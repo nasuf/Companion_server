@@ -1,0 +1,124 @@
+"""Emotion system.
+
+VAD (Valence-Arousal-Dominance) emotion model.
+Extracts emotion from user messages and manages AI emotion state.
+"""
+
+import logging
+
+from app.db import db
+from app.redis_client import get_redis, DEFAULT_TTL
+from app.services.llm.models import get_utility_model, invoke_json
+from app.services.prompts.extraction_prompts import EMOTION_EXTRACTION_PROMPT
+
+logger = logging.getLogger(__name__)
+
+# VAD to tone descriptor mapping
+TONE_MAP = {
+    (1, 1, 1): "enthusiastic and confident",
+    (1, 1, -1): "excited but uncertain",
+    (1, -1, 1): "calm and content",
+    (1, -1, -1): "peaceful and accepting",
+    (-1, 1, 1): "frustrated and assertive",
+    (-1, 1, -1): "anxious and stressed",
+    (-1, -1, 1): "melancholic but composed",
+    (-1, -1, -1): "sad and withdrawn",
+}
+
+
+async def extract_emotion(message: str) -> dict:
+    """Extract VAD emotion from a user message."""
+    model = get_utility_model()
+    prompt = EMOTION_EXTRACTION_PROMPT.format(message=message)
+
+    try:
+        result = await invoke_json(model, prompt)
+        return {
+            "valence": max(-1.0, min(1.0, float(result.get("valence", 0.0)))),
+            "arousal": max(-1.0, min(1.0, float(result.get("arousal", 0.0)))),
+            "dominance": max(-1.0, min(1.0, float(result.get("dominance", 0.0)))),
+        }
+    except Exception as e:
+        logger.warning(f"Emotion extraction failed: {e}")
+        return {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
+
+
+def update_emotion_state(
+    current: dict,
+    input_emotion: dict,
+    decay: float = 0.9,
+    input_weight: float = 0.1,
+) -> dict:
+    """Update AI emotion state: new = old * decay + input * input_weight."""
+    return {
+        "valence": current.get("valence", 0.0) * decay + input_emotion.get("valence", 0.0) * input_weight,
+        "arousal": current.get("arousal", 0.0) * decay + input_emotion.get("arousal", 0.0) * input_weight,
+        "dominance": current.get("dominance", 0.0) * decay + input_emotion.get("dominance", 0.0) * input_weight,
+    }
+
+
+def emotion_to_tone(emotion: dict) -> str:
+    """Map VAD emotion to a tone descriptor string."""
+    v_sign = 1 if emotion.get("valence", 0) >= 0 else -1
+    a_sign = 1 if emotion.get("arousal", 0) >= 0 else -1
+    d_sign = 1 if emotion.get("dominance", 0) >= 0 else -1
+    return TONE_MAP.get((v_sign, a_sign, d_sign), "neutral and balanced")
+
+
+async def get_ai_emotion(agent_id: str) -> dict:
+    """Get current AI emotion state from DB, with Redis cache."""
+    redis = await get_redis()
+    cache_key = f"emotion:{agent_id}"
+
+    # Try cache
+    cached = await redis.hgetall(cache_key)
+    if cached:
+        return {
+            "valence": float(cached.get("valence", 0)),
+            "arousal": float(cached.get("arousal", 0)),
+            "dominance": float(cached.get("dominance", 0)),
+        }
+
+    # From DB
+    state = await db.aiemotionstate.find_unique(where={"agentId": agent_id})
+    if state:
+        emotion = {
+            "valence": state.valence,
+            "arousal": state.arousal,
+            "dominance": state.dominance,
+        }
+    else:
+        emotion = {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
+
+    # Cache
+    await redis.hset(cache_key, mapping={k: str(v) for k, v in emotion.items()})
+    await redis.expire(cache_key, DEFAULT_TTL)
+
+    return emotion
+
+
+async def save_ai_emotion(agent_id: str, emotion: dict) -> None:
+    """Save AI emotion state to DB and cache."""
+    # Update DB
+    await db.aiemotionstate.upsert(
+        where={"agentId": agent_id},
+        data={
+            "create": {
+                "agent": {"connect": {"id": agent_id}},
+                "valence": emotion["valence"],
+                "arousal": emotion["arousal"],
+                "dominance": emotion["dominance"],
+            },
+            "update": {
+                "valence": emotion["valence"],
+                "arousal": emotion["arousal"],
+                "dominance": emotion["dominance"],
+            },
+        },
+    )
+
+    # Update cache
+    redis = await get_redis()
+    cache_key = f"emotion:{agent_id}"
+    await redis.hset(cache_key, mapping={k: str(v) for k, v in emotion.items()})
+    await redis.expire(cache_key, DEFAULT_TTL)

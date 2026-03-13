@@ -1,0 +1,108 @@
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector", schema: "extensions")]
+}
+
+generator client {
+  provider             = "prisma-client-py"
+  previewFeatures      = ["postgresqlExtensions"]
+  recursive_type_depth = 5
+}
+
+model User {
+  id            String         @id @default(uuid())
+  name          String
+  email         String?        @unique
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  agents        AiAgent[]
+  conversations Conversation[]
+  memories      Memory[]
+  profile       UserProfile?
+
+  @@map("users")
+}
+
+model AiAgent {
+  id              String         @id @default(uuid())
+  name            String
+  userId          String         @map("user_id")
+  user            User           @relation(fields: [userId], references: [id])
+  personality     Json?
+  background      String?
+  values          Json?
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  conversations   Conversation[]
+  emotionState    AiEmotionState?
+
+  @@map("ai_agents")
+}
+
+model Conversation {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id])
+  agentId   String    @map("agent_id")
+  agent     AiAgent   @relation(fields: [agentId], references: [id])
+  title     String?
+  isDeleted Boolean   @default(false) @map("is_deleted")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  messages  Message[]
+
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String       @map("conversation_id")
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  role           String       // "user" or "assistant"
+  content        String
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@map("messages")
+}
+
+model Memory {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id])
+  type       String?  // e.g., "preference", "event", "identity"
+  level      Int      @default(3) // L1=1, L2=2, L3=3
+  content    String
+  summary    String?
+  importance Float    @default(0.5)
+  isArchived Boolean  @default(false) @map("is_archived")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("memories")
+}
+
+model UserProfile {
+  id                String   @id @default(uuid())
+  userId            String   @unique @map("user_id")
+  user              User     @relation(fields: [userId], references: [id])
+  traits            Json?
+  interests         Json?
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@map("user_profiles")
+}
+
+model AiEmotionState {
+  id        String   @id @default(uuid())
+  agentId   String   @unique @map("agent_id")
+  agent     AiAgent  @relation(fields: [agentId], references: [id])
+  valence   Float    @default(0.0)
+  arousal   Float    @default(0.0)
+  dominance Float    @default(0.0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("ai_emotion_states")
+}
