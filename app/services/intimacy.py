@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import UTC, datetime, timedelta
@@ -79,7 +80,6 @@ async def get_cached_intimacy(agent_id: str, user_id: str) -> dict | None:
 
 async def save_intimacy(agent_id: str, user_id: str, data: dict) -> None:
     """保存亲密度到Redis。"""
-    import json
     redis = await get_redis()
     await redis.set(
         _intimacy_key(agent_id, user_id),
@@ -148,7 +148,7 @@ async def _compute_self_disclosure(
             "isArchived": False,
         }
     )
-    if total == 0:
+    if total < 5:
         return 0.0
 
     emotional = await db.memory.count(
@@ -172,18 +172,22 @@ def _compute_relationship_duration(created_at: datetime) -> float:
 
 # --- 成长亲密度（每日） ---
 
-async def compute_growth_intimacy(agent_id: str, user_id: str) -> float:
+async def compute_growth_intimacy(
+    agent_id: str, user_id: str, created_at: datetime | None = None,
+) -> float:
     """计算成长亲密度(0-1000)。
 
     权重：互动粘性0.3 + 自我暴露0.3 + 关系时长0.4
     """
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        return 0.0
+    if not created_at:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        if not agent:
+            return 0.0
+        created_at = agent.createdAt
 
     interaction = await _compute_interaction_stickiness(agent_id, user_id)
     disclosure = await _compute_self_disclosure(user_id)
-    duration = _compute_relationship_duration(agent.createdAt)
+    duration = _compute_relationship_duration(created_at)
 
     raw = interaction * 0.3 + disclosure * 0.3 + duration * 0.4
     score = raw * 1000
@@ -203,7 +207,9 @@ async def compute_growth_intimacy(agent_id: str, user_id: str) -> float:
 
 # --- 话题亲密度（每周） ---
 
-async def compute_topic_intimacy(agent_id: str, user_id: str) -> float:
+async def compute_topic_intimacy(
+    agent_id: str, user_id: str, created_at: datetime | None = None,
+) -> float:
     """计算话题亲密度(0-100)。
 
     基于近30天记忆的话题深度。
@@ -233,8 +239,10 @@ async def compute_topic_intimacy(agent_id: str, user_id: str) -> float:
     depth = min(1.0, high_importance / max(len(memories) * 0.3, 1))
 
     # 互动时长
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    duration = _compute_relationship_duration(agent.createdAt) if agent else 0.0
+    if not created_at:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        created_at = agent.createdAt if agent else datetime.now(UTC)
+    duration = _compute_relationship_duration(created_at)
 
     raw = diversity * 0.2 + depth * 0.5 + duration * 0.3
     score = raw * 100
@@ -251,7 +259,7 @@ async def get_intimacy_data(agent_id: str, user_id: str) -> dict:
     topic = await get_topic_intimacy(agent_id, user_id)
 
     growth = cached.get("growth", 0) if cached else 0
-    level = get_intimacy_level(growth)
+    level = cached.get("level") if cached else get_intimacy_level(growth)
     topic_depth = get_topic_depth(topic)
 
     return {
@@ -259,5 +267,4 @@ async def get_intimacy_data(agent_id: str, user_id: str) -> dict:
         "topic_intimacy": topic,
         "level": level,
         "topic_depth": topic_depth,
-        "details": cached,
     }

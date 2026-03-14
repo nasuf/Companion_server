@@ -256,14 +256,14 @@ async def _run_proactive_scan():
 
 async def _run_daily_intimacy():
     await _run_for_all_agents(
-        lambda a: compute_growth_intimacy(a.id, a.userId),
+        lambda a: compute_growth_intimacy(a.id, a.userId, a.createdAt),
         concurrency=3, task_name="Growth intimacy",
     )
 
 
 async def _run_weekly_topic_intimacy():
     await _run_for_all_agents(
-        lambda a: compute_topic_intimacy(a.id, a.userId),
+        lambda a: compute_topic_intimacy(a.id, a.userId, a.createdAt),
         concurrency=3, task_name="Topic intimacy",
     )
 
