@@ -22,6 +22,7 @@ from app.services.schedule import (
     get_current_status, get_life_overview, review_daily_schedule, save_life_overview,
 )
 from app.services.boundary import recover_patience_hourly
+from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive import generate_proactive_message
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,27 @@ async def _run_for_all_agents(
 
 def setup_scheduler():
     """Configure and start the job scheduler."""
+    # Daily growth intimacy at 2 AM
+    scheduler.add_job(
+        _run_daily_intimacy,
+        "cron",
+        hour=2,
+        minute=0,
+        id="daily_intimacy",
+        replace_existing=True,
+    )
+
+    # Weekly topic intimacy on Sunday at 2 AM
+    scheduler.add_job(
+        _run_weekly_topic_intimacy,
+        "cron",
+        day_of_week="sun",
+        hour=2,
+        minute=30,
+        id="weekly_topic_intimacy",
+        replace_existing=True,
+    )
+
     # Daily reflection at 3 AM
     scheduler.add_job(
         run_daily_reflection,
@@ -230,6 +252,20 @@ async def _run_proactive_scan():
             logger.info(f"Proactive message sent for agent {agent.id}")
 
     await _run_for_all_agents(_try_proactive, concurrency=3, task_name="Proactive scan")
+
+
+async def _run_daily_intimacy():
+    await _run_for_all_agents(
+        lambda a: compute_growth_intimacy(a.id, a.userId),
+        concurrency=3, task_name="Growth intimacy",
+    )
+
+
+async def _run_weekly_topic_intimacy():
+    await _run_for_all_agents(
+        lambda a: compute_topic_intimacy(a.id, a.userId),
+        concurrency=3, task_name="Topic intimacy",
+    )
 
 
 async def _run_patience_recovery():

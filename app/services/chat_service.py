@@ -34,6 +34,7 @@ from app.services.topic import push_topic, detect_topic_fatigue, format_topic_co
 from app.services.strategy import decide_strategy, format_strategy_instruction
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
 from app.services.boundary import check_boundary, process_boundary_violation, detect_apology, handle_apology, APOLOGY_KEYWORDS
+from app.services.intimacy import get_topic_intimacy
 
 logger = logging.getLogger(__name__)
 
@@ -306,8 +307,16 @@ async def _background_post_process(
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
 
         # Run all background tasks concurrently
+        # Load topic intimacy for emotion fusion
+        topic_intimacy = 50.0
+        if agent_id:
+            try:
+                topic_intimacy = await get_topic_intimacy(agent_id, user_id)
+            except Exception:
+                pass
+
         tasks = [
-            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion),
+            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
@@ -325,6 +334,7 @@ async def _bg_emotion(
     user_message_id: str,
     user_message: str,
     cached_emotion: dict | None = None,
+    topic_intimacy: float = 50.0,
 ) -> None:
     """Extract emotion from user message, update AI emotion state, and save to message metadata."""
     if not agent_id:
@@ -332,7 +342,7 @@ async def _bg_emotion(
     try:
         user_emotion = await extract_emotion(user_message)
         current_emotion = cached_emotion or await get_ai_emotion(agent_id)
-        new_emotion = update_emotion_state(current_emotion, user_emotion)
+        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy)
         await save_ai_emotion(agent_id, new_emotion)
 
         # Save user emotion to message metadata (use known ID, no re-query)
