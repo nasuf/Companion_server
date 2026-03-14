@@ -26,6 +26,33 @@ TONE_MAP = {
 }
 
 
+def compute_baseline_emotion(personality: dict) -> dict:
+    """Compute baseline VAD from Big Five personality traits.
+
+    Maps personality dimensions to resting emotional state:
+    - High extraversion → positive valence, higher arousal
+    - High neuroticism → negative valence, higher arousal
+    - High agreeableness → positive valence, lower dominance
+    - High openness → slightly positive valence
+    - High conscientiousness → higher dominance
+    """
+    e = personality.get("extraversion", 0.5)
+    a = personality.get("agreeableness", 0.5)
+    n = personality.get("neuroticism", 0.5)
+    o = personality.get("openness", 0.5)
+    c = personality.get("conscientiousness", 0.5)
+
+    valence = (e - 0.5) * 0.4 + (a - 0.5) * 0.2 + (o - 0.5) * 0.1 - (n - 0.5) * 0.3
+    arousal = (e - 0.5) * 0.3 + (n - 0.5) * 0.4
+    dominance = (e - 0.5) * 0.2 + (c - 0.5) * 0.3 - (n - 0.5) * 0.2
+
+    return {
+        "valence": max(-1.0, min(1.0, valence)),
+        "arousal": max(-1.0, min(1.0, arousal)),
+        "dominance": max(-1.0, min(1.0, dominance)),
+    }
+
+
 async def extract_emotion(message: str) -> dict:
     """Extract VAD emotion from a user message."""
     model = get_utility_model()

@@ -7,6 +7,7 @@ from prisma import Json
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.memory.self_memory import generate_initial_self_memories
+from app.services.emotion import compute_baseline_emotion, save_ai_emotion
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ async def create_agent(data: AgentCreate):
     if data.values is not None:
         create_data["values"] = Json(data.values)
     agent = await db.aiagent.create(data=create_data)
+
+    # Initialize baseline emotion from personality
+    baseline = compute_baseline_emotion(agent.personality or {})
+    asyncio.create_task(save_ai_emotion(agent.id, baseline))
 
     # Generate initial self-memories in background
     task = asyncio.create_task(
