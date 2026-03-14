@@ -33,6 +33,7 @@ from app.services.memory.deletion import detect_deletion_intent, delete_memories
 from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
 from app.services.strategy import decide_strategy, format_strategy_instruction
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
+from app.services.boundary import check_boundary, process_boundary_violation, detect_apology, handle_apology
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,33 @@ async def stream_chat_response(
     )
     user_message_id = saved_msg.id
 
+    agent_id = getattr(agent, "id", None)
+
+    # --- Boundary check (keyword + Redis, no LLM) ---
+    if agent_id:
+        boundary_result = await check_boundary(agent_id, user_id, user_message)
+        if boundary_result:
+            response = boundary_result["response"]
+            await db.message.create(
+                data={
+                    "conversation": {"connect": {"id": conversation_id}},
+                    "role": "assistant",
+                    "content": response,
+                    "metadata": Json({"boundary": True, "zone": boundary_result["zone"]}),
+                }
+            )
+            yield {"event": "token", "data": json.dumps({"token": response})}
+            yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+            # Background: classify + deduct patience
+            task = asyncio.create_task(
+                process_boundary_violation(agent_id, user_id, user_message)
+            )
+            task.add_done_callback(
+                lambda t: logger.error(f"Boundary processing failed: {t.exception()}")
+                if not t.cancelled() and t.exception() else None
+            )
+            return
+
     # Load recent messages (for prompt context)
     recent_messages = await db.message.find_many(
         where={"conversationId": conversation_id},
@@ -64,8 +92,6 @@ async def stream_chat_response(
     messages_dicts = [
         {"role": m.role, "content": m.content} for m in recent_messages
     ]
-
-    agent_id = getattr(agent, "id", None)
 
     # --- Load previous user emotion from message metadata (no LLM) ---
     prev_user_emotion = None
@@ -287,6 +313,8 @@ async def _background_post_process(
         ]
         if has_deletion_keyword:
             tasks.append(_bg_deletion_check(user_id, user_message))
+        if agent_id:
+            tasks.append(_bg_apology_check(agent_id, user_id, user_message))
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")
@@ -352,3 +380,14 @@ async def _bg_deletion_check(user_id: str, user_message: str) -> None:
             logger.info(f"Deletion check: removed {deleted} memories for user {user_id}")
     except Exception as e:
         logger.warning(f"Background deletion check failed: {e}")
+
+
+async def _bg_apology_check(agent_id: str, user_id: str, user_message: str) -> None:
+    """Check if user is apologizing and restore patience."""
+    try:
+        result = await detect_apology(user_message)
+        if result.get("is_apology") and result.get("sincerity", 0) >= 0.5:
+            new_patience = await handle_apology(agent_id, user_id)
+            logger.info(f"Apology detected: patience restored to {new_patience}")
+    except Exception as e:
+        logger.warning(f"Background apology check failed: {e}")

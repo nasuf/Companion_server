@@ -21,6 +21,7 @@ from app.services.schedule import (
     generate_daily_schedule, generate_life_overview, get_cached_schedule,
     get_current_status, get_life_overview, review_daily_schedule, save_life_overview,
 )
+from app.services.boundary import recover_patience_hourly
 from app.services.proactive import generate_proactive_message
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,15 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # Patience recovery every hour
+    scheduler.add_job(
+        _run_patience_recovery,
+        "interval",
+        hours=1,
+        id="patience_recovery",
+        replace_existing=True,
+    )
+
     # Emotion decay every 5 minutes
     scheduler.add_job(
         _run_emotion_decay,
@@ -220,6 +230,13 @@ async def _run_proactive_scan():
             logger.info(f"Proactive message sent for agent {agent.id}")
 
     await _run_for_all_agents(_try_proactive, concurrency=3, task_name="Proactive scan")
+
+
+async def _run_patience_recovery():
+    await _run_for_all_agents(
+        lambda a: recover_patience_hourly(a.id, a.userId),
+        concurrency=5, task_name="Patience recovery",
+    )
 
 
 async def _run_emotion_decay():
