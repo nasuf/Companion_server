@@ -8,7 +8,7 @@ Uses APScheduler for:
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -38,7 +38,7 @@ async def _run_for_all_agents(
             except Exception as e:
                 logger.warning(f"{task_name} failed for agent {agent.id}: {e}")
 
-    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
+    await asyncio.gather(*[_process(a) for a in agents])
 
 
 def setup_scheduler():
