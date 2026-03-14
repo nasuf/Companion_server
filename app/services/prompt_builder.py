@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.style import generate_style_instruction
 from app.services.prompts.system_prompts import (
     SYSTEM_BASE as _SYSTEM_BASE,
     RESPONSE_INSTRUCTION as _INSTRUCTION,
@@ -139,6 +140,8 @@ def _build_personality_section(agent: Any) -> str | None:
         return _section("你的身份", body)
 
     description = _build_personality_description(personality, name, gender)
+    style = generate_style_instruction(personality)
+    description += f"\n\n具体语言风格要求：\n{style}"
     return _section("你的身份", description)
 
 
