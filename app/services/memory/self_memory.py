@@ -5,7 +5,7 @@ thoughts, and feelings during conversations.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
@@ -104,7 +104,7 @@ async def generate_daily_self_memories(
         return []
 
     # Count today's self-memories
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     count = await db.memory.count(
         where={
             "userId": user_id,
