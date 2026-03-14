@@ -154,8 +154,7 @@ def _personalize_template(personality: dict, date: datetime) -> list[dict]:
 async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -> None:
     """缓存当日作息到Redis。"""
     redis = await get_redis()
-    key = f"schedule:{agent_id}:{date.strftime('%Y%m%d')}"
-    await redis.set(key, json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
+    await redis.set(_schedule_key(agent_id, date), json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
 
 
 async def save_life_overview(agent_id: str, overview: str) -> None:
@@ -164,12 +163,24 @@ async def save_life_overview(agent_id: str, overview: str) -> None:
     await redis.set(f"life_overview:{agent_id}", overview, ex=86400 * 30)
 
 
+async def get_life_overview(agent_id: str) -> str | None:
+    """从Redis获取生活画像。"""
+    redis = await get_redis()
+    data = await redis.get(f"life_overview:{agent_id}")
+    if isinstance(data, bytes):
+        return data.decode()
+    return data
+
+
+def _schedule_key(agent_id: str, date: datetime) -> str:
+    return f"schedule:{agent_id}:{date.strftime('%Y%m%d')}"
+
+
 async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> list[dict] | None:
     """从Redis获取缓存的当日作息。"""
     date = date or datetime.now(UTC)
     redis = await get_redis()
-    key = f"schedule:{agent_id}:{date.strftime('%Y%m%d')}"
-    data = await redis.get(key)
+    data = await redis.get(_schedule_key(agent_id, date))
     if data:
         try:
             return json.loads(data)
@@ -300,13 +311,9 @@ _SCHEDULE_REVIEW_PROMPT = """你是{name}。回顾今天的作息，用第一人
 {{"memories": ["感想1", "感想2"]}}"""
 
 
-async def review_daily_schedule(agent_id: str, user_id: str) -> list[str]:
+async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "伙伴") -> list[str]:
     """回顾当日作息，生成AI自我记忆。"""
     from app.services.memory.storage import store_memory
-
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        return []
 
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
@@ -317,7 +324,7 @@ async def review_daily_schedule(agent_id: str, user_id: str) -> list[str]:
     )
 
     prompt = _SCHEDULE_REVIEW_PROMPT.format(
-        name=agent.name, schedule_text=schedule_text,
+        name=agent_name, schedule_text=schedule_text,
     )
 
     try:
