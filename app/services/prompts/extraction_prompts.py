@@ -56,22 +56,30 @@ Rules for level assignment:
 
 If nothing worth remembering, return {{"memories":[],"entities":[],"preferences":[],"topics":[]}}."""
 
-EMOTION_EXTRACTION_PROMPT = """Analyze the emotional content of the following message.
+EMOTION_EXTRACTION_PROMPT = """分析以下消息的情绪内容。
 
-Message: {message}
+消息：{message}
 
-Return JSON with VAD (Valence-Arousal-Dominance) scores, each between -1.0 and 1.0:
+返回JSON，包含VAD分数（每个在-1.0到1.0之间）、主要情绪类别和置信度：
 {{
   "valence": 0.0,
   "arousal": 0.0,
-  "dominance": 0.0
+  "dominance": 0.0,
+  "primary_emotion": "neutral",
+  "confidence": 0.5
 }}
 
-- valence: positive (happy, excited) to negative (sad, angry)
-- arousal: high energy to low energy
-- dominance: feeling in control to feeling submissive
+VAD维度：
+- valence: 正向(开心/兴奋) 到 负向(伤心/愤怒)
+- arousal: 高能量(激动/紧张) 到 低能量(平静/疲惫)
+- dominance: 掌控感(自信/强势) 到 顺从感(无助/被动)
 
-For neutral messages, return values near 0."""
+primary_emotion必须是以下12类之一：
+joy, sadness, anger, fear, surprise, disgust, trust, anticipation, love, anxiety, pride, guilt
+
+confidence: 0.0到1.0，表示你对情绪判断的确信度
+
+对于中性消息，valence/arousal/dominance接近0，primary_emotion为neutral，confidence为0.3-0.5。"""
 
 MEMORY_SCORING_PROMPT = """Rate the following memory for a conversation context.
 

@@ -37,10 +37,12 @@ async def extract_emotion(message: str) -> dict:
             "valence": max(-1.0, min(1.0, float(result.get("valence", 0.0)))),
             "arousal": max(-1.0, min(1.0, float(result.get("arousal", 0.0)))),
             "dominance": max(-1.0, min(1.0, float(result.get("dominance", 0.0)))),
+            "primary_emotion": result.get("primary_emotion", "neutral"),
+            "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.5)))),
         }
     except Exception as e:
         logger.warning(f"Emotion extraction failed: {e}")
-        return {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
+        return {"valence": 0.0, "arousal": 0.0, "dominance": 0.0, "primary_emotion": "neutral", "confidence": 0.0}
 
 
 def update_emotion_state(
