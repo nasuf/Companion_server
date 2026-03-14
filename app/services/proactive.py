@@ -39,18 +39,21 @@ PROACTIVE_PROMPT = """你是{ai_name}，现在你想主动和用户聊天。
 消息："""
 
 
+def _proactive_count_key(agent_id: str, user_id: str) -> str:
+    return f"proactive_count:{agent_id}:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
+
+
 async def can_send_proactive(agent_id: str, user_id: str) -> bool:
     """检查今日是否还能发送主动消息。"""
     redis = await get_redis()
-    key = f"proactive_count:{agent_id}:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
-    count = await redis.get(key)
+    count = await redis.get(_proactive_count_key(agent_id, user_id))
     return int(count or 0) < MAX_DAILY_PROACTIVE
 
 
 async def increment_proactive_count(agent_id: str, user_id: str) -> None:
     """增加今日主动消息计数。"""
     redis = await get_redis()
-    key = f"proactive_count:{agent_id}:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
+    key = _proactive_count_key(agent_id, user_id)
     await redis.incr(key)
     await redis.expire(key, 86400)
 
@@ -71,8 +74,8 @@ async def generate_proactive_message(
         if not agent:
             return None
 
-        # 获取记忆
-        memories = await retrieve_memories("", user_id, semantic_k=3, recent_k=5, important_k=2)
+        # 获取记忆（跳过语义检索，只用最近+重要记忆）
+        memories = await retrieve_memories("", user_id, semantic_k=0, recent_k=5, important_k=3)
         memory_strings = format_memories_for_prompt(memories)
 
         # 获取情绪

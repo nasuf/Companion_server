@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from app.redis_client import get_redis
@@ -45,9 +46,10 @@ async def get_topic_stack(conversation_id: str) -> list[dict]:
     data = await redis.lrange(key, 0, 9)  # 最近10个话题
     result = []
     for item in data:
-        parts = item.split("|", 2)
-        if len(parts) == 3:
-            result.append({"topic": parts[0], "turns": int(parts[1]), "category": parts[2]})
+        try:
+            result.append(json.loads(item))
+        except (json.JSONDecodeError, TypeError):
+            continue
     return result
 
 
@@ -60,21 +62,24 @@ async def push_topic(conversation_id: str, message: str) -> dict:
     # 检查栈顶是否同一话题类别
     current = await redis.lindex(key, 0)
     if current:
-        parts = current.split("|", 2)
-        if len(parts) == 3 and parts[2] == category:
+        try:
+            top = json.loads(current)
+        except (json.JSONDecodeError, TypeError):
+            top = None
+        if top and top.get("category") == category:
             # 同类话题，增加轮数
-            turns = int(parts[1]) + 1
-            await redis.lset(key, 0, f"{parts[0]}|{turns}|{category}")
-            return {"topic": parts[0], "turns": turns, "category": category}
+            top["turns"] = top.get("turns", 1) + 1
+            await redis.lset(key, 0, json.dumps(top, ensure_ascii=False))
+            return top
 
     # 新话题入栈
     topic_name = message[:20]
-    entry = f"{topic_name}|1|{category}"
-    await redis.lpush(key, entry)
+    entry = {"topic": topic_name, "turns": 1, "category": category}
+    await redis.lpush(key, json.dumps(entry, ensure_ascii=False))
     await redis.ltrim(key, 0, 9)  # 保留最近10个
     await redis.expire(key, 86400)  # 24小时过期
 
-    return {"topic": topic_name, "turns": 1, "category": category}
+    return entry
 
 
 def detect_topic_fatigue(topic_info: dict, recent_responses: list[str] | None = None) -> bool:
@@ -87,13 +92,8 @@ def detect_topic_fatigue(topic_info: dict, recent_responses: list[str] | None = 
     return False
 
 
-def format_topic_context(topic_stack: list[dict]) -> str | None:
-    """格式化话题上下文供Prompt注入。"""
-    if not topic_stack:
+def format_topic_context(current_topic: dict) -> str | None:
+    """格式化当前话题上下文供Prompt注入。"""
+    if not current_topic:
         return None
-    current = topic_stack[0]
-    parts = [f"当前话题：{current['category']}（已持续{current['turns']}轮）"]
-    if len(topic_stack) > 1:
-        prev_topics = "→".join(t["category"] for t in topic_stack[1:4])
-        parts.append(f"之前的话题：{prev_topics}")
-    return "\n".join(parts)
+    return f"当前话题：{current_topic['category']}（已持续{current_topic['turns']}轮）"

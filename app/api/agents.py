@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from fastapi import APIRouter, HTTPException
 from prisma import Json
@@ -6,6 +7,8 @@ from prisma import Json
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.memory.self_memory import generate_initial_self_memories
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -25,13 +28,17 @@ async def create_agent(data: AgentCreate):
     agent = await db.aiagent.create(data=create_data)
 
     # Generate initial self-memories in background
-    asyncio.create_task(
+    task = asyncio.create_task(
         generate_initial_self_memories(
             agent_id=agent.id,
             agent_name=agent.name,
             personality=agent.personality or {},
             user_id=data.user_id,
         )
+    )
+    task.add_done_callback(
+        lambda t: logger.error(f"Initial self-memory generation failed: {t.exception()}")
+        if not t.cancelled() and t.exception() else None
     )
 
     return AgentResponse(

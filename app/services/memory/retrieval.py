@@ -40,9 +40,14 @@ async def retrieve_memories(
 
     Runs all three queries concurrently, then deduplicates.
     """
-    # Run all queries in parallel
+    # Build tasks — skip semantic search if k=0 or empty query
+    async def _semantic():
+        if semantic_k > 0 and query:
+            return await search_similar(query, user_id, top_k=semantic_k * 2)
+        return []
+
     semantic_results, recent, important = await asyncio.gather(
-        search_similar(query, user_id, top_k=semantic_k * 2),
+        _semantic(),
         db.memory.find_many(
             where={"userId": user_id, "isArchived": False},
             order={"createdAt": "desc"},

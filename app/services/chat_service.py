@@ -69,20 +69,12 @@ async def stream_chat_response(
     has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
 
     # --- Topic tracking (Redis, no LLM) ---
-    conversation_id_for_topic = conversation_id
-    topic_info = await push_topic(conversation_id_for_topic, user_message)
-    topic_context = format_topic_context([topic_info]) if topic_info else None
+    topic_info = await push_topic(conversation_id, user_message)
+    topic_context = format_topic_context(topic_info) if topic_info else None
 
-    # --- Strategy decision (pure computation) ---
+    # --- Pre-compute personality and topic fatigue (needed after parallel fetch) ---
     agent_personality = getattr(agent, "personality", None) or {}
     topic_fatigued = detect_topic_fatigue(topic_info)
-    strategy_result = decide_strategy(
-        message=user_message,
-        topic_info=topic_info,
-        personality=agent_personality,
-        topic_fatigued=topic_fatigued,
-    )
-    strategy_instruction = format_strategy_instruction(strategy_result)
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
@@ -149,16 +141,15 @@ async def stream_chat_response(
         logger.warning(f"Loading portrait failed: {portrait}")
         portrait = None
 
-    # Emotion available for strategy (update with loaded emotion)
-    if emotion and not isinstance(emotion, Exception):
-        strategy_result = decide_strategy(
-            message=user_message,
-            emotion=emotion,
-            topic_info=topic_info,
-            personality=agent_personality,
-            topic_fatigued=topic_fatigued,
-        )
-        strategy_instruction = format_strategy_instruction(strategy_result)
+    # --- Strategy decision (pure computation, after emotion is loaded) ---
+    strategy_result = decide_strategy(
+        message=user_message,
+        emotion=emotion if not isinstance(emotion, Exception) else None,
+        topic_info=topic_info,
+        personality=agent_personality,
+        topic_fatigued=topic_fatigued,
+    )
+    strategy_instruction = format_strategy_instruction(strategy_result)
 
     # Build prompt (pure string operations — instant)
     system_prompt = build_system_prompt(
@@ -216,7 +207,8 @@ async def stream_chat_response(
     yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
 
     # --- BACKGROUND: fire-and-forget post-processing ---
-    asyncio.create_task(
+    loaded_emotion = emotion if not isinstance(emotion, Exception) else None
+    task = asyncio.create_task(
         _background_post_process(
             user_id=user_id,
             agent_id=agent_id,
@@ -225,8 +217,10 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             memory_strings=memory_strings,
             has_deletion_keyword=has_deletion_keyword,
+            cached_emotion=loaded_emotion,
         )
     )
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
 
 
 async def _background_post_process(
@@ -237,6 +231,7 @@ async def _background_post_process(
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
     has_deletion_keyword: bool = False,
+    cached_emotion: dict | None = None,
 ) -> None:
     """Run all background tasks after response is sent.
 
@@ -250,7 +245,7 @@ async def _background_post_process(
 
         # Run all background tasks concurrently
         tasks = [
-            _bg_emotion(agent_id, user_message),
+            _bg_emotion(agent_id, user_message, cached_emotion),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
@@ -261,13 +256,13 @@ async def _background_post_process(
         logger.error(f"Background post-processing failed: {e}")
 
 
-async def _bg_emotion(agent_id: str | None, user_message: str) -> None:
+async def _bg_emotion(agent_id: str | None, user_message: str, cached_emotion: dict | None = None) -> None:
     """Extract emotion from user message and update AI emotion state."""
     if not agent_id:
         return
     try:
         user_emotion = await extract_emotion(user_message)
-        current_emotion = await get_ai_emotion(agent_id)
+        current_emotion = cached_emotion or await get_ai_emotion(agent_id)
         new_emotion = update_emotion_state(current_emotion, user_emotion)
         await save_ai_emotion(agent_id, new_emotion)
     except Exception as e:

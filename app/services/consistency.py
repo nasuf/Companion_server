@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from app.redis_client import get_redis
@@ -13,7 +14,6 @@ from app.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 CONTEXT_WINDOW_SIZE = 50
-DRIFT_THRESHOLD = 0.15  # 人格偏移阈值
 
 
 async def get_context_window(conversation_id: str) -> list[dict]:
@@ -23,9 +23,10 @@ async def get_context_window(conversation_id: str) -> list[dict]:
     data = await redis.lrange(key, 0, CONTEXT_WINDOW_SIZE - 1)
     result = []
     for item in data:
-        parts = item.split("|", 1)
-        if len(parts) == 2:
-            result.append({"role": parts[0], "content": parts[1]})
+        try:
+            result.append(json.loads(item))
+        except (json.JSONDecodeError, TypeError):
+            continue
     return result
 
 
@@ -33,7 +34,7 @@ async def push_to_context_window(conversation_id: str, role: str, content: str) 
     """将消息推入上下文窗口。"""
     redis = await get_redis()
     key = f"context_window:{conversation_id}"
-    entry = f"{role}|{content[:500]}"  # 截断过长内容
+    entry = json.dumps({"role": role, "content": content[:500]}, ensure_ascii=False)
     await redis.lpush(key, entry)
     await redis.ltrim(key, 0, CONTEXT_WINDOW_SIZE - 1)
     await redis.expire(key, 86400 * 7)  # 7天过期
