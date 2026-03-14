@@ -267,6 +267,8 @@ def build_system_prompt(
     graph_context: dict | None = None,
     summaries: dict | None = None,
     portrait: str | None = None,
+    topic_context: str | None = None,
+    strategy_instruction: str | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
@@ -300,7 +302,14 @@ def build_system_prompt(
     if graph:
         sections.append(graph)
 
-    sections.append(_section("回复要求", _INSTRUCTION))
+    if topic_context:
+        sections.append(_section("话题上下文", topic_context))
+
+    # 回复要求 + 策略指令
+    instruction = _INSTRUCTION
+    if strategy_instruction:
+        instruction += f"\n\n本次回复策略：\n{strategy_instruction}"
+    sections.append(_section("回复要求", instruction))
 
     return "\n\n".join(sections)
 

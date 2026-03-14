@@ -30,6 +30,8 @@ from app.services.cache import cache_summarizer, cache_set_summarizer
 from app.services.portrait import get_latest_portrait
 from app.services.timing import calculate_reply_delay, calculate_typing_duration
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
+from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
+from app.services.strategy import decide_strategy, format_strategy_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,22 @@ async def stream_chat_response(
 
     # --- Check deletion intent (keyword-only, no LLM on hot path) ---
     has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
+
+    # --- Topic tracking (Redis, no LLM) ---
+    conversation_id_for_topic = conversation_id
+    topic_info = await push_topic(conversation_id_for_topic, user_message)
+    topic_context = format_topic_context([topic_info]) if topic_info else None
+
+    # --- Strategy decision (pure computation) ---
+    agent_personality = getattr(agent, "personality", None) or {}
+    topic_fatigued = detect_topic_fatigue(topic_info)
+    strategy_result = decide_strategy(
+        message=user_message,
+        topic_info=topic_info,
+        personality=agent_personality,
+        topic_fatigued=topic_fatigued,
+    )
+    strategy_instruction = format_strategy_instruction(strategy_result)
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
@@ -131,6 +149,17 @@ async def stream_chat_response(
         logger.warning(f"Loading portrait failed: {portrait}")
         portrait = None
 
+    # Emotion available for strategy (update with loaded emotion)
+    if emotion and not isinstance(emotion, Exception):
+        strategy_result = decide_strategy(
+            message=user_message,
+            emotion=emotion,
+            topic_info=topic_info,
+            personality=agent_personality,
+            topic_fatigued=topic_fatigued,
+        )
+        strategy_instruction = format_strategy_instruction(strategy_result)
+
     # Build prompt (pure string operations — instant)
     system_prompt = build_system_prompt(
         agent=agent,
@@ -140,11 +169,12 @@ async def stream_chat_response(
         graph_context=graph_context,
         summaries=summaries,
         portrait=portrait,
+        topic_context=topic_context,
+        strategy_instruction=strategy_instruction,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
     # --- Send typing event before response ---
-    agent_personality = getattr(agent, "personality", None) or {}
     typing_duration = calculate_typing_duration(len(user_message))
     yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
 
