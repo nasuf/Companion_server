@@ -158,6 +158,12 @@ async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -
     await redis.set(key, json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
 
 
+async def save_life_overview(agent_id: str, overview: str) -> None:
+    """保存生活画像到Redis。"""
+    redis = await get_redis()
+    await redis.set(f"life_overview:{agent_id}", overview, ex=86400 * 30)
+
+
 async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> list[dict] | None:
     """从Redis获取缓存的当日作息。"""
     date = date or datetime.now(UTC)

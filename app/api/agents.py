@@ -8,7 +8,7 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.memory.self_memory import generate_initial_self_memories
 from app.services.emotion import compute_baseline_emotion, save_ai_emotion
-from app.services.schedule import generate_life_overview, generate_daily_schedule, get_cached_schedule, get_current_status
+from app.services.schedule import generate_life_overview, generate_daily_schedule, get_cached_schedule, get_current_status, save_life_overview
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,7 @@ async def create_agent(data: AgentCreate):
         try:
             overview = await generate_life_overview(agent.name, agent.personality or {})
             await generate_daily_schedule(agent.id, agent.name, agent.personality or {}, overview)
-            # Store overview in Redis for later use
-            from app.redis_client import get_redis
-            redis = await get_redis()
-            await redis.set(f"life_overview:{agent.id}", overview, ex=86400 * 30)
+            await save_life_overview(agent.id, overview)
         except Exception as e:
             logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
 
@@ -141,32 +138,29 @@ async def update_agent(agent_id: str, data: AgentUpdate):
     )
 
 
-@router.get("/{agent_id}/schedule")
-async def get_agent_schedule(agent_id: str):
-    """获取Agent当日作息表。"""
+async def _resolve_schedule(agent_id: str):
+    """获取Agent和作息表，不存在则404。"""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
         schedule = await generate_daily_schedule(
             agent_id, agent.name, agent.personality or {}
         )
+    return agent, schedule
+
+
+@router.get("/{agent_id}/schedule")
+async def get_agent_schedule(agent_id: str):
+    """获取Agent当日作息表。"""
+    _, schedule = await _resolve_schedule(agent_id)
     return {"agent_id": agent_id, "schedule": schedule}
 
 
 @router.get("/{agent_id}/status")
 async def get_agent_status(agent_id: str):
     """获取Agent当前状态。"""
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    schedule = await get_cached_schedule(agent_id)
-    if not schedule:
-        schedule = await generate_daily_schedule(
-            agent_id, agent.name, agent.personality or {}
-        )
+    _, schedule = await _resolve_schedule(agent_id)
     status = get_current_status(schedule)
     return {"agent_id": agent_id, **status}

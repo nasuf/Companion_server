@@ -17,7 +17,8 @@ from app.services.memory.compression import compress_weekly, compress_monthly
 from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.emotion import decay_emotion_toward_baseline
-from app.services.schedule import generate_daily_schedule, generate_life_overview, review_daily_schedule
+from app.redis_client import get_redis
+from app.services.schedule import generate_daily_schedule, generate_life_overview, review_daily_schedule, save_life_overview
 from app.services.proactive import generate_proactive_message, increment_proactive_count
 
 logger = logging.getLogger(__name__)
@@ -178,7 +179,6 @@ async def _run_daily_self_memories():
 
 async def _run_daily_schedules():
     async def _gen(agent):
-        from app.redis_client import get_redis
         redis = await get_redis()
         overview = await redis.get(f"life_overview:{agent.id}")
         await generate_daily_schedule(
@@ -191,9 +191,7 @@ async def _run_daily_schedules():
 async def _run_monthly_overview_refresh():
     async def _refresh(agent):
         overview = await generate_life_overview(agent.name, agent.personality or {})
-        from app.redis_client import get_redis
-        redis = await get_redis()
-        await redis.set(f"life_overview:{agent.id}", overview, ex=86400 * 30)
+        await save_life_overview(agent.id, overview)
 
     await _run_for_all_agents(_refresh, concurrency=2, task_name="Monthly overview")
 
@@ -207,25 +205,22 @@ async def _run_schedule_review():
 
 async def _run_proactive_scan():
     """扫描所有Agent-用户对，尝试发送主动消息。"""
-    from app.db import db
     from app.services.schedule import get_cached_schedule, get_current_status
 
-    agents = await db.aiagent.find_many()
-    for agent in agents:
-        try:
-            # 跳过睡眠状态
-            schedule = await get_cached_schedule(agent.id)
-            if schedule:
-                status = get_current_status(schedule)
-                if status.get("status") == "sleep":
-                    continue
+    async def _try_proactive(agent):
+        # 跳过睡眠状态
+        schedule = await get_cached_schedule(agent.id)
+        if schedule:
+            status = get_current_status(schedule)
+            if status.get("status") == "sleep":
+                return
 
-            msg = await generate_proactive_message(agent.userId, agent.id)
-            if msg:
-                await increment_proactive_count(agent.id, agent.userId)
-                logger.info(f"Proactive message sent for agent {agent.id}")
-        except Exception as e:
-            logger.warning(f"Proactive scan failed for agent {agent.id}: {e}")
+        msg = await generate_proactive_message(agent.userId, agent.id)
+        if msg:
+            await increment_proactive_count(agent.id, agent.userId)
+            logger.info(f"Proactive message sent for agent {agent.id}")
+
+    await _run_for_all_agents(_try_proactive, concurrency=3, task_name="Proactive scan")
 
 
 async def _run_emotion_decay():
