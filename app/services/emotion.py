@@ -75,15 +75,33 @@ async def extract_emotion(message: str) -> dict:
 def update_emotion_state(
     current: dict,
     input_emotion: dict,
-    decay: float = 0.9,
-    input_weight: float = 0.1,
+    topic_intimacy: float = 50.0,
 ) -> dict:
-    """Update AI emotion state: new = old * decay + input * input_weight."""
-    return {
-        "valence": current.get("valence", 0.0) * decay + input_emotion.get("valence", 0.0) * input_weight,
-        "arousal": current.get("arousal", 0.0) * decay + input_emotion.get("arousal", 0.0) * input_weight,
-        "dominance": current.get("dominance", 0.0) * decay + input_emotion.get("dominance", 0.0) * input_weight,
-    }
+    """Fuse AI emotion with user emotion using intimacy-weighted blend.
+
+    E_target = α * E_ai + β * E_user + γ * empathy_vector
+    - α, β, γ are weighted by topic_intimacy (0-100)
+    - Higher intimacy → stronger empathy response
+    """
+    # Intimacy-based weights (normalized 0-1)
+    intimacy_norm = max(0.0, min(1.0, topic_intimacy / 100.0))
+
+    # Base weights: AI retains more control at low intimacy
+    alpha = 0.7 - intimacy_norm * 0.2   # AI self: 0.7 → 0.5
+    beta = 0.2 + intimacy_norm * 0.15   # User influence: 0.2 → 0.35
+    gamma = 0.1 + intimacy_norm * 0.05  # Empathy: 0.1 → 0.15
+
+    result = {}
+    for dim in ("valence", "arousal", "dominance"):
+        ai_val = current.get(dim, 0.0)
+        user_val = input_emotion.get(dim, 0.0)
+
+        # Empathy vector: move toward user's emotion direction
+        empathy = user_val * 0.5  # damped empathy
+
+        result[dim] = alpha * ai_val + beta * user_val + gamma * empathy
+
+    return result
 
 
 def emotion_to_tone(emotion: dict) -> str:
