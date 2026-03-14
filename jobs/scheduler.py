@@ -15,6 +15,7 @@ from app.services.reflection import run_daily_reflection, run_weekly_reflection
 from app.services.memory.compression import compress_weekly, compress_monthly
 from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
+from app.services.emotion import decay_emotion_toward_baseline
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,15 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # Emotion decay every 5 minutes
+    scheduler.add_job(
+        _run_emotion_decay,
+        "interval",
+        minutes=5,
+        id="emotion_decay",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -123,6 +133,22 @@ async def _run_daily_self_memories():
                 )
             except Exception as e:
                 logger.warning(f"Self-memory generation failed for agent {agent.id}: {e}")
+
+    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
+
+
+async def _run_emotion_decay():
+    """Decay all agents' emotions toward their personality baseline."""
+    from app.db import db
+    agents = await db.aiagent.find_many()
+    sem = asyncio.Semaphore(5)
+
+    async def _process(agent):
+        async with sem:
+            try:
+                await decay_emotion_toward_baseline(agent.id, agent.personality or {})
+            except Exception as e:
+                logger.warning(f"Emotion decay failed for agent {agent.id}: {e}")
 
     await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
 

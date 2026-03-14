@@ -126,6 +126,29 @@ async def get_ai_emotion(agent_id: str) -> dict:
     return emotion
 
 
+async def decay_emotion_toward_baseline(agent_id: str, personality: dict | None = None) -> None:
+    """Decay current emotion toward personality baseline.
+
+    decay_rate = 0.05 + (1 - stability) * 0.1
+    where stability = 1 - neuroticism
+    """
+    current = await get_ai_emotion(agent_id)
+    personality = personality or {}
+    n = personality.get("neuroticism", 0.5)
+    stability = 1.0 - n
+    decay_rate = 0.05 + (1 - stability) * 0.1
+
+    baseline = compute_baseline_emotion(personality)
+
+    decayed = {}
+    for dim in ("valence", "arousal", "dominance"):
+        cur = current.get(dim, 0.0)
+        base = baseline.get(dim, 0.0)
+        decayed[dim] = cur + (base - cur) * decay_rate
+
+    await save_ai_emotion(agent_id, decayed)
+
+
 async def save_ai_emotion(agent_id: str, emotion: dict) -> None:
     """Save AI emotion state to DB and cache."""
     # Update DB
