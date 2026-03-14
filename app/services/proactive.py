@@ -6,11 +6,11 @@ AI主动发起消息：事件路由 + 频率控制(≤3/日) + 记忆触发。
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.models import get_chat_model, invoke_text
+from app.services.llm.models import get_utility_model, invoke_text
 from app.services.memory.retrieval import retrieve_memories, format_memories_for_prompt
 from app.services.emotion import get_ai_emotion
 
@@ -40,7 +40,7 @@ PROACTIVE_PROMPT = """你是{ai_name}，现在你想主动和用户聊天。
 
 
 def _proactive_count_key(agent_id: str, user_id: str) -> str:
-    return f"proactive_count:{agent_id}:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
+    return f"proactive_count:{agent_id}:{user_id}:{datetime.now(UTC).strftime('%Y%m%d')}"
 
 
 async def can_send_proactive(agent_id: str, user_id: str) -> bool:
@@ -92,7 +92,7 @@ async def generate_proactive_message(
             memories="\n".join(f"- {m}" for m in memory_strings) or "暂无记忆。",
         )
 
-        model = get_chat_model()
+        model = get_utility_model()
         response = await invoke_text(model, prompt)
         response = response.strip()
 

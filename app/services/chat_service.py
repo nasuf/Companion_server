@@ -144,7 +144,7 @@ async def stream_chat_response(
     # --- Strategy decision (pure computation, after emotion is loaded) ---
     strategy_result = decide_strategy(
         message=user_message,
-        emotion=emotion if not isinstance(emotion, Exception) else None,
+        emotion=emotion,
         topic_info=topic_info,
         personality=agent_personality,
         topic_fatigued=topic_fatigued,
@@ -207,7 +207,6 @@ async def stream_chat_response(
     yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
 
     # --- BACKGROUND: fire-and-forget post-processing ---
-    loaded_emotion = emotion if not isinstance(emotion, Exception) else None
     task = asyncio.create_task(
         _background_post_process(
             user_id=user_id,
@@ -217,10 +216,13 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             memory_strings=memory_strings,
             has_deletion_keyword=has_deletion_keyword,
-            cached_emotion=loaded_emotion,
+            cached_emotion=emotion,
         )
     )
-    task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
+    task.add_done_callback(
+        lambda t: logger.error(f"Background post-processing failed: {t.exception()}")
+        if not t.cancelled() and t.exception() else None
+    )
 
 
 async def _background_post_process(
