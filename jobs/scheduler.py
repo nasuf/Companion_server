@@ -6,6 +6,7 @@ Uses APScheduler for:
 - Monthly: memory compression (L2 -> L1)
 """
 
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -92,28 +93,38 @@ def setup_scheduler():
 
 async def _run_weekly_portraits():
     """Update portraits for all active user-agent pairs."""
-    from app.db import db
+    from app.db import db  # deferred to avoid circular import at scheduler setup
     agents = await db.aiagent.find_many()
-    for agent in agents:
-        try:
-            await update_portrait_weekly(agent.userId, agent.id)
-        except Exception as e:
-            logger.warning(f"Portrait update failed for agent {agent.id}: {e}")
+    sem = asyncio.Semaphore(3)
+
+    async def _process(agent):
+        async with sem:
+            try:
+                await update_portrait_weekly(agent.userId, agent.id)
+            except Exception as e:
+                logger.warning(f"Portrait update failed for agent {agent.id}: {e}")
+
+    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
 
 
 async def _run_daily_self_memories():
     """Generate daily self-memories for all active agents."""
-    from app.db import db
+    from app.db import db  # deferred to avoid circular import at scheduler setup
     agents = await db.aiagent.find_many()
-    for agent in agents:
-        try:
-            await generate_daily_self_memories(
-                agent_id=agent.id,
-                user_id=agent.userId,
-                dialogue_summary=None,
-            )
-        except Exception as e:
-            logger.warning(f"Self-memory generation failed for agent {agent.id}: {e}")
+    sem = asyncio.Semaphore(3)
+
+    async def _process(agent):
+        async with sem:
+            try:
+                await generate_daily_self_memories(
+                    agent_id=agent.id,
+                    user_id=agent.userId,
+                    dialogue_summary=None,
+                )
+            except Exception as e:
+                logger.warning(f"Self-memory generation failed for agent {agent.id}: {e}")
+
+    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
 
 
 def shutdown_scheduler():

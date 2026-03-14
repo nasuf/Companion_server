@@ -8,6 +8,7 @@ import logging
 
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.memory.storage import log_memory_changelog
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +100,14 @@ async def resolve_conflict(
     if resolution == "ignore" or not old_id:
         return "ignored"
 
-    if resolution == "update_l1":
+    if resolution in ("update_l1", "demote_old"):
         old_memory = await db.memory.find_unique(where={"id": old_id})
         if not old_memory:
             return "ignored"
 
         old_content = old_memory.content
 
-        if conflict.get("conflict_type") == "preference_change":
+        if conflict.get("conflict_type") == "preference_change" or resolution == "demote_old":
             # Demote old memory to L2
             await db.memory.update(
                 where={"id": old_id},
@@ -114,8 +115,7 @@ async def resolve_conflict(
             )
             logger.info(f"Demoted conflicting memory {old_id} from L1 to L2")
 
-            # Log the change
-            await _log_changelog(user_id, old_id, "update", old_content, f"降级L2: {conflict.get('reason', '')}")
+            await log_memory_changelog(user_id, old_id, "update", old_content, f"降级L2: {conflict.get('reason', '')}")
             return "demoted"
         else:
             # Update the old memory with new content
@@ -126,29 +126,7 @@ async def resolve_conflict(
             )
             logger.info(f"Updated conflicting memory {old_id}: {old_content[:30]} -> {new_content[:30]}")
 
-            await _log_changelog(user_id, old_id, "update", old_content, new_content)
+            await log_memory_changelog(user_id, old_id, "update", old_content, new_content)
             return "updated"
 
     return "ignored"
-
-
-async def _log_changelog(
-    user_id: str,
-    memory_id: str,
-    operation: str,
-    old_value: str | None = None,
-    new_value: str | None = None,
-) -> None:
-    """Write a memory changelog entry."""
-    try:
-        await db.memorychangelog.create(
-            data={
-                "user": {"connect": {"id": user_id}},
-                "memory": {"connect": {"id": memory_id}},
-                "operation": operation,
-                "oldValue": old_value,
-                "newValue": new_value,
-            }
-        )
-    except Exception as e:
-        logger.warning(f"Failed to write changelog: {e}")

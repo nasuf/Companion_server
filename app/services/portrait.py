@@ -5,6 +5,7 @@ Runs weekly as a scheduled job.
 """
 
 import logging
+from datetime import datetime, timedelta
 
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_text
@@ -106,7 +107,6 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
         return await generate_portrait(user_id, agent_id)
 
     # Get this week's changelog
-    from datetime import datetime, timedelta
     one_week_ago = datetime.utcnow() - timedelta(days=7)
 
     changelogs = await db.memorychangelog.find_many(

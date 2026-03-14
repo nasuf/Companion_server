@@ -28,7 +28,7 @@ from app.services.emotion import (
 )
 from app.services.cache import cache_summarizer, cache_set_summarizer
 from app.services.portrait import get_latest_portrait
-from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, get_deletion_response
+from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,7 @@ async def stream_chat_response(
     agent_id = getattr(agent, "id", None)
 
     # --- Check deletion intent (keyword-only, no LLM on hot path) ---
-    deletion_keywords = ["忘了", "忘掉", "别记了", "删除", "删掉", "不要记", "忘记", "去掉", "移除", "forget", "delete", "remove"]
-    has_deletion_keyword = any(kw in user_message for kw in deletion_keywords)
+    has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
