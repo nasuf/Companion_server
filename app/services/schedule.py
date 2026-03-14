@@ -276,3 +276,63 @@ async def handle_schedule_adjustment(
         }
 
     return {"accepted": True, "response": ""}
+
+
+# --- 每日作息回顾 ---
+
+_SCHEDULE_REVIEW_PROMPT = """你是{name}。回顾今天的作息，用第一人称写1-2条简短感想。
+
+今日作息：
+{schedule_text}
+
+要求：
+- 用口语化第一人称
+- 每条30字以内
+- 关注感受和体验
+
+返回JSON：
+{{"memories": ["感想1", "感想2"]}}"""
+
+
+async def review_daily_schedule(agent_id: str, user_id: str) -> list[str]:
+    """回顾当日作息，生成AI自我记忆。"""
+    from app.services.memory.storage import store_memory
+
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        return []
+
+    schedule = await get_cached_schedule(agent_id)
+    if not schedule:
+        return []
+
+    schedule_text = "\n".join(
+        f"{s['start']}-{s['end']} {s['activity']}" for s in schedule
+    )
+
+    prompt = _SCHEDULE_REVIEW_PROMPT.format(
+        name=agent.name, schedule_text=schedule_text,
+    )
+
+    try:
+        result = await invoke_json(get_utility_model(), prompt)
+    except Exception as e:
+        logger.warning(f"Schedule review failed for agent {agent_id}: {e}")
+        return []
+
+    memories = result.get("memories", [])
+    stored = []
+    for content in memories[:2]:
+        if not content or not isinstance(content, str):
+            continue
+        mem_id = await store_memory(
+            user_id=user_id,
+            content=content,
+            memory_type="生活",
+            level=3,
+            importance=0.3,
+        )
+        if mem_id:
+            stored.append(mem_id)
+
+    return stored
