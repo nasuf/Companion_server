@@ -144,6 +144,37 @@ async def get_ai_emotion(agent_id: str) -> dict:
     return emotion
 
 
+def apply_memory_emotion_influence(
+    current_emotion: dict,
+    memory_emotions: list[dict],
+    influence_weight: float = 0.05,
+) -> dict:
+    """Apply emotion influence from recalled memories.
+
+    When memories with emotional content are retrieved, they subtly
+    shift the AI's current emotion. Each memory contributes a small
+    nudge toward its emotional valence.
+    """
+    if not memory_emotions:
+        return current_emotion
+
+    # Average the emotional content of recalled memories
+    avg = {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
+    for mem_emo in memory_emotions:
+        for dim in avg:
+            avg[dim] += mem_emo.get(dim, 0.0)
+    for dim in avg:
+        avg[dim] /= len(memory_emotions)
+
+    # Apply subtle influence
+    result = {}
+    for dim in ("valence", "arousal", "dominance"):
+        cur = current_emotion.get(dim, 0.0)
+        result[dim] = cur + (avg[dim] - cur) * influence_weight
+
+    return result
+
+
 async def decay_emotion_toward_baseline(agent_id: str, personality: dict | None = None) -> None:
     """Decay current emotion toward personality baseline.
 
