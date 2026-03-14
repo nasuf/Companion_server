@@ -65,6 +65,15 @@ async def stream_chat_response(
 
     agent_id = getattr(agent, "id", None)
 
+    # --- Load previous user emotion from message metadata (no LLM) ---
+    prev_user_emotion = None
+    for m in reversed(recent_messages[:-1]):  # skip current message
+        if m.role == "user" and m.metadata:
+            meta = m.metadata if isinstance(m.metadata, dict) else {}
+            if "emotion" in meta:
+                prev_user_emotion = meta["emotion"]
+                break
+
     # --- Check deletion intent (keyword-only, no LLM on hot path) ---
     has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
 
@@ -162,6 +171,7 @@ async def stream_chat_response(
         portrait=portrait,
         topic_context=topic_context,
         strategy_instruction=strategy_instruction,
+        user_emotion=prev_user_emotion,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
@@ -211,6 +221,7 @@ async def stream_chat_response(
         _background_post_process(
             user_id=user_id,
             agent_id=agent_id,
+            conversation_id=conversation_id,
             user_message=user_message,
             full_response=full_response,
             messages_dicts=messages_dicts,
@@ -228,6 +239,7 @@ async def stream_chat_response(
 async def _background_post_process(
     user_id: str,
     agent_id: str | None,
+    conversation_id: str,
     user_message: str,
     full_response: str,
     messages_dicts: list[dict],
@@ -247,7 +259,7 @@ async def _background_post_process(
 
         # Run all background tasks concurrently
         tasks = [
-            _bg_emotion(agent_id, user_message, cached_emotion),
+            _bg_emotion(agent_id, conversation_id, user_message, cached_emotion),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
@@ -258,8 +270,13 @@ async def _background_post_process(
         logger.error(f"Background post-processing failed: {e}")
 
 
-async def _bg_emotion(agent_id: str | None, user_message: str, cached_emotion: dict | None = None) -> None:
-    """Extract emotion from user message and update AI emotion state."""
+async def _bg_emotion(
+    agent_id: str | None,
+    conversation_id: str,
+    user_message: str,
+    cached_emotion: dict | None = None,
+) -> None:
+    """Extract emotion from user message, update AI emotion state, and save to message metadata."""
     if not agent_id:
         return
     try:
@@ -267,6 +284,17 @@ async def _bg_emotion(agent_id: str | None, user_message: str, cached_emotion: d
         current_emotion = cached_emotion or await get_ai_emotion(agent_id)
         new_emotion = update_emotion_state(current_emotion, user_emotion)
         await save_ai_emotion(agent_id, new_emotion)
+
+        # Save user emotion to the most recent user message metadata
+        recent_msg = await db.message.find_first(
+            where={"conversationId": conversation_id, "role": "user"},
+            order={"createdAt": "desc"},
+        )
+        if recent_msg:
+            await db.message.update(
+                where={"id": recent_msg.id},
+                data={"metadata": Json({"emotion": user_emotion})},
+            )
     except Exception as e:
         logger.warning(f"Background emotion update failed: {e}")
 

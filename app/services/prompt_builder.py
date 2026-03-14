@@ -145,8 +145,8 @@ def _build_personality_section(agent: Any) -> str | None:
     return _section("你的身份", description)
 
 
-def _build_emotion_section(emotion: dict | None) -> str | None:
-    """Build the emotion section from a VAD dict."""
+def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = None) -> str | None:
+    """Build the emotion section from VAD dicts (AI + user)."""
     if not emotion:
         return None
 
@@ -166,13 +166,34 @@ def _build_emotion_section(emotion: dict | None) -> str | None:
     elif arousal < -0.3:
         mood_parts.append("比较平静")
 
+    if dominance > 0.3:
+        mood_parts.append("感觉自信")
+    elif dominance < -0.3:
+        mood_parts.append("感觉有些被动")
+
     mood_text = "，".join(mood_parts) if mood_parts else "心情平静"
 
-    body = (
-        f"你现在的情绪：{mood_text}\n"
-        f"(VAD: {valence:.1f}, {arousal:.1f}, {dominance:.1f})\n\n"
-        f"{_EMOTION_INSTRUCTION}"
-    )
+    body = f"你现在的情绪：{mood_text}\n(VAD: {valence:.1f}, {arousal:.1f}, {dominance:.1f})\n"
+
+    # Add user emotion context if available
+    if user_emotion:
+        primary = user_emotion.get("primary_emotion", "neutral")
+        confidence = user_emotion.get("confidence", 0.0)
+        u_valence = user_emotion.get("valence", 0.0)
+
+        if confidence >= 0.5 and primary != "neutral":
+            emotion_map = {
+                "joy": "开心", "sadness": "难过", "anger": "生气", "fear": "害怕",
+                "surprise": "惊讶", "disgust": "反感", "trust": "信任", "anticipation": "期待",
+                "love": "喜爱", "anxiety": "焦虑", "pride": "自豪", "guilt": "愧疚",
+            }
+            emotion_cn = emotion_map.get(primary, primary)
+            body += f"用户当前情绪：{emotion_cn}（置信度{confidence:.1f}）\n"
+
+            if u_valence < -0.3:
+                body += "请注意关心用户的感受。\n"
+
+    body += f"\n{_EMOTION_INSTRUCTION}"
     return _section("当前情绪", body)
 
 
@@ -269,6 +290,7 @@ def build_system_prompt(
     portrait: str | None = None,
     topic_context: str | None = None,
     strategy_instruction: str | None = None,
+    user_emotion: dict | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
@@ -282,7 +304,7 @@ def build_system_prompt(
     if core:
         sections.append(core)
 
-    emo = _build_emotion_section(emotion)
+    emo = _build_emotion_section(emotion, user_emotion)
     if emo:
         sections.append(emo)
 
