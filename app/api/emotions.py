@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.db import db
 from app.services.emotion import get_ai_emotion, emotion_to_tone
+from app.services.emoji import recommend_emoji
 
 router = APIRouter(prefix="/emotions", tags=["emotions"])
 
@@ -73,3 +74,15 @@ async def get_emotion_timeline(agent_id: str, limit: int = 50):
             })
 
     return timeline
+
+
+@router.post("/emoji/recommend")
+async def recommend_emoji_api(
+    valence: float = 0.0,
+    arousal: float = 0.0,
+    primary_emotion: str | None = None,
+    count: int = 3,
+):
+    """推荐表情。"""
+    emojis = recommend_emoji(valence, arousal, primary_emotion, count)
+    return {"emojis": emojis}
