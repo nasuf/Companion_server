@@ -28,6 +28,7 @@ from app.services.emotion import (
 )
 from app.services.cache import cache_summarizer, cache_set_summarizer
 from app.services.portrait import get_latest_portrait
+from app.services.timing import calculate_reply_delay, calculate_typing_duration
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,15 @@ async def stream_chat_response(
         portrait=portrait,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
+
+    # --- Send typing event before response ---
+    agent_personality = getattr(agent, "personality", None) or {}
+    typing_duration = calculate_typing_duration(len(user_message))
+    yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
+
+    # Simulate reply delay (non-blocking)
+    reply_delay = calculate_reply_delay(len(user_message), agent_personality)
+    await asyncio.sleep(min(reply_delay, 2.0))  # cap at 2s to avoid blocking
 
     # --- Stream response from large model (the ONLY LLM call in hot path) ---
     model = get_chat_model()
