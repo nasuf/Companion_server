@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.db import db
 from app.models.user import UserCreate, UserUpdate, UserResponse
+from app.services.portrait import get_latest_portrait
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -35,6 +36,15 @@ async def update_user(user_id: str, data: UserUpdate):
     return UserResponse(
         id=user.id, name=user.name, email=user.email, created_at=str(user.createdAt)
     )
+
+
+@router.get("/{user_id}/portrait")
+async def get_user_portrait(user_id: str, agent_id: str):
+    """Get the latest AI-generated user portrait."""
+    portrait = await get_latest_portrait(user_id, agent_id)
+    if not portrait:
+        raise HTTPException(status_code=404, detail="Portrait not found")
+    return {"portrait": portrait}
 
 
 @router.get("", response_model=list[UserResponse])

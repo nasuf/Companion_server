@@ -218,6 +218,13 @@ def _build_memory_section(memories: list[str] | None) -> str | None:
     return _section("你记得的事情", body)
 
 
+def _build_portrait_section(portrait: str | None) -> str | None:
+    """Build the user portrait section."""
+    if not portrait:
+        return None
+    return _section("用户画像", portrait)
+
+
 def _build_graph_context_section(graph_context: dict | None) -> str | None:
     """Build the graph/relationship context section."""
     if not graph_context:
@@ -256,6 +263,7 @@ def build_system_prompt(
     emotion: dict | None = None,
     graph_context: dict | None = None,
     summaries: dict | None = None,
+    portrait: str | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
@@ -276,6 +284,10 @@ def build_system_prompt(
     summ = _build_summarizer_section(summaries)
     if summ:
         sections.append(summ)
+
+    port = _build_portrait_section(portrait)
+    if port:
+        sections.append(port)
 
     mem = _build_memory_section(memories)
     if mem:

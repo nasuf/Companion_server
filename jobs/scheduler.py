@@ -12,6 +12,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.services.reflection import run_daily_reflection, run_weekly_reflection
 from app.services.memory.compression import compress_weekly, compress_monthly
+from app.services.portrait import update_portrait_weekly
+from app.services.memory.self_memory import generate_daily_self_memories
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +65,55 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # Weekly portrait update on Sunday at 3 AM
+    scheduler.add_job(
+        _run_weekly_portraits,
+        "cron",
+        day_of_week="sun",
+        hour=3,
+        minute=0,
+        id="weekly_portrait",
+        replace_existing=True,
+    )
+
+    # Daily self-memory generation at 3:15 AM
+    scheduler.add_job(
+        _run_daily_self_memories,
+        "cron",
+        hour=3,
+        minute=15,
+        id="daily_self_memory",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
+
+
+async def _run_weekly_portraits():
+    """Update portraits for all active user-agent pairs."""
+    from app.db import db
+    agents = await db.aiagent.find_many()
+    for agent in agents:
+        try:
+            await update_portrait_weekly(agent.userId, agent.id)
+        except Exception as e:
+            logger.warning(f"Portrait update failed for agent {agent.id}: {e}")
+
+
+async def _run_daily_self_memories():
+    """Generate daily self-memories for all active agents."""
+    from app.db import db
+    agents = await db.aiagent.find_many()
+    for agent in agents:
+        try:
+            await generate_daily_self_memories(
+                agent_id=agent.id,
+                user_id=agent.userId,
+                dialogue_summary=None,
+            )
+        except Exception as e:
+            logger.warning(f"Self-memory generation failed for agent {agent.id}: {e}")
 
 
 def shutdown_scheduler():

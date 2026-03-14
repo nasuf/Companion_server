@@ -1,6 +1,6 @@
 """Async memory pipeline.
 
-Orchestrates: extract -> score -> dedup -> store -> embed -> graph update.
+Orchestrates: extract -> conflict check -> score -> dedup -> store -> embed -> graph update.
 Runs as FastAPI BackgroundTasks (non-blocking).
 """
 
@@ -8,6 +8,7 @@ import logging
 
 from app.services.memory.extraction import extract_memories
 from app.services.memory.storage import store_memory
+from app.services.memory.conflict import detect_conflicts, resolve_conflict
 from app.services.graph_service import update_graph_from_extraction
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ async def process_memory_pipeline(
 
     stored_ids: list[str] = []
 
-    # Step 2: Store each memory with dedup
+    # Step 2: Store each memory with dedup and conflict check
     for mem in memories:
         summary = mem.get("summary", "")
         level = mem.get("level", 3)
@@ -43,6 +44,18 @@ async def process_memory_pipeline(
         if emotion:
             valence = abs(emotion.get("valence", 0.0))
             importance = min(1.0, importance + valence * 0.2)
+
+        # Step 2a: Conflict check for L1 memories
+        if level == 1:
+            try:
+                conflict = await detect_conflicts(user_id, mem)
+                if conflict:
+                    action = await resolve_conflict(user_id, conflict, mem)
+                    if action in ("updated", "demoted"):
+                        logger.info(f"Conflict resolved ({action}), skipping duplicate store")
+                        continue
+            except Exception as e:
+                logger.warning(f"Conflict check failed: {e}")
 
         memory_id = await store_memory(
             user_id=user_id,

@@ -12,6 +12,28 @@ from app.services.memory.vector_search import search_by_embedding
 
 logger = logging.getLogger(__name__)
 
+
+async def log_memory_changelog(
+    user_id: str,
+    memory_id: str,
+    operation: str,
+    old_value: str | None = None,
+    new_value: str | None = None,
+) -> None:
+    """Write a memory changelog entry for portrait generation."""
+    try:
+        await db.memorychangelog.create(
+            data={
+                "user": {"connect": {"id": user_id}},
+                "memory": {"connect": {"id": memory_id}},
+                "operation": operation,
+                "oldValue": old_value,
+                "newValue": new_value,
+            }
+        )
+    except Exception as e:
+        logger.warning(f"Failed to write changelog: {e}")
+
 DEDUP_THRESHOLD = 0.9
 
 
@@ -65,6 +87,9 @@ async def store_memory(
 
     # Store embedding
     await store_embedding(memory.id, embedding)
+
+    # Log changelog for portrait generation
+    await log_memory_changelog(user_id, memory.id, "insert", new_value=content)
 
     logger.info(f"Stored memory L{level} (importance={importance:.2f}): {content[:50]}")
     return memory.id

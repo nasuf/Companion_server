@@ -27,6 +27,8 @@ from app.services.emotion import (
     save_ai_emotion,
 )
 from app.services.cache import cache_summarizer, cache_set_summarizer
+from app.services.portrait import get_latest_portrait
+from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, get_deletion_response
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,10 @@ async def stream_chat_response(
 
     agent_id = getattr(agent, "id", None)
 
+    # --- Check deletion intent (keyword-only, no LLM on hot path) ---
+    deletion_keywords = ["忘了", "忘掉", "别记了", "删除", "删掉", "不要记", "忘记", "去掉", "移除", "forget", "delete", "remove"]
+    has_deletion_keyword = any(kw in user_message for kw in deletion_keywords)
+
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
         return await hybrid_retrieve(user_message, user_id)
@@ -85,11 +91,18 @@ async def stream_chat_response(
         )
         return [r.summary or r.content for r in rows] if rows else None
 
-    retrieval_result, emotion, summaries, core_memories = await asyncio.gather(
+    async def _load_portrait():
+        """Load latest user portrait — no LLM call."""
+        if agent_id:
+            return await get_latest_portrait(user_id, agent_id)
+        return None
+
+    retrieval_result, emotion, summaries, core_memories, portrait = await asyncio.gather(
         _do_retrieval(),
         _load_cached_emotion(),
         _load_cached_summaries(),
         _load_core_memories(),
+        _load_portrait(),
         return_exceptions=True,
     )
 
@@ -114,6 +127,10 @@ async def stream_chat_response(
         logger.warning(f"Loading core memories failed: {core_memories}")
         core_memories = None
 
+    if isinstance(portrait, Exception):
+        logger.warning(f"Loading portrait failed: {portrait}")
+        portrait = None
+
     # Build prompt (pure string operations — instant)
     system_prompt = build_system_prompt(
         agent=agent,
@@ -122,6 +139,7 @@ async def stream_chat_response(
         emotion=emotion,
         graph_context=graph_context,
         summaries=summaries,
+        portrait=portrait,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
@@ -167,6 +185,7 @@ async def stream_chat_response(
             full_response=full_response,
             messages_dicts=messages_dicts,
             memory_strings=memory_strings,
+            has_deletion_keyword=has_deletion_keyword,
         )
     )
 
@@ -178,6 +197,7 @@ async def _background_post_process(
     full_response: str,
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
+    has_deletion_keyword: bool = False,
 ) -> None:
     """Run all background tasks after response is sent.
 
@@ -189,13 +209,15 @@ async def _background_post_process(
         # Add the assistant response to messages for summarizer context
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
 
-        # Run all 3 background tasks concurrently
-        await asyncio.gather(
+        # Run all background tasks concurrently
+        tasks = [
             _bg_emotion(agent_id, user_message),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
-            return_exceptions=True,
-        )
+        ]
+        if has_deletion_keyword:
+            tasks.append(_bg_deletion_check(user_id, user_message))
+        await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")
 
@@ -236,3 +258,16 @@ async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
         await process_memory_pipeline(user_id, conv_text)
     except Exception as e:
         logger.error(f"Background memory pipeline failed: {e}")
+
+
+async def _bg_deletion_check(user_id: str, user_message: str) -> None:
+    """Check if user wants to delete a memory and execute deletion."""
+    try:
+        intent = await detect_deletion_intent(user_message)
+        if intent and intent.get("target_description"):
+            deleted = await delete_memories_by_description(
+                user_id, intent["target_description"]
+            )
+            logger.info(f"Deletion check: removed {deleted} memories for user {user_id}")
+    except Exception as e:
+        logger.warning(f"Background deletion check failed: {e}")
