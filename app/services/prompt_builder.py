@@ -145,6 +145,13 @@ def _build_personality_section(agent: Any) -> str | None:
     return _section("你的身份", description)
 
 
+_EMOTION_LABEL_CN = {
+    "joy": "开心", "sadness": "难过", "anger": "生气", "fear": "害怕",
+    "surprise": "惊讶", "disgust": "反感", "trust": "信任", "anticipation": "期待",
+    "love": "喜爱", "anxiety": "焦虑", "pride": "自豪", "guilt": "愧疚",
+}
+
+
 def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = None) -> str | None:
     """Build the emotion section from VAD dicts (AI + user)."""
     if not emotion:
@@ -154,7 +161,6 @@ def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = Non
     arousal = emotion.get("arousal", 0.0)
     dominance = emotion.get("dominance", 0.0)
 
-    # Translate VAD to natural language mood
     mood_parts: list[str] = []
     if valence > 0.3:
         mood_parts.append("心情不错")
@@ -175,19 +181,13 @@ def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = Non
 
     body = f"你现在的情绪：{mood_text}\n(VAD: {valence:.1f}, {arousal:.1f}, {dominance:.1f})\n"
 
-    # Add user emotion context if available
     if user_emotion:
         primary = user_emotion.get("primary_emotion", "neutral")
         confidence = user_emotion.get("confidence", 0.0)
         u_valence = user_emotion.get("valence", 0.0)
 
         if confidence >= 0.5 and primary != "neutral":
-            emotion_map = {
-                "joy": "开心", "sadness": "难过", "anger": "生气", "fear": "害怕",
-                "surprise": "惊讶", "disgust": "反感", "trust": "信任", "anticipation": "期待",
-                "love": "喜爱", "anxiety": "焦虑", "pride": "自豪", "guilt": "愧疚",
-            }
-            emotion_cn = emotion_map.get(primary, primary)
+            emotion_cn = _EMOTION_LABEL_CN.get(primary, primary)
             body += f"用户当前情绪：{emotion_cn}（置信度{confidence:.1f}）\n"
 
             if u_valence < -0.3:

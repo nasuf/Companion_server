@@ -30,7 +30,11 @@ async def create_agent(data: AgentCreate):
 
     # Initialize baseline emotion from personality
     baseline = compute_baseline_emotion(agent.personality or {})
-    asyncio.create_task(save_ai_emotion(agent.id, baseline))
+    emo_task = asyncio.create_task(save_ai_emotion(agent.id, baseline))
+    emo_task.add_done_callback(
+        lambda t: logger.error(f"Baseline emotion init failed: {t.exception()}")
+        if not t.cancelled() and t.exception() else None
+    )
 
     # Generate initial self-memories in background
     task = asyncio.create_task(

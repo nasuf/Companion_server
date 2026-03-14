@@ -43,13 +43,14 @@ async def stream_chat_response(
     user_id: str,
 ) -> AsyncGenerator[dict, None]:
     # Save user message
-    await db.message.create(
+    saved_msg = await db.message.create(
         data={
             "conversation": {"connect": {"id": conversation_id}},
             "role": "user",
             "content": user_message,
         }
     )
+    user_message_id = saved_msg.id
 
     # Load recent messages (for prompt context)
     recent_messages = await db.message.find_many(
@@ -223,6 +224,7 @@ async def stream_chat_response(
             agent_id=agent_id,
             conversation_id=conversation_id,
             user_message=user_message,
+            user_message_id=user_message_id,
             full_response=full_response,
             messages_dicts=messages_dicts,
             memory_strings=memory_strings,
@@ -241,6 +243,7 @@ async def _background_post_process(
     agent_id: str | None,
     conversation_id: str,
     user_message: str,
+    user_message_id: str,
     full_response: str,
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
@@ -259,7 +262,7 @@ async def _background_post_process(
 
         # Run all background tasks concurrently
         tasks = [
-            _bg_emotion(agent_id, conversation_id, user_message, cached_emotion),
+            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
@@ -272,7 +275,7 @@ async def _background_post_process(
 
 async def _bg_emotion(
     agent_id: str | None,
-    conversation_id: str,
+    user_message_id: str,
     user_message: str,
     cached_emotion: dict | None = None,
 ) -> None:
@@ -285,16 +288,11 @@ async def _bg_emotion(
         new_emotion = update_emotion_state(current_emotion, user_emotion)
         await save_ai_emotion(agent_id, new_emotion)
 
-        # Save user emotion to the most recent user message metadata
-        recent_msg = await db.message.find_first(
-            where={"conversationId": conversation_id, "role": "user"},
-            order={"createdAt": "desc"},
+        # Save user emotion to message metadata (use known ID, no re-query)
+        await db.message.update(
+            where={"id": user_message_id},
+            data={"metadata": Json({"emotion": user_emotion})},
         )
-        if recent_msg:
-            await db.message.update(
-                where={"id": recent_msg.id},
-                data={"metadata": Json({"emotion": user_emotion})},
-            )
     except Exception as e:
         logger.warning(f"Background emotion update failed: {e}")
 

@@ -8,6 +8,7 @@ Uses APScheduler for:
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -20,6 +21,24 @@ from app.services.emotion import decay_emotion_toward_baseline
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+
+
+async def _run_for_all_agents(
+    fn: Callable, concurrency: int = 3, task_name: str = "task"
+) -> None:
+    """Run an async function for all agents with concurrency control."""
+    from app.db import db
+    agents = await db.aiagent.find_many()
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _process(agent):
+        async with sem:
+            try:
+                await fn(agent)
+            except Exception as e:
+                logger.warning(f"{task_name} failed for agent {agent.id}: {e}")
+
+    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
 
 
 def setup_scheduler():
@@ -102,55 +121,24 @@ def setup_scheduler():
 
 
 async def _run_weekly_portraits():
-    """Update portraits for all active user-agent pairs."""
-    from app.db import db  # deferred to avoid circular import at scheduler setup
-    agents = await db.aiagent.find_many()
-    sem = asyncio.Semaphore(3)
-
-    async def _process(agent):
-        async with sem:
-            try:
-                await update_portrait_weekly(agent.userId, agent.id)
-            except Exception as e:
-                logger.warning(f"Portrait update failed for agent {agent.id}: {e}")
-
-    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
+    await _run_for_all_agents(
+        lambda a: update_portrait_weekly(a.userId, a.id),
+        concurrency=3, task_name="Portrait update",
+    )
 
 
 async def _run_daily_self_memories():
-    """Generate daily self-memories for all active agents."""
-    from app.db import db  # deferred to avoid circular import at scheduler setup
-    agents = await db.aiagent.find_many()
-    sem = asyncio.Semaphore(3)
-
-    async def _process(agent):
-        async with sem:
-            try:
-                await generate_daily_self_memories(
-                    agent_id=agent.id,
-                    user_id=agent.userId,
-                    dialogue_summary=None,
-                )
-            except Exception as e:
-                logger.warning(f"Self-memory generation failed for agent {agent.id}: {e}")
-
-    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
+    await _run_for_all_agents(
+        lambda a: generate_daily_self_memories(agent_id=a.id, user_id=a.userId, dialogue_summary=None),
+        concurrency=3, task_name="Self-memory generation",
+    )
 
 
 async def _run_emotion_decay():
-    """Decay all agents' emotions toward their personality baseline."""
-    from app.db import db
-    agents = await db.aiagent.find_many()
-    sem = asyncio.Semaphore(5)
-
-    async def _process(agent):
-        async with sem:
-            try:
-                await decay_emotion_toward_baseline(agent.id, agent.personality or {})
-            except Exception as e:
-                logger.warning(f"Emotion decay failed for agent {agent.id}: {e}")
-
-    await asyncio.gather(*[_process(a) for a in agents], return_exceptions=True)
+    await _run_for_all_agents(
+        lambda a: decay_emotion_toward_baseline(a.id, a.personality or {}),
+        concurrency=5, task_name="Emotion decay",
+    )
 
 
 def shutdown_scheduler():
