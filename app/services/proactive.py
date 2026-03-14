@@ -1,53 +1,92 @@
-"""Proactive sharing service.
+"""主动分享服务。
 
-AI-initiated messages based on memory + personality + relationship.
+AI主动发起消息：事件路由 + 频率控制(≤3/日) + 记忆触发。
 """
 
-import logging
+from __future__ import annotations
 
+import logging
+from datetime import datetime
+
+from app.db import db
+from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.retrieval import retrieve_memories, format_memories_for_prompt
 from app.services.emotion import get_ai_emotion
 
 logger = logging.getLogger(__name__)
 
-PROACTIVE_PROMPT = """You are an AI companion considering whether to proactively share something with the user.
+MAX_DAILY_PROACTIVE = 3
 
-Your current emotion state:
-Valence: {valence}, Arousal: {arousal}, Dominance: {dominance}
+PROACTIVE_PROMPT = """你是{ai_name}，现在你想主动和用户聊天。
 
-Recent memories about the user:
+你的当前情绪：心情{mood}
+(VAD: {valence:.1f}, {arousal:.1f}, {dominance:.1f})
+
+关于用户的记忆：
 {memories}
 
-Based on your personality and these memories, generate a short, natural message
-to share with the user. It could be:
-- A follow-up on something they mentioned
-- A relevant thought or observation
-- A caring check-in
+请生成一条自然的主动消息。可以是：
+- 跟进用户之前提到的事
+- 分享一个想法或感受
+- 关心问候
 
-If there's nothing meaningful to share, return "SKIP".
+规则：
+- 像朋友发微信一样，简短自然，1-2句话
+- 不要说"我想到了"、"我突然想起"这种刻意的开头
+- 如果实在没什么好聊的，返回 SKIP
 
-Message:"""
+消息："""
+
+
+async def can_send_proactive(agent_id: str, user_id: str) -> bool:
+    """检查今日是否还能发送主动消息。"""
+    redis = await get_redis()
+    key = f"proactive_count:{agent_id}:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
+    count = await redis.get(key)
+    return int(count or 0) < MAX_DAILY_PROACTIVE
+
+
+async def increment_proactive_count(agent_id: str, user_id: str) -> None:
+    """增加今日主动消息计数。"""
+    redis = await get_redis()
+    key = f"proactive_count:{agent_id}:{user_id}:{datetime.utcnow().strftime('%Y%m%d')}"
+    await redis.incr(key)
+    await redis.expire(key, 86400)
 
 
 async def generate_proactive_message(
     user_id: str,
     agent_id: str,
 ) -> str | None:
-    """Generate a proactive message, or None if nothing to share."""
+    """生成主动消息，或None（无内容/超限）。"""
+    # 频率控制
+    if not await can_send_proactive(agent_id, user_id):
+        logger.info(f"Proactive limit reached for agent {agent_id}")
+        return None
+
     try:
-        # Get memories
+        # 获取 agent 信息
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        if not agent:
+            return None
+
+        # 获取记忆
         memories = await retrieve_memories("", user_id, semantic_k=3, recent_k=5, important_k=2)
         memory_strings = format_memories_for_prompt(memories)
 
-        # Get emotion
+        # 获取情绪
         emotion = await get_ai_emotion(agent_id)
+        valence = emotion.get("valence", 0.0)
+        mood = "不错" if valence > 0.2 else ("有点低落" if valence < -0.2 else "平静")
 
         prompt = PROACTIVE_PROMPT.format(
+            ai_name=agent.name,
+            mood=mood,
             valence=emotion.get("valence", 0),
             arousal=emotion.get("arousal", 0),
             dominance=emotion.get("dominance", 0),
-            memories="\n".join(f"- {m}" for m in memory_strings) or "No memories yet.",
+            memories="\n".join(f"- {m}" for m in memory_strings) or "暂无记忆。",
         )
 
         model = get_chat_model()
@@ -57,8 +96,32 @@ async def generate_proactive_message(
         if response == "SKIP" or len(response) < 5:
             return None
 
+        # 记录日志
+        await increment_proactive_count(agent_id, user_id)
+        await db.proactivechatlog.create(
+            data={
+                "agent": {"connect": {"id": agent_id}},
+                "user": {"connect": {"id": user_id}},
+                "content": response,
+                "triggerType": "scheduled",
+            }
+        )
+
         return response
 
     except Exception as e:
         logger.error(f"Proactive message generation failed: {e}")
         return None
+
+
+async def get_proactive_history(agent_id: str, user_id: str, limit: int = 10) -> list[dict]:
+    """获取主动消息历史。"""
+    logs = await db.proactivechatlog.find_many(
+        where={"agentId": agent_id, "userId": user_id},
+        order={"createdAt": "desc"},
+        take=limit,
+    )
+    return [
+        {"content": log.content, "trigger_type": log.triggerType, "created_at": str(log.createdAt)}
+        for log in logs
+    ]
