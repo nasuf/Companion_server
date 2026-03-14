@@ -55,3 +55,21 @@ def calculate_typing_duration(response_length: int) -> float:
     duration = response_length / chars_per_second
     # 限制在 0.5-4s
     return max(0.5, min(4.0, duration))
+
+
+def calculate_status_delay(status: str) -> float:
+    """根据AI当前状态计算额外延迟（秒）。
+
+    - idle: 0-3s（有空，快速回复）
+    - busy: 0-5min（忙碌中，延迟回复）
+    - sleep: 0-4hr（睡觉中，大幅延迟）
+    """
+    if status == "sleep":
+        # 睡觉：5分钟到4小时的随机延迟
+        return random.uniform(300, 14400)
+    elif status == "busy":
+        # 忙碌：30秒到5分钟
+        return random.uniform(30, 300)
+    else:
+        # 空闲：0-3秒
+        return random.uniform(0, 3)

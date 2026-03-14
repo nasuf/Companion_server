@@ -17,6 +17,7 @@ from app.services.memory.compression import compress_weekly, compress_monthly
 from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.emotion import decay_emotion_toward_baseline
+from app.services.schedule import generate_daily_schedule, generate_life_overview
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,27 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # Daily schedule generation at 3:30 AM
+    scheduler.add_job(
+        _run_daily_schedules,
+        "cron",
+        hour=3,
+        minute=30,
+        id="daily_schedule",
+        replace_existing=True,
+    )
+
+    # Monthly life overview refresh on 1st at 5:30 AM
+    scheduler.add_job(
+        _run_monthly_overview_refresh,
+        "cron",
+        day=1,
+        hour=5,
+        minute=30,
+        id="monthly_overview",
+        replace_existing=True,
+    )
+
     # Emotion decay every 5 minutes
     scheduler.add_job(
         _run_emotion_decay,
@@ -132,6 +154,28 @@ async def _run_daily_self_memories():
         lambda a: generate_daily_self_memories(agent_id=a.id, user_id=a.userId, dialogue_summary=None),
         concurrency=3, task_name="Self-memory generation",
     )
+
+
+async def _run_daily_schedules():
+    async def _gen(agent):
+        from app.redis_client import get_redis
+        redis = await get_redis()
+        overview = await redis.get(f"life_overview:{agent.id}")
+        await generate_daily_schedule(
+            agent.id, agent.name, agent.personality or {}, overview,
+        )
+
+    await _run_for_all_agents(_gen, concurrency=3, task_name="Daily schedule")
+
+
+async def _run_monthly_overview_refresh():
+    async def _refresh(agent):
+        overview = await generate_life_overview(agent.name, agent.personality or {})
+        from app.redis_client import get_redis
+        redis = await get_redis()
+        await redis.set(f"life_overview:{agent.id}", overview, ex=86400 * 30)
+
+    await _run_for_all_agents(_refresh, concurrency=2, task_name="Monthly overview")
 
 
 async def _run_emotion_decay():

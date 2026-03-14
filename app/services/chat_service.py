@@ -32,6 +32,7 @@ from app.services.timing import calculate_reply_delay, calculate_typing_duration
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
 from app.services.strategy import decide_strategy, format_strategy_instruction
+from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
 
 logger = logging.getLogger(__name__)
 
@@ -117,12 +118,19 @@ async def stream_chat_response(
             return await get_latest_portrait(user_id, agent_id)
         return None
 
-    retrieval_result, emotion, summaries, core_memories, portrait = await asyncio.gather(
+    async def _load_schedule():
+        """Load cached schedule for AI status context."""
+        if agent_id:
+            return await get_cached_schedule(agent_id)
+        return None
+
+    retrieval_result, emotion, summaries, core_memories, portrait, schedule = await asyncio.gather(
         _do_retrieval(),
         _load_cached_emotion(),
         _load_cached_summaries(),
         _load_core_memories(),
         _load_portrait(),
+        _load_schedule(),
         return_exceptions=True,
     )
 
@@ -151,6 +159,16 @@ async def stream_chat_response(
         logger.warning(f"Loading portrait failed: {portrait}")
         portrait = None
 
+    if isinstance(schedule, Exception):
+        logger.warning(f"Loading schedule failed: {schedule}")
+        schedule = None
+
+    # --- AI status context from schedule (pure computation) ---
+    schedule_context = None
+    if schedule:
+        ai_status = get_current_status(schedule)
+        schedule_context = format_schedule_context(ai_status)
+
     # --- Strategy decision (pure computation, after emotion is loaded) ---
     strategy_result = decide_strategy(
         message=user_message,
@@ -173,6 +191,7 @@ async def stream_chat_response(
         topic_context=topic_context,
         strategy_instruction=strategy_instruction,
         user_emotion=prev_user_emotion,
+        schedule_context=schedule_context,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
