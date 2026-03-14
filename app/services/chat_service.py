@@ -33,7 +33,7 @@ from app.services.memory.deletion import detect_deletion_intent, delete_memories
 from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
 from app.services.strategy import decide_strategy, format_strategy_instruction
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
-from app.services.boundary import check_boundary, process_boundary_violation, detect_apology, handle_apology
+from app.services.boundary import check_boundary, process_boundary_violation, detect_apology, handle_apology, APOLOGY_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +313,7 @@ async def _background_post_process(
         ]
         if has_deletion_keyword:
             tasks.append(_bg_deletion_check(user_id, user_message))
-        if agent_id:
+        if agent_id and any(kw in user_message for kw in APOLOGY_KEYWORDS):
             tasks.append(_bg_apology_check(agent_id, user_id, user_message))
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:

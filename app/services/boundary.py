@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import random
 
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
@@ -69,9 +70,13 @@ async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:
 
 
 async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
-    """每小时自然恢复耐心值。耐心≤0时不恢复。"""
-    current = await get_patience(agent_id, user_id)
-    if current <= 0:
+    """每小时自然恢复耐心值。满值或拉黑时跳过。"""
+    redis = await get_redis()
+    val = await redis.get(_patience_key(agent_id, user_id))
+    if val is None:
+        return PATIENCE_MAX  # 无记录=满值，跳过写入
+    current = int(val)
+    if current <= 0 or current >= PATIENCE_MAX:
         return current
     return await set_patience(agent_id, user_id, current + PATIENCE_HOURLY_RECOVERY)
 
@@ -158,21 +163,21 @@ async def assess_severity(message: str, intent: str) -> dict:
 
 # --- 24小时重复攻击加重 ---
 
-_ATTACK_HISTORY_KEY = "attack_history:{agent_id}:{user_id}"
+def _attack_history_key(agent_id: str, user_id: str) -> str:
+    return f"attack_history:{agent_id}:{user_id}"
 
 
 async def check_repeat_attack(agent_id: str, user_id: str) -> bool:
     """检查24h内是否有攻击记录。"""
     redis = await get_redis()
-    key = _ATTACK_HISTORY_KEY.format(agent_id=agent_id, user_id=user_id)
-    count = await redis.get(key)
+    count = await redis.get(_attack_history_key(agent_id, user_id))
     return int(count or 0) > 0
 
 
 async def record_attack(agent_id: str, user_id: str) -> None:
     """记录攻击事件，24h过期。"""
     redis = await get_redis()
-    key = _ATTACK_HISTORY_KEY.format(agent_id=agent_id, user_id=user_id)
+    key = _attack_history_key(agent_id, user_id)
     await redis.incr(key)
     await redis.expire(key, 86400)
 
@@ -204,12 +209,16 @@ _BOUNDARY_RESPONSES = {
 
 def generate_boundary_response(zone: str) -> str:
     """根据耐心区间生成边界回复。纯计算。"""
-    import random
     responses = _BOUNDARY_RESPONSES.get(zone, _BOUNDARY_RESPONSES["normal"])
     return random.choice(responses)
 
 
 # --- 道歉/承诺识别（LLM，后台异步） ---
+
+APOLOGY_KEYWORDS = [
+    "对不起", "抱歉", "sorry", "我错了", "不应该", "原谅",
+    "道歉", "是我不好", "我不该", "请原谅", "别生气",
+]
 
 _APOLOGY_PROMPT = """分析以下消息是否包含道歉或承诺改正。
 
@@ -279,6 +288,11 @@ async def process_boundary_violation(
     agent_id: str, user_id: str, message: str,
 ) -> None:
     """后台处理边界违规：分类→分级→扣分→记录。"""
+    # 已拉黑用户跳过LLM调用
+    current = await get_patience(agent_id, user_id)
+    if current <= 0:
+        return
+
     intent_result = await classify_attack_intent(message)
     intent = intent_result.get("intent", "none")
     confidence = intent_result.get("confidence", 0.0)
