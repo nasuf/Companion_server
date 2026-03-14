@@ -11,15 +11,18 @@ generator client {
 }
 
 model User {
-  id            String         @id @default(uuid())
-  name          String
-  email         String?        @unique
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
-  agents        AiAgent[]
-  conversations Conversation[]
-  memories      Memory[]
-  profile       UserProfile?
+  id               String             @id @default(uuid())
+  name             String
+  email            String?            @unique
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+  agents           AiAgent[]
+  conversations    Conversation[]
+  memories         Memory[]
+  profile          UserProfile?
+  portraits        UserPortrait[]
+  memoryChangelogs MemoryChangelog[]
+  intimacies       Intimacy[]
 
   @@map("users")
 }
@@ -32,10 +35,18 @@ model AiAgent {
   personality     Json?
   background      String?
   values          Json?
+  lifeOverview    String?        @map("life_overview")
+  lifeOverviewData Json?         @map("life_overview_data")
+  age             Int?
+  occupation      String?
+  city            String?
   createdAt       DateTime       @default(now()) @map("created_at")
   updatedAt       DateTime       @updatedAt @map("updated_at")
   conversations   Conversation[]
   emotionState    AiEmotionState?
+  schedules       AiDailySchedule[]
+  intimacies      Intimacy[]
+  proactiveLogs   ProactiveChatLog[]
 
   @@map("ai_agents")
 }
@@ -68,17 +79,18 @@ model Message {
 }
 
 model Memory {
-  id         String   @id @default(uuid())
-  userId     String   @map("user_id")
-  user       User     @relation(fields: [userId], references: [id])
-  type       String?  // e.g., "preference", "event", "identity"
-  level      Int      @default(3) // L1=1, L2=2, L3=3
+  id         String            @id @default(uuid())
+  userId     String            @map("user_id")
+  user       User              @relation(fields: [userId], references: [id])
+  type       String?           // e.g., "preference", "event", "identity"
+  level      Int               @default(3) // L1=1, L2=2, L3=3
   content    String
   summary    String?
-  importance Float    @default(0.5)
-  isArchived Boolean  @default(false) @map("is_archived")
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  importance Float             @default(0.5)
+  isArchived Boolean           @default(false) @map("is_archived")
+  createdAt  DateTime          @default(now()) @map("created_at")
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+  changelogs MemoryChangelog[]
 
   @@map("memories")
 }
@@ -105,4 +117,85 @@ model AiEmotionState {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("ai_emotion_states")
+}
+
+model UserPortrait {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  agentId   String   @map("agent_id")
+  version   Int      @default(1)
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("user_portraits")
+}
+
+model MemoryChangelog {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  memoryId  String   @map("memory_id")
+  memory    Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  operation String   // "insert", "update", "delete"
+  oldValue  String?  @map("old_value")
+  newValue  String?  @map("new_value")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("memory_changelogs")
+}
+
+model Intimacy {
+  id              String   @id @default(uuid())
+  agentId         String   @map("agent_id")
+  agent           AiAgent  @relation(fields: [agentId], references: [id])
+  userId          String   @map("user_id")
+  user            User     @relation(fields: [userId], references: [id])
+  topicIntimacy   Int      @default(50)  @map("topic_intimacy")
+  topicLevel      String   @default("L3") @map("topic_level")
+  topicUpdatedAt  DateTime @default(now()) @map("topic_updated_at")
+  growthIntimacy  Int      @default(500) @map("growth_intimacy")
+  growthLevel     String   @default("G5") @map("growth_level")
+  growthUpdatedAt DateTime @default(now()) @map("growth_updated_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([agentId, userId])
+  @@map("intimacies")
+}
+
+model AiDailySchedule {
+  id           String   @id @default(uuid())
+  agentId      String   @map("agent_id")
+  agent        AiAgent  @relation(fields: [agentId], references: [id])
+  date         DateTime @db.Date
+  scheduleData Json     @map("schedule_data")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([agentId, date])
+  @@map("ai_daily_schedules")
+}
+
+model ScheduleAdjustLog {
+  id         String   @id @default(uuid())
+  agentId    String   @map("agent_id")
+  adjustType String   @map("adjust_type")
+  oldValue   String?  @map("old_value")
+  newValue   String?  @map("new_value")
+  reason     String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("schedule_adjust_logs")
+}
+
+model ProactiveChatLog {
+  id        String   @id @default(uuid())
+  agentId   String   @map("agent_id")
+  agent     AiAgent  @relation(fields: [agentId], references: [id])
+  userId    String   @map("user_id")
+  message   String
+  eventType String?  @map("event_type")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("proactive_chat_logs")
 }
