@@ -12,7 +12,7 @@
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -121,61 +121,52 @@ class TestComputeRelationshipDuration:
         assert result == 1.0  # capped at 1.0
 
 
-# --- Redis cache ---
+# --- Redis cache (using patch_intimacy_redis fixture) ---
 
 @pytest.mark.asyncio
 class TestIntimacyRedis:
-    async def test_get_cached_intimacy_none(self, mock_redis):
-        mock_redis.get.return_value = None
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            result = await get_cached_intimacy("agent1", "user1")
-            assert result is None
+    async def test_get_cached_intimacy_none(self, patch_intimacy_redis):
+        patch_intimacy_redis.get.return_value = None
+        result = await get_cached_intimacy("agent1", "user1")
+        assert result is None
 
-    async def test_get_cached_intimacy_valid(self, mock_redis):
+    async def test_get_cached_intimacy_valid(self, patch_intimacy_redis):
         data = {"growth": 500, "level": {"level": "L3"}}
-        mock_redis.get.return_value = json.dumps(data)
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            result = await get_cached_intimacy("agent1", "user1")
-            assert result["growth"] == 500
+        patch_intimacy_redis.get.return_value = json.dumps(data)
+        result = await get_cached_intimacy("agent1", "user1")
+        assert result["growth"] == 500
 
-    async def test_save_intimacy(self, mock_redis):
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            await save_intimacy("agent1", "user1", {"growth": 100})
-            mock_redis.set.assert_called_once()
+    async def test_save_intimacy(self, patch_intimacy_redis):
+        await save_intimacy("agent1", "user1", {"growth": 100})
+        patch_intimacy_redis.set.assert_called_once()
 
-    async def test_get_topic_intimacy_default(self, mock_redis):
-        mock_redis.get.return_value = None
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            val = await get_topic_intimacy("agent1", "user1")
-            assert val == 0.0
+    async def test_get_topic_intimacy_default(self, patch_intimacy_redis):
+        patch_intimacy_redis.get.return_value = None
+        val = await get_topic_intimacy("agent1", "user1")
+        assert val == 0.0
 
-    async def test_get_topic_intimacy_existing(self, mock_redis):
-        mock_redis.get.return_value = "42.5"
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            val = await get_topic_intimacy("agent1", "user1")
-            assert val == 42.5
+    async def test_get_topic_intimacy_existing(self, patch_intimacy_redis):
+        patch_intimacy_redis.get.return_value = "42.5"
+        val = await get_topic_intimacy("agent1", "user1")
+        assert val == 42.5
 
-    async def test_save_topic_intimacy(self, mock_redis):
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            await save_topic_intimacy("agent1", "user1", 55.0)
-            mock_redis.set.assert_called_once()
+    async def test_save_topic_intimacy(self, patch_intimacy_redis):
+        await save_topic_intimacy("agent1", "user1", 55.0)
+        patch_intimacy_redis.set.assert_called_once()
 
 
 # --- compute_growth_intimacy ---
 
 @pytest.mark.asyncio
 class TestComputeGrowthIntimacy:
-    async def test_no_activity(self, mock_db, mock_redis):
+    async def test_no_activity(self, mock_db, patch_intimacy_redis):
         """Zero conversations → score 0 (only duration contributes)."""
         mock_db.conversation.find_many = AsyncMock(return_value=[])
         mock_db.memory.count = AsyncMock(return_value=0)
 
         created_at = datetime.now(UTC) - timedelta(days=30)
 
-        with (
-            patch("app.services.intimacy.db", mock_db),
-            patch("app.services.intimacy.get_redis", return_value=mock_redis),
-        ):
+        with patch("app.services.intimacy.db", mock_db):
             score = await compute_growth_intimacy("agent1", "user1", created_at)
             # Only duration contributes (0.4 weight)
             assert 0 < score < 400
@@ -185,23 +176,21 @@ class TestComputeGrowthIntimacy:
 
 @pytest.mark.asyncio
 class TestGetIntimacyData:
-    async def test_returns_full_structure(self, mock_redis):
+    async def test_returns_full_structure(self, patch_intimacy_redis):
         cached = {"growth": 300, "level": {"level": "L3", "label": "亲近", "score": 300}}
-        mock_redis.get.side_effect = [
+        patch_intimacy_redis.get.side_effect = [
             json.dumps(cached),  # intimacy cache
             "45.0",              # topic intimacy
         ]
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            data = await get_intimacy_data("agent1", "user1")
-            assert data["growth_intimacy"] == 300
-            assert data["topic_intimacy"] == 45.0
-            assert data["level"]["level"] == "L3"
-            assert data["topic_depth"]["depth"] == "中层"
+        data = await get_intimacy_data("agent1", "user1")
+        assert data["growth_intimacy"] == 300
+        assert data["topic_intimacy"] == 45.0
+        assert data["level"]["level"] == "L3"
+        assert data["topic_depth"]["depth"] == "中层"
 
-    async def test_no_cache(self, mock_redis):
-        mock_redis.get.side_effect = [None, None]
-        with patch("app.services.intimacy.get_redis", return_value=mock_redis):
-            data = await get_intimacy_data("agent1", "user1")
-            assert data["growth_intimacy"] == 0
-            assert data["topic_intimacy"] == 0.0
-            assert data["level"]["level"] == "L1"
+    async def test_no_cache(self, patch_intimacy_redis):
+        patch_intimacy_redis.get.side_effect = [None, None]
+        data = await get_intimacy_data("agent1", "user1")
+        assert data["growth_intimacy"] == 0
+        assert data["topic_intimacy"] == 0.0
+        assert data["level"]["level"] == "L1"

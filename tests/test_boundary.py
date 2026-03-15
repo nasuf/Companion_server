@@ -10,13 +10,12 @@
 - 热路径边界检查
 """
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from app.services.boundary import (
     PATIENCE_MAX,
     PATIENCE_NORMAL_MIN,
+    _BOUNDARY_RESPONSES,
     adjust_patience,
     check_banned_keywords,
     check_boundary,
@@ -85,130 +84,107 @@ class TestCheckBannedKeywords:
 class TestGenerateBoundaryResponse:
     def test_normal_zone(self):
         resp = generate_boundary_response("normal")
-        assert resp in [
-            "嗯...你这么说我有点难过。",
-            "这样说话不太好吧...",
-            "我们好好聊天吧～",
-        ]
+        assert resp in _BOUNDARY_RESPONSES["normal"]
 
     def test_blocked_zone(self):
         resp = generate_boundary_response("blocked")
-        assert resp in ["...", "我不想和你说话了。"]
+        assert resp in _BOUNDARY_RESPONSES["blocked"]
 
     def test_unknown_zone_falls_back_to_normal(self):
         resp = generate_boundary_response("unknown")
-        assert resp in [
-            "嗯...你这么说我有点难过。",
-            "这样说话不太好吧...",
-            "我们好好聊天吧～",
-        ]
+        assert resp in _BOUNDARY_RESPONSES["normal"]
 
 
-# --- Redis CRUD (mocked) ---
+# --- Redis CRUD (mocked via patch_boundary_redis fixture) ---
 
 @pytest.mark.asyncio
 class TestPatienceRedis:
-    async def test_get_patience_default(self, mock_redis):
-        mock_redis.get.return_value = None
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await get_patience("agent1", "user1")
-            assert val == PATIENCE_MAX
+    async def test_get_patience_default(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = None
+        val = await get_patience("agent1", "user1")
+        assert val == PATIENCE_MAX
 
-    async def test_get_patience_existing(self, mock_redis):
-        mock_redis.get.return_value = "55"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await get_patience("agent1", "user1")
-            assert val == 55
+    async def test_get_patience_existing(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "55"
+        val = await get_patience("agent1", "user1")
+        assert val == 55
 
-    async def test_set_patience_clamp_max(self, mock_redis):
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await set_patience("agent1", "user1", 150)
-            assert val == PATIENCE_MAX
-            mock_redis.set.assert_called_once()
+    async def test_set_patience_clamp_max(self, patch_boundary_redis):
+        val = await set_patience("agent1", "user1", 150)
+        assert val == PATIENCE_MAX
+        patch_boundary_redis.set.assert_called_once()
 
-    async def test_set_patience_clamp_min(self, mock_redis):
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await set_patience("agent1", "user1", -20)
-            assert val == 0
+    async def test_set_patience_clamp_min(self, patch_boundary_redis):
+        val = await set_patience("agent1", "user1", -20)
+        assert val == 0
 
-    async def test_adjust_patience(self, mock_redis):
-        mock_redis.get.return_value = "80"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await adjust_patience("agent1", "user1", -15)
-            assert val == 65
+    async def test_adjust_patience(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "80"
+        val = await adjust_patience("agent1", "user1", -15)
+        assert val == 65
 
-    async def test_recover_hourly_normal(self, mock_redis):
-        mock_redis.get.return_value = "50"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await recover_patience_hourly("agent1", "user1")
-            assert val == 55
+    async def test_recover_hourly_normal(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "50"
+        val = await recover_patience_hourly("agent1", "user1")
+        assert val == 55
 
-    async def test_recover_hourly_skip_max(self, mock_redis):
-        mock_redis.get.return_value = "100"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await recover_patience_hourly("agent1", "user1")
-            assert val == 100
-            mock_redis.set.assert_not_called()
+    async def test_recover_hourly_skip_max(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "100"
+        val = await recover_patience_hourly("agent1", "user1")
+        assert val == 100
+        patch_boundary_redis.set.assert_not_called()
 
-    async def test_recover_hourly_skip_blocked(self, mock_redis):
-        mock_redis.get.return_value = "0"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await recover_patience_hourly("agent1", "user1")
-            assert val == 0
-            mock_redis.set.assert_not_called()
+    async def test_recover_hourly_skip_blocked(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "0"
+        val = await recover_patience_hourly("agent1", "user1")
+        assert val == 0
+        patch_boundary_redis.set.assert_not_called()
 
-    async def test_recover_hourly_no_record(self, mock_redis):
-        mock_redis.get.return_value = None
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await recover_patience_hourly("agent1", "user1")
-            assert val == PATIENCE_MAX
+    async def test_recover_hourly_no_record(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = None
+        val = await recover_patience_hourly("agent1", "user1")
+        assert val == PATIENCE_MAX
 
 
 # --- handle_apology ---
 
 @pytest.mark.asyncio
 class TestHandleApology:
-    async def test_apology_from_blocked_restores_to_70(self, mock_redis):
-        mock_redis.get.return_value = "0"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await handle_apology("agent1", "user1")
-            assert val == PATIENCE_NORMAL_MIN  # 70
+    async def test_apology_from_blocked_restores_to_70(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "0"
+        val = await handle_apology("agent1", "user1")
+        assert val == PATIENCE_NORMAL_MIN  # 70
 
-    async def test_apology_from_low_restores_to_60(self, mock_redis):
-        mock_redis.get.return_value = "20"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await handle_apology("agent1", "user1")
-            assert val == 60
+    async def test_apology_from_low_restores_to_60(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "20"
+        val = await handle_apology("agent1", "user1")
+        assert val == 60
 
-    async def test_apology_from_high_keeps_current(self, mock_redis):
-        mock_redis.get.return_value = "80"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            val = await handle_apology("agent1", "user1")
-            assert val == 80
+    async def test_apology_from_high_keeps_current(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "80"
+        val = await handle_apology("agent1", "user1")
+        assert val == 80
 
 
 # --- check_boundary (热路径) ---
 
 @pytest.mark.asyncio
 class TestCheckBoundary:
-    async def test_no_banned_words_returns_none(self, mock_redis):
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            result = await check_boundary("agent1", "user1", "你好")
-            assert result is None
+    async def test_no_banned_words_returns_none(self, patch_boundary_redis):
+        result = await check_boundary("agent1", "user1", "你好")
+        assert result is None
 
-    async def test_banned_word_normal_zone(self, mock_redis):
-        mock_redis.get.return_value = "80"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            result = await check_boundary("agent1", "user1", "你这个垃圾AI")
-            assert result is not None
-            assert result["blocked"] is False
-            assert result["zone"] == "normal"
-            assert "垃圾AI" in result["hits"]
+    async def test_banned_word_normal_zone(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "80"
+        result = await check_boundary("agent1", "user1", "你这个垃圾AI")
+        assert result is not None
+        assert result["blocked"] is False
+        assert result["zone"] == "normal"
+        assert "垃圾AI" in result["hits"]
 
-    async def test_banned_word_blocked_zone(self, mock_redis):
-        mock_redis.get.return_value = "0"
-        with patch("app.services.boundary.get_redis", return_value=mock_redis):
-            result = await check_boundary("agent1", "user1", "你这个垃圾AI")
-            assert result is not None
-            assert result["blocked"] is True
-            assert result["zone"] == "blocked"
+    async def test_banned_word_blocked_zone(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "0"
+        result = await check_boundary("agent1", "user1", "你这个垃圾AI")
+        assert result is not None
+        assert result["blocked"] is True
+        assert result["zone"] == "blocked"

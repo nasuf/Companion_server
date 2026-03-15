@@ -1,7 +1,7 @@
 """Test configuration and fixtures."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -50,4 +50,19 @@ def mock_redis():
     mock.hset = AsyncMock()
     mock.expire = AsyncMock()
     mock.ping = AsyncMock(return_value=True)
+    mock.incr = AsyncMock(return_value=1)
     return mock
+
+
+@pytest.fixture
+def patch_boundary_redis(mock_redis):
+    """Auto-patch get_redis for boundary service tests."""
+    with patch("app.services.boundary.get_redis", return_value=mock_redis):
+        yield mock_redis
+
+
+@pytest.fixture
+def patch_intimacy_redis(mock_redis):
+    """Auto-patch get_redis for intimacy service tests."""
+    with patch("app.services.intimacy.get_redis", return_value=mock_redis):
+        yield mock_redis
