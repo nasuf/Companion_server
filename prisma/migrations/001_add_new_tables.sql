@@ -1,11 +1,12 @@
 -- Phase 0: Add new tables for PRD 2-7
 -- Run this migration against the Supabase database
+-- Note: public schema uses TEXT for IDs (not UUID)
 
 -- 0.7: User Portrait
 CREATE TABLE IF NOT EXISTS user_portraits (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id),
-    agent_id UUID NOT NULL,
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    agent_id TEXT NOT NULL,
     version INT NOT NULL DEFAULT 1,
     content TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -13,9 +14,9 @@ CREATE TABLE IF NOT EXISTS user_portraits (
 
 -- 0.8: Memory Changelog
 CREATE TABLE IF NOT EXISTS memory_changelogs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id),
-    memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     operation VARCHAR(20) NOT NULL, -- 'insert', 'update', 'delete'
     old_value TEXT,
     new_value TEXT,
@@ -24,9 +25,9 @@ CREATE TABLE IF NOT EXISTS memory_changelogs (
 
 -- 0.9: Intimacy
 CREATE TABLE IF NOT EXISTS intimacies (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id UUID NOT NULL REFERENCES ai_agents(id),
-    user_id UUID NOT NULL REFERENCES users(id),
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    agent_id TEXT NOT NULL REFERENCES ai_agents(id),
+    user_id TEXT NOT NULL REFERENCES users(id),
     topic_intimacy INT NOT NULL DEFAULT 50,
     topic_level VARCHAR(10) NOT NULL DEFAULT 'L3',
     topic_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -40,8 +41,8 @@ CREATE TABLE IF NOT EXISTS intimacies (
 
 -- 0.10: AI Daily Schedule
 CREATE TABLE IF NOT EXISTS ai_daily_schedules (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id UUID NOT NULL REFERENCES ai_agents(id),
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    agent_id TEXT NOT NULL REFERENCES ai_agents(id),
     date DATE NOT NULL,
     schedule_data JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -50,8 +51,8 @@ CREATE TABLE IF NOT EXISTS ai_daily_schedules (
 
 -- 0.11: Schedule Adjust Log
 CREATE TABLE IF NOT EXISTS schedule_adjust_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id UUID NOT NULL,
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    agent_id TEXT NOT NULL,
     adjust_type VARCHAR(50) NOT NULL,
     old_value TEXT,
     new_value TEXT,
@@ -61,9 +62,9 @@ CREATE TABLE IF NOT EXISTS schedule_adjust_logs (
 
 -- 0.12: Proactive Chat Log
 CREATE TABLE IF NOT EXISTS proactive_chat_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id UUID NOT NULL REFERENCES ai_agents(id),
-    user_id UUID NOT NULL,
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    agent_id TEXT NOT NULL REFERENCES ai_agents(id),
+    user_id TEXT NOT NULL,
     message TEXT NOT NULL,
     event_type VARCHAR(50),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
