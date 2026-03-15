@@ -69,7 +69,7 @@ async def list_conversations(
 @router.get("/{conversation_id}/messages", response_model=list[MessageResponse])
 async def list_messages(
     conversation_id: str,
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=100, le=500),
     offset: int = 0,
 ):
     conv = await db.conversation.find_unique(where={"id": conversation_id})
@@ -77,7 +77,7 @@ async def list_messages(
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages = await db.message.find_many(
         where={"conversationId": conversation_id},
-        order={"createdAt": "asc"},
+        order={"createdAt": "desc"},
         take=limit,
         skip=offset,
     )
