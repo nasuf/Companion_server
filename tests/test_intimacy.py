@@ -98,27 +98,30 @@ class TestGetTopicDepth:
 # --- _compute_relationship_duration ---
 
 class TestComputeRelationshipDuration:
+    """G3 sigmoid: min(1000, 1000/(1+e^(-0.1*(days-30)))) / 1000"""
+
     def test_zero_days(self):
         now = datetime.now(UTC)
         result = _compute_relationship_duration(now)
-        assert 0 <= result < 0.01
+        # t=0 → 1000/(1+e^3) ≈ 47.4 → 0.047
+        assert 0.04 < result < 0.06
 
     def test_30_days(self):
+        """t=30 → sigmoid midpoint → ~0.5"""
         created = datetime.now(UTC) - timedelta(days=30)
         result = _compute_relationship_duration(created)
-        expected = math.log1p(30) / math.log1p(180)
-        assert abs(result - expected) < 0.01
+        assert abs(result - 0.5) < 0.01
 
-    def test_180_days(self):
-        created = datetime.now(UTC) - timedelta(days=180)
+    def test_60_days(self):
+        """t=60 → ~0.95"""
+        created = datetime.now(UTC) - timedelta(days=60)
         result = _compute_relationship_duration(created)
-        expected = math.log1p(180) / math.log1p(180)
-        assert abs(result - expected) < 0.01  # ~1.0
+        assert result > 0.9
 
-    def test_365_days_capped(self):
+    def test_365_days_near_1(self):
         created = datetime.now(UTC) - timedelta(days=365)
         result = _compute_relationship_duration(created)
-        assert result == 1.0  # capped at 1.0
+        assert result > 0.99
 
 
 # --- Redis cache (using patch_intimacy_redis fixture) ---

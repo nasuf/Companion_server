@@ -106,10 +106,9 @@ async def get_topic_intimacy(agent_id: str, user_id: str) -> float:
 async def _compute_interaction_stickiness(
     agent_id: str, user_id: str, days: int = 7,
 ) -> float:
-    """计算互动粘性(0-1)。基于最近N天的消息量和活跃天数。"""
+    """G1 互动粘性(0-1)。对数公式: min(1000, 200*log10(msg_count+1)) / 1000"""
     since = datetime.now(UTC) - timedelta(days=days)
 
-    # 获取Agent的对话
     conversations = await db.conversation.find_many(
         where={"userId": user_id, "agentId": agent_id},
     )
@@ -117,7 +116,6 @@ async def _compute_interaction_stickiness(
     if not conv_ids:
         return 0.0
 
-    # 统计近N天消息量
     msg_count = await db.message.count(
         where={
             "conversationId": {"in": conv_ids},
@@ -125,49 +123,39 @@ async def _compute_interaction_stickiness(
         }
     )
 
-    # 消息量归一化：0条=0, 50条=0.5, 100+=1.0
-    msg_score = min(1.0, msg_count / 100)
-
-    # 活跃天数：简化为消息量/天均
-    daily_avg = msg_count / max(days, 1)
-    activity_score = min(1.0, daily_avg / 10)
-
-    return (msg_score * 0.6 + activity_score * 0.4)
+    # G1 对数公式: min(1000, 200*log10(msg_count+1)) / 1000
+    return min(1000, 200 * math.log10(msg_count + 1)) / 1000
 
 
 async def _compute_self_disclosure(
-    user_id: str, days: int = 7,
+    user_id: str,
 ) -> float:
-    """计算自我暴露程度(0-1)。基于情感类记忆的比例。"""
-    since = datetime.now(UTC) - timedelta(days=days)
+    """G2 自我暴露(0-1)。基于L1+L2记忆重要度总和的对数公式。
 
-    total = await db.memory.count(
-        where={
-            "userId": user_id,
-            "createdAt": {"gte": since},
-            "isArchived": False,
-        }
-    )
-    if total < 5:
-        return 0.0
-
-    emotional = await db.memory.count(
-        where={
-            "userId": user_id,
-            "createdAt": {"gte": since},
-            "isArchived": False,
-            "type": {"in": ["情感", "感受", "关系", "价值观"]},
-        }
+    min(1000, 200*log10(importance_sum+1)) / 1000
+    """
+    # 查询L1+L2记忆的importance总和
+    result = await db.query_raw(
+        """
+        SELECT COALESCE(SUM(importance), 0) as total_importance
+        FROM memories
+        WHERE user_id = $1 AND level IN (1, 2) AND is_archived = false
+        """,
+        user_id,
     )
 
-    return min(1.0, emotional / max(total * 0.5, 1))
+    importance_sum = float(result[0]["total_importance"]) if result else 0.0
+
+    return min(1000, 200 * math.log10(importance_sum + 1)) / 1000
 
 
 def _compute_relationship_duration(created_at: datetime) -> float:
-    """计算关系时长因子(0-1)。30天达到0.5，180天达到0.9。"""
+    """G3 关系时长(0-1)。Sigmoid曲线: min(1000, 1000/(1+e^(-0.1*(days-30)))) / 1000
+
+    t=0→18, t=30→500, t=60→952, t=90→998
+    """
     days = (datetime.now(UTC) - created_at).days
-    # 对数增长，避免线性
-    return min(1.0, math.log1p(days) / math.log1p(180))
+    return min(1000, 1000 / (1 + math.exp(-0.1 * (days - 30)))) / 1000
 
 
 # --- 成长亲密度（每日） ---
@@ -188,6 +176,7 @@ async def compute_growth_intimacy(
     interaction = await _compute_interaction_stickiness(agent_id, user_id)
     disclosure = await _compute_self_disclosure(user_id)
     duration = _compute_relationship_duration(created_at)
+    # Note: G1/G2/G3 all return 0-1 range via /1000 normalization
 
     raw = interaction * 0.3 + disclosure * 0.3 + duration * 0.4
     score = raw * 1000
