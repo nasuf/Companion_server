@@ -276,9 +276,14 @@ async def _run_patience_recovery():
 
 
 async def _run_emotion_decay():
+    from app.services.trait_model import get_seven_dim
+
+    async def _decay(agent):
+        seven_dim = get_seven_dim(agent)
+        await decay_emotion_toward_baseline(agent.id, agent.personality or {}, seven_dim)
+
     await _run_for_all_agents(
-        lambda a: decay_emotion_toward_baseline(a.id, a.personality or {}),
-        concurrency=5, task_name="Emotion decay",
+        _decay, concurrency=5, task_name="Emotion decay",
     )
 
 

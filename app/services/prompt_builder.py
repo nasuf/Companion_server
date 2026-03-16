@@ -185,10 +185,13 @@ def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = Non
         primary = user_emotion.get("primary_emotion", "neutral")
         confidence = user_emotion.get("confidence", 0.0)
         u_valence = user_emotion.get("valence", 0.0)
+        u_arousal = user_emotion.get("arousal", 0.0)
+        u_dominance = user_emotion.get("dominance", 0.0)
 
         if confidence >= 0.5 and primary != "neutral":
             emotion_cn = _EMOTION_LABEL_CN.get(primary, primary)
             body += f"用户当前情绪：{emotion_cn}（置信度{confidence:.1f}）\n"
+            body += f"用户PAD向量：({u_valence:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
 
             if u_valence < -0.3:
                 body += "请注意关心用户的感受。\n"

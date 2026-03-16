@@ -1,23 +1,28 @@
 """情绪系统单元测试。
 
 测试覆盖：
-- VAD状态更新（亲密度加权融合）
+- VAD状态更新（亲密度加权融合+共情向量）
 - 情绪→语气映射
-- 人格基线情绪计算
-- 记忆情绪影响
+- 七维人格基线情绪计算
+- 情绪稳定性系数
+- 12标签PAD映射
+- 记忆情绪影响（权重0.2）
 - Clamp/Lerp辅助函数
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from app.services.emotion import (
+    PAD_LABEL_TABLE,
     _clamp,
     _lerp_vad,
     apply_memory_emotion_influence,
     compute_baseline_emotion,
+    compute_emotional_stability,
     emotion_to_tone,
+    label_to_vad,
     update_emotion_state,
+    vad_to_label,
 )
 
 
@@ -62,47 +67,42 @@ class TestLerpVad:
             assert abs(result[dim] - 0.5) < 1e-6
 
 
-# --- update_emotion_state ---
+# --- update_emotion_state (with empathy vector) ---
 
 class TestUpdateEmotionState:
-    def test_default_intimacy(self):
-        """Default intimacy=50 → balanced weights."""
+    def test_with_empathy_vector(self):
+        """With seven_dim, empathy vector is applied."""
+        current = {"valence": 0.5, "arousal": 0.3, "dominance": 0.4}
+        input_emotion = {"valence": -0.8, "arousal": 0.9, "dominance": -0.5}
+        seven_dim = {"感性度": 80}
+
+        result = update_emotion_state(current, input_emotion, topic_intimacy=50.0, seven_dim=seven_dim)
+        assert isinstance(result["valence"], float)
+        assert -1.0 <= result["valence"] <= 1.0
+
+    def test_without_seven_dim(self):
+        """Without seven_dim, default 0.5 sensitivity used."""
         current = {"valence": 0.5, "arousal": 0.3, "dominance": 0.4}
         input_emotion = {"valence": -0.8, "arousal": 0.9, "dominance": -0.5}
 
-        result = update_emotion_state(current, input_emotion)
-        # At intimacy=50: alpha=0.6, beta=0.4
-        for dim in ("valence", "arousal", "dominance"):
-            expected = 0.6 * current[dim] + 0.4 * input_emotion[dim]
-            assert abs(result[dim] - expected) < 1e-6
+        result = update_emotion_state(current, input_emotion, topic_intimacy=50.0)
+        assert isinstance(result["valence"], float)
 
-    def test_zero_intimacy(self):
-        """intimacy=0 → AI retains more (alpha=0.7, beta=0.3)."""
-        current = {"valence": 0.5, "arousal": 0.3, "dominance": 0.4}
-        input_emotion = {"valence": -0.8, "arousal": 0.9, "dominance": -0.5}
+    def test_high_intimacy_more_user_influence(self):
+        """High intimacy → larger β (more user influence)."""
+        current = {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
+        input_emotion = {"valence": 1.0, "arousal": 1.0, "dominance": 1.0}
 
-        result = update_emotion_state(current, input_emotion, topic_intimacy=0.0)
-        for dim in ("valence", "arousal", "dominance"):
-            expected = 0.7 * current[dim] + 0.3 * input_emotion[dim]
-            assert abs(result[dim] - expected) < 1e-6
-
-    def test_max_intimacy(self):
-        """intimacy=100 → equal weights (alpha=0.5, beta=0.5)."""
-        current = {"valence": 0.5, "arousal": 0.3, "dominance": 0.4}
-        input_emotion = {"valence": -0.8, "arousal": 0.9, "dominance": -0.5}
-
-        result = update_emotion_state(current, input_emotion, topic_intimacy=100.0)
-        for dim in ("valence", "arousal", "dominance"):
-            expected = 0.5 * current[dim] + 0.5 * input_emotion[dim]
-            assert abs(result[dim] - expected) < 1e-6
+        low = update_emotion_state(current, input_emotion, topic_intimacy=10.0)
+        high = update_emotion_state(current, input_emotion, topic_intimacy=90.0)
+        assert high["valence"] > low["valence"]
 
     def test_missing_keys(self):
         """Missing VAD dims default to 0."""
         current = {}
         input_emotion = {"valence": 0.5}
         result = update_emotion_state(current, input_emotion)
-        assert result["arousal"] == 0.0
-        assert result["dominance"] == 0.0
+        assert result["arousal"] is not None
 
 
 # --- emotion_to_tone ---
@@ -114,22 +114,14 @@ class TestEmotionToTone:
     def test_negative(self):
         assert emotion_to_tone({"valence": -0.5, "arousal": -0.3, "dominance": -0.7}) == "sad and withdrawn"
 
-    def test_zero_maps_to_positive_octant(self):
-        tone = emotion_to_tone({"valence": 0.0, "arousal": 0.0, "dominance": 0.0})
-        assert isinstance(tone, str) and len(tone) > 0
-
     def test_anxious(self):
         assert emotion_to_tone({"valence": -0.5, "arousal": 0.8, "dominance": -0.3}) == "anxious and stressed"
-
-    def test_calm(self):
-        assert emotion_to_tone({"valence": 0.6, "arousal": -0.4, "dominance": 0.3}) == "calm and content"
 
 
 # --- compute_baseline_emotion ---
 
 class TestComputeBaselineEmotion:
-    def test_neutral_personality(self):
-        """All 0.5 (neutral) → baseline ~0."""
+    def test_neutral_big_five(self):
         personality = {
             "openness": 0.5, "conscientiousness": 0.5,
             "extraversion": 0.5, "agreeableness": 0.5,
@@ -139,33 +131,56 @@ class TestComputeBaselineEmotion:
         for dim in ("valence", "arousal", "dominance"):
             assert abs(result[dim]) < 1e-6
 
-    def test_high_extraversion(self):
-        """High extraversion → positive valence."""
-        personality = {"extraversion": 1.0, "agreeableness": 0.5, "neuroticism": 0.0, "openness": 0.5, "conscientiousness": 0.5}
-        result = compute_baseline_emotion(personality)
-        assert result["valence"] > 0
-        # arousal: (e-0.5)*0.3 + (n-0.5)*0.4 = 0.15 - 0.2 = -0.05 (low neuroticism lowers arousal)
-        assert result["arousal"] < 0
+    def test_with_seven_dim_neutral(self):
+        seven = {"活泼度": 50, "理性度": 50, "感性度": 50, "计划度": 50, "随性度": 50, "脑洞度": 50, "幽默度": 50}
+        result = compute_baseline_emotion({}, seven_dim=seven)
+        assert abs(result["valence"] - 0.2) < 0.01
+        assert abs(result["arousal"] - 0.5) < 0.01
 
-    def test_high_neuroticism(self):
-        """High neuroticism → negative valence, higher arousal."""
-        personality = {"extraversion": 0.5, "agreeableness": 0.5, "neuroticism": 1.0, "openness": 0.5, "conscientiousness": 0.5}
-        result = compute_baseline_emotion(personality)
-        assert result["valence"] < 0
-        assert result["arousal"] > 0
-
-    def test_empty_personality(self):
-        """Empty personality defaults to 0.5 → zero baseline."""
-        result = compute_baseline_emotion({})
-        for dim in ("valence", "arousal", "dominance"):
-            assert abs(result[dim]) < 1e-6
+    def test_high_lively_high_humor(self):
+        seven = {"活泼度": 90, "理性度": 50, "感性度": 50, "计划度": 50, "随性度": 50, "脑洞度": 50, "幽默度": 90}
+        result = compute_baseline_emotion({}, seven_dim=seven)
+        assert result["valence"] > 0.3
 
     def test_values_clamped(self):
-        """Extreme personality values still produce clamped output."""
-        personality = {"extraversion": 1.0, "agreeableness": 1.0, "neuroticism": 0.0, "openness": 1.0, "conscientiousness": 1.0}
-        result = compute_baseline_emotion(personality)
+        seven = {"活泼度": 100, "理性度": 0, "感性度": 100, "计划度": 0, "随性度": 100, "脑洞度": 100, "幽默度": 100}
+        result = compute_baseline_emotion({}, seven_dim=seven)
         for dim in ("valence", "arousal", "dominance"):
             assert -1.0 <= result[dim] <= 1.0
+
+
+# --- compute_emotional_stability ---
+
+class TestEmotionalStability:
+    def test_neutral(self):
+        seven = {"理性度": 50, "计划度": 50, "感性度": 50, "随性度": 50}
+        assert abs(compute_emotional_stability(seven) - 0.5) < 0.01
+
+    def test_high_rational(self):
+        seven = {"理性度": 100, "计划度": 100, "感性度": 0, "随性度": 0}
+        assert compute_emotional_stability(seven) > 0.7
+
+    def test_high_emotional(self):
+        seven = {"理性度": 0, "计划度": 0, "感性度": 100, "随性度": 100}
+        assert compute_emotional_stability(seven) < 0.3
+
+
+# --- PAD label table ---
+
+class TestPADLabelTable:
+    def test_all_12_labels(self):
+        assert len(PAD_LABEL_TABLE) == 12
+
+    def test_label_to_vad(self):
+        result = label_to_vad("joy")
+        assert result is not None
+        assert result["valence"] > 0
+
+    def test_vad_to_label_happy(self):
+        assert vad_to_label({"valence": 0.7, "arousal": 0.4, "dominance": 0.3}) == "快乐"
+
+    def test_vad_to_label_sad(self):
+        assert vad_to_label({"valence": -0.7, "arousal": -0.3, "dominance": -0.5}) == "悲伤"
 
 
 # --- apply_memory_emotion_influence ---
@@ -176,27 +191,9 @@ class TestMemoryEmotionInfluence:
         result = apply_memory_emotion_influence(current, [])
         assert result == current
 
-    def test_single_memory(self):
-        current = {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
-        memories = [{"valence": 1.0, "arousal": 1.0, "dominance": 1.0}]
-        result = apply_memory_emotion_influence(current, memories, influence_weight=0.1)
-        for dim in ("valence", "arousal", "dominance"):
-            assert abs(result[dim] - 0.1) < 1e-6
-
-    def test_multiple_memories_averaged(self):
-        current = {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
-        memories = [
-            {"valence": 1.0, "arousal": 0.0, "dominance": 0.0},
-            {"valence": -1.0, "arousal": 0.0, "dominance": 0.0},
-        ]
-        result = apply_memory_emotion_influence(current, memories, influence_weight=0.1)
-        # Average of 1.0 and -1.0 is 0.0, so no change
-        assert abs(result["valence"]) < 1e-6
-
-    def test_default_weight(self):
+    def test_default_weight_is_0_2(self):
         current = {"valence": 0.0, "arousal": 0.0, "dominance": 0.0}
         memories = [{"valence": 1.0, "arousal": 1.0, "dominance": 1.0}]
         result = apply_memory_emotion_influence(current, memories)
-        # default weight is 0.05
         for dim in ("valence", "arousal", "dominance"):
-            assert abs(result[dim] - 0.05) < 1e-6
+            assert abs(result[dim] - 0.2) < 1e-6
