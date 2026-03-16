@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
+from app.services.trait_model import get_dim
 
 logger = logging.getLogger(__name__)
 

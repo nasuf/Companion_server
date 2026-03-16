@@ -33,6 +33,9 @@ model AiAgent {
   userId          String         @map("user_id")
   user            User           @relation(fields: [userId], references: [id])
   personality     Json?
+  sevenDimTraits  Json?          @map("seven_dim_traits")
+  currentTraits   Json?          @map("current_traits")
+  traitsHistory   Json?          @map("traits_history")
   background      String?
   values          Json?
   lifeOverview    String?        @map("life_overview")
@@ -47,6 +50,7 @@ model AiAgent {
   schedules       AiDailySchedule[]
   intimacies      Intimacy[]
   proactiveLogs   ProactiveChatLog[]
+  traitFeedbackLogs TraitFeedbackLog[]
 
   @@map("ai_agents")
 }
@@ -79,18 +83,19 @@ model Message {
 }
 
 model Memory {
-  id         String            @id @default(uuid())
-  userId     String            @map("user_id")
-  user       User              @relation(fields: [userId], references: [id])
-  type       String?           // e.g., "preference", "event", "identity"
-  level      Int               @default(3) // L1=1, L2=2, L3=3
-  content    String
-  summary    String?
-  importance Float             @default(0.5)
-  isArchived Boolean           @default(false) @map("is_archived")
-  createdAt  DateTime          @default(now()) @map("created_at")
-  updatedAt  DateTime          @updatedAt @map("updated_at")
-  changelogs MemoryChangelog[]
+  id           String            @id @default(uuid())
+  userId       String            @map("user_id")
+  user         User              @relation(fields: [userId], references: [id])
+  type         String?           // e.g., "preference", "event", "identity"
+  level        Int               @default(3) // L1=1, L2=2, L3=3
+  content      String
+  summary      String?
+  importance   Float             @default(0.5)
+  mentionCount Int               @default(0) @map("mention_count")
+  isArchived   Boolean           @default(false) @map("is_archived")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+  changelogs   MemoryChangelog[]
 
   @@map("memories")
 }
@@ -198,4 +203,17 @@ model ProactiveChatLog {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@map("proactive_chat_logs")
+}
+
+model TraitFeedbackLog {
+  id        String   @id @default(uuid())
+  agentId   String   @map("agent_id")
+  agent     AiAgent  @relation(fields: [agentId], references: [id])
+  dimension String
+  delta     Float
+  source    String   // "implicit" or "direct"
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("trait_feedback_logs")
 }

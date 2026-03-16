@@ -35,6 +35,7 @@ from app.services.strategy import decide_strategy, format_strategy_instruction
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
 from app.services.boundary import check_boundary, process_boundary_violation, detect_apology, handle_apology, APOLOGY_KEYWORDS
 from app.services.intimacy import get_topic_intimacy
+from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,8 @@ async def _background_post_process(
             tasks.append(_bg_deletion_check(user_id, user_message))
         if agent_id and any(kw in user_message for kw in APOLOGY_KEYWORDS):
             tasks.append(_bg_apology_check(agent_id, user_id, user_message))
+        if agent_id:
+            tasks.append(_bg_trait_adjustment(agent_id, user_message))
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")
@@ -390,6 +393,16 @@ async def _bg_deletion_check(user_id: str, user_message: str) -> None:
             logger.info(f"Deletion check: removed {deleted} memories for user {user_id}")
     except Exception as e:
         logger.warning(f"Background deletion check failed: {e}")
+
+
+async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
+    """Check for trait adjustment signals in user message."""
+    try:
+        adjustments = detect_direct_feedback(user_message) or infer_feedback(user_message)
+        if adjustments:
+            await apply_trait_adjustment(agent_id, adjustments)
+    except Exception as e:
+        logger.warning(f"Background trait adjustment failed: {e}")
 
 
 async def _bg_apology_check(agent_id: str, user_id: str, user_message: str) -> None:

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from app.services.trait_model import get_dim
+
 
 def generate_style_instruction(personality: dict) -> str:
     """将Big Five人格维度转换为具体的语言风格指令。"""

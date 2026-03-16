@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from app.services.trait_model import get_dim
+
 # 回复策略类型
 STRATEGIES = ["回答", "共情", "分享", "转话题", "幽默", "简短"]
 

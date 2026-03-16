@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import random
 
+from app.services.trait_model import get_dim
+
 
 def calculate_reply_delay(
     message_length: int,
