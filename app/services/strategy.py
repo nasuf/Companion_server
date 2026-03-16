@@ -35,7 +35,7 @@ def decide_strategy(
     a = personality.get("agreeableness", 0.5)
     o = personality.get("openness", 0.5)
 
-    valence = emotion.get("valence", 0.0)
+    pleasure = emotion.get("pleasure", 0.0)
     msg_len = len(message)
 
     strategy = "回答"
@@ -44,7 +44,7 @@ def decide_strategy(
     if topic_fatigued:
         strategy = "转话题"
         instruction = "当前话题已经聊得差不多了，自然地转到一个新话题。"
-    elif valence < -0.3:
+    elif pleasure < -0.3:
         strategy = "共情"
         if a >= 0.6:
             instruction = "用户心情不好，温柔地安慰和共情，表达理解和关心。"
@@ -120,8 +120,8 @@ def calculate_reply_length(
     score += (user_detail_pref - 0.5) * 2
 
     # Factor 2: 负面情绪 → 简短
-    valence = emotion.get("valence", 0.0)
-    if valence < 0:
+    pleasure = emotion.get("pleasure", 0.0)
+    if pleasure < 0:
         score -= 1.5
 
     # Factor 3: 用户平均消息长度

@@ -116,9 +116,9 @@ model AiEmotionState {
   id        String   @id @default(uuid())
   agentId   String   @unique @map("agent_id")
   agent     AiAgent  @relation(fields: [agentId], references: [id])
-  valence   Float    @default(0.0)
-  arousal   Float    @default(0.0)
-  dominance Float    @default(0.0)
+  pleasure  Float    @default(0.0) @map("pleasure")
+  arousal   Float    @default(0.5)
+  dominance Float    @default(0.5)
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("ai_emotion_states")

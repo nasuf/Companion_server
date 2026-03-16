@@ -50,10 +50,10 @@ def test_build_system_prompt_no_personality():
 def test_build_system_prompt_with_emotion():
     """Emotion section appears when emotion dict is provided."""
     agent = _make_agent()
-    emotion = {"valence": 0.5, "arousal": 0.3, "dominance": 0.7}
+    emotion = {"pleasure": 0.5, "arousal": 0.3, "dominance": 0.7}
     prompt = build_system_prompt(agent, emotion=emotion)
     assert "## 当前情绪" in prompt
-    assert "VAD" in prompt
+    assert "PAD" in prompt
 
 
 def test_build_system_prompt_with_memories():

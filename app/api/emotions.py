@@ -24,7 +24,7 @@ async def get_current_emotion(agent_id: str):
 
     return {
         "agent_id": agent_id,
-        "valence": emotion["valence"],
+        "pleasure": emotion["pleasure"],
         "arousal": emotion["arousal"],
         "dominance": emotion["dominance"],
         "tone": tone,
@@ -67,7 +67,7 @@ async def get_emotion_timeline(agent_id: str, limit: int = 50):
             emo = metadata["emotion"]
             timeline.append({
                 "timestamp": str(msg.createdAt),
-                "valence": emo.get("valence", 0.0),
+                "pleasure": emo.get("pleasure", 0.0),
                 "arousal": emo.get("arousal", 0.0),
                 "dominance": emo.get("dominance", 0.0),
                 "message_preview": msg.content[:80],
@@ -78,11 +78,11 @@ async def get_emotion_timeline(agent_id: str, limit: int = 50):
 
 @router.post("/emoji/recommend")
 async def recommend_emoji_api(
-    valence: float = 0.0,
+    pleasure: float = 0.0,
     arousal: float = 0.0,
     primary_emotion: str | None = None,
     count: int = 3,
 ):
     """推荐表情。"""
-    emojis = recommend_emoji(valence, arousal, primary_emotion, count)
+    emojis = recommend_emoji(pleasure, arousal, primary_emotion, count)
     return {"emojis": emojis}

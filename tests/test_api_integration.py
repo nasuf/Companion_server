@@ -106,12 +106,12 @@ def test_get_emotion(mock_deps):
     with (
         patch("app.api.emotions.db") as mock_db,
         patch("app.api.emotions.get_ai_emotion", new_callable=AsyncMock,
-              return_value={"valence": 0.5, "arousal": 0.3, "dominance": 0.4}),
+              return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4}),
     ):
         mock_db.aiagent = MagicMock()
         mock_db.aiagent.find_unique = AsyncMock(return_value=mock_agent)
         response = client.get("/emotions/agent-id/current")
         assert response.status_code == 200
         data = response.json()
-        assert data["valence"] == 0.5
+        assert data["pleasure"] == 0.5
         assert "tone" in data

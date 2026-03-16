@@ -147,53 +147,54 @@ def _build_personality_section(agent: Any) -> str | None:
 
 _EMOTION_LABEL_CN = {
     "joy": "开心", "sadness": "难过", "anger": "生气", "fear": "害怕",
-    "surprise": "惊讶", "disgust": "反感", "trust": "信任", "anticipation": "期待",
-    "love": "喜爱", "anxiety": "焦虑", "pride": "自豪", "guilt": "愧疚",
+    "surprise": "惊讶", "disgust": "反感", "neutral": "平静",
+    "anxiety": "焦虑", "disappointment": "失望", "relief": "欣慰",
+    "gratitude": "感激", "playful": "调皮",
 }
 
 
 def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = None) -> str | None:
-    """Build the emotion section from VAD dicts (AI + user)."""
+    """Build the emotion section from PAD dicts (AI + user)."""
     if not emotion:
         return None
 
-    valence = emotion.get("valence", 0.0)
+    pleasure = emotion.get("pleasure", 0.0)
     arousal = emotion.get("arousal", 0.0)
     dominance = emotion.get("dominance", 0.0)
 
     mood_parts: list[str] = []
-    if valence > 0.3:
+    if pleasure > 0.3:
         mood_parts.append("心情不错")
-    elif valence < -0.3:
+    elif pleasure < -0.3:
         mood_parts.append("有点低落")
 
-    if arousal > 0.5:
+    if arousal > 0.7:
         mood_parts.append("比较兴奋")
-    elif arousal < -0.3:
+    elif arousal < 0.3:
         mood_parts.append("比较平静")
 
-    if dominance > 0.3:
+    if dominance > 0.7:
         mood_parts.append("感觉自信")
-    elif dominance < -0.3:
+    elif dominance < 0.3:
         mood_parts.append("感觉有些被动")
 
     mood_text = "，".join(mood_parts) if mood_parts else "心情平静"
 
-    body = f"你现在的情绪：{mood_text}\n(VAD: {valence:.1f}, {arousal:.1f}, {dominance:.1f})\n"
+    body = f"你现在的情绪：{mood_text}\n(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})\n"
 
     if user_emotion:
         primary = user_emotion.get("primary_emotion", "neutral")
         confidence = user_emotion.get("confidence", 0.0)
-        u_valence = user_emotion.get("valence", 0.0)
+        u_pleasure = user_emotion.get("pleasure", 0.0)
         u_arousal = user_emotion.get("arousal", 0.0)
         u_dominance = user_emotion.get("dominance", 0.0)
 
         if confidence >= 0.5 and primary != "neutral":
             emotion_cn = _EMOTION_LABEL_CN.get(primary, primary)
             body += f"用户当前情绪：{emotion_cn}（置信度{confidence:.1f}）\n"
-            body += f"用户PAD向量：({u_valence:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
+            body += f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
 
-            if u_valence < -0.3:
+            if u_pleasure < -0.3:
                 body += "请注意关心用户的感受。\n"
 
     body += f"\n{_EMOTION_INSTRUCTION}"

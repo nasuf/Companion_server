@@ -123,8 +123,8 @@ def compute_message_interval_delay(
 
     # ≥30min gap: check emotion
     if ai_emotion:
-        valence = ai_emotion.get("valence", 0.0)
-        if valence > 0.3 and random.random() < 0.9:
+        pleasure = ai_emotion.get("pleasure", 0.0)
+        if pleasure > 0.3 and random.random() < 0.9:
             return random.uniform(1, 3)  # happy → quick reply
 
     # Fall back to status-based delay

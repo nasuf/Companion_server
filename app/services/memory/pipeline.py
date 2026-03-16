@@ -55,8 +55,8 @@ async def process_memory_pipeline(
         # Adjust importance based on emotion
         emotion = mem.get("emotion")
         if emotion:
-            valence = abs(emotion.get("valence", 0.0))
-            importance = min(1.0, importance + valence * 0.2)
+            pleasure_abs = abs(emotion.get("pleasure", 0.0))
+            importance = min(1.0, importance + pleasure_abs * 0.2)
 
         # Step 2a: Conflict check for L1 memories
         if level == 1:

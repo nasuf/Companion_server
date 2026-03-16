@@ -111,18 +111,18 @@ async def link_user_preference(user_id: str, category: str, value: str) -> None:
 
 
 async def link_memory_emotion(
-    memory_id: str, valence: float, arousal: float, dominance: float,
+    memory_id: str, pleasure: float, arousal: float, dominance: float,
 ) -> None:
     await run_write(
         """
         MATCH (m:Memory {id: $memory_id})
         MERGE (e:Emotion {memory_id: $memory_id})
-        SET e.valence = $valence, e.arousal = $arousal, e.dominance = $dominance
+        SET e.pleasure = $pleasure, e.arousal = $arousal, e.dominance = $dominance
         MERGE (m)-[:HAS_EMOTION]->(e)
         """,
         {
             "memory_id": memory_id,
-            "valence": valence,
+            "pleasure": pleasure,
             "arousal": arousal,
             "dominance": dominance,
         },
@@ -185,7 +185,7 @@ async def update_graph_from_extraction(
     if emotion:
         await link_memory_emotion(
             memory_id,
-            emotion.get("valence", 0.0),
+            emotion.get("pleasure", 0.0),
             emotion.get("arousal", 0.0),
             emotion.get("dominance", 0.0),
         )

@@ -21,7 +21,7 @@ MAX_DAILY_PROACTIVE = 3
 PROACTIVE_PROMPT = """你是{ai_name}，现在你想主动和用户聊天。
 
 你的当前情绪：心情{mood}
-(VAD: {valence:.1f}, {arousal:.1f}, {dominance:.1f})
+(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})
 
 关于用户的记忆：
 {memories}
@@ -80,13 +80,13 @@ async def generate_proactive_message(
 
         # 获取情绪
         emotion = await get_ai_emotion(agent_id)
-        valence = emotion.get("valence", 0.0)
-        mood = "不错" if valence > 0.2 else ("有点低落" if valence < -0.2 else "平静")
+        pleasure = emotion.get("pleasure", 0.0)
+        mood = "不错" if pleasure > 0.2 else ("有点低落" if pleasure < -0.2 else "平静")
 
         prompt = PROACTIVE_PROMPT.format(
             ai_name=agent.name,
             mood=mood,
-            valence=emotion.get("valence", 0),
+            pleasure=emotion.get("pleasure", 0),
             arousal=emotion.get("arousal", 0),
             dominance=emotion.get("dominance", 0),
             memories="\n".join(f"- {m}" for m in memory_strings) or "暂无记忆。",

@@ -23,6 +23,7 @@ from app.services.summarizer import summarize
 from app.services.emotion import (
     extract_emotion,
     get_ai_emotion,
+    quick_emotion_estimate,
     update_emotion_state,
     save_ai_emotion,
 )
@@ -106,6 +107,10 @@ async def stream_chat_response(
             if "emotion" in meta:
                 prev_user_emotion = meta["emotion"]
                 break
+
+    # --- Quick keyword emotion estimate for current message (no LLM) ---
+    if prev_user_emotion is None:
+        prev_user_emotion = quick_emotion_estimate(user_message)
 
     # --- Check deletion intent (keyword-only, no LLM on hot path) ---
     has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)

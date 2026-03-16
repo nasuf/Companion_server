@@ -28,7 +28,7 @@ Return JSON with this exact schema:
       "entities": ["entity1"],
       "topics": ["topic1"],
       "emotion": {{
-        "valence": 0.0,
+        "pleasure": 0.0,
         "arousal": 0.0,
         "dominance": 0.0
       }}
@@ -60,26 +60,26 @@ EMOTION_EXTRACTION_PROMPT = """分析以下消息的情绪内容。
 
 消息：{message}
 
-返回JSON，包含VAD分数（每个在-1.0到1.0之间）、主要情绪类别和置信度：
+返回JSON，包含PAD分数（pleasure在-1.0到1.0之间，arousal和dominance在0.0到1.0之间）、主要情绪类别和置信度：
 {{
-  "valence": 0.0,
-  "arousal": 0.0,
-  "dominance": 0.0,
+  "pleasure": 0.0,
+  "arousal": 0.5,
+  "dominance": 0.5,
   "primary_emotion": "neutral",
   "confidence": 0.5
 }}
 
-VAD维度：
-- valence: 正向(开心/兴奋) 到 负向(伤心/愤怒)
-- arousal: 高能量(激动/紧张) 到 低能量(平静/疲惫)
-- dominance: 掌控感(自信/强势) 到 顺从感(无助/被动)
+PAD维度：
+- pleasure: 正向(开心/兴奋) 到 负向(伤心/愤怒)，范围 [-1.0, 1.0]
+- arousal: 高能量(激动/紧张) 到 低能量(平静/疲惫)，范围 [0.0, 1.0]
+- dominance: 掌控感(自信/强势) 到 顺从感(无助/被动)，范围 [0.0, 1.0]
 
 primary_emotion必须是以下12类之一：
-joy, sadness, anger, fear, surprise, disgust, trust, anticipation, love, anxiety, pride, guilt
+joy, sadness, anger, fear, surprise, disgust, neutral, anxiety, disappointment, relief, gratitude, playful
 
 confidence: 0.0到1.0，表示你对情绪判断的确信度
 
-对于中性消息，valence/arousal/dominance接近0，primary_emotion为neutral，confidence为0.3-0.5。"""
+对于中性消息，pleasure接近0，arousal/dominance接近0.5，primary_emotion为neutral，confidence为0.3-0.5。"""
 
 MEMORY_SCORING_PROMPT = """Rate the following memory for a conversation context.
 
