@@ -21,7 +21,7 @@ from app.services.schedule import (
     generate_daily_schedule, generate_life_overview, get_cached_schedule,
     get_current_status, get_life_overview, review_daily_schedule, save_life_overview,
 )
-from app.services.boundary import recover_patience_hourly
+from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive import generate_proactive_message
 
@@ -184,6 +184,15 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # 5B.3: Blacklist expiry scan every 5 minutes
+    scheduler.add_job(
+        _run_blacklist_scan,
+        "interval",
+        minutes=5,
+        id="blacklist_scan",
+        replace_existing=True,
+    )
+
     # Emotion decay every 5 minutes
     scheduler.add_job(
         _run_emotion_decay,
@@ -273,6 +282,16 @@ async def _run_patience_recovery():
         lambda a: recover_patience_hourly(a.id, a.userId),
         concurrency=5, task_name="Patience recovery",
     )
+
+
+async def _run_blacklist_scan():
+    """5B.3: 扫描已过期的拉黑计时器并自动解除。"""
+    try:
+        count = await scan_blacklist_expiry()
+        if count > 0:
+            logger.info(f"Blacklist scan: lifted {count} blacklists")
+    except Exception as e:
+        logger.warning(f"Blacklist scan failed: {e}")
 
 
 async def _run_emotion_decay():

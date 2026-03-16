@@ -295,6 +295,7 @@ def build_system_prompt(
     strategy_instruction: str | None = None,
     user_emotion: dict | None = None,
     schedule_context: str | None = None,
+    patience_instruction: str | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
@@ -333,6 +334,10 @@ def build_system_prompt(
 
     if schedule_context:
         sections.append(_section("当前状态", schedule_context))
+
+    # 5B.4: 耐心区间语气描述
+    if patience_instruction:
+        sections.append(_section("情绪状态提醒", patience_instruction))
 
     # 回复要求 + 策略指令
     instruction = _INSTRUCTION

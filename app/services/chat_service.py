@@ -33,7 +33,10 @@ from app.services.memory.deletion import detect_deletion_intent, delete_memories
 from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
 from app.services.strategy import decide_strategy, format_strategy_instruction
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
-from app.services.boundary import check_boundary, process_boundary_violation, detect_apology, handle_apology, APOLOGY_KEYWORDS
+from app.services.boundary import (
+    check_boundary, process_boundary_violation, detect_apology, handle_apology,
+    APOLOGY_KEYWORDS, check_positive_recovery, get_patience, get_patience_prompt_instruction,
+)
 from app.services.intimacy import get_topic_intimacy
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 
@@ -207,6 +210,10 @@ async def stream_chat_response(
     )
     strategy_instruction = format_strategy_instruction(strategy_result)
 
+    # 5B.4: Get patience prompt instruction
+    patience = await get_patience(agent_id, user_id)
+    patience_instruction = get_patience_prompt_instruction(patience)
+
     # Build prompt (pure string operations — instant)
     system_prompt = build_system_prompt(
         agent=agent,
@@ -220,6 +227,7 @@ async def stream_chat_response(
         strategy_instruction=strategy_instruction,
         user_emotion=prev_user_emotion,
         schedule_context=schedule_context,
+        patience_instruction=patience_instruction,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
@@ -327,6 +335,9 @@ async def _background_post_process(
             tasks.append(_bg_apology_check(agent_id, user_id, user_message))
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
+        # 5B.2: Positive interaction recovery (no banned words → potentially positive)
+        if agent_id:
+            tasks.append(_bg_positive_recovery(agent_id, user_id, user_message))
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")
@@ -414,3 +425,15 @@ async def _bg_apology_check(agent_id: str, user_id: str, user_message: str) -> N
             logger.info(f"Apology detected: patience restored to {new_patience}")
     except Exception as e:
         logger.warning(f"Background apology check failed: {e}")
+
+
+async def _bg_positive_recovery(agent_id: str, user_id: str, user_message: str) -> None:
+    """5B.2: Check for positive interaction and recover patience."""
+    from app.services.boundary import check_banned_keywords
+    try:
+        # No banned keywords = potentially positive
+        hits = check_banned_keywords(user_message)
+        is_positive = len(hits) == 0
+        await check_positive_recovery(agent_id, user_id, is_positive)
+    except Exception as e:
+        logger.warning(f"Background positive recovery failed: {e}")
