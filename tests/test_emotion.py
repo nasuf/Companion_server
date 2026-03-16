@@ -14,6 +14,7 @@ import pytest
 
 from app.services.emotion import (
     PAD_LABEL_TABLE,
+    _PAD_DEFAULTS,
     _clamp,
     _clamp_pad,
     _lerp_pad,
@@ -119,7 +120,7 @@ class TestUpdateEmotionState:
         assert high["pleasure"] > low["pleasure"]
 
     def test_missing_keys(self):
-        """Missing PAD dims default to 0."""
+        """Missing PAD dims default to _PAD_DEFAULTS (pleasure=0, arousal=0.5, dominance=0.5)."""
         current = {}
         input_emotion = {"pleasure": 0.5}
         result = update_emotion_state(current, input_emotion)
@@ -268,3 +269,23 @@ class TestQuickEmotionEstimate:
     def test_no_match(self):
         result = quick_emotion_estimate("今天天气不错")
         assert result is None
+
+    def test_returns_copy_not_shared_reference(self):
+        """Returned dict should be a copy, not a reference into PAD_LABEL_TABLE."""
+        result = quick_emotion_estimate("哈哈太好了")
+        assert result is not None
+        assert result is not PAD_LABEL_TABLE["高兴"]
+        assert result == PAD_LABEL_TABLE["高兴"]
+
+
+# --- _PAD_DEFAULTS ---
+
+class TestPADDefaults:
+    def test_pleasure_default_is_zero(self):
+        assert _PAD_DEFAULTS["pleasure"] == 0.0
+
+    def test_arousal_default_is_half(self):
+        assert _PAD_DEFAULTS["arousal"] == 0.5
+
+    def test_dominance_default_is_half(self):
+        assert _PAD_DEFAULTS["dominance"] == 0.5

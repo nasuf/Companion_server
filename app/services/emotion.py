@@ -63,13 +63,17 @@ _EMOTION_LABEL_MAP = {
 
 
 def label_to_pad(label: str) -> dict | None:
-    """Convert emotion label to PAD values."""
+    """Convert emotion label to PAD values (returns a copy)."""
     cn_label = _EMOTION_LABEL_MAP.get(label, label)
-    return PAD_LABEL_TABLE.get(cn_label)
+    entry = PAD_LABEL_TABLE.get(cn_label)
+    return dict(entry) if entry else None
 
 
 # --- Quick keyword emotion estimate (no LLM) ---
 
+# Only covers high-confidence keyword-detectable emotions (5/12).
+# 恐惧/惊讶/厌恶/中性/失望/欣慰/戏谑 are omitted intentionally —
+# they require sentence-level context that keyword matching can't provide.
 _QUICK_EMOTION_KEYWORDS: dict[str, list[str]] = {
     "高兴": ["哈哈", "开心", "太好了", "好棒", "耶", "太开心", "好高兴"],
     "悲伤": ["难过", "伤心", "哭", "呜呜", "好难受", "心碎"],
@@ -83,15 +87,16 @@ def quick_emotion_estimate(message: str) -> dict | None:
     """快速关键词情绪推断（无LLM），用于热路径填补当前消息情绪空缺。"""
     for label, keywords in _QUICK_EMOTION_KEYWORDS.items():
         if any(kw in message for kw in keywords):
-            return PAD_LABEL_TABLE.get(label)
+            entry = PAD_LABEL_TABLE.get(label)
+            return dict(entry) if entry else None
     return None
 
 
 def pad_to_label(pad: dict) -> str:
     """Find closest emotion label for given PAD values."""
-    v = pad.get("pleasure", 0)
-    a = pad.get("arousal", 0)
-    d = pad.get("dominance", 0)
+    v = pad.get("pleasure", _PAD_DEFAULTS["pleasure"])
+    a = pad.get("arousal", _PAD_DEFAULTS["arousal"])
+    d = pad.get("dominance", _PAD_DEFAULTS["dominance"])
 
     best_label = "中性"
     best_dist = float("inf")
@@ -104,6 +109,8 @@ def pad_to_label(pad: dict) -> str:
 
 
 _PAD_RANGES = {"pleasure": (-1.0, 1.0), "arousal": (0.0, 1.0), "dominance": (0.0, 1.0)}
+_PAD_DEFAULTS = {dim: (lo + hi) / 2 for dim, (lo, hi) in _PAD_RANGES.items()}
+# → {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
 
 
 def _clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -113,15 +120,17 @@ def _clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
 def _clamp_pad(dim: str, value: float) -> float:
     """Clamp a PAD dimension value to its valid range."""
     lo, hi = _PAD_RANGES[dim]
-    return max(lo, min(hi, value))
+    return _clamp(value, lo, hi)
 
 
 def _lerp_pad(current: dict, target: dict, rate: float) -> dict:
     """Linear interpolation between two PAD dicts."""
-    return {
-        dim: current.get(dim, 0.0) + (target.get(dim, 0.0) - current.get(dim, 0.0)) * rate
-        for dim in _PAD_DIMS
-    }
+    result = {}
+    for dim in _PAD_DIMS:
+        c = current.get(dim, _PAD_DEFAULTS[dim])
+        t = target.get(dim, _PAD_DEFAULTS[dim])
+        result[dim] = c + (t - c) * rate
+    return result
 
 
 # --- 3B.1 基线改用七维公式 ---
@@ -192,15 +201,15 @@ async def extract_emotion(message: str) -> dict:
     try:
         result = await invoke_json(model, prompt)
         return {
-            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", 0.0))),
-            "arousal": _clamp_pad("arousal", float(result.get("arousal", 0.5))),
-            "dominance": _clamp_pad("dominance", float(result.get("dominance", 0.5))),
+            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", _PAD_DEFAULTS["pleasure"]))),
+            "arousal": _clamp_pad("arousal", float(result.get("arousal", _PAD_DEFAULTS["arousal"]))),
+            "dominance": _clamp_pad("dominance", float(result.get("dominance", _PAD_DEFAULTS["dominance"]))),
             "primary_emotion": result.get("primary_emotion", "neutral"),
             "confidence": _clamp(float(result.get("confidence", 0.5)), 0.0, 1.0),
         }
     except Exception as e:
         logger.warning(f"Emotion extraction failed: {e}")
-        return {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5, "primary_emotion": "neutral", "confidence": 0.0}
+        return {**_PAD_DEFAULTS, "primary_emotion": "neutral", "confidence": 0.0}
 
 
 # --- 3B.2 融合公式 + 共情向量 ---
@@ -238,14 +247,14 @@ def update_emotion_state(
     # Compute empathy vector
     emotional_sensitivity = get_dim(seven_dim, "感性度") if seven_dim else 0.5
     empathy = {
-        dim: input_emotion.get(dim, 0.0) * emotional_sensitivity
+        dim: input_emotion.get(dim, _PAD_DEFAULTS[dim]) * emotional_sensitivity
         for dim in _PAD_DIMS
     }
 
     result = {}
     for dim in _PAD_DIMS:
-        e_ai = current.get(dim, 0.0)
-        e_user = input_emotion.get(dim, 0.0)
+        e_ai = current.get(dim, _PAD_DEFAULTS[dim])
+        e_user = input_emotion.get(dim, _PAD_DEFAULTS[dim])
         e_empathy = empathy[dim]
         result[dim] = _clamp_pad(dim, alpha * e_ai + beta * e_user + gamma * e_empathy)
 
@@ -267,13 +276,13 @@ async def get_ai_emotion(agent_id: str) -> dict:
 
     cached = await redis.hgetall(cache_key)
     if cached:
-        return {dim: float(cached.get(dim, 0)) for dim in _PAD_DIMS}
+        return {dim: float(cached.get(dim, _PAD_DEFAULTS[dim])) for dim in _PAD_DIMS}
 
     state = await db.aiemotionstate.find_unique(where={"agentId": agent_id})
     if state:
         emotion = {dim: getattr(state, dim) for dim in _PAD_DIMS}
     else:
-        emotion = {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
+        emotion = dict(_PAD_DEFAULTS)
 
     await redis.hset(cache_key, mapping={k: str(v) for k, v in emotion.items()})
     await redis.expire(cache_key, DEFAULT_TTL)
@@ -294,7 +303,7 @@ def apply_memory_emotion_influence(
     avg = {dim: 0.0 for dim in _PAD_DIMS}
     for mem_emo in memory_emotions:
         for dim in _PAD_DIMS:
-            avg[dim] += mem_emo.get(dim, 0.0)
+            avg[dim] += mem_emo.get(dim, _PAD_DEFAULTS[dim])
     for dim in _PAD_DIMS:
         avg[dim] /= len(memory_emotions)
 
@@ -331,7 +340,7 @@ async def decay_emotion_toward_baseline(
 
 async def save_ai_emotion(agent_id: str, emotion: dict) -> None:
     """Save AI emotion state (PAD only) to DB and cache."""
-    pad = {dim: _clamp_pad(dim, emotion.get(dim, 0.0)) for dim in _PAD_DIMS}
+    pad = {dim: _clamp_pad(dim, emotion.get(dim, _PAD_DEFAULTS[dim])) for dim in _PAD_DIMS}
 
     await db.aiemotionstate.upsert(
         where={"agentId": agent_id},

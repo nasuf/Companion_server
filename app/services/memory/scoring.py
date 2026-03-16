@@ -42,9 +42,9 @@ def compute_emotional_weight(emotion: dict | None) -> float:
     """Score based on emotional intensity."""
     if not emotion:
         return 0.0
-    pleasure = abs(emotion.get("pleasure", 0.0))
-    arousal = abs(emotion.get("arousal", 0.0))
-    return min(1.0, (pleasure + arousal) / 2)
+    pleasure_intensity = abs(emotion.get("pleasure", 0.0))  # [-1,1], neutral=0
+    arousal_intensity = abs(emotion.get("arousal", 0.5) - 0.5) * 2  # [0,1], neutral=0.5 → rescale to [0,1]
+    return min(1.0, (pleasure_intensity + arousal_intensity) / 2)
 
 
 def compute_rule_score(
