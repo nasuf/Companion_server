@@ -64,6 +64,56 @@ async def consolidate_weekly():
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     await _consolidate_level(source_level=2, target_level=1, cutoff=cutoff, take=50)
 
+    # Also check for L2→L1 upgrade candidates
+    await check_l2_upgrade_candidates()
+
+
+async def check_l2_upgrade_candidates() -> None:
+    """检测满足升级条件的L2记忆并升级到L1。
+
+    条件:
+    - importance ≥ 0.85
+    - 年提及次数 ≥ 10
+    - 无同主题L1冲突
+    """
+    one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
+
+    candidates = await db.memory.find_many(
+        where={
+            "level": 2,
+            "isArchived": False,
+            "importance": {"gte": 0.85},
+            "mentionCount": {"gte": 10},
+        },
+        take=20,
+    )
+
+    if not candidates:
+        return
+
+    for mem in candidates:
+        # 检查是否有同主题L1冲突
+        existing_l1 = await db.memory.find_many(
+            where={
+                "userId": mem.userId,
+                "level": 1,
+                "isArchived": False,
+                "type": mem.type,
+            },
+            take=5,
+        )
+
+        # 简单冲突检测：如果同类型L1已有5条以上，跳过
+        if len(existing_l1) >= 5:
+            continue
+
+        # 升级到L1
+        await db.memory.update(
+            where={"id": mem.id},
+            data={"level": 1},
+        )
+        logger.info(f"Upgraded L2 memory {mem.id} to L1 (importance={mem.importance}, mentions={mem.mentionCount})")
+
 
 async def _consolidate_user_memories(
     user_id: str,

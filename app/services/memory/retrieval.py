@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 from app.db import db
+from app.services.memory.lifecycle import increment_mention_count
 from app.services.memory.vector_search import search_similar
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,55 @@ async def retrieve_memories(
             seen_ids.add(m.id)
             results.append(_memory_to_dict(m))
 
+    # 4. L3 awakening: find similar archived/L3 memories for fuzzy recall
+    awakened = await _find_awakening_candidates(query, user_id, seen_ids)
+    results.extend(awakened)
+
+    # Increment mention counts for all retrieved memories (fire-and-forget)
+    for r in results:
+        mid = r.get("id")
+        if mid:
+            try:
+                await increment_mention_count(mid)
+            except Exception:
+                pass
+
     return results
+
+
+async def _find_awakening_candidates(
+    query: str, user_id: str, exclude_ids: set[str],
+) -> list[dict]:
+    """L3记忆唤醒机制。
+
+    相似度≥0.6的L3记忆 → 标记为模糊回忆，在prompt中以"好像听你提过…"形式出现。
+    """
+    if not query:
+        return []
+
+    try:
+        l3_results = await search_similar(query, user_id, top_k=3)
+    except Exception:
+        return []
+
+    awakened = []
+    for r in l3_results:
+        mid = r.get("id", "")
+        similarity = float(r.get("similarity", 0))
+        level = r.get("level", 3)
+
+        if mid in exclude_ids or level != 3:
+            continue
+        if similarity < 0.6:
+            continue
+
+        # Mark as fuzzy recall
+        content = r.get("summary") or r.get("content", "")
+        r["content"] = f"（模糊记忆）好像听你提过：{content}"
+        r["awakened"] = True
+        awakened.append(r)
+
+    return awakened[:2]  # Max 2 awakened memories
 
 
 def format_memories_for_prompt(memories: list[dict]) -> list[str]:

@@ -7,6 +7,7 @@ Runs as FastAPI BackgroundTasks (non-blocking).
 import logging
 
 from app.services.memory.extraction import extract_memories
+from app.services.memory.filter import should_extract_memory
 from app.services.memory.storage import store_memory
 from app.services.memory.conflict import detect_conflicts, resolve_conflict
 from app.services.graph_service import update_graph_from_extraction
@@ -22,6 +23,18 @@ async def process_memory_pipeline(
 
     Returns list of stored memory IDs.
     """
+    # Step 0: Filter — skip extraction for low-value messages
+    # Extract last user message from conversation text for filtering
+    lines = conversation_text.strip().split("\n")
+    last_user_msg = ""
+    for line in reversed(lines):
+        if line.startswith("user:"):
+            last_user_msg = line[5:].strip()
+            break
+    if last_user_msg and not should_extract_memory(last_user_msg):
+        logger.debug("Message filtered out by memory filter, skipping extraction")
+        return []
+
     # Step 1: Extract structured memories
     extraction = await extract_memories(conversation_text)
     memories = extraction.get("memories", [])
