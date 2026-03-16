@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 
 from prisma import Json
 
@@ -29,7 +30,11 @@ from app.services.emotion import (
 )
 from app.services.cache import cache_summarizer, cache_set_summarizer
 from app.services.portrait import get_latest_portrait
-from app.services.timing import calculate_reply_delay, calculate_typing_duration
+from app.services.timing import (
+    calculate_reply_delay, calculate_typing_duration,
+    should_skip_reply, calculate_status_delay,
+    compute_message_interval_delay,
+)
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
 from app.services.strategy import decide_strategy, format_strategy_instruction
@@ -40,8 +45,21 @@ from app.services.boundary import (
 )
 from app.services.intimacy import get_topic_intimacy
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
+from app.services.trait_model import get_seven_dim
 
 logger = logging.getLogger(__name__)
+
+
+def _on_task_error(t: asyncio.Task) -> None:
+    """Log unhandled exceptions from background tasks."""
+    if not t.cancelled() and t.exception():
+        logger.error(f"Background post-processing failed: {t.exception()}")
+
+
+def _fire_background(coro) -> None:
+    """Schedule a background coroutine as a fire-and-forget task."""
+    task = asyncio.create_task(coro)
+    task.add_done_callback(_on_task_error)
 
 
 async def stream_chat_response(
@@ -78,13 +96,7 @@ async def stream_chat_response(
             yield {"event": "token", "data": json.dumps({"token": response})}
             yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
             # Background: classify + deduct patience
-            task = asyncio.create_task(
-                process_boundary_violation(agent_id, user_id, user_message)
-            )
-            task.add_done_callback(
-                lambda t: logger.error(f"Boundary processing failed: {t.exception()}")
-                if not t.cancelled() and t.exception() else None
-            )
+            _fire_background(process_boundary_violation(agent_id, user_id, user_message))
             return
 
     # Load recent messages (for prompt context)
@@ -121,7 +133,9 @@ async def stream_chat_response(
 
     # --- Pre-compute personality and topic fatigue (needed after parallel fetch) ---
     agent_personality = getattr(agent, "personality", None) or {}
-    topic_fatigued = detect_topic_fatigue(topic_info)
+    seven_dim = get_seven_dim(agent)
+    recent_user_msgs = [m["content"] for m in messages_dicts if m["role"] == "user"]
+    topic_fatigued = detect_topic_fatigue(topic_info, recent_user_msgs)
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
@@ -136,7 +150,12 @@ async def stream_chat_response(
     async def _load_cached_summaries():
         """Load previously cached summarizer results — no LLM call."""
         from app.services.summarizer import _conv_hash
-        ch = _conv_hash(messages_dicts[:-1], messages_dicts[-2]["content"] if len(messages_dicts) >= 2 else "")
+        prev_msgs = messages_dicts[:-1]
+        prev_user_content = next(
+            (m["content"] for m in reversed(prev_msgs) if m["role"] == "user"),
+            ""
+        )
+        ch = _conv_hash(prev_msgs, prev_user_content)
         return await cache_summarizer(ch)
 
     async def _load_core_memories():
@@ -201,9 +220,26 @@ async def stream_chat_response(
 
     # --- AI status context from schedule (pure computation) ---
     schedule_context = None
-    if schedule:
-        ai_status = get_current_status(schedule)
+    ai_status = get_current_status(schedule) if schedule else None
+    if ai_status:
         schedule_context = format_schedule_context(ai_status)
+    ai_status_str = ai_status["status"] if ai_status else "idle"
+
+    # --- Skip reply check (before expensive prompt building) ---
+    if should_skip_reply(agent_personality, seven_dim):
+        yield {"event": "read", "data": json.dumps({"status": "read_no_reply"})}
+        yield {"event": "done", "data": json.dumps({"message_id": "skipped"})}
+        _fire_background(_background_post_process(
+            user_id=user_id, agent_id=agent_id,
+            conversation_id=conversation_id,
+            user_message=user_message, user_message_id=user_message_id,
+            full_response="",
+            messages_dicts=messages_dicts,
+            memory_strings=memory_strings,
+            has_deletion_keyword=has_deletion_keyword,
+            cached_emotion=emotion, seven_dim=seven_dim,
+        ))
+        return
 
     # --- Strategy decision (pure computation, after emotion is loaded) ---
     strategy_result = decide_strategy(
@@ -212,6 +248,7 @@ async def stream_chat_response(
         topic_info=topic_info,
         personality=agent_personality,
         topic_fatigued=topic_fatigued,
+        seven_dim=seven_dim,
     )
     strategy_instruction = format_strategy_instruction(strategy_result)
 
@@ -238,11 +275,29 @@ async def stream_chat_response(
 
     # --- Send typing event before response ---
     typing_duration = calculate_typing_duration(len(user_message))
-    yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
 
-    # Simulate reply delay (non-blocking)
-    reply_delay = calculate_reply_delay(len(user_message), agent_personality)
-    await asyncio.sleep(min(reply_delay, 2.0))  # cap at 2s to avoid blocking
+    # Status delay (based on AI activity schedule)
+    status_delay = calculate_status_delay(ai_status_str) if ai_status_str != "idle" else 0.0
+
+    # Message interval delay (long gaps → extra delay)
+    interval_delay = 0.0
+    if len(recent_messages) >= 2:
+        prev_time = recent_messages[-2].createdAt
+        if prev_time.tzinfo is None:
+            prev_time = prev_time.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - prev_time).total_seconds()
+        if age >= 1800:  # ≥30min gap
+            interval_delay = compute_message_interval_delay(age, emotion, ai_status_str)
+
+    # Conceptual delay (sent to client) vs actual sleep (server-side cap)
+    reply_delay = calculate_reply_delay(len(user_message), agent_personality, seven_dim=seven_dim)
+    conceptual_delay = max(reply_delay, status_delay, interval_delay)
+    actual_sleep = min(reply_delay, 2.0)
+
+    if conceptual_delay > 5.0:
+        yield {"event": "delay", "data": json.dumps({"duration": conceptual_delay})}
+    yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
+    await asyncio.sleep(actual_sleep)
 
     # --- Stream response from large model (the ONLY LLM call in hot path) ---
     model = get_chat_model()
@@ -278,24 +333,19 @@ async def stream_chat_response(
     yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
 
     # --- BACKGROUND: fire-and-forget post-processing ---
-    task = asyncio.create_task(
-        _background_post_process(
-            user_id=user_id,
-            agent_id=agent_id,
-            conversation_id=conversation_id,
-            user_message=user_message,
-            user_message_id=user_message_id,
-            full_response=full_response,
-            messages_dicts=messages_dicts,
-            memory_strings=memory_strings,
-            has_deletion_keyword=has_deletion_keyword,
-            cached_emotion=emotion,
-        )
-    )
-    task.add_done_callback(
-        lambda t: logger.error(f"Background post-processing failed: {t.exception()}")
-        if not t.cancelled() and t.exception() else None
-    )
+    _fire_background(_background_post_process(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+        user_message=user_message,
+        user_message_id=user_message_id,
+        full_response=full_response,
+        messages_dicts=messages_dicts,
+        memory_strings=memory_strings,
+        has_deletion_keyword=has_deletion_keyword,
+        cached_emotion=emotion,
+        seven_dim=seven_dim,
+    ))
 
 
 async def _background_post_process(
@@ -309,6 +359,7 @@ async def _background_post_process(
     memory_strings: list[str] | None,
     has_deletion_keyword: bool = False,
     cached_emotion: dict | None = None,
+    seven_dim: dict | None = None,
 ) -> None:
     """Run all background tasks after response is sent.
 
@@ -330,7 +381,7 @@ async def _background_post_process(
                 pass
 
         tasks = [
-            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy),
+            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, seven_dim),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
@@ -354,6 +405,7 @@ async def _bg_emotion(
     user_message: str,
     cached_emotion: dict | None = None,
     topic_intimacy: float = 50.0,
+    seven_dim: dict | None = None,
 ) -> None:
     """Extract emotion from user message, update AI emotion state, and save to message metadata."""
     if not agent_id:
@@ -361,7 +413,7 @@ async def _bg_emotion(
     try:
         user_emotion = await extract_emotion(user_message)
         current_emotion = cached_emotion or await get_ai_emotion(agent_id)
-        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy)
+        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy, seven_dim=seven_dim)
         await save_ai_emotion(agent_id, new_emotion)
 
         # Save user emotion to message metadata (use known ID, no re-query)

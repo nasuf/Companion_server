@@ -10,13 +10,22 @@ import json
 import logging
 import random
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
+from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.trait_model import get_dim
 
 logger = logging.getLogger(__name__)
+
+_SCHEDULE_TZ = ZoneInfo(settings.schedule_timezone)
+
+
+def _local_now() -> datetime:
+    """Return current time in the configured schedule timezone."""
+    return datetime.now(_SCHEDULE_TZ)
 
 # 作息时段模板（基准，根据人格微调）
 _BASE_SCHEDULE_TEMPLATE = [
@@ -93,7 +102,7 @@ async def generate_daily_schedule(
     date: datetime | None = None,
 ) -> list[dict]:
     """生成每日作息表。基于生活画像+模板+个性化。"""
-    date = date or datetime.now(UTC)
+    date = date or _local_now()
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday = weekdays[date.weekday()]
 
@@ -179,7 +188,7 @@ def _schedule_key(agent_id: str, date: datetime) -> str:
 
 async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> list[dict] | None:
     """从Redis获取缓存的当日作息。"""
-    date = date or datetime.now(UTC)
+    date = date or _local_now()
     redis = await get_redis()
     data = await redis.get(_schedule_key(agent_id, date))
     if data:
@@ -195,7 +204,7 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
 
     返回 {"activity": str, "type": str, "status": "idle"|"busy"|"sleep"}
     """
-    now = now or datetime.now(UTC)
+    now = now or _local_now()
     current_time = now.strftime("%H:%M")
 
     for slot in schedule:
@@ -309,7 +318,7 @@ async def compute_adjustment_feasibility(
 
     # 今日调整次数
     redis = await get_redis()
-    today = datetime.now(UTC).strftime("%Y%m%d")
+    today = _local_now().strftime("%Y%m%d")
     adj_key = f"schedule_adj:{agent_id}:{today}"
     adj_count = int(await redis.get(adj_key) or 0)
     if adj_count >= 2:
@@ -346,7 +355,7 @@ async def handle_schedule_adjustment(
     if score >= 70:
         # 接受
         redis = await get_redis()
-        today = datetime.now(UTC).strftime("%Y%m%d")
+        today = _local_now().strftime("%Y%m%d")
         adj_key = f"schedule_adj:{agent_id}:{today}"
         await redis.incr(adj_key)
         await redis.expire(adj_key, 86400)
@@ -363,7 +372,7 @@ async def handle_schedule_adjustment(
         # 部分接受（50%概率）
         if random.random() < 0.5:
             redis = await get_redis()
-            today = datetime.now(UTC).strftime("%Y%m%d")
+            today = _local_now().strftime("%Y%m%d")
             adj_key = f"schedule_adj:{agent_id}:{today}"
             await redis.incr(adj_key)
             await redis.expire(adj_key, 86400)

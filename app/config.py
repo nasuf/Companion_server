@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Anthropic (when llm_provider == "claude")
     anthropic_api_key: str = ""
 
+    # Schedule
+    schedule_timezone: str = "Asia/Shanghai"
+
     # LangSmith tracing
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
