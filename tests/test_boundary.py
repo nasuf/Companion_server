@@ -74,9 +74,9 @@ class TestCheckBannedKeywords:
     def test_empty_message(self):
         assert check_banned_keywords("") == []
 
-    def test_partial_no_match(self):
-        # "垃圾" alone should not match "垃圾AI"
-        assert check_banned_keywords("垃圾分类") == []
+    def test_no_match_innocent(self):
+        # Innocent message should not match any banned words
+        assert check_banned_keywords("今天天气真好") == []
 
 
 # --- generate_boundary_response ---

@@ -16,36 +16,35 @@ def _make_agent(**kwargs):
             "neuroticism": 0.3,
         },
         "background": "A friendly test agent",
-        "values": ["honesty", "curiosity"],
+        "values": {"gender": "female"},
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
 
 def test_build_system_prompt_basic():
-    """System prompt includes system section and instruction."""
+    """System prompt includes core rules and response instruction sections."""
     agent = _make_agent()
     prompt = build_system_prompt(agent)
-    assert "## System" in prompt
-    assert "## Instruction" in prompt
-    assert "AI companion" in prompt
+    assert "## 核心规则" in prompt
+    assert "## 回复要求" in prompt
 
 
 def test_build_system_prompt_with_personality():
     """Personality section appears when agent has personality."""
     agent = _make_agent()
     prompt = build_system_prompt(agent)
-    assert "## Personality Profile" in prompt
+    assert "## 你的身份" in prompt
     assert "TestBot" in prompt
-    assert "Openness: 0.8" in prompt
-    assert "Extraversion: 0.6" in prompt
+    assert "性格" in prompt
 
 
 def test_build_system_prompt_no_personality():
-    """No personality section when agent has no personality."""
+    """Still has identity section even without personality data."""
     agent = _make_agent(personality=None)
     prompt = build_system_prompt(agent)
-    assert "## Personality Profile" not in prompt
+    assert "## 你的身份" in prompt
+    assert "TestBot" in prompt
 
 
 def test_build_system_prompt_with_emotion():
@@ -53,8 +52,8 @@ def test_build_system_prompt_with_emotion():
     agent = _make_agent()
     emotion = {"valence": 0.5, "arousal": 0.3, "dominance": 0.7}
     prompt = build_system_prompt(agent, emotion=emotion)
-    assert "## Current Emotion State" in prompt
-    assert "Valence: 0.5" in prompt
+    assert "## 当前情绪" in prompt
+    assert "VAD" in prompt
 
 
 def test_build_system_prompt_with_memories():
@@ -62,7 +61,7 @@ def test_build_system_prompt_with_memories():
     agent = _make_agent()
     memories = ["User likes sushi", "User visited Tokyo"]
     prompt = build_system_prompt(agent, memories=memories)
-    assert "## Relevant Memories" in prompt
+    assert "## 你记得的事情" in prompt
     assert "1. User likes sushi" in prompt
     assert "2. User visited Tokyo" in prompt
 
@@ -76,9 +75,9 @@ def test_build_system_prompt_with_summaries():
         "state": "Current state analysis",
     }
     prompt = build_system_prompt(agent, summaries=summaries)
-    assert "### Conversation Review" in prompt
-    assert "### Memory Distillation" in prompt
-    assert "### Current State" in prompt
+    assert "### 对话回顾" in prompt
+    assert "### 记忆要点" in prompt
+    assert "### 当前状态" in prompt
 
 
 def test_build_system_prompt_with_graph_context():
@@ -89,9 +88,17 @@ def test_build_system_prompt_with_graph_context():
         "entities": ["Tokyo", "sushi"],
     }
     prompt = build_system_prompt(agent, graph_context=graph_context)
-    assert "## Relationship Context" in prompt
+    assert "## 关系上下文" in prompt
     assert "food" in prompt
     assert "Tokyo" in prompt
+
+
+def test_build_system_prompt_with_patience():
+    """Patience instruction appears when provided."""
+    agent = _make_agent()
+    prompt = build_system_prompt(agent, patience_instruction="你对用户有些不满")
+    assert "## 情绪状态提醒" in prompt
+    assert "不满" in prompt
 
 
 def test_build_chat_messages():
