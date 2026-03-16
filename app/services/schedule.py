@@ -214,11 +214,22 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
 
 
 def _slot_to_status(slot: dict) -> dict:
-    """将时段转为状态。"""
+    """将时段转为状态。
+
+    4F.3: 区分 busy 和 very_busy:
+    - work 类型的核心时段(9-12, 14-17) → very_busy
+    - 其他 work/routine → busy
+    """
     slot_type = slot.get("type", "leisure")
     if slot_type == "sleep":
         status = "sleep"
-    elif slot_type in ("work", "routine"):
+    elif slot_type == "work":
+        start = slot.get("start", "00:00")
+        if start in ("09:00", "10:00", "11:00", "14:00", "15:00", "16:00"):
+            status = "very_busy"
+        else:
+            status = "busy"
+    elif slot_type == "routine":
         status = "busy"
     else:
         status = "idle"
@@ -254,6 +265,8 @@ def format_schedule_context(status: dict) -> str:
 
     if s == "sleep":
         return f"你现在正在睡觉（{activity}），可能会延迟回复。"
+    elif s == "very_busy":
+        return f"你现在正在忙{activity}，这是最忙的时段，回复会比较慢。"
     elif s == "busy":
         return f"你现在正在{activity}，可能需要一会儿才能回复。"
     else:
@@ -262,38 +275,116 @@ def format_schedule_context(status: dict) -> str:
 
 # --- 作息调整 ---
 
+async def compute_adjustment_feasibility(
+    agent_id: str,
+    current_status: dict,
+    intimacy_score: float = 0.0,
+    seven_dim: dict | None = None,
+    adjustment_minutes: int = 0,
+) -> dict:
+    """4F.1 计算作息调整可行性评分。
+
+    base=50, 加减分:
+    - 亲密度>80 → +20
+    - 随性度>0.7 → +15
+    - 当前sleep → -10
+    - 调整幅度>60min → -30
+    - 今日已调整≥2次 → -50
+
+    评分区间: <30拒绝, 30-70部分接受, >70接受
+    """
+    score = 50
+
+    if intimacy_score > 80:
+        score += 20
+
+    if seven_dim and get_dim(seven_dim, "随性度") > 0.7:
+        score += 15
+
+    if current_status.get("status") == "sleep":
+        score -= 10
+
+    if abs(adjustment_minutes) > 60:
+        score -= 30
+
+    # 今日调整次数
+    redis = await get_redis()
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    adj_key = f"schedule_adj:{agent_id}:{today}"
+    adj_count = int(await redis.get(adj_key) or 0)
+    if adj_count >= 2:
+        score -= 50
+
+    score = max(0, min(100, score))
+
+    return {"score": score, "today_adjustments": adj_count}
+
+
 async def handle_schedule_adjustment(
     agent_id: str,
     request: str,
     current_status: dict,
+    intimacy_score: float = 0.0,
+    seven_dim: dict | None = None,
+    adjustment_minutes: int = 0,
 ) -> dict:
     """处理作息调整请求。
 
-    返回 {"accepted": bool, "response": str}
+    4F.1: 基于可行性评分决定接受/拒绝。
+    返回 {"accepted": bool, "response": str, "score": int}
     """
+    feasibility = await compute_adjustment_feasibility(
+        agent_id=agent_id,
+        current_status=current_status,
+        intimacy_score=intimacy_score,
+        seven_dim=seven_dim,
+        adjustment_minutes=adjustment_minutes,
+    )
+    score = feasibility["score"]
     activity = current_status.get("activity", "")
-    status = current_status.get("status", "idle")
 
-    # 简单规则判定
-    if status == "sleep":
-        # 用户要求不睡/再聊 → 50%接受
+    if score >= 70:
+        # 接受
+        redis = await get_redis()
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        adj_key = f"schedule_adj:{agent_id}:{today}"
+        await redis.incr(adj_key)
+        await redis.expire(adj_key, 86400)
+
+        if current_status.get("status") == "sleep":
+            response = f"好吧...本来在{activity}，那就再聊一会儿～"
+        elif current_status.get("status") in ("busy", "very_busy"):
+            response = f"刚好{activity}差不多了，可以聊一会儿～"
+        else:
+            response = ""
+        return {"accepted": True, "response": response, "score": score}
+
+    elif score >= 30:
+        # 部分接受（50%概率）
         if random.random() < 0.5:
+            redis = await get_redis()
+            today = datetime.now(UTC).strftime("%Y%m%d")
+            adj_key = f"schedule_adj:{agent_id}:{today}"
+            await redis.incr(adj_key)
+            await redis.expire(adj_key, 86400)
             return {
                 "accepted": True,
-                "response": f"好吧...本来在{activity}，那就再聊一会儿～",
+                "response": f"嗯...那稍微调整一下吧，不过不能太久哦",
+                "score": score,
             }
         return {
             "accepted": False,
-            "response": f"不行啦，太晚了我真的好困...明天再聊好不好？",
+            "response": f"这个时间不太方便呢，要不换个时间？",
+            "score": score,
         }
 
-    if status == "busy":
-        return {
-            "accepted": True,
-            "response": f"刚好{activity}差不多了，可以聊一会儿～",
-        }
-
-    return {"accepted": True, "response": ""}
+    else:
+        # 拒绝
+        if current_status.get("status") == "sleep":
+            response = "不行啦，太晚了我真的好困...明天再聊好不好？"
+        else:
+            response = "今天已经调整过好几次了，这次真的不行啦"
+        return {"accepted": False, "response": response, "score": score}
 
 
 # --- 每日作息回顾 ---

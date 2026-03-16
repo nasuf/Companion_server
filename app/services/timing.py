@@ -86,6 +86,14 @@ def calculate_status_delay(status: str) -> float:
             return random.uniform(7200, 10800)
         else:
             return random.uniform(10800, 14400)
+    elif status == "very_busy":
+        # 4F.3: 非常忙碌（工作高峰）→ 更长延迟
+        if r < 0.5:
+            return random.uniform(60, 180)
+        elif r < 0.8:
+            return random.uniform(180, 300)
+        else:
+            return random.uniform(300, 600)
     elif status == "busy":
         if r < 0.6:
             return random.uniform(30, 60)
