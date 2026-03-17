@@ -38,8 +38,6 @@ def calculate_reply_delay(
     return max(0.5, min(5.0, delay))
 
 
-
-
 def calculate_typing_duration(response_length: int) -> float:
     """计算模拟打字动画时长（秒）。"""
     chars_per_second = 5 + random.random() * 3
@@ -48,43 +46,42 @@ def calculate_typing_duration(response_length: int) -> float:
 
 
 def calculate_status_delay(status: str) -> float:
-    """根据AI当前状态计算额外延迟（秒）。
+    """根据AI当前状态计算额外延迟（秒）。PRD §6.1.2.2。
 
-    2I.7: 概率分层
-    - idle: 70% 即回(0-1s), 30% 稍延(1-3s)
-    - busy: 60% 短延(30-60s), 30% 中延(60-180s), 10% 长延(180-300s)
-    - sleep: 40% 浅睡(300-1800s), 30% 中睡(1800-7200s), 20% 深睡(7200-10800s), 10% 熟睡(10800-14400s)
+    - idle: 70% 0-3s, 30% 3-10s
+    - busy: 60% 0-60s, 30% 60-180s, 10% 180-300s
+    - very_busy: 50% 0-180s, 30% 180-300s, 20% 300-600s
+    - sleep: 40% 0-1800s, 30% 1800-3600s, 20% 3600-7200s, 10% 7200-14400s
     """
     r = random.random()
     if status == "sleep":
         if r < 0.4:
-            return random.uniform(300, 1800)
+            return random.uniform(0, 1800)
         elif r < 0.7:
-            return random.uniform(1800, 7200)
+            return random.uniform(1800, 3600)
         elif r < 0.9:
-            return random.uniform(7200, 10800)
+            return random.uniform(3600, 7200)
         else:
-            return random.uniform(10800, 14400)
+            return random.uniform(7200, 14400)
     elif status == "very_busy":
-        # 4F.3: 非常忙碌（工作高峰）→ 更长延迟
         if r < 0.5:
-            return random.uniform(60, 180)
+            return random.uniform(0, 180)
         elif r < 0.8:
             return random.uniform(180, 300)
         else:
             return random.uniform(300, 600)
     elif status == "busy":
         if r < 0.6:
-            return random.uniform(30, 60)
+            return random.uniform(0, 60)
         elif r < 0.9:
             return random.uniform(60, 180)
         else:
             return random.uniform(180, 300)
     else:  # idle
         if r < 0.7:
-            return random.uniform(0, 1)
+            return random.uniform(0, 3)
         else:
-            return random.uniform(1, 3)
+            return random.uniform(3, 10)
 
 
 def compute_message_interval_delay(
@@ -92,19 +89,28 @@ def compute_message_interval_delay(
     ai_emotion: dict | None = None,
     current_status: str = "idle",
 ) -> float:
-    """4F.2 消息间隔感知延迟。
+    """消息间隔感知延迟（PRD §6.2.1.2）。
 
-    - <30min → 1-5s (正常聊天)
-    - ≥30min → 查情绪(高兴→90%即回) → 查作息状态
+    - <30min（交流状态）→ 1-5s
+    - ≥30min + 高情绪(arousal>0.6 & pleasure<0.4) → 90% 0-5s, 10% 60-180s
+    - ≥30min + 高兴(pleasure>0.3) → 90% 1-3s
+    - 其他 → 按作息状态延迟
     """
-    if last_message_age_seconds < 1800:  # <30min
+    if last_message_age_seconds < 1800:  # 交流状态
         return random.uniform(1, 5)
 
-    # ≥30min gap: check emotion
+    # 高情绪状态: arousal>0.6 且 pleasure<0.4
     if ai_emotion:
+        arousal = ai_emotion.get("arousal", 0.0)
         pleasure = ai_emotion.get("pleasure", 0.0)
-        if pleasure > 0.3 and random.random() < 0.9:
-            return random.uniform(1, 3)  # happy → quick reply
+        if arousal > 0.6 and pleasure < 0.4:
+            if random.random() < 0.9:
+                return random.uniform(0, 5)
+            return random.uniform(60, 180)
 
-    # Fall back to status-based delay
+    # 高兴快速回复
+    if ai_emotion:
+        if ai_emotion.get("pleasure", 0.0) > 0.3 and random.random() < 0.9:
+            return random.uniform(1, 3)
+
     return calculate_status_delay(current_status)

@@ -38,7 +38,7 @@ from app.services.cache import cache_summarizer
 from app.services.portrait import get_latest_portrait
 from app.services.timing import (
     calculate_reply_delay, calculate_typing_duration,
-    calculate_status_delay, compute_message_interval_delay,
+    compute_message_interval_delay,
 )
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 from app.services.topic import push_topic, format_topic_context
@@ -357,22 +357,20 @@ async def stream_chat_response(
     # --- Send typing event before response ---
     typing_duration = calculate_typing_duration(len(user_message))
 
-    # Status delay (based on AI activity schedule)
-    status_delay = calculate_status_delay(ai_status_str) if ai_status_str != "idle" else 0.0
-
-    # Message interval delay (long gaps → extra delay)
-    interval_delay = 0.0
+    # Message interval delay (PRD §6.2.1.2)
+    # compute_message_interval_delay handles all cases:
+    #   交流状态(<30min) → 1-5s, 高情绪 → 0-5s/60-180s, 其他 → calculate_status_delay
+    status_delay = 0.0
     if len(recent_messages) >= 2:
         prev_time = recent_messages[-2].createdAt
         if prev_time.tzinfo is None:
             prev_time = prev_time.replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - prev_time).total_seconds()
-        if age >= 1800:  # ≥30min gap
-            interval_delay = compute_message_interval_delay(age, emotion, ai_status_str)
+        status_delay = compute_message_interval_delay(age, emotion, ai_status_str)
 
     # Conceptual delay (sent to client) vs actual sleep (server-side cap)
     reply_delay = calculate_reply_delay(len(user_message), agent_personality, seven_dim=seven_dim)
-    conceptual_delay = max(reply_delay, status_delay, interval_delay)
+    conceptual_delay = max(reply_delay, status_delay)
     actual_sleep = min(reply_delay, 2.0)
 
     if conceptual_delay > 5.0:
