@@ -96,6 +96,8 @@ async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
 
 _BANNED_WORDS_PATH = Path(__file__).parent.parent / "data" / "banned_words.json"
 _BANNED_CACHE: dict | None = None
+_BANNED_KEYWORDS_CACHE: list[str] | None = None
+_PINYIN_VARIANTS_CACHE: dict[str, list[str]] | None = None
 
 
 def _load_banned_words() -> dict:
@@ -116,7 +118,11 @@ def _load_banned_words() -> dict:
 
 
 def _get_all_banned_keywords() -> list[str]:
-    """获取所有违禁关键词（展平）。"""
+    """获取所有违禁关键词（展平，带缓存）。"""
+    global _BANNED_KEYWORDS_CACHE
+    if _BANNED_KEYWORDS_CACHE is not None:
+        return _BANNED_KEYWORDS_CACHE
+
     data = _load_banned_words()
     keywords: list[str] = []
     for key, value in data.items():
@@ -124,13 +130,18 @@ def _get_all_banned_keywords() -> list[str]:
             continue
         if isinstance(value, list):
             keywords.extend(value)
+    _BANNED_KEYWORDS_CACHE = keywords
     return keywords
 
 
 def _get_pinyin_variants() -> dict[str, list[str]]:
-    """获取拼音变体映射。"""
+    """获取拼音变体映射（带缓存）。"""
+    global _PINYIN_VARIANTS_CACHE
+    if _PINYIN_VARIANTS_CACHE is not None:
+        return _PINYIN_VARIANTS_CACHE
     data = _load_banned_words()
-    return data.get("pinyin_variants", {})
+    _PINYIN_VARIANTS_CACHE = data.get("pinyin_variants", {})
+    return _PINYIN_VARIANTS_CACHE
 
 
 def check_banned_keywords(message: str) -> list[str]:
@@ -276,6 +287,12 @@ APOLOGY_KEYWORDS = [
     "道歉", "是我不好", "我不该", "请原谅", "别生气",
 ]
 
+
+def has_apology_keyword(message: str) -> bool:
+    """检查消息是否包含道歉关键词。"""
+    return any(kw in message for kw in APOLOGY_KEYWORDS)
+
+
 _APOLOGY_PROMPT = """分析以下消息是否包含道歉或承诺改正。
 
 消息："{message}"
@@ -299,58 +316,34 @@ async def detect_apology(message: str) -> dict:
 
 
 async def handle_apology(agent_id: str, user_id: str) -> int:
-    """处理道歉：非拉黑恢复到60点，拉黑恢复到70点。"""
+    """处理道歉：非拉黑+60点（上限100），拉黑恢复到70点。"""
     current = await get_patience(agent_id, user_id)
     if current <= 0:
         return await set_patience(agent_id, user_id, PATIENCE_NORMAL_MIN)
-    return await set_patience(agent_id, user_id, max(current, 60))
+    return await set_patience(agent_id, user_id, current + 60)
 
 
-# --- 5B.2 正面互动恢复耐心 ---
-
-def _positive_streak_key(agent_id: str, user_id: str) -> str:
-    return f"positive_streak:{agent_id}:{user_id}"
+# --- 正面互动恢复耐心 ---
 
 
 async def check_positive_recovery(
     agent_id: str,
     user_id: str,
-    is_positive: bool,
 ) -> int | None:
-    """5B.2 正面互动恢复耐心值。
+    """正面互动恢复耐心值。
 
-    连续3次正面消息（无违禁词且情绪正面）→ 恢复+5~10点。
+    每条正面消息（无违禁词）→ 恢复+5~10点。
     耐心值≤0（拉黑）时不生效。
-    返回新耐心值，或None（未触发恢复）。
+    仅在消息已通过边界检查后调用。
     """
-    redis = await get_redis()
-    key = _positive_streak_key(agent_id, user_id)
-
-    if not is_positive:
-        await redis.set(key, "0", ex=86400)
-        return None
-
-    # 递增正面计数
-    streak = int(await redis.get(key) or 0) + 1
-    await redis.set(key, str(streak), ex=86400)
-
-    if streak < 3:
-        return None
-
-    # 连续3次正面 → 恢复
     current = await get_patience(agent_id, user_id)
     if current <= 0:
         return None  # 拉黑时不生效
-
     if current >= PATIENCE_MAX:
         return current  # 已满值
 
     recovery = random.randint(5, 10)
     new_val = await set_patience(agent_id, user_id, current + recovery)
-
-    # 重置计数
-    await redis.set(key, "0", ex=86400)
-
     logger.info(
         f"Positive recovery: agent={agent_id} user={user_id} "
         f"+{recovery} → {new_val}"
@@ -436,32 +429,33 @@ def get_patience_prompt_instruction(patience: int) -> str | None:
 
 async def check_boundary(
     agent_id: str, user_id: str, message: str,
-) -> dict | None:
+) -> tuple[dict | None, int]:
     """热路径边界检查。
 
-    返回 {"blocked": True, "response": str, "zone": str} 或 None（通过）。
+    返回 (result, patience)。result 为 dict 或 None（通过）。
     纯关键词匹配 + Redis读取，无LLM调用。
+
+    拉黑状态（耐心值≤0）：任何消息都拦截（PRD §6.5.2.4）。
     """
-    hits = check_banned_keywords(message)
-    if not hits:
-        return None
-
     patience = await get_patience(agent_id, user_id)
-    zone = get_patience_zone(patience)
-
-    if zone == "blocked":
+    if patience <= 0:
         return {
             "blocked": True,
             "response": generate_boundary_response("blocked"),
-            "zone": zone,
-        }
+            "zone": "blocked",
+        }, patience
 
+    hits = check_banned_keywords(message)
+    if not hits:
+        return None, patience
+
+    zone = get_patience_zone(patience)
     return {
         "blocked": False,
         "response": generate_boundary_response(zone),
         "zone": zone,
         "hits": hits,
-    }
+    }, patience
 
 
 # --- 后台异步处理：扣分 + 攻击记录 ---
@@ -479,7 +473,7 @@ async def process_boundary_violation(
     intent = intent_result.get("intent", "none")
     confidence = intent_result.get("confidence", 0.0)
 
-    if intent == "none" or confidence < 0.6:
+    if intent == "none" or confidence < 0.8:
         return
 
     if intent == "attack_third":

@@ -155,15 +155,15 @@ class TestHandleApology:
         val = await handle_apology("agent1", "user1")
         assert val == PATIENCE_NORMAL_MIN  # 70
 
-    async def test_apology_from_low_restores_to_60(self, patch_boundary_redis):
+    async def test_apology_from_low_adds_60(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "20"
         val = await handle_apology("agent1", "user1")
-        assert val == 60
+        assert val == 80  # 20 + 60
 
-    async def test_apology_from_high_keeps_current(self, patch_boundary_redis):
+    async def test_apology_from_high_caps_at_100(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "80"
         val = await handle_apology("agent1", "user1")
-        assert val == 80
+        assert val == 100  # min(80 + 60, 100)
 
 
 # --- check_boundary (热路径) ---
@@ -171,20 +171,32 @@ class TestHandleApology:
 @pytest.mark.asyncio
 class TestCheckBoundary:
     async def test_no_banned_words_returns_none(self, patch_boundary_redis):
-        result = await check_boundary("agent1", "user1", "你好")
+        result, patience = await check_boundary("agent1", "user1", "你好")
         assert result is None
+        assert patience == 100
 
     async def test_banned_word_normal_zone(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "80"
-        result = await check_boundary("agent1", "user1", "你这个垃圾AI")
+        result, patience = await check_boundary("agent1", "user1", "你这个垃圾AI")
         assert result is not None
         assert result["blocked"] is False
         assert result["zone"] == "normal"
         assert "垃圾AI" in result["hits"]
+        assert patience == 80
 
     async def test_banned_word_blocked_zone(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "0"
-        result = await check_boundary("agent1", "user1", "你这个垃圾AI")
+        result, patience = await check_boundary("agent1", "user1", "你这个垃圾AI")
         assert result is not None
         assert result["blocked"] is True
         assert result["zone"] == "blocked"
+        assert patience == 0
+
+    async def test_clean_message_blocked_zone(self, patch_boundary_redis):
+        """Blocked users are intercepted even with clean messages (PRD §6.5.2.4)."""
+        patch_boundary_redis.get.return_value = "0"
+        result, patience = await check_boundary("agent1", "user1", "你好")
+        assert result is not None
+        assert result["blocked"] is True
+        assert result["zone"] == "blocked"
+        assert patience == 0
