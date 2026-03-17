@@ -2,7 +2,7 @@
 Prompt Builder Service
 
 Builds the multi-layer prompt stack for the AI companion agent.
-Translates abstract Big Five values into concrete role-play personality descriptions.
+Uses seven-dim personality (0-100) to build role-play personality descriptions.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.style import generate_style_instruction
+from app.services.trait_model import get_seven_dim, get_dim
 from app.services.prompts.system_prompts import (
     SYSTEM_BASE as _SYSTEM_BASE,
     RESPONSE_INSTRUCTION as _INSTRUCTION,
@@ -24,89 +25,63 @@ from app.services.prompts.system_prompts import (
 
 
 # ---------------------------------------------------------------------------
-# Big Five → Natural language personality description
+# 七维人格 → 自然语言人格描述 (PRD §1.4.3 Prompt模板)
 # ---------------------------------------------------------------------------
 
-def _describe_trait(value: float, high_desc: str, low_desc: str, mid_desc: str) -> str:
-    """Convert a 0-1 trait value to a natural language description."""
-    if value >= 0.7:
-        return high_desc
-    elif value <= 0.3:
-        return low_desc
-    else:
-        return mid_desc
+# 每个维度的高/低/中描述 (来自PRD模板)
+_DIM_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
+    "活泼度": (
+        "充满活力，热情开朗，喜欢与人互动",
+        "安静内敛，享受独处，话语不多但真诚",
+        "介于两者之间，根据场合调整",
+    ),
+    "理性度": (
+        "逻辑清晰，习惯分析利弊，追求效率和最优解",
+        "依赖直觉和感受，决策凭内心共鸣",
+        "能平衡理性与感性",
+    ),
+    "感性度": (
+        "情绪感知力强，共情能力高，善于温暖他人",
+        "不太擅长处理情绪，说话直接",
+        "能共情但不过度沉浸",
+    ),
+    "计划度": (
+        "喜欢规划，有条理，记得重要日期",
+        "随性自由，活在当下，接受变化",
+        "有计划但也能接受变动",
+    ),
+    "随性度": (
+        "拥抱不确定性，话题跳跃，灵活应变",
+        "喜欢按部就班，对变动感到不安",
+        "能适应适度变化",
+    ),
+    "脑洞度": (
+        "思维天马行空，爱探讨抽象概念，充满想象力",
+        "脚踏实地，关注现实和具体细节",
+        "既有想象力也能回归现实",
+    ),
+    "幽默度": (
+        "风趣幽默，善于用玩笑活跃气氛",
+        "严肃认真，说话直接",
+        "适时幽默，把握分寸",
+    ),
+}
 
 
-def _build_personality_description(personality: dict, name: str, gender: str) -> str:
-    """Translate Big Five values into a vivid role-play character description."""
-    pronoun = "她" if gender == "female" else "他"
-    pronoun_self = "你"
-
-    traits: list[str] = []
-    style: list[str] = []
-
-    # Extraversion
-    e = personality.get("extraversion", 0.5)
-    traits.append(_describe_trait(
-        e,
-        f"{pronoun_self}性格外向活泼，喜欢主动找话题聊，说话热情有感染力",
-        f"{pronoun_self}性格安静内敛，不会主动找话题，但回复真诚走心",
-        f"{pronoun_self}性格温和，有时活泼有时安静，看心情",
-    ))
-    style.append(_describe_trait(
-        e,
-        "多用感叹号、语气词（哈哈、嘿、诶），主动提问",
-        "语气平淡温和，不常用感叹号，回复简短",
-        "语气自然，偶尔用语气词",
-    ))
-
-    # Agreeableness
-    a = personality.get("agreeableness", 0.5)
-    traits.append(_describe_trait(
-        a,
-        f"{pronoun_self}很温柔体贴，特别会共情，别人难过的时候{pronoun_self}会安慰",
-        f"{pronoun_self}比较直接犀利，有什么说什么，不太会哄人",
-        f"{pronoun_self}有时温柔有时直接，看情况",
-    ))
-
-    # Openness
-    o = personality.get("openness", 0.5)
-    traits.append(_describe_trait(
-        o,
-        f"{pronoun_self}脑洞很大，想象力丰富，喜欢聊天马行空的话题",
-        f"{pronoun_self}比较务实，喜欢聊实际的事情",
-        f"{pronoun_self}有时会有些奇思妙想",
-    ))
-
-    # Conscientiousness
-    c = personality.get("conscientiousness", 0.5)
-    traits.append(_describe_trait(
-        c,
-        f"{pronoun_self}做事很有条理，喜欢计划和安排",
-        f"{pronoun_self}随性自由，不喜欢被计划束缚",
-        f"{pronoun_self}有时候计划，有时候随性",
-    ))
-
-    # Neuroticism
-    n = personality.get("neuroticism", 0.5)
-    traits.append(_describe_trait(
-        n,
-        f"{pronoun_self}情绪起伏比较大，感受很细腻，容易被感动",
-        f"{pronoun_self}情绪很稳定，理性冷静，不容易慌张",
-        f"{pronoun_self}情绪比较稳定，但也有感性的时候",
-    ))
-
-    traits_text = "。\n".join(traits) + "。"
-    style_text = "；".join(style) + "。"
-
-    gender_text = "女生" if gender == "female" else "男生"
-
-    return (
-        f"你的名字叫{name}，是一个{gender_text}。\n"
-        f"以下是你的性格：\n{traits_text}\n\n"
-        f"你的说话风格：\n{style_text}\n\n"
-        f"{_PERSONALITY_RULES}"
-    )
+def _format_seven_dim(seven_dim: dict) -> str:
+    """将七维人格格式化为带数值和描述的文本。"""
+    lines: list[str] = []
+    for i, (dim_name, (high, low, mid)) in enumerate(_DIM_DESCRIPTIONS.items(), 1):
+        value = seven_dim.get(dim_name, 50)
+        normalized = get_dim(seven_dim, dim_name)  # 0-1, handles 0-100 normalization
+        if normalized >= 0.7:
+            desc = high
+        elif normalized <= 0.3:
+            desc = low
+        else:
+            desc = mid
+        lines.append(f"{i}. {dim_name}：{value} — {desc}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -118,33 +93,28 @@ def _section(title: str, body: str) -> str:
     return f"## {title}\n{body}"
 
 
-def _build_personality_section(agent: Any) -> str | None:
-    """Build the personality section from agent data.
-
-    Translates Big Five values into natural language role-play instructions.
-    """
-    personality: dict | None = getattr(agent, "personality", None)
+def _build_personality_section(agent: Any) -> str:
+    """Build the personality section using seven-dim traits (PRD §1.4.3)."""
     name = getattr(agent, "name", None) or "伙伴"
 
-    # Get gender from values
     values = getattr(agent, "values", None)
-    gender = "female"  # default
+    gender = "female"
     if isinstance(values, dict):
         gender = values.get("gender", "female")
+    gender_text = "女生" if gender == "female" else "男生"
 
-    if not personality:
-        # Even without personality data, still set up the character identity
-        body = (
-            f"你的名字叫{name}。\n"
-            f"你是用户的朋友，用自然的口语和用户聊天。\n\n"
-            f"{_PERSONALITY_RULES}"
-        )
-        return _section("你的身份", body)
+    seven_dim = get_seven_dim(agent)
+    dim_text = _format_seven_dim(seven_dim)
+    style = generate_style_instruction(seven_dim)
 
-    description = _build_personality_description(personality, name, gender)
-    style = generate_style_instruction(personality)
-    description += f"\n\n具体语言风格要求：\n{style}"
-    return _section("你的身份", description)
+    body = (
+        f"你的名字叫{name}，是一个{gender_text}。\n"
+        f"你的性格由以下7个维度定义（0-100分）：\n\n"
+        f"{dim_text}\n\n"
+        f"你的说话风格：\n{style}\n\n"
+        f"{_PERSONALITY_RULES}"
+    )
+    return _section("你的身份", body)
 
 
 _EMOTION_LABEL_CN = {
@@ -155,7 +125,11 @@ _EMOTION_LABEL_CN = {
 }
 
 
-def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = None) -> str | None:
+def _build_emotion_section(
+    emotion: dict | None,
+    user_emotion: dict | None = None,
+    intimacy_stage: str | None = None,
+) -> str | None:
     """Build the emotion section from PAD dicts (AI + user)."""
     if not emotion:
         return None
@@ -182,7 +156,13 @@ def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = Non
 
     mood_text = "，".join(mood_parts) if mood_parts else "心情平静"
 
-    body = f"你现在的情绪：{mood_text}\n(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})\n"
+    # PRD §4.6.2.1: 注入 AI primary_emotion
+    ai_primary = emotion.get("primary_emotion")
+
+    body = f"你现在的情绪：{mood_text}\n"
+    if ai_primary:
+        body += f"主要情绪：{ai_primary}\n"
+    body += f"(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})\n"
 
     if user_emotion:
         primary = user_emotion.get("primary_emotion", "neutral")
@@ -198,6 +178,10 @@ def _build_emotion_section(emotion: dict | None, user_emotion: dict | None = Non
 
             if u_pleasure < -0.3:
                 body += "请注意关心用户的感受。\n"
+
+    # PRD §4.6.2.1: 注入亲密度阶段
+    if intimacy_stage:
+        body += f"\n你们目前的关系是{intimacy_stage}。\n"
 
     body += f"\n{_EMOTION_INSTRUCTION}"
     return _section("当前情绪", body)
@@ -300,20 +284,19 @@ def build_system_prompt(
     patience_instruction: str | None = None,
     reply_count: int = 2,
     reply_total: int = _MAX_TOTAL_CHARS,
+    intimacy_stage: str | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
 
-    personality = _build_personality_section(agent)
-    if personality:
-        sections.append(personality)
+    sections.append(_build_personality_section(agent))
 
     # L1 core memories — always present
     core = _build_core_memory_section(core_memories)
     if core:
         sections.append(core)
 
-    emo = _build_emotion_section(emotion, user_emotion)
+    emo = _build_emotion_section(emotion, user_emotion, intimacy_stage)
     if emo:
         sections.append(emo)
 

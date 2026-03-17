@@ -48,7 +48,7 @@ from app.services.boundary import (
     has_apology_keyword, check_positive_recovery, get_patience_prompt_instruction,
     PATIENCE_MAX,
 )
-from app.services.intimacy import get_topic_intimacy
+from app.services.intimacy import get_topic_intimacy, get_topic_depth
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.conversation_end import check_conversation_end
 from app.services.emoji import should_add_emoji, pick_one_emoji
@@ -266,13 +266,20 @@ async def stream_chat_response(
             return await get_cached_schedule(agent_id)
         return None
 
-    retrieval_result, emotion, summaries, core_memories, portrait, schedule = await asyncio.gather(
+    async def _load_topic_intimacy():
+        """Load topic intimacy score for prompt injection."""
+        if agent_id and user_id:
+            return await get_topic_intimacy(agent_id, user_id)
+        return 50.0
+
+    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy = await asyncio.gather(
         _do_retrieval(),
         _load_cached_emotion(),
         _load_cached_summaries(),
         _load_core_memories(),
         _load_portrait(),
         _load_schedule(),
+        _load_topic_intimacy(),
         return_exceptions=True,
     )
 
@@ -305,6 +312,13 @@ async def stream_chat_response(
         logger.warning(f"Loading schedule failed: {schedule}")
         schedule = None
 
+    if isinstance(topic_intimacy, Exception):
+        logger.warning(f"Loading topic intimacy failed: {topic_intimacy}")
+        topic_intimacy = 50.0
+
+    # --- Intimacy stage for prompt (PRD §4.6.2.1) ---
+    intimacy_stage = get_topic_depth(topic_intimacy).get("depth")
+
     # --- AI status context from schedule (pure computation) ---
     schedule_context = None
     ai_status = get_current_status(schedule) if schedule else None
@@ -336,6 +350,7 @@ async def stream_chat_response(
         patience_instruction=patience_instruction,
         reply_count=reply_count,
         reply_total=max_total,
+        intimacy_stage=intimacy_stage,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
@@ -431,6 +446,7 @@ async def stream_chat_response(
         has_deletion_keyword=has_deletion_keyword,
         cached_emotion=emotion,
         seven_dim=seven_dim,
+        topic_intimacy=topic_intimacy,
     ))
 
 
@@ -446,6 +462,7 @@ async def _background_post_process(
     has_deletion_keyword: bool = False,
     cached_emotion: dict | None = None,
     seven_dim: dict | None = None,
+    topic_intimacy: float = 50.0,
 ) -> None:
     """Run all background tasks after response is sent.
 
@@ -458,14 +475,6 @@ async def _background_post_process(
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
 
         # Run all background tasks concurrently
-        # Load topic intimacy for emotion fusion
-        topic_intimacy = 50.0
-        if agent_id:
-            try:
-                topic_intimacy = await get_topic_intimacy(agent_id, user_id)
-            except Exception:
-                pass
-
         tasks = [
             _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, seven_dim),
             _bg_summarizer(full_messages, user_message, memory_strings),
