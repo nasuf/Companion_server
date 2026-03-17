@@ -17,6 +17,8 @@ from app.services.prompts.system_prompts import (
     PERSONALITY_RULES as _PERSONALITY_RULES,
     MEMORY_INSTRUCTION as _MEMORY_INSTRUCTION,
     MEMORY_TOKEN_BUDGET,
+    MAX_PER_REPLY as _MAX_PER_REPLY,
+    MAX_TOTAL_CHARS as _MAX_TOTAL_CHARS,
     MAX_RECENT_MESSAGES,
 )
 
@@ -296,6 +298,8 @@ def build_system_prompt(
     user_emotion: dict | None = None,
     schedule_context: str | None = None,
     patience_instruction: str | None = None,
+    reply_count: int = 2,
+    reply_total: int = _MAX_TOTAL_CHARS,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
@@ -339,7 +343,7 @@ def build_system_prompt(
     if patience_instruction:
         sections.append(_section("情绪状态提醒", patience_instruction))
 
-    sections.append(_section("回复要求", _INSTRUCTION))
+    sections.append(_section("回复要求", _INSTRUCTION.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY)))
 
     return "\n\n".join(sections)
 

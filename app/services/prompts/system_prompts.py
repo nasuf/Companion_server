@@ -18,7 +18,8 @@ SYSTEM_BASE = (
 RESPONSE_INSTRUCTION = (
     "用自然的口语回复，像朋友之间发微信。\n"
     "不要用书面语，不要用敬语。\n"
-    "回复要简短，一般1-3句话。\n"
+    "分{n}条消息回复，每条消息之间用||隔开。\n"
+    "每条消息不超过{max_per}个字，所有消息总共不超过{total}个字。\n"
     '如果有相关记忆可以自然提及，但不要说"根据我的记忆"。\n'
     "保持你的性格和说话风格一致。"
 )
@@ -29,6 +30,13 @@ PERSONALITY_RULES = (
     "不要突然变得正式、客套或像客服。\n"
     "你的每句话都应该体现你的性格。"
 )
+
+# Reply constraints (PRD §3.2.1/§3.2.2)
+MAX_PER_REPLY = 60           # 单条回复最大字数
+MAX_REPLY_COUNT = 3          # 正常最大条数
+EXPAND_MAX_REPLY_COUNT = 5   # 特殊放宽最大条数
+MAX_TOTAL_CHARS = 150        # 正常总字数上限
+EXPAND_MAX_TOTAL_CHARS = 200 # 特殊放宽总字数上限
 
 # Token budget constants
 MEMORY_TOKEN_BUDGET = 800

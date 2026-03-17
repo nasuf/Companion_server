@@ -10,6 +10,8 @@ Background (fire-and-forget, after response):
 import asyncio
 import json
 import logging
+import random
+import re
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
@@ -18,6 +20,10 @@ from prisma import Json
 from app.db import db
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.prompt_builder import build_system_prompt, build_chat_messages
+from app.services.prompts.system_prompts import (
+    MAX_PER_REPLY, MAX_REPLY_COUNT, EXPAND_MAX_REPLY_COUNT,
+    MAX_TOTAL_CHARS, EXPAND_MAX_TOTAL_CHARS,
+)
 from app.services.memory.hybrid_retrieval import hybrid_retrieve
 from app.services.memory.pipeline import process_memory_pipeline
 from app.services.summarizer import summarize
@@ -28,7 +34,7 @@ from app.services.emotion import (
     update_emotion_state,
     save_ai_emotion,
 )
-from app.services.cache import cache_summarizer, cache_set_summarizer
+from app.services.cache import cache_summarizer
 from app.services.portrait import get_latest_portrait
 from app.services.timing import (
     calculate_reply_delay, calculate_typing_duration,
@@ -59,6 +65,61 @@ def _fire_background(coro) -> None:
     """Schedule a background coroutine as a fire-and-forget task."""
     task = asyncio.create_task(coro)
     task.add_done_callback(_on_task_error)
+
+
+# --- Multi-reply split & validate (PRD §3.2.1/§3.2.2) ---
+
+_SENTENCE_END = re.compile(r'[。！？…～~!?]+')
+
+_MORE_KEYWORDS = ["多说", "详细", "展开", "继续说", "说多点", "多聊聊"]
+
+
+def truncate_at_sentence(text: str, max_len: int) -> str:
+    """截断至max_len内最后一个句子边界。"""
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    match = None
+    for m in _SENTENCE_END.finditer(truncated):
+        match = m
+    if match and match.end() > max_len // 2:
+        return truncated[:match.end()]
+    return truncated
+
+
+def split_and_validate_replies(
+    raw: str,
+    max_count: int = MAX_REPLY_COUNT,
+    max_per_reply: int = MAX_PER_REPLY,
+    max_total: int = MAX_TOTAL_CHARS,
+) -> list[str]:
+    """按||分割LLM输出，校验条数/单条长度/总长度。"""
+    parts = [p.strip() for p in raw.split("||") if p.strip()]
+    if not parts:
+        return [raw.strip() or "..."]
+    parts = parts[:max_count]
+    parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
+    result: list[str] = []
+    total = 0
+    for p in parts:
+        if total + len(p) > max_total:
+            remaining = max_total - total
+            if remaining > 5:
+                result.append(truncate_at_sentence(p, remaining))
+            break
+        result.append(p)
+        total += len(p)
+    return result or [parts[0][:max_per_reply]]
+
+
+def detect_special_expand(message: str, emotion: dict | None) -> bool:
+    """检测是否需要放宽回复限制（用户要求多说 或 高唤醒+负面情绪）。"""
+    if any(kw in message for kw in _MORE_KEYWORDS):
+        return True
+    if emotion:
+        if emotion.get("arousal", 0.5) > 0.7 and emotion.get("pleasure", 0.0) < -0.3:
+            return True
+    return False
 
 
 async def stream_chat_response(
@@ -93,7 +154,7 @@ async def stream_chat_response(
                     "metadata": Json({"boundary": True, "zone": boundary_result["zone"]}),
                 }
             )
-            yield {"event": "token", "data": json.dumps({"token": response})}
+            yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
             yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
             # Background: classify + deduct patience
             _fire_background(process_boundary_violation(agent_id, user_id, user_message))
@@ -234,6 +295,12 @@ async def stream_chat_response(
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
 
+    # --- Multi-reply parameters (PRD §3.2.1) ---
+    is_expand = detect_special_expand(user_message, emotion)
+    reply_count = random.randint(1, MAX_REPLY_COUNT)
+    max_reply_count = EXPAND_MAX_REPLY_COUNT if is_expand else MAX_REPLY_COUNT
+    max_total = EXPAND_MAX_TOTAL_CHARS if is_expand else MAX_TOTAL_CHARS
+
     # Build prompt (pure string operations — instant)
     system_prompt = build_system_prompt(
         agent=agent,
@@ -247,6 +314,8 @@ async def stream_chat_response(
         user_emotion=prev_user_emotion,
         schedule_context=schedule_context,
         patience_instruction=patience_instruction,
+        reply_count=reply_count,
+        reply_total=max_total,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 
@@ -276,7 +345,7 @@ async def stream_chat_response(
     yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
     await asyncio.sleep(actual_sleep)
 
-    # --- Stream response from large model (the ONLY LLM call in hot path) ---
+    # --- Collect full LLM response (the ONLY LLM call in hot path) ---
     model = get_chat_model()
     lc_messages = convert_messages(chat_messages)
 
@@ -285,27 +354,30 @@ async def stream_chat_response(
         token = chunk.content
         if token:
             response_chunks.append(token)
-            yield {"event": "token", "data": json.dumps({"token": token})}
 
-    full_response = "".join(response_chunks)
+    raw_response = "".join(response_chunks)
 
-    # Save assistant message
-    await db.message.create(
-        data={
-            "conversation": {"connect": {"id": conversation_id}},
-            "role": "assistant",
-            "content": full_response,
-            "metadata": Json({}),
-        }
-    )
+    # --- Split & validate into multiple replies (PRD §3.2.1/§3.2.2) ---
+    replies = split_and_validate_replies(raw_response, max_reply_count, MAX_PER_REPLY, max_total)
 
-    # Update conversation title if first exchange
+    # --- Yield reply events (staggered for UX) ---
+    for i, reply_text in enumerate(replies):
+        if i > 0:
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+        yield {"event": "reply", "data": json.dumps({"text": reply_text, "index": i})}
+
+    # Save all replies to DB in background (don't block SSE stream)
+    _fire_background(_save_replies(conversation_id, replies))
+
+    full_response = " ".join(replies)
+
+    # Update conversation title if first exchange (non-blocking)
     if len(recent_messages) <= 1:
         title = user_message[:50] + ("..." if len(user_message) > 50 else "")
-        await db.conversation.update(
+        _fire_background(db.conversation.update(
             where={"id": conversation_id},
             data={"title": title},
-        )
+        ))
 
     yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
 
@@ -414,6 +486,22 @@ async def _bg_summarizer(
             logger.debug("Background summarizer completed and cached")
     except Exception as e:
         logger.warning(f"Background summarizer failed: {e}")
+
+
+async def _save_replies(conversation_id: str, replies: list[str]) -> None:
+    """Save split replies as individual DB messages."""
+    try:
+        for i, text in enumerate(replies):
+            await db.message.create(
+                data={
+                    "conversation": {"connect": {"id": conversation_id}},
+                    "role": "assistant",
+                    "content": text,
+                    "metadata": Json({"reply_index": i}),
+                }
+            )
+    except Exception as e:
+        logger.error(f"Failed to save replies: {e}")
 
 
 async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
