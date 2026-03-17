@@ -24,6 +24,7 @@ from app.services.schedule import (
 from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive import generate_proactive_message
+from app.services.aggregation import scan_expired
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,15 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # 12E: Message aggregation scan every second
+    scheduler.add_job(
+        _run_aggregation_scan,
+        "interval",
+        seconds=1,
+        id="aggregation_scan",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -304,6 +314,33 @@ async def _run_emotion_decay():
     await _run_for_all_agents(
         _decay, concurrency=5, task_name="Emotion decay",
     )
+
+
+async def _run_aggregation_scan():
+    """12E: 扫描到期的碎片化聚合窗口，触发合并处理。"""
+    from app.services.chat_service import stream_chat_response
+    from app.db import db
+
+    try:
+        expired = await scan_expired()
+        for user_id, combined_text, conv_id in expired:
+            conv = await db.conversation.find_unique(
+                where={"id": conv_id},
+                include={"agent": True},
+            )
+            if not conv or not conv.agent:
+                continue
+            # 消费generator以触发处理（无SSE连接，结果存DB）
+            async for _ in stream_chat_response(
+                conversation_id=conv_id,
+                user_message=combined_text,
+                agent=conv.agent,
+                user_id=user_id,
+            ):
+                pass
+            logger.debug(f"Aggregation triggered for user {user_id}: '{combined_text}'")
+    except Exception as e:
+        logger.warning(f"Aggregation scan failed: {e}")
 
 
 def shutdown_scheduler():

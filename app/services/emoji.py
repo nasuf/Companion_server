@@ -65,3 +65,27 @@ def recommend_emoji(
     return random.sample(pool, min(count, len(pool)))
 
 
+def should_add_emoji(arousal: float = 0.0) -> bool:
+    """PRD §3.3.2: P = min(0.8, max(0, P_base(0~0.4) + A×0.5))"""
+    p_base = random.uniform(0, 0.4)
+    p_final = min(0.8, max(0, p_base + arousal * 0.5))
+    return random.random() < p_final
+
+
+def pick_one_emoji(
+    pleasure: float = 0.0,
+    arousal: float = 0.0,
+    primary_emotion: str | None = None,
+) -> str:
+    """从推荐列表中随机选一个emoji。"""
+    candidates = recommend_emoji(pleasure, arousal, primary_emotion, count=3)
+    return random.choice(candidates) if candidates else ""
+
+
+def should_add_sticker(arousal: float = 0.0) -> bool:
+    """PRD §3.3.3: P = min(0.7, max(0, P_base(0~0.4) + A×0.4))"""
+    p_base = random.uniform(0, 0.4)
+    p_final = min(0.7, max(0, p_base + arousal * 0.4))
+    return random.random() < p_final
+
+

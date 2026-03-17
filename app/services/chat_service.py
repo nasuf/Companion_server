@@ -50,6 +50,8 @@ from app.services.boundary import (
 )
 from app.services.intimacy import get_topic_intimacy
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
+from app.services.conversation_end import check_conversation_end
+from app.services.emoji import should_add_emoji, pick_one_emoji
 from app.services.trait_model import get_seven_dim
 
 logger = logging.getLogger(__name__)
@@ -167,6 +169,24 @@ async def stream_chat_response(
             if boundary_result.get("zone") == "blocked" and has_apology_keyword(user_message):
                 _fire_background(_bg_apology_check(agent_id, user_id, user_message))
             return
+
+    # --- Conversation end detection (PRD §3.2.3, keyword trigger + LLM farewell) ---
+    if check_conversation_end(user_message):
+        farewell_prompt = build_system_prompt(agent=agent, reply_count=1, reply_total=60)
+        farewell_prompt += (
+            "\n\n## 特殊指令\n"
+            "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。"
+        )
+        model = get_chat_model()
+        result = await model.ainvoke(convert_messages([
+            {"role": "system", "content": farewell_prompt},
+            {"role": "user", "content": user_message},
+        ]))
+        farewell = result.content.strip().split("||")[0][:60]
+        _fire_background(_save_replies(conversation_id, [farewell]))
+        yield {"event": "reply", "data": json.dumps({"text": farewell, "index": 0})}
+        yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+        return
 
     # Load recent messages (for prompt context)
     recent_messages = await db.message.find_many(
@@ -360,11 +380,28 @@ async def stream_chat_response(
     # --- Split & validate into multiple replies (PRD §3.2.1/§3.2.2) ---
     replies = split_and_validate_replies(raw_response, max_reply_count, MAX_PER_REPLY, max_total)
 
-    # --- Yield reply events (staggered for UX) ---
+    # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
+    ai_arousal = emotion.get("arousal", 0.0) if isinstance(emotion, dict) else 0.0
+    ai_pleasure = emotion.get("pleasure", 0.0) if isinstance(emotion, dict) else 0.0
+    ai_primary_emotion = emotion.get("primary_emotion") if isinstance(emotion, dict) else None
+
     for i, reply_text in enumerate(replies):
+        # 12C: emoji概率
+        if should_add_emoji(ai_arousal):
+            emoji = pick_one_emoji(ai_pleasure, ai_arousal, ai_primary_emotion)
+            if emoji:
+                reply_text += emoji
+
+        # 12D: 表情包互斥 — 框架预留，sticker资源接入后启用
+        # from app.services.emoji import should_add_sticker
+        # if not added_emoji and not sticker_used and should_add_sticker(ai_arousal):
+        #     data["sticker_url"] = sticker_url
+
         if i > 0:
             await asyncio.sleep(random.uniform(0.3, 0.8))
-        yield {"event": "reply", "data": json.dumps({"text": reply_text, "index": i})}
+
+        data: dict = {"text": reply_text, "index": i}
+        yield {"event": "reply", "data": json.dumps(data)}
 
     # Save all replies to DB in background (don't block SSE stream)
     _fire_background(_save_replies(conversation_id, replies))
