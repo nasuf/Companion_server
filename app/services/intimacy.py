@@ -120,9 +120,9 @@ async def get_topic_intimacy(agent_id: str, user_id: str) -> float:
 # --- 维度计算 ---
 
 async def _compute_interaction_stickiness(
-    agent_id: str, user_id: str, days: int = 7,
+    agent_id: str, user_id: str, days: int = 30,
 ) -> float:
-    """G1 互动粘性(0-1)。对数公式: min(1000, 200*log10(msg_count+1)) / 1000"""
+    """G1 互动粘性(0-1)。PRD §8.3.1: x=近30天平均每日对话轮数, G1=min(1000, 200*log10(x+1))/1000"""
     since = datetime.now(UTC) - timedelta(days=days)
 
     conversations = await db.conversation.find_many(
@@ -139,8 +139,9 @@ async def _compute_interaction_stickiness(
         }
     )
 
-    # G1 对数公式: min(1000, 200*log10(msg_count+1)) / 1000
-    return min(1000, 200 * math.log10(msg_count + 1)) / 1000
+    # PRD §8.3.1: x = 近30天平均每日对话轮数
+    daily_avg = msg_count / days
+    return min(1000, 200 * math.log10(daily_avg + 1)) / 1000
 
 
 async def _compute_self_disclosure(
