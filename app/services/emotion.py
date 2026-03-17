@@ -214,21 +214,22 @@ async def extract_emotion(message: str) -> dict:
 
 # --- 3B.2 融合公式 + 共情向量 ---
 
-# 亲密度→权重表: growth_intimacy ranges → (α, β, γ)
-_FUSION_WEIGHT_TABLE = [
-    (0, 30, 0.5, 0.2, 0.3),
-    (31, 60, 0.4, 0.3, 0.3),
-    (61, 85, 0.3, 0.4, 0.3),
-    (86, 100, 0.2, 0.5, 0.3),
-]
+# 亲密度阶段→融合权重 (α=AI权重, β=用户权重, γ=共情权重)
+# 阶段划分复用 intimacy.RELATIONSHIP_STAGES
+from app.services.intimacy import get_relationship_stage
+
+_STAGE_WEIGHTS: dict[str, tuple[float, float, float]] = {
+    "普通朋友": (0.5, 0.2, 0.3),
+    "好朋友":   (0.4, 0.3, 0.3),
+    "挚友":     (0.3, 0.4, 0.3),
+    "灵魂伴侣": (0.2, 0.5, 0.3),
+}
 
 
 def _get_fusion_weights(topic_intimacy: float) -> tuple[float, float, float]:
     """Get α, β, γ fusion weights based on topic intimacy."""
-    for lo, hi, alpha, beta, gamma in _FUSION_WEIGHT_TABLE:
-        if lo <= topic_intimacy <= hi:
-            return alpha, beta, gamma
-    return 0.2, 0.5, 0.3  # default high intimacy
+    stage = get_relationship_stage(topic_intimacy)
+    return _STAGE_WEIGHTS.get(stage, (0.2, 0.5, 0.3))
 
 
 def update_emotion_state(

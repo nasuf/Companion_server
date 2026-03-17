@@ -48,7 +48,7 @@ from app.services.boundary import (
     has_apology_keyword, check_positive_recovery, get_patience_prompt_instruction,
     PATIENCE_MAX,
 )
-from app.services.intimacy import get_topic_intimacy, get_topic_depth
+from app.services.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.conversation_end import check_conversation_end
 from app.services.emoji import should_add_emoji, pick_one_emoji
@@ -317,7 +317,7 @@ async def stream_chat_response(
         topic_intimacy = 50.0
 
     # --- Intimacy stage for prompt (PRD §4.6.2.1) ---
-    intimacy_stage = get_topic_depth(topic_intimacy).get("depth")
+    intimacy_stage = get_relationship_stage(topic_intimacy)
 
     # --- AI status context from schedule (pure computation) ---
     schedule_context = None

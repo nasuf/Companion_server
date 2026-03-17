@@ -38,6 +38,14 @@ TOPIC_LEVELS = [
     (80, 101, "核心", "深层秘密与脆弱面"),
 ]
 
+# PRD §4.6.2.1: 亲密度阶段标签 (基于topic_intimacy 0-100)
+RELATIONSHIP_STAGES = [
+    (0, 31, "普通朋友"),
+    (31, 61, "好朋友"),
+    (61, 86, "挚友"),
+    (86, 101, "灵魂伴侣"),
+]
+
 
 def get_intimacy_level(score: float) -> dict:
     """返回亲密度等级信息。"""
@@ -53,6 +61,14 @@ def get_topic_depth(score: float) -> dict:
         if lo <= score < hi:
             return {"depth": depth, "label": label, "score": score}
     return {"depth": "核心", "label": "深层秘密与脆弱面", "score": score}
+
+
+def get_relationship_stage(score: float) -> str:
+    """根据话题亲密度(0-100)返回PRD关系阶段标签。"""
+    for lo, hi, stage in RELATIONSHIP_STAGES:
+        if lo <= score < hi:
+            return stage
+    return "灵魂伴侣"
 
 
 # --- Redis 缓存 ---
