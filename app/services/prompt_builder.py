@@ -293,7 +293,6 @@ def build_system_prompt(
     summaries: dict | None = None,
     portrait: str | None = None,
     topic_context: str | None = None,
-    strategy_instruction: str | None = None,
     user_emotion: dict | None = None,
     schedule_context: str | None = None,
     patience_instruction: str | None = None,
@@ -340,11 +339,7 @@ def build_system_prompt(
     if patience_instruction:
         sections.append(_section("情绪状态提醒", patience_instruction))
 
-    # 回复要求 + 策略指令
-    instruction = _INSTRUCTION
-    if strategy_instruction:
-        instruction += f"\n\n本次回复策略：\n{strategy_instruction}"
-    sections.append(_section("回复要求", instruction))
+    sections.append(_section("回复要求", _INSTRUCTION))
 
     return "\n\n".join(sections)
 

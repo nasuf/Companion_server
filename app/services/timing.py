@@ -38,27 +38,6 @@ def calculate_reply_delay(
     return max(0.5, min(5.0, delay))
 
 
-def should_skip_reply(personality: dict, seven_dim: dict | None = None) -> bool:
-    """判断是否"已读未回"。
-
-    2I.2: 随性度×0.2（高随性 → 更高概率已读未回）
-    """
-    if seven_dim:
-        skip_probability = get_dim(seven_dim, "随性度") * 0.2
-    else:
-        spontaneity = personality.get("extraversion", 0.5)
-        skip_probability = (1.0 - spontaneity) * 0.15
-    return random.random() < skip_probability
-
-
-def should_delay_roundtrip(seven_dim: dict | None = None) -> float | None:
-    """2I.3 回马枪延迟：随性度≥0.7时10%概率，返回延迟秒数(30min-2hr)，否则None。"""
-    if not seven_dim:
-        return None
-    spontaneous = get_dim(seven_dim, "随性度")
-    if spontaneous >= 0.7 and random.random() < 0.1:
-        return random.uniform(1800, 7200)  # 30min - 2hr
-    return None
 
 
 def calculate_typing_duration(response_length: int) -> float:

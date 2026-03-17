@@ -65,10 +65,3 @@ def recommend_emoji(
     return random.sample(pool, min(count, len(pool)))
 
 
-def should_include_emoji(personality: dict, arousal: float = 0.0) -> bool:
-    """判断是否应该在回复中包含表情。"""
-    e = personality.get("extraversion", 0.5)
-    n = personality.get("neuroticism", 0.5)
-    # 外向+高情绪表达 → 更常用表情
-    probability = 0.2 + e * 0.3 + n * 0.2 + abs(arousal) * 0.1
-    return random.random() < probability

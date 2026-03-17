@@ -32,12 +32,10 @@ from app.services.cache import cache_summarizer, cache_set_summarizer
 from app.services.portrait import get_latest_portrait
 from app.services.timing import (
     calculate_reply_delay, calculate_typing_duration,
-    should_skip_reply, calculate_status_delay,
-    compute_message_interval_delay,
+    calculate_status_delay, compute_message_interval_delay,
 )
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
-from app.services.topic import push_topic, detect_topic_fatigue, format_topic_context
-from app.services.strategy import decide_strategy, format_strategy_instruction
+from app.services.topic import push_topic, format_topic_context
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
 from app.services.boundary import (
     check_boundary, process_boundary_violation, detect_apology, handle_apology,
@@ -144,8 +142,6 @@ async def stream_chat_response(
     # --- Pre-compute personality and topic fatigue (needed after parallel fetch) ---
     agent_personality = getattr(agent, "personality", None) or {}
     seven_dim = get_seven_dim(agent)
-    recent_user_msgs = [m["content"] for m in messages_dicts if m["role"] == "user"]
-    topic_fatigued = detect_topic_fatigue(topic_info, recent_user_msgs)
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
@@ -235,33 +231,6 @@ async def stream_chat_response(
         schedule_context = format_schedule_context(ai_status)
     ai_status_str = ai_status["status"] if ai_status else "idle"
 
-    # --- Skip reply check (before expensive prompt building) ---
-    if should_skip_reply(agent_personality, seven_dim):
-        yield {"event": "read", "data": json.dumps({"status": "read_no_reply"})}
-        yield {"event": "done", "data": json.dumps({"message_id": "skipped"})}
-        _fire_background(_background_post_process(
-            user_id=user_id, agent_id=agent_id,
-            conversation_id=conversation_id,
-            user_message=user_message, user_message_id=user_message_id,
-            full_response="",
-            messages_dicts=messages_dicts,
-            memory_strings=memory_strings,
-            has_deletion_keyword=has_deletion_keyword,
-            cached_emotion=emotion, seven_dim=seven_dim,
-        ))
-        return
-
-    # --- Strategy decision (pure computation, after emotion is loaded) ---
-    strategy_result = decide_strategy(
-        message=user_message,
-        emotion=emotion,
-        topic_info=topic_info,
-        personality=agent_personality,
-        topic_fatigued=topic_fatigued,
-        seven_dim=seven_dim,
-    )
-    strategy_instruction = format_strategy_instruction(strategy_result)
-
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
 
@@ -275,7 +244,6 @@ async def stream_chat_response(
         summaries=summaries,
         portrait=portrait,
         topic_context=topic_context,
-        strategy_instruction=strategy_instruction,
         user_emotion=prev_user_emotion,
         schedule_context=schedule_context,
         patience_instruction=patience_instruction,
