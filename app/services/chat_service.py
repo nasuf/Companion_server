@@ -441,6 +441,8 @@ async def stream_chat_response(
 
     sticker_used = False  # 一个回合最多一个表情包
 
+    emitted_replies: list[dict] = []
+
     for i, reply_text in enumerate(replies):
         added_emoji = False
         # PRD §3.3.2: emoji概率
@@ -467,10 +469,11 @@ async def stream_chat_response(
         data: dict = {"text": reply_text, "index": i}
         if sticker_url:
             data["sticker_url"] = sticker_url
+        emitted_replies.append(data)
         yield {"event": "reply", "data": json.dumps(data)}
 
     # Save all replies to DB in background (don't block SSE stream)
-    _fire_background(_save_replies(conversation_id, replies))
+    _fire_background(_save_replies(conversation_id, emitted_replies))
 
     full_response = " ".join(replies)
 
@@ -585,16 +588,26 @@ async def _bg_summarizer(
         logger.warning(f"Background summarizer failed: {e}")
 
 
-async def _save_replies(conversation_id: str, replies: list[str]) -> None:
+async def _save_replies(conversation_id: str, replies: list[str | dict]) -> None:
     """Save split replies as individual DB messages."""
     try:
-        for i, text in enumerate(replies):
+        for i, reply in enumerate(replies):
+            if isinstance(reply, dict):
+                text = str(reply.get("text", ""))
+                sticker_url = reply.get("sticker_url")
+                metadata = {"reply_index": i}
+                if sticker_url:
+                    metadata["sticker_url"] = sticker_url
+            else:
+                text = reply
+                metadata = {"reply_index": i}
+
             await db.message.create(
                 data={
                     "conversation": {"connect": {"id": conversation_id}},
                     "role": "assistant",
                     "content": text,
-                    "metadata": Json({"reply_index": i}),
+                    "metadata": Json(metadata),
                 }
             )
     except Exception as e:
