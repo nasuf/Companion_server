@@ -285,6 +285,8 @@ def build_system_prompt(
     reply_count: int = 2,
     reply_total: int = _MAX_TOTAL_CHARS,
     intimacy_stage: str | None = None,
+    time_context: str | None = None,
+    time_memories: list[str] | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
@@ -319,8 +321,19 @@ def build_system_prompt(
     if topic_context:
         sections.append(_section("话题上下文", topic_context))
 
+    # 时间上下文：当前状态 + 时间信息 + 节假日
+    status_parts = []
     if schedule_context:
-        sections.append(_section("当前状态", schedule_context))
+        status_parts.append(schedule_context)
+    if time_context:
+        status_parts.append(time_context)
+    if status_parts:
+        sections.append(_section("当前状态", "\n".join(status_parts)))
+
+    # 时间相关记忆
+    if time_memories:
+        numbered = "\n".join(f"- {m}" for m in time_memories)
+        sections.append(_section("相关时间记忆", f"用户提到的时间对应的记忆：\n{numbered}"))
 
     # 5B.4: 耐心区间语气描述
     if patience_instruction:

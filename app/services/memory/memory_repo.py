@@ -31,6 +31,7 @@ class MemoryRecord:
     importance: float
     mentionCount: int
     isArchived: bool
+    occurTime: datetime | None
     createdAt: datetime
     updatedAt: datetime
 
@@ -48,6 +49,7 @@ def _to_record(row, source: Source) -> MemoryRecord:
         importance=row.importance,
         mentionCount=row.mentionCount,
         isArchived=row.isArchived,
+        occurTime=getattr(row, "occurTime", None),
         createdAt=row.createdAt,
         updatedAt=row.updatedAt,
     )

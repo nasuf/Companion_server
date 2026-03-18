@@ -43,6 +43,8 @@ from app.services.timing import (
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule import get_cached_schedule, get_current_status, format_schedule_context
+from app.services.time_service import build_time_context
+from app.services.time_parser import parse_time_expressions, has_explicit_time
 from app.services.boundary import (
     check_boundary, process_boundary_violation, detect_apology, handle_apology,
     has_apology_keyword, check_positive_recovery, get_patience_prompt_instruction,
@@ -221,6 +223,9 @@ async def stream_chat_response(
     topic_info = await push_topic(conversation_id, user_message)
     topic_context = format_topic_context(topic_info) if topic_info else None
 
+    # --- Time system: parse explicit time expressions (PRD §9.3.2) ---
+    parsed_times = parse_time_expressions(user_message) if has_explicit_time(user_message) else []
+
     # --- Pre-compute personality and topic fatigue (needed after parallel fetch) ---
     agent_personality = getattr(agent, "personality", None) or {}
     seven_dim = get_seven_dim(agent)
@@ -275,7 +280,26 @@ async def stream_chat_response(
             return await get_topic_intimacy(agent_id, user_id)
         return 50.0
 
-    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy = await asyncio.gather(
+    async def _load_time_memories():
+        """Load memories matching parsed time ranges (PRD §9.3.4)."""
+        past_times = [pt for pt in parsed_times if not pt.is_future]
+        if not past_times:
+            return []
+        from app.services.memory.vector_search import search_by_time_range
+        all_rows = await asyncio.gather(
+            *[search_by_time_range(user_id, pt.start, pt.end, limit=5) for pt in past_times]
+        )
+        seen: set[str] = set()
+        results: list[str] = []
+        for rows in all_rows:
+            for r in rows:
+                content = r.get("summary") or r.get("content", "")
+                if content and content not in seen:
+                    seen.add(content)
+                    results.append(content)
+        return results[:10]
+
+    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy, time_memories_result = await asyncio.gather(
         _do_retrieval(),
         _load_cached_emotion(),
         _load_cached_summaries(),
@@ -283,6 +307,7 @@ async def stream_chat_response(
         _load_portrait(),
         _load_schedule(),
         _load_topic_intimacy(),
+        _load_time_memories(),
         return_exceptions=True,
     )
 
@@ -319,6 +344,15 @@ async def stream_chat_response(
         logger.warning(f"Loading topic intimacy failed: {topic_intimacy}")
         topic_intimacy = 50.0
 
+    time_memories: list[str] = []
+    if isinstance(time_memories_result, Exception):
+        logger.warning(f"Loading time memories failed: {time_memories_result}")
+    elif time_memories_result:
+        time_memories = time_memories_result
+
+    # --- Time context for prompt (PRD §9.2) ---
+    time_context = build_time_context()
+
     # --- Intimacy stage for prompt (PRD §4.6.2.1) ---
     intimacy_stage = get_relationship_stage(topic_intimacy)
 
@@ -354,6 +388,8 @@ async def stream_chat_response(
         reply_count=reply_count,
         reply_total=max_total,
         intimacy_stage=intimacy_stage,
+        time_context=time_context,
+        time_memories=time_memories or None,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
 

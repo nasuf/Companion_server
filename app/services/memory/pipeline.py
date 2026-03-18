@@ -5,6 +5,7 @@ Runs as FastAPI BackgroundTasks (non-blocking).
 """
 
 import logging
+from datetime import datetime
 
 from app.services.memory.extraction import extract_memories
 from app.services.memory.filter import should_extract_memory
@@ -52,6 +53,15 @@ async def process_memory_pipeline(
         importance = mem.get("importance", 0.5)
         memory_type = mem.get("type")
 
+        # Parse occur_time from extraction result
+        occur_time: datetime | None = None
+        raw_time = mem.get("occur_time")
+        if raw_time and isinstance(raw_time, str):
+            try:
+                occur_time = datetime.fromisoformat(raw_time)
+            except ValueError:
+                pass
+
         # Adjust importance based on emotion
         emotion = mem.get("emotion")
         if emotion:
@@ -77,6 +87,7 @@ async def process_memory_pipeline(
             level=level,
             importance=importance,
             memory_type=memory_type,
+            occur_time=occur_time,
         )
 
         if memory_id:

@@ -5,6 +5,7 @@ Classifies into L1/L2/L3 levels.
 """
 
 import logging
+from datetime import datetime
 
 from app.db import db
 from app.services.memory import memory_repo
@@ -97,6 +98,7 @@ async def store_memory(
     importance: float = 0.5,
     memory_type: str | None = None,
     source: str = "user",
+    occur_time: datetime | None = None,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -115,8 +117,7 @@ async def store_memory(
         return None
 
     # Store in PostgreSQL (routed to memories_user or memories_ai)
-    memory = await memory_repo.create(
-        source=source,
+    create_data = dict(
         userId=user_id,
         content=content,
         summary=summary or content[:200],
@@ -124,6 +125,9 @@ async def store_memory(
         importance=importance,
         type=memory_type,
     )
+    if occur_time is not None:
+        create_data["occurTime"] = occur_time
+    memory = await memory_repo.create(source=source, **create_data)
 
     # Store embedding
     await store_embedding(memory.id, embedding)

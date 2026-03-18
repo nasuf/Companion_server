@@ -4,6 +4,7 @@ Performs cosine similarity search on memory_embeddings table.
 """
 
 import logging
+from datetime import datetime
 
 from app.db import db
 from app.services.memory.embedding import generate_embedding
@@ -66,3 +67,67 @@ async def search_similar(
     """Search for similar memories by text query (generates embedding first)."""
     embedding = await generate_embedding(query)
     return await search_by_embedding(embedding, user_id, top_k)
+
+
+async def search_by_time_range(
+    user_id: str,
+    start_time: datetime,
+    end_time: datetime,
+    source: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """按时间范围检索记忆（基于 occur_time 字段）。
+
+    PRD §9.3.4: 用户提及过去时间时，召回对应时间段的记忆。
+    """
+    if source == "user":
+        return await db.query_raw(
+            """
+            SELECT id, content, summary, level, importance, type,
+                   occur_time, created_at, 'user' AS source
+            FROM memories_user
+            WHERE user_id = $1 AND is_archived = false
+              AND occur_time >= $2 AND occur_time < $3
+            ORDER BY importance DESC
+            LIMIT $4
+            """,
+            user_id, start_time, end_time, limit,
+        )
+    elif source == "ai":
+        return await db.query_raw(
+            """
+            SELECT id, content, summary, level, importance, type,
+                   occur_time, created_at, 'ai' AS source
+            FROM memories_ai
+            WHERE user_id = $1 AND is_archived = false
+              AND occur_time >= $2 AND occur_time < $3
+            ORDER BY importance DESC
+            LIMIT $4
+            """,
+            user_id, start_time, end_time, limit,
+        )
+    # 查两表
+    return await db.query_raw(
+        """
+        SELECT * FROM (
+            (SELECT id, content, summary, level, importance, type,
+                    occur_time, created_at, 'user' AS source
+             FROM memories_user
+             WHERE user_id = $1 AND is_archived = false
+               AND occur_time >= $2 AND occur_time < $3
+             ORDER BY importance DESC
+             LIMIT $4)
+            UNION ALL
+            (SELECT id, content, summary, level, importance, type,
+                    occur_time, created_at, 'ai' AS source
+             FROM memories_ai
+             WHERE user_id = $1 AND is_archived = false
+               AND occur_time >= $2 AND occur_time < $3
+             ORDER BY importance DESC
+             LIMIT $4)
+        ) combined
+        ORDER BY importance DESC
+        LIMIT $4
+        """,
+        user_id, start_time, end_time, limit,
+    )

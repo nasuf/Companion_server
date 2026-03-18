@@ -26,6 +26,8 @@ from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive import generate_proactive_message
 from app.services.aggregation import scan_expired
+from app.services.trigger_engine import scan_triggers, create_holiday_triggers, scan_birthday_memories
+from app.services.time_service import is_holiday
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +215,36 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # §9.5: Time trigger scan every minute
+    scheduler.add_job(
+        _run_trigger_scan,
+        "interval",
+        minutes=1,
+        id="trigger_scan",
+        replace_existing=True,
+    )
+
+    # §9.6: Holiday trigger check daily at 3:00 AM
+    scheduler.add_job(
+        _run_holiday_check,
+        "cron",
+        hour=3,
+        minute=0,
+        id="holiday_check",
+        replace_existing=True,
+    )
+
+    # §9.6: Birthday memory scan weekly on Sunday at 4:30 AM
+    scheduler.add_job(
+        _run_birthday_scan,
+        "cron",
+        day_of_week="sun",
+        hour=4,
+        minute=30,
+        id="birthday_scan",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -318,6 +350,38 @@ async def _run_emotion_decay():
     await _run_for_all_agents(
         _decay, concurrency=5, task_name="Emotion decay",
     )
+
+
+async def _run_trigger_scan():
+    """§9.5: 扫描到期的时间触发器。"""
+    try:
+        await scan_triggers()
+    except Exception as e:
+        logger.warning(f"Trigger scan failed: {e}")
+
+
+async def _run_holiday_check():
+    """§9.6: 检查今天是否节假日，若是则创建祝福触发器。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.config import settings
+
+    try:
+        now = datetime.now(ZoneInfo(settings.schedule_timezone))
+        holiday = is_holiday(now.date())
+        if holiday:
+            await create_holiday_triggers(now.date().isoformat(), holiday.name)
+            logger.info(f"Holiday triggers created for {holiday.name}")
+    except Exception as e:
+        logger.warning(f"Holiday check failed: {e}")
+
+
+async def _run_birthday_scan():
+    """§9.6: 每周扫描用户记忆中的生日信息，创建生日触发器。"""
+    try:
+        await scan_birthday_memories()
+    except Exception as e:
+        logger.warning(f"Birthday scan failed: {e}")
 
 
 async def _run_aggregation_scan():

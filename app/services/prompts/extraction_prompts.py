@@ -10,6 +10,8 @@ Analyze the conversation and extract structured memory about the user.
 Conversation:
 {conversation}
 
+Current time: {current_time}
+
 Return JSON with this exact schema:
 {{
   "memories": [
@@ -18,6 +20,7 @@ Return JSON with this exact schema:
       "level": 2,
       "importance": 0.8,
       "type": "identity|emotion|preference|life|thought",
+      "occur_time": null,
       "entities": ["entity1"],
       "topics": ["topic1"],
       "emotion": {{
@@ -48,6 +51,11 @@ Memory type definitions:
 - preference: 偏好边界 — 喜恶、在意的事、习惯、兴趣爱好
 - life: 生活记忆 — 事件、日期、日常生活、人际关系动态
 - thought: 思维记忆 — 想法、观点、目标、价值观、规划
+
+Rules for occur_time:
+- If the user mentions a specific time (e.g. "yesterday", "next Friday", "last Christmas"), convert it to ISO format (e.g. "2026-03-17T00:00:00") based on the current time above
+- If the memory describes a future plan/event, set occur_time to that future date
+- If no time information is mentioned, set occur_time to null
 
 Rules for level assignment:
 - Level 1: Core identity (name, birthday, family, job) — importance 0.8-1.0

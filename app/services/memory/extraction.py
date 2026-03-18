@@ -5,7 +5,10 @@ Output: {memories, entities, preferences, topics}
 """
 
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from app.config import settings
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.prompts.extraction_prompts import MEMORY_EXTRACTION_PROMPT as EXTRACTION_PROMPT
 
@@ -18,7 +21,11 @@ async def extract_memories(conversation: str) -> dict:
     Returns dict with keys: memories, entities, preferences, topics.
     """
     model = get_utility_model()
-    prompt = EXTRACTION_PROMPT.format(conversation=conversation)
+    now = datetime.now(ZoneInfo(settings.schedule_timezone))
+    prompt = EXTRACTION_PROMPT.format(
+        conversation=conversation,
+        current_time=now.strftime("%Y-%m-%d %H:%M %A"),
+    )
 
     try:
         result = await invoke_json(model, prompt)

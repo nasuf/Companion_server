@@ -286,8 +286,14 @@ def _slot_to_status(slot: dict) -> dict:
 # --- 作息查询意图识别 ---
 
 _SCHEDULE_QUERY_KEYWORDS = {
-    "current": ["在干嘛", "在做什么", "忙不忙", "有空吗", "做什么呢"],
-    "routine": ["几点起", "几点睡", "作息", "日程", "时间表"],
+    "current": [
+        "在干嘛", "在做什么", "做什么呢", "干什么呢", "干嘛呢",
+        "忙不忙", "有空吗", "忙吗", "在忙吗",
+        "现在呢", "你呢", "在吗",
+        "最近怎么样", "最近好吗", "今天怎么样",
+        "有没有想我", "想我了吗",
+    ],
+    "routine": ["几点起", "几点睡", "作息", "日程", "时间表", "今天有什么安排"],
     "date": ["明天", "后天", "周末", "下午"],
 }
 
@@ -438,16 +444,18 @@ async def handle_schedule_adjustment(
 
 # --- 每日作息回顾 ---
 
-_SCHEDULE_REVIEW_PROMPT = """你是{name}。回顾今天的作息，用第一人称写1-2条简短感想。
+_SCHEDULE_REVIEW_PROMPT = """你是{name}。回顾今天的经历，用第一人称写2-3条简短感想。
 
 今日作息：
 {schedule_text}
 {adjustments_text}
+{chat_summary_text}
 要求：
 - 用口语化第一人称
-- 每条30字以内
+- 每条30-50字以内
 - 关注感受和体验
 - 如有作息调整，提及这些变化
+- 如果和用户有聊天，提及互动感受
 
 返回JSON：
 {{"memories": ["感想1", "感想2"]}}"""
@@ -481,10 +489,29 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     except Exception as e:
         logger.warning(f"Failed to load adjustments for review: {e}")
 
+    # PRD §9.7: 合并当日聊天摘要
+    chat_summary_text = ""
+    try:
+        redis = await get_redis()
+        # 尝试获取最近的summarizer缓存
+        keys = await redis.keys(f"summarizer:*")
+        for key in keys[:3]:
+            data = await redis.get(key)
+            if data:
+                import json as _json
+                cached = _json.loads(data) if isinstance(data, str) else _json.loads(data.decode())
+                review = cached.get("review", "")
+                if review:
+                    chat_summary_text = f"\n今日聊天回顾：\n{review[:200]}"
+                    break
+    except Exception as e:
+        logger.warning(f"Failed to load chat summary for review: {e}")
+
     prompt = _SCHEDULE_REVIEW_PROMPT.format(
         name=agent_name,
         schedule_text=schedule_text,
         adjustments_text=adjustments_text,
+        chat_summary_text=chat_summary_text,
     )
 
     try:
@@ -495,7 +522,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
 
     memories = result.get("memories", [])
     stored = []
-    for content in memories[:2]:
+    for content in memories[:3]:
         if not content or not isinstance(content, str):
             continue
         mem_id = await store_memory(
@@ -503,7 +530,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
             content=content,
             memory_type="life",
             level=3,
-            importance=0.3,
+            importance=0.8,
             source="ai",
         )
         if mem_id:
