@@ -292,7 +292,8 @@ async def _run_schedule_review():
 
 
 async def _run_proactive_scan():
-    """扫描所有Agent-用户对，尝试发送主动消息。"""
+    """扫描所有Agent-用户对，尝试发送主动消息。如有WS连接则直接推送。"""
+    from app.services.ws_manager import manager
 
     async def _try_proactive(agent):
         # 跳过睡眠状态
@@ -304,7 +305,15 @@ async def _run_proactive_scan():
 
         msg = await generate_proactive_message(agent.userId, agent.id)
         if msg:
-            logger.info(f"Proactive message sent for agent {agent.id}")
+            # 尝试通过 WS 推送主动消息
+            sent = await manager.send_to_user(
+                agent.userId, "proactive",
+                {"text": msg, "agent_id": agent.id},
+            )
+            if sent:
+                logger.info(f"Proactive message pushed via WS for agent {agent.id}")
+            else:
+                logger.info(f"Proactive message saved (no WS) for agent {agent.id}")
 
     await _run_for_all_agents(_try_proactive, concurrency=3, task_name="Proactive scan")
 
@@ -385,8 +394,13 @@ async def _run_birthday_scan():
 
 
 async def _run_aggregation_scan():
-    """12E: 扫描到期的碎片化聚合窗口，触发合并处理。"""
+    """12E: 扫描到期的碎片化聚合窗口，触发合并处理。
+
+    如果有活跃的 WebSocket 连接，通过 WS 推送回复；否则静默消费（结果存 DB）。
+    """
     from app.services.chat_service import stream_chat_response
+    from app.services.ws_manager import manager
+    from app.api.ws import stream_to_ws
     from app.db import db
 
     try:
@@ -398,15 +412,24 @@ async def _run_aggregation_scan():
             )
             if not conv or not conv.agent:
                 continue
-            # 消费generator以触发处理（无SSE连接，结果存DB）
-            async for _ in stream_chat_response(
+
+            gen = stream_chat_response(
                 conversation_id=conv_id,
                 user_message=combined_text,
                 agent=conv.agent,
                 user_id=user_id,
-            ):
-                pass
-            logger.debug(f"Aggregation triggered for user {user_id}: '{combined_text}'")
+            )
+
+            ws = manager.get(conv_id)
+            if ws:
+                # 通过 WebSocket 推送聚合回复
+                await stream_to_ws(ws, gen)
+                logger.debug(f"Aggregation pushed via WS for conv={conv_id[:8]}")
+            else:
+                # 无活跃连接，静默消费（结果存DB，前端重连时加载）
+                async for _ in gen:
+                    pass
+                logger.debug(f"Aggregation consumed silently for conv={conv_id[:8]}")
     except Exception as e:
         logger.warning(f"Aggregation scan failed: {e}")
 

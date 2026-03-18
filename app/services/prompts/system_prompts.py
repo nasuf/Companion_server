@@ -31,6 +31,13 @@ PERSONALITY_RULES = (
     "你的每句话都应该体现你的性格。"
 )
 
+# Context consistency rules
+CONSISTENCY_RULES = (
+    "仔细阅读上面的对话记录，不要问对方已经回答过的问题。\n"
+    "不要说出与对话记录或记忆矛盾的话。\n"
+    "如果对方刚说了某件事，不要反过来再问同样的事。"
+)
+
 # Reply constraints (PRD §3.2.1/§3.2.2)
 MAX_PER_REPLY = 60           # 单条回复最大字数
 MAX_REPLY_COUNT = 3          # 正常最大条数

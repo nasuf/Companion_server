@@ -16,6 +16,7 @@ from app.services.prompts.system_prompts import (
     RESPONSE_INSTRUCTION as _INSTRUCTION,
     EMOTION_INSTRUCTION as _EMOTION_INSTRUCTION,
     PERSONALITY_RULES as _PERSONALITY_RULES,
+    CONSISTENCY_RULES as _CONSISTENCY_RULES,
     MEMORY_INSTRUCTION as _MEMORY_INSTRUCTION,
     MEMORY_TOKEN_BUDGET,
     MAX_PER_REPLY as _MAX_PER_REPLY,
@@ -339,6 +340,7 @@ def build_system_prompt(
     if patience_instruction:
         sections.append(_section("情绪状态提醒", patience_instruction))
 
+    sections.append(_section("对话一致性", _CONSISTENCY_RULES))
     sections.append(_section("回复要求", _INSTRUCTION.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY)))
 
     return "\n\n".join(sections)

@@ -16,6 +16,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 async def _empty_stream() -> AsyncGenerator[dict, None]:
     """空SSE流：碎片消息已入队，暂无AI回复。"""
+    yield {"event": "pending", "data": json.dumps({"status": "aggregating"})}
     yield {"event": "done", "data": json.dumps({"message_id": "pending"})}
 
 

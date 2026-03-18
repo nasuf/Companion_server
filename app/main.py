@@ -53,6 +53,7 @@ from app.api.emotions import router as emotions_router
 from app.api.intimacy import router as intimacy_router
 from app.api.boundary import router as boundary_router
 from app.api.stickers import router as stickers_router
+from app.api.ws import router as ws_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -64,3 +65,4 @@ app.include_router(emotions_router)
 app.include_router(intimacy_router)
 app.include_router(boundary_router)
 app.include_router(stickers_router)
+app.include_router(ws_router)

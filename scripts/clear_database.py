@@ -1,4 +1,4 @@
-"""清空数据库所有表数据，保留表结构。
+"""清空所有数据库（PostgreSQL + Neo4j + Redis），保留表结构。
 
 Usage:
     cd Server
@@ -19,6 +19,7 @@ _TABLES = [
     "memories_user",
     "memories_ai",
     "memories_backup",
+    "time_triggers",
     "messages",
     "proactive_chat_logs",
     "trait_feedback_logs",
@@ -34,11 +35,11 @@ _TABLES = [
 ]
 
 
-async def main():
+async def _clear_postgres():
     from app.db import db
 
+    print("[PostgreSQL]")
     await db.connect()
-
     try:
         for table in _TABLES:
             try:
@@ -49,6 +50,39 @@ async def main():
     finally:
         await db.disconnect()
 
+
+async def _clear_neo4j():
+    from app.neo4j_client import run_write, close_neo4j
+
+    print("[Neo4j]")
+    try:
+        await run_write("MATCH (n) DETACH DELETE n")
+        print("  all nodes and relationships deleted")
+    except Exception as e:
+        print(f"  ERROR - {e}")
+    finally:
+        await close_neo4j()
+
+
+async def _clear_redis():
+    from app.redis_client import get_redis, close_redis
+
+    print("[Redis]")
+    try:
+        r = await get_redis()
+        count = await r.dbsize()
+        await r.flushdb()
+        print(f"  flushed {count} keys")
+    except Exception as e:
+        print(f"  ERROR - {e}")
+    finally:
+        await close_redis()
+
+
+async def main():
+    await _clear_postgres()
+    await _clear_neo4j()
+    await _clear_redis()
     print("\nDone.")
 
 

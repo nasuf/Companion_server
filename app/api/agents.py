@@ -138,6 +138,23 @@ async def update_agent(agent_id: str, data: AgentUpdate):
     )
 
 
+@router.delete("/{agent_id}")
+async def delete_agent(agent_id: str):
+    """删除 Agent 及其所有关联数据（对话、记忆、画像、缓存等）。"""
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    from app.services.data_reset import reset_agent_data
+
+    stats = await reset_agent_data(agent_id, agent.userId)
+
+    # 最后删除 agent 本身
+    await db.aiagent.delete(where={"id": agent_id})
+
+    return {"ok": True, "stats": stats}
+
+
 async def _resolve_schedule(agent_id: str):
     """获取Agent和作息表，不存在则404。"""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
