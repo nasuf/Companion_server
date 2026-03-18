@@ -165,7 +165,6 @@ class TestComputeGrowthIntimacy:
     async def test_no_activity(self, mock_db, patch_intimacy_redis):
         """Zero conversations → score 0 (only duration contributes)."""
         mock_db.conversation.find_many = AsyncMock(return_value=[])
-        mock_db.memory.count = AsyncMock(return_value=0)
 
         created_at = datetime.now(UTC) - timedelta(days=30)
 

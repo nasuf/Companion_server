@@ -3,8 +3,9 @@ ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS seven_dim_traits JSONB;
 ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS current_traits JSONB;
 ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS traits_history JSONB;
 
--- Add mention_count to memories
-ALTER TABLE memories ADD COLUMN IF NOT EXISTS mention_count INTEGER NOT NULL DEFAULT 0;
+-- Add mention_count to split memory tables
+ALTER TABLE memories_user ADD COLUMN IF NOT EXISTS mention_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories_ai ADD COLUMN IF NOT EXISTS mention_count INTEGER NOT NULL DEFAULT 0;
 
 -- Create trait feedback log table
 CREATE TABLE IF NOT EXISTS trait_feedback_logs (

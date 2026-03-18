@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.services.memory.memory_repo import MemoryRecord
 from app.services.memory.retrieval import (
     _memory_to_dict,
     format_memories_for_prompt,
@@ -88,31 +89,37 @@ class TestFormatMemories:
 class TestRetrieveMemories:
     async def test_deduplicates_across_sources(self, mock_db):
         """Same memory from semantic + recent should appear only once."""
-        mem = MagicMock()
-        mem.id = "shared_id"
-        mem.content = "shared content"
-        mem.summary = "shared"
-        mem.level = 2
-        mem.importance = 0.9
-        mem.type = "事实"
-        mem.createdAt = "2025-01-01"
+        mem = MemoryRecord(
+            id="shared_id",
+            userId="user1",
+            type="identity",
+            source="user",
+            level=2,
+            content="shared content",
+            summary="shared",
+            importance=0.9,
+            mentionCount=0,
+            isArchived=False,
+            occurTime=None,
+            createdAt="2025-01-01",
+            updatedAt="2025-01-01",
+        )
 
         semantic_results = [{"id": "shared_id", "content": "shared content", "summary": "shared", "similarity": 0.95}]
-        mock_db.memory.find_many = AsyncMock(return_value=[mem])
 
         with (
             patch("app.services.memory.retrieval.search_similar", return_value=semantic_results),
-            patch("app.services.memory.retrieval.db", mock_db),
+            patch("app.services.memory.retrieval.memory_repo.find_many", new_callable=AsyncMock, side_effect=[[mem], [mem]]),
+            patch("app.services.memory.retrieval.increment_mention_count", new_callable=AsyncMock),
         ):
             results = await retrieve_memories("test query", "user1", semantic_k=5, recent_k=3, important_k=2)
             ids = [r["id"] for r in results]
             assert ids.count("shared_id") == 1
 
     async def test_empty_query_skips_semantic(self, mock_db):
-        mock_db.memory.find_many = AsyncMock(return_value=[])
         with (
             patch("app.services.memory.retrieval.search_similar", new_callable=AsyncMock) as mock_search,
-            patch("app.services.memory.retrieval.db", mock_db),
+            patch("app.services.memory.retrieval.memory_repo.find_many", new_callable=AsyncMock, side_effect=[[], []]),
         ):
             await retrieve_memories("", "user1")
             mock_search.assert_not_called()

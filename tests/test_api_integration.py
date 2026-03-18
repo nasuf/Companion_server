@@ -91,9 +91,7 @@ def test_create_agent(mock_deps):
 def test_list_memories(mock_deps):
     """GET /memories returns memory list."""
     client = mock_deps
-    with patch("app.api.memories.db") as mock_db:
-        mock_db.memory = MagicMock()
-        mock_db.memory.find_many = AsyncMock(return_value=[])
+    with patch("app.api.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=[]):
         response = client.get("/memories", params={"user_id": "test-user"})
         assert response.status_code == 200
         assert response.json() == []

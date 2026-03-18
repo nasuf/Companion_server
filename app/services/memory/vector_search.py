@@ -33,21 +33,21 @@ async def search_by_embedding(
             (SELECT
                 m.id, m.content, m.summary, m.level, m.importance, m.type,
                 m.created_at, 'user' AS source,
-                1 - (me.embedding <=> $1::vector) AS similarity
+                1 - (me.embedding <=> $1::extensions.vector) AS similarity
             FROM memory_embeddings me
             JOIN memories_user m ON m.id = me.memory_id
             WHERE m.user_id = $2 AND m.is_archived = false
-            ORDER BY me.embedding <=> $1::vector
+            ORDER BY me.embedding <=> $1::extensions.vector
             LIMIT $3)
             UNION ALL
             (SELECT
                 m.id, m.content, m.summary, m.level, m.importance, m.type,
                 m.created_at, 'ai' AS source,
-                1 - (me.embedding <=> $1::vector) AS similarity
+                1 - (me.embedding <=> $1::extensions.vector) AS similarity
             FROM memory_embeddings me
             JOIN memories_ai m ON m.id = me.memory_id
             WHERE m.user_id = $2 AND m.is_archived = false
-            ORDER BY me.embedding <=> $1::vector
+            ORDER BY me.embedding <=> $1::extensions.vector
             LIMIT $3)
         ) combined
         ORDER BY similarity DESC

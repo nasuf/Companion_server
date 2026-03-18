@@ -30,6 +30,16 @@ class TestShouldExtractMemory:
         """Fact + first person = extract."""
         assert should_extract_memory("我在上海住了三年了")
 
+    def test_short_core_profile(self):
+        """Short but high-value profile facts should pass."""
+        assert should_extract_memory("我28岁")
+        assert should_extract_memory("我叫小明")
+
+    def test_english_self_disclosure(self):
+        """English self-disclosure should not be filtered out."""
+        assert should_extract_memory("I work in San Francisco")
+        assert should_extract_memory("My birthday is in July")
+
     def test_long_message(self):
         """Long message has inherent value."""
         msg = "今天天气真的非常好，阳光明媚，我和朋友们一起去公园散步，心情特别愉快"

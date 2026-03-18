@@ -40,8 +40,8 @@ async def store_embedding(memory_id: str, embedding: list[float]) -> None:
     await db.execute_raw(
         """
         INSERT INTO memory_embeddings (memory_id, embedding)
-        VALUES ($1, $2::vector)
-        ON CONFLICT (memory_id) DO UPDATE SET embedding = $2::vector
+        VALUES ($1, $2::extensions.vector)
+        ON CONFLICT (memory_id) DO UPDATE SET embedding = $2::extensions.vector
         """,
         memory_id,
         vec_str,

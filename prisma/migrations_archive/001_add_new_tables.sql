@@ -2,6 +2,8 @@
 -- Run this migration against the Supabase database
 -- Note: public schema uses TEXT for IDs (not UUID)
 
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
+
 -- 0.7: User Portrait
 CREATE TABLE IF NOT EXISTS user_portraits (
     id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -16,11 +18,17 @@ CREATE TABLE IF NOT EXISTS user_portraits (
 CREATE TABLE IF NOT EXISTS memory_changelogs (
     id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     user_id TEXT NOT NULL REFERENCES users(id),
-    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL,
     operation VARCHAR(20) NOT NULL, -- 'insert', 'update', 'delete'
     old_value TEXT,
     new_value TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 0.8a: Memory Embeddings
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    memory_id TEXT PRIMARY KEY,
+    embedding extensions.vector NOT NULL
 );
 
 -- 0.9: Intimacy
@@ -82,6 +90,10 @@ ALTER TABLE ai_agents
 CREATE INDEX IF NOT EXISTS idx_user_portraits_user_id ON user_portraits(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_changelogs_user_id ON memory_changelogs(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_changelogs_created_at ON memory_changelogs(created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_vector
+    ON memory_embeddings
+    USING ivfflat (embedding extensions.vector_cosine_ops)
+    WITH (lists = 100);
 CREATE INDEX IF NOT EXISTS idx_intimacies_agent_user ON intimacies(agent_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_ai_daily_schedules_agent_date ON ai_daily_schedules(agent_id, date);
 CREATE INDEX IF NOT EXISTS idx_proactive_chat_logs_agent ON proactive_chat_logs(agent_id, created_at);
