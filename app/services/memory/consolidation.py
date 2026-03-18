@@ -8,7 +8,7 @@ Weekly: L2 patterns -> L1
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.db import db
+from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.vector_search import search_by_embedding
 from app.services.llm.models import get_utility_model, invoke_text
@@ -31,7 +31,7 @@ async def _consolidate_level(
     take: int,
 ) -> None:
     """Shared consolidation logic for any level transition."""
-    old_memories = await db.memory.find_many(
+    old_memories = await memory_repo.find_many(
         where={
             "level": source_level,
             "isArchived": False,
@@ -76,9 +76,7 @@ async def check_l2_upgrade_candidates() -> None:
     - 年提及次数 ≥ 10
     - 无同主题L1冲突
     """
-    one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
-
-    candidates = await db.memory.find_many(
+    candidates = await memory_repo.find_many(
         where={
             "level": 2,
             "isArchived": False,
@@ -93,7 +91,8 @@ async def check_l2_upgrade_candidates() -> None:
 
     for mem in candidates:
         # 检查是否有同主题L1冲突
-        existing_l1 = await db.memory.find_many(
+        existing_l1 = await memory_repo.find_many(
+            source=mem.source,
             where={
                 "userId": mem.userId,
                 "level": 1,
@@ -108,10 +107,7 @@ async def check_l2_upgrade_candidates() -> None:
             continue
 
         # 升级到L1
-        await db.memory.update(
-            where={"id": mem.id},
-            data={"level": 1},
-        )
+        await memory_repo.update(mem.id, source=mem.source, level=1)
         logger.info(f"Upgraded L2 memory {mem.id} to L1 (importance={mem.importance}, mentions={mem.mentionCount})")
 
 
@@ -168,23 +164,24 @@ async def _consolidate_user_memories(
             summary = summary.strip()
 
             max_importance = max(m.importance for m in cluster)
-            merged = await db.memory.create(
-                data={
-                    "user": {"connect": {"id": user_id}},
-                    "content": summary,
-                    "summary": summary,
-                    "level": target_level,
-                    "importance": min(1.0, max_importance + 0.1),
-                    "type": "consolidated",
-                }
+            # Inherit source from cluster — if any member is "ai", mark consolidated as "ai"
+            cluster_source = "ai" if any(m.source == "ai" for m in cluster) else "user"
+            merged = await memory_repo.create(
+                source=cluster_source,
+                userId=user_id,
+                content=summary,
+                summary=summary,
+                level=target_level,
+                importance=min(1.0, max_importance + 0.1),
+                type="consolidated",
             )
 
             embedding = await generate_embedding(summary)
             await store_embedding(merged.id, embedding)
 
-            # Batch archive old memories
+            # Batch archive old memories (source=None to cover mixed-source clusters)
             cluster_ids = [m.id for m in cluster]
-            await db.memory.update_many(
+            await memory_repo.update_many(
                 where={"id": {"in": cluster_ids}},
                 data={"isArchived": True},
             )

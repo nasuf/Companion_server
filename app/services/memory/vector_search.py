@@ -21,24 +21,35 @@ async def search_by_embedding(
     user_id: str,
     top_k: int = 50,
 ) -> list[dict]:
-    """Search using a pre-computed embedding vector."""
+    """Search using a pre-computed embedding vector.
+
+    Searches across both memories_user and memories_ai via UNION.
+    """
     vec_str = _format_vector(embedding)
     return await db.query_raw(
         """
-        SELECT
-            m.id,
-            m.content,
-            m.summary,
-            m.level,
-            m.importance,
-            m.type,
-            m.created_at,
-            1 - (me.embedding <=> $1::vector) AS similarity
-        FROM memory_embeddings me
-        JOIN memories m ON m.id = me.memory_id
-        WHERE m.user_id = $2
-          AND m.is_archived = false
-        ORDER BY me.embedding <=> $1::vector
+        SELECT * FROM (
+            (SELECT
+                m.id, m.content, m.summary, m.level, m.importance, m.type,
+                m.created_at, 'user' AS source,
+                1 - (me.embedding <=> $1::vector) AS similarity
+            FROM memory_embeddings me
+            JOIN memories_user m ON m.id = me.memory_id
+            WHERE m.user_id = $2 AND m.is_archived = false
+            ORDER BY me.embedding <=> $1::vector
+            LIMIT $3)
+            UNION ALL
+            (SELECT
+                m.id, m.content, m.summary, m.level, m.importance, m.type,
+                m.created_at, 'ai' AS source,
+                1 - (me.embedding <=> $1::vector) AS similarity
+            FROM memory_embeddings me
+            JOIN memories_ai m ON m.id = me.memory_id
+            WHERE m.user_id = $2 AND m.is_archived = false
+            ORDER BY me.embedding <=> $1::vector
+            LIMIT $3)
+        ) combined
+        ORDER BY similarity DESC
         LIMIT $3
         """,
         vec_str,

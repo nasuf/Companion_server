@@ -9,7 +9,7 @@ Retrieves memories using a combination strategy:
 import asyncio
 import logging
 
-from app.db import db
+from app.services.memory import memory_repo
 from app.services.memory.lifecycle import increment_mention_count
 from app.services.memory.vector_search import search_similar
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def _memory_to_dict(m, similarity: float = 0.0) -> dict:
-    """Convert a Prisma memory object to a dict."""
+    """Convert a MemoryRecord or Prisma object to a dict."""
     return {
         "id": m.id,
         "content": m.content,
@@ -49,12 +49,12 @@ async def retrieve_memories(
 
     semantic_results, recent, important = await asyncio.gather(
         _semantic(),
-        db.memory.find_many(
+        memory_repo.find_many(
             where={"userId": user_id, "isArchived": False},
             order={"createdAt": "desc"},
             take=recent_k * 2,
         ),
-        db.memory.find_many(
+        memory_repo.find_many(
             where={"userId": user_id, "isArchived": False},
             order={"importance": "desc"},
             take=important_k * 2,
@@ -118,7 +118,7 @@ async def _find_awakening_candidates(
     for r in l3_results:
         mid = r.get("id", "")
         similarity = float(r.get("similarity", 0))
-        level = r.get("level", 3)
+        level = int(r.get("level", 3))
 
         if mid in exclude_ids or level != 3:
             continue

@@ -5,6 +5,7 @@ class MemoryResponse(BaseModel):
     id: str
     user_id: str
     type: str | None = None
+    source: str = "user"
     level: int
     content: str
     summary: str | None = None

@@ -18,7 +18,6 @@ model User {
   updatedAt        DateTime           @updatedAt @map("updated_at")
   agents           AiAgent[]
   conversations    Conversation[]
-  memories         Memory[]
   profile          UserProfile?
   portraits        UserPortrait[]
   memoryChangelogs MemoryChangelog[]
@@ -82,22 +81,36 @@ model Message {
   @@map("messages")
 }
 
-model Memory {
-  id           String            @id @default(uuid())
-  userId       String            @map("user_id")
-  user         User              @relation(fields: [userId], references: [id])
-  type         String?           // e.g., "preference", "event", "identity"
-  level        Int               @default(3) // L1=1, L2=2, L3=3
+model UserMemory {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
+  level        Int      @default(3)
   content      String
   summary      String?
-  importance   Float             @default(0.5)
-  mentionCount Int               @default(0) @map("mention_count")
-  isArchived   Boolean           @default(false) @map("is_archived")
-  createdAt    DateTime          @default(now()) @map("created_at")
-  updatedAt    DateTime          @updatedAt @map("updated_at")
-  changelogs   MemoryChangelog[]
+  importance   Float    @default(0.5)
+  mentionCount Int      @default(0) @map("mention_count")
+  isArchived   Boolean  @default(false) @map("is_archived")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
-  @@map("memories")
+  @@map("memories_user")
+}
+
+model AiMemory {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
+  level        Int      @default(3)
+  content      String
+  summary      String?
+  importance   Float    @default(0.5)
+  mentionCount Int      @default(0) @map("mention_count")
+  isArchived   Boolean  @default(false) @map("is_archived")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("memories_ai")
 }
 
 model UserProfile {
@@ -141,7 +154,6 @@ model MemoryChangelog {
   userId    String   @map("user_id")
   user      User     @relation(fields: [userId], references: [id])
   memoryId  String   @map("memory_id")
-  memory    Memory   @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   operation String   // "insert", "update", "delete"
   oldValue  String?  @map("old_value")
   newValue  String?  @map("new_value")

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.memory import memory_repo
 from app.services.memory.storage import store_memory
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ AI性格：{personality}
   "memories": [
     {{
       "content": "自我记忆内容（第一人称）",
-      "type": "感受/体验/思考/生活/关系",
+      "type": "identity|emotion|preference|life|thought",
       "importance": 50-100,
       "level": 1或2
     }}
@@ -37,7 +38,7 @@ AI性格：{personality}
 
 规则：
 1. 用AI的第一人称视角（"我觉得…"、"今天和用户聊了…"）
-2. 类型分布：感受类（对话中的情绪体验）、体验类（发生了什么）、思考类（对话引发的思考）
+2. 类型分布：emotion（对话中的情绪体验）、life（发生了什么）、thought（对话引发的思考）
 3. 至少1条要和用户讨论的话题相关
 4. importance：重要事件80-100，日常感受50-70
 5. level：核心身份信息=1，日常体验=2
@@ -82,6 +83,7 @@ async def generate_initial_self_memories(
             level=template["level"],
             importance=template["importance"],
             memory_type=template["type"],
+            source="ai",
         )
         if mid:
             stored_ids.append(mid)
@@ -103,14 +105,15 @@ async def generate_daily_self_memories(
     if not agent:
         return []
 
-    # Count today's self-memories
+    # Count today's AI self-memories
     today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    count = await db.memory.count(
+    count = await memory_repo.count(
+        source="ai",
         where={
             "userId": user_id,
-            "type": {"in": ["感受", "体验", "思考", "生活", "关系", "identity"]},
+            "type": {"in": ["identity", "emotion", "preference", "life", "thought"]},
             "createdAt": {"gte": today_start},
-        }
+        },
     )
 
     if count >= 8:
@@ -144,7 +147,8 @@ async def generate_daily_self_memories(
             summary=mem.get("content", ""),
             level=mem.get("level", 2),
             importance=min(1.0, mem.get("importance", 50) / 100),
-            memory_type=mem.get("type", "体验"),
+            memory_type=mem.get("type", "life"),
+            source="ai",
         )
         if mid:
             stored_ids.append(mid)

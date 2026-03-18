@@ -7,10 +7,45 @@ Classifies into L1/L2/L3 levels.
 import logging
 
 from app.db import db
+from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.vector_search import search_by_embedding
 
 logger = logging.getLogger(__name__)
+
+# Map legacy/mixed type values to the standard English enum
+_TYPE_NORMALIZE_MAP: dict[str, str] = {
+    # Standard values (passthrough)
+    "identity": "identity",
+    "emotion": "emotion",
+    "preference": "preference",
+    "life": "life",
+    "thought": "thought",
+    "consolidated": "consolidated",
+    # Old English values
+    "event": "life",
+    "relationship": "life",
+    "fact": "identity",
+    # Old Chinese values (from self_memory)
+    "感受": "emotion",
+    "体验": "life",
+    "思考": "thought",
+    "生活": "life",
+    "关系": "life",
+    # System types
+    "compressed": "consolidated",
+}
+
+
+def normalize_memory_type(memory_type: str | None) -> str | None:
+    """Normalize a memory type value to the standard English enum.
+
+    Standard types: identity, emotion, preference, life, thought, consolidated.
+    Returns None if input is None, or the mapped value (original value if no mapping found).
+    """
+    if memory_type is None:
+        return None
+    return _TYPE_NORMALIZE_MAP.get(memory_type, memory_type)
 
 
 async def log_memory_changelog(
@@ -25,7 +60,7 @@ async def log_memory_changelog(
         await db.memorychangelog.create(
             data={
                 "user": {"connect": {"id": user_id}},
-                "memory": {"connect": {"id": memory_id}},
+                "memoryId": memory_id,
                 "operation": operation,
                 "oldValue": old_value,
                 "newValue": new_value,
@@ -61,11 +96,17 @@ async def store_memory(
     level: int = 3,
     importance: float = 0.5,
     memory_type: str | None = None,
+    source: str = "user",
 ) -> str | None:
     """Store a memory with deduplication.
 
     Returns memory_id if stored, None if duplicate.
+    Args:
+        source: "user" for memories about the user, "ai" for AI self-memories.
     """
+    # Normalize type to standard enum
+    memory_type = normalize_memory_type(memory_type)
+
     # Generate embedding
     embedding = await generate_embedding(content)
 
@@ -73,16 +114,15 @@ async def store_memory(
     if await is_duplicate(user_id, content, embedding):
         return None
 
-    # Store in PostgreSQL
-    memory = await db.memory.create(
-        data={
-            "user": {"connect": {"id": user_id}},
-            "content": content,
-            "summary": summary or content[:200],
-            "level": level,
-            "importance": importance,
-            "type": memory_type,
-        }
+    # Store in PostgreSQL (routed to memories_user or memories_ai)
+    memory = await memory_repo.create(
+        source=source,
+        userId=user_id,
+        content=content,
+        summary=summary or content[:200],
+        level=level,
+        importance=importance,
+        type=memory_type,
     )
 
     # Store embedding

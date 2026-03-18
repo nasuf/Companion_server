@@ -6,7 +6,7 @@ then applies resolution strategies (update, demote, ignore).
 
 import logging
 
-from app.db import db
+from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.storage import log_memory_changelog
 
@@ -50,7 +50,8 @@ async def detect_conflicts(
 
     Returns conflict info dict or None if no conflict.
     """
-    existing = await db.memory.find_many(
+    existing = await memory_repo.find_many(
+        source="user",
         where={"userId": user_id, "level": 1, "isArchived": False},
         order={"importance": "desc"},
         take=20,
@@ -101,7 +102,7 @@ async def resolve_conflict(
         return "ignored"
 
     if resolution in ("update_l1", "demote_old"):
-        old_memory = await db.memory.find_unique(where={"id": old_id})
+        old_memory = await memory_repo.find_unique(old_id)
         if not old_memory:
             return "ignored"
 
@@ -109,9 +110,9 @@ async def resolve_conflict(
 
         if conflict.get("conflict_type") == "preference_change" or resolution == "demote_old":
             # Demote old memory to L2
-            await db.memory.update(
-                where={"id": old_id},
-                data={"level": 2, "importance": max(0.3, old_memory.importance - 0.2)},
+            await memory_repo.update(
+                old_id, source=old_memory.source,
+                level=2, importance=max(0.3, old_memory.importance - 0.2),
             )
             logger.info(f"Demoted conflicting memory {old_id} from L1 to L2")
 
@@ -120,9 +121,9 @@ async def resolve_conflict(
         else:
             # Update the old memory with new content
             new_content = new_memory.get("summary", "")
-            await db.memory.update(
-                where={"id": old_id},
-                data={"content": new_content, "summary": new_content},
+            await memory_repo.update(
+                old_id, source=old_memory.source,
+                content=new_content, summary=new_content,
             )
             logger.info(f"Updated conflicting memory {old_id}: {old_content[:30]} -> {new_content[:30]}")
 

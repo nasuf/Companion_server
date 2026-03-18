@@ -7,7 +7,7 @@ Monthly: 4 weekly summaries -> 1 monthly summary
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.db import db
+from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.llm.models import get_utility_model, invoke_text
 
@@ -37,23 +37,24 @@ async def _compress_batch(
     summary = summary.strip()
 
     max_importance = max(m.importance for m in batch)
-    compressed = await db.memory.create(
-        data={
-            "user": {"connect": {"id": user_id}},
-            "content": summary,
-            "summary": summary,
-            "level": target_level,
-            "importance": min(1.0, max_importance + importance_bump),
-            "type": "compressed",
-        }
+    # Inherit source from batch
+    batch_source = "ai" if any(m.source == "ai" for m in batch) else "user"
+    compressed = await memory_repo.create(
+        source=batch_source,
+        userId=user_id,
+        content=summary,
+        summary=summary,
+        level=target_level,
+        importance=min(1.0, max_importance + importance_bump),
+        type="compressed",
     )
 
     embedding = await generate_embedding(summary)
     await store_embedding(compressed.id, embedding)
 
-    # Batch archive old memories
+    # Batch archive old memories (source=None to cover mixed-source batches)
     batch_ids = [m.id for m in batch]
-    await db.memory.update_many(
+    await memory_repo.update_many(
         where={"id": {"in": batch_ids}},
         data={"isArchived": True},
     )
@@ -67,7 +68,7 @@ async def compress_weekly() -> None:
     """Compress daily memories older than 7 days into weekly summaries."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
-    memories = await db.memory.find_many(
+    memories = await memory_repo.find_many(
         where={
             "level": 3,
             "isArchived": False,
@@ -103,7 +104,7 @@ async def compress_monthly() -> None:
     """Compress weekly summaries older than 30 days into monthly summaries."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
-    memories = await db.memory.find_many(
+    memories = await memory_repo.find_many(
         where={
             "level": 2,
             "isArchived": False,

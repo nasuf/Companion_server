@@ -58,16 +58,17 @@ def compute_dynamic_weight(initial_importance: float, months_age: float, mention
 
 
 async def increment_mention_count(memory_id: str) -> None:
-    """在检索命中时增加记忆的提及次数。"""
+    """在检索命中时增加记忆的提及次数（尝试两表）。"""
     try:
-        await db.execute_raw(
-            """
-            UPDATE memories
-            SET mention_count = mention_count + 1, updated_at = NOW()
-            WHERE id = $1
-            """,
+        updated = await db.execute_raw(
+            "UPDATE memories_user SET mention_count = mention_count + 1, updated_at = NOW() WHERE id = $1",
             memory_id,
         )
+        if not updated:
+            await db.execute_raw(
+                "UPDATE memories_ai SET mention_count = mention_count + 1, updated_at = NOW() WHERE id = $1",
+                memory_id,
+            )
     except Exception as e:
         logger.warning(f"Failed to increment mention count for {memory_id}: {e}")
 
@@ -78,10 +79,8 @@ async def decay_importance():
     Uses tiered time table instead of exponential decay.
     L1 memories are never decayed.
     """
-    # Apply tiered decay using SQL CASE statement
-    result = await db.execute_raw(
-        """
-        UPDATE memories
+    _DECAY_SQL = """
+        UPDATE {table}
         SET importance = importance * (
             CASE
                 WHEN EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400 / 30 < 1 THEN 1.0
@@ -100,16 +99,14 @@ async def decay_importance():
             END
         )
         WHERE is_archived = false AND level != 1
-        """
-    )
-    logger.info(f"Tiered decay applied to {result} memories")
+    """
+
+    result_user = await db.execute_raw(_DECAY_SQL.format(table="memories_user"))
+    result_ai = await db.execute_raw(_DECAY_SQL.format(table="memories_ai"))
+    logger.info(f"Tiered decay applied to {result_user}+{result_ai} memories (user+ai)")
 
     # Archive memories below threshold
-    archived = await db.execute_raw(
-        f"""
-        UPDATE memories
-        SET is_archived = true
-        WHERE is_archived = false AND importance < {ARCHIVE_THRESHOLD} AND level != 1
-        """
-    )
-    logger.info(f"Archived {archived} memories below threshold {ARCHIVE_THRESHOLD}")
+    _ARCHIVE_SQL = "UPDATE {table} SET is_archived = true WHERE is_archived = false AND importance < $1 AND level != 1"
+    archived_user = await db.execute_raw(_ARCHIVE_SQL.format(table="memories_user"), ARCHIVE_THRESHOLD)
+    archived_ai = await db.execute_raw(_ARCHIVE_SQL.format(table="memories_ai"), ARCHIVE_THRESHOLD)
+    logger.info(f"Archived {archived_user}+{archived_ai} memories below threshold {ARCHIVE_THRESHOLD}")

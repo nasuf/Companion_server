@@ -6,6 +6,7 @@ Detects user intent to delete memories and executes deletion pipeline.
 import logging
 
 from app.db import db
+from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.embedding import generate_embedding
 from app.services.memory.vector_search import search_by_embedding
@@ -94,12 +95,12 @@ async def delete_memories_by_description(
         if sim < 0.7:
             continue
 
-        memory_id = r.get("memory_id")
+        memory_id = r.get("id")
         if not memory_id:
             continue
 
         # Log before delete
-        memory = await db.memory.find_unique(where={"id": memory_id})
+        memory = await memory_repo.find_unique(memory_id)
         if memory:
             await log_memory_changelog(
                 user_id, memory_id, "delete",
@@ -117,7 +118,7 @@ async def delete_memories_by_description(
 
         # Delete memory
         try:
-            await db.memory.delete(where={"id": memory_id})
+            await memory_repo.delete(memory_id)
             deleted += 1
             logger.info(f"Deleted memory {memory_id}: {r.get('content', '')[:50]}")
         except Exception as e:

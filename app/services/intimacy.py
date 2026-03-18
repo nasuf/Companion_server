@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.db import db
 from app.redis_client import get_redis
+from app.services.memory import memory_repo
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,6 @@ def _topic_intimacy_key(agent_id: str, user_id: str) -> str:
 async def get_cached_intimacy(agent_id: str, user_id: str) -> dict | None:
     """获取缓存的亲密度数据。"""
     redis = await get_redis()
-    import json
     data = await redis.get(_intimacy_key(agent_id, user_id))
     if data:
         try:
@@ -151,11 +151,11 @@ async def _compute_self_disclosure(
 
     min(1000, 200*log10(importance_sum+1)) / 1000
     """
-    # 查询L1+L2记忆的importance总和
+    # 查询L1+L2记忆的importance总和 (user memories only)
     result = await db.query_raw(
         """
         SELECT COALESCE(SUM(importance), 0) as total_importance
-        FROM memories
+        FROM memories_user
         WHERE user_id = $1 AND level IN (1, 2) AND is_archived = false
         """,
         user_id,
@@ -223,7 +223,8 @@ async def compute_topic_intimacy(
     """
     since = datetime.now(UTC) - timedelta(days=30)
 
-    memories = await db.memory.find_many(
+    memories = await memory_repo.find_many(
+        source="user",
         where={
             "userId": user_id,
             "createdAt": {"gte": since},

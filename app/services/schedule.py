@@ -175,7 +175,9 @@ async def _get_user_memory_summary(user_id: str | None, limit: int = 5) -> str:
     if not user_id:
         return ""
     try:
-        memories = await db.memory.find_many(
+        from app.services.memory import memory_repo
+        memories = await memory_repo.find_many(
+            source="user",
             where={"userId": user_id, "level": 1},
             order={"importance": "desc"},
             take=limit,
@@ -499,9 +501,10 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         mem_id = await store_memory(
             user_id=user_id,
             content=content,
-            memory_type="生活",
+            memory_type="life",
             level=3,
             importance=0.3,
+            source="ai",
         )
         if mem_id:
             stored.append(mem_id)

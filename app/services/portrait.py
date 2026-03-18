@@ -8,6 +8,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from app.db import db
+from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_text
 
 logger = logging.getLogger(__name__)
@@ -66,14 +67,16 @@ async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
         logger.info(f"Portrait precondition: agent {agent_id} created <24h ago")
         return False
 
-    l2_count = await db.memory.count(
+    l2_count = await memory_repo.count(
+        source="user",
         where={"userId": user_id, "level": 2, "isArchived": False},
     )
     if l2_count < 20:
         logger.info(f"Portrait precondition: only {l2_count} L2 memories (need 20)")
         return False
 
-    l1_count = await db.memory.count(
+    l1_count = await memory_repo.count(
+        source="user",
         where={"userId": user_id, "level": 1, "isArchived": False},
     )
     if l1_count < 5:
@@ -93,7 +96,8 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
         if not await check_portrait_preconditions(user_id, agent_id):
             return None
 
-    memories = await db.memory.find_many(
+    memories = await memory_repo.find_many(
+        source="user",
         where={
             "userId": user_id,
             "level": {"in": [1, 2]},

@@ -5,14 +5,7 @@ Used by the memory extraction pipeline to extract structured data from conversat
 
 MEMORY_EXTRACTION_PROMPT = """You are a memory extraction system.
 
-Analyze the conversation and extract structured memory.
-
-Rules:
-1. Identify important information about the user
-2. Detect preferences (likes, dislikes, habits)
-3. Detect events (things that happened or will happen)
-4. Detect entities (people, places, things mentioned)
-5. Detect emotional signals
+Analyze the conversation and extract structured memory about the user.
 
 Conversation:
 {conversation}
@@ -24,7 +17,7 @@ Return JSON with this exact schema:
       "summary": "short description of the memory",
       "level": 2,
       "importance": 0.8,
-      "type": "preference|event|identity|relationship|fact",
+      "type": "identity|emotion|preference|life|thought",
       "entities": ["entity1"],
       "topics": ["topic1"],
       "emotion": {{
@@ -49,10 +42,24 @@ Return JSON with this exact schema:
   "topics": ["topic1", "topic2"]
 }}
 
+Memory type definitions:
+- identity: 身份信息 — 姓名、年龄、职业、家庭关系、身份角色
+- emotion: 情绪记忆 — 情绪状态、情感体验、心理感受
+- preference: 偏好边界 — 喜恶、在意的事、习惯、兴趣爱好
+- life: 生活记忆 — 事件、日期、日常生活、人际关系动态
+- thought: 思维记忆 — 想法、观点、目标、价值观、规划
+
 Rules for level assignment:
-- Level 1: Core identity (name, birthday, family, job)
-- Level 2: Important preferences, significant events, relationships
-- Level 3: Daily conversation, casual mentions
+- Level 1: Core identity (name, birthday, family, job) — importance 0.8-1.0
+- Level 2: Important preferences, significant events, relationships — importance 0.5-0.8
+- Level 3: Daily conversation, casual mentions — importance 0.2-0.5
+
+Rules for importance scoring:
+- 涉及核心身份(姓名/职业/家庭): 0.9-1.0
+- 明确的偏好/喜恶: 0.7-0.9
+- 重要事件/里程碑: 0.7-0.9
+- 情绪强烈的体验: 0.6-0.8
+- 日常提及/闲聊: 0.2-0.5
 
 If nothing worth remembering, return {{"memories":[],"entities":[],"preferences":[],"topics":[]}}."""
 

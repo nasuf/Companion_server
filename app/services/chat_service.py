@@ -246,8 +246,10 @@ async def stream_chat_response(
         return await cache_summarizer(ch)
 
     async def _load_core_memories():
-        """Load L1 core memories — always present in prompt."""
-        rows = await db.memory.find_many(
+        """Load L1 core memories (user only) — always present in prompt."""
+        from app.services.memory import memory_repo
+        rows = await memory_repo.find_many(
+            source="user",
             where={"userId": user_id, "level": 1, "isArchived": False},
             order={"importance": "desc"},
             take=20,
