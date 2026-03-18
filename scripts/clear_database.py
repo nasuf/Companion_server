@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # 按外键依赖顺序排列：子表在前，父表在后
 _TABLES = [
+    "stickers",
     "memory_embeddings",
     "memory_changelogs",
     "memories_user",

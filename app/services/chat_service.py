@@ -51,7 +51,8 @@ from app.services.boundary import (
 from app.services.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.conversation_end import check_conversation_end
-from app.services.emoji import should_add_emoji, pick_one_emoji
+from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_emoji
+from app.services.sticker import recommend_sticker
 from app.services.trait_model import get_seven_dim
 
 logger = logging.getLogger(__name__)
@@ -398,24 +399,37 @@ async def stream_chat_response(
     # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
     ai_arousal = emotion.get("arousal", 0.0) if isinstance(emotion, dict) else 0.0
     ai_pleasure = emotion.get("pleasure", 0.0) if isinstance(emotion, dict) else 0.0
+    ai_dominance = emotion.get("dominance", 0.5) if isinstance(emotion, dict) else 0.5
     ai_primary_emotion = emotion.get("primary_emotion") if isinstance(emotion, dict) else None
 
+    sticker_used = False  # 一个回合最多一个表情包
+
     for i, reply_text in enumerate(replies):
-        # 12C: emoji概率
+        added_emoji = False
+        # PRD §3.3.2: emoji概率
         if should_add_emoji(ai_arousal):
             emoji = pick_one_emoji(ai_pleasure, ai_arousal, ai_primary_emotion)
             if emoji:
                 reply_text += emoji
+                added_emoji = True
 
-        # 12D: 表情包互斥 — 框架预留，sticker资源接入后启用
-        # from app.services.emoji import should_add_sticker
-        # if not added_emoji and not sticker_used and should_add_sticker(ai_arousal):
-        #     data["sticker_url"] = sticker_url
+        # PRD §3.3.3: 表情包互斥 — 该条未加emoji且本回合未用过表情包
+        sticker_url = None
+        if not added_emoji and not sticker_used and should_add_sticker(ai_arousal):
+            try:
+                result = await recommend_sticker(ai_pleasure, ai_arousal, ai_dominance, ai_primary_emotion)
+                if result:
+                    sticker_url = result["url"]
+                    sticker_used = True
+            except Exception:
+                pass
 
         if i > 0:
             await asyncio.sleep(random.uniform(0.3, 0.8))
 
         data: dict = {"text": reply_text, "index": i}
+        if sticker_url:
+            data["sticker_url"] = sticker_url
         yield {"event": "reply", "data": json.dumps(data)}
 
     # Save all replies to DB in background (don't block SSE stream)

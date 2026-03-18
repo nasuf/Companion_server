@@ -229,3 +229,15 @@ model TraitFeedbackLog {
 
   @@map("trait_feedback_logs")
 }
+
+model Sticker {
+  id         Int      @id @default(autoincrement())
+  url        String   @db.VarChar(255)
+  emotionTags Json    @map("emotion_tags")  // [{"emotion":"高兴","weight":0.8}]
+  intensity  Int      @default(3)           // 1~5
+  style      String?  @db.VarChar(50)       // 幽默、可爱、严肃等
+  tags       Json?                          // 场景标签 ["问候","安慰"]
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("stickers")
+}
