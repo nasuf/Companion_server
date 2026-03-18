@@ -77,13 +77,12 @@ async def recommend_sticker(
     # 计算 match_score 并过滤
     candidates: list[tuple[dict, float]] = []
     for row in rows:
-        emotion_tags = row["emotion_tags"] if isinstance(row["emotion_tags"], list) else []
-        weight = 0.0
-        for tag in emotion_tags:
-            if isinstance(tag, dict) and tag.get("emotion") == target_emotion:
-                weight += tag.get("weight", 0.5)
-        intensity_penalty = 1 - abs(row["intensity"] - target_intensity) / 5
-        score = weight * intensity_penalty
+        tags = row["emotion_tags"] if isinstance(row["emotion_tags"], list) else []
+        weight = sum(
+            t.get("weight", 0.5) for t in tags
+            if isinstance(t, dict) and t.get("emotion") == target_emotion
+        )
+        score = weight * (1 - abs(row["intensity"] - target_intensity) / 5)
         if score >= 0.3:
             candidates.append((row, score))
 

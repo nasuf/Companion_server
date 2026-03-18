@@ -7,7 +7,6 @@ router = APIRouter(prefix="/stickers", tags=["stickers"])
 
 
 class StickerRecommendRequest(BaseModel):
-    user_id: str
     target_emotion: dict  # {"pleasure": 0.6, "arousal": 0.6, "dominance": 0.5, "primary_emotion": "高兴"}
 
 

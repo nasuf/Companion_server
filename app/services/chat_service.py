@@ -397,10 +397,11 @@ async def stream_chat_response(
     replies = split_and_validate_replies(raw_response, max_reply_count, MAX_PER_REPLY, max_total)
 
     # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
-    ai_arousal = emotion.get("arousal", 0.0) if isinstance(emotion, dict) else 0.0
-    ai_pleasure = emotion.get("pleasure", 0.0) if isinstance(emotion, dict) else 0.0
-    ai_dominance = emotion.get("dominance", 0.5) if isinstance(emotion, dict) else 0.5
-    ai_primary_emotion = emotion.get("primary_emotion") if isinstance(emotion, dict) else None
+    emo = emotion if isinstance(emotion, dict) else {}
+    ai_arousal = emo.get("arousal", 0.0)
+    ai_pleasure = emo.get("pleasure", 0.0)
+    ai_dominance = emo.get("dominance", 0.5)
+    ai_primary_emotion = emo.get("primary_emotion")
 
     sticker_used = False  # 一个回合最多一个表情包
 
