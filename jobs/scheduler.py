@@ -26,6 +26,7 @@ from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive import generate_proactive_message
 from app.services.aggregation import scan_expired
+from app.services.delayed_queue import enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads
 from app.services.trigger_engine import scan_triggers, create_holiday_triggers, scan_birthday_memories
 from app.services.time_service import is_holiday
 
@@ -206,7 +207,7 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # 12E: Message aggregation scan every second
+    # 12E + PRD §6.2.2: aggregation + delayed reply delivery scan every second
     scheduler.add_job(
         _run_aggregation_scan,
         "interval",
@@ -394,10 +395,7 @@ async def _run_birthday_scan():
 
 
 async def _run_aggregation_scan():
-    """12E: 扫描到期的碎片化聚合窗口，触发合并处理。
-
-    如果有活跃的 WebSocket 连接，通过 WS 推送回复；否则静默消费（结果存 DB）。
-    """
+    """Scan aggregation windows and due delayed replies, then deliver asynchronously."""
     from app.services.chat_service import stream_chat_response
     from app.services.ws_manager import manager
     from app.api.ws import stream_to_ws
@@ -405,7 +403,26 @@ async def _run_aggregation_scan():
 
     try:
         expired = await scan_expired()
-        for user_id, combined_text, conv_id in expired:
+        for user_id, combined_text, conv_id, reply_context, latest_message_id in expired:
+            await enqueue_delayed_message(
+                conv_id,
+                {
+                    "conversation_id": conv_id,
+                    "agent_id": None,
+                    "user_id": user_id,
+                    "message": combined_text,
+                    "message_id": latest_message_id,
+                    "reply_context": reply_context,
+                },
+                float((reply_context or {}).get("delay_seconds", 0.0) or 0.0),
+            )
+
+        due_conversations = await scan_due_delayed_messages()
+        for conv_id, payloads in due_conversations:
+            merged = merge_delayed_payloads(payloads)
+            if not merged:
+                continue
+
             conv = await db.conversation.find_unique(
                 where={"id": conv_id},
                 include={"agent": True},
@@ -415,21 +432,23 @@ async def _run_aggregation_scan():
 
             gen = stream_chat_response(
                 conversation_id=conv_id,
-                user_message=combined_text,
+                user_message=merged["user_message"],
                 agent=conv.agent,
-                user_id=user_id,
+                user_id=merged["user_id"],
+                reply_context=merged.get("reply_context"),
+                save_user_message=False,
+                user_message_id=merged.get("user_message_id"),
+                delivered_from_queue=True,
             )
 
             ws = manager.get(conv_id)
             if ws:
-                # 通过 WebSocket 推送聚合回复
                 await stream_to_ws(ws, gen)
-                logger.debug(f"Aggregation pushed via WS for conv={conv_id[:8]}")
+                logger.debug(f"Delayed reply pushed via WS for conv={conv_id[:8]}")
             else:
-                # 无活跃连接，静默消费（结果存DB，前端重连时加载）
                 async for _ in gen:
                     pass
-                logger.debug(f"Aggregation consumed silently for conv={conv_id[:8]}")
+                logger.debug(f"Delayed reply consumed silently for conv={conv_id[:8]}")
     except Exception as e:
         logger.warning(f"Aggregation scan failed: {e}")
 

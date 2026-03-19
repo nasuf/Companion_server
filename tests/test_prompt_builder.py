@@ -77,6 +77,17 @@ def test_build_system_prompt_with_working_facts():
     assert "下周去东京出差" in prompt
 
 
+def test_build_system_prompt_with_delay_context():
+    """Delay explanation section appears when provided."""
+    agent = _make_agent()
+    prompt = build_system_prompt(
+        agent,
+        delay_context="你在 08:03 收到消息时正在工作，现在已经过去约 120 秒。",
+    )
+    assert "## 回复时机说明" in prompt
+    assert "120 秒" in prompt
+
+
 def test_build_system_prompt_with_summaries():
     """Summarizer sections appear when summaries provided."""
     agent = _make_agent()

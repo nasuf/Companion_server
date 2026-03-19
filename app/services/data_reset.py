@@ -122,6 +122,8 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         f"intimacy:{agent_id}:{user_id}",
         f"topic_intimacy:{agent_id}:{user_id}",
         f"pending:msgs:{user_id}",
+        f"pending:ctx:{user_id}",
+        f"last_reply:{agent_id}:{user_id}",
     ]
 
     # conversation 相关的精确 key
@@ -129,6 +131,7 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         exact_keys.append(f"topics:{cid}")
         exact_keys.append(f"context_window:{cid}")
         exact_keys.append(f"working_facts:{cid}")
+        exact_keys.append(f"delayed:msgs:{cid}")
 
     # 通配符 patterns（需要 SCAN）
     scan_patterns = [
@@ -150,6 +153,12 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
     if exact_keys:
         try:
             deleted += await redis.delete(*exact_keys)
+        except Exception:
+            pass
+
+    if conv_ids:
+        try:
+            deleted += await redis.zrem("delayed:due", *conv_ids)
         except Exception:
             pass
 

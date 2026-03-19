@@ -114,3 +114,18 @@ def compute_message_interval_delay(
             return random.uniform(1, 3)
 
     return calculate_status_delay(current_status)
+
+
+def explain_delay_reason(reason: str, activity: str | None = None, status: str | None = None) -> str:
+    """Human-readable delay reason summary for prompt injection."""
+    if reason == "conversation_mode":
+        return "你们刚刚一直在连续聊天，所以通常会回得更快。"
+    if reason == "high_emotion":
+        return "用户情绪较强烈，你会倾向于更快接住对方的情绪。"
+    if reason == "schedule_sleep":
+        return f"收到消息时你正在{activity or '睡觉'}，因此没有立刻看到消息。"
+    if reason == "schedule_very_busy":
+        return f"收到消息时你正在{activity or '忙事情'}，而且是当天最忙的时段。"
+    if reason == "schedule_busy":
+        return f"收到消息时你正在{activity or '处理日常安排'}，所以回复被拖后了。"
+    return f"收到消息时你在{activity or '安排自己的事情'}，回复节奏受当时状态影响。"

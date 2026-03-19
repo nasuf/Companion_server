@@ -247,6 +247,13 @@ def _build_working_memory_section(working_facts: list[str] | None) -> str | None
     return _section("当前会话事实", body)
 
 
+def _build_delay_context_section(delay_context: str | None) -> str | None:
+    """Build the delayed-reply explanation section."""
+    if not delay_context:
+        return None
+    return _section("回复时机说明", delay_context)
+
+
 def _build_portrait_section(portrait: str | None) -> str | None:
     """Build the user portrait section."""
     if not portrait:
@@ -289,6 +296,7 @@ def build_system_prompt(
     agent: Any,
     memories: list[str] | None = None,
     working_facts: list[str] | None = None,
+    delay_context: str | None = None,
     core_memories: list[str] | None = None,
     emotion: dict | None = None,
     graph_context: dict | None = None,
@@ -329,6 +337,10 @@ def build_system_prompt(
     working = _build_working_memory_section(working_facts)
     if working:
         sections.append(working)
+
+    delay = _build_delay_context_section(delay_context)
+    if delay:
+        sections.append(delay)
 
     mem = _build_memory_section(memories)
     if mem:

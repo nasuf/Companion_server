@@ -13,7 +13,7 @@ import logging
 import random
 import re
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import datetime
 
 from prisma import Json
 
@@ -38,7 +38,7 @@ from app.services.cache import cache_summarizer
 from app.services.portrait import get_latest_portrait
 from app.services.timing import (
     calculate_reply_delay, calculate_typing_duration,
-    compute_message_interval_delay,
+    explain_delay_reason,
 )
 from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
 from app.services.topic import push_topic, format_topic_context
@@ -57,6 +57,7 @@ from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_em
 from app.services.sticker import recommend_sticker
 from app.services.trait_model import get_seven_dim
 from app.services.fast_fact import update_working_facts, facts_for_prompt
+from app.services.reply_context import actual_delay_seconds, save_last_reply_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -133,16 +134,22 @@ async def stream_chat_response(
     user_message: str,
     agent,
     user_id: str,
+    reply_context: dict | None = None,
+    *,
+    save_user_message: bool = True,
+    user_message_id: str | None = None,
+    delivered_from_queue: bool = False,
 ) -> AsyncGenerator[dict, None]:
-    # Save user message
-    saved_msg = await db.message.create(
-        data={
-            "conversation": {"connect": {"id": conversation_id}},
-            "role": "user",
-            "content": user_message,
-        }
-    )
-    user_message_id = saved_msg.id
+    # Save user message unless it has already been persisted at receipt time.
+    if save_user_message:
+        saved_msg = await db.message.create(
+            data={
+                "conversation": {"connect": {"id": conversation_id}},
+                "role": "user",
+                "content": user_message,
+            }
+        )
+        user_message_id = saved_msg.id
 
     agent_id = getattr(agent, "id", None)
 
@@ -161,6 +168,7 @@ async def stream_chat_response(
                 }
             )
             yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
+            await save_last_reply_timestamp(agent_id, user_id)
             yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
             # Background: classify + deduct patience
             _fire_background(process_boundary_violation(agent_id, user_id, user_message))
@@ -189,6 +197,7 @@ async def stream_chat_response(
         farewell = result.content.strip().split("||")[0][:60]
         _fire_background(_save_replies(conversation_id, [farewell]))
         yield {"event": "reply", "data": json.dumps({"text": farewell, "index": 0})}
+        await save_last_reply_timestamp(agent_id, user_id)
         yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
         return
 
@@ -362,6 +371,29 @@ async def stream_chat_response(
     elif working_facts_result:
         working_facts = facts_for_prompt(working_facts_result)
 
+    delay_context = None
+    if reply_context:
+        received_status = reply_context.get("received_status") or {}
+        received_activity = str(received_status.get("activity", "")).strip() or "处理自己的事"
+        received_status_label = str(received_status.get("status", "idle"))
+        received_at = str(reply_context.get("received_at", ""))
+        elapsed = actual_delay_seconds(reply_context)
+        if elapsed is not None:
+            rounded_delay = max(1, round(elapsed))
+            delay_reason_text = explain_delay_reason(
+                str(reply_context.get("delay_reason", "")),
+                activity=received_activity,
+                status=received_status_label,
+            )
+            delay_context = (
+                f"你在 {received_at} 收到用户消息时，正在{received_activity}"
+                f"（状态：{received_status_label}）。\n"
+                f"现在距离收到消息已经过去约 {rounded_delay} 秒。\n"
+                f"{delay_reason_text}\n"
+                "如果延迟超过60秒，可以很自然地用一句话带过刚才在忙什么；"
+                "如果延迟很短，就不要刻意解释。解释必须口语化、简短、像真人聊天。"
+            )
+
     # --- Time context for prompt (PRD §9.2) ---
     time_context = build_time_context()
 
@@ -373,7 +405,6 @@ async def stream_chat_response(
     ai_status = get_current_status(schedule) if schedule else None
     if ai_status:
         schedule_context = format_schedule_context(ai_status)
-    ai_status_str = ai_status["status"] if ai_status else "idle"
 
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
@@ -389,6 +420,7 @@ async def stream_chat_response(
         agent=agent,
         memories=memory_strings,
         working_facts=working_facts,
+        delay_context=delay_context,
         core_memories=core_memories,
         emotion=emotion,
         graph_context=graph_context,
@@ -409,24 +441,17 @@ async def stream_chat_response(
     # --- Send typing event before response ---
     typing_duration = calculate_typing_duration(len(user_message))
 
-    # Message interval delay (PRD §6.2.1.2)
-    # compute_message_interval_delay handles all cases:
-    #   交流状态(<30min) → 1-5s, 高情绪 → 0-5s/60-180s, 其他 → calculate_status_delay
-    status_delay = 0.0
-    if len(recent_messages) >= 2:
-        prev_time = recent_messages[-2].createdAt
-        if prev_time.tzinfo is None:
-            prev_time = prev_time.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - prev_time).total_seconds()
-        status_delay = compute_message_interval_delay(age, emotion, ai_status_str)
-
-    # Conceptual delay (sent to client) vs actual sleep (server-side cap)
+    # Delay decision is frozen at receipt time via reply_context.
+    # For live WS/SSE, we keep a short blocking sleep while exposing the conceptual delay.
     reply_delay = calculate_reply_delay(len(user_message), agent_personality, seven_dim=seven_dim)
-    conceptual_delay = max(reply_delay, status_delay)
-    actual_sleep = min(reply_delay, 2.0)
-
-    if conceptual_delay > 5.0:
-        yield {"event": "delay", "data": json.dumps({"duration": conceptual_delay})}
+    queued_delay = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
+    conceptual_delay = max(reply_delay, queued_delay)
+    if delivered_from_queue:
+        actual_sleep = min(reply_delay, 1.5)
+    else:
+        actual_sleep = min(conceptual_delay, 2.0)
+        if conceptual_delay > 5.0:
+            yield {"event": "delay", "data": json.dumps({"duration": conceptual_delay})}
     yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
     await asyncio.sleep(actual_sleep)
 
@@ -498,6 +523,7 @@ async def stream_chat_response(
             data={"title": title},
         ))
 
+    await save_last_reply_timestamp(agent_id, user_id)
     yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
 
     # --- BACKGROUND: fire-and-forget post-processing ---
@@ -522,7 +548,7 @@ async def _background_post_process(
     agent_id: str | None,
     conversation_id: str,
     user_message: str,
-    user_message_id: str,
+    user_message_id: str | None,
     full_response: str,
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
@@ -563,7 +589,7 @@ async def _background_post_process(
 
 async def _bg_emotion(
     agent_id: str | None,
-    user_message_id: str,
+    user_message_id: str | None,
     user_message: str,
     cached_emotion: dict | None = None,
     topic_intimacy: float = 50.0,
@@ -579,10 +605,11 @@ async def _bg_emotion(
         await save_ai_emotion(agent_id, new_emotion)
 
         # Save user emotion to message metadata (use known ID, no re-query)
-        await db.message.update(
-            where={"id": user_message_id},
-            data={"metadata": Json({"emotion": user_emotion})},
-        )
+        if user_message_id:
+            await db.message.update(
+                where={"id": user_message_id},
+                data={"metadata": Json({"emotion": user_emotion})},
+            )
     except Exception as e:
         logger.warning(f"Background emotion update failed: {e}")
 
