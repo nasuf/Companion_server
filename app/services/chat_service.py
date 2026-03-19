@@ -56,6 +56,7 @@ from app.services.conversation_end import check_conversation_end
 from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_emoji
 from app.services.sticker import recommend_sticker
 from app.services.trait_model import get_seven_dim
+from app.services.fast_fact import update_working_facts, facts_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +300,11 @@ async def stream_chat_response(
                     results.append(content)
         return results[:10]
 
-    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy, time_memories_result = await asyncio.gather(
+    async def _load_working_facts():
+        """Synchronously update hot-path working memory for the current user message."""
+        return await update_working_facts(conversation_id, user_message)
+
+    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy, time_memories_result, working_facts_result = await asyncio.gather(
         _do_retrieval(),
         _load_cached_emotion(),
         _load_cached_summaries(),
@@ -308,6 +313,7 @@ async def stream_chat_response(
         _load_schedule(),
         _load_topic_intimacy(),
         _load_time_memories(),
+        _load_working_facts(),
         return_exceptions=True,
     )
 
@@ -350,6 +356,12 @@ async def stream_chat_response(
     elif time_memories_result:
         time_memories = time_memories_result
 
+    working_facts: list[str] | None = None
+    if isinstance(working_facts_result, Exception):
+        logger.warning(f"Loading working facts failed: {working_facts_result}")
+    elif working_facts_result:
+        working_facts = facts_for_prompt(working_facts_result)
+
     # --- Time context for prompt (PRD §9.2) ---
     time_context = build_time_context()
 
@@ -376,6 +388,7 @@ async def stream_chat_response(
     system_prompt = build_system_prompt(
         agent=agent,
         memories=memory_strings,
+        working_facts=working_facts,
         core_memories=core_memories,
         emotion=emotion,
         graph_context=graph_context,

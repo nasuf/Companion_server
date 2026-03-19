@@ -66,6 +66,17 @@ def test_build_system_prompt_with_memories():
     assert "2. User visited Tokyo" in prompt
 
 
+def test_build_system_prompt_with_working_facts():
+    """Working memory section appears with hot-path facts."""
+    agent = _make_agent()
+    prompt = build_system_prompt(
+        agent,
+        working_facts=["[plan] 下周去东京出差", "[preference] 喜欢黑咖啡"],
+    )
+    assert "## 当前会话事实" in prompt
+    assert "下周去东京出差" in prompt
+
+
 def test_build_system_prompt_with_summaries():
     """Summarizer sections appear when summaries provided."""
     agent = _make_agent()

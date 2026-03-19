@@ -128,6 +128,7 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
     for cid in conv_ids:
         exact_keys.append(f"topics:{cid}")
         exact_keys.append(f"context_window:{cid}")
+        exact_keys.append(f"working_facts:{cid}")
 
     # 通配符 patterns（需要 SCAN）
     scan_patterns = [
