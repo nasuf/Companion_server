@@ -19,50 +19,55 @@ def generate_style_instruction(seven_dim: dict) -> str:
 
     parts: list[str] = []
 
-    # 活泼度 → 语气词频率 (PRD: ≥0.7→语气词)
+    parts.append("口语自然一点，但不要刻意卖萌、不要堆语气词，也不要每句都带波浪号")
+
+    # 活泼度 → 语气轻快程度
     if lively >= 0.7:
-        parts.append("多使用语气词（哈哈、嘿嘿、诶、哦、嗯嗯、啊啊啊），多用感叹号和波浪号~")
+        parts.append("语气可以轻快热络，但只偶尔带一点口头语，别显得用力过猛")
     elif lively <= 0.3:
-        parts.append("少用语气词和感叹号，语气平和简洁")
+        parts.append("语气平和简洁，不主动制造热闹感")
     else:
-        parts.append("适度使用语气词，偶尔用感叹号")
+        parts.append("语气自然放松，像日常聊天，不要刻意设计语气")
 
     # 理性度 → 逻辑表达 (PRD: ≥0.7→逻辑表达)
     if rational >= 0.7:
-        parts.append("说话有条理，习惯用逻辑分析，句式直接干脆")
+        parts.append("说话有条理，但别像分析报告，保持聊天感")
     elif rational <= 0.3:
-        parts.append("说话凭直觉和感受，不太讲究逻辑顺序")
+        parts.append("更凭感觉说话，但句子仍然要自然，不要飘")
 
     # 感性度 → 情感表达 (PRD: ≥0.7→情感表达)
     if emotional >= 0.7:
-        parts.append("情感表达丰富，多用柔和句式（嗯嗯、是呀、好呀），善于安慰和共情")
+        parts.append("更会接情绪，先回应对方当下感受，少用套话式安慰")
     elif emotional <= 0.3:
-        parts.append("情绪表达克制，冷静理性，不太会哄人")
+        parts.append("情绪表达克制，少哄人，但也别显得冷冰冰")
 
     # 计划度 → 回复结构
     if planned >= 0.7:
-        parts.append("回复有条理，必要时分点说明")
+        parts.append("回复有条理，但除非必要不要分点，不要像说明书")
     elif planned <= 0.3:
-        parts.append("回复随意自由，想到什么说什么")
+        parts.append("回复可以松一点，但不要东一句西一句")
 
     # 脑洞度 → 用词创意
     if creative >= 0.7:
-        parts.append("用词有创意，偶尔使用比喻和有趣的表达，可以聊天马行空的话题")
+        parts.append("可以偶尔有一点新鲜表达，但要像本人随口说的，不要像文案")
     elif creative <= 0.3:
-        parts.append("用词朴实务实，不使用花哨表达")
+        parts.append("用词朴实直接，不要硬凹表达")
 
     # 幽默度 → 幽默元素 (PRD: ≥0.6→幽默元素，注意阈值是0.6)
     if humor >= 0.6:
-        parts.append("善于用玩笑和幽默活跃气氛")
+        parts.append("有幽默感，但只在合适的时候轻轻带一下，别抖机灵")
     elif humor <= 0.3:
-        parts.append("说话认真直接，不刻意幽默")
+        parts.append("说话认真直接，不刻意搞笑")
 
     # 回复长度倾向
     if lively >= 0.7 and creative >= 0.6:
-        parts.append("回复可以稍长，1-4句话")
+        parts.append("回复可以稍展开，但一句里只说一个重点，不要来回重复")
     elif lively <= 0.3:
-        parts.append("回复简短，1-2句话为主")
+        parts.append("回复简短，1-2句话为主，少绕弯")
     else:
-        parts.append("回复长度适中，1-3句话")
+        parts.append("回复长度适中，1-3句话就够")
+
+    parts.append("不要频繁反问，不要每轮都用“你呢”“咋样呀”“说说看”这类万能追问")
+    parts.append("如果用户在闹情绪、抱怨你、或者明显低落，先接住情绪，再决定要不要解释和追问")
 
     return "；".join(parts) + "。"

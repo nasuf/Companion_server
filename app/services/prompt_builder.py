@@ -254,6 +254,13 @@ def _build_delay_context_section(delay_context: str | None) -> str | None:
     return _section("回复时机说明", delay_context)
 
 
+def _build_relational_context_section(relational_context: str | None) -> str | None:
+    """Build the relationship-sensitive response guidance section."""
+    if not relational_context:
+        return None
+    return _section("关系回应重点", relational_context)
+
+
 def _build_portrait_section(portrait: str | None) -> str | None:
     """Build the user portrait section."""
     if not portrait:
@@ -297,6 +304,7 @@ def build_system_prompt(
     memories: list[str] | None = None,
     working_facts: list[str] | None = None,
     delay_context: str | None = None,
+    relational_context: str | None = None,
     core_memories: list[str] | None = None,
     emotion: dict | None = None,
     graph_context: dict | None = None,
@@ -341,6 +349,10 @@ def build_system_prompt(
     delay = _build_delay_context_section(delay_context)
     if delay:
         sections.append(delay)
+
+    relational = _build_relational_context_section(relational_context)
+    if relational:
+        sections.append(relational)
 
     mem = _build_memory_section(memories)
     if mem:

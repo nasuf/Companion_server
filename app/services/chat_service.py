@@ -79,6 +79,14 @@ def _fire_background(coro) -> None:
 _SENTENCE_END = re.compile(r'[。！？…～~!?]+')
 
 _MORE_KEYWORDS = ["多说", "详细", "展开", "继续说", "说多点", "多聊聊"]
+_RELATIONAL_COMPLAINT_KEYWORDS = [
+    "怎么不理我", "不理我", "不回我", "不想理我", "你在忙吗", "你还在吗",
+    "你是不是不想理我", "是不是不想聊", "是不是烦我", "怎么才回",
+]
+_DISTRESS_KEYWORDS = [
+    "不好", "难受", "烦", "委屈", "崩溃", "糟糕", "不开心", "很累", "想哭",
+    "好难过", "撑不住", "心情不好",
+]
 
 
 def truncate_at_sentence(text: str, max_len: int) -> str:
@@ -127,6 +135,30 @@ def detect_special_expand(message: str, emotion: dict | None) -> bool:
         if emotion.get("arousal", 0.5) > 0.7 and emotion.get("pleasure", 0.0) < -0.3:
             return True
     return False
+
+
+def detect_relational_context(message: str, user_emotion: dict | None) -> str | None:
+    """Detect relationship repair / distress cues that need more human handling."""
+    text = message.strip()
+    if any(keyword in text for keyword in _RELATIONAL_COMPLAINT_KEYWORDS):
+        return (
+            "用户这句更像是在确认你有没有在意Ta，或者在表达被忽略感。"
+            "先短促地接住关系情绪，比如安抚、解释半句、表明你不是故意的；"
+            "不要一上来就长解释，也不要立刻抛万能反问。"
+        )
+
+    negative_emotion = bool(
+        user_emotion
+        and float(user_emotion.get("pleasure", 0.0)) < -0.2
+        and float(user_emotion.get("arousal", 0.0)) > 0.25
+    )
+    if any(keyword in text for keyword in _DISTRESS_KEYWORDS) or negative_emotion:
+        return (
+            "用户这句带明显低落或烦闷情绪。"
+            "先回应当下感受，语气真一点、短一点；"
+            "不要套模板安慰，不要一下子给很多建议，追问也只问最贴当前情绪的一句。"
+        )
+    return None
 
 
 async def stream_chat_response(
@@ -223,8 +255,8 @@ async def stream_chat_response(
                 break
 
     # --- Quick keyword emotion estimate for current message (no LLM) ---
-    if prev_user_emotion is None:
-        prev_user_emotion = quick_emotion_estimate(user_message)
+    current_user_emotion = quick_emotion_estimate(user_message)
+    prompt_user_emotion = current_user_emotion or prev_user_emotion
 
     # --- Check deletion intent (keyword-only, no LLM on hot path) ---
     has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
@@ -390,9 +422,11 @@ async def stream_chat_response(
                 f"（状态：{received_status_label}）。\n"
                 f"现在距离收到消息已经过去约 {rounded_delay} 秒。\n"
                 f"{delay_reason_text}\n"
-                "如果延迟超过60秒，可以很自然地用一句话带过刚才在忙什么；"
-                "如果延迟很短，就不要刻意解释。解释必须口语化、简短、像真人聊天。"
+                "只有在确实需要时，才用半句自然带过刚才在忙什么；"
+                "优先回应用户当下情绪或关系信号，解释不要压过聊天本身。"
             )
+
+    relational_context = detect_relational_context(user_message, prompt_user_emotion)
 
     # --- Time context for prompt (PRD §9.2) ---
     time_context = build_time_context()
@@ -411,7 +445,10 @@ async def stream_chat_response(
 
     # --- Multi-reply parameters (PRD §3.2.1) ---
     is_expand = detect_special_expand(user_message, emotion)
-    reply_count = random.randint(1, MAX_REPLY_COUNT)
+    if relational_context:
+        reply_count = 1
+    else:
+        reply_count = random.randint(1, MAX_REPLY_COUNT)
     max_reply_count = EXPAND_MAX_REPLY_COUNT if is_expand else MAX_REPLY_COUNT
     max_total = EXPAND_MAX_TOTAL_CHARS if is_expand else MAX_TOTAL_CHARS
 
@@ -421,13 +458,14 @@ async def stream_chat_response(
         memories=memory_strings,
         working_facts=working_facts,
         delay_context=delay_context,
+        relational_context=relational_context,
         core_memories=core_memories,
         emotion=emotion,
         graph_context=graph_context,
         summaries=summaries,
         portrait=portrait,
         topic_context=topic_context,
-        user_emotion=prev_user_emotion,
+        user_emotion=prompt_user_emotion,
         schedule_context=schedule_context,
         patience_instruction=patience_instruction,
         reply_count=reply_count,

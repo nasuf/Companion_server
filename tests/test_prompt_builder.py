@@ -88,6 +88,17 @@ def test_build_system_prompt_with_delay_context():
     assert "120 秒" in prompt
 
 
+def test_build_system_prompt_with_relational_context():
+    """Relationship-sensitive guidance section appears when provided."""
+    agent = _make_agent()
+    prompt = build_system_prompt(
+        agent,
+        relational_context="用户这句更像是在确认你有没有在意Ta，先接住关系情绪。",
+    )
+    assert "## 关系回应重点" in prompt
+    assert "先接住关系情绪" in prompt
+
+
 def test_build_system_prompt_with_summaries():
     """Summarizer sections appear when summaries provided."""
     agent = _make_agent()
