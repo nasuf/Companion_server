@@ -8,7 +8,15 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.memory.self_memory import generate_initial_self_memories
 from app.services.emotion import compute_baseline_emotion, save_ai_emotion
-from app.services.schedule import generate_life_overview, generate_daily_schedule, get_cached_schedule, get_current_status, save_life_overview
+from app.services.schedule import (
+    generate_life_overview,
+    generate_daily_schedule,
+    get_cached_schedule,
+    get_current_status,
+    save_life_overview,
+    status_label,
+    type_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,4 +188,9 @@ async def get_agent_status(agent_id: str):
     """获取Agent当前状态。"""
     _, schedule = await _resolve_schedule(agent_id)
     status = get_current_status(schedule)
-    return {"agent_id": agent_id, **status}
+    return {
+        "agent_id": agent_id,
+        **status,
+        "status_label": status_label(str(status.get("status", ""))),
+        "type_label": type_label(str(status.get("type", ""))),
+    }

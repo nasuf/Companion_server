@@ -283,6 +283,31 @@ def _slot_to_status(slot: dict) -> dict:
     }
 
 
+_STATUS_LABELS = {
+    "idle": "空闲",
+    "busy": "忙碌",
+    "very_busy": "很忙",
+    "sleep": "睡眠中",
+}
+
+_TYPE_LABELS = {
+    "leisure": "休闲",
+    "work": "工作",
+    "routine": "日常",
+    "sleep": "睡眠",
+}
+
+
+def status_label(status: str) -> str:
+    """中文状态标签。"""
+    return _STATUS_LABELS.get(status, status)
+
+
+def type_label(slot_type: str) -> str:
+    """中文类型标签。"""
+    return _TYPE_LABELS.get(slot_type, slot_type)
+
+
 # --- 作息查询意图识别 ---
 
 _SCHEDULE_QUERY_KEYWORDS = {
