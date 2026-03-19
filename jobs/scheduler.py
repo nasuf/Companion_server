@@ -404,6 +404,7 @@ async def _run_aggregation_scan():
     try:
         expired = await scan_expired()
         for user_id, combined_text, conv_id, reply_context, latest_message_id in expired:
+            delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
             await enqueue_delayed_message(
                 conv_id,
                 {
@@ -414,8 +415,14 @@ async def _run_aggregation_scan():
                     "message_id": latest_message_id,
                     "reply_context": reply_context,
                 },
-                float((reply_context or {}).get("delay_seconds", 0.0) or 0.0),
+                delay_seconds,
             )
+            # 12E: Update frontend after aggregation window ends
+            ws = manager.get(conv_id)
+            if ws:
+                if delay_seconds > 5:
+                    await ws.send_json({"type": "delay", "data": {"duration": delay_seconds}})
+                await ws.send_json({"type": "pending", "data": {"status": "queued", "delay": delay_seconds}})
 
         due_conversations = await scan_due_delayed_messages()
         for conv_id, payloads in due_conversations:
