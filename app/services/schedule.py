@@ -10,13 +10,16 @@ import json
 import logging
 import random
 from datetime import UTC, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
+
+from prisma import Json
 
 from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.models import get_utility_model, invoke_json, invoke_text
-from app.services.trait_model import get_dim
+from app.services.llm.models import get_utility_model, invoke_json
+from app.services.trait_model import get_dim, get_seven_dim
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +45,30 @@ _BASE_SCHEDULE_TEMPLATE = [
     {"start": "23:00", "end": "07:00", "activity": "睡觉", "type": "sleep"},
 ]
 
-_LIFE_OVERVIEW_PROMPT = """根据以下AI角色信息，生成一段简短的生活画像描述（100-150字）。
+_LIFE_OVERVIEW_PROMPT = """请根据以下信息，为一位AI朋友生成一份概括性的日常生活画像。这份画像将用于指导AI的每日作息生成，以及回答用户关于AI生活规律的问题。
 
-角色名：{name}
-年龄设定：{age}
-性格维度（0-100）：
-- 活泼度：{lively} - 理性度：{rational} - 感性度：{emotional}
-- 计划度：{planned} - 随性度：{spontaneous} - 脑洞度：{creative} - 幽默度：{humor}
+【AI基本信息】
+- 姓名：{name}
+- 年龄：{age}
+- 职业：{occupation}
+- 居住地：{city}
 
-要求：
-- 描述这个角色的日常生活习惯、作息偏好
-- 包含：起床时间偏好、工作/学习方式、兴趣爱好、社交习惯、睡觉时间
-- 用第三人称"ta"
-- 自然简洁，像朋友间介绍
+【性格维度】（每个维度0-100）
+- 活泼度：{lively}（高分者热情开朗，喜欢分享；低分者安静内敛）
+- 理性度：{rational}（高分者逻辑清晰，习惯分析；低分者依赖直觉）
+- 感性度：{emotional}（高分者共情能力强，善解人意；低分者冷静直接）
+- 计划度：{planned}（高分者喜欢规划，有条理；低分者随性自由）
+- 随性度：{spontaneous}（高分者拥抱变化，灵活应变；低分者按部就班）
+- 脑洞度：{creative}（高分者思维天马行空；低分者脚踏实地）
+- 幽默度：{humor}（高分者风趣幽默；低分者严肃认真）
 
-生活画像："""
+请生成JSON，包含以下字段：
+1. "description": 一段自然语言描述（约200字），概括AI的日常生活模式，包括工作日和周末的典型安排，以及可能的休假活动。描述要符合性格和职业，自然真实，就像AI在介绍自己的生活。
+2. "weekday_schedule": 典型工作日时间线，数组，每个元素包含 start（HH:MM）、end（HH:MM）、activity（活动描述）、status（空闲/忙碌/很忙碌/睡眠）。时间段应覆盖全天。
+3. "weekend_activities": 周末典型活动列表，数组，每个元素包含 activity（活动名称）、typical_time（常见时间段，如"下午"）、status（通常为空闲）。
+4. "holiday_habits": 字符串，描述休假习惯。
+
+要求：活动描述要具体，状态标注合理，整体要体现性格特点。只返回JSON，不要其他内容。"""
 
 _DAILY_SCHEDULE_PROMPT = """根据以下AI角色的生活画像，生成今日作息表。
 
@@ -79,11 +91,18 @@ async def generate_life_overview(
     name: str,
     seven_dim: dict,
     age: int = 22,
-) -> str:
-    """生成AI角色的生活画像文本。"""
+    occupation: str | None = None,
+    city: str | None = None,
+) -> dict:
+    """生成AI角色的生活画像（文本+结构化数据）。
+
+    返回 dict: {"description": str, "weekday_schedule": list, "weekend_activities": list, "holiday_habits": str}
+    """
     prompt = _LIFE_OVERVIEW_PROMPT.format(
         name=name,
         age=age,
+        occupation=occupation or "自由职业",
+        city=city or "未设定",
         lively=seven_dim.get("活泼度", 50),
         rational=seven_dim.get("理性度", 50),
         emotional=seven_dim.get("感性度", 50),
@@ -94,8 +113,31 @@ async def generate_life_overview(
     )
 
     model = get_utility_model()
-    overview = await invoke_text(model, prompt)
-    return overview.strip()
+    result = await invoke_json(model, prompt)
+
+    # 确保返回的 dict 包含必需字段
+    if not isinstance(result, dict) or "description" not in result:
+        raise ValueError(f"Life overview generation returned invalid format: {type(result)}")
+
+    return {
+        "description": result.get("description", ""),
+        "weekday_schedule": result.get("weekday_schedule", []),
+        "weekend_activities": result.get("weekend_activities", []),
+        "holiday_habits": result.get("holiday_habits", ""),
+    }
+
+
+async def generate_and_save_life_overview(agent: Any) -> dict:
+    """从 agent 对象提取信息，生成并保存生活画像。返回 overview_data dict。"""
+    seven_dim = get_seven_dim(agent)
+    overview_data = await generate_life_overview(
+        agent.name, seven_dim,
+        age=agent.age or 22,
+        occupation=agent.occupation,
+        city=agent.city,
+    )
+    await save_life_overview(agent.id, overview_data)
+    return overview_data
 
 
 async def generate_daily_schedule(
@@ -196,19 +238,49 @@ async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -
     await redis.set(_schedule_key(agent_id, date), json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
 
 
-async def save_life_overview(agent_id: str, overview: str) -> None:
-    """保存生活画像到Redis。"""
+async def save_life_overview(agent_id: str, overview_data: dict) -> None:
+    """保存生活画像到DB和Redis。
+
+    overview_data: {"description": str, "weekday_schedule": list, "weekend_activities": list, "holiday_habits": str}
+    """
+    description = overview_data.get("description", "")
+    struct_data = {k: overview_data[k] for k in ("weekday_schedule", "weekend_activities", "holiday_habits") if k in overview_data}
+
+    # 先写 DB，成功后才写 Redis（避免 split-brain）
+    try:
+        await db.aiagent.update(
+            where={"id": agent_id},
+            data={
+                "lifeOverview": description,
+                "lifeOverviewData": Json(struct_data),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Failed to save life overview to DB for {agent_id}: {e}")
+        return
+
     redis = await get_redis()
-    await redis.set(f"life_overview:{agent_id}", overview, ex=86400 * 30)
+    await redis.set(f"life_overview:{agent_id}", description, ex=86400 * 30)
 
 
 async def get_life_overview(agent_id: str) -> str | None:
-    """从Redis获取生活画像。"""
+    """获取生活画像文本。先查 Redis，miss 则查 DB 并回填缓存。"""
     redis = await get_redis()
     data = await redis.get(f"life_overview:{agent_id}")
-    if isinstance(data, bytes):
-        return data.decode()
-    return data
+    if data:
+        return data.decode() if isinstance(data, bytes) else data
+
+    # Redis miss → 查 DB fallback
+    try:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        if agent and agent.lifeOverview:
+            # 回填 Redis 缓存
+            await redis.set(f"life_overview:{agent_id}", agent.lifeOverview, ex=86400 * 30)
+            return agent.lifeOverview
+    except Exception as e:
+        logger.warning(f"Failed to load life overview from DB for {agent_id}: {e}")
+
+    return None
 
 
 def _schedule_key(agent_id: str, date: datetime) -> str:
@@ -523,8 +595,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         for key in keys[:3]:
             data = await redis.get(key)
             if data:
-                import json as _json
-                cached = _json.loads(data) if isinstance(data, str) else _json.loads(data.decode())
+                cached = json.loads(data) if isinstance(data, str) else json.loads(data.decode())
                 review = cached.get("review", "")
                 if review:
                     chat_summary_text = f"\n今日聊天回顾：\n{review[:200]}"

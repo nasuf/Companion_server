@@ -8,12 +8,12 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.memory.self_memory import generate_initial_self_memories
 from app.services.emotion import compute_baseline_emotion, save_ai_emotion
+from app.services.trait_model import get_seven_dim
 from app.services.schedule import (
-    generate_life_overview,
+    generate_and_save_life_overview,
     generate_daily_schedule,
     get_cached_schedule,
     get_current_status,
-    save_life_overview,
     status_label,
     type_label,
 )
@@ -48,9 +48,11 @@ async def create_agent(data: AgentCreate):
     # Generate life overview and initial schedule in background
     async def _init_schedule():
         try:
-            overview = await generate_life_overview(agent.name, agent.personality or {})
-            await generate_daily_schedule(agent.id, agent.name, agent.personality or {}, overview)
-            await save_life_overview(agent.id, overview)
+            overview_data = await generate_and_save_life_overview(agent)
+            await generate_daily_schedule(
+                agent.id, agent.name, get_seven_dim(agent),
+                life_overview=overview_data.get("description"),
+            )
         except Exception as e:
             logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
 
@@ -171,7 +173,7 @@ async def _resolve_schedule(agent_id: str):
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
         schedule = await generate_daily_schedule(
-            agent_id, agent.name, agent.personality or {}
+            agent_id, agent.name, get_seven_dim(agent)
         )
     return agent, schedule
 

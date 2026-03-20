@@ -18,8 +18,8 @@ from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.emotion import decay_emotion_toward_baseline
 from app.services.schedule import (
-    generate_daily_schedule, generate_life_overview, get_cached_schedule,
-    get_current_status, get_life_overview, review_daily_schedule, save_life_overview,
+    generate_and_save_life_overview, generate_daily_schedule, get_cached_schedule,
+    get_current_status, get_life_overview, review_daily_schedule,
 )
 from app.services.trait_model import get_seven_dim
 from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
@@ -278,9 +278,7 @@ async def _run_daily_schedules():
 
 async def _run_monthly_overview_refresh():
     async def _refresh(agent):
-        seven_dim = get_seven_dim(agent)
-        overview = await generate_life_overview(agent.name, seven_dim)
-        await save_life_overview(agent.id, overview)
+        await generate_and_save_life_overview(agent)
 
     await _run_for_all_agents(_refresh, concurrency=2, task_name="Monthly overview")
 
