@@ -18,14 +18,14 @@ _PAD_DIMS = ("pleasure", "arousal", "dominance")
 
 # PAD to tone descriptor mapping
 TONE_MAP = {
-    (1, 1, 1): "enthusiastic and confident",
-    (1, 1, -1): "excited but uncertain",
-    (1, -1, 1): "calm and content",
-    (1, -1, -1): "peaceful and accepting",
-    (-1, 1, 1): "frustrated and assertive",
-    (-1, 1, -1): "anxious and stressed",
-    (-1, -1, 1): "melancholic but composed",
-    (-1, -1, -1): "sad and withdrawn",
+    (1, 1, 1): "热情而笃定",
+    (1, 1, -1): "兴奋但不太踏实",
+    (1, -1, 1): "平静而满足",
+    (1, -1, -1): "安宁而接纳",
+    (-1, 1, 1): "烦躁但强撑着",
+    (-1, 1, -1): "焦虑而紧绷",
+    (-1, -1, 1): "低落但克制",
+    (-1, -1, -1): "难过而退缩",
 }
 
 # --- 3B.3 12标签 PAD 映射表 ---
@@ -267,7 +267,7 @@ def emotion_to_tone(emotion: dict) -> str:
     v_sign = 1 if emotion.get("pleasure", 0) >= 0 else -1
     a_sign = 1 if emotion.get("arousal", 0.5) >= 0.5 else -1
     d_sign = 1 if emotion.get("dominance", 0.5) >= 0.5 else -1
-    return TONE_MAP.get((v_sign, a_sign, d_sign), "neutral and balanced")
+    return TONE_MAP.get((v_sign, a_sign, d_sign), "平稳而克制")
 
 
 async def get_ai_emotion(agent_id: str) -> dict:

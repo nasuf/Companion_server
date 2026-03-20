@@ -139,13 +139,13 @@ class TestUpdateEmotionState:
 
 class TestEmotionToTone:
     def test_positive(self):
-        assert emotion_to_tone({"pleasure": 0.8, "arousal": 0.6, "dominance": 0.6}) == "enthusiastic and confident"
+        assert emotion_to_tone({"pleasure": 0.8, "arousal": 0.6, "dominance": 0.6}) == "热情而笃定"
 
     def test_negative(self):
-        assert emotion_to_tone({"pleasure": -0.5, "arousal": 0.3, "dominance": 0.2}) == "sad and withdrawn"
+        assert emotion_to_tone({"pleasure": -0.5, "arousal": 0.3, "dominance": 0.2}) == "难过而退缩"
 
     def test_anxious(self):
-        assert emotion_to_tone({"pleasure": -0.5, "arousal": 0.8, "dominance": 0.3}) == "anxious and stressed"
+        assert emotion_to_tone({"pleasure": -0.5, "arousal": 0.8, "dominance": 0.3}) == "焦虑而紧绷"
 
 
 # --- compute_baseline_emotion ---
