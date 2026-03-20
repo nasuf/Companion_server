@@ -189,6 +189,28 @@ async def get_agent_schedule(agent_id: str):
     return {"agent_id": agent_id, "schedule": schedule}
 
 
+@router.get("/{agent_id}/schedule-history")
+async def get_schedule_history(agent_id: str, days: int = 30):
+    """获取Agent作息历史（含生活画像）。"""
+    from datetime import datetime, timedelta
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    since = datetime.utcnow() - timedelta(days=days)
+    records = await db.aidailyschedule.find_many(
+        where={"agentId": agent_id, "date": {"gte": since}},
+        order={"date": "desc"},
+    )
+    return {
+        "life_overview": agent.lifeOverview,
+        "schedules": [
+            {"date": str(r.date.date()), "schedule": r.scheduleData}
+            for r in records
+        ],
+    }
+
+
 @router.get("/{agent_id}/status")
 async def get_agent_status(agent_id: str):
     """获取Agent当前状态。"""

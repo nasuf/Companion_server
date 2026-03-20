@@ -233,9 +233,28 @@ async def _get_user_memory_summary(user_id: str | None, limit: int = 5) -> str:
 
 
 async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -> None:
-    """缓存当日作息到Redis。"""
+    """缓存当日作息到Redis并持久化到DB。"""
     redis = await get_redis()
     await redis.set(_schedule_key(agent_id, date), json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
+
+    # 持久化到 DB（用于历史查询）
+    date_only = date.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        await db.aidailyschedule.upsert(
+            where={"agentId_date": {"agentId": agent_id, "date": date_only}},
+            data={
+                "create": {
+                    "agent": {"connect": {"id": agent_id}},
+                    "date": date_only,
+                    "scheduleData": Json(schedule),
+                },
+                "update": {
+                    "scheduleData": Json(schedule),
+                },
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Failed to persist schedule to DB for {agent_id}: {e}")
 
 
 async def save_life_overview(agent_id: str, overview_data: dict) -> None:
