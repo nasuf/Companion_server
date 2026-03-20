@@ -272,18 +272,18 @@ async def stream_chat_response(
     agent_personality = getattr(agent, "personality", None) or {}
     seven_dim = get_seven_dim(agent)
 
-    # --- HOT PATH: parallel data fetches (no LLM calls) ---
-    async def _do_retrieval():
-        return await hybrid_retrieve(user_message, user_id)
+    # --- HOT PATH: parallel data fetches ---
+    # 记忆提取与其他非依赖数据并行加载，提取完成后再执行记忆检索
+    async def _do_memory_extraction():
+        """前置记忆提取：确保当前消息的记忆在检索前已入库。"""
+        await _bg_memory_pipeline(user_id, messages_dicts)
 
     async def _load_cached_emotion():
-        """Load last known emotion from cache/DB — no LLM call."""
         if agent_id:
             return await get_ai_emotion(agent_id)
         return None
 
     async def _load_cached_summaries():
-        """Load previously cached summarizer results — no LLM call."""
         from app.services.summarizer import _conv_hash
         prev_msgs = messages_dicts[:-1]
         prev_user_content = next(
@@ -294,7 +294,6 @@ async def stream_chat_response(
         return await cache_summarizer(ch)
 
     async def _load_core_memories():
-        """Load L1 core memories (user only) — always present in prompt."""
         from app.services.memory import memory_repo
         rows = await memory_repo.find_many(
             source="user",
@@ -305,25 +304,21 @@ async def stream_chat_response(
         return [r.summary or r.content for r in rows] if rows else None
 
     async def _load_portrait():
-        """Load latest user portrait — no LLM call."""
         if agent_id:
             return await get_latest_portrait(user_id, agent_id)
         return None
 
     async def _load_schedule():
-        """Load cached schedule for AI status context."""
         if agent_id:
             return await get_cached_schedule(agent_id)
         return None
 
     async def _load_topic_intimacy():
-        """Load topic intimacy score for prompt injection."""
         if agent_id and user_id:
             return await get_topic_intimacy(agent_id, user_id)
         return 50.0
 
     async def _load_time_memories():
-        """Load memories matching parsed time ranges (PRD §9.3.4)."""
         past_times = [pt for pt in parsed_times if not pt.is_future]
         if not past_times:
             return []
@@ -342,11 +337,11 @@ async def stream_chat_response(
         return results[:10]
 
     async def _load_working_facts():
-        """Synchronously update hot-path working memory for the current user message."""
         return await update_working_facts(conversation_id, user_message)
 
-    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy, time_memories_result, working_facts_result = await asyncio.gather(
-        _do_retrieval(),
+    # Phase 1: 记忆提取与其他数据加载并行执行
+    _, emotion, summaries, core_memories, portrait, schedule, topic_intimacy, time_memories_result, working_facts_result = await asyncio.gather(
+        _do_memory_extraction(),
         _load_cached_emotion(),
         _load_cached_summaries(),
         _load_core_memories(),
@@ -358,14 +353,16 @@ async def stream_chat_response(
         return_exceptions=True,
     )
 
+    # Phase 2: 记忆提取完成后执行检索（现在能找到刚存入的记忆）
+    try:
+        retrieval_result = await hybrid_retrieve(user_message, user_id)
+    except Exception as e:
+        logger.warning(f"Hybrid retrieval failed: {e}")
+        retrieval_result = {}
+
     # Process retrieval results
-    memory_strings = None
-    graph_context = None
-    if isinstance(retrieval_result, Exception):
-        logger.warning(f"Hybrid retrieval failed: {retrieval_result}")
-    else:
-        memory_strings = retrieval_result.get("memories")
-        graph_context = retrieval_result.get("graph_context")
+    memory_strings = retrieval_result.get("memories")
+    graph_context = retrieval_result.get("graph_context")
 
     if isinstance(emotion, Exception):
         logger.warning(f"Loading cached emotion failed: {emotion}")
@@ -606,10 +603,11 @@ async def _background_post_process(
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
 
         # Run all background tasks concurrently
+        # 用户消息的记忆提取已移至热路径；此处仅补充提取AI回复中的记忆
         tasks = [
             _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, seven_dim),
             _bg_summarizer(full_messages, user_message, memory_strings),
-            _bg_memory_pipeline(user_id, full_messages),
+            _bg_memory_pipeline(user_id, [{"role": "assistant", "content": full_response}]),
         ]
         if has_deletion_keyword:
             tasks.append(_bg_deletion_check(user_id, user_message))
