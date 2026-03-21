@@ -1,4 +1,4 @@
-"""LangChain LLM model factory and helper functions."""
+"""LangChain model factory and helper functions."""
 
 import json
 import logging
@@ -7,81 +7,148 @@ from functools import lru_cache
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+Provider = str
+
+
+def _default_provider() -> Provider:
+    return "dashscope" if settings.online_model else "ollama"
+
+
+def _utility_model_name() -> str:
+    return (
+        settings.utility_model
+        or settings.ollama_model
+        or (settings.remote_small_model if settings.online_model else settings.local_small_model)
+    )
+
+
+def _chat_model_name() -> str:
+    return settings.chat_model or (
+        settings.remote_chat_model if settings.online_model else settings.local_chat_model
+    )
+
+
+def _summarizer_model_name() -> str:
+    return settings.summarizer_model or (
+        settings.remote_small_model if settings.online_model else settings.local_small_model
+    )
+
+
+def _embedding_model_name() -> str:
+    return settings.embedding_model or (
+        settings.remote_embedding_model
+        if settings.online_model
+        else settings.local_embedding_model
+    )
+
+
+def _provider_for(role: str) -> Provider:
+    override = getattr(settings, f"{role}_provider", "") or ""
+    provider = (override or settings.llm_provider or _default_provider()).strip().lower()
+    if provider not in {"ollama", "dashscope", "claude"}:
+        raise ValueError(f"Unsupported provider for {role}: {provider}")
+    return provider
+
+
+def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
+    if not settings.dashscope_api_key:
+        raise ValueError("DASHSCOPE_API_KEY is required when provider is dashscope")
+    return ChatOpenAI(
+        model=model_name,
+        api_key=settings.dashscope_api_key,
+        base_url=settings.dashscope_base_url,
+        temperature=0.7,
+        max_tokens=4096,
+        extra_body={"enable_thinking": settings.dashscope_enable_thinking},
+    )
+
+
+def _claude_model() -> ChatAnthropic:
+    if not settings.anthropic_api_key:
+        raise ValueError("ANTHROPIC_API_KEY is required when provider is claude")
+    return ChatAnthropic(
+        model="claude-sonnet-4-20250514",
+        api_key=settings.anthropic_api_key,
+        max_tokens=4096,
+    )
+
 
 @lru_cache(maxsize=1)
-def get_chat_model() -> ChatOllama | ChatAnthropic:
-    """Return the large model used for final chat responses.
-
-    Uses ``settings.chat_model`` (default qwen2.5:14b).
-    When ``settings.llm_provider == "claude"``, returns ChatAnthropic instead.
-    """
-    if settings.llm_provider == "claude":
-        return ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            api_key=settings.anthropic_api_key,
-            max_tokens=4096,
-        )
+def get_chat_model() -> BaseChatModel:
+    """Return the large model used for final chat responses."""
+    provider = _provider_for("chat")
+    if provider == "claude":
+        return _claude_model()
+    if provider == "dashscope":
+        return _dashscope_chat_model(_chat_model_name())
     return ChatOllama(
-        model=settings.chat_model,
+        model=_chat_model_name(),
         base_url=settings.ollama_base_url,
     )
 
 
 @lru_cache(maxsize=1)
-def get_summarizer_model() -> ChatOllama:
-    """Return the small model used by the 3-layer summarizer.
-
-    Uses ``settings.summarizer_model`` (default qwen2.5:7b).
-    Always Ollama regardless of llm_provider.
-    """
+def get_summarizer_model() -> BaseChatModel:
+    """Return the small model used by the 3-layer summarizer."""
+    provider = _provider_for("summarizer")
+    if provider == "claude":
+        return _claude_model()
+    if provider == "dashscope":
+        return _dashscope_chat_model(_summarizer_model_name())
     return ChatOllama(
-        model=settings.summarizer_model,
+        model=_summarizer_model_name(),
         base_url=settings.ollama_base_url,
     )
 
 
 @lru_cache(maxsize=1)
-def get_utility_model() -> ChatOllama | ChatAnthropic:
-    """Return the model used for tool / utility tasks.
-
-    Handles memory extraction, conflict detection, deletion detection,
-    and user portrait updates.  Uses ``settings.ollama_model``.
-    When ``settings.llm_provider == "claude"``, returns ChatAnthropic instead.
-    """
-    if settings.llm_provider == "claude":
-        return ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            api_key=settings.anthropic_api_key,
-            max_tokens=4096,
-        )
+def get_utility_model() -> BaseChatModel:
+    """Return the model used for tool / utility tasks."""
+    provider = _provider_for("utility")
+    if provider == "claude":
+        return _claude_model()
+    if provider == "dashscope":
+        return _dashscope_chat_model(_utility_model_name())
     return ChatOllama(
-        model=settings.ollama_model,
+        model=_utility_model_name(),
         base_url=settings.ollama_base_url,
     )
 
 
 @lru_cache(maxsize=1)
-def get_embedding_model() -> OllamaEmbeddings:
+def get_embedding_model() -> Embeddings:
     """Return the embedding model for vector operations."""
+    provider = _provider_for("embedding")
+    if provider == "dashscope":
+        if not settings.dashscope_api_key:
+            raise ValueError("DASHSCOPE_API_KEY is required when embedding_provider is dashscope")
+        return OpenAIEmbeddings(
+            model=_embedding_model_name(),
+            api_key=settings.dashscope_api_key,
+            base_url=settings.dashscope_base_url,
+            dimensions=settings.embedding_dimensions,
+            check_embedding_ctx_length=False,
+        )
+    if provider == "claude":
+        raise ValueError("Claude does not provide embeddings; use ollama or dashscope")
     return OllamaEmbeddings(
-        model=settings.embedding_model,
+        model=_embedding_model_name(),
         base_url=settings.ollama_base_url,
     )
 
 
 def convert_messages(messages: list[dict]) -> list[BaseMessage]:
-    """Convert a list of message dicts to LangChain BaseMessage objects.
-
-    Each dict must have ``role`` (``"system"`` | ``"user"`` | ``"assistant"``)
-    and ``content`` keys.
-    """
+    """Convert a list of message dicts to LangChain BaseMessage objects."""
     role_map: dict[str, type[BaseMessage]] = {
         "system": SystemMessage,
         "user": HumanMessage,
@@ -97,18 +164,13 @@ def convert_messages(messages: list[dict]) -> list[BaseMessage]:
 
 
 def _extract_json(text: str) -> Any:
-    """Extract and parse JSON from model output text.
-
-    Handles both raw JSON and markdown-fenced code blocks.
-    """
-    # Try direct parse first
+    """Extract and parse JSON from model output text."""
     text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try extracting from markdown code block
     match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if match:
         try:
@@ -116,7 +178,6 @@ def _extract_json(text: str) -> Any:
         except json.JSONDecodeError:
             pass
 
-    # Try finding first { ... } or [ ... ]
     for start_char, end_char in [("{", "}"), ("[", "]")]:
         start = text.find(start_char)
         end = text.rfind(end_char)
@@ -130,23 +191,16 @@ def _extract_json(text: str) -> Any:
 
 
 async def invoke_json(
-    model: ChatOllama | ChatAnthropic,
+    model: BaseChatModel,
     prompt: str | list[BaseMessage],
     **kwargs: Any,
 ) -> Any:
-    """Invoke the model and parse the response as JSON.
-
-    Accepts either a plain text prompt (sent as a HumanMessage) or a list of
-    BaseMessage objects.  Extra *kwargs* are forwarded to ``model.ainvoke``.
-
-    If the model supports ``format="json"`` (ChatOllama), it is set automatically.
-    """
+    """Invoke the model and parse the response as JSON."""
     if isinstance(prompt, str):
         messages = [HumanMessage(content=prompt)]
     else:
         messages = prompt
 
-    # Request JSON format from Ollama models
     if isinstance(model, ChatOllama):
         kwargs.setdefault("format", "json")
 
@@ -155,15 +209,11 @@ async def invoke_json(
 
 
 async def invoke_text(
-    model: ChatOllama | ChatAnthropic,
+    model: BaseChatModel,
     prompt: str | list[BaseMessage],
     **kwargs: Any,
 ) -> str:
-    """Invoke the model and return the response as plain text.
-
-    Accepts either a plain text prompt (sent as a HumanMessage) or a list of
-    BaseMessage objects.  Extra *kwargs* are forwarded to ``model.ainvoke``.
-    """
+    """Invoke the model and return the response as plain text."""
     if isinstance(prompt, str):
         messages = [HumanMessage(content=prompt)]
     else:

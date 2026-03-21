@@ -16,16 +16,34 @@ class Settings(BaseSettings):
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
 
-    # LLM models
-    chat_model: str = "qwen2.5:14b"
-    summarizer_model: str = "qwen2.5:7b"
-    ollama_model: str = "qwen2.5:7b"
+    # DashScope / Alibaba Cloud Bailian (OpenAI-compatible)
+    dashscope_api_key: str = ""
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_enable_thinking: bool = False
 
-    # Embedding model
-    embedding_model: str = "nomic-embed-text"
+    # Simple model switch
+    online_model: bool = False
+    local_chat_model: str = "qwen2.5:14b"
+    local_small_model: str = "qwen2.5:7b"
+    remote_chat_model: str = "qwen3.5-plus"
+    remote_small_model: str = "qwen3.5-flash"
 
-    # LLM provider: "ollama" or "claude"
-    llm_provider: str = "ollama"
+    # Internal embedding defaults used by the memory system
+    local_embedding_model: str = "nomic-embed-text"
+    remote_embedding_model: str = "text-embedding-v3"
+    embedding_dimensions: int = 768
+
+    # Advanced / legacy overrides
+    chat_model: str = ""
+    summarizer_model: str = ""
+    utility_model: str = ""
+    ollama_model: str = ""
+    embedding_model: str = ""
+    llm_provider: str = ""
+    chat_provider: str = ""
+    summarizer_provider: str = ""
+    utility_provider: str = ""
+    embedding_provider: str = ""
 
     # Anthropic (when llm_provider == "claude")
     anthropic_api_key: str = ""
