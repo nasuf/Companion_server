@@ -11,7 +11,7 @@ This repo deploys to RackNerd through GitHub Actions.
 
 Server path on the VPS:
 
-- `/opt/companion/server`
+- `/app/companion-server`
 
 ## GitHub configuration
 

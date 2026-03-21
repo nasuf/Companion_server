@@ -22,7 +22,7 @@ jobs:
           password: ${{ secrets.VPS_PASSWORD }}
           port: ${{ vars.VPS_PORT }}
           source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example"
-          target: "/opt/companion/server"
+          target: "/app/companion-server"
 
       - name: Deploy server stack on VPS
         uses: appleboy/ssh-action@v1.2.0
@@ -44,8 +44,8 @@ jobs:
               apt-get install -y docker-compose-plugin
             fi
 
-            mkdir -p /opt/companion/server
-            cd /opt/companion/server
+            mkdir -p /app/companion-server
+            cd /app/companion-server
 
             cat > .env <<EOF
             DATABASE_URL=${{ secrets.DATABASE_URL }}
