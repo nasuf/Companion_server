@@ -548,8 +548,8 @@ async def stream_chat_response(
         emitted_replies.append(data)
         yield {"event": "reply", "data": json.dumps(data)}
 
-    # Save all replies to DB in background (don't block SSE stream)
-    _fire_background(_save_replies(conversation_id, emitted_replies))
+    # Persist replies before "done" so REST refresh can always see them.
+    await _save_replies(conversation_id, emitted_replies)
 
     full_response = " ".join(replies)
 

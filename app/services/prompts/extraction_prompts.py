@@ -3,20 +3,20 @@
 Used by the memory extraction pipeline to extract structured data from conversations.
 """
 
-MEMORY_EXTRACTION_PROMPT = """You are a memory extraction system.
+MEMORY_EXTRACTION_PROMPT = """你是一个记忆提取系统。
 
-Analyze the conversation and extract structured memory about the user.
+请分析对话，提取关于用户的结构化记忆。
 
 Conversation:
 {conversation}
 
 Current time: {current_time}
 
-Return JSON with this exact schema:
+请按这个 JSON 结构返回：
 {{
   "memories": [
     {{
-      "summary": "short description of the memory",
+      "summary": "记忆的简短中文总结",
       "level": 2,
       "importance": 0.8,
       "type": "identity|emotion|preference|life|thought",
@@ -45,31 +45,36 @@ Return JSON with this exact schema:
   "topics": ["topic1", "topic2"]
 }}
 
-Memory type definitions:
+记忆类型定义：
 - identity: 身份信息 — 姓名、年龄、职业、家庭关系、身份角色
 - emotion: 情绪记忆 — 情绪状态、情感体验、心理感受
 - preference: 偏好边界 — 喜恶、在意的事、习惯、兴趣爱好
 - life: 生活记忆 — 事件、日期、日常生活、人际关系动态
 - thought: 思维记忆 — 想法、观点、目标、价值观、规划
 
-Rules for occur_time:
+occur_time 规则：
 - If the user mentions a specific time (e.g. "yesterday", "next Friday", "last Christmas"), convert it to ISO format (e.g. "2026-03-17T00:00:00") based on the current time above
 - If the memory describes a future plan/event, set occur_time to that future date
 - If no time information is mentioned, set occur_time to null
 
-Rules for level assignment:
+层级规则：
 - Level 1: Core identity (name, birthday, family, job) — importance 0.8-1.0
 - Level 2: Important preferences, significant events, relationships — importance 0.5-0.8
 - Level 3: Daily conversation, casual mentions — importance 0.2-0.5
 
-Rules for importance scoring:
+importance 评分规则：
 - 涉及核心身份(姓名/职业/家庭): 0.9-1.0
 - 明确的偏好/喜恶: 0.7-0.9
 - 重要事件/里程碑: 0.7-0.9
 - 情绪强烈的体验: 0.6-0.8
 - 日常提及/闲聊: 0.2-0.5
 
-If nothing worth remembering, return {{"memories":[],"entities":[],"preferences":[],"topics":[]}}."""
+额外要求：
+- `summary` 必须是自然、简洁的中文
+- `entities.name`、`preferences.value`、`topics` 尽量用中文，除非原文中的专有名词必须保留英文
+- 不要把总结写成英文
+
+如果没有值得记住的内容，返回 {{"memories":[],"entities":[],"preferences":[],"topics":[]}}。"""
 
 EMOTION_EXTRACTION_PROMPT = """分析以下消息的情绪内容。
 

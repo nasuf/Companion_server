@@ -13,13 +13,17 @@ from app.services.llm.models import get_utility_model, invoke_text
 
 logger = logging.getLogger(__name__)
 
-COMPRESS_PROMPT = """Compress the following {count} memories into a single concise summary (2-3 sentences).
-Preserve the most important facts, preferences, and events.
+COMPRESS_PROMPT = """请将下面 {count} 条记忆压缩成一段 2-3 句的简洁中文总结。
+保留最重要的事实、偏好和事件。
 
-Memories:
+记忆：
 {memories}
 
-Compressed summary:"""
+要求：
+- 输出必须是自然中文
+- 不要输出英文总结，除非专有名词本身是英文
+
+压缩总结："""
 
 
 async def _compress_batch(

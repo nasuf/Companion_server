@@ -61,7 +61,7 @@ DATABASE_URL=postgresql://postgres.lzmeacugbmdzqhasitog:Hellocompanion713%21@aws
 ### Redis
 
 ```env
-REDIS_URL=redis://:nasuf713%21@192.210.235.115:6380/0
+REDIS_URL=redis://:nasuf713%21@192.210.235.115:6380/4
 ```
 
 ### Neo4j
@@ -110,3 +110,6 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
 - `ONLINE_MODEL=true` means chat / summarizer / utility / embedding all use DashScope defaults.
 - `ONLINE_MODEL=false` means the same roles all use local Ollama defaults.
 - The backend API is not exposed directly to the public internet in this deploy shape; Nginx on the web repo proxies requests to `127.0.0.1:8000`.
+- Keep local and deployed environments on different Redis DBs. Recommended:
+  - local: `redis://localhost:6380/0`
+  - dev server: `redis://:***@host:6380/4`

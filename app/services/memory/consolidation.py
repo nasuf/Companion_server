@@ -15,13 +15,17 @@ from app.services.llm.models import get_utility_model, invoke_text
 
 logger = logging.getLogger(__name__)
 
-SUMMARIZE_PROMPT = """Summarize the following memories into a single stable long-term memory.
-Be concise (1-2 sentences).
+SUMMARIZE_PROMPT = """请把下面这些记忆整合成一条稳定的长期中文记忆。
+保持简洁，控制在 1-2 句。
 
-Memories:
+记忆：
 {memories}
 
-Summary:"""
+要求：
+- 输出必须是自然中文
+- 不要输出英文总结，除非专有名词本身是英文
+
+总结："""
 
 
 async def _consolidate_level(
