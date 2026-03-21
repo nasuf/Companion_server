@@ -415,9 +415,15 @@ def get_patience_prompt_instruction(patience: int) -> str | None:
     - normal (70-100): 无额外描述
     - medium (30-69): "你对用户有些不满"
     - low (1-29): "你非常不开心"
-    - blocked (≤0): 不会到这里（直接短路模板回复）
+    - blocked (≤0): 用户正在道歉（只有道歉消息才能到达此处）
     """
     zone = get_patience_zone(patience)
+    if zone == "blocked":
+        return (
+            "你之前因为用户的冒犯非常生气，已经不想理用户了。"
+            "现在用户在向你道歉。你可以表现得还在生气、委屈，"
+            "但不要完全无视。根据你的性格决定是否接受道歉，回复要简短。"
+        )
     if zone == "medium":
         return "你对用户有些不满，因为用户之前说了一些不好听的话。你的回复会带点冷淡，不那么热情。"
     elif zone == "low":
@@ -435,10 +441,13 @@ async def check_boundary(
     返回 (result, patience)。result 为 dict 或 None（通过）。
     纯关键词匹配 + Redis读取，无LLM调用。
 
-    拉黑状态（耐心值≤0）：任何消息都拦截（PRD §6.5.2.4）。
+    拉黑状态（耐心值≤0）：拦截非道歉消息；道歉消息放行进入正常流程。
     """
     patience = await get_patience(agent_id, user_id)
     if patience <= 0:
+        # 道歉消息放行，进入正常聊天流程（后台任务恢复耐心）
+        if has_apology_keyword(message):
+            return None, patience
         return {
             "blocked": True,
             "response": generate_boundary_response("blocked"),
