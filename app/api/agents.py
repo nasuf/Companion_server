@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException
 from prisma import Json
@@ -192,12 +193,11 @@ async def get_agent_schedule(agent_id: str):
 @router.get("/{agent_id}/schedule-history")
 async def get_schedule_history(agent_id: str, days: int = 30):
     """获取Agent作息历史（含生活画像）。"""
-    from datetime import datetime, timedelta
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.now(UTC) - timedelta(days=days)
     records = await db.aidailyschedule.find_many(
         where={"agentId": agent_id, "date": {"gte": since}},
         order={"date": "desc"},
