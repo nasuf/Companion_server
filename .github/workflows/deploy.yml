@@ -73,6 +73,6 @@ jobs:
             EOF
 
             docker compose -f docker-compose.deploy.yml build
-            docker compose -f docker-compose.deploy.yml run --rm -e DATABASE_URL=${{ secrets.MIGRATION_DATABASE_URL }} server prisma db execute --file prisma/migrations/001_add_prompt_templates.sql --schema prisma/schema.prisma
-            docker compose -f docker-compose.deploy.yml run --rm -e DATABASE_URL=${{ secrets.MIGRATION_DATABASE_URL }} server prisma db execute --file prisma/migrations/002_add_prompt_template_versions.sql --schema prisma/schema.prisma
+            docker compose -f docker-compose.deploy.yml run --rm -e DATABASE_URL='${{ secrets.MIGRATION_DATABASE_URL }}' server prisma db execute --file prisma/migrations/001_add_prompt_templates.sql --schema prisma/schema.prisma
+            docker compose -f docker-compose.deploy.yml run --rm -e DATABASE_URL='${{ secrets.MIGRATION_DATABASE_URL }}' server prisma db execute --file prisma/migrations/002_add_prompt_template_versions.sql --schema prisma/schema.prisma
             docker compose -f docker-compose.deploy.yml up -d --remove-orphans
