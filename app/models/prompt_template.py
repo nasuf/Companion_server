@@ -17,3 +17,16 @@ class PromptTemplateResponse(BaseModel):
 class PromptTemplateUpdateRequest(BaseModel):
     content: str
 
+
+class PromptTemplateVersionResponse(BaseModel):
+    id: str
+    prompt_key: str
+    content: str
+    source: str
+    change_type: str
+    persistence: str
+    created_at: str
+
+
+class PromptTemplateRestoreVersionRequest(BaseModel):
+    version_id: str

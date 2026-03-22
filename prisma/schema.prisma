@@ -99,6 +99,20 @@ model PromptTemplate {
   @@map("prompt_templates")
 }
 
+model PromptTemplateVersion {
+  id          String   @id @default(uuid())
+  promptId    String   @map("prompt_id")
+  promptKey   String   @map("prompt_key")
+  content     String
+  source      String
+  changeType  String   @map("change_type")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([promptId, createdAt(sort: Desc)])
+  @@index([promptKey, createdAt(sort: Desc)])
+  @@map("prompt_template_versions")
+}
+
 model UserMemory {
   id           String   @id @default(uuid())
   userId       String   @map("user_id")

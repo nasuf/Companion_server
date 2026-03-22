@@ -43,9 +43,20 @@ async def ensure_prompt_templates() -> None:
                         "defaultContent": definition.default_text,
                     },
                 )
+            version_count = await db.prompttemplateversion.count(
+                where={"promptId": existing.id}
+            )
+            if version_count == 0:
+                await _create_prompt_version(
+                    prompt_id=existing.id,
+                    prompt_key=definition.key,
+                    content=content,
+                    source="db",
+                    change_type="bootstrap",
+                )
         else:
             content = definition.default_text
-            await db.prompttemplate.create(
+            created = await db.prompttemplate.create(
                 data={
                     "key": definition.key,
                     "stage": definition.stage,
@@ -56,6 +67,13 @@ async def ensure_prompt_templates() -> None:
                     "defaultContent": definition.default_text,
                     "isEnabled": True,
                 }
+            )
+            await _create_prompt_version(
+                prompt_id=created.id,
+                prompt_key=definition.key,
+                content=definition.default_text,
+                source="default",
+                change_type="bootstrap",
             )
         redis = await get_redis()
         await redis.set(_redis_key(definition.key), content)
@@ -101,12 +119,61 @@ async def list_prompts() -> list[dict]:
     return prompts
 
 
-async def _persist_prompt_update(key: str, content: str) -> None:
+async def _create_prompt_version(
+    *,
+    prompt_id: str,
+    prompt_key: str,
+    content: str,
+    source: str,
+    change_type: str,
+) -> None:
+    await db.prompttemplateversion.create(
+        data={
+            "promptId": prompt_id,
+            "promptKey": prompt_key,
+            "content": content,
+            "source": source,
+            "changeType": change_type,
+        }
+    )
+
+
+async def list_prompt_versions(key: str, limit: int = 20) -> list[dict]:
+    definition = PROMPT_DEFINITION_MAP.get(key)
+    if not definition:
+        raise KeyError(f"Unknown prompt key: {key}")
+
+    versions = await db.prompttemplateversion.find_many(
+        where={"promptKey": key},
+        order={"createdAt": "desc"},
+        take=limit,
+    )
+    return [
+        {
+            "id": version.id,
+            "prompt_key": version.promptKey,
+            "content": version.content,
+            "source": version.source,
+            "change_type": version.changeType,
+            "persistence": "synced",
+            "created_at": version.createdAt.isoformat(),
+        }
+        for version in versions
+    ]
+
+
+async def _persist_prompt_update(
+    key: str,
+    content: str,
+    *,
+    source: str,
+    change_type: str,
+) -> dict:
     definition = PROMPT_DEFINITION_MAP[key]
     try:
         existing = await db.prompttemplate.find_unique(where={"key": key})
         if existing:
-            await db.prompttemplate.update(
+            row = await db.prompttemplate.update(
                 where={"key": key},
                 data={
                     "content": content,
@@ -118,7 +185,7 @@ async def _persist_prompt_update(key: str, content: str) -> None:
                 },
             )
         else:
-            await db.prompttemplate.create(
+            row = await db.prompttemplate.create(
                 data={
                     "key": key,
                     "stage": definition.stage,
@@ -130,8 +197,17 @@ async def _persist_prompt_update(key: str, content: str) -> None:
                     "isEnabled": True,
                 }
             )
+        await _create_prompt_version(
+            prompt_id=row.id,
+            prompt_key=key,
+            content=content,
+            source=source,
+            change_type=change_type,
+        )
+        return row
     except Exception as exc:
         logger.error("Failed to persist prompt %s: %s", key, exc)
+        raise
 
 
 async def update_prompt_text(key: str, content: str) -> dict:
@@ -146,7 +222,14 @@ async def update_prompt_text(key: str, content: str) -> dict:
 
     redis = await get_redis()
     await redis.set(_redis_key(key), normalized)
-    task = asyncio.create_task(_persist_prompt_update(key, normalized))
+    task = asyncio.create_task(
+        _persist_prompt_update(
+            key,
+            normalized,
+            source="redis",
+            change_type="manual_save",
+        )
+    )
     task.add_done_callback(lambda t: t.exception() and logger.error("Prompt save task failed: %s", t.exception()))
 
     return {
@@ -164,11 +247,40 @@ async def reset_prompt_text(key: str) -> dict:
 
     redis = await get_redis()
     await redis.set(_redis_key(key), definition.default_text)
-    await _persist_prompt_update(key, definition.default_text)
-    row = await db.prompttemplate.find_unique(where={"key": key})
+    row = await _persist_prompt_update(
+        key,
+        definition.default_text,
+        source="default",
+        change_type="reset_default",
+    )
     return {
         **asdict(definition),
         "content": definition.default_text,
         "source": "default",
+        "updated_at": row.updatedAt.isoformat() if row else None,
+    }
+
+
+async def restore_prompt_version(key: str, version_id: str) -> dict:
+    definition = PROMPT_DEFINITION_MAP.get(key)
+    if not definition:
+        raise KeyError(f"Unknown prompt key: {key}")
+
+    version = await db.prompttemplateversion.find_unique(where={"id": version_id})
+    if not version or version.promptKey != key:
+        raise KeyError(f"Unknown prompt version for key: {key}")
+
+    redis = await get_redis()
+    await redis.set(_redis_key(key), version.content)
+    row = await _persist_prompt_update(
+        key,
+        version.content,
+        source="version_restore",
+        change_type=f"restore:{version_id}",
+    )
+    return {
+        **asdict(definition),
+        "content": version.content,
+        "source": "redis",
         "updated_at": row.updatedAt.isoformat() if row else None,
     }

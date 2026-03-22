@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/companion"
+    migration_database_url: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

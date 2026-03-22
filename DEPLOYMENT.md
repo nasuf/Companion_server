@@ -26,6 +26,7 @@ Use both repository `Secrets` and repository `Variables`.
 
 - `VPS_HOST`
 - `DATABASE_URL`
+- `MIGRATION_DATABASE_URL`
 - `REDIS_URL`
 - `NEO4J_PASSWORD`
 - `DASHSCOPE_API_KEY`
@@ -61,6 +62,7 @@ Optional:
 
 ```env
 DATABASE_URL=postgresql://postgres.lzmeacugbmdzqhasitog:Hellocompanion713%21@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require
+MIGRATION_DATABASE_URL=postgresql://postgres.lzmeacugbmdzqhasitog:Hellocompanion713%21@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1
 ```
 
 ### Redis
@@ -118,6 +120,10 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
 
 ## Notes
 
+- Best practice for Supabase:
+  - `DATABASE_URL` uses session mode (`5432`) for the long-running server process.
+  - `MIGRATION_DATABASE_URL` uses transaction mode (`6543`) for Prisma admin commands.
+  - For Prisma against Supabase transaction pooler, keep `pgbouncer=true&connection_limit=1`.
 - The memory system still uses embeddings internally, but you do not need to configure an embedding model separately anymore.
 - `ONLINE_MODEL=true` means chat / summarizer / utility / embedding all use DashScope defaults.
 - `ONLINE_MODEL=false` means the same roles all use local Ollama defaults.

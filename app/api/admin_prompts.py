@@ -4,10 +4,18 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.admin_auth import require_admin
 from app.models.prompt_template import (
+    PromptTemplateRestoreVersionRequest,
     PromptTemplateResponse,
     PromptTemplateUpdateRequest,
+    PromptTemplateVersionResponse,
 )
-from app.services.prompt_store import list_prompts, reset_prompt_text, update_prompt_text
+from app.services.prompt_store import (
+    list_prompt_versions,
+    list_prompts,
+    reset_prompt_text,
+    restore_prompt_version,
+    update_prompt_text,
+)
 
 router = APIRouter(prefix="/admin-api/prompts", tags=["admin-prompts"])
 
@@ -33,10 +41,32 @@ async def update_prompt(
     return PromptTemplateResponse(**prompt)
 
 
+@router.get("/{key}/versions", response_model=list[PromptTemplateVersionResponse])
+async def get_prompt_versions(key: str, _: str = Depends(require_admin)):
+    try:
+        versions = await list_prompt_versions(key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt not found") from None
+    return [PromptTemplateVersionResponse(**version) for version in versions]
+
+
 @router.post("/{key}/reset", response_model=PromptTemplateResponse)
 async def reset_prompt(key: str, _: str = Depends(require_admin)):
     try:
         prompt = await reset_prompt_text(key)
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
+    return PromptTemplateResponse(**prompt)
+
+
+@router.post("/{key}/restore-version", response_model=PromptTemplateResponse)
+async def restore_prompt_from_version(
+    key: str,
+    payload: PromptTemplateRestoreVersionRequest,
+    _: str = Depends(require_admin),
+):
+    try:
+        prompt = await restore_prompt_version(key, payload.version_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt version not found") from None
     return PromptTemplateResponse(**prompt)
