@@ -8,6 +8,7 @@ This repo deploys to RackNerd through GitHub Actions.
 - `neo4j:5-community` via Docker Compose
 - External Redis via `REDIS_URL`
 - External Postgres / Supabase via `DATABASE_URL`
+- Prompt template migration applied during deploy
 
 Server path on the VPS:
 
@@ -29,6 +30,10 @@ Use both repository `Secrets` and repository `Variables`.
 - `NEO4J_PASSWORD`
 - `DASHSCOPE_API_KEY`
 - `LANGSMITH_API_KEY`
+- `LANGSMITH_ORG_ID`
+- `LANGSMITH_PROJECT_ID`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
 
 Optional:
 
@@ -90,6 +95,13 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
 LANGSMITH_TRACING=true
 ```
 
+### Admin prompt console
+
+```env
+ADMIN_USERNAME=your_admin_username
+ADMIN_PASSWORD=your_admin_password
+```
+
 For local Ollama:
 
 ```env
@@ -110,6 +122,7 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
 - `ONLINE_MODEL=true` means chat / summarizer / utility / embedding all use DashScope defaults.
 - `ONLINE_MODEL=false` means the same roles all use local Ollama defaults.
 - The backend API is not exposed directly to the public internet in this deploy shape; Nginx on the web repo proxies requests to `127.0.0.1:8000`.
+- The prompt admin API is protected by HTTP Basic auth using `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 - Keep local and deployed environments on different Redis DBs. Recommended:
   - local: `redis://localhost:6380/0`
   - dev server: `redis://:***@host:6380/4`

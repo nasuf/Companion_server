@@ -19,6 +19,12 @@ from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.prompt_defaults import (
+    DAILY_SCHEDULE_PROMPT as _DAILY_SCHEDULE_PROMPT,
+    LIFE_OVERVIEW_PROMPT as _LIFE_OVERVIEW_PROMPT,
+    SCHEDULE_REVIEW_PROMPT as _SCHEDULE_REVIEW_PROMPT,
+)
+from app.services.prompt_store import get_prompt_text
 from app.services.trait_model import get_dim, get_seven_dim
 
 logger = logging.getLogger(__name__)
@@ -45,47 +51,6 @@ _BASE_SCHEDULE_TEMPLATE = [
     {"start": "23:00", "end": "07:00", "activity": "睡觉", "type": "sleep"},
 ]
 
-_LIFE_OVERVIEW_PROMPT = """请根据以下信息，为一位AI朋友生成一份概括性的日常生活画像。这份画像将用于指导AI的每日作息生成，以及回答用户关于AI生活规律的问题。
-
-【AI基本信息】
-- 姓名：{name}
-- 年龄：{age}
-- 职业：{occupation}
-- 居住地：{city}
-
-【性格维度】（每个维度0-100）
-- 活泼度：{lively}（高分者热情开朗，喜欢分享；低分者安静内敛）
-- 理性度：{rational}（高分者逻辑清晰，习惯分析；低分者依赖直觉）
-- 感性度：{emotional}（高分者共情能力强，善解人意；低分者冷静直接）
-- 计划度：{planned}（高分者喜欢规划，有条理；低分者随性自由）
-- 随性度：{spontaneous}（高分者拥抱变化，灵活应变；低分者按部就班）
-- 脑洞度：{creative}（高分者思维天马行空；低分者脚踏实地）
-- 幽默度：{humor}（高分者风趣幽默；低分者严肃认真）
-
-请生成JSON，包含以下字段：
-1. "description": 一段自然语言描述（约200字），概括AI的日常生活模式，包括工作日和周末的典型安排，以及可能的休假活动。描述要符合性格和职业，自然真实，就像AI在介绍自己的生活。
-2. "weekday_schedule": 典型工作日时间线，数组，每个元素包含 start（HH:MM）、end（HH:MM）、activity（活动描述）、status（空闲/忙碌/很忙碌/睡眠）。时间段应覆盖全天。
-3. "weekend_activities": 周末典型活动列表，数组，每个元素包含 activity（活动名称）、typical_time（常见时间段，如"下午"）、status（通常为空闲）。
-4. "holiday_habits": 字符串，描述休假习惯。
-
-要求：活动描述要具体，状态标注合理，整体要体现性格特点。只返回JSON，不要其他内容。"""
-
-_DAILY_SCHEDULE_PROMPT = """根据以下AI角色的生活画像，生成今日作息表。
-
-角色名：{name}
-生活画像：{overview}
-今日日期：{date}
-星期：{weekday}
-
-返回JSON数组，每个时段包含start/end/activity/type：
-- type: routine(日常)/work(工作)/rest(休息)/leisure(休闲)/social(社交)/sleep(睡觉)
-- 时间格式HH:MM
-- 覆盖全天24小时
-- 根据星期适当调整（周末可以晚起、多休闲）
-- 加入1-2个个性化活动
-
-返回JSON数组（不要其他内容）："""
-
 
 async def generate_life_overview(
     name: str,
@@ -98,7 +63,7 @@ async def generate_life_overview(
 
     返回 dict: {"description": str, "weekday_schedule": list, "weekend_activities": list, "holiday_habits": str}
     """
-    prompt = _LIFE_OVERVIEW_PROMPT.format(
+    prompt = (await get_prompt_text("schedule.life_overview")).format(
         name=name,
         age=age,
         occupation=occupation or "自由职业",
@@ -158,7 +123,7 @@ async def generate_daily_schedule(
         is_weekend = date.weekday() >= 5
         if is_weekend or random.random() < 0.4:
             try:
-                prompt = _DAILY_SCHEDULE_PROMPT.format(
+                prompt = (await get_prompt_text("schedule.daily_schedule")).format(
                     name=name,
                     overview=life_overview,
                     date=date.strftime("%Y-%m-%d"),
@@ -560,23 +525,6 @@ async def handle_schedule_adjustment(
 
 # --- 每日作息回顾 ---
 
-_SCHEDULE_REVIEW_PROMPT = """你是{name}。回顾今天的经历，用第一人称写2-3条简短感想。
-
-今日作息：
-{schedule_text}
-{adjustments_text}
-{chat_summary_text}
-要求：
-- 用口语化第一人称
-- 每条30-50字以内
-- 关注感受和体验
-- 如有作息调整，提及这些变化
-- 如果和用户有聊天，提及互动感受
-
-返回JSON：
-{{"memories": ["感想1", "感想2"]}}"""
-
-
 async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "伙伴") -> list[str]:
     """回顾当日作息，合并调整记录，生成AI自我记忆。"""
     from app.services.memory.storage import store_memory
@@ -622,7 +570,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     except Exception as e:
         logger.warning(f"Failed to load chat summary for review: {e}")
 
-    prompt = _SCHEDULE_REVIEW_PROMPT.format(
+    prompt = (await get_prompt_text("schedule.review")).format(
         name=agent_name,
         schedule_text=schedule_text,
         adjustments_text=adjustments_text,

@@ -10,42 +10,13 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_text
+from app.services.prompt_defaults import (
+    PORTRAIT_GENERATION_PROMPT,
+    PORTRAIT_UPDATE_PROMPT,
+)
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
-
-PORTRAIT_GENERATION_PROMPT = """你是一个用户画像生成系统。请根据以下用户记忆，生成一份200-300字的用户画像。
-
-用户记忆：
-{memories}
-
-画像结构要求（共5段）：
-1. 基本身份（姓名、年龄、性别、职业等已知信息）
-2. 主要偏好与禁忌（从L1、L2偏好记忆提取）
-3. 生活状态与重要事件
-4. 性格特征与交流风格
-5. 情感倾向与关注点
-
-规则：
-- 只使用记忆中明确提到的信息，不要推测
-- 未知信息用"未知"标注
-- 语言简洁客观，不加评价
-- 总字数200-300字"""
-
-PORTRAIT_UPDATE_PROMPT = """你是一个用户画像更新系统。请根据上一版画像和本周新增变化，生成更新后的画像。
-
-上一版画像：
-{previous_portrait}
-
-本周变化摘要：
-{weekly_changes}
-
-规则：
-- 保留未变化的信息
-- 更新有变化的部分
-- 新增新发现的信息
-- 删除被用户否定的旧信息
-- 总字数200-300字
-- 保持5段结构"""
 
 
 async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
@@ -115,7 +86,7 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
         f"- [L{m.level}] {m.summary or m.content}" for m in memories
     )
 
-    prompt = PORTRAIT_GENERATION_PROMPT.format(memories=memories_text)
+    prompt = (await get_prompt_text("portrait.generation")).format(memories=memories_text)
 
     try:
         portrait = await invoke_text(get_utility_model(), prompt)
@@ -175,7 +146,7 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
         for cl in changelogs
     )
 
-    prompt = PORTRAIT_UPDATE_PROMPT.format(
+    prompt = (await get_prompt_text("portrait.update")).format(
         previous_portrait=previous.content,
         weekly_changes=changes_text,
     )

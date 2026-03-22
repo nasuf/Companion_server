@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     langsmith_org_id: str = ""
     langsmith_project_id: str = ""
 
+    # Admin prompt management
+    admin_username: str = ""
+    admin_password: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

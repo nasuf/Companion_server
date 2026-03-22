@@ -83,6 +83,22 @@ model Message {
   @@map("messages")
 }
 
+model PromptTemplate {
+  id             String   @id @default(uuid())
+  key            String   @unique
+  stage          String
+  category       String
+  title          String
+  description    String?
+  content        String
+  defaultContent String   @map("default_content")
+  isEnabled      Boolean  @default(true) @map("is_enabled")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("prompt_templates")
+}
+
 model UserMemory {
   id           String   @id @default(uuid())
   userId       String   @map("user_id")

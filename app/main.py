@@ -8,6 +8,7 @@ from app.redis_client import get_redis, close_redis
 from app.neo4j_client import get_driver, close_neo4j
 from app.services.graph.schema import init_graph_schema
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
+from app.services.prompt_store import ensure_prompt_templates
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
 
 # Configure logging and tracing before anything else
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
     await get_redis()
     await get_driver()
     await init_graph_schema()
+    await ensure_prompt_templates()
     setup_scheduler()
     yield
     # Shutdown
@@ -54,6 +56,7 @@ from app.api.intimacy import router as intimacy_router
 from app.api.boundary import router as boundary_router
 from app.api.stickers import router as stickers_router
 from app.api.ws import router as ws_router
+from app.api.admin_prompts import router as admin_prompts_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -66,3 +69,4 @@ app.include_router(intimacy_router)
 app.include_router(boundary_router)
 app.include_router(stickers_router)
 app.include_router(ws_router)
+app.include_router(admin_prompts_router)

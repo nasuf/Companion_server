@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timezone
 
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.prompts.extraction_prompts import MEMORY_SCORING_PROMPT as LLM_SCORING_PROMPT
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def compute_rule_score(
 async def compute_llm_score(memory_summary: str, context: str) -> float:
     """Compute LLM-based relevance + importance score."""
     model = get_utility_model()
-    prompt = LLM_SCORING_PROMPT.format(
+    prompt = (await get_prompt_text("memory.scoring")).format(
         memory_summary=memory_summary, context=context
     )
     try:

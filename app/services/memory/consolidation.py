@@ -12,6 +12,7 @@ from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.vector_search import search_by_embedding
 from app.services.llm.models import get_utility_model, invoke_text
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ async def _consolidate_user_memories(
     model = get_utility_model()
     for cluster in clusters:
         mem_texts = "\n".join(f"- {m.content}" for m in cluster)
-        prompt = SUMMARIZE_PROMPT.format(memories=mem_texts)
+        prompt = (await get_prompt_text("memory.consolidation")).format(memories=mem_texts)
 
         try:
             summary = await invoke_text(model, prompt)

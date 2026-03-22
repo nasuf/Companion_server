@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.prompts.extraction_prompts import MEMORY_EXTRACTION_PROMPT as EXTRACTION_PROMPT
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ async def extract_memories(conversation: str) -> dict:
     """
     model = get_utility_model()
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
-    prompt = EXTRACTION_PROMPT.format(
+    prompt = (await get_prompt_text("memory.extraction")).format(
         conversation=conversation,
         current_time=now.strftime("%Y-%m-%d %H:%M %A"),
     )

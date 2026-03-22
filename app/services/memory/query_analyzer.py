@@ -3,6 +3,7 @@
 import logging
 
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ ANALYZER_PROMPT = """分析用户消息，判断需要什么类型的检索。
 async def analyze_query(message: str) -> dict:
     """Analyze user message to determine retrieval strategy."""
     model = get_utility_model()
-    prompt = ANALYZER_PROMPT.format(message=message)
+    prompt = (await get_prompt_text("memory.query_analyzer")).format(message=message)
 
     try:
         result = await invoke_json(model, prompt)

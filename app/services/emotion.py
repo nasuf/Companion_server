@@ -9,7 +9,7 @@ import logging
 from app.db import db
 from app.redis_client import get_redis, DEFAULT_TTL
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.prompts.extraction_prompts import EMOTION_EXTRACTION_PROMPT
+from app.services.prompt_store import get_prompt_text
 from app.services.trait_model import get_seven_dim, get_dim
 
 logger = logging.getLogger(__name__)
@@ -196,7 +196,7 @@ def compute_emotional_stability(seven_dim: dict) -> float:
 async def extract_emotion(message: str) -> dict:
     """Extract PAD emotion from a user message."""
     model = get_utility_model()
-    prompt = EMOTION_EXTRACTION_PROMPT.format(message=message)
+    prompt = (await get_prompt_text("emotion.extraction")).format(message=message)
 
     try:
         result = await invoke_json(model, prompt)

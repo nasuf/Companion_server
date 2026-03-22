@@ -19,6 +19,7 @@ from pathlib import Path
 
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ _ATTACK_INTENT_PROMPT = """分析以下消息的攻击意图。
 
 async def classify_attack_intent(message: str) -> dict:
     """LLM分类攻击意图。后台异步调用。"""
-    prompt = _ATTACK_INTENT_PROMPT.format(message=message)
+    prompt = (await get_prompt_text("boundary.attack_intent")).format(message=message)
     try:
         result = await invoke_json(get_utility_model(), prompt)
         return {
@@ -214,7 +215,7 @@ _SEVERITY_PROMPT = """评估以下攻击性消息的严重程度。
 
 async def assess_severity(message: str, intent: str) -> dict:
     """LLM评估攻击严重度。后台异步调用。"""
-    prompt = _SEVERITY_PROMPT.format(message=message, intent=intent)
+    prompt = (await get_prompt_text("boundary.severity")).format(message=message, intent=intent)
     try:
         result = await invoke_json(get_utility_model(), prompt)
         level = result.get("level", "L0")
@@ -303,7 +304,7 @@ _APOLOGY_PROMPT = """分析以下消息是否包含道歉或承诺改正。
 
 async def detect_apology(message: str) -> dict:
     """检测道歉意图。后台异步调用。"""
-    prompt = _APOLOGY_PROMPT.format(message=message)
+    prompt = (await get_prompt_text("boundary.apology")).format(message=message)
     try:
         result = await invoke_json(get_utility_model(), prompt)
         return {

@@ -11,6 +11,7 @@ from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.embedding import generate_embedding
 from app.services.memory.vector_search import search_by_embedding
 from app.services.memory.storage import log_memory_changelog
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ async def detect_deletion_intent(message: str) -> dict | None:
         return None
 
     # Confirm with LLM
-    prompt = DELETION_INTENT_PROMPT.format(message=message)
+    prompt = (await get_prompt_text("memory.deletion_intent")).format(message=message)
     try:
         result = await invoke_json(get_utility_model(), prompt)
     except Exception as e:

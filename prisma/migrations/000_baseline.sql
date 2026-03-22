@@ -60,6 +60,23 @@ CREATE TABLE "messages" (
 );
 
 -- CreateTable
+CREATE TABLE "prompt_templates" (
+    "id" TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    "stage" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "description" TEXT,
+    "content" TEXT NOT NULL,
+    "default_content" TEXT NOT NULL,
+    "is_enabled" BOOLEAN NOT NULL DEFAULT true,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "prompt_templates_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "memories_user" (
     "id" TEXT NOT NULL,
     "user_id" TEXT NOT NULL,
@@ -249,6 +266,9 @@ CREATE TABLE "time_triggers" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "prompt_templates_key_key" ON "prompt_templates"("key");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "user_profiles_user_id_key" ON "user_profiles"("user_id");

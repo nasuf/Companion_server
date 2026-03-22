@@ -65,8 +65,12 @@ jobs:
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}
-            LANGSMITH_ORG_ID=${{ vars.LANGSMITH_ORG_ID }}
-            LANGSMITH_PROJECT_ID=${{ vars.LANGSMITH_PROJECT_ID }}
+            LANGSMITH_ORG_ID=${{ secrets.LANGSMITH_ORG_ID }}
+            LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
+            ADMIN_USERNAME=${{ secrets.ADMIN_USERNAME }}
+            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
             EOF
 
-            docker compose -f docker-compose.deploy.yml up -d --build --remove-orphans
+            docker compose -f docker-compose.deploy.yml build
+            docker compose -f docker-compose.deploy.yml run --rm server prisma db execute --file prisma/migrations/001_add_prompt_templates.sql --schema prisma/schema.prisma
+            docker compose -f docker-compose.deploy.yml up -d --remove-orphans

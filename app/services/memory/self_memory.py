@@ -11,6 +11,7 @@ from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory import memory_repo
 from app.services.memory.storage import store_memory
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ async def generate_daily_self_memories(
         return []
 
     personality = agent.personality or {}
-    prompt = SELF_MEMORY_PROMPT.format(
+    prompt = (await get_prompt_text("self_memory.daily")).format(
         ai_name=agent.name,
         personality=str(personality),
         dialogue_summary=dialogue_summary or "今天没有对话",

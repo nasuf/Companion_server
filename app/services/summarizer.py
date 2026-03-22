@@ -13,13 +13,9 @@ import asyncio
 import hashlib
 import logging
 
-from app.services.llm.models import get_summarizer_model, invoke_text
-from app.services.prompts.summarizer_prompts import (
-    LAYER1_REVIEW_PROMPT,
-    LAYER2_DISTILLATION_PROMPT,
-    LAYER3_STATE_PROMPT,
-)
 from app.services.cache import cache_summarizer, cache_set_summarizer
+from app.services.llm.models import get_summarizer_model, invoke_text
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +71,16 @@ async def summarize(
     )
 
     # Build prompts
-    layer1_prompt = LAYER1_REVIEW_PROMPT.format(conversation=conv_text)
-    layer2_prompt = LAYER2_DISTILLATION_PROMPT.format(
+    layer1_template, layer2_template, layer3_template = await asyncio.gather(
+        get_prompt_text("summarizer.layer1_review"),
+        get_prompt_text("summarizer.layer2_distillation"),
+        get_prompt_text("summarizer.layer3_state"),
+    )
+    layer1_prompt = layer1_template.format(conversation=conv_text)
+    layer2_prompt = layer2_template.format(
         memories=mem_text, current_message=current_message
     )
-    layer3_prompt = LAYER3_STATE_PROMPT.format(
+    layer3_prompt = layer3_template.format(
         recent=recent_text, current_message=current_message
     )
 

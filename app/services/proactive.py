@@ -13,30 +13,12 @@ from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.memory.retrieval import retrieve_memories, format_memories_for_prompt
 from app.services.emotion import get_ai_emotion
+from app.services.prompt_defaults import PROACTIVE_PROMPT
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
 MAX_DAILY_PROACTIVE = 3
-
-PROACTIVE_PROMPT = """你是{ai_name}，现在你想主动和用户聊天。
-
-你的当前情绪：心情{mood}
-(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})
-
-关于用户的记忆：
-{memories}
-
-请生成一条自然的主动消息。可以是：
-- 跟进用户之前提到的事
-- 分享一个想法或感受
-- 关心问候
-
-规则：
-- 像朋友发微信一样，简短自然，1-2句话
-- 不要说"我想到了"、"我突然想起"这种刻意的开头
-- 如果实在没什么好聊的，返回 SKIP
-
-消息："""
 
 
 def _proactive_count_key(agent_id: str, user_id: str) -> str:
@@ -83,7 +65,7 @@ async def generate_proactive_message(
         pleasure = emotion.get("pleasure", 0.0)
         mood = "不错" if pleasure > 0.2 else ("有点低落" if pleasure < -0.2 else "平静")
 
-        prompt = PROACTIVE_PROMPT.format(
+        prompt = (await get_prompt_text("proactive.message")).format(
             ai_name=agent.name,
             mood=mood,
             pleasure=emotion.get("pleasure", 0),

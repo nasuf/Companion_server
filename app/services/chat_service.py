@@ -301,7 +301,7 @@ async def stream_chat_response(
 
     # --- Conversation end detection (PRD §3.2.3, keyword trigger + LLM farewell) ---
     if check_conversation_end(user_message):
-        farewell_prompt = build_system_prompt(agent=agent, reply_count=1, reply_total=60)
+        farewell_prompt = await build_system_prompt(agent=agent, reply_count=1, reply_total=60)
         farewell_prompt += (
             "\n\n## 特殊指令\n"
             "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。"
@@ -539,7 +539,7 @@ async def stream_chat_response(
     max_total = EXPAND_MAX_TOTAL_CHARS if is_expand else MAX_TOTAL_CHARS
 
     # Build prompt (pure string operations — instant)
-    system_prompt = build_system_prompt(
+    system_prompt = await build_system_prompt(
         agent=agent,
         memories=memory_strings,
         working_facts=working_facts,

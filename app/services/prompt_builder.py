@@ -9,15 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.prompt_store import get_prompt_text
 from app.services.style import generate_style_instruction
 from app.services.trait_model import get_seven_dim, get_dim
 from app.services.prompts.system_prompts import (
-    SYSTEM_BASE as _SYSTEM_BASE,
-    RESPONSE_INSTRUCTION as _INSTRUCTION,
-    EMOTION_INSTRUCTION as _EMOTION_INSTRUCTION,
-    PERSONALITY_RULES as _PERSONALITY_RULES,
-    CONSISTENCY_RULES as _CONSISTENCY_RULES,
-    MEMORY_INSTRUCTION as _MEMORY_INSTRUCTION,
     MEMORY_TOKEN_BUDGET,
     MAX_PER_REPLY as _MAX_PER_REPLY,
     MAX_TOTAL_CHARS as _MAX_TOTAL_CHARS,
@@ -94,7 +89,7 @@ def _section(title: str, body: str) -> str:
     return f"## {title}\n{body}"
 
 
-def _build_personality_section(agent: Any) -> str:
+async def _build_personality_section(agent: Any) -> str:
     """Build the personality section using seven-dim traits (PRD §1.4.3)."""
     name = getattr(agent, "name", None) or "伙伴"
 
@@ -108,12 +103,13 @@ def _build_personality_section(agent: Any) -> str:
     dim_text = _format_seven_dim(seven_dim)
     style = generate_style_instruction(seven_dim)
 
+    personality_rules = await get_prompt_text("chat.personality_rules")
     body = (
         f"你的名字叫{name}，是一个{gender_text}。\n"
         f"你的性格由以下7个维度定义（0-100分）：\n\n"
         f"{dim_text}\n\n"
         f"你的说话风格：\n{style}\n\n"
-        f"{_PERSONALITY_RULES}"
+        f"{personality_rules}"
     )
     return _section("你的身份", body)
 
@@ -126,7 +122,7 @@ _EMOTION_LABEL_CN = {
 }
 
 
-def _build_emotion_section(
+async def _build_emotion_section(
     emotion: dict | None,
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
@@ -184,7 +180,8 @@ def _build_emotion_section(
     if intimacy_stage:
         body += f"\n你们目前的关系是{intimacy_stage}。\n"
 
-    body += f"\n{_EMOTION_INSTRUCTION}"
+    emotion_instruction = await get_prompt_text("chat.emotion_instruction")
+    body += f"\n{emotion_instruction}"
     return _section("当前情绪", body)
 
 
@@ -223,13 +220,14 @@ def _build_core_memory_section(core_memories: list[str] | None) -> str | None:
     return _section("用户核心信息", body)
 
 
-def _build_memory_section(memories: list[str] | None) -> str | None:
+async def _build_memory_section(memories: list[str] | None) -> str | None:
     """Build the memory section from a list of memory strings."""
     if not memories:
         return None
 
     numbered = "\n".join(f"{i}. {m}" for i, m in enumerate(memories, 1))
-    body = f"{numbered}\n\n{_MEMORY_INSTRUCTION.format(budget=MEMORY_TOKEN_BUDGET)}"
+    memory_instruction = await get_prompt_text("chat.memory_instruction")
+    body = f"{numbered}\n\n{memory_instruction.format(budget=MEMORY_TOKEN_BUDGET)}"
     return _section("你记得的事情", body)
 
 
@@ -299,7 +297,7 @@ def _build_graph_context_section(graph_context: dict | None) -> str | None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(
+async def build_system_prompt(
     agent: Any,
     memories: list[str] | None = None,
     working_facts: list[str] | None = None,
@@ -321,16 +319,20 @@ def build_system_prompt(
     time_memories: list[str] | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
-    sections: list[str] = [_section("核心规则", _SYSTEM_BASE)]
+    system_base = await get_prompt_text("chat.system_base")
+    consistency_rules = await get_prompt_text("chat.consistency_rules")
+    response_instruction = await get_prompt_text("chat.response_instruction")
 
-    sections.append(_build_personality_section(agent))
+    sections: list[str] = [_section("核心规则", system_base)]
+
+    sections.append(await _build_personality_section(agent))
 
     # L1 core memories — always present
     core = _build_core_memory_section(core_memories)
     if core:
         sections.append(core)
 
-    emo = _build_emotion_section(emotion, user_emotion, intimacy_stage)
+    emo = await _build_emotion_section(emotion, user_emotion, intimacy_stage)
     if emo:
         sections.append(emo)
 
@@ -354,7 +356,7 @@ def build_system_prompt(
     if relational:
         sections.append(relational)
 
-    mem = _build_memory_section(memories)
+    mem = await _build_memory_section(memories)
     if mem:
         sections.append(mem)
 
@@ -383,8 +385,13 @@ def build_system_prompt(
     if patience_instruction:
         sections.append(_section("情绪状态提醒", patience_instruction))
 
-    sections.append(_section("对话一致性", _CONSISTENCY_RULES))
-    sections.append(_section("回复要求", _INSTRUCTION.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY)))
+    sections.append(_section("对话一致性", consistency_rules))
+    sections.append(
+        _section(
+            "回复要求",
+            response_instruction.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY),
+        )
+    )
 
     return "\n\n".join(sections)
 

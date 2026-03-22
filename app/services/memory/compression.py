@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.llm.models import get_utility_model, invoke_text
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ async def _compress_batch(
 ) -> None:
     """Compress a batch of memories into a single summary."""
     mem_texts = "\n".join(f"- {m.content}" for m in batch)
-    prompt = COMPRESS_PROMPT.format(count=len(batch), memories=mem_texts)
+    prompt = (await get_prompt_text("memory.compression")).format(count=len(batch), memories=mem_texts)
 
     summary = await invoke_text(model, prompt)
     summary = summary.strip()

@@ -15,6 +15,7 @@ from typing import Any
 
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -34,40 +35,6 @@ _ALLOWED_CATEGORIES = {
     "plan",
     "schedule",
 }
-
-FAST_FACT_PROMPT = """你是一个快速事实提取系统。
-
-从用户最新消息中提取高置信度的用户事实。
-这是热路径工作记忆，请保守提取。
-
-用户消息：
-{message}
-
-按以下JSON格式返回：
-{{
-  "facts": [
-    {{
-      "category": "name|age|location|occupation|education|preference|dislike|relationship|plan|schedule",
-      "key": "稳定字段键，如 name/job/home_city/favorite_food/weekend_plan",
-      "value": "简洁的事实描述",
-      "confidence": 0.0,
-      "ttl_days": 7
-    }}
-  ]
-}}
-
-规则：
-- 最多提取3条事实
-- 只提取用户明确表达的事实，不要猜测
-- 忽略没有稳定信息的闲聊
-- preference/dislike 类别：用户必须明确表达了喜好/厌恶
-- plan/schedule 类别：只包含近期具体计划或固定日程
-- confidence 仅在事实明确时 >= 0.8
-- key 用小写英文、下划线分隔
-- value 用简洁中文描述
-
-如果没有高置信度事实，返回 {{"facts":[]}}。
-"""
 
 
 def _working_facts_key(conversation_id: str) -> str:
@@ -307,9 +274,10 @@ async def extract_fast_facts(message: str) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     facts: list[dict[str, Any]] = []
     try:
+        prompt_template = await get_prompt_text("memory.fast_fact")
         result = await invoke_json(
             get_utility_model(),
-            FAST_FACT_PROMPT.format(message=message),
+            prompt_template.format(message=message),
         )
         raw_facts = result.get("facts", []) if isinstance(result, dict) else []
         if isinstance(raw_facts, list):

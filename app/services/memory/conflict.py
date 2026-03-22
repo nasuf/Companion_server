@@ -9,6 +9,7 @@ import logging
 from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.storage import log_memory_changelog
+from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ async def detect_conflicts(
     )
     new_text = new_memory.get("summary", "")
 
-    prompt = CONFLICT_DETECTION_PROMPT.format(
+    prompt = (await get_prompt_text("memory.conflict_detection")).format(
         existing_memories=existing_text,
         new_memory=new_text,
     )
