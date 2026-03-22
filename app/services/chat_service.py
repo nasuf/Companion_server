@@ -191,35 +191,46 @@ async def _bg_share_trace(trace_id: str, conversation_id: str) -> None:
         client = _get_langsmith_client()
         public_url = await loop.run_in_executor(None, client.share_run, trace_id)
         logger.info(f"Trace shared: {public_url}")
-        # Update the first assistant reply that carries trace_url
+        updated_message_id: str | None = None
+        # Update the first assistant reply for this trace.
         msgs = await db.message.find_many(
             where={"conversationId": conversation_id, "role": "assistant"},
             order={"createdAt": "desc"},
-            take=5,
+            take=20,
         )
         for msg in msgs:
             meta = msg.metadata or {}
-            if isinstance(meta, dict) and meta.get("trace_url"):
+            if isinstance(meta, dict) and meta.get("trace_id") == trace_id:
                 await db.message.update(
                     where={"id": msg.id},
-                    data={"metadata": Json({**meta, "trace_url": public_url})},
+                    data={
+                        "metadata": Json(
+                            {
+                                **meta,
+                                "trace_url": public_url,
+                                "trace_pending": False,
+                            }
+                        )
+                    },
                 )
+                updated_message_id = msg.id
                 break
+        if updated_message_id:
+            from app.services.ws_manager import manager
+
+            ws = manager.get(conversation_id)
+            if ws:
+                await ws.send_json(
+                    {
+                        "type": "trace_ready",
+                        "data": {
+                            "message_id": updated_message_id,
+                            "trace_url": public_url,
+                        },
+                    }
+                )
     except Exception as e:
         logger.warning(f"Failed to share trace: {e}")
-
-
-def _build_private_trace_url(trace_id: str | None) -> str | None:
-    """Build a private LangSmith trace URL (immediate, no network call)."""
-    if not trace_id or not settings.langsmith_tracing:
-        return None
-    if not settings.langsmith_org_id or not settings.langsmith_project_id:
-        return None
-    return (
-        f"https://smith.langchain.com/o/{settings.langsmith_org_id}"
-        f"/projects/p/{settings.langsmith_project_id}/r/{trace_id}"
-        f"?trace_id={trace_id}"
-    )
 
 
 def _end_trace(trace_ctx, trace_id: str | None, conversation_id: str) -> None:
@@ -651,14 +662,18 @@ async def stream_chat_response(
         topic_intimacy=topic_intimacy,
     ))
 
-    # Persist replies immediately with private trace URL (no network call)
-    trace_url = _build_private_trace_url(trace_id)
-    await _save_replies(conversation_id, emitted_replies, trace_url=trace_url)
+    # Persist replies immediately; trace links become clickable only after public share completes.
+    first_assistant_message_id = await _save_replies(
+        conversation_id,
+        emitted_replies,
+        trace_id=trace_id if settings.langsmith_tracing else None,
+    )
 
     await save_last_reply_timestamp(agent_id, user_id)
     done_data: dict = {"message_id": "complete"}
-    if trace_url:
-        done_data["trace_url"] = trace_url
+    if first_assistant_message_id and trace_id and settings.langsmith_tracing:
+        done_data["assistant_message_id"] = first_assistant_message_id
+        done_data["trace_pending"] = True
     yield {"event": "done", "data": json.dumps(done_data)}
 
     # End trace and share publicly in background (updates DB with public URL)
@@ -753,10 +768,11 @@ async def _bg_summarizer(
 async def _save_replies(
     conversation_id: str,
     replies: list[str | dict],
-    trace_url: str | None = None,
-) -> None:
+    trace_id: str | None = None,
+) -> str | None:
     """Save split replies as individual DB messages."""
     try:
+        first_message_id: str | None = None
         for i, reply in enumerate(replies):
             if isinstance(reply, dict):
                 text = str(reply.get("text", ""))
@@ -768,11 +784,12 @@ async def _save_replies(
                 text = reply
                 metadata = {"reply_index": i}
 
-            # 只在第一条回复上记录 trace_url（同一轮对话共享同一个 trace）
-            if i == 0 and trace_url:
-                metadata["trace_url"] = trace_url
+            # First reply carries trace-pending metadata until a public LangSmith link is ready.
+            if i == 0 and trace_id:
+                metadata["trace_id"] = trace_id
+                metadata["trace_pending"] = True
 
-            await db.message.create(
+            created = await db.message.create(
                 data={
                     "conversation": {"connect": {"id": conversation_id}},
                     "role": "assistant",
@@ -780,8 +797,12 @@ async def _save_replies(
                     "metadata": Json(metadata),
                 }
             )
+            if i == 0:
+                first_message_id = created.id
+        return first_message_id
     except Exception as e:
         logger.error(f"Failed to save replies: {e}")
+        return None
 
 
 async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
