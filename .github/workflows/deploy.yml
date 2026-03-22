@@ -65,6 +65,8 @@ jobs:
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}
+            LANGSMITH_ORG_ID=${{ secrets.LANGSMITH_ORG_ID }}
+            LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
             EOF
 
             docker compose -f docker-compose.deploy.yml up -d --build --remove-orphans
