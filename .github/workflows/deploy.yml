@@ -75,18 +75,7 @@ jobs:
             echo "==> Building server image"
             docker compose -f docker-compose.deploy.yml build server
 
-            echo "==> Applying prompt template migrations"
-            timeout 180s docker run --rm \
-              --env-file .env \
-              -e DATABASE_URL='${{ secrets.MIGRATION_DATABASE_URL }}' \
-              companion-server:deploy \
-              prisma db execute --file prisma/migrations/001_add_prompt_templates.sql --schema prisma/schema.prisma
-
-            timeout 180s docker run --rm \
-              --env-file .env \
-              -e DATABASE_URL='${{ secrets.MIGRATION_DATABASE_URL }}' \
-              companion-server:deploy \
-              prisma db execute --file prisma/migrations/002_add_prompt_template_versions.sql --schema prisma/schema.prisma
+            echo "==> Skipping prompt template migrations (already applied manually)"
 
             echo "==> Starting server stack"
             docker compose -f docker-compose.deploy.yml up -d --remove-orphans
