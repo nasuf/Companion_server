@@ -1,41 +1,38 @@
-"""Summarizer prompt templates.
+"""摘要器提示词模板。"""
 
-Separated from summarizer.py for maintainability and reuse.
-"""
+LAYER1_REVIEW_PROMPT = """你是一个对话摘要系统。
 
-LAYER1_REVIEW_PROMPT = """You are a conversation summarizer.
+请将以下对话历史总结为200-300字的摘要。
+重点关注：讨论的核心话题、分享的重要信息、关系互动。
 
-Summarize the following conversation history in 200-300 words.
-Focus on: key topics discussed, important information shared, relationship dynamics.
-
-Conversation:
+对话内容：
 {conversation}
 
-Summary:"""
+摘要："""
 
-LAYER2_DISTILLATION_PROMPT = """You are a memory distillation system.
+LAYER2_DISTILLATION_PROMPT = """你是一个记忆提炼系统。
 
-Given the user's stored memories and the current message, extract the most relevant points in 150-200 words.
-Focus on: what the user cares about, relevant past context, useful background.
+根据用户已存储的记忆和当前消息，提取最相关的要点，150-200字。
+重点关注：用户在意什么、相关的过往背景、有用的上下文。
 
-Stored memories:
+已存储记忆：
 {memories}
 
-Current message: {current_message}
+当前消息：{current_message}
 
-Key points:"""
+要点："""
 
-LAYER3_STATE_PROMPT = """You are a conversation state analyzer.
+LAYER3_STATE_PROMPT = """你是一个对话状态分析系统。
 
-Analyze the recent messages and current message. In 100-150 words, describe:
-1. Current emotional tone
-2. Active topic/subject
-3. User's likely intent
-4. Suggested response approach
+分析最近的消息和当前消息，用100-150字描述：
+1. 当前情绪基调
+2. 正在讨论的话题
+3. 用户可能的意图
+4. 建议的回复策略
 
-Recent messages:
+最近消息：
 {recent}
 
-Current message: {current_message}
+当前消息：{current_message}
 
-Analysis:"""
+分析："""

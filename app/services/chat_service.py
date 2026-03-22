@@ -8,6 +8,7 @@ Background (fire-and-forget, after response):
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import random
@@ -17,6 +18,7 @@ from datetime import datetime
 
 from prisma import Json
 
+from app.config import settings
 from app.db import db
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.prompt_builder import build_system_prompt, build_chat_messages
@@ -161,6 +163,72 @@ def detect_relational_context(message: str, user_emotion: dict | None) -> str | 
     return None
 
 
+def _langsmith_trace_ctx(user_message: str, conversation_id: str):
+    """Create a LangSmith parent trace context if tracing is enabled."""
+    if settings.langsmith_tracing:
+        from langsmith import trace as ls_trace
+        return ls_trace(
+            name="chat_request",
+            run_type="chain",
+            inputs={"message": user_message, "conversation_id": conversation_id},
+            project_name="ai-companion",
+        )
+    return contextlib.nullcontext()
+
+
+def _get_langsmith_client():
+    """Return a cached LangSmith Client singleton."""
+    if not hasattr(_get_langsmith_client, "_instance"):
+        from langsmith import Client
+        _get_langsmith_client._instance = Client()
+    return _get_langsmith_client._instance
+
+
+async def _bg_share_trace(trace_id: str, conversation_id: str) -> None:
+    """Background: share the LangSmith trace and update DB message metadata with public URL."""
+    try:
+        loop = asyncio.get_running_loop()
+        client = _get_langsmith_client()
+        public_url = await loop.run_in_executor(None, client.share_run, trace_id)
+        logger.info(f"Trace shared: {public_url}")
+        # Update the first assistant reply that carries trace_url
+        msgs = await db.message.find_many(
+            where={"conversationId": conversation_id, "role": "assistant"},
+            order={"createdAt": "desc"},
+            take=5,
+        )
+        for msg in msgs:
+            meta = msg.metadata or {}
+            if isinstance(meta, dict) and meta.get("trace_url"):
+                await db.message.update(
+                    where={"id": msg.id},
+                    data={"metadata": Json({**meta, "trace_url": public_url})},
+                )
+                break
+    except Exception as e:
+        logger.warning(f"Failed to share trace: {e}")
+
+
+def _build_private_trace_url(trace_id: str | None) -> str | None:
+    """Build a private LangSmith trace URL (immediate, no network call)."""
+    if not trace_id or not settings.langsmith_tracing:
+        return None
+    if not settings.langsmith_org_id or not settings.langsmith_project_id:
+        return None
+    return (
+        f"https://smith.langchain.com/o/{settings.langsmith_org_id}"
+        f"/projects/p/{settings.langsmith_project_id}/r/{trace_id}"
+        f"?trace_id={trace_id}"
+    )
+
+
+def _end_trace(trace_ctx, trace_id: str | None, conversation_id: str) -> None:
+    """Safely close the LangSmith trace and fire background share task."""
+    trace_ctx.__exit__(None, None, None)
+    if trace_id and settings.langsmith_tracing:
+        _fire_background(_bg_share_trace(trace_id, conversation_id))
+
+
 async def stream_chat_response(
     conversation_id: str,
     user_message: str,
@@ -184,6 +252,11 @@ async def stream_chat_response(
         user_message_id = saved_msg.id
 
     agent_id = getattr(agent, "id", None)
+
+    # --- LangSmith parent trace (groups all LLM calls for this request) ---
+    _trace_ctx = _langsmith_trace_ctx(user_message, conversation_id)
+    _run_tree = _trace_ctx.__enter__()
+    trace_id = str(_run_tree.id) if _run_tree else None
 
     # --- Boundary check (keyword + Redis, no LLM) ---
     cached_patience = PATIENCE_MAX
@@ -212,6 +285,7 @@ async def stream_chat_response(
             # 拉黑状态下检测道歉（PRD §6.6.2.2）
             if boundary_result.get("zone") == "blocked" and has_apology_keyword(user_message):
                 _fire_background(_bg_apology_check(agent_id, user_id, user_message))
+            _end_trace(_trace_ctx, trace_id, conversation_id)
             return
 
     # --- Conversation end detection (PRD §3.2.3, keyword trigger + LLM farewell) ---
@@ -231,6 +305,7 @@ async def stream_chat_response(
         yield {"event": "reply", "data": json.dumps({"text": farewell, "index": 0})}
         await save_last_reply_timestamp(agent_id, user_id)
         yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+        _end_trace(_trace_ctx, trace_id, conversation_id)
         return
 
     # Load recent messages (for prompt context)
@@ -548,9 +623,6 @@ async def stream_chat_response(
         emitted_replies.append(data)
         yield {"event": "reply", "data": json.dumps(data)}
 
-    # Persist replies before "done" so REST refresh can always see them.
-    await _save_replies(conversation_id, emitted_replies)
-
     full_response = " ".join(replies)
 
     # Update conversation title if first exchange (non-blocking)
@@ -561,10 +633,9 @@ async def stream_chat_response(
             data={"title": title},
         ))
 
-    await save_last_reply_timestamp(agent_id, user_id)
-    yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
-
     # --- BACKGROUND: fire-and-forget post-processing ---
+    # Background tasks inherit trace context via asyncio.create_task context copy,
+    # so their LLM calls appear as children in LangSmith.
     _fire_background(_background_post_process(
         user_id=user_id,
         agent_id=agent_id,
@@ -579,6 +650,19 @@ async def stream_chat_response(
         seven_dim=seven_dim,
         topic_intimacy=topic_intimacy,
     ))
+
+    # Persist replies immediately with private trace URL (no network call)
+    trace_url = _build_private_trace_url(trace_id)
+    await _save_replies(conversation_id, emitted_replies, trace_url=trace_url)
+
+    await save_last_reply_timestamp(agent_id, user_id)
+    done_data: dict = {"message_id": "complete"}
+    if trace_url:
+        done_data["trace_url"] = trace_url
+    yield {"event": "done", "data": json.dumps(done_data)}
+
+    # End trace and share publicly in background (updates DB with public URL)
+    _end_trace(_trace_ctx, trace_id, conversation_id)
 
 
 async def _background_post_process(
@@ -666,19 +750,27 @@ async def _bg_summarizer(
         logger.warning(f"Background summarizer failed: {e}")
 
 
-async def _save_replies(conversation_id: str, replies: list[str | dict]) -> None:
+async def _save_replies(
+    conversation_id: str,
+    replies: list[str | dict],
+    trace_url: str | None = None,
+) -> None:
     """Save split replies as individual DB messages."""
     try:
         for i, reply in enumerate(replies):
             if isinstance(reply, dict):
                 text = str(reply.get("text", ""))
                 sticker_url = reply.get("sticker_url")
-                metadata = {"reply_index": i}
+                metadata: dict = {"reply_index": i}
                 if sticker_url:
                     metadata["sticker_url"] = sticker_url
             else:
                 text = reply
                 metadata = {"reply_index": i}
+
+            # 只在第一条回复上记录 trace_url（同一轮对话共享同一个 trace）
+            if i == 0 and trace_url:
+                metadata["trace_url"] = trace_url
 
             await db.message.create(
                 data={

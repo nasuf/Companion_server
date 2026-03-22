@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # LangSmith tracing
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
+    langsmith_org_id: str = ""
+    langsmith_project_id: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

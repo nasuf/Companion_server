@@ -1,7 +1,4 @@
-"""Query analyzer for hybrid retrieval.
-
-Uses small model to determine retrieval strategy for a user message.
-"""
+"""查询分析器 — 用于混合检索的意图分析。"""
 
 import logging
 
@@ -9,24 +6,24 @@ from app.services.llm.models import get_utility_model, invoke_json
 
 logger = logging.getLogger(__name__)
 
-ANALYZER_PROMPT = """Analyze the user message and determine what retrieval is needed.
+ANALYZER_PROMPT = """分析用户消息，判断需要什么类型的检索。
 
-User message: {message}
+用户消息：{message}
 
-Return JSON:
+返回JSON：
 {{
   "intent": "ask_preference|ask_event|ask_person|casual|greeting|question|other",
-  "entities": ["list of named entities mentioned"],
-  "retrieve_memory": true or false,
-  "retrieve_graph": true or false,
-  "retrieve_structured": true or false
+  "entities": ["提到的命名实体列表"],
+  "retrieve_memory": true或false,
+  "retrieve_graph": true或false,
+  "retrieve_structured": true或false
 }}
 
-Rules:
-- retrieve_memory: true if the message references past conversations or needs context
-- retrieve_graph: true if the message involves relationships, preferences, or entities
-- retrieve_structured: true if the message asks for specific stored data (name, birthday, etc.)
-- For casual greetings, all can be false
+规则：
+- retrieve_memory：消息涉及过去的对话或需要上下文时为true
+- retrieve_graph：消息涉及人际关系、偏好或实体时为true
+- retrieve_structured：消息询问具体存储数据（姓名、生日等）时为true
+- 日常问候时，全部可以为false
 """
 
 

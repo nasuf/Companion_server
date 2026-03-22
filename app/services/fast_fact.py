@@ -35,38 +35,38 @@ _ALLOWED_CATEGORIES = {
     "schedule",
 }
 
-FAST_FACT_PROMPT = """You are a fast fact extractor for a chat agent.
+FAST_FACT_PROMPT = """你是一个快速事实提取系统。
 
-Extract only high-confidence user facts from the latest user message.
-This is HOT PATH working memory, so be conservative.
+从用户最新消息中提取高置信度的用户事实。
+这是热路径工作记忆，请保守提取。
 
-User message:
+用户消息：
 {message}
 
-Return JSON with this exact schema:
+按以下JSON格式返回：
 {{
   "facts": [
     {{
       "category": "name|age|location|occupation|education|preference|dislike|relationship|plan|schedule",
-      "key": "stable field key like name/job/home_city/favorite_food/weekend_plan",
-      "value": "concise fact text",
+      "key": "稳定字段键，如 name/job/home_city/favorite_food/weekend_plan",
+      "value": "简洁的事实描述",
       "confidence": 0.0,
       "ttl_days": 7
     }}
   ]
 }}
 
-Rules:
-- Extract at most 3 facts.
-- Only extract explicit user facts, not guesses.
-- Ignore casual chit-chat with no stable information.
-- For preference/dislike, the user must express a clear like/dislike.
-- For plan/schedule, only include near-term concrete plans or recurring schedules.
-- confidence must be >= 0.8 only when the fact is explicit.
-- key must be short, lowercase, underscore-separated.
-- value must be concise and self-contained.
+规则：
+- 最多提取3条事实
+- 只提取用户明确表达的事实，不要猜测
+- 忽略没有稳定信息的闲聊
+- preference/dislike 类别：用户必须明确表达了喜好/厌恶
+- plan/schedule 类别：只包含近期具体计划或固定日程
+- confidence 仅在事实明确时 >= 0.8
+- key 用小写英文、下划线分隔
+- value 用简洁中文描述
 
-If no high-confidence facts exist, return {{"facts":[]}}.
+如果没有高置信度事实，返回 {{"facts":[]}}。
 """
 
 
