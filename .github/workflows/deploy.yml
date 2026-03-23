@@ -70,6 +70,7 @@ jobs:
             LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
             ADMIN_USERNAME=${{ vars.ADMIN_USERNAME }}
             ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
             EOF
 
             echo "==> Building server image"
