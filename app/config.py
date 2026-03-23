@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     langsmith_org_id: str = ""
     langsmith_project_id: str = ""
 
+    # JWT authentication
+    jwt_secret: str = ""
+    jwt_expiry_hours: int = 168  # 7 days
+
     # Admin prompt management
     admin_username: str = ""
     admin_password: str = ""

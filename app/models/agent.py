@@ -7,6 +7,7 @@ class AgentCreate(BaseModel):
     personality: dict | None = None
     background: str | None = None
     values: dict | None = None
+    gender: str | None = None
 
 
 class AgentUpdate(BaseModel):
@@ -23,5 +24,6 @@ class AgentResponse(BaseModel):
     personality: dict | None = None
     background: str | None = None
     values: dict | None = None
+    gender: str | None = None
     life_overview: str | None = None
     created_at: str | None = None

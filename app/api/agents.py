@@ -36,6 +36,8 @@ async def create_agent(data: AgentCreate):
         create_data["background"] = data.background
     if data.values is not None:
         create_data["values"] = Json(data.values)
+    if data.gender is not None:
+        create_data["gender"] = data.gender
     agent = await db.aiagent.create(data=create_data)
 
     # Initialize baseline emotion from personality
@@ -84,6 +86,7 @@ async def create_agent(data: AgentCreate):
         personality=agent.personality,
         background=agent.background,
         values=agent.values,
+        gender=agent.gender,
         life_overview=agent.lifeOverview,
         created_at=str(agent.createdAt),
     )
@@ -101,6 +104,7 @@ async def get_agent(agent_id: str):
         personality=agent.personality,
         background=agent.background,
         values=agent.values,
+        gender=agent.gender,
         life_overview=agent.lifeOverview,
         created_at=str(agent.createdAt),
     )
@@ -118,6 +122,7 @@ async def list_agents(user_id: str | None = None):
             personality=a.personality,
             background=a.background,
             values=a.values,
+            gender=a.gender,
             life_overview=a.lifeOverview,
             created_at=str(a.createdAt),
         )
@@ -148,6 +153,7 @@ async def update_agent(agent_id: str, data: AgentUpdate):
         personality=agent.personality,
         background=agent.background,
         values=agent.values,
+        gender=agent.gender,
         life_overview=agent.lifeOverview,
         created_at=str(agent.createdAt),
     )

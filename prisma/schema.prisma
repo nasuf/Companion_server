@@ -13,6 +13,9 @@ generator client {
 model User {
   id               String             @id @default(uuid())
   name             String
+  username         String             @unique
+  hashedPassword   String             @map("hashed_password")
+  role             String             @default("user") @map("role")
   email            String?            @unique
   createdAt        DateTime           @default(now()) @map("created_at")
   updatedAt        DateTime           @updatedAt @map("updated_at")
@@ -43,6 +46,7 @@ model AiAgent {
   age             Int?
   occupation      String?
   city            String?
+  gender          String?        @map("gender")
   createdAt       DateTime       @default(now()) @map("created_at")
   updatedAt       DateTime       @updatedAt @map("updated_at")
   conversations   Conversation[]
