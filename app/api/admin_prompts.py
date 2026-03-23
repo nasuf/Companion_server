@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.admin_auth import require_admin
+from app.api.jwt_auth import require_admin_jwt
 from app.models.prompt_template import (
     PromptTemplateRestoreVersionRequest,
     PromptTemplateResponse,
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/admin-api/prompts", tags=["admin-prompts"])
 
 
 @router.get("", response_model=list[PromptTemplateResponse])
-async def get_prompts(_: str = Depends(require_admin)):
+async def get_prompts(_: str = Depends(require_admin_jwt)):
     prompts = await list_prompts()
     return [PromptTemplateResponse(**prompt) for prompt in prompts]
 
@@ -30,7 +30,7 @@ async def get_prompts(_: str = Depends(require_admin)):
 async def update_prompt(
     key: str,
     payload: PromptTemplateUpdateRequest,
-    _: str = Depends(require_admin),
+    _: str = Depends(require_admin_jwt),
 ):
     try:
         prompt = await update_prompt_text(key, payload.content)
@@ -42,7 +42,7 @@ async def update_prompt(
 
 
 @router.get("/{key}/versions", response_model=list[PromptTemplateVersionResponse])
-async def get_prompt_versions(key: str, _: str = Depends(require_admin)):
+async def get_prompt_versions(key: str, _: str = Depends(require_admin_jwt)):
     try:
         versions = await list_prompt_versions(key)
     except KeyError:
@@ -51,7 +51,7 @@ async def get_prompt_versions(key: str, _: str = Depends(require_admin)):
 
 
 @router.post("/{key}/reset", response_model=PromptTemplateResponse)
-async def reset_prompt(key: str, _: str = Depends(require_admin)):
+async def reset_prompt(key: str, _: str = Depends(require_admin_jwt)):
     try:
         prompt = await reset_prompt_text(key)
     except KeyError:
@@ -63,7 +63,7 @@ async def reset_prompt(key: str, _: str = Depends(require_admin)):
 async def restore_prompt_from_version(
     key: str,
     payload: PromptTemplateRestoreVersionRequest,
-    _: str = Depends(require_admin),
+    _: str = Depends(require_admin_jwt),
 ):
     try:
         prompt = await restore_prompt_version(key, payload.version_id)
