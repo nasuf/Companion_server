@@ -14,6 +14,7 @@ class LoginRequest(BaseModel):
 class AuthResponse(BaseModel):
     token: str
     user_id: str
+    username: str
     role: str
     has_agent: bool
     agent_id: str | None = None

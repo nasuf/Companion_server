@@ -19,6 +19,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
     return AuthResponse(
         token=token,
         user_id=user.id,
+        username=user.username,
         role=user.role,
         has_agent=agent is not None,
         agent_id=agent.id if agent else None,
