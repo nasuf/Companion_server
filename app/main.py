@@ -58,6 +58,7 @@ from app.api.stickers import router as stickers_router
 from app.api.ws import router as ws_router
 from app.api.admin_prompts import router as admin_prompts_router
 from app.api.auth import router as auth_router
+from app.api.admin_users import router as admin_users_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -72,3 +73,4 @@ app.include_router(stickers_router)
 app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(auth_router)
+app.include_router(admin_users_router)
