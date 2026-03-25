@@ -138,6 +138,23 @@ async def get_user_detail(
     }
 
 
+@router.delete("/{user_id}/agents/{agent_id}")
+async def delete_user_agent(
+    user_id: str,
+    agent_id: str,
+    _: dict = Depends(require_admin_jwt),
+):
+    """彻底删除用户与指定 Agent 的全部数据。"""
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent or agent.userId != user_id:
+        raise HTTPException(status_code=404, detail="Agent not found for this user")
+
+    from app.services.data_reset import hard_delete_agent_data
+
+    stats = await hard_delete_agent_data(agent_id, user_id)
+    return {"ok": True, "stats": stats}
+
+
 @router.get("/{user_id}/conversations/{conv_id}/messages")
 async def get_user_messages(
     user_id: str,

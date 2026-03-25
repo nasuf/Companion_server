@@ -163,3 +163,168 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
             logger.warning(f"Redis scan delete failed for {pattern}: {e}")
 
     return deleted
+
+
+async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
+    """彻底物理删除用户与某个 Agent 的全部数据，不影响其他 Agent。"""
+    stats: dict[str, int] = {}
+
+    # 1. 找到该 agent 的所有 workspace
+    workspaces = await db.chatworkspace.find_many(
+        where={"agentId": agent_id, "userId": user_id},
+    )
+    workspace_ids = [w.id for w in workspaces]
+
+    # 2. 找到该 agent 所有 conversation
+    conversations = await db.conversation.find_many(
+        where={"agentId": agent_id, "userId": user_id},
+    )
+    conv_ids = [c.id for c in conversations]
+
+    # 3. 删除 messages
+    if conv_ids:
+        cnt = await db.message.delete_many(
+            where={"conversationId": {"in": conv_ids}},
+        )
+        stats["messages"] = cnt
+
+    # 4. 删除 conversations
+    if conv_ids:
+        cnt = await db.conversation.delete_many(
+            where={"id": {"in": conv_ids}},
+        )
+        stats["conversations"] = cnt
+
+    # 5. 删除 workspace 下的 memories + embeddings
+    if workspace_ids:
+        # 收集 memory ids 用于删除 embeddings
+        user_mems = await db.usermemory.find_many(
+            where={"workspaceId": {"in": workspace_ids}},
+        )
+        ai_mems = await db.aimemory.find_many(
+            where={"workspaceId": {"in": workspace_ids}},
+        )
+        mem_ids = [m.id for m in user_mems] + [m.id for m in ai_mems]
+
+        if mem_ids:
+            try:
+                cnt = await db.execute_raw(
+                    "DELETE FROM memory_embeddings WHERE memory_id = ANY($1::text[])",
+                    mem_ids,
+                )
+                stats["embeddings"] = cnt or 0
+            except Exception as e:
+                logger.warning(f"Embedding delete failed: {e}")
+
+        cnt = await db.usermemory.delete_many(
+            where={"workspaceId": {"in": workspace_ids}},
+        )
+        stats["user_memories"] = cnt
+
+        cnt = await db.aimemory.delete_many(
+            where={"workspaceId": {"in": workspace_ids}},
+        )
+        stats["ai_memories"] = cnt
+
+        # UserProfile, MemoryChangelog
+        cnt = await db.userprofile.delete_many(
+            where={"workspaceId": {"in": workspace_ids}},
+        )
+        stats["profiles"] = cnt
+
+        cnt = await db.memorychangelog.delete_many(
+            where={"workspaceId": {"in": workspace_ids}},
+        )
+        stats["changelogs"] = cnt
+
+        # 删除 workspaces
+        cnt = await db.chatworkspace.delete_many(
+            where={"id": {"in": workspace_ids}},
+        )
+        stats["workspaces"] = cnt
+
+    # 6. 删除 agent 级别数据
+    try:
+        cnt = await db.intimacy.delete_many(
+            where={"agentId": agent_id, "userId": user_id},
+        )
+        stats["intimacy"] = cnt
+    except Exception:
+        pass
+
+    for model_name, model in [
+        ("emotion_states", db.aiemotionstate),
+        ("schedules", db.aidailyschedule),
+        ("trait_logs", db.traitfeedbacklog),
+        ("proactive_logs", db.proactivechatlog),
+    ]:
+        try:
+            cnt = await model.delete_many(where={"agentId": agent_id})
+            stats[model_name] = cnt
+        except Exception:
+            pass
+
+    try:
+        cnt = await db.timetrigger.delete_many(where={"aiAgentId": agent_id})
+        stats["triggers"] = cnt
+    except Exception:
+        pass
+
+    try:
+        cnt = await db.userportrait.delete_many(
+            where={"agentId": agent_id, "userId": user_id},
+        )
+        stats["portraits"] = cnt
+    except Exception:
+        pass
+
+    # ScheduleAdjustLog (no FK, raw SQL)
+    try:
+        cnt = await db.execute_raw(
+            "DELETE FROM schedule_adjust_logs WHERE agent_id = $1", agent_id,
+        )
+        stats["schedule_logs"] = cnt or 0
+    except Exception:
+        pass
+
+    # 7. 删除 Agent 本身
+    try:
+        await db.aiagent.delete(where={"id": agent_id})
+        stats["agent"] = 1
+    except Exception as e:
+        logger.error(f"Agent delete failed: {e}")
+        stats["agent"] = 0
+
+    # 8. 清理 Redis
+    stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
+
+    # 9. 清理 Neo4j（物理删除）
+    stats["neo4j"] = await _hard_delete_neo4j(workspace_ids, agent_id, user_id)
+
+    logger.info(f"Hard deleted agent={agent_id} user={user_id}: {stats}")
+    return stats
+
+
+async def _hard_delete_neo4j(
+    workspace_ids: list[str], agent_id: str, user_id: str,
+) -> int:
+    """物理删除 Neo4j 中该 agent 相关的所有节点和关系。"""
+    deleted = 0
+    queries = [
+        (
+            "MATCH (n {agent_id: $agent_id}) DETACH DELETE n",
+            {"agent_id": agent_id},
+        ),
+    ]
+    for ws_id in workspace_ids:
+        queries.append((
+            "MATCH (n {workspace_id: $ws_id}) DETACH DELETE n",
+            {"ws_id": ws_id},
+        ))
+    for query, params in queries:
+        try:
+            await run_write(query, params)
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"Neo4j hard delete failed: {e}")
+    return deleted
