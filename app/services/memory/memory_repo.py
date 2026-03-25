@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Literal
 
 from app.db import db
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +92,19 @@ async def create(source: Source = "user", **data) -> MemoryRecord:
     Pass fields as keyword args: userId, content, summary, level, importance, type, etc.
     Do NOT pass 'source' in data — it's determined by the `source` parameter.
     """
+    if data.get("userId") and not data.get("workspaceId"):
+        data["workspaceId"] = await resolve_workspace_id(user_id=data["userId"])
     row = await _table(source).create(data=data)
     return _to_record(row, source)
+
+
+async def _scope_where(where: dict | None) -> dict | None:
+    if not where or "workspaceId" in where or "userId" not in where:
+        return where
+
+    scoped = dict(where)
+    scoped["workspaceId"] = await resolve_workspace_id(user_id=scoped["userId"])
+    return scoped
 
 
 async def find_many(
@@ -103,6 +115,7 @@ async def find_many(
     skip: int | None = None,
 ) -> list[MemoryRecord]:
     """Query memories. source=None queries both tables and merges results."""
+    where = await _scope_where(where)
     kwargs = _build_kwargs(where, order, take, skip)
 
     if source is not None:
@@ -156,7 +169,7 @@ async def count(
     """Count memories. source=None counts both tables."""
     kwargs: dict = {}
     if where is not None:
-        kwargs["where"] = where
+        kwargs["where"] = await _scope_where(where)
 
     if source is not None:
         return await _table(source).count(**kwargs)
@@ -186,7 +199,7 @@ async def update_many(
     data: dict | None = None,
 ) -> int:
     """Batch update. source=None updates both tables."""
-    kwargs_where = where or {}
+    kwargs_where = await _scope_where(where or {})
     kwargs_data = data or {}
 
     if source is not None:

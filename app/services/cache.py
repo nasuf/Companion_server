@@ -62,32 +62,32 @@ async def cache_set_embedding(text: str, embedding: list[float]) -> None:
     await cache_set("emb", text, embedding, ttl=1800)
 
 
-async def cache_retrieval(query: str, user_id: str) -> dict | None:
+async def cache_retrieval(query: str, user_id: str, workspace_id: str | None = None) -> dict | None:
     """Get cached retrieval results."""
-    result = await cache_get("ret", f"{user_id}:{query}")
+    result = await cache_get("ret", f"{user_id}:{workspace_id or 'none'}:{query}")
     if isinstance(result, dict):
         return result
     return None
 
 
 async def cache_set_retrieval(
-    query: str, user_id: str, results: dict
+    query: str, user_id: str, results: dict, workspace_id: str | None = None
 ) -> None:
     """Cache retrieval results (TTL 5 min)."""
-    await cache_set("ret", f"{user_id}:{query}", results, ttl=DEFAULT_TTL)
+    await cache_set("ret", f"{user_id}:{workspace_id or 'none'}:{query}", results, ttl=DEFAULT_TTL)
 
 
-async def cache_graph_context(user_id: str) -> dict | None:
+async def cache_graph_context(user_id: str, workspace_id: str | None = None) -> dict | None:
     """Get cached graph context."""
-    result = await cache_get("graph", user_id)
+    result = await cache_get("graph", f"{user_id}:{workspace_id or 'none'}")
     if isinstance(result, dict):
         return result
     return None
 
 
-async def cache_set_graph_context(user_id: str, context: dict) -> None:
+async def cache_set_graph_context(user_id: str, context: dict, workspace_id: str | None = None) -> None:
     """Cache graph context (TTL 5 min)."""
-    await cache_set("graph", user_id, context, ttl=DEFAULT_TTL)
+    await cache_set("graph", f"{user_id}:{workspace_id or 'none'}", context, ttl=DEFAULT_TTL)
 
 
 async def cache_summarizer(conv_hash: str) -> dict | None:

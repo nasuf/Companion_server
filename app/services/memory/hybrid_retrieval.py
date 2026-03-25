@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 async def hybrid_retrieve(
     message: str,
     user_id: str,
+    workspace_id: str | None = None,
     token_budget: int = 800,
 ) -> dict:
     """Perform hybrid retrieval and return context for prompt.
@@ -40,14 +41,14 @@ async def hybrid_retrieve(
       - graph_context: dict (topics, entities)
     """
     # Check cache
-    cached = await cache_retrieval(message, user_id)
+    cached = await cache_retrieval(message, user_id, workspace_id=workspace_id)
     if cached:
         logger.debug("Hybrid retrieval cache hit")
         return cached
 
     # Parallel: vector search + graph context (no LLM needed)
-    vector_task = search_similar(message, user_id, top_k=50)
-    graph_task = get_relationship_context(user_id)
+    vector_task = search_similar(message, user_id, top_k=50, workspace_id=workspace_id)
+    graph_task = get_relationship_context(user_id, workspace_id=workspace_id)
 
     vector_results, graph_result = await asyncio.gather(
         vector_task, graph_task, return_exceptions=True
@@ -71,12 +72,12 @@ async def hybrid_retrieve(
     graph_context = None
     if isinstance(graph_result, Exception):
         logger.warning(f"Graph context failed: {graph_result}")
-        graph_context = await cache_graph_context(user_id)
+        graph_context = await cache_graph_context(user_id, workspace_id=workspace_id)
     else:
         graph_context = graph_result
         if graph_context:
             try:
-                await cache_set_graph_context(user_id, graph_context)
+                await cache_set_graph_context(user_id, graph_context, workspace_id=workspace_id)
             except Exception:
                 pass
 
@@ -87,7 +88,7 @@ async def hybrid_retrieve(
 
     # Cache the result
     try:
-        await cache_set_retrieval(message, user_id, result)
+        await cache_set_retrieval(message, user_id, result, workspace_id=workspace_id)
     except Exception:
         pass
 

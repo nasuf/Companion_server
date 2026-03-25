@@ -21,6 +21,7 @@ class AgentResponse(BaseModel):
     id: str
     name: str
     user_id: str
+    workspace_id: str | None = None
     personality: dict | None = None
     background: str | None = None
     values: dict | None = None

@@ -18,11 +18,14 @@ model User {
   hashedPassword   String             @map("hashed_password")
   role             String             @default("user") @map("role")
   email            String?            @unique
+  status           String             @default("active")
+  archivedAt       DateTime?          @map("archived_at")
   createdAt        DateTime           @default(now()) @map("created_at")
   updatedAt        DateTime           @updatedAt @map("updated_at")
   agents           AiAgent[]
+  workspaces       ChatWorkspace[]
   conversations    Conversation[]
-  profile          UserProfile?
+  profiles         UserProfile[]
   portraits        UserPortrait[]
   memoryChangelogs MemoryChangelog[]
   intimacies       Intimacy[]
@@ -36,6 +39,8 @@ model AiAgent {
   name            String
   userId          String         @map("user_id")
   user            User           @relation(fields: [userId], references: [id])
+  status          String         @default("active")
+  archivedAt      DateTime?      @map("archived_at")
   personality     Json?
   sevenDimTraits  Json?          @map("seven_dim_traits")
   currentTraits   Json?          @map("current_traits")
@@ -50,6 +55,7 @@ model AiAgent {
   gender          String?        @map("gender")
   createdAt       DateTime       @default(now()) @map("created_at")
   updatedAt       DateTime       @updatedAt @map("updated_at")
+  workspaces      ChatWorkspace[]
   conversations   Conversation[]
   emotionState    AiEmotionState?
   schedules       AiDailySchedule[]
@@ -61,14 +67,38 @@ model AiAgent {
   @@map("ai_agents")
 }
 
+model ChatWorkspace {
+  id            String            @id @default(uuid())
+  userId        String            @map("user_id")
+  user          User              @relation(fields: [userId], references: [id])
+  agentId       String?           @map("agent_id")
+  agent         AiAgent?          @relation(fields: [agentId], references: [id])
+  status        String            @default("active")
+  archivedAt    DateTime?         @map("archived_at")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+  conversations Conversation[]
+  userMemories  UserMemory[]
+  aiMemories    AiMemory[]
+  profiles      UserProfile[]
+  changelogs    MemoryChangelog[]
+
+  @@index([userId, status])
+  @@index([agentId, status])
+  @@map("chat_workspaces")
+}
+
 model Conversation {
   id        String    @id @default(uuid())
   userId    String    @map("user_id")
   user      User      @relation(fields: [userId], references: [id])
   agentId   String    @map("agent_id")
   agent     AiAgent   @relation(fields: [agentId], references: [id])
+  workspaceId String? @map("workspace_id")
+  workspace  ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   title     String?
   isDeleted Boolean   @default(false) @map("is_deleted")
+  archivedAt DateTime? @map("archived_at")
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   messages  Message[]
@@ -121,6 +151,8 @@ model PromptTemplateVersion {
 model UserMemory {
   id           String   @id @default(uuid())
   userId       String   @map("user_id")
+  workspaceId  String?  @map("workspace_id")
+  workspace    ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
   level        Int      @default(3)
   content      String
@@ -138,6 +170,8 @@ model UserMemory {
 model AiMemory {
   id           String   @id @default(uuid())
   userId       String   @map("user_id")
+  workspaceId  String?  @map("workspace_id")
+  workspace    ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
   level        Int      @default(3)
   content      String
@@ -154,13 +188,16 @@ model AiMemory {
 
 model UserProfile {
   id                String   @id @default(uuid())
-  userId            String   @unique @map("user_id")
+  userId            String   @map("user_id")
   user              User     @relation(fields: [userId], references: [id])
+  workspaceId       String?  @unique @map("workspace_id")
+  workspace         ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   traits            Json?
   interests         Json?
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  @@index([userId])
   @@map("user_profiles")
 }
 
@@ -192,6 +229,8 @@ model MemoryChangelog {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")
   user      User     @relation(fields: [userId], references: [id])
+  workspaceId String? @map("workspace_id")
+  workspace ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   memoryId  String   @map("memory_id")
   operation String   // "insert", "update", "delete"
   oldValue  String?  @map("old_value")

@@ -36,6 +36,8 @@ async def list_users(
                 "name": u.name,
                 "role": u.role,
                 "created_at": str(u.createdAt),
+                "status": getattr(u, "status", "active"),
+                "archived_at": str(u.archivedAt) if getattr(u, "archivedAt", None) else None,
                 "agent_count": len(u.agents) if u.agents else 0,
             }
             for u in users
@@ -53,9 +55,18 @@ async def get_user_detail(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    user_workspaces = await db.chatworkspace.find_many(
+        where={"userId": user_id},
+        include={"agent": True, "conversations": {"include": {"messages": True}}},
+        order={"createdAt": "desc"},
+    )
+
     agents = await db.aiagent.find_many(
         where={"userId": user_id},
-        include={"conversations": {"include": {"messages": True}}},
+        include={
+            "conversations": {"include": {"messages": True}},
+            "workspaces": {"include": {"conversations": {"include": {"messages": True}}}},
+        },
     )
 
     agent_list = []
@@ -69,13 +80,31 @@ async def get_user_detail(
             "name": a.name,
             "gender": a.gender,
             "created_at": str(a.createdAt),
+            "status": getattr(a, "status", "active"),
+            "archived_at": str(a.archivedAt) if getattr(a, "archivedAt", None) else None,
             "conversation_count": conv_count,
             "message_count": msg_count,
+            "workspaces": [
+                {
+                    "id": w.id,
+                    "status": w.status,
+                    "created_at": str(w.createdAt),
+                    "archived_at": str(w.archivedAt) if getattr(w, "archivedAt", None) else None,
+                    "conversation_count": len(w.conversations) if w.conversations else 0,
+                    "message_count": sum(
+                        len(c.messages) for c in (w.conversations or []) if c.messages
+                    ),
+                }
+                for w in (a.workspaces or [])
+            ],
             "conversations": [
                 {
                     "id": c.id,
                     "created_at": str(c.createdAt),
                     "updated_at": str(c.updatedAt),
+                    "is_deleted": c.isDeleted,
+                    "workspace_id": c.workspaceId,
+                    "archived_at": str(c.archivedAt) if getattr(c, "archivedAt", None) else None,
                     "message_count": len(c.messages) if c.messages else 0,
                 }
                 for c in (a.conversations or [])
@@ -90,6 +119,21 @@ async def get_user_detail(
             "role": user.role,
             "created_at": str(user.createdAt),
         },
+        "workspaces": [
+            {
+                "id": w.id,
+                "status": w.status,
+                "agent_id": w.agentId,
+                "agent_name": getattr(getattr(w, "agent", None), "name", None),
+                "created_at": str(w.createdAt),
+                "archived_at": str(w.archivedAt) if getattr(w, "archivedAt", None) else None,
+                "conversation_count": len(w.conversations) if w.conversations else 0,
+                "message_count": sum(
+                    len(c.messages) for c in (w.conversations or []) if c.messages
+                ),
+            }
+            for w in user_workspaces
+        ],
         "agents": agent_list,
     }
 

@@ -57,7 +57,13 @@ async def generate_proactive_message(
             return None
 
         # 获取记忆（跳过语义检索，只用最近+重要记忆）
-        memories = await retrieve_memories("", user_id, semantic_k=0, recent_k=5, important_k=3)
+        memories = await retrieve_memories(
+            "",
+            user_id,
+            semantic_k=0,
+            recent_k=5,
+            important_k=3,
+        )
         memory_strings = format_memories_for_prompt(memories)
 
         # 获取情绪

@@ -186,7 +186,7 @@ async def scan_birthday_memories() -> None:
     import re
     from app.services.memory import memory_repo
 
-    agents = await db.aiagent.find_many()
+    agents = await db.aiagent.find_many(where={"status": "active"})
     birthday_pattern = re.compile(r"(\d{1,2})月(\d{1,2})[日号].*生日|生日.*(\d{1,2})月(\d{1,2})[日号]")
 
     for agent in agents:
@@ -247,7 +247,7 @@ async def create_holiday_triggers(date_str: str, holiday_name: str) -> None:
     trigger_time = datetime(d.year, d.month, d.day, 8, 0, tzinfo=_TZ)
 
     # 查找所有活跃的 agent-user 组合
-    agents = await db.aiagent.find_many()
+    agents = await db.aiagent.find_many(where={"status": "active"})
     for agent in agents:
         try:
             await db.timetrigger.create(data={

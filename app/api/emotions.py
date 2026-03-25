@@ -16,7 +16,7 @@ router = APIRouter(prefix="/emotions", tags=["emotions"])
 async def get_current_emotion(agent_id: str):
     """Get the current emotion state for an AI agent."""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
+    if not agent or getattr(agent, "status", "active") != "active":
         raise HTTPException(status_code=404, detail="Agent not found")
 
     emotion = await get_ai_emotion(agent_id)
@@ -38,7 +38,7 @@ async def get_emotion_timeline(agent_id: str, limit: int = 50):
     Reconstructs timeline from messages that have emotion metadata.
     """
     agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
+    if not agent or getattr(agent, "status", "active") != "active":
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Get conversations for this agent

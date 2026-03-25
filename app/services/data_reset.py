@@ -1,6 +1,6 @@
-"""数据重置服务。
+"""运行时状态清理服务。
 
-彻底清除某个 AI Agent 及其关联用户的所有数据，包括 PostgreSQL、Neo4j、Redis。
+用于工作区归档时清理旧 agent 的缓存、图谱状态和触发器，保留 PostgreSQL 历史数据。
 """
 
 import logging
@@ -12,65 +12,41 @@ from app.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 
-async def reset_agent_data(agent_id: str, user_id: str) -> dict[str, int]:
-    """清除指定 agent + user 的所有数据。返回各阶段删除计数。
-
-    调用方负责最后删除 AiAgent 和 User 记录本身。
-    """
+async def clear_agent_runtime_state(
+    workspace_id: str,
+    agent_id: str,
+    user_id: str,
+    conversation_ids: list[str] | None = None,
+) -> dict[str, int]:
+    """清理指定 agent + user 的运行时状态。"""
     stats: dict[str, int] = {}
 
-    # 1. 查出所有 conversation_id（后面清 Redis 要用）
-    convs = await db.query_raw(
-        "SELECT id FROM conversations WHERE agent_id = $1",
-        agent_id,
-    )
-    conv_ids = [c["id"] for c in (convs or [])]
+    conv_ids = list(conversation_ids or [])
+    if not conv_ids:
+        convs = await db.query_raw(
+            "SELECT id FROM conversations WHERE agent_id = $1",
+            agent_id,
+        )
+        conv_ids = [c["id"] for c in (convs or [])]
 
-    # 2. PostgreSQL — 按外键依赖顺序删除
-    stats["postgres"] = await _clear_postgres(agent_id, user_id, conv_ids)
-
-    # 3. Neo4j — 删除图谱节点和关系
-    stats["neo4j"] = await _clear_neo4j(agent_id, user_id)
-
-    # 4. Redis — 删除所有缓存键
+    stats["postgres"] = await _clear_runtime_postgres(agent_id)
+    stats["neo4j"] = await _clear_neo4j(workspace_id, agent_id, user_id)
     stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
 
-    logger.info(f"Data reset complete for agent={agent_id} user={user_id}: {stats}")
+    logger.info(f"Runtime state cleared for agent={agent_id} user={user_id}: {stats}")
     return stats
 
 
-async def _clear_postgres(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
-    """按外键依赖顺序删除 PostgreSQL 数据。"""
-    total = 0
+async def reset_agent_data(agent_id: str, user_id: str) -> dict[str, int]:
+    """兼容旧调用方名称。"""
+    return await clear_agent_runtime_state("legacy", agent_id, user_id)
 
-    # 子表 → 父表顺序
+
+async def _clear_runtime_postgres(agent_id: str) -> int:
+    """清理影响线上行为但不需要长期保留的 PostgreSQL 运行时状态。"""
+    total = 0
     queries = [
-        # messages (通过 conversation)
-        (
-            "DELETE FROM messages WHERE conversation_id = ANY($1)",
-            conv_ids,
-        ),
-        # conversation 相关
-        ("DELETE FROM conversations WHERE agent_id = $1", agent_id),
-        ("DELETE FROM proactive_chat_logs WHERE agent_id = $1", agent_id),
-        ("DELETE FROM trait_feedback_logs WHERE agent_id = $1", agent_id),
-        ("DELETE FROM schedule_adjust_logs WHERE agent_id = $1", agent_id),
-        ("DELETE FROM ai_daily_schedules WHERE agent_id = $1", agent_id),
-        ("DELETE FROM ai_emotion_states WHERE agent_id = $1", agent_id),
-        ("DELETE FROM user_portraits WHERE agent_id = $1", agent_id),
-        ("DELETE FROM intimacies WHERE agent_id = $1", agent_id),
-        ("DELETE FROM time_triggers WHERE ai_agent_id = $1", agent_id),
-        # memory embeddings (通过 memory_id)
-        (
-            "DELETE FROM memory_embeddings WHERE memory_id IN "
-            "(SELECT id FROM memories_user WHERE user_id = $1 "
-            "UNION SELECT id FROM memories_ai WHERE user_id = $1)",
-            user_id,
-        ),
-        ("DELETE FROM memory_changelogs WHERE user_id = $1", user_id),
-        ("DELETE FROM memories_user WHERE user_id = $1", user_id),
-        ("DELETE FROM memories_ai WHERE user_id = $1", user_id),
-        ("DELETE FROM user_profiles WHERE user_id = $1", user_id),
+        ("UPDATE time_triggers SET is_active = false WHERE ai_agent_id = $1", agent_id),
     ]
 
     for sql, param in queries:
@@ -78,33 +54,44 @@ async def _clear_postgres(agent_id: str, user_id: str, conv_ids: list[str]) -> i
             cnt = await db.execute_raw(sql, param)
             total += cnt or 0
         except Exception as e:
-            logger.warning(f"PG delete failed: {sql[:60]}... — {e}")
+            logger.warning(f"PG runtime cleanup failed: {sql[:60]}... — {e}")
 
     return total
 
 
-async def _clear_neo4j(agent_id: str, user_id: str) -> int:
-    """删除 Neo4j 中 AI 和 User 节点及其所有关系。"""
-    deleted = 0
-    try:
-        await run_write(
-            "MATCH (a:AI {id: $id}) DETACH DELETE a",
-            {"id": agent_id},
-        )
-        deleted += 1
-    except Exception as e:
-        logger.warning(f"Neo4j AI node delete failed: {e}")
-
-    try:
-        await run_write(
-            "MATCH (u:User {id: $id}) DETACH DELETE u",
-            {"id": user_id},
-        )
-        deleted += 1
-    except Exception as e:
-        logger.warning(f"Neo4j User node delete failed: {e}")
-
-    return deleted
+async def _clear_neo4j(workspace_id: str, agent_id: str, user_id: str) -> int:
+    """归档 Neo4j 当前 workspace 节点，不硬删历史。"""
+    updated = 0
+    queries = [
+        (
+            """
+            MATCH (a:AI {id: $agent_id, workspace_id: $workspace_id})
+            SET a.status = 'archived', a.archived_at = datetime()
+            """,
+            {"agent_id": agent_id, "workspace_id": workspace_id},
+        ),
+        (
+            """
+            MATCH (u:User {id: $user_id, workspace_id: $workspace_id})
+            SET u.status = 'archived', u.archived_at = datetime()
+            """,
+            {"user_id": user_id, "workspace_id": workspace_id},
+        ),
+        (
+            """
+            MATCH (m:Memory {workspace_id: $workspace_id})
+            SET m.status = 'archived', m.archived_at = datetime()
+            """,
+            {"workspace_id": workspace_id},
+        ),
+    ]
+    for query, params in queries:
+        try:
+            await run_write(query, params)
+            updated += 1
+        except Exception as e:
+            logger.warning(f"Neo4j archive failed: {e}")
+    return updated
 
 
 async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:

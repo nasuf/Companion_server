@@ -11,6 +11,7 @@ from app.db import db
 from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.vector_search import search_by_embedding
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,11 @@ async def log_memory_changelog(
     operation: str,
     old_value: str | None = None,
     new_value: str | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     """Write a memory changelog entry for portrait generation."""
     try:
+        workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
         await db.memorychangelog.create(
             data={
                 "user": {"connect": {"id": user_id}},
@@ -65,6 +68,7 @@ async def log_memory_changelog(
                 "operation": operation,
                 "oldValue": old_value,
                 "newValue": new_value,
+                "workspaceId": workspace_id,
             }
         )
     except Exception as e:
@@ -77,9 +81,10 @@ async def is_duplicate(
     user_id: str,
     content: str,
     embedding: list[float],
+    workspace_id: str | None = None,
 ) -> bool:
     """Check if a similar memory already exists (cosine > 0.9)."""
-    results = await search_by_embedding(embedding, user_id, top_k=5)
+    results = await search_by_embedding(embedding, user_id, top_k=5, workspace_id=workspace_id)
     for r in results:
         sim = r.get("similarity", 0)
         if isinstance(sim, str):
@@ -99,6 +104,7 @@ async def store_memory(
     memory_type: str | None = None,
     source: str = "user",
     occur_time: datetime | None = None,
+    workspace_id: str | None = None,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -109,11 +115,13 @@ async def store_memory(
     # Normalize type to standard enum
     memory_type = normalize_memory_type(memory_type)
 
+    workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
+
     # Generate embedding
     embedding = await generate_embedding(content)
 
     # Deduplication check
-    if await is_duplicate(user_id, content, embedding):
+    if await is_duplicate(user_id, content, embedding, workspace_id=workspace_id):
         return None
 
     # Store in PostgreSQL (routed to memories_user or memories_ai)
@@ -124,6 +132,7 @@ async def store_memory(
         level=level,
         importance=importance,
         type=memory_type,
+        workspaceId=workspace_id,
     )
     if occur_time is not None:
         create_data["occurTime"] = occur_time
@@ -133,7 +142,13 @@ async def store_memory(
     await store_embedding(memory.id, embedding)
 
     # Log changelog for portrait generation
-    await log_memory_changelog(user_id, memory.id, "insert", new_value=content)
+    await log_memory_changelog(
+        user_id,
+        memory.id,
+        "insert",
+        new_value=content,
+        workspace_id=workspace_id,
+    )
 
     logger.info(f"Stored memory L{level} (importance={importance:.2f}): {content[:50]}")
     return memory.id

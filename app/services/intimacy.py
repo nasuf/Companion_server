@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.redis_client import get_redis
 from app.services.memory import memory_repo
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -146,19 +147,22 @@ async def _compute_interaction_stickiness(
 
 async def _compute_self_disclosure(
     user_id: str,
+    workspace_id: str | None = None,
 ) -> float:
     """G2 自我暴露(0-1)。基于L1+L2记忆重要度总和的对数公式。
 
     min(1000, 200*log10(importance_sum+1)) / 1000
     """
     # 查询L1+L2记忆的importance总和 (user memories only)
+    workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
     result = await db.query_raw(
         """
         SELECT COALESCE(SUM(importance), 0) as total_importance
         FROM memories_user
-        WHERE user_id = $1 AND level IN (1, 2) AND is_archived = false
+        WHERE user_id = $1 AND workspace_id = $2 AND level IN (1, 2) AND is_archived = false
         """,
         user_id,
+        workspace_id,
     )
 
     importance_sum = float(result[0]["total_importance"]) if result else 0.0
@@ -184,6 +188,7 @@ async def compute_growth_intimacy(
 
     权重：互动粘性0.3 + 自我暴露0.3 + 关系时长0.4
     """
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     if not created_at:
         agent = await db.aiagent.find_unique(where={"id": agent_id})
         if not agent:
@@ -191,7 +196,7 @@ async def compute_growth_intimacy(
         created_at = agent.createdAt
 
     interaction = await _compute_interaction_stickiness(agent_id, user_id)
-    disclosure = await _compute_self_disclosure(user_id)
+    disclosure = await _compute_self_disclosure(user_id, workspace_id=workspace_id)
     duration = _compute_relationship_duration(created_at)
     # Note: G1/G2/G3 all return 0-1 range via /1000 normalization
 
@@ -221,12 +226,14 @@ async def compute_topic_intimacy(
     基于近30天记忆的话题深度。
     权重：话题多样性0.2 + 情感深度0.5 + 互动时长0.3
     """
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     since = datetime.now(UTC) - timedelta(days=30)
 
     memories = await memory_repo.find_many(
         source="user",
         where={
             "userId": user_id,
+            "workspaceId": workspace_id,
             "createdAt": {"gte": since},
             "isArchived": False,
         },

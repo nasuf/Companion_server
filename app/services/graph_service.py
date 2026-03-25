@@ -12,32 +12,33 @@ logger = logging.getLogger(__name__)
 
 # --- Node Operations ---
 
-async def create_user_node(user_id: str, name: str) -> None:
+async def create_user_node(user_id: str, workspace_id: str, name: str) -> None:
     await run_write(
-        "MERGE (u:User {id: $id}) SET u.name = $name",
-        {"id": user_id, "name": name},
+        "MERGE (u:User {id: $id, workspace_id: $workspace_id}) SET u.name = $name, u.status = 'active'",
+        {"id": user_id, "workspace_id": workspace_id, "name": name},
     )
 
 
-async def create_ai_node(agent_id: str, name: str) -> None:
+async def create_ai_node(agent_id: str, workspace_id: str, name: str) -> None:
     await run_write(
-        "MERGE (a:AI {id: $id}) SET a.name = $name",
-        {"id": agent_id, "name": name},
+        "MERGE (a:AI {id: $id, workspace_id: $workspace_id}) SET a.name = $name, a.status = 'active'",
+        {"id": agent_id, "workspace_id": workspace_id, "name": name},
     )
 
 
 async def create_memory_node(
     memory_id: str,
+    workspace_id: str,
     summary: str,
     level: int,
     importance: float,
 ) -> None:
     await run_write(
         """
-        MERGE (m:Memory {id: $id})
-        SET m.summary = $summary, m.level = $level, m.importance = $importance
+        MERGE (m:Memory {id: $id, workspace_id: $workspace_id})
+        SET m.summary = $summary, m.level = $level, m.importance = $importance, m.status = 'active'
         """,
-        {"id": memory_id, "summary": summary, "level": level, "importance": importance},
+        {"id": memory_id, "workspace_id": workspace_id, "summary": summary, "level": level, "importance": importance},
     )
 
 
@@ -64,64 +65,65 @@ async def merge_preference_node(category: str, value: str) -> None:
 
 # --- Edge Operations ---
 
-async def link_user_memory(user_id: str, memory_id: str) -> None:
+async def link_user_memory(user_id: str, workspace_id: str, memory_id: str) -> None:
     await run_write(
         """
-        MATCH (u:User {id: $user_id})
-        MATCH (m:Memory {id: $memory_id})
+        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})
+        MATCH (m:Memory {id: $memory_id, workspace_id: $workspace_id})
         MERGE (u)-[:HAS_MEMORY]->(m)
         """,
-        {"user_id": user_id, "memory_id": memory_id},
+        {"user_id": user_id, "workspace_id": workspace_id, "memory_id": memory_id},
     )
 
 
-async def link_memory_entity(memory_id: str, entity_name: str) -> None:
+async def link_memory_entity(memory_id: str, workspace_id: str, entity_name: str) -> None:
     await run_write(
         """
-        MATCH (m:Memory {id: $memory_id})
+        MATCH (m:Memory {id: $memory_id, workspace_id: $workspace_id})
         MERGE (e:Entity {name: $entity_name})
         MERGE (m)-[:MENTIONS]->(e)
         """,
-        {"memory_id": memory_id, "entity_name": entity_name},
+        {"memory_id": memory_id, "workspace_id": workspace_id, "entity_name": entity_name},
     )
 
 
-async def link_memory_topic(memory_id: str, topic_name: str) -> None:
+async def link_memory_topic(memory_id: str, workspace_id: str, topic_name: str) -> None:
     await run_write(
         """
-        MATCH (m:Memory {id: $memory_id})
+        MATCH (m:Memory {id: $memory_id, workspace_id: $workspace_id})
         MERGE (t:Topic {name: $topic_name})
         MERGE (m)-[:RELATED_TO]->(t)
         """,
-        {"memory_id": memory_id, "topic_name": topic_name},
+        {"memory_id": memory_id, "workspace_id": workspace_id, "topic_name": topic_name},
     )
 
 
-async def link_user_preference(user_id: str, category: str, value: str) -> None:
+async def link_user_preference(user_id: str, workspace_id: str, category: str, value: str) -> None:
     await run_write(
         """
-        MATCH (u:User {id: $user_id})
+        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})
         MERGE (p:Preference {category: $category, value: $value})
         MERGE (u)-[r:LIKES]->(p)
         ON CREATE SET r.strength = 0.5
         ON MATCH SET r.strength = r.strength * 0.9 + 0.1
         """,
-        {"user_id": user_id, "category": category, "value": value},
+        {"user_id": user_id, "workspace_id": workspace_id, "category": category, "value": value},
     )
 
 
 async def link_memory_emotion(
-    memory_id: str, pleasure: float, arousal: float, dominance: float,
+    memory_id: str, workspace_id: str, pleasure: float, arousal: float, dominance: float,
 ) -> None:
     await run_write(
         """
-        MATCH (m:Memory {id: $memory_id})
-        MERGE (e:Emotion {memory_id: $memory_id})
+        MATCH (m:Memory {id: $memory_id, workspace_id: $workspace_id})
+        MERGE (e:Emotion {memory_id: $memory_id, workspace_id: $workspace_id})
         SET e.pleasure = $pleasure, e.arousal = $arousal, e.dominance = $dominance
         MERGE (m)-[:HAS_EMOTION]->(e)
         """,
         {
             "memory_id": memory_id,
+            "workspace_id": workspace_id,
             "pleasure": pleasure,
             "arousal": arousal,
             "dominance": dominance,
@@ -135,6 +137,10 @@ async def update_graph_from_extraction(
     user_id: str,
     memory_id: str,
     extraction: dict,
+    workspace_id: str,
+    agent_id: str | None = None,
+    user_name: str | None = None,
+    agent_name: str | None = None,
 ) -> None:
     """Update the graph after memory extraction.
 
@@ -150,13 +156,19 @@ async def update_graph_from_extraction(
         return
 
     # Create memory node
+    if user_name:
+        await create_user_node(user_id, workspace_id, user_name)
+    if agent_id and agent_name:
+        await create_ai_node(agent_id, workspace_id, agent_name)
+
     await create_memory_node(
         memory_id,
+        workspace_id,
         memory_data.get("summary", ""),
         memory_data.get("level", 3),
         memory_data.get("importance", 0.5),
     )
-    await link_user_memory(user_id, memory_id)
+    await link_user_memory(user_id, workspace_id, memory_id)
 
     # Link entities
     for entity in extraction.get("entities", []):
@@ -164,13 +176,13 @@ async def update_graph_from_extraction(
         etype = entity.get("type", "unknown")
         if name:
             await merge_entity_node(name, etype)
-            await link_memory_entity(memory_id, name)
+            await link_memory_entity(memory_id, workspace_id, name)
 
     # Link topics
     for topic in extraction.get("topics", []):
         if topic:
             await merge_topic_node(topic)
-            await link_memory_topic(memory_id, topic)
+            await link_memory_topic(memory_id, workspace_id, topic)
 
     # Link preferences
     for pref in extraction.get("preferences", []):
@@ -178,13 +190,14 @@ async def update_graph_from_extraction(
         val = pref.get("value", "")
         if cat and val:
             await merge_preference_node(cat, val)
-            await link_user_preference(user_id, cat, val)
+            await link_user_preference(user_id, workspace_id, cat, val)
 
     # Link emotion
     emotion = memory_data.get("emotion")
     if emotion:
         await link_memory_emotion(
             memory_id,
+            workspace_id,
             emotion.get("pleasure", 0.0),
             emotion.get("arousal", 0.0),
             emotion.get("dominance", 0.0),

@@ -15,6 +15,7 @@ from app.services.prompt_defaults import (
     PORTRAIT_UPDATE_PROMPT,
 )
 from app.services.prompt_store import get_prompt_text
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +39,10 @@ async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
         logger.info(f"Portrait precondition: agent {agent_id} created <24h ago")
         return False
 
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     l2_count = await memory_repo.count(
         source="user",
-        where={"userId": user_id, "level": 2, "isArchived": False},
+        where={"userId": user_id, "workspaceId": workspace_id, "level": 2, "isArchived": False},
     )
     if l2_count < 20:
         logger.info(f"Portrait precondition: only {l2_count} L2 memories (need 20)")
@@ -48,7 +50,7 @@ async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
 
     l1_count = await memory_repo.count(
         source="user",
-        where={"userId": user_id, "level": 1, "isArchived": False},
+        where={"userId": user_id, "workspaceId": workspace_id, "level": 1, "isArchived": False},
     )
     if l1_count < 5:
         logger.info(f"Portrait precondition: only {l1_count} L1 memories (need 5)")
@@ -59,6 +61,7 @@ async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
 
 async def generate_portrait(user_id: str, agent_id: str) -> str | None:
     """Generate a user portrait from L1/L2 memories."""
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     # Check preconditions for first-time generation
     existing = await db.userportrait.find_first(
         where={"userId": user_id, "agentId": agent_id},
@@ -71,6 +74,7 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
         source="user",
         where={
             "userId": user_id,
+            "workspaceId": workspace_id,
             "level": {"in": [1, 2]},
             "isArchived": False,
         },
@@ -116,6 +120,7 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
 
 async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
     """Update user portrait based on weekly memory changes."""
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     # Get previous portrait
     previous = await db.userportrait.find_first(
         where={"userId": user_id, "agentId": agent_id},
@@ -131,6 +136,7 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
     changelogs = await db.memorychangelog.find_many(
         where={
             "userId": user_id,
+            "workspaceId": workspace_id,
             "createdAt": {"gte": one_week_ago},
         },
         order={"createdAt": "desc"},

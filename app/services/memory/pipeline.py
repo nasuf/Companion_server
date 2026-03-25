@@ -7,11 +7,13 @@ Runs as FastAPI BackgroundTasks (non-blocking).
 import logging
 from datetime import datetime
 
+from app.db import db
 from app.services.memory.extraction import extract_memories
 from app.services.memory.filter import should_extract_memory
 from app.services.memory.storage import store_memory
 from app.services.memory.conflict import detect_conflicts, resolve_conflict
 from app.services.graph_service import update_graph_from_extraction
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,14 @@ async def process_memory_pipeline(
 
     Returns list of stored memory IDs.
     """
+    workspace_id = await resolve_workspace_id(user_id=user_id)
+    active_workspace = None
+    if workspace_id:
+        active_workspace = await db.chatworkspace.find_unique(
+            where={"id": workspace_id},
+            include={"agent": True, "user": True},
+        )
+
     # Step 0: Filter — skip extraction for low-value messages
     # Extract last user message from conversation text for filtering
     lines = conversation_text.strip().split("\n")
@@ -88,6 +98,7 @@ async def process_memory_pipeline(
             importance=importance,
             memory_type=memory_type,
             occur_time=occur_time,
+            workspace_id=workspace_id,
         )
 
         if memory_id:
@@ -95,7 +106,15 @@ async def process_memory_pipeline(
 
             # Step 3: Update graph
             try:
-                await update_graph_from_extraction(user_id, memory_id, extraction)
+                await update_graph_from_extraction(
+                    user_id,
+                    memory_id,
+                    extraction,
+                    workspace_id=workspace_id or "legacy",
+                    agent_id=getattr(active_workspace, "agentId", None),
+                    user_name=getattr(getattr(active_workspace, "user", None), "name", None),
+                    agent_name=getattr(getattr(active_workspace, "agent", None), "name", None),
+                )
             except Exception as e:
                 logger.warning(f"Graph update failed for memory {memory_id}: {e}")
 

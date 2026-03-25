@@ -8,6 +8,7 @@ from app.db import db
 from app.models.auth import RegisterRequest, LoginRequest, AuthResponse
 from app.services.auth import hash_password, verify_password, create_jwt
 from app.api.jwt_auth import require_user
+from app.services.workspaces import get_active_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -15,15 +16,28 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 async def _build_auth_response(user, token: str) -> AuthResponse:
-    agent = await db.aiagent.find_first(where={"userId": user.id})
+    workspace = await get_active_workspace(user_id=user.id)
+    agent = None
+    conversation = None
+    if workspace:
+        agent = await db.aiagent.find_unique(where={"id": workspace.agentId})
+        conversation = await db.conversation.find_first(
+            where={
+                "workspaceId": workspace.id,
+                "isDeleted": False,
+            },
+            order={"updatedAt": "desc"},
+        )
     return AuthResponse(
         token=token,
         user_id=user.id,
         username=user.username,
         role=user.role,
-        has_agent=agent is not None,
+        has_agent=workspace is not None and agent is not None,
         agent_id=agent.id if agent else None,
         agent_name=agent.name if agent else None,
+        workspace_id=workspace.id if workspace else None,
+        conversation_id=conversation.id if conversation else None,
     )
 
 

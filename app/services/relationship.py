@@ -13,13 +13,14 @@ logger = logging.getLogger(__name__)
 async def update_relationship(
     user_id: str,
     agent_id: str,
+    workspace_id: str,
     interaction_quality: float = 0.5,
 ) -> None:
     """Update user-agent relationship metrics."""
     await run_write(
         """
-        MATCH (u:User {id: $user_id})
-        MATCH (a:AI {id: $agent_id})
+        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})
+        MATCH (a:AI {id: $agent_id, workspace_id: $workspace_id})
         MERGE (u)-[r:INTERACTS_WITH]->(a)
         ON CREATE SET
             r.trust = $quality,
@@ -32,18 +33,19 @@ async def update_relationship(
         {
             "user_id": user_id,
             "agent_id": agent_id,
+            "workspace_id": workspace_id,
             "quality": interaction_quality,
         },
     )
 
 
-async def get_relationship(user_id: str, agent_id: str) -> dict | None:
+async def get_relationship(user_id: str, agent_id: str, workspace_id: str) -> dict | None:
     """Get relationship metrics between user and agent."""
     results = await run_query(
         """
-        MATCH (u:User {id: $user_id})-[r:INTERACTS_WITH]->(a:AI {id: $agent_id})
+        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})-[r:INTERACTS_WITH]->(a:AI {id: $agent_id, workspace_id: $workspace_id})
         RETURN r.trust AS trust, r.interaction_count AS interaction_count
         """,
-        {"user_id": user_id, "agent_id": agent_id},
+        {"user_id": user_id, "agent_id": agent_id, "workspace_id": workspace_id},
     )
     return results[0] if results else None

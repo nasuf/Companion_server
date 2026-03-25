@@ -18,6 +18,16 @@ from app.services.schedule import (
     status_label,
     type_label,
 )
+from app.services.workspaces import (
+    activate_workspace,
+    archive_provisioning_workspace,
+    archive_workspace,
+    create_provisioning_workspace,
+    finalize_archived_workspaces,
+    get_active_workspace,
+    restore_staged_workspaces,
+    stage_active_workspaces_for_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +39,8 @@ async def create_agent(data: AgentCreate):
     create_data: dict = {
         "name": data.name,
         "user": {"connect": {"id": data.user_id}},
+        "status": "provisioning",
+        "archivedAt": None,
     }
     if data.personality is not None:
         create_data["personality"] = Json(data.personality)
@@ -38,7 +50,37 @@ async def create_agent(data: AgentCreate):
         create_data["values"] = Json(data.values)
     if data.gender is not None:
         create_data["gender"] = data.gender
-    agent = await db.aiagent.create(data=create_data)
+    agent = None
+    workspace = None
+    try:
+        agent = await db.aiagent.create(data=create_data)
+        workspace = await create_provisioning_workspace(data.user_id, agent.id)
+    except Exception:
+        if agent is not None:
+            await db.aiagent.update(
+                where={"id": agent.id},
+                data={"status": "archived", "archivedAt": datetime.now(UTC)},
+            )
+        raise
+    try:
+        staged_workspaces = await stage_active_workspaces_for_user(data.user_id)
+        await db.aiagent.update(
+            where={"id": agent.id},
+            data={"status": "active", "archivedAt": None},
+        )
+        workspace = await activate_workspace(workspace.id)
+        await finalize_archived_workspaces(staged_workspaces)
+    except Exception:
+        if workspace is not None:
+            await archive_provisioning_workspace(workspace.id)
+        if agent is not None:
+            await db.aiagent.update(
+                where={"id": agent.id},
+                data={"status": "archived", "archivedAt": datetime.now(UTC)},
+            )
+        if 'staged_workspaces' in locals():
+            await restore_staged_workspaces(staged_workspaces)
+        raise
 
     # Initialize baseline emotion from personality
     baseline = compute_baseline_emotion(agent.personality or {})
@@ -83,6 +125,7 @@ async def create_agent(data: AgentCreate):
         id=agent.id,
         name=agent.name,
         user_id=agent.userId,
+        workspace_id=workspace.id,
         personality=agent.personality,
         background=agent.background,
         values=agent.values,
@@ -94,6 +137,9 @@ async def create_agent(data: AgentCreate):
 
 @router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(agent_id: str):
+    workspace = await get_active_workspace(agent_id=agent_id)
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Agent not found")
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -101,6 +147,7 @@ async def get_agent(agent_id: str):
         id=agent.id,
         name=agent.name,
         user_id=agent.userId,
+        workspace_id=workspace.id,
         personality=agent.personality,
         background=agent.background,
         values=agent.values,
@@ -112,13 +159,16 @@ async def get_agent(agent_id: str):
 
 @router.get("", response_model=list[AgentResponse])
 async def list_agents(user_id: str | None = None):
-    where = {"userId": user_id} if user_id else {}
+    where = {"status": "active"}
+    if user_id:
+        where["userId"] = user_id
     agents = await db.aiagent.find_many(where=where)
     return [
         AgentResponse(
             id=a.id,
             name=a.name,
             user_id=a.userId,
+            workspace_id=None,
             personality=a.personality,
             background=a.background,
             values=a.values,
@@ -161,17 +211,21 @@ async def update_agent(agent_id: str, data: AgentUpdate):
 
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str):
-    """删除 Agent 及其所有关联数据（对话、记忆、画像、缓存等）。"""
+    """归档 Agent 当前工作区，并清理运行时状态。"""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    from app.services.data_reset import reset_agent_data
-
-    stats = await reset_agent_data(agent_id, agent.userId)
-
-    # 最后删除 agent 本身
-    await db.aiagent.delete(where={"id": agent_id})
+    workspace = await get_active_workspace(agent_id=agent_id)
+    if workspace:
+        stats = await archive_workspace(workspace.id)
+    else:
+        archived_at = datetime.now(UTC)
+        await db.aiagent.update(
+            where={"id": agent_id},
+            data={"status": "archived", "archivedAt": archived_at},
+        )
+        stats = {"agent_id": agent_id, "workspace_id": None, "runtime": {}}
 
     return {"ok": True, "stats": stats}
 
@@ -179,7 +233,7 @@ async def delete_agent(agent_id: str):
 async def _resolve_schedule(agent_id: str):
     """获取Agent和作息表，不存在则404。"""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
+    if not agent or getattr(agent, "status", "active") != "active":
         raise HTTPException(status_code=404, detail="Agent not found")
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
@@ -200,7 +254,7 @@ async def get_agent_schedule(agent_id: str):
 async def get_schedule_history(agent_id: str, days: int = 30):
     """获取Agent作息历史（含生活画像）。"""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
+    if not agent or getattr(agent, "status", "active") != "active":
         raise HTTPException(status_code=404, detail="Agent not found")
 
     since = datetime.now(UTC) - timedelta(days=days)

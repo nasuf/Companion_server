@@ -263,6 +263,8 @@ async def stream_chat_response(
         user_message_id = saved_msg.id
 
     agent_id = getattr(agent, "id", None)
+    conversation = await db.conversation.find_unique(where={"id": conversation_id})
+    workspace_id = getattr(conversation, "workspaceId", None)
 
     # --- LangSmith parent trace (groups all LLM calls for this request) ---
     _trace_ctx = _langsmith_trace_ctx(user_message, conversation_id)
@@ -360,7 +362,7 @@ async def stream_chat_response(
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
-        return await hybrid_retrieve(user_message, user_id)
+        return await hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
 
     async def _load_cached_emotion():
         """Load last known emotion from cache/DB — no LLM call."""
