@@ -237,11 +237,11 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
         )
         stats["changelogs"] = cnt
 
-        # 删除 workspaces
-        cnt = await db.chatworkspace.delete_many(
-            where={"id": {"in": workspace_ids}},
-        )
-        stats["workspaces"] = cnt
+    # 删除 workspaces (按 agentId 确保全部清除)
+    cnt = await db.chatworkspace.delete_many(
+        where={"agentId": agent_id, "userId": user_id},
+    )
+    stats["workspaces"] = cnt
 
     # 6. 删除 agent 级别数据
     try:
@@ -287,13 +287,23 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     except Exception:
         pass
 
-    # 7. 删除 Agent 本身
+    # 7. 清理可能遗漏的无 workspace 的 memories (workspaceId=null, userId匹配)
     try:
-        await db.aiagent.delete(where={"id": agent_id})
-        stats["agent"] = 1
-    except Exception as e:
-        logger.error(f"Agent delete failed: {e}")
-        stats["agent"] = 0
+        cnt = await db.execute_raw(
+            "DELETE FROM memories_user WHERE user_id = $1 AND workspace_id IS NULL "
+            "AND id IN (SELECT mu.id FROM memories_user mu "
+            "JOIN conversations c ON c.user_id = mu.user_id "
+            "WHERE c.agent_id = $2 AND mu.workspace_id IS NULL "
+            "GROUP BY mu.id)",
+            user_id, agent_id,
+        )
+        stats["orphan_user_memories"] = cnt or 0
+    except Exception:
+        pass
+
+    # 8. 删除 Agent 本身
+    await db.aiagent.delete(where={"id": agent_id})
+    stats["agent"] = 1
 
     # 8. 清理 Redis
     stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
