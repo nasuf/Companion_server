@@ -70,6 +70,8 @@ jobs:
             LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
             ADMIN_USERNAME=${{ vars.ADMIN_USERNAME }}
             ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
+            EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL }}
+            EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             EOF
 
