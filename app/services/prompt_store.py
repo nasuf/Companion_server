@@ -24,13 +24,18 @@ async def ensure_prompt_templates() -> None:
     for definition in PROMPT_DEFINITIONS:
         existing = await db.prompttemplate.find_unique(where={"key": definition.key})
         if existing:
-            content = existing.content or definition.default_text
+            # Logic: If current content matches the old default, update it to the new default.
+            # This ensures code-level prompt updates are applied unless the user has customized them in the DB.
+            is_unmodified = existing.content == existing.defaultContent
+            new_content = definition.default_text if is_unmodified else existing.content
+            
             needs_update = (
                 existing.stage != definition.stage
                 or existing.category != definition.category
                 or existing.title != definition.title
                 or (existing.description or "") != definition.description
                 or existing.defaultContent != definition.default_text
+                or (is_unmodified and existing.content != definition.default_text)
             )
             if needs_update:
                 await db.prompttemplate.update(
@@ -41,8 +46,10 @@ async def ensure_prompt_templates() -> None:
                         "title": definition.title,
                         "description": definition.description,
                         "defaultContent": definition.default_text,
+                        "content": new_content,
                     },
                 )
+                content = new_content
             version_count = await db.prompttemplateversion.count(
                 where={"promptId": existing.id}
             )

@@ -34,16 +34,9 @@ async def process_memory_pipeline(
             include={"agent": True, "user": True},
         )
 
-    # Step 0: Filter — skip extraction for low-value messages
-    # Extract last user message from conversation text for filtering
-    lines = conversation_text.strip().split("\n")
-    last_user_msg = ""
-    for line in reversed(lines):
-        if line.startswith("user:"):
-            last_user_msg = line[5:].strip()
-            break
-    if last_user_msg and not should_extract_memory(last_user_msg):
-        logger.debug("Message filtered out by memory filter, skipping extraction")
+    # Step 0: Filter — skip extraction if the entire segment is low-value
+    if not should_extract_memory(conversation_text):
+        logger.debug("Conversation segment filtered out by memory filter, skipping extraction")
         return []
 
     # Step 1: Extract structured memories
