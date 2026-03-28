@@ -29,6 +29,9 @@ async def ensure_prompt_templates() -> None:
             is_unmodified = existing.content == existing.defaultContent
             new_content = definition.default_text if is_unmodified else existing.content
             
+            # Content for Redis sync (will be updated below if needs_update is True)
+            content = new_content
+            
             needs_update = (
                 existing.stage != definition.stage
                 or existing.category != definition.category
@@ -50,6 +53,7 @@ async def ensure_prompt_templates() -> None:
                     },
                 )
                 content = new_content
+                
             version_count = await db.prompttemplateversion.count(
                 where={"promptId": existing.id}
             )

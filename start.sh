@@ -20,7 +20,13 @@ fi
 EXISTING=$(lsof -i :"$PORT" -t 2>/dev/null || true)
 if [ -n "$EXISTING" ]; then
     echo "Killing existing process on port $PORT (PID $EXISTING)..."
-    kill "$EXISTING" 2>/dev/null || true
+    kill $EXISTING 2>/dev/null || true
+    sleep 2
+    # Force kill if still alive
+    EXISTING_AGAIN=$(lsof -i :"$PORT" -t 2>/dev/null || true)
+    if [ -n "$EXISTING_AGAIN" ]; then
+        kill -9 $EXISTING_AGAIN 2>/dev/null || true
+    fi
     sleep 1
 fi
 
