@@ -103,6 +103,7 @@ async def process_memory_pipeline(
             sub_category=sub_category,
             occur_time=occur_time,
             workspace_id=workspace_id,
+            source=mem.get("owner", "user"),
         )
 
         if memory_id:

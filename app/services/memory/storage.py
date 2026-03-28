@@ -64,7 +64,7 @@ async def log_memory_changelog(
         workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
         await db.memorychangelog.create(
             data={
-                "user": {"connect": {"id": user_id}},
+                "userId": user_id,
                 "memoryId": memory_id,
                 "operation": operation,
                 "oldValue": old_value,

@@ -26,7 +26,10 @@ from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive import generate_proactive_message
 from app.services.aggregation import scan_expired
-from app.services.delayed_queue import enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads
+from app.services.delayed_queue import (
+    enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
+    try_lock_conversation, unlock_conversation
+)
 from app.services.trigger_engine import scan_triggers, create_holiday_triggers, scan_birthday_memories
 from app.services.time_service import is_holiday
 
@@ -424,36 +427,45 @@ async def _run_aggregation_scan():
 
         due_conversations = await scan_due_delayed_messages()
         for conv_id, payloads in due_conversations:
-            merged = merge_delayed_payloads(payloads)
-            if not merged:
+            # Prevent concurrent processing of the same conversation
+            if not await try_lock_conversation(conv_id, ttl=120):
+                logger.debug(f"Conversation {conv_id[:8]} is locked, skipping this scan")
                 continue
 
-            conv = await db.conversation.find_unique(
-                where={"id": conv_id},
-                include={"agent": True},
-            )
-            if not conv or not conv.agent:
-                continue
+            try:
+                merged = merge_delayed_payloads(payloads)
+                if not merged:
+                    continue
 
-            gen = stream_chat_response(
-                conversation_id=conv_id,
-                user_message=merged["user_message"],
-                agent=conv.agent,
-                user_id=merged["user_id"],
-                reply_context=merged.get("reply_context"),
-                save_user_message=False,
-                user_message_id=merged.get("user_message_id"),
-                delivered_from_queue=True,
-            )
+                conv = await db.conversation.find_unique(
+                    where={"id": conv_id},
+                    include={"agent": True},
+                )
+                if not conv or not conv.agent:
+                    continue
 
-            ws = manager.get(conv_id)
-            if ws:
-                await stream_to_ws(ws, gen)
-                logger.debug(f"Delayed reply pushed via WS for conv={conv_id[:8]}")
-            else:
-                async for _ in gen:
-                    pass
-                logger.debug(f"Delayed reply consumed silently for conv={conv_id[:8]}")
+                gen = stream_chat_response(
+                    conversation_id=conv_id,
+                    user_message=merged["user_message"],
+                    agent=conv.agent,
+                    user_id=merged["user_id"],
+                    reply_context=merged.get("reply_context"),
+                    save_user_message=False,
+                    user_message_id=merged.get("user_message_id"),
+                    delivered_from_queue=True,
+                )
+
+                ws = manager.get(conv_id)
+                if ws:
+                    await stream_to_ws(ws, gen)
+                    logger.debug(f"Delayed reply pushed via WS for conv={conv_id[:8]}")
+                else:
+                    # Consume the generator to trigger the AI response processing
+                    async for _ in gen:
+                        pass
+                    logger.debug(f"Delayed reply consumed silently for conv={conv_id[:8]}")
+            finally:
+                await unlock_conversation(conv_id)
     except Exception as e:
         logger.warning(f"Aggregation scan failed: {e}")
 

@@ -111,3 +111,25 @@ def merge_delayed_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any] | N
         "reply_context": reply_context,
         "queued_messages": texts,
     }
+
+# --- Concurrency Control ---
+
+_LOCK_KEY = "lock:chat:{cid}"
+
+async def try_lock_conversation(conversation_id: str, ttl: int = 60) -> bool:
+    """Try to acquire a distributed lock for a conversation.
+    
+    Returns True if lock acquired, False otherwise.
+    TTL prevents deadlocks if a process crashes.
+    """
+    redis = await get_redis()
+    lock_key = _LOCK_KEY.format(cid=conversation_id)
+    # nx=True: only set if key doesn't exist
+    return bool(await redis.set(lock_key, "locked", ex=ttl, nx=True))
+
+
+async def unlock_conversation(conversation_id: str) -> None:
+    """Release the lock for a conversation."""
+    redis = await get_redis()
+    lock_key = _LOCK_KEY.format(cid=conversation_id)
+    await redis.delete(lock_key)
