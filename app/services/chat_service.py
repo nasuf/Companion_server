@@ -28,6 +28,7 @@ from app.services.prompts.system_prompts import (
 )
 from app.services.memory.hybrid_retrieval import hybrid_retrieve
 from app.services.memory.pipeline import process_memory_pipeline
+from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.summarizer import summarize
 from app.services.emotion import (
     extract_emotion,
@@ -720,6 +721,10 @@ async def _background_post_process(
         # Positive recovery: messages reaching here passed boundary check (no banned words)
         if agent_id:
             tasks.append(_bg_positive_recovery(agent_id, user_id))
+        # AI self-memory: generate memories from AI's perspective about this conversation
+        if agent_id:
+            dialogue = f"用户: {user_message}\nAI: {full_response}"
+            tasks.append(_bg_self_memory(agent_id, user_id, dialogue))
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")
@@ -807,14 +812,38 @@ async def _save_replies(
 
 
 async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
-    """Run memory extraction pipeline."""
+    """Run memory extraction pipeline (user memories only).
+    
+    Only user messages are included to prevent AI statements from being
+    misclassified as user memories. AI self-memories are handled by
+    _bg_self_memory via the dedicated self_memory system.
+    """
     try:
+        # Only include user messages to avoid misattribution
+        user_msgs = [m for m in messages[-10:] if m.get("role") == "user"]
+        if not user_msgs:
+            return
         conv_text = "\n".join(
-            f"{m['role']}: {m['content']}" for m in messages[-10:]
+            f"user: {m['content']}" for m in user_msgs
         )
         await process_memory_pipeline(user_id, conv_text)
     except Exception as e:
         logger.error(f"Background memory pipeline failed: {e}")
+
+
+
+async def _bg_self_memory(agent_id: str, user_id: str, dialogue: str) -> None:
+    """Generate AI self-memories from the current conversation exchange."""
+    try:
+        stored = await generate_daily_self_memories(
+            agent_id=agent_id,
+            user_id=user_id,
+            dialogue_summary=dialogue,
+        )
+        if stored:
+            logger.info(f"Real-time self-memory: generated {len(stored)} AI memories")
+    except Exception as e:
+        logger.warning(f"Background self-memory generation failed: {e}")
 
 
 async def _bg_deletion_check(user_id: str, user_message: str) -> None:
