@@ -154,6 +154,8 @@ model UserMemory {
   workspaceId  String?  @map("workspace_id")
   workspace    ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
+  mainCategory String?  @map("main_category")
+  subCategory  String?  @map("sub_category")
   level        Int      @default(3)
   content      String
   summary      String?
@@ -173,6 +175,8 @@ model AiMemory {
   workspaceId  String?  @map("workspace_id")
   workspace    ChatWorkspace? @relation(fields: [workspaceId], references: [id])
   type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
+  mainCategory String?  @map("main_category")
+  subCategory  String?  @map("sub_category")
   level        Int      @default(3)
   content      String
   summary      String?

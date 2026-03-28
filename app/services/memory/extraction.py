@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.memory.taxonomy import resolve_taxonomy
 from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,20 @@ async def extract_memories(conversation: str) -> dict:
         result.setdefault("entities", [])
         result.setdefault("preferences", [])
         result.setdefault("topics", [])
+        sanitized_memories = []
+        for mem in result["memories"]:
+            if not isinstance(mem, dict):
+                continue
+            taxonomy = resolve_taxonomy(
+                main_category=mem.get("main_category"),
+                sub_category=mem.get("sub_category"),
+                legacy_type=mem.get("type"),
+            )
+            mem["main_category"] = taxonomy.main_category
+            mem["sub_category"] = taxonomy.sub_category
+            mem["type"] = taxonomy.legacy_type
+            sanitized_memories.append(mem)
+        result["memories"] = sanitized_memories
         return result
     except Exception as e:
         logger.error(f"Memory extraction failed: {e}")

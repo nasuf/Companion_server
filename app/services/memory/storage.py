@@ -10,6 +10,7 @@ from datetime import datetime
 from app.db import db
 from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
+from app.services.memory.taxonomy import resolve_taxonomy
 from app.services.memory.vector_search import search_by_embedding
 from app.services.workspaces import resolve_workspace_id
 
@@ -102,6 +103,8 @@ async def store_memory(
     level: int = 3,
     importance: float = 0.5,
     memory_type: str | None = None,
+    main_category: str | None = None,
+    sub_category: str | None = None,
     source: str = "user",
     occur_time: datetime | None = None,
     workspace_id: str | None = None,
@@ -112,8 +115,12 @@ async def store_memory(
     Args:
         source: "user" for memories about the user, "ai" for AI self-memories.
     """
-    # Normalize type to standard enum
-    memory_type = normalize_memory_type(memory_type)
+    taxonomy = resolve_taxonomy(
+        main_category=main_category,
+        sub_category=sub_category,
+        legacy_type=normalize_memory_type(memory_type),
+    )
+    memory_type = normalize_memory_type(taxonomy.legacy_type)
 
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
 
@@ -132,6 +139,8 @@ async def store_memory(
         level=level,
         importance=importance,
         type=memory_type,
+        mainCategory=taxonomy.main_category,
+        subCategory=taxonomy.sub_category,
         workspaceId=workspace_id,
     )
     if occur_time is not None:

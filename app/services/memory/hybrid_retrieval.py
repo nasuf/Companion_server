@@ -12,6 +12,7 @@ Includes Redis caching for retrieval results and graph context.
 import asyncio
 import logging
 
+from app.services.memory.query_analyzer import analyze_query
 from app.services.memory.vector_search import search_similar
 from app.services.memory.ranker import rank_memories
 from app.services.memory.context_selector import select_context
@@ -46,9 +47,36 @@ async def hybrid_retrieve(
         logger.debug("Hybrid retrieval cache hit")
         return cached
 
+    analysis = await analyze_query(message)
+    retrieve_memory = bool(analysis.get("retrieve_memory", True))
+    retrieve_graph = bool(analysis.get("retrieve_graph", False))
+    context_entities = analysis.get("entities", []) or []
+    context_categories = analysis.get("main_categories", []) or []
+    context_sub_categories = analysis.get("sub_categories", []) or []
+    levels = analysis.get("levels", [2, 3]) or [2, 3]
+
     # Parallel: vector search + graph context (no LLM needed)
-    vector_task = search_similar(message, user_id, top_k=50, workspace_id=workspace_id)
-    graph_task = get_relationship_context(user_id, workspace_id=workspace_id)
+    vector_task = (
+        search_similar(
+            message,
+            user_id,
+            top_k=50,
+            workspace_id=workspace_id,
+            main_categories=context_categories,
+            sub_categories=context_sub_categories,
+            levels=levels,
+        )
+        if retrieve_memory else asyncio.sleep(0, result=[])
+    )
+    graph_task = (
+        get_relationship_context(
+            user_id,
+            workspace_id=workspace_id,
+            main_categories=context_categories,
+            sub_categories=context_sub_categories,
+        )
+        if retrieve_graph else asyncio.sleep(0, result=None)
+    )
 
     vector_results, graph_result = await asyncio.gather(
         vector_task, graph_task, return_exceptions=True
@@ -63,7 +91,13 @@ async def hybrid_retrieve(
             all_candidates.append(mem)
 
     # Rank (no entity context needed without query analyzer)
-    ranked = rank_memories(all_candidates, context_entities=[], top_k=20)
+    ranked = rank_memories(
+        all_candidates,
+        context_entities=context_entities,
+        context_categories=context_categories,
+        context_sub_categories=context_sub_categories,
+        top_k=20,
+    )
 
     # Select within token budget
     memory_strings = select_context(ranked, token_budget)
@@ -84,6 +118,7 @@ async def hybrid_retrieve(
     result = {
         "memories": memory_strings if memory_strings else None,
         "graph_context": graph_context,
+        "analysis": analysis,
     }
 
     # Cache the result

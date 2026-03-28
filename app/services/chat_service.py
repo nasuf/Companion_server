@@ -383,14 +383,13 @@ async def stream_chat_response(
 
     async def _load_core_memories():
         """Load L1 core memories (user only) — always present in prompt."""
-        from app.services.memory import memory_repo
-        rows = await memory_repo.find_many(
+        from app.services.memory.core_memory import load_core_memory_strings
+        rows = await load_core_memory_strings(
+            user_id=user_id,
+            workspace_id=workspace_id,
             source="user",
-            where={"userId": user_id, "level": 1, "isArchived": False},
-            order={"importance": "desc"},
-            take=20,
         )
-        return [r.summary or r.content for r in rows] if rows else None
+        return rows if rows else None
 
     async def _load_portrait():
         """Load latest user portrait — no LLM call."""

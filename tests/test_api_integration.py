@@ -74,11 +74,25 @@ def test_create_agent(mock_deps):
         personality={"openness": 0.8},
         background=None,
         values=None,
+        gender=None,
+        lifeOverview=None,
         createdAt="2025-01-01T00:00:00",
     )
-    with patch("app.api.agents.db") as mock_db:
+    mock_workspace = SimpleNamespace(id="workspace-id")
+    with (
+        patch("app.api.agents.db") as mock_db,
+        patch("app.api.agents.create_provisioning_workspace", new_callable=AsyncMock, return_value=mock_workspace),
+        patch("app.api.agents.stage_active_workspaces_for_user", new_callable=AsyncMock, return_value=[]),
+        patch("app.api.agents.activate_workspace", new_callable=AsyncMock, return_value=mock_workspace),
+        patch("app.api.agents.finalize_archived_workspaces", new_callable=AsyncMock),
+        patch("app.api.agents.generate_initial_self_memories", new_callable=AsyncMock),
+        patch("app.api.agents.save_ai_emotion", new_callable=AsyncMock),
+        patch("app.api.agents.generate_and_save_life_overview", new_callable=AsyncMock, return_value={"description": "overview"}),
+        patch("app.api.agents.generate_daily_schedule", new_callable=AsyncMock),
+    ):
         mock_db.aiagent = MagicMock()
         mock_db.aiagent.create = AsyncMock(return_value=mock_agent)
+        mock_db.aiagent.update = AsyncMock(return_value=mock_agent)
         response = client.post("/agents", json={
             "name": "TestBot",
             "user_id": "user-id",
@@ -95,6 +109,88 @@ def test_list_memories(mock_deps):
         response = client.get("/memories", params={"user_id": "test-user"})
         assert response.status_code == 200
         assert response.json() == []
+
+
+def test_memory_stats(mock_deps):
+    """GET /memories/stats returns bucketed counts."""
+    client = mock_deps
+    memories = [
+        SimpleNamespace(level=1, mainCategory="身份", subCategory="姓名"),
+        SimpleNamespace(level=2, mainCategory="生活", subCategory="工作"),
+        SimpleNamespace(level=2, mainCategory="生活", subCategory="工作"),
+    ]
+    with patch("app.api.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=memories):
+        response = client.get("/memories/stats", params={"user_id": "test-user"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert data["by_level"][0]["key"] == "L2"
+        assert data["by_main_category"][0]["key"] == "生活"
+
+
+def test_search_memories_forwards_workspace_and_taxonomy_filters(mock_deps):
+    """POST /memories/search forwards workspace/category filters to retrieval."""
+    client = mock_deps
+    with patch("app.api.memories.retrieve_memories", new_callable=AsyncMock, return_value=[]) as mock_retrieve:
+        response = client.post(
+            "/memories/search?user_id=test-user",
+            json={
+                "query": "她最近工作怎么样",
+                "top_k": 8,
+                "workspace_id": "ws-1",
+                "main_category": "生活",
+                "sub_category": "工作",
+            },
+        )
+        assert response.status_code == 200
+        mock_retrieve.assert_awaited_once_with(
+            "她最近工作怎么样",
+            user_id="test-user",
+            semantic_k=8,
+            workspace_id="ws-1",
+            main_category="生活",
+            sub_category="工作",
+        )
+
+
+def test_admin_memory_overview(mock_deps):
+    """GET /admin-api/users/memory-overview returns overview payload."""
+    client = mock_deps
+    from app.main import app
+    from app.api.jwt_auth import require_admin_jwt
+
+    mock_workspace = SimpleNamespace(id="ws1", status="active")
+    mock_user_memory = SimpleNamespace(
+        level=1,
+        mainCategory="身份",
+        subCategory="姓名",
+        workspaceId="ws1",
+    )
+    mock_ai_memory = SimpleNamespace(
+        level=2,
+        mainCategory="生活",
+        subCategory="工作",
+        workspaceId="ws1",
+    )
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    try:
+        with patch("app.api.admin_users.db") as mock_db:
+            mock_db.chatworkspace.find_many = AsyncMock(return_value=[mock_workspace])
+            mock_db.usermemory.find_many = AsyncMock(
+                side_effect=[[mock_user_memory], [mock_user_memory]]
+            )
+            mock_db.aimemory.find_many = AsyncMock(
+                side_effect=[[mock_ai_memory], [mock_ai_memory]]
+            )
+            response = client.get("/admin-api/users/memory-overview")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["totals"]["workspaces"] == 1
+            assert data["totals"]["memories"] == 2
+            assert data["totals"]["recent_memories_7d"] == 2
+            assert data["by_workspace_status"][0]["key"] == "active"
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
 
 
 def test_get_emotion(mock_deps):

@@ -87,7 +87,8 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
         return None
 
     memories_text = "\n".join(
-        f"- [L{m.level}] {m.summary or m.content}" for m in memories
+        f"- [L{m.level}] [{m.mainCategory or '未分类'}/{m.subCategory or '其他'}] {m.summary or m.content}"
+        for m in memories
     )
 
     prompt = (await get_prompt_text("portrait.generation")).format(memories=memories_text)

@@ -25,6 +25,8 @@ def _memory_to_dict(m, similarity: float = 0.0) -> dict:
         "level": m.level,
         "importance": m.importance,
         "type": m.type,
+        "main_category": getattr(m, "mainCategory", None),
+        "sub_category": getattr(m, "subCategory", None),
         "created_at": str(m.createdAt),
         "similarity": similarity,
     }
@@ -36,6 +38,9 @@ async def retrieve_memories(
     semantic_k: int = 5,
     recent_k: int = 3,
     important_k: int = 2,
+    workspace_id: str | None = None,
+    main_category: str | None = None,
+    sub_category: str | None = None,
 ) -> list[dict]:
     """Retrieve relevant memories using combined strategy.
 
@@ -44,18 +49,37 @@ async def retrieve_memories(
     # Build tasks — skip semantic search if k=0 or empty query
     async def _semantic():
         if semantic_k > 0 and query:
-            return await search_similar(query, user_id, top_k=semantic_k * 2)
+            return await search_similar(
+                query,
+                user_id,
+                top_k=semantic_k * 2,
+                workspace_id=workspace_id,
+                main_categories=[main_category] if main_category else None,
+                sub_categories=[sub_category] if sub_category else None,
+            )
         return []
 
     semantic_results, recent, important = await asyncio.gather(
         _semantic(),
         memory_repo.find_many(
-            where={"userId": user_id, "isArchived": False},
+            where={
+                "userId": user_id,
+                "workspaceId": workspace_id,
+                "isArchived": False,
+                **({"mainCategory": main_category} if main_category else {}),
+                **({"subCategory": sub_category} if sub_category else {}),
+            },
             order={"createdAt": "desc"},
             take=recent_k * 2,
         ),
         memory_repo.find_many(
-            where={"userId": user_id, "isArchived": False},
+            where={
+                "userId": user_id,
+                "workspaceId": workspace_id,
+                "isArchived": False,
+                **({"mainCategory": main_category} if main_category else {}),
+                **({"subCategory": sub_category} if sub_category else {}),
+            },
             order={"importance": "desc"},
             take=important_k * 2,
         ),
@@ -84,7 +108,14 @@ async def retrieve_memories(
             results.append(_memory_to_dict(m))
 
     # 4. L3 awakening: find similar archived/L3 memories for fuzzy recall
-    awakened = await _find_awakening_candidates(query, user_id, seen_ids)
+    awakened = await _find_awakening_candidates(
+        query,
+        user_id,
+        seen_ids,
+        workspace_id=workspace_id,
+        main_category=main_category,
+        sub_category=sub_category,
+    )
     results.extend(awakened)
 
     # Increment mention counts for all retrieved memories (fire-and-forget)
@@ -100,7 +131,12 @@ async def retrieve_memories(
 
 
 async def _find_awakening_candidates(
-    query: str, user_id: str, exclude_ids: set[str],
+    query: str,
+    user_id: str,
+    exclude_ids: set[str],
+    workspace_id: str | None = None,
+    main_category: str | None = None,
+    sub_category: str | None = None,
 ) -> list[dict]:
     """L3记忆唤醒机制。
 
@@ -110,7 +146,15 @@ async def _find_awakening_candidates(
         return []
 
     try:
-        l3_results = await search_similar(query, user_id, top_k=3)
+        l3_results = await search_similar(
+            query,
+            user_id,
+            top_k=3,
+            workspace_id=workspace_id,
+            main_categories=[main_category] if main_category else None,
+            sub_categories=[sub_category] if sub_category else None,
+            levels=[3],
+        )
     except Exception:
         return []
 

@@ -62,6 +62,8 @@ async def process_memory_pipeline(
         level = mem.get("level", 3)
         importance = mem.get("importance", 0.5)
         memory_type = mem.get("type")
+        main_category = mem.get("main_category")
+        sub_category = mem.get("sub_category")
 
         # Parse occur_time from extraction result
         occur_time: datetime | None = None
@@ -81,7 +83,7 @@ async def process_memory_pipeline(
         # Step 2a: Conflict check for L1 memories
         if level == 1:
             try:
-                conflict = await detect_conflicts(user_id, mem)
+                conflict = await detect_conflicts(user_id, mem, workspace_id=workspace_id)
                 if conflict:
                     action = await resolve_conflict(user_id, conflict, mem)
                     if action in ("updated", "demoted"):
@@ -97,6 +99,8 @@ async def process_memory_pipeline(
             level=level,
             importance=importance,
             memory_type=memory_type,
+            main_category=main_category,
+            sub_category=sub_category,
             occur_time=occur_time,
             workspace_id=workspace_id,
         )

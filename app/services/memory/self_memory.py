@@ -31,6 +31,8 @@ AI性格：{personality}
     {{
       "content": "自我记忆内容（第一人称）",
       "type": "identity|emotion|preference|life|thought",
+      "main_category": "身份|偏好|生活|情绪|思维",
+      "sub_category": "严格使用正式分类中的一个子类",
       "importance": 50-100,
       "level": 1或2
     }}
@@ -43,11 +45,26 @@ AI性格：{personality}
 3. 至少1条要和用户讨论的话题相关
 4. importance：重要事件80-100，日常感受50-70
 5. level：核心身份信息=1，日常体验=2
-6. 内容简洁，每条20-50字"""
+6. `main_category` 和 `sub_category` 必须严格遵守正式分类，不允许自造名称
+7. 内容简洁，每条20-50字"""
 
 INITIAL_SELF_MEMORIES = [
-    {"content": "我叫{name}，这是我的名字，是属于我的身份。", "type": "identity", "level": 1, "importance": 1.0},
-    {"content": "我是一个{traits}的人，这些性格特质是我最核心的部分。", "type": "identity", "level": 1, "importance": 1.0},
+    {
+        "content": "我叫{name}，这是我的名字，是属于我的身份。",
+        "type": "identity",
+        "main_category": "身份",
+        "sub_category": "姓名",
+        "level": 1,
+        "importance": 1.0,
+    },
+    {
+        "content": "我是一个{traits}的人，这些性格特质是我最核心的部分。",
+        "type": "thought",
+        "main_category": "思维",
+        "sub_category": "自我认知",
+        "level": 1,
+        "importance": 1.0,
+    },
 ]
 
 
@@ -84,6 +101,8 @@ async def generate_initial_self_memories(
             level=template["level"],
             importance=template["importance"],
             memory_type=template["type"],
+            main_category=template["main_category"],
+            sub_category=template["sub_category"],
             source="ai",
         )
         if mid:
@@ -149,6 +168,8 @@ async def generate_daily_self_memories(
             level=mem.get("level", 2),
             importance=min(1.0, mem.get("importance", 50) / 100),
             memory_type=mem.get("type", "life"),
+            main_category=mem.get("main_category"),
+            sub_category=mem.get("sub_category"),
             source="ai",
         )
         if mid:

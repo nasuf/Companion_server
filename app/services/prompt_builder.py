@@ -287,6 +287,14 @@ def _build_graph_context_section(graph_context: dict | None) -> str | None:
         for e in entities:
             lines.append(f"  - {e}")
 
+    categories = graph_context.get("categories")
+    if categories:
+        if lines:
+            lines.append("")
+        lines.append("高频记忆分类：")
+        for category in categories:
+            lines.append(f"  - {category}")
+
     if not lines:
         return None
 

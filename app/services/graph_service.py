@@ -32,13 +32,28 @@ async def create_memory_node(
     summary: str,
     level: int,
     importance: float,
+    main_category: str | None = None,
+    sub_category: str | None = None,
 ) -> None:
     await run_write(
         """
         MERGE (m:Memory {id: $id, workspace_id: $workspace_id})
-        SET m.summary = $summary, m.level = $level, m.importance = $importance, m.status = 'active'
+        SET m.summary = $summary,
+            m.level = $level,
+            m.importance = $importance,
+            m.main_category = $main_category,
+            m.sub_category = $sub_category,
+            m.status = 'active'
         """,
-        {"id": memory_id, "workspace_id": workspace_id, "summary": summary, "level": level, "importance": importance},
+        {
+            "id": memory_id,
+            "workspace_id": workspace_id,
+            "summary": summary,
+            "level": level,
+            "importance": importance,
+            "main_category": main_category,
+            "sub_category": sub_category,
+        },
     )
 
 
@@ -60,6 +75,15 @@ async def merge_preference_node(category: str, value: str) -> None:
     await run_write(
         "MERGE (p:Preference {category: $category, value: $value})",
         {"category": category, "value": value},
+    )
+
+
+async def merge_taxonomy_node(main_category: str, sub_category: str) -> None:
+    await run_write(
+        """
+        MERGE (c:MemoryCategory {main_category: $main_category, sub_category: $sub_category})
+        """,
+        {"main_category": main_category, "sub_category": sub_category},
     )
 
 
@@ -108,6 +132,27 @@ async def link_user_preference(user_id: str, workspace_id: str, category: str, v
         ON MATCH SET r.strength = r.strength * 0.9 + 0.1
         """,
         {"user_id": user_id, "workspace_id": workspace_id, "category": category, "value": value},
+    )
+
+
+async def link_memory_taxonomy(
+    memory_id: str,
+    workspace_id: str,
+    main_category: str,
+    sub_category: str,
+) -> None:
+    await run_write(
+        """
+        MATCH (m:Memory {id: $memory_id, workspace_id: $workspace_id})
+        MERGE (c:MemoryCategory {main_category: $main_category, sub_category: $sub_category})
+        MERGE (m)-[:IN_CATEGORY]->(c)
+        """,
+        {
+            "memory_id": memory_id,
+            "workspace_id": workspace_id,
+            "main_category": main_category,
+            "sub_category": sub_category,
+        },
     )
 
 
@@ -167,8 +212,16 @@ async def update_graph_from_extraction(
         memory_data.get("summary", ""),
         memory_data.get("level", 3),
         memory_data.get("importance", 0.5),
+        main_category=memory_data.get("main_category"),
+        sub_category=memory_data.get("sub_category"),
     )
     await link_user_memory(user_id, workspace_id, memory_id)
+
+    main_category = memory_data.get("main_category")
+    sub_category = memory_data.get("sub_category")
+    if main_category and sub_category:
+        await merge_taxonomy_node(main_category, sub_category)
+        await link_memory_taxonomy(memory_id, workspace_id, main_category, sub_category)
 
     # Link entities
     for entity in extraction.get("entities", []):

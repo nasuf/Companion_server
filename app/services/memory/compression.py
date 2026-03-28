@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
+from app.services.memory.taxonomy import summarize_batch_taxonomy
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompt_store import get_prompt_text
 
@@ -42,6 +43,7 @@ async def _compress_batch(
     summary = summary.strip()
 
     max_importance = max(m.importance for m in batch)
+    main_category, sub_category = summarize_batch_taxonomy(batch)
     # Inherit source from batch
     batch_source = "ai" if any(m.source == "ai" for m in batch) else "user"
     compressed = await memory_repo.create(
@@ -52,6 +54,8 @@ async def _compress_batch(
         level=target_level,
         importance=min(1.0, max_importance + importance_bump),
         type="compressed",
+        mainCategory=main_category,
+        subCategory=sub_category,
     )
 
     embedding = await generate_embedding(summary)

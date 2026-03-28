@@ -9,6 +9,7 @@ import logging
 from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.storage import log_memory_changelog
+from app.services.memory.taxonomy import conflict_candidate_scope
 from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -46,14 +47,30 @@ CONFLICT_DETECTION_PROMPT = """你是一个记忆冲突检测系统。
 async def detect_conflicts(
     user_id: str,
     new_memory: dict,
+    workspace_id: str | None = None,
 ) -> dict | None:
     """Detect if a new memory conflicts with existing L1 memories.
 
     Returns conflict info dict or None if no conflict.
     """
+    scope = conflict_candidate_scope(
+        new_memory.get("main_category"),
+        new_memory.get("sub_category"),
+    )
+    if not scope.get("should_check", True):
+        return None
+
+    where: dict = {"userId": user_id, "level": 1, "isArchived": False}
+    if workspace_id:
+        where["workspaceId"] = workspace_id
+    if new_memory.get("main_category"):
+        where["mainCategory"] = new_memory.get("main_category")
+    if scope.get("prefer_same_sub_category") and new_memory.get("sub_category"):
+        where["subCategory"] = new_memory.get("sub_category")
+
     existing = await memory_repo.find_many(
         source="user",
-        where={"userId": user_id, "level": 1, "isArchived": False},
+        where=where,
         order={"importance": "desc"},
         take=20,
     )
@@ -83,6 +100,11 @@ async def detect_conflicts(
     if result.get("confidence", 0) < 0.8:
         logger.info(f"Conflict detected but low confidence ({result.get('confidence')}), ignoring")
         return None
+
+    if not result.get("resolution") or result.get("resolution") == "ignore":
+        default_resolution = scope.get("default_resolution")
+        if default_resolution:
+            result["resolution"] = default_resolution
 
     return result
 

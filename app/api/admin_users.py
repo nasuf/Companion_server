@@ -1,11 +1,75 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.db import db
 from app.api.jwt_auth import require_admin_jwt
 
 router = APIRouter(prefix="/admin-api/users", tags=["admin-users"])
+
+
+@router.get("/memory-overview")
+async def memory_overview(_: dict = Depends(require_admin_jwt)):
+    workspaces = await db.chatworkspace.find_many()
+    user_memories = await db.usermemory.find_many(where={"isArchived": False})
+    ai_memories = await db.aimemory.find_many(where={"isArchived": False})
+    since = datetime.now(UTC) - timedelta(days=7)
+    recent_user_memories = await db.usermemory.find_many(
+        where={"isArchived": False, "createdAt": {"gte": since}}
+    )
+    recent_ai_memories = await db.aimemory.find_many(
+        where={"isArchived": False, "createdAt": {"gte": since}}
+    )
+
+    all_memories = [*user_memories, *ai_memories]
+    recent_memories = [*recent_user_memories, *recent_ai_memories]
+    by_main_category: dict[str, int] = {}
+    by_sub_category: dict[str, int] = {}
+    by_level: dict[str, int] = {}
+    by_workspace_status: dict[str, int] = {}
+    recent_by_main_category: dict[str, int] = {}
+
+    workspace_status_map = {workspace.id: workspace.status for workspace in workspaces}
+    active_workspace_count = sum(1 for workspace in workspaces if workspace.status == "active")
+
+    for memory in all_memories:
+        main_category = getattr(memory, "mainCategory", None) or "未分类"
+        sub_category = getattr(memory, "subCategory", None) or "其他"
+        level = f"L{memory.level}"
+        workspace_status = workspace_status_map.get(getattr(memory, "workspaceId", None), "unknown")
+
+        by_main_category[main_category] = by_main_category.get(main_category, 0) + 1
+        by_sub_category[sub_category] = by_sub_category.get(sub_category, 0) + 1
+        by_level[level] = by_level.get(level, 0) + 1
+        by_workspace_status[workspace_status] = by_workspace_status.get(workspace_status, 0) + 1
+
+    for memory in recent_memories:
+        main_category = getattr(memory, "mainCategory", None) or "未分类"
+        recent_by_main_category[main_category] = recent_by_main_category.get(main_category, 0) + 1
+
+    def _serialize(data: dict[str, int], limit: int | None = None):
+        items = sorted(data.items(), key=lambda item: (-item[1], item[0]))
+        if limit is not None:
+            items = items[:limit]
+        return [{"key": key, "count": count} for key, count in items]
+
+    return {
+        "totals": {
+            "workspaces": len(workspaces),
+            "active_workspaces": active_workspace_count,
+            "memories": len(all_memories),
+            "user_memories": len(user_memories),
+            "ai_memories": len(ai_memories),
+            "recent_memories_7d": len(recent_memories),
+        },
+        "by_level": _serialize(by_level),
+        "by_main_category": _serialize(by_main_category),
+        "by_sub_category": _serialize(by_sub_category, limit=15),
+        "by_workspace_status": _serialize(by_workspace_status),
+        "recent_by_main_category": _serialize(recent_by_main_category),
+    }
 
 
 @router.get("")

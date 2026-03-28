@@ -35,6 +35,8 @@ class MemoryRecord:
     occurTime: datetime | None
     createdAt: datetime
     updatedAt: datetime
+    mainCategory: str | None = None
+    subCategory: str | None = None
 
 
 def _to_record(row, source: Source) -> MemoryRecord:
@@ -43,6 +45,8 @@ def _to_record(row, source: Source) -> MemoryRecord:
         id=row.id,
         userId=row.userId,
         type=row.type,
+        mainCategory=getattr(row, "mainCategory", None),
+        subCategory=getattr(row, "subCategory", None),
         source=source,
         level=row.level,
         content=row.content,

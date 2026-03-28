@@ -3,6 +3,7 @@
 import logging
 
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.memory.taxonomy import allowed_main_categories, allowed_sub_categories
 from app.services.prompt_store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,27 @@ async def analyze_query(message: str) -> dict:
         result.setdefault("retrieve_memory", True)
         result.setdefault("retrieve_graph", False)
         result.setdefault("retrieve_structured", False)
+        result.setdefault("main_categories", [])
+        result.setdefault("sub_categories", [])
+        result.setdefault("levels", [2, 3])
+        valid_main = set(allowed_main_categories())
+        result["main_categories"] = [
+            item for item in result["main_categories"]
+            if isinstance(item, str) and item in valid_main
+        ]
+        valid_sub = {
+            item
+            for main_category in valid_main
+            for item in allowed_sub_categories(main_category)
+        }
+        result["sub_categories"] = [
+            item for item in result["sub_categories"]
+            if isinstance(item, str) and item in valid_sub
+        ]
+        result["levels"] = [
+            int(item) for item in result["levels"]
+            if str(item).isdigit() and int(item) in (1, 2, 3)
+        ] or [2, 3]
         return result
     except Exception as e:
         logger.warning(f"Query analysis failed: {e}")
@@ -49,4 +71,7 @@ async def analyze_query(message: str) -> dict:
             "retrieve_memory": True,
             "retrieve_graph": False,
             "retrieve_structured": False,
+            "main_categories": [],
+            "sub_categories": [],
+            "levels": [2, 3],
         }

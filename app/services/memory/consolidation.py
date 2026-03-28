@@ -10,6 +10,11 @@ from datetime import datetime, timedelta, timezone
 
 from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
+from app.services.memory.taxonomy import (
+    get_compression_rule,
+    get_promotion_rule,
+    summarize_batch_taxonomy,
+)
 from app.services.memory.vector_search import search_by_embedding
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompt_store import get_prompt_text
@@ -95,6 +100,14 @@ async def check_l2_upgrade_candidates() -> None:
         return
 
     for mem in candidates:
+        rule = get_promotion_rule(mem.mainCategory, mem.subCategory)
+        if not bool(rule.get("allow_l1", False)):
+            continue
+        if float(mem.importance) < float(rule.get("min_importance", 1.0)):
+            continue
+        if int(mem.mentionCount) < int(rule.get("min_mentions", 999)):
+            continue
+
         # 检查是否有同主题L1冲突
         existing_l1 = await memory_repo.find_many(
             source=mem.source,
@@ -102,7 +115,8 @@ async def check_l2_upgrade_candidates() -> None:
                 "userId": mem.userId,
                 "level": 1,
                 "isArchived": False,
-                "type": mem.type,
+                "mainCategory": mem.mainCategory,
+                "subCategory": mem.subCategory,
             },
             take=5,
         )
@@ -161,6 +175,18 @@ async def _consolidate_user_memories(
     # Merge each cluster
     model = get_utility_model()
     for cluster in clusters:
+        main_category, sub_category = summarize_batch_taxonomy(cluster)
+        compression_rule = get_compression_rule(main_category)
+        if not bool(compression_rule.get("allow_cross_subcategory", True)):
+            unique_sub_categories = {
+                getattr(item, "subCategory", None) or "其他"
+                for item in cluster
+            }
+            if len(unique_sub_categories) > 1:
+                continue
+        if len(cluster) < int(compression_rule.get("batch_size", 2)):
+            continue
+
         mem_texts = "\n".join(f"- {m.content}" for m in cluster)
         prompt = (await get_prompt_text("memory.consolidation")).format(memories=mem_texts)
 
@@ -179,6 +205,8 @@ async def _consolidate_user_memories(
                 level=target_level,
                 importance=min(1.0, max_importance + 0.1),
                 type="consolidated",
+                mainCategory=main_category,
+                subCategory=sub_category,
             )
 
             embedding = await generate_embedding(summary)

@@ -50,7 +50,12 @@ async def get_entity_context(entity_name: str) -> list[dict]:
     )
 
 
-async def get_relationship_context(user_id: str, workspace_id: str | None = None) -> dict:
+async def get_relationship_context(
+    user_id: str,
+    workspace_id: str | None = None,
+    main_categories: list[str] | None = None,
+    sub_categories: list[str] | None = None,
+) -> dict:
     """Get full relationship context for prompt building.
 
     Returns dict with topics and entities.
@@ -77,7 +82,25 @@ async def get_relationship_context(user_id: str, workspace_id: str | None = None
         ),
     )
 
+    category_result = await run_query(
+        """
+        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})-[:HAS_MEMORY]->(m:Memory {workspace_id: $workspace_id})-[:IN_CATEGORY]->(c:MemoryCategory)
+        WHERE ($main_categories IS NULL OR c.main_category IN $main_categories)
+          AND ($sub_categories IS NULL OR c.sub_category IN $sub_categories)
+        RETURN c.main_category AS main_category, c.sub_category AS sub_category, count(m) AS count
+        ORDER BY count DESC
+        LIMIT 12
+        """,
+        {
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "main_categories": main_categories or None,
+            "sub_categories": sub_categories or None,
+        },
+    )
+
     return {
         "topics": [r["name"] for r in topics_result],
         "entities": [f"{r['name']} ({r.get('type', '')})" for r in entities_result],
+        "categories": [f"{r['main_category']} / {r['sub_category']}" for r in category_result],
     }
