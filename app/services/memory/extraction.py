@@ -39,7 +39,8 @@ async def extract_memories(conversation: str) -> dict:
         for mem in result["memories"]:
             if not isinstance(mem, dict):
                 continue
-            taxonomy = resolve_taxonomy(
+            from app.services.memory.normalization import normalize_memory_category
+            taxonomy = await normalize_memory_category(
                 main_category=mem.get("main_category"),
                 sub_category=mem.get("sub_category"),
                 legacy_type=mem.get("type"),

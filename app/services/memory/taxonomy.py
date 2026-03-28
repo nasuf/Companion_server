@@ -220,6 +220,39 @@ def get_compression_rule(main_category: str | None) -> dict[str, int | bool]:
     )
 
 
+SUBCATEGORY_ALIASES: dict[str, str] = {
+    # 身份
+    "猫": "宠物",
+    "狗": "宠物",
+    "宠物信息": "宠物",
+    "毛孩子": "宠物",
+    "铲屎官": "宠物",
+    "工作": "职业/与经济",
+    "职业": "职业/与经济",
+    "赚钱": "职业/与经济",
+    "薪水": "职业/与经济",
+    "财务": "职业/与经济",
+    "亲人": "亲属关系",
+    "家人": "亲属关系",
+    "朋友": "社会关系",
+    "同学": "社会关系",
+    "同事": "社会关系",
+    # 偏好
+    "喜欢吃": "饮食喜好",
+    "爱喝": "饮食喜好",
+    "讨厌吃": "饮食厌恶",
+    "忌口": "饮食厌恶",
+    "雷区": "禁忌/雷区",
+    # 生活
+    "出差": "旅行",
+    "度假": "旅行",
+    "生病": "健康",
+    "吃药": "健康",
+    "医院": "健康",
+    "搬家": "居住",
+}
+
+
 def resolve_taxonomy(
     *,
     main_category: str | None = None,
@@ -236,8 +269,26 @@ def resolve_taxonomy(
     if normalized_main not in TAXONOMY:
         normalized_main = "生活"
 
-    if normalized_sub not in TAXONOMY[normalized_main]:
-        normalized_sub = "其他"
+    # Step 1: Direct Match
+    if normalized_sub in TAXONOMY[normalized_main]:
+        return TaxonomyResult(
+            main_category=normalized_main,
+            sub_category=normalized_sub,
+            legacy_type=MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy),
+        )
+
+    # Step 2: Alias Mapping
+    mapped_sub = SUBCATEGORY_ALIASES.get(normalized_sub)
+    if mapped_sub and mapped_sub in TAXONOMY[normalized_main]:
+        normalized_sub = mapped_sub
+    # Step 3: Fuzzy Prefix Match (e.g. "宠物类" -> "宠物")
+    else:
+        for allowed in TAXONOMY[normalized_main]:
+            if normalized_sub and allowed != "其他" and (normalized_sub.startswith(allowed) or allowed.startswith(normalized_sub)):
+                normalized_sub = allowed
+                break
+        else:
+            normalized_sub = "其他"
 
     return TaxonomyResult(
         main_category=normalized_main,
