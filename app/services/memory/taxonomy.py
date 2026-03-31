@@ -221,36 +221,165 @@ def get_compression_rule(main_category: str | None) -> dict[str, int | bool]:
 
 
 SUBCATEGORY_ALIASES: dict[str, str] = {
-    # 身份
+    # ── 身份 ──
+    # 宠物
     "猫": "宠物",
     "狗": "宠物",
+    "猫咪": "宠物",
+    "小猫": "宠物",
+    "猫猫": "宠物",
+    "猫的名字": "宠物",
+    "养猫": "宠物",
+    "养狗": "宠物",
+    "养宠物": "宠物",
+    "养宠": "宠物",
+    "狗狗": "宠物",
+    "狗子": "宠物",
+    "小狗": "宠物",
+    "喵星人": "宠物",
+    "汪星人": "宠物",
     "宠物信息": "宠物",
+    "宠物名": "宠物",
+    "宠物名字": "宠物",
     "毛孩子": "宠物",
     "铲屎官": "宠物",
+    "仓鼠": "宠物",
+    "兔子": "宠物",
+    "金鱼": "宠物",
+    "鹦鹉": "宠物",
+    "乌龟": "宠物",
+    "遛狗": "宠物",
+    "喂猫": "宠物",
+    "喂鱼": "宠物",
+    # 职业/与经济
     "工作": "职业/与经济",
     "职业": "职业/与经济",
     "赚钱": "职业/与经济",
     "薪水": "职业/与经济",
     "财务": "职业/与经济",
+    "上班": "职业/与经济",
+    "打工": "职业/与经济",
+    "收入": "职业/与经济",
+    "工资": "职业/与经济",
+    "程序员": "职业/与经济",
+    "老师": "职业/与经济",
+    "医生": "职业/与经济",
+    "创业": "职业/与经济",
+    "副业": "职业/与经济",
+    "失业": "职业/与经济",
+    "离职": "职业/与经济",
+    "跳槽": "职业/与经济",
+    "求职": "职业/与经济",
+    "面试": "职业/与经济",
+    # 亲属关系
     "亲人": "亲属关系",
     "家人": "亲属关系",
+    "爸爸": "亲属关系",
+    "妈妈": "亲属关系",
+    "父亲": "亲属关系",
+    "母亲": "亲属关系",
+    "哥哥": "亲属关系",
+    "姐姐": "亲属关系",
+    "弟弟": "亲属关系",
+    "妹妹": "亲属关系",
+    "爷爷": "亲属关系",
+    "奶奶": "亲属关系",
+    "外公": "亲属关系",
+    "外婆": "亲属关系",
+    "老公": "亲属关系",
+    "老婆": "亲属关系",
+    "丈夫": "亲属关系",
+    "妻子": "亲属关系",
+    "儿子": "亲属关系",
+    "女儿": "亲属关系",
+    "孩子": "亲属关系",
+    # 社会关系
     "朋友": "社会关系",
     "同学": "社会关系",
     "同事": "社会关系",
-    # 偏好
+    "闺蜜": "社会关系",
+    "室友": "社会关系",
+    "男朋友": "社会关系",
+    "女朋友": "社会关系",
+    "对象": "社会关系",
+    "前任": "社会关系",
+    "恋人": "社会关系",
+    # 教育背景
+    "学校": "教育背景",
+    "大学": "教育背景",
+    "专业": "教育背景",
+    "学历": "教育背景",
+    "研究生": "教育背景",
+    "本科": "教育背景",
+    "高中": "教育背景",
+    # ── 偏好 ──
     "喜欢吃": "饮食喜好",
     "爱喝": "饮食喜好",
+    "爱吃": "饮食喜好",
+    "口味": "饮食喜好",
     "讨厌吃": "饮食厌恶",
     "忌口": "饮食厌恶",
+    "不能吃": "饮食厌恶",
+    "过敏": "饮食厌恶",
     "雷区": "禁忌/雷区",
-    # 生活
+    "早睡": "生活习惯",
+    "熬夜": "生活习惯",
+    "作息": "生活习惯",
+    # ── 生活 ──
     "出差": "旅行",
     "度假": "旅行",
+    "旅游": "旅行",
+    "出国": "旅行",
     "生病": "健康",
     "吃药": "健康",
     "医院": "健康",
+    "体检": "健康",
+    "感冒": "健康",
+    "发烧": "健康",
+    "住院": "健康",
     "搬家": "居住",
+    "租房": "居住",
+    "买房": "居住",
+    "装修": "居住",
+    "考试": "教育",
+    "上课": "教育",
+    "学习": "教育",
+    "加班": "工作",
+    "开会": "工作",
 }
+
+
+# Pre-sorted alias keys by length descending for contains matching.
+# Longer keys first so "铲屎官" is checked before "猫".
+_ALIAS_KEYS_BY_LENGTH: list[str] = sorted(
+    SUBCATEGORY_ALIASES.keys(), key=len, reverse=True
+)
+
+
+def _resolve_by_contains(
+    text: str, main_category: str
+) -> str | None:
+    """Check if *text* contains any known alias key or canonical sub_category name.
+
+    Returns the resolved sub_category if found within *main_category*'s taxonomy,
+    or ``None`` if nothing matches.
+    """
+    if not text:
+        return None
+
+    # Check canonical sub_category names first (e.g. text="关于宠物" contains "宠物")
+    for allowed in TAXONOMY.get(main_category, ()):
+        if allowed != "其他" and allowed in text:
+            return allowed
+
+    # Check alias keys (longer keys first)
+    for key in _ALIAS_KEYS_BY_LENGTH:
+        if key in text:
+            mapped = SUBCATEGORY_ALIASES[key]
+            if mapped in TAXONOMY.get(main_category, ()):
+                return mapped
+
+    return None
 
 
 def resolve_taxonomy(
@@ -277,18 +406,23 @@ def resolve_taxonomy(
             legacy_type=MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy),
         )
 
-    # Step 2: Alias Mapping
+    # Step 2: Alias Mapping (exact)
     mapped_sub = SUBCATEGORY_ALIASES.get(normalized_sub)
     if mapped_sub and mapped_sub in TAXONOMY[normalized_main]:
         normalized_sub = mapped_sub
-    # Step 3: Fuzzy Prefix Match (e.g. "宠物类" -> "宠物")
     else:
-        for allowed in TAXONOMY[normalized_main]:
-            if normalized_sub and allowed != "其他" and (normalized_sub.startswith(allowed) or allowed.startswith(normalized_sub)):
-                normalized_sub = allowed
-                break
+        # Step 2.5: Contains Matching
+        contains_hit = _resolve_by_contains(normalized_sub, normalized_main)
+        if contains_hit:
+            normalized_sub = contains_hit
+        # Step 3: Fuzzy Prefix Match (e.g. "宠物类" -> "宠物")
         else:
-            normalized_sub = "其他"
+            for allowed in TAXONOMY[normalized_main]:
+                if normalized_sub and allowed != "其他" and (normalized_sub.startswith(allowed) or allowed.startswith(normalized_sub)):
+                    normalized_sub = allowed
+                    break
+            else:
+                normalized_sub = "其他"
 
     return TaxonomyResult(
         main_category=normalized_main,

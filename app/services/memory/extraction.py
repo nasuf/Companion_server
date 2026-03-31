@@ -44,6 +44,7 @@ async def extract_memories(conversation: str) -> dict:
                 main_category=mem.get("main_category"),
                 sub_category=mem.get("sub_category"),
                 legacy_type=mem.get("type"),
+                summary=mem.get("summary", ""),
             )
             mem["main_category"] = taxonomy.main_category
             mem["sub_category"] = taxonomy.sub_category
