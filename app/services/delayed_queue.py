@@ -17,6 +17,31 @@ _DELAYED_LIST_KEY = "delayed:msgs:{cid}"
 _DELAYED_ZSET_KEY = "delayed:due"
 _DELAYED_TTL = 86400
 
+# Lua script: atomically read + remove due items from per-conversation ZSET,
+# then update or clean the global index ZSET.  Prevents race conditions when
+# multiple scheduler scans overlap.
+_FLUSH_LUA = """
+local list_key = KEYS[1]
+local index_key = KEYS[2]
+local conv_id = ARGV[1]
+local due_before = tonumber(ARGV[2])
+
+local rows = redis.call('ZRANGEBYSCORE', list_key, 0, due_before)
+if #rows == 0 then
+    return nil
+end
+redis.call('ZREM', list_key, unpack(rows))
+
+local next_due = redis.call('ZRANGE', list_key, 0, 0, 'WITHSCORES')
+if #next_due >= 2 then
+    redis.call('ZADD', index_key, tonumber(next_due[2]), conv_id)
+else
+    redis.call('DEL', list_key)
+    redis.call('ZREM', index_key, conv_id)
+end
+return rows
+"""
+
 async def enqueue_delayed_message(
     conversation_id: str,
     payload: dict[str, Any],
@@ -39,16 +64,23 @@ async def enqueue_delayed_message(
 
 
 async def flush_due_delayed_messages(conversation_id: str, now: float | None = None) -> list[dict[str, Any]]:
-    """Return and clear only the due delayed payloads for a conversation."""
+    """Atomically return and clear due delayed payloads for a conversation.
+
+    Uses a Lua script to guarantee that read + remove is a single atomic
+    Redis operation, preventing duplicate processing when scheduler scans
+    overlap.
+    """
     redis = await get_redis()
     list_key = _DELAYED_LIST_KEY.format(cid=conversation_id)
     due_before = now if now is not None else time.time()
-    rows = await redis.zrangebyscore(list_key, 0, due_before)
+
+    rows = await redis.eval(
+        _FLUSH_LUA, 2,
+        list_key, _DELAYED_ZSET_KEY,
+        conversation_id, str(due_before),
+    )
     if not rows:
         return []
-
-    if rows:
-        await redis.zrem(list_key, *rows)
 
     payloads: list[dict[str, Any]] = []
     for row in rows:
@@ -59,13 +91,6 @@ async def flush_due_delayed_messages(conversation_id: str, now: float | None = N
             continue
         if isinstance(item, dict):
             payloads.append(item)
-
-    next_due = await redis.zrange(list_key, 0, 0, withscores=True)
-    if next_due:
-        await redis.zadd(_DELAYED_ZSET_KEY, {conversation_id: float(next_due[0][1])})
-    else:
-        await redis.delete(list_key)
-        await redis.zrem(_DELAYED_ZSET_KEY, conversation_id)
     return payloads
 
 

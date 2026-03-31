@@ -69,33 +69,31 @@ def test_merge_delayed_payloads_falls_back_to_last_non_empty_text():
 
 
 @pytest.mark.asyncio
-async def test_flush_due_delayed_messages_keeps_future_payloads(monkeypatch):
+async def test_flush_due_delayed_messages_returns_due_payloads(monkeypatch):
+    """Lua-based flush returns due payloads atomically."""
     redis = AsyncMock()
-    redis.zrangebyscore.return_value = [
+    redis.eval.return_value = [
         '{"message":"先发","message_id":"msg-1","due_at":10}',
     ]
-    redis.zrange.return_value = [("future-payload", 20.0)]
     monkeypatch.setattr(delayed_queue, "get_redis", AsyncMock(return_value=redis))
 
     payloads = await delayed_queue.flush_due_delayed_messages("conv-1", now=15.0)
 
     assert payloads == [{"message": "先发", "message_id": "msg-1", "due_at": 10}]
-    redis.zrem.assert_awaited_once_with("delayed:msgs:conv-1", '{"message":"先发","message_id":"msg-1","due_at":10}')
-    redis.zadd.assert_awaited_once_with("delayed:due", {"conv-1": 20.0})
-    redis.delete.assert_not_called()
+    redis.eval.assert_awaited_once()
+    # Verify Lua script receives correct keys and args
+    call_args = redis.eval.call_args
+    assert call_args[0][1] == 2  # 2 keys
+    assert call_args[0][4] == "conv-1"  # ARGV[1] = conversation_id
 
 
 @pytest.mark.asyncio
-async def test_flush_due_delayed_messages_clears_conversation_when_empty(monkeypatch):
+async def test_flush_due_delayed_messages_returns_empty_when_nothing_due(monkeypatch):
+    """Lua returns nil when no items are due."""
     redis = AsyncMock()
-    redis.zrangebyscore.return_value = [
-        '{"message":"先发","message_id":"msg-1","due_at":10}',
-    ]
-    redis.zrange.return_value = []
+    redis.eval.return_value = None
     monkeypatch.setattr(delayed_queue, "get_redis", AsyncMock(return_value=redis))
 
     payloads = await delayed_queue.flush_due_delayed_messages("conv-1", now=15.0)
 
-    assert payloads == [{"message": "先发", "message_id": "msg-1", "due_at": 10}]
-    redis.delete.assert_awaited_once_with("delayed:msgs:conv-1")
-    redis.zrem.assert_any_await("delayed:due", "conv-1")
+    assert payloads == []
