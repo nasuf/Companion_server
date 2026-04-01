@@ -15,94 +15,57 @@ from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
-SELF_MEMORY_PROMPT = """你是AI记忆系统。请以AI的第一人称视角，根据以下对话生成3-5条AI自我记忆。
-
-AI名字：{ai_name}
-AI性格：{personality}
-
-今日对话摘要：
-{dialogue_summary}
-
-今日已生成自我记忆数：{count_today}
-
-返回JSON：
-{{
-  "memories": [
-    {{
-      "content": "自我记忆内容（第一人称）",
-      "type": "identity|emotion|preference|life|thought",
-      "main_category": "身份|偏好|生活|情绪|思维",
-      "sub_category": "严格使用正式分类中的一个子类",
-      "importance": 50-100,
-      "level": 1或2
-    }}
-  ]
-}}
-
-规则：
-1. 用AI的第一人称视角（"我觉得…"、"今天和用户聊了…"）
-2. 类型分布：emotion（对话中的情绪体验）、life（发生了什么）、thought（对话引发的思考）
-3. 至少1条要和用户讨论的话题相关
-4. importance：重要事件80-100，日常感受50-70
-5. level：核心身份信息=1，日常体验=2
-6. `main_category` 和 `sub_category` 必须严格遵守正式分类，不允许自造名称
-7. 内容简洁，每条20-50字"""
-
-INITIAL_SELF_MEMORIES = [
-    {
-        "content": "我叫{name}，这是我的名字，是属于我的身份。",
-        "type": "identity",
-        "main_category": "身份",
-        "sub_category": "姓名",
-        "level": 1,
-        "importance": 1.0,
-    },
-    {
-        "content": "我是一个{traits}的人，这些性格特质是我最核心的部分。",
-        "type": "thought",
-        "main_category": "思维",
-        "sub_category": "自我认知",
-        "level": 1,
-        "importance": 1.0,
-    },
-]
-
 
 async def generate_initial_self_memories(
     agent_id: str,
     agent_name: str,
     personality: dict,
     user_id: str,
+    *,
+    background: str = "",
+    values: dict | None = None,
+    gender: str = "",
+    age: int = 22,
+    occupation: str = "",
+    city: str = "",
 ) -> list[str]:
-    """Generate initial L1 self-memories when an agent is created.
+    """Generate initial L1 self-memories via LLM when an agent is created.
 
     Returns list of stored memory IDs.
     """
-    traits = []
-    trait_map = {
-        "openness": "开放", "conscientiousness": "认真",
-        "extraversion": "外向", "agreeableness": "友善",
-        "neuroticism": "敏感",
-    }
-    for key, label in trait_map.items():
-        val = personality.get(key, 0.5)
-        if val > 0.6:
-            traits.append(label)
+    prompt = (await get_prompt_text("self_memory.initial")).format(
+        name=agent_name,
+        gender=gender or "未设定",
+        age=age,
+        occupation=occupation or "未设定",
+        city=city or "未设定",
+        personality=str(personality),
+        background=background or "暂无",
+        values=str(values) if values else "暂无",
+    )
 
-    traits_str = "、".join(traits) if traits else "独特"
+    try:
+        result = await invoke_json(get_utility_model(), prompt)
+    except Exception as e:
+        logger.error(f"Initial self-memory LLM generation failed: {e}")
+        return []
+
+    memories = result.get("memories", [])
     stored_ids = []
 
-    for template in INITIAL_SELF_MEMORIES:
-        content = template["content"].format(name=agent_name, traits=traits_str)
+    for mem in memories[:5]:
+        content = mem.get("content", "")
+        if not content or not mem.get("type") or not mem.get("main_category"):
+            continue
         mid = await store_memory(
             user_id=user_id,
             content=content,
             summary=content,
-            level=template["level"],
-            importance=template["importance"],
-            memory_type=template["type"],
-            main_category=template["main_category"],
-            sub_category=template["sub_category"],
+            level=1,
+            importance=min(1.0, mem.get("importance", 90) / 100),
+            memory_type=mem["type"],
+            main_category=mem["main_category"],
+            sub_category=mem.get("sub_category", "自我认知"),
             source="ai",
         )
         if mid:

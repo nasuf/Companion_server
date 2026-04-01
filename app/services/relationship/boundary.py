@@ -7,7 +7,7 @@
 - ≤0: 拉黑（固定模板回复）
 
 5B增强：500+违禁词库、拼音变体检测、正面互动恢复、24h自动解除拉黑。
-纯计算 + Redis，热路径无LLM调用。
+Redis缓存 + DB持久化，热路径无LLM调用。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import logging
 import random
 from pathlib import Path
 
+from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
@@ -50,20 +51,55 @@ def _patience_key(agent_id: str, user_id: str) -> str:
 
 
 async def get_patience(agent_id: str, user_id: str) -> int:
-    """获取当前耐心值，默认100。"""
+    """获取当前耐心值。Redis → DB → 默认100。"""
     redis = await get_redis()
     val = await redis.get(_patience_key(agent_id, user_id))
-    if val is None:
-        return PATIENCE_MAX
-    return int(val)
+    if val is not None:
+        return int(val)
+
+    # Redis miss → 查 DB
+    try:
+        record = await db.patiencestate.find_unique(
+            where={"agentId_userId": {"agentId": agent_id, "userId": user_id}},
+        )
+        if record:
+            # 回填 Redis 缓存
+            await redis.set(_patience_key(agent_id, user_id), str(record.value))
+            return record.value
+    except Exception as e:
+        logger.warning(f"DB patience lookup failed: {e}")
+
+    return PATIENCE_MAX
 
 
 async def set_patience(agent_id: str, user_id: str, value: int) -> int:
-    """设置耐心值（clamp到0-100）。"""
+    """设置耐心值（clamp到0-100），同步写 Redis + DB。"""
     value = max(0, min(PATIENCE_MAX, value))
     redis = await get_redis()
     await redis.set(_patience_key(agent_id, user_id), str(value))
+
+    # 同步持久化到 DB
+    try:
+        await db.patiencestate.upsert(
+            where={"agentId_userId": {"agentId": agent_id, "userId": user_id}},
+            data={
+                "create": {
+                    "agent": {"connect": {"id": agent_id}},
+                    "user": {"connect": {"id": user_id}},
+                    "value": value,
+                },
+                "update": {"value": value},
+            },
+        )
+    except Exception as e:
+        logger.warning(f"DB patience persist failed: {e}")
+
     return value
+
+
+async def init_patience(agent_id: str, user_id: str) -> int:
+    """创建时显式初始化耐心值为100（Redis + DB）。"""
+    return await set_patience(agent_id, user_id, PATIENCE_MAX)
 
 
 async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:

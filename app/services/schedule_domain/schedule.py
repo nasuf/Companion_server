@@ -19,12 +19,8 @@ from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.prompting.defaults import (
-    DAILY_SCHEDULE_PROMPT as _DAILY_SCHEDULE_PROMPT,
-    LIFE_OVERVIEW_PROMPT as _LIFE_OVERVIEW_PROMPT,
-    SCHEDULE_REVIEW_PROMPT as _SCHEDULE_REVIEW_PROMPT,
-)
 from app.services.prompting.store import get_prompt_text
+from app.services.schedule_domain.time_service import is_holiday
 from app.services.trait_model import get_dim, get_seven_dim
 
 logger = logging.getLogger(__name__)
@@ -113,15 +109,19 @@ async def generate_daily_schedule(
     date: datetime | None = None,
     user_id: str | None = None,
 ) -> list[dict]:
-    """生成每日作息表。基于生活画像+模板+个性化。"""
+    """生成每日作息表。基于生活画像+模板+个性化。节日强制LLM路径。"""
     date = date or _local_now()
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday = weekdays[date.weekday()]
 
+    # 检测节日
+    holiday = is_holiday(date.date())
+
     if life_overview:
-        # LLM生成个性化作息（40%概率或周末）
         is_weekend = date.weekday() >= 5
-        if is_weekend or random.random() < 0.4:
+        # 节日强制走LLM路径
+        use_llm = is_weekend or holiday is not None or random.random() < 0.4
+        if use_llm:
             try:
                 prompt = (await get_prompt_text("schedule.daily_schedule")).format(
                     name=name,
@@ -129,6 +129,9 @@ async def generate_daily_schedule(
                     date=date.strftime("%Y-%m-%d"),
                     weekday=weekday,
                 )
+                # 注入节日信息
+                if holiday:
+                    prompt += f"\n今天是{holiday.name}（{holiday.type}类节日）。请根据节日特点调整作息，安排节日相关活动。"
                 # 10D.5: 融入用户记忆
                 memory_summary = await _get_user_memory_summary(user_id) if user_id else ""
                 if memory_summary:
@@ -143,18 +146,19 @@ async def generate_daily_schedule(
                 logger.warning(f"Custom schedule generation failed: {e}")
 
     # 默认用模板（根据人格微调）
-    schedule = _personalize_template(seven_dim, date)
+    schedule = _personalize_template(seven_dim, date, holiday=holiday)
     await _cache_schedule(agent_id, date, schedule)
     return schedule
 
 
-def _personalize_template(seven_dim: dict, date: datetime) -> list[dict]:
-    """根据七维人格微调基准模板。"""
+def _personalize_template(seven_dim: dict, date: datetime, *, holiday=None) -> list[dict]:
+    """根据七维人格微调基准模板。法定节日将work替换为leisure/rest。"""
     schedule = [slot.copy() for slot in _BASE_SCHEDULE_TEMPLATE]
     lively = get_dim(seven_dim, "活泼度")
     planned = get_dim(seven_dim, "计划度")
 
     is_weekend = date.weekday() >= 5
+    is_legal_holiday = holiday is not None and holiday.type == "legal"
 
     for slot in schedule:
         # 活泼度高：更多社交活动
@@ -172,6 +176,11 @@ def _personalize_template(seven_dim: dict, date: datetime) -> list[dict]:
             slot["start"] = "09:00"
         if is_weekend and slot["type"] == "work":
             slot["activity"] = random.choice(["看书", "追剧", "逛街", "玩游戏", "画画"])
+            slot["type"] = "leisure"
+
+        # 法定节日：work → leisure/rest
+        if is_legal_holiday and slot["type"] == "work":
+            slot["activity"] = random.choice(["休息放松", "出去玩", "看书", "和朋友聚餐", "追剧"])
             slot["type"] = "leisure"
 
     return schedule
@@ -526,8 +535,9 @@ async def handle_schedule_adjustment(
 # --- 每日作息回顾 ---
 
 async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "伙伴") -> list[str]:
-    """回顾当日作息，合并调整记录，生成AI自我记忆。"""
+    """回顾当日作息，合并调整记录+主动日志+聊天摘要，生成AI自我记忆。"""
     from app.services.memory.storage import store_memory
+    from app.services.proactive.history import get_proactive_history
 
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
@@ -553,16 +563,26 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     except Exception as e:
         logger.warning(f"Failed to load adjustments for review: {e}")
 
-    # PRD §9.7: 合并当日聊天摘要
+    # 查询当日主动消息日志
+    proactive_text = ""
+    try:
+        logs = await get_proactive_history(agent_id, user_id, limit=5)
+        if logs:
+            lines = [f"- {p['content']}" for p in logs if p.get("content")]
+            if lines:
+                proactive_text = "\n今日主动消息：\n" + "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Failed to load proactive history for review: {e}")
+
+    # 合并当日聊天摘要（key格式：cache:sum:{hash}）
     chat_summary_text = ""
     try:
         redis = await get_redis()
-        # 尝试获取最近的summarizer缓存
-        keys = await redis.keys(f"summarizer:*")
+        cursor, keys = await redis.scan(0, match="cache:sum:*", count=100)
         for key in keys[:3]:
             data = await redis.get(key)
             if data:
-                cached = json.loads(data) if isinstance(data, str) else json.loads(data.decode())
+                cached = json.loads(data if isinstance(data, str) else data.decode())
                 review = cached.get("review", "")
                 if review:
                     chat_summary_text = f"\n今日聊天回顾：\n{review[:200]}"
@@ -574,6 +594,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         name=agent_name,
         schedule_text=schedule_text,
         adjustments_text=adjustments_text,
+        proactive_text=proactive_text,
         chat_summary_text=chat_summary_text,
     )
 
@@ -583,17 +604,36 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         logger.warning(f"Schedule review failed for agent {agent_id}: {e}")
         return []
 
+    if not isinstance(result, dict):
+        logger.warning(f"Schedule review returned non-dict: {type(result)}")
+        return []
     memories = result.get("memories", [])
+    if not isinstance(memories, list):
+        logger.warning(f"Schedule review 'memories' is not a list: {type(memories)}")
+        return []
     stored = []
-    for content in memories[:3]:
-        if not content or not isinstance(content, str):
+    for mem in memories[:3]:
+        # 支持新格式（dict）和旧格式（str）
+        if isinstance(mem, str):
+            content = mem
+            level = 3
+            importance = 0.8
+        elif isinstance(mem, dict):
+            content = mem.get("content", "")
+            level = mem.get("level", 3)
+            importance = min(1.0, mem.get("importance", 0.8))
+        else:
             continue
+
+        if not content:
+            continue
+
         mem_id = await store_memory(
             user_id=user_id,
             content=content,
             memory_type="life",
-            level=3,
-            importance=0.8,
+            level=level,
+            importance=importance,
             source="ai",
         )
         if mem_id:

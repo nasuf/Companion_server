@@ -13,9 +13,12 @@ from app.services.prompting.defaults import (
     CONSOLIDATE_SUMMARIZE_PROMPT,
     DAILY_SCHEDULE_PROMPT,
     DELETION_INTENT_PROMPT,
+    EMOTION_BASELINE_PROMPT,
     EMOTION_EXTRACTION_PROMPT,
     EMOTION_INSTRUCTION_PROMPT,
     FAST_FACT_PROMPT,
+    IDENTITY_GENERATION_PROMPT,
+    INITIAL_SELF_MEMORY_PROMPT,
     LAYER1_REVIEW_PROMPT,
     LAYER2_DISTILLATION_PROMPT,
     LAYER3_STATE_PROMPT,
@@ -61,6 +64,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("memory.query_analyzer", "检索意图分析", "检索前置", "记忆", "判断检索类型与实体。", QUERY_ANALYZER_PROMPT),
     PromptDefinition("memory.compression", "记忆压缩总结", "定时压缩", "记忆", "多条记忆压缩为总结。", COMPRESS_PROMPT),
     PromptDefinition("memory.consolidation", "记忆整合总结", "定时整合", "记忆", "相似记忆整合为长期记忆。", CONSOLIDATE_SUMMARIZE_PROMPT),
+    PromptDefinition("emotion.baseline", "情感基线计算", "初始化", "情绪", "小模型推导 PAD 情感基线。", EMOTION_BASELINE_PROMPT),
     PromptDefinition("emotion.extraction", "情绪提取", "异步情绪", "情绪", "用户消息 PAD 提取。", EMOTION_EXTRACTION_PROMPT),
     PromptDefinition("summarizer.layer1_review", "摘要层1-对话回顾", "异步摘要", "摘要", "30 条消息回顾总结。", LAYER1_REVIEW_PROMPT),
     PromptDefinition("summarizer.layer2_distillation", "摘要层2-记忆提炼", "异步摘要", "摘要", "记忆与当前消息提炼。", LAYER2_DISTILLATION_PROMPT),
@@ -75,6 +79,8 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("boundary.severity", "攻击严重度评估", "边界系统", "边界", "评估攻击消息严重度。", SEVERITY_PROMPT),
     PromptDefinition("boundary.apology", "道歉识别", "边界系统", "边界", "识别是否为有效道歉。", APOLOGY_PROMPT),
     PromptDefinition("self_memory.daily", "AI 自我记忆生成", "AI 自我记忆", "自我记忆", "从每日对话生成 AI 视角记忆。", SELF_MEMORY_PROMPT),
+    PromptDefinition("self_memory.initial", "AI 初始自我记忆", "AI 自我记忆", "自我记忆", "创建时生成 3-5 条核心自我认知。", INITIAL_SELF_MEMORY_PROMPT),
+    PromptDefinition("agent.identity_generation", "AI 身份信息生成", "初始化", "初始化", "根据人格推导 age/occupation/city。", IDENTITY_GENERATION_PROMPT),
 ]
 
 PROMPT_DEFINITION_MAP = {definition.key: definition for definition in PROMPT_DEFINITIONS}

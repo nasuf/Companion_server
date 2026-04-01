@@ -133,16 +133,13 @@ def _lerp_pad(current: dict, target: dict, rate: float) -> dict:
     return result
 
 
-# --- 3B.1 基线改用七维公式 ---
+# --- 3B.1 基线计算 ---
 
 def compute_baseline_emotion(personality: dict, seven_dim: dict | None = None) -> dict:
-    """Compute baseline PAD from seven-dim personality traits.
+    """Compute baseline PAD from personality traits using formula.
 
-    公式:
-    p = 0.2 + (活泼度-0.5)*0.4 + (幽默度-0.5)*0.4 + (随性度-0.5)*0.2
-    a = 0.5 + (活泼度-0.5)*0.3 + (脑洞度-0.5)*0.3 + (幽默度-0.5)*0.2 + (感性度-0.5)*0.2
-    d = 0.5 + (计划度-0.5)*0.3 + (理性度-0.5)*0.3 + (活泼度-0.5)*0.2 + (幽默度-0.5)*0.2
-        - (随性度-0.5)*0.2 - (感性度-0.5)*0.2
+    Used by emotion decay (every 5 min) — must be fast and deterministic.
+    For initial creation, use compute_baseline_emotion_llm() instead.
     """
     if seven_dim:
         lively = get_dim(seven_dim, "活泼度")
@@ -176,6 +173,38 @@ def compute_baseline_emotion(personality: dict, seven_dim: dict | None = None) -
         "arousal": _clamp_pad("arousal", 0.5 + (e - 0.5) * 0.3 + (n - 0.5) * 0.4),
         "dominance": _clamp_pad("dominance", 0.5 + (e - 0.5) * 0.2 + (c - 0.5) * 0.3 - (n - 0.5) * 0.2),
     }
+
+
+async def compute_baseline_emotion_llm(
+    personality: dict,
+    seven_dim: dict | None = None,
+    *,
+    name: str = "",
+    background: str = "",
+    gender: str = "",
+) -> dict:
+    """Compute initial baseline PAD via small model (LLM).
+
+    Used only during agent creation. Falls back to formula on LLM failure.
+    """
+    prompt = (await get_prompt_text("emotion.baseline")).format(
+        name=name or "AI",
+        gender=gender or "未设定",
+        personality=str(personality),
+        seven_dim=str(seven_dim) if seven_dim else "无",
+        background=background or "暂无",
+    )
+
+    try:
+        result = await invoke_json(get_utility_model(), prompt)
+        return {
+            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", 0.0))),
+            "arousal": _clamp_pad("arousal", float(result.get("arousal", 0.5))),
+            "dominance": _clamp_pad("dominance", float(result.get("dominance", 0.5))),
+        }
+    except Exception as e:
+        logger.warning(f"LLM baseline emotion failed, falling back to formula: {e}")
+        return compute_baseline_emotion(personality, seven_dim)
 
 
 def compute_emotional_stability(seven_dim: dict) -> float:

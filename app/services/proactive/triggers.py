@@ -222,7 +222,7 @@ async def scan_birthday_memories() -> None:
                 try:
                     birthday = date(year, month, day)
                     if birthday < now.date():
-                        birthday = date_type(year + 1, month, day)
+                        birthday = date(year + 1, month, day)
                     trigger_time = datetime(birthday.year, birthday.month, birthday.day, 8, 0, tzinfo=_TZ)
                     await db.timetrigger.create(data={
                         "agent": {"connect": {"id": agent.id}},

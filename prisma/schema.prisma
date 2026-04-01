@@ -32,6 +32,7 @@ model User {
   timeTriggers     TimeTrigger[]
   proactiveStates  ProactiveState[]
   proactiveEvents  ProactiveEventLog[]
+  patienceStates   PatienceState[]
 
   @@map("users")
 }
@@ -67,6 +68,7 @@ model AiAgent {
   timeTriggers      TimeTrigger[]
   proactiveStates    ProactiveState[]
   proactiveEvents    ProactiveEventLog[]
+  patienceStates     PatienceState[]
 
   @@map("ai_agents")
 }
@@ -225,6 +227,20 @@ model AiEmotionState {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("ai_emotion_states")
+}
+
+model PatienceState {
+  id        String   @id @default(uuid())
+  agentId   String   @map("agent_id")
+  agent     AiAgent  @relation(fields: [agentId], references: [id])
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  value     Int      @default(100)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([agentId, userId])
+  @@map("patience_states")
 }
 
 model UserPortrait {

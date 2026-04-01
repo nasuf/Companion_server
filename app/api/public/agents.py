@@ -7,8 +7,11 @@ from prisma import Json
 
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
+from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.self_memory import generate_initial_self_memories
-from app.services.relationship.emotion import compute_baseline_emotion, save_ai_emotion
+from app.services.prompting.store import get_prompt_text
+from app.services.relationship.boundary import init_patience
+from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.trait_model import get_seven_dim
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview,
@@ -82,44 +85,88 @@ async def create_agent(data: AgentCreate):
             await restore_staged_workspaces(staged_workspaces)
         raise
 
-    # Initialize baseline emotion from personality
-    baseline = compute_baseline_emotion(agent.personality or {})
-    emo_task = asyncio.create_task(save_ai_emotion(agent.id, baseline))
-    emo_task.add_done_callback(
-        lambda t: logger.error(f"Baseline emotion init failed: {t.exception()}")
-        if not t.cancelled() and t.exception() else None
-    )
-
-    # Generate life overview and initial schedule in background
-    async def _init_schedule():
+    # Initialize baseline emotion from personality (small model)
+    async def _init_emotion():
         try:
-            overview_data = await generate_and_save_life_overview(agent)
+            baseline = await compute_baseline_emotion_llm(
+                agent.personality or {},
+                seven_dim=get_seven_dim(agent),
+                name=agent.name,
+                background=agent.background or "",
+                gender=agent.gender or "",
+            )
+            await save_ai_emotion(agent.id, baseline)
+        except Exception as e:
+            logger.error(f"Baseline emotion init failed for agent {agent.id}: {e}")
+
+    asyncio.create_task(_init_emotion())
+
+    # Initialize patience value (Redis + DB)
+    asyncio.create_task(init_patience(agent.id, data.user_id))
+
+    # Background: identity generation → schedule → self-memories (serial chain)
+    async def _init_agent_background():
+        personality = agent.personality or {}
+        background = agent.background or ""
+        values = agent.values
+        gender = agent.gender or ""
+        age = agent.age
+        occupation = agent.occupation
+        city = agent.city
+
+        # Step 1: LLM identity generation (if missing)
+        if age is None and occupation is None and city is None:
+            try:
+                prompt = (await get_prompt_text("agent.identity_generation")).format(
+                    name=agent.name,
+                    gender=gender or "未设定",
+                    personality=str(personality),
+                    background=background or "暂无",
+                    values=str(values) if values else "暂无",
+                )
+                result = await invoke_json(get_utility_model(), prompt)
+                age = int(result.get("age", 22))
+                occupation = result.get("occupation", "")
+                city = result.get("city", "")
+                await db.aiagent.update(
+                    where={"id": agent.id},
+                    data={"age": age, "occupation": occupation, "city": city},
+                )
+                logger.info(f"Identity generated for agent {agent.id}: age={age}, occupation={occupation}, city={city}")
+            except Exception as e:
+                logger.warning(f"Identity generation failed for agent {agent.id}: {e}")
+                age = age or 22
+
+        # Step 2: Life overview + schedule (depends on identity)
+        try:
+            updated_agent = await db.aiagent.find_unique(where={"id": agent.id})
+            target = updated_agent or agent
+            overview_data = await generate_and_save_life_overview(target)
             await generate_daily_schedule(
-                agent.id, agent.name, get_seven_dim(agent),
+                agent.id, agent.name, get_seven_dim(target),
                 life_overview=overview_data.get("description"),
             )
         except Exception as e:
             logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
 
-    sched_task = asyncio.create_task(_init_schedule())
-    sched_task.add_done_callback(
-        lambda t: logger.error(f"Schedule init failed: {t.exception()}")
-        if not t.cancelled() and t.exception() else None
-    )
+        # Step 3: Self-memories (depends on identity)
+        try:
+            await generate_initial_self_memories(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                personality=personality,
+                user_id=data.user_id,
+                background=background,
+                values=values,
+                gender=gender,
+                age=age or 22,
+                occupation=occupation or "",
+                city=city or "",
+            )
+        except Exception as e:
+            logger.warning(f"Initial self-memory generation failed for agent {agent.id}: {e}")
 
-    # Generate initial self-memories in background
-    task = asyncio.create_task(
-        generate_initial_self_memories(
-            agent_id=agent.id,
-            agent_name=agent.name,
-            personality=agent.personality or {},
-            user_id=data.user_id,
-        )
-    )
-    task.add_done_callback(
-        lambda t: logger.error(f"Initial self-memory generation failed: {t.exception()}")
-        if not t.cancelled() and t.exception() else None
-    )
+    asyncio.create_task(_init_agent_background())
 
     return AgentResponse(
         id=agent.id,
