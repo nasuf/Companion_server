@@ -1,6 +1,6 @@
 """Tests for the cache service."""
 
-from app.services.cache import _make_key
+from app.services.runtime.cache import _make_key
 
 
 def test_make_key_deterministic():

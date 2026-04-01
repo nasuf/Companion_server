@@ -8,7 +8,7 @@ from datetime import datetime
 
 from app.db import db
 from app.services.memory.embedding import generate_embedding
-from app.services.workspaces import resolve_workspace_id
+from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 

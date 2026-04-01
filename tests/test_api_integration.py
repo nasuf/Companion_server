@@ -35,9 +35,9 @@ def test_health_endpoint(mock_deps):
     """Health endpoint returns 200."""
     client = mock_deps
     with (
-        patch("app.api.health.db") as mock_db,
-        patch("app.api.health.redis_health", new_callable=AsyncMock, return_value=True),
-        patch("app.api.health.neo4j_health", new_callable=AsyncMock, return_value=True),
+        patch("app.api.public.health.db") as mock_db,
+        patch("app.api.public.health.redis_health", new_callable=AsyncMock, return_value=True),
+        patch("app.api.public.health.neo4j_health", new_callable=AsyncMock, return_value=True),
     ):
         mock_db.execute_raw = AsyncMock(return_value=None)
         response = client.get("/health")
@@ -56,7 +56,7 @@ def test_create_user(mock_deps):
         createdAt="2025-01-01T00:00:00",
         updatedAt="2025-01-01T00:00:00",
     )
-    with patch("app.api.users.db") as mock_db:
+    with patch("app.api.public.users.db") as mock_db:
         mock_db.user = MagicMock()
         mock_db.user.create = AsyncMock(return_value=mock_user)
         response = client.post("/users", json={"name": "Test User"})
@@ -80,15 +80,15 @@ def test_create_agent(mock_deps):
     )
     mock_workspace = SimpleNamespace(id="workspace-id")
     with (
-        patch("app.api.agents.db") as mock_db,
-        patch("app.api.agents.create_provisioning_workspace", new_callable=AsyncMock, return_value=mock_workspace),
-        patch("app.api.agents.stage_active_workspaces_for_user", new_callable=AsyncMock, return_value=[]),
-        patch("app.api.agents.activate_workspace", new_callable=AsyncMock, return_value=mock_workspace),
-        patch("app.api.agents.finalize_archived_workspaces", new_callable=AsyncMock),
-        patch("app.api.agents.generate_initial_self_memories", new_callable=AsyncMock),
-        patch("app.api.agents.save_ai_emotion", new_callable=AsyncMock),
-        patch("app.api.agents.generate_and_save_life_overview", new_callable=AsyncMock, return_value={"description": "overview"}),
-        patch("app.api.agents.generate_daily_schedule", new_callable=AsyncMock),
+        patch("app.api.public.agents.db") as mock_db,
+        patch("app.api.public.agents.create_provisioning_workspace", new_callable=AsyncMock, return_value=mock_workspace),
+        patch("app.api.public.agents.stage_active_workspaces_for_user", new_callable=AsyncMock, return_value=[]),
+        patch("app.api.public.agents.activate_workspace", new_callable=AsyncMock, return_value=mock_workspace),
+        patch("app.api.public.agents.finalize_archived_workspaces", new_callable=AsyncMock),
+        patch("app.api.public.agents.generate_initial_self_memories", new_callable=AsyncMock),
+        patch("app.api.public.agents.save_ai_emotion", new_callable=AsyncMock),
+        patch("app.api.public.agents.generate_and_save_life_overview", new_callable=AsyncMock, return_value={"description": "overview"}),
+        patch("app.api.public.agents.generate_daily_schedule", new_callable=AsyncMock),
     ):
         mock_db.aiagent = MagicMock()
         mock_db.aiagent.create = AsyncMock(return_value=mock_agent)
@@ -105,7 +105,7 @@ def test_create_agent(mock_deps):
 def test_list_memories(mock_deps):
     """GET /memories returns memory list."""
     client = mock_deps
-    with patch("app.api.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=[]):
+    with patch("app.api.public.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=[]):
         response = client.get("/memories", params={"user_id": "test-user"})
         assert response.status_code == 200
         assert response.json() == []
@@ -119,7 +119,7 @@ def test_memory_stats(mock_deps):
         SimpleNamespace(level=2, mainCategory="生活", subCategory="工作"),
         SimpleNamespace(level=2, mainCategory="生活", subCategory="工作"),
     ]
-    with patch("app.api.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=memories):
+    with patch("app.api.public.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=memories):
         response = client.get("/memories/stats", params={"user_id": "test-user"})
         assert response.status_code == 200
         data = response.json()
@@ -131,7 +131,7 @@ def test_memory_stats(mock_deps):
 def test_search_memories_forwards_workspace_and_taxonomy_filters(mock_deps):
     """POST /memories/search forwards workspace/category filters to retrieval."""
     client = mock_deps
-    with patch("app.api.memories.retrieve_memories", new_callable=AsyncMock, return_value=[]) as mock_retrieve:
+    with patch("app.api.public.memories.retrieve_memories", new_callable=AsyncMock, return_value=[]) as mock_retrieve:
         response = client.post(
             "/memories/search?user_id=test-user",
             json={
@@ -174,7 +174,7 @@ def test_admin_memory_overview(mock_deps):
     )
     app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
     try:
-        with patch("app.api.admin_users.db") as mock_db:
+        with patch("app.api.admin.users.db") as mock_db:
             mock_db.chatworkspace.find_many = AsyncMock(return_value=[mock_workspace])
             mock_db.usermemory.find_many = AsyncMock(
                 side_effect=[[mock_user_memory], [mock_user_memory]]
@@ -208,7 +208,7 @@ def test_admin_agent_proactive_detail(mock_deps):
     )
     app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
     try:
-        with patch("app.api.admin_users.db") as mock_db:
+        with patch("app.api.admin.users.db") as mock_db:
             mock_db.aiagent.find_unique = AsyncMock(return_value=mock_agent)
             mock_db.chatworkspace.find_first = AsyncMock(return_value=mock_workspace)
             mock_db.query_raw = AsyncMock(
@@ -260,8 +260,8 @@ def test_get_emotion(mock_deps):
     client = mock_deps
     mock_agent = SimpleNamespace(id="agent-id")
     with (
-        patch("app.api.emotions.db") as mock_db,
-        patch("app.api.emotions.get_ai_emotion", new_callable=AsyncMock,
+        patch("app.api.public.emotions.db") as mock_db,
+        patch("app.api.public.emotions.get_ai_emotion", new_callable=AsyncMock,
               return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4}),
     ):
         mock_db.aiagent = MagicMock()

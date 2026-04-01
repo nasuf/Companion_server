@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.taxonomy import resolve_taxonomy
-from app.services.prompt_store import get_prompt_text
+from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 

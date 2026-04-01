@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.fast_fact import (
+from app.services.chat.fast_fact import (
     extract_fast_facts,
     facts_for_prompt,
     merge_working_facts,
@@ -57,7 +57,10 @@ async def test_extract_fast_facts_uses_model_output():
             }
         ]
     }
-    with patch("app.services.fast_fact.invoke_json", AsyncMock(return_value=payload)):
+    with (
+        patch("app.services.chat.fast_fact.get_prompt_text", AsyncMock(return_value="{message}")),
+        patch("app.services.chat.fast_fact.invoke_json", AsyncMock(return_value=payload)),
+    ):
         facts = await extract_fast_facts("我住在上海")
 
     assert len(facts) == 1
@@ -67,10 +70,10 @@ async def test_extract_fast_facts_uses_model_output():
 
 @pytest.mark.asyncio
 async def test_update_working_facts_merges_and_saves(mock_redis):
-    mock_redis.get = AsyncMock(return_value='{"facts":[{"category":"name","key":"name","value":"小明","confidence":0.9,"updated_at":"2026-03-18T10:00:00+00:00","expires_at":"2026-03-28T10:00:00+00:00"}]}')
-    with patch("app.services.fast_fact.get_redis", AsyncMock(return_value=mock_redis)):
+    mock_redis.get = AsyncMock(return_value='{"facts":[{"category":"name","key":"name","value":"小明","confidence":0.9,"updated_at":"2026-03-18T10:00:00+00:00","expires_at":"2026-04-28T10:00:00+00:00"}]}')
+    with patch("app.services.chat.fast_fact.get_redis", AsyncMock(return_value=mock_redis)):
         with patch(
-            "app.services.fast_fact.extract_fast_facts",
+            "app.services.chat.fast_fact.extract_fast_facts",
             AsyncMock(
                 return_value=[
                     {
@@ -79,7 +82,7 @@ async def test_update_working_facts_merges_and_saves(mock_redis):
                         "value": "28岁",
                         "confidence": 0.95,
                         "updated_at": "2026-03-18T11:00:00+00:00",
-                        "expires_at": "2026-03-28T11:00:00+00:00",
+                        "expires_at": "2026-04-28T11:00:00+00:00",
                     }
                 ]
             ),

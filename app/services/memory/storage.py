@@ -12,7 +12,7 @@ from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import resolve_taxonomy
 from app.services.memory.vector_search import search_by_embedding
-from app.services.workspaces import resolve_workspace_id
+from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 

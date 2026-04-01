@@ -17,7 +17,7 @@ from app.services.memory.taxonomy import (
 )
 from app.services.memory.vector_search import search_by_embedding
 from app.services.llm.models import get_utility_model, invoke_text
-from app.services.prompt_store import get_prompt_text
+from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 

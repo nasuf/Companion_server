@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from app.services.reply_context import (
+from app.services.chat.reply_context import (
     actual_delay_seconds,
     compute_delay_profile,
     merge_reply_contexts,

@@ -13,9 +13,9 @@ import asyncio
 import hashlib
 import logging
 
-from app.services.cache import cache_summarizer, cache_set_summarizer
+from app.services.runtime.cache import cache_summarizer, cache_set_summarizer
 from app.services.llm.models import get_summarizer_model, invoke_text
-from app.services.prompt_store import get_prompt_text
+from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 

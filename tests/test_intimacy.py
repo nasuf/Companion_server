@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.intimacy import (
+from app.services.relationship.intimacy import (
     _compute_relationship_duration,
     compute_growth_intimacy,
     get_cached_intimacy,
@@ -168,7 +168,7 @@ class TestComputeGrowthIntimacy:
 
         created_at = datetime.now(UTC) - timedelta(days=30)
 
-        with patch("app.services.intimacy.db", mock_db):
+        with patch("app.services.relationship.intimacy.db", mock_db):
             score = await compute_growth_intimacy("agent1", "user1", created_at)
             # Only duration contributes (0.4 weight)
             assert 0 < score < 400

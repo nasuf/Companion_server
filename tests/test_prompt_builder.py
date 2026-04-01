@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from app.services.prompt_builder import build_system_prompt, build_chat_messages
+from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
 
 
 def _make_agent(**kwargs):

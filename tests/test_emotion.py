@@ -12,7 +12,7 @@
 
 import pytest
 
-from app.services.emotion import (
+from app.services.relationship.emotion import (
     PAD_LABEL_TABLE,
     _PAD_DEFAULTS,
     _clamp,

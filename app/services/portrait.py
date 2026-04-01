@@ -10,12 +10,12 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_text
-from app.services.prompt_defaults import (
+from app.services.prompting.defaults import (
     PORTRAIT_GENERATION_PROMPT,
     PORTRAIT_UPDATE_PROMPT,
 )
-from app.services.prompt_store import get_prompt_text
-from app.services.workspaces import resolve_workspace_id
+from app.services.prompting.store import get_prompt_text
+from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 

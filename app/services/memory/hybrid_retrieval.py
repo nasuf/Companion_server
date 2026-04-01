@@ -17,7 +17,7 @@ from app.services.memory.vector_search import search_similar
 from app.services.memory.ranker import rank_memories
 from app.services.memory.context_selector import select_context
 from app.services.graph.queries import get_relationship_context
-from app.services.cache import (
+from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
     cache_graph_context,

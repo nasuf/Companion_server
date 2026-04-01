@@ -1,6 +1,6 @@
 """系统提示词模板。"""
 
-from app.services.prompt_defaults import (
+from app.services.prompting.defaults import (
     CONSISTENCY_RULES_PROMPT as CONSISTENCY_RULES,
     EMOTION_INSTRUCTION_PROMPT as EMOTION_INSTRUCTION,
     MEMORY_INSTRUCTION_PROMPT as MEMORY_INSTRUCTION,

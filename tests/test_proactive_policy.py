@@ -4,12 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.proactive_policy import (
+from app.services.proactive.policy import (
     scene_candidate_available,
     select_trigger_type,
     should_hit_window,
 )
-from app.services.proactive_state import ProactiveStateRecord, escalate_waiting_state
+from app.services.proactive.state import ProactiveStateRecord, escalate_waiting_state
 
 
 UTC = timezone.utc
@@ -86,9 +86,9 @@ async def test_escalate_waiting_state_resumes_normal_plan_for_n_le_4():
     due_at = now + timedelta(minutes=45)
     mock_db = SimpleNamespace(execute_raw=AsyncMock())
     with (
-        patch("app.services.proactive_state.db", new=mock_db),
-        patch("app.services.proactive_state.log_proactive_event", new_callable=AsyncMock) as mock_log,
-        patch("app.services.proactive_state._pick_random_due_at", return_value=due_at),
+        patch("app.services.proactive.state.db", new=mock_db),
+        patch("app.services.proactive.state.log_proactive_event", new_callable=AsyncMock) as mock_log,
+        patch("app.services.proactive.state._pick_random_due_at", return_value=due_at),
     ):
         await escalate_waiting_state(_state(silence_level_n=3), now=now)
 
@@ -108,8 +108,8 @@ async def test_escalate_waiting_state_enters_seven_day_sparse_plan_at_n_5():
     now = datetime(2026, 4, 1, 10, 0, tzinfo=UTC)
     due_at = now + timedelta(days=2)
     with (
-        patch("app.services.proactive_state._resume_forced_plan", new_callable=AsyncMock) as mock_resume,
-        patch("app.services.proactive_state._pick_random_future_due_at", return_value=due_at),
+        patch("app.services.proactive.state._resume_forced_plan", new_callable=AsyncMock) as mock_resume,
+        patch("app.services.proactive.state._pick_random_future_due_at", return_value=due_at),
     ):
         await escalate_waiting_state(_state(silence_level_n=4), now=now)
 
@@ -127,8 +127,8 @@ async def test_escalate_waiting_state_resumes_existing_forced_plan_when_remainin
     due_at = now + timedelta(days=1)
     window_end = (now + timedelta(days=7)).isoformat()
     with (
-        patch("app.services.proactive_state._resume_forced_plan", new_callable=AsyncMock) as mock_resume,
-        patch("app.services.proactive_state._pick_random_future_due_at", return_value=due_at),
+        patch("app.services.proactive.state._resume_forced_plan", new_callable=AsyncMock) as mock_resume,
+        patch("app.services.proactive.state._pick_random_future_due_at", return_value=due_at),
     ):
         await escalate_waiting_state(
             _state(
@@ -151,8 +151,8 @@ async def test_escalate_waiting_state_resumes_existing_forced_plan_when_remainin
 async def test_escalate_waiting_state_stops_after_final_no_reply():
     now = datetime(2026, 4, 1, 10, 0, tzinfo=UTC)
     with (
-        patch("app.services.proactive_state.stop_proactive_state", new_callable=AsyncMock) as mock_stop,
-        patch("app.services.proactive_state.log_proactive_event", new_callable=AsyncMock) as mock_log,
+        patch("app.services.proactive.state.stop_proactive_state", new_callable=AsyncMock) as mock_stop,
+        patch("app.services.proactive.state.log_proactive_event", new_callable=AsyncMock) as mock_log,
     ):
         await escalate_waiting_state(
             _state(

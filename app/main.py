@@ -8,7 +8,7 @@ from app.redis_client import get_redis, close_redis
 from app.neo4j_client import get_driver, close_neo4j
 from app.services.graph.schema import init_graph_schema
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
-from app.services.prompt_store import ensure_prompt_templates
+from app.services.prompting.store import ensure_prompt_templates
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
 
 # Configure logging and tracing before anything else
@@ -45,21 +45,21 @@ app.add_middleware(
 )
 
 # Register routers
-from app.api.health import router as health_router
-from app.api.users import router as users_router
-from app.api.agents import router as agents_router
-from app.api.conversations import router as conversations_router
-from app.api.chat import router as chat_router
-from app.api.memories import router as memories_router
-from app.api.emotions import router as emotions_router
-from app.api.intimacy import router as intimacy_router
-from app.api.boundary import router as boundary_router
-from app.api.stickers import router as stickers_router
-from app.api.ws import router as ws_router
-from app.api.admin_prompts import router as admin_prompts_router
-from app.api.auth import router as auth_router
-from app.api.admin_users import router as admin_users_router
-from app.api.traces import router as traces_router
+from app.api.public.health import router as health_router
+from app.api.public.users import router as users_router
+from app.api.public.agents import router as agents_router
+from app.api.public.conversations import router as conversations_router
+from app.api.public.chat import router as chat_router
+from app.api.public.memories import router as memories_router
+from app.api.public.emotions import router as emotions_router
+from app.api.public.intimacy import router as intimacy_router
+from app.api.public.boundary import router as boundary_router
+from app.api.public.stickers import router as stickers_router
+from app.api.realtime.ws import router as ws_router
+from app.api.admin.prompts import router as admin_prompts_router
+from app.api.public.auth import router as auth_router
+from app.api.admin.users import router as admin_users_router
+from app.api.public.traces import router as traces_router
 
 app.include_router(health_router)
 app.include_router(users_router)

@@ -1,7 +1,7 @@
 """Tests for chat naturalness helpers."""
 
-from app.services.chat_service import detect_relational_context
-from app.services.emotion import quick_emotion_estimate
+from app.services.chat.orchestrator import detect_relational_context
+from app.services.relationship.emotion import quick_emotion_estimate
 
 
 def test_detect_relational_context_for_complaint():

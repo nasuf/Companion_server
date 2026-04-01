@@ -6,7 +6,7 @@ import sys
 sys.path.append("/Users/songtao/Projects/companion/Companion_server")
 
 from app.db import db
-from app.services.prompt_registry import PROMPT_DEFINITIONS
+from app.services.prompting.registry import PROMPT_DEFINITIONS
 
 async def sync():
     await db.connect()

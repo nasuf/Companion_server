@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Literal
 
 from app.db import db
-from app.services.workspaces import resolve_workspace_id
+from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 

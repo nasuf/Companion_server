@@ -9,7 +9,7 @@ import logging
 
 from app.db import db
 from app.services.llm.models import get_embedding_model
-from app.services.cache import cache_embedding, cache_set_embedding
+from app.services.runtime.cache import cache_embedding, cache_set_embedding
 
 logger = logging.getLogger(__name__)
 

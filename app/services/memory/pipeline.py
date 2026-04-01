@@ -13,7 +13,7 @@ from app.services.memory.filter import should_extract_memory
 from app.services.memory.storage import store_memory
 from app.services.memory.conflict import detect_conflicts, resolve_conflict
 from app.services.graph_service import update_graph_from_extraction
-from app.services.workspaces import resolve_workspace_id
+from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 

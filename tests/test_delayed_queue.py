@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services import delayed_queue
-from app.services.delayed_queue import merge_delayed_payloads
+from app.services.runtime import delayed_queue
+from app.services.runtime.delayed_queue import merge_delayed_payloads
 
 
 def test_merge_delayed_payloads_combines_all_messages_and_keeps_first_context():

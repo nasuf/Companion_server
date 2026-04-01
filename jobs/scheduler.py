@@ -16,22 +16,22 @@ from app.services.reflection import run_daily_reflection, run_weekly_reflection
 from app.services.memory.compression import compress_weekly, compress_monthly
 from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
-from app.services.emotion import decay_emotion_toward_baseline
-from app.services.schedule import (
+from app.services.relationship.emotion import decay_emotion_toward_baseline
+from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview, generate_daily_schedule, get_cached_schedule,
     get_current_status, get_life_overview, review_daily_schedule,
 )
 from app.services.trait_model import get_seven_dim
-from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
-from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
-from app.services.proactive_orchestrator import scan_proactive_states
-from app.services.aggregation import scan_expired
-from app.services.delayed_queue import (
+from app.services.relationship.boundary import recover_patience_hourly, scan_blacklist_expiry
+from app.services.relationship.intimacy import compute_growth_intimacy, compute_topic_intimacy
+from app.services.proactive.orchestrator import scan_proactive_states
+from app.services.runtime.aggregation import scan_expired
+from app.services.runtime.delayed_queue import (
     enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
     try_lock_conversation, unlock_conversation
 )
-from app.services.trigger_engine import scan_triggers, create_holiday_triggers, scan_birthday_memories
-from app.services.time_service import is_holiday
+from app.services.proactive.triggers import scan_triggers, create_holiday_triggers, scan_birthday_memories
+from app.services.schedule_domain.time_service import is_holiday
 
 logger = logging.getLogger(__name__)
 
@@ -377,9 +377,9 @@ async def _run_birthday_scan():
 
 async def _run_aggregation_scan():
     """Scan aggregation windows and due delayed replies, then deliver asynchronously."""
-    from app.services.chat_service import stream_chat_response
-    from app.services.ws_manager import manager
-    from app.api.ws import stream_to_ws
+    from app.services.chat.orchestrator import stream_chat_response
+    from app.services.runtime.ws_manager import manager
+    from app.api.realtime.ws import stream_to_ws
     from app.db import db
 
     try:
