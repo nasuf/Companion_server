@@ -24,3 +24,6 @@ build/
 .idea/
 .vscode/
 *.swp
+
+# Package manager lock
+uv.lock
