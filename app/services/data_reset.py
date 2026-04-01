@@ -47,6 +47,14 @@ async def _clear_runtime_postgres(agent_id: str) -> int:
     total = 0
     queries = [
         ("UPDATE time_triggers SET is_active = false WHERE ai_agent_id = $1", agent_id),
+        (
+            """
+            UPDATE proactive_states
+            SET status = 'stopped', stop_reason = 'workspace_archived', updated_at = CURRENT_TIMESTAMP
+            WHERE agent_id = $1
+            """,
+            agent_id,
+        ),
     ]
 
     for sql, param in queries:
@@ -263,6 +271,24 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
             stats[model_name] = cnt
         except Exception:
             pass
+
+    try:
+        cnt = await db.execute_raw(
+            "DELETE FROM proactive_event_logs WHERE agent_id = $1",
+            agent_id,
+        )
+        stats["proactive_event_logs"] = cnt or 0
+    except Exception:
+        pass
+
+    try:
+        cnt = await db.execute_raw(
+            "DELETE FROM proactive_states WHERE agent_id = $1",
+            agent_id,
+        )
+        stats["proactive_states"] = cnt or 0
+    except Exception:
+        pass
 
     try:
         cnt = await db.timetrigger.delete_many(where={"aiAgentId": agent_id})

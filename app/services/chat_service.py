@@ -61,6 +61,7 @@ from app.services.sticker import recommend_sticker
 from app.services.trait_model import get_seven_dim
 from app.services.fast_fact import update_working_facts, facts_for_prompt
 from app.services.reply_context import actual_delay_seconds, save_last_reply_timestamp
+from app.services.proactive_state import start_or_restart_proactive_session
 
 logger = logging.getLogger(__name__)
 
@@ -672,6 +673,14 @@ async def stream_chat_response(
     )
 
     await save_last_reply_timestamp(agent_id, user_id)
+    if workspace_id and agent_id:
+        _fire_background(start_or_restart_proactive_session(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            reason="conversation_end",
+        ))
     done_data: dict = {"message_id": "complete"}
     if first_assistant_message_id and trace_id and settings.langsmith_tracing:
         done_data["assistant_message_id"] = first_assistant_message_id

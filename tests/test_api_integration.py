@@ -193,6 +193,68 @@ def test_admin_memory_overview(mock_deps):
         app.dependency_overrides.pop(require_admin_jwt, None)
 
 
+def test_admin_agent_proactive_detail(mock_deps):
+    """GET /admin-api/users/{user_id}/agents/{agent_id}/proactive returns state/events/logs."""
+    client = mock_deps
+    from app.main import app
+    from app.api.jwt_auth import require_admin_jwt
+
+    mock_agent = SimpleNamespace(id="agent-1", userId="user-1")
+    mock_workspace = SimpleNamespace(id="ws-1")
+    mock_log = SimpleNamespace(
+        message="你今天过得怎么样？",
+        eventType="memory_proactive",
+        createdAt="2026-04-01T08:00:00+00:00",
+    )
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    try:
+        with patch("app.api.admin_users.db") as mock_db:
+            mock_db.aiagent.find_unique = AsyncMock(return_value=mock_agent)
+            mock_db.chatworkspace.find_first = AsyncMock(return_value=mock_workspace)
+            mock_db.query_raw = AsyncMock(
+                side_effect=[
+                    [{
+                        "status": "waiting_user",
+                        "stage": "warming",
+                        "silence_level_n": 2,
+                        "followup_plan_type": "normal",
+                        "remaining_forced_triggers": None,
+                        "current_window_index": None,
+                        "window_due_at": None,
+                        "response_deadline_at": "2026-04-02T08:00:00+00:00",
+                        "t0_at": "2026-04-01T08:00:00+00:00",
+                        "last_proactive_at": "2026-04-01T08:00:00+00:00",
+                        "last_user_reply_at": None,
+                        "last_assistant_reply_at": "2026-04-01T07:30:00+00:00",
+                        "stop_reason": None,
+                        "metadata": {"reason": "conversation_end"},
+                    }],
+                    [{
+                        "event_type": "message_sent",
+                        "window_name": "2h-4h",
+                        "trigger_type": "memory_proactive",
+                        "payload": {"message": "你今天过得怎么样？"},
+                        "created_at": "2026-04-01T08:00:00+00:00",
+                    }],
+                ]
+            )
+            mock_db.proactivechatlog.find_many = AsyncMock(return_value=[mock_log])
+            response = client.get("/admin-api/users/user-1/agents/agent-1/proactive")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["workspace_id"] == "ws-1"
+            assert data["state"]["status"] == "waiting_user"
+            assert data["events"][0]["event_type"] == "message_sent"
+            assert data["logs"][0]["message"] == "你今天过得怎么样？"
+            mock_db.proactivechatlog.find_many.assert_awaited_once_with(
+                where={"workspaceId": "ws-1"},
+                order={"createdAt": "desc"},
+                take=20,
+            )
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
 def test_get_emotion(mock_deps):
     """GET /emotions/{agent_id}/current returns emotion state."""
     client = mock_deps

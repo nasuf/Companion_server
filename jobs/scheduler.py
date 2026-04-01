@@ -24,7 +24,7 @@ from app.services.schedule import (
 from app.services.trait_model import get_seven_dim
 from app.services.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.intimacy import compute_growth_intimacy, compute_topic_intimacy
-from app.services.proactive import generate_proactive_message
+from app.services.proactive_orchestrator import scan_proactive_states
 from app.services.aggregation import scan_expired
 from app.services.delayed_queue import (
     enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
@@ -174,12 +174,11 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # Proactive chat scan every hour at :30
     scheduler.add_job(
-        _run_proactive_scan,
+        _run_proactive_orchestrator_scan,
         "interval",
-        hours=1,
-        id="proactive_scan",
+        minutes=1,
+        id="proactive_orchestrator_scan",
         replace_existing=True,
     )
 
@@ -293,31 +292,12 @@ async def _run_schedule_review():
     )
 
 
-async def _run_proactive_scan():
-    """扫描所有Agent-用户对，尝试发送主动消息。如有WS连接则直接推送。"""
-    from app.services.ws_manager import manager
-
-    async def _try_proactive(agent):
-        # 跳过睡眠状态
-        schedule = await get_cached_schedule(agent.id)
-        if schedule:
-            status = get_current_status(schedule)
-            if status.get("status") == "sleep":
-                return
-
-        msg = await generate_proactive_message(agent.userId, agent.id)
-        if msg:
-            # 尝试通过 WS 推送主动消息
-            sent = await manager.send_to_user(
-                agent.userId, "proactive",
-                {"text": msg, "agent_id": agent.id},
-            )
-            if sent:
-                logger.info(f"Proactive message pushed via WS for agent {agent.id}")
-            else:
-                logger.info(f"Proactive message saved (no WS) for agent {agent.id}")
-
-    await _run_for_all_agents(_try_proactive, concurrency=3, task_name="Proactive scan")
+async def _run_proactive_orchestrator_scan():
+    """扫描主动状态机。第一阶段仅做区间推进和互斥检查。"""
+    try:
+        await scan_proactive_states()
+    except Exception as e:
+        logger.warning(f"Proactive orchestrator scan failed: {e}")
 
 
 async def _run_daily_intimacy():

@@ -30,6 +30,8 @@ model User {
   memoryChangelogs MemoryChangelog[]
   intimacies       Intimacy[]
   timeTriggers     TimeTrigger[]
+  proactiveStates  ProactiveState[]
+  proactiveEvents  ProactiveEventLog[]
 
   @@map("users")
 }
@@ -63,6 +65,8 @@ model AiAgent {
   proactiveLogs   ProactiveChatLog[]
   traitFeedbackLogs TraitFeedbackLog[]
   timeTriggers      TimeTrigger[]
+  proactiveStates    ProactiveState[]
+  proactiveEvents    ProactiveEventLog[]
 
   @@map("ai_agents")
 }
@@ -82,6 +86,9 @@ model ChatWorkspace {
   aiMemories    AiMemory[]
   profiles      UserProfile[]
   changelogs    MemoryChangelog[]
+  proactiveLogs ProactiveChatLog[]
+  proactiveState ProactiveState?
+  proactiveEvents ProactiveEventLog[]
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -102,6 +109,9 @@ model Conversation {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   messages  Message[]
+  proactiveLogs ProactiveChatLog[]
+  proactiveStates ProactiveState[]
+  proactiveEvents ProactiveEventLog[]
 
   @@map("conversations")
 }
@@ -288,15 +298,82 @@ model ScheduleAdjustLog {
 }
 
 model ProactiveChatLog {
-  id        String   @id @default(uuid())
-  agentId   String   @map("agent_id")
-  agent     AiAgent  @relation(fields: [agentId], references: [id])
-  userId    String   @map("user_id")
-  message   String
-  eventType String?  @map("event_type")
-  createdAt DateTime @default(now()) @map("created_at")
+  id             String        @id @default(uuid())
+  agentId        String        @map("agent_id")
+  agent          AiAgent       @relation(fields: [agentId], references: [id])
+  userId         String        @map("user_id")
+  workspaceId    String?       @map("workspace_id")
+  workspace      ChatWorkspace? @relation(fields: [workspaceId], references: [id])
+  conversationId String?       @map("conversation_id")
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+  message        String
+  eventType      String?       @map("event_type")
+  createdAt      DateTime      @default(now()) @map("created_at")
 
+  @@index([workspaceId, createdAt])
+  @@index([conversationId, createdAt])
   @@map("proactive_chat_logs")
+}
+
+model ProactiveState {
+  id                    String         @id @default(uuid())
+  workspaceId           String         @unique @map("workspace_id")
+  workspace             ChatWorkspace  @relation(fields: [workspaceId], references: [id])
+  userId                String         @map("user_id")
+  user                  User           @relation(fields: [userId], references: [id])
+  agentId               String         @map("agent_id")
+  agent                 AiAgent        @relation(fields: [agentId], references: [id])
+  conversationId        String?        @map("conversation_id")
+  conversation          Conversation?  @relation(fields: [conversationId], references: [id])
+  status                String         @default("idle")
+  stage                 String         @default("cold_start")
+  silenceLevelN         Int            @default(0) @map("silence_level_n")
+  followupPlanType      String         @default("normal") @map("followup_plan_type")
+  remainingForcedTriggers Int?         @map("remaining_forced_triggers")
+  currentWindowIndex    Int?           @map("current_window_index")
+  windowDueAt           DateTime?      @map("window_due_at")
+  responseDeadlineAt    DateTime?      @map("response_deadline_at")
+  t0At                  DateTime?      @map("t0_at")
+  lastProactiveAt       DateTime?      @map("last_proactive_at")
+  lastUserReplyAt       DateTime?      @map("last_user_reply_at")
+  lastAssistantReplyAt  DateTime?      @map("last_assistant_reply_at")
+  lastAttemptAt         DateTime?      @map("last_attempt_at")
+  dailySceneTriggeredAt DateTime?      @map("daily_scene_triggered_at")
+  stopReason            String?        @map("stop_reason")
+  metadata              Json?
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
+  events                ProactiveEventLog[]
+
+  @@index([userId, status])
+  @@index([agentId, status])
+  @@index([status, windowDueAt])
+  @@map("proactive_states")
+}
+
+model ProactiveEventLog {
+  id             String         @id @default(uuid())
+  stateId        String         @map("state_id")
+  state          ProactiveState @relation(fields: [stateId], references: [id])
+  workspaceId    String         @map("workspace_id")
+  workspace      ChatWorkspace  @relation(fields: [workspaceId], references: [id])
+  userId         String         @map("user_id")
+  user           User           @relation(fields: [userId], references: [id])
+  agentId        String         @map("agent_id")
+  agent          AiAgent        @relation(fields: [agentId], references: [id])
+  conversationId String?        @map("conversation_id")
+  conversation   Conversation?  @relation(fields: [conversationId], references: [id])
+  eventType      String         @map("event_type")
+  windowIndex    Int?           @map("window_index")
+  windowName     String?        @map("window_name")
+  triggerType    String?        @map("trigger_type")
+  payload        Json?          @map("payload")
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  @@index([workspaceId, createdAt])
+  @@index([stateId, createdAt])
+  @@index([eventType, createdAt])
+  @@map("proactive_event_logs")
 }
 
 model TraitFeedbackLog {

@@ -18,6 +18,7 @@ from app.services.emotion import quick_emotion_estimate
 from app.services.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.trait_model import get_seven_dim
+from app.services.proactive_state import mark_user_replied_for_conversation
 from app.services.ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ async def _persist_user_message(
             **({"metadata": Json(metadata)} if metadata else {}),
         }
     )
+    await mark_user_replied_for_conversation(conversation_id)
     return saved.id
 
 

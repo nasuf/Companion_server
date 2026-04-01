@@ -15,6 +15,7 @@ from app.services.memory.retrieval import retrieve_memories, format_memories_for
 from app.services.emotion import get_ai_emotion
 from app.services.prompt_defaults import PROACTIVE_PROMPT
 from app.services.prompt_store import get_prompt_text
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +90,14 @@ async def generate_proactive_message(
 
         # 记录日志
         await increment_proactive_count(agent_id, user_id)
+        workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
         await db.proactivechatlog.create(
             data={
                 "agent": {"connect": {"id": agent_id}},
-                "user": {"connect": {"id": user_id}},
-                "content": response,
-                "triggerType": "scheduled",
+                "userId": user_id,
+                "workspaceId": workspace_id,
+                "message": response,
+                "eventType": "scheduled",
             }
         )
 
@@ -105,14 +108,21 @@ async def generate_proactive_message(
         return None
 
 
-async def get_proactive_history(agent_id: str, user_id: str, limit: int = 10) -> list[dict]:
+async def get_proactive_history(
+    agent_id: str,
+    user_id: str,
+    limit: int = 10,
+    workspace_id: str | None = None,
+) -> list[dict]:
     """获取主动消息历史。"""
+    effective_workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    where = {"workspaceId": effective_workspace_id} if effective_workspace_id else {"agentId": agent_id, "userId": user_id}
     logs = await db.proactivechatlog.find_many(
-        where={"agentId": agent_id, "userId": user_id},
+        where=where,
         order={"createdAt": "desc"},
         take=limit,
     )
     return [
-        {"content": log.content, "trigger_type": log.triggerType, "created_at": str(log.createdAt)}
+        {"content": log.message, "trigger_type": log.eventType, "created_at": str(log.createdAt)}
         for log in logs
     ]

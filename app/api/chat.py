@@ -13,7 +13,10 @@ from app.services.emotion import quick_emotion_estimate
 from app.services.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.trait_model import get_seven_dim
-from app.services.proactive import generate_proactive_message, get_proactive_history
+from app.services.proactive import get_proactive_history
+from app.services.proactive_sender import send_manual_or_triggered_proactive
+from app.services.proactive_state import mark_user_replied_for_conversation
+from app.services.workspaces import resolve_workspace_id
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -46,6 +49,7 @@ async def _persist_user_message(
             **({"metadata": Json(metadata)} if metadata else {}),
         }
     )
+    await mark_user_replied_for_conversation(conversation_id)
     return saved.id
 
 
@@ -121,14 +125,21 @@ async def chat(conversation_id: str, data: ChatRequest):
 @router.post("/proactive/{agent_id}")
 async def trigger_proactive(agent_id: str, user_id: str):
     """触发AI主动消息。"""
-    message = await generate_proactive_message(user_id, agent_id)
-    if not message:
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    if not workspace_id:
+        return {"message": None, "reason": "workspace_not_found"}
+    result = await send_manual_or_triggered_proactive(
+        workspace_id=workspace_id,
+        trigger_type="manual_trigger",
+    )
+    if not result["ok"]:
         return {"message": None, "reason": "no_content_or_limit_reached"}
-    return {"message": message}
+    return {"message": result["message"]}
 
 
 @router.get("/proactive/{agent_id}/history")
 async def proactive_history(agent_id: str, user_id: str, limit: int = 10):
     """获取主动消息历史。"""
-    history = await get_proactive_history(agent_id, user_id, limit)
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    history = await get_proactive_history(agent_id, user_id, limit, workspace_id=workspace_id)
     return {"history": history}

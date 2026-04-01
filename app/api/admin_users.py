@@ -202,6 +202,92 @@ async def get_user_detail(
     }
 
 
+@router.get("/{user_id}/agents/{agent_id}/proactive")
+async def get_agent_proactive_detail(
+    user_id: str,
+    agent_id: str,
+    _: dict = Depends(require_admin_jwt),
+):
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent or agent.userId != user_id:
+        raise HTTPException(status_code=404, detail="Agent not found for this user")
+
+    workspace = await db.chatworkspace.find_first(
+        where={"userId": user_id, "agentId": agent_id},
+        order={"createdAt": "desc"},
+    )
+    if not workspace:
+        return {"workspace_id": None, "state": None, "events": [], "logs": []}
+
+    state_rows = await db.query_raw(
+        """
+        SELECT *
+        FROM proactive_states
+        WHERE workspace_id = $1
+        LIMIT 1
+        """,
+        workspace.id,
+    )
+    event_rows = await db.query_raw(
+        """
+        SELECT event_type, window_name, trigger_type, payload, created_at
+        FROM proactive_event_logs
+        WHERE workspace_id = $1
+        ORDER BY created_at DESC
+        LIMIT 30
+        """,
+        workspace.id,
+    )
+    logs = await db.proactivechatlog.find_many(
+        where={"workspaceId": workspace.id},
+        order={"createdAt": "desc"},
+        take=20,
+    )
+
+    state = None
+    if state_rows:
+        row = state_rows[0]
+        state = {
+            "status": row.get("status"),
+            "stage": row.get("stage"),
+            "silence_level_n": int(row.get("silence_level_n") or 0),
+            "followup_plan_type": row.get("followup_plan_type"),
+            "remaining_forced_triggers": row.get("remaining_forced_triggers"),
+            "current_window_index": row.get("current_window_index"),
+            "window_due_at": str(row["window_due_at"]) if row.get("window_due_at") else None,
+            "response_deadline_at": str(row["response_deadline_at"]) if row.get("response_deadline_at") else None,
+            "t0_at": str(row["t0_at"]) if row.get("t0_at") else None,
+            "last_proactive_at": str(row["last_proactive_at"]) if row.get("last_proactive_at") else None,
+            "last_user_reply_at": str(row["last_user_reply_at"]) if row.get("last_user_reply_at") else None,
+            "last_assistant_reply_at": str(row["last_assistant_reply_at"]) if row.get("last_assistant_reply_at") else None,
+            "stop_reason": row.get("stop_reason"),
+            "metadata": row.get("metadata"),
+        }
+
+    return {
+        "workspace_id": workspace.id,
+        "state": state,
+        "events": [
+            {
+                "event_type": row.get("event_type"),
+                "window_name": row.get("window_name"),
+                "trigger_type": row.get("trigger_type"),
+                "payload": row.get("payload"),
+                "created_at": str(row["created_at"]),
+            }
+            for row in event_rows
+        ],
+        "logs": [
+            {
+                "message": log.message,
+                "event_type": log.eventType,
+                "created_at": str(log.createdAt),
+            }
+            for log in logs
+        ],
+    }
+
+
 @router.delete("/{user_id}/agents/{agent_id}")
 async def delete_user_agent(
     user_id: str,

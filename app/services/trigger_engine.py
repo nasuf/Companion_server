@@ -10,8 +10,10 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.db import db
 from app.redis_client import get_redis
+from app.services.proactive_sender import send_manual_or_triggered_proactive
 from app.services.schedule import get_cached_schedule, get_current_status
 from app.services.time_service import _TZ
+from app.services.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +81,18 @@ async def _execute_trigger(trigger, now: datetime) -> None:
             return
 
     # 执行触发动作
-    from app.services.proactive import generate_proactive_message
-    message = await generate_proactive_message(user_id, agent_id)
-    if not message:
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    if not workspace_id:
+        logger.debug(f"Trigger {trigger.id} skipped: workspace not found")
+        return
+
+    result = await send_manual_or_triggered_proactive(
+        workspace_id=workspace_id,
+        trigger_type=f"trigger:{trigger.actionType}",
+        now=now,
+    )
+    message = result.get("message")
+    if not result.get("ok") or not message:
         logger.debug(f"Trigger {trigger.id}: proactive message generation returned empty")
         return
 
@@ -95,17 +106,6 @@ async def _execute_trigger(trigger, now: datetime) -> None:
     if trigger.repeatRule is None:
         update_data["isActive"] = False  # 一次性触发器执行后停用
     await db.timetrigger.update(where={"id": trigger.id}, data=update_data)
-
-    # 存入主动消息日志
-    try:
-        await db.proactivechatlog.create(data={
-            "agentId": agent_id,
-            "userId": user_id,
-            "content": message,
-            "triggerType": trigger.actionType,
-        })
-    except Exception as e:
-        logger.warning(f"Failed to log proactive message: {e}")
 
     logger.info(f"Trigger {trigger.id} fired: {trigger.actionType} for agent {agent_id}")
 
