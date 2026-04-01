@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.services.memory import memory_repo
+from app.services.memory.lifecycle import compute_dynamic_weight
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import (
     get_compression_rule,
@@ -74,41 +75,37 @@ async def consolidate_weekly():
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     await _consolidate_level(source_level=2, target_level=1, cutoff=cutoff, take=50)
 
-    # Also check for L2→L1 upgrade candidates
+    # Check for L2→L1 upgrade candidates
     await check_l2_upgrade_candidates()
+    # Check for L2→L3 demotion candidates
+    await check_l2_demotion_candidates()
 
 
 async def check_l2_upgrade_candidates() -> None:
     """检测满足升级条件的L2记忆并升级到L1。
 
-    条件:
-    - importance ≥ 0.85
-    - 年提及次数 ≥ 10
-    - 无同主题L1冲突
+    条件: 综合分数(importance × time_factor × freq_factor) ≥ 0.85 + category规则允许。
     """
+    now = datetime.now(timezone.utc)
     candidates = await memory_repo.find_many(
-        where={
-            "level": 2,
-            "isArchived": False,
-            "importance": {"gte": 0.85},
-            "mentionCount": {"gte": 10},
-        },
-        take=20,
+        where={"level": 2, "isArchived": False},
+        take=100,
     )
 
     if not candidates:
         return
 
     for mem in candidates:
+        months_age = (now - mem.createdAt.replace(tzinfo=timezone.utc if mem.createdAt.tzinfo is None else mem.createdAt.tzinfo)).total_seconds() / 86400 / 30
+        score = compute_dynamic_weight(mem.importance, months_age, mem.mentionCount)
+        if score < 0.85:
+            continue
+
         rule = get_promotion_rule(mem.mainCategory, mem.subCategory)
         if not bool(rule.get("allow_l1", False)):
             continue
-        if float(mem.importance) < float(rule.get("min_importance", 1.0)):
-            continue
-        if int(mem.mentionCount) < int(rule.get("min_mentions", 999)):
-            continue
 
-        # 检查是否有同主题L1冲突
+        # 检查同主题L1数量
         existing_l1 = await memory_repo.find_many(
             source=mem.source,
             where={
@@ -120,14 +117,55 @@ async def check_l2_upgrade_candidates() -> None:
             },
             take=5,
         )
-
-        # 简单冲突检测：如果同类型L1已有5条以上，跳过
         if len(existing_l1) >= 5:
             continue
 
-        # 升级到L1
         await memory_repo.update(mem.id, source=mem.source, level=1)
-        logger.info(f"Upgraded L2 memory {mem.id} to L1 (importance={mem.importance}, mentions={mem.mentionCount})")
+        logger.info(f"Upgraded L2→L1: {mem.id} (score={score:.2f})")
+
+
+async def check_l2_demotion_candidates() -> None:
+    """检测满足降级条件的L2记忆并降级到L3。
+
+    条件: 综合分数 < 0.49 AND 创建时间 > 30天。
+    """
+    from app.services.memory.storage import log_memory_changelog
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=30)
+
+    candidates = await memory_repo.find_many(
+        where={
+            "level": 2,
+            "isArchived": False,
+            "createdAt": {"lt": cutoff},
+        },
+        take=100,
+    )
+
+    if not candidates:
+        return
+
+    demoted = 0
+    for mem in candidates:
+        months_age = (now - mem.createdAt.replace(tzinfo=timezone.utc if mem.createdAt.tzinfo is None else mem.createdAt.tzinfo)).total_seconds() / 86400 / 30
+        score = compute_dynamic_weight(mem.importance, months_age, mem.mentionCount)
+        if score >= 0.49:
+            continue
+
+        await memory_repo.update(mem.id, source=mem.source, level=3)
+        try:
+            await log_memory_changelog(
+                mem.userId, mem.id, "demote",
+                old_value=f"L2 (score={score:.2f})",
+                new_value="L3",
+            )
+        except Exception:
+            pass
+        demoted += 1
+
+    if demoted:
+        logger.info(f"Demoted {demoted} L2→L3 memories (score<0.49, age>30d)")
 
 
 async def _consolidate_user_memories(

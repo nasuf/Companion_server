@@ -11,9 +11,10 @@ Includes Redis caching for retrieval results and graph context.
 
 import asyncio
 import logging
+from datetime import datetime
 
 from app.services.memory.query_analyzer import analyze_query
-from app.services.memory.vector_search import search_similar
+from app.services.memory.vector_search import search_similar, search_by_time_range
 from app.services.memory.ranker import rank_memories
 from app.services.memory.context_selector import select_context
 from app.services.graph.queries import get_relationship_context
@@ -54,8 +55,9 @@ async def hybrid_retrieve(
     context_categories = analysis.get("main_categories", []) or []
     context_sub_categories = analysis.get("sub_categories", []) or []
     levels = analysis.get("levels", [2, 3]) or [2, 3]
+    time_range = analysis.get("time_range")
 
-    # Parallel: vector search + graph context (no LLM needed)
+    # Parallel: vector search + graph context + optional time search
     vector_task = (
         search_similar(
             message,
@@ -77,18 +79,33 @@ async def hybrid_retrieve(
         )
         if retrieve_graph else asyncio.sleep(0, result=None)
     )
-
-    vector_results, graph_result = await asyncio.gather(
-        vector_task, graph_task, return_exceptions=True
+    time_task = (
+        search_by_time_range(
+            user_id,
+            datetime.fromisoformat(time_range["start"]),
+            datetime.fromisoformat(time_range["end"]),
+            limit=20,
+            workspace_id=workspace_id,
+        )
+        if time_range else asyncio.sleep(0, result=[])
     )
 
-    # Process vector results
+    vector_results, graph_result, time_results = await asyncio.gather(
+        vector_task, graph_task, time_task, return_exceptions=True
+    )
+
+    # Merge vector + time results (union by id)
     all_candidates: list[dict] = []
-    if isinstance(vector_results, Exception):
-        logger.warning(f"Vector search failed: {vector_results}")
-    else:
-        for mem in vector_results:
-            all_candidates.append(mem)
+    seen_ids: set[str] = set()
+    for source_results, label in [(vector_results, "vector"), (time_results, "time")]:
+        if isinstance(source_results, Exception):
+            logger.warning(f"{label} search failed: {source_results}")
+            continue
+        for mem in (source_results or []):
+            mid = mem.get("id", "")
+            if mid and mid not in seen_ids:
+                seen_ids.add(mid)
+                all_candidates.append(mem)
 
     # Rank (no entity context needed without query analyzer)
     ranked = rank_memories(

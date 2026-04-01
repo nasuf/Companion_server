@@ -5,6 +5,7 @@ import logging
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.taxonomy import allowed_main_categories, allowed_sub_categories
 from app.services.prompting.store import get_prompt_text
+from app.services.schedule_domain.time_parser import has_explicit_time, parse_time_expressions
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,18 @@ ANALYZER_PROMPT = """分析用户消息，判断需要什么类型的检索。
 
 async def analyze_query(message: str) -> dict:
     """Analyze user message to determine retrieval strategy."""
+    # 纯规则时间解析（无LLM），在 LLM 调用前执行
+    time_range = None
+    if has_explicit_time(message):
+        parsed = parse_time_expressions(message)
+        if parsed:
+            best = max(parsed, key=lambda p: p.confidence)
+            if not best.is_future:
+                time_range = {
+                    "start": best.start.isoformat(),
+                    "end": best.end.isoformat(),
+                }
+
     model = get_utility_model()
     prompt = (await get_prompt_text("memory.query_analyzer")).format(message=message)
 
@@ -44,6 +57,7 @@ async def analyze_query(message: str) -> dict:
         result.setdefault("main_categories", [])
         result.setdefault("sub_categories", [])
         result.setdefault("levels", [2, 3])
+        result["time_range"] = time_range
         valid_main = set(allowed_main_categories())
         result["main_categories"] = [
             item for item in result["main_categories"]
@@ -74,4 +88,5 @@ async def analyze_query(message: str) -> dict:
             "main_categories": [],
             "sub_categories": [],
             "levels": [2, 3],
+            "time_range": time_range,
         }

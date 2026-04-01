@@ -43,7 +43,10 @@ from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
 )
-from app.services.memory.deletion import detect_deletion_intent, delete_memories_by_description, DELETION_KEYWORDS
+from app.services.memory.deletion import (
+    detect_deletion_intent, delete_memories_by_description,
+    generate_deletion_reply, DELETION_KEYWORDS,
+)
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status, format_schedule_context
 from app.services.schedule_domain.time_service import build_time_context
@@ -356,8 +359,24 @@ async def stream_chat_response(
     current_user_emotion = quick_emotion_estimate(user_message)
     prompt_user_emotion = current_user_emotion or prev_user_emotion
 
-    # --- Check deletion intent (keyword-only, no LLM on hot path) ---
+    # --- Deletion intent: keyword check + LLM confirm + delete + reply ---
     has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
+    if has_deletion_keyword:
+        try:
+            intent = await detect_deletion_intent(user_message)
+            if intent and intent.get("target_description"):
+                description = intent["target_description"]
+                deleted = await delete_memories_by_description(user_id, description)
+                agent_name = agent.name if agent else "伙伴"
+                reply = await generate_deletion_reply(agent_name, description, deleted)
+                _fire_background(_save_replies(conversation_id, [reply]))
+                yield {"event": "reply", "data": json.dumps({"text": reply, "index": 0})}
+                await save_last_reply_timestamp(agent_id, user_id)
+                yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+        except Exception as e:
+            logger.warning(f"Hot-path deletion failed, falling through to normal chat: {e}")
 
     # --- Topic tracking (Redis, no LLM) ---
     topic_info = await push_topic(conversation_id, user_message)
@@ -729,8 +748,7 @@ async def _background_post_process(
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
-        if has_deletion_keyword:
-            tasks.append(_bg_deletion_check(user_id, user_message))
+        # 删除检查已在热路径处理，不再后台重复执行
         if agent_id and has_apology_keyword(user_message):
             tasks.append(_bg_apology_check(agent_id, user_id, user_message))
         if agent_id:

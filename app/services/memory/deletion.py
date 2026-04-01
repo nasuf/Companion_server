@@ -7,7 +7,7 @@ import logging
 
 from app.db import db
 from app.services.memory import memory_repo
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.memory.embedding import generate_embedding
 from app.services.memory.vector_search import search_by_embedding
 from app.services.memory.storage import log_memory_changelog
@@ -72,6 +72,42 @@ async def detect_deletion_intent(message: str) -> dict | None:
     return result
 
 
+async def find_matching_memories(
+    user_id: str,
+    description: str,
+    threshold: float = 0.7,
+) -> list[dict]:
+    """查找匹配的记忆但不删除，返回候选列表。"""
+    embedding = await generate_embedding(description)
+    results = await search_by_embedding(embedding, user_id, top_k=5)
+    matches = []
+    for r in results:
+        sim = float(r.get("similarity", 0))
+        if sim >= threshold:
+            matches.append(r)
+    return matches
+
+
+async def generate_deletion_reply(
+    agent_name: str,
+    description: str,
+    deleted_count: int,
+) -> str:
+    """用LLM生成删除记忆后的委婉回复。失败时用模板。"""
+    if deleted_count == 0:
+        return "嗯...我好像没有关于这个的记忆呢。"
+
+    prompt = (
+        f"你是{agent_name}。用户要求你忘掉关于「{description}」的事情，你已经忘掉了。\n"
+        "请用1句话自然地回复用户，语气温和体贴，像朋友聊天一样。\n"
+        "不要说「好的」开头，不要提及「记忆」或「删除」这类技术词汇。"
+    )
+    try:
+        return await invoke_text(get_utility_model(), prompt)
+    except Exception:
+        return get_deletion_response()
+
+
 async def delete_memories_by_description(
     user_id: str,
     description: str,
@@ -92,8 +128,8 @@ async def delete_memories_by_description(
         if isinstance(sim, str):
             sim = float(sim)
 
-        # Only delete if similarity is high enough
-        if sim < 0.7:
+        # 高相似度(≥0.85)直接删除，避免误删
+        if sim < 0.85:
             continue
 
         memory_id = r.get("id")

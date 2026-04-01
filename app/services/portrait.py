@@ -173,6 +173,20 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
         }
     )
 
+    # 清理已消费的变更日志
+    try:
+        deleted = await db.memorychangelog.delete_many(
+            where={
+                "userId": user_id,
+                "workspaceId": workspace_id,
+                "createdAt": {"lte": one_week_ago},
+            },
+        )
+        if deleted:
+            logger.info(f"Cleaned up {deleted} changelog entries for user {user_id}")
+    except Exception as e:
+        logger.warning(f"Failed to clean changelog for user {user_id}: {e}")
+
     logger.info(f"Updated portrait v{previous.version + 1} for user {user_id}")
     return portrait
 
