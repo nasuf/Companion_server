@@ -116,8 +116,11 @@ async def hybrid_retrieve(
         top_k=20,
     )
 
-    # Select within token budget
-    memory_strings = select_context(ranked, token_budget)
+    # Select within token budget (returns ClassifiedMemory list)
+    classified_memories = select_context(ranked, token_budget)
+
+    # Plain text list for consumers that don't need classification (summarizer, etc.)
+    memory_strings = [m.text for m in classified_memories] if classified_memories else None
 
     # Graph context (with caching)
     graph_context = None
@@ -133,7 +136,8 @@ async def hybrid_retrieve(
                 pass
 
     result = {
-        "memories": memory_strings if memory_strings else None,
+        "memories": classified_memories if classified_memories else None,
+        "memory_strings": memory_strings,
         "graph_context": graph_context,
         "analysis": analysis,
     }

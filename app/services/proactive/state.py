@@ -64,6 +64,16 @@ def _now(now: datetime | None = None) -> datetime:
     return ts.astimezone(UTC)
 
 
+def _ts(dt: datetime) -> str:
+    """Convert datetime to ISO string for prisma-py query_raw parameters.
+
+    prisma-py passes datetime objects as text to PostgreSQL, causing
+    'operator does not exist: timestamp <= text' errors.
+    Using .isoformat() + ::timestamp cast in SQL fixes this.
+    """
+    return dt.isoformat()
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if not value:
         return None
@@ -331,16 +341,16 @@ async def claim_due_proactive_state(
             UPDATE proactive_states
             SET
                 status = 'processing',
-                last_attempt_at = $2,
+                last_attempt_at = $2::timestamp,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
               AND status = 'running'
               AND window_due_at IS NOT NULL
-              AND window_due_at <= $2
+              AND window_due_at <= $2::timestamp
             RETURNING *
             """,
             state_id,
-            now_ts,
+            _ts(now_ts),
         )
     except Exception as e:
         _log_if_unavailable("claim due", e)
@@ -362,16 +372,16 @@ async def claim_waiting_timeout_state(
             UPDATE proactive_states
             SET
                 status = 'processing_timeout',
-                last_attempt_at = $2,
+                last_attempt_at = $2::timestamp,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
               AND status = 'waiting_user'
               AND response_deadline_at IS NOT NULL
-              AND response_deadline_at <= $2
+              AND response_deadline_at <= $2::timestamp
             RETURNING *
             """,
             state_id,
-            now_ts,
+            _ts(now_ts),
         )
     except Exception as e:
         _log_if_unavailable("claim waiting timeout", e)
@@ -407,8 +417,8 @@ async def start_or_restart_proactive_session(
             VALUES (
                 $1, $2, $3, $4, $5,
                 'running', $6, 0, 'normal', NULL,
-                $7, $8, NULL,
-                $9, $9, NULL, $10::jsonb
+                $7, $8::timestamp, NULL,
+                $9::timestamp, $9::timestamp, NULL, $10::jsonb
             )
             ON CONFLICT (workspace_id)
             DO UPDATE SET
@@ -436,8 +446,8 @@ async def start_or_restart_proactive_session(
             conversation_id,
             stage,
             first_window_index,
-            due_at,
-            now_ts,
+            _ts(due_at),
+            _ts(now_ts),
             json.dumps({"reason": reason}, ensure_ascii=False),
         )
     except Exception as e:
@@ -512,11 +522,11 @@ async def list_due_proactive_states(now: datetime | None = None) -> list[Proacti
             FROM proactive_states
             WHERE status = 'running'
               AND window_due_at IS NOT NULL
-              AND window_due_at <= $1
+              AND window_due_at <= $1::timestamp
             ORDER BY window_due_at ASC
             LIMIT 100
             """,
-            now_ts,
+            _ts(now_ts),
         )
     except Exception as e:
         _log_if_unavailable("list due", e)
@@ -533,11 +543,11 @@ async def list_waiting_timeout_states(now: datetime | None = None) -> list[Proac
             FROM proactive_states
             WHERE status = 'waiting_user'
               AND response_deadline_at IS NOT NULL
-              AND response_deadline_at <= $1
+              AND response_deadline_at <= $1::timestamp
             ORDER BY response_deadline_at ASC
             LIMIT 100
             """,
-            now_ts,
+            _ts(now_ts),
         )
     except Exception as e:
         _log_if_unavailable("list waiting timeouts", e)
@@ -587,7 +597,7 @@ async def stop_proactive_state(
                 current_window_index = NULL,
                 window_due_at = NULL,
                 response_deadline_at = NULL,
-                last_attempt_at = $2,
+                last_attempt_at = $2::timestamp,
                 stop_reason = $3,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
@@ -643,10 +653,10 @@ async def mark_proactive_sent(
                 status = 'waiting_user',
                 current_window_index = NULL,
                 window_due_at = NULL,
-                response_deadline_at = $3,
+                response_deadline_at = $3::timestamp,
                 last_proactive_at = $2,
-                last_attempt_at = $2,
-                t0_at = $2,
+                last_attempt_at = $2::timestamp,
+                t0_at = $2::timestamp,
                 remaining_forced_triggers = $4,
                 daily_scene_triggered_at = CASE WHEN $5 THEN $2 ELSE daily_scene_triggered_at END,
                 metadata = $6::jsonb,
@@ -754,10 +764,10 @@ async def escalate_waiting_state(
                     followup_plan_type = 'normal',
                     remaining_forced_triggers = NULL,
                     current_window_index = 1,
-                    window_due_at = $3,
+                    window_due_at = $3::timestamp,
                     response_deadline_at = NULL,
-                    t0_at = $4,
-                    last_attempt_at = $4,
+                    t0_at = $4::timestamp,
+                    last_attempt_at = $4::timestamp,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1
                 """,
@@ -847,9 +857,9 @@ async def _resume_forced_plan(
                 followup_plan_type = $3,
                 remaining_forced_triggers = $4,
                 current_window_index = NULL,
-                window_due_at = $5,
+                window_due_at = $5::timestamp,
                 response_deadline_at = NULL,
-                last_attempt_at = $6,
+                last_attempt_at = $6::timestamp,
                 updated_at = CURRENT_TIMESTAMP,
                 metadata = $7::jsonb
             WHERE id = $1
@@ -898,8 +908,8 @@ async def advance_to_next_window(
             SET
                 status = 'running',
                 current_window_index = $2,
-                window_due_at = $3,
-                last_attempt_at = $4,
+                window_due_at = $3::timestamp,
+                last_attempt_at = $4::timestamp,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             """,

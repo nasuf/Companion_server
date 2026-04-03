@@ -137,6 +137,61 @@ def merge_delayed_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any] | N
         "queued_messages": texts,
     }
 
+_APPEND_OR_ENQUEUE_LUA = """
+local list_key = KEYS[1]
+local index_key = KEYS[2]
+local conv_id = ARGV[1]
+local payload_json = ARGV[2]
+local fallback_due = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+
+local existing = redis.call('ZRANGE', list_key, 0, 0, 'WITHSCORES')
+if #existing >= 2 then
+    -- 已有待处理消息：使用已有最早 due_at
+    local due_at = tonumber(existing[2])
+    redis.call('ZADD', list_key, due_at, payload_json)
+    redis.call('EXPIRE', list_key, ttl)
+    return 1
+else
+    -- 无待处理消息：使用 fallback_due
+    redis.call('ZADD', list_key, fallback_due, payload_json)
+    redis.call('EXPIRE', list_key, ttl)
+    -- 更新全局索引
+    local cur = redis.call('ZSCORE', index_key, conv_id)
+    if not cur or fallback_due < tonumber(cur) then
+        redis.call('ZADD', index_key, fallback_due, conv_id)
+    end
+    return 0
+end
+"""
+
+
+async def enqueue_or_append_delayed(
+    conversation_id: str,
+    payload: dict[str, Any],
+    delay_seconds: float,
+) -> bool:
+    """原子入队：若已有待处理消息则追加（保持原 due_at），否则新建。
+
+    Returns True if appended to existing queue, False if created new entry.
+    """
+    redis = await get_redis()
+    list_key = _DELAYED_LIST_KEY.format(cid=conversation_id)
+    due_at = time.time() + max(0.0, delay_seconds)
+    stored = dict(payload)
+    stored["due_at"] = due_at
+
+    result = await redis.eval(
+        _APPEND_OR_ENQUEUE_LUA, 2,
+        list_key, _DELAYED_ZSET_KEY,
+        conversation_id,
+        json.dumps(stored, ensure_ascii=False),
+        str(due_at),
+        str(_DELAYED_TTL),
+    )
+    return bool(result)
+
+
 # --- Concurrency Control ---
 
 _LOCK_KEY = "lock:chat:{cid}"

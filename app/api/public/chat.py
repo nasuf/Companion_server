@@ -8,7 +8,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.db import db
 from app.models.message import ChatRequest
 from app.services.runtime.aggregation import is_short_message, push_pending, flush_pending
-from app.services.runtime.delayed_queue import enqueue_delayed_message
+from app.services.runtime.delayed_queue import enqueue_or_append_delayed
 from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.chat.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
@@ -107,7 +107,8 @@ async def chat(conversation_id: str, data: ChatRequest):
         metadata={"queued": True},
     )
     delay_seconds = float((final_context or {}).get("delay_seconds", 0.0) or 0.0)
-    await enqueue_delayed_message(
+    # 原子入队：若已有待处理消息则追加（不延长等待），否则新建
+    await enqueue_or_append_delayed(
         conversation_id,
         {
             "conversation_id": conversation_id,
@@ -119,6 +120,7 @@ async def chat(conversation_id: str, data: ChatRequest):
         },
         delay_seconds,
     )
+
     return EventSourceResponse(_queued_stream(delay_seconds))
 
 

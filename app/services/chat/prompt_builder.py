@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.memory.context_selector import ClassifiedMemory
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
 from app.services.trait_model import get_seven_dim, get_dim
@@ -220,14 +221,43 @@ def _build_core_memory_section(core_memories: list[str] | None) -> str | None:
     return _section("用户核心信息", body)
 
 
-async def _build_memory_section(memories: list[str] | None) -> str | None:
-    """Build the memory section from a list of memory strings."""
+async def _build_memory_section(memories: list | None) -> str | None:
+    """Build the memory section with relevance classification.
+
+    Accepts list[ClassifiedMemory] or list[str] (backward compat).
+    """
     if not memories:
         return None
 
-    numbered = "\n".join(f"{i}. {m}" for i, m in enumerate(memories, 1))
+    # Separate by classification
+    strong: list[str] = []
+    medium: list[str] = []
+    plain: list[str] = []
+
+    for m in memories:
+        if isinstance(m, ClassifiedMemory):
+            if m.relevance == "strong":
+                strong.append(m.text)
+            else:
+                medium.append(m.text)
+        elif isinstance(m, str):
+            plain.append(m)
+
+    parts: list[str] = []
+    if strong:
+        parts.append("### 你清楚记得的事（可以自然提起）")
+        for i, t in enumerate(strong, 1):
+            parts.append(f"{i}. {t}")
+    if medium:
+        parts.append("### 你有印象的事（不要主动强调）")
+        for i, t in enumerate(medium, 1):
+            parts.append(f"{i}. {t}")
+    if plain:
+        for i, t in enumerate(plain, 1):
+            parts.append(f"{i}. {t}")
+
     memory_instruction = await get_prompt_text("chat.memory_instruction")
-    body = f"{numbered}\n\n{memory_instruction.format(budget=MEMORY_TOKEN_BUDGET)}"
+    body = "\n".join(parts) + f"\n\n{memory_instruction.format(budget=MEMORY_TOKEN_BUDGET)}"
     return _section("你记得的事情", body)
 
 

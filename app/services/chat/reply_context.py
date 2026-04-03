@@ -60,33 +60,9 @@ def _is_high_emotion(user_emotion: dict[str, Any] | None) -> bool:
 
 
 def _schedule_delay_for_status(status: str) -> float:
-    r = random.random()
-    if status == "sleep":
-        if r < 0.4:
-            return random.uniform(0, 1800)
-        if r < 0.7:
-            return random.uniform(1800, 3600)
-        if r < 0.9:
-            return random.uniform(3600, 7200)
-        return random.uniform(7200, 14400)
-
-    if status == "very_busy":
-        if r < 0.5:
-            return random.uniform(0, 180)
-        if r < 0.8:
-            return random.uniform(180, 300)
-        return random.uniform(300, 600)
-
-    if status == "busy":
-        if r < 0.6:
-            return random.uniform(0, 60)
-        if r < 0.9:
-            return random.uniform(60, 180)
-        return random.uniform(180, 300)
-
-    if r < 0.7:
-        return random.uniform(0, 3)
-    return random.uniform(3, 10)
+    """委托给 timing.py 的 calculate_status_delay，避免重复实现。"""
+    from app.services.schedule_domain.timing import calculate_status_delay
+    return calculate_status_delay(status)
 
 
 def compute_delay_profile(

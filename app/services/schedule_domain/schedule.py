@@ -532,6 +532,49 @@ async def handle_schedule_adjustment(
         return {"accepted": False, "response": response, "score": score}
 
 
+async def update_schedule_slot(
+    agent_id: str,
+    schedule: list[dict],
+    current_status: dict,
+    new_type: str = "leisure",
+    new_activity: str = "和用户聊天",
+) -> list[dict]:
+    """更新当前时段并写回 Redis。按时间范围匹配当前时段。"""
+    now = _local_now()
+    now_str = now.strftime("%H:%M")
+    updated = [s.copy() for s in schedule]
+    for s in updated:
+        if s.get("start", "") <= now_str < s.get("end", "24:00"):
+            s["type"] = new_type
+            s["activity"] = new_activity
+            break
+    await _cache_schedule(agent_id, now, updated)
+    return updated
+
+
+def format_full_schedule_for_query(
+    schedule: list[dict],
+    query_type: str,
+    status: dict | None = None,
+) -> str:
+    """格式化完整日程供查询意图的 prompt 注入。"""
+    lines = [f"{s['start']}-{s['end']} {s['activity']}" for s in schedule]
+    full_text = "\n".join(lines)
+
+    current = ""
+    if status:
+        current = f"\n当前状态：{format_schedule_context(status)}"
+
+    if query_type == "current":
+        instruction = "用户在问你现在在干什么。自然地描述你当前的状态和活动。"
+    elif query_type == "routine":
+        instruction = "用户在问你的日程安排。自然地描述你今天的计划，用你的性格说话。"
+    else:
+        instruction = "用户在问你的日程安排。根据你的作息表自然回答。"
+
+    return f"以下是你今天的完整作息：\n{full_text}{current}\n{instruction}"
+
+
 # --- 每日作息回顾 ---
 
 async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "伙伴") -> list[str]:

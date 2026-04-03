@@ -352,12 +352,22 @@ async def detect_apology(message: str) -> dict:
         return {"is_apology": False, "sincerity": 0.0}
 
 
-async def handle_apology(agent_id: str, user_id: str) -> int:
-    """处理道歉：非拉黑+60点（上限100），拉黑恢复到70点。"""
+async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_floor: int) -> int:
+    """恢复耐心值的共享逻辑：非拉黑+delta（上限100），拉黑恢复到blocked_floor。"""
     current = await get_patience(agent_id, user_id)
     if current <= 0:
-        return await set_patience(agent_id, user_id, PATIENCE_NORMAL_MIN)
-    return await set_patience(agent_id, user_id, current + 60)
+        return await set_patience(agent_id, user_id, blocked_floor)
+    return await set_patience(agent_id, user_id, min(PATIENCE_MAX, current + delta))
+
+
+async def handle_apology(agent_id: str, user_id: str) -> int:
+    """处理道歉：非拉黑+60点（上限100），拉黑恢复到70点。"""
+    return await _restore_patience(agent_id, user_id, delta=60, blocked_floor=PATIENCE_NORMAL_MIN)
+
+
+async def handle_promise(agent_id: str, user_id: str) -> int:
+    """处理承诺：非拉黑+40点（上限100），拉黑恢复到50点。"""
+    return await _restore_patience(agent_id, user_id, delta=40, blocked_floor=50)
 
 
 # --- 正面互动恢复耐心 ---

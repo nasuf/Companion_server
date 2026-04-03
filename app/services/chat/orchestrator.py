@@ -48,17 +48,22 @@ from app.services.memory.deletion import (
     generate_deletion_reply, DELETION_KEYWORDS,
 )
 from app.services.topic import push_topic, format_topic_context
-from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status, format_schedule_context
+from app.services.schedule_domain.schedule import (
+    get_cached_schedule, get_current_status, format_schedule_context,
+    handle_schedule_adjustment, update_schedule_slot, format_full_schedule_for_query,
+)
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.relationship.boundary import (
     check_boundary, process_boundary_violation, detect_apology, handle_apology,
-    has_apology_keyword, check_positive_recovery, get_patience_prompt_instruction,
+    handle_promise, has_apology_keyword, check_positive_recovery,
+    get_patience_prompt_instruction, get_patience_zone,
     PATIENCE_MAX,
 )
 from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.conversation_end import check_conversation_end
+from app.services.chat.intent_dispatcher import detect_intent, IntentType
 from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_emoji
 from app.services.sticker import recommend_sticker
 from app.services.trait_model import get_seven_dim
@@ -79,6 +84,41 @@ def _fire_background(coro) -> None:
     """Schedule a background coroutine as a fire-and-forget task."""
     task = asyncio.create_task(coro)
     task.add_done_callback(_on_task_error)
+
+
+async def _short_circuit_reply(
+    reply: str,
+    conversation_id: str,
+    agent_id: str | None,
+    user_id: str,
+) -> list[dict]:
+    """Build SSE events for a short-circuit reply (intent branches).
+
+    Handles: save to DB, save timestamp. Returns list of SSE event dicts to yield.
+    Caller must yield these events, then call _end_trace and return.
+    """
+    _fire_background(_save_replies(conversation_id, [reply]))
+    await save_last_reply_timestamp(agent_id, user_id)
+    return [
+        {"event": "reply", "data": json.dumps({"text": reply, "index": 0})},
+        {"event": "done", "data": json.dumps({"message_id": "complete"})},
+    ]
+
+
+async def _intent_llm_reply(
+    agent,
+    user_message: str,
+    instruction: str,
+) -> str:
+    """Generate a short LLM reply for a special intent (farewell, reconciliation, etc.)."""
+    prompt = await build_system_prompt(agent=agent, reply_count=1, reply_total=60)
+    prompt += f"\n\n## 特殊指令\n{instruction}"
+    model = get_chat_model()
+    result = await model.ainvoke(convert_messages([
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": user_message},
+    ]))
+    return result.content.strip().split("||")[0][:60]
 
 
 # --- Multi-reply split & validate (PRD §3.2.1/§3.2.2) ---
@@ -306,22 +346,18 @@ async def stream_chat_response(
             _end_trace(_trace_ctx, trace_id, conversation_id)
             return
 
-    # --- Conversation end detection (PRD §3.2.3, keyword trigger + LLM farewell) ---
-    if check_conversation_end(user_message):
-        farewell_prompt = await build_system_prompt(agent=agent, reply_count=1, reply_total=60)
-        farewell_prompt += (
-            "\n\n## 特殊指令\n"
-            "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。"
+    # --- 统一意图识别（单次关键词扫描） ---
+    patience_zone = get_patience_zone(cached_patience)
+    detected_intent = detect_intent(user_message, patience_zone)
+
+    # --- IntentType.CONVERSATION_END: 终结对话 ---
+    if detected_intent.intent == IntentType.CONVERSATION_END:
+        farewell = await _intent_llm_reply(
+            agent, user_message,
+            "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。",
         )
-        model = get_chat_model()
-        result = await model.ainvoke(convert_messages([
-            {"role": "system", "content": farewell_prompt},
-            {"role": "user", "content": user_message},
-        ]))
-        farewell = result.content.strip().split("||")[0][:60]
-        _fire_background(_save_replies(conversation_id, [farewell]))
-        yield {"event": "reply", "data": json.dumps({"text": farewell, "index": 0})}
-        await save_last_reply_timestamp(agent_id, user_id)
+        for evt in await _short_circuit_reply(farewell, conversation_id, agent_id, user_id):
+            yield evt
         if workspace_id and agent_id:
             _fire_background(start_or_restart_proactive_session(
                 workspace_id=workspace_id,
@@ -330,9 +366,53 @@ async def stream_chat_response(
                 agent_id=agent_id,
                 reason="farewell",
             ))
-        yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
         _end_trace(_trace_ctx, trace_id, conversation_id)
         return
+
+    # --- IntentType.APOLOGY: 道歉热路径短路 ---
+    if detected_intent.intent == IntentType.APOLOGY and agent_id and cached_patience < PATIENCE_MAX:
+        try:
+            apology_result = await detect_apology(user_message)
+            if apology_result.get("is_apology") and apology_result.get("sincerity", 0) >= 0.5:
+                new_patience = await handle_apology(agent_id, user_id)
+                reply = await _intent_llm_reply(
+                    agent, user_message,
+                    "用户在向你道歉/表达悔意。你已经原谅了Ta。"
+                    "生成一句温暖的和解回复，不超过30字。不要用||分隔。"
+                    f"你当前的耐心值已恢复到{new_patience}。",
+                )
+                for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
+                    yield evt
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+        except Exception as e:
+            logger.warning(f"Hot-path apology failed, falling through to normal chat: {e}")
+
+    # --- IntentType.PROMISE: 承诺恢复耐心（不短路） ---
+    elif detected_intent.intent == IntentType.PROMISE and agent_id:
+        try:
+            new_patience = await handle_promise(agent_id, user_id)
+            logger.info(f"Promise detected: patience adjusted to {new_patience}")
+        except Exception as e:
+            logger.warning(f"Promise handling failed: {e}")
+
+    # --- IntentType.DELETION: 删除记忆热路径 ---
+    elif detected_intent.intent == IntentType.DELETION:
+        try:
+            deletion_result = await detect_deletion_intent(user_message)
+            if deletion_result and deletion_result.get("target_description"):
+                description = deletion_result["target_description"]
+                deleted = await delete_memories_by_description(user_id, description)
+                agent_name = agent.name if agent else "伙伴"
+                reply = await generate_deletion_reply(agent_name, description, deleted)
+                for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
+                    yield evt
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+        except Exception as e:
+            logger.warning(f"Hot-path deletion failed, falling through to normal chat: {e}")
+
+    # NOTE: IntentType.SCHEDULE_ADJUST 和 SCHEDULE_QUERY 在 parallel data fetch 之后处理（需要 schedule 数据）
 
     # Load recent messages (for prompt context)
     recent_messages = await db.message.find_many(
@@ -358,25 +438,6 @@ async def stream_chat_response(
     # --- Quick keyword emotion estimate for current message (no LLM) ---
     current_user_emotion = quick_emotion_estimate(user_message)
     prompt_user_emotion = current_user_emotion or prev_user_emotion
-
-    # --- Deletion intent: keyword check + LLM confirm + delete + reply ---
-    has_deletion_keyword = any(kw in user_message for kw in DELETION_KEYWORDS)
-    if has_deletion_keyword:
-        try:
-            intent = await detect_deletion_intent(user_message)
-            if intent and intent.get("target_description"):
-                description = intent["target_description"]
-                deleted = await delete_memories_by_description(user_id, description)
-                agent_name = agent.name if agent else "伙伴"
-                reply = await generate_deletion_reply(agent_name, description, deleted)
-                _fire_background(_save_replies(conversation_id, [reply]))
-                yield {"event": "reply", "data": json.dumps({"text": reply, "index": 0})}
-                await save_last_reply_timestamp(agent_id, user_id)
-                yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
-                _end_trace(_trace_ctx, trace_id, conversation_id)
-                return
-        except Exception as e:
-            logger.warning(f"Hot-path deletion failed, falling through to normal chat: {e}")
 
     # --- Topic tracking (Redis, no LLM) ---
     topic_info = await push_topic(conversation_id, user_message)
@@ -475,12 +536,14 @@ async def stream_chat_response(
     )
 
     # Process retrieval results
-    memory_strings = None
+    classified_memories = None  # ClassifiedMemory list for prompt_builder
+    memory_strings = None       # plain text list for summarizer/other consumers
     graph_context = None
     if isinstance(retrieval_result, Exception):
         logger.warning(f"Hybrid retrieval failed: {retrieval_result}")
     else:
-        memory_strings = retrieval_result.get("memories")
+        classified_memories = retrieval_result.get("memories")
+        memory_strings = retrieval_result.get("memory_strings")
         graph_context = retrieval_result.get("graph_context")
 
     if isinstance(emotion, Exception):
@@ -556,6 +619,32 @@ async def stream_chat_response(
     if ai_status:
         schedule_context = format_schedule_context(ai_status)
 
+    # --- IntentType.SCHEDULE_ADJUST: 作息调整（需要 schedule 数据，在 data fetch 之后处理） ---
+    if detected_intent.intent == IntentType.SCHEDULE_ADJUST and agent_id and schedule and ai_status:
+        try:
+            adj_result = await handle_schedule_adjustment(
+                agent_id=agent_id,
+                request=user_message,
+                current_status=ai_status,
+                intimacy_score=float(topic_intimacy),
+                seven_dim=seven_dim,
+            )
+            response = adj_result.get("response", "")
+            if response:
+                if adj_result.get("accepted"):
+                    await update_schedule_slot(agent_id, schedule, ai_status)
+                for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                    yield evt
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+        except Exception as e:
+            logger.warning(f"Schedule adjustment failed, falling through: {e}")
+
+    # --- IntentType.SCHEDULE_QUERY: 计划查询（增强 prompt，不短路） ---
+    if detected_intent.intent == IntentType.SCHEDULE_QUERY and schedule:
+        query_type = detected_intent.metadata.get("query_type", "current")
+        schedule_context = format_full_schedule_for_query(schedule, query_type, ai_status)
+
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
 
@@ -571,7 +660,7 @@ async def stream_chat_response(
     # Build prompt (pure string operations — instant)
     system_prompt = await build_system_prompt(
         agent=agent,
-        memories=memory_strings,
+        memories=classified_memories,
         working_facts=working_facts,
         delay_context=delay_context,
         relational_context=relational_context,
@@ -686,7 +775,6 @@ async def stream_chat_response(
         full_response=full_response,
         messages_dicts=messages_dicts,
         memory_strings=memory_strings,
-        has_deletion_keyword=has_deletion_keyword,
         cached_emotion=emotion,
         seven_dim=seven_dim,
         topic_intimacy=topic_intimacy,
@@ -727,7 +815,6 @@ async def _background_post_process(
     full_response: str,
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
-    has_deletion_keyword: bool = False,
     cached_emotion: dict | None = None,
     seven_dim: dict | None = None,
     topic_intimacy: float = 50.0,
@@ -748,9 +835,7 @@ async def _background_post_process(
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
-        # 删除检查已在热路径处理，不再后台重复执行
-        if agent_id and has_apology_keyword(user_message):
-            tasks.append(_bg_apology_check(agent_id, user_id, user_message))
+        # 道歉和删除检查已在热路径处理，不再后台重复执行
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
         # Positive recovery: messages reaching here passed boundary check (no banned words)

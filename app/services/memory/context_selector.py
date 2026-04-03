@@ -1,8 +1,20 @@
 """Context selector.
 
 Selects memories to fit within the 800-token prompt budget.
-Strategy: 5 semantic + 3 recent + 2 high importance (deduplicated).
+Classifies each memory by relevance: strong (score ≥ 0.7) / medium (0.4-0.7).
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass
+class ClassifiedMemory:
+    """记忆项，附带相关度分级。"""
+    text: str
+    relevance: str  # "strong" | "medium"
+    score: float
 
 
 def estimate_tokens(text: str) -> int:
@@ -13,12 +25,16 @@ def estimate_tokens(text: str) -> int:
 def select_context(
     ranked_memories: list[dict],
     token_budget: int = 800,
-) -> list[str]:
-    """Select memories to fit within token budget.
+) -> list[ClassifiedMemory]:
+    """Select memories to fit within token budget, with relevance classification.
 
-    Returns list of memory summary strings.
+    Classification:
+    - strong: rank_score ≥ 0.7 → "你清楚记得的事"
+    - medium: 0.4 ≤ rank_score < 0.7 → "你有印象的事"
+
+    Returns list of ClassifiedMemory.
     """
-    selected: list[str] = []
+    selected: list[ClassifiedMemory] = []
     used_tokens = 0
     seen_ids: set[str] = set()
 
@@ -28,13 +44,21 @@ def select_context(
             continue
 
         text = mem.get("summary") or mem.get("content", "")
+        if not text:
+            continue
         tokens = estimate_tokens(text)
 
         if used_tokens + tokens > token_budget:
             continue
 
+        score = float(mem.get("rank_score", mem.get("score", 0.5)))
+        if score >= 0.7:
+            relevance = "strong"
+        else:
+            relevance = "medium"
+
         seen_ids.add(mid)
-        selected.append(text)
+        selected.append(ClassifiedMemory(text=text, relevance=relevance, score=score))
         used_tokens += tokens
 
     return selected
