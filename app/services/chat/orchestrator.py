@@ -340,8 +340,10 @@ async def stream_chat_response(
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": response},
             ]))
-            # 拉黑状态下检测道歉（PRD §6.6.2.2）
-            if boundary_result.get("zone") == "blocked" and has_apology_keyword(user_message):
+            # 拉黑状态下始终检测道歉（LLM语义识别，覆盖隐式道歉）
+            # 即使没有精确道歉关键词，用户也可能用隐式方式道歉
+            # 如 "那天的事是我不对" / "我不该那样说你"
+            if boundary_result.get("zone") == "blocked":
                 _fire_background(_bg_apology_check(agent_id, user_id, user_message))
             _end_trace(_trace_ctx, trace_id, conversation_id)
             return

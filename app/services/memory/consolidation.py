@@ -81,10 +81,19 @@ async def consolidate_weekly():
     await check_l2_demotion_candidates()
 
 
+# PRD要求年提及≥10次，但初期数据稀疏时门槛太高。
+# 折中：至少被提及3次才允许升级，确保记忆确实被用户反复关注。
+MIN_MENTION_COUNT_FOR_L1 = 3
+
+
 async def check_l2_upgrade_candidates() -> None:
     """检测满足升级条件的L2记忆并升级到L1。
 
-    条件: 综合分数(importance × time_factor × freq_factor) ≥ 0.85 + category规则允许。
+    条件:
+      1. 综合分数(importance × time_factor × freq_factor) ≥ 0.85
+      2. mentionCount ≥ MIN_MENTION_COUNT_FOR_L1 (PRD §3.7.3 频率门槛)
+      3. category规则允许
+      4. 同类L1不超过5条
     """
     now = datetime.now(timezone.utc)
     candidates = await memory_repo.find_many(
@@ -99,6 +108,10 @@ async def check_l2_upgrade_candidates() -> None:
         months_age = (now - mem.createdAt.replace(tzinfo=timezone.utc if mem.createdAt.tzinfo is None else mem.createdAt.tzinfo)).total_seconds() / 86400 / 30
         score = compute_dynamic_weight(mem.importance, months_age, mem.mentionCount)
         if score < 0.85:
+            continue
+
+        # PRD §3.7.3: 频率门槛 — 记忆需被多次提及才有资格升级
+        if mem.mentionCount < MIN_MENTION_COUNT_FOR_L1:
             continue
 
         rule = get_promotion_rule(mem.mainCategory, mem.subCategory)
@@ -121,7 +134,7 @@ async def check_l2_upgrade_candidates() -> None:
             continue
 
         await memory_repo.update(mem.id, source=mem.source, level=1)
-        logger.info(f"Upgraded L2→L1: {mem.id} (score={score:.2f})")
+        logger.info(f"Upgraded L2→L1: {mem.id} (score={score:.2f}, mentions={mem.mentionCount})")
 
 
 async def check_l2_demotion_candidates() -> None:

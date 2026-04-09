@@ -698,59 +698,26 @@ def _metadata_with_window_end(state: ProactiveStateRecord, plan_window_end_at: d
     return json.dumps(current, ensure_ascii=False)
 
 
-async def escalate_waiting_state(
+async def _escalate_silence_level(
     state: ProactiveStateRecord,
     *,
-    now: datetime | None = None,
+    now: datetime,
+    trigger: str = "reply_timeout",
 ) -> None:
+    """共享的 n+1 升级逻辑。
+
+    由两个场景调用:
+    - windows_exhausted: 所有窗口概率都未命中，算作一轮未触发
+    - reply_timeout: 主动消息发出后用户24h未回复
+
+    升级规则 (流程图):
+    - n ≤ 4: 标准窗口规则，从窗口1重新开始
+    - n = 5: 7天内2次强制触发
+    - n = 6: 30天内1次最终触发
+    - n > 6: 永久停止
+    """
     now_ts = _now(now)
     next_n = state.silence_level_n + 1
-
-    if state.followup_plan_type == "seven_day_sparse":
-        remaining = int(state.remaining_forced_triggers or 0)
-        if remaining > 0:
-            window_end = _parse_dt((state.metadata or {}).get("plan_window_end_at")) or (now_ts + timedelta(days=7))
-            next_due = _pick_random_future_due_at(now_ts, end_at=window_end)
-            await _resume_forced_plan(
-                state,
-                now_ts=now_ts,
-                due_at=next_due,
-                followup_plan_type="seven_day_sparse",
-                remaining_forced_triggers=remaining,
-                metadata_json=_metadata_with_window_end(state, window_end),
-                event_type="silence_plan_resumed",
-                payload={"plan": "seven_day_sparse", "remaining": remaining, "due_at": next_due.isoformat()},
-            )
-            return
-        next_n = max(next_n, 6)
-
-    if state.followup_plan_type == "thirty_day_final":
-        remaining = int(state.remaining_forced_triggers or 0)
-        if remaining > 0:
-            window_end = _parse_dt((state.metadata or {}).get("plan_window_end_at")) or (now_ts + timedelta(days=30))
-            next_due = _pick_random_future_due_at(now_ts, end_at=window_end)
-            await _resume_forced_plan(
-                state,
-                now_ts=now_ts,
-                due_at=next_due,
-                followup_plan_type="thirty_day_final",
-                remaining_forced_triggers=remaining,
-                metadata_json=_metadata_with_window_end(state, window_end),
-                event_type="silence_plan_resumed",
-                payload={"plan": "thirty_day_final", "remaining": remaining, "due_at": next_due.isoformat()},
-            )
-            return
-        await stop_proactive_state(state, reason="final_no_reply", now=now_ts)
-        await log_proactive_event(
-            state_id=state.id,
-            workspace_id=state.workspace_id,
-            user_id=state.user_id,
-            agent_id=state.agent_id,
-            conversation_id=state.conversation_id,
-            event_type="permanently_stopped",
-            payload={"reason": "final_no_reply"},
-        )
-        return
 
     if next_n <= 4:
         due_at = _pick_random_due_at(now_ts, 1, now_ts)
@@ -787,7 +754,7 @@ async def escalate_waiting_state(
             conversation_id=state.conversation_id,
             event_type="silence_escalated",
             window_index=1,
-            payload={"n": next_n, "plan": "normal", "due_at": due_at.isoformat()},
+            payload={"n": next_n, "plan": "normal", "trigger": trigger, "due_at": due_at.isoformat()},
         )
         return
 
@@ -803,7 +770,7 @@ async def escalate_waiting_state(
             silence_level_n=5,
             metadata_json=_metadata_with_window_end(state, window_end),
             event_type="silence_escalated",
-            payload={"n": 5, "plan": "seven_day_sparse", "remaining": 2, "due_at": next_due.isoformat()},
+            payload={"n": 5, "plan": "seven_day_sparse", "trigger": trigger, "remaining": 2, "due_at": next_due.isoformat()},
         )
         return
 
@@ -819,7 +786,7 @@ async def escalate_waiting_state(
             silence_level_n=6,
             metadata_json=_metadata_with_window_end(state, window_end),
             event_type="silence_escalated",
-            payload={"n": 6, "plan": "thirty_day_final", "remaining": 1, "due_at": next_due.isoformat()},
+            payload={"n": 6, "plan": "thirty_day_final", "trigger": trigger, "remaining": 1, "due_at": next_due.isoformat()},
         )
         return
 
@@ -831,8 +798,63 @@ async def escalate_waiting_state(
         agent_id=state.agent_id,
         conversation_id=state.conversation_id,
         event_type="permanently_stopped",
-        payload={"reason": "silence_exhausted", "n": next_n},
+        payload={"reason": "silence_exhausted", "trigger": trigger, "n": next_n},
     )
+
+
+async def escalate_waiting_state(
+    state: ProactiveStateRecord,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """主动消息发送后用户未回复时的升级处理。
+
+    处理 seven_day_sparse/thirty_day_final 的剩余触发次数，
+    然后委托给共享的 _escalate_silence_level 处理 n+1 逻辑。
+    """
+    now_ts = _now(now)
+
+    # 处理强制计划的剩余触发次数
+    if state.followup_plan_type == "seven_day_sparse":
+        remaining = int(state.remaining_forced_triggers or 0)
+        if remaining > 0:
+            window_end = _parse_dt((state.metadata or {}).get("plan_window_end_at")) or (now_ts + timedelta(days=7))
+            next_due = _pick_random_future_due_at(now_ts, end_at=window_end)
+            await _resume_forced_plan(
+                state,
+                now_ts=now_ts,
+                due_at=next_due,
+                followup_plan_type="seven_day_sparse",
+                remaining_forced_triggers=remaining,
+                metadata_json=_metadata_with_window_end(state, window_end),
+                event_type="silence_plan_resumed",
+                payload={"plan": "seven_day_sparse", "remaining": remaining, "due_at": next_due.isoformat()},
+            )
+            return
+        # 七日计划用完 → 强制跳到 n=6
+        state.silence_level_n = 5  # _escalate 会 +1 变成 6
+
+    if state.followup_plan_type == "thirty_day_final":
+        remaining = int(state.remaining_forced_triggers or 0)
+        if remaining > 0:
+            window_end = _parse_dt((state.metadata or {}).get("plan_window_end_at")) or (now_ts + timedelta(days=30))
+            next_due = _pick_random_future_due_at(now_ts, end_at=window_end)
+            await _resume_forced_plan(
+                state,
+                now_ts=now_ts,
+                due_at=next_due,
+                followup_plan_type="thirty_day_final",
+                remaining_forced_triggers=remaining,
+                metadata_json=_metadata_with_window_end(state, window_end),
+                event_type="silence_plan_resumed",
+                payload={"plan": "thirty_day_final", "remaining": remaining, "due_at": next_due.isoformat()},
+            )
+            return
+        # 三十日计划用完 → 强制跳到 n=6 让 _escalate 产生 n=7 → 永久停止
+        state.silence_level_n = 6
+
+    # 委托给共享逻辑
+    await _escalate_silence_level(state, now=now_ts, trigger="reply_timeout")
 
 
 async def _resume_forced_plan(
@@ -897,7 +919,8 @@ async def advance_to_next_window(
     current_index = state.current_window_index if state.current_window_index is not None else 0
     next_index = current_index + 1
     if next_index >= len(PROACTIVE_WINDOWS):
-        await stop_proactive_state(state, reason="windows_exhausted", now=now_ts)
+        # 流程图: 所有窗口用完 → 算作一轮未触发 → n+1 升级
+        await _escalate_silence_level(state, now=now_ts, trigger="windows_exhausted")
         return
 
     due_at = _pick_random_due_at(state.t0_at or now_ts, next_index, now_ts)

@@ -11,6 +11,7 @@ Includes Redis caching for retrieval results and graph context.
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 
 from app.services.memory.query_analyzer import analyze_query
@@ -27,6 +28,42 @@ from app.services.runtime.cache import (
 
 logger = logging.getLogger(__name__)
 
+# 无需检索的短消息/语气词/纯问候（跳过 LLM query_analyzer + 向量搜索）
+_TRIVIAL_WORDS = {
+    "嗯", "嗯嗯", "哦", "哦哦", "好", "好的", "行", "行吧", "ok", "OK",
+    "哈哈", "哈哈哈", "呵呵", "嘻嘻", "嘿嘿", "哇", "额", "唔",
+    "是", "是的", "对", "对对", "没", "没有", "不是", "不会",
+    "谢谢", "感谢", "好吧", "可以", "当然", "知道了", "收到",
+    "早", "早上好", "晚安", "你好", "hello", "hi", "嗨",
+    "啊", "啊啊", "了", "吧", "呢", "吗", "呀", "喔", "噢",
+    "666", "hh", "hhh", "哭", "累",
+}
+
+_EMPTY_RESULT = {
+    "memories": None,
+    "memory_strings": None,
+    "graph_context": None,
+    "analysis": {"intent": "trivial", "skipped": True},
+}
+
+
+def _is_trivial_message(message: str) -> bool:
+    """快速判断消息是否为不需要记忆检索的无意义短消息。"""
+    text = message.strip()
+    if not text:
+        return True
+    # 纯 emoji / 纯标点
+    cleaned = re.sub(r'[\s\U00010000-\U0010ffff.,!?。，！？…~～、]+', '', text)
+    if not cleaned:
+        return True
+    # 精确匹配语气词表
+    if text.lower() in _TRIVIAL_WORDS:
+        return True
+    # 极短纯重复字符 (如 "嗯嗯嗯嗯")
+    if len(text) <= 6 and len(set(text)) <= 2:
+        return True
+    return False
+
 
 async def hybrid_retrieve(
     message: str,
@@ -42,6 +79,11 @@ async def hybrid_retrieve(
       - memories: list[str] (formatted for prompt)
       - graph_context: dict (topics, entities)
     """
+    # 快速跳过无意义短消息（避免 LLM query_analyzer + 向量搜索的开销）
+    if _is_trivial_message(message):
+        logger.debug("Skipping retrieval for trivial message: %s", message[:20])
+        return _EMPTY_RESULT
+
     # Check cache
     cached = await cache_retrieval(message, user_id, workspace_id=workspace_id)
     if cached:

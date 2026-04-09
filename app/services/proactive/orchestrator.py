@@ -70,7 +70,7 @@ async def scan_proactive_states(now: datetime | None = None) -> None:
 
 
 async def _process_due_state(state, now: datetime | None = None) -> None:
-    # --- Mutex: workspace active ---
+    # --- Mutex: workspace active (永久性条件，停止合理) ---
     workspace_rows = await db.query_raw(
         """
         SELECT status
@@ -89,12 +89,17 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
         await stop_proactive_state(state, reason="workspace_inactive", now=now)
         return
 
-    # --- Mutex: 30分钟内有用户活动 ---
+    # --- Mutex: 30分钟内有用户活动 (临时性条件，推迟到下一窗口) ---
     if await has_recent_user_activity(state.workspace_id, now=now, window_minutes=30):
-        await stop_proactive_state(state, reason="recent_user_activity", now=now)
+        await advance_to_next_window(
+            state,
+            now=now,
+            event_type="window_deferred",
+            payload={"reason": "recent_user_activity"},
+        )
         return
 
-    # --- Mutex: 疲劳停止 (BUG 5) ---
+    # --- Mutex: 话题疲劳 (临时性条件，推迟到下一窗口) ---
     recent_user_msgs = await db.query_raw(
         """
         SELECT m.content
@@ -111,10 +116,15 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
     recent_texts = [str(r.get("content", "")) for r in (recent_user_msgs or [])]
     recent_texts.reverse()  # chronological order
     if detect_topic_fatigue({}, recent_texts):
-        await stop_proactive_state(state, reason="topic_fatigue", now=now)
+        await advance_to_next_window(
+            state,
+            now=now,
+            event_type="window_deferred",
+            payload={"reason": "topic_fatigue"},
+        )
         return
 
-    # --- Gate: 亲密度前置检查 (BUG 4) ---
+    # --- Gate: 亲密度前置检查 (永久性条件，停止合理) ---
     topic_intimacy = await get_topic_intimacy(state.agent_id, state.user_id)
     if state.stage == "cold_start" and topic_intimacy < 10:
         await stop_proactive_state(state, reason="intimacy_too_low", now=now)
