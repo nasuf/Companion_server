@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 Provider = str
 
+# Ollama httpx 客户端超时
+# 默认 5s 太短 — 大模型(qwen2.5:14b)首次加载 + 长 prompt 推理可能耗时几十秒
+# 注意：不设 trust_env=False，让生产环境可以通过 HTTP_PROXY 环境变量配置代理。
+# 本地开发时通过 start.sh 设置 NO_PROXY=localhost 来绕过代理（见 start.sh）。
+_OLLAMA_CLIENT_KWARGS = {
+    "timeout": 300.0,
+}
+
 
 def _default_provider() -> Provider:
     return "dashscope" if settings.online_model else "ollama"
@@ -94,6 +102,8 @@ def get_chat_model() -> BaseChatModel:
     return ChatOllama(
         model=_chat_model_name(),
         base_url=settings.ollama_base_url,
+        client_kwargs=_OLLAMA_CLIENT_KWARGS,
+        async_client_kwargs=_OLLAMA_CLIENT_KWARGS,
     )
 
 
@@ -108,6 +118,8 @@ def get_summarizer_model() -> BaseChatModel:
     return ChatOllama(
         model=_summarizer_model_name(),
         base_url=settings.ollama_base_url,
+        client_kwargs=_OLLAMA_CLIENT_KWARGS,
+        async_client_kwargs=_OLLAMA_CLIENT_KWARGS,
     )
 
 
@@ -122,6 +134,8 @@ def get_utility_model() -> BaseChatModel:
     return ChatOllama(
         model=_utility_model_name(),
         base_url=settings.ollama_base_url,
+        client_kwargs=_OLLAMA_CLIENT_KWARGS,
+        async_client_kwargs=_OLLAMA_CLIENT_KWARGS,
     )
 
 

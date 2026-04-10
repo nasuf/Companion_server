@@ -95,6 +95,23 @@ echo "Generating Prisma client..."
 export PATH="$(pwd)/.venv/bin:$PATH"
 .venv/bin/prisma generate 2>/dev/null || true
 
+# ── 绕过代理 ──
+# 本地开发时如果开启了代理 (HTTP_PROXY/HTTPS_PROXY)，
+# Prisma engine / Ollama / Supabase 连接会被代理拦截。
+# 把 localhost + Supabase host 加到 NO_PROXY 白名单绕过代理直连。
+# 仅影响通过 start.sh 启动的本地开发环境，生产部署不走此脚本，不受影响。
+LOCAL_NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1"
+if [ -f ".env" ]; then
+    DB_HOST=$(grep -E '^DATABASE_URL=' .env | sed -E 's/.*@([^:\/]+).*/\1/' || true)
+    [ -n "$DB_HOST" ] && LOCAL_NO_PROXY="$LOCAL_NO_PROXY,$DB_HOST"
+fi
+if [ -n "$NO_PROXY" ]; then
+    export NO_PROXY="$LOCAL_NO_PROXY,$NO_PROXY"
+else
+    export NO_PROXY="$LOCAL_NO_PROXY"
+fi
+export no_proxy="$NO_PROXY"
+
 # ── Start server ──
 echo ""
 echo "Starting server on port $PORT..."

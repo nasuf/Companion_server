@@ -9,6 +9,8 @@ from app.neo4j_client import get_driver, close_neo4j
 from app.services.graph.schema import init_graph_schema
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
 from app.services.prompting.store import ensure_prompt_templates
+from app.services.character import ensure_default_template
+from app.services.career import ensure_default_careers
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
 
 # Configure logging and tracing before anything else
@@ -24,6 +26,8 @@ async def lifespan(app: FastAPI):
     await get_driver()
     await init_graph_schema()
     await ensure_prompt_templates()
+    await ensure_default_template()
+    await ensure_default_careers()
     setup_scheduler()
     yield
     # Shutdown
@@ -59,6 +63,8 @@ from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
 from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
+from app.api.admin.character import router as admin_character_router
+from app.api.admin.career import router as admin_career_router
 from app.api.public.traces import router as traces_router
 
 app.include_router(health_router)
@@ -75,4 +81,6 @@ app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(auth_router)
 app.include_router(admin_users_router)
+app.include_router(admin_character_router)
+app.include_router(admin_career_router)
 app.include_router(traces_router)
