@@ -14,34 +14,7 @@ from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
-CONFLICT_DETECTION_PROMPT = """你是一个记忆冲突检测系统。
-
-请分析新记忆是否与现有核心记忆（L1）存在矛盾。
-
-现有L1记忆列表：
-{existing_memories}
-
-新提取的记忆：
-{new_memory}
-
-请判断新记忆是否与某条现有记忆存在矛盾（例如：旧记忆说"用户喜欢咖啡"，新记忆说"用户不喝咖啡了"）。
-
-返回JSON：
-{{
-  "has_conflict": true/false,
-  "conflicting_memory_id": "冲突的旧记忆ID（如无冲突则为null）",
-  "conflict_type": "update/correction/preference_change/null",
-  "confidence": 0.0-1.0,
-  "reason": "简要说明冲突原因",
-  "resolution": "update_l1/demote_old/ignore"
-}}
-
-规则：
-- update: 新信息明确替代旧信息（如改名、换工作）→ resolution=update_l1
-- correction: 用户纠正之前的错误信息 → resolution=update_l1
-- preference_change: 偏好发生变化（如不再喜欢某食物）→ resolution=update_l1，旧记忆降级L2
-- 如果置信度<0.8，resolution=ignore
-- 如果没有冲突，has_conflict=false"""
+# Prompt is loaded from the prompt store at runtime via get_prompt_text("memory.conflict_detection")
 
 
 async def detect_conflicts(
@@ -68,12 +41,14 @@ async def detect_conflicts(
     if scope.get("prefer_same_sub_category") and new_memory.get("sub_category"):
         where["subCategory"] = new_memory.get("sub_category")
 
-    existing = await memory_repo.find_many(
-        source="user",
-        where=where,
-        order={"importance": "desc"},
-        take=20,
+    # 搜索 user + ai 两种 source 的 L1 记忆, 确保对话记忆能与人生经历(ai)做冲突检测
+    existing_user = await memory_repo.find_many(
+        source="user", where=where, order={"importance": "desc"}, take=10,
     )
+    existing_ai = await memory_repo.find_many(
+        source="ai", where=where, order={"importance": "desc"}, take=10,
+    )
+    existing = existing_user + existing_ai
 
     if not existing:
         return None

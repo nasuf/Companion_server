@@ -65,6 +65,7 @@ from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
 from app.api.admin.character import router as admin_character_router
 from app.api.admin.career import router as admin_career_router
+from app.api.admin.agents import router as admin_agents_router
 from app.api.public.traces import router as traces_router
 
 app.include_router(health_router)
@@ -83,4 +84,5 @@ app.include_router(auth_router)
 app.include_router(admin_users_router)
 app.include_router(admin_character_router)
 app.include_router(admin_career_router)
+app.include_router(admin_agents_router)
 app.include_router(traces_router)

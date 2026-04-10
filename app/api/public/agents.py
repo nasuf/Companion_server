@@ -8,11 +8,11 @@ from prisma import Json
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.memory.self_memory import generate_initial_self_memories
 from app.services.prompting.store import get_prompt_text
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.trait_model import get_seven_dim
+from app.services.life_story import generate_full_life_story, get_progress
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview,
     generate_daily_schedule,
@@ -67,10 +67,7 @@ async def create_agent(data: AgentCreate):
         raise
     try:
         staged_workspaces = await stage_active_workspaces_for_user(data.user_id)
-        await db.aiagent.update(
-            where={"id": agent.id},
-            data={"status": "active", "archivedAt": None},
-        )
+        # status 保持 "provisioning" — 等人生经历生成完成后再设为 "active"
         workspace = await activate_workspace(workspace.id)
         await finalize_archived_workspaces(staged_workspaces)
     except Exception:
@@ -149,24 +146,39 @@ async def create_agent(data: AgentCreate):
         except Exception as e:
             logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
 
-        # Step 3: Self-memories (depends on identity)
+        # Step 3: initial self-memories 已由万字人生经历替代, 不再单独生成
+        # 人生经历在 _init_and_generate_story() 中执行
+
+    # Background: identity + schedule + self-memories → then life story
+    async def _init_and_generate_story():
         try:
-            await generate_initial_self_memories(
+            await _init_agent_background()
+        except Exception as e:
+            logger.error(f"Agent background init failed for {agent.id}: {e}", exc_info=True)
+        # 无论基础初始化是否成功, 都尝试生成人生经历
+        ws_id = workspace.id if workspace else None
+        try:
+            await generate_full_life_story(
                 agent_id=agent.id,
-                agent_name=agent.name,
-                personality=personality,
                 user_id=data.user_id,
-                background=background,
-                values=values,
-                gender=gender,
-                age=age or 22,
-                occupation=occupation or "",
-                city=city or "",
+                name=agent.name,
+                gender=agent.gender,
+                personality=agent.personality,
+                seven_dim=get_seven_dim(agent),
+                workspace_id=ws_id,
             )
         except Exception as e:
-            logger.warning(f"Initial self-memory generation failed for agent {agent.id}: {e}")
+            logger.error(f"Life story generation failed for {agent.id}: {e}", exc_info=True)
+            # generate_full_life_story 内部已有 _activate_agent 兜底;
+            # 这里仅在函数本身抛出未捕获异常时做最后保底
+            try:
+                a = await db.aiagent.find_unique(where={"id": agent.id})
+                if a and a.status != "active":
+                    await db.aiagent.update(where={"id": agent.id}, data={"status": "active"})
+            except Exception:
+                pass
 
-    asyncio.create_task(_init_agent_background())
+    asyncio.create_task(_init_and_generate_story())
 
     return AgentResponse(
         id=agent.id,
@@ -328,4 +340,43 @@ async def get_agent_status(agent_id: str):
         **status,
         "status_label": status_label(str(status.get("status", ""))),
         "type_label": type_label(str(status.get("type", ""))),
+    }
+
+
+@router.get("/{agent_id}/provision-status")
+async def get_provision_status(agent_id: str):
+    """获取Agent初始化进度（人生经历生成）。
+
+    前端轮询此接口显示进度条，直到 stage=complete。
+    """
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # 已激活 → 直接返回完成
+    if agent.status == "active":
+        return {
+            "agent_id": agent_id,
+            "status": "active",
+            "stage": "complete",
+            "percent": 100,
+            "message": "初始化完成",
+        }
+
+    # 查 Redis 进度
+    progress = await get_progress(agent_id)
+    if progress:
+        return {
+            "agent_id": agent_id,
+            "status": agent.status,
+            **progress,
+        }
+
+    # 刚创建，还没开始
+    return {
+        "agent_id": agent_id,
+        "status": agent.status,
+        "stage": "initializing",
+        "percent": 0,
+        "message": "正在初始化...",
     }

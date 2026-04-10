@@ -64,6 +64,13 @@ async def chat(conversation_id: str, data: ChatRequest):
     if conv.isDeleted:
         raise HTTPException(status_code=410, detail="Conversation deleted")
 
+    # 阻断: agent 还在初始化中（人生经历生成未完成）
+    if conv.agent and conv.agent.status == "provisioning":
+        raise HTTPException(
+            status_code=503,
+            detail="AI 正在初始化中，请稍等...",
+        )
+
     user_id = conv.userId
 
     # --- 12E: 碎片化消息聚合 (PRD §3.4) ---

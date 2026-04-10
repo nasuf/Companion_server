@@ -327,7 +327,17 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     except Exception:
         pass
 
-    # 8. 删除 Agent 本身
+    # 8. 解绑 CharacterProfile（清空 agentId 引用，背景本身保留可复用）
+    try:
+        cnt = await db.execute_raw(
+            'UPDATE "character_profiles" SET "agent_id" = NULL WHERE "agent_id" = $1',
+            agent_id,
+        )
+        stats["character_profiles_unlinked"] = cnt or 0
+    except Exception:
+        pass
+
+    # 9. 删除 Agent 本身
     await db.aiagent.delete(where={"id": agent_id})
     stats["agent"] = 1
 
