@@ -327,7 +327,17 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     except Exception:
         pass
 
-    # 8. 解绑 CharacterProfile（清空 agentId 引用，背景本身保留可复用）
+    # 8. 删除 PatienceState（有 agent_id 外键）
+    try:
+        cnt = await db.execute_raw(
+            'DELETE FROM "patience_states" WHERE "agent_id" = $1',
+            agent_id,
+        )
+        stats["patience_states"] = cnt or 0
+    except Exception:
+        pass
+
+    # 8b. 解绑 CharacterProfile（清空 agentId 引用，背景本身保留可复用）
     try:
         cnt = await db.execute_raw(
             'UPDATE "character_profiles" SET "agent_id" = NULL WHERE "agent_id" = $1',
