@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.services.memory.taxonomy import TAXONOMY
+from app.services.runtime.data_reset import hard_delete_agent_data
 
 router = APIRouter(prefix="/admin-api/agents", tags=["admin-agents"])
 
@@ -232,3 +233,20 @@ async def get_messages(
         }
         for m in messages
     ]
+
+
+@router.delete("/{agent_id}")
+async def delete_agent(
+    agent_id: str,
+    _: str = Depends(require_admin_jwt),
+):
+    """Delete an agent and ALL related data (conversations, memories, embeddings, graph, Redis).
+
+    Uses the same hard_delete_agent_data as the user management tab.
+    Scoped by workspace — other agents' data is not affected.
+    """
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    stats = await hard_delete_agent_data(agent_id, agent.userId)
+    return {"ok": True, "stats": stats}
