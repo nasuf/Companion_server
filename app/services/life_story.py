@@ -1,9 +1,9 @@
-"""AI 万字人生经历生成服务。
+"""AI 人生经历生成服务。
 
 流程:
   1. 选择匹配的 CharacterProfile (性别匹配, published 状态)
   2. 生成人生大纲 (12-15 个章节标题+关键事件)
-  3. 逐章扩写 (~800 字/章, 传入大纲+前章摘要保证连贯)
+  3. 逐章提取结构化记忆 (每章 5-10 条, 与聊天记忆格式一致)
   4. 写入 AI L1 记忆
   5. 通过 Redis 实时更新进度, 供前端轮询
 """
@@ -16,7 +16,7 @@ import random
 
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.models import get_chat_model, invoke_json, invoke_text
+from app.services.llm.models import get_chat_model, invoke_json
 from app.services.memory.storage import store_memory
 from app.services.memory.taxonomy import TAXONOMY
 
@@ -175,86 +175,88 @@ async def generate_outline(
     return []
 
 
-async def expand_chapter(
+async def extract_chapter_memories(
     chapter: dict,
     outline_summary: str,
-    profile_data: dict,
     name: str,
-    prev_summary: str | None,
     chapter_index: int,
     total_chapters: int,
-) -> str:
-    """Expand a single chapter outline into ~800 chars of narrative."""
-    prompt = f"""你是一个人物传记作家，正在为角色「{name}」撰写人生经历的第 {chapter_index + 1}/{total_chapters} 章。
+) -> list[dict]:
+    """Extract 5-10 structured memories from a single chapter."""
+    prompt = f"""你正在为角色「{name}」梳理人生经历第 {chapter_index + 1}/{total_chapters} 阶段的记忆。
 
-完整大纲：
+完整人生大纲：
 {outline_summary}
 
-{"上一章摘要：" + prev_summary if prev_summary else "这是第一章。"}
-
-当前章节：
+当前阶段：
 - 标题: {chapter.get('title', '')}
 - 年龄阶段: {chapter.get('age_range', '')}
 - 关键事件: {json.dumps(chapter.get('key_events', []), ensure_ascii=False)}
 
+请为这个阶段生成 5-10 条结构化记忆。每条记忆是一个独立的事实/经历/感受，格式与聊天记忆一致。
+
+记忆分类表（必须严格选择）：
+{_taxonomy_description()}
+
+返回 JSON：
+{{
+  "memories": [
+    {{
+      "summary": "一句话描述（20-80字），以'我'开头",
+      "level": 1,
+      "importance": 0.85,
+      "type": "identity|preference|life|emotion|thought",
+      "main_category": "身份|偏好|生活|情绪|思维",
+      "sub_category": "从上方分类表中选择"
+    }}
+  ]
+}}
+
 要求：
-1. 以第一人称「我」叙述，语气自然真实，像在跟朋友讲述自己的经历
-2. 篇幅控制在600-1000字
-3. 要有具体的场景描写、情感体验、心理变化
-4. 与上一章自然衔接，与大纲逻辑一致
-5. 不要写标题或章节号，直接开始叙述
-6. 不要使用"我是一个AI"等打破沉浸感的表述"""
+1. 每条记忆只描述一个具体事实，如"我5岁时养了一只叫小白的猫"
+2. 不要写成大段叙事，每条 summary 控制在 20-80 字
+3. 以第一人称「我」开头
+4. 涵盖具体人物、地点、事件、情感、决定等细节
+5. 不同记忆应覆盖不同的分类（身份/偏好/生活/情绪/思维）
+6. importance 范围: 核心身份事实 0.9-0.95, 重要经历 0.8-0.9, 情感/偏好 0.7-0.85
+7. sub_category 必须从分类表中原样复制，禁止自造"""
 
     model = get_chat_model()
-    text = await invoke_text(model, prompt)
-    return text.strip()
+    result = await invoke_json(model, prompt)
+    if isinstance(result, dict) and "memories" in result:
+        return result["memories"]
+    if isinstance(result, list):
+        return result
+    return []
 
 
-def _resolve_category(chapter: dict) -> tuple[str, str]:
-    """Use LLM-assigned main_category + sub_category from outline, validated against TAXONOMY."""
-    main = chapter.get("main_category", "")
-    sub = chapter.get("sub_category", "")
-    # Validate against TAXONOMY
-    if main in TAXONOMY and sub in TAXONOMY[main]:
-        return main, sub
-    # main valid but sub invalid → fallback to "其他"
-    if main in TAXONOMY:
-        return main, "其他"
-    # Both invalid → fallback
-    return "生活", "其他"
-
-
-async def store_chapters_as_memories(
+async def store_chapter_memories(
     agent_id: str,
     user_id: str,
-    chapters: list[dict],
-    expanded_texts: list[str],
+    all_memories: list[dict],
     workspace_id: str | None = None,
 ) -> list[str]:
-    """Store expanded chapters as L1 AI memories, updating progress per item."""
+    """Store extracted chapter memories as L1 AI memories."""
     stored_ids = []
-    total = len(chapters)
-    for i, (chapter, text) in enumerate(zip(chapters, expanded_texts)):
-        if not text:
+    total = len(all_memories)
+    for i, mem in enumerate(all_memories):
+        summary = mem.get("summary", "")
+        if not summary:
             continue
         await set_progress(
             agent_id, "storing_memories",
             current=i + 1, total=total,
             message=f"正在写入记忆 ({i+1}/{total})...",
         )
-        main_cat, sub_cat = _resolve_category(chapter)
-        title = chapter.get("title", f"人生经历第{i+1}章")
-        summary = f"{title} ({chapter.get('age_range', '')})"
-
         memory_id = await store_memory(
             user_id=user_id,
-            content=text,
+            content=summary,
             summary=summary,
             level=1,
-            importance=0.95,
-            memory_type="life",
-            main_category=main_cat,
-            sub_category=sub_cat,
+            importance=float(mem.get("importance", 0.85)),
+            memory_type=mem.get("type", "life"),
+            main_category=mem.get("main_category", "生活"),
+            sub_category=mem.get("sub_category", "其他"),
             source="ai",
             workspace_id=workspace_id,
         )
@@ -272,7 +274,7 @@ async def generate_full_life_story(
     seven_dim: dict | None,
     workspace_id: str | None = None,
 ) -> None:
-    """Main entry point: select profile → generate outline → expand chapters → store L1 memories.
+    """Main entry point: select profile → outline → extract memories → store L1.
 
     Updates Redis progress throughout. Sets agent status to 'active' when done.
     """
@@ -315,46 +317,37 @@ async def generate_full_life_story(
             for i, ch in enumerate(chapters)
         )
 
-        # Step 3: Expand each chapter
-        expanded: list[str] = []
-        prev_summary: str | None = None
+        # Step 3: Extract structured memories from each chapter
+        all_memories: list[dict] = []
         for i, chapter in enumerate(chapters):
             await set_progress(
                 agent_id, "generating_chapter",
                 current=i + 1, total=total,
-                message=f"正在撰写「{chapter.get('title', '')}」({i+1}/{total})...",
+                message=f"正在提取「{chapter.get('title', '')}」的记忆 ({i+1}/{total})...",
             )
             try:
-                text = await expand_chapter(
-                    chapter, outline_summary, profile_data,
-                    name, prev_summary, i, total,
+                memories = await extract_chapter_memories(
+                    chapter, outline_summary, name, i, total,
                 )
-                expanded.append(text)
-                # Use first 100 chars as summary for next chapter's context
-                prev_summary = text[:100] + "..." if len(text) > 100 else text
+                all_memories.extend(memories)
             except Exception as e:
-                logger.warning(f"Chapter {i+1} expansion failed: {e}")
-                expanded.append("")
+                logger.warning(f"Chapter {i+1} memory extraction failed: {e}")
 
         # Step 4: Store as L1 memories (progress updated inside store function)
-        valid_chapters = [(ch, txt) for ch, txt in zip(chapters, expanded) if txt]
-        stored_ids = await store_chapters_as_memories(
-            agent_id, user_id,
-            [ch for ch, _ in valid_chapters],
-            [txt for _, txt in valid_chapters],
+        stored_ids = await store_chapter_memories(
+            agent_id, user_id, all_memories,
             workspace_id=workspace_id,
         )
 
-        total_chars = sum(len(t) for t in expanded if t)
         logger.info(
             f"Life story complete for agent {agent_id}: "
-            f"{len(stored_ids)} memories, {total_chars} chars"
+            f"{len(stored_ids)} memories stored ({len(all_memories)} extracted)"
         )
 
         # Step 5: Mark complete
         await set_progress(
             agent_id, "complete",
-            message=f"人生经历生成完成: {total_chars} 字, {len(stored_ids)} 段记忆",
+            message=f"人生经历生成完成: {len(stored_ids)} 条记忆",
         )
         await _activate_agent(agent_id)
 
