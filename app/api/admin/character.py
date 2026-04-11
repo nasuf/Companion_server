@@ -12,6 +12,7 @@ from prisma import Json
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.models.character import (
+    ProfileBatchStatusRequest,
     ProfileGenerateRequest,
     ProfileResponse,
     ProfileUpdateRequest,
@@ -443,6 +444,23 @@ async def update_profile(
         include={"template": True, "career": True},
     )
     return _profile_response(updated)
+
+
+@router.delete("/profiles/{profile_id}")
+@router.post("/profiles/batch-status")
+async def batch_update_profile_status(
+    body: ProfileBatchStatusRequest,
+    _: str = Depends(require_admin_jwt),
+):
+    """Batch update status for multiple profiles."""
+    if body.status not in ("draft", "published", "archived"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    cnt = await db.execute_raw(
+        'UPDATE "character_profiles" SET "status" = $1, "updated_at" = CURRENT_TIMESTAMP WHERE "id" = ANY($2::text[])',
+        body.status,
+        body.ids,
+    )
+    return {"ok": True, "updated": cnt or 0}
 
 
 @router.delete("/profiles/{profile_id}")

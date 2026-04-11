@@ -97,6 +97,11 @@ class ProfileUpdateRequest(BaseModel):
     status: str | None = None
 
 
+class ProfileBatchStatusRequest(BaseModel):
+    ids: list[str]
+    status: str
+
+
 class ProfileResponse(BaseModel):
     id: str
     template_id: str
