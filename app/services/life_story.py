@@ -286,12 +286,19 @@ async def generate_full_life_story(
             await _activate_agent(agent_id)
             return
 
-        # Bind profile to agent
-        await db.aiagent.update(
-            where={"id": agent_id},
-            data={"characterProfileId": profile["id"]},
-        )
+        # Bind profile to agent + 用 profile 数据覆盖 agent 的 occupation/age/city
+        # 防止 _init_agent_background 的 LLM 自由生成与 profile 冲突
         profile_data = profile["data"]
+        identity = profile_data.get("identity", {})
+        career = profile_data.get("career", {})
+        update_data: dict = {"characterProfileId": profile["id"]}
+        if career.get("title"):
+            update_data["occupation"] = career["title"]
+        if identity.get("location"):
+            update_data["city"] = str(identity["location"])
+        if identity.get("age"):
+            update_data["age"] = int(identity["age"])
+        await db.aiagent.update(where={"id": agent_id}, data=update_data)
 
         # Step 2: Generate outline
         await set_progress(agent_id, "generating_outline", message="正在构思人生大纲...")
