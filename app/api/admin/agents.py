@@ -158,6 +158,8 @@ async def get_memories(
         tables.append(("memories_ai", "ai"))
 
     all_rows = []
+    limit_idx = param_idx
+    offset_idx = param_idx + 1
     for table, src_label in tables:
         rows = await db.query_raw(
             f"""
@@ -166,8 +168,8 @@ async def get_memories(
             FROM {table}
             WHERE {where_clause}
             ORDER BY importance DESC, created_at DESC
-            LIMIT ${{param_idx}} OFFSET ${{param_idx + 1}}
-            """.replace(f"${{{param_idx}}}", f"${param_idx}").replace(f"${{{param_idx + 1}}}", f"${param_idx + 1}"),
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
+            """,
             *params, limit, offset,
         )
         for r in rows:
