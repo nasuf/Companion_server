@@ -327,23 +327,30 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     except Exception:
         pass
 
-    # 8. 删除 PatienceState（有 agent_id 外键）
-    try:
-        cnt = await db.execute_raw(
-            'DELETE FROM "patience_states" WHERE "agent_id" = $1',
-            agent_id,
-        )
-        stats["patience_states"] = cnt or 0
-    except Exception:
-        pass
+    # 8. 清除所有引用 agent_id 的表（防止 FK 约束阻止 agent 删除）
+    # 逐表列举容易遗漏，这里用通用列表一次性处理
+    _FK_TABLES_TO_DELETE = [
+        "patience_states",
+        "ai_emotion_states",
+        "ai_daily_schedules",
+        "trait_feedback_logs",
+        "intimacies",
+    ]
+    for table in _FK_TABLES_TO_DELETE:
+        try:
+            cnt = await db.execute_raw(
+                f'DELETE FROM "{table}" WHERE "agent_id" = $1', agent_id,
+            )
+            stats[table] = cnt or 0
+        except Exception:
+            pass
 
-    # 8b. 解绑 CharacterProfile（清空 agentId 引用，背景本身保留可复用）
+    # 解绑 CharacterProfile（清空 agentId 引用，背景本身保留可复用）
     try:
-        cnt = await db.execute_raw(
+        await db.execute_raw(
             'UPDATE "character_profiles" SET "agent_id" = NULL WHERE "agent_id" = $1',
             agent_id,
         )
-        stats["character_profiles_unlinked"] = cnt or 0
     except Exception:
         pass
 
