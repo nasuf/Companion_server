@@ -85,8 +85,8 @@ def test_create_agent(mock_deps):
         patch("app.api.public.agents.stage_active_workspaces_for_user", new_callable=AsyncMock, return_value=[]),
         patch("app.api.public.agents.activate_workspace", new_callable=AsyncMock, return_value=mock_workspace),
         patch("app.api.public.agents.finalize_archived_workspaces", new_callable=AsyncMock),
-        patch("app.api.public.agents.generate_initial_self_memories", new_callable=AsyncMock),
         patch("app.api.public.agents.save_ai_emotion", new_callable=AsyncMock),
+        patch("app.api.public.agents.generate_full_life_story", new_callable=AsyncMock),
         patch("app.api.public.agents.generate_and_save_life_overview", new_callable=AsyncMock, return_value={"description": "overview"}),
         patch("app.api.public.agents.generate_daily_schedule", new_callable=AsyncMock),
     ):

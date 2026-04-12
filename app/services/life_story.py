@@ -118,7 +118,7 @@ _PROFILE_FIELD_MAP: list[tuple[str, str, str, str, str, float]] = [
     ("identity", "gender", "身份", "性别", "identity", 0.95),
     ("identity", "age", "身份", "年龄", "identity", 0.95),
     ("identity", "birthday", "身份", "生日", "identity", 0.90),
-    ("identity", "education", "身份", "教育背景", "identity", 0.85),
+    # identity.education 与 education_knowledge.degree 重复, 只保留后者
     ("identity", "location", "身份", "现居地", "identity", 0.90),
     ("identity", "family", "身份", "亲属关系", "identity", 0.90),
     # appearance
@@ -171,12 +171,20 @@ _LIKES_FIELD_MAP: list[tuple[str, str, str, float]] = [
     ("quirks", "生活习惯", "preference", 0.75),
 ]
 
+# (field_key, prefix, main_category, sub_category, memory_type, importance)
+_CAREER_FIELD_MAP: list[tuple[str, str, str, str, str, float]] = [
+    ("title", "我的职业是", "身份", "职业/与经济", "identity", 0.95),
+    ("duties", "我的工作内容: ", "生活", "工作", "life", 0.90),
+    ("outputs", "我的主要产出物: ", "生活", "工作", "life", 0.85),
+    ("social_value", "我的工作的社会价值: ", "生活", "工作", "life", 0.80),
+    ("clients", "我的服务对象: ", "生活", "工作", "life", 0.80),
+]
+
 # 字段名 → 中文描述 (用于生成 "我..." 句式)
 _FIELD_LABELS: dict[str, str] = {
     "gender": "性别是",
     "age": "今年",
     "birthday": "生日是",
-    "education": "教育背景:",
     "location": "住在",
     "family": "家庭情况:",
     "height": "身高",
@@ -285,38 +293,22 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
                 "importance": importance,
             })
 
-    # 职业模板 (career_template 来自 CareerTemplate 表, 比 profile.data.career 更权威)
-    if career_template:
-        ct = career_template
-        if ct.get("title"):
+    # 职业: 优先 career_template (CareerTemplate 表), 回退 profile_data.career
+    ct = career_template
+    if not ct:
+        profile_career = profile_data.get("career", {})
+        if isinstance(profile_career, dict) and profile_career.get("title"):
+            ct = profile_career
+
+    if ct:
+        for key, prefix, main_cat, sub_cat, mem_type, importance in _CAREER_FIELD_MAP:
+            val = _format_value(ct.get(key))
+            if not val:
+                continue
             memories.append({
-                "summary": f"我的职业是{ct['title']}",
-                "main_category": "身份", "sub_category": "职业/与经济",
-                "type": "identity", "importance": 0.95,
-            })
-        if ct.get("duties"):
-            memories.append({
-                "summary": f"我的工作内容: {ct['duties']}",
-                "main_category": "生活", "sub_category": "工作",
-                "type": "life", "importance": 0.90,
-            })
-        if ct.get("outputs"):
-            memories.append({
-                "summary": f"我的主要产出物: {ct['outputs']}",
-                "main_category": "生活", "sub_category": "工作",
-                "type": "life", "importance": 0.85,
-            })
-        if ct.get("social_value"):
-            memories.append({
-                "summary": f"我的工作的社会价值: {ct['social_value']}",
-                "main_category": "生活", "sub_category": "工作",
-                "type": "life", "importance": 0.80,
-            })
-        if ct.get("clients"):
-            memories.append({
-                "summary": f"我的服务对象: {ct['clients']}",
-                "main_category": "生活", "sub_category": "工作",
-                "type": "life", "importance": 0.80,
+                "summary": f"{prefix}{val}",
+                "main_category": main_cat, "sub_category": sub_cat,
+                "type": mem_type, "importance": importance,
             })
 
     return memories

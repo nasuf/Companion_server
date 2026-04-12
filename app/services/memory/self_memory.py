@@ -29,9 +29,9 @@ async def generate_initial_self_memories(
     occupation: str = "",
     city: str = "",
 ) -> list[str]:
-    """Generate initial L1 self-memories via LLM when an agent is created.
+    """DEPRECATED: Replaced by life_story.convert_profile_to_memories + extract_chapter_memories.
 
-    Returns list of stored memory IDs.
+    Kept for backward compatibility with daily self-memory generation module.
     """
     prompt = (await get_prompt_text("self_memory.initial")).format(
         name=agent_name,
