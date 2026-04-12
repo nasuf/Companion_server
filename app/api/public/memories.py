@@ -22,7 +22,7 @@ async def list_memories(
     main_category: str | None = None,
     sub_category: str | None = None,
     source: Literal["user", "ai"] | None = None,
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=500, le=1000),
     offset: int = 0,
 ):
     where: dict = {"userId": user_id, "isArchived": False}
