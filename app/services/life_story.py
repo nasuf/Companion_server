@@ -9,15 +9,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
 
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.models import get_chat_model, invoke_json
-from app.services.memory.storage import store_memory
-from app.services.memory.taxonomy import TAXONOMY
+from app.services.llm.models import get_chat_model, get_embedding_model, invoke_json
+from app.services.memory import memory_repo
+from app.services.memory.embedding import store_embedding
+from app.services.memory.storage import log_memory_changelog, normalize_memory_type
+from app.services.memory.taxonomy import TAXONOMY, resolve_taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -524,32 +527,62 @@ async def store_memories_batch(
     all_memories: list[dict],
     workspace_id: str | None = None,
 ) -> list[str]:
-    """Store a list of memory dicts as L1 AI memories."""
-    stored_ids = []
-    total = len(all_memories)
-    for i, mem in enumerate(all_memories):
-        summary = mem.get("summary", "")
-        if not summary:
-            continue
-        await set_progress(
-            agent_id, "storing_memories",
-            current=i + 1, total=total,
-            message=f"正在写入记忆 ({i+1}/{total})...",
+    """Store memories with batch optimizations for initial provisioning.
+
+    Optimizations vs per-item store_memory():
+    - Batch embedding: aembed_documents() instead of N × aembed_query()
+    - Skip dedup: initial provisioning, DB is empty, no duplicates possible
+    - Progress throttle: update every 10 items instead of every item
+    """
+    # Filter empty summaries
+    valid = [m for m in all_memories if m.get("summary")]
+    if not valid:
+        return []
+
+    total = len(valid)
+    texts = [m["summary"] for m in valid]
+
+    # Batch generate embeddings (single model call)
+    await set_progress(agent_id, "storing_memories", current=0, total=total,
+                       message=f"正在生成向量 ({total} 条)...")
+    embed_model = get_embedding_model()
+    embeddings = await embed_model.aembed_documents(texts)
+
+    # Store each memory + embedding (no dedup check)
+    stored_ids: list[str] = []
+    for i, (mem, embedding) in enumerate(zip(valid, embeddings)):
+        if i % 10 == 0:
+            await set_progress(agent_id, "storing_memories",
+                               current=i + 1, total=total,
+                               message=f"正在写入记忆 ({i+1}/{total})...")
+
+        summary = mem["summary"]
+        mem_type = normalize_memory_type(mem.get("type", "life"))
+        taxonomy = resolve_taxonomy(
+            main_category=mem.get("main_category", "生活"),
+            sub_category=mem.get("sub_category", "其他"),
+            legacy_type=mem_type,
         )
-        memory_id = await store_memory(
-            user_id=user_id,
+        memory = await memory_repo.create(
+            source="ai",
+            userId=user_id,
             content=summary,
             summary=summary,
             level=1,
             importance=float(mem.get("importance", 0.85)),
-            memory_type=mem.get("type", "life"),
-            main_category=mem.get("main_category", "生活"),
-            sub_category=mem.get("sub_category", "其他"),
-            source="ai",
-            workspace_id=workspace_id,
+            type=mem_type,
+            mainCategory=taxonomy.main_category,
+            subCategory=taxonomy.sub_category,
+            workspaceId=workspace_id,
         )
-        if memory_id:
-            stored_ids.append(memory_id)
+        await store_embedding(memory.id, embedding)
+        stored_ids.append(memory.id)
+
+    # Batch changelog (fire-and-forget, non-critical)
+    for mid, mem in zip(stored_ids, valid):
+        await log_memory_changelog(user_id, mid, "insert",
+                                   new_value=mem["summary"], workspace_id=workspace_id)
+
     return stored_ids
 
 
@@ -618,20 +651,29 @@ async def generate_full_life_story(
             )
             profile_text = _format_profile_for_prompt(profile_data, career_template)
 
-            for i, chapter in enumerate(chapters):
+            # Parallel extraction in batches of 4
+            async def _extract_one(idx: int, ch: dict) -> list[dict]:
+                try:
+                    return await extract_chapter_memories(
+                        ch, outline_summary, name, seven_dim,
+                        idx, total, profile_text,
+                    )
+                except Exception as e:
+                    logger.warning(f"Chapter {idx+1} memory extraction failed: {e}")
+                    return []
+
+            BATCH_SIZE = 4
+            for batch_start in range(0, total, BATCH_SIZE):
+                batch = list(enumerate(chapters[batch_start:batch_start + BATCH_SIZE], start=batch_start))
+                batch_end = min(batch_start + BATCH_SIZE, total)
                 await set_progress(
                     agent_id, "generating_chapter",
-                    current=i + 1, total=total,
-                    message=f"正在生成「{chapter.get('title', '')}」的经历 ({i+1}/{total})...",
+                    current=batch_end, total=total,
+                    message=f"正在生成经历 ({batch_start+1}-{batch_end}/{total})...",
                 )
-                try:
-                    memories = await extract_chapter_memories(
-                        chapter, outline_summary, name, seven_dim,
-                        i, total, profile_text,
-                    )
-                    experience_memories.extend(memories)
-                except Exception as e:
-                    logger.warning(f"Chapter {i+1} memory extraction failed: {e}")
+                results = await asyncio.gather(*[_extract_one(i, ch) for i, ch in batch])
+                for mems in results:
+                    experience_memories.extend(mems)
         else:
             logger.warning(f"Outline generation returned empty for agent {agent_id}")
 
