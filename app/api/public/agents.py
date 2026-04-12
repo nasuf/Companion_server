@@ -251,8 +251,12 @@ async def _resolve_schedule(agent_id: str):
         raise HTTPException(status_code=404, detail="Agent not found")
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
+        life_overview = None
+        if isinstance(agent.lifeOverview, dict):
+            life_overview = agent.lifeOverview.get("description")
         schedule = await generate_daily_schedule(
-            agent_id, agent.name, get_seven_dim(agent)
+            agent_id, agent.name, get_seven_dim(agent),
+            life_overview=life_overview,
         )
     return agent, schedule
 
