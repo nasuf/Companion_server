@@ -107,38 +107,84 @@ async def get_life_story(
     return [_memory_row(r) for r in rows]
 
 
+@router.get("/{agent_id}/memory-stats")
+async def get_memory_stats(
+    agent_id: str,
+    source: str = "",
+    _: str = Depends(require_admin_jwt),
+):
+    """Precise memory statistics via SQL COUNT + GROUP BY."""
+    from app.api.public.memories import _compute_stats
+    workspace_id = await _resolve_workspace_id(agent_id)
+    return await _compute_stats(workspace_id, source or None)
+
+
 @router.get("/{agent_id}/memories")
 async def get_memories(
     agent_id: str,
-    limit: int = 500,
+    source: str = "",
+    main_category: str = "",
+    sub_category: str = "",
+    level: int | None = None,
+    search: str = "",
+    limit: int = 50,
+    offset: int = 0,
     _: str = Depends(require_admin_jwt),
 ):
-    """Get all agent memories (both user + ai), scoped by workspace.
-
-    Filtering is done client-side for consistent counts with the chat inspector.
-    """
+    """Get agent memories with server-side filtering and pagination."""
     workspace_id = await _resolve_workspace_id(agent_id)
     if not workspace_id:
-        return {"items": []}
+        return []
+
+    conditions = ["is_archived = FALSE", "workspace_id = $1"]
+    params: list = [workspace_id]
+    idx = 2
+
+    if main_category:
+        conditions.append(f"main_category = ${idx}")
+        params.append(main_category)
+        idx += 1
+    if sub_category:
+        conditions.append(f"sub_category = ${idx}")
+        params.append(sub_category)
+        idx += 1
+    if level is not None:
+        conditions.append(f"level = ${idx}")
+        params.append(level)
+        idx += 1
+    if search:
+        conditions.append(f"(content ILIKE ${idx} OR summary ILIKE ${idx})")
+        params.append(f"%{search}%")
+        idx += 1
+
+    where_clause = " AND ".join(conditions)
+    limit_idx = idx
+    offset_idx = idx + 1
+
+    tables: list[tuple[str, str]] = []
+    if source in ("", "user"):
+        tables.append(("memories_user", "user"))
+    if source in ("", "ai"):
+        tables.append(("memories_ai", "ai"))
 
     all_rows = []
-    for table, src_label in [("memories_user", "user"), ("memories_ai", "ai")]:
+    for table, src_label in tables:
         rows = await db.query_raw(
             f"""
             SELECT id, content, summary, level, importance,
                    main_category, sub_category, type, mention_count, created_at
             FROM {table}
-            WHERE is_archived = FALSE AND workspace_id = $1
+            WHERE {where_clause}
             ORDER BY importance DESC, created_at DESC
-            LIMIT $2
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
             """,
-            workspace_id, limit,
+            *params, limit, offset,
         )
         for r in rows:
             all_rows.append(_memory_row(r, source=src_label))
 
     all_rows.sort(key=lambda x: -x["importance"])
-    return {"items": all_rows}
+    return all_rows
 
 
 @router.get("/{agent_id}/conversations")

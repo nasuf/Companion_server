@@ -33,3 +33,4 @@ class MemoryStatsResponse(BaseModel):
     by_level: list[MemoryStatsBucket]
     by_main_category: list[MemoryStatsBucket]
     by_sub_category: list[MemoryStatsBucket]
+    by_main_sub: dict[str, int] = {}  # "身份-姓名" → count
