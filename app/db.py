@@ -34,10 +34,10 @@ async def connect_db():
     for attempt in range(1, _CONNECT_MAX_ATTEMPTS + 1):
         try:
             if not db.is_connected():
+                logger.info(f"  DB connecting... (attempt {attempt})")
                 await db.connect()
             await _ping()
-            if attempt > 1:
-                logger.info(f"Database connected after {attempt} attempts")
+            logger.info(f"  DB connected (attempt {attempt})")
             return
         except Exception as e:
             last_error = e

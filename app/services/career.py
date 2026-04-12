@@ -157,14 +157,18 @@ DEFAULT_CAREERS: list[dict[str, str]] = [
 
 
 async def ensure_default_careers() -> None:
-    """启动时按 title 逐条检查，补回缺失的默认职业。已存在的不覆盖。"""
-    created = 0
-    for i, career in enumerate(DEFAULT_CAREERS):
-        existing = await db.careertemplate.find_first(
-            where={"title": career["title"]},
-        )
-        if existing:
-            continue
+    """启动时批量检查，只创建缺失的默认职业。"""
+    existing = await db.careertemplate.find_many(select={"title": True})
+    existing_titles = {r.title for r in existing}
+
+    missing = [
+        (i, c) for i, c in enumerate(DEFAULT_CAREERS)
+        if c["title"] not in existing_titles
+    ]
+    if not missing:
+        return
+
+    for i, career in missing:
         await db.careertemplate.create(
             data={
                 "title": career["title"],
@@ -175,6 +179,4 @@ async def ensure_default_careers() -> None:
                 "sortOrder": i + 1,
             }
         )
-        created += 1
-    if created:
-        logger.info(f"Seeded {created} missing default careers")
+    logger.info(f"Seeded {len(missing)} missing default careers")

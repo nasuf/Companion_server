@@ -1,3 +1,6 @@
+import asyncio
+import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,18 +20,45 @@ from jobs.scheduler import setup_scheduler, shutdown_scheduler
 configure_logging()
 configure_langsmith()
 
+logger = logging.getLogger(__name__)
+
+
+async def _timed(name: str, coro):
+    """Run a coroutine and log its execution time."""
+    t0 = time.monotonic()
+    await coro
+    elapsed = (time.monotonic() - t0) * 1000
+    logger.info(f"  ✓ {name} ({elapsed:.0f}ms)")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    await connect_db()
-    await get_redis()
-    await get_driver()
-    await init_graph_schema()
-    await ensure_prompt_templates()
-    await ensure_default_template()
-    await ensure_default_careers()
+    t_start = time.monotonic()
+    logger.info("Starting up...")
+
+    # Phase 1: Connect to all services in parallel
+    await _timed("Database", connect_db())
+    await asyncio.gather(
+        _timed("Redis", get_redis()),
+        _timed("Neo4j driver", get_driver()),
+    )
+
+    # Phase 2: Schema + seeding (depends on DB/Neo4j being connected)
+    await asyncio.gather(
+        _timed("Neo4j schema", init_graph_schema()),
+        _timed("Prompt templates", ensure_prompt_templates()),
+    )
+    await asyncio.gather(
+        _timed("Character template", ensure_default_template()),
+        _timed("Career templates", ensure_default_careers()),
+    )
+
+    # Phase 3: Scheduler
     setup_scheduler()
+    logger.info(f"  ✓ Scheduler")
+
+    total = (time.monotonic() - t_start) * 1000
+    logger.info(f"Startup complete ({total:.0f}ms)")
     yield
     # Shutdown
     shutdown_scheduler()
