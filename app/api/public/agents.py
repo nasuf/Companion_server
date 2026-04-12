@@ -7,8 +7,6 @@ from prisma import Json
 
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
-from app.services.llm.models import get_utility_model, invoke_json
-from app.services.prompting.store import get_prompt_text
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.trait_model import get_seven_dim
@@ -101,82 +99,39 @@ async def create_agent(data: AgentCreate):
     # Initialize patience value (Redis + DB)
     asyncio.create_task(init_patience(agent.id, data.user_id))
 
-    # Background: identity generation → schedule → self-memories (serial chain)
-    async def _init_agent_background():
-        personality = agent.personality or {}
-        background = agent.background or ""
-        values = agent.values
-        gender = agent.gender or ""
-        age = agent.age
-        occupation = agent.occupation
-        city = agent.city
-
-        # Step 1: LLM identity generation (if missing)
-        if age is None and occupation is None and city is None:
-            try:
-                prompt = (await get_prompt_text("agent.identity_generation")).format(
-                    name=agent.name,
-                    gender=gender or "未设定",
-                    personality=str(personality),
-                    background=background or "暂无",
-                    values=str(values) if values else "暂无",
-                )
-                result = await invoke_json(get_utility_model(), prompt)
-                age = int(result.get("age", 22))
-                occupation = result.get("occupation", "")
-                city = result.get("city", "")
-                await db.aiagent.update(
-                    where={"id": agent.id},
-                    data={"age": age, "occupation": occupation, "city": city},
-                )
-                logger.info(f"Identity generated for agent {agent.id}: age={age}, occupation={occupation}, city={city}")
-            except Exception as e:
-                logger.warning(f"Identity generation failed for agent {agent.id}: {e}")
-                age = age or 22
-
-        # Step 2: Life overview + schedule (depends on identity)
-        try:
-            updated_agent = await db.aiagent.find_unique(where={"id": agent.id})
-            target = updated_agent or agent
-            overview_data = await generate_and_save_life_overview(target)
-            await generate_daily_schedule(
-                agent.id, agent.name, get_seven_dim(target),
-                life_overview=overview_data.get("description"),
-            )
-        except Exception as e:
-            logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
-
-        # Step 3: initial self-memories 已由万字人生经历替代, 不再单独生成
-        # 人生经历在 _init_and_generate_story() 中执行
-
-    # Background: identity + schedule + self-memories → then life story
+    # Background: life story (profile selection → memory generation) → schedule
     async def _init_and_generate_story():
-        try:
-            await _init_agent_background()
-        except Exception as e:
-            logger.error(f"Agent background init failed for {agent.id}: {e}", exc_info=True)
-        # 无论基础初始化是否成功, 都尝试生成人生经历
         ws_id = workspace.id if workspace else None
+        # Step 1: 生成人生经历 (内部会从 Profile 覆盖 age/occupation/city)
         try:
             await generate_full_life_story(
                 agent_id=agent.id,
                 user_id=data.user_id,
                 name=agent.name,
                 gender=agent.gender,
-                personality=agent.personality,
                 seven_dim=get_seven_dim(agent),
                 workspace_id=ws_id,
             )
         except Exception as e:
             logger.error(f"Life story generation failed for {agent.id}: {e}", exc_info=True)
-            # generate_full_life_story 内部已有 _activate_agent 兜底;
-            # 这里仅在函数本身抛出未捕获异常时做最后保底
             try:
                 a = await db.aiagent.find_unique(where={"id": agent.id})
                 if a and a.status != "active":
                     await db.aiagent.update(where={"id": agent.id}, data={"status": "active"})
             except Exception:
                 pass
+
+        # Step 2: 生成生活画像 + 作息表 (依赖 Step 1 已覆盖的 identity 字段)
+        try:
+            updated_agent = await db.aiagent.find_unique(where={"id": agent.id})
+            if updated_agent:
+                overview_data = await generate_and_save_life_overview(updated_agent)
+                await generate_daily_schedule(
+                    agent.id, agent.name, get_seven_dim(updated_agent),
+                    life_overview=overview_data.get("description"),
+                )
+        except Exception as e:
+            logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
 
     asyncio.create_task(_init_and_generate_story())
 

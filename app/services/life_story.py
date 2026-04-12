@@ -2,10 +2,9 @@
 
 流程:
   1. 选择匹配的 CharacterProfile (性别匹配, published 状态)
-  2. 生成人生大纲 (12-15 个章节标题+关键事件)
-  3. 逐章提取结构化记忆 (每章 5-10 条, 与聊天记忆格式一致)
-  4. 写入 AI L1 记忆
-  5. 通过 Redis 实时更新进度, 供前端轮询
+  2. Phase 1: 将 Profile 结构化字段直接转换为 L1 记忆 (无需LLM)
+  3. Phase 2: 基于完整 Profile + 性格生成人生大纲 → 逐章提取经历型记忆
+  4. 通过 Redis 实时更新进度, 供前端轮询
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ PROGRESS_TTL = 3600  # 1 hour
 
 
 def _taxonomy_description() -> str:
-    """将完整 taxonomy 格式化为 LLM 可读文本，供大纲 prompt 使用。"""
+    """将完整 taxonomy 格式化为 LLM 可读文本。"""
     lines = []
     for main_cat, sub_cats in TAXONOMY.items():
         subs = ", ".join(sub_cats)
@@ -42,12 +41,14 @@ async def set_progress(agent_id: str, stage: str, current: int = 0, total: int =
     percent = 0
     if stage == "selecting_profile":
         percent = 2
+    elif stage == "converting_profile":
+        percent = 5
     elif stage == "generating_outline":
-        percent = 8
+        percent = 10
     elif stage == "generating_chapter":
-        percent = 10 + int(75 * current / max(total, 1))
+        percent = 12 + int(75 * current / max(total, 1))
     elif stage == "storing_memories":
-        percent = 88 + int(10 * current / max(total, 1))
+        percent = 90 + int(8 * current / max(total, 1))
     elif stage == "complete":
         percent = 100
     elif stage == "failed":
@@ -73,14 +74,9 @@ async def get_progress(agent_id: str) -> dict | None:
 
 
 async def select_character_profile(gender: str | None) -> dict | None:
-    """Select a matching published CharacterProfile by gender.
-
-    Returns dict with profile id + data, or None if no match.
-    """
-    where: dict = {"status": "published"}
-    # Find profiles matching gender in JSON data
+    """Select a matching published CharacterProfile by gender."""
     profiles = await db.characterprofile.find_many(
-        where=where,
+        where={"status": "published"},
         include={"career": True},
     )
 
@@ -96,9 +92,7 @@ async def select_character_profile(gender: str | None) -> dict | None:
         matching.append(p)
 
     if not matching:
-        # Fallback: any published profile
         matching = profiles
-
     if not matching:
         return None
 
@@ -116,6 +110,220 @@ async def select_character_profile(gender: str | None) -> dict | None:
     }
 
 
+# ── Phase 1: Profile 结构化字段 → L1 记忆 (无需LLM) ──
+
+# (category_key, field_key, main_category, sub_category, memory_type, importance)
+_PROFILE_FIELD_MAP: list[tuple[str, str, str, str, str, float]] = [
+    # identity
+    ("identity", "gender", "身份", "性别", "identity", 0.95),
+    ("identity", "age", "身份", "年龄", "identity", 0.95),
+    ("identity", "birthday", "身份", "生日", "identity", 0.90),
+    ("identity", "education", "身份", "教育背景", "identity", 0.85),
+    ("identity", "location", "身份", "现居地", "identity", 0.90),
+    ("identity", "family", "身份", "亲属关系", "identity", 0.90),
+    # appearance
+    ("appearance", "height", "身份", "相貌", "identity", 0.80),
+    ("appearance", "weight", "身份", "相貌", "identity", 0.75),
+    ("appearance", "features", "身份", "相貌", "identity", 0.80),
+    ("appearance", "style", "身份", "相貌", "identity", 0.75),
+    ("appearance", "voice", "身份", "相貌", "identity", 0.75),
+    # education_knowledge
+    ("education_knowledge", "degree", "身份", "教育背景", "identity", 0.85),
+    ("education_knowledge", "strengths", "生活", "技能", "life", 0.80),
+    ("education_knowledge", "self_taught", "生活", "技能", "life", 0.80),
+    # values
+    ("values", "motto", "思维", "价值观", "thought", 0.85),
+    ("values", "believes", "思维", "价值观", "thought", 0.80),
+    ("values", "opposes", "思维", "价值观", "thought", 0.80),
+    ("values", "goal", "思维", "理想与目标", "thought", 0.85),
+    # abilities
+    ("abilities", "good_at", "生活", "技能", "life", 0.80),
+    ("abilities", "never_do", "偏好", "禁忌/雷区", "preference", 0.85),
+    ("abilities", "limits", "思维", "自我认知", "thought", 0.75),
+    # fears
+    ("fears", "animals", "偏好", "禁忌/雷区", "preference", 0.85),
+    ("fears", "objects", "偏好", "禁忌/雷区", "preference", 0.80),
+    ("fears", "atmospheres", "偏好", "禁忌/雷区", "preference", 0.80),
+    # dislikes
+    ("dislikes", "foods", "偏好", "饮食厌恶", "preference", 0.80),
+    ("dislikes", "sounds", "偏好", "审美厌恶", "preference", 0.75),
+    ("dislikes", "smells", "偏好", "审美厌恶", "preference", 0.75),
+    ("dislikes", "habits", "偏好", "人际厌恶", "preference", 0.75),
+]
+
+# likes 字段太多, 单独定义映射
+_LIKES_FIELD_MAP: list[tuple[str, str, str, float]] = [
+    # field_key, sub_category, memory_type, importance
+    ("colors", "审美爱好", "preference", 0.70),
+    ("foods", "饮食喜好", "preference", 0.80),
+    ("fruits", "饮食喜好", "preference", 0.75),
+    ("season", "审美爱好", "preference", 0.70),
+    ("weather", "审美爱好", "preference", 0.70),
+    ("plants", "审美爱好", "preference", 0.70),
+    ("animals", "审美爱好", "preference", 0.75),
+    ("music", "审美爱好", "preference", 0.75),
+    ("songs", "审美爱好", "preference", 0.70),
+    ("sounds", "审美爱好", "preference", 0.70),
+    ("scents", "审美爱好", "preference", 0.70),
+    ("books", "审美爱好", "preference", 0.70),
+    ("movies", "审美爱好", "preference", 0.70),
+    ("sports", "生活习惯", "preference", 0.75),
+    ("quirks", "生活习惯", "preference", 0.75),
+]
+
+# 字段名 → 中文描述 (用于生成 "我..." 句式)
+_FIELD_LABELS: dict[str, str] = {
+    "gender": "性别是",
+    "age": "今年",
+    "birthday": "生日是",
+    "education": "教育背景:",
+    "location": "住在",
+    "family": "家庭情况:",
+    "height": "身高",
+    "weight": "体型",
+    "features": "外貌特征:",
+    "style": "穿搭风格:",
+    "voice": "声音特点:",
+    "degree": "学历:",
+    "strengths": "擅长的知识领域:",
+    "self_taught": "自学过的技能:",
+    "motto": "人生信条:",
+    "believes": "相信",
+    "opposes": "反对",
+    "goal": "人生目标:",
+    "good_at": "擅长",
+    "never_do": "绝对不会做的事:",
+    "limits": "能力上限:",
+    "colors": "喜欢的颜色:",
+    "foods": "喜欢吃",
+    "fruits": "喜欢的水果:",
+    "season": "喜欢的季节:",
+    "weather": "喜欢的天气:",
+    "plants": "喜欢的植物:",
+    "animals": "喜欢的动物:",
+    "music": "喜欢的音乐:",
+    "songs": "喜欢的歌曲:",
+    "sounds": "喜欢的声音:",
+    "scents": "喜欢的气味:",
+    "books": "喜欢看的书:",
+    "movies": "喜欢的电影:",
+    "sports": "喜欢的运动:",
+    "quirks": "小癖好:",
+}
+
+_DISLIKE_LABELS: dict[str, str] = {
+    "foods": "讨厌吃",
+    "sounds": "讨厌的声音:",
+    "smells": "讨厌的气味:",
+    "habits": "讨厌的习惯:",
+}
+
+_FEAR_LABELS: dict[str, str] = {
+    "animals": "害怕的动物:",
+    "objects": "害怕的东西:",
+    "atmospheres": "害怕的氛围:",
+}
+
+
+def _format_value(value: object) -> str | None:
+    """将字段值格式化为字符串, 过滤空值。"""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        items = [str(v).strip() for v in value if v]
+        return "、".join(items) if items else None
+    s = str(value).strip()
+    return s if s else None
+
+
+def convert_profile_to_memories(profile_data: dict, career_template: dict | None) -> list[dict]:
+    """将 CharacterProfile 结构化字段直接转换为 L1 记忆列表 (无需LLM)。"""
+    memories: list[dict] = []
+
+    # 通用字段
+    for cat_key, field_key, main_cat, sub_cat, mem_type, importance in _PROFILE_FIELD_MAP:
+        cat_data = profile_data.get(cat_key, {})
+        if not isinstance(cat_data, dict):
+            continue
+        val = _format_value(cat_data.get(field_key))
+        if not val:
+            continue
+        label = _FIELD_LABELS.get(field_key, f"{field_key}:")
+        # 特殊处理 dislikes/fears 的标签
+        if cat_key == "dislikes":
+            label = _DISLIKE_LABELS.get(field_key, f"讨厌{field_key}:")
+        elif cat_key == "fears":
+            label = _FEAR_LABELS.get(field_key, f"害怕{field_key}:")
+
+        # age 特殊: "我今年22岁"
+        if field_key == "age":
+            summary = f"我今年{val}岁"
+        else:
+            summary = f"我{label}{val}"
+
+        memories.append({
+            "summary": summary,
+            "main_category": main_cat,
+            "sub_category": sub_cat,
+            "type": mem_type,
+            "importance": importance,
+        })
+
+    # likes 字段 (归属偏好)
+    likes = profile_data.get("likes", {})
+    if isinstance(likes, dict):
+        for field_key, sub_cat, mem_type, importance in _LIKES_FIELD_MAP:
+            val = _format_value(likes.get(field_key))
+            if not val:
+                continue
+            label = _FIELD_LABELS.get(field_key, f"喜欢{field_key}:")
+            memories.append({
+                "summary": f"我{label}{val}",
+                "main_category": "偏好",
+                "sub_category": sub_cat,
+                "type": mem_type,
+                "importance": importance,
+            })
+
+    # 职业模板 (career_template 来自 CareerTemplate 表, 比 profile.data.career 更权威)
+    if career_template:
+        ct = career_template
+        if ct.get("title"):
+            memories.append({
+                "summary": f"我的职业是{ct['title']}",
+                "main_category": "身份", "sub_category": "职业/与经济",
+                "type": "identity", "importance": 0.95,
+            })
+        if ct.get("duties"):
+            memories.append({
+                "summary": f"我的工作内容: {ct['duties']}",
+                "main_category": "生活", "sub_category": "工作",
+                "type": "life", "importance": 0.90,
+            })
+        if ct.get("outputs"):
+            memories.append({
+                "summary": f"我的主要产出物: {ct['outputs']}",
+                "main_category": "生活", "sub_category": "工作",
+                "type": "life", "importance": 0.85,
+            })
+        if ct.get("social_value"):
+            memories.append({
+                "summary": f"我的工作的社会价值: {ct['social_value']}",
+                "main_category": "生活", "sub_category": "工作",
+                "type": "life", "importance": 0.80,
+            })
+        if ct.get("clients"):
+            memories.append({
+                "summary": f"我的服务对象: {ct['clients']}",
+                "main_category": "生活", "sub_category": "工作",
+                "type": "life", "importance": 0.80,
+            })
+
+    return memories
+
+
+# ── Phase 2: LLM 生成经历型记忆 ──
+
 def _format_career(career_template: dict | None) -> str:
     """Format career template data for prompt injection."""
     if not career_template:
@@ -132,39 +340,98 @@ def _format_career(career_template: dict | None) -> str:
     return "\n".join(parts)
 
 
+def _format_profile_for_prompt(profile_data: dict, career_template: dict | None) -> str:
+    """将完整 Profile 数据格式化为 LLM prompt 文本, 不遗漏任何分类。"""
+    sections = []
+
+    identity = profile_data.get("identity", {})
+    if identity:
+        sections.append(f"""基础身份:
+- 年龄: {identity.get('age', '未知')}
+- 出生日期: {identity.get('birthday', '未知')}
+- 城市: {identity.get('location', '未知')}
+- 教育: {identity.get('education', '未知')}
+- 家庭: {identity.get('family', '未知')}""")
+
+    appearance = profile_data.get("appearance", {})
+    if appearance:
+        labels = {"height": "身高", "weight": "体型", "features": "外貌特征",
+                  "style": "穿搭风格", "voice": "声音特点"}
+        parts = [f"- {labels[k]}: {v}" for k in labels if (v := appearance.get(k))]
+        if parts:
+            sections.append("外貌与形象:\n" + "\n".join(parts))
+
+    edu = profile_data.get("education_knowledge", {})
+    if edu:
+        parts = []
+        if edu.get("degree"):
+            parts.append(f"- 学历: {edu['degree']}")
+        if edu.get("strengths"):
+            parts.append(f"- 知识擅长: {json.dumps(edu['strengths'], ensure_ascii=False)}")
+        if edu.get("self_taught"):
+            parts.append(f"- 自学技能: {json.dumps(edu['self_taught'], ensure_ascii=False)}")
+        if parts:
+            sections.append("教育与知识:\n" + "\n".join(parts))
+
+    sections.append(f"职业详情:\n{_format_career(career_template)}")
+
+    likes = profile_data.get("likes", {})
+    if likes:
+        sections.append(f"喜好: {json.dumps(likes, ensure_ascii=False)}")
+
+    dislikes = profile_data.get("dislikes", {})
+    if dislikes:
+        sections.append(f"讨厌: {json.dumps(dislikes, ensure_ascii=False)}")
+
+    fears = profile_data.get("fears", {})
+    if fears:
+        sections.append(f"害怕: {json.dumps(fears, ensure_ascii=False)}")
+
+    values = profile_data.get("values", {})
+    if values:
+        parts = []
+        if values.get("motto"):
+            parts.append(f"- 人生信条: {values['motto']}")
+        if values.get("believes"):
+            parts.append(f"- 相信: {json.dumps(values['believes'], ensure_ascii=False)}")
+        if values.get("opposes"):
+            parts.append(f"- 反对: {json.dumps(values['opposes'], ensure_ascii=False)}")
+        if values.get("goal"):
+            parts.append(f"- 人生目标: {values['goal']}")
+        if parts:
+            sections.append("价值观:\n" + "\n".join(parts))
+
+    abilities = profile_data.get("abilities", {})
+    if abilities:
+        parts = []
+        if abilities.get("good_at"):
+            parts.append(f"- 擅长: {json.dumps(abilities['good_at'], ensure_ascii=False)}")
+        if abilities.get("never_do"):
+            parts.append(f"- 绝不做: {json.dumps(abilities['never_do'], ensure_ascii=False)}")
+        if abilities.get("limits"):
+            parts.append(f"- 能力上限: {json.dumps(abilities['limits'], ensure_ascii=False)}")
+        if parts:
+            sections.append("能力与边界:\n" + "\n".join(parts))
+
+    return "\n\n".join(sections)
+
+
 async def generate_outline(
     profile_data: dict,
     name: str,
     gender: str | None,
-    personality: dict | None,
     seven_dim: dict | None,
     career_template: dict | None = None,
 ) -> list[dict]:
     """Generate life story outline: 12-15 chapters with titles and key events."""
-    identity = profile_data.get("identity", {})
-    education = profile_data.get("education_knowledge", {})
-    values = profile_data.get("values", {})
-    likes = profile_data.get("likes", {})
-    abilities = profile_data.get("abilities", {})
+    profile_text = _format_profile_for_prompt(profile_data, career_template)
 
     prompt = f"""你是一个人物传记作家。请为以下角色生成一份人生经历大纲。
 
-角色基本信息：
-- 姓名: {name}
-- 性别: {gender or '未设定'}
-- 年龄: {identity.get('age', 22)}
-- 出生日期: {identity.get('birthday', '未知')}
-- 城市: {identity.get('location', '未知')}
-- 教育背景: {education.get('degree', '未知')}
-- 家庭: {identity.get('family', '未知')}
-- 性格特点: {json.dumps(seven_dim, ensure_ascii=False) if seven_dim else '未设定'}
-- 喜好: {json.dumps(likes, ensure_ascii=False) if likes else '未知'}
-- 价值观: {values.get('motto', '未知')}
-- 人生目标: {values.get('goal', '未知')}
-- 擅长: {json.dumps(abilities.get('good_at', []), ensure_ascii=False)}
+角色: {name} ({gender or '未设定'})
+性格特点: {json.dumps(seven_dim, ensure_ascii=False) if seven_dim else '未设定'}
 
-职业详情：
-{_format_career(career_template)}
+{profile_text}
 
 请生成12-15个人生阶段的大纲。每个阶段包含：
 1. title: 阶段标题（如"童年时光"）
@@ -178,10 +445,11 @@ async def generate_outline(
 
 要求：
 - 从出生到现在的完整人生轨迹
-- 事件要与角色的职业、性格、喜好逻辑自洽
+- 事件要与角色的职业、性格、喜好、害怕的事物、价值观等逻辑自洽
 - 以第一人称视角（"我"）
 - 包含成长转折点、关键人物、情感体验
 - 12-15个章节应覆盖尽可能多的不同分类（身份/偏好/生活/情绪/思维），而非集中在某一类
+- 注意: 基本事实（身份/喜好/职业等）已通过其他方式记录，这里重点生成「经历和故事」
 
 返回JSON数组: [{{"title": "...", "age_range": "...", "key_events": ["...", "..."], "main_category": "身份", "sub_category": "成长地"}}]"""
 
@@ -198,25 +466,31 @@ async def extract_chapter_memories(
     chapter: dict,
     outline_summary: str,
     name: str,
+    seven_dim: dict | None,
     chapter_index: int,
     total_chapters: int,
-    career_template: dict | None = None,
+    profile_text: str,
 ) -> list[dict]:
-    """Extract 5-10 structured memories from a single chapter."""
-    career_section = f"\n角色职业详情：\n{_format_career(career_template)}" if career_template else ""
-
+    """Extract 5-10 experiential memories from a single chapter."""
     prompt = f"""你正在为角色「{name}」梳理人生经历第 {chapter_index + 1}/{total_chapters} 阶段的记忆。
+
+性格特点: {json.dumps(seven_dim, ensure_ascii=False) if seven_dim else '未设定'}
+
+角色完整背景:
+{profile_text}
 
 完整人生大纲：
 {outline_summary}
-{career_section}
 
 当前阶段：
 - 标题: {chapter.get('title', '')}
 - 年龄阶段: {chapter.get('age_range', '')}
 - 关键事件: {json.dumps(chapter.get('key_events', []), ensure_ascii=False)}
 
-请为这个阶段生成 5-10 条结构化记忆。每条记忆是一个独立的事实/经历/感受，格式与聊天记忆一致。
+请为这个阶段生成 5-10 条经历型记忆。每条记忆描述一个具体的事件/经历/感受/决定。
+
+⚠️ 注意: 角色的基本事实（身份、喜好、职业、外貌等）已另外存储，请不要重复生成这些事实性记忆。
+这里只生成「经历和故事」——发生了什么事、有什么感受、做了什么决定。
 
 记忆分类表（必须严格选择）：
 {_taxonomy_description()}
@@ -236,13 +510,12 @@ async def extract_chapter_memories(
 }}
 
 要求：
-1. 每条记忆只描述一个具体事实，如"我5岁时养了一只叫小白的猫"
+1. 每条记忆只描述一个具体经历，如"我5岁时在乡下第一次见到蛇，吓得哭了一下午"
 2. 不要写成大段叙事，每条 summary 控制在 20-80 字
 3. 以第一人称「我」开头
-4. 涵盖具体人物、地点、事件、情感、决定等细节
-5. 不同记忆应覆盖不同的分类（身份/偏好/生活/情绪/思维）
-6. importance 范围: 核心身份事实 0.9-0.95, 重要经历 0.8-0.9, 情感/偏好 0.7-0.85
-7. sub_category 必须从分类表中原样复制，禁止自造"""
+4. 经历要与角色的性格、喜好、职业、害怕的事物等逻辑自洽
+5. importance 范围: 重大转折 0.9-0.95, 重要经历 0.8-0.9, 一般经历 0.7-0.85
+6. sub_category 必须从分类表中原样复制，禁止自造"""
 
     model = get_chat_model()
     result = await invoke_json(model, prompt)
@@ -253,13 +526,13 @@ async def extract_chapter_memories(
     return []
 
 
-async def store_chapter_memories(
+async def store_memories_batch(
     agent_id: str,
     user_id: str,
     all_memories: list[dict],
     workspace_id: str | None = None,
 ) -> list[str]:
-    """Store extracted chapter memories as L1 AI memories."""
+    """Store a list of memory dicts as L1 AI memories."""
     stored_ids = []
     total = len(all_memories)
     for i, mem in enumerate(all_memories):
@@ -288,16 +561,17 @@ async def store_chapter_memories(
     return stored_ids
 
 
+# ── Main Entry Point ──
+
 async def generate_full_life_story(
     agent_id: str,
     user_id: str,
     name: str,
     gender: str | None,
-    personality: dict | None,
     seven_dim: dict | None,
     workspace_id: str | None = None,
 ) -> None:
-    """Main entry point: select profile → outline → extract memories → store L1.
+    """Main entry point: select profile → direct convert → LLM experiences → store L1.
 
     Updates Redis progress throughout. Sets agent status to 'active' when done.
     """
@@ -311,11 +585,11 @@ async def generate_full_life_story(
             await _activate_agent(agent_id)
             return
 
-        # Bind profile to agent + 用 profile 数据覆盖 agent 的 occupation/age/city
-        # 防止 _init_agent_background 的 LLM 自由生成与 profile 冲突
         profile_data = profile["data"]
         career_template = profile.get("career_template")
         identity = profile_data.get("identity", {})
+
+        # Bind profile to agent + overwrite agent fields from profile
         update_data: dict = {"characterProfileId": profile["id"]}
         if career_template and career_template.get("title"):
             update_data["occupation"] = career_template["title"]
@@ -325,63 +599,65 @@ async def generate_full_life_story(
             update_data["age"] = int(identity["age"])
         await db.aiagent.update(where={"id": agent_id}, data=update_data)
 
-        # Step 2: Generate outline
+        # Step 2 (Phase 1): Convert profile structured fields to memories directly
+        await set_progress(agent_id, "converting_profile", message="正在转换背景信息为记忆...")
+        profile_memories = convert_profile_to_memories(profile_data, career_template)
+        logger.info(f"Profile → {len(profile_memories)} direct memories for agent {agent_id}")
+
+        # Step 3 (Phase 2): Generate experiential memories via LLM
         await set_progress(agent_id, "generating_outline", message="正在构思人生大纲...")
         chapters = await generate_outline(
-            profile_data, name, gender, personality, seven_dim,
+            profile_data, name, gender, seven_dim,
             career_template=career_template,
         )
-        if not chapters:
-            logger.warning(f"Outline generation returned empty for agent {agent_id}")
-            await set_progress(agent_id, "complete", message="大纲生成失败，已跳过")
-            await _activate_agent(agent_id)
-            return
 
-        total = len(chapters)
-        outline_summary = "\n".join(
-            f"{i+1}. {ch.get('title', '')} ({ch.get('age_range', '')}): {', '.join(ch.get('key_events', []))}"
-            for i, ch in enumerate(chapters)
-        )
-
-        # Step 3: Extract structured memories from each chapter
-        all_memories: list[dict] = []
-        for i, chapter in enumerate(chapters):
-            await set_progress(
-                agent_id, "generating_chapter",
-                current=i + 1, total=total,
-                message=f"正在提取「{chapter.get('title', '')}」的记忆 ({i+1}/{total})...",
+        experience_memories: list[dict] = []
+        if chapters:
+            total = len(chapters)
+            outline_summary = "\n".join(
+                f"{i+1}. {ch.get('title', '')} ({ch.get('age_range', '')}): {', '.join(ch.get('key_events', []))}"
+                for i, ch in enumerate(chapters)
             )
-            try:
-                memories = await extract_chapter_memories(
-                    chapter, outline_summary, name, i, total,
-                    career_template=career_template,
-                )
-                all_memories.extend(memories)
-            except Exception as e:
-                logger.warning(f"Chapter {i+1} memory extraction failed: {e}")
+            profile_text = _format_profile_for_prompt(profile_data, career_template)
 
-        # Step 4: Store as L1 memories (progress updated inside store function)
-        stored_ids = await store_chapter_memories(
+            for i, chapter in enumerate(chapters):
+                await set_progress(
+                    agent_id, "generating_chapter",
+                    current=i + 1, total=total,
+                    message=f"正在生成「{chapter.get('title', '')}」的经历 ({i+1}/{total})...",
+                )
+                try:
+                    memories = await extract_chapter_memories(
+                        chapter, outline_summary, name, seven_dim,
+                        i, total, profile_text,
+                    )
+                    experience_memories.extend(memories)
+                except Exception as e:
+                    logger.warning(f"Chapter {i+1} memory extraction failed: {e}")
+        else:
+            logger.warning(f"Outline generation returned empty for agent {agent_id}")
+
+        # Step 4: Store all memories (profile + experience)
+        all_memories = profile_memories + experience_memories
+        stored_ids = await store_memories_batch(
             agent_id, user_id, all_memories,
             workspace_id=workspace_id,
         )
 
         logger.info(
             f"Life story complete for agent {agent_id}: "
-            f"{len(stored_ids)} memories stored ({len(all_memories)} extracted)"
+            f"{len(stored_ids)} stored ({len(profile_memories)} profile + {len(experience_memories)} experience)"
         )
 
-        # Step 5: Mark complete
         await set_progress(
             agent_id, "complete",
-            message=f"人生经历生成完成: {len(stored_ids)} 条记忆",
+            message=f"生成完成: {len(stored_ids)} 条记忆",
         )
         await _activate_agent(agent_id)
 
     except Exception as e:
         logger.error(f"Life story generation failed for agent {agent_id}: {e}", exc_info=True)
         await set_progress(agent_id, "failed", message=f"生成失败: {str(e)[:200]}")
-        # Still activate agent so user isn't permanently stuck
         await _activate_agent(agent_id)
 
 
