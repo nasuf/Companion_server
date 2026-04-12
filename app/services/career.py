@@ -158,7 +158,7 @@ DEFAULT_CAREERS: list[dict[str, str]] = [
 
 async def ensure_default_careers() -> None:
     """启动时批量检查，只创建缺失的默认职业。"""
-    existing = await db.careertemplate.find_many(select={"title": True})
+    existing = await db.careertemplate.find_many()
     existing_titles = {r.title for r in existing}
 
     missing = [

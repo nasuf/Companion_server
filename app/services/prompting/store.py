@@ -20,18 +20,33 @@ def _redis_key(key: str) -> str:
 
 
 async def ensure_prompt_templates() -> None:
-    """Ensure prompt templates exist in DB and warm Redis from DB state."""
+    """Ensure prompt templates exist in DB and warm Redis from DB state.
+
+    Optimized: batch-load all existing prompts + versions in 2 queries,
+    then only write to DB for missing/changed entries.
+    """
+    # Batch load: 1 query for all prompts, 1 for version counts
+    all_existing = await db.prompttemplate.find_many()
+    existing_map = {t.key: t for t in all_existing}
+
+    # Get prompt IDs that have at least one version (single query)
+    version_prompt_ids: set[str] = set()
+    if all_existing:
+        versions = await db.query_raw(
+            "SELECT DISTINCT prompt_id FROM prompt_template_versions",
+        )
+        version_prompt_ids = {str(v["prompt_id"]) for v in versions}
+
+    redis = await get_redis()
+    pipe = redis.pipeline()
+
     for definition in PROMPT_DEFINITIONS:
-        existing = await db.prompttemplate.find_unique(where={"key": definition.key})
+        existing = existing_map.get(definition.key)
         if existing:
-            # Logic: If current content matches the old default, update it to the new default.
-            # This ensures code-level prompt updates are applied unless the user has customized them in the DB.
             is_unmodified = existing.content == existing.defaultContent
             new_content = definition.default_text if is_unmodified else existing.content
-            
-            # Content for Redis sync (will be updated below if needs_update is True)
             content = new_content
-            
+
             needs_update = (
                 existing.stage != definition.stage
                 or existing.category != definition.category
@@ -52,12 +67,8 @@ async def ensure_prompt_templates() -> None:
                         "content": new_content,
                     },
                 )
-                content = new_content
-                
-            version_count = await db.prompttemplateversion.count(
-                where={"promptId": existing.id}
-            )
-            if version_count == 0:
+
+            if existing.id not in version_prompt_ids:
                 await _create_prompt_version(
                     prompt_id=existing.id,
                     prompt_key=definition.key,
@@ -86,8 +97,9 @@ async def ensure_prompt_templates() -> None:
                 source="default",
                 change_type="bootstrap",
             )
-        redis = await get_redis()
-        await redis.set(_redis_key(definition.key), content)
+        pipe.set(_redis_key(definition.key), content)
+
+    await pipe.execute()
 
 
 async def get_prompt_text(key: str) -> str:
