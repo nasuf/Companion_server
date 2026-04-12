@@ -111,12 +111,18 @@ async def get_life_story(
 async def get_memory_stats(
     agent_id: str,
     source: str = "",
+    level: int | None = None,
+    main_category: str = "",
+    sub_category: str = "",
     _: str = Depends(require_admin_jwt),
 ):
     """Precise memory statistics via SQL COUNT + GROUP BY."""
     from app.api.public.memories import _compute_stats
     workspace_id = await _resolve_workspace_id(agent_id)
-    return await _compute_stats(workspace_id, source or None)
+    return await _compute_stats(
+        workspace_id, source or None, level,
+        main_category or None, sub_category or None,
+    )
 
 
 @router.get("/{agent_id}/memories")

@@ -19,10 +19,13 @@ router = APIRouter(prefix="/memories", tags=["memories"])
 async def _compute_stats(
     workspace_id: str | None,
     source: str | None = None,
+    level: int | None = None,
+    main_category: str | None = None,
+    sub_category: str | None = None,
 ) -> MemoryStatsResponse:
     """Compute precise memory stats via SQL COUNT + GROUP BY.
 
-    Shared by public /memories/stats and admin /agents/{id}/memory-stats.
+    Accepts optional filter params so dropdown counts reflect cross-filters.
     """
     if not workspace_id:
         return MemoryStatsResponse(
@@ -35,9 +38,26 @@ async def _compute_stats(
     if source in (None, "ai"):
         tables.append("memories_ai")
 
+    conditions = ["is_archived = FALSE", "workspace_id = $1"]
+    params: list = [workspace_id]
+    idx = 2
+    if level is not None:
+        conditions.append(f"level = ${idx}")
+        params.append(level)
+        idx += 1
+    if main_category:
+        conditions.append(f"main_category = ${idx}")
+        params.append(main_category)
+        idx += 1
+    if sub_category:
+        conditions.append(f"sub_category = ${idx}")
+        params.append(sub_category)
+        idx += 1
+
+    where_clause = " AND ".join(conditions)
+
     by_level: dict[str, int] = {}
     by_main: dict[str, int] = {}
-    by_sub: dict[str, int] = {}
     by_main_sub: dict[str, int] = {}
     total = 0
 
@@ -46,10 +66,10 @@ async def _compute_stats(
             f"""
             SELECT level, main_category, sub_category, COUNT(*)::int AS cnt
             FROM {table}
-            WHERE is_archived = FALSE AND workspace_id = $1
+            WHERE {where_clause}
             GROUP BY level, main_category, sub_category
             """,
-            workspace_id,
+            *params,
         )
         for r in rows:
             cnt = int(r["cnt"])
@@ -59,7 +79,6 @@ async def _compute_stats(
             sk = r.get("sub_category") or "其他"
             by_level[lk] = by_level.get(lk, 0) + cnt
             by_main[mk] = by_main.get(mk, 0) + cnt
-            by_sub[sk] = by_sub.get(sk, 0) + cnt
             by_main_sub[f"{mk}-{sk}"] = by_main_sub.get(f"{mk}-{sk}", 0) + cnt
 
     def _ser(d: dict[str, int]) -> list[MemoryStatsBucket]:
@@ -69,7 +88,7 @@ async def _compute_stats(
         total=total,
         by_level=_ser(by_level),
         by_main_category=_ser(by_main),
-        by_sub_category=_ser(by_sub),
+        by_sub_category=[],
         by_main_sub=by_main_sub,
     )
 
@@ -125,10 +144,13 @@ async def memory_stats(
     user_id: str,
     workspace_id: str | None = None,
     source: Literal["user", "ai"] | None = None,
+    level: int | None = None,
+    main_category: str | None = None,
+    sub_category: str | None = None,
 ):
     """Precise memory statistics via SQL COUNT + GROUP BY."""
     ws_id = workspace_id or await resolve_workspace_id(user_id=user_id)
-    return await _compute_stats(ws_id, source)
+    return await _compute_stats(ws_id, source, level, main_category, sub_category)
 
 
 @router.post("/search")

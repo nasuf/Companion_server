@@ -594,6 +594,12 @@ async def generate_full_life_story(
         # Step 2 (Phase 1): Convert profile structured fields to memories directly
         await set_progress(agent_id, "converting_profile", message="正在转换背景信息为记忆...")
         profile_memories = convert_profile_to_memories(profile_data, career_template)
+        # 用户给定的姓名是最重要的身份信息
+        profile_memories.insert(0, {
+            "summary": f"我叫{name}",
+            "main_category": "身份", "sub_category": "姓名",
+            "type": "identity", "importance": 1.0,
+        })
         logger.info(f"Profile → {len(profile_memories)} direct memories for agent {agent_id}")
 
         # Step 3 (Phase 2): Generate experiential memories via LLM
