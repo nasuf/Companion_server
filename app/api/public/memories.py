@@ -6,7 +6,7 @@ from app.db import db
 from app.models.memory import (
     MemoryResponse,
     MemorySearchRequest,
-    MemoryStatsBucket,
+    MemoryStatsGroup,
     MemoryStatsResponse,
 )
 from app.services.memory import memory_repo
@@ -19,18 +19,13 @@ router = APIRouter(prefix="/memories", tags=["memories"])
 async def _compute_stats(
     workspace_id: str | None,
     source: str | None = None,
-    level: int | None = None,
-    main_category: str | None = None,
-    sub_category: str | None = None,
 ) -> MemoryStatsResponse:
-    """Compute precise memory stats via SQL COUNT + GROUP BY.
+    """Return raw (level, main_category, sub_category, count) groups.
 
-    Accepts optional filter params so dropdown counts reflect cross-filters.
+    Frontend computes cross-filtered counts from these groups.
     """
     if not workspace_id:
-        return MemoryStatsResponse(
-            total=0, by_level=[], by_main_category=[], by_sub_category=[], by_main_sub={},
-        )
+        return MemoryStatsResponse(total=0, groups=[])
 
     tables: list[str] = []
     if source in (None, "user"):
@@ -38,59 +33,28 @@ async def _compute_stats(
     if source in (None, "ai"):
         tables.append("memories_ai")
 
-    conditions = ["is_archived = FALSE", "workspace_id = $1"]
-    params: list = [workspace_id]
-    idx = 2
-    if level is not None:
-        conditions.append(f"level = ${idx}")
-        params.append(level)
-        idx += 1
-    if main_category:
-        conditions.append(f"main_category = ${idx}")
-        params.append(main_category)
-        idx += 1
-    if sub_category:
-        conditions.append(f"sub_category = ${idx}")
-        params.append(sub_category)
-        idx += 1
-
-    where_clause = " AND ".join(conditions)
-
-    by_level: dict[str, int] = {}
-    by_main: dict[str, int] = {}
-    by_main_sub: dict[str, int] = {}
-    total = 0
-
+    # Aggregate across tables using a dict key
+    agg: dict[tuple[int, str, str], int] = {}
     for table in tables:
         rows = await db.query_raw(
             f"""
             SELECT level, main_category, sub_category, COUNT(*)::int AS cnt
             FROM {table}
-            WHERE {where_clause}
+            WHERE is_archived = FALSE AND workspace_id = $1
             GROUP BY level, main_category, sub_category
             """,
-            *params,
+            workspace_id,
         )
         for r in rows:
-            cnt = int(r["cnt"])
-            total += cnt
-            lk = f"L{r['level']}"
-            mk = r.get("main_category") or "未分类"
-            sk = r.get("sub_category") or "其他"
-            by_level[lk] = by_level.get(lk, 0) + cnt
-            by_main[mk] = by_main.get(mk, 0) + cnt
-            by_main_sub[f"{mk}-{sk}"] = by_main_sub.get(f"{mk}-{sk}", 0) + cnt
+            key = (int(r["level"]), r.get("main_category") or "未分类", r.get("sub_category") or "其他")
+            agg[key] = agg.get(key, 0) + int(r["cnt"])
 
-    def _ser(d: dict[str, int]) -> list[MemoryStatsBucket]:
-        return [MemoryStatsBucket(key=k, count=c) for k, c in sorted(d.items(), key=lambda x: (-x[1], x[0]))]
-
-    return MemoryStatsResponse(
-        total=total,
-        by_level=_ser(by_level),
-        by_main_category=_ser(by_main),
-        by_sub_category=[],
-        by_main_sub=by_main_sub,
-    )
+    groups = [
+        MemoryStatsGroup(level=lv, main_category=mc, sub_category=sc, count=cnt)
+        for (lv, mc, sc), cnt in agg.items()
+    ]
+    total = sum(g.count for g in groups)
+    return MemoryStatsResponse(total=total, groups=groups)
 
 
 @router.get("", response_model=list[MemoryResponse])
@@ -144,13 +108,10 @@ async def memory_stats(
     user_id: str,
     workspace_id: str | None = None,
     source: Literal["user", "ai"] | None = None,
-    level: int | None = None,
-    main_category: str | None = None,
-    sub_category: str | None = None,
 ):
-    """Precise memory statistics via SQL COUNT + GROUP BY."""
+    """Return raw grouped counts. Frontend computes cross-filtered totals."""
     ws_id = workspace_id or await resolve_workspace_id(user_id=user_id)
-    return await _compute_stats(ws_id, source, level, main_category, sub_category)
+    return await _compute_stats(ws_id, source)
 
 
 @router.post("/search")

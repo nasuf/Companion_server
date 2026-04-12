@@ -23,14 +23,13 @@ class MemorySearchRequest(BaseModel):
     sub_category: str | None = None
 
 
-class MemoryStatsBucket(BaseModel):
-    key: str
+class MemoryStatsGroup(BaseModel):
+    level: int
+    main_category: str
+    sub_category: str
     count: int
 
 
 class MemoryStatsResponse(BaseModel):
     total: int
-    by_level: list[MemoryStatsBucket]
-    by_main_category: list[MemoryStatsBucket]
-    by_sub_category: list[MemoryStatsBucket]
-    by_main_sub: dict[str, int] = {}  # "身份-姓名" → count
+    groups: list[MemoryStatsGroup]
