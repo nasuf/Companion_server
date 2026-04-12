@@ -106,12 +106,30 @@ async def select_character_profile(gender: str | None) -> dict | None:
     return {
         "id": selected.id,
         "data": selected.data if isinstance(selected.data, dict) else {},
-        "career_id": getattr(selected, "careerId", None),
-        "career": {
-            "title": selected.career.title if selected.career else None,
-            "duties": selected.career.duties if selected.career else None,
+        "career_template": {
+            "title": selected.career.title,
+            "duties": selected.career.duties,
+            "outputs": selected.career.outputs,
+            "social_value": selected.career.socialValue,
+            "clients": selected.career.clients,
         } if selected.career else None,
     }
+
+
+def _format_career(career_template: dict | None) -> str:
+    """Format career template data for prompt injection."""
+    if not career_template:
+        return "未知"
+    parts = [f"职业: {career_template.get('title', '未知')}"]
+    if career_template.get("duties"):
+        parts.append(f"工作内容: {career_template['duties']}")
+    if career_template.get("outputs"):
+        parts.append(f"主要产出物: {career_template['outputs']}")
+    if career_template.get("social_value"):
+        parts.append(f"社会价值: {career_template['social_value']}")
+    if career_template.get("clients"):
+        parts.append(f"服务对象: {career_template['clients']}")
+    return "\n".join(parts)
 
 
 async def generate_outline(
@@ -120,10 +138,10 @@ async def generate_outline(
     gender: str | None,
     personality: dict | None,
     seven_dim: dict | None,
+    career_template: dict | None = None,
 ) -> list[dict]:
     """Generate life story outline: 12-15 chapters with titles and key events."""
     identity = profile_data.get("identity", {})
-    career = profile_data.get("career", {})
     education = profile_data.get("education_knowledge", {})
     values = profile_data.get("values", {})
     likes = profile_data.get("likes", {})
@@ -138,14 +156,15 @@ async def generate_outline(
 - 出生日期: {identity.get('birthday', '未知')}
 - 城市: {identity.get('location', '未知')}
 - 教育背景: {education.get('degree', '未知')}
-- 职业: {career.get('title', '未知')}
-- 工作内容: {career.get('duties', '未知')}
 - 家庭: {identity.get('family', '未知')}
 - 性格特点: {json.dumps(seven_dim, ensure_ascii=False) if seven_dim else '未设定'}
 - 喜好: {json.dumps(likes, ensure_ascii=False) if likes else '未知'}
 - 价值观: {values.get('motto', '未知')}
 - 人生目标: {values.get('goal', '未知')}
 - 擅长: {json.dumps(abilities.get('good_at', []), ensure_ascii=False)}
+
+职业详情：
+{_format_career(career_template)}
 
 请生成12-15个人生阶段的大纲。每个阶段包含：
 1. title: 阶段标题（如"童年时光"）
@@ -181,12 +200,16 @@ async def extract_chapter_memories(
     name: str,
     chapter_index: int,
     total_chapters: int,
+    career_template: dict | None = None,
 ) -> list[dict]:
     """Extract 5-10 structured memories from a single chapter."""
+    career_section = f"\n角色职业详情：\n{_format_career(career_template)}" if career_template else ""
+
     prompt = f"""你正在为角色「{name}」梳理人生经历第 {chapter_index + 1}/{total_chapters} 阶段的记忆。
 
 完整人生大纲：
 {outline_summary}
+{career_section}
 
 当前阶段：
 - 标题: {chapter.get('title', '')}
@@ -291,11 +314,11 @@ async def generate_full_life_story(
         # Bind profile to agent + 用 profile 数据覆盖 agent 的 occupation/age/city
         # 防止 _init_agent_background 的 LLM 自由生成与 profile 冲突
         profile_data = profile["data"]
+        career_template = profile.get("career_template")
         identity = profile_data.get("identity", {})
-        career = profile_data.get("career", {})
         update_data: dict = {"characterProfileId": profile["id"]}
-        if career.get("title"):
-            update_data["occupation"] = career["title"]
+        if career_template and career_template.get("title"):
+            update_data["occupation"] = career_template["title"]
         if identity.get("location"):
             update_data["city"] = str(identity["location"])
         if identity.get("age"):
@@ -304,7 +327,10 @@ async def generate_full_life_story(
 
         # Step 2: Generate outline
         await set_progress(agent_id, "generating_outline", message="正在构思人生大纲...")
-        chapters = await generate_outline(profile_data, name, gender, personality, seven_dim)
+        chapters = await generate_outline(
+            profile_data, name, gender, personality, seven_dim,
+            career_template=career_template,
+        )
         if not chapters:
             logger.warning(f"Outline generation returned empty for agent {agent_id}")
             await set_progress(agent_id, "complete", message="大纲生成失败，已跳过")
@@ -328,6 +354,7 @@ async def generate_full_life_story(
             try:
                 memories = await extract_chapter_memories(
                     chapter, outline_summary, name, i, total,
+                    career_template=career_template,
                 )
                 all_memories.extend(memories)
             except Exception as e:
