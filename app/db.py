@@ -60,6 +60,26 @@ async def connect_db():
     )
 
 
+async def ensure_connected() -> None:
+    """Verify DB connection is alive; reconnect if stale.
+
+    Supabase pooler may close idle connections during long-running tasks
+    (e.g. batch embedding). Call this before write-heavy phases.
+    """
+    try:
+        await _ping()
+    except Exception:
+        logger.warning("DB connection stale, reconnecting...")
+        try:
+            if db.is_connected():
+                await db.disconnect()
+        except Exception:
+            pass
+        await db.connect()
+        await _ping()
+        logger.info("DB reconnected")
+
+
 async def disconnect_db():
     if db.is_connected():
         await db.disconnect()

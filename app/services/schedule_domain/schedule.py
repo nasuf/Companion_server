@@ -118,34 +118,28 @@ async def generate_daily_schedule(
     holiday = is_holiday(date.date())
 
     if life_overview:
-        is_weekend = date.weekday() >= 5
-        # 节日强制走LLM路径
-        use_llm = is_weekend or holiday is not None or random.random() < 0.4
-        if use_llm:
-            try:
-                prompt = (await get_prompt_text("schedule.daily_schedule")).format(
-                    name=name,
-                    overview=life_overview,
-                    date=date.strftime("%Y-%m-%d"),
-                    weekday=weekday,
-                )
-                # 注入节日信息
-                if holiday:
-                    prompt += f"\n今天是{holiday.name}（{holiday.type}类节日）。请根据节日特点调整作息，安排节日相关活动。"
-                # 10D.5: 融入用户记忆
-                memory_summary = await _get_user_memory_summary(user_id) if user_id else ""
-                if memory_summary:
-                    prompt += f"\n用户近期情况：{memory_summary}\n可以在空闲时段融入与用户相关的个性化活动。"
+        try:
+            prompt = (await get_prompt_text("schedule.daily_schedule")).format(
+                name=name,
+                overview=life_overview,
+                date=date.strftime("%Y-%m-%d"),
+                weekday=weekday,
+            )
+            if holiday:
+                prompt += f"\n今天是{holiday.name}（{holiday.type}类节日）。请根据节日特点调整作息，安排节日相关活动。"
+            memory_summary = await _get_user_memory_summary(user_id) if user_id else ""
+            if memory_summary:
+                prompt += f"\n用户近期情况：{memory_summary}\n可以在空闲时段融入与用户相关的个性化活动。"
 
-                model = get_utility_model()
-                schedule = await invoke_json(model, prompt)
-                if isinstance(schedule, list) and len(schedule) >= 5:
-                    await _cache_schedule(agent_id, date, schedule)
-                    return schedule
-            except Exception as e:
-                logger.warning(f"Custom schedule generation failed: {e}")
+            model = get_utility_model()
+            schedule = await invoke_json(model, prompt)
+            if isinstance(schedule, list) and len(schedule) >= 5:
+                await _cache_schedule(agent_id, date, schedule)
+                return schedule
+        except Exception as e:
+            logger.warning(f"LLM schedule generation failed, falling back to template: {e}")
 
-    # 默认用模板（根据人格微调）
+    # 兜底: 无 life_overview 或 LLM 失败时用模板
     schedule = _personalize_template(seven_dim, date, holiday=holiday)
     await _cache_schedule(agent_id, date, schedule)
     return schedule
@@ -170,10 +164,15 @@ def _personalize_template(seven_dim: dict, date: datetime, *, holiday=None) -> l
         # 计划度高：早起
         if slot["activity"] == "起床洗漱" and planned >= 0.7:
             slot["start"] = "06:30"
+            slot["end"] = "07:30"
 
-        # 周末晚起
+        # 周末晚起 + 晚餐也顺延
         if is_weekend and slot["activity"] == "起床洗漱":
             slot["start"] = "09:00"
+            slot["end"] = "10:00"
+        if is_weekend and slot["activity"] == "吃早餐":
+            slot["start"] = "10:00"
+            slot["end"] = "11:00"
         if is_weekend and slot["type"] == "work":
             slot["activity"] = random.choice(["看书", "追剧", "逛街", "玩游戏", "画画"])
             slot["type"] = "leisure"

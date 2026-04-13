@@ -486,7 +486,7 @@ async def mark_user_replied_for_conversation(
                 current_window_index = NULL,
                 window_due_at = NULL,
                 response_deadline_at = NULL,
-                last_user_reply_at = $2,
+                last_user_reply_at = $2::timestamp,
                 updated_at = CURRENT_TIMESTAMP
             FROM conversations c
             WHERE c.id = $1
@@ -654,11 +654,11 @@ async def mark_proactive_sent(
                 current_window_index = NULL,
                 window_due_at = NULL,
                 response_deadline_at = $3::timestamp,
-                last_proactive_at = $2,
+                last_proactive_at = $2::timestamp,
                 last_attempt_at = $2::timestamp,
                 t0_at = $2::timestamp,
                 remaining_forced_triggers = $4,
-                daily_scene_triggered_at = CASE WHEN $5 THEN $2 ELSE daily_scene_triggered_at END,
+                daily_scene_triggered_at = CASE WHEN $5 THEN $2::timestamp ELSE daily_scene_triggered_at END,
                 metadata = $6::jsonb,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1

@@ -96,7 +96,7 @@ async def hybrid_retrieve(
     context_entities = analysis.get("entities", []) or []
     context_categories = analysis.get("main_categories", []) or []
     context_sub_categories = analysis.get("sub_categories", []) or []
-    levels = analysis.get("levels", [2, 3]) or [2, 3]
+    levels = analysis.get("levels") or None  # None = all levels including L1
     time_range = analysis.get("time_range")
 
     # Parallel: vector search + graph context + optional time search

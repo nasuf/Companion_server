@@ -14,7 +14,7 @@ import json
 import logging
 import random
 
-from app.db import db
+from app.db import db, ensure_connected
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_embedding_model, invoke_json
 from app.services.memory import memory_repo
@@ -547,6 +547,9 @@ async def store_memories_batch(
                        message=f"正在生成向量 ({total} 条)...")
     embed_model = get_embedding_model()
     embeddings = await embed_model.aembed_documents(texts)
+
+    # Refresh DB connection (may have gone stale during embedding)
+    await ensure_connected()
 
     # Store each memory + embedding (no dedup check)
     stored_ids: list[str] = []

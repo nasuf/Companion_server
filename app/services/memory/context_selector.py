@@ -18,8 +18,10 @@ class ClassifiedMemory:
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate (1 token ≈ 4 chars for English)."""
-    return len(text) // 4
+    """Rough token estimate. Chinese: ~1.5 token per char; ASCII: ~0.25 token per char."""
+    cjk = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    ascii_chars = len(text) - cjk
+    return int(cjk * 1.5 + ascii_chars * 0.25)
 
 
 def select_context(

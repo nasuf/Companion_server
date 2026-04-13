@@ -474,14 +474,14 @@ async def stream_chat_response(
         return await cache_summarizer(ch)
 
     async def _load_core_memories():
-        """Load L1 core memories (user only) — always present in prompt."""
+        """Load L1 core memories (user + AI) — always present in prompt."""
         from app.services.memory.core_memory import load_core_memory_strings
-        rows = await load_core_memory_strings(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            source="user",
+        user_rows, ai_rows = await asyncio.gather(
+            load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="user"),
+            load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="ai"),
         )
-        return rows if rows else None
+        combined = user_rows + ai_rows
+        return combined if combined else None
 
     async def _load_portrait():
         """Load latest user portrait — no LLM call."""
@@ -559,6 +559,11 @@ async def stream_chat_response(
     if isinstance(core_memories, Exception):
         logger.warning(f"Loading core memories failed: {core_memories}")
         core_memories = None
+
+    # Dedup: remove semantic results already present in core memories
+    if core_memories and classified_memories:
+        core_set = set(core_memories)
+        classified_memories = [m for m in classified_memories if m.text not in core_set]
 
     if isinstance(portrait, Exception):
         logger.warning(f"Loading portrait failed: {portrait}")

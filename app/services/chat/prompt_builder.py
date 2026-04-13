@@ -211,14 +211,30 @@ def _build_summarizer_section(summaries: dict | None) -> str | None:
     return _section("上下文摘要", "\n\n".join(parts))
 
 
+_CORE_MEMORY_TOKEN_BUDGET = 1200
+
+
 def _build_core_memory_section(core_memories: list[str] | None) -> str | None:
-    """Build the L1 core memory section (always present in prompt)."""
+    """Build the L1 core memory section (always present in prompt, with token cap)."""
     if not core_memories:
         return None
 
-    numbered = "\n".join(f"- {m}" for m in core_memories)
-    body = f"以下是你对用户最重要的了解，随时可以自然使用：\n{numbered}"
-    return _section("用户核心信息", body)
+    from app.services.memory.context_selector import estimate_tokens
+    selected: list[str] = []
+    used = 0
+    for m in core_memories:
+        t = estimate_tokens(m)
+        if used + t > _CORE_MEMORY_TOKEN_BUDGET:
+            break
+        selected.append(m)
+        used += t
+
+    if not selected:
+        return None
+
+    numbered = "\n".join(f"- {m}" for m in selected)
+    body = f"以下是你和用户最重要的信息，随时可以自然使用：\n{numbered}"
+    return _section("核心记忆", body)
 
 
 async def _build_memory_section(memories: list | None) -> str | None:
