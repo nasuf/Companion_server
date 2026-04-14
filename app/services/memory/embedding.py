@@ -35,8 +35,8 @@ async def generate_embedding(text: str) -> list[float]:
 
 async def store_embedding(memory_id: str, embedding: list[float]) -> None:
     """Store an embedding in the memory_embeddings table."""
-    from app.services.memory.vector_search import _format_vector
-    vec_str = _format_vector(embedding)
+    from app.services.memory.vector_search import format_vector
+    vec_str = format_vector(embedding)
     await db.execute_raw(
         """
         INSERT INTO memory_embeddings (memory_id, embedding)

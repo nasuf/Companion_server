@@ -10,7 +10,13 @@ from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.trait_model import get_seven_dim
-from app.services.life_story import generate_full_life_story, get_progress
+from app.services.life_story import (
+    activate_agent,
+    generate_life_story_memories,
+    get_progress,
+    prepare_profile_for_agent,
+    set_progress,
+)
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview,
     generate_daily_schedule,
@@ -99,39 +105,78 @@ async def create_agent(data: AgentCreate):
     # Initialize patience value (Redis + DB)
     asyncio.create_task(init_patience(agent.id, data.user_id))
 
-    # Background: life story (profile selection → memory generation) → schedule
+    # Background: profile selection → (life story memories ∥ life overview) → daily schedule
+    async def _safe_overview() -> dict | None:
+        try:
+            return await generate_and_save_life_overview(agent)
+        except Exception as e:
+            logger.warning(f"Life overview failed for {agent.id}: {e}")
+            return None
+
     async def _init_and_generate_story():
         ws_id = workspace.id if workspace else None
-        # Step 1: 生成人生经历 (内部会从 Profile 覆盖 age/occupation/city)
         try:
-            await generate_full_life_story(
-                agent_id=agent.id,
-                user_id=data.user_id,
-                name=agent.name,
-                gender=agent.gender,
-                seven_dim=get_seven_dim(agent),
-                workspace_id=ws_id,
-            )
+            result = await prepare_profile_for_agent(agent.id, agent.gender)
         except Exception as e:
-            logger.error(f"Life story generation failed for {agent.id}: {e}", exc_info=True)
-            try:
-                a = await db.aiagent.find_unique(where={"id": agent.id})
-                if a and a.status != "active":
-                    await db.aiagent.update(where={"id": agent.id}, data={"status": "active"})
-            except Exception:
-                pass
+            logger.error(f"Profile preparation failed for {agent.id}: {e}", exc_info=True)
+            result = None
 
-        # Step 2: 生成生活画像 + 作息表 (依赖 Step 1 已覆盖的 identity 字段)
+        # Patch the local agent with the same fields we just wrote to DB,
+        # avoiding a redundant find_unique round-trip.
+        if result:
+            profile, applied = result
+            for field, value in applied.items():
+                if hasattr(agent, field):
+                    setattr(agent, field, value)
+        else:
+            profile = None
+
+        seven_dim = get_seven_dim(agent)
+        overview_data: dict | None = None
+
+        if profile:
+            # life_overview 与 life_story 都从同一份 profile/agent 派生，
+            # 逻辑自洽且无跨任务依赖，可安全并行。
+            async def _run_memories():
+                try:
+                    await generate_life_story_memories(
+                        agent_id=agent.id,
+                        user_id=data.user_id,
+                        name=agent.name,
+                        gender=agent.gender,
+                        seven_dim=seven_dim,
+                        profile=profile,
+                        workspace_id=ws_id,
+                    )
+                except Exception as e:
+                    logger.error(f"Life story memories failed for {agent.id}: {e}", exc_info=True)
+                    await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
+
+            _, overview_data = await asyncio.gather(_run_memories(), _safe_overview())
+        else:
+            # 无 profile：跳过记忆，仍尝试 overview（基于 agent 默认字段）
+            await set_progress(agent.id, "complete", message="无可用背景模板，已跳过")
+            overview_data = await _safe_overview()
+
+        # 仅在生成未失败时标记 complete（避免覆盖 _run_memories 的 failed 状态）
         try:
-            updated_agent = await db.aiagent.find_unique(where={"id": agent.id})
-            if updated_agent:
-                overview_data = await generate_and_save_life_overview(updated_agent)
+            current = await get_progress(agent.id)
+            if current and current.get("stage") != "failed":
+                await set_progress(agent.id, "complete", message="生成完成")
+        except Exception as e:
+            logger.debug(f"Skip complete-stage write for {agent.id}: {e}")
+
+        if overview_data:
+            try:
                 await generate_daily_schedule(
-                    agent.id, agent.name, get_seven_dim(updated_agent),
+                    agent.id, agent.name, seven_dim,
                     life_overview=overview_data.get("description"),
                 )
-        except Exception as e:
-            logger.warning(f"Schedule init failed for agent {agent.id}: {e}")
+            except Exception as e:
+                logger.warning(f"Daily schedule init failed for agent {agent.id}: {e}")
+
+        # 兜底激活：即使前面任一环节失败，也保证用户能用
+        await activate_agent(agent.id)
 
     asyncio.create_task(_init_and_generate_story())
 

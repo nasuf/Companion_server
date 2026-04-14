@@ -13,20 +13,27 @@ import asyncio
 import json
 import logging
 import random
+import uuid
 
 from app.db import db, ensure_connected
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_embedding_model, invoke_json
-from app.services.memory import memory_repo
-from app.services.memory.embedding import store_embedding
-from app.services.memory.storage import log_memory_changelog, normalize_memory_type
+from app.services.memory.storage import normalize_memory_type
 from app.services.memory.taxonomy import TAXONOMY, resolve_taxonomy
+from app.services.memory.vector_search import format_vector
+from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
 # Redis key for provisioning progress
 PROGRESS_KEY_PREFIX = "provision_progress:"
 PROGRESS_TTL = 3600  # 1 hour
+
+# 章节并发上限：避免对 LLM provider 的 burst，但充分并行
+_CHAPTER_CONCURRENCY = 8
+
+# 进度刷新粒度：每完成 N 章（或最后一章）才写一次 Redis，避免锁/RTT 抖动
+_PROGRESS_EVERY = 3
 
 
 def _taxonomy_description() -> str:
@@ -532,7 +539,8 @@ async def store_memories_batch(
     Optimizations vs per-item store_memory():
     - Batch embedding: aembed_documents() instead of N × aembed_query()
     - Skip dedup: initial provisioning, DB is empty, no duplicates possible
-    - Progress throttle: update every 10 items instead of every item
+    - Bulk insert: client-side UUIDs + create_many for memories/changelog,
+      asyncio.gather for embedding rows (pgvector lacks Prisma binding)
     """
     # Filter empty summaries
     valid = [m for m in all_memories if m.get("summary")]
@@ -551,14 +559,17 @@ async def store_memories_batch(
     # Refresh DB connection (may have gone stale during embedding)
     await ensure_connected()
 
-    # Store each memory + embedding (no dedup check)
-    stored_ids: list[str] = []
-    for i, (mem, embedding) in enumerate(zip(valid, embeddings)):
-        if i % 10 == 0:
-            await set_progress(agent_id, "storing_memories",
-                               current=i + 1, total=total,
-                               message=f"正在写入记忆 ({i+1}/{total})...")
+    # Resolve workspace once (shared by all memories + changelogs)
+    workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
 
+    # Pre-generate IDs so we can bulk-insert memories AND link embeddings
+    # without a per-row RETURNING round-trip.
+    ids = [str(uuid.uuid4()) for _ in valid]
+
+    # Resolve taxonomy + normalize types in pure Python (no I/O)
+    memory_rows: list[dict] = []
+    changelog_rows: list[dict] = []
+    for mid, mem in zip(ids, valid):
         summary = mem["summary"]
         mem_type = normalize_memory_type(mem.get("type", "life"))
         taxonomy = resolve_taxonomy(
@@ -566,30 +577,196 @@ async def store_memories_batch(
             sub_category=mem.get("sub_category", "其他"),
             legacy_type=mem_type,
         )
-        memory = await memory_repo.create(
-            source="ai",
-            userId=user_id,
-            content=summary,
-            summary=summary,
-            level=1,
-            importance=float(mem.get("importance", 0.85)),
-            type=mem_type,
-            mainCategory=taxonomy.main_category,
-            subCategory=taxonomy.sub_category,
-            workspaceId=workspace_id,
-        )
-        await store_embedding(memory.id, embedding)
-        stored_ids.append(memory.id)
+        memory_rows.append({
+            "id": mid,
+            "userId": user_id,
+            "content": summary,
+            "summary": summary,
+            "level": 1,
+            "importance": float(mem.get("importance", 0.85)),
+            "type": mem_type,
+            "mainCategory": taxonomy.main_category,
+            "subCategory": taxonomy.sub_category,
+            "workspaceId": workspace_id,
+        })
+        changelog_rows.append({
+            "userId": user_id,
+            "memoryId": mid,
+            "operation": "insert",
+            "newValue": summary,
+            "workspaceId": workspace_id,
+        })
 
-    # Batch changelog (fire-and-forget, non-critical)
-    for mid, mem in zip(stored_ids, valid):
-        await log_memory_changelog(user_id, mid, "insert",
-                                   new_value=mem["summary"], workspace_id=workspace_id)
+    # ── Bulk insert memories (single SQL via Prisma create_many) ──
+    await set_progress(agent_id, "storing_memories",
+                       current=int(total * 0.3), total=total,
+                       message=f"正在写入记忆 ({total} 条)...")
+    await db.aimemory.create_many(data=memory_rows)
 
-    return stored_ids
+    # ── Bulk insert embeddings: single multi-VALUES SQL ──
+    # pgvector lacks Prisma binding, so we hand-build the placeholder list:
+    # ($1,$2::extensions.vector),($3,$4::extensions.vector),...
+    # Fresh client-side UUIDs guarantee no collisions, so no ON CONFLICT.
+    await set_progress(agent_id, "storing_memories",
+                       current=int(total * 0.6), total=total,
+                       message=f"正在写入向量 ({total} 条)...")
+    placeholders = ",".join(
+        f"(${i * 2 + 1},${i * 2 + 2}::extensions.vector)" for i in range(total)
+    )
+    args: list = []
+    for mid, emb in zip(ids, embeddings):
+        args.append(mid)
+        args.append(format_vector(emb))
+    await db.execute_raw(
+        f"INSERT INTO memory_embeddings (memory_id, embedding) VALUES {placeholders}",
+        *args,
+    )
+
+    # ── Bulk insert changelog (single SQL) ──
+    # Non-critical: never let changelog failure abort provisioning.
+    try:
+        await db.memorychangelog.create_many(data=changelog_rows)
+    except Exception as e:
+        logger.warning(f"Bulk changelog insert failed for agent {agent_id}: {e}")
+
+    await set_progress(agent_id, "storing_memories",
+                       current=total, total=total,
+                       message=f"已写入 {total} 条记忆")
+    return ids
 
 
 # ── Main Entry Point ──
+
+async def prepare_profile_for_agent(
+    agent_id: str,
+    gender: str | None,
+) -> tuple[dict, dict] | None:
+    """Step A: 选 profile + 写回 agent 的 age/occupation/city/profileId。
+
+    返回 (profile, applied_updates)，或 None (无可用模板)。applied_updates 是
+    本次写入 agent 表的字段子集，调用方可直接把它 patch 到本地 agent 对象上，
+    免去一次 find_unique 往返。
+    """
+    await set_progress(agent_id, "selecting_profile", message="正在匹配角色背景...")
+    profile = await select_character_profile(gender)
+    if not profile:
+        logger.warning(f"No matching CharacterProfile for agent {agent_id}")
+        return None
+
+    profile_data = profile["data"]
+    career_template = profile.get("career_template")
+    identity = profile_data.get("identity", {})
+
+    update_data: dict = {"characterProfileId": profile["id"]}
+    if career_template and career_template.get("title"):
+        update_data["occupation"] = career_template["title"]
+    if identity.get("location"):
+        update_data["city"] = str(identity["location"])
+    if identity.get("age"):
+        update_data["age"] = int(identity["age"])
+    await db.aiagent.update(where={"id": agent_id}, data=update_data)
+    return profile, update_data
+
+
+async def generate_life_story_memories(
+    agent_id: str,
+    user_id: str,
+    name: str,
+    gender: str | None,
+    seven_dim: dict | None,
+    profile: dict,
+    workspace_id: str | None = None,
+) -> int:
+    """Step B: 基于已选定的 profile 生成 + 存储所有 L1 记忆。
+
+    依赖 prepare_profile_for_agent 已返回的 profile dict。可与其他依赖 agent
+    身份字段的任务（如 life_overview）并行执行。
+
+    返回写入的记忆条数。失败时抛出，由调用方统一处理。
+    """
+    profile_data = profile["data"]
+    career_template = profile.get("career_template")
+
+    # ── Phase 1: 结构化字段直转 (无 LLM, 极快) ──
+    await set_progress(agent_id, "converting_profile", message="正在转换背景信息为记忆...")
+    profile_memories = convert_profile_to_memories(profile_data, career_template)
+    profile_memories.insert(0, {
+        "summary": f"我叫{name}",
+        "main_category": "身份", "sub_category": "姓名",
+        "type": "identity", "importance": 1.0,
+    })
+    logger.info(f"Profile → {len(profile_memories)} direct memories for agent {agent_id}")
+
+    # ── Phase 2: LLM 生成大纲 + 并发提取章节经历 ──
+    await set_progress(agent_id, "generating_outline", message="正在构思人生大纲...")
+    chapters = await generate_outline(
+        profile_data, name, gender, seven_dim,
+        career_template=career_template,
+    )
+
+    experience_memories: list[dict] = []
+    if chapters:
+        total = len(chapters)
+        # 大纲 summary 全程共享给每一章，保证章节间逻辑/时间线连续不冲突
+        outline_summary = "\n".join(
+            f"{i+1}. {ch.get('title', '')} ({ch.get('age_range', '')}): "
+            f"{', '.join(ch.get('key_events', []))}"
+            for i, ch in enumerate(chapters)
+        )
+        profile_text = _format_profile_for_prompt(profile_data, career_template)
+
+        # 全并发：所有章节同时发起，以 Semaphore 限流避免 burst
+        sem = asyncio.Semaphore(_CHAPTER_CONCURRENCY)
+        # 单线程 asyncio 协作调度下 += 不需要锁。进度是 advisory，
+        # 仅每完成 _PROGRESS_EVERY 章或最后一章时刷一次 Redis。
+        completed = 0
+        await set_progress(
+            agent_id, "generating_chapter",
+            current=0, total=total,
+            message=f"正在并发生成 {total} 段经历...",
+        )
+
+        async def _extract_one(idx: int, ch: dict) -> list[dict]:
+            nonlocal completed
+            async with sem:
+                try:
+                    mems = await extract_chapter_memories(
+                        ch, outline_summary, name, seven_dim,
+                        idx, total, profile_text,
+                    )
+                except Exception as e:
+                    logger.warning(f"Chapter {idx+1} memory extraction failed: {e}")
+                    mems = []
+            completed += 1
+            if completed % _PROGRESS_EVERY == 0 or completed == total:
+                await set_progress(
+                    agent_id, "generating_chapter",
+                    current=completed, total=total,
+                    message=f"已完成 {completed}/{total} 段经历",
+                )
+            return mems
+
+        results = await asyncio.gather(
+            *[_extract_one(i, ch) for i, ch in enumerate(chapters)]
+        )
+        for mems in results:
+            experience_memories.extend(mems)
+    else:
+        logger.warning(f"Outline generation returned empty for agent {agent_id}")
+
+    # ── Phase 3: 批量写库 ──
+    all_memories = profile_memories + experience_memories
+    stored_ids = await store_memories_batch(
+        agent_id, user_id, all_memories,
+        workspace_id=workspace_id,
+    )
+
+    logger.info(
+        f"Life story memories stored for agent {agent_id}: "
+        f"{len(stored_ids)} ({len(profile_memories)} profile + {len(experience_memories)} experience)"
+    )
+    return len(stored_ids)
+
 
 async def generate_full_life_story(
     agent_id: str,
@@ -599,112 +776,42 @@ async def generate_full_life_story(
     seven_dim: dict | None,
     workspace_id: str | None = None,
 ) -> None:
-    """Main entry point: select profile → direct convert → LLM experiences → store L1.
+    """Backward-compat 包装：select profile → direct convert → LLM experiences → store L1。
 
-    Updates Redis progress throughout. Sets agent status to 'active' when done.
+    新代码应优先使用 prepare_profile_for_agent + generate_life_story_memories
+    以便让 life_overview 等下游任务并行启动。本函数保证总会写 progress 并把
+    agent 置为 active（即使中途失败）。
     """
     try:
-        # Step 1: Select matching CharacterProfile
-        await set_progress(agent_id, "selecting_profile", message="正在匹配角色背景...")
-        profile = await select_character_profile(gender)
-        if not profile:
-            logger.warning(f"No matching CharacterProfile for agent {agent_id}, skipping life story")
+        result = await prepare_profile_for_agent(agent_id, gender)
+        if not result:
             await set_progress(agent_id, "complete", message="无可用背景模板，已跳过")
-            await _activate_agent(agent_id)
+            await activate_agent(agent_id)
             return
 
-        profile_data = profile["data"]
-        career_template = profile.get("career_template")
-        identity = profile_data.get("identity", {})
-
-        # Bind profile to agent + overwrite agent fields from profile
-        update_data: dict = {"characterProfileId": profile["id"]}
-        if career_template and career_template.get("title"):
-            update_data["occupation"] = career_template["title"]
-        if identity.get("location"):
-            update_data["city"] = str(identity["location"])
-        if identity.get("age"):
-            update_data["age"] = int(identity["age"])
-        await db.aiagent.update(where={"id": agent_id}, data=update_data)
-
-        # Step 2 (Phase 1): Convert profile structured fields to memories directly
-        await set_progress(agent_id, "converting_profile", message="正在转换背景信息为记忆...")
-        profile_memories = convert_profile_to_memories(profile_data, career_template)
-        # 用户给定的姓名是最重要的身份信息
-        profile_memories.insert(0, {
-            "summary": f"我叫{name}",
-            "main_category": "身份", "sub_category": "姓名",
-            "type": "identity", "importance": 1.0,
-        })
-        logger.info(f"Profile → {len(profile_memories)} direct memories for agent {agent_id}")
-
-        # Step 3 (Phase 2): Generate experiential memories via LLM
-        await set_progress(agent_id, "generating_outline", message="正在构思人生大纲...")
-        chapters = await generate_outline(
-            profile_data, name, gender, seven_dim,
-            career_template=career_template,
-        )
-
-        experience_memories: list[dict] = []
-        if chapters:
-            total = len(chapters)
-            outline_summary = "\n".join(
-                f"{i+1}. {ch.get('title', '')} ({ch.get('age_range', '')}): {', '.join(ch.get('key_events', []))}"
-                for i, ch in enumerate(chapters)
-            )
-            profile_text = _format_profile_for_prompt(profile_data, career_template)
-
-            # Parallel extraction in batches of 4
-            async def _extract_one(idx: int, ch: dict) -> list[dict]:
-                try:
-                    return await extract_chapter_memories(
-                        ch, outline_summary, name, seven_dim,
-                        idx, total, profile_text,
-                    )
-                except Exception as e:
-                    logger.warning(f"Chapter {idx+1} memory extraction failed: {e}")
-                    return []
-
-            BATCH_SIZE = 4
-            for batch_start in range(0, total, BATCH_SIZE):
-                batch = list(enumerate(chapters[batch_start:batch_start + BATCH_SIZE], start=batch_start))
-                batch_end = min(batch_start + BATCH_SIZE, total)
-                await set_progress(
-                    agent_id, "generating_chapter",
-                    current=batch_end, total=total,
-                    message=f"正在生成经历 ({batch_start+1}-{batch_end}/{total})...",
-                )
-                results = await asyncio.gather(*[_extract_one(i, ch) for i, ch in batch])
-                for mems in results:
-                    experience_memories.extend(mems)
-        else:
-            logger.warning(f"Outline generation returned empty for agent {agent_id}")
-
-        # Step 4: Store all memories (profile + experience)
-        all_memories = profile_memories + experience_memories
-        stored_ids = await store_memories_batch(
-            agent_id, user_id, all_memories,
+        profile, _ = result
+        count = await generate_life_story_memories(
+            agent_id=agent_id,
+            user_id=user_id,
+            name=name,
+            gender=gender,
+            seven_dim=seven_dim,
+            profile=profile,
             workspace_id=workspace_id,
         )
-
-        logger.info(
-            f"Life story complete for agent {agent_id}: "
-            f"{len(stored_ids)} stored ({len(profile_memories)} profile + {len(experience_memories)} experience)"
-        )
-
         await set_progress(
             agent_id, "complete",
-            message=f"生成完成: {len(stored_ids)} 条记忆",
+            message=f"生成完成: {count} 条记忆",
         )
-        await _activate_agent(agent_id)
+        await activate_agent(agent_id)
 
     except Exception as e:
         logger.error(f"Life story generation failed for agent {agent_id}: {e}", exc_info=True)
         await set_progress(agent_id, "failed", message=f"生成失败: {str(e)[:200]}")
-        await _activate_agent(agent_id)
+        await activate_agent(agent_id)
 
 
-async def _activate_agent(agent_id: str) -> None:
+async def activate_agent(agent_id: str) -> None:
     """Set agent status to active."""
     try:
         await db.aiagent.update(

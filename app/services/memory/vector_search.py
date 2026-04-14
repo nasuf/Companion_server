@@ -13,7 +13,7 @@ from app.services.workspace.workspaces import resolve_workspace_id
 logger = logging.getLogger(__name__)
 
 
-def _format_vector(embedding: list[float]) -> str:
+def format_vector(embedding: list[float]) -> str:
     """Format embedding list as a pgvector-compatible string."""
     return "[" + ",".join(str(v) for v in embedding) + "]"
 
@@ -32,7 +32,7 @@ async def search_by_embedding(
     Searches across both memories_user and memories_ai via UNION.
     """
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
-    vec_str = _format_vector(embedding)
+    vec_str = format_vector(embedding)
     return await db.query_raw(
         """
         SELECT * FROM (
