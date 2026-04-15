@@ -9,7 +9,7 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
-from app.services.mbti import compute_mbti, get_mbti
+from app.services.mbti import build_mbti, get_mbti
 from app.services.life_story import (
     activate_agent,
     generate_life_story_memories,
@@ -86,14 +86,13 @@ async def create_agent(data: AgentCreate):
             await restore_staged_workspaces(staged_workspaces)
         raise
 
-    # Per spec §1.2: 用户输入的 personality (Big Five / 7 维) 立即转 MBTI,
-    # 写入 agent.mbti + currentMbti. 然后 emotion baseline 才能基于 MBTI 计算.
-    # 两步必须串行: emotion 依赖 mbti 已落库.
-    user_personality_input = data.seven_dim_input or {}
+    # Per spec §1.2: MBTI 是用户直接输入的 4 维; 异步 LLM 生 summary +
+    # 写入 agent.mbti+currentMbti, 紧接着算 emotion baseline (依赖 mbti 落库).
+    mbti_input = data.mbti.model_dump()
 
     async def _init_mbti_then_emotion():
         try:
-            mbti = await compute_mbti(user_personality_input)
+            mbti = await build_mbti(mbti_input)
             await db.aiagent.update(
                 where={"id": agent.id},
                 data={"mbti": Json(mbti), "currentMbti": Json(mbti)},
@@ -282,29 +281,18 @@ async def update_agent(agent_id: str, data: AgentUpdate):
 
 
 @router.post("/{agent_id}/regenerate-mbti", response_model=AgentResponse)
-async def regenerate_mbti(agent_id: str, data: RegenerateMbtiRequest | None = None):
-    """重新生成 agent 的 MBTI 性格。
+async def regenerate_mbti(agent_id: str, data: RegenerateMbtiRequest):
+    """重写 agent 的 MBTI 性格。
 
-    body 可选:
-      - {} 或不传 → 基于当前 mbti 反向作为 seed 重抖
-      - {"seven_dim_input": {...}} → 用户重新填了 7 维 / Big Five，覆盖
-    成功后 mbti + currentMbti 都被改写为新值（trait_adjustment 历史 reset）。
+    body 必填: {"mbti": {EI, NS, TF, JP}} (4 个 0-100 整数)
+    后端按这 4 个数字构建新 MBTI (LLM 仅用于生成 summary 文本) 并同时
+    覆盖 mbti + currentMbti, trait_adjustment 累计偏移 reset.
     """
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    seed: dict
-    if data and data.seven_dim_input:
-        seed = data.seven_dim_input
-    elif agent.mbti and isinstance(agent.mbti, dict):
-        # 用现有 MBTI 的 4 个百分比当 seed，让 LLM 重抖一个相似但略有偏移的版本
-        seed = {k: agent.mbti.get(k, 50) for k in ("EI", "NS", "TF", "JP")}
-    else:
-        # agent 没有任何性格输入，给中性默认
-        seed = {"EI": 50, "NS": 50, "TF": 50, "JP": 50}
-
-    new_mbti = await compute_mbti(seed)
+    new_mbti = await build_mbti(data.mbti.model_dump())
     await db.aiagent.update(
         where={"id": agent_id},
         data={"mbti": Json(new_mbti), "currentMbti": Json(new_mbti)},

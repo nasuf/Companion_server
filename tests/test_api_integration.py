@@ -67,7 +67,8 @@ def test_create_agent(mock_deps):
         id="agent-id",
         name="TestBot",
         userId="user-id",
-        personality={"openness": 0.8},
+        mbti=None,
+        currentMbti=None,
         background=None,
         values=None,
         gender=None,
@@ -95,7 +96,7 @@ def test_create_agent(mock_deps):
         response = client.post("/agents", json={
             "name": "TestBot",
             "user_id": "user-id",
-            "personality": {"openness": 0.8},
+            "mbti": {"EI": 70, "NS": 60, "TF": 40, "JP": 30},
         })
         assert response.status_code == 200
         assert response.json()["name"] == "TestBot"

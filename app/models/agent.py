@@ -1,25 +1,34 @@
 from pydantic import BaseModel
 
 
+class MbtiInput(BaseModel):
+    """用户在前端拖动 4 个 MBTI 滑块得到的整数百分比。
+
+    每个值 0-100；> 50 偏向首字母 (E/N/T/J)，<= 50 偏向后字母 (I/S/F/P)。
+    """
+    EI: int
+    NS: int
+    TF: int
+    JP: int
+
+
 class AgentCreate(BaseModel):
     name: str
     user_id: str
-    # 用户在前端填的性格表单（7 维或 Big Five，自动检测）。仅作为创建时
-    # 计算 MBTI 的 transient 输入，不会持久化。spec §1.2: MBTI 是 canonical。
-    seven_dim_input: dict | None = None
+    # spec §1.2: MBTI 是 canonical，用户直接填 4 维，不再有 7 维中转。
+    mbti: MbtiInput
     background: str | None = None
     values: dict | None = None
     gender: str | None = None
 
 
 class RegenerateMbtiRequest(BaseModel):
-    """POST /agents/{id}/regenerate-mbti 的可选 body。
+    """POST /agents/{id}/regenerate-mbti 的 body。
 
-    不传 → LLM 基于现有 mbti 重抖一次（带轻微随机 seed 不一定能保证完全
-    复现；适合"我不喜欢这个性格，重新生成一个"场景）。
-    传 seven_dim_input → 用户重新填了 7 维，覆盖原 MBTI。
+    用户重抖性格 → 拖动 4 个 MBTI 滑块得到新的 EI/NS/TF/JP 百分比。
+    后端按这 4 个数字重写 mbti + currentMbti，并让 LLM 重新生成 summary。
     """
-    seven_dim_input: dict | None = None
+    mbti: MbtiInput
 
 
 class AgentUpdate(BaseModel):

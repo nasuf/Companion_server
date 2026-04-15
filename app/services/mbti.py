@@ -29,26 +29,17 @@ from app.services.llm.models import get_utility_model, invoke_json
 logger = logging.getLogger(__name__)
 
 
-_MBTI_PROMPT = """你是 MBTI 性格评估专家。基于以下 AI 角色的性格分数（0-100），
-推测其 MBTI 八维度百分比分数（0-100）。
+_MBTI_SUMMARY_PROMPT = """你是 MBTI 性格评估专家。给定一个 AI 角色的 MBTI 类型，
+请用 80 字以内的自然中文写一段描述其整体性格画像的 summary。
 
-性格分数（值越高，特质越强）：
-{personality}
+MBTI 类型：{type}
+四个维度强度（0-100，值越高越偏向首字母）：
+- E/I: {ei}（>50 偏外向）
+- N/S: {ns}（>50 偏直觉）
+- T/F: {tf}（>50 偏思考）
+- J/P: {jp}（>50 偏判断）
 
-请输出 JSON：
-{{
-  "EI": 65,    // 0-100，> 50 偏外向(E)，≤ 50 偏内向(I)
-  "NS": 70,    // > 50 偏直觉(N)，≤ 50 偏感觉(S)
-  "TF": 40,    // > 50 偏思考(T)，≤ 50 偏情感(F)
-  "JP": 35,    // > 50 偏判断(J)，≤ 50 偏知觉(P)
-  "type": "ENFP",   // 4 字母代号，按上面 4 个分数取 > 50 的字母
-  "summary": "活泼开朗、富有想象力、感性细腻，倾向自由灵活的生活节奏"
-}}
-
-注意：
-- 4 个数字必须 0-100 整数
-- type 字段必须严格按 EI/NS/TF/JP 的分数 > 50 取首字母（E/N/T/J），≤ 50 取后字母（I/S/F/P）
-- summary 80 字以内，自然中文，描述 AI 整体性格画像"""
+直接输出 JSON: {{"summary": "..."}} ，不要其他内容。"""
 
 
 _VALID_TYPES = {
@@ -67,59 +58,58 @@ def _derive_type(mbti: dict) -> str:
     )
 
 
-def _validate_and_normalize(raw: Any) -> dict:
-    """Coerce LLM output into the storage shape; clamp percentages to [0,100]
-    and trust derived `type` over whatever the LLM emitted."""
-    if not isinstance(raw, dict):
-        return _default_mbti()
-    out: dict = {}
-    for k in ("EI", "NS", "TF", "JP"):
-        v = raw.get(k, 50)
+_VALID_INPUT_KEYS = {"EI", "NS", "TF", "JP"}
+
+
+def _validate_input(percentages: dict) -> dict[str, int]:
+    """Validate user-supplied 4 MBTI percentages. Strict: keys must be
+    exactly EI/NS/TF/JP, values must be int-coercible and clamped to
+    [0, 100]. Raises ValueError on bad input — there is no fallback,
+    the API layer should reject the request.
+    """
+    missing = _VALID_INPUT_KEYS - set(percentages.keys())
+    if missing:
+        raise ValueError(f"MBTI input missing keys: {sorted(missing)}")
+    unknown = set(percentages.keys()) - _VALID_INPUT_KEYS
+    if unknown:
+        raise ValueError(f"MBTI input has unknown keys: {sorted(unknown)}")
+    out: dict[str, int] = {}
+    for k in _VALID_INPUT_KEYS:
         try:
-            iv = max(0, min(100, int(v)))
+            out[k] = max(0, min(100, int(percentages[k])))
         except (TypeError, ValueError):
-            iv = 50
-        out[k] = iv
-    out["type"] = _derive_type(out)  # always recompute (LLM 可能写错)
-    summary = raw.get("summary") or ""
-    out["summary"] = str(summary).strip()[:200]
+            raise ValueError(f"MBTI dimension '{k}' must be int 0-100, got {percentages[k]!r}")
     return out
 
 
-def _default_mbti() -> dict:
-    """Neutral fallback when LLM is unavailable. All midpoint."""
-    return {"EI": 50, "NS": 50, "TF": 50, "JP": 50, "type": "ISFP", "summary": ""}
+async def build_mbti(percentages: dict) -> dict:
+    """Build the canonical agent.mbti JSON shape from user-supplied 4
+    percentages. Calls a small LLM only to flesh out the `summary` text;
+    the type and percentages come straight from the input.
 
-
-_BIG_FIVE_KEYS = {"extraversion", "openness", "conscientiousness", "agreeableness", "neuroticism"}
-
-
-def _format_personality_input(scores: dict) -> str:
-    """Render the user-supplied personality dict as a bullet list for the
-    LLM prompt. Auto-detects Big Five (0-1 floats) vs explicit 0-100 ints.
+    Per spec §1.2 起 MBTI 直接由用户填写，不再有 7 维中转层。
     """
-    if not scores:
-        return "(无)"
-    if _BIG_FIVE_KEYS.intersection(scores.keys()):
-        # Big Five 0-1 → 0-100 for prompt clarity
-        return "\n".join(
-            f"- {k}: {round(v * 100)}" for k, v in scores.items()
-        )
-    return "\n".join(f"- {k}: {v}" for k, v in scores.items())
+    pct = _validate_input(percentages)
+    type_str = _derive_type(pct)
+    summary = await _generate_summary(pct, type_str)
+    return {**pct, "type": type_str, "summary": summary}
 
 
-async def compute_mbti(personality_scores: dict) -> dict:
-    """Generate MBTI from any 7-dim or Big Five personality dict via LLM.
-    Falls back to neutral on failure."""
-    if not personality_scores:
-        return _default_mbti()
-    prompt = _MBTI_PROMPT.format(personality=_format_personality_input(personality_scores))
+async def _generate_summary(pct: dict[str, int], type_str: str) -> str:
+    """LLM-generate an 80-字 summary. Falls back to "" on LLM failure;
+    callers must tolerate empty summary (it's flavor text, not core data)."""
+    prompt = _MBTI_SUMMARY_PROMPT.format(
+        type=type_str,
+        ei=pct["EI"], ns=pct["NS"], tf=pct["TF"], jp=pct["JP"],
+    )
     try:
         result = await invoke_json(get_utility_model(), prompt)
     except Exception as e:
-        logger.warning(f"MBTI LLM call failed: {e}; using neutral fallback")
-        return _default_mbti()
-    return _validate_and_normalize(result)
+        logger.warning(f"MBTI summary LLM call failed: {e}")
+        return ""
+    if isinstance(result, dict):
+        return str(result.get("summary", "")).strip()[:200]
+    return ""
 
 
 def _coerce(raw: Any) -> dict | None:
@@ -152,52 +142,49 @@ def get_initial_mbti(agent: Any) -> dict | None:
 
 # ── Derived signals ──
 # Many downstream modules (style / schedule / emotion / topic) need a
-# 0-1 "lively" or "planned" or "extraversion" knob rather than 4 raw
+# 0-1 "lively" or "planned" knob rather than 4 raw
 # percentages. These helpers map MBTI dimensions to common axes so call
 # sites don't have to know MBTI internals.
+
+_SIGNAL_VOCAB: frozenset[str] = frozenset({
+    "lively", "rational", "emotional", "planned", "spontaneous",
+    "creative", "humor",
+})
+
 
 def signal(mbti: dict | None, name: str) -> float:
     """Derived 0-1 signal from MBTI. Returns 0.5 when mbti is None.
 
-    Recognized signals (designed to mirror the old 7-dim semantics so
-    consumers can swap in place):
-      - 'extraversion' / 'lively'   ← EI / 100
-      - 'rational'                  ← TF / 100   (T 偏理性)
-      - 'emotional'                 ← (100 - TF) / 100   (F 偏感性)
-      - 'planned'                   ← JP / 100   (J 偏计划)
-      - 'spontaneous'               ← (100 - JP) / 100   (P 偏知觉)
-      - 'creative' / 'imaginative'  ← NS / 100   (N 偏直觉)
-      - 'agreeableness'             ← (100 - TF) / 100  + bias
-      - 'openness'                  ← NS / 100
-      - 'conscientiousness'         ← JP / 100
-      - 'neuroticism'               ← clamp(0.5 + (50 - TF)/200 + (50 - JP)/200, 0, 1)
-        (近似: 越偏 F + 越偏 P，神经质略高)
+    每个 signal 都是 MBTI 4 维度的纯函数派生。signal 名称是描述性的，
+    但语义都明确绑定 MBTI 字母 (E/N/T/F/J/P)，不是 Big Five 别名。
+
+    Recognized signals (传 unknown name 会 raise 而不是 silent 0.5):
+      - 'lively'      ← EI / 100         (E 程度)
+      - 'rational'    ← TF / 100         (T 程度)
+      - 'emotional'   ← (100 - TF) / 100 (F 程度)
+      - 'planned'     ← JP / 100         (J 程度)
+      - 'spontaneous' ← (100 - JP) / 100 (P 程度)
+      - 'creative'    ← NS / 100         (N 程度)
+      - 'humor'       ← (EI + NS) / 200  (E + N 复合)
     """
+    if name not in _SIGNAL_VOCAB:
+        raise ValueError(
+            f"Unknown MBTI signal '{name}'; expected one of {sorted(_SIGNAL_VOCAB)}"
+        )
     if not mbti:
         return 0.5
     ei = mbti.get("EI", 50)
     ns = mbti.get("NS", 50)
     tf = mbti.get("TF", 50)
     jp = mbti.get("JP", 50)
-    mapping = {
-        "extraversion": ei / 100,
-        "lively": ei / 100,
-        "rational": tf / 100,
-        "emotional": (100 - tf) / 100,
-        "planned": jp / 100,
-        "spontaneous": (100 - jp) / 100,
-        "creative": ns / 100,
-        "imaginative": ns / 100,
-        "openness": ns / 100,
-        "conscientiousness": jp / 100,
-        # F 偏宜人 (intuition + empathy bias)
-        "agreeableness": ((100 - tf) + ns) / 200,
-        # 简化近似：F + P 略升高神经质感
-        "neuroticism": max(0.0, min(1.0, 0.5 + ((50 - tf) + (50 - jp)) / 200)),
-        # 幽默 = 外向 + 直觉
-        "humor": (ei + ns) / 200,
-    }
-    return mapping.get(name, 0.5)
+    if name == "lively":      return ei / 100
+    if name == "rational":    return tf / 100
+    if name == "emotional":   return (100 - tf) / 100
+    if name == "planned":     return jp / 100
+    if name == "spontaneous": return (100 - jp) / 100
+    if name == "creative":    return ns / 100
+    if name == "humor":       return (ei + ns) / 200
+    return 0.5  # unreachable (vocab gate above), kept for type-checker
 
 
 def format_mbti_for_prompt(mbti: dict | None) -> str:
