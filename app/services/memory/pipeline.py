@@ -7,7 +7,6 @@ Runs as FastAPI BackgroundTasks (non-blocking).
 import logging
 from datetime import datetime
 
-from app.db import db
 from app.services.memory.entity_repo import (
     record_entities_for_memory,
     record_preferences_for_memory,
@@ -31,12 +30,6 @@ async def process_memory_pipeline(
     Returns list of stored memory IDs.
     """
     workspace_id = await resolve_workspace_id(user_id=user_id)
-    active_workspace = None
-    if workspace_id:
-        active_workspace = await db.chatworkspace.find_unique(
-            where={"id": workspace_id},
-            include={"agent": True, "user": True},
-        )
 
     # Step 0: Filter — skip extraction if the entire segment is low-value
     if not should_extract_memory(conversation_text):
@@ -135,6 +128,5 @@ async def process_memory_pipeline(
             except Exception as e:
                 logger.warning(f"Entity linking failed for memory {memory_id}: {e}")
 
-    _ = active_workspace  # kept for future per-agent/per-user enrichment
     logger.info(f"Pipeline complete: {len(stored_ids)}/{len(memories)} memories stored")
     return stored_ids

@@ -10,6 +10,7 @@ If you want the rich relationship model (topic intimacy + growth levels
 """
 
 import logging
+import uuid
 
 from app.db import db
 
@@ -28,15 +29,17 @@ async def update_relationship(
     `relationship.intimacy` API which also handles topic-level signals.
     """
     _ = workspace_id  # Intimacy is (agent, user) unique; ws not needed here
-    # Postgres upsert, EMA on existing value: new = 0.9*old + 0.1*quality*1000
-    # Clamp result into [0, 1000] to keep with the existing scale.
+    # Client-side UUID (avoids depending on pgcrypto's gen_random_uuid,
+    # which isn't enabled by our baseline migration and only ships with
+    # PostgreSQL ≥ 13). EMA on existing value: new = 0.9*old + 0.1*q,
+    # clamped to [0, 1000].
     quality_scaled = max(0, min(1000, int(interaction_quality * 1000)))
     await db.execute_raw(
         """
         INSERT INTO intimacies
             (id, agent_id, user_id, growth_intimacy, growth_updated_at,
              created_at, updated_at)
-        VALUES (gen_random_uuid(), $1, $2, $3, NOW(), NOW(), NOW())
+        VALUES ($1, $2, $3, $4, NOW(), NOW(), NOW())
         ON CONFLICT (agent_id, user_id) DO UPDATE SET
             growth_intimacy = LEAST(1000, GREATEST(0,
                 (intimacies.growth_intimacy * 9 + EXCLUDED.growth_intimacy) / 10
@@ -44,7 +47,7 @@ async def update_relationship(
             growth_updated_at = NOW(),
             updated_at = NOW()
         """,
-        agent_id, user_id, quality_scaled,
+        str(uuid.uuid4()), agent_id, user_id, quality_scaled,
     )
 
 

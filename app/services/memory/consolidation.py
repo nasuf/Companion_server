@@ -135,7 +135,7 @@ async def check_l2_upgrade_candidates() -> None:
         if len(existing_l1) >= 5:
             continue
 
-        await memory_repo.update(mem.id, source=mem.source, level=1)
+        await memory_repo.update(mem.id, source=mem.source, record=mem, level=1)
         logger.info(f"Upgraded L2→L1: {mem.id} (score={score:.2f}, mentions={mem.mentionCount})")
 
 
@@ -169,7 +169,7 @@ async def check_l2_demotion_candidates() -> None:
         if score >= 0.49:
             continue
 
-        await memory_repo.update(mem.id, source=mem.source, level=3)
+        await memory_repo.update(mem.id, source=mem.source, record=mem, level=3)
         try:
             await log_memory_changelog(
                 mem.userId, mem.id, "demote",

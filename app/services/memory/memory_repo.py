@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Literal
 
 from app.db import db
+from app.services.runtime.cache import bump_cache_version
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,6 @@ async def _invalidate_caches(user_id: str | None, workspace_id: str | None) -> N
     if not user_id:
         return
     try:
-        from app.services.runtime.cache import bump_cache_version
         await bump_cache_version(user_id, workspace_id)
     except Exception as e:
         logger.debug(f"cache bump failed for {user_id}/{workspace_id}: {e}")
@@ -241,18 +241,32 @@ async def count(
     return user_count + ai_count
 
 
-async def update(id: str, source: Source | None = None, **data) -> None:
-    """Update a memory by ID. If source unknown, auto-detect."""
-    rec = await find_unique(id)
-    if not rec:
+async def update(
+    id: str,
+    source: Source | None = None,
+    *,
+    record: MemoryRecord | None = None,
+    **data,
+) -> None:
+    """Update a memory by ID. If source unknown, auto-detect.
+
+    Callers that already hold the pre-update `MemoryRecord` (e.g. a
+    consolidation/conflict job that just fetched the row) can pass it via
+    `record=` to skip the extra `find_unique` round-trip. Only `userId` /
+    `workspaceId` / `source` are read from the record — all write fields
+    come from **data.
+    """
+    if record is None:
+        record = await find_unique(id)
+    if record is None:
         logger.warning(f"Memory {id} not found for update")
         return
     if source is None:
-        source = rec.source
+        source = record.source
 
     await _table(source).update(where={"id": id}, data=data)
-    # rec still holds pre-update fields; userId/workspaceId don't change on update
-    await _invalidate_caches(rec.userId, getattr(rec, "workspaceId", None))
+    # userId/workspaceId don't change on update; safe to bump from record
+    await _invalidate_caches(record.userId, record.workspaceId)
 
 
 async def update_many(

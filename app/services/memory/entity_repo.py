@@ -20,6 +20,7 @@ import logging
 import uuid
 
 from app.db import db
+from app.services.memory.normalization import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -95,14 +96,25 @@ async def link_memory_to_entity(
 
     Returns True if a new edge was inserted; False if the edge already
     existed (idempotent on re-runs / pipeline retries).
+
+    Uses a single CTE so the INSERT and the counter UPDATE share one round
+    trip — the UPDATE only fires when the INSERT actually produced a row.
     """
     rows = await db.query_raw(
         """
-        INSERT INTO memory_mentions
-            (memory_id, memory_source, entity_id, user_id, workspace_id, created_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
-        ON CONFLICT (memory_id, entity_id) DO NOTHING
-        RETURNING memory_id
+        WITH ins AS (
+            INSERT INTO memory_mentions
+                (memory_id, memory_source, entity_id, user_id, workspace_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (memory_id, entity_id) DO NOTHING
+            RETURNING entity_id
+        )
+        UPDATE memory_entities
+        SET mention_count = mention_count + 1,
+            last_mentioned_at = NOW(),
+            updated_at = NOW()
+        WHERE id IN (SELECT entity_id FROM ins)
+        RETURNING id
         """,
         memory_id,
         memory_source,
@@ -110,20 +122,7 @@ async def link_memory_to_entity(
         user_id,
         workspace_id,
     )
-    if not rows:
-        return False  # edge existed; stats already counted
-
-    await db.execute_raw(
-        """
-        UPDATE memory_entities
-        SET mention_count = mention_count + 1,
-            last_mentioned_at = NOW(),
-            updated_at = NOW()
-        WHERE id = $1
-        """,
-        entity_id,
-    )
-    return True
+    return bool(rows)
 
 
 async def record_entities_for_memory(
@@ -478,13 +477,21 @@ async def archive_stale_entities(
     return result or 0
 
 
-async def _embed_entity(name: str, aliases: list[str]) -> list[float]:
-    """Entities are identified primarily by canonical name; we mix in
-    aliases so '妈妈' and '我妈' embed close together naturally."""
+def _entity_display_text(name: str, aliases: list[str]) -> str:
+    """Text we send to the embedder for an entity; mixing aliases in
+    pulls '妈妈'/'我妈'/'妈咪' close together in embedding space."""
+    return name if not aliases else f"{name}（也叫：{','.join(aliases[:5])}）"
+
+
+async def _embed_entities_batch(entities: list[dict]) -> list[list[float]]:
+    """One LLM round-trip for all entities (vs N for per-entity embed)."""
     from app.services.llm.models import get_embedding_model
     model = get_embedding_model()
-    text = name if not aliases else f"{name}（也叫：{','.join(aliases[:5])}）"
-    return await model.aembed_query(text)
+    texts = [
+        _entity_display_text(e["canonical_name"], e.get("aliases") or [])
+        for e in entities
+    ]
+    return await model.aembed_documents(texts)
 
 
 async def _load_active_entities(
@@ -505,15 +512,6 @@ async def _load_active_entities(
         user_id, workspace_id, entity_type, limit,
     )
     return [dict(r) for r in rows]
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    num = sum(x * y for x, y in zip(a, b))
-    da = sum(x * x for x in a) ** 0.5
-    db = sum(y * y for y in b) ** 0.5
-    if da == 0 or db == 0:
-        return 0.0
-    return num / (da * db)
 
 
 async def _merge_entity_pair(winner_id: str, loser_id: str) -> None:
@@ -584,17 +582,13 @@ async def merge_duplicate_entities(
     if len(entities) < 2:
         return 0
 
-    # Embed each entity's display name once
-    embeddings: list[list[float]] = []
-    for ent in entities:
-        try:
-            vec = await _embed_entity(
-                ent["canonical_name"], ent.get("aliases") or [],
-            )
-        except Exception as e:
-            logger.warning(f"entity embed failed for {ent['id']}: {e}")
-            vec = []
-        embeddings.append(vec)
+    try:
+        embeddings = await _embed_entities_batch(entities)
+    except Exception as e:
+        logger.warning(
+            f"batch entity embed failed for {user_id}/{entity_type}: {e}"
+        )
+        return 0
 
     # Greedy single-link clustering: iterate pairs, merge if cosine high.
     # Winner = higher mention_count (tie broken by earlier created_at via
@@ -607,7 +601,7 @@ async def merge_duplicate_entities(
         for j in range(i + 1, len(entities)):
             if entities[j]["id"] in merged_ids or not embeddings[j]:
                 continue
-            sim = _cosine(embeddings[i], embeddings[j])
+            sim = cosine_similarity(embeddings[i], embeddings[j])
             if sim < similarity_threshold:
                 continue
             # pick winner by higher mention_count

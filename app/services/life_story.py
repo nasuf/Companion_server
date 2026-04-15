@@ -21,6 +21,7 @@ from app.services.llm.models import get_chat_model, get_embedding_model, invoke_
 from app.services.memory.storage import normalize_memory_type
 from app.services.memory.taxonomy import TAXONOMY, resolve_taxonomy
 from app.services.memory.vector_search import format_vector
+from app.services.runtime.cache import bump_cache_version
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -661,7 +662,6 @@ async def store_memories_batch(
     # Invalidate any stale per-user retrieval/graph caches so the first
     # message after provisioning actually sees these memories.
     try:
-        from app.services.runtime.cache import bump_cache_version
         await bump_cache_version(user_id, workspace_id)
     except Exception as e:
         logger.debug(f"cache bump failed for {user_id}: {e}")

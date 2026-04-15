@@ -110,7 +110,7 @@ async def resolve_conflict(
         if conflict.get("conflict_type") == "preference_change" or resolution == "demote_old":
             # Demote old memory to L2
             await memory_repo.update(
-                old_id, source=old_memory.source,
+                old_id, source=old_memory.source, record=old_memory,
                 level=2, importance=max(0.3, old_memory.importance - 0.2),
             )
             logger.info(f"Demoted conflicting memory {old_id} from L1 to L2")
@@ -121,7 +121,7 @@ async def resolve_conflict(
             # Update the old memory with new content
             new_content = new_memory.get("summary", "")
             await memory_repo.update(
-                old_id, source=old_memory.source,
+                old_id, source=old_memory.source, record=old_memory,
                 content=new_content, summary=new_content,
             )
             logger.info(f"Updated conflicting memory {old_id}: {old_content[:30]} -> {new_content[:30]}")
