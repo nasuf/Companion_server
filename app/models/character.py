@@ -89,6 +89,7 @@ class ProfileGenerateRequest(BaseModel):
     template_id: str
     count: int = 1
     career_id: str | None = None  # None = 随机选择职业
+    gender: str | None = None  # "male" / "female" / None(随机)
 
 
 class ProfileUpdateRequest(BaseModel):

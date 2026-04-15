@@ -294,10 +294,11 @@ def build_generation_prompt(
     header: str | None = None,
     requirements: str | None = None,
     career: dict | None = None,
+    gender: str | None = None,
 ) -> str:
     """组装完整的角色生成提示词。
 
-    结构: header + [职业背景设定] + 模板结构(schema) + 生成规则(defaults) + 输出要求(requirements)
+    结构: header + [性别约束] + [职业背景设定] + 模板结构 + 生成规则 + 输出要求
 
     Args:
         schema: 模板的分类/字段定义
@@ -306,6 +307,7 @@ def build_generation_prompt(
         header: 提示词开头（None = 用 DEFAULT_PROMPT_HEADER）
         requirements: 输出要求（None = 用 DEFAULT_PROMPT_REQUIREMENTS）
         career: 职业背景数据 dict（None = 不注入职业约束）
+        gender: "male" / "female" / None — 指定时约束 LLM 整体描写向该性别靠拢
     """
     actual_header = header if header is not None else DEFAULT_PROMPT_HEADER
     actual_requirements = requirements if requirements is not None else DEFAULT_PROMPT_REQUIREMENTS
@@ -323,6 +325,12 @@ def build_generation_prompt(
     schema_desc = _build_schema_description(effective_schema)
 
     prompt = f"{actual_header}\n\n"
+    if gender in ("male", "female"):
+        gender_zh = "男性" if gender == "male" else "女性"
+        prompt += (
+            f"【性别约束】该角色必须是{gender_zh}。identity.gender 字段必须填 "
+            f"{'“男”' if gender == 'male' else '“女”'},外貌、称呼、兴趣等描写需与该性别一致。\n\n"
+        )
     if career:
         prompt += _build_career_section(career) + "\n"
     prompt += f"模板结构：{schema_desc}\n\n"
@@ -340,10 +348,12 @@ async def generate_single_profile(
     header: str | None = None,
     requirements: str | None = None,
     career: dict | None = None,
+    gender: str | None = None,
 ) -> dict:
-    """用 LLM 根据模板结构生成一份完整角色背景数据。"""
+    """用 LLM 根据模板结构生成一份完整角色背景数据。gender ∈ {"male","female",None}。"""
     prompt = build_generation_prompt(
-        schema, defaults, index, header=header, requirements=requirements, career=career
+        schema, defaults, index,
+        header=header, requirements=requirements, career=career, gender=gender,
     )
 
     # 可选：管理员可在「提示词管理」中注册 character.generation key 来覆盖默认 prompt

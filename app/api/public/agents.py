@@ -56,8 +56,8 @@ async def create_agent(data: AgentCreate):
     if data.values is not None:
         create_data["values"] = Json(data.values)
     if data.gender is not None:
-        # 统一存中文 男/女, 防止前端 male/female 与 profile.identity.gender 中文对不上
-        create_data["gender"] = normalize_gender(data.gender)
+        # 前端约定已传 "male"/"female", 直接存
+        create_data["gender"] = data.gender
     agent = None
     workspace = None
     try:

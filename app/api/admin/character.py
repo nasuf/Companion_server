@@ -334,6 +334,15 @@ async def generate_profiles(
         else:
             career = None
 
+        # 性别: 指定 → 每次强制; 随机 → 本条按 50/50 掷一次, 保证多条批量里两性都会出现
+        gender_for_run: str | None
+        if body.gender in ("male", "female"):
+            gender_for_run = body.gender
+        elif body.gender is None:
+            gender_for_run = _random.choice(["male", "female"])
+        else:
+            raise HTTPException(status_code=400, detail=f"gender 必须是 male/female/null, 收到 {body.gender!r}")
+
         try:
             data = await generate_single_profile(
                 schema,
@@ -342,9 +351,16 @@ async def generate_profiles(
                 header=header_override,
                 requirements=requirements_override,
                 career=career,
+                gender=gender_for_run,
             )
             if not data:
                 raise ValueError("LLM 返回为空")
+
+            # 性别字段强制覆盖: profile.identity.gender 存中文 (与既有种子数据一致,
+            # 读取侧 _profile_gender_en 会翻译回英文)。
+            if not isinstance(data.get("identity"), dict):
+                data["identity"] = {}
+            data["identity"]["gender"] = "男" if gender_for_run == "male" else "女"
 
             # 职业字段强制覆盖 — outputs/clients 拆成 tags 数组
             if career:
