@@ -108,9 +108,17 @@ _EMOTION_FULL: tuple[str, ...] = (
     "惊讶", "感激", "释怀", "其他",
 )
 
-_THOUGHT_FULL: tuple[str, ...] = (
+_THOUGHT_L1: tuple[str, ...] = (
     "人生观", "价值观", "世界观", "理想与目标",
     "人际关系观", "社会观点", "自我认知", "信仰/寄托", "其他",
+)
+
+# L2/L3 思维 strips "其他" — spec requires the strict 8-member set.
+# An extraction that can't fit into one of these 8 should be refused
+# rather than silently collapsed to "其他".
+_THOUGHT_L23: tuple[str, ...] = (
+    "人生观", "价值观", "世界观", "理想与目标",
+    "人际关系观", "社会观点", "自我认知", "信仰/寄托",
 )
 
 # Per-(owner, level) matrix.
@@ -123,21 +131,25 @@ TAXONOMY_MATRIX: dict[Source, dict[int, dict[str, tuple[str, ...]]]] = {
             "偏好": _PREFERENCE_L1,
             "生活": _LIFE_BASE,
             "情绪": _EMOTION_FULL,
-            "思维": _THOUGHT_FULL,
+            "思维": _THOUGHT_L1,
         },
         2: {
+            # L2 身份 keeps 其他 per spec (3 items).
             "身份": ("社会关系", "变化", "其他"),
             "偏好": _PREFERENCE_L23,
             "生活": _LIFE_BASE,
             "情绪": _EMOTION_FULL,
-            "思维": _THOUGHT_FULL,
+            # L2 思维 strict — no 其他 per spec.
+            "思维": _THOUGHT_L23,
         },
         3: {
-            "身份": ("社会关系", "变化", "其他"),
+            # L3 身份 strict — no 其他 per spec (only 社会关系/变化).
+            "身份": ("社会关系", "变化"),
             "偏好": _PREFERENCE_L23,
             "生活": ("闲聊",) + _LIFE_BASE,
             "情绪": _EMOTION_FULL,
-            "思维": _THOUGHT_FULL,
+            # L3 思维 strict — no 其他 per spec.
+            "思维": _THOUGHT_L23,
         },
     },
     "ai": {
@@ -147,7 +159,7 @@ TAXONOMY_MATRIX: dict[Source, dict[int, dict[str, tuple[str, ...]]]] = {
             # AI L1 生活 uniquely has "交互" (interactions with the user).
             "生活": _LIFE_BASE + ("交互",),
             "情绪": _EMOTION_FULL,
-            "思维": _THOUGHT_FULL,
+            "思维": _THOUGHT_L1,
         },
         2: {
             "身份": (),   # locked — AI persona facts only live at L1
@@ -511,6 +523,17 @@ def resolve_taxonomy(
         ):
             return TaxonomyResult(normalized_main, allowed, legacy)
 
-    # Step 5: Fallback to "其他" if present, else the first allowed sub
-    fallback = "其他" if "其他" in allowed_subs else allowed_subs[0]
-    return TaxonomyResult(normalized_main, fallback, legacy)
+    # Step 5: Safe fallback or refusal
+    # - If "其他" is in the allowed set, use it as the catch-all.
+    # - Otherwise the spec deliberately omitted "其他" for this
+    #   (source, level, main) — e.g. user L2/L3 思维, user L3 身份 — so
+    #   an unresolvable sub shouldn't be silently collapsed into the first
+    #   alphabetical slot. Return allowed=False and let the caller decide.
+    if "其他" in allowed_subs:
+        return TaxonomyResult(normalized_main, "其他", legacy)
+    return TaxonomyResult(
+        normalized_main,
+        normalized_sub or allowed_subs[0],
+        legacy,
+        allowed=False,
+    )
