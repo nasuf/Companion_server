@@ -5,7 +5,6 @@ This repo deploys to RackNerd through GitHub Actions.
 ## What the workflow deploys
 
 - `companion-server` bound to `127.0.0.1:8000`
-- `neo4j:5-community` via Docker Compose
 - External Redis via `REDIS_URL`
 - External Postgres / Supabase via `DATABASE_URL`
 - Prompt template migration applied during deploy
@@ -28,7 +27,6 @@ Use both repository `Secrets` and repository `Variables`.
 - `DATABASE_URL`
 - `MIGRATION_DATABASE_URL`
 - `REDIS_URL`
-- `NEO4J_PASSWORD`
 - `DASHSCOPE_API_KEY`
 - `LANGSMITH_API_KEY`
 - `LANGSMITH_ORG_ID`
@@ -69,14 +67,6 @@ MIGRATION_DATABASE_URL=postgresql://postgres.lzmeacugbmdzqhasitog:Hellocompanion
 
 ```env
 REDIS_URL=redis://:nasuf713%21@192.210.235.115:6380/4
-```
-
-### Neo4j
-
-Choose your own password:
-
-```env
-NEO4J_PASSWORD=change_this_to_a_strong_password
 ```
 
 ### Model switch
