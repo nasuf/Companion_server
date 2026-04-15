@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from prisma import Json
 
 from app.db import db
-from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
+from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.mbti import compute_mbti, get_mbti
@@ -89,7 +89,7 @@ async def create_agent(data: AgentCreate):
     # Per spec §1.2: 用户输入的 personality (Big Five / 7 维) 立即转 MBTI,
     # 写入 agent.mbti + currentMbti. 然后 emotion baseline 才能基于 MBTI 计算.
     # 两步必须串行: emotion 依赖 mbti 已落库.
-    user_personality_input = data.personality or {}
+    user_personality_input = data.seven_dim_input or {}
 
     async def _init_mbti_then_emotion():
         try:
@@ -278,6 +278,52 @@ async def update_agent(agent_id: str, data: AgentUpdate):
         gender=agent.gender,
         life_overview=agent.lifeOverview,
         created_at=str(agent.createdAt),
+    )
+
+
+@router.post("/{agent_id}/regenerate-mbti", response_model=AgentResponse)
+async def regenerate_mbti(agent_id: str, data: RegenerateMbtiRequest | None = None):
+    """重新生成 agent 的 MBTI 性格。
+
+    body 可选:
+      - {} 或不传 → 基于当前 mbti 反向作为 seed 重抖
+      - {"seven_dim_input": {...}} → 用户重新填了 7 维 / Big Five，覆盖
+    成功后 mbti + currentMbti 都被改写为新值（trait_adjustment 历史 reset）。
+    """
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    seed: dict
+    if data and data.seven_dim_input:
+        seed = data.seven_dim_input
+    elif agent.mbti and isinstance(agent.mbti, dict):
+        # 用现有 MBTI 的 4 个百分比当 seed，让 LLM 重抖一个相似但略有偏移的版本
+        seed = {k: agent.mbti.get(k, 50) for k in ("EI", "NS", "TF", "JP")}
+    else:
+        # agent 没有任何性格输入，给中性默认
+        seed = {"EI": 50, "NS": 50, "TF": 50, "JP": 50}
+
+    new_mbti = await compute_mbti(seed)
+    await db.aiagent.update(
+        where={"id": agent_id},
+        data={"mbti": Json(new_mbti), "currentMbti": Json(new_mbti)},
+    )
+
+    refreshed = await db.aiagent.find_unique(where={"id": agent_id})
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Agent disappeared after update")
+
+    return AgentResponse(
+        id=refreshed.id,
+        name=refreshed.name,
+        user_id=refreshed.userId,
+        mbti=get_mbti(refreshed),
+        background=refreshed.background,
+        values=refreshed.values,
+        gender=refreshed.gender,
+        life_overview=refreshed.lifeOverview,
+        created_at=str(refreshed.createdAt),
     )
 
 

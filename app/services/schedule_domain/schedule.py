@@ -162,13 +162,13 @@ def _personalize_template(mbti: dict | None, date: datetime, *, holiday=None) ->
     is_legal_holiday = holiday is not None and holiday.type == "legal"
 
     for slot in schedule:
-        # 活泼度高：更多社交活动
+        # E 程度高：更多社交活动
         if slot["type"] == "leisure" and lively >= 0.7:
             if random.random() < 0.4:
                 slot["activity"] = random.choice(["和朋友聊天", "刷社交媒体", "出去逛逛"])
                 slot["type"] = "social"
 
-        # 计划度高：早起
+        # J 程度高：早起
         if slot["activity"] == "起床洗漱" and planned >= 0.7:
             slot["start"] = "06:30"
             slot["end"] = "07:30"
@@ -430,7 +430,7 @@ async def compute_adjustment_feasibility(
 
     base=50, 加减分:
     - 亲密度>80 → +20
-    - 随性度(=P 程度)>0.7 → +15
+    - P 程度>0.7 → +15
     - 当前sleep → -10
     - 调整幅度>60min → -30
     - 今日已调整≥2次 → -50

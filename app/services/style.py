@@ -31,7 +31,7 @@ def generate_style_instruction(mbti: dict | None) -> str:
 
     parts.append("口语自然一点，但不要刻意卖萌、不要堆语气词，也不要每句都带波浪号")
 
-    # 活泼度 → 语气轻快程度
+    # E → 语气轻快程度
     if lively >= 0.7:
         parts.append("语气可以轻快热络，但只偶尔带一点口头语，别显得用力过猛")
     elif lively <= 0.3:

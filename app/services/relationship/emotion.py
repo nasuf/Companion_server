@@ -1,6 +1,6 @@
 """Emotion system.
 
-PAD (Pleasure-Arousal-Dominance) emotion model with seven-dim personality support.
+PAD (Pleasure-Arousal-Dominance) emotion model driven by MBTI personality.
 Extracts emotion from user messages and manages AI emotion state.
 """
 
@@ -176,7 +176,6 @@ async def compute_baseline_emotion_llm(
         name=name or "AI",
         gender=gender or "未设定",
         personality=str(mbti or {}),
-        seven_dim="",  # legacy placeholder kept for prompt template compat
         background=background or "暂无",
     )
 
@@ -256,8 +255,8 @@ def update_emotion_state(
     """Fuse AI emotion with user emotion using empathy vector.
 
     E_target = α * E_ai + β * E_user + γ * empathy_vector
-    empathy_vector = (p_user * 感性度, a_user * 感性度, d_user * 感性度)
-    spec §1.2 起感性度 = MBTI 的 F 程度。
+    empathy_vector = (p_user * F程度, a_user * F程度, d_user * F程度)
+    spec §1.2: F 程度即 MBTI 的 (100-TF)/100 信号。
     """
     alpha, beta, gamma = _get_fusion_weights(topic_intimacy)
 

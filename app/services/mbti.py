@@ -29,11 +29,11 @@ from app.services.llm.models import get_utility_model, invoke_json
 logger = logging.getLogger(__name__)
 
 
-_MBTI_PROMPT = """你是 MBTI 性格评估专家。基于以下 AI 角色的 7 维性格分数（0-100），
+_MBTI_PROMPT = """你是 MBTI 性格评估专家。基于以下 AI 角色的性格分数（0-100），
 推测其 MBTI 八维度百分比分数（0-100）。
 
-7 维分数（值越高，特质越强）：
-{seven_dim}
+性格分数（值越高，特质越强）：
+{personality}
 
 请输出 JSON：
 {{
@@ -95,17 +95,13 @@ _BIG_FIVE_KEYS = {"extraversion", "openness", "conscientiousness", "agreeablenes
 
 
 def _format_personality_input(scores: dict) -> str:
-    """Render whatever shape the user supplied into the prompt-friendly bullet
-    list. Accepts either:
-      - 7-dim Chinese keys (活泼度...) with 0-100 ints
-      - Big Five English keys (extraversion...) with 0-1 floats (multiplied
-        to 0-100 for prompt clarity)
-    Other shapes are rendered as-is.
+    """Render the user-supplied personality dict as a bullet list for the
+    LLM prompt. Auto-detects Big Five (0-1 floats) vs explicit 0-100 ints.
     """
     if not scores:
         return "(无)"
     if _BIG_FIVE_KEYS.intersection(scores.keys()):
-        # Big Five 0-1 → 0-100 for the prompt
+        # Big Five 0-1 → 0-100 for prompt clarity
         return "\n".join(
             f"- {k}: {round(v * 100)}" for k, v in scores.items()
         )
@@ -117,7 +113,7 @@ async def compute_mbti(personality_scores: dict) -> dict:
     Falls back to neutral on failure."""
     if not personality_scores:
         return _default_mbti()
-    prompt = _MBTI_PROMPT.format(seven_dim=_format_personality_input(personality_scores))
+    prompt = _MBTI_PROMPT.format(personality=_format_personality_input(personality_scores))
     try:
         result = await invoke_json(get_utility_model(), prompt)
     except Exception as e:
