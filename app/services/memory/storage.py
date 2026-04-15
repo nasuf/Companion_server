@@ -9,6 +9,7 @@ from datetime import datetime
 
 from app.db import db
 from app.services.memory import memory_repo
+from app.services.memory.config import DEDUP_THRESHOLD
 from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import resolve_taxonomy
 from app.services.memory.vector_search import search_by_embedding
@@ -74,9 +75,6 @@ async def log_memory_changelog(
         )
     except Exception as e:
         logger.warning(f"Failed to write changelog: {e}")
-
-DEDUP_THRESHOLD = 0.9
-
 
 async def is_duplicate(
     user_id: str,
@@ -147,17 +145,35 @@ async def store_memory(
         create_data["occurTime"] = occur_time
     memory = await memory_repo.create(source=source, **create_data)
 
-    # Store embedding
-    await store_embedding(memory.id, embedding)
+    # Store embedding. If this fails the memory row exists but would never
+    # be retrievable by vector search — delete the orphan to keep state
+    # consistent. The caller sees the error and can retry.
+    try:
+        await store_embedding(memory.id, embedding)
+    except Exception:
+        logger.error(
+            f"Embedding store failed for memory {memory.id}; rolling back memory row"
+        )
+        try:
+            await memory_repo.delete(memory.id, source=source)  # type: ignore[arg-type]
+        except Exception as cleanup_err:
+            logger.error(
+                f"Rollback failed for orphan memory {memory.id}: {cleanup_err}"
+            )
+        raise
 
-    # Log changelog for portrait generation
-    await log_memory_changelog(
-        user_id,
-        memory.id,
-        "insert",
-        new_value=content,
-        workspace_id=workspace_id,
-    )
+    # Changelog is advisory (portrait generation input); a failure here is
+    # not worth rolling back the memory for.
+    try:
+        await log_memory_changelog(
+            user_id,
+            memory.id,
+            "insert",
+            new_value=content,
+            workspace_id=workspace_id,
+        )
+    except Exception as e:
+        logger.warning(f"Changelog write failed for memory {memory.id}: {e}")
 
     logger.info(f"Stored memory L{level} (importance={importance:.2f}): {content[:50]}")
     return memory.id

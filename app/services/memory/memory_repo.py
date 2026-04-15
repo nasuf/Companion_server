@@ -37,6 +37,7 @@ class MemoryRecord:
     updatedAt: datetime
     mainCategory: str | None = None
     subCategory: str | None = None
+    workspaceId: str | None = None
 
 
 def _to_record(row, source: Source) -> MemoryRecord:
@@ -57,6 +58,7 @@ def _to_record(row, source: Source) -> MemoryRecord:
         occurTime=getattr(row, "occurTime", None),
         createdAt=row.createdAt,
         updatedAt=row.updatedAt,
+        workspaceId=getattr(row, "workspaceId", None),
     )
 
 
@@ -99,16 +101,64 @@ async def create(source: Source = "user", **data) -> MemoryRecord:
     if data.get("userId") and not data.get("workspaceId"):
         data["workspaceId"] = await resolve_workspace_id(user_id=data["userId"])
     row = await _table(source).create(data=data)
+    await _invalidate_caches(data.get("userId"), data.get("workspaceId"))
     return _to_record(row, source)
 
 
-async def _scope_where(where: dict | None) -> dict | None:
-    if not where or "workspaceId" in where or "userId" not in where:
+async def _invalidate_caches(user_id: str | None, workspace_id: str | None) -> None:
+    """Bump per-(user, workspace) cache version so stale retrieval/graph
+    results are never served. Best-effort: Redis hiccups must not fail the
+    write path (caller has already persisted to Postgres)."""
+    if not user_id:
+        return
+    try:
+        from app.services.runtime.cache import bump_cache_version
+        await bump_cache_version(user_id, workspace_id)
+    except Exception as e:
+        logger.debug(f"cache bump failed for {user_id}/{workspace_id}: {e}")
+
+
+async def _scope_where(where: dict | None, *, allow_cross_user: bool = False) -> dict | None:
+    """Attach workspaceId filter so per-user queries never leak across workspaces.
+
+    Callers MUST include `userId` unless they:
+      - already pre-scoped via `workspaceId`
+      - target memories by primary key (`id` / `id in [...]`)
+      - pass `allow_cross_user=True` (batch/admin jobs like consolidation)
+
+    Otherwise raise — a bare `where={"level": 1}` is a bug that would scan
+    every workspace.
+    """
+    if not where:
+        # Preserve legacy behaviour: empty/None means "no constraint".
+        # Callers who want cross-user access must pass allow_cross_user=True
+        # with a non-empty where (or accept that bare empty scans nothing
+        # special beyond the table). Keep historical API surface intact.
         return where
 
-    scoped = dict(where)
-    scoped["workspaceId"] = await resolve_workspace_id(user_id=scoped["userId"])
-    return scoped
+    # If workspaceId is already specified, respect it and do not overwrite —
+    # callers that pass both userId and workspaceId have done the scoping
+    # themselves and may be targeting an explicit legacy/migration workspace.
+    if "workspaceId" in where:
+        return where
+
+    if "userId" in where:
+        scoped = dict(where)
+        scoped["workspaceId"] = await resolve_workspace_id(user_id=scoped["userId"])
+        return scoped
+
+    # Queries keyed by primary id are inherently scoped.
+    if "id" in where:
+        return where
+
+    if allow_cross_user:
+        return where
+
+    raise ValueError(
+        "memory_repo queries must include userId / workspaceId / id, "
+        "or pass allow_cross_user=True for batch jobs "
+        "(prevents cross-workspace data leakage)"
+    )
 
 
 async def find_many(
@@ -117,9 +167,14 @@ async def find_many(
     order: dict | None = None,
     take: int | None = None,
     skip: int | None = None,
+    allow_cross_user: bool = False,
 ) -> list[MemoryRecord]:
-    """Query memories. source=None queries both tables and merges results."""
-    where = await _scope_where(where)
+    """Query memories. source=None queries both tables and merges results.
+
+    Set allow_cross_user=True only for admin/batch jobs (consolidation,
+    lifecycle) that intentionally span users.
+    """
+    where = await _scope_where(where, allow_cross_user=allow_cross_user)
     kwargs = _build_kwargs(where, order, take, skip)
 
     if source is not None:
@@ -169,11 +224,12 @@ async def find_unique(id: str) -> MemoryRecord | None:
 async def count(
     source: Source | None = None,
     where: dict | None = None,
+    allow_cross_user: bool = False,
 ) -> int:
     """Count memories. source=None counts both tables."""
     kwargs: dict = {}
     if where is not None:
-        kwargs["where"] = await _scope_where(where)
+        kwargs["where"] = await _scope_where(where, allow_cross_user=allow_cross_user)
 
     if source is not None:
         return await _table(source).count(**kwargs)
@@ -187,41 +243,97 @@ async def count(
 
 async def update(id: str, source: Source | None = None, **data) -> None:
     """Update a memory by ID. If source unknown, auto-detect."""
+    rec = await find_unique(id)
+    if not rec:
+        logger.warning(f"Memory {id} not found for update")
+        return
     if source is None:
-        rec = await find_unique(id)
-        if not rec:
-            logger.warning(f"Memory {id} not found for update")
-            return
         source = rec.source
 
     await _table(source).update(where={"id": id}, data=data)
+    # rec still holds pre-update fields; userId/workspaceId don't change on update
+    await _invalidate_caches(rec.userId, getattr(rec, "workspaceId", None))
 
 
 async def update_many(
     source: Source | None = None,
     where: dict | None = None,
     data: dict | None = None,
+    allow_cross_user: bool = False,
 ) -> int:
-    """Batch update. source=None updates both tables."""
-    kwargs_where = await _scope_where(where or {})
+    """Batch update. source=None updates both tables.
+
+    Cache invalidation: collect the distinct (userId, workspaceId) pairs
+    that will be affected BEFORE the update. We only support cache bumping
+    for the common case `where={"id": {"in": [...]}}` (what every caller
+    in this codebase uses); for more exotic where clauses we fall back to
+    no-bump rather than loading the whole table.
+    """
+    kwargs_where = await _scope_where(where or {}, allow_cross_user=allow_cross_user)
     kwargs_data = data or {}
 
-    if source is not None:
-        return await _table(source).update_many(where=kwargs_where, data=kwargs_data)
+    scopes = await _scopes_for_update_many(source, kwargs_where)
 
-    user_count, ai_count = await asyncio.gather(
-        db.usermemory.update_many(where=kwargs_where, data=kwargs_data),
-        db.aimemory.update_many(where=kwargs_where, data=kwargs_data),
-    )
-    return user_count + ai_count
+    if source is not None:
+        total = await _table(source).update_many(where=kwargs_where, data=kwargs_data)
+    else:
+        user_count, ai_count = await asyncio.gather(
+            db.usermemory.update_many(where=kwargs_where, data=kwargs_data),
+            db.aimemory.update_many(where=kwargs_where, data=kwargs_data),
+        )
+        total = user_count + ai_count
+
+    for user_id, workspace_id in scopes:
+        await _invalidate_caches(user_id, workspace_id)
+    return total
+
+
+async def _scopes_for_update_many(
+    source: Source | None, where: dict | None,
+) -> set[tuple[str, str | None]]:
+    """Return the distinct (userId, workspaceId) pairs that update_many will
+    touch, for cache invalidation. Only handles the id-IN form used in this
+    codebase; other shapes return empty (skipping the bump)."""
+    if not where:
+        return set()
+    id_filter = where.get("id")
+    if not isinstance(id_filter, dict):
+        return set()
+    ids = id_filter.get("in")
+    if not ids:
+        return set()
+
+    sources: list[Source] = [source] if source is not None else ["user", "ai"]
+    scopes: set[tuple[str, str | None]] = set()
+    for s in sources:
+        rows = await _table(s).find_many(
+            where={"id": {"in": list(ids)}},
+        )
+        for r in rows:
+            scopes.add((r.userId, getattr(r, "workspaceId", None)))
+    return scopes
 
 
 async def delete(id: str, source: Source | None = None) -> None:
-    """Delete a memory by ID."""
+    """Delete a memory by ID, cascading to its embedding.
+
+    Order is intentional: memory row is deleted first so that even if the
+    vector-row delete fails, we never leave a memory-less orphan embedding
+    with the same id in a surprising visibility state (any reinsert of a
+    new memory with the same uuid would collide with the stale vector).
+    The embedding delete tolerates absence (WHERE matches 0 rows is OK).
+    """
+    rec = await find_unique(id)
+    if not rec:
+        return
     if source is None:
-        rec = await find_unique(id)
-        if not rec:
-            return
         source = rec.source
 
     await _table(source).delete(where={"id": id})
+    try:
+        await db.execute_raw(
+            "DELETE FROM memory_embeddings WHERE memory_id = $1", id,
+        )
+    except Exception as e:
+        logger.warning(f"Embedding cleanup failed for memory {id}: {e}")
+    await _invalidate_caches(rec.userId, rec.workspaceId)

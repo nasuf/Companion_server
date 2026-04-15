@@ -6,10 +6,12 @@ Handles importance decay (tiered time table), dynamic weight, mention tracking, 
 import logging
 
 from app.db import db
+from app.services.memory.config import ARCHIVE_IMPORTANCE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
-ARCHIVE_THRESHOLD = 0.1
+# 别名保持向后兼容（此前 `from lifecycle import ARCHIVE_THRESHOLD` 的调用方）
+ARCHIVE_THRESHOLD = ARCHIVE_IMPORTANCE_THRESHOLD
 
 # 分层时间衰减表
 # (months_start, months_end, factor)
@@ -58,15 +60,21 @@ def compute_dynamic_weight(initial_importance: float, months_age: float, mention
 
 
 async def increment_mention_count(memory_id: str) -> None:
-    """在检索命中时增加记忆的提及次数（尝试两表）。"""
+    """在检索命中时增加记忆的提及次数（尝试两表）。
+
+    仅对未归档的记忆递增；否则归档记忆仍可能被"唤醒"（mentionCount 提高 →
+    动态权重升高 → 升级到更高 level），违反 archive 的语义。
+    """
     try:
         updated = await db.execute_raw(
-            "UPDATE memories_user SET mention_count = mention_count + 1, updated_at = NOW() WHERE id = $1",
+            "UPDATE memories_user SET mention_count = mention_count + 1, updated_at = NOW() "
+            "WHERE id = $1 AND is_archived = false",
             memory_id,
         )
         if not updated:
             await db.execute_raw(
-                "UPDATE memories_ai SET mention_count = mention_count + 1, updated_at = NOW() WHERE id = $1",
+                "UPDATE memories_ai SET mention_count = mention_count + 1, updated_at = NOW() "
+                "WHERE id = $1 AND is_archived = false",
                 memory_id,
             )
     except Exception as e:

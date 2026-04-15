@@ -8,6 +8,7 @@ import logging
 
 from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
+from app.services.memory.config import LLM_INTENT_MIN_CONFIDENCE
 from app.services.memory.storage import log_memory_changelog
 from app.services.memory.taxonomy import conflict_candidate_scope
 from app.services.prompting.store import get_prompt_text
@@ -72,7 +73,7 @@ async def detect_conflicts(
     if not result.get("has_conflict", False):
         return None
 
-    if result.get("confidence", 0) < 0.8:
+    if result.get("confidence", 0) < LLM_INTENT_MIN_CONFIDENCE:
         logger.info(f"Conflict detected but low confidence ({result.get('confidence')}), ignoring")
         return None
 

@@ -50,6 +50,7 @@ async def _consolidate_level(
         },
         order={"createdAt": "asc"},
         take=take,
+        allow_cross_user=True,
     )
 
     if not old_memories:
@@ -99,6 +100,7 @@ async def check_l2_upgrade_candidates() -> None:
     candidates = await memory_repo.find_many(
         where={"level": 2, "isArchived": False},
         take=100,
+        allow_cross_user=True,
     )
 
     if not candidates:
@@ -154,6 +156,7 @@ async def check_l2_demotion_candidates() -> None:
             "createdAt": {"lt": cutoff},
         },
         take=100,
+        allow_cross_user=True,
     )
 
     if not candidates:

@@ -86,6 +86,7 @@ async def compress_weekly() -> None:
         },
         order={"createdAt": "asc"},
         take=100,
+        allow_cross_user=True,
     )
 
     if len(memories) < 3:
@@ -122,6 +123,7 @@ async def compress_monthly() -> None:
         },
         order={"createdAt": "asc"},
         take=50,
+        allow_cross_user=True,
     )
 
     if len(memories) < 2:

@@ -5,9 +5,9 @@ Detects user intent to delete memories and executes deletion pipeline.
 
 import logging
 
-from app.db import db
 from app.services.memory import memory_repo
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
+from app.services.memory.config import DELETION_SIMILARITY_THRESHOLD, LLM_INTENT_MIN_CONFIDENCE
 from app.services.memory.embedding import generate_embedding
 from app.services.memory.vector_search import search_by_embedding
 from app.services.memory.storage import log_memory_changelog
@@ -66,7 +66,7 @@ async def detect_deletion_intent(message: str) -> dict | None:
 
     if not result.get("is_deletion_request", False):
         return None
-    if result.get("confidence", 0) < 0.8:
+    if result.get("confidence", 0) < LLM_INTENT_MIN_CONFIDENCE:
         return None
 
     return result
@@ -128,15 +128,14 @@ async def delete_memories_by_description(
         if isinstance(sim, str):
             sim = float(sim)
 
-        # 高相似度(≥0.85)直接删除，避免误删
-        if sim < 0.85:
+        if sim < DELETION_SIMILARITY_THRESHOLD:
             continue
 
         memory_id = r.get("id")
         if not memory_id:
             continue
 
-        # Log before delete
+        # Audit log BEFORE delete (once deleted, memory row & content are gone)
         memory = await memory_repo.find_unique(memory_id)
         if memory:
             await log_memory_changelog(
@@ -144,16 +143,9 @@ async def delete_memories_by_description(
                 old_value=memory.content,
             )
 
-        # Delete embedding first (raw SQL)
-        try:
-            await db.execute_raw(
-                "DELETE FROM memory_embeddings WHERE memory_id = $1",
-                memory_id,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to delete embedding for {memory_id}: {e}")
-
-        # Delete memory
+        # memory_repo.delete handles embedding cascade in the safe order
+        # (memory row first → embedding row). Retrieval is guaranteed to
+        # miss the record the moment the memory row disappears.
         try:
             await memory_repo.delete(memory_id)
             deleted += 1

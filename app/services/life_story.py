@@ -538,9 +538,12 @@ async def store_memories_batch(
 
     Optimizations vs per-item store_memory():
     - Batch embedding: aembed_documents() instead of N × aembed_query()
-    - Skip dedup: initial provisioning, DB is empty, no duplicates possible
+    - Dedup guard: refuse to run if the target workspace already has AI
+      memories (re-running provisioning would otherwise duplicate records)
     - Bulk insert: client-side UUIDs + create_many for memories/changelog,
-      asyncio.gather for embedding rows (pgvector lacks Prisma binding)
+      one multi-VALUES SQL for embeddings
+    - Best-effort rollback: if the embedding insert fails we delete the
+      freshly-inserted memory rows so retrieval never sees a half-state
     """
     # Filter empty summaries
     valid = [m for m in all_memories if m.get("summary")]
@@ -548,9 +551,26 @@ async def store_memories_batch(
         return []
 
     total = len(valid)
+
+    # Resolve workspace once (shared by all memories + changelogs)
+    workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
+
+    # Dedup guard: bulk path intentionally skips per-row similarity checks
+    # (it's hot, and on first provisioning DB is empty). But re-running
+    # provisioning for a non-empty workspace would silently duplicate every
+    # profile memory. Refuse rather than corrupt.
+    existing = await db.aimemory.count(
+        where={"userId": user_id, "workspaceId": workspace_id}
+    )
+    if existing > 0:
+        logger.warning(
+            f"store_memories_batch skipped for agent {agent_id}: workspace "
+            f"already has {existing} AI memories (re-run would duplicate)"
+        )
+        return []
+
     texts = [m["summary"] for m in valid]
 
-    # Batch generate embeddings (single model call)
     await set_progress(agent_id, "storing_memories", current=0, total=total,
                        message=f"正在生成向量 ({total} 条)...")
     embed_model = get_embedding_model()
@@ -558,9 +578,6 @@ async def store_memories_batch(
 
     # Refresh DB connection (may have gone stale during embedding)
     await ensure_connected()
-
-    # Resolve workspace once (shared by all memories + changelogs)
-    workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
 
     # Pre-generate IDs so we can bulk-insert memories AND link embeddings
     # without a per-row RETURNING round-trip.
@@ -597,7 +614,7 @@ async def store_memories_batch(
             "workspaceId": workspace_id,
         })
 
-    # ── Bulk insert memories (single SQL via Prisma create_many) ──
+    # ── Bulk insert memories ──
     await set_progress(agent_id, "storing_memories",
                        current=int(total * 0.3), total=total,
                        message=f"正在写入记忆 ({total} 条)...")
@@ -617,17 +634,37 @@ async def store_memories_batch(
     for mid, emb in zip(ids, embeddings):
         args.append(mid)
         args.append(format_vector(emb))
-    await db.execute_raw(
-        f"INSERT INTO memory_embeddings (memory_id, embedding) VALUES {placeholders}",
-        *args,
-    )
+    try:
+        await db.execute_raw(
+            f"INSERT INTO memory_embeddings (memory_id, embedding) VALUES {placeholders}",
+            *args,
+        )
+    except Exception:
+        # Embedding write failed — roll back the memories we just inserted
+        # so vector search never sees records without vectors.
+        logger.error(
+            f"Embedding batch insert failed for agent {agent_id}; "
+            f"rolling back {len(ids)} orphan memory rows"
+        )
+        try:
+            await db.aimemory.delete_many(where={"id": {"in": ids}})
+        except Exception as cleanup_err:
+            logger.error(f"Rollback failed for agent {agent_id}: {cleanup_err}")
+        raise
 
-    # ── Bulk insert changelog (single SQL) ──
-    # Non-critical: never let changelog failure abort provisioning.
+    # ── Bulk insert changelog (advisory, never abort for it) ──
     try:
         await db.memorychangelog.create_many(data=changelog_rows)
     except Exception as e:
         logger.warning(f"Bulk changelog insert failed for agent {agent_id}: {e}")
+
+    # Invalidate any stale per-user retrieval/graph caches so the first
+    # message after provisioning actually sees these memories.
+    try:
+        from app.services.runtime.cache import bump_cache_version
+        await bump_cache_version(user_id, workspace_id)
+    except Exception as e:
+        logger.debug(f"cache bump failed for {user_id}: {e}")
 
     await set_progress(agent_id, "storing_memories",
                        current=total, total=total,
