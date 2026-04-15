@@ -102,6 +102,18 @@ async def create_agent(data: AgentCreate):
 
     asyncio.create_task(_init_emotion())
 
+    # Per spec §1.2: 7-dim → MBTI 8-dim via LLM, store on agent
+    async def _init_mbti():
+        try:
+            from prisma import Json
+            from app.services.mbti import compute_mbti
+            mbti = await compute_mbti(get_seven_dim(agent))
+            await db.aiagent.update(where={"id": agent.id}, data={"mbti": Json(mbti)})
+        except Exception as e:
+            logger.error(f"MBTI init failed for agent {agent.id}: {e}")
+
+    asyncio.create_task(_init_mbti())
+
     # Initialize patience value (Redis + DB)
     asyncio.create_task(init_patience(agent.id, data.user_id))
 

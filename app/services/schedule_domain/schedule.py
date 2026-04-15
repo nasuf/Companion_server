@@ -127,9 +127,15 @@ async def generate_daily_schedule(
             )
             if holiday:
                 prompt += f"\n今天是{holiday.name}（{holiday.type}类节日）。请根据节日特点调整作息，安排节日相关活动。"
-            memory_summary = await _get_user_memory_summary(user_id) if user_id else ""
-            if memory_summary:
-                prompt += f"\n用户近期情况：{memory_summary}\n可以在空闲时段融入与用户相关的个性化活动。"
+            # Per spec §2.1: "40% 概率启用带用户记忆的指令"
+            # — 节日强制 LLM 路径但仍随机决定是否注入用户记忆
+            if user_id and random.random() < 0.4:
+                memory_summary = await _get_user_memory_summary(user_id)
+                if memory_summary:
+                    prompt += (
+                        f"\n用户近期情况：{memory_summary}\n"
+                        "可以在空闲时段融入与用户相关的个性化活动。"
+                    )
 
             model = get_utility_model()
             schedule = await invoke_json(model, prompt)

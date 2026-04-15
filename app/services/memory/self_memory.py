@@ -124,12 +124,26 @@ async def generate_daily_self_memories(
         if count + len(stored_ids) >= 8:
             break
 
+        # Per spec §2.3: 0-100 importance score → level
+        #   ≥ 85   → L1 核心   |   50-84 → L2 重要
+        #   10-49 → L3 模糊    |   0-9   → 不存
+        raw_score = float(mem.get("importance", 50))
+        if raw_score < 10:
+            continue
+        elif raw_score >= 85:
+            level = 1
+        elif raw_score >= 50:
+            level = 2
+        else:
+            level = 3
+        importance_unit = min(1.0, raw_score / 100)
+
         mid = await store_memory(
             user_id=user_id,
             content=mem.get("content", ""),
             summary=mem.get("content", ""),
-            level=mem.get("level", 2),
-            importance=min(1.0, mem.get("importance", 50) / 100),
+            level=level,
+            importance=importance_unit,
             memory_type=mem.get("type", "life"),
             main_category=mem.get("main_category"),
             sub_category=mem.get("sub_category"),

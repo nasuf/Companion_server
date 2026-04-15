@@ -260,10 +260,21 @@ async def _run_weekly_portraits():
 
 
 async def _run_daily_self_memories():
-    await _run_for_all_agents(
-        lambda a: generate_daily_self_memories(agent_id=a.id, user_id=a.userId, dialogue_summary=None),
-        concurrency=3, task_name="Self-memory generation",
-    )
+    """Per spec §2.2 + §2.3:
+        ① 汇总前一日 [作息表 / 调整日志 / 主动日志] → 200 字总结
+        ② 把总结送给 LLM 拆分打分 → 写入 AI 记忆库
+    """
+    from app.services.memory.daily_summary import build_yesterday_summary
+
+    async def _gen(agent):
+        summary = await build_yesterday_summary(
+            agent_id=agent.id, agent_name=agent.name, user_id=agent.userId,
+        )
+        await generate_daily_self_memories(
+            agent_id=agent.id, user_id=agent.userId, dialogue_summary=summary,
+        )
+
+    await _run_for_all_agents(_gen, concurrency=3, task_name="Self-memory generation")
 
 
 async def _run_daily_schedules():

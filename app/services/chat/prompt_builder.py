@@ -12,6 +12,7 @@ from typing import Any
 from app.services.memory.context_selector import ClassifiedMemory
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
+from app.services.mbti import format_mbti_for_prompt, get_mbti
 from app.services.trait_model import get_seven_dim, get_dim
 from app.services.prompts.system_prompts import (
     MEMORY_TOKEN_BUDGET,
@@ -104,14 +105,28 @@ async def _build_personality_section(agent: Any) -> str:
     dim_text = _format_seven_dim(seven_dim)
     style = generate_style_instruction(seven_dim)
 
+    # Per spec §1.2: prefer MBTI as the canonical personality description.
+    # Fall back to the 7-dim narrative for legacy agents that haven't had
+    # their MBTI computed yet.
+    mbti_line = format_mbti_for_prompt(get_mbti(agent))
+
     personality_rules = await get_prompt_text("chat.personality_rules")
-    body = (
-        f"你的名字叫{name}，是一个{gender_text}。\n"
-        f"你的性格由以下7个维度定义（0-100分）：\n\n"
-        f"{dim_text}\n\n"
-        f"你的说话风格：\n{style}\n\n"
-        f"{personality_rules}"
-    )
+    if mbti_line:
+        body = (
+            f"你的名字叫{name}，是一个{gender_text}。\n"
+            f"你的性格画像：{mbti_line}\n\n"
+            f"参考维度（0-100 分）：\n{dim_text}\n\n"
+            f"你的说话风格：\n{style}\n\n"
+            f"{personality_rules}"
+        )
+    else:
+        body = (
+            f"你的名字叫{name}，是一个{gender_text}。\n"
+            f"你的性格由以下7个维度定义（0-100分）：\n\n"
+            f"{dim_text}\n\n"
+            f"你的说话风格：\n{style}\n\n"
+            f"{personality_rules}"
+        )
     return _section("你的身份", body)
 
 

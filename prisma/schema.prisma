@@ -48,6 +48,7 @@ model AiAgent {
   sevenDimTraits  Json?          @map("seven_dim_traits")
   currentTraits   Json?          @map("current_traits")
   traitsHistory   Json?          @map("traits_history")
+  mbti            Json?          // {EI, NS, TF, JP, type, summary} per spec §1.2
   background      String?
   values          Json?
   lifeOverview    String?        @map("life_overview")

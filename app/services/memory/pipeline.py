@@ -49,11 +49,23 @@ async def process_memory_pipeline(
     # Step 2: Store each memory with dedup and conflict check
     for mem in memories:
         summary = mem.get("summary", "")
-        level = mem.get("level", 3)
         importance = mem.get("importance", 0.5)
         memory_type = mem.get("type")
         main_category = mem.get("main_category")
         sub_category = mem.get("sub_category")
+
+        # Per spec《产品手册·背景信息》§2.3 — level is derived from importance
+        # score (0-100), not whatever level the LLM may have guessed:
+        #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
+        if importance < 0.10:
+            logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {summary[:40]}")
+            continue
+        elif importance >= 0.85:
+            level = 1
+        elif importance >= 0.50:
+            level = 2
+        else:
+            level = 3
 
         # Parse occur_time from extraction result
         occur_time: datetime | None = None

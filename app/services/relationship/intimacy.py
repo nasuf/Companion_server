@@ -18,7 +18,6 @@ from datetime import UTC, datetime, timedelta
 
 from app.db import db
 from app.redis_client import get_redis
-from app.services.memory import memory_repo
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -148,22 +147,46 @@ async def _compute_interaction_stickiness(
 async def _compute_self_disclosure(
     user_id: str,
     workspace_id: str | None = None,
+    *,
+    cutoff: datetime | None = None,
 ) -> float:
     """G2 自我暴露(0-1)。基于L1+L2记忆重要度总和的对数公式。
 
     min(1000, 200*log10(importance_sum+1)) / 1000
+
+    Per spec §3.4.1:
+      - 每日值（成长亲密度）: 截止到当日结束时累计
+      - 每周值（话题亲密度）: 截止到当周周日结束时累计
+
+    `cutoff` 给调用方一个显式截止点。None 表示"现在"，等同于历史行为。
+    importance 在写入时确定后不会随 level 衰减，所以 cutoff 在表上对应
+    的就是 createdAt ≤ cutoff 的子集。
     """
-    # 查询L1+L2记忆的importance总和 (user memories only)
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
-    result = await db.query_raw(
-        """
-        SELECT COALESCE(SUM(importance), 0) as total_importance
-        FROM memories_user
-        WHERE user_id = $1 AND workspace_id = $2 AND level IN (1, 2) AND is_archived = false
-        """,
-        user_id,
-        workspace_id,
-    )
+    if cutoff is None:
+        result = await db.query_raw(
+            """
+            SELECT COALESCE(SUM(importance), 0) as total_importance
+            FROM memories_user
+            WHERE user_id = $1 AND workspace_id = $2
+              AND level IN (1, 2) AND is_archived = false
+            """,
+            user_id,
+            workspace_id,
+        )
+    else:
+        result = await db.query_raw(
+            """
+            SELECT COALESCE(SUM(importance), 0) as total_importance
+            FROM memories_user
+            WHERE user_id = $1 AND workspace_id = $2
+              AND level IN (1, 2) AND is_archived = false
+              AND created_at <= $3
+            """,
+            user_id,
+            workspace_id,
+            cutoff,
+        )
 
     importance_sum = float(result[0]["total_importance"]) if result else 0.0
 
@@ -186,7 +209,8 @@ async def compute_growth_intimacy(
 ) -> float:
     """计算成长亲密度(0-1000)。
 
-    权重：互动粘性0.3 + 自我暴露0.3 + 关系时长0.4
+    spec §3.4.5: 每日凌晨基于"前一日结束时"的快照计算。
+    权重：互动粘性 0.3 + 自我暴露 0.3 + 关系时长 0.4
     """
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     if not created_at:
@@ -195,8 +219,14 @@ async def compute_growth_intimacy(
             return 0.0
         created_at = agent.createdAt
 
+    # spec §3.4.1 daily snapshot: 截止到前一日结束时（= 今日 00:00 UTC）
+    now = datetime.now(UTC)
+    daily_cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
     interaction = await _compute_interaction_stickiness(agent_id, user_id)
-    disclosure = await _compute_self_disclosure(user_id, workspace_id=workspace_id)
+    disclosure = await _compute_self_disclosure(
+        user_id, workspace_id=workspace_id, cutoff=daily_cutoff,
+    )
     duration = _compute_relationship_duration(created_at)
     # Note: G1/G2/G3 all return 0-1 range via /1000 normalization
 
@@ -223,46 +253,36 @@ async def compute_topic_intimacy(
 ) -> float:
     """计算话题亲密度(0-100)。
 
-    基于近30天记忆的话题深度。
-    权重：话题多样性0.2 + 情感深度0.5 + 互动时长0.3
+    spec §3.4.5: 与成长亲密度共用同一组三维度（互动粘性 / 自我暴露 / 关系
+    时长），仅权重和归一化不同：
+      话题亲密度 = round(T1 * 0.2 + T2 * 0.5 + T3 * 0.3)
+      其中 T1/T2/T3 = round(G1/G2/G3 * 100)
     """
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
-    since = datetime.now(UTC) - timedelta(days=30)
-
-    memories = await memory_repo.find_many(
-        source="user",
-        where={
-            "userId": user_id,
-            "workspaceId": workspace_id,
-            "createdAt": {"gte": since},
-            "isArchived": False,
-        },
-        order={"importance": "desc"},
-        take=100,
-    )
-
-    if not memories:
-        return 0.0
-
-    # 话题多样性：记忆类型种类
-    types = {m.type for m in memories if m.type}
-    diversity = min(1.0, len(types) / 6)
-
-    # 情感深度：高重要性记忆比例
-    high_importance = sum(1 for m in memories if (m.importance or 0) >= 0.7)
-    depth = min(1.0, high_importance / max(len(memories) * 0.3, 1))
-
-    # 互动时长
     if not created_at:
         agent = await db.aiagent.find_unique(where={"id": agent_id})
-        created_at = agent.createdAt if agent else datetime.now(UTC)
-    duration = _compute_relationship_duration(created_at)
+        if not agent:
+            return 0.0
+        created_at = agent.createdAt
 
-    raw = diversity * 0.2 + depth * 0.5 + duration * 0.3
-    score = raw * 100
+    # spec §3.4.1 weekly snapshot: 截止到当周周日结束时
+    # job 在周日凌晨跑，"当周周日结束" = job 触发当下，cutoff = now
+    g1 = await _compute_interaction_stickiness(agent_id, user_id)
+    g2 = await _compute_self_disclosure(
+        user_id, workspace_id=workspace_id, cutoff=datetime.now(UTC),
+    )
+    g3 = _compute_relationship_duration(created_at)
+
+    # T = round(G * 100), 范围 0-100
+    t1 = round(g1 * 100)
+    t2 = round(g2 * 100)
+    t3 = round(g3 * 100)
+
+    # spec 权重: 互动粘性 20% + 自我暴露 50% + 关系时长 30%
+    score = round(t1 * 0.2 + t2 * 0.5 + t3 * 0.3)
 
     await save_topic_intimacy(agent_id, user_id, score)
-    return score
+    return float(score)
 
 
 # --- API ---
