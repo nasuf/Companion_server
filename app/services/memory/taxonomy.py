@@ -180,7 +180,7 @@ TAXONOMY_MATRIX: dict[Source, dict[int, dict[str, tuple[str, ...]]]] = {
 
 # Flat backward-compat view: the user L1 superset.
 # Callers that don't care about (owner, level) continue to import this.
-TAXONOMY: dict[str, tuple[str, ...]] = dict(TAXONOMY_MATRIX["user"][1])
+TAXONOMY: dict[str, tuple[str, ...]] = TAXONOMY_MATRIX["user"][1]
 
 
 @dataclass(frozen=True)
@@ -195,7 +195,15 @@ class TaxonomyResult:
 
 
 def allowed_main_categories(source: Source = "user", level: int = 1) -> tuple[str, ...]:
-    return tuple(TAXONOMY_MATRIX[source][level].keys())
+    """Main categories that actually allow memories at (source, level).
+
+    Mains with an empty sub-cat set (e.g. AI 身份/偏好/思维 at L2/L3) are
+    excluded — the spec forbids memories there, so returning them would
+    mislead callers that iterate to build UIs or validators.
+    """
+    return tuple(
+        main for main, subs in TAXONOMY_MATRIX[source][level].items() if subs
+    )
 
 
 def allowed_sub_categories(
@@ -478,14 +486,30 @@ def resolve_taxonomy(
     In that case main_category is preserved — the caller decides whether to
     archive, reject, or keep the memory at a different level.
     """
-    normalized_main = (main_category or "").strip()
+    raw_main = (main_category or "").strip()
     normalized_sub = (sub_category or "").strip()
     normalized_legacy = (legacy_type or "").strip() or None
 
-    if not normalized_main and normalized_legacy:
-        normalized_main = LEGACY_TYPE_TO_MAIN_CATEGORY.get(normalized_legacy, "")
-    if normalized_main not in TAXONOMY_MATRIX["user"][1]:
+    # Resolve main: explicit first, then legacy type, else fallback to 生活.
+    # If the caller gave a non-empty but UNRECOGNIZED main (e.g. the LLM
+    # hallucinated "某乱"), we refuse rather than silently dumping it into
+    # 生活/其他 — that would pollute retrieval with mis-categorized rows.
+    if raw_main in TAXONOMY_MATRIX["user"][1]:
+        normalized_main = raw_main
+    elif not raw_main and normalized_legacy:
+        normalized_main = LEGACY_TYPE_TO_MAIN_CATEGORY.get(normalized_legacy, "生活")
+        if normalized_main not in TAXONOMY_MATRIX["user"][1]:
+            normalized_main = "生活"
+    elif not raw_main:
         normalized_main = "生活"
+    else:
+        # Unrecognized non-empty main → refuse.
+        return TaxonomyResult(
+            main_category=raw_main,
+            sub_category=normalized_sub or "其他",
+            legacy_type=normalized_legacy,
+            allowed=False,
+        )
 
     legacy = MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy)
 

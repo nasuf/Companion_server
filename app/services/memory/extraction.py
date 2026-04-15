@@ -10,10 +10,23 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.memory.taxonomy import resolve_taxonomy
+from app.services.memory.taxonomy import TAXONOMY_MATRIX
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
+
+
+def _taxonomy_list_text() -> str:
+    """Render the L1 (user) taxonomy as bullet text for the extraction prompt.
+
+    Always uses the L1 superset — extraction assigns a tentative level and
+    the downstream pipeline will demote/reject if the (source, level, main)
+    slice turns out to forbid the sub-category.
+    """
+    return "\n".join(
+        f"- {main}：{'、'.join(subs)}"
+        for main, subs in TAXONOMY_MATRIX["user"][1].items()
+    )
 
 
 async def extract_memories(conversation: str) -> dict:
@@ -26,6 +39,7 @@ async def extract_memories(conversation: str) -> dict:
     prompt = (await get_prompt_text("memory.extraction")).format(
         conversation=conversation,
         current_time=now.strftime("%Y-%m-%d %H:%M %A"),
+        taxonomy_list=_taxonomy_list_text(),
     )
 
     try:
