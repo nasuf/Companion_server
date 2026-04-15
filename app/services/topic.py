@@ -11,7 +11,7 @@ import logging
 import random
 
 from app.redis_client import get_redis
-from app.services.trait_model import get_dim
+from app.services.mbti import signal as mbti_signal
 
 logger = logging.getLogger(__name__)
 
@@ -149,13 +149,13 @@ TOPIC_POOL: dict[str, list[str]] = {
     ],
 }
 
-# 人格倾向 → 话题偏好权重
-_PERSONALITY_TOPIC_WEIGHTS: dict[str, dict[str, float]] = {
-    "活泼度": {"生活_casual": 0.3, "兴趣_casual": 0.3, "幽默": 0.4},
-    "理性度": {"思想_deep": 0.5, "生活_deep": 0.3, "兴趣_casual": 0.2},
-    "感性度": {"情感_deep": 0.5, "生活_deep": 0.3, "生活_casual": 0.2},
-    "脑洞度": {"脑洞": 0.5, "思想_deep": 0.3, "幽默": 0.2},
-    "幽默度": {"幽默": 0.5, "生活_casual": 0.3, "兴趣_casual": 0.2},
+# MBTI 派生信号 → 话题偏好权重 (spec §1.2 后用 MBTI 表达)
+_MBTI_TOPIC_WEIGHTS: dict[str, dict[str, float]] = {
+    "lively":    {"生活_casual": 0.3, "兴趣_casual": 0.3, "幽默": 0.4},
+    "rational":  {"思想_deep": 0.5, "生活_deep": 0.3, "兴趣_casual": 0.2},
+    "emotional": {"情感_deep": 0.5, "生活_deep": 0.3, "生活_casual": 0.2},
+    "creative":  {"脑洞": 0.5, "思想_deep": 0.3, "幽默": 0.2},
+    "humor":     {"幽默": 0.5, "生活_casual": 0.3, "兴趣_casual": 0.2},
 }
 
 # 亲密度等级 → 可用话题深度
@@ -169,16 +169,14 @@ _INTIMACY_ALLOWED: dict[str, list[str]] = {
 
 
 def select_new_topic(
-    personality: dict | None = None,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
     intimacy_level: str = "L1",
     recent_topics: list[str] | None = None,
 ) -> str:
-    """2I.6 基于人格偏好+亲密度等级推荐新话题。
+    """2I.6 基于人格偏好+亲密度等级推荐新话题。spec §1.2 使用 MBTI。
 
     Args:
-        personality: Big Five人格 (fallback)
-        seven_dim: 七维人格
+        mbti: 当前 effective MBTI dict（None 时所有类别等权）
         intimacy_level: 亲密度等级 L1-L5
         recent_topics: 最近使用过的话题（用于去重）
 
@@ -193,20 +191,12 @@ def select_new_topic(
     # 2. 计算各话题类别权重
     category_weights: dict[str, float] = {cat: 1.0 for cat in allowed_categories}
 
-    if seven_dim:
-        for dim_name, topic_prefs in _PERSONALITY_TOPIC_WEIGHTS.items():
-            dim_val = get_dim(seven_dim, dim_name)
+    if mbti:
+        for signal_name, topic_prefs in _MBTI_TOPIC_WEIGHTS.items():
+            sig_val = mbti_signal(mbti, signal_name)
             for cat, weight in topic_prefs.items():
                 if cat in category_weights:
-                    category_weights[cat] += dim_val * weight
-    elif personality:
-        e = personality.get("extraversion", 0.5)
-        o = personality.get("openness", 0.5)
-        for cat in category_weights:
-            if "casual" in cat:
-                category_weights[cat] += e * 0.3
-            if "deep" in cat or cat == "脑洞":
-                category_weights[cat] += o * 0.3
+                    category_weights[cat] += sig_val * weight
 
     # 3. 按权重选择类别
     categories = list(category_weights.keys())

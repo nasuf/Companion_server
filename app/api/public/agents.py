@@ -9,7 +9,7 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
-from app.services.trait_model import get_seven_dim
+from app.services.mbti import compute_mbti, get_mbti
 from app.services.life_story import (
     activate_agent,
     generate_life_story_memories,
@@ -43,14 +43,14 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 @router.post("", response_model=AgentResponse)
 async def create_agent(data: AgentCreate):
+    # Per spec §1.2: 7-dim / Big Five 用户输入仅作为 MBTI 计算的临时输入,
+    # 不再常驻 DB. MBTI 在 _init_mbti() 里生成并写入.
     create_data: dict = {
         "name": data.name,
         "user": {"connect": {"id": data.user_id}},
         "status": "provisioning",
         "archivedAt": None,
     }
-    if data.personality is not None:
-        create_data["personality"] = Json(data.personality)
     if data.background is not None:
         create_data["background"] = data.background
     if data.values is not None:
@@ -86,12 +86,25 @@ async def create_agent(data: AgentCreate):
             await restore_staged_workspaces(staged_workspaces)
         raise
 
-    # Initialize baseline emotion from personality (small model)
-    async def _init_emotion():
+    # Per spec §1.2: 用户输入的 personality (Big Five / 7 维) 立即转 MBTI,
+    # 写入 agent.mbti + currentMbti. 然后 emotion baseline 才能基于 MBTI 计算.
+    # 两步必须串行: emotion 依赖 mbti 已落库.
+    user_personality_input = data.personality or {}
+
+    async def _init_mbti_then_emotion():
+        try:
+            mbti = await compute_mbti(user_personality_input)
+            await db.aiagent.update(
+                where={"id": agent.id},
+                data={"mbti": Json(mbti), "currentMbti": Json(mbti)},
+            )
+        except Exception as e:
+            logger.error(f"MBTI init failed for agent {agent.id}: {e}")
+            mbti = None
+
         try:
             baseline = await compute_baseline_emotion_llm(
-                agent.personality or {},
-                seven_dim=get_seven_dim(agent),
+                mbti,
                 name=agent.name,
                 background=agent.background or "",
                 gender=agent.gender or "",
@@ -100,19 +113,7 @@ async def create_agent(data: AgentCreate):
         except Exception as e:
             logger.error(f"Baseline emotion init failed for agent {agent.id}: {e}")
 
-    asyncio.create_task(_init_emotion())
-
-    # Per spec §1.2: 7-dim → MBTI 8-dim via LLM, store on agent
-    async def _init_mbti():
-        try:
-            from prisma import Json
-            from app.services.mbti import compute_mbti
-            mbti = await compute_mbti(get_seven_dim(agent))
-            await db.aiagent.update(where={"id": agent.id}, data={"mbti": Json(mbti)})
-        except Exception as e:
-            logger.error(f"MBTI init failed for agent {agent.id}: {e}")
-
-    asyncio.create_task(_init_mbti())
+    asyncio.create_task(_init_mbti_then_emotion())
 
     # Initialize patience value (Redis + DB)
     asyncio.create_task(init_patience(agent.id, data.user_id))
@@ -143,7 +144,7 @@ async def create_agent(data: AgentCreate):
         else:
             profile = None
 
-        seven_dim = get_seven_dim(agent)
+        mbti = get_mbti(agent)
         overview_data: dict | None = None
 
         if profile:
@@ -156,7 +157,7 @@ async def create_agent(data: AgentCreate):
                         user_id=data.user_id,
                         name=agent.name,
                         gender=agent.gender,
-                        seven_dim=seven_dim,
+                        mbti=mbti,
                         profile=profile,
                         workspace_id=ws_id,
                     )
@@ -181,7 +182,7 @@ async def create_agent(data: AgentCreate):
         if overview_data:
             try:
                 await generate_daily_schedule(
-                    agent.id, agent.name, seven_dim,
+                    agent.id, agent.name, mbti,
                     life_overview=overview_data.get("description"),
                 )
             except Exception as e:
@@ -197,7 +198,7 @@ async def create_agent(data: AgentCreate):
         name=agent.name,
         user_id=agent.userId,
         workspace_id=workspace.id,
-        personality=agent.personality,
+        mbti=get_mbti(agent),
         background=agent.background,
         values=agent.values,
         gender=agent.gender,
@@ -219,7 +220,7 @@ async def get_agent(agent_id: str):
         name=agent.name,
         user_id=agent.userId,
         workspace_id=workspace.id,
-        personality=agent.personality,
+        mbti=get_mbti(agent),
         background=agent.background,
         values=agent.values,
         gender=agent.gender,
@@ -240,7 +241,7 @@ async def list_agents(user_id: str | None = None):
             name=a.name,
             user_id=a.userId,
             workspace_id=None,
-            personality=a.personality,
+            mbti=get_mbti(a),
             background=a.background,
             values=a.values,
             gender=a.gender,
@@ -256,8 +257,8 @@ async def update_agent(agent_id: str, data: AgentUpdate):
     update_data = {}
     if data.name is not None:
         update_data["name"] = data.name
-    if data.personality is not None:
-        update_data["personality"] = Json(data.personality)
+    # Per spec §1.2: personality is no longer a persisted column; users that
+    # want to redo MBTI should regenerate via a dedicated endpoint (TBD).
     if data.background is not None:
         update_data["background"] = data.background
     if data.values is not None:
@@ -271,7 +272,7 @@ async def update_agent(agent_id: str, data: AgentUpdate):
         id=agent.id,
         name=agent.name,
         user_id=agent.userId,
-        personality=agent.personality,
+        mbti=get_mbti(agent),
         background=agent.background,
         values=agent.values,
         gender=agent.gender,
@@ -312,7 +313,7 @@ async def _resolve_schedule(agent_id: str):
         if isinstance(agent.lifeOverview, dict):
             life_overview = agent.lifeOverview.get("description")
         schedule = await generate_daily_schedule(
-            agent_id, agent.name, get_seven_dim(agent),
+            agent_id, agent.name, get_mbti(agent),
             life_overview=life_overview,
         )
     return agent, schedule

@@ -44,11 +44,10 @@ model AiAgent {
   user            User           @relation(fields: [userId], references: [id])
   status          String         @default("active")
   archivedAt      DateTime?      @map("archived_at")
-  personality     Json?
-  sevenDimTraits  Json?          @map("seven_dim_traits")
-  currentTraits   Json?          @map("current_traits")
-  traitsHistory   Json?          @map("traits_history")
-  mbti            Json?          // {EI, NS, TF, JP, type, summary} per spec §1.2
+  // Per spec §1.2: MBTI 是 canonical personality 表达，user 输入的 7 维仅作
+  // 创建时的 transient 输入，转 MBTI 后即丢弃。
+  mbti            Json?          // 初始 MBTI: {EI, NS, TF, JP, type, summary}
+  currentMbti     Json?          @map("current_mbti")  // 调整后的 MBTI（同形）
   background      String?
   values          Json?
   lifeOverview    String?        @map("life_overview")

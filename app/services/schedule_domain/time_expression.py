@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, date
 
-from app.services.trait_model import get_dim
+from app.services.mbti import signal as mbti_signal
 from app.services.schedule_domain.time_service import _TZ
 
 _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -34,16 +34,16 @@ def _get_period(hour: int) -> str:
 def format_time_naturally(
     target: datetime,
     now: datetime | None = None,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
 ) -> str:
-    """将时间点转为人格化自然语言。"""
+    """将时间点转为人格化自然语言。spec §1.2 后用 MBTI。"""
     now = now or datetime.now(_TZ)
     today = now.date()
     target_date = target.date() if isinstance(target, datetime) else target
     diff_days = (target_date - today).days
 
-    is_lively = seven_dim and get_dim(seven_dim, "活泼度") >= 0.7
-    is_precise = seven_dim and get_dim(seven_dim, "理性度") >= 0.7
+    is_lively = bool(mbti) and mbti_signal(mbti, "lively") >= 0.7
+    is_precise = bool(mbti) and mbti_signal(mbti, "rational") >= 0.7
 
     # 日期部分
     date_part = _format_date_part(target_date, today, diff_days, is_lively)

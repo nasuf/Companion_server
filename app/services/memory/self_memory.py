@@ -103,10 +103,10 @@ async def generate_daily_self_memories(
         logger.info(f"Daily self-memory limit reached ({count}/8) for agent {agent_id}")
         return []
 
-    personality = agent.personality or {}
+    from app.services.mbti import format_mbti_for_prompt, get_mbti
     prompt = (await get_prompt_text("self_memory.daily")).format(
         ai_name=agent.name,
-        personality=str(personality),
+        personality=format_mbti_for_prompt(get_mbti(agent)) or "中性",
         dialogue_summary=dialogue_summary or "今天没有对话",
         count_today=count,
     )

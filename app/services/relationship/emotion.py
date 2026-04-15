@@ -10,7 +10,7 @@ from app.db import db
 from app.redis_client import get_redis, DEFAULT_TTL
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
-from app.services.trait_model import get_seven_dim, get_dim
+from app.services.mbti import get_mbti, signal as mbti_signal
 
 logger = logging.getLogger(__name__)
 
@@ -135,49 +135,34 @@ def _lerp_pad(current: dict, target: dict, rate: float) -> dict:
 
 # --- 3B.1 基线计算 ---
 
-def compute_baseline_emotion(personality: dict, seven_dim: dict | None = None) -> dict:
-    """Compute baseline PAD from personality traits using formula.
+def compute_baseline_emotion(mbti: dict | None) -> dict:
+    """Compute baseline PAD from MBTI using a deterministic formula.
 
     Used by emotion decay (every 5 min) — must be fast and deterministic.
     For initial creation, use compute_baseline_emotion_llm() instead.
     """
-    if seven_dim:
-        lively = get_dim(seven_dim, "活泼度")
-        rational = get_dim(seven_dim, "理性度")
-        emotional = get_dim(seven_dim, "感性度")
-        planned = get_dim(seven_dim, "计划度")
-        spontaneous = get_dim(seven_dim, "随性度")
-        creative = get_dim(seven_dim, "脑洞度")
-        humor = get_dim(seven_dim, "幽默度")
+    lively = mbti_signal(mbti, "lively")
+    rational = mbti_signal(mbti, "rational")
+    emotional = mbti_signal(mbti, "emotional")
+    planned = mbti_signal(mbti, "planned")
+    spontaneous = mbti_signal(mbti, "spontaneous")
+    creative = mbti_signal(mbti, "creative")
+    humor = mbti_signal(mbti, "humor")
 
-        p = 0.2 + (lively - 0.5) * 0.4 + (humor - 0.5) * 0.4 + (spontaneous - 0.5) * 0.2
-        a = 0.5 + (lively - 0.5) * 0.3 + (creative - 0.5) * 0.3 + (humor - 0.5) * 0.2 + (emotional - 0.5) * 0.2
-        d = (0.5 + (planned - 0.5) * 0.3 + (rational - 0.5) * 0.3 + (lively - 0.5) * 0.2
-             + (humor - 0.5) * 0.2 - (spontaneous - 0.5) * 0.2 - (emotional - 0.5) * 0.2)
-
-        return {
-            "pleasure": _clamp_pad("pleasure", p),
-            "arousal": _clamp_pad("arousal", a),
-            "dominance": _clamp_pad("dominance", d),
-        }
-
-    # Fallback: Big Five computation
-    e = personality.get("extraversion", 0.5)
-    a = personality.get("agreeableness", 0.5)
-    n = personality.get("neuroticism", 0.5)
-    o = personality.get("openness", 0.5)
-    c = personality.get("conscientiousness", 0.5)
+    p = 0.2 + (lively - 0.5) * 0.4 + (humor - 0.5) * 0.4 + (spontaneous - 0.5) * 0.2
+    a = 0.5 + (lively - 0.5) * 0.3 + (creative - 0.5) * 0.3 + (humor - 0.5) * 0.2 + (emotional - 0.5) * 0.2
+    d = (0.5 + (planned - 0.5) * 0.3 + (rational - 0.5) * 0.3 + (lively - 0.5) * 0.2
+         + (humor - 0.5) * 0.2 - (spontaneous - 0.5) * 0.2 - (emotional - 0.5) * 0.2)
 
     return {
-        "pleasure": _clamp_pad("pleasure", (e - 0.5) * 0.4 + (a - 0.5) * 0.2 + (o - 0.5) * 0.1 - (n - 0.5) * 0.3),
-        "arousal": _clamp_pad("arousal", 0.5 + (e - 0.5) * 0.3 + (n - 0.5) * 0.4),
-        "dominance": _clamp_pad("dominance", 0.5 + (e - 0.5) * 0.2 + (c - 0.5) * 0.3 - (n - 0.5) * 0.2),
+        "pleasure": _clamp_pad("pleasure", p),
+        "arousal": _clamp_pad("arousal", a),
+        "dominance": _clamp_pad("dominance", d),
     }
 
 
 async def compute_baseline_emotion_llm(
-    personality: dict,
-    seven_dim: dict | None = None,
+    mbti: dict | None,
     *,
     name: str = "",
     background: str = "",
@@ -190,8 +175,8 @@ async def compute_baseline_emotion_llm(
     prompt = (await get_prompt_text("emotion.baseline")).format(
         name=name or "AI",
         gender=gender or "未设定",
-        personality=str(personality),
-        seven_dim=str(seven_dim) if seven_dim else "无",
+        personality=str(mbti or {}),
+        seven_dim="",  # legacy placeholder kept for prompt template compat
         background=background or "暂无",
     )
 
@@ -204,18 +189,19 @@ async def compute_baseline_emotion_llm(
         }
     except Exception as e:
         logger.warning(f"LLM baseline emotion failed, falling back to formula: {e}")
-        return compute_baseline_emotion(personality, seven_dim)
+        return compute_baseline_emotion(mbti)
 
 
-def compute_emotional_stability(seven_dim: dict) -> float:
+def compute_emotional_stability(mbti: dict | None) -> float:
     """计算情绪稳定性系数。
 
-    stability = 0.5 + (理性度-0.5)*0.4 + (计划度-0.5)*0.3 - (感性度-0.5)*0.3 - (随性度-0.5)*0.2
+    spec §1.2 后用 MBTI 推导：T(理性) + J(计划) 高 → 稳定；F(感性) + P(知觉) 高 → 不稳定
+        stability = 0.5 + (T-0.5)*0.4 + (J-0.5)*0.3 - (F-0.5)*0.3 - (P-0.5)*0.2
     """
-    rational = get_dim(seven_dim, "理性度")
-    planned = get_dim(seven_dim, "计划度")
-    emotional = get_dim(seven_dim, "感性度")
-    spontaneous = get_dim(seven_dim, "随性度")
+    rational = mbti_signal(mbti, "rational")
+    planned = mbti_signal(mbti, "planned")
+    emotional = mbti_signal(mbti, "emotional")
+    spontaneous = mbti_signal(mbti, "spontaneous")
 
     stability = (0.5 + (rational - 0.5) * 0.4 + (planned - 0.5) * 0.3
                  - (emotional - 0.5) * 0.3 - (spontaneous - 0.5) * 0.2)
@@ -265,17 +251,17 @@ def update_emotion_state(
     current: dict,
     input_emotion: dict,
     topic_intimacy: float = 50.0,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
 ) -> dict:
     """Fuse AI emotion with user emotion using empathy vector.
 
     E_target = α * E_ai + β * E_user + γ * empathy_vector
     empathy_vector = (p_user * 感性度, a_user * 感性度, d_user * 感性度)
+    spec §1.2 起感性度 = MBTI 的 F 程度。
     """
     alpha, beta, gamma = _get_fusion_weights(topic_intimacy)
 
-    # Compute empathy vector
-    emotional_sensitivity = get_dim(seven_dim, "感性度") if seven_dim else 0.5
+    emotional_sensitivity = mbti_signal(mbti, "emotional")
     empathy = {
         dim: input_emotion.get(dim, _PAD_DEFAULTS[dim]) * emotional_sensitivity
         for dim in _PAD_DIMS
@@ -344,27 +330,17 @@ def apply_memory_emotion_influence(
 
 async def decay_emotion_toward_baseline(
     agent_id: str,
-    personality: dict | None = None,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
 ) -> None:
-    """Decay current emotion toward personality baseline.
+    """Decay current emotion toward MBTI-derived baseline.
 
     decay_rate = 0.05 + (1 - stability) * 0.1
     """
     current = await get_ai_emotion(agent_id)
-    personality = personality or {}
-
-    if seven_dim:
-        stability = compute_emotional_stability(seven_dim)
-    else:
-        n = personality.get("neuroticism", 0.5)
-        stability = 1.0 - n
-
+    stability = compute_emotional_stability(mbti)
     decay_rate = 0.05 + (1 - stability) * 0.1
-
-    baseline = compute_baseline_emotion(personality, seven_dim)
+    baseline = compute_baseline_emotion(mbti)
     decayed = _lerp_pad(current, baseline, decay_rate)
-
     await save_ai_emotion(agent_id, decayed)
 
 

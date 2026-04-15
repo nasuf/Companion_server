@@ -8,33 +8,24 @@ from __future__ import annotations
 
 import random
 
-from app.services.trait_model import get_dim
+from app.services.mbti import signal as mbti_signal
 
 
 def calculate_reply_delay(
     message_length: int,
-    personality: dict,
     response_length: int = 50,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
 ) -> float:
     """计算回复延迟（秒）。
 
-    基于消息长度、人格、回复长度计算 0.5-5s 延迟。
-    2I.1: thinking_factor 改用 理性度×2.0
+    基于消息长度、MBTI 派生信号、回复长度计算 0.5-5s 延迟。
+    spec §1.2 起 thinking_factor 改用 MBTI 的 T 程度×2.0（T 越高思考越慢）。
     """
     base = 0.5 + random.random() * 0.5
     length_factor = min(1.5, message_length / 100)
-
-    # 2I.1: 思考因子改用理性度×2.0
-    if seven_dim:
-        thinking_factor = get_dim(seven_dim, "理性度") * 2.0
-    else:
-        conscientiousness = personality.get("conscientiousness", 0.5)
-        thinking_factor = conscientiousness * 1.0
-
+    thinking_factor = mbti_signal(mbti, "rational") * 2.0
     typing_factor = min(1.0, response_length / 100)
     delay = base + length_factor + thinking_factor + typing_factor
-
     return max(0.5, min(5.0, delay))
 
 

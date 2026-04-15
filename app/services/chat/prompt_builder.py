@@ -12,8 +12,7 @@ from typing import Any
 from app.services.memory.context_selector import ClassifiedMemory
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
-from app.services.mbti import format_mbti_for_prompt, get_mbti
-from app.services.trait_model import get_seven_dim, get_dim
+from app.services.mbti import format_mbti_for_prompt, get_mbti, signal as mbti_signal
 from app.services.prompts.system_prompts import (
     MEMORY_TOKEN_BUDGET,
     MAX_PER_REPLY as _MAX_PER_REPLY,
@@ -26,59 +25,49 @@ from app.services.prompts.system_prompts import (
 # 七维人格 → 自然语言人格描述 (PRD §1.4.3 Prompt模板)
 # ---------------------------------------------------------------------------
 
-# 每个维度的高/低/中描述 (来自PRD模板)
-_DIM_DESCRIPTIONS: dict[str, tuple[str, str, str]] = {
-    "活泼度": (
-        "充满活力，热情开朗，喜欢与人互动",
-        "安静内敛，享受独处，话语不多但真诚",
+# MBTI 4 个维度 → (高分描述, 低分描述, 中段描述)
+_MBTI_DIM_DESCRIPTIONS: dict[str, tuple[str, str, tuple[str, str, str]]] = {
+    "EI": ("E", "I", (
+        "外向开朗，喜欢与人互动，从社交中获取能量",
+        "内向克制，享受独处，社交后需要独自恢复",
         "介于两者之间，根据场合调整",
-    ),
-    "理性度": (
-        "逻辑清晰，习惯分析利弊，追求效率和最优解",
-        "依赖直觉和感受，决策凭内心共鸣",
+    )),
+    "NS": ("N", "S", (
+        "直觉型，思维抽象、跳跃，喜欢探讨可能性",
+        "感觉型，关注现实细节、当下事实",
+        "兼具直觉与现实感",
+    )),
+    "TF": ("T", "F", (
+        "思考型，逻辑清晰，按事实和原则做判断",
+        "情感型，共情能力高，重视和谐与他人感受",
         "能平衡理性与感性",
-    ),
-    "感性度": (
-        "情绪感知力强，共情能力高，善于温暖他人",
-        "不太擅长处理情绪，说话直接",
-        "能共情但不过度沉浸",
-    ),
-    "计划度": (
-        "喜欢规划，有条理，记得重要日期",
-        "随性自由，活在当下，接受变化",
-        "有计划但也能接受变动",
-    ),
-    "随性度": (
-        "拥抱不确定性，话题跳跃，灵活应变",
-        "喜欢按部就班，对变动感到不安",
-        "能适应适度变化",
-    ),
-    "脑洞度": (
-        "思维天马行空，爱探讨抽象概念，充满想象力",
-        "脚踏实地，关注现实和具体细节",
-        "既有想象力也能回归现实",
-    ),
-    "幽默度": (
-        "风趣幽默，善于用玩笑活跃气氛",
-        "严肃认真，说话直接",
-        "适时幽默，把握分寸",
-    ),
+    )),
+    "JP": ("J", "P", (
+        "判断型，喜欢规划、有条理、追求确定性",
+        "知觉型，灵活随性、接受变化、活在当下",
+        "有计划也能接受变动",
+    )),
 }
 
 
-def _format_seven_dim(seven_dim: dict) -> str:
-    """将七维人格格式化为带数值和描述的文本。"""
+def _format_mbti_detail(mbti: dict) -> str:
+    """4 维度数值 + 描述，用于 prompt 详细注入。"""
     lines: list[str] = []
-    for i, (dim_name, (high, low, mid)) in enumerate(_DIM_DESCRIPTIONS.items(), 1):
-        value = seven_dim.get(dim_name, 50)
-        normalized = get_dim(seven_dim, dim_name)  # 0-1, handles 0-100 normalization
+    for i, (key, (hi_letter, lo_letter, (hi_desc, lo_desc, mid_desc))) in enumerate(
+        _MBTI_DIM_DESCRIPTIONS.items(), 1,
+    ):
+        value = mbti.get(key, 50)
+        normalized = value / 100
         if normalized >= 0.7:
-            desc = high
+            desc = hi_desc
+            letter = hi_letter
         elif normalized <= 0.3:
-            desc = low
+            desc = lo_desc
+            letter = lo_letter
         else:
-            desc = mid
-        lines.append(f"{i}. {dim_name}：{value} — {desc}")
+            desc = mid_desc
+            letter = f"{hi_letter}/{lo_letter}"
+        lines.append(f"{i}. {key} [{letter}]：{value} — {desc}")
     return "\n".join(lines)
 
 
@@ -92,7 +81,7 @@ def _section(title: str, body: str) -> str:
 
 
 async def _build_personality_section(agent: Any) -> str:
-    """Build the personality section using seven-dim traits (PRD §1.4.3)."""
+    """Build the personality section using MBTI (spec §1.2)."""
     name = getattr(agent, "name", None) or "伙伴"
 
     values = getattr(agent, "values", None)
@@ -101,32 +90,20 @@ async def _build_personality_section(agent: Any) -> str:
         gender = values.get("gender", "female")
     gender_text = "女生" if gender == "female" else "男生"
 
-    seven_dim = get_seven_dim(agent)
-    dim_text = _format_seven_dim(seven_dim)
-    style = generate_style_instruction(seven_dim)
+    mbti = get_mbti(agent)
+    mbti_line = format_mbti_for_prompt(mbti)
+    style = generate_style_instruction(mbti)
 
-    # Per spec §1.2: prefer MBTI as the canonical personality description.
-    # Fall back to the 7-dim narrative for legacy agents that haven't had
-    # their MBTI computed yet.
-    mbti_line = format_mbti_for_prompt(get_mbti(agent))
+    detail = _format_mbti_detail(mbti) if mbti else "（性格未生成，将使用默认中性表达）"
 
     personality_rules = await get_prompt_text("chat.personality_rules")
-    if mbti_line:
-        body = (
-            f"你的名字叫{name}，是一个{gender_text}。\n"
-            f"你的性格画像：{mbti_line}\n\n"
-            f"参考维度（0-100 分）：\n{dim_text}\n\n"
-            f"你的说话风格：\n{style}\n\n"
-            f"{personality_rules}"
-        )
-    else:
-        body = (
-            f"你的名字叫{name}，是一个{gender_text}。\n"
-            f"你的性格由以下7个维度定义（0-100分）：\n\n"
-            f"{dim_text}\n\n"
-            f"你的说话风格：\n{style}\n\n"
-            f"{personality_rules}"
-        )
+    body = (
+        f"你的名字叫{name}，是一个{gender_text}。\n"
+        f"你的性格画像：{mbti_line or '中性'}\n\n"
+        f"四个维度详情：\n{detail}\n\n"
+        f"你的说话风格：\n{style}\n\n"
+        f"{personality_rules}"
+    )
     return _section("你的身份", body)
 
 

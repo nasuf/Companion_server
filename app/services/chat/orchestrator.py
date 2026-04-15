@@ -66,7 +66,7 @@ from app.services.chat.conversation_end import check_conversation_end
 from app.services.chat.intent_dispatcher import detect_intent, IntentType
 from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_emoji
 from app.services.sticker import recommend_sticker
-from app.services.trait_model import get_seven_dim
+from app.services.mbti import get_mbti
 from app.services.chat.fast_fact import update_working_facts, facts_for_prompt
 from app.services.chat.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
@@ -448,9 +448,8 @@ async def stream_chat_response(
     # --- Time system: parse explicit time expressions (PRD §9.3.2) ---
     parsed_times = parse_time_expressions(user_message) if has_explicit_time(user_message) else []
 
-    # --- Pre-compute personality and topic fatigue (needed after parallel fetch) ---
-    agent_personality = getattr(agent, "personality", None) or {}
-    seven_dim = get_seven_dim(agent)
+    # --- Pre-compute personality (MBTI) for downstream timing/emotion calls ---
+    mbti = get_mbti(agent)
 
     # --- HOT PATH: parallel data fetches (no LLM calls) ---
     async def _do_retrieval():
@@ -634,7 +633,7 @@ async def stream_chat_response(
                 request=user_message,
                 current_status=ai_status,
                 intimacy_score=float(topic_intimacy),
-                seven_dim=seven_dim,
+                mbti=mbti,
             )
             response = adj_result.get("response", "")
             if response:
@@ -693,7 +692,7 @@ async def stream_chat_response(
 
     # Delay decision is frozen at receipt time via reply_context.
     # For live WS/SSE, we keep a short blocking sleep while exposing the conceptual delay.
-    reply_delay = calculate_reply_delay(len(user_message), agent_personality, seven_dim=seven_dim)
+    reply_delay = calculate_reply_delay(len(user_message), mbti=mbti)
     queued_delay = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
     conceptual_delay = max(reply_delay, queued_delay)
     if delivered_from_queue:
@@ -783,7 +782,7 @@ async def stream_chat_response(
         messages_dicts=messages_dicts,
         memory_strings=memory_strings,
         cached_emotion=emotion,
-        seven_dim=seven_dim,
+        mbti=mbti,
         topic_intimacy=topic_intimacy,
     ))
 
@@ -823,7 +822,7 @@ async def _background_post_process(
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
     cached_emotion: dict | None = None,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
     topic_intimacy: float = 50.0,
 ) -> None:
     """Run all background tasks after response is sent.
@@ -838,7 +837,7 @@ async def _background_post_process(
 
         # Run all background tasks concurrently
         tasks = [
-            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, seven_dim),
+            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, mbti),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
@@ -863,7 +862,7 @@ async def _bg_emotion(
     user_message: str,
     cached_emotion: dict | None = None,
     topic_intimacy: float = 50.0,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
 ) -> None:
     """Extract emotion from user message, update AI emotion state, and save to message metadata."""
     if not agent_id:
@@ -871,7 +870,7 @@ async def _bg_emotion(
     try:
         user_emotion = await extract_emotion(user_message)
         current_emotion = cached_emotion or await get_ai_emotion(agent_id)
-        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy, seven_dim=seven_dim)
+        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy, mbti=mbti)
         await save_ai_emotion(agent_id, new_emotion)
 
         # Save user emotion to message metadata (use known ID, no re-query)

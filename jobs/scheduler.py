@@ -21,7 +21,7 @@ from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview, generate_daily_schedule, get_cached_schedule,
     get_current_status, get_life_overview, review_daily_schedule,
 )
-from app.services.trait_model import get_seven_dim
+from app.services.mbti import get_mbti
 from app.services.relationship.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.relationship.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive.orchestrator import scan_proactive_states
@@ -280,9 +280,9 @@ async def _run_daily_self_memories():
 async def _run_daily_schedules():
     async def _gen(agent):
         overview = await get_life_overview(agent.id)
-        seven_dim = get_seven_dim(agent)
+        mbti = get_mbti(agent)
         await generate_daily_schedule(
-            agent.id, agent.name, seven_dim,
+            agent.id, agent.name, mbti,
             life_overview=overview, user_id=agent.userId,
         )
 
@@ -343,11 +343,8 @@ async def _run_blacklist_scan():
 
 
 async def _run_emotion_decay():
-    from app.services.trait_model import get_seven_dim
-
     async def _decay(agent):
-        seven_dim = get_seven_dim(agent)
-        await decay_emotion_toward_baseline(agent.id, agent.personality or {}, seven_dim)
+        await decay_emotion_toward_baseline(agent.id, get_mbti(agent))
 
     await _run_for_all_agents(
         _decay, concurrency=5, task_name="Emotion decay",

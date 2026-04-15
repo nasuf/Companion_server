@@ -12,7 +12,7 @@ from app.services.runtime.delayed_queue import enqueue_or_append_delayed
 from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.chat.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
-from app.services.trait_model import get_seven_dim
+from app.services.mbti import get_mbti
 from app.services.proactive import get_proactive_history
 from app.services.proactive.sender import send_manual_or_triggered_proactive
 from app.services.proactive.state import mark_user_replied_for_conversation
@@ -78,7 +78,7 @@ async def chat(conversation_id: str, data: ChatRequest):
     schedule = await get_cached_schedule(conv.agent.id)
     if not schedule:
         schedule = await generate_daily_schedule(
-            conv.agent.id, conv.agent.name, get_seven_dim(conv.agent), user_id=user_id,
+            conv.agent.id, conv.agent.name, get_mbti(conv.agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
     current_context = await build_reply_timing_context(

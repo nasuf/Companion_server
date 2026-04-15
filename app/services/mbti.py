@@ -91,12 +91,33 @@ def _default_mbti() -> dict:
     return {"EI": 50, "NS": 50, "TF": 50, "JP": 50, "type": "ISFP", "summary": ""}
 
 
-async def compute_mbti(seven_dim: dict) -> dict:
-    """Generate MBTI from 7-dim via LLM. Falls back to neutral on failure."""
-    if not seven_dim:
+_BIG_FIVE_KEYS = {"extraversion", "openness", "conscientiousness", "agreeableness", "neuroticism"}
+
+
+def _format_personality_input(scores: dict) -> str:
+    """Render whatever shape the user supplied into the prompt-friendly bullet
+    list. Accepts either:
+      - 7-dim Chinese keys (活泼度...) with 0-100 ints
+      - Big Five English keys (extraversion...) with 0-1 floats (multiplied
+        to 0-100 for prompt clarity)
+    Other shapes are rendered as-is.
+    """
+    if not scores:
+        return "(无)"
+    if _BIG_FIVE_KEYS.intersection(scores.keys()):
+        # Big Five 0-1 → 0-100 for the prompt
+        return "\n".join(
+            f"- {k}: {round(v * 100)}" for k, v in scores.items()
+        )
+    return "\n".join(f"- {k}: {v}" for k, v in scores.items())
+
+
+async def compute_mbti(personality_scores: dict) -> dict:
+    """Generate MBTI from any 7-dim or Big Five personality dict via LLM.
+    Falls back to neutral on failure."""
+    if not personality_scores:
         return _default_mbti()
-    seven_text = "\n".join(f"- {k}: {v}" for k, v in seven_dim.items())
-    prompt = _MBTI_PROMPT.format(seven_dim=seven_text)
+    prompt = _MBTI_PROMPT.format(seven_dim=_format_personality_input(personality_scores))
     try:
         result = await invoke_json(get_utility_model(), prompt)
     except Exception as e:
@@ -105,12 +126,10 @@ async def compute_mbti(seven_dim: dict) -> dict:
     return _validate_and_normalize(result)
 
 
-def get_mbti(agent: Any) -> dict | None:
-    """Returns the stored MBTI dict, or None if not yet computed."""
-    raw = getattr(agent, "mbti", None)
+def _coerce(raw: Any) -> dict | None:
     if isinstance(raw, dict) and raw.get("type") in _VALID_TYPES:
         return raw
-    if isinstance(raw, str):  # defensive: in case Prisma serialized it
+    if isinstance(raw, str):  # defensive: Prisma serialized
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict) and parsed.get("type") in _VALID_TYPES:
@@ -118,6 +137,71 @@ def get_mbti(agent: Any) -> dict | None:
         except Exception:
             pass
     return None
+
+
+def get_mbti(agent: Any) -> dict | None:
+    """Returns the current effective MBTI: currentMbti (post-adjustment)
+    if present, else the initial mbti, else None."""
+    return (
+        _coerce(getattr(agent, "currentMbti", None))
+        or _coerce(getattr(agent, "mbti", None))
+    )
+
+
+def get_initial_mbti(agent: Any) -> dict | None:
+    """Returns the as-created MBTI snapshot (ignores trait adjustments).
+    Used by trait_adjustment to enforce the ±10 drift cap."""
+    return _coerce(getattr(agent, "mbti", None))
+
+
+# ── Derived signals ──
+# Many downstream modules (style / schedule / emotion / topic) need a
+# 0-1 "lively" or "planned" or "extraversion" knob rather than 4 raw
+# percentages. These helpers map MBTI dimensions to common axes so call
+# sites don't have to know MBTI internals.
+
+def signal(mbti: dict | None, name: str) -> float:
+    """Derived 0-1 signal from MBTI. Returns 0.5 when mbti is None.
+
+    Recognized signals (designed to mirror the old 7-dim semantics so
+    consumers can swap in place):
+      - 'extraversion' / 'lively'   ← EI / 100
+      - 'rational'                  ← TF / 100   (T 偏理性)
+      - 'emotional'                 ← (100 - TF) / 100   (F 偏感性)
+      - 'planned'                   ← JP / 100   (J 偏计划)
+      - 'spontaneous'               ← (100 - JP) / 100   (P 偏知觉)
+      - 'creative' / 'imaginative'  ← NS / 100   (N 偏直觉)
+      - 'agreeableness'             ← (100 - TF) / 100  + bias
+      - 'openness'                  ← NS / 100
+      - 'conscientiousness'         ← JP / 100
+      - 'neuroticism'               ← clamp(0.5 + (50 - TF)/200 + (50 - JP)/200, 0, 1)
+        (近似: 越偏 F + 越偏 P，神经质略高)
+    """
+    if not mbti:
+        return 0.5
+    ei = mbti.get("EI", 50)
+    ns = mbti.get("NS", 50)
+    tf = mbti.get("TF", 50)
+    jp = mbti.get("JP", 50)
+    mapping = {
+        "extraversion": ei / 100,
+        "lively": ei / 100,
+        "rational": tf / 100,
+        "emotional": (100 - tf) / 100,
+        "planned": jp / 100,
+        "spontaneous": (100 - jp) / 100,
+        "creative": ns / 100,
+        "imaginative": ns / 100,
+        "openness": ns / 100,
+        "conscientiousness": jp / 100,
+        # F 偏宜人 (intuition + empathy bias)
+        "agreeableness": ((100 - tf) + ns) / 200,
+        # 简化近似：F + P 略升高神经质感
+        "neuroticism": max(0.0, min(1.0, 0.5 + ((50 - tf) + (50 - jp)) / 200)),
+        # 幽默 = 外向 + 直觉
+        "humor": (ei + ns) / 200,
+    }
+    return mapping.get(name, 0.5)
 
 
 def format_mbti_for_prompt(mbti: dict | None) -> str:

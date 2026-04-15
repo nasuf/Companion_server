@@ -21,7 +21,7 @@ from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
 from app.services.schedule_domain.time_service import is_holiday
-from app.services.trait_model import get_dim, get_seven_dim
+from app.services.mbti import get_mbti, signal as mbti_signal
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +50,15 @@ _BASE_SCHEDULE_TEMPLATE = [
 
 async def generate_life_overview(
     name: str,
-    seven_dim: dict,
+    mbti: dict | None,
     age: int = 22,
     occupation: str | None = None,
     city: str | None = None,
 ) -> dict:
     """生成AI角色的生活画像（文本+结构化数据）。
 
+    spec §1.5: 性格描述统一用 MBTI 表达。这里把 MBTI 派生的 0-100 信号
+    填回到原 prompt 模板里同名占位符（活泼/理性/...）保证向后兼容。
     返回 dict: {"description": str, "weekday_schedule": list, "weekend_activities": list, "holiday_habits": str}
     """
     prompt = (await get_prompt_text("schedule.life_overview")).format(
@@ -64,13 +66,13 @@ async def generate_life_overview(
         age=age,
         occupation=occupation or "自由职业",
         city=city or "未设定",
-        lively=seven_dim.get("活泼度", 50),
-        rational=seven_dim.get("理性度", 50),
-        emotional=seven_dim.get("感性度", 50),
-        planned=seven_dim.get("计划度", 50),
-        spontaneous=seven_dim.get("随性度", 50),
-        creative=seven_dim.get("脑洞度", 50),
-        humor=seven_dim.get("幽默度", 50),
+        lively=round(mbti_signal(mbti, "lively") * 100),
+        rational=round(mbti_signal(mbti, "rational") * 100),
+        emotional=round(mbti_signal(mbti, "emotional") * 100),
+        planned=round(mbti_signal(mbti, "planned") * 100),
+        spontaneous=round(mbti_signal(mbti, "spontaneous") * 100),
+        creative=round(mbti_signal(mbti, "creative") * 100),
+        humor=round(mbti_signal(mbti, "humor") * 100),
     )
 
     model = get_utility_model()
@@ -90,9 +92,8 @@ async def generate_life_overview(
 
 async def generate_and_save_life_overview(agent: Any) -> dict:
     """从 agent 对象提取信息，生成并保存生活画像。返回 overview_data dict。"""
-    seven_dim = get_seven_dim(agent)
     overview_data = await generate_life_overview(
-        agent.name, seven_dim,
+        agent.name, get_mbti(agent),
         age=agent.age or 22,
         occupation=agent.occupation,
         city=agent.city,
@@ -104,7 +105,7 @@ async def generate_and_save_life_overview(agent: Any) -> dict:
 async def generate_daily_schedule(
     agent_id: str,
     name: str,
-    seven_dim: dict,
+    mbti: dict | None,
     life_overview: str | None = None,
     date: datetime | None = None,
     user_id: str | None = None,
@@ -146,16 +147,16 @@ async def generate_daily_schedule(
             logger.warning(f"LLM schedule generation failed, falling back to template: {e}")
 
     # 兜底: 无 life_overview 或 LLM 失败时用模板
-    schedule = _personalize_template(seven_dim, date, holiday=holiday)
+    schedule = _personalize_template(mbti, date, holiday=holiday)
     await _cache_schedule(agent_id, date, schedule)
     return schedule
 
 
-def _personalize_template(seven_dim: dict, date: datetime, *, holiday=None) -> list[dict]:
-    """根据七维人格微调基准模板。法定节日将work替换为leisure/rest。"""
+def _personalize_template(mbti: dict | None, date: datetime, *, holiday=None) -> list[dict]:
+    """根据 MBTI 派生信号微调基准模板。法定节日将 work 替换为 leisure/rest。"""
     schedule = [slot.copy() for slot in _BASE_SCHEDULE_TEMPLATE]
-    lively = get_dim(seven_dim, "活泼度")
-    planned = get_dim(seven_dim, "计划度")
+    lively = mbti_signal(mbti, "lively")
+    planned = mbti_signal(mbti, "planned")
 
     is_weekend = date.weekday() >= 5
     is_legal_holiday = holiday is not None and holiday.type == "legal"
@@ -422,14 +423,14 @@ async def compute_adjustment_feasibility(
     agent_id: str,
     current_status: dict,
     intimacy_score: float = 0.0,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
     adjustment_minutes: int = 0,
 ) -> dict:
     """4F.1 计算作息调整可行性评分。
 
     base=50, 加减分:
     - 亲密度>80 → +20
-    - 随性度>0.7 → +15
+    - 随性度(=P 程度)>0.7 → +15
     - 当前sleep → -10
     - 调整幅度>60min → -30
     - 今日已调整≥2次 → -50
@@ -441,7 +442,7 @@ async def compute_adjustment_feasibility(
     if intimacy_score > 80:
         score += 20
 
-    if seven_dim and get_dim(seven_dim, "随性度") > 0.7:
+    if mbti and mbti_signal(mbti, "spontaneous") > 0.7:
         score += 15
 
     if current_status.get("status") == "sleep":
@@ -466,10 +467,10 @@ async def handle_schedule_adjustment(
     request: str,
     current_status: dict,
     intimacy_score: float = 0.0,
-    seven_dim: dict | None = None,
+    mbti: dict | None = None,
     adjustment_minutes: int = 0,
 ) -> dict:
-    """处理作息调整请求。
+    """处理作息调整请求 (spec §1.2 起 MBTI)。
 
     4F.1: 基于可行性评分决定接受/拒绝。
     返回 {"accepted": bool, "response": str, "score": int}
@@ -478,7 +479,7 @@ async def handle_schedule_adjustment(
         agent_id=agent_id,
         current_status=current_status,
         intimacy_score=intimacy_score,
-        seven_dim=seven_dim,
+        mbti=mbti,
         adjustment_minutes=adjustment_minutes,
     )
     score = feasibility["score"]

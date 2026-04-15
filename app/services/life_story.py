@@ -428,16 +428,17 @@ async def generate_outline(
     profile_data: dict,
     name: str,
     gender: str | None,
-    seven_dim: dict | None,
+    mbti: dict | None,
     career_template: dict | None = None,
 ) -> list[dict]:
     """Generate life story outline: 12-15 chapters with titles and key events."""
     profile_text = _format_profile_for_prompt(profile_data, career_template)
+    from app.services.mbti import format_mbti_for_prompt
 
     prompt = f"""你是一个人物传记作家。请为以下角色生成一份人生经历大纲。
 
 角色: {name} ({gender or '未设定'})
-性格特点: {json.dumps(seven_dim, ensure_ascii=False) if seven_dim else '未设定'}
+性格特点: {format_mbti_for_prompt(mbti) or '未设定'}
 
 {profile_text}
 
@@ -474,15 +475,16 @@ async def extract_chapter_memories(
     chapter: dict,
     outline_summary: str,
     name: str,
-    seven_dim: dict | None,
+    mbti: dict | None,
     chapter_index: int,
     total_chapters: int,
     profile_text: str,
 ) -> list[dict]:
     """Extract 5-10 experiential memories from a single chapter."""
+    from app.services.mbti import format_mbti_for_prompt
     prompt = f"""你正在为角色「{name}」梳理人生经历第 {chapter_index + 1}/{total_chapters} 阶段的记忆。
 
-性格特点: {json.dumps(seven_dim, ensure_ascii=False) if seven_dim else '未设定'}
+性格特点: {format_mbti_for_prompt(mbti) or '未设定'}
 
 角色完整背景:
 {profile_text}
@@ -718,7 +720,7 @@ async def generate_life_story_memories(
     user_id: str,
     name: str,
     gender: str | None,
-    seven_dim: dict | None,
+    mbti: dict | None,
     profile: dict,
     workspace_id: str | None = None,
 ) -> int:
@@ -745,7 +747,7 @@ async def generate_life_story_memories(
     # ── Phase 2: LLM 生成大纲 + 并发提取章节经历 ──
     await set_progress(agent_id, "generating_outline", message="正在构思人生大纲...")
     chapters = await generate_outline(
-        profile_data, name, gender, seven_dim,
+        profile_data, name, gender, mbti,
         career_template=career_template,
     )
 
@@ -776,7 +778,7 @@ async def generate_life_story_memories(
             async with sem:
                 try:
                     mems = await extract_chapter_memories(
-                        ch, outline_summary, name, seven_dim,
+                        ch, outline_summary, name, mbti,
                         idx, total, profile_text,
                     )
                 except Exception as e:
@@ -818,7 +820,7 @@ async def generate_full_life_story(
     user_id: str,
     name: str,
     gender: str | None,
-    seven_dim: dict | None,
+    mbti: dict | None,
     workspace_id: str | None = None,
 ) -> None:
     """Backward-compat 包装：select profile → direct convert → LLM experiences → store L1。
@@ -840,7 +842,7 @@ async def generate_full_life_story(
             user_id=user_id,
             name=name,
             gender=gender,
-            seven_dim=seven_dim,
+            mbti=mbti,
             profile=profile,
             workspace_id=workspace_id,
         )

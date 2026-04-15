@@ -17,7 +17,7 @@ from app.services.runtime.delayed_queue import enqueue_delayed_message
 from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.chat.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
-from app.services.trait_model import get_seven_dim
+from app.services.mbti import get_mbti
 from app.services.proactive.state import mark_user_replied_for_conversation
 from app.services.runtime.ws_manager import manager
 
@@ -140,7 +140,7 @@ async def _handle_message(
     schedule = await get_cached_schedule(agent.id)
     if not schedule:
         schedule = await generate_daily_schedule(
-            agent.id, agent.name, get_seven_dim(agent), user_id=user_id,
+            agent.id, agent.name, get_mbti(agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
     current_context = await build_reply_timing_context(

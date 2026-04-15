@@ -42,17 +42,18 @@ async def push_to_context_window(conversation_id: str, role: str, content: str) 
 
 def detect_personality_drift(
     responses: list[str],
-    personality: dict,
+    mbti: dict | None,
 ) -> dict:
-    """检测人格漂移（基于回复特征分析）。
+    """检测人格漂移（基于回复特征分析）。spec §1.2 后用 MBTI。
 
     返回 {"drifted": bool, "details": str}
     """
     if len(responses) < 5:
         return {"drifted": False, "details": ""}
 
-    e = personality.get("extraversion", 0.5)
-    a = personality.get("agreeableness", 0.5)
+    from app.services.mbti import signal as mbti_signal
+    e = mbti_signal(mbti, "extraversion")
+    a = mbti_signal(mbti, "agreeableness")
 
     # 分析最近回复的特征
     recent = responses[-10:]
