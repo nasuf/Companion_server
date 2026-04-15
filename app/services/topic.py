@@ -149,13 +149,16 @@ TOPIC_POOL: dict[str, list[str]] = {
     ],
 }
 
-# MBTI 派生信号 → 话题偏好权重 (spec §1.2 后用 MBTI 表达)
+# MBTI 字母 → 话题偏好权重 (spec §1.2: 直接 MBTI, 不经派生信号)
+# 注: "humor" 作为 (E + N)/2 的复合在循环里另算。
 _MBTI_TOPIC_WEIGHTS: dict[str, dict[str, float]] = {
-    "lively":    {"生活_casual": 0.3, "兴趣_casual": 0.3, "幽默": 0.4},
-    "rational":  {"思想_deep": 0.5, "生活_deep": 0.3, "兴趣_casual": 0.2},
-    "emotional": {"情感_deep": 0.5, "生活_deep": 0.3, "生活_casual": 0.2},
-    "creative":  {"脑洞": 0.5, "思想_deep": 0.3, "幽默": 0.2},
-    "humor":     {"幽默": 0.5, "生活_casual": 0.3, "兴趣_casual": 0.2},
+    "E": {"生活_casual": 0.3, "兴趣_casual": 0.3, "幽默": 0.4},
+    "T": {"思想_deep": 0.5, "生活_deep": 0.3, "兴趣_casual": 0.2},
+    "F": {"情感_deep": 0.5, "生活_deep": 0.3, "生活_casual": 0.2},
+    "N": {"脑洞": 0.5, "思想_deep": 0.3, "幽默": 0.2},
+}
+_HUMOR_TOPIC_WEIGHTS: dict[str, float] = {
+    "幽默": 0.5, "生活_casual": 0.3, "兴趣_casual": 0.2,
 }
 
 # 亲密度等级 → 可用话题深度
@@ -192,11 +195,16 @@ def select_new_topic(
     category_weights: dict[str, float] = {cat: 1.0 for cat in allowed_categories}
 
     if mbti:
-        for signal_name, topic_prefs in _MBTI_TOPIC_WEIGHTS.items():
-            sig_val = mbti_signal(mbti, signal_name)
+        for letter, topic_prefs in _MBTI_TOPIC_WEIGHTS.items():
+            sig_val = mbti_signal(mbti, letter)
             for cat, weight in topic_prefs.items():
                 if cat in category_weights:
                     category_weights[cat] += sig_val * weight
+        # humor 是 (E + N)/2 的复合, 单独算
+        humor = (mbti_signal(mbti, "E") + mbti_signal(mbti, "N")) / 2
+        for cat, weight in _HUMOR_TOPIC_WEIGHTS.items():
+            if cat in category_weights:
+                category_weights[cat] += humor * weight
 
     # 3. 按权重选择类别
     categories = list(category_weights.keys())

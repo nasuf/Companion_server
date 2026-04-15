@@ -142,49 +142,43 @@ def get_initial_mbti(agent: Any) -> dict | None:
 
 # ── Derived signals ──
 # Many downstream modules (style / schedule / emotion / topic) need a
-# 0-1 "lively" or "planned" knob rather than 4 raw
+# 0-1 single-letter knob rather than 4 raw
 # percentages. These helpers map MBTI dimensions to common axes so call
 # sites don't have to know MBTI internals.
 
-_SIGNAL_VOCAB: frozenset[str] = frozenset({
-    "lively", "rational", "emotional", "planned", "spontaneous",
-    "creative", "humor",
-})
+# Letter → (raw_field, is_positive_side)
+# 约定 EI 字段值 >50 偏 E；NS >50 偏 N；TF >50 偏 T；JP >50 偏 J。
+# 因此 E/N/T/J 是各字段的"正向字母"，I/S/F/P 是其互补。
+_LETTER_MAP: dict[str, tuple[str, bool]] = {
+    "E": ("EI", True),  "I": ("EI", False),
+    "N": ("NS", True),  "S": ("NS", False),
+    "T": ("TF", True),  "F": ("TF", False),
+    "J": ("JP", True),  "P": ("JP", False),
+}
 
 
-def signal(mbti: dict | None, name: str) -> float:
-    """Derived 0-1 signal from MBTI. Returns 0.5 when mbti is None.
+def signal(mbti: dict | None, letter: str) -> float:
+    """Return the 0-1 strength of a single MBTI letter.
 
-    每个 signal 都是 MBTI 4 维度的纯函数派生。signal 名称是描述性的，
-    但语义都明确绑定 MBTI 字母 (E/N/T/F/J/P)，不是 Big Five 别名。
+    letter ∈ {E, I, N, S, T, F, J, P}. Each maps directly to one of the
+    4 stored percentages (or its complement). No invented derived names
+    — composite signals like "humor" must be assembled at the call site
+    so the formula is visible, e.g.:
 
-    Recognized signals (传 unknown name 会 raise 而不是 silent 0.5):
-      - 'lively'      ← EI / 100         (E 程度)
-      - 'rational'    ← TF / 100         (T 程度)
-      - 'emotional'   ← (100 - TF) / 100 (F 程度)
-      - 'planned'     ← JP / 100         (J 程度)
-      - 'spontaneous' ← (100 - JP) / 100 (P 程度)
-      - 'creative'    ← NS / 100         (N 程度)
-      - 'humor'       ← (EI + NS) / 200  (E + N 复合)
+        humor = (signal(m, "E") + signal(m, "N")) / 2
+
+    Returns 0.5 when mbti is None (neutral fallback for legacy agents).
     """
-    if name not in _SIGNAL_VOCAB:
+    if letter not in _LETTER_MAP:
         raise ValueError(
-            f"Unknown MBTI signal '{name}'; expected one of {sorted(_SIGNAL_VOCAB)}"
+            f"Unknown MBTI letter '{letter}'; expected one of "
+            f"{sorted(_LETTER_MAP.keys())}"
         )
     if not mbti:
         return 0.5
-    ei = mbti.get("EI", 50)
-    ns = mbti.get("NS", 50)
-    tf = mbti.get("TF", 50)
-    jp = mbti.get("JP", 50)
-    if name == "lively":      return ei / 100
-    if name == "rational":    return tf / 100
-    if name == "emotional":   return (100 - tf) / 100
-    if name == "planned":     return jp / 100
-    if name == "spontaneous": return (100 - jp) / 100
-    if name == "creative":    return ns / 100
-    if name == "humor":       return (ei + ns) / 200
-    return 0.5  # unreachable (vocab gate above), kept for type-checker
+    field, is_positive = _LETTER_MAP[letter]
+    raw = mbti.get(field, 50) / 100
+    return raw if is_positive else 1 - raw
 
 
 def format_mbti_for_prompt(mbti: dict | None) -> str:

@@ -23,7 +23,7 @@ def calculate_reply_delay(
     """
     base = 0.5 + random.random() * 0.5
     length_factor = min(1.5, message_length / 100)
-    thinking_factor = mbti_signal(mbti, "rational") * 2.0
+    thinking_factor = mbti_signal(mbti, "T") * 2.0
     typing_factor = min(1.0, response_length / 100)
     delay = base + length_factor + thinking_factor + typing_factor
     return max(0.5, min(5.0, delay))

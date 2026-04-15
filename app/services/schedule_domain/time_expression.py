@@ -42,8 +42,8 @@ def format_time_naturally(
     target_date = target.date() if isinstance(target, datetime) else target
     diff_days = (target_date - today).days
 
-    is_lively = bool(mbti) and mbti_signal(mbti, "lively") >= 0.7
-    is_precise = bool(mbti) and mbti_signal(mbti, "rational") >= 0.7
+    is_lively = bool(mbti) and mbti_signal(mbti, "E") >= 0.7
+    is_precise = bool(mbti) and mbti_signal(mbti, "T") >= 0.7
 
     # 日期部分
     date_part = _format_date_part(target_date, today, diff_days, is_lively)

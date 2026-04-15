@@ -141,23 +141,25 @@ def compute_baseline_emotion(mbti: dict | None) -> dict:
     Used by emotion decay (every 5 min) — must be fast and deterministic.
     For initial creation, use compute_baseline_emotion_llm() instead.
     """
-    lively = mbti_signal(mbti, "lively")
-    rational = mbti_signal(mbti, "rational")
-    emotional = mbti_signal(mbti, "emotional")
-    planned = mbti_signal(mbti, "planned")
-    spontaneous = mbti_signal(mbti, "spontaneous")
-    creative = mbti_signal(mbti, "creative")
-    humor = mbti_signal(mbti, "humor")
+    e = mbti_signal(mbti, "E")
+    t = mbti_signal(mbti, "T")
+    f = mbti_signal(mbti, "F")
+    j = mbti_signal(mbti, "J")
+    p_letter = mbti_signal(mbti, "P")  # 'p' 已被 PAD pleasure 占用
+    n = mbti_signal(mbti, "N")
+    humor = (e + n) / 2  # 外向 + 直觉的复合
 
-    p = 0.2 + (lively - 0.5) * 0.4 + (humor - 0.5) * 0.4 + (spontaneous - 0.5) * 0.2
-    a = 0.5 + (lively - 0.5) * 0.3 + (creative - 0.5) * 0.3 + (humor - 0.5) * 0.2 + (emotional - 0.5) * 0.2
-    d = (0.5 + (planned - 0.5) * 0.3 + (rational - 0.5) * 0.3 + (lively - 0.5) * 0.2
-         + (humor - 0.5) * 0.2 - (spontaneous - 0.5) * 0.2 - (emotional - 0.5) * 0.2)
+    pleasure = 0.2 + (e - 0.5) * 0.4 + (humor - 0.5) * 0.4 + (p_letter - 0.5) * 0.2
+    arousal = 0.5 + (e - 0.5) * 0.3 + (n - 0.5) * 0.3 + (humor - 0.5) * 0.2 + (f - 0.5) * 0.2
+    dominance = (
+        0.5 + (j - 0.5) * 0.3 + (t - 0.5) * 0.3 + (e - 0.5) * 0.2
+        + (humor - 0.5) * 0.2 - (p_letter - 0.5) * 0.2 - (f - 0.5) * 0.2
+    )
 
     return {
-        "pleasure": _clamp_pad("pleasure", p),
-        "arousal": _clamp_pad("arousal", a),
-        "dominance": _clamp_pad("dominance", d),
+        "pleasure": _clamp_pad("pleasure", pleasure),
+        "arousal": _clamp_pad("arousal", arousal),
+        "dominance": _clamp_pad("dominance", dominance),
     }
 
 
@@ -197,13 +199,13 @@ def compute_emotional_stability(mbti: dict | None) -> float:
     spec §1.2 后用 MBTI 推导：T(理性) + J(计划) 高 → 稳定；F(感性) + P(知觉) 高 → 不稳定
         stability = 0.5 + (T-0.5)*0.4 + (J-0.5)*0.3 - (F-0.5)*0.3 - (P-0.5)*0.2
     """
-    rational = mbti_signal(mbti, "rational")
-    planned = mbti_signal(mbti, "planned")
-    emotional = mbti_signal(mbti, "emotional")
-    spontaneous = mbti_signal(mbti, "spontaneous")
+    t = mbti_signal(mbti, "T")
+    j = mbti_signal(mbti, "J")
+    f = mbti_signal(mbti, "F")
+    p = mbti_signal(mbti, "P")
 
-    stability = (0.5 + (rational - 0.5) * 0.4 + (planned - 0.5) * 0.3
-                 - (emotional - 0.5) * 0.3 - (spontaneous - 0.5) * 0.2)
+    stability = (0.5 + (t - 0.5) * 0.4 + (j - 0.5) * 0.3
+                 - (f - 0.5) * 0.3 - (p - 0.5) * 0.2)
     return _clamp(stability, 0.0, 1.0)
 
 
@@ -260,7 +262,7 @@ def update_emotion_state(
     """
     alpha, beta, gamma = _get_fusion_weights(topic_intimacy)
 
-    emotional_sensitivity = mbti_signal(mbti, "emotional")
+    emotional_sensitivity = mbti_signal(mbti, "F")  # F 程度 = 共情敏感
     empathy = {
         dim: input_emotion.get(dim, _PAD_DEFAULTS[dim]) * emotional_sensitivity
         for dim in _PAD_DIMS

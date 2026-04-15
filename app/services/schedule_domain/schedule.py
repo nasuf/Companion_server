@@ -66,13 +66,16 @@ async def generate_life_overview(
         age=age,
         occupation=occupation or "自由职业",
         city=city or "未设定",
-        lively=round(mbti_signal(mbti, "lively") * 100),
-        rational=round(mbti_signal(mbti, "rational") * 100),
-        emotional=round(mbti_signal(mbti, "emotional") * 100),
-        planned=round(mbti_signal(mbti, "planned") * 100),
-        spontaneous=round(mbti_signal(mbti, "spontaneous") * 100),
-        creative=round(mbti_signal(mbti, "creative") * 100),
-        humor=round(mbti_signal(mbti, "humor") * 100),
+        # MBTI 4 维直接 0-100 + 复合 humor (= (E + N)/2)
+        e=round(mbti_signal(mbti, "E") * 100),
+        i=round(mbti_signal(mbti, "I") * 100),
+        n=round(mbti_signal(mbti, "N") * 100),
+        s=round(mbti_signal(mbti, "S") * 100),
+        t=round(mbti_signal(mbti, "T") * 100),
+        f=round(mbti_signal(mbti, "F") * 100),
+        j=round(mbti_signal(mbti, "J") * 100),
+        p=round(mbti_signal(mbti, "P") * 100),
+        humor=round((mbti_signal(mbti, "E") + mbti_signal(mbti, "N")) / 2 * 100),
     )
 
     model = get_utility_model()
@@ -155,8 +158,8 @@ async def generate_daily_schedule(
 def _personalize_template(mbti: dict | None, date: datetime, *, holiday=None) -> list[dict]:
     """根据 MBTI 派生信号微调基准模板。法定节日将 work 替换为 leisure/rest。"""
     schedule = [slot.copy() for slot in _BASE_SCHEDULE_TEMPLATE]
-    lively = mbti_signal(mbti, "lively")
-    planned = mbti_signal(mbti, "planned")
+    lively = mbti_signal(mbti, "E")
+    planned = mbti_signal(mbti, "J")
 
     is_weekend = date.weekday() >= 5
     is_legal_holiday = holiday is not None and holiday.type == "legal"
@@ -442,7 +445,7 @@ async def compute_adjustment_feasibility(
     if intimacy_score > 80:
         score += 20
 
-    if mbti and mbti_signal(mbti, "spontaneous") > 0.7:
+    if mbti and mbti_signal(mbti, "P") > 0.7:
         score += 15
 
     if current_status.get("status") == "sleep":

@@ -52,7 +52,7 @@ def detect_personality_drift(
         return {"drifted": False, "details": ""}
 
     from app.services.mbti import signal as mbti_signal
-    e = mbti_signal(mbti, "lively")  # E 程度
+    e = mbti_signal(mbti, "E")
 
     # 分析最近回复的特征
     recent = responses[-10:]
