@@ -99,7 +99,7 @@ _PREFERENCE_L23: tuple[str, ...] = (
 
 _LIFE_BASE: tuple[str, ...] = (
     "教育", "工作", "旅行", "居住", "健康", "宠物",
-    "人际", "技能", "日常生活", "其他",
+    "人际", "技能", "生活", "其他",
 )
 
 _EMOTION_FULL: tuple[str, ...] = (
@@ -302,6 +302,7 @@ SUBCATEGORY_ALIASES: dict[str, str] = {
     # ── Renamed canonical names (back-compat with pre-Phase-1 data) ──
     "相貌": "外貌特征",
     "信仰": "信仰/寄托",
+    "日常生活": "生活",   # prior local name; spec字面是"生活"
     # ── 身份 ──
     # 宠物
     "猫": "宠物",
