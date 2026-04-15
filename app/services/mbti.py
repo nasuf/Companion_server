@@ -58,7 +58,8 @@ def _derive_type(mbti: dict) -> str:
     )
 
 
-_VALID_INPUT_KEYS = {"EI", "NS", "TF", "JP"}
+MBTI_DIMS = ("EI", "NS", "TF", "JP")
+_VALID_INPUT_KEYS = set(MBTI_DIMS)
 
 
 def _validate_input(percentages: dict) -> dict[str, int]:

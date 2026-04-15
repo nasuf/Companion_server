@@ -89,27 +89,37 @@ async def get_progress(agent_id: str) -> dict | None:
     return json.loads(raw)
 
 
+# DB / API 一律存英文 male/female; profile 种子数据是历史中文, 读取时翻译一次。
+_PROFILE_GENDER_ZH_TO_EN = {"男": "male", "女": "female"}
+_GENDER_EN_TO_ZH = {"male": "男", "female": "女"}
+
+
+def _profile_gender_en(profile_data: dict) -> str | None:
+    identity = profile_data.get("identity") if isinstance(profile_data, dict) else None
+    if not isinstance(identity, dict):
+        return None
+    raw = identity.get("gender")
+    if not raw:
+        return None
+    return _PROFILE_GENDER_ZH_TO_EN.get(raw, raw)  # 已是英文则透传
+
+
 async def select_character_profile(gender: str | None) -> dict | None:
-    """Select a matching published CharacterProfile by gender."""
+    """全栈约定: gender ∈ {"male", "female", None}. 指定但 0 匹配 → None。"""
     profiles = await db.characterprofile.find_many(
         where={"status": "published"},
         include={"career": True},
     )
-
-    # Filter by gender (stored in data.identity.gender)
     matching = []
     for p in profiles:
         data = p.data if isinstance(p.data, dict) else {}
-        identity = data.get("identity", {})
-        if isinstance(identity, dict):
-            p_gender = identity.get("gender")
-            if gender and p_gender and p_gender != gender:
-                continue
+        p_gender = _profile_gender_en(data)
+        if gender and p_gender and p_gender != gender:
+            continue
         matching.append(p)
-
     if not matching:
-        matching = profiles
-    if not matching:
+        if gender is not None:
+            logger.warning(f"No CharacterProfile matches gender={gender!r}; skip life-story")
         return None
 
     selected = random.choice(matching)
@@ -269,17 +279,19 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         cat_data = profile_data.get(cat_key, {})
         if not isinstance(cat_data, dict):
             continue
-        val = _format_value(cat_data.get(field_key))
+        raw_val = cat_data.get(field_key)
+        # gender 字段: 内部 male/female, 写入显示文本时翻译为中文
+        if cat_key == "identity" and field_key == "gender" and isinstance(raw_val, str):
+            raw_val = _GENDER_EN_TO_ZH.get(raw_val, raw_val)
+        val = _format_value(raw_val)
         if not val:
             continue
         label = _FIELD_LABELS.get(field_key, f"{field_key}:")
-        # 特殊处理 dislikes/fears 的标签
         if cat_key == "dislikes":
             label = _DISLIKE_LABELS.get(field_key, f"讨厌{field_key}:")
         elif cat_key == "fears":
             label = _FEAR_LABELS.get(field_key, f"害怕{field_key}:")
 
-        # age 特殊: "我今年22岁"
         if field_key == "age":
             summary = f"我今年{val}岁"
         else:
