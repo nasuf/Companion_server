@@ -24,7 +24,7 @@ DEFAULT_TEMPLATE_SCHEMA = {
             "sort": 1,
             "fields": [
                 {"key": "gender", "name": "性别", "type": "select", "options": ["男", "女"], "required": True},
-                {"key": "age", "name": "年龄", "type": "number", "min": 18, "max": 27, "hint": "18-27岁之间"},
+                {"key": "age", "name": "年龄", "type": "number", "min": 20, "max": 29, "hint": "20-29岁之间"},
                 {"key": "birthday", "name": "出生日期", "type": "date"},
                 {"key": "education", "name": "教育背景", "type": "textarea"},
                 {"key": "location", "name": "所在地", "type": "text", "hint": "出生地=居住地=工作地"},
@@ -135,7 +135,7 @@ DEFAULT_TEMPLATE_SCHEMA = {
 DEFAULT_TEMPLATE_DEFAULTS = (
     "通用规则：\n"
     "1. 人物身处中国区域内的地球镜像世界，地域、文化、生活规则与现实中国一致\n"
-    "2. 年龄在18-27岁之间\n"
+    "2. 年龄在20-29岁之间\n"
     "3. 女性身高160-170cm，男性177-185cm\n"
     "4. 女性体重=身高÷3.6，男性体重=身高÷2.6\n"
     "5. 出生地=居住地=工作地\n"
@@ -148,13 +148,19 @@ DEFAULT_TEMPLATE_DEFAULTS = (
 DEFAULT_TEMPLATE_NAME = "标准角色背景模板"
 
 async def ensure_default_template() -> None:
-    """启动时确保默认背景模板存在。不创建示例背景 — 背景通过管理后台批量生成。"""
+    """启动时确保默认背景模板存在。不创建示例背景 — 背景通过管理后台批量生成。
+
+    对于已存在的模板，做一次性的 best-effort 字面迁移（如 18-27 → 20-29），
+    让历史部署也能跟上 spec 调整；admin 已经手动改过的部分（比如自定义其他
+    规则文本）保留不动，只替换具体数字字面。
+    """
     from prisma import Json
 
     existing = await db.charactertemplate.find_first(
         where={"name": DEFAULT_TEMPLATE_NAME},
     )
     if existing:
+        await _migrate_default_template_age_range(existing)
         return
 
     await db.charactertemplate.create(
@@ -167,6 +173,50 @@ async def ensure_default_template() -> None:
         }
     )
     logger.info("Default character template seeded")
+
+
+async def _migrate_default_template_age_range(existing) -> None:
+    """One-shot migration: 18-27 → 20-29 in defaults text + schema.identity.age."""
+    from prisma import Json
+
+    updates: dict = {}
+
+    # 1) defaults 文本里的 "18-27" 字面替换。只动数字，admin 自定义文本保留。
+    if existing.defaults and "18-27" in existing.defaults:
+        updates["defaults"] = (
+            existing.defaults
+            .replace("年龄在18-27岁之间", "年龄在20-29岁之间")
+            .replace("18-27", "20-29")
+        )
+
+    # 2) schemaData.identity.age min/max + hint
+    schema = existing.schemaData if isinstance(existing.schemaData, dict) else None
+    if schema:
+        changed = False
+        for cat in schema.get("categories", []):
+            if cat.get("key") != "identity":
+                continue
+            for field in cat.get("fields", []):
+                if field.get("key") != "age":
+                    continue
+                if field.get("min") == 18:
+                    field["min"] = 20
+                    changed = True
+                if field.get("max") == 27:
+                    field["max"] = 29
+                    changed = True
+                if field.get("hint") == "18-27岁之间":
+                    field["hint"] = "20-29岁之间"
+                    changed = True
+        if changed:
+            updates["schemaData"] = Json(schema)
+
+    if updates:
+        await db.charactertemplate.update(where={"id": existing.id}, data=updates)
+        logger.info(
+            f"Migrated default character template age range to 20-29 "
+            f"(fields: {list(updates.keys())})"
+        )
 
 
 # ── LLM 画像生成 ──
