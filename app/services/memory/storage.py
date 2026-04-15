@@ -113,11 +113,25 @@ async def store_memory(
     Args:
         source: "user" for memories about the user, "ai" for AI self-memories.
     """
+    # Source narrows to the literal Source type expected by the taxonomy
+    repo_source = "ai" if source == "ai" else "user"
     taxonomy = resolve_taxonomy(
         main_category=main_category,
         sub_category=sub_category,
         legacy_type=normalize_memory_type(memory_type),
+        source=repo_source,
+        level=level,
     )
+    if not taxonomy.allowed:
+        # The (source, level, main) combination is forbidden by the spec —
+        # e.g. trying to write an AI 身份/偏好/思维 memory at L2 or L3.
+        # Refuse rather than silently mis-categorize. Caller can retry at
+        # a different level (typically L1) if appropriate.
+        logger.info(
+            f"Refusing memory: ({repo_source}, L{level}, {taxonomy.main_category}) "
+            f"is not allowed by the taxonomy spec. content={content[:60]}"
+        )
+        return None
     memory_type = normalize_memory_type(taxonomy.legacy_type)
 
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)

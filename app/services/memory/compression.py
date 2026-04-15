@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.services.memory import memory_repo
 from app.services.memory.embedding import generate_embedding, store_embedding
-from app.services.memory.taxonomy import summarize_batch_taxonomy
+from app.services.memory.taxonomy import is_allowed_at, summarize_batch_taxonomy
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompting.store import get_prompt_text
 
@@ -44,8 +44,15 @@ async def _compress_batch(
 
     max_importance = max(m.importance for m in batch)
     main_category, sub_category = summarize_batch_taxonomy(batch)
-    # Inherit source from batch
     batch_source = "ai" if any(m.source == "ai" for m in batch) else "user"
+    if not is_allowed_at(batch_source, target_level, main_category):
+        # Spec forbids this (source, target_level, main_category). Don't
+        # emit a forbidden compressed summary; leave the originals alone.
+        logger.debug(
+            f"Skip compression: ({batch_source}, L{target_level}, "
+            f"{main_category}) not allowed; batch size={len(batch)}"
+        )
+        return
     compressed = await memory_repo.create(
         source=batch_source,
         userId=user_id,

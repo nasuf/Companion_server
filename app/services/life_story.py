@@ -19,7 +19,7 @@ from app.db import db, ensure_connected
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_embedding_model, invoke_json
 from app.services.memory.storage import normalize_memory_type
-from app.services.memory.taxonomy import TAXONOMY, resolve_taxonomy
+from app.services.memory.taxonomy import TAXONOMY_MATRIX, resolve_taxonomy
 from app.services.memory.vector_search import format_vector
 from app.services.runtime.cache import bump_cache_version
 from app.services.workspace.workspaces import resolve_workspace_id
@@ -38,9 +38,14 @@ _PROGRESS_EVERY = 3
 
 
 def _taxonomy_description() -> str:
-    """将完整 taxonomy 格式化为 LLM 可读文本。"""
+    """格式化 AI L1 taxonomy 给 LLM 看。
+
+    Life-story 生成的全部都是 AI-source L1 记忆，所以这里只罗列 ai/L1 集合
+    （比 user/L1 多一个生活/交互），避免 LLM 输出 L2/L3 才允许的"变化"
+    /"闲聊"等 sub-cat 又被 resolve 时强行归到"其他"。
+    """
     lines = []
-    for main_cat, sub_cats in TAXONOMY.items():
+    for main_cat, sub_cats in TAXONOMY_MATRIX["ai"][1].items():
         subs = ", ".join(sub_cats)
         lines.append(f"  {main_cat}: [{subs}]")
     return "\n".join(lines)
@@ -133,11 +138,11 @@ _PROFILE_FIELD_MAP: list[tuple[str, str, str, str, str, float]] = [
     ("identity", "location", "身份", "现居地", "identity", 0.90),
     ("identity", "family", "身份", "亲属关系", "identity", 0.90),
     # appearance
-    ("appearance", "height", "身份", "相貌", "identity", 0.80),
-    ("appearance", "weight", "身份", "相貌", "identity", 0.75),
-    ("appearance", "features", "身份", "相貌", "identity", 0.80),
-    ("appearance", "style", "身份", "相貌", "identity", 0.75),
-    ("appearance", "voice", "身份", "相貌", "identity", 0.75),
+    ("appearance", "height", "身份", "外貌特征", "identity", 0.80),
+    ("appearance", "weight", "身份", "外貌特征", "identity", 0.75),
+    ("appearance", "features", "身份", "外貌特征", "identity", 0.80),
+    ("appearance", "style", "身份", "外貌特征", "identity", 0.75),
+    ("appearance", "voice", "身份", "外貌特征", "identity", 0.75),
     # education_knowledge
     ("education_knowledge", "degree", "身份", "教育背景", "identity", 0.85),
     ("education_knowledge", "strengths", "生活", "技能", "life", 0.80),
@@ -590,10 +595,13 @@ async def store_memories_batch(
     for mid, mem in zip(ids, valid):
         summary = mem["summary"]
         mem_type = normalize_memory_type(mem.get("type", "life"))
+        # Provisioning always writes AI-source L1 memories.
         taxonomy = resolve_taxonomy(
             main_category=mem.get("main_category", "生活"),
             sub_category=mem.get("sub_category", "其他"),
             legacy_type=mem_type,
+            source="ai",
+            level=1,
         )
         memory_rows.append({
             "id": mid,

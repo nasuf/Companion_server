@@ -1,12 +1,29 @@
 """Canonical memory taxonomy.
 
-This module defines the only allowed memory categories/sub-categories.
-The taxonomy follows the product-defined Chinese classification exactly.
+Per-(owner, level) allowed categories. The product spec splits by both:
+
+- owner: memories_user vs memories_ai
+- level: L1 (core facts) / L2 (consolidated) / L3 (long-term abstractions)
+
+Design intent:
+- L1 is the full semantic set (姓名/年龄/亲属关系/…). Specific facts.
+- L2 collapses身份/偏好 into a small set + adds "变化" to track state deltas
+  ("user changed jobs"). 生活/情绪/思维 stay rich.
+- L3 further shrinks身份; adds "闲聊" to 生活 for low-value chat memories.
+- AI at L2/L3 forbids身份/偏好/思维 entirely — the companion's core persona
+  is locked at L1 and never drifts into fuzzy L2/L3 forms. AI L1 uniquely
+  allows 生活/交互 (interaction memories with the user).
+
+Back-compat: the flat `TAXONOMY` dict (= user L1) is still exported so
+callers that don't care about level/owner keep working.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+Source = Literal["user", "ai"]
 
 LEGACY_TYPE_TO_MAIN_CATEGORY = {
     "identity": "身份",
@@ -60,80 +77,98 @@ COMPRESSION_RULES: dict[str, dict[str, int | bool]] = {
     "思维": {"batch_size": 6, "allow_cross_subcategory": False},
 }
 
-TAXONOMY: dict[str, tuple[str, ...]] = {
-    "身份": (
-        "姓名",
-        "年龄",
-        "性别",
-        "生日",
-        "星座",
-        "生肖",
-        "血型",
-        "民族",
-        "出生地",
-        "成长地",
-        "现居地",
-        "相貌",
-        "教育背景",
-        "职业/与经济",
-        "亲属关系",
-        "社会关系",
-        "宠物",
-        "其他",
-    ),
-    "偏好": (
-        "饮食喜好",
-        "饮食厌恶",
-        "审美爱好",
-        "审美厌恶",
-        "人际喜好",
-        "人际厌恶",
-        "生活习惯",
-        "禁忌/雷区",
-        "其他",
-    ),
-    "生活": (
-        "教育",
-        "工作",
-        "旅行",
-        "居住",
-        "健康",
-        "宠物",
-        "人际",
-        "技能",
-        "日常生活",
-        "其他",
-    ),
-    "情绪": (
-        "高兴",
-        "悲伤",
-        "愤怒",
-        "恐惧",
-        "厌恶",
-        "焦虑",
-        "失望",
-        "自豪",
-        "感动",
-        "尴尬",
-        "遗憾",
-        "孤独",
-        "惊讶",
-        "感激",
-        "释怀",
-        "其他",
-    ),
-    "思维": (
-        "人生观",
-        "价值观",
-        "世界观",
-        "理想与目标",
-        "人际关系观",
-        "社会观点",
-        "自我认知",
-        "信仰",
-        "其他",
-    ),
+# ── Full sub-category sets (used to compose the L1/L2/L3 slices below) ──
+
+_IDENTITY_FULL: tuple[str, ...] = (
+    "姓名", "年龄", "性别", "生日", "星座", "生肖", "血型", "民族",
+    "出生地", "成长地", "现居地", "外貌特征",
+    "教育背景", "职业/与经济", "亲属关系", "社会关系", "宠物", "其他",
+)
+
+_PREFERENCE_L1: tuple[str, ...] = (
+    "饮食喜好", "饮食厌恶", "审美爱好", "审美厌恶",
+    "人际喜好", "人际厌恶", "生活习惯", "禁忌/雷区", "其他",
+)
+
+# L2/L3 偏好 drops "禁忌/雷区" and adds "变化" (preference shifts over time).
+_PREFERENCE_L23: tuple[str, ...] = (
+    "变化",
+    "饮食喜好", "饮食厌恶", "审美爱好", "审美厌恶",
+    "人际喜好", "人际厌恶", "生活习惯", "其他",
+)
+
+_LIFE_BASE: tuple[str, ...] = (
+    "教育", "工作", "旅行", "居住", "健康", "宠物",
+    "人际", "技能", "日常生活", "其他",
+)
+
+_EMOTION_FULL: tuple[str, ...] = (
+    "高兴", "悲伤", "愤怒", "恐惧", "厌恶", "焦虑",
+    "失望", "自豪", "感动", "尴尬", "遗憾", "孤独",
+    "惊讶", "感激", "释怀", "其他",
+)
+
+_THOUGHT_FULL: tuple[str, ...] = (
+    "人生观", "价值观", "世界观", "理想与目标",
+    "人际关系观", "社会观点", "自我认知", "信仰/寄托", "其他",
+)
+
+# Per-(owner, level) matrix.
+# An EMPTY tuple means memories of that (owner, level, main) are NOT allowed
+# at all — e.g. AI 身份 at L2 must either stay at L1 or be archived.
+TAXONOMY_MATRIX: dict[Source, dict[int, dict[str, tuple[str, ...]]]] = {
+    "user": {
+        1: {
+            "身份": _IDENTITY_FULL,
+            "偏好": _PREFERENCE_L1,
+            "生活": _LIFE_BASE,
+            "情绪": _EMOTION_FULL,
+            "思维": _THOUGHT_FULL,
+        },
+        2: {
+            "身份": ("社会关系", "变化", "其他"),
+            "偏好": _PREFERENCE_L23,
+            "生活": _LIFE_BASE,
+            "情绪": _EMOTION_FULL,
+            "思维": _THOUGHT_FULL,
+        },
+        3: {
+            "身份": ("社会关系", "变化", "其他"),
+            "偏好": _PREFERENCE_L23,
+            "生活": ("闲聊",) + _LIFE_BASE,
+            "情绪": _EMOTION_FULL,
+            "思维": _THOUGHT_FULL,
+        },
+    },
+    "ai": {
+        1: {
+            "身份": _IDENTITY_FULL,
+            "偏好": _PREFERENCE_L1,
+            # AI L1 生活 uniquely has "交互" (interactions with the user).
+            "生活": _LIFE_BASE + ("交互",),
+            "情绪": _EMOTION_FULL,
+            "思维": _THOUGHT_FULL,
+        },
+        2: {
+            "身份": (),   # locked — AI persona facts only live at L1
+            "偏好": (),
+            "生活": _LIFE_BASE,
+            "情绪": _EMOTION_FULL,
+            "思维": (),
+        },
+        3: {
+            "身份": (),
+            "偏好": (),
+            "生活": ("闲聊",) + _LIFE_BASE,
+            "情绪": _EMOTION_FULL,
+            "思维": (),
+        },
+    },
 }
+
+# Flat backward-compat view: the user L1 superset.
+# Callers that don't care about (owner, level) continue to import this.
+TAXONOMY: dict[str, tuple[str, ...]] = dict(TAXONOMY_MATRIX["user"][1])
 
 
 @dataclass(frozen=True)
@@ -141,14 +176,45 @@ class TaxonomyResult:
     main_category: str
     sub_category: str
     legacy_type: str | None
+    # Whether (main, sub) is permitted at the requested (source, level).
+    # False means the caller should refuse to write or archive instead
+    # (e.g. demoting an AI 身份 memory from L1 to L2 — not allowed).
+    allowed: bool = True
 
 
-def allowed_main_categories() -> tuple[str, ...]:
-    return tuple(TAXONOMY.keys())
+def allowed_main_categories(source: Source = "user", level: int = 1) -> tuple[str, ...]:
+    return tuple(TAXONOMY_MATRIX[source][level].keys())
 
 
-def allowed_sub_categories(main_category: str) -> tuple[str, ...]:
-    return TAXONOMY.get(main_category, ())
+def allowed_sub_categories(
+    main_category: str,
+    source: Source = "user",
+    level: int = 1,
+) -> tuple[str, ...]:
+    """Allowed sub-categories for (source, level, main_category).
+
+    Defaults to (user, L1) which is the full set — keeps back-compat with
+    callers that only pass main_category.
+    """
+    return TAXONOMY_MATRIX.get(source, {}).get(level, {}).get(main_category, ())
+
+
+def is_allowed_at(
+    source: Source,
+    level: int,
+    main_category: str,
+    sub_category: str | None = None,
+) -> bool:
+    """Is (main_category, sub_category) permitted at (source, level)?
+
+    When sub_category is None, only main_category presence is checked.
+    """
+    subs = allowed_sub_categories(main_category, source=source, level=level)
+    if not subs:
+        return False
+    if sub_category is None:
+        return True
+    return sub_category in subs
 
 
 def l1_category_quotas() -> tuple[tuple[str, int], ...]:
@@ -221,6 +287,9 @@ def get_compression_rule(main_category: str | None) -> dict[str, int | bool]:
 
 
 SUBCATEGORY_ALIASES: dict[str, str] = {
+    # ── Renamed canonical names (back-compat with pre-Phase-1 data) ──
+    "相貌": "外貌特征",
+    "信仰": "信仰/寄托",
     # ── 身份 ──
     # 宠物
     "猫": "宠物",
@@ -356,27 +425,23 @@ _ALIAS_KEYS_BY_LENGTH: list[str] = sorted(
 )
 
 
-def _resolve_by_contains(
-    text: str, main_category: str
-) -> str | None:
-    """Check if *text* contains any known alias key or canonical sub_category name.
-
-    Returns the resolved sub_category if found within *main_category*'s taxonomy,
-    or ``None`` if nothing matches.
+def _resolve_by_contains(text: str, allowed: tuple[str, ...]) -> str | None:
+    """Scan *text* for any known alias key or canonical sub-category name
+    that is present in *allowed*. Returns the matched sub-category or None.
     """
-    if not text:
+    if not text or not allowed:
         return None
 
-    # Check canonical sub_category names first (e.g. text="关于宠物" contains "宠物")
-    for allowed in TAXONOMY.get(main_category, ()):
-        if allowed != "其他" and allowed in text:
-            return allowed
+    # Canonical names first (e.g. text="关于宠物" contains "宠物")
+    for name in allowed:
+        if name != "其他" and name in text:
+            return name
 
-    # Check alias keys (longer keys first)
+    # Alias keys (longer first)
     for key in _ALIAS_KEYS_BY_LENGTH:
         if key in text:
             mapped = SUBCATEGORY_ALIASES[key]
-            if mapped in TAXONOMY.get(main_category, ()):
+            if mapped in allowed:
                 return mapped
 
     return None
@@ -387,45 +452,65 @@ def resolve_taxonomy(
     main_category: str | None = None,
     sub_category: str | None = None,
     legacy_type: str | None = None,
+    source: Source = "user",
+    level: int = 1,
 ) -> TaxonomyResult:
+    """Normalize a (main, sub) pair against the (source, level) allowed set.
+
+    Backward-compat: source/level default to (user, L1), the full superset,
+    so callers that don't pass them behave exactly as before.
+
+    The returned `allowed` flag is False only when the target (source, level)
+    forbids this main_category entirely (e.g. AI 身份/偏好/思维 at L2/L3).
+    In that case main_category is preserved — the caller decides whether to
+    archive, reject, or keep the memory at a different level.
+    """
     normalized_main = (main_category or "").strip()
     normalized_sub = (sub_category or "").strip()
     normalized_legacy = (legacy_type or "").strip() or None
 
     if not normalized_main and normalized_legacy:
         normalized_main = LEGACY_TYPE_TO_MAIN_CATEGORY.get(normalized_legacy, "")
-
-    if normalized_main not in TAXONOMY:
+    if normalized_main not in TAXONOMY_MATRIX["user"][1]:
         normalized_main = "生活"
 
-    # Step 1: Direct Match
-    if normalized_sub in TAXONOMY[normalized_main]:
+    legacy = MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy)
+
+    allowed_subs = allowed_sub_categories(normalized_main, source=source, level=level)
+    if not allowed_subs:
+        # Main category is forbidden at this (source, level). Keep the
+        # original sub text so the caller can see what the LLM produced,
+        # but mark as not-allowed for the write path to decide.
         return TaxonomyResult(
             main_category=normalized_main,
-            sub_category=normalized_sub,
-            legacy_type=MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy),
+            sub_category=normalized_sub or "其他",
+            legacy_type=legacy,
+            allowed=False,
         )
 
-    # Step 2: Alias Mapping (exact)
-    mapped_sub = SUBCATEGORY_ALIASES.get(normalized_sub)
-    if mapped_sub and mapped_sub in TAXONOMY[normalized_main]:
-        normalized_sub = mapped_sub
-    else:
-        # Step 2.5: Contains Matching
-        contains_hit = _resolve_by_contains(normalized_sub, normalized_main)
-        if contains_hit:
-            normalized_sub = contains_hit
-        # Step 3: Fuzzy Prefix Match (e.g. "宠物类" -> "宠物")
-        else:
-            for allowed in TAXONOMY[normalized_main]:
-                if normalized_sub and allowed != "其他" and (normalized_sub.startswith(allowed) or allowed.startswith(normalized_sub)):
-                    normalized_sub = allowed
-                    break
-            else:
-                normalized_sub = "其他"
+    # Step 1: Direct match in the allowed set
+    if normalized_sub in allowed_subs:
+        return TaxonomyResult(normalized_main, normalized_sub, legacy)
 
-    return TaxonomyResult(
-        main_category=normalized_main,
-        sub_category=normalized_sub,
-        legacy_type=MAIN_CATEGORY_TO_LEGACY_TYPE.get(normalized_main, normalized_legacy),
-    )
+    # Step 2: Exact alias mapping (e.g. "妈妈" -> "亲属关系")
+    mapped = SUBCATEGORY_ALIASES.get(normalized_sub)
+    if mapped and mapped in allowed_subs:
+        return TaxonomyResult(normalized_main, mapped, legacy)
+
+    # Step 3: Contains matching (text contains a canonical or alias key)
+    contains_hit = _resolve_by_contains(normalized_sub, allowed_subs)
+    if contains_hit:
+        return TaxonomyResult(normalized_main, contains_hit, legacy)
+
+    # Step 4: Fuzzy prefix match (e.g. "宠物类" -> "宠物")
+    for allowed in allowed_subs:
+        if (
+            normalized_sub
+            and allowed != "其他"
+            and (normalized_sub.startswith(allowed) or allowed.startswith(normalized_sub))
+        ):
+            return TaxonomyResult(normalized_main, allowed, legacy)
+
+    # Step 5: Fallback to "其他" if present, else the first allowed sub
+    fallback = "其他" if "其他" in allowed_subs else allowed_subs[0]
+    return TaxonomyResult(normalized_main, fallback, legacy)

@@ -14,6 +14,7 @@ from app.services.memory.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import (
     get_compression_rule,
     get_promotion_rule,
+    is_allowed_at,
     summarize_batch_taxonomy,
 )
 from app.services.memory.vector_search import search_by_embedding
@@ -163,13 +164,37 @@ async def check_l2_demotion_candidates() -> None:
         return
 
     demoted = 0
+    archived = 0
     for mem in candidates:
         months_age = (now - mem.createdAt.replace(tzinfo=timezone.utc if mem.createdAt.tzinfo is None else mem.createdAt.tzinfo)).total_seconds() / 86400 / 30
         score = compute_dynamic_weight(mem.importance, months_age, mem.mentionCount)
         if score >= 0.49:
             continue
 
-        await memory_repo.update(mem.id, source=mem.source, record=mem, level=3)
+        # Per spec: if (source, L3, main_category, sub_category) is forbidden
+        # — e.g. AI 身份/偏好/思维 are blocked at L2/L3 — we cannot demote.
+        # Archive the memory instead so it stops occupying the active set
+        # without being silently re-categorized.
+        target_level = 3
+        if not is_allowed_at(
+            mem.source, target_level,
+            mem.mainCategory or "", mem.subCategory,
+        ):
+            await memory_repo.update(
+                mem.id, source=mem.source, record=mem, isArchived=True,
+            )
+            archived += 1
+            try:
+                await log_memory_changelog(
+                    mem.userId, mem.id, "archive",
+                    old_value=f"L2 (score={score:.2f}, demote-blocked)",
+                    new_value="archived",
+                )
+            except Exception:
+                pass
+            continue
+
+        await memory_repo.update(mem.id, source=mem.source, record=mem, level=target_level)
         try:
             await log_memory_changelog(
                 mem.userId, mem.id, "demote",
@@ -180,8 +205,10 @@ async def check_l2_demotion_candidates() -> None:
             pass
         demoted += 1
 
-    if demoted:
-        logger.info(f"Demoted {demoted} L2→L3 memories (score<0.49, age>30d)")
+    if demoted or archived:
+        logger.info(
+            f"L2→L3 pass: demoted={demoted}, archived (demote-blocked)={archived}"
+        )
 
 
 async def _consolidate_user_memories(
@@ -241,6 +268,17 @@ async def _consolidate_user_memories(
         if len(cluster) < int(compression_rule.get("batch_size", 2)):
             continue
 
+        # Inherit source from cluster — if any member is "ai", the merged
+        # row inherits "ai" too. Skip if (source, target_level, main_category)
+        # is forbidden by the spec (e.g. AI 身份/偏好/思维 at L2/L3).
+        cluster_source = "ai" if any(m.source == "ai" for m in cluster) else "user"
+        if not is_allowed_at(cluster_source, target_level, main_category):
+            logger.debug(
+                f"Skip consolidation: ({cluster_source}, L{target_level}, "
+                f"{main_category}) not allowed; cluster size={len(cluster)}"
+            )
+            continue
+
         mem_texts = "\n".join(f"- {m.content}" for m in cluster)
         prompt = (await get_prompt_text("memory.consolidation")).format(memories=mem_texts)
 
@@ -249,8 +287,6 @@ async def _consolidate_user_memories(
             summary = summary.strip()
 
             max_importance = max(m.importance for m in cluster)
-            # Inherit source from cluster — if any member is "ai", mark consolidated as "ai"
-            cluster_source = "ai" if any(m.source == "ai" for m in cluster) else "user"
             merged = await memory_repo.create(
                 source=cluster_source,
                 userId=user_id,
