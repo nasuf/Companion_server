@@ -8,8 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import connect_db, disconnect_db
 from app.redis_client import get_redis, close_redis
-from app.neo4j_client import get_driver, close_neo4j
-from app.services.graph.schema import init_graph_schema
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
 from app.services.prompting.store import ensure_prompt_templates
 from app.services.character import ensure_default_template
@@ -38,17 +36,11 @@ async def lifespan(app: FastAPI):
 
     # Phase 1: Connect to all services in parallel
     await _timed("Database", connect_db())
-    await asyncio.gather(
-        _timed("Redis", get_redis()),
-        _timed("Neo4j driver", get_driver()),
-    )
+    await _timed("Redis", get_redis())
 
-    # Phase 2: Schema + seeding (depends on DB/Neo4j being connected)
+    # Phase 2: Schema + seeding
     await asyncio.gather(
-        _timed("Neo4j schema", init_graph_schema()),
         _timed("Prompt templates", ensure_prompt_templates()),
-    )
-    await asyncio.gather(
         _timed("Character template", ensure_default_template()),
         _timed("Career templates", ensure_default_careers()),
     )
@@ -64,7 +56,6 @@ async def lifespan(app: FastAPI):
     shutdown_scheduler()
     await disconnect_db()
     await close_redis()
-    await close_neo4j()
 
 
 app = FastAPI(title="AI Companion", version="0.1.0", lifespan=lifespan)

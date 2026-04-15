@@ -491,3 +491,45 @@ model TimeTrigger {
 
   @@map("time_triggers")
 }
+
+// ── Entity knowledge layer (replaces Neo4j graph projection) ──
+
+model MemoryEntity {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  workspaceId    String?  @map("workspace_id")
+  canonicalName  String   @map("canonical_name")        // "妈妈" / "老王" / "杭州"
+  aliases        String[] @default([])                  // ["妈","我妈","妈咪"]
+  entityType     String   @map("entity_type")           // person / place / org / pet / topic / preference / other
+  role           String?                                // mother / colleague / hometown / ...
+  mentionCount   Int      @default(0) @map("mention_count")
+  lastMentionedAt DateTime? @map("last_mentioned_at")
+  isArchived     Boolean  @default(false) @map("is_archived")
+  metadata       Json?                                  // 可选扩展（e.g. preference.value）
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  mentions       MemoryMention[]
+
+  @@unique([userId, workspaceId, entityType, canonicalName])
+  @@index([userId, workspaceId, entityType])
+  @@index([userId, workspaceId, mentionCount])
+  @@index([userId, workspaceId, isArchived, lastMentionedAt])
+  @@map("memory_entities")
+}
+
+model MemoryMention {
+  memoryId      String   @map("memory_id")
+  memorySource  String   @map("memory_source")   // "user" | "ai"
+  entityId      String   @map("entity_id")
+  entity        MemoryEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  userId        String   @map("user_id")
+  workspaceId   String?  @map("workspace_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@id([memoryId, entityId])
+  @@index([entityId])
+  @@index([userId, workspaceId])
+  @@index([memoryId])
+  @@map("memory_mentions")
+}

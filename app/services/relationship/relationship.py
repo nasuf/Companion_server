@@ -1,11 +1,17 @@
 """Relationship evolution tracking.
 
-Tracks trust score, interaction frequency/depth.
+User↔AI relationship state (trust / interaction count / growth stage)
+lives in the Postgres `intimacies` table — see schema.prisma::Intimacy and
+the dedicated intimacy service. This module is a thin view helper kept
+for back-compat with any caller that expects a flat trust/count shape.
+
+If you want the rich relationship model (topic intimacy + growth levels
++ updated_at), call `app.services.relationship.intimacy` directly.
 """
 
 import logging
 
-from app.neo4j_client import run_write, run_query
+from app.db import db
 
 logger = logging.getLogger(__name__)
 
@@ -13,39 +19,57 @@ logger = logging.getLogger(__name__)
 async def update_relationship(
     user_id: str,
     agent_id: str,
-    workspace_id: str,
+    workspace_id: str | None = None,
     interaction_quality: float = 0.5,
 ) -> None:
-    """Update user-agent relationship metrics."""
-    await run_write(
+    """EMA-update the pair's growth intimacy using the passed quality.
+
+    Retained for back-compat; new code should use the richer
+    `relationship.intimacy` API which also handles topic-level signals.
+    """
+    _ = workspace_id  # Intimacy is (agent, user) unique; ws not needed here
+    # Postgres upsert, EMA on existing value: new = 0.9*old + 0.1*quality*1000
+    # Clamp result into [0, 1000] to keep with the existing scale.
+    quality_scaled = max(0, min(1000, int(interaction_quality * 1000)))
+    await db.execute_raw(
         """
-        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})
-        MATCH (a:AI {id: $agent_id, workspace_id: $workspace_id})
-        MERGE (u)-[r:INTERACTS_WITH]->(a)
-        ON CREATE SET
-            r.trust = $quality,
-            r.interaction_count = 1,
-            r.created_at = datetime()
-        ON MATCH SET
-            r.trust = r.trust * 0.9 + $quality * 0.1,
-            r.interaction_count = r.interaction_count + 1
+        INSERT INTO intimacies
+            (id, agent_id, user_id, growth_intimacy, growth_updated_at,
+             created_at, updated_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, NOW(), NOW(), NOW())
+        ON CONFLICT (agent_id, user_id) DO UPDATE SET
+            growth_intimacy = LEAST(1000, GREATEST(0,
+                (intimacies.growth_intimacy * 9 + EXCLUDED.growth_intimacy) / 10
+            )),
+            growth_updated_at = NOW(),
+            updated_at = NOW()
         """,
-        {
-            "user_id": user_id,
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "quality": interaction_quality,
-        },
+        agent_id, user_id, quality_scaled,
     )
 
 
-async def get_relationship(user_id: str, agent_id: str, workspace_id: str) -> dict | None:
-    """Get relationship metrics between user and agent."""
-    results = await run_query(
+async def get_relationship(
+    user_id: str,
+    agent_id: str,
+    workspace_id: str | None = None,
+) -> dict | None:
+    """Return a flat {trust, interaction_count} view. Interaction count is
+    approximated by number of conversations (cheap JOIN); topic intimacy is
+    not included — call the intimacy service for that."""
+    _ = workspace_id
+    rows = await db.query_raw(
         """
-        MATCH (u:User {id: $user_id, workspace_id: $workspace_id})-[r:INTERACTS_WITH]->(a:AI {id: $agent_id, workspace_id: $workspace_id})
-        RETURN r.trust AS trust, r.interaction_count AS interaction_count
+        SELECT i.growth_intimacy::float / 1000 AS trust,
+               COALESCE(c.conversation_count, 0) AS interaction_count
+        FROM intimacies i
+        LEFT JOIN (
+            SELECT agent_id, user_id, COUNT(*) AS conversation_count
+            FROM conversations
+            WHERE agent_id = $1 AND user_id = $2
+            GROUP BY agent_id, user_id
+        ) c ON c.agent_id = i.agent_id AND c.user_id = i.user_id
+        WHERE i.agent_id = $1 AND i.user_id = $2
         """,
-        {"user_id": user_id, "agent_id": agent_id, "workspace_id": workspace_id},
+        agent_id, user_id,
     )
-    return results[0] if results else None
+    return dict(rows[0]) if rows else None

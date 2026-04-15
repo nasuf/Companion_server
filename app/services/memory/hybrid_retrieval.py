@@ -18,7 +18,7 @@ from app.services.memory.query_analyzer import analyze_query
 from app.services.memory.vector_search import search_similar, search_by_time_range
 from app.services.memory.ranker import rank_memories
 from app.services.memory.context_selector import select_context
-from app.services.graph.queries import get_relationship_context
+from app.services.memory.entity_repo import get_relationship_context
 from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
@@ -114,7 +114,7 @@ async def hybrid_retrieve(
     )
     graph_task = (
         get_relationship_context(
-            user_id,
+            user_id=user_id,
             workspace_id=workspace_id,
             main_categories=context_categories,
             sub_categories=context_sub_categories,

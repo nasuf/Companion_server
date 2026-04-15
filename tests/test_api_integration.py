@@ -19,9 +19,6 @@ def mock_deps():
         patch("app.db.disconnect_db", new_callable=AsyncMock),
         patch("app.redis_client.get_redis", new_callable=AsyncMock),
         patch("app.redis_client.close_redis", new_callable=AsyncMock),
-        patch("app.neo4j_client.get_driver", new_callable=AsyncMock),
-        patch("app.neo4j_client.close_neo4j", new_callable=AsyncMock),
-        patch("app.services.graph.schema.init_graph_schema", new_callable=AsyncMock),
         patch("jobs.scheduler.setup_scheduler"),
         patch("jobs.scheduler.shutdown_scheduler"),
         patch("app.middleware.configure_logging"),
@@ -37,7 +34,6 @@ def test_health_endpoint(mock_deps):
     with (
         patch("app.api.public.health.db") as mock_db,
         patch("app.api.public.health.redis_health", new_callable=AsyncMock, return_value=True),
-        patch("app.api.public.health.neo4j_health", new_callable=AsyncMock, return_value=True),
     ):
         mock_db.execute_raw = AsyncMock(return_value=None)
         response = client.get("/health")

@@ -1,6 +1,6 @@
 """Async memory pipeline.
 
-Orchestrates: extract -> conflict check -> score -> dedup -> store -> embed -> graph update.
+Orchestrates: extract -> conflict check -> score -> dedup -> store -> embed -> entity link.
 Runs as FastAPI BackgroundTasks (non-blocking).
 """
 
@@ -8,11 +8,15 @@ import logging
 from datetime import datetime
 
 from app.db import db
+from app.services.memory.entity_repo import (
+    record_entities_for_memory,
+    record_preferences_for_memory,
+    record_topics_for_memory,
+)
 from app.services.memory.extraction import extract_memories
 from app.services.memory.filter import should_extract_memory
 from app.services.memory.storage import store_memory
 from app.services.memory.conflict import detect_conflicts, resolve_conflict
-from app.services.graph_service import update_graph_from_extraction
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -102,19 +106,35 @@ async def process_memory_pipeline(
         if memory_id:
             stored_ids.append(memory_id)
 
-            # Step 3: Update graph
+            # Step 3: Link entities / topics / preferences to this memory.
+            # Best-effort: failure here is advisory (retrieval still works
+            # from the memory row + pgvector) so we log-and-continue.
+            memory_source = mem.get("owner", "user")
             try:
-                await update_graph_from_extraction(
-                    user_id,
-                    memory_id,
-                    extraction,
-                    workspace_id=workspace_id or "legacy",
-                    agent_id=getattr(active_workspace, "agentId", None),
-                    user_name=getattr(getattr(active_workspace, "user", None), "name", None),
-                    agent_name=getattr(getattr(active_workspace, "agent", None), "name", None),
+                await record_entities_for_memory(
+                    memory_id=memory_id,
+                    memory_source=memory_source,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    entities=extraction.get("entities", []),
+                )
+                await record_topics_for_memory(
+                    memory_id=memory_id,
+                    memory_source=memory_source,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    topics=extraction.get("topics", []),
+                )
+                await record_preferences_for_memory(
+                    memory_id=memory_id,
+                    memory_source=memory_source,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    preferences=extraction.get("preferences", []),
                 )
             except Exception as e:
-                logger.warning(f"Graph update failed for memory {memory_id}: {e}")
+                logger.warning(f"Entity linking failed for memory {memory_id}: {e}")
 
+    _ = active_workspace  # kept for future per-agent/per-user enrichment
     logger.info(f"Pipeline complete: {len(stored_ids)}/{len(memories)} memories stored")
     return stored_ids

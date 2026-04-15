@@ -59,37 +59,6 @@ else
     sleep 2
 fi
 
-# ── Check & start Neo4j ──
-echo "Checking Neo4j..."
-NEO4J_RUNNING=$(docker ps --filter "publish=7687" --format "{{.Names}}" 2>/dev/null || true)
-if [ -z "$NEO4J_RUNNING" ]; then
-    # Try docker-compose
-    COMPOSE_FILE=""
-    [ -f "docker-compose.yml" ] && COMPOSE_FILE="docker-compose.yml"
-    [ -f "../docker-compose.yml" ] && COMPOSE_FILE="../docker-compose.yml"
-
-    if [ -n "$COMPOSE_FILE" ]; then
-        echo "Starting Neo4j via docker compose..."
-        docker compose -f "$COMPOSE_FILE" up -d neo4j 2>/dev/null || \
-        docker-compose -f "$COMPOSE_FILE" up -d neo4j 2>/dev/null || true
-    else
-        NEO4J_STOPPED=$(docker ps -a --filter "publish=7687" --format "{{.Names}}" 2>/dev/null | head -1)
-        if [ -n "$NEO4J_STOPPED" ]; then
-            echo "Starting stopped Neo4j container ($NEO4J_STOPPED)..."
-            docker start "$NEO4J_STOPPED"
-        else
-            echo "WARNING: No Neo4j container found. Start it manually."
-        fi
-    fi
-    sleep 2
-fi
-# Verify Neo4j is reachable
-if curl -s http://localhost:7474 >/dev/null 2>&1; then
-    echo "  Neo4j: OK"
-else
-    echo "  Neo4j: started (may take a few seconds to be ready)"
-fi
-
 # ── Ensure Prisma client is generated ──
 echo "Generating Prisma client..."
 export PATH="$(pwd)/.venv/bin:$PATH"

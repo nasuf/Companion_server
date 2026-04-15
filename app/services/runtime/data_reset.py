@@ -6,7 +6,6 @@
 import logging
 
 from app.db import db
-from app.neo4j_client import run_write
 from app.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -30,8 +29,8 @@ async def clear_agent_runtime_state(
         conv_ids = [c["id"] for c in (convs or [])]
 
     stats["postgres"] = await _clear_runtime_postgres(agent_id)
-    stats["neo4j"] = await _clear_neo4j(workspace_id, agent_id, user_id)
     stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
+    _ = workspace_id  # reserved: was used by Neo4j archival path
 
     logger.info(f"Runtime state cleared for agent={agent_id} user={user_id}: {stats}")
     return stats
@@ -65,41 +64,6 @@ async def _clear_runtime_postgres(agent_id: str) -> int:
             logger.warning(f"PG runtime cleanup failed: {sql[:60]}... — {e}")
 
     return total
-
-
-async def _clear_neo4j(workspace_id: str, agent_id: str, user_id: str) -> int:
-    """归档 Neo4j 当前 workspace 节点，不硬删历史。"""
-    updated = 0
-    queries = [
-        (
-            """
-            MATCH (a:AI {id: $agent_id, workspace_id: $workspace_id})
-            SET a.status = 'archived', a.archived_at = datetime()
-            """,
-            {"agent_id": agent_id, "workspace_id": workspace_id},
-        ),
-        (
-            """
-            MATCH (u:User {id: $user_id, workspace_id: $workspace_id})
-            SET u.status = 'archived', u.archived_at = datetime()
-            """,
-            {"user_id": user_id, "workspace_id": workspace_id},
-        ),
-        (
-            """
-            MATCH (m:Memory {workspace_id: $workspace_id})
-            SET m.status = 'archived', m.archived_at = datetime()
-            """,
-            {"workspace_id": workspace_id},
-        ),
-    ]
-    for query, params in queries:
-        try:
-            await run_write(query, params)
-            updated += 1
-        except Exception as e:
-            logger.warning(f"Neo4j archive failed: {e}")
-    return updated
 
 
 async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
@@ -361,33 +325,18 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     # 8. 清理 Redis
     stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
 
-    # 9. 清理 Neo4j（物理删除）
-    stats["neo4j"] = await _hard_delete_neo4j(workspace_ids, agent_id, user_id)
+    # 9. 清理 entity knowledge layer (memory_mentions 由 memories_* 删除
+    # 触发器自动级联；memory_entities 按 workspace + user 清干净即可)
+    if workspace_ids:
+        try:
+            cnt = await db.execute_raw(
+                "DELETE FROM memory_entities WHERE user_id = $1 "
+                "AND workspace_id = ANY($2::text[])",
+                user_id, workspace_ids,
+            )
+            stats["entities"] = cnt or 0
+        except Exception as e:
+            logger.warning(f"Entity cleanup failed: {e}")
 
     logger.info(f"Hard deleted agent={agent_id} user={user_id}: {stats}")
     return stats
-
-
-async def _hard_delete_neo4j(
-    workspace_ids: list[str], agent_id: str, user_id: str,
-) -> int:
-    """物理删除 Neo4j 中该 agent 相关的所有节点和关系。"""
-    deleted = 0
-    queries = [
-        (
-            "MATCH (n {agent_id: $agent_id}) DETACH DELETE n",
-            {"agent_id": agent_id},
-        ),
-    ]
-    for ws_id in workspace_ids:
-        queries.append((
-            "MATCH (n {workspace_id: $ws_id}) DETACH DELETE n",
-            {"ws_id": ws_id},
-        ))
-    for query, params in queries:
-        try:
-            await run_write(query, params)
-            deleted += 1
-        except Exception as e:
-            logger.warning(f"Neo4j hard delete failed: {e}")
-    return deleted

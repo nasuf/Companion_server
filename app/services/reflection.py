@@ -7,6 +7,7 @@ relationship update, personality observation.
 import logging
 
 from app.services.memory.consolidation import consolidate_daily, consolidate_weekly
+from app.services.memory.entity_repo import consolidate_entities_globally
 from app.services.memory.lifecycle import decay_importance
 
 logger = logging.getLogger(__name__)
@@ -31,5 +32,16 @@ async def run_weekly_reflection():
 
     # 1. Consolidate L2 patterns to L1
     await consolidate_weekly()
+
+    # 2. Entity knowledge-layer hygiene: archive stale entities, merge
+    # near-duplicate names (handles "妈妈/我妈/妈咪" drift that accumulates
+    # over months of chat).
+    try:
+        stats = await consolidate_entities_globally()
+        logger.info(
+            f"Entity consolidation: archived={stats['archived']}, merged={stats['merged']}"
+        )
+    except Exception as e:
+        logger.warning(f"Entity consolidation failed: {e}")
 
     logger.info("Weekly reflection complete")
