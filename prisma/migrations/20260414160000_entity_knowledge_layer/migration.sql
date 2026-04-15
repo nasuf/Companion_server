@@ -1,7 +1,6 @@
--- Entity knowledge layer. Replaces the Neo4j graph projection that was
--- only doing statistical aggregation (top-N entities/topics/preferences).
--- Lives alongside memories_user / memories_ai; single source of truth,
--- cascades naturally on entity delete.
+-- Entity knowledge layer: canonical entities (people / places / topics /
+-- preferences) with a many-to-many mentions edge to memories_user/ai.
+-- Single source of truth, cascades naturally on entity delete.
 
 CREATE TABLE "memory_entities" (
     "id"              TEXT        NOT NULL,

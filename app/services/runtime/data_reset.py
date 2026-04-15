@@ -30,7 +30,7 @@ async def clear_agent_runtime_state(
 
     stats["postgres"] = await _clear_runtime_postgres(agent_id)
     stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
-    _ = workspace_id  # reserved: was used by Neo4j archival path
+    _ = workspace_id  # reserved for future per-workspace runtime state cleanup
 
     logger.info(f"Runtime state cleared for agent={agent_id} user={user_id}: {stats}")
     return stats

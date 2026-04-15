@@ -492,7 +492,7 @@ model TimeTrigger {
   @@map("time_triggers")
 }
 
-// ── Entity knowledge layer (replaces Neo4j graph projection) ──
+// ── Entity knowledge layer ──
 
 model MemoryEntity {
   id             String   @id @default(uuid())

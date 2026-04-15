@@ -1,7 +1,7 @@
-"""清空所有数据库（PostgreSQL + Neo4j + Redis），保留表结构。
+"""清空所有数据库（PostgreSQL + Redis），保留表结构。
 
 Usage:
-    cd Server
+    cd Companion_server
     python -m scripts.clear_database
 """
 
@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # 按外键依赖顺序排列：子表在前，父表在后
 _TABLES = [
     "stickers",
+    "memory_mentions",
+    "memory_entities",
     "memory_embeddings",
     "memory_changelogs",
     "memories_user",
@@ -51,19 +53,6 @@ async def _clear_postgres():
         await db.disconnect()
 
 
-async def _clear_neo4j():
-    from app.neo4j_client import run_write, close_neo4j
-
-    print("[Neo4j]")
-    try:
-        await run_write("MATCH (n) DETACH DELETE n")
-        print("  all nodes and relationships deleted")
-    except Exception as e:
-        print(f"  ERROR - {e}")
-    finally:
-        await close_neo4j()
-
-
 async def _clear_redis():
     from app.redis_client import get_redis, close_redis
 
@@ -81,7 +70,6 @@ async def _clear_redis():
 
 async def main():
     await _clear_postgres()
-    await _clear_neo4j()
     await _clear_redis()
     print("\nDone.")
 

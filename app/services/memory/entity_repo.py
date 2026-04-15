@@ -1,4 +1,4 @@
-"""Entity knowledge layer — Postgres-native replacement for the Neo4j projection.
+"""Entity knowledge layer.
 
 Stores canonical entities (people / places / orgs / topics / preferences) that
 appear across a user's memories, plus a many-to-many `memory_mentions` edge
@@ -292,11 +292,11 @@ async def get_relationship_context(
     main_categories: list[str] | None = None,
     sub_categories: list[str] | None = None,
 ) -> dict:
-    """Shape-compatible with the old Neo4j `get_relationship_context`.
+    """Topics / named entities / dominant categories for prompt context.
 
     Returns {"topics": [...], "entities": [...], "categories": [...]} where
     entities are "name (type)" strings and categories come from a direct
-    SQL aggregation over memories_* (no graph projection needed).
+    SQL aggregation over memories_*.
     """
     top_topics = await top_entities(
         user_id=user_id, workspace_id=workspace_id,
@@ -364,8 +364,7 @@ async def get_user_preferences(
 ) -> list[dict]:
     """Return all preferences the user has expressed.
 
-    Shape matches the old Neo4j `get_user_preferences`:
-        [{"category": "food", "value": "ramen", "count": 3}, ...]
+    Shape: [{"category": "food", "value": "ramen", "count": 3}, ...]
     """
     rows = await db.query_raw(
         """
