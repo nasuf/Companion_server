@@ -256,8 +256,7 @@ async def update_agent(agent_id: str, data: AgentUpdate):
     update_data = {}
     if data.name is not None:
         update_data["name"] = data.name
-    # Per spec §1.2: personality is no longer a persisted column; users that
-    # want to redo MBTI should regenerate via a dedicated endpoint (TBD).
+    # MBTI 走 POST /agents/{id}/regenerate-mbti, 不在通用 PATCH 里
     if data.background is not None:
         update_data["background"] = data.background
     if data.values is not None:
@@ -292,15 +291,17 @@ async def regenerate_mbti(agent_id: str, data: RegenerateMbtiRequest):
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    new_mbti = await build_mbti(data.mbti.model_dump())
-    await db.aiagent.update(
+    try:
+        new_mbti = await build_mbti(data.mbti.model_dump())
+    except ValueError as e:
+        # _validate_input raised on bad shape (e.g. unknown / missing keys
+        # that slipped past Pydantic). Surface as 400 not 500.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    refreshed = await db.aiagent.update(
         where={"id": agent_id},
         data={"mbti": Json(new_mbti), "currentMbti": Json(new_mbti)},
     )
-
-    refreshed = await db.aiagent.find_unique(where={"id": agent_id})
-    if not refreshed:
-        raise HTTPException(status_code=404, detail="Agent disappeared after update")
 
     return AgentResponse(
         id=refreshed.id,
