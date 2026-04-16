@@ -65,6 +65,7 @@ async def list_memories(
     main_category: str | None = None,
     sub_category: str | None = None,
     source: Literal["user", "ai"] | None = None,
+    search: str | None = None,
     limit: int = Query(default=50, le=200),
     offset: int = 0,
 ):
@@ -77,6 +78,15 @@ async def list_memories(
         where["mainCategory"] = main_category
     if sub_category:
         where["subCategory"] = sub_category
+    if search and search.strip():
+        # Substring match on content + summary; case-insensitive.
+        # Same UX as admin's adminGetMemories `search` param so the chat
+        # Inspector and Agent Overview behave identically.
+        q = search.strip()
+        where["OR"] = [
+            {"content": {"contains": q, "mode": "insensitive"}},
+            {"summary": {"contains": q, "mode": "insensitive"}},
+        ]
 
     memories = await memory_repo.find_many(
         source=source,
