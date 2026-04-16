@@ -210,6 +210,17 @@ async def invoke_json(
     **kwargs: Any,
 ) -> Any:
     """Invoke the model and parse the response as JSON."""
+    parsed, _ = await invoke_json_with_usage(model, prompt, **kwargs)
+    return parsed
+
+
+async def invoke_json_with_usage(
+    model: BaseChatModel,
+    prompt: str | list[BaseMessage],
+    **kwargs: Any,
+) -> tuple[Any, dict]:
+    """Same as invoke_json but also returns `{input_tokens, output_tokens}` when
+    available from the model. Empty dict if the provider doesn't expose usage."""
     if isinstance(prompt, str):
         messages = [HumanMessage(content=prompt)]
     else:
@@ -219,7 +230,14 @@ async def invoke_json(
         kwargs.setdefault("format", "json")
 
     response = await model.ainvoke(messages, **kwargs)
-    return _extract_json(response.content)
+    usage: dict = {}
+    meta = getattr(response, "usage_metadata", None)
+    if isinstance(meta, dict):
+        usage = {
+            "input_tokens": int(meta.get("input_tokens", 0) or 0),
+            "output_tokens": int(meta.get("output_tokens", 0) or 0),
+        }
+    return _extract_json(response.content), usage
 
 
 async def invoke_text(

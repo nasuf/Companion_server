@@ -12,7 +12,7 @@ from app.services.relationship.emotion import compute_baseline_emotion_llm, save
 from app.services.mbti import build_mbti, get_mbti
 from app.services.life_story import (
     activate_agent,
-    generate_life_story_memories,
+    generate_l1_coverage,
     get_progress,
     prepare_profile_for_agent,
     set_progress,
@@ -152,7 +152,7 @@ async def create_agent(data: AgentCreate):
             # 逻辑自洽且无跨任务依赖，可安全并行。
             async def _run_memories():
                 try:
-                    await generate_life_story_memories(
+                    await generate_l1_coverage(
                         agent_id=agent.id,
                         user_id=data.user_id,
                         name=agent.name,

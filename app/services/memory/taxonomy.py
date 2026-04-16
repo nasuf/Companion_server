@@ -77,6 +77,160 @@ COMPRESSION_RULES: dict[str, dict[str, int | bool]] = {
     "思维": {"batch_size": 6, "allow_cross_subcategory": False},
 }
 
+# ── Initial L1 coverage policy (agent provisioning) ───────────────────
+# spec §1.2: agent 创建时应保证每个 (main, sub) 子类都有 L1 记忆。
+# Singleton: 只能有 1 条(事实型,多了就矛盾)。Multi: 3-5 条。
+# 少数子类豁免: 刚创建时既无经历也无用户互动，硬塞只能编造。
+
+L1_SINGLETON_SUBS: frozenset[tuple[str, str]] = frozenset({
+    ("身份", "姓名"),
+    ("身份", "年龄"),
+    ("身份", "性别"),
+    ("身份", "生日"),
+    ("身份", "星座"),
+    ("身份", "生肖"),
+    ("身份", "血型"),
+    ("身份", "民族"),
+    ("身份", "出生地"),
+    ("身份", "成长地"),
+    ("身份", "现居地"),
+})
+
+# 豁免: agent 刚创建时不应预填; 留给聊天/时间累积。
+# 注: 情绪子类不豁免 — agent 过往的"刻骨铭心"情绪事件是人格基石,
+# 需要 LLM 根据 MBTI + profile 生成, 而不是留空。
+L1_COVERAGE_EXEMPT: frozenset[tuple[str, str]] = frozenset({
+    # AI 与当前用户的互动, 用户 0 互动时不能预填
+    ("生活", "交互"),
+    # "其他" 类目不强制初始化, 留给后续记忆沉淀
+    ("身份", "其他"),
+    ("偏好", "其他"),
+    ("生活", "其他"),
+    ("情绪", "其他"),
+    ("思维", "其他"),
+})
+
+# 条件可选: 是否生成依赖 profile 分析 (非简单的 "phase-1 have > 0")。
+# 调用方使用 analyze_conditional_subs(profile) 动态决定哪些 OPTIONAL 要生成。
+L1_CONDITIONAL_SUBS: frozenset[tuple[str, str]] = frozenset({
+    ("身份", "宠物"),       # 依赖 profile 养宠信号
+    ("生活", "宠物"),       # 同上
+    ("思维", "信仰/寄托"),  # 依赖 profile 信仰信号
+    ("偏好", "人际厌恶"),   # profile 若无 dislikes.habits 则跳过
+})
+
+# 情绪类记忆目标条数 — 少而深, 每类 2-3 条"刻骨铭心"的过往事件。
+L1_TARGET_EMOTION: tuple[int, int] = (2, 3)
+L1_TARGET_MULTI: tuple[int, int] = (3, 5)
+
+
+def l1_target_count(main: str, sub: str) -> int:
+    """返回 (main, sub) 在初始 L1 生成时的目标条数。
+
+    - singleton: 1
+    - EXEMPT: 0
+    - 情绪 (非其他): 取 L1_TARGET_EMOTION 中值 (2-3 → 2)
+    - 其他多值: 取 L1_TARGET_MULTI 中值 (3-5 → 4)
+    """
+    if (main, sub) in L1_COVERAGE_EXEMPT:
+        return 0
+    if (main, sub) in L1_SINGLETON_SUBS:
+        return 1
+    if main == "情绪":
+        return (L1_TARGET_EMOTION[0] + L1_TARGET_EMOTION[1]) // 2
+    return (L1_TARGET_MULTI[0] + L1_TARGET_MULTI[1]) // 2
+
+
+def l1_min_importance(main: str, sub: str) -> float:
+    """初始写入时该子类的最低 importance (对齐 PROMOTION_RULES.min_importance)。"""
+    rule = PROMOTION_RULES.get((main, sub))
+    if rule:
+        return float(rule.get("min_importance", 0.75))
+    return 0.75
+
+
+_PET_KEYWORDS: tuple[str, ...] = (
+    # 泛指 / 动作
+    "宠物", "养", "喂", "遛",
+    # 常见物种
+    "狗", "猫", "喵", "犬", "兔", "仓鼠", "龟", "鹦鹉", "锦鲤", "猫咪",
+    # 常见品种 (family/quirks 文本里容易出现)
+    "拉布拉多", "金毛", "泰迪", "柯基", "哈士奇", "柴犬", "边牧",
+    "布偶", "英短", "美短", "暹罗", "橘猫", "狸花",
+)
+
+_FAITH_KEYWORDS: tuple[str, ...] = (
+    "信仰", "宗教", "神", "佛", "道", "基督", "天主",
+    "祷告", "冥想", "因果", "菩萨", "耶稣", "真主",
+    "信奉", "皈依", "灵性",
+)
+
+_INTERPERSONAL_DISLIKE_SIGNALS: tuple[str, ...] = (
+    "虚伪", "背后", "说谎", "打断", "喧哗", "打扰",
+    "抢功", "邀功", "推卸", "拖延", "敷衍",
+)
+
+
+def as_dict(container: dict, key: str) -> dict:
+    """Return `container[key]` if it's a dict, else `{}`. Defensive accessor
+    for profile traversal where sections may be missing or malformed."""
+    v = container.get(key)
+    return v if isinstance(v, dict) else {}
+
+
+def analyze_conditional_subs(profile_data: dict) -> set[tuple[str, str]]:
+    """Decide which L1_CONDITIONAL_SUBS to include in the initial gap plan.
+
+    启发式分析 profile, 返回应该生成的 conditional 子类集合。无信号则跳过
+    (不编造)。调用方把结果并入 gap 计划, 让 LLM 生成。
+    """
+    include: set[tuple[str, str]] = set()
+
+    identity = as_dict(profile_data, "identity")
+    likes = as_dict(profile_data, "likes")
+    fears = as_dict(profile_data, "fears")
+    values = as_dict(profile_data, "values")
+    dislikes = as_dict(profile_data, "dislikes")
+
+    # 宠物: 只看不矛盾的正向信号。likes.animals 中被 fears 列为害怕的动物先剔除,
+    # 避免 "喜欢猫" 和 "怕猫" 同时出现时误判。
+    la = likes.get("animals") if isinstance(likes.get("animals"), list) else []
+    fa = fears.get("animals") if isinstance(fears.get("animals"), list) else []
+    liked_animals = set(la or [])
+    feared_animals = set(fa or [])
+    non_conflicting_pets = liked_animals - feared_animals
+    positive_pet_text = " ".join([
+        str(identity.get("family") or ""),
+        " ".join(sorted(non_conflicting_pets)),
+        str(likes.get("quirks") or ""),
+    ])
+    pet_keyword_hit = any(kw in positive_pet_text for kw in _PET_KEYWORDS)
+    if pet_keyword_hit or non_conflicting_pets:
+        include.add(("身份", "宠物"))
+        include.add(("生活", "宠物"))
+
+    # 信仰: motto / believes / family 中出现宗教/灵性关键词
+    faith_text = " ".join([
+        str(values.get("motto") or ""),
+        " ".join(values.get("believes") or []) if isinstance(values.get("believes"), list) else "",
+        str(identity.get("family") or ""),
+    ])
+    if any(kw in faith_text for kw in _FAITH_KEYWORDS):
+        include.add(("思维", "信仰/寄托"))
+
+    # 人际厌恶: dislikes.habits 有内容, 或 abilities/values 含人际负面信号
+    if dislikes.get("habits"):
+        include.add(("偏好", "人际厌恶"))
+    else:
+        interp_text = " ".join([
+            " ".join(values.get("opposes") or []) if isinstance(values.get("opposes"), list) else "",
+            str(values.get("motto") or ""),
+        ])
+        if any(kw in interp_text for kw in _INTERPERSONAL_DISLIKE_SIGNALS):
+            include.add(("偏好", "人际厌恶"))
+
+    return include
+
 # ── Full sub-category sets (used to compose the L1/L2/L3 slices below) ──
 
 _IDENTITY_FULL: tuple[str, ...] = (

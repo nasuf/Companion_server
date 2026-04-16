@@ -66,3 +66,44 @@ def patch_intimacy_redis(mock_redis):
     """Auto-patch get_redis for intimacy service tests."""
     with patch("app.services.relationship.intimacy.get_redis", return_value=mock_redis):
         yield mock_redis
+
+
+class FakeRedis:
+    """In-memory Redis stub for lock + SET/GET/EVAL assertions.
+
+    Supports `set(key, value, nx=?, ex=?)`, `get`, `delete`, and `eval` with
+    a Lua-compatible compare-and-delete emulation. Tests that need richer
+    behavior (pubsub, hashes) should mock those methods on top.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def set(self, key: str, value, *, nx: bool = False, ex: int | None = None):
+        if nx and key in self._store:
+            return False
+        self._store[key] = value
+        return True
+
+    async def get(self, key: str):
+        return self._store.get(key)
+
+    async def delete(self, key: str):
+        return self._store.pop(key, None) is not None
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args):
+        # Emulate the only Lua pattern we use: CAS compare-and-delete.
+        keys = keys_and_args[:numkeys]
+        args = keys_and_args[numkeys:]
+        key = keys[0]
+        token = args[0]
+        if self._store.get(key) == token:
+            self._store.pop(key, None)
+            return 1
+        return 0
+
+
+@pytest.fixture
+def fake_redis() -> FakeRedis:
+    """Fresh FakeRedis per test."""
+    return FakeRedis()
