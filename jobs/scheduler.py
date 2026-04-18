@@ -467,7 +467,9 @@ async def _run_aggregation_scan():
 
                 ws = manager.get(conv_id)
                 if ws:
-                    await stream_to_ws(ws, gen)
+                    # 传 conversation_id，stream_to_ws 内部每次 send 前都会
+                    # 重新 manager.get() 获取当前活跃 WS，兼容前端重连场景
+                    await stream_to_ws(ws, gen, conv_id)
                     logger.debug(f"Delayed reply pushed via WS for conv={conv_id[:8]}")
                 else:
                     # Consume the generator to trigger the AI response processing

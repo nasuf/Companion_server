@@ -8,6 +8,7 @@ import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from prisma import Json
 
 from app.db import db
@@ -189,8 +190,14 @@ async def _handle_message(
         await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
 
 
-async def stream_to_ws(ws: WebSocket, generator) -> None:
-    """将 stream_chat_response() 的 yield 转为 WS send_json。"""
+async def stream_to_ws(ws: WebSocket, generator, conversation_id: str | None = None) -> None:
+    """将 stream_chat_response() 的 yield 转为 WS send_json。
+
+    每次推送前重新从 manager 获取当前活跃 WS。这对应前端重连场景：
+    LLM 流式生成往往持续几十秒，期间原 WS 可能被新连接替换。
+    如果只保留最初的 ws 引用，后续 send_json 会推给已关闭的连接，
+    消息丢失，前端永远等不到 reply。
+    """
     async for event in generator:
         event_type = event.get("event", "")
         data_str = event.get("data") or "{}"
@@ -198,4 +205,21 @@ async def stream_to_ws(ws: WebSocket, generator) -> None:
             data = json.loads(data_str)
         except (json.JSONDecodeError, TypeError):
             data = {"raw": data_str}
-        await ws.send_json({"type": event_type, "data": data})
+
+        # Prefer the current active WS for the conversation (handles reconnect).
+        target = manager.get(conversation_id) if conversation_id else None
+        if target is None:
+            target = ws
+        try:
+            if target.client_state == WebSocketState.CONNECTED:
+                await target.send_json({"type": event_type, "data": data})
+            else:
+                logger.debug(
+                    f"WS not connected, dropped event type={event_type} "
+                    f"for conv={(conversation_id or '')[:8]}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"WS send failed for conv={(conversation_id or '')[:8]} "
+                f"type={event_type}: {e}"
+            )
