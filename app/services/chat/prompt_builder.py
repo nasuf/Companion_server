@@ -17,7 +17,7 @@ from app.services.prompts.system_prompts import (
     MEMORY_TOKEN_BUDGET,
     MAX_PER_REPLY as _MAX_PER_REPLY,
     MAX_TOTAL_CHARS as _MAX_TOTAL_CHARS,
-    MAX_RECENT_MESSAGES,
+    CHAT_HISTORY_TOKEN_BUDGET,
 )
 
 
@@ -429,16 +429,31 @@ async def build_system_prompt(
 def build_chat_messages(
     system_prompt: str,
     messages: list[dict],
-    max_recent: int = MAX_RECENT_MESSAGES,
+    token_budget: int = CHAT_HISTORY_TOKEN_BUDGET,
 ) -> list[dict]:
-    """Return a list of role/content dicts ready for LLM consumption."""
+    """Return a list of role/content dicts ready for LLM consumption.
+
+    Uses a token budget instead of a fixed message count:
+    - Walks backwards from the latest message, adding complete messages
+      until the budget is exhausted.
+    - Short exchanges (嗯/好/哈哈) → more rounds of context.
+    - Long messages (深度倾诉) → fewer rounds but full content.
+    """
+    from app.services.memory.context_selector import estimate_tokens
+
+    selected: list[dict] = []
+    used_tokens = 0
+
+    for msg in reversed(messages):
+        content = msg.get("content", "")
+        tokens = estimate_tokens(content)
+        if used_tokens + tokens > token_budget and selected:
+            break  # budget exhausted (always include at least the latest message)
+        selected.append({"role": msg["role"], "content": content})
+        used_tokens += tokens
+
+    selected.reverse()
+
     result: list[dict] = [{"role": "system", "content": system_prompt}]
-
-    recent = messages[-max_recent:] if len(messages) > max_recent else messages
-    for msg in recent:
-        result.append({
-            "role": msg["role"],
-            "content": msg["content"],
-        })
-
+    result.extend(selected)
     return result
