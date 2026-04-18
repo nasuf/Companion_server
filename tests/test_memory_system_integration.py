@@ -17,10 +17,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.memory.context_selector import ClassifiedMemory
-from app.services.memory.relevance import compute_display_score, RelevanceLevel
-from app.services.memory.l2_dynamics import _time_factor, _frequency_factor
-from app.services.memory.l3_awakening import should_awaken_l3
+from app.services.memory.retrieval.context_selector import ClassifiedMemory
+from app.services.memory.retrieval.relevance import compute_display_score, RelevanceLevel
+from app.services.memory.lifecycle.l2_dynamics import _time_factor, _frequency_factor
+from app.services.memory.retrieval.l3_awakening import should_awaken_l3
 
 
 class TestSpecRetrievalDriven:
@@ -112,7 +112,7 @@ class TestContradictionStateMachine:
     async def test_save_load_clear_cycle(self, fake_redis):
         with patch("app.services.memory.contradiction.get_redis",
                    AsyncMock(return_value=fake_redis)):
-            from app.services.memory.contradiction import (
+            from app.services.memory.interaction.contradiction import (
                 save_pending_contradiction,
                 load_pending_contradiction,
                 clear_pending_contradiction,
@@ -132,7 +132,7 @@ class TestContradictionStateMachine:
     async def test_load_nonexistent_returns_none(self, fake_redis):
         with patch("app.services.memory.contradiction.get_redis",
                    AsyncMock(return_value=fake_redis)):
-            from app.services.memory.contradiction import load_pending_contradiction
+            from app.services.memory.interaction.contradiction import load_pending_contradiction
             assert await load_pending_contradiction("nonexistent") is None
 
 

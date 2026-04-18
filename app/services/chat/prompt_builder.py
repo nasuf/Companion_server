@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.memory.context_selector import ClassifiedMemory
+from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti, signal as mbti_signal
@@ -439,7 +439,7 @@ def build_chat_messages(
     - Short exchanges (嗯/好/哈哈) → more rounds of context.
     - Long messages (深度倾诉) → fewer rounds but full content.
     """
-    from app.services.memory.context_selector import estimate_tokens
+    from app.services.memory.retrieval.context_selector import estimate_tokens
 
     selected: list[dict] = []
     used_tokens = 0

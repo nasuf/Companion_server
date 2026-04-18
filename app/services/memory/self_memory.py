@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
-from app.services.memory import memory_repo
-from app.services.memory.storage import store_memory
+from app.services.memory.storage import repo as memory_repo
+from app.services.memory.storage.persistence import store_memory
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)

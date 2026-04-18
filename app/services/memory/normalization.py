@@ -2,7 +2,7 @@ import logging
 import math
 from typing import Any
 from app.services.memory.taxonomy import TAXONOMY, resolve_taxonomy
-from app.services.memory.embedding import generate_embedding
+from app.services.memory.storage.embedding import generate_embedding
 
 logger = logging.getLogger(__name__)
 

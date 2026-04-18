@@ -6,10 +6,10 @@ then applies resolution strategies (update, demote, ignore).
 
 import logging
 
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.config import LLM_INTENT_MIN_CONFIDENCE
-from app.services.memory.storage import log_memory_changelog
+from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.memory.taxonomy import conflict_candidate_scope
 from app.services.prompting.store import get_prompt_text
 

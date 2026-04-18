@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from app.services.memory.vector_search import search_by_embedding
+from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.llm.models import get_embedding_model
 
 logger = logging.getLogger(__name__)

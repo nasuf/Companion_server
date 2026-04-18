@@ -9,9 +9,9 @@ Retrieves memories using a combination strategy:
 import asyncio
 import logging
 
-from app.services.memory import memory_repo
-from app.services.memory.lifecycle import increment_mention_count
-from app.services.memory.vector_search import search_similar
+from app.services.memory.storage import repo as memory_repo
+from app.services.memory.lifecycle.decay import increment_mention_count
+from app.services.memory.retrieval.vector_search import search_similar
 
 logger = logging.getLogger(__name__)
 

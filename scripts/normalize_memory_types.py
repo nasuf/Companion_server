@@ -13,7 +13,7 @@ import sys
 # Add parent to path so we can import app modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.services.memory.storage import _TYPE_NORMALIZE_MAP
+from app.services.memory.storage.persistence import _TYPE_NORMALIZE_MAP
 
 _TABLES = ["memories_user", "memories_ai"]
 

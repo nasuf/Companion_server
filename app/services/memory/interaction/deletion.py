@@ -14,12 +14,12 @@ import json
 import logging
 
 from app.redis_client import get_redis
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, get_chat_model, invoke_json, invoke_text
 from app.services.memory.config import DELETION_SIMILARITY_THRESHOLD, LLM_INTENT_MIN_CONFIDENCE
-from app.services.memory.embedding import generate_embedding
-from app.services.memory.vector_search import search_by_embedding
-from app.services.memory.storage import log_memory_changelog
+from app.services.memory.storage.embedding import generate_embedding
+from app.services.memory.retrieval.vector_search import search_by_embedding
+from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)

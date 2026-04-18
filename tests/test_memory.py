@@ -11,13 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.memory.memory_repo import MemoryRecord
-from app.services.memory.retrieval import (
+from app.services.memory.storage.repo import MemoryRecord
+from app.services.memory.retrieval.legacy import (
     _memory_to_dict,
     format_memories_for_prompt,
     retrieve_memories,
 )
-from app.services.memory.storage import DEDUP_THRESHOLD, is_duplicate
+from app.services.memory.storage.persistence import DEDUP_THRESHOLD, is_duplicate
 
 
 # --- _memory_to_dict ---

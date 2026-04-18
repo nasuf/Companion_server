@@ -1,6 +1,6 @@
 """记忆消息过滤器测试。"""
 
-from app.services.memory.filter import should_extract_memory
+from app.services.memory.recording.filter import should_extract_memory
 
 
 class TestShouldExtractMemory:

@@ -184,7 +184,7 @@ async def scan_birthday_memories() -> None:
     PRD §9.6.3: 用户自定义日期（如生日）自动生成周期性触发器。
     """
     import re
-    from app.services.memory import memory_repo
+    from app.services.memory.storage import repo as memory_repo
 
     agents = await db.aiagent.find_many(where={"status": "active"})
     birthday_pattern = re.compile(r"(\d{1,2})月(\d{1,2})[日号].*生日|生日.*(\d{1,2})月(\d{1,2})[日号]")

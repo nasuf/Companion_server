@@ -8,16 +8,16 @@ Weekly: L2 patterns -> L1
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.services.memory import memory_repo
-from app.services.memory.lifecycle import compute_dynamic_weight
-from app.services.memory.embedding import generate_embedding, store_embedding
+from app.services.memory.storage import repo as memory_repo
+from app.services.memory.lifecycle.decay import compute_dynamic_weight
+from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import (
     get_compression_rule,
     get_promotion_rule,
     is_allowed_at,
     summarize_batch_taxonomy,
 )
-from app.services.memory.vector_search import search_by_embedding
+from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompting.store import get_prompt_text
 
@@ -145,7 +145,7 @@ async def check_l2_demotion_candidates() -> None:
 
     条件: 综合分数 < 0.49 AND 创建时间 > 30天。
     """
-    from app.services.memory.storage import log_memory_changelog
+    from app.services.memory.storage.persistence import log_memory_changelog
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=30)

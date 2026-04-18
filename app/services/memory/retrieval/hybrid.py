@@ -15,10 +15,10 @@ import re
 from datetime import datetime
 
 from app.db import db
-from app.services.memory.query_analyzer import analyze_query
-from app.services.memory.vector_search import search_similar, search_by_time_range
-from app.services.memory.context_selector import select_context
-from app.services.memory.entity_repo import get_relationship_context
+from app.services.memory.retrieval.query_analyzer import analyze_query
+from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
+from app.services.memory.retrieval.context_selector import select_context
+from app.services.memory.storage.entity_repo import get_relationship_context
 from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,

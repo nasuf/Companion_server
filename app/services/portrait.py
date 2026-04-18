@@ -8,7 +8,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from app.db import db
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompting.defaults import (
     PORTRAIT_GENERATION_PROMPT,

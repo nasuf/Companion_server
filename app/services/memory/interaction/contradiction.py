@@ -18,7 +18,7 @@ import logging
 
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, get_chat_model, invoke_json
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 
 _PENDING_KEY_PREFIX = "contradiction:pending:"
 _PENDING_TTL = 1800  # 30 min — generous window for user to reply

@@ -12,9 +12,9 @@ from collections.abc import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.services.memory.l2_dynamics import run_l2_adjustment
+from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
 from app.services.reflection import run_daily_reflection, run_weekly_reflection
-from app.services.memory.compression import compress_weekly, compress_monthly
+from app.services.memory.lifecycle.compression import compress_weekly, compress_monthly
 from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.relationship.emotion import decay_emotion_toward_baseline

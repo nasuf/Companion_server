@@ -26,8 +26,8 @@ from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, EXPAND_MAX_REPLY_COUNT,
     MAX_TOTAL_CHARS, EXPAND_MAX_TOTAL_CHARS,
 )
-from app.services.memory.hybrid_retrieval import hybrid_retrieve
-from app.services.memory.pipeline import process_memory_pipeline
+from app.services.memory.retrieval.hybrid import hybrid_retrieve
+from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.summarizer import summarize
 from app.services.relationship.emotion import (
     extract_emotion,
@@ -42,7 +42,7 @@ from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
 )
-from app.services.memory.deletion import (
+from app.services.memory.interaction.deletion import (
     detect_deletion_intent,
     generate_deletion_reply, DELETION_KEYWORDS,
     find_matching_memories,
@@ -50,14 +50,14 @@ from app.services.memory.deletion import (
     is_deletion_confirmed, generate_deletion_confirmation_prompt,
     execute_confirmed_deletion,
 )
-from app.services.memory.relevance import classify_memory_relevance, compute_display_score
-from app.services.memory.l3_awakening import should_awaken_l3, search_l3_memories
-from app.services.memory.contradiction import (
+from app.services.memory.retrieval.relevance import classify_memory_relevance, compute_display_score
+from app.services.memory.retrieval.l3_awakening import should_awaken_l3, search_l3_memories
+from app.services.memory.interaction.contradiction import (
     detect_l1_contradiction, generate_contradiction_inquiry,
     analyze_contradiction_response, apply_contradiction_resolution,
     save_pending_contradiction, load_pending_contradiction, clear_pending_contradiction,
 )
-from app.services.memory.access_log import log_memory_access
+from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.schedule import (
     get_cached_schedule, get_current_status, format_schedule_context,
@@ -566,7 +566,7 @@ async def stream_chat_response(
         past_times = [pt for pt in parsed_times if not pt.is_future]
         if not past_times:
             return []
-        from app.services.memory.vector_search import search_by_time_range
+        from app.services.memory.retrieval.vector_search import search_by_time_range
         all_rows = await asyncio.gather(
             *[search_by_time_range(user_id, pt.start, pt.end, limit=5) for pt in past_times]
         )

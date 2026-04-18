@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from app.db import db
-from app.services.memory.storage import log_memory_changelog
+from app.services.memory.storage.persistence import log_memory_changelog
 
 logger = logging.getLogger(__name__)
 

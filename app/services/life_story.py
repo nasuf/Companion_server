@@ -43,7 +43,7 @@ from app.services.memory.init_report import (
     phase_timer,
 )
 from app.services.memory.normalization import cosine_similarity
-from app.services.memory.storage import normalize_memory_type
+from app.services.memory.storage.persistence import normalize_memory_type
 from app.services.memory.taxonomy import (
     L1_CONDITIONAL_SUBS,
     L1_COVERAGE_EXEMPT,
@@ -59,7 +59,7 @@ from app.services.memory.taxonomy import (
     l1_target_count,
     resolve_taxonomy,
 )
-from app.services.memory.vector_search import format_vector
+from app.services.memory.retrieval.vector_search import format_vector
 from app.services.runtime.cache import bump_cache_version
 from app.services.workspace.workspaces import resolve_workspace_id
 

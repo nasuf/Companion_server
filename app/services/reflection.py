@@ -6,9 +6,9 @@ relationship update, personality observation.
 
 import logging
 
-from app.services.memory.consolidation import consolidate_daily, consolidate_weekly
-from app.services.memory.entity_repo import consolidate_entities_globally
-from app.services.memory.lifecycle import decay_importance
+from app.services.memory.lifecycle.consolidation import consolidate_daily, consolidate_weekly
+from app.services.memory.storage.entity_repo import consolidate_entities_globally
+from app.services.memory.lifecycle.decay import decay_importance
 
 logger = logging.getLogger(__name__)
 

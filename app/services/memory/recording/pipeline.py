@@ -7,16 +7,16 @@ Runs as FastAPI BackgroundTasks (non-blocking).
 import logging
 from datetime import datetime
 
-from app.services.memory.entity_repo import (
+from app.services.memory.storage.entity_repo import (
     record_entities_for_memory,
     record_preferences_for_memory,
     record_topics_for_memory,
 )
-from app.services.memory.extraction import extract_memories
-from app.services.memory.filter import should_extract_memory
-from app.services.memory.pre_filter import should_memorize
-from app.services.memory.storage import store_memory, log_memory_changelog
-from app.services.memory.conflict import detect_conflicts, resolve_conflict
+from app.services.memory.recording.extraction import extract_memories
+from app.services.memory.recording.filter import should_extract_memory
+from app.services.memory.recording.pre_filter import should_memorize
+from app.services.memory.storage.persistence import store_memory, log_memory_changelog
+from app.services.memory.recording.conflict import detect_conflicts, resolve_conflict
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)

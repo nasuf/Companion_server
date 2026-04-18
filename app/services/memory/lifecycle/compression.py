@@ -7,8 +7,8 @@ Monthly: 4 weekly summaries -> 1 monthly summary
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.services.memory import memory_repo
-from app.services.memory.embedding import generate_embedding, store_embedding
+from app.services.memory.storage import repo as memory_repo
+from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import is_allowed_at, summarize_batch_taxonomy
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompting.store import get_prompt_text

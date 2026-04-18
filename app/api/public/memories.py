@@ -9,8 +9,8 @@ from app.models.memory import (
     MemoryStatsGroup,
     MemoryStatsResponse,
 )
-from app.services.memory import memory_repo
-from app.services.memory.retrieval import retrieve_memories
+from app.services.memory.storage import repo as memory_repo
+from app.services.memory.retrieval.legacy import retrieve_memories
 from app.services.workspace.workspaces import resolve_workspace_id
 
 router = APIRouter(prefix="/memories", tags=["memories"])

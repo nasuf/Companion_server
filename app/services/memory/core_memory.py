@@ -7,7 +7,7 @@ facts (hard constraints the LLM must never contradict) from other memories
 
 from __future__ import annotations
 
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 from app.services.memory.taxonomy import l1_category_quotas
 
 

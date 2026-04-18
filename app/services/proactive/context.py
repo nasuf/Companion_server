@@ -8,7 +8,7 @@ from typing import Any
 from app.db import db
 from app.services.relationship.emotion import get_ai_emotion
 from app.services.relationship.intimacy import get_relationship_stage, get_topic_intimacy
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 from app.services.memory.core_memory import load_core_memory_strings
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
 

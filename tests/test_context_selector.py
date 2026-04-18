@@ -1,6 +1,6 @@
 """Tests for the context selector."""
 
-from app.services.memory.context_selector import select_context
+from app.services.memory.retrieval.context_selector import select_context
 
 
 def test_select_context_within_budget():

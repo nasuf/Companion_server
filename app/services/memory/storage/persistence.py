@@ -8,11 +8,11 @@ import logging
 from datetime import datetime
 
 from app.db import db
-from app.services.memory import memory_repo
+from app.services.memory.storage import repo as memory_repo
 from app.services.memory.config import DEDUP_THRESHOLD
-from app.services.memory.embedding import generate_embedding, store_embedding
+from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.taxonomy import resolve_taxonomy
-from app.services.memory.vector_search import search_by_embedding
+from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)

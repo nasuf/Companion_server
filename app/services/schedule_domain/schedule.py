@@ -200,7 +200,7 @@ async def _get_user_memory_summary(user_id: str | None, limit: int = 5) -> str:
     if not user_id:
         return ""
     try:
-        from app.services.memory import memory_repo
+        from app.services.memory.storage import repo as memory_repo
         memories = await memory_repo.find_many(
             source="user",
             where={"userId": user_id, "level": 1},
@@ -588,7 +588,7 @@ def format_full_schedule_for_query(
 
 async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "伙伴") -> list[str]:
     """回顾当日作息，合并调整记录+主动日志+聊天摘要，生成AI自我记忆。"""
-    from app.services.memory.storage import store_memory
+    from app.services.memory.storage.persistence import store_memory
     from app.services.proactive.history import get_proactive_history
 
     schedule = await get_cached_schedule(agent_id)

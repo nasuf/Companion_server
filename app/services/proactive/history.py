@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_text
-from app.services.memory.retrieval import retrieve_memories, format_memories_for_prompt
+from app.services.memory.retrieval.legacy import retrieve_memories, format_memories_for_prompt
 from app.services.relationship.emotion import get_ai_emotion
 from app.services.prompting.defaults import PROACTIVE_PROMPT
 from app.services.prompting.store import get_prompt_text
