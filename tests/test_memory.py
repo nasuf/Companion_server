@@ -108,9 +108,9 @@ class TestRetrieveMemories:
         semantic_results = [{"id": "shared_id", "content": "shared content", "summary": "shared", "similarity": 0.95}]
 
         with (
-            patch("app.services.memory.retrieval.search_similar", return_value=semantic_results),
-            patch("app.services.memory.retrieval.memory_repo.find_many", new_callable=AsyncMock, side_effect=[[mem], [mem]]),
-            patch("app.services.memory.retrieval.increment_mention_count", new_callable=AsyncMock),
+            patch("app.services.memory.retrieval.legacy.search_similar", return_value=semantic_results),
+            patch("app.services.memory.retrieval.legacy.memory_repo.find_many", new_callable=AsyncMock, side_effect=[[mem], [mem]]),
+            patch("app.services.memory.retrieval.legacy.increment_mention_count", new_callable=AsyncMock),
         ):
             results = await retrieve_memories("test query", "user1", semantic_k=5, recent_k=3, important_k=2)
             ids = [r["id"] for r in results]
@@ -118,8 +118,8 @@ class TestRetrieveMemories:
 
     async def test_empty_query_skips_semantic(self, mock_db):
         with (
-            patch("app.services.memory.retrieval.search_similar", new_callable=AsyncMock) as mock_search,
-            patch("app.services.memory.retrieval.memory_repo.find_many", new_callable=AsyncMock, side_effect=[[], []]),
+            patch("app.services.memory.retrieval.legacy.search_similar", new_callable=AsyncMock) as mock_search,
+            patch("app.services.memory.retrieval.legacy.memory_repo.find_many", new_callable=AsyncMock, side_effect=[[], []]),
         ):
             await retrieve_memories("", "user1")
             mock_search.assert_not_called()
@@ -131,22 +131,22 @@ class TestRetrieveMemories:
 class TestIsDuplicate:
     async def test_above_threshold_is_duplicate(self):
         results = [{"similarity": 0.95}]
-        with patch("app.services.memory.storage.search_by_embedding", return_value=results):
+        with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is True
 
     async def test_below_threshold_not_duplicate(self):
         results = [{"similarity": 0.85}]
-        with patch("app.services.memory.storage.search_by_embedding", return_value=results):
+        with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is False
 
     async def test_no_results_not_duplicate(self):
-        with patch("app.services.memory.storage.search_by_embedding", return_value=[]):
+        with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=[]):
             assert await is_duplicate("user1", "test", [0.1]) is False
 
     async def test_string_similarity_parsed(self):
         """Similarity can come as string from raw query."""
         results = [{"similarity": "0.92"}]
-        with patch("app.services.memory.storage.search_by_embedding", return_value=results):
+        with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is True
 
 

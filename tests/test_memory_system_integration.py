@@ -110,7 +110,7 @@ class TestContradictionStateMachine:
 
     @pytest.mark.asyncio
     async def test_save_load_clear_cycle(self, fake_redis):
-        with patch("app.services.memory.contradiction.get_redis",
+        with patch("app.services.memory.interaction.contradiction.get_redis",
                    AsyncMock(return_value=fake_redis)):
             from app.services.memory.interaction.contradiction import (
                 save_pending_contradiction,
@@ -130,7 +130,7 @@ class TestContradictionStateMachine:
 
     @pytest.mark.asyncio
     async def test_load_nonexistent_returns_none(self, fake_redis):
-        with patch("app.services.memory.contradiction.get_redis",
+        with patch("app.services.memory.interaction.contradiction.get_redis",
                    AsyncMock(return_value=fake_redis)):
             from app.services.memory.interaction.contradiction import load_pending_contradiction
             assert await load_pending_contradiction("nonexistent") is None
