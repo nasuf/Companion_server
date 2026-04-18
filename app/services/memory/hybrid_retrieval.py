@@ -14,9 +14,9 @@ import logging
 import re
 from datetime import datetime
 
+from app.db import db
 from app.services.memory.query_analyzer import analyze_query
 from app.services.memory.vector_search import search_similar, search_by_time_range
-from app.services.memory.ranker import rank_memories
 from app.services.memory.context_selector import select_context
 from app.services.memory.entity_repo import get_relationship_context
 from app.services.runtime.cache import (
@@ -65,6 +65,73 @@ def _is_trivial_message(message: str) -> bool:
     return False
 
 
+async def _keyword_fallback_search(
+    message: str,
+    user_id: str,
+    workspace_id: str | None,
+    already_seen: set[str],
+    levels: list[int],
+) -> list[dict]:
+    """Keyword-based fallback: direct ILIKE on content/summary.
+
+    Simple safety net — extract meaningful Chinese words (≥2 chars) from the
+    message and search for them in memory text. No synonym expansion; the
+    embedding model (bge-m3) should handle semantic bridging.
+    """
+    # Extract Chinese word chunks ≥ 2 characters (skip stopwords/particles)
+    raw_words = re.findall(r'[\u4e00-\u9fff]{2,}', message)
+    _STOP = {"什么", "怎么", "哪里", "哪个", "为什么", "怎样", "如何", "可以", "是不是", "能不能"}
+    words = [w for w in raw_words if w not in _STOP][:5]
+    if not words:
+        return []
+
+    # Build OR conditions
+    conditions: list[str] = []
+    params: list = [user_id]
+    idx = 2
+    for w in words:
+        conditions.append(f'("content" ILIKE ${idx} OR "summary" ILIKE ${idx})')
+        params.append(f"%{w}%")
+        idx += 1
+
+    level_list = ",".join(str(l) for l in levels)
+    where_clause = " OR ".join(conditions)
+
+    results: list[dict] = []
+    for table in ("memories_ai", "memories_user"):
+        ws_filter = f'AND "workspace_id" = ${idx}' if workspace_id else ""
+        query_params = params + ([workspace_id] if workspace_id else [])
+
+        try:
+            rows = await db.query_raw(
+                f"""
+                SELECT id, content, summary, level, importance, type,
+                       main_category, sub_category, created_at,
+                       0.75::float AS similarity
+                FROM "{table}"
+                WHERE "user_id" = $1
+                  AND "level" IN ({level_list})
+                  AND "is_archived" = false
+                  AND ({where_clause})
+                  {ws_filter}
+                ORDER BY importance DESC
+                LIMIT 10
+                """,
+                *query_params,
+            )
+            for r in rows:
+                mid = r.get("id", "")
+                if mid and mid not in already_seen:
+                    already_seen.add(mid)
+                    results.append(r)
+        except Exception as e:
+            logger.debug(f"Keyword fallback on {table} failed: {e}")
+
+    if results:
+        logger.info(f"Keyword fallback found {len(results)} extra memories for '{message[:30]}'")
+    return results
+
+
 async def hybrid_retrieve(
     message: str,
     user_id: str,
@@ -91,32 +158,29 @@ async def hybrid_retrieve(
         return cached
 
     analysis = await analyze_query(message)
-    retrieve_memory = bool(analysis.get("retrieve_memory", True))
+    # analyze_query extracts entities/categories/time_range for targeted search,
+    # but its retrieve_memory flag is IGNORED — the orchestrator's spec §3.1
+    # relevance classifier (强/中/弱) already gates whether retrieval results
+    # are used. If we reach here, the caller already decided retrieval is needed.
     retrieve_graph = bool(analysis.get("retrieve_graph", False))
-    context_entities = analysis.get("entities", []) or []
-    context_categories = analysis.get("main_categories", []) or []
     context_sub_categories = analysis.get("sub_categories", []) or []
-    levels = analysis.get("levels") or None  # None = all levels including L1
     time_range = analysis.get("time_range")
+    # Spec §3.2: always search L1+L2. Never let analyzer override to [2,3] etc.
+    levels = [1, 2]
 
-    # Parallel: vector search + graph context + optional time search
-    vector_task = (
-        search_similar(
-            message,
-            user_id,
-            top_k=50,
-            workspace_id=workspace_id,
-            main_categories=context_categories,
-            sub_categories=context_sub_categories,
-            levels=levels,
-        )
-        if retrieve_memory else asyncio.sleep(0, result=[])
+    # Always perform vector search (gating is done by orchestrator, not here)
+    vector_task = search_similar(
+        message,
+        user_id,
+        top_k=50,
+        workspace_id=workspace_id,
+        sub_categories=context_sub_categories,
+        levels=levels,
     )
     graph_task = (
         get_relationship_context(
             user_id=user_id,
             workspace_id=workspace_id,
-            main_categories=context_categories,
             sub_categories=context_sub_categories,
         )
         if retrieve_graph else asyncio.sleep(0, result=None)
@@ -136,7 +200,18 @@ async def hybrid_retrieve(
         vector_task, graph_task, time_task, return_exceptions=True
     )
 
-    # Merge vector + time results (union by id)
+    # Log raw vector search results for debugging
+    if isinstance(vector_results, Exception):
+        logger.info(f"[DEBUG-VEC] vector search EXCEPTION: {vector_results}")
+    else:
+        total = len(vector_results) if vector_results else 0
+        logger.info(f"[DEBUG-VEC] vector search returned {total} raw results for '{message[:50]}'")
+        if vector_results:
+            for r in sorted(vector_results, key=lambda x: float(x.get("similarity", 0)), reverse=True)[:5]:
+                logger.info(f"[DEBUG-VEC]   sim={float(r.get('similarity',0)):.3f} '{(r.get('summary') or r.get('content',''))[:60]}'")
+
+    # Merge vector + time results (union by id), apply similarity threshold.
+    _SIMILARITY_THRESHOLD = 0.50
     all_candidates: list[dict] = []
     seen_ids: set[str] = set()
     for source_results, label in [(vector_results, "vector"), (time_results, "time")]:
@@ -145,21 +220,28 @@ async def hybrid_retrieve(
             continue
         for mem in (source_results or []):
             mid = mem.get("id", "")
-            if mid and mid not in seen_ids:
+            sim = float(mem.get("similarity", 0))
+            if mid and mid not in seen_ids and sim >= _SIMILARITY_THRESHOLD:
                 seen_ids.add(mid)
                 all_candidates.append(mem)
 
-    # Rank (no entity context needed without query analyzer)
-    ranked = rank_memories(
-        all_candidates,
-        context_entities=context_entities,
-        context_categories=context_categories,
-        context_sub_categories=context_sub_categories,
-        top_k=20,
-    )
+    logger.info(f"[DEBUG-VEC] after threshold={_SIMILARITY_THRESHOLD}: {len(all_candidates)} candidates")
+
+    # Keyword fallback: when embedding model can't bridge the semantic gap
+    # between conversational queries ("你在哪里生活") and short factual memories
+    # ("我现在住在上海"), do a keyword search to catch what vector search missed.
+    if len(all_candidates) < 50:
+        keyword_results = await _keyword_fallback_search(
+            message, user_id, workspace_id, seen_ids, levels,
+        )
+        all_candidates.extend(keyword_results)
+
+    # Spec §3.2 step 1: sort by 当前分数 (importance) desc, take top 50.
+    all_candidates.sort(key=lambda m: float(m.get("importance", 0)), reverse=True)
+    top_candidates = all_candidates[:50]
 
     # Select within token budget (returns ClassifiedMemory list)
-    classified_memories = select_context(ranked, token_budget)
+    classified_memories = select_context(top_candidates, token_budget)
 
     # Plain text list for consumers that don't need classification (summarizer, etc.)
     memory_strings = [m.text for m in classified_memories] if classified_memories else None

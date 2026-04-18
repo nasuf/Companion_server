@@ -1,4 +1,9 @@
-"""Core L1 memory loading policy."""
+"""Core L1 memory loading policy.
+
+Returns (main_category, text) tuples so prompt_builder can split identity
+facts (hard constraints the LLM must never contradict) from other memories
+(soft references the LLM can weave in naturally).
+"""
 
 from __future__ import annotations
 
@@ -11,8 +16,15 @@ async def load_core_memory_strings(
     user_id: str,
     workspace_id: str | None,
     source: str = "user",
-) -> list[str]:
-    results: list[str] = []
+) -> list[tuple[str, str]]:
+    """Load L1 memories as ``(main_category, summary_text)`` pairs.
+
+    Iterates categories in quota order (身份 first), so identity facts are
+    always at the front of the returned list.  Falls back to a flat top-20
+    query if per-category search returns nothing (e.g. brand-new agent with
+    no taxonomy tags yet).
+    """
+    results: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     for category, limit in l1_category_quotas():
@@ -33,11 +45,12 @@ async def load_core_memory_strings(
             if not text or row.id in seen:
                 continue
             seen.add(row.id)
-            results.append(text)
+            results.append((category, text))
 
     if results:
         return results
 
+    # Fallback: no per-category rows (legacy data without mainCategory).
     rows = await memory_repo.find_many(
         source=source,
         where={
@@ -49,4 +62,8 @@ async def load_core_memory_strings(
         order={"importance": "desc"},
         take=20,
     )
-    return [row.summary or row.content for row in rows if (row.summary or row.content)]
+    return [
+        (getattr(row, "mainCategory", "") or "生活", row.summary or row.content)
+        for row in rows
+        if (row.summary or row.content)
+    ]

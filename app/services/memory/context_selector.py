@@ -15,6 +15,11 @@ class ClassifiedMemory:
     text: str
     relevance: str  # "strong" | "medium"
     score: float
+    id: str = ""  # memory row ID for access logging
+    importance: float = 0.5
+    similarity: float = 0.8
+    created_at: str | None = None
+    display_score: float = 0.0  # set by reranking in orchestrator
 
 
 def estimate_tokens(text: str) -> int:
@@ -54,13 +59,18 @@ def select_context(
             continue
 
         score = float(mem.get("rank_score", mem.get("score", 0.5)))
-        if score >= 0.7:
-            relevance = "strong"
-        else:
-            relevance = "medium"
+        relevance = "strong" if score >= 0.7 else "medium"
 
         seen_ids.add(mid)
-        selected.append(ClassifiedMemory(text=text, relevance=relevance, score=score))
+        selected.append(ClassifiedMemory(
+            text=text,
+            relevance=relevance,
+            score=score,
+            id=mid,
+            importance=float(mem.get("importance", 0.5)),
+            similarity=float(mem.get("similarity", 0.8)),
+            created_at=mem.get("created_at"),
+        ))
         used_tokens += tokens
 
     return selected

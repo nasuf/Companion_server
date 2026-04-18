@@ -96,7 +96,10 @@ def test_create_agent(mock_deps):
         response = client.post("/agents", json={
             "name": "TestBot",
             "user_id": "user-id",
-            "mbti": {"EI": 70, "NS": 60, "TF": 40, "JP": 30},
+            "personality": {
+                "lively": 70, "rational": 60, "emotional": 40,
+                "planned": 55, "spontaneous": 45, "creative": 65, "humor": 50,
+            },
         })
         assert response.status_code == 200
         assert response.json()["name"] == "TestBot"

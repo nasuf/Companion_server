@@ -24,17 +24,17 @@ class Settings(BaseSettings):
     remote_chat_model: str = "qwen3.5-plus"
     remote_small_model: str = "qwen3.5-flash"
 
-    # Internal embedding defaults used by the memory system
-    local_embedding_model: str = "nomic-embed-text"
-    remote_embedding_model: str = "text-embedding-v3"
-    embedding_dimensions: int = 768
+    # Embedding (always via Ollama, set EMBEDDING_MODEL in .env)
+    embedding_model: str = "bge-m3"
+    embedding_dimensions: int = 1024
 
     # Advanced / legacy overrides
     chat_model: str = ""
     summarizer_model: str = ""
     utility_model: str = ""
+    prefilter_model: str = ""  # Override for pre-filter model (default: utility_model)
+    enable_memory_prefilter: bool = True  # Spec §2.1.2: small model "记/不记" before big model extraction
     ollama_model: str = ""
-    embedding_model: str = ""
     llm_provider: str = ""
     chat_provider: str = ""
     summarizer_provider: str = ""

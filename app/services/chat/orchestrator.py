@@ -20,7 +20,7 @@ from prisma import Json
 
 from app.config import settings
 from app.db import db
-from app.services.llm.models import get_chat_model, convert_messages
+from app.services.llm.models import get_chat_model, convert_messages, invoke_text
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, EXPAND_MAX_REPLY_COUNT,
@@ -28,7 +28,6 @@ from app.services.prompts.system_prompts import (
 )
 from app.services.memory.hybrid_retrieval import hybrid_retrieve
 from app.services.memory.pipeline import process_memory_pipeline
-from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.summarizer import summarize
 from app.services.relationship.emotion import (
     extract_emotion,
@@ -44,9 +43,21 @@ from app.services.schedule_domain.timing import (
     explain_delay_reason,
 )
 from app.services.memory.deletion import (
-    detect_deletion_intent, delete_memories_by_description,
+    detect_deletion_intent,
     generate_deletion_reply, DELETION_KEYWORDS,
+    find_matching_memories,
+    save_pending_deletion, load_pending_deletion, clear_pending_deletion,
+    is_deletion_confirmed, generate_deletion_confirmation_prompt,
+    execute_confirmed_deletion,
 )
+from app.services.memory.relevance import classify_memory_relevance, compute_display_score
+from app.services.memory.l3_awakening import should_awaken_l3, search_l3_memories
+from app.services.memory.contradiction import (
+    detect_l1_contradiction, generate_contradiction_inquiry,
+    analyze_contradiction_response, apply_contradiction_resolution,
+    save_pending_contradiction, load_pending_contradiction, clear_pending_contradiction,
+)
+from app.services.memory.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.schedule import (
     get_cached_schedule, get_current_status, format_schedule_context,
@@ -348,6 +359,56 @@ async def stream_chat_response(
             _end_trace(_trace_ctx, trace_id, conversation_id)
             return
 
+    # --- Pending cross-message state checks (BEFORE intent dispatch) ---
+    # User replies to contradiction inquiries or deletion confirmations won't
+    # contain the original intent keywords, so intent detection would miss them.
+    # Check Redis pending state FIRST and short-circuit if found.
+
+    # §4 step 3-5: Contradiction resolution
+    pending_conflict = await load_pending_contradiction(conversation_id)
+    if pending_conflict:
+        try:
+            analysis = await analyze_contradiction_response(user_message, pending_conflict)
+            await apply_contradiction_resolution(pending_conflict, analysis)
+            await clear_pending_contradiction(conversation_id)
+            change = analysis.get("change_type", "新增")
+            reason = analysis.get("reason", "")
+            agent_name = agent.name if agent else "AI"
+            try:
+                reply = await invoke_text(get_chat_model(),
+                    f"你是{agent_name}。用户刚才解释了一个信息变化：{reason}（类型：{change}）。"
+                    f"请用1-2句自然的话回应，表示你记住了新的情况，然后把话题拉回正轨。"
+                    f"不要提及'记忆''修改''系统'等词。")
+            except Exception:
+                reply = "好的，我记住了~"
+            for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
+                yield evt
+            _end_trace(_trace_ctx, trace_id, conversation_id)
+            return
+        except Exception as e:
+            logger.warning(f"Contradiction resolution failed: {e}")
+            await clear_pending_contradiction(conversation_id)
+
+    # §5 step 3: Deletion confirmation
+    pending_del = await load_pending_deletion(conversation_id)
+    if pending_del:
+        try:
+            if is_deletion_confirmed(user_message):
+                deleted = await execute_confirmed_deletion(user_id, pending_del)
+                await clear_pending_deletion(conversation_id)
+                agent_name = agent.name if agent else "伙伴"
+                reply = await generate_deletion_reply(agent_name, "之前提到的", deleted)
+            else:
+                await clear_pending_deletion(conversation_id)
+                reply = "好的，那就不删了，继续聊吧~"
+            for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
+                yield evt
+            _end_trace(_trace_ctx, trace_id, conversation_id)
+            return
+        except Exception as e:
+            logger.warning(f"Deletion confirmation failed: {e}")
+            await clear_pending_deletion(conversation_id)
+
     # --- 统一意图识别（单次关键词扫描） ---
     patience_zone = get_patience_zone(cached_patience)
     detected_intent = detect_intent(user_message, patience_zone)
@@ -398,15 +459,19 @@ async def stream_chat_response(
         except Exception as e:
             logger.warning(f"Promise handling failed: {e}")
 
-    # --- IntentType.DELETION: 删除记忆热路径 ---
+    # --- IntentType.DELETION: spec §5 step 1-2 (find candidates → ask confirmation) ---
     elif detected_intent.intent == IntentType.DELETION:
         try:
             deletion_result = await detect_deletion_intent(user_message)
             if deletion_result and deletion_result.get("target_description"):
                 description = deletion_result["target_description"]
-                deleted = await delete_memories_by_description(user_id, description)
-                agent_name = agent.name if agent else "伙伴"
-                reply = await generate_deletion_reply(agent_name, description, deleted)
+                candidates = await find_matching_memories(user_id, description)
+                if candidates:
+                    await save_pending_deletion(conversation_id, candidates)
+                    agent_name = agent.name if agent else "伙伴"
+                    reply = await generate_deletion_confirmation_prompt(agent_name, candidates)
+                else:
+                    reply = "嗯...我好像没有关于这个的记忆呢。"
                 for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
                     yield evt
                 _end_trace(_trace_ctx, trace_id, conversation_id)
@@ -451,7 +516,13 @@ async def stream_chat_response(
     # --- Pre-compute personality (MBTI) for downstream timing/emotion calls ---
     mbti = get_mbti(agent)
 
-    # --- HOT PATH: parallel data fetches (no LLM calls) ---
+    # --- HOT PATH: parallel data fetches ---
+    # Spec §3.1: classify memory relevance (强/中/弱) in parallel with other
+    # fetches. Result gates whether retrieval results are injected into prompt.
+
+    async def _classify_relevance():
+        return await classify_memory_relevance(user_message)
+
     async def _do_retrieval():
         return await hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
 
@@ -471,16 +542,6 @@ async def stream_chat_response(
         )
         ch = _conv_hash(prev_msgs, prev_user_content)
         return await cache_summarizer(ch)
-
-    async def _load_core_memories():
-        """Load L1 core memories (user + AI) — always present in prompt."""
-        from app.services.memory.core_memory import load_core_memory_strings
-        user_rows, ai_rows = await asyncio.gather(
-            load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="user"),
-            load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="ai"),
-        )
-        combined = user_rows + ai_rows
-        return combined if combined else None
 
     async def _load_portrait():
         """Load latest user portrait — no LLM call."""
@@ -523,11 +584,11 @@ async def stream_chat_response(
         """Synchronously update hot-path working memory for the current user message."""
         return await update_working_facts(conversation_id, user_message)
 
-    retrieval_result, emotion, summaries, core_memories, portrait, schedule, topic_intimacy, time_memories_result, working_facts_result = await asyncio.gather(
+    relevance_result, retrieval_result, emotion, summaries, portrait, schedule, topic_intimacy, time_memories_result, working_facts_result = await asyncio.gather(
+        _classify_relevance(),
         _do_retrieval(),
         _load_cached_emotion(),
         _load_cached_summaries(),
-        _load_core_memories(),
         _load_portrait(),
         _load_schedule(),
         _load_topic_intimacy(),
@@ -536,16 +597,47 @@ async def stream_chat_response(
         return_exceptions=True,
     )
 
-    # Process retrieval results
+    # Spec §3.1: determine memory relevance level
+    memory_relevance = "medium"
+    if isinstance(relevance_result, Exception):
+        logger.warning(f"Memory relevance classification failed: {relevance_result}")
+    elif isinstance(relevance_result, str):
+        memory_relevance = relevance_result
+    logger.info(f"[DEBUG-MEM] relevance='{memory_relevance}' for '{user_message[:60]}'")
+
+    # Process retrieval results — gate by relevance
     classified_memories = None  # ClassifiedMemory list for prompt_builder
     memory_strings = None       # plain text list for summarizer/other consumers
     graph_context = None
-    if isinstance(retrieval_result, Exception):
+    if memory_relevance == "weak":
+        # Spec §3.4: weak relevance → don't inject any retrieved memories
+        logger.info("[DEBUG-MEM] SKIPPED — weak relevance, no memories injected")
+    elif isinstance(retrieval_result, Exception):
         logger.warning(f"Hybrid retrieval failed: {retrieval_result}")
     else:
         classified_memories = retrieval_result.get("memories")
         memory_strings = retrieval_result.get("memory_strings")
         graph_context = retrieval_result.get("graph_context")
+        logger.info(f"[DEBUG-MEM] retrieval returned {len(classified_memories) if classified_memories else 0} memories")
+        if classified_memories:
+            for m in classified_memories[:5]:
+                logger.info(f"[DEBUG-MEM]   sim={m.similarity:.3f} imp={m.importance:.2f} text='{m.text[:60]}'")
+
+        # Spec §3.2/3.3: rerank by display_score and cap at top 10
+        if classified_memories:
+            for m in classified_memories:
+                m.display_score = compute_display_score(
+                    importance=getattr(m, "importance", 0.5),
+                    last_accessed_at=getattr(m, "created_at", None),
+                    similarity=getattr(m, "similarity", 0.8),
+                )
+            classified_memories.sort(key=lambda m: m.display_score, reverse=True)
+            classified_memories = classified_memories[:10]
+            logger.info(f"[DEBUG-MEM] after rerank, top {len(classified_memories)} injected into prompt:")
+            for m in classified_memories[:5]:
+                logger.info(f"[DEBUG-MEM]   ds={m.display_score:.3f} text='{m.text[:60]}'")
+        else:
+            logger.info("[DEBUG-MEM] no classified_memories from retrieval (empty result)")
 
     if isinstance(emotion, Exception):
         logger.warning(f"Loading cached emotion failed: {emotion}")
@@ -555,14 +647,15 @@ async def stream_chat_response(
         logger.warning(f"Loading cached summaries failed: {summaries}")
         summaries = None
 
-    if isinstance(core_memories, Exception):
-        logger.warning(f"Loading core memories failed: {core_memories}")
-        core_memories = None
-
-    # Dedup: remove semantic results already present in core memories
-    if core_memories and classified_memories:
-        core_set = set(core_memories)
-        classified_memories = [m for m in classified_memories if m.text not in core_set]
+# Spec §3.2 step 2-3: L3 awakening for "strong" relevance when needed
+    l3_memories: list[str] = []
+    if memory_relevance == "strong":
+        l1_l2_count = len(classified_memories) if classified_memories else 0
+        if should_awaken_l3(l1_l2_count):
+            l3_results = await search_l3_memories(user_message, user_id, workspace_id=workspace_id)
+            l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
+            if l3_memories:
+                logger.info(f"L3 awakening: {len(l3_memories)} memories injected for '{user_message[:30]}'")
 
     if isinstance(portrait, Exception):
         logger.warning(f"Loading portrait failed: {portrait}")
@@ -654,10 +747,26 @@ async def stream_chat_response(
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
 
+    # Spec §4 step 1-2: detect NEW contradictions (resolution already handled
+    # at the top of the function via pending state check)
+    contradiction_inquiry: str | None = None
+    if memory_relevance in ("strong", "medium"):
+        try:
+            conflict = await detect_l1_contradiction(user_message, user_id, workspace_id=workspace_id)
+            if conflict:
+                inquiry = await generate_contradiction_inquiry(conflict, agent_name=agent.name if agent else "AI")
+                contradiction_inquiry = inquiry
+                await save_pending_contradiction(conversation_id, conflict)
+                logger.info(f"L1 contradiction detected: {conflict.get('conflict_description', '')}")
+        except Exception as e:
+            logger.warning(f"Contradiction detection failed: {e}")
+
     # --- Multi-reply parameters (PRD §3.2.1) ---
     is_expand = detect_special_expand(user_message, emotion)
     if relational_context:
         reply_count = 1
+    elif contradiction_inquiry:
+        reply_count = 1  # contradiction inquiry is a single focused question
     else:
         reply_count = random.randint(1, MAX_REPLY_COUNT)
     max_reply_count = EXPAND_MAX_REPLY_COUNT if is_expand else MAX_REPLY_COUNT
@@ -670,7 +779,6 @@ async def stream_chat_response(
         working_facts=working_facts,
         delay_context=delay_context,
         relational_context=relational_context,
-        core_memories=core_memories,
         emotion=emotion,
         graph_context=graph_context,
         summaries=summaries,
@@ -684,8 +792,16 @@ async def stream_chat_response(
         intimacy_stage=intimacy_stage,
         time_context=time_context,
         time_memories=time_memories or None,
+        l3_memories=l3_memories or None,
     )
     chat_messages = build_chat_messages(system_prompt, messages_dicts)
+
+    # Log memory access for L2 frequency tracking (background, non-blocking)
+    accessed_ids: list[str] = []
+    if classified_memories:
+        accessed_ids.extend(getattr(m, "id", "") for m in classified_memories if getattr(m, "id", ""))
+    if accessed_ids:
+        _fire_background(log_memory_access(user_id, accessed_ids, workspace_id=workspace_id))
 
     # --- Send typing event before response ---
     typing_duration = calculate_typing_duration(len(user_message))
@@ -704,20 +820,27 @@ async def stream_chat_response(
     yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
     await asyncio.sleep(actual_sleep)
 
-    # --- Collect full LLM response (the ONLY LLM call in hot path) ---
-    model = get_chat_model()
-    lc_messages = convert_messages(chat_messages)
+    # --- Spec §4: If contradiction detected, use the inquiry as the reply
+    # instead of calling the main LLM. The user's next message will be
+    # analyzed for contradiction resolution (steps 3-5). ---
+    if contradiction_inquiry:
+        raw_response = contradiction_inquiry
+        replies = [raw_response]
+    else:
+        # --- Collect full LLM response (the ONLY LLM call in hot path) ---
+        model = get_chat_model()
+        lc_messages = convert_messages(chat_messages)
 
-    response_chunks: list[str] = []
-    async for chunk in model.astream(lc_messages):
-        token = chunk.content
-        if token:
-            response_chunks.append(token)
+        response_chunks: list[str] = []
+        async for chunk in model.astream(lc_messages):
+            token = chunk.content
+            if token:
+                response_chunks.append(token)
 
-    raw_response = "".join(response_chunks)
+        raw_response = "".join(response_chunks)
 
-    # --- Split & validate into multiple replies (PRD §3.2.1/§3.2.2) ---
-    replies = split_and_validate_replies(raw_response, max_reply_count, MAX_PER_REPLY, max_total)
+        # --- Split & validate into multiple replies (PRD §3.2.1/§3.2.2) ---
+        replies = split_and_validate_replies(raw_response, max_reply_count, MAX_PER_REPLY, max_total)
 
     # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
     emo = emotion if isinstance(emotion, dict) else {}
@@ -847,10 +970,9 @@ async def _background_post_process(
         # Positive recovery: messages reaching here passed boundary check (no banned words)
         if agent_id:
             tasks.append(_bg_positive_recovery(agent_id, user_id))
-        # AI self-memory: generate memories from AI's perspective about this conversation
-        if agent_id:
-            dialogue = f"用户: {user_message}\nAI: {full_response}"
-            tasks.append(_bg_self_memory(agent_id, user_id, dialogue))
+        # AI self-memory: now handled by _bg_memory_pipeline which processes
+        # both user and AI messages through the unified 3-step pipeline (spec §2.2).
+        # The extraction prompt distinguishes owner=user vs owner=ai.
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")
@@ -938,19 +1060,23 @@ async def _save_replies(
 
 
 async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
-    """Run memory extraction pipeline (user memories only).
-    
-    Only user messages are included to prevent AI statements from being
-    misclassified as user memories. AI self-memories are handled by
-    _bg_self_memory via the dedicated self_memory system.
+    """Run memory extraction pipeline for BOTH user and AI messages.
+
+    Spec §2.1/§2.2: both user and AI messages go through the same 3-step
+    pipeline (filter → small model → big model). The extraction prompt
+    distinguishes owner (user vs ai) via the "owner" field in output.
+
+    Input: last 3 rounds of dialogue (user+assistant alternating), which
+    gives the big model enough context per spec §2.1.3.
     """
     try:
-        # Only include user messages to avoid misattribution
-        user_msgs = [m for m in messages[-10:] if m.get("role") == "user"]
-        if not user_msgs:
+        # Spec §2.1.3: "用户消息 + 最近3轮对话上下文"
+        # Take last 6 messages (3 rounds of user+assistant)
+        recent = messages[-6:]
+        if not recent:
             return
         conv_text = "\n".join(
-            f"user: {m['content']}" for m in user_msgs
+            f"{m.get('role', 'user')}: {m['content']}" for m in recent
         )
         await process_memory_pipeline(user_id, conv_text)
     except Exception as e:
@@ -958,31 +1084,6 @@ async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
 
 
 
-async def _bg_self_memory(agent_id: str, user_id: str, dialogue: str) -> None:
-    """Generate AI self-memories from the current conversation exchange."""
-    try:
-        stored = await generate_daily_self_memories(
-            agent_id=agent_id,
-            user_id=user_id,
-            dialogue_summary=dialogue,
-        )
-        if stored:
-            logger.info(f"Real-time self-memory: generated {len(stored)} AI memories")
-    except Exception as e:
-        logger.warning(f"Background self-memory generation failed: {e}")
-
-
-async def _bg_deletion_check(user_id: str, user_message: str) -> None:
-    """Check if user wants to delete a memory and execute deletion."""
-    try:
-        intent = await detect_deletion_intent(user_message)
-        if intent and intent.get("target_description"):
-            deleted = await delete_memories_by_description(
-                user_id, intent["target_description"]
-            )
-            logger.info(f"Deletion check: removed {deleted} memories for user {user_id}")
-    except Exception as e:
-        logger.warning(f"Background deletion check failed: {e}")
 
 
 async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:

@@ -81,12 +81,31 @@ def _word_set(message: str) -> set[str]:
     return {w.lower() for w in re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", message)}
 
 
+# Spec §2.1.1: 常用应答词/语气词，长度≤2 时直接丢弃
+_FILLER_WORDS: set[str] = {
+    "嗯", "哦", "好", "对", "啊", "哈", "呢", "吧", "呀", "噢", "唔",
+    "ok", "嗯嗯", "哦哦", "好的", "好吧", "行", "是", "对对",
+    "哈哈", "嘿", "嘻嘻", "呵呵", "hihi", "yeah", "yep", "nope",
+    "mhm", "hmm", "haha", "lol",
+}
+
+
 def should_extract_memory(message: str) -> bool:
-    """判断消息是否值得进行记忆提取。"""
+    """判断消息是否值得进行记忆提取。
+
+    Spec §2.1.1: 纯语气词或长度≤2的常用应答词直接丢弃。
+    """
     if not message or not message.strip():
         return False
 
     msg = message.strip()
+
+    # Spec §2.1.1: 硬拒短消息 + 语气词
+    if len(msg) <= 2 and msg.lower() in _FILLER_WORDS:
+        return False
+    if msg.lower() in _FILLER_WORDS:
+        return False
+
     msg_lower = msg.lower()
     chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', message))
     latin_words = _word_set(msg)

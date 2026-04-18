@@ -14,11 +14,20 @@ from app.services.memory.entity_repo import (
 )
 from app.services.memory.extraction import extract_memories
 from app.services.memory.filter import should_extract_memory
-from app.services.memory.storage import store_memory
+from app.services.memory.pre_filter import should_memorize
+from app.services.memory.storage import store_memory, log_memory_changelog
 from app.services.memory.conflict import detect_conflicts, resolve_conflict
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
+
+# Spec §1.5.2: keywords indicating user expressed that information is important.
+# Detected once per pipeline call (on conversation_text), tagged on all extracted
+# memories so L2→L1 promotion can verify the condition.
+_IMPORTANCE_EXPRESSIONS = (
+    "很重要", "一定要记住", "千万别忘", "记住了", "别忘了",
+    "这很关键", "非常重要", "特别重要", "务必记住",
+)
 
 
 async def process_memory_pipeline(
@@ -31,12 +40,23 @@ async def process_memory_pipeline(
     """
     workspace_id = await resolve_workspace_id(user_id=user_id)
 
-    # Step 0: Filter — skip extraction if the entire segment is low-value
+    # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
     if not should_extract_memory(conversation_text):
-        logger.debug("Conversation segment filtered out by memory filter, skipping extraction")
+        logger.debug("Conversation segment filtered out by heuristic filter")
         return []
 
-    # Step 1: Extract structured memories
+    # Step 1 (spec §2.1.2): Small model pre-filter — "记" or "不记"
+    # Uses get_utility_model() which is the cheaper/faster model (e.g. qwen3.5-flash).
+    from app.config import settings
+    if settings.enable_memory_prefilter:
+        try:
+            if not await should_memorize(conversation_text):
+                logger.debug("Small model pre-filter: 不记")
+                return []
+        except Exception as e:
+            logger.warning(f"Small model pre-filter failed ({e}), proceeding with extraction")
+
+    # Step 2 (spec §2.1.3): Big model extraction — split + classify + score
     extraction = await extract_memories(conversation_text)
     memories = extraction.get("memories", [])
 
@@ -45,6 +65,9 @@ async def process_memory_pipeline(
         return []
 
     stored_ids: list[str] = []
+
+    # Check once: did user express importance in this conversation segment?
+    user_emphasized = any(kw in conversation_text for kw in _IMPORTANCE_EXPRESSIONS)
 
     # Step 2: Store each memory with dedup and conflict check
     for mem in memories:
@@ -110,6 +133,16 @@ async def process_memory_pipeline(
 
         if memory_id:
             stored_ids.append(memory_id)
+            # Log user emphasis so L2→L1 promotion can verify the condition
+            if user_emphasized:
+                try:
+                    await log_memory_changelog(
+                        user_id, memory_id, "user_emphasized",
+                        new_value="用户表达了该信息的重要性",
+                        workspace_id=workspace_id,
+                    )
+                except Exception:
+                    pass
 
             # Step 3: Link entities / topics / preferences to this memory.
             # Best-effort: failure here is advisory (retrieval still works

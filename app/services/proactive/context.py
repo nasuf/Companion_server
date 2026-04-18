@@ -55,7 +55,9 @@ async def build_proactive_context(
         "agent": agent,
         "schedule_status": schedule_status,
         "emotion": emotion,
-        "core_memories": core_memories[:8],
+        # core_memory now returns (category, text) tuples; extract text for
+        # downstream consumers that expect plain strings.
+        "core_memories": [t[1] if isinstance(t, tuple) else t for t in core_memories[:8]],
         "proactive_memories": proactive_memories[:6],
         "used_memory_ids": used_memory_ids,
         "relationship_stage": relationship_stage,

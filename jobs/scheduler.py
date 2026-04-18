@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.services.memory.l2_dynamics import run_l2_adjustment
 from app.services.reflection import run_daily_reflection, run_weekly_reflection
 from app.services.memory.compression import compress_weekly, compress_monthly
 from app.services.portrait import update_portrait_weekly
@@ -76,6 +77,16 @@ def setup_scheduler():
         hour=2,
         minute=30,
         id="weekly_topic_intimacy",
+        replace_existing=True,
+    )
+
+    # Daily L2 memory scoring adjustment at 2:30 AM (spec §1.5.2)
+    scheduler.add_job(
+        _run_l2_adjustment,
+        "cron",
+        hour=2,
+        minute=30,
+        id="l2_adjustment",
         replace_existing=True,
     )
 
@@ -209,13 +220,14 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # 12E + PRD §6.2.2: aggregation + delayed reply delivery scan every second
+    # 12E + PRD §6.2.2: aggregation + delayed reply delivery scan
     scheduler.add_job(
         _run_aggregation_scan,
         "interval",
-        seconds=1,
+        seconds=2,
         id="aggregation_scan",
         replace_existing=True,
+        max_instances=1,  # prevent "max instances reached" warning
     )
 
     # §9.5: Time trigger scan every minute
@@ -309,6 +321,16 @@ async def _run_proactive_orchestrator_scan():
         await scan_proactive_states()
     except Exception as e:
         logger.warning(f"Proactive orchestrator scan failed: {e}")
+
+
+async def _run_l2_adjustment():
+    """Spec §1.5.2: recalculate L2 scores, promote/demote."""
+    try:
+        stats = await run_l2_adjustment()
+        if stats.get("promoted") or stats.get("demoted"):
+            logger.info(f"L2 adjustment: {stats}")
+    except Exception as e:
+        logger.warning(f"L2 adjustment failed: {e}")
 
 
 async def _run_daily_intimacy():

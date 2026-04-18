@@ -53,11 +53,7 @@ def _summarizer_model_name() -> str:
 
 
 def _embedding_model_name() -> str:
-    return settings.embedding_model or (
-        settings.remote_embedding_model
-        if settings.online_model
-        else settings.local_embedding_model
-    )
+    return settings.embedding_model
 
 
 def _provider_for(role: str) -> Provider:

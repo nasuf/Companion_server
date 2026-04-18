@@ -62,6 +62,30 @@ MBTI_DIMS = ("EI", "NS", "TF", "JP")
 _VALID_INPUT_KEYS = set(MBTI_DIMS)
 
 
+def seven_dim_to_mbti(p: dict) -> dict[str, int]:
+    """确定性映射: 7 维性格 → MBTI 4 维百分比 (0-100)。
+
+    spec §1.1 定义 7 维:
+      活泼度 (lively)     → E/I  (高活泼 = 高 E)
+      脑洞度 (creative)   → N/S  (高脑洞 = 高 N)
+      理性度 (rational)   ┐
+      感性度 (emotional)  ┘→ T/F  (理性↑ 感性↓ = 高 T; 相反 = 高 F)
+      计划度 (planned)    ┐
+      随性度 (spontaneous) ┘→ J/P  (计划↑ 随性↓ = 高 J; 相反 = 高 P)
+      幽默度 (humor)       → 不映射 MBTI 维度, 仅在 summary 中体现
+
+    正反维度取平均: (正维 + (100 - 反维)) / 2。
+    两个反义维度一致时强化,矛盾时趋中。
+    """
+    clamp = lambda v: max(0, min(100, int(v)))
+    return {
+        "EI": clamp(p.get("lively", 50)),
+        "NS": clamp(p.get("creative", 50)),
+        "TF": clamp((int(p.get("rational", 50)) + (100 - int(p.get("emotional", 50)))) / 2),
+        "JP": clamp((int(p.get("planned", 50)) + (100 - int(p.get("spontaneous", 50)))) / 2),
+    }
+
+
 def _validate_input(percentages: dict) -> dict[str, int]:
     """Validate user-supplied 4 MBTI percentages. Strict: keys must be
     exactly EI/NS/TF/JP, values must be int-coercible and clamped to

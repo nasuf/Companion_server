@@ -203,30 +203,7 @@ def _build_summarizer_section(summaries: dict | None) -> str | None:
     return _section("上下文摘要", "\n\n".join(parts))
 
 
-_CORE_MEMORY_TOKEN_BUDGET = 1200
-
-
-def _build_core_memory_section(core_memories: list[str] | None) -> str | None:
-    """Build the L1 core memory section (always present in prompt, with token cap)."""
-    if not core_memories:
-        return None
-
-    from app.services.memory.context_selector import estimate_tokens
-    selected: list[str] = []
-    used = 0
-    for m in core_memories:
-        t = estimate_tokens(m)
-        if used + t > _CORE_MEMORY_TOKEN_BUDGET:
-            break
-        selected.append(m)
-        used += t
-
-    if not selected:
-        return None
-
-    numbered = "\n".join(f"- {m}" for m in selected)
-    body = f"以下是你和用户最重要的信息，随时可以自然使用：\n{numbered}"
-    return _section("核心记忆", body)
+    # (core_memory permanent injection removed — spec §3 uses retrieval only)
 
 
 async def _build_memory_section(memories: list | None) -> str | None:
@@ -251,21 +228,21 @@ async def _build_memory_section(memories: list | None) -> str | None:
         elif isinstance(m, str):
             plain.append(m)
 
-    parts: list[str] = []
-    if strong:
-        parts.append("### 你清楚记得的事（可以自然提起）")
-        for i, t in enumerate(strong, 1):
-            parts.append(f"{i}. {t}")
-    if medium:
-        parts.append("### 你有印象的事（不要主动强调）")
-        for i, t in enumerate(medium, 1):
-            parts.append(f"{i}. {t}")
-    if plain:
-        for i, t in enumerate(plain, 1):
-            parts.append(f"{i}. {t}")
+    # Spec §3.2: all retrieved memories are factual context, no strong/medium split.
+    all_texts: list[str] = []
+    for m in memories:
+        if isinstance(m, ClassifiedMemory):
+            all_texts.append(m.text)
+        elif isinstance(m, str):
+            all_texts.append(m)
 
+    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(all_texts, 1))
     memory_instruction = await get_prompt_text("chat.memory_instruction")
-    body = "\n".join(parts) + f"\n\n{memory_instruction.format(budget=MEMORY_TOKEN_BUDGET)}"
+    body = (
+        "以下是你记忆中与当前话题相关的事实。回答用户时必须与这些记忆保持一致，不得编造与之矛盾的信息。\n\n"
+        f"{numbered}\n\n"
+        f"{memory_instruction.format(budget=MEMORY_TOKEN_BUDGET)}"
+    )
     return _section("你记得的事情", body)
 
 
@@ -349,7 +326,6 @@ async def build_system_prompt(
     working_facts: list[str] | None = None,
     delay_context: str | None = None,
     relational_context: str | None = None,
-    core_memories: list[str] | None = None,
     emotion: dict | None = None,
     graph_context: dict | None = None,
     summaries: dict | None = None,
@@ -363,6 +339,7 @@ async def build_system_prompt(
     intimacy_stage: str | None = None,
     time_context: str | None = None,
     time_memories: list[str] | None = None,
+    l3_memories: list[str] | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     system_base = await get_prompt_text("chat.system_base")
@@ -373,10 +350,8 @@ async def build_system_prompt(
 
     sections.append(await _build_personality_section(agent))
 
-    # L1 core memories — always present
-    core = _build_core_memory_section(core_memories)
-    if core:
-        sections.append(core)
+    # Spec §3: 记忆全部通过检索注入,不再有"永驻核心记忆"。
+    # Agent 基本身份(名字/性格)已在上方 personality section 中。
 
     emo = await _build_emotion_section(emotion, user_emotion, intimacy_stage)
     if emo:
@@ -426,6 +401,15 @@ async def build_system_prompt(
     if time_memories:
         numbered = "\n".join(f"- {m}" for m in time_memories)
         sections.append(_section("相关时间记忆", f"用户提到的时间对应的记忆：\n{numbered}"))
+
+    # Spec §3.2 step 3: L3 distant memories (awakened only when relevant)
+    if l3_memories:
+        l3_block = "\n".join(f"- {m}" for m in l3_memories)
+        sections.append(_section(
+            "久远记忆（L3）",
+            "以下是你很久以前的模糊记忆，用户正在回忆相关内容。"
+            "回忆时语气自然，可以说\"我好像记得...\"或\"那好像是...\"：\n" + l3_block
+        ))
 
     # 5B.4: 耐心区间语气描述
     if patience_instruction:

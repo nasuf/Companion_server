@@ -9,7 +9,7 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.relationship.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
-from app.services.mbti import build_mbti, get_mbti
+from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.life_story import (
     activate_agent,
     generate_l1_coverage,
@@ -87,9 +87,9 @@ async def create_agent(data: AgentCreate):
             await restore_staged_workspaces(staged_workspaces)
         raise
 
-    # Per spec §1.2: MBTI 是用户直接输入的 4 维; 异步 LLM 生 summary +
-    # 写入 agent.mbti+currentMbti, 紧接着算 emotion baseline (依赖 mbti 落库).
-    mbti_input = data.mbti.model_dump()
+    # spec §1.1: 用户填 7 维性格, 确定性映射为 MBTI 4 维 (不存储 7 维).
+    # 异步 LLM 仅生成 MBTI summary 文本, 紧接着算 emotion baseline.
+    mbti_input = seven_dim_to_mbti(data.personality.model_dump())
 
     async def _init_mbti_then_emotion():
         try:

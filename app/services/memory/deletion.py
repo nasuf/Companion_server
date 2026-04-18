@@ -1,12 +1,21 @@
-"""Memory deletion by user request.
+"""Memory deletion by user request (spec §5).
 
-Detects user intent to delete memories and executes deletion pipeline.
+4-step flow:
+  1. Intent recognition (keyword + LLM)
+  2. Find candidates → generate confirmation reply (show what would be deleted)
+  3. User confirms → execute deletion
+  4. Physical delete + audit log
+
+Uses Redis pending state (same pattern as contradiction) to remember
+deletion candidates across the confirmation round-trip.
 """
 
+import json
 import logging
 
+from app.redis_client import get_redis
 from app.services.memory import memory_repo
-from app.services.llm.models import get_utility_model, invoke_json, invoke_text
+from app.services.llm.models import get_utility_model, get_chat_model, invoke_json, invoke_text
 from app.services.memory.config import DELETION_SIMILARITY_THRESHOLD, LLM_INTENT_MIN_CONFIDENCE
 from app.services.memory.embedding import generate_embedding
 from app.services.memory.vector_search import search_by_embedding
@@ -14,6 +23,9 @@ from app.services.memory.storage import log_memory_changelog
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
+
+_PENDING_DELETION_PREFIX = "deletion:pending:"
+_PENDING_DELETION_TTL = 300  # 5 min for confirmation
 
 # Keywords that may indicate deletion intent
 DELETION_KEYWORDS = [
@@ -103,7 +115,7 @@ async def generate_deletion_reply(
         "不要说「好的」开头，不要提及「记忆」或「删除」这类技术词汇。"
     )
     try:
-        return await invoke_text(get_utility_model(), prompt)
+        return await invoke_text(get_chat_model(), prompt)  # spec §5.3: 大模型生成删除回复
     except Exception:
         return get_deletion_response()
 
@@ -160,3 +172,82 @@ def get_deletion_response() -> str:
     """Get a natural language response for memory deletion."""
     import random
     return random.choice(DELETION_RESPONSE_TEMPLATES)
+
+
+# ── Spec §5.2-5.3: Confirmation state ────────────────────────────────────
+
+async def save_pending_deletion(conversation_id: str, candidates: list[dict]) -> None:
+    """Store deletion candidates in Redis so user can confirm."""
+    redis = await get_redis()
+    await redis.set(
+        f"{_PENDING_DELETION_PREFIX}{conversation_id}",
+        json.dumps(candidates, ensure_ascii=False),
+        ex=_PENDING_DELETION_TTL,
+    )
+
+
+async def load_pending_deletion(conversation_id: str) -> list[dict] | None:
+    redis = await get_redis()
+    raw = await redis.get(f"{_PENDING_DELETION_PREFIX}{conversation_id}")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw if isinstance(raw, str) else raw.decode())
+        return data if isinstance(data, list) else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+async def clear_pending_deletion(conversation_id: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"{_PENDING_DELETION_PREFIX}{conversation_id}")
+
+
+_CONFIRM_KEYWORDS = {"对", "是", "是的", "确认", "删掉", "删吧", "好", "好的", "嗯", "ok", "yes"}
+
+
+def is_deletion_confirmed(user_reply: str) -> bool:
+    """Check if user's reply is a confirmation to proceed with deletion."""
+    return user_reply.strip().lower() in _CONFIRM_KEYWORDS
+
+
+async def generate_deletion_confirmation_prompt(
+    agent_name: str,
+    candidates: list[dict],
+) -> str:
+    """Spec §5.2: show candidates and ask user to confirm."""
+    previews = "\n".join(
+        f"  {i+1}. {c.get('content', c.get('summary', ''))[:60]}"
+        for i, c in enumerate(candidates[:5])
+    )
+    prompt = (
+        f"你是{agent_name}。用户想让你忘掉一些事情，你找到了以下相关记忆：\n"
+        f"{previews}\n\n"
+        "请用1-2句温和的话确认用户是否真的要忘掉这些内容。"
+        "语气像朋友确认一样，不要用技术词汇。"
+    )
+    try:
+        return await invoke_text(get_chat_model(), prompt)  # spec §5.2: 大模型生成确认回复
+    except Exception:
+        return f"我找到了{len(candidates)}条相关的记忆，你确定要我忘掉吗？"
+
+
+async def execute_confirmed_deletion(
+    user_id: str,
+    candidates: list[dict],
+) -> int:
+    """Spec §5.3-5.4: execute physical deletion after confirmation."""
+    deleted = 0
+    for c in candidates:
+        memory_id = c.get("id")
+        if not memory_id:
+            continue
+        memory = await memory_repo.find_unique(memory_id)
+        if memory:
+            await log_memory_changelog(user_id, memory_id, "delete", old_value=memory.content)
+        try:
+            await memory_repo.delete(memory_id)
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"Confirmed deletion failed for {memory_id}: {e}")
+    return deleted

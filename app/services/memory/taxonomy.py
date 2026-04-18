@@ -42,12 +42,14 @@ MAIN_CATEGORY_TO_LEGACY_TYPE = {
     "思维": "thought",
 }
 
+# Legacy quota — retained for portrait generation's priority ordering.
+# NOT used for prompt injection (spec §3 uses retrieval, not quotas).
 L1_CATEGORY_QUOTAS: tuple[tuple[str, int], ...] = (
-    ("身份", 6),
-    ("偏好", 4),
-    ("思维", 4),
-    ("生活", 4),
-    ("情绪", 2),
+    ("身份", 20),
+    ("偏好", 10),
+    ("思维", 8),
+    ("生活", 10),
+    ("情绪", 6),
 )
 
 PROMOTION_RULES: dict[tuple[str, str], dict[str, float | int | bool]] = {

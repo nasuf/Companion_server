@@ -9,7 +9,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_chat_model, invoke_json
 from app.services.memory.taxonomy import TAXONOMY_MATRIX
 from app.services.prompting.store import get_prompt_text
 
@@ -34,7 +34,7 @@ async def extract_memories(conversation: str) -> dict:
 
     Returns dict with keys: memories, entities, preferences, topics.
     """
-    model = get_utility_model()
+    model = get_chat_model()  # spec §2.1.3: 大模型精细处理(拆分+分类+打分)
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
     prompt = (await get_prompt_text("memory.extraction")).format(
         conversation=conversation,
