@@ -167,7 +167,8 @@ async def _handle_message(
     final_context = current_context
     user_message_id: str | None = None
     if pending_text:
-        final_message = " ".join(part for part in [pending_text, text] if part)
+        # spec §1.5: 直接连接不加空格
+        final_message = "".join(part for part in [pending_text, text] if part)
         final_context = merge_reply_contexts(pending_context, current_context)
     user_message_id = await _persist_user_message(
         conversation_id,

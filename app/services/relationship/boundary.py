@@ -30,7 +30,7 @@ PATIENCE_MAX = 100
 PATIENCE_NORMAL_MIN = 70
 PATIENCE_MEDIUM_MIN = 30
 PATIENCE_LOW_MIN = 1
-PATIENCE_HOURLY_RECOVERY = 5
+PATIENCE_HOURLY_RECOVERY = 10  # spec §2.5: 每小时 +10
 
 
 def get_patience_zone(patience: int) -> str:
@@ -267,23 +267,44 @@ async def assess_severity(message: str, intent: str) -> dict:
 
 # --- 24小时重复攻击加重 ---
 
-def _attack_history_key(agent_id: str, user_id: str) -> str:
+def _attack_history_key(agent_id: str, user_id: str, level: str | None = None) -> str:
+    if level:
+        return f"attack_history:{agent_id}:{user_id}:{level}"
     return f"attack_history:{agent_id}:{user_id}"
 
 
 async def check_repeat_attack(agent_id: str, user_id: str) -> bool:
-    """检查24h内是否有攻击记录。"""
+    """检查24h内是否有任意级别的攻击记录。"""
     redis = await get_redis()
     count = await redis.get(_attack_history_key(agent_id, user_id))
     return int(count or 0) > 0
 
 
-async def record_attack(agent_id: str, user_id: str) -> None:
-    """记录攻击事件，24h过期。"""
+async def record_attack(agent_id: str, user_id: str, level: str | None = None) -> int:
+    """记录攻击事件 24h 过期。若提供 level，同时累计该级别次数。返回同级别当日累计次数。"""
     redis = await get_redis()
-    key = _attack_history_key(agent_id, user_id)
-    await redis.incr(key)
-    await redis.expire(key, 86400)
+    pipe = redis.pipeline()
+    pipe.incr(_attack_history_key(agent_id, user_id))
+    pipe.expire(_attack_history_key(agent_id, user_id), 86400)
+    if level:
+        pipe.incr(_attack_history_key(agent_id, user_id, level))
+        pipe.expire(_attack_history_key(agent_id, user_id, level), 86400)
+    results = await pipe.execute()
+    return int(results[-2]) if level else 0
+
+
+# spec §2.4 基础扣分与上限
+_LEVEL_BASE = {"L0": 5, "L1": 15, "L2": 50}
+_LEVEL_CAP = {"L0": 10, "L1": 25, "L2": 50}
+
+
+def compute_repeat_deduction(level: str, count: int) -> int:
+    """spec §2.4: 实际扣除 = ⌈base × (1 + 0.5 × (n-1))⌉，不超过上限。"""
+    import math
+    base = _LEVEL_BASE.get(level, 5)
+    cap = _LEVEL_CAP.get(level, 10)
+    n = max(1, count)
+    return min(cap, math.ceil(base * (1 + 0.5 * (n - 1))))
 
 
 # --- 边界反应生成（纯计算，热路径使用） ---
@@ -364,13 +385,13 @@ async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_flo
 
 
 async def handle_apology(agent_id: str, user_id: str) -> int:
-    """处理道歉：非拉黑+60点（上限100），拉黑恢复到70点。"""
-    return await _restore_patience(agent_id, user_id, delta=60, blocked_floor=PATIENCE_NORMAL_MIN)
+    """spec §2.5: 道歉/承诺恢复 +70，拉黑时直接恢复至70并解除拉黑。"""
+    return await _restore_patience(agent_id, user_id, delta=70, blocked_floor=PATIENCE_NORMAL_MIN)
 
 
 async def handle_promise(agent_id: str, user_id: str) -> int:
-    """处理承诺：非拉黑+40点（上限100），拉黑恢复到50点。"""
-    return await _restore_patience(agent_id, user_id, delta=40, blocked_floor=50)
+    """spec §2.5: 承诺与道歉走同一 +70 恢复规则。"""
+    return await _restore_patience(agent_id, user_id, delta=70, blocked_floor=PATIENCE_NORMAL_MIN)
 
 
 # --- 正面互动恢复耐心 ---
@@ -380,24 +401,15 @@ async def check_positive_recovery(
     agent_id: str,
     user_id: str,
 ) -> int | None:
-    """正面互动恢复耐心值。
-
-    每条正面消息（无违禁词）→ 恢复+5~10点。
-    耐心值≤0（拉黑）时不生效。
-    仅在消息已通过边界检查后调用。
-    """
+    """spec §2.5: 正向互动恢复 +20（上限100），耐心值≤0 时不生效。"""
     current = await get_patience(agent_id, user_id)
     if current <= 0:
-        return None  # 拉黑时不生效
+        return None
     if current >= PATIENCE_MAX:
-        return current  # 已满值
+        return current
 
-    recovery = random.randint(5, 10)
-    new_val = await set_patience(agent_id, user_id, current + recovery)
-    logger.info(
-        f"Positive recovery: agent={agent_id} user={user_id} "
-        f"+{recovery} → {new_val}"
-    )
+    new_val = await set_patience(agent_id, user_id, current + 20)
+    logger.info(f"Positive recovery: agent={agent_id} user={user_id} +20 → {new_val}")
     return new_val
 
 
@@ -540,14 +552,13 @@ async def process_boundary_violation(
         return
 
     severity = await assess_severity(message, intent)
-    deduction = severity.get("deduction", 5)
+    level = severity.get("level", "L0")
 
-    # 24h重复攻击加重50%
-    if await check_repeat_attack(agent_id, user_id):
-        deduction = int(deduction * 1.5)
+    # spec §2.4: 先记录累计次数，按 (1 + 0.5×(n-1)) 公式并按级别上限封顶
+    count = await record_attack(agent_id, user_id, level=level)
+    deduction = compute_repeat_deduction(level, count if count > 0 else 1)
 
     await adjust_patience(agent_id, user_id, -deduction)
-    await record_attack(agent_id, user_id)
 
     logger.info(
         f"Boundary violation: agent={agent_id} intent={intent} "

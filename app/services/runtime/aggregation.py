@@ -12,12 +12,13 @@ from typing import Any
 
 from app.redis_client import get_redis
 
-# 常用应答词集合（不参与聚合，直接处理）
+# 常用应答词集合（spec §1.2）：长度≤2 但属于应答词 → 不视为碎片，直接进入边界系统。
 COMMON_RESPONSES = {
-    "嗯", "哦", "啊", "好", "行", "对", "是", "哈", "嘿",
-    "呢", "吧", "呀", "噢", "嗯嗯", "好的", "可以", "没事",
-    "ok", "OK", "好吧", "知道了", "明白", "收到", "是的",
-    "对的", "没有", "你好", "您好",
+    "嗯", "哦", "啊", "噢", "哎", "喂", "嗨", "哈",
+    "好", "是", "不", "对", "行",
+    "ok", "OK", "嗯嗯", "好的", "是的", "对啊", "不行",
+    "可以", "没事", "知道", "明白",
+    "额", "呃", "嗯哼",
 }
 
 # Lua脚本: 原子读取conv_id + 取出msgs + 清理所有key
@@ -115,7 +116,8 @@ async def flush_pending(user_id: str) -> tuple[str | None, str | None, dict | No
         msg_id = item.get("message_id")
         if isinstance(msg_id, str) and msg_id.strip():
             latest_message_id = msg_id
-    return " ".join(texts) if texts else None, conv_id, ctx, latest_message_id
+    # spec §1.5: 按原始顺序直接连接（中文不加空格）
+    return ("".join(texts) if texts else None), conv_id, ctx, latest_message_id
 
 
 async def has_pending(user_id: str) -> bool:

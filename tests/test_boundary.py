@@ -155,15 +155,15 @@ class TestHandleApology:
         val = await handle_apology("agent1", "user1")
         assert val == PATIENCE_NORMAL_MIN  # 70
 
-    async def test_apology_from_low_adds_60(self, patch_boundary_redis):
+    async def test_apology_from_low_adds_70(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "20"
         val = await handle_apology("agent1", "user1")
-        assert val == 80  # 20 + 60
+        assert val == 90  # spec §2.5: 20 + 70
 
     async def test_apology_from_high_caps_at_100(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "80"
         val = await handle_apology("agent1", "user1")
-        assert val == 100  # min(80 + 60, 100)
+        assert val == 100  # min(80 + 70, 100)
 
 
 # --- check_boundary (热路径) ---

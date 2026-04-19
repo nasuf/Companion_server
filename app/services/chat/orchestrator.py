@@ -688,7 +688,8 @@ async def stream_chat_response(
         received_status_label = str(received_status.get("status", "idle"))
         received_at = str(reply_context.get("received_at", ""))
         elapsed = actual_delay_seconds(reply_context)
-        if elapsed is not None:
+        # spec §6.5: ≥1min 时会单独推送"延迟解释回复"，主回复不再重复注入解释
+        if elapsed is not None and elapsed < 60:
             rounded_delay = max(1, round(elapsed))
             delay_reason_text = explain_delay_reason(
                 str(reply_context.get("delay_reason", "")),
@@ -853,6 +854,31 @@ async def stream_chat_response(
 
     emitted_replies: list[dict] = []
 
+    # --- spec §6.4/§6.5: 实际延迟 ≥1分钟时，先单独推送一条"延迟解释回复"
+    # 该回复不拆分、不加 emoji/表情包，独立作为 index 0 推送，后续 replies 顺延。
+    elapsed = actual_delay_seconds(reply_context)
+    delay_explain_offset = 0
+    if elapsed is not None and elapsed >= 60:
+        try:
+            received_status = (reply_context or {}).get("received_status") or {}
+            activity = str(received_status.get("activity", "")).strip() or "处理自己的事"
+            status_label = str(received_status.get("status", "idle"))
+            minutes = max(1, round(elapsed / 60))
+            explain_instruction = (
+                f"用户 {minutes} 分钟前给你发了消息，当时你正在{activity}（状态：{status_label}），"
+                "现在才来回复。请用1句简短自然的道歉/解释（不超过25字），"
+                "口吻贴合你的性格，不要用||分隔，不要加标点之外的符号。"
+            )
+            explain_text = await _intent_llm_reply(agent, user_message, explain_instruction)
+            explain_text = explain_text.strip()
+            if explain_text:
+                data: dict = {"text": explain_text, "index": 0, "delay_explanation": True}
+                emitted_replies.append(data)
+                yield {"event": "reply", "data": json.dumps(data)}
+                delay_explain_offset = 1
+        except Exception as e:
+            logger.warning(f"Delay explanation generation failed: {e}")
+
     for i, reply_text in enumerate(replies):
         added_emoji = False
         # PRD §3.3.2: emoji概率
@@ -873,10 +899,10 @@ async def stream_chat_response(
             except Exception:
                 pass
 
-        if i > 0:
+        if i > 0 or delay_explain_offset:
             await asyncio.sleep(random.uniform(0.3, 0.8))
 
-        data: dict = {"text": reply_text, "index": i}
+        data: dict = {"text": reply_text, "index": i + delay_explain_offset}
         if sticker_url:
             data["sticker_url"] = sticker_url
         emitted_replies.append(data)

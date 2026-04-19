@@ -52,11 +52,12 @@ def _normalize_received_at(received_at: datetime | None = None) -> datetime:
 
 
 def _is_high_emotion(user_emotion: dict[str, Any] | None) -> bool:
+    """spec §6.2: 用户唤醒度>0.6 且愉悦度<0.4，或唤醒度>0.7。"""
     if not user_emotion:
         return False
     arousal = float(user_emotion.get("arousal", 0.5))
     pleasure = float(user_emotion.get("pleasure", 0.0))
-    return (arousal > 0.6 and pleasure < 0.0) or arousal > 0.7
+    return (arousal > 0.6 and pleasure < 0.4) or arousal > 0.7
 
 
 def _schedule_delay_for_status(status: str) -> float:
@@ -86,10 +87,8 @@ def compute_delay_profile(
         }
 
     if _is_high_emotion(user_emotion):
-        if random.random() < 0.9:
-            delay = random.uniform(0, 5)
-        else:
-            delay = random.uniform(60, 180)
+        # spec §6.2: 高情绪 0-5s(90%), 5-10s(10%)
+        delay = random.uniform(0, 5) if random.random() < 0.9 else random.uniform(5, 10)
         return {
             "interaction_mode": "high_emotion",
             "delay_reason": "high_emotion",
