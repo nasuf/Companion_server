@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services.runtime import delayed_queue
+from app.services.interaction import delayed_queue
 from app.services.interaction.delayed_queue import merge_delayed_payloads
 
 

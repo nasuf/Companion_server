@@ -132,7 +132,7 @@ async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
 
 # --- 5B.1 违禁词库（从JSON加载，500+词） ---
 
-_BANNED_WORDS_PATH = Path(__file__).parent.parent / "data" / "banned_words.json"
+_BANNED_WORDS_PATH = Path(__file__).parent.parent.parent / "data" / "banned_words.json"
 _BANNED_CACHE: dict | None = None
 _BANNED_KEYWORDS_CACHE: list[str] | None = None
 _PINYIN_VARIANTS_CACHE: dict[str, list[str]] | None = None
