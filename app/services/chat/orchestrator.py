@@ -92,6 +92,7 @@ from app.services.chat.intent_replies import (
     split_reply_to_n_sentences as _split_reply_to_n_sentences,
 )
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
+from app.services.chat.reply_generate import generate_reply as _generate_reply
 from app.services.chat.preflight import (
     PreflightCtx,
     resolve_pending_contradiction,
@@ -946,91 +947,34 @@ async def stream_chat_response(
     yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
     await asyncio.sleep(actual_sleep)
 
-    # --- Spec §4: If contradiction detected, use the inquiry as the reply
-    # instead of calling the main LLM. The user's next message will be
-    # analyzed for contradiction resolution (steps 3-5). ---
-    tier_reply_text: str | None = None
-    if contradiction_inquiry:
-        raw_response = contradiction_inquiry
-        replies = [raw_response]
-    else:
-        # --- Spec §4 step 2/4/5A/5B: 纯日常交流时走分级 prompt 短路 ---
-        # 只有完全"纯聊天"场景才走 tier prompt：不能有意图分支/关系上下文/作息/延迟上下文。
-        # 其他场景（schedule_context、delay<60s、relational、非 NONE 意图）仍走 rich prompt。
-        # spec §3.4.5: 「调用久远记忆」意图必须走「久远记忆回复」prompt。
-        can_use_tier = (
-            detected_intent.intent in (IntentType.NONE, IntentType.L3_RECALL)
-            and not relational_context
-            and not schedule_context
-            and not delay_context
-            and memory_relevance in ("weak", "medium", "strong")
-        )
-        if can_use_tier:
-            personality_brief = getattr(agent, "name", "") or ""
-            context_text = "\n".join(
-                f"{m['role']}: {m['content']}" for m in messages_dicts[-6:]
-            ) or "(无)"
-            portrait_text = str(portrait) if portrait else "(未知)"
-            memory_lines = [m.text for m in (classified_memories or [])]
-            combined_memory = "\n".join(f"- {t}" for t in memory_lines) if memory_lines else "(无)"
-            base_tier_params = {
-                "message": user_message,
-                "context": context_text,
-                "user_emotion": prompt_user_emotion,
-                "personality_brief": personality_brief,
-                "user_portrait": portrait_text,
-            }
-            if l3_memories:
-                tier_fn, extra = _memory_l3_reply, {"l3_memory": "\n".join(f"- {t}" for t in l3_memories)}
-            elif memory_relevance == "strong":
-                tier_fn, extra = _memory_strong_reply, {"user_memory": combined_memory, "ai_memory": "(同上)"}
-            elif memory_relevance == "medium":
-                tier_fn, extra = _memory_medium_reply, {"user_memory": combined_memory, "ai_memory": "(同上)"}
-            else:
-                tier_fn, extra = _memory_weak_reply, {}
-            try:
-                tier_reply_text = await tier_fn(**base_tier_params, **extra)
-            except Exception as e:
-                logger.warning(f"Memory tier reply failed, falling back to main prompt: {e}")
-                tier_reply_text = None
-
-        if tier_reply_text:
-            # Tier prompt outputs 单一完整回复；保留 emoji/sticker 处理但跳过多段拆分。
-            raw_response = tier_reply_text
-            replies = [tier_reply_text]
-        else:
-            # --- Collect full LLM response (the ONLY LLM call in hot path) ---
-            model = get_chat_model()
-            lc_messages = convert_messages(chat_messages)
-
-            response_chunks: list[str] = []
-            async for chunk in model.astream(lc_messages):
-                token = chunk.content
-                if token:
-                    response_chunks.append(token)
-
-            raw_response = "".join(response_chunks)
-
-            # spec §5.5: n=1 保持原回复；n>=2 调小模型拆分，失败回退 `||`。
-            replies = None
-            split_source = "single"
-            if reply_count >= 2:
-                split_result = await _split_reply_to_n_sentences(raw_response, reply_count)
-                if split_result:
-                    replies = [
-                        truncate_at_sentence(p, MAX_PER_REPLY)
-                        for p in split_result[:max_reply_count]
-                    ]
-                    split_source = f"llm_{reply_count}"
-            if replies is None:
-                replies = split_and_validate_replies(
-                    raw_response, max_reply_count, MAX_PER_REPLY, max_total
-                )
-                split_source = "pipe_fallback"
-            logger.info(
-                f"[REPLY-SPLIT] n_target={reply_count} actual={len(replies)} "
-                f"source={split_source}"
-            )
+    replies, raw_response = await _generate_reply(
+        contradiction_inquiry=contradiction_inquiry,
+        detected_intent=detected_intent,
+        memory_relevance=memory_relevance,
+        relational_context=relational_context,
+        schedule_context=schedule_context,
+        delay_context=delay_context,
+        l3_memories=l3_memories,
+        classified_memories=classified_memories or [],
+        messages_dicts=messages_dicts,
+        portrait=portrait,
+        prompt_user_emotion=prompt_user_emotion,
+        user_message=user_message,
+        agent=agent,
+        chat_messages=chat_messages,
+        reply_count=reply_count,
+        max_reply_count=max_reply_count,
+        max_total=max_total,
+        tier_fns={
+            "weak": _memory_weak_reply,
+            "medium": _memory_medium_reply,
+            "strong": _memory_strong_reply,
+            "l3": _memory_l3_reply,
+        },
+        split_llm_fn=_split_reply_to_n_sentences,
+        truncate_fn=truncate_at_sentence,
+        pipe_fallback_fn=split_and_validate_replies,
+    )
 
     # spec §5/§6.4-§6.5: emoji/sticker + 延迟解释 + 推送
     emitted_replies: list[dict] = []
