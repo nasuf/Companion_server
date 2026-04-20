@@ -195,7 +195,7 @@ async def get_conversations(
     """Get all conversations for an agent with message counts (single query)."""
     rows = await db.query_raw(
         """
-        SELECT c.id, c.title, c.created_at, c.updated_at,
+        SELECT c.id, c.title, c.workspace_id, c.created_at, c.updated_at,
                COUNT(m.id)::int AS message_count
         FROM conversations c
         LEFT JOIN messages m ON m.conversation_id = c.id
@@ -209,6 +209,7 @@ async def get_conversations(
         {
             "id": str(r["id"]),
             "title": r.get("title"),
+            "workspace_id": str(r["workspace_id"]) if r.get("workspace_id") else None,
             "message_count": int(r.get("message_count", 0)),
             "created_at": str(r.get("created_at", "")),
             "updated_at": str(r.get("updated_at", "")),
