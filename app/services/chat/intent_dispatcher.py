@@ -12,7 +12,7 @@ from typing import Any
 
 from app.services.chat.conversation_end import CONVERSATION_END_KEYWORDS
 from app.services.memory.interaction.deletion import DELETION_KEYWORDS
-from app.services.relationship.boundary import APOLOGY_KEYWORDS
+from app.services.interaction.boundary import APOLOGY_KEYWORDS
 from app.services.schedule_domain.schedule import _SCHEDULE_QUERY_KEYWORDS
 
 

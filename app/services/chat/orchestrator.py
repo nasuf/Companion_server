@@ -14,8 +14,6 @@ import logging
 import random
 import re
 from collections.abc import AsyncGenerator
-from datetime import datetime
-
 from prisma import Json
 
 from app.config import settings
@@ -61,7 +59,7 @@ from app.services.schedule_domain.schedule import (
 )
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
-from app.services.relationship.boundary import (
+from app.services.interaction.boundary import (
     check_boundary, process_boundary_violation, detect_apology, handle_apology,
     check_positive_recovery,
     get_patience_prompt_instruction, get_patience_zone,
@@ -101,11 +99,10 @@ from app.services.chat.intent_replies import (
     l3_trigger_classify as _l3_trigger_classify,
     split_reply_to_n_sentences as _split_reply_to_n_sentences,
 )
-from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_emoji
-from app.services.sticker import recommend_sticker
+from app.services.chat.reply_post_process import emit_replies as _emit_replies
 from app.services.mbti import get_mbti
 from app.services.chat.fast_fact import update_working_facts, facts_for_prompt
-from app.services.chat.reply_context import actual_delay_seconds, save_last_reply_timestamp
+from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
 
 logger = logging.getLogger(__name__)
@@ -1070,85 +1067,21 @@ async def stream_chat_response(
                 f"source={split_source}"
             )
 
-    # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
-    emo = emotion if isinstance(emotion, dict) else {}
-    ai_arousal = emo.get("arousal", 0.0)
-    ai_pleasure = emo.get("pleasure", 0.0)
-    ai_dominance = emo.get("dominance", 0.5)
-    ai_primary_emotion = emo.get("primary_emotion")
-
-    sticker_used = False  # 一个回合最多一个表情包
-
+    # spec §5/§6.4-§6.5: emoji/sticker + 延迟解释 + 推送
     emitted_replies: list[dict] = []
-
-    # --- spec §6.4/§6.5: 实际延迟 ≥1分钟时，先单独推送一条"延迟解释回复"
-    # 该回复不拆分、不加 emoji/表情包，独立作为 index 0 推送，后续 replies 顺延。
-    # sub_intent_mode: 父调用已推送延迟解释，子片段跳过
-    elapsed = None if sub_intent_mode else actual_delay_seconds(reply_context)
-    delay_explain_offset = 0
-    if elapsed is not None and elapsed >= 60:
-        try:
-            received_status = (reply_context or {}).get("received_status") or {}
-            activity = str(received_status.get("activity", "")).strip() or "处理自己的事"
-            status_label = str(received_status.get("status", "idle"))
-            minutes = max(1, round(elapsed / 60))
-            received_at = str((reply_context or {}).get("received_at", ""))
-            explain_text = await _delay_explanation_reply(
-                received_time=received_at,
-                current_time=datetime.now().strftime("%H:%M"),
-                activity=activity,
-                status=status_label,
-                delay_minutes=minutes,
-            )
-            if not explain_text:
-                explain_text = await _intent_llm_reply(
-                    agent, user_message,
-                    f"你{minutes}分钟前收到用户消息但在忙，现在才回复。用1句简短自然的解释。",
-                )
-            explain_text = (explain_text or "").strip()
-            if explain_text:
-                data: dict = {
-                    "text": explain_text,
-                    "index": reply_index_offset,
-                    "delay_explanation": True,
-                }
-                emitted_replies.append(data)
-                yield {"event": "reply", "data": json.dumps(data)}
-                delay_explain_offset = 1
-        except Exception as e:
-            logger.warning(f"Delay explanation generation failed: {e}")
-
-    for i, reply_text in enumerate(replies):
-        added_emoji = False
-        # PRD §3.3.2: emoji概率
-        if should_add_emoji(ai_arousal):
-            emoji = pick_one_emoji(ai_pleasure, ai_arousal, ai_primary_emotion)
-            if emoji:
-                reply_text += emoji
-                added_emoji = True
-
-        # PRD §3.3.3: 表情包互斥 — 该条未加emoji且本回合未用过表情包
-        sticker_url = None
-        if not added_emoji and not sticker_used and should_add_sticker(ai_arousal):
-            try:
-                result = await recommend_sticker(ai_pleasure, ai_arousal, ai_dominance, ai_primary_emotion)
-                if result:
-                    sticker_url = result["url"]
-                    sticker_used = True
-            except Exception:
-                pass
-
-        if i > 0 or delay_explain_offset or reply_index_offset > 0:
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-
-        data: dict = {
-            "text": reply_text,
-            "index": reply_index_offset + i + delay_explain_offset,
-        }
-        if sticker_url:
-            data["sticker_url"] = sticker_url
-        emitted_replies.append(data)
-        yield {"event": "reply", "data": json.dumps(data)}
+    async for evt in _emit_replies(
+        replies,
+        reply_context=reply_context,
+        reply_index_offset=reply_index_offset,
+        sub_intent_mode=sub_intent_mode,
+        emotion=emotion,
+        agent=agent,
+        user_message=user_message,
+        delay_reply_fn=_delay_explanation_reply,
+        fallback_fn=_intent_llm_reply,
+        emitted_replies=emitted_replies,
+    ):
+        yield evt
 
     full_response = " ".join(replies)
 
@@ -1188,7 +1121,7 @@ async def stream_chat_response(
 
     # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段
     if pending_sub_fragments:
-        start_idx = reply_index_offset + delay_explain_offset + len(replies)
+        start_idx = reply_index_offset + len(emitted_replies)
         async for evt in _process_sub_intents(
             pending_sub_fragments, conversation_id, agent, user_id,
             reply_context, start_index=start_idx,

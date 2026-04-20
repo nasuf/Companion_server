@@ -7,10 +7,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.db import db
 from app.models.message import ChatRequest
-from app.services.runtime.aggregation import is_short_message, push_pending, flush_pending
-from app.services.runtime.delayed_queue import enqueue_or_append_delayed
+from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
+from app.services.interaction.delayed_queue import enqueue_or_append_delayed
 from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
-from app.services.chat.reply_context import build_reply_timing_context, merge_reply_contexts
+from app.services.interaction.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
 from app.services.proactive import get_proactive_history

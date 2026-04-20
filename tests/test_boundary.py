@@ -12,7 +12,7 @@
 
 import pytest
 
-from app.services.relationship.boundary import (
+from app.services.interaction.boundary import (
     PATIENCE_MAX,
     PATIENCE_NORMAL_MIN,
     _BOUNDARY_RESPONSES,

@@ -12,11 +12,11 @@ from starlette.websockets import WebSocketState
 from prisma import Json
 
 from app.db import db
-from app.services.runtime.aggregation import is_short_message, push_pending, flush_pending
+from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
 from app.services.chat.orchestrator import stream_chat_response
-from app.services.runtime.delayed_queue import enqueue_delayed_message
+from app.services.interaction.delayed_queue import enqueue_delayed_message
 from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
-from app.services.chat.reply_context import build_reply_timing_context, merge_reply_contexts
+from app.services.interaction.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
 from app.services.proactive.state import mark_user_replied_for_conversation

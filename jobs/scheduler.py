@@ -23,11 +23,11 @@ from app.services.schedule_domain.schedule import (
     get_current_status, get_life_overview, review_daily_schedule,
 )
 from app.services.mbti import get_mbti
-from app.services.relationship.boundary import recover_patience_hourly, scan_blacklist_expiry
+from app.services.interaction.boundary import recover_patience_hourly, scan_blacklist_expiry
 from app.services.relationship.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive.orchestrator import scan_proactive_states
-from app.services.runtime.aggregation import scan_expired
-from app.services.runtime.delayed_queue import (
+from app.services.interaction.aggregation import scan_expired
+from app.services.interaction.delayed_queue import (
     enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
     try_lock_conversation, unlock_conversation
 )

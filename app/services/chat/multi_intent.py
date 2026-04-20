@@ -22,7 +22,7 @@ from app.services.chat.intent_dispatcher import (
     IntentType,
     LABEL_TO_INTENT,
 )
-from app.services.chat.reply_context import save_last_reply_timestamp
+from app.services.interaction.reply_context import save_last_reply_timestamp
 
 logger = logging.getLogger(__name__)
 

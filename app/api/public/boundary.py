@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.db import db
 
-from app.services.relationship.boundary import get_patience, get_patience_zone
+from app.services.interaction.boundary import get_patience, get_patience_zone
 
 router = APIRouter(prefix="/boundary", tags=["boundary"])
 

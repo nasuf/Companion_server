@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from app.redis_client import get_redis
-from app.services.chat.reply_context import merge_reply_contexts
+from app.services.interaction.reply_context import merge_reply_contexts
 
 _DELAYED_LIST_KEY = "delayed:msgs:{cid}"
 _DELAYED_ZSET_KEY = "delayed:due"

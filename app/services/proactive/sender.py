@@ -24,7 +24,7 @@ from app.services.proactive.state import (
     mark_proactive_sent,
 )
 from app.services.prompting.store import get_prompt_text
-from app.services.chat.reply_context import save_last_reply_timestamp
+from app.services.interaction.reply_context import save_last_reply_timestamp
 from app.services.runtime.ws_manager import manager
 
 logger = logging.getLogger(__name__)

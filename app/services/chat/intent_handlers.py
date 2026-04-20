@@ -27,7 +27,7 @@ from app.services.memory.interaction.deletion import (
     generate_deletion_confirmation_prompt,
     save_pending_deletion,
 )
-from app.services.relationship.boundary import (
+from app.services.interaction.boundary import (
     PATIENCE_MAX,
     detect_apology,
     handle_apology,

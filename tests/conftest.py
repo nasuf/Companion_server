@@ -57,7 +57,7 @@ def mock_redis():
 @pytest.fixture
 def patch_boundary_redis(mock_redis):
     """Auto-patch get_redis for boundary service tests."""
-    with patch("app.services.relationship.boundary.get_redis", return_value=mock_redis):
+    with patch("app.services.interaction.boundary.get_redis", return_value=mock_redis):
         yield mock_redis
 
 

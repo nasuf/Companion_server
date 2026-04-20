@@ -7,7 +7,7 @@ from prisma import Json
 
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
-from app.services.relationship.boundary import init_patience
+from app.services.interaction.boundary import init_patience
 from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.life_story import (
