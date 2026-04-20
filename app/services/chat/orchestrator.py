@@ -127,6 +127,7 @@ async def _short_circuit_reply(
     sub_intent_mode: bool = False,
     reply_index_offset: int = 0,
     include_done: bool = True,
+    extra_metadata: dict | None = None,
 ) -> list[dict]:
     """Orchestrator-side adapter that injects `_save_replies`."""
     return await _short_circuit_reply_impl(
@@ -134,6 +135,7 @@ async def _short_circuit_reply(
         sub_intent_mode=sub_intent_mode,
         reply_index_offset=reply_index_offset,
         include_done=include_done,
+        extra_metadata=extra_metadata,
     )
 
 
@@ -387,14 +389,11 @@ async def stream_chat_response(
                 response = await generate_boundary_reply_llm(
                     zone="blocked", message=user_message, personality_brief=personality_brief,
                 ) or boundary_result.get("fallback", "...")
-                await db.message.create(data={
-                    "conversation": {"connect": {"id": conversation_id}},
-                    "role": "assistant", "content": response,
-                    "metadata": Json({"boundary": True, "zone": "blocked"}),
-                })
-                yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
-                await save_last_reply_timestamp(agent_id, user_id)
-                yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+                for evt in await _short_circuit_reply(
+                    response, conversation_id, agent_id, user_id,
+                    extra_metadata={"boundary": True, "zone": "blocked"},
+                ):
+                    yield evt
                 _fire_background(_bg_apology_check(agent_id, user_id, user_message))
                 _fire_background(_bg_memory_pipeline(user_id, [
                     {"role": "user", "content": user_message},
@@ -407,19 +406,14 @@ async def stream_chat_response(
             attack_target = await _attack_target_classify(user_message)
             if attack_target and attack_target != "攻击AI":
                 # 非攻击 AI → 跳到步骤 6/7（按当前耐心状态处理，不扣分）
-                if zone == "medium":
+                if zone in ("medium", "low"):
                     response = await generate_boundary_reply_llm(
-                        zone="medium", message=user_message, personality_brief=personality_brief,
+                        zone=zone, message=user_message, personality_brief=personality_brief,
                     ) or boundary_result.get("fallback", "...")
-                    for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
-                        yield evt
-                    _end_trace(_trace_ctx, trace_id, conversation_id)
-                    return
-                if zone == "low":
-                    response = await generate_boundary_reply_llm(
-                        zone="low", message=user_message, personality_brief=personality_brief,
-                    ) or boundary_result.get("fallback", "...")
-                    for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                    for evt in await _short_circuit_reply(
+                        response, conversation_id, agent_id, user_id,
+                        extra_metadata={"boundary": True, "zone": zone, "attack_target": attack_target},
+                    ):
                         yield evt
                     _end_trace(_trace_ctx, trace_id, conversation_id)
                     return
@@ -434,14 +428,11 @@ async def stream_chat_response(
                     personality_brief=personality_brief,
                     attack_level=attack_level,
                 ) or boundary_result.get("fallback", "...")
-                await db.message.create(data={
-                    "conversation": {"connect": {"id": conversation_id}},
-                    "role": "assistant", "content": response,
-                    "metadata": Json({"boundary": True, "zone": zone, "attack_level": attack_level}),
-                })
-                yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
-                await save_last_reply_timestamp(agent_id, user_id)
-                yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+                for evt in await _short_circuit_reply(
+                    response, conversation_id, agent_id, user_id,
+                    extra_metadata={"boundary": True, "zone": zone, "attack_level": attack_level},
+                ):
+                    yield evt
                 # 后台：按 attack_level 扣分
                 _fire_background(process_boundary_violation(agent_id, user_id, user_message))
                 _fire_background(_bg_memory_pipeline(user_id, [
@@ -461,7 +452,10 @@ async def stream_chat_response(
                 zone=patience_zone, message=user_message, personality_brief=personality_brief,
             )
             if response:
-                for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                for evt in await _short_circuit_reply(
+                    response, conversation_id, agent_id, user_id,
+                    extra_metadata={"boundary": True, "zone": patience_zone},
+                ):
                     yield evt
                 _end_trace(_trace_ctx, trace_id, conversation_id)
                 return
@@ -1152,10 +1146,11 @@ async def _save_replies(
         for i, reply in enumerate(replies):
             if isinstance(reply, dict):
                 text = str(reply.get("text", ""))
-                sticker_url = reply.get("sticker_url")
                 metadata: dict = {"reply_index": i}
-                if sticker_url:
-                    metadata["sticker_url"] = sticker_url
+                # 允许任意白名单之外的 metadata 合并进来（如 boundary/zone/attack_level/sticker_url）
+                for k, v in reply.items():
+                    if k not in ("text", "index") and v is not None:
+                        metadata[k] = v
             else:
                 text = reply
                 metadata = {"reply_index": i}

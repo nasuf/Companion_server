@@ -48,6 +48,7 @@ async def short_circuit_reply(
     sub_intent_mode: bool = False,
     reply_index_offset: int = 0,
     include_done: bool = True,
+    extra_metadata: dict | None = None,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
@@ -55,8 +56,12 @@ async def short_circuit_reply(
       协程工厂，避免 multi_intent 依赖 orchestrator 的持久化实现。
     - sub_intent_mode=True：父调用负责 save_last_reply_timestamp/done。
     - include_done=False：延后 done（用于主调用随后处理 sub fragments）。
+    - extra_metadata：透传给 save_replies_fn 的持久化 metadata（如 boundary/zone/attack_level）。
     """
-    _fire_background(save_replies_fn(conversation_id, [reply]))
+    reply_payload: str | dict = reply
+    if extra_metadata:
+        reply_payload = {"text": reply, **extra_metadata}
+    _fire_background(save_replies_fn(conversation_id, [reply_payload]))
     if not sub_intent_mode and agent_id:
         await save_last_reply_timestamp(agent_id, user_id)
     events: list[dict] = [{
