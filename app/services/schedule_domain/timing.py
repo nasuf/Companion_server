@@ -69,33 +69,6 @@ def calculate_status_delay(status: str) -> float:
     return random.uniform(4, 6)
 
 
-def compute_message_interval_delay(
-    last_message_age_seconds: float,
-    ai_emotion: dict | None = None,
-    user_emotion: dict | None = None,
-    current_status: str = "idle",
-) -> float:
-    """消息间隔感知延迟（spec §6.2）。
-
-    - <30min（交流状态）→ 1-5s 均匀
-    - 高情绪（用户 arousal>0.6 & pleasure<0.4，或 arousal>0.7）→ 90% 0-5s, 10% 5-10s
-    - 其他 → 按作息状态延迟
-    """
-    if last_message_age_seconds < 1800:
-        return random.uniform(1, 5)
-
-    emo = user_emotion or ai_emotion
-    if emo:
-        arousal = float(emo.get("arousal", 0.0))
-        pleasure = float(emo.get("pleasure", 0.0))
-        if (arousal > 0.6 and pleasure < 0.4) or arousal > 0.7:
-            if random.random() < 0.9:
-                return random.uniform(0, 5)
-            return random.uniform(5, 10)
-
-    return calculate_status_delay(current_status)
-
-
 def explain_delay_reason(reason: str, activity: str | None = None, status: str | None = None) -> str:
     """Human-readable delay reason summary for prompt injection."""
     if reason == "conversation_mode":

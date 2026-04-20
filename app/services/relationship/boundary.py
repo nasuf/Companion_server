@@ -205,19 +205,6 @@ def check_banned_keywords(message: str) -> list[str]:
 
 # --- 攻击意图分类（LLM，后台异步） ---
 
-_ATTACK_INTENT_PROMPT = """分析以下消息的攻击意图。
-
-消息："{message}"
-
-分类为以下之一：
-1. attack_ai — 直接攻击/侮辱AI
-2. attack_third — 攻击第三方（不针对AI）
-3. profanity_no_target — 无目标脏话/发泄
-4. none — 无负面意图
-
-返回JSON：
-{{"intent": "attack_ai/attack_third/profanity_no_target/none", "confidence": 0.0-1.0}}"""
-
 
 async def classify_attack_intent(message: str) -> dict:
     """LLM分类攻击意图。后台异步调用。"""
@@ -234,19 +221,6 @@ async def classify_attack_intent(message: str) -> dict:
 
 
 # --- 攻击严重度分级 ---
-
-_SEVERITY_PROMPT = """评估以下攻击性消息的严重程度。
-
-消息："{message}"
-攻击意图：{intent}
-
-分级：
-- L0: 轻微（不耐烦/轻微不满） → 扣5-10点
-- L1: 中等（明确侮辱/攻击） → 扣15-25点
-- L2: 严重（极端侮辱/威胁/人身攻击） → 扣50点或归零
-
-返回JSON：
-{{"level": "L0/L1/L2", "deduction": 5-100, "reason": "简短原因"}}"""
 
 
 async def assess_severity(message: str, intent: str) -> dict:
@@ -273,13 +247,6 @@ def _attack_history_key(agent_id: str, user_id: str, level: str | None = None) -
     return f"attack_history:{agent_id}:{user_id}"
 
 
-async def check_repeat_attack(agent_id: str, user_id: str) -> bool:
-    """检查24h内是否有任意级别的攻击记录。"""
-    redis = await get_redis()
-    count = await redis.get(_attack_history_key(agent_id, user_id))
-    return int(count or 0) > 0
-
-
 async def record_attack(agent_id: str, user_id: str, level: str | None = None) -> int:
     """记录攻击事件 24h 过期。若提供 level，同时累计该级别次数。返回同级别当日累计次数。"""
     redis = await get_redis()
@@ -294,7 +261,8 @@ async def record_attack(agent_id: str, user_id: str, level: str | None = None) -
 
 
 # spec §2.4 基础扣分与上限
-_LEVEL_BASE = {"L0": 5, "L1": 15, "L2": 50}
+# K1=L0: 5 首次, 10 上限；K2=L1: 15 首次, 25 上限；K3=L2: 40 首次, 50 上限
+_LEVEL_BASE = {"L0": 5, "L1": 15, "L2": 40}
 _LEVEL_CAP = {"L0": 10, "L1": 25, "L2": 50}
 
 
@@ -333,9 +301,74 @@ _BOUNDARY_RESPONSES = {
 
 
 def generate_boundary_response(zone: str) -> str:
-    """根据耐心区间生成边界回复。纯计算。"""
+    """兜底的固定模板回复。仅在 LLM 调用失败时使用。"""
     responses = _BOUNDARY_RESPONSES.get(zone, _BOUNDARY_RESPONSES["normal"])
     return random.choice(responses)
+
+
+# --- spec §2.6 分级 LLM 回复 ---
+
+_ATTACK_LEVEL_TO_PROMPT = {
+    "K1": "boundary.light_attack_reply",
+    "K2": "boundary.medium_attack_reply",
+    "K3": "boundary.severe_attack_reply",
+}
+
+_ZONE_TO_PATIENCE_PROMPT = {
+    "medium": "boundary.medium_patience_reply",
+    "low": "boundary.low_patience_reply",
+    "blocked": "boundary.blacklist_reply",
+}
+
+
+async def generate_boundary_reply_llm(
+    *,
+    zone: str,
+    message: str,
+    context: str = "",
+    user_emotion: dict | None = None,
+    personality_brief: str = "",
+    user_portrait: str = "",
+    attack_level: str | None = None,
+) -> str | None:
+    """spec §2.6 用大模型生成分级边界回复。失败时返回 None 让调用方用兜底模板。
+
+    - attack_level 给定（K1/K2/K3）→ 攻击分级回复
+    - 否则按 zone（medium/low/blocked）→ 耐心分级回复
+    """
+    from app.services.llm.models import get_chat_model, invoke_text
+
+    key = None
+    if attack_level:
+        key = _ATTACK_LEVEL_TO_PROMPT.get(attack_level)
+    if not key:
+        key = _ZONE_TO_PATIENCE_PROMPT.get(zone)
+    if not key:
+        return None
+
+    emo = user_emotion or {}
+    params = {
+        "message": message,
+        "context": context or "(无)",
+        "pleasure": f"{float(emo.get('pleasure', 0.0)):.2f}",
+        "arousal": f"{float(emo.get('arousal', 0.0)):.2f}",
+        "dominance": f"{float(emo.get('dominance', 0.5)):.2f}",
+        "personality_brief": personality_brief or "真诚朋友",
+        "user_portrait": user_portrait or "(未知)",
+    }
+    try:
+        template = await get_prompt_text(key)
+        # 各 prompt 的占位符子集不同，format_map 容错
+        prompt = template.format_map(_SafeDict(params))
+        return (await invoke_text(get_chat_model(), prompt)).strip().split("||")[0][:120]
+    except Exception as e:
+        logger.warning(f"Boundary LLM reply failed ({key}): {e}")
+        return None
+
+
+class _SafeDict(dict):
+    def __missing__(self, key: str) -> str:  # pragma: no cover
+        return "(无)"
 
 
 # --- 道歉/承诺识别（LLM，后台异步） ---
@@ -352,14 +385,6 @@ APOLOGY_KEYWORDS = [
 def has_apology_keyword(message: str) -> bool:
     """检查消息是否包含道歉关键词。"""
     return any(kw in message for kw in APOLOGY_KEYWORDS)
-
-
-_APOLOGY_PROMPT = """分析以下消息是否包含道歉或承诺改正。
-
-消息："{message}"
-
-返回JSON：
-{{"is_apology": true/false, "sincerity": 0.0-1.0}}"""
 
 
 async def detect_apology(message: str) -> dict:
@@ -385,12 +410,10 @@ async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_flo
 
 
 async def handle_apology(agent_id: str, user_id: str) -> int:
-    """spec §2.5: 道歉/承诺恢复 +70，拉黑时直接恢复至70并解除拉黑。"""
-    return await _restore_patience(agent_id, user_id, delta=70, blocked_floor=PATIENCE_NORMAL_MIN)
+    """spec §2.5: 道歉/承诺恢复 +70（上限100），拉黑时直接恢复至70并解除拉黑。
 
-
-async def handle_promise(agent_id: str, user_id: str) -> int:
-    """spec §2.5: 承诺与道歉走同一 +70 恢复规则。"""
+    spec §3.4.4 把"道歉"和"承诺"合并为一个意图，使用同一恢复规则。
+    """
     return await _restore_patience(agent_id, user_id, delta=70, blocked_floor=PATIENCE_NORMAL_MIN)
 
 
@@ -498,12 +521,17 @@ def get_patience_prompt_instruction(patience: int) -> str | None:
 async def check_boundary(
     agent_id: str, user_id: str, message: str,
 ) -> tuple[dict | None, int]:
-    """热路径边界检查。
+    """热路径边界检查（关键词匹配 + Redis 读取，无 LLM）。
 
-    返回 (result, patience)。result 为 dict 或 None（通过）。
-    纯关键词匹配 + Redis读取，无LLM调用。
+    返回 (signal, patience)。signal 为 None 表示通过；否则包含：
+      - blocked: 是否拉黑（没耐心≤0 且非道歉）
+      - zone: normal / medium / low / blocked
+      - hits: 命中的违禁关键词列表
+      - fallback: 兜底文案（LLM 生成失败时使用）
 
-    拉黑状态（耐心值≤0）：拦截非道歉消息；道歉消息放行进入正常流程。
+    spec §2.6：
+    - 拉黑状态：拦截非道歉消息；道歉消息放行进入正常流程（§2.2）
+    - 正常/中/低：仅在含违禁词时拦截（违禁词作为步骤 3 的硬关键词兜底）
     """
     patience = await get_patience(agent_id, user_id)
     if patience <= 0:
@@ -512,8 +540,9 @@ async def check_boundary(
             return None, patience
         return {
             "blocked": True,
-            "response": generate_boundary_response("blocked"),
             "zone": "blocked",
+            "hits": [],
+            "fallback": generate_boundary_response("blocked"),
         }, patience
 
     hits = check_banned_keywords(message)
@@ -523,9 +552,9 @@ async def check_boundary(
     zone = get_patience_zone(patience)
     return {
         "blocked": False,
-        "response": generate_boundary_response(zone),
         "zone": zone,
         "hits": hits,
+        "fallback": generate_boundary_response(zone),
     }, patience
 
 

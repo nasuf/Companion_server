@@ -17,8 +17,8 @@ from app.services.schedule_domain.schedule import _SCHEDULE_QUERY_KEYWORDS
 
 
 class IntentType(Enum):
-    APOLOGY = "apology"
-    PROMISE = "promise"
+    # spec §3.3 将"道歉承诺"合并为一个意图
+    APOLOGY_PROMISE = "apology_promise"
     CONVERSATION_END = "conversation_end"
     DELETION = "deletion"
     SCHEDULE_ADJUST = "schedule_adjust"
@@ -44,10 +44,9 @@ SCHEDULE_ADJUST_KEYWORDS = [
     "你今天早点", "今天晚点",
 ]
 
-# 优先级顺序：前面的优先匹配
+# 优先级顺序：前面的优先匹配。spec §3.3 道歉承诺合并为一个意图
 _CHECKS: list[tuple[IntentType, list[str]]] = [
-    (IntentType.APOLOGY, APOLOGY_KEYWORDS),
-    (IntentType.PROMISE, PROMISE_KEYWORDS),
+    (IntentType.APOLOGY_PROMISE, APOLOGY_KEYWORDS + PROMISE_KEYWORDS),
     (IntentType.CONVERSATION_END, CONVERSATION_END_KEYWORDS),
     (IntentType.DELETION, DELETION_KEYWORDS),
     (IntentType.SCHEDULE_ADJUST, SCHEDULE_ADJUST_KEYWORDS),

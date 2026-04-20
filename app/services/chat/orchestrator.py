@@ -67,8 +67,9 @@ from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.relationship.boundary import (
     check_boundary, process_boundary_violation, detect_apology, handle_apology,
-    handle_promise, has_apology_keyword, check_positive_recovery,
+    has_apology_keyword, check_positive_recovery,
     get_patience_prompt_instruction, get_patience_zone,
+    generate_boundary_reply_llm,
     PATIENCE_MAX,
 )
 from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
@@ -332,13 +333,22 @@ async def stream_chat_response(
     if agent_id:
         boundary_result, cached_patience = await check_boundary(agent_id, user_id, user_message)
         if boundary_result:
-            response = boundary_result["response"]
+            # spec §2.6：用大模型按 zone 生成对应等级的边界回复，失败时落兜底模板
+            zone = boundary_result["zone"]
+            personality_brief = getattr(agent, "name", "") or ""
+            response = await generate_boundary_reply_llm(
+                zone=zone,
+                message=user_message,
+                personality_brief=personality_brief,
+            )
+            if not response:
+                response = boundary_result.get("fallback", "...")
             await db.message.create(
                 data={
                     "conversation": {"connect": {"id": conversation_id}},
                     "role": "assistant",
                     "content": response,
-                    "metadata": Json({"boundary": True, "zone": boundary_result["zone"]}),
+                    "metadata": Json({"boundary": True, "zone": zone}),
                 }
             )
             yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
@@ -354,7 +364,7 @@ async def stream_chat_response(
             # 拉黑状态下始终检测道歉（LLM语义识别，覆盖隐式道歉）
             # 即使没有精确道歉关键词，用户也可能用隐式方式道歉
             # 如 "那天的事是我不对" / "我不该那样说你"
-            if boundary_result.get("zone") == "blocked":
+            if zone == "blocked":
                 _fire_background(_bg_apology_check(agent_id, user_id, user_message))
             _end_trace(_trace_ctx, trace_id, conversation_id)
             return
@@ -432,8 +442,8 @@ async def stream_chat_response(
         _end_trace(_trace_ctx, trace_id, conversation_id)
         return
 
-    # --- IntentType.APOLOGY: 道歉热路径短路 ---
-    if detected_intent.intent == IntentType.APOLOGY and agent_id and cached_patience < PATIENCE_MAX:
+    # --- IntentType.APOLOGY_PROMISE: 道歉/承诺热路径短路 (spec §3.4.4) ---
+    if detected_intent.intent == IntentType.APOLOGY_PROMISE and agent_id and cached_patience < PATIENCE_MAX:
         try:
             apology_result = await detect_apology(user_message)
             if apology_result.get("is_apology") and apology_result.get("sincerity", 0) >= 0.5:
@@ -450,14 +460,6 @@ async def stream_chat_response(
                 return
         except Exception as e:
             logger.warning(f"Hot-path apology failed, falling through to normal chat: {e}")
-
-    # --- IntentType.PROMISE: 承诺恢复耐心（不短路） ---
-    elif detected_intent.intent == IntentType.PROMISE and agent_id:
-        try:
-            new_patience = await handle_promise(agent_id, user_id)
-            logger.info(f"Promise detected: patience adjusted to {new_patience}")
-        except Exception as e:
-            logger.warning(f"Promise handling failed: {e}")
 
     # --- IntentType.DELETION: spec §5 step 1-2 (find candidates → ask confirmation) ---
     elif detected_intent.intent == IntentType.DELETION:

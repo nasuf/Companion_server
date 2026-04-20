@@ -126,7 +126,7 @@ class TestPatienceRedis:
     async def test_recover_hourly_normal(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "50"
         val = await recover_patience_hourly("agent1", "user1")
-        assert val == 55
+        assert val == 60  # spec §2.5: 每小时 +10
 
     async def test_recover_hourly_skip_max(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "100"

@@ -15,7 +15,7 @@ from app.db import db
 from app.services.runtime.aggregation import is_short_message, push_pending, flush_pending
 from app.services.chat.orchestrator import stream_chat_response
 from app.services.runtime.delayed_queue import enqueue_delayed_message
-from app.services.relationship.emotion import quick_emotion_estimate
+from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
 from app.services.chat.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
@@ -144,11 +144,13 @@ async def _handle_message(
             agent.id, agent.name, get_mbti(agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
+    ai_emotion = await get_ai_emotion(agent.id)
     current_context = await build_reply_timing_context(
         agent_id=agent.id,
         user_id=user_id,
         received_status=received_status,
         user_emotion=quick_emotion_estimate(text),
+        ai_emotion=ai_emotion,
     )
 
     pending_text, _, pending_context, _ = await flush_pending(user_id)

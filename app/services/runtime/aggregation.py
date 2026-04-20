@@ -120,12 +120,6 @@ async def flush_pending(user_id: str) -> tuple[str | None, str | None, dict | No
     return ("".join(texts) if texts else None), conv_id, ctx, latest_message_id
 
 
-async def has_pending(user_id: str) -> bool:
-    """检查用户是否有待聚合消息。"""
-    r = await get_redis()
-    return await r.exists(_PENDING_MSG_KEY.format(uid=user_id)) > 0
-
-
 async def scan_expired() -> list[tuple[str, str, str, dict | None, str | None]]:
     """扫描到期的聚合窗口。返回 [(user_id, combined_text, conversation_id, reply_context, latest_message_id)]。"""
     r = await get_redis()
