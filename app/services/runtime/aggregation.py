@@ -7,10 +7,13 @@ PRD §3.4
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
 from app.redis_client import get_redis
+
+logger = logging.getLogger(__name__)
 
 # 常用应答词集合（spec §1.2）：长度≤2 但属于应答词 → 不视为碎片，直接进入边界系统。
 COMMON_RESPONSES = {
@@ -76,6 +79,10 @@ async def push_pending(
         pipe.set(ctx_key, json.dumps(reply_context, ensure_ascii=False), ex=_PENDING_TTL)
     pipe.zadd(_PENDING_DELAYED_KEY, {user_id: time.time() + _AGGREGATION_WINDOW})
     await pipe.execute()
+    logger.info(
+        f"[AGG-PUSH] user_id={user_id} text={text!r} "
+        f"window_sec={_AGGREGATION_WINDOW}"
+    )
 
 
 async def flush_pending(user_id: str) -> tuple[str | None, str | None, dict | None, str | None]:
@@ -117,7 +124,13 @@ async def flush_pending(user_id: str) -> tuple[str | None, str | None, dict | No
         if isinstance(msg_id, str) and msg_id.strip():
             latest_message_id = msg_id
     # spec §1.5: 按原始顺序直接连接（中文不加空格）
-    return ("".join(texts) if texts else None), conv_id, ctx, latest_message_id
+    combined = "".join(texts) if texts else None
+    if combined:
+        logger.info(
+            f"[AGG-FLUSH] user_id={user_id} parts={len(texts)} "
+            f"combined={combined[:80]!r}"
+        )
+    return combined, conv_id, ctx, latest_message_id
 
 
 async def scan_expired() -> list[tuple[str, str, str, dict | None, str | None]]:

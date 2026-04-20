@@ -42,11 +42,9 @@ from app.services.schedule_domain.timing import (
     explain_delay_reason,
 )
 from app.services.memory.interaction.deletion import (
-    detect_deletion_intent,
     generate_deletion_reply,
-    find_matching_memories,
-    save_pending_deletion, load_pending_deletion, clear_pending_deletion,
-    is_deletion_confirmed, generate_deletion_confirmation_prompt,
+    load_pending_deletion, clear_pending_deletion,
+    is_deletion_confirmed,
     execute_confirmed_deletion,
 )
 from app.services.memory.retrieval.relevance import classify_memory_relevance, compute_display_score
@@ -60,7 +58,6 @@ from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.schedule import (
     get_cached_schedule, get_current_status, format_schedule_context,
-    handle_schedule_adjustment, update_schedule_slot, format_full_schedule_for_query,
 )
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
@@ -70,16 +67,28 @@ from app.services.relationship.boundary import (
     get_patience_prompt_instruction, get_patience_zone,
     generate_boundary_reply_llm,
     PATIENCE_MAX,
-)
+)  # detect_apology/handle_apology: pending contradiction 分支 + _bg_apology_check 仍用
 from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.intent_dispatcher import (
     detect_intent, detect_intent_llm, IntentType, IntentResult,
     LABEL_TO_INTENT, INTENT_PRIORITY,
 )
+from app.services.chat.multi_intent import (
+    finalize_short_circuit as _finalize_short_circuit,
+    process_sub_intents as _process_sub_intents,
+    short_circuit_reply as _short_circuit_reply_impl,
+)
+from app.services.chat.intent_handlers import (
+    ShortCircuitCtx,
+    handle_apology_promise,
+    handle_conversation_end,
+    handle_current_state,
+    handle_deletion,
+    handle_schedule_adjust,
+    handle_schedule_query,
+)
 from app.services.chat.intent_replies import (
-    apology_reply as _apology_reply,
-    end_reply as _end_reply,
     delay_explanation_reply as _delay_explanation_reply,
     attack_target_classify as _attack_target_classify,
     attack_level_classify as _attack_level_classify,
@@ -87,10 +96,7 @@ from app.services.chat.intent_replies import (
     memory_medium_reply as _memory_medium_reply,
     memory_strong_reply as _memory_strong_reply,
     memory_l3_reply as _memory_l3_reply,
-    deletion_confirm_reply as _deletion_confirm_reply,
     deletion_done_reply as _deletion_done_reply,
-    schedule_query_reply as _schedule_query_reply,
-    current_state_reply as _current_state_reply,
     banned_word_check as _banned_word_check,
     l3_trigger_classify as _l3_trigger_classify,
     split_reply_to_n_sentences as _split_reply_to_n_sentences,
@@ -127,104 +133,13 @@ async def _short_circuit_reply(
     reply_index_offset: int = 0,
     include_done: bool = True,
 ) -> list[dict]:
-    """Build SSE events for a short-circuit reply (intent branches).
-
-    sub_intent_mode=True: 父调用负责 save_last_reply_timestamp/done，此处跳过。
-    include_done=False: 即使非 sub_intent_mode，也延后 done（由主调用稍后处理 sub fragments 再 done）。
-    """
-    _fire_background(_save_replies(conversation_id, [reply]))
-    if not sub_intent_mode:
-        await save_last_reply_timestamp(agent_id, user_id)
-    events: list[dict] = [{
-        "event": "reply",
-        "data": json.dumps({"text": reply, "index": reply_index_offset}),
-    }]
-    if include_done and not sub_intent_mode:
-        events.append({"event": "done", "data": json.dumps({"message_id": "complete"})})
-    return events
-
-
-async def _finalize_short_circuit(
-    reply: str,
-    *,
-    conversation_id: str,
-    agent_id: str | None,
-    user_id: str,
-    agent,
-    reply_context: dict | None,
-    trace_ctx,
-    trace_id: str | None,
-    pending_sub_fragments: dict[str, str],
-    sub_intent_mode: bool,
-    reply_index_offset: int,
-    cached_patience: int,
-) -> AsyncGenerator[dict, None]:
-    """统一短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
-
-    sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
-    """
-    events = await _short_circuit_reply(
-        reply, conversation_id, agent_id, user_id,
+    """Orchestrator-side adapter that injects `_save_replies`."""
+    return await _short_circuit_reply_impl(
+        reply, conversation_id, agent_id, user_id, _save_replies,
         sub_intent_mode=sub_intent_mode,
         reply_index_offset=reply_index_offset,
-        include_done=False,
+        include_done=include_done,
     )
-    for evt in events:
-        yield evt
-    if not sub_intent_mode and pending_sub_fragments:
-        async for evt in _process_sub_intents(
-            pending_sub_fragments, conversation_id, agent, user_id,
-            reply_context, start_index=reply_index_offset + 1,
-            parent_patience=cached_patience,
-        ):
-            yield evt
-    if not sub_intent_mode:
-        yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
-        _end_trace(trace_ctx, trace_id, conversation_id)
-
-
-async def _process_sub_intents(
-    pending_sub_fragments: dict[str, str],
-    conversation_id: str,
-    agent,
-    user_id: str,
-    reply_context: dict | None,
-    start_index: int,
-    parent_patience: int,
-) -> AsyncGenerator[dict, None]:
-    """spec §3.3 step 3：按 priority 顺序处理拆分后的子意图片段。
-
-    每个片段作为独立子调用进入 stream_chat_response(sub_intent_mode=True)，
-    共享 reply_context 沿用首条消息的 due_at（spec §6）。
-    """
-    if not pending_sub_fragments:
-        return
-    ordered = sorted(
-        pending_sub_fragments.items(),
-        key=lambda kv: INTENT_PRIORITY.index(kv[0]) if kv[0] in INTENT_PRIORITY else float("inf"),
-    )
-    cur_index = start_index
-    for label, text in ordered:
-        intent_type = LABEL_TO_INTENT.get(label, IntentType.NONE)
-        logger.info(f"[INTENT-SUB] processing '{label}' → {intent_type.value}, text='{text[:40]}'")
-        async for evt in stream_chat_response(
-            conversation_id=conversation_id,
-            user_message=text,
-            agent=agent,
-            user_id=user_id,
-            reply_context=reply_context,
-            save_user_message=False,
-            delivered_from_queue=True,
-            sub_intent_mode=True,
-            forced_intent=intent_type,
-            reply_index_offset=cur_index,
-            parent_patience=parent_patience,
-        ):
-            if evt.get("event") == "done":
-                continue
-            yield evt
-            if evt.get("event") == "reply":
-                cur_index += 1
 
 
 async def _intent_llm_reply(
@@ -657,26 +572,26 @@ async def stream_chat_response(
                     f"sub={list(pending_sub_fragments.keys())}"
                 )
 
-    # --- IntentType.CONVERSATION_END: 终结对话 (spec §3.4.6) ---
+    # 统一短路上下文：6 个意图 handler 共用
+    sc_ctx = ShortCircuitCtx(
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        user_id=user_id,
+        agent=agent,
+        reply_context=reply_context,
+        trace_ctx=_trace_ctx,
+        trace_id=trace_id,
+        end_trace_fn=_end_trace,
+        save_replies_fn=_save_replies,
+        pending_sub_fragments=pending_sub_fragments,
+        sub_intent_mode=sub_intent_mode,
+        reply_index_offset=reply_index_offset,
+        cached_patience=cached_patience,
+    )
+
+    # §3.4.6 终结意图
     if detected_intent.intent == IntentType.CONVERSATION_END:
-        farewell = await _end_reply(
-            message=user_message,
-            personality_brief=getattr(agent, "name", "") or "",
-        )
-        if not farewell:
-            farewell = await _intent_llm_reply(
-                agent, user_message,
-                "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。",
-            )
-        async for evt in _finalize_short_circuit(
-            farewell,
-            conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
-            reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
-            pending_sub_fragments=pending_sub_fragments,
-            sub_intent_mode=sub_intent_mode,
-            reply_index_offset=reply_index_offset,
-            cached_patience=cached_patience,
-        ):
+        async for evt in handle_conversation_end(user_message, sc_ctx, _intent_llm_reply):
             yield evt
         if workspace_id and agent_id and not sub_intent_mode:
             _fire_background(start_or_restart_proactive_session(
@@ -688,70 +603,23 @@ async def stream_chat_response(
             ))
         return
 
-    # --- IntentType.APOLOGY_PROMISE: 道歉/承诺热路径短路 (spec §3.4.4) ---
-    if detected_intent.intent == IntentType.APOLOGY_PROMISE and agent_id and cached_patience < PATIENCE_MAX:
-        try:
-            apology_result = await detect_apology(user_message)
-            if apology_result.get("is_apology") and apology_result.get("sincerity", 0) >= 0.5:
-                new_patience = await handle_apology(agent_id, user_id)
-                reply = await _apology_reply(
-                    message=user_message,
-                    personality_brief=getattr(agent, "name", "") or "",
-                    new_patience=new_patience,
-                )
-                if not reply:
-                    reply = "好啦，我不生气了~"
-                async for evt in _finalize_short_circuit(
-                    reply,
-                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
-                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
-                    pending_sub_fragments=pending_sub_fragments,
-                    sub_intent_mode=sub_intent_mode,
-                    reply_index_offset=reply_index_offset,
-                    cached_patience=cached_patience,
-                ):
-                    yield evt
-                return
-        except Exception as e:
-            logger.warning(f"Hot-path apology failed, falling through to normal chat: {e}")
+    # §3.4.4 道歉承诺热路径
+    if detected_intent.intent == IntentType.APOLOGY_PROMISE:
+        handled, events = await handle_apology_promise(user_message, sc_ctx)
+        if handled and events is not None:
+            async for evt in events:
+                yield evt
+            return
 
-    # --- IntentType.DELETION: spec §5 step 1-2 (find candidates → ask confirmation) ---
+    # §5 step 1-2 删除意图：找候选 → 请求确认
     elif detected_intent.intent == IntentType.DELETION:
-        try:
-            deletion_result = await detect_deletion_intent(user_message)
-            if deletion_result and deletion_result.get("target_description"):
-                description = deletion_result["target_description"]
-                candidates = await find_matching_memories(user_id, description)
-                if candidates:
-                    await save_pending_deletion(conversation_id, candidates)
-                    agent_name = agent.name if agent else "伙伴"
-                    # spec §5.2 用注册的 deletion_confirm prompt 生成
-                    candidate_preview = "\n".join(
-                        f"{i+1}. {c.get('content', c.get('summary', ''))[:60]}"
-                        for i, c in enumerate(candidates[:5])
-                    )
-                    reply = await _deletion_confirm_reply(
-                        message=user_message,
-                        personality_brief=agent_name,
-                        candidate_memories=candidate_preview,
-                    ) or await generate_deletion_confirmation_prompt(agent_name, candidates)
-                else:
-                    reply = "嗯...我好像没有关于这个的记忆呢。"
-                async for evt in _finalize_short_circuit(
-                    reply,
-                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
-                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
-                    pending_sub_fragments=pending_sub_fragments,
-                    sub_intent_mode=sub_intent_mode,
-                    reply_index_offset=reply_index_offset,
-                    cached_patience=cached_patience,
-                ):
-                    yield evt
-                return
-        except Exception as e:
-            logger.warning(f"Hot-path deletion failed, falling through to normal chat: {e}")
+        handled, events = await handle_deletion(user_message, sc_ctx)
+        if handled and events is not None:
+            async for evt in events:
+                yield evt
+            return
 
-    # NOTE: IntentType.SCHEDULE_ADJUST 和 SCHEDULE_QUERY 在 parallel data fetch 之后处理（需要 schedule 数据）
+    # NOTE: SCHEDULE_ADJUST/SCHEDULE_QUERY/CURRENT_STATE 在 parallel data fetch 之后处理
 
     # Load recent messages (for prompt context)
     recent_messages = await db.message.find_many(
@@ -1001,94 +869,45 @@ async def stream_chat_response(
     if ai_status:
         schedule_context = format_schedule_context(ai_status)
 
-    # --- IntentType.SCHEDULE_ADJUST: 作息调整（需要 schedule 数据，在 data fetch 之后处理） ---
-    if detected_intent.intent == IntentType.SCHEDULE_ADJUST and agent_id and schedule and ai_status:
-        try:
-            adj_result = await handle_schedule_adjustment(
-                agent_id=agent_id,
-                request=user_message,
-                current_status=ai_status,
-                intimacy_score=float(topic_intimacy),
-                mbti=mbti,
-            )
-            response = adj_result.get("response", "")
-            if response:
-                if adj_result.get("accepted"):
-                    await update_schedule_slot(agent_id, schedule, ai_status)
-                async for evt in _finalize_short_circuit(
-                    response,
-                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
-                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
-                    pending_sub_fragments=pending_sub_fragments,
-                    sub_intent_mode=sub_intent_mode,
-                    reply_index_offset=reply_index_offset,
-                    cached_patience=cached_patience,
-                ):
-                    yield evt
-                return
-        except Exception as e:
-            logger.warning(f"Schedule adjustment failed, falling through: {e}")
+    # §3.4.2 作息调整
+    if detected_intent.intent == IntentType.SCHEDULE_ADJUST:
+        handled, events = await handle_schedule_adjust(
+            user_message, sc_ctx,
+            schedule=schedule, ai_status=ai_status,
+            topic_intimacy=topic_intimacy, mbti=mbti,
+        )
+        if handled and events is not None:
+            async for evt in events:
+                yield evt
+            return
 
-    # --- IntentType.SCHEDULE_QUERY: 计划查询 (spec §3.4.1) ---
-    if detected_intent.intent == IntentType.SCHEDULE_QUERY and schedule:
+    # §3.4.1 计划查询
+    if detected_intent.intent == IntentType.SCHEDULE_QUERY:
         query_type = detected_intent.metadata.get("query_type", "current")
-        schedule_context = format_full_schedule_for_query(schedule, query_type, ai_status)
-        try:
-            personality_brief = getattr(agent, "name", "") or ""
-            portrait_text = str(portrait) if portrait else "(未知)"
-            current_activity = format_schedule_context(ai_status) if ai_status else "(未知)"
-            response = await _schedule_query_reply(
-                message=user_message,
-                user_emotion=prompt_user_emotion,
-                personality_brief=personality_brief,
-                user_portrait=portrait_text,
-                current_activity=current_activity,
-                ai_schedule=schedule_context or "(未知)",
-            )
-            if response:
-                async for evt in _finalize_short_circuit(
-                    response,
-                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
-                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
-                    pending_sub_fragments=pending_sub_fragments,
-                    sub_intent_mode=sub_intent_mode,
-                    reply_index_offset=reply_index_offset,
-                    cached_patience=cached_patience,
-                ):
-                    yield evt
-                return
-        except Exception as e:
-            logger.warning(f"Schedule query short-circuit failed, falling through: {e}")
+        handled, events, schedule_ctx_for_prompt = await handle_schedule_query(
+            user_message, sc_ctx,
+            schedule=schedule, ai_status=ai_status,
+            portrait=portrait, user_emotion=prompt_user_emotion,
+            query_type=query_type,
+        )
+        if schedule_ctx_for_prompt is not None:
+            schedule_context = schedule_ctx_for_prompt  # 供下方 rich prompt 复用
+        if handled and events is not None:
+            async for evt in events:
+                yield evt
+            return
 
-    # --- IntentType.CURRENT_STATE: 询问当前状态 (spec §3.4.3) ---
+    # §3.4.3 询问当前状态
     if detected_intent.intent == IntentType.CURRENT_STATE:
-        try:
-            personality_brief = getattr(agent, "name", "") or ""
-            portrait_text = str(portrait) if portrait else "(未知)"
-            current_activity = format_schedule_context(ai_status) if ai_status else "(未知)"
-            ai_sched_text = schedule_context or "(未知)"
-            response = await _current_state_reply(
-                message=user_message,
-                user_emotion=prompt_user_emotion,
-                personality_brief=personality_brief,
-                user_portrait=portrait_text,
-                current_activity=current_activity,
-                ai_schedule=ai_sched_text,
-            )
-            if response:
-                async for evt in _finalize_short_circuit(
-                    response,
-                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
-                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
-                    pending_sub_fragments=pending_sub_fragments,
-                    sub_intent_mode=sub_intent_mode,
-                    reply_index_offset=reply_index_offset,
-                    cached_patience=cached_patience,
-                ):
-                    yield evt
-                return
-        except Exception as e:
-            logger.warning(f"Current state short-circuit failed, falling through: {e}")
+        handled, events = await handle_current_state(
+            user_message, sc_ctx,
+            ai_status=ai_status, schedule_context=schedule_context,
+            portrait=portrait, user_emotion=prompt_user_emotion,
+        )
+        if handled and events is not None:
+            async for evt in events:
+                yield evt
+            return
 
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
@@ -1230,11 +1049,9 @@ async def stream_chat_response(
 
             raw_response = "".join(response_chunks)
 
-            # --- spec §5.5: 回复句数拆分 ---
-            # reply_count 已在上面按 n=random.randint(1,3) 均匀分布选定。
-            # n=1 → 保持原回复；n=2/3 → 调小模型「AI语句拆分（n句）」指令。
-            # 小模型失败 → 回退到 `||` 分隔切分（旧逻辑）。
+            # spec §5.5: n=1 保持原回复；n>=2 调小模型拆分，失败回退 `||`。
             replies = None
+            split_source = "single"
             if reply_count >= 2:
                 split_result = await _split_reply_to_n_sentences(raw_response, reply_count)
                 if split_result:
@@ -1242,10 +1059,16 @@ async def stream_chat_response(
                         truncate_at_sentence(p, MAX_PER_REPLY)
                         for p in split_result[:max_reply_count]
                     ]
+                    split_source = f"llm_{reply_count}"
             if replies is None:
                 replies = split_and_validate_replies(
                     raw_response, max_reply_count, MAX_PER_REPLY, max_total
                 )
+                split_source = "pipe_fallback"
+            logger.info(
+                f"[REPLY-SPLIT] n_target={reply_count} actual={len(replies)} "
+                f"source={split_source}"
+            )
 
     # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
     emo = emotion if isinstance(emotion, dict) else {}

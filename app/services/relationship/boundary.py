@@ -393,8 +393,18 @@ async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_flo
     """恢复耐心值的共享逻辑：非拉黑+delta（上限100），拉黑恢复到blocked_floor。"""
     current = await get_patience(agent_id, user_id)
     if current <= 0:
-        return await set_patience(agent_id, user_id, blocked_floor)
-    return await set_patience(agent_id, user_id, min(PATIENCE_MAX, current + delta))
+        new_val = await set_patience(agent_id, user_id, blocked_floor)
+        logger.info(
+            f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
+            f"reason=apology_unblock current=0 new={new_val}"
+        )
+        return new_val
+    new_val = await set_patience(agent_id, user_id, min(PATIENCE_MAX, current + delta))
+    logger.info(
+        f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
+        f"reason=restore delta=+{delta} current={current} new={new_val}"
+    )
+    return new_val
 
 
 async def handle_apology(agent_id: str, user_id: str) -> int:
@@ -575,9 +585,10 @@ async def process_boundary_violation(
     count = await record_attack(agent_id, user_id, level=level)
     deduction = compute_repeat_deduction(level, count if count > 0 else 1)
 
-    await adjust_patience(agent_id, user_id, -deduction)
+    new_val = await adjust_patience(agent_id, user_id, -deduction)
 
     logger.info(
-        f"Boundary violation: agent={agent_id} intent={intent} "
-        f"severity={severity.get('level')} deduction={deduction}"
+        f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
+        f"reason=violation intent={intent} level={level} count={count} "
+        f"delta=-{deduction} current={current} new={new_val}"
     )

@@ -6,11 +6,14 @@ structured delay decision that can later be injected into the reply prompt.
 
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime, timezone
 from typing import Any
 
 from app.redis_client import get_redis
+
+logger = logging.getLogger(__name__)
 
 LAST_REPLY_TTL = 86400 * 14
 
@@ -93,27 +96,31 @@ def compute_delay_profile(
         age_seconds = max(0.0, (received_at - base).total_seconds())
 
     if age_seconds is not None and age_seconds < 1800:
-        return {
+        profile = {
             "interaction_mode": "conversation_mode",
             "delay_reason": "conversation_mode",
             "delay_seconds": random.uniform(1, 5),
         }
-
-    if _is_high_emotion(user_emotion, ai_emotion):
+    elif _is_high_emotion(user_emotion, ai_emotion):
         # spec §6.2: 高情绪 0-5s(90%), 5-10s(10%)
         delay = random.uniform(0, 5) if random.random() < 0.9 else random.uniform(5, 10)
-        return {
+        profile = {
             "interaction_mode": "high_emotion",
             "delay_reason": "high_emotion",
             "delay_seconds": delay,
         }
-
-    status = str((received_status or {}).get("status", "idle"))
-    return {
-        "interaction_mode": "schedule_state",
-        "delay_reason": f"schedule_{status}",
-        "delay_seconds": _schedule_delay_for_status(status),
-    }
+    else:
+        status = str((received_status or {}).get("status", "idle"))
+        profile = {
+            "interaction_mode": "schedule_state",
+            "delay_reason": f"schedule_{status}",
+            "delay_seconds": _schedule_delay_for_status(status),
+        }
+    logger.info(
+        f"[DELAY-CALC] reason={profile['delay_reason']} "
+        f"seconds={profile['delay_seconds']:.2f}"
+    )
+    return profile
 
 
 async def build_reply_timing_context(
