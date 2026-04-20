@@ -39,19 +39,12 @@ from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
 )
-from app.services.memory.interaction.deletion import (
-    generate_deletion_reply,
-    load_pending_deletion, clear_pending_deletion,
-    is_deletion_confirmed,
-    execute_confirmed_deletion,
-)
 from app.services.memory.retrieval.relevance import classify_memory_relevance, compute_display_score
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
 from app.services.memory.interaction.contradiction import (
     detect_l1_contradiction, generate_contradiction_inquiry,
-    analyze_contradiction_response, apply_contradiction_resolution,
-    save_pending_contradiction, load_pending_contradiction, clear_pending_contradiction,
-)
+    save_pending_contradiction,
+)  # analyze/apply/load/clear 已由 preflight.resolve_pending_contradiction 接管
 from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.schedule import (
@@ -94,12 +87,16 @@ from app.services.chat.intent_replies import (
     memory_medium_reply as _memory_medium_reply,
     memory_strong_reply as _memory_strong_reply,
     memory_l3_reply as _memory_l3_reply,
-    deletion_done_reply as _deletion_done_reply,
     banned_word_check as _banned_word_check,
     l3_trigger_classify as _l3_trigger_classify,
     split_reply_to_n_sentences as _split_reply_to_n_sentences,
 )
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
+from app.services.chat.preflight import (
+    PreflightCtx,
+    resolve_pending_contradiction,
+    resolve_pending_deletion,
+)
 from app.services.mbti import get_mbti
 from app.services.chat.fast_fact import update_working_facts, facts_for_prompt
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
@@ -470,64 +467,32 @@ async def stream_chat_response(
         except Exception as e:
             logger.warning(f"Medium/low patience short-circuit failed: {e}")
 
-    # --- Pending cross-message state checks (BEFORE intent dispatch) ---
-    # User replies to contradiction inquiries or deletion confirmations won't
-    # contain the original intent keywords, so intent detection would miss them.
-    # Check Redis pending state FIRST and short-circuit if found.
-    # sub_intent_mode: 父调用已处理 pending 状态，子片段跳过。
-    pending_conflict = None if sub_intent_mode else await load_pending_contradiction(conversation_id)
-    # §4 step 3-5: Contradiction resolution
-    if pending_conflict:
-        try:
-            analysis = await analyze_contradiction_response(user_message, pending_conflict)
-            await apply_contradiction_resolution(pending_conflict, analysis)
-            await clear_pending_contradiction(conversation_id)
-            change = analysis.get("change_type", "新增")
-            reason = analysis.get("reason", "")
-            agent_name = agent.name if agent else "AI"
-            try:
-                reply = await invoke_text(get_chat_model(),
-                    f"你是{agent_name}。用户刚才解释了一个信息变化：{reason}（类型：{change}）。"
-                    f"请用1-2句自然的话回应，表示你记住了新的情况，然后把话题拉回正轨。"
-                    f"不要提及'记忆''修改''系统'等词。")
-            except Exception:
-                reply = "好的，我记住了~"
-            for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
-                yield evt
-            _end_trace(_trace_ctx, trace_id, conversation_id)
-            return
-        except Exception as e:
-            logger.warning(f"Contradiction resolution failed: {e}")
-            await clear_pending_contradiction(conversation_id)
+    # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
+    # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
+    if not sub_intent_mode:
+        preflight_ctx = PreflightCtx(
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            agent=agent,
+            trace_ctx=_trace_ctx,
+            trace_id=trace_id,
+            end_trace_fn=_end_trace,
+            short_circuit_fn=_short_circuit_reply,
+        )
 
-    # §5 step 3: Deletion confirmation
-    pending_del = None if sub_intent_mode else await load_pending_deletion(conversation_id)
-    if pending_del:
-        try:
-            if is_deletion_confirmed(user_message):
-                deleted = await execute_confirmed_deletion(user_id, pending_del)
-                await clear_pending_deletion(conversation_id)
-                agent_name = agent.name if agent else "伙伴"
-                # spec §5.3 用注册的 deletion_reply prompt 生成
-                deleted_preview = "\n".join(
-                    f"- {c.get('content', c.get('summary', ''))[:60]}"
-                    for c in pending_del[:5]
-                ) or "(无)"
-                reply = await _deletion_done_reply(
-                    message=user_message,
-                    personality_brief=agent_name,
-                    deleted_memories=deleted_preview,
-                ) or await generate_deletion_reply(agent_name, "之前提到的", deleted)
-            else:
-                await clear_pending_deletion(conversation_id)
-                reply = "好的，那就不删了，继续聊吧~"
-            for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
-                yield evt
-            _end_trace(_trace_ctx, trace_id, conversation_id)
+        async def _chat_text(prompt: str) -> str:
+            return await invoke_text(get_chat_model(), prompt)
+
+        async for evt in resolve_pending_contradiction(user_message, preflight_ctx, _chat_text):
+            yield evt
+        if preflight_ctx.stopped:
             return
-        except Exception as e:
-            logger.warning(f"Deletion confirmation failed: {e}")
-            await clear_pending_deletion(conversation_id)
+
+        async for evt in resolve_pending_deletion(user_message, preflight_ctx):
+            yield evt
+        if preflight_ctx.stopped:
+            return
 
     # --- 统一意图识别：关键字快路 + LLM 兜底（spec §3.3 step 1-2） ---
     patience_zone = get_patience_zone(cached_patience)
