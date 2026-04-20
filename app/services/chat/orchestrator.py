@@ -23,8 +23,7 @@ from app.db import db
 from app.services.llm.models import get_chat_model, convert_messages, invoke_text
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
 from app.services.prompts.system_prompts import (
-    MAX_PER_REPLY, MAX_REPLY_COUNT, EXPAND_MAX_REPLY_COUNT,
-    MAX_TOTAL_CHARS, EXPAND_MAX_TOTAL_CHARS,
+    MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.recording.pipeline import process_memory_pipeline
@@ -44,14 +43,14 @@ from app.services.schedule_domain.timing import (
 )
 from app.services.memory.interaction.deletion import (
     detect_deletion_intent,
-    generate_deletion_reply, DELETION_KEYWORDS,
+    generate_deletion_reply,
     find_matching_memories,
     save_pending_deletion, load_pending_deletion, clear_pending_deletion,
     is_deletion_confirmed, generate_deletion_confirmation_prompt,
     execute_confirmed_deletion,
 )
 from app.services.memory.retrieval.relevance import classify_memory_relevance, compute_display_score
-from app.services.memory.retrieval.l3_awakening import should_awaken_l3, search_l3_memories
+from app.services.memory.retrieval.l3_awakening import search_l3_memories
 from app.services.memory.interaction.contradiction import (
     detect_l1_contradiction, generate_contradiction_inquiry,
     analyze_contradiction_response, apply_contradiction_resolution,
@@ -67,15 +66,35 @@ from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.relationship.boundary import (
     check_boundary, process_boundary_violation, detect_apology, handle_apology,
-    has_apology_keyword, check_positive_recovery,
+    check_positive_recovery,
     get_patience_prompt_instruction, get_patience_zone,
     generate_boundary_reply_llm,
     PATIENCE_MAX,
 )
 from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
-from app.services.chat.conversation_end import check_conversation_end
-from app.services.chat.intent_dispatcher import detect_intent, IntentType
+from app.services.chat.intent_dispatcher import (
+    detect_intent, detect_intent_llm, IntentType, IntentResult,
+    LABEL_TO_INTENT, INTENT_PRIORITY,
+)
+from app.services.chat.intent_replies import (
+    apology_reply as _apology_reply,
+    end_reply as _end_reply,
+    delay_explanation_reply as _delay_explanation_reply,
+    attack_target_classify as _attack_target_classify,
+    attack_level_classify as _attack_level_classify,
+    memory_weak_reply as _memory_weak_reply,
+    memory_medium_reply as _memory_medium_reply,
+    memory_strong_reply as _memory_strong_reply,
+    memory_l3_reply as _memory_l3_reply,
+    deletion_confirm_reply as _deletion_confirm_reply,
+    deletion_done_reply as _deletion_done_reply,
+    schedule_query_reply as _schedule_query_reply,
+    current_state_reply as _current_state_reply,
+    banned_word_check as _banned_word_check,
+    l3_trigger_classify as _l3_trigger_classify,
+    split_reply_to_n_sentences as _split_reply_to_n_sentences,
+)
 from app.services.emoji import should_add_emoji, should_add_sticker, pick_one_emoji
 from app.services.sticker import recommend_sticker
 from app.services.mbti import get_mbti
@@ -103,18 +122,109 @@ async def _short_circuit_reply(
     conversation_id: str,
     agent_id: str | None,
     user_id: str,
+    *,
+    sub_intent_mode: bool = False,
+    reply_index_offset: int = 0,
+    include_done: bool = True,
 ) -> list[dict]:
     """Build SSE events for a short-circuit reply (intent branches).
 
-    Handles: save to DB, save timestamp. Returns list of SSE event dicts to yield.
-    Caller must yield these events, then call _end_trace and return.
+    sub_intent_mode=True: 父调用负责 save_last_reply_timestamp/done，此处跳过。
+    include_done=False: 即使非 sub_intent_mode，也延后 done（由主调用稍后处理 sub fragments 再 done）。
     """
     _fire_background(_save_replies(conversation_id, [reply]))
-    await save_last_reply_timestamp(agent_id, user_id)
-    return [
-        {"event": "reply", "data": json.dumps({"text": reply, "index": 0})},
-        {"event": "done", "data": json.dumps({"message_id": "complete"})},
-    ]
+    if not sub_intent_mode:
+        await save_last_reply_timestamp(agent_id, user_id)
+    events: list[dict] = [{
+        "event": "reply",
+        "data": json.dumps({"text": reply, "index": reply_index_offset}),
+    }]
+    if include_done and not sub_intent_mode:
+        events.append({"event": "done", "data": json.dumps({"message_id": "complete"})})
+    return events
+
+
+async def _finalize_short_circuit(
+    reply: str,
+    *,
+    conversation_id: str,
+    agent_id: str | None,
+    user_id: str,
+    agent,
+    reply_context: dict | None,
+    trace_ctx,
+    trace_id: str | None,
+    pending_sub_fragments: dict[str, str],
+    sub_intent_mode: bool,
+    reply_index_offset: int,
+    cached_patience: int,
+) -> AsyncGenerator[dict, None]:
+    """统一短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
+
+    sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
+    """
+    events = await _short_circuit_reply(
+        reply, conversation_id, agent_id, user_id,
+        sub_intent_mode=sub_intent_mode,
+        reply_index_offset=reply_index_offset,
+        include_done=False,
+    )
+    for evt in events:
+        yield evt
+    if not sub_intent_mode and pending_sub_fragments:
+        async for evt in _process_sub_intents(
+            pending_sub_fragments, conversation_id, agent, user_id,
+            reply_context, start_index=reply_index_offset + 1,
+            parent_patience=cached_patience,
+        ):
+            yield evt
+    if not sub_intent_mode:
+        yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+        _end_trace(trace_ctx, trace_id, conversation_id)
+
+
+async def _process_sub_intents(
+    pending_sub_fragments: dict[str, str],
+    conversation_id: str,
+    agent,
+    user_id: str,
+    reply_context: dict | None,
+    start_index: int,
+    parent_patience: int,
+) -> AsyncGenerator[dict, None]:
+    """spec §3.3 step 3：按 priority 顺序处理拆分后的子意图片段。
+
+    每个片段作为独立子调用进入 stream_chat_response(sub_intent_mode=True)，
+    共享 reply_context 沿用首条消息的 due_at（spec §6）。
+    """
+    if not pending_sub_fragments:
+        return
+    ordered = sorted(
+        pending_sub_fragments.items(),
+        key=lambda kv: INTENT_PRIORITY.index(kv[0]) if kv[0] in INTENT_PRIORITY else float("inf"),
+    )
+    cur_index = start_index
+    for label, text in ordered:
+        intent_type = LABEL_TO_INTENT.get(label, IntentType.NONE)
+        logger.info(f"[INTENT-SUB] processing '{label}' → {intent_type.value}, text='{text[:40]}'")
+        async for evt in stream_chat_response(
+            conversation_id=conversation_id,
+            user_message=text,
+            agent=agent,
+            user_id=user_id,
+            reply_context=reply_context,
+            save_user_message=False,
+            delivered_from_queue=True,
+            sub_intent_mode=True,
+            forced_intent=intent_type,
+            reply_index_offset=cur_index,
+            parent_patience=parent_patience,
+        ):
+            if evt.get("event") == "done":
+                continue
+            yield evt
+            if evt.get("event") == "reply":
+                cur_index += 1
 
 
 async def _intent_llm_reply(
@@ -137,7 +247,6 @@ async def _intent_llm_reply(
 
 _SENTENCE_END = re.compile(r'[。！？…～~!?]+')
 
-_MORE_KEYWORDS = ["多说", "详细", "展开", "继续说", "说多点", "多聊聊"]
 _RELATIONAL_COMPLAINT_KEYWORDS = [
     "怎么不理我", "不理我", "不回我", "不想理我", "你在忙吗", "你还在吗",
     "你是不是不想理我", "是不是不想聊", "是不是烦我", "怎么才回",
@@ -184,16 +293,6 @@ def split_and_validate_replies(
         result.append(p)
         total += len(p)
     return result or [parts[0][:max_per_reply]]
-
-
-def detect_special_expand(message: str, emotion: dict | None) -> bool:
-    """检测是否需要放宽回复限制（用户要求多说 或 高唤醒+负面情绪）。"""
-    if any(kw in message for kw in _MORE_KEYWORDS):
-        return True
-    if emotion:
-        if emotion.get("arousal", 0.5) > 0.7 and emotion.get("pleasure", 0.0) < -0.3:
-            return True
-    return False
 
 
 def detect_relational_context(message: str, user_emotion: dict | None) -> str | None:
@@ -307,9 +406,23 @@ async def stream_chat_response(
     save_user_message: bool = True,
     user_message_id: str | None = None,
     delivered_from_queue: bool = False,
+    sub_intent_mode: bool = False,
+    forced_intent: IntentType | None = None,
+    reply_index_offset: int = 0,
+    parent_patience: int | None = None,
 ) -> AsyncGenerator[dict, None]:
-    # Save user message unless it has already been persisted at receipt time.
-    if save_user_message:
+    """spec §3.3 step 3：多意图拆分后递归调用本函数处理每个子片段。
+
+    sub_intent_mode=True 的子调用：跳过用户消息 DB 写入、边界/pending 检查、
+    延迟解释、done 事件、save_last_reply_timestamp 与后台任务；由父调用统一完成。
+    forced_intent 指定片段意图不再识别；reply_index_offset 让回复 index 顺延；
+    parent_patience 复用父调用的耐心值，避免每个子片段再读一次 Redis。
+    子调用共享 reply_context 沿用首条消息的 due_at（spec §6 延迟批处理）。
+    """
+    pending_sub_fragments: dict[str, str] = {}
+
+    # 碎片聚合/延迟队列在入队时已落库；sub_intent_mode 共享父调用的原始消息
+    if save_user_message and not sub_intent_mode:
         saved_msg = await db.message.create(
             data={
                 "conversation": {"connect": {"id": conversation_id}},
@@ -328,54 +441,130 @@ async def stream_chat_response(
     _run_tree = _trace_ctx.__enter__()
     trace_id = str(_run_tree.id) if _run_tree else None
 
-    # --- Boundary check (keyword + Redis, no LLM) ---
+    # --- Boundary check: spec §2.6 全流程
+    # sub_intent_mode: 父调用已完成边界检查并传递耐心值，子片段不重复读 Redis ---
     cached_patience = PATIENCE_MAX
-    if agent_id:
+    if sub_intent_mode:
+        cached_patience = parent_patience if parent_patience is not None else PATIENCE_MAX
+        boundary_result = None
+    elif agent_id:
         boundary_result, cached_patience = await check_boundary(agent_id, user_id, user_message)
+        # --- spec §2.6 步骤 3: 关键词没命中但耐心已非满，调小模型语义违禁判断
+        # 目的：catch 关键词兜底漏掉的隐式攻击/脏话（如语音谐音、新造词等）
+        if boundary_result is None and cached_patience < PATIENCE_MAX and len(user_message.strip()) > 3:
+            try:
+                if await _banned_word_check(user_message):
+                    zone_for_llm = get_patience_zone(cached_patience)
+                    logger.info(
+                        f"[BOUNDARY-LLM] banned_word_check hit for '{user_message[:40]}' "
+                        f"zone={zone_for_llm} patience={cached_patience}"
+                    )
+                    boundary_result = {
+                        "blocked": zone_for_llm == "blocked",
+                        "zone": zone_for_llm,
+                        "hits": [],
+                        "fallback": "...",
+                        "llm_detected": True,
+                    }
+            except Exception as e:
+                logger.warning(f"LLM banned word check failed: {e}")
         if boundary_result:
-            # spec §2.6：用大模型按 zone 生成对应等级的边界回复，失败时落兜底模板
             zone = boundary_result["zone"]
             personality_brief = getattr(agent, "name", "") or ""
-            response = await generate_boundary_reply_llm(
-                zone=zone,
-                message=user_message,
-                personality_brief=personality_brief,
-            )
-            if not response:
-                response = boundary_result.get("fallback", "...")
-            await db.message.create(
-                data={
-                    "conversation": {"connect": {"id": conversation_id}},
-                    "role": "assistant",
-                    "content": response,
-                    "metadata": Json({"boundary": True, "zone": zone}),
-                }
-            )
-            yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
-            await save_last_reply_timestamp(agent_id, user_id)
-            yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
-            # Background: classify + deduct patience
-            _fire_background(process_boundary_violation(agent_id, user_id, user_message))
-            # 记忆管道（攻击性消息也需记录）
-            _fire_background(_bg_memory_pipeline(user_id, [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": response},
-            ]))
-            # 拉黑状态下始终检测道歉（LLM语义识别，覆盖隐式道歉）
-            # 即使没有精确道歉关键词，用户也可能用隐式方式道歉
-            # 如 "那天的事是我不对" / "我不该那样说你"
+
+            # --- §2.6 步骤 2: 拉黑 → 直接用 blacklist_reply ---
             if zone == "blocked":
+                response = await generate_boundary_reply_llm(
+                    zone="blocked", message=user_message, personality_brief=personality_brief,
+                ) or boundary_result.get("fallback", "...")
+                await db.message.create(data={
+                    "conversation": {"connect": {"id": conversation_id}},
+                    "role": "assistant", "content": response,
+                    "metadata": Json({"boundary": True, "zone": "blocked"}),
+                })
+                yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
+                await save_last_reply_timestamp(agent_id, user_id)
+                yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
                 _fire_background(_bg_apology_check(agent_id, user_id, user_message))
-            _end_trace(_trace_ctx, trace_id, conversation_id)
-            return
+                _fire_background(_bg_memory_pipeline(user_id, [
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": response},
+                ]))
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+
+            # --- §2.6 步骤 4: 攻击目标识别（小模型热路径） ---
+            attack_target = await _attack_target_classify(user_message)
+            if attack_target and attack_target != "攻击AI":
+                # 非攻击 AI → 跳到步骤 6/7（按当前耐心状态处理，不扣分）
+                if zone == "medium":
+                    response = await generate_boundary_reply_llm(
+                        zone="medium", message=user_message, personality_brief=personality_brief,
+                    ) or boundary_result.get("fallback", "...")
+                    for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                        yield evt
+                    _end_trace(_trace_ctx, trace_id, conversation_id)
+                    return
+                if zone == "low":
+                    response = await generate_boundary_reply_llm(
+                        zone="low", message=user_message, personality_brief=personality_brief,
+                    ) or boundary_result.get("fallback", "...")
+                    for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                        yield evt
+                    _end_trace(_trace_ctx, trace_id, conversation_id)
+                    return
+                # zone == "normal" + 非攻击AI → 不触发边界，放行到意图识别
+                boundary_result = None  # 清除，下面继续走正常流程
+
+            # --- §2.6 步骤 5: 攻击 AI → 级别识别 + 扣分 + 分级回复 ---
+            if boundary_result:
+                attack_level = await _attack_level_classify(user_message)
+                response = await generate_boundary_reply_llm(
+                    zone=zone, message=user_message,
+                    personality_brief=personality_brief,
+                    attack_level=attack_level,
+                ) or boundary_result.get("fallback", "...")
+                await db.message.create(data={
+                    "conversation": {"connect": {"id": conversation_id}},
+                    "role": "assistant", "content": response,
+                    "metadata": Json({"boundary": True, "zone": zone, "attack_level": attack_level}),
+                })
+                yield {"event": "reply", "data": json.dumps({"text": response, "index": 0})}
+                await save_last_reply_timestamp(agent_id, user_id)
+                yield {"event": "done", "data": json.dumps({"message_id": "complete"})}
+                # 后台：按 attack_level 扣分
+                _fire_background(process_boundary_violation(agent_id, user_id, user_message))
+                _fire_background(_bg_memory_pipeline(user_id, [
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": response},
+                ]))
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+
+    # --- §2.6 步骤 6: 非攻击场景下中/低耐心短路 ---
+    # 不含违禁词（boundary_result 已被清除或本来 None），但耐心仍在中/低区间 → 走对应 prompt
+    patience_zone = get_patience_zone(cached_patience)
+    if patience_zone in ("medium", "low") and agent_id:
+        try:
+            personality_brief = getattr(agent, "name", "") or ""
+            response = await generate_boundary_reply_llm(
+                zone=patience_zone, message=user_message, personality_brief=personality_brief,
+            )
+            if response:
+                for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                    yield evt
+                _end_trace(_trace_ctx, trace_id, conversation_id)
+                return
+        except Exception as e:
+            logger.warning(f"Medium/low patience short-circuit failed: {e}")
 
     # --- Pending cross-message state checks (BEFORE intent dispatch) ---
     # User replies to contradiction inquiries or deletion confirmations won't
     # contain the original intent keywords, so intent detection would miss them.
     # Check Redis pending state FIRST and short-circuit if found.
-
+    # sub_intent_mode: 父调用已处理 pending 状态，子片段跳过。
+    pending_conflict = None if sub_intent_mode else await load_pending_contradiction(conversation_id)
     # §4 step 3-5: Contradiction resolution
-    pending_conflict = await load_pending_contradiction(conversation_id)
     if pending_conflict:
         try:
             analysis = await analyze_contradiction_response(user_message, pending_conflict)
@@ -400,14 +589,23 @@ async def stream_chat_response(
             await clear_pending_contradiction(conversation_id)
 
     # §5 step 3: Deletion confirmation
-    pending_del = await load_pending_deletion(conversation_id)
+    pending_del = None if sub_intent_mode else await load_pending_deletion(conversation_id)
     if pending_del:
         try:
             if is_deletion_confirmed(user_message):
                 deleted = await execute_confirmed_deletion(user_id, pending_del)
                 await clear_pending_deletion(conversation_id)
                 agent_name = agent.name if agent else "伙伴"
-                reply = await generate_deletion_reply(agent_name, "之前提到的", deleted)
+                # spec §5.3 用注册的 deletion_reply prompt 生成
+                deleted_preview = "\n".join(
+                    f"- {c.get('content', c.get('summary', ''))[:60]}"
+                    for c in pending_del[:5]
+                ) or "(无)"
+                reply = await _deletion_done_reply(
+                    message=user_message,
+                    personality_brief=agent_name,
+                    deleted_memories=deleted_preview,
+                ) or await generate_deletion_reply(agent_name, "之前提到的", deleted)
             else:
                 await clear_pending_deletion(conversation_id)
                 reply = "好的，那就不删了，继续聊吧~"
@@ -419,19 +617,68 @@ async def stream_chat_response(
             logger.warning(f"Deletion confirmation failed: {e}")
             await clear_pending_deletion(conversation_id)
 
-    # --- 统一意图识别（单次关键词扫描） ---
+    # --- 统一意图识别：关键字快路 + LLM 兜底（spec §3.3 step 1-2） ---
     patience_zone = get_patience_zone(cached_patience)
-    detected_intent = detect_intent(user_message, patience_zone)
+    if forced_intent is not None:
+        # sub_intent_mode 的子片段，意图由父调用指定
+        detected_intent = IntentResult(intent=forced_intent, confidence=1.0)
+    else:
+        detected_intent = detect_intent(user_message, patience_zone)
+        # 关键字扫描落空且消息足够长 → 调小模型统一识别，覆盖没有关键词的意图表达
+        if detected_intent.intent == IntentType.NONE and len(user_message.strip()) > 4:
+            try:
+                llm_intent = await detect_intent_llm(user_message)
+                if llm_intent.intent != IntentType.NONE:
+                    detected_intent = llm_intent
+                    logger.info(
+                        f"[INTENT-LLM] '{user_message[:30]}' → {llm_intent.intent.value} "
+                        f"(labels={llm_intent.metadata.get('llm_labels')})"
+                    )
+            except Exception as e:
+                logger.warning(f"LLM intent recognition failed: {e}")
+        # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
+        fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
+        if fragments and len(fragments) > 1:
+            primary_label = next(
+                (lb for lb, it in LABEL_TO_INTENT.items()
+                 if it == detected_intent.intent and lb in fragments),
+                None,
+            )
+            if primary_label and fragments.get(primary_label):
+                user_message = str(fragments[primary_label]).strip() or user_message
+            pending_sub_fragments = {
+                lb: str(txt).strip()
+                for lb, txt in fragments.items()
+                if lb != primary_label and str(txt).strip()
+            }
+            if pending_sub_fragments:
+                logger.info(
+                    f"[INTENT-MULTI] primary={detected_intent.intent.value} "
+                    f"sub={list(pending_sub_fragments.keys())}"
+                )
 
-    # --- IntentType.CONVERSATION_END: 终结对话 ---
+    # --- IntentType.CONVERSATION_END: 终结对话 (spec §3.4.6) ---
     if detected_intent.intent == IntentType.CONVERSATION_END:
-        farewell = await _intent_llm_reply(
-            agent, user_message,
-            "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。",
+        farewell = await _end_reply(
+            message=user_message,
+            personality_brief=getattr(agent, "name", "") or "",
         )
-        for evt in await _short_circuit_reply(farewell, conversation_id, agent_id, user_id):
+        if not farewell:
+            farewell = await _intent_llm_reply(
+                agent, user_message,
+                "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。",
+            )
+        async for evt in _finalize_short_circuit(
+            farewell,
+            conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
+            reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
+            pending_sub_fragments=pending_sub_fragments,
+            sub_intent_mode=sub_intent_mode,
+            reply_index_offset=reply_index_offset,
+            cached_patience=cached_patience,
+        ):
             yield evt
-        if workspace_id and agent_id:
+        if workspace_id and agent_id and not sub_intent_mode:
             _fire_background(start_or_restart_proactive_session(
                 workspace_id=workspace_id,
                 conversation_id=conversation_id,
@@ -439,7 +686,6 @@ async def stream_chat_response(
                 agent_id=agent_id,
                 reason="farewell",
             ))
-        _end_trace(_trace_ctx, trace_id, conversation_id)
         return
 
     # --- IntentType.APOLOGY_PROMISE: 道歉/承诺热路径短路 (spec §3.4.4) ---
@@ -448,15 +694,23 @@ async def stream_chat_response(
             apology_result = await detect_apology(user_message)
             if apology_result.get("is_apology") and apology_result.get("sincerity", 0) >= 0.5:
                 new_patience = await handle_apology(agent_id, user_id)
-                reply = await _intent_llm_reply(
-                    agent, user_message,
-                    "用户在向你道歉/表达悔意。你已经原谅了Ta。"
-                    "生成一句温暖的和解回复，不超过30字。不要用||分隔。"
-                    f"你当前的耐心值已恢复到{new_patience}。",
+                reply = await _apology_reply(
+                    message=user_message,
+                    personality_brief=getattr(agent, "name", "") or "",
+                    new_patience=new_patience,
                 )
-                for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
+                if not reply:
+                    reply = "好啦，我不生气了~"
+                async for evt in _finalize_short_circuit(
+                    reply,
+                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
+                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
+                    pending_sub_fragments=pending_sub_fragments,
+                    sub_intent_mode=sub_intent_mode,
+                    reply_index_offset=reply_index_offset,
+                    cached_patience=cached_patience,
+                ):
                     yield evt
-                _end_trace(_trace_ctx, trace_id, conversation_id)
                 return
         except Exception as e:
             logger.warning(f"Hot-path apology failed, falling through to normal chat: {e}")
@@ -471,12 +725,28 @@ async def stream_chat_response(
                 if candidates:
                     await save_pending_deletion(conversation_id, candidates)
                     agent_name = agent.name if agent else "伙伴"
-                    reply = await generate_deletion_confirmation_prompt(agent_name, candidates)
+                    # spec §5.2 用注册的 deletion_confirm prompt 生成
+                    candidate_preview = "\n".join(
+                        f"{i+1}. {c.get('content', c.get('summary', ''))[:60]}"
+                        for i, c in enumerate(candidates[:5])
+                    )
+                    reply = await _deletion_confirm_reply(
+                        message=user_message,
+                        personality_brief=agent_name,
+                        candidate_memories=candidate_preview,
+                    ) or await generate_deletion_confirmation_prompt(agent_name, candidates)
                 else:
                     reply = "嗯...我好像没有关于这个的记忆呢。"
-                for evt in await _short_circuit_reply(reply, conversation_id, agent_id, user_id):
+                async for evt in _finalize_short_circuit(
+                    reply,
+                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
+                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
+                    pending_sub_fragments=pending_sub_fragments,
+                    sub_intent_mode=sub_intent_mode,
+                    reply_index_offset=reply_index_offset,
+                    cached_patience=cached_patience,
+                ):
                     yield evt
-                _end_trace(_trace_ctx, trace_id, conversation_id)
                 return
         except Exception as e:
             logger.warning(f"Hot-path deletion failed, falling through to normal chat: {e}")
@@ -649,15 +919,25 @@ async def stream_chat_response(
         logger.warning(f"Loading cached summaries failed: {summaries}")
         summaries = None
 
-# Spec §3.2 step 2-3: L3 awakening for "strong" relevance when needed
+    # spec §4 step 5 & §3.4.5: 强相关或调用久远记忆意图 → 小模型「调用L3」判断
+    # 输出 "不满纠正" / "请求更久" / "无"。前两类触发 L3 召回。
     l3_memories: list[str] = []
-    if memory_relevance == "strong":
-        l1_l2_count = len(classified_memories) if classified_memories else 0
-        if should_awaken_l3(l1_l2_count):
+    l3_trigger_label: str = "无"
+    should_call_l3 = detected_intent.intent == IntentType.L3_RECALL
+    if memory_relevance == "strong" or should_call_l3:
+        try:
+            l3_trigger_label = await _l3_trigger_classify(user_message)
+        except Exception as e:
+            logger.warning(f"L3 trigger classify failed: {e}")
+            l3_trigger_label = "无"
+        logger.info(f"[L3-TRIGGER] label='{l3_trigger_label}' for '{user_message[:40]}'")
+        # §3.4.5 调用久远记忆意图 → 无论分类结果都召回；§4 强相关 → 仅前两类召回
+        if should_call_l3 or l3_trigger_label in ("不满纠正", "请求更久"):
             l3_results = await search_l3_memories(user_message, user_id, workspace_id=workspace_id)
             l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
             if l3_memories:
-                logger.info(f"L3 awakening: {len(l3_memories)} memories injected for '{user_message[:30]}'")
+                logger.info(f"L3 awakening: {len(l3_memories)} memories injected "
+                            f"(label='{l3_trigger_label}')")
 
     if isinstance(portrait, Exception):
         logger.warning(f"Loading portrait failed: {portrait}")
@@ -735,17 +1015,80 @@ async def stream_chat_response(
             if response:
                 if adj_result.get("accepted"):
                     await update_schedule_slot(agent_id, schedule, ai_status)
-                for evt in await _short_circuit_reply(response, conversation_id, agent_id, user_id):
+                async for evt in _finalize_short_circuit(
+                    response,
+                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
+                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
+                    pending_sub_fragments=pending_sub_fragments,
+                    sub_intent_mode=sub_intent_mode,
+                    reply_index_offset=reply_index_offset,
+                    cached_patience=cached_patience,
+                ):
                     yield evt
-                _end_trace(_trace_ctx, trace_id, conversation_id)
                 return
         except Exception as e:
             logger.warning(f"Schedule adjustment failed, falling through: {e}")
 
-    # --- IntentType.SCHEDULE_QUERY: 计划查询（增强 prompt，不短路） ---
+    # --- IntentType.SCHEDULE_QUERY: 计划查询 (spec §3.4.1) ---
     if detected_intent.intent == IntentType.SCHEDULE_QUERY and schedule:
         query_type = detected_intent.metadata.get("query_type", "current")
         schedule_context = format_full_schedule_for_query(schedule, query_type, ai_status)
+        try:
+            personality_brief = getattr(agent, "name", "") or ""
+            portrait_text = str(portrait) if portrait else "(未知)"
+            current_activity = format_schedule_context(ai_status) if ai_status else "(未知)"
+            response = await _schedule_query_reply(
+                message=user_message,
+                user_emotion=prompt_user_emotion,
+                personality_brief=personality_brief,
+                user_portrait=portrait_text,
+                current_activity=current_activity,
+                ai_schedule=schedule_context or "(未知)",
+            )
+            if response:
+                async for evt in _finalize_short_circuit(
+                    response,
+                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
+                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
+                    pending_sub_fragments=pending_sub_fragments,
+                    sub_intent_mode=sub_intent_mode,
+                    reply_index_offset=reply_index_offset,
+                    cached_patience=cached_patience,
+                ):
+                    yield evt
+                return
+        except Exception as e:
+            logger.warning(f"Schedule query short-circuit failed, falling through: {e}")
+
+    # --- IntentType.CURRENT_STATE: 询问当前状态 (spec §3.4.3) ---
+    if detected_intent.intent == IntentType.CURRENT_STATE:
+        try:
+            personality_brief = getattr(agent, "name", "") or ""
+            portrait_text = str(portrait) if portrait else "(未知)"
+            current_activity = format_schedule_context(ai_status) if ai_status else "(未知)"
+            ai_sched_text = schedule_context or "(未知)"
+            response = await _current_state_reply(
+                message=user_message,
+                user_emotion=prompt_user_emotion,
+                personality_brief=personality_brief,
+                user_portrait=portrait_text,
+                current_activity=current_activity,
+                ai_schedule=ai_sched_text,
+            )
+            if response:
+                async for evt in _finalize_short_circuit(
+                    response,
+                    conversation_id=conversation_id, agent_id=agent_id, user_id=user_id, agent=agent,
+                    reply_context=reply_context, trace_ctx=_trace_ctx, trace_id=trace_id,
+                    pending_sub_fragments=pending_sub_fragments,
+                    sub_intent_mode=sub_intent_mode,
+                    reply_index_offset=reply_index_offset,
+                    cached_patience=cached_patience,
+                ):
+                    yield evt
+                return
+        except Exception as e:
+            logger.warning(f"Current state short-circuit failed, falling through: {e}")
 
     # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
     patience_instruction = get_patience_prompt_instruction(cached_patience)
@@ -764,16 +1107,15 @@ async def stream_chat_response(
         except Exception as e:
             logger.warning(f"Contradiction detection failed: {e}")
 
-    # --- Multi-reply parameters (PRD §3.2.1) ---
-    is_expand = detect_special_expand(user_message, emotion)
+    # --- spec §5.5: n = random.randint(1, 3) 均匀分布 ---
     if relational_context:
         reply_count = 1
     elif contradiction_inquiry:
         reply_count = 1  # contradiction inquiry is a single focused question
     else:
         reply_count = random.randint(1, MAX_REPLY_COUNT)
-    max_reply_count = EXPAND_MAX_REPLY_COUNT if is_expand else MAX_REPLY_COUNT
-    max_total = EXPAND_MAX_TOTAL_CHARS if is_expand else MAX_TOTAL_CHARS
+    max_reply_count = MAX_REPLY_COUNT
+    max_total = MAX_TOTAL_CHARS
 
     # Build prompt (pure string operations — instant)
     system_prompt = await build_system_prompt(
@@ -826,24 +1168,84 @@ async def stream_chat_response(
     # --- Spec §4: If contradiction detected, use the inquiry as the reply
     # instead of calling the main LLM. The user's next message will be
     # analyzed for contradiction resolution (steps 3-5). ---
+    tier_reply_text: str | None = None
     if contradiction_inquiry:
         raw_response = contradiction_inquiry
         replies = [raw_response]
     else:
-        # --- Collect full LLM response (the ONLY LLM call in hot path) ---
-        model = get_chat_model()
-        lc_messages = convert_messages(chat_messages)
+        # --- Spec §4 step 2/4/5A/5B: 纯日常交流时走分级 prompt 短路 ---
+        # 只有完全"纯聊天"场景才走 tier prompt：不能有意图分支/关系上下文/作息/延迟上下文。
+        # 其他场景（schedule_context、delay<60s、relational、非 NONE 意图）仍走 rich prompt。
+        # spec §3.4.5: 「调用久远记忆」意图必须走「久远记忆回复」prompt。
+        can_use_tier = (
+            detected_intent.intent in (IntentType.NONE, IntentType.L3_RECALL)
+            and not relational_context
+            and not schedule_context
+            and not delay_context
+            and memory_relevance in ("weak", "medium", "strong")
+        )
+        if can_use_tier:
+            personality_brief = getattr(agent, "name", "") or ""
+            context_text = "\n".join(
+                f"{m['role']}: {m['content']}" for m in messages_dicts[-6:]
+            ) or "(无)"
+            portrait_text = str(portrait) if portrait else "(未知)"
+            memory_lines = [m.text for m in (classified_memories or [])]
+            combined_memory = "\n".join(f"- {t}" for t in memory_lines) if memory_lines else "(无)"
+            base_tier_params = {
+                "message": user_message,
+                "context": context_text,
+                "user_emotion": prompt_user_emotion,
+                "personality_brief": personality_brief,
+                "user_portrait": portrait_text,
+            }
+            if l3_memories:
+                tier_fn, extra = _memory_l3_reply, {"l3_memory": "\n".join(f"- {t}" for t in l3_memories)}
+            elif memory_relevance == "strong":
+                tier_fn, extra = _memory_strong_reply, {"user_memory": combined_memory, "ai_memory": "(同上)"}
+            elif memory_relevance == "medium":
+                tier_fn, extra = _memory_medium_reply, {"user_memory": combined_memory, "ai_memory": "(同上)"}
+            else:
+                tier_fn, extra = _memory_weak_reply, {}
+            try:
+                tier_reply_text = await tier_fn(**base_tier_params, **extra)
+            except Exception as e:
+                logger.warning(f"Memory tier reply failed, falling back to main prompt: {e}")
+                tier_reply_text = None
 
-        response_chunks: list[str] = []
-        async for chunk in model.astream(lc_messages):
-            token = chunk.content
-            if token:
-                response_chunks.append(token)
+        if tier_reply_text:
+            # Tier prompt outputs 单一完整回复；保留 emoji/sticker 处理但跳过多段拆分。
+            raw_response = tier_reply_text
+            replies = [tier_reply_text]
+        else:
+            # --- Collect full LLM response (the ONLY LLM call in hot path) ---
+            model = get_chat_model()
+            lc_messages = convert_messages(chat_messages)
 
-        raw_response = "".join(response_chunks)
+            response_chunks: list[str] = []
+            async for chunk in model.astream(lc_messages):
+                token = chunk.content
+                if token:
+                    response_chunks.append(token)
 
-        # --- Split & validate into multiple replies (PRD §3.2.1/§3.2.2) ---
-        replies = split_and_validate_replies(raw_response, max_reply_count, MAX_PER_REPLY, max_total)
+            raw_response = "".join(response_chunks)
+
+            # --- spec §5.5: 回复句数拆分 ---
+            # reply_count 已在上面按 n=random.randint(1,3) 均匀分布选定。
+            # n=1 → 保持原回复；n=2/3 → 调小模型「AI语句拆分（n句）」指令。
+            # 小模型失败 → 回退到 `||` 分隔切分（旧逻辑）。
+            replies = None
+            if reply_count >= 2:
+                split_result = await _split_reply_to_n_sentences(raw_response, reply_count)
+                if split_result:
+                    replies = [
+                        truncate_at_sentence(p, MAX_PER_REPLY)
+                        for p in split_result[:max_reply_count]
+                    ]
+            if replies is None:
+                replies = split_and_validate_replies(
+                    raw_response, max_reply_count, MAX_PER_REPLY, max_total
+                )
 
     # --- Yield reply events with emoji/sticker (PRD §3.3.2/§3.3.3) ---
     emo = emotion if isinstance(emotion, dict) else {}
@@ -858,7 +1260,8 @@ async def stream_chat_response(
 
     # --- spec §6.4/§6.5: 实际延迟 ≥1分钟时，先单独推送一条"延迟解释回复"
     # 该回复不拆分、不加 emoji/表情包，独立作为 index 0 推送，后续 replies 顺延。
-    elapsed = actual_delay_seconds(reply_context)
+    # sub_intent_mode: 父调用已推送延迟解释，子片段跳过
+    elapsed = None if sub_intent_mode else actual_delay_seconds(reply_context)
     delay_explain_offset = 0
     if elapsed is not None and elapsed >= 60:
         try:
@@ -866,15 +1269,26 @@ async def stream_chat_response(
             activity = str(received_status.get("activity", "")).strip() or "处理自己的事"
             status_label = str(received_status.get("status", "idle"))
             minutes = max(1, round(elapsed / 60))
-            explain_instruction = (
-                f"用户 {minutes} 分钟前给你发了消息，当时你正在{activity}（状态：{status_label}），"
-                "现在才来回复。请用1句简短自然的道歉/解释（不超过25字），"
-                "口吻贴合你的性格，不要用||分隔，不要加标点之外的符号。"
+            received_at = str((reply_context or {}).get("received_at", ""))
+            explain_text = await _delay_explanation_reply(
+                received_time=received_at,
+                current_time=datetime.now().strftime("%H:%M"),
+                activity=activity,
+                status=status_label,
+                delay_minutes=minutes,
             )
-            explain_text = await _intent_llm_reply(agent, user_message, explain_instruction)
-            explain_text = explain_text.strip()
+            if not explain_text:
+                explain_text = await _intent_llm_reply(
+                    agent, user_message,
+                    f"你{minutes}分钟前收到用户消息但在忙，现在才回复。用1句简短自然的解释。",
+                )
+            explain_text = (explain_text or "").strip()
             if explain_text:
-                data: dict = {"text": explain_text, "index": 0, "delay_explanation": True}
+                data: dict = {
+                    "text": explain_text,
+                    "index": reply_index_offset,
+                    "delay_explanation": True,
+                }
                 emitted_replies.append(data)
                 yield {"event": "reply", "data": json.dumps(data)}
                 delay_explain_offset = 1
@@ -901,16 +1315,30 @@ async def stream_chat_response(
             except Exception:
                 pass
 
-        if i > 0 or delay_explain_offset:
+        if i > 0 or delay_explain_offset or reply_index_offset > 0:
             await asyncio.sleep(random.uniform(0.3, 0.8))
 
-        data: dict = {"text": reply_text, "index": i + delay_explain_offset}
+        data: dict = {
+            "text": reply_text,
+            "index": reply_index_offset + i + delay_explain_offset,
+        }
         if sticker_url:
             data["sticker_url"] = sticker_url
         emitted_replies.append(data)
         yield {"event": "reply", "data": json.dumps(data)}
 
     full_response = " ".join(replies)
+
+    # Persist replies immediately; trace links become clickable only after public share completes.
+    first_assistant_message_id = await _save_replies(
+        conversation_id,
+        emitted_replies,
+        trace_id=trace_id if settings.langsmith_tracing else None,
+    )
+
+    if sub_intent_mode:
+        # 父调用负责后台任务、save_last_reply_timestamp、done、trace 关闭
+        return
 
     # Update conversation title if first exchange (non-blocking)
     if len(recent_messages) <= 1:
@@ -921,8 +1349,6 @@ async def stream_chat_response(
         ))
 
     # --- BACKGROUND: fire-and-forget post-processing ---
-    # Background tasks inherit trace context via asyncio.create_task context copy,
-    # so their LLM calls appear as children in LangSmith.
     _fire_background(_background_post_process(
         user_id=user_id,
         agent_id=agent_id,
@@ -937,12 +1363,15 @@ async def stream_chat_response(
         topic_intimacy=topic_intimacy,
     ))
 
-    # Persist replies immediately; trace links become clickable only after public share completes.
-    first_assistant_message_id = await _save_replies(
-        conversation_id,
-        emitted_replies,
-        trace_id=trace_id if settings.langsmith_tracing else None,
-    )
+    # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段
+    if pending_sub_fragments:
+        start_idx = reply_index_offset + delay_explain_offset + len(replies)
+        async for evt in _process_sub_intents(
+            pending_sub_fragments, conversation_id, agent, user_id,
+            reply_context, start_index=start_idx,
+            parent_patience=cached_patience,
+        ):
+            yield evt
 
     await save_last_reply_timestamp(agent_id, user_id)
     if workspace_id and agent_id:

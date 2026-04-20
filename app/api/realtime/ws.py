@@ -153,23 +153,31 @@ async def _handle_message(
         ai_emotion=ai_emotion,
     )
 
-    pending_text, _, pending_context, _ = await flush_pending(user_id)
+    # spec §1.3 窗口管理规则
+    # - 碎片 + 无 pending → 新建窗口
+    # - 碎片 + 已有 pending → 追加 + 刷新窗口（push_pending 里的 zadd 自动刷新 due_at）
+    # - 非碎片 + 已有 pending → 打断触发（flush 合并后处理）
+    # - 非碎片 + 无 pending → 直接处理
+    is_fragment = is_short_message(text)
 
-    if is_short_message(text) and not pending_text:
+    if is_fragment:
         message_id = await _persist_user_message(
             conversation_id,
             text,
             metadata={"fragment": True},
         )
+        # push_pending 内部 zadd 刷新 due_at = now + 5，同时覆盖最新 reply_context
         await push_pending(user_id, conversation_id, text, current_context, message_id)
         await ws.send_json({"type": "pending", "data": {"status": "aggregating"}})
         return
 
+    # 非碎片：若有 pending，先打断触发合并；否则直接处理当前消息
+    pending_text, _, pending_context, _ = await flush_pending(user_id)
+
     final_message = text
     final_context = current_context
-    user_message_id: str | None = None
     if pending_text:
-        # spec §1.5: 直接连接不加空格
+        # spec §1.5: 按原始顺序直接连接（中文不加空格），当前非碎片作为最后一条
         final_message = "".join(part for part in [pending_text, text] if part)
         final_context = merge_reply_contexts(pending_context, current_context)
     user_message_id = await _persist_user_message(

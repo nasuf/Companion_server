@@ -19,8 +19,9 @@ from pathlib import Path
 
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.utils import SafeDict, pad_params
 
 logger = logging.getLogger(__name__)
 
@@ -336,39 +337,26 @@ async def generate_boundary_reply_llm(
     - attack_level 给定（K1/K2/K3）→ 攻击分级回复
     - 否则按 zone（medium/low/blocked）→ 耐心分级回复
     """
-    from app.services.llm.models import get_chat_model, invoke_text
-
-    key = None
-    if attack_level:
-        key = _ATTACK_LEVEL_TO_PROMPT.get(attack_level)
-    if not key:
-        key = _ZONE_TO_PATIENCE_PROMPT.get(zone)
+    key = _ATTACK_LEVEL_TO_PROMPT.get(attack_level) if attack_level else None
+    key = key or _ZONE_TO_PATIENCE_PROMPT.get(zone)
     if not key:
         return None
 
-    emo = user_emotion or {}
     params = {
         "message": message,
         "context": context or "(无)",
-        "pleasure": f"{float(emo.get('pleasure', 0.0)):.2f}",
-        "arousal": f"{float(emo.get('arousal', 0.0)):.2f}",
-        "dominance": f"{float(emo.get('dominance', 0.5)):.2f}",
         "personality_brief": personality_brief or "真诚朋友",
         "user_portrait": user_portrait or "(未知)",
+        **pad_params(user_emotion),
     }
     try:
         template = await get_prompt_text(key)
         # 各 prompt 的占位符子集不同，format_map 容错
-        prompt = template.format_map(_SafeDict(params))
+        prompt = template.format_map(SafeDict(params))
         return (await invoke_text(get_chat_model(), prompt)).strip().split("||")[0][:120]
     except Exception as e:
         logger.warning(f"Boundary LLM reply failed ({key}): {e}")
         return None
-
-
-class _SafeDict(dict):
-    def __missing__(self, key: str) -> str:  # pragma: no cover
-        return "(无)"
 
 
 # --- 道歉/承诺识别（LLM，后台异步） ---

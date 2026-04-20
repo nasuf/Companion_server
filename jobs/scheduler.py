@@ -220,11 +220,11 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # 12E + PRD §6.2.2: aggregation + delayed reply delivery scan
+    # spec §1.4: 后台定时任务每秒扫描延迟队列
     scheduler.add_job(
         _run_aggregation_scan,
         "interval",
-        seconds=2,
+        seconds=1,
         id="aggregation_scan",
         replace_existing=True,
         max_instances=1,  # prevent "max instances reached" warning

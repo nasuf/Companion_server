@@ -23,7 +23,28 @@ class IntentType(Enum):
     DELETION = "deletion"
     SCHEDULE_ADJUST = "schedule_adjust"
     SCHEDULE_QUERY = "schedule_query"
+    CURRENT_STATE = "current_state"  # spec §3.4.3 询问当前状态
+    L3_RECALL = "l3_recall"          # spec §3.4.5 调用久远记忆
     NONE = "none"
+
+
+# spec §3.3 中文标签 → IntentType 映射
+LABEL_TO_INTENT: dict[str, IntentType] = {
+    "终结意图": IntentType.CONVERSATION_END,
+    "计划查询": IntentType.SCHEDULE_QUERY,
+    "作息调整": IntentType.SCHEDULE_ADJUST,
+    "询问当前状态": IntentType.CURRENT_STATE,
+    "道歉承诺": IntentType.APOLOGY_PROMISE,
+    "删除": IntentType.DELETION,
+    "调用久远记忆": IntentType.L3_RECALL,
+    "日常交流": IntentType.NONE,
+}
+
+# spec §3.3 multi-intent 优先级（高优先级先处理；用于 primary 选择和 sub-intent 处理顺序）
+INTENT_PRIORITY: list[str] = [
+    "删除", "作息调整", "终结意图", "计划查询",
+    "询问当前状态", "道歉承诺", "调用久远记忆", "日常交流",
+]
 
 
 @dataclass
@@ -80,3 +101,39 @@ def detect_intent(message: str, patience_zone: str = "normal") -> IntentResult:
             )
 
     return IntentResult()
+
+
+async def detect_intent_llm(message: str) -> IntentResult:
+    """Spec §3.3 step 1-2 — LLM 统一意图识别 + 多意图拆分。
+
+    只有关键词扫描落空时才调。结果命中多个意图时，优先级：
+      删除 > 作息调整 > 终结意图 > 计划查询 > 询问当前状态 > 道歉承诺 > 调用久远记忆 > 日常交流
+    """
+    # 延迟导入避免循环依赖（intent_replies 依赖 prompting.store）
+    from app.services.chat.intent_replies import unified_intent_recognize, split_multi_intent
+
+    try:
+        labels = await unified_intent_recognize(message)
+    except Exception:
+        return IntentResult()
+
+    if not labels or labels == ["日常交流"]:
+        return IntentResult()
+
+    # 多意图：调 split 以便下游可按 fragment 处理
+    fragments: dict[str, str] | None = None
+    if len(labels) > 1:
+        try:
+            fragments = await split_multi_intent(message, labels)
+        except Exception:
+            fragments = None
+
+    primary = next((l for l in INTENT_PRIORITY if l in labels), labels[0])
+    intent = LABEL_TO_INTENT.get(primary, IntentType.NONE)
+    if intent == IntentType.NONE:
+        return IntentResult()
+
+    metadata: dict[str, Any] = {"llm_labels": labels}
+    if fragments:
+        metadata["fragments"] = fragments
+    return IntentResult(intent=intent, confidence=0.75, metadata=metadata)

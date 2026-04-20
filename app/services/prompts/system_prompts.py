@@ -9,12 +9,10 @@ from app.services.prompting.defaults import (
     SYSTEM_BASE_PROMPT as SYSTEM_BASE,
 )
 
-# 回复约束 (PRD §3.2.1/§3.2.2)
+# 回复约束 (spec §5.5: n = random.randint(1, 3) 均匀分布)
 MAX_PER_REPLY = 60           # 单条回复最大字数
-MAX_REPLY_COUNT = 3          # 正常最大条数
-EXPAND_MAX_REPLY_COUNT = 5   # 特殊放宽最大条数
-MAX_TOTAL_CHARS = 150        # 正常总字数上限
-EXPAND_MAX_TOTAL_CHARS = 200 # 特殊放宽总字数上限
+MAX_REPLY_COUNT = 3          # spec §5.5: 严格 1-3 均匀随机
+MAX_TOTAL_CHARS = 150        # 总字数上限
 
 # Token预算常量
 MEMORY_TOKEN_BUDGET = 800
