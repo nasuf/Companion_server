@@ -3,9 +3,24 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, field_validator
 
 from app.db import db
 from app.api.jwt_auth import require_admin_jwt
+
+_ALLOWED_ROLES = {"user", "admin"}
+
+
+class UpdateUserRoleRequest(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _ALLOWED_ROLES:
+            raise ValueError(f"role must be one of {sorted(_ALLOWED_ROLES)}")
+        return v
 
 router = APIRouter(prefix="/admin-api/users", tags=["admin-users"])
 
@@ -286,6 +301,36 @@ async def get_agent_proactive_detail(
             for log in logs
         ],
     }
+
+
+@router.patch("/{user_id}/role")
+async def update_user_role(
+    user_id: str,
+    payload: UpdateUserRoleRequest,
+    claims: dict = Depends(require_admin_jwt),
+):
+    """修改用户角色（user / admin）。禁止自己改自己，避免误锁定最后一个 admin。"""
+    if claims.get("user_id") == user_id or claims.get("sub") == user_id:
+        raise HTTPException(status_code=400, detail="Cannot change your own role")
+
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.role == payload.role:
+        return {"ok": True, "id": user.id, "role": user.role, "changed": False}
+
+    # 若将最后一个 admin 降级为普通用户，拒绝
+    if user.role == "admin" and payload.role != "admin":
+        admin_count = await db.user.count(where={"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot demote the last admin")
+
+    updated = await db.user.update(
+        where={"id": user_id},
+        data={"role": payload.role},
+    )
+    return {"ok": True, "id": updated.id, "role": updated.role, "changed": True}
 
 
 @router.delete("/{user_id}/agents/{agent_id}")
