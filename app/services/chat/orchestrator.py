@@ -53,12 +53,11 @@ from app.services.schedule_domain.schedule import (
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.interaction.boundary import (
-    check_boundary, process_boundary_violation, detect_apology, handle_apology,
+    detect_apology, handle_apology,
     check_positive_recovery,
     get_patience_prompt_instruction, get_patience_zone,
-    generate_boundary_reply_llm,
     PATIENCE_MAX,
-)  # detect_apology/handle_apology: pending contradiction 分支 + _bg_apology_check 仍用
+)  # detect_apology/handle_apology: _bg_apology_check + pending 分支仍用
 from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.intent_dispatcher import (
@@ -81,13 +80,10 @@ from app.services.chat.intent_handlers import (
 )
 from app.services.chat.intent_replies import (
     delay_explanation_reply as _delay_explanation_reply,
-    attack_target_classify as _attack_target_classify,
-    attack_level_classify as _attack_level_classify,
     memory_weak_reply as _memory_weak_reply,
     memory_medium_reply as _memory_medium_reply,
     memory_strong_reply as _memory_strong_reply,
     memory_l3_reply as _memory_l3_reply,
-    banned_word_check as _banned_word_check,
     l3_trigger_classify as _l3_trigger_classify,
     split_reply_to_n_sentences as _split_reply_to_n_sentences,
 )
@@ -98,6 +94,7 @@ from app.services.chat.preflight import (
     resolve_pending_contradiction,
     resolve_pending_deletion,
 )
+from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
 from app.services.mbti import get_mbti
 from app.services.chat.fast_fact import update_working_facts, facts_for_prompt
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
@@ -353,114 +350,28 @@ async def stream_chat_response(
     _run_tree = _trace_ctx.__enter__()
     trace_id = str(_run_tree.id) if _run_tree else None
 
-    # --- Boundary check: spec §2.6 全流程
-    # sub_intent_mode: 父调用已完成边界检查并传递耐心值，子片段不重复读 Redis ---
-    cached_patience = PATIENCE_MAX
-    if sub_intent_mode:
-        cached_patience = parent_patience if parent_patience is not None else PATIENCE_MAX
-        boundary_result = None
-    elif agent_id:
-        boundary_result, cached_patience = await check_boundary(agent_id, user_id, user_message)
-        # --- spec §2.6 步骤 3: 关键词没命中但耐心已非满，调小模型语义违禁判断
-        # 目的：catch 关键词兜底漏掉的隐式攻击/脏话（如语音谐音、新造词等）
-        if boundary_result is None and cached_patience < PATIENCE_MAX and len(user_message.strip()) > 3:
-            try:
-                if await _banned_word_check(user_message):
-                    zone_for_llm = get_patience_zone(cached_patience)
-                    logger.info(
-                        f"[BOUNDARY-LLM] banned_word_check hit for '{user_message[:40]}' "
-                        f"zone={zone_for_llm} patience={cached_patience}"
-                    )
-                    boundary_result = {
-                        "blocked": zone_for_llm == "blocked",
-                        "zone": zone_for_llm,
-                        "hits": [],
-                        "fallback": "...",
-                        "llm_detected": True,
-                    }
-            except Exception as e:
-                logger.warning(f"LLM banned word check failed: {e}")
-        if boundary_result:
-            zone = boundary_result["zone"]
-            personality_brief = getattr(agent, "name", "") or ""
-
-            # --- §2.6 步骤 2: 拉黑 → 直接用 blacklist_reply ---
-            if zone == "blocked":
-                response = await generate_boundary_reply_llm(
-                    zone="blocked", message=user_message, personality_brief=personality_brief,
-                ) or boundary_result.get("fallback", "...")
-                for evt in await _short_circuit_reply(
-                    response, conversation_id, agent_id, user_id,
-                    extra_metadata={"boundary": True, "zone": "blocked"},
-                ):
-                    yield evt
-                _fire_background(_bg_apology_check(agent_id, user_id, user_message))
-                _fire_background(_bg_memory_pipeline(user_id, [
-                    {"role": "user", "content": user_message},
-                    {"role": "assistant", "content": response},
-                ]))
-                _end_trace(_trace_ctx, trace_id, conversation_id)
-                return
-
-            # --- §2.6 步骤 4: 攻击目标识别（小模型热路径） ---
-            attack_target = await _attack_target_classify(user_message)
-            if attack_target and attack_target != "攻击AI":
-                # 非攻击 AI → 跳到步骤 6/7（按当前耐心状态处理，不扣分）
-                if zone in ("medium", "low"):
-                    response = await generate_boundary_reply_llm(
-                        zone=zone, message=user_message, personality_brief=personality_brief,
-                    ) or boundary_result.get("fallback", "...")
-                    for evt in await _short_circuit_reply(
-                        response, conversation_id, agent_id, user_id,
-                        extra_metadata={"boundary": True, "zone": zone, "attack_target": attack_target},
-                    ):
-                        yield evt
-                    _end_trace(_trace_ctx, trace_id, conversation_id)
-                    return
-                # zone == "normal" + 非攻击AI → 不触发边界，放行到意图识别
-                boundary_result = None  # 清除，下面继续走正常流程
-
-            # --- §2.6 步骤 5: 攻击 AI → 级别识别 + 扣分 + 分级回复 ---
-            if boundary_result:
-                attack_level = await _attack_level_classify(user_message)
-                response = await generate_boundary_reply_llm(
-                    zone=zone, message=user_message,
-                    personality_brief=personality_brief,
-                    attack_level=attack_level,
-                ) or boundary_result.get("fallback", "...")
-                for evt in await _short_circuit_reply(
-                    response, conversation_id, agent_id, user_id,
-                    extra_metadata={"boundary": True, "zone": zone, "attack_level": attack_level},
-                ):
-                    yield evt
-                # 后台：按 attack_level 扣分
-                _fire_background(process_boundary_violation(agent_id, user_id, user_message))
-                _fire_background(_bg_memory_pipeline(user_id, [
-                    {"role": "user", "content": user_message},
-                    {"role": "assistant", "content": response},
-                ]))
-                _end_trace(_trace_ctx, trace_id, conversation_id)
-                return
-
-    # --- §2.6 步骤 6: 非攻击场景下中/低耐心短路 ---
-    # 不含违禁词（boundary_result 已被清除或本来 None），但耐心仍在中/低区间 → 走对应 prompt
-    patience_zone = get_patience_zone(cached_patience)
-    if patience_zone in ("medium", "low") and agent_id:
-        try:
-            personality_brief = getattr(agent, "name", "") or ""
-            response = await generate_boundary_reply_llm(
-                zone=patience_zone, message=user_message, personality_brief=personality_brief,
-            )
-            if response:
-                for evt in await _short_circuit_reply(
-                    response, conversation_id, agent_id, user_id,
-                    extra_metadata={"boundary": True, "zone": patience_zone},
-                ):
-                    yield evt
-                _end_trace(_trace_ctx, trace_id, conversation_id)
-                return
-        except Exception as e:
-            logger.warning(f"Medium/low patience short-circuit failed: {e}")
+    # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
+    boundary_ctx = BoundaryPhaseCtx(
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        user_id=user_id,
+        agent=agent,
+        user_message=user_message,
+        sub_intent_mode=sub_intent_mode,
+        parent_patience=parent_patience,
+        trace_ctx=_trace_ctx,
+        trace_id=trace_id,
+        end_trace_fn=_end_trace,
+        short_circuit_fn=_short_circuit_reply,
+        fire_background_fn=_fire_background,
+        bg_apology_check_fn=_bg_apology_check,
+        bg_memory_pipeline_fn=_bg_memory_pipeline,
+    )
+    async for evt in run_boundary(boundary_ctx):
+        yield evt
+    if boundary_ctx.stopped:
+        return
+    cached_patience = boundary_ctx.cached_patience
 
     # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
     # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
