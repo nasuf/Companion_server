@@ -23,15 +23,7 @@ from app.services.chat.prompt_builder import build_system_prompt, build_chat_mes
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
-from app.services.memory.recording.pipeline import process_memory_pipeline
-from app.services.summarizer import summarize
-from app.services.relationship.emotion import (
-    extract_emotion,
-    get_ai_emotion,
-    quick_emotion_estimate,
-    update_emotion_state,
-    save_ai_emotion,
-)
+from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
@@ -46,12 +38,10 @@ from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.interaction.boundary import (
     detect_apology, handle_apology,
-    check_positive_recovery,
     get_patience_prompt_instruction, get_patience_zone,
     PATIENCE_MAX,
 )  # detect_apology/handle_apology: APOLOGY_PROMISE intent handler 仍用
 from app.services.relationship.intimacy import get_relationship_stage
-from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.intent_dispatcher import (
     detect_intent, detect_intent_unified, IntentType, IntentResult,
     LABEL_TO_INTENT, INTENT_PRIORITY,
@@ -89,6 +79,11 @@ from app.services.chat.preflight import (
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
 from app.services.chat.data_fetch_phase import fetch_parallel_context
+from app.services.chat.post_process import (
+    save_replies as _save_replies,
+    run_post_process as _background_post_process,
+    _bg_memory_pipeline,
+)
 from app.services.mbti import get_mbti
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
@@ -804,171 +799,4 @@ async def stream_chat_response(
     _end_trace(_trace_ctx, trace_id, conversation_id)
 
 
-async def _background_post_process(
-    user_id: str,
-    agent_id: str | None,
-    conversation_id: str,
-    user_message: str,
-    user_message_id: str | None,
-    full_response: str,
-    messages_dicts: list[dict],
-    memory_strings: list[str] | None,
-    cached_emotion: dict | None = None,
-    mbti: dict | None = None,
-    topic_intimacy: float = 50.0,
-) -> None:
-    """Run all background tasks after response is sent.
 
-    1. Emotion extraction + state update (small model)
-    2. Summarizer → cache to Redis for next request (small model)
-    3. Memory extraction pipeline (small model)
-    """
-    try:
-        # Add the assistant response to messages for summarizer context
-        full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
-
-        # Run all background tasks concurrently
-        tasks = [
-            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, mbti),
-            _bg_summarizer(full_messages, user_message, memory_strings),
-            _bg_memory_pipeline(user_id, full_messages),
-        ]
-        # 道歉和删除检查已在热路径处理，不再后台重复执行
-        if agent_id:
-            tasks.append(_bg_trait_adjustment(agent_id, user_message))
-        # Positive recovery: messages reaching here passed boundary check (no banned words)
-        if agent_id:
-            tasks.append(_bg_positive_recovery(agent_id, user_id))
-        # AI self-memory: now handled by _bg_memory_pipeline which processes
-        # both user and AI messages through the unified 3-step pipeline (spec §2.2).
-        # The extraction prompt distinguishes owner=user vs owner=ai.
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        logger.error(f"Background post-processing failed: {e}")
-
-
-async def _bg_emotion(
-    agent_id: str | None,
-    user_message_id: str | None,
-    user_message: str,
-    cached_emotion: dict | None = None,
-    topic_intimacy: float = 50.0,
-    mbti: dict | None = None,
-) -> None:
-    """Extract emotion from user message, update AI emotion state, and save to message metadata."""
-    if not agent_id:
-        return
-    try:
-        user_emotion = await extract_emotion(user_message)
-        current_emotion = cached_emotion or await get_ai_emotion(agent_id)
-        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy, mbti=mbti)
-        await save_ai_emotion(agent_id, new_emotion)
-
-        # Save user emotion to message metadata (use known ID, no re-query)
-        if user_message_id:
-            await db.message.update(
-                where={"id": user_message_id},
-                data={"metadata": Json({"emotion": user_emotion})},
-            )
-    except Exception as e:
-        logger.warning(f"Background emotion update failed: {e}")
-
-
-async def _bg_summarizer(
-    messages: list[dict],
-    current_message: str,
-    memories: list[str] | None,
-) -> None:
-    """Run 3-layer summarizer and cache results for next request."""
-    try:
-        result = await summarize(messages, current_message, memories)
-        if result:
-            logger.debug("Background summarizer completed and cached")
-    except Exception as e:
-        logger.warning(f"Background summarizer failed: {e}")
-
-
-async def _save_replies(
-    conversation_id: str,
-    replies: list[str | dict],
-    trace_id: str | None = None,
-) -> str | None:
-    """Save split replies as individual DB messages."""
-    try:
-        first_message_id: str | None = None
-        for i, reply in enumerate(replies):
-            if isinstance(reply, dict):
-                text = str(reply.get("text", ""))
-                metadata: dict = {"reply_index": i}
-                # 允许任意白名单之外的 metadata 合并进来（如 boundary/zone/attack_level/sticker_url）
-                for k, v in reply.items():
-                    if k not in ("text", "index") and v is not None:
-                        metadata[k] = v
-            else:
-                text = reply
-                metadata = {"reply_index": i}
-
-            # First reply carries trace-pending metadata until a public LangSmith link is ready.
-            if i == 0 and trace_id:
-                metadata["trace_id"] = trace_id
-                metadata["trace_pending"] = True
-
-            created = await db.message.create(
-                data={
-                    "conversation": {"connect": {"id": conversation_id}},
-                    "role": "assistant",
-                    "content": text,
-                    "metadata": Json(metadata),
-                }
-            )
-            if i == 0:
-                first_message_id = created.id
-        return first_message_id
-    except Exception as e:
-        logger.error(f"Failed to save replies: {e}")
-        return None
-
-
-async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
-    """Run memory extraction pipeline for BOTH user and AI messages.
-
-    Spec §2.1/§2.2: both user and AI messages go through the same 3-step
-    pipeline (filter → small model → big model). The extraction prompt
-    distinguishes owner (user vs ai) via the "owner" field in output.
-
-    Input: last 3 rounds of dialogue (user+assistant alternating), which
-    gives the big model enough context per spec §2.1.3.
-    """
-    try:
-        # Spec §2.1.3: "用户消息 + 最近3轮对话上下文"
-        # Take last 6 messages (3 rounds of user+assistant)
-        recent = messages[-6:]
-        if not recent:
-            return
-        conv_text = "\n".join(
-            f"{m.get('role', 'user')}: {m['content']}" for m in recent
-        )
-        await process_memory_pipeline(user_id, conv_text)
-    except Exception as e:
-        logger.error(f"Background memory pipeline failed: {e}")
-
-
-
-
-
-async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
-    """Check for trait adjustment signals in user message."""
-    try:
-        adjustments = detect_direct_feedback(user_message) or infer_feedback(user_message)
-        if adjustments:
-            await apply_trait_adjustment(agent_id, adjustments)
-    except Exception as e:
-        logger.warning(f"Background trait adjustment failed: {e}")
-
-
-async def _bg_positive_recovery(agent_id: str, user_id: str) -> None:
-    """Positive interaction recovery. Only called for messages that passed boundary check."""
-    try:
-        await check_positive_recovery(agent_id, user_id)
-    except Exception as e:
-        logger.warning(f"Background positive recovery failed: {e}")
