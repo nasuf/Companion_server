@@ -60,10 +60,11 @@ async def process_memory_pipeline(
         return []
 
     # Step 1 (spec §2.1.2 / §2.2.2): Small model pre-filter — "记" or "不记"
+    # Uses registered prompt `memory.judgement_{side}` via should_memorize.
     from app.config import settings
     if settings.enable_memory_prefilter:
         try:
-            if not await should_memorize(conversation_text):
+            if not await should_memorize(conversation_text, side=side):
                 logger.debug(f"[MEM-{side}] pre-filter: 不记")
                 return []
         except Exception as e:

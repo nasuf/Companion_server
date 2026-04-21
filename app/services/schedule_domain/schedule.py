@@ -123,28 +123,40 @@ async def generate_daily_schedule(
 
     if life_overview:
         try:
-            prompt = (await get_prompt_text("schedule.daily_schedule")).format(
-                name=name,
-                overview=life_overview,
-                date=date.strftime("%Y-%m-%d"),
-                weekday=weekday,
-            )
+            # Spec Part 1 §2.1: 70% 概率使用不带用户记忆指令；30% 使用带用户记忆指令。
+            use_memory_variant = bool(user_id) and random.random() < 0.30
+            memory_summary = ""
+            if use_memory_variant:
+                memory_summary = await _get_user_memory_summary(user_id)
+                if not memory_summary:
+                    # 没有可用的用户记忆 → 退回到基础版
+                    use_memory_variant = False
+
+            if use_memory_variant:
+                prompt_key = "schedule.daily_schedule_with_memory"
+                prompt = (await get_prompt_text(prompt_key)).format(
+                    name=name,
+                    overview=life_overview,
+                    date=date.strftime("%Y-%m-%d"),
+                    weekday=weekday,
+                    user_memories="\n".join(f"- {m}" for m in memory_summary.split("；") if m.strip()),
+                )
+            else:
+                prompt_key = "schedule.daily_schedule"
+                prompt = (await get_prompt_text(prompt_key)).format(
+                    name=name,
+                    overview=life_overview,
+                    date=date.strftime("%Y-%m-%d"),
+                    weekday=weekday,
+                )
             if holiday:
                 prompt += f"\n今天是{holiday.name}（{holiday.type}类节日）。请根据节日特点调整作息，安排节日相关活动。"
-            # Per spec §2.1: "40% 概率启用带用户记忆的指令"
-            # — 节日强制 LLM 路径但仍随机决定是否注入用户记忆
-            if user_id and random.random() < 0.4:
-                memory_summary = await _get_user_memory_summary(user_id)
-                if memory_summary:
-                    prompt += (
-                        f"\n用户近期情况：{memory_summary}\n"
-                        "可以在空闲时段融入与用户相关的个性化活动。"
-                    )
 
             model = get_utility_model()
             schedule = await invoke_json(model, prompt)
             if isinstance(schedule, list) and len(schedule) >= 5:
                 await _cache_schedule(agent_id, date, schedule)
+                logger.info(f"[SCHEDULE] {agent_id} {date.date()} gen via {prompt_key}")
                 return schedule
         except Exception as e:
             logger.warning(f"LLM schedule generation failed, falling back to template: {e}")
@@ -309,7 +321,10 @@ async def get_cached_schedule(agent_id: str, date: datetime | None = None) -> li
 def get_current_status(schedule: list[dict], now: datetime | None = None) -> dict:
     """根据作息表查询当前时段状态。
 
-    返回 {"activity": str, "type": str, "status": "idle"|"busy"|"sleep"}
+    Spec Part 1 §2.1：LLM 直接输出 4 个状态之一（空闲/忙碌/很忙碌/睡眠）。
+    为了兼容旧缓存数据（字段 activity/type 的 6 值枚举），读取时统一规范化。
+
+    返回 {"event": str, "status": "idle"|"busy"|"very_busy"|"sleep"}
     """
     now = now or _local_now()
     current_time = now.strftime("%H:%M")
@@ -326,49 +341,75 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
             if start <= current_time < end:
                 return _slot_to_status(slot)
 
-    return {"activity": "自由时间", "type": "leisure", "status": "idle"}
+    return {"event": "自由时间", "status": "idle"}
+
+
+# spec 的 4 个中文状态 → 代码内部 ASCII 枚举
+_SPEC_STATUS_MAP = {
+    "空闲": "idle",
+    "忙碌": "busy",
+    "很忙碌": "very_busy",
+    "很忙": "very_busy",  # 宽松匹配
+    "睡眠": "sleep",
+}
+
+# 兼容旧缓存数据：6 值 type 枚举 → 4 值 status
+_LEGACY_TYPE_MAP = {
+    "sleep": "sleep",
+    "work": "busy",
+    "routine": "busy",
+    "rest": "idle",
+    "leisure": "idle",
+    "social": "idle",
+}
 
 
 def _slot_to_status(slot: dict) -> dict:
-    """将时段转为状态。
+    """规范化 slot 到 spec 字段 {event, status}。
 
-    4F.3: 区分 busy 和 very_busy:
-    - work 类型的核心时段(9-12, 14-17) → very_busy
-    - 其他 work/routine → busy
+    优先读取 spec 字段；回退到旧的 6 值 type + activity 字段以兼容历史缓存。
     """
-    slot_type = slot.get("type", "leisure")
-    if slot_type == "sleep":
-        status = "sleep"
-    elif slot_type == "work":
-        start = slot.get("start", "00:00")
-        if "09:00" <= start < "12:00" or "14:00" <= start < "17:00":
-            status = "very_busy"
-        else:
-            status = "busy"
-    elif slot_type == "routine":
-        status = "busy"
-    else:
-        status = "idle"
+    # Spec 字段（LLM 新输出）
+    event = slot.get("event") or slot.get("activity", "")
+    raw_status = slot.get("status")
 
-    return {
-        "activity": slot.get("activity", ""),
-        "type": slot_type,
-        "status": status,
-    }
+    if raw_status in ("idle", "busy", "very_busy", "sleep"):
+        status = raw_status
+    elif isinstance(raw_status, str) and raw_status in _SPEC_STATUS_MAP:
+        status = _SPEC_STATUS_MAP[raw_status]
+    else:
+        # 回退：旧缓存仍是 type 字段（6 值枚举）
+        legacy_type = slot.get("type", "leisure")
+        status = _LEGACY_TYPE_MAP.get(legacy_type, "idle")
+        # 旧 work 时段在核心小时段细分为 very_busy（保留旧行为）
+        if status == "busy" and legacy_type == "work":
+            start = slot.get("start", "00:00")
+            if "09:00" <= start < "12:00" or "14:00" <= start < "17:00":
+                status = "very_busy"
+
+    # Keep `activity` alias for backward-compat with existing consumers
+    # (proactive/context.py, proactive/sender.py). These will migrate to
+    # `event` over time.
+    return {"event": event, "activity": event, "status": status}
 
 
 _STATUS_LABELS = {
     "idle": "空闲",
     "busy": "忙碌",
-    "very_busy": "很忙",
-    "sleep": "睡眠中",
+    "very_busy": "很忙碌",
+    "sleep": "睡眠",
 }
 
-_TYPE_LABELS = {
+# Deprecated: kept only for the public `type_label()` function used by api.
+# Spec Part 1 §2.1 doesn't use `type` at all — schedule slots now carry only
+# {event, status}. Callers should use `status_label` instead.
+_LEGACY_TYPE_LABELS = {
     "leisure": "休闲",
     "work": "工作",
     "routine": "日常",
     "sleep": "睡眠",
+    "social": "社交",
+    "rest": "休息",
 }
 
 
@@ -378,8 +419,8 @@ def status_label(status: str) -> str:
 
 
 def type_label(slot_type: str) -> str:
-    """中文类型标签。"""
-    return _TYPE_LABELS.get(slot_type, slot_type)
+    """中文类型标签（已废弃；新 schedule 只有 event/status，type 字段不再使用）。"""
+    return _LEGACY_TYPE_LABELS.get(slot_type, slot_type)
 
 
 # --- 作息查询意图识别 ---
@@ -567,7 +608,10 @@ def format_full_schedule_for_query(
     status: dict | None = None,
 ) -> str:
     """格式化完整日程供查询意图的 prompt 注入。"""
-    lines = [f"{s['start']}-{s['end']} {s['activity']}" for s in schedule]
+    lines = [
+        f"{s['start']}-{s['end']} {s.get('event') or s.get('activity', '')}"
+        for s in schedule
+    ]
     full_text = "\n".join(lines)
 
     current = ""
@@ -596,7 +640,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         return []
 
     schedule_text = "\n".join(
-        f"{s['start']}-{s['end']} {s['activity']}" for s in schedule
+        f"{s['start']}-{s['end']} {s.get('event') or s.get('activity', '')}" for s in schedule
     )
 
     # 查询当日调整记录
@@ -642,18 +686,32 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     except Exception as e:
         logger.warning(f"Failed to load chat summary for review: {e}")
 
-    prompt = (await get_prompt_text("schedule.review")).format(
+    # Spec Part 1 §2.2: Step 1 — 先生成 200 字自然语言总结。
+    from app.services.llm.models import invoke_text
+    summary_prompt = (await get_prompt_text("schedule.daily_summary")).format(
         name=agent_name,
         schedule_text=schedule_text,
-        adjustments_text=adjustments_text,
-        proactive_text=proactive_text,
-        chat_summary_text=chat_summary_text,
+        adjustments_text=adjustments_text or "（无调整）",
+        proactive_text=proactive_text or "（无主动消息）",
+        chat_summary_text=chat_summary_text or "（无聊天回顾）",
     )
-
     try:
-        result = await invoke_json(get_utility_model(), prompt)
+        summary_text = (await invoke_text(get_utility_model(), summary_prompt)).strip()
     except Exception as e:
-        logger.warning(f"Schedule review failed for agent {agent_id}: {e}")
+        logger.warning(f"Daily summary (text) failed for agent {agent_id}: {e}")
+        return []
+    if not summary_text:
+        logger.info(f"Daily summary empty for agent {agent_id}, skip memory extraction")
+        return []
+
+    # Spec Part 1 §2.3: Step 2 — 把总结拆分为记忆条目 + 五类分类 + 0-100 打分。
+    memories_prompt = (await get_prompt_text("schedule.daily_summary_memories")).format(
+        summary_text=summary_text,
+    )
+    try:
+        result = await invoke_json(get_utility_model(), memories_prompt)
+    except Exception as e:
+        logger.warning(f"Daily summary memory classification failed for agent {agent_id}: {e}")
         return []
 
     if not isinstance(result, dict):
@@ -663,27 +721,50 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     if not isinstance(memories, list):
         logger.warning(f"Schedule review 'memories' is not a list: {type(memories)}")
         return []
+
+    # Spec Part 1 §2.3 layer mapping: score ≥85→L1, 50-84→L2, 10-49→L3, <10→drop
+    def _score_to_level(score: float) -> tuple[int, float] | None:
+        if score < 10:
+            return None
+        importance = min(1.0, max(0.1, score / 100.0))
+        if score >= 85:
+            return (1, importance)
+        if score >= 50:
+            return (2, importance)
+        return (3, importance)
+
     stored = []
-    for mem in memories[:3]:
-        # 支持新格式（dict）和旧格式（str）
+    for mem in memories[:10]:
+        # Spec 格式：{"type":"类型","content":"记忆内容","score":0-100}
         if isinstance(mem, str):
-            content = mem
-            level = 3
-            importance = 0.8
+            content, level, importance = mem, 3, 0.3
         elif isinstance(mem, dict):
             content = mem.get("content", "")
-            level = mem.get("level", 3)
-            importance = min(1.0, mem.get("importance", 0.8))
+            score = mem.get("score")
+            if isinstance(score, (int, float)):
+                mapped = _score_to_level(float(score))
+                if mapped is None:
+                    continue
+                level, importance = mapped
+            else:
+                # 兜底：旧格式 level + importance
+                level = mem.get("level", 3)
+                importance = min(1.0, mem.get("importance", 0.3))
         else:
             continue
 
         if not content:
             continue
 
+        # Spec §2.3 五类记忆：身份/情绪/偏好边界/生活/思维
+        raw_type = mem.get("type") if isinstance(mem, dict) else None
+        main_cat = _MEM_TYPE_TO_MAIN.get(str(raw_type or "").strip(), "生活")
+
         mem_id = await store_memory(
             user_id=user_id,
             content=content,
             memory_type="life",
+            main_category=main_cat,
             level=level,
             importance=importance,
             source="ai",
@@ -692,3 +773,19 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
             stored.append(mem_id)
 
     return stored
+
+
+# Spec §2.3 五类记忆名称（来自「AI总结记忆分类及打分」prompt 输出）→ taxonomy main_category
+_MEM_TYPE_TO_MAIN = {
+    "身份": "身份",
+    "身份记忆": "身份",
+    "情绪": "情绪",
+    "情绪记忆": "情绪",
+    "偏好边界": "偏好",
+    "偏好边界记忆": "偏好",
+    "偏好": "偏好",
+    "生活": "生活",
+    "生活记忆": "生活",
+    "思维": "思维",
+    "思维记忆": "思维",
+}

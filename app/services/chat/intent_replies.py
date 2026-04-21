@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
-from app.services.prompting.utils import SafeDict, pad_params, render_prompt
+from app.services.prompting.utils import pad_params, render_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -238,14 +238,6 @@ async def deletion_done_reply(
 # §4 日常交流分级回复
 # ═══════════════════════════════════════════════════════════════════
 
-_PERSONA_SHORT = (
-    "1.你是真人朋友，不是AI/客服，和用户是平等朋友关系。\n"
-    "2.自然情感流露，不刻意讨好。\n"
-    "3.绝不自称AI，不解释AI原理，不主动提及技术限制。\n"
-    "4.你和用户没有任何现实线下交集。"
-)
-
-
 async def memory_weak_reply(
     *,
     message: str,
@@ -254,11 +246,10 @@ async def memory_weak_reply(
     personality_brief: str = "",
     user_portrait: str = "",
 ) -> str | None:
-    """§4 step 2：弱相关回复。"""
+    """§4 step 2：弱相关回复。人设【限定】已内联在 prompt 文本中。"""
     return await _render_llm(
         "memory.weak_reply",
         {
-            "persona": _PERSONA_SHORT,
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
@@ -282,7 +273,6 @@ async def memory_medium_reply(
     return await _render_llm(
         "memory.medium_reply",
         {
-            "persona": _PERSONA_SHORT,
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
@@ -308,7 +298,6 @@ async def memory_strong_reply(
     return await _render_llm(
         "memory.strong_reply",
         {
-            "persona": _PERSONA_SHORT,
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
@@ -333,7 +322,6 @@ async def memory_l3_reply(
     return await _render_llm(
         "memory.l3_reply",
         {
-            "persona": _PERSONA_SHORT,
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",

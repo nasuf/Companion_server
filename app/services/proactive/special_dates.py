@@ -67,11 +67,11 @@ def find_first_idle_after_wakeup(
     if not schedule:
         return fallback
 
-    # 找起床事件
+    # 找起床事件（兼容新 schema `event` + 旧 schema `activity`/`type`）
     wake_end: str | None = None
     for slot in schedule:
-        activity = str(slot.get("activity") or "")
-        if "起床" in activity or slot.get("type") == "wake":
+        event = str(slot.get("event") or slot.get("activity") or "")
+        if "起床" in event or slot.get("type") == "wake":
             wake_end = str(slot.get("end") or "")
             if wake_end:
                 break
@@ -79,13 +79,13 @@ def find_first_idle_after_wakeup(
     if not wake_end:
         return fallback
 
-    # 从起床结束时刻开始, 找第一个 status != busy/very_busy/sleep 的时段
+    # 从起床结束时刻开始, 找第一个 status == idle 的时段
     for slot in schedule:
         start = str(slot.get("start") or "")
         if start < wake_end:
             continue
-        slot_type = slot.get("type") or "leisure"
-        if slot_type in ("leisure",) or slot.get("status") == "idle":
+        # Spec §2.1: status ∈ {idle, busy, very_busy, sleep}
+        if slot.get("status") == "idle":
             h, m = start.split(":")
             return datetime(the_date.year, the_date.month, the_date.day, int(h), int(m), tzinfo=_TZ)
 

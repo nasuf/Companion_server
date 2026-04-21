@@ -54,9 +54,10 @@ def _format_schedule(slots: list[dict] | None) -> str:
     for slot in slots[:20]:  # 上限 20 段，避免 prompt 膨胀
         start = slot.get("start_time") or slot.get("start") or ""
         end = slot.get("end_time") or slot.get("end") or ""
-        activity = slot.get("activity") or slot.get("description") or ""
+        # Spec §2.1 新 schema: event + status; 旧 schema: activity + type
+        event = slot.get("event") or slot.get("activity") or slot.get("description") or ""
         status = slot.get("status") or slot.get("type") or ""
-        lines.append(f"- {start}-{end} {activity}（{status}）")
+        lines.append(f"- {start}-{end} {event}（{status}）")
     return "\n".join(lines)
 
 
