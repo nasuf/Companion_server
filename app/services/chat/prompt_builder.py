@@ -155,7 +155,7 @@ async def _build_emotion_section(
     body += f"(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})\n"
 
     if user_emotion:
-        primary = user_emotion.get("primary_emotion", "neutral")
+        primary = user_emotion.get("primary_emotion", "中性")
         confidence = user_emotion.get("confidence", 0.0)
         u_pleasure = user_emotion.get("pleasure", 0.0)
         u_arousal = user_emotion.get("arousal", 0.0)

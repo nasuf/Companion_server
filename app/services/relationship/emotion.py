@@ -220,12 +220,12 @@ async def extract_emotion(message: str) -> dict:
             "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", _PAD_DEFAULTS["pleasure"]))),
             "arousal": _clamp_pad("arousal", float(result.get("arousal", _PAD_DEFAULTS["arousal"]))),
             "dominance": _clamp_pad("dominance", float(result.get("dominance", _PAD_DEFAULTS["dominance"]))),
-            "primary_emotion": result.get("primary_emotion", "neutral"),
+            "primary_emotion": result.get("primary_emotion", "中性"),
             "confidence": _clamp(float(result.get("confidence", 0.5)), 0.0, 1.0),
         }
     except Exception as e:
         logger.warning(f"Emotion extraction failed: {e}")
-        return {**_PAD_DEFAULTS, "primary_emotion": "neutral", "confidence": 0.0}
+        return {**_PAD_DEFAULTS, "primary_emotion": "中性", "confidence": 0.0}
 
 
 # --- 3B.2 融合公式 + 共情向量 ---
