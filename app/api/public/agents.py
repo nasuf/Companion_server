@@ -87,12 +87,13 @@ async def create_agent(data: AgentCreate):
             await restore_staged_workspaces(staged_workspaces)
         raise
 
-    # spec §1.1: 用户填 7 维性格, 确定性映射为 MBTI 4 维 (不存储 7 维).
-    # 异步 LLM 仅生成 MBTI summary 文本, 紧接着算 emotion baseline.
-    mbti_input = seven_dim_to_mbti(data.personality.model_dump())
+    # Spec §1.3：7 维 → MBTI 8 维用大模型推导（对应指令「AI性格打分」）。
+    # 整个流程在后台 asyncio.create_task 里跑，不阻塞 API 响应。
+    personality_dict = data.personality.model_dump()
 
     async def _init_mbti_then_emotion():
         try:
+            mbti_input = await seven_dim_to_mbti(personality_dict)
             mbti = await build_mbti(mbti_input)
             await db.aiagent.update(
                 where={"id": agent.id},

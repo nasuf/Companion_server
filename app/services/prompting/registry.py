@@ -154,7 +154,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("boundary.apology", "道歉识别", "边界系统", "边界", "【工程扩展】识别是否为有效道歉（spec §4 道歉处理在 apology_reply，此 prompt 是前置检测）。", APOLOGY_PROMPT),
     PromptDefinition("self_memory.daily", "AI 自我记忆生成(事件级)", "AI 自我记忆", "自我记忆", "【工程扩展】从单次对话事件生成 AI 自我记忆（日末汇总见 schedule.daily_summary_memories）。", SELF_MEMORY_PROMPT),
     PromptDefinition("agent.identity_generation", "AI 身份信息生成", "初始化", "初始化", "【工程扩展】根据人格推导 age/occupation/city（简化版，spec AI 背景生成是完整 Markdown 表格）。", IDENTITY_GENERATION_PROMPT),
-    PromptDefinition("agent.personality_scoring", "AI 性格打分", "初始化", "初始化", "Spec §1.3：7 维 → MBTI 8 维。代码默认用 mbti.seven_dim_to_mbti 确定性公式，此 prompt 仅作 registry 对齐与调试用途。", PERSONALITY_SCORING_PROMPT),
+    PromptDefinition("agent.personality_scoring", "AI 性格打分", "初始化", "初始化", "Spec §1.3 + 指令模版 P26：agent 创建时用 LLM 把用户选的 7 维性格推导为 MBTI 8 维分数。在后台异步任务中调用，不阻塞 API 响应。", PERSONALITY_SCORING_PROMPT),
 
     # ── spec §2-§6 新增（4.19 指令模板） ──
     PromptDefinition("boundary.attack_target", "攻击目标识别", "边界系统", "边界", "判断攻击目标类型（攻击AI/第三方/无负面/无目标脏话）。", ATTACK_TARGET_PROMPT),

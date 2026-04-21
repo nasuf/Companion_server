@@ -855,8 +855,8 @@ PAD模型说明：
 {{"pleasure": -1.0到1.0, "arousal": 0.0到1.0, "dominance": 0.0到1.0}}"""
 
 # Spec 第一部分 §1.3 + 指令模版 P26「AI性格打分」
-# 代码默认用确定性公式（services/mbti.py:seven_dim_to_mbti）；此 prompt 可通过
-# settings.use_llm_personality_scoring 切换到 LLM 路径，便于后台调试。
+# agent 创建时在后台异步任务中调用（services/mbti.py:seven_dim_to_mbti），
+# 把用户选的 7 维性格推导为 MBTI 8 维。不阻塞 API 响应。
 PERSONALITY_SCORING_PROMPT = """【任务】根据AI的七个性格维度分数（0-100），推测其对应的MBTI八个维度的百分比分数（0-100）。
 
 【输入】AI性格分数：
