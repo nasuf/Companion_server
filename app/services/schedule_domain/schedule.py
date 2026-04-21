@@ -49,11 +49,9 @@ _BASE_SCHEDULE_TEMPLATE = [
 
 
 async def generate_life_overview(
-    name: str,
     mbti: dict | None,
     age: int = 22,
     occupation: str | None = None,
-    city: str | None = None,
     gender: str | None = None,
 ) -> str:
     """生成AI角色的生活画像（spec 第一部分 §2.1 + 指令模版 P20）。
@@ -64,19 +62,14 @@ async def generate_life_overview(
       planning = J                 spontaneity = 100 - J
       humor = (E+N)/2（复合）
 
-    Args:
-        city: spec prompt 不需要城市，保留参数是为了向后兼容。
-
-    Returns: 纯文本生活画像（未使用 city）。
+    Returns: 纯文本生活画像。
     """
-    del city  # unused — spec prompt 不需要
     e = round(mbti_signal(mbti, "E") * 100)
     n = round(mbti_signal(mbti, "N") * 100)
     t = round(mbti_signal(mbti, "T") * 100)
     j = round(mbti_signal(mbti, "J") * 100)
 
     prompt = (await get_prompt_text("schedule.life_overview")).format(
-        name=name,
         age=age,
         gender=gender or "未设定",
         occupation=occupation or "自由职业",
@@ -100,7 +93,7 @@ async def generate_life_overview(
 async def generate_and_save_life_overview(agent: Any) -> str:
     """从 agent 对象提取信息，生成并保存生活画像。返回文本描述。"""
     description = await generate_life_overview(
-        agent.name, get_mbti(agent),
+        get_mbti(agent),
         age=agent.age or 22,
         occupation=agent.occupation,
         gender=getattr(agent, "gender", None),
