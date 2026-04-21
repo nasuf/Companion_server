@@ -1,14 +1,13 @@
 """Interactive contradiction handling (spec §4).
 
 When a user's new message conflicts with an existing L1 memory, the AI should:
-1. Detect the contradiction (small model)
-2. Ask the user naturally about the discrepancy (big model)
-3. Analyze user's response (small model → 变化/新增/错误)
-4. Adjust memories (demote old L1 → L2, create new entry)
-5. Generate a natural reply acknowledging the change
+1. Detect the contradiction — memory.contradiction_detection (small model, §4.1)
+2. Ask the user naturally — memory.contradiction_inquiry (big model, §4.2)
+3. Analyze user's response — memory.contradiction_analysis (small model, §4.3)
+4. Adjust memories (demote old L1 → L2, create new entry, §4.4)
+5. Generate wrap-up reply — memory.contradiction_reply (big model, §4.5)
 
-This module provides the detection + inquiry generation steps (1-2).
-Steps 3-5 are handled in the orchestrator when the user replies to the inquiry.
+All 5 LLM calls go through the prompt registry; no inline prompts.
 """
 
 from __future__ import annotations
@@ -17,8 +16,15 @@ import json
 import logging
 
 from app.redis_client import get_redis
-from app.services.llm.models import get_utility_model, get_chat_model, invoke_json
+from app.services.llm.models import (
+    get_chat_model,
+    get_utility_model,
+    invoke_json,
+    invoke_text,
+)
 from app.services.memory.storage import repo as memory_repo
+from app.services.prompting.store import get_prompt_text
+from app.services.prompting.utils import SafeDict, pad_params
 
 _PENDING_KEY_PREFIX = "contradiction:pending:"
 _PENDING_TTL = 1800  # 30 min — generous window for user to reply
@@ -66,27 +72,12 @@ async def detect_l1_contradiction(
 
     l1_text = "\n".join(f"[{m.id}] {m.summary or m.content}" for m in all_l1)
 
-    prompt = f"""你是一个记忆矛盾检测器。判断用户新消息是否与已有 L1 核心记忆矛盾。
-
-已有 L1 记忆:
-{l1_text}
-
-用户新消息: {user_message}
-
-判断标准:
-- 矛盾: 新消息中的事实与已有记忆直接冲突(如记忆说住北京,新消息说住上海)
-- 非矛盾: 补充信息、无关话题、或与记忆一致
-
-输出 JSON:
-{{
-  "has_conflict": true/false,
-  "conflicting_memory_id": "记忆ID(若有矛盾)",
-  "old_content": "原记忆内容",
-  "new_info": "用户提到的新信息",
-  "conflict_description": "矛盾描述(≤30字)"
-}}
-"""
     try:
+        template = await get_prompt_text("memory.contradiction_detection")
+        prompt = template.format_map(SafeDict({
+            "user_message": user_message,
+            "existing_l1_memory": l1_text,
+        }))
         result = await invoke_json(get_utility_model(), prompt)
         if isinstance(result, dict) and result.get("has_conflict"):
             return result
@@ -99,74 +90,81 @@ async def detect_l1_contradiction(
 async def generate_contradiction_inquiry(
     conflict: dict,
     agent_name: str = "AI",
+    recent_context: str = "",
+    user_emotion: dict | None = None,
+    personality_brief: str = "",
+    user_portrait: str = "",
 ) -> str:
     """Spec §4.2: generate a natural inquiry about the contradiction.
 
-    The AI asks the user in a friendly way: "wait, I thought you lived in X,
-    did something change?"
+    Uses `memory.contradiction_inquiry` (registry). Friendly, not accusatory.
     """
-    prompt = f"""你是 {agent_name}，用户刚才说的话似乎和你记忆中的信息不一致。
-
-原来的记忆: {conflict.get('old_content', '')}
-用户新说的: {conflict.get('new_info', '')}
-矛盾描述: {conflict.get('conflict_description', '')}
-
-请以朋友的语气温和地询问用户:
-- 是情况发生了变化?
-- 还是之前的记忆有误?
-- 或者是你理解错了?
-
-要求:
-- 语气自然温暖,像朋友关心对方
-- 不要用"根据我的记忆"这种机械表达
-- 简短,1-2句话
-- 用口语化的表达
-
-直接输出询问文本,不要 JSON。
-"""
     try:
-        from app.services.llm.models import invoke_text
-        return await invoke_text(get_chat_model(), prompt)
+        template = await get_prompt_text("memory.contradiction_inquiry")
+        params = {
+            "user_message": conflict.get("new_info", ""),
+            "original_memory": conflict.get("old_content", ""),
+            "conflict_memory": conflict.get("conflict_description", ""),
+            "recent_context": recent_context or "(无)",
+            "personality_brief": personality_brief or agent_name,
+            "user_portrait": user_portrait or "(未知)",
+            **pad_params(user_emotion),
+        }
+        prompt = template.format_map(SafeDict(params))
+        return (await invoke_text(get_chat_model(), prompt)).strip()
     except Exception as e:
         logger.warning(f"Contradiction inquiry generation failed: {e}")
-        return f"诶,我记得你之前说的不太一样,是情况有变化吗?"
+        return "诶,我记得你之前说的不太一样,是情况有变化吗?"
 
 
 async def analyze_contradiction_response(
     user_reply: str,
     conflict: dict,
+    recent_context: str = "",
 ) -> dict:
-    """Spec §4.3: analyze user's response to contradiction inquiry.
-
-    Returns {"change_type": "变化"|"新增"|"错误",
-             "reason": "...",
-             "updated_memory": "...",
-             "new_memory": "..."}
-    """
-    prompt = f"""用户回复了你的矛盾询问。请分析用户的意图:
-
-原记忆: {conflict.get('old_content', '')}
-矛盾内容: {conflict.get('new_info', '')}
-用户回复: {user_reply}
-
-输出 JSON:
-{{
-  "change_type": "变化" 或 "新增" 或 "错误",
-  "reason": "变化原因(≤20字)",
-  "updated_memory": "原记忆应更新为的内容(如适用)",
-  "new_memory": "需新增的记忆内容(如适用)"
-}}
-
-- 变化: 用户确认情况发生了变化(搬家、换工作等)
-- 新增: 新信息是补充而非替代(可以和原记忆共存)
-- 错误: 原记忆有误,需要纠正
-"""
+    """Spec §4.3: analyze user's response → 变化 / 新增 / 错误 + 调整方案。"""
     try:
+        template = await get_prompt_text("memory.contradiction_analysis")
+        prompt = template.format_map(SafeDict({
+            "user_reply": user_reply,
+            "recent_context": recent_context or "(无)",
+            "original_memory": conflict.get("old_content", ""),
+            "conflict_memory": conflict.get("conflict_description", ""),
+        }))
         result = await invoke_json(get_utility_model(), prompt)
         return result if isinstance(result, dict) else {"change_type": "新增", "reason": "解析失败"}
     except Exception as e:
         logger.warning(f"Contradiction response analysis failed: {e}")
         return {"change_type": "新增", "reason": str(e)[:20]}
+
+
+async def generate_contradiction_reply(
+    user_message: str,
+    conflict: dict,
+    analysis: dict,
+    recent_context: str = "",
+    user_emotion: dict | None = None,
+    personality_brief: str = "",
+    user_portrait: str = "",
+) -> str:
+    """Spec §4.5: 用户解释清楚后，自然地把话题拉回正轨。"""
+    try:
+        template = await get_prompt_text("memory.contradiction_reply")
+        params = {
+            "user_message": user_message,
+            "recent_context": recent_context or "(无)",
+            "original_memory": conflict.get("old_content", ""),
+            "conflict_memory": conflict.get("conflict_description", ""),
+            "change_reason": analysis.get("reason", ""),
+            "personality_brief": personality_brief or "真诚朋友",
+            "user_portrait": user_portrait or "(未知)",
+            **pad_params(user_emotion),
+        }
+        prompt = template.format_map(SafeDict(params))
+        return (await invoke_text(get_chat_model(), prompt)).strip()
+    except Exception as e:
+        logger.warning(f"Contradiction reply generation failed: {e}")
+        return "好的，我记住了~"
 
 
 async def apply_contradiction_resolution(

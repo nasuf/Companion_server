@@ -159,15 +159,23 @@ async def _handle_attack_target_non_ai(
 async def _handle_attack_ai(
     ctx: BoundaryPhaseCtx, zone: str, boundary_result: dict,
 ) -> AsyncGenerator[dict, None]:
-    """spec §2.6 步骤 5：攻击 AI → 级别识别 + 扣分 + 分级回复。"""
+    """spec §2.6 步骤 5：攻击 AI → 级别识别 + 扣分 + 分级回复。
+
+    spec §2.4 K4（最终警告）：处于低耐心区（zone=low）时再次攻击 AI，
+    发出最后一次警告（替代 K1/K2/K3 攻击分级回复）。
+    """
     attack_level = await attack_level_classify(ctx.user_message)
+    is_final_warning = zone == "low"
     response = await generate_boundary_reply_llm(
         zone=zone,
         message=ctx.user_message,
         personality_brief=_personality_brief(ctx.agent),
-        attack_level=attack_level,
+        attack_level=None if is_final_warning else attack_level,
+        final_warning=is_final_warning,
     ) or boundary_result.get("fallback", "...")
     metadata = {"boundary": True, "zone": zone, "attack_level": attack_level}
+    if is_final_warning:
+        metadata["final_warning"] = True
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
     ctx.fire_background_fn(process_boundary_violation(ctx.agent_id, ctx.user_id, ctx.user_message))

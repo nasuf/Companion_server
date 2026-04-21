@@ -24,6 +24,7 @@ from app.services.memory.interaction.contradiction import (
     analyze_contradiction_response,
     apply_contradiction_resolution,
     clear_pending_contradiction,
+    generate_contradiction_reply,
     load_pending_contradiction,
 )
 from app.services.memory.interaction.deletion import (
@@ -53,9 +54,12 @@ class PreflightCtx:
 async def resolve_pending_contradiction(
     user_message: str,
     ctx: PreflightCtx,
-    chat_invoke_fn: Callable[[str], Awaitable[str]],
 ) -> AsyncGenerator[dict, None]:
-    """spec §4 step 3-5：若有待解决矛盾，分析用户回答 → 应用解析 → 回复。"""
+    """spec §4 step 3-5：若有待解决矛盾，分析用户回答 → 应用解析 → 生成矛盾回复。
+
+    调用链：memory.contradiction_analysis（§4.3）→ apply_contradiction_resolution
+    （§4.4 降级原 L1 → L2）→ memory.contradiction_reply（§4.5 自然拉回话题）。
+    """
     pending = await load_pending_contradiction(ctx.conversation_id)
     if not pending:
         return
@@ -63,17 +67,13 @@ async def resolve_pending_contradiction(
         analysis = await analyze_contradiction_response(user_message, pending)
         await apply_contradiction_resolution(pending, analysis)
         await clear_pending_contradiction(ctx.conversation_id)
-        change = analysis.get("change_type", "新增")
-        reason = analysis.get("reason", "")
-        agent_name = ctx.agent.name if ctx.agent else "AI"
-        try:
-            reply = await chat_invoke_fn(
-                f"你是{agent_name}。用户刚才解释了一个信息变化：{reason}（类型：{change}）。"
-                f"请用1-2句自然的话回应，表示你记住了新的情况，然后把话题拉回正轨。"
-                f"不要提及'记忆''修改''系统'等词。"
-            )
-        except Exception:
-            reply = "好的，我记住了~"
+        personality_brief = ctx.agent.name if ctx.agent else "AI"
+        reply = await generate_contradiction_reply(
+            user_message=user_message,
+            conflict=pending,
+            analysis=analysis,
+            personality_brief=personality_brief,
+        )
         for evt in await ctx.short_circuit_fn(reply, ctx.conversation_id, ctx.agent_id, ctx.user_id):
             yield evt
         ctx.tracer.close()

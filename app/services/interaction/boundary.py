@@ -331,14 +331,19 @@ async def generate_boundary_reply_llm(
     personality_brief: str = "",
     user_portrait: str = "",
     attack_level: str | None = None,
+    final_warning: bool = False,
 ) -> str | None:
     """spec §2.6 用大模型生成分级边界回复。失败时返回 None 让调用方用兜底模板。
 
+    - final_warning=True（K4）→ 低耐心区再次攻击 AI，用「最终警告」prompt
     - attack_level 给定（K1/K2/K3）→ 攻击分级回复
     - 否则按 zone（medium/low/blocked）→ 耐心分级回复
     """
-    key = _ATTACK_LEVEL_TO_PROMPT.get(attack_level) if attack_level else None
-    key = key or _ZONE_TO_PATIENCE_PROMPT.get(zone)
+    if final_warning:
+        key = "boundary.final_warning"
+    else:
+        key = _ATTACK_LEVEL_TO_PROMPT.get(attack_level) if attack_level else None
+        key = key or _ZONE_TO_PATIENCE_PROMPT.get(zone)
     if not key:
         return None
 

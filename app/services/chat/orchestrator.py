@@ -15,7 +15,7 @@ import re
 from collections.abc import AsyncGenerator
 
 from app.db import db
-from app.services.llm.models import get_chat_model, convert_messages, invoke_text
+from app.services.llm.models import get_chat_model, convert_messages
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
@@ -278,10 +278,7 @@ async def stream_chat_response(
             short_circuit_fn=_short_circuit_reply,
         )
 
-        async def _chat_text(prompt: str) -> str:
-            return await invoke_text(get_chat_model(), prompt)
-
-        async for evt in resolve_pending_contradiction(user_message, preflight_ctx, _chat_text):
+        async for evt in resolve_pending_contradiction(user_message, preflight_ctx):
             yield evt
         if preflight_ctx.stopped:
             return

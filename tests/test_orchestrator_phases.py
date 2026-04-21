@@ -131,10 +131,11 @@ async def test_boundary_blocked_apology_unblocks():
 
 @pytest.mark.asyncio
 async def test_boundary_attack_ai_triggers_level_classification_and_violation():
-    """zone=low + 攻击AI → 调 attack_level_classify + process_boundary_violation。"""
+    """zone=low + 攻击AI → spec §2.4 K4：final_warning 替代 K1/K2/K3 分级回复。"""
     from app.services.chat.boundary_phase import run_boundary
 
     ctx = _make_boundary_ctx()
+    mock_reply = AsyncMock(return_value="你这样我很难过")
     with patch(
         "app.services.chat.boundary_phase.check_boundary",
         AsyncMock(return_value=({"zone": "low", "fallback": "..."}, 10)),
@@ -146,7 +147,7 @@ async def test_boundary_attack_ai_triggers_level_classification_and_violation():
         AsyncMock(return_value="K2"),
     ), patch(
         "app.services.chat.boundary_phase.generate_boundary_reply_llm",
-        AsyncMock(return_value="你这样我很难过"),
+        mock_reply,
     ), patch(
         "app.services.chat.boundary_phase.process_boundary_violation",
     ) as mock_violation:
@@ -154,11 +155,45 @@ async def test_boundary_attack_ai_triggers_level_classification_and_violation():
 
     kwargs = ctx.short_circuit_fn.call_args.kwargs
     assert kwargs["extra_metadata"] == {
-        "boundary": True, "zone": "low", "attack_level": "K2",
+        "boundary": True, "zone": "low", "attack_level": "K2", "final_warning": True,
     }
+    # generate_boundary_reply_llm 以 final_warning=True 调用，attack_level=None
+    reply_kwargs = mock_reply.call_args.kwargs
+    assert reply_kwargs["final_warning"] is True
+    assert reply_kwargs["attack_level"] is None
     # process_boundary_violation 通过 fire_background_fn 调度
     mock_violation.assert_called_once_with("agent1", "user1", "你这个傻X")
     assert ctx.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_boundary_attack_ai_zone_medium_uses_level_reply():
+    """zone=medium + 攻击AI → 按 K1/K2/K3 分级回复，不触发最终警告。"""
+    from app.services.chat.boundary_phase import run_boundary
+
+    ctx = _make_boundary_ctx()
+    mock_reply = AsyncMock(return_value="你这样我很难过")
+    with patch(
+        "app.services.chat.boundary_phase.check_boundary",
+        AsyncMock(return_value=({"zone": "medium", "fallback": "..."}, 50)),
+    ), patch(
+        "app.services.chat.boundary_phase.attack_target_classify",
+        AsyncMock(return_value="攻击AI"),
+    ), patch(
+        "app.services.chat.boundary_phase.attack_level_classify",
+        AsyncMock(return_value="K2"),
+    ), patch(
+        "app.services.chat.boundary_phase.generate_boundary_reply_llm",
+        mock_reply,
+    ), patch(
+        "app.services.chat.boundary_phase.process_boundary_violation",
+    ):
+        await _drain(run_boundary(ctx))
+
+    reply_kwargs = mock_reply.call_args.kwargs
+    assert reply_kwargs["final_warning"] is False
+    assert reply_kwargs["attack_level"] == "K2"
+    assert "final_warning" not in ctx.short_circuit_fn.call_args.kwargs["extra_metadata"]
 
 
 @pytest.mark.asyncio
