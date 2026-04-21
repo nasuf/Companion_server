@@ -66,8 +66,8 @@ async def test_boundary_sub_intent_mode_skips_redis():
 
 
 @pytest.mark.asyncio
-async def test_boundary_blocked_zone_short_circuits():
-    """zone=blocked 走拉黑回复：yield 事件 + 触发 apology_check/memory_pipeline + trace close。"""
+async def test_boundary_blocked_zone_no_apology_falls_through():
+    """zone=blocked + 用户不在道歉 → 走拉黑回复（spec §2.6 步骤 2.3）。"""
     from app.services.chat.boundary_phase import run_boundary
 
     ctx = _make_boundary_ctx()
@@ -75,24 +75,61 @@ async def test_boundary_blocked_zone_short_circuits():
         "app.services.chat.boundary_phase.check_boundary",
         AsyncMock(return_value=({"zone": "blocked", "fallback": "..."}, 0)),
     ), patch(
+        "app.services.chat.boundary_phase.detect_apology",
+        AsyncMock(return_value={"is_apology": False, "sincerity": 0.0}),
+    ), patch(
         "app.services.chat.boundary_phase.generate_boundary_reply_llm",
         AsyncMock(return_value="滚开"),
     ):
         events = await _drain(run_boundary(ctx))
 
-    # short_circuit_fn 被调用，metadata 带 boundary+zone
     ctx.short_circuit_fn.assert_awaited_once()
     kwargs = ctx.short_circuit_fn.call_args.kwargs
     assert kwargs["extra_metadata"] == {"boundary": True, "zone": "blocked"}
-    # 触发 2 个后台任务 (apology_check + memory_pipeline)
-    assert ctx.fire_background_fn.call_count == 2
-    # trace 关闭
+    # P3.1 后只 fire memory_pipeline（不再 fire apology_check）
+    assert ctx.fire_background_fn.call_count == 1
     ctx.end_trace_fn.assert_called_once()
-    # phase 标记 stopped
     assert ctx.stopped is True
-    # yield 事件来自 short_circuit_fn 返回值（2 个）
     assert len(events) == 2
     assert ctx.cached_patience == 0
+
+
+@pytest.mark.asyncio
+async def test_boundary_blocked_apology_unblocks():
+    """zone=blocked + 检测到道歉 → 调 handle_apology + apology_reply（spec §2.6 步骤 2.2）。"""
+    from app.services.chat.boundary_phase import run_boundary
+
+    ctx = _make_boundary_ctx(user_message="对不起，是我不对")
+    mock_apology = AsyncMock(return_value=70)
+    with patch(
+        "app.services.chat.boundary_phase.check_boundary",
+        AsyncMock(return_value=({"zone": "blocked", "fallback": "..."}, 0)),
+    ), patch(
+        "app.services.chat.boundary_phase.detect_apology",
+        AsyncMock(return_value={"is_apology": True, "sincerity": 0.9}),
+    ), patch(
+        "app.services.chat.boundary_phase.handle_apology",
+        mock_apology,
+    ), patch(
+        "app.services.chat.boundary_phase.apology_reply",
+        AsyncMock(return_value="原谅你啦"),
+    ), patch(
+        "app.services.chat.boundary_phase.generate_boundary_reply_llm",
+    ) as mock_blacklist:
+        events = await _drain(run_boundary(ctx))
+
+    # 调了 handle_apology 恢复耐心，没调拉黑回复 LLM
+    mock_apology.assert_awaited_once_with("agent1", "user1")
+    mock_blacklist.assert_not_called()
+    # metadata 带 apology_unblock=True
+    kwargs = ctx.short_circuit_fn.call_args.kwargs
+    assert kwargs["extra_metadata"] == {
+        "boundary": True, "zone": "blocked", "apology_unblock": True,
+    }
+    # 触发 memory_pipeline（无 apology_check）
+    assert ctx.fire_background_fn.call_count == 1
+    assert ctx.stopped is True
+    assert len(events) == 2
 
 
 @pytest.mark.asyncio

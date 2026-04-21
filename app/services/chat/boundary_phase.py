@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from app.services.chat.intent_replies import (
+    apology_reply,
     attack_level_classify,
     attack_target_classify,
     banned_word_check,
@@ -22,8 +23,10 @@ from app.services.chat.intent_replies import (
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
     check_boundary,
+    detect_apology,
     generate_boundary_reply_llm,
     get_patience_zone,
+    handle_apology,
     process_boundary_violation,
 )
 
@@ -100,7 +103,28 @@ async def _emit_short_circuit(
 async def _handle_blocked(
     ctx: BoundaryPhaseCtx, boundary_result: dict,
 ) -> AsyncGenerator[dict, None]:
-    """spec §2.6 步骤 2：拉黑。"""
+    """spec §2.6 步骤 2：拉黑。先检测道歉承诺；命中则恢复+和解回复，否则拉黑回复。"""
+    apology = await detect_apology(ctx.user_message)
+    if apology.get("is_apology") and apology.get("sincerity", 0) >= 0.5:
+        new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
+        reply = await apology_reply(
+            message=ctx.user_message,
+            personality_brief=_personality_brief(ctx.agent),
+            new_patience=new_patience,
+        ) or "好啦，我不生气了~"
+        async for evt in _emit_short_circuit(
+            ctx, reply,
+            {"boundary": True, "zone": "blocked", "apology_unblock": True},
+        ):
+            yield evt
+        ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
+            {"role": "user", "content": ctx.user_message},
+            {"role": "assistant", "content": reply},
+        ]))
+        ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+        ctx.stopped = True
+        return
+
     response = await generate_boundary_reply_llm(
         zone="blocked",
         message=ctx.user_message,
@@ -108,7 +132,6 @@ async def _handle_blocked(
     ) or boundary_result.get("fallback", "...")
     async for evt in _emit_short_circuit(ctx, response, {"boundary": True, "zone": "blocked"}):
         yield evt
-    ctx.fire_background_fn(ctx.bg_apology_check_fn(ctx.agent_id, ctx.user_id, ctx.user_message))
     ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
         {"role": "user", "content": ctx.user_message},
         {"role": "assistant", "content": response},
