@@ -124,7 +124,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("memory.compression", "记忆压缩总结", "定时压缩", "记忆", "【工程扩展】多条记忆压缩为总结（L2 衰减实现）。", COMPRESS_PROMPT),
     PromptDefinition("memory.consolidation", "记忆整合总结", "定时整合", "记忆", "【工程扩展】相似记忆整合为长期记忆。", CONSOLIDATE_SUMMARIZE_PROMPT),
     PromptDefinition("emotion.baseline", "情感基线计算", "初始化", "情绪", "【工程扩展】初始化时推导 AI PAD 情感基线，供后续实时 PAD 生成参考。", EMOTION_BASELINE_PROMPT),
-    PromptDefinition("emotion.extraction", "用户 PAD 值判断", "异步情绪", "情绪", "Spec §3.3：用户消息 PAD 三维值 + 工程扩展 primary_emotion/confidence 用于 emoji/sticker。", EMOTION_EXTRACTION_PROMPT),
+    PromptDefinition("emotion.extraction", "用户 PAD 值判断", "异步情绪", "情绪", "Spec §3.3 + 指令模版 P26：用户消息 PAD 三维值。", EMOTION_EXTRACTION_PROMPT),
     PromptDefinition("summarizer.layer1_review", "摘要层1-对话回顾", "异步摘要", "摘要", "【工程扩展】30 条消息回顾总结（分层摘要优化之一，spec 未定义）。", LAYER1_REVIEW_PROMPT),
     PromptDefinition("summarizer.layer2_distillation", "摘要层2-记忆提炼", "异步摘要", "摘要", "【工程扩展】记忆与当前消息提炼（spec 未定义）。", LAYER2_DISTILLATION_PROMPT),
     PromptDefinition("summarizer.layer3_state", "摘要层3-状态分析", "异步摘要", "摘要", "【工程扩展】当前情绪/话题/意图分析（spec 未定义）。", LAYER3_STATE_PROMPT),

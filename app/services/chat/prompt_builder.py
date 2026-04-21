@@ -112,7 +112,11 @@ async def _build_emotion_section(
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
 ) -> str | None:
-    """Build the emotion section from PAD dicts (AI + user)."""
+    """Build the emotion section from PAD dicts (AI + user).
+
+    Spec §3.3：AI 和用户情绪都用 PAD 三维表达。这里注入的是 chat.system_base
+    层级的情境信息（非 spec 要求），但字段统一只用 PAD，不额外带离散标签。
+    """
     if not emotion:
         return None
 
@@ -138,29 +142,18 @@ async def _build_emotion_section(
 
     mood_text = "，".join(mood_parts) if mood_parts else "心情平静"
 
-    # PRD §4.6.2.1: 注入 AI primary_emotion
-    ai_primary = emotion.get("primary_emotion")
-
     body = f"你现在的情绪：{mood_text}\n"
-    if ai_primary:
-        body += f"主要情绪：{ai_primary}\n"
     body += f"(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})\n"
 
     if user_emotion:
-        primary = user_emotion.get("primary_emotion", "中性")
-        confidence = user_emotion.get("confidence", 0.0)
         u_pleasure = user_emotion.get("pleasure", 0.0)
         u_arousal = user_emotion.get("arousal", 0.0)
         u_dominance = user_emotion.get("dominance", 0.0)
+        body += f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
+        if u_pleasure < -0.3:
+            body += "请注意关心用户的感受。\n"
 
-        if confidence >= 0.5 and primary != "中性":
-            body += f"用户当前情绪：{primary}（置信度{confidence:.1f}）\n"
-            body += f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
-
-            if u_pleasure < -0.3:
-                body += "请注意关心用户的感受。\n"
-
-    # PRD §4.6.2.1: 注入亲密度阶段
+    # 注入亲密度阶段
     if intimacy_stage:
         body += f"\n你们目前的关系是{intimacy_stage}。\n"
 
