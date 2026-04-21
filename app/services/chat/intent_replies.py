@@ -463,6 +463,30 @@ async def l3_trigger_classify(message: str) -> str:
     ) or "无"
 
 
+async def ai_reply_emotion(reply_text: str) -> dict:
+    """spec §5 step 1：调小模型「AI语句情绪」prompt 解析 AI 回复的情绪。
+
+    返回 `{"emotion": str, "intensity": int}`；任一字段缺失或调用失败返回 `{}`。
+    """
+    if not reply_text or not reply_text.strip():
+        return {}
+    result = await render_prompt(
+        "reply.emotion_detection",
+        {"ai_reply": reply_text},
+        lambda p: invoke_json(get_utility_model(), p),
+    )
+    if not isinstance(result, dict):
+        return {}
+    emotion = str(result.get("emotion", "")).strip()
+    if not emotion:
+        return {}
+    try:
+        intensity = int(result.get("intensity", 0))
+    except (TypeError, ValueError):
+        intensity = 0
+    return {"emotion": emotion, "intensity": intensity}
+
+
 async def split_reply_to_n_sentences(original_reply: str, n: int) -> list[str] | None:
     """§5.5：小模型「AI语句拆分（2/3句）」。失败/不足 n 条返回 None 让调用方兜底。"""
     if n not in (2, 3):
@@ -506,4 +530,5 @@ __all__ = [
     "attack_level_classify",
     "l3_trigger_classify",
     "split_reply_to_n_sentences",
+    "ai_reply_emotion",
 ]

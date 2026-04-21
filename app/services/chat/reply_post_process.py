@@ -31,6 +31,13 @@ def extract_pad_for_decoration(emotion: Any) -> tuple[float, float, float, str |
     )
 
 
+def _resolve_primary_emotion(reply_emotion: dict | None, pad_primary: str | None) -> str | None:
+    """spec §5：优先用 ai_reply_emotion 输出的 emotion 标签，回退到 AI PAD 缓存。"""
+    if reply_emotion and reply_emotion.get("emotion"):
+        return reply_emotion["emotion"]
+    return pad_primary
+
+
 async def _build_delay_explanation_text(
     reply_context: dict | None,
     elapsed: float,
@@ -77,13 +84,17 @@ async def emit_replies(
     delay_reply_fn: Callable[..., Awaitable[str | None]],
     fallback_fn: Callable[..., Awaitable[str]],
     emitted_replies: list[dict],
+    reply_emotion: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §5/§6.4-§6.5：延迟解释 + emoji/sticker + reply SSE 事件流。
 
     emitted_replies 传入的空列表会被原地填充（用于后续 `_save_replies`）。
     sub_intent_mode=True 时跳过延迟解释（父调用已推送）。
+    reply_emotion: spec §5 step 1 的 ai_reply_emotion 输出 `{emotion, intensity}`，
+    若提供则优先用其 emotion 标签匹配 EMOJI_MAP，否则回退到 AI PAD 缓存的 primary_emotion。
     """
-    ai_pleasure, ai_arousal, ai_dominance, ai_primary_emotion = extract_pad_for_decoration(emotion)
+    ai_pleasure, ai_arousal, ai_dominance, pad_primary = extract_pad_for_decoration(emotion)
+    ai_primary_emotion = _resolve_primary_emotion(reply_emotion, pad_primary)
     sticker_used = False  # 一个回合最多一个表情包
 
     # §6.4/§6.5 延迟解释

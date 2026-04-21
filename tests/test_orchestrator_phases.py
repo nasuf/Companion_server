@@ -330,6 +330,86 @@ async def test_reply_generate_relational_context_disables_tier():
     assert len(replies) == 1
 
 
+# ═══════════════════════════════════════════════════════════════════
+# reply_post_process: AI reply emotion override (P3.2)
+# ═══════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_emit_replies_uses_ai_reply_emotion_for_emoji():
+    """spec §5 step 1：reply_emotion 提供时，pick_one_emoji 收到 LLM 出来的标签。"""
+    from app.services.chat.reply_post_process import emit_replies
+
+    captured: dict = {}
+
+    def _capture(pleasure, arousal, primary_emotion=None):
+        captured["primary_emotion"] = primary_emotion
+        return "🎉"
+
+    emitted: list[dict] = []
+    with patch(
+        "app.services.chat.reply_post_process.should_add_emoji", return_value=True,
+    ), patch(
+        "app.services.chat.reply_post_process.pick_one_emoji", side_effect=_capture,
+    ), patch(
+        "app.services.chat.reply_post_process.should_add_sticker", return_value=False,
+    ):
+        async for _ in emit_replies(
+            ["hi"],
+            reply_context=None,
+            reply_index_offset=0,
+            sub_intent_mode=False,
+            emotion={"primary_emotion": "悲伤"},  # PAD 缓存说悲伤
+            agent=SimpleNamespace(name="A"),
+            user_message="嗨",
+            delay_reply_fn=AsyncMock(return_value=None),
+            fallback_fn=AsyncMock(return_value=""),
+            emitted_replies=emitted,
+            reply_emotion={"emotion": "高兴", "intensity": 80},  # LLM 说回复是高兴
+        ):
+            pass
+
+    # LLM 输出的"高兴"应覆盖缓存的"悲伤"
+    assert captured["primary_emotion"] == "高兴"
+
+
+@pytest.mark.asyncio
+async def test_emit_replies_falls_back_to_pad_emotion_when_no_reply_emotion():
+    """reply_emotion 缺失/空 → 回退到 PAD primary_emotion。"""
+    from app.services.chat.reply_post_process import emit_replies
+
+    captured: dict = {}
+
+    def _capture(pleasure, arousal, primary_emotion=None):
+        captured["primary_emotion"] = primary_emotion
+        return "😢"
+
+    emitted: list[dict] = []
+    with patch(
+        "app.services.chat.reply_post_process.should_add_emoji", return_value=True,
+    ), patch(
+        "app.services.chat.reply_post_process.pick_one_emoji", side_effect=_capture,
+    ), patch(
+        "app.services.chat.reply_post_process.should_add_sticker", return_value=False,
+    ):
+        async for _ in emit_replies(
+            ["hi"],
+            reply_context=None,
+            reply_index_offset=0,
+            sub_intent_mode=False,
+            emotion={"primary_emotion": "悲伤"},
+            agent=SimpleNamespace(name="A"),
+            user_message="嗨",
+            delay_reply_fn=AsyncMock(return_value=None),
+            fallback_fn=AsyncMock(return_value=""),
+            emitted_replies=emitted,
+            reply_emotion={},  # LLM 失败/空
+        ):
+            pass
+
+    assert captured["primary_emotion"] == "悲伤"
+
+
 @pytest.mark.asyncio
 async def test_reply_generate_intent_schedule_adjust_disables_tier():
     """非 NONE/L3_RECALL 意图 → 走主 LLM 而非 tier。"""

@@ -86,6 +86,7 @@ from app.services.chat.intent_replies import (
     memory_l3_reply as _memory_l3_reply,
     l3_trigger_classify as _l3_trigger_classify,
     split_reply_to_n_sentences as _split_reply_to_n_sentences,
+    ai_reply_emotion as _ai_reply_emotion,
 )
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
 from app.services.chat.reply_generate import generate_reply as _generate_reply
@@ -881,6 +882,15 @@ async def stream_chat_response(
         pipe_fallback_fn=split_and_validate_replies,
     )
 
+    # spec §5 step 1：AI 语句情绪识别（基于回复文本，不是 AI PAD 缓存）
+    full_response = " ".join(replies)
+    reply_emotion = await _ai_reply_emotion(full_response)
+    if reply_emotion.get("emotion"):
+        logger.info(
+            f"[REPLY-EMO] emotion={reply_emotion['emotion']} "
+            f"intensity={reply_emotion.get('intensity', 0)}"
+        )
+
     # spec §5/§6.4-§6.5: emoji/sticker + 延迟解释 + 推送
     emitted_replies: list[dict] = []
     async for evt in _emit_replies(
@@ -894,10 +904,9 @@ async def stream_chat_response(
         delay_reply_fn=_delay_explanation_reply,
         fallback_fn=_intent_llm_reply,
         emitted_replies=emitted_replies,
+        reply_emotion=reply_emotion,
     ):
         yield evt
-
-    full_response = " ".join(replies)
 
     # Persist replies immediately; trace links become clickable only after public share completes.
     first_assistant_message_id = await _save_replies(
