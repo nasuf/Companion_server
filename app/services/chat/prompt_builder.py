@@ -107,14 +107,6 @@ async def _build_personality_section(agent: Any) -> str:
     return _section("你的身份", body)
 
 
-_EMOTION_LABEL_CN = {
-    "joy": "开心", "sadness": "难过", "anger": "生气", "fear": "害怕",
-    "surprise": "惊讶", "disgust": "反感", "neutral": "平静",
-    "anxiety": "焦虑", "disappointment": "失望", "relief": "欣慰",
-    "gratitude": "感激", "playful": "调皮",
-}
-
-
 async def _build_emotion_section(
     emotion: dict | None,
     user_emotion: dict | None = None,
@@ -161,9 +153,8 @@ async def _build_emotion_section(
         u_arousal = user_emotion.get("arousal", 0.0)
         u_dominance = user_emotion.get("dominance", 0.0)
 
-        if confidence >= 0.5 and primary != "neutral":
-            emotion_cn = _EMOTION_LABEL_CN.get(primary, primary)
-            body += f"用户当前情绪：{emotion_cn}（置信度{confidence:.1f}）\n"
+        if confidence >= 0.5 and primary != "中性":
+            body += f"用户当前情绪：{primary}（置信度{confidence:.1f}）\n"
             body += f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
 
             if u_pleasure < -0.3:
