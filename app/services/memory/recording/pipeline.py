@@ -33,8 +33,13 @@ _IMPORTANCE_EXPRESSIONS = (
 async def process_memory_pipeline(
     user_id: str,
     conversation_text: str,
+    statement_time: datetime | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline.
+
+    Args:
+        statement_time: Part 5 §3.1 用户说出这句话的时间 (消息接收时刻).
+            未提供时由 store_memory 取 now() 作为最佳估计.
 
     Returns list of stored memory IDs.
     """
@@ -127,6 +132,7 @@ async def process_memory_pipeline(
             main_category=main_category,
             sub_category=sub_category,
             occur_time=occur_time,
+            statement_time=statement_time,
             workspace_id=workspace_id,
             source=mem.get("owner", "user"),
         )

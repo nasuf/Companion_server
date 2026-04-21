@@ -20,6 +20,7 @@ from app.services.interaction.reply_context import build_reply_timing_context, m
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
 from app.services.proactive.state import mark_user_replied_for_conversation
+from app.services.proactive.sender import send_first_greeting
 from app.services.runtime.ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,19 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
 
     await websocket.accept()
     await manager.connect(conversation_id, user_id, websocket)
+
+    # spec §12 开场主动第一句话: 只在首次进入 (0 消息) 时触发
+    try:
+        asyncio.create_task(
+            send_first_greeting(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent.id,
+                workspace_id=getattr(conv, "workspaceId", None),
+            )
+        )
+    except Exception as e:
+        logger.warning(f"first_greeting dispatch failed conv={conversation_id[:8]}: {e}")
 
     try:
         while True:

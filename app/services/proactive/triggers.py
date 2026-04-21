@@ -6,11 +6,15 @@ PRD §9.5: 在合适的时间触发AI主动行为，遵循作息规则。
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.db import db
 from app.redis_client import get_redis
 from app.services.proactive.sender import send_manual_or_triggered_proactive
+from app.services.proactive.special_dates import (
+    Occasion,
+    send_special_date_proactive,
+)
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
 from app.services.schedule_domain.time_service import _TZ
 from app.services.workspace.workspaces import resolve_workspace_id
@@ -45,13 +49,71 @@ async def scan_triggers() -> None:
             logger.warning(f"Trigger {trigger.id} execution failed: {e}")
 
 
+async def _defer_special_date_trigger(
+    trigger,
+    schedule: list[dict] | None,
+    now: datetime,
+    reason: str,
+) -> None:
+    """spec §10/§5.2: special_date 触发被互斥阻塞时, 顺延到 "下一个空闲状态" 开始时刻.
+
+    顺延算法:
+    1. 优先找作息表中 status=idle 且 start > now 的最早时段
+    2. 找不到 (今日无后续 idle) → 顺延到 +30 min, 让下一次 scan 重新尝试
+    3. 仍跨过当日 22:00 → 取消本次 trigger (避免越过 spec §1.2 主动时段)
+    """
+    next_time: datetime | None = None
+    if schedule:
+        cur_hm = now.strftime("%H:%M")
+        for slot in schedule:
+            start_hm = str(slot.get("start") or "")
+            slot_type = slot.get("type") or "leisure"
+            if start_hm <= cur_hm:
+                continue
+            if slot_type in ("leisure",) or slot.get("status") == "idle":
+                h, m = start_hm.split(":")
+                cand = datetime(now.year, now.month, now.day, int(h), int(m), tzinfo=now.tzinfo)
+                if cand > now:
+                    next_time = cand
+                    break
+    if next_time is None:
+        next_time = now + timedelta(minutes=30)
+
+    # spec §1.2: 22:00-8:00 不发送, 越过则取消
+    local_h = next_time.astimezone(_TZ).hour
+    if local_h >= 22 or local_h < 8:
+        logger.info(
+            f"Trigger {trigger.id} (special_date) cancelled after defer: "
+            f"next_time={next_time} fell outside active hours"
+        )
+        await db.timetrigger.update(
+            where={"id": trigger.id},
+            data={"isActive": False},
+        )
+        return
+
+    await db.timetrigger.update(
+        where={"id": trigger.id},
+        data={"triggerTime": next_time},
+    )
+    logger.info(
+        f"Trigger {trigger.id} (special_date) deferred: "
+        f"reason={reason} new_time={next_time}"
+    )
+
+
 async def _execute_trigger(trigger, now: datetime) -> None:
     """执行单个触发器，检查所有规则。"""
     agent_id = trigger.aiAgentId
     user_id = trigger.userId
+    is_special_date = trigger.actionType == "special_date"
 
     # 规则1: 非交流中（最后消息间隔 > 30min）
     if await _is_in_chat(agent_id, user_id):
+        if is_special_date:
+            schedule = await get_cached_schedule(agent_id)
+            await _defer_special_date_trigger(trigger, schedule, now, reason="user_in_chat")
+            return
         logger.debug(f"Trigger {trigger.id} skipped: user in active chat")
         return
 
@@ -60,6 +122,9 @@ async def _execute_trigger(trigger, now: datetime) -> None:
     if schedule:
         status = get_current_status(schedule, now)
         if status.get("status") == "sleep":
+            if is_special_date:
+                await _defer_special_date_trigger(trigger, schedule, now, reason="ai_sleep")
+                return
             logger.debug(f"Trigger {trigger.id} skipped: AI is sleeping")
             return
 
@@ -86,15 +151,37 @@ async def _execute_trigger(trigger, now: datetime) -> None:
         logger.debug(f"Trigger {trigger.id} skipped: workspace not found")
         return
 
-    result = await send_manual_or_triggered_proactive(
-        workspace_id=workspace_id,
-        trigger_type=f"trigger:{trigger.actionType}",
-        now=now,
-    )
-    message = result.get("message")
-    if not result.get("ok") or not message:
-        logger.debug(f"Trigger {trigger.id}: proactive message generation returned empty")
-        return
+    # spec §10 特殊日期走独立发送路径 (带 skip_post_process + 合并/单日期 prompt)
+    if trigger.actionType == "special_date":
+        raw_occasions = (trigger.actionData or {}).get("occasions") or []
+        occasions = [
+            Occasion(
+                type=o.get("type", "holiday"),
+                name=o.get("name", ""),
+                owner=o.get("owner", "user"),
+            )
+            for o in raw_occasions
+        ]
+        sent = await send_special_date_proactive(
+            agent_id=agent_id,
+            user_id=user_id,
+            occasions=occasions,
+            now=now,
+        )
+        if not sent:
+            logger.debug(f"Trigger {trigger.id}: special_date send failed/skipped")
+            return
+        message = "[special_date sent]"
+    else:
+        result = await send_manual_or_triggered_proactive(
+            workspace_id=workspace_id,
+            trigger_type=f"trigger:{trigger.actionType}",
+            now=now,
+        )
+        message = result.get("message")
+        if not result.get("ok") or not message:
+            logger.debug(f"Trigger {trigger.id}: proactive message generation returned empty")
+            return
 
     # 记录日志
     await redis.incr(daily_key)
@@ -133,27 +220,6 @@ async def _is_in_chat(agent_id: str, user_id: str) -> bool:
     return False
 
 
-async def create_reminder_trigger(
-    ai_agent_id: str,
-    user_id: str,
-    trigger_time: datetime,
-    content: str,
-) -> str:
-    """创建一次性提醒触发器。
-
-    PRD §9.5.3: 用户说"明天提醒我开会" → 创建一次性触发器。
-    """
-    trigger = await db.timetrigger.create(data={
-        "agent": {"connect": {"id": ai_agent_id}},
-        "user": {"connect": {"id": user_id}},
-        "triggerTime": trigger_time,
-        "actionType": "reminder",
-        "actionData": {"content": content},
-    })
-    logger.info(f"Created reminder trigger {trigger.id} for {trigger_time}")
-    return trigger.id
-
-
 async def seed_default_triggers(ai_agent_id: str, user_id: str) -> None:
     """Agent创建时种入默认触发器：早安/午安/晚安。"""
     now = datetime.now(_TZ)
@@ -177,85 +243,7 @@ async def seed_default_triggers(ai_agent_id: str, user_id: str) -> None:
             "actionData": {"period": period},
         })
 
-
-async def scan_birthday_memories() -> None:
-    """每周扫描用户记忆，识别含"生日"关键词的记忆，创建生日触发器。
-
-    PRD §9.6.3: 用户自定义日期（如生日）自动生成周期性触发器。
-    """
-    import re
-    from app.services.memory.storage import repo as memory_repo
-
-    agents = await db.aiagent.find_many(where={"status": "active"})
-    birthday_pattern = re.compile(r"(\d{1,2})月(\d{1,2})[日号].*生日|生日.*(\d{1,2})月(\d{1,2})[日号]")
-
-    for agent in agents:
-        try:
-            memories = await memory_repo.find_many(
-                source="user",
-                where={"userId": agent.userId, "isArchived": False},
-            )
-            for mem in memories:
-                text = mem.content or ""
-                if "生日" not in text:
-                    continue
-                m = birthday_pattern.search(text)
-                if not m:
-                    continue
-                month = int(m.group(1) or m.group(3))
-                day = int(m.group(2) or m.group(4))
-
-                # 检查是否已有该用户的生日触发器
-                existing = await db.timetrigger.find_first(
-                    where={
-                        "aiAgentId": agent.id,
-                        "userId": agent.userId,
-                        "actionType": "birthday",
-                    }
-                )
-                if existing:
-                    continue
-
-                # 创建当年的生日触发器
-                now = datetime.now(_TZ)
-                year = now.year
-                try:
-                    birthday = date(year, month, day)
-                    if birthday < now.date():
-                        birthday = date(year + 1, month, day)
-                    trigger_time = datetime(birthday.year, birthday.month, birthday.day, 8, 0, tzinfo=_TZ)
-                    await db.timetrigger.create(data={
-                        "agent": {"connect": {"id": agent.id}},
-                        "user": {"connect": {"id": agent.userId}},
-                        "triggerTime": trigger_time,
-                        "actionType": "birthday",
-                        "actionData": {"month": month, "day": day},
-                    })
-                    logger.info(f"Birthday trigger created for agent {agent.id}: {month}月{day}日")
-                except ValueError:
-                    pass
-        except Exception as e:
-            logger.warning(f"Birthday scan failed for agent {agent.id}: {e}")
-
-
-async def create_holiday_triggers(date_str: str, holiday_name: str) -> None:
-    """为所有活跃agent创建节假日祝福触发器。
-
-    PRD §9.6.3: 节日当天早上8:00触发。
-    """
-    d = date.fromisoformat(date_str)
-    trigger_time = datetime(d.year, d.month, d.day, 8, 0, tzinfo=_TZ)
-
-    # 查找所有活跃的 agent-user 组合
-    agents = await db.aiagent.find_many(where={"status": "active"})
-    for agent in agents:
-        try:
-            await db.timetrigger.create(data={
-                "agent": {"connect": {"id": agent.id}},
-                "user": {"connect": {"id": agent.userId}},
-                "triggerTime": trigger_time,
-                "actionType": "holiday",
-                "actionData": {"holiday_name": holiday_name},
-            })
-        except Exception as e:
-            logger.warning(f"Failed to create holiday trigger for agent {agent.id}: {e}")
+# 已移除 (Part 5 §4.3 统一扫描代替):
+# - create_reminder_trigger    → 改走 memory taxonomy 提醒子类 + scan_special_dates_today
+# - scan_birthday_memories     → 整合进 scan_special_dates_today
+# - create_holiday_triggers    → 整合进 scan_special_dates_today

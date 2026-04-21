@@ -16,11 +16,22 @@ from app.services.schedule_domain.time_service import _TZ
 
 _WEEKDAY_CN = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
 
+# Part 5 §3.1 相对时间段默认映射 (严格对齐 spec 表格).
+# 深夜 = 次日 00:00-06:00, 在调用方决定是否要把日期 +1.
 _PERIOD_HOURS = {
-    "凌晨": (0, 6), "早上": (6, 9), "上午": (9, 12),
-    "中午": (11, 13), "下午": (13, 18), "傍晚": (17, 19),
-    "晚上": (18, 23), "深夜": (23, 24),
+    "凌晨": (0, 6),
+    "早上": (6, 9),
+    "早晨": (6, 9),
+    "上午": (9, 12),
+    "中午": (12, 14),
+    "下午": (14, 18),
+    "傍晚": (17, 19),  # spec 未列, 按常识保留
+    "晚上": (18, 24),
+    "深夜": (0, 6),    # 实际语义指次日 0-6, 解析时由调用方决定 +1 天
 }
+
+# 标记需要"次日"语义的时段
+_NEXT_DAY_PERIODS = {"深夜"}
 
 # 相对日期词（按长度降序，确保"大前天"优先于"前天"匹配）
 _RELATIVE_DAYS: list[tuple[str, int]] = sorted(
@@ -62,6 +73,38 @@ class ParsedTime:
     end: datetime
     confidence: float
     is_future: bool
+
+
+@dataclass
+class TimeExtract:
+    """Part 5 §3.1 双时间字段输出.
+
+    spec §6.1 落库映射:
+    - statement_time → memories.statement_time 列
+    - event_times    → memories.occur_time 列 (取列表第一个或最相关的一条)
+
+    statement_time: 用户说这句话的时间 (消息到达时刻)
+    event_times:    事件时间范围列表 (可能多条: "昨天跟明天")
+    """
+    statement_time: datetime
+    event_times: list[ParsedTime]
+
+
+def parse_with_statement_time(
+    message: str,
+    now: datetime | None = None,
+) -> TimeExtract:
+    """spec Part 5 §3.1: 返回 (statement_time, event_time 列表).
+
+    statement_time 取自调用时的 now (若未提供则用当前时间).
+    调用方落库时, 把 event_times[0].start 写入 memories.occur_time,
+    把 statement_time 写入 memories.statement_time.
+    """
+    ts = now or datetime.now(_TZ)
+    return TimeExtract(
+        statement_time=ts,
+        event_times=parse_time_expressions(message, now=ts),
+    )
 
 
 def parse_time_expressions(
@@ -190,11 +233,19 @@ def parse_time_expressions(
     # --- 7. 时间段词 ---
     for period_name, (h_start, h_end) in _PERIOD_HOURS.items():
         idx = message.find(period_name)
-        if idx != -1:
-            span = (idx, idx + len(period_name))
-            s = datetime.combine(today, time(h_start, 0), tzinfo=_TZ)
-            e = datetime.combine(today, time(min(h_end, 23), 59), tzinfo=_TZ)
-            _add(period_name, s, e, "relative", 0.6, span)
+        if idx == -1:
+            continue
+        span = (idx, idx + len(period_name))
+        # spec §3.1: "深夜" 语义 = 次日 00:00-06:00
+        anchor_day = today + timedelta(days=1) if period_name in _NEXT_DAY_PERIODS else today
+        # 处理 18-24 这种 end=24 不是合法 hour, 改用次日 00:00 作为闭区间
+        if h_end >= 24:
+            s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=_TZ)
+            e = datetime.combine(anchor_day + timedelta(days=1), time(0, 0), tzinfo=_TZ) - timedelta(seconds=1)
+        else:
+            s = datetime.combine(anchor_day, time(h_start, 0), tzinfo=_TZ)
+            e = datetime.combine(anchor_day, time(h_end - 1, 59, 59), tzinfo=_TZ)
+        _add(period_name, s, e, "relative", 0.6, span)
 
     # --- 8. 节日名称 ---
     for holiday_name, dates in HOLIDAY_NAME_DATES.items():

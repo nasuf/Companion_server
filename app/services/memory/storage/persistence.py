@@ -5,7 +5,7 @@ Classifies into L1/L2/L3 levels.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.db import db
 from app.services.memory.storage import repo as memory_repo
@@ -105,6 +105,7 @@ async def store_memory(
     sub_category: str | None = None,
     source: str = "user",
     occur_time: datetime | None = None,
+    statement_time: datetime | None = None,
     workspace_id: str | None = None,
 ) -> str | None:
     """Store a memory with deduplication.
@@ -157,6 +158,9 @@ async def store_memory(
     )
     if occur_time is not None:
         create_data["occurTime"] = occur_time
+    # Part 5 §3.1: statement_time = 用户说出这句话的时间 (消息接收时刻)
+    # 调用方未提供时, 用 now 作为最佳估计 (extraction 时机近似消息时刻)
+    create_data["statementTime"] = statement_time or datetime.now(timezone.utc)
     memory = await memory_repo.create(source=source, **create_data)
 
     # Store embedding. If this fails the memory row exists but would never

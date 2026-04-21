@@ -10,6 +10,9 @@ from app.services.proactive.state import ProactiveStateRecord, PROACTIVE_WINDOWS
 
 UTC = timezone.utc
 
+# spec §1.2 base hit rates 已经在 PROACTIVE_WINDOWS 表里: 0/5/12/25/35%
+# stage multiplier 保留 (spec 未禁止, 产品决策允许按阶段做 ±15% 调节),
+# silence_penalty 用于衰减阶段 n≤4 期间渐降命中率 (spec §8.3 "最多 4 次"隐含).
 STAGE_HIT_MULTIPLIER = {
     "cold_start": 0.85,
     "warming": 1.0,
@@ -49,39 +52,122 @@ def select_trigger_type(
     *,
     scene_available: bool,
 ) -> str:
-    weights: list[tuple[str, float]]
-    if state.stage == "cold_start":
-        weights = [
-            ("silence_wakeup", 0.55),
-            ("memory_proactive", 0.35),
-            ("scheduled_scene", 0.10 if scene_available else 0.0),
-        ]
-    elif state.stage == "warming":
-        weights = [
-            ("silence_wakeup", 0.30),
-            ("memory_proactive", 0.45),
-            ("scheduled_scene", 0.25 if scene_available else 0.0),
-        ]
-    else:
-        weights = [
-            ("silence_wakeup", 0.20),
-            ("memory_proactive", 0.45),
-            ("scheduled_scene", 0.35 if scene_available else 0.0),
-        ]
+    """spec §1.3 触发类型基础配比: 沉默唤醒 30% / 记忆主动 30% / 定时情景 40%.
 
-    filtered = [(name, weight) for name, weight in weights if weight > 0]
-    total = sum(weight for _, weight in filtered)
-    if total <= 0:
-        return random.choice(["silence_wakeup", "memory_proactive"])
+    - scene 不可用时按 spec §1.3 兜底规则重抽 (沉默 50% / 记忆 50%)
+    - 不再按 stage 做动态倾斜, stage 只影响 hit_rate multiplier 和话题来源
+    """
+    if not scene_available:
+        return fallback_trigger_type()
 
-    r = random.random() * total
-    acc = 0.0
-    for name, weight in filtered:
-        acc += weight
-        if r <= acc:
-            return name
-    return filtered[-1][0]
+    r = random.random()
+    if r < 0.30:
+        return "silence_wakeup"
+    if r < 0.60:
+        return "memory_proactive"
+    return "scheduled_scene"
 
 
 def fallback_trigger_type() -> str:
+    """spec §1.3 兜底: 定时情景不可用或抽取失败时, 在沉默/记忆之间 50/50."""
     return random.choice(["silence_wakeup", "memory_proactive"])
+
+
+# ── spec §3.1 话题范围分级库 (P1-P5, 高等级包含低等级) ──
+TOPIC_THEMES_BY_STAGE: dict[str, tuple[str, ...]] = {
+    # P1 + P2 (冷启动)
+    "cold_start": (
+        "天气", "问候", "兴趣爱好试探", "公共话题",
+        "日常琐事", "AI的简单生活", "询问近况",
+    ),
+    # P1-P4 (升温)
+    "warming": (
+        "天气", "问候", "兴趣爱好试探", "公共话题",
+        "日常琐事", "AI的简单生活", "询问近况",
+        "共同兴趣", "回忆之前聊过的事", "分享有趣见闻",
+        "关心用户情绪", "分享内心感受", "讨论人生话题",
+    ),
+    # P1-P5 (亲密)
+    "intimate": (
+        "天气", "问候", "兴趣爱好试探", "公共话题",
+        "日常琐事", "AI的简单生活", "询问近况",
+        "共同兴趣", "回忆之前聊过的事", "分享有趣见闻",
+        "关心用户情绪", "分享内心感受", "讨论人生话题",
+        "深入价值观探讨", "回忆共同经历", "随意调侃",
+    ),
+}
+
+
+def select_topic_theme(stage: str) -> str:
+    """spec §3.2: 沉默唤醒/记忆主动触发前先抽一个话题方向."""
+    themes = TOPIC_THEMES_BY_STAGE.get(stage) or TOPIC_THEMES_BY_STAGE["cold_start"]
+    return random.choice(themes)
+
+
+# ── spec §4.1 沉默唤醒 话题来源配比 ──
+# key: 话题来源枚举, value: {stage: probability}
+# 来源: ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting
+SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
+    "cold_start": {
+        "ai_l1": 0.20, "ai_l2": 0.00, "ai_schedule": 0.10,
+        "user_l1": 0.00, "user_l2": 0.00, "greeting": 0.70,
+    },
+    "warming": {
+        "ai_l1": 0.10, "ai_l2": 0.00, "ai_schedule": 0.10,
+        "user_l1": 0.05, "user_l2": 0.05, "greeting": 0.70,
+    },
+    "intimate": {
+        "ai_l1": 0.05, "ai_l2": 0.05, "ai_schedule": 0.10,
+        "user_l1": 0.10, "user_l2": 0.10, "greeting": 0.60,
+    },
+}
+
+# ── spec §4.2 记忆主动触发 话题来源配比 (PAD 情绪融合独立 100% 不参与抽签) ──
+MEMORY_SOURCE_DIST: dict[str, dict[str, float]] = {
+    "cold_start": {
+        "ai_l1": 1.00, "ai_l2": 0.00,
+        "user_l1": 0.00, "user_l2": 0.00,
+    },
+    "warming": {
+        "ai_l1": 0.75, "ai_l2": 0.05,
+        "user_l1": 0.10, "user_l2": 0.10,
+    },
+    "intimate": {
+        "ai_l1": 0.50, "ai_l2": 0.10,
+        "user_l1": 0.15, "user_l2": 0.25,
+    },
+}
+
+
+def _weighted_choice(weights: dict[str, float]) -> str:
+    total = sum(w for w in weights.values() if w > 0)
+    if total <= 0:
+        return "greeting"
+    r = random.random() * total
+    acc = 0.0
+    for name, w in weights.items():
+        if w <= 0:
+            continue
+        acc += w
+        if r <= acc:
+            return name
+    return next(iter(weights))
+
+
+def select_topic_source(stage: str, trigger_type: str) -> str:
+    """spec §4.1/§4.2: 根据 stage + trigger_type 抽一个话题来源.
+
+    Returns one of:
+      - silence_wakeup:  ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting
+      - memory_proactive: ai_l1 / ai_l2 / user_l1 / user_l2
+      - scheduled_scene:  ai_schedule (固定)
+    """
+    if trigger_type == "scheduled_scene":
+        return "ai_schedule"
+    if trigger_type == "silence_wakeup":
+        dist = SILENCE_SOURCE_DIST.get(stage) or SILENCE_SOURCE_DIST["cold_start"]
+        return _weighted_choice(dist)
+    if trigger_type == "memory_proactive":
+        dist = MEMORY_SOURCE_DIST.get(stage) or MEMORY_SOURCE_DIST["cold_start"]
+        return _weighted_choice(dist)
+    return "greeting"

@@ -31,8 +31,8 @@ from app.services.interaction.delayed_queue import (
     enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
     try_lock_conversation, unlock_conversation
 )
-from app.services.proactive.triggers import scan_triggers, create_holiday_triggers, scan_birthday_memories
-from app.services.schedule_domain.time_service import is_holiday
+from app.services.proactive.triggers import scan_triggers
+from app.services.proactive.special_dates import scan_special_dates_today
 
 logger = logging.getLogger(__name__)
 
@@ -239,24 +239,27 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # §9.6: Holiday trigger check daily at 3:00 AM
+    # Part 4 §10 + Part 5 §4.3: Unified special date scan daily at 3:30 AM.
+    # 收集当日 用户+AI 7 类特殊日期 (春节/元旦/生日/提醒), 合并为一条 trigger,
+    # actionType=special_date, triggerTime=作息表"起床"事件后第一个空闲段.
+    # 此 job 取代了原来的 _run_holiday_check + _run_birthday_scan
+    # (二者保留为可手动调用的函数, 但不再自动定时, 否则会导致同日多发).
     scheduler.add_job(
-        _run_holiday_check,
+        _run_special_dates_scan,
         "cron",
         hour=3,
-        minute=0,
-        id="holiday_check",
+        minute=30,
+        id="special_dates_scan",
         replace_existing=True,
     )
 
-    # §9.6: Birthday memory scan weekly on Sunday at 4:30 AM
+    # Part 5 §2.1: NTP 校准每 6 小时跑一次
     scheduler.add_job(
-        _run_birthday_scan,
+        _run_ntp_calibration,
         "cron",
-        day_of_week="sun",
-        hour=4,
-        minute=30,
-        id="birthday_scan",
+        hour="*/6",
+        minute=15,
+        id="ntp_calibration",
         replace_existing=True,
     )
 
@@ -381,28 +384,35 @@ async def _run_trigger_scan():
         logger.warning(f"Trigger scan failed: {e}")
 
 
-async def _run_holiday_check():
-    """§9.6: 检查今天是否节假日，若是则创建祝福触发器。"""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from app.config import settings
+async def _run_special_dates_scan():
+    """Part 4 §10 + Part 5 §4.3: 每日统一扫描特殊日期.
 
+    收集当日 用户+AI 共 4 类 (春节/元旦/生日/提醒), 汇总成一条 trigger
+    actionType=special_date, triggerTime=作息表"起床"事件后第一个空闲段.
+    多命中走合并消息 prompt; 跳过 reply_post_process.
+    """
     try:
-        now = datetime.now(ZoneInfo(settings.schedule_timezone))
-        holiday = is_holiday(now.date())
-        if holiday:
-            await create_holiday_triggers(now.date().isoformat(), holiday.name)
-            logger.info(f"Holiday triggers created for {holiday.name}")
+        await scan_special_dates_today()
     except Exception as e:
-        logger.warning(f"Holiday check failed: {e}")
+        logger.warning(f"Special dates scan failed: {e}")
 
 
-async def _run_birthday_scan():
-    """§9.6: 每周扫描用户记忆中的生日信息，创建生日触发器。"""
+async def _run_ntp_calibration():
+    """Part 5 §2.1: NTP 校准, 漂移 > 阈值时告警."""
+    import asyncio
+    from app.services.schedule_domain.time_service import calibrate_against_ntp
     try:
-        await scan_birthday_memories()
+        # ntplib 是同步阻塞调用, 放线程池
+        drift = await asyncio.to_thread(calibrate_against_ntp)
+        if drift is None:
+            logger.warning("NTP calibration failed (network or lib unavailable)")
+            return
+        if abs(drift) > 1.0:
+            logger.warning(f"NTP drift {drift:+.3f}s exceeds 1s threshold; investigate clock source")
+        else:
+            logger.info(f"NTP drift {drift:+.3f}s (within threshold)")
     except Exception as e:
-        logger.warning(f"Birthday scan failed: {e}")
+        logger.warning(f"NTP calibration job failed: {e}")
 
 
 async def _run_aggregation_scan():

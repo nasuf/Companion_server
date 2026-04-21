@@ -39,9 +39,21 @@ from app.services.proactive.state import (
 )
 from app.services.relationship.intimacy import get_topic_intimacy
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
+from app.services.schedule_domain.time_service import _TZ
 from app.services.topic import detect_topic_fatigue
 
 logger = logging.getLogger(__name__)
+
+
+# spec §1.2: 主动交流仅在每日 8:00-22:00 之间发送.
+# 22:00-次日 8:00 的窗口照常推进+概率计数, 但命中后也不发送.
+PROACTIVE_ACTIVE_HOUR_START = 8
+PROACTIVE_ACTIVE_HOUR_END = 22
+
+
+def _is_in_active_hours(now: datetime) -> bool:
+    local = now.astimezone(_TZ)
+    return PROACTIVE_ACTIVE_HOUR_START <= local.hour < PROACTIVE_ACTIVE_HOUR_END
 
 
 async def scan_proactive_states(now: datetime | None = None) -> None:
@@ -128,6 +140,18 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
     topic_intimacy = await get_topic_intimacy(state.agent_id, state.user_id)
     if state.stage == "cold_start" and topic_intimacy < 10:
         await stop_proactive_state(state, reason="intimacy_too_low", now=now)
+        return
+
+    # --- Gate: spec §1.2 22:00-8:00 不发送, 照常推进窗口 ---
+    from datetime import datetime as _dt, timezone as _tz
+    _now_dt = now or _dt.now(_tz.utc)
+    if not _is_in_active_hours(_now_dt):
+        await advance_to_next_window(
+            state,
+            now=now,
+            event_type="window_missed",
+            payload={"reason": "off_hours", "local_hour": _now_dt.astimezone(_TZ).hour},
+        )
         return
 
     # --- 强制计划 vs 正常概率分支 (BUG 1) ---

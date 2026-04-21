@@ -175,7 +175,10 @@ model UserMemory {
   importance   Float    @default(0.5)
   mentionCount Int      @default(0) @map("mention_count")
   isArchived   Boolean  @default(false) @map("is_archived")
+  // Part 5 §3.1: occur_time = 事件实际发生时间 (= 时间解析器的 event_time)
   occurTime    DateTime? @map("occur_time")
+  // Part 5 §3.1: statement_time = 用户说出这句话的时间 (一般为消息接收时刻)
+  statementTime DateTime? @map("statement_time")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
@@ -196,7 +199,10 @@ model AiMemory {
   importance   Float    @default(0.5)
   mentionCount Int      @default(0) @map("mention_count")
   isArchived   Boolean  @default(false) @map("is_archived")
+  // Part 5 §3.1: occur_time = 事件实际发生时间 (= 时间解析器的 event_time)
   occurTime    DateTime? @map("occur_time")
+  // Part 5 §3.1: statement_time = 用户说出这句话的时间 (一般为消息接收时刻)
+  statementTime DateTime? @map("statement_time")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 

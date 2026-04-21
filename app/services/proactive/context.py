@@ -14,12 +14,6 @@ from app.services.schedule_domain.schedule import get_cached_schedule, get_curre
 
 UTC = timezone.utc
 
-STAGE_CATEGORY_MAP = {
-    "cold_start": ["身份", "生活", "偏好"],
-    "warming": ["生活", "偏好", "情绪"],
-    "intimate": ["情绪", "思维", "生活", "偏好"],
-}
-
 
 async def build_proactive_context(
     *,
@@ -29,6 +23,8 @@ async def build_proactive_context(
     trigger_type: str,
     stage: str,
     exclude_memory_ids: set[str] | None = None,
+    source: str | None = None,
+    topic_theme: str | None = None,
 ) -> dict[str, Any]:
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
@@ -41,8 +37,7 @@ async def build_proactive_context(
     proactive_memories, used_memory_ids = await _load_proactive_memories(
         user_id=user_id,
         workspace_id=workspace_id,
-        stage=stage,
-        trigger_type=trigger_type,
+        source=source,
         exclude_memory_ids=exclude_memory_ids,
     )
     topic_intimacy = await get_topic_intimacy(agent_id, user_id)
@@ -66,6 +61,8 @@ async def build_proactive_context(
         "scene_hint": scene_hint,
         "trigger_type": trigger_type,
         "stage": stage,
+        "source": source or "greeting",
+        "topic_theme": topic_theme or "",
     }
 
 
@@ -73,39 +70,53 @@ async def _load_proactive_memories(
     *,
     user_id: str,
     workspace_id: str,
-    stage: str,
-    trigger_type: str,
+    source: str | None = None,
     exclude_memory_ids: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Load proactive memories with dedup support.
 
+    spec §4.1/§4.2: 来源 (source) 决定从 A 库(ai)还是 B 库(user), 以及 L1 / L2 层级.
+    - ai_l1 / ai_l2  → memories_ai, level=1 or 2
+    - user_l1 / user_l2 → memories_user, level=1 or 2
+    - ai_schedule / greeting → 无记忆 (返回空)
+
     Returns (texts, memory_ids) for tracking which memories were used.
     """
+    # spec §4.1/§4.2: 非记忆来源直接返回空 (打招呼 / 作息走 prompt 模板自身)
+    if source in ("ai_schedule", "greeting", None):
+        return [], []
+
+    # Resolve (owner, level) from source
+    if source == "ai_l1":
+        owner, level = "ai", 1
+    elif source == "ai_l2":
+        owner, level = "ai", 2
+    elif source == "user_l1":
+        owner, level = "user", 1
+    elif source == "user_l2":
+        owner, level = "user", 2
+    else:
+        return [], []
+
     rows = await memory_repo.find_many(
-        source="user",
+        source=owner,  # type: ignore[arg-type]
         where={
             "userId": user_id,
             "workspaceId": workspace_id,
             "isArchived": False,
+            "level": level,
         },
         order={"importance": "desc"},
         take=30,
     )
 
     exclude = exclude_memory_ids or set()
-    allowed_categories = set(STAGE_CATEGORY_MAP.get(stage, ["生活", "偏好"]))
-    if trigger_type == "silence_wakeup":
-        allowed_categories = {"生活", "偏好", "身份"}
-    elif trigger_type == "scheduled_scene":
-        allowed_categories = {"生活", "偏好"}
 
     texts: list[str] = []
     ids: list[str] = []
     seen: set[str] = set()
     for row in rows:
         if row.id in exclude:
-            continue
-        if row.mainCategory and row.mainCategory not in allowed_categories:
             continue
         text = row.summary or row.content
         if not text or text in seen:

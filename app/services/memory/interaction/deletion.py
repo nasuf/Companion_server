@@ -28,9 +28,12 @@ _PENDING_DELETION_PREFIX = "deletion:pending:"
 _PENDING_DELETION_TTL = 300  # 5 min for confirmation
 
 # Keywords that may indicate deletion intent
+# Part 5 §4.2: 用户说"不用提醒了/取消提醒"→ 走记忆删除机制 (针对 reminder 子类)
 DELETION_KEYWORDS = [
     "忘了", "忘掉", "别记了", "不记得", "删除", "删掉",
     "不要记", "别提了", "忘记", "去掉", "移除",
+    # Part 5 §4.2 提醒取消语义
+    "不用提醒", "取消提醒", "不用记着", "不用再提",
     "forget", "delete", "remove", "don't remember",
 ]
 

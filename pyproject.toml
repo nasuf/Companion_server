@@ -18,6 +18,10 @@ dependencies = [
     "apscheduler>=3.11.0",
     "bcrypt>=4.2.0",
     "PyJWT>=2.9.0",
+    # Part 5 §2.1: 农历转换支持 (春节等动态计算)
+    "lunardate>=0.2.2",
+    # Part 5 §2.1: NTP 时间校准
+    "ntplib>=0.4.0",
 ]
 
 [project.optional-dependencies]
