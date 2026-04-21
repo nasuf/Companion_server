@@ -51,7 +51,6 @@ model AiAgent {
   background      String?
   values          Json?
   lifeOverview    String?        @map("life_overview")
-  lifeOverviewData Json?         @map("life_overview_data")
   age             Int?
   occupation      String?
   city            String?

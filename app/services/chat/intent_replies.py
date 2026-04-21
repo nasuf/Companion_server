@@ -114,6 +114,7 @@ async def schedule_query_reply(
     user_portrait: str = "",
     current_activity: str = "",
     ai_schedule: str = "",
+    ai_portrait: str = "",
 ) -> str | None:
     """§3.4.1 计划查询回复。"""
     return await _render_llm(
@@ -125,6 +126,7 @@ async def schedule_query_reply(
             "user_portrait": user_portrait or "(未知)",
             "current_activity": current_activity or "(未知)",
             "ai_schedule": ai_schedule or "(未知)",
+            "ai_portrait": ai_portrait or "(未知)",
             **_pad_params(user_emotion),
         },
     )
