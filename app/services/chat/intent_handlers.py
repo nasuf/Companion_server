@@ -11,7 +11,10 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.chat.tracing import LangSmithTracer
 
 from app.services.chat.intent_replies import (
     apology_reply,
@@ -51,9 +54,7 @@ class ShortCircuitCtx:
     user_id: str
     agent: Any
     reply_context: dict | None
-    trace_ctx: Any
-    trace_id: str | None
-    end_trace_fn: Callable[..., None]
+    tracer: "LangSmithTracer"
     save_replies_fn: Callable[..., Any]
     pending_sub_fragments: dict[str, str]
     sub_intent_mode: bool
@@ -68,9 +69,7 @@ class ShortCircuitCtx:
             user_id=self.user_id,
             agent=self.agent,
             reply_context=self.reply_context,
-            trace_ctx=self.trace_ctx,
-            trace_id=self.trace_id,
-            end_trace_fn=self.end_trace_fn,
+            tracer=self.tracer,
             save_replies_fn=self.save_replies_fn,
             pending_sub_fragments=self.pending_sub_fragments,
             sub_intent_mode=self.sub_intent_mode,

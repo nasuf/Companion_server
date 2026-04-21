@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from app.services.chat.intent_dispatcher import (
     INTENT_PRIORITY,
@@ -132,9 +133,7 @@ async def finalize_short_circuit(
     user_id: str,
     agent,
     reply_context: dict | None,
-    trace_ctx,
-    trace_id: str | None,
-    end_trace_fn,
+    tracer: Any,
     save_replies_fn,
     pending_sub_fragments: dict[str, str],
     sub_intent_mode: bool,
@@ -144,7 +143,7 @@ async def finalize_short_circuit(
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
     sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
-    end_trace_fn 由调用方注入，签名 `(trace_ctx, trace_id, conversation_id) -> None`。
+    tracer 是 `LangSmithTracer` 实例；本函数仅调 `tracer.close()`。
     """
     events = await short_circuit_reply(
         reply, conversation_id, agent_id, user_id, save_replies_fn,
@@ -165,4 +164,4 @@ async def finalize_short_circuit(
 
     if not sub_intent_mode:
         yield _DONE_EVENT
-        end_trace_fn(trace_ctx, trace_id, conversation_id)
+        tracer.close()

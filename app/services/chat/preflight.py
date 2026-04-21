@@ -14,7 +14,10 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.chat.tracing import LangSmithTracer
 
 from app.services.chat.intent_replies import deletion_done_reply
 from app.services.memory.interaction.contradiction import (
@@ -42,9 +45,7 @@ class PreflightCtx:
     agent_id: str | None
     user_id: str
     agent: Any
-    trace_ctx: Any
-    trace_id: str | None
-    end_trace_fn: Callable[..., None]
+    tracer: "LangSmithTracer"
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     stopped: bool = False
 
@@ -75,7 +76,7 @@ async def resolve_pending_contradiction(
             reply = "好的，我记住了~"
         for evt in await ctx.short_circuit_fn(reply, ctx.conversation_id, ctx.agent_id, ctx.user_id):
             yield evt
-        ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+        ctx.tracer.close()
         ctx.stopped = True
     except Exception as e:
         logger.warning(f"Contradiction resolution failed: {e}")
@@ -112,7 +113,7 @@ async def resolve_pending_deletion(
             reply = "好的，那就不删了，继续聊吧~"
         for evt in await ctx.short_circuit_fn(reply, ctx.conversation_id, ctx.agent_id, ctx.user_id):
             yield evt
-        ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+        ctx.tracer.close()
         ctx.stopped = True
     except Exception as e:
         logger.warning(f"Deletion confirmation failed: {e}")

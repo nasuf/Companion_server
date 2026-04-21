@@ -35,9 +35,7 @@ def _make_boundary_ctx(**overrides):
         user_message="你这个傻X",
         sub_intent_mode=False,
         parent_patience=None,
-        trace_ctx=None,
-        trace_id=None,
-        end_trace_fn=MagicMock(),
+        tracer=MagicMock(trace_id=None, is_active=False),
         short_circuit_fn=AsyncMock(return_value=[
             {"event": "reply", "data": "{}"},
             {"event": "done", "data": "{}"},
@@ -87,7 +85,7 @@ async def test_boundary_blocked_zone_no_apology_falls_through():
     assert kwargs["extra_metadata"] == {"boundary": True, "zone": "blocked"}
     # P3.1 后只 fire memory_pipeline（不再 fire apology_check）
     assert ctx.fire_background_fn.call_count == 1
-    ctx.end_trace_fn.assert_called_once()
+    ctx.tracer.close.assert_called_once()
     assert ctx.stopped is True
     assert len(events) == 2
     assert ctx.cached_patience == 0

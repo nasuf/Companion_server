@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from app.services.chat.intent_replies import (
     apology_reply,
@@ -20,6 +20,9 @@ from app.services.chat.intent_replies import (
     attack_target_classify,
     banned_word_check,
 )
+
+if TYPE_CHECKING:
+    from app.services.chat.tracing import LangSmithTracer
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
     check_boundary,
@@ -44,9 +47,7 @@ class BoundaryPhaseCtx:
     user_message: str
     sub_intent_mode: bool
     parent_patience: int | None
-    trace_ctx: Any
-    trace_id: str | None
-    end_trace_fn: Callable[..., None]
+    tracer: "LangSmithTracer"
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     fire_background_fn: Callable[[Any], None]
     bg_memory_pipeline_fn: Callable[..., Any]
@@ -120,7 +121,7 @@ async def _handle_blocked(
             {"role": "user", "content": ctx.user_message},
             {"role": "assistant", "content": reply},
         ]))
-        ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+        ctx.tracer.close()
         ctx.stopped = True
         return
 
@@ -135,7 +136,7 @@ async def _handle_blocked(
         {"role": "user", "content": ctx.user_message},
         {"role": "assistant", "content": response},
     ]))
-    ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+    ctx.tracer.close()
     ctx.stopped = True
 
 
@@ -151,7 +152,7 @@ async def _handle_attack_target_non_ai(
     metadata = {"boundary": True, "zone": zone, "attack_target": attack_target}
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
-    ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+    ctx.tracer.close()
     ctx.stopped = True
 
 
@@ -174,7 +175,7 @@ async def _handle_attack_ai(
         {"role": "user", "content": ctx.user_message},
         {"role": "assistant", "content": response},
     ]))
-    ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+    ctx.tracer.close()
     ctx.stopped = True
 
 
@@ -195,7 +196,7 @@ async def _handle_residual_patience(
         return
     async for evt in _emit_short_circuit(ctx, response, {"boundary": True, "zone": patience_zone}):
         yield evt
-    ctx.end_trace_fn(ctx.trace_ctx, ctx.trace_id, ctx.conversation_id)
+    ctx.tracer.close()
     ctx.stopped = True
 
 
