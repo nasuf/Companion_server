@@ -103,6 +103,24 @@ def detect_intent(message: str, patience_zone: str = "normal") -> IntentResult:
     return IntentResult()
 
 
+async def detect_intent_unified(message: str) -> IntentResult:
+    """spec §3.3 step 1-2 标准入口：始终调小模型统一识别 + 多意图拆分。
+
+    LLM 失败时 fallback 到关键字扫描（保底单意图）。极短消息（≤4 字符）
+    应在调用前由调用方决定是否绕过此函数（"嗯"/"好" 这类无价值召回）。
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        result = await detect_intent_llm(message)
+        if result.intent != IntentType.NONE:
+            return result
+    except Exception as e:
+        logger.warning(f"Unified LLM intent failed, fallback to keyword: {e}")
+    return detect_intent(message)
+
+
 async def detect_intent_llm(message: str) -> IntentResult:
     """Spec §3.3 step 1-2 — LLM 统一意图识别 + 多意图拆分。
 

@@ -61,7 +61,7 @@ from app.services.interaction.boundary import (
 from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.intent_dispatcher import (
-    detect_intent, detect_intent_llm, IntentType, IntentResult,
+    detect_intent, detect_intent_unified, IntentType, IntentResult,
     LABEL_TO_INTENT, INTENT_PRIORITY,
 )
 from app.services.chat.multi_intent import (
@@ -406,20 +406,18 @@ async def stream_chat_response(
     if forced_intent is not None:
         # sub_intent_mode 的子片段，意图由父调用指定
         detected_intent = IntentResult(intent=forced_intent, confidence=1.0)
-    else:
+    elif len(user_message.strip()) <= 4:
+        # 极短消息（"嗯"/"好" 类）跳过 LLM，关键字判定即可
         detected_intent = detect_intent(user_message, patience_zone)
-        # 关键字扫描落空且消息足够长 → 调小模型统一识别，覆盖没有关键词的意图表达
-        if detected_intent.intent == IntentType.NONE and len(user_message.strip()) > 4:
-            try:
-                llm_intent = await detect_intent_llm(user_message)
-                if llm_intent.intent != IntentType.NONE:
-                    detected_intent = llm_intent
-                    logger.info(
-                        f"[INTENT-LLM] '{user_message[:30]}' → {llm_intent.intent.value} "
-                        f"(labels={llm_intent.metadata.get('llm_labels')})"
-                    )
-            except Exception as e:
-                logger.warning(f"LLM intent recognition failed: {e}")
+    else:
+        # spec §3.3 step 1：始终调小模型统一意图识别（含多意图拆分）
+        detected_intent = await detect_intent_unified(user_message)
+        if detected_intent.intent != IntentType.NONE:
+            logger.info(
+                f"[INTENT-LLM] '{user_message[:30]}' → {detected_intent.intent.value} "
+                f"(labels={detected_intent.metadata.get('llm_labels')})"
+            )
+    if forced_intent is None:
         # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
         fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
         if fragments and len(fragments) > 1:
