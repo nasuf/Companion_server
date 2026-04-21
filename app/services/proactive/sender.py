@@ -189,7 +189,6 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
 
 def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     """按 prompt key 选定填充字段."""
-    emotion = ctx["emotion"] or {}
     topic = ctx.get("topic_theme") or "日常"
     memories = ctx.get("proactive_memories") or []
     schedule_status = ctx.get("schedule_status") or {}
@@ -197,11 +196,6 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     status = str(schedule_status.get("status") or "idle")
     memory_text = "\n".join(f"- {m}" for m in memories) if memories else "（暂无）"
 
-    pad = {
-        "pleasure": float(emotion.get("pleasure", 0.0)),
-        "arousal": float(emotion.get("arousal", 0.5)),
-        "dominance": float(emotion.get("dominance", 0.5)),
-    }
     fields_by_key: dict[str, dict[str, Any]] = {
         "proactive.silence_plain": {"personality_brief": personality_brief},
         "proactive.silence_ai_memory": {
@@ -218,22 +212,16 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "personality_brief": personality_brief,
             "current_activity": f"{activity}({status})",
         },
-        # Spec §4.2 step 3 六项参考信息：性格/记忆/话题主题/PAD/用户画像/近期对话
+        # Spec §4.2 + 指令模版 P24-25：仅 3 项（性格/记忆/话题主题）
         "proactive.memory_ai": {
             "personality_brief": personality_brief,
             "ai_memory": memory_text,
             "topic": topic,
-            **pad,
-            "user_portrait": ctx.get("user_portrait") or "(未知)",
-            "recent_context": ctx.get("recent_context") or "(无)",
         },
         "proactive.memory_user": {
             "personality_brief": personality_brief,
             "user_memory": memory_text,
             "topic": topic,
-            **pad,
-            "user_portrait": ctx.get("user_portrait") or "(未知)",
-            "recent_context": ctx.get("recent_context") or "(无)",
         },
         "proactive.scheduled_scene": {
             "personality_brief": personality_brief,
