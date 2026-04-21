@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
+from app.services.portrait import get_latest_portrait
 from app.services.relationship.emotion import get_ai_emotion
 from app.services.relationship.intimacy import get_relationship_stage, get_topic_intimacy
 from app.services.memory.storage import repo as memory_repo
@@ -46,6 +47,10 @@ async def build_proactive_context(
     silence_hours = await _compute_silence_hours(workspace_id)
     scene_hint = _build_scene_hint(trigger_type, schedule_status)
 
+    # Spec §4.2 step 3 记忆主动触发参考信息需含"用户画像"+"近期对话上下文"
+    user_portrait = await get_latest_portrait(user_id, agent_id)
+    recent_context = await _load_recent_context(workspace_id)
+
     return {
         "agent": agent,
         "schedule_status": schedule_status,
@@ -63,7 +68,44 @@ async def build_proactive_context(
         "stage": stage,
         "source": source or "greeting",
         "topic_theme": topic_theme or "",
+        "user_portrait": user_portrait or "",
+        "recent_context": recent_context,
     }
+
+
+async def _load_recent_context(workspace_id: str, limit: int = 6) -> str:
+    """Spec §4.2 step 3 汇总参考信息里的"近期对话上下文"。
+
+    取工作空间最近 N 条消息（用户+AI 混排），按时间正序拼成文本。
+    """
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT m.role, m.content, m.created_at
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE c.workspace_id = $1
+              AND c.is_deleted = FALSE
+            ORDER BY m.created_at DESC
+            LIMIT $2
+            """,
+            workspace_id,
+            limit,
+        )
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    # rows are newest-first; flip to chronological
+    lines = []
+    for r in reversed(rows):
+        role = r.get("role") or "user"
+        text = (r.get("content") or "").strip()
+        if not text:
+            continue
+        prefix = "AI" if role == "assistant" else "用户"
+        lines.append(f"{prefix}: {text[:80]}")
+    return "\n".join(lines)
 
 
 async def _load_proactive_memories(

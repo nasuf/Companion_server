@@ -218,17 +218,22 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "personality_brief": personality_brief,
             "current_activity": f"{activity}({status})",
         },
+        # Spec §4.2 step 3 六项参考信息：性格/记忆/话题主题/PAD/用户画像/近期对话
         "proactive.memory_ai": {
             "personality_brief": personality_brief,
             "ai_memory": memory_text,
             "topic": topic,
             **pad,
+            "user_portrait": ctx.get("user_portrait") or "(未知)",
+            "recent_context": ctx.get("recent_context") or "(无)",
         },
         "proactive.memory_user": {
             "personality_brief": personality_brief,
             "user_memory": memory_text,
             "topic": topic,
             **pad,
+            "user_portrait": ctx.get("user_portrait") or "(未知)",
+            "recent_context": ctx.get("recent_context") or "(无)",
         },
         "proactive.scheduled_scene": {
             "personality_brief": personality_brief,
