@@ -86,6 +86,56 @@ def seven_dim_to_mbti(p: dict) -> dict[str, int]:
     }
 
 
+async def seven_dim_to_mbti_via_llm(p: dict) -> dict[str, int]:
+    """Spec §1.3 LLM 路径（指令模版 P26 "AI性格打分"）：7 维 → MBTI 8 维 → 折算 4 维。
+
+    默认 `build_mbti` 用 `seven_dim_to_mbti` 确定性公式（更快更稳）。此函数
+    可在调试/实验时显式调用以对照 spec 的 LLM 推导结果。
+
+    输入字段命名对齐 spec：liveliness/rationality/sensitivity/planning/
+    spontaneity/imagination/humor（代码内用 lively/rational/emotional/
+    planned/spontaneous/creative/humor，此处兼容双命名）。
+    """
+    from app.services.prompting.store import get_prompt_text
+
+    def _pick(*keys: str, default: int = 50) -> int:
+        for k in keys:
+            if k in p:
+                try:
+                    return max(0, min(100, int(p[k])))
+                except (TypeError, ValueError):
+                    pass
+        return default
+
+    template = await get_prompt_text("agent.personality_scoring")
+    prompt = template.format(
+        liveliness=_pick("liveliness", "lively"),
+        rationality=_pick("rationality", "rational"),
+        sensitivity=_pick("sensitivity", "emotional"),
+        planning=_pick("planning", "planned"),
+        spontaneity=_pick("spontaneity", "spontaneous"),
+        imagination=_pick("imagination", "creative"),
+        humor=_pick("humor"),
+    )
+    result = await invoke_json(get_utility_model(), prompt)
+    if not isinstance(result, dict):
+        logger.warning(f"personality_scoring LLM returned non-dict: {type(result)}")
+        return seven_dim_to_mbti(p)
+
+    # spec 输出 E/I/N/S/T/F/J/P 8 维；折算 4 维（EI = E 值，假设 E+I≈100）
+    clamp = lambda v: max(0, min(100, int(v)))
+    try:
+        return {
+            "EI": clamp(result.get("E", 50)),
+            "NS": clamp(result.get("N", 50)),
+            "TF": clamp(result.get("T", 50)),
+            "JP": clamp(result.get("J", 50)),
+        }
+    except (TypeError, ValueError) as e:
+        logger.warning(f"personality_scoring LLM output invalid ({e}), falling back to deterministic")
+        return seven_dim_to_mbti(p)
+
+
 def _validate_input(percentages: dict) -> dict[str, int]:
     """Validate user-supplied 4 MBTI percentages. Strict: keys must be
     exactly EI/NS/TF/JP, values must be int-coercible and clamped to

@@ -16,65 +16,6 @@ from app.services.prompting.store import get_prompt_text
 logger = logging.getLogger(__name__)
 
 
-async def generate_initial_self_memories(
-    agent_id: str,
-    agent_name: str,
-    personality: dict,
-    user_id: str,
-    *,
-    background: str = "",
-    values: dict | None = None,
-    gender: str = "",
-    age: int = 22,
-    occupation: str = "",
-    city: str = "",
-) -> list[str]:
-    """DEPRECATED: Replaced by life_story.convert_profile_to_memories + extract_chapter_memories.
-
-    Kept for backward compatibility with daily self-memory generation module.
-    """
-    prompt = (await get_prompt_text("self_memory.initial")).format(
-        name=agent_name,
-        gender=gender or "未设定",
-        age=age,
-        occupation=occupation or "未设定",
-        city=city or "未设定",
-        personality=str(personality),
-        background=background or "暂无",
-        values=str(values) if values else "暂无",
-    )
-
-    try:
-        result = await invoke_json(get_utility_model(), prompt)
-    except Exception as e:
-        logger.error(f"Initial self-memory LLM generation failed: {e}")
-        return []
-
-    memories = result.get("memories", [])
-    stored_ids = []
-
-    for mem in memories[:5]:
-        content = mem.get("content", "")
-        if not content or not mem.get("type") or not mem.get("main_category"):
-            continue
-        mid = await store_memory(
-            user_id=user_id,
-            content=content,
-            summary=content,
-            level=1,
-            importance=min(1.0, mem.get("importance", 90) / 100),
-            memory_type=mem["type"],
-            main_category=mem["main_category"],
-            sub_category=mem.get("sub_category", "自我认知"),
-            source="ai",
-        )
-        if mid:
-            stored_ids.append(mid)
-
-    logger.info(f"Created {len(stored_ids)} initial self-memories for agent {agent_id}")
-    return stored_ids
-
-
 async def generate_daily_self_memories(
     agent_id: str,
     user_id: str,

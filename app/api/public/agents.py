@@ -119,7 +119,7 @@ async def create_agent(data: AgentCreate):
     asyncio.create_task(init_patience(agent.id, data.user_id))
 
     # Background: profile selection → (life story memories ∥ life overview) → daily schedule
-    async def _safe_overview() -> dict | None:
+    async def _safe_overview() -> str | None:
         try:
             return await generate_and_save_life_overview(agent)
         except Exception as e:
@@ -145,7 +145,7 @@ async def create_agent(data: AgentCreate):
             profile = None
 
         mbti = get_mbti(agent)
-        overview_data: dict | None = None
+        overview_text: str | None = None
 
         if profile:
             # life_overview 与 life_story 都从同一份 profile/agent 派生，
@@ -165,11 +165,11 @@ async def create_agent(data: AgentCreate):
                     logger.error(f"Life story memories failed for {agent.id}: {e}", exc_info=True)
                     await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
 
-            _, overview_data = await asyncio.gather(_run_memories(), _safe_overview())
+            _, overview_text = await asyncio.gather(_run_memories(), _safe_overview())
         else:
             # 无 profile：跳过记忆，仍尝试 overview（基于 agent 默认字段）
             await set_progress(agent.id, "complete", message="无可用背景模板，已跳过")
-            overview_data = await _safe_overview()
+            overview_text = await _safe_overview()
 
         # 仅在生成未失败时标记 complete（避免覆盖 _run_memories 的 failed 状态）
         try:
@@ -179,11 +179,11 @@ async def create_agent(data: AgentCreate):
         except Exception as e:
             logger.debug(f"Skip complete-stage write for {agent.id}: {e}")
 
-        if overview_data:
+        if overview_text:
             try:
                 await generate_daily_schedule(
                     agent.id, agent.name, mbti,
-                    life_overview=overview_data.get("description"),
+                    life_overview=overview_text,
                 )
             except Exception as e:
                 logger.warning(f"Daily schedule init failed for agent {agent.id}: {e}")

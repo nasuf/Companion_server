@@ -18,7 +18,7 @@ from prisma import Json
 from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
 from app.services.schedule_domain.time_service import is_holiday
 from app.services.mbti import get_mbti, signal as mbti_signal
@@ -54,55 +54,59 @@ async def generate_life_overview(
     age: int = 22,
     occupation: str | None = None,
     city: str | None = None,
-) -> dict:
-    """生成AI角色的生活画像（文本+结构化数据）。
+    gender: str | None = None,
+) -> str:
+    """生成AI角色的生活画像（spec 第一部分 §2.1 + 指令模版 P20）。
 
-    spec §1.5: 性格描述统一用 MBTI 表达。这里把 MBTI 派生的 0-100 信号
-    填回到原 prompt 模板里同名占位符（活泼/理性/...）保证向后兼容。
-    返回 dict: {"description": str, "weekday_schedule": list, "weekend_activities": list, "holiday_habits": str}
+    Spec 要求输出 200 字以内纯文本。7 个中文性格维度由 MBTI 4 维反推近似值：
+      liveliness = E(0-100)         rationality = T
+      imagination = N              sensitivity = 100 - T
+      planning = J                 spontaneity = 100 - J
+      humor = (E+N)/2（复合）
+
+    Args:
+        city: spec prompt 不需要城市，保留参数是为了向后兼容。
+
+    Returns: 纯文本生活画像（未使用 city）。
     """
+    del city  # unused — spec prompt 不需要
+    e = round(mbti_signal(mbti, "E") * 100)
+    n = round(mbti_signal(mbti, "N") * 100)
+    t = round(mbti_signal(mbti, "T") * 100)
+    j = round(mbti_signal(mbti, "J") * 100)
+
     prompt = (await get_prompt_text("schedule.life_overview")).format(
         name=name,
         age=age,
+        gender=gender or "未设定",
         occupation=occupation or "自由职业",
-        city=city or "未设定",
-        # MBTI 4 维直接 0-100 + 复合 humor (= (E + N)/2)
-        e=round(mbti_signal(mbti, "E") * 100),
-        i=round(mbti_signal(mbti, "I") * 100),
-        n=round(mbti_signal(mbti, "N") * 100),
-        s=round(mbti_signal(mbti, "S") * 100),
-        t=round(mbti_signal(mbti, "T") * 100),
-        f=round(mbti_signal(mbti, "F") * 100),
-        j=round(mbti_signal(mbti, "J") * 100),
-        p=round(mbti_signal(mbti, "P") * 100),
-        humor=round((mbti_signal(mbti, "E") + mbti_signal(mbti, "N")) / 2 * 100),
+        liveliness=e,
+        rationality=t,
+        sensitivity=100 - t,
+        planning=j,
+        spontaneity=100 - j,
+        imagination=n,
+        humor=round((e + n) / 2),
     )
 
     model = get_utility_model()
-    result = await invoke_json(model, prompt)
+    text = (await invoke_text(model, prompt)).strip()
 
-    # 确保返回的 dict 包含必需字段
-    if not isinstance(result, dict) or "description" not in result:
-        raise ValueError(f"Life overview generation returned invalid format: {type(result)}")
-
-    return {
-        "description": result.get("description", ""),
-        "weekday_schedule": result.get("weekday_schedule", []),
-        "weekend_activities": result.get("weekend_activities", []),
-        "holiday_habits": result.get("holiday_habits", ""),
-    }
+    if not text:
+        raise ValueError("Life overview generation returned empty text")
+    return text
 
 
-async def generate_and_save_life_overview(agent: Any) -> dict:
-    """从 agent 对象提取信息，生成并保存生活画像。返回 overview_data dict。"""
-    overview_data = await generate_life_overview(
+async def generate_and_save_life_overview(agent: Any) -> str:
+    """从 agent 对象提取信息，生成并保存生活画像。返回文本描述。"""
+    description = await generate_life_overview(
         agent.name, get_mbti(agent),
         age=agent.age or 22,
         occupation=agent.occupation,
-        city=agent.city,
+        gender=getattr(agent, "gender", None),
     )
-    await save_life_overview(agent.id, overview_data)
-    return overview_data
+    await save_life_overview(agent.id, description)
+    return description
 
 
 async def generate_daily_schedule(
@@ -252,22 +256,17 @@ async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -
         logger.warning(f"Failed to persist schedule to DB for {agent_id}: {e}")
 
 
-async def save_life_overview(agent_id: str, overview_data: dict) -> None:
-    """保存生活画像到DB和Redis。
+async def save_life_overview(agent_id: str, description: str) -> None:
+    """保存生活画像到DB和Redis（spec §2.1：纯文本，不含结构化字段）。
 
-    overview_data: {"description": str, "weekday_schedule": list, "weekend_activities": list, "holiday_habits": str}
+    历史遗留的 lifeOverviewData JSON 列保留不写入（仍在 prisma schema 里以避免
+    DB 迁移，但不再使用）。
     """
-    description = overview_data.get("description", "")
-    struct_data = {k: overview_data[k] for k in ("weekday_schedule", "weekend_activities", "holiday_habits") if k in overview_data}
-
     # 先写 DB，成功后才写 Redis（避免 split-brain）
     try:
         await db.aiagent.update(
             where={"id": agent_id},
-            data={
-                "lifeOverview": description,
-                "lifeOverviewData": Json(struct_data),
-            },
+            data={"lifeOverview": description},
         )
     except Exception as e:
         logger.warning(f"Failed to save life overview to DB for {agent_id}: {e}")
