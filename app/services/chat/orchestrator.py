@@ -49,7 +49,7 @@ from app.services.interaction.boundary import (
     check_positive_recovery,
     get_patience_prompt_instruction, get_patience_zone,
     PATIENCE_MAX,
-)  # detect_apology/handle_apology: _bg_apology_check + pending 分支仍用
+)  # detect_apology/handle_apology: APOLOGY_PROMISE intent handler 仍用
 from app.services.relationship.intimacy import get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.intent_dispatcher import (
@@ -357,7 +357,6 @@ async def stream_chat_response(
         end_trace_fn=_end_trace,
         short_circuit_fn=_short_circuit_reply,
         fire_background_fn=_fire_background,
-        bg_apology_check_fn=_bg_apology_check,
         bg_memory_pipeline_fn=_bg_memory_pipeline,
     )
     async for evt in run_boundary(boundary_ctx):
@@ -965,17 +964,6 @@ async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
             await apply_trait_adjustment(agent_id, adjustments)
     except Exception as e:
         logger.warning(f"Background trait adjustment failed: {e}")
-
-
-async def _bg_apology_check(agent_id: str, user_id: str, user_message: str) -> None:
-    """Check if user is apologizing and restore patience."""
-    try:
-        result = await detect_apology(user_message)
-        if result.get("is_apology") and result.get("sincerity", 0) >= 0.8:
-            new_patience = await handle_apology(agent_id, user_id)
-            logger.info(f"Apology detected: patience restored to {new_patience}")
-    except Exception as e:
-        logger.warning(f"Background apology check failed: {e}")
 
 
 async def _bg_positive_recovery(agent_id: str, user_id: str) -> None:

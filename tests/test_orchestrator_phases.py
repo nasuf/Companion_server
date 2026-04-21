@@ -43,7 +43,6 @@ def _make_boundary_ctx(**overrides):
             {"event": "done", "data": "{}"},
         ]),
         fire_background_fn=MagicMock(),
-        bg_apology_check_fn=MagicMock(return_value=None),
         bg_memory_pipeline_fn=MagicMock(return_value=None),
     )
     defaults.update(overrides)

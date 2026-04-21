@@ -49,7 +49,6 @@ class BoundaryPhaseCtx:
     end_trace_fn: Callable[..., None]
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     fire_background_fn: Callable[[Any], None]
-    bg_apology_check_fn: Callable[..., Any]
     bg_memory_pipeline_fn: Callable[..., Any]
     # 输出
     stopped: bool = False
