@@ -168,7 +168,11 @@ class TestComputeGrowthIntimacy:
 
         created_at = datetime.now(UTC) - timedelta(days=30)
 
-        with patch("app.services.relationship.intimacy.db", mock_db):
+        with patch("app.services.relationship.intimacy.db", mock_db), patch(
+            "app.services.relationship.intimacy.resolve_workspace_id",
+            new_callable=AsyncMock,
+            return_value="ws-1",
+        ):
             score = await compute_growth_intimacy("agent1", "user1", created_at)
             # Only duration contributes (0.4 weight)
             assert 0 < score < 400

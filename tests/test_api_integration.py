@@ -115,20 +115,32 @@ def test_list_memories(mock_deps):
 
 
 def test_memory_stats(mock_deps):
-    """GET /memories/stats returns bucketed counts."""
+    """GET /memories/stats returns bucketed counts.
+
+    `_compute_stats` 走 db.query_raw 聚合（按 level/main/sub 分组返回 cnt）。
+    返回模型为 `MemoryStatsResponse{total, groups: [...]}`。
+    """
     client = mock_deps
-    memories = [
-        SimpleNamespace(level=1, mainCategory="身份", subCategory="姓名"),
-        SimpleNamespace(level=2, mainCategory="生活", subCategory="工作"),
-        SimpleNamespace(level=2, mainCategory="生活", subCategory="工作"),
+    raw_rows = [
+        {"level": 1, "main_category": "身份", "sub_category": "姓名", "cnt": 1},
+        {"level": 2, "main_category": "生活", "sub_category": "工作", "cnt": 2},
     ]
-    with patch("app.api.public.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=memories):
-        response = client.get("/memories/stats", params={"user_id": "test-user"})
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=raw_rows)
+    with patch(
+        "app.api.public.memories.resolve_workspace_id",
+        new_callable=AsyncMock, return_value="ws-1",
+    ), patch("app.api.public.memories.db", fake_db):
+        response = client.get("/memories/stats", params={"user_id": "test-user", "source": "user"})
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 3
-        assert data["by_level"][0]["key"] == "L2"
-        assert data["by_main_category"][0]["key"] == "生活"
+        groups = data["groups"]
+        assert len(groups) == 2
+        # 主分类按 count 排序时"生活"应排首位
+        life_group = next(g for g in groups if g["main_category"] == "生活")
+        assert life_group["count"] == 2
+        assert life_group["sub_category"] == "工作"
 
 
 def test_search_memories_forwards_workspace_and_taxonomy_filters(mock_deps):

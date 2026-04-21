@@ -11,7 +11,9 @@ def test_select_context_within_budget():
     ]
     result = select_context(candidates, token_budget=800)
     assert len(result) == 2
-    assert "Short memory one" in result[0]
+    # select_context 现返回 ClassifiedMemory 数据类
+    assert result[0].text == "Short memory one"
+    assert result[1].text == "Short memory two"
 
 
 def test_select_context_empty():

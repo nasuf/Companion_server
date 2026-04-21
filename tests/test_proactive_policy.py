@@ -164,6 +164,9 @@ async def test_escalate_waiting_state_stops_after_final_no_reply():
         )
 
     mock_stop.assert_awaited_once()
-    assert mock_stop.await_args.kwargs["reason"] == "final_no_reply"
+    # 30-day final 用尽后走共享 _escalate_silence_level 路径，
+    # reason 收敛为 "silence_exhausted"（与普通 n=7 永久停止使用同一标签）
+    assert mock_stop.await_args.kwargs["reason"] == "silence_exhausted"
     mock_log.assert_awaited_once()
     assert mock_log.await_args.kwargs["event_type"] == "permanently_stopped"
+    assert mock_log.await_args.kwargs["payload"]["reason"] == "silence_exhausted"

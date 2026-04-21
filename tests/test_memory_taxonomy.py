@@ -14,10 +14,13 @@ class _MemoryStub:
         self.subCategory = sub_category
 
 
-def test_resolve_taxonomy_defaults_unknown_values():
+def test_resolve_taxonomy_refuses_unknown_main_category():
+    """spec：未识别的非空 main_category 拒绝默认填到生活/其他，
+    保留原值并标 allowed=False，由调用方决定丢弃/归档/降级。"""
     result = resolve_taxonomy(main_category="不存在", sub_category="乱填", legacy_type=None)
-    assert result.main_category == "生活"
-    assert result.sub_category == "其他"
+    assert result.main_category == "不存在"
+    assert result.sub_category == "乱填"
+    assert result.allowed is False
 
 
 def test_get_promotion_rule_for_identity_name():
@@ -158,10 +161,11 @@ class TestEdgeCases:
         assert r.main_category == "身份"
         assert r.sub_category == "宠物"
 
-    def test_unknown_main_defaults_to_life(self):
+    def test_unknown_main_marked_disallowed(self):
+        """spec：未识别的非空 main 不再 silently 落到"生活"，而是保留原值 + allowed=False。"""
         r = resolve_taxonomy(main_category="不存在的", sub_category="宠物")
-        assert r.main_category == "生活"
-        assert r.sub_category == "宠物"
+        assert r.main_category == "不存在的"
+        assert r.allowed is False
 
     def test_whitespace_handling(self):
         r = resolve_taxonomy(main_category=" 身份 ", sub_category=" 猫咪 ")
