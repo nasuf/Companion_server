@@ -23,7 +23,6 @@ from app.services.chat.prompt_builder import build_system_prompt, build_chat_mes
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
-from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.summarizer import summarize
 from app.services.relationship.emotion import (
@@ -33,23 +32,16 @@ from app.services.relationship.emotion import (
     update_emotion_state,
     save_ai_emotion,
 )
-from app.services.runtime.cache import cache_summarizer
-from app.services.portrait import get_latest_portrait
 from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
 )
-from app.services.memory.retrieval.relevance import classify_memory_relevance, compute_display_score
-from app.services.memory.retrieval.l3_awakening import search_l3_memories
 from app.services.memory.interaction.contradiction import (
     detect_l1_contradiction, generate_contradiction_inquiry,
     save_pending_contradiction,
 )  # analyze/apply/load/clear 已由 preflight.resolve_pending_contradiction 接管
 from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
-from app.services.schedule_domain.schedule import (
-    get_cached_schedule, get_current_status, format_schedule_context,
-)
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.interaction.boundary import (
@@ -58,7 +50,7 @@ from app.services.interaction.boundary import (
     get_patience_prompt_instruction, get_patience_zone,
     PATIENCE_MAX,
 )  # detect_apology/handle_apology: _bg_apology_check + pending 分支仍用
-from app.services.relationship.intimacy import get_topic_intimacy, get_relationship_stage
+from app.services.relationship.intimacy import get_relationship_stage
 from app.services.trait_adjustment import infer_feedback, detect_direct_feedback, apply_trait_adjustment
 from app.services.chat.intent_dispatcher import (
     detect_intent, detect_intent_unified, IntentType, IntentResult,
@@ -96,8 +88,8 @@ from app.services.chat.preflight import (
     resolve_pending_deletion,
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
+from app.services.chat.data_fetch_phase import fetch_parallel_context
 from app.services.mbti import get_mbti
-from app.services.chat.fast_fact import update_working_facts, facts_for_prompt
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
 
@@ -523,180 +515,28 @@ async def stream_chat_response(
     # --- Pre-compute personality (MBTI) for downstream timing/emotion calls ---
     mbti = get_mbti(agent)
 
-    # --- HOT PATH: parallel data fetches ---
-    # Spec §3.1: classify memory relevance (强/中/弱) in parallel with other
-    # fetches. Result gates whether retrieval results are injected into prompt.
-
-    async def _classify_relevance():
-        return await classify_memory_relevance(user_message)
-
-    async def _do_retrieval():
-        return await hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
-
-    async def _load_cached_emotion():
-        """Load last known emotion from cache/DB — no LLM call."""
-        if agent_id:
-            return await get_ai_emotion(agent_id)
-        return None
-
-    async def _load_cached_summaries():
-        """Load previously cached summarizer results — no LLM call."""
-        from app.services.summarizer import _conv_hash
-        prev_msgs = messages_dicts[:-1]
-        prev_user_content = next(
-            (m["content"] for m in reversed(prev_msgs) if m["role"] == "user"),
-            ""
-        )
-        ch = _conv_hash(prev_msgs, prev_user_content)
-        return await cache_summarizer(ch)
-
-    async def _load_portrait():
-        """Load latest user portrait — no LLM call."""
-        if agent_id:
-            return await get_latest_portrait(user_id, agent_id)
-        return None
-
-    async def _load_schedule():
-        """Load cached schedule for AI status context."""
-        if agent_id:
-            return await get_cached_schedule(agent_id)
-        return None
-
-    async def _load_topic_intimacy():
-        """Load topic intimacy score for prompt injection."""
-        if agent_id and user_id:
-            return await get_topic_intimacy(agent_id, user_id)
-        return 50.0
-
-    async def _load_time_memories():
-        """Load memories matching parsed time ranges (PRD §9.3.4)."""
-        past_times = [pt for pt in parsed_times if not pt.is_future]
-        if not past_times:
-            return []
-        from app.services.memory.retrieval.vector_search import search_by_time_range
-        all_rows = await asyncio.gather(
-            *[search_by_time_range(user_id, pt.start, pt.end, limit=5) for pt in past_times]
-        )
-        seen: set[str] = set()
-        results: list[str] = []
-        for rows in all_rows:
-            for r in rows:
-                content = r.get("summary") or r.get("content", "")
-                if content and content not in seen:
-                    seen.add(content)
-                    results.append(content)
-        return results[:10]
-
-    async def _load_working_facts():
-        """Synchronously update hot-path working memory for the current user message."""
-        return await update_working_facts(conversation_id, user_message)
-
-    relevance_result, retrieval_result, emotion, summaries, portrait, schedule, topic_intimacy, time_memories_result, working_facts_result = await asyncio.gather(
-        _classify_relevance(),
-        _do_retrieval(),
-        _load_cached_emotion(),
-        _load_cached_summaries(),
-        _load_portrait(),
-        _load_schedule(),
-        _load_topic_intimacy(),
-        _load_time_memories(),
-        _load_working_facts(),
-        return_exceptions=True,
+    # spec §3.1+§3.2 step 2-3: 并行拉取记忆/情绪/画像/作息 + L3 awakening
+    fetched = await fetch_parallel_context(
+        user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
+        conversation_id=conversation_id, user_message=user_message,
+        messages_dicts=messages_dicts, parsed_times=parsed_times,
+        detected_intent=detected_intent,
+        l3_trigger_classify_fn=_l3_trigger_classify,
     )
-
-    # Spec §3.1: determine memory relevance level
-    memory_relevance = "medium"
-    if isinstance(relevance_result, Exception):
-        logger.warning(f"Memory relevance classification failed: {relevance_result}")
-    elif isinstance(relevance_result, str):
-        memory_relevance = relevance_result
-    logger.info(f"[DEBUG-MEM] relevance='{memory_relevance}' for '{user_message[:60]}'")
-
-    # Process retrieval results — gate by relevance
-    classified_memories = None  # ClassifiedMemory list for prompt_builder
-    memory_strings = None       # plain text list for summarizer/other consumers
-    graph_context = None
-    if memory_relevance == "weak":
-        # Spec §3.4: weak relevance → don't inject any retrieved memories
-        logger.info("[DEBUG-MEM] SKIPPED — weak relevance, no memories injected")
-    elif isinstance(retrieval_result, Exception):
-        logger.warning(f"Hybrid retrieval failed: {retrieval_result}")
-    else:
-        classified_memories = retrieval_result.get("memories")
-        memory_strings = retrieval_result.get("memory_strings")
-        graph_context = retrieval_result.get("graph_context")
-        logger.info(f"[DEBUG-MEM] retrieval returned {len(classified_memories) if classified_memories else 0} memories")
-        if classified_memories:
-            for m in classified_memories[:5]:
-                logger.info(f"[DEBUG-MEM]   sim={m.similarity:.3f} imp={m.importance:.2f} text='{m.text[:60]}'")
-
-        # Spec §3.2/3.3: rerank by display_score and cap at top 10
-        if classified_memories:
-            for m in classified_memories:
-                m.display_score = compute_display_score(
-                    importance=getattr(m, "importance", 0.5),
-                    last_accessed_at=getattr(m, "created_at", None),
-                    similarity=getattr(m, "similarity", 0.8),
-                )
-            classified_memories.sort(key=lambda m: m.display_score, reverse=True)
-            classified_memories = classified_memories[:10]
-            logger.info(f"[DEBUG-MEM] after rerank, top {len(classified_memories)} injected into prompt:")
-            for m in classified_memories[:5]:
-                logger.info(f"[DEBUG-MEM]   ds={m.display_score:.3f} text='{m.text[:60]}'")
-        else:
-            logger.info("[DEBUG-MEM] no classified_memories from retrieval (empty result)")
-
-    if isinstance(emotion, Exception):
-        logger.warning(f"Loading cached emotion failed: {emotion}")
-        emotion = None
-
-    if isinstance(summaries, Exception):
-        logger.warning(f"Loading cached summaries failed: {summaries}")
-        summaries = None
-
-    # spec §4 step 5 & §3.4.5: 强相关或调用久远记忆意图 → 小模型「调用L3」判断
-    # 输出 "不满纠正" / "请求更久" / "无"。前两类触发 L3 召回。
-    l3_memories: list[str] = []
-    l3_trigger_label: str = "无"
-    should_call_l3 = detected_intent.intent == IntentType.L3_RECALL
-    if memory_relevance == "strong" or should_call_l3:
-        try:
-            l3_trigger_label = await _l3_trigger_classify(user_message)
-        except Exception as e:
-            logger.warning(f"L3 trigger classify failed: {e}")
-            l3_trigger_label = "无"
-        logger.info(f"[L3-TRIGGER] label='{l3_trigger_label}' for '{user_message[:40]}'")
-        # §3.4.5 调用久远记忆意图 → 无论分类结果都召回；§4 强相关 → 仅前两类召回
-        if should_call_l3 or l3_trigger_label in ("不满纠正", "请求更久"):
-            l3_results = await search_l3_memories(user_message, user_id, workspace_id=workspace_id)
-            l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
-            if l3_memories:
-                logger.info(f"L3 awakening: {len(l3_memories)} memories injected "
-                            f"(label='{l3_trigger_label}')")
-
-    if isinstance(portrait, Exception):
-        logger.warning(f"Loading portrait failed: {portrait}")
-        portrait = None
-
-    if isinstance(schedule, Exception):
-        logger.warning(f"Loading schedule failed: {schedule}")
-        schedule = None
-
-    if isinstance(topic_intimacy, Exception):
-        logger.warning(f"Loading topic intimacy failed: {topic_intimacy}")
-        topic_intimacy = 50.0
-
-    time_memories: list[str] = []
-    if isinstance(time_memories_result, Exception):
-        logger.warning(f"Loading time memories failed: {time_memories_result}")
-    elif time_memories_result:
-        time_memories = time_memories_result
-
-    working_facts: list[str] | None = None
-    if isinstance(working_facts_result, Exception):
-        logger.warning(f"Loading working facts failed: {working_facts_result}")
-    elif working_facts_result:
-        working_facts = facts_for_prompt(working_facts_result)
+    memory_relevance = fetched.memory_relevance
+    classified_memories = fetched.classified_memories
+    memory_strings = fetched.memory_strings
+    graph_context = fetched.graph_context
+    emotion = fetched.emotion
+    summaries = fetched.summaries
+    portrait = fetched.portrait
+    schedule = fetched.schedule
+    topic_intimacy = fetched.topic_intimacy
+    time_memories = fetched.time_memories
+    working_facts = fetched.working_facts
+    l3_memories = fetched.l3_memories
+    ai_status = fetched.ai_status
+    schedule_context = fetched.schedule_context
 
     delay_context = None
     if reply_context:
@@ -730,11 +570,7 @@ async def stream_chat_response(
     # --- Intimacy stage for prompt (PRD §4.6.2.1) ---
     intimacy_stage = get_relationship_stage(topic_intimacy)
 
-    # --- AI status context from schedule (pure computation) ---
-    schedule_context = None
-    ai_status = get_current_status(schedule) if schedule else None
-    if ai_status:
-        schedule_context = format_schedule_context(ai_status)
+    # ai_status / schedule_context 已由 fetch_parallel_context 在上面计算并赋值
 
     # §3.4.2 作息调整
     if detected_intent.intent == IntentType.SCHEDULE_ADJUST:
