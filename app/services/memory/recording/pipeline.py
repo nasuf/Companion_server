@@ -2,10 +2,14 @@
 
 Orchestrates: extract -> conflict check -> score -> dedup -> store -> embed -> entity link.
 Runs as FastAPI BackgroundTasks (non-blocking).
+
+Spec 第二部分 §2.1 / §2.2：用户侧与 AI 侧各走一条独立管线，`side` 决定抽取 prompt 与
+存储归属（B 库 / A 库）。owner 不再由 LLM 推断。
 """
 
 import logging
 from datetime import datetime
+from typing import Literal
 
 from app.services.memory.storage.entity_repo import (
     record_entities_for_memory,
@@ -21,6 +25,8 @@ from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
+Side = Literal["user", "ai"]
+
 # Spec §1.5.2: keywords indicating user expressed that information is important.
 # Detected once per pipeline call (on conversation_text), tagged on all extracted
 # memories so L2→L1 promotion can verify the condition.
@@ -34,12 +40,15 @@ async def process_memory_pipeline(
     user_id: str,
     conversation_text: str,
     statement_time: datetime | None = None,
+    side: Side = "user",
 ) -> list[str]:
-    """Run the full memory extraction and storage pipeline.
+    """Run the full memory extraction and storage pipeline for one side.
 
     Args:
-        statement_time: Part 5 §3.1 用户说出这句话的时间 (消息接收时刻).
-            未提供时由 store_memory 取 now() 作为最佳估计.
+        side: "user" → spec §2.1，抽取用户记忆，存入 memories_user；
+              "ai"   → spec §2.2，抽取 AI 自我记忆，存入 memories_ai。
+        statement_time: Part 5 §3.1 说出这句话的时间（消息接收时刻）。
+            未提供时由 store_memory 取 now() 作为最佳估计。
 
     Returns list of stored memory IDs.
     """
@@ -47,32 +56,33 @@ async def process_memory_pipeline(
 
     # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
     if not should_extract_memory(conversation_text):
-        logger.debug("Conversation segment filtered out by heuristic filter")
+        logger.debug(f"[MEM-{side}] filtered by heuristic filter")
         return []
 
-    # Step 1 (spec §2.1.2): Small model pre-filter — "记" or "不记"
-    # Uses get_utility_model() which is the cheaper/faster model (e.g. qwen3.5-flash).
+    # Step 1 (spec §2.1.2 / §2.2.2): Small model pre-filter — "记" or "不记"
     from app.config import settings
     if settings.enable_memory_prefilter:
         try:
             if not await should_memorize(conversation_text):
-                logger.debug("Small model pre-filter: 不记")
+                logger.debug(f"[MEM-{side}] pre-filter: 不记")
                 return []
         except Exception as e:
-            logger.warning(f"Small model pre-filter failed ({e}), proceeding with extraction")
+            logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
 
-    # Step 2 (spec §2.1.3): Big model extraction — split + classify + score
-    extraction = await extract_memories(conversation_text)
+    # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
+    extraction = await extract_memories(conversation_text, side=side)
     memories = extraction.get("memories", [])
 
     if not memories:
-        logger.info("No memories extracted from conversation")
+        logger.info(f"[MEM-{side}] no memories extracted")
         return []
 
     stored_ids: list[str] = []
 
-    # Check once: did user express importance in this conversation segment?
-    user_emphasized = any(kw in conversation_text for kw in _IMPORTANCE_EXPRESSIONS)
+    # Spec §1.5.2 user emphasis only drives user-side L2→L1 promotion.
+    user_emphasized = side == "user" and any(
+        kw in conversation_text for kw in _IMPORTANCE_EXPRESSIONS
+    )
 
     # Step 2: Store each memory with dedup and conflict check
     for mem in memories:
@@ -134,7 +144,7 @@ async def process_memory_pipeline(
             occur_time=occur_time,
             statement_time=statement_time,
             workspace_id=workspace_id,
-            source=mem.get("owner", "user"),
+            source=side,
         )
 
         if memory_id:
@@ -153,25 +163,24 @@ async def process_memory_pipeline(
             # Step 3: Link entities / topics / preferences to this memory.
             # Best-effort: failure here is advisory (retrieval still works
             # from the memory row + pgvector) so we log-and-continue.
-            memory_source = mem.get("owner", "user")
             try:
                 await record_entities_for_memory(
                     memory_id=memory_id,
-                    memory_source=memory_source,
+                    memory_source=side,
                     user_id=user_id,
                     workspace_id=workspace_id,
                     entities=extraction.get("entities", []),
                 )
                 await record_topics_for_memory(
                     memory_id=memory_id,
-                    memory_source=memory_source,
+                    memory_source=side,
                     user_id=user_id,
                     workspace_id=workspace_id,
                     topics=extraction.get("topics", []),
                 )
                 await record_preferences_for_memory(
                     memory_id=memory_id,
-                    memory_source=memory_source,
+                    memory_source=side,
                     user_id=user_id,
                     workspace_id=workspace_id,
                     preferences=extraction.get("preferences", []),

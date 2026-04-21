@@ -123,9 +123,10 @@ async def _bg_summarizer(
 
 
 async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
-    """spec §2.1/§2.2：用户 + AI 消息走同一 3 步 pipeline。
+    """spec §2.1 / §2.2：用户侧与 AI 侧走两条独立管线，owner 由路径决定。
 
-    取最近 6 条（3 轮 user+assistant），spec §2.1.3 要求"用户消息 + 最近3轮上下文"。
+    取最近 6 条（3 轮 user+assistant）作为共享上下文。两条管线都看得到完整对话，
+    但每条 prompt 只抽取自己那一侧的记忆，避免 LLM 从混合对话里错归 owner。
     """
     try:
         recent = messages[-6:]
@@ -134,7 +135,15 @@ async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
         conv_text = "\n".join(
             f"{m.get('role', 'user')}: {m['content']}" for m in recent
         )
-        await process_memory_pipeline(user_id, conv_text)
+        has_user = any(m.get("role") == "user" for m in recent)
+        has_ai = any(m.get("role") == "assistant" for m in recent)
+        tasks = []
+        if has_user:
+            tasks.append(process_memory_pipeline(user_id, conv_text, side="user"))
+        if has_ai:
+            tasks.append(process_memory_pipeline(user_id, conv_text, side="ai"))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=False)
     except Exception as e:
         logger.error(f"Background memory pipeline failed: {e}")
 
