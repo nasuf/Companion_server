@@ -26,6 +26,7 @@ from prisma import Json
 
 from app.config import settings
 from app.db import db
+from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +40,6 @@ def get_langsmith_client():
     instance = Client()
     get_langsmith_client._instance = instance  # type: ignore[attr-defined]
     return instance
-
-
-def _fire_background(coro) -> None:
-    task = asyncio.create_task(coro)
-    task.add_done_callback(
-        lambda t: None if t.cancelled() or not t.exception()
-        else logger.warning(f"Background trace task failed: {t.exception()}")
-    )
 
 
 class LangSmithTracer:

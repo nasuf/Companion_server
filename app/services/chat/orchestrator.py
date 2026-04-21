@@ -85,20 +85,9 @@ from app.services.chat.tracing import LangSmithTracer
 from app.services.mbti import get_mbti
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
+from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
-
-
-def _on_task_error(t: asyncio.Task) -> None:
-    """Log unhandled exceptions from background tasks."""
-    if not t.cancelled() and t.exception():
-        logger.error(f"Background post-processing failed: {t.exception()}")
-
-
-def _fire_background(coro) -> None:
-    """Schedule a background coroutine as a fire-and-forget task."""
-    task = asyncio.create_task(coro)
-    task.add_done_callback(_on_task_error)
 
 
 async def _short_circuit_reply(

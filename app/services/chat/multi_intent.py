@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -24,19 +23,11 @@ from app.services.chat.intent_dispatcher import (
     LABEL_TO_INTENT,
 )
 from app.services.interaction.reply_context import save_last_reply_timestamp
+from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
 
 _DONE_EVENT = {"event": "done", "data": json.dumps({"message_id": "complete"})}
-
-
-def _fire_background(coro) -> None:
-    """Schedule a fire-and-forget coroutine with error-logging callback."""
-    task = asyncio.create_task(coro)
-    task.add_done_callback(
-        lambda t: None if t.cancelled() or not t.exception()
-        else logger.error(f"Background task failed: {t.exception()}")
-    )
 
 
 async def short_circuit_reply(
