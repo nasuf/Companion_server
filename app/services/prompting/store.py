@@ -59,17 +59,15 @@ async def ensure_prompt_templates() -> None:
     for definition in PROMPT_DEFINITIONS:
         existing = existing_map.get(definition.key)
         if existing:
-            is_unmodified = existing.content == existing.defaultContent
-            new_content = definition.default_text if is_unmodified else existing.content
-            content = new_content
-
+            # 永不覆盖 DB `content` 列：startup 只同步 metadata + defaultContent，
+            # content 的唯一写入路径是 UI 保存 / reset / restore_version。
+            content = existing.content
             needs_update = (
                 existing.stage != definition.stage
                 or existing.category != definition.category
                 or existing.title != definition.title
                 or (existing.description or "") != definition.description
                 or existing.defaultContent != definition.default_text
-                or (is_unmodified and existing.content != definition.default_text)
             )
             if needs_update:
                 await db.prompttemplate.update(
@@ -80,7 +78,6 @@ async def ensure_prompt_templates() -> None:
                         "title": definition.title,
                         "description": definition.description,
                         "defaultContent": definition.default_text,
-                        "content": new_content,
                     },
                 )
 
