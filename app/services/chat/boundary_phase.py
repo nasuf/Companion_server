@@ -178,7 +178,8 @@ async def _handle_attack_ai(
         metadata["final_warning"] = True
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
-    ctx.fire_background_fn(process_boundary_violation(ctx.agent_id, ctx.user_id, ctx.user_message))
+    if attack_level:
+        ctx.fire_background_fn(process_boundary_violation(ctx.agent_id, ctx.user_id, attack_level))
     ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
         {"role": "user", "content": ctx.user_message},
         {"role": "assistant", "content": response},

@@ -204,42 +204,6 @@ def check_banned_keywords(message: str) -> list[str]:
     return hits
 
 
-# --- 攻击意图分类（LLM，后台异步） ---
-
-
-async def classify_attack_intent(message: str) -> dict:
-    """LLM分类攻击意图。后台异步调用。"""
-    prompt = (await get_prompt_text("boundary.attack_intent")).format(message=message)
-    try:
-        result = await invoke_json(get_utility_model(), prompt)
-        return {
-            "intent": result.get("intent", "none"),
-            "confidence": float(result.get("confidence", 0.0)),
-        }
-    except Exception as e:
-        logger.warning(f"Attack intent classification failed: {e}")
-        return {"intent": "none", "confidence": 0.0}
-
-
-# --- 攻击严重度分级 ---
-
-
-async def assess_severity(message: str, intent: str) -> dict:
-    """LLM评估攻击严重度。后台异步调用。"""
-    prompt = (await get_prompt_text("boundary.severity")).format(message=message, intent=intent)
-    try:
-        result = await invoke_json(get_utility_model(), prompt)
-        level = result.get("level", "L0")
-        # 确保扣分在合理范围
-        deduction_ranges = {"L0": (5, 10), "L1": (15, 25), "L2": (50, 100)}
-        lo, hi = deduction_ranges.get(level, (5, 10))
-        deduction = max(lo, min(hi, int(result.get("deduction", lo))))
-        return {"level": level, "deduction": deduction, "reason": result.get("reason", "")}
-    except Exception as e:
-        logger.warning(f"Severity assessment failed: {e}")
-        return {"level": "L0", "deduction": 5, "reason": ""}
-
-
 # --- 24小时重复攻击加重 ---
 
 def _attack_history_key(agent_id: str, user_id: str, level: str | None = None) -> str:
@@ -262,9 +226,8 @@ async def record_attack(agent_id: str, user_id: str, level: str | None = None) -
 
 
 # spec §2.4 基础扣分与上限
-# K1=L0: 5 首次, 10 上限；K2=L1: 15 首次, 25 上限；K3=L2: 40 首次, 50 上限
-_LEVEL_BASE = {"L0": 5, "L1": 15, "L2": 40}
-_LEVEL_CAP = {"L0": 10, "L1": 25, "L2": 50}
+_LEVEL_BASE = {"K1": 5, "K2": 15, "K3": 40}
+_LEVEL_CAP = {"K1": 10, "K2": 25, "K3": 50}
 
 
 def compute_repeat_deduction(level: str, count: int) -> int:
@@ -564,36 +527,21 @@ async def check_boundary(
 # --- 后台异步处理：扣分 + 攻击记录 ---
 
 async def process_boundary_violation(
-    agent_id: str, user_id: str, message: str,
+    agent_id: str, user_id: str, attack_level: str,
 ) -> None:
-    """后台处理边界违规：分类→分级→扣分→记录。"""
-    # 已拉黑用户跳过LLM调用
+    """后台扣分：依据热路径已识别的 attack_level (K1/K2/K3) 按 spec §2.4 累计扣减。"""
+    if attack_level not in _LEVEL_BASE:
+        return
     current = await get_patience(agent_id, user_id)
     if current <= 0:
         return
 
-    intent_result = await classify_attack_intent(message)
-    intent = intent_result.get("intent", "none")
-    confidence = intent_result.get("confidence", 0.0)
-
-    if intent == "none" or confidence < 0.8:
-        return
-
-    if intent == "attack_third":
-        # 攻击第三方不扣耐心值
-        return
-
-    severity = await assess_severity(message, intent)
-    level = severity.get("level", "L0")
-
-    # spec §2.4: 先记录累计次数，按 (1 + 0.5×(n-1)) 公式并按级别上限封顶
-    count = await record_attack(agent_id, user_id, level=level)
-    deduction = compute_repeat_deduction(level, count if count > 0 else 1)
-
+    count = await record_attack(agent_id, user_id, level=attack_level)
+    deduction = compute_repeat_deduction(attack_level, count if count > 0 else 1)
     new_val = await adjust_patience(agent_id, user_id, -deduction)
 
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
-        f"reason=violation intent={intent} level={level} count={count} "
+        f"reason=violation level={attack_level} count={count} "
         f"delta=-{deduction} current={current} new={new_val}"
     )

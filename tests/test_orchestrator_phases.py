@@ -161,8 +161,8 @@ async def test_boundary_attack_ai_triggers_level_classification_and_violation():
     reply_kwargs = mock_reply.call_args.kwargs
     assert reply_kwargs["final_warning"] is True
     assert reply_kwargs["attack_level"] is None
-    # process_boundary_violation 通过 fire_background_fn 调度
-    mock_violation.assert_called_once_with("agent1", "user1", "你这个傻X")
+    # process_boundary_violation 通过 fire_background_fn 调度，传入 K1/K2/K3
+    mock_violation.assert_called_once_with("agent1", "user1", "K2")
     assert ctx.stopped is True
 
 

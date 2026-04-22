@@ -32,7 +32,6 @@ from app.services.memory.interaction.deletion import (
 )
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
-    detect_apology,
     handle_apology,
 )
 from app.services.schedule_domain.schedule import (
@@ -115,13 +114,10 @@ async def handle_apology_promise(
     user_message: str,
     ctx: ShortCircuitCtx,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
-    """返回 (handled, events_gen)；handled=False 表示调用方回退到普通聊天。"""
+    """Spec §3.4.4：intent.unified 已分类为 apology_promise，直接恢复耐心 + 和解回复。"""
     if not ctx.agent_id or ctx.cached_patience >= PATIENCE_MAX:
         return False, None
     try:
-        apology_result = await detect_apology(user_message)
-        if not (apology_result.get("is_apology") and apology_result.get("sincerity", 0) >= 0.5):
-            return False, None
         new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
         reply = await apology_reply(
             message=user_message,
