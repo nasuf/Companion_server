@@ -33,6 +33,9 @@ async def build_proactive_context(
 
     schedule = await get_cached_schedule(agent_id)
     schedule_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "status": "idle", "type": "leisure"}
+    # 读缓存的上一次 PAD（聊天热路径 compute_ai_pad 结果）；proactive 不触发新的
+    # emotion.ai_pad LLM 调用，避免每分钟 tick 多一次小模型请求。若缓存为空则
+    # 落中性默认。
     emotion = await get_ai_emotion(agent_id)
     core_memories = await load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="user")
     proactive_memories, used_memory_ids = await _load_proactive_memories(

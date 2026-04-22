@@ -15,7 +15,6 @@ import re
 from datetime import datetime
 
 from app.db import db
-from app.services.memory.retrieval.query_analyzer import analyze_query
 from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
 from app.services.memory.retrieval.context_selector import select_context
 from app.services.memory.storage.entity_repo import get_relationship_context
@@ -25,10 +24,11 @@ from app.services.runtime.cache import (
     cache_graph_context,
     cache_set_graph_context,
 )
+from app.services.schedule_domain.time_parser import has_explicit_time, parse_time_expressions
 
 logger = logging.getLogger(__name__)
 
-# 无需检索的短消息/语气词/纯问候（跳过 LLM query_analyzer + 向量搜索）
+# 无需检索的短消息/语气词/纯问候（跳过向量搜索）
 _TRIVIAL_WORDS = {
     "嗯", "嗯嗯", "哦", "哦哦", "好", "好的", "行", "行吧", "ok", "OK",
     "哈哈", "哈哈哈", "呵呵", "嘻嘻", "嘿嘿", "哇", "额", "唔",
@@ -43,7 +43,6 @@ _EMPTY_RESULT = {
     "memories": None,
     "memory_strings": None,
     "graph_context": None,
-    "analysis": {"intent": "trivial", "skipped": True},
 }
 
 
@@ -146,7 +145,7 @@ async def hybrid_retrieve(
       - memories: list[str] (formatted for prompt)
       - graph_context: dict (topics, entities)
     """
-    # 快速跳过无意义短消息（避免 LLM query_analyzer + 向量搜索的开销）
+    # 快速跳过无意义短消息（避免向量搜索的开销）
     if _is_trivial_message(message):
         logger.debug("Skipping retrieval for trivial message: %s", message[:20])
         return _EMPTY_RESULT
@@ -157,41 +156,28 @@ async def hybrid_retrieve(
         logger.debug("Hybrid retrieval cache hit")
         return cached
 
-    analysis = await analyze_query(message)
-    # analyze_query extracts entities/categories/time_range for targeted search,
-    # but its retrieve_memory flag is IGNORED — the orchestrator's spec §3.1
-    # relevance classifier (强/中/弱) already gates whether retrieval results
-    # are used. If we reach here, the caller already decided retrieval is needed.
-    retrieve_graph = bool(analysis.get("retrieve_graph", False))
-    context_sub_categories = analysis.get("sub_categories", []) or []
-    time_range = analysis.get("time_range")
-    # Spec §3.2: always search L1+L2. Never let analyzer override to [2,3] etc.
+    # Spec §3.2 step 1: 向量搜索 L1+L2 + 时间搜索（若有显式时间）
+    # 时间范围由时间系统（纯规则）解析，无 LLM 调用。
+    time_range: tuple[datetime, datetime] | None = None
+    if has_explicit_time(message):
+        parsed = parse_time_expressions(message)
+        if parsed:
+            best = max(parsed, key=lambda p: p.confidence)
+            if not best.is_future:
+                time_range = (best.start, best.end)
+
     levels = [1, 2]
 
-    # Always perform vector search (gating is done by orchestrator, not here)
     vector_task = search_similar(
-        message,
-        user_id,
-        top_k=50,
-        workspace_id=workspace_id,
-        sub_categories=context_sub_categories,
-        levels=levels,
+        message, user_id, top_k=50, workspace_id=workspace_id, levels=levels,
     )
-    graph_task = (
-        get_relationship_context(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            sub_categories=context_sub_categories,
-        )
-        if retrieve_graph else asyncio.sleep(0, result=None)
+    graph_task = get_relationship_context(
+        user_id=user_id, workspace_id=workspace_id,
     )
     time_task = (
         search_by_time_range(
-            user_id,
-            datetime.fromisoformat(time_range["start"]),
-            datetime.fromisoformat(time_range["end"]),
-            limit=20,
-            workspace_id=workspace_id,
+            user_id, time_range[0], time_range[1],
+            limit=20, workspace_id=workspace_id,
         )
         if time_range else asyncio.sleep(0, result=[])
     )
@@ -263,7 +249,6 @@ async def hybrid_retrieve(
         "memories": classified_memories if classified_memories else None,
         "memory_strings": memory_strings,
         "graph_context": graph_context,
-        "analysis": analysis,
     }
 
     # Cache the result

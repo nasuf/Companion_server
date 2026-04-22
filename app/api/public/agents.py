@@ -8,7 +8,6 @@ from prisma import Json
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.interaction.boundary import init_patience
-from app.services.relationship.emotion import compute_baseline_emotion_llm, save_ai_emotion
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.life_story import (
     activate_agent,
@@ -91,7 +90,13 @@ async def create_agent(data: AgentCreate):
     # 整个流程在后台 asyncio.create_task 里跑，不阻塞 API 响应。
     personality_dict = data.personality.model_dump()
 
-    async def _init_mbti_then_emotion():
+    async def _init_mbti():
+        """Spec §1.3：agent 创建时后台推导 MBTI。
+
+        AI PAD 情感不在此处初始化 —— spec §3.2 要求每条用户消息调
+        compute_ai_pad 动态计算，不存在"初始基线"。首条聊天消息到达前
+        get_ai_emotion 返回中性默认 {0.0, 0.5, 0.5}。
+        """
         try:
             mbti_input = await seven_dim_to_mbti(personality_dict)
             mbti = await build_mbti(mbti_input)
@@ -101,20 +106,8 @@ async def create_agent(data: AgentCreate):
             )
         except Exception as e:
             logger.error(f"MBTI init failed for agent {agent.id}: {e}")
-            mbti = None
 
-        try:
-            baseline = await compute_baseline_emotion_llm(
-                mbti,
-                name=agent.name,
-                background=agent.background or "",
-                gender=agent.gender or "",
-            )
-            await save_ai_emotion(agent.id, baseline)
-        except Exception as e:
-            logger.error(f"Baseline emotion init failed for agent {agent.id}: {e}")
-
-    asyncio.create_task(_init_mbti_then_emotion())
+    asyncio.create_task(_init_mbti())
 
     # Initialize patience value (Redis + DB)
     asyncio.create_task(init_patience(agent.id, data.user_id))

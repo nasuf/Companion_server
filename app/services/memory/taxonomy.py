@@ -71,14 +71,6 @@ PROMOTION_RULES: dict[tuple[str, str], dict[str, float | int | bool]] = {
     ("思维", "自我认知"): {"allow_l1": True, "min_importance": 0.9, "min_mentions": 2},
 }
 
-COMPRESSION_RULES: dict[str, dict[str, int | bool]] = {
-    "身份": {"batch_size": 6, "allow_cross_subcategory": False},
-    "偏好": {"batch_size": 8, "allow_cross_subcategory": False},
-    "生活": {"batch_size": 10, "allow_cross_subcategory": True},
-    "情绪": {"batch_size": 6, "allow_cross_subcategory": False},
-    "思维": {"batch_size": 6, "allow_cross_subcategory": False},
-}
-
 # ── Initial L1 coverage policy (agent provisioning) ───────────────────
 # spec §1.2: agent 创建时应保证每个 (main, sub) 子类都有 L1 记忆。
 # Singleton: 只能有 1 条(事实型,多了就矛盾)。Multi: 3-5 条。
@@ -444,22 +436,6 @@ def summarize_batch_taxonomy(items: list) -> tuple[str, str]:
         counts[key] = counts.get(key, 0) + 1
 
     return max(counts.items(), key=lambda pair: pair[1])[0]
-
-
-def get_promotion_rule(main_category: str | None, sub_category: str | None) -> dict[str, float | int | bool]:
-    key = ((main_category or "").strip(), (sub_category or "").strip())
-    return PROMOTION_RULES.get(
-        key,
-        {"allow_l1": False, "min_importance": 0.95, "min_mentions": 12},
-    )
-
-
-def get_compression_rule(main_category: str | None) -> dict[str, int | bool]:
-    key = (main_category or "").strip()
-    return COMPRESSION_RULES.get(
-        key,
-        {"batch_size": 10, "allow_cross_subcategory": True},
-    )
 
 
 SUBCATEGORY_ALIASES: dict[str, str] = {

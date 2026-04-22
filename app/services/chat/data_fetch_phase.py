@@ -13,7 +13,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from app.services.chat.fast_fact import facts_for_prompt, update_working_facts
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
@@ -22,7 +21,7 @@ from app.services.memory.retrieval.relevance import (
     compute_display_score,
 )
 from app.services.portrait import get_latest_portrait
-from app.services.relationship.emotion import get_ai_emotion
+from app.services.relationship.emotion import compute_ai_pad, extract_emotion
 from app.services.relationship.intimacy import get_topic_intimacy
 from app.services.runtime.cache import cache_summarizer
 from app.services.schedule_domain.schedule import (
@@ -30,6 +29,7 @@ from app.services.schedule_domain.schedule import (
     get_cached_schedule,
     get_current_status,
 )
+from app.services.schedule_domain.time_service import get_current_time
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,13 @@ class FetchedContext:
     classified_memories: list | None = None
     memory_strings: list[str] | None = None
     graph_context: dict | None = None
-    emotion: dict | None = None
+    emotion: dict | None = None             # AI PAD (spec §3.2)
+    user_emotion: dict | None = None        # 用户 PAD (spec §3.2 用户侧)
     summaries: dict | None = None
     portrait: Any = None
     schedule: Any = None
     topic_intimacy: float = 50.0
     time_memories: list[str] = field(default_factory=list)
-    working_facts: list[str] | None = None
     l3_memories: list[str] = field(default_factory=list)
     l3_trigger_label: str = "无"            # "无" | "不满纠正" | "请求更久"
     ai_status: dict | None = None
@@ -63,10 +63,23 @@ async def _do_retrieval(user_message: str, user_id: str, workspace_id: str | Non
     return await hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
 
 
-async def _load_cached_emotion(agent_id: str | None) -> dict | None:
-    if agent_id:
-        return await get_ai_emotion(agent_id)
-    return None
+def _format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_chars: int = 400) -> str:
+    """Spec §3.2 AIPAD值判断 的 recent_context 输入：最近 N 条用户/AI 消息。"""
+    if not messages_dicts:
+        return "（无）"
+    tail = messages_dicts[-turns:]
+    lines: list[str] = []
+    for m in tail:
+        role = m.get("role") or "user"
+        text = (m.get("content") or "").strip()
+        if not text:
+            continue
+        prefix = "AI" if role == "assistant" else "用户"
+        lines.append(f"{prefix}: {text[:120]}")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+    return text or "（无）"
 
 
 async def _load_cached_summaries(messages_dicts: list[dict]) -> dict | None:
@@ -116,10 +129,6 @@ async def _load_time_memories(user_id: str, parsed_times: list) -> list[str]:
                 seen.add(content)
                 results.append(content)
     return results[:10]
-
-
-async def _load_working_facts(conversation_id: str, user_message: str) -> Any:
-    return await update_working_facts(conversation_id, user_message)
 
 
 def _post_process_retrieval(
@@ -204,7 +213,6 @@ async def fetch_parallel_context(
     user_id: str,
     agent_id: str | None,
     workspace_id: str | None,
-    conversation_id: str,
     user_message: str,
     messages_dicts: list[dict],
     parsed_times: list,
@@ -213,19 +221,18 @@ async def fetch_parallel_context(
 ) -> FetchedContext:
     """spec §3.1+§3.2 step 2-3：并行拉取记忆/情绪/画像/作息 + L3 awakening。"""
     (
-        relevance_result, retrieval_result, emotion, summaries,
+        relevance_result, retrieval_result, summaries,
         portrait, schedule, topic_intimacy,
-        time_memories_result, working_facts_result,
+        time_memories_result, user_emotion_result,
     ) = await asyncio.gather(
         _classify_relevance(user_message),
         _do_retrieval(user_message, user_id, workspace_id),
-        _load_cached_emotion(agent_id),
         _load_cached_summaries(messages_dicts),
         _load_portrait(user_id, agent_id),
         _load_schedule(agent_id),
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times),
-        _load_working_facts(conversation_id, user_message),
+        extract_emotion(user_message),  # Spec §3.2 用户 PAD：与其他 fetch 并行
         return_exceptions=True,
     )
 
@@ -242,9 +249,6 @@ async def fetch_parallel_context(
     )
 
     # 解包 exception → None
-    if isinstance(emotion, Exception):
-        logger.warning(f"Loading cached emotion failed: {emotion}")
-        emotion = None
     if isinstance(summaries, Exception):
         logger.warning(f"Loading cached summaries failed: {summaries}")
         summaries = None
@@ -264,11 +268,14 @@ async def fetch_parallel_context(
     elif time_memories_result:
         time_memories = time_memories_result
 
-    working_facts: list[str] | None = None
-    if isinstance(working_facts_result, Exception):
-        logger.warning(f"Loading working facts failed: {working_facts_result}")
-    elif working_facts_result:
-        working_facts = facts_for_prompt(working_facts_result)
+    # Spec §3.2 用户 PAD：LLM 失败时 extract_emotion 内部已回退中性默认；
+    # 外部再接一次 exception 守护（asyncio.gather return_exceptions）。
+    user_emotion: dict | None
+    if isinstance(user_emotion_result, Exception):
+        logger.warning(f"extract_emotion failed: {user_emotion_result}")
+        user_emotion = None
+    else:
+        user_emotion = user_emotion_result
 
     l3_memories, l3_trigger_label = await _maybe_awaken_l3(
         user_message, user_id, workspace_id,
@@ -279,18 +286,36 @@ async def fetch_parallel_context(
     ai_status = get_current_status(schedule) if schedule else None
     schedule_context = format_schedule_context(ai_status) if ai_status else None
 
+    # Spec §3.2：每条用户消息触发一次 AIPAD值判断，输入 4 项参考信息
+    # (当前时间, 作息状态, 当前活动, 近期对话上下文)
+    status_label = str(ai_status.get("status") if ai_status else "空闲")
+    activity_label = str(ai_status.get("activity") if ai_status else "自由活动")
+    recent_context = _format_recent_context(messages_dicts)
+    time_info = get_current_time()
+    current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
+    try:
+        emotion: dict | None = await compute_ai_pad(
+            current_time=current_time_str,
+            schedule_status=status_label,
+            current_activity=activity_label,
+            recent_context=recent_context,
+        )
+    except Exception as e:
+        logger.warning(f"compute_ai_pad failed: {e}")
+        emotion = None
+
     return FetchedContext(
         memory_relevance=memory_relevance,
         classified_memories=classified_memories,
         memory_strings=memory_strings,
         graph_context=graph_context,
         emotion=emotion,
+        user_emotion=user_emotion,
         summaries=summaries,
         portrait=portrait,
         schedule=schedule,
         topic_intimacy=float(topic_intimacy) if topic_intimacy is not None else 50.0,
         time_memories=time_memories,
-        working_facts=working_facts,
         l3_memories=l3_memories,
         l3_trigger_label=l3_trigger_label,
         ai_status=ai_status,

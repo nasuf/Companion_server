@@ -80,7 +80,7 @@ async def test_run_post_process_fires_all_tasks_for_agent():
     """有 agent_id 时，5 个后台任务都被并行 await。"""
     from app.services.chat import post_process
 
-    with patch.object(post_process, "_bg_emotion", AsyncMock()) as e, \
+    with patch.object(post_process, "_bg_user_emotion", AsyncMock()) as e, \
          patch.object(post_process, "_bg_summarizer", AsyncMock()) as s, \
          patch.object(post_process, "_bg_memory_pipeline", AsyncMock()) as m, \
          patch.object(post_process, "_bg_trait_adjustment", AsyncMock()) as t, \
@@ -105,7 +105,7 @@ async def test_run_post_process_skips_agent_only_tasks_when_no_agent():
     """无 agent_id 时跳过 trait_adjustment + positive_recovery。"""
     from app.services.chat import post_process
 
-    with patch.object(post_process, "_bg_emotion", AsyncMock()) as e, \
+    with patch.object(post_process, "_bg_user_emotion", AsyncMock()) as e, \
          patch.object(post_process, "_bg_summarizer", AsyncMock()) as s, \
          patch.object(post_process, "_bg_memory_pipeline", AsyncMock()) as m, \
          patch.object(post_process, "_bg_trait_adjustment", AsyncMock()) as t, \

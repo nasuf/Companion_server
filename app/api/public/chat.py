@@ -81,6 +81,8 @@ async def chat(conversation_id: str, data: ChatRequest):
             conv.agent.id, conv.agent.name, get_mbti(conv.agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
+    # Spec §6.2 高情绪状态判定需要 AI arousal；这里读缓存（上一轮算出的 PAD）作近似。
+    # 热路径计算新 PAD 在 orchestrator 里 (spec §3.2)；此处延迟计算在消息进入前触发。
     ai_emotion = await get_ai_emotion(conv.agent.id)
     current_context = await build_reply_timing_context(
         agent_id=conv.agent.id,

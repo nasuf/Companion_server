@@ -1,10 +1,13 @@
 """Async memory pipeline.
 
-Orchestrates: extract -> conflict check -> score -> dedup -> store -> embed -> entity link.
+Orchestrates: extract -> score -> dedup -> store -> embed -> entity link.
 Runs as FastAPI BackgroundTasks (non-blocking).
 
 Spec 第二部分 §2.1 / §2.2：用户侧与 AI 侧各走一条独立管线，`side` 决定抽取 prompt 与
 存储归属（B 库 / A 库）。owner 不再由 LLM 推断。
+
+L1 冲突处理完全走 spec §4 交互矛盾机制（热路径询问用户确认）—
+录入期不自动降级/修改 L1，避免绕过用户确认（spec §1.5.1）。
 """
 
 import logging
@@ -20,7 +23,6 @@ from app.services.memory.recording.extraction import extract_memories
 from app.services.memory.recording.filter import should_extract_memory
 from app.services.memory.recording.pre_filter import should_memorize
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
-from app.services.memory.recording.conflict import detect_conflicts, resolve_conflict
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -120,18 +122,6 @@ async def process_memory_pipeline(
         if emotion:
             pleasure_abs = abs(emotion.get("pleasure", 0.0))
             importance = min(1.0, importance + pleasure_abs * 0.2)
-
-        # Step 2a: Conflict check for L1 memories
-        if level == 1:
-            try:
-                conflict = await detect_conflicts(user_id, mem, workspace_id=workspace_id)
-                if conflict:
-                    action = await resolve_conflict(user_id, conflict, mem)
-                    if action in ("updated", "demoted"):
-                        logger.info(f"Conflict resolved ({action}), skipping duplicate store")
-                        continue
-            except Exception as e:
-                logger.warning(f"Conflict check failed: {e}")
 
         memory_id = await store_memory(
             user_id=user_id,

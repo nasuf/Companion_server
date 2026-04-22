@@ -1,9 +1,8 @@
 """Job scheduler for periodic tasks.
 
 Uses APScheduler for:
-- Daily: consolidation, importance decay
-- Weekly: reflection, memory compression
-- Monthly: memory compression (L2 -> L1)
+- Daily: L2 动态分数调整 (spec §1.5.2), reflection, 记忆衰减
+- Weekly: weekly reflection, portrait update
 """
 
 import asyncio
@@ -13,11 +12,9 @@ from collections.abc import Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
-from app.services.reflection import run_daily_reflection, run_weekly_reflection
-from app.services.memory.lifecycle.compression import compress_weekly, compress_monthly
+from app.services.reflection import run_weekly_reflection
 from app.services.portrait import update_portrait_weekly
 from app.services.memory.self_memory import generate_daily_self_memories
-from app.services.relationship.emotion import decay_emotion_toward_baseline
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview, generate_daily_schedule, get_cached_schedule,
     get_current_status, get_life_overview, review_daily_schedule,
@@ -90,16 +87,6 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # Daily reflection at 3 AM
-    scheduler.add_job(
-        run_daily_reflection,
-        "cron",
-        hour=3,
-        minute=0,
-        id="daily_reflection",
-        replace_existing=True,
-    )
-
     # Weekly reflection on Sunday at 4 AM
     scheduler.add_job(
         run_weekly_reflection,
@@ -108,28 +95,6 @@ def setup_scheduler():
         hour=4,
         minute=0,
         id="weekly_reflection",
-        replace_existing=True,
-    )
-
-    # Weekly memory compression on Sunday at 5 AM
-    scheduler.add_job(
-        compress_weekly,
-        "cron",
-        day_of_week="sun",
-        hour=5,
-        minute=0,
-        id="weekly_compression",
-        replace_existing=True,
-    )
-
-    # Monthly memory compression on 1st at 5 AM
-    scheduler.add_job(
-        compress_monthly,
-        "cron",
-        day=1,
-        hour=5,
-        minute=0,
-        id="monthly_compression",
         replace_existing=True,
     )
 
@@ -208,15 +173,6 @@ def setup_scheduler():
         "interval",
         minutes=5,
         id="blacklist_scan",
-        replace_existing=True,
-    )
-
-    # Emotion decay every 5 minutes
-    scheduler.add_job(
-        _run_emotion_decay,
-        "interval",
-        minutes=5,
-        id="emotion_decay",
         replace_existing=True,
     )
 
@@ -365,15 +321,6 @@ async def _run_blacklist_scan():
             logger.info(f"Blacklist scan: lifted {count} blacklists")
     except Exception as e:
         logger.warning(f"Blacklist scan failed: {e}")
-
-
-async def _run_emotion_decay():
-    async def _decay(agent):
-        await decay_emotion_toward_baseline(agent.id, get_mbti(agent))
-
-    await _run_for_all_agents(
-        _decay, concurrency=5, task_name="Emotion decay",
-    )
 
 
 async def _run_trigger_scan():

@@ -1,8 +1,6 @@
 import pytest
 
 from app.services.memory.taxonomy import (
-    get_compression_rule,
-    get_promotion_rule,
     resolve_taxonomy,
     summarize_batch_taxonomy,
 )
@@ -21,23 +19,6 @@ def test_resolve_taxonomy_refuses_unknown_main_category():
     assert result.main_category == "不存在"
     assert result.sub_category == "乱填"
     assert result.allowed is False
-
-
-def test_get_promotion_rule_for_identity_name():
-    rule = get_promotion_rule("身份", "姓名")
-    assert rule["allow_l1"] is True
-    assert rule["min_mentions"] == 1
-
-
-def test_get_promotion_rule_for_unsupported_category():
-    rule = get_promotion_rule("情绪", "高兴")
-    assert rule["allow_l1"] is False
-
-
-def test_get_compression_rule_for_preference():
-    rule = get_compression_rule("偏好")
-    assert rule["allow_cross_subcategory"] is False
-    assert rule["batch_size"] == 8
 
 
 def test_summarize_batch_taxonomy_picks_majority():

@@ -14,7 +14,12 @@ router = APIRouter(prefix="/emotions", tags=["emotions"])
 
 @router.get("/{agent_id}/current")
 async def get_current_emotion(agent_id: str):
-    """Get the current emotion state for an AI agent."""
+    """返回 AI 最近一次（上次聊天）计算出的 PAD 缓存值。
+
+    Spec §3.2 AI PAD 每条用户消息动态计算（见 compute_ai_pad），本接口不触发
+    重新生成，只返回上次 compute_ai_pad 回写的缓存。agent 刚创建还没聊过天时
+    返回中性默认 {0.0, 0.5, 0.5}。
+    """
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent or getattr(agent, "status", "active") != "active":
         raise HTTPException(status_code=404, detail="Agent not found")

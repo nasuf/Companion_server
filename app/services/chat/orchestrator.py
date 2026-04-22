@@ -20,7 +20,7 @@ from app.services.chat.prompt_builder import build_system_prompt, build_chat_mes
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
-from app.services.relationship.emotion import quick_emotion_estimate
+from app.services.relationship.emotion import save_ai_emotion
 from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
@@ -385,19 +385,6 @@ async def stream_chat_response(
         {"role": m.role, "content": m.content} for m in recent_messages
     ]
 
-    # --- Load previous user emotion from message metadata (no LLM) ---
-    prev_user_emotion = None
-    for m in reversed(recent_messages[:-1]):  # skip current message
-        if m.role == "user" and m.metadata:
-            meta = m.metadata if isinstance(m.metadata, dict) else {}
-            if "emotion" in meta:
-                prev_user_emotion = meta["emotion"]
-                break
-
-    # --- Quick keyword emotion estimate for current message (no LLM) ---
-    current_user_emotion = quick_emotion_estimate(user_message)
-    prompt_user_emotion = current_user_emotion or prev_user_emotion
-
     # --- Topic tracking (Redis, no LLM) ---
     topic_info = await push_topic(conversation_id, user_message)
     topic_context = format_topic_context(topic_info) if topic_info else None
@@ -411,7 +398,7 @@ async def stream_chat_response(
     # spec §3.1+§3.2 step 2-3: 并行拉取记忆/情绪/画像/作息 + L3 awakening
     fetched = await fetch_parallel_context(
         user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
-        conversation_id=conversation_id, user_message=user_message,
+        user_message=user_message,
         messages_dicts=messages_dicts, parsed_times=parsed_times,
         detected_intent=detected_intent,
         l3_trigger_classify_fn=_l3_trigger_classify,
@@ -421,12 +408,16 @@ async def stream_chat_response(
     memory_strings = fetched.memory_strings
     graph_context = fetched.graph_context
     emotion = fetched.emotion
+    # Spec §3.2: fresh AI PAD 计算完毕后回写缓存，供下一轮延迟计算 / proactive / GET 读接口使用
+    if emotion and agent_id:
+        _fire_background(save_ai_emotion(agent_id, emotion))
+    # Spec §3.2: 用户 PAD 由 data_fetch_phase 并行 LLM 算出，直接传给后续 intent 回复
+    prompt_user_emotion = fetched.user_emotion
     summaries = fetched.summaries
     portrait = fetched.portrait
     schedule = fetched.schedule
     topic_intimacy = fetched.topic_intimacy
     time_memories = fetched.time_memories
-    working_facts = fetched.working_facts
     l3_memories = fetched.l3_memories
     ai_status = fetched.ai_status
     schedule_context = fetched.schedule_context
@@ -536,7 +527,6 @@ async def stream_chat_response(
     system_prompt = await build_system_prompt(
         agent=agent,
         memories=classified_memories,
-        working_facts=working_facts,
         delay_context=delay_context,
         relational_context=relational_context,
         emotion=emotion,
@@ -664,9 +654,7 @@ async def stream_chat_response(
         full_response=full_response,
         messages_dicts=messages_dicts,
         memory_strings=memory_strings,
-        cached_emotion=emotion,
-        mbti=mbti,
-        topic_intimacy=topic_intimacy,
+        user_emotion=prompt_user_emotion,
     ))
 
     # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段

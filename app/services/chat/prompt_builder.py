@@ -230,20 +230,6 @@ async def _build_memory_section(memories: list | None) -> str | None:
     return _section("你记得的事情", body)
 
 
-def _build_working_memory_section(working_facts: list[str] | None) -> str | None:
-    """Build the hot-path working memory section."""
-    if not working_facts:
-        return None
-
-    numbered = "\n".join(f"- {fact}" for fact in working_facts)
-    body = (
-        "以下是当前会话中刚确认的高价值事实。"
-        "优先用于承接刚刚提到的重要信息，但不要机械复述：\n"
-        f"{numbered}"
-    )
-    return _section("当前会话事实", body)
-
-
 def _build_delay_context_section(delay_context: str | None) -> str | None:
     """Build the delayed-reply explanation section."""
     if not delay_context:
@@ -307,7 +293,6 @@ def _build_graph_context_section(graph_context: dict | None) -> str | None:
 async def build_system_prompt(
     agent: Any,
     memories: list[str] | None = None,
-    working_facts: list[str] | None = None,
     delay_context: str | None = None,
     relational_context: str | None = None,
     emotion: dict | None = None,
@@ -348,10 +333,6 @@ async def build_system_prompt(
     port = _build_portrait_section(portrait)
     if port:
         sections.append(port)
-
-    working = _build_working_memory_section(working_facts)
-    if working:
-        sections.append(working)
 
     delay = _build_delay_context_section(delay_context)
     if delay:

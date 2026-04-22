@@ -27,8 +27,11 @@ async def test_fetch_parallel_context_happy_path():
         "app.services.chat.data_fetch_phase.hybrid_retrieve",
         AsyncMock(return_value={"memories": classified, "memory_strings": ["a"], "graph_context": None}),
     ), patch(
-        "app.services.chat.data_fetch_phase.get_ai_emotion",
-        AsyncMock(return_value={"primary_emotion": "中性"}),
+        "app.services.chat.data_fetch_phase.compute_ai_pad",
+        AsyncMock(return_value={"pleasure": 0.1, "arousal": 0.5, "dominance": 0.5}),
+    ), patch(
+        "app.services.chat.data_fetch_phase.extract_emotion",
+        AsyncMock(return_value={"pleasure": 0.2, "arousal": 0.4, "dominance": 0.5}),
     ), patch(
         "app.services.chat.data_fetch_phase.cache_summarizer",
         AsyncMock(return_value={"layer1": "..."}),
@@ -42,11 +45,6 @@ async def test_fetch_parallel_context_happy_path():
         "app.services.chat.data_fetch_phase.get_topic_intimacy",
         AsyncMock(return_value=65.0),
     ), patch(
-        "app.services.chat.data_fetch_phase.update_working_facts",
-        AsyncMock(return_value=[]),
-    ), patch(
-        "app.services.chat.data_fetch_phase.facts_for_prompt", return_value=None,
-    ), patch(
         "app.services.chat.data_fetch_phase.get_current_status",
         return_value={"activity": "工作", "status": "busy"},
     ), patch(
@@ -55,7 +53,7 @@ async def test_fetch_parallel_context_happy_path():
     ):
         ctx = await fetch_parallel_context(
             user_id="u1", agent_id="a1", workspace_id=None,
-            conversation_id="c1", user_message="嗨",
+            user_message="嗨",
             messages_dicts=[{"role": "user", "content": "嗨"}],
             parsed_times=[],
             detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
@@ -68,7 +66,8 @@ async def test_fetch_parallel_context_happy_path():
     # rerank 后按 display_score 降序
     scores = [m.display_score for m in ctx.classified_memories]
     assert scores == sorted(scores, reverse=True)
-    assert ctx.emotion == {"primary_emotion": "中性"}
+    assert ctx.emotion == {"pleasure": 0.1, "arousal": 0.5, "dominance": 0.5}
+    assert ctx.user_emotion == {"pleasure": 0.2, "arousal": 0.4, "dominance": 0.5}
     assert ctx.portrait == "user portrait"
     assert ctx.topic_intimacy == 65.0
     assert ctx.ai_status == {"activity": "工作", "status": "busy"}
@@ -89,7 +88,9 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
         "app.services.chat.data_fetch_phase.hybrid_retrieve",
         AsyncMock(return_value={"memories": ["should_not_use"], "memory_strings": [], "graph_context": None}),
     ), patch(
-        "app.services.chat.data_fetch_phase.get_ai_emotion", AsyncMock(return_value=None),
+        "app.services.chat.data_fetch_phase.compute_ai_pad", AsyncMock(return_value={"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}),
+    ), patch(
+        "app.services.chat.data_fetch_phase.extract_emotion", AsyncMock(return_value={"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}),
     ), patch(
         "app.services.chat.data_fetch_phase.cache_summarizer", AsyncMock(return_value=None),
     ), patch(
@@ -98,12 +99,10 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
         "app.services.chat.data_fetch_phase.get_cached_schedule", AsyncMock(return_value=None),
     ), patch(
         "app.services.chat.data_fetch_phase.get_topic_intimacy", AsyncMock(return_value=50.0),
-    ), patch(
-        "app.services.chat.data_fetch_phase.update_working_facts", AsyncMock(return_value=None),
     ):
         ctx = await fetch_parallel_context(
             user_id="u1", agent_id="a1", workspace_id=None,
-            conversation_id="c1", user_message="嗨",
+            user_message="嗨",
             messages_dicts=[{"role": "user", "content": "嗨"}],
             parsed_times=[],
             detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
@@ -127,7 +126,9 @@ async def test_fetch_parallel_context_l3_awakened_on_strong_relevance():
         "app.services.chat.data_fetch_phase.hybrid_retrieve",
         AsyncMock(return_value={"memories": [], "memory_strings": [], "graph_context": None}),
     ), patch(
-        "app.services.chat.data_fetch_phase.get_ai_emotion", AsyncMock(return_value=None),
+        "app.services.chat.data_fetch_phase.compute_ai_pad", AsyncMock(return_value={"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}),
+    ), patch(
+        "app.services.chat.data_fetch_phase.extract_emotion", AsyncMock(return_value={"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}),
     ), patch(
         "app.services.chat.data_fetch_phase.cache_summarizer", AsyncMock(return_value=None),
     ), patch(
@@ -137,14 +138,12 @@ async def test_fetch_parallel_context_l3_awakened_on_strong_relevance():
     ), patch(
         "app.services.chat.data_fetch_phase.get_topic_intimacy", AsyncMock(return_value=50.0),
     ), patch(
-        "app.services.chat.data_fetch_phase.update_working_facts", AsyncMock(return_value=None),
-    ), patch(
         "app.services.chat.data_fetch_phase.search_l3_memories",
         AsyncMock(return_value=[{"content": "很久以前你说过喜欢下雨"}]),
     ):
         ctx = await fetch_parallel_context(
             user_id="u1", agent_id="a1", workspace_id=None,
-            conversation_id="c1", user_message="还记得我以前喜欢什么天气吗",
+            user_message="还记得我以前喜欢什么天气吗",
             messages_dicts=[{"role": "user", "content": "..."}],
             parsed_times=[],
             detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),

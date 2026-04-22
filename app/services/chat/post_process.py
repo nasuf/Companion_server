@@ -3,12 +3,13 @@
 `save_replies` 是热路径同步调用（持久化分段回复）；
 `run_post_process` 是 fire-and-forget，把 5 个 _bg_* 任务并行执行：
 
-- _bg_emotion: 提取用户情绪 → 更新 AI 情绪状态 → 写消息 metadata
+- _bg_user_emotion: 提取用户 PAD → 写入用户消息 metadata (spec §3.2 用户侧)
 - _bg_summarizer: 跑 3 层摘要并缓存到 Redis（spec §2 摘要复用）
 - _bg_memory_pipeline: spec §2.1/§2.2 记忆抽取（user + AI）
 - _bg_trait_adjustment: 检测用户反馈调整 agent 性格
 - _bg_positive_recovery: 正向互动 +20 耐心（spec §2.5）
 
+AI PAD 不在此处处理 — spec §3.2 由 orchestrator 在热路径内通过 compute_ai_pad 计算。
 `_bg_memory_pipeline` 还被 boundary_phase 通过 bg_memory_pipeline_fn 注入使用。
 """
 
@@ -23,12 +24,6 @@ from prisma import Json
 from app.db import db
 from app.services.interaction.boundary import check_positive_recovery
 from app.services.memory.recording.pipeline import process_memory_pipeline
-from app.services.relationship.emotion import (
-    extract_emotion,
-    get_ai_emotion,
-    save_ai_emotion,
-    update_emotion_state,
-)
 from app.services.summarizer import summarize
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
@@ -83,29 +78,25 @@ async def save_replies(
         return None
 
 
-async def _bg_emotion(
-    agent_id: str | None,
+async def _bg_user_emotion(
     user_message_id: str | None,
-    user_message: str,
-    cached_emotion: dict | None = None,
-    topic_intimacy: float = 50.0,
-    mbti: dict | None = None,
+    user_emotion: dict | None,
 ) -> None:
-    """提取用户情绪 → 更新 AI 情绪状态 → 写消息 metadata。"""
-    if not agent_id:
+    """Spec §3.2 用户侧：把 data_fetch_phase 已经算好的 LLM 用户 PAD 写进消息 metadata。
+
+    用户 PAD 的 LLM 调用 (extract_emotion) 已在热路径 data_fetch_phase 并行跑完，
+    这里只负责持久化到消息 metadata 供将来审计 / emotion timeline 使用。
+    AI 侧 PAD 由 orchestrator 热路径内通过 compute_ai_pad 计算，不在这里处理。
+    """
+    if not user_message_id or not user_emotion:
         return
     try:
-        user_emotion = await extract_emotion(user_message)
-        current_emotion = cached_emotion or await get_ai_emotion(agent_id)
-        new_emotion = update_emotion_state(current_emotion, user_emotion, topic_intimacy, mbti=mbti)
-        await save_ai_emotion(agent_id, new_emotion)
-        if user_message_id:
-            await db.message.update(
-                where={"id": user_message_id},
-                data={"metadata": Json({"emotion": user_emotion})},
-            )
+        await db.message.update(
+            where={"id": user_message_id},
+            data={"metadata": Json({"emotion": user_emotion})},
+        )
     except Exception as e:
-        logger.warning(f"Background emotion update failed: {e}")
+        logger.warning(f"Background user emotion metadata write failed: {e}")
 
 
 async def _bg_summarizer(
@@ -176,23 +167,24 @@ async def run_post_process(
     full_response: str,
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
-    cached_emotion: dict | None = None,
-    mbti: dict | None = None,
-    topic_intimacy: float = 50.0,
+    user_emotion: dict | None = None,
 ) -> None:
     """5 个后台任务并发执行。本身 fire-and-forget。
 
-    1. 用户情绪抽取 + AI 状态更新
+    1. 写用户 PAD 到消息 metadata (spec §3.2 用户侧，值已由热路径算出)
     2. 3 层摘要缓存
     3. 记忆抽取 pipeline（user + AI）
     4. 性格特征调整（仅 agent_id 存在）
     5. 正向恢复（仅 agent_id 存在）
+
+    AI PAD (spec §3.2) 由 orchestrator 热路径内 compute_ai_pad 处理，不在此处。
+    用户 PAD 的 LLM 调用 extract_emotion 也在 data_fetch_phase 并行跑，这里只写 metadata。
     """
     _ = conversation_id  # 保留供未来扩展（如 conversation-level metric）
     try:
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
-            _bg_emotion(agent_id, user_message_id, user_message, cached_emotion, topic_intimacy, mbti),
+            _bg_user_emotion(user_message_id, user_emotion),
             _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]

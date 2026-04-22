@@ -1,7 +1,13 @@
-"""Emotion system.
+"""Emotion system — PAD (Pleasure-Arousal-Dominance) model.
 
-PAD (Pleasure-Arousal-Dominance) emotion model driven by MBTI personality.
-Extracts emotion from user messages and manages AI emotion state.
+Spec §3.2 前置步骤：每条用户消息触发一次 `emotion.ai_pad` 小模型调用，
+输入 (作息状态, 当前活动, 近期对话上下文) 输出 AI 当前 PAD。
+没有持久化的 AI 情绪状态，没有衰减，没有基线，没有用户情绪融合。
+
+`ai_emotion_states` 表/Redis `emotion:{agent_id}` 被降级为 **只读缓存**：
+- 热路径每次聊天计算新 PAD 后写入缓存
+- Proactive 主动消息 / GET /emotions 读接口 / 消息接收时的延迟计算从缓存读取
+  （read-only 路径下不再调 LLM，避免 per-tick 成本）
 """
 
 import logging
@@ -10,7 +16,6 @@ from app.db import db
 from app.redis_client import get_redis, DEFAULT_TTL
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
-from app.services.mbti import get_mbti, signal as mbti_signal
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +77,6 @@ def label_to_pad(label: str) -> dict | None:
 # --- Quick keyword emotion estimate (no LLM) ---
 
 # Only covers high-confidence keyword-detectable emotions (5/12).
-# 恐惧/惊讶/厌恶/中性/失望/欣慰/戏谑 are omitted intentionally —
-# they require sentence-level context that keyword matching can't provide.
 _QUICK_EMOTION_KEYWORDS: dict[str, list[str]] = {
     "高兴": ["哈哈", "开心", "太好了", "好棒", "耶", "太开心", "好高兴"],
     "悲伤": ["难过", "伤心", "哭", "呜呜", "好难受", "心碎", "委屈", "不好", "不开心", "想哭"],
@@ -123,90 +126,41 @@ def _clamp_pad(dim: str, value: float) -> float:
     return _clamp(value, lo, hi)
 
 
-def _lerp_pad(current: dict, target: dict, rate: float) -> dict:
-    """Linear interpolation between two PAD dicts."""
-    result = {}
-    for dim in _PAD_DIMS:
-        c = current.get(dim, _PAD_DEFAULTS[dim])
-        t = target.get(dim, _PAD_DEFAULTS[dim])
-        result[dim] = c + (t - c) * rate
-    return result
+# --- Spec §3.2 AIPAD值判断 ---
 
-
-# --- 3B.1 基线计算 ---
-
-def compute_baseline_emotion(mbti: dict | None) -> dict:
-    """Compute baseline PAD from MBTI using a deterministic formula.
-
-    Used by emotion decay (every 5 min) — must be fast and deterministic.
-    For initial creation, use compute_baseline_emotion_llm() instead.
-    """
-    e = mbti_signal(mbti, "E")
-    t = mbti_signal(mbti, "T")
-    f = mbti_signal(mbti, "F")
-    j = mbti_signal(mbti, "J")
-    p_letter = mbti_signal(mbti, "P")  # 'p' 已被 PAD pleasure 占用
-    n = mbti_signal(mbti, "N")
-    humor = (e + n) / 2  # 外向 + 直觉的复合
-
-    pleasure = 0.2 + (e - 0.5) * 0.4 + (humor - 0.5) * 0.4 + (p_letter - 0.5) * 0.2
-    arousal = 0.5 + (e - 0.5) * 0.3 + (n - 0.5) * 0.3 + (humor - 0.5) * 0.2 + (f - 0.5) * 0.2
-    dominance = (
-        0.5 + (j - 0.5) * 0.3 + (t - 0.5) * 0.3 + (e - 0.5) * 0.2
-        + (humor - 0.5) * 0.2 - (p_letter - 0.5) * 0.2 - (f - 0.5) * 0.2
-    )
-
-    return {
-        "pleasure": _clamp_pad("pleasure", pleasure),
-        "arousal": _clamp_pad("arousal", arousal),
-        "dominance": _clamp_pad("dominance", dominance),
-    }
-
-
-async def compute_baseline_emotion_llm(
-    mbti: dict | None,
+async def compute_ai_pad(
     *,
-    name: str = "",
-    background: str = "",
-    gender: str = "",
+    current_time: str,
+    schedule_status: str,
+    current_activity: str,
+    recent_context: str,
 ) -> dict:
-    """Compute initial baseline PAD via small model (LLM).
+    """Spec §3.2 AIPAD值判断：每条用户消息触发一次小模型调用，输出 AI 当前 PAD。
 
-    Used only during agent creation. Falls back to formula on LLM failure.
+    Inputs 严格对齐 spec §3.2 四项参考信息：
+      - 当前时间（UTC+8，ISO 格式）
+      - 当前作息状态（空闲/忙碌/很忙碌/睡眠等）
+      - 当前正在做（活动名）
+      - 对话上下文（近期消息片段）
+
+    无 prev_pad / baseline / 衰减。LLM 失败时回退到中性默认 {0.0, 0.5, 0.5}。
     """
-    prompt = (await get_prompt_text("emotion.baseline")).format(
-        name=name or "AI",
-        gender=gender or "未设定",
-        personality=str(mbti or {}),
-        background=background or "暂无",
+    prompt = (await get_prompt_text("emotion.ai_pad")).format(
+        current_time=current_time or "（未知）",
+        current_status=schedule_status or "空闲",
+        current_activity=current_activity or "自由活动",
+        recent_context=recent_context or "（无）",
     )
-
     try:
         result = await invoke_json(get_utility_model(), prompt)
         return {
-            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", 0.0))),
-            "arousal": _clamp_pad("arousal", float(result.get("arousal", 0.5))),
-            "dominance": _clamp_pad("dominance", float(result.get("dominance", 0.5))),
+            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", _PAD_DEFAULTS["pleasure"]))),
+            "arousal": _clamp_pad("arousal", float(result.get("arousal", _PAD_DEFAULTS["arousal"]))),
+            "dominance": _clamp_pad("dominance", float(result.get("dominance", _PAD_DEFAULTS["dominance"]))),
         }
     except Exception as e:
-        logger.warning(f"LLM baseline emotion failed, falling back to formula: {e}")
-        return compute_baseline_emotion(mbti)
-
-
-def compute_emotional_stability(mbti: dict | None) -> float:
-    """计算情绪稳定性系数。
-
-    spec §1.2 后用 MBTI 推导：T(理性) + J(计划) 高 → 稳定；F(感性) + P(知觉) 高 → 不稳定
-        stability = 0.5 + (T-0.5)*0.4 + (J-0.5)*0.3 - (F-0.5)*0.3 - (P-0.5)*0.2
-    """
-    t = mbti_signal(mbti, "T")
-    j = mbti_signal(mbti, "J")
-    f = mbti_signal(mbti, "F")
-    p = mbti_signal(mbti, "P")
-
-    stability = (0.5 + (t - 0.5) * 0.4 + (j - 0.5) * 0.3
-                 - (f - 0.5) * 0.3 - (p - 0.5) * 0.2)
-    return _clamp(stability, 0.0, 1.0)
+        logger.warning(f"compute_ai_pad failed, falling back to neutral defaults: {e}")
+        return dict(_PAD_DEFAULTS)
 
 
 async def extract_emotion(message: str) -> dict:
@@ -226,56 +180,6 @@ async def extract_emotion(message: str) -> dict:
         return dict(_PAD_DEFAULTS)
 
 
-# --- 3B.2 融合公式 + 共情向量 ---
-
-# 亲密度阶段→融合权重 (α=AI权重, β=用户权重, γ=共情权重)
-# 阶段划分复用 intimacy.RELATIONSHIP_STAGES
-from app.services.relationship.intimacy import get_relationship_stage
-
-_STAGE_WEIGHTS: dict[str, tuple[float, float, float]] = {
-    "普通朋友": (0.5, 0.2, 0.3),
-    "好朋友":   (0.4, 0.3, 0.3),
-    "挚友":     (0.3, 0.4, 0.3),
-    "灵魂伴侣": (0.2, 0.5, 0.3),
-}
-
-
-def _get_fusion_weights(topic_intimacy: float) -> tuple[float, float, float]:
-    """Get α, β, γ fusion weights based on topic intimacy."""
-    stage = get_relationship_stage(topic_intimacy)
-    return _STAGE_WEIGHTS.get(stage, (0.2, 0.5, 0.3))
-
-
-def update_emotion_state(
-    current: dict,
-    input_emotion: dict,
-    topic_intimacy: float = 50.0,
-    mbti: dict | None = None,
-) -> dict:
-    """Fuse AI emotion with user emotion using empathy vector.
-
-    E_target = α * E_ai + β * E_user + γ * empathy_vector
-    empathy_vector = (p_user * F程度, a_user * F程度, d_user * F程度)
-    spec §1.2: F 程度即 MBTI 的 (100-TF)/100 信号。
-    """
-    alpha, beta, gamma = _get_fusion_weights(topic_intimacy)
-
-    emotional_sensitivity = mbti_signal(mbti, "F")  # F 程度 = 共情敏感
-    empathy = {
-        dim: input_emotion.get(dim, _PAD_DEFAULTS[dim]) * emotional_sensitivity
-        for dim in _PAD_DIMS
-    }
-
-    result = {}
-    for dim in _PAD_DIMS:
-        e_ai = current.get(dim, _PAD_DEFAULTS[dim])
-        e_user = input_emotion.get(dim, _PAD_DEFAULTS[dim])
-        e_empathy = empathy[dim]
-        result[dim] = _clamp_pad(dim, alpha * e_ai + beta * e_user + gamma * e_empathy)
-
-    return result
-
-
 def emotion_to_tone(emotion: dict) -> str:
     """Map PAD emotion to a tone descriptor string."""
     v_sign = 1 if emotion.get("pleasure", 0) >= 0 else -1
@@ -284,8 +188,17 @@ def emotion_to_tone(emotion: dict) -> str:
     return TONE_MAP.get((v_sign, a_sign, d_sign), "平稳而克制")
 
 
+# --- Cache (ai_emotion_states) ---
+
 async def get_ai_emotion(agent_id: str) -> dict:
-    """Get current AI emotion state from DB, with Redis cache."""
+    """Read last-computed AI PAD from cache.
+
+    降级为缓存后，此函数仅用于：
+      - 消息接收时的延迟计算（spec §6.2，需要 arousal 判定高情绪状态）
+      - Proactive 主动消息的 mood label
+      - GET /emotions/{agent_id}/current 读接口
+    Chat hot path 不读此缓存，总是通过 compute_ai_pad 重新计算。
+    """
     redis = await get_redis()
     cache_key = f"emotion:{agent_id}"
 
@@ -304,47 +217,8 @@ async def get_ai_emotion(agent_id: str) -> dict:
     return emotion
 
 
-# --- 3B.5 记忆情绪权重 0.05→0.2 ---
-
-def apply_memory_emotion_influence(
-    current_emotion: dict,
-    memory_emotions: list[dict],
-    influence_weight: float = 0.2,
-) -> dict:
-    """Apply emotion influence from recalled memories."""
-    if not memory_emotions:
-        return current_emotion
-
-    avg = {dim: 0.0 for dim in _PAD_DIMS}
-    for mem_emo in memory_emotions:
-        for dim in _PAD_DIMS:
-            avg[dim] += mem_emo.get(dim, _PAD_DEFAULTS[dim])
-    for dim in _PAD_DIMS:
-        avg[dim] /= len(memory_emotions)
-
-    return _lerp_pad(current_emotion, avg, influence_weight)
-
-
-# --- 3B.4 情绪衰减用 stability ---
-
-async def decay_emotion_toward_baseline(
-    agent_id: str,
-    mbti: dict | None = None,
-) -> None:
-    """Decay current emotion toward MBTI-derived baseline.
-
-    decay_rate = 0.05 + (1 - stability) * 0.1
-    """
-    current = await get_ai_emotion(agent_id)
-    stability = compute_emotional_stability(mbti)
-    decay_rate = 0.05 + (1 - stability) * 0.1
-    baseline = compute_baseline_emotion(mbti)
-    decayed = _lerp_pad(current, baseline, decay_rate)
-    await save_ai_emotion(agent_id, decayed)
-
-
 async def save_ai_emotion(agent_id: str, emotion: dict) -> None:
-    """Save AI emotion state (PAD only) to DB and cache."""
+    """Write computed PAD to cache (DB + Redis) for downstream readers."""
     pad = {dim: _clamp_pad(dim, emotion.get(dim, _PAD_DEFAULTS[dim])) for dim in _PAD_DIMS}
 
     await db.aiemotionstate.upsert(

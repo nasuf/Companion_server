@@ -158,6 +158,8 @@ async def _handle_message(
             agent.id, agent.name, get_mbti(agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
+    # Spec §6.2 高情绪状态判定需要 AI arousal；这里读缓存（上一轮算出的 PAD）作近似。
+    # 热路径计算新 PAD 在 orchestrator 里 (spec §3.2)；此处延迟计算在消息进入前触发。
     ai_emotion = await get_ai_emotion(agent.id)
     current_context = await build_reply_timing_context(
         agent_id=agent.id,
