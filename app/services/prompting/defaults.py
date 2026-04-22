@@ -213,43 +213,6 @@ EMOTION_EXTRACTION_PROMPT = """【任务】分析用户消息的情绪，输出P
 
 【输出格式】{{"pleasure": float, "arousal": float, "dominance": float}}"""
 
-LAYER1_REVIEW_PROMPT = """你是一个对话摘要系统。
-
-请将以下对话历史总结为200-300字的摘要。
-重点关注：讨论的核心话题、分享的重要信息、关系互动。
-
-对话内容：
-{conversation}
-
-摘要："""
-
-LAYER2_DISTILLATION_PROMPT = """你是一个记忆提炼系统。
-
-根据用户已存储的记忆和当前消息，提取最相关的要点，150-200字。
-重点关注：用户在意什么、相关的过往背景、有用的上下文。
-
-已存储记忆：
-{memories}
-
-当前消息：{current_message}
-
-要点："""
-
-LAYER3_STATE_PROMPT = """你是一个对话状态分析系统。
-
-分析最近的消息和当前消息，用100-150字描述：
-1. 当前情绪基调
-2. 正在讨论的话题
-3. 用户可能的意图
-4. 建议的回复策略
-
-最近消息：
-{recent}
-
-当前消息：{current_message}
-
-分析："""
-
 # Spec 第一部分 §2.1 + 指令模版 P20「AI生活画像」
 # 与 spec 原文字符级一致。
 LIFE_OVERVIEW_PROMPT = """【任务】为AI朋友生成日常生活画像（200字以内），用于指导每日随机作息安排。

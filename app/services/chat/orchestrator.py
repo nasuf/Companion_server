@@ -4,7 +4,7 @@ Hot path (user-facing, ~2s):
   save msg → parallel(vector retrieval + load cached context) → prompt → stream LLM
 
 Background (fire-and-forget, after response):
-  emotion extraction + summarizer update + memory pipeline
+  user PAD metadata + AI PAD cache write + memory pipeline + trait/patience updates
 """
 
 import asyncio
@@ -523,7 +523,6 @@ async def stream_chat_response(
         relational_context=relational_context,
         emotion=emotion,
         graph_context=fetched.graph_context,
-        summaries=fetched.summaries,
         portrait=portrait,
         topic_context=topic_context,
         user_emotion=prompt_user_emotion,
@@ -645,7 +644,6 @@ async def stream_chat_response(
         user_message_id=user_message_id,
         full_response=full_response,
         messages_dicts=messages_dicts,
-        memory_strings=fetched.memory_strings,
         user_emotion=prompt_user_emotion,
         ai_emotion=emotion,
     ))

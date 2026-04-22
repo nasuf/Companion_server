@@ -30,14 +30,12 @@ class Settings(BaseSettings):
 
     # Advanced / legacy overrides
     chat_model: str = ""
-    summarizer_model: str = ""
     utility_model: str = ""
     prefilter_model: str = ""  # Override for pre-filter model (default: utility_model)
     enable_memory_prefilter: bool = True  # Spec §2.1.2: small model "记/不记" before big model extraction
     ollama_model: str = ""
     llm_provider: str = ""
     chat_provider: str = ""
-    summarizer_provider: str = ""
     utility_provider: str = ""
     embedding_provider: str = ""
 

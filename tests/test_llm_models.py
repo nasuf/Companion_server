@@ -6,7 +6,6 @@ from app.services.llm import models
 
 def _reset_caches() -> None:
     models.get_chat_model.cache_clear()
-    models.get_summarizer_model.cache_clear()
     models.get_utility_model.cache_clear()
     models.get_embedding_model.cache_clear()
 

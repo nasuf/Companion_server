@@ -46,12 +46,6 @@ def _chat_model_name() -> str:
     )
 
 
-def _summarizer_model_name() -> str:
-    return settings.summarizer_model or (
-        settings.remote_small_model if settings.online_model else settings.local_small_model
-    )
-
-
 def _embedding_model_name() -> str:
     return settings.embedding_model
 
@@ -97,22 +91,6 @@ def get_chat_model() -> BaseChatModel:
         return _dashscope_chat_model(_chat_model_name())
     return ChatOllama(
         model=_chat_model_name(),
-        base_url=settings.ollama_base_url,
-        client_kwargs=_OLLAMA_CLIENT_KWARGS,
-        async_client_kwargs=_OLLAMA_CLIENT_KWARGS,
-    )
-
-
-@lru_cache(maxsize=1)
-def get_summarizer_model() -> BaseChatModel:
-    """Return the small model used by the 3-layer summarizer."""
-    provider = _provider_for("summarizer")
-    if provider == "claude":
-        return _claude_model()
-    if provider == "dashscope":
-        return _dashscope_chat_model(_summarizer_model_name())
-    return ChatOllama(
-        model=_summarizer_model_name(),
         base_url=settings.ollama_base_url,
         client_kwargs=_OLLAMA_CLIENT_KWARGS,
         async_client_kwargs=_OLLAMA_CLIENT_KWARGS,

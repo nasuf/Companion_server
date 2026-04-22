@@ -115,7 +115,7 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
   - `MIGRATION_DATABASE_URL` uses transaction mode (`6543`) for Prisma admin commands.
   - For Prisma against Supabase transaction pooler, keep `pgbouncer=true&connection_limit=1`.
 - The memory system still uses embeddings internally, but you do not need to configure an embedding model separately anymore.
-- `ONLINE_MODEL=true` means chat / summarizer / utility / embedding all use DashScope defaults.
+- `ONLINE_MODEL=true` means chat / utility / embedding all use DashScope defaults.
 - `ONLINE_MODEL=false` means the same roles all use local Ollama defaults.
 - The backend API is not exposed directly to the public internet in this deploy shape; Nginx on the web repo proxies requests to `127.0.0.1:8000`.
 - The prompt admin API is protected by HTTP Basic auth using `ADMIN_USERNAME` and `ADMIN_PASSWORD`.

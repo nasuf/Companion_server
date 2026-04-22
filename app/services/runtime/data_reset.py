@@ -99,7 +99,6 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         f"trait_adj_week:{agent_id}:*",
         f"trigger_count:{agent_id}:{user_id}:*",
         f"proactive_count:{agent_id}:{user_id}:*",
-        f"cache:sum:*",   # summarizer cache（MD5 key，无法按 conv 过滤，清全部）
         f"cache:ret:*",   # retrieval cache
         f"cache:graph:*", # graph cache
         f"cache:emb:*",   # embedding cache

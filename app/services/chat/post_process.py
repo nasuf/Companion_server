@@ -1,15 +1,14 @@
-"""聊天回复推送后的善后工作：持久化 + 5 个并行后台任务。
+"""聊天回复推送后的善后工作：持久化 + 并行后台任务。
 
 `save_replies` 是热路径同步调用（持久化分段回复）；
-`run_post_process` 是 fire-and-forget，把 5 个 _bg_* 任务并行执行：
+`run_post_process` 是 fire-and-forget，把以下任务并行执行：
 
-- _bg_user_emotion: 提取用户 PAD → 写入用户消息 metadata (spec §3.2 用户侧)
-- _bg_summarizer: 跑 3 层摘要并缓存到 Redis（spec §2 摘要复用）
+- _bg_user_emotion: 写用户 PAD 到消息 metadata（值由热路径已算好）
 - _bg_memory_pipeline: spec §2.1/§2.2 记忆抽取（user + AI）
 - _bg_trait_adjustment: 检测用户反馈调整 agent 性格
 - _bg_positive_recovery: 正向互动 +20 耐心（spec §2.5）
+- save_ai_emotion: 回写 AI PAD 缓存
 
-AI PAD 不在此处处理 — spec §3.2 由 orchestrator 在热路径内通过 compute_ai_pad 计算。
 `_bg_memory_pipeline` 还被 boundary_phase 通过 bg_memory_pipeline_fn 注入使用。
 """
 
@@ -25,7 +24,6 @@ from app.db import db
 from app.services.interaction.boundary import check_positive_recovery
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.relationship.emotion import save_ai_emotion
-from app.services.summarizer import summarize
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
     detect_direct_feedback,
@@ -95,20 +93,6 @@ async def _bg_user_emotion(
         logger.warning(f"Background user emotion metadata write failed: {e}")
 
 
-async def _bg_summarizer(
-    messages: list[dict],
-    current_message: str,
-    memories: list[str] | None,
-) -> None:
-    """跑 3 层摘要并缓存到 Redis 供下次请求复用。"""
-    try:
-        result = await summarize(messages, current_message, memories)
-        if result:
-            logger.debug("Background summarizer completed and cached")
-    except Exception as e:
-        logger.warning(f"Background summarizer failed: {e}")
-
-
 async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
     """spec §2.1 / §2.2：用户侧与 AI 侧走两条独立管线，owner 由路径决定。
 
@@ -162,17 +146,15 @@ async def run_post_process(
     user_message_id: str | None,
     full_response: str,
     messages_dicts: list[dict],
-    memory_strings: list[str] | None,
     user_emotion: dict | None = None,
     ai_emotion: dict | None = None,
 ) -> None:
-    """6 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 摘要 / 记忆抽取 / 性格反馈 / 耐心恢复。"""
+    """5 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 记忆抽取 / 性格反馈 / 耐心恢复。"""
     _ = conversation_id  # 保留供未来扩展（如 conversation-level metric）
     try:
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
             _bg_user_emotion(user_message_id, user_emotion),
-            _bg_summarizer(full_messages, user_message, memory_strings),
             _bg_memory_pipeline(user_id, full_messages),
         ]
         if agent_id:

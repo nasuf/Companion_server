@@ -77,11 +77,10 @@ async def test_save_replies_first_carries_trace_pending():
 
 @pytest.mark.asyncio
 async def test_run_post_process_fires_all_tasks_for_agent():
-    """有 agent_id 时，5 个后台任务都被并行 await。"""
+    """有 agent_id 时，4 个后台任务都被并行 await（不含可选 save_ai_emotion）。"""
     from app.services.chat import post_process
 
     with patch.object(post_process, "_bg_user_emotion", AsyncMock()) as e, \
-         patch.object(post_process, "_bg_summarizer", AsyncMock()) as s, \
          patch.object(post_process, "_bg_memory_pipeline", AsyncMock()) as m, \
          patch.object(post_process, "_bg_trait_adjustment", AsyncMock()) as t, \
          patch.object(post_process, "_bg_positive_recovery", AsyncMock()) as pr:
@@ -90,11 +89,9 @@ async def test_run_post_process_fires_all_tasks_for_agent():
             user_message="hi", user_message_id="msg-x",
             full_response="hello",
             messages_dicts=[{"role": "user", "content": "hi"}],
-            memory_strings=[],
         )
 
     e.assert_awaited_once()
-    s.assert_awaited_once()
     m.assert_awaited_once()
     t.assert_awaited_once()
     pr.assert_awaited_once()
@@ -106,7 +103,6 @@ async def test_run_post_process_skips_agent_only_tasks_when_no_agent():
     from app.services.chat import post_process
 
     with patch.object(post_process, "_bg_user_emotion", AsyncMock()) as e, \
-         patch.object(post_process, "_bg_summarizer", AsyncMock()) as s, \
          patch.object(post_process, "_bg_memory_pipeline", AsyncMock()) as m, \
          patch.object(post_process, "_bg_trait_adjustment", AsyncMock()) as t, \
          patch.object(post_process, "_bg_positive_recovery", AsyncMock()) as pr:
@@ -115,13 +111,11 @@ async def test_run_post_process_skips_agent_only_tasks_when_no_agent():
             user_message="hi", user_message_id=None,
             full_response="hello",
             messages_dicts=[{"role": "user", "content": "hi"}],
-            memory_strings=None,
         )
 
-    # 3 个公共任务仍跑
+    # 公共任务仍跑
     e.assert_awaited_once()
-    s.assert_awaited_once()
     m.assert_awaited_once()
-    # 2 个 agent-only 跳过
+    # agent-only 跳过
     t.assert_not_called()
     pr.assert_not_called()

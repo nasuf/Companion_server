@@ -162,31 +162,6 @@ async def _build_emotion_section(
     return _section("当前情绪", body)
 
 
-def _build_summarizer_section(summaries: dict | None) -> str | None:
-    """Build summarizer sections (review / distillation / state)."""
-    if not summaries:
-        return None
-
-    parts: list[str] = []
-
-    review = summaries.get("review")
-    if review:
-        parts.append(f"### 对话回顾\n{review}")
-
-    distillation = summaries.get("distillation")
-    if distillation:
-        parts.append(f"### 记忆要点\n{distillation}")
-
-    state = summaries.get("state")
-    if state:
-        parts.append(f"### 当前状态\n{state}")
-
-    if not parts:
-        return None
-
-    return _section("上下文摘要", "\n\n".join(parts))
-
-
     # (core_memory permanent injection removed — spec §3 uses retrieval only)
 
 
@@ -297,7 +272,6 @@ async def build_system_prompt(
     relational_context: str | None = None,
     emotion: dict | None = None,
     graph_context: dict | None = None,
-    summaries: dict | None = None,
     portrait: str | None = None,
     topic_context: str | None = None,
     user_emotion: dict | None = None,
@@ -325,10 +299,6 @@ async def build_system_prompt(
     emo = await _build_emotion_section(emotion, user_emotion, intimacy_stage)
     if emo:
         sections.append(emo)
-
-    summ = _build_summarizer_section(summaries)
-    if summ:
-        sections.append(summ)
 
     port = _build_portrait_section(portrait)
     if port:

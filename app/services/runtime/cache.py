@@ -1,7 +1,6 @@
 """Redis caching layer for expensive operations.
 
-Caches: embeddings, retrieval results, prompt context, graph queries,
-and summarizer results.
+Caches: embeddings, retrieval results, prompt context, graph queries.
 
 Invalidation strategy: per (user, workspace) version counter bumped on any
 memory write/delete. The counter is embedded in the cache key so stale
@@ -149,14 +148,3 @@ async def cache_set_graph_context(user_id: str, context: dict, workspace_id: str
     )
 
 
-async def cache_summarizer(conv_hash: str) -> dict | None:
-    """Get cached summarizer results."""
-    result = await cache_get("sum", conv_hash)
-    if isinstance(result, dict):
-        return result
-    return None
-
-
-async def cache_set_summarizer(conv_hash: str, results: dict) -> None:
-    """Cache summarizer results (TTL 5 min)."""
-    await cache_set("sum", conv_hash, results, ttl=DEFAULT_TTL)

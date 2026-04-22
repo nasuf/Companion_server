@@ -229,7 +229,7 @@ async def hybrid_retrieve(
     # Select within token budget (returns ClassifiedMemory list)
     classified_memories = select_context(top_candidates, token_budget)
 
-    # Plain text list for consumers that don't need classification (summarizer, etc.)
+    # Plain text list for consumers that don't need ClassifiedMemory metadata
     memory_strings = [m.text for m in classified_memories] if classified_memories else None
 
     # Graph context (with caching)

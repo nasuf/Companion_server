@@ -23,7 +23,6 @@ from app.services.memory.retrieval.relevance import (
 from app.services.portrait import get_latest_portrait
 from app.services.relationship.emotion import compute_ai_pad, extract_emotion
 from app.services.relationship.intimacy import get_topic_intimacy
-from app.services.runtime.cache import cache_summarizer
 from app.services.schedule_domain.schedule import (
     format_schedule_context,
     get_cached_schedule,
@@ -44,7 +43,6 @@ class FetchedContext:
     graph_context: dict | None = None
     emotion: dict | None = None             # AI PAD (spec §3.2)
     user_emotion: dict | None = None        # 用户 PAD (spec §3.2 用户侧)
-    summaries: dict | None = None
     portrait: Any = None
     schedule: Any = None
     topic_intimacy: float = 50.0
@@ -91,17 +89,6 @@ def _format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_ch
     if len(text) > max_chars:
         text = text[-max_chars:]
     return text or "（无）"
-
-
-async def _load_cached_summaries(messages_dicts: list[dict]) -> dict | None:
-    from app.services.summarizer import _conv_hash
-    prev_msgs = messages_dicts[:-1]
-    prev_user_content = next(
-        (m["content"] for m in reversed(prev_msgs) if m["role"] == "user"),
-        "",
-    )
-    ch = _conv_hash(prev_msgs, prev_user_content)
-    return await cache_summarizer(ch)
 
 
 async def _load_portrait(user_id: str, agent_id: str | None) -> Any:
@@ -242,13 +229,12 @@ async def fetch_parallel_context(
     recent_context = _format_recent_context(messages_dicts)
 
     (
-        relevance_result, retrieval_result, summaries,
+        relevance_result, retrieval_result,
         portrait, topic_intimacy,
         time_memories_result, user_emotion_result, emotion_result,
     ) = await asyncio.gather(
         _classify_relevance(user_message),
         _do_retrieval(user_message, user_id, workspace_id),
-        _load_cached_summaries(messages_dicts),
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times),
@@ -273,7 +259,6 @@ async def fetch_parallel_context(
         memory_relevance, retrieval_result,
     )
 
-    summaries = _unwrap(summaries, None, "Loading cached summaries")
     portrait = _unwrap(portrait, None, "Loading portrait")
     topic_intimacy = _unwrap(topic_intimacy, 50.0, "Loading topic intimacy")
     time_memories: list[str] = _unwrap(time_memories_result, [], "Loading time memories") or []
@@ -293,7 +278,6 @@ async def fetch_parallel_context(
         graph_context=graph_context,
         emotion=emotion,
         user_emotion=user_emotion,
-        summaries=summaries,
         portrait=portrait,
         schedule=schedule,
         topic_intimacy=float(topic_intimacy) if topic_intimacy is not None else 50.0,
