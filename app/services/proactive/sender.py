@@ -6,7 +6,7 @@
   _apply_memory_cooldown    spec §9 -1/+50 冷却语义
   _generate_message         按 (trigger_type, source, decay_final) 分发 7 个 prompt
   _persist_proactive_state  调 mark_proactive_sent + save_last_reply_timestamp
-  generate_and_send_proactive  主流程编排 (上述 5 段 + emit + bg self_memory)
+  generate_and_send_proactive  主流程编排 (上述 5 段 + emit + bg AI 自我记忆 pipeline)
 
 公共持久化与 WS 广播在 emit.py.
 """
@@ -21,7 +21,7 @@ from typing import Any
 
 from app.db import db
 from app.services.llm.models import get_chat_model, invoke_text
-from app.services.memory.self_memory import generate_daily_self_memories
+from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
     can_send_proactive, can_send_proactive_2day,
@@ -393,7 +393,7 @@ async def generate_and_send_proactive(
         now_ts=now_ts,
     )
 
-    asyncio.create_task(_bg_self_memory(state.agent_id, state.user_id, message))
+    asyncio.create_task(_bg_proactive_ai_memory(state.user_id, message))
     return True
 
 
@@ -496,12 +496,13 @@ async def send_first_greeting(
 # 后台任务
 # ────────────────────────────────────────────────────────────────────
 
-async def _bg_self_memory(agent_id: str, user_id: str, message: str) -> None:
+async def _bg_proactive_ai_memory(user_id: str, message: str) -> None:
+    """Spec §2.2：把刚发出的主动消息送进 per-message AI 自我记忆 pipeline。"""
     try:
-        await generate_daily_self_memories(
-            agent_id=agent_id,
+        await process_memory_pipeline(
             user_id=user_id,
-            dialogue_summary=f"AI主动对用户说：{message}",
+            conversation_text=f"assistant: {message}",
+            side="ai",
         )
     except Exception as e:
-        logger.warning(f"Proactive self-memory generation failed: {e}")
+        logger.warning(f"Proactive AI memory pipeline failed: {e}")

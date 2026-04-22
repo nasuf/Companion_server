@@ -70,7 +70,6 @@ from app.services.prompting.defaults import (
     SCHEDULE_DAILY_SUMMARY_MEMORIES_PROMPT,
     SCHEDULE_DAILY_SUMMARY_PROMPT,
     SCHEDULE_QUERY_REPLY_PROMPT,
-    SELF_MEMORY_PROMPT,
     SEVERE_ATTACK_REPLY_PROMPT,
     STRONG_MEMORY_REPLY_PROMPT,
     SYSTEM_BASE_PROMPT,
@@ -127,7 +126,6 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("proactive.special_reminder", "特殊日期(提醒)", "主动交流", "主动消息", "用户提醒日期主动提醒。", PROACTIVE_SPECIAL_REMINDER_PROMPT),
     PromptDefinition("proactive.special_combined", "特殊日期(合并)", "主动交流", "主动消息", "同日多个特殊日期合并消息。", PROACTIVE_SPECIAL_COMBINED_PROMPT),
     PromptDefinition("boundary.apology", "道歉真诚度检测", "边界系统", "边界", "【工程扩展】拉黑态防 spam-unblock：用 sincerity 阈值闸门用户是否真心道歉，spec §2.6.2.1 的 intent.unified 仅做意图分类不评估真诚度。", APOLOGY_PROMPT),
-    PromptDefinition("self_memory.daily", "AI 自我记忆生成(事件级)", "AI 自我记忆", "自我记忆", "【工程扩展】从单次对话事件生成 AI 自我记忆（日末汇总见 schedule.daily_summary_memories）。", SELF_MEMORY_PROMPT),
     PromptDefinition("agent.personality_scoring", "AI 性格打分", "初始化", "初始化", "Spec §1.3 + 指令模版 P26：agent 创建时用 LLM 把用户选的 7 维性格推导为 MBTI 8 维分数。在后台异步任务中调用，不阻塞 API 响应。", PERSONALITY_SCORING_PROMPT),
 
     # ── spec §2-§6 新增（4.19 指令模板） ──

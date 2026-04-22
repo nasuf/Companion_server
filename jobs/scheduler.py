@@ -14,7 +14,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
 from app.services.reflection import run_weekly_reflection
 from app.services.portrait import update_portrait_weekly
-from app.services.memory.self_memory import generate_daily_self_memories
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview, generate_daily_schedule, get_cached_schedule,
     get_current_status, get_life_overview, review_daily_schedule,
@@ -106,16 +105,6 @@ def setup_scheduler():
         hour=3,
         minute=45,
         id="weekly_portrait",
-        replace_existing=True,
-    )
-
-    # Daily self-memory generation at 3:15 AM
-    scheduler.add_job(
-        _run_daily_self_memories,
-        "cron",
-        hour=3,
-        minute=15,
-        id="daily_self_memory",
         replace_existing=True,
     )
 
@@ -228,24 +217,6 @@ async def _run_weekly_portraits():
         lambda a: update_portrait_weekly(a.userId, a.id),
         concurrency=3, task_name="Portrait update",
     )
-
-
-async def _run_daily_self_memories():
-    """Per spec §2.2 + §2.3:
-        ① 汇总前一日 [作息表 / 调整日志 / 主动日志] → 200 字总结
-        ② 把总结送给 LLM 拆分打分 → 写入 AI 记忆库
-    """
-    from app.services.memory.daily_summary import build_yesterday_summary
-
-    async def _gen(agent):
-        summary = await build_yesterday_summary(
-            agent_id=agent.id, agent_name=agent.name, user_id=agent.userId,
-        )
-        await generate_daily_self_memories(
-            agent_id=agent.id, user_id=agent.userId, dialogue_summary=summary,
-        )
-
-    await _run_for_all_agents(_gen, concurrency=3, task_name="Self-memory generation")
 
 
 async def _run_daily_schedules():
