@@ -196,21 +196,33 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     status = str(schedule_status.get("status") or "idle")
     memory_text = "\n".join(f"- {m}" for m in memories) if memories else "（暂无）"
 
+    # Spec §4.1 step 4：沉默唤醒参考信息含 话题主题/用户画像/近期对话
+    user_portrait = ctx.get("user_portrait") or "(未知)"
+    recent_context = ctx.get("recent_context") or "(无)"
+    silence_shared = {
+        "topic": topic,
+        "user_portrait": user_portrait,
+        "recent_context": recent_context,
+    }
     fields_by_key: dict[str, dict[str, Any]] = {
-        "proactive.silence_plain": {"personality_brief": personality_brief},
+        "proactive.silence_plain": {
+            "personality_brief": personality_brief,
+            **silence_shared,
+        },
         "proactive.silence_ai_memory": {
             "personality_brief": personality_brief,
             "ai_memory": memory_text,
-            "topic": topic,
+            **silence_shared,
         },
         "proactive.silence_user_memory": {
             "personality_brief": personality_brief,
             "user_memory": memory_text,
-            "topic": topic,
+            **silence_shared,
         },
         "proactive.silence_schedule": {
             "personality_brief": personality_brief,
             "current_activity": f"{activity}({status})",
+            **silence_shared,
         },
         # Spec §4.2 + 指令模版 P24-25：仅 3 项（性格/记忆/话题主题）
         "proactive.memory_ai": {
