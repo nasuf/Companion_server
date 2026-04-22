@@ -22,6 +22,9 @@ def _redis_key(key: str) -> str:
 async def ensure_prompt_templates() -> None:
     """Ensure prompt templates exist in DB and warm Redis from DB state.
 
+    Also reconciles orphan rows — any key in DB/Redis that is no longer in
+    `PROMPT_DEFINITIONS` gets deleted so the data source stays in sync with code.
+
     Optimized: batch-load all existing prompts + versions in 2 queries,
     then only write to DB for missing/changed entries.
     """
@@ -39,6 +42,19 @@ async def ensure_prompt_templates() -> None:
 
     redis = await get_redis()
     pipe = redis.pipeline()
+
+    # Reconcile orphans: DB keys not in registry → delete (rows + versions + Redis)
+    registry_keys = {d.key for d in PROMPT_DEFINITIONS}
+    orphan_keys = [k for k in existing_map if k not in registry_keys]
+    if orphan_keys:
+        logger.warning(
+            "Deleting %d orphan prompt template(s) not in registry: %s",
+            len(orphan_keys), ", ".join(sorted(orphan_keys)),
+        )
+        await db.prompttemplateversion.delete_many(where={"promptKey": {"in": orphan_keys}})
+        await db.prompttemplate.delete_many(where={"key": {"in": orphan_keys}})
+        for k in orphan_keys:
+            pipe.delete(_redis_key(k))
 
     for definition in PROMPT_DEFINITIONS:
         existing = existing_map.get(definition.key)
