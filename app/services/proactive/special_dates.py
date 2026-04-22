@@ -288,10 +288,8 @@ async def _pick_prompt_key_and_fields(
 
     o = occasions[0]
     if o.type == "holiday":
-        return (
-            "proactive.special_holiday",
-            {"personality_brief": personality_brief, "holiday_name": o.name},
-        )
+        # Spec 指令模版 P28 节日类无【参考信息】，仅需 holiday_name 占位符
+        return ("proactive.special_holiday", {"holiday_name": o.name})
     if o.type == "birthday":
         return (
             "proactive.special_birthday",
@@ -305,7 +303,7 @@ async def _pick_prompt_key_and_fields(
                 "reminder_content": o.name,
             },
         )
-    return ("proactive.special_holiday", {"personality_brief": personality_brief, "holiday_name": o.name})
+    return ("proactive.special_holiday", {"holiday_name": o.name})
 
 
 async def send_special_date_proactive(
