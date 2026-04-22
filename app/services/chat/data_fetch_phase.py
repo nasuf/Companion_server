@@ -63,6 +63,17 @@ async def _do_retrieval(user_message: str, user_id: str, workspace_id: str | Non
     return await hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
 
 
+_T = Any  # gather result type alias
+
+
+def _unwrap(result: _T, default: _T, label: str) -> _T:
+    """Unwrap one slot of an asyncio.gather(return_exceptions=True) call: log + fallback on Exception."""
+    if isinstance(result, Exception):
+        logger.warning(f"{label} failed: {result}")
+        return default
+    return result
+
+
 def _format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_chars: int = 400) -> str:
     """Spec §3.2 AIPAD值判断 的 recent_context 输入：最近 N 条用户/AI 消息。"""
     if not messages_dicts:
@@ -220,23 +231,37 @@ async def fetch_parallel_context(
     l3_trigger_classify_fn: Callable[[str], Awaitable[str]],
 ) -> FetchedContext:
     """spec §3.1+§3.2 step 2-3：并行拉取记忆/情绪/画像/作息 + L3 awakening。"""
+    # Schedule 提前 (Redis 缓存)，使 compute_ai_pad 能进 gather 并行块
+    schedule = await _load_schedule(agent_id)
+    ai_status = get_current_status(schedule) if schedule else None
+    schedule_context = format_schedule_context(ai_status) if ai_status else None
+    status_label = (ai_status or {}).get("status", "空闲")
+    activity_label = (ai_status or {}).get("activity", "自由活动")
+    time_info = get_current_time()
+    current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
+    recent_context = _format_recent_context(messages_dicts)
+
     (
         relevance_result, retrieval_result, summaries,
-        portrait, schedule, topic_intimacy,
-        time_memories_result, user_emotion_result,
+        portrait, topic_intimacy,
+        time_memories_result, user_emotion_result, emotion_result,
     ) = await asyncio.gather(
         _classify_relevance(user_message),
         _do_retrieval(user_message, user_id, workspace_id),
         _load_cached_summaries(messages_dicts),
         _load_portrait(user_id, agent_id),
-        _load_schedule(agent_id),
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times),
-        extract_emotion(user_message),  # Spec §3.2 用户 PAD：与其他 fetch 并行
+        extract_emotion(user_message),
+        compute_ai_pad(
+            current_time=current_time_str,
+            schedule_status=status_label,
+            current_activity=activity_label,
+            recent_context=recent_context,
+        ),
         return_exceptions=True,
     )
 
-    # Spec §3.1: memory relevance level
     memory_relevance = "medium"
     if isinstance(relevance_result, Exception):
         logger.warning(f"Memory relevance classification failed: {relevance_result}")
@@ -248,61 +273,18 @@ async def fetch_parallel_context(
         memory_relevance, retrieval_result,
     )
 
-    # 解包 exception → None
-    if isinstance(summaries, Exception):
-        logger.warning(f"Loading cached summaries failed: {summaries}")
-        summaries = None
-    if isinstance(portrait, Exception):
-        logger.warning(f"Loading portrait failed: {portrait}")
-        portrait = None
-    if isinstance(schedule, Exception):
-        logger.warning(f"Loading schedule failed: {schedule}")
-        schedule = None
-    if isinstance(topic_intimacy, Exception):
-        logger.warning(f"Loading topic intimacy failed: {topic_intimacy}")
-        topic_intimacy = 50.0
-
-    time_memories: list[str] = []
-    if isinstance(time_memories_result, Exception):
-        logger.warning(f"Loading time memories failed: {time_memories_result}")
-    elif time_memories_result:
-        time_memories = time_memories_result
-
-    # Spec §3.2 用户 PAD：LLM 失败时 extract_emotion 内部已回退中性默认；
-    # 外部再接一次 exception 守护（asyncio.gather return_exceptions）。
-    user_emotion: dict | None
-    if isinstance(user_emotion_result, Exception):
-        logger.warning(f"extract_emotion failed: {user_emotion_result}")
-        user_emotion = None
-    else:
-        user_emotion = user_emotion_result
+    summaries = _unwrap(summaries, None, "Loading cached summaries")
+    portrait = _unwrap(portrait, None, "Loading portrait")
+    topic_intimacy = _unwrap(topic_intimacy, 50.0, "Loading topic intimacy")
+    time_memories: list[str] = _unwrap(time_memories_result, [], "Loading time memories") or []
+    user_emotion: dict | None = _unwrap(user_emotion_result, None, "extract_emotion")
+    emotion: dict | None = _unwrap(emotion_result, None, "compute_ai_pad")
 
     l3_memories, l3_trigger_label = await _maybe_awaken_l3(
         user_message, user_id, workspace_id,
         detected_intent, memory_relevance,
         l3_trigger_classify_fn,
     )
-
-    ai_status = get_current_status(schedule) if schedule else None
-    schedule_context = format_schedule_context(ai_status) if ai_status else None
-
-    # Spec §3.2：每条用户消息触发一次 AIPAD值判断，输入 4 项参考信息
-    # (当前时间, 作息状态, 当前活动, 近期对话上下文)
-    status_label = str(ai_status.get("status") if ai_status else "空闲")
-    activity_label = str(ai_status.get("activity") if ai_status else "自由活动")
-    recent_context = _format_recent_context(messages_dicts)
-    time_info = get_current_time()
-    current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
-    try:
-        emotion: dict | None = await compute_ai_pad(
-            current_time=current_time_str,
-            schedule_status=status_label,
-            current_activity=activity_label,
-            recent_context=recent_context,
-        )
-    except Exception as e:
-        logger.warning(f"compute_ai_pad failed: {e}")
-        emotion = None
 
     return FetchedContext(
         memory_relevance=memory_relevance,

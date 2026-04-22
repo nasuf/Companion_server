@@ -20,7 +20,6 @@ from app.services.chat.prompt_builder import build_system_prompt, build_chat_mes
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
-from app.services.relationship.emotion import save_ai_emotion
 from app.services.schedule_domain.timing import (
     calculate_reply_delay, calculate_typing_duration,
     explain_delay_reason,
@@ -405,15 +404,8 @@ async def stream_chat_response(
     )
     memory_relevance = fetched.memory_relevance
     classified_memories = fetched.classified_memories
-    memory_strings = fetched.memory_strings
-    graph_context = fetched.graph_context
     emotion = fetched.emotion
-    # Spec §3.2: fresh AI PAD 计算完毕后回写缓存，供下一轮延迟计算 / proactive / GET 读接口使用
-    if emotion and agent_id:
-        _fire_background(save_ai_emotion(agent_id, emotion))
-    # Spec §3.2: 用户 PAD 由 data_fetch_phase 并行 LLM 算出，直接传给后续 intent 回复
     prompt_user_emotion = fetched.user_emotion
-    summaries = fetched.summaries
     portrait = fetched.portrait
     schedule = fetched.schedule
     topic_intimacy = fetched.topic_intimacy
@@ -530,8 +522,8 @@ async def stream_chat_response(
         delay_context=delay_context,
         relational_context=relational_context,
         emotion=emotion,
-        graph_context=graph_context,
-        summaries=summaries,
+        graph_context=fetched.graph_context,
+        summaries=fetched.summaries,
         portrait=portrait,
         topic_context=topic_context,
         user_emotion=prompt_user_emotion,
@@ -653,8 +645,9 @@ async def stream_chat_response(
         user_message_id=user_message_id,
         full_response=full_response,
         messages_dicts=messages_dicts,
-        memory_strings=memory_strings,
+        memory_strings=fetched.memory_strings,
         user_emotion=prompt_user_emotion,
+        ai_emotion=emotion,
     ))
 
     # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段

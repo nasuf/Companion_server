@@ -1,13 +1,7 @@
 """Emotion system — PAD (Pleasure-Arousal-Dominance) model.
 
-Spec §3.2 前置步骤：每条用户消息触发一次 `emotion.ai_pad` 小模型调用，
-输入 (作息状态, 当前活动, 近期对话上下文) 输出 AI 当前 PAD。
-没有持久化的 AI 情绪状态，没有衰减，没有基线，没有用户情绪融合。
-
-`ai_emotion_states` 表/Redis `emotion:{agent_id}` 被降级为 **只读缓存**：
-- 热路径每次聊天计算新 PAD 后写入缓存
-- Proactive 主动消息 / GET /emotions 读接口 / 消息接收时的延迟计算从缓存读取
-  （read-only 路径下不再调 LLM，避免 per-tick 成本）
+Spec §3.2: per-message LLM 计算 AI/用户 PAD。`ai_emotion_states` 表是**只读缓存**——
+hot path 每次重算并回写，proactive / GET / 延迟计算等只读路径直接读缓存。
 """
 
 import logging
@@ -50,30 +44,6 @@ PAD_LABEL_TABLE: dict[str, dict[str, float]] = {
     "戏谑":  {"pleasure": 0.6,  "arousal": 0.6, "dominance": 0.7},
 }
 
-# English-to-Chinese label map for backward compatibility
-_EMOTION_LABEL_MAP = {
-    "joy": "高兴", "happiness": "高兴", "happy": "高兴",
-    "sadness": "悲伤", "sad": "悲伤",
-    "anger": "愤怒", "angry": "愤怒",
-    "fear": "恐惧", "afraid": "恐惧",
-    "surprise": "惊讶", "surprised": "惊讶",
-    "disgust": "厌恶",
-    "neutral": "中性",
-    "anxious": "焦虑", "anxiety": "焦虑",
-    "disappointed": "失望", "disappointment": "失望",
-    "relieved": "欣慰", "relief": "欣慰",
-    "grateful": "感激", "gratitude": "感激",
-    "playful": "戏谑", "teasing": "戏谑",
-}
-
-
-def label_to_pad(label: str) -> dict | None:
-    """Convert emotion label to PAD values (returns a copy)."""
-    cn_label = _EMOTION_LABEL_MAP.get(label, label)
-    entry = PAD_LABEL_TABLE.get(cn_label)
-    return dict(entry) if entry else None
-
-
 # --- Quick keyword emotion estimate (no LLM) ---
 
 # Only covers high-confidence keyword-detectable emotions (5/12).
@@ -95,38 +65,30 @@ def quick_emotion_estimate(message: str) -> dict | None:
     return None
 
 
-def pad_to_label(pad: dict) -> str:
-    """Find closest emotion label for given PAD values."""
-    v = pad.get("pleasure", _PAD_DEFAULTS["pleasure"])
-    a = pad.get("arousal", _PAD_DEFAULTS["arousal"])
-    d = pad.get("dominance", _PAD_DEFAULTS["dominance"])
-
-    best_label = "中性"
-    best_dist = float("inf")
-    for label, ref in PAD_LABEL_TABLE.items():
-        dist = (v - ref["pleasure"]) ** 2 + (a - ref["arousal"]) ** 2 + (d - ref["dominance"]) ** 2
-        if dist < best_dist:
-            best_dist = dist
-            best_label = label
-    return best_label
-
-
 _PAD_RANGES = {"pleasure": (-1.0, 1.0), "arousal": (0.0, 1.0), "dominance": (0.0, 1.0)}
 _PAD_DEFAULTS = {dim: (lo + hi) / 2 for dim, (lo, hi) in _PAD_RANGES.items()}
 # → {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
 
 
-def _clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, value))
-
-
 def _clamp_pad(dim: str, value: float) -> float:
     """Clamp a PAD dimension value to its valid range."""
     lo, hi = _PAD_RANGES[dim]
-    return _clamp(value, lo, hi)
+    return max(lo, min(hi, value))
 
 
-# --- Spec §3.2 AIPAD值判断 ---
+async def _invoke_pad(prompt_key: str, **format_args) -> dict:
+    """Format a PAD prompt and invoke utility LLM; clamp 3 dims, fallback to neutral on error."""
+    prompt = (await get_prompt_text(prompt_key)).format(**format_args)
+    try:
+        result = await invoke_json(get_utility_model(), prompt)
+        return {
+            dim: _clamp_pad(dim, float(result.get(dim, _PAD_DEFAULTS[dim])))
+            for dim in _PAD_DIMS
+        }
+    except Exception as e:
+        logger.warning(f"{prompt_key} failed, falling back to neutral defaults: {e}")
+        return dict(_PAD_DEFAULTS)
+
 
 async def compute_ai_pad(
     *,
@@ -135,49 +97,19 @@ async def compute_ai_pad(
     current_activity: str,
     recent_context: str,
 ) -> dict:
-    """Spec §3.2 AIPAD值判断：每条用户消息触发一次小模型调用，输出 AI 当前 PAD。
-
-    Inputs 严格对齐 spec §3.2 四项参考信息：
-      - 当前时间（UTC+8，ISO 格式）
-      - 当前作息状态（空闲/忙碌/很忙碌/睡眠等）
-      - 当前正在做（活动名）
-      - 对话上下文（近期消息片段）
-
-    无 prev_pad / baseline / 衰减。LLM 失败时回退到中性默认 {0.0, 0.5, 0.5}。
-    """
-    prompt = (await get_prompt_text("emotion.ai_pad")).format(
+    """Spec §3.2 AIPAD值判断：4 项参考信息 → AI PAD。失败回退中性默认。"""
+    return await _invoke_pad(
+        "emotion.ai_pad",
         current_time=current_time or "（未知）",
         current_status=schedule_status or "空闲",
         current_activity=current_activity or "自由活动",
         recent_context=recent_context or "（无）",
     )
-    try:
-        result = await invoke_json(get_utility_model(), prompt)
-        return {
-            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", _PAD_DEFAULTS["pleasure"]))),
-            "arousal": _clamp_pad("arousal", float(result.get("arousal", _PAD_DEFAULTS["arousal"]))),
-            "dominance": _clamp_pad("dominance", float(result.get("dominance", _PAD_DEFAULTS["dominance"]))),
-        }
-    except Exception as e:
-        logger.warning(f"compute_ai_pad failed, falling back to neutral defaults: {e}")
-        return dict(_PAD_DEFAULTS)
 
 
 async def extract_emotion(message: str) -> dict:
     """Spec §3.3 + 指令模版 P26「用户PAD值判断」：只输出 PAD 三维值。"""
-    model = get_utility_model()
-    prompt = (await get_prompt_text("emotion.extraction")).format(message=message)
-
-    try:
-        result = await invoke_json(model, prompt)
-        return {
-            "pleasure": _clamp_pad("pleasure", float(result.get("pleasure", _PAD_DEFAULTS["pleasure"]))),
-            "arousal": _clamp_pad("arousal", float(result.get("arousal", _PAD_DEFAULTS["arousal"]))),
-            "dominance": _clamp_pad("dominance", float(result.get("dominance", _PAD_DEFAULTS["dominance"]))),
-        }
-    except Exception as e:
-        logger.warning(f"Emotion extraction failed: {e}")
-        return dict(_PAD_DEFAULTS)
+    return await _invoke_pad("emotion.extraction", message=message)
 
 
 def emotion_to_tone(emotion: dict) -> str:
@@ -191,14 +123,7 @@ def emotion_to_tone(emotion: dict) -> str:
 # --- Cache (ai_emotion_states) ---
 
 async def get_ai_emotion(agent_id: str) -> dict:
-    """Read last-computed AI PAD from cache.
-
-    降级为缓存后，此函数仅用于：
-      - 消息接收时的延迟计算（spec §6.2，需要 arousal 判定高情绪状态）
-      - Proactive 主动消息的 mood label
-      - GET /emotions/{agent_id}/current 读接口
-    Chat hot path 不读此缓存，总是通过 compute_ai_pad 重新计算。
-    """
+    """读上一轮 compute_ai_pad 回写的缓存，供 proactive / GET / 延迟计算等只读路径使用。"""
     redis = await get_redis()
     cache_key = f"emotion:{agent_id}"
 

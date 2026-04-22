@@ -24,6 +24,7 @@ from prisma import Json
 from app.db import db
 from app.services.interaction.boundary import check_positive_recovery
 from app.services.memory.recording.pipeline import process_memory_pipeline
+from app.services.relationship.emotion import save_ai_emotion
 from app.services.summarizer import summarize
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
@@ -82,12 +83,7 @@ async def _bg_user_emotion(
     user_message_id: str | None,
     user_emotion: dict | None,
 ) -> None:
-    """Spec §3.2 用户侧：把 data_fetch_phase 已经算好的 LLM 用户 PAD 写进消息 metadata。
-
-    用户 PAD 的 LLM 调用 (extract_emotion) 已在热路径 data_fetch_phase 并行跑完，
-    这里只负责持久化到消息 metadata 供将来审计 / emotion timeline 使用。
-    AI 侧 PAD 由 orchestrator 热路径内通过 compute_ai_pad 计算，不在这里处理。
-    """
+    """Spec §3.2 用户侧：写 LLM 算好的用户 PAD 到消息 metadata。"""
     if not user_message_id or not user_emotion:
         return
     try:
@@ -168,18 +164,9 @@ async def run_post_process(
     messages_dicts: list[dict],
     memory_strings: list[str] | None,
     user_emotion: dict | None = None,
+    ai_emotion: dict | None = None,
 ) -> None:
-    """5 个后台任务并发执行。本身 fire-and-forget。
-
-    1. 写用户 PAD 到消息 metadata (spec §3.2 用户侧，值已由热路径算出)
-    2. 3 层摘要缓存
-    3. 记忆抽取 pipeline（user + AI）
-    4. 性格特征调整（仅 agent_id 存在）
-    5. 正向恢复（仅 agent_id 存在）
-
-    AI PAD (spec §3.2) 由 orchestrator 热路径内 compute_ai_pad 处理，不在此处。
-    用户 PAD 的 LLM 调用 extract_emotion 也在 data_fetch_phase 并行跑，这里只写 metadata。
-    """
+    """6 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 摘要 / 记忆抽取 / 性格反馈 / 耐心恢复。"""
     _ = conversation_id  # 保留供未来扩展（如 conversation-level metric）
     try:
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
@@ -191,6 +178,8 @@ async def run_post_process(
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
             tasks.append(_bg_positive_recovery(agent_id, user_id))
+            if ai_emotion:
+                tasks.append(save_ai_emotion(agent_id, ai_emotion))
         await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as e:
         logger.error(f"Background post-processing failed: {e}")

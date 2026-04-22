@@ -87,8 +87,7 @@ async def generate_proactive_message(
         )
         memory_strings = format_memories_for_prompt(memories)
 
-        # 读缓存 PAD 供 mood label。proactive 不触发新的 emotion.ai_pad LLM，
-        # spec §3.2 的动态计算仅发生在聊天热路径。
+        # Proactive 读缓存 PAD（不触发 emotion.ai_pad LLM）
         emotion = await get_ai_emotion(agent_id)
         pleasure = emotion.get("pleasure", 0.0)
         mood = "不错" if pleasure > 0.2 else ("有点低落" if pleasure < -0.2 else "平静")

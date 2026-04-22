@@ -91,12 +91,7 @@ async def create_agent(data: AgentCreate):
     personality_dict = data.personality.model_dump()
 
     async def _init_mbti():
-        """Spec §1.3：agent 创建时后台推导 MBTI。
-
-        AI PAD 情感不在此处初始化 —— spec §3.2 要求每条用户消息调
-        compute_ai_pad 动态计算，不存在"初始基线"。首条聊天消息到达前
-        get_ai_emotion 返回中性默认 {0.0, 0.5, 0.5}。
-        """
+        """Spec §1.3：agent 创建时后台推导 MBTI。"""
         try:
             mbti_input = await seven_dim_to_mbti(personality_dict)
             mbti = await build_mbti(mbti_input)
