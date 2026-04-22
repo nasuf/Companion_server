@@ -521,7 +521,6 @@ async def stream_chat_response(
         memories=classified_memories,
         delay_context=delay_context,
         relational_context=relational_context,
-        emotion=emotion,
         graph_context=fetched.graph_context,
         portrait=portrait,
         topic_context=topic_context,

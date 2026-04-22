@@ -108,58 +108,29 @@ async def _build_personality_section(agent: Any) -> str:
 
 
 async def _build_emotion_section(
-    emotion: dict | None,
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
 ) -> str | None:
-    """Build the emotion section from PAD dicts (AI + user).
-
-    Spec §3.3：AI 和用户情绪都用 PAD 三维表达。这里注入的是 chat.system_base
-    层级的情境信息（非 spec 要求），但字段统一只用 PAD，不额外带离散标签。
-    """
-    if not emotion:
+    """Spec §4 汇总参考信息：用户PAD值 + 关系阶段（不含 AI PAD — spec 把 AI PAD 限定在 §5.3/§5.4/§6.2 装饰/时机决策）。"""
+    if not user_emotion and not intimacy_stage:
         return None
 
-    pleasure = emotion.get("pleasure", 0.0)
-    arousal = emotion.get("arousal", 0.0)
-    dominance = emotion.get("dominance", 0.0)
-
-    mood_parts: list[str] = []
-    if pleasure > 0.3:
-        mood_parts.append("心情不错")
-    elif pleasure < -0.3:
-        mood_parts.append("有点低落")
-
-    if arousal > 0.7:
-        mood_parts.append("比较兴奋")
-    elif arousal < 0.3:
-        mood_parts.append("比较平静")
-
-    if dominance > 0.7:
-        mood_parts.append("感觉自信")
-    elif dominance < 0.3:
-        mood_parts.append("感觉有些被动")
-
-    mood_text = "，".join(mood_parts) if mood_parts else "心情平静"
-
-    body = f"你现在的情绪：{mood_text}\n"
-    body += f"(PAD: {pleasure:.1f}, {arousal:.1f}, {dominance:.1f})\n"
+    parts: list[str] = []
 
     if user_emotion:
         u_pleasure = user_emotion.get("pleasure", 0.0)
         u_arousal = user_emotion.get("arousal", 0.0)
         u_dominance = user_emotion.get("dominance", 0.0)
-        body += f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})\n"
+        parts.append(f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})")
         if u_pleasure < -0.3:
-            body += "请注意关心用户的感受。\n"
+            parts.append("请注意关心用户的感受。")
 
-    # 注入亲密度阶段
     if intimacy_stage:
-        body += f"\n你们目前的关系是{intimacy_stage}。\n"
+        parts.append(f"你们目前的关系是{intimacy_stage}。")
 
     emotion_instruction = await get_prompt_text("chat.emotion_instruction")
-    body += f"\n{emotion_instruction}"
-    return _section("当前情绪", body)
+    parts.append(emotion_instruction)
+    return _section("当前情绪", "\n".join(parts))
 
 
     # (core_memory permanent injection removed — spec §3 uses retrieval only)
@@ -270,7 +241,6 @@ async def build_system_prompt(
     memories: list[str] | None = None,
     delay_context: str | None = None,
     relational_context: str | None = None,
-    emotion: dict | None = None,
     graph_context: dict | None = None,
     portrait: str | None = None,
     topic_context: str | None = None,
@@ -296,7 +266,7 @@ async def build_system_prompt(
     # Spec §3: 记忆全部通过检索注入,不再有"永驻核心记忆"。
     # Agent 基本身份(名字/性格)已在上方 personality section 中。
 
-    emo = await _build_emotion_section(emotion, user_emotion, intimacy_stage)
+    emo = await _build_emotion_section(user_emotion, intimacy_stage)
     if emo:
         sections.append(emo)
 
