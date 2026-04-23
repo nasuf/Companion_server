@@ -24,6 +24,7 @@ from app.services.chat.intent_replies import (
 if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
 from app.services.interaction.boundary import (
+    APOLOGY_SINCERITY_MIN,
     PATIENCE_MAX,
     check_boundary,
     detect_apology,
@@ -105,7 +106,7 @@ async def _handle_blocked(
 ) -> AsyncGenerator[dict, None]:
     """spec §2.6 步骤 2：拉黑。先检测道歉承诺；命中则恢复+和解回复，否则拉黑回复。"""
     apology = await detect_apology(ctx.user_message)
-    if apology.get("is_apology") and apology.get("sincerity", 0) >= 0.5:
+    if apology.get("is_apology") and apology.get("sincerity", 0) >= APOLOGY_SINCERITY_MIN:
         new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
         reply = await apology_reply(
             message=ctx.user_message,

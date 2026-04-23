@@ -127,6 +127,7 @@ model Message {
   metadata       Json?
   createdAt      DateTime     @default(now()) @map("created_at")
 
+  @@index([conversationId, createdAt(sort: Desc)])
   @@map("messages")
 }
 

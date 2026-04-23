@@ -31,14 +31,11 @@ from app.services.memory.interaction.deletion import (
     save_pending_deletion,
 )
 from app.services.interaction.boundary import (
+    APOLOGY_SINCERITY_MIN,
     PATIENCE_MAX,
     detect_apology,
     handle_apology,
 )
-
-# spec §2.6.2.1: 道歉 sincerity 门禁阈值, 与 boundary_phase.py 拉黑态道歉检测
-# 使用同一常量 (避免两路径阈值漂移).
-_APOLOGY_SINCERITY_MIN = 0.5
 from app.services.schedule_domain.schedule import (
     format_full_schedule_for_query,
     format_schedule_context,
@@ -132,7 +129,7 @@ async def handle_apology_promise(
         apology = await detect_apology(user_message)
         if not (
             apology.get("is_apology")
-            and apology.get("sincerity", 0) >= _APOLOGY_SINCERITY_MIN
+            and apology.get("sincerity", 0) >= APOLOGY_SINCERITY_MIN
         ):
             # intent 识别为道歉但诚意不够 → 不短路, 落回正常 reply 流程
             return False, None

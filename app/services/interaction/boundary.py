@@ -33,6 +33,10 @@ PATIENCE_MEDIUM_MIN = 30
 PATIENCE_LOW_MIN = 1
 PATIENCE_HOURLY_RECOVERY = 10  # spec §2.5: 每小时 +10
 
+# spec §2.6 步骤 2：道歉承诺触发拉黑解除的 sincerity 最低阈值；
+# 同一阈值也用于 intent_handlers.handle_apology_promise 的门禁。
+APOLOGY_SINCERITY_MIN = 0.5
+
 
 def get_patience_zone(patience: int) -> str:
     """返回耐心值所在区间: normal/medium/low/blocked。"""
