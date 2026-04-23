@@ -149,17 +149,19 @@ async def upsert_many(
             }
         )
         if existing is None:
-            await db.holiday.create(
-                data={
-                    "date": entry_dt,
-                    "name": entry.name,
-                    "type": entry.type,
-                    "countryCode": entry.country_code,
-                    "isWorkdaySwap": entry.is_workday_swap,
-                    "source": entry.source,
-                    "metadata": entry.metadata,  # type: ignore[arg-type]
-                }
-            )
+            create_data: dict[str, Any] = {
+                "date": entry_dt,
+                "name": entry.name,
+                "type": entry.type,
+                "countryCode": entry.country_code,
+                "isWorkdaySwap": entry.is_workday_swap,
+                "source": entry.source,
+            }
+            # Prisma Python 对 Json? 字段传 None 会抛 "A value is required
+            # but not set". 只在 metadata 非空时才放进 data.
+            if entry.metadata:
+                create_data["metadata"] = entry.metadata  # type: ignore[assignment]
+            await db.holiday.create(data=create_data)  # type: ignore[arg-type]
             inserted += 1
             continue
 
@@ -167,15 +169,14 @@ async def upsert_many(
             skipped += 1
             continue
 
-        await db.holiday.update(
-            where={"id": existing.id},
-            data={
-                "type": entry.type,
-                "isWorkdaySwap": entry.is_workday_swap,
-                "source": entry.source,
-                "metadata": entry.metadata,  # type: ignore[arg-type]
-            },
-        )
+        update_data: dict[str, Any] = {
+            "type": entry.type,
+            "isWorkdaySwap": entry.is_workday_swap,
+            "source": entry.source,
+        }
+        if entry.metadata:
+            update_data["metadata"] = entry.metadata  # type: ignore[assignment]
+        await db.holiday.update(where={"id": existing.id}, data=update_data)  # type: ignore[arg-type]
         updated += 1
 
     stats = {"inserted": inserted, "updated": updated, "skipped": skipped}
