@@ -208,19 +208,10 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # spec-audit 2026-04-23: 节假日 DB 每周日 3:00 AM 同步外部源
-    # (chinesecalendar + nager + un_observed). 在 special_dates_scan (3:30) 之前跑,
-    # 保证当日扫描看到最新数据. source='manual' 行受保护不被覆盖, 运营手动
-    # 录入的条目永远生效.
-    scheduler.add_job(
-        _run_holiday_refresh,
-        "cron",
-        day_of_week="sun",
-        hour=3,
-        minute=0,
-        id="holiday_refresh",
-        replace_existing=True,
-    )
+    # spec-audit 2026-04-23: 节假日 DB 不走定时 cron.
+    # 原因: 节日表年度变化 (国务院 11-12 月发布次年安排), 一年 1-2 次,
+    # cron 成本大于收益. 改为 admin UI "直接刷新" 按钮手动触发 _run_holiday_refresh /
+    # /admin-api/holidays/refresh, 运营需要时手动拉一次即可.
 
     scheduler.start()
     logger.info("Job scheduler started")
