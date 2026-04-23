@@ -20,7 +20,7 @@ from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
-from app.services.schedule_domain.time_service import is_holiday, is_workday_swap
+from app.services.schedule_domain.time_service import classify_day_kind, is_holiday
 from app.services.mbti import get_mbti, signal as mbti_signal
 
 _WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -35,16 +35,6 @@ def _mbti_brief(mbti: dict | None) -> str:
     brief = f"{mbti_type} {summary}".strip()
     return brief or "温和友善"
 
-
-def _day_kind(d, holiday_info) -> str:
-    """Spec Part 5 §3.2: 当日属性分类 (节假日 / 调休 / 周末 / 工作日)."""
-    if holiday_info is not None:
-        return f"节假日·{holiday_info.name}"
-    if is_workday_swap(d):
-        return "调休上班日"
-    if d.weekday() >= 5:
-        return "周末"
-    return "工作日"
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +137,7 @@ async def generate_daily_schedule(
 
     # 检测节日 + 当日属性
     holiday = is_holiday(date.date())
-    day_kind = _day_kind(date.date(), holiday)
+    day_kind = classify_day_kind(date.date(), holiday)
 
     # Age / occupation 懒查: 调用方未传时从 DB 拉 agent
     if age is None or occupation is None:
