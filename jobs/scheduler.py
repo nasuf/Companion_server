@@ -208,6 +208,20 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # spec-audit 2026-04-23: 节假日 DB 每周日 3:00 AM 同步外部源
+    # (chinesecalendar + nager + un_observed). 在 special_dates_scan (3:30) 之前跑,
+    # 保证当日扫描看到最新数据. source='manual' 行受保护不被覆盖, 运营手动
+    # 录入的条目永远生效.
+    scheduler.add_job(
+        _run_holiday_refresh,
+        "cron",
+        day_of_week="sun",
+        hour=3,
+        minute=0,
+        id="holiday_refresh",
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -331,6 +345,37 @@ async def _run_ntp_calibration():
             logger.info(f"NTP drift {drift:+.3f}s (within threshold)")
     except Exception as e:
         logger.warning(f"NTP calibration job failed: {e}")
+
+
+async def _run_holiday_refresh():
+    """spec-audit 2026-04-23: 每周从外部源拉取当年 + 下年节假日, upsert
+    到 DB, 然后失效内存 cache.
+
+    `source='manual'` 的条目 (admin 手动录入) 受保护, 永远不会被覆盖。
+    """
+    from datetime import datetime
+    from app.services.schedule_domain import holiday_cache, holiday_repo
+    from app.services.schedule_domain.holiday_sources import collect_candidates
+
+    year_now = datetime.now().year
+    for year in (year_now, year_now + 1):
+        try:
+            entries, status = await collect_candidates(year, include_international=True)
+            refreshable = [e for e in entries if e.source in holiday_repo.REFRESHABLE_SOURCES]
+            if not refreshable:
+                logger.info(
+                    f"Holiday refresh {year}: no candidates "
+                    f"(cc={status.chinesecalendar} nager={status.nager})"
+                )
+                continue
+            stats = await holiday_repo.upsert_many(refreshable, allow_overwrite_manual=False)
+            logger.info(f"Holiday refresh {year}: {stats}")
+        except Exception as e:
+            logger.warning(f"Holiday refresh {year} failed: {e}")
+    try:
+        await holiday_cache.reload()
+    except Exception as e:
+        logger.warning(f"Holiday cache reload failed: {e}")
 
 
 async def _run_aggregation_scan():
