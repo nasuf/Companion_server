@@ -18,8 +18,8 @@ from app.services.chat.intent_dispatcher import (
 )
 
 
-def _row(role: str, content: str) -> SimpleNamespace:
-    return SimpleNamespace(role=role, content=content)
+def _row(role: str, content: str, id: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(role=role, content=content, id=id)
 
 
 class TestUnifiedPassesContextToPrompt:
@@ -109,10 +109,54 @@ class TestIntentContextFetching:
         from app.services.chat.orchestrator import _fetch_intent_context
 
         rows = [  # DB desc 顺序 (最新在前)
+            _row("user", "好", id="msg-current"),
+            _row("assistant", "要我再陪你一会儿吗?", id="msg-ai2"),
+            _row("user", "我今天有点累", id="msg-user1"),
+            _row("assistant", "怎么了?", id="msg-ai1"),
+        ]
+        with patch("app.services.chat.orchestrator.db") as mock_db:
+            mock_db.message = MagicMock()
+            mock_db.message.find_many = AsyncMock(return_value=rows)
+
+            context = await _fetch_intent_context("conv-1", exclude_id="msg-current")
+
+        # 应该: 反转为时间顺序 + 排除当前 "好" + role 映射到 AI/用户
+        assert "AI: 怎么了?" in context
+        assert "用户: 我今天有点累" in context
+        assert "AI: 要我再陪你一会儿吗?" in context
+        # "好" 不出现 (exclude_id 精确排除)
+        assert "用户: 好" not in context
+
+    @pytest.mark.asyncio
+    async def test_duplicate_short_reply_preserved_when_id_excludes_current(self):
+        """快速连发 "好"/"好": 用 id 排除当前那条, 前一轮的 "好" 仍保留在 context 里."""
+        from app.services.chat.orchestrator import _fetch_intent_context
+
+        rows = [
+            _row("user", "好", id="msg-current"),    # 当前用户消息 (排除)
+            _row("assistant", "要我再陪你一会儿吗?", id="msg-ai2"),
+            _row("user", "好", id="msg-prev"),        # 上一轮用户 "好" (保留)
+            _row("assistant", "今天累吗?", id="msg-ai1"),
+        ]
+        with patch("app.services.chat.orchestrator.db") as mock_db:
+            mock_db.message = MagicMock()
+            mock_db.message.find_many = AsyncMock(return_value=rows)
+
+            context = await _fetch_intent_context("conv-1", exclude_id="msg-current")
+
+        # 前一轮的 "好" 必须保留 — 这是修 "exclude_content 误伤" bug 的关键
+        assert context.count("用户: 好") == 1
+        assert "AI: 今天累吗?" in context
+
+    @pytest.mark.asyncio
+    async def test_exclude_content_fallback_matches_first_only(self):
+        """未传 exclude_id 时按 content 回退, 只过滤最后出现的那一条 (避免误伤历史重复)."""
+        from app.services.chat.orchestrator import _fetch_intent_context
+
+        rows = [
             _row("user", "好"),
-            _row("assistant", "要我再陪你一会儿吗?"),
-            _row("user", "我今天有点累"),
-            _row("assistant", "怎么了?"),
+            _row("assistant", "陪你一会儿?"),
+            _row("user", "好"),  # 前一轮用户也说 "好" — 回退逻辑只过滤当前那条
         ]
         with patch("app.services.chat.orchestrator.db") as mock_db:
             mock_db.message = MagicMock()
@@ -120,12 +164,10 @@ class TestIntentContextFetching:
 
             context = await _fetch_intent_context("conv-1", exclude_content="好")
 
-        # 应该: 反转为时间顺序 + 排除当前 "好" + role 映射到 AI/用户
-        assert "AI: 怎么了?" in context
-        assert "用户: 我今天有点累" in context
-        assert "AI: 要我再陪你一会儿吗?" in context
-        # "好" 不出现 (exclude_content 排除)
-        assert "用户: 好" not in context
+        # reversed → 时间顺序 [好, 陪你一会儿?, 好]; 回退过滤最早出现的一条
+        # 剩余应至少保留一条 "用户: 好" 和 AI 那句
+        assert context.count("用户: 好") == 1
+        assert "AI: 陪你一会儿?" in context
 
     @pytest.mark.asyncio
     async def test_fetch_handles_db_failure_gracefully(self):
