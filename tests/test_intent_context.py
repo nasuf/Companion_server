@@ -164,7 +164,7 @@ class TestIntentContextFetching:
 
             context = await _fetch_intent_context("conv-1", exclude_content="好")
 
-        # reversed → 时间顺序 [好, 陪你一会儿?, 好]; 回退过滤最早出现的一条
+        # rows 按 desc 迭代, 回退过滤首个命中 (即最新那条当前消息);
         # 剩余应至少保留一条 "用户: 好" 和 AI 那句
         assert context.count("用户: 好") == 1
         assert "AI: 陪你一会儿?" in context

@@ -26,6 +26,7 @@ from app.models.character import (
 )
 from app.services.character import (
     build_generation_prompt,
+    clamp_agent_age,
     generate_single_profile,
     get_default_prompts,
 )
@@ -36,16 +37,6 @@ router = APIRouter(prefix="/admin-api/character", tags=["admin-character"])
 
 
 # ── helpers ──
-
-AGE_MIN = 20
-AGE_MAX = 29
-
-
-def clamp_agent_age(age: int) -> int:
-    """spec §1.3: agent 年龄硬区间 20-29. prompt hint 无法保证 LLM 严格输出,
-    这里兜底. 抽成函数让 tests 直接验证生产逻辑, 避免在 test 里重算."""
-    return max(AGE_MIN, min(AGE_MAX, age))
-
 
 def _to_tags(val: str) -> list[str]:
     """Split a delimited string into a tags array."""

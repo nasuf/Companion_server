@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from app.api.admin.character import AGE_MAX, AGE_MIN, clamp_agent_age
+from app.services.character import AGE_MAX, AGE_MIN, clamp_agent_age
 
 
 def _age_from_birthday(birthday_iso: str, today_iso: str = "2026-04-23") -> int:

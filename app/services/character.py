@@ -14,6 +14,18 @@ from app.services.prompting.store import get_prompt_text
 logger = logging.getLogger(__name__)
 
 
+# Spec §1.3: agent 年龄硬区间 20-29.
+AGE_MIN = 20
+AGE_MAX = 29
+
+
+def clamp_agent_age(age: int) -> int:
+    """把 LLM 反推的年龄钳回 spec §1.3 的 20-29 区间.
+    prompt hint 无法保证 LLM 严格输出, 这里是最后防线.
+    """
+    return max(AGE_MIN, min(AGE_MAX, age))
+
+
 # ── 默认基础模板 (PRD 9大分类) ──
 
 DEFAULT_TEMPLATE_SCHEMA = {
