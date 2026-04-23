@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.data.holidays_cn import HOLIDAYS, WORKDAY_SWAPS
+from app.services.schedule_domain import holiday_cache
 
 _TZ = ZoneInfo(settings.schedule_timezone)
 
@@ -118,21 +118,19 @@ def is_holiday(d: date | None = None) -> HolidayInfo | None:
     """判断给定日期是否为节假日。
 
     优先级:
-    1. holidays_cn.py 静态表 (含调休、国际节日, 准确度更高)
-    2. lunardate 动态计算 (覆盖静态表过期的年份)
+    1. DB (holiday_cache 模块内进程缓存, 启动时预加载, admin 保存后失效)
+    2. lunardate 动态计算 (覆盖 DB 没覆盖的未来年份)
     """
     d = d or datetime.now(_TZ).date()
-    key = d.isoformat()
-    entry = HOLIDAYS.get(key)
-    if entry:
+    cached = holiday_cache.get_by_date(d)
+    if cached:
         return HolidayInfo(
-            name=entry["name"],
+            name=cached.name,
             date=d,
-            type=entry["type"],
+            type=cached.type,
             days_away=0,
         )
 
-    # 静态表无命中 → 农历兜底
     lunar_hit = _lunar_holiday_today(d)
     if lunar_hit:
         name, htype = lunar_hit
@@ -143,7 +141,7 @@ def is_holiday(d: date | None = None) -> HolidayInfo | None:
 def is_workday_swap(d: date | None = None) -> bool:
     """判断是否为调休上班日。"""
     d = d or datetime.now(_TZ).date()
-    return d.isoformat() in WORKDAY_SWAPS
+    return holiday_cache.is_workday_swap(d)
 
 
 _next_holiday_cache: tuple[date, HolidayInfo | None] | None = None
@@ -159,9 +157,9 @@ def get_next_holiday(after: date | None = None, limit_days: int = 90) -> Holiday
     result = None
     for i in range(1, limit_days + 1):
         d = start + timedelta(days=i)
-        entry = HOLIDAYS.get(d.isoformat())
+        entry = holiday_cache.get_by_date(d)
         if entry:
-            result = HolidayInfo(name=entry["name"], date=d, type=entry["type"], days_away=i)
+            result = HolidayInfo(name=entry.name, date=d, type=entry.type, days_away=i)
             break
 
     _next_holiday_cache = (start, result)

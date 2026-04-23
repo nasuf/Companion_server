@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
-from app.services.schedule_domain import holiday_repo
+from app.services.schedule_domain import holiday_cache, holiday_repo
 from app.services.schedule_domain.holiday_repo import (
     REFRESHABLE_SOURCES,
     HolidayEntry,
@@ -153,6 +153,7 @@ async def bulk_save_holidays(
         stats = await holiday_repo.upsert_many(entries, allow_overwrite_manual=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await holiday_cache.reload()
     return BulkSaveResponse(**stats)
 
 
@@ -174,6 +175,7 @@ async def delete_holiday(
     ok = await holiday_repo.delete_by_id(holiday_id)
     if not ok:
         raise HTTPException(status_code=404, detail="holiday not found")
+    await holiday_cache.reload()
     return {"ok": True}
 
 
@@ -191,4 +193,5 @@ async def refresh_holidays(
     refreshable = [e for e in entries if e.source in REFRESHABLE_SOURCES]
     stats = await holiday_repo.upsert_many(refreshable, allow_overwrite_manual=False)
     logger.info(f"Admin-triggered refresh for {payload.year}: {stats}")
+    await holiday_cache.reload()
     return BulkSaveResponse(**stats)

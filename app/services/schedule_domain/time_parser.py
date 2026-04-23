@@ -14,7 +14,7 @@ from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time
 
-from app.data.holidays_cn import HOLIDAY_NAME_DATES
+from app.services.schedule_domain import holiday_cache
 from app.services.schedule_domain.time_service import _TZ
 
 _WEEKDAY_CN = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
@@ -300,18 +300,19 @@ def parse_time_expressions(
         _add(period_name, s, e, "relative", 0.6, span)
 
     # --- 8. 节日名称 ---
-    for holiday_name, dates in HOLIDAY_NAME_DATES.items():
+    for holiday_name in holiday_cache.all_known_names():
         idx = message.find(holiday_name)
         if idx == -1:
             continue
         span = (idx, idx + len(holiday_name))
-        best_date_str = _nearest_holiday_date(dates, today)
-        if best_date_str:
-            d = date.fromisoformat(best_date_str)
-            s, e = _day_range(d)
+        dates = holiday_cache.list_dates_for_name(holiday_name)
+        best = _nearest_holiday_date(dates, today)
+        if best:
+            d_found = best
+            s, e = _day_range(d_found)
             prefix_text = message[max(0, idx - 3):idx]
             if "去年" in prefix_text:
-                d_prev = date(d.year - 1, d.month, d.day)
+                d_prev = date(d_found.year - 1, d_found.month, d_found.day)
                 s, e = _day_range(d_prev)
             _add(holiday_name, s, e, "absolute", 0.85, span)
 
@@ -320,14 +321,14 @@ def parse_time_expressions(
     return results
 
 
-def _nearest_holiday_date(dates: list[str], today: date) -> str | None:
+def _nearest_holiday_date(dates: list[date], today: date) -> date | None:
     """从候选日期中找距今最近的一个（优先当年或最近过去年份）。"""
-    best, best_diff = None, float("inf")
-    for ds in dates:
-        d = date.fromisoformat(ds)
+    best: date | None = None
+    best_diff = float("inf")
+    for d in dates:
         diff = abs((d - today).days)
         if diff < best_diff:
-            best, best_diff = ds, diff
+            best, best_diff = d, diff
     return best
 
 

@@ -12,6 +12,7 @@ from app.middleware import configure_logging, configure_langsmith, RequestTiming
 from app.services.prompting.store import ensure_prompt_templates
 from app.services.character import ensure_default_template
 from app.services.career import ensure_default_careers
+from app.services.schedule_domain.holiday_cache import reload as reload_holiday_cache
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
 
 # Configure logging and tracing before anything else
@@ -43,6 +44,7 @@ async def lifespan(app: FastAPI):
         _timed("Prompt templates", ensure_prompt_templates()),
         _timed("Character template", ensure_default_template()),
         _timed("Career templates", ensure_default_careers()),
+        _timed("Holiday cache", reload_holiday_cache()),
     )
 
     # Phase 3: Scheduler

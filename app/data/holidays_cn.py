@@ -1,13 +1,20 @@
-"""中国节假日数据（2025-2027）。
+"""[LEGACY] 中国节假日硬编码数据 — 一次性 seed 源.
 
-包含法定假日（含调休）、传统节日、国际常见节日。
-按 ISO 日期字符串索引，支持快速查询。
+自 `holidays` 表 DB 化后 (migration 20260423120000_holidays + admin
+"日历管理" 页), 运行时不再直接 import 这里的数据. 本文件唯一用途:
+`scripts/seed_holidays_from_hardcoded.py` 一次性把历史数据导入 DB,
+之后 admin 通过 UI 维护 + weekly refresh cron 从外部源同步.
 
-数据源：
-  - 2025 年：国务院办公厅 2024-11-12 通知《关于 2025 年部分节假日安排的通知》
-  - 2026 年：国务院办公厅 2025-12 通知（常见方案 + 官方公布内容）
-  - 2027 年：暂按每年常规休假安排推演（国庆 7 天 / 劳动 5 天 / 清明 3 天 / 端午 3 天 / 春节 8 天）；
-    国务院发布具体调休安排前 WORKDAY_SWAPS 留空。
+⚠️ 请**不要**在新代码里引用 `HOLIDAYS` / `HOLIDAY_NAME_DATES` /
+`WORKDAY_SWAPS` — 改用 `app.services.schedule_domain.holiday_cache`:
+  - 查节日: `holiday_cache.get_by_date(d)` (sync, 启动时预加载)
+  - 查调休: `holiday_cache.is_workday_swap(d)`
+  - 按名字查日期: `holiday_cache.list_dates_for_name(name)`
+
+数据源 (历史):
+  - 2025 年：国务院办公厅 2024-11-12 通知
+  - 2026 年：国务院办公厅 2025-12 通知
+  - 2027 年：推演数据 (官方通知发布后由 admin 通过 UI 刷新)
 """
 
 from __future__ import annotations
