@@ -369,7 +369,8 @@ async def generate_profiles(
                     "social_value": career.get("socialValue", career.get("social_value", "")),
                     "clients": _to_tags(career["clients"]),
                 }
-            # 后处理：用生日精确计算年龄（LLM 不擅长算术）
+            # 后处理：用生日精确计算年龄（LLM 不擅长算术），再按 spec §1.3
+            # 硬钳 20-29（prompt hint 不保证，LLM 偶尔生成超出区间的 birthday）
             identity = data.get("identity")
             if isinstance(identity, dict):
                 birthday = identity.get("birthday")
@@ -378,7 +379,7 @@ async def generate_profiles(
                         bd = date.fromisoformat(birthday)
                         today = date.today()
                         age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
-                        identity["age"] = age
+                        identity["age"] = max(20, min(29, age))
                     except (ValueError, TypeError):
                         pass
 
