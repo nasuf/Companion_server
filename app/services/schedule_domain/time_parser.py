@@ -48,12 +48,43 @@ _WEEK_PAT = re.compile(r"(上上?|下下?|这)(?:个)?周([一二三四五六日
 _DATE_PAT = re.compile(r"(\d{1,2})月(\d{1,2})[日号]")
 _YEAR_PAT = re.compile(r"(去年|前年|今年)(?:(\d{1,2})月)?")
 _HOUR_PAT = re.compile(r"(?:(早上|上午|中午|下午|晚上|凌晨))?(\d{1,2})[点时](?:(\d{1,2})分?)?")
+# spec §3.1 相对偏移: "3天后 / 2小时前 / 15分钟之后 / 两周后 / 十五天前"
+# 支持阿拉伯数字 + 中文数字一~九十九，单位: 分钟 / 小时 / 天 / 周 / 月
+_REL_OFFSET_PAT = re.compile(
+    r"([一二三四五六七八九十百两\d]{1,4})\s*(分钟|小时|天|周|月)(?:之)?(前|后)"
+)
 _QUICK_TIME_PAT = re.compile(
     r"[今昨明前后]天|[上下这]周|[上下这]个月"
     r"|\d{1,2}月\d{1,2}[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
     r"|早上|上午|中午|下午|晚上|凌晨"
+    r"|[一二三四五六七八九十百两\d]{1,4}\s*(?:分钟|小时|天|周|月)(?:之)?[前后]"
 )
+
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _parse_cn_number(s: str) -> int | None:
+    """解析中文或阿拉伯数字（0-99 足够覆盖常见相对时间表达）。"""
+    if s.isdigit():
+        return int(s)
+    if s == "十":
+        return 10
+    # X十
+    if len(s) == 2 and s[1] == "十" and s[0] in _CN_DIGIT:
+        return _CN_DIGIT[s[0]] * 10
+    # 十X
+    if len(s) == 2 and s[0] == "十" and s[1] in _CN_DIGIT:
+        return 10 + _CN_DIGIT[s[1]]
+    # X十Y
+    if (len(s) == 3 and s[1] == "十"
+        and s[0] in _CN_DIGIT and s[2] in _CN_DIGIT):
+        return _CN_DIGIT[s[0]] * 10 + _CN_DIGIT[s[2]]
+    # 单字
+    if len(s) == 1 and s in _CN_DIGIT:
+        return _CN_DIGIT[s]
+    return None
 
 _MONTH_MAP = [("这个月", 0), ("上个月", -1), ("下个月", 1)]
 
@@ -141,6 +172,32 @@ def parse_time_expressions(
             d = today + timedelta(days=delta)
             s, e = _day_range(d)
             _add(word, s, e, "relative", 0.95, span)
+
+    # --- 1b. N 天后 / N 小时前 / 十五分钟后 等相对偏移 ---
+    for m in _REL_OFFSET_PAT.finditer(message):
+        num_str, unit, direction = m.group(1), m.group(2), m.group(3)
+        amount = _parse_cn_number(num_str)
+        if amount is None:
+            continue
+        if direction == "前":
+            amount = -amount
+        target = now
+        if unit == "分钟":
+            target = now + timedelta(minutes=amount)
+            s, e = target, target + timedelta(minutes=1)
+        elif unit == "小时":
+            target = now + timedelta(hours=amount)
+            s, e = target, target + timedelta(hours=1)
+        elif unit == "天":
+            d = today + timedelta(days=amount)
+            s, e = _day_range(d)
+        elif unit == "周":
+            d = today + timedelta(weeks=amount)
+            s, e = _day_range(d)
+        else:  # 月（按 30 天近似）
+            d = today + timedelta(days=30 * amount)
+            s, e = _day_range(d)
+        _add(m.group(), s, e, "relative", 0.88, m.span())
 
     # --- 2. 相对周 ---
     for m in _WEEK_PAT.finditer(message):

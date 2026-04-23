@@ -73,35 +73,49 @@ def fallback_trigger_type() -> str:
     return random.choice(["silence_wakeup", "memory_proactive"])
 
 
-# ── spec §3.1 话题范围分级库 (P1-P5, 高等级包含低等级) ──
-TOPIC_THEMES_BY_STAGE: dict[str, tuple[str, ...]] = {
-    # P1 + P2 (冷启动)
-    "cold_start": (
-        "天气", "问候", "兴趣爱好试探", "公共话题",
-        "日常琐事", "AI的简单生活", "询问近况",
-    ),
-    # P1-P4 (升温)
-    "warming": (
-        "天气", "问候", "兴趣爱好试探", "公共话题",
-        "日常琐事", "AI的简单生活", "询问近况",
-        "共同兴趣", "回忆之前聊过的事", "分享有趣见闻",
-        "关心用户情绪", "分享内心感受", "讨论人生话题",
-    ),
-    # P1-P5 (亲密)
-    "intimate": (
-        "天气", "问候", "兴趣爱好试探", "公共话题",
-        "日常琐事", "AI的简单生活", "询问近况",
-        "共同兴趣", "回忆之前聊过的事", "分享有趣见闻",
-        "关心用户情绪", "分享内心感受", "讨论人生话题",
-        "深入价值观探讨", "回忆共同经历", "随意调侃",
-    ),
+# ── spec §3.4.7 话题范围分级库 (P1-P5) ──
+# 权威源: 每个 P-level 列出该等级 *新增* 的话题类型; 抽取时按
+# `allowed_topics(stage_code)` 累加当级及以下所有话题 (spec "高等级
+# 话题范围包含低等级话题").
+TOPIC_RANGE_BY_STAGE: dict[str, tuple[str, ...]] = {
+    "P1": ("天气", "问候", "兴趣爱好试探", "公共话题"),
+    "P2": ("日常琐事", "AI的简单生活", "询问近况"),
+    "P3": ("共同兴趣", "回忆之前聊过的事", "分享有趣见闻"),
+    "P4": ("关心用户情绪", "分享内心感受", "讨论人生话题"),
+    "P5": ("深入价值观探讨", "回忆共同经历", "随意调侃"),
+}
+
+_P_LEVELS = ("P1", "P2", "P3", "P4", "P5")
+
+# proactive 3-archetype → spec P-code. cold_start 覆盖 P1-P2; warming
+# 覆盖到 P4; intimate 放开全 5 级。保留 3-stage 是因为 state.stage 由
+# memory 数量 + topic_intimacy 联合决定, 不能纯用 topic_intimacy 推。
+_STAGE_TO_P: dict[str, str] = {
+    "cold_start": "P2",
+    "warming": "P4",
+    "intimate": "P5",
 }
 
 
+def allowed_topics(stage_code: str) -> tuple[str, ...]:
+    """spec §3.4.7: 返回 `stage_code` 及以下所有 P-level 的累加话题白名单。
+
+    `stage_code` 接受 P1-P5 或 proactive 3-archetype (cold_start/warming/intimate)。
+    """
+    p_code = _STAGE_TO_P.get(stage_code, stage_code)
+    if p_code not in _P_LEVELS:
+        p_code = "P1"
+    idx = _P_LEVELS.index(p_code)
+    result: list[str] = []
+    for p in _P_LEVELS[: idx + 1]:
+        result.extend(TOPIC_RANGE_BY_STAGE[p])
+    return tuple(result)
+
+
 def select_topic_theme(stage: str) -> str:
-    """spec §3.2: 沉默唤醒/记忆主动触发前先抽一个话题方向."""
-    themes = TOPIC_THEMES_BY_STAGE.get(stage) or TOPIC_THEMES_BY_STAGE["cold_start"]
-    return random.choice(themes)
+    """spec §3.2 + §3.4.7: 根据 stage 抽取允许范围内的话题方向。"""
+    themes = allowed_topics(stage)
+    return random.choice(themes) if themes else "问候"
 
 
 # ── spec §4.1 沉默唤醒 话题来源配比 ──

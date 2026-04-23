@@ -29,11 +29,18 @@ def estimate_tokens(text: str) -> int:
     return int(cjk * 1.5 + ascii_chars * 0.25)
 
 
+MAX_MEMORIES_INJECTED = 10  # spec §3.2 step 4: 前 10 条硬上限
+
+
 def select_context(
     ranked_memories: list[dict],
     token_budget: int = 800,
+    max_items: int = MAX_MEMORIES_INJECTED,
 ) -> list[ClassifiedMemory]:
     """Select memories to fit within token budget, with relevance classification.
+
+    spec §3.2 step 4: 前 `max_items` 条 + 不超过 `token_budget` tokens。
+    两条限制取较严的一个。
 
     Classification:
     - strong: rank_score ≥ 0.7 → "你清楚记得的事"
@@ -46,6 +53,9 @@ def select_context(
     seen_ids: set[str] = set()
 
     for mem in ranked_memories:
+        if len(selected) >= max_items:
+            break
+
         mid = mem.get("id", "")
         if mid in seen_ids:
             continue
