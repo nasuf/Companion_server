@@ -1,10 +1,11 @@
-"""Combine chinesecalendar + nager.date + un_observed into a unified candidate list.
+"""合并 chinesecalendar + nager.date + 本地源 成为统一候选列表.
 
 Called by the admin preview endpoint (to show candidates for a given year
-before user selection) and by the weekly refresh cron (to upsert).
+before user selection) and by the manual refresh path (to upsert).
 
-Dedup precedence by `(date, country_code, name)`:
-  chinesecalendar > nager > un_observed
+按 `(date, country_code, name)` 去重，优先级: chinesecalendar > nager > local.
+
+Sources 参数允许精细控制要查哪几个源; 默认全查.
 """
 
 from __future__ import annotations
@@ -14,18 +15,23 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from app.services.schedule_domain.holiday_repo import HolidayEntry
+from app.services.schedule_domain.holiday_repo import (
+    SOURCE_CHINESE_CALENDAR,
+    SOURCE_LOCAL,
+    SOURCE_NAGER,
+    HolidayEntry,
+)
 from app.services.schedule_domain.holiday_sources.chinesecalendar import (
     fetch_cn_year,
 )
+from app.services.schedule_domain.holiday_sources.local import compute_local
 from app.services.schedule_domain.holiday_sources.nager import fetch_intl_year
-from app.services.schedule_domain.holiday_sources.un_observed import (
-    compute_un_observed,
-)
 
 logger = logging.getLogger(__name__)
 
 Status = Literal["ok", "unavailable", "failed"]
+
+ALL_SOURCES = frozenset({SOURCE_CHINESE_CALENDAR, SOURCE_NAGER, SOURCE_LOCAL})
 
 
 @dataclass
@@ -36,37 +42,54 @@ class SourceStatus:
     chinesecalendar_error: str | None
     nager: Status
     nager_error: str | None
-    un_observed: Status
+    local: Status
 
 
 async def collect_candidates(
     year: int,
     *,
-    include_international: bool = True,
+    sources: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[HolidayEntry], SourceStatus]:
-    """Fetch from all sources in parallel, dedup, return sorted candidates."""
+    """Fetch requested sources in parallel, dedup, return sorted candidates.
 
-    cc_result = await asyncio.to_thread(fetch_cn_year, year)
+    `sources` 控制查询范围 (任一子集 of `{chinesecalendar, nager, local}`).
+    None 等同于 ALL_SOURCES. 未被请求的源 status='unavailable', entries 为空.
+    """
+    sources = frozenset(sources) if sources is not None else ALL_SOURCES
 
-    if include_international:
-        nager_task = fetch_intl_year(year)
-        un_entries = compute_un_observed(year)
-        nager_result = await nager_task
-    else:
-        nager_result = {"available": False, "entries": [], "error": "skipped"}
-        un_entries = []
+    # chinesecalendar 是同步阻塞库, 放线程池避免卡事件循环
+    cc_result = (
+        await asyncio.to_thread(fetch_cn_year, year)
+        if SOURCE_CHINESE_CALENDAR in sources
+        else {"available": False, "entries": [], "error": None}
+    )
 
+    nager_result = (
+        await fetch_intl_year(year)
+        if SOURCE_NAGER in sources
+        else {"available": False, "entries": [], "error": None}
+    )
+
+    local_entries = compute_local(year) if SOURCE_LOCAL in sources else []
+
+    # chinesecalendar 的 "no data for year" 是年份未覆盖, 语义上是 unavailable
+    # 不是 failed (不像 nager 的 HTTPError 那样区分网络错误). 所以 CC 只分
+    # requested/ok/unavailable 三态, 不引入 failed.
     status = SourceStatus(
-        chinesecalendar="ok" if cc_result["available"] else "unavailable",
+        chinesecalendar=(
+            "ok"
+            if SOURCE_CHINESE_CALENDAR in sources and cc_result.get("available")
+            else "unavailable"
+        ),
         chinesecalendar_error=cc_result.get("error"),
-        nager=_nager_status(nager_result, include_international),
+        nager=_nager_status(nager_result, SOURCE_NAGER in sources),
         nager_error=nager_result.get("error"),
-        un_observed="ok" if include_international else "unavailable",
+        local="ok" if SOURCE_LOCAL in sources else "unavailable",
     )
 
     merged: dict[tuple[str, str, str], HolidayEntry] = {}
     # Lower-precedence first so higher-precedence overwrites.
-    for entry in un_entries:
+    for entry in local_entries:
         merged[entry.unique_key()] = entry
     for entry in nager_result.get("entries", []):
         merged[entry.unique_key()] = entry
@@ -81,14 +104,14 @@ async def collect_candidates(
         f"Holiday candidates for {year}: "
         f"cc={len(cc_result.get('entries', []))} "
         f"nager={len(nager_result.get('entries', []))} "
-        f"un_observed={len(un_entries)} "
+        f"local={len(local_entries)} "
         f"merged={len(ordered)}"
     )
     return ordered, status
 
 
-def _nager_status(result: dict, include_international: bool) -> Status:
-    if not include_international:
+def _nager_status(result: dict, requested: bool) -> Status:
+    if not requested:
         return "unavailable"
     if result.get("available"):
         return "ok"

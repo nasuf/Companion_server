@@ -1,14 +1,13 @@
-"""Algorithmic international observances that no public API reliably returns.
+"""本地源: 算法生成的国际常见纪念日 + 可算的西方节日.
 
-Covers two classes:
-  1. Fixed-date UN-observed international days (妇女节 3-8, 儿童节 6-1,
-     国际劳动妇女节 3-8 等)
-  2. Movable Western holidays computed from day-of-month rules (母亲节 =
-     5 月第 2 个周日; 父亲节 = 6 月第 3 个周日; 感恩节 = 11 月第 4 个
-     周四 — 这些也由 nager 提供, 但算法版用作无网络时的兜底)
+不依赖任何外部 API, 无网络也能用. 主要兜住 nager.date US 覆盖不到的:
+  1. 固定日期国际纪念日 (妇女节 3-8, 儿童节 6-1, 国际劳动节 5-1)
+     — 这些不是美国联邦假日, nager US 不返回
+  2. 可算的西方节日 (母亲节 = 5 月第 2 个周日; 父亲节 = 6 月第 3 个周日)
+     — nager 也有, 本地源作为备份
 
-We intentionally keep overlap with nager minimal by only emitting names
-nager does not return for US (妇女节, 儿童节, 重阳节等 UN-style observances).
+(之前命名 "un_observed" 不准确 — 严格说只有 3/8 国际妇女节是 UN 1977
+设立, 其它不是. 改叫 "本地源" 更能反映 "本地算法生成, 无外部依赖".)
 """
 
 from __future__ import annotations
@@ -16,11 +15,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.services.schedule_domain.holiday_repo import (
-    SOURCE_UN_OBSERVED,
+    SOURCE_LOCAL,
     HolidayEntry,
 )
 
-# spec: 每年固定公历日期的国际纪念日
+# 每年固定公历日期的国际纪念日
 _FIXED_DATES = [
     (3, 8, "妇女节"),
     (6, 1, "儿童节"),
@@ -35,7 +34,7 @@ def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
     return first + timedelta(days=offset + 7 * (n - 1))
 
 
-def compute_un_observed(year: int) -> list[HolidayEntry]:
+def compute_local(year: int) -> list[HolidayEntry]:
     """Return all algorithmically-computed international observances for the year."""
     entries: list[HolidayEntry] = []
 
@@ -45,7 +44,7 @@ def compute_un_observed(year: int) -> list[HolidayEntry]:
             name=name,
             type="international",
             country_code="INTL",
-            source=SOURCE_UN_OBSERVED,
+            source=SOURCE_LOCAL,
         ))
 
     # 母亲节 = 5 月第 2 个周日 (周日 = weekday 6)
@@ -54,7 +53,7 @@ def compute_un_observed(year: int) -> list[HolidayEntry]:
         name="母亲节",
         type="international",
         country_code="INTL",
-        source=SOURCE_UN_OBSERVED,
+        source=SOURCE_LOCAL,
     ))
     # 父亲节 = 6 月第 3 个周日
     entries.append(HolidayEntry(
@@ -62,7 +61,7 @@ def compute_un_observed(year: int) -> list[HolidayEntry]:
         name="父亲节",
         type="international",
         country_code="INTL",
-        source=SOURCE_UN_OBSERVED,
+        source=SOURCE_LOCAL,
     ))
 
     return entries

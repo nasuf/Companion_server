@@ -21,12 +21,11 @@ logger = logging.getLogger(__name__)
 
 SOURCE_CHINESE_CALENDAR = "chinesecalendar"
 SOURCE_NAGER = "nager"
-SOURCE_UN_OBSERVED = "un_observed"
+SOURCE_LOCAL = "local"          # 本地源: 算法生成的国际纪念日 + 母亲/父亲节
 SOURCE_MANUAL = "manual"
 
-# Used by the weekly refresh cron to filter which rows it's allowed to
-# upsert/replace — 'manual' is always protected.
-REFRESHABLE_SOURCES = frozenset({SOURCE_CHINESE_CALENDAR, SOURCE_NAGER, SOURCE_UN_OBSERVED})
+# Admin 手动刷新 / refresh cron 可覆盖的 source — 'manual' 永远受保护.
+REFRESHABLE_SOURCES = frozenset({SOURCE_CHINESE_CALENDAR, SOURCE_NAGER, SOURCE_LOCAL})
 
 VALID_TYPES = frozenset({"legal", "traditional", "international", "custom"})
 

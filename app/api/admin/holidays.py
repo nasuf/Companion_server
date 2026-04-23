@@ -32,6 +32,9 @@ router = APIRouter(prefix="/admin-api/holidays", tags=["admin-holidays"])
 
 # ─── Schemas ────────────────────────────────────────────────────────────
 
+SourceKey = Literal["chinesecalendar", "nager", "local"]
+
+
 class HolidayCandidatePayload(BaseModel):
     date: date
     name: str
@@ -50,7 +53,10 @@ class HolidayResponse(HolidayCandidatePayload):
 
 class PreviewRequest(BaseModel):
     year: int = Field(..., ge=2020, le=2100)
-    include_international: bool = True
+    # 要查询的数据源列表; 默认全查. 前端按需精细控制.
+    sources: list[SourceKey] = Field(
+        default_factory=lambda: ["chinesecalendar", "nager", "local"]
+    )
 
 
 class PreviewResponse(BaseModel):
@@ -111,7 +117,7 @@ async def preview_holidays(
 ) -> PreviewResponse:
     entries, status = await collect_candidates(
         payload.year,
-        include_international=payload.include_international,
+        sources=set(payload.sources),
     )
     return PreviewResponse(
         candidates=[
@@ -135,7 +141,7 @@ async def preview_holidays(
                 "status": status.nager,
                 "error": status.nager_error,
             },
-            "un_observed": {"status": status.un_observed, "error": None},
+            "local": {"status": status.local, "error": None},
         },
     )
 
@@ -189,7 +195,7 @@ async def refresh_holidays(
     Cron-equivalent path; gives admin a button to pull latest without
     waiting for the weekly job.
     """
-    entries, _status = await collect_candidates(payload.year, include_international=True)
+    entries, _status = await collect_candidates(payload.year)
     refreshable = [e for e in entries if e.source in REFRESHABLE_SOURCES]
     stats = await holiday_repo.upsert_many(refreshable, allow_overwrite_manual=False)
     logger.info(f"Admin-triggered refresh for {payload.year}: {stats}")

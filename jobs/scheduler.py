@@ -351,7 +351,7 @@ async def _run_holiday_refresh():
     year_now = datetime.now().year
     for year in (year_now, year_now + 1):
         try:
-            entries, status = await collect_candidates(year, include_international=True)
+            entries, status = await collect_candidates(year)
             refreshable = [e for e in entries if e.source in holiday_repo.REFRESHABLE_SOURCES]
             if not refreshable:
                 logger.info(

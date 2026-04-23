@@ -9,8 +9,8 @@ import pytest
 
 from app.services.schedule_domain.holiday_repo import (
     SOURCE_CHINESE_CALENDAR,
+    SOURCE_LOCAL,
     SOURCE_NAGER,
-    SOURCE_UN_OBSERVED,
     HolidayEntry,
 )
 from app.services.schedule_domain.holiday_sources.chinesecalendar import (
@@ -18,8 +18,8 @@ from app.services.schedule_domain.holiday_sources.chinesecalendar import (
     _normalize_cn_name,
 )
 from app.services.schedule_domain.holiday_sources.merger import collect_candidates
-from app.services.schedule_domain.holiday_sources.un_observed import (
-    compute_un_observed,
+from app.services.schedule_domain.holiday_sources.local import (
+    compute_local,
     _nth_weekday,
 )
 
@@ -65,9 +65,9 @@ class TestChineseCalendar:
         assert _normalize_cn_name("Unknown Festival") == "Unknown Festival"
 
 
-class TestUnObserved:
+class TestLocal:
     def test_fixed_dates(self):
-        entries = compute_un_observed(2026)
+        entries = compute_local(2026)
         names = {e.name: e.date for e in entries}
         assert names["妇女节"] == date(2026, 3, 8)
         assert names["儿童节"] == date(2026, 6, 1)
@@ -75,13 +75,13 @@ class TestUnObserved:
 
     def test_mothers_day_2025_is_may_11(self):
         # 母亲节 = 5 月第 2 个周日. 2025-05-11 是周日.
-        entries = compute_un_observed(2025)
+        entries = compute_local(2025)
         mothers = [e for e in entries if e.name == "母亲节"][0]
         assert mothers.date == date(2025, 5, 11)
 
     def test_fathers_day_2025_is_june_15(self):
         # 父亲节 = 6 月第 3 个周日. 2025-06-15 是周日.
-        entries = compute_un_observed(2025)
+        entries = compute_local(2025)
         fathers = [e for e in entries if e.name == "父亲节"][0]
         assert fathers.date == date(2025, 6, 15)
 
@@ -92,17 +92,17 @@ class TestUnObserved:
         assert _nth_weekday(2025, 11, 3, 4) == date(2025, 11, 27)
 
     def test_all_marked_international_intl_country(self):
-        entries = compute_un_observed(2026)
+        entries = compute_local(2026)
         for e in entries:
             assert e.type == "international"
             assert e.country_code == "INTL"
-            assert e.source == SOURCE_UN_OBSERVED
+            assert e.source == SOURCE_LOCAL
 
 
 class TestMerger:
     @pytest.mark.asyncio
     async def test_cc_unavailable_still_returns_intl_entries(self):
-        """即使 chinesecalendar 空 (2030), 国际源仍可用 → 返回 nager + un_observed."""
+        """即使 chinesecalendar 空 (2030), 国际源仍可用 → 返回 nager + local."""
         cc_stub = {"available": False, "entries": [], "error": "no data for 2030"}
         nager_stub = {
             "available": True,
@@ -122,18 +122,18 @@ class TestMerger:
             "app.services.schedule_domain.holiday_sources.merger.fetch_intl_year",
             new=AsyncMock(return_value=nager_stub),
         ):
-            entries, status = await collect_candidates(2030, include_international=True)
+            entries, status = await collect_candidates(2030)
 
         assert status.chinesecalendar == "unavailable"
         assert status.nager == "ok"
-        assert status.un_observed == "ok"
+        assert status.local == "ok"
         names = {e.name for e in entries}
         assert "圣诞节" in names
-        assert "妇女节" in names  # from un_observed
+        assert "妇女节" in names  # from local
 
     @pytest.mark.asyncio
-    async def test_cc_overrides_un_observed_on_same_key(self):
-        """chinesecalendar > un_observed when (date, country, name) collides."""
+    async def test_cc_overrides_local_on_same_key(self):
+        """chinesecalendar > local when (date, country, name) collides."""
         cc_stub = {
             "available": True,
             "entries": [HolidayEntry(
@@ -153,14 +153,15 @@ class TestMerger:
             "app.services.schedule_domain.holiday_sources.merger.fetch_intl_year",
             new=AsyncMock(return_value=nager_stub),
         ):
-            entries, _ = await collect_candidates(2026, include_international=True)
+            entries, _ = await collect_candidates(2026)
 
         labor_cn = [e for e in entries if e.country_code == "CN" and e.name == "劳动节"]
         assert len(labor_cn) == 1
         assert labor_cn[0].source == SOURCE_CHINESE_CALENDAR
 
     @pytest.mark.asyncio
-    async def test_skip_international_when_flag_false(self):
+    async def test_sources_subset_only_queries_requested(self):
+        """sources={"chinesecalendar"} 只查 CN 库, nager + local 都 unavailable."""
         cc_stub = {
             "available": True,
             "entries": [HolidayEntry(
@@ -176,11 +177,13 @@ class TestMerger:
             "app.services.schedule_domain.holiday_sources.merger.fetch_cn_year",
             return_value=cc_stub,
         ):
-            entries, status = await collect_candidates(2026, include_international=False)
+            entries, status = await collect_candidates(
+                2026, sources={"chinesecalendar"}
+            )
 
+        assert status.chinesecalendar == "ok"
         assert status.nager == "unavailable"
-        assert status.un_observed == "unavailable"
-        # 只剩 CN 条目
+        assert status.local == "unavailable"
         assert all(e.country_code == "CN" for e in entries)
 
     @pytest.mark.asyncio
@@ -194,7 +197,7 @@ class TestMerger:
             "app.services.schedule_domain.holiday_sources.merger.fetch_intl_year",
             new=AsyncMock(return_value=nager_stub),
         ):
-            _, status = await collect_candidates(2026, include_international=True)
+            _, status = await collect_candidates(2026)
 
         assert status.nager == "failed"
         assert status.nager_error is not None

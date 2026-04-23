@@ -3,7 +3,7 @@
 We anchor on US (the broadest coverage of Western holidays relevant to
 Chinese consumers: Valentine's, Mother's/Father's Day, Halloween,
 Thanksgiving, Christmas). UN-observed days (妇女节, 儿童节) and
-algorithmic holidays are handled in `un_observed.py` — nager doesn't
+algorithmic holidays are handled in `local.py` — nager doesn't
 return them as US federal holidays.
 """
 
