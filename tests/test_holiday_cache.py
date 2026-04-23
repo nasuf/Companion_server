@@ -51,6 +51,21 @@ SAMPLE_ENTRIES = [
 
 class TestReload:
     @pytest.mark.asyncio
+    async def test_db_error_leaves_empty_cache_without_crashing(self):
+        """启动时 holidays 表不存在 / 连接池耗尽时, reload 不应抛出,
+        应返回零 stats + 标记 _loaded=True, 供启动继续推进。
+        """
+        with patch(
+            "app.services.schedule_domain.holiday_cache.list_holidays",
+            side_effect=RuntimeError("relation \"holidays\" does not exist"),
+        ):
+            stats = await holiday_cache.reload()
+
+        assert stats == {"total": 0, "unique_dates": 0, "unique_names": 0, "workday_swaps": 0}
+        assert holiday_cache.is_loaded() is True
+        assert holiday_cache.get_by_date(date(2026, 1, 1)) is None
+
+    @pytest.mark.asyncio
     async def test_populates_cache(self):
         with patch(
             "app.services.schedule_domain.holiday_cache.list_holidays",

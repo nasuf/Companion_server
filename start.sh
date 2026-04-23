@@ -64,6 +64,15 @@ echo "Generating Prisma client..."
 export PATH="$(pwd)/.venv/bin:$PATH"
 .venv/bin/prisma generate 2>/dev/null || true
 
+# ── Apply pending DB migrations ──
+# 本地开发: 每次 start 自动追上 migration, 避免忘记手动 migrate 导致
+# 运行时查询新表失败 (e.g. 节假日 DB 化后的 holidays 表).
+# 生产环境应在 CI/CD 里显式跑 migrate deploy, 不依赖 start.sh.
+echo "Applying DB migrations..."
+if ! .venv/bin/prisma migrate deploy 2>&1 | grep -v "^$"; then
+    echo "  WARNING: migrate deploy failed (may be offline or already up-to-date)"
+fi
+
 # ── 绕过代理 ──
 # 本地开发时如果开启了代理 (HTTP_PROXY/HTTPS_PROXY)，
 # Prisma engine / Ollama / Supabase 连接会被代理拦截。

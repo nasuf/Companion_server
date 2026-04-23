@@ -44,8 +44,18 @@ async def lifespan(app: FastAPI):
         _timed("Prompt templates", ensure_prompt_templates()),
         _timed("Character template", ensure_default_template()),
         _timed("Career templates", ensure_default_careers()),
-        _timed("Holiday cache", reload_holiday_cache()),
     )
+
+    # Phase 2b: Holiday cache preload. Runs sequentially (not in the gather
+    # above) to avoid exhausting the Prisma pool when the other seed tasks
+    # hold connections for several seconds. Failure here must not crash
+    # startup — cache stays empty and `is_holiday()` falls back to lunardate.
+    try:
+        await _timed("Holiday cache", reload_holiday_cache())
+    except Exception as e:
+        logger.warning(
+            f"Holiday cache preload failed ({e!r}); lunardate fallback active."
+        )
 
     # Phase 3: Scheduler
     setup_scheduler()

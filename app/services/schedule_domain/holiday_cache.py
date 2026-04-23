@@ -37,9 +37,26 @@ async def reload() -> dict[str, int]:
     """Pull all holidays from DB and replace the in-process cache atomically.
 
     Returns stats for logging. Safe to call concurrently — last writer wins.
+
+    If the DB query fails (e.g. `holidays` table not yet migrated, connection
+    pool exhausted, etc.), we mark the cache as loaded-but-empty and return
+    zero stats. Caller logs a warning; `is_holiday()` then falls back to the
+    lunardate branch, which covers the main traditional holidays.
     """
     global _loaded
-    entries = await list_holidays()
+    try:
+        entries = await list_holidays()
+    except Exception as e:
+        logger.warning(
+            f"Holiday cache DB query failed ({type(e).__name__}: {e}); "
+            f"leaving cache empty. lunardate fallback will handle lunar holidays."
+        )
+        with _lock:
+            _by_date.clear()
+            _by_name.clear()
+            _workday_swaps.clear()
+            _loaded = True  # 标记为已加载, 避免重复重试
+        return {"total": 0, "unique_dates": 0, "unique_names": 0, "workday_swaps": 0}
 
     by_date: dict[date, list[HolidayEntry]] = defaultdict(list)
     by_name: dict[str, list[date]] = defaultdict(list)
