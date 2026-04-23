@@ -37,6 +37,16 @@ router = APIRouter(prefix="/admin-api/character", tags=["admin-character"])
 
 # ── helpers ──
 
+AGE_MIN = 20
+AGE_MAX = 29
+
+
+def clamp_agent_age(age: int) -> int:
+    """spec §1.3: agent 年龄硬区间 20-29. prompt hint 无法保证 LLM 严格输出,
+    这里兜底. 抽成函数让 tests 直接验证生产逻辑, 避免在 test 里重算."""
+    return max(AGE_MIN, min(AGE_MAX, age))
+
+
 def _to_tags(val: str) -> list[str]:
     """Split a delimited string into a tags array."""
     if not val:
@@ -379,7 +389,7 @@ async def generate_profiles(
                         bd = date.fromisoformat(birthday)
                         today = date.today()
                         age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
-                        identity["age"] = max(20, min(29, age))
+                        identity["age"] = clamp_agent_age(age)
                     except (ValueError, TypeError):
                         pass
 
