@@ -75,7 +75,6 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         f"emotion:{agent_id}",
         f"life_overview:{agent_id}",
         f"patience:{agent_id}:{user_id}",
-        f"blacklist_timer:{agent_id}:{user_id}",
         f"attack_history:{agent_id}:{user_id}",
         f"trigger_last:{agent_id}:{user_id}",
         f"intimacy:{agent_id}:{user_id}",

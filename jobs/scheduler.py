@@ -19,7 +19,7 @@ from app.services.schedule_domain.schedule import (
     get_current_status, get_life_overview, review_daily_schedule,
 )
 from app.services.mbti import get_mbti
-from app.services.interaction.boundary import recover_patience_hourly, scan_blacklist_expiry
+from app.services.interaction.boundary import recover_patience_hourly
 from app.services.relationship.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive.orchestrator import scan_proactive_states
 from app.services.interaction.aggregation import scan_expired
@@ -156,15 +156,6 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # 5B.3: Blacklist expiry scan every 5 minutes
-    scheduler.add_job(
-        _run_blacklist_scan,
-        "interval",
-        minutes=5,
-        id="blacklist_scan",
-        replace_existing=True,
-    )
-
     # spec §1.4: 后台定时任务每秒扫描延迟队列
     scheduler.add_job(
         _run_aggregation_scan,
@@ -286,16 +277,6 @@ async def _run_patience_recovery():
         lambda a: recover_patience_hourly(a.id, a.userId),
         concurrency=5, task_name="Patience recovery",
     )
-
-
-async def _run_blacklist_scan():
-    """5B.3: 扫描已过期的拉黑计时器并自动解除。"""
-    try:
-        count = await scan_blacklist_expiry()
-        if count > 0:
-            logger.info(f"Blacklist scan: lifted {count} blacklists")
-    except Exception as e:
-        logger.warning(f"Blacklist scan failed: {e}")
 
 
 async def _run_trigger_scan():

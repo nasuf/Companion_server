@@ -6,7 +6,8 @@
 - 1-29: 低（警告）
 - ≤0: 拉黑（固定模板回复）
 
-5B增强：500+违禁词库、拼音变体检测、正面互动恢复、24h自动解除拉黑。
+5B增强：500+违禁词库、拼音变体检测、正面互动恢复。
+spec §2 拉黑态只能通过用户真诚道歉恢复 (spec §2.5 / §2.6.2.1), 不做超时自动解封.
 Redis缓存 + DB持久化，热路径无LLM调用。
 """
 
@@ -108,18 +109,12 @@ async def init_patience(agent_id: str, user_id: str) -> int:
 
 
 async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:
-    """调整耐心值（正数恢复，负数扣除）。返回新值。"""
+    """调整耐心值（正数恢复，负数扣除）。返回新值。
+
+    spec §2 拉黑恢复只能走道歉路径 (handle_apology), 不做超时自动解封.
+    """
     current = await get_patience(agent_id, user_id)
-    new_val = await set_patience(agent_id, user_id, current + delta)
-
-    # 5B.3: 耐心值归零时启动24h拉黑计时器
-    if new_val <= 0 and current > 0:
-        redis = await get_redis()
-        blacklist_key = f"blacklist_timer:{agent_id}:{user_id}"
-        await redis.set(blacklist_key, "1", ex=86400)  # 24h TTL
-        logger.info(f"Blacklist timer started: agent={agent_id} user={user_id}")
-
-    return new_val
+    return await set_patience(agent_id, user_id, current + delta)
 
 
 async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
@@ -404,62 +399,6 @@ async def check_positive_recovery(
     new_val = await set_patience(agent_id, user_id, current + 20)
     logger.info(f"Positive recovery: agent={agent_id} user={user_id} +20 → {new_val}")
     return new_val
-
-
-# --- 5B.3 拉黑24h自动解除 ---
-
-async def check_blacklist_expiry(agent_id: str, user_id: str) -> bool:
-    """检查拉黑计时器是否已过期。
-
-    由 scheduler 定期调用。如果 blacklist_timer key 已过期且耐心值≤0，
-    恢复耐心值到30。
-    返回是否执行了恢复。
-    """
-    redis = await get_redis()
-    blacklist_key = f"blacklist_timer:{agent_id}:{user_id}"
-
-    # 如果计时器还在，未过期
-    if await redis.exists(blacklist_key):
-        return False
-
-    # 计时器已过期，检查是否仍然拉黑
-    current = await get_patience(agent_id, user_id)
-    if current > 0:
-        return False  # 已经不是拉黑状态了
-
-    # 恢复到30点（low区间，作为缓冲）
-    await set_patience(agent_id, user_id, 30)
-    logger.info(f"Blacklist auto-lifted: agent={agent_id} user={user_id} → 30")
-    return True
-
-
-async def scan_blacklist_expiry() -> int:
-    """扫描所有拉黑计时器，解除已过期的。
-
-    由 scheduler 每5分钟调用。
-    返回解除的数量。
-    """
-    redis = await get_redis()
-    count = 0
-
-    # 扫描所有 patience key 值为 0 的
-    cursor = 0
-    while True:
-        cursor, keys = await redis.scan(cursor, match="patience:*", count=100)
-        for key in keys:
-            val = await redis.get(key)
-            if val is not None and int(val) <= 0:
-                # 解析 agent_id 和 user_id
-                parts = key if isinstance(key, str) else key.decode()
-                segments = parts.split(":")
-                if len(segments) == 3:
-                    _, agent_id, user_id = segments
-                    if await check_blacklist_expiry(agent_id, user_id):
-                        count += 1
-        if cursor == 0:
-            break
-
-    return count
 
 
 # --- 5B.4 耐心区间描述（供Prompt注入） ---
