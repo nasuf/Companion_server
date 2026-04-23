@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from prisma import Json
+
 from app.db import db
 
 logger = logging.getLogger(__name__)
@@ -157,10 +159,12 @@ async def upsert_many(
                 "isWorkdaySwap": entry.is_workday_swap,
                 "source": entry.source,
             }
-            # Prisma Python 对 Json? 字段传 None 会抛 "A value is required
-            # but not set". 只在 metadata 非空时才放进 data.
+            # Prisma Python 对 Json? 字段:
+            #   - 收到 None 会抛 "A value is required but not set"
+            #   - 收到原始 dict 会抛 "should be of type Json" 拒绝
+            # 非空 dict 必须用 prisma.Json() 包装, None 则干脆不放 key.
             if entry.metadata:
-                create_data["metadata"] = entry.metadata  # type: ignore[assignment]
+                create_data["metadata"] = Json(entry.metadata)
             await db.holiday.create(data=create_data)  # type: ignore[arg-type]
             inserted += 1
             continue
@@ -175,7 +179,7 @@ async def upsert_many(
             "source": entry.source,
         }
         if entry.metadata:
-            update_data["metadata"] = entry.metadata  # type: ignore[assignment]
+            update_data["metadata"] = Json(entry.metadata)
         await db.holiday.update(where={"id": existing.id}, data=update_data)  # type: ignore[arg-type]
         updated += 1
 
