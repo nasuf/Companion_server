@@ -52,7 +52,6 @@ def _career_row_to_dict(c) -> dict:
         "id": c.id,
         "title": c.title,
         "duties": c.duties,
-        "outputs": c.outputs,
         "socialValue": c.socialValue,
         "clients": c.clients,
     }
@@ -362,12 +361,11 @@ async def generate_profiles(
                 data["identity"] = {}
             data["identity"]["gender"] = "男" if gender_for_run == "male" else "女"
 
-            # 职业字段强制覆盖 — outputs/clients 拆成 tags 数组
+            # 职业字段强制覆盖 — clients 拆成 tags 数组
             if career:
                 data["career"] = {
                     "title": career["title"],
                     "duties": career["duties"],
-                    "outputs": _to_tags(career["outputs"]),
                     "social_value": career.get("socialValue", career.get("social_value", "")),
                     "clients": _to_tags(career["clients"]),
                 }

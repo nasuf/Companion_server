@@ -6,7 +6,6 @@ from pydantic import BaseModel
 class CareerCreateRequest(BaseModel):
     title: str
     duties: str
-    outputs: str
     social_value: str
     clients: str
     sort_order: int = 0
@@ -15,7 +14,6 @@ class CareerCreateRequest(BaseModel):
 class CareerUpdateRequest(BaseModel):
     title: str | None = None
     duties: str | None = None
-    outputs: str | None = None
     social_value: str | None = None
     clients: str | None = None
     sort_order: int | None = None
@@ -25,7 +23,6 @@ class CareerResponse(BaseModel):
     id: str
     title: str
     duties: str
-    outputs: str
     social_value: str
     clients: str
     status: str

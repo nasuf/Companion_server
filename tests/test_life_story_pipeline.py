@@ -133,12 +133,11 @@ class TestConvertProfileToMemories:
 
     def test_career_template_applied(self):
         career = {"title": "程序员", "duties": "写代码",
-                  "outputs": ["产品", "工具"], "clients": ["团队"],
-                  "social_value": "创造价值"}
+                  "clients": ["团队"], "social_value": "创造价值"}
         mems = convert_profile_to_memories({}, career)
         career_mems = [m for m in mems
                       if m["sub_category"] == "职业/与经济" or m["sub_category"] == "工作"]
-        assert len(career_mems) >= 5  # title + duties + 2 outputs + 1 client + social
+        assert len(career_mems) >= 4  # title + duties + 1 client + social
 
     def test_malformed_sections_are_skipped(self):
         """Non-dict sections shouldn't throw."""

@@ -64,7 +64,6 @@ DEFAULT_TEMPLATE_SCHEMA = {
             "fields": [
                 {"key": "title", "name": "职业", "type": "text", "hint": "关联《职业背景设定表》"},
                 {"key": "duties", "name": "工作内容", "type": "textarea"},
-                {"key": "outputs", "name": "主要产出物", "type": "tags"},
                 {"key": "social_value", "name": "社会价值", "type": "textarea"},
                 {"key": "clients", "name": "服务对象", "type": "tags"},
             ],
@@ -282,7 +281,6 @@ def _build_career_section(career: dict) -> str:
         "===== 该角色的职业背景（仅供参考，不需要在输出中生成 career 分类）=====\n"
         f"职业: {career.get('title', '')}\n"
         f"工作内容: {career.get('duties', '')}\n"
-        f"主要产出物: {career.get('outputs', '')}\n"
         f"社会价值: {career.get('socialValue', career.get('social_value', ''))}\n"
         f"服务对象: {career.get('clients', '')}\n\n"
         "请围绕上述职业合理生成其他分类（身份、外貌、教育、喜好等），使整体逻辑自洽。\n"

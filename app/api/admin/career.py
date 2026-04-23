@@ -16,7 +16,6 @@ def _career_response(c, profile_count: int = 0) -> CareerResponse:
         id=c.id,
         title=c.title,
         duties=c.duties,
-        outputs=c.outputs,
         social_value=c.socialValue,
         clients=c.clients,
         status=c.status,
@@ -62,7 +61,6 @@ async def create_career(
         data={
             "title": body.title,
             "duties": body.duties,
-            "outputs": body.outputs,
             "socialValue": body.social_value,
             "clients": body.clients,
             "sortOrder": body.sort_order,
@@ -85,8 +83,6 @@ async def update_career(
         update_data["title"] = body.title
     if body.duties is not None:
         update_data["duties"] = body.duties
-    if body.outputs is not None:
-        update_data["outputs"] = body.outputs
     if body.social_value is not None:
         update_data["socialValue"] = body.social_value
     if body.clients is not None:

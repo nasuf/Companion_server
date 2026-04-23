@@ -192,7 +192,6 @@ async def select_character_profile(gender: str | None) -> dict | None:
         "career_template": {
             "title": selected.career.title,
             "duties": selected.career.duties,
-            "outputs": selected.career.outputs,
             "social_value": selected.career.socialValue,
             "clients": selected.career.clients,
         } if selected.career else None,
@@ -299,9 +298,7 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
             _add(memories, f"我的职业是 {v}", "身份", "职业/与经济", "identity", 0.95)
         if (v := _clean_text(ct.get("duties"))):
             _add(memories, f"我的工作内容: {v}", "生活", "工作", "life", 0.88)
-        # outputs/clients 是 tag 数组 — 每项一条工作相关记忆
-        for out in _as_list(ct.get("outputs")):
-            _add(memories, f"我的工作会产出 {out}", "生活", "工作", "life", 0.80)
+        # clients 是 tag 数组 — 每项一条工作相关记忆
         for client in _as_list(ct.get("clients")):
             _add(memories, f"我的服务对象包括 {client}", "生活", "工作", "life", 0.78)
         if (v := _clean_text(ct.get("social_value") or ct.get("socialValue"))):

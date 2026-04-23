@@ -432,9 +432,8 @@ model Sticker {
 
 model CareerTemplate {
   id          String   @id @default(uuid())
-  title       String                          // 职业名称
+  title       String                          // 职业
   duties      String                          // 工作内容
-  outputs     String                          // 主要产出物
   socialValue String   @map("social_value")   // 社会价值
   clients     String                          // 服务对象
   status      String   @default("active")     // active / archived
