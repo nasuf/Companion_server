@@ -548,8 +548,8 @@ model MemoryMention {
 // 来源:
 //   chinesecalendar  (CN 法定假日 + 调休, 年度数据随国务院办公厅通知发布更新)
 //   nager            (国际节日, nager.date REST API)
-//   un_observed      (算法计算的国际纪念日, 妇女节/儿童节/母亲节等)
-//   manual           (admin 手动录入或从老硬编码 seed 的条目, refresh job 不覆盖)
+//   local            (算法计算的国际纪念日, 妇女节/儿童节/母亲节/父亲节)
+//   manual           (admin 手动录入或从老硬编码 seed 的条目, refresh 不覆盖)
 //
 // country_code: ISO-3166 alpha-2 (如 "CN"); "INTL" 表示无特定国家的国际纪念日.
 model Holiday {
@@ -559,7 +559,7 @@ model Holiday {
   type          String // legal / traditional / international / custom
   countryCode   String   @default("CN") @map("country_code")
   isWorkdaySwap Boolean  @default(false) @map("is_workday_swap")
-  source        String // chinesecalendar / nager / un_observed / manual
+  source        String // chinesecalendar / nager / local / manual
   metadata      Json?
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")

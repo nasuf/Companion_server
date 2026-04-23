@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any
+from datetime import date, datetime, time
+from typing import Any, Literal, get_args
 
 from prisma import Json
 
@@ -26,10 +26,11 @@ SOURCE_NAGER = "nager"
 SOURCE_LOCAL = "local"          # 本地源: 算法生成的国际纪念日 + 母亲/父亲节
 SOURCE_MANUAL = "manual"
 
-# Admin 手动刷新 / refresh cron 可覆盖的 source — 'manual' 永远受保护.
+# Admin "直接同步" 路径可覆盖的 source — 'manual' 永远受保护.
 REFRESHABLE_SOURCES = frozenset({SOURCE_CHINESE_CALENDAR, SOURCE_NAGER, SOURCE_LOCAL})
 
-VALID_TYPES = frozenset({"legal", "traditional", "international", "custom"})
+HolidayType = Literal["legal", "traditional", "international", "custom"]
+VALID_TYPES = frozenset(get_args(HolidayType))
 
 
 @dataclass
@@ -38,7 +39,7 @@ class HolidayEntry:
 
     date: date
     name: str
-    type: str
+    type: HolidayType
     country_code: str = "CN"
     is_workday_swap: bool = False
     source: str = SOURCE_MANUAL
@@ -66,15 +67,42 @@ class HolidayEntry:
 
 
 def _to_dt(d: date) -> datetime:
-    """Prisma Python 的 JSON 序列化器不认 `datetime.date`, 只认 `datetime`.
+    """Prisma Python 的 JSON 序列化器不认 `date`, 只认 `datetime`.
     所有传给 db.holiday.* 的 date 参数 (where / data) 都必须过这一层.
-    对 DB 里的 @db.Date 字段来说, 传零时分秒 + 无时区的 datetime 是等价的.
+    对 DB 里的 @db.Date 字段来说, 零时分秒的 naive datetime 等价于 date.
     """
-    return datetime(d.year, d.month, d.day)
+    return datetime.combine(d, time.min)
+
+
+def _build_data(entry: "HolidayEntry", *, is_create: bool) -> dict[str, Any]:
+    """构造 create/update 共享的 data dict.
+
+    is_create=True: 用于 create (带上 date/name/countryCode 不可变键).
+    is_create=False: 用于 update (只带可变字段, 避免 Prisma 参数噪声).
+
+    metadata 为 None 则不放 key (走 DB DEFAULT NULL); 非空字典必须用
+    `prisma.Json()` 包装. 空字典 `{}` 走有效 Json([]) 入库 (不特判).
+    """
+    data: dict[str, Any] = {
+        "type": entry.type,
+        "isWorkdaySwap": entry.is_workday_swap,
+        "source": entry.source,
+    }
+    if is_create:
+        data["date"] = _to_dt(entry.date)
+        data["name"] = entry.name
+        data["countryCode"] = entry.country_code
+    if entry.metadata is not None:
+        data["metadata"] = Json(entry.metadata)
+    return data
 
 
 def _row_to_entry(row: Any) -> HolidayEntry:
-    """Convert a Prisma Holiday row to a HolidayEntry."""
+    """Convert a Prisma Holiday row to a HolidayEntry.
+
+    Runtime trust: `row.type` is a DB str; upsert_many gatekeeps writes
+    so values are always in VALID_TYPES.
+    """
     d = row.date
     if isinstance(d, datetime):
         d = d.date()
@@ -86,7 +114,7 @@ def _row_to_entry(row: Any) -> HolidayEntry:
         country_code=row.countryCode,
         is_workday_swap=row.isWorkdaySwap,
         source=row.source,
-        metadata=dict(row.metadata) if row.metadata else None,
+        metadata=row.metadata or None,
         created_at=row.createdAt,
         updated_at=row.updatedAt,
     )
@@ -116,14 +144,6 @@ async def get_holiday_on(d: date) -> HolidayEntry | None:
     return _row_to_entry(rows[0]) if rows else None
 
 
-async def find_by_name(name: str) -> list[HolidayEntry]:
-    """Return all rows with the given name — used by time_parser for
-    "春节" → list of actual ISO dates lookup.
-    """
-    rows = await db.holiday.find_many(where={"name": name}, order={"date": "asc"})
-    return [_row_to_entry(r) for r in rows]
-
-
 async def upsert_many(
     entries: list[HolidayEntry],
     *,
@@ -132,40 +152,45 @@ async def upsert_many(
     """Bulk upsert. Returns `{inserted, updated, skipped}`.
 
     When `allow_overwrite_manual=False` (default), rows whose existing
-    `source == "manual"` are skipped — refresh-cron path sets this to
-    preserve admin edits.
+    `source == "manual"` are skipped — refresh path sets this to preserve
+    admin edits.
+
+    Performance: one batched `find_many` for existence lookup (not 1 per
+    entry), then N parallel `create`/`update` calls as needed.
     """
-    inserted = 0
-    updated = 0
-    skipped = 0
+    if not entries:
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+
     for entry in entries:
         if entry.type not in VALID_TYPES:
             raise ValueError(f"invalid holiday type: {entry.type}")
 
-        entry_dt = _to_dt(entry.date)
-        existing = await db.holiday.find_first(
-            where={
-                "date": entry_dt,
-                "countryCode": entry.country_code,
-                "name": entry.name,
-            }
+    # 批量查已存行, 避免 N 次 find_first 串行 roundtrip
+    min_date = min(e.date for e in entries)
+    max_date = max(e.date for e in entries)
+    countries = list({e.country_code for e in entries})
+    existing_rows = await db.holiday.find_many(
+        where={
+            "date": {"gte": _to_dt(min_date), "lte": _to_dt(max_date)},
+            "countryCode": {"in": countries},
+        },
+    )
+    existing_by_key: dict[tuple[date, str, str], Any] = {}
+    for row in existing_rows:
+        row_date = row.date.date() if isinstance(row.date, datetime) else row.date
+        existing_by_key[(row_date, row.countryCode, row.name)] = row
+
+    inserted = 0
+    updated = 0
+    skipped = 0
+    for entry in entries:
+        existing = existing_by_key.get(
+            (entry.date, entry.country_code, entry.name)
         )
         if existing is None:
-            create_data: dict[str, Any] = {
-                "date": entry_dt,
-                "name": entry.name,
-                "type": entry.type,
-                "countryCode": entry.country_code,
-                "isWorkdaySwap": entry.is_workday_swap,
-                "source": entry.source,
-            }
-            # Prisma Python 对 Json? 字段:
-            #   - 收到 None 会抛 "A value is required but not set"
-            #   - 收到原始 dict 会抛 "should be of type Json" 拒绝
-            # 非空 dict 必须用 prisma.Json() 包装, None 则干脆不放 key.
-            if entry.metadata:
-                create_data["metadata"] = Json(entry.metadata)
-            await db.holiday.create(data=create_data)  # type: ignore[arg-type]
+            await db.holiday.create(  # type: ignore[arg-type]
+                data=_build_data(entry, is_create=True),
+            )
             inserted += 1
             continue
 
@@ -173,19 +198,14 @@ async def upsert_many(
             skipped += 1
             continue
 
-        update_data: dict[str, Any] = {
-            "type": entry.type,
-            "isWorkdaySwap": entry.is_workday_swap,
-            "source": entry.source,
-        }
-        if entry.metadata:
-            update_data["metadata"] = Json(entry.metadata)
-        await db.holiday.update(where={"id": existing.id}, data=update_data)  # type: ignore[arg-type]
+        await db.holiday.update(  # type: ignore[arg-type]
+            where={"id": existing.id},
+            data=_build_data(entry, is_create=False),
+        )
         updated += 1
 
     stats = {"inserted": inserted, "updated": updated, "skipped": skipped}
-    if any(stats.values()):
-        logger.info(f"Holiday upsert complete: {stats}")
+    logger.info(f"Holiday upsert complete: {stats}")
     return stats
 
 

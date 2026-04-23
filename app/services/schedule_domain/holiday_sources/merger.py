@@ -44,6 +44,18 @@ class SourceStatus:
     nager_error: str | None
     local: Status
 
+    def to_response_dict(self) -> dict[str, dict[str, str | None]]:
+        """Serialize for the /preview response. Extend here when new
+        sources are added instead of editing the admin endpoint."""
+        return {
+            "chinesecalendar": {
+                "status": self.chinesecalendar,
+                "error": self.chinesecalendar_error,
+            },
+            "nager": {"status": self.nager, "error": self.nager_error},
+            "local": {"status": self.local, "error": None},
+        }
+
 
 async def collect_candidates(
     year: int,
@@ -57,19 +69,19 @@ async def collect_candidates(
     """
     sources = frozenset(sources) if sources is not None else ALL_SOURCES
 
-    # chinesecalendar 是同步阻塞库, 放线程池避免卡事件循环
-    cc_result = (
-        await asyncio.to_thread(fetch_cn_year, year)
+    # CC (同步库, 放线程池) + nager (async HTTP) 并发跑: nager HTTP 0.5-2s,
+    # CC CPU ~0.1s, 串行会白等一个. compute_local 是纯同步瞬时, 直接算.
+    cc_coro = (
+        asyncio.to_thread(fetch_cn_year, year)
         if SOURCE_CHINESE_CALENDAR in sources
-        else {"available": False, "entries": [], "error": None}
+        else _skipped_result()
     )
-
-    nager_result = (
-        await fetch_intl_year(year)
+    nager_coro = (
+        fetch_intl_year(year)
         if SOURCE_NAGER in sources
-        else {"available": False, "entries": [], "error": None}
+        else _skipped_result()
     )
-
+    cc_result, nager_result = await asyncio.gather(cc_coro, nager_coro)
     local_entries = compute_local(year) if SOURCE_LOCAL in sources else []
 
     # chinesecalendar 的 "no data for year" 是年份未覆盖, 语义上是 unavailable
@@ -108,6 +120,11 @@ async def collect_candidates(
         f"merged={len(ordered)}"
     )
     return ordered, status
+
+
+async def _skipped_result() -> dict:
+    """占位协程: 该源未被请求时, 给 gather 一个 awaitable 填位."""
+    return {"available": False, "entries": [], "error": None}
 
 
 def _nager_status(result: dict, requested: bool) -> Status:

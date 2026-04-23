@@ -86,7 +86,7 @@ def _entry_to_response(e: HolidayEntry) -> HolidayResponse:
         id=e.id,
         date=e.date,
         name=e.name,
-        type=e.type,  # type: ignore[arg-type]
+        type=e.type,
         country_code=e.country_code,
         is_workday_swap=e.is_workday_swap,
         source=e.source,
@@ -124,7 +124,7 @@ async def preview_holidays(
             HolidayCandidatePayload(
                 date=e.date,
                 name=e.name,
-                type=e.type,  # type: ignore[arg-type]
+                type=e.type,
                 country_code=e.country_code,
                 is_workday_swap=e.is_workday_swap,
                 source=e.source,
@@ -132,17 +132,7 @@ async def preview_holidays(
             )
             for e in entries
         ],
-        sources_status={
-            "chinesecalendar": {
-                "status": status.chinesecalendar,
-                "error": status.chinesecalendar_error,
-            },
-            "nager": {
-                "status": status.nager,
-                "error": status.nager_error,
-            },
-            "local": {"status": status.local, "error": None},
-        },
+        sources_status=status.to_response_dict(),
     )
 
 

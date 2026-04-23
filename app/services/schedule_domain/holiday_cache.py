@@ -69,7 +69,7 @@ async def reload() -> dict[str, int]:
             by_name[e.name].append(e.date)
             # Also record canonical name (e.g. "春节假期" has metadata
             # {canonical_name: "春节"}) so time_parser resolves "春节"
-            canonical = (e.metadata or {}).get("canonical_name") if e.metadata else None
+            canonical = e.metadata.get("canonical_name") if e.metadata else None
             if canonical and canonical != e.name:
                 by_name[canonical].append(e.date)
 
@@ -129,6 +129,17 @@ def all_known_names() -> list[str]:
     """Used by time_parser to scan message for any holiday name mention."""
     with _lock:
         return sorted(_by_name.keys())
+
+
+def reset_for_testing() -> None:
+    """Clear the module-level cache. For test fixtures only — do not call
+    from production code (use `reload()` to replace with fresh DB data)."""
+    with _lock:
+        _by_date.clear()
+        _by_name.clear()
+        _workday_swaps.clear()
+    global _loaded
+    _loaded = False
 
 
 def invalidate_background() -> None:

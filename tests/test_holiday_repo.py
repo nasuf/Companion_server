@@ -90,7 +90,7 @@ class TestUpsert:
         mock_create = AsyncMock()
         with patch("app.services.schedule_domain.holiday_repo.db") as mock_db:
             mock_db.holiday = MagicMock()
-            mock_db.holiday.find_first = AsyncMock(return_value=None)
+            mock_db.holiday.find_many = AsyncMock(return_value=[])
             mock_db.holiday.create = mock_create
             mock_db.holiday.update = AsyncMock()
 
@@ -107,7 +107,7 @@ class TestUpsert:
         mock_update = AsyncMock()
         with patch("app.services.schedule_domain.holiday_repo.db") as mock_db:
             mock_db.holiday = MagicMock()
-            mock_db.holiday.find_first = AsyncMock(return_value=existing)
+            mock_db.holiday.find_many = AsyncMock(return_value=[existing])
             mock_db.holiday.create = AsyncMock()
             mock_db.holiday.update = mock_update
 
@@ -132,7 +132,7 @@ class TestUpsert:
         mock_update = AsyncMock()
         with patch("app.services.schedule_domain.holiday_repo.db") as mock_db:
             mock_db.holiday = MagicMock()
-            mock_db.holiday.find_first = AsyncMock(return_value=existing)
+            mock_db.holiday.find_many = AsyncMock(return_value=[existing])
             mock_db.holiday.create = AsyncMock()
             mock_db.holiday.update = mock_update
 
@@ -155,7 +155,7 @@ class TestUpsert:
         mock_update = AsyncMock()
         with patch("app.services.schedule_domain.holiday_repo.db") as mock_db:
             mock_db.holiday = MagicMock()
-            mock_db.holiday.find_first = AsyncMock(return_value=existing)
+            mock_db.holiday.find_many = AsyncMock(return_value=[existing])
             mock_db.holiday.create = AsyncMock()
             mock_db.holiday.update = mock_update
 
@@ -174,7 +174,7 @@ class TestUpsert:
     async def test_invalid_type_raises(self):
         with patch("app.services.schedule_domain.holiday_repo.db") as mock_db:
             mock_db.holiday = MagicMock()
-            mock_db.holiday.find_first = AsyncMock()
+            mock_db.holiday.find_many = AsyncMock(return_value=[])
             with pytest.raises(ValueError, match="invalid holiday type"):
                 await upsert_many([
                     HolidayEntry(date=date(2026, 1, 1), name="x", type="bogus"),

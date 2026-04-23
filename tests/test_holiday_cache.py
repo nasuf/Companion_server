@@ -13,25 +13,10 @@ from app.services.schedule_domain.holiday_repo import HolidayEntry
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
-    """Each test starts with an empty cache; snapshots restore on teardown."""
-    with holiday_cache._lock:  # type: ignore[attr-defined]
-        prev_date = dict(holiday_cache._by_date)  # type: ignore[attr-defined]
-        prev_name = dict(holiday_cache._by_name)  # type: ignore[attr-defined]
-        prev_swaps = set(holiday_cache._workday_swaps)  # type: ignore[attr-defined]
-        prev_loaded = holiday_cache._loaded  # type: ignore[attr-defined]
-        holiday_cache._by_date.clear()  # type: ignore[attr-defined]
-        holiday_cache._by_name.clear()  # type: ignore[attr-defined]
-        holiday_cache._workday_swaps.clear()  # type: ignore[attr-defined]
-        holiday_cache._loaded = False  # type: ignore[attr-defined]
+    """Each test starts with an empty cache; fresh state on teardown."""
+    holiday_cache.reset_for_testing()
     yield
-    with holiday_cache._lock:  # type: ignore[attr-defined]
-        holiday_cache._by_date.clear()  # type: ignore[attr-defined]
-        holiday_cache._by_date.update(prev_date)  # type: ignore[attr-defined]
-        holiday_cache._by_name.clear()  # type: ignore[attr-defined]
-        holiday_cache._by_name.update(prev_name)  # type: ignore[attr-defined]
-        holiday_cache._workday_swaps.clear()  # type: ignore[attr-defined]
-        holiday_cache._workday_swaps.update(prev_swaps)  # type: ignore[attr-defined]
-        holiday_cache._loaded = prev_loaded  # type: ignore[attr-defined]
+    holiday_cache.reset_for_testing()
 
 
 SAMPLE_ENTRIES = [
