@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
 from app.services.interaction.boundary import (
     APOLOGY_SINCERITY_MIN,
+    FINAL_WARNING_PATIENCE_THRESHOLD,
     PATIENCE_MAX,
     check_boundary,
     detect_apology,
@@ -160,13 +161,29 @@ async def _handle_attack_target_non_ai(
 async def _handle_attack_ai(
     ctx: BoundaryPhaseCtx, zone: str, boundary_result: dict,
 ) -> AsyncGenerator[dict, None]:
-    """spec §2.6 步骤 5：攻击 AI → 级别识别 + 扣分 + 分级回复。
+    """spec §2.6 步骤 5：攻击 AI → 级别识别 + 扣分 + 按扣分后 patience 选 prompt。
 
-    spec §2.4 K4（最终警告）：处于低耐心区（zone=low）时再次攻击 AI，
-    发出最后一次警告（替代 K1/K2/K3 攻击分级回复）。
+    严格按 spec §5.3 (先扣分, 重新判定耐心状态) → §5.4 (再按 attack_level 选 prompt) 的顺序:
+    扣分 await 完再决定 prompt, 不再后台发射.
+
+    PM 补丁规则: 扣分后 patience < FINAL_WARNING_PATIENCE_THRESHOLD → 用指令模版
+    「最终警告」prompt 覆写 K1/K2/K3 (patience 已明显透支, 三档基线文案不匹配).
     """
     attack_level = await attack_level_classify(ctx.user_message)
-    is_final_warning = zone == "low"
+
+    new_patience: int | None = None
+    if attack_level:
+        try:
+            new_patience = await process_boundary_violation(
+                ctx.agent_id, ctx.user_id, attack_level,
+            )
+        except Exception as e:
+            logger.warning(f"process_boundary_violation failed: {e}")
+    effective_patience = new_patience if new_patience is not None else ctx.cached_patience
+    if new_patience is not None:
+        ctx.cached_patience = new_patience
+
+    is_final_warning = effective_patience < FINAL_WARNING_PATIENCE_THRESHOLD
     response = await generate_boundary_reply_llm(
         zone=zone,
         message=ctx.user_message,
@@ -179,8 +196,6 @@ async def _handle_attack_ai(
         metadata["final_warning"] = True
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
-    if attack_level:
-        ctx.fire_background_fn(process_boundary_violation(ctx.agent_id, ctx.user_id, attack_level))
     ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
         {"role": "user", "content": ctx.user_message},
         {"role": "assistant", "content": response},

@@ -38,6 +38,12 @@ PATIENCE_HOURLY_RECOVERY = 10  # spec §2.5: 每小时 +10
 # 同一阈值也用于 intent_handlers.handle_apology_promise 的门禁。
 APOLOGY_SINCERITY_MIN = 0.5
 
+# spec §2.6 步骤 5.3+5.4 + PM 补丁规则：
+# 攻击 AI 扣分后 patience 低于此阈值 → 用指令模版「最终警告」prompt 覆写 K1/K2/K3.
+# 规则 spec 未列, PM 决策的边缘规则. 阈值落在 low zone 内 (20 < 29),
+# 保留 low zone 上半段 (20-29) 的 K1/K2/K3 分档回复.
+FINAL_WARNING_PATIENCE_THRESHOLD = 20
+
 
 def get_patience_zone(patience: int) -> str:
     """返回耐心值所在区间: normal/medium/low/blocked。"""
@@ -471,13 +477,17 @@ async def check_boundary(
 
 async def process_boundary_violation(
     agent_id: str, user_id: str, attack_level: str,
-) -> None:
-    """后台扣分：依据热路径已识别的 attack_level (K1/K2/K3) 按 spec §2.4 累计扣减。"""
+) -> int | None:
+    """Spec §2.4+§2.6 步骤 5.2：按 attack_level (K1/K2/K3) 累计扣分。
+
+    返回扣分后的 patience 新值，供调用方按 spec §5.3 "重新判定耐心状态" 再决定
+    §5.4 prompt 选择。非法 level / 已 ≤0 / 异常 → 返回 None (调用方回退原 patience)。
+    """
     if attack_level not in _LEVEL_BASE:
-        return
+        return None
     current = await get_patience(agent_id, user_id)
     if current <= 0:
-        return
+        return None
 
     count = await record_attack(agent_id, user_id, level=attack_level)
     deduction = compute_repeat_deduction(attack_level, count if count > 0 else 1)
@@ -488,3 +498,4 @@ async def process_boundary_violation(
         f"reason=violation level={attack_level} count={count} "
         f"delta=-{deduction} current={current} new={new_val}"
     )
+    return new_val

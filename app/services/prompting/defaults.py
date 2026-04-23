@@ -663,8 +663,9 @@ MEMORY_CONTRADICTION_REPLY_PROMPT = """【限定】
 【输出】只输出回复内容"""
 
 
-# Spec 第二部分 §2.4 + 指令模版 P14-15「最终警告」
-# K4 档：用户处于低耐心区（1-29）时再次攻击 AI，发出最后一次警告。
+# 指令模版 P14-15「最终警告」
+# PM 补丁规则 (规则 spec §2.6 步骤 5.4 只列 K1/K2/K3):
+# 攻击 AI 扣分后 patience < FINAL_WARNING_PATIENCE_THRESHOLD (=20) 时覆写 K1/K2/K3.
 BOUNDARY_FINAL_WARNING_PROMPT = """【任务】你现在处于低耐心状态，用户仍在攻击你。你非常不高兴，决定发出最后一次警告。
 
 【参考信息】

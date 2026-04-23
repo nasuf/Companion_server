@@ -135,7 +135,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("boundary.severe_attack_reply", "重度攻击回复(K3)", "边界系统", "边界", "K3 级别的坚定底线回复。", SEVERE_ATTACK_REPLY_PROMPT),
     PromptDefinition("boundary.medium_patience_reply", "中耐心回复", "边界系统", "边界", "中耐心区间的正常对话，自然带出情绪。", MEDIUM_PATIENCE_REPLY_PROMPT),
     PromptDefinition("boundary.low_patience_reply", "低耐心回复", "边界系统", "边界", "低耐心区间的简短冷淡回复。", LOW_PATIENCE_REPLY_PROMPT),
-    PromptDefinition("boundary.final_warning", "最终警告(K4)", "边界系统", "边界", "Spec §2.4：低耐心区再次攻击 AI 时的最后警告。", BOUNDARY_FINAL_WARNING_PROMPT),
+    PromptDefinition("boundary.final_warning", "最终警告", "边界系统", "边界", "指令模版【最终警告】：PM 补丁规则—攻击 AI 扣分后 patience<20 时覆写 K1/K2/K3。规则 spec §2.6 步骤 5.4 未列此档。", BOUNDARY_FINAL_WARNING_PROMPT),
     PromptDefinition("boundary.blacklist_reply", "拉黑回复", "边界系统", "边界", "没耐心(≤0)的拉黑固定回复。", BLACKLIST_REPLY_PROMPT),
     PromptDefinition("boundary.apology_reply", "道歉/承诺回复", "边界系统", "边界", "接受道歉或承诺时的和解回复。", APOLOGY_REPLY_PROMPT),
     PromptDefinition("intent.unified", "统一意图识别", "意图识别", "意图", "多选意图识别（8 类）。", INTENT_UNIFIED_PROMPT),
