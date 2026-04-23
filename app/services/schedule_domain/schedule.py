@@ -20,8 +20,31 @@ from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
-from app.services.schedule_domain.time_service import is_holiday
+from app.services.schedule_domain.time_service import is_holiday, is_workday_swap
 from app.services.mbti import get_mbti, signal as mbti_signal
+
+_WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+def _mbti_brief(mbti: dict | None) -> str:
+    """Spec §2.1 prompt 参考信息 "性格"：输出 MBTI 类型 + 简要描述."""
+    if not isinstance(mbti, dict) or not mbti:
+        return "温和友善"
+    mbti_type = mbti.get("type") or ""
+    summary = mbti.get("summary") or ""
+    brief = f"{mbti_type} {summary}".strip()
+    return brief or "温和友善"
+
+
+def _day_kind(d, holiday_info) -> str:
+    """Spec Part 5 §3.2: 当日属性分类 (节假日 / 调休 / 周末 / 工作日)."""
+    if holiday_info is not None:
+        return f"节假日·{holiday_info.name}"
+    if is_workday_swap(d):
+        return "调休上班日"
+    if d.weekday() >= 5:
+        return "周末"
+    return "工作日"
 
 logger = logging.getLogger(__name__)
 
@@ -109,14 +132,49 @@ async def generate_daily_schedule(
     life_overview: str | None = None,
     date: datetime | None = None,
     user_id: str | None = None,
+    *,
+    age: int | None = None,
+    occupation: str | None = None,
 ) -> list[dict]:
-    """生成每日作息表。基于生活画像+模板+个性化。节日强制LLM路径。"""
-    date = date or _local_now()
-    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    weekday = weekdays[date.weekday()]
+    """生成每日作息表。基于生活画像+模板+个性化。节日强制LLM路径。
 
-    # 检测节日
+    Spec Part 1 §2.1 要求 prompt 注入:
+        姓名 / 年龄 / 职业 / 性格(MBTI) / 生活画像 / 日期属性 [+ 用户记忆]
+    age/occupation 如果调用方已知可直接传; 缺时从 DB 懒查 agent 记录.
+    """
+    date = date or _local_now()
+    weekday = _WEEKDAY_CN[date.weekday()]
+
+    # 检测节日 + 当日属性
     holiday = is_holiday(date.date())
+    day_kind = _day_kind(date.date(), holiday)
+
+    # Age / occupation 懒查: 调用方未传时从 DB 拉 agent
+    if age is None or occupation is None:
+        try:
+            agent_row = await db.aiagent.find_unique(where={"id": agent_id})
+            if agent_row is not None:
+                age = age if age is not None else getattr(agent_row, "age", None)
+                occupation = (
+                    occupation
+                    if occupation is not None
+                    else getattr(agent_row, "occupation", None)
+                )
+        except Exception as e:
+            logger.debug(f"Failed to lazy-lookup agent {agent_id}: {e}")
+
+    personality_brief = _mbti_brief(mbti)
+
+    base_fmt = {
+        "name": name,
+        "age": age if age is not None else "未知",
+        "occupation": occupation or "普通人",
+        "personality_brief": personality_brief,
+        "overview": life_overview or "",
+        "date": date.strftime("%Y-%m-%d"),
+        "weekday": weekday,
+        "day_kind": day_kind,
+    }
 
     if life_overview:
         try:
@@ -126,28 +184,19 @@ async def generate_daily_schedule(
             if use_memory_variant:
                 memory_summary = await _get_user_memory_summary(user_id)
                 if not memory_summary:
-                    # 没有可用的用户记忆 → 退回到基础版
                     use_memory_variant = False
 
             if use_memory_variant:
                 prompt_key = "schedule.daily_schedule_with_memory"
                 prompt = (await get_prompt_text(prompt_key)).format(
-                    name=name,
-                    overview=life_overview,
-                    date=date.strftime("%Y-%m-%d"),
-                    weekday=weekday,
-                    user_memories="\n".join(f"- {m}" for m in memory_summary.split("；") if m.strip()),
+                    **base_fmt,
+                    user_memories="\n".join(
+                        f"- {m}" for m in memory_summary.split("；") if m.strip()
+                    ),
                 )
             else:
                 prompt_key = "schedule.daily_schedule"
-                prompt = (await get_prompt_text(prompt_key)).format(
-                    name=name,
-                    overview=life_overview,
-                    date=date.strftime("%Y-%m-%d"),
-                    weekday=weekday,
-                )
-            if holiday:
-                prompt += f"\n今天是{holiday.name}（{holiday.type}类节日）。请根据节日特点调整作息，安排节日相关活动。"
+                prompt = (await get_prompt_text(prompt_key)).format(**base_fmt)
 
             model = get_utility_model()
             schedule = await invoke_json(model, prompt)
