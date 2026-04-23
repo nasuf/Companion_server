@@ -26,9 +26,6 @@ SOURCE_NAGER = "nager"
 SOURCE_LOCAL = "local"          # 本地源: 算法生成的国际纪念日 + 母亲/父亲节
 SOURCE_MANUAL = "manual"
 
-# Admin "直接同步" 路径可覆盖的 source — 'manual' 永远受保护.
-REFRESHABLE_SOURCES = frozenset({SOURCE_CHINESE_CALENDAR, SOURCE_NAGER, SOURCE_LOCAL})
-
 HolidayType = Literal["legal", "traditional", "international", "custom"]
 VALID_TYPES = frozenset(get_args(HolidayType))
 

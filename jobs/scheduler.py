@@ -208,10 +208,9 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # spec-audit 2026-04-23: 节假日 DB 不走定时 cron.
-    # 原因: 节日表年度变化 (国务院 11-12 月发布次年安排), 一年 1-2 次,
-    # cron 成本大于收益. 改为 admin UI "直接刷新" 按钮手动触发 _run_holiday_refresh /
-    # /admin-api/holidays/refresh, 运营需要时手动拉一次即可.
+    # 节假日 DB 不走定时 cron, 也不走后端批量 refresh: 年度变化 (国务院
+    # 11-12 月发布次年安排), 运营需要时在 admin UI "查询外部源" 拉候选挑
+    # 选保存即可 — preview + bulk_save 工作流覆盖所有使用场景.
 
     scheduler.start()
     logger.info("Job scheduler started")
@@ -338,35 +337,6 @@ async def _run_ntp_calibration():
         logger.warning(f"NTP calibration job failed: {e}")
 
 
-async def _run_holiday_refresh():
-    """spec-audit 2026-04-23: 每周从外部源拉取当年 + 下年节假日, upsert
-    到 DB, 然后失效内存 cache.
-
-    `source='manual'` 的条目 (admin 手动录入) 受保护, 永远不会被覆盖。
-    """
-    from datetime import datetime
-    from app.services.schedule_domain import holiday_cache, holiday_repo
-    from app.services.schedule_domain.holiday_sources import collect_candidates
-
-    year_now = datetime.now().year
-    for year in (year_now, year_now + 1):
-        try:
-            entries, status = await collect_candidates(year)
-            refreshable = [e for e in entries if e.source in holiday_repo.REFRESHABLE_SOURCES]
-            if not refreshable:
-                logger.info(
-                    f"Holiday refresh {year}: no candidates "
-                    f"(cc={status.chinesecalendar} nager={status.nager})"
-                )
-                continue
-            stats = await holiday_repo.upsert_many(refreshable, allow_overwrite_manual=False)
-            logger.info(f"Holiday refresh {year}: {stats}")
-        except Exception as e:
-            logger.warning(f"Holiday refresh {year} failed: {e}")
-    try:
-        await holiday_cache.reload()
-    except Exception as e:
-        logger.warning(f"Holiday cache reload failed: {e}")
 
 
 async def _run_aggregation_scan():

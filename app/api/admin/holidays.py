@@ -5,7 +5,6 @@ Endpoints:
   POST  /admin-api/holidays/bulk_save     — 保存挑选结果
   GET   /admin-api/holidays               — 已存列表 (可按年/国家过滤)
   DELETE /admin-api/holidays/{id}         — 单条删除
-  POST  /admin-api/holidays/refresh       — 手动触发 refresh (同步执行)
 """
 
 from __future__ import annotations
@@ -19,10 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.services.schedule_domain import holiday_cache, holiday_repo
-from app.services.schedule_domain.holiday_repo import (
-    REFRESHABLE_SOURCES,
-    HolidayEntry,
-)
+from app.services.schedule_domain.holiday_repo import HolidayEntry
 from app.services.schedule_domain.holiday_sources import collect_candidates
 
 logger = logging.getLogger(__name__)
@@ -72,10 +68,6 @@ class BulkSaveResponse(BaseModel):
     inserted: int
     updated: int
     skipped: int
-
-
-class RefreshRequest(BaseModel):
-    year: int = Field(..., ge=2020, le=2100)
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────
@@ -175,19 +167,3 @@ async def delete_holiday(
     return {"ok": True}
 
 
-@router.post("/refresh", response_model=BulkSaveResponse)
-async def refresh_holidays(
-    payload: RefreshRequest,
-    _: str = Depends(require_admin_jwt),
-) -> BulkSaveResponse:
-    """Manual refresh of one year. Preserves manual rows (source='manual').
-
-    Cron-equivalent path; gives admin a button to pull latest without
-    waiting for the weekly job.
-    """
-    entries, _status = await collect_candidates(payload.year)
-    refreshable = [e for e in entries if e.source in REFRESHABLE_SOURCES]
-    stats = await holiday_repo.upsert_many(refreshable, allow_overwrite_manual=False)
-    logger.info(f"Admin-triggered refresh for {payload.year}: {stats}")
-    await holiday_cache.reload()
-    return BulkSaveResponse(**stats)
