@@ -103,17 +103,23 @@ def detect_intent(message: str, patience_zone: str = "normal") -> IntentResult:
     return IntentResult()
 
 
-async def detect_intent_unified(message: str) -> IntentResult:
+async def detect_intent_unified(
+    message: str,
+    context: str = "",
+) -> IntentResult:
     """spec §3.3 step 1-2 标准入口：始终调小模型统一识别 + 多意图拆分。
 
-    LLM 失败时 fallback 到关键字扫描（保底单意图）。极短消息（≤4 字符）
-    应在调用前由调用方决定是否绕过此函数（"嗯"/"好" 这类无价值召回）。
+    `context` 为 spec §3.3 step 1 要求的"对话上下文"，格式由调用方组装，
+    一般是最近 N 轮 "AI: ... / 用户: ..." 换行拼接。传空串时 LLM 回退到
+    "仅凭当前消息判断"（首轮对话场景）。
+
+    LLM 失败时 fallback 到关键字扫描（保底单意图，不依赖上下文）。
     """
     import logging
     logger = logging.getLogger(__name__)
 
     try:
-        result = await detect_intent_llm(message)
+        result = await detect_intent_llm(message, context=context)
         if result.intent != IntentType.NONE:
             return result
     except Exception as e:
@@ -121,17 +127,17 @@ async def detect_intent_unified(message: str) -> IntentResult:
     return detect_intent(message)
 
 
-async def detect_intent_llm(message: str) -> IntentResult:
+async def detect_intent_llm(message: str, *, context: str = "") -> IntentResult:
     """Spec §3.3 step 1-2 — LLM 统一意图识别 + 多意图拆分。
 
-    只有关键词扫描落空时才调。结果命中多个意图时，优先级：
+    结果命中多个意图时，优先级：
       删除 > 作息调整 > 终结意图 > 计划查询 > 询问当前状态 > 道歉承诺 > 调用久远记忆 > 日常交流
     """
     # 延迟导入避免循环依赖（intent_replies 依赖 prompting.store）
     from app.services.chat.intent_replies import unified_intent_recognize, split_multi_intent
 
     try:
-        labels = await unified_intent_recognize(message)
+        labels = await unified_intent_recognize(message, context=context)
     except Exception:
         return IntentResult()
 

@@ -32,15 +32,10 @@ from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
-from app.services.interaction.boundary import (
-    detect_apology, handle_apology,
-    get_patience_prompt_instruction, get_patience_zone,
-    PATIENCE_MAX,
-)  # detect_apology/handle_apology: APOLOGY_PROMISE intent handler 仍用
+from app.services.interaction.boundary import get_patience_prompt_instruction
 from app.services.relationship.intimacy import get_relationship_stage
 from app.services.chat.intent_dispatcher import (
-    detect_intent, detect_intent_unified, IntentType, IntentResult,
-    LABEL_TO_INTENT, INTENT_PRIORITY,
+    detect_intent_unified, IntentType, IntentResult, LABEL_TO_INTENT,
 )
 from app.services.chat.multi_intent import (
     finalize_short_circuit as _finalize_short_circuit,
@@ -202,6 +197,52 @@ def detect_relational_context(message: str, user_emotion: dict | None) -> str | 
     return None
 
 
+_INTENT_CONTEXT_WINDOW = 6  # 最近 6 条消息 (3-4 轮对话), spec §3.3 "及上下文"
+
+
+async def _fetch_intent_context(
+    conversation_id: str,
+    *,
+    exclude_content: str | None = None,
+) -> str:
+    """拉最近 N 条消息拼成意图识别 prompt 的上下文段落。
+
+    spec §3.3 step 1 要求识别 "用户消息及上下文". 常见场景:
+    AI 问 "要我再陪你一会儿吗?" + 用户回 "好" — 必须结合 AI 上一句
+    才能判定用户 "好" 是 作息调整 意图.
+
+    如果 current user_message 已经被持久化到 DB (当前消息),
+    用 exclude_content 排除掉, 避免它在 context 里出现又在 {user_message}
+    里再出现.
+    """
+    try:
+        rows = await db.message.find_many(
+            where={"conversationId": conversation_id},
+            order={"createdAt": "desc"},
+            take=_INTENT_CONTEXT_WINDOW + 1,
+        )
+    except Exception as e:
+        logger.debug(f"intent context fetch failed: {e}")
+        return ""
+
+    # Prisma 返回按 desc 排序, 反转为时间顺序
+    rows = list(reversed(rows))
+    lines: list[str] = []
+    for row in rows:
+        content = (getattr(row, "content", "") or "").strip()
+        if not content:
+            continue
+        role = "AI" if getattr(row, "role", "") == "assistant" else "用户"
+        # 排除当前消息自身 (已经作为 {user_message} 传给 prompt)
+        if exclude_content and role == "用户" and content == exclude_content:
+            continue
+        lines.append(f"{role}: {content}")
+
+    # 只保留最近 N 条 (去重 current 后可能少于 N+1)
+    lines = lines[-_INTENT_CONTEXT_WINDOW:]
+    return "\n".join(lines)
+
+
 async def stream_chat_response(
     conversation_id: str,
     user_message: str,
@@ -287,17 +328,16 @@ async def stream_chat_response(
         if preflight_ctx.stopped:
             return
 
-    # --- 统一意图识别：关键字快路 + LLM 兜底（spec §3.3 step 1-2） ---
-    patience_zone = get_patience_zone(cached_patience)
+    # --- 统一意图识别：spec §3.3 step 1 严格实现 ---
+    # 每条用户消息都调小模型做意图分类, 并把最近对话历史作为上下文注入.
+    # 不再区分消息长度 — 短消息如 "好" / "嗯" 只有结合 AI 上一句
+    # ("要我再陪你一会儿吗?") 才能识别出 "作息调整" 意图.
     if forced_intent is not None:
-        # sub_intent_mode 的子片段，意图由父调用指定
+        # sub_intent_mode 的子片段, 意图由父调用指定, 不再识别
         detected_intent = IntentResult(intent=forced_intent, confidence=1.0)
-    elif len(user_message.strip()) <= 4:
-        # 极短消息（"嗯"/"好" 类）跳过 LLM，关键字判定即可
-        detected_intent = detect_intent(user_message, patience_zone)
     else:
-        # spec §3.3 step 1：始终调小模型统一意图识别（含多意图拆分）
-        detected_intent = await detect_intent_unified(user_message)
+        context_text = await _fetch_intent_context(conversation_id, exclude_content=user_message)
+        detected_intent = await detect_intent_unified(user_message, context=context_text)
         if detected_intent.intent != IntentType.NONE:
             logger.info(
                 f"[INTENT-LLM] '{user_message[:30]}' → {detected_intent.intent.value} "

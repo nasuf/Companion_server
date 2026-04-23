@@ -371,11 +371,19 @@ _INTENT_LABELS = {
 }
 
 
-async def unified_intent_recognize(user_message: str) -> list[str]:
-    """§3.3 step 1：统一意图识别，返回 spec 的 8 类标签（多选）。失败返回 ["日常交流"]。"""
+async def unified_intent_recognize(
+    user_message: str,
+    context: str = "",
+) -> list[str]:
+    """§3.3 step 1：统一意图识别，返回 spec 的 8 类标签（多选）。失败返回 ["日常交流"]。
+
+    spec §3.3 要求 "输入用户消息**及上下文**". context 由调用方传入,
+    一般格式是最近 N 轮对话的 "AI: ... / 用户: ..." 换行拼接.
+    context 为空时 prompt 填 "(无)", 模型按单条消息判断.
+    """
     raw = await render_prompt(
         "intent.unified",
-        {"user_message": user_message},
+        {"user_message": user_message, "context": context or "(无)"},
         lambda p: invoke_text(get_utility_model(), p),
         strip_split=False,
     )
