@@ -23,6 +23,10 @@ from app.services.memory.recording.extraction import extract_memories
 from app.services.memory.recording.filter import should_extract_memory
 from app.services.memory.recording.pre_filter import should_memorize
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
+from app.services.schedule_domain.time_parser import (
+    has_explicit_time,
+    parse_with_statement_time,
+)
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -80,6 +84,15 @@ async def process_memory_pipeline(
         logger.info(f"[MEM-{side}] no memories extracted")
         return []
 
+    # Spec Part 5 §3.1: 解析过程不调大模型。规则引擎作为权威源；只有当
+    # 消息里唯一匹配到 1 个时间表述时才覆盖 LLM 的 occur_time — 否则
+    # 无法把单个时间归因到多条记忆中的哪一条，回退到 LLM 抽取字段。
+    rule_based_occur_time: datetime | None = None
+    if has_explicit_time(conversation_text):
+        parsed = parse_with_statement_time(conversation_text, now=statement_time)
+        if len(parsed.event_times) == 1:
+            rule_based_occur_time = parsed.event_times[0].start
+
     stored_ids: list[str] = []
 
     # Spec §1.5.2 user emphasis only drives user-side L2→L1 promotion.
@@ -87,7 +100,7 @@ async def process_memory_pipeline(
         kw in conversation_text for kw in _IMPORTANCE_EXPRESSIONS
     )
 
-    # Step 2: Store each memory with dedup and conflict check
+    # Step 3: Store each memory with dedup and conflict check
     for mem in memories:
         summary = mem.get("summary", "")
         importance = mem.get("importance", 0.5)
@@ -108,14 +121,15 @@ async def process_memory_pipeline(
         else:
             level = 3
 
-        # Parse occur_time from extraction result
-        occur_time: datetime | None = None
-        raw_time = mem.get("occur_time")
-        if raw_time and isinstance(raw_time, str):
-            try:
-                occur_time = datetime.fromisoformat(raw_time)
-            except ValueError:
-                pass
+        # Rule engine wins when it's unambiguous; LLM occur_time is fallback.
+        occur_time: datetime | None = rule_based_occur_time
+        if occur_time is None:
+            raw_time = mem.get("occur_time")
+            if raw_time and isinstance(raw_time, str):
+                try:
+                    occur_time = datetime.fromisoformat(raw_time)
+                except ValueError:
+                    pass
 
         # Adjust importance based on emotion
         emotion = mem.get("emotion")

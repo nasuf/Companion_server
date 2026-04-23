@@ -29,6 +29,7 @@ from app.services.proactive.history import (
 )
 from app.services.proactive.context import build_proactive_context
 from app.services.proactive.policy import select_topic_source, select_topic_theme
+from app.services.workspace.workspaces import resolve_workspace_id
 from app.services.proactive.state import (
     ProactiveStateRecord,
     ensure_proactive_state_for_workspace,
@@ -456,7 +457,10 @@ async def send_first_greeting(
 ) -> bool:
     """spec §12: 用户首次进入聊天 (对话消息数=0) 时 AI 主动发送第一句.
 
-    不走时间窗概率/不计入每日 3 次上限; 计入衰减 n=1 由 state 常规路径处理.
+    不走时间窗概率/不计入每日 3 次上限; 但需计入衰减 n=1 —
+    走与其他主动消息相同的 mark_proactive_sent 路径, 用户不回复时才
+    能进入 spec §8 的三级衰减等待 (`status=waiting_user`,
+    `response_deadline_at` 写入等).
     """
     count = await db.message.count(where={"conversationId": conversation_id})
     if count > 0:
@@ -477,7 +481,8 @@ async def send_first_greeting(
         if not message or len(message) < 4:
             return False
 
-        await emit_proactive_message(
+        now_ts = datetime.now(UTC)
+        assistant_message_id = await emit_proactive_message(
             conversation_id=conversation_id,
             user_id=user_id,
             agent_id=agent_id,
@@ -486,6 +491,25 @@ async def send_first_greeting(
             trigger_type="first_greeting",
             skip_post_process=True,
         )
+
+        # 接入 spec §8 衰减链路：首句仍需计入 n=1，用户不回复才会
+        # 推进到第二/三阶段。
+        ws_id = workspace_id or await resolve_workspace_id(
+            user_id=user_id, agent_id=agent_id,
+        )
+        if ws_id:
+            state = await ensure_proactive_state_for_workspace(
+                ws_id, reason="first_greeting",
+            )
+            if state is not None:
+                await mark_proactive_sent(
+                    state,
+                    trigger_type="first_greeting",
+                    message=message,
+                    assistant_message_id=assistant_message_id,
+                    now=now_ts,
+                )
+                await save_last_reply_timestamp(agent_id, user_id, when=now_ts)
         return True
     except Exception as e:
         logger.warning(f"send_first_greeting failed: {e}")

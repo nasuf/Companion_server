@@ -1,7 +1,10 @@
 """时间解析器。
 
-PRD §9.3.2: 识别用户消息中的显式时间表述，转换为标准时间范围。
-规则引擎优先，覆盖常见中文时间表达。
+Spec Part 5 §3.1: 识别用户消息中的显式时间表述，转换为标准时间范围。
+纯规则引擎，不调大模型。
+
+spec 明确模糊时间词（"小时候/几年前/以前/当时"）不做处理 — 无法
+落成确定的时间范围，勉强解析成 20 年跨度会污染 occur_time 过滤。
 """
 
 from __future__ import annotations
@@ -40,13 +43,6 @@ _RELATIVE_DAYS: list[tuple[str, int]] = sorted(
     key=lambda x: len(x[0]), reverse=True,
 )
 
-_FUZZY_WORDS: list[tuple[str, int, int]] = [
-    ("小时候", -20 * 365, -5 * 365),
-    ("以前", -365 * 3, 0),
-    ("之前", -365, 0),
-    ("当时", -365, 0),
-]
-
 # Pre-compiled patterns for hot path
 _WEEK_PAT = re.compile(r"(上上?|下下?|这)(?:个)?周([一二三四五六日天])")
 _DATE_PAT = re.compile(r"(\d{1,2})月(\d{1,2})[日号]")
@@ -57,7 +53,6 @@ _QUICK_TIME_PAT = re.compile(
     r"|\d{1,2}月\d{1,2}[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
     r"|早上|上午|中午|下午|晚上|凌晨"
-    r"|小时候|以前"
 )
 
 _MONTH_MAP = [("这个月", 0), ("上个月", -1), ("下个月", 1)]
@@ -263,14 +258,7 @@ def parse_time_expressions(
                 s, e = _day_range(d_prev)
             _add(holiday_name, s, e, "absolute", 0.85, span)
 
-    # --- 9. 模糊时间 ---
-    for word, d_start, d_end in _FUZZY_WORDS:
-        idx = message.find(word)
-        if idx != -1:
-            span = (idx, idx + len(word))
-            s = now + timedelta(days=d_start)
-            e = now + timedelta(days=d_end)
-            _add(word, s, e, "fuzzy", 0.5, span)
+    # spec §3.1 明确不处理模糊时间词（小时候 / 以前 / 之前 / 当时）。
 
     return results
 

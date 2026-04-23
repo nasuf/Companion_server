@@ -39,12 +39,13 @@ TOPIC_LEVELS = [
     (80, 101, "核心", "深层秘密与脆弱面"),
 ]
 
-# PRD §4.6.2.1: 亲密度阶段标签 (基于topic_intimacy 0-100)
+# spec §3.4.6 话题亲密度等级 P1-P5 (基于 topic_intimacy 0-100)
 RELATIONSHIP_STAGES = [
-    (0, 31, "普通朋友"),
-    (31, 61, "好朋友"),
-    (61, 86, "挚友"),
-    (86, 101, "灵魂伴侣"),
+    (0, 21, "P1", "初识"),
+    (21, 41, "P2", "熟悉"),
+    (41, 61, "P3", "朋友"),
+    (61, 81, "P4", "挚友"),
+    (81, 101, "P5", "知己"),
 ]
 
 
@@ -65,11 +66,11 @@ def get_topic_depth(score: float) -> dict:
 
 
 def get_relationship_stage(score: float) -> str:
-    """根据话题亲密度(0-100)返回PRD关系阶段标签。"""
-    for lo, hi, stage in RELATIONSHIP_STAGES:
+    """根据话题亲密度(0-100)返回 spec §3.4.6 阶段标签。"""
+    for lo, hi, _code, label in RELATIONSHIP_STAGES:
         if lo <= score < hi:
-            return stage
-    return "灵魂伴侣"
+            return label
+    return "知己"
 
 
 # --- Redis 缓存 ---
@@ -122,7 +123,7 @@ async def get_topic_intimacy(agent_id: str, user_id: str) -> float:
 async def _compute_interaction_stickiness(
     agent_id: str, user_id: str, days: int = 30,
 ) -> float:
-    """G1 互动粘性(0-1)。PRD §8.3.1: x=近30天平均每日对话轮数, G1=min(1000, 200*log10(x+1))/1000"""
+    """G1 互动粘性(0-1)。spec §3.4.2: x=近30天平均每日对话轮数, G1=min(1000, 600*log10(x+1))/1000"""
     since = datetime.now(UTC) - timedelta(days=days)
 
     conversations = await db.conversation.find_many(
@@ -139,9 +140,8 @@ async def _compute_interaction_stickiness(
         }
     )
 
-    # PRD §8.3.1: x = 近30天平均每日对话轮数
     daily_avg = msg_count / days
-    return min(1000, 200 * math.log10(daily_avg + 1)) / 1000
+    return min(1000, 600 * math.log10(daily_avg + 1)) / 1000
 
 
 async def _compute_self_disclosure(

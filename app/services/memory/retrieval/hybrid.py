@@ -17,6 +17,7 @@ from datetime import datetime
 from app.db import db
 from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
 from app.services.memory.retrieval.context_selector import select_context
+from app.services.memory.retrieval.relevance import compute_display_score
 from app.services.memory.storage.entity_repo import get_relationship_context
 from app.services.runtime.cache import (
     cache_retrieval,
@@ -44,6 +45,10 @@ _EMPTY_RESULT = {
     "memory_strings": None,
     "graph_context": None,
 }
+
+# Spec §3.2 前级过滤相似度阈值。Spec 原值 0.7; bge-m3 对中文短文本召回
+# 能力不足, 降到 0.5 以保证召回率 (见 docs/spec-audit-2026-04-23.md)。
+_SIMILARITY_THRESHOLD = 0.50
 
 
 def _is_trivial_message(message: str) -> bool:
@@ -197,7 +202,6 @@ async def hybrid_retrieve(
                 logger.info(f"[DEBUG-VEC]   sim={float(r.get('similarity',0)):.3f} '{(r.get('summary') or r.get('content',''))[:60]}'")
 
     # Merge vector + time results (union by id), apply similarity threshold.
-    _SIMILARITY_THRESHOLD = 0.50
     all_candidates: list[dict] = []
     seen_ids: set[str] = set()
     for source_results, label in [(vector_results, "vector"), (time_results, "time")]:
@@ -222,12 +226,21 @@ async def hybrid_retrieve(
         )
         all_candidates.extend(keyword_results)
 
-    # Spec §3.2 step 1: sort by 当前分数 (importance) desc, take top 50.
-    all_candidates.sort(key=lambda m: float(m.get("importance", 0)), reverse=True)
-    top_candidates = all_candidates[:50]
+    # Spec §3.2 step 4: rerank by display_score = importance × time_freshness × similarity.
+    # 我们没有 last_accessed_at 列, 用 created_at 作为 freshness 代理
+    # (spec 意图是 "越久没被触达的记忆越靠后", created_at 与此大致一致)。
+    # 只写 rank_score — ClassifiedMemory.display_score 由下游 data_fetch_phase
+    # 统一赋值 + 截断到 10 条。
+    for m in all_candidates:
+        m["rank_score"] = compute_display_score(
+            importance=float(m.get("importance", 0)),
+            last_accessed_at=m.get("created_at"),
+            similarity=float(m.get("similarity", 1.0)),
+        )
+    all_candidates.sort(key=lambda m: float(m.get("rank_score", 0)), reverse=True)
 
     # Select within token budget (returns ClassifiedMemory list)
-    classified_memories = select_context(top_candidates, token_budget)
+    classified_memories = select_context(all_candidates, token_budget)
 
     # Plain text list for consumers that don't need ClassifiedMemory metadata
     memory_strings = [m.text for m in classified_memories] if classified_memories else None
