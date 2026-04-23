@@ -10,11 +10,10 @@ from app.services.proactive.state import ProactiveStateRecord, PROACTIVE_WINDOWS
 
 UTC = timezone.utc
 
-# spec §1.2 base hit rates 严格使用 PROACTIVE_WINDOWS 表: 0/5/12/25/35%,
-# 不再叠加 stage 系数 (避免 intimate 在高值窗口突破 spec 35% 上限;
-# stage 的频率差异由 silence_penalty 单独承担, 话题差异由 TOPIC_RANGE_BY_STAGE
-# 和 SOURCE_DIST 承担, 三者在 spec 里各司其职, 不在频率维度重复生效).
-# silence_penalty 用于衰减阶段 n≤4 期间渐降命中率 (spec §8.3 "最多 4 次"隐含).
+# spec §1.2 base hit rates 严格使用 PROACTIVE_WINDOWS 表: 0/5/12/25/35%.
+# spec §8.3 第一阶段 n=1-4 要求 "正常概率, 最多 4 次", 4 次上限由
+# _escalate_silence_level 的 n+1 升级机制保证 (n=5 后走强制触发路径,
+# 不再进此函数), 频率维度不做额外折扣.
 
 
 def should_hit_window(state: ProactiveStateRecord) -> tuple[bool, float]:
@@ -24,9 +23,7 @@ def should_hit_window(state: ProactiveStateRecord) -> tuple[bool, float]:
             base_rate = float(window["hit_rate"])
             break
 
-    silence_penalty = max(0.5, 1.0 - 0.08 * max(0, state.silence_level_n))
-    final_rate = max(0.0, min(1.0, base_rate * silence_penalty))
-    return random.random() < final_rate, final_rate
+    return random.random() < base_rate, base_rate
 
 
 def scene_candidate_available(
