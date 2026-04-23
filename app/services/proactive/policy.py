@@ -10,14 +10,11 @@ from app.services.proactive.state import ProactiveStateRecord, PROACTIVE_WINDOWS
 
 UTC = timezone.utc
 
-# spec §1.2 base hit rates 已经在 PROACTIVE_WINDOWS 表里: 0/5/12/25/35%
-# stage multiplier 保留 (spec 未禁止, 产品决策允许按阶段做 ±15% 调节),
+# spec §1.2 base hit rates 严格使用 PROACTIVE_WINDOWS 表: 0/5/12/25/35%,
+# 不再叠加 stage 系数 (避免 intimate 在高值窗口突破 spec 35% 上限;
+# stage 的频率差异由 silence_penalty 单独承担, 话题差异由 TOPIC_RANGE_BY_STAGE
+# 和 SOURCE_DIST 承担, 三者在 spec 里各司其职, 不在频率维度重复生效).
 # silence_penalty 用于衰减阶段 n≤4 期间渐降命中率 (spec §8.3 "最多 4 次"隐含).
-STAGE_HIT_MULTIPLIER = {
-    "cold_start": 0.85,
-    "warming": 1.0,
-    "intimate": 1.15,
-}
 
 
 def should_hit_window(state: ProactiveStateRecord) -> tuple[bool, float]:
@@ -27,9 +24,8 @@ def should_hit_window(state: ProactiveStateRecord) -> tuple[bool, float]:
             base_rate = float(window["hit_rate"])
             break
 
-    multiplier = STAGE_HIT_MULTIPLIER.get(state.stage, 1.0)
     silence_penalty = max(0.5, 1.0 - 0.08 * max(0, state.silence_level_n))
-    final_rate = max(0.0, min(1.0, base_rate * multiplier * silence_penalty))
+    final_rate = max(0.0, min(1.0, base_rate * silence_penalty))
     return random.random() < final_rate, final_rate
 
 
@@ -55,7 +51,7 @@ def select_trigger_type(
     """spec §1.3 触发类型基础配比: 沉默唤醒 30% / 记忆主动 30% / 定时情景 40%.
 
     - scene 不可用时按 spec §1.3 兜底规则重抽 (沉默 50% / 记忆 50%)
-    - 不再按 stage 做动态倾斜, stage 只影响 hit_rate multiplier 和话题来源
+    - 不按 stage 做动态倾斜, stage 只影响话题来源和话题范围 (TOPIC_RANGE_BY_STAGE)
     """
     if not scene_available:
         return fallback_trigger_type()
