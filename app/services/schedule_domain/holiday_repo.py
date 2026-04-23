@@ -64,6 +64,14 @@ class HolidayEntry:
         }
 
 
+def _to_dt(d: date) -> datetime:
+    """Prisma Python 的 JSON 序列化器不认 `datetime.date`, 只认 `datetime`.
+    所有传给 db.holiday.* 的 date 参数 (where / data) 都必须过这一层.
+    对 DB 里的 @db.Date 字段来说, 传零时分秒 + 无时区的 datetime 是等价的.
+    """
+    return datetime(d.year, d.month, d.day)
+
+
 def _row_to_entry(row: Any) -> HolidayEntry:
     """Convert a Prisma Holiday row to a HolidayEntry."""
     d = row.date
@@ -94,8 +102,8 @@ async def list_holidays(
         where["countryCode"] = country_code
     if year is not None:
         where["date"] = {
-            "gte": date(year, 1, 1),
-            "lt": date(year + 1, 1, 1),
+            "gte": _to_dt(date(year, 1, 1)),
+            "lt": _to_dt(date(year + 1, 1, 1)),
         }
     rows = await db.holiday.find_many(where=where, order={"date": "asc"})
     return [_row_to_entry(r) for r in rows]
@@ -103,7 +111,7 @@ async def list_holidays(
 
 async def get_holiday_on(d: date) -> HolidayEntry | None:
     """Return the first matching Holiday for a date (any country)."""
-    rows = await db.holiday.find_many(where={"date": d}, take=1)
+    rows = await db.holiday.find_many(where={"date": _to_dt(d)}, take=1)
     return _row_to_entry(rows[0]) if rows else None
 
 
@@ -133,9 +141,10 @@ async def upsert_many(
         if entry.type not in VALID_TYPES:
             raise ValueError(f"invalid holiday type: {entry.type}")
 
+        entry_dt = _to_dt(entry.date)
         existing = await db.holiday.find_first(
             where={
-                "date": entry.date,
+                "date": entry_dt,
                 "countryCode": entry.country_code,
                 "name": entry.name,
             }
@@ -143,7 +152,7 @@ async def upsert_many(
         if existing is None:
             await db.holiday.create(
                 data={
-                    "date": entry.date,
+                    "date": entry_dt,
                     "name": entry.name,
                     "type": entry.type,
                     "countryCode": entry.country_code,

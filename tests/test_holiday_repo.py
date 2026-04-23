@@ -66,10 +66,11 @@ class TestListHolidays:
             mock_db.holiday.find_many = mock_find
             await list_holidays(year=2026)
 
-        args, kwargs = mock_find.call_args
+        _, kwargs = mock_find.call_args
         where = kwargs["where"]
-        assert where["date"]["gte"] == date(2026, 1, 1)
-        assert where["date"]["lt"] == date(2027, 1, 1)
+        # Prisma 序列化器不认 date, 所以 where 里必须是 datetime (零时零分零秒)
+        assert where["date"]["gte"] == datetime(2026, 1, 1)
+        assert where["date"]["lt"] == datetime(2027, 1, 1)
 
     @pytest.mark.asyncio
     async def test_country_filter_applied(self):
