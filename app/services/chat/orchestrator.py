@@ -197,7 +197,9 @@ def detect_relational_context(message: str, user_emotion: dict | None) -> str | 
     return None
 
 
-_INTENT_CONTEXT_WINDOW = 6  # 最近 6 条消息 (3-4 轮对话), spec §3.3 "及上下文"
+# 最近 6 条 ≈ 3 轮对话, 覆盖 "好" / "嗯" / "对" 类短应答对前一两轮
+# AI 问话的 context 依赖; 再大会挤占 intent prompt 的 token 预算.
+_INTENT_CONTEXT_WINDOW = 6
 
 
 async def _fetch_intent_context(
@@ -223,7 +225,8 @@ async def _fetch_intent_context(
             take=_INTENT_CONTEXT_WINDOW + 1,
         )
     except Exception as e:
-        logger.debug(f"intent context fetch failed: {e}")
+        # 静默降级对意图识别质量影响较大, 生产环境需能 grep 到
+        logger.warning(f"intent context fetch failed: {e}")
         return ""
 
     # Prisma desc 排序下, 首条即最新; 当前消息通常在这里.

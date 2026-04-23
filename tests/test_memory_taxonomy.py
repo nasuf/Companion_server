@@ -154,7 +154,7 @@ class TestEdgeCases:
         assert r.sub_category == "宠物"
 
 
-# ── D10: spec §1.4 「其他特殊事件」子类 ──
+# ── spec §1.4 「其他特殊事件」子类 ──
 
 
 class TestOtherSpecialEvents:

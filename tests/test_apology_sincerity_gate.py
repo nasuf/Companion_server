@@ -1,4 +1,4 @@
-"""D14 / spec §2.6.2.1: 道歉恢复耐心必须过 sincerity >= 0.5 门禁.
+"""Spec §2.6.2.1: 道歉恢复耐心必须过 sincerity >= 0.5 门禁.
 
 两条路径都受门禁约束:
   Path A — intent.unified 识别 apology_promise 后调 handle_apology_promise()
