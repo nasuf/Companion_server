@@ -2,9 +2,14 @@
 
 Per spec《产品手册·背景信息》§1.2:
   系统根据用户设定的 7 维性格分数，调用大模型推测并生成 AI 的
-  MBTI 八个维度（E/I、N/S、T/F、J/P）的百分比分数（0–100）。
+  MBTI 四条双极轴 (E-I / S-N / T-F / J-P) 的偏向百分比 (0–100)。
   此后 AI 所有行为中涉及性格描述的部分，统一使用 MBTI 分数表达，
   替代原始 7 维描述。
+
+MBTI 本质是 4 条双极轴, 不是 8 个独立维度 (那是 Big Five 模型).
+每轴上偏向一端, 另一端由 100 减得出. spec 写 "八个维度 (E/I、N/S、
+T/F、J/P)" 是把 4 轴 2 极口语化描述为 8 极; 存储与 LLM 输出都以 4 轴
+偏向表达, 语义一致.
 
 Storage: agent.mbti JSON =
     { "EI": int 0-100,   # 100 = pure E, 0 = pure I
@@ -63,10 +68,14 @@ _VALID_INPUT_KEYS = set(MBTI_DIMS)
 
 
 async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
-    """Spec §1.3 + 指令模版 P26「AI性格打分」：7 维 → MBTI 8 维 → 折算 4 维百分比。
+    """Spec §1.2 + 指令模版 P25-26「AI性格打分」：7 维 → MBTI 4 轴偏向百分比。
 
     在 agent 创建的后台异步任务中调用（`api/public/agents.py:_init_mbti_then_emotion`），
     不阻塞 API 响应。若 LLM 调用失败或输出非法，抛异常由上层捕获。
+
+    MBTI 是 4 个双极轴 (E-I / S-N / T-F / J-P), 每轴上只能偏向一端, 不存在
+    "既强 E 又强 I" 这种并存状态 (那是 Big Five 模型). spec 写"八个维度"
+    是把 4 轴 2 极口语化为 8 极的表达, 实质存储只需 4 个偏向百分比.
 
     输入字段命名兼容 spec（liveliness/rationality/sensitivity/planning/
     spontaneity/imagination/humor）与代码内命名（lively/rational/emotional/
@@ -97,15 +106,10 @@ async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
     if not isinstance(result, dict):
         raise ValueError(f"personality_scoring LLM returned non-dict: {type(result).__name__}")
 
-    # spec 输出 E/I/N/S/T/F/J/P 8 维；存储层只用 4 维（EI/NS/TF/JP 其中一端），
-    # 假设 E+I≈100（MBTI 的基本约定）。
+    # MBTI 是 4 条双极轴, LLM 直接输出 4 轴偏向 (EI/NS/TF/JP 各一个 0-100).
+    # 每轴取偏向 E/N/T/J 一端的百分比, 另一端由 100 减得出.
     clamp = lambda v: max(0, min(100, int(v)))
-    return {
-        "EI": clamp(result.get("E", 50)),
-        "NS": clamp(result.get("N", 50)),
-        "TF": clamp(result.get("T", 50)),
-        "JP": clamp(result.get("J", 50)),
-    }
+    return {dim: clamp(result.get(dim, 50)) for dim in MBTI_DIMS}
 
 
 def _validate_input(percentages: dict) -> dict[str, int]:
