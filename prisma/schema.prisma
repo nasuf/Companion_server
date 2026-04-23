@@ -12,16 +12,16 @@ generator client {
 }
 
 model User {
-  id               String             @id @default(uuid())
+  id               String              @id @default(uuid())
   name             String
-  username         String             @unique
-  hashedPassword   String             @map("hashed_password")
-  role             String             @default("user") @map("role")
-  email            String?            @unique
-  status           String             @default("active")
-  archivedAt       DateTime?          @map("archived_at")
-  createdAt        DateTime           @default(now()) @map("created_at")
-  updatedAt        DateTime           @updatedAt @map("updated_at")
+  username         String              @unique
+  hashedPassword   String              @map("hashed_password")
+  role             String              @default("user") @map("role")
+  email            String?             @unique
+  status           String              @default("active")
+  archivedAt       DateTime?           @map("archived_at")
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
   agents           AiAgent[]
   workspaces       ChatWorkspace[]
   conversations    Conversation[]
@@ -38,34 +38,34 @@ model User {
 }
 
 model AiAgent {
-  id              String         @id @default(uuid())
-  name            String
-  userId          String         @map("user_id")
-  user            User           @relation(fields: [userId], references: [id])
-  status          String         @default("active")
-  archivedAt      DateTime?      @map("archived_at")
+  id                 String              @id @default(uuid())
+  name               String
+  userId             String              @map("user_id")
+  user               User                @relation(fields: [userId], references: [id])
+  status             String              @default("active")
+  archivedAt         DateTime?           @map("archived_at")
   // Per spec §1.2: MBTI 是 canonical personality 表达，user 输入的 7 维仅作
   // 创建时的 transient 输入，转 MBTI 后即丢弃。
-  mbti            Json?          // 初始 MBTI: {EI, NS, TF, JP, type, summary}
-  currentMbti     Json?          @map("current_mbti")  // 调整后的 MBTI（同形）
-  background      String?
-  values          Json?
-  lifeOverview    String?        @map("life_overview")
-  age             Int?
-  occupation      String?
-  city            String?
-  gender          String?        @map("gender")
-  characterProfileId String?     @map("character_profile_id")
-  createdAt       DateTime       @default(now()) @map("created_at")
-  updatedAt       DateTime       @updatedAt @map("updated_at")
-  workspaces      ChatWorkspace[]
-  conversations   Conversation[]
-  emotionState    AiEmotionState?
-  schedules       AiDailySchedule[]
-  intimacies      Intimacy[]
-  proactiveLogs   ProactiveChatLog[]
-  traitFeedbackLogs TraitFeedbackLog[]
-  timeTriggers      TimeTrigger[]
+  mbti               Json? // 初始 MBTI: {EI, NS, TF, JP, type, summary}
+  currentMbti        Json?               @map("current_mbti") // 调整后的 MBTI（同形）
+  background         String?
+  values             Json?
+  lifeOverview       String?             @map("life_overview")
+  age                Int?
+  occupation         String?
+  city               String?
+  gender             String?             @map("gender")
+  characterProfileId String?             @map("character_profile_id")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  workspaces         ChatWorkspace[]
+  conversations      Conversation[]
+  emotionState       AiEmotionState?
+  schedules          AiDailySchedule[]
+  intimacies         Intimacy[]
+  proactiveLogs      ProactiveChatLog[]
+  traitFeedbackLogs  TraitFeedbackLog[]
+  timeTriggers       TimeTrigger[]
   proactiveStates    ProactiveState[]
   proactiveEvents    ProactiveEventLog[]
   patienceStates     PatienceState[]
@@ -74,22 +74,22 @@ model AiAgent {
 }
 
 model ChatWorkspace {
-  id            String            @id @default(uuid())
-  userId        String            @map("user_id")
-  user          User              @relation(fields: [userId], references: [id])
-  agentId       String?           @map("agent_id")
-  agent         AiAgent?          @relation(fields: [agentId], references: [id])
-  status        String            @default("active")
-  archivedAt    DateTime?         @map("archived_at")
-  createdAt     DateTime          @default(now()) @map("created_at")
-  updatedAt     DateTime          @updatedAt @map("updated_at")
-  conversations Conversation[]
-  userMemories  UserMemory[]
-  aiMemories    AiMemory[]
-  profiles      UserProfile[]
-  changelogs    MemoryChangelog[]
-  proactiveLogs ProactiveChatLog[]
-  proactiveState ProactiveState?
+  id              String              @id @default(uuid())
+  userId          String              @map("user_id")
+  user            User                @relation(fields: [userId], references: [id])
+  agentId         String?             @map("agent_id")
+  agent           AiAgent?            @relation(fields: [agentId], references: [id])
+  status          String              @default("active")
+  archivedAt      DateTime?           @map("archived_at")
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+  conversations   Conversation[]
+  userMemories    UserMemory[]
+  aiMemories      AiMemory[]
+  profiles        UserProfile[]
+  changelogs      MemoryChangelog[]
+  proactiveLogs   ProactiveChatLog[]
+  proactiveState  ProactiveState?
   proactiveEvents ProactiveEventLog[]
 
   @@index([userId, status])
@@ -98,20 +98,20 @@ model ChatWorkspace {
 }
 
 model Conversation {
-  id        String    @id @default(uuid())
-  userId    String    @map("user_id")
-  user      User      @relation(fields: [userId], references: [id])
-  agentId   String    @map("agent_id")
-  agent     AiAgent   @relation(fields: [agentId], references: [id])
-  workspaceId String? @map("workspace_id")
-  workspace  ChatWorkspace? @relation(fields: [workspaceId], references: [id])
-  title     String?
-  isDeleted Boolean   @default(false) @map("is_deleted")
-  archivedAt DateTime? @map("archived_at")
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  messages  Message[]
-  proactiveLogs ProactiveChatLog[]
+  id              String              @id @default(uuid())
+  userId          String              @map("user_id")
+  user            User                @relation(fields: [userId], references: [id])
+  agentId         String              @map("agent_id")
+  agent           AiAgent             @relation(fields: [agentId], references: [id])
+  workspaceId     String?             @map("workspace_id")
+  workspace       ChatWorkspace?      @relation(fields: [workspaceId], references: [id])
+  title           String?
+  isDeleted       Boolean             @default(false) @map("is_deleted")
+  archivedAt      DateTime?           @map("archived_at")
+  createdAt       DateTime            @default(now()) @map("created_at")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+  messages        Message[]
+  proactiveLogs   ProactiveChatLog[]
   proactiveStates ProactiveState[]
   proactiveEvents ProactiveEventLog[]
 
@@ -122,7 +122,7 @@ model Message {
   id             String       @id @default(uuid())
   conversationId String       @map("conversation_id")
   conversation   Conversation @relation(fields: [conversationId], references: [id])
-  role           String       // "user" or "assistant"
+  role           String // "user" or "assistant"
   content        String
   metadata       Json?
   createdAt      DateTime     @default(now()) @map("created_at")
@@ -147,13 +147,13 @@ model PromptTemplate {
 }
 
 model PromptTemplateVersion {
-  id          String   @id @default(uuid())
-  promptId    String   @map("prompt_id")
-  promptKey   String   @map("prompt_key")
-  content     String
-  source      String
-  changeType  String   @map("change_type")
-  createdAt   DateTime @default(now()) @map("created_at")
+  id         String   @id @default(uuid())
+  promptId   String   @map("prompt_id")
+  promptKey  String   @map("prompt_key")
+  content    String
+  source     String
+  changeType String   @map("change_type")
+  createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([promptId, createdAt(sort: Desc)])
   @@index([promptKey, createdAt(sort: Desc)])
@@ -161,63 +161,63 @@ model PromptTemplateVersion {
 }
 
 model UserMemory {
-  id           String   @id @default(uuid())
-  userId       String   @map("user_id")
-  workspaceId  String?  @map("workspace_id")
-  workspace    ChatWorkspace? @relation(fields: [workspaceId], references: [id])
-  type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
-  mainCategory String?  @map("main_category")
-  subCategory  String?  @map("sub_category")
-  level        Int      @default(3)
-  content      String
-  summary      String?
-  importance   Float    @default(0.5)
-  mentionCount Int      @default(0) @map("mention_count")
-  isArchived   Boolean  @default(false) @map("is_archived")
+  id            String         @id @default(uuid())
+  userId        String         @map("user_id")
+  workspaceId   String?        @map("workspace_id")
+  workspace     ChatWorkspace? @relation(fields: [workspaceId], references: [id])
+  type          String? // "identity", "emotion", "preference", "life", "thought", "consolidated"
+  mainCategory  String?        @map("main_category")
+  subCategory   String?        @map("sub_category")
+  level         Int            @default(3)
+  content       String
+  summary       String?
+  importance    Float          @default(0.5)
+  mentionCount  Int            @default(0) @map("mention_count")
+  isArchived    Boolean        @default(false) @map("is_archived")
   // Part 5 §3.1: occur_time = 事件实际发生时间 (= 时间解析器的 event_time)
-  occurTime    DateTime? @map("occur_time")
+  occurTime     DateTime?      @map("occur_time")
   // Part 5 §3.1: statement_time = 用户说出这句话的时间 (一般为消息接收时刻)
-  statementTime DateTime? @map("statement_time")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  statementTime DateTime?      @map("statement_time")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
 
   @@map("memories_user")
 }
 
 model AiMemory {
-  id           String   @id @default(uuid())
-  userId       String   @map("user_id")
-  workspaceId  String?  @map("workspace_id")
-  workspace    ChatWorkspace? @relation(fields: [workspaceId], references: [id])
-  type         String?  // "identity", "emotion", "preference", "life", "thought", "consolidated"
-  mainCategory String?  @map("main_category")
-  subCategory  String?  @map("sub_category")
-  level        Int      @default(3)
-  content      String
-  summary      String?
-  importance   Float    @default(0.5)
-  mentionCount Int      @default(0) @map("mention_count")
-  isArchived   Boolean  @default(false) @map("is_archived")
+  id            String         @id @default(uuid())
+  userId        String         @map("user_id")
+  workspaceId   String?        @map("workspace_id")
+  workspace     ChatWorkspace? @relation(fields: [workspaceId], references: [id])
+  type          String? // "identity", "emotion", "preference", "life", "thought", "consolidated"
+  mainCategory  String?        @map("main_category")
+  subCategory   String?        @map("sub_category")
+  level         Int            @default(3)
+  content       String
+  summary       String?
+  importance    Float          @default(0.5)
+  mentionCount  Int            @default(0) @map("mention_count")
+  isArchived    Boolean        @default(false) @map("is_archived")
   // Part 5 §3.1: occur_time = 事件实际发生时间 (= 时间解析器的 event_time)
-  occurTime    DateTime? @map("occur_time")
+  occurTime     DateTime?      @map("occur_time")
   // Part 5 §3.1: statement_time = 用户说出这句话的时间 (一般为消息接收时刻)
-  statementTime DateTime? @map("statement_time")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  statementTime DateTime?      @map("statement_time")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
 
   @@map("memories_ai")
 }
 
 model UserProfile {
-  id                String   @id @default(uuid())
-  userId            String   @map("user_id")
-  user              User     @relation(fields: [userId], references: [id])
-  workspaceId       String?  @unique @map("workspace_id")
-  workspace         ChatWorkspace? @relation(fields: [workspaceId], references: [id])
-  traits            Json?
-  interests         Json?
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  id          String         @id @default(uuid())
+  userId      String         @map("user_id")
+  user        User           @relation(fields: [userId], references: [id])
+  workspaceId String?        @unique @map("workspace_id")
+  workspace   ChatWorkspace? @relation(fields: [workspaceId], references: [id])
+  traits      Json?
+  interests   Json?
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("user_profiles")
@@ -267,16 +267,16 @@ model UserPortrait {
 }
 
 model MemoryChangelog {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  user      User     @relation(fields: [userId], references: [id])
-  workspaceId String? @map("workspace_id")
-  workspace ChatWorkspace? @relation(fields: [workspaceId], references: [id])
-  memoryId  String   @map("memory_id")
-  operation String   // "insert", "update", "delete"
-  oldValue  String?  @map("old_value")
-  newValue  String?  @map("new_value")
-  createdAt DateTime @default(now()) @map("created_at")
+  id          String         @id @default(uuid())
+  userId      String         @map("user_id")
+  user        User           @relation(fields: [userId], references: [id])
+  workspaceId String?        @map("workspace_id")
+  workspace   ChatWorkspace? @relation(fields: [workspaceId], references: [id])
+  memoryId    String         @map("memory_id")
+  operation   String // "insert", "update", "delete"
+  oldValue    String?        @map("old_value")
+  newValue    String?        @map("new_value")
+  createdAt   DateTime       @default(now()) @map("created_at")
 
   @@map("memory_changelogs")
 }
@@ -287,7 +287,7 @@ model Intimacy {
   agent           AiAgent  @relation(fields: [agentId], references: [id])
   userId          String   @map("user_id")
   user            User     @relation(fields: [userId], references: [id])
-  topicIntimacy   Int      @default(50)  @map("topic_intimacy")
+  topicIntimacy   Int      @default(50) @map("topic_intimacy")
   topicLevel      String   @default("L3") @map("topic_level")
   topicUpdatedAt  DateTime @default(now()) @map("topic_updated_at")
   growthIntimacy  Int      @default(500) @map("growth_intimacy")
@@ -325,17 +325,17 @@ model ScheduleAdjustLog {
 }
 
 model ProactiveChatLog {
-  id             String        @id @default(uuid())
-  agentId        String        @map("agent_id")
-  agent          AiAgent       @relation(fields: [agentId], references: [id])
-  userId         String        @map("user_id")
-  workspaceId    String?       @map("workspace_id")
+  id             String         @id @default(uuid())
+  agentId        String         @map("agent_id")
+  agent          AiAgent        @relation(fields: [agentId], references: [id])
+  userId         String         @map("user_id")
+  workspaceId    String?        @map("workspace_id")
   workspace      ChatWorkspace? @relation(fields: [workspaceId], references: [id])
-  conversationId String?       @map("conversation_id")
-  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+  conversationId String?        @map("conversation_id")
+  conversation   Conversation?  @relation(fields: [conversationId], references: [id])
   message        String
-  eventType      String?       @map("event_type")
-  createdAt      DateTime      @default(now()) @map("created_at")
+  eventType      String?        @map("event_type")
+  createdAt      DateTime       @default(now()) @map("created_at")
 
   @@index([workspaceId, createdAt])
   @@index([conversationId, createdAt])
@@ -343,34 +343,34 @@ model ProactiveChatLog {
 }
 
 model ProactiveState {
-  id                    String         @id @default(uuid())
-  workspaceId           String         @unique @map("workspace_id")
-  workspace             ChatWorkspace  @relation(fields: [workspaceId], references: [id])
-  userId                String         @map("user_id")
-  user                  User           @relation(fields: [userId], references: [id])
-  agentId               String         @map("agent_id")
-  agent                 AiAgent        @relation(fields: [agentId], references: [id])
-  conversationId        String?        @map("conversation_id")
-  conversation          Conversation?  @relation(fields: [conversationId], references: [id])
-  status                String         @default("idle")
-  stage                 String         @default("cold_start")
-  silenceLevelN         Int            @default(0) @map("silence_level_n")
-  followupPlanType      String         @default("normal") @map("followup_plan_type")
-  remainingForcedTriggers Int?         @map("remaining_forced_triggers")
-  currentWindowIndex    Int?           @map("current_window_index")
-  windowDueAt           DateTime?      @map("window_due_at")
-  responseDeadlineAt    DateTime?      @map("response_deadline_at")
-  t0At                  DateTime?      @map("t0_at")
-  lastProactiveAt       DateTime?      @map("last_proactive_at")
-  lastUserReplyAt       DateTime?      @map("last_user_reply_at")
-  lastAssistantReplyAt  DateTime?      @map("last_assistant_reply_at")
-  lastAttemptAt         DateTime?      @map("last_attempt_at")
-  dailySceneTriggeredAt DateTime?      @map("daily_scene_triggered_at")
-  stopReason            String?        @map("stop_reason")
-  metadata              Json?
-  createdAt             DateTime       @default(now()) @map("created_at")
-  updatedAt             DateTime       @updatedAt @map("updated_at")
-  events                ProactiveEventLog[]
+  id                      String              @id @default(uuid())
+  workspaceId             String              @unique @map("workspace_id")
+  workspace               ChatWorkspace       @relation(fields: [workspaceId], references: [id])
+  userId                  String              @map("user_id")
+  user                    User                @relation(fields: [userId], references: [id])
+  agentId                 String              @map("agent_id")
+  agent                   AiAgent             @relation(fields: [agentId], references: [id])
+  conversationId          String?             @map("conversation_id")
+  conversation            Conversation?       @relation(fields: [conversationId], references: [id])
+  status                  String              @default("idle")
+  stage                   String              @default("cold_start")
+  silenceLevelN           Int                 @default(0) @map("silence_level_n")
+  followupPlanType        String              @default("normal") @map("followup_plan_type")
+  remainingForcedTriggers Int?                @map("remaining_forced_triggers")
+  currentWindowIndex      Int?                @map("current_window_index")
+  windowDueAt             DateTime?           @map("window_due_at")
+  responseDeadlineAt      DateTime?           @map("response_deadline_at")
+  t0At                    DateTime?           @map("t0_at")
+  lastProactiveAt         DateTime?           @map("last_proactive_at")
+  lastUserReplyAt         DateTime?           @map("last_user_reply_at")
+  lastAssistantReplyAt    DateTime?           @map("last_assistant_reply_at")
+  lastAttemptAt           DateTime?           @map("last_attempt_at")
+  dailySceneTriggeredAt   DateTime?           @map("daily_scene_triggered_at")
+  stopReason              String?             @map("stop_reason")
+  metadata                Json?
+  createdAt               DateTime            @default(now()) @map("created_at")
+  updatedAt               DateTime            @updatedAt @map("updated_at")
+  events                  ProactiveEventLog[]
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -409,7 +409,7 @@ model TraitFeedbackLog {
   agent     AiAgent  @relation(fields: [agentId], references: [id])
   dimension String
   delta     Float
-  source    String   // "implicit" or "direct"
+  source    String // "implicit" or "direct"
   reason    String?
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -417,13 +417,13 @@ model TraitFeedbackLog {
 }
 
 model Sticker {
-  id         Int      @id @default(autoincrement())
-  url        String   @db.VarChar(255)
-  emotionTags Json    @map("emotion_tags")  // [{"emotion":"高兴","weight":0.8}]
-  intensity  Int      @default(3)           // 1~5
-  style      String?  @db.VarChar(50)       // 幽默、可爱、严肃等
-  tags       Json?                          // 场景标签 ["问候","安慰"]
-  createdAt  DateTime @default(now()) @map("created_at")
+  id          Int      @id @default(autoincrement())
+  url         String   @db.VarChar(255)
+  emotionTags Json     @map("emotion_tags") // [{"emotion":"高兴","weight":0.8}]
+  intensity   Int      @default(3) // 1~5
+  style       String?  @db.VarChar(50) // 幽默、可爱、严肃等
+  tags        Json? // 场景标签 ["问候","安慰"]
+  createdAt   DateTime @default(now()) @map("created_at")
 
   @@map("stickers")
 }
@@ -432,16 +432,16 @@ model Sticker {
 
 model CareerTemplate {
   id          String   @id @default(uuid())
-  title       String                          // 职业
-  duties      String                          // 工作内容
-  socialValue String   @map("social_value")   // 社会价值
-  clients     String                          // 服务对象
-  status      String   @default("active")     // active / archived
+  title       String // 职业
+  duties      String // 工作内容
+  socialValue String   @map("social_value") // 社会价值
+  clients     String // 服务对象
+  status      String   @default("active") // active / archived
   sortOrder   Int      @default(0) @map("sort_order")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  profiles    CharacterProfile[]
+  profiles CharacterProfile[]
 
   @@map("career_templates")
 }
@@ -449,34 +449,34 @@ model CareerTemplate {
 // ── AI 角色背景管理 ──
 
 model CharacterTemplate {
-  id                  String   @id @default(uuid())
-  name                String
-  description         String?
-  schemaData          Json     @map("schema")               // 动态分类/字段定义
-  promptHeader        String?  @map("prompt_header")        // 提示词开头（NULL=用默认）
-  defaults            String?                               // 生成规则（用户主体约束）
-  promptRequirements  String?  @map("prompt_requirements")  // 输出要求（NULL=用默认）
-  status              String   @default("active")           // active / archived
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  id                 String   @id @default(uuid())
+  name               String
+  description        String?
+  schemaData         Json     @map("schema") // 动态分类/字段定义
+  promptHeader       String?  @map("prompt_header") // 提示词开头（NULL=用默认）
+  defaults           String? // 生成规则（用户主体约束）
+  promptRequirements String?  @map("prompt_requirements") // 输出要求（NULL=用默认）
+  status             String   @default("active") // active / archived
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
-  profiles            CharacterProfile[]
+  profiles CharacterProfile[]
 
   @@map("character_templates")
 }
 
 model CharacterProfile {
-  id          String   @id @default(uuid())
-  templateId  String   @map("template_id")
-  template    CharacterTemplate @relation(fields: [templateId], references: [id])
-  careerId    String?  @map("career_id")
-  career      CareerTemplate?   @relation(fields: [careerId], references: [id])
-  name        String                          // 背景名称（职业名）
-  data        Json                            // 根据模板 schema 填充的值
-  status      String   @default("draft")      // draft / published / archived
-  agentId     String?  @map("agent_id")       // 绑定到 AiAgent
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id         String            @id @default(uuid())
+  templateId String            @map("template_id")
+  template   CharacterTemplate @relation(fields: [templateId], references: [id])
+  careerId   String?           @map("career_id")
+  career     CareerTemplate?   @relation(fields: [careerId], references: [id])
+  name       String // 背景名称（职业名）
+  data       Json // 根据模板 schema 填充的值
+  status     String            @default("draft") // draft / published / archived
+  agentId    String?           @map("agent_id") // 绑定到 AiAgent
+  createdAt  DateTime          @default(now()) @map("created_at")
+  updatedAt  DateTime          @updatedAt @map("updated_at")
 
   @@index([templateId])
   @@index([careerId])
@@ -491,8 +491,8 @@ model TimeTrigger {
   userId      String    @map("user_id")
   user        User      @relation(fields: [userId], references: [id])
   triggerTime DateTime  @map("trigger_time")
-  repeatRule  String?   @map("repeat_rule")   // cron表达式，null=一次性
-  actionType  String    @map("action_type")   // greeting/reminder/holiday/birthday
+  repeatRule  String?   @map("repeat_rule") // cron表达式，null=一次性
+  actionType  String    @map("action_type") // greeting/reminder/holiday/birthday
   actionData  Json?     @map("action_data")
   isActive    Boolean   @default(true) @map("is_active")
   lastFired   DateTime? @map("last_fired")
@@ -504,21 +504,21 @@ model TimeTrigger {
 // ── Entity knowledge layer ──
 
 model MemoryEntity {
-  id             String   @id @default(uuid())
-  userId         String   @map("user_id")
-  workspaceId    String?  @map("workspace_id")
-  canonicalName  String   @map("canonical_name")        // "妈妈" / "老王" / "杭州"
-  aliases        String[] @default([])                  // ["妈","我妈","妈咪"]
-  entityType     String   @map("entity_type")           // person / place / org / pet / topic / preference / other
-  role           String?                                // mother / colleague / hometown / ...
-  mentionCount   Int      @default(0) @map("mention_count")
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  workspaceId     String?   @map("workspace_id")
+  canonicalName   String    @map("canonical_name") // "妈妈" / "老王" / "杭州"
+  aliases         String[]  @default([]) // ["妈","我妈","妈咪"]
+  entityType      String    @map("entity_type") // person / place / org / pet / topic / preference / other
+  role            String? // mother / colleague / hometown / ...
+  mentionCount    Int       @default(0) @map("mention_count")
   lastMentionedAt DateTime? @map("last_mentioned_at")
-  isArchived     Boolean  @default(false) @map("is_archived")
-  metadata       Json?                                  // 可选扩展（e.g. preference.value）
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  isArchived      Boolean   @default(false) @map("is_archived")
+  metadata        Json? // 可选扩展（e.g. preference.value）
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  mentions       MemoryMention[]
+  mentions MemoryMention[]
 
   @@unique([userId, workspaceId, entityType, canonicalName])
   @@index([userId, workspaceId, entityType])
@@ -528,17 +528,45 @@ model MemoryEntity {
 }
 
 model MemoryMention {
-  memoryId      String   @map("memory_id")
-  memorySource  String   @map("memory_source")   // "user" | "ai"
-  entityId      String   @map("entity_id")
-  entity        MemoryEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
-  userId        String   @map("user_id")
-  workspaceId   String?  @map("workspace_id")
-  createdAt     DateTime @default(now()) @map("created_at")
+  memoryId     String       @map("memory_id")
+  memorySource String       @map("memory_source") // "user" | "ai"
+  entityId     String       @map("entity_id")
+  entity       MemoryEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  userId       String       @map("user_id")
+  workspaceId  String?      @map("workspace_id")
+  createdAt    DateTime     @default(now()) @map("created_at")
 
   @@id([memoryId, entityId])
   @@index([entityId])
   @@index([userId, workspaceId])
   @@index([memoryId])
   @@map("memory_mentions")
+}
+
+// ── Calendar / 节假日 ──
+//
+// 来源:
+//   chinesecalendar  (CN 法定假日 + 调休, 年度数据随国务院办公厅通知发布更新)
+//   nager            (国际节日, nager.date REST API)
+//   un_observed      (算法计算的国际纪念日, 妇女节/儿童节/母亲节等)
+//   manual           (admin 手动录入或从老硬编码 seed 的条目, refresh job 不覆盖)
+//
+// country_code: ISO-3166 alpha-2 (如 "CN"); "INTL" 表示无特定国家的国际纪念日.
+model Holiday {
+  id            String   @id @default(uuid())
+  date          DateTime @db.Date
+  name          String
+  type          String // legal / traditional / international / custom
+  countryCode   String   @default("CN") @map("country_code")
+  isWorkdaySwap Boolean  @default(false) @map("is_workday_swap")
+  source        String // chinesecalendar / nager / un_observed / manual
+  metadata      Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([date, countryCode, name])
+  @@index([date])
+  @@index([countryCode])
+  @@index([source])
+  @@map("holidays")
 }

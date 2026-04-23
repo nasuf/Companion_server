@@ -82,6 +82,7 @@ from app.api.public.boundary import router as boundary_router
 from app.api.public.stickers import router as stickers_router
 from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
+from app.api.admin.holidays import router as admin_holidays_router
 from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
 from app.api.admin.character import router as admin_character_router
@@ -101,6 +102,7 @@ app.include_router(boundary_router)
 app.include_router(stickers_router)
 app.include_router(ws_router)
 app.include_router(admin_prompts_router)
+app.include_router(admin_holidays_router)
 app.include_router(auth_router)
 app.include_router(admin_users_router)
 app.include_router(admin_character_router)

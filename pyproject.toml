@@ -22,6 +22,8 @@ dependencies = [
     "lunardate>=0.2.2",
     # Part 5 §2.1: NTP 时间校准
     "ntplib>=0.4.0",
+    # spec-audit 2026-04-23: 国务院法定假日 + 调休数据 (admin-curated holidays 表的外部源)
+    "chinesecalendar>=1.11.0",
 ]
 
 [project.optional-dependencies]
