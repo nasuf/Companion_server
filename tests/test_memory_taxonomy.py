@@ -152,3 +152,37 @@ class TestEdgeCases:
         r = resolve_taxonomy(main_category=" 身份 ", sub_category=" 猫咪 ")
         assert r.main_category == "身份"
         assert r.sub_category == "宠物"
+
+
+# ── D10: spec §1.4 「其他特殊事件」子类 ──
+
+
+class TestOtherSpecialEvents:
+    """spec §1.4 生活记忆明列"其他特殊事件"作为独立子类 (非通用"其他")."""
+
+    def test_allowed_in_user_life_matrix(self):
+        from app.services.memory.taxonomy import TAXONOMY_MATRIX
+        assert "其他特殊事件" in TAXONOMY_MATRIX["user"][2]["生活"]
+
+    def test_allowed_in_ai_life_matrix(self):
+        from app.services.memory.taxonomy import TAXONOMY_MATRIX
+        assert "其他特殊事件" in TAXONOMY_MATRIX["ai"][2]["生活"]
+
+    def test_direct_match_is_preserved(self):
+        """直接传 "其他特殊事件" 应原样通过, 不被降级到 "其他"."""
+        r = resolve_taxonomy(main_category="生活", sub_category="其他特殊事件")
+        assert r.sub_category == "其他特殊事件"
+        assert r.allowed is True
+
+    def test_alias_special_event_maps_to_canonical(self):
+        r = resolve_taxonomy(main_category="生活", sub_category="特殊事件")
+        assert r.sub_category == "其他特殊事件"
+
+    def test_alias_unforgettable_experience(self):
+        r = resolve_taxonomy(main_category="生活", sub_category="难忘经历")
+        assert r.sub_category == "其他特殊事件"
+
+    def test_general_other_still_works(self):
+        """通用兜底 "其他" 独立存在, 不被 "其他特殊事件" 吞并."""
+        r = resolve_taxonomy(main_category="生活", sub_category="其他")
+        assert r.sub_category == "其他"
