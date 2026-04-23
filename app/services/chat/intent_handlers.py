@@ -32,8 +32,13 @@ from app.services.memory.interaction.deletion import (
 )
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
+    detect_apology,
     handle_apology,
 )
+
+# spec §2.6.2.1: 道歉 sincerity 门禁阈值, 与 boundary_phase.py 拉黑态道歉检测
+# 使用同一常量 (避免两路径阈值漂移).
+_APOLOGY_SINCERITY_MIN = 0.5
 from app.services.schedule_domain.schedule import (
     format_full_schedule_for_query,
     format_schedule_context,
@@ -114,10 +119,23 @@ async def handle_apology_promise(
     user_message: str,
     ctx: ShortCircuitCtx,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
-    """Spec §3.4.4：intent.unified 已分类为 apology_promise，直接恢复耐心 + 和解回复。"""
+    """Spec §3.4.4: intent.unified 已分类为 apology_promise.
+
+    Spec §2.6.2.1 要求道歉恢复耐心**必须过 sincerity >= 0.5 门禁** —
+    即便 intent 分类判定是道歉, 也要小模型再看一眼诚意度 (防止 "对不起
+    啦但我就是讨厌你" 这类低诚意道歉无条件恢复耐心). 门禁和 boundary_phase
+    拉黑态道歉路径保持同一阈值, 两路径行为一致。
+    """
     if not ctx.agent_id or ctx.cached_patience >= PATIENCE_MAX:
         return False, None
     try:
+        apology = await detect_apology(user_message)
+        if not (
+            apology.get("is_apology")
+            and apology.get("sincerity", 0) >= _APOLOGY_SINCERITY_MIN
+        ):
+            # intent 识别为道歉但诚意不够 → 不短路, 落回正常 reply 流程
+            return False, None
         new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
         reply = await apology_reply(
             message=user_message,
