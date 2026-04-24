@@ -83,7 +83,11 @@ async def push_pending(
     reply_context: dict | None = None,
     message_id: str | None = None,
 ) -> None:
-    """将碎片消息加入 (agent, user) scoped 聚合队列。"""
+    """将碎片消息加入 (agent, user) scoped 聚合队列。
+
+    kwargs-only: 三个前置位置参数都是 UUID 字符串, 位置传参很容易把
+    agent_id / user_id / conversation_id 写反导致静默路由错误。
+    """
     r = await get_redis()
     msg_key = _PENDING_MSG_KEY.format(aid=agent_id, uid=user_id)
     conv_key = _PENDING_CONV_KEY.format(aid=agent_id, uid=user_id)

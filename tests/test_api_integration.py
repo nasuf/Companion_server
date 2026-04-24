@@ -297,15 +297,11 @@ def _as_user(client_sub: str, agent_owner_id: str = "user-1", agent_id: str = "a
 def test_get_emotion(mock_deps):
     """GET /emotions/{agent_id}/current returns emotion state for owner."""
     client = mock_deps
-    with _as_user(client_sub="user-1"):
-        with (
-            patch("app.api.public.emotions.db") as mock_db_emo,
-            patch("app.api.public.emotions.get_ai_emotion", new_callable=AsyncMock,
-                  return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4}),
-        ):
-            mock_db_emo.aiagent = MagicMock()
-            mock_db_emo.aiagent.find_unique = AsyncMock()
-            response = client.get("/emotions/agent-id/current")
+    with _as_user(client_sub="user-1"), patch(
+        "app.api.public.emotions.get_ai_emotion", new_callable=AsyncMock,
+        return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4},
+    ):
+        response = client.get("/emotions/agent-id/current")
     assert response.status_code == 200
     data = response.json()
     assert data["pleasure"] == 0.5

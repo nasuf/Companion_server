@@ -126,7 +126,7 @@ class FakeAggregationRedis:
         self.zsets: dict[str, dict[str, float]] = defaultdict(dict)
 
     def pipeline(self):
-        return _FakeAggregationPipeline(self)
+        return FakeAggregationPipeline(self)
 
     async def rpush(self, key, *values):
         self.lists[key].extend(values)
@@ -187,7 +187,7 @@ class FakeAggregationRedis:
         return [conv_id, ctx, *msgs]
 
 
-class _FakeAggregationPipeline:
+class FakeAggregationPipeline:
     def __init__(self, parent: FakeAggregationRedis) -> None:
         self.parent = parent
         self.ops: list[tuple] = []
