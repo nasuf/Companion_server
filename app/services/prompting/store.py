@@ -56,20 +56,24 @@ async def ensure_prompt_templates() -> None:
         for k in orphan_keys:
             pipe.delete(_redis_key(k))
 
+    # 代码 default 是 prompt 的终极真理: 每次 startup 发现 definition.default_text
+    # 与 DB 里 defaultContent 不一致, 说明代码侧有过编辑; content 同时被覆盖,
+    # 用户在 UI 的定制 (update_prompt_text) 在下次部署重启时作废. default 未变
+    # 期间, UI 保存照旧生效 (通过 Redis 立即读到新值).
+    code_sync_count = 0
     for definition in PROMPT_DEFINITIONS:
         existing = existing_map.get(definition.key)
         if existing:
-            # 永不覆盖 DB `content` 列：startup 只同步 metadata + defaultContent，
-            # content 的唯一写入路径是 UI 保存 / reset / restore_version。
-            content = existing.content
-            needs_update = (
+            default_changed = existing.defaultContent != definition.default_text
+            metadata_changed = (
                 existing.stage != definition.stage
                 or existing.category != definition.category
                 or existing.title != definition.title
                 or (existing.description or "") != definition.description
-                or existing.defaultContent != definition.default_text
             )
-            if needs_update:
+
+            if default_changed:
+                content = definition.default_text
                 await db.prompttemplate.update(
                     where={"key": definition.key},
                     data={
@@ -77,11 +81,34 @@ async def ensure_prompt_templates() -> None:
                         "category": definition.category,
                         "title": definition.title,
                         "description": definition.description,
+                        "content": definition.default_text,
                         "defaultContent": definition.default_text,
                     },
                 )
+                await _create_prompt_version(
+                    prompt_id=existing.id,
+                    prompt_key=definition.key,
+                    content=definition.default_text,
+                    source="default",
+                    change_type="code_sync",
+                )
+                code_sync_count += 1
+                logger.info(f"[PROMPT-SYNC] key={definition.key} overridden by code default")
+            else:
+                content = existing.content
+                if metadata_changed:
+                    await db.prompttemplate.update(
+                        where={"key": definition.key},
+                        data={
+                            "stage": definition.stage,
+                            "category": definition.category,
+                            "title": definition.title,
+                            "description": definition.description,
+                        },
+                    )
 
             if existing.id not in version_prompt_ids:
+                # pre-versions 时代遗留的行补一条 bootstrap 版本
                 await _create_prompt_version(
                     prompt_id=existing.id,
                     prompt_key=definition.key,
@@ -113,6 +140,8 @@ async def ensure_prompt_templates() -> None:
         pipe.set(_redis_key(definition.key), content)
 
     await pipe.execute()
+    if code_sync_count:
+        logger.info(f"[PROMPT-SYNC] code_sync_count={code_sync_count}")
 
 
 async def get_prompt_text(key: str) -> str:
