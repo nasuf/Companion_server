@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from prisma import Json
 
 from app.db import db
 from app.services.interaction.boundary import check_positive_recovery
 from app.services.memory.recording.pipeline import process_memory_pipeline
+from app.services.memory.recording.watermark import get_watermark, set_watermark
 from app.services.relationship.emotion import save_ai_emotion
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
@@ -93,30 +95,98 @@ async def _bg_user_emotion(
         logger.warning(f"Background user emotion metadata write failed: {e}")
 
 
-async def _bg_memory_pipeline(user_id: str, messages: list[dict]) -> None:
+async def _bg_memory_pipeline(
+    user_id: str,
+    messages: list[dict],
+    conversation_id: str | None = None,
+) -> None:
     """spec §2.1 / §2.2：用户侧与 AI 侧走两条独立管线，owner 由路径决定。
 
-    取最近 6 条（3 轮 user+assistant）作为共享上下文。两条管线都看得到完整对话，
-    但每条 prompt 只抽取自己那一侧的记忆，避免 LLM 从混合对话里错归 owner。
+    取最近 6 条（3 轮 user+assistant）作为 LLM 输入窗口（解指代/情境需要多轮）。
+    按 (conversation_id, side) 水位线把窗口切成【历史上下文】+【待抽取消息】:
+    仅从后者抽取记忆, 前者仅供 LLM 理解; 抽完推进水位线. 两条管线水位线独立,
+    同一条消息跨轮不再被重复抽取 ~3 次.
+
+    conversation_id 为 None 时退化回老行为 (无水位线, 全部当新消息抽), 兼容
+    proactive sender 等无会话上下文的入口. 每条 msg 必须含 createdAt (ISO) 才能
+    参与水位线切分, 没有则归为新消息.
     """
     try:
         recent = messages[-6:]
         if not recent:
             return
-        conv_text = "\n".join(
-            f"{m.get('role', 'user')}: {m['content']}" for m in recent
-        )
-        has_user = any(m.get("role") == "user" for m in recent)
-        has_ai = any(m.get("role") == "assistant" for m in recent)
-        tasks = []
-        if has_user:
-            tasks.append(process_memory_pipeline(user_id, conv_text, side="user"))
-        if has_ai:
-            tasks.append(process_memory_pipeline(user_id, conv_text, side="ai"))
+        roles = {m.get("role") for m in recent}
+        sides_to_run: list[tuple[Literal["user", "ai"], str]] = [
+            ("user", "user"),
+            ("ai", "assistant"),
+        ]
+        tasks = [
+            _pipeline_with_watermark(user_id, recent, conversation_id, side=side)
+            for side, role in sides_to_run
+            if role in roles
+        ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=False)
     except Exception as e:
         logger.error(f"Background memory pipeline failed: {e}")
+
+
+async def _pipeline_with_watermark(
+    user_id: str,
+    recent: list[dict],
+    conversation_id: str | None,
+    *,
+    side: Literal["user", "ai"],
+) -> None:
+    """按 (conversation_id, side) 水位线切分 recent, 调用 extraction pipeline."""
+    wm = await get_watermark(conversation_id, side) if conversation_id else None
+
+    # 单次扫描: 解析 ts, 判定 new/context, 同步收集 side 最大 ts.
+    # 无 ts 的消息 (刚生成未持久化的 AI reply / boundary 短路手工构造) 用 now()
+    # 占位参与水位线推进, 否则混合 ts 场景下会漏推进导致下轮重抽.
+    target_role = "user" if side == "user" else "assistant"
+    fallback_now = datetime.now(UTC)
+    context_msgs: list[dict] = []
+    new_msgs: list[dict] = []
+    max_side_ts: datetime | None = None
+    for m in recent:
+        ts = _parse_ts(m)
+        is_new = wm is None or ts is None or ts > wm
+        (new_msgs if is_new else context_msgs).append(m)
+        if is_new and m.get("role") == target_role:
+            effective = ts if ts is not None else fallback_now
+            if max_side_ts is None or effective > max_side_ts:
+                max_side_ts = effective
+
+    if max_side_ts is None:
+        return  # 该 side 无新消息, 跳过 LLM
+
+    await process_memory_pipeline(
+        user_id=user_id,
+        new_conversation=_fmt_conversation(new_msgs),
+        context_conversation=_fmt_conversation(context_msgs),
+        side=side,
+    )
+
+    # 防时钟回退: 仅当新候选 > wm 才推进
+    if conversation_id and (wm is None or max_side_ts > wm):
+        await set_watermark(conversation_id, side, max_side_ts)
+
+
+def _parse_ts(m: dict) -> datetime | None:
+    ts = m.get("createdAt")
+    if isinstance(ts, datetime):
+        return ts
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+
+
+def _fmt_conversation(msgs: list[dict]) -> str:
+    return "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in msgs)
 
 
 async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
@@ -150,12 +220,11 @@ async def run_post_process(
     ai_emotion: dict | None = None,
 ) -> None:
     """5 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 记忆抽取 / 性格反馈 / 耐心恢复。"""
-    _ = conversation_id  # 保留供未来扩展（如 conversation-level metric）
     try:
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
             _bg_user_emotion(user_message_id, user_emotion),
-            _bg_memory_pipeline(user_id, full_messages),
+            _bg_memory_pipeline(user_id, full_messages, conversation_id=conversation_id),
         ]
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))

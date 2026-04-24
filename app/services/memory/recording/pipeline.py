@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 Side = Literal["user", "ai"]
 
 # Spec §1.5.2: keywords indicating user expressed that information is important.
-# Detected once per pipeline call (on conversation_text), tagged on all extracted
+# Detected once per pipeline call (on new_conversation), tagged on all extracted
 # memories so L2→L1 promotion can verify the condition.
 _IMPORTANCE_EXPRESSIONS = (
     "很重要", "一定要记住", "千万别忘", "记住了", "别忘了",
@@ -44,13 +44,19 @@ _IMPORTANCE_EXPRESSIONS = (
 
 async def process_memory_pipeline(
     user_id: str,
-    conversation_text: str,
+    new_conversation: str,
+    *,
+    context_conversation: str = "",
     statement_time: datetime | None = None,
     side: Side = "user",
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
 
     Args:
+        new_conversation: Dialogue to extract from (post-watermark messages).
+            Pre-filter + heuristic filter run against this block only.
+        context_conversation: Prior dialogue for LLM disambiguation only (no
+            extraction). Empty string when no pre-watermark history.
         side: "user" → spec §2.1，抽取用户记忆，存入 memories_user；
               "ai"   → spec §2.2，抽取 AI 自我记忆，存入 memories_ai。
         statement_time: Part 5 §3.1 说出这句话的时间（消息接收时刻）。
@@ -61,7 +67,8 @@ async def process_memory_pipeline(
     workspace_id = await resolve_workspace_id(user_id=user_id)
 
     # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
-    if not should_extract_memory(conversation_text):
+    # 只对 new_conversation 判定, 历史上下文已经抽过了
+    if not should_extract_memory(new_conversation):
         logger.debug(f"[MEM-{side}] filtered by heuristic filter")
         return []
 
@@ -70,14 +77,18 @@ async def process_memory_pipeline(
     from app.config import settings
     if settings.enable_memory_prefilter:
         try:
-            if not await should_memorize(conversation_text, side=side):
+            if not await should_memorize(new_conversation, side=side):
                 logger.debug(f"[MEM-{side}] pre-filter: 不记")
                 return []
         except Exception as e:
             logger.warning(f"[MEM-{side}] pre-filter failed ({e}), proceeding")
 
     # Step 2 (spec §2.1.3 / §2.2.3): Big model extraction
-    extraction = await extract_memories(conversation_text, side=side)
+    extraction = await extract_memories(
+        new_conversation,
+        context_conversation=context_conversation,
+        side=side,
+    )
     memories = extraction.get("memories", [])
 
     if not memories:
@@ -88,8 +99,8 @@ async def process_memory_pipeline(
     # 消息里唯一匹配到 1 个时间表述时才覆盖 LLM 的 occur_time — 否则
     # 无法把单个时间归因到多条记忆中的哪一条，回退到 LLM 抽取字段。
     rule_based_occur_time: datetime | None = None
-    if has_explicit_time(conversation_text):
-        parsed = parse_with_statement_time(conversation_text, now=statement_time)
+    if has_explicit_time(new_conversation):
+        parsed = parse_with_statement_time(new_conversation, now=statement_time)
         if len(parsed.event_times) == 1:
             rule_based_occur_time = parsed.event_times[0].start
 
@@ -97,7 +108,7 @@ async def process_memory_pipeline(
 
     # Spec §1.5.2 user emphasis only drives user-side L2→L1 promotion.
     user_emphasized = side == "user" and any(
-        kw in conversation_text for kw in _IMPORTANCE_EXPRESSIONS
+        kw in new_conversation for kw in _IMPORTANCE_EXPRESSIONS
     )
 
     # Step 3: Store each memory with dedup and conflict check

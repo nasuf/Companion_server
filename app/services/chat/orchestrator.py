@@ -440,7 +440,12 @@ async def stream_chat_response(
     recent_messages.reverse()
 
     messages_dicts = [
-        {"role": m.role, "content": m.content} for m in recent_messages
+        {
+            "role": m.role,
+            "content": m.content,
+            "createdAt": m.createdAt.isoformat() if getattr(m, "createdAt", None) else None,
+        }
+        for m in recent_messages
     ]
 
     # --- Topic tracking (Redis, no LLM) ---

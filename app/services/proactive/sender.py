@@ -525,7 +525,7 @@ async def _bg_proactive_ai_memory(user_id: str, message: str) -> None:
     try:
         await process_memory_pipeline(
             user_id=user_id,
-            conversation_text=f"assistant: {message}",
+            new_conversation=f"assistant: {message}",
             side="ai",
         )
     except Exception as e:

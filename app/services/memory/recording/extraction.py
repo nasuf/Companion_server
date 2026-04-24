@@ -40,11 +40,20 @@ def _taxonomy_list_text(side: Side) -> str:
     )
 
 
-async def extract_memories(conversation: str, side: Side = "user") -> dict:
+async def extract_memories(
+    new_conversation: str,
+    *,
+    context_conversation: str = "",
+    side: Side = "user",
+) -> dict:
     """Extract structured memory from a conversation string for one side.
 
     Args:
-        conversation: Recent dialogue lines (`user:` / `assistant:` prefixed).
+        new_conversation: Dialogue lines to extract from (`user:` / `assistant:`
+            prefixed). LLM must only output memories sourced from this block.
+        context_conversation: Prior dialogue lines for disambiguation (指代 /
+            情境); LLM instructed NOT to extract from this block. Empty string
+            when the pipeline has no history pre-watermark.
         side: Which speaker's memories to extract ("user" | "ai"). The owner
             is determined by this path, not inferred by the LLM.
 
@@ -53,7 +62,8 @@ async def extract_memories(conversation: str, side: Side = "user") -> dict:
     model = get_chat_model()  # spec §2.1.3 / §2.2.3: 大模型精细处理
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
     prompt = (await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])).format(
-        conversation=conversation,
+        new_conversation=new_conversation,
+        context_conversation=context_conversation or "(无)",
         current_time=now.strftime("%Y-%m-%d %H:%M %A"),
         taxonomy_list=_taxonomy_list_text(side),
     )

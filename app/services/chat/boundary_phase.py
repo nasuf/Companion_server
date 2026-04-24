@@ -90,6 +90,18 @@ async def _maybe_llm_banned_check(
     }
 
 
+def _fire_memory_pipeline(ctx: BoundaryPhaseCtx, reply: str) -> None:
+    """短路路径把 (user_msg, reply) 送进记忆管线, 共用三处调用点."""
+    ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(
+        ctx.user_id,
+        [
+            {"role": "user", "content": ctx.user_message},
+            {"role": "assistant", "content": reply},
+        ],
+        conversation_id=ctx.conversation_id,
+    ))
+
+
 async def _emit_short_circuit(
     ctx: BoundaryPhaseCtx,
     reply: str,
@@ -121,10 +133,7 @@ async def _handle_blocked(
             {"boundary": True, "zone": "blocked", "apology_unblock": True},
         ):
             yield evt
-        ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
-            {"role": "user", "content": ctx.user_message},
-            {"role": "assistant", "content": reply},
-        ]))
+        _fire_memory_pipeline(ctx, reply)
         ctx.tracer.close()
         ctx.stopped = True
         return
@@ -136,10 +145,7 @@ async def _handle_blocked(
     ) or boundary_result.get("fallback", "...")
     async for evt in _emit_short_circuit(ctx, response, {"boundary": True, "zone": "blocked"}):
         yield evt
-    ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
-        {"role": "user", "content": ctx.user_message},
-        {"role": "assistant", "content": response},
-    ]))
+    _fire_memory_pipeline(ctx, response)
     ctx.tracer.close()
     ctx.stopped = True
 
@@ -196,10 +202,7 @@ async def _handle_attack_ai(
         metadata["final_warning"] = True
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
-    ctx.fire_background_fn(ctx.bg_memory_pipeline_fn(ctx.user_id, [
-        {"role": "user", "content": ctx.user_message},
-        {"role": "assistant", "content": response},
-    ]))
+    _fire_memory_pipeline(ctx, response)
     ctx.tracer.close()
     ctx.stopped = True
 
