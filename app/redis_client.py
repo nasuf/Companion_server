@@ -12,7 +12,11 @@ async def get_redis() -> redis.Redis:
     global _pool, _client
     if _client is None:
         _pool = redis.ConnectionPool.from_url(
-            settings.redis_url, decode_responses=True
+            settings.redis_url,
+            decode_responses=True,
+            socket_timeout=settings.redis_socket_timeout_s,
+            socket_connect_timeout=settings.redis_connect_timeout_s,
+            max_connections=settings.redis_max_connections,
         )
         _client = redis.Redis(connection_pool=_pool)
     return _client

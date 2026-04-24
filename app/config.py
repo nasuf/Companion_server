@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     # 流式首 chunk 超时 (连不上 / 模型未加载时触发 fallback, 防用户长时间无响应)
     llm_chat_stream_first_chunk_timeout_s: float = 30.0
 
+    # Redis client resilience (app/redis_client.py)
+    # socket_timeout 防止 Redis 卡顿永久阻塞 asyncio event loop; 超时触发后抛
+    # redis.TimeoutError, 继承自 RedisError, 下游 try/except 可捕获走降级.
+    # 5s 是所有 Lua 脚本/单 op 的合理上限; 连接阶段给 2s 足够 (内网 < 100ms).
+    redis_socket_timeout_s: float = 5.0
+    redis_connect_timeout_s: float = 2.0
+    redis_max_connections: int = 50
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
