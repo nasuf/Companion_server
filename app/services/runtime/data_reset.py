@@ -83,6 +83,13 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         f"pending:conv:{agent_id}:{user_id}",
         f"pending:ctx:{agent_id}:{user_id}",
         f"last_reply:{agent_id}:{user_id}",
+        f"proactive_2day:{agent_id}:{user_id}",
+        f"attack_history:{agent_id}:{user_id}:L0",
+        f"attack_history:{agent_id}:{user_id}:L1",
+        f"attack_history:{agent_id}:{user_id}:L2",
+        f"memgen:lock:{agent_id}",
+        f"memgen:report:{agent_id}",
+        f"provision_progress:{agent_id}",
     ]
 
     # conversation 相关的精确 key
@@ -233,6 +240,7 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
         ("schedules", db.aidailyschedule),
         ("trait_logs", db.traitfeedbacklog),
         ("proactive_logs", db.proactivechatlog),
+        ("proactive_counters", db.proactivecounter),
     ]:
         try:
             cnt = await model.delete_many(where={"agentId": agent_id})

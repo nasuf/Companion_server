@@ -27,7 +27,6 @@ from app.services.schedule_domain.schedule import (
 from app.services.workspace.workspaces import (
     activate_workspace,
     archive_provisioning_workspace,
-    archive_workspace,
     create_provisioning_workspace,
     finalize_archived_workspaces,
     get_active_workspace,
@@ -304,27 +303,6 @@ async def regenerate_mbti(agent_id: str, data: RegenerateMbtiRequest):
         life_overview=refreshed.lifeOverview,
         created_at=str(refreshed.createdAt),
     )
-
-
-@router.delete("/{agent_id}")
-async def delete_agent(agent_id: str):
-    """归档 Agent 当前工作区，并清理运行时状态。"""
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    workspace = await get_active_workspace(agent_id=agent_id)
-    if workspace:
-        stats = await archive_workspace(workspace.id)
-    else:
-        archived_at = datetime.now(UTC)
-        await db.aiagent.update(
-            where={"id": agent_id},
-            data={"status": "archived", "archivedAt": archived_at},
-        )
-        stats = {"agent_id": agent_id, "workspace_id": None, "runtime": {}}
-
-    return {"ok": True, "stats": stats}
 
 
 async def _resolve_schedule(agent_id: str):
