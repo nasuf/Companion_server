@@ -65,36 +65,52 @@ class CallProfile:
             )
 
 
-def _build_profiles() -> dict[str, CallProfile]:
-    """从 settings 构建 profiles; 每次调用重新读以便测试能动态改 settings."""
-    return {
-        "utility_fast": CallProfile(
-            timeout_s=settings.llm_utility_timeout_s,
-            max_retries=2,
-            retry_backoff_s=(0.5, 2.0),
-        ),
-        "chat_extract": CallProfile(
-            timeout_s=settings.llm_chat_extract_timeout_s,
-            max_retries=1,
-            retry_backoff_s=(1.0,),
-        ),
-        "chat_stream": CallProfile(
-            timeout_s=settings.llm_chat_stream_timeout_s,
-            max_retries=0,
-            retry_backoff_s=(),
-            first_chunk_timeout_s=settings.llm_chat_stream_first_chunk_timeout_s,
-        ),
-        "background": CallProfile(
-            timeout_s=120.0,
-            max_retries=2,
-            retry_backoff_s=(1.0, 5.0),
-        ),
-    }
+_PROFILES_CACHE: dict[str, CallProfile] | None = None
+
+
+def _profiles() -> dict[str, CallProfile]:
+    """从 settings 构建 profiles, 热路径级缓存避免每次 get_profile 重建 dict.
+
+    settings 运行时不变 (部署级配置), cache 安全. 测试需动态改 settings 时
+    先调 reset_profiles_cache_for_testing().
+    """
+    global _PROFILES_CACHE
+    if _PROFILES_CACHE is None:
+        _PROFILES_CACHE = {
+            "utility_fast": CallProfile(
+                timeout_s=settings.llm_utility_timeout_s,
+                max_retries=2,
+                retry_backoff_s=(0.5, 2.0),
+            ),
+            "chat_extract": CallProfile(
+                timeout_s=settings.llm_chat_extract_timeout_s,
+                max_retries=1,
+                retry_backoff_s=(1.0,),
+            ),
+            "chat_stream": CallProfile(
+                timeout_s=settings.llm_chat_stream_timeout_s,
+                max_retries=0,
+                retry_backoff_s=(),
+                first_chunk_timeout_s=settings.llm_chat_stream_first_chunk_timeout_s,
+            ),
+            "background": CallProfile(
+                timeout_s=120.0,
+                max_retries=2,
+                retry_backoff_s=(1.0, 5.0),
+            ),
+        }
+    return _PROFILES_CACHE
 
 
 def get_profile(name: str) -> CallProfile:
     """按名字取 profile. 未知名字抛 KeyError (编程错误, 不应静默默认)."""
-    return _build_profiles()[name]
+    return _profiles()[name]
+
+
+def reset_profiles_cache_for_testing() -> None:
+    """清 profile cache (测试动态改 settings 前调用)."""
+    global _PROFILES_CACHE
+    _PROFILES_CACHE = None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -212,6 +228,27 @@ def provider_name(model: Any) -> str:
 # Core unary call with retry + CB (single provider)
 # ═══════════════════════════════════════════════════════════════════
 
+def _log_attempt(
+    *,
+    provider: str,
+    op: str,
+    result: str,
+    started: float,
+    attempt: int | None = None,
+    exc: Exception | None = None,
+) -> None:
+    """统一 [LLM] 结构化日志. result in {ok, timeout, error, mid_timeout,
+    mid_error, first_chunk_fail}. 成功用 info, 其他 warning."""
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    parts = [f"provider={provider}", f"op={op}", f"result={result}", f"latency_ms={elapsed_ms}"]
+    if attempt is not None:
+        parts.append(f"attempt={attempt}")
+    if exc is not None:
+        parts.append(f"exc={type(exc).__name__}: {exc}")
+    line = "[LLM] " + " ".join(parts)
+    (logger.info if result == "ok" else logger.warning)(line)
+
+
 async def _run_with_retry(
     factory: Callable[[], Awaitable[Any]],
     *,
@@ -233,27 +270,17 @@ async def _run_with_retry(
         try:
             result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
             breaker.record_success()
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            logger.info(
-                f"[LLM] provider={provider} op={op} result=ok "
-                f"latency_ms={elapsed_ms} attempt={attempt}"
-            )
+            _log_attempt(provider=provider, op=op, result="ok",
+                         started=started, attempt=attempt)
             return result
         except asyncio.TimeoutError as e:
             last_exc = e
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            logger.warning(
-                f"[LLM] provider={provider} op={op} result=timeout "
-                f"latency_ms={elapsed_ms} attempt={attempt}"
-            )
+            _log_attempt(provider=provider, op=op, result="timeout",
+                         started=started, attempt=attempt)
         except Exception as e:
             last_exc = e
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            logger.warning(
-                f"[LLM] provider={provider} op={op} result=error "
-                f"latency_ms={elapsed_ms} attempt={attempt} "
-                f"exc={type(e).__name__}: {e}"
-            )
+            _log_attempt(provider=provider, op=op, result="error",
+                         started=started, attempt=attempt, exc=e)
 
         breaker.record_failure()
         if attempt >= profile.max_retries:
@@ -392,18 +419,23 @@ async def _stream_provider(
     stream = factory()
     aiter = stream.__aiter__()
 
-    # First chunk with tight timeout
+    # First chunk with tight timeout (timeout / empty stream / upstream error 统一
+    # 视为 primary 失败, 触发 fallback. 捕获后必须 aclose 释放底层 SSE/HTTP 连接,
+    # 不能依赖 GC — Dashscope 抽风时 CB 会 open, 多次 timeout 堆积 fd 可能打爆.)
     try:
         first = await asyncio.wait_for(
             aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
         )
-    except (asyncio.TimeoutError, StopAsyncIteration, Exception) as e:
+    except Exception as e:
         breaker.record_failure()
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        logger.warning(
-            f"[LLM] provider={provider} op={op} result=first_chunk_fail "
-            f"latency_ms={elapsed_ms} exc={type(e).__name__}"
-        )
+        _log_attempt(provider=provider, op=op, result="first_chunk_fail",
+                     started=started, exc=e)
+        _close = getattr(stream, "aclose", None)
+        if _close is not None:
+            try:
+                await _close()
+            except Exception:
+                pass  # aclose 本身失败不该覆盖原始异常
         raise LLMFailedError(f"stream no first chunk on {provider}: {e}") from e
 
     yield _chunk_text(first)
@@ -414,27 +446,18 @@ async def _stream_provider(
         async for chunk in aiter:
             if time.monotonic() > deadline:
                 breaker.record_failure()
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-                logger.warning(
-                    f"[LLM] provider={provider} op={op} result=mid_timeout "
-                    f"latency_ms={elapsed_ms}"
-                )
+                _log_attempt(provider=provider, op=op, result="mid_timeout",
+                             started=started)
                 raise LLMFailedError(f"stream exceeded overall {profile.timeout_s}s on {provider}")
             yield _chunk_text(chunk)
         breaker.record_success()
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        logger.info(
-            f"[LLM] provider={provider} op={op} result=ok latency_ms={elapsed_ms}"
-        )
+        _log_attempt(provider=provider, op=op, result="ok", started=started)
     except LLMFailedError:
         raise
     except Exception as e:
         breaker.record_failure()
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        logger.warning(
-            f"[LLM] provider={provider} op={op} result=mid_error "
-            f"latency_ms={elapsed_ms} exc={type(e).__name__}: {e}"
-        )
+        _log_attempt(provider=provider, op=op, result="mid_error",
+                     started=started, exc=e)
         raise LLMFailedError(f"stream mid error on {provider}: {e}") from e
 
 
