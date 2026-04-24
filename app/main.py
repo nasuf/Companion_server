@@ -36,8 +36,17 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up...")
 
     # Phase 1: Connect to all services in parallel
+    # DB 是硬依赖, 启动失败直接 crash; Redis 软依赖, 失败降级到 readonly mode
+    # (GET 端点仍可用, 写端点 require_redis 返 503, scheduler 每 30s 重检自愈).
     await _timed("Database", connect_db())
-    await _timed("Redis", get_redis())
+    try:
+        await _timed("Redis", get_redis())
+        from app.redis_client import mark_redis_healthy
+        mark_redis_healthy(True)
+    except Exception as e:
+        from app.redis_client import mark_redis_healthy
+        logger.error(f"Redis connect failed ({e!r}); starting in readonly mode")
+        mark_redis_healthy(False)
 
     # Phase 2: Schema + seeding
     await asyncio.gather(

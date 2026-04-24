@@ -1,10 +1,11 @@
 import json
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from prisma import Json
 from sse_starlette.sse import EventSourceResponse
 
+from app.api.deps import require_redis
 from app.db import db
 from app.models.message import ChatRequest
 from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
@@ -53,7 +54,7 @@ async def _persist_user_message(
     return saved.id
 
 
-@router.post("/{conversation_id}")
+@router.post("/{conversation_id}", dependencies=[Depends(require_redis)])
 async def chat(conversation_id: str, data: ChatRequest):
     conv = await db.conversation.find_unique(
         where={"id": conversation_id},
@@ -143,7 +144,7 @@ async def chat(conversation_id: str, data: ChatRequest):
     return EventSourceResponse(_queued_stream(delay_seconds))
 
 
-@router.post("/proactive/{agent_id}")
+@router.post("/proactive/{agent_id}", dependencies=[Depends(require_redis)])
 async def trigger_proactive(agent_id: str, user_id: str):
     """触发AI主动消息。"""
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)

@@ -157,3 +157,46 @@ async def test_delayed_queue_scan_redis_down_returns_empty(caplog):
 
     assert result == []
     assert any("[DELAY-SCAN] Redis zrangebyscore failed" in rec.message for rec in caplog.records)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# readonly mode: require_redis + recheck
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_require_redis_raises_503_when_unhealthy():
+    from fastapi import HTTPException
+
+    from app.api.deps import require_redis
+
+    with patch("app.api.deps.is_redis_healthy", return_value=False):
+        with pytest.raises(HTTPException) as ei:
+            await require_redis()
+    assert ei.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_require_redis_passes_when_healthy():
+    from app.api.deps import require_redis
+
+    with patch("app.api.deps.is_redis_healthy", return_value=True):
+        # 不抛则 pass
+        await require_redis()
+
+
+@pytest.mark.asyncio
+async def test_recheck_redis_health_flips_state(caplog):
+    """recheck 把 global _redis_healthy 切到最新 ping 结果, transition 打日志."""
+    from app.redis_client import mark_redis_healthy, recheck_redis_health
+
+    mark_redis_healthy(True)  # 起点 healthy
+
+    with patch("app.redis_client.redis_health", AsyncMock(return_value=False)):
+        with caplog.at_level("WARNING"):
+            new = await recheck_redis_health()
+
+    assert new is False
+    assert any("[REDIS-HEALTH] state transition: True -> False" in rec.message for rec in caplog.records)
+
+    # 恢复 flag 避免污染后续测试
+    mark_redis_healthy(True)

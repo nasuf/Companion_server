@@ -79,6 +79,14 @@ async def _queue_reply(
 @router.websocket("/ws/{conversation_id}")
 async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     """WebSocket 聊天连接。"""
+    from app.redis_client import is_redis_healthy
+
+    if not is_redis_healthy():
+        # readonly mode: 无 Redis 无法跑聚合 / 延迟队列 / 计数, 拒绝新连接
+        # code=1011: Internal Server Error (WebSocket 协议语义)
+        await websocket.close(code=1011, reason="redis_unavailable")
+        return
+
     conv = await db.conversation.find_unique(
         where={"id": conversation_id},
         include={"agent": True},

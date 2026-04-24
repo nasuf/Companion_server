@@ -156,6 +156,15 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # Redis health recheck: flip app-level readonly mode as Redis recovers/fails
+    scheduler.add_job(
+        _run_redis_health_recheck,
+        "interval",
+        seconds=30,
+        id="redis_health_recheck",
+        replace_existing=True,
+    )
+
     # spec §1.4: 后台定时任务每秒扫描延迟队列
     scheduler.add_job(
         _run_aggregation_scan,
@@ -285,6 +294,17 @@ async def _run_trigger_scan():
         await scan_triggers()
     except Exception as e:
         logger.warning(f"Trigger scan failed: {e}")
+
+
+async def _run_redis_health_recheck():
+    """30s 周期 ping Redis 并更新 _redis_healthy flag. 允许 Redis 故障后自愈
+    (修好后下次 tick flip 回 healthy, 写 endpoints 自动重开).
+    """
+    try:
+        from app.redis_client import recheck_redis_health
+        await recheck_redis_health()
+    except Exception as e:
+        logger.warning(f"Redis health recheck failed: {e}")
 
 
 async def _run_special_dates_scan():
