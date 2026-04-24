@@ -12,28 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
-class _FakeRedisPipeline:
-    def __init__(self) -> None:
-        self.ops: list[tuple] = []
-
-    def set(self, key, value):
-        self.ops.append(("set", key, value))
-
-    def delete(self, key):
-        self.ops.append(("delete", key))
-
-    async def execute(self):
-        return None
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self.pipeline_ref = _FakeRedisPipeline()
-
-    def pipeline(self):
-        return self.pipeline_ref
-
-
 def _make_definition(
     key: str = "test.key",
     default_text: str = "new default v2",
@@ -75,13 +53,16 @@ def _make_existing(
 
 
 @pytest.fixture
-def prompt_store_mocks():
+def prompt_store_mocks(fake_aggregation_redis):
     """安装 store.py 内 db / get_redis / PROMPT_DEFINITIONS 所需 mock.
 
     返回一个 (mock_db, fake_redis, set_definitions) helper; 测试用
     set_definitions([def1, def2, ...]) 指定要注入的 PROMPT_DEFINITIONS.
+
+    fake_aggregation_redis fixture 由 conftest 提供, 带 pipeline 支持
+    (set/delete/execute), 复用避免造轮子.
     """
-    fake_redis = _FakeRedis()
+    fake_redis = fake_aggregation_redis
     mock_db = MagicMock()
     mock_db.prompttemplate = MagicMock()
     mock_db.prompttemplate.find_many = AsyncMock(return_value=[])
@@ -125,7 +106,7 @@ async def test_new_key_creates_fresh(prompt_store_mocks):
     assert ver["source"] == "default"
     assert ver["changeType"] == "bootstrap"
     # Redis 缓存到新值
-    assert ("set", "prompt_template:new.key", "fresh text") in fake_redis.pipeline_ref.ops
+    assert fake_redis.strings["prompt_template:new.key"] == "fresh text"
 
 
 @pytest.mark.asyncio
@@ -149,7 +130,7 @@ async def test_default_unchanged_preserves_user_edit(prompt_store_mocks):
     # 无新版本写入
     mock_db.prompttemplateversion.create.assert_not_called()
     # Redis 缓存用户定制
-    assert ("set", "prompt_template:test.key", "user custom") in fake_redis.pipeline_ref.ops
+    assert fake_redis.strings["prompt_template:test.key"] == "user custom"
 
 
 @pytest.mark.asyncio
@@ -177,7 +158,7 @@ async def test_default_changed_overrides_user_edit(prompt_store_mocks):
     assert ver_data["changeType"] == "code_sync"
     assert ver_data["content"] == "new v2"
     # Redis 缓存到新 default
-    assert ("set", "prompt_template:test.key", "new v2") in fake_redis.pipeline_ref.ops
+    assert fake_redis.strings["prompt_template:test.key"] == "new v2"
 
 
 @pytest.mark.asyncio
@@ -208,4 +189,4 @@ async def test_metadata_only_change_preserves_content(prompt_store_mocks):
     # 无 version 写入 (未 code_sync)
     mock_db.prompttemplateversion.create.assert_not_called()
     # Redis 保留用户 content
-    assert ("set", "prompt_template:test.key", "user custom") in fake_redis.pipeline_ref.ops
+    assert fake_redis.strings["prompt_template:test.key"] == "user custom"

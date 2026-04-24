@@ -196,6 +196,7 @@ class FakeAggregationPipeline:
     def expire(self, key, ttl): self.ops.append(("expire", key, ttl))
     def set(self, key, value, ex=None): self.ops.append(("set", key, value, ex))
     def zadd(self, key, mapping): self.ops.append(("zadd", key, mapping))
+    def delete(self, *keys): self.ops.append(("delete", *keys))
 
     async def execute(self):
         for op in self.ops:
@@ -207,6 +208,8 @@ class FakeAggregationPipeline:
                 await self.parent.set(op[1], op[2], ex=op[3])
             elif op[0] == "zadd":
                 await self.parent.zadd(op[1], op[2])
+            elif op[0] == "delete":
+                await self.parent.delete(*op[1:])
 
 
 @pytest.fixture
