@@ -404,6 +404,22 @@ model ProactiveEventLog {
   @@map("proactive_event_logs")
 }
 
+// DB-backed snapshot for Redis-primary proactive counters (proactive_count:{aid}:{uid}:{YYYYMMDD}).
+// Redis 挂时 can_send_proactive / can_send_proactive_2day 可从这里降级读取, 避免计数丢失
+// 导致主动消息超发. date 按 Asia/Shanghai 时区的 YYYYMMDD 字符串, 与 Redis key 对齐.
+model ProactiveCounter {
+  id        String   @id @default(uuid())
+  agentId   String   @map("agent_id")
+  userId    String   @map("user_id")
+  date      String
+  count     Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([agentId, userId, date])
+  @@index([agentId, userId])
+  @@map("proactive_counters")
+}
+
 model TraitFeedbackLog {
   id        String   @id @default(uuid())
   agentId   String   @map("agent_id")
