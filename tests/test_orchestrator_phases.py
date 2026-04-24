@@ -319,7 +319,7 @@ async def test_reply_generate_contradiction_inquiry_short_circuits_llm():
     from app.services.chat.reply_generate import generate_reply
 
     kwargs = _make_reply_generate_kwargs(contradiction_inquiry="你之前不是说住苏州吗？")
-    replies, raw = await generate_reply(**kwargs)
+    replies, raw, _ = await generate_reply(**kwargs)
 
     assert replies == ["你之前不是说住苏州吗？"]
     assert raw == "你之前不是说住苏州吗？"
@@ -334,7 +334,7 @@ async def test_reply_generate_tier_weak_bypasses_main_llm():
 
     kwargs = _make_reply_generate_kwargs(memory_relevance="weak")
     with patch("app.services.chat.reply_generate.get_chat_model") as mock_model:
-        replies, raw = await generate_reply(**kwargs)
+        replies, raw, _ = await generate_reply(**kwargs)
 
     mock_model.assert_not_called()
     kwargs["tier_fns"]["weak"].assert_awaited_once()
@@ -351,7 +351,7 @@ async def test_reply_generate_tier_l3_when_l3_memories_present():
         memory_relevance="strong",
         l3_memories=["很久以前你说过喜欢下雨"],
     )
-    replies, _ = await generate_reply(**kwargs)
+    replies, _, _ = await generate_reply(**kwargs)
 
     kwargs["tier_fns"]["l3"].assert_awaited_once()
     kwargs["tier_fns"]["strong"].assert_not_called()
@@ -385,7 +385,7 @@ async def test_reply_generate_relational_context_disables_tier():
         "app.services.chat.reply_generate.convert_messages",
         side_effect=lambda m: m,
     ):
-        replies, raw = await generate_reply(**kwargs)
+        replies, raw, _ = await generate_reply(**kwargs)
 
     kwargs["tier_fns"]["weak"].assert_not_called()
     assert raw == "主 LLM 回复"
@@ -499,8 +499,49 @@ async def test_reply_generate_intent_schedule_adjust_disables_tier():
         "app.services.chat.reply_generate.convert_messages",
         side_effect=lambda m: m,
     ):
-        replies, raw = await generate_reply(**kwargs)
+        replies, raw, _ = await generate_reply(**kwargs)
 
     kwargs["tier_fns"]["weak"].assert_not_called()
     assert raw == "排期已调整"
     assert len(replies) == 1
+
+
+@pytest.mark.asyncio
+async def test_main_reply_fallback_on_llm_failure():
+    """spec-audit: primary + Ollama 都抛异常 → 返回静态兜底文本 + is_fallback=True."""
+    from app.services.chat.reply_generate import generate_reply, _MAIN_REPLY_ULTIMATE_FALLBACK
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.llm.resilience import reset_breakers_for_testing
+    reset_breakers_for_testing()
+
+    async def _fail_stream(_messages):
+        raise RuntimeError("primary dead")
+        yield  # unreachable
+
+    primary_model = MagicMock()
+    primary_model.astream = _fail_stream
+    fallback_model = MagicMock()
+    fallback_model.astream = _fail_stream
+
+    kwargs = _make_reply_generate_kwargs(
+        memory_relevance="weak",
+        detected_intent=IntentResult(intent=IntentType.SCHEDULE_ADJUST, confidence=1.0),
+    )
+    with patch(
+        "app.services.chat.reply_generate.get_chat_model",
+        return_value=primary_model,
+    ), patch(
+        "app.services.chat.reply_generate.get_fallback_chat_model",
+        return_value=fallback_model,
+    ), patch(
+        "app.services.chat.reply_generate.convert_messages",
+        side_effect=lambda m: m,
+    ), patch(
+        "app.services.chat.reply_generate.provider_name",
+        return_value="dashscope",  # primary 不是 ollama, 才会尝试 fallback
+    ):
+        replies, raw, is_fallback = await generate_reply(**kwargs)
+
+    assert is_fallback is True
+    assert raw == _MAIN_REPLY_ULTIMATE_FALLBACK
+    assert replies == [_MAIN_REPLY_ULTIMATE_FALLBACK]

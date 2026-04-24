@@ -619,7 +619,7 @@ async def stream_chat_response(
     yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
     await asyncio.sleep(actual_sleep)
 
-    replies, raw_response = await _generate_reply(
+    replies, raw_response, reply_is_fallback = await _generate_reply(
         contradiction_inquiry=contradiction_inquiry,
         detected_intent=detected_intent,
         memory_relevance=memory_relevance,
@@ -671,6 +671,7 @@ async def stream_chat_response(
         fallback_fn=_intent_llm_reply,
         emitted_replies=emitted_replies,
         reply_emotion=reply_emotion,
+        reply_is_fallback=reply_is_fallback,
     ):
         yield evt
 

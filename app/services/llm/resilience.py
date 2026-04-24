@@ -187,6 +187,27 @@ def reset_breakers_for_testing() -> None:
     _breakers.clear()
 
 
+def provider_name(model: Any) -> str:
+    """通过 LangChain model class 识别 provider. Primary / fallback 都走此函数,
+    避免在 models.py 和 reply_generate.py 里重复 isinstance 判断.
+
+    未知类型返回 "unknown"; CB 会为其单独建一个 breaker, 不影响 Dashscope/Ollama.
+    """
+    # 懒导入: resilience.py 作为 pure utility 不直接 import LangChain,
+    # 避免循环依赖风险 + 允许纯 Python 的 CB/retry 单元测试免 LangChain.
+    from langchain_anthropic import ChatAnthropic
+    from langchain_ollama import ChatOllama
+    from langchain_openai import ChatOpenAI
+
+    if isinstance(model, ChatOllama):
+        return "ollama"
+    if isinstance(model, ChatOpenAI):
+        return "dashscope"
+    if isinstance(model, ChatAnthropic):
+        return "claude"
+    return "unknown"
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Core unary call with retry + CB (single provider)
 # ═══════════════════════════════════════════════════════════════════

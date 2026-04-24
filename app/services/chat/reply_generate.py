@@ -14,10 +14,22 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
-from app.services.llm.models import convert_messages, get_chat_model
+from app.services.llm.models import convert_messages, get_chat_model, get_fallback_chat_model
+from app.services.llm.resilience import (
+    LLMFailedError,
+    astream_with_resilience,
+    get_profile,
+    provider_name,
+)
 from app.services.prompts.system_prompts import MAX_PER_REPLY
 
 logger = logging.getLogger(__name__)
+
+
+# 两级 LLM (primary + Ollama) 全挂时的静态兜底回复. 措辞刻意保持"走神"风格,
+# 让用户意识到异常又不吓到. 搭配 reply metadata {reply_failed: true},
+# 前端未来可选提供"重新回答"按钮.
+_MAIN_REPLY_ULTIMATE_FALLBACK = "诶,我这会儿有点走神……你刚说的是什么?"
 
 
 def can_use_tier_reply(
@@ -54,16 +66,46 @@ def _build_tier_call(
     return tier_fns["weak"], {}
 
 
-async def _run_main_llm(chat_messages: list[dict]) -> str:
-    """主 LLM 流式调用，收集完整响应。"""
-    model = get_chat_model()
+async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
+    """主 LLM 流式调用，收集完整响应。
+
+    三级降级策略 (resilience.astream_with_resilience):
+    1. primary (Dashscope / Claude / 或配置指定的其他) 流式, 首 chunk 在
+       first_chunk_timeout_s 内到达 → commit 到 primary
+    2. 首 chunk 未到 → 无副作用切本地 Ollama LOCAL_CHAT_MODEL 流
+    3. Ollama 也挂 → 抛 LLMFailedError, 我们落到静态兜底文本
+
+    返回 (text, is_fallback). is_fallback=True 表示走了静态兜底 (两级 LLM 全挂),
+    调用方可据此给 reply metadata 打 `{reply_failed: true}` 让前端显示重试按钮等.
+    """
+    primary = get_chat_model()
+    primary_prov = provider_name(primary)
     lc_messages = convert_messages(chat_messages)
-    chunks: list[str] = []
-    async for chunk in model.astream(lc_messages):
-        token = chunk.content
-        if token:
-            chunks.append(token)
-    return "".join(chunks)
+
+    # primary 若本就是 Ollama, 不配 fallback (避免本地 → 本地二次重试无意义)
+    fallback = get_fallback_chat_model() if primary_prov != "ollama" else None
+
+    def _primary_stream():
+        return primary.astream(lc_messages)
+
+    def _fallback_stream():
+        return fallback.astream(lc_messages)
+
+    try:
+        chunks: list[str] = []
+        async for token in astream_with_resilience(
+            _primary_stream,
+            primary_provider=primary_prov,
+            profile=get_profile("chat_stream"),
+            op="reply_stream",
+            fallback_factory=(_fallback_stream if fallback is not None else None),
+        ):
+            if token:
+                chunks.append(token)
+        return "".join(chunks), False
+    except LLMFailedError as e:
+        logger.warning(f"[LLM-FALLBACK] reply_stream total failure (primary + ollama both down): {e}")
+        return _MAIN_REPLY_ULTIMATE_FALLBACK, True
 
 
 async def _split_replies(
@@ -113,10 +155,15 @@ async def generate_reply(
     split_llm_fn: Callable[[str, int], Awaitable[list[str] | None]],
     truncate_fn: Callable[[str, int], str],
     pipe_fallback_fn: Callable[[str, int, int, int], list[str]],
-) -> tuple[list[str], str]:
-    """返回 (replies, raw_response)。"""
+) -> tuple[list[str], str, bool]:
+    """返回 (replies, raw_response, is_fallback).
+
+    is_fallback=True 表示主 LLM 和 Ollama 都挂, 走了静态兜底文本;
+    调用方可据此在 reply metadata 加 `{reply_failed: true}` 供前端显示重试按钮.
+    tier 分级回复和 contradiction inquiry 路径始终 is_fallback=False.
+    """
     if contradiction_inquiry:
-        return [contradiction_inquiry], contradiction_inquiry
+        return [contradiction_inquiry], contradiction_inquiry, False
 
     tier_reply_text: str | None = None
     if can_use_tier_reply(
@@ -148,9 +195,9 @@ async def generate_reply(
             tier_reply_text = None
 
     if tier_reply_text:
-        return [tier_reply_text], tier_reply_text
+        return [tier_reply_text], tier_reply_text, False
 
-    raw_response = await _run_main_llm(chat_messages)
+    raw_response, is_fallback = await _run_main_llm(chat_messages)
     replies, split_source = await _split_replies(
         raw_response,
         reply_count,
@@ -163,6 +210,6 @@ async def generate_reply(
     )
     logger.info(
         f"[REPLY-SPLIT] n_target={reply_count} actual={len(replies)} "
-        f"source={split_source}"
+        f"source={split_source} is_fallback={is_fallback}"
     )
-    return replies, raw_response
+    return replies, raw_response, is_fallback

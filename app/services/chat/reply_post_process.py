@@ -85,6 +85,7 @@ async def emit_replies(
     fallback_fn: Callable[..., Awaitable[str]],
     emitted_replies: list[dict],
     reply_emotion: dict | None = None,
+    reply_is_fallback: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """spec §5/§6.4-§6.5：延迟解释 + emoji/sticker + reply SSE 事件流。
 
@@ -146,5 +147,9 @@ async def emit_replies(
         }
         if sticker_url:
             data["sticker_url"] = sticker_url
+        if reply_is_fallback:
+            # spec-audit: 主 LLM + Ollama 全挂, 走了静态兜底文本;
+            # 前端可据此显示"重新回答"按钮或隐藏 emoji 等非必要装饰.
+            data["reply_failed"] = True
         emitted_replies.append(data)
         yield {"event": "reply", "data": json.dumps(data)}
