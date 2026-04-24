@@ -59,6 +59,22 @@ class Settings(BaseSettings):
     admin_username: str = ""
     admin_password: str = ""
 
+    # LLM resilience layer (app/services/llm/resilience.py)
+    # 紧急 kill switch: 设为 False 时, 所有 LLM 调用只保留 per-profile timeout,
+    # 跳过 circuit breaker + retry + Ollama fallback (回到原始行为)
+    llm_resilience_enabled: bool = True
+    # Circuit breaker: 滑动窗口内连续失败次数达到 threshold 则 open
+    llm_cb_failure_threshold: int = 5
+    llm_cb_window_sec: float = 10.0
+    # open 状态持续 cooldown_sec 后进入 half_open, 放 1 个 probe
+    llm_cb_cooldown_sec: float = 30.0
+    # Per-profile timeout (秒). 小模型快分类 / 大模型抽取 / 大模型流式
+    llm_utility_timeout_s: float = 8.0
+    llm_chat_extract_timeout_s: float = 45.0
+    llm_chat_stream_timeout_s: float = 90.0
+    # 流式首 chunk 超时 (连不上 / 模型未加载时触发 fallback, 防用户长时间无响应)
+    llm_chat_stream_first_chunk_timeout_s: float = 30.0
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
