@@ -70,18 +70,29 @@ async def _check_promotion_conditions(mem, side: str) -> bool:
     - User expressed importance (changelog contains 'user_emphasized')
     - No conflict with existing L1 memories on same side (user vs ai)
     """
+    # memoryId 是全局唯一 UUID, defensive scope 防止未来跨 workspace 串:
+    # 加 userId + workspaceId 过滤, workspaceId=None 时 Prisma 会生成 IS NULL,
+    # 与 mem 自身 workspaceId=None 的情况一致.
     emphasis_count = await db.memorychangelog.count(
-        where={"memoryId": mem.id, "operation": "user_emphasized"},
+        where={
+            "memoryId": mem.id,
+            "operation": "user_emphasized",
+            "userId": mem.userId,
+            "workspaceId": mem.workspaceId,
+        },
     )
     if emphasis_count == 0:
         return False
 
     # Side-aware L1 conflict check (B5 fix): query the same table the memory
     # belongs to. A user-side L2 should only check user L1 conflicts; same for ai.
+    # workspaceId 过滤确保同一 user 的不同 agent (workspace) L1 不会被误判冲突,
+    # 每个 workspace 的 L1 是独立空间.
     model = db.usermemory if side == "user" else db.aimemory
     existing_l1 = await model.find_many(
         where={
             "userId": mem.userId,
+            "workspaceId": mem.workspaceId,
             "level": 1,
             "isArchived": False,
             "mainCategory": mem.mainCategory,
@@ -144,6 +155,9 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
 
     model = db.usermemory if side == "user" else db.aimemory
 
+    # 周期性 L2 衰减扫描: 每个 user 的所有 L2 都要算时间+频率因子更新分数,
+    # 按 userId 过滤足够 (user_id=None 时 cron 模式全量扫), 不需要 workspaceId
+    # 过滤——每个 L2 独立 score, 跨 workspace 不相互依赖.
     where: dict = {"level": 2, "isArchived": False}
     if user_id:
         where["userId"] = user_id
