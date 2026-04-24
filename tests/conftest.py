@@ -107,3 +107,109 @@ class FakeRedis:
 def fake_redis() -> FakeRedis:
     """Fresh FakeRedis per test."""
     return FakeRedis()
+
+
+class FakeAggregationRedis:
+    """In-memory Redis stub for aggregation queue tests.
+
+    Supports rpush / lrange / set / get / del / zadd / zrangebyscore / zrem
+    / expire / pipeline / eval — the minimum subset needed by
+    push_pending / flush_pending / scan_expired.
+    Extend with lock CAS via FakeRedis if ever both contracts are needed
+    in the same test.
+    """
+
+    def __init__(self) -> None:
+        from collections import defaultdict
+        self.lists: dict[str, list[str]] = defaultdict(list)
+        self.strings: dict[str, str] = {}
+        self.zsets: dict[str, dict[str, float]] = defaultdict(dict)
+
+    def pipeline(self):
+        return _FakeAggregationPipeline(self)
+
+    async def rpush(self, key, *values):
+        self.lists[key].extend(values)
+        return len(self.lists[key])
+
+    async def expire(self, key, ttl):  # noqa: ARG002 — interface shim
+        return True
+
+    async def set(self, key, value, *, ex=None, nx=False):  # noqa: ARG002 — interface shim
+        if nx and key in self.strings:
+            return False
+        self.strings[key] = value
+        return True
+
+    async def get(self, key):
+        return self.strings.get(key)
+
+    async def delete(self, *keys):
+        n = 0
+        for k in keys:
+            if k in self.lists:
+                del self.lists[k]; n += 1
+            if k in self.strings:
+                del self.strings[k]; n += 1
+        return n
+
+    async def zadd(self, key, mapping):
+        self.zsets[key].update(mapping)
+        return len(mapping)
+
+    async def zrangebyscore(self, key, min_, max_):
+        return [m for m, s in sorted(self.zsets.get(key, {}).items(), key=lambda x: x[1])
+                if min_ <= s <= max_]
+
+    async def zrem(self, key, *members):
+        zs = self.zsets.get(key, {})
+        n = 0
+        for m in members:
+            if m in zs:
+                del zs[m]; n += 1
+        return n
+
+    async def eval(self, script, numkeys, *args):  # noqa: ARG002 — aggregation Lua is hard-coded below
+        """Emulate the aggregation Lua script: LRANGE + GET + DEL + ZREM."""
+        keys = args[:numkeys]
+        argv = args[numkeys:]
+        msgs = self.lists.get(keys[0], [])
+        if not msgs:
+            return None
+        conv_id = self.strings.get(keys[2])
+        ctx = self.strings.get(keys[3])
+        msgs = list(msgs)
+        if keys[0] in self.lists:
+            del self.lists[keys[0]]
+        self.zsets.get(keys[1], {}).pop(argv[0], None)
+        for k in (keys[2], keys[3]):
+            self.strings.pop(k, None)
+        return [conv_id, ctx, *msgs]
+
+
+class _FakeAggregationPipeline:
+    def __init__(self, parent: FakeAggregationRedis) -> None:
+        self.parent = parent
+        self.ops: list[tuple] = []
+
+    def rpush(self, key, value): self.ops.append(("rpush", key, value))
+    def expire(self, key, ttl): self.ops.append(("expire", key, ttl))
+    def set(self, key, value, ex=None): self.ops.append(("set", key, value, ex))
+    def zadd(self, key, mapping): self.ops.append(("zadd", key, mapping))
+
+    async def execute(self):
+        for op in self.ops:
+            if op[0] == "rpush":
+                await self.parent.rpush(op[1], op[2])
+            elif op[0] == "expire":
+                await self.parent.expire(op[1], op[2])
+            elif op[0] == "set":
+                await self.parent.set(op[1], op[2], ex=op[3])
+            elif op[0] == "zadd":
+                await self.parent.zadd(op[1], op[2])
+
+
+@pytest.fixture
+def fake_aggregation_redis() -> FakeAggregationRedis:
+    """Fresh FakeAggregationRedis per test."""
+    return FakeAggregationRedis()

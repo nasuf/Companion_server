@@ -182,12 +182,21 @@ async def _handle_message(
             metadata={"fragment": True},
         )
         # push_pending 内部 zadd 刷新 due_at = now + 5，同时覆盖最新 reply_context
-        await push_pending(agent.id, user_id, conversation_id, text, current_context, message_id)
+        await push_pending(
+            agent_id=agent.id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            text=text,
+            reply_context=current_context,
+            message_id=message_id,
+        )
         await ws.send_json({"type": "pending", "data": {"status": "aggregating"}})
         return
 
     # 非碎片：若有 pending，先打断触发合并；否则直接处理当前消息
-    pending_text, _, pending_context, _ = await flush_pending(agent.id, user_id)
+    pending_text, _, pending_context, _ = await flush_pending(
+        agent_id=agent.id, user_id=user_id,
+    )
 
     final_message = text
     final_context = current_context

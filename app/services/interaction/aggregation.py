@@ -75,6 +75,7 @@ def is_short_message(text: str) -> bool:
 
 
 async def push_pending(
+    *,
     agent_id: str,
     user_id: str,
     conversation_id: str,
@@ -107,7 +108,7 @@ async def push_pending(
 
 
 async def flush_pending(
-    agent_id: str, user_id: str,
+    *, agent_id: str, user_id: str,
 ) -> tuple[str | None, str | None, dict | None, str | None]:
     """取出并清空 (agent, user) scoped 聚合队列。返回 (合并文本, conversation_id, reply_context, latest_message_id)。"""
     r = await get_redis()
@@ -172,11 +173,11 @@ async def scan_expired() -> list[tuple[str, str, str, str, dict | None, str | No
         token = raw.decode() if isinstance(raw, bytes) else raw
         parsed = _parse_scope_token(token)
         if parsed is None:
-            # 旧版 user-only 成员或格式非法: 一次性清理出 ZSET 不再干扰
+            # 非 "{agent_id}:{user_id}" 格式成员直接 zrem, 防止无限循环
             await r.zrem(_PENDING_DELAYED_KEY, token)
             continue
         agent_id, user_id = parsed
-        text, conv_id, ctx, latest_message_id = await flush_pending(agent_id, user_id)
+        text, conv_id, ctx, latest_message_id = await flush_pending(agent_id=agent_id, user_id=user_id)
         if text and conv_id:
             results.append((agent_id, user_id, text, conv_id, ctx, latest_message_id))
     return results
