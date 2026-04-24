@@ -270,18 +270,52 @@ def test_admin_agent_proactive_detail(mock_deps):
 
 
 def test_get_emotion(mock_deps):
-    """GET /emotions/{agent_id}/current returns emotion state."""
+    """GET /emotions/{agent_id}/current returns emotion state for owner."""
+    from app.api.jwt_auth import require_user
+    from app.main import app
+
     client = mock_deps
-    mock_agent = SimpleNamespace(id="agent-id")
-    with (
-        patch("app.api.public.emotions.db") as mock_db,
-        patch("app.api.public.emotions.get_ai_emotion", new_callable=AsyncMock,
-              return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4}),
-    ):
-        mock_db.aiagent = MagicMock()
-        mock_db.aiagent.find_unique = AsyncMock(return_value=mock_agent)
-        response = client.get("/emotions/agent-id/current")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["pleasure"] == 0.5
-        assert "tone" in data
+    mock_agent = SimpleNamespace(id="agent-id", userId="user-1", status="active")
+    app.dependency_overrides[require_user] = lambda: {"sub": "user-1"}
+    try:
+        with (
+            patch("app.api.public.emotions.db") as mock_db_emo,
+            patch("app.api.jwt_auth.db") as mock_db_auth,
+            patch("app.api.public.emotions.get_ai_emotion", new_callable=AsyncMock,
+                  return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4}),
+        ):
+            for mock_db in (mock_db_emo, mock_db_auth):
+                mock_db.aiagent = MagicMock()
+                mock_db.aiagent.find_unique = AsyncMock(return_value=mock_agent)
+            response = client.get("/emotions/agent-id/current")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["pleasure"] == 0.5
+            assert "tone" in data
+    finally:
+        app.dependency_overrides.pop(require_user, None)
+
+
+def test_get_emotion_rejects_non_owner(mock_deps):
+    """不同 user 访问他人 agent → 403."""
+    from app.api.jwt_auth import require_user
+    from app.main import app
+
+    client = mock_deps
+    mock_agent = SimpleNamespace(id="agent-id", userId="user-1", status="active")
+    app.dependency_overrides[require_user] = lambda: {"sub": "user-2"}  # 非 owner
+    try:
+        with patch("app.api.jwt_auth.db") as mock_db_auth:
+            mock_db_auth.aiagent = MagicMock()
+            mock_db_auth.aiagent.find_unique = AsyncMock(return_value=mock_agent)
+            response = client.get("/emotions/agent-id/current")
+            assert response.status_code == 403
+    finally:
+        app.dependency_overrides.pop(require_user, None)
+
+
+def test_get_emotion_requires_auth(mock_deps):
+    """无 JWT token → 401."""
+    client = mock_deps
+    response = client.get("/emotions/agent-id/current")
+    assert response.status_code == 401
