@@ -104,7 +104,16 @@ async def push_pending(
     if reply_context:
         pipe.set(ctx_key, json.dumps(reply_context, ensure_ascii=False), ex=_PENDING_TTL)
     pipe.zadd(_PENDING_DELAYED_KEY, {token: time.time() + _AGGREGATION_WINDOW})
-    await pipe.execute()
+    try:
+        await pipe.execute()
+    except Exception as e:
+        # Redis 挂时 push 失败; 上层 ws/chat 已 send 'aggregating' 事件, 此处只
+        # 记日志后返回. 用户看到 'aggregating' 但 30s TTL 内 flush 找不到数据,
+        # 等同于'短消息丢失'. Redis 恢复后后续消息照常走.
+        logger.warning(
+            f"[AGG-PUSH] Redis push failed agent_id={agent_id} user_id={user_id}: {e}"
+        )
+        return
     logger.info(
         f"[AGG-PUSH] agent_id={agent_id} user_id={user_id} text={text!r} "
         f"window_sec={_AGGREGATION_WINDOW}"
@@ -121,11 +130,17 @@ async def flush_pending(
     ctx_key = _PENDING_CTX_KEY.format(aid=agent_id, uid=user_id)
     token = _scope_token(agent_id, user_id)
 
-    result = await r.eval(
-        _AGGREGATE_LUA, 4,
-        msg_key, _PENDING_DELAYED_KEY, conv_key, ctx_key,
-        token,
-    )
+    try:
+        result = await r.eval(
+            _AGGREGATE_LUA, 4,
+            msg_key, _PENDING_DELAYED_KEY, conv_key, ctx_key,
+            token,
+        )
+    except Exception as e:
+        logger.warning(
+            f"[AGG-FLUSH] Redis eval failed agent_id={agent_id} user_id={user_id}: {e}"
+        )
+        return None, None, None, None
     if not result:
         return None, None, None, None
 
@@ -171,7 +186,12 @@ async def scan_expired() -> list[tuple[str, str, str, str, dict | None, str | No
     """扫描到期的聚合窗口。返回 [(agent_id, user_id, combined_text, conversation_id, reply_context, latest_message_id)]。"""
     r = await get_redis()
     now = time.time()
-    expired = await r.zrangebyscore(_PENDING_DELAYED_KEY, 0, now)
+    try:
+        expired = await r.zrangebyscore(_PENDING_DELAYED_KEY, 0, now)
+    except Exception as e:
+        # scheduler 每秒跑一次, 单次失败跳过, 下一 tick 再试
+        logger.warning(f"[AGG-SCAN] Redis zrangebyscore failed: {e}")
+        return []
     results = []
     for raw in expired:
         token = raw.decode() if isinstance(raw, bytes) else raw
