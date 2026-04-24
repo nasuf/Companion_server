@@ -245,8 +245,11 @@ async def _invoke_with_resilience(
     fallback_factory = None
     if provider != "ollama":
         _fb_model = get_fallback_chat_model()
-        # Fallback 是 Ollama, 需要 format='json' 才走 JSON 模式
-        fb_kwargs = {**kwargs, "format": "json"} if force_json else kwargs
+        # Fallback 是 Ollama, 需要 format='json' 走 JSON 模式.
+        # 用 setdefault 与 primary 路径对称 — 尊重调用方显式传入的 format.
+        fb_kwargs = {**kwargs}
+        if force_json:
+            fb_kwargs.setdefault("format", "json")
 
         async def _fallback():
             return await _fb_model.ainvoke(messages, **fb_kwargs)
