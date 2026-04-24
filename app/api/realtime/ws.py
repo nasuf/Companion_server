@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketState
 from prisma import Json
 
 from app.db import db
+from app.redis_client import is_redis_healthy
 from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
 from app.services.chat.orchestrator import stream_chat_response
 from app.services.interaction.delayed_queue import enqueue_delayed_message
@@ -79,8 +80,6 @@ async def _queue_reply(
 @router.websocket("/ws/{conversation_id}")
 async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     """WebSocket 聊天连接。"""
-    from app.redis_client import is_redis_healthy
-
     if not is_redis_healthy():
         # readonly mode: 无 Redis 无法跑聚合 / 延迟队列 / 计数, 拒绝新连接
         # code=1011: Internal Server Error (WebSocket 协议语义)

@@ -24,8 +24,7 @@ def history_mocks():
     mock_db.proactivecounter = MagicMock()
     mock_db.proactivecounter.find_unique = AsyncMock(return_value=None)
     mock_db.proactivecounter.find_many = AsyncMock(return_value=[])
-    mock_db.proactivecounter.create = AsyncMock()
-    mock_db.proactivecounter.update = AsyncMock()
+    mock_db.proactivecounter.upsert = AsyncMock()
 
     with patch("app.services.proactive.history.db", mock_db), \
          patch("app.services.proactive.history.get_redis",
@@ -117,18 +116,17 @@ async def test_increment_triggers_db_upsert(history_mocks):
     mock_db, mock_redis = history_mocks
     mock_redis.incr = AsyncMock(return_value=1)
     mock_redis.expire = AsyncMock()
-    mock_db.proactivecounter.find_unique = AsyncMock(return_value=None)  # 无存量
-    mock_db.proactivecounter.create = AsyncMock()
 
     await increment_proactive_count("a1", "u1")
     # 让后台 task 跑完
     await asyncio.sleep(0.01)
 
-    mock_db.proactivecounter.create.assert_awaited_once()
-    create_data = mock_db.proactivecounter.create.call_args.kwargs["data"]
-    assert create_data["agentId"] == "a1"
-    assert create_data["userId"] == "u1"
-    assert create_data["count"] == 1
+    mock_db.proactivecounter.upsert.assert_awaited_once()
+    kwargs = mock_db.proactivecounter.upsert.call_args.kwargs
+    assert kwargs["data"]["create"]["agentId"] == "a1"
+    assert kwargs["data"]["create"]["userId"] == "u1"
+    assert kwargs["data"]["create"]["count"] == 1
+    assert kwargs["data"]["update"] == {"count": {"increment": 1}}
 
 
 @pytest.mark.asyncio
@@ -140,10 +138,8 @@ async def test_increment_redis_down_still_upserts_db(history_mocks):
 
     mock_db, mock_redis = history_mocks
     mock_redis.incr = AsyncMock(side_effect=redis_async.ConnectionError("down"))
-    mock_db.proactivecounter.find_unique = AsyncMock(return_value=None)
-    mock_db.proactivecounter.create = AsyncMock()
 
     await increment_proactive_count("a1", "u1")
     await asyncio.sleep(0.01)
 
-    mock_db.proactivecounter.create.assert_awaited_once()
+    mock_db.proactivecounter.upsert.assert_awaited_once()

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import connect_db, disconnect_db
-from app.redis_client import get_redis, close_redis
+from app.redis_client import get_redis, close_redis, mark_redis_healthy
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
 from app.services.prompting.store import ensure_prompt_templates
 from app.services.character import ensure_default_template
@@ -41,10 +41,8 @@ async def lifespan(app: FastAPI):
     await _timed("Database", connect_db())
     try:
         await _timed("Redis", get_redis())
-        from app.redis_client import mark_redis_healthy
         mark_redis_healthy(True)
     except Exception as e:
-        from app.redis_client import mark_redis_healthy
         logger.error(f"Redis connect failed ({e!r}); starting in readonly mode")
         mark_redis_healthy(False)
 
