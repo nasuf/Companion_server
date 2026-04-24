@@ -114,6 +114,22 @@ def get_utility_model() -> BaseChatModel:
 
 
 @lru_cache(maxsize=1)
+def get_fallback_chat_model() -> ChatOllama:
+    """LOCAL_CHAT_MODEL 大模型作为全局 LLM 失败兜底 (resilience.py 消费).
+
+    不论 online_model 开关, 这里永远返回本地 Ollama 实例, 用于 primary
+    (Dashscope/Claude) 不可用时的降级. 与 get_chat_model 区分: get_chat_model
+    根据 online_model 可能返回 Dashscope; 本函数始终返回 Ollama.
+    """
+    return ChatOllama(
+        model=settings.local_chat_model,
+        base_url=settings.ollama_base_url,
+        client_kwargs=_OLLAMA_CLIENT_KWARGS,
+        async_client_kwargs=_OLLAMA_CLIENT_KWARGS,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_embedding_model() -> Embeddings:
     """Return the embedding model for vector operations."""
     provider = _provider_for("embedding")
@@ -178,6 +194,25 @@ def _extract_json(text: str) -> Any:
     raise ValueError(f"Could not extract JSON from model output: {text[:200]}")
 
 
+def _provider_and_profile(
+    model: BaseChatModel, override: str | None,
+):
+    """自动从 model 识别 provider 和默认 profile. override 可强制指定 profile.
+
+    默认按"是否是 get_chat_model() 返回的 lru_cache 单例"区分: chat_model →
+    chat_extract (45s, 1 retry); utility_model 或自建 model → utility_fast
+    (8s, 2 retry). 调用方可传 profile="background" 等 override.
+    """
+    from app.services.llm.resilience import get_profile, provider_name
+
+    provider = provider_name(model)
+    if override:
+        return provider, get_profile(override)
+    if model is get_chat_model():
+        return provider, get_profile("chat_extract")
+    return provider, get_profile("utility_fast")
+
+
 async def invoke_json(
     model: BaseChatModel,
     prompt: str | list[BaseMessage],
@@ -194,7 +229,16 @@ async def invoke_json_with_usage(
     **kwargs: Any,
 ) -> tuple[Any, dict]:
     """Same as invoke_json but also returns `{input_tokens, output_tokens}` when
-    available from the model. Empty dict if the provider doesn't expose usage."""
+    available from the model. Empty dict if the provider doesn't expose usage.
+
+    Resilience: primary 经 timeout+retry+CB, 失败后切本地 Ollama. 两级都挂抛
+    LLMFailedError (调用方自己兜底, 多数已有 try/except 返 None/空 dict).
+    """
+    from app.services.llm.resilience import call_with_resilience
+
+    profile_override = kwargs.pop("profile", None)
+    provider, profile = _provider_and_profile(model, profile_override)
+
     if isinstance(prompt, str):
         messages = [HumanMessage(content=prompt)]
     else:
@@ -203,7 +247,29 @@ async def invoke_json_with_usage(
     if isinstance(model, ChatOllama):
         kwargs.setdefault("format", "json")
 
-    response = await model.ainvoke(messages, **kwargs)
+    async def _primary():
+        return await model.ainvoke(messages, **kwargs)
+
+    # Fallback 本身是 ChatOllama, 补上 format=json
+    fallback_kwargs = {**kwargs}
+    fallback_kwargs.setdefault("format", "json")
+
+    fallback_factory = None
+    if provider != "ollama":
+        _fb_model = get_fallback_chat_model()
+
+        async def _fallback():
+            return await _fb_model.ainvoke(messages, **fallback_kwargs)
+        fallback_factory = _fallback
+
+    response = await call_with_resilience(
+        _primary,
+        primary_provider=provider,
+        profile=profile,
+        op="invoke_json",
+        fallback_factory=fallback_factory,
+    )
+
     usage: dict = {}
     meta = getattr(response, "usage_metadata", None)
     if isinstance(meta, dict):
@@ -219,11 +285,37 @@ async def invoke_text(
     prompt: str | list[BaseMessage],
     **kwargs: Any,
 ) -> str:
-    """Invoke the model and return the response as plain text."""
+    """Invoke the model and return the response as plain text.
+
+    Resilience: primary 经 timeout+retry+CB, 失败后切本地 Ollama. 两级都挂抛
+    LLMFailedError.
+    """
+    from app.services.llm.resilience import call_with_resilience
+
+    profile_override = kwargs.pop("profile", None)
+    provider, profile = _provider_and_profile(model, profile_override)
+
     if isinstance(prompt, str):
         messages = [HumanMessage(content=prompt)]
     else:
         messages = prompt
 
-    response = await model.ainvoke(messages, **kwargs)
+    async def _primary():
+        return await model.ainvoke(messages, **kwargs)
+
+    fallback_factory = None
+    if provider != "ollama":
+        _fb_model = get_fallback_chat_model()
+
+        async def _fallback():
+            return await _fb_model.ainvoke(messages, **kwargs)
+        fallback_factory = _fallback
+
+    response = await call_with_resilience(
+        _primary,
+        primary_provider=provider,
+        profile=profile,
+        op="invoke_text",
+        fallback_factory=fallback_factory,
+    )
     return response.content
