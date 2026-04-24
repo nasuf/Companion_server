@@ -55,6 +55,8 @@ class BoundaryPhaseCtx:
     bg_memory_pipeline_fn: Callable[..., Any]
     # 输出
     stopped: bool = False
+    # 默认 PATIENCE_MAX；check_boundary 写入最新读数；攻击路径 (_handle_attack_ai)
+    # 扣分成功后 in-place 更新为扣分后值，供阈值判断与下游 phase 读到最新状态。
     cached_patience: int = PATIENCE_MAX
 
 
