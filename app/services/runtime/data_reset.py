@@ -79,8 +79,9 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         f"trigger_last:{agent_id}:{user_id}",
         f"intimacy:{agent_id}:{user_id}",
         f"topic_intimacy:{agent_id}:{user_id}",
-        f"pending:msgs:{user_id}",
-        f"pending:ctx:{user_id}",
+        f"pending:msgs:{agent_id}:{user_id}",
+        f"pending:conv:{agent_id}:{user_id}",
+        f"pending:ctx:{agent_id}:{user_id}",
         f"last_reply:{agent_id}:{user_id}",
     ]
 
@@ -117,6 +118,12 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
             deleted += await redis.zrem("delayed:due", *conv_ids)
         except Exception:
             pass
+
+    # aggregation pending ZSET: 成员格式 "{agent_id}:{user_id}"
+    try:
+        deleted += await redis.zrem("pending:delayed", f"{agent_id}:{user_id}")
+    except Exception:
+        pass
 
     # SCAN 删除通配符 key
     for pattern in scan_patterns:

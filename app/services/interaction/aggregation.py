@@ -2,6 +2,10 @@
 
 短消息(≤2字且非常用应答词)进入聚合队列，等待5秒窗口后合并处理。
 PRD §3.4
+
+Key scope: 所有 key 和 ZSET 成员都以 (agent_id, user_id) 双维度隔离，
+防止同一用户并行与两个 agent 会话时碎片串扰（pending:msgs:{A}:{uid}
+与 pending:msgs:{B}:{uid} 独立, flush 时互不合并）。
 """
 
 from __future__ import annotations
@@ -39,12 +43,27 @@ redis.call('DEL', KEYS[4])
 return {conv_id, ctx, unpack(msgs)}
 """
 
-_PENDING_MSG_KEY = "pending:msgs:{uid}"
-_PENDING_CONV_KEY = "pending:conv:{uid}"
-_PENDING_CTX_KEY = "pending:ctx:{uid}"
+_PENDING_MSG_KEY = "pending:msgs:{aid}:{uid}"
+_PENDING_CONV_KEY = "pending:conv:{aid}:{uid}"
+_PENDING_CTX_KEY = "pending:ctx:{aid}:{uid}"
 _PENDING_DELAYED_KEY = "pending:delayed"
 _AGGREGATION_WINDOW = 5  # seconds
 _PENDING_TTL = 30  # seconds, fallback TTL
+
+
+def _scope_token(agent_id: str, user_id: str) -> str:
+    """ZSET 成员编码：{agent_id}:{user_id}, UUID 不含 ':' 可安全 split."""
+    return f"{agent_id}:{user_id}"
+
+
+def _parse_scope_token(token: str) -> tuple[str, str] | None:
+    """scan_expired 解码 ZSET 成员。非法格式 → None 跳过。"""
+    if ":" not in token:
+        return None
+    agent_id, _, user_id = token.partition(":")
+    if not agent_id or not user_id:
+        return None
+    return agent_id, user_id
 
 
 def is_short_message(text: str) -> bool:
@@ -56,17 +75,19 @@ def is_short_message(text: str) -> bool:
 
 
 async def push_pending(
+    agent_id: str,
     user_id: str,
     conversation_id: str,
     text: str,
     reply_context: dict | None = None,
     message_id: str | None = None,
 ) -> None:
-    """将碎片消息加入聚合队列。"""
+    """将碎片消息加入 (agent, user) scoped 聚合队列。"""
     r = await get_redis()
-    msg_key = _PENDING_MSG_KEY.format(uid=user_id)
-    conv_key = _PENDING_CONV_KEY.format(uid=user_id)
-    ctx_key = _PENDING_CTX_KEY.format(uid=user_id)
+    msg_key = _PENDING_MSG_KEY.format(aid=agent_id, uid=user_id)
+    conv_key = _PENDING_CONV_KEY.format(aid=agent_id, uid=user_id)
+    ctx_key = _PENDING_CTX_KEY.format(aid=agent_id, uid=user_id)
+    token = _scope_token(agent_id, user_id)
 
     pipe = r.pipeline()
     payload: dict[str, Any] = {"text": text}
@@ -77,33 +98,41 @@ async def push_pending(
     pipe.set(conv_key, conversation_id, ex=_PENDING_TTL)
     if reply_context:
         pipe.set(ctx_key, json.dumps(reply_context, ensure_ascii=False), ex=_PENDING_TTL)
-    pipe.zadd(_PENDING_DELAYED_KEY, {user_id: time.time() + _AGGREGATION_WINDOW})
+    pipe.zadd(_PENDING_DELAYED_KEY, {token: time.time() + _AGGREGATION_WINDOW})
     await pipe.execute()
     logger.info(
-        f"[AGG-PUSH] user_id={user_id} text={text!r} "
+        f"[AGG-PUSH] agent_id={agent_id} user_id={user_id} text={text!r} "
         f"window_sec={_AGGREGATION_WINDOW}"
     )
 
 
-async def flush_pending(user_id: str) -> tuple[str | None, str | None, dict | None, str | None]:
-    """取出并清空聚合队列。返回 (合并文本, conversation_id, reply_context, latest_message_id)。"""
+async def flush_pending(
+    agent_id: str, user_id: str,
+) -> tuple[str | None, str | None, dict | None, str | None]:
+    """取出并清空 (agent, user) scoped 聚合队列。返回 (合并文本, conversation_id, reply_context, latest_message_id)。"""
     r = await get_redis()
-    msg_key = _PENDING_MSG_KEY.format(uid=user_id)
-    conv_key = _PENDING_CONV_KEY.format(uid=user_id)
-    ctx_key = _PENDING_CTX_KEY.format(uid=user_id)
+    msg_key = _PENDING_MSG_KEY.format(aid=agent_id, uid=user_id)
+    conv_key = _PENDING_CONV_KEY.format(aid=agent_id, uid=user_id)
+    ctx_key = _PENDING_CTX_KEY.format(aid=agent_id, uid=user_id)
+    token = _scope_token(agent_id, user_id)
 
     result = await r.eval(
         _AGGREGATE_LUA, 4,
         msg_key, _PENDING_DELAYED_KEY, conv_key, ctx_key,
-        user_id,
+        token,
     )
     if not result:
         return None, None, None, None
 
-    items = [m if isinstance(m, str) else m.decode() for m in result]
+    def _coerce(m):
+        if m is None or m is False:
+            return None
+        return m if isinstance(m, str) else m.decode()
+
+    items = [_coerce(m) for m in result]
     conv_id = items[0] if items else None
     raw_ctx = items[1] if len(items) > 1 else None
-    raw_msgs = items[2:] if len(items) > 2 else []
+    raw_msgs = [m for m in items[2:] if m is not None]
     ctx = None
     if raw_ctx:
         try:
@@ -127,22 +156,27 @@ async def flush_pending(user_id: str) -> tuple[str | None, str | None, dict | No
     combined = "".join(texts) if texts else None
     if combined:
         logger.info(
-            f"[AGG-FLUSH] user_id={user_id} parts={len(texts)} "
+            f"[AGG-FLUSH] agent_id={agent_id} user_id={user_id} parts={len(texts)} "
             f"combined={combined[:80]!r}"
         )
     return combined, conv_id, ctx, latest_message_id
 
 
-async def scan_expired() -> list[tuple[str, str, str, dict | None, str | None]]:
-    """扫描到期的聚合窗口。返回 [(user_id, combined_text, conversation_id, reply_context, latest_message_id)]。"""
+async def scan_expired() -> list[tuple[str, str, str, str, dict | None, str | None]]:
+    """扫描到期的聚合窗口。返回 [(agent_id, user_id, combined_text, conversation_id, reply_context, latest_message_id)]。"""
     r = await get_redis()
     now = time.time()
     expired = await r.zrangebyscore(_PENDING_DELAYED_KEY, 0, now)
     results = []
-    for uid in expired:
-        if isinstance(uid, bytes):
-            uid = uid.decode()
-        text, conv_id, ctx, latest_message_id = await flush_pending(uid)
+    for raw in expired:
+        token = raw.decode() if isinstance(raw, bytes) else raw
+        parsed = _parse_scope_token(token)
+        if parsed is None:
+            # 旧版 user-only 成员或格式非法: 一次性清理出 ZSET 不再干扰
+            await r.zrem(_PENDING_DELAYED_KEY, token)
+            continue
+        agent_id, user_id = parsed
+        text, conv_id, ctx, latest_message_id = await flush_pending(agent_id, user_id)
         if text and conv_id:
-            results.append((uid, text, conv_id, ctx, latest_message_id))
+            results.append((agent_id, user_id, text, conv_id, ctx, latest_message_id))
     return results

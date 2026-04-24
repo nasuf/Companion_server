@@ -91,7 +91,7 @@ async def chat(conversation_id: str, data: ChatRequest):
         ai_emotion=ai_emotion,
     )
 
-    pending_text, _, pending_context, _ = await flush_pending(user_id)
+    pending_text, _, pending_context, _ = await flush_pending(conv.agent.id, user_id)
 
     if is_short_message(data.message) and not pending_text:
         # 短消息，加入聚合队列，暂不触发AI回复
@@ -100,7 +100,7 @@ async def chat(conversation_id: str, data: ChatRequest):
             data.message,
             metadata={"fragment": True},
         )
-        await push_pending(user_id, conversation_id, data.message, current_context, message_id)
+        await push_pending(conv.agent.id, user_id, conversation_id, data.message, current_context, message_id)
         # 保存碎片到DB（用户能看到自己发的消息）
         return EventSourceResponse(_empty_stream())
 

@@ -329,13 +329,13 @@ async def _run_aggregation_scan():
 
     try:
         expired = await scan_expired()
-        for user_id, combined_text, conv_id, reply_context, latest_message_id in expired:
+        for agent_id, user_id, combined_text, conv_id, reply_context, latest_message_id in expired:
             delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
             await enqueue_delayed_message(
                 conv_id,
                 {
                     "conversation_id": conv_id,
-                    "agent_id": None,
+                    "agent_id": agent_id,
                     "user_id": user_id,
                     "message": combined_text,
                     "message_id": latest_message_id,
