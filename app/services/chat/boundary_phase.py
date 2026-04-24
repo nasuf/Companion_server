@@ -163,15 +163,13 @@ async def _handle_attack_ai(
 ) -> AsyncGenerator[dict, None]:
     """spec §2.6 步骤 5：攻击 AI → 级别识别 + 扣分 + 按扣分后 patience 选 prompt。
 
-    严格按 spec §5.3 (先扣分, 重新判定耐心状态) → §5.4 (再按 attack_level 选 prompt) 的顺序:
-    扣分 await 完再决定 prompt, 不再后台发射.
+    扣分走 await 完成 (spec §5.3 "重新判定耐心状态") 才选 §5.4 的 prompt。
 
     PM 补丁规则: 扣分后 patience < FINAL_WARNING_PATIENCE_THRESHOLD → 用指令模版
     「最终警告」prompt 覆写 K1/K2/K3 (patience 已明显透支, 三档基线文案不匹配).
     """
     attack_level = await attack_level_classify(ctx.user_message)
 
-    new_patience: int | None = None
     if attack_level:
         try:
             new_patience = await process_boundary_violation(
@@ -179,11 +177,11 @@ async def _handle_attack_ai(
             )
         except Exception as e:
             logger.warning(f"process_boundary_violation failed: {e}")
-    effective_patience = new_patience if new_patience is not None else ctx.cached_patience
-    if new_patience is not None:
-        ctx.cached_patience = new_patience
+            new_patience = None
+        if new_patience is not None:
+            ctx.cached_patience = new_patience
 
-    is_final_warning = effective_patience < FINAL_WARNING_PATIENCE_THRESHOLD
+    is_final_warning = ctx.cached_patience < FINAL_WARNING_PATIENCE_THRESHOLD
     response = await generate_boundary_reply_llm(
         zone=zone,
         message=ctx.user_message,

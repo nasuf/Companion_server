@@ -1,15 +1,16 @@
 """MBTI personality model — derived from 7-dim via LLM at agent creation.
 
-Per spec《产品手册·背景信息》§1.2:
+Spec verbatim (《产品手册·背景信息》§1.2):
   系统根据用户设定的 7 维性格分数，调用大模型推测并生成 AI 的
-  MBTI 四条双极轴 (E-I / S-N / T-F / J-P) 的偏向百分比 (0–100)。
+  MBTI 八个维度（E/I、N/S、T/F、J/P）的百分比分数（0–100）。
   此后 AI 所有行为中涉及性格描述的部分，统一使用 MBTI 分数表达，
   替代原始 7 维描述。
 
-MBTI 本质是 4 条双极轴, 不是 8 个独立维度 (那是 Big Five 模型).
-每轴上偏向一端, 另一端由 100 减得出. spec 写 "八个维度 (E/I、N/S、
-T/F、J/P)" 是把 4 轴 2 极口语化描述为 8 极; 存储与 LLM 输出都以 4 轴
-偏向表达, 语义一致.
+Implementation note — 存储和 prompt 输出按 4 轴偏向（而非 spec 字面的 8 独立数）:
+  MBTI 本质是 4 条双极轴 (E-I / S-N / T-F / J-P)，每轴只能偏向一端，
+  另一端由 100 减得出。spec "八个维度" 是 "4 轴 × 2 极" 的口语化表达。
+  8 个独立百分比是 Big Five 模型的范畴，与 MBTI 双极假设不符。
+  端到端只用 4 轴偏向（LLM prompt 输出 4 个数、存储 4 键）更干净。
 
 Storage: agent.mbti JSON =
     { "EI": int 0-100,   # 100 = pure E, 0 = pure I
@@ -67,15 +68,18 @@ MBTI_DIMS = ("EI", "NS", "TF", "JP")
 _VALID_INPUT_KEYS = set(MBTI_DIMS)
 
 
+def _clamp_pct(v) -> int:
+    """强制 0-100 整数。LLM / 用户输入的非数值会抛 ValueError/TypeError。"""
+    return max(0, min(100, int(v)))
+
+
 async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
     """Spec §1.2 + 指令模版 P25-26「AI性格打分」：7 维 → MBTI 4 轴偏向百分比。
 
     在 agent 创建的后台异步任务中调用（`api/public/agents.py:_init_mbti_then_emotion`），
     不阻塞 API 响应。若 LLM 调用失败或输出非法，抛异常由上层捕获。
 
-    MBTI 是 4 个双极轴 (E-I / S-N / T-F / J-P), 每轴上只能偏向一端, 不存在
-    "既强 E 又强 I" 这种并存状态 (那是 Big Five 模型). spec 写"八个维度"
-    是把 4 轴 2 极口语化为 8 极的表达, 实质存储只需 4 个偏向百分比.
+    关于 4 轴 vs spec 字面 "8 维" 的语义差异见模块顶部 Implementation note。
 
     输入字段命名兼容 spec（liveliness/rationality/sensitivity/planning/
     spontaneity/imagination/humor）与代码内命名（lively/rational/emotional/
@@ -87,7 +91,7 @@ async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
         for k in keys:
             if k in p:
                 try:
-                    return max(0, min(100, int(p[k])))
+                    return _clamp_pct(p[k])
                 except (TypeError, ValueError):
                     pass
         return default
@@ -106,10 +110,7 @@ async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
     if not isinstance(result, dict):
         raise ValueError(f"personality_scoring LLM returned non-dict: {type(result).__name__}")
 
-    # MBTI 是 4 条双极轴, LLM 直接输出 4 轴偏向 (EI/NS/TF/JP 各一个 0-100).
-    # 每轴取偏向 E/N/T/J 一端的百分比, 另一端由 100 减得出.
-    clamp = lambda v: max(0, min(100, int(v)))
-    return {dim: clamp(result.get(dim, 50)) for dim in MBTI_DIMS}
+    return {dim: _clamp_pct(result.get(dim, 50)) for dim in MBTI_DIMS}
 
 
 def _validate_input(percentages: dict) -> dict[str, int]:
@@ -127,7 +128,7 @@ def _validate_input(percentages: dict) -> dict[str, int]:
     out: dict[str, int] = {}
     for k in _VALID_INPUT_KEYS:
         try:
-            out[k] = max(0, min(100, int(percentages[k])))
+            out[k] = _clamp_pct(percentages[k])
         except (TypeError, ValueError):
             raise ValueError(f"MBTI dimension '{k}' must be int 0-100, got {percentages[k]!r}")
     return out

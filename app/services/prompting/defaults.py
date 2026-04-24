@@ -681,12 +681,8 @@ BOUNDARY_FINAL_WARNING_PROMPT = """【任务】你现在处于低耐心状态，
 
 
 # Spec 第一部分 §1.2 + 指令模版 P25-26「AI性格打分」
-# agent 创建时在后台异步任务中调用（services/mbti.py:seven_dim_to_mbti），
-# 把用户选的 7 维性格推导为 MBTI 4 轴偏向值。不阻塞 API 响应。
-# 说明: spec 原文写"八个维度"是把"4 轴 × 2 极 = 8 极"口语化描述,
-# MBTI 本质是 4 个双极轴 (E-I / S-N / T-F / J-P), 每轴上偏向一端,
-# 另一端由 100 减得出. 这里让 LLM 只输出 4 轴偏向, 避免 "E=70 + I=40"
-# 这种 MBTI 框架不支持的双极并存输出 (那是 Big Five 模型的范畴).
+# agent 创建时在后台异步任务中调用（services/mbti.py:seven_dim_to_mbti）。
+# 4 轴 vs spec 字面 "8 维" 的设计说明见 services/mbti.py 模块顶部 Implementation note。
 PERSONALITY_SCORING_PROMPT = """【任务】根据AI的七个性格维度分数（0-100），推测其在 MBTI 4 条双极轴上的偏向百分比（0-100）。
 
 【MBTI 4 轴说明】MBTI 为双极模型，不支持双极并存；每轴只给一端百分比，另一端由 100 减得出：

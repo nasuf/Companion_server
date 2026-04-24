@@ -491,7 +491,8 @@ async def process_boundary_violation(
 
     count = await record_attack(agent_id, user_id, level=attack_level)
     deduction = compute_repeat_deduction(attack_level, count if count > 0 else 1)
-    new_val = await adjust_patience(agent_id, user_id, -deduction)
+    # 直接 set_patience 避免 adjust_patience 再查一次 get_patience (热路径省 1 Redis GET)
+    new_val = await set_patience(agent_id, user_id, current - deduction)
 
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
