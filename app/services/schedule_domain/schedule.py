@@ -701,21 +701,11 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     except Exception as e:
         logger.warning(f"Failed to load proactive history for review: {e}")
 
-    # 合并当日聊天摘要（key格式：cache:sum:{hash}）
-    chat_summary_text = ""
-    try:
-        redis = await get_redis()
-        cursor, keys = await redis.scan(0, match="cache:sum:*", count=100)
-        for key in keys[:3]:
-            data = await redis.get(key)
-            if data:
-                cached = json.loads(data if isinstance(data, str) else data.decode())
-                review = cached.get("review", "")
-                if review:
-                    chat_summary_text = f"\n今日聊天回顾：\n{review[:200]}"
-                    break
-    except Exception as e:
-        logger.warning(f"Failed to load chat summary for review: {e}")
+    # TODO(workspace-isolation): 原本用 redis.scan(match='cache:sum:*') 取前 3 个
+    # 注入聊天回顾, 但 cache:sum:* 无对应写入点, 是死路径 + 跨 workspace 泄漏风险
+    # (SCAN 会匹配任意 agent/user 的 summary). 若未来恢复聊天摘要注入, 必须改为
+    # cache:sum:{agent_id}:{user_id}:{...} 精确 key 格式.
+    chat_summary_text = "（无聊天回顾）"
 
     # Spec Part 1 §2.2: Step 1 — 先生成 200 字自然语言总结。
     from app.services.llm.models import invoke_text
@@ -724,7 +714,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         schedule_text=schedule_text,
         adjustments_text=adjustments_text or "（无调整）",
         proactive_text=proactive_text or "（无主动消息）",
-        chat_summary_text=chat_summary_text or "（无聊天回顾）",
+        chat_summary_text=chat_summary_text,
     )
     try:
         summary_text = (await invoke_text(get_utility_model(), summary_prompt)).strip()
