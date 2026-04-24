@@ -103,7 +103,7 @@ async def chat(conversation_id: str, data: ChatRequest):
             data.message,
             metadata={"fragment": True},
         )
-        await push_pending(
+        pushed = await push_pending(
             agent_id=conv.agent.id,
             user_id=user_id,
             conversation_id=conversation_id,
@@ -111,8 +111,23 @@ async def chat(conversation_id: str, data: ChatRequest):
             reply_context=current_context,
             message_id=message_id,
         )
-        # 保存碎片到DB（用户能看到自己发的消息）
-        return EventSourceResponse(_empty_stream())
+        if pushed:
+            return EventSourceResponse(_empty_stream())
+        # Redis 挂 → 聚合失败, 当作完整消息入延迟队列 (跳聚合, 不合并)
+        delay_seconds = float((current_context or {}).get("delay_seconds", 0.0) or 0.0)
+        await enqueue_or_append_delayed(
+            conversation_id,
+            {
+                "conversation_id": conversation_id,
+                "agent_id": conv.agent.id,
+                "user_id": user_id,
+                "message": data.message,
+                "message_id": message_id,
+                "reply_context": current_context,
+            },
+            delay_seconds,
+        )
+        return EventSourceResponse(_queued_stream(delay_seconds))
 
     # 有聚合文本：拼接后处理
     final_message = data.message

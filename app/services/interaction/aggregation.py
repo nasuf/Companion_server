@@ -82,11 +82,14 @@ async def push_pending(
     text: str,
     reply_context: dict | None = None,
     message_id: str | None = None,
-) -> None:
+) -> bool:
     """将碎片消息加入 (agent, user) scoped 聚合队列。
 
     kwargs-only: 三个前置位置参数都是 UUID 字符串, 位置传参很容易把
     agent_id / user_id / conversation_id 写反导致静默路由错误。
+
+    Returns True 表示成功入队 (caller 可安心回 'aggregating'), False 表示
+    Redis 挂, caller 应走同步 LLM 跳过聚合 (避免用户长时间看不到回应).
     """
     r = await get_redis()
     msg_key = _PENDING_MSG_KEY.format(aid=agent_id, uid=user_id)
@@ -107,17 +110,15 @@ async def push_pending(
     try:
         await pipe.execute()
     except Exception as e:
-        # Redis 挂时 push 失败; 上层 ws/chat 已 send 'aggregating' 事件, 此处只
-        # 记日志后返回. 用户看到 'aggregating' 但 30s TTL 内 flush 找不到数据,
-        # 等同于'短消息丢失'. Redis 恢复后后续消息照常走.
         logger.warning(
             f"[AGG-PUSH] Redis push failed agent_id={agent_id} user_id={user_id}: {e}"
         )
-        return
+        return False
     logger.info(
         f"[AGG-PUSH] agent_id={agent_id} user_id={user_id} text={text!r} "
         f"window_sec={_AGGREGATION_WINDOW}"
     )
+    return True
 
 
 async def flush_pending(

@@ -57,19 +57,48 @@ class _BrokenRedis:
 # ═══════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_aggregation_push_pending_redis_down_swallows(caplog):
-    """push_pending 遇 Redis ConnectionError 应 warning + 返回, 不向上抛."""
+async def test_aggregation_push_pending_redis_down_returns_false(caplog):
+    """push_pending 遇 Redis ConnectionError 返回 False + warning, 不向上抛."""
     from app.services.interaction.aggregation import push_pending
 
     broken = _BrokenRedis()
     with patch("app.services.interaction.aggregation.get_redis", AsyncMock(return_value=broken)):
         with caplog.at_level("WARNING"):
-            await push_pending(
+            result = await push_pending(
                 agent_id="a1", user_id="u1",
                 conversation_id="c1", text="hi", message_id="m1",
             )
 
+    assert result is False
     assert any("[AGG-PUSH] Redis push failed" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_aggregation_push_pending_success_returns_true():
+    """push_pending 成功执行 pipeline 返回 True, caller 可信任入队."""
+    from app.services.interaction.aggregation import push_pending
+
+    class _OkPipeline:
+        def rpush(self, *a, **k): pass
+        def expire(self, *a, **k): pass
+        def set(self, *a, **k): pass
+        def zadd(self, *a, **k): pass
+
+        async def execute(self):
+            return [1, True, True, 1]
+
+    class _OkRedis:
+        def pipeline(self):
+            return _OkPipeline()
+
+    ok = _OkRedis()
+    with patch("app.services.interaction.aggregation.get_redis", AsyncMock(return_value=ok)):
+        result = await push_pending(
+            agent_id="a1", user_id="u1",
+            conversation_id="c1", text="hi", message_id="m1",
+        )
+
+    assert result is True
 
 
 @pytest.mark.asyncio

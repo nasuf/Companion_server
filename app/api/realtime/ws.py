@@ -190,7 +190,7 @@ async def _handle_message(
             metadata={"fragment": True},
         )
         # push_pending 内部 zadd 刷新 due_at = now + 5，同时覆盖最新 reply_context
-        await push_pending(
+        pushed = await push_pending(
             agent_id=agent.id,
             user_id=user_id,
             conversation_id=conversation_id,
@@ -198,7 +198,26 @@ async def _handle_message(
             reply_context=current_context,
             message_id=message_id,
         )
-        await ws.send_json({"type": "pending", "data": {"status": "aggregating"}})
+        if pushed:
+            await ws.send_json({"type": "pending", "data": {"status": "aggregating"}})
+            return
+        # Redis 挂 → 聚合失败, 消息已持久化 (fragment=True); 直接入延迟队列走同步回复
+        logger.warning(
+            f"[WS] push_pending failed conv={conversation_id[:8]}, fallback to sync queue"
+        )
+        try:
+            await _queue_reply(
+                ws,
+                conversation_id=conversation_id,
+                agent_id=agent.id,
+                user_id=user_id,
+                user_message=text,
+                user_message_id=message_id,
+                reply_context=current_context,
+            )
+        except Exception as e:
+            logger.error(f"Chat queue failed for conv={conversation_id[:8]}: {e}")
+            await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
         return
 
     # 非碎片：若有 pending，先打断触发合并；否则直接处理当前消息
