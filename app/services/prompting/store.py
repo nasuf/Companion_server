@@ -238,6 +238,10 @@ async def _persist_prompt_update(
     try:
         existing = await db.prompttemplate.find_unique(where={"key": key})
         if existing:
+            # defaultContent 是 ensure_prompt_templates 的同步哨兵 (上次 startup 时
+            # 代码 default 的快照), 只归 bootstrap + startup sync 写. UI 保存 / reset
+            # / restore 路径不能触它, 否则下次代码改 default 时 sync 认为"哨兵对得
+            # 上" → 放弃覆盖 → UI 永远停在旧版本.
             row = await db.prompttemplate.update(
                 where={"key": key},
                 data={
@@ -246,7 +250,6 @@ async def _persist_prompt_update(
                     "category": definition.category,
                     "title": definition.title,
                     "description": definition.description,
-                    "defaultContent": definition.default_text,
                 },
             )
         else:
