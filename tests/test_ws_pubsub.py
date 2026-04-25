@@ -231,3 +231,85 @@ async def test_stop_subscriber_idempotent():
     mgr = ConnectionManager()
     await mgr.stop_subscriber()  # 没启动也不抛
     await mgr.stop_subscriber()
+
+
+@pytest.mark.asyncio
+async def test_close_pubsub_safely_calls_aclose():
+    """_close_pubsub_safely 必须调用 aclose 释放 Redis 连接 (regression for
+    Too many connections cascade)."""
+    aclose_calls = 0
+
+    ps = MagicMock()
+    async def _punsubscribe():
+        pass
+    async def _unsubscribe():
+        pass
+    async def _aclose():
+        nonlocal aclose_calls
+        aclose_calls += 1
+    ps.punsubscribe = _punsubscribe
+    ps.unsubscribe = _unsubscribe
+    ps.aclose = _aclose
+
+    await ConnectionManager._close_pubsub_safely(ps)
+    assert aclose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_close_pubsub_safely_swallows_exceptions():
+    """关闭过程中任何步骤异常都不抛 (best-effort cleanup)."""
+    ps = MagicMock()
+
+    async def _raise():
+        raise Exception("redis disconnected")
+
+    ps.punsubscribe = _raise
+    ps.unsubscribe = _raise
+    ps.aclose = _raise
+    # 应该不抛
+    await ConnectionManager._close_pubsub_safely(ps)
+
+
+@pytest.mark.asyncio
+async def test_close_pubsub_safely_handles_none():
+    """pubsub=None 时 (subscribe 还没建好就抛了) 不应崩."""
+    await ConnectionManager._close_pubsub_safely(None)
+
+
+def test_pubsub_client_does_not_inherit_business_socket_timeout():
+    """pubsub 用独立 client 不带 socket_timeout: listen() 永久阻塞读, 不会
+    每 5s 被业务 pool 的 socket_timeout 打断 (regression for Timeout 循环 bug)."""
+    client = ConnectionManager._make_pubsub_client()
+    pool_kwargs = client.connection_pool.connection_kwargs
+    # 不应该有 socket_timeout (None 或 missing 都行)
+    assert pool_kwargs.get("socket_timeout") is None
+    # 应启 keepalive + 健康检查
+    assert pool_kwargs.get("socket_keepalive") is True
+    assert pool_kwargs.get("health_check_interval") == 30
+
+
+@pytest.mark.asyncio
+async def test_close_pubsub_safely_closes_client_too():
+    """_close_pubsub_safely(pubsub, client) 必须关 client (不然连接泄漏)."""
+    client_aclose = 0
+    pubsub_aclose = 0
+
+    ps = MagicMock()
+    async def _no_op():
+        pass
+    async def _ps_close():
+        nonlocal pubsub_aclose
+        pubsub_aclose += 1
+    ps.punsubscribe = _no_op
+    ps.unsubscribe = _no_op
+    ps.aclose = _ps_close
+
+    cl = MagicMock()
+    async def _cl_close():
+        nonlocal client_aclose
+        client_aclose += 1
+    cl.aclose = _cl_close
+
+    await ConnectionManager._close_pubsub_safely(ps, cl)
+    assert pubsub_aclose == 1
+    assert client_aclose == 1

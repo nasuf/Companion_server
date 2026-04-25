@@ -23,8 +23,10 @@ import json
 import logging
 from typing import Any
 
+import redis.asyncio as redis_async
 from starlette.websockets import WebSocket, WebSocketState
 
+from app.config import settings
 from app.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -204,26 +206,71 @@ class ConnectionManager:
             self._subscriber_task = None
 
     async def _subscribe_loop(self) -> None:
-        """长期运行的订阅 task. Redis 异常时静默重试, 不向上抛打挂主进程."""
+        """长期运行的订阅 task. Redis 异常时静默重试, 不向上抛打挂主进程.
+
+        关键: pubsub 必须用独立 client (不共享业务 pool). 业务 pool 的
+        socket_timeout=5s 对热路径合理但会让 pubsub.listen() 每 5s 触发
+        TimeoutError. pubsub client 不设 socket_timeout, 加 health_check_interval
+        防 firewall/NAT 空闲断连. 失败 / 取消时显式 aclose 释放底层连接.
+        """
+        backoff_sec = 1.0
         while True:
+            pubsub_client, pubsub = None, None
             try:
-                redis = await get_redis()
-                pubsub = redis.pubsub()
+                pubsub_client = self._make_pubsub_client()
+                pubsub = pubsub_client.pubsub()
                 await pubsub.psubscribe(_PSUB_PATTERN_CONV, _PSUB_PATTERN_WS)
                 logger.info(
                     f"WS subscriber started: psubscribe "
                     f"{_PSUB_PATTERN_CONV} {_PSUB_PATTERN_WS}"
                 )
+                backoff_sec = 1.0
                 async for msg in pubsub.listen():
                     if msg.get("type") not in ("pmessage", "message"):
                         continue
                     await self._handle_message(msg)
             except asyncio.CancelledError:
                 logger.info("WS subscriber cancelled")
+                await self._close_pubsub_safely(pubsub, pubsub_client)
                 return
             except Exception as e:
-                logger.warning(f"WS subscriber loop error, retry in 5s: {e}")
-                await asyncio.sleep(5)
+                logger.warning(
+                    f"WS subscriber loop error, retry in {backoff_sec:.0f}s: {e}"
+                )
+                await self._close_pubsub_safely(pubsub, pubsub_client)
+                await asyncio.sleep(backoff_sec)
+                backoff_sec = min(backoff_sec * 2, 60.0)
+
+    @staticmethod
+    def _make_pubsub_client() -> redis_async.Redis:
+        """单独建一个 Redis client 给 pubsub 用, 不共享业务 pool.
+
+        - 不设 socket_timeout: listen() 长期阻塞读, 默认会被 5s timeout 打断
+        - health_check_interval=30: 主动 ping 防 firewall/LB 空闲连接回收
+        - decode_responses=True: 与业务 pool 一致, channel/data 解为 str
+        """
+        return redis_async.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=settings.redis_connect_timeout_s,
+            socket_keepalive=True,
+            health_check_interval=30,
+        )
+
+    @staticmethod
+    async def _close_pubsub_safely(pubsub, client=None) -> None:
+        """关闭 pubsub + 单独的 client 释放底层 Redis 连接. 任何异常吃掉."""
+        if pubsub is not None:
+            for op in ("punsubscribe", "unsubscribe", "aclose"):
+                try:
+                    await getattr(pubsub, op)()
+                except Exception:
+                    pass
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
     async def _handle_message(self, msg: dict) -> None:
         channel = msg.get("channel")
