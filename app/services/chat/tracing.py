@@ -122,14 +122,13 @@ class LangSmithTracer:
 
             if updated_message_id:
                 from app.services.runtime.ws_manager import manager
-                ws = manager.get(self._conversation_id)
-                if ws:
-                    await ws.send_json({
-                        "type": "trace_ready",
-                        "data": {
-                            "message_id": updated_message_id,
-                            "trace_url": public_url,
-                        },
-                    })
+                await manager.send_event(
+                    self._conversation_id,
+                    "trace_ready",
+                    {
+                        "message_id": updated_message_id,
+                        "trace_url": public_url,
+                    },
+                )
         except Exception as e:
             logger.warning(f"Failed to share trace: {e}")

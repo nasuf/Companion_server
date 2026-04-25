@@ -8,13 +8,11 @@ import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketState
 from prisma import Json
 
 from app.db import db
 from app.redis_client import is_redis_healthy
 from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
-from app.services.chat.orchestrator import stream_chat_response
 from app.services.interaction.delayed_queue import enqueue_delayed_message
 from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
 from app.services.interaction.reply_context import build_reply_timing_context, merge_reply_contexts
@@ -98,7 +96,10 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     agent = conv.agent
 
     await websocket.accept()
-    await manager.connect(conversation_id, user_id, websocket)
+    await manager.connect(
+        conversation_id, user_id, websocket,
+        workspace_id=getattr(conv, "workspaceId", None),
+    )
 
     # spec §12 开场主动第一句话: 只在首次进入 (0 消息) 时触发
     try:
@@ -251,13 +252,13 @@ async def _handle_message(
         await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
 
 
-async def stream_to_ws(ws: WebSocket, generator, conversation_id: str | None = None) -> None:
-    """将 stream_chat_response() 的 yield 转为 WS send_json。
+async def stream_to_ws(generator, conversation_id: str) -> None:
+    """将 stream_chat_response() 的 yield 转为 WS 推送 (跨进程兼容).
 
-    每次推送前重新从 manager 获取当前活跃 WS。这对应前端重连场景：
-    LLM 流式生成往往持续几十秒，期间原 WS 可能被新连接替换。
-    如果只保留最初的 ws 引用，后续 send_json 会推给已关闭的连接，
-    消息丢失，前端永远等不到 reply。
+    通过 manager.send_event 路由到持有 conversation_id 连接的 worker:
+    - 同进程: fast path 本地直送
+    - 跨进程 (multi-worker / scheduler 拆容器): publish 到 ws:conv:{conv_id}
+    - 前端断连重连切到别的 worker: 新 worker 接管, publish 自动路由过去
     """
     async for event in generator:
         event_type = event.get("event", "")
@@ -266,21 +267,4 @@ async def stream_to_ws(ws: WebSocket, generator, conversation_id: str | None = N
             data = json.loads(data_str)
         except (json.JSONDecodeError, TypeError):
             data = {"raw": data_str}
-
-        # Prefer the current active WS for the conversation (handles reconnect).
-        target = manager.get(conversation_id) if conversation_id else None
-        if target is None:
-            target = ws
-        try:
-            if target.client_state == WebSocketState.CONNECTED:
-                await target.send_json({"type": event_type, "data": data})
-            else:
-                logger.debug(
-                    f"WS not connected, dropped event type={event_type} "
-                    f"for conv={(conversation_id or '')[:8]}"
-                )
-        except Exception as e:
-            logger.warning(
-                f"WS send failed for conv={(conversation_id or '')[:8]} "
-                f"type={event_type}: {e}"
-            )
+        await manager.send_event(conversation_id, event_type, data)

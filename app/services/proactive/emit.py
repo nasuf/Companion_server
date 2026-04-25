@@ -74,11 +74,14 @@ async def emit_proactive_message(
     ws_payload: dict[str, Any] = {
         "text": message,
         "agent_id": agent_id,
+        "user_id": user_id,  # send_to_workspace fallback 需要 (workspace_id=None 时退回 user 维度)
         "assistant_message_id": created.id,
         "trigger_type": trigger_type,
     }
     if ws_payload_extra:
         ws_payload.update(ws_payload_extra)
-    await manager.send_to_user(user_id, "proactive", ws_payload)
+    # workspace 维度路由: 同一 user 多 agent 时不会跨 agent 广播 proactive.
+    # workspace_id 为 None (历史 conv) 时 send_to_workspace 内部 fallback 到 send_to_user.
+    await manager.send_to_workspace(workspace_id, "proactive", ws_payload)
 
     return created.id

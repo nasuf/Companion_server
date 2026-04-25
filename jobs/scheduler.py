@@ -363,12 +363,11 @@ async def _run_aggregation_scan():
                 },
                 delay_seconds,
             )
-            # 12E: Update frontend after aggregation window ends
-            ws = manager.get(conv_id)
-            if ws:
-                if delay_seconds > 5:
-                    await ws.send_json({"type": "delay", "data": {"duration": delay_seconds}})
-                await ws.send_json({"type": "pending", "data": {"status": "queued", "delay": delay_seconds}})
+            # 12E: Update frontend after aggregation window ends.
+            # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
+            if delay_seconds > 5:
+                await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
+            await manager.send_event(conv_id, "pending", {"status": "queued", "delay": delay_seconds})
 
         due_conversations = await scan_due_delayed_messages()
         for conv_id, payloads in due_conversations:
@@ -400,17 +399,12 @@ async def _run_aggregation_scan():
                     delivered_from_queue=True,
                 )
 
-                ws = manager.get(conv_id)
-                if ws:
-                    # 传 conversation_id，stream_to_ws 内部每次 send 前都会
-                    # 重新 manager.get() 获取当前活跃 WS，兼容前端重连场景
-                    await stream_to_ws(ws, gen, conv_id)
-                    logger.debug(f"Delayed reply pushed via WS for conv={conv_id[:8]}")
-                else:
-                    # Consume the generator to trigger the AI response processing
-                    async for _ in gen:
-                        pass
-                    logger.debug(f"Delayed reply consumed silently for conv={conv_id[:8]}")
+                # stream_to_ws 内部每条 chunk 走 manager.send_event,
+                # fast path 本地命中或 slow path publish 跨 worker, 无需手工查 WS.
+                # 离线用户 (无 WS / 跨进程 publish 也无人订阅): 仍 await 消费完
+                # generator 触发 LLM + 持久化, 避免漏存回复.
+                await stream_to_ws(gen, conv_id)
+                logger.debug(f"Delayed reply pushed for conv={conv_id[:8]}")
             finally:
                 await unlock_conversation(conv_id)
     except Exception as e:

@@ -64,14 +64,18 @@ async def lifespan(app: FastAPI):
             f"Holiday cache preload failed ({e!r}); lunardate fallback active."
         )
 
-    # Phase 3: Scheduler
+    # Phase 3: Scheduler + WS subscriber (跨进程 Pub/Sub)
     setup_scheduler()
-    logger.info(f"  ✓ Scheduler")
+    logger.info("  ✓ Scheduler")
+    from app.services.runtime.ws_manager import manager as ws_manager
+    await ws_manager.start_subscriber()
+    logger.info("  ✓ WS subscriber")
 
     total = (time.monotonic() - t_start) * 1000
     logger.info(f"Startup complete ({total:.0f}ms)")
     yield
     # Shutdown
+    await ws_manager.stop_subscriber()
     shutdown_scheduler()
     await disconnect_db()
     await close_redis()
