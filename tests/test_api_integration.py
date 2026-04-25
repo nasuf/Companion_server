@@ -60,10 +60,7 @@ def test_create_user(mock_deps):
         assert response.json()["name"] == "Test User"
 
 
-def _auth_header(user_id: str = "user-id") -> dict:
-    """Build Authorization header with a valid JWT for the given user_id."""
-    from app.services.auth import create_jwt
-    return {"Authorization": f"Bearer {create_jwt(user_id, role='user')}"}
+from tests.conftest import make_auth_header as _auth_header  # noqa: F401
 
 
 def test_create_agent(mock_deps):

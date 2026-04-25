@@ -139,38 +139,59 @@ async def test_require_memory_owner_returns_memory_when_owner():
     assert result is m
 
 
-# ─────────────────── require_agent_owner (regression coverage) ───────────────────
+# ─────────────────── require_agent_owner_any_status ───────────────────
 
 @pytest.mark.asyncio
-async def test_require_agent_owner_404_when_missing():
+async def test_require_agent_owner_any_status_404_when_missing():
+    from app.api.ownership import require_agent_owner_any_status
     fake_db = AsyncMock()
     fake_db.aiagent.find_unique = AsyncMock(return_value=None)
     user = {"sub": "u1", "role": "user"}
     with patch("app.api.ownership.db", fake_db):
         with pytest.raises(HTTPException) as exc:
-            await require_agent_owner(agent_id="a-1", user=user)
+            await require_agent_owner_any_status(agent_id="a-1", user=user)
     assert exc.value.status_code == 404
 
+
+@pytest.mark.asyncio
+async def test_require_agent_owner_any_status_passes_when_provisioning():
+    """provisioning 状态也能通过 (用于 provision-status endpoint)."""
+    from app.api.ownership import require_agent_owner_any_status
+    agent = SimpleNamespace(id="a-1", userId="u1", status="provisioning")
+    fake_db = AsyncMock()
+    fake_db.aiagent.find_unique = AsyncMock(return_value=agent)
+    user = {"sub": "u1", "role": "user"}
+    with patch("app.api.ownership.db", fake_db):
+        result = await require_agent_owner_any_status(agent_id="a-1", user=user)
+    assert result is agent
+
+
+@pytest.mark.asyncio
+async def test_require_agent_owner_any_status_403_when_wrong_owner():
+    from app.api.ownership import require_agent_owner_any_status
+    agent = SimpleNamespace(id="a-1", userId="other-user", status="provisioning")
+    fake_db = AsyncMock()
+    fake_db.aiagent.find_unique = AsyncMock(return_value=agent)
+    user = {"sub": "u1", "role": "user"}
+    with patch("app.api.ownership.db", fake_db):
+        with pytest.raises(HTTPException) as exc:
+            await require_agent_owner_any_status(agent_id="a-1", user=user)
+    assert exc.value.status_code == 403
+
+
+# ─────────────────── require_agent_owner (active-only) ───────────────────
 
 @pytest.mark.asyncio
 async def test_require_agent_owner_404_when_archived():
+    """archived agent 即使是 owner 也走不通 active-only dep."""
     agent = SimpleNamespace(id="a-1", userId="u1", status="archived")
-    fake_db = AsyncMock()
-    fake_db.aiagent.find_unique = AsyncMock(return_value=agent)
-    user = {"sub": "u1", "role": "user"}
-    with patch("app.api.ownership.db", fake_db):
-        with pytest.raises(HTTPException) as exc:
-            await require_agent_owner(agent_id="a-1", user=user)
+    with pytest.raises(HTTPException) as exc:
+        await require_agent_owner(agent=agent)
     assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_require_agent_owner_403_when_wrong_owner():
-    agent = SimpleNamespace(id="a-1", userId="other-user", status="active")
-    fake_db = AsyncMock()
-    fake_db.aiagent.find_unique = AsyncMock(return_value=agent)
-    user = {"sub": "u1", "role": "user"}
-    with patch("app.api.ownership.db", fake_db):
-        with pytest.raises(HTTPException) as exc:
-            await require_agent_owner(agent_id="a-1", user=user)
-    assert exc.value.status_code == 403
+async def test_require_agent_owner_passes_when_active():
+    agent = SimpleNamespace(id="a-1", userId="u1", status="active")
+    result = await require_agent_owner(agent=agent)
+    assert result is agent

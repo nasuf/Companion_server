@@ -4,6 +4,43 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
+
+
+# ── 共享 JWT / TestClient helpers ────────────────────────────────────────
+
+def make_auth_header(user_id: str = "user-id", role: str = "user") -> dict:
+    """Build Authorization header with a valid JWT for the given user."""
+    from app.services.auth import create_jwt
+    return {"Authorization": f"Bearer {create_jwt(user_id, role=role)}"}
+
+
+@pytest.fixture
+def auth_header():
+    """Convenience fixture returning the helper itself.
+
+    Usage: `auth_header("user-id")` or `auth_header("admin", role="admin")`.
+    """
+    return make_auth_header
+
+
+@pytest.fixture
+def api_client():
+    """TestClient(app) with all external deps mocked. Replaces the inline
+    `mock_deps` fixture in test_api_integration.py / test_public_endpoints_ownership.py.
+    """
+    with (
+        patch("app.db.connect_db", new_callable=AsyncMock),
+        patch("app.db.disconnect_db", new_callable=AsyncMock),
+        patch("app.redis_client.get_redis", new_callable=AsyncMock),
+        patch("app.redis_client.close_redis", new_callable=AsyncMock),
+        patch("jobs.scheduler.setup_scheduler"),
+        patch("jobs.scheduler.shutdown_scheduler"),
+        patch("app.middleware.configure_logging"),
+        patch("app.middleware.configure_langsmith"),
+    ):
+        from app.main import app
+        yield TestClient(app)
 
 
 @pytest.fixture(scope="session")

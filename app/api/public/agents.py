@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from prisma import Json
 
 from app.api.jwt_auth import require_user
-from app.api.ownership import require_agent_owner, require_user_self
+from app.api.ownership import (
+    require_agent_owner,
+    require_agent_owner_any_status,
+    require_user_self,
+)
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.interaction.boundary import init_patience
@@ -280,7 +284,7 @@ async def update_agent(
 async def regenerate_mbti(
     agent_id: str,
     data: RegenerateMbtiRequest,
-    agent=Depends(require_agent_owner),
+    _agent=Depends(require_agent_owner),
 ):
     """重写 agent 的 MBTI 性格。
 
@@ -288,7 +292,6 @@ async def regenerate_mbti(
     后端按这 4 个数字构建新 MBTI (LLM 仅用于生成 summary 文本) 并同时
     覆盖 mbti + currentMbti, trait_adjustment 累计偏移 reset.
     """
-    _ = agent  # 已由 require_agent_owner 校验存在 + 拥有
     try:
         new_mbti = await build_mbti(data.mbti.model_dump())
     except ValueError as e:
@@ -381,20 +384,13 @@ async def get_agent_status(
 @router.get("/{agent_id}/provision-status")
 async def get_provision_status(
     agent_id: str,
-    user: dict = Depends(require_user),
+    agent=Depends(require_agent_owner_any_status),
 ):
     """获取Agent初始化进度（人生经历生成）。
 
     前端轮询此接口显示进度条，直到 stage=complete。
-
-    require_agent_owner 需要 status="active", 但 provisioning 阶段 status
-    是 "provisioning", 这里手工做 ownership 校验.
+    用 _any_status 变体: provisioning 阶段也能查进度.
     """
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if agent.userId != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Not your agent")
 
     # 已激活 → 直接返回完成
     if agent.status == "active":

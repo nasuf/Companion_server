@@ -12,35 +12,17 @@ already covered by test_ownership_dependencies.py.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+
+from tests.conftest import make_auth_header as _hdr  # noqa: F401 — shared helper
 
 
 @pytest.fixture
-def client():
-    with (
-        patch("app.db.connect_db", new_callable=AsyncMock),
-        patch("app.db.disconnect_db", new_callable=AsyncMock),
-        patch("app.redis_client.get_redis", new_callable=AsyncMock),
-        patch("app.redis_client.close_redis", new_callable=AsyncMock),
-        patch("jobs.scheduler.setup_scheduler"),
-        patch("jobs.scheduler.shutdown_scheduler"),
-        patch("app.middleware.configure_logging"),
-        patch("app.middleware.configure_langsmith"),
-    ):
-        from app.main import app
-        yield TestClient(app)
-
-
-def _token(user_id: str, role: str = "user") -> str:
-    from app.services.auth import create_jwt
-    return create_jwt(user_id, role=role)
-
-
-def _hdr(user_id: str, role: str = "user") -> dict:
-    return {"Authorization": f"Bearer {_token(user_id, role)}"}
+def client(api_client):
+    """Alias to shared api_client fixture for existing test code."""
+    return api_client
 
 
 # ───────────────────── /intimacy/{agent_id}/{user_id} ─────────────────────
@@ -186,9 +168,9 @@ class TestAgentsOwnership:
         assert r.status_code == 200
 
     def test_provision_status_wrong_owner_403(self, client):
-        """Provision status 用手工 ownership 校验 (status=provisioning, 走不了 require_agent_owner)."""
+        """provision-status 用 require_agent_owner_any_status (能在 status=provisioning 阶段访问)."""
         agent = SimpleNamespace(id="a1", userId="other-user", status="provisioning")
-        with patch("app.api.public.agents.db") as db_mock:
+        with patch("app.api.ownership.db") as db_mock:
             db_mock.aiagent.find_unique = AsyncMock(return_value=agent)
             r = client.get("/agents/a1/provision-status", headers=_hdr("u1"))
         assert r.status_code == 403
