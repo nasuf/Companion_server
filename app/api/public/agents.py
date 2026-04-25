@@ -207,7 +207,12 @@ async def create_agent(
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(agent_id: str, agent=Depends(require_agent_owner)):
+async def get_agent(agent_id: str, agent=Depends(require_agent_owner_any_status)):
+    """读 agent 详情. 用 _any_status 变体允许 status="provisioning" 阶段也能查
+    (life_story 生成期 ~90s 内 agent.status 仍是 provisioning, 但前端需要拿
+    agent 信息渲染 chat / inspector UI). archived 仍 404."""
+    if getattr(agent, "status", "active") == "archived":
+        raise HTTPException(status_code=404, detail="Agent not found")
     workspace = await get_active_workspace(agent_id=agent_id)
     if not workspace:
         raise HTTPException(status_code=404, detail="Agent not found")

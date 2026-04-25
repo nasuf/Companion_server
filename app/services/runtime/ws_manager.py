@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any
 
 import redis.asyncio as redis_async
@@ -65,6 +66,10 @@ class ConnectionManager:
         self._conv_workspace: dict[str, str | None] = {}
         self._lock = asyncio.Lock()
         self._subscriber_task: asyncio.Task | None = None
+        # 用于过滤 self-publish: 每个进程的 manager 实例 UUID 唯一,
+        # publish 时带上 sender_id, 自己的 subscriber 收到自己的消息直接 skip,
+        # 避免 send_to_workspace 双发 (本地 + Redis 回环) 导致前端看到重复消息.
+        self._instance_id = uuid.uuid4().hex
 
     # ────────────────────────── lifecycle ──────────────────────────
 
@@ -181,7 +186,10 @@ class ConnectionManager:
     async def _publish(self, channel: str, event_type: str, data: Any) -> bool:
         try:
             redis = await get_redis()
-            payload = json.dumps({"type": event_type, "data": data}, ensure_ascii=False)
+            payload = json.dumps(
+                {"sender": self._instance_id, "type": event_type, "data": data},
+                ensure_ascii=False,
+            )
             await redis.publish(channel, payload)
             return True
         except Exception as e:
@@ -289,6 +297,10 @@ class ConnectionManager:
             payload = json.loads(data_raw)
         except (json.JSONDecodeError, ValueError):
             logger.warning(f"WS subscriber bad payload on {channel}")
+            return
+        # 关键: 跳过自己 publish 的消息. send_to_workspace 同时本地 push +
+        # publish, 自己的 subscriber 收到自己的 publish 会重复 push 一次.
+        if payload.get("sender") == self._instance_id:
             return
         event_type = payload.get("type", "")
         data = payload.get("data")

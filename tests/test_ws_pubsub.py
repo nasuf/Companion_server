@@ -81,7 +81,9 @@ async def test_send_event_slow_path_local_miss_publishes():
     args = fake_redis.publish.await_args.args
     assert args[0] == "ws:conv:{conv-elsewhere}"
     payload = json.loads(args[1])
-    assert payload == {"type": "stream", "data": {"chunk": "abc"}}
+    assert payload["type"] == "stream"
+    assert payload["data"] == {"chunk": "abc"}
+    assert "sender" in payload  # 防 self-receive 双发, 见 _handle_message 过滤
 
 
 @pytest.mark.asyncio
@@ -286,6 +288,52 @@ def test_pubsub_client_does_not_inherit_business_socket_timeout():
     # 应启 keepalive + 健康检查
     assert pool_kwargs.get("socket_keepalive") is True
     assert pool_kwargs.get("health_check_interval") == 30
+
+
+@pytest.mark.asyncio
+async def test_subscriber_skips_self_published_messages():
+    """Regression for first_greeting 重复显示: send_to_workspace 同时本地 push +
+    publish, 自己的 subscriber 收到自己的 publish 会重复 push 一次. 防 self-receive
+    通过 sender_id 过滤."""
+    mgr = ConnectionManager()
+    ws = _make_ws()
+    await mgr.connect("conv-1", "user-1", ws, workspace_id="ws-1")
+
+    # 模拟收到自己 publish 的消息 (同 instance_id)
+    self_payload = json.dumps({
+        "sender": mgr._instance_id,
+        "type": "proactive",
+        "data": {"text": "hi"},
+    })
+    msg = {
+        "type": "pmessage",
+        "channel": b"ws:workspace:{ws-1}",
+        "data": self_payload.encode(),
+    }
+    await mgr._handle_message(msg)
+    # self-publish 应被丢弃, ws.send_json 不应被调用
+    ws.send_json.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_processes_other_sender_messages():
+    """非 self instance 的 publish 仍正常 dispatch."""
+    mgr = ConnectionManager()
+    ws = _make_ws()
+    await mgr.connect("conv-1", "user-1", ws, workspace_id="ws-1")
+
+    other_payload = json.dumps({
+        "sender": "other-worker-instance",
+        "type": "proactive",
+        "data": {"text": "hi"},
+    })
+    msg = {
+        "type": "pmessage",
+        "channel": b"ws:workspace:{ws-1}",
+        "data": other_payload.encode(),
+    }
+    await mgr._handle_message(msg)
+    ws.send_json.assert_awaited_once()
 
 
 @pytest.mark.asyncio

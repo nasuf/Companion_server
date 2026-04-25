@@ -175,6 +175,34 @@ class TestAgentsOwnership:
             r = client.get("/agents/a1/provision-status", headers=_hdr("u1"))
         assert r.status_code == 403
 
+    def test_get_agent_returns_200_during_provisioning(self, client):
+        """Regression for "agent 创建完成后跳回创建页" bug:
+        get_agent 老用 require_agent_owner (active-only), 期间 GET 返 404 → 前端
+        视为 agent 不存在 → 跳创建页. 改用 _any_status 后 provisioning 阶段也能查."""
+        agent = SimpleNamespace(
+            id="a-prov", userId="u1", status="provisioning",
+            name="x", mbti=None, currentMbti=None, background=None,
+            values=None, gender="male", lifeOverview=None,
+            createdAt=__import__("datetime").datetime.now(),
+        )
+        workspace = SimpleNamespace(id="ws-1", status="active")
+        with (
+            patch("app.api.ownership.db") as db_owner,
+            patch("app.api.public.agents.get_active_workspace",
+                  new_callable=AsyncMock, return_value=workspace),
+        ):
+            db_owner.aiagent.find_unique = AsyncMock(return_value=agent)
+            r = client.get("/agents/a-prov", headers=_hdr("u1"))
+        assert r.status_code == 200, r.text
+
+    def test_get_agent_archived_returns_404(self, client):
+        """archived agent 即使 owner 也应 404 (软删除语义)."""
+        agent = SimpleNamespace(id="a-arch", userId="u1", status="archived")
+        with patch("app.api.ownership.db") as db_owner:
+            db_owner.aiagent.find_unique = AsyncMock(return_value=agent)
+            r = client.get("/agents/a-arch", headers=_hdr("u1"))
+        assert r.status_code == 404
+
 
 # ───────────────────── /memories/* ─────────────────────
 
