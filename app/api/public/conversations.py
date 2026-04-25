@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.jwt_auth import require_user
+from app.api.ownership import require_conversation_owner, require_user_self
 from app.db import db
 from app.models.conversation import ConversationCreate, ConversationResponse
 from app.models.message import MessageResponse
@@ -11,7 +13,17 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
 @router.post("", response_model=ConversationResponse)
-async def create_conversation(data: ConversationCreate):
+async def create_conversation(
+    data: ConversationCreate,
+    user: dict = Depends(require_user),
+):
+    if data.user_id != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your user_id")
+    agent = await db.aiagent.find_unique(where={"id": data.agent_id})
+    if not agent or getattr(agent, "status", "active") != "active":
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your agent")
     workspace = None
     if data.workspace_id:
         workspace = await get_workspace_by_id(data.workspace_id)
@@ -76,10 +88,7 @@ async def create_conversation(data: ConversationCreate):
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)
-async def get_conversation(conversation_id: str):
-    conv = await db.conversation.find_unique(where={"id": conversation_id})
-    if not conv or conv.isDeleted:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+async def get_conversation(conv=Depends(require_conversation_owner)):
     return ConversationResponse(
         id=conv.id,
         user_id=conv.userId,
@@ -93,14 +102,13 @@ async def get_conversation(conversation_id: str):
 
 @router.get("", response_model=list[ConversationResponse])
 async def list_conversations(
-    user_id: str | None = None,
+    user_id: str = Query(...),
     workspace_id: str | None = None,
     limit: int = Query(default=50, le=200),
     offset: int = 0,
+    _user=Depends(require_user_self),
 ):
-    where = {"isDeleted": False}
-    if user_id:
-        where["userId"] = user_id
+    where: dict = {"isDeleted": False, "userId": user_id}
     if workspace_id:
         where["workspaceId"] = workspace_id
     convs = await db.conversation.find_many(
@@ -125,10 +133,8 @@ async def list_messages(
     conversation_id: str,
     limit: int = Query(default=100, le=500),
     offset: int = 0,
+    _conv=Depends(require_conversation_owner),
 ):
-    conv = await db.conversation.find_unique(where={"id": conversation_id})
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
     messages = await db.message.find_many(
         where={"conversationId": conversation_id},
         order={"createdAt": "desc"},
@@ -149,12 +155,9 @@ async def list_messages(
 
 
 @router.delete("/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    conv = await db.conversation.find_unique(where={"id": conversation_id})
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+async def delete_conversation(conv=Depends(require_conversation_owner)):
     await db.conversation.update(
-        where={"id": conversation_id},
+        where={"id": conv.id},
         data={"isDeleted": True, "archivedAt": datetime.now(UTC)},
     )
     return {"status": "deleted"}

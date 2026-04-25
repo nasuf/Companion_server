@@ -60,6 +60,12 @@ def test_create_user(mock_deps):
         assert response.json()["name"] == "Test User"
 
 
+def _auth_header(user_id: str = "user-id") -> dict:
+    """Build Authorization header with a valid JWT for the given user_id."""
+    from app.services.auth import create_jwt
+    return {"Authorization": f"Bearer {create_jwt(user_id, role='user')}"}
+
+
 def test_create_agent(mock_deps):
     """POST /agents creates an agent."""
     client = mock_deps
@@ -92,14 +98,18 @@ def test_create_agent(mock_deps):
         mock_db.aiagent = MagicMock()
         mock_db.aiagent.create = AsyncMock(return_value=mock_agent)
         mock_db.aiagent.update = AsyncMock(return_value=mock_agent)
-        response = client.post("/agents", json={
-            "name": "TestBot",
-            "user_id": "user-id",
-            "personality": {
-                "lively": 70, "rational": 60, "emotional": 40,
-                "planned": 55, "spontaneous": 45, "creative": 65, "humor": 50,
+        response = client.post(
+            "/agents",
+            headers=_auth_header("user-id"),
+            json={
+                "name": "TestBot",
+                "user_id": "user-id",
+                "personality": {
+                    "lively": 70, "rational": 60, "emotional": 40,
+                    "planned": 55, "spontaneous": 45, "creative": 65, "humor": 50,
+                },
             },
-        })
+        )
         assert response.status_code == 200
         assert response.json()["name"] == "TestBot"
 
@@ -108,7 +118,11 @@ def test_list_memories(mock_deps):
     """GET /memories returns memory list."""
     client = mock_deps
     with patch("app.api.public.memories.memory_repo.find_many", new_callable=AsyncMock, return_value=[]):
-        response = client.get("/memories", params={"user_id": "test-user"})
+        response = client.get(
+            "/memories",
+            params={"user_id": "test-user"},
+            headers=_auth_header("test-user"),
+        )
         assert response.status_code == 200
         assert response.json() == []
 
@@ -130,7 +144,11 @@ def test_memory_stats(mock_deps):
         "app.api.public.memories.resolve_workspace_id",
         new_callable=AsyncMock, return_value="ws-1",
     ), patch("app.api.public.memories.db", fake_db):
-        response = client.get("/memories/stats", params={"user_id": "test-user", "source": "user"})
+        response = client.get(
+            "/memories/stats",
+            params={"user_id": "test-user", "source": "user"},
+            headers=_auth_header("test-user"),
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 3
@@ -148,6 +166,7 @@ def test_search_memories_forwards_workspace_and_taxonomy_filters(mock_deps):
     with patch("app.api.public.memories.retrieve_memories", new_callable=AsyncMock, return_value=[]) as mock_retrieve:
         response = client.post(
             "/memories/search?user_id=test-user",
+            headers=_auth_header("test-user"),
             json={
                 "query": "她最近工作怎么样",
                 "top_k": 8,

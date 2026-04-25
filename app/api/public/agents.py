@@ -2,9 +2,11 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from prisma import Json
 
+from app.api.jwt_auth import require_user
+from app.api.ownership import require_agent_owner, require_user_self
 from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.interaction.boundary import init_patience
@@ -40,7 +42,12 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 
 @router.post("", response_model=AgentResponse)
-async def create_agent(data: AgentCreate):
+async def create_agent(
+    data: AgentCreate,
+    user: dict = Depends(require_user),
+):
+    if data.user_id != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your user_id")
     # Per spec §1.2: 7-dim / Big Five 用户输入仅作为 MBTI 计算的临时输入,
     # 不再常驻 DB. MBTI 在 _init_mbti() 里生成并写入.
     create_data: dict = {
@@ -196,12 +203,9 @@ async def create_agent(data: AgentCreate):
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(agent_id: str):
+async def get_agent(agent_id: str, agent=Depends(require_agent_owner)):
     workspace = await get_active_workspace(agent_id=agent_id)
     if not workspace:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return AgentResponse(
         id=agent.id,
@@ -218,11 +222,11 @@ async def get_agent(agent_id: str):
 
 
 @router.get("", response_model=list[AgentResponse])
-async def list_agents(user_id: str | None = None):
-    where = {"status": "active"}
-    if user_id:
-        where["userId"] = user_id
-    agents = await db.aiagent.find_many(where=where)
+async def list_agents(
+    user_id: str = Query(...),
+    _user=Depends(require_user_self),
+):
+    agents = await db.aiagent.find_many(where={"status": "active", "userId": user_id})
     return [
         AgentResponse(
             id=a.id,
@@ -241,7 +245,11 @@ async def list_agents(user_id: str | None = None):
 
 
 @router.patch("/{agent_id}", response_model=AgentResponse)
-async def update_agent(agent_id: str, data: AgentUpdate):
+async def update_agent(
+    agent_id: str,
+    data: AgentUpdate,
+    _agent=Depends(require_agent_owner),
+):
     update_data = {}
     if data.name is not None:
         update_data["name"] = data.name
@@ -269,17 +277,18 @@ async def update_agent(agent_id: str, data: AgentUpdate):
 
 
 @router.post("/{agent_id}/regenerate-mbti", response_model=AgentResponse)
-async def regenerate_mbti(agent_id: str, data: RegenerateMbtiRequest):
+async def regenerate_mbti(
+    agent_id: str,
+    data: RegenerateMbtiRequest,
+    agent=Depends(require_agent_owner),
+):
     """重写 agent 的 MBTI 性格。
 
     body 必填: {"mbti": {EI, NS, TF, JP}} (4 个 0-100 整数)
     后端按这 4 个数字构建新 MBTI (LLM 仅用于生成 summary 文本) 并同时
     覆盖 mbti + currentMbti, trait_adjustment 累计偏移 reset.
     """
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
+    _ = agent  # 已由 require_agent_owner 校验存在 + 拥有
     try:
         new_mbti = await build_mbti(data.mbti.model_dump())
     except ValueError as e:
@@ -323,19 +332,22 @@ async def _resolve_schedule(agent_id: str):
 
 
 @router.get("/{agent_id}/schedule")
-async def get_agent_schedule(agent_id: str):
+async def get_agent_schedule(
+    agent_id: str,
+    _agent=Depends(require_agent_owner),
+):
     """获取Agent当日作息表。"""
     _, schedule = await _resolve_schedule(agent_id)
     return {"agent_id": agent_id, "schedule": schedule}
 
 
 @router.get("/{agent_id}/schedule-history")
-async def get_schedule_history(agent_id: str, days: int = 30):
+async def get_schedule_history(
+    agent_id: str,
+    days: int = 30,
+    agent=Depends(require_agent_owner),
+):
     """获取Agent作息历史（含生活画像）。"""
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent or getattr(agent, "status", "active") != "active":
-        raise HTTPException(status_code=404, detail="Agent not found")
-
     since = datetime.now(UTC) - timedelta(days=days)
     records = await db.aidailyschedule.find_many(
         where={"agentId": agent_id, "date": {"gte": since}},
@@ -351,7 +363,10 @@ async def get_schedule_history(agent_id: str, days: int = 30):
 
 
 @router.get("/{agent_id}/status")
-async def get_agent_status(agent_id: str):
+async def get_agent_status(
+    agent_id: str,
+    _agent=Depends(require_agent_owner),
+):
     """获取Agent当前状态。"""
     _, schedule = await _resolve_schedule(agent_id)
     status = get_current_status(schedule)
@@ -364,14 +379,22 @@ async def get_agent_status(agent_id: str):
 
 
 @router.get("/{agent_id}/provision-status")
-async def get_provision_status(agent_id: str):
+async def get_provision_status(
+    agent_id: str,
+    user: dict = Depends(require_user),
+):
     """获取Agent初始化进度（人生经历生成）。
 
     前端轮询此接口显示进度条，直到 stage=complete。
+
+    require_agent_owner 需要 status="active", 但 provisioning 阶段 status
+    是 "provisioning", 这里手工做 ownership 校验.
     """
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your agent")
 
     # 已激活 → 直接返回完成
     if agent.status == "active":

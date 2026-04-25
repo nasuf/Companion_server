@@ -1,18 +1,19 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
 
-from app.db import db
-
+from app.api.ownership import require_agent_owner, require_user_self
 from app.services.interaction.boundary import get_patience, get_patience_zone
 
 router = APIRouter(prefix="/boundary", tags=["boundary"])
 
 
 @router.get("/{agent_id}/{user_id}")
-async def get_boundary_status(agent_id: str, user_id: str):
-    """获取耐心值和状态区间。"""
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent or getattr(agent, "status", "active") != "active":
-        raise HTTPException(status_code=404, detail="Agent not found")
+async def get_boundary_status(
+    agent_id: str,
+    user_id: str,
+    _agent=Depends(require_agent_owner),
+    _user=Depends(require_user_self),
+):
+    """获取耐心值和状态区间。需 JWT, agent 必须属本人, user_id 必须为本人."""
     patience = await get_patience(agent_id, user_id)
     return {
         "patience": patience,

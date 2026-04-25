@@ -1,7 +1,8 @@
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.api.ownership import require_memory_owner, require_user_self
 from app.db import db
 from app.models.memory import (
     MemoryResponse,
@@ -68,6 +69,7 @@ async def list_memories(
     search: str | None = None,
     limit: int = Query(default=50, le=200),
     offset: int = 0,
+    _user=Depends(require_user_self),
 ):
     where: dict = {"userId": user_id, "isArchived": False}
     if workspace_id:
@@ -118,6 +120,7 @@ async def memory_stats(
     user_id: str,
     workspace_id: str | None = None,
     source: Literal["user", "ai"] | None = None,
+    _user=Depends(require_user_self),
 ):
     """Return raw grouped counts. Frontend computes cross-filtered totals."""
     ws_id = workspace_id or await resolve_workspace_id(user_id=user_id)
@@ -125,9 +128,11 @@ async def memory_stats(
 
 
 @router.post("/search")
-async def search_memories(data: MemorySearchRequest, user_id: str = Query(default="")):
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id is required")
+async def search_memories(
+    data: MemorySearchRequest,
+    user_id: str = Query(...),
+    _user=Depends(require_user_self),
+):
     results = await retrieve_memories(
         data.query,
         user_id=user_id,
@@ -140,10 +145,7 @@ async def search_memories(data: MemorySearchRequest, user_id: str = Query(defaul
 
 
 @router.get("/{memory_id}", response_model=MemoryResponse)
-async def get_memory(memory_id: str):
-    m = await memory_repo.find_unique(memory_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Memory not found")
+async def get_memory(m=Depends(require_memory_owner)):
     return MemoryResponse(
         id=m.id,
         user_id=m.userId,
