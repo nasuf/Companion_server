@@ -174,3 +174,65 @@ def test_life_event_time_ranges_all_in_past():
     for field, (lo, hi) in _LIFE_EVENT_TIME_RANGE.items():
         assert lo >= 0, f"{field} has negative min"
         assert hi > lo, f"{field} hi <= lo"
+
+
+def test_event_memories_carry_occur_time_to_storage_dict():
+    """convert 输出含 occur_time 字段, store_memories_batch 必须保留 (regression
+    test for occurTime drop in batch insert)."""
+    profile = _profile(life_events={"education": ["A 事件"]})
+    memories = convert_profile_to_memories(profile, None)
+    edu = next(m for m in memories if m["sub_category"] == "教育")
+    # 字段名是 "occur_time" (snake_case), 后续 store_memories_batch 把它映射到 occurTime
+    assert "occur_time" in edu
+    assert isinstance(edu["occur_time"], datetime)
+
+
+def test_phase1_does_not_duplicate_zodiac_when_profile_has_it():
+    """v2 schema 下 LLM 生成 identity.zodiac, _phase1_direct_memories 不应再派生
+    一次 (避免重复记忆)."""
+    from app.services.life_story import _phase1_direct_memories
+
+    profile_data = {
+        "identity": {
+            "name": "测试", "gender": "女", "age": 25,
+            "birthday": "2001-03-15",
+            "zodiac": "蛇",
+            "constellation": "双鱼座",
+            "blood_type": "A型",
+        },
+    }
+    memories = _phase1_direct_memories(
+        profile_data=profile_data, career_template=None,
+        name="测试", agent_id="test-agent",
+    )
+    zodiac_mems = [m for m in memories if m["sub_category"] == "生肖"]
+    constellation_mems = [m for m in memories if m["sub_category"] == "星座"]
+    blood_mems = [m for m in memories if m["sub_category"] == "血型"]
+    # 各 sub 只允许 1 条 (LLM 已生成, 派生函数应跳过)
+    assert len(zodiac_mems) == 1
+    assert len(constellation_mems) == 1
+    assert len(blood_mems) == 1
+
+
+def test_phase1_falls_back_to_derive_when_profile_missing_zodiac():
+    """旧 schema 或 LLM 漏填时, _phase1_direct_memories 应派生兜底."""
+    from app.services.life_story import _phase1_direct_memories
+
+    profile_data = {
+        "identity": {
+            "name": "测试", "gender": "女", "age": 25,
+            "birthday": "2001-03-15",
+            # 没有 zodiac/constellation/blood_type
+        },
+    }
+    memories = _phase1_direct_memories(
+        profile_data=profile_data, career_template=None,
+        name="测试", agent_id="test-agent",
+    )
+    zodiac_mems = [m for m in memories if m["sub_category"] == "生肖"]
+    constellation_mems = [m for m in memories if m["sub_category"] == "星座"]
+    blood_mems = [m for m in memories if m["sub_category"] == "血型"]
+    # 派生函数兜底, 至少 1 条
+    assert len(zodiac_mems) == 1
+    assert len(constellation_mems) == 1
+    assert len(blood_mems) == 1

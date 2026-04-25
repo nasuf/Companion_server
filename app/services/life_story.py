@@ -838,7 +838,7 @@ async def store_memories_batch(
             source="ai",
             level=1,
         )
-        memory_rows.append({
+        row = {
             "id": mid,
             "userId": user_id,
             "content": summary,
@@ -849,7 +849,12 @@ async def store_memories_batch(
             "mainCategory": taxonomy.main_category,
             "subCategory": taxonomy.sub_category,
             "workspaceId": workspace_id,
-        })
+        }
+        # Part 5 §3.1: life_events / emotion_events 等过去事件带 occur_time,
+        # 让 retrieval 能按时间过滤、L3 awakening 能找到久远记忆.
+        if mem.get("occur_time") is not None:
+            row["occurTime"] = mem["occur_time"]
+        memory_rows.append(row)
         changelog_rows.append({
             "userId": user_id,
             "memoryId": mid,
@@ -994,18 +999,19 @@ def _phase1_direct_memories(name: str, profile_data: dict,
         "type": "identity", "importance": 1.0,
     })
 
-    identity = as_dict(profile_data, "identity")
-    birthday = _clean_text(identity.get("birthday"))
-    if (v := derive_constellation(birthday)):
-        memories.append({"summary": f"我是{v}", "main_category": "身份",
-                        "sub_category": "星座", "type": "identity", "importance": 0.75})
-    if (v := derive_zodiac(birthday)):
-        memories.append({"summary": f"我属{v}", "main_category": "身份",
-                        "sub_category": "生肖", "type": "identity", "importance": 0.75})
-
+    # v2 schema 让 LLM 直接输出 zodiac/constellation/blood_type 字段, 已被
+    # convert_profile_to_memories 转成记忆. 这里只对未生成的 sub 兜底派生.
     existing_identity_subs = {
         m["sub_category"] for m in memories if m["main_category"] == "身份"
     }
+    identity = as_dict(profile_data, "identity")
+    birthday = _clean_text(identity.get("birthday"))
+    if "星座" not in existing_identity_subs and (v := derive_constellation(birthday)):
+        memories.append({"summary": f"我是{v}", "main_category": "身份",
+                        "sub_category": "星座", "type": "identity", "importance": 0.75})
+    if "生肖" not in existing_identity_subs and (v := derive_zodiac(birthday)):
+        memories.append({"summary": f"我属{v}", "main_category": "身份",
+                        "sub_category": "生肖", "type": "identity", "importance": 0.75})
     if "血型" not in existing_identity_subs:
         memories.append({"summary": f"我是{sample_blood_type(agent_id)}血", "main_category": "身份",
                         "sub_category": "血型", "type": "identity", "importance": 0.75})
