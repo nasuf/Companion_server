@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 from app.db import db
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_chat_model, invoke_json
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,6 @@ DEFAULT_TEMPLATE_SCHEMA = {
             "fields": [
                 {"key": "title", "name": "职业", "type": "text"},
                 {"key": "duties", "name": "工作内容", "type": "textarea"},
-                {"key": "output", "name": "主要产出物", "type": "textarea"},
                 {"key": "social_value", "name": "社会价值", "type": "textarea"},
                 {"key": "clients", "name": "服务对象", "type": "tags"},
                 {"key": "income", "name": "经济状况", "type": "text",
@@ -179,8 +178,6 @@ DEFAULT_TEMPLATE_SCHEMA = {
                 {"key": "sounds", "name": "噪音", "type": "tags",
                  "_memory_sub": "审美厌恶"},
                 {"key": "smells", "name": "气味", "type": "tags",
-                 "_memory_sub": "审美厌恶"},
-                {"key": "habits", "name": "习惯", "type": "tags",
                  "_memory_sub": "审美厌恶"},
             ],
         },
@@ -403,25 +400,39 @@ async def ensure_default_template() -> None:
     logger.info("Default character template seeded (v2)")
 
 
-def _is_v2_schema(schema: dict | None) -> bool:
-    """v2 schema 标志: 包含 life_events / emotion_events 分类."""
+def _is_current_schema(schema: dict | None) -> bool:
+    """当前 schema 标志 (v2.1):
+    - 包含 life_events / emotion_events 分类
+    - career 不再有 output 字段 (4.21 spec 删除)
+    - dislikes 不再有 habits 字段 (不在 spec)
+    """
     if not isinstance(schema, dict):
         return False
-    keys = {cat.get("key") for cat in schema.get("categories", [])}
-    return "life_events" in keys and "emotion_events" in keys
+    cats = schema.get("categories", [])
+    keys = {cat.get("key") for cat in cats}
+    if not ("life_events" in keys and "emotion_events" in keys):
+        return False
+    for cat in cats:
+        if cat.get("key") == "career":
+            if any(f.get("key") == "output" for f in cat.get("fields", [])):
+                return False
+        if cat.get("key") == "dislikes":
+            if any(f.get("key") == "habits" for f in cat.get("fields", [])):
+                return False
+    return True
 
 
 async def _migrate_default_template(existing) -> None:
-    """One-shot 迁移: 旧 schema (9 分类 / 无 life_events 等) → v2 (13 分类).
+    """One-shot 迁移: 旧 schema → 最新版本.
 
-    检测到 v2 标志缺失时全量覆盖默认模板的 schemaData + defaults + description.
+    检测当前版本标志缺失时全量覆盖默认模板的 schemaData + defaults + description.
     用户改过的非默认模板 (status != active 或 name != DEFAULT_TEMPLATE_NAME) 不动.
     """
     from prisma import Json
 
     schema = existing.schemaData if isinstance(existing.schemaData, dict) else None
-    if _is_v2_schema(schema):
-        return  # 已是 v2
+    if _is_current_schema(schema):
+        return  # 已是最新
 
     await db.charactertemplate.update(
         where={"id": existing.id},
@@ -471,13 +482,13 @@ DEFAULT_PROMPT_REQUIREMENTS = (
     "要求：\n"
     "1. 所有字段必须填充，内容具体、有画面感\n"
     "2. 各项内容逻辑自洽（职业、教育、喜好、价值观之间要合理关联）\n"
-    "3. tags 类型的字段返回字符串数组\n"
-    "4. text/textarea 类型的字段返回字符串\n"
+    "3. tags 类型的字段返回字符串数组（数组元素必须是字符串，不能是对象）\n"
+    "4. text/textarea 类型的字段必须返回**单一字符串**，禁止返回对象/数组；如有多项内容（如「短期 + 长期」「赞同 + 反对」），用一段连贯文字串起来，不要拆成 {{\"short\": ..., \"long\": ...}} 这样的对象\n"
     "5. number 类型的字段返回数字\n"
     "6. 每次生成的角色要有独特性，不要雷同\n"
     "7. 这是第 {index} 个角色，请确保与之前的角色有明显差异\n\n"
     "返回JSON，顶层 key 为分类的 key，值为该分类所有字段 key→value 的 dict。\n"
-    "例如: {{\"identity\": {{\"name\": \"...\", \"gender\": \"...\", ...}}, \"appearance\": {{...}}, ...}}"
+    "例如: {{\"identity\": {{\"gender\": \"...\", \"age\": 25, ...}}, \"appearance\": {{...}}, ...}}"
 )
 
 
@@ -501,16 +512,14 @@ def _build_career_section(career: dict) -> str:
     """将职业背景数据格式化为 prompt 注入段落。告知 LLM 围绕此职业生成其他分类，
     但不要求 LLM 生成职业字段本身（后处理直接赋值）。
 
-    income / output 缺省时用合规默认值: spec PDF 要求年收入 < 10 万。
+    income 缺省时用合规默认值: spec PDF 要求年收入 < 10 万。
     """
     income = career.get("income") or "年薪 5-10 万"
-    output = career.get("output") or "（请由 LLM 推断该职业的典型主要产出物）"
     social_value = career.get("socialValue", career.get("social_value", ""))
     return (
         "===== 该角色的职业背景（仅供参考，不需要在输出中生成 career 分类）=====\n"
         f"职业: {career.get('title', '')}\n"
         f"工作内容: {career.get('duties', '')}\n"
-        f"主要产出物: {output}\n"
         f"社会价值: {social_value}\n"
         f"服务对象: {career.get('clients', '')}\n"
         f"经济状况: {income}\n\n"
@@ -656,13 +665,155 @@ async def generate_single_profile(
     except Exception:
         pass
 
-    model = get_utility_model()
-    data = await invoke_json(model, prompt)
+    # Schema v2: prompt ~6K + 输出 JSON ~3-4K (含 26 项过去事件 × 3-5 场景),
+    # 远超 utility_fast 8s timeout. 用 chat 大模型 + background profile (120s).
+    model = get_chat_model()
+    data = await invoke_json(model, prompt, profile="background")
     if not isinstance(data, dict):
         return {}
+
+    # 缺字段 repair: schema v2 满输出可能擦边 max_tokens, 偶发末尾字段截断.
+    # 检测后只对缺失字段发一次 follow-up 调用 (输出 1-2K, 不会再截断).
+    missing = _detect_missing_fields(schema, data)
+    if missing:
+        logger.warning(f"character profile missing {len(missing)} fields, running repair")
+        repaired = await _repair_missing_fields(schema, data, missing, model)
+        for cat_key, fields in repaired.items():
+            data.setdefault(cat_key, {}).update(fields)
+
     return _apply_postprocess_overrides(
         data, agent_name=effective_name, career=career,
     )
+
+
+# 这些字段由 _apply_postprocess_overrides 硬覆盖, 不参与 repair 检测.
+_REPAIR_SKIP_CATEGORIES = frozenset({"career"})
+_REPAIR_SKIP_IDENTITY_FIELDS = frozenset({"name", "ethnicity", "gender"})
+
+
+def _is_field_empty(value: object, field_type: str) -> bool:
+    """判定 LLM 输出字段是否为空 (需要 repair)."""
+    if value is None:
+        return True
+    if field_type in ("tags",):
+        return not isinstance(value, list) or len(value) == 0
+    if field_type in ("text", "textarea", "select", "date"):
+        return not isinstance(value, str) or not value.strip()
+    if field_type == "number":
+        return not isinstance(value, (int, float))
+    return value in (None, "", [], {})
+
+
+def _detect_missing_fields(
+    schema: dict, data: dict,
+) -> list[tuple[str, dict]]:
+    """返回 [(category_key, field_dict), ...], 跳过 career 与 identity 硬覆盖字段."""
+    missing: list[tuple[str, dict]] = []
+    for cat in schema.get("categories", []):
+        cat_key = cat.get("key")
+        if not cat_key or cat_key in _REPAIR_SKIP_CATEGORIES:
+            continue
+        cat_data = data.get(cat_key)
+        cat_data = cat_data if isinstance(cat_data, dict) else {}
+        for field in cat.get("fields", []):
+            field_key = field.get("key")
+            if not field_key:
+                continue
+            if cat_key == "identity" and field_key in _REPAIR_SKIP_IDENTITY_FIELDS:
+                continue
+            if _is_field_empty(cat_data.get(field_key), field.get("type", "text")):
+                missing.append((cat_key, field))
+    return missing
+
+
+def _build_repair_prompt(
+    schema: dict, data: dict, missing: list[tuple[str, dict]],
+) -> str:
+    """构造 follow-up prompt: 注入已生成的 identity 摘要, 让 LLM 只补缺失字段."""
+    identity = data.get("identity", {}) if isinstance(data.get("identity"), dict) else {}
+    career = data.get("career", {}) if isinstance(data.get("career"), dict) else {}
+    persona_summary = (
+        f"姓名: {identity.get('name', '')}; "
+        f"性别: {identity.get('gender', '')}; "
+        f"年龄: {identity.get('age', '')}; "
+        f"职业: {career.get('title', '')}; "
+        f"现居地: {identity.get('location', '')}"
+    )
+
+    # 按分类聚合缺字段
+    by_cat: dict[str, list[dict]] = {}
+    for cat_key, field in missing:
+        by_cat.setdefault(cat_key, []).append(field)
+
+    cat_name_map = {cat["key"]: cat.get("name", cat["key"]) for cat in schema.get("categories", [])}
+    cat_hint_map = {cat["key"]: cat.get("hint", "") for cat in schema.get("categories", [])}
+
+    lines = [
+        "你之前已经为以下角色生成了部分背景信息, 但有些字段输出被截断丢失了.",
+        "请只补齐下面列出的缺失字段, 保持与已生成内容的人设一致.\n",
+        f"角色概要: {persona_summary}\n",
+        "需要补齐的字段:",
+    ]
+    for cat_key, fields in by_cat.items():
+        cat_label = cat_name_map.get(cat_key, cat_key)
+        cat_hint = cat_hint_map.get(cat_key, "")
+        lines.append(f"\n[{cat_label}]（key: {cat_key}）" + (f" — {cat_hint}" if cat_hint else ""))
+        for f in fields:
+            line = f"  - {f.get('name')}（key: {f.get('key')}, 类型: {f.get('type')}）"
+            if f.get("hint"):
+                line += f"; 提示: {f['hint']}"
+            lines.append(line)
+
+    lines.append(
+        "\n返回 JSON, 顶层 key 为分类 key, 值为该分类下缺失字段的 key→value dict. "
+        "例如: {\"life_events\": {\"relationships\": [\"...\", \"...\"]}, "
+        "\"emotion_events\": {\"relieved\": [\"...\"]}}.\n"
+        "tags 类型必须返回数组. 不要重复输出已有字段, 也不要包含其他分类."
+    )
+    return "\n".join(lines)
+
+
+async def _repair_missing_fields(
+    schema: dict, data: dict, missing: list[tuple[str, dict]], model,
+) -> dict[str, dict]:
+    """调 LLM 补缺. 失败返回空 dict (不抛, 让上层接受不完整结果)."""
+    prompt = _build_repair_prompt(schema, data, missing)
+    try:
+        result = await invoke_json(model, prompt, profile="background")
+    except Exception as e:
+        logger.warning(f"character repair LLM call failed: {e}")
+        return {}
+    if not isinstance(result, dict):
+        return {}
+    # 过滤: 只保留我们要求的 (cat_key, field_key) 组合, 防 LLM 多嘴
+    wanted: dict[str, set[str]] = {}
+    for cat_key, field in missing:
+        fk = field.get("key")
+        if fk:
+            wanted.setdefault(cat_key, set()).add(fk)
+    cleaned: dict[str, dict] = {}
+    for cat_key, fields in result.items():
+        if cat_key not in wanted or not isinstance(fields, dict):
+            continue
+        sub: dict = {}
+        for fk, fv in fields.items():
+            if fk in wanted[cat_key]:
+                sub[fk] = fv
+        if sub:
+            cleaned[cat_key] = sub
+    return cleaned
+
+
+def _split_clients(clients) -> list[str]:
+    """职业服务对象: 既兼容 list (新数据) 又兼容字符串 (DB 原始字段, 含 、，；\\n 分隔符)."""
+    if isinstance(clients, list):
+        return [str(s).strip() for s in clients if str(s).strip()]
+    if not clients:
+        return []
+    val = str(clients)
+    for sep in ("、", "，", "；", "\n"):
+        val = val.replace(sep, ",")
+    return [s.strip() for s in val.split(",") if s.strip()]
 
 
 def _apply_postprocess_overrides(
@@ -673,20 +824,23 @@ def _apply_postprocess_overrides(
 ) -> dict:
     """LLM 输出后强制覆盖几个字段, 保证 spec 一致性:
     - identity.ethnicity 硬写「汉族」(spec PDF #34 第一维 #8: "汉族")
-    - identity.name 直接引用注入的姓名 (spec PDF #34 第一维 #1: "直接引用")
+    - identity.name 直接引用注入的姓名 (PDF #34 第一维 #1 "直接引用");
+      未注入 (admin 背景池批量生成无姓名) 时清空, 防 LLM 自填随机名进 DB
     - career 分类用预设池数据回填 (LLM 不生成 career, 见 build_generation_prompt)
     """
     profile.setdefault("identity", {})
     profile["identity"]["ethnicity"] = "汉族"
     if agent_name:
         profile["identity"]["name"] = agent_name
+    else:
+        # 背景池场景: 名字由用户在 agent 创建页输入, 这里清掉 LLM 自填的随机名
+        profile["identity"].pop("name", None)
     if career:
         profile["career"] = {
             "title": career.get("title"),
             "duties": career.get("duties"),
-            "output": career.get("output") or "",
             "social_value": career.get("socialValue") or career.get("social_value") or "",
-            "clients": career.get("clients"),
+            "clients": _split_clients(career.get("clients")),
             "income": career.get("income") or "年薪 5-10 万",
         }
     return profile

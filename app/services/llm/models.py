@@ -66,7 +66,11 @@ def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_base_url,
         temperature=0.7,
-        max_tokens=4096,
+        # 8192 是 qwen-plus 输出硬上限. character schema v2 (26 项过去事件 ×
+        # 3-5 场景 + 偏好/价值观/能力等) 满输出约 6-7K tokens, 4K 会截断丢失
+        # 末尾字段 (life_events.special / emotion_events.relieved 等).
+        # 普通聊天回复 <500 tokens, 不受影响.
+        max_tokens=8192,
         extra_body={"enable_thinking": settings.dashscope_enable_thinking},
     )
 
@@ -77,7 +81,7 @@ def _claude_model() -> ChatAnthropic:
     return ChatAnthropic(
         model="claude-sonnet-4-20250514",
         api_key=settings.anthropic_api_key,
-        max_tokens=4096,
+        max_tokens=8192,
     )
 
 

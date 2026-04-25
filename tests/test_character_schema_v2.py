@@ -10,7 +10,7 @@ from app.services.character import (
     DEFAULT_PROMPT_HEADER,
     build_generation_prompt,
     _apply_postprocess_overrides,
-    _is_v2_schema,
+    _is_current_schema,
 )
 from app.services.memory.taxonomy import TAXONOMY_MATRIX
 
@@ -109,11 +109,49 @@ def test_taxonomy_ai_l1_named_subs_covered_by_schema():
     assert not missing, f"taxonomy subs missing schema field: {missing}"
 
 
-def test_is_v2_schema_detects_correctly():
-    assert _is_v2_schema(DEFAULT_TEMPLATE_SCHEMA) is True
+def test_is_current_schema_detects_correctly():
+    assert _is_current_schema(DEFAULT_TEMPLATE_SCHEMA) is True
     old_schema = {"categories": [{"key": "identity", "fields": []}]}
-    assert _is_v2_schema(old_schema) is False
-    assert _is_v2_schema(None) is False
+    assert _is_current_schema(old_schema) is False
+    assert _is_current_schema(None) is False
+
+
+def test_is_current_schema_rejects_legacy_output_field():
+    """老 schema 残留 career.output 应触发迁移."""
+    legacy = {
+        "categories": [
+            {"key": "life_events", "fields": []},
+            {"key": "emotion_events", "fields": []},
+            {"key": "career", "fields": [{"key": "output", "name": "主要产出物"}]},
+        ],
+    }
+    assert _is_current_schema(legacy) is False
+
+
+def test_is_current_schema_rejects_legacy_dislikes_habits():
+    """老 schema 残留 dislikes.habits 应触发迁移."""
+    legacy = {
+        "categories": [
+            {"key": "life_events", "fields": []},
+            {"key": "emotion_events", "fields": []},
+            {"key": "dislikes", "fields": [{"key": "habits", "name": "习惯"}]},
+        ],
+    }
+    assert _is_current_schema(legacy) is False
+
+
+def test_schema_career_no_output_field():
+    """spec 4.21 删除主要产出物."""
+    career = next(c for c in DEFAULT_TEMPLATE_SCHEMA["categories"] if c["key"] == "career")
+    field_keys = {f["key"] for f in career["fields"]}
+    assert "output" not in field_keys
+
+
+def test_schema_dislikes_no_habits_field():
+    """习惯不在 spec dislikes 维度内."""
+    dislikes = next(c for c in DEFAULT_TEMPLATE_SCHEMA["categories"] if c["key"] == "dislikes")
+    field_keys = {f["key"] for f in dislikes["fields"]}
+    assert "habits" not in field_keys
 
 
 def test_default_prompt_header_contains_required_clauses():
@@ -213,6 +251,15 @@ def test_postprocess_overrides_name_with_agent_name():
     assert result["identity"]["name"] == "李小雨"
 
 
+def test_postprocess_strips_name_when_no_agent_name():
+    """背景池场景 (admin 批量生成无姓名): LLM 自填的随机名应被清掉,
+    名字由用户在 agent 创建页输入."""
+    profile = {"identity": {"name": "林晓晴", "age": 25}}
+    result = _apply_postprocess_overrides(profile, agent_name=None, career=None)
+    assert "name" not in result["identity"]
+    assert result["identity"]["age"] == 25  # 其他字段保留
+
+
 def test_postprocess_fills_career_from_template():
     profile = {"identity": {}}
     career = {
@@ -230,3 +277,121 @@ def test_postprocess_career_income_default_when_missing():
     profile = {"identity": {}}
     result = _apply_postprocess_overrides(profile, agent_name="x", career=career)
     assert result["career"]["income"] == "年薪 5-10 万"
+
+
+def test_postprocess_career_clients_split_from_string():
+    """clients 既支持 list 也支持原始 DB string (含、，；分隔符)."""
+    career = {"title": "x", "clients": "饲养伤残动物的主人；宠物医院、动物康复机构"}
+    profile = {"identity": {}}
+    result = _apply_postprocess_overrides(profile, agent_name="x", career=career)
+    assert result["career"]["clients"] == [
+        "饲养伤残动物的主人", "宠物医院", "动物康复机构",
+    ]
+
+
+def test_postprocess_career_clients_already_list_passthrough():
+    career = {"title": "x", "clients": ["A", "B", " C "]}
+    profile = {"identity": {}}
+    result = _apply_postprocess_overrides(profile, agent_name="x", career=career)
+    assert result["career"]["clients"] == ["A", "B", "C"]
+
+
+# ── repair (缺字段补齐) 测试 ──
+
+from app.services.character import (  # noqa: E402
+    _detect_missing_fields,
+    _is_field_empty,
+    _build_repair_prompt,
+)
+
+
+def test_is_field_empty_tags():
+    assert _is_field_empty([], "tags") is True
+    assert _is_field_empty(None, "tags") is True
+    assert _is_field_empty(["x"], "tags") is False
+
+
+def test_is_field_empty_text():
+    assert _is_field_empty("", "textarea") is True
+    assert _is_field_empty("   ", "textarea") is True
+    assert _is_field_empty(None, "text") is True
+    assert _is_field_empty("hello", "text") is False
+
+
+def test_is_field_empty_textarea_dict_treated_as_empty():
+    """LLM 偶尔给 textarea 返对象 (如 goal: {short: ..., long: ...}),
+    会渲染成 [object Object]. 视为 empty 触发 repair 重生成成合规字符串."""
+    assert _is_field_empty({"short": "x", "long": "y"}, "textarea") is True
+    assert _is_field_empty({"a": 1}, "text") is True
+
+
+def test_is_field_empty_number():
+    assert _is_field_empty(None, "number") is True
+    assert _is_field_empty(0, "number") is False  # 0 is valid
+    assert _is_field_empty(25, "number") is False
+
+
+def test_detect_missing_fields_skips_career_and_identity_overrides():
+    """career 整分类 + identity.{name, ethnicity, gender} 不参与 repair (后处理硬覆盖)."""
+    schema = {
+        "categories": [
+            {"key": "identity", "fields": [
+                {"key": "name", "type": "text"},
+                {"key": "ethnicity", "type": "text"},
+                {"key": "gender", "type": "select"},
+                {"key": "age", "type": "number"},  # 应该被检测
+            ]},
+            {"key": "career", "fields": [
+                {"key": "title", "type": "text"},  # 跳过整分类
+            ]},
+        ],
+    }
+    data = {"identity": {}, "career": {}}  # 全空
+    missing = _detect_missing_fields(schema, data)
+    field_keys = [f.get("key") for _, f in missing]
+    assert field_keys == ["age"]
+
+
+def test_detect_missing_fields_truncation_pattern():
+    """模拟 LLM 截断: life_events 末尾 4 个字段空."""
+    schema = {
+        "categories": [
+            {"key": "life_events", "fields": [
+                {"key": "interaction", "type": "tags"},
+                {"key": "education", "type": "tags"},
+                {"key": "relationships", "type": "tags"},  # 缺
+                {"key": "skill_learning", "type": "tags"},  # 缺
+                {"key": "life", "type": "tags"},  # 缺
+                {"key": "special", "type": "tags"},  # 缺
+            ]},
+        ],
+    }
+    data = {"life_events": {
+        "interaction": ["事件1"], "education": ["事件2"],
+        "relationships": [], "skill_learning": [], "life": [], "special": [],
+    }}
+    missing = _detect_missing_fields(schema, data)
+    field_keys = [f.get("key") for _, f in missing]
+    assert field_keys == ["relationships", "skill_learning", "life", "special"]
+
+
+def test_build_repair_prompt_includes_persona_and_missing_fields():
+    schema = {
+        "categories": [
+            {"key": "life_events", "name": "生活记忆事件", "fields": []},
+        ],
+    }
+    data = {
+        "identity": {"name": "李小雨", "gender": "女", "age": 25, "location": "上海"},
+        "career": {"title": "占卜师"},
+    }
+    missing = [
+        ("life_events", {"key": "relieved", "name": "释怀", "type": "tags",
+                         "hint": "30-80 字"}),
+    ]
+    prompt = _build_repair_prompt(schema, data, missing)
+    assert "李小雨" in prompt
+    assert "占卜师" in prompt
+    assert "释怀" in prompt
+    assert "relieved" in prompt
+    assert "截断丢失" in prompt

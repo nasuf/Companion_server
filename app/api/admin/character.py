@@ -38,15 +38,6 @@ router = APIRouter(prefix="/admin-api/character", tags=["admin-character"])
 
 # ── helpers ──
 
-def _to_tags(val: str) -> list[str]:
-    """Split a delimited string into a tags array."""
-    if not val:
-        return []
-    for sep in ("、", "，", "；", "\n"):
-        val = val.replace(sep, ",")
-    return [s.strip() for s in val.split(",") if s.strip()]
-
-
 def _career_row_to_dict(c) -> dict:
     """Convert a CareerTemplate DB row to a plain dict for prompt injection."""
     return {
@@ -362,14 +353,10 @@ async def generate_profiles(
                 data["identity"] = {}
             data["identity"]["gender"] = "男" if gender_for_run == "male" else "女"
 
-            # 职业字段强制覆盖 — clients 拆成 tags 数组
-            if career:
-                data["career"] = {
-                    "title": career["title"],
-                    "duties": career["duties"],
-                    "social_value": career.get("socialValue", career.get("social_value", "")),
-                    "clients": _to_tags(career["clients"]),
-                }
+            # 职业 / 民族 / 姓名 等覆盖由 generate_single_profile 内部的
+            # _apply_postprocess_overrides 统一处理 (含 income 默认值与 clients 拆 tags),
+            # 此处不再重复.
+
             # 后处理：用生日精确计算年龄（LLM 不擅长算术），再按 spec §1.3
             # 硬钳 20-29（prompt hint 不保证，LLM 偶尔生成超出区间的 birthday）
             identity = data.get("identity")
