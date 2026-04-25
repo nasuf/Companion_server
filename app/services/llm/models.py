@@ -166,6 +166,70 @@ def convert_messages(messages: list[dict]) -> list[BaseMessage]:
     return result
 
 
+def _salvage_truncated_json_object(text: str) -> dict | None:
+    """Recover the longest complete prefix of a top-level JSON object.
+
+    LLM 满 max_tokens 时输出会从中间 (字符串/数字/嵌套对象内部) 突然截断,
+    json.loads 整体失败. 本函数走一遍状态机, 找到最后一次顶层逗号 (或开括号)
+    的位置, 截断到那并补上闭括号, 至少把已完整的 top-level key:value 保住.
+
+    返回 None 表示没救活. 调用方应让 repair pass 来填空缺.
+    """
+    text = text.strip()
+    # 剥掉 ```json ... ``` 围栏 (可能闭围栏因截断缺失)
+    fence = re.match(r"^```(?:json)?\s*\n?", text)
+    if fence:
+        text = text[fence.end():]
+        text = text.rstrip("`").rstrip()
+
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    last_safe_end = -1  # 顶层逗号或开括号后的位置, 在此截断 + 补 "}" 必合法
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+            if depth == 1:
+                last_safe_end = i  # 顶层 `{` 后, 空对象也合法
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                # 完整结束 — 但 json.loads 已经在外层失败了, 说明内部某处坏了
+                # 这种情况罕见, 直接返回 None 让外层处理
+                return None
+        elif ch == "," and depth == 1:
+            last_safe_end = i  # 顶层逗号位, 截到此 (含逗号前) 必能闭合
+
+    if last_safe_end < 0:
+        return None
+
+    # 截断到 last_safe_end (不含此位置的 `,`/`{`), 补 "}" 闭顶层
+    salvaged = text[start:last_safe_end].rstrip().rstrip(",") + "}"
+    try:
+        result = json.loads(salvaged)
+        return result if isinstance(result, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
 def _extract_json(text: str) -> Any:
     """Extract and parse JSON from model output text."""
     text = text.strip()
@@ -189,6 +253,12 @@ def _extract_json(text: str) -> Any:
                 return json.loads(text[start : end + 1])
             except json.JSONDecodeError:
                 continue
+
+    # 截断救援: LLM 满 max_tokens 时会从中间突然停, 标准解析全失败.
+    # 走状态机救出已完整的顶层字段, 残缺字段交给上层 repair pass.
+    salvaged = _salvage_truncated_json_object(text)
+    if salvaged is not None:
+        return salvaged
 
     raise ValueError(f"Could not extract JSON from model output: {text[:200]}")
 
