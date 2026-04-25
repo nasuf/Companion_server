@@ -15,6 +15,7 @@ import logging
 import random
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from collections import Counter
 
@@ -219,14 +220,78 @@ def _as_list(value: object) -> list[str]:
     return [s] if s else []
 
 
-def _add(memories: list, summary: str, main: str, sub: str, mem_type: str, importance: float) -> None:
-    memories.append({
+def _add(
+    memories: list, summary: str, main: str, sub: str, mem_type: str, importance: float,
+    *, occur_time: datetime | None = None,
+) -> None:
+    entry = {
         "summary": summary,
         "main_category": main,
         "sub_category": sub,
         "type": mem_type,
         "importance": importance,
-    })
+    }
+    if occur_time is not None:
+        entry["occur_time"] = occur_time
+    memories.append(entry)
+
+
+# life_events 11 字段 → taxonomy.生活 子类映射
+_LIFE_EVENT_SUB_MAP: dict[str, str] = {
+    "interaction": "交互",
+    "education": "教育",
+    "work": "工作",
+    "travel": "旅行",
+    "living": "居住",
+    "health": "健康",
+    "pet": "宠物",
+    "relationships": "人际",
+    "skill_learning": "技能",
+    "life": "生活",
+    "special": "其他特殊事件",
+}
+
+# emotion_events 15 字段 → taxonomy.情绪 子类映射
+_EMOTION_EVENT_SUB_MAP: dict[str, str] = {
+    "happy": "高兴",
+    "sad": "悲伤",
+    "angry": "愤怒",
+    "fear": "恐惧",
+    "disgust": "厌恶",
+    "anxiety": "焦虑",
+    "disappointment": "失望",
+    "pride": "自豪",
+    "moved": "感动",
+    "embarrassed": "尴尬",
+    "regret": "遗憾",
+    "lonely": "孤独",
+    "surprised": "惊讶",
+    "grateful": "感激",
+    "relieved": "释怀",
+}
+
+# 生活事件按字段类型选合理过往时间区间 (years_ago_min, years_ago_max)
+_LIFE_EVENT_TIME_RANGE: dict[str, tuple[float, float]] = {
+    "interaction": (0.0, 1.0),       # 近年的社交互动
+    "education": (3.0, 12.0),        # 求学阶段, 离当前 3-12 年
+    "work": (0.0, 5.0),              # 职业生涯任意一点
+    "travel": (0.5, 8.0),            # 旅行
+    "living": (0.5, 10.0),           # 搬家/装修
+    "health": (1.0, 15.0),           # 健康事件可能很早
+    "pet": (1.0, 15.0),              # 宠物记忆
+    "relationships": (1.0, 10.0),    # 人际转折
+    "skill_learning": (1.0, 12.0),   # 学习关键技能
+    "life": (0.5, 12.0),             # 普通生活事件
+    "special": (0.5, 15.0),          # 特殊偶然事件
+}
+
+
+def _random_past_time(min_years_ago: float, max_years_ago: float) -> datetime:
+    """生成一个 [min, max] 年前的随机时间点 (UTC)."""
+    now = datetime.now(UTC)
+    span_days = (max_years_ago - min_years_ago) * 365.25
+    offset_days = min_years_ago * 365.25 + random.random() * span_days
+    return now - timedelta(days=offset_days)
 
 
 def convert_profile_to_memories(profile_data: dict, career_template: dict | None) -> list[dict]:
@@ -244,9 +309,17 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     abilities = as_dict(profile_data, "abilities")
     likes = as_dict(profile_data, "likes")
     dislikes = as_dict(profile_data, "dislikes")
+    interpersonal = as_dict(profile_data, "interpersonal")
+    lifestyle = as_dict(profile_data, "lifestyle")
+    taboo = as_dict(profile_data, "taboo")
+    life_events = as_dict(profile_data, "life_events")
+    emotion_events = as_dict(profile_data, "emotion_events")
+    # 旧 schema 兼容: fears 分类已删除, 仍读取以处理历史 profile_data
     fears = as_dict(profile_data, "fears")
 
     # ── 身份: singleton 事实 ──
+    if (v := _clean_text(identity.get("name"))):
+        _add(memories, f"我叫{v}", "身份", "姓名", "identity", 0.95)
     gender = identity.get("gender")
     if isinstance(gender, str):
         gender = _GENDER_EN_TO_ZH.get(gender, gender)
@@ -256,6 +329,10 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         _add(memories, f"我今年{v}岁", "身份", "年龄", "identity", 0.95)
     if (v := _clean_text(identity.get("birthday"))):
         _add(memories, f"我生日是{v}", "身份", "生日", "identity", 0.90)
+    if (v := _clean_text(identity.get("zodiac"))):
+        _add(memories, f"我属{v}", "身份", "生肖", "identity", 0.85)
+    if (v := _clean_text(identity.get("constellation"))):
+        _add(memories, f"我是{v}", "身份", "星座", "identity", 0.85)
     if (v := _clean_text(identity.get("location"))):
         _add(memories, f"我现在住在{v}", "身份", "现居地", "identity", 0.90)
     if (v := _clean_text(identity.get("birthplace"))):
@@ -268,6 +345,10 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         _add(memories, f"我是{v}血", "身份", "血型", "identity", 0.80)
     if (v := _clean_text(identity.get("family"))):
         _add(memories, f"我的家庭情况: {v}", "身份", "亲属关系", "identity", 0.90)
+    if (v := _clean_text(identity.get("social_relations"))):
+        _add(memories, f"我的社会关系: {v}", "身份", "社会关系", "identity", 0.85)
+    if (v := _clean_text(identity.get("pet_profile"))) and v not in ("无", "无养", "不养"):
+        _add(memories, f"我养的宠物: {v}", "身份", "宠物", "identity", 0.85)
 
     # ── 身份: 外貌特征 —— 每个维度一条, 合计 3-5 ──
     for key, label in (("height", "身高"), ("weight", "体型"), ("features", "外貌特征"),
@@ -319,29 +400,76 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for item in _as_list(dislikes.get("smells")):
         _add(memories, f"我讨厌 {item} 的气味", "偏好", "审美厌恶", "preference", 0.75)
     for item in _as_list(dislikes.get("habits")):
-        _add(memories, f"我讨厌别人 {item}", "偏好", "人际厌恶", "preference", 0.78)
+        _add(memories, f"我讨厌别人 {item}", "偏好", "审美厌恶", "preference", 0.75)
 
-    # ── 偏好: fears + abilities.never_do 归 禁忌/雷区 ──
+    # ── 偏好: 人际偏好 (v2 schema 新增) ──
+    for item in _as_list(interpersonal.get("liked_traits")):
+        _add(memories, f"我欣赏的人际特质: {item}", "偏好", "人际喜好", "preference", 0.78)
+    for item in _as_list(interpersonal.get("disliked_traits")):
+        _add(memories, f"我反感的人际行为: {item}", "偏好", "人际厌恶", "preference", 0.78)
+
+    # ── 偏好: 生活习惯 (v2 schema 新增, 整分类合成 1 条) ──
+    lifestyle_parts: list[str] = []
+    for key, label in (("routine", "作息"), ("hygiene", "卫生"), ("leisure", "休闲")):
+        if (v := _clean_text(lifestyle.get(key))):
+            lifestyle_parts.append(f"{label}: {v}")
+    if lifestyle_parts:
+        _add(memories, "我的生活习惯 - " + "; ".join(lifestyle_parts),
+             "偏好", "生活习惯", "preference", 0.80)
+
+    # ── 偏好: 禁忌/雷区 (v2: taboo.items; 旧 schema fears + abilities.never_do 兜底) ──
+    for item in _as_list(taboo.get("items")):
+        _add(memories, f"我的雷区: {item}", "偏好", "禁忌/雷区", "preference", 0.88)
+    for item in _as_list(abilities.get("never_do")):
+        _add(memories, f"我绝对不会做: {item}", "偏好", "禁忌/雷区", "preference", 0.88)
+    # 旧 schema fears 兼容: 历史 profile_data 仍含 fears 分类时, 仍能转记忆
     for item in _as_list(fears.get("animals")):
         _add(memories, f"我害怕 {item}", "偏好", "禁忌/雷区", "preference", 0.85)
     for item in _as_list(fears.get("objects")):
         _add(memories, f"我害怕 {item}", "偏好", "禁忌/雷区", "preference", 0.82)
     for item in _as_list(fears.get("atmospheres")):
         _add(memories, f"我害怕 {item} 的氛围", "偏好", "禁忌/雷区", "preference", 0.82)
-    for item in _as_list(abilities.get("never_do")):
-        _add(memories, f"我绝对不会做: {item}", "偏好", "禁忌/雷区", "preference", 0.88)
 
-    # ── 思维: 价值观 / 理想与目标 / 自我认知 ──
+    # ── 思维: 价值观 / 世界观 / 理想与目标 / 人际关系观 / 社会观点 / 信仰 / 自我认知 ──
     if (v := _clean_text(values.get("motto"))):
-        _add(memories, f"我的人生信条: {v}", "思维", "价值观", "thought", 0.92)
+        _add(memories, f"我的人生信条: {v}", "思维", "人生观", "thought", 0.92)
     for item in _as_list(values.get("believes")):
         _add(memories, f"我相信 {item}", "思维", "价值观", "thought", 0.90)
     for item in _as_list(values.get("opposes")):
         _add(memories, f"我反对 {item}", "思维", "价值观", "thought", 0.90)
+    if (v := _clean_text(values.get("worldview"))):
+        _add(memories, f"我的世界观: {v}", "思维", "世界观", "thought", 0.90)
     if (v := _clean_text(values.get("goal"))):
-        _add(memories, f"我的人生目标: {v}", "思维", "理想与目标", "thought", 0.90)
+        _add(memories, f"我的理想与目标: {v}", "思维", "理想与目标", "thought", 0.90)
+    if (v := _clean_text(values.get("interpersonal_view"))):
+        _add(memories, f"我对亲情/友情/爱情的处理原则: {v}",
+             "思维", "人际关系观", "thought", 0.88)
+    if (v := _clean_text(values.get("social_view"))):
+        _add(memories, f"我的社会观点: {v}", "思维", "社会观点", "thought", 0.85)
+    if (v := _clean_text(values.get("faith"))):
+        _add(memories, f"我的精神寄托: {v}", "思维", "信仰/寄托", "thought", 0.90)
     for item in _as_list(abilities.get("limits")):
         _add(memories, f"我清楚自己的局限: {item}", "思维", "自我认知", "thought", 0.88)
+
+    # ── 生活: life_events 11 字段, 每个 tag 元素 → 1 条 L2 记忆 + 合理 occur_time ──
+    for field_key, sub in _LIFE_EVENT_SUB_MAP.items():
+        scenes = _as_list(life_events.get(field_key))
+        time_range = _LIFE_EVENT_TIME_RANGE.get(field_key, (0.5, 10.0))
+        for scene in scenes:
+            occur = _random_past_time(*time_range)
+            _add(memories, scene, "生活", sub, "life", 0.65, occur_time=occur)
+
+    # ── 情绪: emotion_events 15 字段, 每个 tag 元素 → 1 条 L2 记忆 + 全生命周期随机 ──
+    try:
+        agent_age = int(identity.get("age", 25))
+    except (ValueError, TypeError):
+        agent_age = 25
+    emotion_max_years = max(float(agent_age) - 3.0, 5.0)
+    for field_key, sub in _EMOTION_EVENT_SUB_MAP.items():
+        scenes = _as_list(emotion_events.get(field_key))
+        for scene in scenes:
+            occur = _random_past_time(0.5, emotion_max_years)
+            _add(memories, scene, "情绪", sub, "emotion", 0.65, occur_time=occur)
 
     return memories
 
@@ -402,11 +530,13 @@ def _derive_timeline(profile_data: dict) -> str:
 
 
 # 每个 main 调用时只注入与该 main 相关的 profile 切片, 减少 token 冗余。
+# v2 schema: fears 已删除, 新增 interpersonal/lifestyle/taboo/life_events/emotion_events;
+# 旧 fears 仍保留兼容历史 profile_data。
 _PROFILE_RELEVANCE: dict[str, tuple[str, ...]] = {
     "身份": ("identity", "appearance", "education_knowledge", "career"),
-    "偏好": ("likes", "dislikes", "fears", "abilities", "identity"),
-    "生活": ("career", "education_knowledge", "abilities", "identity", "likes"),
-    "情绪": ("values", "fears", "abilities", "identity"),
+    "偏好": ("likes", "dislikes", "interpersonal", "lifestyle", "taboo", "abilities", "identity", "fears"),
+    "生活": ("career", "education_knowledge", "abilities", "identity", "likes", "life_events"),
+    "情绪": ("values", "abilities", "identity", "emotion_events", "fears"),
     "思维": ("values", "abilities", "education_knowledge", "identity"),
 }
 

@@ -30,76 +30,140 @@ def clamp_agent_age(age: int) -> int:
 
 DEFAULT_TEMPLATE_SCHEMA = {
     "categories": [
+        # ═══ 身份层 (映射 memories_ai main_category="身份") ═══
         {
             "key": "identity",
             "name": "基础身份",
             "sort": 1,
             "fields": [
-                {"key": "gender", "name": "性别", "type": "select", "options": ["男", "女"], "required": True},
-                {"key": "age", "name": "年龄", "type": "number", "min": 20, "max": 29, "hint": "20-29岁之间"},
-                {"key": "birthday", "name": "出生日期", "type": "date"},
-                {"key": "education", "name": "教育背景", "type": "textarea"},
-                {"key": "location", "name": "所在地", "type": "text", "hint": "出生地=居住地=工作地"},
-                {"key": "birthplace", "name": "出生地", "type": "text", "hint": "具体到市/区, 通常=成长地=location"},
-                {"key": "growing_up_location", "name": "成长地", "type": "text", "hint": "18岁前长期居住地"},
-                {"key": "ethnicity", "name": "民族", "type": "text", "hint": "留空则按人口分布随机"},
-                {"key": "blood_type", "name": "血型", "type": "select", "options": ["", "O型", "A型", "B型", "AB型"], "hint": "留空则按人口分布随机"},
-                {"key": "family", "name": "家庭关系", "type": "textarea", "hint": "父母健在、性格温和、不喜欢热闹、独生"},
+                {"key": "name", "name": "姓名", "type": "text",
+                 "hint": "直接引用注入的【姓名】，原样填入不要修改",
+                 "_memory_sub": "姓名"},
+                {"key": "gender", "name": "性别", "type": "select",
+                 "options": ["男", "女"], "required": True,
+                 "_memory_sub": "性别"},
+                {"key": "age", "name": "年龄", "type": "number",
+                 "min": 20, "max": 29, "hint": "20-29岁之间",
+                 "_memory_sub": "年龄"},
+                {"key": "birthday", "name": "出生日期", "type": "date",
+                 "_memory_sub": "生日"},
+                {"key": "zodiac", "name": "生肖", "type": "text",
+                 "hint": "必须与出生年份对应（鼠/牛/虎/兔/龙/蛇/马/羊/猴/鸡/狗/猪）",
+                 "_memory_sub": "生肖"},
+                {"key": "constellation", "name": "星座", "type": "text",
+                 "hint": "必须与生日月日对应",
+                 "_memory_sub": "星座"},
+                {"key": "blood_type", "name": "血型", "type": "select",
+                 "options": ["O型", "A型", "B型", "AB型"],
+                 "hint": "选定后简述与性格的微关联",
+                 "_memory_sub": "血型"},
+                {"key": "location", "name": "现居地", "type": "text",
+                 "hint": "出生地=居住地=工作地，格式参考居民身份证地址",
+                 "_memory_sub": "现居地"},
+                {"key": "birthplace", "name": "出生地", "type": "text",
+                 "hint": "具体到市/区",
+                 "_memory_sub": "出生地"},
+                {"key": "growing_up_location", "name": "成长地", "type": "text",
+                 "hint": "18岁前长期居住地",
+                 "_memory_sub": "成长地"},
+                {"key": "family", "name": "亲属关系", "type": "textarea",
+                 "hint": "父母职业 + 关系模式 + 是否兄弟姐妹（默认独生）",
+                 "_memory_sub": "亲属关系"},
+                {"key": "social_relations", "name": "社会关系", "type": "textarea",
+                 "hint": "朋友数量质量、同事关系、社交圈层特点",
+                 "_memory_sub": "社会关系"},
+                {"key": "pet_profile", "name": "宠物", "type": "textarea",
+                 "hint": "养宠则写种类+名字+由来；不养则写「无」",
+                 "_memory_sub": "宠物"},
+                # ethnicity 删除 — 后处理硬写"汉族"对齐 spec
             ],
         },
         {
             "key": "appearance",
             "name": "外貌与形象",
             "sort": 2,
+            "_memory_sub": "外貌特征",  # 整分类合成 1 条 身份/外貌特征
             "fields": [
-                {"key": "height", "name": "身高", "type": "text", "hint": "女160-170cm，男177-185cm"},
-                {"key": "weight", "name": "体型", "type": "text", "hint": "女=身高÷3.6，男=身高÷2.6"},
-                {"key": "features", "name": "外貌特征", "type": "textarea"},
-                {"key": "style", "name": "穿搭风格", "type": "textarea"},
-                {"key": "voice", "name": "声音特点", "type": "textarea"},
+                {"key": "height", "name": "身高", "type": "text",
+                 "hint": "男 165-190cm，女 155-175cm，给出具体数值"},
+                {"key": "weight", "name": "体型", "type": "text",
+                 "hint": "匀称/清瘦/微胖/结实等定性描述，与身高、性别协调"},
+                {"key": "features", "name": "外貌特征", "type": "textarea",
+                 "hint": "脸型、眉眼、鼻唇特点及整体气质"},
+                {"key": "style", "name": "穿搭风格", "type": "textarea",
+                 "hint": "日常通勤、居家、社交场合着装偏好"},
+                {"key": "voice", "name": "声音特点", "type": "textarea",
+                 "hint": "音色、语速、语调习惯"},
             ],
         },
         {
             "key": "education_knowledge",
             "name": "教育与知识",
             "sort": 3,
+            "_memory_sub": "教育背景",
             "fields": [
-                {"key": "degree", "name": "学历", "type": "textarea", "hint": "没上全日制大学，偏爱「XX 职业」相关事情，跟前辈学习"},
-                {"key": "strengths", "name": "知识擅长范围", "type": "tags"},
-                {"key": "self_taught", "name": "自学过的特殊技能", "type": "tags"},
+                {"key": "degree", "name": "学历", "type": "textarea",
+                 "hint": "没上全日制大学，偏爱本职业相关事情，跟前辈学习"},
+                {"key": "strengths", "name": "知识擅长范围", "type": "tags",
+                 "hint": "3 个左右专业或知识领域"},
+                {"key": "self_taught", "name": "自学特殊技能", "type": "tags",
+                 "hint": "1-2 项与职业或兴趣相关的技能"},
             ],
         },
         {
             "key": "career",
             "name": "职业与生存闭环",
             "sort": 4,
+            "_memory_sub": "职业/与经济",
             "fields": [
-                {"key": "title", "name": "职业", "type": "text", "hint": "关联《职业背景设定表》"},
+                {"key": "title", "name": "职业", "type": "text"},
                 {"key": "duties", "name": "工作内容", "type": "textarea"},
+                {"key": "output", "name": "主要产出物", "type": "textarea"},
                 {"key": "social_value", "name": "社会价值", "type": "textarea"},
                 {"key": "clients", "name": "服务对象", "type": "tags"},
+                {"key": "income", "name": "经济状况", "type": "text",
+                 "hint": "年薪区间，必须 < 10 万"},
             ],
         },
+
+        # ═══ 偏好层 (映射 memories_ai main_category="偏好") ═══
         {
             "key": "likes",
             "name": "喜好",
             "sort": 5,
             "fields": [
-                {"key": "colors", "name": "颜色", "type": "tags"},
-                {"key": "foods", "name": "食物", "type": "tags"},
-                {"key": "fruits", "name": "水果", "type": "tags"},
-                {"key": "season", "name": "季节", "type": "tags"},
-                {"key": "weather", "name": "天气", "type": "tags"},
-                {"key": "plants", "name": "植物", "type": "tags"},
-                {"key": "animals", "name": "动物", "type": "tags"},
-                {"key": "music", "name": "音乐", "type": "tags"},
-                {"key": "songs", "name": "歌曲", "type": "tags"},
-                {"key": "sounds", "name": "声音", "type": "tags"},
-                {"key": "scents", "name": "气味", "type": "tags"},
-                {"key": "books", "name": "书籍类型", "type": "tags"},
-                {"key": "movies", "name": "电影", "type": "tags"},
-                {"key": "sports", "name": "运动", "type": "tags"},
-                {"key": "quirks", "name": "小癖好", "type": "textarea"},
+                # 饮食喜好
+                {"key": "foods", "name": "食物", "type": "tags",
+                 "_memory_sub": "饮食喜好"},
+                {"key": "fruits", "name": "水果", "type": "tags",
+                 "_memory_sub": "饮食喜好"},
+                # 审美爱好 13 子项
+                {"key": "colors", "name": "颜色", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "season", "name": "季节", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "weather", "name": "天气", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "plants", "name": "植物", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "animals", "name": "动物", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "music", "name": "音乐", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "songs", "name": "歌曲", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "sounds", "name": "声音", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "scents", "name": "气味", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "books", "name": "书籍类型", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "movies", "name": "电影", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "sports", "name": "运动", "type": "tags",
+                 "_memory_sub": "审美爱好"},
+                {"key": "quirks", "name": "小癖好", "type": "textarea",
+                 "_memory_sub": "审美爱好"},
             ],
         },
         {
@@ -107,41 +171,181 @@ DEFAULT_TEMPLATE_SCHEMA = {
             "name": "讨厌",
             "sort": 6,
             "fields": [
-                {"key": "foods", "name": "食物", "type": "tags"},
-                {"key": "sounds", "name": "噪音", "type": "tags"},
-                {"key": "smells", "name": "气味", "type": "tags"},
-                {"key": "habits", "name": "习惯", "type": "tags"},
+                # 饮食厌恶
+                {"key": "foods", "name": "食物", "type": "tags",
+                 "hint": "含不吃的原因（过敏/口味/心理）",
+                 "_memory_sub": "饮食厌恶"},
+                # 审美厌恶
+                {"key": "sounds", "name": "噪音", "type": "tags",
+                 "_memory_sub": "审美厌恶"},
+                {"key": "smells", "name": "气味", "type": "tags",
+                 "_memory_sub": "审美厌恶"},
+                {"key": "habits", "name": "习惯", "type": "tags",
+                 "_memory_sub": "审美厌恶"},
             ],
         },
         {
-            "key": "fears",
-            "name": "害怕",
+            "key": "interpersonal",
+            "name": "人际偏好",
             "sort": 7,
             "fields": [
-                {"key": "animals", "name": "动物", "type": "tags"},
-                {"key": "objects", "name": "物品", "type": "tags"},
-                {"key": "atmospheres", "name": "氛围", "type": "tags"},
+                {"key": "liked_traits", "name": "人际喜好", "type": "tags",
+                 "hint": "欣赏的人际特质",
+                 "_memory_sub": "人际喜好"},
+                {"key": "disliked_traits", "name": "人际厌恶", "type": "tags",
+                 "hint": "反感的行为或性格",
+                 "_memory_sub": "人际厌恶"},
             ],
         },
+        {
+            "key": "lifestyle",
+            "name": "生活习惯",
+            "sort": 8,
+            "_memory_sub": "生活习惯",  # 整分类合成 1 条 偏好/生活习惯
+            "fields": [
+                {"key": "routine", "name": "作息规律", "type": "textarea"},
+                {"key": "hygiene", "name": "卫生习惯", "type": "textarea"},
+                {"key": "leisure", "name": "休闲方式", "type": "textarea"},
+            ],
+        },
+        {
+            "key": "taboo",
+            "name": "禁忌雷区",
+            "sort": 9,
+            "fields": [
+                {"key": "items", "name": "绝对禁忌", "type": "tags",
+                 "hint": "不可触碰的底线，3-5 项",
+                 "_memory_sub": "禁忌/雷区"},
+            ],
+        },
+
+        # ═══ 生活层 (映射 memories_ai main_category="生活") ═══
+        # 每字段是 tags 数组, 3-5 个具体场景, 每场景 → 1 条独立 memories_ai
+        {
+            "key": "life_events",
+            "name": "生活记忆事件",
+            "sort": 10,
+            "hint": "每字段返回 3-5 个具体场景字符串数组，每段 50-100 字",
+            "fields": [
+                {"key": "interaction", "name": "交互事件", "type": "tags",
+                 "hint": "与他人产生深度连接或冲突的典型社交事件",
+                 "_memory_sub": "交互"},
+                {"key": "education", "name": "重要教育事件", "type": "tags",
+                 "hint": "求学阶段影响深远的事",
+                 "_memory_sub": "教育"},
+                {"key": "work", "name": "重要工作事件", "type": "tags",
+                 "hint": "职业生涯关键节点",
+                 "_memory_sub": "工作"},
+                {"key": "travel", "name": "重要旅行事件", "type": "tags",
+                 "hint": "印象深刻的旅行经历及途中小故事",
+                 "_memory_sub": "旅行"},
+                {"key": "living", "name": "重要居住事件", "type": "tags",
+                 "hint": "搬家/租房/买房/装修过程的特别记忆",
+                 "_memory_sub": "居住"},
+                {"key": "health", "name": "重要健康事件", "type": "tags",
+                 "hint": "生病/受伤/体检异常及带来的改变",
+                 "_memory_sub": "健康"},
+                {"key": "pet", "name": "重要宠物事件", "type": "tags",
+                 "hint": "不养宠物则写与流浪动物或他人宠物的特殊互动",
+                 "_memory_sub": "宠物"},
+                {"key": "relationships", "name": "重要人际事件", "type": "tags",
+                 "hint": "朋友/恋人/同事关系建立或破裂的转折点",
+                 "_memory_sub": "人际"},
+                {"key": "skill_learning", "name": "重要技能学习事件", "type": "tags",
+                 "hint": "学会某项关键技能的过程和契机",
+                 "_memory_sub": "技能"},
+                {"key": "life", "name": "重要生活事件", "type": "tags",
+                 "hint": "生活中普通但具有象征意义的场景",
+                 "_memory_sub": "生活"},
+                {"key": "special", "name": "重要其他特殊事件", "type": "tags",
+                 "hint": "未归入上述分类但极具个人特色的偶然事件",
+                 "_memory_sub": "其他特殊事件"},
+            ],
+        },
+
+        # ═══ 情绪层 (映射 memories_ai main_category="情绪") ═══
+        {
+            "key": "emotion_events",
+            "name": "情绪记忆事件",
+            "sort": 11,
+            "hint": "每字段返回 3-5 个具体情境字符串数组，每段 30-80 字",
+            "fields": [
+                {"key": "happy", "name": "重要高兴的记忆", "type": "tags",
+                 "_memory_sub": "高兴"},
+                {"key": "sad", "name": "重要悲伤的记忆", "type": "tags",
+                 "_memory_sub": "悲伤"},
+                {"key": "angry", "name": "重要愤怒的记忆", "type": "tags",
+                 "_memory_sub": "愤怒"},
+                {"key": "fear", "name": "重要恐惧的记忆", "type": "tags",
+                 "hint": "必须明确体现害怕的【动物】【物品】或【氛围】",
+                 "_memory_sub": "恐惧"},
+                {"key": "disgust", "name": "重要厌恶的记忆", "type": "tags",
+                 "_memory_sub": "厌恶"},
+                {"key": "anxiety", "name": "重要焦虑的记忆", "type": "tags",
+                 "_memory_sub": "焦虑"},
+                {"key": "disappointment", "name": "重要失望的记忆", "type": "tags",
+                 "_memory_sub": "失望"},
+                {"key": "pride", "name": "重要自豪的记忆", "type": "tags",
+                 "_memory_sub": "自豪"},
+                {"key": "moved", "name": "重要感动的记忆", "type": "tags",
+                 "_memory_sub": "感动"},
+                {"key": "embarrassed", "name": "重要尴尬的记忆", "type": "tags",
+                 "_memory_sub": "尴尬"},
+                {"key": "regret", "name": "重要遗憾的记忆", "type": "tags",
+                 "_memory_sub": "遗憾"},
+                {"key": "lonely", "name": "重要孤独的记忆", "type": "tags",
+                 "_memory_sub": "孤独"},
+                {"key": "surprised", "name": "重要惊讶的记忆", "type": "tags",
+                 "_memory_sub": "惊讶"},
+                {"key": "grateful", "name": "重要感激的记忆", "type": "tags",
+                 "_memory_sub": "感激"},
+                {"key": "relieved", "name": "重要释怀的记忆", "type": "tags",
+                 "_memory_sub": "释怀"},
+            ],
+        },
+
+        # ═══ 思维层 (映射 memories_ai main_category="思维") ═══
         {
             "key": "values",
             "name": "价值观与信念",
-            "sort": 8,
+            "sort": 12,
             "fields": [
-                {"key": "motto", "name": "人生信条", "type": "textarea"},
-                {"key": "believes", "name": "相信什么", "type": "tags"},
-                {"key": "opposes", "name": "反对什么", "type": "tags"},
-                {"key": "goal", "name": "人生目标", "type": "textarea"},
+                {"key": "motto", "name": "人生观", "type": "textarea",
+                 "hint": "对生命意义、生活方式的基本看法",
+                 "_memory_sub": "人生观"},
+                {"key": "believes", "name": "相信什么", "type": "tags",
+                 "_memory_sub": "价值观"},
+                {"key": "opposes", "name": "反对什么", "type": "tags",
+                 "_memory_sub": "价值观"},
+                {"key": "worldview", "name": "世界观", "type": "textarea",
+                 "hint": "对世界运行规则的理解和态度（宏观视角）",
+                 "_memory_sub": "世界观"},
+                {"key": "goal", "name": "理想与目标", "type": "textarea",
+                 "hint": "短期 1-3 年 + 长期 5-10 年",
+                 "_memory_sub": "理想与目标"},
+                {"key": "interpersonal_view", "name": "人际关系观", "type": "textarea",
+                 "hint": "对亲情、友情、爱情的理解及处理原则",
+                 "_memory_sub": "人际关系观"},
+                {"key": "social_view", "name": "社会观点", "type": "textarea",
+                 "hint": "对当下社会热点或普遍现象的 1-2 个具体看法",
+                 "_memory_sub": "社会观点"},
+                {"key": "faith", "name": "信仰/精神寄托", "type": "textarea",
+                 "hint": "必填；即使无宗教信仰也要写精神寄托（艺术/自然/家人/事业等）",
+                 "_memory_sub": "信仰/寄托"},
             ],
         },
         {
             "key": "abilities",
             "name": "能力与边界",
-            "sort": 9,
+            "sort": 13,
+            "_memory_sub": "自我认知",  # 整分类合成 1 条 思维/自我认知
             "fields": [
-                {"key": "good_at", "name": "擅长的事情", "type": "tags"},
-                {"key": "never_do", "name": "绝对不会做的事情", "type": "tags"},
-                {"key": "limits", "name": "能力上限", "type": "tags"},
+                {"key": "good_at", "name": "擅长的事情", "type": "tags",
+                 "hint": "3-5 项具体强项"},
+                {"key": "never_do", "name": "绝对不会做的事情", "type": "tags",
+                 "hint": "道德或原则底线上的禁止行为"},
+                {"key": "limits", "name": "能力上限", "type": "tags",
+                 "hint": "坦诚不擅长或感到吃力的领域"},
             ],
         },
     ]
@@ -150,13 +354,22 @@ DEFAULT_TEMPLATE_SCHEMA = {
 DEFAULT_TEMPLATE_DEFAULTS = (
     "通用规则：\n"
     "1. 人物身处中国区域内的地球镜像世界，地域、文化、生活规则与现实中国一致\n"
-    "2. 年龄在20-29岁之间\n"
-    "3. 女性身高160-170cm，男性177-185cm\n"
-    "4. 女性体重=身高÷3.6，男性体重=身高÷2.6\n"
-    "5. 出生地=居住地=工作地\n"
-    "6. 没上全日制大学，偏爱某个领域，跟前辈学习\n"
-    "7. 父母健在、性格温和、不喜欢热闹、独生\n"
-    "8. 所有内容具体、有画面感，各项内容逻辑自洽"
+    "2. 所有内容必须符合社会主义核心价值观与公序良俗\n"
+    "3. 年龄在 20-29 岁之间\n"
+    "4. 男性身高 165-190cm，女性身高 155-175cm，给出具体数值\n"
+    "5. 体型描述与身高、性别协调（匀称/清瘦/微胖/结实等定性词）\n"
+    "6. 出生地=居住地=工作地\n"
+    "7. 没上全日制大学，偏爱某个领域，跟前辈学习\n"
+    "8. 父母健在、性格温和、不喜欢热闹、独生\n"
+    "9. 生肖必须与出生年份对应；星座必须与生日月日对应\n"
+    "10. 血型选定后简述与性格的微关联\n"
+    "11. 内容与输入的性格 7 维分数深度绑定，描写要明显体现该性格分布\n"
+    "12. 时间线/年龄/生肖/星座/经历需全部逻辑自洽，不得互相矛盾\n"
+    "13. life_events 每类 3-5 个具体片段（不少于 3、不多于 5），每段独立完整场景，"
+    "时间线按当前年龄反推（教育事件多在 18-22 岁，工作事件在 22-当前岁之间）\n"
+    "14. emotion_events 每类 3-5 个具体情境；fear 字段必须明确害怕的动物/物品/氛围\n"
+    "15. 经济状况按注入的职业 income 字段，年收入 < 10 万\n"
+    "16. 严禁留空或使用「暂无」「无」等占位符（除 pet_profile 不养时写「无」外）"
 )
 
 
@@ -175,63 +388,54 @@ async def ensure_default_template() -> None:
         where={"name": DEFAULT_TEMPLATE_NAME},
     )
     if existing:
-        await _migrate_default_template_age_range(existing)
+        await _migrate_default_template(existing)
         return
 
     await db.charactertemplate.create(
         data={
             "name": DEFAULT_TEMPLATE_NAME,
-            "description": "PRD 9大分类完整角色设定，适用于大多数AI伴侣角色",
+            "description": "PRD 13大分类完整角色设定 (含 26 项过去事件), 适用于大多数AI伴侣角色",
             "schemaData": Json(DEFAULT_TEMPLATE_SCHEMA),
             "defaults": DEFAULT_TEMPLATE_DEFAULTS,
             "status": "active",
         }
     )
-    logger.info("Default character template seeded")
+    logger.info("Default character template seeded (v2)")
 
 
-async def _migrate_default_template_age_range(existing) -> None:
-    """One-shot migration: 18-27 → 20-29 in defaults text + schema.identity.age."""
+def _is_v2_schema(schema: dict | None) -> bool:
+    """v2 schema 标志: 包含 life_events / emotion_events 分类."""
+    if not isinstance(schema, dict):
+        return False
+    keys = {cat.get("key") for cat in schema.get("categories", [])}
+    return "life_events" in keys and "emotion_events" in keys
+
+
+async def _migrate_default_template(existing) -> None:
+    """One-shot 迁移: 旧 schema (9 分类 / 无 life_events 等) → v2 (13 分类).
+
+    检测到 v2 标志缺失时全量覆盖默认模板的 schemaData + defaults + description.
+    用户改过的非默认模板 (status != active 或 name != DEFAULT_TEMPLATE_NAME) 不动.
+    """
     from prisma import Json
 
-    updates: dict = {}
-
-    # 1) defaults 文本里的 "18-27" 字面替换。只动数字，admin 自定义文本保留。
-    if existing.defaults and "18-27" in existing.defaults:
-        updates["defaults"] = (
-            existing.defaults
-            .replace("年龄在18-27岁之间", "年龄在20-29岁之间")
-            .replace("18-27", "20-29")
-        )
-
-    # 2) schemaData.identity.age min/max + hint
     schema = existing.schemaData if isinstance(existing.schemaData, dict) else None
-    if schema:
-        changed = False
-        for cat in schema.get("categories", []):
-            if cat.get("key") != "identity":
-                continue
-            for field in cat.get("fields", []):
-                if field.get("key") != "age":
-                    continue
-                if field.get("min") == 18:
-                    field["min"] = 20
-                    changed = True
-                if field.get("max") == 27:
-                    field["max"] = 29
-                    changed = True
-                if field.get("hint") == "18-27岁之间":
-                    field["hint"] = "20-29岁之间"
-                    changed = True
-        if changed:
-            updates["schemaData"] = Json(schema)
+    if _is_v2_schema(schema):
+        return  # 已是 v2
 
-    if updates:
-        await db.charactertemplate.update(where={"id": existing.id}, data=updates)
-        logger.info(
-            f"Migrated default character template age range to 20-29 "
-            f"(fields: {list(updates.keys())})"
-        )
+    await db.charactertemplate.update(
+        where={"id": existing.id},
+        data={
+            "schemaData": Json(DEFAULT_TEMPLATE_SCHEMA),
+            "defaults": DEFAULT_TEMPLATE_DEFAULTS,
+            "description": "PRD 13大分类完整角色设定 (含 26 项过去事件), 适用于大多数AI伴侣角色",
+        },
+    )
+    logger.info(
+        f"Migrated default character template to v2 schema "
+        f"({len(DEFAULT_TEMPLATE_SCHEMA['categories'])} categories, "
+        f"{sum(len(c['fields']) for c in DEFAULT_TEMPLATE_SCHEMA['categories'])} fields)"
+    )
 
 
 # ── LLM 画像生成 ──
@@ -253,7 +457,14 @@ def _build_schema_description(schema: dict) -> str:
     return "\n".join(lines)
 
 
-DEFAULT_PROMPT_HEADER = "你是一个AI角色设计师。请根据以下模板结构，生成一个完整的虚构人物。"
+DEFAULT_PROMPT_HEADER = (
+    "你是一个AI人格构建专家。请根据以下基础信息和模板结构，构建一个逻辑严密、"
+    "细节丰满、完全符合当代中国现实背景的虚拟人格全维度档案。\n\n"
+    "【强制设定前提】\n"
+    "- 人物身处中国区域内的地球镜像世界\n"
+    "- 地域、文化、生活规则、社会体系、历史背景等所有宏观设定均与现实当代中国保持100%一致\n"
+    "- 所有生成内容必须符合社会主义核心价值观与公序良俗"
+)
 
 # 输出要求模板。{index} 是占位符 — 在 build_generation_prompt 时被替换为实际的角色序号。
 DEFAULT_PROMPT_REQUIREMENTS = (
@@ -288,16 +499,61 @@ def _format_requirements(requirements_template: str, index: int) -> str:
 
 def _build_career_section(career: dict) -> str:
     """将职业背景数据格式化为 prompt 注入段落。告知 LLM 围绕此职业生成其他分类，
-    但不要求 LLM 生成职业字段本身（后处理直接赋值）。"""
+    但不要求 LLM 生成职业字段本身（后处理直接赋值）。
+
+    income / output 缺省时用合规默认值: spec PDF 要求年收入 < 10 万。
+    """
+    income = career.get("income") or "年薪 5-10 万"
+    output = career.get("output") or "（请由 LLM 推断该职业的典型主要产出物）"
+    social_value = career.get("socialValue", career.get("social_value", ""))
     return (
         "===== 该角色的职业背景（仅供参考，不需要在输出中生成 career 分类）=====\n"
         f"职业: {career.get('title', '')}\n"
         f"工作内容: {career.get('duties', '')}\n"
-        f"社会价值: {career.get('socialValue', career.get('social_value', ''))}\n"
-        f"服务对象: {career.get('clients', '')}\n\n"
+        f"主要产出物: {output}\n"
+        f"社会价值: {social_value}\n"
+        f"服务对象: {career.get('clients', '')}\n"
+        f"经济状况: {income}\n\n"
         "请围绕上述职业合理生成其他分类（身份、外貌、教育、喜好等），使整体逻辑自洽。\n"
         "注意：不要在 JSON 输出中包含 career 分类，该分类由系统自动填充。\n"
     )
+
+
+_PERSONALITY_DIM_LABELS: dict[str, str] = {
+    "liveliness": "活泼度",
+    "rationality": "理性度",
+    "sensitivity": "感性度",
+    "planning": "计划度",
+    "spontaneity": "随性度",
+    "imagination": "脑洞度",
+    "humor": "幽默度",
+}
+
+
+def _build_name_section(name: str) -> str:
+    """注入用户填的姓名 (PDF #34 输入变量第一项: 直接引用)."""
+    return (
+        f"【姓名】{name}\n"
+        f"请把 identity.name 字段直接填为「{name}」，原样不要修改。"
+        "可在 appearance.features / appearance.voice 等字段中适当呼应这个名字的气质。\n"
+    )
+
+
+def _build_personality_section(personality: dict) -> str:
+    """注入性格 7 维分数 (PDF #34 生成要求: 与输入性格深度绑定)."""
+    lines = ["【性格 7 维分数】（0-100，用于深度绑定描写风格、喜好、价值观）"]
+    for key, label in _PERSONALITY_DIM_LABELS.items():
+        value = personality.get(key)
+        if value is None:
+            value = personality.get(key.rstrip("ness").rstrip("ity"))  # 兼容简写命名
+        if value is None:
+            value = 50
+        lines.append(f"- {label}（{key}）：{value}")
+    lines.append(
+        "请让 likes / dislikes / values / abilities / appearance.style / "
+        "life_events / emotion_events 等字段的描写明显体现这套性格分布。"
+    )
+    return "\n".join(lines) + "\n"
 
 
 def build_generation_prompt(
@@ -309,10 +565,13 @@ def build_generation_prompt(
     requirements: str | None = None,
     career: dict | None = None,
     gender: str | None = None,
+    name: str | None = None,
+    personality: dict | None = None,
 ) -> str:
-    """组装完整的角色生成提示词。
+    """组装完整的角色生成提示词 (对齐 PDF #34 + taxonomy v2).
 
-    结构: header + [性别约束] + [职业背景设定] + 模板结构 + 生成规则 + 输出要求
+    结构: header + 性别约束 + [姓名] + [性格 7 维] + [职业背景] + 模板结构
+          + 生成规则 + 输出要求
 
     Args:
         schema: 模板的分类/字段定义
@@ -321,7 +580,9 @@ def build_generation_prompt(
         header: 提示词开头（None = 用 DEFAULT_PROMPT_HEADER）
         requirements: 输出要求（None = 用 DEFAULT_PROMPT_REQUIREMENTS）
         career: 职业背景数据 dict（None = 不注入职业约束）
-        gender: "male" / "female" / None — 指定时约束 LLM 整体描写向该性别靠拢
+        gender: "male" / "female" / None
+        name: 角色姓名 (PDF #34 输入第一项: "AI 自我姓名: 直接引用")
+        personality: 性格 7 维 dict (liveliness/rationality/sensitivity/...)
     """
     actual_header = header if header is not None else DEFAULT_PROMPT_HEADER
     actual_requirements = requirements if requirements is not None else DEFAULT_PROMPT_REQUIREMENTS
@@ -343,8 +604,13 @@ def build_generation_prompt(
         gender_zh = "男性" if gender == "male" else "女性"
         prompt += (
             f"【性别约束】该角色必须是{gender_zh}。identity.gender 字段必须填 "
-            f"{'“男”' if gender == 'male' else '“女”'},外貌、称呼、兴趣等描写需与该性别一致。\n\n"
+            f"{'「男」' if gender == 'male' else '「女」'}，"
+            "外貌、称呼、兴趣等描写需与该性别一致。\n\n"
         )
+    if name:
+        prompt += _build_name_section(name) + "\n"
+    if personality:
+        prompt += _build_personality_section(personality) + "\n"
     if career:
         prompt += _build_career_section(career) + "\n"
     prompt += f"模板结构：{schema_desc}\n\n"
@@ -363,11 +629,22 @@ async def generate_single_profile(
     requirements: str | None = None,
     career: dict | None = None,
     gender: str | None = None,
+    name: str | None = None,
+    personality: dict | None = None,
+    agent_name: str | None = None,
 ) -> dict:
-    """用 LLM 根据模板结构生成一份完整角色背景数据。gender ∈ {"male","female",None}。"""
+    """用 LLM 根据模板结构生成一份完整角色背景数据。
+
+    name vs agent_name: name 注入 prompt 让 LLM 看到; agent_name 后处理硬写
+    identity.name (PDF #34 第一维 #1 "直接引用"). 通常两者相同, 但兼容
+    旧调用方仅传 agent_name 不传 name 的情况.
+    """
+    effective_name = name or agent_name
     prompt = build_generation_prompt(
         schema, defaults, index,
-        header=header, requirements=requirements, career=career, gender=gender,
+        header=header, requirements=requirements,
+        career=career, gender=gender,
+        name=effective_name, personality=personality,
     )
 
     # 可选：管理员可在「提示词管理」中注册 character.generation key 来覆盖默认 prompt
@@ -381,4 +658,35 @@ async def generate_single_profile(
 
     model = get_utility_model()
     data = await invoke_json(model, prompt)
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return _apply_postprocess_overrides(
+        data, agent_name=effective_name, career=career,
+    )
+
+
+def _apply_postprocess_overrides(
+    profile: dict,
+    *,
+    agent_name: str | None,
+    career: dict | None,
+) -> dict:
+    """LLM 输出后强制覆盖几个字段, 保证 spec 一致性:
+    - identity.ethnicity 硬写「汉族」(spec PDF #34 第一维 #8: "汉族")
+    - identity.name 直接引用注入的姓名 (spec PDF #34 第一维 #1: "直接引用")
+    - career 分类用预设池数据回填 (LLM 不生成 career, 见 build_generation_prompt)
+    """
+    profile.setdefault("identity", {})
+    profile["identity"]["ethnicity"] = "汉族"
+    if agent_name:
+        profile["identity"]["name"] = agent_name
+    if career:
+        profile["career"] = {
+            "title": career.get("title"),
+            "duties": career.get("duties"),
+            "output": career.get("output") or "",
+            "social_value": career.get("socialValue") or career.get("social_value") or "",
+            "clients": career.get("clients"),
+            "income": career.get("income") or "年薪 5-10 万",
+        }
+    return profile
