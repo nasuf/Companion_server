@@ -462,7 +462,6 @@ async def update_profile(
     return _profile_response(updated)
 
 
-@router.delete("/profiles/{profile_id}")
 @router.post("/profiles/batch-status")
 async def batch_update_profile_status(
     body: ProfileBatchStatusRequest,
