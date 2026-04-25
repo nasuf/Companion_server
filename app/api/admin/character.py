@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random as _random
 from datetime import date
@@ -314,90 +315,94 @@ async def generate_profiles(
         career_pool = [_career_row_to_dict(c) for c in all_careers]
         _random.shuffle(career_pool)
 
-    results: list[ProfileResponse] = []
-    failures: list[str] = []
+    # 决定每条的 (career, gender), 进 asyncio.gather 并行化
+    plans: list[tuple[int, dict | None, str]] = []
     for i in range(count):
-        # 确定本次使用的职业
         if fixed_career:
             career = fixed_career
         elif career_pool:
             career = career_pool[i % len(career_pool)]
         else:
             career = None
-
-        # 性别: 指定 → 每次强制; 随机 → 本条按 50/50 掷一次, 保证多条批量里两性都会出现
-        gender_for_run: str | None
         if body.gender in ("male", "female"):
             gender_for_run = body.gender
         elif body.gender is None:
             gender_for_run = _random.choice(["male", "female"])
         else:
             raise HTTPException(status_code=400, detail=f"gender 必须是 male/female/null, 收到 {body.gender!r}")
+        plans.append((i, career, gender_for_run))
 
-        try:
-            data = await generate_single_profile(
-                schema,
-                tpl.defaults,
-                index=i,
-                header=header_override,
-                requirements=requirements_override,
-                career=career,
-                gender=gender_for_run,
-            )
-            if not data:
-                raise ValueError("LLM 返回为空")
+    async def _gen_one(i: int, career: dict | None, gender_for_run: str) -> ProfileResponse:
+        data = await generate_single_profile(
+            schema,
+            tpl.defaults,
+            index=i,
+            header=header_override,
+            requirements=requirements_override,
+            career=career,
+            gender=gender_for_run,
+        )
+        if not data:
+            raise ValueError("LLM 返回为空")
 
-            # 性别字段强制覆盖: profile.identity.gender 存中文 (与既有种子数据一致,
-            # 读取侧 _profile_gender_en 会翻译回英文)。
-            if not isinstance(data.get("identity"), dict):
-                data["identity"] = {}
-            data["identity"]["gender"] = "男" if gender_for_run == "male" else "女"
+        # 性别字段强制覆盖: profile.identity.gender 存中文 (与既有种子数据一致,
+        # 读取侧 _profile_gender_en 会翻译回英文)。
+        if not isinstance(data.get("identity"), dict):
+            data["identity"] = {}
+        data["identity"]["gender"] = "男" if gender_for_run == "male" else "女"
 
-            # 职业 / 民族 / 姓名 等覆盖由 generate_single_profile 内部的
-            # _apply_postprocess_overrides 统一处理 (含 income 默认值与 clients 拆 tags),
-            # 此处不再重复.
+        # 职业 / 民族 / 姓名 等覆盖由 generate_single_profile 内部的
+        # _apply_postprocess_overrides 统一处理 (含 income 默认值与 clients 拆 tags).
 
-            # 后处理：用生日精确计算年龄（LLM 不擅长算术），再按 spec §1.3
-            # 硬钳 20-29（prompt hint 不保证，LLM 偶尔生成超出区间的 birthday）
-            identity = data.get("identity")
-            if isinstance(identity, dict):
-                birthday = identity.get("birthday")
-                if birthday and isinstance(birthday, str):
-                    try:
-                        bd = date.fromisoformat(birthday)
-                        today = date.today()
-                        age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
-                        identity["age"] = clamp_agent_age(age)
-                    except (ValueError, TypeError):
-                        pass
+        # 后处理：用生日精确计算年龄（LLM 不擅长算术），再按 spec §1.3
+        # 硬钳 20-29（prompt hint 不保证，LLM 偶尔生成超出区间的 birthday）
+        identity = data.get("identity")
+        if isinstance(identity, dict):
+            birthday = identity.get("birthday")
+            if birthday and isinstance(birthday, str):
+                try:
+                    bd = date.fromisoformat(birthday)
+                    today = date.today()
+                    age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
+                    identity["age"] = clamp_agent_age(age)
+                except (ValueError, TypeError):
+                    pass
 
-            # 姓名由用户在 app 内手动输入，背景不含姓名
-            # profile_name 用职业名做管理标识
-            career_title = ""
-            if career:
-                career_title = career.get("title", "")
-            elif isinstance(data.get("career"), dict):
-                career_title = data["career"].get("title", "")
-            profile_name = career_title or f"角色_{i + 1}"
+        # 姓名由用户在 app 内手动输入，背景不含姓名 (_apply_postprocess_overrides 已清);
+        # profile_name 用职业名做管理标识
+        career_title = ""
+        if career:
+            career_title = career.get("title", "")
+        elif isinstance(data.get("career"), dict):
+            career_title = data["career"].get("title", "")
+        profile_name = career_title or f"角色_{i + 1}"
 
-            create_data: dict = {
-                "templateId": tpl.id,
-                "name": profile_name,
-                "data": Json(data),
-                "status": "draft",
-            }
-            if career and career.get("id"):
-                create_data["careerId"] = career["id"]
-            p = await db.characterprofile.create(
-                data=create_data
-            )
-            results.append(_profile_response(p, template_name=tpl.name))
-            logger.info(f"Generated profile {i + 1}/{count}: {profile_name}")
-        except Exception as e:
-            err_msg = f"#{i + 1}: {type(e).__name__}: {str(e)[:200]}"
+        create_data: dict = {
+            "templateId": tpl.id,
+            "name": profile_name,
+            "data": Json(data),
+            "status": "draft",
+        }
+        if career and career.get("id"):
+            create_data["careerId"] = career["id"]
+        p = await db.characterprofile.create(data=create_data)
+        logger.info(f"Generated profile {i + 1}/{count}: {profile_name}")
+        return _profile_response(p, template_name=tpl.name)
+
+    # 并行生成: count ≤ 10 (上方 clamp), DashScope 单 admin 操作并发安全
+    raw = await asyncio.gather(
+        *(_gen_one(i, career, gender) for i, career, gender in plans),
+        return_exceptions=True,
+    )
+    results: list[ProfileResponse] = []
+    failures: list[str] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, Exception):
+            err_msg = f"#{i + 1}: {type(item).__name__}: {str(item)[:200]}"
             failures.append(err_msg)
-            logger.warning(f"Profile generation failed at index {i}: {e}", exc_info=True)
-            continue
+            logger.warning(f"Profile generation failed at index {i}: {item}", exc_info=item)
+        else:
+            results.append(item)
 
     # 全部失败 → 抛 500，让前端 toast 显示具体原因
     if not results and failures:
