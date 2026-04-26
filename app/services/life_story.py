@@ -1122,7 +1122,12 @@ async def _run_l1_coverage(
         await set_progress(
             agent_id, "generating_chapter",
             current=0, total=len(gaps),
-            message=f"正在补齐 {len(gaps)} 类 / {report.gaps_after_phase1} 条 L1 记忆覆盖...",
+            # 区分清楚: direct_count 是 phase 1 从画像字段直接转好的, gaps_after_phase1
+            # 是还需 LLM 调用补齐的剩余条数. 总数 = direct_count + gaps_after_phase1
+            message=(
+                f"已直填 {report.direct_count} 条记忆, "
+                f"还需补 {len(gaps)} 类 / {report.gaps_after_phase1} 条..."
+            ),
         )
         await _phase3_4_llm_fill(
             agent_id, name, gender, mbti, profile_data, career_template,
