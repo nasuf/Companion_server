@@ -125,6 +125,19 @@ async def _intent_llm_reply(
 
 _SENTENCE_END = re.compile(r'[。！？…～~!?]+')
 
+# 切分分隔符: 优先 || (我们要求 LLM 输出的); 兼容 LLM 自作主张用空行分段的情况
+# (\n\n+) — 不切就会被前端 pre-wrap 渲染成同一气泡内带空行.
+_REPLY_SPLIT_RE = re.compile(r'\|\||\n{2,}')
+
+# 单条回复内部残留的换行 (单个 \n 或单个 \r) 收敛为空格,
+# 避免句子内 "你好\n吗" 这种意外换行被 pre-wrap 渲染成断行.
+_INTRA_REPLY_WS_RE = re.compile(r'[\r\n]+')
+
+
+def _clean_reply_part(text: str) -> str:
+    """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格."""
+    return _INTRA_REPLY_WS_RE.sub(" ", text).strip()
+
 _RELATIONAL_COMPLAINT_KEYWORDS = [
     "怎么不理我", "不理我", "不回我", "不想理我", "你在忙吗", "你还在吗",
     "你是不是不想理我", "是不是不想聊", "是不是烦我", "怎么才回",
@@ -154,10 +167,16 @@ def split_and_validate_replies(
     max_per_reply: int = MAX_PER_REPLY,
     max_total: int = MAX_TOTAL_CHARS,
 ) -> list[str]:
-    """按||分割LLM输出，校验条数/单条长度/总长度。"""
-    parts = [p.strip() for p in raw.split("||") if p.strip()]
+    """按 || 或空行分割 LLM 输出, 校验条数/单条长度/总长度.
+
+    LLM 偶尔不按 prompt 用 ||, 改用空行分段 — 不切的话前端 pre-wrap 会把
+    \\n\\n 渲染成单气泡里的空行, 视觉跟正常多条回复混淆. 这里把空行也当
+    分隔符. 单条内的孤立 \\n 由 _clean_reply_part 折叠成空格.
+    """
+    parts = [_clean_reply_part(p) for p in _REPLY_SPLIT_RE.split(raw)]
+    parts = [p for p in parts if p]
     if not parts:
-        return [raw.strip() or "..."]
+        return [_clean_reply_part(raw) or "..."]
     parts = parts[:max_count]
     parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
     result: list[str] = []
@@ -649,7 +668,10 @@ async def stream_chat_response(
             "l3": _memory_l3_reply,
         },
         split_llm_fn=_split_reply_to_n_sentences,
-        truncate_fn=truncate_at_sentence,
+        # LLM-split 分支用 truncate_fn: 先 _clean_reply_part 把单条内残留 \n 折成空格,
+        # 再走 sentence-truncate, 防止 LLM 给的某条单片里嵌空白行/换行被前端
+        # pre-wrap 渲染成断行.
+        truncate_fn=lambda text, max_len: truncate_at_sentence(_clean_reply_part(text), max_len),
         pipe_fallback_fn=split_and_validate_replies,
     )
 
