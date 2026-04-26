@@ -54,7 +54,8 @@ DEFAULT_TEMPLATE_SCHEMA = {
                  "_memory_sub": "星座"},
                 {"key": "blood_type", "name": "血型", "type": "select",
                  "options": ["O型", "A型", "B型", "AB型"],
-                 "hint": "选定后简述与性格的微关联",
+                 "required": True,
+                 "hint": "必须从 4 个选项中选一个并简述与性格的微关联",
                  "_memory_sub": "血型"},
                 {"key": "location", "name": "现居地", "type": "text",
                  "hint": "出生地=居住地=工作地，格式参考居民身份证地址",
@@ -757,6 +758,11 @@ def _build_repair_missing_fields_text(
         lines.append(f"[{cat_label}]（key: {cat_key}）" + (f" — {cat_hint}" if cat_hint else ""))
         for f in fields:
             line = f"  - {f.get('name')}（key: {f.get('key')}, 类型: {f.get('type')}）"
+            # select 字段必须把 options 透传给 LLM, 否则 LLM 不知道有效值是什么
+            # → 选填 / 跳过 (例如 blood_type 经常空着). 直接列出可选枚举强制选一个。
+            opts = f.get("options")
+            if isinstance(opts, list) and opts:
+                line += f"; 必须从以下选项中严格选一个: {', '.join(map(str, opts))}"
             if f.get("hint"):
                 line += f"; 提示: {f['hint']}"
             lines.append(line)

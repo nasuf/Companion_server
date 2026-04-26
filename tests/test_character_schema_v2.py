@@ -404,3 +404,34 @@ def test_repair_missing_fields_text_lists_each_field():
     assert "relieved" in text
     assert "tags" in text
     assert "30-80 字" in text
+
+
+def test_repair_missing_fields_text_includes_select_options():
+    """select 字段的 options 必须透传给 repair LLM, 否则 LLM 不知道有效枚举值
+    会偷懒跳过 (历史 bug: 血型字段经常空着)."""
+    schema = {
+        "categories": [
+            {"key": "identity", "name": "基础身份", "fields": []},
+        ],
+    }
+    missing = [
+        ("identity", {
+            "key": "blood_type", "name": "血型", "type": "select",
+            "options": ["O型", "A型", "B型", "AB型"],
+            "hint": "选定后简述与性格的微关联",
+        }),
+    ]
+    text = _build_repair_missing_fields_text(schema, missing)
+    # 4 个枚举值必须出现在 prompt 里
+    for opt in ["O型", "A型", "B型", "AB型"]:
+        assert opt in text, f"option {opt!r} missing from repair prompt"
+    assert "严格选一个" in text
+
+
+def test_blood_type_marked_required_in_schema():
+    """血型不标 required 时 LLM 偶尔会跳过, 导致前端编辑器看到空值需手动选."""
+    identity = next(
+        c for c in DEFAULT_TEMPLATE_SCHEMA["categories"] if c["key"] == "identity"
+    )
+    blood_field = next(f for f in identity["fields"] if f["key"] == "blood_type")
+    assert blood_field.get("required") is True

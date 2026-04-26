@@ -12,6 +12,7 @@ from prisma import Json
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
+from app.redis_client import get_redis
 from app.models.character import (
     ProfileBatchStatusRequest,
     ProfileGenerateRequest,
@@ -296,6 +297,31 @@ async def list_profiles(
     return [_profile_response(p) for p in profiles]
 
 
+_BATCH_LOCK_PREFIX = "lock:profile_gen:"
+
+
+def _batch_lock_key(template_id: str) -> str:
+    return f"{_BATCH_LOCK_PREFIX}{template_id}"
+
+
+@router.get("/templates/{template_id}/batch-status")
+async def batch_status(template_id: str, _: str = Depends(require_admin_jwt)):
+    """前端 mount / refresh 后查询该模板是否有批次正在跑。
+
+    返回 `{ "in_progress": bool }`. 前端用此值在 Redis 锁还在时把"开始生成"
+    按钮置灰, 避免刷新后再次点击触发重复生成 (历史 bug: 用户连点 5 次,
+    1 次 30 个 → 总产 150+ profile).
+    """
+    try:
+        redis = await get_redis()
+        held = await redis.exists(_batch_lock_key(template_id))
+        return {"in_progress": bool(held)}
+    except Exception as e:
+        logger.warning(f"batch_status redis check failed for {template_id}: {e}")
+        # Redis 挂时优雅降级 (后端会同步走 LLM, 不靠锁): 不阻止前端尝试。
+        return {"in_progress": False}
+
+
 @router.post("/profiles/generate", response_model=list[ProfileResponse])
 async def generate_profiles(
     body: ProfileGenerateRequest,
@@ -313,6 +339,24 @@ async def generate_profiles(
     header_override = getattr(tpl, "promptHeader", None)
     requirements_override = getattr(tpl, "promptRequirements", None)
     sem = asyncio.Semaphore(settings.character_profile_batch_concurrency)
+
+    # 排他锁: 同一 template 同时只能跑一个批次. 防止用户在等待期间多次点击 /
+    # 刷新后重复提交导致 N × count 个 profile 被生成 (生成速度 ≈ ceil(count /
+    # concurrency) × 30-60s, 100/10 大约 5-10 min, 锁 TTL 给 15 min 留余量).
+    lock_key = _batch_lock_key(body.template_id)
+    lock_ttl = 15 * 60  # 15 min, 远超最长批次预期
+    redis = None
+    try:
+        redis = await get_redis()
+        acquired = await redis.set(lock_key, "1", nx=True, ex=lock_ttl)
+    except Exception as e:
+        logger.warning(f"batch lock acquire failed for {body.template_id}: {e}")
+        acquired = True  # Redis 挂 → 不阻塞业务, fail-open
+    if not acquired:
+        raise HTTPException(
+            status_code=409,
+            detail="该模板已有批次正在生成, 请等待当前批次完成后再试",
+        )
 
     # ── 职业选择 ──
     fixed_career: dict | None = None
@@ -410,29 +454,37 @@ async def generate_profiles(
         return _profile_response(p, template_name=tpl.name)
 
     # 全 count 进 gather, 内部 Semaphore 控制实际并发 (默认 10, 可配),
-    # 防 DashScope 429。
-    raw = await asyncio.gather(
-        *(_gen_one(i, career, gender) for i, career, gender in plans),
-        return_exceptions=True,
-    )
-    results: list[ProfileResponse] = []
-    failures: list[str] = []
-    for i, item in enumerate(raw):
-        if isinstance(item, Exception):
-            err_msg = f"#{i + 1}: {type(item).__name__}: {str(item)[:200]}"
-            failures.append(err_msg)
-            logger.warning(f"Profile generation failed at index {i}: {item}", exc_info=item)
-        else:
-            results.append(item)
-
-    # 全部失败 → 抛 500，让前端 toast 显示具体原因
-    if not results and failures:
-        raise HTTPException(
-            status_code=500,
-            detail=f"全部 {count} 个画像生成失败。首个错误: {failures[0]}",
+    # 防 DashScope 429。无论成功 / 失败 / 异常都要释放锁防止后续请求被
+    # 误认为"批次仍在跑"。
+    try:
+        raw = await asyncio.gather(
+            *(_gen_one(i, career, gender) for i, career, gender in plans),
+            return_exceptions=True,
         )
+        results: list[ProfileResponse] = []
+        failures: list[str] = []
+        for i, item in enumerate(raw):
+            if isinstance(item, Exception):
+                err_msg = f"#{i + 1}: {type(item).__name__}: {str(item)[:200]}"
+                failures.append(err_msg)
+                logger.warning(f"Profile generation failed at index {i}: {item}", exc_info=item)
+            else:
+                results.append(item)
 
-    return results
+        # 全部失败 → 抛 500，让前端 toast 显示具体原因
+        if not results and failures:
+            raise HTTPException(
+                status_code=500,
+                detail=f"全部 {count} 个画像生成失败。首个错误: {failures[0]}",
+            )
+
+        return results
+    finally:
+        if redis is not None:
+            try:
+                await redis.delete(lock_key)
+            except Exception as e:
+                logger.warning(f"batch lock release failed for {body.template_id}: {e}")
 
 
 @router.get("/profiles/{profile_id}", response_model=ProfileResponse)
