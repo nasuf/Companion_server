@@ -53,7 +53,6 @@ async def register(data: RegisterRequest):
     hashed = hash_password(data.password)
     user = await db.user.create(
         data={
-            "name": data.username,
             "username": data.username,
             "hashedPassword": hashed,
             "role": "user",

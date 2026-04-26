@@ -194,7 +194,6 @@ async def get_user_detail(
         "user": {
             "id": user.id,
             "username": user.username,
-            "name": user.name,
             "role": user.role,
             "created_at": str(user.createdAt),
         },

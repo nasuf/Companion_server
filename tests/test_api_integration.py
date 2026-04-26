@@ -42,22 +42,24 @@ def test_health_endpoint(mock_deps):
         assert "status" in data
 
 
-def test_create_user(mock_deps):
-    """POST /users creates a user."""
+def test_get_user_returns_username(mock_deps):
+    """GET /users/{id} returns the user with `username` field (no legacy `name`)."""
     client = mock_deps
     mock_user = SimpleNamespace(
         id="test-id",
-        name="Test User",
-        email="test@example.com",
+        username="alice",
+        email="alice@example.com",
         createdAt="2025-01-01T00:00:00",
         updatedAt="2025-01-01T00:00:00",
     )
     with patch("app.api.public.users.db") as mock_db:
         mock_db.user = MagicMock()
-        mock_db.user.create = AsyncMock(return_value=mock_user)
-        response = client.post("/users", json={"name": "Test User"})
+        mock_db.user.find_unique = AsyncMock(return_value=mock_user)
+        response = client.get("/users/test-id")
         assert response.status_code == 200
-        assert response.json()["name"] == "Test User"
+        body = response.json()
+        assert body["username"] == "alice"
+        assert "name" not in body
 
 
 from tests.conftest import make_auth_header as _auth_header  # noqa: F401
