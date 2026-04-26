@@ -8,6 +8,7 @@ Uses APScheduler for:
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -340,6 +341,48 @@ async def _run_ntp_calibration():
 
 
 
+async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
+    """检查是否已有 assistant 回复在 prompt 中显式覆盖了这条 user 消息.
+
+    依赖 orchestrator 主路径在 save_replies 时写入的 metadata.covered_until_user_ts
+    (LLM 数据拉取时刻能看到的最新 user 消息时间). user_msg.createdAt 早于或等于
+    任一 assistant 的 covered_until_user_ts → 视为已被覆盖, 跳过避免双发。
+
+    短路/边界回复不写此字段 → 不会误判, 这类回复对应的 user 消息仍按原路处理。
+    """
+    from app.db import db
+
+    user_msg = await db.message.find_unique(where={"id": user_msg_id})
+    if not user_msg or user_msg.createdAt is None:
+        return False
+
+    # 拉取此消息之后的所有 assistant 消息 (上限 10 条防长会话扫描过大).
+    later_ai = await db.message.find_many(
+        where={
+            "conversationId": conversation_id,
+            "role": "assistant",
+            "createdAt": {"gt": user_msg.createdAt},
+        },
+        order={"createdAt": "asc"},
+        take=10,
+    )
+    for ai_msg in later_ai:
+        md = getattr(ai_msg, "metadata", None) or {}
+        covered = md.get("covered_until_user_ts") if isinstance(md, dict) else None
+        if not covered:
+            continue
+        try:
+            cutoff = datetime.fromisoformat(covered) if isinstance(covered, str) else None
+        except ValueError:
+            cutoff = None
+        if cutoff is None:
+            continue
+        # 比较时统一带 tz, prisma 默认返回 aware datetime; isoformat 也带 tz.
+        if cutoff >= user_msg.createdAt:
+            return True
+    return False
+
+
 async def _run_aggregation_scan():
     """Scan aggregation windows and due delayed replies, then deliver asynchronously."""
     from app.services.chat.orchestrator import stream_chat_response
@@ -379,6 +422,19 @@ async def _run_aggregation_scan():
             try:
                 merged = merge_delayed_payloads(payloads)
                 if not merged:
+                    continue
+
+                # 去重 gate: ws.py 已用 enqueue_or_append_delayed 关闭主要 race;
+                # 这里兜底 "msg1 已被 flush 出队但仍在 LLM 中, msg2 才到达" 窗口:
+                # 上一轮 LLM 数据拉取若已隐式包含本 user_msg(写到 reply 的
+                # metadata.covered_until_user_ts), 则跳过避免重复回复。
+                # 仅看 metadata 显式字段 → 不会因短路/边界 reply 误伤未覆盖消息。
+                user_msg_id = merged.get("user_message_id")
+                if user_msg_id and await _already_covered(conv_id, user_msg_id):
+                    logger.info(
+                        f"[DEDUP-GATE] skip conv={conv_id[:8]} "
+                        f"user_msg={user_msg_id[:8]} already covered by prior reply"
+                    )
                     continue
 
                 conv = await db.conversation.find_unique(

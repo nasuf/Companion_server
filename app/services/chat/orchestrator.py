@@ -467,6 +467,15 @@ async def stream_chat_response(
         for m in recent_messages
     ]
 
+    # 记录 LLM 数据拉取时刻能看到的最新 user 消息时间, 用于 scheduler dedup gate.
+    # 若用户连发多条非碎片, 第一条 LLM 调用的 history 已经隐式包含后续所有 user
+    # 消息 → reply 实际覆盖了它们; 写到 reply metadata 后, scheduler 处理后续
+    # payload 时凭此跳过, 避免重复回复 (见 jobs/scheduler.py dedup gate).
+    covered_until_user_ts = max(
+        (m.createdAt for m in recent_messages if m.role == "user" and m.createdAt is not None),
+        default=None,
+    )
+
     # --- Topic tracking (Redis, no LLM) ---
     topic_info = await push_topic(conversation_id, user_message)
     topic_context = format_topic_context(topic_info) if topic_info else None
@@ -703,6 +712,11 @@ async def stream_chat_response(
         yield evt
 
     # Persist replies immediately; trace links become clickable only after public share completes.
+    # 把 covered_until_user_ts 注入首条 reply, save_replies 会写入 metadata.
+    if emitted_replies and covered_until_user_ts is not None:
+        first = emitted_replies[0]
+        if isinstance(first, dict):
+            first.setdefault("covered_until_user_ts", covered_until_user_ts.isoformat())
     first_assistant_message_id = await _save_replies(
         conversation_id,
         emitted_replies,

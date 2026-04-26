@@ -13,7 +13,7 @@ from prisma import Json
 from app.db import db
 from app.redis_client import is_redis_healthy
 from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
-from app.services.interaction.delayed_queue import enqueue_delayed_message
+from app.services.interaction.delayed_queue import enqueue_or_append_delayed
 from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
 from app.services.interaction.reply_context import build_reply_timing_context, merge_reply_contexts
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
@@ -58,7 +58,9 @@ async def _queue_reply(
     reply_context: dict | None,
 ) -> None:
     delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
-    await enqueue_delayed_message(
+    # 用户连发非碎片：若已有 pending payload，append 到同一 due_at（沿用 spec §6.3
+    # 时间戳沿用语义），scheduler flush 时一次拿到合并处理，避免双发。
+    appended = await enqueue_or_append_delayed(
         conversation_id,
         {
             "conversation_id": conversation_id,
@@ -70,7 +72,7 @@ async def _queue_reply(
         },
         delay_seconds,
     )
-    if delay_seconds > 5:
+    if delay_seconds > 5 and not appended:
         await ws.send_json({"type": "delay", "data": {"duration": delay_seconds}})
     await ws.send_json({"type": "pending", "data": {"status": "queued", "delay": delay_seconds}})
 
