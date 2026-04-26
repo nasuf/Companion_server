@@ -301,7 +301,8 @@ def test_postprocess_career_clients_already_list_passthrough():
 from app.services.character import (  # noqa: E402
     _detect_missing_fields,
     _is_field_empty,
-    _build_repair_prompt,
+    _build_repair_persona_summary,
+    _build_repair_missing_fields_text,
 )
 
 
@@ -375,23 +376,31 @@ def test_detect_missing_fields_truncation_pattern():
     assert field_keys == ["relationships", "skill_learning", "life", "special"]
 
 
-def test_build_repair_prompt_includes_persona_and_missing_fields():
+def test_repair_persona_summary_includes_identity_and_career():
+    """注入 character.repair_missing_fields 模板的 {persona_summary} 部分。"""
+    data = {
+        "identity": {"name": "李小雨", "gender": "女", "age": 25, "location": "上海"},
+        "career": {"title": "占卜师"},
+    }
+    summary = _build_repair_persona_summary(data)
+    assert "李小雨" in summary
+    assert "占卜师" in summary
+    assert "上海" in summary
+
+
+def test_repair_missing_fields_text_lists_each_field():
+    """注入 character.repair_missing_fields 模板的 {missing_fields} 部分。"""
     schema = {
         "categories": [
             {"key": "life_events", "name": "生活记忆事件", "fields": []},
         ],
     }
-    data = {
-        "identity": {"name": "李小雨", "gender": "女", "age": 25, "location": "上海"},
-        "career": {"title": "占卜师"},
-    }
     missing = [
         ("life_events", {"key": "relieved", "name": "释怀", "type": "tags",
                          "hint": "30-80 字"}),
     ]
-    prompt = _build_repair_prompt(schema, data, missing)
-    assert "李小雨" in prompt
-    assert "占卜师" in prompt
-    assert "释怀" in prompt
-    assert "relieved" in prompt
-    assert "截断丢失" in prompt
+    text = _build_repair_missing_fields_text(schema, missing)
+    assert "释怀" in text
+    assert "relieved" in text
+    assert "tags" in text
+    assert "30-80 字" in text

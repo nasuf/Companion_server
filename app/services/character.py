@@ -724,13 +724,11 @@ def _detect_missing_fields(
     return missing
 
 
-def _build_repair_prompt(
-    schema: dict, data: dict, missing: list[tuple[str, dict]],
-) -> str:
-    """构造 follow-up prompt: 注入已生成的 identity 摘要, 让 LLM 只补缺失字段."""
+def _build_repair_persona_summary(data: dict) -> str:
+    """已生成 profile 的浓缩单行摘要, 注入 character.repair_missing_fields prompt."""
     identity = data.get("identity", {}) if isinstance(data.get("identity"), dict) else {}
     career = data.get("career", {}) if isinstance(data.get("career"), dict) else {}
-    persona_summary = (
+    return (
         f"姓名: {identity.get('name', '')}; "
         f"性别: {identity.get('gender', '')}; "
         f"年龄: {identity.get('age', '')}; "
@@ -738,7 +736,11 @@ def _build_repair_prompt(
         f"现居地: {identity.get('location', '')}"
     )
 
-    # 按分类聚合缺字段
+
+def _build_repair_missing_fields_text(
+    schema: dict, missing: list[tuple[str, dict]],
+) -> str:
+    """缺字段清单浓缩文本, 注入 character.repair_missing_fields prompt."""
     by_cat: dict[str, list[dict]] = {}
     for cat_key, field in missing:
         by_cat.setdefault(cat_key, []).append(field)
@@ -746,28 +748,16 @@ def _build_repair_prompt(
     cat_name_map = {cat["key"]: cat.get("name", cat["key"]) for cat in schema.get("categories", [])}
     cat_hint_map = {cat["key"]: cat.get("hint", "") for cat in schema.get("categories", [])}
 
-    lines = [
-        "你之前已经为以下角色生成了部分背景信息, 但有些字段输出被截断丢失了.",
-        "请只补齐下面列出的缺失字段, 保持与已生成内容的人设一致.\n",
-        f"角色概要: {persona_summary}\n",
-        "需要补齐的字段:",
-    ]
+    lines: list[str] = []
     for cat_key, fields in by_cat.items():
         cat_label = cat_name_map.get(cat_key, cat_key)
         cat_hint = cat_hint_map.get(cat_key, "")
-        lines.append(f"\n[{cat_label}]（key: {cat_key}）" + (f" — {cat_hint}" if cat_hint else ""))
+        lines.append(f"[{cat_label}]（key: {cat_key}）" + (f" — {cat_hint}" if cat_hint else ""))
         for f in fields:
             line = f"  - {f.get('name')}（key: {f.get('key')}, 类型: {f.get('type')}）"
             if f.get("hint"):
                 line += f"; 提示: {f['hint']}"
             lines.append(line)
-
-    lines.append(
-        "\n返回 JSON, 顶层 key 为分类 key, 值为该分类下缺失字段的 key→value dict. "
-        "例如: {\"life_events\": {\"relationships\": [\"...\", \"...\"]}, "
-        "\"emotion_events\": {\"relieved\": [\"...\"]}}.\n"
-        "tags 类型必须返回数组. 不要重复输出已有字段, 也不要包含其他分类."
-    )
     return "\n".join(lines)
 
 
@@ -775,7 +765,13 @@ async def _repair_missing_fields(
     schema: dict, data: dict, missing: list[tuple[str, dict]], model,
 ) -> dict[str, dict]:
     """调 LLM 补缺. 失败返回空 dict (不抛, 让上层接受不完整结果)."""
-    prompt = _build_repair_prompt(schema, data, missing)
+    from app.services.prompting.store import get_prompt_text
+
+    template = await get_prompt_text("character.repair_missing_fields")
+    prompt = template.format(
+        persona_summary=_build_repair_persona_summary(data),
+        missing_fields=_build_repair_missing_fields_text(schema, missing),
+    )
     try:
         result = await invoke_json(model, prompt, profile="background")
     except Exception as e:

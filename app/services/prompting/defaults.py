@@ -736,6 +736,18 @@ CHARACTER_TEMPLATE_REQUIREMENTS_PROMPT = (
 )
 
 
+CHARACTER_REPAIR_MISSING_FIELDS_PROMPT = """你之前已经为以下角色生成了部分背景信息, 但有些字段输出被截断丢失了.
+请只补齐下面列出的缺失字段, 保持与已生成内容的人设一致.
+
+角色概要: {persona_summary}
+
+需要补齐的字段:
+{missing_fields}
+
+返回 JSON, 顶层 key 为分类 key, 值为该分类下缺失字段的 key→value dict. 例如: {{"life_events": {{"relationships": ["...", "..."]}}, "emotion_events": {{"relieved": ["..."]}}}}.
+tags 类型必须返回数组. 不要重复输出已有字段, 也不要包含其他分类."""
+
+
 LIFE_STORY_MAIN_GAP_FILL_PROMPT = """你在为 AI 伙伴「{name}」生成记忆库中「{main}」大类的 L1 记忆。
 
 {constraints}
