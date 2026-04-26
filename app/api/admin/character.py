@@ -227,8 +227,10 @@ async def prompt_defaults(_: str = Depends(require_admin_jwt)):
     """Return system default prompt header and requirements.
 
     Used by frontend "重置默认" button to populate textareas with the original values.
+    Reads from prompting registry (character.template_header /
+    character.template_requirements) so admin edits via「提示词管理」UI take effect.
     """
-    defaults = get_default_prompts()
+    defaults = await get_default_prompts()
     return PromptDefaultsResponse(
         header=defaults["header"],
         requirements=defaults["requirements"],
@@ -243,18 +245,26 @@ async def preview_prompt(
     """Build the assembled generation prompt without saving the template.
 
     Allows admin UI to show a live preview of what will be sent to the LLM.
+    body 字段为空 → 用 registry default (与「重置默认」一致), 这样模板尚未保存
+    时也能看到最终拼装结果。
     """
     career_data: dict | None = None
     if body.career_id:
         career_row = await db.careertemplate.find_unique(where={"id": body.career_id})
         if career_row:
             career_data = _career_row_to_dict(career_row)
+    header = body.prompt_header
+    requirements = body.prompt_requirements
+    if header is None or requirements is None:
+        defaults = await get_default_prompts()
+        header = header if header is not None else defaults["header"]
+        requirements = requirements if requirements is not None else defaults["requirements"]
     prompt = build_generation_prompt(
         body.schema_body.model_dump(),
         body.defaults,
         index=body.index,
-        header=body.prompt_header,
-        requirements=body.prompt_requirements,
+        header=header,
+        requirements=requirements,
         career=career_data,
     )
     return PromptPreviewResponse(prompt=prompt)

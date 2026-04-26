@@ -467,36 +467,34 @@ def _build_schema_description(schema: dict) -> str:
     return "\n".join(lines)
 
 
-DEFAULT_PROMPT_HEADER = (
-    "你是一个AI人格构建专家。请根据以下基础信息和模板结构，构建一个逻辑严密、"
-    "细节丰满、完全符合当代中国现实背景的虚拟人格全维度档案。\n\n"
-    "【强制设定前提】\n"
-    "- 人物身处中国区域内的地球镜像世界\n"
-    "- 地域、文化、生活规则、社会体系、历史背景等所有宏观设定均与现实当代中国保持100%一致\n"
-    "- 所有生成内容必须符合社会主义核心价值观与公序良俗"
-)
-
-# 输出要求模板。{index} 是占位符 — 在 build_generation_prompt 时被替换为实际的角色序号。
-DEFAULT_PROMPT_REQUIREMENTS = (
-    "要求：\n"
-    "1. 所有字段必须填充，内容具体、有画面感\n"
-    "2. 各项内容逻辑自洽（职业、教育、喜好、价值观之间要合理关联）\n"
-    "3. tags 类型的字段返回字符串数组（数组元素必须是字符串，不能是对象）\n"
-    "4. text/textarea 类型的字段必须返回**单一字符串**，禁止返回对象/数组；如有多项内容（如「短期 + 长期」「赞同 + 反对」），用一段连贯文字串起来，不要拆成 {{\"short\": ..., \"long\": ...}} 这样的对象\n"
-    "5. number 类型的字段返回数字\n"
-    "6. 每次生成的角色要有独特性，不要雷同\n"
-    "7. 这是第 {index} 个角色，请确保与之前的角色有明显差异\n\n"
-    "返回JSON，顶层 key 为分类的 key，值为该分类所有字段 key→value 的 dict。\n"
-    "例如: {{\"identity\": {{\"gender\": \"...\", \"age\": 25, ...}}, \"appearance\": {{...}}, ...}}"
-)
+# 默认 header / requirements 真源已迁到 prompting registry
+# (character.template_header / character.template_requirements):
+# - admin「提示词管理」UI 可编辑 → 写 Redis + DB
+# - admin「Agent管理 / 背景模板」UI 也读这两个 key, 「重置默认」按钮拿 registry 值
+# - per-template promptHeader / promptRequirements 仍可覆盖
+# 这里保留极简静态 fallback 应对 registry 启动期不可达的极端情况。
+_FALLBACK_PROMPT_HEADER = "你是一个AI人格构建专家。请根据基础信息构建虚拟人格档案。"
+_FALLBACK_PROMPT_REQUIREMENTS = "返回JSON，顶层 key 为分类 key，值为字段 key→value dict。"
 
 
-def get_default_prompts() -> dict[str, str]:
-    """返回系统默认的提示词开头和输出要求，供前端"重置默认"使用。"""
-    return {
-        "header": DEFAULT_PROMPT_HEADER,
-        "requirements": DEFAULT_PROMPT_REQUIREMENTS,
-    }
+async def get_default_prompts() -> dict[str, str]:
+    """返回系统默认的提示词开头和输出要求 (从 registry 读取).
+
+    供 admin「Agent管理 / 背景模板」的「重置默认」按钮 + per-template fallback 共用.
+    """
+    from app.services.prompting.store import get_prompt_text
+
+    try:
+        header = await get_prompt_text("character.template_header")
+    except Exception as e:
+        logger.warning(f"character.template_header registry read failed: {e}")
+        header = _FALLBACK_PROMPT_HEADER
+    try:
+        requirements = await get_prompt_text("character.template_requirements")
+    except Exception as e:
+        logger.warning(f"character.template_requirements registry read failed: {e}")
+        requirements = _FALLBACK_PROMPT_REQUIREMENTS
+    return {"header": header, "requirements": requirements}
 
 
 def _format_requirements(requirements_template: str, index: int) -> str:
@@ -585,15 +583,16 @@ def build_generation_prompt(
         schema: 模板的分类/字段定义
         defaults: 模板的生成规则
         index: 当前生成的角色序号
-        header: 提示词开头（None = 用 DEFAULT_PROMPT_HEADER）
-        requirements: 输出要求（None = 用 DEFAULT_PROMPT_REQUIREMENTS）
+        header: 提示词开头. 调用方应已通过 get_default_prompts() 从 registry
+                解析过；None 时用极简静态 fallback 应对启动期 registry 不可达。
+        requirements: 输出要求, 同 header.
         career: 职业背景数据 dict（None = 不注入职业约束）
         gender: "male" / "female" / None
         name: 角色姓名 (PDF #34 输入第一项: "AI 自我姓名: 直接引用")
         personality: 性格 7 维 dict (liveliness/rationality/sensitivity/...)
     """
-    actual_header = header if header is not None else DEFAULT_PROMPT_HEADER
-    actual_requirements = requirements if requirements is not None else DEFAULT_PROMPT_REQUIREMENTS
+    actual_header = header if header is not None else _FALLBACK_PROMPT_HEADER
+    actual_requirements = requirements if requirements is not None else _FALLBACK_PROMPT_REQUIREMENTS
 
     # 有职业时，从 schema 中剔除 career 分类 — 不让 LLM 生成职业字段（后处理直接赋值）
     effective_schema = schema
@@ -648,9 +647,15 @@ async def generate_single_profile(
     旧调用方仅传 agent_name 不传 name 的情况.
     """
     effective_name = name or agent_name
-    # 注: character profile prompt 由 schema/career/name/personality 多段动态拼装,
-    # 不走 prompt registry. Admin 想调 prompt 走 schema 设置的 promptHeader /
-    # promptRequirements 字段 (api/admin/character.py 已暴露), 而非 registry。
+    # header / requirements 解析顺序:
+    #   per-template 覆盖 (caller 传入)  >  registry default (character.template_*)
+    #   >  _FALLBACK_PROMPT_*  (registry 不可达极端兜底)
+    # 整段 prompt 由 schema/career/name/personality 多段运行时拼装, 拼装结构
+    # 不进 registry; 但顶部规则 / 底部要求两段进 registry, admin 双 UI 共享一份。
+    if header is None or requirements is None:
+        resolved = await get_default_prompts()
+        header = header if header is not None else resolved["header"]
+        requirements = requirements if requirements is not None else resolved["requirements"]
     prompt = build_generation_prompt(
         schema, defaults, index,
         header=header, requirements=requirements,

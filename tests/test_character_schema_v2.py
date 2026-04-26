@@ -7,11 +7,11 @@ import pytest
 from app.services.character import (
     DEFAULT_TEMPLATE_SCHEMA,
     DEFAULT_TEMPLATE_DEFAULTS,
-    DEFAULT_PROMPT_HEADER,
     build_generation_prompt,
     _apply_postprocess_overrides,
     _is_current_schema,
 )
+from app.services.prompting.defaults import CHARACTER_TEMPLATE_HEADER_PROMPT
 from app.services.memory.taxonomy import TAXONOMY_MATRIX
 
 
@@ -155,9 +155,9 @@ def test_schema_dislikes_no_habits_field():
 
 
 def test_default_prompt_header_contains_required_clauses():
-    assert "AI人格构建专家" in DEFAULT_PROMPT_HEADER
-    assert "中国区域内的地球镜像世界" in DEFAULT_PROMPT_HEADER
-    assert "社会主义核心价值观" in DEFAULT_PROMPT_HEADER
+    assert "AI人格构建专家" in CHARACTER_TEMPLATE_HEADER_PROMPT
+    assert "中国区域内的地球镜像世界" in CHARACTER_TEMPLATE_HEADER_PROMPT
+    assert "社会主义核心价值观" in CHARACTER_TEMPLATE_HEADER_PROMPT
 
 
 def test_default_defaults_contains_all_pdf_required_rules():
