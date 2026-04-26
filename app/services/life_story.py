@@ -24,7 +24,6 @@ from app.redis_client import get_redis
 from app.services.llm.models import (
     get_chat_model,
     get_embedding_model,
-    invoke_json,
     invoke_json_with_usage,
 )
 from app.services.memory.demographics import (
@@ -601,42 +600,25 @@ async def _fill_main_gaps(
     gender/mbti 已通过 constraints 注入。is_retry=True 时提示 LLM 上一轮
     遗漏了这些子类, 必须逐个补齐。stats 非 None 时写入 token/duration/count 统计。
     """
+    from app.services.prompting.store import get_prompt_text
+
     profile_slice = _slice_profile(main, profile_data, career_template)
     spec = _spec_for_gap(main, gap_subs)
     retry_note = _RETRY_NOTE if is_retry else ""
     emotion_guidance = _EMOTION_GUIDANCE if main == "情绪" else ""
 
-    prompt = f"""你在为 AI 伙伴「{name}」生成记忆库中「{main}」大类的 L1 记忆。
-
-{constraints}
-
-{timeline}
-
-=== 角色相关背景 ===
-{profile_slice}
-
-=== 已有记忆(请勿重复) ===
-{existing_digest}
-
-=== 需要生成的子类 ==={retry_note}
-{spec}{emotion_guidance}
-
-要求:
-1. 每条 summary 以"我"开头, 20-80 字, 描述一个具体事实/偏好/经历/体验
-2. 同一子类的多条记忆应展现该事实/偏好的不同侧面(场景/来源/情感/频次), 句式不要雷同
-3. 所有内容必须与上方 "硬约束 + 时间线" 严格一致, 不得矛盾
-4. importance 在指定下限到 0.95 之间, 重要事实更高
-5. sub_category 必须严格使用 "=== 需要生成的子类 ===" 列出的名字, 不得自造
-
-输出严格 JSON, 顶层按子类分组:
-{{
-  "<子类名>": [
-    {{"summary": "...", "importance": 0.85}},
-    ...
-  ],
-  ...
-}}
-"""
+    template = await get_prompt_text("life_story.main_gap_fill")
+    prompt = template.format(
+        name=name,
+        main=main,
+        constraints=constraints,
+        timeline=timeline,
+        profile_slice=profile_slice,
+        existing_digest=existing_digest,
+        retry_note=retry_note,
+        spec=spec,
+        emotion_guidance=emotion_guidance,
+    )
     start_ms = int(time.time() * 1000)
     async with _LLM_SEMAPHORE:
         result, usage = await invoke_json_with_usage(get_chat_model(), prompt)

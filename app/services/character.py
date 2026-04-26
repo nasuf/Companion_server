@@ -9,7 +9,6 @@ import logging
 
 from app.db import db
 from app.services.llm.models import get_chat_model, invoke_json
-from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -649,21 +648,15 @@ async def generate_single_profile(
     旧调用方仅传 agent_name 不传 name 的情况.
     """
     effective_name = name or agent_name
+    # 注: character profile prompt 由 schema/career/name/personality 多段动态拼装,
+    # 不走 prompt registry. Admin 想调 prompt 走 schema 设置的 promptHeader /
+    # promptRequirements 字段 (api/admin/character.py 已暴露), 而非 registry。
     prompt = build_generation_prompt(
         schema, defaults, index,
         header=header, requirements=requirements,
         career=career, gender=gender,
         name=effective_name, personality=personality,
     )
-
-    # 可选：管理员可在「提示词管理」中注册 character.generation key 来覆盖默认 prompt
-    try:
-        custom_prompt = await get_prompt_text("character.generation")
-        if custom_prompt and "{schema}" in custom_prompt:
-            schema_desc = _build_schema_description(schema)
-            prompt = custom_prompt.format(schema=schema_desc, defaults=defaults or "", index=index + 1)
-    except Exception:
-        pass
 
     # Schema v2: prompt ~6K + 输出 JSON ~3-4K (含 26 项过去事件 × 3-5 场景),
     # 远超 utility_fast 8s timeout. 用 chat 大模型 + background profile (120s).

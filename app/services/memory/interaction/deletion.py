@@ -15,7 +15,7 @@ import logging
 
 from app.redis_client import get_redis
 from app.services.memory.storage import repo as memory_repo
-from app.services.llm.models import get_utility_model, get_chat_model, invoke_json, invoke_text
+from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.config import DELETION_SIMILARITY_THRESHOLD, LLM_INTENT_MIN_CONFIDENCE
 from app.services.memory.storage.embedding import generate_embedding
 from app.services.memory.retrieval.vector_search import search_by_embedding
@@ -36,22 +36,6 @@ DELETION_KEYWORDS = [
     "不用提醒", "取消提醒", "不用记着", "不用再提",
     "forget", "delete", "remove", "don't remember",
 ]
-
-DELETION_INTENT_PROMPT = """判断用户是否在要求AI忘记/删除某条记忆。
-
-用户消息：{message}
-
-返回JSON：
-{{
-  "is_deletion_request": true/false,
-  "target_description": "用户想删除的记忆描述（如无则为null）",
-  "confidence": 0.0-1.0
-}}
-
-规则：
-- 用户说"忘了吧"、"别记了"、"删掉那个"等属于删除请求
-- 用户说"我忘了"（表达自己忘记）不是删除请求
-- 只有明确要求AI删除/忘记时才返回true"""
 
 DELETION_RESPONSE_TEMPLATES = [
     "好的，那件事我不会再提了。",
@@ -108,19 +92,18 @@ async def generate_deletion_reply(
     description: str,
     deleted_count: int,
 ) -> str:
-    """用LLM生成删除记忆后的委婉回复。失败时用模板。"""
+    """删除记忆后的兜底回复 (静态模板).
+
+    spec §5.3 主路径走 registry-backed `intent.deletion_reply` (intent_replies.
+    deletion_done_reply), 这里仅在主 LLM 返回 None/空时承接, 因此不再二次调
+    LLM——同一会话同一窗口再调一次内联简化 prompt 多半也会失败, 直接给模板更
+    稳更快。模板池见 DELETION_RESPONSE_TEMPLATES。
+    agent_name / description 仅留作签名兼容, 不再使用。
+    """
+    del agent_name, description  # 保留签名兼容
     if deleted_count == 0:
         return "嗯...我好像没有关于这个的记忆呢。"
-
-    prompt = (
-        f"你是{agent_name}。用户要求你忘掉关于「{description}」的事情，你已经忘掉了。\n"
-        "请用1句话自然地回复用户，语气温和体贴，像朋友聊天一样。\n"
-        "不要说「好的」开头，不要提及「记忆」或「删除」这类技术词汇。"
-    )
-    try:
-        return await invoke_text(get_chat_model(), prompt)  # spec §5.3: 大模型生成删除回复
-    except Exception:
-        return get_deletion_response()
+    return get_deletion_response()
 
 
 async def delete_memories_by_description(
@@ -218,21 +201,19 @@ async def generate_deletion_confirmation_prompt(
     agent_name: str,
     candidates: list[dict],
 ) -> str:
-    """Spec §5.2: show candidates and ask user to confirm."""
+    """Spec §5.2 兜底确认提示 (静态模板).
+
+    主路径走 registry-backed `intent.deletion_confirm` (intent_replies.
+    deletion_confirm_reply), 这里仅在 None/空 时承接——同会话再调一次简化版
+    LLM 没意义, 直接列候选更稳。agent_name 留着作签名兼容, 不再使用。
+    """
+    del agent_name  # 仅保留签名兼容
     previews = "\n".join(
-        f"  {i+1}. {c.get('content', c.get('summary', ''))[:60]}"
+        f"  {i + 1}. {c.get('content', c.get('summary', ''))[:60]}"
         for i, c in enumerate(candidates[:5])
     )
-    prompt = (
-        f"你是{agent_name}。用户想让你忘掉一些事情，你找到了以下相关记忆：\n"
-        f"{previews}\n\n"
-        "请用1-2句温和的话确认用户是否真的要忘掉这些内容。"
-        "语气像朋友确认一样，不要用技术词汇。"
-    )
-    try:
-        return await invoke_text(get_chat_model(), prompt)  # spec §5.2: 大模型生成确认回复
-    except Exception:
-        return f"我找到了{len(candidates)}条相关的记忆，你确定要我忘掉吗？"
+    return f"我找到了这些可能相关的记忆：\n{previews}\n\n你确定要我把这些都忘掉吗？"
+
 
 
 async def execute_confirmed_deletion(

@@ -30,6 +30,7 @@ from app.services.prompting.defaults import (
     L3_MEMORY_REPLY_PROMPT,
     L3_TRIGGER_PROMPT,
     LIFE_OVERVIEW_PROMPT,
+    LIFE_STORY_MAIN_GAP_FILL_PROMPT,
     LIGHT_ATTACK_REPLY_PROMPT,
     LOW_PATIENCE_REPLY_PROMPT,
     MEDIUM_ATTACK_REPLY_PROMPT,
@@ -125,6 +126,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("proactive.special_combined", "特殊日期(合并)", "主动交流", "主动消息", "同日多个特殊日期合并消息。", PROACTIVE_SPECIAL_COMBINED_PROMPT),
     PromptDefinition("boundary.apology", "道歉真诚度检测", "边界系统", "边界", "【工程扩展】拉黑态防 spam-unblock：用 sincerity 阈值闸门用户是否真心道歉，spec §2.6.2.1 的 intent.unified 仅做意图分类不评估真诚度。", APOLOGY_PROMPT),
     PromptDefinition("agent.personality_scoring", "AI 性格打分", "初始化", "初始化", "Spec §1.3 + 指令模版 P26：agent 创建时用 LLM 把用户选的 7 维性格推导为 MBTI 8 维分数。在后台异步任务中调用，不阻塞 API 响应。", PERSONALITY_SCORING_PROMPT),
+    PromptDefinition("life_story.main_gap_fill", "L1 记忆缺口补齐", "初始化", "初始化", "【工程附加 / 技术债】spec §1.4「AI背景生成」原本是单步生成全部 L1 记忆，但代码拆成两步：(1) admin「背景模板」批量预生成 character_profiles JSON，(2) 用户创建 agent 时 convert_profile_to_memories 把 profile 字段映射成记忆条目，发现某大类条数不足 → 此 prompt LLM 补齐。如要回归 spec 单步流程需消除此 prompt + 重写 character.py + life_story.py。", LIFE_STORY_MAIN_GAP_FILL_PROMPT),
 
     # ── spec §2-§6 新增（4.19 指令模板） ──
     PromptDefinition("boundary.attack_target", "攻击目标识别", "边界系统", "边界", "判断攻击目标类型（攻击AI/第三方/无负面/无目标脏话）。", ATTACK_TARGET_PROMPT),

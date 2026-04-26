@@ -35,19 +35,6 @@ from app.services.llm.models import get_utility_model, invoke_json
 logger = logging.getLogger(__name__)
 
 
-_MBTI_SUMMARY_PROMPT = """你是 MBTI 性格评估专家。给定一个 AI 角色的 MBTI 类型，
-请用 80 字以内的自然中文写一段描述其整体性格画像的 summary。
-
-MBTI 类型：{type}
-四个维度强度（0-100，值越高越偏向首字母）：
-- E/I: {ei}（>50 偏外向）
-- N/S: {ns}（>50 偏直觉）
-- T/F: {tf}（>50 偏思考）
-- J/P: {jp}（>50 偏判断）
-
-直接输出 JSON: {{"summary": "..."}} ，不要其他内容。"""
-
-
 _VALID_TYPES = {
     f"{a}{b}{c}{d}"
     for a in "EI" for b in "NS" for c in "TF" for d in "JP"
@@ -136,32 +123,13 @@ def _validate_input(percentages: dict) -> dict[str, int]:
 
 async def build_mbti(percentages: dict) -> dict:
     """Build the canonical agent.mbti JSON shape from user-supplied 4
-    percentages. Calls a small LLM only to flesh out the `summary` text;
-    the type and percentages come straight from the input.
-
-    Per spec §1.2 起 MBTI 直接由用户填写，不再有 7 维中转层。
+    percentages. Type derives from percentages; summary 字段保留为空字符串
+    保持下游 schema 兼容 (format_mbti_for_prompt / schedule._mbti_brief 已优雅
+    降级). spec §1.2 仅定义 4 轴百分比，不要求 summary 文本生成。
     """
     pct = _validate_input(percentages)
     type_str = _derive_type(pct)
-    summary = await _generate_summary(pct, type_str)
-    return {**pct, "type": type_str, "summary": summary}
-
-
-async def _generate_summary(pct: dict[str, int], type_str: str) -> str:
-    """LLM-generate an 80-字 summary. Falls back to "" on LLM failure;
-    callers must tolerate empty summary (it's flavor text, not core data)."""
-    prompt = _MBTI_SUMMARY_PROMPT.format(
-        type=type_str,
-        ei=pct["EI"], ns=pct["NS"], tf=pct["TF"], jp=pct["JP"],
-    )
-    try:
-        result = await invoke_json(get_utility_model(), prompt)
-    except Exception as e:
-        logger.warning(f"MBTI summary LLM call failed: {e}")
-        return ""
-    if isinstance(result, dict):
-        return str(result.get("summary", "")).strip()[:200]
-    return ""
+    return {**pct, "type": type_str, "summary": ""}
 
 
 def _coerce(raw: Any) -> dict | None:

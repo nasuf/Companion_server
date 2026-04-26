@@ -1,11 +1,16 @@
 """Memory relevance classification and reranking.
 
-Product spec §3: 每条用户消息先判断与记忆的相关程度 (强/中/弱),
+Product spec §3.1：每条用户消息先判断与记忆的相关程度 (强/中/弱),
 决定是否调取记忆以及调取多少。
 
 强: 用户明确要求回忆, 或话题与记忆高度绑定 → 搜 L1+L2 前50, 考虑 L3
 中: 话题与记忆有关联但不强制 → 搜 L1+L2 前50, 不触发 L3
 弱: 与记忆完全无关 → 不调任何记忆
+
+工程偏离 spec §3.1：spec 输入只列了"用户消息"单条文本, 实测对省略式追问
+("颜色呢？") 误判为弱 → 漏召回. 这里复用 intent.unified 已用的最近几轮对话
+上下文格式让 LLM 自己解指代——prompt 走 registry (memory.relevance), 仅在
+模板基础上新增 {context} 占位符, 其他 spec 措辞 / 输出格式保持不变。
 """
 
 from __future__ import annotations
@@ -14,38 +19,37 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal
 
-from app.services.llm.models import get_utility_model, invoke_json
+from app.services.llm.models import get_utility_model, invoke_text
+from app.services.prompting.utils import render_prompt
 
 logger = logging.getLogger(__name__)
 
 RelevanceLevel = Literal["strong", "medium", "weak"]
 
+_LEVEL_MAP: dict[str, RelevanceLevel] = {"强": "strong", "中": "medium", "弱": "weak"}
 
-async def classify_memory_relevance(user_message: str) -> RelevanceLevel:
-    """Use a small/fast LLM call to classify how relevant the user's
-    message is to stored memory.
 
-    Returns "strong", "medium", or "weak".
+async def classify_memory_relevance(
+    user_message: str,
+    context: str = "",
+) -> RelevanceLevel:
+    """spec §3.1 小模型「判断回忆相关」, 输出 strong/medium/weak.
+
+    `context` 与 intent.unified 同格式: 最近几轮 "AI: ... / 用户: ..." 换行拼接,
+    用于解析省略式追问. 空串时填 "(无)" — LLM 退化到仅看当前消息。
     """
-    prompt = f"""你是一个记忆相关度分析器。判断用户消息与AI助手自身记忆的相关程度。
-注意：这里的"记忆"包括AI自身的身份信息（名字、职业、住所、年龄、血型、爱好等）以及与用户的共同经历。
-
-定义（严格遵循）:
-「强」: 询问AI个人信息（身份/职业/住所/年龄/喜好/经历等），或明确要求回忆。
-  例: 你是做什么工作的 / 你住在哪 / 你多大了 / 你叫什么 / 你喜欢什么 / 你还记得吗 / 上次我说的 / 你的血型
-「中」: 话题可能与记忆有关联，聊天涉及生活/情感/经历。
-  例: 今天心情不好 / 最近工作好累 / 周末去了哪里 / 我想你了
-「弱」: 与记忆完全无关，纯寒暄或通用知识问答。
-  例: 你好 / 哈哈 / 今天天气怎么样 / 帮我写一首诗 / 1+1等于几
-
-用户消息: {user_message}
-
-输出严格 JSON: {{"level": "强"|"中"|"弱"}}"""
     try:
-        result = await invoke_json(get_utility_model(), prompt)
-        level = result.get("level", "中") if isinstance(result, dict) else "中"
-        mapping: dict[str, RelevanceLevel] = {"强": "strong", "中": "medium", "弱": "weak"}
-        return mapping.get(level, "medium")
+        raw = await render_prompt(
+            "memory.relevance",
+            {"message": user_message, "context": context or "(无)"},
+            lambda p: invoke_text(get_utility_model(), p),
+        )
+        text = (raw or "").strip()
+        # spec 输出是单字 "强"/"中"/"弱", 取首个匹配字符兜底 LLM 多嘴
+        for ch in text:
+            if ch in _LEVEL_MAP:
+                return _LEVEL_MAP[ch]
+        return "medium"
     except Exception as e:
         logger.warning(f"Memory relevance classification failed: {e}; defaulting to 'medium'")
         return "medium"

@@ -53,8 +53,8 @@ class FetchedContext:
     schedule_context: str | None = None
 
 
-async def _classify_relevance(user_message: str) -> str:
-    return await classify_memory_relevance(user_message)
+async def _classify_relevance(user_message: str, context: str = "") -> str:
+    return await classify_memory_relevance(user_message, context=context)
 
 
 async def _do_retrieval(user_message: str, user_id: str, workspace_id: str | None) -> dict:
@@ -233,7 +233,7 @@ async def fetch_parallel_context(
         portrait, topic_intimacy,
         time_memories_result, user_emotion_result, emotion_result,
     ) = await asyncio.gather(
-        _classify_relevance(user_message),
+        _classify_relevance(user_message, context=recent_context),
         _do_retrieval(user_message, user_id, workspace_id),
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
