@@ -689,7 +689,9 @@ async def generate_single_profile(
 
 # 这些字段由 _apply_postprocess_overrides 硬覆盖, 不参与 repair 检测.
 _REPAIR_SKIP_CATEGORIES = frozenset({"career"})
-_REPAIR_SKIP_IDENTITY_FIELDS = frozenset({"name", "ethnicity", "gender"})
+_REPAIR_SKIP_IDENTITY_FIELDS = frozenset({"name", "ethnicity", "gender", "blood_type"})
+
+_BLOOD_TYPE_OPTIONS = ("O型", "A型", "B型", "AB型")
 
 
 def _is_field_empty(value: object, field_type: str) -> bool:
@@ -826,17 +828,28 @@ def _apply_postprocess_overrides(
 ) -> dict:
     """LLM 输出后强制覆盖几个字段, 保证 spec 一致性:
     - identity.ethnicity 硬写「汉族」(spec PDF #34 第一维 #8: "汉族")
+    - identity.blood_type LLM 偶尔跳过 (即使 required + repair 也漏); spec
+      PDF #34 第一维 #7 原文是"随机生成 A/B/O/AB 型之一", 本就是后端兜底字
+      段, 这里若 LLM 给的不是 4 选项之一就随机补 (类比 gender / ethnicity
+      在 admin 层面的硬覆盖)
     - identity.name 直接引用注入的姓名 (PDF #34 第一维 #1 "直接引用");
       未注入 (admin 背景池批量生成无姓名) 时清空, 防 LLM 自填随机名进 DB
     - career 分类用预设池数据回填 (LLM 不生成 career, 见 build_generation_prompt)
     """
-    profile.setdefault("identity", {})
-    profile["identity"]["ethnicity"] = "汉族"
+    import random as _r
+
+    identity = profile.setdefault("identity", {})
+    identity["ethnicity"] = "汉族"
+
+    blood = identity.get("blood_type")
+    if blood not in _BLOOD_TYPE_OPTIONS:
+        identity["blood_type"] = _r.choice(_BLOOD_TYPE_OPTIONS)
+
     if agent_name:
-        profile["identity"]["name"] = agent_name
+        identity["name"] = agent_name
     else:
         # 背景池场景: 名字由用户在 agent 创建页输入, 这里清掉 LLM 自填的随机名
-        profile["identity"].pop("name", None)
+        identity.pop("name", None)
     if career:
         profile["career"] = {
             "title": career.get("title"),

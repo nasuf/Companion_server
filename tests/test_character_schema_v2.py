@@ -244,6 +244,31 @@ def test_postprocess_hardcodes_ethnicity_han():
     assert result["identity"]["ethnicity"] == "汉族"
 
 
+_VALID_BLOOD = {"O型", "A型", "B型", "AB型"}
+
+
+def test_postprocess_fills_missing_blood_type():
+    """LLM 没给 blood_type → 后端随机补一个 (spec PDF #34: 随机生成)."""
+    profile = {"identity": {"gender": "女"}}
+    result = _apply_postprocess_overrides(profile, agent_name="x", career=None)
+    assert result["identity"]["blood_type"] in _VALID_BLOOD
+
+
+def test_postprocess_keeps_valid_blood_type():
+    """LLM 给的合法值原样保留, 不随机覆盖。"""
+    profile = {"identity": {"gender": "女", "blood_type": "AB型"}}
+    result = _apply_postprocess_overrides(profile, agent_name="x", career=None)
+    assert result["identity"]["blood_type"] == "AB型"
+
+
+def test_postprocess_replaces_invalid_blood_type():
+    """LLM 给非法值 (如 'O' 缺'型', 或英文 'Type O') → 替换为 4 选项之一。"""
+    for bad in ["O", "AB", "Type O", "", None, "AB型 (我猜)"]:
+        profile = {"identity": {"blood_type": bad}}
+        result = _apply_postprocess_overrides(profile, agent_name="x", career=None)
+        assert result["identity"]["blood_type"] in _VALID_BLOOD, f"bad={bad!r}"
+
+
 def test_postprocess_overrides_name_with_agent_name():
     """LLM 即使乱填 name, 后处理也会硬写为 agent_name (PDF #34 直接引用)."""
     profile = {"identity": {"name": "WrongName"}}
