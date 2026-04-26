@@ -10,10 +10,6 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_text
-from app.services.prompting.defaults import (
-    PORTRAIT_GENERATION_PROMPT,
-    PORTRAIT_UPDATE_PROMPT,
-)
 from app.services.prompting.store import get_prompt_text
 from app.services.workspace.workspaces import resolve_workspace_id
 

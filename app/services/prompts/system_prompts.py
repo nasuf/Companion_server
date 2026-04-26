@@ -1,13 +1,9 @@
-"""系统提示词模板。"""
+"""聊天回复约束 + token 预算常量。
 
-from app.services.prompting.defaults import (
-    CONSISTENCY_RULES_PROMPT as CONSISTENCY_RULES,
-    EMOTION_INSTRUCTION_PROMPT as EMOTION_INSTRUCTION,
-    MEMORY_INSTRUCTION_PROMPT as MEMORY_INSTRUCTION,
-    PERSONALITY_RULES_PROMPT as PERSONALITY_RULES,
-    RESPONSE_INSTRUCTION_PROMPT as RESPONSE_INSTRUCTION,
-    SYSTEM_BASE_PROMPT as SYSTEM_BASE,
-)
+历史: 这里曾从 defaults.py 重导出 SYSTEM_BASE / CONSISTENCY_RULES 等 prompt
+别名, 但全仓没消费方——chat 路径已通过 get_prompt_text("chat.system_base")
+等 registry key 取用. 别名已删, 文件保留是为了集中放回复 / token 预算常量.
+"""
 
 # 回复约束 (spec §5.5: n = random.randint(1, 3) 均匀分布)
 MAX_PER_REPLY = 60           # 单条回复最大字数
