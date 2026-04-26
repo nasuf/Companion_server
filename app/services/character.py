@@ -648,14 +648,16 @@ async def generate_single_profile(
     """
     effective_name = name or agent_name
     # header / requirements 解析顺序:
-    #   per-template 覆盖 (caller 传入)  >  registry default (character.template_*)
+    #   per-template 覆盖 (caller 传入非空)  >  registry default (character.template_*)
     #   >  _FALLBACK_PROMPT_*  (registry 不可达极端兜底)
     # 整段 prompt 由 schema/career/name/personality 多段运行时拼装, 拼装结构
     # 不进 registry; 但顶部规则 / 底部要求两段进 registry, admin 双 UI 共享一份。
-    if header is None or requirements is None:
+    # 用 truthy 判断而非 `is None`: 兼容 admin 在背景模板页保存了空字符串覆盖
+    # 的情况——空覆盖应回退 registry default, 而不是直接送空给 LLM。
+    if not header or not requirements:
         resolved = await get_default_prompts()
-        header = header if header is not None else resolved["header"]
-        requirements = requirements if requirements is not None else resolved["requirements"]
+        header = header or resolved["header"]
+        requirements = requirements or resolved["requirements"]
     prompt = build_generation_prompt(
         schema, defaults, index,
         header=header, requirements=requirements,

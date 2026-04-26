@@ -253,12 +253,14 @@ async def preview_prompt(
         career_row = await db.careertemplate.find_unique(where={"id": body.career_id})
         if career_row:
             career_data = _career_row_to_dict(career_row)
+    # truthy 判断: 兼容 admin 把 textarea 清空 → 字段送空字符串. 空覆盖一律
+    # 回退 registry default, 与 generate_single_profile 行为一致。
     header = body.prompt_header
     requirements = body.prompt_requirements
-    if header is None or requirements is None:
+    if not header or not requirements:
         defaults = await get_default_prompts()
-        header = header if header is not None else defaults["header"]
-        requirements = requirements if requirements is not None else defaults["requirements"]
+        header = header or defaults["header"]
+        requirements = requirements or defaults["requirements"]
     prompt = build_generation_prompt(
         body.schema_body.model_dump(),
         body.defaults,

@@ -132,7 +132,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("character.template_header", "背景模板·开头规则", "初始化", "初始化", "Spec §1.4「AI背景生成」核心生成规则段。同时是 admin「Agent管理 / 背景模板 / 生成规则」的系统默认值，新建模板 / 重置默认按钮读此值。Per-template 可在背景模板页覆盖。", CHARACTER_TEMPLATE_HEADER_PROMPT),
     PromptDefinition("character.template_requirements", "背景模板·输出要求", "初始化", "初始化", "Spec §1.4「AI背景生成」输出格式 / 字段填充规则段。同时是 admin「Agent管理 / 背景模板 / 输出要求」的系统默认值。Per-template 可在背景模板页覆盖。{index} 占位符在运行时被替换为角色序号。", CHARACTER_TEMPLATE_REQUIREMENTS_PROMPT),
     PromptDefinition("character.repair_missing_fields", "背景生成·缺字段补齐", "初始化", "初始化", "【工程附加】character profile 主路径输出 JSON 偶尔被 max_tokens 截断 → 末尾字段缺失。本 prompt 注入已生成的角色概要 + 缺字段清单，让 LLM 只补缺。{persona_summary} / {missing_fields} 在运行时填充。", CHARACTER_REPAIR_MISSING_FIELDS_PROMPT),
-    PromptDefinition("life_story.main_gap_fill", "L1 记忆缺口补齐", "初始化", "初始化", "【工程附加 / 技术债】spec §1.4「AI背景生成」原本是单步生成全部 L1 记忆，但代码拆成两步：(1) admin「背景模板」批量预生成 character_profiles JSON，(2) 用户创建 agent 时 convert_profile_to_memories 把 profile 字段映射成记忆条目，发现某大类条数不足 → 此 prompt LLM 补齐。如要回归 spec 单步流程需消除此 prompt + 重写 character.py + life_story.py。", LIFE_STORY_MAIN_GAP_FILL_PROMPT),
+    PromptDefinition("life_story.main_gap_fill", "L1 记忆缺口补齐", "初始化", "初始化", "【工程附加 / 技术债】spec §1.4「AI背景生成」原本是单步生成全部 L1 记忆，但代码拆成两步：(1) admin「背景模板」批量预生成 character_profiles JSON，(2) 用户创建 agent 时 convert_profile_to_memories 把 profile 字段映射成记忆条目，发现某大类条数不足 → 此 prompt LLM 补齐。如要回归 spec 单步流程需消除此 prompt + 重写 character.py + life_story.py。占位符: {name} {main} {constraints} {timeline} {profile_slice} {existing_digest} {retry_note} {spec} {emotion_guidance} —— 编辑时不要删除任何 {} 占位符。", LIFE_STORY_MAIN_GAP_FILL_PROMPT),
 
     # ── spec §2-§6 新增（4.19 指令模板） ──
     PromptDefinition("boundary.attack_target", "攻击目标识别", "边界系统", "边界", "判断攻击目标类型（攻击AI/第三方/无负面/无目标脏话）。", ATTACK_TARGET_PROMPT),
@@ -154,7 +154,7 @@ PROMPT_DEFINITIONS = [
     PromptDefinition("intent.current_state_reply", "当前状态回复", "意图处理", "意图", "回答 AI 现在在做什么。", CURRENT_STATE_REPLY_PROMPT),
     PromptDefinition("intent.deletion_confirm", "删除意图确认", "意图处理", "意图", "询问用户具体想删除的内容。", DELETION_CONFIRM_PROMPT),
     PromptDefinition("intent.deletion_reply", "删除回复", "意图处理", "意图", "表示已忘记并自然带过。", DELETION_REPLY_PROMPT),
-    PromptDefinition("memory.relevance", "回忆相关度判断", "日常交流", "记忆", "判断消息与记忆的强/中/弱相关。", MEMORY_RELEVANCE_PROMPT),
+    PromptDefinition("memory.relevance", "回忆相关度判断", "日常交流", "记忆", "Spec §3.1：判断消息与记忆的强/中/弱相关。占位符: {message} (用户当前消息) 与 {context} (最近几轮对话, 解省略式追问如「颜色呢？」)。{context} 为 spec 偏离 (spec 仅输入单条用户消息), 见 CLAUDE.md 偏离表。", MEMORY_RELEVANCE_PROMPT),
     PromptDefinition("memory.l3_trigger", "L3 唤醒判断", "日常交流", "记忆", "是否需要调用 L3 久远记忆（不满纠正/请求更久/无）。", L3_TRIGGER_PROMPT),
     PromptDefinition("memory.weak_reply", "弱记忆回复", "日常交流", "记忆", "相关度弱时的自然回复。", WEAK_MEMORY_REPLY_PROMPT),
     PromptDefinition("memory.medium_reply", "中记忆回复", "日常交流", "记忆", "相关度中时的自然回复。", MEDIUM_MEMORY_REPLY_PROMPT),
