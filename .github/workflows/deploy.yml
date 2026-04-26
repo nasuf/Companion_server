@@ -114,3 +114,10 @@ jobs:
             echo "==> Starting server stack"
             docker compose -f docker-compose.deploy.yml up -d --remove-orphans
             docker compose -f docker-compose.deploy.yml ps
+
+            echo "==> Cleaning up old docker images (>72h old, dangling, untagged)"
+            # 防止历史 deploy 镜像层堆积撑爆磁盘 (Redis bgsave 一旦失败就锁所有
+            # 写命令, 整个后端起不来). until=72h 安全保留近 3 天回滚目标; -a
+            # 包含未被任何容器引用的具名 image, -f 跳过交互确认.
+            docker image prune -af --filter "until=72h" || true
+            docker builder prune -af --filter "until=72h" || true
