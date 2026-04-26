@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     # 流式首 chunk 超时 (连不上 / 模型未加载时触发 fallback, 防用户长时间无响应)
     llm_chat_stream_first_chunk_timeout_s: float = 30.0
 
+    # admin 批量生成 character profile 单请求最大数量 + 内部并发上限.
+    # 单请求 N 个 profile 时, 后端用 Semaphore 控制实际并发 LLM 数, 防止 100
+    # 个同时打 DashScope 触发 429. 总耗时 ≈ ceil(N / concurrency) × 单次 LLM 时间.
+    # 默认 10 是 DashScope 默认 tier 安全值; 升级 tier 后可调高 env 覆盖。
+    character_profile_batch_max: int = 100
+    character_profile_batch_concurrency: int = 10
+
     # Redis client resilience (app/redis_client.py)
     # socket_timeout 防止 Redis 卡顿永久阻塞 asyncio event loop; 超时触发后抛
     # redis.TimeoutError, 继承自 RedisError, 下游 try/except 可捕获走降级.

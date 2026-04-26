@@ -301,13 +301,18 @@ async def generate_profiles(
     body: ProfileGenerateRequest,
     _: str = Depends(require_admin_jwt),
 ):
+    from app.config import settings
+
     tpl = await db.charactertemplate.find_unique(where={"id": body.template_id})
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
     schema = tpl.schemaData if isinstance(tpl.schemaData, dict) else {}
-    count = min(body.count, 10)  # 上限10个
+    # 单请求上限默认 100; 实际 LLM 并发由下方 Semaphore 控制 (默认 10),
+    # 防止 100 个同时打 DashScope 触发账号级 429. 100 × 30-60s / 10 ≈ 5-10 min.
+    count = max(1, min(body.count, settings.character_profile_batch_max))
     header_override = getattr(tpl, "promptHeader", None)
     requirements_override = getattr(tpl, "promptRequirements", None)
+    sem = asyncio.Semaphore(settings.character_profile_batch_concurrency)
 
     # ── 职业选择 ──
     fixed_career: dict | None = None
@@ -345,15 +350,18 @@ async def generate_profiles(
         plans.append((i, career, gender_for_run))
 
     async def _gen_one(i: int, career: dict | None, gender_for_run: str) -> ProfileResponse:
-        data = await generate_single_profile(
-            schema,
-            tpl.defaults,
-            index=i,
-            header=header_override,
-            requirements=requirements_override,
-            career=career,
-            gender=gender_for_run,
-        )
+        # Semaphore 限并发: 100 个 task 全部进 gather, 实际只有 N 个同时 await
+        # LLM, 其余排队. 防 DashScope 429.
+        async with sem:
+            data = await generate_single_profile(
+                schema,
+                tpl.defaults,
+                index=i,
+                header=header_override,
+                requirements=requirements_override,
+                career=career,
+                gender=gender_for_run,
+            )
         if not data:
             raise ValueError("LLM 返回为空")
 
@@ -401,7 +409,8 @@ async def generate_profiles(
         logger.info(f"Generated profile {i + 1}/{count}: {profile_name}")
         return _profile_response(p, template_name=tpl.name)
 
-    # 并行生成: count ≤ 10 (上方 clamp), DashScope 单 admin 操作并发安全
+    # 全 count 进 gather, 内部 Semaphore 控制实际并发 (默认 10, 可配),
+    # 防 DashScope 429。
     raw = await asyncio.gather(
         *(_gen_one(i, career, gender) for i, career, gender in plans),
         return_exceptions=True,
