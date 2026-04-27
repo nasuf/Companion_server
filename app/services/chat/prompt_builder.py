@@ -237,7 +237,6 @@ async def build_system_prompt(
     portrait: str | None = None,
     topic_context: str | None = None,
     user_emotion: dict | None = None,
-    schedule_context: str | None = None,
     patience_instruction: str | None = None,
     reply_count: int = 2,
     reply_total: int = _MAX_TOTAL_CHARS,
@@ -285,14 +284,18 @@ async def build_system_prompt(
     if topic_context:
         sections.append(_section("话题上下文", topic_context))
 
-    # 时间上下文：当前状态 + 时间信息 + 节假日
-    status_parts = []
-    if schedule_context:
-        status_parts.append(schedule_context)
+    # 时间上下文: 仅注入日期/星期/节假日, 不注入 AI 当前活动 (schedule_context).
+    # spec §4 日常交流 步骤 4.3 / 5B.3 的"汇总参考信息"明确不包含 AI 当前作息;
+    # 只有 §3.4.3 询问当前状态 才需要, 那是另一条 short-circuit 路径
+    # (intent_handlers.handle_current_state → current_state_reply prompt).
+    # 这里若注入 schedule_context 会让 §4 主回复跟 §3.4.3 的输出主题撞车
+    # (例: 用户问"有意思。你现在在干嘛", 主意图 §3.4.3 回"我在沙发看剧",
+    # 子意图"日常交流" §4 也回"我在沙发看老剧" — 重复). 实测 langsmith trace
+    # 已确认这个失效, 见 commit 3d0417d 上下文.
+    # NOTE: 回复时机说明已通过 reply_context.delay_seconds / received_at 路径
+    # 单独注入 (delay_context_section), 不依赖 schedule_context.
     if time_context:
-        status_parts.append(time_context)
-    if status_parts:
-        sections.append(_section("当前状态", "\n".join(status_parts)))
+        sections.append(_section("时间", time_context))
 
     # 时间相关记忆
     if time_memories:

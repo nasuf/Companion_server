@@ -392,18 +392,15 @@ async def stream_chat_response(
             )
             if primary_label and fragments.get(primary_label):
                 user_message = str(fragments[primary_label]).strip() or user_message
-            # spec §3.3 步骤 3: 多意图拆分后, "日常交流" 是 catch-all 兜底类,
-            # 没有独立 short-circuit handler 或专属 prompt — 作为 sub_intent
-            # 重跑 stream_chat_response 时会落到主回复 generate_reply, 拉同一组
-            # schedule/memory/agent context, 跟主调用产生几乎重复的内容
-            # (实测 langsmith trace: 主意图"询问当前状态"+子意图"日常交流"两次都
-            # 输出"在沙发看剧/吃巧克力" 类描述). 过滤掉避免重复回复 + 省 LLM 钱.
+            # spec §3.3 step 3: 子意图按延迟批处理依次进入对应分支. 不再过滤
+            # "日常交流" — 之前为防"日常交流" sub 跟其他意图主题撞车 (commit
+            # 3d0417d) 引入的 hack 已不需要, 因为根因 (prompt_builder 把
+            # schedule_context 注入 §4 主回复, 让 §4 输出 AI 当前活动跟 §3.4.3
+            # 撞车) 已修. 现在 §4 不再带 AI 状态主题, 多意图自然分流.
             pending_sub_fragments = {
                 lb: str(txt).strip()
                 for lb, txt in fragments.items()
-                if lb != primary_label
-                and lb != "日常交流"
-                and str(txt).strip()
+                if lb != primary_label and str(txt).strip()
             }
             if pending_sub_fragments:
                 logger.info(
@@ -625,7 +622,9 @@ async def stream_chat_response(
         portrait=portrait,
         topic_context=topic_context,
         user_emotion=prompt_user_emotion,
-        schedule_context=schedule_context,
+        # schedule_context 故意不传给 §4 主回复 prompt: spec §4 不要求 AI 当前活动,
+        # 只有 §3.4.3 询问当前状态走 short-circuit 时才需要 (handle_current_state
+        # 有自己的参数路径). 详见 prompt_builder.py 注释 + commit 0038a13 上下文.
         patience_instruction=patience_instruction,
         reply_count=reply_count,
         reply_total=max_total,
