@@ -102,7 +102,9 @@ async def _keyword_fallback_search(
     where_clause = " OR ".join(conditions)
 
     results: list[dict] = []
-    for table in ("memories_ai", "memories_user"):
+    # source 标签必须随 row 一起返回, 否则下游 prompt_builder 会把
+    # memories_ai 误标为"用户告诉过你的事" → 人设串戏. 见 ClassifiedMemory.source.
+    for table, source_label in (("memories_ai", "ai"), ("memories_user", "user")):
         ws_filter = f'AND "workspace_id" = ${idx}' if workspace_id else ""
         query_params = params + ([workspace_id] if workspace_id else [])
 
@@ -111,7 +113,8 @@ async def _keyword_fallback_search(
                 f"""
                 SELECT id, content, summary, level, importance, type,
                        main_category, sub_category, created_at,
-                       0.75::float AS similarity
+                       0.75::float AS similarity,
+                       '{source_label}' AS source
                 FROM "{table}"
                 WHERE "user_id" = $1
                   AND "level" IN ({level_list})

@@ -54,7 +54,19 @@ class CallProfile:
     timeout_s: float
     max_retries: int
     retry_backoff_s: tuple[float, ...]
-    first_chunk_timeout_s: float = 30.0  # 流式专用
+    first_chunk_timeout_s: float = 30.0  # 流式专用: 首 chunk 等待
+    # primary 失败后是否回退到 ollama. 大输出场景 (character.generation 6-8K
+    # tokens) 主云超时往往是"输出量大", 此时 ollama 14B 必然更慢, fallback 反
+    # 而拖慢用户 6+ 分钟. 设 False 则 fail-fast.
+    allow_ollama_fallback: bool = True
+    # 流式相邻 chunk 间最大允许停顿. None → 沿用 first_chunk_timeout_s.
+    # 解决 dashscope qwen-plus 偶尔 30-40s 静默(GPU 排队/限流)导致总 timeout
+    # 误判. 只要 LLM 在持续吐字, 就不会触发.
+    idle_timeout_s: float | None = None
+    # True 时 unary API (invoke_json/invoke_text) 内部走 streaming 累积, 享受
+    # idle_timeout 保护. 用于 character.generation 这类 6-8K tokens 长输出.
+    # API 不变, 调用方零改动. 默认 False, 不影响其他 profile.
+    stream_mode: bool = False
 
     def __post_init__(self) -> None:
         # retry_backoff_s 长度须覆盖 max_retries 次退避
@@ -94,9 +106,25 @@ def _profiles() -> dict[str, CallProfile]:
                 first_chunk_timeout_s=settings.llm_chat_stream_first_chunk_timeout_s,
             ),
             "background": CallProfile(
-                timeout_s=120.0,
-                max_retries=2,
-                retry_backoff_s=(1.0, 5.0),
+                # character.generation 输出 ~6-8K tokens (87 字段), qwen-plus 稳态
+                # ~50-80 tok/s → 80-160s. timeout_s 是 safety 网, 真正决定生死的
+                # 是 first_chunk_timeout_s + idle_timeout_s. 600s 留给最坏情况.
+                timeout_s=600.0,
+                # timeout 后不重试: 重试同 prompt 必然再超时, 只浪费 4-8 分钟用户
+                # 等待. 真网络抖动是少数, 让前端 failed UI 引导重建更快.
+                max_retries=0,
+                retry_backoff_s=(),
+                # 主云超时 = LLM 输出量大, 本地 14B 必然更慢. 不 fallback,
+                # 立即 fail-fast 由前端引导用户重建.
+                allow_ollama_fallback=False,
+                # dashscope cold-start 偶尔 30-40s 才返首字节, 给 45s 留余量.
+                first_chunk_timeout_s=45.0,
+                # 相邻 chunk 间隔上限. dashscope qwen-plus 偶尔 30-40s 静默
+                # (GPU 排队/限流), 60s 不误杀;但持续断流可在 60s 内识别失败.
+                idle_timeout_s=60.0,
+                # ★ 启用 streaming. invoke_json 内部走 astream + 累积, 同样的
+                # API 但享受 idle_timeout 保护. 见 models.py:_invoke_via_stream.
+                stream_mode=True,
             ),
         }
     return _PROFILES_CACHE
@@ -111,6 +139,16 @@ def reset_profiles_cache_for_testing() -> None:
     """清 profile cache (测试动态改 settings 前调用)."""
     global _PROFILES_CACHE
     _PROFILES_CACHE = None
+
+
+def set_profiles_for_testing(mapping: dict[str, CallProfile]) -> None:
+    """直接注入一组 profile (仅测试用), 绕过 settings 构造逻辑.
+
+    比 monkeypatch.setattr(_PROFILES_CACHE, ...) 更稳定: 不依赖私有名字,
+    将来 cache 实现变化 (比如改成多层 dict / TTL) 也只需改一处.
+    """
+    global _PROFILES_CACHE
+    _PROFILES_CACHE = dict(mapping)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -319,7 +357,7 @@ async def call_with_resilience(
             primary_factory, provider=primary_provider, profile=profile, op=op,
         )
     except LLMFailedError as primary_exc:
-        if fallback_factory is None:
+        if fallback_factory is None or not profile.allow_ollama_fallback:
             raise
         logger.warning(
             f"[LLM-FALLBACK] op={op} primary={primary_provider} failed: "
@@ -394,6 +432,33 @@ async def astream_with_resilience(
         ) from fallback_exc
 
 
+async def collect_stream(
+    primary_factory: Callable[[], AsyncIterator[Any]],
+    *,
+    primary_provider: str,
+    profile: CallProfile,
+    op: str,
+    fallback_factory: Callable[[], AsyncIterator[Any]] | None = None,
+) -> str:
+    """累积 astream_with_resilience 的全部 token 成单一字符串.
+
+    供 unary 接口 (e.g. invoke_json on background profile) 复用流式管线时
+    使用; 直接的流式消费方仍应迭代 astream_with_resilience.
+    LLMFailedError 透传到调用方.
+    """
+    chunks: list[str] = []
+    async for token in astream_with_resilience(
+        primary_factory,
+        primary_provider=primary_provider,
+        profile=profile,
+        op=op,
+        fallback_factory=fallback_factory,
+    ):
+        if token:
+            chunks.append(token)
+    return "".join(chunks)
+
+
 async def _stream_provider(
     factory: Callable[[], AsyncIterator[Any]],
     *,
@@ -422,6 +487,16 @@ async def _stream_provider(
     # First chunk with tight timeout (timeout / empty stream / upstream error 统一
     # 视为 primary 失败, 触发 fallback. 捕获后必须 aclose 释放底层 SSE/HTTP 连接,
     # 不能依赖 GC — Dashscope 抽风时 CB 会 open, 多次 timeout 堆积 fd 可能打爆.)
+    async def _safe_close() -> None:
+        """关底层流, 释放 SSE/HTTP fd. aclose 失败不该覆盖原始异常."""
+        _close = getattr(stream, "aclose", None)
+        if _close is None:
+            return
+        try:
+            await _close()
+        except Exception:
+            pass
+
     try:
         first = await asyncio.wait_for(
             aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
@@ -430,24 +505,36 @@ async def _stream_provider(
         breaker.record_failure()
         _log_attempt(provider=provider, op=op, result="first_chunk_fail",
                      started=started, exc=e)
-        _close = getattr(stream, "aclose", None)
-        if _close is not None:
-            try:
-                await _close()
-            except Exception:
-                pass  # aclose 本身失败不该覆盖原始异常
+        await _safe_close()
         raise LLMFailedError(f"stream no first chunk on {provider}: {e}") from e
 
     yield _chunk_text(first)
     deadline = started + profile.timeout_s
+    # idle 超时: chunk 间最大允许停顿. None → 沿用 first_chunk_timeout_s
+    # (与改动前等价 — 老 chat_stream profile 行为不变).
+    idle = profile.idle_timeout_s or profile.first_chunk_timeout_s
 
-    # Remaining chunks with overall budget
+    # Remaining chunks with idle + overall budget. mid-stream 失败必须 aclose
+    # 释放底层 SSE 连接 (dashscope 抽风时 CB open + fd 堆积可能打爆).
     try:
-        async for chunk in aiter:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=idle)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                breaker.record_failure()
+                _log_attempt(provider=provider, op=op, result="idle_timeout",
+                             started=started)
+                await _safe_close()
+                raise LLMFailedError(
+                    f"stream idle > {idle}s on {provider} (no chunk between yields)"
+                )
             if time.monotonic() > deadline:
                 breaker.record_failure()
                 _log_attempt(provider=provider, op=op, result="mid_timeout",
                              started=started)
+                await _safe_close()
                 raise LLMFailedError(f"stream exceeded overall {profile.timeout_s}s on {provider}")
             yield _chunk_text(chunk)
         breaker.record_success()
@@ -458,6 +545,7 @@ async def _stream_provider(
         breaker.record_failure()
         _log_attempt(provider=provider, op=op, result="mid_error",
                      started=started, exc=e)
+        await _safe_close()
         raise LLMFailedError(f"stream mid error on {provider}: {e}") from e
 
 

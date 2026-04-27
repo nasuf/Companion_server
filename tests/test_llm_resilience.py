@@ -321,3 +321,77 @@ class TestAstreamWithResilience:
                 fallback_factory=_stream_raises,
             ):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_triggers_failure_after_first_chunk(self):
+        """首字节正常但相邻 chunk 间停顿 > idle_timeout_s 应抛 LLMFailedError.
+
+        模拟 dashscope 首字节快但中间 hang 的场景 (背景生成最大顾虑).
+        first_chunk 已落地, mid-stream 失败不再 fallback (避免拼接错乱).
+        """
+        async def first_then_hang():
+            yield _Chunk("first")
+            await asyncio.sleep(1.0)  # > idle_timeout_s
+            yield _Chunk("never reaches consumer")
+
+        tokens = []
+        with pytest.raises(LLMFailedError) as exc_info:
+            async for t in astream_with_resilience(
+                first_then_hang,
+                primary_provider="dashscope",
+                profile=_profile(
+                    timeout_s=5.0, max_retries=0, retry_backoff_s=(),
+                    first_chunk_timeout_s=0.5,
+                    idle_timeout_s=0.1,  # 极短 idle 触发
+                ),
+                op="reply_stream",
+                fallback_factory=lambda: _stream_of(["fb"]),
+            ):
+                tokens.append(t)
+        assert tokens == ["first"]
+        assert "idle" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_falls_back_to_first_chunk_when_unset(self):
+        """idle_timeout_s=None 时, chunk 间停顿沿用 first_chunk_timeout_s 行为
+        (与改动前等价, 老 chat_stream profile 不变)."""
+        async def first_then_pause_within_first_chunk_window():
+            yield _Chunk("a")
+            await asyncio.sleep(0.05)  # < first_chunk_timeout_s
+            yield _Chunk("b")
+
+        tokens = []
+        async for t in astream_with_resilience(
+            first_then_pause_within_first_chunk_window,
+            primary_provider="dashscope",
+            profile=_profile(
+                timeout_s=2.0, max_retries=0, retry_backoff_s=(),
+                first_chunk_timeout_s=0.5,
+                idle_timeout_s=None,  # 默认: 沿用 first_chunk_timeout_s = 0.5s
+            ),
+            op="reply_stream",
+        ):
+            tokens.append(t)
+        assert tokens == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_unset_still_enforces_first_chunk_window_mid_stream(self):
+        """idle_timeout_s=None 时停顿超过 first_chunk_timeout_s 仍然失败,
+        证明 None fallback 是真的沿用而不是无限期等待."""
+        async def first_then_long_pause():
+            yield _Chunk("a")
+            await asyncio.sleep(0.5)  # > first_chunk_timeout_s
+            yield _Chunk("b")
+
+        with pytest.raises(LLMFailedError):
+            async for _t in astream_with_resilience(
+                first_then_long_pause,
+                primary_provider="dashscope",
+                profile=_profile(
+                    timeout_s=5.0, max_retries=0, retry_backoff_s=(),
+                    first_chunk_timeout_s=0.1,
+                    idle_timeout_s=None,
+                ),
+                op="reply_stream",
+            ):
+                pass

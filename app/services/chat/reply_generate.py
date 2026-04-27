@@ -17,10 +17,11 @@ from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.llm.models import convert_messages, get_chat_model, get_fallback_chat_model
 from app.services.llm.resilience import (
     LLMFailedError,
-    astream_with_resilience,
+    collect_stream,
     get_profile,
     provider_name,
 )
+from app.services.memory.retrieval.context_selector import split_by_source
 from app.services.prompts.system_prompts import MAX_PER_REPLY
 
 logger = logging.getLogger(__name__)
@@ -53,16 +54,18 @@ def can_use_tier_reply(
 def _build_tier_call(
     memory_relevance: str,
     l3_memories: list[str],
-    combined_memory: str,
+    *,
+    user_memory: str,
+    ai_memory: str,
     tier_fns: dict[str, Callable[..., Awaitable[str | None]]],
 ) -> tuple[Callable[..., Awaitable[str | None]], dict[str, Any]]:
-    """选择 tier 函数 + 它需要的额外参数。"""
+    """选择 tier 函数 + 它需要的额外参数. 见 ClassifiedMemory.source 分流原因."""
     if l3_memories:
         return tier_fns["l3"], {"l3_memory": "\n".join(f"- {t}" for t in l3_memories)}
     if memory_relevance == "strong":
-        return tier_fns["strong"], {"user_memory": combined_memory, "ai_memory": "(同上)"}
+        return tier_fns["strong"], {"user_memory": user_memory, "ai_memory": ai_memory}
     if memory_relevance == "medium":
-        return tier_fns["medium"], {"user_memory": combined_memory, "ai_memory": "(同上)"}
+        return tier_fns["medium"], {"user_memory": user_memory, "ai_memory": ai_memory}
     return tier_fns["weak"], {}
 
 
@@ -92,17 +95,14 @@ async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
         return fallback.astream(lc_messages)
 
     try:
-        chunks: list[str] = []
-        async for token in astream_with_resilience(
+        text = await collect_stream(
             _primary_stream,
             primary_provider=primary_prov,
             profile=get_profile("chat_stream"),
             op="reply_stream",
             fallback_factory=(_fallback_stream if fallback is not None else None),
-        ):
-            if token:
-                chunks.append(token)
-        return "".join(chunks), False
+        )
+        return text, False
     except LLMFailedError as e:
         logger.warning(f"[LLM-FALLBACK] reply_stream total failure (primary + ollama both down): {e}")
         return _MAIN_REPLY_ULTIMATE_FALLBACK, True
@@ -178,8 +178,9 @@ async def generate_reply(
             f"{m['role']}: {m['content']}" for m in messages_dicts[-6:]
         ) or "(无)"
         portrait_text = str(portrait) if portrait else "(未知)"
-        memory_lines = [m.text for m in (classified_memories or [])]
-        combined_memory = "\n".join(f"- {t}" for t in memory_lines) if memory_lines else "(无)"
+        user_lines, ai_lines = split_by_source(classified_memories)
+        user_memory_text = "\n".join(f"- {t}" for t in user_lines) if user_lines else "(无)"
+        ai_memory_text = "\n".join(f"- {t}" for t in ai_lines) if ai_lines else "(无)"
         base_params = {
             "message": user_message,
             "context": context_text,
@@ -187,7 +188,11 @@ async def generate_reply(
             "personality_brief": personality_brief,
             "user_portrait": portrait_text,
         }
-        tier_fn, extra = _build_tier_call(memory_relevance, l3_memories, combined_memory, tier_fns)
+        tier_fn, extra = _build_tier_call(
+            memory_relevance, l3_memories,
+            user_memory=user_memory_text, ai_memory=ai_memory_text,
+            tier_fns=tier_fns,
+        )
         try:
             tier_reply_text = await tier_fn(**base_params, **extra)
         except Exception as e:

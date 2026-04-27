@@ -57,23 +57,23 @@ PROGRESS_TTL = 3600
 # Cosine similarity threshold for intra-(main, sub) memory dedup.
 _DEDUPE_THRESHOLD = 0.88
 
-# (profile likes field, taxonomy sub-category, 记忆句式前缀)
-# Hoisted to module scope to avoid re-allocating the tuple on every call.
+# (profile likes field, taxonomy sub-category, 动词式前缀)
+# 必须用动词形式直接拼 item, 名词式前缀 (e.g. "喜欢的水果") 拼出来语法错误.
 _LIKES_TO_SUB: tuple[tuple[str, str, str], ...] = (
     ("foods", "饮食喜好", "喜欢吃"),
-    ("fruits", "饮食喜好", "喜欢的水果"),
-    ("colors", "审美爱好", "喜欢的颜色"),
-    ("season", "审美爱好", "喜欢的季节"),
-    ("weather", "审美爱好", "喜欢的天气"),
-    ("plants", "审美爱好", "喜欢的植物"),
-    ("animals", "审美爱好", "喜欢的动物"),
-    ("music", "审美爱好", "喜欢的音乐"),
-    ("songs", "审美爱好", "喜欢的歌曲"),
-    ("sounds", "审美爱好", "喜欢的声音"),
-    ("scents", "审美爱好", "喜欢的气味"),
-    ("books", "审美爱好", "喜欢看的书"),
-    ("movies", "审美爱好", "喜欢的电影"),
-    ("sports", "生活习惯", "喜欢的运动"),
+    ("fruits", "饮食喜好", "喜欢吃"),
+    ("colors", "审美爱好", "喜欢"),
+    ("season", "审美爱好", "喜欢"),
+    ("weather", "审美爱好", "喜欢"),
+    ("plants", "审美爱好", "喜欢"),
+    ("animals", "审美爱好", "喜欢"),
+    ("music", "审美爱好", "喜欢听"),
+    ("songs", "审美爱好", "喜欢听"),
+    ("sounds", "审美爱好", "喜欢"),
+    ("scents", "审美爱好", "喜欢"),
+    ("books", "审美爱好", "喜欢看"),
+    ("movies", "审美爱好", "喜欢看"),
+    ("sports", "生活习惯", "喜欢"),
 )
 
 
@@ -285,36 +285,39 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         _add(memories, f"我是{v}", "身份", "民族", "identity", 0.85)
     if (v := _clean_text(identity.get("blood_type"))):
         _add(memories, f"我是{v}血", "身份", "血型", "identity", 0.80)
-    # 亲属关系 / 社会关系 / 宠物：Plan B 后这些字段是 list (LLM 直接输出 3-5 条);
-    # 旧字符串数据也兼容 (_as_list 会 wrap 成 [str]).
+    # 亲属关系 / 社会关系 / 宠物：LLM schema 要求每条都是"事实/描述"完整句,
+    # 不再加 "家人:" / "我的社会关系:" 等冗余前缀 (前缀已在 sub_category 里,
+    # 嵌入和检索都不需要重复, 还会让 AI 复述时带颗粒).
     for item in _as_list(identity.get("family")):
-        _add(memories, f"家人: {item}", "身份", "亲属关系", "identity", 0.90)
+        _add(memories, item, "身份", "亲属关系", "identity", 0.90)
     for item in _as_list(identity.get("social_relations")):
-        _add(memories, f"我的社会关系: {item}", "身份", "社会关系", "identity", 0.85)
+        _add(memories, item, "身份", "社会关系", "identity", 0.85)
     pet_items = _as_list(identity.get("pet_profile"))
     pet_items = [it for it in pet_items if it not in ("无", "无养", "不养")]
     for item in pet_items:
-        _add(memories, f"我的宠物: {item}", "身份", "宠物", "identity", 0.85)
+        _add(memories, item, "身份", "宠物", "identity", 0.85)
 
-    # ── 身份: 外貌特征 —— 每个维度产 N 条, height/weight 仍单值 ──
-    for key, label in (("height", "身高"), ("weight", "体型")):
-        if (v := _clean_text(appearance.get(key))):
-            _add(memories, f"我的{label}: {v}", "身份", "外貌特征", "identity", 0.78)
-    for key, label in (("features", "外貌特征"), ("style", "穿搭风格"), ("voice", "声音特点")):
+    # ── 身份: 外貌特征 —— height/weight 是单值 (e.g. "168cm" / "匀称"), 用 "是"
+    # 连词组成完整句; features/style/voice 已是完整描述句, 直接入库.
+    if (v := _clean_text(appearance.get("height"))):
+        _add(memories, f"我的身高是{v}", "身份", "外貌特征", "identity", 0.78)
+    if (v := _clean_text(appearance.get("weight"))):
+        _add(memories, f"我的体型是{v}", "身份", "外貌特征", "identity", 0.78)
+    for key in ("features", "style", "voice"):
         for item in _as_list(appearance.get(key)):
-            _add(memories, f"我的{label}: {item}", "身份", "外貌特征", "identity", 0.78)
+            _add(memories, item, "身份", "外貌特征", "identity", 0.78)
 
-    # ── 身份: 教育背景 (Plan B 后 degree 是 list) ──
+    # ── 身份: 教育背景 (degree 每条已含学历/学校/时间线, 无需前缀) ──
     for item in _as_list(edu.get("degree")):
-        _add(memories, f"我的学历: {item}", "身份", "教育背景", "identity", 0.85)
+        _add(memories, item, "身份", "教育背景", "identity", 0.85)
 
     # ── 生活: 技能 —— 知识擅长 + 自学 每项一条 ──
     for item in _as_list(edu.get("strengths")):
-        _add(memories, f"我擅长 {item} 相关的知识", "生活", "技能", "life", 0.80)
+        _add(memories, f"我擅长{item}相关的知识", "生活", "技能", "life", 0.80)
     for item in _as_list(edu.get("self_taught")):
-        _add(memories, f"我自学过 {item}", "生活", "技能", "life", 0.78)
+        _add(memories, f"我自学过{item}", "生活", "技能", "life", 0.78)
     for item in _as_list(abilities.get("good_at")):
-        _add(memories, f"我擅长 {item}", "生活", "技能", "life", 0.80)
+        _add(memories, f"我擅长{item}", "生活", "技能", "life", 0.80)
 
     # ── 职业: 优先 career_template, 回退 profile_data.career ──
     ct = career_template
@@ -324,77 +327,77 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
             ct = pc
     if ct:
         if (v := _clean_text(ct.get("title"))):
-            _add(memories, f"我的职业是 {v}", "身份", "职业/与经济", "identity", 0.95)
+            _add(memories, f"我的职业是{v}", "身份", "职业/与经济", "identity", 0.95)
         if (v := _clean_text(ct.get("duties"))):
-            _add(memories, f"我的工作内容: {v}", "生活", "工作", "life", 0.88)
+            _add(memories, f"我的工作是{v}", "生活", "工作", "life", 0.88)
         # clients 是 tag 数组 — 每项一条工作相关记忆
         for client in _as_list(ct.get("clients")):
-            _add(memories, f"我的服务对象包括 {client}", "生活", "工作", "life", 0.78)
+            _add(memories, f"我的服务对象包括{client}", "生活", "工作", "life", 0.78)
         if (v := _clean_text(ct.get("social_value") or ct.get("socialValue"))):
-            _add(memories, f"我工作的社会价值: {v}", "生活", "工作", "life", 0.78)
+            _add(memories, f"我做这份工作的意义在于{v}", "生活", "工作", "life", 0.78)
 
     for key, sub, prefix in _LIKES_TO_SUB:
         for item in _as_list(likes.get(key)):
-            _add(memories, f"我{prefix} {item}", "偏好", sub, "preference", 0.73)
-    # 小癖好 (Plan B 后是 list, 旧数据 str 也兼容)
+            _add(memories, f"我{prefix}{item}", "偏好", sub, "preference", 0.73)
+    # 小癖好 (quirks "每条一句", 已是完整描述, 不加前缀).
     for item in _as_list(likes.get("quirks")):
-        _add(memories, f"我的小癖好: {item}", "偏好", "生活习惯", "preference", 0.75)
+        _add(memories, item, "偏好", "生活习惯", "preference", 0.75)
 
     # ── 偏好: dislikes 每项一条 ──
     for item in _as_list(dislikes.get("foods")):
-        _add(memories, f"我讨厌吃 {item}", "偏好", "饮食厌恶", "preference", 0.78)
+        _add(memories, f"我讨厌吃{item}", "偏好", "饮食厌恶", "preference", 0.78)
     for item in _as_list(dislikes.get("sounds")):
-        _add(memories, f"我讨厌 {item} 这种声音", "偏好", "审美厌恶", "preference", 0.75)
+        _add(memories, f"我讨厌{item}这种声音", "偏好", "审美厌恶", "preference", 0.75)
     for item in _as_list(dislikes.get("smells")):
-        _add(memories, f"我讨厌 {item} 的气味", "偏好", "审美厌恶", "preference", 0.75)
+        _add(memories, f"我讨厌{item}的气味", "偏好", "审美厌恶", "preference", 0.75)
     for item in _as_list(dislikes.get("habits")):
-        _add(memories, f"我讨厌别人 {item}", "偏好", "审美厌恶", "preference", 0.75)
+        _add(memories, f"我讨厌别人{item}", "偏好", "审美厌恶", "preference", 0.75)
 
-    # ── 偏好: 人际偏好 (v2 schema 新增) ──
+    # ── 偏好: 人际偏好 (item 是特质/行为短语, 用动词连接避免 "的人的人" 重叠) ──
     for item in _as_list(interpersonal.get("liked_traits")):
-        _add(memories, f"我欣赏的人际特质: {item}", "偏好", "人际喜好", "preference", 0.78)
+        _add(memories, f"我欣赏{item}", "偏好", "人际喜好", "preference", 0.78)
     for item in _as_list(interpersonal.get("disliked_traits")):
-        _add(memories, f"我反感的人际行为: {item}", "偏好", "人际厌恶", "preference", 0.78)
+        _add(memories, f"我反感{item}", "偏好", "人际厌恶", "preference", 0.78)
 
-    # ── 偏好: 生活习惯 (Plan B 后 routine/hygiene/leisure 各为 list, 每条 1 记忆) ──
-    for key, label in (("routine", "作息"), ("hygiene", "卫生"), ("leisure", "休闲")):
+    # ── 偏好: 生活习惯 (routine/hygiene/leisure 已是描述句, 不加前缀) ──
+    for key in ("routine", "hygiene", "leisure"):
         for item in _as_list(lifestyle.get(key)):
-            _add(memories, f"我的{label}习惯: {item}", "偏好", "生活习惯", "preference", 0.80)
+            _add(memories, item, "偏好", "生活习惯", "preference", 0.80)
 
-    # ── 偏好: 禁忌/雷区 (v2: taboo.items; 旧 schema fears + abilities.never_do 兜底) ──
+    # ── 偏好: 禁忌/雷区 (taboo "不可触碰的底线" 已自带语义) ──
     for item in _as_list(taboo.get("items")):
-        _add(memories, f"我的雷区: {item}", "偏好", "禁忌/雷区", "preference", 0.88)
+        _add(memories, item, "偏好", "禁忌/雷区", "preference", 0.88)
     for item in _as_list(abilities.get("never_do")):
-        _add(memories, f"我绝对不会做: {item}", "偏好", "禁忌/雷区", "preference", 0.88)
+        _add(memories, f"我绝对不会{item}", "偏好", "禁忌/雷区", "preference", 0.88)
     # 旧 schema fears 兼容: 历史 profile_data 仍含 fears 分类时, 仍能转记忆
     for item in _as_list(fears.get("animals")):
-        _add(memories, f"我害怕 {item}", "偏好", "禁忌/雷区", "preference", 0.85)
+        _add(memories, f"我害怕{item}", "偏好", "禁忌/雷区", "preference", 0.85)
     for item in _as_list(fears.get("objects")):
-        _add(memories, f"我害怕 {item}", "偏好", "禁忌/雷区", "preference", 0.82)
+        _add(memories, f"我害怕{item}", "偏好", "禁忌/雷区", "preference", 0.82)
     for item in _as_list(fears.get("atmospheres")):
-        _add(memories, f"我害怕 {item} 的氛围", "偏好", "禁忌/雷区", "preference", 0.82)
+        _add(memories, f"我害怕{item}的氛围", "偏好", "禁忌/雷区", "preference", 0.82)
 
     # ── 思维: 价值观 / 世界观 / 理想与目标 / 人际关系观 / 社会观点 / 信仰 / 自我认知 ──
-    # Plan B 后所有 textarea 改 list, 每条单独 1 记忆。旧字符串数据 _as_list 自动 wrap。
+    # 所有字段都是 list, schema 要求"每条 X" — 已是完整观点/陈述句, 不重复加
+    # 主题前缀 (主题已在 sub_category 里).
     for item in _as_list(values.get("motto")):
-        _add(memories, f"我的人生信条: {item}", "思维", "人生观", "thought", 0.92)
+        _add(memories, item, "思维", "人生观", "thought", 0.92)
     for item in _as_list(values.get("believes")):
-        _add(memories, f"我相信 {item}", "思维", "价值观", "thought", 0.90)
+        _add(memories, f"我相信{item}", "思维", "价值观", "thought", 0.90)
     for item in _as_list(values.get("opposes")):
-        _add(memories, f"我反对 {item}", "思维", "价值观", "thought", 0.90)
+        _add(memories, f"我反对{item}", "思维", "价值观", "thought", 0.90)
     for item in _as_list(values.get("worldview")):
-        _add(memories, f"我的世界观: {item}", "思维", "世界观", "thought", 0.90)
+        _add(memories, item, "思维", "世界观", "thought", 0.90)
     for item in _as_list(values.get("goal")):
-        _add(memories, f"我的理想与目标: {item}", "思维", "理想与目标", "thought", 0.90)
+        _add(memories, item, "思维", "理想与目标", "thought", 0.90)
     for item in _as_list(values.get("interpersonal_view")):
-        _add(memories, f"我对亲情/友情/爱情的处理原则: {item}",
-             "思维", "人际关系观", "thought", 0.88)
+        _add(memories, item, "思维", "人际关系观", "thought", 0.88)
     for item in _as_list(values.get("social_view")):
-        _add(memories, f"我的社会观点: {item}", "思维", "社会观点", "thought", 0.85)
+        _add(memories, item, "思维", "社会观点", "thought", 0.85)
     for item in _as_list(values.get("faith")):
-        _add(memories, f"我的精神寄托: {item}", "思维", "信仰/寄托", "thought", 0.90)
+        _add(memories, item, "思维", "信仰/寄托", "thought", 0.90)
     for item in _as_list(abilities.get("limits")):
-        _add(memories, f"我清楚自己的局限: {item}", "思维", "自我认知", "thought", 0.88)
+        _add(memories, item, "思维", "自我认知", "thought", 0.88)
 
     # ── 生活: life_events 11 字段, 每个 tag 元素 → 1 条 L2 记忆 + 合理 occur_time ──
     for field_key, sub in _LIFE_EVENT_SUB_MAP.items():

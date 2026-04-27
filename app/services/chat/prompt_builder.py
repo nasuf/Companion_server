@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.memory.retrieval.context_selector import ClassifiedMemory
+from app.services.memory.retrieval.context_selector import ClassifiedMemory, split_by_source
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
-from app.services.mbti import format_mbti_for_prompt, get_mbti, signal as mbti_signal
+from app.services.mbti import format_mbti_for_prompt, get_mbti
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY as _MAX_PER_REPLY,
     MAX_TOTAL_CHARS as _MAX_TOTAL_CHARS,
@@ -138,42 +138,32 @@ async def _build_emotion_section(
     # (core_memory permanent injection removed — spec §3 uses retrieval only)
 
 
-async def _build_memory_section(memories: list | None) -> str | None:
-    """Build the memory section with relevance classification.
-
-    Accepts list[ClassifiedMemory] or list[str] (backward compat).
-    """
+async def _build_memory_section(
+    memories: list[ClassifiedMemory] | None,
+) -> str | None:
+    """按 owner 分两段渲染. 见 ClassifiedMemory.source 分组原因."""
     if not memories:
         return None
 
-    # Separate by classification
-    strong: list[str] = []
-    medium: list[str] = []
-    plain: list[str] = []
+    user_texts, ai_texts = split_by_source(memories)
 
-    for m in memories:
-        if isinstance(m, ClassifiedMemory):
-            if m.relevance == "strong":
-                strong.append(m.text)
-            else:
-                medium.append(m.text)
-        elif isinstance(m, str):
-            plain.append(m)
+    def _numbered(label: str, items: list[str]) -> str:
+        body = "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
+        return f"{label}\n{body}"
 
-    # Spec §3.2: all retrieved memories are factual context, no strong/medium split.
-    all_texts: list[str] = []
-    for m in memories:
-        if isinstance(m, ClassifiedMemory):
-            all_texts.append(m.text)
-        elif isinstance(m, str):
-            all_texts.append(m)
+    parts: list[str] = []
+    if user_texts:
+        parts.append(_numbered("【用户告诉过你的事情】", user_texts))
+    if ai_texts:
+        parts.append(_numbered("【你自己的相关经历 / 人设】", ai_texts))
 
-    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(all_texts, 1))
-    # 早期版本拼了 chat.memory_instruction "(记忆上下文预算: 约 N tokens...)"
-    # 元注释, 审计后删除——LLM 看到 token 数字也不改变行为, 是无效占位.
+    if not parts:
+        return None
+
     body = (
-        "以下是你记忆中与当前话题相关的事实。回答用户时必须与这些记忆保持一致，不得编造与之矛盾的信息。\n\n"
-        f"{numbered}"
+        "以下是与当前话题相关的事实, 已按归属分组. 回答时必须与这些保持一致, "
+        "不得编造矛盾信息, 也不要把对方的记忆误当成自己的、或反之。\n\n"
+        + "\n\n".join(parts)
     )
     return _section("你记得的事情", body)
 
@@ -240,7 +230,7 @@ def _build_graph_context_section(graph_context: dict | None) -> str | None:
 
 async def build_system_prompt(
     agent: Any,
-    memories: list[str] | None = None,
+    memories: list[ClassifiedMemory] | None = None,
     delay_context: str | None = None,
     relational_context: str | None = None,
     graph_context: dict | None = None,

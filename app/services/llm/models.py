@@ -4,7 +4,10 @@ import json
 import logging
 import re
 from functools import lru_cache
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.services.llm.resilience import CallProfile  # type: ignore[import-not-found]
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.embeddings import Embeddings
@@ -298,6 +301,11 @@ async def _invoke_with_resilience(
 
     返回原始 LangChain response 对象 (未解析), 让调用方自行处理
     .content / _extract_json / usage_metadata 等.
+
+    Streaming 分支: profile.stream_mode=True 时, 内部 astream + 累积 chunks,
+    用 AIMessage 包装让上层 `.content` 路径无感. 享受 idle_timeout 保护
+    (相邻 chunk 间最大停顿), 不受总 timeout 误杀. 用于 character.generation
+    这类 6-8K tokens 长输出场景.
     """
     from app.services.llm.resilience import call_with_resilience
 
@@ -312,6 +320,12 @@ async def _invoke_with_resilience(
     # Primary 是 Ollama 才加 format='json' (ChatOpenAI/Anthropic 忽略此 kwarg)
     if force_json and isinstance(model, ChatOllama):
         kwargs.setdefault("format", "json")
+
+    if profile.stream_mode:
+        return await _invoke_via_stream(
+            model, messages, provider=provider, profile=profile,
+            op=op, force_json=force_json, **kwargs,
+        )
 
     async def _primary():
         return await model.ainvoke(messages, **kwargs)
@@ -336,6 +350,53 @@ async def _invoke_with_resilience(
         op=op,
         fallback_factory=fallback_factory,
     )
+
+
+async def _invoke_via_stream(
+    model: BaseChatModel,
+    messages: list[BaseMessage],
+    *,
+    provider: str,
+    profile: "CallProfile",
+    op: str,
+    force_json: bool,
+    **kwargs: Any,
+) -> Any:
+    """Streaming 适配器: 与 ainvoke 等价的接口, 内部走 astream + 累积 chunks.
+
+    返回 AIMessage(content=joined), 上层 `_extract_json(response.content)` /
+    `response.content` 路径无感.
+
+    TODO(usage_metadata): LangChain stream chunk 的 usage_metadata 暴露不一致
+    (dashscope 在末 chunk; ollama 不暴露). 当前所有 background profile 调用
+    走 `invoke_json` 直接丢 usage, 无外部 caller 受影响. 若日后需要计费/观测,
+    可在 collect_stream 内 fold 末 chunk 的 usage_metadata 到 AIMessage 上.
+    """
+    from app.services.llm.resilience import collect_stream
+    from langchain_core.messages import AIMessage
+
+    def _primary_stream():
+        return model.astream(messages, **kwargs)
+
+    fallback_factory = None
+    if provider != "ollama" and profile.allow_ollama_fallback:
+        _fb_model = get_fallback_chat_model()
+        fb_kwargs = {**kwargs}
+        if force_json:
+            fb_kwargs.setdefault("format", "json")
+
+        def _fallback_stream():
+            return _fb_model.astream(messages, **fb_kwargs)
+        fallback_factory = _fallback_stream
+
+    text = await collect_stream(
+        _primary_stream,
+        primary_provider=provider,
+        profile=profile,
+        op=op,
+        fallback_factory=fallback_factory,
+    )
+    return AIMessage(content=text)
 
 
 async def invoke_json(

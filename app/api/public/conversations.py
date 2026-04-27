@@ -20,7 +20,10 @@ async def create_conversation(
     if data.user_id != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your user_id")
     agent = await db.aiagent.find_unique(where={"id": data.agent_id})
-    if not agent or getattr(agent, "status", "active") != "active":
+    # 放宽到 active / provisioning: agent 创建后端 LLM 后台 30-60s, 前端在
+    # 此期间立刻创建会话, workspace 已 active, conversation 可正常落库;
+    # 待 agent 激活后用户即可发送消息. archived 仍 404.
+    if not agent or getattr(agent, "status", "active") == "archived":
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.userId != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your agent")

@@ -7,11 +7,20 @@ Classifies each memory by relevance: strong (score ≥ 0.7) / medium (0.4-0.7).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
+MemorySource = Literal["user", "ai"]
 
 
 @dataclass
 class ClassifiedMemory:
-    """记忆项，附带相关度分级。"""
+    """记忆项，附带相关度分级。
+
+    source 区分"用户告诉过你的事" (memories_user) vs "你自己的人设/经历"
+    (memories_ai). 混在一起喂给 LLM 会让 AI 把自己的记忆当成用户在描述自己,
+    触发人设串戏 → 回退到 AI 助手 persona. 下游 prompt_builder 和分级 tier
+    prompt (强/中) 都依赖这个字段做双槽分流.
+    """
     text: str
     relevance: str  # "strong" | "medium"
     score: float
@@ -20,6 +29,18 @@ class ClassifiedMemory:
     similarity: float = 0.8
     created_at: str | None = None
     display_score: float = 0.0  # set by reranking in orchestrator
+    source: MemorySource = "user"  # 上游 vector_search/keyword_fallback 必填
+
+
+def split_by_source(
+    mems: list[ClassifiedMemory] | None,
+) -> tuple[list[str], list[str]]:
+    """按 source 拆 (user_texts, ai_texts). 用于 prompt 的双槽分流."""
+    user_t: list[str] = []
+    ai_t: list[str] = []
+    for m in mems or []:
+        (ai_t if m.source == "ai" else user_t).append(m.text)
+    return user_t, ai_t
 
 
 def estimate_tokens(text: str) -> int:
@@ -72,6 +93,8 @@ def select_context(
         relevance = "strong" if score >= 0.7 else "medium"
 
         seen_ids.add(mid)
+        # source 透传自上游 SQL 的 'user'/'ai' AS source 列.
+        source: MemorySource = "ai" if mem.get("source") == "ai" else "user"
         selected.append(ClassifiedMemory(
             text=text,
             relevance=relevance,
@@ -80,6 +103,7 @@ def select_context(
             importance=float(mem.get("importance", 0.5)),
             similarity=float(mem.get("similarity", 0.8)),
             created_at=mem.get("created_at"),
+            source=source,
         ))
         used_tokens += tokens
 
