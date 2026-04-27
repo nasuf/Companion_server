@@ -470,6 +470,17 @@ async def send_first_greeting(
     if not agent:
         return False
 
+    # provisioning 期间不发: 此时 character profile / life_events / MBTI 衍生
+    # 偏好都还没入库, _build_personality_brief 只能拿到 7 维基础值, LLM 写出来
+    # 的开场白不能反映完整人设. 等 provisioning 完成后前端会 remount App,
+    # WS 重连再次进入这里 (count 仍 0), 那时 agent.status=active 才正常发首句.
+    if getattr(agent, "status", "active") != "active":
+        logger.info(
+            f"first_greeting skipped: agent {agent_id[:8]} status="
+            f"{getattr(agent, 'status', '?')}, will retry on next ws reconnect"
+        )
+        return False
+
     try:
         tpl = await get_prompt_text("proactive.first_greeting")
         prompt = tpl.format(
