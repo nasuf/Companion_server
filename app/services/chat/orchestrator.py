@@ -392,10 +392,18 @@ async def stream_chat_response(
             )
             if primary_label and fragments.get(primary_label):
                 user_message = str(fragments[primary_label]).strip() or user_message
+            # spec §3.3 步骤 3: 多意图拆分后, "日常交流" 是 catch-all 兜底类,
+            # 没有独立 short-circuit handler 或专属 prompt — 作为 sub_intent
+            # 重跑 stream_chat_response 时会落到主回复 generate_reply, 拉同一组
+            # schedule/memory/agent context, 跟主调用产生几乎重复的内容
+            # (实测 langsmith trace: 主意图"询问当前状态"+子意图"日常交流"两次都
+            # 输出"在沙发看剧/吃巧克力" 类描述). 过滤掉避免重复回复 + 省 LLM 钱.
             pending_sub_fragments = {
                 lb: str(txt).strip()
                 for lb, txt in fragments.items()
-                if lb != primary_label and str(txt).strip()
+                if lb != primary_label
+                and lb != "日常交流"
+                and str(txt).strip()
             }
             if pending_sub_fragments:
                 logger.info(
