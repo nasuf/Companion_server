@@ -291,6 +291,7 @@ async def stream_chat_response(
     forced_intent: IntentType | None = None,
     reply_index_offset: int = 0,
     parent_patience: int | None = None,
+    parent_trace_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §3.3 step 3：多意图拆分后递归调用本函数处理每个子片段。
 
@@ -317,8 +318,16 @@ async def stream_chat_response(
     conversation = await db.conversation.find_unique(where={"id": conversation_id})
     workspace_id = getattr(conversation, "workspaceId", None)
 
-    # --- LangSmith parent trace (groups all LLM calls for this request) ---
-    tracer = LangSmithTracer(user_message, conversation_id).enter()
+    # --- LangSmith trace ---
+    # 主调用 (sub_intent_mode=False): 开新 chat_request span 作为 root.
+    # sub_intent 调用: attach 到 parent trace_id, 不开新 span — sub 内的 LLM
+    # 调用通过 LangSmith contextvars 自动 attach 到 parent ctx 形成嵌套树,
+    # sub 产生的消息 metadata.trace_id 跟 parent 一致, 用户点 trace 跳到 root
+    # 视图能看到完整树 (而非只看 sub 子树).
+    if sub_intent_mode and parent_trace_id:
+        tracer = LangSmithTracer(user_message, conversation_id).attach_to_parent(parent_trace_id)
+    else:
+        tracer = LangSmithTracer(user_message, conversation_id).enter()
 
     # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
     boundary_ctx = BoundaryPhaseCtx(
@@ -765,6 +774,7 @@ async def stream_chat_response(
             pending_sub_fragments, conversation_id, agent, user_id,
             reply_context, start_index=start_idx,
             parent_patience=cached_patience,
+            parent_trace_id=tracer.trace_id,
         ):
             yield evt
 

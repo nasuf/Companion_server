@@ -61,6 +61,32 @@ def test_tracer_close_is_idempotent():
         assert fbg.call_count == 1
 
 
+def test_attach_to_parent_inherits_trace_id_and_skips_share():
+    """sub_intent 模式: attach_to_parent 复用 parent trace_id, close 不 share."""
+    from app.services.chat import tracing
+
+    with patch.object(tracing, "_fire_background") as fbg:
+        tracer = tracing.LangSmithTracer("有意思。", "conv1").attach_to_parent("parent-trace-xyz")
+        assert tracer.trace_id == "parent-trace-xyz"
+        assert tracer._attached is True
+
+        tracer.close()
+        # 不 fire share — parent 会自己 share, sub close 不重复
+        fbg.assert_not_called()
+
+
+def test_attach_to_parent_with_none_parent_id_propagates_none():
+    """parent_trace_id=None (langsmith 未启用 / parent enter 失败) → sub 也无 trace."""
+    from app.services.chat import tracing
+
+    tracer = tracing.LangSmithTracer("x", "conv1").attach_to_parent(None)
+    assert tracer.trace_id is None
+    # close 也无副作用
+    with patch.object(tracing, "_fire_background") as fbg:
+        tracer.close()
+        fbg.assert_not_called()
+
+
 def test_run_tree_none_logs_warning(caplog):
     """is_active=True 但 ls_trace 返回的 run_tree 为 None (SDK 初始化失败) → 
     应 log warning 提示 trace 缺失, trace_id 仍为 None."""

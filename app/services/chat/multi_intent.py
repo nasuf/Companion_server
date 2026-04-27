@@ -73,11 +73,16 @@ async def process_sub_intents(
     reply_context: dict | None,
     start_index: int,
     parent_patience: int,
+    parent_trace_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §3.3 step 3：按 priority 顺序处理拆分后的子意图片段。
 
     每个片段作为独立子调用进入 stream_chat_response(sub_intent_mode=True)，
     共享 reply_context 沿用首条消息的 due_at（spec §6）。
+
+    parent_trace_id 透传给 sub: sub 的 LangSmithTracer 用 attach_to_parent 复用
+    parent run_id, 让 sub 产生的消息 metadata.trace_id 跟 parent 一致 — 用户点
+    任意 reply 的 trace 按钮跳到 parent 视图, 看到完整 root + nested 树.
     """
     if not pending_sub_fragments:
         return
@@ -108,6 +113,7 @@ async def process_sub_intents(
             forced_intent=intent_type,
             reply_index_offset=cur_index,
             parent_patience=parent_patience,
+            parent_trace_id=parent_trace_id,
         ):
             if evt.get("event") == "done":
                 continue

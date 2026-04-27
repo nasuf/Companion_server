@@ -54,6 +54,11 @@ class LangSmithTracer:
         self._conversation_id = conversation_id
         self._ctx: Any = None
         self._closed = False
+        # _attached=True: sub_intent 模式, trace_id 来自 parent, close() 不 share.
+        # 这种模式下 LangSmith 仍会把 sub 内的 LLM 调用记到 parent 的 ls_trace ctx
+        # (parent ctx 还活着), 所以 trace tree 是完整的, 用户点击任意 reply 的
+        # trace 按钮跳到 parent run_id, 看到完整的 root + nested 视图.
+        self._attached = False
         self.trace_id: str | None = None
 
     @property
@@ -61,7 +66,7 @@ class LangSmithTracer:
         return bool(settings.langsmith_tracing)
 
     def enter(self) -> "LangSmithTracer":
-        """打开 trace ctx，填充 trace_id。"""
+        """打开 trace ctx，填充 trace_id。主调用 (root chat_request) 用这个."""
         if self.is_active:
             from langsmith import trace as ls_trace
             self._ctx = ls_trace(
@@ -87,12 +92,38 @@ class LangSmithTracer:
             )
         return self
 
+    def attach_to_parent(self, parent_trace_id: str | None) -> "LangSmithTracer":
+        """sub_intent 模式: 不开新 ls_trace ctx, 复用 parent trace_id 给消息 metadata.
+
+        sub_intent 调用是发生在 parent 的 ls_trace ctx 内 (orchestrator 还没
+        调 parent.close()), 所以 sub 内所有 LLM 调用会自动 attach 到 parent
+        run tree (LangSmith 通过 contextvars 跟踪父子关系). 我们这里不开新
+        chat_request span, 仅把 parent_trace_id 透传到 sub 产生的消息 metadata,
+        让用户点 trace 按钮时跳到 parent run_id, 看到完整 root + nested 视图.
+
+        若 parent_trace_id 为 None (LangSmith 未启用 / parent enter 失败),
+        sub 也跳过 trace, 行为退化到无 trace 状态.
+        """
+        self._ctx = contextlib.nullcontext()
+        self._ctx.__enter__()
+        self.trace_id = parent_trace_id
+        self._attached = True
+        return self
+
     def close(self) -> None:
-        """关闭 trace ctx，启用时 fire-and-forget share。幂等。"""
+        """关闭 trace ctx，启用时 fire-and-forget share。幂等。
+
+        attached 模式下不调 share_run (parent 会自己 share). 这避免:
+        1. 多次重复 share 同一棵树
+        2. sub 调用 close 时 parent ctx 还活着, share parent run_id 会失败
+           (run 还没结束, LangSmith 拒绝)
+        """
         if self._closed or self._ctx is None:
             return
         self._closed = True
         self._ctx.__exit__(None, None, None)
+        if self._attached:
+            return
         if self.is_active and self.trace_id:
             _fire_background(self._share())
 
