@@ -224,6 +224,11 @@ async def load_public_trace(trace_url: str) -> dict[str, Any]:
     normalized_steps = [_normalize_step(run) for run in runs_by_id.values()]
     normalized_steps.sort(key=lambda step: (step.get("dotted_order") or "", step.get("id") or ""))
 
+    # P1: 给每个 step 加语义字段 (display_name / category / prompt_key /
+    # decision_label) 让前端 PM-friendly 渲染. 详见 trace_enrich.py.
+    from app.services.chat.trace_enrich import enrich_steps
+    enrich_steps(normalized_steps)
+
     llm_steps = [step for step in normalized_steps if step.get("run_type") == "llm"]
     total_tokens = sum(
         int(step.get("total_tokens") or 0)
