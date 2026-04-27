@@ -9,11 +9,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import random
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -21,15 +19,10 @@ from collections import Counter
 
 from app.db import db, ensure_connected
 from app.redis_client import get_redis
-from app.services.llm.models import (
-    get_chat_model,
-    get_embedding_model,
-    invoke_json_with_usage,
-)
+from app.services.llm.models import get_embedding_model
 from app.services.memory.demographics import (
     derive_constellation,
     derive_zodiac,
-    sample_blood_type,
     sample_ethnicity,
 )
 from app.services.memory.generation_lock import (
@@ -38,7 +31,6 @@ from app.services.memory.generation_lock import (
 )
 from app.services.memory.init_report import (
     InitReport,
-    MainStats,
     init_report,
     phase_timer,
 )
@@ -47,15 +39,9 @@ from app.services.memory.storage.persistence import normalize_memory_type
 from app.services.memory.taxonomy import (
     L1_CONDITIONAL_SUBS,
     L1_COVERAGE_EXEMPT,
-    L1_SINGLETON_SUBS,
-    L1_TARGET_EMOTION,
-    L1_TARGET_MULTI,
-    MAIN_CATEGORY_TO_LEGACY_TYPE,
     TAXONOMY_MATRIX,
-    allowed_sub_categories,
     analyze_conditional_subs,
     as_dict,
-    l1_min_importance,
     l1_target_count,
     resolve_taxonomy,
 )
@@ -68,26 +54,8 @@ logger = logging.getLogger(__name__)
 PROGRESS_KEY_PREFIX = "provision_progress:"
 PROGRESS_TTL = 3600
 
-# Concurrent LLM calls cap. 5 matches the AI L1 main count so all mains
-# can run in parallel; raise if upstream TPM allows more.
-_LLM_MAX_CONCURRENCY = 5
-_LLM_SEMAPHORE = asyncio.Semaphore(_LLM_MAX_CONCURRENCY)
-
 # Cosine similarity threshold for intra-(main, sub) memory dedup.
 _DEDUPE_THRESHOLD = 0.88
-
-# Inserted into prompt when filling the 情绪 main category. Emotion memories
-# are rare high-impact events, not routine ups and downs — this guidance
-# keeps LLM from producing generic fluff.
-_EMOTION_GUIDANCE = (
-    "\n\n【本大类特殊要求 — 情绪】\n"
-    "情绪类记忆不是日常琐碎情绪波动, 而是 **此生难忘、塑造人格** 的过往事件:\n"
-    "- 每条描述一个具体时刻/事件, 带时间或场景锚点 (如 '高三那年母亲住院', '第一次获奖上台时')\n"
-    "- 情绪强度应极高, 至今回想仍有感受\n"
-    "- 情绪反应模式必须与 MBTI 性格一致 (内向型在独处时更易感孤独; 直觉型对未来可能性更敏感; 等等)\n"
-    "- 与 profile 的 fears/values/career 逻辑自洽, 不得凭空造职业/家庭情节\n"
-)
-_RETRY_NOTE = "\n⚠️ 上一轮生成遗漏了下列子类，本轮必须逐个补齐（不得再空返）。\n"
 
 # (profile likes field, taxonomy sub-category, 记忆句式前缀)
 # Hoisted to module scope to avoid re-allocating the tuple on every call.
@@ -109,32 +77,43 @@ _LIKES_TO_SUB: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Plan B 9 段进度表 (单 LLM 调用 + 转换 + 入库). LLM 调用期间静止 15%, 前端按
+# elapsed time 本地推进到 70%. 旧 stage 名 (selecting_profile / converting_profile /
+# storing_memories) 保留兼容: store_memories_batch 内部仍写 storing_memories 用于
+# 进度回报. generating_chapter 现已不用, 但保留 entry 以防旧调用路径漏迁移.
+_STAGE_PERCENT: dict[str, int] = {
+    "initializing": 2,
+    "mbti_deriving": 5,
+    "mbti_done": 10,
+    "prompt_building": 12,
+    "llm_generating": 15,
+    "llm_done": 72,
+    "converting": 78,
+    "embedding": 85,
+    "storing": 92,
+    "complete": 100,
+    "failed": -1,
+    # 旧名兼容
+    "selecting_profile": 2,
+    "converting_profile": 78,
+}
+
+
 async def set_progress(agent_id: str, stage: str, current: int = 0, total: int = 0, message: str = "") -> None:
-    """Update provisioning progress in Redis.
-
-    Stages (new pipeline):
-      selecting_profile  →  2%    匹配角色背景
-      converting_profile →  5%    profile 直转 + 派生
-      generating_chapter → 10-85% 按 main 并发 LLM 补齐 + retry
-      storing_memories   → 88-98% 去重 + embedding + 写库
-      complete           → 100%
-      failed             → -1
-    """
-    redis = await get_redis()
-    percent = 0
-    if stage == "selecting_profile":
-        percent = 2
-    elif stage == "converting_profile":
-        percent = 5
+    """Update provisioning progress in Redis. See _STAGE_PERCENT for stage table."""
+    if stage in _STAGE_PERCENT:
+        percent = _STAGE_PERCENT[stage]
     elif stage == "generating_chapter":
-        percent = 10 + int(75 * current / max(total, 1))
+        # 旧路径: percent 随 current/total 线性推进
+        percent = 15 + int(55 * current / max(total, 1))
     elif stage == "storing_memories":
-        percent = 88 + int(10 * current / max(total, 1))
-    elif stage == "complete":
-        percent = 100
-    elif stage == "failed":
-        percent = -1
+        # 内层 store_memories_batch 的 fine-grained 进度: 92 → 100 单调推进,
+        # 与 "storing" stage 92 的起点一致, 避免进度条回退
+        percent = 92 + int(8 * current / max(total, 1))
+    else:
+        percent = 0
 
+    redis = await get_redis()
     data = json.dumps({
         "stage": stage,
         "current": current,
@@ -154,48 +133,12 @@ async def get_progress(agent_id: str) -> dict | None:
     return json.loads(raw)
 
 
-# DB / API 一律存英文 male/female; profile 种子数据是历史中文, 读取时翻译一次。
-_PROFILE_GENDER_ZH_TO_EN = {"男": "male", "女": "female"}
+# DB / API 一律存英文 male/female; convert_profile_to_memories 写记忆时翻为中文。
 _GENDER_EN_TO_ZH = {"male": "男", "female": "女"}
 
-
-def _profile_gender_en(profile_data: dict) -> str | None:
-    raw = as_dict(profile_data, "identity").get("gender")
-    if not raw:
-        return None
-    # profile 种子数据是中文, 新数据已是英文, 两者都透传为英文 male/female。
-    return _PROFILE_GENDER_ZH_TO_EN.get(raw, raw)
-
-
-async def select_character_profile(gender: str | None) -> dict | None:
-    """全栈约定: gender ∈ {"male", "female", None}. 指定但 0 匹配 → None。"""
-    profiles = await db.characterprofile.find_many(
-        where={"status": "published"},
-        include={"career": True},
-    )
-    matching = []
-    for p in profiles:
-        data = p.data if isinstance(p.data, dict) else {}
-        p_gender = _profile_gender_en(data)
-        if gender and p_gender and p_gender != gender:
-            continue
-        matching.append(p)
-    if not matching:
-        if gender is not None:
-            logger.warning(f"No CharacterProfile matches gender={gender!r}; skip life-story")
-        return None
-
-    selected = random.choice(matching)
-    return {
-        "id": selected.id,
-        "data": selected.data if isinstance(selected.data, dict) else {},
-        "career_template": {
-            "title": selected.career.title,
-            "duties": selected.career.duties,
-            "social_value": selected.career.socialValue,
-            "clients": selected.career.clients,
-        } if selected.career else None,
-    }
+# NOTE: 旧架构 admin 预生 character_profiles → 用户创建时抽取 (select_character_profile
+# / prepare_profile_for_agent) 已随 Plan B (spec §1.4 单步 LLM 含 MBTI) 废弃,
+# 由 agents.py:_init_and_generate_story 直接调用 character_generation.generate_full_profile.
 
 
 # ── Phase 1: Profile 结构化字段 → L1 记忆 (无需 LLM) ──
@@ -235,9 +178,10 @@ def _add(
     memories.append(entry)
 
 
-# life_events 11 字段 → taxonomy.生活 子类映射
+# life_events 10 字段 → taxonomy.生活 子类映射. Plan B 下 prompt 不再生 interaction
+# (taxonomy.L1_COVERAGE_EXEMPT 已含 (生活, 交互), 那是 AI↔当前用户的实际聊天历史,
+# 由 memory pipeline 累积). 历史 profile 仍带 interaction 时也会被忽略.
 _LIFE_EVENT_SUB_MAP: dict[str, str] = {
-    "interaction": "交互",
     "education": "教育",
     "work": "工作",
     "travel": "旅行",
@@ -271,7 +215,6 @@ _EMOTION_EVENT_SUB_MAP: dict[str, str] = {
 
 # 生活事件按字段类型选合理过往时间区间 (years_ago_min, years_ago_max)
 _LIFE_EVENT_TIME_RANGE: dict[str, tuple[float, float]] = {
-    "interaction": (0.0, 1.0),       # 近年的社交互动
     "education": (3.0, 12.0),        # 求学阶段, 离当前 3-12 年
     "work": (0.0, 5.0),              # 职业生涯任意一点
     "travel": (0.5, 8.0),            # 旅行
@@ -342,22 +285,28 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         _add(memories, f"我是{v}", "身份", "民族", "identity", 0.85)
     if (v := _clean_text(identity.get("blood_type"))):
         _add(memories, f"我是{v}血", "身份", "血型", "identity", 0.80)
-    if (v := _clean_text(identity.get("family"))):
-        _add(memories, f"我的家庭情况: {v}", "身份", "亲属关系", "identity", 0.90)
-    if (v := _clean_text(identity.get("social_relations"))):
-        _add(memories, f"我的社会关系: {v}", "身份", "社会关系", "identity", 0.85)
-    if (v := _clean_text(identity.get("pet_profile"))) and v not in ("无", "无养", "不养"):
-        _add(memories, f"我养的宠物: {v}", "身份", "宠物", "identity", 0.85)
+    # 亲属关系 / 社会关系 / 宠物：Plan B 后这些字段是 list (LLM 直接输出 3-5 条);
+    # 旧字符串数据也兼容 (_as_list 会 wrap 成 [str]).
+    for item in _as_list(identity.get("family")):
+        _add(memories, f"家人: {item}", "身份", "亲属关系", "identity", 0.90)
+    for item in _as_list(identity.get("social_relations")):
+        _add(memories, f"我的社会关系: {item}", "身份", "社会关系", "identity", 0.85)
+    pet_items = _as_list(identity.get("pet_profile"))
+    pet_items = [it for it in pet_items if it not in ("无", "无养", "不养")]
+    for item in pet_items:
+        _add(memories, f"我的宠物: {item}", "身份", "宠物", "identity", 0.85)
 
-    # ── 身份: 外貌特征 —— 每个维度一条, 合计 3-5 ──
-    for key, label in (("height", "身高"), ("weight", "体型"), ("features", "外貌特征"),
-                       ("style", "穿搭风格"), ("voice", "声音特点")):
+    # ── 身份: 外貌特征 —— 每个维度产 N 条, height/weight 仍单值 ──
+    for key, label in (("height", "身高"), ("weight", "体型")):
         if (v := _clean_text(appearance.get(key))):
             _add(memories, f"我的{label}: {v}", "身份", "外貌特征", "identity", 0.78)
+    for key, label in (("features", "外貌特征"), ("style", "穿搭风格"), ("voice", "声音特点")):
+        for item in _as_list(appearance.get(key)):
+            _add(memories, f"我的{label}: {item}", "身份", "外貌特征", "identity", 0.78)
 
-    # ── 身份: 教育背景 ──
-    if (v := _clean_text(edu.get("degree"))):
-        _add(memories, f"我的学历: {v}", "身份", "教育背景", "identity", 0.85)
+    # ── 身份: 教育背景 (Plan B 后 degree 是 list) ──
+    for item in _as_list(edu.get("degree")):
+        _add(memories, f"我的学历: {item}", "身份", "教育背景", "identity", 0.85)
 
     # ── 生活: 技能 —— 知识擅长 + 自学 每项一条 ──
     for item in _as_list(edu.get("strengths")):
@@ -387,9 +336,9 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for key, sub, prefix in _LIKES_TO_SUB:
         for item in _as_list(likes.get(key)):
             _add(memories, f"我{prefix} {item}", "偏好", sub, "preference", 0.73)
-    # 小癖好是 textarea, 整段一条
-    if (v := _clean_text(likes.get("quirks"))):
-        _add(memories, f"我的小癖好: {v}", "偏好", "生活习惯", "preference", 0.75)
+    # 小癖好 (Plan B 后是 list, 旧数据 str 也兼容)
+    for item in _as_list(likes.get("quirks")):
+        _add(memories, f"我的小癖好: {item}", "偏好", "生活习惯", "preference", 0.75)
 
     # ── 偏好: dislikes 每项一条 ──
     for item in _as_list(dislikes.get("foods")):
@@ -407,14 +356,10 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for item in _as_list(interpersonal.get("disliked_traits")):
         _add(memories, f"我反感的人际行为: {item}", "偏好", "人际厌恶", "preference", 0.78)
 
-    # ── 偏好: 生活习惯 (v2 schema 新增, 整分类合成 1 条) ──
-    lifestyle_parts: list[str] = []
+    # ── 偏好: 生活习惯 (Plan B 后 routine/hygiene/leisure 各为 list, 每条 1 记忆) ──
     for key, label in (("routine", "作息"), ("hygiene", "卫生"), ("leisure", "休闲")):
-        if (v := _clean_text(lifestyle.get(key))):
-            lifestyle_parts.append(f"{label}: {v}")
-    if lifestyle_parts:
-        _add(memories, "我的生活习惯 - " + "; ".join(lifestyle_parts),
-             "偏好", "生活习惯", "preference", 0.80)
+        for item in _as_list(lifestyle.get(key)):
+            _add(memories, f"我的{label}习惯: {item}", "偏好", "生活习惯", "preference", 0.80)
 
     # ── 偏好: 禁忌/雷区 (v2: taboo.items; 旧 schema fears + abilities.never_do 兜底) ──
     for item in _as_list(taboo.get("items")):
@@ -430,23 +375,24 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         _add(memories, f"我害怕 {item} 的氛围", "偏好", "禁忌/雷区", "preference", 0.82)
 
     # ── 思维: 价值观 / 世界观 / 理想与目标 / 人际关系观 / 社会观点 / 信仰 / 自我认知 ──
-    if (v := _clean_text(values.get("motto"))):
-        _add(memories, f"我的人生信条: {v}", "思维", "人生观", "thought", 0.92)
+    # Plan B 后所有 textarea 改 list, 每条单独 1 记忆。旧字符串数据 _as_list 自动 wrap。
+    for item in _as_list(values.get("motto")):
+        _add(memories, f"我的人生信条: {item}", "思维", "人生观", "thought", 0.92)
     for item in _as_list(values.get("believes")):
         _add(memories, f"我相信 {item}", "思维", "价值观", "thought", 0.90)
     for item in _as_list(values.get("opposes")):
         _add(memories, f"我反对 {item}", "思维", "价值观", "thought", 0.90)
-    if (v := _clean_text(values.get("worldview"))):
-        _add(memories, f"我的世界观: {v}", "思维", "世界观", "thought", 0.90)
-    if (v := _clean_text(values.get("goal"))):
-        _add(memories, f"我的理想与目标: {v}", "思维", "理想与目标", "thought", 0.90)
-    if (v := _clean_text(values.get("interpersonal_view"))):
-        _add(memories, f"我对亲情/友情/爱情的处理原则: {v}",
+    for item in _as_list(values.get("worldview")):
+        _add(memories, f"我的世界观: {item}", "思维", "世界观", "thought", 0.90)
+    for item in _as_list(values.get("goal")):
+        _add(memories, f"我的理想与目标: {item}", "思维", "理想与目标", "thought", 0.90)
+    for item in _as_list(values.get("interpersonal_view")):
+        _add(memories, f"我对亲情/友情/爱情的处理原则: {item}",
              "思维", "人际关系观", "thought", 0.88)
-    if (v := _clean_text(values.get("social_view"))):
-        _add(memories, f"我的社会观点: {v}", "思维", "社会观点", "thought", 0.85)
-    if (v := _clean_text(values.get("faith"))):
-        _add(memories, f"我的精神寄托: {v}", "思维", "信仰/寄托", "thought", 0.90)
+    for item in _as_list(values.get("social_view")):
+        _add(memories, f"我的社会观点: {item}", "思维", "社会观点", "thought", 0.85)
+    for item in _as_list(values.get("faith")):
+        _add(memories, f"我的精神寄托: {item}", "思维", "信仰/寄托", "thought", 0.90)
     for item in _as_list(abilities.get("limits")):
         _add(memories, f"我清楚自己的局限: {item}", "思维", "自我认知", "thought", 0.88)
 
@@ -476,192 +422,11 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 # ── Phase 2: LLM 按子类补齐覆盖 (taxonomy-driven) ──
 
 
-def _build_constraints(
-    name: str,
-    gender: str | None,
-    mbti: dict | None,
-    profile_data: dict,
-    career_template: dict | None,
-) -> str:
-    """硬约束块: LLM 任何子类输出都不得违反这些事实。"""
-    from app.services.mbti import format_mbti_for_prompt
-
-    identity = as_dict(profile_data, "identity")
-    gender_zh = _GENDER_EN_TO_ZH.get(str(gender or ""), gender or "未指定")
-    lines = [
-        "=== 硬约束 (任何子类输出都不得违反) ===",
-        f"姓名: {name}",
-        f"性别: {gender_zh}",
-        f"年龄: {identity.get('age', '未知')}",
-        f"生日: {identity.get('birthday', '未知')}",
-    ]
-    for key, label in (("location", "现居地"), ("birthplace", "出生地"),
-                       ("growing_up_location", "成长地")):
-        if identity.get(key):
-            lines.append(f"{label}: {identity[key]}")
-    if career_template and career_template.get("title"):
-        lines.append(f"职业: {career_template['title']}")
-    if (mbti_text := format_mbti_for_prompt(mbti)):
-        lines.append(f"MBTI: {mbti_text}")
-    lines.append("=======================================")
-    return "\n".join(lines)
-
-
-def _derive_timeline(profile_data: dict) -> str:
-    """派生简单时间线锚点, 作为硬约束让 5 个 main 并发调用时间线一致。"""
-    identity = as_dict(profile_data, "identity")
-    birthplace = identity.get("birthplace") or identity.get("location") or "家乡"
-    grown = identity.get("growing_up_location") or birthplace
-    current = identity.get("location") or grown
-    age_raw = identity.get("age")
-    try:
-        age = int(age_raw) if age_raw is not None else 25
-    except (ValueError, TypeError):
-        age = 25
-    return (
-        "=== 人生时间线 (各子类记忆若涉及年龄/地点必须与此一致) ===\n"
-        f"- 童年 (0-6 岁): 在 {birthplace}\n"
-        f"- 少年 (7-15 岁): 在 {grown} 上学\n"
-        f"- 青年 (16-22 岁): 离家求学/工作, 在 {grown} 或周边城市\n"
-        f"- 成年 (23-{age} 岁, 当前): 在 {current} 生活工作\n"
-        "=================================================="
-    )
-
-
-# 每个 main 调用时只注入与该 main 相关的 profile 切片, 减少 token 冗余。
-# v2 schema: fears 已删除, 新增 interpersonal/lifestyle/taboo/life_events/emotion_events;
-# 旧 fears 仍保留兼容历史 profile_data。
-_PROFILE_RELEVANCE: dict[str, tuple[str, ...]] = {
-    "身份": ("identity", "appearance", "education_knowledge", "career"),
-    "偏好": ("likes", "dislikes", "interpersonal", "lifestyle", "taboo", "abilities", "identity", "fears"),
-    "生活": ("career", "education_knowledge", "abilities", "identity", "likes", "life_events"),
-    "情绪": ("values", "abilities", "identity", "emotion_events", "fears"),
-    "思维": ("values", "abilities", "education_knowledge", "identity"),
-}
-
-
-def _slice_profile(main: str, profile_data: dict, career_template: dict | None) -> str:
-    """按 main 取 profile 子集并格式化."""
-    keys = _PROFILE_RELEVANCE.get(main, tuple(profile_data.keys()))
-    lines: list[str] = []
-    for k in keys:
-        v = profile_data.get(k)
-        if v:
-            lines.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
-    if career_template and main in ("身份", "生活"):
-        lines.append(f"career: {json.dumps(career_template, ensure_ascii=False)}")
-    return "\n".join(lines) if lines else "(无相关背景)"
-
-
-def _digest_existing(memories: list[dict], per_sub: int = 2) -> str:
-    """已生成记忆摘要 (每 sub 取前 N 条) 给 LLM 看, 避免重复生成。"""
-    by_sub: dict[tuple[str, str], list[str]] = {}
-    for m in memories:
-        key = (m.get("main_category", ""), m.get("sub_category", ""))
-        by_sub.setdefault(key, []).append(m.get("summary", ""))
-    lines = []
-    for (main, sub), summaries in by_sub.items():
-        lines.append(f"[{main}/{sub}]: " + "; ".join(summaries[:per_sub]))
-    return "\n".join(lines) if lines else "(无)"
-
-
-def _spec_for_gap(main: str, gap_subs: dict[str, int]) -> str:
-    """格式化缺口子类规格(目标条数 + 最低 importance)给 prompt."""
-    lines = []
-    for sub in gap_subs:
-        if (main, sub) in L1_SINGLETON_SUBS:
-            n_min = n_max = 1
-        elif main == "情绪":
-            n_min, n_max = L1_TARGET_EMOTION
-        else:
-            n_min, n_max = L1_TARGET_MULTI
-        lines.append(
-            f"  - {sub}: {n_min}-{n_max} 条, "
-            f"importance ≥ {l1_min_importance(main, sub):.2f}"
-        )
-    return "\n".join(lines)
-
-
-async def _fill_main_gaps(
-    main: str,
-    gap_subs: dict[str, int],
-    name: str,
-    profile_data: dict,
-    career_template: dict | None,
-    constraints: str,
-    timeline: str,
-    existing_digest: str,
-    *,
-    is_retry: bool = False,
-    stats: MainStats | None = None,
-) -> list[dict]:
-    """针对一个 main 大类, 用一次 LLM 调用输出所有缺口子类的 3-5 条记忆。
-
-    gender/mbti 已通过 constraints 注入。is_retry=True 时提示 LLM 上一轮
-    遗漏了这些子类, 必须逐个补齐。stats 非 None 时写入 token/duration/count 统计。
-    """
-    from app.services.prompting.store import get_prompt_text
-
-    profile_slice = _slice_profile(main, profile_data, career_template)
-    spec = _spec_for_gap(main, gap_subs)
-    retry_note = _RETRY_NOTE if is_retry else ""
-    emotion_guidance = _EMOTION_GUIDANCE if main == "情绪" else ""
-
-    template = await get_prompt_text("life_story.main_gap_fill")
-    prompt = template.format(
-        name=name,
-        main=main,
-        constraints=constraints,
-        timeline=timeline,
-        profile_slice=profile_slice,
-        existing_digest=existing_digest,
-        retry_note=retry_note,
-        spec=spec,
-        emotion_guidance=emotion_guidance,
-    )
-    start_ms = int(time.time() * 1000)
-    async with _LLM_SEMAPHORE:
-        result, usage = await invoke_json_with_usage(get_chat_model(), prompt)
-    if stats is not None:
-        stats.duration_ms = int(time.time() * 1000) - start_ms
-        stats.tokens_in = usage.get("input_tokens", 0)
-        stats.tokens_out = usage.get("output_tokens", 0)
-
-    if not isinstance(result, dict):
-        logger.warning(f"_fill_main_gaps({main}) returned non-dict: {type(result)}")
-        if stats is not None:
-            stats.failed = True
-        return []
-
-    allowed_subs = set(allowed_sub_categories(main, "ai", 1))
-    mem_type = MAIN_CATEGORY_TO_LEGACY_TYPE[main]
-
-    out: list[dict] = []
-    for sub, items in result.items():
-        if sub not in allowed_subs or sub not in gap_subs:
-            continue
-        if not isinstance(items, list):
-            continue
-        min_imp = l1_min_importance(main, sub)
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            summary = _clean_text(item.get("summary"))
-            if not summary or len(summary) < 6:
-                continue
-            try:
-                imp = float(item.get("importance", min_imp))
-            except (TypeError, ValueError):
-                imp = min_imp
-            imp = max(min_imp, min(0.95, imp))
-            out.append({
-                "summary": summary,
-                "main_category": main,
-                "sub_category": sub,
-                "type": mem_type,
-                "importance": imp,
-            })
-    return out
+# NOTE: 旧架构 phase-3 LLM gap-fill (_build_constraints / _derive_timeline /
+# _slice_profile / _digest_existing / _spec_for_gap / _fill_main_gaps +
+# _PROFILE_RELEVANCE) 在 Plan B 下已废弃: 单步 character.generation 已通过
+# prompt 强制每子类最小条数, 不再需要 main 级补齐。Prompt 调优应该在
+# character.generation, 而非加 gap-fill 补丁。
 
 
 async def _embed_and_dedupe(memories: list[dict], intra_threshold: float = _DEDUPE_THRESHOLD) -> list[dict]:
@@ -766,17 +531,21 @@ async def store_memories_batch(
     # Resolve workspace once (shared by all memories + changelogs)
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
 
-    existing = await db.aimemory.count(
-        where={"userId": user_id, "workspaceId": workspace_id}
-    )
-    if existing > 0 and not force:
-        # Re-running provisioning without force would silently duplicate;
-        # caller must opt into replacement via force=True.
-        logger.warning(
-            f"store_memories_batch skipped for agent {agent_id}: workspace "
-            f"already has {existing} AI memories (re-run would duplicate)"
+    # 仅在非 force 路径需要查 existing (force=True 会无条件 delete_many);
+    # provisioning 主路径走 force=True, 跳过这次 count 节省一次往返.
+    existing = 0
+    if not force:
+        existing = await db.aimemory.count(
+            where={"userId": user_id, "workspaceId": workspace_id}
         )
-        return []
+        if existing > 0:
+            # Re-running provisioning without force would silently duplicate;
+            # caller must opt into replacement via force=True.
+            logger.warning(
+                f"store_memories_batch skipped for agent {agent_id}: workspace "
+                f"already has {existing} AI memories (re-run would duplicate)"
+            )
+            return []
 
     # Embed BEFORE deleting any existing rows — if embedding fails, the
     # original L1 remains intact and caller can retry safely.
@@ -793,14 +562,16 @@ async def store_memories_batch(
     # Refresh DB connection (may have gone stale during embedding)
     await ensure_connected()
 
-    if existing > 0:  # force=True path
-        logger.info(
-            f"store_memories_batch force=True for agent {agent_id}: clearing "
-            f"{existing} existing AI memories in workspace {workspace_id}"
-        )
-        await db.aimemory.delete_many(
+    if force:
+        # 无条件 delete_many: rows 数没意义, 由 delete_many 返回值取代之前的 existing 计数
+        deleted = await db.aimemory.delete_many(
             where={"userId": user_id, "workspaceId": workspace_id}
         )
+        if deleted:
+            logger.info(
+                f"store_memories_batch force=True for agent {agent_id}: cleared "
+                f"{deleted} existing AI memories in workspace {workspace_id}"
+            )
 
     # Pre-generate IDs so we can bulk-insert memories AND link embeddings
     # without a per-row RETURNING round-trip.
@@ -904,231 +675,106 @@ async def store_memories_batch(
 
 # ── Main Entry Point ──
 
-async def prepare_profile_for_agent(
-    agent_id: str,
-    gender: str | None,
-) -> tuple[dict, dict] | None:
-    """Step A: 选 profile + 写回 agent 的 age/occupation/city/profileId。
-
-    返回 (profile, applied_updates)，或 None (无可用模板)。applied_updates 是
-    本次写入 agent 表的字段子集，调用方可直接把它 patch 到本地 agent 对象上，
-    免去一次 find_unique 往返。
-    """
-    await set_progress(agent_id, "selecting_profile", message="正在匹配角色背景...")
-    profile = await select_character_profile(gender)
-    if not profile:
-        logger.warning(f"No matching CharacterProfile for agent {agent_id}")
-        return None
-
-    profile_data = profile["data"]
-    career_template = profile.get("career_template")
-    identity = profile_data.get("identity", {})
-
-    update_data: dict = {"characterProfileId": profile["id"]}
-    if career_template and career_template.get("title"):
-        update_data["occupation"] = career_template["title"]
-    if identity.get("location"):
-        update_data["city"] = str(identity["location"])
-    if identity.get("age"):
-        update_data["age"] = int(identity["age"])
-    await db.aiagent.update(where={"id": agent_id}, data=update_data)
-    return profile, update_data
-
-
 async def generate_l1_coverage(
     agent_id: str,
     user_id: str,
-    name: str,
-    gender: str | None,
-    mbti: dict | None,
     profile: dict,
+    career_template: dict | None,
     workspace_id: str | None = None,
 ) -> int:
-    """Step B (refactored): 生成完整 L1 覆盖的记忆库。
+    """Plan B 核心: 把已生成的 profile dict 转成 L1 记忆库 + 入库.
 
-    取代旧的 "大纲 + 12-15 章节" 流程; taxonomy-driven:
-      1. profile 直转 (singleton 1 条 / list 每项 1 条)
-      2. 生日派生 星座/生肖, 兜底 血型/民族 (人口分布)
-      3. 遍历 AI L1 taxonomy 算缺口, 尊重 EXEMPT + OPTIONAL
-      4. 按 main 并发 LLM 一次性补齐 (硬约束 + 时间线 + 多样性要求)
-      5. 缺口 retry (按 main 批) + Embedding 语义去重
-      6. 写库 (force 清理旧 AI 记忆以支持重试)
-      7. Redis 分布式锁防并发重入
+    调用方负责:
+    - 通过 character_generation.generate_full_profile 单步 LLM 生成 profile dict
+      (含 MBTI / 7 维 / 职业输入, postprocess 兜底必填字段)
+    - 通过 career_templates 池随机选 career_template
+
+    本函数职责:
+    1. profile JSON → 记忆条目 (convert_profile_to_memories, 字段→sub 1:1 / 1:N 映射)
+    2. 缺口验证 (_compute_l1_gaps): 仅 log warning + InitReport, 不再 LLM 补
+       (Plan B 单步 prompt 已强制每子类最小条数, 缺口 → 应该改 prompt 而非加补丁)
+    3. 语义去重 (_embed_and_dedupe)
+    4. 批量写库 (store_memories_batch, force=True 清旧 AI 记忆)
+    5. Redis 分布式锁防并发重入
+
+    NOTE: name/gender/mbti 不参与本函数: 它们已在 generate_full_profile 阶段融入
+    prompt; convert_profile_to_memories 直接从 profile.identity 拿姓名/性别 (硬覆盖).
+    旧架构的 phase3/4 LLM gap-fill / select_character_profile 已废弃。
     """
     try:
         async with memory_generation_lock(agent_id):
-            async with init_report(agent_id, profile_id=profile.get("id")) as report:
+            async with init_report(agent_id, profile_id=None) as report:
                 return await _run_l1_coverage(
-                    agent_id, user_id, name, gender, mbti, profile,
-                    workspace_id, report,
+                    agent_id, user_id, profile, career_template, workspace_id, report,
                 )
     except MemoryGenerationLocked:
         logger.warning(f"generate_l1_coverage already running for agent {agent_id}; skipping")
         return 0
 
 
-def _phase1_direct_memories(name: str, profile_data: dict,
-                             career_template: dict | None, agent_id: str) -> list[dict]:
-    """Build the full set of deterministic profile-derived memories (phase 1).
-
-    Covers: profile singletons/lists, 姓名 seed, 星座/生肖 from birthday,
-    and blood type / ethnicity fallback sampled from population distributions.
-    """
-    memories = convert_profile_to_memories(profile_data, career_template)
-    memories.insert(0, {
-        "summary": f"我叫{name}",
-        "main_category": "身份", "sub_category": "姓名",
-        "type": "identity", "importance": 1.0,
-    })
-
-    # v2 schema 让 LLM 直接输出 zodiac/constellation/blood_type 字段, 已被
-    # convert_profile_to_memories 转成记忆. 这里只对未生成的 sub 兜底派生.
-    existing_identity_subs = {
-        m["sub_category"] for m in memories if m["main_category"] == "身份"
-    }
-    identity = as_dict(profile_data, "identity")
-    birthday = _clean_text(identity.get("birthday"))
-    if "星座" not in existing_identity_subs and (v := derive_constellation(birthday)):
-        memories.append({"summary": f"我是{v}", "main_category": "身份",
-                        "sub_category": "星座", "type": "identity", "importance": 0.75})
-    if "生肖" not in existing_identity_subs and (v := derive_zodiac(birthday)):
-        memories.append({"summary": f"我属{v}", "main_category": "身份",
-                        "sub_category": "生肖", "type": "identity", "importance": 0.75})
-    if "血型" not in existing_identity_subs:
-        memories.append({"summary": f"我是{sample_blood_type(agent_id)}血", "main_category": "身份",
-                        "sub_category": "血型", "type": "identity", "importance": 0.75})
-    if "民族" not in existing_identity_subs:
-        memories.append({"summary": f"我是{sample_ethnicity(agent_id)}", "main_category": "身份",
-                        "sub_category": "民族", "type": "identity", "importance": 0.80})
-
-    return memories
-
-
-async def _phase3_4_llm_fill(
-    agent_id: str, name: str, gender: str | None, mbti: dict | None,
-    profile_data: dict, career_template: dict | None,
-    memories: list[dict], gaps: dict[str, dict[str, int]],
-    conditional_include: set[tuple[str, str]],
-    report: InitReport,
-) -> None:
-    """Run phase 3 (per-main LLM fill) + phase 4 (retry still-missing subs).
-
-    Mutates `memories` in place and writes per-main stats into `report`.
-    """
-    constraints = _build_constraints(name, gender, mbti, profile_data, career_template)
-    timeline = _derive_timeline(profile_data)
-    digest = _digest_existing(memories)
-
-    def _fill(m: str, subs: dict[str, int], digest_text: str, *, retry: bool = False,
-              stats: MainStats | None = None):
-        return _fill_main_gaps(m, subs, name, profile_data, career_template,
-                               constraints, timeline, digest_text,
-                               is_retry=retry, stats=stats)
-
-    phase3_stats = {m: MainStats() for m in gaps}
-    with phase_timer(report, "phase3_fill_llm"):
-        results = await asyncio.gather(
-            *(_fill(m, subs, digest, stats=phase3_stats[m]) for m, subs in gaps.items()),
-            return_exceptions=True,
-        )
-    done_mains: list[str] = []
-    for main, res in zip(gaps.keys(), results):
-        if isinstance(res, list):
-            memories.extend(res)
-            phase3_stats[main].produced = len(res)
-            done_mains.append(f"{main} ✓")
-        else:
-            phase3_stats[main].failed = True
-            done_mains.append(f"{main} ✗")
-            logger.warning(f"Phase3 main={main} failed: {res}")
-    report.main_stats = phase3_stats
-    await set_progress(
-        agent_id, "generating_chapter",
-        current=len(gaps), total=len(gaps),
-        message=" · ".join(done_mains),
-    )
-
-    still_missing = _compute_l1_gaps(memories, conditional_include=conditional_include)
-    if not still_missing:
-        return
-
-    await set_progress(
-        agent_id, "generating_chapter",
-        current=len(gaps), total=len(gaps),
-        message="正在补齐剩余子类...",
-    )
-    retry_digest = _digest_existing(memories)
-    phase4_stats = {m: MainStats() for m in still_missing}
-    with phase_timer(report, "phase4_retry"):
-        retry_results = await asyncio.gather(
-            *(_fill(m, subs, retry_digest, retry=True, stats=phase4_stats[m])
-              for m, subs in still_missing.items()),
-            return_exceptions=True,
-        )
-    for main, res in zip(still_missing.keys(), retry_results):
-        if isinstance(res, list) and res:
-            memories.extend(res)
-            phase4_stats[main].produced = len(res)
-        else:
-            phase4_stats[main].failed = True
-            logger.warning(f"L1 coverage retry for main={main} produced nothing: {res!r}")
-    report.retry_stats = phase4_stats
-
-
 async def _run_l1_coverage(
-    agent_id: str, user_id: str, name: str, gender: str | None,
-    mbti: dict | None, profile: dict, workspace_id: str | None,
-    report: InitReport,
+    agent_id: str, user_id: str, profile: dict, career_template: dict | None,
+    workspace_id: str | None, report: InitReport,
 ) -> int:
-    profile_data = profile["data"]
-    career_template = profile.get("career_template")
+    """Plan B 简化版主流程. profile 是 character_generation 输出的字典 (字段名
+    与 character.generation prompt JSON schema 对齐). career_template 是池里
+    随机选的 dict (用于 convert_profile_to_memories 中职业相关 sub 映射)."""
+    await set_progress(agent_id, "converting", message="正在转换背景信息为长期记忆...")
+    with phase_timer(report, "phase1_convert"):
+        memories = convert_profile_to_memories(profile, career_template)
+        # 兜底派生: postprocess 已硬覆盖 ethnicity / blood_type / name. 但若 LLM
+        # 漏了 zodiac/constellation 字段, convert 不会产生对应记忆 → 这里从
+        # birthday 派生补齐 (taxonomy 这两个 sub 都是 SINGLETON, 必须有 1 条)。
+        existing_subs = {
+            (m["main_category"], m["sub_category"]) for m in memories
+        }
+        identity = as_dict(profile, "identity")
+        birthday = _clean_text(identity.get("birthday"))
+        if ("身份", "星座") not in existing_subs:
+            v = derive_constellation(birthday)
+            if v:
+                memories.append({"summary": f"我是{v}", "main_category": "身份",
+                                "sub_category": "星座", "type": "identity", "importance": 0.85})
+        if ("身份", "生肖") not in existing_subs:
+            v = derive_zodiac(birthday)
+            if v:
+                memories.append({"summary": f"我属{v}", "main_category": "身份",
+                                "sub_category": "生肖", "type": "identity", "importance": 0.85})
+        if ("身份", "民族") not in existing_subs:
+            memories.append({"summary": f"我是{sample_ethnicity(agent_id)}",
+                            "main_category": "身份", "sub_category": "民族",
+                            "type": "identity", "importance": 0.80})
 
-    await set_progress(agent_id, "converting_profile", message="正在转换背景信息为记忆...")
-    with phase_timer(report, "phase1_direct"):
-        memories = _phase1_direct_memories(name, profile_data, career_template, agent_id)
-
-    conditional_include = analyze_conditional_subs(profile_data)
+    conditional_include = analyze_conditional_subs(profile)
     report.direct_count = len(memories)
     report.conditional_included = [f"{m}/{s}" for m, s in sorted(conditional_include)]
     logger.info(
-        f"Phase1 profile direct → {len(memories)} memories for agent {agent_id}, "
+        f"Plan B convert → {len(memories)} memories for agent {agent_id}, "
         f"conditional includes: {report.conditional_included or '(none)'}"
     )
 
+    # 覆盖度验证 (仅 log + report, 不 retry; Plan B 单 prompt 已强制最小条数)
     gaps = _compute_l1_gaps(memories, conditional_include=conditional_include)
-    report.gaps_after_phase1 = sum(sum(s.values()) for s in gaps.values())
-
-    if not gaps:
-        logger.info(f"agent {agent_id}: no L1 gaps after phase 1, skip LLM")
-    else:
-        await set_progress(
-            agent_id, "generating_chapter",
-            current=0, total=len(gaps),
-            # 区分清楚: direct_count 是 phase 1 从画像字段直接转好的, gaps_after_phase1
-            # 是还需 LLM 调用补齐的剩余条数. 总数 = direct_count + gaps_after_phase1
-            message=(
-                f"已直填 {report.direct_count} 条记忆, "
-                f"还需补 {len(gaps)} 类 / {report.gaps_after_phase1} 条..."
-            ),
-        )
-        await _phase3_4_llm_fill(
-            agent_id, name, gender, mbti, profile_data, career_template,
-            memories, gaps, conditional_include, report,
+    total_gap_count = sum(sum(s.values()) for s in gaps.values())
+    report.gaps_after_phase1 = total_gap_count
+    report.gaps_after_llm = total_gap_count
+    report.llm_count = 0
+    if gaps:
+        logger.warning(
+            f"agent {agent_id}: L1 coverage gaps after Plan B single-LLM: "
+            f"{total_gap_count} entries across {len(gaps)} mains. Detail: "
+            f"{ {m: dict(s) for m, s in gaps.items()} }. "
+            f"调整 character.generation prompt 强化最小条数提示可减少缺口."
         )
 
-    report.gaps_after_llm = sum(
-        sum(s.values()) for s in _compute_l1_gaps(memories,
-                                                 conditional_include=conditional_include).values()
-    )
-    report.llm_count = len(memories) - report.direct_count
-
-    await set_progress(agent_id, "storing_memories", message="正在去重并整理记忆...")
+    await set_progress(agent_id, "embedding", message="正在向量化与去重...")
     pre_dedupe = len(memories)
-    with phase_timer(report, "phase5_dedupe"):
+    with phase_timer(report, "phase2_dedupe"):
         memories = await _embed_and_dedupe(memories)
     report.dedupe_removed = pre_dedupe - len(memories)
 
-    with phase_timer(report, "phase6_store"):
+    await set_progress(agent_id, "storing", message="正在写入记忆库...")
+    with phase_timer(report, "phase3_store"):
         stored_ids = await store_memories_batch(
             agent_id, user_id, memories,
             workspace_id=workspace_id,
@@ -1144,47 +790,8 @@ async def _run_l1_coverage(
     return len(stored_ids)
 
 
-async def generate_full_life_story(
-    agent_id: str,
-    user_id: str,
-    name: str,
-    gender: str | None,
-    mbti: dict | None,
-    workspace_id: str | None = None,
-) -> None:
-    """Wrapper: select profile → generate L1 coverage → activate.
-
-    prepare_profile_for_agent + generate_l1_coverage 更灵活 (允许
-    life_overview 等下游任务并行)。本函数保证总会写 progress 并把 agent
-    置为 active (即使中途失败)。
-    """
-    try:
-        result = await prepare_profile_for_agent(agent_id, gender)
-        if not result:
-            await set_progress(agent_id, "complete", message="无可用背景模板，已跳过")
-            await activate_agent(agent_id)
-            return
-
-        profile, _ = result
-        count = await generate_l1_coverage(
-            agent_id=agent_id,
-            user_id=user_id,
-            name=name,
-            gender=gender,
-            mbti=mbti,
-            profile=profile,
-            workspace_id=workspace_id,
-        )
-        await set_progress(
-            agent_id, "complete",
-            message=f"生成完成: {count} 条记忆",
-        )
-        await activate_agent(agent_id)
-
-    except Exception as e:
-        logger.error(f"Life story generation failed for agent {agent_id}: {e}", exc_info=True)
-        await set_progress(agent_id, "failed", message=f"生成失败: {str(e)[:200]}")
-        await activate_agent(agent_id)
+# NOTE: generate_full_life_story 旧 wrapper 已废弃 (依赖 prepare_profile_for_agent
+# 选 character_profile 池, Plan B 改 agents.py:_init_and_generate_story 直接编排)。
 
 
 async def activate_agent(agent_id: str) -> None:

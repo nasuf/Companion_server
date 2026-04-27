@@ -321,14 +321,8 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
         except Exception:
             pass
 
-    # 解绑 CharacterProfile（清空 agentId 引用，背景本身保留可复用）
-    try:
-        await db.execute_raw(
-            'UPDATE "character_profiles" SET "agent_id" = NULL WHERE "agent_id" = $1',
-            agent_id,
-        )
-    except Exception:
-        pass
+    # Plan B 后已无 character_profiles 表 (DROP 见 migration 20260427180000),
+    # 旧 UPDATE 解绑逻辑随之失效, 此处不再需要任何 hook.
 
     # 9. 删除 Agent 本身
     await db.aiagent.delete(where={"id": agent_id})

@@ -10,7 +10,6 @@ from app.db import connect_db, disconnect_db
 from app.redis_client import get_redis, close_redis, mark_redis_healthy
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
 from app.services.prompting.store import ensure_prompt_templates
-from app.services.character import ensure_default_template
 from app.services.career import ensure_default_careers
 from app.services.schedule_domain.holiday_cache import reload as reload_holiday_cache
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
@@ -49,7 +48,6 @@ async def lifespan(app: FastAPI):
     # Phase 2: Schema + seeding
     await asyncio.gather(
         _timed("Prompt templates", ensure_prompt_templates()),
-        _timed("Character template", ensure_default_template()),
         _timed("Career templates", ensure_default_careers()),
     )
 
@@ -108,7 +106,6 @@ from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
 from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
-from app.api.admin.character import router as admin_character_router
 from app.api.admin.career import router as admin_career_router
 from app.api.admin.agents import router as admin_agents_router
 from app.api.public.traces import router as traces_router
@@ -128,7 +125,6 @@ app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)
 app.include_router(auth_router)
 app.include_router(admin_users_router)
-app.include_router(admin_character_router)
 app.include_router(admin_career_router)
 app.include_router(admin_agents_router)
 app.include_router(traces_router)

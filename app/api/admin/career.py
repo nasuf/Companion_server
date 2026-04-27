@@ -38,18 +38,9 @@ async def list_careers(
         where=where,
         order={"sortOrder": "asc"},
     )
-    # Batch count profiles per career (single query instead of N+1)
-    if careers:
-        ids = [c.id for c in careers]
-        rows = await db.query_raw(
-            'SELECT "career_id" AS fk, COUNT(*)::int AS cnt '
-            'FROM "character_profiles" WHERE "career_id" = ANY($1) GROUP BY "career_id"',
-            ids,
-        )
-        counts = {str(r["fk"]): int(r["cnt"]) for r in rows}
-    else:
-        counts = {}
-    return [_career_response(c, profile_count=counts.get(c.id, 0)) for c in careers]
+    # Plan B 后已无 character_profiles 表 → profile_count 永远 0 (保留字段
+    # 是为兼容前端 CareerTemplate 类型, 不在 UI 显示).
+    return [_career_response(c, profile_count=0) for c in careers]
 
 
 @router.post("", response_model=CareerResponse, status_code=201)
@@ -98,21 +89,12 @@ async def update_career(
 @router.delete("/{career_id}")
 async def delete_career(
     career_id: str,
-    force: bool = False,
+    force: bool = False,  # 兼容前端调用签名, Plan B 后无引用约束故无作用
     _: str = Depends(require_admin_jwt),
 ):
+    del force  # noqa: F841 — 接口兼容
     c = await db.careertemplate.find_unique(where={"id": career_id})
     if not c:
         raise HTTPException(status_code=404, detail="Career not found")
-    profile_count = await db.characterprofile.count(where={"careerId": career_id})
-    if profile_count > 0 and not force:
-        return {
-            "ok": False,
-            "action": "blocked",
-            "profile_count": profile_count,
-            "message": f"该职业关联了 {profile_count} 个背景，确认级联删除？",
-        }
-    if force and profile_count > 0:
-        await db.characterprofile.delete_many(where={"careerId": career_id})
     await db.careertemplate.delete(where={"id": career_id})
     return {"ok": True, "action": "deleted"}

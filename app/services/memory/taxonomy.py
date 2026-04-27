@@ -96,6 +96,8 @@ L1_SINGLETON_SUBS: frozenset[tuple[str, str]] = frozenset({
 L1_COVERAGE_EXEMPT: frozenset[tuple[str, str]] = frozenset({
     # AI 与当前用户的互动, 用户 0 互动时不能预填
     ("生活", "交互"),
+    # 提醒类记忆是聊天时用户对 AI 说"提醒我X"产生, character.generation 不预填
+    ("生活", "提醒"),
     # "其他" 类目不强制初始化, 留给后续记忆沉淀
     ("身份", "其他"),
     ("偏好", "其他"),

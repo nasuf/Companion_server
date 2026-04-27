@@ -60,13 +60,14 @@ def _clamp_pct(v) -> int:
     return max(0, min(100, int(v)))
 
 
-async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
-    """Spec §1.2 + 指令模版 P25-26「AI性格打分」：7 维 → MBTI 4 轴偏向百分比。
+async def seven_dim_to_mbti(p: dict) -> dict:
+    """Spec §1.2 + 指令模版 P25-26「AI性格打分」：7 维 → MBTI 4 轴偏向百分比 + 性格画像 summary。
 
-    在 agent 创建的后台异步任务中调用（`api/public/agents.py:_init_mbti_then_emotion`），
-    不阻塞 API 响应。若 LLM 调用失败或输出非法，抛异常由上层捕获。
+    在 agent 创建的后台异步任务中调用，不阻塞 API 响应。LLM 同一次调用产出 4 轴 +
+    summary（性格画像短文本），避免再起一次 round-trip。LLM 调用失败抛异常由上层捕获;
+    summary 字段缺失时降级到空串 (UI 端 InspectorPanel 容器会判空隐藏).
 
-    关于 4 轴 vs spec 字面 "8 维" 的语义差异见模块顶部 Implementation note。
+    Returns dict with keys: EI, NS, TF, JP (int 0-100), summary (str, 可能为空).
 
     输入字段命名兼容 spec（liveliness/rationality/sensitivity/planning/
     spontaneity/imagination/humor）与代码内命名（lively/rational/emotional/
@@ -97,7 +98,10 @@ async def seven_dim_to_mbti(p: dict) -> dict[str, int]:
     if not isinstance(result, dict):
         raise ValueError(f"personality_scoring LLM returned non-dict: {type(result).__name__}")
 
-    return {dim: _clamp_pct(result.get(dim, 50)) for dim in MBTI_DIMS}
+    out: dict = {dim: _clamp_pct(result.get(dim, 50)) for dim in MBTI_DIMS}
+    raw_summary = result.get("summary")
+    out["summary"] = raw_summary.strip() if isinstance(raw_summary, str) else ""
+    return out
 
 
 def _validate_input(percentages: dict) -> dict[str, int]:
@@ -121,15 +125,16 @@ def _validate_input(percentages: dict) -> dict[str, int]:
     return out
 
 
-async def build_mbti(percentages: dict) -> dict:
-    """Build the canonical agent.mbti JSON shape from user-supplied 4
-    percentages. Type derives from percentages; summary 字段保留为空字符串
-    保持下游 schema 兼容 (format_mbti_for_prompt / schedule._mbti_brief 已优雅
-    降级). spec §1.2 仅定义 4 轴百分比，不要求 summary 文本生成。
+async def build_mbti(percentages: dict, *, summary: str = "") -> dict:
+    """Build the canonical agent.mbti JSON shape from 4-axis percentages.
+
+    Type derives from percentages; summary 字段由调用方提供 (seven_dim_to_mbti
+    场景下 LLM 同步产出). regenerate-mbti 端点仅传 4 轴, summary 默认空串.
+    UI 在 summary 为空时隐藏画像容器, 不显示空白条.
     """
     pct = _validate_input(percentages)
     type_str = _derive_type(pct)
-    return {**pct, "type": type_str, "summary": ""}
+    return {**pct, "type": type_str, "summary": summary.strip() if summary else ""}
 
 
 def _coerce(raw: Any) -> dict | None:

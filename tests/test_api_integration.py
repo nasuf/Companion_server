@@ -87,8 +87,12 @@ def test_create_agent(mock_deps):
         patch("app.api.public.agents.stage_active_workspaces_for_user", new_callable=AsyncMock, return_value=[]),
         patch("app.api.public.agents.activate_workspace", new_callable=AsyncMock, return_value=mock_workspace),
         patch("app.api.public.agents.finalize_archived_workspaces", new_callable=AsyncMock),
-        patch("app.api.public.agents.prepare_profile_for_agent", new_callable=AsyncMock, return_value=None),
+        patch("app.api.public.agents.pick_random_active_career", new_callable=AsyncMock, return_value=None),
+        patch("app.api.public.agents.generate_full_profile", new_callable=AsyncMock, return_value={"identity": {}}),
         patch("app.api.public.agents.generate_l1_coverage", new_callable=AsyncMock),
+        patch("app.api.public.agents.seven_dim_to_mbti", new_callable=AsyncMock, return_value={"EI": 50, "NS": 50, "TF": 50, "JP": 50}),
+        patch("app.api.public.agents.build_mbti", new_callable=AsyncMock, return_value={"EI": 50, "NS": 50, "TF": 50, "JP": 50, "type": "INTP"}),
+        patch("app.api.public.agents.init_patience", new_callable=AsyncMock),
         patch("app.api.public.agents.set_progress", new_callable=AsyncMock),
         patch("app.api.public.agents.activate_agent", new_callable=AsyncMock),
         patch("app.api.public.agents.generate_and_save_life_overview", new_callable=AsyncMock, return_value={"description": "overview"}),
@@ -97,6 +101,8 @@ def test_create_agent(mock_deps):
         mock_db.aiagent = MagicMock()
         mock_db.aiagent.create = AsyncMock(return_value=mock_agent)
         mock_db.aiagent.update = AsyncMock(return_value=mock_agent)
+        # 防双击检查: 用户没有 provisioning agent 时返回 None (允许新建)
+        mock_db.aiagent.find_first = AsyncMock(return_value=None)
         response = client.post(
             "/agents",
             headers=_auth_header("user-id"),

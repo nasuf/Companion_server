@@ -223,6 +223,29 @@ DEFAULT_CAREERS: list[dict[str, str]] = [
 _OBSOLETE_CAREER_TITLES: tuple[str, ...] = ("陨石猎人",)
 
 
+def career_row_to_dict(c) -> dict:
+    """CareerTemplate row → 纯 dict (prompt / convert_profile_to_memories 共用)."""
+    return {
+        "id": c.id,
+        "title": c.title,
+        "duties": c.duties,
+        "socialValue": c.socialValue,
+        "clients": c.clients,
+    }
+
+
+async def pick_random_active_career() -> dict | None:
+    """Plan B: agent 创建时从 active career_templates 池随机抽一条.
+
+    Returns None 时 generate_full_profile 内会回退到"自由职业者"默认值, 不阻塞。
+    """
+    import random as _r
+    rows = await db.careertemplate.find_many(where={"status": "active"})
+    if not rows:
+        return None
+    return career_row_to_dict(_r.choice(rows))
+
+
 async def ensure_default_careers() -> None:
     """启动时同步默认职业到 DB：
 
@@ -250,20 +273,10 @@ async def ensure_default_careers() -> None:
     if missing:
         logger.info(f"Seeded {len(missing)} missing default careers")
 
-    # 2) 清理过期 title
+    # 2) 清理过期 title (Plan B 后无 character_profiles 引用约束, 直接 DROP 安全)
     for obsolete_title in _OBSOLETE_CAREER_TITLES:
         row = next((r for r in existing if r.title == obsolete_title), None)
         if not row:
             continue
-        profile_count = await db.characterprofile.count(where={"careerId": row.id})
-        if profile_count > 0:
-            if row.status != "archived":
-                await db.careertemplate.update(
-                    where={"id": row.id}, data={"status": "archived"}
-                )
-                logger.info(
-                    f"Archived obsolete career '{obsolete_title}' (has {profile_count} profile references)"
-                )
-        else:
-            await db.careertemplate.delete(where={"id": row.id})
-            logger.info(f"Deleted obsolete career '{obsolete_title}' (no profile references)")
+        await db.careertemplate.delete(where={"id": row.id})
+        logger.info(f"Deleted obsolete career '{obsolete_title}'")

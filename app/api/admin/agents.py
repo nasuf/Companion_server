@@ -78,7 +78,6 @@ async def list_agents(
             "city": a.city,
             "user_id": a.userId,
             "username": a.user.username if a.user else None,
-            "character_profile_id": getattr(a, "characterProfileId", None),
             "created_at": str(a.createdAt),
         })
     return result

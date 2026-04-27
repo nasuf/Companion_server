@@ -9,14 +9,9 @@ import pytest
 
 from app.services.life_story import (
     _as_list,
-    _build_constraints,
     _clean_text,
     _compute_l1_gaps,
-    _derive_timeline,
-    _digest_existing,
     _embed_and_dedupe,
-    _slice_profile,
-    _spec_for_gap,
     convert_profile_to_memories,
 )
 from app.services.memory.taxonomy import (
@@ -193,55 +188,10 @@ class TestComputeL1Gaps:
         assert gaps["偏好"]["饮食喜好"] == 2
 
 
-class TestPromptAssembly:
-    def test_build_constraints_includes_core_facts(self, rich_profile):
-        c = _build_constraints("Lumia", "male", {"EI": 70, "NS": 60,
-                                                 "TF": 40, "JP": 55,
-                                                 "type": "ENFJ"},
-                              rich_profile, None)
-        assert "姓名: Lumia" in c
-        assert "性别: 男" in c
-        assert "年龄: 27" in c
-        assert "现居地: 苏州" in c
-
-    def test_build_constraints_no_mbti_gracefully(self, rich_profile):
-        c = _build_constraints("X", "female", None, rich_profile, None)
-        assert "姓名: X" in c
-        assert "MBTI" not in c
-
-    def test_derive_timeline_reflects_ages(self, rich_profile):
-        t = _derive_timeline(rich_profile)
-        assert "0-6" in t and "27" in t
-
-    def test_spec_for_gap_uses_singleton_for_identity(self):
-        spec = _spec_for_gap("身份", {"姓名": 1, "外貌特征": 3})
-        assert "姓名: 1-1 条" in spec
-        assert "外貌特征: 3-5 条" in spec
-
-    def test_spec_for_gap_uses_emotion_range(self):
-        spec = _spec_for_gap("情绪", {"高兴": 2})
-        # L1_TARGET_EMOTION is (2, 3)
-        assert "2-3 条" in spec
-
-    def test_digest_existing_caps_per_sub(self):
-        # many memories per sub → per_sub=2 trimmed.
-        mems = [{"main_category": "偏好", "sub_category": "饮食喜好",
-                "summary": f"memory {i}"} for i in range(10)]
-        digest = _digest_existing(mems, per_sub=2)
-        # Should reference "memory 0" and "memory 1" at most.
-        assert "memory 0" in digest
-        assert "memory 1" in digest
-        assert "memory 5" not in digest
-
-    def test_slice_profile_respects_main(self):
-        profile = {"identity": {"gender": "male"}, "likes": {"foods": ["x"]},
-                  "values": {"motto": "y"}}
-        sliced_id = _slice_profile("身份", profile, None)
-        sliced_pref = _slice_profile("偏好", profile, None)
-        assert "identity" in sliced_id
-        assert "likes" in sliced_pref
-        # 偏好 cares about likes, not about raw values-dict (values is for thought/emotion)
-        assert "values" not in sliced_pref
+# NOTE: Plan B 后旧 phase-3 LLM gap-fill 路径全删 (_build_constraints /
+# _derive_timeline / _spec_for_gap / _digest_existing / _slice_profile),
+# 对应 prompt assembly 测试同步移除. 单步 character.generation 的 prompt
+# contract 在 tests/test_convert_profile_contract.py 中保护。
 
 
 class TestEmbedAndDedupe:

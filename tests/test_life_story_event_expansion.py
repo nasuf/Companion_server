@@ -153,12 +153,17 @@ def test_random_past_time_within_range():
 
 
 def test_life_event_sub_map_covers_taxonomy_life_subs():
-    """life_events schema 11 个字段映射到 taxonomy 生活的 11 个核心子类."""
+    """life_events schema 10 个字段映射到 taxonomy 生活的 10 个非交互子类.
+
+    Plan B: 不再预填 "交互" (L1_COVERAGE_EXEMPT 已含 (生活, 交互), 由聊天历史
+    在 memory pipeline 运行时累积).
+    """
     expected = {
-        "交互", "教育", "工作", "旅行", "居住", "健康", "宠物",
+        "教育", "工作", "旅行", "居住", "健康", "宠物",
         "人际", "技能", "生活", "其他特殊事件",
     }
     assert set(_LIFE_EVENT_SUB_MAP.values()) == expected
+    assert "交互" not in _LIFE_EVENT_SUB_MAP.values()
 
 
 def test_emotion_event_sub_map_covers_15_emotions():
@@ -187,11 +192,9 @@ def test_event_memories_carry_occur_time_to_storage_dict():
     assert isinstance(edu["occur_time"], datetime)
 
 
-def test_phase1_does_not_duplicate_zodiac_when_profile_has_it():
-    """v2 schema 下 LLM 生成 identity.zodiac, _phase1_direct_memories 不应再派生
-    一次 (避免重复记忆)."""
-    from app.services.life_story import _phase1_direct_memories
-
+def test_convert_does_not_duplicate_zodiac_when_profile_has_it():
+    """v2 schema 下 LLM 生成 identity.zodiac/constellation/blood_type, convert
+    应直接消费, 每 sub 只产 1 条."""
     profile_data = {
         "identity": {
             "name": "测试", "gender": "女", "age": 25,
@@ -201,23 +204,15 @@ def test_phase1_does_not_duplicate_zodiac_when_profile_has_it():
             "blood_type": "A型",
         },
     }
-    memories = _phase1_direct_memories(
-        profile_data=profile_data, career_template=None,
-        name="测试", agent_id="test-agent",
-    )
-    zodiac_mems = [m for m in memories if m["sub_category"] == "生肖"]
-    constellation_mems = [m for m in memories if m["sub_category"] == "星座"]
-    blood_mems = [m for m in memories if m["sub_category"] == "血型"]
-    # 各 sub 只允许 1 条 (LLM 已生成, 派生函数应跳过)
-    assert len(zodiac_mems) == 1
-    assert len(constellation_mems) == 1
-    assert len(blood_mems) == 1
+    memories = convert_profile_to_memories(profile_data, None)
+    assert sum(1 for m in memories if m["sub_category"] == "生肖") == 1
+    assert sum(1 for m in memories if m["sub_category"] == "星座") == 1
+    assert sum(1 for m in memories if m["sub_category"] == "血型") == 1
 
 
-def test_phase1_falls_back_to_derive_when_profile_missing_zodiac():
-    """旧 schema 或 LLM 漏填时, _phase1_direct_memories 应派生兜底."""
-    from app.services.life_story import _phase1_direct_memories
-
+def test_convert_omits_zodiac_when_profile_missing_it():
+    """Plan B 后兜底派生 (zodiac/constellation/民族) 移到 _run_l1_coverage,
+    convert 本身只消费 profile 字段; profile 缺则 convert 不输出对应记忆."""
     profile_data = {
         "identity": {
             "name": "测试", "gender": "女", "age": 25,
@@ -225,14 +220,11 @@ def test_phase1_falls_back_to_derive_when_profile_missing_zodiac():
             # 没有 zodiac/constellation/blood_type
         },
     }
-    memories = _phase1_direct_memories(
-        profile_data=profile_data, career_template=None,
-        name="测试", agent_id="test-agent",
-    )
-    zodiac_mems = [m for m in memories if m["sub_category"] == "生肖"]
-    constellation_mems = [m for m in memories if m["sub_category"] == "星座"]
-    blood_mems = [m for m in memories if m["sub_category"] == "血型"]
-    # 派生函数兜底, 至少 1 条
-    assert len(zodiac_mems) == 1
-    assert len(constellation_mems) == 1
-    assert len(blood_mems) == 1
+    memories = convert_profile_to_memories(profile_data, None)
+    # convert 不再派生; 兜底由 _run_l1_coverage 调用 derive_zodiac/constellation
+    # + sample_ethnicity (单独有 demographics 测试覆盖).
+    assert not any(m["sub_category"] == "生肖" for m in memories)
+    assert not any(m["sub_category"] == "星座" for m in memories)
+    # blood_type 由 _apply_postprocess_overrides 在 generate_full_profile 内硬覆盖,
+    # 故 profile 缺时 convert 也不应产 — 用 character_generation_test 校验
+    assert not any(m["sub_category"] == "血型" for m in memories)

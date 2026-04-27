@@ -54,7 +54,6 @@ model AiAgent {
   occupation         String?
   city               String?
   gender             String?             @map("gender")
-  characterProfileId String?             @map("character_profile_id")
   createdAt          DateTime            @default(now()) @map("created_at")
   updatedAt          DateTime            @updatedAt @map("updated_at")
   workspaces         ChatWorkspace[]
@@ -457,48 +456,11 @@ model CareerTemplate {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  profiles CharacterProfile[]
-
   @@map("career_templates")
 }
 
-// ── AI 角色背景管理 ──
-
-model CharacterTemplate {
-  id                 String   @id @default(uuid())
-  name               String
-  description        String?
-  schemaData         Json     @map("schema") // 动态分类/字段定义
-  promptHeader       String?  @map("prompt_header") // 提示词开头（NULL=用默认）
-  defaults           String? // 生成规则（用户主体约束）
-  promptRequirements String?  @map("prompt_requirements") // 输出要求（NULL=用默认）
-  status             String   @default("active") // active / archived
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
-
-  profiles CharacterProfile[]
-
-  @@map("character_templates")
-}
-
-model CharacterProfile {
-  id         String            @id @default(uuid())
-  templateId String            @map("template_id")
-  template   CharacterTemplate @relation(fields: [templateId], references: [id])
-  careerId   String?           @map("career_id")
-  career     CareerTemplate?   @relation(fields: [careerId], references: [id])
-  name       String // 背景名称（职业名）
-  data       Json // 根据模板 schema 填充的值
-  status     String            @default("draft") // draft / published / archived
-  agentId    String?           @map("agent_id") // 绑定到 AiAgent
-  createdAt  DateTime          @default(now()) @map("created_at")
-  updatedAt  DateTime          @updatedAt @map("updated_at")
-
-  @@index([templateId])
-  @@index([careerId])
-  @@index([status])
-  @@map("character_profiles")
-}
+// Plan B 后已删除 CharacterTemplate / CharacterProfile (admin 不再批量预生
+// 背景, agent 创建时即时单步 LLM 生成 — services/character_generation.py).
 
 model TimeTrigger {
   id          String    @id @default(uuid())

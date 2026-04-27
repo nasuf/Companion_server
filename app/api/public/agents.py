@@ -15,11 +15,12 @@ from app.db import db
 from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, RegenerateMbtiRequest
 from app.services.interaction.boundary import init_patience
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
+from app.services.career import pick_random_active_career
+from app.services.character_generation import generate_full_profile
 from app.services.life_story import (
     activate_agent,
     generate_l1_coverage,
     get_progress,
-    prepare_profile_for_agent,
     set_progress,
 )
 from app.services.schedule_domain.schedule import (
@@ -52,6 +53,17 @@ async def create_agent(
 ):
     if data.user_id != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your user_id")
+    # 防双击 / 重试竞态: 用户已有 provisioning agent 时拒绝新建. 否则两次并发
+    # 会 (a) 重复扣 LLM 配额, (b) 后入的 stage_active_workspaces_for_user 把
+    # 前一份的 workspace 归档, 造成前一份在已 archived 的 workspace 写记忆.
+    pending = await db.aiagent.find_first(
+        where={"userId": data.user_id, "status": "provisioning"},
+    )
+    if pending is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="已有 AI 伙伴正在生成中, 请等候完成或删除后重试",
+        )
     # Per spec §1.2: 7-dim / Big Five 用户输入仅作为 MBTI 计算的临时输入,
     # 不再常驻 DB. MBTI 在 _init_mbti() 里生成并写入.
     create_data: dict = {
@@ -79,6 +91,7 @@ async def create_agent(
                 data={"status": "archived", "archivedAt": datetime.now(UTC)},
             )
         raise
+    staged_workspaces: list = []
     try:
         staged_workspaces = await stage_active_workspaces_for_user(data.user_id)
         # status 保持 "provisioning" — 等人生经历生成完成后再设为 "active"
@@ -92,32 +105,17 @@ async def create_agent(
                 where={"id": agent.id},
                 data={"status": "archived", "archivedAt": datetime.now(UTC)},
             )
-        if 'staged_workspaces' in locals():
+        if staged_workspaces:
             await restore_staged_workspaces(staged_workspaces)
         raise
 
-    # Spec §1.3：7 维 → MBTI 8 维用大模型推导（对应指令「AI性格打分」）。
-    # 整个流程在后台 asyncio.create_task 里跑，不阻塞 API 响应。
+    # Spec §1.3：7 维 → MBTI 4 轴用大模型推导，再 §1.4 单步 LLM 生 background。
+    # 整个 Plan B pipeline 在后台 asyncio.create_task 里跑，不阻塞 API 响应。
     personality_dict = data.personality.model_dump()
-
-    async def _init_mbti():
-        """Spec §1.3：agent 创建时后台推导 MBTI。"""
-        try:
-            mbti_input = await seven_dim_to_mbti(personality_dict)
-            mbti = await build_mbti(mbti_input)
-            await db.aiagent.update(
-                where={"id": agent.id},
-                data={"mbti": Json(mbti), "currentMbti": Json(mbti)},
-            )
-        except Exception as e:
-            logger.error(f"MBTI init failed for agent {agent.id}: {e}")
-
-    asyncio.create_task(_init_mbti())
 
     # Initialize patience value (Redis + DB)
     asyncio.create_task(init_patience(agent.id, data.user_id))
 
-    # Background: profile selection → (life story memories ∥ life overview) → daily schedule
     async def _safe_overview() -> str | None:
         try:
             return await generate_and_save_life_overview(agent)
@@ -126,59 +124,119 @@ async def create_agent(
             return None
 
     async def _init_and_generate_story():
+        """Plan B 主管线（9 段进度）.
+
+        1. initializing → mbti_deriving → 推导 MBTI 写库 → mbti_done
+        2. prompt_building → 抽 career → llm_generating
+        3. generate_full_profile (单步 LLM, 含 MBTI + career)
+        4. llm_done → 写 agent.occupation/age/city
+        5. converting/embedding/storing 由 generate_l1_coverage 内部推进；
+           与 life_overview 并行
+        6. complete (任一步 failed 则保留 failed 状态, 仍兜底激活)
+        """
         ws_id = workspace.id if workspace else None
+        await set_progress(agent.id, "initializing", message="正在创建空间...")
+
+        # ── Step 1: MBTI ──
+        await set_progress(agent.id, "mbti_deriving", message="正在推导 MBTI 性格...")
+        mbti: dict | None = None
         try:
-            result = await prepare_profile_for_agent(agent.id, agent.gender)
+            mbti_input = await seven_dim_to_mbti(personality_dict)
+            # seven_dim_to_mbti 同步产出 4 轴 + summary; 拆开传给 build_mbti
+            # (build_mbti 单独签名仅取 4 轴 percentages, summary 走 kwarg).
+            summary = mbti_input.pop("summary", "")
+            mbti = await build_mbti(mbti_input, summary=summary)
+            await db.aiagent.update(
+                where={"id": agent.id},
+                data={"mbti": Json(mbti), "currentMbti": Json(mbti)},
+            )
+            agent.mbti = mbti
+            agent.currentMbti = mbti
         except Exception as e:
-            logger.error(f"Profile preparation failed for {agent.id}: {e}", exc_info=True)
-            result = None
+            logger.error(f"MBTI init failed for agent {agent.id}: {e}")
+        await set_progress(agent.id, "mbti_done", message="MBTI 推导完成")
 
-        # Patch the local agent with the same fields we just wrote to DB,
-        # avoiding a redundant find_unique round-trip.
-        if result:
-            profile, applied = result
-            for field, value in applied.items():
-                if hasattr(agent, field):
-                    setattr(agent, field, value)
-        else:
-            profile = None
-
-        mbti = get_mbti(agent)
-        overview_text: str | None = None
-
-        if profile:
-            # life_overview 与 life_story 都从同一份 profile/agent 派生，
-            # 逻辑自洽且无跨任务依赖，可安全并行。
-            async def _run_memories():
-                try:
-                    await generate_l1_coverage(
-                        agent_id=agent.id,
-                        user_id=data.user_id,
-                        name=agent.name,
-                        gender=agent.gender,
-                        mbti=mbti,
-                        profile=profile,
-                        workspace_id=ws_id,
-                    )
-                except Exception as e:
-                    logger.error(f"Life story memories failed for {agent.id}: {e}", exc_info=True)
-                    await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
-
-            _, overview_text = await asyncio.gather(_run_memories(), _safe_overview())
-        else:
-            # 无 profile：跳过记忆，仍尝试 overview（基于 agent 默认字段）
-            await set_progress(agent.id, "complete", message="无可用背景模板，已跳过")
-            overview_text = await _safe_overview()
-
-        # 仅在生成未失败时标记 complete（避免覆盖 _run_memories 的 failed 状态）
+        # ── Step 2: career_template + prompt build ──
+        await set_progress(agent.id, "prompt_building", message="正在构建生成提示...")
         try:
-            current = await get_progress(agent.id)
-            if current and current.get("stage") != "failed":
-                await set_progress(agent.id, "complete", message="生成完成")
+            career = await pick_random_active_career()
         except Exception as e:
-            logger.debug(f"Skip complete-stage write for {agent.id}: {e}")
+            logger.warning(f"Career pool query failed for {agent.id}: {e}")
+            career = None
 
-        if overview_text:
+        # ── Step 3: 单步 LLM 生成 background ──
+        await set_progress(agent.id, "llm_generating", message="正在生成 AI 背景...")
+        try:
+            profile = await generate_full_profile(
+                name=agent.name,
+                gender=agent.gender,
+                mbti=mbti,
+                personality=personality_dict,
+                career_template=career,
+            )
+        except Exception as e:
+            logger.error(f"Background generation failed for {agent.id}: {e}", exc_info=True)
+            await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
+            # 不激活: 失败时 agent 保持 provisioning, 让 /provision-status 仍能
+            # 返回 stage="failed" → 前端显示「请删除重建」UI; 若 activate_agent
+            # 写 status=active, /provision-status 会被 active 短路返回 complete
+            # 状态, 失败信息丢失.
+            return
+        await set_progress(agent.id, "llm_done", message="背景生成完成, 正在解析...")
+
+        # ── Step 4: persist derived agent fields (occupation/age/city) ──
+        identity = profile.get("identity", {}) if isinstance(profile, dict) else {}
+        update_payload: dict = {}
+        if career and isinstance(career.get("title"), str) and career["title"].strip():
+            update_payload["occupation"] = career["title"].strip()
+        city = identity.get("location")
+        if isinstance(city, str) and city.strip():
+            update_payload["city"] = city.strip()
+        derived_age = identity.get("age")
+        if isinstance(derived_age, int):
+            update_payload["age"] = derived_age
+        if update_payload:
+            try:
+                await db.aiagent.update(where={"id": agent.id}, data=update_payload)
+                for k, v in update_payload.items():
+                    setattr(agent, k, v)
+            except Exception as e:
+                logger.warning(f"Persisting derived agent fields failed for {agent.id}: {e}")
+
+        # ── Step 5: L1 记忆生成 ∥ 生活画像 ──
+        # 用 nonlocal 闭包标志取代 get_progress 回查 Redis (省一次 round-trip).
+        memories_failed = False
+
+        async def _run_memories():
+            nonlocal memories_failed
+            try:
+                stored = await generate_l1_coverage(
+                    agent_id=agent.id,
+                    user_id=data.user_id,
+                    profile=profile,
+                    career_template=career,
+                    workspace_id=ws_id,
+                )
+            except Exception as e:
+                memories_failed = True
+                logger.error(f"Life story memories failed for {agent.id}: {e}", exc_info=True)
+                await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
+                return
+            # 0 条 = 锁被占 (MemoryGenerationLocked 内部 catch + return 0) 或转换全空,
+            # 任何一种都不能激活成"空记忆"agent. spec §1.4 要求至少覆盖 5 大类.
+            if stored == 0:
+                memories_failed = True
+                logger.warning(f"L1 generation produced 0 memories for {agent.id} (lock held or empty profile)")
+                await set_progress(agent.id, "failed", message="生成失败: 记忆库为空, 请删除重建")
+
+        _, overview_text = await asyncio.gather(_run_memories(), _safe_overview())
+
+        if not memories_failed:
+            await set_progress(agent.id, "complete", message="生成完成")
+
+        # daily_schedule 只在 memory 生成成功时跑: 失败 agent 不会被激活, 跑 schedule
+        # 是浪费 LLM token; 且 schedule 依赖记忆库 / agent.occupation 等已落地数据.
+        if overview_text and not memories_failed:
             try:
                 await generate_daily_schedule(
                     agent.id, agent.name, mbti,
@@ -187,8 +245,10 @@ async def create_agent(
             except Exception as e:
                 logger.warning(f"Daily schedule init failed for agent {agent.id}: {e}")
 
-        # 兜底激活：即使前面任一环节失败，也保证用户能用
-        await activate_agent(agent.id)
+        # 仅在没有失败的情况下激活. 失败 agent 保持 provisioning, 让 /provision-status
+        # 仍能返回 failed → 前端显示「请删除重建」UI (active 状态会被短路成 complete).
+        if not memories_failed:
+            await activate_agent(agent.id)
 
     asyncio.create_task(_init_and_generate_story())
 
