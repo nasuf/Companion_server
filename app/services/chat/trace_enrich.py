@@ -424,4 +424,59 @@ def enrich_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """批量包装. 修改原 dict 并返回 (in-place)."""
     for step in steps:
         enrich_step(step)
+    _mark_critical_path(steps)
     return steps
+
+
+# ─────────────────────────────────────────────────────────────────
+# P4b: 关键路径标记 - 跑完所有 enrich_step 之后, 算 critical path
+# ─────────────────────────────────────────────────────────────────
+
+
+def _end_ms(step: dict[str, Any]) -> int:
+    """从 step.ended_at (ISO8601) 解析为 epoch ms. 缺失返回 0."""
+    end_str = step.get("ended_at")
+    if not end_str:
+        return 0
+    try:
+        from datetime import datetime
+        return int(
+            datetime.fromisoformat(str(end_str).replace("Z", "+00:00")).timestamp() * 1000
+        )
+    except Exception:
+        return 0
+
+
+def _mark_critical_path(steps: list[dict[str, Any]]) -> None:
+    """关键路径定义: 从 root 出发, 每层选 ended_at 最晚的 child, 递归到底.
+
+    背后的直觉: parent 完成时间 = max(children 完成时间), 决定 parent
+    完成时间的那个 child 是"卡 parent 的瓶颈". 整条链就是导致总耗时的路径,
+    优化它能直接缩短整次请求.
+
+    跟"longest path by sum of durations"的严格定义有差别 (并行场景 sum 会
+    大于真实 wall-clock latency), 但跟用户对"关键路径"的直觉更对齐 — 我们
+    在意的是 wall-clock 慢在哪.
+
+    所有在路径上的 step 加 on_critical_path=True. 路径外的不写字段
+    (前端用 step.on_critical_path === true 判断, undefined 视为 false).
+    """
+    if not steps:
+        return
+    # 按 parent_id 分组
+    by_parent: dict[str | None, list[dict[str, Any]]] = {}
+    for s in steps:
+        by_parent.setdefault(s.get("parent_id"), []).append(s)
+
+    # 找 root: parent_id 为 None 的节点中 ended_at 最晚的 (一般只有 1 个)
+    roots = by_parent.get(None) or []
+    if not roots:
+        return
+    cur: dict[str, Any] | None = max(roots, key=_end_ms)
+
+    while cur is not None:
+        cur["on_critical_path"] = True
+        children = by_parent.get(cur.get("id")) or []
+        if not children:
+            break
+        cur = max(children, key=_end_ms)

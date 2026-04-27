@@ -190,3 +190,65 @@ def test_enrich_steps_batch_inplace():
     assert result is steps  # in-place
     assert steps[0]["prompt_key"] == "memory.relevance"
     assert steps[1]["prompt_key"] == "emotion.ai_pad"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# P4b: critical path 标记
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _step(id_, parent_id, started, ended):
+    return {
+        "id": id_,
+        "name": "n",
+        "run_type": "chain",
+        "parent_id": parent_id,
+        "started_at": started,
+        "ended_at": ended,
+        "inputs": None,
+        "outputs": None,
+    }
+
+
+def test_critical_path_simple_serial_chain():
+    """root → A → B (串行): 三者都在关键路径上."""
+    steps = [
+        _step("root", None, "2026-04-28T00:00:00Z", "2026-04-28T00:00:10Z"),
+        _step("A", "root", "2026-04-28T00:00:00Z", "2026-04-28T00:00:05Z"),
+        _step("B", "A", "2026-04-28T00:00:05Z", "2026-04-28T00:00:10Z"),
+    ]
+    trace_enrich.enrich_steps(steps)
+    by_id = {s["id"]: s for s in steps}
+    assert by_id["root"].get("on_critical_path") is True
+    assert by_id["A"].get("on_critical_path") is True
+    assert by_id["B"].get("on_critical_path") is True
+
+
+def test_critical_path_parallel_takes_slower():
+    """root → A (1s 并行) + B (5s 并行) → only B 在路径上."""
+    steps = [
+        _step("root", None, "2026-04-28T00:00:00Z", "2026-04-28T00:00:05Z"),
+        _step("A", "root", "2026-04-28T00:00:00Z", "2026-04-28T00:00:01Z"),
+        _step("B", "root", "2026-04-28T00:00:00Z", "2026-04-28T00:00:05Z"),
+    ]
+    trace_enrich.enrich_steps(steps)
+    by_id = {s["id"]: s for s in steps}
+    assert by_id["root"].get("on_critical_path") is True
+    assert by_id["B"].get("on_critical_path") is True
+    # A 比 B 早结束, 不在关键路径
+    assert by_id["A"].get("on_critical_path") is not True
+
+
+def test_critical_path_empty_safe():
+    """空 steps 不报错."""
+    trace_enrich.enrich_steps([])  # 不抛
+
+
+def test_critical_path_no_root_safe():
+    """无 root (所有节点都有 parent_id) 优雅处理 — 应该不挂."""
+    steps = [
+        _step("A", "missing-parent", "2026-04-28T00:00:00Z", "2026-04-28T00:00:01Z"),
+    ]
+    trace_enrich.enrich_steps(steps)
+    # 没 root 就不标 critical_path, 不报错
+    assert steps[0].get("on_critical_path") is not True
