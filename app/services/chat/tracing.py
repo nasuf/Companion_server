@@ -77,6 +77,14 @@ class LangSmithTracer:
             self._ctx = contextlib.nullcontext()
         run_tree = self._ctx.__enter__()
         self.trace_id = str(run_tree.id) if run_tree else None
+        # is_active=True 但 run_tree=None 表示 LangSmith SDK 初始化失败 (网络/认证).
+        # 记录下来便于诊断 "trace 偶尔消失" — 此后整条请求不会有 trace, 消息
+        # metadata 也不会带 trace_id, 前端永远不显示按钮.
+        if self.is_active and self.trace_id is None:
+            logger.warning(
+                f"[TRACE] LangSmith ls_trace returned no run_tree "
+                f"(conv={self._conversation_id[:8]}); trace will be missing for this request"
+            )
         return self
 
     def close(self) -> None:
@@ -88,16 +96,47 @@ class LangSmithTracer:
         if self.is_active and self.trace_id:
             _fire_background(self._share())
 
+    async def _share_run_with_retry(self) -> str:
+        """调 client.share_run, 失败重试 3 次指数退避 (1s, 2s, 4s).
+
+        share_run 是网络调用 (~500ms-2s 正常, 抽风时 5xx). 不重试时偶发失败
+        会让 trace_pending 永远卡在 true, 用户感觉 "trace 时有时无".
+        """
+        loop = asyncio.get_running_loop()
+        client = get_langsmith_client()
+        delays = (1.0, 2.0, 4.0)
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate(delays, start=1):
+            try:
+                return await loop.run_in_executor(None, client.share_run, self.trace_id)
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    f"[TRACE] share_run attempt {attempt}/{len(delays)} failed "
+                    f"trace_id={self.trace_id} err={type(e).__name__}: {e}"
+                )
+                if attempt < len(delays):
+                    await asyncio.sleep(delay)
+        # 全失败, 抛最后一次异常给上层 logger.exception 捕获 stack
+        assert last_exc is not None
+        raise last_exc
+
     async def _share(self) -> None:
         """后台：share trace + 更新对应消息 metadata + WS 通知。"""
         try:
-            loop = asyncio.get_running_loop()
-            client = get_langsmith_client()
-            public_url = await loop.run_in_executor(
-                None, client.share_run, self.trace_id,
+            public_url = await self._share_run_with_retry()
+            logger.info(f"[TRACE] shared trace_id={self.trace_id} url={public_url}")
+        except Exception:
+            # 已重试 3 次仍失败. 用 exception 打完整 stack 便于诊断 (quota?
+            # 网络? API 变更?). 消息的 trace_pending 留 true, 前端永远等不到
+            # trace_ready — 这是已知不修复路径 (重启服务也补不回来).
+            logger.exception(
+                f"[TRACE] share_run permanently failed after retries "
+                f"trace_id={self.trace_id} conv={self._conversation_id[:8]}"
             )
-            logger.info(f"Trace shared: {public_url}")
+            return
 
+        try:
             updated_message_id: str | None = None
             msgs = await db.message.find_many(
                 where={"conversationId": self._conversation_id, "role": "assistant"},
@@ -130,5 +169,15 @@ class LangSmithTracer:
                         "trace_url": public_url,
                     },
                 )
-        except Exception as e:
-            logger.warning(f"Failed to share trace: {e}")
+            else:
+                # share_run 成功了但找不到对应 message — 边缘竞争 (save_replies
+                # 还没落库 / sub_intent 模式还没回 parent). 不致命, 只是按钮不亮.
+                logger.warning(
+                    f"[TRACE] no message found with trace_id={self.trace_id} "
+                    f"in conv={self._conversation_id[:8]} (last 20 assistant msgs)"
+                )
+        except Exception:
+            logger.exception(
+                f"[TRACE] failed to update message metadata after share "
+                f"trace_id={self.trace_id} conv={self._conversation_id[:8]}"
+            )
