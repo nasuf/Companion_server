@@ -242,3 +242,138 @@ class TestIntegration:
                 min_imp = l1_min_importance(*key)
                 assert m["importance"] >= min_imp, \
                     f"{m['summary']} importance {m['importance']} < required {min_imp}"
+
+
+class TestContradictionDetection:
+    """LLM-based pairwise contradiction scan (spec §1.4)."""
+
+    @pytest.mark.asyncio
+    async def test_drops_lower_importance_side(self, monkeypatch):
+        from app.services import life_story
+
+        memories = [
+            {"summary": "我养了一只名为糯米的博美犬",
+             "main_category": "身份", "sub_category": "宠物", "importance": 0.85},
+            {"summary": "我没有养宠物，家里常备急救包帮助小动物",
+             "main_category": "生活", "sub_category": "宠物", "importance": 0.85},
+            {"summary": "我叫Hia",
+             "main_category": "身份", "sub_category": "姓名", "importance": 0.95},
+        ]
+
+        async def fake_invoke_json(_model, _prompt):
+            # Simulate LLM finding the pet contradiction.
+            return {"contradictions": [{"a": 0, "b": 1, "reason": "养/没养冲突"}]}
+
+        monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
+        monkeypatch.setattr(life_story, "get_utility_model", lambda: object())
+        async def fake_get_prompt_text(_key): return "{memory_list}"
+        monkeypatch.setattr(life_story, "get_prompt_text", fake_get_prompt_text)
+
+        result = await life_story._detect_and_resolve_contradictions(memories)
+        # Tied importance → drop b (the second one, "没有养宠物").
+        assert len(result) == 2
+        assert all("没有养宠物" not in m["summary"] for m in result)
+
+    @pytest.mark.asyncio
+    async def test_no_contradiction_returns_unchanged(self, monkeypatch):
+        from app.services import life_story
+        memories = [
+            {"summary": "我叫Hia", "main_category": "身份",
+             "sub_category": "姓名", "importance": 0.95},
+            {"summary": "我喜欢咖啡", "main_category": "偏好",
+             "sub_category": "饮食喜好", "importance": 0.86},
+        ]
+
+        async def fake_invoke_json(_model, _prompt):
+            return {"contradictions": []}
+
+        monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
+        monkeypatch.setattr(life_story, "get_utility_model", lambda: object())
+        async def fake_get_prompt_text(_key): return "{memory_list}"
+        monkeypatch.setattr(life_story, "get_prompt_text", fake_get_prompt_text)
+
+        result = await life_story._detect_and_resolve_contradictions(memories)
+        assert result == memories
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_falls_back(self, monkeypatch):
+        """LLM 调用炸了 → 跳过, 不阻塞 agent 创建."""
+        from app.services import life_story
+        memories = [
+            {"summary": "a", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
+            {"summary": "b", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
+        ]
+
+        async def fake_invoke_json(_model, _prompt):
+            raise RuntimeError("LLM down")
+
+        monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
+        monkeypatch.setattr(life_story, "get_utility_model", lambda: object())
+        async def fake_get_prompt_text(_key): return "{memory_list}"
+        monkeypatch.setattr(life_story, "get_prompt_text", fake_get_prompt_text)
+
+        result = await life_story._detect_and_resolve_contradictions(memories)
+        assert result == memories  # 原样回退
+
+    @pytest.mark.asyncio
+    async def test_skips_when_too_few_memories(self, monkeypatch):
+        from app.services import life_story
+        called = False
+        async def fake_invoke_json(_model, _prompt):
+            nonlocal called
+            called = True
+            return {"contradictions": []}
+        monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
+
+        assert await life_story._detect_and_resolve_contradictions([]) == []
+        single = [{"summary": "x", "main_category": "身份",
+                   "sub_category": "姓名", "importance": 0.9}]
+        assert await life_story._detect_and_resolve_contradictions(single) == single
+        assert called is False  # 短路, 不调 LLM
+
+    @pytest.mark.asyncio
+    async def test_drops_higher_importance_pair_loser_correctly(self, monkeypatch):
+        """importance 不等时, drop 低分那条 (而非简单按 a/b 顺序)."""
+        from app.services import life_story
+        memories = [
+            {"summary": "我没养宠物", "main_category": "生活",
+             "sub_category": "宠物", "importance": 0.86},
+            {"summary": "我有一只博美犬", "main_category": "身份",
+             "sub_category": "宠物", "importance": 0.92},
+        ]
+        async def fake_invoke_json(_m, _p):
+            return {"contradictions": [{"a": 0, "b": 1, "reason": "宠物冲突"}]}
+        monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
+        monkeypatch.setattr(life_story, "get_utility_model", lambda: object())
+        async def fake_get_prompt_text(_key): return "{memory_list}"
+        monkeypatch.setattr(life_story, "get_prompt_text", fake_get_prompt_text)
+
+        result = await life_story._detect_and_resolve_contradictions(memories)
+        assert len(result) == 1
+        assert result[0]["summary"] == "我有一只博美犬"
+
+    @pytest.mark.asyncio
+    async def test_ignores_invalid_pairs(self, monkeypatch):
+        """LLM 输出包含无效 idx / 自反对 / 重叠 drop, 应安全跳过."""
+        from app.services import life_story
+        memories = [
+            {"summary": "a", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
+            {"summary": "b", "main_category": "身份", "sub_category": "姓名", "importance": 0.85},
+        ]
+        async def fake_invoke_json(_m, _p):
+            return {"contradictions": [
+                {"a": 0, "b": 99, "reason": "out of range"},
+                {"a": 1, "b": 1, "reason": "self"},
+                "not a dict",
+                {"a": 0, "b": 1, "reason": "valid"},
+                {"a": 0, "b": 1, "reason": "duplicate after drop"},
+            ]}
+        monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
+        monkeypatch.setattr(life_story, "get_utility_model", lambda: object())
+        async def fake_get_prompt_text(_key): return "{memory_list}"
+        monkeypatch.setattr(life_story, "get_prompt_text", fake_get_prompt_text)
+
+        result = await life_story._detect_and_resolve_contradictions(memories)
+        # Only the valid pair (0, 1) → drop b (importance 0.85).
+        assert len(result) == 1
+        assert result[0]["summary"] == "a"

@@ -43,6 +43,7 @@ class InitReport:
     direct_count: int = 0
     llm_count: int = 0
     dedupe_removed: int = 0
+    contradiction_removed: int = 0  # spec §1.4: LLM 一致性扫描丢掉的矛盾对数
     total_stored: int = 0
     distinct_subs: int = 0
     conditional_included: list[str] = field(default_factory=list)
@@ -84,8 +85,8 @@ async def init_report(agent_id: str, profile_id: str | None = None) -> AsyncIter
         logger.info(
             f"[InitReport] agent={agent_id} total={report.total_duration_ms()}ms "
             f"direct={report.direct_count} llm={report.llm_count} "
-            f"dedupe={report.dedupe_removed} stored={report.total_stored} "
-            f"subs={report.distinct_subs}"
+            f"dedupe={report.dedupe_removed} contra={report.contradiction_removed} "
+            f"stored={report.total_stored} subs={report.distinct_subs}"
         )
 
 

@@ -19,7 +19,8 @@ from collections import Counter
 
 from app.db import db, ensure_connected
 from app.redis_client import get_redis
-from app.services.llm.models import get_embedding_model
+from app.services.llm.models import get_embedding_model, get_utility_model, invoke_json
+from app.services.prompting.store import get_prompt_text
 from app.services.memory.demographics import (
     derive_constellation,
     derive_zodiac,
@@ -434,6 +435,63 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 # character.generation, 而非加 gap-fill 补丁。
 
 
+async def _detect_and_resolve_contradictions(memories: list[dict]) -> list[dict]:
+    """LLM 扫描全部 L1 记忆找语义矛盾对, drop 较低 importance 那条.
+
+    spec《背景信息》§1.4 要求 agent 创建期 L1 记忆内部一致. character.generation
+    单步 prompt 已加跨字段一致性硬约束 (rule 11), 这里是事后兜底:
+    - _embed_and_dedupe 只能抓向量近似 (similarity > 0.88) 的复述句, 抓不到
+      "养了糯米" vs "没养宠" 这类同主题相反立场 (相似度仅 0.6-0.7).
+    - 用 utility model 单次调用扫 80+ 条记忆, ~3K tokens / 5-10s, agent 创建
+      总耗时 60-180s 里可接受.
+
+    失败策略: LLM 调用失败、JSON 解析失败、返回空数组 → 跳过, 原样返回.
+    不阻塞 agent 创建.
+    """
+    if len(memories) < 2:
+        return memories
+
+    items = [{"id": i, "text": m["summary"]} for i, m in enumerate(memories)]
+    memory_list_json = json.dumps(items, ensure_ascii=False, indent=2)
+
+    try:
+        tpl = await get_prompt_text("memory.pairwise_contradiction")
+        prompt = tpl.format(memory_list=memory_list_json)
+        result = await invoke_json(get_utility_model(), prompt)
+    except Exception as e:
+        logger.warning(f"[CONTRA-SCAN] LLM call failed, skipping: {e}")
+        return memories
+
+    pairs = result.get("contradictions") if isinstance(result, dict) else None
+    if not isinstance(pairs, list) or not pairs:
+        return memories
+
+    # Drop the lower-importance side of each pair; on tie drop b. Defer drops by
+    # collecting indices first so a single memory caught in two pairs only logs once.
+    drop_ids: set[int] = set()
+    n = len(memories)
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        a, b = pair.get("a"), pair.get("b")
+        if not isinstance(a, int) or not isinstance(b, int):
+            continue
+        if not (0 <= a < n and 0 <= b < n) or a == b:
+            continue
+        if a in drop_ids or b in drop_ids:
+            continue
+        loser = b if memories[a]["importance"] >= memories[b]["importance"] else a
+        drop_ids.add(loser)
+        logger.info(
+            f"[CONTRA-SCAN] drop #{loser} ({memories[loser]['summary'][:40]!r}) "
+            f"vs #{a if loser == b else b} — {pair.get('reason', '')}"
+        )
+
+    if drop_ids:
+        logger.info(f"[CONTRA-SCAN] removed {len(drop_ids)} contradictory memories of {n}")
+    return [m for i, m in enumerate(memories) if i not in drop_ids]
+
+
 async def _embed_and_dedupe(memories: list[dict], intra_threshold: float = _DEDUPE_THRESHOLD) -> list[dict]:
     """同一 (main, sub) 内语义相似度 > threshold 合并, 保高 importance。
 
@@ -775,6 +833,15 @@ async def _run_l1_coverage(
             f"{ {m: dict(s) for m, s in gaps.items()} }. "
             f"调整 character.generation prompt 强化最小条数提示可减少缺口."
         )
+
+    # spec《背景信息》§1.4: 跨字段一致性兜底. character.generation prompt 已加
+    # 硬约束 (rule 11), 这里 LLM 二次扫描捕捉漏网矛盾对 (e.g. 身份/宠物 vs
+    # 生活/宠物). 失败回退原数据, 不阻塞.
+    await set_progress(agent_id, "consistency", message="正在校对人设一致性...")
+    pre_contra = len(memories)
+    with phase_timer(report, "phase1b_contradiction_scan"):
+        memories = await _detect_and_resolve_contradictions(memories)
+    report.contradiction_removed = pre_contra - len(memories)
 
     await set_progress(agent_id, "embedding", message="正在向量化与去重...")
     pre_dedupe = len(memories)

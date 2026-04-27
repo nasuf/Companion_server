@@ -42,6 +42,7 @@ from app.services.prompting.defaults import (
     MEMORY_CONTRADICTION_REPLY_PROMPT,
     MEMORY_EXTRACTION_AI_PROMPT,
     MEMORY_EXTRACTION_USER_PROMPT,
+    MEMORY_PAIRWISE_CONTRADICTION_PROMPT,
     MEMORY_RELEVANCE_PROMPT,
     PERSONALITY_RULES_PROMPT,
     PORTRAIT_GENERATION_PROMPT,
@@ -189,6 +190,11 @@ PROMPT_DEFINITIONS = [
         "memory.contradiction_reply", "矛盾回复", "交互矛盾", "记忆",
         "《记忆部分产品手册》§4.5: 用户解释后 AI 自然把话题拉回正轨.",
         MEMORY_CONTRADICTION_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "memory.pairwise_contradiction", "L1 一致性扫描", "交互矛盾", "记忆",
+        "《背景信息》§1.4: agent 创建期 L1 记忆两两扫描矛盾对, 自动 drop 低 importance 那条, 防止人设自相矛盾.",
+        MEMORY_PAIRWISE_CONTRADICTION_PROMPT,
     ),
 
     # ── 记忆: 删除 (Memory §5) ──
