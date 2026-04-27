@@ -112,7 +112,6 @@ async def list_users(
             {
                 "id": u.id,
                 "username": u.username,
-                "name": u.name,
                 "role": u.role,
                 "created_at": str(u.createdAt),
                 "status": getattr(u, "status", "active"),
