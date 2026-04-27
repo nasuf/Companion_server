@@ -532,8 +532,8 @@ async def batch_update_profile_status(
     body: ProfileBatchStatusRequest,
     _: str = Depends(require_admin_jwt),
 ):
-    """Batch update status for multiple profiles."""
-    if body.status not in ("draft", "published", "archived"):
+    """Batch update status for multiple profiles. 仅支持 draft / published 二态。"""
+    if body.status not in ("draft", "published"):
         raise HTTPException(status_code=400, detail="Invalid status")
     cnt = await db.execute_raw(
         'UPDATE "character_profiles" SET "status" = $1, "updated_at" = CURRENT_TIMESTAMP WHERE "id" = ANY($2::text[])',
@@ -544,17 +544,14 @@ async def batch_update_profile_status(
 
 
 @router.delete("/profiles/{profile_id}")
-async def archive_or_delete_profile(
+async def delete_profile(
     profile_id: str,
-    force: bool = False,
     _: str = Depends(require_admin_jwt),
 ):
-    """Soft-archive by default. Pass ?force=true to permanently delete."""
+    """物理删除 profile. 历史曾支持 ?force=false 走"软归档", 现在 status 简化
+    为 draft / published 二态, 不再有 archived → 永远走永久删除。"""
     p = await db.characterprofile.find_unique(where={"id": profile_id})
     if not p:
         raise HTTPException(status_code=404, detail="Profile not found")
-    if force:
-        await db.characterprofile.delete(where={"id": profile_id})
-        return {"ok": True, "action": "deleted"}
-    await db.characterprofile.update(where={"id": profile_id}, data={"status": "archived"})
-    return {"ok": True, "action": "archived"}
+    await db.characterprofile.delete(where={"id": profile_id})
+    return {"ok": True, "action": "deleted"}
