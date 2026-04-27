@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
+from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.proactive.emit import emit_proactive_message
@@ -472,13 +473,22 @@ async def send_first_greeting(
 
     # provisioning 期间不发: 此时 character profile / life_events / MBTI 衍生
     # 偏好都还没入库, _build_personality_brief 只能拿到 7 维基础值, LLM 写出来
-    # 的开场白不能反映完整人设. 等 provisioning 完成后前端会 remount App,
-    # WS 重连再次进入这里 (count 仍 0), 那时 agent.status=active 才正常发首句.
+    # 的开场白不能反映完整人设. agents.py 在 activate_agent 完成后会显式
+    # dispatch_first_greeting_for_agent 兜底触发, 不依赖前端 WS 重连
+    # (chatSocket 是 module-level singleton, App remount 不会重连 WS).
     if getattr(agent, "status", "active") != "active":
         logger.info(
-            f"first_greeting skipped: agent {agent_id[:8]} status="
-            f"{getattr(agent, 'status', '?')}, will retry on next ws reconnect"
+            f"first_greeting deferred: agent {agent_id[:8]} status="
+            f"{getattr(agent, 'status', '?')}, will fire after activate_agent"
         )
+        return False
+
+    # Redis SETNX 锁防止并发触发 (e.g. WS 重连 + post-active dispatch 同时进入).
+    # TTL 1 天足够覆盖 agent 的整个 onboarding, 不会因临时网络问题永久阻塞.
+    redis = await get_redis()
+    lock_key = f"first_greeting:fired:{conversation_id}"
+    if not await redis.set(lock_key, "1", nx=True, ex=86400):
+        logger.info(f"first_greeting skipped: lock held for conv={conversation_id[:8]}")
         return False
 
     try:
@@ -524,7 +534,42 @@ async def send_first_greeting(
         return True
     except Exception as e:
         logger.warning(f"send_first_greeting failed: {e}")
+        # 锁清掉, 让用户下次 WS 重连或 admin 手动 retry 还能再试.
+        try:
+            await redis.delete(lock_key)
+        except Exception:
+            pass
         return False
+
+
+async def dispatch_first_greeting_for_agent(*, agent_id: str, user_id: str) -> None:
+    """activate_agent 后兜底触发: 找该 agent 所有未删除会话, 对消息数=0 的发开场白.
+
+    解决前端 WS singleton 不会随 App remount 重连导致 send_first_greeting 永远
+    不被再次调用的问题. send_first_greeting 内部用 Redis SETNX 保证幂等.
+    """
+    try:
+        convs = await db.conversation.find_many(
+            where={"agentId": agent_id, "isDeleted": False},
+        )
+    except Exception as e:
+        logger.warning(f"dispatch_first_greeting_for_agent: list convs failed for {agent_id[:8]}: {e}")
+        return
+    for conv in convs:
+        # send_first_greeting 内部检查 message count > 0 → 跳过 (覆盖用户已开始
+        # 聊天的边界情况) + Redis SETNX 防并发. 这里只 fire-and-forget.
+        try:
+            await send_first_greeting(
+                conversation_id=conv.id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workspace_id=getattr(conv, "workspaceId", None),
+            )
+        except Exception as e:
+            logger.warning(
+                f"dispatch_first_greeting_for_agent: send failed for "
+                f"conv={conv.id[:8]} agent={agent_id[:8]}: {e}"
+            )
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -23,6 +23,7 @@ from app.services.life_story import (
     get_progress,
     set_progress,
 )
+from app.services.proactive.sender import dispatch_first_greeting_for_agent
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview,
     generate_daily_schedule,
@@ -249,6 +250,16 @@ async def create_agent(
         # 仍能返回 failed → 前端显示「请删除重建」UI (active 状态会被短路成 complete).
         if not memories_failed:
             await activate_agent(agent.id)
+            # provisioning 期间用户的 WS 已连上但 send_first_greeting 被 status
+            # gate 跳过. 前端 chatSocket 是 module-level singleton, App remount
+            # 不重连 WS — 因此必须由后端在转 active 后主动 dispatch, 否则
+            # 第一句话永远不会发. send_first_greeting 内有 Redis SETNX 幂等锁.
+            try:
+                await dispatch_first_greeting_for_agent(
+                    agent_id=agent.id, user_id=agent.userId,
+                )
+            except Exception as e:
+                logger.warning(f"first_greeting dispatch failed for agent {agent.id}: {e}")
 
     asyncio.create_task(_init_and_generate_story())
 
