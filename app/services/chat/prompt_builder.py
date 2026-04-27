@@ -244,6 +244,7 @@ async def build_system_prompt(
     time_context: str | None = None,
     time_memories: list[str] | None = None,
     l3_memories: list[str] | None = None,
+    ai_status: dict | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
     system_base = await get_prompt_text("chat.system_base")
@@ -314,6 +315,19 @@ async def build_system_prompt(
     # 5B.4: 耐心区间语气描述
     if patience_instruction:
         sections.append(_section("情绪状态提醒", patience_instruction))
+
+    # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 禁止主动展开,
+    # 防止 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动. 详见
+    # CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).
+    if ai_status:
+        activity = str(ai_status.get("activity", "")).strip()
+        status_label = str(ai_status.get("status", "idle")).strip()
+        if activity:
+            tpl = await get_prompt_text("chat.ai_state_constraint")
+            sections.append(_section(
+                "你的隐性状态约束",
+                tpl.format(activity=activity, status=status_label),
+            ))
 
     sections.append(_section("对话一致性", consistency_rules))
     sections.append(

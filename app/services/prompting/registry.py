@@ -16,6 +16,7 @@ from app.services.prompting.defaults import (
     BOUNDARY_FINAL_WARNING_PROMPT,
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
+    CHAT_AI_STATE_CONSTRAINT_PROMPT,
     CONSISTENCY_RULES_PROMPT,
     CURRENT_STATE_REPLY_PROMPT,
     DAILY_SCHEDULE_PROMPT,
@@ -117,6 +118,14 @@ PROMPT_DEFINITIONS = [
         "chat.consistency_rules", "对话一致性规则", "聊天热路径", "聊天",
         "【工程补丁】无字面 spec 章节. 防 LLM 重复提问 / 与上文矛盾 / 短情绪话立刻给大道理.",
         CONSISTENCY_RULES_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.ai_state_constraint", "AI 自洽性隐性约束", "聊天热路径", "聊天",
+        "【工程补丁】spec §4 不含 AI 当前作息, 但 ≥1min 延迟主回复路径下 LLM 可能编造"
+        "跟真实状态矛盾的活动 (e.g. AI 睡眠中却说\"刚去爬山\"). 这段以约束式注入:"
+        "告诉 LLM 状态但禁止主动展开, 避免跟 §3.4.3 询问当前状态分支撞主题. "
+        "占位符: {activity} {status}.",
+        CHAT_AI_STATE_CONSTRAINT_PROMPT,
     ),
 
     # ── 初始化 (背景生成) ──
