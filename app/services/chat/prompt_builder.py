@@ -14,7 +14,6 @@ from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti, signal as mbti_signal
 from app.services.prompts.system_prompts import (
-    MEMORY_TOKEN_BUDGET,
     MAX_PER_REPLY as _MAX_PER_REPLY,
     MAX_TOTAL_CHARS as _MAX_TOTAL_CHARS,
     CHAT_HISTORY_TOKEN_BUDGET,
@@ -111,7 +110,12 @@ async def _build_emotion_section(
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
 ) -> str | None:
-    """Spec §4 汇总参考信息：用户PAD值 + 关系阶段（不含 AI PAD — spec 把 AI PAD 限定在 §5.3/§5.4/§6.2 装饰/时机决策）。"""
+    """Spec §4 汇总参考信息：用户PAD值 + 关系阶段（不含 AI PAD — spec 把 AI PAD
+    限定在 §5.3/§5.4/§6.2 装饰/时机决策）。
+
+    PAD 数值本身已是足够暗示, 早期版本曾追加 chat.emotion_instruction "让情绪
+    影响语气" 的明示指令, 后审计为工程冗余删除——现代 LLM 看到 PAD 值会自然反应.
+    """
     if not user_emotion and not intimacy_stage:
         return None
 
@@ -128,8 +132,6 @@ async def _build_emotion_section(
     if intimacy_stage:
         parts.append(f"你们目前的关系是{intimacy_stage}。")
 
-    emotion_instruction = await get_prompt_text("chat.emotion_instruction")
-    parts.append(emotion_instruction)
     return _section("当前情绪", "\n".join(parts))
 
 
@@ -167,11 +169,11 @@ async def _build_memory_section(memories: list | None) -> str | None:
             all_texts.append(m)
 
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(all_texts, 1))
-    memory_instruction = await get_prompt_text("chat.memory_instruction")
+    # 早期版本拼了 chat.memory_instruction "(记忆上下文预算: 约 N tokens...)"
+    # 元注释, 审计后删除——LLM 看到 token 数字也不改变行为, 是无效占位.
     body = (
         "以下是你记忆中与当前话题相关的事实。回答用户时必须与这些记忆保持一致，不得编造与之矛盾的信息。\n\n"
-        f"{numbered}\n\n"
-        f"{memory_instruction.format(budget=MEMORY_TOKEN_BUDGET)}"
+        f"{numbered}"
     )
     return _section("你记得的事情", body)
 

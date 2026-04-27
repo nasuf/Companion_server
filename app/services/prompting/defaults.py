@@ -37,9 +37,12 @@ CONSISTENCY_RULES_PROMPT = (
     "如果对方只说了很短的一句情绪话，不要立刻给一整套大道理。"
 )
 
-EMOTION_INSTRUCTION_PROMPT = "让当前的情绪状态自然地影响你的语气和用词。"
-
-MEMORY_INSTRUCTION_PROMPT = "(记忆上下文预算：约{budget} tokens，只包含最相关的记忆。)"
+# Plan B 之后已删除:
+#   EMOTION_INSTRUCTION_PROMPT  (chat.emotion_instruction)  — 单句"让情绪影响
+#       语气", PAD 数值已是足够暗示, 这句对现代 LLM 几乎无影响
+#   MEMORY_INSTRUCTION_PROMPT   (chat.memory_instruction)   — token budget 注释,
+#       LLM 看到数字也不会改变行为, 浪费上下文 token
+# spec §4 (日常交流) 仅要求注入 PAD/关系阶段数据本身, 不要求加这两句明示.
 
 _MEMORY_EXTRACTION_COMMON_TAIL = """记忆分类必须严格遵守以下体系（L1 全集）：
 
