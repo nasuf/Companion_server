@@ -284,7 +284,7 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     if (v := _clean_text(identity.get("ethnicity"))):
         _add(memories, f"我是{v}", "身份", "民族", "identity", 0.85)
     if (v := _clean_text(identity.get("blood_type"))):
-        _add(memories, f"我是{v}血", "身份", "血型", "identity", 0.80)
+        _add(memories, f"我是{v}血", "身份", "血型", "identity", 0.85)
     # 亲属关系 / 社会关系 / 宠物：LLM schema 要求每条都是"事实/描述"完整句,
     # 不再加 "家人:" / "我的社会关系:" 等冗余前缀 (前缀已在 sub_category 里,
     # 嵌入和检索都不需要重复, 还会让 AI 复述时带颗粒).
@@ -300,12 +300,12 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     # ── 身份: 外貌特征 —— height/weight 是单值 (e.g. "168cm" / "匀称"), 用 "是"
     # 连词组成完整句; features/style/voice 已是完整描述句, 直接入库.
     if (v := _clean_text(appearance.get("height"))):
-        _add(memories, f"我的身高是{v}", "身份", "外貌特征", "identity", 0.78)
+        _add(memories, f"我的身高是{v}", "身份", "外貌特征", "identity", 0.86)
     if (v := _clean_text(appearance.get("weight"))):
-        _add(memories, f"我的体型是{v}", "身份", "外貌特征", "identity", 0.78)
+        _add(memories, f"我的体型是{v}", "身份", "外貌特征", "identity", 0.86)
     for key in ("features", "style", "voice"):
         for item in _as_list(appearance.get(key)):
-            _add(memories, item, "身份", "外貌特征", "identity", 0.78)
+            _add(memories, item, "身份", "外貌特征", "identity", 0.86)
 
     # ── 身份: 教育背景 (degree 每条已含学历/学校/时间线, 无需前缀) ──
     for item in _as_list(edu.get("degree")):
@@ -313,11 +313,11 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 
     # ── 生活: 技能 —— 知识擅长 + 自学 每项一条 ──
     for item in _as_list(edu.get("strengths")):
-        _add(memories, f"我擅长{item}相关的知识", "生活", "技能", "life", 0.80)
+        _add(memories, f"我擅长{item}相关的知识", "生活", "技能", "life", 0.87)
     for item in _as_list(edu.get("self_taught")):
-        _add(memories, f"我自学过{item}", "生活", "技能", "life", 0.78)
+        _add(memories, f"我自学过{item}", "生活", "技能", "life", 0.86)
     for item in _as_list(abilities.get("good_at")):
-        _add(memories, f"我擅长{item}", "生活", "技能", "life", 0.80)
+        _add(memories, f"我擅长{item}", "生活", "技能", "life", 0.87)
 
     # ── 职业: 优先 career_template, 回退 profile_data.career ──
     ct = career_template
@@ -332,50 +332,50 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
             _add(memories, f"我的工作是{v}", "生活", "工作", "life", 0.88)
         # clients 是 tag 数组 — 每项一条工作相关记忆
         for client in _as_list(ct.get("clients")):
-            _add(memories, f"我的服务对象包括{client}", "生活", "工作", "life", 0.78)
+            _add(memories, f"我的服务对象包括{client}", "生活", "工作", "life", 0.86)
         if (v := _clean_text(ct.get("social_value") or ct.get("socialValue"))):
-            _add(memories, f"我做这份工作的意义在于{v}", "生活", "工作", "life", 0.78)
+            _add(memories, f"我做这份工作的意义在于{v}", "生活", "工作", "life", 0.86)
 
     for key, sub, prefix in _LIKES_TO_SUB:
         for item in _as_list(likes.get(key)):
-            _add(memories, f"我{prefix}{item}", "偏好", sub, "preference", 0.73)
+            _add(memories, f"我{prefix}{item}", "偏好", sub, "preference", 0.86)
     # 小癖好 (quirks "每条一句", 已是完整描述, 不加前缀).
     for item in _as_list(likes.get("quirks")):
-        _add(memories, item, "偏好", "生活习惯", "preference", 0.75)
+        _add(memories, item, "偏好", "生活习惯", "preference", 0.86)
 
     # ── 偏好: dislikes 每项一条 ──
     for item in _as_list(dislikes.get("foods")):
-        _add(memories, f"我讨厌吃{item}", "偏好", "饮食厌恶", "preference", 0.78)
+        _add(memories, f"我讨厌吃{item}", "偏好", "饮食厌恶", "preference", 0.86)
     for item in _as_list(dislikes.get("sounds")):
-        _add(memories, f"我讨厌{item}这种声音", "偏好", "审美厌恶", "preference", 0.75)
+        _add(memories, f"我讨厌{item}这种声音", "偏好", "审美厌恶", "preference", 0.86)
     for item in _as_list(dislikes.get("smells")):
-        _add(memories, f"我讨厌{item}的气味", "偏好", "审美厌恶", "preference", 0.75)
+        _add(memories, f"我讨厌{item}的气味", "偏好", "审美厌恶", "preference", 0.86)
     for item in _as_list(dislikes.get("habits")):
-        _add(memories, f"我讨厌别人{item}", "偏好", "审美厌恶", "preference", 0.75)
+        _add(memories, f"我讨厌别人{item}", "偏好", "审美厌恶", "preference", 0.86)
 
     # ── 偏好: 人际偏好 (item 是特质/行为短语, 用动词连接避免 "的人的人" 重叠) ──
     for item in _as_list(interpersonal.get("liked_traits")):
-        _add(memories, f"我欣赏{item}", "偏好", "人际喜好", "preference", 0.78)
+        _add(memories, f"我欣赏{item}", "偏好", "人际喜好", "preference", 0.87)
     for item in _as_list(interpersonal.get("disliked_traits")):
-        _add(memories, f"我反感{item}", "偏好", "人际厌恶", "preference", 0.78)
+        _add(memories, f"我反感{item}", "偏好", "人际厌恶", "preference", 0.87)
 
     # ── 偏好: 生活习惯 (routine/hygiene/leisure 已是描述句, 不加前缀) ──
     for key in ("routine", "hygiene", "leisure"):
         for item in _as_list(lifestyle.get(key)):
-            _add(memories, item, "偏好", "生活习惯", "preference", 0.80)
+            _add(memories, item, "偏好", "生活习惯", "preference", 0.88)
 
     # ── 偏好: 禁忌/雷区 (taboo "不可触碰的底线" 已自带语义) ──
     for item in _as_list(taboo.get("items")):
-        _add(memories, item, "偏好", "禁忌/雷区", "preference", 0.88)
+        _add(memories, item, "偏好", "禁忌/雷区", "preference", 0.93)
     for item in _as_list(abilities.get("never_do")):
-        _add(memories, f"我绝对不会{item}", "偏好", "禁忌/雷区", "preference", 0.88)
+        _add(memories, f"我绝对不会{item}", "偏好", "禁忌/雷区", "preference", 0.93)
     # 旧 schema fears 兼容: 历史 profile_data 仍含 fears 分类时, 仍能转记忆
     for item in _as_list(fears.get("animals")):
-        _add(memories, f"我害怕{item}", "偏好", "禁忌/雷区", "preference", 0.85)
+        _add(memories, f"我害怕{item}", "偏好", "禁忌/雷区", "preference", 0.88)
     for item in _as_list(fears.get("objects")):
-        _add(memories, f"我害怕{item}", "偏好", "禁忌/雷区", "preference", 0.82)
+        _add(memories, f"我害怕{item}", "偏好", "禁忌/雷区", "preference", 0.86)
     for item in _as_list(fears.get("atmospheres")):
-        _add(memories, f"我害怕{item}的氛围", "偏好", "禁忌/雷区", "preference", 0.82)
+        _add(memories, f"我害怕{item}的氛围", "偏好", "禁忌/雷区", "preference", 0.86)
 
     # ── 思维: 价值观 / 世界观 / 理想与目标 / 人际关系观 / 社会观点 / 信仰 / 自我认知 ──
     # 所有字段都是 list, schema 要求"每条 X" — 已是完整观点/陈述句, 不重复加
@@ -399,15 +399,17 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for item in _as_list(abilities.get("limits")):
         _add(memories, item, "思维", "自我认知", "thought", 0.88)
 
-    # ── 生活: life_events 11 字段, 每个 tag 元素 → 1 条 L2 记忆 + 合理 occur_time ──
+    # ── 生活: life_events 11 字段, 每条 50-100 字"深远的事/关键节点" + occur_time ──
+    # spec §1.4: agent 创建期生成的记忆全部入 L1, 故 importance ≥ 0.85. 比纯偏好
+    # 略低 (经历型 vs 身份型), 给 0.85 让 retrieval 时仍能与日常记忆匹配上.
     for field_key, sub in _LIFE_EVENT_SUB_MAP.items():
         scenes = _as_list(life_events.get(field_key))
         time_range = _LIFE_EVENT_TIME_RANGE.get(field_key, (0.5, 10.0))
         for scene in scenes:
             occur = _random_past_time(*time_range)
-            _add(memories, scene, "生活", sub, "life", 0.65, occur_time=occur)
+            _add(memories, scene, "生活", sub, "life", 0.85, occur_time=occur)
 
-    # ── 情绪: emotion_events 15 字段, 每个 tag 元素 → 1 条 L2 记忆 + 全生命周期随机 ──
+    # ── 情绪: emotion_events 15 字段, 每条 50-100 字 + 全生命周期随机 occur_time ──
     try:
         agent_age = int(identity.get("age", 25))
     except (ValueError, TypeError):
@@ -417,7 +419,7 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         scenes = _as_list(emotion_events.get(field_key))
         for scene in scenes:
             occur = _random_past_time(0.5, emotion_max_years)
-            _add(memories, scene, "情绪", sub, "emotion", 0.65, occur_time=occur)
+            _add(memories, scene, "情绪", sub, "emotion", 0.85, occur_time=occur)
 
     return memories
 
@@ -594,13 +596,17 @@ async def store_memories_batch(
             source="ai",
             level=1,
         )
+        # spec §1.4: agent 创建期所有记忆都入 L1, importance ∈ [0.85, 1.0].
+        # convert_profile_to_memories 内已按 spec 给出 ≥0.85 的分数, 这里 clamp
+        # 仅作防御 (新加字段忘记调权重时仍守住 spec invariant).
+        importance = max(0.85, float(mem.get("importance", 0.85)))
         row = {
             "id": mid,
             "userId": user_id,
             "content": summary,
             "summary": summary,
             "level": 1,
-            "importance": float(mem.get("importance", 0.85)),
+            "importance": importance,
             "type": mem_type,
             "mainCategory": taxonomy.main_category,
             "subCategory": taxonomy.sub_category,
@@ -746,7 +752,7 @@ async def _run_l1_coverage(
         if ("身份", "民族") not in existing_subs:
             memories.append({"summary": f"我是{sample_ethnicity(agent_id)}",
                             "main_category": "身份", "sub_category": "民族",
-                            "type": "identity", "importance": 0.80})
+                            "type": "identity", "importance": 0.85})
 
     conditional_include = analyze_conditional_subs(profile)
     report.direct_count = len(memories)
