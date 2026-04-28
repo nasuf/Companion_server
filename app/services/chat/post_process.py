@@ -26,6 +26,7 @@ from app.services.interaction.boundary import check_positive_recovery
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.memory.recording.watermark import get_watermark, set_watermark
 from app.services.relationship.emotion import save_ai_emotion
+from app.services.runtime.ws_manager import manager
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
     detect_direct_feedback,
@@ -110,6 +111,9 @@ async def _bg_memory_pipeline(
     conversation_id 为 None 时退化回老行为 (无水位线, 全部当新消息抽), 兼容
     proactive sender 等无会话上下文的入口. 每条 msg 必须含 createdAt (ISO) 才能
     参与水位线切分, 没有则归为新消息.
+
+    抽取完成后, 若有 conversation_id 且确有新记忆入库, 通过 WS 推
+    `memory_extracted` 让 admin inspector 实时刷新 (前端按当前 filter 重拉).
     """
     try:
         recent = messages[-6:]
@@ -125,8 +129,16 @@ async def _bg_memory_pipeline(
             for side, role in sides_to_run
             if role in roles
         ]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=False)
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        total = sum(results)
+        if total > 0 and conversation_id:
+            await manager.send_event(
+                conversation_id,
+                "memory_extracted",
+                {"count": total},
+            )
     except Exception as e:
         logger.error(f"Background memory pipeline failed: {e}")
 
@@ -137,8 +149,9 @@ async def _pipeline_with_watermark(
     conversation_id: str | None,
     *,
     side: Literal["user", "ai"],
-) -> None:
-    """按 (conversation_id, side) 水位线切分 recent, 调用 extraction pipeline."""
+) -> int:
+    """按 (conversation_id, side) 水位线切分 recent, 调用 extraction pipeline.
+    返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件)."""
     wm = await get_watermark(conversation_id, side) if conversation_id else None
 
     # 单次扫描: 解析 ts, 判定 new/context, 同步收集 side 最大 ts.
@@ -159,9 +172,9 @@ async def _pipeline_with_watermark(
                 max_side_ts = effective
 
     if max_side_ts is None:
-        return  # 该 side 无新消息, 跳过 LLM
+        return 0  # 该 side 无新消息, 跳过 LLM
 
-    await process_memory_pipeline(
+    stored_ids = await process_memory_pipeline(
         user_id=user_id,
         new_conversation=_fmt_conversation(new_msgs),
         context_conversation=_fmt_conversation(context_msgs),
@@ -171,6 +184,8 @@ async def _pipeline_with_watermark(
     # 防时钟回退: 仅当新候选 > wm 才推进
     if conversation_id and (wm is None or max_side_ts > wm):
         await set_watermark(conversation_id, side, max_side_ts)
+
+    return len(stored_ids)
 
 
 def _parse_ts(m: dict) -> datetime | None:
