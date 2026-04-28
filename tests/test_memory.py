@@ -135,7 +135,7 @@ class TestIsDuplicate:
             assert await is_duplicate("user1", "test", [0.1]) is True
 
     async def test_below_threshold_not_duplicate(self):
-        results = [{"similarity": 0.85}]
+        results = [{"similarity": 0.80}]
         with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is False
 
@@ -151,4 +151,4 @@ class TestIsDuplicate:
 
 
 def test_dedup_threshold_value():
-    assert DEDUP_THRESHOLD == 0.9
+    assert DEDUP_THRESHOLD == 0.85
