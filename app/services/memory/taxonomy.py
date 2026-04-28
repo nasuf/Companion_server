@@ -267,13 +267,10 @@ _THOUGHT_L1: tuple[str, ...] = (
     "人际关系观", "社会观点", "自我认知", "信仰/寄托", "其他",
 )
 
-# L2/L3 思维 strips "其他" — spec requires the strict 8-member set.
-# An extraction that can't fit into one of these 8 should be refused
-# rather than silently collapsed to "其他".
-_THOUGHT_L23: tuple[str, ...] = (
-    "人生观", "价值观", "世界观", "理想与目标",
-    "人际关系观", "社会观点", "自我认知", "信仰/寄托",
-)
+# L2/L3 思维 与 L1 共用同一份 schema. 之前 strict 8 项 (无"其他") 是工程层
+# over-spec 引入的洁癖, spec 没要求 L2/L3 思维必须是成熟意识形态; 实际后果
+# 是同一份 LLM 输出 L1 能进、importance 落 L3 时被静默拒收, 数据丢失.
+_THOUGHT_L23: tuple[str, ...] = _THOUGHT_L1
 
 # Per-(owner, level) matrix.
 # An EMPTY tuple means memories of that (owner, level, main) are NOT allowed
@@ -297,12 +294,13 @@ TAXONOMY_MATRIX: dict[Source, dict[int, dict[str, tuple[str, ...]]]] = {
             "思维": _THOUGHT_L23,
         },
         3: {
-            # L3 身份 strict — no 其他 per spec (only 社会关系/变化).
-            "身份": ("社会关系", "变化"),
+            # L3 身份: 加 "其他" 兜底, 防止 L1 降级到 L3 时 sub_category 不在
+            # ("社会关系", "变化") 二选一里被静默拒收. spec 没要求 L3 身份必须
+            # 是这两类之一.
+            "身份": ("社会关系", "变化", "其他"),
             "偏好": _PREFERENCE_L23,
             "生活": ("闲聊",) + _LIFE_BASE,
             "情绪": _EMOTION_FULL,
-            # L3 思维 strict — no 其他 per spec.
             "思维": _THOUGHT_L23,
         },
     },

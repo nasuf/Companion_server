@@ -21,6 +21,32 @@ def test_resolve_taxonomy_refuses_unknown_main_category():
     assert result.allowed is False
 
 
+@pytest.mark.parametrize("level", [1, 2, 3])
+def test_thought_freeform_sub_falls_back_at_all_levels(level):
+    """L1/L2/L3 思维 必须共用同一份 schema (含'其他'兜底).
+
+    回归测试: 之前 L2/L3 砍掉'其他' → LLM 自由文本 sub_category 在 L1 能进
+    但 importance 落 L2/L3 时被静默拒收 (bug 3). 现在三层级一致, 不该再丢.
+    """
+    r = resolve_taxonomy(
+        main_category="思维", sub_category="好奇心",
+        source="user", level=level,
+    )
+    assert r.allowed is True
+    assert r.main_category == "思维"
+    assert r.sub_category == "其他"
+
+
+def test_l3_identity_freeform_sub_falls_back():
+    """L3 身份 加'其他'兜底, 之前仅 ('社会关系','变化') 二选一会拒收."""
+    r = resolve_taxonomy(
+        main_category="身份", sub_category="姓名",
+        source="user", level=3,
+    )
+    assert r.allowed is True
+    assert r.sub_category == "其他"
+
+
 def test_summarize_batch_taxonomy_picks_majority():
     items = [
         _MemoryStub("身份", "姓名"),
