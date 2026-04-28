@@ -110,6 +110,7 @@ from app.api.admin.career import router as admin_career_router
 from app.api.admin.agents import router as admin_agents_router
 from app.api.public.traces import router as traces_router
 from app.api.admin.bug_reports import router as admin_bug_reports_router
+from app.api.admin.stats import router as admin_stats_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -130,3 +131,4 @@ app.include_router(admin_career_router)
 app.include_router(admin_agents_router)
 app.include_router(traces_router)
 app.include_router(admin_bug_reports_router)
+app.include_router(admin_stats_router)

@@ -610,3 +610,25 @@ model Holiday {
   @@index([source])
   @@map("holidays")
 }
+
+// 每条 chat 请求结束时写一行的 token 用量明细. 跟 message_traces 解耦 —
+// 后者是 lazy 写 (用户点 Trace 才落库), 这张表是热路径强写, 用于后台统计概览.
+model LlmUsage {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  agentId        String?  @map("agent_id")
+  userId         String?  @map("user_id")
+  // 关联到 message_traces (nullable, 不外键, 避免删 trace 级联到 usage 历史)
+  traceId        String?  @map("trace_id")
+  inputTokens    Int      @map("input_tokens")
+  outputTokens   Int      @map("output_tokens")
+  // {"qwen3.5-flash": {"input": 1200, "output": 80}, "qwen3.5-plus": {...}}
+  tokensByModel  Json     @map("tokens_by_model")
+  costCny        Float    @map("cost_cny")
+  callCount      Int      @map("call_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("llm_usage")
+}

@@ -386,6 +386,8 @@ async def astream_with_resilience(
     profile: CallProfile,
     op: str,
     fallback_factory: Callable[[], AsyncIterator[Any]] | None = None,
+    primary_model_name: str = "",
+    fallback_model_name: str = "",
 ) -> AsyncIterator[str]:
     """Stream LLM output, yield text tokens.
 
@@ -406,6 +408,7 @@ async def astream_with_resilience(
             provider=primary_provider,
             profile=profile,
             op=op,
+            model_name=primary_model_name,
         ):
             got_first_chunk = True
             yield token
@@ -423,6 +426,7 @@ async def astream_with_resilience(
     try:
         async for token in _stream_provider(
             fallback_factory, provider="ollama", profile=profile, op=f"{op}:fallback",
+            model_name=fallback_model_name,
         ):
             yield token
     except LLMFailedError as fallback_exc:
@@ -439,6 +443,8 @@ async def collect_stream(
     profile: CallProfile,
     op: str,
     fallback_factory: Callable[[], AsyncIterator[Any]] | None = None,
+    primary_model_name: str = "",
+    fallback_model_name: str = "",
 ) -> str:
     """累积 astream_with_resilience 的全部 token 成单一字符串.
 
@@ -453,10 +459,34 @@ async def collect_stream(
         profile=profile,
         op=op,
         fallback_factory=fallback_factory,
+        primary_model_name=primary_model_name,
+        fallback_model_name=fallback_model_name,
     ):
         if token:
             chunks.append(token)
     return "".join(chunks)
+
+
+def _capture_chunk_usage(chunk: Any, last_usage: dict) -> None:
+    """langchain stream chunks 末尾 chunk 通常带 usage_metadata; 在迭代时
+    每见到一次就覆盖 last_usage, 流结束后取最后一个非空值. 调用方把这个
+    dict 在 finally 里 record 给 usage_tracker."""
+    meta = getattr(chunk, "usage_metadata", None)
+    if isinstance(meta, dict) and (meta.get("input_tokens") or meta.get("output_tokens")):
+        last_usage["input_tokens"] = int(meta.get("input_tokens", 0) or 0)
+        last_usage["output_tokens"] = int(meta.get("output_tokens", 0) or 0)
+
+
+def _flush_stream_usage(last_usage: dict, model_name: str) -> None:
+    """流结束/异常时记一次 usage_tracker. 没拿到 usage 或没 model_name 则跳过."""
+    if not last_usage or not model_name:
+        return
+    from app.services.llm import usage_tracker
+    usage_tracker.record(
+        model_name,
+        last_usage.get("input_tokens", 0),
+        last_usage.get("output_tokens", 0),
+    )
 
 
 async def _stream_provider(
@@ -465,15 +495,22 @@ async def _stream_provider(
     provider: str,
     profile: CallProfile,
     op: str,
+    model_name: str = "",
 ) -> AsyncIterator[str]:
     """在单一 provider 上跑 stream; 管理 first_chunk_timeout 和总 timeout + CB."""
+    last_usage: dict = {}
+
     if not settings.llm_resilience_enabled:
         started = time.monotonic()
-        async for chunk in factory():
-            # 仅尊重总 timeout (killswitch 场景保留基本防卡)
-            if time.monotonic() - started > profile.timeout_s:
-                raise LLMFailedError(f"{op} on {provider}: exceeded overall timeout (killswitch mode)")
-            yield _chunk_text(chunk)
+        try:
+            async for chunk in factory():
+                # 仅尊重总 timeout (killswitch 场景保留基本防卡)
+                if time.monotonic() - started > profile.timeout_s:
+                    raise LLMFailedError(f"{op} on {provider}: exceeded overall timeout (killswitch mode)")
+                _capture_chunk_usage(chunk, last_usage)
+                yield _chunk_text(chunk)
+        finally:
+            _flush_stream_usage(last_usage, model_name)
         return
 
     breaker = _get_breaker(provider)
@@ -508,6 +545,7 @@ async def _stream_provider(
         await _safe_close()
         raise LLMFailedError(f"stream no first chunk on {provider}: {e}") from e
 
+    _capture_chunk_usage(first, last_usage)
     yield _chunk_text(first)
     deadline = started + profile.timeout_s
     # idle 超时: chunk 间最大允许停顿. None → 沿用 first_chunk_timeout_s
@@ -536,6 +574,7 @@ async def _stream_provider(
                              started=started)
                 await _safe_close()
                 raise LLMFailedError(f"stream exceeded overall {profile.timeout_s}s on {provider}")
+            _capture_chunk_usage(chunk, last_usage)
             yield _chunk_text(chunk)
         breaker.record_success()
         _log_attempt(provider=provider, op=op, result="ok", started=started)
@@ -547,6 +586,8 @@ async def _stream_provider(
                      started=started, exc=e)
         await _safe_close()
         raise LLMFailedError(f"stream mid error on {provider}: {e}") from e
+    finally:
+        _flush_stream_usage(last_usage, model_name)
 
 
 def _chunk_text(chunk: Any) -> str:

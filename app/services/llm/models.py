@@ -74,6 +74,10 @@ def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
         # 末尾字段 (life_events.special / emotion_events.relieved 等).
         # 普通聊天回复 <500 tokens, 不受影响.
         max_tokens=8192,
+        # OpenAI-compatible 流式默认不带 usage; 显式开 include_usage 让末
+        # chunk 带 token_usage. 必须开, 否则统计概览看不到 stream 模型
+        # (qwen3.5-plus 主回复) 的输入/输出 token.
+        stream_usage=True,
         extra_body={"enable_thinking": settings.dashscope_enable_thinking},
     )
 
@@ -379,8 +383,10 @@ async def _invoke_via_stream(
         return model.astream(messages, **kwargs)
 
     fallback_factory = None
+    fb_model_name = ""
     if provider != "ollama" and profile.allow_ollama_fallback:
         _fb_model = get_fallback_chat_model()
+        fb_model_name = _resolve_model_name(_fb_model)
         fb_kwargs = {**kwargs}
         if force_json:
             fb_kwargs.setdefault("format", "json")
@@ -395,6 +401,8 @@ async def _invoke_via_stream(
         profile=profile,
         op=op,
         fallback_factory=fallback_factory,
+        primary_model_name=_resolve_model_name(model),
+        fallback_model_name=fb_model_name,
     )
     return AIMessage(content=text)
 
@@ -407,6 +415,28 @@ async def invoke_json(
     """Invoke the model and parse the response as JSON."""
     parsed, _ = await invoke_json_with_usage(model, prompt, **kwargs)
     return parsed
+
+
+def _resolve_model_name(model: BaseChatModel) -> str:
+    """Best-effort model name from a langchain BaseChatModel; e.g. "qwen3.5-flash"."""
+    for attr in ("model_name", "model", "model_id"):
+        v = getattr(model, attr, None)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
+    """提取 response.usage_metadata 并 record 到当前 chat session, 返回 usage dict."""
+    from app.services.llm import usage_tracker
+
+    meta = getattr(response, "usage_metadata", None)
+    if not isinstance(meta, dict):
+        return {}
+    input_tok = int(meta.get("input_tokens", 0) or 0)
+    output_tok = int(meta.get("output_tokens", 0) or 0)
+    usage_tracker.record(_resolve_model_name(model), input_tok, output_tok)
+    return {"input_tokens": input_tok, "output_tokens": output_tok}
 
 
 async def invoke_json_with_usage(
@@ -423,13 +453,7 @@ async def invoke_json_with_usage(
     response = await _invoke_with_resilience(
         model, prompt, op="invoke_json", force_json=True, **kwargs,
     )
-    usage: dict = {}
-    meta = getattr(response, "usage_metadata", None)
-    if isinstance(meta, dict):
-        usage = {
-            "input_tokens": int(meta.get("input_tokens", 0) or 0),
-            "output_tokens": int(meta.get("output_tokens", 0) or 0),
-        }
+    usage = _record_usage_from_response(model, response)
     return _extract_json(response.content), usage
 
 
@@ -446,4 +470,5 @@ async def invoke_text(
     response = await _invoke_with_resilience(
         model, prompt, op="invoke_text", force_json=False, **kwargs,
     )
+    _record_usage_from_response(model, response)
     return response.content
