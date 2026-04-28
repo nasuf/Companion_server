@@ -81,6 +81,34 @@ async def create_bug_report(
     return _serialize(report)
 
 
+@router.get("/counts-by-agent")
+async def bug_report_counts_by_agent(_: dict = Depends(require_admin_jwt)):
+    """Return per-agent bug report counts for the admin agent list badge.
+
+    左外连 conversations 而非按 user — 一条 bug 通过 message → conversation
+    锚到 agent. 用户可能跨多个 agent 各自有 bug, 必须按 agent 维度切.
+    """
+    rows = await db.query_raw(
+        """
+        SELECT c.agent_id AS agent_id,
+               COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE br.status = 'open') AS open_count
+        FROM bug_reports br
+        JOIN messages m ON m.id = br.message_id
+        JOIN conversations c ON c.id = m.conversation_id
+        GROUP BY c.agent_id
+        """
+    )
+    return [
+        {
+            "agent_id": r["agent_id"],
+            "total": int(r["total"]),
+            "open": int(r["open_count"]),
+        }
+        for r in rows
+    ]
+
+
 @router.get("/by-conversation/{conversation_id}")
 async def list_bug_reports_by_conversation(
     conversation_id: str,
