@@ -362,30 +362,37 @@ async def send_special_date_proactive(
         logger.warning(f"Special date prompt format failed key={prompt_key}: {e}")
         return False
 
-    model = get_chat_model()
-    message = (await invoke_text(model, prompt)).strip()
-    if not message or len(message) < 4:
-        return False
+    from app.services.llm.usage_tracker import traced_usage_session
+    async with traced_usage_session(
+        name="[proactive:special_date]",
+        scope="proactive", conversation_id=conversation_id,
+        agent_id=agent_id, user_id=user_id,
+    ) as tracer:
+        model = get_chat_model()
+        message = (await invoke_text(model, prompt)).strip()
+        if not message or len(message) < 4:
+            return False
 
-    await emit_proactive_message(
-        conversation_id=conversation_id,
-        user_id=user_id,
-        agent_id=agent_id,
-        workspace_id=workspace_id,
-        message=message,
-        trigger_type="special_date",
-        skip_post_process=True,  # spec §10.4 不经过回复加工
-        extra_metadata={
-            "occasions": [
-                {"type": o.type, "name": o.name, "owner": o.owner}
-                for o in occasions
-            ],
-        },
-        ws_payload_extra={"occasions": [o.type for o in occasions]},
-    )
-    await increment_proactive_count(agent_id, user_id)
-    await increment_proactive_2day_count(agent_id, user_id)
-    return True
+        await emit_proactive_message(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            message=message,
+            trigger_type="special_date",
+            skip_post_process=True,  # spec §10.4 不经过回复加工
+            extra_metadata={
+                "occasions": [
+                    {"type": o.type, "name": o.name, "owner": o.owner}
+                    for o in occasions
+                ],
+            },
+            ws_payload_extra={"occasions": [o.type for o in occasions]},
+            trace_id=tracer.safe_trace_id,
+        )
+        await increment_proactive_count(agent_id, user_id)
+        await increment_proactive_2day_count(agent_id, user_id)
+        return True
 
 
 # ── 每日扫描入口 ──

@@ -8,7 +8,7 @@ from prisma import Json
 
 from app.db import db
 from app.services.llm.pricing import estimate_cost_cny
-from app.services.llm.usage_tracker import UsageSummary
+from app.services.llm.usage_tracker import UsageScope, UsageSummary
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +23,17 @@ def _total_cost_cny(tokens_by_model: dict) -> float:
 async def write_usage_row(
     *,
     summary: UsageSummary,
-    conversation_id: str,
+    conversation_id: str | None,
     agent_id: str | None,
     user_id: str | None,
     trace_id: str | None,
+    scope: UsageScope = "chat",
 ) -> None:
     cost = _total_cost_cny(summary["tokens_by_model"])
     try:
         await db.llmusage.create(
             data={
+                "scope": scope,
                 "conversationId": conversation_id,
                 "agentId": agent_id,
                 "userId": user_id,
@@ -44,7 +46,8 @@ async def write_usage_row(
             }
         )
     except Exception as e:
+        conv_label = (conversation_id or scope)[:16]
         logger.warning(
-            f"[llm-usage] write failed conv={conversation_id[:8]} "
+            f"[llm-usage] write failed scope={scope} conv={conv_label} "
             f"agent={(agent_id or '?')[:8]} cost=¥{cost:.6f}: {e}"
         )

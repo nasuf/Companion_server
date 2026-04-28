@@ -67,6 +67,11 @@ class LangSmithTracer:
     def is_active(self) -> bool:
         return bool(settings.langsmith_tracing)
 
+    @property
+    def safe_trace_id(self) -> str | None:
+        """is_active 时返回 trace_id, 否则 None — 调用方写消息 metadata 用."""
+        return self.trace_id if self.is_active else None
+
     def enter(self) -> "LangSmithTracer":
         """打开 trace ctx，填充 trace_id。主调用 (root chat_request) 用这个."""
         if self.is_active:

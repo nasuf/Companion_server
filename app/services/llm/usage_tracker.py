@@ -15,8 +15,13 @@ sub_intent_mode 直接复用父 session 不开新的 (orchestrator 自己控制 
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
-from typing import TypedDict
+from typing import Callable, Literal, TypedDict
+
+UsageScope = Literal[
+    "chat", "post_process", "proactive", "agent_creation", "schedule_cron",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -75,3 +80,58 @@ def flush_session(token: Token) -> UsageSummary | None:
     if summary is None or summary["call_count"] == 0:
         return None
     return summary
+
+
+@asynccontextmanager
+async def usage_session(
+    *,
+    scope: UsageScope,
+    conversation_id: str | None,
+    agent_id: str | None,
+    user_id: str | None,
+    trace_id_provider: Callable[[], str | None] | None = None,
+):
+    """统一封装 start_session → 业务 → flush_session → write_usage_row.
+
+    `trace_id_provider` 是 callable 而非 str: tracer.trace_id 在 enter() 后
+    才有值, 而调用方常常 `enter()` 在外面 / 业务在里面, callable 形式让
+    flush 时再取最新值.
+    """
+    from app.services.llm.usage_repo import write_usage_row
+    token = start_session()
+    try:
+        yield
+    finally:
+        summary = flush_session(token)
+        if summary:
+            await write_usage_row(
+                summary=summary,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                trace_id=trace_id_provider() if trace_id_provider else None,
+                scope=scope,
+            )
+
+
+@asynccontextmanager
+async def traced_usage_session(
+    *,
+    name: str,
+    scope: UsageScope,
+    conversation_id: str | None,
+    agent_id: str | None,
+    user_id: str | None,
+):
+    """LangSmith trace + usage_session 组合, 给 yield 出来的 tracer 让调用方读 safe_trace_id."""
+    from app.services.chat.tracing import LangSmithTracer
+    tracer = LangSmithTracer(name, conversation_id or "").enter()
+    try:
+        async with usage_session(
+            scope=scope, conversation_id=conversation_id,
+            agent_id=agent_id, user_id=user_id,
+            trace_id_provider=lambda: tracer.safe_trace_id,
+        ):
+            yield tracer
+    finally:
+        tracer.close()

@@ -234,8 +234,16 @@ async def run_post_process(
     user_emotion: dict | None = None,
     ai_emotion: dict | None = None,
 ) -> None:
-    """5 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 记忆抽取 / 性格反馈 / 耐心恢复。"""
-    try:
+    """5 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 记忆抽取 / 性格反馈 / 耐心恢复。
+
+    起独立 usage session: fire_background 已把 ContextVar 隔离,
+    这里重新开让记忆/trait 的 token 落到 llm_usage 自己一行 (scope=post_process).
+    """
+    from app.services.llm.usage_tracker import usage_session
+    async with usage_session(
+        scope="post_process", conversation_id=conversation_id,
+        agent_id=agent_id, user_id=user_id,
+    ):
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
             _bg_user_emotion(user_message_id, user_emotion),
@@ -247,5 +255,3 @@ async def run_post_process(
             if ai_emotion:
                 tasks.append(save_ai_emotion(agent_id, ai_emotion))
         await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        logger.error(f"Background post-processing failed: {e}")

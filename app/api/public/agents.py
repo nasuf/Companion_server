@@ -135,6 +135,14 @@ async def create_agent(
            与 life_overview 并行
         6. complete (任一步 failed 则保留 failed 状态, 仍兜底激活)
         """
+        from app.services.llm.usage_tracker import usage_session
+        async with usage_session(
+            scope="agent_creation", conversation_id=None,
+            agent_id=agent.id, user_id=data.user_id,
+        ):
+            await _init_and_generate_story_inner()
+
+    async def _init_and_generate_story_inner():
         ws_id = workspace.id if workspace else None
         await set_progress(agent.id, "initializing", message="正在创建空间...")
 

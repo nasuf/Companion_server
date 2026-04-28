@@ -615,7 +615,11 @@ model Holiday {
 // 后者是 lazy 写 (用户点 Trace 才落库), 这张表是热路径强写, 用于后台统计概览.
 model LlmUsage {
   id             String   @id @default(uuid())
-  conversationId String   @map("conversation_id")
+  // conversation_id 可空: 非会话场景 (admin 建 agent / 每日作息 cron) 也写一行,
+  // 这两类没有 conversation 归属, 用 scope 区分.
+  conversationId String?  @map("conversation_id")
+  // 'chat' | 'post_process' | 'proactive' | 'agent_creation' | 'schedule_cron'
+  scope          String   @default("chat") @map("scope")
   agentId        String?  @map("agent_id")
   userId         String?  @map("user_id")
   // 关联到 message_traces (nullable, 不外键, 避免删 trace 级联到 usage 历史)

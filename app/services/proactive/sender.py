@@ -364,23 +364,32 @@ async def generate_and_send_proactive(
     # spec §8.5 衰减最后一次
     ctx["is_decay_final"] = state.followup_plan_type == "thirty_day_final"
 
-    message = await _generate_message(ctx)
-    if not message:
-        await _log_skip(
-            state, trigger_type, "empty_or_skip",
-            conversation_id=prep.conversation_id,
-        )
-        return False
+    # 主动消息也开 LangSmith trace + usage_session, 名字 [proactive:trigger_type]
+    # 方便 LangSmith 看板与统计 dashboard 区分被动回复.
+    from app.services.llm.usage_tracker import traced_usage_session
+    async with traced_usage_session(
+        name=f"[proactive:{trigger_type}]",
+        scope="proactive", conversation_id=prep.conversation_id,
+        agent_id=state.agent_id, user_id=state.user_id,
+    ) as tracer:
+        message = await _generate_message(ctx)
+        if not message:
+            await _log_skip(
+                state, trigger_type, "empty_or_skip",
+                conversation_id=prep.conversation_id,
+            )
+            return False
 
-    assistant_message_id = await emit_proactive_message(
-        conversation_id=prep.conversation_id,
-        user_id=state.user_id,
-        agent_id=state.agent_id,
-        workspace_id=state.workspace_id,
-        message=message,
-        trigger_type=trigger_type,
-        extra_metadata={"stage": state.stage},
-    )
+        assistant_message_id = await emit_proactive_message(
+            conversation_id=prep.conversation_id,
+            user_id=state.user_id,
+            agent_id=state.agent_id,
+            workspace_id=state.workspace_id,
+            message=message,
+            trigger_type=trigger_type,
+            extra_metadata={"stage": state.stage},
+            trace_id=tracer.safe_trace_id,
+        )
 
     await increment_proactive_count(state.agent_id, state.user_id)
     await increment_proactive_2day_count(state.agent_id, state.user_id)
@@ -395,7 +404,11 @@ async def generate_and_send_proactive(
         now_ts=now_ts,
     )
 
-    asyncio.create_task(_bg_proactive_ai_memory(state.user_id, message))
+    asyncio.create_task(_bg_proactive_ai_memory(
+        state.user_id, message,
+        conversation_id=prep.conversation_id,
+        agent_id=state.agent_id,
+    ))
     return True
 
 
@@ -491,47 +504,54 @@ async def send_first_greeting(
         logger.info(f"first_greeting skipped: lock held for conv={conversation_id[:8]}")
         return False
 
+    from app.services.llm.usage_tracker import traced_usage_session
     try:
-        tpl = await get_prompt_text("proactive.first_greeting")
-        prompt = tpl.format(
-            ai_name=agent.name,
-            personality_brief=_build_personality_brief(agent),
-            occupation=getattr(agent, "occupation", None) or "普通人",
-        )
-        message = (await invoke_text(get_chat_model(), prompt)).strip()
-        if not message or len(message) < 4:
-            return False
-
-        now_ts = datetime.now(UTC)
-        assistant_message_id = await emit_proactive_message(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            workspace_id=workspace_id,
-            message=message,
-            trigger_type="first_greeting",
-            skip_post_process=True,
-        )
-
-        # 接入 spec §8 衰减链路：首句仍需计入 n=1，用户不回复才会
-        # 推进到第二/三阶段。
-        ws_id = workspace_id or await resolve_workspace_id(
-            user_id=user_id, agent_id=agent_id,
-        )
-        if ws_id:
-            state = await ensure_proactive_state_for_workspace(
-                ws_id, reason="first_greeting",
+        async with traced_usage_session(
+            name="[proactive:first_greeting]",
+            scope="proactive", conversation_id=conversation_id,
+            agent_id=agent_id, user_id=user_id,
+        ) as tracer:
+            tpl = await get_prompt_text("proactive.first_greeting")
+            prompt = tpl.format(
+                ai_name=agent.name,
+                personality_brief=_build_personality_brief(agent),
+                occupation=getattr(agent, "occupation", None) or "普通人",
             )
-            if state is not None:
-                await mark_proactive_sent(
-                    state,
-                    trigger_type="first_greeting",
-                    message=message,
-                    assistant_message_id=assistant_message_id,
-                    now=now_ts,
+            message = (await invoke_text(get_chat_model(), prompt)).strip()
+            if not message or len(message) < 4:
+                return False
+
+            now_ts = datetime.now(UTC)
+            assistant_message_id = await emit_proactive_message(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workspace_id=workspace_id,
+                message=message,
+                trigger_type="first_greeting",
+                skip_post_process=True,
+                trace_id=tracer.safe_trace_id,
+            )
+
+            # 接入 spec §8 衰减链路：首句仍需计入 n=1，用户不回复才会
+            # 推进到第二/三阶段。
+            ws_id = workspace_id or await resolve_workspace_id(
+                user_id=user_id, agent_id=agent_id,
+            )
+            if ws_id:
+                state = await ensure_proactive_state_for_workspace(
+                    ws_id, reason="first_greeting",
                 )
-                await save_last_reply_timestamp(agent_id, user_id, when=now_ts)
-        return True
+                if state is not None:
+                    await mark_proactive_sent(
+                        state,
+                        trigger_type="first_greeting",
+                        message=message,
+                        assistant_message_id=assistant_message_id,
+                        now=now_ts,
+                    )
+                    await save_last_reply_timestamp(agent_id, user_id, when=now_ts)
+            return True
     except Exception as e:
         logger.warning(f"send_first_greeting failed: {e}")
         # 锁清掉, 让用户下次 WS 重连或 admin 手动 retry 还能再试.
@@ -576,13 +596,24 @@ async def dispatch_first_greeting_for_agent(*, agent_id: str, user_id: str) -> N
 # 后台任务
 # ────────────────────────────────────────────────────────────────────
 
-async def _bg_proactive_ai_memory(user_id: str, message: str) -> None:
-    """Spec §2.2：把刚发出的主动消息送进 per-message AI 自我记忆 pipeline。"""
-    try:
-        await process_memory_pipeline(
-            user_id=user_id,
-            new_conversation=f"assistant: {message}",
-            side="ai",
-        )
-    except Exception as e:
-        logger.warning(f"Proactive AI memory pipeline failed: {e}")
+async def _bg_proactive_ai_memory(
+    user_id: str, message: str,
+    *, conversation_id: str, agent_id: str,
+) -> None:
+    """Spec §2.2：把刚发出的主动消息送进 per-message AI 自我记忆 pipeline。
+
+    起独立 usage session, 让记忆抽取的 LLM token 也落到 llm_usage 表.
+    """
+    from app.services.llm.usage_tracker import usage_session
+    async with usage_session(
+        scope="post_process", conversation_id=conversation_id,
+        agent_id=agent_id, user_id=user_id,
+    ):
+        try:
+            await process_memory_pipeline(
+                user_id=user_id,
+                new_conversation=f"assistant: {message}",
+                side="ai",
+            )
+        except Exception as e:
+            logger.warning(f"Proactive AI memory pipeline failed: {e}")

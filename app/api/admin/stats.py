@@ -1,6 +1,7 @@
 """Admin 后台 统计概览 — token 用量 + 费用聚合."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -53,39 +54,87 @@ async def token_usage(
     where_sql = " AND ".join(["1=1"] + [b for b, _ in base_filters])
     where_sql_u = " AND ".join(["1=1"] + [p for _, p in base_filters])
 
-    # 1. totals
-    totals_rows = await db.query_raw(
-        f"""
-        SELECT
-            COUNT(*)::int AS request_count,
-            COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
-            COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
-            COALESCE(SUM(cost_cny), 0)::float AS cost_cny,
-            COALESCE(SUM(call_count), 0)::int AS call_count
-        FROM llm_usage
-        WHERE {where_sql}
-        """,
-        *params,
+    # 5 段聚合查询互相独立, asyncio.gather 并发跑省 dashboard 加载延迟.
+    totals_rows, by_model_rows, by_agent_rows, by_scope_rows, daily_rows = await asyncio.gather(
+        db.query_raw(
+            f"""
+            SELECT
+                COUNT(*)::int AS request_count,
+                COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
+                COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
+                COALESCE(SUM(cost_cny), 0)::float AS cost_cny,
+                COALESCE(SUM(call_count), 0)::int AS call_count
+            FROM llm_usage
+            WHERE {where_sql}
+            """,
+            *params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                kv.key AS model,
+                SUM((kv.value->>'input')::int)::int AS input_tokens,
+                SUM((kv.value->>'output')::int)::int AS output_tokens
+            FROM llm_usage, jsonb_each(tokens_by_model) AS kv
+            WHERE {where_sql}
+            GROUP BY kv.key
+            ORDER BY (SUM((kv.value->>'input')::int) + SUM((kv.value->>'output')::int)) DESC
+            """,
+            *params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                u.agent_id,
+                COALESCE(a.name, '(已删除)') AS agent_name,
+                COUNT(*)::int AS request_count,
+                COALESCE(SUM(u.input_tokens), 0)::int AS input_tokens,
+                COALESCE(SUM(u.output_tokens), 0)::int AS output_tokens,
+                COALESCE(SUM(u.cost_cny), 0)::float AS cost_cny
+            FROM llm_usage u
+            LEFT JOIN ai_agents a ON a.id = u.agent_id
+            WHERE {where_sql_u}
+            GROUP BY u.agent_id, a.name
+            ORDER BY cost_cny DESC
+            LIMIT 50
+            """,
+            *params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                scope,
+                COUNT(*)::int AS request_count,
+                COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
+                COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
+                COALESCE(SUM(cost_cny), 0)::float AS cost_cny
+            FROM llm_usage
+            WHERE {where_sql}
+            GROUP BY scope
+            ORDER BY cost_cny DESC
+            """,
+            *params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                DATE_TRUNC('day', created_at)::date AS bucket,
+                COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
+                COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
+                COALESCE(SUM(cost_cny), 0)::float AS cost_cny,
+                COUNT(*)::int AS request_count
+            FROM llm_usage
+            WHERE {where_sql}
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """,
+            *params,
+        ),
     )
     totals = totals_rows[0] if totals_rows else {
         "request_count": 0, "input_tokens": 0, "output_tokens": 0,
         "cost_cny": 0.0, "call_count": 0,
     }
-
-    # 2. by_model — jsonb_each 拆开 tokens_by_model
-    by_model_rows = await db.query_raw(
-        f"""
-        SELECT
-            kv.key AS model,
-            SUM((kv.value->>'input')::int)::int AS input_tokens,
-            SUM((kv.value->>'output')::int)::int AS output_tokens
-        FROM llm_usage, jsonb_each(tokens_by_model) AS kv
-        WHERE {where_sql}
-        GROUP BY kv.key
-        ORDER BY (SUM((kv.value->>'input')::int) + SUM((kv.value->>'output')::int)) DESC
-        """,
-        *params,
-    )
     by_model = [
         {
             "model": r["model"],
@@ -97,43 +146,17 @@ async def token_usage(
         }
         for r in by_model_rows
     ]
+    by_scope = [
+        {
+            "scope": r["scope"],
+            "request_count": r["request_count"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+            "cost_cny": round(r["cost_cny"], 6),
+        }
+        for r in by_scope_rows
+    ]
 
-    # 3. by_agent — JOIN ai_agents 拿名字, 取 top 50
-    by_agent_rows = await db.query_raw(
-        f"""
-        SELECT
-            u.agent_id,
-            COALESCE(a.name, '(已删除)') AS agent_name,
-            COUNT(*)::int AS request_count,
-            COALESCE(SUM(u.input_tokens), 0)::int AS input_tokens,
-            COALESCE(SUM(u.output_tokens), 0)::int AS output_tokens,
-            COALESCE(SUM(u.cost_cny), 0)::float AS cost_cny
-        FROM llm_usage u
-        LEFT JOIN ai_agents a ON a.id = u.agent_id
-        WHERE {where_sql_u}
-        GROUP BY u.agent_id, a.name
-        ORDER BY cost_cny DESC
-        LIMIT 50
-        """,
-        *params,
-    )
-
-    # 4. daily — 每天 bucket
-    daily_rows = await db.query_raw(
-        f"""
-        SELECT
-            DATE_TRUNC('day', created_at)::date AS bucket,
-            COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
-            COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
-            COALESCE(SUM(cost_cny), 0)::float AS cost_cny,
-            COUNT(*)::int AS request_count
-        FROM llm_usage
-        WHERE {where_sql}
-        GROUP BY bucket
-        ORDER BY bucket ASC
-        """,
-        *params,
-    )
     daily = [
         {
             "date": str(r["bucket"]),
@@ -168,5 +191,6 @@ async def token_usage(
             }
             for r in by_agent_rows
         ],
+        "by_scope": by_scope,
         "daily": daily,
     }

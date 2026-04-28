@@ -37,19 +37,29 @@ scheduler = AsyncIOScheduler()
 
 
 async def _run_for_all_agents(
-    fn: Callable, concurrency: int = 3, task_name: str = "task"
+    fn: Callable, concurrency: int = 3, task_name: str = "task",
 ) -> None:
-    """Run an async function for all agents with concurrency control."""
+    """Run an async function for all agents with concurrency control.
+
+    每个 agent 起一个独立 usage session, cron 的 LLM 调用 (作息生成 / 画像更新 /
+    月度 overview 等) 按 agent 维度落到 llm_usage 表 (scope=schedule_cron).
+    无 LLM 调用的 cron (l2_adjustment 等) flush 返回 None, 不写空行.
+    """
     from app.db import db
+    from app.services.llm.usage_tracker import usage_session
     agents = await db.aiagent.find_many()
     sem = asyncio.Semaphore(concurrency)
 
     async def _process(agent):
         async with sem:
-            try:
-                await fn(agent)
-            except Exception as e:
-                logger.warning(f"{task_name} failed for agent {agent.id}: {e}")
+            async with usage_session(
+                scope="schedule_cron", conversation_id=None,
+                agent_id=agent.id, user_id=getattr(agent, "userId", None),
+            ):
+                try:
+                    await fn(agent)
+                except Exception as e:
+                    logger.warning(f"{task_name} failed for agent {agent.id}: {e}")
 
     await asyncio.gather(*[_process(a) for a in agents])
 

@@ -74,7 +74,10 @@ async def resolve_pending_contradiction(
             analysis=analysis,
             personality_brief=personality_brief,
         )
-        for evt in await ctx.short_circuit_fn(reply, ctx.conversation_id, ctx.agent_id, ctx.user_id):
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
             yield evt
         ctx.tracer.close()
         ctx.stopped = True
@@ -111,7 +114,10 @@ async def resolve_pending_deletion(
         else:
             await clear_pending_deletion(ctx.conversation_id)
             reply = "好的，那就不删了，继续聊吧~"
-        for evt in await ctx.short_circuit_fn(reply, ctx.conversation_id, ctx.agent_id, ctx.user_id):
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
             yield evt
         ctx.tracer.close()
         ctx.stopped = True

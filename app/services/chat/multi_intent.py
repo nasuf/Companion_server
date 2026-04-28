@@ -41,19 +41,24 @@ async def short_circuit_reply(
     reply_index_offset: int = 0,
     include_done: bool = True,
     extra_metadata: dict | None = None,
+    trace_id: str | None = None,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
     - save_replies_fn: 由调用方注入的 `_save_replies(conversation_id, [reply])`
-      协程工厂，避免 multi_intent 依赖 orchestrator 的持久化实现。
-    - sub_intent_mode=True：父调用负责 save_last_reply_timestamp/done。
-    - include_done=False：延后 done（用于主调用随后处理 sub fragments）。
-    - extra_metadata：透传给 save_replies_fn 的持久化 metadata（如 boundary/zone/attack_level）。
+      协程工厂，避免 multi_intent 依赖 orchestrator 的持久化实现.
+    - sub_intent_mode=True：父调用负责 save_last_reply_timestamp/done.
+    - include_done=False：延后 done（用于主调用随后处理 sub fragments）.
+    - extra_metadata：透传给 save_replies_fn 的持久化 metadata（如 boundary/zone/attack_level）.
+    - trace_id: 挂到首条 reply.metadata, 让前端 Trace 按钮可点. sub_intent_mode
+      或非父调用可不传.
     """
     reply_payload: str | dict = reply
     if extra_metadata:
         reply_payload = {"text": reply, **extra_metadata}
-    _fire_background(save_replies_fn(conversation_id, [reply_payload]))
+    _fire_background(save_replies_fn(
+        conversation_id, [reply_payload], trace_id=trace_id,
+    ))
     if not sub_intent_mode and agent_id:
         await save_last_reply_timestamp(agent_id, user_id)
     events: list[dict] = [{
@@ -142,11 +147,16 @@ async def finalize_short_circuit(
     sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
     tracer 是 `LangSmithTracer` 实例；本函数仅调 `tracer.close()`。
     """
+    # sub_intent_mode 父调用已经保存过 trace_id 到首条 reply.metadata, 不重复挂.
+    trace_id = (
+        tracer.safe_trace_id if not sub_intent_mode and tracer is not None else None
+    )
     events = await short_circuit_reply(
         reply, conversation_id, agent_id, user_id, save_replies_fn,
         sub_intent_mode=sub_intent_mode,
         reply_index_offset=reply_index_offset,
         include_done=False,
+        trace_id=trace_id,
     )
     for evt in events:
         yield evt

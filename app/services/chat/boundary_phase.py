@@ -114,6 +114,7 @@ async def _emit_short_circuit(
     events = await ctx.short_circuit_fn(
         reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
         extra_metadata=extra_metadata,
+        trace_id=ctx.tracer.safe_trace_id,
     )
     for evt in events:
         yield evt

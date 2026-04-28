@@ -32,11 +32,14 @@ async def emit_proactive_message(
     extra_metadata: dict[str, Any] | None = None,
     skip_post_process: bool = False,
     ws_payload_extra: dict[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> str:
     """持久化主动消息 + 推 WS, 返回 assistant message id.
 
     spec §10.4: special_date 等场景需要 skip_post_process=True 标记,
     避免下游再做 emoji/拆句加工.
+
+    trace_id 挂到 metadata, 让前端 Trace 按钮可点 (跟主聊天回复路径对齐).
     """
     metadata: dict[str, Any] = {
         "proactive": True,
@@ -44,6 +47,8 @@ async def emit_proactive_message(
     }
     if skip_post_process:
         metadata["skip_post_process"] = True
+    if trace_id:
+        metadata["trace_id"] = trace_id
     if extra_metadata:
         metadata.update(extra_metadata)
 
