@@ -32,6 +32,8 @@ model User {
   proactiveStates  ProactiveState[]
   proactiveEvents  ProactiveEventLog[]
   patienceStates   PatienceState[]
+  bugReportsFiled    BugReport[] @relation("BugReportsFiled")
+  bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
   @@map("users")
 }
@@ -124,9 +126,33 @@ model Message {
   content        String
   metadata       Json?
   createdAt      DateTime     @default(now()) @map("created_at")
+  bugReports     BugReport[]
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@map("messages")
+}
+
+// Admin 测试时对单条 AI 回复打标的 bug 标签. 跟 Message 是 N:1
+// (同一条消息可能踩到多类问题, 多次提报无重复约束).
+// errorTypes 用 String[] 而非枚举: 类目随系统演化, 列表见
+// Companion_web/src/lib/bugReportTypes.ts.
+model BugReport {
+  id           String    @id @default(uuid())
+  messageId    String    @map("message_id")
+  message      Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  reporterId   String    @map("reporter_id")
+  reporter     User      @relation("BugReportsFiled", fields: [reporterId], references: [id])
+  errorTypes   String[]  @map("error_types")
+  reason       String?
+  status       String    @default("open") // "open" | "resolved"
+  resolvedAt   DateTime? @map("resolved_at")
+  resolvedById String?   @map("resolved_by_id")
+  resolvedBy   User?     @relation("BugReportsResolved", fields: [resolvedById], references: [id])
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([messageId])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("bug_reports")
 }
 
 // 本地 trace 镜像表. /traces/resolve/{message_id} 懒触发 share 后, 把
