@@ -217,31 +217,6 @@ async def get_conversations(
     ]
 
 
-@router.get("/{agent_id}/conversations/{conv_id}/messages")
-async def get_messages(
-    agent_id: str,
-    conv_id: str,
-    limit: int = 200,
-    _: str = Depends(require_admin_jwt),
-):
-    """Get messages for a specific conversation."""
-    messages = await db.message.find_many(
-        where={"conversationId": conv_id},
-        order={"createdAt": "asc"},
-        take=limit,
-    )
-    return [
-        {
-            "id": m.id,
-            "role": m.role,
-            "content": m.content,
-            "metadata": m.metadata if isinstance(m.metadata, dict) else None,
-            "created_at": str(m.createdAt),
-        }
-        for m in messages
-    ]
-
-
 @router.delete("/{agent_id}")
 async def delete_agent(
     agent_id: str,

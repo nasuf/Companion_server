@@ -348,30 +348,3 @@ async def delete_user_agent(
     return {"ok": True, "stats": stats}
 
 
-@router.get("/{user_id}/conversations/{conv_id}/messages")
-async def get_user_messages(
-    user_id: str,
-    conv_id: str,
-    limit: int = Query(default=200, ge=1, le=500),
-    _: dict = Depends(require_admin_jwt),
-):
-    conv = await db.conversation.find_unique(where={"id": conv_id})
-    if not conv or conv.userId != user_id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    messages = await db.message.find_many(
-        where={"conversationId": conv_id},
-        order={"createdAt": "asc"},
-        take=limit,
-    )
-
-    return [
-        {
-            "id": m.id,
-            "role": m.role,
-            "content": m.content,
-            "metadata": m.metadata,
-            "created_at": str(m.createdAt),
-        }
-        for m in messages
-    ]

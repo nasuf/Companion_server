@@ -42,12 +42,11 @@ async def test_require_user_self_rejects_when_mismatch():
 
 
 @pytest.mark.asyncio
-async def test_require_user_self_rejects_admin_role_too():
-    """admin role 也不能在 public endpoint 读他人数据 (走 admin-api)."""
+async def test_require_user_self_admin_bypasses_check():
+    """admin role 拥有全局权限, 路径 user_id 跟自己 sub 不同也放行."""
     user = {"sub": "u1", "role": "admin"}
-    with pytest.raises(HTTPException) as exc:
-        await require_user_self(user_id="other-user", user=user)
-    assert exc.value.status_code == 403
+    result = await require_user_self(user_id="other-user", user=user)
+    assert result is user
 
 
 # ─────────────────── require_conversation_owner ───────────────────
@@ -99,6 +98,17 @@ async def test_require_conversation_owner_returns_conv_when_owner():
     assert result is conv
 
 
+@pytest.mark.asyncio
+async def test_require_conversation_owner_admin_bypasses_check():
+    conv = SimpleNamespace(id="conv-1", userId="other-user", isDeleted=False)
+    fake_db = AsyncMock()
+    fake_db.conversation.find_unique = AsyncMock(return_value=conv)
+    user = {"sub": "admin-1", "role": "admin"}
+    with patch("app.api.ownership.db", fake_db):
+        result = await require_conversation_owner(conversation_id="conv-1", user=user)
+    assert result is conv
+
+
 # ─────────────────── require_memory_owner ───────────────────
 
 @pytest.mark.asyncio
@@ -131,6 +141,18 @@ async def test_require_memory_owner_403_when_wrong_owner():
 async def test_require_memory_owner_returns_memory_when_owner():
     m = SimpleNamespace(id="mem-1", userId="u1")
     user = {"sub": "u1", "role": "user"}
+    with patch(
+        "app.services.memory.storage.repo.find_unique",
+        new_callable=AsyncMock, return_value=m,
+    ):
+        result = await require_memory_owner(memory_id="mem-1", user=user)
+    assert result is m
+
+
+@pytest.mark.asyncio
+async def test_require_memory_owner_admin_bypasses_check():
+    m = SimpleNamespace(id="mem-1", userId="other-user")
+    user = {"sub": "admin-1", "role": "admin"}
     with patch(
         "app.services.memory.storage.repo.find_unique",
         new_callable=AsyncMock, return_value=m,
@@ -177,6 +199,18 @@ async def test_require_agent_owner_any_status_403_when_wrong_owner():
         with pytest.raises(HTTPException) as exc:
             await require_agent_owner_any_status(agent_id="a-1", user=user)
     assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_agent_owner_admin_bypasses_check():
+    from app.api.ownership import require_agent_owner_any_status
+    agent = SimpleNamespace(id="a-1", userId="other-user", status="active")
+    fake_db = AsyncMock()
+    fake_db.aiagent.find_unique = AsyncMock(return_value=agent)
+    user = {"sub": "admin-1", "role": "admin"}
+    with patch("app.api.ownership.db", fake_db):
+        result = await require_agent_owner_any_status(agent_id="a-1", user=user)
+    assert result is agent
 
 
 # ─────────────────── require_agent_owner (active-only) ───────────────────
