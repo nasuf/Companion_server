@@ -790,7 +790,6 @@ async def stream_chat_response(
     done_data: dict = {"message_id": "complete"}
     if first_assistant_message_id and tracer.trace_id and tracer.is_active:
         done_data["assistant_message_id"] = first_assistant_message_id
-        done_data["trace_pending"] = True
     yield {"event": "done", "data": json.dumps(done_data)}
 
     # End trace and share publicly in background (updates DB with public URL)

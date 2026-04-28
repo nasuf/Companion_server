@@ -58,10 +58,10 @@ async def save_replies(
                 text = reply
                 metadata = {"reply_index": i}
 
-            # spec: 首条带 trace_pending，后台 share 完成后再回填 trace_url
+            # 懒触发 trace: 首条只挂 trace_id, 用户点 Trace 按钮时通过
+            # /traces/resolve endpoint 触发 share + mirror 写入.
             if i == 0 and trace_id:
                 metadata["trace_id"] = trace_id
-                metadata["trace_pending"] = True
 
             created = await db.message.create(
                 data={

@@ -45,8 +45,9 @@ async def test_save_replies_persists_dict_metadata():
 
 
 @pytest.mark.asyncio
-async def test_save_replies_first_carries_trace_pending():
-    """trace_id 给定时第一条 reply 的 metadata 带 trace_id+trace_pending。"""
+async def test_save_replies_first_carries_trace_id():
+    """trace_id 给定时第一条 reply 的 metadata 只带 trace_id (懒触发模式,
+    不再写 trace_pending; share + mirror 由用户点 Trace 按钮时通过 retry endpoint 调)."""
     from app.services.chat import post_process
 
     created_calls: list[dict] = []
@@ -67,7 +68,8 @@ async def test_save_replies_first_carries_trace_pending():
     md0 = created_calls[0]["metadata"]
     md0_dict = md0.data if hasattr(md0, "data") else md0
     assert md0_dict["trace_id"] == "trace-xyz"
-    assert md0_dict["trace_pending"] is True
+    assert "trace_pending" not in md0_dict
+    assert "trace_failed" not in md0_dict
 
     md1 = created_calls[1]["metadata"]
     md1_dict = md1.data if hasattr(md1, "data") else md1

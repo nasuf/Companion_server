@@ -1,18 +1,15 @@
-"""LangSmith trace 全生命周期管理。
+"""LangSmith trace 全生命周期管理.
 
-把原 orchestrator 散落的 4 个函数（_langsmith_trace_ctx / _get_langsmith_client /
-_bg_share_trace / _end_trace）收敛成一个 `LangSmithTracer` 类，并把下游 phase
-ctx 中的 `(trace_ctx, trace_id, end_trace_fn)` 三元组合并为单一 `tracer` 字段。
-
-用法：
+用法:
     tracer = LangSmithTracer(user_message, conversation_id).enter()
     try:
-        ...                # 主流程
+        ...                # 主流程 — LLM 调用自动 attach 到此 trace
     finally:
-        tracer.close()     # 关闭 ctx + 后台 share
+        tracer.close()     # exit ctx; share + mirror 由用户点击时懒触发
 
-`tracer.is_active`：是否启用 LangSmith。关闭时 enter/close 都是 no-op。
-`tracer.trace_id`：本次 trace 的 ID（启用时填充，下游写消息 metadata 用）。
+`tracer.is_active`: 是否启用 LangSmith. 关闭时 enter/close 都是 no-op.
+`tracer.trace_id`: 本次 trace 的 ID, 写到首条 reply 的 metadata.trace_id, 用户
+点 Trace 按钮时通过 /traces/resolve/{message_id} 懒 share + 加载 mirror.
 """
 
 from __future__ import annotations
@@ -26,7 +23,12 @@ from prisma import Json
 
 from app.config import settings
 from app.db import db
-from app.services.runtime.tasks import fire_background as _fire_background
+from app.services.chat.trace_mirror import (
+    get_trace_mirror_by_message,
+    write_trace_mirror,
+)
+from app.services.public_trace import load_public_trace
+from app.services.runtime.ws_manager import manager
 
 logger = logging.getLogger(__name__)
 
@@ -111,53 +113,17 @@ class LangSmithTracer:
         return self
 
     def close(self) -> None:
-        """关闭 trace ctx，启用时 fire-and-forget share。幂等。
+        """关闭 trace ctx. 幂等.
 
-        attached 模式下不调 share_run (parent 会自己 share). 这避免:
-        1. 多次重复 share 同一棵树
-        2. sub 调用 close 时 parent ctx 还活着, share parent run_id 会失败
-           (run 还没结束, LangSmith 拒绝)
+        share_run + mirror 写入改为懒触发 (用户点 trace 按钮时通过
+        /traces/resolve/{message_id} endpoint 调). 这里只 exit ctx 让
+        LangSmith SDK 把 run 上报到 LangSmith private project. Share
+        API quota 从"每次回复"降到"实际查看的 ~5%", mirror 表 95% 行省.
         """
         if self._closed or self._ctx is None:
             return
         self._closed = True
         self._ctx.__exit__(None, None, None)
-        if self._attached:
-            return
-        if self.is_active and self.trace_id:
-            _fire_background(self._share())
-
-    async def _share(self) -> None:
-        """后台：share trace + 更新对应消息 metadata + WS 通知。"""
-        # close() 已守 `if self.trace_id:`, 进到这里 trace_id 必非空.
-        trace_id = self.trace_id
-        assert trace_id is not None
-        try:
-            public_url = await share_run_with_retry(
-                trace_id, conversation_id=self._conversation_id,
-            )
-            logger.info(f"[TRACE] shared trace_id={trace_id} url={public_url}")
-        except Exception:
-            # 已重试 3 次仍失败. 用 exception 打完整 stack 便于诊断 (quota?
-            # 网络? API 变更?). 把 trace_failed=true 写回 message metadata,
-            # 前端据此显示"重试"按钮替代永久 loading.
-            logger.exception(
-                f"[TRACE] share_run permanently failed after retries "
-                f"trace_id={trace_id} conv={self._conversation_id[:8]}"
-            )
-            await _mark_trace_failed(self._conversation_id, trace_id)
-            return
-
-        await _persist_share_success(
-            self._conversation_id, trace_id, public_url,
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Module-level helpers — 同时给 LangSmithTracer._share() 和 retry endpoint 用.
-# 抽出来是为了消除 "实例方法 vs 单条消息重试" 两条路径的代码重复, 并保证
-# 失败时统一打 trace_failed=true 让前端显示重试按钮.
-# ─────────────────────────────────────────────────────────────────────
 
 
 _SHARE_RETRY_DELAYS = (1.0, 2.0, 4.0)
@@ -170,11 +136,9 @@ async def share_run_with_retry(
 ) -> str:
     """调 LangSmith client.share_run, 失败重试 3 次指数退避 (1s, 2s, 4s).
 
-    share_run 是网络调用 (~500ms-2s 正常, 抽风时 5xx). 不重试时偶发失败
-    会让 trace_pending 永远卡在 true, 用户感觉 "trace 时有时无".
-
-    Raises 最后一次异常给调用方 (LangSmithTracer._share / retry endpoint),
-    供 logger.exception 打完整 stack.
+    share_run 是网络调用 (~500ms-2s 正常, 抽风时 5xx). 偶发失败会让用户感觉
+    "trace 时有时无", 重试可大幅降低这种感受. 三次都失败时把最后一次异常抛
+    给调用方 (resolve endpoint) 转 503.
     """
     if not trace_id:
         raise ValueError("share_run_with_retry requires a non-empty trace_id")
@@ -197,24 +161,6 @@ async def share_run_with_retry(
     raise last_exc
 
 
-async def _find_message_by_trace_id(conversation_id: str, trace_id: str):
-    """找该会话下 metadata.trace_id 匹配的最近 assistant 消息. 找不到返回 None.
-
-    扫最近 20 条够覆盖正常场景 (一条用户消息 → ≤3 条 split assistant + 同会话
-    其他消息); trace_id 只挂在第一条 split 上.
-    """
-    msgs = await db.message.find_many(
-        where={"conversationId": conversation_id, "role": "assistant"},
-        order={"createdAt": "desc"},
-        take=20,
-    )
-    for msg in msgs:
-        meta = msg.metadata or {}
-        if isinstance(meta, dict) and meta.get("trace_id") == trace_id:
-            return msg
-    return None
-
-
 async def _patch_message_metadata(message_id: str, current_meta: dict, **patch) -> None:
     """合并 patch 进 metadata 并写库. 保留原有 key (e.g. reply_index, sticker_url)."""
     await db.message.update(
@@ -223,74 +169,17 @@ async def _patch_message_metadata(message_id: str, current_meta: dict, **patch) 
     )
 
 
-async def _persist_share_success(
-    conversation_id: str, trace_id: str, public_url: str,
-) -> str | None:
-    """share_run 成功后回填 message metadata + WS 推 trace_ready. 返回 message_id."""
-    msg = await _find_message_by_trace_id(conversation_id, trace_id)
-    if not msg:
-        # share_run 成功了但找不到对应 message — 边缘竞争 (save_replies 还没
-        # 落库 / sub_intent 模式还没回 parent). 不致命, 只是按钮不亮.
-        logger.warning(
-            f"[TRACE] no message found with trace_id={trace_id} "
-            f"in conv={conversation_id[:8]} (last 20 assistant msgs)"
-        )
-        return None
-    try:
-        await _patch_message_metadata(
-            msg.id, msg.metadata or {},
-            trace_url=public_url, trace_pending=False, trace_failed=False,
-        )
-        from app.services.runtime.ws_manager import manager
-        await manager.send_event(
-            conversation_id,
-            "trace_ready",
-            {"message_id": msg.id, "trace_url": public_url},
-        )
-        return msg.id
-    except Exception:
-        logger.exception(
-            f"[TRACE] failed to update message metadata after share "
-            f"trace_id={trace_id} conv={conversation_id[:8]}"
-        )
-        return None
+async def resolve_trace_for_message(
+    message_id: str, *, user_id: str, is_admin: bool = False,
+) -> dict[str, Any]:
+    """懒触发: 用户首次点 Trace 按钮时调用, 返回完整 trace detail.
 
+    流程: 校验消息归属 (admin 跳过, 用于后台管理跨用户调试) → 取 metadata.trace_id →
+    本地 mirror 命中直接返回 → 否则 share_run + load_public_trace + 写 mirror →
+    返回 {trace_url, detail}. 失败抛 ValueError / RuntimeError, endpoint 转 4xx/5xx.
 
-async def _mark_trace_failed(conversation_id: str, trace_id: str | None) -> None:
-    """share_run 永久失败后, 在对应 message metadata 上打 trace_failed=true,
-    前端据此显示"重试"按钮替代永久 loading.
-    """
-    if not trace_id:
-        return
-    msg = await _find_message_by_trace_id(conversation_id, trace_id)
-    if not msg:
-        return
-    try:
-        await _patch_message_metadata(
-            msg.id, msg.metadata or {},
-            trace_failed=True, trace_pending=False,
-        )
-        from app.services.runtime.ws_manager import manager
-        await manager.send_event(
-            conversation_id,
-            "trace_failed",
-            {"message_id": msg.id},
-        )
-    except Exception:
-        logger.exception(
-            f"[TRACE] failed to mark trace_failed trace_id={trace_id} "
-            f"conv={conversation_id[:8]}"
-        )
-
-
-async def retry_share_for_message(
-    message_id: str, *, user_id: str,
-) -> dict[str, str]:
-    """重试单条消息的 trace 分享. 由 /traces/retry/{message_id} endpoint 调用.
-
-    流程: 校验消息归属当前用户 → 取 metadata.trace_id → share_run + retry →
-    成功更新 metadata + WS 通知. 失败抛 ValueError / RuntimeError 让 endpoint
-    转 4xx/5xx.
+    一次调用搞定 share + mirror + 读取, 避免前端"mirror→retry→public-detail"
+    三次串行 RTT 的等待 + 重复 load_public_trace.
     """
     msg = await db.message.find_unique(
         where={"id": message_id},
@@ -299,7 +188,9 @@ async def retry_share_for_message(
     if not msg:
         raise ValueError("message_not_found")
     conv = getattr(msg, "conversation", None)
-    if not conv or conv.userId != user_id:
+    if not conv:
+        raise ValueError("message_not_found")
+    if not is_admin and conv.userId != user_id:
         raise PermissionError("not_your_message")
 
     meta = msg.metadata or {}
@@ -307,23 +198,28 @@ async def retry_share_for_message(
         raise ValueError("metadata_invalid")
     trace_id = meta.get("trace_id")
     if not trace_id:
-        # 老消息没有 trace_id, 没有底层 LangSmith run 可分享.
         raise ValueError("no_trace_id")
-    if meta.get("trace_url"):
-        # 已经成功过了, 直接返回现有 url (前端可能拿到旧状态).
-        return {"trace_url": str(meta["trace_url"])}
 
+    # 已 share 过 — 优先 mirror 命中, 落空再走 LangSmith 公开 API
+    existing_url = meta.get("trace_url")
+    if existing_url:
+        cached = await get_trace_mirror_by_message(message_id)
+        if cached:
+            return {"trace_url": str(existing_url), "detail": cached}
+        detail = await load_public_trace(str(existing_url))
+        await write_trace_mirror(detail=detail, message_id=msg.id)
+        return {"trace_url": str(existing_url), "detail": detail}
+
+    # 首次 share — share_run + load + mirror 一气呵成
     public_url = await share_run_with_retry(
         trace_id, conversation_id=conv.id,
     )
-    await _patch_message_metadata(
-        msg.id, meta,
-        trace_url=public_url, trace_pending=False, trace_failed=False,
-    )
-    from app.services.runtime.ws_manager import manager
+    detail = await load_public_trace(public_url)
+    await write_trace_mirror(detail=detail, message_id=msg.id)
+    await _patch_message_metadata(msg.id, meta, trace_url=public_url)
     await manager.send_event(
         conv.id,
         "trace_ready",
         {"message_id": msg.id, "trace_url": public_url},
     )
-    return {"trace_url": public_url}
+    return {"trace_url": public_url, "detail": detail}

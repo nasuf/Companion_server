@@ -6,22 +6,19 @@ from unittest.mock import MagicMock, patch
 
 
 def test_tracer_disabled_no_op():
-    """settings.langsmith_tracing=False → enter 后 trace_id=None，close 不报错。"""
+    """settings.langsmith_tracing=False → enter 后 trace_id=None, close 不报错."""
     from app.services.chat import tracing
 
     with patch.object(tracing.settings, "langsmith_tracing", False):
         tracer = tracing.LangSmithTracer("hi", "conv1").enter()
         assert tracer.is_active is False
         assert tracer.trace_id is None
-        # close 不应抛异常，且不调 share
-        with patch.object(tracing, "_fire_background") as fbg:
-            tracer.close()
-            fbg.assert_not_called()
+        tracer.close()  # 不应抛异常
 
 
-def test_tracer_enabled_returns_trace_id_and_fires_share():
-    """settings.langsmith_tracing=True → trace_id 取自 ls_trace 的 run_tree.id；
-    close() 触发后台 _fire_background(self._share())。"""
+def test_tracer_enabled_returns_trace_id_and_no_auto_share():
+    """settings.langsmith_tracing=True → trace_id 取自 ls_trace 的 run_tree.id;
+    close() 仅 exit ctx, 不再自动 share (改为用户点 trace 按钮时懒触发)."""
     from app.services.chat import tracing
 
     fake_run_tree = MagicMock(id="trace-xyz-123")
@@ -32,17 +29,15 @@ def test_tracer_enabled_returns_trace_id_and_fires_share():
     fake_ls_trace = MagicMock(return_value=fake_ctx)
 
     with patch.object(tracing.settings, "langsmith_tracing", True), \
-         patch.dict("sys.modules", {"langsmith": MagicMock(trace=fake_ls_trace)}), \
-         patch.object(tracing, "_fire_background") as fbg:
+         patch.dict("sys.modules", {"langsmith": MagicMock(trace=fake_ls_trace)}):
         tracer = tracing.LangSmithTracer("hi", "conv1").enter()
         assert tracer.trace_id == "trace-xyz-123"
         tracer.close()
-        # 应 fire 一次后台 share 任务
-        fbg.assert_called_once()
+        assert fake_ctx.__exit__.call_count == 1
 
 
 def test_tracer_close_is_idempotent():
-    """重复调 close 不应导致 ctx.__exit__ 被多次调用或 share 被多次 fire。"""
+    """重复调 close 不应导致 ctx.__exit__ 被多次调用."""
     from app.services.chat import tracing
 
     fake_run_tree = MagicMock(id="t-1")
@@ -51,28 +46,23 @@ def test_tracer_close_is_idempotent():
     fake_ctx.__exit__ = MagicMock(return_value=None)
 
     with patch.object(tracing.settings, "langsmith_tracing", True), \
-         patch.dict("sys.modules", {"langsmith": MagicMock(trace=MagicMock(return_value=fake_ctx))}), \
-         patch.object(tracing, "_fire_background") as fbg:
+         patch.dict("sys.modules", {"langsmith": MagicMock(trace=MagicMock(return_value=fake_ctx))}):
         tracer = tracing.LangSmithTracer("hi", "conv1").enter()
         tracer.close()
         tracer.close()  # 第二次 no-op
         tracer.close()
         assert fake_ctx.__exit__.call_count == 1
-        assert fbg.call_count == 1
 
 
-def test_attach_to_parent_inherits_trace_id_and_skips_share():
-    """sub_intent 模式: attach_to_parent 复用 parent trace_id, close 不 share."""
+def test_attach_to_parent_inherits_trace_id():
+    """sub_intent 模式: attach_to_parent 复用 parent trace_id."""
     from app.services.chat import tracing
 
-    with patch.object(tracing, "_fire_background") as fbg:
-        tracer = tracing.LangSmithTracer("有意思。", "conv1").attach_to_parent("parent-trace-xyz")
-        assert tracer.trace_id == "parent-trace-xyz"
-        assert tracer._attached is True
-
-        tracer.close()
-        # 不 fire share — parent 会自己 share, sub close 不重复
-        fbg.assert_not_called()
+    tracer = tracing.LangSmithTracer("有意思。", "conv1").attach_to_parent("parent-trace-xyz")
+    assert tracer.trace_id == "parent-trace-xyz"
+    assert tracer._attached is True
+    # close 不报错
+    tracer.close()
 
 
 def test_attach_to_parent_with_none_parent_id_propagates_none():
@@ -81,10 +71,7 @@ def test_attach_to_parent_with_none_parent_id_propagates_none():
 
     tracer = tracing.LangSmithTracer("x", "conv1").attach_to_parent(None)
     assert tracer.trace_id is None
-    # close 也无副作用
-    with patch.object(tracing, "_fire_background") as fbg:
-        tracer.close()
-        fbg.assert_not_called()
+    tracer.close()
 
 
 def test_run_tree_none_logs_warning(caplog):
@@ -156,53 +143,23 @@ class TestShareRunRetry:
             await self._invoke_share_run(tracer, client, monkeypatch)
         assert client.share_run.call_count == 3
 
-    async def test_share_failure_logs_with_stack(self, monkeypatch, caplog):
-        """share_run 全部失败 → _share 应 logger.exception (含 stack trace), 并触发
-        _mark_trace_failed 让前端能显示重试按钮."""
-        import logging
-        from app.services.chat import tracing
-
-        tracer, client = self._build_tracer_with_share_outcome(
-            [RuntimeError("e1"), RuntimeError("e2"), RuntimeError("e3")]
-        )
-        monkeypatch.setattr(tracing, "get_langsmith_client", lambda: client)
-        async def _instant_sleep(_): return None
-        monkeypatch.setattr(tracing.asyncio, "sleep", _instant_sleep)
-        # 截获 mark_trace_failed 调用, 不真打 DB.
-        called: dict[str, object] = {}
-        async def fake_mark_failed(conv_id, trace_id):
-            called["conv"] = conv_id
-            called["trace"] = trace_id
-        monkeypatch.setattr(tracing, "_mark_trace_failed", fake_mark_failed)
-
-        with caplog.at_level(logging.WARNING, logger="app.services.chat.tracing"):
-            await tracer._share()
-
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert errors, "expected logger.exception (ERROR-level) for permanent failure"
-        assert errors[0].exc_info is not None, "should include stack trace"
-        assert called == {"conv": "conv-share-test", "trace": "trace-abc"}, \
-            "permanent failure should trigger _mark_trace_failed"
-
-
 import pytest as _pytest
 
 # Mark async tests
 TestShareRunRetry.test_first_attempt_succeeds = _pytest.mark.asyncio(TestShareRunRetry.test_first_attempt_succeeds)
 TestShareRunRetry.test_succeeds_on_third_attempt = _pytest.mark.asyncio(TestShareRunRetry.test_succeeds_on_third_attempt)
 TestShareRunRetry.test_all_retries_fail_raises = _pytest.mark.asyncio(TestShareRunRetry.test_all_retries_fail_raises)
-TestShareRunRetry.test_share_failure_logs_with_stack = _pytest.mark.asyncio(TestShareRunRetry.test_share_failure_logs_with_stack)
 
 
-class TestRetryShareForMessage:
-    """retry_share_for_message: 重试单条消息 trace 分享 (供 /traces/retry endpoint).
+class TestResolveTraceForMessage:
+    """resolve_trace_for_message: 懒触发 share + 返回 detail (供 /traces/resolve endpoint).
 
     覆盖关键场景:
     - 消息不存在 → ValueError("message_not_found")
-    - 跨用户访问 → PermissionError
+    - 跨用户访问 → PermissionError; admin 跳过校验
     - 老消息没 trace_id → ValueError("no_trace_id")
-    - 已有 trace_url → 直接返回 (幂等)
-    - share_run 成功 → 更新 metadata + WS 通知
+    - 已 share 过且 mirror 命中 → 直接返回 cached detail
+    - 首次 share → share_run + load + 写 mirror + WS 通知 + 返回 detail
     """
 
     def _make_msg(self, *, msg_id="m1", user_id="u1", metadata=None):
@@ -228,7 +185,7 @@ class TestRetryShareForMessage:
         from app.services.chat import tracing
         with patch.object(tracing, "db", self._fake_db(None)):
             with pytest.raises(ValueError, match="message_not_found"):
-                await tracing.retry_share_for_message("missing", user_id="u1")
+                await tracing.resolve_trace_for_message("missing", user_id="u1")
 
     @_pytest.mark.asyncio
     async def test_cross_user_rejected(self):
@@ -237,7 +194,25 @@ class TestRetryShareForMessage:
         msg = self._make_msg(user_id="other_user")
         with patch.object(tracing, "db", self._fake_db(msg)):
             with pytest.raises(PermissionError, match="not_your_message"):
-                await tracing.retry_share_for_message("m1", user_id="u1")
+                await tracing.resolve_trace_for_message("m1", user_id="u1")
+
+    @_pytest.mark.asyncio
+    async def test_admin_bypasses_ownership(self, monkeypatch):
+        """admin 后台调试时跨用户访问不应被拒绝."""
+        from app.services.chat import tracing
+        msg = self._make_msg(
+            user_id="other_user",
+            metadata={"trace_id": "t1", "trace_url": "https://existing"},
+        )
+        cached = {"trace": {"trace_id": "t1"}, "steps": []}
+        async def fake_get_mirror(_): return cached
+        monkeypatch.setattr(tracing, "get_trace_mirror_by_message", fake_get_mirror)
+
+        with patch.object(tracing, "db", self._fake_db(msg)):
+            result = await tracing.resolve_trace_for_message(
+                "m1", user_id="u1", is_admin=True,
+            )
+        assert result == {"trace_url": "https://existing", "detail": cached}
 
     @_pytest.mark.asyncio
     async def test_no_trace_id_in_metadata(self):
@@ -246,48 +221,65 @@ class TestRetryShareForMessage:
         msg = self._make_msg(metadata={"reply_index": 0})  # 老消息无 trace_id
         with patch.object(tracing, "db", self._fake_db(msg)):
             with pytest.raises(ValueError, match="no_trace_id"):
-                await tracing.retry_share_for_message("m1", user_id="u1")
+                await tracing.resolve_trace_for_message("m1", user_id="u1")
 
     @_pytest.mark.asyncio
-    async def test_already_has_url_short_circuits(self, monkeypatch):
+    async def test_existing_url_returns_mirror(self, monkeypatch):
+        """已 share 过且 mirror 命中 → 直接返回, 不调 share/load."""
         from app.services.chat import tracing
         msg = self._make_msg(metadata={"trace_id": "t1", "trace_url": "https://existing"})
-        called = {"share": 0}
+        cached = {"trace": {"trace_id": "t1"}, "steps": [{"id": "s1"}]}
+        share_calls = {"n": 0}
         async def fake_share(*a, **k):
-            called["share"] += 1
-            return "should_not_be_called"
+            share_calls["n"] += 1
+            return "unused"
+        async def fake_get_mirror(_): return cached
+        async def fake_load(_): return {}
         monkeypatch.setattr(tracing, "share_run_with_retry", fake_share)
+        monkeypatch.setattr(tracing, "get_trace_mirror_by_message", fake_get_mirror)
+        monkeypatch.setattr(tracing, "load_public_trace", fake_load)
 
         with patch.object(tracing, "db", self._fake_db(msg)):
-            result = await tracing.retry_share_for_message("m1", user_id="u1")
-        assert result == {"trace_url": "https://existing"}
-        assert called["share"] == 0
+            result = await tracing.resolve_trace_for_message("m1", user_id="u1")
+        assert result == {"trace_url": "https://existing", "detail": cached}
+        assert share_calls["n"] == 0
 
     @_pytest.mark.asyncio
-    async def test_success_updates_metadata_and_pushes_ws(self, monkeypatch):
+    async def test_first_share_loads_writes_mirror_and_pushes_ws(self, monkeypatch):
+        """首次 share: share_run + load + write mirror + WS 推送, 返回 detail."""
         from app.services.chat import tracing
-        msg = self._make_msg(metadata={"trace_id": "t1", "trace_pending": True})
+        msg = self._make_msg(metadata={"trace_id": "t1"})
+        loaded_detail = {"trace": {"trace_id": "t1"}, "steps": [{"id": "s1"}]}
 
         async def fake_share(*a, **k): return "https://smith/new"
-        monkeypatch.setattr(tracing, "share_run_with_retry", fake_share)
-
-        captured = {}
+        async def fake_load(url):
+            assert url == "https://smith/new"
+            return loaded_detail
+        write_calls = []
+        async def fake_write(*, detail, message_id):
+            write_calls.append((detail, message_id))
+            return True
+        captured: dict = {}
         async def fake_patch(message_id, current, **patch_):
-            captured["patch"] = patch_
             captured["msg_id"] = message_id
+            captured["patch"] = patch_
+
+        monkeypatch.setattr(tracing, "share_run_with_retry", fake_share)
+        monkeypatch.setattr(tracing, "load_public_trace", fake_load)
+        monkeypatch.setattr(tracing, "write_trace_mirror", fake_write)
         monkeypatch.setattr(tracing, "_patch_message_metadata", fake_patch)
 
         ws_calls = []
         class FakeManager:
             async def send_event(self, conv_id, event, payload):
                 ws_calls.append((conv_id, event, payload))
-        from app.services.runtime import ws_manager
-        monkeypatch.setattr(ws_manager, "manager", FakeManager())
+        monkeypatch.setattr(tracing, "manager", FakeManager())
 
         with patch.object(tracing, "db", self._fake_db(msg)):
-            result = await tracing.retry_share_for_message("m1", user_id="u1")
-        assert result == {"trace_url": "https://smith/new"}
-        assert captured["patch"]["trace_url"] == "https://smith/new"
-        assert captured["patch"]["trace_pending"] is False
-        assert captured["patch"]["trace_failed"] is False
+            result = await tracing.resolve_trace_for_message("m1", user_id="u1")
+        assert result == {"trace_url": "https://smith/new", "detail": loaded_detail}
+        assert write_calls == [(loaded_detail, "m1")]
+        assert captured["patch"] == {"trace_url": "https://smith/new"}
         assert ws_calls and ws_calls[0][1] == "trace_ready"
+
+

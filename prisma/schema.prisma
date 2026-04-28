@@ -129,6 +129,42 @@ model Message {
   @@map("messages")
 }
 
+// 本地 trace 镜像表. /traces/resolve/{message_id} 懒触发 share 后, 把
+// LangSmith 的 enriched trace 树整份缓存到这里, 让 trace 详情页:
+// 1. 不依赖 LangSmith 网络 (可读性 / 抽风容忍)
+// 2. 不被 quota 限制 (batch trace 分析时不撞 LangSmith API 上限)
+// 3. 可加 SQL 索引做趋势分析 (e.g. "哪个 prompt_key 平均耗时分位最高")
+//
+// 设计取舍:
+// - traceId 做主键, 一条 trace 一行 (消息 → trace 是 1:1; sub_intent
+//   通过 attach_to_parent 复用 parent traceId, 不另起 trace).
+// - stepsJson 存 trace_enrich.enrich_steps 跑完的完整 step 数组 (含
+//   inputs/outputs/decision_label/category/on_critical_path 等), 不展平
+//   到列 — 字段多 + 可能演化, 列粒度太碎.
+// - summaryJson 冗余存顶部 trace 摘要 (duration / tokens / message), 前端
+//   常用字段不用每次解 stepsJson.
+// - shareUrl 与 message.metadata.trace_url 重复, 但单独存便于按 trace 维度
+//   查 (e.g. batch 分析).
+model MessageTrace {
+  traceId         String   @id @map("trace_id")
+  conversationId  String   @map("conversation_id")
+  messageId       String?  @map("message_id") // 关联 message 表; 不外键, 避免删 msg 级联
+  rootMessage     String?  @map("root_message") // 用户原文 (从 trace.inputs.message)
+  totalDurationMs Int?     @map("total_duration_ms")
+  totalTokens     Int?     @map("total_tokens")
+  llmStepCount    Int?     @map("llm_step_count")
+  stepsJson       Json     @map("steps_json")
+  summaryJson     Json     @map("summary_json")
+  shareStatus     String   @default("pending") @map("share_status") // pending / shared / failed
+  shareUrl        String?  @map("share_url")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@index([messageId])
+  @@map("message_traces")
+}
+
 model PromptTemplate {
   id             String   @id @default(uuid())
   key            String   @unique
