@@ -23,6 +23,7 @@ from app.services.chat.intent_replies import (
 
 if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
+from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.interaction.boundary import (
     APOLOGY_SINCERITY_MIN,
     FINAL_WARNING_PATIENCE_THRESHOLD,
@@ -53,6 +54,8 @@ class BoundaryPhaseCtx:
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     fire_background_fn: Callable[[Any], None]
     bg_memory_pipeline_fn: Callable[..., Any]
+    # 最近几轮对话格式化文本, 给 attack_target_classify 做"连续骂战"上下文判断.
+    recent_context: str = EMPTY_RECENT_CONTEXT
     # 输出
     stopped: bool = False
     # 默认 PATIENCE_MAX；check_boundary 写入最新读数；攻击路径 (_handle_attack_ai)
@@ -256,8 +259,11 @@ async def run_boundary(ctx: BoundaryPhaseCtx) -> AsyncGenerator[dict, None]:
                 yield evt
             return
 
-        # 步骤 4：攻击目标识别
-        attack_target = await attack_target_classify(ctx.user_message)
+        # 步骤 4：攻击目标识别 (带最近对话上下文, 帮 LLM 在连续骂战里
+        # 把含糊代词如"不然呢"也归到"攻击AI")
+        attack_target = await attack_target_classify(
+            ctx.user_message, recent_context=ctx.recent_context,
+        )
         if attack_target and attack_target != "攻击AI":
             if zone in ("medium", "low"):
                 async for evt in _handle_attack_target_non_ai(

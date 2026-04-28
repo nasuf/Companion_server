@@ -15,6 +15,11 @@ from app.services.prompting.store import get_prompt_text
 logger = logging.getLogger(__name__)
 
 
+# 所有 prompt 里 {recent_context} 为空时的统一文本.
+# 全角括号: 跟 format_recent_context 的输出对齐, 让 LLM 始终看到同一 token.
+EMPTY_RECENT_CONTEXT = "（无）"
+
+
 class SafeDict(dict):
     """format_map 兜底：未填充占位符返回 "(无)"。"""
 

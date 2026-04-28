@@ -214,7 +214,7 @@ _register("分析用户对矛盾询问的回复，判断矛盾类型、原因及
 _register("分析以下消息是否包含道歉或承诺改正", _PromptMeta(
     "intent.apology_detect", "道歉检测", "decision", _label_apology,
 ))
-_register("分析用户消息的攻击目标", _PromptMeta(
+_register("判断用户消息的攻击目标", _PromptMeta(
     "boundary.attack_target", "攻击目标识别", "decision", _label_passthrough,
 ))
 _register("判断用户这句话的冒犯程度。请以朋友的包容心态", _PromptMeta(

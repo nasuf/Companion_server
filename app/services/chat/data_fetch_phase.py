@@ -21,6 +21,7 @@ from app.services.memory.retrieval.relevance import (
     compute_display_score,
 )
 from app.services.portrait import get_latest_portrait
+from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.relationship.emotion import compute_ai_pad, extract_emotion
 from app.services.relationship.intimacy import get_topic_intimacy
 from app.services.schedule_domain.schedule import (
@@ -78,10 +79,10 @@ def _unwrap(result: _T, default: _T, label: str) -> _T:
     return result
 
 
-def _format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_chars: int = 400) -> str:
+def format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_chars: int = 400) -> str:
     """Spec §3.2 AIPAD值判断 的 recent_context 输入：最近 N 条用户/AI 消息。"""
     if not messages_dicts:
-        return "（无）"
+        return EMPTY_RECENT_CONTEXT
     tail = messages_dicts[-turns:]
     lines: list[str] = []
     for m in tail:
@@ -94,7 +95,7 @@ def _format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_ch
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[-max_chars:]
-    return text or "（无）"
+    return text or EMPTY_RECENT_CONTEXT
 
 
 async def _load_portrait(user_id: str, agent_id: str | None) -> Any:
@@ -232,7 +233,7 @@ async def fetch_parallel_context(
     activity_label = (ai_status or {}).get("activity", "自由活动")
     time_info = get_current_time()
     current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
-    recent_context = _format_recent_context(messages_dicts)
+    recent_context = format_recent_context(messages_dicts)
 
     (
         relevance_result, retrieval_result,

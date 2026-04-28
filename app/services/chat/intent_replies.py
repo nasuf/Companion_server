@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
-from app.services.prompting.utils import pad_params, render_prompt
+from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, pad_params, render_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -435,11 +435,17 @@ async def banned_word_check(message: str) -> bool | None:
     return None
 
 
-async def attack_target_classify(message: str) -> str | None:
-    """§2.6 步骤 4：攻击目标识别。攻击AI / 攻击第三方 / 无负面意图 / 无目标脏话。"""
+async def attack_target_classify(
+    message: str, recent_context: str = EMPTY_RECENT_CONTEXT,
+) -> str | None:
+    """§2.6 步骤 4：攻击目标识别。攻击AI / 攻击第三方 / 无负面意图 / 无目标脏话.
+
+    `recent_context`: 最近几轮对话, 帮 LLM 在连续骂战里识别"你"指 AI
+    (e.g. 用户上轮骂"你个傻逼", 这轮"不然呢" 也是攻击 AI).
+    """
     return await _classify_label(
         "boundary.attack_target",
-        {"message": message},
+        {"message": message, "recent_context": recent_context},
         ("攻击AI", "攻击第三方", "无负面意图", "无目标脏话"),
     )
 

@@ -69,7 +69,7 @@ from app.services.chat.preflight import (
     resolve_pending_deletion,
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
-from app.services.chat.data_fetch_phase import fetch_parallel_context
+from app.services.chat.data_fetch_phase import fetch_parallel_context, format_recent_context
 from app.services.chat.post_process import (
     save_replies as _save_replies,
     run_post_process as _background_post_process,
@@ -329,6 +329,23 @@ async def stream_chat_response(
     else:
         tracer = LangSmithTracer(user_message, conversation_id).enter()
 
+    # 必须早于 boundary phase: spec §2.6 步骤 4 攻击目标识别需要最近几轮做上下文,
+    # 单看孤立含糊代词 ("不然呢") 时 LLM 无法判定 "你" 指 AI.
+    recent_messages = await db.message.find_many(
+        where={"conversationId": conversation_id},
+        order={"createdAt": "desc"},
+        take=30,
+    )
+    recent_messages.reverse()
+    messages_dicts = [
+        {
+            "role": m.role,
+            "content": m.content,
+            "createdAt": m.createdAt.isoformat() if getattr(m, "createdAt", None) else None,
+        }
+        for m in recent_messages
+    ]
+
     # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
     boundary_ctx = BoundaryPhaseCtx(
         conversation_id=conversation_id,
@@ -342,6 +359,7 @@ async def stream_chat_response(
         short_circuit_fn=_short_circuit_reply,
         fire_background_fn=_fire_background,
         bg_memory_pipeline_fn=_bg_memory_pipeline,
+        recent_context=format_recent_context(messages_dicts),
     )
     async for evt in run_boundary(boundary_ctx):
         yield evt
@@ -463,23 +481,6 @@ async def stream_chat_response(
             return
 
     # NOTE: SCHEDULE_ADJUST/SCHEDULE_QUERY/CURRENT_STATE 在 parallel data fetch 之后处理
-
-    # Load recent messages (for prompt context)
-    recent_messages = await db.message.find_many(
-        where={"conversationId": conversation_id},
-        order={"createdAt": "desc"},
-        take=30,
-    )
-    recent_messages.reverse()
-
-    messages_dicts = [
-        {
-            "role": m.role,
-            "content": m.content,
-            "createdAt": m.createdAt.isoformat() if getattr(m, "createdAt", None) else None,
-        }
-        for m in recent_messages
-    ]
 
     # 记录 LLM 数据拉取时刻能看到的最新 user 消息时间, 用于 scheduler dedup gate.
     # 若用户连发多条非碎片, 第一条 LLM 调用的 history 已经隐式包含后续所有 user
