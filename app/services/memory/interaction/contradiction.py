@@ -42,26 +42,23 @@ async def detect_l1_contradiction(
     Returns {"has_conflict": True, "old_memory_id": ..., "old_content": ...,
              "new_info": ..., "conflict_description": ...} or None.
     """
-    # spec §4.1: 输入 = 现有 L1 记忆摘要 + 用户当前提及内容. 全量取 L1
-    # (不按 mainCategory 过滤, 不 take 上限) 避免漏召高度子类 (如 身份/宠物) 的
-    # 真实矛盾. 安全网 take=300 防止极端情况 (单一 agent L1 不应超过 200 条).
-    l1_filter = {
-        "userId": user_id, "workspaceId": workspace_id,
-        "level": 1, "isArchived": False,
-    }
+    # spec §4.1: 输入 = "关于该用户的核心记忆" + 用户当前提及内容.
+    # 只取 source=user 的 L1 — AI 人设记忆 (e.g. "我在苏州长大" 描述的是 AI 自己)
+    # 跟"用户提了什么事实"无关, 混入会导致 LLM 把 AI 第一人称叙述误读为用户说的话
+    # (实测: 用户说"我是西安人", LLM 把 AI 的"在苏州长大"当成用户说过的, 误报矛盾).
+    # 全量取 L1 (不按 mainCategory 过滤, 不限 take), 安全网 300 防极端情况.
     l1_user = await memory_repo.find_many(
-        source="user", where=l1_filter,
+        source="user",
+        where={
+            "userId": user_id, "workspaceId": workspace_id,
+            "level": 1, "isArchived": False,
+        },
         order={"importance": "desc"}, take=300,
     )
-    l1_ai = await memory_repo.find_many(
-        source="ai", where=l1_filter,
-        order={"importance": "desc"}, take=300,
-    )
-    all_l1 = l1_user + l1_ai
-    if not all_l1:
+    if not l1_user:
         return None
 
-    l1_text = "\n".join(f"[{m.id}] {m.summary or m.content}" for m in all_l1)
+    l1_text = "\n".join(f"[{m.id}] {m.summary or m.content}" for m in l1_user)
 
     try:
         template = await get_prompt_text("memory.contradiction_detection")
