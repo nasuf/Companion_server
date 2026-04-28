@@ -57,8 +57,14 @@ async def _classify_relevance(user_message: str, context: str = "") -> str:
     return await classify_memory_relevance(user_message, context=context)
 
 
-async def _do_retrieval(user_message: str, user_id: str, workspace_id: str | None) -> dict:
-    return await hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
+async def _do_retrieval(
+    user_message: str, user_id: str, workspace_id: str | None,
+    recent_context: str = "",
+) -> dict:
+    return await hybrid_retrieve(
+        user_message, user_id,
+        workspace_id=workspace_id, recent_context=recent_context,
+    )
 
 
 _T = Any  # gather result type alias
@@ -234,7 +240,7 @@ async def fetch_parallel_context(
         time_memories_result, user_emotion_result, emotion_result,
     ) = await asyncio.gather(
         _classify_relevance(user_message, context=recent_context),
-        _do_retrieval(user_message, user_id, workspace_id),
+        _do_retrieval(user_message, user_id, workspace_id, recent_context=recent_context),
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times),

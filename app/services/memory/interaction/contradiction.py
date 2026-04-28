@@ -42,29 +42,20 @@ async def detect_l1_contradiction(
     Returns {"has_conflict": True, "old_memory_id": ..., "old_content": ...,
              "new_info": ..., "conflict_description": ...} or None.
     """
-    # Only load identity + lifestyle L1 memories — these are the categories
-    # where factual contradictions matter (name, age, location, job...).
-    # Loading ALL L1 (170+) would blow up token cost per message.
-    contradiction_categories = ("身份", "生活")
+    # spec §4.1: 输入 = 现有 L1 记忆摘要 + 用户当前提及内容. 全量取 L1
+    # (不按 mainCategory 过滤, 不 take 上限) 避免漏召高度子类 (如 身份/宠物) 的
+    # 真实矛盾. 安全网 take=300 防止极端情况 (单一 agent L1 不应超过 200 条).
+    l1_filter = {
+        "userId": user_id, "workspaceId": workspace_id,
+        "level": 1, "isArchived": False,
+    }
     l1_user = await memory_repo.find_many(
-        source="user",
-        where={
-            "userId": user_id, "workspaceId": workspace_id,
-            "level": 1, "isArchived": False,
-            "mainCategory": {"in": list(contradiction_categories)},
-        },
-        order={"importance": "desc"},
-        take=15,
+        source="user", where=l1_filter,
+        order={"importance": "desc"}, take=300,
     )
     l1_ai = await memory_repo.find_many(
-        source="ai",
-        where={
-            "userId": user_id, "workspaceId": workspace_id,
-            "level": 1, "isArchived": False,
-            "mainCategory": {"in": list(contradiction_categories)},
-        },
-        order={"importance": "desc"},
-        take=15,
+        source="ai", where=l1_filter,
+        order={"importance": "desc"}, take=300,
     )
     all_l1 = l1_user + l1_ai
     if not all_l1:
