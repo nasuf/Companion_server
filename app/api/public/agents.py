@@ -314,31 +314,22 @@ async def list_agents(
     user_id: str = Query(...),
     _user=Depends(require_user_self),
 ):
-    """列出该用户所有活跃 agents (按创建时间降序). workspace_id 取该 agent 当前
-    active workspace; 没有 active workspace 的 agent (provisioning 阶段刚建好但
-    workspace 未 activate) workspace_id 为 None, 前端可凭此排除. 多次 await
-    serial 拉 workspace 即可, 一个用户的 agents 个数不会大到需要并行优化.
-    """
-    agents = await db.aiagent.find_many(
-        where={"status": "active", "userId": user_id},
-        order={"createdAt": "desc"},
-    )
-    out: list[AgentResponse] = []
-    for a in agents:
-        ws = await get_active_workspace(agent_id=a.id)
-        out.append(AgentResponse(
+    agents = await db.aiagent.find_many(where={"status": "active", "userId": user_id})
+    return [
+        AgentResponse(
             id=a.id,
             name=a.name,
             user_id=a.userId,
-            workspace_id=ws.id if ws else None,
+            workspace_id=None,
             mbti=get_mbti(a),
             background=a.background,
             values=a.values,
             gender=a.gender,
             life_overview=a.lifeOverview,
             created_at=str(a.createdAt),
-        ))
-    return out
+        )
+        for a in agents
+    ]
 
 
 @router.patch("/{agent_id}", response_model=AgentResponse)
