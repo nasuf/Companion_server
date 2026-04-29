@@ -21,6 +21,8 @@ from app.services.interaction.boundary import (
     adjust_patience,
     check_banned_keywords,
     check_boundary,
+    compute_repeat_deduction,
+    detect_apology,
     generate_boundary_response,
     get_patience,
     get_patience_zone,
@@ -121,9 +123,17 @@ class TestPatienceRedis:
         assert val == 0
 
     async def test_adjust_patience(self, patch_boundary_redis):
-        patch_boundary_redis.get.return_value = "80"
+        # 现在 adjust_patience 走 Redis Lua, eval 返结果即新值
+        patch_boundary_redis.eval = AsyncMock(return_value=65)
         val = await adjust_patience("agent1", "user1", -15)
         assert val == 65
+        # 验证 Lua script 被调用 + 关键词 KEYS/ARGV 顺序
+        patch_boundary_redis.eval.assert_awaited_once()
+        call_args = patch_boundary_redis.eval.await_args.args
+        assert call_args[1] == 1  # numkeys
+        assert "patience" in call_args[2]  # KEYS[1] = patience key
+        assert call_args[3] == "-15"  # ARGV[1] = delta
+        assert call_args[4] == "100"  # ARGV[2] = PATIENCE_MAX
 
     async def test_recover_hourly_normal(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "50"
@@ -158,12 +168,16 @@ class TestHandleApology:
         assert val == PATIENCE_NORMAL_MIN  # 70
 
     async def test_apology_from_low_adds_70(self, patch_boundary_redis):
+        # 非拉黑分支走 adjust_patience (Lua eval); mock eval 返新值
         patch_boundary_redis.get.return_value = "20"
+        patch_boundary_redis.eval = AsyncMock(return_value=90)
         val = await handle_apology("agent1", "user1")
         assert val == 90  # spec §2.5: 20 + 70
 
     async def test_apology_from_high_caps_at_100(self, patch_boundary_redis):
+        # Lua 内部 clamp 到 PATIENCE_MAX, mock 直接返 100
         patch_boundary_redis.get.return_value = "80"
+        patch_boundary_redis.eval = AsyncMock(return_value=100)
         val = await handle_apology("agent1", "user1")
         assert val == 100  # min(80 + 70, 100)
 
@@ -277,3 +291,94 @@ class TestRecordAttackZset:
         assert count == 0
         pipe.zadd.assert_not_called()
         redis.zcard.assert_not_called()
+
+
+# --- compute_repeat_deduction: spec §2.4 重复加重公式 ---
+
+class TestComputeRepeatDeduction:
+    """⌈base × (1 + 0.5 × (n-1))⌉，受 cap 限制."""
+
+    def test_first_attack_returns_base(self):
+        # K1: base=5, n=1 → 5
+        assert compute_repeat_deduction("K1", 1) == 5
+        assert compute_repeat_deduction("K2", 1) == 15
+        assert compute_repeat_deduction("K3", 1) == 40
+
+    def test_second_attack_uses_1_5_multiplier(self):
+        # K1: 5 × 1.5 = 7.5 → ceil = 8
+        assert compute_repeat_deduction("K1", 2) == 8
+        # K2: 15 × 1.5 = 22.5 → ceil = 23 → capped at 25
+        assert compute_repeat_deduction("K2", 2) == 23
+        # K3: 40 × 1.5 = 60 → capped at 50
+        assert compute_repeat_deduction("K3", 2) == 50
+
+    def test_third_attack_uses_2x_multiplier(self):
+        # K1: 5 × 2 = 10 → exactly cap
+        assert compute_repeat_deduction("K1", 3) == 10
+
+    def test_fourth_attack_caps_at_level_max(self):
+        # K1: 5 × 2.5 = 12.5 → ceil = 13 → capped at 10
+        assert compute_repeat_deduction("K1", 4) == 10
+        # K2: 15 × 2.5 = 37.5 → ceil = 38 → capped at 25
+        assert compute_repeat_deduction("K2", 4) == 25
+        # K3 早就 cap 在第 2 次 (60 → 50), 后续也是 50
+        assert compute_repeat_deduction("K3", 4) == 50
+
+    def test_high_count_stays_at_cap(self):
+        for n in (10, 50, 100):
+            assert compute_repeat_deduction("K1", n) == 10
+            assert compute_repeat_deduction("K2", n) == 25
+            assert compute_repeat_deduction("K3", n) == 50
+
+    def test_zero_or_negative_count_treated_as_one(self):
+        # n = max(1, count) 内部 clamp
+        assert compute_repeat_deduction("K1", 0) == 5
+        assert compute_repeat_deduction("K1", -3) == 5
+
+    def test_unknown_level_falls_back_to_k1_base(self):
+        assert compute_repeat_deduction("unknown", 1) == 5  # base default
+        assert compute_repeat_deduction("unknown", 100) == 10  # cap default
+
+
+# --- detect_apology LLM 失败兑底 (P2-7 防永久困死) ---
+
+@pytest.mark.asyncio
+class TestDetectApologyFallback:
+    async def test_llm_failure_with_keyword_grants_threshold_sincerity(self):
+        """LLM down + 含道歉关键词 → 返 sincerity=0.5 让 _handle_blocked 阈值通过."""
+        with patch(
+            "app.services.interaction.boundary.get_prompt_text",
+            AsyncMock(return_value="判断{message}"),
+        ), patch(
+            "app.services.interaction.boundary.invoke_json",
+            AsyncMock(side_effect=RuntimeError("LLM timeout")),
+        ):
+            result = await detect_apology("对不起我错了")
+        assert result["is_apology"] is True
+        assert result["sincerity"] == 0.5
+
+    async def test_llm_failure_without_keyword_no_unblock(self):
+        """LLM down + 无关键词 → 维持原 sincerity=0.0, 不解封."""
+        with patch(
+            "app.services.interaction.boundary.get_prompt_text",
+            AsyncMock(return_value="判断{message}"),
+        ), patch(
+            "app.services.interaction.boundary.invoke_json",
+            AsyncMock(side_effect=RuntimeError("LLM timeout")),
+        ):
+            result = await detect_apology("我反思了一下")  # 无关键词
+        assert result["is_apology"] is False
+        assert result["sincerity"] == 0.0
+
+    async def test_llm_success_overrides_keyword(self):
+        """LLM 正常返回时 fallback 不触发, 以 LLM 判定为准."""
+        with patch(
+            "app.services.interaction.boundary.get_prompt_text",
+            AsyncMock(return_value="判断{message}"),
+        ), patch(
+            "app.services.interaction.boundary.invoke_json",
+            AsyncMock(return_value={"is_apology": False, "sincerity": 0.1}),
+        ):
+            result = await detect_apology("对不起")  # 即便有关键词
+        assert result["is_apology"] is False
+        assert result["sincerity"] == 0.1

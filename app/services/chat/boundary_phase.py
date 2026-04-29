@@ -178,10 +178,14 @@ async def _handle_attack_ai(
 ) -> AsyncGenerator[dict, None]:
     """spec §2.6 步骤 5：攻击 AI → 级别识别 + 扣分 + 按扣分后 patience 选 prompt。
 
-    扣分走 await 完成 (spec §5.3 "重新判定耐心状态") 才选 §5.4 的 prompt。
+    扣分走 await 完成 (spec §5.3 "重新判定耐心状态") 才选 §5.4 的 prompt.
 
-    PM 补丁规则: 扣分后 patience < FINAL_WARNING_PATIENCE_THRESHOLD → 用指令模版
-    「最终警告」prompt 覆写 K1/K2/K3 (patience 已明显透支, 三档基线文案不匹配).
+    Patience 路由:
+    - 扣分后 ≤ 0  → 已进入拉黑态, 当条直接走 blacklist 回复 + zone="blocked"
+                    metadata.becomes_blocked=True (spec §2.6: patience ≤ 0 即拉黑,
+                    当条还说"最终警告"会让用户困惑"明明警告又给拉黑").
+    - 扣分后 < 20 → final_warning prompt 覆写 K1/K2/K3 (PM 补丁规则).
+    - 否则        → K1/K2/K3 分档回复.
     """
     attack_level = await attack_level_classify(ctx.user_message)
 
@@ -196,17 +200,30 @@ async def _handle_attack_ai(
         if new_patience is not None:
             ctx.cached_patience = new_patience
 
-    is_final_warning = ctx.cached_patience < FINAL_WARNING_PATIENCE_THRESHOLD
-    response = await generate_boundary_reply_llm(
-        zone=zone,
-        message=ctx.user_message,
-        personality_brief=_personality_brief(ctx.agent),
-        attack_level=None if is_final_warning else attack_level,
-        final_warning=is_final_warning,
-    ) or boundary_result.get("fallback", "...")
-    metadata = {"boundary": True, "zone": zone, "attack_level": attack_level}
-    if is_final_warning:
-        metadata["final_warning"] = True
+    if ctx.cached_patience <= 0:
+        # 当条扣到拉黑: 走 blacklist 路径而非 final_warning, 立刻通知用户.
+        response = await generate_boundary_reply_llm(
+            zone="blocked",
+            message=ctx.user_message,
+            personality_brief=_personality_brief(ctx.agent),
+        ) or boundary_result.get("fallback", "...")
+        metadata = {
+            "boundary": True, "zone": "blocked",
+            "attack_level": attack_level, "becomes_blocked": True,
+        }
+    else:
+        is_final_warning = ctx.cached_patience < FINAL_WARNING_PATIENCE_THRESHOLD
+        response = await generate_boundary_reply_llm(
+            zone=zone,
+            message=ctx.user_message,
+            personality_brief=_personality_brief(ctx.agent),
+            attack_level=None if is_final_warning else attack_level,
+            final_warning=is_final_warning,
+        ) or boundary_result.get("fallback", "...")
+        metadata = {"boundary": True, "zone": zone, "attack_level": attack_level}
+        if is_final_warning:
+            metadata["final_warning"] = True
+
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
     # 攻击场景的回复 ("不要这样跟我说话") 是边界程序化反应, 同样不进记忆管线.

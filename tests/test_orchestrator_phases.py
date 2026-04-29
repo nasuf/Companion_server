@@ -274,6 +274,38 @@ async def test_boundary_attack_ai_prompt_selection(
 
 
 @pytest.mark.asyncio
+async def test_boundary_attack_to_zero_routes_to_blacklist_not_final_warning():
+    """P2-6: 当条扣到 ≤ 0 → 走 blacklist 回复 + zone='blocked' + becomes_blocked=True.
+    旧行为: 走 final_warning 让用户当条看到"最终警告", 下条才被拉黑 → 困惑.
+    新行为: 立刻通知用户已进入拉黑态, 行为对齐 spec §2.6 patience ≤ 0 即拉黑.
+    """
+    from app.services.chat.boundary_phase import run_boundary
+
+    ctx = _make_boundary_ctx()
+    reply_mock = AsyncMock(return_value="不想理你了")
+    violation_mock = AsyncMock(return_value=0)  # 扣分后 patience=0
+    with _patch_attack_ai_flow(
+        zone="low", cached_patience=20, attack_level="K3",
+        reply_mock=reply_mock, violation_mock=violation_mock,
+    ):
+        await _drain(run_boundary(ctx))
+
+    # generate_boundary_reply_llm 应以 zone='blocked' 调用 (不是 'low')
+    reply_kwargs = reply_mock.call_args.kwargs
+    assert reply_kwargs["zone"] == "blocked"
+    # 不该带 attack_level / final_warning kwargs (走 blacklist 路径不传这两个)
+    assert "attack_level" not in reply_kwargs or reply_kwargs.get("attack_level") is None
+    assert reply_kwargs.get("final_warning") in (False, None)
+
+    meta = ctx.short_circuit_fn.call_args.kwargs["extra_metadata"]
+    assert meta["zone"] == "blocked"
+    assert meta["becomes_blocked"] is True
+    assert meta["attack_level"] == "K3"  # 仍记录 attack_level 供审计
+    assert ctx.stopped is True
+    assert ctx.cached_patience == 0
+
+
+@pytest.mark.asyncio
 async def test_boundary_attack_ai_violation_failure_falls_back_to_cached_patience():
     """process_boundary_violation 抛异常 → 回退 ctx.cached_patience 做阈值判断, 不阻断回复."""
     from app.services.chat.boundary_phase import run_boundary

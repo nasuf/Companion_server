@@ -116,13 +116,58 @@ async def init_patience(agent_id: str, user_id: str) -> int:
     return await set_patience(agent_id, user_id, PATIENCE_MAX)
 
 
+# Lua: 原子 read-modify-write + clamp [0, PATIENCE_MAX]. 老 get→set 两步组合
+# 在并发场景 (sub-intent 并行 process_boundary_violation) 会丢分; Lua 在 Redis
+# 端单线程执行杜绝 race.
+# ARGV[2] 既是 GET NIL 默认值也是上限 clamp — 跟 get_patience miss 时返
+# PATIENCE_MAX 的语义一致 (调用方有责任先 await get_patience 暖 Redis 防 cold-start
+# 漏掉 DB 中的低 patience 状态).
+_ADJUST_PATIENCE_LUA = """
+local cur = tonumber(redis.call('GET', KEYS[1]) or ARGV[2])
+local v = cur + tonumber(ARGV[1])
+if v < 0 then v = 0 end
+if v > tonumber(ARGV[2]) then v = tonumber(ARGV[2]) end
+redis.call('SET', KEYS[1], v)
+return v
+"""
+
+
 async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:
     """调整耐心值（正数恢复，负数扣除）。返回新值。
 
+    Redis 端用 Lua 原子化 read-modify-write, 防并发扣分丢分 (e.g. sub-intent
+    并行触发 process_boundary_violation 时). 调用方通过 get_patience 暖 Redis
+    防 cold-start 漏 DB 状态 (Redis miss → Lua 默认 PATIENCE_MAX → 累积低 patience
+    被静默重置).
+
     spec §2 拉黑恢复只能走道歉路径 (handle_apology), 不做超时自动解封.
     """
-    current = await get_patience(agent_id, user_id)
-    return await set_patience(agent_id, user_id, current + delta)
+    # 暖 Redis: get_patience miss 时回填 DB 值, 防 cold-start 漏 DB 持久化的低 patience.
+    await get_patience(agent_id, user_id)
+
+    redis = await get_redis()
+    new_val = int(await redis.eval(
+        _ADJUST_PATIENCE_LUA, 1,
+        _patience_key(agent_id, user_id), str(delta), str(PATIENCE_MAX),
+    ))
+
+    # DB 持久化: best-effort, Redis 已是 source of truth, 失败仅丢跨重启状态.
+    try:
+        await db.patiencestate.upsert(
+            where={"agentId_userId": {"agentId": agent_id, "userId": user_id}},
+            data={
+                "create": {
+                    "agent": {"connect": {"id": agent_id}},
+                    "user": {"connect": {"id": user_id}},
+                    "value": new_val,
+                },
+                "update": {"value": new_val},
+            },
+        )
+    except Exception as e:
+        logger.warning(f"DB patience persist (atomic adjust) failed: {e}")
+
+    return new_val
 
 
 async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
@@ -379,12 +424,27 @@ async def detect_apology(message: str) -> dict:
             "sincerity": float(result.get("sincerity", 0.0)),
         }
     except Exception as e:
+        # LLM 失败 fallback: 关键词级保守判定. 防 LLM 长时间 down 时拉黑用户即便发
+        # "对不起 + 长篇解释" 也无法解封 (自然恢复 +10/h 对 ≤0 也跳过, 永久困死).
+        # 命中关键词 → 给临界 sincerity=0.5, 让 _handle_blocked 的阈值检查通过解封;
+        # 牺牲一点真诚度判定准度避免硬伤. 不命中 → 维持原行为不解封.
+        has_keyword = any(kw in message for kw in APOLOGY_KEYWORDS)
+        if has_keyword:
+            logger.warning(
+                f"Apology detection LLM failed ({e}); keyword fallback granted "
+                f"sincerity=0.5 for: {message[:60]}"
+            )
+            return {"is_apology": True, "sincerity": 0.5}
         logger.warning(f"Apology detection failed: {e}")
         return {"is_apology": False, "sincerity": 0.0}
 
 
 async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_floor: int) -> int:
-    """恢复耐心值的共享逻辑：非拉黑+delta（上限100），拉黑恢复到blocked_floor。"""
+    """恢复耐心值的共享逻辑：非拉黑 +delta (上限 100, 走原子 adjust), 拉黑恢复到 blocked_floor.
+
+    拉黑分支用 set_patience 显式重写 (不是 delta 操作), 非拉黑分支走 adjust_patience
+    Lua 原子化防 race.
+    """
     current = await get_patience(agent_id, user_id)
     if current <= 0:
         new_val = await set_patience(agent_id, user_id, blocked_floor)
@@ -393,7 +453,7 @@ async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_flo
             f"reason=apology_unblock current=0 new={new_val}"
         )
         return new_val
-    new_val = await set_patience(agent_id, user_id, min(PATIENCE_MAX, current + delta))
+    new_val = await adjust_patience(agent_id, user_id, +delta)
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
         f"reason=restore delta=+{delta} current={current} new={new_val}"
@@ -423,7 +483,7 @@ async def check_positive_recovery(
     if current >= PATIENCE_MAX:
         return current
 
-    new_val = await set_patience(agent_id, user_id, current + 20)
+    new_val = await adjust_patience(agent_id, user_id, +20)
     logger.info(f"Positive recovery: agent={agent_id} user={user_id} +20 → {new_val}")
     return new_val
 
@@ -513,8 +573,8 @@ async def process_boundary_violation(
 
     count = await record_attack(agent_id, user_id, level=attack_level)
     deduction = compute_repeat_deduction(attack_level, count if count > 0 else 1)
-    # 直接 set_patience 避免 adjust_patience 再查一次 get_patience (热路径省 1 Redis GET)
-    new_val = await set_patience(agent_id, user_id, current - deduction)
+    # adjust_patience 走 Lua 原子化, 防 sub-intent 并行扣分丢分.
+    new_val = await adjust_patience(agent_id, user_id, -deduction)
 
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
