@@ -87,18 +87,83 @@ def _patch_attack_ai_flow(
 
 
 @pytest.mark.asyncio
-async def test_boundary_sub_intent_mode_skips_redis():
-    """sub_intent_mode=True 直接复用 parent_patience，不读 Redis、不产出事件。"""
+async def test_boundary_sub_intent_mode_skips_redis_when_clean():
+    """sub_intent_mode=True + 子片段干净 → 复用 parent_patience, 不读 Redis, 不产出事件.
+    (spec §2.6: 父调用已检查整体, 这里仅对 fragment 做违禁词扫描.)
+    """
     from app.services.chat.boundary_phase import run_boundary
 
-    ctx = _make_boundary_ctx(sub_intent_mode=True, parent_patience=42)
-    with patch("app.services.chat.boundary_phase.check_boundary") as mock_check:
+    ctx = _make_boundary_ctx(sub_intent_mode=True, parent_patience=42, user_message="你好")
+    with patch("app.services.chat.boundary_phase.check_boundary") as mock_check, patch(
+        "app.services.chat.boundary_phase._maybe_llm_banned_check",
+        AsyncMock(return_value=None),
+    ):
         events = await _drain(run_boundary(ctx))
 
-    mock_check.assert_not_called()
+    mock_check.assert_not_called()  # sub-intent 不重读 patience
     assert events == []
     assert ctx.stopped is False
     assert ctx.cached_patience == 42
+
+
+@pytest.mark.asyncio
+async def test_boundary_sub_intent_banned_keyword_caught():
+    """sub_intent fragment 含违禁词 → 走攻击路径短路, 防多意图拆分后子片段绕过边界."""
+    from app.services.chat.boundary_phase import run_boundary
+
+    ctx = _make_boundary_ctx(sub_intent_mode=True, parent_patience=80, user_message="你这个垃圾AI")
+    with patch(
+        "app.services.chat.boundary_phase.check_banned_keywords",
+        return_value=["垃圾AI"],
+    ), patch(
+        "app.services.chat.boundary_phase.attack_level_classify",
+        AsyncMock(return_value="K1"),
+    ), patch(
+        "app.services.chat.boundary_phase.process_boundary_violation",
+        AsyncMock(return_value=75),
+    ), patch(
+        "app.services.chat.boundary_phase.generate_boundary_reply_llm",
+        AsyncMock(return_value="别这样说"),
+    ):
+        events = await _drain(run_boundary(ctx))
+
+    # 触发了攻击短路
+    ctx.short_circuit_fn.assert_awaited_once()
+    assert ctx.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_boundary_sub_intent_llm_fallback_catches_obfuscated():
+    """sub_intent fragment 关键词没命中但 LLM 兜底判违禁 → 仍被拦.
+    覆盖谐音/缩写/新造词 (e.g. 草字头变体) 绕过关键词表的场景.
+    """
+    from app.services.chat.boundary_phase import run_boundary
+
+    ctx = _make_boundary_ctx(sub_intent_mode=True, parent_patience=50, user_message="你这个**ai")
+    with patch(
+        "app.services.chat.boundary_phase.check_banned_keywords",
+        return_value=[],  # 关键词表没命中
+    ), patch(
+        "app.services.chat.boundary_phase._maybe_llm_banned_check",
+        AsyncMock(return_value={"zone": "medium", "blocked": False, "hits": [], "fallback": "..."}),
+    ), patch(
+        "app.services.chat.boundary_phase.attack_target_classify",
+        AsyncMock(return_value="攻击AI"),
+    ), patch(
+        "app.services.chat.boundary_phase.attack_level_classify",
+        AsyncMock(return_value="K2"),
+    ), patch(
+        "app.services.chat.boundary_phase.process_boundary_violation",
+        AsyncMock(return_value=35),
+    ), patch(
+        "app.services.chat.boundary_phase.generate_boundary_reply_llm",
+        AsyncMock(return_value="不喜欢你这样说话"),
+    ):
+        await _drain(run_boundary(ctx))
+
+    # LLM 兜底判违禁 → 仍走攻击短路
+    ctx.short_circuit_fn.assert_awaited_once()
+    assert ctx.stopped is True
 
 
 @pytest.mark.asyncio
@@ -122,8 +187,8 @@ async def test_boundary_blocked_zone_no_apology_falls_through():
     ctx.short_circuit_fn.assert_awaited_once()
     kwargs = ctx.short_circuit_fn.call_args.kwargs
     assert kwargs["extra_metadata"] == {"boundary": True, "zone": "blocked"}
-    # P3.1 后只 fire memory_pipeline（不再 fire apology_check）
-    assert ctx.fire_background_fn.call_count == 1
+    # P1-5: 拉黑回复不再 fire memory_pipeline (防污染 AI 自我记忆)
+    assert ctx.fire_background_fn.call_count == 0
     ctx.tracer.close.assert_called_once()
     assert ctx.stopped is True
     assert len(events) == 2

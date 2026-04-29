@@ -121,3 +121,76 @@ async def test_run_post_process_skips_agent_only_tasks_when_no_agent():
     # agent-only 跳过
     t.assert_not_called()
     pr.assert_not_called()
+
+
+# --- _bg_positive_recovery: spec §2.5 LLM 语义判定门 ---
+
+
+@pytest.mark.asyncio
+async def test_bg_positive_recovery_skipped_for_neutral_message():
+    """中性应答 (嗯/哦) → positive_interaction_check 返 False → 不调 +20."""
+    from app.services.chat import post_process
+
+    with patch.object(post_process, "get_patience", AsyncMock(return_value=80)), patch.object(
+        post_process, "positive_interaction_check", AsyncMock(return_value=False),
+    ), patch.object(post_process, "check_positive_recovery", AsyncMock()) as cpr:
+        await post_process._bg_positive_recovery("a1", "u1", "嗯")
+
+    cpr.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bg_positive_recovery_fires_for_positive_message():
+    """感谢/善意 + patience 在恢复区间 → LLM 返 True → +20."""
+    from app.services.chat import post_process
+
+    with patch.object(post_process, "get_patience", AsyncMock(return_value=60)), patch.object(
+        post_process, "positive_interaction_check", AsyncMock(return_value=True),
+    ), patch.object(post_process, "check_positive_recovery", AsyncMock()) as cpr:
+        await post_process._bg_positive_recovery("a1", "u1", "谢谢你")
+
+    cpr.assert_awaited_once_with("a1", "u1")
+
+
+@pytest.mark.asyncio
+async def test_bg_positive_recovery_skipped_at_patience_cap():
+    """患者 patience=100 时 +20 必然 no-op, 跳 LLM 调用省 ~200ms qwen-flash."""
+    from app.services.chat import post_process
+
+    pic = AsyncMock(return_value=True)
+    with patch.object(post_process, "get_patience", AsyncMock(return_value=100)), patch.object(
+        post_process, "positive_interaction_check", pic,
+    ), patch.object(post_process, "check_positive_recovery", AsyncMock()) as cpr:
+        await post_process._bg_positive_recovery("a1", "u1", "谢谢你")
+
+    pic.assert_not_called()  # LLM 不该被调
+    cpr.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bg_positive_recovery_skipped_when_blocked():
+    """patience ≤ 0 时也跳过 LLM 与 +20: 拉黑只能靠真诚道歉解封, 不走正向恢复."""
+    from app.services.chat import post_process
+
+    pic = AsyncMock(return_value=True)
+    with patch.object(post_process, "get_patience", AsyncMock(return_value=0)), patch.object(
+        post_process, "positive_interaction_check", pic,
+    ), patch.object(post_process, "check_positive_recovery", AsyncMock()) as cpr:
+        await post_process._bg_positive_recovery("a1", "u1", "谢谢你")
+
+    pic.assert_not_called()
+    cpr.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bg_positive_recovery_swallows_exception():
+    """positive_interaction_check 异常时不抛, 走 fallback (不发放恢复)."""
+    from app.services.chat import post_process
+
+    with patch.object(post_process, "get_patience", AsyncMock(return_value=60)), patch.object(
+        post_process, "positive_interaction_check",
+        AsyncMock(side_effect=RuntimeError("LLM down")),
+    ), patch.object(post_process, "check_positive_recovery", AsyncMock()) as cpr:
+        await post_process._bg_positive_recovery("a1", "u1", "谢谢你")
+
+    cpr.assert_not_called()

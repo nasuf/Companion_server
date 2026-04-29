@@ -48,6 +48,7 @@ from app.services.prompting.defaults import (
     MEMORY_RELEVANCE_PROMPT,
     PERSONALITY_RULES_PROMPT,
     PORTRAIT_GENERATION_PROMPT,
+    POSITIVE_INTERACTION_PROMPT,
     PORTRAIT_UPDATE_PROMPT,
     PROACTIVE_SILENCE_PLAIN_PROMPT,
     PROACTIVE_SILENCE_AI_MEMORY_PROMPT,
@@ -369,6 +370,12 @@ PROMPT_DEFINITIONS = [
         "《终稿·第三部分 交互系统》§2.6: 判断消息是否含违禁内容 (谐音 / 缩写 / 涉黄涉暴等), "
         "语义级兜底关键词漏判.",
         BANNED_WORD_PROMPT,
+    ),
+    PromptDefinition(
+        "boundary.positive_interaction", "正向互动判断", "边界系统", "边界",
+        "《终稿·第三部分 交互系统》§2.5: 判断消息是否构成正向互动 (感谢/善意/积极反馈/正向情绪), "
+        "用于门控 +20 耐心恢复, 防中性应答与普通问询滥发.",
+        POSITIVE_INTERACTION_PROMPT,
     ),
     PromptDefinition(
         "boundary.light_attack_reply", "轻度攻击回复(K1)", "边界系统", "边界",

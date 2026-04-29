@@ -435,6 +435,17 @@ async def banned_word_check(message: str) -> bool | None:
     return None
 
 
+async def positive_interaction_check(message: str) -> bool:
+    """spec §2.5 正向互动: 小模型判定用户消息是否表达感谢/善意/积极反馈/正向情绪.
+    返回 True 才让 +20 耐心恢复生效, 防中性应答 (嗯/哦/好) 也加分.
+    LLM 失败/歧义 → 保守返 False, 不发放恢复.
+    """
+    label = await _classify_label(
+        "boundary.positive_interaction", {"message": message}, ("是", "否"),
+    )
+    return label == "是"
+
+
 async def attack_target_classify(
     message: str, recent_context: str = EMPTY_RECENT_CONTEXT,
 ) -> str | None:
@@ -530,6 +541,7 @@ __all__ = [
     "unified_intent_recognize",
     "split_multi_intent",
     "banned_word_check",
+    "positive_interaction_check",
     "attack_target_classify",
     "attack_level_classify",
     "l3_trigger_classify",

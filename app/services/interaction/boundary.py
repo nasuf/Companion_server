@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import random
+import time
+import uuid
 from pathlib import Path
 
 from app.db import db
@@ -217,17 +219,41 @@ def _attack_history_key(agent_id: str, user_id: str, level: str | None = None) -
     return f"attack_history:{agent_id}:{user_id}"
 
 
+_ATTACK_WINDOW_SECONDS = 86400  # spec §2.4: 24h 滚动窗口
+_ATTACK_KEY_TTL = _ATTACK_WINDOW_SECONDS * 2  # 48h 兜底自动回收闲置 key
+
+
 async def record_attack(agent_id: str, user_id: str, level: str | None = None) -> int:
-    """记录攻击事件 24h 过期。若提供 level，同时累计该级别次数。返回同级别当日累计次数。"""
+    """记录攻击事件并返回同级别 24h 滚动窗口内累计次数 (spec §2.4).
+
+    用 Redis ZSET 实现真滚动窗口: ZADD 时间戳 score, 读时 ZREMRANGEBYSCORE
+    清掉 24h 前的条目, ZCARD 返活跃 count. 旧 INCR + EXPIRE 实现每次刷 TTL,
+    用户每 23h 攻击一次 count 永不归零, 不符合 spec '24h 内 n 次'.
+
+    无 level 的总计数 key 仅用于聚合统计, 不参与扣分公式, 行为保留.
+    """
     redis = await get_redis()
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - _ATTACK_WINDOW_SECONDS * 1000
+
     pipe = redis.pipeline()
+    # 总计数 key (聚合统计用) — 保留旧 INCR 行为
     pipe.incr(_attack_history_key(agent_id, user_id))
-    pipe.expire(_attack_history_key(agent_id, user_id), 86400)
+    pipe.expire(_attack_history_key(agent_id, user_id), _ATTACK_WINDOW_SECONDS)
+
     if level:
-        pipe.incr(_attack_history_key(agent_id, user_id, level))
-        pipe.expire(_attack_history_key(agent_id, user_id, level), 86400)
-    results = await pipe.execute()
-    return int(results[-2]) if level else 0
+        key = _attack_history_key(agent_id, user_id, level)
+        # member 用 timestamp + 短 uuid 防同毫秒冲突, score = timestamp
+        member = f"{now_ms}:{uuid.uuid4().hex[:6]}"
+        pipe.zadd(key, {member: now_ms})
+        pipe.zremrangebyscore(key, 0, cutoff_ms)
+        pipe.expire(key, _ATTACK_KEY_TTL)
+        await pipe.execute()
+        # 单独 ZCARD 而非塞进 pipe — 避免 magic index, 多一次 RTT 但可读.
+        return int(await redis.zcard(key))
+
+    await pipe.execute()
+    return 0
 
 
 # spec §2.4 基础扣分与上限

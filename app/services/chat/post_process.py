@@ -22,7 +22,12 @@ from typing import Any, Literal
 from prisma import Json
 
 from app.db import db
-from app.services.interaction.boundary import check_positive_recovery
+from app.services.chat.intent_replies import positive_interaction_check
+from app.services.interaction.boundary import (
+    PATIENCE_MAX,
+    check_positive_recovery,
+    get_patience,
+)
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.memory.recording.watermark import get_watermark, set_watermark
 from app.services.relationship.emotion import save_ai_emotion
@@ -217,9 +222,23 @@ async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
         logger.warning(f"Background trait adjustment failed: {e}")
 
 
-async def _bg_positive_recovery(agent_id: str, user_id: str) -> None:
-    """spec §2.5：正向互动 +20 耐心（仅对通过边界检查的消息）。"""
+async def _bg_positive_recovery(
+    agent_id: str, user_id: str, user_message: str,
+) -> None:
+    """spec §2.5：正向互动 +20 耐心 (仅对感谢/善意/积极反馈/正向情绪类消息生效).
+
+    LLM 语义判定门: 防中性应答 (嗯/哦/好) + 普通问询滥发 +20, 后者会等价为
+    "3 倍速自然恢复". LLM 判定失败 → 保守不发放, 走自然 +10/h 路径.
+
+    优化: 患者 patience 已满或拉黑时, +20 必然 no-op (check_positive_recovery
+    内部会 early-return), 跳过 LLM 调用省 ~200ms qwen-flash 成本.
+    """
     try:
+        patience = await get_patience(agent_id, user_id)
+        if patience >= PATIENCE_MAX or patience <= 0:
+            return
+        if not await positive_interaction_check(user_message):
+            return
         await check_positive_recovery(agent_id, user_id)
     except Exception as e:
         logger.warning(f"Background positive recovery failed: {e}")
@@ -254,7 +273,7 @@ async def run_post_process(
         ]
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
-            tasks.append(_bg_positive_recovery(agent_id, user_id))
+            tasks.append(_bg_positive_recovery(agent_id, user_id, user_message))
             if ai_emotion:
                 tasks.append(save_ai_emotion(agent_id, ai_emotion))
         await asyncio.gather(*tasks, return_exceptions=True)

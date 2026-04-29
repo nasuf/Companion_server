@@ -10,6 +10,8 @@
 - 热路径边界检查
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from app.services.interaction.boundary import (
@@ -214,3 +216,64 @@ class TestCheckBoundary:
         assert result["blocked"] is True
         assert result["zone"] == "blocked"
         assert patience == 0
+
+
+# --- record_attack: 24h ZSET 滚动窗口 (spec §2.4) ---
+
+@pytest.mark.asyncio
+class TestRecordAttackZset:
+    async def _run_record_attack(self, level, zcard_return):
+        """复用模板: mock pipeline + redis.zcard, 调用 record_attack 并返回 (count, pipe, redis)."""
+        from app.services.interaction.boundary import record_attack
+
+        pipe = MagicMock()
+        pipe.incr = MagicMock()
+        pipe.expire = MagicMock()
+        pipe.zadd = MagicMock()
+        pipe.zremrangebyscore = MagicMock()
+        pipe.execute = AsyncMock(return_value=[1, 1, 1, 0, 1])
+
+        redis = AsyncMock()
+        redis.pipeline = MagicMock(return_value=pipe)
+        redis.zcard = AsyncMock(return_value=zcard_return)
+
+        with patch("app.services.interaction.boundary.get_redis", return_value=redis):
+            count = await record_attack("agent1", "user1", level=level)
+        return count, pipe, redis
+
+    async def test_record_attack_uses_zset_pipeline(self):
+        """K1 攻击应走 ZADD + ZREMRANGEBYSCORE + ZCARD 真滚动窗口流程."""
+        count, pipe, redis = await self._run_record_attack("K1", zcard_return=3)
+        assert count == 3  # 真实 24h 内累计
+        pipe.zadd.assert_called_once()
+        pipe.zremrangebyscore.assert_called_once()
+        # 验证 cutoff: ZREMRANGEBYSCORE key 0 (now - 86400_000)
+        args = pipe.zremrangebyscore.call_args.args
+        assert args[1] == 0
+        assert isinstance(args[2], int) and args[2] > 0
+        redis.zcard.assert_awaited_once()
+
+    async def test_record_attack_cleans_24h_old_entries(self):
+        """ZREMRANGEBYSCORE 区间应跨 24h 边界, 老条目被清理后 ZCARD 仅返活跃."""
+        # 模拟 ZSET 内原有 5 条, 4 条被清掉, ZCARD 返 1
+        count, _pipe, _redis = await self._run_record_attack("K3", zcard_return=1)
+        assert count == 1
+
+    async def test_record_attack_no_level_returns_zero(self):
+        """无 level (聚合统计 key) 仍走旧 INCR 路径, 返 0, 不走 ZSET."""
+        from app.services.interaction.boundary import record_attack
+
+        pipe = MagicMock()
+        pipe.incr = MagicMock()
+        pipe.expire = MagicMock()
+        pipe.zadd = MagicMock()  # 应不被调
+        pipe.execute = AsyncMock(return_value=[1, 1])
+        redis = AsyncMock()
+        redis.pipeline = MagicMock(return_value=pipe)
+        redis.zcard = AsyncMock()
+
+        with patch("app.services.interaction.boundary.get_redis", return_value=redis):
+            count = await record_attack("agent1", "user1")
+        assert count == 0
+        pipe.zadd.assert_not_called()
+        redis.zcard.assert_not_called()

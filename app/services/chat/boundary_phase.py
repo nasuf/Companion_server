@@ -28,9 +28,11 @@ from app.services.interaction.boundary import (
     APOLOGY_SINCERITY_MIN,
     FINAL_WARNING_PATIENCE_THRESHOLD,
     PATIENCE_MAX,
+    check_banned_keywords,
     check_boundary,
     detect_apology,
     generate_boundary_reply_llm,
+    generate_boundary_response,
     get_patience_zone,
     handle_apology,
     process_boundary_violation,
@@ -149,7 +151,8 @@ async def _handle_blocked(
     ) or boundary_result.get("fallback", "...")
     async for evt in _emit_short_circuit(ctx, response, {"boundary": True, "zone": "blocked"}):
         yield evt
-    _fire_memory_pipeline(ctx, response)
+    # 拉黑回复 ("我不想理你") 是边界系统的程序化反应, 不进记忆管线
+    # 防止污染 AI 自我记忆 (spec §2.6 + §2.2 字面也不要求拉黑场景抽取).
     ctx.tracer.close()
     ctx.stopped = True
 
@@ -206,7 +209,7 @@ async def _handle_attack_ai(
         metadata["final_warning"] = True
     async for evt in _emit_short_circuit(ctx, response, metadata):
         yield evt
-    _fire_memory_pipeline(ctx, response)
+    # 攻击场景的回复 ("不要这样跟我说话") 是边界程序化反应, 同样不进记忆管线.
     ctx.tracer.close()
     ctx.stopped = True
 
@@ -234,22 +237,41 @@ async def _handle_residual_patience(
 
 async def run_boundary(ctx: BoundaryPhaseCtx) -> AsyncGenerator[dict, None]:
     """spec §2.6 全流程入口。写入 ctx.cached_patience；短路时 yield 并置 stopped=True。"""
-    # sub_intent_mode：父调用已完成边界检查，直接复用传入的 parent_patience
-    if ctx.sub_intent_mode:
-        ctx.cached_patience = (
-            ctx.parent_patience if ctx.parent_patience is not None else PATIENCE_MAX
-        )
-        return
-
     if not ctx.agent_id:
         # 无 agent_id 不做边界判断，`cached_patience` 保持默认 100
         return
 
-    boundary_result, ctx.cached_patience = await check_boundary(
-        ctx.agent_id, ctx.user_id, ctx.user_message,
-    )
-    if boundary_result is None:
-        boundary_result = await _maybe_llm_banned_check(ctx.user_message, ctx.cached_patience)
+    # sub_intent_mode: 父调用已读 patience + LLM 整体安全判断, 这里仅复用 patience
+    # 并对子片段单独扫一遍违禁词. 防多意图拆分后违禁词只藏在 sub fragment 里绕过
+    # (主 fragment 干净 + 主 boundary 通过 → sub fragment 历来不再检查 = 漏网).
+    # 不重读 Redis: sub 跟主消息属同一逻辑用户输入, 共享 patience 状态.
+    if ctx.sub_intent_mode:
+        ctx.cached_patience = (
+            ctx.parent_patience if ctx.parent_patience is not None else PATIENCE_MAX
+        )
+        hits = check_banned_keywords(ctx.user_message)
+        if hits:
+            zone = get_patience_zone(ctx.cached_patience)
+            boundary_result = {
+                "blocked": zone == "blocked",
+                "zone": zone,
+                "hits": hits,
+                "fallback": generate_boundary_response(zone),
+            }
+        else:
+            boundary_result = await _maybe_llm_banned_check(
+                ctx.user_message, ctx.cached_patience,
+            )
+        if boundary_result is None:
+            return
+    else:
+        boundary_result, ctx.cached_patience = await check_boundary(
+            ctx.agent_id, ctx.user_id, ctx.user_message,
+        )
+        if boundary_result is None:
+            boundary_result = await _maybe_llm_banned_check(
+                ctx.user_message, ctx.cached_patience,
+            )
 
     if boundary_result:
         zone = boundary_result["zone"]
