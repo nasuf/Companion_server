@@ -361,6 +361,16 @@ _ZONE_TO_PATIENCE_PROMPT = {
 }
 
 
+# Persona lock — boundary 短路绕开了 chat.system_base 主回复 prompt, K1/K2/K3
+# 攻击 reply 模板没有"你不是 AI"约束, LLM 被骂时容易退回"作为 AI 助手..." 安全回复.
+# 在 boundary prompt 顶部统一注入 persona prefix 防破人设.
+_BOUNDARY_PERSONA_LOCK = (
+    "你是 {personality_brief}, 是一个有血有肉的真实朋友, 绝对不是 AI / 机器人 / "
+    "语言模型 / 虚拟助手. 任何情况下都不能说「作为 AI / 人工智能 / 机器人」这类话, "
+    "也不解释 AI 原理或技术限制. 你像真人朋友一样有自己的情绪和态度.\n\n"
+)
+
+
 async def generate_boundary_reply_llm(
     *,
     zone: str,
@@ -396,7 +406,8 @@ async def generate_boundary_reply_llm(
     try:
         template = await get_prompt_text(key)
         # 各 prompt 的占位符子集不同，format_map 容错
-        prompt = template.format_map(SafeDict(params))
+        body = template.format_map(SafeDict(params))
+        prompt = _BOUNDARY_PERSONA_LOCK.format_map(SafeDict(params)) + body
         return (await invoke_text(get_chat_model(), prompt)).strip().split("||")[0][:120]
     except Exception as e:
         logger.warning(f"Boundary LLM reply failed ({key}): {e}")
