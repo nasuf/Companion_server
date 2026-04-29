@@ -141,9 +141,18 @@ async def _build_emotion_section(
 async def _build_memory_section(
     memories: list[ClassifiedMemory] | None,
 ) -> str | None:
-    """按 owner 分两段渲染. 见 ClassifiedMemory.source 分组原因."""
+    """按 owner 分两段渲染. 见 ClassifiedMemory.source 分组原因.
+
+    即便 memories 为空 (弱路径不调记忆 / 强中路径召回为空) 也注入空 section,
+    给 chat.consistency_rules 的反幻觉规则一个可靠锚点 — LLM 看到 "(本次没有
+    联想到任何相关记忆)" 就明白搜过了没有, 可以柔和拒绝用户的预设性问句, 而不是
+    顺承编造. 详见 CLAUDE.md 偏离表对应章节.
+    """
     if not memories:
-        return None
+        return _section(
+            "你记得的事情",
+            "(本次没有联想到任何与当前话题相关的记忆)",
+        )
 
     user_texts, ai_texts = split_by_source(memories)
 
