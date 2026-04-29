@@ -11,7 +11,7 @@ from app.db import db
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.config import DEDUP_THRESHOLD
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
-from app.services.memory.taxonomy import L1_SINGLETON_SUBS, resolve_taxonomy
+from app.services.memory.taxonomy import is_singleton, resolve_taxonomy
 from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.workspace.workspaces import resolve_workspace_id
 
@@ -137,11 +137,12 @@ async def store_memory(
 
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
 
-    # spec §1.5.1 闸门: L1 SINGLETON 子类 (姓名/年龄/生日/性别 等身份硬唯一字段)
-    # 同一 (source, main, sub) 永远只能有 1 条 L1, 否则会出现两条相互矛盾的核心
-    # 事实. 即便 LLM 把"我今年28岁"复述为"我今年28岁，生日是3月15号"这种合并表
-    # 述, dedup 只做 1-vs-1 拦不住 (单看跟任一已有 L1 都 < 0.85 阈值), 这里硬拦.
-    if level == 1 and (taxonomy.main_category, taxonomy.sub_category) in L1_SINGLETON_SUBS:
+    # spec §1.5.1 闸门: L1 SINGLETON 子类 (姓名/年龄/生日 等身份硬唯一字段) 永
+    # 远只能 1 条 L1. 即便 LLM 把"我今年28岁"复述为"我今年28岁，生日是3月15号"
+    # 这种合并表述, dedup 单看跟任一已有 L1 都 < 0.85 阈值拦不住, 这里硬拦.
+    if level == 1 and is_singleton(taxonomy.main_category, taxonomy.sub_category):
+        # find_many(take=1) 比 count() 快: Prisma count 生成 SELECT COUNT(*) 是
+        # 全过滤行扫描, take=1 生成 LIMIT 1 命中第一行就停; 没建索引时差距更明显.
         existing = await memory_repo.find_many(
             source=repo_source,
             where={

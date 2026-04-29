@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.db import db
 from app.redis_client import get_redis
-from app.services.memory.taxonomy import L1_SINGLETON_SUBS
+from app.services.memory.taxonomy import is_singleton
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ async def _check_promotion_conditions(mem, side: str) -> bool:
             overlap = sum(1 for c in mem_content if c in l1_content)
             if overlap > len(mem_content) * 0.5:
                 continue
-            if (mem.mainCategory, mem.subCategory) in L1_SINGLETON_SUBS:
+            if is_singleton(mem.mainCategory, mem.subCategory):
                 logger.info(
                     f"L2→L1 blocked: {side}/{mem.id} conflicts with L1 "
                     f"{l1.id} in singleton {mem.mainCategory}/{mem.subCategory}"

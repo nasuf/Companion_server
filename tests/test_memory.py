@@ -7,6 +7,7 @@
 - 记忆存储去重阈值
 """
 
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,7 +18,7 @@ from app.services.memory.retrieval.legacy import (
     format_memories_for_prompt,
     retrieve_memories,
 )
-from app.services.memory.storage.persistence import DEDUP_THRESHOLD, is_duplicate
+from app.services.memory.storage.persistence import DEDUP_THRESHOLD, is_duplicate, store_memory
 
 
 # --- _memory_to_dict ---
@@ -156,6 +157,24 @@ def test_dedup_threshold_value():
 
 # --- L1 SINGLETON 闸门 (spec §1.5.1) ---
 
+
+@contextmanager
+def _patch_storage_chain(*, existing_l1: list | None = None, create_id: str = "new-id"):
+    """patch store_memory 的依赖. existing_l1 控制 SINGLETON find_many 返回值."""
+    P = "app.services.memory.storage.persistence"
+    existing_records = existing_l1 if existing_l1 is not None else []
+    with (
+        patch(f"{P}.memory_repo.find_many", new_callable=AsyncMock, return_value=existing_records),
+        patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
+        patch(f"{P}.generate_embedding", new_callable=AsyncMock, return_value=[0.1]) as mock_embed,
+        patch(f"{P}.is_duplicate", new_callable=AsyncMock, return_value=False),
+        patch(f"{P}.memory_repo.create", new_callable=AsyncMock, return_value=MagicMock(id=create_id)) as mock_create,
+        patch(f"{P}.store_embedding", new_callable=AsyncMock),
+        patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
+    ):
+        yield {"embed": mock_embed, "create": mock_create}
+
+
 @pytest.mark.asyncio
 class TestL1SingletonGate:
     """写入 L1 时, 若 (main, sub) 在 SINGLETON 集合且已有 L1, 拒收新条目.
@@ -166,186 +185,49 @@ class TestL1SingletonGate:
     """
 
     async def test_blocks_when_singleton_l1_exists(self):
-        """L1 SINGLETON 子类已有 L1 → store_memory 拒收新条目."""
-        from app.services.memory.storage.persistence import store_memory
-
-        existing = MagicMock()
-        existing.id = "existing-id"
-
-        with (
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.find_many",
-                new_callable=AsyncMock,
-                return_value=[existing],
-            ),
-            patch(
-                "app.services.memory.storage.persistence.resolve_workspace_id",
-                new_callable=AsyncMock,
-                return_value="ws1",
-            ),
-            patch(
-                "app.services.memory.storage.persistence.generate_embedding",
-                new_callable=AsyncMock,
-            ) as mock_embed,
-        ):
+        """主路径: SINGLETON 子类 + 已有 L1 → 短路拒收, 不调 embed/create."""
+        existing = MagicMock(id="existing-id")
+        with _patch_storage_chain(existing_l1=[existing]) as mocks:
             result = await store_memory(
-                user_id="u1",
-                content="我今年28岁",
-                level=1,
-                importance=0.9,
-                main_category="身份",
-                sub_category="年龄",
-                source="ai",
+                user_id="u1", content="我今年28岁", level=1, importance=0.9,
+                main_category="身份", sub_category="年龄", source="ai",
             )
         assert result is None  # 拒收
-        mock_embed.assert_not_called()  # 短路在 embed 之前 — 省一次嵌入调用
+        mocks["embed"].assert_not_called()  # 短路在 embed 之前, 省嵌入开销 — perf 契约
+        mocks["create"].assert_not_called()  # 没写入
 
     async def test_allows_when_l1_does_not_exist(self):
-        """L1 SINGLETON 子类还没有 L1 → 正常入库."""
-        from app.services.memory.storage.persistence import store_memory
-
-        with (
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.find_many",
-                new_callable=AsyncMock,
-                return_value=[],
-            ),
-            patch(
-                "app.services.memory.storage.persistence.resolve_workspace_id",
-                new_callable=AsyncMock,
-                return_value="ws1",
-            ),
-            patch(
-                "app.services.memory.storage.persistence.generate_embedding",
-                new_callable=AsyncMock,
-                return_value=[0.1],
-            ),
-            patch(
-                "app.services.memory.storage.persistence.is_duplicate",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.create",
-                new_callable=AsyncMock,
-                return_value=MagicMock(id="new-id"),
-            ),
-            patch(
-                "app.services.memory.storage.persistence.store_embedding",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.log_memory_changelog",
-                new_callable=AsyncMock,
-            ),
-        ):
+        """SINGLETON 子类还没 L1 → 正常入库."""
+        with _patch_storage_chain(existing_l1=[]) as mocks:
             result = await store_memory(
-                user_id="u1",
-                content="我今年28岁",
-                level=1,
-                importance=0.9,
-                main_category="身份",
-                sub_category="年龄",
-                source="ai",
+                user_id="u1", content="我今年28岁", level=1, importance=0.9,
+                main_category="身份", sub_category="年龄", source="ai",
             )
         assert result == "new-id"
+        mocks["create"].assert_called_once()
 
     async def test_no_block_for_l2_l3(self):
-        """L1 SINGLETON 闸门只在 level=1 触发. L2/L3 写入跳过 SINGLETON 检查."""
-        from app.services.memory.storage.persistence import store_memory
+        """L1 SINGLETON 闸门只在 level=1 触发, L2/L3 写入正常通过.
 
-        find_many_mock = AsyncMock()  # 不该被调用 (SINGLETON 检查跳过)
-        with (
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.find_many",
-                find_many_mock,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.resolve_workspace_id",
-                new_callable=AsyncMock,
-                return_value="ws1",
-            ),
-            patch(
-                "app.services.memory.storage.persistence.generate_embedding",
-                new_callable=AsyncMock,
-                return_value=[0.1],
-            ),
-            patch(
-                "app.services.memory.storage.persistence.is_duplicate",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.create",
-                new_callable=AsyncMock,
-                return_value=MagicMock(id="new-id"),
-            ),
-            patch(
-                "app.services.memory.storage.persistence.store_embedding",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.log_memory_changelog",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await store_memory(
-                user_id="u1",
-                content="我今年28岁",
-                level=2,
-                importance=0.7,
-                main_category="身份",
-                sub_category="年龄",
-                source="ai",
+        注: (ai, L2, 身份) 被 spec §1.5.1 完全禁止 (TAXONOMY_MATRIX 空集),
+        所以测试 L2 必须 source=user. user/L2/身份 fallback 是合法的.
+        """
+        existing = MagicMock(id="other-l1-id")
+        with _patch_storage_chain(existing_l1=[existing]) as mocks:
+            result = await store_memory(
+                user_id="u1", content="用户今年28岁", level=2, importance=0.7,
+                main_category="身份", sub_category="年龄", source="user",
             )
-        find_many_mock.assert_not_called()
+        assert result == "new-id"
+        mocks["create"].assert_called_once()
 
     async def test_no_block_for_non_singleton_sub(self):
-        """非 SINGLETON 子类 (如偏好/饮食喜好) 不走闸门, 多条共存合规."""
-        from app.services.memory.storage.persistence import store_memory
-
-        find_many_mock = AsyncMock()  # 不该被调用
-        with (
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.find_many",
-                find_many_mock,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.resolve_workspace_id",
-                new_callable=AsyncMock,
-                return_value="ws1",
-            ),
-            patch(
-                "app.services.memory.storage.persistence.generate_embedding",
-                new_callable=AsyncMock,
-                return_value=[0.1],
-            ),
-            patch(
-                "app.services.memory.storage.persistence.is_duplicate",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.memory_repo.create",
-                new_callable=AsyncMock,
-                return_value=MagicMock(id="new-id"),
-            ),
-            patch(
-                "app.services.memory.storage.persistence.store_embedding",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "app.services.memory.storage.persistence.log_memory_changelog",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await store_memory(
-                user_id="u1",
-                content="我喜欢吃辣",
-                level=1,
-                importance=0.9,
-                main_category="偏好",
-                sub_category="饮食喜好",
-                source="user",
+        """非 SINGLETON 子类 (偏好/饮食喜好) 不走闸门, 多条共存合规."""
+        existing = MagicMock(id="other-l1-id")
+        with _patch_storage_chain(existing_l1=[existing]) as mocks:
+            result = await store_memory(
+                user_id="u1", content="我喜欢吃辣", level=1, importance=0.9,
+                main_category="偏好", sub_category="饮食喜好", source="user",
             )
-        find_many_mock.assert_not_called()
+        assert result == "new-id"
+        mocks["create"].assert_called_once()

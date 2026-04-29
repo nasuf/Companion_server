@@ -120,6 +120,11 @@ L1_TARGET_EMOTION: tuple[int, int] = (2, 3)
 L1_TARGET_MULTI: tuple[int, int] = (3, 5)
 
 
+def is_singleton(main: str | None, sub: str | None) -> bool:
+    """spec §1.4: 该 (main, sub) 是否为'独占'类 (姓名/年龄/生日 等), L1 永远只 1 条."""
+    return (main or "", sub or "") in L1_SINGLETON_SUBS
+
+
 def l1_target_count(main: str, sub: str) -> int:
     """返回 (main, sub) 在初始 L1 生成时的目标条数。
 
