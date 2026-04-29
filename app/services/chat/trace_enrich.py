@@ -278,7 +278,7 @@ _register("你现在处于中等耐心状态（有点不高兴，但还没到生
 _register("你现在处于低耐心状态（很不高兴，不太想多说话）", _PromptMeta(
     "boundary.patience_low_reply", "低耐心回复", "reply", _label_reply_text,
 ))
-_register("你已进入拉黑状态。用户给你发消息，但你现在不想回应", _PromptMeta(
+_register("用户已被你拉黑 — 你之前受过他言语冒犯", _PromptMeta(
     "boundary.blacklist_reply", "拉黑回复", "reply", _label_reply_text,
 ))
 _register("你是一个有血有肉的人，不是AI助手", _PromptMeta(
