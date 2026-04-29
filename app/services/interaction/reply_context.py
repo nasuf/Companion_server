@@ -89,7 +89,22 @@ def compute_delay_profile(
     user_emotion: dict[str, Any] | None = None,
     ai_emotion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Compute PRD-aligned delay mode and duration."""
+    """Compute PRD-aligned delay mode and duration.
+
+    settings.reply_delay_enabled=False (默认): 短路返 0, 配合 ws 同步快路径
+    跳过 delayed queue 调度延迟. 测试反馈即时.
+    True 时按 spec §6.2 走 conversation_mode / high_emotion / schedule_state 三档随机.
+    """
+    from app.config import settings
+    if not settings.reply_delay_enabled:
+        profile = {
+            "interaction_mode": "disabled",
+            "delay_reason": "delay_disabled",
+            "delay_seconds": 0.0,
+        }
+        logger.info(f"[DELAY-CALC] reason={profile['delay_reason']} seconds=0.00")
+        return profile
+
     age_seconds = None
     if last_reply_at is not None:
         base = last_reply_at if last_reply_at.tzinfo else last_reply_at.replace(tzinfo=timezone.utc)

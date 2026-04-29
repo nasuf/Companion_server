@@ -51,20 +51,39 @@ async def _queue_reply(
     ws: WebSocket,
     *,
     conversation_id: str,
-    agent_id: str,
+    agent,
     user_id: str,
     user_message: str,
     user_message_id: str | None,
     reply_context: dict | None,
 ) -> None:
     delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
+
+    # delay=0 同步快路径: 跳过 delayed queue + scheduler 1s 调度延迟, 直接走 orchestrator
+    # 流式回复. settings.reply_delay_enabled=False (默认) 时所有消息走这里; 即便开启
+    # 延迟, 偶尔某次随机出 0 也走快路径. 不发 "queued" pending 事件 (前端不显示"已排队").
+    if delay_seconds <= 0.0:
+        from app.services.chat.orchestrator import stream_chat_response
+        gen = stream_chat_response(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            agent=agent,
+            user_id=user_id,
+            reply_context=reply_context,
+            save_user_message=False,
+            user_message_id=user_message_id,
+            delivered_from_queue=True,
+        )
+        await stream_to_ws(gen, conversation_id)
+        return
+
     # 用户连发非碎片：若已有 pending payload，append 到同一 due_at（沿用 spec §6.3
     # 时间戳沿用语义），scheduler flush 时一次拿到合并处理，避免双发。
     appended = await enqueue_or_append_delayed(
         conversation_id,
         {
             "conversation_id": conversation_id,
-            "agent_id": agent_id,
+            "agent_id": agent.id,
             "user_id": user_id,
             "message": user_message,
             "message_id": user_message_id,
@@ -211,7 +230,7 @@ async def _handle_message(
             await _queue_reply(
                 ws,
                 conversation_id=conversation_id,
-                agent_id=agent.id,
+                agent=agent,
                 user_id=user_id,
                 user_message=text,
                 user_message_id=message_id,
@@ -243,7 +262,7 @@ async def _handle_message(
         await _queue_reply(
             ws,
             conversation_id=conversation_id,
-            agent_id=agent.id,
+            agent=agent,
             user_id=user_id,
             user_message=final_message,
             user_message_id=user_message_id,

@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # Schedule
     schedule_timezone: str = "Asia/Shanghai"
 
+    # 回复延迟开关 (spec §6 异步回复机制).
+    # False (默认): compute_delay_profile 直接返 0, ws 走同步快路径 (跳过 delayed
+    #   queue + scheduler 调度), 用户看不到 "已排队" 提示, 测试时反馈即时.
+    # True (生产): 走 spec §6 完整流程 — 按 PAD/作息计算 delay_seconds,
+    #   入 delayed queue, scheduler 每秒扫到期推送, 模拟真人间隔回复.
+    reply_delay_enabled: bool = False
+
     # LangSmith tracing
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
