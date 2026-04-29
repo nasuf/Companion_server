@@ -15,6 +15,7 @@ from app.services.prompting.defaults import (
     BANNED_WORD_PROMPT,
     BLACKLIST_REPLY_PROMPT,
     BOUNDARY_FINAL_WARNING_PROMPT,
+    BOUNDARY_PERSONA_LOCK_PROMPT,
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
@@ -376,6 +377,14 @@ PROMPT_DEFINITIONS = [
         "《终稿·第三部分 交互系统》§2.5: 判断消息是否构成正向互动 (感谢/善意/积极反馈/正向情绪), "
         "用于门控 +20 耐心恢复, 防中性应答与普通问询滥发.",
         POSITIVE_INTERACTION_PROMPT,
+    ),
+    PromptDefinition(
+        "boundary.persona_lock", "边界回复人设锁", "边界系统", "边界",
+        "【工程补丁】无字面 spec 章节. boundary 短路路径绕开 chat.system_base 主回复 prompt, "
+        "K1/K2/K3 / blacklist / final_warning 等模板没有 \"你不是 AI\" 约束, LLM 被骂时容易"
+        "退回 \"作为 AI 助手...\" 安全回复. 此前缀在 generate_boundary_reply_llm 内统一注入"
+        "到所有 boundary reply prompt 顶部, 一处改动 5 个模板都受益. 占位符: {personality_brief}.",
+        BOUNDARY_PERSONA_LOCK_PROMPT,
     ),
     PromptDefinition(
         "boundary.light_attack_reply", "轻度攻击回复(K1)", "边界系统", "边界",
