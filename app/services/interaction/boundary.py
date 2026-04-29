@@ -343,11 +343,6 @@ APOLOGY_KEYWORDS = [
 ]
 
 
-def has_apology_keyword(message: str) -> bool:
-    """检查消息是否包含道歉关键词。"""
-    return any(kw in message for kw in APOLOGY_KEYWORDS)
-
-
 async def detect_apology(message: str) -> dict:
     """检测道歉意图。后台异步调用。"""
     prompt = (await get_prompt_text("boundary.apology")).format(message=message)
@@ -439,20 +434,21 @@ async def check_boundary(
     """热路径边界检查（关键词匹配 + Redis 读取，无 LLM）。
 
     返回 (signal, patience)。signal 为 None 表示通过；否则包含：
-      - blocked: 是否拉黑（没耐心≤0 且非道歉）
+      - blocked: 是否拉黑（patience ≤ 0）
       - zone: normal / medium / low / blocked
       - hits: 命中的违禁关键词列表
       - fallback: 兜底文案（LLM 生成失败时使用）
 
     spec §2.6：
-    - 拉黑状态：拦截非道歉消息；道歉消息放行进入正常流程（§2.2）
+    - 拉黑状态：永远返回 blocked signal, 由 boundary_phase._handle_blocked
+      调 LLM detect_apology + sincerity ≥ 0.5 判断是否解封 (handle_apology).
+      之前热路径有"道歉关键词命中即放行"的捷径, 但: (a) 没调 handle_apology
+      导致 patience 留在 0, 下条消息又被拦; (b) 绕过 sincerity 语义判断,
+      违背 spec §2 "仅真诚道歉解封"的字面要求.
     - 正常/中/低：仅在含违禁词时拦截（违禁词作为步骤 3 的硬关键词兜底）
     """
     patience = await get_patience(agent_id, user_id)
     if patience <= 0:
-        # 道歉消息放行，进入正常聊天流程（后台任务恢复耐心）
-        if has_apology_keyword(message):
-            return None, patience
         return {
             "blocked": True,
             "zone": "blocked",

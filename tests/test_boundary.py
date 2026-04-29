@@ -200,3 +200,17 @@ class TestCheckBoundary:
         assert result["blocked"] is True
         assert result["zone"] == "blocked"
         assert patience == 0
+
+    async def test_apology_keyword_blocked_still_returns_blocked_signal(
+        self, patch_boundary_redis,
+    ):
+        """spec §2: blocked 态下道歉关键词不再走热路径捷径放行 ——
+        必须返回 blocked signal, 让 _handle_blocked 调 LLM 真诚度判断 +
+        handle_apology 写回 patience. 老捷径会让 patience 留在 0, 下条又拒.
+        """
+        patch_boundary_redis.get.return_value = "0"
+        result, patience = await check_boundary("agent1", "user1", "对不起我错了")
+        assert result is not None
+        assert result["blocked"] is True
+        assert result["zone"] == "blocked"
+        assert patience == 0
