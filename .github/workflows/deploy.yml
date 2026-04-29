@@ -64,6 +64,7 @@ jobs:
             REMOTE_SMALL_MODEL=${{ vars.REMOTE_SMALL_MODEL }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
+            REPLY_DELAY_ENABLED=${{ vars.REPLY_DELAY_ENABLED }}
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}
             LANGSMITH_ORG_ID=${{ secrets.LANGSMITH_ORG_ID }}
             LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
