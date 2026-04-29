@@ -94,6 +94,7 @@ async def _short_circuit_reply(
     reply_index_offset: int = 0,
     include_done: bool = True,
     extra_metadata: dict | None = None,
+    trace_id: str | None = None,
 ) -> list[dict]:
     """Orchestrator-side adapter that injects `_save_replies`."""
     return await _short_circuit_reply_impl(
@@ -102,6 +103,7 @@ async def _short_circuit_reply(
         reply_index_offset=reply_index_offset,
         include_done=include_done,
         extra_metadata=extra_metadata,
+        trace_id=trace_id,
     )
 
 

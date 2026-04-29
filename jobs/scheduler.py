@@ -430,47 +430,62 @@ async def _run_aggregation_scan():
                 continue
 
             try:
-                merged = merge_delayed_payloads(payloads)
-                if not merged:
-                    continue
+                try:
+                    merged = merge_delayed_payloads(payloads)
+                    if not merged:
+                        continue
 
-                # 去重 gate: ws.py 已用 enqueue_or_append_delayed 关闭主要 race;
-                # 这里兜底 "msg1 已被 flush 出队但仍在 LLM 中, msg2 才到达" 窗口:
-                # 上一轮 LLM 数据拉取若已隐式包含本 user_msg(写到 reply 的
-                # metadata.covered_until_user_ts), 则跳过避免重复回复。
-                # 仅看 metadata 显式字段 → 不会因短路/边界 reply 误伤未覆盖消息。
-                user_msg_id = merged.get("user_message_id")
-                if user_msg_id and await _already_covered(conv_id, user_msg_id):
-                    logger.info(
-                        f"[DEDUP-GATE] skip conv={conv_id[:8]} "
-                        f"user_msg={user_msg_id[:8]} already covered by prior reply"
+                    # 去重 gate: ws.py 已用 enqueue_or_append_delayed 关闭主要 race;
+                    # 这里兜底 "msg1 已被 flush 出队但仍在 LLM 中, msg2 才到达" 窗口:
+                    # 上一轮 LLM 数据拉取若已隐式包含本 user_msg(写到 reply 的
+                    # metadata.covered_until_user_ts), 则跳过避免重复回复。
+                    # 仅看 metadata 显式字段 → 不会因短路/边界 reply 误伤未覆盖消息。
+                    user_msg_id = merged.get("user_message_id")
+                    if user_msg_id and await _already_covered(conv_id, user_msg_id):
+                        logger.info(
+                            f"[DEDUP-GATE] skip conv={conv_id[:8]} "
+                            f"user_msg={user_msg_id[:8]} already covered by prior reply"
+                        )
+                        continue
+
+                    conv = await db.conversation.find_unique(
+                        where={"id": conv_id},
+                        include={"agent": True},
                     )
-                    continue
+                    if not conv or not conv.agent:
+                        continue
 
-                conv = await db.conversation.find_unique(
-                    where={"id": conv_id},
-                    include={"agent": True},
-                )
-                if not conv or not conv.agent:
-                    continue
+                    gen = stream_chat_response(
+                        conversation_id=conv_id,
+                        user_message=merged["user_message"],
+                        agent=conv.agent,
+                        user_id=merged["user_id"],
+                        reply_context=merged.get("reply_context"),
+                        save_user_message=False,
+                        user_message_id=merged.get("user_message_id"),
+                        delivered_from_queue=True,
+                    )
 
-                gen = stream_chat_response(
-                    conversation_id=conv_id,
-                    user_message=merged["user_message"],
-                    agent=conv.agent,
-                    user_id=merged["user_id"],
-                    reply_context=merged.get("reply_context"),
-                    save_user_message=False,
-                    user_message_id=merged.get("user_message_id"),
-                    delivered_from_queue=True,
-                )
-
-                # stream_to_ws 内部每条 chunk 走 manager.send_event,
-                # fast path 本地命中或 slow path publish 跨 worker, 无需手工查 WS.
-                # 离线用户 (无 WS / 跨进程 publish 也无人订阅): 仍 await 消费完
-                # generator 触发 LLM + 持久化, 避免漏存回复.
-                await stream_to_ws(gen, conv_id)
-                logger.debug(f"Delayed reply pushed for conv={conv_id[:8]}")
+                    # stream_to_ws 内部每条 chunk 走 manager.send_event,
+                    # fast path 本地命中或 slow path publish 跨 worker, 无需手工查 WS.
+                    # 离线用户 (无 WS / 跨进程 publish 也无人订阅): 仍 await 消费完
+                    # generator 触发 LLM + 持久化, 避免漏存回复.
+                    await stream_to_ws(gen, conv_id)
+                    logger.debug(f"Delayed reply pushed for conv={conv_id[:8]}")
+                except Exception as conv_err:
+                    # 单个会话的处理失败不能阻塞批次内其他会话; 推 done 事件给前端
+                    # 解卡"消息处理中"状态, 防用户卡死 UI.
+                    logger.exception(
+                        f"Aggregation scan: conv {conv_id[:8]} processing failed: {conv_err}"
+                    )
+                    try:
+                        await manager.send_event(
+                            conv_id, "done", {"message_id": "error", "error": str(conv_err)},
+                        )
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"Failed to notify conv {conv_id[:8]} of error: {notify_err}"
+                        )
             finally:
                 await unlock_conversation(conv_id)
     except Exception as e:
