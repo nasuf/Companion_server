@@ -7,6 +7,7 @@ Uses seven-dim personality (0-100) to build role-play personality descriptions.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory, split_by_source
@@ -256,11 +257,18 @@ async def build_system_prompt(
     ai_status: dict | None = None,
 ) -> str:
     """Build the full system prompt from the prompt stack."""
-    system_base = await get_prompt_text("chat.system_base")
-    consistency_rules = await get_prompt_text("chat.consistency_rules")
-    response_instruction = await get_prompt_text("chat.response_instruction")
+    # Parallel — 4 independent prompt reads (each turn, hot path).
+    system_base, consistency_rules, response_instruction, anti_hallucination = await asyncio.gather(
+        get_prompt_text("chat.system_base"),
+        get_prompt_text("chat.consistency_rules"),
+        get_prompt_text("chat.response_instruction"),
+        get_prompt_text("chat.anti_hallucination_hard_rule"),
+    )
 
     sections: list[str] = [_section("核心规则", system_base)]
+
+    # Must precede _build_memory_section — see ANTI_HALLUCINATION_HARD_RULE_PROMPT comment.
+    sections.append(_section("反幻觉硬约束", anti_hallucination))
 
     sections.append(await _build_personality_section(agent))
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from app.services.prompting.defaults import (
     AI_PAD_PROMPT,
     AI_REPLY_EMOTION_PROMPT,
+    ANTI_HALLUCINATION_HARD_RULE_PROMPT,
     APOLOGY_PROMPT,
     APOLOGY_REPLY_PROMPT,
     ATTACK_LEVEL_PROMPT,
@@ -118,6 +119,13 @@ PROMPT_DEFINITIONS = [
         "chat.consistency_rules", "对话一致性规则", "聊天热路径", "聊天",
         "【工程补丁】无字面 spec 章节. 防 LLM 重复提问 / 与上文矛盾 / 短情绪话立刻给大道理.",
         CONSISTENCY_RULES_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.anti_hallucination_hard_rule", "反幻觉硬约束", "聊天热路径", "聊天",
+        "【工程补丁】无字面 spec 章节, 但呼应《记忆部分产品手册》§3.4 \"若联想记忆为无, 则明确告诉用户不记得\"."
+        " v3 升级: 三分判断 (有 X / 有内容但无 X / 段空) + 顶部位置 + 警示用户问句不是记忆,"
+        " 防 LLM 顺承预设性问句编造过往. 详见 prompt 顶部注释.",
+        ANTI_HALLUCINATION_HARD_RULE_PROMPT,
     ),
     PromptDefinition(
         "chat.ai_state_constraint", "AI 自洽性隐性约束", "聊天热路径", "聊天",

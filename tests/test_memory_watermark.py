@@ -23,8 +23,8 @@ def _msg(role: str, content: str, ts: datetime) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_watermark_absent_extracts_all():
-    """首次运行 (无水位线) → 全部当新消息, process_memory_pipeline 收到完整 conversation."""
+async def test_watermark_absent_extracts_target_role_only():
+    """首次运行 (无水位线) → target_role 新消息进 new, cross-role 进 context (反幻觉切回路)."""
     from app.services.chat.post_process import _bg_memory_pipeline
 
     t0 = datetime.now(UTC)
@@ -39,10 +39,15 @@ async def test_watermark_absent_extracts_all():
         await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
 
     assert mock_pipeline.await_count == 2  # user + ai
-    for call in mock_pipeline.await_args_list:
-        kwargs = call.kwargs
-        assert kwargs["context_conversation"] == ""  # wm 无 → context 空
-        assert kwargs["new_conversation"] != ""
+    by_side = {c.kwargs["side"]: c.kwargs for c in mock_pipeline.await_args_list}
+    # user 侧: 只 user 行进 new, AI 行进 context
+    assert "user: hi" in by_side["user"]["new_conversation"]
+    assert "assistant: hey" not in by_side["user"]["new_conversation"]
+    assert "assistant: hey" in by_side["user"]["context_conversation"]
+    # ai 侧反过来
+    assert "assistant: hey" in by_side["ai"]["new_conversation"]
+    assert "user: hi" not in by_side["ai"]["new_conversation"]
+    assert "user: hi" in by_side["ai"]["context_conversation"]
     # 推进水位线: user 一次 + ai 一次
     assert mock_set.await_count == 2
 
@@ -68,13 +73,20 @@ async def test_watermark_splits_context_and_new():
 
     # user + ai 两条 pipeline 都应被调用
     assert mock_pipeline.await_count == 2
-    # 每条都要有 context (pre-wm 消息) + new (post-wm 消息)
-    for call in mock_pipeline.await_args_list:
-        kwargs = call.kwargs
-        assert "old_u" in kwargs["context_conversation"]
-        assert "old_a" in kwargs["context_conversation"]
-        assert "new_u" in kwargs["new_conversation"]
-        assert "new_a" in kwargs["new_conversation"]
+    by_side = {c.kwargs["side"]: c.kwargs for c in mock_pipeline.await_args_list}
+    # 每条 context 都包含 pre-wm 历史 + 本轮 cross-role NEW (反幻觉自我强化回路 cut)
+    # user 侧
+    assert "old_u" in by_side["user"]["context_conversation"]
+    assert "old_a" in by_side["user"]["context_conversation"]
+    assert "new_a" in by_side["user"]["context_conversation"]   # cross-role NEW 进 context
+    assert "new_u" in by_side["user"]["new_conversation"]
+    assert "new_a" not in by_side["user"]["new_conversation"]   # 不再被抽
+    # ai 侧 (镜像)
+    assert "old_u" in by_side["ai"]["context_conversation"]
+    assert "old_a" in by_side["ai"]["context_conversation"]
+    assert "new_u" in by_side["ai"]["context_conversation"]
+    assert "new_a" in by_side["ai"]["new_conversation"]
+    assert "new_u" not in by_side["ai"]["new_conversation"]
 
     # 水位线推进到 max(本 side 新消息 createdAt)
     assert mock_set.await_count == 2
@@ -129,7 +141,9 @@ async def test_no_conversation_id_falls_back_to_legacy_behavior():
     mock_get.assert_not_called()
     mock_set.assert_not_called()
     mock_pipeline.assert_awaited_once()
+    # 单条 assistant 消息 → ai 侧 new=assistant行, context="" (无 cross-role 干扰)
     assert mock_pipeline.await_args.kwargs["context_conversation"] == ""
+    assert mock_pipeline.await_args.kwargs["side"] == "ai"
 
 
 @pytest.mark.asyncio

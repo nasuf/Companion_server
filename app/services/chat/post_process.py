@@ -154,29 +154,32 @@ async def _pipeline_with_watermark(
     返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件)."""
     wm = await get_watermark(conversation_id, side) if conversation_id else None
 
-    # 单次扫描: 解析 ts, 判定 new/context, 同步收集 side 最大 ts.
-    # 无 ts 的消息 (刚生成未持久化的 AI reply / boundary 短路手工构造) 用 now()
-    # 占位参与水位线推进, 否则混合 ts 场景下会漏推进导致下轮重抽.
+    # Cross-role NEW msgs go to context_msgs, not new_target_msgs — prevents
+    # AI's just-generated reply from being extracted as a user fact (and vice versa).
+    # target_role NEW msgs without ts (boundary short-circuit, fresh reply) use now()
+    # so the watermark still advances; otherwise next round would re-extract them.
     target_role = "user" if side == "user" else "assistant"
     fallback_now = datetime.now(UTC)
     context_msgs: list[dict] = []
-    new_msgs: list[dict] = []
+    new_target_msgs: list[dict] = []
     max_side_ts: datetime | None = None
     for m in recent:
         ts = _parse_ts(m)
         is_new = wm is None or ts is None or ts > wm
-        (new_msgs if is_new else context_msgs).append(m)
         if is_new and m.get("role") == target_role:
+            new_target_msgs.append(m)
             effective = ts if ts is not None else fallback_now
             if max_side_ts is None or effective > max_side_ts:
                 max_side_ts = effective
+        else:
+            context_msgs.append(m)
 
     if max_side_ts is None:
         return 0  # 该 side 无新消息, 跳过 LLM
 
     stored_ids = await process_memory_pipeline(
         user_id=user_id,
-        new_conversation=_fmt_conversation(new_msgs),
+        new_conversation=_fmt_conversation(new_target_msgs),
         context_conversation=_fmt_conversation(context_msgs),
         side=side,
     )
