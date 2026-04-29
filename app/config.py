@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -96,6 +97,21 @@ class Settings(BaseSettings):
     redis_socket_timeout_s: float = 5.0
     redis_connect_timeout_s: float = 2.0
     redis_max_connections: int = 50
+
+    # 防御性: GitHub Actions vars.X 未设时, deploy.yml heredoc 把 .env 写成
+    # X=, pydantic 不能把空串 parse 成 bool/int/float, 直接 ValidationError
+    # 让进程起不来. 这里在 model 解析前把所有 "" 值从输入里剔除, pydantic 找
+    # 不到字段值就走 field default — 等价于 env 没设. 不影响显式 = 0 / = false.
+    # str 字段默认值多数本来就是 "" (api_key 等), 剔除后用 default 仍是 "" 一致.
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_empty_envs(cls, data):
+        if isinstance(data, dict):
+            return {
+                k: v for k, v in data.items()
+                if not (isinstance(v, str) and v.strip() == "")
+            }
+        return data
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
