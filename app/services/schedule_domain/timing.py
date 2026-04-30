@@ -29,13 +29,6 @@ def calculate_reply_delay(
     return max(0.5, min(5.0, delay))
 
 
-def calculate_typing_duration(response_length: int) -> float:
-    """计算模拟打字动画时长（秒）。"""
-    chars_per_second = 5 + random.random() * 3
-    duration = response_length / chars_per_second
-    return max(0.5, min(4.0, duration))
-
-
 def calculate_status_delay(status: str) -> float:
     """根据AI当前状态计算额外延迟（秒）。spec §6.2。
 

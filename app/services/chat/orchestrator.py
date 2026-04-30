@@ -21,7 +21,7 @@ from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
 from app.services.schedule_domain.timing import (
-    calculate_reply_delay, calculate_typing_duration,
+    calculate_reply_delay,
     explain_delay_reason,
 )
 from app.services.memory.interaction.contradiction import (
@@ -713,18 +713,11 @@ async def stream_chat_response(
         if accessed_ids:
             _fire_background(log_memory_access(user_id, accessed_ids, workspace_id=workspace_id))
 
-        # --- Send typing event before response ---
-        typing_duration = calculate_typing_duration(len(user_message))
-
-        # Delay decision is frozen at receipt time via reply_context.
-        # For live WS/SSE, we keep a short blocking sleep while exposing the conceptual delay.
-        # settings.reply_delay_enabled=False (默认) → 跳过假 typing sleep, 即时回复;
-        # 仍 yield typing event 让前端动效占位, 但 actual_sleep=0.
+        # spec §6 异步回复机制只规定延迟分布, 没"对方正在输入"占位事件; 早期作为
+        # UX 装饰加的, 关闭后前端直接看到流式 token 即可, 无视觉退化.
+        # settings.reply_delay_enabled=False (默认) → 跳过 sleep 即时回复.
         from app.config import settings as _settings
-        if not _settings.reply_delay_enabled:
-            actual_sleep = 0.0
-            conceptual_delay = 0.0
-        else:
+        if _settings.reply_delay_enabled:
             reply_delay = calculate_reply_delay(len(user_message), mbti=mbti)
             queued_delay = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
             conceptual_delay = max(reply_delay, queued_delay)
@@ -734,9 +727,8 @@ async def stream_chat_response(
                 actual_sleep = min(conceptual_delay, 2.0)
                 if conceptual_delay > 5.0:
                     yield {"event": "delay", "data": json.dumps({"duration": conceptual_delay})}
-        yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
-        if actual_sleep > 0:
-            await asyncio.sleep(actual_sleep)
+            if actual_sleep > 0:
+                await asyncio.sleep(actual_sleep)
 
         replies, raw_response, reply_is_fallback, reply_emotion_pre = await _generate_reply(
             contradiction_inquiry=contradiction_inquiry,
