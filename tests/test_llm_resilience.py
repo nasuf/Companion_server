@@ -205,8 +205,10 @@ class TestCallWithResilience:
             raise RuntimeError("x")
 
         profile = _profile(max_retries=0, retry_backoff_s=())
-        # 阈值默认 5; 打 5 次失败 → open
-        for _ in range(5):
+        # 阈值跟 settings 同步 (避免 hardcode 跟 config 漂)
+        from app.config import settings
+        threshold = settings.llm_cb_failure_threshold
+        for _ in range(threshold):
             try:
                 await call_with_resilience(
                     fail, primary_provider="dashscope", profile=profile, op="test",
@@ -214,7 +216,7 @@ class TestCallWithResilience:
             except LLMFailedError:
                 pass
 
-        # 第 6 次: CB open, 不进 retry, 直接快速失败
+        # 下一次: CB open, 不进 retry, 直接快速失败
         with pytest.raises(LLMCircuitOpenError):
             await call_with_resilience(
                 fail, primary_provider="dashscope", profile=profile, op="test",

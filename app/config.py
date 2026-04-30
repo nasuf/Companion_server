@@ -71,12 +71,15 @@ class Settings(BaseSettings):
     # 跳过 circuit breaker + retry + Ollama fallback (回到原始行为)
     llm_resilience_enabled: bool = True
     # Circuit breaker: 滑动窗口内连续失败次数达到 threshold 则 open
-    llm_cb_failure_threshold: int = 5
+    # threshold=10 容许一次 chat (data_fetch_phase 7 并发 utility 调用) 的 burst
+    # 失败而不立刻开 CB — provider 真挂时 10 次失败仍能短时间内累计.
+    llm_cb_failure_threshold: int = 10
     llm_cb_window_sec: float = 10.0
     # open 状态持续 cooldown_sec 后进入 half_open, 放 1 个 probe
     llm_cb_cooldown_sec: float = 30.0
     # Per-profile timeout (秒). 小模型快分类 / 大模型抽取 / 大模型流式
-    llm_utility_timeout_s: float = 8.0
+    # utility=12s: dev 跨地域到 dashscope 网络抖动时 8s 容易超, 给点 buffer.
+    llm_utility_timeout_s: float = 12.0
     llm_chat_extract_timeout_s: float = 45.0
     llm_chat_stream_timeout_s: float = 90.0
     # 流式首 chunk 超时 (连不上 / 模型未加载时触发 fallback, 防用户长时间无响应)
