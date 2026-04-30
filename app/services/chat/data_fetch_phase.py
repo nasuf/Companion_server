@@ -180,7 +180,7 @@ def _post_process_retrieval(
     return classified_memories, memory_strings, graph_context
 
 
-async def _maybe_awaken_l3(
+async def maybe_awaken_l3(
     user_message: str,
     user_id: str,
     workspace_id: str | None,
@@ -221,10 +221,15 @@ async def fetch_parallel_context(
     user_message: str,
     messages_dicts: list[dict],
     parsed_times: list,
-    detected_intent: IntentResult,
-    l3_trigger_classify_fn: Callable[[str], Awaitable[str]],
+    detected_intent: IntentResult | None = None,
+    l3_trigger_classify_fn: Callable[[str], Awaitable[str]] | None = None,
 ) -> FetchedContext:
-    """spec §3.1+§3.2 step 2-3：并行拉取记忆/情绪/画像/作息 + L3 awakening。"""
+    """spec §3.1+§3.2 step 2-3：并行拉取记忆/情绪/画像/作息 + L3 awakening。
+
+    detected_intent / l3_trigger_classify_fn 二者均给定时, 内部会做 L3 唤醒;
+    任一为 None 时跳过 L3 (调用方负责后续单独调 maybe_awaken_l3). 这是 P0-2
+    优化打开的口子: 让 intent 与本函数能并行, 短路意图早返回时无需等 fetch.
+    """
     # Schedule 提前 (Redis 缓存)，使 compute_ai_pad 能进 gather 并行块
     schedule = await _load_schedule(agent_id)
     ai_status = get_current_status(schedule) if schedule else None
@@ -272,11 +277,14 @@ async def fetch_parallel_context(
     user_emotion: dict | None = _unwrap(user_emotion_result, None, "extract_emotion")
     emotion: dict | None = _unwrap(emotion_result, None, "compute_ai_pad")
 
-    l3_memories, l3_trigger_label = await _maybe_awaken_l3(
-        user_message, user_id, workspace_id,
-        detected_intent, memory_relevance,
-        l3_trigger_classify_fn,
-    )
+    if detected_intent is not None and l3_trigger_classify_fn is not None:
+        l3_memories, l3_trigger_label = await maybe_awaken_l3(
+            user_message, user_id, workspace_id,
+            detected_intent, memory_relevance,
+            l3_trigger_classify_fn,
+        )
+    else:
+        l3_memories, l3_trigger_label = [], "无"
 
     return FetchedContext(
         memory_relevance=memory_relevance,

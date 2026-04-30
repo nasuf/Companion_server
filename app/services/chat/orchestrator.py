@@ -69,7 +69,7 @@ from app.services.chat.preflight import (
     resolve_pending_deletion,
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
-from app.services.chat.data_fetch_phase import fetch_parallel_context, format_recent_context
+from app.services.chat.data_fetch_phase import fetch_parallel_context, format_recent_context, maybe_awaken_l3
 from app.services.chat.post_process import (
     save_replies as _save_replies,
     run_post_process as _background_post_process,
@@ -398,6 +398,27 @@ async def stream_chat_response(
             if preflight_ctx.stopped:
                 return
 
+        # P0-2: auto-intent 路径下提前 kick off fetch 与 intent 并行 (节省 600-1500ms).
+        # 短路意图 (CONVERSATION_END/APOLOGY_PROMISE/DELETION) 命中时 cancel fetch_task
+        # 避免浪费已 in-flight 的 LLM. 非短路场景 await fetch 后单独跑 L3 awakening
+        # (因 L3 需要 intent + relevance 双信号).
+        # sub_intent_mode (forced_intent != None) 同步取得 intent 无需并行, fetch_task=None
+        # 走原同步路径在下方 fetch_parallel_context.
+        fetch_task: asyncio.Task | None = None
+        early_parsed_times: list = []
+        if forced_intent is None:
+            early_parsed_times = (
+                parse_time_expressions(user_message)
+                if has_explicit_time(user_message) else []
+            )
+            fetch_task = asyncio.create_task(fetch_parallel_context(
+                user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
+                user_message=user_message,
+                messages_dicts=messages_dicts, parsed_times=early_parsed_times,
+                # detected_intent / l3_trigger_classify_fn 都不传 → fetch 跳过 L3,
+                # 由 orchestrator 在 intent 出来后单独跑.
+            ))
+
         # --- 统一意图识别：spec §3.3 step 1 严格实现 ---
         # 每条用户消息都调小模型做意图分类, 并把最近对话历史作为上下文注入.
         # 不再区分消息长度 — 短消息如 "好" / "嗯" 只有结合 AI 上一句
@@ -417,6 +438,16 @@ async def stream_chat_response(
                     f"[INTENT-LLM] '{user_message[:30]}' → {detected_intent.intent.value} "
                     f"(labels={detected_intent.metadata.get('llm_labels')})"
                 )
+
+        async def _cancel_fetch_task() -> None:
+            """短路 / 异常时调用: cancel + 等待 propagate, 避免 orphan task warning."""
+            if fetch_task is None or fetch_task.done():
+                return
+            fetch_task.cancel()
+            try:
+                await fetch_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if forced_intent is None:
             # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
             fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
@@ -461,6 +492,7 @@ async def stream_chat_response(
 
         # §3.4.6 终结意图
         if detected_intent.intent == IntentType.CONVERSATION_END:
+            await _cancel_fetch_task()
             async for evt in handle_conversation_end(user_message, sc_ctx, _intent_llm_reply):
                 yield evt
             if workspace_id and agent_id and not sub_intent_mode:
@@ -477,6 +509,7 @@ async def stream_chat_response(
         if detected_intent.intent == IntentType.APOLOGY_PROMISE:
             handled, events = await handle_apology_promise(user_message, sc_ctx)
             if handled and events is not None:
+                await _cancel_fetch_task()
                 async for evt in events:
                     yield evt
                 return
@@ -485,6 +518,7 @@ async def stream_chat_response(
         elif detected_intent.intent == IntentType.DELETION:
             handled, events = await handle_deletion(user_message, sc_ctx)
             if handled and events is not None:
+                await _cancel_fetch_task()
                 async for evt in events:
                     yield evt
                 return
@@ -504,20 +538,35 @@ async def stream_chat_response(
         topic_info = await push_topic(conversation_id, user_message)
         topic_context = format_topic_context(topic_info) if topic_info else None
 
-        # --- Time system: parse explicit time expressions (PRD §9.3.2) ---
-        parsed_times = parse_time_expressions(user_message) if has_explicit_time(user_message) else []
-
         # --- Pre-compute personality (MBTI) for downstream timing/emotion calls ---
         mbti = get_mbti(agent)
 
-        # spec §3.1+§3.2 step 2-3: 并行拉取记忆/情绪/画像/作息 + L3 awakening
-        fetched = await fetch_parallel_context(
-            user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
-            user_message=user_message,
-            messages_dicts=messages_dicts, parsed_times=parsed_times,
-            detected_intent=detected_intent,
-            l3_trigger_classify_fn=_l3_trigger_classify,
-        )
+        # spec §3.1+§3.2 step 2-3: 拉取记忆/情绪/画像/作息. 两条路径:
+        # - auto-intent: 已在 intent 之前用 create_task 启动 fetch_task, 这里 await
+        #   它的结果, 然后单独跑 L3 awakening (intent + relevance 都已知).
+        # - sub_intent_mode (forced_intent): 同步调 fetch_parallel_context 包含 L3,
+        #   行为跟之前一致.
+        if fetch_task is not None:
+            fetched = await fetch_task
+            l3_memories, l3_trigger_label = await maybe_awaken_l3(
+                user_message, user_id, workspace_id,
+                detected_intent, fetched.memory_relevance,
+                _l3_trigger_classify,
+            )
+            fetched.l3_memories = l3_memories
+            fetched.l3_trigger_label = l3_trigger_label
+        else:
+            parsed_times = (
+                parse_time_expressions(user_message)
+                if has_explicit_time(user_message) else []
+            )
+            fetched = await fetch_parallel_context(
+                user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
+                user_message=user_message,
+                messages_dicts=messages_dicts, parsed_times=parsed_times,
+                detected_intent=detected_intent,
+                l3_trigger_classify_fn=_l3_trigger_classify,
+            )
         memory_relevance = fetched.memory_relevance
         classified_memories = fetched.classified_memories
         emotion = fetched.emotion
@@ -669,19 +718,27 @@ async def stream_chat_response(
 
         # Delay decision is frozen at receipt time via reply_context.
         # For live WS/SSE, we keep a short blocking sleep while exposing the conceptual delay.
-        reply_delay = calculate_reply_delay(len(user_message), mbti=mbti)
-        queued_delay = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
-        conceptual_delay = max(reply_delay, queued_delay)
-        if delivered_from_queue:
-            actual_sleep = min(reply_delay, 1.5)
+        # settings.reply_delay_enabled=False (默认) → 跳过假 typing sleep, 即时回复;
+        # 仍 yield typing event 让前端动效占位, 但 actual_sleep=0.
+        from app.config import settings as _settings
+        if not _settings.reply_delay_enabled:
+            actual_sleep = 0.0
+            conceptual_delay = 0.0
         else:
-            actual_sleep = min(conceptual_delay, 2.0)
-            if conceptual_delay > 5.0:
-                yield {"event": "delay", "data": json.dumps({"duration": conceptual_delay})}
+            reply_delay = calculate_reply_delay(len(user_message), mbti=mbti)
+            queued_delay = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
+            conceptual_delay = max(reply_delay, queued_delay)
+            if delivered_from_queue:
+                actual_sleep = min(reply_delay, 1.5)
+            else:
+                actual_sleep = min(conceptual_delay, 2.0)
+                if conceptual_delay > 5.0:
+                    yield {"event": "delay", "data": json.dumps({"duration": conceptual_delay})}
         yield {"event": "typing", "data": json.dumps({"duration": typing_duration})}
-        await asyncio.sleep(actual_sleep)
+        if actual_sleep > 0:
+            await asyncio.sleep(actual_sleep)
 
-        replies, raw_response, reply_is_fallback = await _generate_reply(
+        replies, raw_response, reply_is_fallback, reply_emotion_pre = await _generate_reply(
             contradiction_inquiry=contradiction_inquiry,
             detected_intent=detected_intent,
             memory_relevance=memory_relevance,
@@ -711,11 +768,20 @@ async def stream_chat_response(
             # pre-wrap 渲染成断行.
             truncate_fn=lambda text, max_len: truncate_at_sentence(_clean_reply_part(text), max_len),
             pipe_fallback_fn=split_and_validate_replies,
+            # P0-3: 主 LLM 路径下 split + emotion 在 generate_reply 内并行,
+            # 直接拿 reply_emotion_pre 返回, 无需再串行多调一次. tier / contradiction
+            # 路径返 None, fallback 兜底见下方.
+            reply_emotion_fn=_ai_reply_emotion,
         )
 
         # spec §5 step 1：AI 语句情绪识别（基于回复文本，不是 AI PAD 缓存）
-        full_response = " ".join(replies)
-        reply_emotion = await _ai_reply_emotion(full_response)
+        # 主 LLM 路径已在 generate_reply 内并行算好, 直接复用; tier/contradiction 路径
+        # reply_emotion_pre=None 时兜底再调一次 (这两条路径都是单 LLM, 增量小).
+        if reply_emotion_pre is not None:
+            reply_emotion = reply_emotion_pre
+        else:
+            full_response = " ".join(replies)
+            reply_emotion = await _ai_reply_emotion(full_response)
         if reply_emotion.get("emotion"):
             logger.info(
                 f"[REPLY-EMO] emotion={reply_emotion['emotion']} "

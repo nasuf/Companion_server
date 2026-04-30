@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -159,15 +160,21 @@ async def generate_reply(
     split_llm_fn: Callable[[str, int], Awaitable[list[str] | None]],
     truncate_fn: Callable[[str, int], str],
     pipe_fallback_fn: Callable[[str, int, int, int], list[str]],
-) -> tuple[list[str], str, bool]:
-    """返回 (replies, raw_response, is_fallback).
+    reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
+) -> tuple[list[str], str, bool, dict | None]:
+    """返回 (replies, raw_response, is_fallback, reply_emotion).
 
     is_fallback=True 表示主 LLM 和 Ollama 都挂, 走了静态兜底文本;
     调用方可据此在 reply metadata 加 `{reply_failed: true}` 供前端显示重试按钮.
     tier 分级回复和 contradiction inquiry 路径始终 is_fallback=False.
+
+    reply_emotion_fn (可选): 主 LLM 流式完成后, 立刻并行启动情绪识别小模型,
+    跟 _split_replies 同时跑 (两者都只依赖 raw_response, 互不依赖). 命中时
+    返回 dict; 未传 / tier 路径短路 / contradiction_inquiry 路径返 None,
+    调用方需 fallback 自行调 _ai_reply_emotion.
     """
     if contradiction_inquiry:
-        return [contradiction_inquiry], contradiction_inquiry, False
+        return [contradiction_inquiry], contradiction_inquiry, False, None
 
     tier_reply_text: str | None = None
     if can_use_tier_reply(
@@ -204,21 +211,27 @@ async def generate_reply(
             tier_reply_text = None
 
     if tier_reply_text:
-        return [tier_reply_text], tier_reply_text, False
+        return [tier_reply_text], tier_reply_text, False, None
 
     raw_response, is_fallback = await _run_main_llm(chat_messages)
-    replies, split_source = await _split_replies(
-        raw_response,
-        reply_count,
-        max_reply_count,
-        MAX_PER_REPLY,
-        max_total,
-        split_llm_fn,
-        truncate_fn,
-        pipe_fallback_fn,
+
+    # split + emotion 都只依赖 raw_response, 互不依赖 → 并行省 ~400-1000ms.
+    # is_fallback=True (主+本地全挂) 时 raw_response 是静态兜底文案, 仍可情绪识别.
+    split_coro = _split_replies(
+        raw_response, reply_count, max_reply_count, MAX_PER_REPLY,
+        max_total, split_llm_fn, truncate_fn, pipe_fallback_fn,
     )
+    if reply_emotion_fn is not None:
+        emotion_coro = reply_emotion_fn(raw_response)
+        (replies, split_source), reply_emotion = await asyncio.gather(
+            split_coro, emotion_coro, return_exceptions=False,
+        )
+    else:
+        replies, split_source = await split_coro
+        reply_emotion = None
+
     logger.info(
         f"[REPLY-SPLIT] n_target={reply_count} actual={len(replies)} "
         f"source={split_source} is_fallback={is_fallback}"
     )
-    return replies, raw_response, is_fallback
+    return replies, raw_response, is_fallback, reply_emotion
