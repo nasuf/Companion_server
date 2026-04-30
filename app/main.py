@@ -62,6 +62,16 @@ async def lifespan(app: FastAPI):
             f"Holiday cache preload failed ({e!r}); lunardate fallback active."
         )
 
+    # Phase 2c: Runtime config preload (system + agent overrides). 失败时全部
+    # fallback 到 env 默认, 不阻断启动.
+    try:
+        from app.services.runtime_config import load_caches
+        await _timed("Runtime config", load_caches())
+    except Exception as e:
+        logger.warning(
+            f"Runtime config load failed ({e!r}); env defaults active."
+        )
+
     # Phase 3: Scheduler + WS subscriber (跨进程 Pub/Sub)
     setup_scheduler()
     logger.info("  ✓ Scheduler")
@@ -111,6 +121,8 @@ from app.api.admin.agents import router as admin_agents_router
 from app.api.public.traces import router as traces_router
 from app.api.admin.bug_reports import router as admin_bug_reports_router
 from app.api.admin.stats import router as admin_stats_router
+from app.api.admin.runtime_config import router as admin_runtime_config_router
+from app.api.admin.model_registry import router as admin_model_registry_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -132,3 +144,5 @@ app.include_router(admin_agents_router)
 app.include_router(traces_router)
 app.include_router(admin_bug_reports_router)
 app.include_router(admin_stats_router)
+app.include_router(admin_runtime_config_router)
+app.include_router(admin_model_registry_router)

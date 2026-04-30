@@ -142,9 +142,16 @@ async def share_run_with_retry(
     """调 LangSmith client.share_run, 失败重试 3 次指数退避 (1s, 2s, 4s).
 
     share_run 是网络调用 (~500ms-2s 正常, 抽风时 5xx). 偶发失败会让用户感觉
-    "trace 时有时无", 重试可大幅降低这种感受. 三次都失败时把最后一次异常抛
-    给调用方 (resolve endpoint) 转 503.
+    "trace 时有时无", 重试可大幅降低这种感受.
+
+    409 Conflict ("Run already shared") 不是失败 — race 场景下 tracer.close()
+    后台 _share() 已抢先完成, 用户点击 resolve 才到. 检测 409 改读现有 share
+    link 直接返回 (无需重试, 不是 transient).
+
+    其他错误三次都失败时把最后一次异常抛给调用方 (resolve endpoint) 转 503.
     """
+    from langsmith.utils import LangSmithConflictError
+
     if not trace_id:
         raise ValueError("share_run_with_retry requires a non-empty trace_id")
     loop = asyncio.get_running_loop()
@@ -153,6 +160,23 @@ async def share_run_with_retry(
     for attempt, delay in enumerate(_SHARE_RETRY_DELAYS, start=1):
         try:
             return await loop.run_in_executor(None, client.share_run, trace_id)
+        except LangSmithConflictError:
+            # Run 已被另一路径 share (典型: tracer.close 后台 task 抢先).
+            # 读现有 link 返回, 跟新 share 等价.
+            existing = await loop.run_in_executor(
+                None, client.read_run_shared_link, trace_id,
+            )
+            if existing:
+                logger.info(
+                    f"[TRACE] share_run race resolved via read_run_shared_link "
+                    f"trace_id={trace_id} conv={conversation_id[:8]}"
+                )
+                return existing
+            # 极罕见: 409 但 read 返 None — 让外层 retry 兜底
+            last_exc = RuntimeError(
+                f"share_run conflict but read_run_shared_link returned None "
+                f"trace_id={trace_id}"
+            )
         except Exception as e:
             last_exc = e
             logger.warning(
@@ -160,8 +184,8 @@ async def share_run_with_retry(
                 f"trace_id={trace_id} conv={conversation_id[:8]} "
                 f"err={type(e).__name__}: {e}"
             )
-            if attempt < len(_SHARE_RETRY_DELAYS):
-                await asyncio.sleep(delay)
+        if attempt < len(_SHARE_RETRY_DELAYS):
+            await asyncio.sleep(delay)
     assert last_exc is not None
     raise last_exc
 

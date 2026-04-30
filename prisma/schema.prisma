@@ -69,6 +69,7 @@ model AiAgent {
   proactiveStates    ProactiveState[]
   proactiveEvents    ProactiveEventLog[]
   patienceStates     PatienceState[]
+  configOverride     AgentConfigOverride?
 
   @@map("ai_agents")
 }
@@ -635,4 +636,74 @@ model LlmUsage {
   @@index([agentId, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
   @@map("llm_usage")
+}
+
+
+// 全局运行时配置 (admin "系统设置" 改, prod 起后可热更换模型而无需重启).
+// 单行 (id 永远=1) 设计避免 0/N 行歧义. 字段 nullable 表示 "未设, 走 env 默认".
+//
+// 解析顺序 (services/runtime_config.resolve_config):
+//   AgentConfigOverride.field → SystemConfig.field → settings.field (env)
+//
+// 改动通过 services/runtime_config.invalidate_caches() 触发 lru_cache 清理,
+// 下条 LLM 调用按新值重建实例; 当前流式中的 chain 仍用旧模型完成 (无中断).
+model SystemConfig {
+  id               Int      @id @default(1)
+  onlineModel      Boolean? @map("online_model")
+  localChatModel   String?  @map("local_chat_model")
+  localSmallModel  String?  @map("local_small_model")
+  remoteChatModel  String?  @map("remote_chat_model")
+  remoteSmallModel String?  @map("remote_small_model")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("system_config")
+}
+
+// 单 agent 模型 override. 改了只影响该 agent, 其余仍走 SystemConfig/env.
+// 字段 nullable: null = 不 override, fallback 上层. embedding 不在此表 — embedding
+// 跨 agent 共享 vector store, 不允许 per-agent 模型 (embedding 改了已有向量失真).
+model AgentConfigOverride {
+  agentId          String   @id @map("agent_id")
+  onlineModel      Boolean? @map("online_model")
+  localChatModel   String?  @map("local_chat_model")
+  localSmallModel  String?  @map("local_small_model")
+  remoteChatModel  String?  @map("remote_chat_model")
+  remoteSmallModel String?  @map("remote_small_model")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  agent AiAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@map("agent_config_overrides")
+}
+
+
+// 模型库 — admin "系统设置 → 模型库" 维护. system_config / agent_config_overrides
+// 的 chat/small 字段从这里选 identifier; pricing.estimate_cost_cny 也从这里取价格.
+//
+// 设计:
+//   - identifier (SDK 用的 model id) 唯一, 创建后不可改 (改 = 新建一行)
+//   - provider 派生 local (ollama) / remote (dashscope/claude) 分组
+//   - enabled=false 软隐藏, 不影响已配置 (现有 system_config/agent override 仍指向它)
+//   - 价格 nullable + Decimal(10,4) 元/1M tokens; 本地默认 0
+//   - contextWindow / notes 留 hook 给未来 prompt budget / admin 备注
+//
+// 暂不支持删除 — 改 enabled=false 即可. 删了被引用会让 system_config 指 "幽灵 ID".
+model ModelRegistry {
+  id                   String   @id @default(uuid())
+  identifier           String   @unique
+  displayName          String?  @map("display_name")
+  provider             String   // ollama | dashscope | claude
+  enabled              Boolean  @default(true)
+  contextWindow        Int?     @map("context_window")
+  // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是
+  // experimental, 启用要全局 flag. 本场景精度需求低 (元/1M tokens 4-5 位小数足够),
+  // float 单次乘法误差远小于 1 分钱, 不影响计费统计.
+  inputCostPerMillion  Float?   @map("input_cost_per_million")
+  outputCostPerMillion Float?   @map("output_cost_per_million")
+  notes                String?
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@index([provider, enabled])
+  @@map("model_registry")
 }

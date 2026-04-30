@@ -326,6 +326,12 @@ async def generate_and_send_proactive(
     trigger_type: str,
     now: datetime | None = None,
 ) -> bool:
+    # 绑 ContextVar 让本调用栈的 LLM 工厂应用该 agent 的模型 override.
+    # 不绑的话主动消息生成 / AI 自我记忆抽取都会用 system 全局, 跟 chat 路径
+    # 的 per-agent 行为不一致, 同时 token stats 会把这些 LLM 调用归到全局模型名.
+    from app.services.runtime_config import bind_agent_context
+    await bind_agent_context(state.agent_id)
+
     now_ts = now or datetime.now(UTC)
 
     prep = await _check_send_eligibility(state, trigger_type)
@@ -476,6 +482,10 @@ async def send_first_greeting(
     能进入 spec §8 的三级衰减等待 (`status=waiting_user`,
     `response_deadline_at` 写入等).
     """
+    # 绑 ContextVar 让 LLM 工厂应用该 agent 的模型 override.
+    from app.services.runtime_config import bind_agent_context
+    await bind_agent_context(agent_id)
+
     count = await db.message.count(where={"conversationId": conversation_id})
     if count > 0:
         return False

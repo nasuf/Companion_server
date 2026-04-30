@@ -132,6 +132,10 @@ async def generate_daily_schedule(
         姓名 / 年龄 / 职业 / 性格(MBTI) / 生活画像 / 日期属性 [+ 用户记忆]
     age/occupation 如果调用方已知可直接传; 缺时从 DB 懒查 agent 记录.
     """
+    # 绑 ContextVar 让作息生成 LLM 用该 agent 的模型 override.
+    from app.services.runtime_config import bind_agent_context
+    await bind_agent_context(agent_id)
+
     date = date or _local_now()
     weekday = _WEEKDAY_CN[date.weekday()]
 

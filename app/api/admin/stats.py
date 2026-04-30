@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
-from app.services.llm.pricing import QWEN_PRICING_CNY_PER_1M, estimate_cost_cny
+from app.services.llm.pricing import estimate_cost_cny
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,8 @@ async def token_usage(
     """
     start = _window_start(days)
     end = datetime.now(timezone.utc)
+    # 价格表从 model_registry 取 (含 disabled — disabled 模型可能仍在历史 usage 行里).
+    pricing_rows = await db.modelregistry.find_many()
 
     # 构造 WHERE — 同时给两个版本: 无表别名的 (totals/by_model/daily 用) +
     # u. 前缀的 (by_agent JOIN 时避免列名跟 ai_agents 冲突).
@@ -175,8 +177,12 @@ async def token_usage(
             "days": days,
         },
         "pricing": {
-            model: {"input": p["input"], "output": p["output"], "unit": "CNY per 1M tokens"}
-            for model, p in QWEN_PRICING_CNY_PER_1M.items()
+            r.identifier: {
+                "input": r.inputCostPerMillion or 0.0,
+                "output": r.outputCostPerMillion or 0.0,
+                "unit": "CNY per 1M tokens",
+            }
+            for r in pricing_rows
         },
         "totals": {**totals, "cost_cny": round(totals["cost_cny"], 6)},
         "by_model": by_model,

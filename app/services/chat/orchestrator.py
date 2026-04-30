@@ -320,6 +320,15 @@ async def stream_chat_response(
     conversation = await db.conversation.find_unique(where={"id": conversation_id})
     workspace_id = getattr(conversation, "workspaceId", None)
 
+    # 把当前 agent 绑到 ContextVar, 后续 get_chat_model() 等据此应用 per-agent
+    # override (无 override 时回落 system / env). 整条流式期间 ContextVar 有效,
+    # 异步任务 (post_process / memory pipeline) 通过 fire_background_fn copy_context
+    # 自己拿快照, 不受 finally reset 影响.
+    # 预置 None token 让 finally reset 在 bind 抛异常时也能 no-op.
+    from app.services.runtime_config import bind_agent_context, reset_current_agent
+    _agent_ctx_token = None
+    _agent_ctx_token = await bind_agent_context(agent_id)
+
     # --- LLM usage 累加 session ---
     # 父调用启 session, 所有 phase 内 LLM wrapper 自动 record 进来; 出口 finally 写一行
     # llm_usage. sub_intent_mode 共享父 session, 不开新的 (避免子片段重复计费).
@@ -769,10 +778,11 @@ async def stream_chat_response(
         # spec §5 step 1：AI 语句情绪识别（基于回复文本，不是 AI PAD 缓存）
         # 主 LLM 路径已在 generate_reply 内并行算好, 直接复用; tier/contradiction 路径
         # reply_emotion_pre=None 时兜底再调一次 (这两条路径都是单 LLM, 增量小).
+        # full_response 必须无条件计算 — 下方 background post_process 总是引用它.
+        full_response = " ".join(replies)
         if reply_emotion_pre is not None:
             reply_emotion = reply_emotion_pre
         else:
-            full_response = " ".join(replies)
             reply_emotion = await _ai_reply_emotion(full_response)
         if reply_emotion.get("emotion"):
             logger.info(
@@ -879,6 +889,8 @@ async def stream_chat_response(
                     )
                 except Exception:
                     logger.warning("[llm-usage] write_usage_row failed", exc_info=True)
+        # 还原 ContextVar (防御共享 worker pool 跨 agent leak)
+        reset_current_agent(_agent_ctx_token)
 
 
 

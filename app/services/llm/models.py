@@ -31,34 +31,57 @@ _OLLAMA_CLIENT_KWARGS = {
 }
 
 
-def _default_provider() -> Provider:
-    return "dashscope" if settings.online_model else "ollama"
+def _default_provider(online: bool) -> Provider:
+    return "dashscope" if online else "ollama"
+
+
+def _resolved():
+    """Read runtime resolved config (agent override → system → env). 不引循环 import."""
+    from app.services.runtime_config import resolve_for_current
+    return resolve_for_current()
 
 
 def _utility_model_name() -> str:
+    cfg = _resolved()
+    # legacy override fields (settings.utility_model / ollama_model) 仍保留兼容,
+    # 它们没在 SystemConfig 表里所以不能动态改; 改不到时就用动态 small_model.
     return (
         settings.utility_model
         or settings.ollama_model
-        or (settings.remote_small_model if settings.online_model else settings.local_small_model)
+        or (cfg.remote_small_model if cfg.online_model else cfg.local_small_model)
     )
 
 
 def _chat_model_name() -> str:
+    cfg = _resolved()
     return settings.chat_model or (
-        settings.remote_chat_model if settings.online_model else settings.local_chat_model
+        cfg.remote_chat_model if cfg.online_model else cfg.local_chat_model
     )
 
 
 def _embedding_model_name() -> str:
-    return settings.embedding_model
+    return settings.embedding_model  # spec: embedding 不动态
 
 
 def _provider_for(role: str) -> Provider:
     override = getattr(settings, f"{role}_provider", "") or ""
-    provider = (override or settings.llm_provider or _default_provider()).strip().lower()
+    if role == "embedding":
+        # spec: embedding 不动态. settings.online_model 切换不应让 embedding
+        # provider 翻 (ollama bge-m3=1024 维 ↔ dashscope text-embedding-* 维度不同),
+        # 否则 pgvector 老向量跟新查询向量混在一起立刻失真. 用 env 默认 ollama.
+        provider = (override or settings.llm_provider or "ollama").strip().lower()
+    else:
+        cfg = _resolved()
+        provider = (override or settings.llm_provider or _default_provider(cfg.online_model)).strip().lower()
     if provider not in {"ollama", "dashscope", "claude"}:
         raise ValueError(f"Unsupported provider for {role}: {provider}")
     return provider
+
+
+def _current_agent_key() -> str | None:
+    """lru_cache key — 让不同 agent 共享或独占模型实例."""
+    from app.services.runtime_config import get_current_agent
+    return get_current_agent()
 
 
 def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
@@ -102,9 +125,8 @@ def _ollama_chat_model(model_name: str) -> ChatOllama:
     )
 
 
-@lru_cache(maxsize=1)
-def get_chat_model() -> BaseChatModel:
-    """Return the large model used for final chat responses."""
+@lru_cache(maxsize=256)
+def _build_chat_model(_agent_key: str | None) -> BaseChatModel:
     provider = _provider_for("chat")
     if provider == "claude":
         return _claude_model()
@@ -113,9 +135,8 @@ def get_chat_model() -> BaseChatModel:
     return _ollama_chat_model(_chat_model_name())
 
 
-@lru_cache(maxsize=1)
-def get_utility_model() -> BaseChatModel:
-    """Return the model used for tool / utility tasks."""
+@lru_cache(maxsize=256)
+def _build_utility_model(_agent_key: str | None) -> BaseChatModel:
     provider = _provider_for("utility")
     if provider == "claude":
         return _claude_model()
@@ -124,15 +145,32 @@ def get_utility_model() -> BaseChatModel:
     return _ollama_chat_model(_utility_model_name())
 
 
-@lru_cache(maxsize=1)
-def get_fallback_chat_model() -> ChatOllama:
-    """LOCAL_CHAT_MODEL 大模型作为全局 LLM 失败兜底 (resilience.py 消费).
+@lru_cache(maxsize=256)
+def _build_fallback_chat_model(_agent_key: str | None) -> ChatOllama:
+    cfg = _resolved()
+    return _ollama_chat_model(cfg.local_chat_model)
 
-    不论 online_model 开关, 这里永远返回本地 Ollama 实例, 用于 primary
-    (Dashscope/Claude) 不可用时的降级. 与 get_chat_model 区分: get_chat_model
-    根据 online_model 可能返回 Dashscope; 本函数始终返回 Ollama.
-    """
-    return _ollama_chat_model(settings.local_chat_model)
+
+def get_chat_model() -> BaseChatModel:
+    """主回复大模型. 缓存按 (current ContextVar agent_id) 分桶, 按 agent override
+    取不同实例; 改 admin/per-agent 配置后 invalidate_caches() 清桶. cache_clear
+    暴露给 runtime_config.invalidate_caches() 调用."""
+    return _build_chat_model(_current_agent_key())
+
+
+def get_utility_model() -> BaseChatModel:
+    return _build_utility_model(_current_agent_key())
+
+
+def get_fallback_chat_model() -> ChatOllama:
+    """resilience.py 用作 primary 失败兜底, 始终是本地 Ollama LOCAL_CHAT_MODEL."""
+    return _build_fallback_chat_model(_current_agent_key())
+
+
+# 公开 cache_clear hook 给 runtime_config 调用 (PUT 配置后清缓存)
+get_chat_model.cache_clear = _build_chat_model.cache_clear  # type: ignore[attr-defined]
+get_utility_model.cache_clear = _build_utility_model.cache_clear  # type: ignore[attr-defined]
+get_fallback_chat_model.cache_clear = _build_fallback_chat_model.cache_clear  # type: ignore[attr-defined]
 
 
 @lru_cache(maxsize=1)
