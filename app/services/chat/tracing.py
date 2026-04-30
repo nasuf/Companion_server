@@ -144,9 +144,10 @@ async def share_run_with_retry(
     share_run 是网络调用 (~500ms-2s 正常, 抽风时 5xx). 偶发失败会让用户感觉
     "trace 时有时无", 重试可大幅降低这种感受.
 
-    409 Conflict ("Run already shared") 不是失败 — race 场景下 tracer.close()
-    后台 _share() 已抢先完成, 用户点击 resolve 才到. 检测 409 改读现有 share
-    link 直接返回 (无需重试, 不是 transient).
+    409 Conflict ("Run already shared") 不是失败 — race 场景下两个并发
+    resolve_trace_for_message 都读到 metadata.trace_url=None 都调 share,
+    第二个被 LangSmith 拒. 检测 409 改读现有 share link 直接返回 (无需
+    重试, 不是 transient).
 
     其他错误三次都失败时把最后一次异常抛给调用方 (resolve endpoint) 转 503.
     """
