@@ -149,9 +149,14 @@ async def process_memory_pipeline(
         # 仍是有效生活记忆但不进特殊日期触发链路.
         # 用 _now_corrected (tz-aware + NTP 修正), 否则 datetime.now() 是 naive,
         # 跟 parser 写出的 tz-aware occur_time 比较会 TypeError.
+        reminder_demoted_reason: str | None = None
         if sub_category == "提醒":
             ref_now = statement_time or _now_corrected()
             if occur_time is None or occur_time <= ref_now:
+                reminder_demoted_reason = (
+                    "missing_occur_time" if occur_time is None
+                    else f"past_occur_time={occur_time.isoformat()}"
+                )
                 logger.warning(
                     f"[MEM-{side}] 提醒记忆 occur_time 缺失或非未来 "
                     f"({occur_time}); 改归生活/其他: {summary[:40]}"
@@ -187,6 +192,17 @@ async def process_memory_pipeline(
                     await log_memory_changelog(
                         user_id, memory_id, "user_emphasized",
                         new_value="用户表达了该信息的重要性",
+                        workspace_id=workspace_id,
+                    )
+                except Exception:
+                    pass
+
+            # spec Part 5 §4.2: 提醒降级审计 trail, 让 admin 能 grep 看到
+            if reminder_demoted_reason:
+                try:
+                    await log_memory_changelog(
+                        user_id, memory_id, "reminder_past_time_demoted",
+                        new_value=reminder_demoted_reason,
                         workspace_id=workspace_id,
                     )
                 except Exception:

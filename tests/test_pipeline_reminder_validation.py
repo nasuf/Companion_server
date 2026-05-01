@@ -153,6 +153,80 @@ async def test_reminder_with_no_occur_time_demoted_to_other():
 
 
 @pytest.mark.asyncio
+async def test_reminder_demotion_logs_changelog_audit_trail():
+    """P2-C: 降级后写 log_memory_changelog(reminder_past_time_demoted)
+    供 admin grep 审计 LLM 抽取质量."""
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    past = (_now() - timedelta(days=7)).isoformat()
+    changelog_calls: list[tuple] = []
+
+    async def fake_changelog(*args, **kwargs):
+        changelog_calls.append((args, kwargs))
+
+    async def fake_store(**kwargs):
+        return "mem-1"
+
+    with (
+        patch(
+            "app.services.memory.recording.pipeline.resolve_workspace_id",
+            new_callable=AsyncMock, return_value="ws1",
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.should_extract_memory",
+            return_value=True,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.should_memorize",
+            new_callable=AsyncMock, return_value=True,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.extract_memories",
+            new_callable=AsyncMock, return_value=_mem_extraction(past, "上周事"),
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.has_explicit_time",
+            return_value=False,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.store_memory",
+            new=fake_store,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.log_memory_changelog",
+            new=fake_changelog,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.record_entities_for_memory",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.record_topics_for_memory",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.memory.recording.pipeline.record_preferences_for_memory",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await process_memory_pipeline(
+            user_id="u1",
+            new_conversation="user: 上周事",
+            statement_time=_now(),
+            side="user",
+        )
+
+    # 应该至少有一条 reminder_past_time_demoted changelog
+    demoted_calls = [
+        c for c in changelog_calls
+        if len(c[0]) >= 3 and c[0][2] == "reminder_past_time_demoted"
+    ]
+    assert demoted_calls, (
+        f"应写 reminder_past_time_demoted changelog, 实际 calls={changelog_calls}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_reminder_with_future_occur_time_kept():
     """sub_category="提醒" + occur_time>now → 保留 (回归)."""
     from app.services.memory.recording.pipeline import process_memory_pipeline

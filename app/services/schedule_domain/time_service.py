@@ -117,9 +117,15 @@ async def resolve_implicit_time(
 
 
 def _lunar_holiday_today(d: date) -> tuple[str, str] | None:
-    """Part 5 §2.1: 农历节日动态计算 (春节 = 正月初一; 中秋 = 八月十五).
+    """Part 5 §2.1: 农历节日动态计算.
 
     返回 (name, type) 或 None. lunardate 不可用时返回 None.
+
+    注: type 字段仅供 prompt 节日上下文展示, **主动触发判定走 spec §5.1
+    name 白名单 (special_dates.py: ["春节","元旦"])**, 不依赖 type. 此处把
+    中秋/端午标 type='legal' 是为对齐"国务院法定节日"语义, 不代表会主动触发.
+    覆盖度: 春节 / 元宵 / 端午 / 七夕 / 中秋 / 重阳 (6 个), 除夕 / 腊八 /
+    小年 等依赖 holidays_cn.py 静态 DB (覆盖到 2027). 见 CLAUDE.md §6.
     """
     try:
         from lunardate import LunarDate
@@ -127,22 +133,16 @@ def _lunar_holiday_today(d: date) -> tuple[str, str] | None:
         return None
     try:
         lunar = LunarDate.fromSolarDate(d.year, d.month, d.day)
-        # 春节: 正月初一
         if lunar.month == 1 and lunar.day == 1:
             return ("春节", "legal")
-        # 中秋: 八月十五 (仅作为传统节日, spec §5.1 不主动触发)
         if lunar.month == 8 and lunar.day == 15:
             return ("中秋节", "legal")
-        # 元宵: 正月十五
         if lunar.month == 1 and lunar.day == 15:
             return ("元宵节", "traditional")
-        # 端午: 五月初五
         if lunar.month == 5 and lunar.day == 5:
             return ("端午节", "legal")
-        # 七夕: 七月初七
         if lunar.month == 7 and lunar.day == 7:
             return ("七夕节", "traditional")
-        # 重阳: 九月初九
         if lunar.month == 9 and lunar.day == 9:
             return ("重阳节", "traditional")
     except Exception:

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, time
 
 from app.services.schedule_domain import holiday_cache
-from app.services.schedule_domain.time_service import _TZ
+from app.services.schedule_domain.time_service import _TZ, _now_corrected
 
 _WEEKDAY_CN = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
 
@@ -121,11 +121,12 @@ def parse_with_statement_time(
 ) -> TimeExtract:
     """spec Part 5 §3.1: 返回 (statement_time, event_time 列表).
 
-    statement_time 取自调用时的 now (若未提供则用当前时间).
+    statement_time 取自调用时的 now (若未提供则用 NTP 修正后当前时间, 跟
+    pipeline.py 提醒未来校验比较侧一致).
     调用方落库时, 把 event_times[0].start 写入 memories.occur_time,
     把 statement_time 写入 memories.statement_time.
     """
-    ts = now or datetime.now(_TZ)
+    ts = now or _now_corrected()
     return TimeExtract(
         statement_time=ts,
         event_times=parse_time_expressions(message, now=ts),
@@ -137,7 +138,7 @@ def parse_time_expressions(
     now: datetime | None = None,
 ) -> list[ParsedTime]:
     """解析消息中的显式时间表述。返回所有匹配结果。"""
-    now = now or datetime.now(_TZ)
+    now = now or _now_corrected()
     today = now.date()
     results: list[ParsedTime] = []
     used_spans: list[tuple[int, int]] = []
