@@ -240,6 +240,11 @@ model UserMemory {
   occurTime     DateTime?      @map("occur_time")
   // Part 5 §3.1: statement_time = 用户说出这句话的时间 (一般为消息接收时刻)
   statementTime DateTime?      @map("statement_time")
+  // Part 5 §4.2: 提醒重复规则 once|yearly|monthly|weekly|daily; null=once 默认.
+  // 部分索引 memories_user_reminder_idx 在 migration 20260502100000 手写 (Prisma
+  // 不支持 partial index DSL), 改 schema 重生成时勿丢: WHERE sub_category='提醒'
+  // AND is_archived=false. 索引 keys: (user_id, sub_category, recurrence).
+  recurrence    String?        @map("recurrence")
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 
@@ -264,6 +269,9 @@ model AiMemory {
   occurTime     DateTime?      @map("occur_time")
   // Part 5 §3.1: statement_time = 用户说出这句话的时间 (一般为消息接收时刻)
   statementTime DateTime?      @map("statement_time")
+  // Part 5 §4.2: 提醒重复规则 (同 UserMemory.recurrence, 注释见上).
+  // 部分索引: memories_ai_reminder_idx — 同样手写, 改 schema 时勿丢.
+  recurrence    String?        @map("recurrence")
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 

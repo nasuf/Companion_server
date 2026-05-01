@@ -18,7 +18,7 @@ def _now() -> datetime:
     return datetime(2026, 4, 22, 14, 30, tzinfo=_TZ)
 
 
-def _mem_extraction(occur_time_iso: str | None, summary="提醒事项"):
+def _mem_extraction(occur_time_iso: str | None, summary="提醒事项", recurrence=None):
     """构造 extract_memories 的返回 (mock 用)."""
     mem = {
         "summary": summary,
@@ -27,6 +27,7 @@ def _mem_extraction(occur_time_iso: str | None, summary="提醒事项"):
         "main_category": "生活",
         "sub_category": "提醒",
         "occur_time": occur_time_iso,
+        "recurrence": recurrence,
     }
     return {"memories": [mem], "entities": [], "topics": [], "preferences": []}
 
@@ -285,4 +286,200 @@ async def test_reminder_with_future_occur_time_kept():
 
     assert captured["sub_category"] == "提醒", (
         f"未来 occur_time 的提醒应保留, 实际 sub={captured['sub_category']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reminder_yearly_recurrence_kept_with_past_occur():
+    """spec §4.2: yearly 提醒 occur_time 是历史 (e.g. 1995 生日) 不应降级,
+    后续按 (month, day) 自动重复触发."""
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    past = (_now() - timedelta(days=365 * 30)).isoformat()
+    captured: dict = {}
+
+    async def fake_store(**kwargs):
+        captured.update(kwargs)
+        return "mem-1"
+
+    with (
+        patch("app.services.memory.recording.pipeline.resolve_workspace_id",
+              new_callable=AsyncMock, return_value="ws1"),
+        patch("app.services.memory.recording.pipeline.should_extract_memory",
+              return_value=True),
+        patch("app.services.memory.recording.pipeline.should_memorize",
+              new_callable=AsyncMock, return_value=True),
+        patch("app.services.memory.recording.pipeline.extract_memories",
+              new_callable=AsyncMock,
+              return_value=_mem_extraction(past, "每年体检", recurrence="yearly")),
+        patch("app.services.memory.recording.pipeline.has_explicit_time",
+              return_value=False),
+        patch("app.services.memory.recording.pipeline.store_memory", new=fake_store),
+        patch("app.services.memory.recording.pipeline.record_entities_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_topics_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_preferences_for_memory",
+              new_callable=AsyncMock),
+    ):
+        await process_memory_pipeline(
+            user_id="u1", new_conversation="user: 每年体检",
+            statement_time=_now(), side="user",
+        )
+
+    assert captured["sub_category"] == "提醒", (
+        f"yearly 提醒不应降级, 实际 sub={captured['sub_category']}"
+    )
+    assert captured["recurrence"] == "yearly"
+
+
+@pytest.mark.asyncio
+async def test_reminder_recurrence_extracted_from_llm_monthly():
+    """LLM 输出 recurrence='monthly' → store_memory 收到 monthly."""
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    future = (_now() + timedelta(days=3)).isoformat()
+    captured: dict = {}
+
+    async def fake_store(**kwargs):
+        captured.update(kwargs)
+        return "mem-1"
+
+    with (
+        patch("app.services.memory.recording.pipeline.resolve_workspace_id",
+              new_callable=AsyncMock, return_value="ws1"),
+        patch("app.services.memory.recording.pipeline.should_extract_memory",
+              return_value=True),
+        patch("app.services.memory.recording.pipeline.should_memorize",
+              new_callable=AsyncMock, return_value=True),
+        patch("app.services.memory.recording.pipeline.extract_memories",
+              new_callable=AsyncMock,
+              return_value=_mem_extraction(future, "每月房租", recurrence="monthly")),
+        patch("app.services.memory.recording.pipeline.has_explicit_time",
+              return_value=False),
+        patch("app.services.memory.recording.pipeline.store_memory", new=fake_store),
+        patch("app.services.memory.recording.pipeline.record_entities_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_topics_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_preferences_for_memory",
+              new_callable=AsyncMock),
+    ):
+        await process_memory_pipeline(
+            user_id="u1", new_conversation="user: 每月 1 号提醒交房租",
+            statement_time=_now(), side="user",
+        )
+
+    assert captured["recurrence"] == "monthly"
+
+
+@pytest.mark.asyncio
+async def test_reminder_subcategory_alias_resolved_before_recurrence():
+    """LLM 输出 sub_category 别名 (e.g. "备忘") → 应识别为提醒并保留 recurrence.
+
+    P0 回归: 之前 pipeline 比对原始 sub_category=="提醒", "备忘"被跳过 →
+    recurrence=None, 后续 store_memory 把 alias 解析后的"提醒"写入但 recurrence
+    丢失, yearly/monthly 提醒一次性化.
+    """
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    extraction = {
+        "memories": [{
+            "summary": "每月 1 号交房租",
+            "importance": 0.6,
+            "type": "life",
+            "main_category": "生活",
+            "sub_category": "备忘",  # alias of "提醒"
+            "occur_time": (_now() + timedelta(days=3)).isoformat(),
+            "recurrence": "monthly",
+        }],
+        "entities": [], "topics": [], "preferences": [],
+    }
+    captured: dict = {}
+
+    async def fake_store(**kwargs):
+        captured.update(kwargs)
+        return "mem-1"
+
+    with (
+        patch("app.services.memory.recording.pipeline.resolve_workspace_id",
+              new_callable=AsyncMock, return_value="ws1"),
+        patch("app.services.memory.recording.pipeline.should_extract_memory",
+              return_value=True),
+        patch("app.services.memory.recording.pipeline.should_memorize",
+              new_callable=AsyncMock, return_value=True),
+        patch("app.services.memory.recording.pipeline.extract_memories",
+              new_callable=AsyncMock, return_value=extraction),
+        patch("app.services.memory.recording.pipeline.has_explicit_time",
+              return_value=False),
+        patch("app.services.memory.recording.pipeline.store_memory", new=fake_store),
+        patch("app.services.memory.recording.pipeline.record_entities_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_topics_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_preferences_for_memory",
+              new_callable=AsyncMock),
+    ):
+        await process_memory_pipeline(
+            user_id="u1", new_conversation="user: 备忘 1 号交租",
+            statement_time=_now(), side="user",
+        )
+
+    # alias 解析后 sub_category 应为 "提醒"
+    assert captured["sub_category"] == "提醒"
+    # recurrence 应保留 (alias 不导致丢失)
+    assert captured["recurrence"] == "monthly"
+
+
+@pytest.mark.asyncio
+async def test_reminder_non_reminder_subcategory_no_recurrence():
+    """非提醒子类传 recurrence=None (避免脏数据)."""
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    captured: dict = {}
+
+    async def fake_store(**kwargs):
+        captured.update(kwargs)
+        return "mem-1"
+
+    # 模拟 LLM 错把生日 (身份/生日) 标了 recurrence=yearly
+    extraction = {
+        "memories": [{
+            "summary": "用户生日 3-20",
+            "importance": 0.9,
+            "type": "identity",
+            "main_category": "身份",
+            "sub_category": "生日",
+            "occur_time": "1995-03-20T00:00:00",
+            "recurrence": "yearly",  # 错的, pipeline 应清空
+        }],
+        "entities": [], "topics": [], "preferences": [],
+    }
+
+    with (
+        patch("app.services.memory.recording.pipeline.resolve_workspace_id",
+              new_callable=AsyncMock, return_value="ws1"),
+        patch("app.services.memory.recording.pipeline.should_extract_memory",
+              return_value=True),
+        patch("app.services.memory.recording.pipeline.should_memorize",
+              new_callable=AsyncMock, return_value=True),
+        patch("app.services.memory.recording.pipeline.extract_memories",
+              new_callable=AsyncMock, return_value=extraction),
+        patch("app.services.memory.recording.pipeline.has_explicit_time",
+              return_value=False),
+        patch("app.services.memory.recording.pipeline.store_memory", new=fake_store),
+        patch("app.services.memory.recording.pipeline.record_entities_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_topics_for_memory",
+              new_callable=AsyncMock),
+        patch("app.services.memory.recording.pipeline.record_preferences_for_memory",
+              new_callable=AsyncMock),
+    ):
+        await process_memory_pipeline(
+            user_id="u1", new_conversation="user: 我生日 3-20",
+            statement_time=_now(), side="user",
+        )
+
+    assert captured["recurrence"] is None, (
+        f"非提醒子类 recurrence 应清空, 实际 {captured['recurrence']}"
     )

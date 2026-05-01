@@ -29,3 +29,8 @@ ARCHIVE_IMPORTANCE_THRESHOLD: float = 0.1
 RETRIEVAL_CACHE_TTL: int = 300
 GRAPH_CACHE_TTL: int = 300
 EMBEDDING_CACHE_TTL: int = 1800
+
+# ── Reminder recurrence (Part 5 §4.2) ──
+# 周期性 recurrence 值. once 是默认 (LLM 缺失/未知 → "once" 兜底), 不需要单独常量.
+# `_reminder_matches_date` 按周期匹配; once 走精确日期比对.
+RECURRENCE_PERIODIC: frozenset[str] = frozenset({"yearly", "monthly", "weekly", "daily"})

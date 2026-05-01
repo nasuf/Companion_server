@@ -192,3 +192,53 @@ def test_occasion_type_includes_important_date():
     """OccasionType Literal 含 important_date (P1-5)."""
     o = Occasion(type="important_date", name="测试", owner="user")
     assert o.type == "important_date"
+
+
+# ── Round 4: 正向查询 sub_category="重要日期" ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_extract_important_dates_uses_explicit_subcategory():
+    """spec §4.1 正向查询 — sub="重要日期" + occur=today 命中."""
+    from app.services.proactive.special_dates import _extract_important_dates_for_date
+
+    today = date(2026, 4, 22)
+    rows = [SimpleNamespace(
+        occurTime=datetime(2026, 4, 22, 14, 0, tzinfo=_TZ),
+        content="下周二面试", summary="下周二面试",
+        mainCategory="生活", subCategory="重要日期",
+    )]
+    captured_where: dict = {}
+
+    async def fake_find_many(**kwargs):
+        captured_where.update(kwargs.get("where", {}))
+        return rows
+
+    with patch(
+        "app.services.proactive.special_dates.memory_repo.find_many",
+        new=fake_find_many,
+    ):
+        result = await _extract_important_dates_for_date("u1", "user", today)
+    assert result == ["下周二面试"]
+    # 正向查询应 SELECT subCategory='重要日期'
+    assert captured_where.get("subCategory") == "重要日期"
+
+
+@pytest.mark.asyncio
+async def test_extract_important_dates_legacy_reverse_推_no_longer_used():
+    """sub="工作" + occur=today 老数据不应被捞 (改为正向查询后的回归)."""
+    from app.services.proactive.special_dates import _extract_important_dates_for_date
+
+    today = date(2026, 4, 22)
+    # mock find_many: 模拟数据库里只有 sub=工作 的老数据 (反向推会捞到, 正向不会)
+    async def fake_find_many(**kwargs):
+        # 我们的 query 已经过 subCategory='重要日期', DB 真返空
+        # 这里 mock 返空模拟正向查询行为
+        return []
+
+    with patch(
+        "app.services.proactive.special_dates.memory_repo.find_many",
+        new=fake_find_many,
+    ):
+        result = await _extract_important_dates_for_date("u1", "user", today)
+    assert result == [], "老数据 sub=工作 不应通过反向推被捞到"

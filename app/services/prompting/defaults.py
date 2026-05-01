@@ -99,6 +99,13 @@ occur_time 规则：
 - 未来计划/事件设为对应未来日期
 - 未提到时间信息设为 null
 
+recurrence 规则 (Part 5 §4.2, **仅** sub_category=="提醒" 时输出, 其他子类用 null):
+- "once" 一次性 (默认)
+- "yearly" 用户说"每年/每周年"
+- "monthly" 用户说"每月"
+- "weekly" 用户说"每周/每星期"
+- "daily" 用户说"每天"
+
 层级规则（由 importance 决定）：
 - Level 1：核心身份（姓名、生日、家庭、职业）— importance 0.8-1.0
 - Level 2：重要偏好、重大事件、人际关系 — importance 0.5-0.8
@@ -177,6 +184,7 @@ AI 说的话（`assistant:` 行）仅作对话上下文，**不要从 AI 的话�
       "main_category": "身份|偏好|生活|情绪|思维",
       "sub_category": "子类",
       "occur_time": null,
+      "recurrence": null,
       "entities": ["entity1"],
       "topics": ["topic1"],
       "emotion": {{"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}}
@@ -193,8 +201,11 @@ AI 说的话（`assistant:` 行）仅作对话上下文，**不要从 AI 的话�
 *   用户："我是程序员" → 身份/职业/与经济
 *   用户："今天加班到很晚" → 生活/工作
 *   用户："喜欢吃辣" → 偏好/饮食喜好
-*   用户："明天提醒我开会" → 生活/提醒（填 occur_time）
-*   用户："下周二有面试" → 生活/工作（填 occur_time）
+*   用户："明天提醒我开会" → 生活/提醒, recurrence="once", occur_time=明天
+*   用户："每月 1 号提醒我交房租" → 生活/提醒, recurrence="monthly"
+*   用户："每年我生日提醒我体检" → 生活/提醒, recurrence="yearly"
+*   用户："下周二我面试" → 生活/重要日期 (日历事件语气), occur_time=下周二
+*   用户："面试通过了" → 生活/工作 (结果叙述, 不是日历事件)
 
 """ + _MEMORY_EXTRACTION_COMMON_TAIL
 
@@ -226,6 +237,7 @@ MEMORY_EXTRACTION_AI_PROMPT = """【任务】模拟真人自我记忆。分析�
       "main_category": "身份|偏好|生活|情绪|思维",
       "sub_category": "子类",
       "occur_time": null,
+      "recurrence": null,
       "entities": ["entity1"],
       "topics": ["topic1"],
       "emotion": {{"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}}
@@ -242,6 +254,7 @@ MEMORY_EXTRACTION_AI_PROMPT = """【任务】模拟真人自我记忆。分析�
 *   我："我下周三要去医院体检" → 生活/健康（填 occur_time）
 *   我："我喜欢喝红茶" → 偏好/饮食喜好
 *   我："我是个程序员" → 身份/职业/与经济
+*   我："3 月 20 日是我创立这家咖啡店的日子" → 生活/重要日期, occur_time=3-20
 
 """ + _MEMORY_EXTRACTION_COMMON_TAIL
 

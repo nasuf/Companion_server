@@ -23,6 +23,8 @@ from app.services.memory.recording.extraction import extract_memories
 from app.services.memory.recording.filter import should_extract_memory
 from app.services.memory.recording.pre_filter import should_memorize
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
+from app.services.memory.config import RECURRENCE_PERIODIC
+from app.services.memory.taxonomy import SUBCATEGORY_ALIASES
 from app.services.schedule_domain.time_parser import (
     has_explicit_time,
     parse_with_statement_time,
@@ -119,6 +121,11 @@ async def process_memory_pipeline(
         memory_type = mem.get("type")
         main_category = mem.get("main_category")
         sub_category = mem.get("sub_category")
+        # 提前解 alias: 否则 LLM 输出"备忘"/"提醒我"等别名时, 下游 sub_category=="提醒"
+        # 比对会漏判 → recurrence 检测被跳过 → store_memory 把已 alias 解析的"提醒"
+        # 行写入但 recurrence=NULL, 一次性提醒过去时间不被降级.
+        if sub_category and sub_category in SUBCATEGORY_ALIASES:
+            sub_category = SUBCATEGORY_ALIASES[sub_category]
 
         # Per spec《产品手册·背景信息》§2.3 — level is derived from importance
         # score (0-100), not whatever level the LLM may have guessed:
@@ -143,14 +150,20 @@ async def process_memory_pipeline(
                 except ValueError:
                     pass
 
-        # spec Part 5 §4.2: 提醒记忆**必须**含未来 event_time. LLM 偶尔把
-        # "上周提醒过我" 误归为提醒, 此时 occur_time 为历史 → 永远不被
-        # _extract_reminders_for_date 捞到, 累积脏数据. 降级到"其他"子类,
-        # 仍是有效生活记忆但不进特殊日期触发链路.
-        # 用 _now_corrected (tz-aware + NTP 修正), 否则 datetime.now() 是 naive,
-        # 跟 parser 写出的 tz-aware occur_time 比较会 TypeError.
-        reminder_demoted_reason: str | None = None
+        # spec Part 5 §4.2: 提醒重复规则 (once|yearly|monthly|weekly|daily).
+        # 仅 sub_category="提醒" 有效, 其他子类强制 None (store_memory 也兜底).
+        recurrence: str | None = None
         if sub_category == "提醒":
+            raw_rec = mem.get("recurrence")
+            recurrence = raw_rec if raw_rec in RECURRENCE_PERIODIC else "once"
+
+        # spec Part 5 §4.2: 一次性提醒 (recurrence=once) 必须含未来 event_time.
+        # 周期提醒 (yearly/monthly/weekly/daily) occur_time 是首次发生时间,
+        # 后续按 recurrence 自动重复, 不要求未来 (e.g. yearly 的 1995-03-20 合法).
+        # 用 _now_corrected (tz-aware + NTP), 否则 datetime.now() 是 naive,
+        # 跟 parser 的 tz-aware occur_time 比较会 TypeError.
+        reminder_demoted_reason: str | None = None
+        if sub_category == "提醒" and recurrence == "once":
             ref_now = statement_time or _now_corrected()
             if occur_time is None or occur_time <= ref_now:
                 reminder_demoted_reason = (
@@ -162,6 +175,7 @@ async def process_memory_pipeline(
                     f"({occur_time}); 改归生活/其他: {summary[:40]}"
                 )
                 sub_category = "其他"
+                # recurrence 不重置: store_memory 的 sub_category!="提醒" 闸门会丢弃
 
         # Adjust importance based on emotion
         emotion = mem.get("emotion")
@@ -182,6 +196,7 @@ async def process_memory_pipeline(
             statement_time=statement_time,
             workspace_id=workspace_id,
             source=side,
+            recurrence=recurrence,
         )
 
         if memory_id:

@@ -107,12 +107,15 @@ async def store_memory(
     occur_time: datetime | None = None,
     statement_time: datetime | None = None,
     workspace_id: str | None = None,
+    recurrence: str | None = None,
 ) -> str | None:
     """Store a memory with deduplication.
 
     Returns memory_id if stored, None if duplicate.
     Args:
         source: "user" for memories about the user, "ai" for AI self-memories.
+        recurrence: Part 5 §4.2 提醒重复规则 (once|yearly|monthly|weekly|daily).
+            仅 sub_category="提醒" 时有效, 其他子类传 None.
     """
     # Source narrows to the literal Source type expected by the taxonomy
     repo_source = "ai" if source == "ai" else "user"
@@ -187,6 +190,9 @@ async def store_memory(
     # Part 5 §3.1: statement_time = 用户说出这句话的时间 (消息接收时刻)
     # 调用方未提供时, 用 now 作为最佳估计 (extraction 时机近似消息时刻)
     create_data["statementTime"] = statement_time or datetime.now(timezone.utc)
+    # Part 5 §4.2: 提醒重复规则; 仅提醒子类有效, 其他子类强制清空避免脏数据.
+    if recurrence and taxonomy.sub_category == "提醒":
+        create_data["recurrence"] = recurrence
     memory = await memory_repo.create(source=source, **create_data)
 
     # Store embedding. If this fails the memory row exists but would never

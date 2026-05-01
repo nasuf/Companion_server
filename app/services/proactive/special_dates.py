@@ -138,14 +138,34 @@ async def _extract_birthday_from_memories(user_id: str, owner: str) -> tuple[int
     return None
 
 
+def _reminder_matches_date(occur, recurrence: str, the_date: date) -> bool:
+    """spec Part 5 §4.2 recurrence 匹配规则. None 视为 once.
+
+    Prisma `occur_time` 反序列化总返 datetime, 所以不需要 try/except 包 `.date()`.
+    """
+    if recurrence == "daily":
+        return True
+    if occur is None:
+        return False
+    d = occur.date()
+    if recurrence == "yearly":
+        return (d.month, d.day) == (the_date.month, the_date.day)
+    if recurrence == "monthly":
+        return d.day == the_date.day
+    if recurrence == "weekly":
+        return d.weekday() == the_date.weekday()
+    return d == the_date  # once
+
+
 async def _extract_reminders_for_date(
     user_id: str,
     owner: str,
     the_date: date,
 ) -> list[str]:
-    """从 owner 的 生活-提醒 子类中抽取 occur_time 落在当日的提醒.
+    """从 owner 的 生活-提醒 子类中抽取当日触发的提醒.
 
-    优先级: occur_time 字段精确匹配 → fallback 到 content 里的日期串粗匹配.
+    spec §4.2 recurrence-aware: once 比对精确日期, yearly/monthly/weekly/daily
+    按周期匹配. occur_time 缺失时只 daily 命中, 其他 recurrence 跳过.
     """
     try:
         rows = await memory_repo.find_many(
@@ -159,27 +179,13 @@ async def _extract_reminders_for_date(
             take=50,
         )
         contents: list[str] = []
-        date_hints = [
-            f"{the_date.month}月{the_date.day}日",
-            f"{the_date.month}月{the_date.day}号",
-            f"{the_date.year}年{the_date.month}月{the_date.day}",
-            the_date.isoformat(),
-        ]
         for row in rows:
             text = (row.summary or row.content or "").strip()
             if not text:
                 continue
-            # 优先: occur_time 精确匹配当日 (spec §6.1 落库映射: parser event_time → occur_time)
             occur = getattr(row, "occurTime", None)
-            if occur is not None:
-                try:
-                    if occur.date() == the_date:
-                        contents.append(text[:60])
-                        continue
-                except Exception:
-                    pass
-            # Fallback: content 里的日期串粗匹配
-            if any(hint in text for hint in date_hints):
+            recurrence = getattr(row, "recurrence", None) or "once"
+            if _reminder_matches_date(occur, recurrence, the_date):
                 contents.append(text[:60])
         return contents
     except Exception as e:
@@ -192,10 +198,15 @@ async def _extract_important_dates_for_date(
     owner: str,
     the_date: date,
 ) -> list[str]:
-    """Part 5 §4.1 "用户/AI 重要日期" 子类:
-    生活记忆中 occur_time 命中当日的非提醒条目 (纪念/考试/面试/体检等).
-    spec §5.1 不把"重要日期"列为主动触发场景, 但 §4.1 要求日历库记录,
+    """Part 5 §4.1 "用户/AI 重要日期" 子类: 直接 SELECT subCategory='重要日期'
+    AND occurTime.date()==today.
+
+    spec §5.1 不把"重要日期"列为独立主动触发场景, 但 §4.1 要求日历库记录,
     用作合并消息时的话题素材 (例如生日恰逢面试日, 一句话带上).
+
+    历史从 `生活/非提醒/有 occur_time` 反向推, 不可靠 (依赖 LLM 抽取时碰巧
+    填了 occur_time) — 改为正向查询子类, 配合 extraction prompt 把"日历事件"
+    显式归到"重要日期"子类.
     """
     try:
         rows = await memory_repo.find_many(
@@ -203,6 +214,7 @@ async def _extract_important_dates_for_date(
             where={
                 "userId": user_id,
                 "mainCategory": "生活",
+                "subCategory": "重要日期",
                 "isArchived": False,
                 "occurTime": {"not": None},
             },
@@ -210,18 +222,15 @@ async def _extract_important_dates_for_date(
         )
         contents: list[str] = []
         for row in rows:
-            if row.subCategory == "提醒":
-                continue  # 提醒走 _extract_reminders_for_date
+            # SQL `WHERE occurTime IS NOT NULL` 已过滤; Python `if occur is None`
+            # 仅防 mock/repo drift (test 直接构 SimpleNamespace 时绕开 WHERE).
             occur = getattr(row, "occurTime", None)
             if occur is None:
                 continue
-            try:
-                if occur.date() == the_date:
-                    text = (row.summary or row.content or "").strip()
-                    if text:
-                        contents.append(text[:60])
-            except Exception:
-                continue
+            if occur.date() == the_date:
+                text = (row.summary or row.content or "").strip()
+                if text:
+                    contents.append(text[:60])
         return contents
     except Exception as e:
         logger.debug(f"Important date extraction ({owner}) failed user={user_id}: {e}")
