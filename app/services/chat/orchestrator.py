@@ -555,15 +555,18 @@ async def stream_chat_response(
         #   它的结果, 然后单独跑 L3 awakening (intent + relevance 都已知).
         # - sub_intent_mode (forced_intent): 同步调 fetch_parallel_context 包含 L3,
         #   行为跟之前一致.
+        # L3 awakening 跟下游 (短路 handlers / contradiction / prompt build) 并行.
+        # L3 仅依赖 fetched.memory_relevance + detected_intent (现已都有), prompt
+        # build 不依赖 L3 — L3 结果只塞 long_term_memories 段, await 时机推到
+        # build_system_prompt 之前. 短路 handlers 早退时通过 _cancel_l3_task 取消.
+        l3_task: asyncio.Task[tuple[list[str], str]] | None = None
         if fetch_task is not None:
             fetched = await fetch_task
-            l3_memories, l3_trigger_label = await maybe_awaken_l3(
+            l3_task = asyncio.create_task(maybe_awaken_l3(
                 user_message, user_id, workspace_id,
                 detected_intent, fetched.memory_relevance,
                 _l3_trigger_classify,
-            )
-            fetched.l3_memories = l3_memories
-            fetched.l3_trigger_label = l3_trigger_label
+            ))
         else:
             parsed_times = (
                 parse_time_expressions(user_message)
@@ -587,6 +590,16 @@ async def stream_chat_response(
         l3_memories = fetched.l3_memories
         ai_status = fetched.ai_status
         schedule_context = fetched.schedule_context
+
+        async def _cancel_l3_task() -> None:
+            """短路 / 异常时调用: cancel L3 task + 等待 propagate, 防 orphan task warning."""
+            if l3_task is None or l3_task.done():
+                return
+            l3_task.cancel()
+            try:
+                await l3_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         delay_context = None
         if reply_context:
@@ -632,6 +645,7 @@ async def stream_chat_response(
             if handled and events is not None:
                 async for evt in events:
                     yield evt
+                await _cancel_l3_task()
                 return
 
         # §3.4.1 计划查询
@@ -648,6 +662,7 @@ async def stream_chat_response(
             if handled and events is not None:
                 async for evt in events:
                     yield evt
+                await _cancel_l3_task()
                 return
 
         # §3.4.3 询问当前状态
@@ -660,6 +675,7 @@ async def stream_chat_response(
             if handled and events is not None:
                 async for evt in events:
                     yield evt
+                await _cancel_l3_task()
                 return
 
         # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
@@ -688,6 +704,16 @@ async def stream_chat_response(
             reply_count = random.randint(1, MAX_REPLY_COUNT)
         max_reply_count = MAX_REPLY_COUNT
         max_total = MAX_TOTAL_CHARS
+
+        # await L3 task (与 short-circuits + contradiction + 上面的 sync 计算并行跑了).
+        # 失败 fallback 到 fetched 里的默认 (空列表 / "无").
+        if l3_task is not None:
+            try:
+                l3_memories, l3_trigger_label = await l3_task
+                fetched.l3_memories = l3_memories
+                fetched.l3_trigger_label = l3_trigger_label
+            except (asyncio.CancelledError, Exception) as e:
+                logger.warning(f"L3 awakening failed: {e}")
 
         # Build prompt (pure string operations — instant)
         system_prompt = await build_system_prompt(
