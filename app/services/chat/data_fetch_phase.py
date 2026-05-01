@@ -111,9 +111,10 @@ async def _load_schedule(agent_id: str | None) -> Any:
 
 
 async def _load_topic_intimacy(agent_id: str | None, user_id: str) -> float:
+    """spec §2.1 无数据归 0 (cold start). 跟 proactive.state._load_topic_intimacy 一致."""
     if agent_id and user_id:
         return await get_topic_intimacy(agent_id, user_id)
-    return 50.0
+    return 0.0
 
 
 async def _load_time_memories(user_id: str, parsed_times: list) -> list[str]:

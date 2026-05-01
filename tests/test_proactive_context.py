@@ -104,18 +104,19 @@ async def test_load_proactive_memories_skips_rerank_when_no_topic():
 
 @pytest.mark.asyncio
 async def test_determine_proactive_stage_4_tier():
-    """Spec §2.1 单维度 4 档: P1/P2/warming/intimate."""
+    """Spec §2.1 单维度 4 档: P1/P2/warming/intimate. 入参 float (Redis 写入侧类型)."""
     from app.services.proactive.state import determine_proactive_stage
 
     cases = [
-        (5, "p1_cold"),
-        (20, "p1_cold"),
-        (21, "p2_cold"),
-        (40, "p2_cold"),
-        (41, "warming"),
-        (80, "warming"),
-        (81, "intimate"),
-        (100, "intimate"),
+        (0.0, "p1_cold"),    # 新 agent 无 Redis cache → cold start
+        (5.0, "p1_cold"),
+        (20.0, "p1_cold"),
+        (21.0, "p2_cold"),
+        (40.0, "p2_cold"),
+        (41.0, "warming"),
+        (80.0, "warming"),
+        (81.0, "intimate"),
+        (100.0, "intimate"),
     ]
     for intimacy, expected in cases:
         with patch(
@@ -124,3 +125,37 @@ async def test_determine_proactive_stage_4_tier():
         ):
             stage = await determine_proactive_stage("agent1", "user1")
         assert stage == expected, f"intimacy={intimacy} → expected={expected}, got={stage}"
+
+
+def test_silence_prompts_carry_current_mood():
+    """Spec §5.3/§6.3/§7.3: 4 个 silence_* prompt 必须带 PAD 心境描述符 (current_mood)."""
+    from app.services.proactive.sender import _format_prompt
+    from app.services.prompting.defaults import (
+        PROACTIVE_SILENCE_PLAIN_PROMPT,
+        PROACTIVE_SILENCE_AI_MEMORY_PROMPT,
+        PROACTIVE_SILENCE_USER_MEMORY_PROMPT,
+        PROACTIVE_SILENCE_SCHEDULE_PROMPT,
+    )
+
+    prompt_by_key = {
+        "proactive.silence_plain": PROACTIVE_SILENCE_PLAIN_PROMPT,
+        "proactive.silence_ai_memory": PROACTIVE_SILENCE_AI_MEMORY_PROMPT,
+        "proactive.silence_user_memory": PROACTIVE_SILENCE_USER_MEMORY_PROMPT,
+        "proactive.silence_schedule": PROACTIVE_SILENCE_SCHEDULE_PROMPT,
+    }
+
+    # PAD = (-0.5, 0.8, 0.2) → "焦虑而紧绷" (TONE_MAP[(-1, 1, -1)])
+    emotion = {"pleasure": -0.5, "arousal": 0.8, "dominance": 0.2}
+    for key, tpl in prompt_by_key.items():
+        ctx = {
+            "topic_theme": "天气",
+            "proactive_memories": ["[生活/日常] 测试记忆"],
+            "schedule_status": {"activity": "散步", "status": "idle"},
+            "user_portrait": "测试用户",
+            "recent_context": "(无)",
+            "emotion": emotion,
+            "__tpl": tpl,
+        }
+        out = _format_prompt(key, ctx, "温和")
+        assert out is not None, f"{key} format returned None"
+        assert "焦虑而紧绷" in out, f"{key} missing current_mood; got:\n{out}"

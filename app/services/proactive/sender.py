@@ -196,17 +196,17 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     status = str(schedule_status.get("status") or "idle")
     memory_text = "\n".join(f"- {m}" for m in memories) if memories else "（暂无）"
 
-    # Spec §4.1 step 4：沉默唤醒参考信息含 话题主题/用户画像/近期对话
+    # Spec §5.3/§6.3/§7.3: silence_wakeup + memory_proactive 都要求 PAD 融合
+    # → emotion_to_tone 8 象限映射注入 {current_mood}.
     user_portrait = ctx.get("user_portrait") or "(未知)"
     recent_context = ctx.get("recent_context") or "(无)"
+    current_mood = emotion_to_tone(ctx.get("emotion"))
     silence_shared = {
         "topic": topic,
         "user_portrait": user_portrait,
         "recent_context": recent_context,
+        "current_mood": current_mood,
     }
-    # Spec §4.2/§5.3/§6.3/§7.3: 记忆主动"PAD 情绪融合 独立 100%" → 8 象限
-    # 语气描述符注入. silence_* 不接 PAD (spec §4.1 沉默唤醒未要求情绪融合).
-    current_mood = emotion_to_tone(ctx.get("emotion"))
     fields_by_key: dict[str, dict[str, Any]] = {
         "proactive.silence_plain": {
             "personality_brief": personality_brief,

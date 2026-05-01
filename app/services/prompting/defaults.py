@@ -378,6 +378,7 @@ PROACTIVE_SILENCE_PLAIN_PROMPT = """【任务】作为用户的好朋友，隔�
 
 【参考信息】
 - 你的性格：{personality_brief}
+- 你当前心境：{current_mood}
 - 话题主题：{topic}
 - 用户画像：{user_portrait}
 - 近期对话：{recent_context}
@@ -389,6 +390,7 @@ PROACTIVE_SILENCE_AI_MEMORY_PROMPT = """【任务】作为用户的好朋友，�
 
 【参考信息】
 - 你的性格：{personality_brief}
+- 你当前心境：{current_mood}
 - 你想起的自身记忆：{ai_memory}
 - 话题主题：{topic}
 - 用户画像：{user_portrait}
@@ -401,6 +403,7 @@ PROACTIVE_SILENCE_USER_MEMORY_PROMPT = """【任务】作为用户的好朋友�
 
 【参考信息】
 - 你的性格：{personality_brief}
+- 你当前心境：{current_mood}
 - 你记得的用户记忆：{user_memory}
 - 话题主题：{topic}
 - 用户画像：{user_portrait}
@@ -413,6 +416,7 @@ PROACTIVE_SILENCE_SCHEDULE_PROMPT = """【任务】作为用户的好朋友，�
 
 【参考信息】
 - 你的性格：{personality_brief}
+- 你当前心境：{current_mood}
 - 你当前的作息/状态：{current_activity}
 - 话题主题：{topic}
 - 用户画像：{user_portrait}

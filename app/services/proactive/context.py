@@ -142,7 +142,14 @@ async def _rerank_memories_by_topic(
         lambda p: invoke_json(get_utility_model(), p),
     )
     ids = result.get("ids") if isinstance(result, dict) else None
-    if not isinstance(ids, list):
+    if not isinstance(ids, list) or not ids:
+        # 监控 fallback 占比, 若长期居高说明 utility model 不稳, 体感"AI 老聊
+        # 同样的事". grep `[REPLY-RERANK fallback=` 即可统计.
+        reason = "render_failed" if result is None else "empty_ids"
+        logger.info(
+            f"[REPLY-RERANK fallback=importance] reason={reason} "
+            f"topic={topic_theme!r} candidates={len(candidates)}"
+        )
         return []
     valid = {c["id"] for c in candidates}
     return [str(i) for i in ids if str(i) in valid][:3]

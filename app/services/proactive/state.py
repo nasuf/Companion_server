@@ -191,24 +191,19 @@ async def _fetch_workspace_context(workspace_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-async def _load_topic_intimacy(agent_id: str, user_id: str) -> int:
+async def _load_topic_intimacy(agent_id: str, user_id: str) -> float:
+    """spec §2.1 话题亲密度 0-100, 无数据归 0 (cold start, 不是 warming).
+
+    走 Redis (`get_topic_intimacy`) 跟 chat 侧 (`data_fetch_phase`) 一致.
+    历史读 Postgres `intimacies` 表 + 默认 50 是工程兜底, 跟 spec "无数据 →
+    cold_start" 不符 — 新 agent 第一次主动消息会按 warming 配比抽源 (75% ai_l1).
+    """
+    from app.services.relationship.intimacy import get_topic_intimacy
     try:
-        rows = await db.query_raw(
-            """
-            SELECT topic_intimacy
-            FROM intimacies
-            WHERE agent_id = $1 AND user_id = $2
-            LIMIT 1
-            """,
-            agent_id,
-            user_id,
-        )
+        return await get_topic_intimacy(agent_id, user_id)
     except Exception as e:
         _log_if_unavailable("load topic intimacy", e)
-        return 50
-    if not rows:
-        return 50
-    return int(rows[0].get("topic_intimacy") or 50)
+        return 0.0
 
 
 async def determine_proactive_stage(agent_id: str, user_id: str) -> str:
