@@ -58,6 +58,7 @@ class TimeInfo:
     date: date
     weekday: str  # "星期一"
     is_weekend: bool
+    timestamp_ms: int  # spec §2.2: Unix 毫秒时间戳
 
 
 @dataclass(frozen=True)
@@ -68,16 +69,51 @@ class HolidayInfo:
     days_away: int  # 距今天数，0=今天
 
 
+def _now_corrected() -> datetime:
+    """spec §2.1: 应用 NTP drift 后的当前北京时间, 用于关键比较点.
+
+    日级别比较 (date(), 节假日扫描) 不需要走此修正 — drift 是亚秒级.
+    时间中枢 + 提醒 occur_time 比较等亚秒精度敏感场景应走此函数; 散落各模块
+    的 datetime.now() 直接调用不修正, 见 CLAUDE.md §6 偏离表.
+    """
+    return datetime.now(_TZ) + timedelta(seconds=_NTP_DRIFT_SECONDS)
+
+
 def get_current_time() -> TimeInfo:
-    """返回当前本地时间信息。"""
-    now = datetime.now(_TZ)
+    """spec §2.2 getCurrentDateTime(): 返回当前本地时间信息 (含 NTP 修正)."""
+    now = _now_corrected()
     d = now.date()
     return TimeInfo(
         now=now,
         date=d,
         weekday=_WEEKDAY_CN[d.weekday()],
         is_weekend=d.weekday() >= 5,
+        timestamp_ms=int(now.timestamp() * 1000),
     )
+
+
+def get_current_timestamp_ms() -> int:
+    """spec §2.2 getCurrentTimestamp(): Unix 毫秒时间戳 (含 NTP 修正)."""
+    return int(_now_corrected().timestamp() * 1000)
+
+
+async def resolve_implicit_time(
+    agent_id: str,
+    ai_status: dict | None = None,
+) -> tuple[datetime, str]:
+    """spec §3.2 隐性时间解析: 给"询问当前状态"意图返 (current_time, current_activity_str).
+
+    `ai_status` 已加载时复用 (caller 在 data_fetch_phase 已 fetch), 否则现场加载.
+    替代散落 chat 内的 `format_schedule_context(get_current_status(schedule))` inline 写法.
+    """
+    from app.services.schedule_domain.schedule import (
+        get_cached_schedule, get_current_status, format_schedule_context,
+    )
+    if ai_status is None:
+        schedule = await get_cached_schedule(agent_id)
+        ai_status = get_current_status(schedule) if schedule else None
+    activity = format_schedule_context(ai_status) if ai_status else "(未知)"
+    return _now_corrected(), activity
 
 
 def _lunar_holiday_today(d: date) -> tuple[str, str] | None:

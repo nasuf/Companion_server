@@ -42,6 +42,7 @@ from app.services.schedule_domain.schedule import (
     handle_schedule_adjustment,
     update_schedule_slot,
 )
+from app.services.schedule_domain.time_service import resolve_implicit_time
 
 logger = logging.getLogger(__name__)
 
@@ -273,13 +274,15 @@ async def handle_current_state(
     portrait: Any,
     user_emotion: dict | None,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
+    # spec §3.2 隐性时间解析: 走时间中枢 helper, 复用 caller 已加载的 ai_status
+    _, current_activity = await resolve_implicit_time(ctx.agent_id or "", ai_status)
     try:
         response = await current_state_reply(
             message=user_message,
             user_emotion=user_emotion,
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "(未知)",
-            current_activity=format_schedule_context(ai_status) if ai_status else "(未知)",
+            current_activity=current_activity,
             ai_schedule=schedule_context or "(未知)",
         )
         if not response:

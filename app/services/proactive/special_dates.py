@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-OccasionType = Literal["holiday", "birthday", "reminder"]
+OccasionType = Literal["holiday", "birthday", "reminder", "important_date"]
 
 
 @dataclass(frozen=True)
@@ -96,10 +96,17 @@ def find_first_idle_after_wakeup(
 # ── 特殊日期收集 ──
 
 _BIRTHDAY_RE = re.compile(r"(\d{1,2})月(\d{1,2})[日号]")
+_BIRTHDAY_ISO_RE = re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")
 
 
 async def _extract_birthday_from_memories(user_id: str, owner: str) -> tuple[int, int] | None:
-    """从 owner(user/ai) 的 L1 身份记忆中提取生日 (month, day)."""
+    """从 owner(user/ai) 的 L1 身份记忆中提取生日 (month, day).
+
+    三层优先级 (spec §4.1 + Part 5 §6.1: parser event_time → occur_time):
+    1. row.occurTime (parser 抽取出的权威源)
+    2. content/summary 中文格式 "3月20日/号"
+    3. content/summary ISO 格式 "1995-03-20" / "2026/3/20"
+    """
     try:
         rows = await memory_repo.find_many(
             source=owner,  # type: ignore[arg-type]
@@ -113,10 +120,19 @@ async def _extract_birthday_from_memories(user_id: str, owner: str) -> tuple[int
             take=3,
         )
         for row in rows:
+            occur = getattr(row, "occurTime", None)
+            if occur is not None:
+                try:
+                    return occur.month, occur.day
+                except Exception:
+                    pass
             text = (row.content or "") + " " + (row.summary or "")
             m = _BIRTHDAY_RE.search(text)
             if m:
                 return int(m.group(1)), int(m.group(2))
+            m = _BIRTHDAY_ISO_RE.search(text)
+            if m:
+                return int(m.group(2)), int(m.group(3))
     except Exception as e:
         logger.debug(f"Birthday extraction ({owner}) failed for user={user_id}: {e}")
     return None
@@ -227,43 +243,48 @@ async def collect_special_dates_today(
     Part 5 §4.1 日历库还登记"重要日期"(纪念/考试/面试)但不独立触发.
     若同日有主动触发命中 + 重要日期, 合并消息会带上重要日期素材.
     """
+    import asyncio
     d = the_date or datetime.now(_TZ).date()
     occasions: list[Occasion] = []
 
-    # 公共节假日: 只主动触发春节 / 元旦
+    # 公共节假日 (sync, 不进 gather)
     try:
         from app.services.schedule_domain.time_service import is_holiday
-
         info = is_holiday(d)
         if info and info.name in ("春节", "元旦"):
             occasions.append(Occasion(type="holiday", name=info.name, owner="user"))
     except Exception as e:
         logger.debug(f"Holiday check failed: {e}")
 
-    # 用户生日
-    ub = await _extract_birthday_from_memories(user_id, "user")
+    # 4 个独立 I/O (生日 user/ai + 提醒 user/ai) 并发拉取
+    ub, ab, user_reminders, ai_reminders = await asyncio.gather(
+        _extract_birthday_from_memories(user_id, "user"),
+        _extract_birthday_from_memories(user_id, "ai"),
+        _extract_reminders_for_date(user_id, "user", d),
+        _extract_reminders_for_date(user_id, "ai", d),
+    )
+
     if ub and ub == (d.month, d.day):
         occasions.append(Occasion(type="birthday", name="用户生日", owner="user"))
-
-    # AI 生日
-    ab = await _extract_birthday_from_memories(user_id, "ai")
     if ab and ab == (d.month, d.day):
         occasions.append(Occasion(type="birthday", name="AI生日", owner="ai"))
-
-    # 用户提醒
-    for text in await _extract_reminders_for_date(user_id, "user", d):
+    for text in user_reminders:
         occasions.append(Occasion(type="reminder", name=text, owner="user"))
-    # AI 提醒
-    for text in await _extract_reminders_for_date(user_id, "ai", d):
+    for text in ai_reminders:
         occasions.append(Occasion(type="reminder", name=text, owner="ai"))
 
     # spec §5.1 重要日期不独立触发 — 但若已有其他 4 类命中, 把当日重要日期作为
-    # 素材附加 (空列表则跳过, 不影响触发判定).
+    # 素材附加. 独立 type="important_date" 防回归: 若以后去掉 `if occasions` gate,
+    # important_date 也不会被 _pick_prompt_key_and_fields 误归到 reminder 单一触发分支.
     if occasions:
-        for text in await _extract_important_dates_for_date(user_id, "user", d):
-            occasions.append(Occasion(type="reminder", name=f"今日重要事项: {text}", owner="user"))
-        for text in await _extract_important_dates_for_date(user_id, "ai", d):
-            occasions.append(Occasion(type="reminder", name=f"今日(我的)重要事项: {text}", owner="ai"))
+        user_important, ai_important = await asyncio.gather(
+            _extract_important_dates_for_date(user_id, "user", d),
+            _extract_important_dates_for_date(user_id, "ai", d),
+        )
+        for text in user_important:
+            occasions.append(Occasion(type="important_date", name=f"今日重要事项: {text}", owner="user"))
+        for text in ai_important:
+            occasions.append(Occasion(type="important_date", name=f"今日(我的)重要事项: {text}", owner="ai"))
 
     return occasions
 
@@ -397,56 +418,74 @@ async def send_special_date_proactive(
 
 # ── 每日扫描入口 ──
 
-async def scan_special_dates_today(now: datetime | None = None) -> None:
+async def _scan_one_agent(agent, today: date, day_start: datetime, day_end: datetime) -> None:
+    """单个 agent 的特殊日期扫描. 主流程错误本地处理, 不影响其他 agent."""
+    try:
+        occasions = await collect_special_dates_today(user_id=agent.userId, the_date=today)
+        if not occasions:
+            return
+
+        schedule = await get_cached_schedule(agent.id)
+        trigger_time = find_first_idle_after_wakeup(schedule, today)
+
+        # 幂等: 同日同 agent 已建则跳
+        existing = await db.timetrigger.find_first(
+            where={
+                "aiAgentId": agent.id,
+                "userId": agent.userId,
+                "actionType": "special_date",
+                "triggerTime": {"gte": day_start, "lt": day_end},
+            }
+        )
+        if existing:
+            return
+
+        await db.timetrigger.create(data={
+            "agent": {"connect": {"id": agent.id}},
+            "user": {"connect": {"id": agent.userId}},
+            "triggerTime": trigger_time,
+            "actionType": "special_date",
+            "actionData": {
+                "occasions": [
+                    {"type": o.type, "name": o.name, "owner": o.owner}
+                    for o in occasions
+                ],
+                "scheduled_reason": "first_idle_after_wakeup",
+            },
+        })
+        logger.info(
+            f"Special date trigger created agent={agent.id} "
+            f"date={today} occasions={[o.type for o in occasions]} at={trigger_time}"
+        )
+    except Exception as e:
+        logger.warning(f"scan_special_dates failed for agent {agent.id}: {e}")
+
+
+async def scan_special_dates_today(now: datetime | None = None, concurrency: int = 8) -> None:
     """spec Part 5 §4.3: 每日凌晨扫所有 active agent 的特殊日期.
 
     - 命中 → 计算「起床后第一个空闲时段」作为触发时刻
     - 写入 timetrigger (actionType=special_date, actionData=occasions 列表)
     - 到点由 scan_triggers 捞出并实际发送
+
+    并发上限 = `concurrency` (默认 8) — 跟主动消息生成模式一致, 避免 N=1000+
+    agent 时 6+ 次串行 DB 查询拖垮 daily_schedule 链路总时长.
     """
+    import asyncio
     now_ts = now or datetime.now(_TZ)
     today = now_ts.date()
+    day_start = datetime(today.year, today.month, today.day, 0, 0, tzinfo=_TZ)
+    day_end = day_start + timedelta(days=1)
 
     agents = await db.aiagent.find_many(where={"status": "active"})
-    for agent in agents:
-        try:
-            occasions = await collect_special_dates_today(user_id=agent.userId, the_date=today)
-            if not occasions:
-                continue
+    if not agents:
+        return
 
-            schedule = await get_cached_schedule(agent.id)
-            trigger_time = find_first_idle_after_wakeup(schedule, today)
+    sem = asyncio.Semaphore(concurrency)
 
-            # 幂等: 若同日同 agent 已创建, 跳过
-            day_start = datetime(today.year, today.month, today.day, 0, 0, tzinfo=_TZ)
-            day_end = day_start + timedelta(days=1)
-            existing = await db.timetrigger.find_first(
-                where={
-                    "aiAgentId": agent.id,
-                    "userId": agent.userId,
-                    "actionType": "special_date",
-                    "triggerTime": {"gte": day_start, "lt": day_end},
-                }
-            )
-            if existing:
-                continue
+    async def _bound(agent):
+        async with sem:
+            await _scan_one_agent(agent, today, day_start, day_end)
 
-            await db.timetrigger.create(data={
-                "agent": {"connect": {"id": agent.id}},
-                "user": {"connect": {"id": agent.userId}},
-                "triggerTime": trigger_time,
-                "actionType": "special_date",
-                "actionData": {
-                    "occasions": [
-                        {"type": o.type, "name": o.name, "owner": o.owner}
-                        for o in occasions
-                    ],
-                    "scheduled_reason": "first_idle_after_wakeup",
-                },
-            })
-            logger.info(
-                f"Special date trigger created agent={agent.id} "
-                f"date={today} occasions={[o.type for o in occasions]} at={trigger_time}"
-            )
-        except Exception as e:
-            logger.warning(f"scan_special_dates failed for agent {agent.id}: {e}")
+    # 用 gather 并发, exception 不会冒上来 (each task 内部已 try/except)
+    await asyncio.gather(*(_bound(a) for a in agents))

@@ -19,7 +19,7 @@ from app.services.schedule_domain.time_service import _TZ
 
 _WEEKDAY_CN = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
 
-# Part 5 §3.1 相对时间段默认映射 (严格对齐 spec 表格).
+# Part 5 §3.1 相对时间段默认映射 (严格对齐 spec 表格 7 项).
 # 深夜 = 次日 00:00-06:00, 在调用方决定是否要把日期 +1.
 _PERIOD_HOURS = {
     "凌晨": (0, 6),
@@ -28,7 +28,6 @@ _PERIOD_HOURS = {
     "上午": (9, 12),
     "中午": (12, 14),
     "下午": (14, 18),
-    "傍晚": (17, 19),  # spec 未列, 按常识保留
     "晚上": (18, 24),
     "深夜": (0, 6),    # 实际语义指次日 0-6, 解析时由调用方决定 +1 天
 }
@@ -276,6 +275,12 @@ def parse_time_expressions(
         period = m.group(1)
         hour = int(m.group(2))
         minute = int(m.group(3)) if m.group(3) else 0
+        # spec §3.1 "晚上 12 点" 语义对齐"深夜次日 00:00", 而不是中午
+        if period == "晚上" and hour == 12:
+            anchor_day = today + timedelta(days=1)
+            dt = datetime.combine(anchor_day, time(0, minute), tzinfo=_TZ)
+            _add(m.group(), dt, dt + timedelta(hours=1), "absolute", 0.85, m.span())
+            continue
         if period and hour <= 12 and period in _PM_PERIODS and hour < 12:
             hour += 12
         if 0 <= hour <= 23 and 0 <= minute <= 59:

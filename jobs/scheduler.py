@@ -95,6 +95,7 @@ def setup_scheduler():
         minute=30,
         id="l2_adjustment",
         replace_existing=True,
+        max_instances=1,
     )
 
     # Weekly reflection on Sunday at 4 AM
@@ -106,6 +107,7 @@ def setup_scheduler():
         minute=0,
         id="weekly_reflection",
         replace_existing=True,
+        max_instances=1,
     )
 
     # Weekly portrait update on Sunday at 3:45 AM (staggered from daily reflection)
@@ -117,9 +119,12 @@ def setup_scheduler():
         minute=45,
         id="weekly_portrait",
         replace_existing=True,
+        max_instances=1,
     )
 
-    # Daily schedule generation at 3:30 AM
+    # Daily schedule generation at 3:30 AM. spec Part 5 §4.3: 内部链式触发
+    # special_dates_scan, 保证 scan 读当天新作息. max_instances=1 防 LLM 慢
+    # 导致 3:30 跨日叠加.
     scheduler.add_job(
         _run_daily_schedules,
         "cron",
@@ -127,6 +132,7 @@ def setup_scheduler():
         minute=30,
         id="daily_schedule",
         replace_existing=True,
+        max_instances=1,
     )
 
     # Monthly life overview refresh on 1st at 5:30 AM
@@ -138,6 +144,7 @@ def setup_scheduler():
         minute=30,
         id="monthly_overview",
         replace_existing=True,
+        max_instances=1,
     )
 
     # Daily schedule review at 4 AM
@@ -148,6 +155,7 @@ def setup_scheduler():
         minute=0,
         id="schedule_review",
         replace_existing=True,
+        max_instances=1,
     )
 
     scheduler.add_job(
@@ -195,20 +203,6 @@ def setup_scheduler():
         replace_existing=True,
     )
 
-    # Part 4 §10 + Part 5 §4.3: Unified special date scan daily at 3:30 AM.
-    # 收集当日 用户+AI 7 类特殊日期 (春节/元旦/生日/提醒), 合并为一条 trigger,
-    # actionType=special_date, triggerTime=作息表"起床"事件后第一个空闲段.
-    # 此 job 取代了原来的 _run_holiday_check + _run_birthday_scan
-    # (二者保留为可手动调用的函数, 但不再自动定时, 否则会导致同日多发).
-    scheduler.add_job(
-        _run_special_dates_scan,
-        "cron",
-        hour=3,
-        minute=30,
-        id="special_dates_scan",
-        replace_existing=True,
-    )
-
     # Part 5 §2.1: NTP 校准每 6 小时跑一次
     scheduler.add_job(
         _run_ntp_calibration,
@@ -244,6 +238,14 @@ async def _run_daily_schedules():
         )
 
     await _run_for_all_agents(_gen, concurrency=3, task_name="Daily schedule")
+
+    # spec Part 5 §4.3: "每日凌晨**生成 AI 作息表时**" 触发特殊日期扫描.
+    # 链式 await 保证 scan 一定读到当天新作息 (不是昨天 cache).
+    # 历史: 独立 cron 在 3:35 跑, 若 daily_schedule 慢于 5 min 仍读旧 cache.
+    try:
+        await scan_special_dates_today()
+    except Exception as e:
+        logger.warning(f"Special dates scan (chained) failed: {e}")
 
 
 async def _run_monthly_overview_refresh():
@@ -316,19 +318,6 @@ async def _run_redis_health_recheck():
         await recheck_redis_health()
     except Exception as e:
         logger.warning(f"Redis health recheck failed: {e}")
-
-
-async def _run_special_dates_scan():
-    """Part 4 §10 + Part 5 §4.3: 每日统一扫描特殊日期.
-
-    收集当日 用户+AI 共 4 类 (春节/元旦/生日/提醒), 汇总成一条 trigger
-    actionType=special_date, triggerTime=作息表"起床"事件后第一个空闲段.
-    多命中走合并消息 prompt; 跳过 reply_post_process.
-    """
-    try:
-        await scan_special_dates_today()
-    except Exception as e:
-        logger.warning(f"Special dates scan failed: {e}")
 
 
 async def _run_ntp_calibration():

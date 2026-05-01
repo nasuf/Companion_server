@@ -27,6 +27,7 @@ from app.services.schedule_domain.time_parser import (
     has_explicit_time,
     parse_with_statement_time,
 )
+from app.services.schedule_domain.time_service import _now_corrected
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,21 @@ async def process_memory_pipeline(
                     occur_time = datetime.fromisoformat(raw_time)
                 except ValueError:
                     pass
+
+        # spec Part 5 §4.2: 提醒记忆**必须**含未来 event_time. LLM 偶尔把
+        # "上周提醒过我" 误归为提醒, 此时 occur_time 为历史 → 永远不被
+        # _extract_reminders_for_date 捞到, 累积脏数据. 降级到"其他"子类,
+        # 仍是有效生活记忆但不进特殊日期触发链路.
+        # 用 _now_corrected (tz-aware + NTP 修正), 否则 datetime.now() 是 naive,
+        # 跟 parser 写出的 tz-aware occur_time 比较会 TypeError.
+        if sub_category == "提醒":
+            ref_now = statement_time or _now_corrected()
+            if occur_time is None or occur_time <= ref_now:
+                logger.warning(
+                    f"[MEM-{side}] 提醒记忆 occur_time 缺失或非未来 "
+                    f"({occur_time}); 改归生活/其他: {summary[:40]}"
+                )
+                sub_category = "其他"
 
         # Adjust importance based on emotion
         emotion = mem.get("emotion")
