@@ -40,19 +40,13 @@ def scene_candidate_available(
     return True
 
 
-def select_trigger_type(
-    state: ProactiveStateRecord,
-    *,
-    scene_available: bool,
-) -> str:
+def select_trigger_type() -> str:
     """spec §1.3 触发类型基础配比: 沉默唤醒 30% / 记忆主动 30% / 定时情景 40%.
 
-    - scene 不可用时按 spec §1.3 兜底规则重抽 (沉默 50% / 记忆 50%)
-    - 不按 stage 做动态倾斜, stage 只影响话题来源和话题范围 (TOPIC_RANGE_BY_STAGE)
+    抽中 scheduled_scene 后, **调用方**再校验 scene 可用性 (AI 睡眠 / 当日已用),
+    不可用走 `fallback_trigger_type()` 兜底. 不在此函数预校验 — 否则在 scene
+    不可用时段会偏到 50/50, 错失 30/30 配比.
     """
-    if not scene_available:
-        return fallback_trigger_type()
-
     r = random.random()
     if r < 0.30:
         return "silence_wakeup"
@@ -80,10 +74,11 @@ TOPIC_RANGE_BY_STAGE: dict[str, tuple[str, ...]] = {
 
 _P_LEVELS = ("P1", "P2", "P3", "P4", "P5")
 
-# proactive 3-archetype → spec P-code. cold_start 覆盖 P1-P2; warming
-# 覆盖到 P4; intimate 放开全 5 级。保留 3-stage 是因为 state.stage 由
-# memory 数量 + topic_intimacy 联合决定, 不能纯用 topic_intimacy 推。
+# spec §3.4.7 P-level 映射. cold_start 保留 — 老 state.stage 行 (pre-4-tier 拆分)
+# 可能仍存此值.
 _STAGE_TO_P: dict[str, str] = {
+    "p1_cold": "P1",
+    "p2_cold": "P2",
     "cold_start": "P2",
     "warming": "P4",
     "intimate": "P5",
@@ -111,14 +106,17 @@ def select_topic_theme(stage: str) -> str:
     return random.choice(themes) if themes else "问候"
 
 
-# ── spec §4.1 沉默唤醒 话题来源配比 ──
-# key: 话题来源枚举, value: {stage: probability}
-# 来源: ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting
+# ── spec §4.1 沉默唤醒 / §4.2 记忆主动 话题来源配比 ──
+# spec §5 把 P1+P2 合并成一档配比, 所以 p1_cold / p2_cold / cold_start 共用
+# 同一份分布. 来源: ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting.
+_SILENCE_COLD = {
+    "ai_l1": 0.20, "ai_l2": 0.00, "ai_schedule": 0.10,
+    "user_l1": 0.00, "user_l2": 0.00, "greeting": 0.70,
+}
 SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
-    "cold_start": {
-        "ai_l1": 0.20, "ai_l2": 0.00, "ai_schedule": 0.10,
-        "user_l1": 0.00, "user_l2": 0.00, "greeting": 0.70,
-    },
+    "p1_cold": _SILENCE_COLD,
+    "p2_cold": _SILENCE_COLD,
+    "cold_start": _SILENCE_COLD,
     "warming": {
         "ai_l1": 0.10, "ai_l2": 0.00, "ai_schedule": 0.10,
         "user_l1": 0.05, "user_l2": 0.05, "greeting": 0.70,
@@ -129,12 +127,15 @@ SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
     },
 }
 
-# ── spec §4.2 记忆主动触发 话题来源配比 (PAD 情绪融合独立 100% 不参与抽签) ──
+# 记忆主动 (PAD 情绪融合独立 100% 不参与抽签)
+_MEMORY_COLD = {
+    "ai_l1": 1.00, "ai_l2": 0.00,
+    "user_l1": 0.00, "user_l2": 0.00,
+}
 MEMORY_SOURCE_DIST: dict[str, dict[str, float]] = {
-    "cold_start": {
-        "ai_l1": 1.00, "ai_l2": 0.00,
-        "user_l1": 0.00, "user_l2": 0.00,
-    },
+    "p1_cold": _MEMORY_COLD,
+    "p2_cold": _MEMORY_COLD,
+    "cold_start": _MEMORY_COLD,
     "warming": {
         "ai_l1": 0.75, "ai_l2": 0.05,
         "user_l1": 0.10, "user_l2": 0.10,
@@ -172,9 +173,7 @@ def select_topic_source(stage: str, trigger_type: str) -> str:
     if trigger_type == "scheduled_scene":
         return "ai_schedule"
     if trigger_type == "silence_wakeup":
-        dist = SILENCE_SOURCE_DIST.get(stage) or SILENCE_SOURCE_DIST["cold_start"]
-        return _weighted_choice(dist)
+        return _weighted_choice(SILENCE_SOURCE_DIST.get(stage, _SILENCE_COLD))
     if trigger_type == "memory_proactive":
-        dist = MEMORY_SOURCE_DIST.get(stage) or MEMORY_SOURCE_DIST["cold_start"]
-        return _weighted_choice(dist)
+        return _weighted_choice(MEMORY_SOURCE_DIST.get(stage, _MEMORY_COLD))
     return "greeting"

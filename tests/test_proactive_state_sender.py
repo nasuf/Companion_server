@@ -7,6 +7,7 @@ import pytest
 from app.services.proactive.sender import send_manual_or_triggered_proactive
 from app.services.proactive.state import (
     ProactiveStateRecord,
+    advance_to_next_window,
     claim_due_proactive_state,
     claim_waiting_timeout_state,
 )
@@ -106,3 +107,51 @@ async def test_send_manual_or_triggered_proactive_blocks_waiting_state():
     mock_send.assert_not_awaited()
     mock_log.assert_awaited_once()
     assert mock_log.await_args.kwargs["payload"]["status"] == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_advance_window_loops_back_to_1_at_cycle_end():
+    """spec §1.2 step 4: 走完 4-6h 区间未命中 → 重启 0-6h 循环 (回到 window 1).
+
+    历史 bug: next_index >= 5 直接 _escalate (n+1), 配合 off_hours 命中也走
+    advance_to_next_window, 用户夜间衰减比 spec 快 ~2x.
+    """
+    now = datetime(2026, 4, 1, 10, 0, tzinfo=UTC)
+    state = _state(current_window_index=4, t0_at=now)
+    mock_db = SimpleNamespace(execute_raw=AsyncMock())
+    with (
+        patch("app.services.proactive.state.db", new=mock_db),
+        patch("app.services.proactive.state.log_proactive_event", new_callable=AsyncMock) as mock_log,
+        patch("app.services.proactive.state._escalate_silence_level", new_callable=AsyncMock) as mock_escalate,
+    ):
+        await advance_to_next_window(state, now=now)
+
+    # 关键: escalate 不能被调用 (n+1 只属于 spec §8 用户回复超时)
+    mock_escalate.assert_not_awaited()
+    mock_db.execute_raw.assert_awaited_once()
+    args = mock_db.execute_raw.await_args.args
+    assert args[2] == 1  # next_index 回到 1
+    # 事件类型默认升级为 cycle_restarted, payload 含标记
+    mock_log.assert_awaited_once()
+    log_kwargs = mock_log.await_args.kwargs
+    assert log_kwargs["event_type"] == "cycle_restarted"
+    assert log_kwargs["window_index"] == 1
+    assert log_kwargs["payload"].get("cycle_restarted") is True
+
+
+@pytest.mark.asyncio
+async def test_advance_window_normal_increments_next_index():
+    """常规推进: next_index < 5 → 递增, 不重启不 escalate."""
+    now = datetime(2026, 4, 1, 10, 0, tzinfo=UTC)
+    state = _state(current_window_index=2, t0_at=now)
+    mock_db = SimpleNamespace(execute_raw=AsyncMock())
+    with (
+        patch("app.services.proactive.state.db", new=mock_db),
+        patch("app.services.proactive.state.log_proactive_event", new_callable=AsyncMock),
+        patch("app.services.proactive.state._escalate_silence_level", new_callable=AsyncMock) as mock_escalate,
+    ):
+        await advance_to_next_window(state, now=now)
+
+    mock_escalate.assert_not_awaited()
+    args = mock_db.execute_raw.await_args.args
+    assert args[2] == 3

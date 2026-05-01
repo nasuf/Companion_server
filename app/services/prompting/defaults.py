@@ -422,11 +422,13 @@ PROACTIVE_SILENCE_SCHEDULE_PROMPT = """【任务】作为用户的好朋友，�
 
 
 # Spec 第四部分 §4.2 + 指令模版 P24「记忆主动·基于AI自身记忆」
-# 严格对齐指令模版 3 项：性格 / 经历 / 话题主题。
+# Spec §5.3/§6.3/§7.3 要求"PAD 情绪融合 独立 100%" — current_mood 由 AI 当前
+# PAD 通过 pad_to_tone 映射的 8 象限语气描述符注入, 让 AI 在不同心境下措辞不同.
 PROACTIVE_MEMORY_AI_PROMPT = """【任务】你想起自己的一段经历，忽然有感而发。请自然、温柔地说一句话，不提问、不查户口，只输出符合人设的日常话语。
 
 【参考信息】（只参考，不用刻意提及）
 - 你的性格：{personality_brief}
+- 你当前心境：{current_mood}
 - 你想起的经历：{ai_memory}
 - 话题主题：{topic}
 
@@ -438,6 +440,7 @@ PROACTIVE_MEMORY_USER_PROMPT = """【任务】你记得用户的一件事，忽�
 
 【参考信息】
 - 你的性格：{personality_brief}
+- 你当前心境：{current_mood}
 - 你记得的用户记忆：{user_memory}
 - 话题主题：{topic}
 
@@ -450,6 +453,25 @@ PROACTIVE_SCHEDULED_SCENE_PROMPT = """【任务】现在是{time}，你正在{ac
 - 你的性格：{personality_brief}
 
 【输出】只输出主动消息内容"""
+
+
+# Spec §3.2 + §4.2: 主动记忆抽取必须先按"话题方向"过滤候选, 再让 LLM 生成.
+# 此 prompt 用 utility model 从候选记忆中挑出与 topic 最相关的 ≤3 条, 失败回退
+# importance 倒排. 输入 candidates 是 [{"id", "text"}] JSON 数组.
+PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT = """【任务】从候选记忆中挑选与"话题方向"最相关的最多 3 条，输出 JSON。
+
+【话题方向】{topic}
+
+【候选记忆】（JSON 数组，每条含 id 与 text）
+{candidates}
+
+【输出要求】
+- 严格 JSON，只含一个字段 ids，类型是字符串数组
+- 按相关度从高到低输出，最多 3 条
+- 全部无关时输出 {{"ids": []}}
+- 不要输出解释、代码块标记或多余字段
+
+【输出】"""
 
 
 PROACTIVE_DECAY_FINAL_PROMPT = """【任务】作为用户的好朋友，这是你最后一次主动发消息。如果用户仍未回复，你将不再打扰。请温和体面地表达这个意思，并期待下次交流。

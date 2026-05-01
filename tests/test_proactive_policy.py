@@ -72,12 +72,16 @@ def test_scene_candidate_unavailable_when_already_triggered_today():
     )
 
 
-def test_select_trigger_type_without_scene_never_returns_scene():
-    selections = {
-        select_trigger_type(_state(stage="cold_start"), scene_available=False)
-        for _ in range(50)
-    }
-    assert "scheduled_scene" not in selections
+def test_select_trigger_type_distribution_matches_30_30_40():
+    """spec §1.3: 永远 30/30/40 抽签, 不依赖外部 scene 可用性 — 确保 scheduled_scene
+    在大样本中被抽到 (历史 bug: scene_available=False 直接 fallback 跳过抽签).
+    """
+    import random as _r
+    _r.seed(42)
+    selections = [select_trigger_type() for _ in range(2000)]
+    # scheduled_scene 期望 ~40%, 给 ±5% 容差
+    scene_ratio = selections.count("scheduled_scene") / len(selections)
+    assert 0.35 <= scene_ratio <= 0.45, f"scene_ratio={scene_ratio:.3f}"
 
 
 @pytest.mark.asyncio

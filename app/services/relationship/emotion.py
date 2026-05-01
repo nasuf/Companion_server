@@ -112,11 +112,12 @@ async def extract_emotion(message: str) -> dict:
     return await _invoke_pad("emotion.extraction", message=message)
 
 
-def emotion_to_tone(emotion: dict) -> str:
-    """Map PAD emotion to a tone descriptor string."""
-    v_sign = 1 if emotion.get("pleasure", 0) >= 0 else -1
-    a_sign = 1 if emotion.get("arousal", 0.5) >= 0.5 else -1
-    d_sign = 1 if emotion.get("dominance", 0.5) >= 0.5 else -1
+def emotion_to_tone(emotion: dict | None) -> str:
+    """Map PAD emotion (or None/empty) to a TONE_MAP 8-quadrant descriptor."""
+    e = emotion or {}
+    v_sign = 1 if e.get("pleasure", _PAD_DEFAULTS["pleasure"]) >= 0 else -1
+    a_sign = 1 if e.get("arousal", _PAD_DEFAULTS["arousal"]) >= 0.5 else -1
+    d_sign = 1 if e.get("dominance", _PAD_DEFAULTS["dominance"]) >= 0.5 else -1
     return TONE_MAP.get((v_sign, a_sign, d_sign), "平稳而克制")
 
 

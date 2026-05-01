@@ -79,7 +79,11 @@ async def _defer_special_date_trigger(
     if next_time is None:
         next_time = now + timedelta(minutes=30)
 
-    # spec §1.2: 22:00-8:00 不发送, 越过则取消
+    # spec §1.2: 22:00-8:00 不发送, 越过则取消.
+    # 注: spec §10.2 字面没让"取消", 仅说"顺延至下一个空闲状态". 选择 cancel
+    # 是为避免凌晨打扰用户 (假设次日 8:00 重发祝福语义错位 — 比如生日已过).
+    # 若以后 spec 明确要求次日补发, 在此扩展为推迟到次日起床后第一个空闲段.
+    # CLAUDE.md §6 spec 偏离表已登记此条.
     local_h = next_time.astimezone(_TZ).hour
     if local_h >= 22 or local_h < 8:
         logger.info(

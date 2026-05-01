@@ -57,6 +57,7 @@ from app.services.prompting.defaults import (
     PROACTIVE_SILENCE_SCHEDULE_PROMPT,
     PROACTIVE_MEMORY_AI_PROMPT,
     PROACTIVE_MEMORY_USER_PROMPT,
+    PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT,
     PROACTIVE_SCHEDULED_SCENE_PROMPT,
     PROACTIVE_DECAY_FINAL_PROMPT,
     PROACTIVE_FIRST_GREETING_PROMPT,
@@ -312,6 +313,13 @@ PROMPT_DEFINITIONS = [
         "proactive.memory_user", "记忆主动(用户记忆)", "主动交流", "主动消息",
         "《终稿·第四部分 主动交流》§4.2 记忆主动: AI 忽然想起用户曾说过的事.",
         PROACTIVE_MEMORY_USER_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.memory_topic_rerank", "记忆主动(话题相关性 rerank)", "主动交流", "主动消息",
+        "《终稿·第四部分 主动交流》§3.2/§4.2 记忆抽取需匹配话题方向: "
+        "utility model 从 30 条候选中挑出与 topic_theme 最相关的最多 3 条, "
+        "失败回退到 importance 倒排.",
+        PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT,
     ),
     PromptDefinition(
         "proactive.scheduled_scene", "定时情景(AI作息)", "主动交流", "主动消息",

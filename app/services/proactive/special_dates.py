@@ -28,7 +28,6 @@ from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
     can_send_proactive,
     increment_proactive_count,
-    increment_proactive_2day_count,
 )
 from app.services.proactive.sender import _build_personality_brief  # type: ignore[import-private]
 from app.services.proactive.state import (
@@ -334,11 +333,13 @@ async def send_special_date_proactive(
     if not workspace_id:
         return False
 
-    # 衰减最终停止检查: 通过 ensure_proactive_state_for_workspace + 读 status
+    # spec §10.2 衰减最终停止检查. stop_proactive_state 把永久停止 state 写
+    # status='idle' + stop_reason='silence_exhausted' (无 stopped_permanent 状态值),
+    # 必须按 stop_reason 字段判别.
     state = await ensure_proactive_state_for_workspace(
         workspace_id, now=now_ts, reason="special_date",
     )
-    if state and state.status == "stopped_permanent":
+    if state and state.stop_reason == "silence_exhausted":
         logger.debug(f"Special date skipped: decay final stop workspace={workspace_id[:8]}")
         return False
 
@@ -391,7 +392,6 @@ async def send_special_date_proactive(
             trace_id=tracer.safe_trace_id,
         )
         await increment_proactive_count(agent_id, user_id)
-        await increment_proactive_2day_count(agent_id, user_id)
         return True
 
 

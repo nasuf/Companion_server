@@ -134,7 +134,9 @@ def _window_name(index: int | None) -> str | None:
 
 
 def _log_if_unavailable(action: str, error: Exception) -> None:
-    logger.info(f"Proactive state {action} skipped: {error}")
+    """proactive_state DB 异常: WARNING 不 INFO — 否则 fire_background 失败的
+    state 创建会静默, 主动消息永远不发难排查."""
+    logger.warning(f"Proactive state {action} skipped: {error}")
 
 
 def _pick_random_due_at(t0_at: datetime, window_index: int, now: datetime) -> datetime:
@@ -189,26 +191,6 @@ async def _fetch_workspace_context(workspace_id: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-async def _count_workspace_memories(workspace_id: str) -> tuple[int, int]:
-    try:
-        rows = await db.query_raw(
-            """
-            SELECT
-                COALESCE(SUM(CASE WHEN level = 1 THEN 1 ELSE 0 END), 0) AS l1_count,
-                COALESCE(SUM(CASE WHEN level = 2 THEN 1 ELSE 0 END), 0) AS l2_count
-            FROM memories_user
-            WHERE workspace_id = $1
-              AND is_archived = FALSE
-            """,
-            workspace_id,
-        )
-    except Exception as e:
-        _log_if_unavailable("count memories", e)
-        return 0, 0
-    row = rows[0] if rows else {}
-    return int(row.get("l1_count") or 0), int(row.get("l2_count") or 0)
-
-
 async def _load_topic_intimacy(agent_id: str, user_id: str) -> int:
     try:
         rows = await db.query_raw(
@@ -229,15 +211,21 @@ async def _load_topic_intimacy(agent_id: str, user_id: str) -> int:
     return int(rows[0].get("topic_intimacy") or 50)
 
 
-async def determine_proactive_stage(workspace_id: str, agent_id: str, user_id: str) -> str:
-    l1_count, l2_count = await _count_workspace_memories(workspace_id)
-    topic_intimacy = await _load_topic_intimacy(agent_id, user_id)
+async def determine_proactive_stage(agent_id: str, user_id: str) -> str:
+    """spec §2.1: 主动交流阶段由话题亲密度等级决定.
 
-    if l1_count >= 15 and l2_count >= 35 and topic_intimacy >= 65:
+    P1 (0-20) → p1_cold / P2 (21-40) → p2_cold / P3+P4 (41-80) → warming /
+    P5 (81-100) → intimate. spec §3.4.7 P1 仅含 4 类话题, P2 增 3 类 — 拆开
+    避免极早期用户拿到 P2 话题集 (体感"AI 话太多").
+    """
+    topic_intimacy = await _load_topic_intimacy(agent_id, user_id)
+    if topic_intimacy >= 81:
         return "intimate"
-    if l1_count >= 8 and l2_count >= 15:
+    if topic_intimacy >= 41:
         return "warming"
-    return "cold_start"
+    if topic_intimacy >= 21:
+        return "p2_cold"
+    return "p1_cold"
 
 
 async def get_active_workspace_context(workspace_id: str) -> dict[str, Any] | None:
@@ -401,7 +389,7 @@ async def start_or_restart_proactive_session(
     reason: str = "conversation_end",
 ) -> str | None:
     now_ts = _now(now)
-    stage = await determine_proactive_stage(workspace_id, agent_id, user_id)
+    stage = await determine_proactive_stage(agent_id, user_id)
     first_window_index = 1
     due_at = _pick_random_due_at(now_ts, first_window_index, now_ts)
 
@@ -639,13 +627,17 @@ async def mark_proactive_sent(
     mark_daily_scene: bool = False,
     response_timeout_hours: int = 24,
     extra_metadata: dict[str, Any] | None = None,
+    initial_silence_level_n: int | None = None,
 ) -> None:
+    """`initial_silence_level_n`: spec §12.3 first_greeting 用 1 设种子, 其它路径不传 —
+    None 表示 silence_level_n 字段不动 (后续 escalate 自然推进)."""
     now_ts = _now(now)
     remaining_forced = state.remaining_forced_triggers
     if state.followup_plan_type in {"seven_day_sparse", "thirty_day_final"} and remaining_forced is not None:
         remaining_forced = max(0, remaining_forced - 1)
     merged_metadata = {**(state.metadata or {}), **(extra_metadata or {})}
     try:
+        # initial_silence_level_n 仅在当前 n=0 时升级 (first_greeting 重入安全).
         await db.execute_raw(
             """
             UPDATE proactive_states
@@ -660,6 +652,10 @@ async def mark_proactive_sent(
                 remaining_forced_triggers = $4,
                 daily_scene_triggered_at = CASE WHEN $5 THEN $2::timestamp ELSE daily_scene_triggered_at END,
                 metadata = $6::jsonb,
+                silence_level_n = CASE
+                    WHEN $7::int IS NOT NULL AND silence_level_n = 0 THEN $7::int
+                    ELSE silence_level_n
+                END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             """,
@@ -669,6 +665,7 @@ async def mark_proactive_sent(
             remaining_forced,
             mark_daily_scene,
             json.dumps(merged_metadata, ensure_ascii=False),
+            initial_silence_level_n,
         )
     except Exception as e:
         _log_if_unavailable("mark proactive sent", e)
@@ -918,29 +915,49 @@ async def advance_to_next_window(
     now_ts = _now(now)
     current_index = state.current_window_index if state.current_window_index is not None else 0
     next_index = current_index + 1
-    if next_index >= len(PROACTIVE_WINDOWS):
-        # 流程图: 所有窗口用完 → 算作一轮未触发 → n+1 升级
-        await _escalate_silence_level(state, now=now_ts, trigger="windows_exhausted")
-        return
+    cycle_restarted = next_index >= len(PROACTIVE_WINDOWS)
+    if cycle_restarted:
+        # spec §1.2 step 4: 走完 4-6h 区间未命中 → 重启 0-6h 循环, 不 escalate.
+        # n+1 仅属于 spec §8 "用户回复 24h 超时", 不属于"概率没命中".
+        next_index = 1
+        new_t0 = now_ts
+        if event_type == "window_advanced":
+            event_type = "cycle_restarted"
+    else:
+        new_t0 = state.t0_at or now_ts
 
-    due_at = _pick_random_due_at(state.t0_at or now_ts, next_index, now_ts)
+    due_at = _pick_random_due_at(new_t0, next_index, now_ts)
+    # cycle 重启时刷新 t0_at; 普通推进 t0 不变, 跳过 no-op 写避免 WAL/replication 噪音.
     try:
-        await db.execute_raw(
-            """
-            UPDATE proactive_states
-            SET
-                status = 'running',
-                current_window_index = $2,
-                window_due_at = $3::timestamp,
-                last_attempt_at = $4::timestamp,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-            """,
-            state.id,
-            next_index,
-            due_at,
-            now_ts,
-        )
+        if cycle_restarted:
+            await db.execute_raw(
+                """
+                UPDATE proactive_states
+                SET
+                    status = 'running',
+                    current_window_index = $2,
+                    window_due_at = $3::timestamp,
+                    t0_at = $4::timestamp,
+                    last_attempt_at = $5::timestamp,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                state.id, next_index, due_at, new_t0, now_ts,
+            )
+        else:
+            await db.execute_raw(
+                """
+                UPDATE proactive_states
+                SET
+                    status = 'running',
+                    current_window_index = $2,
+                    window_due_at = $3::timestamp,
+                    last_attempt_at = $4::timestamp,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                state.id, next_index, due_at, now_ts,
+            )
     except Exception as e:
         _log_if_unavailable("advance window", e)
         return
@@ -952,5 +969,9 @@ async def advance_to_next_window(
         conversation_id=state.conversation_id,
         event_type=event_type,
         window_index=next_index,
-        payload={"due_at": due_at.isoformat(), **(payload or {})},
+        payload={
+            "due_at": due_at.isoformat(),
+            **({"cycle_restarted": True} if cycle_restarted else {}),
+            **(payload or {}),
+        },
     )

@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
+from app.services.llm.models import get_utility_model, invoke_json
 from app.services.portrait import get_latest_portrait
+from app.services.prompting.utils import render_prompt
 from app.services.relationship.emotion import get_ai_emotion
 from app.services.relationship.intimacy import get_relationship_stage, get_topic_intimacy
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.core_memory import load_core_memory_strings
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
 
+logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
 
@@ -27,30 +33,36 @@ async def build_proactive_context(
     source: str | None = None,
     topic_theme: str | None = None,
 ) -> dict[str, Any]:
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    # 9 个独立 I/O 并发 (DB / Redis / LLM rerank). _load_proactive_memories
+    # 含 utility LLM 调用是最长尾, 跟其余 DB 读并行可让 LLM 时间被吸收.
+    (
+        agent, schedule, emotion, core_memories,
+        proactive_memories_pair, topic_intimacy, silence_hours,
+        user_portrait, recent_context,
+    ) = await asyncio.gather(
+        db.aiagent.find_unique(where={"id": agent_id}),
+        get_cached_schedule(agent_id),
+        get_ai_emotion(agent_id),
+        load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="user"),
+        _load_proactive_memories(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            source=source,
+            exclude_memory_ids=exclude_memory_ids,
+            topic_theme=topic_theme,
+        ),
+        get_topic_intimacy(agent_id, user_id),
+        _compute_silence_hours(workspace_id),
+        get_latest_portrait(user_id, agent_id),
+        _load_recent_context(workspace_id),
+    )
     if not agent:
         raise ValueError(f"Agent not found: {agent_id}")
 
-    schedule = await get_cached_schedule(agent_id)
+    proactive_memories, used_memory_ids = proactive_memories_pair
     schedule_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "status": "idle", "type": "leisure"}
-    # Proactive 读缓存 PAD，不触发 emotion.ai_pad LLM (避免 per-tick 成本)
-    emotion = await get_ai_emotion(agent_id)
-    core_memories = await load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="user")
-    proactive_memories, used_memory_ids = await _load_proactive_memories(
-        user_id=user_id,
-        workspace_id=workspace_id,
-        source=source,
-        exclude_memory_ids=exclude_memory_ids,
-    )
-    topic_intimacy = await get_topic_intimacy(agent_id, user_id)
     relationship_stage = get_relationship_stage(topic_intimacy)
-
-    silence_hours = await _compute_silence_hours(workspace_id)
     scene_hint = _build_scene_hint(trigger_type, schedule_status)
-
-    # Spec §4.1 step 4 沉默唤醒参考信息含"用户画像"+"近期对话上下文"
-    user_portrait = await get_latest_portrait(user_id, agent_id)
-    recent_context = await _load_recent_context(workspace_id)
 
     return {
         "agent": agent,
@@ -109,12 +121,40 @@ async def _load_recent_context(workspace_id: str, limit: int = 6) -> str:
     return "\n".join(lines)
 
 
+async def _rerank_memories_by_topic(
+    rows: list, topic_theme: str
+) -> list[str]:
+    """Spec §3.2 + §4.2: utility model 从候选中挑出最贴 topic 的 ≤3 个 id.
+
+    失败 / 空结果 → 返回 [], 调用方回退到 importance 倒排兜底.
+    Caller (`_load_proactive_memories`) 已过滤空 summary/content 行,
+    rows 进来都有内容.
+    """
+    if not topic_theme or not rows:
+        return []
+    candidates = [{"id": r.id, "text": (r.summary or r.content)[:80]} for r in rows]
+    result = await render_prompt(
+        "proactive.memory_topic_rerank",
+        {
+            "topic": topic_theme,
+            "candidates": json.dumps(candidates, ensure_ascii=False),
+        },
+        lambda p: invoke_json(get_utility_model(), p),
+    )
+    ids = result.get("ids") if isinstance(result, dict) else None
+    if not isinstance(ids, list):
+        return []
+    valid = {c["id"] for c in candidates}
+    return [str(i) for i in ids if str(i) in valid][:3]
+
+
 async def _load_proactive_memories(
     *,
     user_id: str,
     workspace_id: str,
     source: str | None = None,
     exclude_memory_ids: set[str] | None = None,
+    topic_theme: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Load proactive memories with dedup support.
 
@@ -122,6 +162,9 @@ async def _load_proactive_memories(
     - ai_l1 / ai_l2  → memories_ai, level=1 or 2
     - user_l1 / user_l2 → memories_user, level=1 or 2
     - ai_schedule / greeting → 无记忆 (返回空)
+
+    spec §3.2 + §4.2: 抽中 source 后, **先按 topic_theme 做 LLM rerank**, 再
+    输出. 失败回退到 importance 倒排兜底, 保留原行为.
 
     Returns (texts, memory_ids) for tracking which memories were used.
     """
@@ -154,13 +197,23 @@ async def _load_proactive_memories(
     )
 
     exclude = exclude_memory_ids or set()
+    eligible = [r for r in rows if r.id not in exclude and (r.summary or r.content)]
+
+    # spec §3.2 + §4.2: topic-aware rerank, 失败回退原 importance 顺序
+    rerank_ids = await _rerank_memories_by_topic(eligible, topic_theme or "")
+    if rerank_ids:
+        order = {mid: idx for idx, mid in enumerate(rerank_ids)}
+        ordered = sorted(
+            (r for r in eligible if r.id in order),
+            key=lambda r: order[r.id],
+        )
+    else:
+        ordered = eligible
 
     texts: list[str] = []
     ids: list[str] = []
     seen: set[str] = set()
-    for row in rows:
-        if row.id in exclude:
-            continue
+    for row in ordered:
         text = row.summary or row.content
         if not text or text in seen:
             continue

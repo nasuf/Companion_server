@@ -37,7 +37,6 @@ from app.services.proactive.state import (
     log_proactive_event,
     stop_proactive_state,
 )
-from app.services.relationship.intimacy import get_topic_intimacy
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
 from app.services.schedule_domain.time_service import _TZ
 from app.services.topic import detect_topic_fatigue
@@ -136,12 +135,6 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
         )
         return
 
-    # --- Gate: 亲密度前置检查 (永久性条件，停止合理) ---
-    topic_intimacy = await get_topic_intimacy(state.agent_id, state.user_id)
-    if state.stage == "cold_start" and topic_intimacy < 10:
-        await stop_proactive_state(state, reason="intimacy_too_low", now=now)
-        return
-
     # --- Gate: spec §1.2 22:00-8:00 不发送, 照常推进窗口 ---
     from datetime import datetime as _dt, timezone as _tz
     _now_dt = now or _dt.now(_tz.utc)
@@ -198,12 +191,14 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
             )
             return
 
-        schedule = await get_cached_schedule(state.agent_id)
-        schedule_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "status": "idle", "type": "leisure"}
-        scene_available = scene_candidate_available(state, schedule_status, now=now)
-        trigger_type = select_trigger_type(state, scene_available=scene_available)
-        if trigger_type == "scheduled_scene" and not scene_available:
-            trigger_type = fallback_trigger_type()
+        # spec §1.3: 先 30/30/40 抽签, 抽中 scene 不可用才 50/50 fallback.
+        # 预校验 scene 会折损 30/30 配比.
+        trigger_type = select_trigger_type()
+        if trigger_type == "scheduled_scene":
+            schedule = await get_cached_schedule(state.agent_id)
+            schedule_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "status": "idle", "type": "leisure"}
+            if not scene_candidate_available(state, schedule_status, now=now):
+                trigger_type = fallback_trigger_type()
 
         await log_proactive_event(
             state_id=state.id,

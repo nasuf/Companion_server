@@ -25,14 +25,15 @@ from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
-    can_send_proactive, can_send_proactive_2day,
-    increment_proactive_count, increment_proactive_2day_count,
+    can_send_proactive, increment_proactive_count,
 )
 from app.services.proactive.context import build_proactive_context
 from app.services.proactive.policy import select_topic_source, select_topic_theme
+from app.services.relationship.emotion import emotion_to_tone
 from app.services.workspace.workspaces import resolve_workspace_id
 from app.services.proactive.state import (
     ProactiveStateRecord,
+    determine_proactive_stage,
     ensure_proactive_state_for_workspace,
     get_active_workspace_context,
     log_proactive_event,
@@ -88,12 +89,9 @@ async def _check_send_eligibility(
     state: ProactiveStateRecord,
     trigger_type: str,
 ) -> _SendPrep | None:
-    """spec §9 互斥: 检查日限/二日限/workspace/conversation. 失败返回 None."""
+    """spec §9 互斥: 检查日限/workspace/conversation. 失败返回 None."""
     if not await can_send_proactive(state.agent_id, state.user_id):
         await _log_skip(state, trigger_type, "daily_limit")
-        return None
-    if not await can_send_proactive_2day(state.agent_id, state.user_id):
-        await _log_skip(state, trigger_type, "2day_limit")
         return None
 
     workspace_context = await get_active_workspace_context(state.workspace_id)
@@ -206,6 +204,9 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
         "user_portrait": user_portrait,
         "recent_context": recent_context,
     }
+    # Spec §4.2/§5.3/§6.3/§7.3: 记忆主动"PAD 情绪融合 独立 100%" → 8 象限
+    # 语气描述符注入. silence_* 不接 PAD (spec §4.1 沉默唤醒未要求情绪融合).
+    current_mood = emotion_to_tone(ctx.get("emotion"))
     fields_by_key: dict[str, dict[str, Any]] = {
         "proactive.silence_plain": {
             "personality_brief": personality_brief,
@@ -226,14 +227,16 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "current_activity": f"{activity}({status})",
             **silence_shared,
         },
-        # Spec §4.2 + 指令模版 P24-25：仅 3 项（性格/记忆/话题主题）
+        # Spec §4.2 + 指令模版 P24-25: 性格 / 当前心境(PAD融合) / 记忆 / 话题主题
         "proactive.memory_ai": {
             "personality_brief": personality_brief,
+            "current_mood": current_mood,
             "ai_memory": memory_text,
             "topic": topic,
         },
         "proactive.memory_user": {
             "personality_brief": personality_brief,
+            "current_mood": current_mood,
             "user_memory": memory_text,
             "topic": topic,
         },
@@ -338,16 +341,20 @@ async def generate_and_send_proactive(
     if prep is None:
         return False
 
+    # spec §2.2: 话题亲密度可变, 触发前实时算; state.stage 仅在 session
+    # start/restart 时持久化, 不追踪中途 intimacy 升级.
+    stage = await determine_proactive_stage(state.agent_id, state.user_id)
+
     # spec §3.2 话题方向 + §4.1/§4.2 来源概率表
-    topic_theme = select_topic_theme(state.stage)
-    source = select_topic_source(state.stage, trigger_type)
+    topic_theme = select_topic_theme(stage)
+    source = select_topic_source(stage, trigger_type)
 
     ctx = await build_proactive_context(
         workspace_id=state.workspace_id,
         user_id=state.user_id,
         agent_id=state.agent_id,
         trigger_type=trigger_type,
-        stage=state.stage,
+        stage=stage,
         exclude_memory_ids=prep.exclude_memory_ids,
         source=source,
         topic_theme=topic_theme,
@@ -393,12 +400,11 @@ async def generate_and_send_proactive(
             workspace_id=state.workspace_id,
             message=message,
             trigger_type=trigger_type,
-            extra_metadata={"stage": state.stage},
+            extra_metadata={"stage": stage},
             trace_id=tracer.safe_trace_id,
         )
 
     await increment_proactive_count(state.agent_id, state.user_id)
-    await increment_proactive_2day_count(state.agent_id, state.user_id)
 
     await _persist_proactive_state(
         state,
@@ -553,12 +559,14 @@ async def send_first_greeting(
                     ws_id, reason="first_greeting",
                 )
                 if state is not None:
+                    # spec §12.3: 首句计入 n=1, 用户未回复 24h 后 escalate 升到 2.
                     await mark_proactive_sent(
                         state,
                         trigger_type="first_greeting",
                         message=message,
                         assistant_message_id=assistant_message_id,
                         now=now_ts,
+                        initial_silence_level_n=1,
                     )
                     await save_last_reply_timestamp(agent_id, user_id, when=now_ts)
             return True

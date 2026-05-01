@@ -65,18 +65,50 @@ async def create_provisioning_workspace(user_id: str, agent_id: str) -> Any:
     )
 
 
+async def _restart_proactive_for_workspace(workspace_id: str) -> None:
+    """workspace 转 active 时, fire_background 重启 proactive_state.
+
+    spec §9 互斥列表里 workspace_inactive 条件下 proactive_state 会被永久
+    stop. 之前 workspace 重新转 active 没 hook 重启, state 永远卡 idle,
+    主动消息再也不发.
+
+    用 start_or_restart_proactive_session (ON CONFLICT UPDATE) 而非
+    ensure_proactive_state_for_workspace — 后者发现现有 idle/stopped 行
+    直接 return, 不会切回 running. ON CONFLICT UPDATE 强制重置 state 回
+    running + first_window_index, 失败仅 log warning, 不阻塞 activation.
+    """
+    from app.services.runtime.tasks import fire_background
+    from app.services.proactive.state import (
+        get_active_workspace_context, start_or_restart_proactive_session,
+    )
+
+    async def _do_restart() -> None:
+        ctx = await get_active_workspace_context(workspace_id)
+        if not ctx:
+            return
+        await start_or_restart_proactive_session(
+            workspace_id=workspace_id,
+            conversation_id=ctx.get("conversation_id"),
+            user_id=str(ctx["user_id"]),
+            agent_id=str(ctx["agent_id"]),
+            reason="workspace_activated",
+        )
+
+    fire_background(_do_restart())
+
+
 async def activate_workspace(workspace_id: str) -> Any:
-    return await db.chatworkspace.update(
+    result = await db.chatworkspace.update(
         where={"id": workspace_id},
         data={"status": "active", "archivedAt": None},
     )
+    await _restart_proactive_for_workspace(workspace_id)
+    return result
 
 
-async def reactivate_workspace(workspace_id: str) -> Any:
-    return await db.chatworkspace.update(
-        where={"id": workspace_id},
-        data={"status": "active", "archivedAt": None},
-    )
+# 同义入口: archive 后恢复走 reactivate, 首次激活 (provisioning→active) 走
+# activate. 行为完全一致, 保留命名让 caller 表达意图.
+reactivate_workspace = activate_workspace
 
 
 async def ensure_workspace(user_id: str, agent_id: str) -> Any:

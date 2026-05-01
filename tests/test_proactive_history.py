@@ -87,25 +87,9 @@ async def test_can_send_proactive_at_limit_returns_false(history_mocks):
     assert await can_send_proactive("a1", "u1") is False
 
 
-@pytest.mark.asyncio
-async def test_can_send_proactive_2day_sums_today_and_yesterday(history_mocks):
-    """2day Redis miss → DB sum(today, yesterday)."""
-    from app.services.proactive.history import can_send_proactive_2day
-
-    mock_db, mock_redis = history_mocks
-    mock_redis.get = AsyncMock(return_value=None)
-    mock_redis.set = AsyncMock()
-    # DB 返 2 行: 今天 2, 昨天 1 → sum = 3 < MAX 4 → True
-    mock_db.proactivecounter.find_many = AsyncMock(return_value=[
-        _row(count=2, date="20260424"),
-        _row(count=1, date="20260423"),
-    ])
-
-    assert await can_send_proactive_2day("a1", "u1") is True
-    # 参数包含 date IN [today, yesterday]
-    call_kwargs = mock_db.proactivecounter.find_many.call_args.kwargs
-    assert call_kwargs["where"]["agentId"] == "a1"
-    assert "in" in call_kwargs["where"]["date"]
+# test_can_send_proactive_2day_sums_today_and_yesterday — 已删除.
+# spec §9 互斥列表只有"沉默+记忆当日合计 3 次"上限, 不存在 2 日 4 次限制.
+# 早期工程加的 2-day 滑窗已删除, 严格对齐 spec.
 
 
 @pytest.mark.asyncio

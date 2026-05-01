@@ -7,6 +7,32 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
+def test_emotion_to_tone_handles_none_and_empty():
+    """spec §4.2/§5.3/§6.3/§7.3: PAD 三轴二值化 → TONE_MAP 8 象限.
+
+    None/空 dict 必须走 _PAD_DEFAULTS (pleasure=0, arousal=0.5, dominance=0.5),
+    映射到 (1, 1, 1) 象限"热情而笃定"; 不能因为 None-guard 提前返回脱离 TONE_MAP.
+    """
+    from app.services.relationship.emotion import emotion_to_tone
+
+    cases = [
+        ({"pleasure": 0.5, "arousal": 0.8, "dominance": 0.8}, "热情而笃定"),
+        ({"pleasure": 0.5, "arousal": 0.8, "dominance": 0.2}, "兴奋但不太踏实"),
+        ({"pleasure": 0.5, "arousal": 0.2, "dominance": 0.8}, "平静而满足"),
+        ({"pleasure": 0.5, "arousal": 0.2, "dominance": 0.2}, "安宁而接纳"),
+        ({"pleasure": -0.5, "arousal": 0.8, "dominance": 0.8}, "烦躁但强撑着"),
+        ({"pleasure": -0.5, "arousal": 0.8, "dominance": 0.2}, "焦虑而紧绷"),
+        ({"pleasure": -0.5, "arousal": 0.2, "dominance": 0.8}, "低落但克制"),
+        ({"pleasure": -0.5, "arousal": 0.2, "dominance": 0.2}, "难过而退缩"),
+    ]
+    for pad, expected in cases:
+        assert emotion_to_tone(pad) == expected, f"{pad} → {expected}"
+
+    # None / 空 → 走 _PAD_DEFAULTS = (0, 0.5, 0.5) → (1, 1, 1) 象限
+    assert emotion_to_tone(None) == "热情而笃定"
+    assert emotion_to_tone({}) == "热情而笃定"
+
+
 @pytest.mark.asyncio
 async def test_compute_ai_pad_happy_path():
     """LLM 返回合法 JSON → 直接返回 clamp 后的 PAD。"""
