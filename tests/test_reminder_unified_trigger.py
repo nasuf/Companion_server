@@ -1263,7 +1263,10 @@ async def test_handle_reminder_defers_when_not_yet_due():
 
 @pytest.mark.asyncio
 async def test_handle_reminder_proceeds_when_exactly_due():
-    """Trigger time == now (or earlier) should pass the not-yet-due gate."""
+    """Trigger time == now (or earlier) should pass the not-yet-due gate.
+
+    Round-3 fix: quiet hours + AI sleep gates 已豁免 (生产 bug "23:01 该睡觉"
+    被 quiet hours 拦下永远不响). 用 pre-check 返 cancelled 让 handler 干净 return."""
     from app.services.proactive import triggers as triggers_mod
 
     now = datetime(2025, 6, 15, 14, 0, 0, tzinfo=_TZ)
@@ -1273,20 +1276,80 @@ async def test_handle_reminder_proceeds_when_exactly_due():
         last_fired=None,
     )
 
-    # Mock the AI sleep gate to short-circuit cleanly
+    async def _cancelled_pre_check(**kwargs):
+        return {"state": "cancelled", "new_time": None, "reason": "测试"}
+
     with (
         patch.object(triggers_mod, "db") as mock_db,
-        patch.object(triggers_mod, "get_cached_schedule",
-                     new_callable=AsyncMock, return_value=[]),
-        patch.object(triggers_mod, "get_current_status",
-                     return_value={"status": "sleep"}),
+        patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
+                     new_callable=AsyncMock, return_value=""),
+        patch("app.services.chat.intent_replies.reminder_pre_check",
+              side_effect=_cancelled_pre_check),
+        patch("app.services.reminder.scheduling.archive_reminder_memory",
+              new_callable=AsyncMock, return_value=True),
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.update = AsyncMock()
         mock_db.timetrigger.create = AsyncMock()
         # Should NOT trigger the not-yet-due early return.
-        # Reaches AI sleep gate and returns there. We just confirm no crash.
+        # 走到 pre-check (cancelled) 然后 archive + deactivate → 不 crash
         await triggers_mod._handle_reminder_trigger(trig, now)
+        assert mock_db.timetrigger.update.call_count >= 1, (
+            "exactly-due trigger 应至少更新一次 (deactivate)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_reminder_exempt_from_quiet_hours_and_ai_sleep():
+    """生产 bug 复现 (2026-05-02 23:01:31): 用户 22:58 设"待会儿提醒我该睡觉啦",
+    落库 23:01:20, 4 次 DEFER 都对, 第 5 次进 quiet hours guard SKIP, 永远不响.
+
+    Round-3 fix: reminder 豁免 quiet hours (22-08) + AI sleep — 跟 daily_limit
+    豁免同 pattern. 用户主动设的提醒, AI 不该用 quiet hours 替用户做决定."""
+    from app.services.proactive import triggers as triggers_mod
+
+    # now = 23:01 (quiet hours 内, 用户主动设的就是这时刻提醒)
+    now = datetime(2025, 6, 15, 23, 1, 0, tzinfo=_TZ)
+    trig = _make_trigger(
+        action_data={"summary": "该睡觉了", "memory_id": "m1", "recurrence": "once"},
+        trigger_time=now - timedelta(seconds=5),  # 5s ago, 已到点
+        last_fired=None,
+    )
+
+    async def _needed_pre_check(**kwargs):
+        return {"state": "needed", "new_time": None, "reason": "测试"}
+
+    with (
+        patch.object(triggers_mod, "db") as mock_db,
+        patch.object(triggers_mod, "_fetch_recent_messages_for_reminder",
+                     new_callable=AsyncMock, return_value=""),
+        patch.object(triggers_mod, "get_cached_schedule",
+                     new_callable=AsyncMock, return_value=[]),
+        # AI sleep status — 之前会 SKIP, 现在豁免应当继续
+        patch.object(triggers_mod, "get_current_status",
+                     return_value={"status": "sleep"}),
+        patch("app.services.chat.intent_replies.reminder_pre_check",
+              side_effect=_needed_pre_check),
+        patch("app.services.chat.intent_replies.reminder_message",
+              new_callable=AsyncMock, return_value="该睡觉啦~"),
+        patch.object(triggers_mod, "resolve_workspace_id",
+                     new_callable=AsyncMock, return_value="ws-1"),
+        patch("app.services.proactive.emit.emit_proactive_message",
+              new_callable=AsyncMock, return_value=None),
+        patch.object(triggers_mod, "get_redis", new_callable=AsyncMock,
+                     return_value=MagicMock(incr=AsyncMock(), expire=AsyncMock())),
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.update = AsyncMock()
+        mock_db.timetrigger.create = AsyncMock()
+        await triggers_mod._handle_reminder_trigger(trig, now)
+
+    # 必须真发了消息 — 不能因 quiet hours 或 AI sleep 静默 SKIP
+    # (claim 写 isActive=False + lastFired) → at least 1 update
+    assert mock_db.timetrigger.update.call_count >= 1, (
+        "reminder 在 quiet hours 内必须仍然 fire (claim trigger), "
+        "不能被 SKIP 拦下 — 这是生产 bug 复现, 必须修住"
+    )
 
 
 @pytest.mark.asyncio

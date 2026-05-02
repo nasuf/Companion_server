@@ -264,31 +264,18 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         )
         return
 
-    # 守门 1: spec §1.2 22:00-08:00 quiet hours
-    local_h = now.astimezone(_TZ).hour
-    if local_h >= 22 or local_h < 8:
-        logger.info(
-            f"[REMINDER-TRIGGER] {trigger.id[:8]} SKIP: outside active hours "
-            f"(local_h={local_h})"
-        )
-        return
-
-    # 守门 2: AI 睡眠状态 (跟 special_date 一致)
-    schedule = await get_cached_schedule(agent_id)
-    if schedule:
-        status = get_current_status(schedule, now)
-        if status.get("status") == "sleep":
-            logger.info(
-                f"[REMINDER-TRIGGER] {trigger.id[:8]} SKIP: AI sleeping"
-            )
-            return
-
-    # 注: reminder **豁免** spec §1.2 每日 3 次上限.
-    # spec §1.2 的 daily_limit 是为了"AI 不要主动找用户太频繁" — 但 reminder
-    # 是用户**主动**让 AI 帮忙记的事, 用户自己设了 5 个提醒, AI 必须执行,
-    # 否则用户花心思设的提醒永远不响, 体感很糟. 仍守 quiet hours + AI sleep
-    # 这两条 (尊重物理边界), 但 daily 配额是被动消息逻辑, 不应卡 reminder.
-    # 仍然 redis 取 daily_key 用于 emit 后递增计数 (供其他主动路径参考).
+    # 注: reminder **豁免** spec §1.2 主动消息所有 gate (daily_limit / quiet hours /
+    # AI sleep). spec §1.2 这些限制是为了"AI 不要主动找用户太频繁/太晚/不在线时
+    # 还出击" — 但 reminder 是用户**主动**让 AI 帮忙记的事, 用户自己说"该睡觉
+    # 了"/"明早 7 点叫我" 就明确希望在那个时刻响. 用 quiet hours 拦下
+    # "23:01 该睡觉" 提醒就是 AI 反客为主决定该不该响, 用户体感: "我设了你不响"
+    # 比"凌晨被打扰"更糟. 设错时间用户可以改/取消, 不该 AI 替用户做决定.
+    #
+    # 生产 bug 复现 (2026-05-02 23:01:31): 用户 22:58 说"待会儿提醒我该睡觉啦",
+    # 落库 23:01:20, 4 次 DEFER 都对, 第 5 次 scan 进 quiet hours guard SKIP,
+    # 提醒永远不响. 现在统一豁免.
+    #
+    # 仍然 redis 取 daily_key 用于 emit 后递增计数 (供其他主动路径参考统计).
     redis = await get_redis()
     daily_key = f"trigger_count:{agent_id}:{user_id}:{now.strftime('%Y%m%d')}"
 
