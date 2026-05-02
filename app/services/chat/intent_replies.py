@@ -234,6 +234,14 @@ async def record_confirm_reply(
     )
 
 
+# pre-check 是 reminder 触发的"在路径上"LLM 调用. 默认 LLM 链路 (resilience)
+# 12s timeout × 3 attempts + ollama fallback, 整体 ~50s, 直接拉爆提醒延迟
+# (生产观察: 用户期望 17:10:18 提醒, 实际 17:11:21 才发, 多花的 ~50s
+# 全是 pre-check LLM 卡住). 给 pre-check 一个短 timeout, 失败立刻 fallback
+# 到"needed" — 保守语义"不知道用户是否已做, 照常提醒不漏".
+_REMINDER_PRECHECK_TIMEOUT_SEC = 5.0
+
+
 async def reminder_pre_check(
     *,
     summary: str,
@@ -243,20 +251,40 @@ async def reminder_pre_check(
     """统一提醒触发前的状态判别 (completed/cancelled/rescheduled/needed).
 
     返回形如 `{"state": "...", "new_time": "ISO|None", "reason": "..."}`.
-    LLM 失败 / 输出非 JSON → 返回 `{"state": "needed", "new_time": None, "reason": "fallback"}`
-    保守路径 (照常发送提醒, 至少不漏)."""
+    LLM 失败 / 超时 / 输出非 JSON → fallback 到 "needed"
+    (保守语义: 照常发送提醒, 宁可让用户被多提醒一次也不漏掉).
+
+    硬 timeout 5s: pre-check 是触发热路径, 长 LLM 卡顿直接拉爆体感延迟.
+    """
+    import asyncio as _asyncio
+
     fallback = {"state": "needed", "new_time": None, "reason": "llm_fallback"}
     if not summary:
         return fallback
-    result = await render_prompt(
-        "proactive.reminder_pre_check",
-        {
-            "summary": summary,
-            "trigger_time": trigger_time or "(未知)",
-            "recent_messages": recent_messages or "(无)",
-        },
-        lambda p: invoke_json(get_utility_model(), p),
-    )
+
+    async def _do_check() -> dict | None:
+        return await render_prompt(
+            "proactive.reminder_pre_check",
+            {
+                "summary": summary,
+                "trigger_time": trigger_time or "(未知)",
+                "recent_messages": recent_messages or "(无)",
+            },
+            lambda p: invoke_json(get_utility_model(), p),
+        )
+
+    try:
+        result = await _asyncio.wait_for(
+            _do_check(), timeout=_REMINDER_PRECHECK_TIMEOUT_SEC,
+        )
+    except (_asyncio.TimeoutError, Exception) as e:
+        logger.info(
+            f"reminder_pre_check timeout/error after "
+            f"{_REMINDER_PRECHECK_TIMEOUT_SEC}s ({type(e).__name__}); "
+            "falling back to 'needed' (will fire reminder)"
+        )
+        return fallback
+
     if not isinstance(result, dict):
         return fallback
     state = str(result.get("state", "")).strip().lower()

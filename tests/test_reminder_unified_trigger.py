@@ -536,6 +536,44 @@ def test_reminder_exempt_from_daily_limit():
     )
 
 
+@pytest.mark.asyncio
+async def test_reminder_pre_check_hard_timeout():
+    """生产观察: dashscope LLM 超时 3 次 (12s ×3) + ollama fallback (~9s) =
+    pre-check 单步阻塞 ~50s. 提醒触发本来 17:10:18 该响, 实际拖到 17:11:21
+    才发, 多花的 60s 几乎全是 pre-check LLM 卡住. pre-check 必须有硬 timeout
+    让快速失败 fallback 到 'needed' (保守语义: 照常发提醒不漏)."""
+    import asyncio
+    import time
+    from unittest.mock import patch
+    from app.services.chat.intent_replies import (
+        reminder_pre_check, _REMINDER_PRECHECK_TIMEOUT_SEC,
+    )
+
+    # timeout 必须 ≤ 10s (1 分钟提醒延迟可接受 10s, 超过就难看)
+    assert _REMINDER_PRECHECK_TIMEOUT_SEC <= 10.0
+
+    async def hangs_forever(*args, **kwargs):
+        await asyncio.sleep(120)
+        return {}
+
+    start = time.monotonic()
+    with patch(
+        "app.services.chat.intent_replies.render_prompt",
+        side_effect=hangs_forever,
+    ):
+        result = await reminder_pre_check(
+            summary="喝水", trigger_time="2025-01-01T00:00:00", recent_messages="",
+        )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < _REMINDER_PRECHECK_TIMEOUT_SEC + 1.0, (
+        f"pre-check 必须在 ~{_REMINDER_PRECHECK_TIMEOUT_SEC}s 内 timeout, "
+        f"实际 {elapsed:.2f}s"
+    )
+    assert result["state"] == "needed"
+    assert result["reason"] == "llm_fallback"
+
+
 def test_loose_offset_parses_minute_without_hou():
     """生产观察: 用户口语经常说"一分钟提醒我"省了"后"字, 全局严格 parser
     只认 "X分钟后", 导致 RECORD_REQUEST 拿不到 future time → 没建 trigger.
