@@ -341,3 +341,49 @@ def _nearest_holiday_date(dates: list[date], today: date) -> date | None:
 def has_explicit_time(message: str) -> bool:
     """快速判断消息是否包含显式时间表述（无需完整解析）。"""
     return bool(_QUICK_TIME_PAT.search(message))
+
+
+# RECORD_REQUEST 上下文专用宽松正则: 允许 "X 分钟/小时/天/周" 省略 "前/后" 字.
+# 严格 _REL_OFFSET_PAT 要求 "前|后" 防 "我等了一分钟" 误匹配, 但 RECORD_REQUEST
+# intent 已确认是用户设提醒, 大概率 "X 分钟" = "X 分钟后". 此 helper 仅在调用方
+# 显式表态"上下文是 reminder 设置"时使用.
+_LOOSE_OFFSET_PAT = re.compile(
+    r"([一二三四五六七八九十百两\d]{1,4})\s*(秒|分钟|小时|天|周)"
+)
+
+
+def parse_loose_offset(
+    message: str, now: datetime, *, default_direction: str = "后",
+) -> datetime | None:
+    """RECORD_REQUEST 等"已知用户在设时间"的上下文里, 宽松提取 "X 时长" 当作
+    `+ default_direction` (通常为 "后"). 返回 future datetime 或 None.
+
+    跟 `parse_time_expressions` 的区别:
+    - 严格 parser 要求"前/后" 后缀, 防止"我等了一分钟" 这种非时间表达被误匹配
+    - 本 helper **不要求**后缀, 假设调用方上下文已确认意图
+
+    支持中文数字 (一/两/十/十五/二十) + 阿拉伯数字 (1/30/180).
+    """
+    if default_direction not in ("前", "后"):
+        return None
+    m = _LOOSE_OFFSET_PAT.search(message)
+    if not m:
+        return None
+    amount = _parse_cn_number(m.group(1))
+    if amount is None or amount <= 0:
+        return None
+    unit = m.group(2)
+    sign = -1 if default_direction == "前" else 1
+    if unit == "秒":
+        delta = timedelta(seconds=sign * amount)
+    elif unit == "分钟":
+        delta = timedelta(minutes=sign * amount)
+    elif unit == "小时":
+        delta = timedelta(hours=sign * amount)
+    elif unit == "天":
+        delta = timedelta(days=sign * amount)
+    elif unit == "周":
+        delta = timedelta(weeks=sign * amount)
+    else:
+        return None
+    return now + delta

@@ -232,6 +232,9 @@ _register("模拟真人自我记忆，判断这句话是否值得进入记忆", 
 _register("判断用户是否在要求AI管理某条记忆 (删除 / 改期)", _PromptMeta(
     "memory.deletion_intent", "记忆删除/改期意图判定", "decision", _label_passthrough,
 ))
+_register("判断用户提醒事项当前状态. 用户在原定提醒时间到达前的", _PromptMeta(
+    "proactive.reminder_pre_check", "提醒触发前状态判别", "decision", _label_passthrough,
+))
 _register("扫描下面的 L1 记忆列表, 找出语义上互相矛盾的对", _PromptMeta(
     "memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough,
 ))
@@ -280,6 +283,17 @@ _register("你现在处于低耐心状态（很不高兴，不太想多说话）
 ))
 _register("用户已被你拉黑 — 你之前受过他言语冒犯", _PromptMeta(
     "boundary.blacklist_reply", "拉黑回复", "reply", _label_reply_text,
+))
+# Reminder reply 类 — round-2 review #6: trace_enrich 之前完全没有 reminder
+# fingerprint, LLM 调用在 LangSmith 里只显示通用 ChatOpenAI, 看不到 prompt_key.
+_register("到点了, 自然提醒用户做该事项", _PromptMeta(
+    "proactive.reminder_message", "提醒发送消息", "reply", _label_reply_text,
+))
+_register("用户刚请求你记一件事 / 在未来某时提醒", _PromptMeta(
+    "intent.record_confirm_reply", "记录请求确认回复", "reply", _label_reply_text,
+))
+_register("今天要提醒TA一件事。你作为好朋友，主动发一条提醒消息", _PromptMeta(
+    "proactive.special_reminder", "特殊日期提醒", "reply", _label_reply_text,
 ))
 _register("你是一个有血有肉的人，不是AI助手", _PromptMeta(
     "chat.system_base", "主回复 (§4 日常交流)", "reply", _label_reply_text,

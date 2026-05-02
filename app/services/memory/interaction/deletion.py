@@ -268,25 +268,18 @@ async def apply_reschedule(
     if not candidate_ids:
         return 0
 
-    # 一次性拉相关 reminder triggers, 按 memory_id 索引 — 比每个 candidate
-    # 跑一次 find_many 节省 N-1 次 round-trip. Prisma 不支持嵌套 JSON 等值过滤,
-    # 必须 Python 侧筛. agent_id 闸防多 agent 数据漂移.
-    trigger_where: dict = {
-        "userId": user_id,
-        "actionType": "reminder",
-        "isActive": True,
-    }
-    if agent_id:
-        trigger_where["aiAgentId"] = agent_id
+    # 一次性拉所有 (user, agent) 的 active reminder triggers, 按 memory_id 索引.
+    # Round-2 review #9: 用 services/reminder/scheduling 收口 (跟 cancel /
+    # idempotency check 共享 helper). agent_id 闸防多 agent 数据漂移.
+    from app.services.reminder.scheduling import find_active_reminder_triggers
     trigger_by_memory: dict = {}
-    try:
-        all_triggers = await db.timetrigger.find_many(where=trigger_where)
-        for t in all_triggers:
-            mid = (t.actionData or {}).get("memory_id")
-            if isinstance(mid, str) and mid in candidate_ids:
-                trigger_by_memory[mid] = t
-    except Exception as e:
-        logger.warning(f"apply_reschedule: timetrigger lookup failed: {e}")
+    all_triggers = await find_active_reminder_triggers(
+        user_id=user_id, agent_id=agent_id,
+    )
+    for t in all_triggers:
+        mid = (t.actionData or {}).get("memory_id")
+        if isinstance(mid, str) and mid in candidate_ids:
+            trigger_by_memory[mid] = t
 
     updated = 0
     for c in candidates:

@@ -70,6 +70,8 @@ def _next_occurrence(current: datetime, recurrence: str) -> datetime | None:
 
 async def scan_triggers() -> None:
     """每 15 秒扫描到期触发器，检查规则后执行。"""
+    import asyncio
+
     now = datetime.now(_TZ)
     window_start = now - timedelta(minutes=1)
     window_end = now + timedelta(minutes=1)
@@ -81,21 +83,29 @@ async def scan_triggers() -> None:
         },
     )
 
-    # 诊断: 命中时打 INFO log (无命中静默, 避免每 15s 打一条空 log).
-    # 之前生产观察到 "trigger 建好了但没 fire", 没有 log 完全摸不到方向 —
-    # 至少先确认 scan 是否选中了 trigger.
-    if triggers:
-        logger.info(
-            f"[SCAN] {len(triggers)} active trigger(s) in window "
-            f"[{window_start.strftime('%H:%M:%S')}, {window_end.strftime('%H:%M:%S')}]: "
-            f"{[(t.id[:8], t.actionType, t.triggerTime.isoformat()) for t in triggers]}"
-        )
+    if not triggers:
+        return
 
-    for trigger in triggers:
-        try:
-            await _execute_trigger(trigger, now)
-        except Exception as e:
-            logger.warning(f"Trigger {trigger.id} execution failed: {e}")
+    # 诊断: 命中时打 INFO log. 之前生产观察到 "trigger 建好了但没 fire", 没有
+    # log 完全摸不到方向 — 至少先确认 scan 是否选中了 trigger.
+    logger.info(
+        f"[SCAN] {len(triggers)} active trigger(s) in window "
+        f"[{window_start.strftime('%H:%M:%S')}, {window_end.strftime('%H:%M:%S')}]: "
+        f"{[(t.id[:8], t.actionType, t.triggerTime.isoformat()) for t in triggers]}"
+    )
+
+    # Round-2 review #10: 之前 `for trigger: await _execute_trigger(...)` 串行,
+    # N 个同时到点的 reminder 各自走 5-10s LLM 链路 → 总耗时 N×10s 拖爆下次
+    # scan (apscheduler max_instances=1 直接 skip). 改 asyncio.gather 并发,
+    # `_execute_trigger` 内部已经各自 try/except 隔离, gather 用 return_exceptions
+    # 防一个抛异常挂住其他.
+    results = await asyncio.gather(
+        *(_execute_trigger(t, now) for t in triggers),
+        return_exceptions=True,
+    )
+    for trigger, result in zip(triggers, results):
+        if isinstance(result, Exception):
+            logger.warning(f"Trigger {trigger.id} execution failed: {result}")
 
 
 async def _defer_special_date_trigger(
@@ -182,33 +192,15 @@ async def _fetch_recent_messages_for_reminder(
 
 
 async def _archive_reminder_memory(memory_id: str, side: str, reason: str) -> None:
-    """软删提醒 memory + 写 changelog 留 trail."""
-    from app.services.memory.storage import repo as memory_repo
-    from app.services.memory.storage.persistence import log_memory_changelog
-
+    """软删提醒 memory + 写 changelog. 薄 wrapper, 真实现在
+    `services/reminder/scheduling.archive_reminder_memory` 收口 (round-2 review
+    #8: 跟 deletion 流程的重复部分集中)."""
+    from app.services.reminder.scheduling import archive_reminder_memory
     if side not in ("user", "ai"):
         side = "user"
-    try:
-        await memory_repo.update(
-            memory_id, source=side,  # type: ignore[arg-type]
-            isArchived=True,
-        )
-    except Exception as e:
-        logger.warning(f"archive reminder memory {memory_id} failed: {e}")
-        return
-    # changelog 失败不影响主流程
-    try:
-        record = await memory_repo.find_unique(memory_id)
-        user_id = record.userId if record else ""
-        workspace_id = record.workspaceId if record else None
-        if user_id:
-            await log_memory_changelog(
-                user_id, memory_id, "reminder_archived",
-                new_value=reason,
-                workspace_id=workspace_id,
-            )
-    except Exception:
-        pass
+    await archive_reminder_memory(
+        memory_id=memory_id, side=side, reason=reason,  # type: ignore[arg-type]
+    )
 
 
 async def _handle_reminder_trigger(trigger, now: datetime) -> None:
@@ -375,16 +367,13 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         next_occur = _next_occurrence(trigger.triggerTime, recurrence)
         if next_occur:
             try:
-                from prisma import Json
-                # scalar FK + Json() — 同 pipeline._create_reminder_timetrigger
-                # 注释里说明的 prisma 兼容原因.
-                await db.timetrigger.create(data={
-                    "aiAgentId": agent_id,
-                    "userId": user_id,
-                    "triggerTime": next_occur,
-                    "actionType": "reminder",
-                    "actionData": Json(data),
-                })
+                from app.services.reminder.scheduling import renew_periodic_trigger
+                await renew_periodic_trigger(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    next_trigger_time=next_occur,
+                    action_data=data,
+                )
                 logger.debug(
                     f"reminder {trigger.id} renewed: next={next_occur} "
                     f"recurrence={recurrence}"

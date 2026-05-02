@@ -342,60 +342,95 @@ def _format_when_text(occur_dt) -> str:
     return local.strftime("%m月%d日 %H:%M")
 
 
-# RECORD_REQUEST 专用宽松正则: 允许"X 分钟/小时/天/周"省略"后"字.
-# 严格 parser (`time_parser._REL_OFFSET_PAT`) 要求"前|后"是为了防止
-# "我等了一分钟" 这种非时间表达被误匹配; 但 RECORD_REQUEST intent 已确认
-# 用户在设提醒, 大概率 "X 分钟" = "X 分钟后".
-import re as _re
-_LOOSE_OFFSET_PAT = _re.compile(
-    r"([一二三四五六七八九十百两\d]{1,4})\s*(秒|分钟|小时|天|周)"
+# 周期性提醒关键词识别. 用户口语 "每天提醒我吃药" / "每月 1 号交房租" 走
+# RECORD_REQUEST 短路时 _direct_create_reminder 必须识别这些, 否则硬编码
+# recurrence="once" 让周期信息丢失, 提醒只响一次. 关键词级判断, 不调 LLM.
+_RECURRENCE_KEYWORDS: tuple[tuple[str, str], ...] = (
+    # 顺序重要 — "每年" 必须在 "每" 单字之前匹配
+    ("每年", "yearly"), ("每月", "monthly"), ("每周", "weekly"),
+    ("每星期", "weekly"), ("每天", "daily"), ("每日", "daily"),
+    ("每晚", "daily"), ("每早", "daily"), ("每个月", "monthly"),
+    ("每一年", "yearly"), ("每一月", "monthly"), ("每一周", "weekly"),
+    ("每一天", "daily"),
 )
-_CN_NUM = {
-    "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-}
 
 
-def _parse_cn_or_arabic(s: str) -> int | None:
-    s = s.strip()
-    if s.isdigit():
-        return int(s)
-    if s in _CN_NUM:
-        return _CN_NUM[s]
-    # 简单"十X"/"X十"/"X十Y" — 不超过 99
-    if "十" in s:
-        parts = s.split("十")
-        if len(parts) == 2:
-            tens = _CN_NUM.get(parts[0], 1) if parts[0] else 1
-            ones = _CN_NUM.get(parts[1], 0) if parts[1] else 0
-            return tens * 10 + ones
-    return None
+def _detect_recurrence(message: str) -> str:
+    """从用户消息识别 recurrence (once/daily/weekly/monthly/yearly).
+    `_RECURRENCE_KEYWORDS` 命中即返对应周期, 否则 "once".
+    """
+    msg = message.strip()
+    for kw, rec in _RECURRENCE_KEYWORDS:
+        if kw in msg:
+            return rec
+    return "once"
 
 
-def _record_request_loose_offset(message: str, now: datetime) -> datetime | None:
-    """RECORD_REQUEST 上下文里宽松提取 "X 分钟/小时/天/周" 默认当作 "+ 方向".
-    返回 future datetime 或 None."""
-    from datetime import timedelta
-    m = _LOOSE_OFFSET_PAT.search(message)
-    if not m:
+async def _persist_one_reminder(
+    *,
+    user_id: str,
+    workspace_id: str | None,
+    summary: str,
+    occur_time: datetime,
+    statement_time: datetime,
+    recurrence: str,
+) -> str | None:
+    """落库一条 reminder memory + 建/更新对应 timetrigger. 返回 memory_id (失败 None).
+
+    内部封装 dedup 复用语义: store_memory 命中 dedup 返 None → find_duplicate_id
+    拿 existing id + update occurTime → 用 existing id 继续建 trigger.
+    `upsert_reminder_trigger` 自身幂等 (existing trigger update 而非 silent skip).
+    """
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.memory.storage.embedding import generate_embedding
+    from app.services.memory.storage.persistence import find_duplicate_id, store_memory
+
+    try:
+        memory_id = await store_memory(
+            user_id=user_id,
+            content=summary,
+            summary=summary,
+            level=3,
+            importance=0.45,  # 落 L3 (pipeline clamp 也是 [0.4, 0.49])
+            memory_type="life",
+            main_category="生活",
+            sub_category="提醒",
+            occur_time=occur_time,
+            statement_time=statement_time,
+            workspace_id=workspace_id,
+            source="user",
+            recurrence=recurrence,
+        )
+    except Exception as e:
+        logger.warning(f"[RECORD-REQ] store_memory failed: {e}")
         return None
-    amount = _parse_cn_or_arabic(m.group(1))
-    if amount is None or amount <= 0:
+
+    if not memory_id:
+        # dedup 命中 → 复用 existing memory_id, 更新 occurTime 到新时刻 (重设语义)
+        try:
+            embedding = await generate_embedding(summary)
+            memory_id = await find_duplicate_id(
+                user_id, summary, embedding, workspace_id=workspace_id,
+            )
+            if memory_id:
+                await memory_repo.update(
+                    memory_id, source="user",
+                    occurTime=occur_time, statementTime=statement_time,
+                )
+                logger.info(
+                    f"[RECORD-REQ] reusing deduped memory={memory_id[:8]} "
+                    f"updated occurTime={occur_time} recurrence={recurrence}"
+                )
+        except Exception as e:
+            logger.warning(f"[RECORD-REQ] dedup fallback failed: {e}")
+            return None
+
+    if not memory_id:
+        logger.warning(
+            "[RECORD-REQ] both store_memory and dedup lookup failed; no reminder"
+        )
         return None
-    unit = m.group(2)
-    if unit == "秒":
-        delta = timedelta(seconds=amount)
-    elif unit == "分钟":
-        delta = timedelta(minutes=amount)
-    elif unit == "小时":
-        delta = timedelta(hours=amount)
-    elif unit == "天":
-        delta = timedelta(days=amount)
-    elif unit == "周":
-        delta = timedelta(weeks=amount)
-    else:
-        return None
-    return now + delta
+    return memory_id
 
 
 async def _direct_create_reminder(
@@ -406,27 +441,31 @@ async def _direct_create_reminder(
     返回人话 when_text 给 confirm reply 用; 没抽到时间则返 None (调用方 fallback
     到模糊确认 "我帮你记上了" 不带时间).
 
-    架构选择 (生产 bug 触发的根因修复): 之前依赖后台 `_bg_memory_pipeline`
-    抽取 → 但 pre-filter LLM 偶尔把"提醒我X好吗"这种问句判为"不记", 导致
-    用户的提醒永远不入库 → trigger 不创建 → 用户没收到提醒. 改为 handler
-    内同步用规则引擎 parse, 100% 可靠. 后台 pipeline 仍跑作冗余 (dedup
-    会防 memory 重复, pipeline 侧的 `_create_reminder_timetrigger` 会被
-    idempotency 闸跳过).
+    支持:
+    - 单 occur_time ("一分钟后提醒X")
+    - 多 occur_time ("8 点吃药, 9 点开会") — 各建 1 条 trigger, when_text 合并为
+      "08:00 / 09:00" 格式
+    - 周期性 ("每天提醒X" / "每月 1 号Y") — 关键词识别 recurrence, 通过 trigger
+      handler 周期续期
+    - 缺"后"字口语 ("一分钟提醒X") — _record_request_loose_offset fallback
+
+    架构: 跨模块依赖 (memory + workspace + reminder/scheduling) 通过本文件 inline
+    import 隔离, 真正 reminder 落地逻辑都收口在 `services/reminder/scheduling.py`.
     """
+    import asyncio
     from datetime import datetime
-    from app.services.memory.recording.pipeline import _create_reminder_timetrigger
-    from app.services.memory.storage.persistence import store_memory
-    from app.services.schedule_domain.time_parser import parse_with_statement_time
+    from app.services.reminder.scheduling import upsert_reminder_trigger
+    from app.services.schedule_domain.time_parser import (
+        parse_loose_offset, parse_with_statement_time,
+    )
     from app.services.schedule_domain.time_service import _now_corrected
-    from app.services.workspace.workspaces import resolve_workspace_id
+    from app.services.workspace.workspaces import get_active_workspace
 
     if not ctx.user_id:
         return None
 
-    # 关键: parse 必须用"用户消息接收时刻"而不是 handler 跑到这一行的时刻.
-    # 之前用 _now_corrected() → 处理链路上前面的 LLM 调用累计 ~25s, 导致
-    # "两分钟后" 实际算成 "处理完 + 2分钟", 提醒比用户期望晚 25s.
-    # ctx.reply_context["received_at"] 是 ws 收到用户消息的时间戳 (ISO 字符串).
+    # parse 必须用"用户消息接收时刻"而不是 handler 跑到这一行的时刻 — 链路上前面
+    # 的 LLM 调用累计 ~25s, "两分钟后" 实际算成 "处理完 + 2分钟" 比期望晚.
     received_at: datetime | None = None
     if ctx.reply_context:
         raw = ctx.reply_context.get("received_at")
@@ -436,106 +475,92 @@ async def _direct_create_reminder(
             except (TypeError, ValueError):
                 received_at = None
     parse_now = received_at or _now_corrected()
+    statement_time = parse_now
+
+    recurrence = _detect_recurrence(user_message)
 
     parsed = parse_with_statement_time(user_message, now=parse_now)
     future_events = [e for e in parsed.event_times if e.is_future]
-
-    # Fallback: 用户口语经常省"后"字 ("一分钟提醒我喝水好吗"). 全局 parser
-    # 严格要"X分钟后"格式以防误匹配, 但 RECORD_REQUEST intent 已确认是用户
-    # 设提醒, 这里宽松匹配 "X(分钟|小时|天|周)" 默认当 "+方向", 优先级低于
-    # 严格匹配 (没找到 future event 才走 fallback).
-    if not future_events:
-        offset = _record_request_loose_offset(user_message, parse_now)
-        if offset is not None:
-            occur_time = offset
-        else:
-            logger.info(
-                f"[RECORD-REQ] no future event time parsed from {user_message[:60]!r}; "
-                "falling back to fuzzy confirmation (background pipeline still runs)"
-            )
-            return None
+    occur_times: list[datetime] = []
+    if future_events:
+        # 多 occur_time 全保留 ("8 点吃药, 9 点开会"), 按时间升序
+        occur_times = sorted(e.start for e in future_events)
     else:
-        # 取置信度最高的 future event_time 作为提醒时刻
-        chosen = max(future_events, key=lambda e: e.confidence)
-        occur_time = chosen.start
-    # Summary 用第一人称 "我..." 而非 spec §2.1 extraction 的 "用户..." 模板:
-    # RECORD_REQUEST 是用户主动让 AI 帮他记一件事, 记忆是用户的指令记录, 第一
-    # 人称体感更自然 (用户在自己的记忆面板看到 "我让 AI 提醒..." 比 "用户请求..."
-    # 顺); spec §2.1 那个 "用户..." 前缀约束是给 LLM extraction 的输出格式指令,
-    # 不是 schema 强制. 前端按 source 已能区分谁的记忆, 不需要前缀帮 disambig.
-    summary_for_memory = f"我让 AI 提醒: {user_message[:120]}"
+        loose = parse_loose_offset(user_message, parse_now)
+        if loose is not None:
+            occur_times = [loose]
 
-    workspace_id = await resolve_workspace_id(user_id=ctx.user_id)
-    # statement_time 也用 received_at, 跟 occur_time 的时间基准一致.
-    statement_time = parse_now
-    try:
-        memory_id = await store_memory(
-            user_id=ctx.user_id,
-            content=summary_for_memory,
-            summary=summary_for_memory,
-            level=3,
-            importance=0.45,  # in [0.4, 0.49] 区间, 落 L3 (跟 pipeline clamp 对齐)
-            memory_type="life",
-            main_category="生活",
-            sub_category="提醒",
-            occur_time=occur_time,
-            statement_time=statement_time,
-            workspace_id=workspace_id,
-            source="user",
-            recurrence="once",
+    if not occur_times:
+        logger.info(
+            f"[RECORD-REQ] no future event time parsed from {user_message[:60]!r}; "
+            "falling back to fuzzy confirmation"
         )
-    except Exception as e:
-        logger.warning(f"[RECORD-REQ] store_memory failed: {e}")
         return None
 
-    # store_memory 在 dedup 命中 (相似度 > 0.9) 时返回 None. 这种情况下
-    # 必须**复用** existing memory id 继续建 trigger — 之前的 bug 是直接
-    # skip, 但 existing memory 的旧 trigger 早已 fired 完 (isActive=False),
-    # 用户这次重新请求的 "1分钟后提醒" 不会触发, 体感像没设上.
-    if not memory_id:
-        from app.services.memory.storage.embedding import generate_embedding
-        from app.services.memory.storage.persistence import find_duplicate_id
-        from app.services.memory.storage import repo as memory_repo
-        try:
-            embedding = await generate_embedding(summary_for_memory)
-            memory_id = await find_duplicate_id(
-                ctx.user_id, summary_for_memory, embedding,
-                workspace_id=workspace_id,
-            )
-            if memory_id:
-                # 用户重新设置了提醒 → 把 occur_time 更新到这次的新值,
-                # 让新 trigger 按新时刻 fire. 旧 trigger 已 inactive 不影响.
-                await memory_repo.update(
-                    memory_id, source="user",
-                    occurTime=occur_time, statementTime=statement_time,
-                )
-                logger.info(
-                    f"[RECORD-REQ] reusing deduped memory={memory_id[:8]}, "
-                    f"updated occurTime={occur_time}"
-                )
-        except Exception as e:
-            logger.warning(f"[RECORD-REQ] dedup fallback failed: {e}")
-            return None
-
-    if not memory_id:
+    # workspace 仅查一次; .id 直接拿避免 resolve_workspace_id 二次 find_first.
+    workspace = await get_active_workspace(
+        user_id=ctx.user_id, agent_id=ctx.agent_id,
+    )
+    if not workspace:
         logger.warning(
-            "[RECORD-REQ] both store_memory and dedup-id lookup failed; "
-            "no reminder scheduled"
+            f"[RECORD-REQ] no active workspace for user={ctx.user_id[:8]}; "
+            "reminder will NOT fire"
         )
         return None
+    agent_id = (
+        getattr(workspace, "agentId", None)
+        or getattr(workspace, "ai_agent_id", None)
+    )
+    if not agent_id:
+        logger.warning(
+            "[RECORD-REQ] workspace has no agentId; reminder will NOT fire"
+        )
+        return None
+    workspace_id = workspace.id
 
-    await _create_reminder_timetrigger(
-        user_id=ctx.user_id,
-        memory_id=memory_id,
-        summary=summary_for_memory,
-        occur_time=occur_time,
-        recurrence="once",
-        side="user",
+    # 每个 occur_time 各建一条 (memory + trigger). 多条时并发建 (gather), N=1 也走
+    # 同一路径无副作用. summary 第一人称 ("我让 AI 提醒") 让用户在记忆面板看到时
+    # 不错位; (N/M) 后缀防 dedup 误合并.
+    async def _schedule_one(idx: int, ot: datetime) -> datetime | None:
+        suffix = f" ({idx + 1}/{len(occur_times)})" if len(occur_times) > 1 else ""
+        summary = f"我让 AI 提醒: {user_message[:120]}{suffix}"
+        memory_id = await _persist_one_reminder(
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            summary=summary,
+            occur_time=ot,
+            statement_time=statement_time,
+            recurrence=recurrence,
+        )
+        if not memory_id:
+            return None
+        await upsert_reminder_trigger(
+            user_id=ctx.user_id,
+            agent_id=agent_id,
+            memory_id=memory_id,
+            summary=summary,
+            trigger_time=ot,
+            recurrence=recurrence,
+            side="user",
+        )
+        return ot
+
+    results = await asyncio.gather(
+        *(_schedule_one(i, ot) for i, ot in enumerate(occur_times)),
+        return_exceptions=False,
     )
+    scheduled = [r for r in results if r is not None]
+
+    if not scheduled:
+        return None
+
     logger.info(
-        f"[RECORD-REQ] reminder scheduled memory={memory_id[:8]} at={occur_time}"
+        f"[RECORD-REQ] {len(scheduled)} reminder(s) scheduled "
+        f"recurrence={recurrence} times={[t.isoformat() for t in scheduled]}"
     )
-    return _format_when_text(occur_time)
+    if len(scheduled) == 1:
+        return _format_when_text(scheduled[0])
+    return " / ".join(_format_when_text(t) for t in sorted(scheduled))
 
 
 # 取消提醒的口语关键词. 用户说"算了别提醒了"/"不用提醒了"/"取消那个提醒" 时
@@ -566,36 +591,23 @@ def _is_cancel_reminder(message: str) -> bool:
     return False
 
 
-async def _cancel_active_reminders(*, user_id: str) -> int:
-    """deactivate 该用户所有 active reminder timetrigger. 返回处理条数.
+async def _cancel_active_reminders(
+    *, user_id: str, agent_id: str | None = None,
+) -> int:
+    """deactivate 该 (user, agent) 的所有 active reminder timetrigger. 返回处理条数.
+
+    Round-2 review bug fix: 必须按 agent_id 过滤. 不传则跨 agent 误删 (用户在
+    agent A 上说"算了别提醒"会把 agent B 的所有 active reminder 一起 deactivate).
+    handler 拿 ctx.agent_id 传入.
 
     用户说"算了别提醒了"时调用. 不用 LLM 判别要取消哪一个 — 用户当前对话
     的语境通常只关心最近一次刚设的, 一刀切 deactivate 所有 active 是最朴素
-    可靠的选择 (用户极少同时挂着多个未触发的提醒).
+    可靠的选择.
     """
-    from app.db import db
-    try:
-        rows = await db.timetrigger.find_many(
-            where={
-                "userId": user_id,
-                "actionType": "reminder",
-                "isActive": True,
-            },
-        )
-    except Exception as e:
-        logger.warning(f"[RECORD-CANCEL] find_many failed: {e}")
-        return 0
-    cancelled = 0
-    for r in rows:
-        try:
-            await db.timetrigger.update(
-                where={"id": r.id},
-                data={"isActive": False},
-            )
-            cancelled += 1
-        except Exception as e:
-            logger.warning(f"[RECORD-CANCEL] deactivate {r.id} failed: {e}")
-    return cancelled
+    from app.services.reminder.scheduling import deactivate_reminder_triggers
+    return await deactivate_reminder_triggers(
+        user_id=user_id, agent_id=agent_id,
+    )
 
 
 async def handle_record_request(
@@ -616,7 +628,10 @@ async def handle_record_request(
     try:
         # 取消语义优先 — 即使 LLM intent 输出 "记录请求", 关键词命中也走取消.
         if _is_cancel_reminder(user_message) and ctx.user_id:
-            n = await _cancel_active_reminders(user_id=ctx.user_id)
+            # 必须传 agent_id, 否则跨 agent 误删 (round-2 review bug fix)
+            n = await _cancel_active_reminders(
+                user_id=ctx.user_id, agent_id=ctx.agent_id,
+            )
             if n > 0:
                 reply = "好嘞, 那就不提醒了, 已经帮你撤掉啦~"
             else:

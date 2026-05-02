@@ -94,82 +94,19 @@ async def _create_reminder_timetrigger(
                 f"using raw occur_time {occur_time}"
             )
 
-    # 同 memory_id 已有 active trigger → **重设语义**: 用户重发"提醒我X" 时
-    # 期望"按新时刻提醒", 必须 update 现有 trigger 的 triggerTime 到新值,
-    # 而不是 silently skip (skip 等于丢用户的新设置).
-    #
-    # 之前生产 bug: 用户多次重设"一分钟后提醒喝水" → memory 被 dedup 复用,
-    # idempotency 命中已有 active trigger → skip → DB 里 trigger.triggerTime
-    # 还是最早那次的旧值 (2 小时前) → scan 永远找不到当前窗口 → 用户没收到提醒.
-    #
-    # Prisma 不支持嵌套 JSON 过滤 — find_many + Python 侧筛, 用户的 active
-    # reminders 通常 < 10 条.
-    existing_trigger_id: str | None = None
-    try:
-        existing_triggers = await db.timetrigger.find_many(
-            where={
-                "aiAgentId": agent_id,
-                "actionType": "reminder",
-                "isActive": True,
-            },
-        )
-        for t in existing_triggers:
-            if (t.actionData or {}).get("memory_id") == memory_id:
-                existing_trigger_id = t.id
-                break
-    except Exception as e:
-        logger.warning(
-            f"[MEM-{side}] reminder idempotency check failed ({e}); "
-            "proceeding to create (may produce duplicate)"
-        )
-
-    if existing_trigger_id:
-        # 重设: update 现有 trigger 的 triggerTime + lastFired 重置 (允许重新触发).
-        try:
-            await db.timetrigger.update(
-                where={"id": existing_trigger_id},
-                data={
-                    "triggerTime": trigger_time,
-                    "lastFired": None,  # 重置, 否则 idempotency 守门 (lastFired<2min) 会拦
-                },
-            )
-            logger.info(
-                f"[MEM-{side}] reminder timetrigger UPDATED (reset) memory={memory_id[:8]} "
-                f"trigger={existing_trigger_id[:8]} new_time={trigger_time}"
-            )
-            return
-        except Exception as e:
-            logger.warning(
-                f"[MEM-{side}] reminder timetrigger update failed ({e}); "
-                "falling back to create new"
-            )
-            # fall through 创建新的
-
-    try:
-        from prisma import Json
-        # 注: 使用 scalar `aiAgentId` + `userId` 而非 `agent: {connect}` /
-        # `user: {connect}` 关系语法 — 关系语法在某些 prisma client 版本下
-        # 跟 actionData 的 Json validation 相互作用诡异 (生产实测报错
-        # "data.aiAgentId: A value is required but not set" + "actionData
-        # should be of type Json"). scalar FK 写法直接, 跟 Json() 兼容.
-        await db.timetrigger.create(data={
-            "aiAgentId": agent_id,
-            "userId": user_id,
-            "triggerTime": trigger_time,
-            "actionType": "reminder",
-            "actionData": Json({
-                "memory_id": memory_id,
-                "summary": summary[:200],
-                "recurrence": recurrence,
-                "memory_side": side,  # 用于 pre-check 跨 user_memories / ai_memories 找
-            }),
-        })
-        logger.info(
-            f"[MEM-{side}] reminder timetrigger CREATED memory={memory_id[:8]} "
-            f"agent={agent_id[:8]} at={trigger_time} recurrence={recurrence}"
-        )
-    except Exception as e:
-        logger.warning(f"[MEM-{side}] reminder timetrigger create failed: {e}")
+    # upsert: 已有 (agent, memory_id) active trigger → update triggerTime + reset
+    # lastFired (重设语义); 否则 create. 完整逻辑在 services/reminder/scheduling.py
+    # 收口 — 三处历史调用 (pipeline / handler / cancel) 共享一致行为.
+    from app.services.reminder.scheduling import upsert_reminder_trigger
+    await upsert_reminder_trigger(
+        user_id=user_id,
+        agent_id=agent_id,
+        memory_id=memory_id,
+        summary=summary,
+        trigger_time=trigger_time,
+        recurrence=recurrence,
+        side=side,  # type: ignore[arg-type]
+    )
 
 
 # Spec §1.5.2: keywords indicating user expressed that information is important.

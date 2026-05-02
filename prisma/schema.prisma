@@ -547,6 +547,17 @@ model TimeTrigger {
   lastFired   DateTime? @map("last_fired")
   createdAt   DateTime  @default(now()) @map("created_at")
 
+  // scan_triggers 主路径: scheduler 每 15s 跑一次, find_many isActive=true +
+  // triggerTime in [now-1min, now+1min). 没此索引会变全表扫 (round-2 review P1).
+  @@index([isActive, triggerTime])
+  // scheduling.find_active_reminder_triggers / deactivate / apply_reschedule:
+  // (user_id, action_type='reminder', is_active) 三元过滤. 反复 cancel/reschedule
+  // 大流量场景必备.
+  @@index([userId, actionType, isActive])
+  // scheduling.upsert_reminder_trigger 幂等查 (按 agent + memory_id 找 existing):
+  // 跟 cancel 不同, 这边按 agent_id 维度 (multi-agent 用户只查当前 agent 的).
+  @@index([aiAgentId, actionType, isActive])
+
   @@map("time_triggers")
 }
 
