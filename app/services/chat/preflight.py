@@ -49,6 +49,8 @@ class PreflightCtx:
     tracer: "LangSmithTracer"
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     stopped: bool = False
+    # 短路 reply 文本回写: orchestrator finally 兜底 fire post_process 用
+    last_short_circuit_reply: str | None = None
 
 
 async def resolve_pending_contradiction(
@@ -74,6 +76,7 @@ async def resolve_pending_contradiction(
             analysis=analysis,
             personality_brief=personality_brief,
         )
+        ctx.last_short_circuit_reply = reply
         for evt in await ctx.short_circuit_fn(
             reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
             trace_id=ctx.tracer.safe_trace_id,
@@ -114,6 +117,7 @@ async def resolve_pending_deletion(
         else:
             await clear_pending_deletion(ctx.conversation_id)
             reply = "好的，那就不删了，继续聊吧~"
+        ctx.last_short_circuit_reply = reply
         for evt in await ctx.short_circuit_fn(
             reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
             trace_id=ctx.tracer.safe_trace_id,

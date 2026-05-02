@@ -63,6 +63,10 @@ class BoundaryPhaseCtx:
     # 默认 PATIENCE_MAX；check_boundary 写入最新读数；攻击路径 (_handle_attack_ai)
     # 扣分成功后 in-place 更新为扣分后值，供阈值判断与下游 phase 读到最新状态。
     cached_patience: int = PATIENCE_MAX
+    # boundary 短路 reply 文本回写, 仅供 trace/debug 观察 — orchestrator finally
+    # 不读 (boundary_handled_pipeline=True 跳过兜底). 跟 ShortCircuitCtx/PreflightCtx
+    # 同模式存在主要为契约一致性 (减少未来扩展时遗漏风险).
+    last_short_circuit_reply: str | None = None
 
 
 def _personality_brief(agent: Any) -> str:
@@ -113,6 +117,7 @@ async def _emit_short_circuit(
     extra_metadata: dict,
 ) -> AsyncGenerator[dict, None]:
     """复用 ctx.short_circuit_fn 推 reply/done 事件。"""
+    ctx.last_short_circuit_reply = reply
     events = await ctx.short_circuit_fn(
         reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
         extra_metadata=extra_metadata,

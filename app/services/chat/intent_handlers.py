@@ -62,8 +62,13 @@ class ShortCircuitCtx:
     sub_intent_mode: bool
     reply_index_offset: int
     cached_patience: int
+    # 短路 handler 经 ctx.finalize(reply) 把回复文本回写到这里, 让 orchestrator
+    # finally 兜底 fire post_process 时拿到正确的 full_response (否则 short-circuit
+    # 路径直接 return, post_process 永不跑, 记忆/PAD/trait 全丢失).
+    last_short_circuit_reply: str | None = None
 
     async def finalize(self, reply: str) -> AsyncGenerator[dict, None]:
+        self.last_short_circuit_reply = reply
         async for evt in finalize_short_circuit(
             reply,
             conversation_id=self.conversation_id,

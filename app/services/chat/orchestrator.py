@@ -346,6 +346,20 @@ async def stream_chat_response(
     else:
         tracer = LangSmithTracer(user_message, conversation_id).enter()
 
+    # spec §2.1/§2.2 全消息走 post_process. 短路路径直接 return 跳过主路径末尾的
+    # _fire_background(post_process) → 必须 finally 兜底, 否则 7 个短路意图 (终结/计划查询/
+    # 询问当前状态/作息调整/道歉/删除/L3) 跟 2 个 preflight (矛盾追问/删除确认) 命中时
+    # 全部丢失记忆抽取 + PAD + trait + 正向恢复 5 个后台任务. boundary 路径例外:
+    # CLAUDE.md §3.3 design — apology 自己 fire memory pipeline, blocked 故意跳;
+    # finally 通过 `boundary_ctx.stopped` 直接判别, 无需独立 flag.
+    post_process_fired = False
+    boundary_ctx: BoundaryPhaseCtx | None = None
+    preflight_ctx: PreflightCtx | None = None
+    sc_ctx: ShortCircuitCtx | None = None
+    prompt_user_emotion: dict | None = None
+    emotion: dict | None = None
+    messages_dicts: list[dict] = []
+
     try:
         # 必须早于 boundary phase: spec §2.6 步骤 4 攻击目标识别需要最近几轮做上下文,
         # 单看孤立含糊代词 ("不然呢") 时 LLM 无法判定 "你" 指 AI.
@@ -382,6 +396,8 @@ async def stream_chat_response(
         async for evt in run_boundary(boundary_ctx):
             yield evt
         if boundary_ctx.stopped:
+            # boundary phase 自己决定是否进 memory pipeline (apology fires _bg_memory_pipeline,
+            # blocked 故意跳 per CLAUDE.md §3.3) — finally 通过 boundary_ctx.stopped 跳过兜底.
             return
         cached_patience = boundary_ctx.cached_patience
 
@@ -870,6 +886,7 @@ async def stream_chat_response(
             user_emotion=prompt_user_emotion,
             ai_emotion=emotion,
         ))
+        post_process_fired = True
 
         # spec §3.3 step 3: 主意图回复完成后，依次处理拆分出的子意图片段
         if pending_sub_fragments:
@@ -917,6 +934,36 @@ async def stream_chat_response(
                     logger.warning("[llm-usage] write_usage_row failed", exc_info=True)
         # 还原 ContextVar (防御共享 worker pool 跨 agent leak)
         reset_current_agent(_agent_ctx_token)
+
+        # spec §2.1/§2.2 兜底: 短路意图早 return 跳过主路径末尾的 post_process fire,
+        # 这里补 fire 让 memory/PAD/trait/recovery 5 个后台任务跑全. boundary 短路
+        # 已自行处理 (apology fires _bg_memory_pipeline, blocked skips per CLAUDE.md §3.3
+        # — 注: blocked 仍丢 PAD/trait/recovery, 是已知 spec 偏离, 见 CLAUDE.md) → 跳过.
+        # sub_intent_mode 由父调用统一处理后台任务, 子片段不重复 fire.
+        # 用 `is not None` 正向判别 last_short_circuit_reply: 短路 handler 完成才 set
+        # ctx field, 中途异常 / 未到短路点 → 字段仍为 None → 不会 phantom fire 空 reply.
+        sc_reply: str | None = None
+        if sc_ctx is not None and sc_ctx.last_short_circuit_reply is not None:
+            sc_reply = sc_ctx.last_short_circuit_reply
+        elif preflight_ctx is not None and preflight_ctx.last_short_circuit_reply is not None:
+            sc_reply = preflight_ctx.last_short_circuit_reply
+
+        boundary_handled = boundary_ctx is not None and boundary_ctx.stopped
+        if (sc_reply is not None
+                and not post_process_fired
+                and not sub_intent_mode
+                and not boundary_handled):
+            _fire_background(_background_post_process(
+                user_id=user_id,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                user_message_id=user_message_id,
+                full_response=sc_reply,
+                messages_dicts=messages_dicts,
+                user_emotion=prompt_user_emotion,
+                ai_emotion=emotion,
+            ))
 
 
 
