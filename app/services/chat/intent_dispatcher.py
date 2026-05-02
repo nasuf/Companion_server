@@ -151,11 +151,14 @@ async def detect_intent_llm(message: str, *, context: str = "") -> IntentResult:
     if not labels or labels == ["日常交流"]:
         return IntentResult()
 
-    # 多意图：调 split 以便下游可按 fragment 处理
+    # 多意图：调 split 以便下游可按 fragment 处理.
+    # 把 context 传给 split — spec §3.3 字面只输入"用户原话", 但生产场景的
+    # 口语融合句拆分依赖上下文 (e.g. "算了别提醒了" 在"刚设了提醒"语境下应
+    # 整句给 RECORD_REQUEST, 不该拆给"计划查询"). 详见 CLAUDE.md §6 偏离表.
     fragments: dict[str, str] | None = None
     if len(labels) > 1:
         try:
-            fragments = await split_multi_intent(message, labels)
+            fragments = await split_multi_intent(message, labels, context=context)
         except Exception:
             fragments = None
 

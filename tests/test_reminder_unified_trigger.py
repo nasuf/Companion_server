@@ -536,6 +536,56 @@ def test_reminder_exempt_from_daily_limit():
     )
 
 
+@pytest.mark.asyncio
+async def test_cancel_branch_sets_consumed_full_message():
+    """生产观察: 用户说"算了别提醒了, 我吃过了" → intent.split 把"别提醒了"
+    错拆给"计划查询" sub-intent → AI 给离题回复. 修复: 取消分支必须设
+    ctx.consumed_full_message=True, 让 finalize 跳过 sub-intent 递归."""
+    from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        # 模拟 LLM 错拆出来的 sub fragment
+        pending_sub_fragments={"计划查询": "别提醒了"},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+    assert ctx.consumed_full_message is False  # 默认 False
+
+    with patch("app.db.db.timetrigger") as mock_table:
+        mock_table.find_many = AsyncMock(return_value=[])
+        mock_table.update = AsyncMock()
+        await handle_record_request("算了别提醒了, 我吃过了", ctx)
+
+    assert ctx.consumed_full_message is True, (
+        "取消分支必须设 consumed_full_message, 让 finalize 跳过 sub-intent 处理 "
+        "(否则 LLM 错拆的'别提醒了'被当'计划查询'处理给离题回复)"
+    )
+
+
+def test_split_multi_intent_passes_context():
+    """spec §3.3 step 2 字面只输入"用户原话", 但生产实测口语融合句拆分依赖
+    上下文. 修复后 split_multi_intent 接收 context 参数, prompt 加上下文段."""
+    import inspect
+    from app.services.chat.intent_replies import split_multi_intent
+
+    src = inspect.getsource(split_multi_intent)
+    assert "context" in src, "split_multi_intent 必须接收 context 参数"
+    assert '"context"' in src, "必须把 context 注入 prompt 渲染参数"
+
+    # prompt 也必须带 context 占位符
+    from app.services.prompting.defaults import INTENT_SPLIT_PROMPT
+    assert "{context}" in INTENT_SPLIT_PROMPT, (
+        "INTENT_SPLIT_PROMPT 必须有 {context} 占位符 (spec §3.3 字面无, "
+        "但生产口语融合句强依赖)"
+    )
+
+
 def test_cancel_keyword_detection():
     """生产观察: '算了算了，别提醒了，我吃过了' 被 LLM 拆成乱七八糟的
     sub-intent, AI 回了离题的话. handler 必须能基于关键词识别取消语义,

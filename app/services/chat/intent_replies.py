@@ -503,16 +503,33 @@ async def unified_intent_recognize(
     return hits or ["日常交流"]
 
 
-async def split_multi_intent(user_message: str, intents: list[str]) -> dict[str, str]:
-    """§3.3 step 2：多意图拆分。输入意图列表，输出 {intent: text_fragment}。"""
+async def split_multi_intent(
+    user_message: str,
+    intents: list[str],
+    context: str = "",
+) -> dict[str, str]:
+    """§3.3 step 2：多意图拆分。输入意图列表，输出 {intent: text_fragment}。
+
+    `context` 是 spec §3.3 偏离 (字面只输入用户原话). 生产实测口语融合句
+    "算了别提醒了，我吃过了" 字面拆出来的子片段意图跟整句相反, 加上下文让
+    LLM 看到"用户在管理之前刚设的提醒", 拆分时不至于乱分到"计划查询"等无关
+    intent. context 为空时退化到 spec 字面行为.
+    """
     if len(intents) <= 1:
         return {intents[0] if intents else "日常交流": user_message}
     result = await render_prompt(
         "intent.split",
-        {"user_message": user_message, "intents": "、".join(intents)},
+        {
+            "user_message": user_message,
+            "intents": "、".join(intents),
+            "context": context or "(无)",
+        },
         lambda p: invoke_json(get_utility_model(), p),
     )
     if isinstance(result, dict):
+        # 空串表示"该 intent 已被主意图消化完, 不需要单独处理" (新 prompt 规则).
+        # 之前是 `if str(v).strip()` 过滤掉空串, 现在保持一致 — 空串不进 fragments,
+        # orchestrator 端就少跑一个 sub-intent.
         fragments = {
             k: str(v) for k, v in result.items()
             if k in _INTENT_LABELS and str(v).strip()

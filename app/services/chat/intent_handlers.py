@@ -69,9 +69,20 @@ class ShortCircuitCtx:
     # finally 兜底 fire post_process 时拿到正确的 full_response (否则 short-circuit
     # 路径直接 return, post_process 永不跑, 记忆/PAD/trait 全丢失).
     last_short_circuit_reply: str | None = None
+    # spec §3.3 step 2 假设多意图能字面拆分 (示例"我好难过，不想聊了" → 2 个独立
+    # 子句). 但生产场景的口语融合句 (e.g. "算了别提醒了, 我吃过了" 整体语义 =
+    # 取消) 子片段单独看意图相反, 强行 sub-intent 处理会反向回复. handler
+    # 在主意图消化整句时 (典型: RECORD_REQUEST 取消分支) 设此 flag = True,
+    # finalize 跳过 sub-intent 递归. 详见 CLAUDE.md §6 偏离表.
+    consumed_full_message: bool = False
 
     async def finalize(self, reply: str) -> AsyncGenerator[dict, None]:
         self.last_short_circuit_reply = reply
+        # consumed_full_message=True 时清空 sub fragments, 让 finalize_short_circuit
+        # 跳过 process_sub_intents 递归. 比加新参数到 finalize 签名干净.
+        sub_fragments = (
+            {} if self.consumed_full_message else self.pending_sub_fragments
+        )
         async for evt in finalize_short_circuit(
             reply,
             conversation_id=self.conversation_id,
@@ -81,7 +92,7 @@ class ShortCircuitCtx:
             reply_context=self.reply_context,
             tracer=self.tracer,
             save_replies_fn=self.save_replies_fn,
-            pending_sub_fragments=self.pending_sub_fragments,
+            pending_sub_fragments=sub_fragments,
             sub_intent_mode=self.sub_intent_mode,
             reply_index_offset=self.reply_index_offset,
             cached_patience=self.cached_patience,
@@ -615,6 +626,9 @@ async def handle_record_request(
                 f"[RECORD-CANCEL] user said cancel ({user_message[:30]!r}); "
                 f"deactivated {n} active reminder(s)"
             )
+            # 取消是整句消化的语义 — 不让 sub-intent 处理用户残句 ("别提醒了"
+            # 不该再被当成"计划查询"询问 AI 日程, 反过来给离题回复).
+            ctx.consumed_full_message = True
             return True, ctx.finalize(reply)
 
         # 设置/新增提醒走原逻辑

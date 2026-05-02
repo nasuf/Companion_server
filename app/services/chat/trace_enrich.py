@@ -199,7 +199,7 @@ _register("判断回答用户这句话需不需要查询长期记忆", _PromptMe
 _register("分析用户当前消息的主要意图，从以下选项中选出最匹配", _PromptMeta(
     "intent.unified", "统一意图识别", "decision", _label_intent_unified,
 ))
-_register("用户的一句话包含多个意图。请将原话拆分成多个片段", _PromptMeta(
+_register("用户的一句话包含多个意图。请结合对话上下文，将原话拆分成多个片段", _PromptMeta(
     "intent.split_multi", "多意图拆分", "decision", _label_passthrough,
 ))
 _register("是否对当前提到的记忆表示不满/纠正，或是否在请求回忆更久之前", _PromptMeta(
