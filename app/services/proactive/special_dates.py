@@ -4,11 +4,16 @@
 - 春节 (农历正月初一)
 - 元旦 (公历 1-1)
 - 用户生日 (从用户记忆 L1 身份:生日 抽取)
-- 用户提醒日期 (生活:提醒 子类, occur_time 落在当日)
-- AI 生日 / AI 重要日期 / AI 提醒日期 (A 库同类结构)
+- AI 生日 / AI 重要日期 (A 库同类结构)
+
+⚠️ 提醒类 (生活:提醒) 自 Phase 4 起**不再走本路径**——pipeline 录入提醒时
+直接建 timetrigger.actionType="reminder" 按精确 occur_time 触发, 由
+`triggers._handle_reminder_trigger` 处理 (含 pre-check / 续期 / 隐式完成).
+旧 `_extract_reminders_for_date` 已删除. proactive.special_reminder prompt
+保留供其他场景或回滚使用. 详见 CLAUDE.md §6 偏离表.
 
 同日多个命中 → 一条合并消息, 使用 proactive.special_combined;
-单一命中 → 节日类 / 生日类 / 提醒类 三个独立 prompt;
+单一命中 → 节日类 / 生日类 两个独立 prompt;
 所有特殊日期消息带 metadata.skip_post_process=True, 走独立发送路径.
 """
 
@@ -138,59 +143,9 @@ async def _extract_birthday_from_memories(user_id: str, owner: str) -> tuple[int
     return None
 
 
-def _reminder_matches_date(occur, recurrence: str, the_date: date) -> bool:
-    """spec Part 5 §4.2 recurrence 匹配规则. None 视为 once.
-
-    Prisma `occur_time` 反序列化总返 datetime, 所以不需要 try/except 包 `.date()`.
-    """
-    if recurrence == "daily":
-        return True
-    if occur is None:
-        return False
-    d = occur.date()
-    if recurrence == "yearly":
-        return (d.month, d.day) == (the_date.month, the_date.day)
-    if recurrence == "monthly":
-        return d.day == the_date.day
-    if recurrence == "weekly":
-        return d.weekday() == the_date.weekday()
-    return d == the_date  # once
-
-
-async def _extract_reminders_for_date(
-    user_id: str,
-    owner: str,
-    the_date: date,
-) -> list[str]:
-    """从 owner 的 生活-提醒 子类中抽取当日触发的提醒.
-
-    spec §4.2 recurrence-aware: once 比对精确日期, yearly/monthly/weekly/daily
-    按周期匹配. occur_time 缺失时只 daily 命中, 其他 recurrence 跳过.
-    """
-    try:
-        rows = await memory_repo.find_many(
-            source=owner,  # type: ignore[arg-type]
-            where={
-                "userId": user_id,
-                "mainCategory": "生活",
-                "subCategory": "提醒",
-                "isArchived": False,
-            },
-            take=50,
-        )
-        contents: list[str] = []
-        for row in rows:
-            text = (row.summary or row.content or "").strip()
-            if not text:
-                continue
-            occur = getattr(row, "occurTime", None)
-            recurrence = getattr(row, "recurrence", None) or "once"
-            if _reminder_matches_date(occur, recurrence, the_date):
-                contents.append(text[:60])
-        return contents
-    except Exception as e:
-        logger.debug(f"Reminder extraction ({owner}) failed user={user_id}: {e}")
-        return []
+# Phase 4.2: removed `_reminder_matches_date` + `_extract_reminders_for_date`.
+# 提醒不再走本日扫描——pipeline 录入即建 timetrigger.actionType="reminder",
+# triggers._handle_reminder_trigger 直接按 occur_time 精确调度.
 
 
 async def _extract_important_dates_for_date(
@@ -244,10 +199,9 @@ async def collect_special_dates_today(
 ) -> list[Occasion]:
     """spec Part 5 §4.3: 凌晨扫当日特殊日期, 命中则返回 Occasion 列表.
 
-    spec §5.1 主动触发场景 (4 类):
+    spec §5.1 主动触发场景剩 3 类 (提醒已迁移到 timetrigger 直接调度, Phase 4.2):
     - 公共节假日 (春节/元旦)
     - 用户生日 / AI 生日
-    - 用户提醒 / AI 提醒 (occur_time 落在当日)
 
     Part 5 §4.1 日历库还登记"重要日期"(纪念/考试/面试)但不独立触发.
     若同日有主动触发命中 + 重要日期, 合并消息会带上重要日期素材.
@@ -265,22 +219,16 @@ async def collect_special_dates_today(
     except Exception as e:
         logger.debug(f"Holiday check failed: {e}")
 
-    # 4 个独立 I/O (生日 user/ai + 提醒 user/ai) 并发拉取
-    ub, ab, user_reminders, ai_reminders = await asyncio.gather(
+    # 2 个独立 I/O (生日 user/ai) 并发拉取
+    ub, ab = await asyncio.gather(
         _extract_birthday_from_memories(user_id, "user"),
         _extract_birthday_from_memories(user_id, "ai"),
-        _extract_reminders_for_date(user_id, "user", d),
-        _extract_reminders_for_date(user_id, "ai", d),
     )
 
     if ub and ub == (d.month, d.day):
         occasions.append(Occasion(type="birthday", name="用户生日", owner="user"))
     if ab and ab == (d.month, d.day):
         occasions.append(Occasion(type="birthday", name="AI生日", owner="ai"))
-    for text in user_reminders:
-        occasions.append(Occasion(type="reminder", name=text, owner="user"))
-    for text in ai_reminders:
-        occasions.append(Occasion(type="reminder", name=text, owner="ai"))
 
     # spec §5.1 重要日期不独立触发 — 但若已有其他 4 类命中, 把当日重要日期作为
     # 素材附加. 独立 type="important_date" 防回归: 若以后去掉 `if occasions` gate,

@@ -213,6 +213,80 @@ async def deletion_confirm_reply(
     )
 
 
+async def record_confirm_reply(
+    *,
+    summary: str,
+    when_text: str = "",
+    is_recurring: bool = False,
+    personality_brief: str = "",
+) -> str | None:
+    """RECORD_REQUEST 短路确认回复. spec §4.2 工程扩展, 见 CLAUDE.md §6 偏离表.
+    用于 "提醒我X" / "记得X" / "X 月 X 日是我生日" 类语句的体感确认 (1-2 句, 不延展)."""
+    return await _render_llm(
+        "intent.record_confirm_reply",
+        {
+            "personality_brief": personality_brief or "真诚朋友",
+            "summary": summary or "(未指定事项)",
+            "when_text": when_text or "(未指定时间)",
+            "is_recurring": "是" if is_recurring else "否",
+        },
+        max_chars=80,
+    )
+
+
+async def reminder_pre_check(
+    *,
+    summary: str,
+    trigger_time: str,
+    recent_messages: str = "",
+) -> dict:
+    """统一提醒触发前的状态判别 (completed/cancelled/rescheduled/needed).
+
+    返回形如 `{"state": "...", "new_time": "ISO|None", "reason": "..."}`.
+    LLM 失败 / 输出非 JSON → 返回 `{"state": "needed", "new_time": None, "reason": "fallback"}`
+    保守路径 (照常发送提醒, 至少不漏)."""
+    fallback = {"state": "needed", "new_time": None, "reason": "llm_fallback"}
+    if not summary:
+        return fallback
+    result = await render_prompt(
+        "proactive.reminder_pre_check",
+        {
+            "summary": summary,
+            "trigger_time": trigger_time or "(未知)",
+            "recent_messages": recent_messages or "(无)",
+        },
+        lambda p: invoke_json(get_utility_model(), p),
+    )
+    if not isinstance(result, dict):
+        return fallback
+    state = str(result.get("state", "")).strip().lower()
+    if state not in {"completed", "cancelled", "rescheduled", "needed"}:
+        return fallback
+    raw_new = result.get("new_time")
+    new_time = str(raw_new).strip() if raw_new not in (None, "", "null") else None
+    return {
+        "state": state,
+        "new_time": new_time,
+        "reason": str(result.get("reason", "")).strip()[:32],
+    }
+
+
+async def reminder_message(
+    *,
+    summary: str,
+    personality_brief: str = "",
+) -> str | None:
+    """统一提醒系统的实际触发消息. 替代旧 special_reminder 路径 (后者保留给节日/生日)."""
+    return await _render_llm(
+        "proactive.reminder_message",
+        {
+            "personality_brief": personality_brief or "真诚朋友",
+            "summary": summary or "(未指定事项)",
+        },
+        max_chars=80,
+    )
+
+
 async def deletion_done_reply(
     *,
     message: str,
@@ -367,7 +441,7 @@ async def delay_explanation_reply(
 
 _INTENT_LABELS = {
     "终结意图", "计划查询", "作息调整", "询问当前状态",
-    "道歉承诺", "删除", "调用久远记忆", "日常交流",
+    "道歉承诺", "删除", "调用久远记忆", "记录请求", "日常交流",
 }
 
 
@@ -533,6 +607,9 @@ __all__ = [
     "current_state_reply",
     "deletion_confirm_reply",
     "deletion_done_reply",
+    "record_confirm_reply",
+    "reminder_pre_check",
+    "reminder_message",
     "memory_weak_reply",
     "memory_medium_reply",
     "memory_strong_reply",

@@ -141,10 +141,8 @@ async def test_important_date_does_not_solo_trigger():
             "app.services.proactive.special_dates._extract_birthday_from_memories",
             new_callable=AsyncMock, return_value=None,
         ),
-        patch(
-            "app.services.proactive.special_dates._extract_reminders_for_date",
-            new_callable=AsyncMock, return_value=[],
-        ),
+        # Phase 4.2: _extract_reminders_for_date removed; reminders now go via
+        # timetrigger directly. No reminder mock needed here.
         patch(
             "app.services.proactive.special_dates._extract_important_dates_for_date",
             new_callable=AsyncMock, return_value=["面试"],
@@ -167,10 +165,7 @@ async def test_important_date_appended_when_birthday_hits():
             new_callable=AsyncMock,
             side_effect=lambda uid, owner: (4, 22) if owner == "user" else None,
         ),
-        patch(
-            "app.services.proactive.special_dates._extract_reminders_for_date",
-            new_callable=AsyncMock, return_value=[],
-        ),
+        # Phase 4.2: _extract_reminders_for_date removed; reminders go via timetrigger.
         patch(
             "app.services.proactive.special_dates._extract_important_dates_for_date",
             new_callable=AsyncMock,

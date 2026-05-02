@@ -65,6 +65,9 @@ from app.services.prompting.defaults import (
     PROACTIVE_SPECIAL_BIRTHDAY_PROMPT,
     PROACTIVE_SPECIAL_REMINDER_PROMPT,
     PROACTIVE_SPECIAL_COMBINED_PROMPT,
+    RECORD_CONFIRM_REPLY_PROMPT,
+    REMINDER_MESSAGE_PROMPT,
+    REMINDER_PRE_CHECK_PROMPT,
     REPLY_SPLIT_2_PROMPT,
     REPLY_SPLIT_3_PROMPT,
     RESPONSE_INSTRUCTION_PROMPT,
@@ -360,6 +363,27 @@ PROMPT_DEFINITIONS = [
         "proactive.special_combined", "特殊日期(合并)", "主动交流", "主动消息",
         "《终稿·第四部分 主动交流》§10.3: 同日多个特殊日期合并到一条消息 (避免一日多次打扰).",
         PROACTIVE_SPECIAL_COMBINED_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.reminder_pre_check", "提醒触发前状态判断", "主动交流", "主动消息",
+        "【工程扩展】无字面 spec 出处. 统一提醒系统 timetrigger.actionType=\"reminder\" "
+        "触发前调用, 看最近 30 min 对话判别 4 种状态 (completed/cancelled/rescheduled/needed) "
+        "→ 决定归档 / 改时刻 / 续期 / 发送. 占位符: {summary} {trigger_time} {recent_messages}.",
+        REMINDER_PRE_CHECK_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.reminder_message", "提醒发送消息", "主动交流", "主动消息",
+        "【工程扩展】统一提醒系统按精确 occur_time 触发的实际提醒消息. "
+        "替代 proactive.special_reminder 的旧「起床后 idle」路径 (后者保留给节日/生日/重要日期). "
+        "占位符: {personality_brief} {summary}.",
+        REMINDER_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.record_confirm_reply", "记录请求确认回复", "意图处理", "意图",
+        "【工程扩展】RECORD_REQUEST 意图短路回复. 用户说「提醒我X」/「记得X」/「X 月 X 日是我生日」 "
+        "时, AI 用 1-2 句确认已记下 (不延展话题, 不查记忆). "
+        "占位符: {personality_brief} {summary} {when_text} {is_recurring}.",
+        RECORD_CONFIRM_REPLY_PROMPT,
     ),
 
     # ── 边界系统 (Part 3 §2) ──

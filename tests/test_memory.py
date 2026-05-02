@@ -131,12 +131,12 @@ class TestRetrieveMemories:
 @pytest.mark.asyncio
 class TestIsDuplicate:
     async def test_above_threshold_is_duplicate(self):
-        results = [{"similarity": 0.95}]
+        results = [{"id": "mem-existing", "similarity": 0.95}]
         with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is True
 
     async def test_below_threshold_not_duplicate(self):
-        results = [{"similarity": 0.80}]
+        results = [{"id": "mem-other", "similarity": 0.80}]
         with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is False
 
@@ -146,7 +146,7 @@ class TestIsDuplicate:
 
     async def test_string_similarity_parsed(self):
         """Similarity can come as string from raw query."""
-        results = [{"similarity": "0.92"}]
+        results = [{"id": "mem-existing", "similarity": "0.92"}]
         with patch("app.services.memory.storage.persistence.search_by_embedding", return_value=results):
             assert await is_duplicate("user1", "test", [0.1]) is True
 

@@ -25,6 +25,10 @@ class IntentType(Enum):
     SCHEDULE_QUERY = "schedule_query"
     CURRENT_STATE = "current_state"  # spec §3.4.3 询问当前状态
     L3_RECALL = "l3_recall"          # spec §3.4.5 调用久远记忆
+    # 工程扩展 (Phase 3): 用户请求 AI 记一件事 / 设提醒 / 告知日历事件.
+    # 跟"计划查询"分离让回复体感正确 ("好嘞我帮你记上了" vs 错误的"你明天要做X").
+    # 详见 CLAUDE.md §6 偏离表.
+    RECORD_REQUEST = "record_request"
     NONE = "none"
 
 
@@ -37,12 +41,15 @@ LABEL_TO_INTENT: dict[str, IntentType] = {
     "道歉承诺": IntentType.APOLOGY_PROMISE,
     "删除": IntentType.DELETION,
     "调用久远记忆": IntentType.L3_RECALL,
+    "记录请求": IntentType.RECORD_REQUEST,
     "日常交流": IntentType.NONE,
 }
 
 # spec §3.3 multi-intent 优先级（高优先级先处理；用于 primary 选择和 sub-intent 处理顺序）
+# 记录请求排在删除之后但在其他短路意图之前: 用户同时说 "记得 X" + 别的意图时,
+# 先确认记下 (体感优先), 再处理别的; 但 "忘了 X" 仍优先以避免冲突.
 INTENT_PRIORITY: list[str] = [
-    "删除", "作息调整", "终结意图", "计划查询",
+    "删除", "记录请求", "作息调整", "终结意图", "计划查询",
     "询问当前状态", "道歉承诺", "调用久远记忆", "日常交流",
 ]
 

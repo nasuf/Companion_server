@@ -11,7 +11,7 @@ L1 冲突处理完全走 spec §4 交互矛盾机制（热路径询问用户确�
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, time
 from typing import Literal
 
 from app.services.memory.storage.entity_repo import (
@@ -29,12 +29,148 @@ from app.services.schedule_domain.time_parser import (
     has_explicit_time,
     parse_with_statement_time,
 )
-from app.services.schedule_domain.time_service import _now_corrected
-from app.services.workspace.workspaces import resolve_workspace_id
+from app.services.schedule_domain.time_service import _now_corrected, ensure_aware
+from app.services.workspace.workspaces import get_active_workspace, resolve_workspace_id
 
 logger = logging.getLogger(__name__)
 
 Side = Literal["user", "ai"]
+
+async def _create_reminder_timetrigger(
+    *,
+    user_id: str,
+    memory_id: str,
+    summary: str,
+    occur_time: datetime,
+    recurrence: str,
+    side: Side,
+) -> None:
+    """统一提醒系统 (Phase 4.1): 提醒入库 → 同步建 timetrigger.
+
+    spec §4.2 字面是"凌晨扫记忆 → 起床后 idle 触发", 但跟 §5.2 自相矛盾且不支持
+    短期闹钟. 改为按精确 occur_time 直接调度 timetrigger; 若 parser 把"明天提醒
+    我X"解析为全天范围 (00:00:00) → 退化到起床后第一个空闲段 (复用 special_dates
+    的 find_first_idle_after_wakeup, 跟节日/生日触发对齐).
+
+    agent_id 通过 user_id 反查当前 active workspace 取得. 无 active workspace →
+    memory 仍入库, 但 trigger 不会创建; Phase 4.2 起 special_dates 路径已删除提醒
+    扫描, 没有 fallback. 这里以 WARNING 记录方便 admin 排查丢失的提醒.
+    """
+    from app.db import db
+
+    try:
+        workspace = await get_active_workspace(user_id=user_id)
+    except Exception as e:
+        logger.warning(f"[MEM-{side}] reminder timetrigger: workspace lookup failed: {e}")
+        return
+    if not workspace:
+        logger.warning(
+            f"[MEM-{side}] reminder timetrigger SKIPPED: no active workspace for "
+            f"user={user_id[:8]} memory={memory_id[:8]}; reminder will NOT fire"
+        )
+        return
+
+    agent_id = getattr(workspace, "agentId", None) or getattr(workspace, "ai_agent_id", None)
+    if not agent_id:
+        logger.warning(
+            f"[MEM-{side}] reminder timetrigger SKIPPED: workspace has no agentId "
+            f"user={user_id[:8]} memory={memory_id[:8]}"
+        )
+        return
+
+    trigger_time = occur_time
+    # Heuristic: parser's _day_range emits start=00:00:00 with no time component.
+    # Real "提醒我 0 点喝水" is rare enough we accept the edge case (still fires
+    # at the next idle slot, off by ~30min — better than waking at midnight).
+    if occur_time.time() == time(0, 0, 0):
+        try:
+            from app.services.proactive.special_dates import find_first_idle_after_wakeup
+            from app.services.schedule_domain.schedule import get_cached_schedule
+            schedule = await get_cached_schedule(agent_id)
+            trigger_time = find_first_idle_after_wakeup(schedule, occur_time.date())
+        except Exception as e:
+            logger.warning(
+                f"[MEM-{side}] reminder timetrigger: idle fallback failed ({e}); "
+                f"using raw occur_time {occur_time}"
+            )
+
+    # 同 memory_id 已有 active trigger → **重设语义**: 用户重发"提醒我X" 时
+    # 期望"按新时刻提醒", 必须 update 现有 trigger 的 triggerTime 到新值,
+    # 而不是 silently skip (skip 等于丢用户的新设置).
+    #
+    # 之前生产 bug: 用户多次重设"一分钟后提醒喝水" → memory 被 dedup 复用,
+    # idempotency 命中已有 active trigger → skip → DB 里 trigger.triggerTime
+    # 还是最早那次的旧值 (2 小时前) → scan 永远找不到当前窗口 → 用户没收到提醒.
+    #
+    # Prisma 不支持嵌套 JSON 过滤 — find_many + Python 侧筛, 用户的 active
+    # reminders 通常 < 10 条.
+    existing_trigger_id: str | None = None
+    try:
+        existing_triggers = await db.timetrigger.find_many(
+            where={
+                "aiAgentId": agent_id,
+                "actionType": "reminder",
+                "isActive": True,
+            },
+        )
+        for t in existing_triggers:
+            if (t.actionData or {}).get("memory_id") == memory_id:
+                existing_trigger_id = t.id
+                break
+    except Exception as e:
+        logger.warning(
+            f"[MEM-{side}] reminder idempotency check failed ({e}); "
+            "proceeding to create (may produce duplicate)"
+        )
+
+    if existing_trigger_id:
+        # 重设: update 现有 trigger 的 triggerTime + lastFired 重置 (允许重新触发).
+        try:
+            await db.timetrigger.update(
+                where={"id": existing_trigger_id},
+                data={
+                    "triggerTime": trigger_time,
+                    "lastFired": None,  # 重置, 否则 idempotency 守门 (lastFired<2min) 会拦
+                },
+            )
+            logger.info(
+                f"[MEM-{side}] reminder timetrigger UPDATED (reset) memory={memory_id[:8]} "
+                f"trigger={existing_trigger_id[:8]} new_time={trigger_time}"
+            )
+            return
+        except Exception as e:
+            logger.warning(
+                f"[MEM-{side}] reminder timetrigger update failed ({e}); "
+                "falling back to create new"
+            )
+            # fall through 创建新的
+
+    try:
+        from prisma import Json
+        # 注: 使用 scalar `aiAgentId` + `userId` 而非 `agent: {connect}` /
+        # `user: {connect}` 关系语法 — 关系语法在某些 prisma client 版本下
+        # 跟 actionData 的 Json validation 相互作用诡异 (生产实测报错
+        # "data.aiAgentId: A value is required but not set" + "actionData
+        # should be of type Json"). scalar FK 写法直接, 跟 Json() 兼容.
+        await db.timetrigger.create(data={
+            "aiAgentId": agent_id,
+            "userId": user_id,
+            "triggerTime": trigger_time,
+            "actionType": "reminder",
+            "actionData": Json({
+                "memory_id": memory_id,
+                "summary": summary[:200],
+                "recurrence": recurrence,
+                "memory_side": side,  # 用于 pre-check 跨 user_memories / ai_memories 找
+            }),
+        })
+        logger.info(
+            f"[MEM-{side}] reminder timetrigger CREATED memory={memory_id[:8]} "
+            f"agent={agent_id[:8]} at={trigger_time} recurrence={recurrence}"
+        )
+    except Exception as e:
+        logger.warning(f"[MEM-{side}] reminder timetrigger create failed: {e}")
+
 
 # Spec §1.5.2: keywords indicating user expressed that information is important.
 # Detected once per pipeline call (on new_conversation), tagged on all extracted
@@ -105,7 +241,7 @@ async def process_memory_pipeline(
     if has_explicit_time(new_conversation):
         parsed = parse_with_statement_time(new_conversation, now=statement_time)
         if len(parsed.event_times) == 1:
-            rule_based_occur_time = parsed.event_times[0].start
+            rule_based_occur_time = ensure_aware(parsed.event_times[0].start)
 
     stored_ids: list[str] = []
 
@@ -127,6 +263,15 @@ async def process_memory_pipeline(
         if sub_category and sub_category in SUBCATEGORY_ALIASES:
             sub_category = SUBCATEGORY_ALIASES[sub_category]
 
+        # Reminder importance clamp: extraction prompt asks 0.4-0.6, but LLM
+        # drifts upward; without the clamp 1 reminder/week could ride the L2
+        # frequency factor up to L1 over a year. Upper bound 0.49 (NOT 0.6) so
+        # importance always lands in L3 (level derivation: ≥0.50 → L2). Triggering
+        # is by timetrigger directly (key by sub_category="提醒"), so layer
+        # demotion is harmless to the reminder feature itself.
+        if sub_category == "提醒":
+            importance = max(0.4, min(0.49, float(importance)))
+
         # Per spec《产品手册·背景信息》§2.3 — level is derived from importance
         # score (0-100), not whatever level the LLM may have guessed:
         #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
@@ -141,12 +286,15 @@ async def process_memory_pipeline(
             level = 3
 
         # Rule engine wins when it's unambiguous; LLM occur_time is fallback.
+        # 必须 ensure_aware: LLM 输出 ISO 经常没 tz, fromisoformat 解出来是
+        # naive, 跟下面 ref_now (aware) 比较时崩 "can't compare offset-naive
+        # and offset-aware datetimes". 在边界统一规范化, 避免每个比较点打补丁.
         occur_time: datetime | None = rule_based_occur_time
         if occur_time is None:
             raw_time = mem.get("occur_time")
             if raw_time and isinstance(raw_time, str):
                 try:
-                    occur_time = datetime.fromisoformat(raw_time)
+                    occur_time = ensure_aware(datetime.fromisoformat(raw_time))
                 except ValueError:
                     pass
 
@@ -182,6 +330,12 @@ async def process_memory_pipeline(
         if emotion:
             pleasure_abs = abs(emotion.get("pleasure", 0.0))
             importance = min(1.0, importance + pleasure_abs * 0.2)
+            # Re-apply reminder clamp after emotion bump — otherwise a strong
+            # reminder ("超级开心地提醒我去看演唱会") boosts to 0.49 + 0.2 = 0.69
+            # → stored at L2 importance even though level=3 was already derived.
+            # Inconsistent state breaks L2→L1 frequency promotion guard.
+            if sub_category == "提醒":
+                importance = min(0.49, importance)
 
         memory_id = await store_memory(
             user_id=user_id,
@@ -201,6 +355,31 @@ async def process_memory_pipeline(
 
         if memory_id:
             stored_ids.append(memory_id)
+
+            # 提醒入库 → 同步建 timetrigger (统一提醒系统).
+            # 限 side=="user": 用户主动设置的事项才该建实际的提醒计划.
+            # AI-side 反思 (e.g. "我差点又忘记提醒用户喝水") extraction LLM 偶尔
+            # 误归 sub_category=="提醒" + 给一个 occur_time, 不能据此真的发提醒
+            # — AI 的内省不该变成产品行为. 严格限制 side="user" 避免这类误触发.
+            #
+            # once 已经在前面校验过必须是未来; 周期性 (yearly/monthly/weekly/daily)
+            # 即使 occur_time 是历史(首次发生时间)也合法, trigger handler 会按
+            # recurrence 续期到下次.
+            if (
+                side == "user"
+                and sub_category == "提醒"
+                and occur_time is not None
+                and recurrence
+            ):
+                await _create_reminder_timetrigger(
+                    user_id=user_id,
+                    memory_id=memory_id,
+                    summary=summary,
+                    occur_time=occur_time,
+                    recurrence=recurrence,
+                    side=side,
+                )
+
             # Log user emphasis so L2→L1 promotion can verify the condition
             if user_emphasized:
                 try:

@@ -61,18 +61,23 @@ async def emit_proactive_message(
         }
     )
 
-    # 审计日志写失败不影响主流程
+    # 审计日志写失败不影响主流程.
+    # 注: 跟 timetrigger 一样, 这个 prisma client 版本对混合 scalar+relation
+    # 写法很挑剔. 历史 `agent: {connect: {id}}` + `workspaceId: workspace_id or ""`
+    # 实测在 reminder 触发路径下报 "workspaceId: Field does not exist" + "agentId
+    # required". 改为全 scalar 写法; workspace 可空, None 时 omit (传空串会被
+    # 当 FK 校验拒绝).
     try:
-        await db.proactivechatlog.create(
-            data={
-                "agent": {"connect": {"id": agent_id}},
-                "userId": user_id,
-                "workspaceId": workspace_id or "",
-                "conversationId": conversation_id,
-                "message": message,
-                "eventType": trigger_type,
-            }
-        )
+        log_data: dict[str, Any] = {
+            "agentId": agent_id,
+            "userId": user_id,
+            "conversationId": conversation_id,
+            "message": message,
+            "eventType": trigger_type,
+        }
+        if workspace_id:
+            log_data["workspaceId"] = workspace_id
+        await db.proactivechatlog.create(data=log_data)
     except Exception as e:
         logger.warning(f"proactive_chat_log write failed: {e}")
 

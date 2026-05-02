@@ -157,7 +157,9 @@ async def _pipeline_with_watermark(
 ) -> int:
     """按 (conversation_id, side) 水位线切分 recent, 调用 extraction pipeline.
     返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件)."""
-    wm = await get_watermark(conversation_id, side) if conversation_id else None
+    wm = _ensure_aware(
+        await get_watermark(conversation_id, side) if conversation_id else None
+    )
 
     # Cross-role NEW msgs go to context_msgs, not new_target_msgs — prevents
     # AI's just-generated reply from being extracted as a user fact (and vice versa).
@@ -197,15 +199,24 @@ async def _pipeline_with_watermark(
 
 
 def _parse_ts(m: dict) -> datetime | None:
+    """规范化 message.createdAt → tz-aware. naive 假定 UTC, 防 'can't compare
+    offset-naive and offset-aware datetimes' (Prisma client 某些版本返 naive)."""
+    from app.services.schedule_domain.time_service import ensure_aware
     ts = m.get("createdAt")
     if isinstance(ts, datetime):
-        return ts
+        return ensure_aware(ts)
     if not isinstance(ts, str):
         return None
     try:
-        return datetime.fromisoformat(ts)
+        return ensure_aware(datetime.fromisoformat(ts))
     except ValueError:
         return None
+
+
+# 测试期望的兼容 alias (test_post_process_datetime_aware_normalize 用)
+def _ensure_aware(dt: datetime | None) -> datetime | None:
+    from app.services.schedule_domain.time_service import ensure_aware
+    return ensure_aware(dt)
 
 
 def _fmt_conversation(msgs: list[dict]) -> str:

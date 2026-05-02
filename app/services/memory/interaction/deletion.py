@@ -1,18 +1,24 @@
-"""Memory deletion by user request (spec §5).
+"""Memory deletion / reschedule by user request (spec §5 + Phase 5 扩展).
 
 4-step flow:
-  1. Intent recognition (keyword + LLM)
-  2. Find candidates → generate confirmation reply (show what would be deleted)
-  3. User confirms → execute deletion
-  4. Physical delete + audit log
+  1. Intent recognition (keyword + LLM) — 同时识别 delete / reschedule
+  2. Find candidates → generate confirmation reply (show what would be deleted/moved)
+  3. User confirms → execute deletion 或 apply_reschedule
+  4. Physical delete + audit log; reschedule 还要更新对应 timetrigger
 
 Uses Redis pending state (same pattern as contradiction) to remember
-deletion candidates across the confirmation round-trip.
+deletion / reschedule candidates across the confirmation round-trip.
+
+Pending shape: 历史是 list[dict] (delete-only); Phase 5 起新写入是
+`{"action": "delete"|"reschedule", "candidates": [...], "new_time": "ISO|None"}`.
+load_pending_deletion 同时识别两种 shape 保持向后兼容.
 """
 
 import json
 import logging
+from datetime import datetime
 
+from app.db import db
 from app.redis_client import get_redis
 from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
@@ -27,14 +33,18 @@ logger = logging.getLogger(__name__)
 _PENDING_DELETION_PREFIX = "deletion:pending:"
 _PENDING_DELETION_TTL = 300  # 5 min for confirmation
 
-# Keywords that may indicate deletion intent
+# Keywords that may indicate deletion / reschedule intent
 # Part 5 §4.2: 用户说"不用提醒了/取消提醒"→ 走记忆删除机制 (针对 reminder 子类)
+# Phase 5 (改期): 用户说"挪到/改到/推迟到/提前到/调到 X" 也走同一 detect 路径,
+# LLM intent 字段区分 delete vs reschedule.
 DELETION_KEYWORDS = [
     "忘了", "忘掉", "别记了", "不记得", "删除", "删掉",
     "不要记", "别提了", "忘记", "去掉", "移除",
     # Part 5 §4.2 提醒取消语义
     "不用提醒", "取消提醒", "不用记着", "不用再提",
-    "forget", "delete", "remove", "don't remember",
+    # Phase 5 改期语义
+    "挪到", "改到", "推迟到", "提前到", "调到", "改成",
+    "forget", "delete", "remove", "don't remember", "reschedule",
 ]
 
 DELETION_RESPONSE_TEMPLATES = [
@@ -173,15 +183,154 @@ async def save_pending_deletion(conversation_id: str, candidates: list[dict]) ->
 
 
 async def load_pending_deletion(conversation_id: str) -> list[dict] | None:
+    """读 pending. 兼容历史 list[dict] shape 与 Phase 5 dict shape; 后者由
+    `load_pending_action` 解开. 这里只返回 candidates 列表给老调用方使用."""
+    action = await load_pending_action(conversation_id)
+    if not action:
+        return None
+    return action.get("candidates")
+
+
+async def save_pending_action(
+    conversation_id: str,
+    *,
+    action: str,
+    candidates: list[dict],
+    new_time: datetime | str | None = None,
+) -> None:
+    """Phase 5 dict-shape 写入: 区分 delete vs reschedule + 携带 new_time."""
+    payload: dict = {"action": action, "candidates": candidates}
+    if new_time is not None:
+        payload["new_time"] = (
+            new_time.isoformat() if isinstance(new_time, datetime) else str(new_time)
+        )
+    redis = await get_redis()
+    await redis.set(
+        f"{_PENDING_DELETION_PREFIX}{conversation_id}",
+        json.dumps(payload, ensure_ascii=False),
+        ex=_PENDING_DELETION_TTL,
+    )
+
+
+async def load_pending_action(conversation_id: str) -> dict | None:
+    """读 pending 并 normalize 成 dict shape `{action, candidates, new_time}`.
+
+    历史 list shape 视为 `{action: "delete", candidates: list}`.
+    """
     redis = await get_redis()
     raw = await redis.get(f"{_PENDING_DELETION_PREFIX}{conversation_id}")
     if not raw:
         return None
     try:
         data = json.loads(raw if isinstance(raw, str) else raw.decode())
-        return data if isinstance(data, list) else None
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    if isinstance(data, list):
+        return {"action": "delete", "candidates": data, "new_time": None}
+    if isinstance(data, dict) and isinstance(data.get("candidates"), list):
+        return {
+            "action": str(data.get("action") or "delete"),
+            "candidates": data["candidates"],
+            "new_time": data.get("new_time"),
+        }
+    return None
+
+
+async def apply_reschedule(
+    user_id: str,
+    candidates: list[dict],
+    new_time: str,
+    *,
+    agent_id: str | None = None,
+) -> int:
+    """把候选 memory 的 occurTime + 对应 reminder timetrigger 全部挪到 new_time.
+
+    - memory.occurTime ← new_time (按 candidate.source 路由 memories_user / _ai)
+    - timetrigger.actionType=reminder 且 actionData.memory_id ∈ candidates → triggerTime ← new_time
+    - 不删 memory, 不改 isArchived
+
+    `agent_id` 可选但**强烈建议传入**: 多 agent 用户场景下, 不传则 trigger
+    find_many 仅按 userId 过滤, 可能影响到其他 agent 的同名 memory_id 引用
+    (理论上 memory_id 全局唯一所以不会真的 cross-bleed, 但加 agent 闸防御
+    数据漂移). 主路径调用方 preflight 持有 agent_id, 应该传.
+
+    candidate 必须含 'source' 字段 ('user' 或 'ai'); 缺失记 WARN 跳过, 不
+    silently fallback (避免 AI memory 被错路由到 user 表).
+
+    返回成功更新的 memory 数."""
+    try:
+        new_time_dt = datetime.fromisoformat(new_time)
+    except (ValueError, TypeError):
+        logger.warning(f"apply_reschedule: invalid new_time={new_time!r}")
+        return 0
+
+    candidate_ids = {c["id"] for c in candidates if c.get("id")}
+    if not candidate_ids:
+        return 0
+
+    # 一次性拉相关 reminder triggers, 按 memory_id 索引 — 比每个 candidate
+    # 跑一次 find_many 节省 N-1 次 round-trip. Prisma 不支持嵌套 JSON 等值过滤,
+    # 必须 Python 侧筛. agent_id 闸防多 agent 数据漂移.
+    trigger_where: dict = {
+        "userId": user_id,
+        "actionType": "reminder",
+        "isActive": True,
+    }
+    if agent_id:
+        trigger_where["aiAgentId"] = agent_id
+    trigger_by_memory: dict = {}
+    try:
+        all_triggers = await db.timetrigger.find_many(where=trigger_where)
+        for t in all_triggers:
+            mid = (t.actionData or {}).get("memory_id")
+            if isinstance(mid, str) and mid in candidate_ids:
+                trigger_by_memory[mid] = t
+    except Exception as e:
+        logger.warning(f"apply_reschedule: timetrigger lookup failed: {e}")
+
+    updated = 0
+    for c in candidates:
+        memory_id = c.get("id")
+        if not memory_id:
+            continue
+        # repo CRUD router 必须知道 source 才能选对表 (memories_user vs _ai).
+        # candidate 来自 vector_search 的 UNION SELECT, 必带 'source' 字段;
+        # 缺失则数据有问题, 不能 silently fallback 到 'user' (会误更 AI memory).
+        source = c.get("source")
+        if source not in ("user", "ai"):
+            logger.warning(
+                f"apply_reschedule: candidate {memory_id} missing/invalid source "
+                f"({source!r}); skipping"
+            )
+            continue
+        memory = await memory_repo.find_unique(memory_id)
+        old_occur = memory.occurTime if memory else None
+        try:
+            await memory_repo.update(memory_id, source=source, occurTime=new_time_dt)
+        except Exception as e:
+            logger.warning(f"apply_reschedule: memory occurTime update failed {memory_id}: {e}")
+            continue
+
+        t = trigger_by_memory.get(memory_id)
+        if t is not None:
+            try:
+                await db.timetrigger.update(
+                    where={"id": t.id},  # type: ignore[attr-defined]
+                    data={"triggerTime": new_time_dt},
+                )
+            except Exception as e:
+                logger.warning(f"apply_reschedule: timetrigger update failed {memory_id}: {e}")
+
+        try:
+            await log_memory_changelog(
+                user_id, memory_id, "reschedule",
+                old_value=old_occur.isoformat() if old_occur else None,
+                new_value=new_time_dt.isoformat(),
+            )
+        except Exception:
+            pass
+        updated += 1
+    return updated
 
 
 async def clear_pending_deletion(conversation_id: str) -> None:

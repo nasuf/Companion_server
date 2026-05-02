@@ -48,6 +48,7 @@ from app.services.chat.intent_handlers import (
     handle_conversation_end,
     handle_current_state,
     handle_deletion,
+    handle_record_request,
     handle_schedule_adjust,
     handle_schedule_query,
 )
@@ -658,6 +659,17 @@ async def stream_chat_response(
                 schedule=schedule, ai_status=ai_status,
                 topic_intimacy=topic_intimacy, mbti=mbti,
             )
+            if handled and events is not None:
+                async for evt in events:
+                    yield evt
+                await _cancel_l3_task()
+                return
+
+        # 工程扩展 (Phase 3): 记录请求 — 用户请求 AI 记一件事 / 设提醒.
+        # 跟"计划查询"分离: 体感需"好嘞我帮你记上了"而非"你明天要做X". 后台
+        # _bg_memory_pipeline 仍跑, 完成实际 memory + timetrigger 创建 (Phase 4.1).
+        if detected_intent.intent == IntentType.RECORD_REQUEST:
+            handled, events = await handle_record_request(user_message, sc_ctx)
             if handled and events is not None:
                 async for evt in events:
                     yield evt

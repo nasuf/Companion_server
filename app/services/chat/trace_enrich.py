@@ -229,8 +229,8 @@ _register("模拟真人记忆，判断这句话是否值得进入记忆", _Promp
 _register("模拟真人自我记忆，判断这句话是否值得进入记忆", _PromptMeta(
     "memory.pre_filter_ai", "AI 自我记忆预筛", "decision", _label_judge_remember,
 ))
-_register("判断用户是否在要求AI忘记/删除某条记忆", _PromptMeta(
-    "memory.deletion_intent", "记忆删除意图判定", "decision", _label_passthrough,
+_register("判断用户是否在要求AI管理某条记忆 (删除 / 改期)", _PromptMeta(
+    "memory.deletion_intent", "记忆删除/改期意图判定", "decision", _label_passthrough,
 ))
 _register("扫描下面的 L1 记忆列表, 找出语义上互相矛盾的对", _PromptMeta(
     "memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough,

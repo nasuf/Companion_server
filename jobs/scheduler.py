@@ -194,14 +194,18 @@ def setup_scheduler():
         max_instances=1,  # prevent "max instances reached" warning
     )
 
-    # §9.5: Time trigger scan every minute
+    # §9.5: Time trigger scan — 15 秒一次. 之前 1 分钟一次, 配合 reminder
+    # "不早响"策略导致 "两分钟后" 的提醒最坏延迟可达 1 分钟. 15s 把最坏延迟
+    # 压到 15s, 同时 DB 查询负担可控 (find_many 在 ±15s 窗口, isActive=true
+    # 的 timetrigger 数量级很小).
     scheduler.add_job(
         _run_trigger_scan,
         "interval",
-        minutes=1,
+        seconds=15,
         id="trigger_scan",
         replace_existing=True,
     )
+    logger.info("Scheduler: trigger_scan registered (interval=15s)")
 
     # Part 5 §2.1: NTP 校准每 6 小时跑一次
     scheduler.add_job(

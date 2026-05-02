@@ -6,7 +6,7 @@ PRD §9.2: 为所有模块提供统一的时间查询能力，包括当前时间
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -77,6 +77,21 @@ def _now_corrected() -> datetime:
     的 datetime.now() 直接调用不修正, 见 CLAUDE.md §6 偏离表.
     """
     return datetime.now(_TZ) + timedelta(seconds=_NTP_DRIFT_SECONDS)
+
+
+def ensure_aware(dt: datetime | None) -> datetime | None:
+    """统一成 tz-aware (假定 naive 是 UTC).
+
+    防 'can't compare offset-naive and offset-aware datetimes' — 多个数据
+    源 (Prisma datetime / Redis ISO / LLM 输出 ISO / datetime.fromisoformat)
+    返回 naive 还是 aware 不一致, 比较点散落各处. 在边界统一规范化, 比每个
+    比较点临时打补丁干净.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def get_current_time() -> TimeInfo:

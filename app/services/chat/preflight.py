@@ -28,11 +28,12 @@ from app.services.memory.interaction.contradiction import (
     load_pending_contradiction,
 )
 from app.services.memory.interaction.deletion import (
+    apply_reschedule,
     clear_pending_deletion,
     execute_confirmed_deletion,
     generate_deletion_reply,
     is_deletion_confirmed,
-    load_pending_deletion,
+    load_pending_action,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,30 +94,48 @@ async def resolve_pending_deletion(
     user_message: str,
     ctx: PreflightCtx,
 ) -> AsyncGenerator[dict, None]:
-    """spec §5 step 3：若有待确认删除，根据用户回答执行删除或放弃。"""
-    pending_del = await load_pending_deletion(ctx.conversation_id)
-    if not pending_del:
+    """spec §5 step 3 + Phase 5: 若有待确认删除/改期, 根据用户回答执行或放弃."""
+    pending = await load_pending_action(ctx.conversation_id)
+    if not pending:
         return
+    candidates = pending.get("candidates") or []
+    action = pending.get("action") or "delete"
+    new_time = pending.get("new_time")
     try:
         if is_deletion_confirmed(user_message):
-            deleted = await execute_confirmed_deletion(ctx.user_id, pending_del)
-            await clear_pending_deletion(ctx.conversation_id)
             agent_name = ctx.agent.name if ctx.agent else "伙伴"
-            deleted_preview = "\n".join(
+            preview = "\n".join(
                 f"- {c.get('content', c.get('summary', ''))[:60]}"
-                for c in pending_del[:5]
+                for c in candidates[:5]
             ) or "(无)"
-            reply = (
-                await deletion_done_reply(
-                    message=user_message,
-                    personality_brief=agent_name,
-                    deleted_memories=deleted_preview,
+
+            if action == "reschedule" and new_time:
+                updated = await apply_reschedule(
+                    ctx.user_id, candidates, new_time, agent_id=ctx.agent_id,
                 )
-                or await generate_deletion_reply(agent_name, "之前提到的", deleted)
-            )
+                await clear_pending_deletion(ctx.conversation_id)
+                reply = (
+                    f"好嘞, 已经把以下 {updated} 件事挪到 {new_time} 啦~\n{preview}"
+                    if updated
+                    else "诶, 改期没成功, 你再说一遍?"
+                )
+            else:
+                deleted = await execute_confirmed_deletion(ctx.user_id, candidates)
+                await clear_pending_deletion(ctx.conversation_id)
+                reply = (
+                    await deletion_done_reply(
+                        message=user_message,
+                        personality_brief=agent_name,
+                        deleted_memories=preview,
+                    )
+                    or await generate_deletion_reply(agent_name, "之前提到的", deleted)
+                )
         else:
             await clear_pending_deletion(ctx.conversation_id)
-            reply = "好的，那就不删了，继续聊吧~"
+            reply = (
+                "好的，那就不改了，继续聊吧~" if action == "reschedule"
+                else "好的，那就不删了，继续聊吧~"
+            )
         ctx.last_short_circuit_reply = reply
         for evt in await ctx.short_circuit_fn(
             reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
@@ -126,5 +145,5 @@ async def resolve_pending_deletion(
         ctx.tracer.close()
         ctx.stopped = True
     except Exception as e:
-        logger.warning(f"Deletion confirmation failed: {e}")
+        logger.warning(f"Deletion/reschedule confirmation failed: {e}")
         await clear_pending_deletion(ctx.conversation_id)

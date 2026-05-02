@@ -76,22 +76,44 @@ async def log_memory_changelog(
     except Exception as e:
         logger.warning(f"Failed to write changelog: {e}")
 
-async def is_duplicate(
+async def find_duplicate_id(
     user_id: str,
     content: str,
     embedding: list[float],
     workspace_id: str | None = None,
-) -> bool:
-    """Check if a similar memory already exists (cosine > 0.9)."""
+) -> str | None:
+    """If a near-duplicate memory already exists (cosine > DEDUP_THRESHOLD),
+    return its id. Otherwise None.
+
+    用 case: RECORD_REQUEST handler dedup 命中时需要拿到 existing memory id,
+    才能 update occurTime + 重建 timetrigger (旧 trigger 已 fired 完, 新一次
+    的"提醒我X"必须建新 trigger).
+    """
     results = await search_by_embedding(embedding, user_id, top_k=5, workspace_id=workspace_id)
     for r in results:
         sim = r.get("similarity", 0)
         if isinstance(sim, str):
             sim = float(sim)
         if sim > DEDUP_THRESHOLD:
-            logger.info(f"Duplicate memory detected (similarity={sim:.3f}): {content[:50]}")
-            return True
-    return False
+            mid = r.get("id")
+            if mid:
+                logger.info(
+                    f"Duplicate memory detected (similarity={sim:.3f}, "
+                    f"matched_id={str(mid)[:8]}): {content[:50]}"
+                )
+                return str(mid)
+    return None
+
+
+async def is_duplicate(
+    user_id: str,
+    content: str,
+    embedding: list[float],
+    workspace_id: str | None = None,
+) -> bool:
+    """向后兼容 wrapper. 新调用方应直接用 find_duplicate_id 拿 id."""
+    matched = await find_duplicate_id(user_id, content, embedding, workspace_id=workspace_id)
+    return matched is not None
 
 
 async def store_memory(

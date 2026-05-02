@@ -1,11 +1,15 @@
 """时间触发引擎。
 
 PRD §9.5: 在合适的时间触发AI主动行为，遵循作息规则。
+
+Phase 4: actionType="reminder" 走 `_handle_reminder_trigger` 独立路径
+(pre-check LLM + 续期 + 隐式完成/取消/改期处理). 详见 CLAUDE.md §6 偏离表.
 """
 
 from __future__ import annotations
 
 import logging
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 
 from app.db import db
@@ -27,10 +31,45 @@ MAX_DAILY_TRIGGERS = 3
 MIN_TRIGGER_INTERVAL = 7200  # 2小时
 # 交流状态判定窗口（秒）
 CHAT_ACTIVE_WINDOW = 1800  # 30分钟
+# Reminder pre-check 上下文窗口
+REMINDER_PRECHECK_WINDOW = timedelta(minutes=30)
+
+
+# ── 周期性提醒续期算法 (Phase 4.6) ────────────────────────────────────
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    """加 N 个月并处理月底边界 (1月31日 +1月 → 2月最后一天).
+
+    stdlib-only 替代 dateutil.relativedelta — 避免新增依赖.
+    """
+    new_month = dt.month + months
+    new_year = dt.year + (new_month - 1) // 12
+    new_month = (new_month - 1) % 12 + 1
+    last_day = monthrange(new_year, new_month)[1]
+    new_day = min(dt.day, last_day)
+    return dt.replace(year=new_year, month=new_month, day=new_day)
+
+
+def _next_occurrence(current: datetime, recurrence: str) -> datetime | None:
+    """下一周期 trigger 时刻. once 返 None (不续期)."""
+    if recurrence == "yearly":
+        # 闰年 2-29 → 平年 2-28 自动 clamp
+        target_month = current.month
+        target_day = current.day
+        new_year = current.year + 1
+        last = monthrange(new_year, target_month)[1]
+        return current.replace(year=new_year, day=min(target_day, last))
+    if recurrence == "monthly":
+        return _add_months(current, 1)
+    if recurrence == "weekly":
+        return current + timedelta(weeks=1)
+    if recurrence == "daily":
+        return current + timedelta(days=1)
+    return None  # once / unknown
 
 
 async def scan_triggers() -> None:
-    """每分钟扫描到期触发器，检查规则后执行。"""
+    """每 15 秒扫描到期触发器，检查规则后执行。"""
     now = datetime.now(_TZ)
     window_start = now - timedelta(minutes=1)
     window_end = now + timedelta(minutes=1)
@@ -41,6 +80,16 @@ async def scan_triggers() -> None:
             "triggerTime": {"gte": window_start, "lt": window_end},
         },
     )
+
+    # 诊断: 命中时打 INFO log (无命中静默, 避免每 15s 打一条空 log).
+    # 之前生产观察到 "trigger 建好了但没 fire", 没有 log 完全摸不到方向 —
+    # 至少先确认 scan 是否选中了 trigger.
+    if triggers:
+        logger.info(
+            f"[SCAN] {len(triggers)} active trigger(s) in window "
+            f"[{window_start.strftime('%H:%M:%S')}, {window_end.strftime('%H:%M:%S')}]: "
+            f"{[(t.id[:8], t.actionType, t.triggerTime.isoformat()) for t in triggers]}"
+        )
 
     for trigger in triggers:
         try:
@@ -106,11 +155,317 @@ async def _defer_special_date_trigger(
     )
 
 
+async def _fetch_recent_messages_for_reminder(
+    agent_id: str, user_id: str, now: datetime,
+) -> str:
+    """拉最近 30min 对话作为 pre-check LLM 上下文. 取所有相关 conversation 的消息."""
+    try:
+        cutoff = now - REMINDER_PRECHECK_WINDOW
+        msgs = await db.message.find_many(
+            where={
+                "conversation": {"agentId": agent_id, "userId": user_id},
+                "createdAt": {"gte": cutoff},
+            },
+            order={"createdAt": "asc"},
+            take=40,
+        )
+    except Exception as e:
+        logger.warning(f"reminder pre-check: fetch recent messages failed: {e}")
+        return ""
+    lines = []
+    for m in msgs:
+        role = "用户" if m.role == "user" else "AI"
+        text = (m.content or "").strip().replace("\n", " ")
+        if text:
+            lines.append(f"{role}: {text[:120]}")
+    return "\n".join(lines) if lines else ""
+
+
+async def _archive_reminder_memory(memory_id: str, side: str, reason: str) -> None:
+    """软删提醒 memory + 写 changelog 留 trail."""
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.memory.storage.persistence import log_memory_changelog
+
+    if side not in ("user", "ai"):
+        side = "user"
+    try:
+        await memory_repo.update(
+            memory_id, source=side,  # type: ignore[arg-type]
+            isArchived=True,
+        )
+    except Exception as e:
+        logger.warning(f"archive reminder memory {memory_id} failed: {e}")
+        return
+    # changelog 失败不影响主流程
+    try:
+        record = await memory_repo.find_unique(memory_id)
+        user_id = record.userId if record else ""
+        workspace_id = record.workspaceId if record else None
+        if user_id:
+            await log_memory_changelog(
+                user_id, memory_id, "reminder_archived",
+                new_value=reason,
+                workspace_id=workspace_id,
+            )
+    except Exception:
+        pass
+
+
+async def _handle_reminder_trigger(trigger, now: datetime) -> None:
+    """统一提醒触发: pre-check LLM + 隐式状态判定 + 续期 + 发送.
+
+    pre-check 状态机 (见 prompt `proactive.reminder_pre_check`):
+    - completed/cancelled: 软删 memory + trigger 失活, 不发消息
+    - rescheduled: 更新 trigger.triggerTime + memory.occurTime, 不发, 等新时刻
+    - needed: 周期性提醒触发前先续期下一周期 (抗崩溃) → 发提醒消息
+
+    豁免 30min in_chat 阻塞 (用户主动设置), 但守 AI 睡眠 + 22:00-08:00 主动时段.
+    """
+    from app.services.chat.intent_replies import reminder_message, reminder_pre_check
+
+    agent_id = trigger.aiAgentId
+    user_id = trigger.userId
+    data = trigger.actionData or {}
+    memory_id = data.get("memory_id")
+    summary = (data.get("summary") or "").strip()
+    recurrence = data.get("recurrence") or "once"
+    side = data.get("memory_side") or "user"
+
+    if not summary:
+        logger.warning(f"reminder trigger {trigger.id} missing summary; deactivating")
+        await db.timetrigger.update(where={"id": trigger.id}, data={"isActive": False})
+        return
+
+    # 诊断 INFO log (调升自 debug): 帮 admin 排查"trigger 建好了但没响"问题.
+    # 频率不高 (用户主动设置才有), 提到 INFO 不会刷屏.
+    logger.info(
+        f"[REMINDER-TRIGGER] {trigger.id[:8]} entered handler: "
+        f"now={now.isoformat()} scheduled={trigger.triggerTime.isoformat()} "
+        f"lastFired={trigger.lastFired} summary={summary[:40]!r}"
+    )
+
+    # 幂等守门: scan_triggers ±1min 窗口跨两次扫描会重复选中同一 trigger.
+    # lastFired 在 2 min 内说明上一次扫描已处理过, 直接 return 避免双发.
+    if trigger.lastFired:
+        last = trigger.lastFired
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if (now - last) < timedelta(minutes=2):
+            logger.info(
+                f"[REMINDER-TRIGGER] {trigger.id[:8]} SKIP: lastFired {last} "
+                f"within 2min idempotency window"
+            )
+            return
+
+    # 守门 0: scan_triggers 用 ±1min 窗口 (window_end = now + 1min) 是为兼容
+    # special_date / greeting 这类粒度宽的场景, 但提醒类用户期望"准点". 之前
+    # "2 分钟后提醒" 实际 ~1 分 27 秒就响 (early by 33s). 改为只在
+    # triggerTime 已到达时 fire — 推迟到下次 scan (~1 min 后) 比早响 1 min
+    # 体感好得多. scan 间隔 15s, 最大延迟 ~15s.
+    trigger_time_aware = trigger.triggerTime
+    if trigger_time_aware.tzinfo is None:
+        trigger_time_aware = trigger_time_aware.replace(tzinfo=timezone.utc)
+    if now < trigger_time_aware:
+        logger.info(
+            f"[REMINDER-TRIGGER] {trigger.id[:8]} DEFER: not yet due "
+            f"(diff={(trigger_time_aware - now).total_seconds():.1f}s)"
+        )
+        return
+
+    # 守门 1: spec §1.2 22:00-08:00 quiet hours
+    local_h = now.astimezone(_TZ).hour
+    if local_h >= 22 or local_h < 8:
+        logger.info(
+            f"[REMINDER-TRIGGER] {trigger.id[:8]} SKIP: outside active hours "
+            f"(local_h={local_h})"
+        )
+        return
+
+    # 守门 2: AI 睡眠状态 (跟 special_date 一致)
+    schedule = await get_cached_schedule(agent_id)
+    if schedule:
+        status = get_current_status(schedule, now)
+        if status.get("status") == "sleep":
+            logger.info(
+                f"[REMINDER-TRIGGER] {trigger.id[:8]} SKIP: AI sleeping"
+            )
+            return
+
+    # 注: reminder **豁免** spec §1.2 每日 3 次上限.
+    # spec §1.2 的 daily_limit 是为了"AI 不要主动找用户太频繁" — 但 reminder
+    # 是用户**主动**让 AI 帮忙记的事, 用户自己设了 5 个提醒, AI 必须执行,
+    # 否则用户花心思设的提醒永远不响, 体感很糟. 仍守 quiet hours + AI sleep
+    # 这两条 (尊重物理边界), 但 daily 配额是被动消息逻辑, 不应卡 reminder.
+    # 仍然 redis 取 daily_key 用于 emit 后递增计数 (供其他主动路径参考).
+    redis = await get_redis()
+    daily_key = f"trigger_count:{agent_id}:{user_id}:{now.strftime('%Y%m%d')}"
+
+    # pre-check: 看最近 30min 对话, 判别隐式完成 / 取消 / 改期 / 仍需要
+    recent = await _fetch_recent_messages_for_reminder(agent_id, user_id, now)
+    state_info = await reminder_pre_check(
+        summary=summary,
+        trigger_time=trigger.triggerTime.isoformat(),
+        recent_messages=recent,
+    )
+    state = state_info.get("state", "needed")
+
+    if state in ("completed", "cancelled") and memory_id:
+        await _archive_reminder_memory(
+            memory_id, side, reason=f"{state}:{state_info.get('reason', '')}",
+        )
+        await db.timetrigger.update(
+            where={"id": trigger.id},
+            data={"isActive": False, "lastFired": now},
+        )
+        logger.info(
+            f"reminder {trigger.id} archived as {state} "
+            f"memory={memory_id[:8]} reason={state_info.get('reason')}"
+        )
+        return
+
+    if state == "rescheduled":
+        new_iso = state_info.get("new_time")
+        if not new_iso:
+            logger.warning(f"reminder {trigger.id} rescheduled but no new_time; falling through to send")
+        else:
+            try:
+                new_time = datetime.fromisoformat(new_iso)
+            except ValueError:
+                logger.warning(f"reminder {trigger.id}: invalid rescheduled new_time={new_iso!r}")
+                new_time = None
+            if new_time is not None:
+                await db.timetrigger.update(
+                    where={"id": trigger.id}, data={"triggerTime": new_time},
+                )
+                if memory_id:
+                    from app.services.memory.storage import repo as memory_repo
+                    try:
+                        await memory_repo.update(
+                            memory_id, source=side,  # type: ignore[arg-type]
+                            occurTime=new_time,
+                        )
+                    except Exception as e:
+                        logger.warning(f"reminder reschedule: memory occurTime update failed: {e}")
+                logger.info(
+                    f"reminder {trigger.id} rescheduled to {new_time} "
+                    f"reason={state_info.get('reason')}"
+                )
+                return
+
+    # state == "needed" (or fall-through from rescheduled-without-time): 发提醒.
+    #
+    # ⚠️ 关键顺序: 先 claim 原 trigger, 再 create 续期, 最后 emit.
+    # 之前的"续期先于 claim"顺序在 claim 抛异常时会双写续期 (round-2 bug2):
+    #   原 trigger 仍 active + 续期已存在 → 下次 scan 又进 _handle_reminder_trigger
+    #   → 续期 create 再跑一次 → 用户的下一周期 trigger 重复.
+    # 现在顺序: claim → create 续期 → emit.
+    # - claim 失败 (抛异常): scan 外层 try 捕获, 原 trigger 仍 active. 但
+    #   idempotency 守门 (lastFired) 还是 None → 下次 scan 重入再尝试 claim,
+    #   合理重试. 续期还没建, 不会重复.
+    # - 续期失败 (after claim 成功): 原 trigger 已死, 续期丢失. 用户失去 1
+    #   个周期 — 是可接受的"退化", 比双重周期 trigger 好.
+    # - emit 失败 (after claim+续期): 原死、续期在、消息丢. 周期性下周期照样
+    #   提醒用户; 一次性提醒丢失 (见 WARNING 日志).
+    await db.timetrigger.update(
+        where={"id": trigger.id},
+        data={"isActive": False, "lastFired": now},
+    )
+
+    if recurrence != "once":
+        next_occur = _next_occurrence(trigger.triggerTime, recurrence)
+        if next_occur:
+            try:
+                from prisma import Json
+                # scalar FK + Json() — 同 pipeline._create_reminder_timetrigger
+                # 注释里说明的 prisma 兼容原因.
+                await db.timetrigger.create(data={
+                    "aiAgentId": agent_id,
+                    "userId": user_id,
+                    "triggerTime": next_occur,
+                    "actionType": "reminder",
+                    "actionData": Json(data),
+                })
+                logger.debug(
+                    f"reminder {trigger.id} renewed: next={next_occur} "
+                    f"recurrence={recurrence}"
+                )
+            except Exception as e:
+                logger.warning(f"reminder {trigger.id} renewal failed: {e}")
+
+    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    if not workspace_id:
+        logger.warning(
+            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: workspace not found "
+            f"recurrence={recurrence}"
+        )
+        return
+
+    from app.services.proactive.emit import emit_proactive_message
+    from app.services.proactive.sender import _build_personality_brief
+    from app.services.proactive.state import get_active_workspace_context
+
+    workspace_context = await get_active_workspace_context(workspace_id)
+    if not workspace_context:
+        logger.warning(
+            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: no workspace context"
+        )
+        return
+    conversation_id = str(workspace_context.get("conversation_id") or "")
+    if not conversation_id:
+        logger.warning(
+            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: no conversation_id"
+        )
+        return
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        logger.warning(
+            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: agent {agent_id[:8]} gone"
+        )
+        return
+
+    message = await reminder_message(
+        summary=summary,
+        personality_brief=_build_personality_brief(agent),
+    )
+    if not message or len(message) < 4:
+        logger.warning(f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: message generation empty/short")
+        return
+
+    await emit_proactive_message(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        workspace_id=workspace_id,
+        message=message,
+        trigger_type="reminder",
+        skip_post_process=True,  # spec §10.4 类比: 提醒消息不走 emoji/拆句加工
+        extra_metadata={
+            "reminder_memory_id": memory_id or "",
+            "reminder_recurrence": recurrence,
+            "reminder_summary": summary[:120],
+        },
+    )
+    await redis.incr(daily_key)
+    await redis.expire(daily_key, 86400)
+    # 注: trigger.isActive=False + lastFired 已在 emit 前 claim, 不重复 update.
+    logger.info(
+        f"reminder {trigger.id} fired memory={memory_id and memory_id[:8]} "
+        f"recurrence={recurrence}"
+    )
+
+
 async def _execute_trigger(trigger, now: datetime) -> None:
     """执行单个触发器，检查所有规则。"""
     agent_id = trigger.aiAgentId
     user_id = trigger.userId
     is_special_date = trigger.actionType == "special_date"
+
+    # Phase 4 reminder: 用户主动设置的事项, 豁免 30min in_chat 阻塞 (用户说
+    # "半小时后" 必然在 30min 内活跃). 仍守 AI 睡眠 + spec §1.2 主动时段 gates,
+    # 由 _handle_reminder_trigger 内部判定.
+    if trigger.actionType == "reminder":
+        await _handle_reminder_trigger(trigger, now)
+        return
 
     # 规则1: 非交流中（最后消息间隔 > 30min）
     if await _is_in_chat(agent_id, user_id):
