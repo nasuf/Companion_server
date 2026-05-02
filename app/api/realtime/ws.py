@@ -152,11 +152,16 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 await websocket.send_json({"type": "pong"})
 
             elif msg_type == "message":
-                text = (raw.get("data") or {}).get("message", "").strip()
+                payload = raw.get("data") or {}
+                text = (payload.get("message") or "").strip()
                 if not text:
                     continue
+                # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
+                # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
+                client_id = payload.get("client_id")
                 await _handle_message(
-                    websocket, conversation_id, user_id, agent, text
+                    websocket, conversation_id, user_id, agent, text,
+                    client_id=client_id,
                 )
 
     except WebSocketDisconnect:
@@ -173,12 +178,41 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         await manager.disconnect(conversation_id)
 
 
+async def _send_ack(
+    ws: WebSocket, *, message_id: str, client_id: str | None,
+) -> None:
+    """spec 之外的工程扩展: persist 落库后立刻发"已读" ack 给前端.
+
+    用户体感"我说出去的话 AI 看到了" — 之前从用户发到 AI 实际开始回复中间
+    这段无任何反馈 (1-5s 在延迟队列), 气泡像石沉大海. ack 让前端能在气泡
+    旁加 ✓✓ 标记.
+
+    `client_id`: 前端发消息时塞的 UUID, 后端原样回. 让前端在快速连发多条时
+    精确对应 ack 跟具体气泡, 不用按时间猜. 没传时仅返 message_id (DB id).
+    """
+    from app.services.schedule_domain.time_service import _now_corrected
+    try:
+        await ws.send_json({
+            "type": "ack",
+            "data": {
+                "message_id": message_id,
+                "client_id": client_id,
+                "received_at": _now_corrected().isoformat(),
+            },
+        })
+    except Exception as e:
+        # ack 失败不影响主流程 (回复仍会发) — 前端最终拿到 reply 也能反推消息已收到
+        logger.warning(f"[WS] send_ack failed: {e}")
+
+
 async def _handle_message(
     ws: WebSocket,
     conversation_id: str,
     user_id: str,
     agent,
     text: str,
+    *,
+    client_id: str | None = None,
 ) -> None:
     """处理用户消息：聚合检查 → 生成回复 → 推送。"""
     schedule = await get_cached_schedule(agent.id)
@@ -210,6 +244,7 @@ async def _handle_message(
             text,
             metadata={"fragment": True},
         )
+        await _send_ack(ws, message_id=message_id, client_id=client_id)
         # push_pending 内部 zadd 刷新 due_at = now + 5，同时覆盖最新 reply_context
         pushed = await push_pending(
             agent_id=agent.id,
@@ -257,6 +292,7 @@ async def _handle_message(
         text,
         metadata={"queued": True},
     )
+    await _send_ack(ws, message_id=user_message_id, client_id=client_id)
 
     try:
         await _queue_reply(
