@@ -14,7 +14,7 @@ Round-2 review 找出的架构问题:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from app.db import db
@@ -29,6 +29,50 @@ ReminderState = Literal["completed", "cancelled", "rescheduled", "needed"]
 
 # TimeTrigger.actionType for reminders. 散落 5+ 处的硬编码 "reminder" 字符串都该用这个常量.
 REMINDER_ACTION_TYPE = "reminder"
+
+
+def format_when_text(occur_dt: datetime, *, now: datetime | None = None) -> str:
+    """把 datetime 渲染成自然中文时间短语, 给 confirm prompt / 反问 / 用户回复用.
+
+    设计目标: 像真人朋友说话, 不冗余. ❌ "05月02日 22:50叫你" (用户当然知道是今天)
+    ✅ "2 分钟后" / "今晚 22:50" / "明天 08:00" / "5 月 9 日 10:00"
+
+    分级 (now 默认为 _now_corrected):
+    - ≤60 分钟内 → "X 分钟后" (相对时间最直观)
+    - 同天 → "今早/今天/今晚 HH:MM" (按时段加修饰)
+    - +1 天 → "明天 HH:MM"
+    - +2 天 → "后天 HH:MM"
+    - 同年 → "M 月 D 日 HH:MM"
+    - 跨年 → "YYYY 年 M 月 D 日 HH:MM"
+    """
+    from app.services.schedule_domain.time_service import _TZ, _now_corrected
+
+    local = occur_dt.astimezone(_TZ)
+    now_local = (now or _now_corrected()).astimezone(_TZ)
+    delta = local - now_local
+
+    # ≤60 分钟内 → 相对分钟数 (排除负值: 过去时间显示绝对值)
+    if timedelta(0) <= delta <= timedelta(minutes=60):
+        minutes = max(0, int(delta.total_seconds() / 60))
+        if minutes == 0:
+            return "马上"
+        return f"{minutes} 分钟后"
+
+    days_diff = (local.date() - now_local.date()).days
+
+    if days_diff == 0:
+        # 同一天 → 按时段加自然修饰
+        h = local.hour
+        period = "今早" if h < 9 else "今天上午" if h < 12 else "今天下午" if h < 18 else "今晚"
+        return f"{period} {local:%H:%M}"
+    if days_diff == 1:
+        return f"明天 {local:%H:%M}"
+    if days_diff == 2:
+        return f"后天 {local:%H:%M}"
+
+    if local.year == now_local.year:
+        return f"{local.month} 月 {local.day} 日 {local:%H:%M}"
+    return f"{local.year} 年 {local.month} 月 {local.day} 日 {local:%H:%M}"
 
 
 # ═══════════════════════════════════════════════════════════════════

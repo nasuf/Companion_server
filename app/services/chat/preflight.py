@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
 
-from app.services.chat.intent_replies import deletion_done_reply
+from app.services.chat.intent_replies import deletion_done_reply, record_confirm_reply
 from app.services.memory.interaction.contradiction import (
     analyze_contradiction_response,
     apply_contradiction_resolution,
@@ -281,14 +281,20 @@ async def _handle_pending_set_reminder(
     await clear_pending_deletion(ctx.conversation_id)
 
     if memory_id:
-        # when_text 形如 "8 月 1 日 10:00"
-        from app.services.schedule_domain.time_service import _TZ
-        local = occur_time.astimezone(_TZ)
-        when_text = local.strftime("%m月%d日 %H:%M")
-        reply = f"好嘞, {when_text}叫你, 记好啦~"
+        # 智能 when_text — 同天显示相对/绝对, 不再死板"05月02日 22:50"
+        from app.services.reminder.scheduling import format_when_text
+        when_text = format_when_text(occur_time, now=parse_now)
+        # 走 LLM 确认回复 (跟第一轮一致, 不要硬编码模板). LLM 失败 fallback 模板.
+        agent_name = ctx.agent.name if ctx.agent else "AI"
+        reply = await record_confirm_reply(
+            summary=summary[:120],
+            when_text=when_text,
+            is_recurring=False,
+            personality_brief=agent_name,
+        ) or f"好嘞, {when_text}叫你, 记好啦~"
         logger.info(
             f"[SET-REMINDER-PENDING] scheduled at {occur_time.isoformat()} "
-            f"summary={summary[:30]!r}"
+            f"when={when_text!r} summary={summary[:30]!r}"
         )
     else:
         reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"

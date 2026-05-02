@@ -337,10 +337,10 @@ async def handle_current_state(
 
 
 def _format_when_text(occur_dt) -> str:
-    """把 datetime 渲染成人话, 给 confirm prompt 用."""
-    from app.services.schedule_domain.time_service import _TZ
-    local = occur_dt.astimezone(_TZ)
-    return local.strftime("%m月%d日 %H:%M")
+    """渲染时间给 confirm prompt 用. 真实现在 reminder/scheduling.format_when_text
+    (智能相对/绝对切换, 不再死板"05月02日 22:50叫你")."""
+    from app.services.reminder.scheduling import format_when_text
+    return format_when_text(occur_dt)
 
 
 # 周期性提醒关键词识别. 用户口语 "每天提醒我吃药" / "每月 1 号交房租" 走

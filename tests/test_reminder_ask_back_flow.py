@@ -359,6 +359,62 @@ async def test_record_ask_time_returns_llm_when_valid():
 # ═══════════════════════════════════════════════════════════════════
 
 
+# ═══════════════════════════════════════════════════════════════════
+# format_when_text — 智能相对/绝对时间, 不死板"05月02日 22:50"
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_format_when_text_natural_phrasing():
+    """生产观察: 用户说"2 分钟吧" 收到"05月02日 22:50叫你" — 同天给日期是废话.
+    formatter 必须分级输出: 短期相对/同天绝对/明后天加修饰/远期日期.
+
+    用 Shanghai 时区构造 (formatter 内部用 _TZ=Asia/Shanghai 算 days_diff).
+    """
+    from app.services.reminder.scheduling import format_when_text
+    from app.services.schedule_domain.time_service import _TZ as SHANGHAI_TZ
+
+    now = datetime(2026, 5, 2, 22, 48, tzinfo=SHANGHAI_TZ)
+
+    # ≤60min 内 → 相对分钟数
+    assert format_when_text(now + timedelta(minutes=2), now=now) == "2 分钟后"
+    assert format_when_text(now + timedelta(minutes=15), now=now) == "15 分钟后"
+    assert format_when_text(now + timedelta(seconds=30), now=now) == "马上"
+
+    # 同一天但 >60min (e.g. 早上设晚上) → "今晚 HH:MM"
+    morning = datetime(2026, 5, 2, 8, 0, tzinfo=SHANGHAI_TZ)
+    same_day_evening = datetime(2026, 5, 2, 21, 30, tzinfo=SHANGHAI_TZ)
+    result = format_when_text(same_day_evening, now=morning)
+    assert "今晚" in result
+    assert "21:30" in result
+
+    # 明天 / 后天
+    assert "明天" in format_when_text(now + timedelta(days=1), now=now)
+    assert "后天" in format_when_text(now + timedelta(days=2), now=now)
+
+    # 同年 >2 天 → "M 月 D 日"
+    far_same_year = datetime(2026, 8, 15, 10, 0, tzinfo=SHANGHAI_TZ)
+    result = format_when_text(far_same_year, now=now)
+    assert "8 月 15 日" in result
+    assert "2026" not in result, "同年不该带年份"
+
+    # 跨年 → 带年份
+    next_year = datetime(2027, 1, 1, 0, 0, tzinfo=SHANGHAI_TZ)
+    assert "2027" in format_when_text(next_year, now=now)
+
+
+def test_format_when_text_no_redundant_date_for_today():
+    """生产 bug 直接复现: now=22:48, occur=22:50, 之前输出 '05月02日 22:50' 含
+    冗余日期. 现在必须不含 '05月02' 之类的当日日期."""
+    from app.services.reminder.scheduling import format_when_text
+    from app.services.schedule_domain.time_service import _TZ as SHANGHAI_TZ
+
+    now = datetime(2026, 5, 2, 22, 48, tzinfo=SHANGHAI_TZ)
+    result = format_when_text(now + timedelta(minutes=2), now=now)
+    assert "05" not in result and "月" not in result, (
+        f"同天 ≤60min 应该说'2 分钟后', 不该提日期; got {result!r}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_save_load_pending_set_reminder_roundtrip():
     """save → load 必须保住 action + summary + candidates 默认空."""
