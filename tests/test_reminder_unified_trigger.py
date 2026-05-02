@@ -536,6 +536,78 @@ def test_reminder_exempt_from_daily_limit():
     )
 
 
+def test_cancel_keyword_detection():
+    """生产观察: '算了算了，别提醒了，我吃过了' 被 LLM 拆成乱七八糟的
+    sub-intent, AI 回了离题的话. handler 必须能基于关键词识别取消语义,
+    跳过 LLM 直接 deactivate active reminder."""
+    from app.services.chat.intent_handlers import _is_cancel_reminder
+
+    # 各种取消语义都要命中
+    assert _is_cancel_reminder("算了算了，别提醒了，我吃过了")
+    assert _is_cancel_reminder("算了别提醒了")
+    assert _is_cancel_reminder("不用提醒了")
+    assert _is_cancel_reminder("取消那个提醒")
+    assert _is_cancel_reminder("我吃过了")
+    assert _is_cancel_reminder("已经做了")
+    # 正常设置提醒不该命中
+    assert not _is_cancel_reminder("一分钟后提醒我喝水")
+    assert not _is_cancel_reminder("提醒我明天去开会")
+    assert not _is_cancel_reminder("帮我记一下")
+
+
+@pytest.mark.asyncio
+async def test_handle_record_request_cancel_branch():
+    """handle_record_request 收到取消语义时, 必须 deactivate active reminders
+    并返回简短确认, 不能走 _direct_create_reminder 试图建新 trigger."""
+    from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+
+    deactivated_ids = []
+
+    class _MockTrigger:
+        def __init__(self, tid):
+            self.id = tid
+
+    triggers = [_MockTrigger("t1"), _MockTrigger("t2")]
+
+    async def _find_many(*, where):
+        return triggers
+
+    async def _update(*, where, data):
+        deactivated_ids.append((where["id"], data.get("isActive")))
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+
+    with patch("app.db.db.timetrigger") as mock_table:
+        mock_table.find_many = AsyncMock(side_effect=_find_many)
+        mock_table.update = AsyncMock(side_effect=_update)
+        # 不让 _direct_create_reminder 跑
+        with patch(
+            "app.services.chat.intent_handlers._direct_create_reminder",
+            new_callable=AsyncMock, return_value=None,
+        ) as mock_direct:
+            handled, events = await handle_record_request(
+                "算了别提醒了，我吃过了", ctx,
+            )
+            # _direct_create_reminder 不应被调用 (取消分支早返)
+            assert mock_direct.call_count == 0
+
+    assert handled is True
+    assert events is not None
+    # 两个 trigger 都被 deactivate
+    assert len(deactivated_ids) == 2
+    assert all(active is False for _, active in deactivated_ids)
+
+
 @pytest.mark.asyncio
 async def test_reminder_pre_check_hard_timeout():
     """生产观察: dashscope LLM 超时 3 次 (12s ×3) + ollama fallback (~9s) =

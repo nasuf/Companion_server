@@ -527,23 +527,97 @@ async def _direct_create_reminder(
     return _format_when_text(occur_time)
 
 
+# 取消提醒的口语关键词. 用户说"算了别提醒了"/"不用提醒了"/"取消那个提醒" 时
+# 走取消分支, 直接 deactivate 该用户最近 active reminder + 简短确认.
+# 不依赖 LLM (这种短句关键词足够明确), 跟 RECORD_REQUEST 主路径互斥.
+#
+# 直接命中: 完整短语
+_CANCEL_DIRECT_KEYWORDS = (
+    "算了", "别提醒", "不用提醒", "不用了",
+    "不记了", "别记了", "我吃过了", "我做过了", "已经做了",
+    "已经吃了", "已经喝了",
+)
+# 共现命中: 任一负向词 + "提醒"/"记" 同时出现 (覆盖"取消那个提醒"/"删掉那个提醒"等)
+_CANCEL_NEG_TOKENS = ("取消", "删掉", "删除", "撤销", "不要")
+
+
+def _is_cancel_reminder(message: str) -> bool:
+    """口语 + 关键词级别的取消语义判定 (不调 LLM, ~0ms).
+
+    仅 RECORD_REQUEST intent 已确认时调用; 不会跟正常聊天里的"算了"误匹配.
+    """
+    msg = message.strip()
+    if any(kw in msg for kw in _CANCEL_DIRECT_KEYWORDS):
+        return True
+    # 共现规则: "取消X提醒" / "删掉提醒" 等 (X 可以是"那个"/"这个"/空)
+    if any(neg in msg for neg in _CANCEL_NEG_TOKENS) and ("提醒" in msg or "记" in msg):
+        return True
+    return False
+
+
+async def _cancel_active_reminders(*, user_id: str) -> int:
+    """deactivate 该用户所有 active reminder timetrigger. 返回处理条数.
+
+    用户说"算了别提醒了"时调用. 不用 LLM 判别要取消哪一个 — 用户当前对话
+    的语境通常只关心最近一次刚设的, 一刀切 deactivate 所有 active 是最朴素
+    可靠的选择 (用户极少同时挂着多个未触发的提醒).
+    """
+    from app.db import db
+    try:
+        rows = await db.timetrigger.find_many(
+            where={
+                "userId": user_id,
+                "actionType": "reminder",
+                "isActive": True,
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[RECORD-CANCEL] find_many failed: {e}")
+        return 0
+    cancelled = 0
+    for r in rows:
+        try:
+            await db.timetrigger.update(
+                where={"id": r.id},
+                data={"isActive": False},
+            )
+            cancelled += 1
+        except Exception as e:
+            logger.warning(f"[RECORD-CANCEL] deactivate {r.id} failed: {e}")
+    return cancelled
+
+
 async def handle_record_request(
     user_message: str,
     ctx: ShortCircuitCtx,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
-    """RECORD_REQUEST 短路: 用户请求 AI 记一件事 / 设提醒.
+    """RECORD_REQUEST 短路: 用户请求 AI 记一件事 / 设提醒 / 取消提醒.
 
-    流程:
-    1. 规则引擎 parse user_message 找 future event_time
-    2. 找到 → 同步直接 store memory + 建 timetrigger (跳过后台 pipeline 不可靠路径)
-    3. 生成 confirmation reply (人话 when_text 注入)
-    4. 没找到时间 → 仍生成模糊确认 "我帮你记上了", 后台 pipeline 兜底 (best-effort)
+    分支:
+    - 取消语义 (含"算了/别提醒/我吃过了" 等) → deactivate user 所有 active
+      reminder + 短确认. 跳过 LLM, 体感: "好嘞, 那就不提醒了~"
+    - 设置语义 → _direct_create_reminder (规则引擎 parse 时间 + 同步建 trigger)
 
-    背景: 生产环境观察到背景 pipeline 的 pre-filter LLM 把"提醒我X好吗?"判为
-    "不记" → 用户的提醒被丢. 改为 handler 直接创建保证可靠性. 后台 pipeline
-    仍跑作冗余 (memory dedup + 已存在 trigger 的 idempotency 防重).
+    背景: 生产观察到 LLM 把"算了别提醒了, 我吃过了"硬塞到 RECORD_REQUEST + 拆出
+    "计划查询" sub-intent → AI 回了一堆离题的话. 加取消分支让取消语义有正确
+    路径处理.
     """
     try:
+        # 取消语义优先 — 即使 LLM intent 输出 "记录请求", 关键词命中也走取消.
+        if _is_cancel_reminder(user_message) and ctx.user_id:
+            n = await _cancel_active_reminders(user_id=ctx.user_id)
+            if n > 0:
+                reply = "好嘞, 那就不提醒了, 已经帮你撤掉啦~"
+            else:
+                # 没 active reminder 可取消 — 用户可能误说或上下文断了
+                reply = "嗯嗯, 我没在帮你记什么提醒哦, 不用担心~"
+            logger.info(
+                f"[RECORD-CANCEL] user said cancel ({user_message[:30]!r}); "
+                f"deactivated {n} active reminder(s)"
+            )
+            return True, ctx.finalize(reply)
+
+        # 设置/新增提醒走原逻辑
         when_text = await _direct_create_reminder(
             user_message=user_message, ctx=ctx,
         )
