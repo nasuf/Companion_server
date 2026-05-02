@@ -518,10 +518,11 @@ async def test_handle_record_request_persists_via_helpers():
         patch("app.services.reminder.scheduling.upsert_reminder_trigger",
               side_effect=_capture_upsert),
     ):
-        when_text = await ih._direct_create_reminder(
+        status, when_text = await ih._direct_create_reminder(
             user_message="一分钟后提醒我喝水", ctx=ctx,
         )
 
+    assert status == "scheduled"
     assert when_text is not None  # 真的解析出时间了
     assert len(upsert_calls) == 1, f"expected 1 upsert call, got {upsert_calls}"
     call = upsert_calls[0]
@@ -705,11 +706,12 @@ async def test_handle_record_request_multiple_occur_times_creates_multiple():
               side_effect=_capture_upsert),
     ):
         # 多 future time: 1 分钟后 + 5 分钟后
-        when_text = await ih._direct_create_reminder(
+        status, when_text = await ih._direct_create_reminder(
             user_message="1 分钟后提醒喝水, 5 分钟后提醒吃药", ctx=ctx,
         )
 
     # parser 应识别两个时间, 各建 1 个 trigger
+    assert status == "scheduled"
     assert upsert_count >= 1, "至少要建 1 个 trigger"
     # confirm 文本应该体现多个时间 (含 "/" 分隔符)
     if upsert_count > 1:

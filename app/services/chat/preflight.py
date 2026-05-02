@@ -35,6 +35,11 @@ from app.services.memory.interaction.deletion import (
     is_deletion_confirmed,
     load_pending_action,
 )
+from app.services.schedule_domain.time_parser import (
+    parse_loose_offset,
+    parse_with_statement_time,
+)
+from app.services.schedule_domain.time_service import _now_corrected
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +99,19 @@ async def resolve_pending_deletion(
     user_message: str,
     ctx: PreflightCtx,
 ) -> AsyncGenerator[dict, None]:
-    """spec §5 step 3 + Phase 5: 若有待确认删除/改期, 根据用户回答执行或放弃."""
+    """spec §5 step 3 + Phase 5: 若有待确认删除/改期/补全提醒时间, 根据用户回答执行或放弃.
+
+    pending.action ∈ {delete, reschedule, set_reminder}:
+    - delete / reschedule: 旧路径, 用户确认/放弃删除或改期
+    - set_reminder: Round-3 工程扩展, 第一轮 RECORD_REQUEST 时间没说清存的 pending,
+      第二轮根据用户回答 (给具体时间 / 取消 / 答非所问) 分发到 _handle_pending_set_reminder
+    """
     pending = await load_pending_action(ctx.conversation_id)
     if not pending:
+        return
+    if pending.get("action") == "set_reminder":
+        async for evt in _handle_pending_set_reminder(user_message, pending, ctx):
+            yield evt
         return
     candidates = pending.get("candidates") or []
     action = pending.get("action") or "delete"
@@ -147,3 +162,146 @@ async def resolve_pending_deletion(
     except Exception as e:
         logger.warning(f"Deletion/reschedule confirmation failed: {e}")
         await clear_pending_deletion(ctx.conversation_id)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Round-3 工程扩展: RECORD_REQUEST 时间没说清, 第二轮反问后的 4 分支处理
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def _handle_pending_set_reminder(
+    user_message: str,
+    pending: dict,
+    ctx: PreflightCtx,
+) -> AsyncGenerator[dict, None]:
+    """RECORD_REQUEST 反问后第二轮: 用户回答时间 / 取消 / 答非所问.
+
+    4 分支:
+    1. 取消语义 (_is_cancel_reminder 命中) → 清 pending + 友好放弃 + stop
+    2. parse 出 future 时间 → 用 pending.summary + 新时间落库 + 确认 + stop
+    3. parse 出非 future 时间 (含过去时刻 / 模糊词只解出当前) → 清 pending +
+       提示"先不记" + stop. 防无限反问 loop.
+    4. 完全没时间表达 (用户在聊别的) → 清 pending + 不阻塞主流程 (不 stop,
+       让 user_message 走正常意图识别 + 回复)
+    """
+    from app.services.chat.intent_handlers import _is_cancel_reminder
+    from app.services.reminder.scheduling import create_user_reminder
+    from app.services.workspace.workspaces import get_active_workspace
+
+    summary = pending.get("summary") or "(未指定事项)"
+
+    # 分支 1: 取消语义
+    if _is_cancel_reminder(user_message):
+        await clear_pending_deletion(ctx.conversation_id)
+        reply = "嗯嗯, 那不记了, 想起来再说~"
+        logger.info(f"[SET-REMINDER-PENDING] user cancelled: {user_message[:30]!r}")
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    # 解析时间. parse_with_statement_time + parse_loose_offset 兜底.
+    parse_now = _now_corrected()
+    parsed = parse_with_statement_time(user_message, now=parse_now)
+    future_events = [e for e in parsed.event_times if e.is_future]
+    occur_time = None
+    if future_events:
+        occur_time = sorted(e.start for e in future_events)[0]
+    else:
+        loose = parse_loose_offset(user_message, parse_now)
+        if loose is not None:
+            occur_time = loose
+
+    # 分支 4: 完全没时间表达 → 用户答非所问. 清 pending + 不阻塞主流程.
+    # 判别: 任何 event_times (含 past/present) 都没抽到 + parse_loose_offset 也 None
+    has_any_time_expr = bool(parsed.event_times) or occur_time is not None
+    if not has_any_time_expr:
+        await clear_pending_deletion(ctx.conversation_id)
+        logger.info(
+            f"[SET-REMINDER-PENDING] user message has no time expression "
+            f"({user_message[:30]!r}); cleared pending, not blocking main flow"
+        )
+        # 不 stop, 不发回复 — 让 user_message 走正常 orchestrator
+        return
+
+    # 分支 3: 有时间表达但不是 future (用户给的还是模糊 / 过去时刻 / 已过期)
+    # 防无限反问 loop, 直接清 pending + 提示让用户重新说.
+    if occur_time is None:
+        await clear_pending_deletion(ctx.conversation_id)
+        reply = "嗯, 这个时间不太明确, 先不记了, 你想清楚再跟我说哈~"
+        logger.info(
+            f"[SET-REMINDER-PENDING] time expression but no future occur_time "
+            f"({user_message[:30]!r}); declining to re-ask"
+        )
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    # 分支 2: 解析成功 → 落库 + 确认
+    if not ctx.user_id or not ctx.agent_id:
+        # 没 agent — 异常 case (preflight 应该总有), 清 pending + 通用回复
+        await clear_pending_deletion(ctx.conversation_id)
+        reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    workspace = await get_active_workspace(
+        user_id=ctx.user_id, agent_id=ctx.agent_id,
+    )
+    workspace_id = workspace.id if workspace else None
+
+    memory_id = await create_user_reminder(
+        user_id=ctx.user_id,
+        agent_id=ctx.agent_id,
+        workspace_id=workspace_id,
+        summary=f"我让 AI 提醒: {summary[:120]}",
+        occur_time=occur_time,
+        statement_time=parse_now,
+        recurrence="once",  # 反问场景默认一次性 — 用户没说重复关键词
+    )
+
+    await clear_pending_deletion(ctx.conversation_id)
+
+    if memory_id:
+        # when_text 形如 "8 月 1 日 10:00"
+        from app.services.schedule_domain.time_service import _TZ
+        local = occur_time.astimezone(_TZ)
+        when_text = local.strftime("%m月%d日 %H:%M")
+        reply = f"好嘞, {when_text}叫你, 记好啦~"
+        logger.info(
+            f"[SET-REMINDER-PENDING] scheduled at {occur_time.isoformat()} "
+            f"summary={summary[:30]!r}"
+        )
+    else:
+        reply = "诶, 这边记的时候出了点小问题, 你再跟我说一遍吧~"
+        logger.warning(
+            f"[SET-REMINDER-PENDING] create_user_reminder returned None for "
+            f"summary={summary[:30]!r}"
+        )
+
+    ctx.last_short_circuit_reply = reply
+    for evt in await ctx.short_circuit_fn(
+        reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+        trace_id=ctx.tracer.safe_trace_id,
+    ):
+        yield evt
+    ctx.tracer.close()
+    ctx.stopped = True

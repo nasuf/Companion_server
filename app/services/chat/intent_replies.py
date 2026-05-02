@@ -213,6 +213,54 @@ async def deletion_confirm_reply(
     )
 
 
+# 反问时间硬 timeout. RECORD_REQUEST parse 失败时调 LLM 反问, 但 utility model
+# 卡 50s 会让用户等到天荒地老 (RECORD_REQUEST 短路本来 ~3s 体感). 5s 上限,
+# 失败/超时 fallback 固定模板. 同 reminder_pre_check 的容错策略.
+_ASK_TIME_TIMEOUT_SEC = 5.0
+_ASK_TIME_FALLBACK = "嗯嗯, 大概什么时候呀? 我好定准点的~"
+
+
+async def record_ask_time(
+    *,
+    user_message: str,
+    personality_brief: str = "",
+) -> str:
+    """RECORD_REQUEST 时间解析失败 → 反问让用户补全时间.
+
+    LLM 针对用户漏掉的时间粒度反问 ("下周提醒我X" → "下周哪天?"; "提醒我Y" → "啥时候?").
+    LLM 失败 / 超时 / 输出明显异常 → fallback 固定模板, 保证用户**总能拿到一个反问**.
+    """
+    import asyncio as _asyncio
+
+    async def _do_ask() -> str | None:
+        return await _render_llm(
+            "intent.record_ask_time",
+            {
+                "user_message": user_message[:120] or "(空)",
+                "personality_brief": personality_brief or "真诚朋友",
+            },
+            max_chars=60,
+        )
+
+    try:
+        result = await _asyncio.wait_for(
+            _do_ask(), timeout=_ASK_TIME_TIMEOUT_SEC,
+        )
+    except (_asyncio.TimeoutError, Exception) as e:
+        logger.info(
+            f"record_ask_time timeout/error after "
+            f"{_ASK_TIME_TIMEOUT_SEC}s ({type(e).__name__}); "
+            "falling back to fixed template"
+        )
+        return _ASK_TIME_FALLBACK
+
+    text = (result or "").strip()
+    # LLM 跑题守门: 长度异常 / 缺问号 (反问句必含 "?" 或 "?") → fallback
+    if not text or len(text) > 50 or not any(q in text for q in ("?", "？")):
+        return _ASK_TIME_FALLBACK
+    return text
+
+
 async def record_confirm_reply(
     *,
     summary: str,
@@ -653,6 +701,7 @@ __all__ = [
     "deletion_confirm_reply",
     "deletion_done_reply",
     "record_confirm_reply",
+    "record_ask_time",
     "reminder_pre_check",
     "reminder_message",
     "memory_weak_reply",

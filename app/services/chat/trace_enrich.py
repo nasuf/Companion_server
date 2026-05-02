@@ -292,6 +292,9 @@ _register("到点了, 自然提醒用户做该事项", _PromptMeta(
 _register("用户刚请求你记一件事 / 在未来某时提醒", _PromptMeta(
     "intent.record_confirm_reply", "记录请求确认回复", "reply", _label_reply_text,
 ))
+_register("用户想让你记/提醒一件事, 但**时间没说清**", _PromptMeta(
+    "intent.record_ask_time", "记录请求反问时间", "reply", _label_reply_text,
+))
 _register("今天要提醒TA一件事。你作为好朋友，主动发一条提醒消息", _PromptMeta(
     "proactive.special_reminder", "特殊日期提醒", "reply", _label_reply_text,
 ))

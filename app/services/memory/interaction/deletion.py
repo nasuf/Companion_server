@@ -195,15 +195,24 @@ async def save_pending_action(
     conversation_id: str,
     *,
     action: str,
-    candidates: list[dict],
+    candidates: list[dict] | None = None,
     new_time: datetime | str | None = None,
+    summary: str | None = None,
 ) -> None:
-    """Phase 5 dict-shape 写入: 区分 delete vs reschedule + 携带 new_time."""
-    payload: dict = {"action": action, "candidates": candidates}
+    """统一跨消息 pending 写入. action ∈ {delete, reschedule, set_reminder}.
+
+    - delete / reschedule: candidates 必填 (memory 候选), new_time 仅 reschedule 用
+    - set_reminder: candidates 留空, summary 必填 (用户原话, 第二轮拿到时间后用它建 memory)
+    """
+    payload: dict = {"action": action}
+    if candidates is not None:
+        payload["candidates"] = candidates
     if new_time is not None:
         payload["new_time"] = (
             new_time.isoformat() if isinstance(new_time, datetime) else str(new_time)
         )
+    if summary is not None:
+        payload["summary"] = summary
     redis = await get_redis()
     await redis.set(
         f"{_PENDING_DELETION_PREFIX}{conversation_id}",
@@ -213,9 +222,10 @@ async def save_pending_action(
 
 
 async def load_pending_action(conversation_id: str) -> dict | None:
-    """读 pending 并 normalize 成 dict shape `{action, candidates, new_time}`.
+    """读 pending 并 normalize 成 dict shape `{action, candidates, new_time, summary}`.
 
-    历史 list shape 视为 `{action: "delete", candidates: list}`.
+    历史 list shape 视为 `{action: "delete", candidates: list}` (向后兼容).
+    set_reminder 路径 candidates 为空 list, summary 持用户原话.
     """
     redis = await get_redis()
     raw = await redis.get(f"{_PENDING_DELETION_PREFIX}{conversation_id}")
@@ -226,12 +236,16 @@ async def load_pending_action(conversation_id: str) -> dict | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     if isinstance(data, list):
-        return {"action": "delete", "candidates": data, "new_time": None}
-    if isinstance(data, dict) and isinstance(data.get("candidates"), list):
+        return {
+            "action": "delete", "candidates": data,
+            "new_time": None, "summary": None,
+        }
+    if isinstance(data, dict):
         return {
             "action": str(data.get("action") or "delete"),
-            "candidates": data["candidates"],
+            "candidates": list(data.get("candidates") or []),
             "new_time": data.get("new_time"),
+            "summary": data.get("summary"),
         }
     return None
 

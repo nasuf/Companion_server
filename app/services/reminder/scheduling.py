@@ -261,3 +261,89 @@ async def archive_reminder_memory(
     except Exception:
         pass  # changelog 失败不影响主流程
     return True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 端到端落库 — 给定 (user, agent, summary, occur_time) 一步建好 memory + trigger
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def create_user_reminder(
+    *,
+    user_id: str,
+    agent_id: str,
+    workspace_id: str | None,
+    summary: str,
+    occur_time: datetime,
+    statement_time: datetime,
+    recurrence: RecurrenceKind = "once",
+) -> str | None:
+    """端到端建 1 条 user-side reminder: store_memory + dedup + upsert trigger.
+    返回 memory_id (失败 None).
+
+    抽出原因: 之前 _direct_create_reminder (intent_handlers) 内联了 ~40 行
+    "落 memory + dedup fallback + 建 trigger" 逻辑. preflight 第二轮拿到时间后
+    需要复用同一逻辑落库 — 抽到这里, 两侧都调.
+
+    dedup 命中时 (相同 summary 已存在): 不 silently skip, 而是 update 旧 memory
+    的 occurTime + statementTime 到新值 (用户重设语义), 用 existing memory_id
+    继续建/重设 trigger.
+    """
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.memory.storage.embedding import generate_embedding
+    from app.services.memory.storage.persistence import find_duplicate_id, store_memory
+
+    try:
+        memory_id = await store_memory(
+            user_id=user_id,
+            content=summary,
+            summary=summary,
+            level=3,
+            importance=0.45,  # 落 L3 (pipeline clamp 也是 [0.4, 0.49])
+            memory_type="life",
+            main_category="生活",
+            sub_category="提醒",
+            occur_time=occur_time,
+            statement_time=statement_time,
+            workspace_id=workspace_id,
+            source="user",
+            recurrence=recurrence,
+        )
+    except Exception as e:
+        logger.warning(f"[REMINDER] create_user_reminder: store_memory failed: {e}")
+        return None
+
+    if not memory_id:
+        # dedup 命中 → 复用 existing memory_id, 更新 occurTime 到新时刻 (重设语义)
+        try:
+            embedding = await generate_embedding(summary)
+            memory_id = await find_duplicate_id(
+                user_id, summary, embedding, workspace_id=workspace_id,
+            )
+            if memory_id:
+                await memory_repo.update(
+                    memory_id, source="user",
+                    occurTime=occur_time, statementTime=statement_time,
+                )
+                logger.info(
+                    f"[REMINDER] reused deduped memory={memory_id[:8]} "
+                    f"updated occurTime={occur_time} recurrence={recurrence}"
+                )
+        except Exception as e:
+            logger.warning(f"[REMINDER] dedup fallback failed: {e}")
+            return None
+
+    if not memory_id:
+        logger.warning("[REMINDER] both store_memory and dedup lookup failed; aborting")
+        return None
+
+    await upsert_reminder_trigger(
+        user_id=user_id,
+        agent_id=agent_id,
+        memory_id=memory_id,
+        summary=summary,
+        trigger_time=occur_time,
+        recurrence=recurrence,
+        side="user",
+    )
+    return memory_id

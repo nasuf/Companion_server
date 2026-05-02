@@ -22,6 +22,7 @@ from app.services.chat.intent_replies import (
     current_state_reply,
     deletion_confirm_reply,
     end_reply,
+    record_ask_time,
     record_confirm_reply,
     schedule_query_reply,
 )
@@ -435,11 +436,14 @@ async def _persist_one_reminder(
 
 async def _direct_create_reminder(
     *, user_message: str, ctx: ShortCircuitCtx,
-) -> str | None:
+) -> tuple[str, str | None]:
     """同步用 time_parser 抽 future event_time → 直接 store_memory + 建 timetrigger.
 
-    返回人话 when_text 给 confirm reply 用; 没抽到时间则返 None (调用方 fallback
-    到模糊确认 "我帮你记上了" 不带时间).
+    返回 (status, when_text):
+    - ("scheduled", "8月1日 10:00") — 落库成功, when_text 给 confirm reply
+    - ("asked", None) — 时间没说清, 已 save_pending_action(action="set_reminder"),
+       调用方应 record_ask_time 反问. 用户下条消息走 preflight.resolve_pending_set_reminder
+    - ("failed", None) — workspace/agent 缺失等错误, 调用方走兜底回复
 
     支持:
     - 单 occur_time ("一分钟后提醒X")
@@ -447,13 +451,15 @@ async def _direct_create_reminder(
       "08:00 / 09:00" 格式
     - 周期性 ("每天提醒X" / "每月 1 号Y") — 关键词识别 recurrence, 通过 trigger
       handler 周期续期
-    - 缺"后"字口语 ("一分钟提醒X") — _record_request_loose_offset fallback
+    - 缺"后"字口语 ("一分钟提醒X") — parse_loose_offset fallback
+    - 完全模糊时间 ("待会"/"过会"/"下周") — pending + 反问 (Round-3 工程扩展)
 
-    架构: 跨模块依赖 (memory + workspace + reminder/scheduling) 通过本文件 inline
-    import 隔离, 真正 reminder 落地逻辑都收口在 `services/reminder/scheduling.py`.
+    架构: 跨模块依赖 (memory + workspace + reminder/scheduling + deletion) 通过
+    本文件 inline import 隔离.
     """
     import asyncio
     from datetime import datetime
+    from app.services.memory.interaction.deletion import save_pending_action
     from app.services.reminder.scheduling import upsert_reminder_trigger
     from app.services.schedule_domain.time_parser import (
         parse_loose_offset, parse_with_statement_time,
@@ -462,7 +468,7 @@ async def _direct_create_reminder(
     from app.services.workspace.workspaces import get_active_workspace
 
     if not ctx.user_id:
-        return None
+        return ("failed", None)
 
     # parse 必须用"用户消息接收时刻"而不是 handler 跑到这一行的时刻 — 链路上前面
     # 的 LLM 调用累计 ~25s, "两分钟后" 实际算成 "处理完 + 2分钟" 比期望晚.
@@ -491,11 +497,23 @@ async def _direct_create_reminder(
             occur_times = [loose]
 
     if not occur_times:
-        logger.info(
-            f"[RECORD-REQ] no future event time parsed from {user_message[:60]!r}; "
-            "falling back to fuzzy confirmation"
-        )
-        return None
+        # Round-3 工程扩展: 时间没说清 → save pending + 反问. 之前 fallback 假装
+        # 记下 ("好嘞, 待会叫你") 但实际没建 trigger, 是 silent correctness bug.
+        # 现在反问让用户给具体时间, 第二轮走 preflight.resolve_pending_set_reminder.
+        try:
+            await save_pending_action(
+                ctx.conversation_id,
+                action="set_reminder",
+                summary=user_message[:200],
+            )
+            logger.info(
+                f"[RECORD-REQ] no time parsed from {user_message[:60]!r}; "
+                f"saved pending set_reminder, will ask user for specific time"
+            )
+            return ("asked", None)
+        except Exception as e:
+            logger.warning(f"[RECORD-REQ] save_pending_action failed: {e}; falling back")
+            return ("failed", None)
 
     # workspace 仅查一次; .id 直接拿避免 resolve_workspace_id 二次 find_first.
     workspace = await get_active_workspace(
@@ -506,7 +524,7 @@ async def _direct_create_reminder(
             f"[RECORD-REQ] no active workspace for user={ctx.user_id[:8]}; "
             "reminder will NOT fire"
         )
-        return None
+        return ("failed", None)
     agent_id = (
         getattr(workspace, "agentId", None)
         or getattr(workspace, "ai_agent_id", None)
@@ -515,7 +533,7 @@ async def _direct_create_reminder(
         logger.warning(
             "[RECORD-REQ] workspace has no agentId; reminder will NOT fire"
         )
-        return None
+        return ("failed", None)
     workspace_id = workspace.id
 
     # 每个 occur_time 各建一条 (memory + trigger). 多条时并发建 (gather), N=1 也走
@@ -552,15 +570,18 @@ async def _direct_create_reminder(
     scheduled = [r for r in results if r is not None]
 
     if not scheduled:
-        return None
+        return ("failed", None)
 
     logger.info(
         f"[RECORD-REQ] {len(scheduled)} reminder(s) scheduled "
         f"recurrence={recurrence} times={[t.isoformat() for t in scheduled]}"
     )
-    if len(scheduled) == 1:
-        return _format_when_text(scheduled[0])
-    return " / ".join(_format_when_text(t) for t in sorted(scheduled))
+    when_text = (
+        _format_when_text(scheduled[0])
+        if len(scheduled) == 1
+        else " / ".join(_format_when_text(t) for t in sorted(scheduled))
+    )
+    return ("scheduled", when_text)
 
 
 # 取消提醒的口语关键词. 用户说"算了别提醒了"/"不用提醒了"/"取消那个提醒" 时
@@ -619,7 +640,10 @@ async def handle_record_request(
     分支:
     - 取消语义 (含"算了/别提醒/我吃过了" 等) → deactivate user 所有 active
       reminder + 短确认. 跳过 LLM, 体感: "好嘞, 那就不提醒了~"
-    - 设置语义 → _direct_create_reminder (规则引擎 parse 时间 + 同步建 trigger)
+    - 设置语义 (有时间) → 落库 + confirm reply ("好嘞, 8 点叫你~")
+    - 设置语义 (无时间) → save_pending + 反问 ("下周哪天呀?"); 第二轮由
+      preflight.resolve_pending_set_reminder 拿到时间后落库. Round-3 工程扩展,
+      之前的 fuzzy fallback 是 silent correctness bug (假装记下但没建 trigger).
 
     背景: 生产观察到 LLM 把"算了别提醒了, 我吃过了"硬塞到 RECORD_REQUEST + 拆出
     "计划查询" sub-intent → AI 回了一堆离题的话. 加取消分支让取消语义有正确
@@ -646,10 +670,22 @@ async def handle_record_request(
             ctx.consumed_full_message = True
             return True, ctx.finalize(reply)
 
-        # 设置/新增提醒走原逻辑
-        when_text = await _direct_create_reminder(
+        # 设置/新增提醒走 _direct_create_reminder. 三态返回:
+        status, when_text = await _direct_create_reminder(
             user_message=user_message, ctx=ctx,
         )
+
+        if status == "asked":
+            # 时间没说清 — 反问让用户补全. 第二轮由 preflight 接管.
+            reply = await record_ask_time(
+                user_message=user_message,
+                personality_brief=_agent_name(ctx.agent),
+            )
+            # 反问后整句已被 set_reminder pending 吸收 — sub-intent 不再处理残句
+            ctx.consumed_full_message = True
+            return True, ctx.finalize(reply)
+
+        # status == "scheduled" or "failed"
         reply = await record_confirm_reply(
             summary=user_message[:120],
             when_text=when_text or "随时",

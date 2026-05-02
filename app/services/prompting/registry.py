@@ -65,6 +65,7 @@ from app.services.prompting.defaults import (
     PROACTIVE_SPECIAL_BIRTHDAY_PROMPT,
     PROACTIVE_SPECIAL_REMINDER_PROMPT,
     PROACTIVE_SPECIAL_COMBINED_PROMPT,
+    RECORD_ASK_TIME_PROMPT,
     RECORD_CONFIRM_REPLY_PROMPT,
     REMINDER_MESSAGE_PROMPT,
     REMINDER_PRE_CHECK_PROMPT,
@@ -384,6 +385,14 @@ PROMPT_DEFINITIONS = [
         "时, AI 用 1-2 句确认已记下 (不延展话题, 不查记忆). "
         "占位符: {personality_brief} {summary} {when_text} {is_recurring}.",
         RECORD_CONFIRM_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.record_ask_time", "记录请求反问时间", "意图处理", "意图",
+        "【工程扩展】RECORD_REQUEST 意图但时间没说清, AI 反问时间补全. "
+        "1 句短话, 针对**用户漏掉的时间粒度**问 (年/月/日/时), 不重复已知信息. "
+        "失败/超时 fallback 到固定模板'嗯嗯, 大概什么时候呀?'. "
+        "占位符: {personality_brief} {user_message}.",
+        RECORD_ASK_TIME_PROMPT,
     ),
 
     # ── 边界系统 (Part 3 §2) ──
