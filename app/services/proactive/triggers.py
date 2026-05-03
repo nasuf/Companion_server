@@ -8,6 +8,8 @@ Phase 4: actionType="reminder" 走 `_handle_reminder_trigger` 独立路径
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from calendar import monthrange
 from datetime import datetime, timedelta, timezone
@@ -33,6 +35,32 @@ MIN_TRIGGER_INTERVAL = 7200  # 2小时
 CHAT_ACTIVE_WINDOW = 1800  # 30分钟
 # Reminder pre-check 上下文窗口
 REMINDER_PRECHECK_WINDOW = timedelta(minutes=30)
+
+# scan_triggers 单次启的最大 LLM 并发数. 防一波同时到点的 reminder 各自走
+# 5-10s LLM (pre-check + message generation) 启 N 个 dashscope 调用打爆
+# rate limit (默认 QPS≈60) 让 circuit breaker 触发, 进而**所有** reminder
+# 都 fallback 到 needed/template — 影响半径放大. 8 是经验值: 单 trigger
+# 平均 ~6s 链路, 8 并发 ≈ 1.3 QPS reminder 占用, 留余量给其他主动消息.
+_TRIGGER_LLM_CONCURRENCY = 8
+_trigger_semaphore: asyncio.Semaphore | None = None
+
+# Reminder emit 失败重试上限. 超过则进 DLQ (Redis ZSET) 不再重试.
+# 3 次 + 每次推后 30s = 总重试窗 90s, 跟 5s pre-check timeout 配套, 临时
+# rate limit / 网络抖动应该能 cover.
+MAX_REMINDER_RETRY = 3
+REMINDER_RETRY_DELAY = timedelta(seconds=30)
+# DLQ Redis ZSET 大小上限 (按时间戳排序, 超出则丢最老的)
+_DLQ_KEY = "reminder:dlq"
+_DLQ_MAX_SIZE = 1000
+
+
+def _get_trigger_semaphore() -> asyncio.Semaphore:
+    """Lazy init 让 Semaphore 绑到当前 event loop. 测试场景每个 test loop
+    独立, 模块级初始化会出"attached to different loop" 错."""
+    global _trigger_semaphore
+    if _trigger_semaphore is None:
+        _trigger_semaphore = asyncio.Semaphore(_TRIGGER_LLM_CONCURRENCY)
+    return _trigger_semaphore
 
 
 # ── 周期性提醒续期算法 (Phase 4.6) ────────────────────────────────────
@@ -70,8 +98,6 @@ def _next_occurrence(current: datetime, recurrence: str) -> datetime | None:
 
 async def scan_triggers() -> None:
     """每 15 秒扫描到期触发器，检查规则后执行。"""
-    import asyncio
-
     now = datetime.now(_TZ)
     window_start = now - timedelta(minutes=1)
     window_end = now + timedelta(minutes=1)
@@ -94,13 +120,17 @@ async def scan_triggers() -> None:
         f"{[(t.id[:8], t.actionType, t.triggerTime.isoformat()) for t in triggers]}"
     )
 
-    # Round-2 review #10: 之前 `for trigger: await _execute_trigger(...)` 串行,
-    # N 个同时到点的 reminder 各自走 5-10s LLM 链路 → 总耗时 N×10s 拖爆下次
-    # scan (apscheduler max_instances=1 直接 skip). 改 asyncio.gather 并发,
-    # `_execute_trigger` 内部已经各自 try/except 隔离, gather 用 return_exceptions
-    # 防一个抛异常挂住其他.
+    # Round-2 review #10: 串行 → asyncio.gather 并发 (N×10s → max(10s) 总耗时).
+    # Semaphore(8) 限流: gather 启全部 task 但同时只 8 个进 LLM 段, 防 N 个
+    # reminder 同时到点把 dashscope rate limit (QPS=60) 打爆触发 circuit breaker.
+    sem = _get_trigger_semaphore()
+
+    async def _bounded_execute(trig):
+        async with sem:
+            await _execute_trigger(trig, now)
+
     results = await asyncio.gather(
-        *(_execute_trigger(t, now) for t in triggers),
+        *(_bounded_execute(t) for t in triggers),
         return_exceptions=True,
     )
     for trigger, result in zip(triggers, results):
@@ -201,6 +231,107 @@ async def _archive_reminder_memory(memory_id: str, side: str, reason: str) -> No
     await archive_reminder_memory(
         memory_id=memory_id, side=side, reason=reason,  # type: ignore[arg-type]
     )
+
+
+# ── Reminder emit 失败重试 + DLQ (无 schema 改动) ────────────────────────
+
+
+async def _push_reminder_dlq(
+    trigger, error: str, *, kind: str, attempt: int,
+) -> None:
+    """写一条 DLQ 记录到 Redis ZSET (按 timestamp 排序). 超过 _DLQ_MAX_SIZE
+    自动丢最老的. admin 可读 ZRANGE 看最近失败. DLQ 写本身失败不冒泡 — 不能
+    让 DLQ 错误掩盖真正失败原因."""
+    data = trigger.actionData or {}
+    entry = {
+        "trigger_id": trigger.id,
+        "memory_id": data.get("memory_id", ""),
+        "summary": (data.get("summary") or "")[:120],
+        "recurrence": data.get("recurrence", "once"),
+        "error": error[:200],
+        "kind": kind,
+        "attempt": attempt,
+        "failed_at": datetime.now(_TZ).isoformat(),
+    }
+    try:
+        redis = await get_redis()
+        score = datetime.now(_TZ).timestamp()
+        await redis.zadd(
+            _DLQ_KEY,
+            {json.dumps(entry, ensure_ascii=False): score},
+        )
+        # cap 大小: 删除排序最低 (最老) 的, 只留最近 _DLQ_MAX_SIZE 条
+        await redis.zremrangebyrank(_DLQ_KEY, 0, -(_DLQ_MAX_SIZE + 1))
+    except Exception as e:
+        logger.warning(f"[REMINDER-DLQ] write failed for {trigger.id}: {e}")
+
+
+async def _handle_emit_failure(
+    trigger, recurrence: str, exc: BaseException,
+) -> None:
+    """reminder emit 链路抛异常时的统一处理: once → 重试上限内重新激活,
+    超限进 DLQ; periodic → 不重试 (续期已建, 下周期照常), 仅写 DLQ 留痕.
+
+    重试机制 (仅 once):
+    - actionData.retry_count 记次数 (无 schema 改动)
+    - 每次 +30s 推迟 triggerTime, isActive=True, lastFired=None → 下次 scan 重试
+    - 超过 MAX_REMINDER_RETRY → DLQ + 永久死信
+    """
+    data = dict(trigger.actionData or {})
+    error_str = f"{type(exc).__name__}: {str(exc)[:150]}"
+
+    if recurrence != "once":
+        # 周期性: 续期 (next_occur) 已经在 _handle_reminder_trigger 里建好,
+        # 这次 emit 丢了下个周期照常 — 是可接受退化, 仅 DLQ 留痕方便 admin 排查.
+        await _push_reminder_dlq(
+            trigger, error_str, kind="periodic_lost_one",
+            attempt=int(data.get("retry_count") or 0),
+        )
+        logger.warning(
+            f"[REMINDER-EMIT] {trigger.id[:8]} (periodic={recurrence}) emit "
+            f"failed, next period intact: {error_str}"
+        )
+        return
+
+    retry_count = int(data.get("retry_count") or 0)
+    if retry_count >= MAX_REMINDER_RETRY:
+        await _push_reminder_dlq(
+            trigger, error_str, kind="exhausted", attempt=retry_count,
+        )
+        logger.warning(
+            f"[REMINDER-EMIT] {trigger.id[:8]} retries exhausted "
+            f"({retry_count}/{MAX_REMINDER_RETRY}), DEAD: {error_str}"
+        )
+        return
+
+    # 重试: reactivate trigger, 推迟 30s 让下次 scan 重新尝试.
+    # 必须 import Json (Prisma 显式包装 JSON 字段) — 直接 dict 在某些 client 版本拒绝.
+    from prisma import Json
+    new_data = {**data, "retry_count": retry_count + 1}
+    new_time = datetime.now(_TZ) + REMINDER_RETRY_DELAY
+    try:
+        await db.timetrigger.update(
+            where={"id": trigger.id},
+            data={
+                "isActive": True,
+                "lastFired": None,
+                "triggerTime": new_time,
+                "actionData": Json(new_data),
+            },
+        )
+        logger.info(
+            f"[REMINDER-EMIT] {trigger.id[:8]} retry scheduled at {new_time} "
+            f"attempt={retry_count + 1}/{MAX_REMINDER_RETRY}: {error_str}"
+        )
+    except Exception as reactivate_err:
+        # 重新激活也失败 → 直接进 DLQ, 否则会陷入"既不响也不进 DLQ"幽灵态
+        logger.warning(
+            f"[REMINDER-EMIT] {trigger.id[:8]} reactivation failed: {reactivate_err}"
+        )
+        await _push_reminder_dlq(
+            trigger, f"reactivate_failed: {reactivate_err}",
+            kind="reactivate_failed", attempt=retry_count,
+        )
 
 
 async def _handle_reminder_trigger(trigger, now: datetime) -> None:
@@ -368,66 +499,58 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
             except Exception as e:
                 logger.warning(f"reminder {trigger.id} renewal failed: {e}")
 
-    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
-    if not workspace_id:
-        logger.warning(
-            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: workspace not found "
+    # emit 段统一 try/except → 失败走 _handle_emit_failure (重试 / DLQ).
+    # 之前任何中途 return (workspace 缺失 / agent 没了 / message 空 /
+    # emit_proactive_message 抛) 都是 silent log + dead, 一次性提醒永久丢失.
+    try:
+        workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+        if not workspace_id:
+            raise RuntimeError("workspace not found")
+
+        from app.services.proactive.emit import emit_proactive_message
+        from app.services.proactive.sender import _build_personality_brief
+        from app.services.proactive.state import get_active_workspace_context
+
+        workspace_context = await get_active_workspace_context(workspace_id)
+        if not workspace_context:
+            raise RuntimeError("no workspace context")
+        conversation_id = str(workspace_context.get("conversation_id") or "")
+        if not conversation_id:
+            raise RuntimeError("no conversation_id")
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        if not agent:
+            raise RuntimeError(f"agent {agent_id[:8]} gone")
+
+        message = await reminder_message(
+            summary=summary,
+            personality_brief=_build_personality_brief(agent),
+        )
+        if not message or len(message) < 4:
+            raise RuntimeError("message generation empty/short")
+
+        await emit_proactive_message(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            message=message,
+            trigger_type="reminder",
+            skip_post_process=True,  # spec §10.4 类比: 提醒消息不走 emoji/拆句加工
+            extra_metadata={
+                "reminder_memory_id": memory_id or "",
+                "reminder_recurrence": recurrence,
+                "reminder_summary": summary[:120],
+            },
+        )
+        await redis.incr(daily_key)
+        await redis.expire(daily_key, 86400)
+        # 注: trigger.isActive=False + lastFired 已在 emit 前 claim, 不重复 update.
+        logger.info(
+            f"reminder {trigger.id} fired memory={memory_id and memory_id[:8]} "
             f"recurrence={recurrence}"
         )
-        return
-
-    from app.services.proactive.emit import emit_proactive_message
-    from app.services.proactive.sender import _build_personality_brief
-    from app.services.proactive.state import get_active_workspace_context
-
-    workspace_context = await get_active_workspace_context(workspace_id)
-    if not workspace_context:
-        logger.warning(
-            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: no workspace context"
-        )
-        return
-    conversation_id = str(workspace_context.get("conversation_id") or "")
-    if not conversation_id:
-        logger.warning(
-            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: no conversation_id"
-        )
-        return
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent:
-        logger.warning(
-            f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: agent {agent_id[:8]} gone"
-        )
-        return
-
-    message = await reminder_message(
-        summary=summary,
-        personality_brief=_build_personality_brief(agent),
-    )
-    if not message or len(message) < 4:
-        logger.warning(f"reminder {trigger.id} CLAIMED-BUT-NOT-SENT: message generation empty/short")
-        return
-
-    await emit_proactive_message(
-        conversation_id=conversation_id,
-        user_id=user_id,
-        agent_id=agent_id,
-        workspace_id=workspace_id,
-        message=message,
-        trigger_type="reminder",
-        skip_post_process=True,  # spec §10.4 类比: 提醒消息不走 emoji/拆句加工
-        extra_metadata={
-            "reminder_memory_id": memory_id or "",
-            "reminder_recurrence": recurrence,
-            "reminder_summary": summary[:120],
-        },
-    )
-    await redis.incr(daily_key)
-    await redis.expire(daily_key, 86400)
-    # 注: trigger.isActive=False + lastFired 已在 emit 前 claim, 不重复 update.
-    logger.info(
-        f"reminder {trigger.id} fired memory={memory_id and memory_id[:8]} "
-        f"recurrence={recurrence}"
-    )
+    except Exception as exc:
+        await _handle_emit_failure(trigger, recurrence, exc)
 
 
 async def _execute_trigger(trigger, now: datetime) -> None:
