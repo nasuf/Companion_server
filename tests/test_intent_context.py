@@ -195,7 +195,7 @@ class TestIntentContextFetching:
 
 
 class TestIntentLlmFallback:
-    """LLM 抛异常 → 落回关键字扫描."""
+    """LLM 抛异常 → 落回关键字扫描. LLM 返 NONE 是合法结果, 不该 fallback."""
 
     @pytest.mark.asyncio
     async def test_llm_exception_falls_back_to_keyword(self):
@@ -208,6 +208,40 @@ class TestIntentLlmFallback:
             result = await detect_intent_unified("对不起", context="")
 
         assert result.intent == IntentType.APOLOGY_PROMISE
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_none_does_not_fallback_to_keyword(self):
+        """生产 bug 复现 (2026-05-03 trace 019dec46): LLM 返"日常交流" → NONE,
+        之前会 fallback 到 keyword scan, 用户 "明天是我的生日" 被 _SCHEDULE_QUERY_KEYWORDS
+        ['date'] 含 "明天" 错路由到 SCHEDULE_QUERY → AI 跑去播报自己日程.
+
+        修复后: LLM 明确说 NONE 是合法结果, 必须 trust, 不 fallback."""
+        with patch(
+            "app.services.chat.intent_replies.unified_intent_recognize",
+            new=AsyncMock(return_value=["日常交流"]),
+        ):
+            # "明天是我的生日" 含 "明天" → keyword scan 会命中 SCHEDULE_QUERY,
+            # 但 LLM 已说 "日常交流" → 必须 trust LLM, 返 NONE
+            result = await detect_intent_unified(
+                "明天是我的生日", context="",
+            )
+
+        assert result.intent == IntentType.NONE, (
+            f"LLM 返'日常交流' 必须 trust 不 fallback; "
+            f"got {result.intent} (可能是 keyword scan 误命中 'SCHEDULE_QUERY')"
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_empty_labels_does_not_fallback(self):
+        """LLM 返空 labels (空字符串 / 全是干扰词) → 也是合法 NONE, 不 fallback."""
+        with patch(
+            "app.services.chat.intent_replies.unified_intent_recognize",
+            new=AsyncMock(return_value=[]),
+        ):
+            result = await detect_intent_unified(
+                "明天周末有空吗", context="",  # 故意含多个 schedule keyword
+            )
+        assert result.intent == IntentType.NONE
 
 
 class TestSpecExampleEndToEnd:

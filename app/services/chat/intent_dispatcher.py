@@ -120,18 +120,20 @@ async def detect_intent_unified(
     一般是最近 N 轮 "AI: ... / 用户: ..." 换行拼接。传空串时 LLM 回退到
     "仅凭当前消息判断"（首轮对话场景）。
 
-    LLM 失败时 fallback 到关键字扫描（保底单意图，不依赖上下文）。
+    fallback 关键词扫描**仅在 LLM 异常时**触发. **不在** LLM 返 NONE 时触发 —
+    NONE 是 LLM 的合法结果, 表示"日常交流, 没特殊意图". 之前的实现把 NONE 也当
+    "弱信号"落到 keyword scan, 导致用户随口说"明天是我的生日" → keyword scan
+    匹配 _SCHEDULE_QUERY_KEYWORDS['date'] 含 "明天" → 错路由到 SCHEDULE_QUERY
+    (生产 bug 复现 2026-05-03 trace 019dec46: AI 跑去播报自己日程).
     """
     import logging
     logger = logging.getLogger(__name__)
 
     try:
-        result = await detect_intent_llm(message, context=context)
-        if result.intent != IntentType.NONE:
-            return result
+        return await detect_intent_llm(message, context=context)
     except Exception as e:
         logger.warning(f"Unified LLM intent failed, fallback to keyword: {e}")
-    return detect_intent(message)
+        return detect_intent(message)
 
 
 async def detect_intent_llm(message: str, *, context: str = "") -> IntentResult:
@@ -143,10 +145,13 @@ async def detect_intent_llm(message: str, *, context: str = "") -> IntentResult:
     # 延迟导入避免循环依赖（intent_replies 依赖 prompting.store）
     from app.services.chat.intent_replies import unified_intent_recognize, split_multi_intent
 
-    try:
-        labels = await unified_intent_recognize(message, context=context)
-    except Exception:
-        return IntentResult()
+    # LLM 异常**不要**在这吞 — caller (detect_intent_unified) 据此区分:
+    # - LLM 异常 → caller fallback 到 keyword scan
+    # - LLM 返 "日常交流" / 空 labels → 是合法的 NONE, caller 不该 fallback
+    # (生产 bug 复现 2026-05-03 trace 019dec46: 之前这里吞掉异常返 NONE, caller
+    # 把 NONE 当 "弱信号" 又跑 keyword scan, 用户 "明天是我的生日" 被 "明天" 关键词
+    # 错路由到 SCHEDULE_QUERY)
+    labels = await unified_intent_recognize(message, context=context)
 
     if not labels or labels == ["日常交流"]:
         return IntentResult()

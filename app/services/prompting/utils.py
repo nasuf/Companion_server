@@ -8,11 +8,36 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Awaitable, Callable
 
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
+
+# 句末标点 — 中英都要 (。?!？！). 留空格/换行允许吃掉句末空白.
+_SENTENCE_END_PAT = re.compile(r"[。?!？！]+[\s]*")
+
+
+def _truncate_at_sentence_boundary(text: str, max_len: int) -> str:
+    """裁到 max_len 内最后一个句末符号. 找不到合理边界 → 退回硬切但优先在
+    标点处. 防 raw[:max_len] 切到中文字符中段 (生产 bug 复现 2026-05-03
+    trace 019dec46: schedule_query_reply max_chars=120 切到 '明天是你生|日'
+    正中字).
+
+    跟 chat/orchestrator.truncate_at_sentence 同语义但独立实现 — utils 不应
+    依赖 chat 层. 句末符更宽松 (中英 ?! 都算) 因为短回复多用问号结尾.
+    """
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    last_match = None
+    for m in _SENTENCE_END_PAT.finditer(truncated):
+        last_match = m
+    # 找到的句末必须在后半段 (>max_len/2), 否则只切几个字毫无意义, 干脆硬切
+    if last_match and last_match.end() > max_len // 2:
+        return truncated[:last_match.end()].rstrip()
+    return truncated
 
 
 # 所有 prompt 里 {recent_context} 为空时的统一文本.
@@ -58,7 +83,9 @@ async def render_prompt(
         if isinstance(raw, str):
             if strip_split:
                 raw = raw.strip().split("||")[0]
-            return raw[:max_chars] if max_chars else raw
+            if max_chars and len(raw) > max_chars:
+                return _truncate_at_sentence_boundary(raw, max_chars)
+            return raw
         return raw
     except Exception as e:
         logger.warning(f"render_prompt failed ({prompt_key}): {e}")
