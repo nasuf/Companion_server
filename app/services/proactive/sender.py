@@ -28,6 +28,7 @@ from app.services.proactive.history import (
     can_send_proactive, increment_proactive_count,
 )
 from app.services.proactive.context import build_proactive_context
+from app.services.schedule_domain.time_service import _now_corrected
 from app.services.proactive.policy import select_topic_source, select_topic_theme
 from app.services.relationship.emotion import emotion_to_tone
 from app.services.workspace.workspaces import resolve_workspace_id
@@ -242,7 +243,11 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
         },
         "proactive.scheduled_scene": {
             "personality_brief": personality_brief,
-            "time": datetime.now(UTC).astimezone().strftime("%H:%M"),
+            # 必须用项目时区 _TZ (Asia/Shanghai), 不能 datetime.now().astimezone() —
+            # 后者会跟服务器系统时区走, 容器跑在 UTC 里就会让 LLM 看到"现在是 00:51"
+            # 然后回"夜深了" (生产 bug 2026-05-03 trace: UTC 00:51 = 上海 08:51,
+            # 用户在吃早饭收到"夜深了"). 同时复用 _now_corrected 保留 NTP drift 修正.
+            "time": _now_corrected().strftime("%H:%M"),
             "activity": activity,
             "status": status,
         },

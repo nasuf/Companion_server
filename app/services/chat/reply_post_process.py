@@ -10,7 +10,7 @@ import json
 import logging
 import random
 from collections.abc import AsyncGenerator
-from datetime import datetime
+from app.services.schedule_domain.time_service import _now_corrected
 from typing import Any, Awaitable, Callable
 
 from app.services.interaction.reply_context import actual_delay_seconds
@@ -56,7 +56,10 @@ async def _build_delay_explanation_text(
     try:
         text = await delay_reply_fn(
             received_time=received_at,
-            current_time=datetime.now().strftime("%H:%M"),
+            # 必须用项目 _TZ (Asia/Shanghai), 不能裸 datetime.now() — 后者跟
+            # 服务器系统时区走, UTC 容器下 LLM 看到"现在 00:51" 会回"夜深了"
+            # (跟 sender.py:243 同根 bug). 用 _now_corrected 保留 NTP drift 修正.
+            current_time=_now_corrected().strftime("%H:%M"),
             activity=activity,
             status=status_label,
             delay_minutes=minutes,
