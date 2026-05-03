@@ -576,6 +576,10 @@ async def _direct_create_reminder(
         f"[RECORD-REQ] {len(scheduled)} reminder(s) scheduled "
         f"recurrence={recurrence} times={[t.isoformat() for t in scheduled]}"
     )
+    # 通知 inspector 提醒 tab 实时刷新
+    from app.services.reminder.scheduling import notify_reminder_changed
+    await notify_reminder_changed(ctx.conversation_id, kind="created")
+
     when_text = (
         _format_when_text(scheduled[0])
         if len(scheduled) == 1
@@ -665,6 +669,9 @@ async def handle_record_request(
                 f"[RECORD-CANCEL] user said cancel ({user_message[:30]!r}); "
                 f"deactivated {n} active reminder(s)"
             )
+            if n > 0:
+                from app.services.reminder.scheduling import notify_reminder_changed
+                await notify_reminder_changed(ctx.conversation_id, kind="cancelled")
             # 取消是整句消化的语义 — 不让 sub-intent 处理用户残句 ("别提醒了"
             # 不该再被当成"计划查询"询问 AI 日程, 反过来给离题回复).
             ctx.consumed_full_message = True

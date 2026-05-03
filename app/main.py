@@ -107,6 +107,7 @@ from app.api.public.agents import router as agents_router
 from app.api.public.conversations import router as conversations_router
 from app.api.public.chat import router as chat_router
 from app.api.public.memories import router as memories_router
+from app.api.public.reminders import router as reminders_router
 from app.api.public.emotions import router as emotions_router
 from app.api.public.intimacy import router as intimacy_router
 from app.api.public.boundary import router as boundary_router
@@ -130,6 +131,7 @@ app.include_router(agents_router)
 app.include_router(conversations_router)
 app.include_router(chat_router)
 app.include_router(memories_router)
+app.include_router(reminders_router)
 app.include_router(emotions_router)
 app.include_router(intimacy_router)
 app.include_router(boundary_router)

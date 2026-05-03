@@ -549,6 +549,11 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
             f"reminder {trigger.id} fired memory={memory_id and memory_id[:8]} "
             f"recurrence={recurrence}"
         )
+        # 通知 inspector 提醒 tab 实时刷新 (status: active → fired)
+        from app.services.reminder.scheduling import notify_reminder_changed
+        await notify_reminder_changed(
+            conversation_id, kind="fired", trigger_id=trigger.id,
+        )
     except Exception as exc:
         await _handle_emit_failure(trigger, recurrence, exc)
 

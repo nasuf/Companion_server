@@ -312,6 +312,31 @@ async def archive_reminder_memory(
 # ═══════════════════════════════════════════════════════════════════
 
 
+async def notify_reminder_changed(
+    conversation_id: str | None,
+    *,
+    kind: str,
+    trigger_id: str | None = None,
+) -> None:
+    """Inspector "提醒" tab 实时刷新通知. WS event reminder_changed 推到指定
+    conversation, 前端按当前 filter 重拉. fires-and-forget, 失败不冒泡 (实时
+    刷新只是体感优化, 用户主动 refresh button 永远兜底).
+
+    kind ∈ {created, fired, cancelled, rescheduled, archived} — 仅供前端日志,
+    前端实际行为是无差别 re-fetch.
+    """
+    if not conversation_id:
+        return
+    try:
+        from app.services.runtime.ws_manager import manager
+        await manager.send_event(
+            conversation_id, "reminder_changed",
+            {"kind": kind, "trigger_id": trigger_id},
+        )
+    except Exception as e:
+        logger.warning(f"[REMINDER] notify_reminder_changed({kind}) failed: {e}")
+
+
 async def create_user_reminder(
     *,
     user_id: str,
