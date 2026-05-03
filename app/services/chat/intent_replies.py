@@ -129,6 +129,11 @@ async def schedule_query_reply(
             "ai_portrait": ai_portrait or "(未知)",
             **_pad_params(user_emotion),
         },
+        # 默认 120 太紧 — 该 prompt 要求 LLM "回答 + 延展话题", LLM 自然产 130-200
+        # 字回复. 之前 120 cap 经常切掉延展部分 (生产 bug 2026-05-03 trace 019decd3:
+        # 邀请的"我肯定去"答案被切掉, 留下来的全是 AI 自言自语). 180 留余量, 仍由
+        # 主回复管道的 truncate_at_sentence 保底句末切.
+        max_chars=180,
     )
 
 

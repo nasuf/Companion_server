@@ -134,3 +134,32 @@ def test_historical_phrase_fixtures_non_empty():
     assert len(RECORD_REQUEST_MUST_MISS) >= 4, (
         "disambiguation 反例至少 4 个 (覆盖 调用久远记忆/日常交流/计划查询/终结意图)"
     )
+
+
+def test_intent_prompt_distinguishes_invitation_from_schedule_query():
+    """生产 bug 复现 (2026-05-03 trace 019decd3): 用户 "你明天一起跟我去看电影?"
+    被 LLM 错归 计划查询 → 路由到 handle_schedule_query → AI 跑去念叨自己一天活动
+    + 邀请回答被 max_chars=120 截断.
+
+    根因: prompt 里 计划查询 例子 "你明天有空吗"/"你周末忙吗" 都是查可用性,
+    LLM 看到 "你+明天+问号" 表面相似就误归. 邀请 ("跟我一起去X") 跟可用性查询
+    语义不同 — 邀请重点是"约你"不是"查你".
+
+    修: 计划查询定义加 disambiguation, 显式说邀请归"日常交流"."""
+    from app.services.prompting.defaults import INTENT_UNIFIED_PROMPT
+
+    schedule_idx = INTENT_UNIFIED_PROMPT.find("- 计划查询")
+    assert schedule_idx >= 0
+    next_opt = INTENT_UNIFIED_PROMPT.find("\n- ", schedule_idx + 1)
+    block = INTENT_UNIFIED_PROMPT[schedule_idx:next_opt if next_opt > 0 else None]
+
+    # 必须含"邀请" disambiguation 关键词, 让 LLM 区分 query vs invite
+    assert "邀请" in block, (
+        "计划查询定义必须显式提到'邀请', 否则 '你明天跟我一起去X' 之类邀请会被"
+        "错归 (生产 bug 2026-05-03)"
+    )
+    # 必须明示邀请归"日常交流"
+    assert "日常交流" in block, (
+        "计划查询的邀请 disambiguation 必须显式说邀请归'日常交流', 不然 LLM "
+        "知道'不归这里'但不知道该归哪里"
+    )
