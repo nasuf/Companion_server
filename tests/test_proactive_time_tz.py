@@ -104,15 +104,56 @@ async def test_delay_explanation_uses_shanghai_tz():
     )
 
 
-def test_reply_post_process_does_not_import_datetime():
-    """端到端守门: 跟 sender 同根问题, 防 future 编辑又把 datetime 导回来.
-    `_build_delay_explanation_text` 应该完全用 _now_corrected, 整个模块不
-    需要 `from datetime import datetime`. 如果有人 add datetime back +
-    `datetime.now()` 这个 assertion 会立刻失败."""
-    import app.services.chat.reply_post_process as rpp_mod
-    # 模块顶层不该出现 datetime 名字 — 我们删了 import. 如果 future 重新加,
-    # 应该是个 deliberate decision, 这个 assertion 会 force review.
-    assert not hasattr(rpp_mod, "datetime"), (
-        "reply_post_process 不应导入 datetime. 时间格式必须走 _now_corrected. "
-        "若需新增 datetime 用法, 请同时 update 本测试"
+def test_format_received_at_converts_utc_to_shanghai():
+    """received_at 从 reply_context 拿到的是 UTC ISO. _format_received_at 必须
+    转成 Shanghai HH:MM, 跟 current_time 同格式. 防 LLM 看 '00:51 收到' + '08:51
+    回复' 编出"早上 8 点收到我消息" 之类离谱话."""
+    from app.services.chat.reply_post_process import _format_received_at
+
+    # UTC midnight = Shanghai 早 08:00
+    assert _format_received_at("2026-05-03T00:51:00+00:00") == "08:51"
+    # 已是 Shanghai tz → 不变
+    assert _format_received_at("2026-05-03T08:51:00+08:00") == "08:51"
+    # naive ISO (无 tz suffix) — 假定 Shanghai (project _TZ default)
+    assert _format_received_at("2026-05-03T08:51:00") == "08:51"
+    # 解析失败 → 兜底
+    assert _format_received_at("garbage") == "刚刚"
+    assert _format_received_at("") == "刚刚"
+
+
+@pytest.mark.asyncio
+async def test_delay_explanation_received_time_normalized():
+    """端到端: reply_context 给 UTC ISO, _build_delay_explanation_text 必须传给
+    LLM 时已转 Shanghai HH:MM. 防 received_time 跟 current_time 不同 tz."""
+    from app.services.chat import reply_post_process as rpp
+
+    morning_shanghai = datetime(2026, 5, 3, 8, 56, tzinfo=SHANGHAI)
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    async def _fb(*a, **k):
+        return ""
+
+    # received_at 是 UTC ISO 00:51 → 该转 Shanghai 08:51
+    with patch("app.services.chat.reply_post_process._now_corrected",
+               return_value=morning_shanghai):
+        await rpp._build_delay_explanation_text(
+            reply_context={
+                "received_at": "2026-05-03T00:51:00+00:00",
+                "received_status": {"activity": "X", "status": "idle"},
+            },
+            elapsed=300.0,
+            delay_reply_fn=_capture,
+            fallback_fn=_fb,
+            agent=MagicMock(),
+            user_message="嗨",
+        )
+
+    # 关键: 两个时间字段必须同 tz 同格式
+    assert captured["received_time"] == "08:51", (
+        f"received_time 必须转 Shanghai, got {captured['received_time']!r}"
     )
+    assert captured["current_time"] == "08:56"

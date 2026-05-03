@@ -10,14 +10,30 @@ import json
 import logging
 import random
 from collections.abc import AsyncGenerator
-from app.services.schedule_domain.time_service import _now_corrected
+from datetime import datetime as _dt
 from typing import Any, Awaitable, Callable
 
+from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
 from app.services.sticker import recommend_sticker
 
 logger = logging.getLogger(__name__)
+
+
+def _format_received_at(iso_str: str) -> str:
+    """把 reply_context 里的 UTC ISO ('2026-05-03T00:51+00:00') 转成 Shanghai
+    HH:MM 给 LLM 用. 跟 current_time 同格式, 防 LLM 混淆 tz 编出"早上 8 点收到"
+    之类离谱话. 解析失败 → 返"刚刚" 兜底 (LLM 用 delay_minutes 是真值源)."""
+    if not iso_str:
+        return "刚刚"
+    try:
+        dt = _dt.fromisoformat(iso_str)
+    except (ValueError, TypeError):
+        return "刚刚"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_TZ)
+    return dt.astimezone(_TZ).strftime("%H:%M")
 
 
 def extract_pad_for_decoration(emotion: Any) -> tuple[float, float, float, str | None]:
@@ -52,10 +68,14 @@ async def _build_delay_explanation_text(
     activity = str(received_status.get("activity", "")).strip() or "处理自己的事"
     status_label = str(received_status.get("status", "idle"))
     minutes = max(1, round(elapsed / 60))
-    received_at = str((reply_context or {}).get("received_at", ""))
+    # received_at 从 reply_context 拿到的是 UTC ISO ("2026-05-03T00:51+00:00").
+    # 直接喂 LLM 会让它跟 current_time (HH:MM Shanghai) 混淆: "你在 00:51 收到...
+    # 现在 08:51" — LLM 可能编出"早上 8 点"之类离谱话. 统一格式化成 Shanghai HH:MM.
+    raw_received = (reply_context or {}).get("received_at", "")
+    received_time_str = _format_received_at(str(raw_received))
     try:
         text = await delay_reply_fn(
-            received_time=received_at,
+            received_time=received_time_str,
             # 必须用项目 _TZ (Asia/Shanghai), 不能裸 datetime.now() — 后者跟
             # 服务器系统时区走, UTC 容器下 LLM 看到"现在 00:51" 会回"夜深了"
             # (跟 sender.py:243 同根 bug). 用 _now_corrected 保留 NTP drift 修正.
