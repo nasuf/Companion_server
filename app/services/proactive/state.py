@@ -562,6 +562,48 @@ async def has_recent_user_activity(workspace_id: str, *, now: datetime | None = 
     return bool(rows)
 
 
+async def has_recent_proactive_or_reminder(
+    workspace_id: str,
+    *,
+    now: datetime | None = None,
+    window_minutes: int = 30,
+) -> bool:
+    """检查 workspace 最近 window_minutes 内是否发过 proactive 类 AI 消息
+    (含 reminder fire, scheduled_scene, silence_wakeup 等).
+
+    用途: proactive orchestrator 的 mutex 检查. 之前只看 user 活动, 漏了
+    "reminder 刚响完同一分钟 proactive scheduled_scene 也响" 的双发场景
+    (生产 bug 复现 2026-05-03 14:00: reminder + proactive 都发"出去走走透气吧",
+    用户连收两条相似消息).
+
+    判别: messages.metadata->>'proactive' = 'true' (emit_proactive_message
+    写入). 普通 chat 回复 (user → AI) 不算 — 那种由 has_recent_user_activity
+    覆盖.
+    """
+    now_ts = _now(now)
+    since = now_ts - timedelta(minutes=window_minutes)
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT 1
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE c.workspace_id = $1
+              AND c.is_deleted = FALSE
+              AND m.role = 'assistant'
+              AND m.created_at >= $2
+              AND (m.metadata->>'proactive')::boolean = TRUE
+            LIMIT 1
+            """,
+            workspace_id,
+            since,
+        )
+    except Exception as e:
+        _log_if_unavailable("recent proactive check", e)
+        return False
+    return bool(rows)
+
+
 async def stop_proactive_state(
     state: ProactiveStateRecord,
     *,

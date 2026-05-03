@@ -507,6 +507,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         if not workspace_id:
             raise RuntimeError("workspace not found")
 
+        from app.services.llm.usage_tracker import traced_usage_session
         from app.services.proactive.emit import emit_proactive_message
         from app.services.proactive.sender import _build_personality_brief
         from app.services.proactive.state import get_active_workspace_context
@@ -521,27 +522,40 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         if not agent:
             raise RuntimeError(f"agent {agent_id[:8]} gone")
 
-        message = await reminder_message(
-            summary=summary,
-            personality_brief=_build_personality_brief(agent),
-        )
-        if not message or len(message) < 4:
-            raise RuntimeError("message generation empty/short")
-
-        await emit_proactive_message(
+        # LangSmith trace + usage session 包住 message 生成 + emit, 让 admin 在
+        # LangSmith 看板能看到 reminder 触发的 LLM 调用 + 前端 Trace 按钮可点
+        # (生产观察 2026-05-03 14:00: reminder bubble 没 Trace 按钮, 因为之前
+        # 没传 trace_id 给 emit. 跟 sender.py 主动消息路径对齐).
+        async with traced_usage_session(
+            name=f"[reminder:{trigger.id[:8]}] {summary[:60]}",
+            scope="proactive",
             conversation_id=conversation_id,
-            user_id=user_id,
             agent_id=agent_id,
-            workspace_id=workspace_id,
-            message=message,
-            trigger_type="reminder",
-            skip_post_process=True,  # spec §10.4 类比: 提醒消息不走 emoji/拆句加工
-            extra_metadata={
-                "reminder_memory_id": memory_id or "",
-                "reminder_recurrence": recurrence,
-                "reminder_summary": summary[:120],
-            },
-        )
+            user_id=user_id,
+        ) as tracer:
+            message = await reminder_message(
+                summary=summary,
+                personality_brief=_build_personality_brief(agent),
+            )
+            if not message or len(message) < 4:
+                raise RuntimeError("message generation empty/short")
+
+            await emit_proactive_message(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workspace_id=workspace_id,
+                message=message,
+                trigger_type="reminder",
+                skip_post_process=True,  # spec §10.4 类比: 提醒消息不走 emoji/拆句加工
+                extra_metadata={
+                    "reminder_memory_id": memory_id or "",
+                    "reminder_recurrence": recurrence,
+                    "reminder_summary": summary[:120],
+                },
+                trace_id=tracer.safe_trace_id,
+            )
+
         await redis.incr(daily_key)
         await redis.expire(daily_key, 86400)
         # 注: trigger.isActive=False + lastFired 已在 emit 前 claim, 不重复 update.

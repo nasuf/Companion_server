@@ -31,6 +31,7 @@ from app.services.proactive.state import (
     claim_due_proactive_state,
     claim_waiting_timeout_state,
     escalate_waiting_state,
+    has_recent_proactive_or_reminder,
     has_recent_user_activity,
     list_due_proactive_states,
     list_waiting_timeout_states,
@@ -107,6 +108,20 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
             now=now,
             event_type="window_deferred",
             payload={"reason": "recent_user_activity"},
+        )
+        return
+
+    # --- Mutex: 30分钟内 AI 已发过 proactive (含 reminder fire). 防止
+    # reminder + scheduled_scene 同分钟双发 (生产 bug 复现 2026-05-03 14:00).
+    # has_recent_user_activity 只看 user 消息, 漏了"AI 自己刚响完 reminder
+    # 还要再 fire 一条 proactive scheduled_scene" 的场景. 两个独立调度器
+    # (trigger_scan 15s + proactive_orchestrator 1min) 没互相协调时必撞.
+    if await has_recent_proactive_or_reminder(state.workspace_id, now=now, window_minutes=30):
+        await advance_to_next_window(
+            state,
+            now=now,
+            event_type="window_deferred",
+            payload={"reason": "recent_proactive_activity"},
         )
         return
 
