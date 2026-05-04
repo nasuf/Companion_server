@@ -19,6 +19,11 @@ import logging
 from datetime import datetime
 
 from app.db import db
+from app.observability import bind_context
+from app.observability.events import (
+    EVT_PROACTIVE_DEFERRED,
+    EVT_PROACTIVE_FALLBACK,
+)
 from app.services.proactive.policy import (
     fallback_trigger_type,
     scene_candidate_available,
@@ -67,7 +72,17 @@ async def scan_proactive_states(now: datetime | None = None) -> None:
             claimed = await claim_due_proactive_state(state.id, now=now)
             if not claimed:
                 continue
-            await _process_due_state(claimed, now=now)
+            # 绑 log 上下文 — claimed 含 agent_id / user_id / workspace_id;
+            # agent_name 走一次 DB lookup, 整个 process 链路复用
+            agent = await db.aiagent.find_unique(where={"id": claimed.agent_id})
+            with bind_context(
+                agent_id=claimed.agent_id,
+                agent_name=agent.name if agent else None,
+                user_id=claimed.user_id,
+                workspace_id=claimed.workspace_id,
+                conversation_id=claimed.conversation_id,
+            ):
+                await _process_due_state(claimed, now=now)
         except Exception as e:
             logger.warning(f"Proactive state scan failed for workspace={state.workspace_id}: {e}")
 
@@ -76,7 +91,15 @@ async def scan_proactive_states(now: datetime | None = None) -> None:
             claimed = await claim_waiting_timeout_state(state.id, now=now)
             if not claimed:
                 continue
-            await _process_waiting_timeout(claimed, now=now)
+            agent = await db.aiagent.find_unique(where={"id": claimed.agent_id})
+            with bind_context(
+                agent_id=claimed.agent_id,
+                agent_name=agent.name if agent else None,
+                user_id=claimed.user_id,
+                workspace_id=claimed.workspace_id,
+                conversation_id=claimed.conversation_id,
+            ):
+                await _process_waiting_timeout(claimed, now=now)
         except Exception as e:
             logger.warning(f"Proactive waiting timeout failed for workspace={state.workspace_id}: {e}")
 
@@ -103,6 +126,11 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
 
     # --- Mutex: 30分钟内有用户活动 (临时性条件，推迟到下一窗口) ---
     if await has_recent_user_activity(state.workspace_id, now=now, window_minutes=30):
+        logger.info(
+            "[PROACTIVE] deferred: recent_user_activity",
+            extra={"event": EVT_PROACTIVE_DEFERRED, "reason": "recent_user_activity",
+                   "stage": state.stage},
+        )
         await advance_to_next_window(
             state,
             now=now,
@@ -117,6 +145,11 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
     # 还要再 fire 一条 proactive scheduled_scene" 的场景. 两个独立调度器
     # (trigger_scan 15s + proactive_orchestrator 1min) 没互相协调时必撞.
     if await has_recent_proactive_or_reminder(state.workspace_id, now=now, window_minutes=30):
+        logger.info(
+            "[PROACTIVE] deferred: recent_proactive_activity (reminder/proactive 30min 内已发)",
+            extra={"event": EVT_PROACTIVE_DEFERRED, "reason": "recent_proactive_activity",
+                   "stage": state.stage},
+        )
         await advance_to_next_window(
             state,
             now=now,
@@ -142,6 +175,11 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
     recent_texts = [str(r.get("content", "")) for r in (recent_user_msgs or [])]
     recent_texts.reverse()  # chronological order
     if detect_topic_fatigue({}, recent_texts):
+        logger.info(
+            "[PROACTIVE] deferred: topic_fatigue",
+            extra={"event": EVT_PROACTIVE_DEFERRED, "reason": "topic_fatigue",
+                   "stage": state.stage, "n_recent_msgs": len(recent_texts)},
+        )
         await advance_to_next_window(
             state,
             now=now,
@@ -213,7 +251,18 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
             schedule = await get_cached_schedule(state.agent_id)
             schedule_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "status": "idle", "type": "leisure"}
             if not scene_candidate_available(state, schedule_status, now=now):
-                trigger_type = fallback_trigger_type()
+                fallback = fallback_trigger_type()
+                logger.info(
+                    f"[PROACTIVE] trigger fallback: scheduled_scene → {fallback} "
+                    f"(scene unavailable: {schedule_status.get('activity')})",
+                    extra={
+                        "event": EVT_PROACTIVE_FALLBACK,
+                        "from_trigger": "scheduled_scene",
+                        "to_trigger": fallback,
+                        "schedule_activity": schedule_status.get("activity"),
+                    },
+                )
+                trigger_type = fallback
 
         await log_proactive_event(
             state_id=state.id,

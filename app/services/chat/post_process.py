@@ -22,6 +22,7 @@ from typing import Any, Literal
 from prisma import Json
 
 from app.db import db
+from app.observability.events import EVT_BG_DONE
 from app.services.chat.intent_replies import positive_interaction_check
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
@@ -97,8 +98,20 @@ async def _bg_user_emotion(
             where={"id": user_message_id},
             data={"metadata": Json({"emotion": user_emotion})},
         )
+        logger.info(
+            f"[BG] user_emotion written to msg {user_message_id[:8]}",
+            extra={
+                "event": EVT_BG_DONE, "kind": "user_emotion",
+                "user_message_id": user_message_id,
+                "primary_emotion": user_emotion.get("primary"),
+            },
+        )
     except Exception as e:
-        logger.warning(f"Background user emotion metadata write failed: {e}")
+        logger.warning(
+            f"Background user emotion metadata write failed: {e}",
+            extra={"event": EVT_BG_DONE, "kind": "user_emotion", "outcome": "failed",
+                   "error_type": type(e).__name__},
+        )
 
 
 async def _bg_memory_pipeline(
@@ -138,6 +151,14 @@ async def _bg_memory_pipeline(
             return
         results = await asyncio.gather(*tasks, return_exceptions=False)
         total = sum(results)
+        logger.info(
+            f"[BG] memory_pipeline stored {total} memories across {len(tasks)} side(s)",
+            extra={
+                "event": EVT_BG_DONE, "kind": "memory_pipeline",
+                "n_stored_total": total,
+                "n_sides_run": len(tasks),
+            },
+        )
         if total > 0 and conversation_id:
             await manager.send_event(
                 conversation_id,
@@ -145,7 +166,11 @@ async def _bg_memory_pipeline(
                 {"count": total},
             )
     except Exception as e:
-        logger.error(f"Background memory pipeline failed: {e}")
+        logger.error(
+            f"Background memory pipeline failed: {e}",
+            extra={"event": EVT_BG_DONE, "kind": "memory_pipeline", "outcome": "failed",
+                   "error_type": type(e).__name__},
+        )
 
 
 async def _pipeline_with_watermark(
@@ -229,8 +254,22 @@ async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
         adjustments = detect_direct_feedback(user_message) or infer_feedback(user_message)
         if adjustments:
             await apply_trait_adjustment(agent_id, adjustments)
+            logger.info(
+                f"[BG] trait_adjustment applied n={len(adjustments)}",
+                extra={"event": EVT_BG_DONE, "kind": "trait_adjustment",
+                       "n_adjustments": len(adjustments)},
+            )
+        else:
+            logger.debug(
+                "[BG] trait_adjustment: no feedback signal detected",
+                extra={"event": EVT_BG_DONE, "kind": "trait_adjustment", "outcome": "no_signal"},
+            )
     except Exception as e:
-        logger.warning(f"Background trait adjustment failed: {e}")
+        logger.warning(
+            f"Background trait adjustment failed: {e}",
+            extra={"event": EVT_BG_DONE, "kind": "trait_adjustment", "outcome": "failed",
+                   "error_type": type(e).__name__},
+        )
 
 
 async def _bg_positive_recovery(
@@ -247,12 +286,31 @@ async def _bg_positive_recovery(
     try:
         patience = await get_patience(agent_id, user_id)
         if patience >= PATIENCE_MAX or patience <= 0:
+            logger.debug(
+                f"[BG] positive_recovery skipped: patience={patience}",
+                extra={"event": EVT_BG_DONE, "kind": "positive_recovery",
+                       "outcome": "skipped_patience_extreme", "patience": patience},
+            )
             return
         if not await positive_interaction_check(user_message):
+            logger.debug(
+                "[BG] positive_recovery skipped: not positive signal",
+                extra={"event": EVT_BG_DONE, "kind": "positive_recovery",
+                       "outcome": "skipped_not_positive"},
+            )
             return
-        await check_positive_recovery(agent_id, user_id)
+        new_patience = await check_positive_recovery(agent_id, user_id)
+        logger.info(
+            f"[BG] positive_recovery applied: {patience} → {new_patience}",
+            extra={"event": EVT_BG_DONE, "kind": "positive_recovery",
+                   "patience_before": patience, "patience_after": new_patience},
+        )
     except Exception as e:
-        logger.warning(f"Background positive recovery failed: {e}")
+        logger.warning(
+            f"Background positive recovery failed: {e}",
+            extra={"event": EVT_BG_DONE, "kind": "positive_recovery", "outcome": "failed",
+                   "error_type": type(e).__name__},
+        )
 
 
 async def run_post_process(

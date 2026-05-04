@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
 
+from app.observability.events import EVT_PREFLIGHT_FAILED, EVT_PREFLIGHT_RESOLVED
 from app.services.chat.intent_replies import deletion_done_reply, record_confirm_reply
 from app.services.memory.interaction.contradiction import (
     analyze_contradiction_response,
@@ -83,6 +84,15 @@ async def resolve_pending_contradiction(
             personality_brief=personality_brief,
         )
         ctx.last_short_circuit_reply = reply
+        logger.info(
+            f"[PREFLIGHT] contradiction resolved change_type={analysis.get('change_type')}",
+            extra={
+                "event": EVT_PREFLIGHT_RESOLVED,
+                "kind": "contradiction",
+                "change_type": analysis.get("change_type"),
+                "reply_text_len": len(reply),
+            },
+        )
         for evt in await ctx.short_circuit_fn(
             reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
             trace_id=ctx.tracer.safe_trace_id,
@@ -91,7 +101,11 @@ async def resolve_pending_contradiction(
         ctx.tracer.close()
         ctx.stopped = True
     except Exception as e:
-        logger.warning(f"Contradiction resolution failed: {e}")
+        logger.warning(
+            f"Contradiction resolution failed: {e}",
+            extra={"event": EVT_PREFLIGHT_FAILED, "kind": "contradiction",
+                   "error_type": type(e).__name__},
+        )
         await clear_pending_contradiction(ctx.conversation_id)
 
 
@@ -134,6 +148,11 @@ async def resolve_pending_deletion(
                     if updated
                     else "诶, 改期没成功, 你再说一遍?"
                 )
+                logger.info(
+                    f"[PREFLIGHT] reschedule confirmed n_updated={updated}",
+                    extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "reschedule",
+                           "n_updated": updated, "new_time": new_time},
+                )
             else:
                 deleted = await execute_confirmed_deletion(ctx.user_id, candidates)
                 await clear_pending_deletion(ctx.conversation_id)
@@ -145,11 +164,21 @@ async def resolve_pending_deletion(
                     )
                     or await generate_deletion_reply(agent_name, "之前提到的", deleted)
                 )
+                logger.info(
+                    f"[PREFLIGHT] deletion confirmed n_deleted={deleted}",
+                    extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "deletion",
+                           "n_deleted": deleted, "n_candidates": len(candidates)},
+                )
         else:
             await clear_pending_deletion(ctx.conversation_id)
             reply = (
                 "好的，那就不改了，继续聊吧~" if action == "reschedule"
                 else "好的，那就不删了，继续聊吧~"
+            )
+            logger.info(
+                f"[PREFLIGHT] {action} cancelled by user",
+                extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": action,
+                       "outcome": "cancelled"},
             )
         ctx.last_short_circuit_reply = reply
         for evt in await ctx.short_circuit_fn(

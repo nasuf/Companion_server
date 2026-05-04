@@ -17,6 +17,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from app.observability.events import EVT_INTENT_SUB_RECURSED
 from app.services.chat.intent_dispatcher import (
     INTENT_PRIORITY,
     IntentType,
@@ -104,7 +105,14 @@ async def process_sub_intents(
         intent_type = LABEL_TO_INTENT.get(label, IntentType.NONE)
         logger.info(
             f"[INTENT-SUB] label={label} intent={intent_type.value} "
-            f"index={cur_index} text={text[:40]!r}"
+            f"index={cur_index} text={text[:40]!r}",
+            extra={
+                "event": EVT_INTENT_SUB_RECURSED,
+                "intent_label": label,
+                "intent": intent_type.value,
+                "fragment_index": cur_index,
+                "fragment_len": len(text),
+            },
         )
         async for evt in stream_chat_response(
             conversation_id=conversation_id,

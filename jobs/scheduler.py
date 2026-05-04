@@ -12,6 +12,7 @@ from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.observability.events import EVT_SCHEDULER_JOB
 from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
 from app.services.reflection import run_weekly_reflection
 from app.services.portrait import update_portrait_weekly
@@ -46,22 +47,55 @@ async def _run_for_all_agents(
     无 LLM 调用的 cron (l2_adjustment 等) flush 返回 None, 不写空行.
     """
     from app.db import db
+    from app.observability import bind_context
     from app.services.llm.usage_tracker import usage_session
     agents = await db.aiagent.find_many()
     sem = asyncio.Semaphore(concurrency)
+    n_total = len(agents)
+    n_failed = 0
+    started_at = asyncio.get_event_loop().time()
+
+    logger.info(
+        f"[CRON] {task_name} started for {n_total} agents",
+        extra={"event": EVT_SCHEDULER_JOB, "task_name": task_name,
+               "phase": "started", "n_agents": n_total},
+    )
 
     async def _process(agent):
+        nonlocal n_failed
         async with sem:
             async with usage_session(
                 scope="schedule_cron", conversation_id=None,
                 agent_id=agent.id, user_id=getattr(agent, "userId", None),
             ):
-                try:
-                    await fn(agent)
-                except Exception as e:
-                    logger.warning(f"{task_name} failed for agent {agent.id}: {e}")
+                # 绑 log 上下文 — 整个 cron 任务链 (生成作息/画像/记忆衰减) 的
+                # log 都带 agent 字段, 便于 Axiom 按 agent 切分
+                with bind_context(
+                    agent_id=agent.id,
+                    agent_name=getattr(agent, "name", None),
+                    user_id=getattr(agent, "userId", None),
+                ):
+                    try:
+                        await fn(agent)
+                    except Exception as e:
+                        n_failed += 1
+                        logger.warning(
+                            f"{task_name} failed for agent {agent.id}: {e}",
+                            extra={"event": EVT_SCHEDULER_JOB, "task_name": task_name,
+                                   "phase": "agent_failed",
+                                   "error_type": type(e).__name__},
+                        )
 
     await asyncio.gather(*[_process(a) for a in agents])
+
+    elapsed = asyncio.get_event_loop().time() - started_at
+    logger.info(
+        f"[CRON] {task_name} done in {elapsed:.1f}s "
+        f"({n_total - n_failed}/{n_total} ok)",
+        extra={"event": EVT_SCHEDULER_JOB, "task_name": task_name,
+               "phase": "completed", "n_agents": n_total, "n_failed": n_failed,
+               "elapsed_sec": round(elapsed, 2)},
+    )
 
 
 def setup_scheduler():

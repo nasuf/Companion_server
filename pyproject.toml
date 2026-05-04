@@ -24,6 +24,8 @@ dependencies = [
     "ntplib>=0.4.0",
     # spec-audit 2026-04-23: 国务院法定假日 + 调休数据 (admin-curated holidays 表的外部源)
     "chinesecalendar>=1.11.0",
+    # 结构化日志 → Axiom (https://app.axiom.co), env 未配置时 setup_axiom() 自动跳过
+    "axiom-py>=0.9.0",
 ]
 
 [project.optional-dependencies]

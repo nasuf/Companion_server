@@ -27,6 +27,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from app.db import db
+from app.observability.events import EVT_MEMORY_L2_ADJUSTED
 from app.redis_client import get_redis
 from app.services.memory.taxonomy import is_singleton
 
@@ -237,7 +238,17 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
         "demoted": demoted,
         "adjusted": adjusted,
     }
-    logger.info(f"L2 adjustment [{side}] complete: {stats}")
+    logger.info(
+        f"L2 adjustment [{side}] complete: {stats}",
+        extra={
+            "event": EVT_MEMORY_L2_ADJUSTED,
+            "side": side,
+            "n_total": len(l2_memories),
+            "n_promoted": promoted,
+            "n_demoted": demoted,
+            "n_adjusted": adjusted,
+        },
+    )
     return stats
 
 

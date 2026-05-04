@@ -51,7 +51,7 @@ async def test_short_circuit_ctx_finalize_captures_reply():
     # 避免 save_last_reply_timestamp 调用真 Redis. 把 agent_id 设 None 让 finalize
     # 跳过 save_last_reply_timestamp 那一步.
     ctx.agent_id = None
-    await _drain(ctx.finalize("好的, 我知道了"))
+    await _drain(ctx.finalize("好的, 我知道了", kind="_test_only"))
 
     assert ctx.last_short_circuit_reply == "好的, 我知道了", (
         f"finalize 必须捕获 reply, 实际 {ctx.last_short_circuit_reply!r}"

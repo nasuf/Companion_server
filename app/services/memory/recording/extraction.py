@@ -13,6 +13,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.observability.events import EVT_LLM_FAIL, EVT_MEMORY_EXTRACTED
 from app.services.llm.models import get_chat_model, invoke_json
 from app.services.memory.taxonomy import TAXONOMY_MATRIX
 from app.services.prompting.store import get_prompt_text
@@ -68,6 +69,8 @@ async def extract_memories(
         taxonomy_list=_taxonomy_list_text(side),
     )
 
+    import time as _time
+    t0 = _time.perf_counter()
     try:
         result = await invoke_json(model, prompt)
         # Validate structure
@@ -91,7 +94,24 @@ async def extract_memories(
             mem["type"] = taxonomy.legacy_type
             sanitized_memories.append(mem)
         result["memories"] = sanitized_memories
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+        logger.info(
+            f"[MEM-EXTRACT-{side}] LLM returned {len(sanitized_memories)} memories "
+            f"({elapsed_ms:.0f}ms)",
+            extra={
+                "event": EVT_MEMORY_EXTRACTED,
+                "side": side, "n_extracted": len(sanitized_memories),
+                "n_entities": len(result.get("entities", [])),
+                "n_topics": len(result.get("topics", [])),
+                "elapsed_ms": round(elapsed_ms, 1),
+            },
+        )
         return result
     except Exception as e:
-        logger.error(f"Memory extraction failed: {e}")
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+        logger.error(
+            f"Memory extraction failed: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "memory_extract", "side": side,
+                   "error_type": type(e).__name__, "elapsed_ms": round(elapsed_ms, 1)},
+        )
         return {"memories": [], "entities": [], "preferences": [], "topics": []}

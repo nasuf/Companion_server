@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     langsmith_org_id: str = ""
     langsmith_project_id: str = ""
 
+    # Axiom 结构化日志 (https://app.axiom.co). 字段在此声明仅为通过 Settings 校验
+    # (避免 extra_forbidden); 实际运行 app/observability/axiom_setup.py 走 os.getenv.
+    axiom_token: str = ""
+    axiom_dataset: str = ""
+    axiom_org_id: str = ""
+    axiom_log_level: str = "INFO"
+
     # JWT authentication
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days

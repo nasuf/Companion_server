@@ -68,6 +68,10 @@ jobs:
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}
             LANGSMITH_ORG_ID=${{ secrets.LANGSMITH_ORG_ID }}
             LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
+            AXIOM_TOKEN=${{ secrets.AXIOM_TOKEN }}
+            AXIOM_DATASET=${{ vars.AXIOM_DATASET }}
+            AXIOM_ORG_ID=${{ vars.AXIOM_ORG_ID }}
+            AXIOM_LOG_LEVEL=${{ vars.AXIOM_LOG_LEVEL }}
             ADMIN_USERNAME=${{ vars.ADMIN_USERNAME }}
             ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
             EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL }}

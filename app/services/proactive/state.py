@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.db import db
+from app.observability.events import EVT_PROACTIVE_STATE_TRANSITION
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +449,15 @@ async def start_or_restart_proactive_session(
             window_index=first_window_index,
             payload={"reason": reason, "stage": stage, "due_at": due_at.isoformat()},
         )
+        logger.info(
+            f"[PROACTIVE] session started reason={reason} stage={stage}",
+            extra={
+                "event": EVT_PROACTIVE_STATE_TRANSITION,
+                "transition": "session_started",
+                "reason": reason, "stage": stage,
+                "due_at": due_at.isoformat(),
+            },
+        )
     return state_id
 
 
@@ -493,6 +503,13 @@ async def mark_user_replied_for_conversation(
         conversation_id=row.get("conversation_id"),
         event_type="user_replied",
         payload={"replied_at": replied_ts.isoformat()},
+    )
+    logger.info(
+        "[PROACTIVE] user_replied → state reset (silence_level_n=0)",
+        extra={
+            "event": EVT_PROACTIVE_STATE_TRANSITION,
+            "transition": "user_replied_reset",
+        },
     )
 
 

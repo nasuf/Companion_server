@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
+from app.observability import bind_context
+from app.observability.events import EVT_PROACTIVE_SENT, EVT_PROACTIVE_SKIPPED
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.recording.pipeline import process_memory_pipeline
@@ -66,6 +68,15 @@ async def _log_skip(
     payload: dict[str, Any] = {"reason": reason}
     if extra:
         payload.update(extra)
+    logger.info(
+        f"proactive skipped: trigger={trigger_type} reason={reason}",
+        extra={
+            "event": EVT_PROACTIVE_SKIPPED,
+            "trigger_type": trigger_type,
+            "skip_reason": reason,
+            "stage": state.stage,
+        },
+    )
     await log_proactive_event(
         state_id=state.id,
         workspace_id=state.workspace_id,
@@ -408,6 +419,17 @@ async def generate_and_send_proactive(
             extra_metadata={"stage": stage},
             trace_id=tracer.safe_trace_id,
         )
+    logger.info(
+        f"proactive sent: trigger={trigger_type} source={source} stage={stage}",
+        extra={
+            "event": EVT_PROACTIVE_SENT,
+            "trigger_type": trigger_type,
+            "topic_source": source,
+            "stage": stage,
+            "is_decay_final": ctx.get("is_decay_final", False),
+            "message_len": len(message),
+        },
+    )
 
     await increment_proactive_count(state.agent_id, state.user_id)
 
@@ -598,16 +620,27 @@ async def dispatch_first_greeting_for_agent(*, agent_id: str, user_id: str) -> N
     except Exception as e:
         logger.warning(f"dispatch_first_greeting_for_agent: list convs failed for {agent_id[:8]}: {e}")
         return
+    # 一次查询 agent_name + username, 整个 dispatch 复用 — 避免每 conv 各查一次
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    user = await db.user.find_unique(where={"id": user_id})
     for conv in convs:
         # send_first_greeting 内部检查 message count > 0 → 跳过 (覆盖用户已开始
         # 聊天的边界情况) + Redis SETNX 防并发. 这里只 fire-and-forget.
         try:
-            await send_first_greeting(
+            with bind_context(
                 conversation_id=conv.id,
-                user_id=user_id,
-                agent_id=agent_id,
                 workspace_id=getattr(conv, "workspaceId", None),
-            )
+                agent_id=agent_id,
+                agent_name=agent.name if agent else None,
+                user_id=user_id,
+                username=user.username if user else None,
+            ):
+                await send_first_greeting(
+                    conversation_id=conv.id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    workspace_id=getattr(conv, "workspaceId", None),
+                )
         except Exception as e:
             logger.warning(
                 f"dispatch_first_greeting_for_agent: send failed for "

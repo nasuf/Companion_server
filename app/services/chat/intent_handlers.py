@@ -17,6 +17,7 @@ from typing import Any, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
 
+from app.observability.events import EVT_INTENT_SHORT_CIRCUIT
 from app.services.chat.intent_replies import (
     apology_reply,
     current_state_reply,
@@ -77,8 +78,20 @@ class ShortCircuitCtx:
     # finalize 跳过 sub-intent 递归. 详见 CLAUDE.md §6 偏离表.
     consumed_full_message: bool = False
 
-    async def finalize(self, reply: str) -> AsyncGenerator[dict, None]:
+    async def finalize(self, reply: str, *, kind: str) -> AsyncGenerator[dict, None]:
+        """`kind` 是该 handler 的 intent 名 (e.g. "apology_promise", "deletion_delete"),
+        作为 EVT_INTENT_SHORT_CIRCUIT 的查询维度. 必填以防止 handler 漏标."""
         self.last_short_circuit_reply = reply
+        logger.info(
+            f"[INTENT-SC] kind={kind} reply_len={len(reply)}",
+            extra={
+                "event": EVT_INTENT_SHORT_CIRCUIT,
+                "intent_kind": kind,
+                "reply_text_len": len(reply),
+                "consumed_full_message": self.consumed_full_message,
+                "sub_intent_mode": self.sub_intent_mode,
+            },
+        )
         # consumed_full_message=True 时清空 sub fragments, 让 finalize_short_circuit
         # 跳过 process_sub_intents 递归. 比加新参数到 finalize 签名干净.
         sub_fragments = (
@@ -124,7 +137,7 @@ async def handle_conversation_end(
             ctx.agent, user_message,
             "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。",
         )
-    async for evt in ctx.finalize(farewell):
+    async for evt in ctx.finalize(farewell, kind="conversation_end"):
         yield evt
 
 
@@ -160,7 +173,7 @@ async def handle_apology_promise(
             personality_brief=_agent_name(ctx.agent),
             new_patience=new_patience,
         ) or "好啦，我不生气了~"
-        return True, ctx.finalize(reply)
+        return True, ctx.finalize(reply, kind="apology_promise")
     except Exception as e:
         logger.warning(f"Hot-path apology failed, falling through: {e}")
         return False, None
@@ -186,7 +199,7 @@ async def handle_deletion(
         candidates = await find_matching_memories(ctx.user_id, description)
         agent_name = ctx.agent.name if ctx.agent else "伙伴"
         if not candidates:
-            return True, ctx.finalize("嗯...我好像没有关于这个的记忆呢。")
+            return True, ctx.finalize("嗯...我好像没有关于这个的记忆呢。", kind="deletion_no_match")
 
         intent = (deletion_result or {}).get("intent") or "delete"
         new_time_raw = (deletion_result or {}).get("new_time")
@@ -218,7 +231,8 @@ async def handle_deletion(
                 )
                 or await generate_deletion_confirmation_prompt(agent_name, candidates)
             )
-        return True, ctx.finalize(reply)
+        # deletion_delete or deletion_reschedule
+        return True, ctx.finalize(reply, kind=f"deletion_{intent}")
     except Exception as e:
         logger.warning(f"Hot-path deletion/reschedule failed, falling through: {e}")
         return False, None
@@ -253,7 +267,7 @@ async def handle_schedule_adjust(
             return False, None
         if adj_result.get("accepted"):
             await update_schedule_slot(ctx.agent_id, schedule, ai_status)
-        return True, ctx.finalize(response)
+        return True, ctx.finalize(response, kind="schedule_adjust")
     except Exception as e:
         logger.warning(f"Schedule adjustment failed, falling through: {e}")
         return False, None
@@ -292,7 +306,7 @@ async def handle_schedule_query(
         )
         if not response:
             return False, None, schedule_context
-        return True, ctx.finalize(response), schedule_context
+        return True, ctx.finalize(response, kind="schedule_query"), schedule_context
     except Exception as e:
         logger.warning(f"Schedule query short-circuit failed, falling through: {e}")
         return False, None, schedule_context
@@ -325,7 +339,7 @@ async def handle_current_state(
         )
         if not response:
             return False, None
-        return True, ctx.finalize(response)
+        return True, ctx.finalize(response, kind="current_state")
     except Exception as e:
         logger.warning(f"Current state short-circuit failed, falling through: {e}")
         return False, None
@@ -675,7 +689,7 @@ async def handle_record_request(
             # 取消是整句消化的语义 — 不让 sub-intent 处理用户残句 ("别提醒了"
             # 不该再被当成"计划查询"询问 AI 日程, 反过来给离题回复).
             ctx.consumed_full_message = True
-            return True, ctx.finalize(reply)
+            return True, ctx.finalize(reply, kind="record_request_cancel")
 
         # 设置/新增提醒走 _direct_create_reminder. 三态返回:
         status, when_text = await _direct_create_reminder(
@@ -690,7 +704,7 @@ async def handle_record_request(
             )
             # 反问后整句已被 set_reminder pending 吸收 — sub-intent 不再处理残句
             ctx.consumed_full_message = True
-            return True, ctx.finalize(reply)
+            return True, ctx.finalize(reply, kind="record_request_ask_time")
 
         # status == "scheduled" or "failed"
         reply = await record_confirm_reply(
@@ -706,7 +720,8 @@ async def handle_record_request(
                 f"好嘞, {when_text}叫你, 记好啦~" if when_text
                 else "好嘞, 我帮你记上了~"
             )
-        return True, ctx.finalize(reply)
+        # record_request_scheduled / _failed
+        return True, ctx.finalize(reply, kind=f"record_request_{status}")
     except Exception as e:
         logger.warning(f"Record request short-circuit failed, falling through: {e}")
         return False, None

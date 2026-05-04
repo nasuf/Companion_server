@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from app.observability.events import EVT_INTENT_DETECTED, EVT_LLM_FAIL
 from app.services.chat.conversation_end import CONVERSATION_END_KEYWORDS
 from app.services.memory.interaction.deletion import DELETION_KEYWORDS
 from app.services.interaction.boundary import APOLOGY_KEYWORDS
@@ -130,9 +131,23 @@ async def detect_intent_unified(
     logger = logging.getLogger(__name__)
 
     try:
-        return await detect_intent_llm(message, context=context)
+        result = await detect_intent_llm(message, context=context)
+        logger.info(
+            f"[INTENT-LLM] intent={result.intent.name} confidence={result.confidence}",
+            extra={
+                "event": EVT_INTENT_DETECTED,
+                "intent_primary": result.intent.name,
+                "confidence": result.confidence,
+                "intent_labels": (result.metadata or {}).get("llm_labels"),
+                "msg_len": len(message),
+            },
+        )
+        return result
     except Exception as e:
-        logger.warning(f"Unified LLM intent failed, fallback to keyword: {e}")
+        logger.warning(
+            f"Unified LLM intent failed, fallback to keyword: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "intent_unified", "error_type": type(e).__name__},
+        )
         return detect_intent(message)
 
 

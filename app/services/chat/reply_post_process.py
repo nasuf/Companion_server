@@ -13,6 +13,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime as _dt
 from typing import Any, Awaitable, Callable
 
+from app.observability.events import EVT_LLM_FAIL, EVT_REPLY_DECORATION
 from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
@@ -143,11 +144,13 @@ async def emit_replies(
     # §5 逐条 emoji / sticker / 推送
     for i, reply_text in enumerate(replies):
         added_emoji = False
+        emoji_used: str | None = None
         if should_add_emoji(ai_arousal):
             emoji = pick_one_emoji(ai_pleasure, ai_arousal, ai_primary_emotion)
             if emoji:
                 reply_text += emoji
                 added_emoji = True
+                emoji_used = emoji
 
         sticker_url: str | None = None
         if not added_emoji and not sticker_used and should_add_sticker(ai_arousal):
@@ -158,8 +161,25 @@ async def emit_replies(
                 if result:
                     sticker_url = result["url"]
                     sticker_used = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    f"sticker recommend failed: {e}",
+                    extra={"event": EVT_LLM_FAIL, "stage": "sticker_recommend"},
+                )
+
+        # 单条装饰决策 — DEBUG 因为 1 条 user msg 可能 emit 1-3 reply, 频率不低
+        decoration_kind = "emoji" if added_emoji else ("sticker" if sticker_url else "none")
+        logger.debug(
+            f"[REPLY-DECO] reply[{i}] kind={decoration_kind}",
+            extra={
+                "event": EVT_REPLY_DECORATION,
+                "reply_index": reply_index_offset + i,
+                "decoration_kind": decoration_kind,
+                "emoji": emoji_used,
+                "sticker_url": sticker_url,
+                "ai_arousal": ai_arousal,
+            },
+        )
 
         if i > 0 or delay_explain_offset or reply_index_offset > 0:
             await asyncio.sleep(random.uniform(0.3, 0.8))

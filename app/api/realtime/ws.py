@@ -11,6 +11,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prisma import Json
 
 from app.db import db
+from app.observability import bind_context
+from app.observability.events import EVT_WS_CONNECT, EVT_WS_DISCONNECT, EVT_WS_MESSAGE_RECV
 from app.redis_client import is_redis_healthy
 from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
 from app.services.interaction.delayed_queue import enqueue_or_append_delayed
@@ -115,67 +117,86 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
 
     user_id = conv.userId
     agent = conv.agent
+    workspace_id = getattr(conv, "workspaceId", None)
+    # username 一次性查询缓存 — 整个 WS 生命周期复用, 避免每条 message 查 DB
+    user_record = await db.user.find_unique(where={"id": user_id})
+    cached_username = user_record.username if user_record else None
 
-    await websocket.accept()
-    await manager.connect(
-        conversation_id, user_id, websocket,
-        workspace_id=getattr(conv, "workspaceId", None),
-    )
-
-    # spec §12 开场主动第一句话: 只在首次进入 (0 消息) 时触发
-    try:
-        asyncio.create_task(
-            send_first_greeting(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                agent_id=agent.id,
-                workspace_id=getattr(conv, "workspaceId", None),
-            )
+    # 绑定整个 WS 连接生命周期的 context — 内层 message handler / 派生的所有
+    # asyncio.create_task / fire_background 自动继承
+    with bind_context(
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        agent_id=agent.id,
+        agent_name=agent.name,
+        user_id=user_id,
+        username=cached_username,
+    ):
+        await websocket.accept()
+        await manager.connect(
+            conversation_id, user_id, websocket, workspace_id=workspace_id,
         )
-    except Exception as e:
-        logger.warning(f"first_greeting dispatch failed conv={conversation_id[:8]}: {e}")
+        logger.info("ws connected", extra={"event": EVT_WS_CONNECT})
 
-    try:
-        while True:
-            try:
-                raw = await asyncio.wait_for(
-                    websocket.receive_json(),
-                    timeout=_IDLE_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                await websocket.close(code=4008, reason="Idle timeout")
-                break
-
-            msg_type = raw.get("type", "")
-
-            if msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
-
-            elif msg_type == "message":
-                payload = raw.get("data") or {}
-                text = (payload.get("message") or "").strip()
-                if not text:
-                    continue
-                # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
-                # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
-                client_id = payload.get("client_id")
-                await _handle_message(
-                    websocket, conversation_id, user_id, agent, text,
-                    client_id=client_id,
-                )
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.warning(f"WS error conv={conversation_id[:8]}: {e}")
+        # spec §12 开场主动第一句话: 只在首次进入 (0 消息) 时触发
         try:
-            await websocket.send_json(
-                {"type": "error", "data": {"message": str(e)}}
+            asyncio.create_task(
+                send_first_greeting(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    agent_id=agent.id,
+                    workspace_id=workspace_id,
+                )
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"first_greeting dispatch failed conv={conversation_id[:8]}: {e}")
+
+        try:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_json(),
+                        timeout=_IDLE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    await websocket.close(code=4008, reason="Idle timeout")
+                    break
+
+                msg_type = raw.get("type", "")
+
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+
+                elif msg_type == "message":
+                    payload = raw.get("data") or {}
+                    text = (payload.get("message") or "").strip()
+                    if not text:
+                        continue
+                    # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
+                    # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
+                    client_id = payload.get("client_id")
+                    logger.info(
+                        "ws message received",
+                        extra={"event": EVT_WS_MESSAGE_RECV, "msg_len": len(text)},
+                    )
+                    await _handle_message(
+                        websocket, conversation_id, user_id, agent, text,
+                        client_id=client_id,
+                    )
+
+        except WebSocketDisconnect:
             pass
-    finally:
-        await manager.disconnect(conversation_id)
+        except Exception as e:
+            logger.warning(f"WS error conv={conversation_id[:8]}: {e}")
+            try:
+                await websocket.send_json(
+                    {"type": "error", "data": {"message": str(e)}}
+                )
+            except Exception:
+                pass
+        finally:
+            logger.info("ws disconnected", extra={"event": EVT_WS_DISCONNECT})
+            await manager.disconnect(conversation_id)
 
 
 async def _send_ack(

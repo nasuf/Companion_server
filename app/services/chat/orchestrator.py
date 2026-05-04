@@ -15,6 +15,12 @@ import re
 from collections.abc import AsyncGenerator
 
 from app.db import db
+from app.observability.events import (
+    EVT_INTENT_SPLIT,
+    EVT_MEMORY_CONTRADICTION,
+    EVT_REPLY_EMITTED,
+    EVT_REPLY_EMOTION,
+)
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
 from app.services.prompts.system_prompts import (
@@ -498,7 +504,13 @@ async def stream_chat_response(
                 if pending_sub_fragments:
                     logger.info(
                         f"[INTENT-MULTI] primary={detected_intent.intent.value} "
-                        f"sub={list(pending_sub_fragments.keys())}"
+                        f"sub={list(pending_sub_fragments.keys())}",
+                        extra={
+                            "event": EVT_INTENT_SPLIT,
+                            "intent_primary": detected_intent.intent.name,
+                            "sub_intents": list(pending_sub_fragments.keys()),
+                            "n_sub": len(pending_sub_fragments),
+                        },
                     )
 
         # 统一短路上下文：6 个意图 handler 共用
@@ -719,7 +731,13 @@ async def stream_chat_response(
                     inquiry = await generate_contradiction_inquiry(conflict, agent_name=agent.name if agent else "AI")
                     contradiction_inquiry = inquiry
                     await save_pending_contradiction(conversation_id, conflict)
-                    logger.info(f"L1 contradiction detected: {conflict.get('conflict_description', '')}")
+                    logger.info(
+                        f"L1 contradiction detected: {conflict.get('conflict_description', '')}",
+                        extra={
+                            "event": EVT_MEMORY_CONTRADICTION,
+                            "conflict_summary": (conflict.get("conflict_description") or "")[:80],
+                        },
+                    )
             except Exception as e:
                 logger.warning(f"Contradiction detection failed: {e}")
 
@@ -841,7 +859,13 @@ async def stream_chat_response(
         if reply_emotion.get("emotion"):
             logger.info(
                 f"[REPLY-EMO] emotion={reply_emotion['emotion']} "
-                f"intensity={reply_emotion.get('intensity', 0)}"
+                f"intensity={reply_emotion.get('intensity', 0)}",
+                extra={
+                    "event": EVT_REPLY_EMOTION,
+                    "ai_emotion": reply_emotion["emotion"],
+                    "intensity": reply_emotion.get("intensity", 0),
+                    "reply_text_len": len(full_response),
+                },
             )
 
         # spec §5/§6.4-§6.5: emoji/sticker + 延迟解释 + 推送
@@ -872,6 +896,18 @@ async def stream_chat_response(
             conversation_id,
             emitted_replies,
             trace_id=tracer.trace_id if tracer.is_active else None,
+        )
+        # spec §6.4-§6.5 已经 emit; 这里记 final 信号 — Axiom 用 event=reply.emitted
+        # 切分一次"完成回复"维度 (跟 reply.llm_main / reply.split 区别: 那两条是
+        # 中间步骤, 这条是用户实际收到的最终结果, 包含 emoji/sticker/拆分后)
+        logger.info(
+            f"[REPLY-EMIT] n={len(emitted_replies)} sub_intent_mode={sub_intent_mode}",
+            extra={
+                "event": EVT_REPLY_EMITTED,
+                "n_replies": len(emitted_replies),
+                "sub_intent_mode": sub_intent_mode,
+                "is_fallback": reply_is_fallback,
+            },
         )
 
         if sub_intent_mode:

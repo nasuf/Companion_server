@@ -19,6 +19,7 @@ import logging
 from datetime import datetime
 
 from app.db import db
+from app.observability.events import EVT_MEMORY_DELETED, EVT_MEMORY_DELETION_PENDING
 from app.redis_client import get_redis
 from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_json
@@ -219,6 +220,15 @@ async def save_pending_action(
         json.dumps(payload, ensure_ascii=False),
         ex=_PENDING_DELETION_TTL,
     )
+    logger.info(
+        f"[PENDING] {action} saved n_candidates={len(candidates or [])}",
+        extra={
+            "event": EVT_MEMORY_DELETION_PENDING,
+            "action": action,
+            "n_candidates": len(candidates or []),
+            "ttl_sec": _PENDING_DELETION_TTL,
+        },
+    )
 
 
 async def load_pending_action(conversation_id: str) -> dict | None:
@@ -390,4 +400,12 @@ async def execute_confirmed_deletion(
             deleted += 1
         except Exception as e:
             logger.warning(f"Confirmed deletion failed for {memory_id}: {e}")
+    logger.info(
+        f"execute_confirmed_deletion: {deleted}/{len(candidates)} memories deleted",
+        extra={
+            "event": EVT_MEMORY_DELETED,
+            "n_candidates": len(candidates),
+            "n_deleted": deleted,
+        },
+    )
     return deleted

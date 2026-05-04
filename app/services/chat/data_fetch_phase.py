@@ -13,6 +13,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from app.observability.events import (
+    EVT_LLM_FAIL,
+    EVT_MEMORY_L3_AWAKEN,
+    EVT_MEMORY_RELEVANCE,
+    EVT_MEMORY_RETRIEVED,
+)
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
@@ -152,9 +158,15 @@ def _post_process_retrieval(
     classified_memories = retrieval_result.get("memories")
     memory_strings = retrieval_result.get("memory_strings")
     graph_context = retrieval_result.get("graph_context")
+    n_retrieved = len(classified_memories) if classified_memories else 0
     logger.info(
-        f"[DEBUG-MEM] retrieval returned "
-        f"{len(classified_memories) if classified_memories else 0} memories"
+        f"[DEBUG-MEM] retrieval returned {n_retrieved} memories",
+        extra={
+            "event": EVT_MEMORY_RETRIEVED,
+            "memory_relevance": memory_relevance,
+            "n_retrieved": n_retrieved,
+            "has_graph_context": graph_context is not None,
+        },
     )
     if not classified_memories:
         logger.info("[DEBUG-MEM] no classified_memories from retrieval (empty result)")
@@ -197,20 +209,36 @@ async def maybe_awaken_l3(
     try:
         label = await l3_trigger_classify_fn(user_message)
     except Exception as e:
-        logger.warning(f"L3 trigger classify failed: {e}")
+        logger.warning(
+            f"L3 trigger classify failed: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "l3_trigger_classify"},
+        )
         label = "无"
-    logger.info(f"[L3-TRIGGER] label='{label}' for '{user_message[:40]}'")
 
     # §3.4.5 调用久远记忆意图 → 无论分类结果都召回；§4 强相关 → 仅前两类召回
     if not (should_call_l3 or label in ("不满纠正", "请求更久")):
+        logger.info(
+            f"[L3-TRIGGER] label='{label}' for '{user_message[:40]}' — skip awaken",
+            extra={
+                "event": EVT_MEMORY_L3_AWAKEN,
+                "trigger_label": label,
+                "awakened": False,
+                "n_l3_retrieved": 0,
+            },
+        )
         return [], label
 
     l3_results = await search_l3_memories(user_message, user_id, workspace_id=workspace_id)
     l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
-    if l3_memories:
-        logger.info(
-            f"L3 awakening: {len(l3_memories)} memories injected (label='{label}')"
-        )
+    logger.info(
+        f"[L3-TRIGGER] label='{label}' awakened {len(l3_memories)} memories",
+        extra={
+            "event": EVT_MEMORY_L3_AWAKEN,
+            "trigger_label": label,
+            "awakened": bool(l3_memories),
+            "n_l3_retrieved": len(l3_memories),
+        },
+    )
     return l3_memories, label
 
 
@@ -266,7 +294,14 @@ async def fetch_parallel_context(
         logger.warning(f"Memory relevance classification failed: {relevance_result}")
     elif isinstance(relevance_result, str):
         memory_relevance = relevance_result
-    logger.info(f"[DEBUG-MEM] relevance='{memory_relevance}' for '{user_message[:60]}'")
+    logger.info(
+        f"[DEBUG-MEM] relevance='{memory_relevance}' for '{user_message[:60]}'",
+        extra={
+            "event": EVT_MEMORY_RELEVANCE,
+            "memory_relevance": memory_relevance,
+            "msg_len": len(user_message),
+        },
+    )
 
     classified_memories, memory_strings, graph_context = _post_process_retrieval(
         memory_relevance, retrieval_result,

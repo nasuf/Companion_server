@@ -21,6 +21,12 @@ import uuid
 from pathlib import Path
 
 from app.db import db
+from app.observability.events import (
+    EVT_BOUNDARY_APOLOGY,
+    EVT_BOUNDARY_ATTACK,
+    EVT_BOUNDARY_BLOCKED,
+    EVT_BOUNDARY_PATIENCE,
+)
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
@@ -295,7 +301,18 @@ async def record_attack(agent_id: str, user_id: str, level: str | None = None) -
         pipe.expire(key, _ATTACK_KEY_TTL)
         await pipe.execute()
         # 单独 ZCARD 而非塞进 pipe — 避免 magic index, 多一次 RTT 但可读.
-        return int(await redis.zcard(key))
+        count_24h = int(await redis.zcard(key))
+        # spec §2.4 攻击事件审计 — 必须 log 让 admin 能追溯 "为什么这个 user 突然
+        # 被拉黑". 之前完全静默, 攻击发生即丢失证据 (Redis ZSET 24h 后自动清).
+        logger.info(
+            f"[ATTACK] agent={agent_id} user={user_id} level={level} count_24h={count_24h}",
+            extra={
+                "event": EVT_BOUNDARY_ATTACK,
+                "attack_level": level,
+                "attack_count_24h": count_24h,
+            },
+        )
+        return count_24h
 
     await pipe.execute()
     return 0
@@ -454,13 +471,26 @@ async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_flo
         new_val = await set_patience(agent_id, user_id, blocked_floor)
         logger.info(
             f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
-            f"reason=apology_unblock current=0 new={new_val}"
+            f"reason=apology_unblock current=0 new={new_val}",
+            extra={
+                "event": EVT_BOUNDARY_APOLOGY,
+                "patience_before": 0,
+                "patience_after": new_val,
+                "reason": "apology_unblock",
+            },
         )
         return new_val
     new_val = await adjust_patience(agent_id, user_id, +delta)
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
-        f"reason=restore delta=+{delta} current={current} new={new_val}"
+        f"reason=restore delta=+{delta} current={current} new={new_val}",
+        extra={
+            "event": EVT_BOUNDARY_PATIENCE,
+            "patience_before": current,
+            "patience_after": new_val,
+            "delta": delta,
+            "reason": "restore",
+        },
     )
     return new_val
 
@@ -583,6 +613,25 @@ async def process_boundary_violation(
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
         f"reason=violation level={attack_level} count={count} "
-        f"delta=-{deduction} current={current} new={new_val}"
+        f"delta=-{deduction} current={current} new={new_val}",
+        extra={
+            "event": EVT_BOUNDARY_PATIENCE,
+            "patience_before": current,
+            "patience_after": new_val,
+            "delta": -deduction,
+            "attack_level": attack_level,
+            "attack_count_24h": count,
+            "reason": "violation",
+        },
     )
+    if new_val is not None and new_val <= 0 and current > 0:
+        # crossed into blocked zone — 单独 emit 一条便于 Axiom 告警
+        logger.info(
+            f"[PATIENCE-BLOCKED] agent={agent_id} user={user_id} reached blocked zone",
+            extra={
+                "event": EVT_BOUNDARY_BLOCKED,
+                "attack_level": attack_level,
+                "patience_after": new_val,
+            },
+        )
     return new_val

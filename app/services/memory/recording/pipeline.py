@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, time
 from typing import Literal
 
+from app.observability.events import EVT_MEMORY_STORED
 from app.services.memory.storage.entity_repo import (
     record_entities_for_memory,
     record_preferences_for_memory,
@@ -367,5 +368,13 @@ async def process_memory_pipeline(
             except Exception as e:
                 logger.warning(f"Entity linking failed for memory {memory_id}: {e}")
 
-    logger.info(f"Pipeline complete: {len(stored_ids)}/{len(memories)} memories stored")
+    logger.info(
+        f"Pipeline complete: {len(stored_ids)}/{len(memories)} memories stored",
+        extra={
+            "event": EVT_MEMORY_STORED,
+            "n_extracted": len(memories),
+            "n_stored": len(stored_ids),
+            "side": side,
+        },
+    )
     return stored_ids

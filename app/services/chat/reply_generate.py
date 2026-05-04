@@ -14,6 +14,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from app.observability.events import EVT_REPLY_LLM, EVT_REPLY_SPLIT, EVT_REPLY_TIER
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.llm.models import convert_messages, get_chat_model, get_fallback_chat_model
 from app.services.llm.resilience import (
@@ -211,9 +212,26 @@ async def generate_reply(
             tier_reply_text = None
 
     if tier_reply_text:
+        logger.info(
+            f"[REPLY-TIER] memory_relevance={memory_relevance} reply_len={len(tier_reply_text)}",
+            extra={
+                "event": EVT_REPLY_TIER,
+                "memory_relevance": memory_relevance,
+                "reply_text_len": len(tier_reply_text),
+                "has_l3": bool(l3_memories),
+            },
+        )
         return [tier_reply_text], tier_reply_text, False, None
 
     raw_response, is_fallback = await _run_main_llm(chat_messages)
+    logger.info(
+        f"[REPLY-LLM] main reply len={len(raw_response)} fallback={is_fallback}",
+        extra={
+            "event": EVT_REPLY_LLM,
+            "raw_response_len": len(raw_response),
+            "is_fallback": is_fallback,
+        },
+    )
 
     # split + emotion 都只依赖 raw_response, 互不依赖 → 并行省 ~400-1000ms.
     # is_fallback=True (主+本地全挂) 时 raw_response 是静态兜底文案, 仍可情绪识别.
@@ -232,6 +250,13 @@ async def generate_reply(
 
     logger.info(
         f"[REPLY-SPLIT] n_target={reply_count} actual={len(replies)} "
-        f"source={split_source} is_fallback={is_fallback}"
+        f"source={split_source} is_fallback={is_fallback}",
+        extra={
+            "event": EVT_REPLY_SPLIT,
+            "n_target": reply_count,
+            "n_actual": len(replies),
+            "split_source": split_source,
+            "is_fallback": is_fallback,
+        },
     )
     return replies, raw_response, is_fallback, reply_emotion

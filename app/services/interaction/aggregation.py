@@ -15,6 +15,7 @@ import logging
 import time
 from typing import Any
 
+from app.observability.events import EVT_AGG_FLUSHED, EVT_AGG_PUSHED, EVT_AGG_SCAN
 from app.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,12 @@ async def push_pending(
         return False
     logger.info(
         f"[AGG-PUSH] agent_id={agent_id} user_id={user_id} text={text!r} "
-        f"window_sec={_AGGREGATION_WINDOW}"
+        f"window_sec={_AGGREGATION_WINDOW}",
+        extra={
+            "event": EVT_AGG_PUSHED,
+            "fragment_len": len(text),
+            "window_sec": _AGGREGATION_WINDOW,
+        },
     )
     return True
 
@@ -178,7 +184,12 @@ async def flush_pending(
     if combined:
         logger.info(
             f"[AGG-FLUSH] agent_id={agent_id} user_id={user_id} parts={len(texts)} "
-            f"combined={combined[:80]!r}"
+            f"combined={combined[:80]!r}",
+            extra={
+                "event": EVT_AGG_FLUSHED,
+                "n_parts": len(texts),
+                "combined_len": len(combined),
+            },
         )
     return combined, conv_id, ctx, latest_message_id
 
@@ -205,4 +216,10 @@ async def scan_expired() -> list[tuple[str, str, str, str, dict | None, str | No
         text, conv_id, ctx, latest_message_id = await flush_pending(agent_id=agent_id, user_id=user_id)
         if text and conv_id:
             results.append((agent_id, user_id, text, conv_id, ctx, latest_message_id))
+    if results:
+        # 仅有命中才打 — 否则 1s/tick 会刷屏 (scheduler 调度间隔)
+        logger.debug(
+            f"[AGG-SCAN] flushed {len(results)} expired window(s)",
+            extra={"event": EVT_AGG_SCAN, "n_flushed": len(results)},
+        )
     return results

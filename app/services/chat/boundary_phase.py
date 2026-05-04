@@ -14,6 +14,13 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
+from app.observability.events import (
+    EVT_BOUNDARY_APOLOGY,
+    EVT_BOUNDARY_BANNED_KW,
+    EVT_BOUNDARY_BLOCKED,
+    EVT_BOUNDARY_VIOLATION_FAIL,
+    EVT_BOUNDARY_ZONE,
+)
 from app.services.chat.intent_replies import (
     apology_reply,
     attack_level_classify,
@@ -132,13 +139,21 @@ async def _handle_blocked(
 ) -> AsyncGenerator[dict, None]:
     """spec §2.6 步骤 2：拉黑。先检测道歉承诺；命中则恢复+和解回复，否则拉黑回复。"""
     apology = await detect_apology(ctx.user_message)
-    if apology.get("is_apology") and apology.get("sincerity", 0) >= APOLOGY_SINCERITY_MIN:
+    sincerity = apology.get("sincerity", 0)
+    if apology.get("is_apology") and sincerity >= APOLOGY_SINCERITY_MIN:
         new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
         reply = await apology_reply(
             message=ctx.user_message,
             personality_brief=_personality_brief(ctx.agent),
             new_patience=new_patience,
         ) or "好啦，我不生气了~"
+        logger.info(
+            f"[BOUNDARY] apology_unblock sincerity={sincerity} → patience={new_patience}",
+            extra={
+                "event": EVT_BOUNDARY_APOLOGY, "outcome": "unblock",
+                "sincerity": sincerity, "patience_after": new_patience,
+            },
+        )
         async for evt in _emit_short_circuit(
             ctx, reply,
             {"boundary": True, "zone": "blocked", "apology_unblock": True},
@@ -193,6 +208,14 @@ async def _handle_attack_ai(
     - 否则        → K1/K2/K3 分档回复.
     """
     attack_level = await attack_level_classify(ctx.user_message)
+    logger.info(
+        f"[BOUNDARY] attack classified zone={zone} level={attack_level}",
+        extra={
+            "event": EVT_BOUNDARY_ZONE,
+            "attack_target": "ai", "attack_level": attack_level,
+            "patience_before": ctx.cached_patience, "zone": zone,
+        },
+    )
 
     if attack_level:
         try:
@@ -200,7 +223,10 @@ async def _handle_attack_ai(
                 ctx.agent_id, ctx.user_id, attack_level,
             )
         except Exception as e:
-            logger.warning(f"process_boundary_violation failed: {e}")
+            logger.warning(
+                f"process_boundary_violation failed: {e}",
+                extra={"event": EVT_BOUNDARY_VIOLATION_FAIL, "error_type": type(e).__name__},
+            )
             new_patience = None
         if new_patience is not None:
             ctx.cached_patience = new_patience
@@ -216,6 +242,13 @@ async def _handle_attack_ai(
             "boundary": True, "zone": "blocked",
             "attack_level": attack_level, "becomes_blocked": True,
         }
+        logger.info(
+            f"[BOUNDARY] becomes_blocked attack_level={attack_level}",
+            extra={
+                "event": EVT_BOUNDARY_BLOCKED,
+                "attack_level": attack_level, "becomes_blocked": True,
+            },
+        )
     else:
         is_final_warning = ctx.cached_patience < FINAL_WARNING_PATIENCE_THRESHOLD
         response = await generate_boundary_reply_llm(
@@ -297,6 +330,17 @@ async def run_boundary(ctx: BoundaryPhaseCtx) -> AsyncGenerator[dict, None]:
 
     if boundary_result:
         zone = boundary_result["zone"]
+        # 命中边界 (违禁词 / LLM 兜底) — 后续走拉黑/攻击/中低耐心分支, 各分支再 emit 细粒度 event
+        hits = boundary_result.get("hits") or []
+        if hits:
+            logger.info(
+                f"[BOUNDARY] banned_keyword zone={zone} hits={len(hits)}",
+                extra={
+                    "event": EVT_BOUNDARY_BANNED_KW,
+                    "zone": zone, "n_hits": len(hits),
+                    "first_hit": (hits[0] if hits else None),
+                },
+            )
 
         # 步骤 2：拉黑
         if zone == "blocked":
@@ -308,6 +352,12 @@ async def run_boundary(ctx: BoundaryPhaseCtx) -> AsyncGenerator[dict, None]:
         # 把含糊代词如"不然呢"也归到"攻击AI")
         attack_target = await attack_target_classify(
             ctx.user_message, recent_context=ctx.recent_context,
+        )
+        logger.info(
+            f"[BOUNDARY] attack_target={attack_target or 'none'} zone={zone}",
+            extra={"event": EVT_BOUNDARY_ZONE,
+                   "attack_target": attack_target or "none", "zone": zone,
+                   "patience": ctx.cached_patience},
         )
         if attack_target and attack_target != "攻击AI":
             if zone in ("medium", "low"):

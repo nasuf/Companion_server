@@ -15,6 +15,15 @@ from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 
 from app.db import db
+from app.observability import bind_context
+from app.observability.events import (
+    EVT_DB_LOOKUP_FAIL,
+    EVT_REMINDER_DLQ,
+    EVT_REMINDER_HANDLED,
+    EVT_REMINDER_PRECHECK,
+    EVT_REMINDER_RENEWED,
+    EVT_REMINDER_RESCHEDULED,
+)
 from app.redis_client import get_redis
 from app.services.proactive.sender import send_manual_or_triggered_proactive
 from app.services.proactive.special_dates import (
@@ -120,6 +129,23 @@ async def scan_triggers() -> None:
         f"{[(t.id[:8], t.actionType, t.triggerTime.isoformat()) for t in triggers]}"
     )
 
+    # 批量预拉 agent 名 — 之前每个 trigger 都 find_unique 一次, 50 reminder 一波
+    # 就 50 round-trips. IN 查询 1 次拿全部, ~10ms vs ~250ms.
+    # workspace_id 仍在 _bounded_execute 单查 (resolve_workspace_id 内部有 Redis
+    # 缓存, 真实命中率高; 跨 user_id 维度 batch 反而复杂).
+    agent_ids = list({t.aiAgentId for t in triggers})
+    agent_name_by_id: dict[str, str | None] = {}
+    try:
+        agents = await db.aiagent.find_many(where={"id": {"in": agent_ids}})
+        agent_name_by_id = {a.id: getattr(a, "name", None) for a in agents}
+    except Exception as e:
+        logger.warning(
+            f"agent batch lookup failed for log enrichment: {e}",
+            extra={"event": EVT_DB_LOOKUP_FAIL, "table": "aiagent",
+                   "stage": "trigger_scan_batch", "n_ids": len(agent_ids),
+                   "error_type": type(e).__name__},
+        )
+
     # Round-2 review #10: 串行 → asyncio.gather 并发 (N×10s → max(10s) 总耗时).
     # Semaphore(8) 限流: gather 启全部 task 但同时只 8 个进 LLM 段, 防 N 个
     # reminder 同时到点把 dashscope rate limit (QPS=60) 打爆触发 circuit breaker.
@@ -127,7 +153,29 @@ async def scan_triggers() -> None:
 
     async def _bounded_execute(trig):
         async with sem:
-            await _execute_trigger(trig, now)
+            # 在 LLM 段开始前绑定 log 上下文 — 内层 _execute_trigger / _handle_reminder_trigger
+            # 派生的 fire_background / asyncio.create_task 自动继承 (各 task 独立 context).
+            # workspace_id 失败仅 ID 不带字段, 不阻塞主流程 (比让一波 reminder 全 fail 好).
+            agent_name = agent_name_by_id.get(trig.aiAgentId)
+            ws_id = None
+            try:
+                ws_id = await resolve_workspace_id(
+                    user_id=trig.userId, agent_id=trig.aiAgentId,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"workspace lookup failed for log enrichment: {e}",
+                    extra={"event": EVT_DB_LOOKUP_FAIL, "table": "workspace",
+                           "stage": "trigger_log_enrichment",
+                           "error_type": type(e).__name__},
+                )
+            with bind_context(
+                agent_id=trig.aiAgentId,
+                agent_name=agent_name,
+                user_id=trig.userId,
+                workspace_id=ws_id,
+            ):
+                await _execute_trigger(trig, now)
 
     results = await asyncio.gather(
         *(_bounded_execute(t) for t in triggers),
@@ -289,7 +337,14 @@ async def _handle_emit_failure(
         )
         logger.warning(
             f"[REMINDER-EMIT] {trigger.id[:8]} (periodic={recurrence}) emit "
-            f"failed, next period intact: {error_str}"
+            f"failed, next period intact: {error_str}",
+            extra={
+                "event": EVT_REMINDER_DLQ,
+                "kind": "periodic_lost_one",
+                "trigger_id": trigger.id,
+                "recurrence": recurrence,
+                "error_type": type(exc).__name__,
+            },
         )
         return
 
@@ -300,7 +355,14 @@ async def _handle_emit_failure(
         )
         logger.warning(
             f"[REMINDER-EMIT] {trigger.id[:8]} retries exhausted "
-            f"({retry_count}/{MAX_REMINDER_RETRY}), DEAD: {error_str}"
+            f"({retry_count}/{MAX_REMINDER_RETRY}), DEAD: {error_str}",
+            extra={
+                "event": EVT_REMINDER_DLQ,
+                "kind": "exhausted",
+                "trigger_id": trigger.id,
+                "attempt": retry_count,
+                "error_type": type(exc).__name__,
+            },
         )
         return
 
@@ -419,6 +481,17 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
     )
     state = state_info.get("state", "needed")
 
+    logger.info(
+        f"[REMINDER-PRECHECK] {trigger.id[:8]} → {state}",
+        extra={
+            "event": EVT_REMINDER_PRECHECK,
+            "trigger_id": trigger.id,
+            "precheck_state": state,
+            "reason": state_info.get("reason"),
+            "recurrence": recurrence,
+        },
+    )
+
     if state in ("completed", "cancelled") and memory_id:
         await _archive_reminder_memory(
             memory_id, side, reason=f"{state}:{state_info.get('reason', '')}",
@@ -429,7 +502,14 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         )
         logger.info(
             f"reminder {trigger.id} archived as {state} "
-            f"memory={memory_id[:8]} reason={state_info.get('reason')}"
+            f"memory={memory_id[:8]} reason={state_info.get('reason')}",
+            extra={
+                "event": EVT_REMINDER_HANDLED,
+                "outcome": state,  # completed / cancelled
+                "trigger_id": trigger.id,
+                "memory_id": memory_id,
+                "recurrence": recurrence,
+            },
         )
         return
 
@@ -458,7 +538,14 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
                         logger.warning(f"reminder reschedule: memory occurTime update failed: {e}")
                 logger.info(
                     f"reminder {trigger.id} rescheduled to {new_time} "
-                    f"reason={state_info.get('reason')}"
+                    f"reason={state_info.get('reason')}",
+                    extra={
+                        "event": EVT_REMINDER_RESCHEDULED,
+                        "trigger_id": trigger.id,
+                        "memory_id": memory_id,
+                        "new_trigger_time": new_time.isoformat(),
+                        "reason": state_info.get("reason"),
+                    },
                 )
                 return
 
@@ -492,9 +579,16 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
                     next_trigger_time=next_occur,
                     action_data=data,
                 )
-                logger.debug(
+                logger.info(
                     f"reminder {trigger.id} renewed: next={next_occur} "
-                    f"recurrence={recurrence}"
+                    f"recurrence={recurrence}",
+                    extra={
+                        "event": EVT_REMINDER_RENEWED,
+                        "trigger_id": trigger.id,
+                        "memory_id": memory_id,
+                        "recurrence": recurrence,
+                        "next_trigger_time": next_occur.isoformat(),
+                    },
                 )
             except Exception as e:
                 logger.warning(f"reminder {trigger.id} renewal failed: {e}")
@@ -561,7 +655,15 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         # 注: trigger.isActive=False + lastFired 已在 emit 前 claim, 不重复 update.
         logger.info(
             f"reminder {trigger.id} fired memory={memory_id and memory_id[:8]} "
-            f"recurrence={recurrence}"
+            f"recurrence={recurrence}",
+            extra={
+                "event": EVT_REMINDER_HANDLED,
+                "outcome": "fired",
+                "trigger_id": trigger.id,
+                "memory_id": memory_id,
+                "recurrence": recurrence,
+                "summary_preview": summary[:40],
+            },
         )
         # 通知 inspector 提醒 tab 实时刷新 (status: active → fired)
         from app.services.reminder.scheduling import notify_reminder_changed

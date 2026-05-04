@@ -15,6 +15,10 @@ from __future__ import annotations
 import json
 import logging
 
+from app.observability.events import (
+    EVT_LLM_FAIL,
+    EVT_MEMORY_CONTRADICTION_STEP,
+)
 from app.redis_client import get_redis
 from app.services.llm.models import (
     get_chat_model,
@@ -56,6 +60,10 @@ async def detect_l1_contradiction(
         order={"importance": "desc"}, take=300,
     )
     if not l1_user:
+        logger.debug(
+            "contradiction.detect: no L1 user memory to compare against",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "detect", "outcome": "no_l1"},
+        )
         return None
 
     l1_text = "\n".join(f"[{m.id}] {m.summary or m.content}" for m in l1_user)
@@ -68,10 +76,27 @@ async def detect_l1_contradiction(
         }))
         result = await invoke_json(get_utility_model(), prompt)
         if isinstance(result, dict) and result.get("has_conflict"):
+            logger.info(
+                f"contradiction.detect: conflict found in {len(l1_user)} L1",
+                extra={
+                    "event": EVT_MEMORY_CONTRADICTION_STEP, "step": "detect",
+                    "outcome": "conflict", "n_l1_checked": len(l1_user),
+                    "old_memory_id": result.get("conflicting_memory_id"),
+                },
+            )
             return result
+        logger.debug(
+            f"contradiction.detect: no conflict (checked {len(l1_user)} L1)",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "detect",
+                   "outcome": "no_conflict", "n_l1_checked": len(l1_user)},
+        )
         return None
     except Exception as e:
-        logger.warning(f"L1 contradiction detection failed: {e}")
+        logger.warning(
+            f"L1 contradiction detection failed: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "contradiction_detect",
+                   "error_type": type(e).__name__},
+        )
         return None
 
 
@@ -99,9 +124,19 @@ async def generate_contradiction_inquiry(
             **pad_params(user_emotion),
         }
         prompt = template.format_map(SafeDict(params))
-        return (await invoke_text(get_chat_model(), prompt)).strip()
+        inquiry = (await invoke_text(get_chat_model(), prompt)).strip()
+        logger.info(
+            f"contradiction.inquiry generated len={len(inquiry)}",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "inquiry",
+                   "inquiry_len": len(inquiry)},
+        )
+        return inquiry
     except Exception as e:
-        logger.warning(f"Contradiction inquiry generation failed: {e}")
+        logger.warning(
+            f"Contradiction inquiry generation failed: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "contradiction_inquiry",
+                   "error_type": type(e).__name__},
+        )
         return "诶,我记得你之前说的不太一样,是情况有变化吗?"
 
 
@@ -120,9 +155,21 @@ async def analyze_contradiction_response(
             "conflict_memory": conflict.get("conflict_description", ""),
         }))
         result = await invoke_json(get_utility_model(), prompt)
-        return result if isinstance(result, dict) else {"change_type": "新增", "reason": "解析失败"}
+        if isinstance(result, dict):
+            logger.info(
+                f"contradiction.analyze: change_type={result.get('change_type')}",
+                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "analyze",
+                       "change_type": result.get("change_type"),
+                       "reason": (result.get("reason") or "")[:60]},
+            )
+            return result
+        return {"change_type": "新增", "reason": "解析失败"}
     except Exception as e:
-        logger.warning(f"Contradiction response analysis failed: {e}")
+        logger.warning(
+            f"Contradiction response analysis failed: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "contradiction_analyze",
+                   "error_type": type(e).__name__},
+        )
         return {"change_type": "新增", "reason": str(e)[:20]}
 
 
@@ -179,7 +226,18 @@ async def apply_contradiction_resolution(
                 level=2,
                 importance=new_imp,
             )
-            logger.info(f"Contradiction: demoted {old_id} L1→L2 ({change_type})")
+            logger.info(
+                f"contradiction.apply: demoted {old_id[:8]} L1→L2 ({change_type})",
+                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                       "change_type": change_type, "old_memory_id": old_id,
+                       "new_importance": new_imp},
+            )
+    else:
+        logger.debug(
+            f"contradiction.apply: no demotion (change_type={change_type})",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                   "change_type": change_type, "outcome": "no_demote"},
+        )
 
     # New memory from analysis (if provided) will be created by the normal
     # memory extraction pipeline on the user's latest message — no need to
