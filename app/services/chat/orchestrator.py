@@ -526,6 +526,12 @@ async def stream_chat_response(
             sub_intent_mode=sub_intent_mode,
             reply_index_offset=reply_index_offset,
             cached_patience=cached_patience,
+            # 复用 boundary_phase 算好的同一份 recent_context, 避免二次格式化.
+            # handler 把它传进 *_reply prompt 的 {context} 占位符 — 否则短路路径
+            # LLM 看不到对话历史, 只能从 AI 当前作息编内容 (生产 bug 2026-05-05:
+            # 用户问"你看到什么段子" → AI 编了一个跟自己当下划船活动巧合的段子,
+            # 因为 prompt 里 {context} 是 "(无)").
+            recent_context=boundary_ctx.recent_context,
         )
 
         # §3.4.6 终结意图

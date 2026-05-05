@@ -48,6 +48,7 @@ from app.services.schedule_domain.schedule import (
     update_schedule_slot,
 )
 from app.services.schedule_domain.time_service import resolve_implicit_time
+from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,12 @@ class ShortCircuitCtx:
     sub_intent_mode: bool
     reply_index_offset: int
     cached_patience: int
+    # 最近几轮对话格式化文本 (format_recent_context 的输出). 所有走 *_reply prompt
+    # 的 handler 都需要它注入 {context}: 缺了就只能看到当前消息 + AI 当前作息,
+    # LLM 会从作息里"借"内容编出跟当下活动巧合相关的答案 (生产 bug: 用户问
+    # "你看到什么段子" → AI 编了一个跟自己当前划船活动巧合的段子). 所有 handler
+    # 共享 orchestrator 已计算好的同一份 recent_context, 不再各自取数.
+    recent_context: str = EMPTY_RECENT_CONTEXT
     # 短路 handler 经 ctx.finalize(reply) 把回复文本回写到这里, 让 orchestrator
     # finally 兜底 fire post_process 时拿到正确的 full_response (否则 short-circuit
     # 路径直接 return, post_process 永不跑, 记忆/PAD/trait 全丢失).
@@ -130,6 +137,7 @@ async def handle_conversation_end(
 ) -> AsyncGenerator[dict, None]:
     farewell = await end_reply(
         message=user_message,
+        context=ctx.recent_context,
         personality_brief=_agent_name(ctx.agent),
     )
     if not farewell:
@@ -170,6 +178,7 @@ async def handle_apology_promise(
         new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
         reply = await apology_reply(
             message=user_message,
+            context=ctx.recent_context,
             personality_brief=_agent_name(ctx.agent),
             new_patience=new_patience,
         ) or "好啦，我不生气了~"
@@ -226,6 +235,7 @@ async def handle_deletion(
             reply = (
                 await deletion_confirm_reply(
                     message=user_message,
+                    context=ctx.recent_context,
                     personality_brief=agent_name,
                     candidate_memories=candidate_preview,
                 )
@@ -298,6 +308,7 @@ async def handle_schedule_query(
     try:
         response = await schedule_query_reply(
             message=user_message,
+            context=ctx.recent_context,
             user_emotion=user_emotion,
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "(未知)",
@@ -331,6 +342,7 @@ async def handle_current_state(
     try:
         response = await current_state_reply(
             message=user_message,
+            context=ctx.recent_context,
             user_emotion=user_emotion,
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "(未知)",
