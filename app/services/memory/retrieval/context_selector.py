@@ -29,7 +29,7 @@ class ClassifiedMemory:
     similarity: float = 0.8
     created_at: str | None = None
     display_score: float = 0.0  # set by reranking in orchestrator
-    source: MemorySource = "user"  # 上游 vector_search/keyword_fallback 必填
+    source: MemorySource = "user"  # 上游 vector_search 必填
 
 
 def split_by_source(
