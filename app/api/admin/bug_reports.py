@@ -114,11 +114,11 @@ async def list_bug_reports_by_conversation(
     conversation_id: str,
     _: dict = Depends(require_admin_jwt),
 ):
-    """List bug reports for all messages in a conversation, newest first."""
+    """List bug reports for all messages in a conversation, oldest first."""
     reports = await db.bugreport.find_many(
         where={"message": {"is": {"conversationId": conversation_id}}},
         include=_INCLUDE_USERS,
-        order={"createdAt": "desc"},
+        order={"createdAt": "asc"},
     )
     return [_serialize(r) for r in reports]
 

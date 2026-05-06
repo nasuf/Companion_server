@@ -134,7 +134,7 @@ async def list_conversations(
 @router.get("/{conversation_id}/messages", response_model=list[MessageResponse])
 async def list_messages(
     conversation_id: str,
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=100, le=100000),
     offset: int = 0,
     _conv=Depends(require_conversation_owner),
 ):
