@@ -27,6 +27,7 @@ from app.services.llm.models import (
     invoke_text,
 )
 from app.services.memory.storage import repo as memory_repo
+from app.services.memory.storage.persistence import store_memory
 from app.services.prompting.store import get_prompt_text
 from app.services.prompting.utils import SafeDict, pad_params
 
@@ -208,30 +209,84 @@ async def apply_contradiction_resolution(
 ) -> None:
     """Spec §4.4: adjust memories based on analysis.
 
-    - 变化/错误: demote old L1 → L2, create new entry at appropriate level
-    - 新增: keep old L1, add new entry alongside
+    - 变化/错误: demote old L1 → L2, create new entry at L1 (same category as old)
+    - 新增: keep old L1; new memory (different aspect) handled by extraction pipeline
+
+    新 L1 写入说明: contradiction_analysis prompt 输出 new_memory 字段 (e.g.
+    "用户今年 29 岁"). 之前注释说"由 extraction pipeline 创建", 但 extraction
+    跑在用户的"确认"消息上 (e.g. "说错了之前"), 文本不含新事实抽不到. 而且即便
+    抽到, 单独写也会被 L1 SINGLETON gate 拦下 (因为老 L1 此时还在). 这里在
+    demote 老 L1 之后立即写新 L1, 走正常 store_memory (含 embedding + dedup).
     """
     change_type = analysis.get("change_type", "新增")
     old_id = conflict.get("conflicting_memory_id")
+    new_memory_text = (analysis.get("new_memory") or "").strip()
 
     if change_type in ("变化", "错误") and old_id:
         # Demote old L1 → L2 with reduced importance
         old_mem = await memory_repo.find_unique(old_id)
-        if old_mem:
-            new_imp = max(0.30, (old_mem.importance or 0.5) - 0.20)
-            await memory_repo.update(
-                old_id,
-                source=getattr(old_mem, "source", "user"),
-                record=old_mem,
-                level=2,
-                importance=new_imp,
-            )
-            logger.info(
-                f"contradiction.apply: demoted {old_id[:8]} L1→L2 ({change_type})",
-                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                       "change_type": change_type, "old_memory_id": old_id,
-                       "new_importance": new_imp},
-            )
+        if not old_mem:
+            return
+
+        new_imp = max(0.30, (old_mem.importance or 0.5) - 0.20)
+        await memory_repo.update(
+            old_id,
+            source=getattr(old_mem, "source", "user"),
+            record=old_mem,
+            level=2,
+            importance=new_imp,
+        )
+        logger.info(
+            f"contradiction.apply: demoted {old_id[:8]} L1→L2 ({change_type})",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                   "change_type": change_type, "old_memory_id": old_id,
+                   "new_importance": new_imp},
+        )
+
+        # spec §4.4 step 2: 写新 L1 (同 category 复用老条目的 main/sub).
+        if new_memory_text:
+            try:
+                new_id = await store_memory(
+                    user_id=old_mem.userId,
+                    content=new_memory_text,
+                    summary=new_memory_text,
+                    level=1,
+                    importance=0.95,
+                    main_category=getattr(old_mem, "mainCategory", None),
+                    sub_category=getattr(old_mem, "subCategory", None),
+                    source=getattr(old_mem, "source", "user"),
+                    workspace_id=getattr(old_mem, "workspaceId", None),
+                )
+                if new_id:
+                    logger.info(
+                        f"contradiction.apply: wrote new L1 {new_id[:8]} "
+                        f"text='{new_memory_text[:40]}'",
+                        extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                               "change_type": change_type, "new_memory_id": new_id,
+                               "new_memory_text_len": len(new_memory_text)},
+                    )
+                else:
+                    # store_memory 返回 None 仅当: dedup 命中 (相似度 ≥ 0.9
+                    # DEDUP_THRESHOLD) 或 taxonomy 不允许该 (source, level, main)
+                    # 组合. 矛盾解决场景下两者都属异常 — 用户已主动纠正, 应该入库.
+                    logger.warning(
+                        f"contradiction.apply: store_memory returned None for "
+                        f"new_memory='{new_memory_text[:40]}' (likely dedup hit "
+                        f"with demoted old or taxonomy block); 新 L1 未入库",
+                        extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                               "change_type": change_type, "outcome": "new_l1_blocked",
+                               "new_memory_text_len": len(new_memory_text)},
+                    )
+            except Exception as e:
+                # Don't crash resolution flow on write failure — old is already
+                # demoted, the conversation can continue. New L1 missing is a
+                # degraded-but-recoverable state (next time user mentions it,
+                # it'll go through normal extraction).
+                logger.warning(
+                    f"contradiction.apply: failed to write new L1: {e}",
+                    extra={"event": EVT_LLM_FAIL, "stage": "contradiction_apply_new",
+                           "error_type": type(e).__name__},
+                )
     else:
         logger.debug(
             f"contradiction.apply: no demotion (change_type={change_type})",
@@ -239,10 +294,8 @@ async def apply_contradiction_resolution(
                    "change_type": change_type, "outcome": "no_demote"},
         )
 
-    # New memory from analysis (if provided) will be created by the normal
-    # memory extraction pipeline on the user's latest message — no need to
-    # double-create here. The orchestrator ensures the message goes through
-    # the standard memory recording flow after contradiction resolution.
+    # 新增 case: old L1 unchanged. New memory (different aspect like new
+    # relative) is left to normal extraction pipeline on the user's reply.
 
 
 # ── Conversation-level state management ──────────────────────────────────
