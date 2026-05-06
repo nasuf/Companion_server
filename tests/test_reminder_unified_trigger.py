@@ -2,7 +2,6 @@
 
 Covers the bugs found in round-1 review:
   - importance clamp must land in L3 (not L2 due to off-by-one boundary)
-  - emotion bump must not push reminder importance back to L2
   - _next_occurrence handles monthly / yearly edge cases (Jan 31 → Feb 28)
   - _handle_reminder_trigger idempotency guard (lastFired within 2 min skips)
   - _handle_reminder_trigger claims original BEFORE emit (R1 ordering)
@@ -53,19 +52,6 @@ def test_reminder_clamp_upper_bound_lands_in_L3():
             f"reminder importance {raw} → clamp {clamped} → "
             f"level {_level_from_importance(clamped)} (must be 3)"
         )
-
-
-def test_reminder_clamp_after_emotion_bump_still_L3():
-    """The emotion bump (importance += pleasure_abs * 0.2) must not push reminder
-    importance back into L2. Verifies the post-emotion re-clamp at pipeline.py."""
-    # Worst case: clamp gives 0.49, emotion gives +0.2 → 0.69 (would be L2!)
-    importance = max(0.4, min(0.49, 0.6))  # 0.49
-    pleasure_abs = 1.0
-    importance = min(1.0, importance + pleasure_abs * 0.2)  # 0.69
-    # Re-clamp for reminder (pipeline.py:266 logic)
-    importance = min(0.49, importance)
-    assert importance <= 0.49
-    assert _level_from_importance(importance) == 3
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -263,18 +263,6 @@ async def process_memory_pipeline(
                 sub_category = "其他"
                 # recurrence 不重置: store_memory 的 sub_category!="提醒" 闸门会丢弃
 
-        # Adjust importance based on emotion
-        emotion = mem.get("emotion")
-        if emotion:
-            pleasure_abs = abs(emotion.get("pleasure", 0.0))
-            importance = min(1.0, importance + pleasure_abs * 0.2)
-            # Re-apply reminder clamp after emotion bump — otherwise a strong
-            # reminder ("超级开心地提醒我去看演唱会") boosts to 0.49 + 0.2 = 0.69
-            # → stored at L2 importance even though level=3 was already derived.
-            # Inconsistent state breaks L2→L1 frequency promotion guard.
-            if sub_category == "提醒":
-                importance = min(0.49, importance)
-
         memory_id = await store_memory(
             user_id=user_id,
             content=summary,
