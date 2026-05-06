@@ -409,6 +409,22 @@ _NO_ROLEPLAY_RULE = (
 )
 
 
+# 反归因幻觉硬约束 — 主动消息 / 当前状态回复独有问题:
+# 失败模式 trace (2026-05-06): AI scheduled_scene 输出
+# "刚把上次你推荐的那个剧追到最新一集" — 用户从未推荐过任何剧, 凭空把"推荐者"
+# 归因到用户身上, 用户追问后 AI 继续掩饰捏造剧名. 这跟 _NO_ROLEPLAY_RULE 的旁白
+# 问题是不同维度: 旁白是格式问题, 归因是事实问题.
+# 主回复 prompt (chat.system_base) 已有"反幻觉硬约束", 但只覆盖"用户问你记不记得X"
+# 的反向场景; AI 主动描述自己时把事归因到用户的正向编造场景没覆盖, 这里独立一条.
+_NO_USER_FABRICATION_RULE = (
+    "\n\n【硬约束·反幻觉】"
+    "描述自己时**不许把事归因到用户**. 任何指向「用户做过 / 说过 / 送过 / 建议过 / "
+    "和你一起做过 X」的话, 只有当 X 字面出现在【参考信息】里给出的用户记忆段时才能说; "
+    "段里没给就只说自己, 不要拉用户进来. "
+    "用户没说过的事, 即便符合氛围, 也是凭空捏造, 会被当面戳穿."
+)
+
+
 # ── Part 4 §4 主动交流 7 个分化指令 (4.19 指令模版) ──
 
 # Spec 第四部分 §4.1「沉默唤醒触发」step 4：参考信息含话题方向/记忆(如有)/
@@ -422,7 +438,7 @@ PROACTIVE_SILENCE_PLAIN_PROMPT = """【任务】作为用户的好朋友，隔�
 - 用户画像：{user_portrait}
 - 近期对话：{recent_context}
 
-【输出】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SILENCE_AI_MEMORY_PROMPT = """【任务】作为用户的好朋友，现在想主动问候用户。你想起一件关于自己的事情，可以自然地带一句，但不深入展开，不提问，不强聊。
@@ -435,7 +451,7 @@ PROACTIVE_SILENCE_AI_MEMORY_PROMPT = """【任务】作为用户的好朋友，�
 - 用户画像：{user_portrait}
 - 近期对话：{recent_context}
 
-【要求】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【要求】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SILENCE_USER_MEMORY_PROMPT = """【任务】作为用户的好朋友，现在想主动问候用户。你想起一件关于用户的事情，可以自然地带一句，但不深入展开，不强聊。
@@ -448,7 +464,7 @@ PROACTIVE_SILENCE_USER_MEMORY_PROMPT = """【任务】作为用户的好朋友�
 - 用户画像：{user_portrait}
 - 近期对话：{recent_context}
 
-【要求】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【要求】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SILENCE_SCHEDULE_PROMPT = """【任务】作为用户的好朋友，现在想主动问候用户。结合你当前的作息安排，轻轻带一句，不强聊。
@@ -461,7 +477,7 @@ PROACTIVE_SILENCE_SCHEDULE_PROMPT = """【任务】作为用户的好朋友，�
 - 用户画像：{user_portrait}
 - 近期对话：{recent_context}
 
-【要求】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【要求】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 # Spec 第四部分 §4.2 + 指令模版 P24「记忆主动·基于AI自身记忆」
@@ -475,7 +491,7 @@ PROACTIVE_MEMORY_AI_PROMPT = """【任务】你想起自己的一段经历，忽
 - 你想起的经历：{ai_memory}
 - 话题主题：{topic}
 
-【输出】只输出主动消息内容""" + _NO_ROLEPLAY_RULE
+【输出】只输出主动消息内容""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 # Spec 第四部分 §4.2 + 指令模版 P25「记忆主动·基于用户记忆」
@@ -487,7 +503,7 @@ PROACTIVE_MEMORY_USER_PROMPT = """【任务】你记得用户的一件事，忽�
 - 你记得的用户记忆：{user_memory}
 - 话题主题：{topic}
 
-【输出】只输出主动消息内容""" + _NO_ROLEPLAY_RULE
+【输出】只输出主动消息内容""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SCHEDULED_SCENE_PROMPT = """【任务】现在是{time}，你正在{activity}（状态：{status}）。请分享一句你自己的状态、心情或小事。不提问，不打扰用户，不期待回复。
@@ -495,7 +511,7 @@ PROACTIVE_SCHEDULED_SCENE_PROMPT = """【任务】现在是{time}，你正在{ac
 【参考信息】
 - 你的性格：{personality_brief}
 
-【输出】只输出主动消息内容""" + _NO_ROLEPLAY_RULE
+【输出】只输出主动消息内容""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 # Spec §3.2 + §4.2: 主动记忆抽取必须先按"话题方向"过滤候选, 再让 LLM 生成.
@@ -524,7 +540,7 @@ PROACTIVE_DECAY_FINAL_PROMPT = """【任务】作为用户的好朋友，这是�
 
 【要求】说一句自然、温和的告别式问候，告知对方这是最后一次主动联系，但仍期待未来能再聊。一句话。
 
-【输出】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出问候内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_FIRST_GREETING_PROMPT = """【限定】
@@ -550,14 +566,14 @@ PROACTIVE_FIRST_GREETING_PROMPT = """【限定】
 - 开放式结尾，引导对方也介绍一下自己
 - 像真人朋友一样自然、热情，不尴尬
 
-【输出】只输出问候内容""" + _NO_ROLEPLAY_RULE
+【输出】只输出问候内容""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SPECIAL_HOLIDAY_PROMPT = """【限定】只作为用户的线上好友，和用户不会有任何线下交集（只参考不用刻意提及）
 
 【任务】今天是{holiday_name}，你作为用户的好朋友，主动给对方发一条节日祝福。消息要自然、真诚，像朋友之间随手发的问候，不要太正式或像群发短信。
 
-【输出】只输出回复内容，不加任何额外说明。""" + _NO_ROLEPLAY_RULE
+【输出】只输出回复内容，不加任何额外说明。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SPECIAL_BIRTHDAY_PROMPT = """【限定】只作为用户的线上好友，和用户不会有任何线下交集（只参考不用刻意提及）
@@ -567,7 +583,7 @@ PROACTIVE_SPECIAL_BIRTHDAY_PROMPT = """【限定】只作为用户的线上好�
 【参考信息】（只参考不要刻意提及）
 - 你的性格：{personality_brief}
 
-【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SPECIAL_REMINDER_PROMPT = """【限定】只作为用户的线上好友，和用户不会有任何线下交集（只参考不用刻意提及）
@@ -578,7 +594,7 @@ PROACTIVE_SPECIAL_REMINDER_PROMPT = """【限定】只作为用户的线上好�
 - 你的性格：{personality_brief}（只参考不要刻意提及）
 - 提醒事项内容：{reminder_content}
 
-【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 PROACTIVE_SPECIAL_COMBINED_PROMPT = """【限定】只作为用户的线上好友，和用户不会有任何线下交集（只参考不用刻意提及）
@@ -594,7 +610,7 @@ PROACTIVE_SPECIAL_COMBINED_PROMPT = """【限定】只作为用户的线上好�
 - 语气符合你的性格，自然真诚，不要生硬堆砌。
 - 将多个日期的祝福或提醒融合成一句或两句流畅的话，不要逐条罗列。
 
-【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 # ── 统一提醒系统 (Part 5 §4.2 工程扩展) ──────────────────────────────
@@ -635,7 +651,7 @@ REMINDER_MESSAGE_PROMPT = """【限定】只作为用户的线上好友，和用
 - 不要列举多件事, 就这一件
 - 例：「嘿~ 该喝水啦, 记得多喝点温的!」/「看升旗的时间到啦, 国旗护卫队都准备好了, 你也加油!」
 
-【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出回复内容，不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 RECORD_CONFIRM_REPLY_PROMPT = """【限定】只作为用户的线上好友, 像朋友顺手帮忙一样自然.
@@ -670,7 +686,7 @@ RECORD_CONFIRM_REPLY_PROMPT = """【限定】只作为用户的线上好友, 像
 - ❌ 「收到, 一分钟倒计时, 记得喝口水润润~」(第二句是提醒动作, 错!)
 - ❌ 「好的, 那现在就喝水吧」 (提前催了, 错!)
 
-【输出】只输出回复内容, 不加任何额外说明""" + _NO_ROLEPLAY_RULE
+【输出】只输出回复内容, 不加任何额外说明""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
 # RECORD_REQUEST 反问时间 (Round-3 工程扩展, 详见 CLAUDE.md §6 偏离表):
@@ -1583,7 +1599,7 @@ CURRENT_STATE_REPLY_PROMPT = """【任务】用户正在询问你当前在做什
 - ⚠️ 先判断用户问的是"AI 此刻在做什么/感受如何"，还是"对话里之前出现过的某个具体内容"。
   若是后者，答案应**来自"最近对话"**；不要从"AI当前作息"里挑一个细节去编出巧合相关的内容。
   "最近对话"里也找不到就如实说不太记得了，不要硬编。
-【输出】只输出回复内容"""
+【输出】只输出回复内容""" + _NO_USER_FABRICATION_RULE
 
 DELETION_CONFIRM_PROMPT = """【任务】用户希望你忘记某件事。作为朋友，你需要先确认对方具体想忘记什么，并询问是否真的要删除。
 【参考信息】（供语气和内容参考，不必直接引用）
