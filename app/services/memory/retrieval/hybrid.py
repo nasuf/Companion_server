@@ -17,6 +17,7 @@ from datetime import datetime
 from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
 from app.services.memory.retrieval.context_selector import select_context
 from app.services.memory.retrieval.ranking import rank_memory_candidate
+from app.services.memory.retrieval.trace import record_retrieval_session
 from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
@@ -91,6 +92,17 @@ async def hybrid_retrieve(
     cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id)
     if cached:
         logger.debug("Hybrid retrieval cache hit (key=%s)", cache_key[:30])
+        cached_memories = cached.get("memories") if isinstance(cached, dict) else None
+        record_retrieval_session(
+            strategy="hybrid_l1_l2",
+            query=message,
+            enhanced_query=enhanced_query,
+            workspace_id=workspace_id,
+            cache_hit=True,
+            selected=cached_memories if isinstance(cached_memories, list) else [],
+            selected_count=len(cached_memories) if isinstance(cached_memories, list) else 0,
+            notes={"cache_key": cache_key[:80]},
+        )
         return cached
 
     # Spec §3.2 step 1: 向量搜索 L1+L2 + 时间搜索（若有显式时间）
@@ -176,6 +188,26 @@ async def hybrid_retrieve(
 
     # Select within token budget (returns ClassifiedMemory list)
     classified_memories = select_context(all_candidates, token_budget)
+    record_retrieval_session(
+        strategy="hybrid_l1_l2",
+        query=message,
+        enhanced_query=enhanced_query,
+        workspace_id=workspace_id,
+        cache_hit=False,
+        raw_count=(
+            (len(vector_results) if isinstance(vector_results, list) else 0)
+            + (len(time_results) if isinstance(time_results, list) else 0)
+        ),
+        candidate_count=len(all_candidates),
+        selected_count=len(classified_memories),
+        candidates=all_candidates,
+        selected=classified_memories,
+        notes={
+            "similarity_threshold": _SIMILARITY_THRESHOLD,
+            "has_explicit_time": bool(time_range),
+            "effective_query": effective_query[:80],
+        },
+    )
 
     # Plain text list for consumers that don't need ClassifiedMemory metadata
     memory_strings = [m.text for m in classified_memories] if classified_memories else None

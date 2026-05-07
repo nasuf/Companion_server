@@ -55,8 +55,17 @@ async def short_circuit_reply(
       或非父调用可不传.
     """
     reply_payload: str | dict = reply
-    if extra_metadata:
-        reply_payload = {"text": reply, **extra_metadata}
+    metadata = dict(extra_metadata or {})
+    if not sub_intent_mode:
+        try:
+            from app.services.memory.retrieval.trace import snapshot_retrieval_traces
+            retrieval_traces = snapshot_retrieval_traces()
+            if retrieval_traces:
+                metadata.setdefault("memory_retrievals", retrieval_traces)
+        except Exception:
+            pass
+    if metadata:
+        reply_payload = {"text": reply, **metadata}
     _fire_background(save_replies_fn(
         conversation_id, [reply_payload], trace_id=trace_id,
     ))

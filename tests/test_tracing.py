@@ -245,6 +245,31 @@ class TestResolveTraceForMessage:
         assert share_calls["n"] == 0
 
     @_pytest.mark.asyncio
+    async def test_existing_url_mirror_includes_message_memory_retrievals(self, monkeypatch):
+        """消息 metadata 上的本地 retrieval trace 应合并进 cached trace detail."""
+        from app.services.chat import tracing
+        retrievals = [{
+            "session_id": "hybrid_l1_l2_x",
+            "strategy": "hybrid_l1_l2",
+            "selected": [{"id": "m1", "text": "用户害怕失眠"}],
+        }]
+        msg = self._make_msg(metadata={
+            "trace_id": "t1",
+            "trace_url": "https://existing",
+            "memory_retrievals": retrievals,
+        })
+        cached = {"trace": {"trace_id": "t1"}, "steps": [{"id": "s1"}]}
+        async def fake_get_mirror(_): return cached
+        monkeypatch.setattr(tracing, "get_trace_mirror_by_message", fake_get_mirror)
+
+        with patch.object(tracing, "db", self._fake_db(msg)):
+            result = await tracing.resolve_trace_for_message("m1", user_id="u1")
+
+        detail = result["detail"]
+        assert detail["memory_retrievals"] == retrievals
+        assert detail["trace"]["memory_retrievals"] == retrievals
+
+    @_pytest.mark.asyncio
     async def test_first_share_loads_writes_mirror_and_pushes_ws(self, monkeypatch):
         """首次 share: share_run + load + write mirror + WS 推送, 返回 detail."""
         from app.services.chat import tracing
@@ -281,5 +306,4 @@ class TestResolveTraceForMessage:
         assert write_calls == [(loaded_detail, "m1")]
         assert captured["patch"] == {"trace_url": "https://smith/new"}
         assert ws_calls and ws_calls[0][1] == "trace_ready"
-
 

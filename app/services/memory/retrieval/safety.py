@@ -18,6 +18,7 @@ from app.services.memory.retrieval.ranking import (
     SAFETY_QUERY_KEYWORDS,
     rank_memory_candidate,
 )
+from app.services.memory.retrieval.trace import record_retrieval_session
 from app.services.memory.retrieval.vector_search import search_similar
 from app.services.workspace.workspaces import resolve_workspace_id
 
@@ -116,8 +117,26 @@ async def retrieve_crisis_memories(
             candidates.append(row)
 
     candidates.sort(key=lambda r: float(r.get("rank_score", 0)), reverse=True)
-    return select_context(
+    selected = select_context(
         candidates,
         token_budget=_CRISIS_TOKEN_BUDGET,
         max_items=limit,
     )
+    record_retrieval_session(
+        strategy="crisis_safety",
+        query=message,
+        workspace_id=workspace_id,
+        raw_count=(
+            (len(vector_results) if isinstance(vector_results, list) else 0)
+            + (len(keyword_results) if isinstance(keyword_results, list) else 0)
+        ),
+        candidate_count=len(candidates),
+        selected_count=len(selected),
+        candidates=candidates,
+        selected=selected,
+        notes={
+            "vector_top_k": _CRISIS_VECTOR_TOP_K,
+            "keyword_limit": _CRISIS_KEYWORD_LIMIT,
+        },
+    )
+    return selected

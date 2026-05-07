@@ -199,6 +199,17 @@ async def _patch_message_metadata(message_id: str, current_meta: dict, **patch) 
     )
 
 
+def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> dict[str, Any]:
+    """Merge app-local trace payloads stored on message.metadata into trace detail."""
+    retrievals = metadata.get("memory_retrievals")
+    if isinstance(retrievals, list):
+        trace = detail.setdefault("trace", {})
+        if isinstance(trace, dict):
+            trace["memory_retrievals"] = retrievals
+        detail["memory_retrievals"] = retrievals
+    return detail
+
+
 async def resolve_trace_for_message(
     message_id: str, *, user_id: str, is_admin: bool = False,
 ) -> dict[str, Any]:
@@ -235,8 +246,10 @@ async def resolve_trace_for_message(
     if existing_url:
         cached = await get_trace_mirror_by_message(message_id)
         if cached:
+            _attach_message_trace_metadata(cached, meta)
             return {"trace_url": str(existing_url), "detail": cached}
         detail = await load_public_trace(str(existing_url))
+        _attach_message_trace_metadata(detail, meta)
         await write_trace_mirror(detail=detail, message_id=msg.id)
         return {"trace_url": str(existing_url), "detail": detail}
 
@@ -245,6 +258,7 @@ async def resolve_trace_for_message(
         trace_id, conversation_id=conv.id,
     )
     detail = await load_public_trace(public_url)
+    _attach_message_trace_metadata(detail, meta)
     await write_trace_mirror(detail=detail, message_id=msg.id)
     await _patch_message_metadata(msg.id, meta, trace_url=public_url)
     await manager.send_event(

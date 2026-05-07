@@ -27,6 +27,7 @@ from app.services.memory.retrieval.relevance import (
     compute_display_score,
 )
 from app.services.memory.retrieval.ranking import is_recall_query
+from app.services.memory.retrieval.trace import record_retrieval_session
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.relationship.emotion import compute_ai_pad, extract_emotion
@@ -180,13 +181,32 @@ async def _load_time_memories(
     )
     seen: set[str] = set()
     results: list[str] = []
+    selected_rows: list[dict] = []
+    candidate_rows: list[dict] = []
     for rows in all_rows:
         for r in rows:
+            candidate_rows.append(r)
             content = r.get("summary") or r.get("content", "")
             if content and content not in seen:
                 seen.add(content)
                 results.append(content)
-    return results[:10]
+                selected_rows.append(r)
+    selected = results[:10]
+    record_retrieval_session(
+        strategy="explicit_time",
+        query="; ".join(
+            f"{getattr(pt, 'start', '')}..{getattr(pt, 'end', '')}"
+            for pt in past_times
+        ),
+        workspace_id=workspace_id,
+        raw_count=len(candidate_rows),
+        candidate_count=len(candidate_rows),
+        selected_count=len(selected),
+        candidates=candidate_rows,
+        selected=selected_rows[:10],
+        notes={"time_range_count": len(past_times)},
+    )
+    return selected
 
 
 def _post_process_retrieval(
@@ -301,6 +321,23 @@ async def maybe_awaken_l3(
     search_query = enhanced_query or user_message
     l3_results = await search_l3_memories(search_query, user_id, workspace_id=workspace_id)
     l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
+    record_retrieval_session(
+        strategy="l3_awaken",
+        query=search_query,
+        enhanced_query=enhanced_query or None,
+        workspace_id=workspace_id,
+        memory_relevance=memory_relevance,
+        trigger_label=label,
+        raw_count=len(l3_results),
+        candidate_count=len(l3_results),
+        selected_count=len(l3_memories),
+        candidates=l3_results,
+        selected=l3_results,
+        notes={
+            "intent": detected_intent.intent.value,
+            "l1_l2_count": l1_l2_count,
+        },
+    )
     logger.info(
         f"[L3-TRIGGER] label='{label}' awakened {len(l3_memories)} memories "
         f"(query='{search_query[:40]}')",

@@ -395,6 +395,10 @@ async def stream_chat_response(
         tracer = LangSmithTracer(user_message, conversation_id).attach_to_parent(parent_trace_id)
     else:
         tracer = LangSmithTracer(user_message, conversation_id).enter()
+    retrieval_trace_token = None
+    if not sub_intent_mode:
+        from app.services.memory.retrieval.trace import start_retrieval_trace
+        retrieval_trace_token = start_retrieval_trace()
 
     # spec §2.1/§2.2 全消息走 post_process. 短路路径直接 return 跳过主路径末尾的
     # _fire_background(post_process) → 必须 finally 兜底, 否则 7 个短路意图 (终结/计划查询/
@@ -1067,6 +1071,18 @@ async def stream_chat_response(
             first = emitted_replies[0]
             if isinstance(first, dict):
                 first.setdefault("covered_until_user_ts", covered_until_user_ts.isoformat())
+        if emitted_replies:
+            from app.services.memory.retrieval.trace import snapshot_retrieval_traces
+            retrieval_traces = snapshot_retrieval_traces()
+            if retrieval_traces:
+                first = emitted_replies[0]
+                if isinstance(first, dict):
+                    first.setdefault("memory_retrievals", retrieval_traces)
+                else:
+                    emitted_replies[0] = {
+                        "text": str(first),
+                        "memory_retrievals": retrieval_traces,
+                    }
         first_assistant_message_id = await _save_replies(
             conversation_id,
             emitted_replies,
@@ -1156,6 +1172,9 @@ async def stream_chat_response(
                 except Exception:
                     logger.warning("[llm-usage] write_usage_row failed", exc_info=True)
         # 还原 ContextVar (防御共享 worker pool 跨 agent leak)
+        if retrieval_trace_token is not None:
+            from app.services.memory.retrieval.trace import reset_retrieval_trace
+            reset_retrieval_trace(retrieval_trace_token)
         reset_current_agent(_agent_ctx_token)
 
         # spec §2.1/§2.2 兜底: 短路意图早 return 跳过主路径末尾的 post_process fire,
