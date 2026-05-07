@@ -90,13 +90,28 @@ def _unwrap(result: _T, default: _T, label: str) -> _T:
     return result
 
 
-def format_recent_context(messages_dicts: list[dict], *, turns: int = 4, max_chars: int = 400) -> str:
-    """Spec §3.2 AIPAD值判断 的 recent_context 输入：最近 N 条用户/AI 消息。"""
+def format_recent_context(
+    messages_dicts: list[dict],
+    *,
+    turns: int = 4,
+    max_chars: int = 400,
+    exclude_message_id: str | None = None,
+) -> str:
+    """Spec §3.2 AIPAD值判断 的 recent_context 输入：最近 N 条用户/AI 消息。
+
+    exclude_message_id: 排除指定 ID 的消息. 用法: short-circuit handler 的 prompt
+    同时有 {message} (当前用户消息) + {context} (recent_context) 占位符, 如果不
+    排除当前消息, LLM 会看到它两遍 (生产 trace 2026-05-07 16:57 实测). AI PAD
+    路径不传 exclude — 那条路径需要看完整含当前消息的上下文做情绪判断.
+    """
     if not messages_dicts:
         return EMPTY_RECENT_CONTEXT
     tail = messages_dicts[-turns:]
     lines: list[str] = []
     for m in tail:
+        # 排除指定 ID (典型: 当前 user_message 已经在 prompt 的 {message} 占位符)
+        if exclude_message_id and m.get("id") == exclude_message_id:
+            continue
         role = m.get("role") or "user"
         text = (m.get("content") or "").strip()
         if not text:

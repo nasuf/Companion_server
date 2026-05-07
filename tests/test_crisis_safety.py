@@ -457,3 +457,99 @@ def test_format_user_memory_filters_to_emotion_relevant():
     assert "日料" not in out
     # AI 侧记忆不出现 (split_by_source 已分流)
     assert "AI 是设计师" not in out
+
+
+# ════════════════════════════════════════════════════════════════════
+# § 7. format_recent_context exclude_message_id (跨 short-circuit 公共修复)
+# ════════════════════════════════════════════════════════════════════
+
+
+def test_format_recent_context_excludes_current_message_id():
+    """short-circuit handler 的 prompt 同时有 {message} (当前消息) 和 {context}
+    (recent), 如果 recent 包含当前消息, LLM 看到两遍 — 实测 trace 2026-05-07 16:57
+    crisis_reply prompt 里"想跳楼，真的" 出现两次. 加 exclude_message_id 修复.
+    """
+    from app.services.chat.data_fetch_phase import format_recent_context
+
+    msgs = [
+        {"id": "m1", "role": "user", "content": "活不下去了，真的"},
+        {"id": "m2", "role": "assistant", "content": "听到了, 我在."},
+        {"id": "m3", "role": "user", "content": "想跳楼，真的"},  # ← 当前消息
+    ]
+
+    # 不传 exclude_message_id → 包含全部 3 条 (向后兼容)
+    full = format_recent_context(msgs)
+    assert "想跳楼" in full
+    assert "活不下去" in full
+
+    # 传 exclude_message_id="m3" → 排除当前消息
+    excluded = format_recent_context(msgs, exclude_message_id="m3")
+    assert "想跳楼" not in excluded, "exclude_message_id 应该排除指定 ID 的消息"
+    assert "活不下去" in excluded  # 历史消息保留
+    assert "听到了" in excluded
+
+
+def test_format_recent_context_exclude_none_keeps_default():
+    """exclude_message_id=None (默认) → 行为不变 (向后兼容现有 caller)."""
+    from app.services.chat.data_fetch_phase import format_recent_context
+
+    msgs = [
+        {"id": "m1", "role": "user", "content": "今天累"},
+        {"id": "m2", "role": "assistant", "content": "怎么了"},
+    ]
+    out = format_recent_context(msgs)
+    assert "今天累" in out
+    assert "怎么了" in out
+
+
+def test_format_recent_context_handles_messages_without_id():
+    """messages_dicts 没 id 字段时 (legacy 数据) — exclude_message_id 不影响输出."""
+    from app.services.chat.data_fetch_phase import format_recent_context
+
+    msgs = [
+        {"role": "user", "content": "X"},  # 无 id
+        {"role": "assistant", "content": "Y"},
+    ]
+    out = format_recent_context(msgs, exclude_message_id="some_id")
+    assert "X" in out
+    assert "Y" in out
+
+
+# ════════════════════════════════════════════════════════════════════
+# § 8. orchestrator crisis 轻量 fetch — 跳过无关 LLM (修复 1)
+# ════════════════════════════════════════════════════════════════════
+
+
+def test_orchestrator_crisis_skips_full_fetch_parallel_context():
+    """orchestrator 在 crisis_force_intent 命中时**不调** fetch_parallel_context,
+    而是只起 hybrid_retrieve + portrait 轻量 fetch.
+
+    防回归: 实测 trace 2026-05-07 16:57 走完整 fetch 浪费 4s 无关 LLM
+    (relevance + AI PAD + user PAD). 修复后 crisis 路径不应再触发这些.
+
+    用 inspect.getsource 验证: orchestrator 中 crisis_force_intent 分支
+    不包含 fetch_parallel_context() 调用, 包含 hybrid_retrieve + get_latest_portrait.
+    """
+    import inspect
+    from app.services.chat import orchestrator
+
+    src = inspect.getsource(orchestrator.stream_chat_response)
+
+    # crisis_force_intent 分支必须出现这两个轻量 fetch
+    assert "crisis_memory_task" in src, "crisis 轻量 memory fetch 缺失"
+    assert "crisis_portrait_task" in src, "crisis 轻量 portrait fetch 缺失"
+    assert "hybrid_retrieve" in src, "crisis 路径必须用 hybrid_retrieve 直调"
+    assert "get_latest_portrait" in src, "crisis 路径必须用 get_latest_portrait 直调"
+
+    # CRISIS dispatch 必须在 fetch_parallel_context await 之前 — 通过位置验证
+    # (在源码中, CRISIS dispatch 'if detected_intent.intent == IntentType.CRISIS'
+    #  必须出现 BEFORE 'fetched = await fetch_task' 的 main path)
+    crisis_dispatch_pos = src.find("if detected_intent.intent == IntentType.CRISIS")
+    main_fetch_pos = src.find("fetched = await fetch_task")
+    assert crisis_dispatch_pos != -1, "缺 CRISIS dispatch"
+    assert main_fetch_pos != -1, "缺 main path fetch await"
+    assert crisis_dispatch_pos < main_fetch_pos, (
+        "CRISIS dispatch 必须排在 fetch_parallel_context await 之前 "
+        f"(crisis@{crisis_dispatch_pos}, fetch@{main_fetch_pos}). "
+        "否则 crisis 仍要等 4s 无关 LLM, 修复 1 失效."
+    )

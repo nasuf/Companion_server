@@ -13,6 +13,7 @@ import logging
 import random
 import re
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from app.db import db
 from app.observability.events import (
@@ -420,6 +421,7 @@ async def stream_chat_response(
         recent_messages.reverse()
         messages_dicts = [
             {
+                "id": getattr(m, "id", None),  # 给 format_recent_context 排除当前消息用
                 "role": m.role,
                 "content": m.content,
                 "createdAt": m.createdAt.isoformat() if getattr(m, "createdAt", None) else None,
@@ -428,6 +430,9 @@ async def stream_chat_response(
         ]
 
         # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
+        # boundary_ctx.recent_context 给 short-circuit handler 的 prompt {context} 用,
+        # 排除当前 user_message_id 防 LLM 看到该消息两遍 ({message} + {context} 重复,
+        # 实测 trace 2026-05-07 16:57 已确认).
         boundary_ctx = BoundaryPhaseCtx(
             conversation_id=conversation_id,
             agent_id=agent_id,
@@ -440,7 +445,9 @@ async def stream_chat_response(
             short_circuit_fn=_short_circuit_reply,
             fire_background_fn=_fire_background,
             bg_memory_pipeline_fn=_bg_memory_pipeline,
-            recent_context=format_recent_context(messages_dicts),
+            recent_context=format_recent_context(
+                messages_dicts, exclude_message_id=user_message_id,
+            ),
         )
         async for evt in run_boundary(boundary_ctx):
             yield evt
@@ -508,11 +515,30 @@ async def stream_chat_response(
         # (因 L3 需要 intent + relevance 双信号).
         # sub_intent_mode (forced_intent != None) 同步取得 intent 无需并行, fetch_task=None
         # 走原同步路径在下方 fetch_parallel_context.
-        # crisis 路径仍 kick off fetch — handle_crisis 需要 user memory/portrait
-        # 给 LLM, 但 cancel 后等 _cancel_fetch_task 一致兜底.
+        #
+        # crisis 路径 (P0): 跳过 fetch_parallel_context 的 7 个并行子任务 (relevance LLM /
+        # AI PAD LLM / user PAD LLM / topic_intimacy / time_memories / schedule / 等),
+        # 只起轻量 hybrid_retrieve + portrait 两个 (handle_crisis 仅需这俩). 实测 trace
+        # 2026-05-07 16:57: crisis 路径走完整 fetch 浪费 4s 无关 LLM (relevance 1.2s
+        # + AI PAD 1.4s + user PAD 1.4s) — 求救场景下用户体感冷漠. 牺牲: user/ai PAD
+        # cache 不更新, message metadata 缺 emotion 字段 (post_process 的 _bg_user_emotion
+        # 和 save_ai_emotion 都 gracefully 跳过 None).
         fetch_task: asyncio.Task | None = None
+        crisis_memory_task: asyncio.Task | None = None
+        crisis_portrait_task: asyncio.Task | None = None
         early_parsed_times: list = []
-        if forced_intent is None:
+        if crisis_force_intent:
+            # 轻量 fetch — 仅 handle_crisis 必需的两项 (lazy import 防循环依赖)
+            from app.services.memory.retrieval.hybrid import hybrid_retrieve
+            from app.services.portrait import get_latest_portrait
+            crisis_memory_task = asyncio.create_task(
+                hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
+            )
+            if agent_id:
+                crisis_portrait_task = asyncio.create_task(
+                    get_latest_portrait(user_id, agent_id)
+                )
+        elif forced_intent is None:
             early_parsed_times = (
                 parse_time_expressions(user_message)
                 if has_explicit_time(user_message) else []
@@ -650,6 +676,40 @@ async def stream_chat_response(
 
         # NOTE: SCHEDULE_ADJUST/SCHEDULE_QUERY/CURRENT_STATE 在 parallel data fetch 之后处理
 
+        # ── P0 危机安全网 短路 (排在主路径 fetch_parallel_context 之前) ─────────
+        # 关键: 必须在 await fetch_parallel_context 之前 dispatch, 否则等完整
+        # fetch (含 relevance/AI PAD/user PAD 三个无关 LLM ~4s) 才到 handle_crisis.
+        # 实测 trace 2026-05-07 16:57: 走完整 fetch 总延迟 18s 中 4s 是浪费 LLM.
+        # 跳过完整 fetch, 只 await 我们提前 kick off 的 crisis_memory_task +
+        # crisis_portrait_task (handle_crisis 仅需这俩).
+        if detected_intent.intent == IntentType.CRISIS:
+            # 等轻量 fetch (memory + portrait), 跳所有 PAD/relevance/topic/schedule LLM
+            crisis_classified: list = []
+            crisis_portrait: Any = None
+            if crisis_memory_task is not None:
+                try:
+                    retrieval_result = await crisis_memory_task
+                    if isinstance(retrieval_result, dict):
+                        crisis_classified = retrieval_result.get("memories") or []
+                except Exception as e:
+                    logger.warning(f"Crisis memory fetch failed: {e}")
+            if crisis_portrait_task is not None:
+                try:
+                    crisis_portrait = await crisis_portrait_task
+                except Exception as e:
+                    logger.warning(f"Crisis portrait fetch failed: {e}")
+            await _cancel_fetch_task()  # 兜底: sub_intent_mode 走 fetch_parallel_context 时, crisis 不该来这条路径, 但保险
+            async for evt in handle_crisis(
+                user_message, sc_ctx,
+                classified_memories=crisis_classified,
+                portrait=crisis_portrait,
+            ):
+                yield evt
+            # finally 兜底 fire post_process (用 None emotion, _bg_user_emotion +
+            # save_ai_emotion 都 gracefully 跳过). memory pipeline 仍跑 — crisis
+            # 消息应该被记忆.
+            return
+
         # 记录 LLM 数据拉取时刻能看到的最新 user 消息时间, 用于 scheduler dedup gate.
         # 若用户连发多条非碎片, 第一条 LLM 调用的 history 已经隐式包含后续所有 user
         # 消息 → reply 实际覆盖了它们; 写到 reply metadata 后, scheduler 处理后续
@@ -717,20 +777,8 @@ async def stream_chat_response(
             except (asyncio.CancelledError, Exception):
                 pass
 
-        # P0 危机安全网 — 排在所有 short-circuit 前. handle_crisis 用专属 prompt
-        # (intent.crisis_reply), 完全切掉主 system_prompt 的 14 段干扰. classified_memories
-        # 给 handler 筛选用户的情绪/求助历史 (e.g. "用户表达过强烈负面情绪"), 让回复连贯.
-        # crisis_force_intent 由 keyword 层判定; 也可由 intent LLM 输出"危机求助" label
-        # 命中 IntentType.CRISIS — 两条路汇合到这里.
-        if detected_intent.intent == IntentType.CRISIS:
-            await _cancel_l3_task()
-            async for evt in handle_crisis(
-                user_message, sc_ctx,
-                classified_memories=classified_memories or [],
-                portrait=portrait,
-            ):
-                yield evt
-            return
+        # NOTE: CRISIS dispatch 已在 fetch_parallel_context 之前 (line ~675), 跳过完整
+        # fetch 节省 4s 无关 LLM 时间. 这里不再有 crisis 分支.
 
         delay_context = None
         if reply_context:
