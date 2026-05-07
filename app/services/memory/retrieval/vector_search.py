@@ -38,7 +38,9 @@ async def search_by_embedding(
         SELECT * FROM (
             (SELECT
                 m.id, m.content, m.summary, m.level, m.importance, m.type, m.main_category, m.sub_category,
-                m.created_at, 'user' AS source,
+                m.created_at, m.updated_at,
+                COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
+                'user' AS source,
                 1 - (me.embedding <=> $1::extensions.vector) AS similarity
             FROM memory_embeddings me
             JOIN memories_user m ON m.id = me.memory_id
@@ -53,7 +55,9 @@ async def search_by_embedding(
             UNION ALL
             (SELECT
                 m.id, m.content, m.summary, m.level, m.importance, m.type, m.main_category, m.sub_category,
-                m.created_at, 'ai' AS source,
+                m.created_at, m.updated_at,
+                COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
+                'ai' AS source,
                 1 - (me.embedding <=> $1::extensions.vector) AS similarity
             FROM memory_embeddings me
             JOIN memories_ai m ON m.id = me.memory_id
@@ -118,7 +122,9 @@ async def search_by_time_range(
         return await db.query_raw(
             """
             SELECT id, content, summary, level, importance, type, main_category, sub_category,
-                   occur_time, created_at, 'user' AS source
+                   occur_time, created_at, updated_at,
+                   COALESCE(updated_at, created_at) AS last_accessed_at,
+                   'user' AS source
             FROM memories_user
             WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
               AND occur_time >= $3 AND occur_time < $4
@@ -131,7 +137,9 @@ async def search_by_time_range(
         return await db.query_raw(
             """
             SELECT id, content, summary, level, importance, type, main_category, sub_category,
-                   occur_time, created_at, 'ai' AS source
+                   occur_time, created_at, updated_at,
+                   COALESCE(updated_at, created_at) AS last_accessed_at,
+                   'ai' AS source
             FROM memories_ai
             WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
               AND occur_time >= $3 AND occur_time < $4
@@ -145,7 +153,9 @@ async def search_by_time_range(
         """
         SELECT * FROM (
             (SELECT id, content, summary, level, importance, type, main_category, sub_category,
-                    occur_time, created_at, 'user' AS source
+                    occur_time, created_at, updated_at,
+                    COALESCE(updated_at, created_at) AS last_accessed_at,
+                    'user' AS source
              FROM memories_user
              WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
                AND occur_time >= $3 AND occur_time < $4
@@ -153,7 +163,9 @@ async def search_by_time_range(
              LIMIT $5)
             UNION ALL
             (SELECT id, content, summary, level, importance, type, main_category, sub_category,
-                    occur_time, created_at, 'ai' AS source
+                    occur_time, created_at, updated_at,
+                    COALESCE(updated_at, created_at) AS last_accessed_at,
+                    'ai' AS source
              FROM memories_ai
              WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
                AND occur_time >= $3 AND occur_time < $4

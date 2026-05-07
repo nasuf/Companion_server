@@ -7,6 +7,7 @@ Classifies each memory by relevance: strong (score ≥ 0.7) / medium (0.4-0.7).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 MemorySource = Literal["user", "ai"]
@@ -27,7 +28,8 @@ class ClassifiedMemory:
     id: str = ""  # memory row ID for access logging
     importance: float = 0.5
     similarity: float = 0.8
-    created_at: str | None = None
+    created_at: datetime | str | None = None
+    last_accessed_at: datetime | str | None = None
     display_score: float = 0.0  # set by reranking in orchestrator
     source: MemorySource = "user"  # 上游 vector_search 必填
 
@@ -103,6 +105,11 @@ def select_context(
             importance=float(mem.get("importance", 0.5)),
             similarity=float(mem.get("similarity", 0.8)),
             created_at=mem.get("created_at"),
+            last_accessed_at=(
+                mem.get("last_accessed_at")
+                or mem.get("updated_at")
+                or mem.get("created_at")
+            ),
             source=source,
         ))
         used_tokens += tokens

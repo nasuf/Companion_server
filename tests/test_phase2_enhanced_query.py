@@ -32,13 +32,9 @@ async def test_hybrid_retrieve_uses_enhanced_query_for_embedding():
         patch.object(hybrid, "search_similar", side_effect=_capture_search),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval",
                      new_callable=AsyncMock, return_value=None),
         patch.object(hybrid, "cache_set_retrieval",
-                     new_callable=AsyncMock),
-        patch.object(hybrid, "cache_set_graph_context",
                      new_callable=AsyncMock),
     ):
         await hybrid.hybrid_retrieve(
@@ -66,13 +62,9 @@ async def test_hybrid_retrieve_falls_back_to_message_when_no_enhanced():
         patch.object(hybrid, "search_similar", side_effect=_capture_search),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval",
                      new_callable=AsyncMock, return_value=None),
         patch.object(hybrid, "cache_set_retrieval",
-                     new_callable=AsyncMock),
-        patch.object(hybrid, "cache_set_graph_context",
                      new_callable=AsyncMock),
     ):
         await hybrid.hybrid_retrieve(
@@ -105,11 +97,8 @@ async def test_hybrid_cache_key_uses_enhanced_query():
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval", side_effect=_capture_cache_get),
         patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
-        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
     ):
         await hybrid.hybrid_retrieve(
             message="那他呢?", user_id="u1", workspace_id="w1",
@@ -315,12 +304,9 @@ async def test_cache_write_uses_same_key_as_read_with_enhanced_query():
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval",
                      new_callable=AsyncMock, return_value=None),
         patch.object(hybrid, "cache_set_retrieval", side_effect=_capture_set),
-        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
     ):
         # 场景 1: enhanced_query 非空 → set/get 都用 enhanced_query
         await hybrid.hybrid_retrieve(
@@ -347,12 +333,9 @@ async def test_cache_write_uses_message_when_no_enhanced_query():
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval",
                      new_callable=AsyncMock, return_value=None),
         patch.object(hybrid, "cache_set_retrieval", side_effect=_capture_set),
-        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
     ):
         await hybrid.hybrid_retrieve(
             message="我喜欢咖啡", user_id="u1", workspace_id="w1",

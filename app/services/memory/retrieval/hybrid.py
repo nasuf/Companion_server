@@ -1,12 +1,12 @@
 """Hybrid retrieval orchestrator.
 
-Combines vector search + graph queries for comprehensive memory retrieval.
+Combines vector search + explicit time search for comprehensive memory retrieval.
 
 Pipeline (no LLM calls — pure data operations):
 
-  parallel(vector_search + graph_context) -> fusion -> ranker -> context_selector
+  parallel(vector_search + explicit time search) -> fusion -> ranker -> context_selector
 
-Includes Redis caching for retrieval results and graph context.
+Includes Redis caching for retrieval results.
 """
 
 import asyncio
@@ -17,12 +17,9 @@ from datetime import datetime
 from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
 from app.services.memory.retrieval.context_selector import select_context
 from app.services.memory.retrieval.relevance import compute_display_score
-from app.services.memory.storage.entity_repo import get_relationship_context
 from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
-    cache_graph_context,
-    cache_set_graph_context,
 )
 from app.services.schedule_domain.time_parser import has_explicit_time, parse_time_expressions
 
@@ -117,9 +114,6 @@ async def hybrid_retrieve(
     vector_task = search_similar(
         effective_query, user_id, top_k=50, workspace_id=workspace_id, levels=levels,
     )
-    graph_task = get_relationship_context(
-        user_id=user_id, workspace_id=workspace_id,
-    )
     time_task = (
         search_by_time_range(
             user_id, time_range[0], time_range[1],
@@ -128,8 +122,8 @@ async def hybrid_retrieve(
         if time_range else asyncio.sleep(0, result=[])
     )
 
-    vector_results, graph_result, time_results = await asyncio.gather(
-        vector_task, graph_task, time_task, return_exceptions=True
+    vector_results, time_results = await asyncio.gather(
+        vector_task, time_task, return_exceptions=True
     )
 
     # Log raw vector search results for debugging
@@ -151,16 +145,28 @@ async def hybrid_retrieve(
             continue
         for mem in (source_results or []):
             mid = mem.get("id", "")
+            if not mid or mid in seen_ids:
+                continue
+            # Time-range matches are explicit user intent ("去年生日那天",
+            # "上周那件事") and rows from search_by_time_range do not carry a
+            # vector similarity. Do not run them through the semantic threshold.
+            if label == "time":
+                mem.setdefault("similarity", 1.0)
+                mem["_retrieval_source"] = "time"
+                seen_ids.add(mid)
+                all_candidates.append(mem)
+                continue
+
             sim = float(mem.get("similarity", 0))
-            if mid and mid not in seen_ids and sim >= _SIMILARITY_THRESHOLD:
+            if sim >= _SIMILARITY_THRESHOLD:
                 seen_ids.add(mid)
                 all_candidates.append(mem)
 
     logger.info(f"[DEBUG-VEC] after threshold={_SIMILARITY_THRESHOLD}: {len(all_candidates)} candidates")
 
     # Spec §3.2 step 4: rerank by display_score = importance × time_freshness × similarity.
-    # 我们没有 last_accessed_at 列, 用 created_at 作为 freshness 代理
-    # (spec 意图是 "越久没被触达的记忆越靠后", created_at 与此大致一致)。
+    # last_accessed_at comes from updated_at (touched by access_log) with created_at fallback,
+    # so prompt-injected memories become fresh in the next retrieval pass.
     # 只写 rank_score — ClassifiedMemory.display_score 由下游 data_fetch_phase
     # 统一赋值 + 截断到 10 条。
     #
@@ -175,7 +181,11 @@ async def hybrid_retrieve(
     for m in all_candidates:
         score = compute_display_score(
             importance=float(m.get("importance", 0)),
-            last_accessed_at=m.get("created_at"),
+            last_accessed_at=(
+                m.get("last_accessed_at")
+                or m.get("updated_at")
+                or m.get("created_at")
+            ),
             similarity=float(m.get("similarity", 1.0)),
         )
         # Phase 3.2: 用户显式否定 query → candidate 无否定 → 极性 mismatch 降权
@@ -196,23 +206,10 @@ async def hybrid_retrieve(
     # Plain text list for consumers that don't need ClassifiedMemory metadata
     memory_strings = [m.text for m in classified_memories] if classified_memories else None
 
-    # Graph context (with caching)
-    graph_context = None
-    if isinstance(graph_result, Exception):
-        logger.warning(f"Graph context failed: {graph_result}")
-        graph_context = await cache_graph_context(user_id, workspace_id=workspace_id)
-    else:
-        graph_context = graph_result
-        if graph_context:
-            try:
-                await cache_set_graph_context(user_id, graph_context, workspace_id=workspace_id)
-            except Exception:
-                pass
-
     result = {
         "memories": classified_memories if classified_memories else None,
         "memory_strings": memory_strings,
-        "graph_context": graph_context,
+        "graph_context": None,
     }
 
     # Cache the result. Phase 2.4: cache write key 必须跟 GET 用同一个 cache_key

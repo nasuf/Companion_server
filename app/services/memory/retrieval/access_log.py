@@ -46,7 +46,7 @@ async def log_memory_access(
     for table in ("memories_user", "memories_ai"):
         try:
             await db.execute_raw(
-                f'UPDATE "{table}" SET "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = ANY($1::text[])',
+                f"UPDATE {table} SET updated_at = CURRENT_TIMESTAMP WHERE id = ANY($1::text[])",
                 memory_ids,
             )
         except Exception as e:

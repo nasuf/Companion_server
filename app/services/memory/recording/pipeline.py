@@ -126,6 +126,7 @@ async def process_memory_pipeline(
     context_conversation: str = "",
     statement_time: datetime | None = None,
     side: Side = "user",
+    workspace_id: str | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
 
@@ -141,7 +142,7 @@ async def process_memory_pipeline(
 
     Returns list of stored memory IDs.
     """
-    workspace_id = await resolve_workspace_id(user_id=user_id)
+    workspace_id = await resolve_workspace_id(workspace_id=workspace_id, user_id=user_id)
 
     # Step 0: Heuristic filter — skip purely noise messages (no LLM call)
     # 只对 new_conversation 判定, 历史上下文已经抽过了

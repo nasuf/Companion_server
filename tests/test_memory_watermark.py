@@ -69,7 +69,7 @@ async def test_watermark_splits_context_and_new():
     with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=wm_ts)), \
          patch("app.services.chat.post_process.set_watermark", AsyncMock()) as mock_set, \
          patch("app.services.chat.post_process.process_memory_pipeline", AsyncMock()) as mock_pipeline:
-        await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
+        await _bg_memory_pipeline("u1", msgs, conversation_id="c1", workspace_id="ws-1")
 
     # user + ai 两条 pipeline 都应被调用
     assert mock_pipeline.await_count == 2
@@ -87,6 +87,10 @@ async def test_watermark_splits_context_and_new():
     assert "new_u" in by_side["ai"]["context_conversation"]
     assert "new_a" in by_side["ai"]["new_conversation"]
     assert "new_u" not in by_side["ai"]["new_conversation"]
+    assert by_side["user"]["statement_time"] == base + timedelta(seconds=1)
+    assert by_side["ai"]["statement_time"] == base + timedelta(seconds=2)
+    assert by_side["user"]["workspace_id"] == "ws-1"
+    assert by_side["ai"]["workspace_id"] == "ws-1"
 
     # 水位线推进到 max(本 side 新消息 createdAt)
     assert mock_set.await_count == 2

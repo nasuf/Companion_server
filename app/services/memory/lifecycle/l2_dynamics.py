@@ -172,18 +172,18 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
     if mem_ids:
         rows = await db.query_raw(
             """
-            SELECT "memoryId", COUNT(*)::int AS cnt
-            FROM "memory_changelogs"
-            WHERE "memoryId" = ANY($1::text[])
-              AND "createdAt" >= $2
-              AND "operation" = 'access'
-            GROUP BY "memoryId"
+            SELECT memory_id, COUNT(*)::int AS cnt
+            FROM memory_changelogs
+            WHERE memory_id = ANY($1::text[])
+              AND created_at >= $2
+              AND operation = 'access'
+            GROUP BY memory_id
             """,
             mem_ids,
             one_year_ago,
         )
         for r in rows:
-            mention_counts[r.get("memoryId", "")] = r.get("cnt", 0)
+            mention_counts[r.get("memory_id", "")] = r.get("cnt", 0)
 
     promoted = 0
     demoted = 0

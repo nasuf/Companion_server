@@ -666,10 +666,13 @@ async def _bg_proactive_ai_memory(
         agent_id=agent_id, user_id=user_id,
     ):
         try:
+            from app.services.workspace.workspaces import resolve_workspace_id
+            workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
             await process_memory_pipeline(
                 user_id=user_id,
                 new_conversation=f"assistant: {message}",
                 side="ai",
+                workspace_id=workspace_id,
             )
         except Exception as e:
             logger.warning(f"Proactive AI memory pipeline failed: {e}")

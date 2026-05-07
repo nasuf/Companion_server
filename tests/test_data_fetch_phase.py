@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -107,6 +108,48 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
     assert ctx.memory_relevance == "weak"
     assert ctx.classified_memories is None
     assert ctx.l3_memories == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_parallel_context_time_memories_use_workspace_scope():
+    """显式时间记忆段必须限制在当前 conversation workspace 内。"""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+
+    now = datetime.now(timezone.utc)
+    parsed_time = SimpleNamespace(
+        is_future=False,
+        start=now - timedelta(days=7),
+        end=now,
+    )
+    search_mock = AsyncMock(return_value=[{
+        "id": "m1",
+        "summary": "当前 workspace 的时间记忆",
+        "content": "当前 workspace 的时间记忆",
+    }])
+
+    with _patch_data_fetch(), patch(
+        "app.services.memory.retrieval.vector_search.search_by_time_range",
+        search_mock,
+    ):
+        ctx = await fetch_parallel_context(
+            user_message="上周那件事",
+            messages_dicts=[{"role": "user", "content": "上周那件事"}],
+            parsed_times=[parsed_time],
+            workspace_id="ws-current",
+            user_id="u1",
+            agent_id="a1",
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+        )
+
+    search_mock.assert_awaited_once_with(
+        "u1",
+        parsed_time.start,
+        parsed_time.end,
+        limit=5,
+        workspace_id="ws-current",
+    )
+    assert ctx.time_memories == ["当前 workspace 的时间记忆"]
 
 
 @pytest.mark.asyncio

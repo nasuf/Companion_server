@@ -75,6 +75,24 @@ def _get_pipeline_lock(conversation_id: str) -> asyncio.Lock:
     return lock
 
 
+async def _resolve_workspace_id_for_conversation(conversation_id: str | None) -> str | None:
+    """Best-effort conversation -> workspace lookup for memory writes.
+
+    The chat hot path already knows the conversation scope, so background memory
+    extraction must not fall back to "latest active workspace" for users who
+    have multiple companions. If lookup fails, callers still degrade to the
+    legacy user-level resolver inside process_memory_pipeline.
+    """
+    if not conversation_id:
+        return None
+    try:
+        conv = await db.conversation.find_unique(where={"id": conversation_id})
+        return getattr(conv, "workspaceId", None) if conv else None
+    except Exception as e:
+        logger.debug(f"conversation workspace lookup failed for {conversation_id}: {e}")
+        return None
+
+
 async def save_replies(
     conversation_id: str,
     replies: list[str | dict],
@@ -151,6 +169,7 @@ async def _bg_memory_pipeline(
     user_id: str,
     messages: list[dict],
     conversation_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     """spec §2.1 / §2.2：用户侧与 AI 侧走两条独立管线，owner 由路径决定。
 
@@ -172,29 +191,34 @@ async def _bg_memory_pipeline(
     """
     if conversation_id is not None:
         async with _get_pipeline_lock(conversation_id):
-            await _do_memory_pipeline(user_id, messages, conversation_id)
+            await _do_memory_pipeline(user_id, messages, conversation_id, workspace_id)
     else:
         # proactive 等无 conv 入口: 调用方天然不并发同源, 无需上锁.
-        await _do_memory_pipeline(user_id, messages, None)
+        await _do_memory_pipeline(user_id, messages, None, workspace_id)
 
 
 async def _do_memory_pipeline(
     user_id: str,
     messages: list[dict],
     conversation_id: str | None,
+    workspace_id: str | None,
 ) -> None:
     """_bg_memory_pipeline 的实现体. 由外层确保同 conv 不并发后被调用."""
     try:
         recent = messages[-6:]
         if not recent:
             return
+        workspace_id = workspace_id or await _resolve_workspace_id_for_conversation(conversation_id)
         roles = {m.get("role") for m in recent}
         sides_to_run: list[tuple[Literal["user", "ai"], str]] = [
             ("user", "user"),
             ("ai", "assistant"),
         ]
         tasks = [
-            _pipeline_with_watermark(user_id, recent, conversation_id, side=side)
+            _pipeline_with_watermark(
+                user_id, recent, conversation_id,
+                side=side, workspace_id=workspace_id,
+            )
             for side, role in sides_to_run
             if role in roles
         ]
@@ -230,6 +254,7 @@ async def _pipeline_with_watermark(
     conversation_id: str | None,
     *,
     side: Literal["user", "ai"],
+    workspace_id: str | None = None,
 ) -> int:
     """按 (conversation_id, side) 水位线切分 recent, 调用 extraction pipeline.
     返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件)."""
@@ -264,7 +289,9 @@ async def _pipeline_with_watermark(
         user_id=user_id,
         new_conversation=_fmt_conversation(new_target_msgs),
         context_conversation=_fmt_conversation(context_msgs),
+        statement_time=max_side_ts,
         side=side,
+        workspace_id=workspace_id,
     )
 
     # 防时钟回退: 仅当新候选 > wm 才推进

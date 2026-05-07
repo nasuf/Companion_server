@@ -143,14 +143,23 @@ async def _load_topic_intimacy(agent_id: str | None, user_id: str) -> float:
     return 0.0
 
 
-async def _load_time_memories(user_id: str, parsed_times: list) -> list[str]:
+async def _load_time_memories(
+    user_id: str,
+    parsed_times: list,
+    workspace_id: str | None,
+) -> list[str]:
     """spec §9.3.4：按解析出的过去时间区间召回记忆。"""
     past_times = [pt for pt in parsed_times if not pt.is_future]
     if not past_times:
         return []
     from app.services.memory.retrieval.vector_search import search_by_time_range
     all_rows = await asyncio.gather(
-        *[search_by_time_range(user_id, pt.start, pt.end, limit=5) for pt in past_times]
+        *[
+            search_by_time_range(
+                user_id, pt.start, pt.end, limit=5, workspace_id=workspace_id,
+            )
+            for pt in past_times
+        ]
     )
     seen: set[str] = set()
     results: list[str] = []
@@ -200,7 +209,10 @@ def _post_process_retrieval(
     for m in classified_memories:
         m.display_score = compute_display_score(
             importance=getattr(m, "importance", 0.5),
-            last_accessed_at=getattr(m, "created_at", None),
+            last_accessed_at=(
+                getattr(m, "last_accessed_at", None)
+                or getattr(m, "created_at", None)
+            ),
             similarity=getattr(m, "similarity", 0.8),
         )
     classified_memories.sort(key=lambda m: m.display_score, reverse=True)
@@ -308,7 +320,7 @@ async def fetch_parallel_context(
         _do_retrieval(user_message, user_id, workspace_id),
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
-        _load_time_memories(user_id, parsed_times),
+        _load_time_memories(user_id, parsed_times, workspace_id),
         extract_emotion(user_message),
         compute_ai_pad(
             current_time=current_time_str,

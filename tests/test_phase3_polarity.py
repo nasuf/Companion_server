@@ -183,12 +183,9 @@ async def test_retrieval_downweights_pos_when_user_negates():
                      new_callable=AsyncMock, return_value=[pos_cand, neg_cand]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval",
                      new_callable=AsyncMock, return_value=None),
         patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
-        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
         patch.object(hybrid, "select_context", side_effect=_spy_select),
     ):
         # 用户 query 含否定: "我不喜欢什么咖啡?"
@@ -233,12 +230,9 @@ async def test_retrieval_no_downweight_when_user_positive():
                      new_callable=AsyncMock, return_value=[pos_cand, neg_cand]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
-        patch.object(hybrid, "get_relationship_context",
-                     new_callable=AsyncMock, return_value={}),
         patch.object(hybrid, "cache_retrieval",
                      new_callable=AsyncMock, return_value=None),
         patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
-        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
         patch.object(hybrid, "select_context", side_effect=_spy_select),
     ):
         # 用户 query 无否定: "我对咖啡的看法"
