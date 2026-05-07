@@ -26,6 +26,7 @@ from app.services.memory.retrieval.relevance import (
     classify_memory_relevance,
     compute_display_score,
 )
+from app.services.memory.retrieval.ranking import is_recall_query
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.relationship.emotion import compute_ai_pad, extract_emotion
@@ -55,7 +56,8 @@ class FetchedContext:
     topic_intimacy: float = 50.0
     time_memories: list[str] = field(default_factory=list)
     l3_memories: list[str] = field(default_factory=list)
-    l3_trigger_label: str = "无"            # "无" | "不满纠正" | "请求更久"
+    l3_trigger_label: str = "无"            # "无" | "不满纠正" | "请求更久" | "稀疏补召"
+    enhanced_query: str = ""
     ai_status: dict | None = None
     schedule_context: str | None = None
 
@@ -80,6 +82,21 @@ async def _do_retrieval(
 
 
 _T = Any  # gather result type alias
+_EMPTY_RETRIEVAL_RESULT = {"memories": None, "memory_strings": None, "graph_context": None}
+
+_ENHANCED_QUERY_FIRST_HINTS = (
+    "他呢", "她呢", "它呢", "这个呢", "那个呢", "这件事", "那件事",
+    "那次", "上次", "当时", "后来呢", "然后呢", "颜色呢", "名字呢",
+    "情况呢", "怎么样了", "怎样了", "怎么了", "咋样了",
+)
+
+
+def _should_wait_for_enhanced_query(user_message: str) -> bool:
+    """省略式追问先等 enhanced_query, 避免用错误 query 做一次无效检索."""
+    text = user_message.strip()
+    if not text or len(text) > 24:
+        return False
+    return any(hint in text for hint in _ENHANCED_QUERY_FIRST_HINTS)
 
 
 def _unwrap(result: _T, default: _T, label: str) -> _T:
@@ -207,14 +224,18 @@ def _post_process_retrieval(
             f"text='{m.text[:60]}'"
         )
     for m in classified_memories:
-        m.display_score = compute_display_score(
-            importance=getattr(m, "importance", 0.5),
-            last_accessed_at=(
-                getattr(m, "last_accessed_at", None)
-                or getattr(m, "created_at", None)
-            ),
-            similarity=getattr(m, "similarity", 0.8),
-        )
+        rank_score = float(getattr(m, "score", 0.0) or 0.0)
+        if rank_score > 0:
+            m.display_score = rank_score
+        else:
+            m.display_score = compute_display_score(
+                importance=getattr(m, "importance", 0.5),
+                last_accessed_at=(
+                    getattr(m, "last_accessed_at", None)
+                    or getattr(m, "created_at", None)
+                ),
+                similarity=getattr(m, "similarity", 0.8),
+            )
     classified_memories.sort(key=lambda m: m.display_score, reverse=True)
     classified_memories = classified_memories[:10]
     logger.info(
@@ -233,6 +254,7 @@ async def maybe_awaken_l3(
     memory_relevance: str,
     l3_trigger_classify_fn: Callable[[str], Awaitable[str]],
     enhanced_query: str = "",
+    l1_l2_count: int | None = None,
 ) -> tuple[list[str], str]:
     """spec §4 step 5 + §3.4.5：强相关或调用久远记忆意图 → 调 L3 trigger 判定.
 
@@ -241,20 +263,29 @@ async def maybe_awaken_l3(
     (LLM 看不到上下文也能判"不满纠正/请求更久").
     """
     should_call_l3 = detected_intent.intent == IntentType.L3_RECALL
-    if not (memory_relevance == "strong" or should_call_l3):
+    sparse_fallback = (
+        l1_l2_count is not None
+        and l1_l2_count < 3
+        and memory_relevance in ("medium", "strong")
+        and is_recall_query(user_message)
+    )
+    if not (memory_relevance == "strong" or should_call_l3 or sparse_fallback):
         return [], "无"
 
-    try:
-        label = await l3_trigger_classify_fn(user_message)
-    except Exception as e:
-        logger.warning(
-            f"L3 trigger classify failed: {e}",
-            extra={"event": EVT_LLM_FAIL, "stage": "l3_trigger_classify"},
-        )
-        label = "无"
+    if sparse_fallback and memory_relevance == "medium" and not should_call_l3:
+        label = "稀疏补召"
+    else:
+        try:
+            label = await l3_trigger_classify_fn(user_message)
+        except Exception as e:
+            logger.warning(
+                f"L3 trigger classify failed: {e}",
+                extra={"event": EVT_LLM_FAIL, "stage": "l3_trigger_classify"},
+            )
+            label = "无"
 
     # §3.4.5 调用久远记忆意图 → 无论分类结果都召回；§4 强相关 → 仅前两类召回
-    if not (should_call_l3 or label in ("不满纠正", "请求更久")):
+    if not (should_call_l3 or sparse_fallback or label in ("不满纠正", "请求更久")):
         logger.info(
             f"[L3-TRIGGER] label='{label}' for '{user_message[:40]}' — skip awaken",
             extra={
@@ -311,13 +342,18 @@ async def fetch_parallel_context(
     current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
     recent_context = format_recent_context(messages_dicts)
 
+    wait_for_enhanced_query = _should_wait_for_enhanced_query(user_message)
+    retrieval_awaitable = (
+        asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
+        if wait_for_enhanced_query else _do_retrieval(user_message, user_id, workspace_id)
+    )
     (
         relevance_result, retrieval_result,
         portrait, topic_intimacy,
         time_memories_result, user_emotion_result, emotion_result,
     ) = await asyncio.gather(
         _classify_relevance(user_message, context=recent_context),
-        _do_retrieval(user_message, user_id, workspace_id),
+        retrieval_awaitable,
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times, workspace_id),
@@ -357,10 +393,19 @@ async def fetch_parallel_context(
         },
     )
 
-    # Phase 2.4: 省略指代场景 (enhanced_query 非空 + 非 weak) → 重检索, 提升召回率.
-    # 初次并行检索用原 message embedding 做 (relevance 还没返回), 命中率低; 拿到
-    # enhanced_query 后用它重 search 一次. 仅在指代场景 (~10% 流量) 跑, 加 ~200ms.
-    if enhanced_query and memory_relevance != "weak":
+    # Phase 2.4 + retrieval latency fix:
+    # - 明显省略式追问 ("那他呢?" / "颜色呢?") 先等 enhanced_query, 再只检索一次。
+    # - 完整消息仍保持 relevance/retrieval 并行; 若 LLM 额外给 enhanced_query, 再重检索。
+    if wait_for_enhanced_query and memory_relevance != "weak":
+        try:
+            retrieval_result = await _do_retrieval(
+                user_message, user_id, workspace_id,
+                enhanced_query=enhanced_query,
+            )
+        except Exception as e:
+            logger.warning(f"Enhanced-first retrieval failed: {e}")
+            retrieval_result = _EMPTY_RETRIEVAL_RESULT
+    elif enhanced_query and memory_relevance != "weak":
         logger.info(
             f"[DEBUG-MEM] re-retrieve with enhanced_query='{enhanced_query[:40]}'"
         )
@@ -384,11 +429,13 @@ async def fetch_parallel_context(
 
     if detected_intent is not None and l3_trigger_classify_fn is not None:
         # Phase 2.4: L3 也用 enhanced_query 做向量检索 (省略指代场景)
+        l1_l2_count = len(classified_memories or [])
         l3_memories, l3_trigger_label = await maybe_awaken_l3(
             user_message, user_id, workspace_id,
             detected_intent, memory_relevance,
             l3_trigger_classify_fn,
             enhanced_query=enhanced_query,
+            l1_l2_count=l1_l2_count,
         )
     else:
         l3_memories, l3_trigger_label = [], "无"
@@ -406,6 +453,7 @@ async def fetch_parallel_context(
         time_memories=time_memories,
         l3_memories=l3_memories,
         l3_trigger_label=l3_trigger_label,
+        enhanced_query=enhanced_query,
         ai_status=ai_status,
         schedule_context=schedule_context,
     )

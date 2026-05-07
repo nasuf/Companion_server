@@ -114,11 +114,11 @@ async def test_hybrid_cache_key_uses_enhanced_query():
 
 
 @pytest.mark.asyncio
-async def test_data_fetch_re_retrieves_when_enhanced_query_present():
-    """data_fetch_phase: relevance 返 enhanced_query 非空 + 非 weak → 重检索.
+async def test_data_fetch_enhanced_first_for_elliptical_followup():
+    """data_fetch_phase: 省略追问先等 enhanced_query, 避免用错误 query 搜两次.
 
-    流程: 初次并行用 message 搜 (relevance 还没返回), 拿到 enhanced_query 后
-    用它重 search 一次 (省略指代场景, 提升召回).
+    流程: "那他怎样了?" 这类消息向量信号不完整, 先等 relevance 还原成
+    enhanced_query, 然后只检索一次.
     """
     from app.services.chat.data_fetch_phase import fetch_parallel_context
     from app.services.memory.retrieval.relevance import RelevanceResult
@@ -157,11 +157,54 @@ async def test_data_fetch_re_retrieves_when_enhanced_query_present():
             l3_trigger_classify_fn=AsyncMock(return_value="无"),
         )
 
-    # 应该有 2 次 retrieval: 第 1 次并行(用 message), 第 2 次 enhanced (重检索)
-    assert len(retrieval_calls) == 2
-    assert retrieval_calls[0]["enhanced"] is None  # 第 1 次没 enhanced
-    assert retrieval_calls[1]["enhanced"] == "妈妈最近情况"  # 第 2 次有
+    assert len(retrieval_calls) == 1
+    assert retrieval_calls[0]["enhanced"] == "妈妈最近情况"
     assert ctx.memory_relevance == "strong"
+
+
+@pytest.mark.asyncio
+async def test_data_fetch_still_retrieves_in_parallel_for_complete_message_with_enhanced_query():
+    """完整消息保持 retrieval/relevance 并行; 若 LLM 给 enhanced_query 再重检索."""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+    from app.services.memory.retrieval.relevance import RelevanceResult
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    relevance_result = RelevanceResult(level="strong", enhanced_query="用户的妈妈最近情况")
+
+    retrieval_calls = []
+    async def _track_retrieve(message, user_id, workspace_id=None,
+                               enhanced_query=None, **kw):
+        retrieval_calls.append({"message": message, "enhanced": enhanced_query})
+        return {"memories": [], "memory_strings": [], "graph_context": None}
+
+    with (
+        patch("app.services.chat.data_fetch_phase.classify_memory_relevance",
+              new_callable=AsyncMock, return_value=relevance_result),
+        patch("app.services.chat.data_fetch_phase.hybrid_retrieve",
+              side_effect=_track_retrieve),
+        patch("app.services.chat.data_fetch_phase.compute_ai_pad",
+              new_callable=AsyncMock, return_value={"pleasure": 0, "arousal": 0.5, "dominance": 0.5}),
+        patch("app.services.chat.data_fetch_phase.extract_emotion",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_latest_portrait",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_cached_schedule",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_topic_intimacy",
+              new_callable=AsyncMock, return_value=50.0),
+    ):
+        await fetch_parallel_context(
+            user_id="u1", agent_id="a1", workspace_id="w1",
+            user_message="我想聊聊妈妈最近的事",
+            messages_dicts=[{"role": "user", "content": "..."}],
+            parsed_times=[],
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+        )
+
+    assert len(retrieval_calls) == 2
+    assert retrieval_calls[0]["enhanced"] is None
+    assert retrieval_calls[1]["enhanced"] == "用户的妈妈最近情况"
 
 
 @pytest.mark.asyncio

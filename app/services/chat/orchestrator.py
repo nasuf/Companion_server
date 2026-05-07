@@ -518,7 +518,7 @@ async def stream_chat_response(
         #
         # crisis 路径 (P0): 跳过 fetch_parallel_context 的 7 个并行子任务 (relevance LLM /
         # AI PAD LLM / user PAD LLM / topic_intimacy / time_memories / schedule / 等),
-        # 只起轻量 hybrid_retrieve + portrait 两个 (handle_crisis 仅需这俩). 实测 trace
+        # 只起安全专用记忆召回 + portrait 两个 (handle_crisis 仅需这俩). 实测 trace
         # 2026-05-07 16:57: crisis 路径走完整 fetch 浪费 4s 无关 LLM (relevance 1.2s
         # + AI PAD 1.4s + user PAD 1.4s) — 求救场景下用户体感冷漠. 牺牲: user/ai PAD
         # cache 不更新, message metadata 缺 emotion 字段 (post_process 的 _bg_user_emotion
@@ -528,11 +528,14 @@ async def stream_chat_response(
         crisis_portrait_task: asyncio.Task | None = None
         early_parsed_times: list = []
         if crisis_force_intent:
-            # 轻量 fetch — 仅 handle_crisis 必需的两项 (lazy import 防循环依赖)
-            from app.services.memory.retrieval.hybrid import hybrid_retrieve
+            # 轻量 fetch — 仅 handle_crisis 必需的两项 (lazy import 防循环依赖).
+            # crisis memory 走专用安全召回, 避免通用 top-10 把轻生/强负面历史挤掉.
+            from app.services.memory.retrieval.safety import retrieve_crisis_memories
             from app.services.portrait import get_latest_portrait
             crisis_memory_task = asyncio.create_task(
-                hybrid_retrieve(user_message, user_id, workspace_id=workspace_id)
+                retrieve_crisis_memories(
+                    user_message, user_id, workspace_id=workspace_id,
+                )
             )
             if agent_id:
                 crisis_portrait_task = asyncio.create_task(
@@ -683,6 +686,19 @@ async def stream_chat_response(
         # 跳过完整 fetch, 只 await 我们提前 kick off 的 crisis_memory_task +
         # crisis_portrait_task (handle_crisis 仅需这俩).
         if detected_intent.intent == IntentType.CRISIS:
+            await _cancel_fetch_task()
+            if crisis_memory_task is None:
+                from app.services.memory.retrieval.safety import retrieve_crisis_memories
+                crisis_memory_task = asyncio.create_task(
+                    retrieve_crisis_memories(
+                        user_message, user_id, workspace_id=workspace_id,
+                    )
+                )
+            if crisis_portrait_task is None and agent_id:
+                from app.services.portrait import get_latest_portrait
+                crisis_portrait_task = asyncio.create_task(
+                    get_latest_portrait(user_id, agent_id)
+                )
             # 等轻量 fetch (memory + portrait), 跳所有 PAD/relevance/topic/schedule LLM
             crisis_classified: list = []
             crisis_portrait: Any = None
@@ -691,6 +707,8 @@ async def stream_chat_response(
                     retrieval_result = await crisis_memory_task
                     if isinstance(retrieval_result, dict):
                         crisis_classified = retrieval_result.get("memories") or []
+                    elif isinstance(retrieval_result, list):
+                        crisis_classified = retrieval_result
                 except Exception as e:
                     logger.warning(f"Crisis memory fetch failed: {e}")
             if crisis_portrait_task is not None:
@@ -698,7 +716,13 @@ async def stream_chat_response(
                     crisis_portrait = await crisis_portrait_task
                 except Exception as e:
                     logger.warning(f"Crisis portrait fetch failed: {e}")
-            await _cancel_fetch_task()  # 兜底: sub_intent_mode 走 fetch_parallel_context 时, crisis 不该来这条路径, 但保险
+            crisis_accessed_ids = [
+                getattr(m, "id", "") for m in crisis_classified if getattr(m, "id", "")
+            ]
+            if crisis_accessed_ids:
+                _fire_background(
+                    log_memory_access(user_id, crisis_accessed_ids, workspace_id=workspace_id)
+                )
             async for evt in handle_crisis(
                 user_message, sc_ctx,
                 classified_memories=crisis_classified,
@@ -742,6 +766,8 @@ async def stream_chat_response(
                 user_message, user_id, workspace_id,
                 detected_intent, fetched.memory_relevance,
                 _l3_trigger_classify,
+                enhanced_query=fetched.enhanced_query,
+                l1_l2_count=len(fetched.classified_memories or []),
             ))
         else:
             parsed_times = (
@@ -1161,6 +1187,3 @@ async def stream_chat_response(
                 user_emotion=prompt_user_emotion,
                 ai_emotion=emotion,
             ))
-
-
-

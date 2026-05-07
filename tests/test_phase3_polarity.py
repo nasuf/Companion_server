@@ -157,7 +157,7 @@ async def test_dedup_below_threshold_unchanged():
 
 @pytest.mark.asyncio
 async def test_retrieval_downweights_pos_when_user_negates():
-    """用户 query 含否定 → positive candidate 降权 (rank_score *= 0.3)."""
+    """用户 query 含否定 → positive candidate 显著降权."""
     from app.services.memory.retrieval import hybrid
 
     # 模拟两个 candidate: 一 positive, 一 negation, 同 sim
@@ -194,13 +194,13 @@ async def test_retrieval_downweights_pos_when_user_negates():
             user_id="u1", workspace_id="w1",
         )
 
-    # negation candidate 应该排前 (不被降权), positive 被降权 0.3
+    # negation candidate 应该排前 (不被降权), positive 被显著降权。
+    # rerank v2 会额外给字面/主题命中加分, 所以这里验证行为而不锁死精确倍率。
     assert captured_scores["m-neg"] > captured_scores["m-pos"], (
         f"用户否定 query 时, 否定 candidate 应排前 negation; got "
         f"neg={captured_scores['m-neg']:.3f}, pos={captured_scores['m-pos']:.3f}"
     )
-    # 验证降权幅度: pos = neg × 0.3
-    assert abs(captured_scores["m-pos"] - captured_scores["m-neg"] * 0.3) < 0.01
+    assert captured_scores["m-pos"] < captured_scores["m-neg"] * 0.35
 
 
 @pytest.mark.asyncio

@@ -37,7 +37,8 @@ async def search_by_embedding(
         """
         SELECT * FROM (
             (SELECT
-                m.id, m.content, m.summary, m.level, m.importance, m.type, m.main_category, m.sub_category,
+                m.id, m.content, m.summary, m.level, m.importance, m.mention_count,
+                m.type, m.main_category, m.sub_category,
                 m.created_at, m.updated_at,
                 COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
                 'user' AS source,
@@ -54,7 +55,8 @@ async def search_by_embedding(
             LIMIT $7)
             UNION ALL
             (SELECT
-                m.id, m.content, m.summary, m.level, m.importance, m.type, m.main_category, m.sub_category,
+                m.id, m.content, m.summary, m.level, m.importance, m.mention_count,
+                m.type, m.main_category, m.sub_category,
                 m.created_at, m.updated_at,
                 COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
                 'ai' AS source,
@@ -121,7 +123,8 @@ async def search_by_time_range(
     if source == "user":
         return await db.query_raw(
             """
-            SELECT id, content, summary, level, importance, type, main_category, sub_category,
+            SELECT id, content, summary, level, importance, mention_count,
+                   type, main_category, sub_category,
                    occur_time, created_at, updated_at,
                    COALESCE(updated_at, created_at) AS last_accessed_at,
                    'user' AS source
@@ -136,7 +139,8 @@ async def search_by_time_range(
     elif source == "ai":
         return await db.query_raw(
             """
-            SELECT id, content, summary, level, importance, type, main_category, sub_category,
+            SELECT id, content, summary, level, importance, mention_count,
+                   type, main_category, sub_category,
                    occur_time, created_at, updated_at,
                    COALESCE(updated_at, created_at) AS last_accessed_at,
                    'ai' AS source
@@ -152,7 +156,8 @@ async def search_by_time_range(
     return await db.query_raw(
         """
         SELECT * FROM (
-            (SELECT id, content, summary, level, importance, type, main_category, sub_category,
+            (SELECT id, content, summary, level, importance, mention_count,
+                    type, main_category, sub_category,
                     occur_time, created_at, updated_at,
                     COALESCE(updated_at, created_at) AS last_accessed_at,
                     'user' AS source
@@ -162,7 +167,8 @@ async def search_by_time_range(
              ORDER BY importance DESC
              LIMIT $5)
             UNION ALL
-            (SELECT id, content, summary, level, importance, type, main_category, sub_category,
+            (SELECT id, content, summary, level, importance, mention_count,
+                    type, main_category, sub_category,
                     occur_time, created_at, updated_at,
                     COALESCE(updated_at, created_at) AS last_accessed_at,
                     'ai' AS source

@@ -28,9 +28,13 @@ class ClassifiedMemory:
     id: str = ""  # memory row ID for access logging
     importance: float = 0.5
     similarity: float = 0.8
+    mention_count: int = 0
+    main_category: str | None = None
+    sub_category: str | None = None
     created_at: datetime | str | None = None
     last_accessed_at: datetime | str | None = None
     display_score: float = 0.0  # set by reranking in orchestrator
+    rank_reasons: list[str] | None = None
     source: MemorySource = "user"  # 上游 vector_search 必填
 
 
@@ -104,12 +108,16 @@ def select_context(
             id=mid,
             importance=float(mem.get("importance", 0.5)),
             similarity=float(mem.get("similarity", 0.8)),
+            mention_count=int(mem.get("mention_count") or 0),
+            main_category=mem.get("main_category"),
+            sub_category=mem.get("sub_category"),
             created_at=mem.get("created_at"),
             last_accessed_at=(
                 mem.get("last_accessed_at")
                 or mem.get("updated_at")
                 or mem.get("created_at")
             ),
+            rank_reasons=list(mem.get("rank_reasons") or []),
             source=source,
         ))
         used_tokens += tokens

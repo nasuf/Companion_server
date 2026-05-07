@@ -16,7 +16,7 @@ from datetime import datetime
 
 from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
 from app.services.memory.retrieval.context_selector import select_context
-from app.services.memory.retrieval.relevance import compute_display_score
+from app.services.memory.retrieval.ranking import rank_memory_candidate
 from app.services.runtime.cache import (
     cache_retrieval,
     cache_set_retrieval,
@@ -74,7 +74,7 @@ async def hybrid_retrieve(
 ) -> dict:
     """Perform hybrid retrieval and return context for prompt.
 
-    No LLM calls — only vector search + graph queries + ranking.
+    No LLM calls — only vector search + explicit time search + ranking.
 
     Phase 2.4: enhanced_query 是 LLM 解省略指代后的完整短语 (e.g. "妈妈病情"
     替代原"那他怎样了"). 优先用 enhanced_query 做 vector embedding, fallback
@@ -164,40 +164,14 @@ async def hybrid_retrieve(
 
     logger.info(f"[DEBUG-VEC] after threshold={_SIMILARITY_THRESHOLD}: {len(all_candidates)} candidates")
 
-    # Spec §3.2 step 4: rerank by display_score = importance × time_freshness × similarity.
-    # last_accessed_at comes from updated_at (touched by access_log) with created_at fallback,
-    # so prompt-injected memories become fresh in the next retrieval pass.
-    # 只写 rank_score — ClassifiedMemory.display_score 由下游 data_fetch_phase
-    # 统一赋值 + 截断到 10 条。
-    #
-    # Phase 3.2: polarity 降权 — bge-m3 反义对 cosine 0.84+, 跟同义难分.
-    # 用户 query 有显式否定 + candidate 没有 → 极性 mismatch → 降权 0.3
-    # (不删, 极端情况 LLM 仍可见). 仅在 user_query 有否定时触发, 防 positive
-    # query 误过滤 negative candidate (用户问"我喜欢什么", 应该看到所有偏好,
-    # 包括"不喜欢" 类记忆).
-    from app.services.memory.polarity import has_negation
-    user_has_neg = has_negation(effective_query)
-
+    # Spec §3.2 step 4 + retrieval v2: rerank by display_score plus lightweight
+    # keyword/category/safety boosts. The vector model recalls broadly; these
+    # deterministic signals stop critical emotional or literal-topic memories
+    # from being buried by generic high-importance facts.
     for m in all_candidates:
-        score = compute_display_score(
-            importance=float(m.get("importance", 0)),
-            last_accessed_at=(
-                m.get("last_accessed_at")
-                or m.get("updated_at")
-                or m.get("created_at")
-            ),
-            similarity=float(m.get("similarity", 1.0)),
-        )
-        # Phase 3.2: 用户显式否定 query → candidate 无否定 → 极性 mismatch 降权
-        if user_has_neg:
-            cand_text = m.get("summary") or m.get("content", "")
-            if not has_negation(cand_text):
-                score *= 0.3
-                logger.debug(
-                    f"[POLARITY] downweight pos candidate "
-                    f"(user_query has negation): '{cand_text[:30]}'"
-                )
+        score, reasons = rank_memory_candidate(m, effective_query)
         m["rank_score"] = score
+        m["rank_reasons"] = reasons
     all_candidates.sort(key=lambda m: float(m.get("rank_score", 0)), reverse=True)
 
     # Select within token budget (returns ClassifiedMemory list)

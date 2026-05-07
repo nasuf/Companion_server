@@ -8,9 +8,10 @@ Uses seven-dim personality (0-100) to build role-play personality descriptions.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
-from app.services.memory.retrieval.context_selector import ClassifiedMemory, split_by_source
+from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti
@@ -151,7 +152,38 @@ async def _build_memory_section(
             "(本次没有联想到任何与当前话题相关的记忆)",
         )
 
-    user_texts, ai_texts = split_by_source(memories)
+    def _days_since(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return None
+        if isinstance(value, datetime) and value.tzinfo:
+            return (datetime.now(timezone.utc) - value).days
+        if isinstance(value, datetime):
+            return (datetime.now() - value).days
+        return None
+
+    def _format_memory(m: ClassifiedMemory) -> str:
+        tags: list[str] = []
+        if m.importance >= 0.85:
+            tags.append("重要")
+        if m.mention_count >= 3:
+            tags.append("多次提及")
+        days = _days_since(m.last_accessed_at or m.created_at)
+        if days is not None and days < 30:
+            tags.append("近期提到")
+        score = m.display_score or m.score
+        if score >= 0.75:
+            tags.append("和当前话题高度相关")
+        if not tags:
+            return m.text
+        return f"({' · '.join(tags)}) {m.text}"
+
+    user_texts = [_format_memory(m) for m in memories if m.source != "ai"]
+    ai_texts = [_format_memory(m) for m in memories if m.source == "ai"]
 
     def _numbered(label: str, items: list[str]) -> str:
         body = "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
@@ -168,7 +200,8 @@ async def _build_memory_section(
 
     body = (
         "以下是与当前话题相关的事实, 已按归属分组. 回答时必须与这些保持一致, "
-        "不得编造矛盾信息, 也不要把对方的记忆误当成自己的、或反之。\n\n"
+        "不得编造矛盾信息, 也不要把对方的记忆误当成自己的、或反之。"
+        "括号里的标记只供你判断轻重缓急, 回复时不要复述这些标记。\n\n"
         + "\n\n".join(parts)
     )
     return _section("你记得的事情", body)

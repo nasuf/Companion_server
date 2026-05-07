@@ -459,6 +459,48 @@ def test_format_user_memory_filters_to_emotion_relevant():
     assert "AI 是设计师" not in out
 
 
+@pytest.mark.asyncio
+async def test_retrieve_crisis_memories_keeps_safety_memory_outside_generic_vector_top(monkeypatch):
+    """crisis 专用召回必须能捞出安全记忆, 不能被通用 L1 top10 挤掉。"""
+    from app.services.memory.retrieval import safety
+
+    generic = [
+        {
+            "id": f"generic-{i}",
+            "summary": f"用户核心身份事实 {i}",
+            "content": f"用户核心身份事实 {i}",
+            "level": 1,
+            "importance": 0.95,
+            "similarity": 0.82,
+            "main_category": "身份",
+            "sub_category": "其他",
+            "source": "user",
+        }
+        for i in range(12)
+    ]
+    safety_row = {
+        "id": "safety-memory",
+        "summary": "用户表达过强烈负面情绪, 有轻生念头",
+        "content": "用户表达过强烈负面情绪, 有轻生念头",
+        "level": 1,
+        "importance": 0.95,
+        "similarity": 1.0,
+        "main_category": "情绪",
+        "sub_category": "悲伤",
+        "source": "user",
+    }
+    monkeypatch.setattr(safety, "search_similar", AsyncMock(return_value=generic))
+    with patch("app.services.memory.retrieval.safety.db") as mock_db:
+        mock_db.query_raw = AsyncMock(return_value=[safety_row])
+        memories = await safety.retrieve_crisis_memories(
+            "我快活不下去了", "u1", workspace_id="ws1", limit=5,
+        )
+
+    ids = [m.id for m in memories]
+    assert "safety-memory" in ids
+    assert ids[0] == "safety-memory"
+
+
 # ════════════════════════════════════════════════════════════════════
 # § 7. format_recent_context exclude_message_id (跨 short-circuit 公共修复)
 # ════════════════════════════════════════════════════════════════════
@@ -522,13 +564,13 @@ def test_format_recent_context_handles_messages_without_id():
 
 def test_orchestrator_crisis_skips_full_fetch_parallel_context():
     """orchestrator 在 crisis_force_intent 命中时**不调** fetch_parallel_context,
-    而是只起 hybrid_retrieve + portrait 轻量 fetch.
+    而是只起 retrieve_crisis_memories + portrait 轻量 fetch.
 
     防回归: 实测 trace 2026-05-07 16:57 走完整 fetch 浪费 4s 无关 LLM
     (relevance + AI PAD + user PAD). 修复后 crisis 路径不应再触发这些.
 
     用 inspect.getsource 验证: orchestrator 中 crisis_force_intent 分支
-    不包含 fetch_parallel_context() 调用, 包含 hybrid_retrieve + get_latest_portrait.
+    不包含 fetch_parallel_context() 调用, 包含 retrieve_crisis_memories + get_latest_portrait.
     """
     import inspect
     from app.services.chat import orchestrator
@@ -538,8 +580,11 @@ def test_orchestrator_crisis_skips_full_fetch_parallel_context():
     # crisis_force_intent 分支必须出现这两个轻量 fetch
     assert "crisis_memory_task" in src, "crisis 轻量 memory fetch 缺失"
     assert "crisis_portrait_task" in src, "crisis 轻量 portrait fetch 缺失"
-    assert "hybrid_retrieve" in src, "crisis 路径必须用 hybrid_retrieve 直调"
+    assert "retrieve_crisis_memories" in src, "crisis 路径必须用安全专用记忆召回"
     assert "get_latest_portrait" in src, "crisis 路径必须用 get_latest_portrait 直调"
+    assert "if crisis_memory_task is None" in src, (
+        "LLM 识别为 CRISIS 但非关键词强制时, 也必须兜底创建安全记忆召回"
+    )
 
     # CRISIS dispatch 必须在 fetch_parallel_context await 之前 — 通过位置验证
     # (在源码中, CRISIS dispatch 'if detected_intent.intent == IntentType.CRISIS'

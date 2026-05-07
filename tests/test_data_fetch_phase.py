@@ -172,3 +172,49 @@ async def test_fetch_parallel_context_l3_awakened_on_strong_relevance():
 
     assert ctx.l3_trigger_label == "请求更久"
     assert ctx.l3_memories == ["很久以前你说过喜欢下雨"]
+
+
+@pytest.mark.asyncio
+async def test_l3_sparse_fallback_runs_for_medium_recall_with_few_l1_l2():
+    """medium + 明确回忆线索 + L1/L2 稀疏时, 应补搜 L3。"""
+    from app.services.chat.data_fetch_phase import maybe_awaken_l3
+
+    search = AsyncMock(return_value=[{"content": "去年那次旅行你很开心"}])
+    with patch("app.services.chat.data_fetch_phase.search_l3_memories", search):
+        memories, label = await maybe_awaken_l3(
+            user_message="还记得去年那次旅行吗",
+            user_id="u1",
+            workspace_id="ws1",
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            memory_relevance="medium",
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+            l1_l2_count=1,
+        )
+
+    assert label == "稀疏补召"
+    assert memories == ["去年那次旅行你很开心"]
+    search.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_l3_sparse_fallback_skips_medium_without_recall_hint():
+    """medium + L1/L2 稀疏但没有回忆线索时, 不应随便唤醒 L3。"""
+    from app.services.chat.data_fetch_phase import maybe_awaken_l3
+
+    search = AsyncMock(return_value=[{"content": "不该出现"}])
+    trigger = AsyncMock(return_value="无")
+    with patch("app.services.chat.data_fetch_phase.search_l3_memories", search):
+        memories, label = await maybe_awaken_l3(
+            user_message="今天好累啊",
+            user_id="u1",
+            workspace_id="ws1",
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            memory_relevance="medium",
+            l3_trigger_classify_fn=trigger,
+            l1_l2_count=1,
+        )
+
+    assert label == "无"
+    assert memories == []
+    search.assert_not_awaited()
+    trigger.assert_not_awaited()
