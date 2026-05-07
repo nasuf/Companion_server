@@ -205,8 +205,14 @@ async def maybe_awaken_l3(
     detected_intent: IntentResult,
     memory_relevance: str,
     l3_trigger_classify_fn: Callable[[str], Awaitable[str]],
+    enhanced_query: str = "",
 ) -> tuple[list[str], str]:
-    """spec §4 step 5 + §3.4.5：强相关或调用久远记忆意图 → 调 L3 trigger 判定。"""
+    """spec §4 step 5 + §3.4.5：强相关或调用久远记忆意图 → 调 L3 trigger 判定.
+
+    Phase 2.4: 加 enhanced_query 参数. 省略指代场景下 (e.g. "那他呢") L3 也用
+    enhanced_query 做向量检索, 提升久远记忆召回率. trigger 分类用原 message
+    (LLM 看不到上下文也能判"不满纠正/请求更久").
+    """
     should_call_l3 = detected_intent.intent == IntentType.L3_RECALL
     if not (memory_relevance == "strong" or should_call_l3):
         return [], "无"
@@ -233,15 +239,19 @@ async def maybe_awaken_l3(
         )
         return [], label
 
-    l3_results = await search_l3_memories(user_message, user_id, workspace_id=workspace_id)
+    # Phase 2.4: enhanced_query 优先 (省略指代场景), fallback 到原 message
+    search_query = enhanced_query or user_message
+    l3_results = await search_l3_memories(search_query, user_id, workspace_id=workspace_id)
     l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
     logger.info(
-        f"[L3-TRIGGER] label='{label}' awakened {len(l3_memories)} memories",
+        f"[L3-TRIGGER] label='{label}' awakened {len(l3_memories)} memories "
+        f"(query='{search_query[:40]}')",
         extra={
             "event": EVT_MEMORY_L3_AWAKEN,
             "trigger_label": label,
             "awakened": bool(l3_memories),
             "n_l3_retrieved": len(l3_memories),
+            "used_enhanced_query": bool(enhanced_query),
         },
     )
     return l3_memories, label
@@ -346,10 +356,12 @@ async def fetch_parallel_context(
     emotion: dict | None = _unwrap(emotion_result, None, "compute_ai_pad")
 
     if detected_intent is not None and l3_trigger_classify_fn is not None:
+        # Phase 2.4: L3 也用 enhanced_query 做向量检索 (省略指代场景)
         l3_memories, l3_trigger_label = await maybe_awaken_l3(
             user_message, user_id, workspace_id,
             detected_intent, memory_relevance,
             l3_trigger_classify_fn,
+            enhanced_query=enhanced_query,
         )
     else:
         l3_memories, l3_trigger_label = [], "无"

@@ -196,9 +196,10 @@ async def hybrid_retrieve(
         "graph_context": graph_context,
     }
 
-    # Cache the result
+    # Cache the result. Phase 2.4: cache write key 必须跟 GET 用同一个 cache_key
+    # (effective_query), 否则 enhanced_query 路径 GET 永远 miss → caching 失效.
     try:
-        await cache_set_retrieval(message, user_id, result, workspace_id=workspace_id)
+        await cache_set_retrieval(cache_key, user_id, result, workspace_id=workspace_id)
     except Exception:
         pass
 

@@ -292,3 +292,123 @@ async def test_relevance_parser_extracts_json_from_noise():
     r = _parse_relevance_response(raw)
     assert r.level == "strong"
     assert r.enhanced_query == "用户的妈妈"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CR Round 1 发现的 bug 修复回归
+# ═══════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_cache_write_uses_same_key_as_read_with_enhanced_query():
+    """Phase 2.4 CR bug fix: cache_set_retrieval 必须用跟 cache_retrieval 相同
+    的 cache_key (effective_query), 否则 enhanced_query 路径永远 cache miss.
+    """
+    from app.services.memory.retrieval import hybrid
+
+    set_calls = []
+    async def _capture_set(key, user_id, result, workspace_id=None):
+        set_calls.append(key)
+
+    with (
+        patch.object(hybrid, "search_similar",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "get_relationship_context",
+                     new_callable=AsyncMock, return_value={}),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval", side_effect=_capture_set),
+        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
+    ):
+        # 场景 1: enhanced_query 非空 → set/get 都用 enhanced_query
+        await hybrid.hybrid_retrieve(
+            message="那他呢?", user_id="u1", workspace_id="w1",
+            enhanced_query="妈妈情况",
+        )
+
+    assert set_calls == ["妈妈情况"], (
+        f"cache_set_retrieval 必须用 enhanced_query (跟 read 一致); got {set_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cache_write_uses_message_when_no_enhanced_query():
+    """无 enhanced_query 时, cache write 仍用 message (跟 read 一致)."""
+    from app.services.memory.retrieval import hybrid
+
+    set_calls = []
+    async def _capture_set(key, user_id, result, workspace_id=None):
+        set_calls.append(key)
+
+    with (
+        patch.object(hybrid, "search_similar",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "get_relationship_context",
+                     new_callable=AsyncMock, return_value={}),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval", side_effect=_capture_set),
+        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="我喜欢咖啡", user_id="u1", workspace_id="w1",
+            # enhanced_query 不传
+        )
+
+    assert set_calls == ["我喜欢咖啡"]
+
+
+@pytest.mark.asyncio
+async def test_l3_awakening_uses_enhanced_query():
+    """Phase 2.4: L3 也走 enhanced_query (省略指代场景)."""
+    from app.services.chat import data_fetch_phase
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    captured_query = []
+    async def _capture_search(query, user_id, workspace_id=None):
+        captured_query.append(query)
+        return []
+
+    with patch.object(data_fetch_phase, "search_l3_memories",
+                      side_effect=_capture_search):
+        await data_fetch_phase.maybe_awaken_l3(
+            user_message="那他呢?",
+            user_id="u1", workspace_id="w1",
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            memory_relevance="strong",
+            l3_trigger_classify_fn=AsyncMock(return_value="请求更久"),
+            enhanced_query="妈妈情况",
+        )
+
+    assert captured_query == ["妈妈情况"], (
+        f"L3 awakening 必须用 enhanced_query; got {captured_query}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_l3_awakening_falls_back_to_message():
+    """L3: 无 enhanced_query → 用原 message (向后兼容)."""
+    from app.services.chat import data_fetch_phase
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    captured_query = []
+    async def _capture_search(query, user_id, workspace_id=None):
+        captured_query.append(query)
+        return []
+
+    with patch.object(data_fetch_phase, "search_l3_memories",
+                      side_effect=_capture_search):
+        await data_fetch_phase.maybe_awaken_l3(
+            user_message="还记得我以前的事吗?",
+            user_id="u1", workspace_id="w1",
+            detected_intent=IntentResult(intent=IntentType.L3_RECALL, confidence=0.9),
+            memory_relevance="strong",
+            l3_trigger_classify_fn=AsyncMock(return_value="请求更久"),
+            # enhanced_query 默认 ""
+        )
+
+    assert captured_query == ["还记得我以前的事吗?"]
