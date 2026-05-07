@@ -126,6 +126,28 @@ def _profiles() -> dict[str, CallProfile]:
                 # API 但享受 idle_timeout 保护. 见 models.py:_invoke_via_stream.
                 stream_mode=True,
             ),
+            "memory_extract": CallProfile(
+                # 用户一次性发"画像 dump" (e.g. 血型/体重/体型/穿搭/忌口/亲戚...
+                # 20+ 条事实) 时 LLM 输出 1500-2500 tokens JSON, qwen-plus 稳态
+                # ~50-80 tok/s → 25-50s. chat_extract 45s 配置经常踩边界 →
+                # asyncio.wait_for cancel 时 langchain callback 跳过 →
+                # langsmith trace 永留 status=pending → silent failure 用户
+                # 20+ 条事实全丢. 生产 trace 复现 (2026-04-29 019dd808).
+                #
+                # 修: 走 streaming + idle_timeout 保护. 对大输出 idle_timeout
+                # 决定生死 (持续吐字就不挂, 只在持续断流 60s 才砍), 总 180s 留
+                # safety. 跟 background 同范式但允许 ollama fallback (extraction
+                # 失败比丢 silent 还差, 14B 兜底有价值; character_generation 是
+                # 用户阻塞热路径, ollama 慢 6 分钟反而坏体感, extraction 是后台
+                # fire-and-forget, ollama 慢点无感).
+                timeout_s=180.0,
+                max_retries=0,
+                retry_backoff_s=(),
+                allow_ollama_fallback=True,
+                first_chunk_timeout_s=30.0,
+                idle_timeout_s=60.0,
+                stream_mode=True,
+            ),
         }
     return _PROFILES_CACHE
 
