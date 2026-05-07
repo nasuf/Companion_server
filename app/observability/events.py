@@ -25,6 +25,7 @@ from __future__ import annotations
 EVT_INTENT_DETECTED = "intent.detected"
 EVT_INTENT_SPLIT = "intent.split"
 EVT_INTENT_SHORT_CIRCUIT = "intent.short_circuit"
+EVT_CHAT_CRISIS_DETECTED = "chat.crisis_detected"  # 自伤/极端念头关键字命中, 走主回复 + crisis hint
 
 # Reply
 EVT_REPLY_TIER = "reply.tier_path"

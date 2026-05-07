@@ -16,6 +16,7 @@ from collections.abc import AsyncGenerator
 
 from app.db import db
 from app.observability.events import (
+    EVT_CHAT_CRISIS_DETECTED,
     EVT_INTENT_SPLIT,
     EVT_MEMORY_CONTRADICTION,
     EVT_REPLY_EMITTED,
@@ -52,6 +53,7 @@ from app.services.chat.intent_handlers import (
     ShortCircuitCtx,
     handle_apology_promise,
     handle_conversation_end,
+    handle_crisis,
     handle_current_state,
     handle_deletion,
     handle_record_request,
@@ -156,6 +158,45 @@ _DISTRESS_KEYWORDS = [
     "不好", "难受", "烦", "委屈", "崩溃", "糟糕", "不开心", "很累", "想哭",
     "好难过", "撑不住", "心情不好",
 ]
+
+# 危机安全网触发关键字 — 自伤 / 自杀 / 想结束生命的明确表达.
+# 设计:
+# - 子串匹配, 不调 LLM (热路径首位 + 不依赖 intent LLM 误判. 生产 trace
+#   2026-05-07 已确认 dashscope 把"我想跳楼"误归"询问当前状态" → AI 答"刚做完手工",
+#   彻底错过用户求救信号).
+# - 宁可"误命中"不可"漏命中". 误命中代价: 普通用户碰巧说到 "想死了" 这种夸张词,
+#   AI 用温柔语气接情绪 — 对正常用户**无伤害, 还是好回复**;
+#   漏命中代价: 用户求救被 AI 当作普通话题接过, 真出事**人命关天**.
+# - 不放泛化情绪词 (难过/累了/烦) — 那些是日常情绪表达, 用 _DISTRESS_KEYWORDS
+#   走 relational_context 路径, 不需要升级到 crisis 等级.
+# - 关键字只放"已定式"短语. 不放对话语境敏感的词 (e.g. "完了"/"结束了" 这些
+#   日常用法太广, 单独拿出来误命中率太高).
+_CRISIS_KEYWORDS = (
+    # 跳类
+    "跳楼", "跳河", "跳桥", "跳轨", "跳海",
+    # 自杀 / 自伤系列
+    "自杀", "自残", "自伤", "轻生",
+    # 不想活类 (对生命的负面想法)
+    "想死", "我去死", "去死算了", "不想活", "活不下去",
+    "活着没意思", "活着没意义", "活够了",
+    "结束生命", "结束自己", "了结自己", "了结我自己",
+    # 具体方式
+    "上吊", "割腕", "吃药自尽",
+    # 存在性消极
+    "不想存在", "消失算了", "消失就好",
+)
+
+
+def _is_crisis_message(text: str) -> bool:
+    """检测用户消息是否含自伤 / 极端念头 / 对生命负面想法等危机信号.
+
+    简单子串匹配, 不调 LLM (热路径首位 + 防 intent LLM 误判).
+    宁可误命中 (回复用温柔语气接情绪, 对正常用户无伤害)
+    也不可漏命中 (漏命中 → AI 离题, 用户求救被忽略 → 严重事故).
+    """
+    if not text:
+        return False
+    return any(keyword in text for keyword in _CRISIS_KEYWORDS)
 
 
 def truncate_at_sentence(text: str, max_len: int) -> str:
@@ -409,9 +450,32 @@ async def stream_chat_response(
             return
         cached_patience = boundary_ctx.cached_patience
 
+        # ── 危机安全网 (P0) ────────────────────────────────────────────
+        # 关键字命中 → force IntentType.CRISIS, 走 handle_crisis short-circuit
+        # (跟 conversation_end / current_state 等同模式). 早于 preflight + intent
+        # LLM, 因为:
+        # - 实证 LLM intent 把"我想跳楼"误归"询问当前状态" → AI 答"我在做手工",
+        #   彻底错过求救信号 (生产 trace 2026-05-07 已确认)
+        # - 用户在 pending 矛盾/删除状态突然说"我想跳楼", preflight 会把它当成
+        #   "对追问的回答" 走错分支
+        # 关键字层兜底是 must-have, 不能依赖 intent LLM 准确性.
+        # sub_intent_mode 跳过: 父调用已用整句判定过, 子片段不重复.
+        crisis_force_intent = (
+            (not sub_intent_mode) and _is_crisis_message(user_message)
+        )
+        if crisis_force_intent:
+            logger.warning(
+                f"[CRISIS] keyword detected, forcing CRISIS intent (len={len(user_message)})",
+                extra={
+                    "event": EVT_CHAT_CRISIS_DETECTED,
+                    "user_message_len": len(user_message),
+                },
+            )
+
         # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
         # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
-        if not sub_intent_mode:
+        # crisis 路径也跳过: 用户求救信号优先级高于一切, pending 留着等用户安全后处理.
+        if not sub_intent_mode and not crisis_force_intent:
             preflight_ctx = PreflightCtx(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
@@ -444,6 +508,8 @@ async def stream_chat_response(
         # (因 L3 需要 intent + relevance 双信号).
         # sub_intent_mode (forced_intent != None) 同步取得 intent 无需并行, fetch_task=None
         # 走原同步路径在下方 fetch_parallel_context.
+        # crisis 路径仍 kick off fetch — handle_crisis 需要 user memory/portrait
+        # 给 LLM, 但 cancel 后等 _cancel_fetch_task 一致兜底.
         fetch_task: asyncio.Task | None = None
         early_parsed_times: list = []
         if forced_intent is None:
@@ -463,9 +529,13 @@ async def stream_chat_response(
         # 每条用户消息都调小模型做意图分类, 并把最近对话历史作为上下文注入.
         # 不再区分消息长度 — 短消息如 "好" / "嗯" 只有结合 AI 上一句
         # ("要我再陪你一会儿吗?") 才能识别出 "作息调整" 意图.
+        # crisis force: 关键字命中直接 force CRISIS, 不调 intent LLM (省成本 +
+        # 保证不被误归 — 实证 LLM 把"我想跳楼"误归"询问当前状态").
         if forced_intent is not None:
             # sub_intent_mode 的子片段, 意图由父调用指定, 不再识别
             detected_intent = IntentResult(intent=forced_intent, confidence=1.0)
+        elif crisis_force_intent:
+            detected_intent = IntentResult(intent=IntentType.CRISIS, confidence=1.0)
         else:
             context_text = await _fetch_intent_context(
                 conversation_id,
@@ -488,7 +558,10 @@ async def stream_chat_response(
                 await fetch_task
             except (asyncio.CancelledError, Exception):
                 pass
-        if forced_intent is None:
+        # crisis 路径下 detected_intent 是手动构造的 CRISIS, metadata={} 没 fragments,
+        # 这里 if 分支自然不进; 但显式 `not crisis_force_intent` 防御 future 改动加进 metadata.
+        # (crisis 优先级最高, 不该被多意图拆分稀释)
+        if forced_intent is None and not crisis_force_intent:
             # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
             fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
             if fragments and len(fragments) > 1:
@@ -643,6 +716,21 @@ async def stream_chat_response(
                 await l3_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+        # P0 危机安全网 — 排在所有 short-circuit 前. handle_crisis 用专属 prompt
+        # (intent.crisis_reply), 完全切掉主 system_prompt 的 14 段干扰. classified_memories
+        # 给 handler 筛选用户的情绪/求助历史 (e.g. "用户表达过强烈负面情绪"), 让回复连贯.
+        # crisis_force_intent 由 keyword 层判定; 也可由 intent LLM 输出"危机求助" label
+        # 命中 IntentType.CRISIS — 两条路汇合到这里.
+        if detected_intent.intent == IntentType.CRISIS:
+            await _cancel_l3_task()
+            async for evt in handle_crisis(
+                user_message, sc_ctx,
+                classified_memories=classified_memories or [],
+                portrait=portrait,
+            ):
+                yield evt
+            return
 
         delay_context = None
         if reply_context:

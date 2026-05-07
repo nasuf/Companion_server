@@ -189,6 +189,34 @@ async def current_state_reply(
     )
 
 
+async def crisis_reply(
+    *,
+    message: str,
+    context: str = "",
+    personality_brief: str = "",
+    user_portrait: str = "",
+    user_memory: str = "",
+) -> str | None:
+    """P0 危机安全网回复 (handle_crisis).
+
+    切掉主 system_prompt 14 段, 只用 intent.crisis_reply 单 prompt 生成. user_memory
+    传入用户 L1/L2 中跟情绪/求助/边界相关的条目, 帮 LLM 知道这是不是 Ta 第一次说.
+    max_chars 给到 200 (比普通 *_reply 的 120 大), 因为 crisis 回复需要 1) 接住情绪
+    2) 想了解 3) 柔和提议求助 — 三步压在 100 字内会被截断成机械回复.
+    """
+    return await _render_llm(
+        "intent.crisis_reply",
+        {
+            "message": message,
+            "context": context or "(无)",
+            "personality_brief": personality_brief or "真诚朋友",
+            "user_portrait": user_portrait or "(未知)",
+            "user_memory": user_memory or "(无)",
+        },
+        max_chars=200,
+    )
+
+
 async def deletion_confirm_reply(
     *,
     message: str,

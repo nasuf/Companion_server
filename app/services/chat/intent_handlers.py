@@ -21,6 +21,7 @@ from app.db import db
 from app.observability.events import EVT_INTENT_SHORT_CIRCUIT
 from app.services.chat.intent_replies import (
     apology_reply,
+    crisis_reply,
     current_state_reply,
     deletion_confirm_reply,
     end_reply,
@@ -356,6 +357,94 @@ async def handle_current_state(
     except Exception as e:
         logger.warning(f"Current state short-circuit failed, falling through: {e}")
         return False, None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 工程扩展 (P0 危机安全网): 危机求助 (CRISIS)
+# ═══════════════════════════════════════════════════════════════════
+
+
+# 静态兜底: handle_crisis 调 LLM 失败 (dashscope/Ollama 全挂) 时, 用这条
+# 写好的回复保住用户安全 — 总比"crisis 漏到主路径 → AI 编兔子假耳朵故事"
+# 好得多. 措辞遵循三步原则 (接住 → 想了解), 没有空话/客套.
+_CRISIS_STATIC_FALLBACK = (
+    "听到你这么说我心里很难受。我在这儿陪着你。"
+    "可以告诉我现在是什么让你这么难吗？我想多听一听。"
+)
+
+
+def _format_user_memory_for_crisis(classified_memories: list) -> str:
+    """从已检索 classified_memories 中筛出"用户侧 + 跟情绪/求助/边界相关"的条目,
+    给 crisis prompt 的 {user_memory} 占位符. 主线: 让 LLM 知道这是不是 Ta 第一次
+    这样表达 — 已知历史 (e.g. L1 `用户表达过强烈负面情绪`) 帮助 LLM 用"我记得你
+    上次也..."的连贯语气, 而不是干巴巴的通用模板.
+
+    筛选不调 LLM (热路径首位), 只用关键字粗筛. 没命中相关条目时返"(无)" —
+    就当 Ta 第一次说, prompt 自己有兜底措辞.
+    """
+    from app.services.memory.retrieval.context_selector import split_by_source
+
+    user_lines, _ = split_by_source(classified_memories)
+    if not user_lines:
+        return "(无)"
+    # 跟情绪/求助/求救相关的关键词. 跟 _CRISIS_KEYWORDS 重叠是 OK 的
+    # (那些是触发判定, 这些是召回筛选), 同时加宽到泛情绪词避免漏召回.
+    relevance_kw = (
+        "情绪", "难过", "委屈", "崩溃", "压力", "焦虑", "抑郁",
+        "哭", "孤独", "撑不住", "求救", "求助",
+        "自伤", "自残", "轻生", "想死", "活不下去", "活着没",
+        "跳楼", "跳河", "自杀",
+    )
+    hits = [t for t in user_lines if any(kw in t for kw in relevance_kw)]
+    if not hits:
+        return "(无)"
+    return "\n".join(f"- {t}" for t in hits[:5])  # 最多 5 条避免 token 爆
+
+
+async def handle_crisis(
+    user_message: str,
+    ctx: ShortCircuitCtx,
+    *,
+    classified_memories: list,
+    portrait: Any,
+) -> AsyncGenerator[dict, None]:
+    """P0 危机安全网 short-circuit handler.
+
+    设计:
+    - 用专属 intent.crisis_reply prompt 单独调 LLM, **完全切掉**主 system_prompt
+      14 段干扰 (delay/ai_state/topic/long history). 实测 trace 已证: 主路径
+      crisis_active flag 注入 hint section 不够, 其他段落 (delay_context /
+      ai_state_constraint / 历史 AI 旁白) 仍把 LLM 拉去"虽然我在忙乌龟但..."
+      句式. handler 隔离才是根治.
+    - {user_memory} 占位符传入用户跟情绪/求助相关的已知 L1/L2 — 让 LLM 知道
+      Ta 历史背景, 输出"这不是 Ta 第一次"或"我记得你上次..."的连贯回复.
+    - LLM 失败 (两级降级全挂) 走 _CRISIS_STATIC_FALLBACK — 比静默漏到主路径
+      让 AI 编故事好得多.
+    - emoji/sticker 跳过 — handler 直接通过 ctx.finalize 走 finalize_short_circuit
+      路径, 不走 emit_replies decoration. 这是天然就跳的, 不需要额外 flag.
+    - reply_count = 1 — finalize_short_circuit 默认单条, 跟其他 short-circuit 一致.
+    """
+    user_memory_block = _format_user_memory_for_crisis(classified_memories)
+    try:
+        response = await crisis_reply(
+            message=user_message,
+            context=ctx.recent_context,
+            personality_brief=_agent_name(ctx.agent),
+            user_portrait=str(portrait) if portrait else "(未知)",
+            user_memory=user_memory_block,
+        )
+        if not response:
+            response = _CRISIS_STATIC_FALLBACK
+            logger.warning("[CRISIS] LLM returned empty, using static fallback")
+    except Exception as e:
+        logger.warning(f"Crisis handler LLM failed, using static fallback: {e}")
+        response = _CRISIS_STATIC_FALLBACK
+
+    # crisis 整句已被本 handler 消化, 强制 sub fragments 跳过 (防 multi-intent
+    # 多个 sub 把"危机 + 别的意图"拆出后 sub 再跑离题回复).
+    ctx.consumed_full_message = True
+    async for evt in ctx.finalize(response, kind="crisis"):
+        yield evt
 
 
 # ═══════════════════════════════════════════════════════════════════

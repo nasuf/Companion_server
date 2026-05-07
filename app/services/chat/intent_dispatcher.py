@@ -30,11 +30,18 @@ class IntentType(Enum):
     # 跟"计划查询"分离让回复体感正确 ("好嘞我帮你记上了" vs 错误的"你明天要做X").
     # 详见 CLAUDE.md §6 偏离表.
     RECORD_REQUEST = "record_request"
+    # 工程扩展 (P0 危机安全网): 用户消息含自伤/极端念头/对生命负面想法等求救信号.
+    # 走独立 short-circuit handler (handle_crisis), 用专属 minimal prompt + 用户
+    # 记忆 fetch, 完全切掉主路径 system_prompt 14 段干扰. 触发由 orchestrator
+    # 关键字层 (_is_crisis_message) 强制 force, 不依赖 intent LLM (实证 LLM 把
+    # "我想跳楼" 误归"询问当前状态"). 详见 CLAUDE.md §6 偏离表 + handle_crisis 注释.
+    CRISIS = "crisis"
     NONE = "none"
 
 
 # spec §3.3 中文标签 → IntentType 映射
 LABEL_TO_INTENT: dict[str, IntentType] = {
+    "危机求助": IntentType.CRISIS,
     "终结意图": IntentType.CONVERSATION_END,
     "计划查询": IntentType.SCHEDULE_QUERY,
     "作息调整": IntentType.SCHEDULE_ADJUST,
@@ -47,10 +54,12 @@ LABEL_TO_INTENT: dict[str, IntentType] = {
 }
 
 # spec §3.3 multi-intent 优先级（高优先级先处理；用于 primary 选择和 sub-intent 处理顺序）
+# 危机求助排首位 — 即使 LLM 把它跟其他意图同时识别 (e.g. "我活不下去了, 算了不聊了"
+# 误打成"危机+终结"), 也必须 crisis 主路径胜出, 用户安全永远在前.
 # 记录请求排在删除之后但在其他短路意图之前: 用户同时说 "记得 X" + 别的意图时,
 # 先确认记下 (体感优先), 再处理别的; 但 "忘了 X" 仍优先以避免冲突.
 INTENT_PRIORITY: list[str] = [
-    "删除", "记录请求", "作息调整", "终结意图", "计划查询",
+    "危机求助", "删除", "记录请求", "作息调整", "终结意图", "计划查询",
     "询问当前状态", "道歉承诺", "调用久远记忆", "日常交流",
 ]
 

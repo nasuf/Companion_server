@@ -20,6 +20,7 @@ from app.services.prompting.defaults import (
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
     CONSISTENCY_RULES_PROMPT,
+    CRISIS_REPLY_PROMPT,
     CURRENT_STATE_REPLY_PROMPT,
     DAILY_SCHEDULE_PROMPT,
     DELAY_EXPLANATION_PROMPT,
@@ -139,6 +140,16 @@ PROMPT_DEFINITIONS = [
         "告诉 LLM 状态但禁止主动展开, 避免跟 §3.4.3 询问当前状态分支撞主题. "
         "占位符: {activity} {status}.",
         CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.crisis_reply", "危机求助回复", "聊天热路径", "聊天",
+        "【工程主导】无字面 spec 章节. 用户消息含自伤/极端念头/对生命负面想法等求救"
+        "信号时, intent_handlers.handle_crisis 调本 prompt 短路生成回复. 完全切掉"
+        "主 system_prompt 14 段干扰 (delay/ai_state/topic/long history). 触发由 "
+        "orchestrator._is_crisis_message 关键字层强制 force IntentType.CRISIS, 不"
+        "依赖 LLM 意图分类 (实证 LLM 把'我想跳楼'误归'询问当前状态'). "
+        "原则化措辞 (不举具体关键词反例) + 三步顺序 + 强禁项. 详见 defaults.py 注释.",
+        CRISIS_REPLY_PROMPT,
     ),
 
     # ── 初始化 (背景生成) ──
