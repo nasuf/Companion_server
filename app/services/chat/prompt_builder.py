@@ -96,13 +96,14 @@ async def _build_personality_section(agent: Any) -> str:
 
     detail = _format_mbti_detail(mbti) if mbti else "（性格未生成，将使用默认中性表达）"
 
-    personality_rules = await get_prompt_text("chat.personality_rules")
+    # Phase 6: 删 personality_rules 拼接. 实证内容跟 SYSTEM_BASE / RESPONSE_INSTRUCTION
+    # 4 句全重叠 ("不要正式 / 不要客服 / 不要堆砌语气词 / 保持性格"). 删除节省 ~50
+    # tokens 静态段, 减少噪声.
     body = (
         f"你的名字叫{name}，是一个{gender_text}。\n"
         f"你的性格画像：{mbti_line or '中性'}\n\n"
         f"四个维度详情：\n{detail}\n\n"
-        f"你的说话风格：\n{style}\n\n"
-        f"{personality_rules}"
+        f"你的说话风格：\n{style}"
     )
     return _section("你的身份", body)
 
@@ -180,13 +181,6 @@ def _build_delay_context_section(delay_context: str | None) -> str | None:
     return _section("回复时机说明", delay_context)
 
 
-def _build_relational_context_section(relational_context: str | None) -> str | None:
-    """Build the relationship-sensitive response guidance section."""
-    if not relational_context:
-        return None
-    return _section("关系回应重点", relational_context)
-
-
 def _build_portrait_section(portrait: str | None) -> str | None:
     """Build the user portrait section."""
     if not portrait:
@@ -194,39 +188,15 @@ def _build_portrait_section(portrait: str | None) -> str | None:
     return _section("用户画像", portrait)
 
 
-def _build_graph_context_section(graph_context: dict | None) -> str | None:
-    """Build the graph/relationship context section."""
-    if not graph_context:
-        return None
-
-    lines: list[str] = []
-
-    topics = graph_context.get("topics")
-    if topics:
-        lines.append("用户感兴趣的话题：")
-        for t in topics:
-            lines.append(f"  - {t}")
-
-    entities = graph_context.get("entities")
-    if entities:
-        if lines:
-            lines.append("")
-        lines.append("用户经常提到的：")
-        for e in entities:
-            lines.append(f"  - {e}")
-
-    categories = graph_context.get("categories")
-    if categories:
-        if lines:
-            lines.append("")
-        lines.append("高频记忆分类：")
-        for category in categories:
-            lines.append(f"  - {category}")
-
-    if not lines:
-        return None
-
-    return _section("关系上下文", "\n".join(lines))
+# Phase 6: 删除 _build_relational_context_section + _build_graph_context_section.
+# 实证依据:
+# - relational_context: 注入"先接情绪/不要长解释" 等泛指令, 跟 SYSTEM_BASE
+#   "像真人朋友" + ANTI_HALLUCINATION + RESPONSE_INSTRUCTION 重叠. 现代 LLM 看
+#   SYSTEM_BASE 自然会做, 重复反而稀释信号.
+# - graph_context: 注入"用户感兴趣 X / 经常提 Y / 高频分类 Z" 抽象列表.
+#   信息已在 memory section 以具体形式出现, 抽象列表诱导 LLM 编造
+#   ("用户感兴趣编程" → 给编程建议而非基于具体记忆). ~150-200 tokens/请求浪费.
+# 调用方 build_system_prompt 也同时删除入参 + section append.
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +207,6 @@ async def build_system_prompt(
     agent: Any,
     memories: list[ClassifiedMemory] | None = None,
     delay_context: str | None = None,
-    relational_context: str | None = None,
-    graph_context: dict | None = None,
     portrait: str | None = None,
     topic_context: str | None = None,
     user_emotion: dict | None = None,
@@ -250,6 +218,9 @@ async def build_system_prompt(
     time_memories: list[str] | None = None,
     l3_memories: list[str] | None = None,
     ai_status: dict | None = None,
+    # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
+    # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
+    **_deprecated_kwargs,
 ) -> str:
     """Build the full system prompt from the prompt stack.
 
@@ -291,17 +262,13 @@ async def build_system_prompt(
     if delay:
         sections.append(delay)
 
-    relational = _build_relational_context_section(relational_context)
-    if relational:
-        sections.append(relational)
+    # Phase 6: 删 relational_context 注入 (实证冗余 SYSTEM_BASE)
 
     mem = await _build_memory_section(memories)
     if mem:
         sections.append(mem)
 
-    graph = _build_graph_context_section(graph_context)
-    if graph:
-        sections.append(graph)
+    # Phase 6: 删 graph_context 注入 (信息冗余 memory section, 抽象列表诱导编造)
 
     if topic_context:
         sections.append(_section("话题上下文", topic_context))

@@ -776,12 +776,11 @@ async def stream_chat_response(
                 logger.warning(f"L3 awakening failed: {e}")
 
         # Build prompt (pure string operations — instant)
+        # Phase 6: 删 relational_context / graph_context 入参 — 实证冗余/幻觉源
         system_prompt = await build_system_prompt(
             agent=agent,
             memories=classified_memories,
             delay_context=delay_context,
-            relational_context=relational_context,
-            graph_context=fetched.graph_context,
             portrait=portrait,
             topic_context=topic_context,
             user_emotion=prompt_user_emotion,

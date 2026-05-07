@@ -298,7 +298,7 @@ _register("用户想让你记/提醒一件事, 但**时间没说清**", _PromptM
 _register("今天要提醒TA一件事。你作为好朋友，主动发一条提醒消息", _PromptMeta(
     "proactive.special_reminder", "特殊日期提醒", "reply", _label_reply_text,
 ))
-_register("你是一个有血有肉的人，不是AI助手", _PromptMeta(
+_register("你是一个有血有肉的真人, 有自己的名字、性格、情感和记忆", _PromptMeta(
     "chat.system_base", "主回复 (§4 日常交流)", "reply", _label_reply_text,
 ))
 
