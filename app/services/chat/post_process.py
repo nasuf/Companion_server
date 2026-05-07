@@ -42,6 +42,39 @@ from app.services.trait_adjustment import (
 logger = logging.getLogger(__name__)
 
 
+# ───────────────────────────────────────────────────────────────────
+# Per-conversation memory pipeline lock
+# ───────────────────────────────────────────────────────────────────
+# 同一 conversation 的连续 batch 必须 serialize, 否则触发双层 race:
+#   1. 水位线 race: 两个 batch 都读到旧 wm → 都把同一批消息当"新"抽取一遍
+#   2. SINGLETON storage TOCTOU (persistence.py:168-189):
+#      Task A 查 (身份/年龄) empty → Task B 也查 empty → 两边各 insert →
+#      L1 重复 (生产 case 2026-05-07 19:59-20:03: 用户 30s 内连发 2 条画像
+#      dump, 两个 _bg_memory_pipeline 任务 24s 重叠, 28+27 条入库且 L1
+#      生日/年龄各重复 1 次).
+#
+# 用 dict[conv_id, asyncio.Lock] 串行同 conv 的 batch; 不同 conv 完全并行.
+# 无 conv_id 入口 (proactive sender 等) 不上锁 — 那些路径不存在并发同源.
+#
+# 内存模型: grow-only (~100B/Lock). 1000 活跃 conv ≈ 100KB 可接受. Lock 不
+# weakref 化 (WeakValueDictionary 在无人持锁时会丢对象, 下次新建的 lock 跟
+# 在飞的 lock 不是同一个 → race 复现). 长期运行需 cleanup 时再加 LRU.
+_pipeline_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_pipeline_lock(conversation_id: str) -> asyncio.Lock:
+    """Get or lazily create the pipeline lock for a given conversation.
+
+    Lazy init 而非启动时全建是因为大多数 conv 短暂活跃, 大多数 lock 永远
+    不会被 contend (单 batch 自然 serialize). Lazy 减少不必要的对象.
+    """
+    lock = _pipeline_locks.get(conversation_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pipeline_locks[conversation_id] = lock
+    return lock
+
+
 async def save_replies(
     conversation_id: str,
     replies: list[str | dict],
@@ -132,7 +165,25 @@ async def _bg_memory_pipeline(
 
     抽取完成后, 若有 conversation_id 且确有新记忆入库, 通过 WS 推
     `memory_extracted` 让 admin inspector 实时刷新 (前端按当前 filter 重拉).
+
+    并发控制: 同一 conversation 的连续 batch 串行执行 (per-conv asyncio.Lock).
+    避免 batch A 在跑 ~2min extraction 时 batch B 读到旧水位线 → 重复抽取
+    msg1 + 双层 race 导致 L1 SINGLETON 重复入库. 不同 conversation 完全并行.
     """
+    if conversation_id is not None:
+        async with _get_pipeline_lock(conversation_id):
+            await _do_memory_pipeline(user_id, messages, conversation_id)
+    else:
+        # proactive 等无 conv 入口: 调用方天然不并发同源, 无需上锁.
+        await _do_memory_pipeline(user_id, messages, None)
+
+
+async def _do_memory_pipeline(
+    user_id: str,
+    messages: list[dict],
+    conversation_id: str | None,
+) -> None:
+    """_bg_memory_pipeline 的实现体. 由外层确保同 conv 不并发后被调用."""
     try:
         recent = messages[-6:]
         if not recent:

@@ -194,3 +194,121 @@ async def test_bg_positive_recovery_swallows_exception():
         await post_process._bg_positive_recovery("a1", "u1", "谢谢你")
 
     cpr.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Per-conversation memory pipeline lock
+# ─────────────────────────────────────────────────────────────────
+# Regression: 同一 conv 连续 batch 必须 serialize 防双层 race
+#   1. 水位线 race (两 batch 都读旧 wm → 重复抽 msg1 的事实)
+#   2. SINGLETON storage TOCTOU (两 batch 同时 query+insert (身份/年龄) → L1 重复)
+# 生产 case: 2026-05-07 用户 30s 内连发 2 条画像 dump, 28+27 入库且
+# L1 生日/年龄各重复. 修法: dict[conv_id, asyncio.Lock] 串行同 conv;
+# 不同 conv 完全并行; 无 conv_id 入口 (proactive sender) 不上锁.
+
+@pytest.mark.asyncio
+async def test_memory_pipeline_lock_serializes_same_conv():
+    """同 conv 两并发调用必须串行执行 (后到的等先到的完成)."""
+    import asyncio
+    from app.services.chat import post_process
+
+    # 清掉前面 test 残留的锁
+    post_process._pipeline_locks.clear()
+
+    started_at: list[float] = []
+    finished_at: list[float] = []
+
+    async def fake_do(*args, **kwargs):
+        loop = asyncio.get_event_loop()
+        started_at.append(loop.time())
+        await asyncio.sleep(0.10)  # 模拟 LLM 抽取耗时
+        finished_at.append(loop.time())
+
+    with patch.object(post_process, "_do_memory_pipeline", side_effect=fake_do):
+        # 同一 conv_id 并发两次
+        await asyncio.gather(
+            post_process._bg_memory_pipeline("u1", [{"role": "user", "content": "a"}], "conv-X"),
+            post_process._bg_memory_pipeline("u1", [{"role": "user", "content": "b"}], "conv-X"),
+        )
+
+    # 串行: 第二次 start 必须晚于第一次 finish (留 5ms 容差)
+    assert len(started_at) == 2 and len(finished_at) == 2
+    assert started_at[1] >= finished_at[0] - 0.005, (
+        f"second batch started before first finished: "
+        f"started={started_at}, finished={finished_at}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_pipeline_lock_parallel_across_convs():
+    """不同 conv 必须并行 (锁按 conv 隔离, 不影响吞吐)."""
+    import asyncio
+    from app.services.chat import post_process
+
+    post_process._pipeline_locks.clear()
+
+    started_at: list[float] = []
+    finished_at: list[float] = []
+
+    async def fake_do(*args, **kwargs):
+        loop = asyncio.get_event_loop()
+        started_at.append(loop.time())
+        await asyncio.sleep(0.10)
+        finished_at.append(loop.time())
+
+    with patch.object(post_process, "_do_memory_pipeline", side_effect=fake_do):
+        # 不同 conv 并发
+        await asyncio.gather(
+            post_process._bg_memory_pipeline("u1", [{"role": "user", "content": "a"}], "conv-A"),
+            post_process._bg_memory_pipeline("u1", [{"role": "user", "content": "b"}], "conv-B"),
+        )
+
+    # 并行: 第二次 start 应在第一次 finish 之前 (重叠)
+    assert len(started_at) == 2 and len(finished_at) == 2
+    assert started_at[1] < finished_at[0], (
+        f"different convs should run in parallel but ran sequentially: "
+        f"started={started_at}, finished={finished_at}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_pipeline_no_lock_when_conversation_id_none():
+    """conversation_id=None (proactive sender) 不上锁, 直接 fall-through."""
+    import asyncio
+    from app.services.chat import post_process
+
+    post_process._pipeline_locks.clear()
+    started_at: list[float] = []
+    finished_at: list[float] = []
+
+    async def fake_do(*args, **kwargs):
+        loop = asyncio.get_event_loop()
+        started_at.append(loop.time())
+        await asyncio.sleep(0.05)
+        finished_at.append(loop.time())
+
+    with patch.object(post_process, "_do_memory_pipeline", side_effect=fake_do):
+        await asyncio.gather(
+            post_process._bg_memory_pipeline("u1", [{"role": "user", "content": "a"}], None),
+            post_process._bg_memory_pipeline("u1", [{"role": "user", "content": "b"}], None),
+        )
+
+    # 完全并行 (无锁): 第二次 start 应在第一次 finish 之前
+    assert started_at[1] < finished_at[0], (
+        "None conversation_id should not be locked"
+    )
+    # 应没在 _pipeline_locks 里写 None 这种坏 key
+    assert None not in post_process._pipeline_locks
+
+
+@pytest.mark.asyncio
+async def test_get_pipeline_lock_returns_same_object_per_conv():
+    """同 conv 多次拿锁返回同一 Lock 对象 (重要: 否则 serialize 失效)."""
+    from app.services.chat import post_process
+
+    post_process._pipeline_locks.clear()
+    lock_a1 = post_process._get_pipeline_lock("conv-A")
+    lock_a2 = post_process._get_pipeline_lock("conv-A")
+    lock_b = post_process._get_pipeline_lock("conv-B")
+    assert lock_a1 is lock_a2, "same conv must return same Lock object"
+    assert lock_a1 is not lock_b, "different convs must have distinct Lock objects"
