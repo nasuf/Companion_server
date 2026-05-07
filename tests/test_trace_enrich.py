@@ -71,8 +71,7 @@ def _fake_llm_step(prompt_text: str, output_text: str = "") -> dict:
     (defaults.LOW_PATIENCE_REPLY_PROMPT, "boundary.patience_low_reply"),
     (defaults.BLACKLIST_REPLY_PROMPT, "boundary.blacklist_reply"),
     (defaults.SYSTEM_BASE_PROMPT, "chat.system_base"),
-    (defaults.REPLY_SPLIT_2_PROMPT, "reply.split_2"),
-    (defaults.REPLY_SPLIT_3_PROMPT, "reply.split_3"),
+    # reply.split_2/split_3 已删除 — 主 LLM 直接按 || 输出, 不再二次拆分
     (defaults.AI_REPLY_EMOTION_PROMPT, "reply.emotion"),
     (defaults.MEMORY_EXTRACTION_USER_PROMPT, "memory.extraction_user"),
     (defaults.MEMORY_EXTRACTION_AI_PROMPT, "memory.extraction_ai"),
@@ -156,11 +155,7 @@ def test_label_contradiction_with_conflict():
     assert "搬家" in enriched["decision_label"]
 
 
-def test_label_split_n():
-    output = "句一\n句二\n句三"
-    step = _fake_llm_step(defaults.REPLY_SPLIT_3_PROMPT, output)
-    enriched = trace_enrich.enrich_step(step)
-    assert enriched["decision_label"] == "拆出 3 句"
+# test_label_split_n 已删除 — REPLY_SPLIT_3_PROMPT 已废 (主 LLM 直接按 || 输出)
 
 
 def test_label_emotion():

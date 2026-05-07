@@ -116,26 +116,26 @@ async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
 
 async def _split_replies(
     raw_response: str,
-    reply_count: int,
     max_reply_count: int,
     max_per_reply: int,
     max_total: int,
-    split_llm_fn: Callable[[str, int], Awaitable[list[str] | None]],
     truncate_fn: Callable[[str, int], str],
     pipe_fallback_fn: Callable[[str, int, int, int], list[str]],
 ) -> tuple[list[str], str]:
-    """spec §5.5：n=1 保持；n>=2 调小模型拆分；失败回退 `||`。返回 (replies, split_source)。"""
-    if reply_count >= 2:
-        llm_result = await split_llm_fn(raw_response, reply_count)
-        if llm_result:
-            return (
-                [truncate_fn(p, max_per_reply) for p in llm_result[:max_reply_count]],
-                f"llm_{reply_count}",
-            )
-    return (
-        pipe_fallback_fn(raw_response, max_reply_count, max_per_reply, max_total),
-        "single" if reply_count == 1 else "pipe_fallback",
-    )
+    """主 LLM 输出按 || / \\n\\n 切分.
+
+    历史 (split_llm 路径) 已删: 主回复 LLM 在 chat.response_instruction 已被指令
+    "分N条||分隔", 直接信主 LLM 输出. 不再额外调小模型拆分 (省 1 次 LLM call +
+    消除截断/扩写 2 个 bug 源).
+    - 主 LLM 给"句1||句2" → 拆 2 条
+    - 主 LLM 给单句 → 单条 (LLM 不听话或内容确实简短)
+
+    truncate_fn 仍保留以约束单条最长字数 (max_per_reply).
+    """
+    parts = pipe_fallback_fn(raw_response, max_reply_count, max_per_reply, max_total)
+    parts = [truncate_fn(p, max_per_reply) for p in parts]
+    source = "single" if len(parts) <= 1 else "main_split"
+    return parts, source
 
 
 async def generate_reply(
@@ -158,7 +158,6 @@ async def generate_reply(
     max_reply_count: int,
     max_total: int,
     tier_fns: dict[str, Callable[..., Awaitable[str | None]]],
-    split_llm_fn: Callable[[str, int], Awaitable[list[str] | None]],
     truncate_fn: Callable[[str, int], str],
     pipe_fallback_fn: Callable[[str, int, int, int], list[str]],
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
@@ -236,8 +235,8 @@ async def generate_reply(
     # split + emotion 都只依赖 raw_response, 互不依赖 → 并行省 ~400-1000ms.
     # is_fallback=True (主+本地全挂) 时 raw_response 是静态兜底文案, 仍可情绪识别.
     split_coro = _split_replies(
-        raw_response, reply_count, max_reply_count, MAX_PER_REPLY,
-        max_total, split_llm_fn, truncate_fn, pipe_fallback_fn,
+        raw_response, max_reply_count, MAX_PER_REPLY,
+        max_total, truncate_fn, pipe_fallback_fn,
     )
     if reply_emotion_fn is not None:
         emotion_coro = reply_emotion_fn(raw_response)

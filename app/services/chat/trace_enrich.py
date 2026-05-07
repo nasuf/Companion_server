@@ -303,12 +303,7 @@ _register("你是一个有血有肉的真人, 有自己的名字、性格、情�
 ))
 
 # Post 类
-_register("将以下AI回复内容拆分成2句自然的回复", _PromptMeta(
-    "reply.split_2", "回复拆 2 句", "post", _label_split_n,
-))
-_register("将以下AI回复内容拆分成3句自然的回复", _PromptMeta(
-    "reply.split_3", "回复拆 3 句", "post", _label_split_n,
-))
+# split_2 / split_3 fingerprints 已删 (Phase: 主 LLM 直接按 || 输出, 无二次拆分)
 _register("判断AI回复文本的情绪及强度", _PromptMeta(
     "reply.emotion", "回复情绪识别", "post", _label_emotion,
 ))

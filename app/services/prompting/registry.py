@@ -69,8 +69,6 @@ from app.services.prompting.defaults import (
     RECORD_CONFIRM_REPLY_PROMPT,
     REMINDER_MESSAGE_PROMPT,
     REMINDER_PRE_CHECK_PROMPT,
-    REPLY_SPLIT_2_PROMPT,
-    REPLY_SPLIT_3_PROMPT,
     RESPONSE_INSTRUCTION_PROMPT,
     DAILY_SCHEDULE_WITH_USER_MEMORY_PROMPT,
     MEMORY_JUDGEMENT_AI_PROMPT,
@@ -572,16 +570,9 @@ PROMPT_DEFINITIONS = [
         "识别 AI 自身回复的情绪标签 (12 类) + 强度 (0-100), 用于 §5 emoji / sticker 概率计算.",
         AI_REPLY_EMOTION_PROMPT,
     ),
-    PromptDefinition(
-        "reply.split_2", "AI 语句拆分(2句)", "回复加工", "回复加工",
-        "《终稿·第三部分 交互系统》§5.5: n=2 时把回复拆为 2 条自然语句. n 由均匀随机 1-3 决定.",
-        REPLY_SPLIT_2_PROMPT,
-    ),
-    PromptDefinition(
-        "reply.split_3", "AI 语句拆分(3句)", "回复加工", "回复加工",
-        "《终稿·第三部分 交互系统》§5.5: n=3 时把回复拆为 3 条自然语句.",
-        REPLY_SPLIT_3_PROMPT,
-    ),
+    # Phase: reply.split_2 / reply.split_3 已删除. 历史用小模型二次拆分,
+    # 引入截断 + 扩写 2 个 bug. 主 LLM 已在 response_instruction 被指令
+    # "分N条||分隔", 信主 LLM 输出 (按 ||/\\n\\n 切, 见 split_and_validate_replies).
 ]
 
 PROMPT_DEFINITION_MAP = {definition.key: definition for definition in PROMPT_DEFINITIONS}

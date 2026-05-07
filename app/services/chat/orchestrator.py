@@ -65,7 +65,7 @@ from app.services.chat.intent_replies import (
     memory_strong_reply as _memory_strong_reply,
     memory_l3_reply as _memory_l3_reply,
     l3_trigger_classify as _l3_trigger_classify,
-    split_reply_to_n_sentences as _split_reply_to_n_sentences,
+    # split_reply_to_n_sentences 已删除 — 主 LLM 直接按 || 输出
     ai_reply_emotion as _ai_reply_emotion,
 )
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
@@ -848,7 +848,7 @@ async def stream_chat_response(
                 "strong": _memory_strong_reply,
                 "l3": _memory_l3_reply,
             },
-            split_llm_fn=_split_reply_to_n_sentences,
+            # split_llm_fn 已删 — 主 LLM 直接按 || 输出, 不再二次拆分
             # LLM-split 分支用 truncate_fn: 先 _clean_reply_part 把单条内残留 \n 折成空格,
             # 再走 sentence-truncate, 防止 LLM 给的某条单片里嵌空白行/换行被前端
             # pre-wrap 渲染成断行.

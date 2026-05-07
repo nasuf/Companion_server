@@ -662,27 +662,13 @@ async def ai_reply_emotion(reply_text: str) -> dict:
     return {"emotion": emotion, "intensity": intensity}
 
 
-async def split_reply_to_n_sentences(original_reply: str, n: int) -> list[str] | None:
-    """§5.5：小模型「AI语句拆分（2/3句）」。失败/不足 n 条返回 None 让调用方兜底。"""
-    if n not in (2, 3):
-        return None
-    raw = await render_prompt(
-        f"reply.split_{n}",
-        {"original_reply": original_reply},
-        lambda p: invoke_text(get_utility_model(), p),
-        strip_split=False,
-    )
-    text = (raw or "").strip()
-    if not text:
-        return None
-    # spec §5.5：小模型输出换行分隔；可能带序号前缀或用 || 混写
-    parts = [
-        p.strip().lstrip("0123456789.、) ").strip()
-        for p in text.split("\n") if p.strip()
-    ]
-    if len(parts) < n and "||" in text:
-        parts = [p.strip() for p in text.split("||") if p.strip()]
-    return parts[:n] if len(parts) >= n else None
+# Phase: 删除 split_reply_to_n_sentences 整层 — 拆分应由主回复 LLM 自己按
+# prompt 内 "{n} 条 || 分隔" 指令完成. 历史额外调小模型拆分有两个 bug:
+# 1. lstrip("0123456789.、) ") 字符集贪心 → "12月8号" 首字符 "1"/"2" 被误删 (trace 019e0116)
+# 2. prompt 含 "可适当扩写" → LLM 看 🎂 自作主张编出"祝你生日快乐" (5 月份语境错)
+# 移除整层后, 主 LLM 给单句就单条, 给"句1||句2"就两条 — 信任 LLM 输出, 不再
+# 二次调用. 其他路径 (tier reply / intent reply / contradiction / boundary)
+# 本就是单条短回复, 不需要拆分.
 
 
 __all__ = [
@@ -709,6 +695,5 @@ __all__ = [
     "attack_target_classify",
     "attack_level_classify",
     "l3_trigger_classify",
-    "split_reply_to_n_sentences",
     "ai_reply_emotion",
 ]

@@ -376,7 +376,7 @@ def _make_reply_generate_kwargs(**overrides):
     tier_strong = AsyncMock(return_value="强相关回复")
     tier_medium = AsyncMock(return_value="中相关回复")
     tier_l3 = AsyncMock(return_value="L3 回复")
-    split_llm = AsyncMock(return_value=None)
+    # split_llm 入参已删 — 主 LLM 直接按 || 输出, _split_replies 不再调小模型
 
     defaults = dict(
         contradiction_inquiry=None,
@@ -402,7 +402,6 @@ def _make_reply_generate_kwargs(**overrides):
             "strong": tier_strong,
             "l3": tier_l3,
         },
-        split_llm_fn=split_llm,
         truncate_fn=lambda t, n: t[:n],
         pipe_fallback_fn=lambda raw, n, per, total: [raw[:per]],
     )
