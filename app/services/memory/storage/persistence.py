@@ -85,10 +85,16 @@ async def find_duplicate_id(
     """If a near-duplicate memory already exists (cosine > DEDUP_THRESHOLD),
     return its id. Otherwise None.
 
+    Phase 3.1: 极性校验防反义误判. bge-m3 反义对 cosine 0.84-0.89, 容易超
+    DEDUP_THRESHOLD=0.85 → 后写的"我不住北京"被当成已存"我住北京"的重复 →
+    数据丢失. 加 polarity 校验: 极性不一致 → 不算重复, 都存.
+
     用 case: RECORD_REQUEST handler dedup 命中时需要拿到 existing memory id,
     才能 update occurTime + 重建 timetrigger (旧 trigger 已 fired 完, 新一次
     的"提醒我X"必须建新 trigger).
     """
+    from app.services.memory.polarity import is_polarity_match
+
     results = await search_by_embedding(embedding, user_id, top_k=5, workspace_id=workspace_id)
     for r in results:
         sim = r.get("similarity", 0)
@@ -96,12 +102,22 @@ async def find_duplicate_id(
             sim = float(sim)
         if sim > DEDUP_THRESHOLD:
             mid = r.get("id")
-            if mid:
+            if not mid:
+                continue
+            # Phase 3.1: 极性校验 — 反义对不算重复
+            cand_text = r.get("summary") or r.get("content") or ""
+            if not is_polarity_match(content, cand_text):
                 logger.info(
-                    f"Duplicate memory detected (similarity={sim:.3f}, "
-                    f"matched_id={str(mid)[:8]}): {content[:50]}"
+                    f"Dedup polarity mismatch (sim={sim:.3f}): "
+                    f"new='{content[:30]}' vs existing='{cand_text[:30]}'; "
+                    f"NOT treating as duplicate (saves both)"
                 )
-                return str(mid)
+                continue  # 反义对, 检查下一个 candidate
+            logger.info(
+                f"Duplicate memory detected (similarity={sim:.3f}, "
+                f"matched_id={str(mid)[:8]}): {content[:50]}"
+            )
+            return str(mid)
     return None
 
 

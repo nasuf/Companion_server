@@ -163,12 +163,31 @@ async def hybrid_retrieve(
     # (spec 意图是 "越久没被触达的记忆越靠后", created_at 与此大致一致)。
     # 只写 rank_score — ClassifiedMemory.display_score 由下游 data_fetch_phase
     # 统一赋值 + 截断到 10 条。
+    #
+    # Phase 3.2: polarity 降权 — bge-m3 反义对 cosine 0.84+, 跟同义难分.
+    # 用户 query 有显式否定 + candidate 没有 → 极性 mismatch → 降权 0.3
+    # (不删, 极端情况 LLM 仍可见). 仅在 user_query 有否定时触发, 防 positive
+    # query 误过滤 negative candidate (用户问"我喜欢什么", 应该看到所有偏好,
+    # 包括"不喜欢" 类记忆).
+    from app.services.memory.polarity import has_negation
+    user_has_neg = has_negation(effective_query)
+
     for m in all_candidates:
-        m["rank_score"] = compute_display_score(
+        score = compute_display_score(
             importance=float(m.get("importance", 0)),
             last_accessed_at=m.get("created_at"),
             similarity=float(m.get("similarity", 1.0)),
         )
+        # Phase 3.2: 用户显式否定 query → candidate 无否定 → 极性 mismatch 降权
+        if user_has_neg:
+            cand_text = m.get("summary") or m.get("content", "")
+            if not has_negation(cand_text):
+                score *= 0.3
+                logger.debug(
+                    f"[POLARITY] downweight pos candidate "
+                    f"(user_query has negation): '{cand_text[:30]}'"
+                )
+        m["rank_score"] = score
     all_candidates.sort(key=lambda m: float(m.get("rank_score", 0)), reverse=True)
 
     # Select within token budget (returns ClassifiedMemory list)
