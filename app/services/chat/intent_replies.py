@@ -387,6 +387,28 @@ async def deletion_done_reply(
 # §4 日常交流分级回复
 # ═══════════════════════════════════════════════════════════════════
 
+# Phase: tier reply 也支持 random 1-3 条 (跟主回复一致, 提升微信多条体感).
+# 调用方 (reply_generate) 传 n/max_per/max_total, 拿到含 || 的输出后走
+# split_and_validate_replies 切. strip_split=False 保留 ||, max_chars=max_total
+# 防"句1||句2||句3" 超 120 默认被截.
+
+
+async def _render_tier_reply(
+    prompt_key: str,
+    params: dict[str, Any],
+    *,
+    max_total: int,
+) -> str | None:
+    """tier reply 专用 render: strip_split=False (允许 ||), max_chars=max_total."""
+    return await render_prompt(
+        prompt_key,
+        params,
+        lambda p: invoke_text(get_chat_model(), p),
+        max_chars=max_total,
+        strip_split=False,
+    )
+
+
 async def memory_weak_reply(
     *,
     message: str,
@@ -394,16 +416,23 @@ async def memory_weak_reply(
     user_emotion: dict | None = None,
     personality_brief: str = "",
     user_portrait: str = "",
+    n: int = 1,
+    max_per: int = 60,
+    max_total: int = 150,
 ) -> str | None:
-    """§4 step 2：弱相关回复。人设【限定】已内联在 prompt 文本中。"""
-    return await _render_llm(
+    """§4 step 2：弱相关回复. n=1 单条, n≥2 按 prompt 内 || 指令多条."""
+    return await _render_tier_reply(
         "memory.weak_reply",
         {
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
+            "n": n,
+            "max_per": max_per,
+            "total": max_total,
         },
+        max_total=max_total,
     )
 
 
@@ -416,9 +445,12 @@ async def memory_medium_reply(
     user_portrait: str = "",
     user_memory: str = "",
     ai_memory: str = "",
+    n: int = 1,
+    max_per: int = 60,
+    max_total: int = 150,
 ) -> str | None:
-    """§4 step 4：中相关回复。"""
-    return await _render_llm(
+    """§4 step 4：中相关回复. n=1 单条, n≥2 按 prompt 内 || 指令多条."""
+    return await _render_tier_reply(
         "memory.medium_reply",
         {
             "message": message,
@@ -427,7 +459,11 @@ async def memory_medium_reply(
             "user_portrait": user_portrait or "(未知)",
             "user_memory": user_memory or "(无)",
             "ai_memory": ai_memory or "(无)",
+            "n": n,
+            "max_per": max_per,
+            "total": max_total,
         },
+        max_total=max_total,
     )
 
 
@@ -440,9 +476,12 @@ async def memory_strong_reply(
     user_portrait: str = "",
     user_memory: str = "",
     ai_memory: str = "",
+    n: int = 1,
+    max_per: int = 60,
+    max_total: int = 150,
 ) -> str | None:
-    """§4 step 5B：强相关回复（不需 L3）。"""
-    return await _render_llm(
+    """§4 step 5B：强相关回复. n=1 单条, n≥2 按 prompt 内 || 指令多条."""
+    return await _render_tier_reply(
         "memory.strong_reply",
         {
             "message": message,
@@ -451,7 +490,11 @@ async def memory_strong_reply(
             "user_portrait": user_portrait or "(未知)",
             "user_memory": user_memory or "(无)",
             "ai_memory": ai_memory or "(无)",
+            "n": n,
+            "max_per": max_per,
+            "total": max_total,
         },
+        max_total=max_total,
     )
 
 
@@ -463,9 +506,12 @@ async def memory_l3_reply(
     personality_brief: str = "",
     user_portrait: str = "",
     l3_memory: str = "",
+    n: int = 1,
+    max_per: int = 60,
+    max_total: int = 150,
 ) -> str | None:
-    """§4 step 5A / §3.4.5：久远记忆回复。"""
-    return await _render_llm(
+    """§4 step 5A：久远记忆回复. n=1 单条, n≥2 按 prompt 内 || 指令多条."""
+    return await _render_tier_reply(
         "memory.l3_reply",
         {
             "message": message,
@@ -473,7 +519,11 @@ async def memory_l3_reply(
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
             "l3_memory": l3_memory or "(无)",
+            "n": n,
+            "max_per": max_per,
+            "total": max_total,
         },
+        max_total=max_total,
     )
 
 

@@ -198,6 +198,11 @@ async def generate_reply(
             "user_emotion": prompt_user_emotion,
             "personality_brief": personality_brief,
             "user_portrait": portrait_text,
+            # Phase: 让 tier reply 也享受 random 1-3 条 (跟主回复一致, 微信多条体感).
+            # tier prompt 已加 {n}/{max_per}/{total} 占位符 + || 分隔指令.
+            "n": reply_count,
+            "max_per": MAX_PER_REPLY,
+            "max_total": max_total,
         }
         tier_fn, extra = _build_tier_call(
             memory_relevance, l3_memories,
@@ -211,16 +216,24 @@ async def generate_reply(
             tier_reply_text = None
 
     if tier_reply_text:
+        # Phase: tier reply 输出可能含 || 多条 (n≥2 时), 走 split_and_validate_replies
+        # 拆分. n=1 单条时也走 (含 || 时仍能正确切, 不含时返单条).
+        tier_replies = pipe_fallback_fn(
+            tier_reply_text, max_reply_count, MAX_PER_REPLY, max_total,
+        )
         logger.info(
-            f"[REPLY-TIER] memory_relevance={memory_relevance} reply_len={len(tier_reply_text)}",
+            f"[REPLY-TIER] memory_relevance={memory_relevance} "
+            f"raw_len={len(tier_reply_text)} n_target={reply_count} actual={len(tier_replies)}",
             extra={
                 "event": EVT_REPLY_TIER,
                 "memory_relevance": memory_relevance,
                 "reply_text_len": len(tier_reply_text),
                 "has_l3": bool(l3_memories),
+                "n_target": reply_count,
+                "n_actual": len(tier_replies),
             },
         )
-        return [tier_reply_text], tier_reply_text, False, None
+        return tier_replies, tier_reply_text, False, None
 
     raw_response, is_fallback = await _run_main_llm(chat_messages)
     logger.info(
