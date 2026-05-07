@@ -30,7 +30,7 @@ from app.observability.events import (
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
-from app.services.prompting.utils import SafeDict, pad_params
+from app.services.prompting.utils import SafeDict
 
 logger = logging.getLogger(__name__)
 
@@ -408,7 +408,6 @@ async def generate_boundary_reply_llm(
         "context": context or "(无)",
         "personality_brief": personality_brief or "真诚朋友",
         "user_portrait": user_portrait or "(未知)",
-        **pad_params(user_emotion),
     }
     try:
         # persona-lock + body 都从 registry 拉, 各 prompt 占位符子集不同 format_map 容错.

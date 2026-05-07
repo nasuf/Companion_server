@@ -66,6 +66,11 @@ def compute_display_score(
     - current_score: importance (0-1)
     - time_freshness: based on how recently the memory was accessed/created
     - topic_match: vector similarity (0-1)
+
+    Phase 2.1: L1 (importance ≥ 0.85) 不衰减 — 身份记忆 (姓名/年龄/家人 等核心
+    事实) 即便很久没访问也是事实, time_freshness 衰减没意义. 历史 bug: 用户半年
+    没说自己名字 → freshness=0.4 → display_score 被新琐事压低 → AI 答非所问.
+    L1 freshness floor 取 1.0, 让 importance × similarity 主导排序.
     """
     # Time freshness factor (spec §3.2):
     # <1 month: 1.2  |  1-3 months: 1.0  |  3-6 months: 0.8
@@ -92,5 +97,9 @@ def compute_display_score(
         freshness = 0.6
     else:
         freshness = 0.4
+
+    # Phase 2.1: L1 不衰减 (核心身份事实 永恒)
+    if importance >= 0.85:
+        freshness = max(freshness, 1.0)
 
     return importance * freshness * similarity

@@ -111,27 +111,22 @@ async def _build_emotion_section(
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
 ) -> str | None:
-    """Spec §4 汇总参考信息：用户PAD值 + 关系阶段（不含 AI PAD — spec 把 AI PAD
-    限定在 §5.3/§5.4/§6.2 装饰/时机决策）。
+    """Phase 2.3 step 1: 删除 raw PAD vector 注入.
 
-    PAD 数值本身已是足够暗示, 早期版本曾追加 chat.emotion_instruction "让情绪
-    影响语气" 的明示指令, 后审计为工程冗余删除——现代 LLM 看到 PAD 值会自然反应.
+    历史方案: 注入 "用户PAD向量：(0.50, 0.30, 0.50)" + 条件性"请注意关心用户的感受".
+    问题: LLM 看不懂抽象数值, 30 tokens/msg 浪费; 提示语只在 pleasure<-0.3 时
+    fire 偏离了"PAD 影响语气" 的初衷.
+
+    现方案: 仅注入 intimacy_stage (LLM 对自然语言 stage label 敏感度好). PAD
+    数值仍在算法层用 (delay 计算 / 主动消息时机), 但不再注入 prompt.
+
+    后续 Phase 2.3 step 2 可加自然语言 PAD 描述 (e.g. "用户略显低落但平静"),
+    需在生产观察"删 raw PAD 后回复风格是否退化"再决定.
     """
-    if not user_emotion and not intimacy_stage:
+    if not intimacy_stage:
         return None
 
-    parts: list[str] = []
-
-    if user_emotion:
-        u_pleasure = user_emotion.get("pleasure", 0.0)
-        u_arousal = user_emotion.get("arousal", 0.0)
-        u_dominance = user_emotion.get("dominance", 0.0)
-        parts.append(f"用户PAD向量：({u_pleasure:.2f}, {u_arousal:.2f}, {u_dominance:.2f})")
-        if u_pleasure < -0.3:
-            parts.append("请注意关心用户的感受。")
-
-    if intimacy_stage:
-        parts.append(f"你们目前的关系是{intimacy_stage}。")
+    parts: list[str] = [f"你们目前的关系是{intimacy_stage}。"]
 
     return _section("当前情绪", "\n".join(parts))
 

@@ -884,7 +884,6 @@ MEMORY_CONTRADICTION_INQUIRY_PROMPT = """【限定】
 - 你原有的记忆：{original_memory}
 - 用户提到的矛盾内容：{conflict_memory}
 - 最近对话：{recent_context}
-- 用户当前情绪：PAD（{pleasure},{arousal},{dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 
@@ -947,7 +946,6 @@ MEMORY_CONTRADICTION_REPLY_PROMPT = """【限定】
 - 原有记忆：{original_memory}
 - 矛盾记忆：{conflict_memory}
 - 变化原因：{change_reason}
-- 用户当前情绪：PAD（{pleasure},{arousal},{dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 
@@ -1281,7 +1279,6 @@ MEDIUM_PATIENCE_REPLY_PROMPT = """【任务】你现在处于中等耐心状态�
 【参考信息】
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 【要求】
@@ -1296,7 +1293,6 @@ LOW_PATIENCE_REPLY_PROMPT = """【任务】你现在处于低耐心状态（很�
 【参考信息】
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 【要求】
@@ -1325,7 +1321,6 @@ paraphrase 同一句.
 【参考信息】
 - 你的性格：{personality_brief}
 - 最近对话：{context}
-- 用户当前情绪 PAD: pleasure={pleasure}, arousal={arousal}, dominance={dominance}
 
 【硬约束】
 1. 绝对不进入正常对话 — 不接用户的话题, 不解释, 不询问, 不讨论用户消息内容
@@ -1344,7 +1339,6 @@ APOLOGY_REPLY_PROMPT = """【任务】用户向你道歉或承诺不再冒犯。
 【参考信息】
 - 用户刚才说：{message}
 - 上下文：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 【要求】
@@ -1437,7 +1431,6 @@ WEAK_MEMORY_REPLY_PROMPT = """【限定】
 【参考信息】（仅供语气和方向参考，不必直接引用）
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 
@@ -1466,7 +1459,6 @@ MEDIUM_MEMORY_REPLY_PROMPT = """【限定】
 - 最近对话：{context}
 - 你联想到的回忆（用户相关）：{user_memory}
 - 你联想到的回忆（自己相关）：{ai_memory}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 
@@ -1497,7 +1489,6 @@ STRONG_MEMORY_REPLY_PROMPT = """【限定】
 - 最近对话：{context}
 - 你联想到的回忆（用户相关）：{user_memory}
 - 你联想到的回忆（自己相关）：{ai_memory}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 
@@ -1527,7 +1518,6 @@ L3_MEMORY_REPLY_PROMPT = """【限定】
 - 用户刚才说：{message}
 - 最近对话：{context}
 - L3相关记忆：{l3_memory}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 
@@ -1545,7 +1535,6 @@ END_REPLY_PROMPT = """【任务】用户表达了结束当前对话的意图。�
 【参考信息】
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 【要求】
 - 回复像真人朋友一样自然、不尴尬
@@ -1558,7 +1547,6 @@ SCHEDULE_QUERY_REPLY_PROMPT = """【任务】用户正在询问你当前或未�
 【参考信息】（供语气和内容参考，不必直接引用）
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 - AI当前的作息：{current_activity}
@@ -1575,7 +1563,6 @@ SCHEDULE_ADJUST_REPLY_PROMPT = """【任务】用户希望你调整作息（例�
 【参考信息】（供语气和内容参考，不必直接引用）
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 - AI当前的作息表：{ai_schedule}
@@ -1592,7 +1579,6 @@ CURRENT_STATE_REPLY_PROMPT = """【任务】用户正在询问你当前在做什
 【参考信息】（供语气和内容参考，不必直接引用）
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 - AI当前的作息表：{ai_schedule}
@@ -1611,7 +1597,6 @@ DELETION_CONFIRM_PROMPT = """【任务】用户希望你忘记某件事。作为
 【参考信息】（供语气和内容参考，不必直接引用）
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 - 可能相关的记忆：{candidate_memories}
@@ -1626,7 +1611,6 @@ DELETION_REPLY_PROMPT = """【任务】用户确认要你忘记某件事。作�
 【参考信息】
 - 用户刚才说：{message}
 - 最近对话：{context}
-- 用户当前情绪：PAD（{pleasure}, {arousal}, {dominance}）
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
 - 需要删除的相关记忆：{deleted_memories}

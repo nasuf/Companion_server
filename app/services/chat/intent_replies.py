@@ -11,11 +11,10 @@ import logging
 from typing import Any
 
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
-from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, pad_params, render_prompt
+from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, render_prompt
 
 logger = logging.getLogger(__name__)
 
-_pad_params = pad_params  # backward-compat alias inside module
 
 
 async def _render_llm(
@@ -75,7 +74,6 @@ async def apology_reply(
         "context": context or "(无)",
         "personality_brief": personality_brief or "真诚朋友",
         "user_portrait": user_portrait or "(未知)",
-        **_pad_params(user_emotion),
     }
     if new_patience is not None:
         # 参考信息，可选
@@ -99,7 +97,6 @@ async def end_reply(
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
-            **_pad_params(user_emotion),
         },
         max_chars=60,
     )
@@ -127,7 +124,6 @@ async def schedule_query_reply(
             "current_activity": current_activity or "(未知)",
             "ai_schedule": ai_schedule or "(未知)",
             "ai_portrait": ai_portrait or "(未知)",
-            **_pad_params(user_emotion),
         },
         # 默认 120 太紧 — 该 prompt 要求 LLM "回答 + 延展话题", LLM 自然产 130-200
         # 字回复. 之前 120 cap 经常切掉延展部分 (生产 bug 2026-05-03 trace 019decd3:
@@ -155,7 +151,6 @@ async def schedule_adjust_reply(
         "user_portrait": user_portrait or "(未知)",
         "current_activity": current_activity or "(未知)",
         "ai_schedule": ai_schedule or "(未知)",
-        **_pad_params(user_emotion),
     }
     result = await render_prompt(
         "intent.schedule_adjust_reply",
@@ -190,7 +185,6 @@ async def current_state_reply(
             "user_portrait": user_portrait or "(未知)",
             "current_activity": current_activity or "(未知)",
             "ai_schedule": ai_schedule or "(未知)",
-            **_pad_params(user_emotion),
         },
     )
 
@@ -213,7 +207,6 @@ async def deletion_confirm_reply(
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
             "candidate_memories": candidate_memories or "(无)",
-            **_pad_params(user_emotion),
         },
     )
 
@@ -386,7 +379,6 @@ async def deletion_done_reply(
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
             "deleted_memories": deleted_memories or "(无)",
-            **_pad_params(user_emotion),
         },
     )
 
@@ -411,7 +403,6 @@ async def memory_weak_reply(
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
-            **_pad_params(user_emotion),
         },
     )
 
@@ -436,7 +427,6 @@ async def memory_medium_reply(
             "user_portrait": user_portrait or "(未知)",
             "user_memory": user_memory or "(无)",
             "ai_memory": ai_memory or "(无)",
-            **_pad_params(user_emotion),
         },
     )
 
@@ -461,7 +451,6 @@ async def memory_strong_reply(
             "user_portrait": user_portrait or "(未知)",
             "user_memory": user_memory or "(无)",
             "ai_memory": ai_memory or "(无)",
-            **_pad_params(user_emotion),
         },
     )
 
@@ -484,7 +473,6 @@ async def memory_l3_reply(
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
             "l3_memory": l3_memory or "(无)",
-            **_pad_params(user_emotion),
         },
     )
 

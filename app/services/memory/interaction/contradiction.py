@@ -29,7 +29,7 @@ from app.services.llm.models import (
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.persistence import log_memory_changelog, store_memory
 from app.services.prompting.store import get_prompt_text
-from app.services.prompting.utils import SafeDict, pad_params
+from app.services.prompting.utils import SafeDict
 
 _PENDING_KEY_PREFIX = "contradiction:pending:"
 _PENDING_TTL = 1800  # 30 min — generous window for user to reply
@@ -122,7 +122,6 @@ async def generate_contradiction_inquiry(
             "recent_context": recent_context or "(无)",
             "personality_brief": personality_brief or agent_name,
             "user_portrait": user_portrait or "(未知)",
-            **pad_params(user_emotion),
         }
         prompt = template.format_map(SafeDict(params))
         inquiry = (await invoke_text(get_chat_model(), prompt)).strip()
@@ -194,7 +193,6 @@ async def generate_contradiction_reply(
             "change_reason": analysis.get("reason", ""),
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
-            **pad_params(user_emotion),
         }
         prompt = template.format_map(SafeDict(params))
         return (await invoke_text(get_chat_model(), prompt)).strip()

@@ -1,7 +1,10 @@
 """Shared helpers for prompt template rendering.
 
 - `SafeDict`: format_map 兜底，未知占位符原样保留或返回 "(无)"。
-- `pad_params`: 把 PAD 情绪 dict 按统一精度转成字符串参数。
+- `pad_params`: [DEPRECATED Phase 2.3] 历史: 把 PAD 情绪 dict 转成 prompt 模板参数.
+  当前所有 prompt 模板已删除 raw PAD 占位符 — LLM 看不懂抽象数值是 token 浪费.
+  保留 helper 仅供兼容外部调用 / 未来 step 2 自然语言版可能复用; 但生产路径
+  已无 caller. 详见 prompt_builder._build_emotion_section 的 Phase 2.3 注释.
 - `render_prompt`: 取模板 → format_map → 调用 LLM → 裁剪，单一入口。
 """
 
