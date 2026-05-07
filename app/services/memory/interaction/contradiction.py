@@ -209,24 +209,28 @@ async def apply_contradiction_resolution(
 ) -> None:
     """Spec §4.4: adjust memories based on analysis.
 
-    - 变化/错误: demote old L1 → L2, create new entry at L1 (same category as old)
-    - 新增: keep old L1; new memory (different aspect) handled by extraction pipeline
+    - 变化/错误: demote old L1 → L2 + 写新 L1 (复用老条目类目)
+    - 新增: 老 L1 不动 + 写新 L1/L2 (用 LLM 给的新类目)
 
-    新 L1 写入说明: contradiction_analysis prompt 输出 new_memory 字段 (e.g.
-    "用户今年 29 岁"). 之前注释说"由 extraction pipeline 创建", 但 extraction
-    跑在用户的"确认"消息上 (e.g. "说错了之前"), 文本不含新事实抽不到. 而且即便
-    抽到, 单独写也会被 L1 SINGLETON gate 拦下 (因为老 L1 此时还在). 这里在
-    demote 老 L1 之后立即写新 L1, 走正常 store_memory (含 embedding + dedup).
+    新条目入库逻辑: contradiction_analysis prompt 输出 new_memory 文本 +
+    new_memory_main/sub_category 类目. 之前注释说"由 extraction pipeline
+    创建", 但 extraction 跑在用户的"确认"消息上 (e.g. "说错了之前"), 文本
+    不含新事实抽不到. 这里直接调 store_memory 写新条目, 走正常 embedding +
+    dedup + taxonomy resolve (LLM 给的类目即便有偏差, taxonomy.SUBCATEGORY_
+    ALIASES + fuzzy match 会 canonicalize).
     """
     change_type = analysis.get("change_type", "新增")
     old_id = conflict.get("conflicting_memory_id")
     new_memory_text = (analysis.get("new_memory") or "").strip()
+    new_main = (analysis.get("new_memory_main_category") or "").strip()
+    new_sub = (analysis.get("new_memory_sub_category") or "").strip()
 
+    # Step 1: demote old L1 → L2 (变化/错误 才降; 新增 老条目保留)
+    old_mem = None
     if change_type in ("变化", "错误") and old_id:
-        # Demote old L1 → L2 with reduced importance
         old_mem = await memory_repo.find_unique(old_id)
         if not old_mem:
-            return
+            return  # 老条目已被删/找不到, 静默退出
 
         new_imp = max(0.30, (old_mem.importance or 0.5) - 0.20)
         await memory_repo.update(
@@ -242,60 +246,79 @@ async def apply_contradiction_resolution(
                    "change_type": change_type, "old_memory_id": old_id,
                    "new_importance": new_imp},
         )
+    elif change_type == "新增" and old_id:
+        # 新增 case: 不降级老条目, 但需要拿老条目作 user/workspace/source 上下文
+        old_mem = await memory_repo.find_unique(old_id)
 
-        # spec §4.4 step 2: 写新 L1 (同 category 复用老条目的 main/sub).
-        if new_memory_text:
-            try:
-                new_id = await store_memory(
-                    user_id=old_mem.userId,
-                    content=new_memory_text,
-                    summary=new_memory_text,
-                    level=1,
-                    importance=0.95,
-                    main_category=getattr(old_mem, "mainCategory", None),
-                    sub_category=getattr(old_mem, "subCategory", None),
-                    source=getattr(old_mem, "source", "user"),
-                    workspace_id=getattr(old_mem, "workspaceId", None),
-                )
-                if new_id:
-                    logger.info(
-                        f"contradiction.apply: wrote new L1 {new_id[:8]} "
-                        f"text='{new_memory_text[:40]}'",
-                        extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                               "change_type": change_type, "new_memory_id": new_id,
-                               "new_memory_text_len": len(new_memory_text)},
-                    )
-                else:
-                    # store_memory 返回 None 仅当: dedup 命中 (相似度 ≥ 0.9
-                    # DEDUP_THRESHOLD) 或 taxonomy 不允许该 (source, level, main)
-                    # 组合. 矛盾解决场景下两者都属异常 — 用户已主动纠正, 应该入库.
-                    logger.warning(
-                        f"contradiction.apply: store_memory returned None for "
-                        f"new_memory='{new_memory_text[:40]}' (likely dedup hit "
-                        f"with demoted old or taxonomy block); 新 L1 未入库",
-                        extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                               "change_type": change_type, "outcome": "new_l1_blocked",
-                               "new_memory_text_len": len(new_memory_text)},
-                    )
-            except Exception as e:
-                # Don't crash resolution flow on write failure — old is already
-                # demoted, the conversation can continue. New L1 missing is a
-                # degraded-but-recoverable state (next time user mentions it,
-                # it'll go through normal extraction).
-                logger.warning(
-                    f"contradiction.apply: failed to write new L1: {e}",
-                    extra={"event": EVT_LLM_FAIL, "stage": "contradiction_apply_new",
-                           "error_type": type(e).__name__},
-                )
-    else:
+    # Step 2: 写新条目 (3 个 change_type 都可能产生 new_memory)
+    if not new_memory_text:
         logger.debug(
-            f"contradiction.apply: no demotion (change_type={change_type})",
+            f"contradiction.apply: no new_memory to write (change_type={change_type})",
             extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
-                   "change_type": change_type, "outcome": "no_demote"},
+                   "change_type": change_type, "outcome": "no_new"},
         )
+        return
 
-    # 新增 case: old L1 unchanged. New memory (different aspect like new
-    # relative) is left to normal extraction pipeline on the user's reply.
+    if not old_mem:
+        # 不该到这里 (上面 change_type=变化/错误 时 old_mem=None 已经 return),
+        # 但 change_type 异常值时兜底, 防止后续 getattr 崩.
+        logger.warning(
+            f"contradiction.apply: cannot write new_memory without old_mem context "
+            f"(change_type={change_type}, old_id={old_id})",
+            extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                   "change_type": change_type, "outcome": "no_old_context"},
+        )
+        return
+
+    # 类目策略:
+    # - 变化/错误: 优先 LLM 给的类目, fallback 复用老条目 (同一属性, 老的肯定对)
+    # - 新增: 用 LLM 给的类目 (新维度, 老的可能完全不适用); 没给就 fallback 老的,
+    #   resolve_taxonomy 至少能 canonicalize 到合法 sub
+    main_category = new_main or getattr(old_mem, "mainCategory", None)
+    sub_category = new_sub or getattr(old_mem, "subCategory", None)
+
+    try:
+        new_id = await store_memory(
+            user_id=old_mem.userId,
+            content=new_memory_text,
+            summary=new_memory_text,
+            level=1,
+            importance=0.95,
+            main_category=main_category,
+            sub_category=sub_category,
+            source=getattr(old_mem, "source", "user"),
+            workspace_id=getattr(old_mem, "workspaceId", None),
+        )
+        if new_id:
+            logger.info(
+                f"contradiction.apply: wrote new L1 {new_id[:8]} "
+                f"({change_type}) cat={main_category}/{sub_category} "
+                f"text='{new_memory_text[:40]}'",
+                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                       "change_type": change_type, "new_memory_id": new_id,
+                       "new_main": main_category, "new_sub": sub_category,
+                       "new_memory_text_len": len(new_memory_text)},
+            )
+        else:
+            # store_memory 返回 None: dedup 命中 (sim ≥ 0.9) 或 taxonomy 不允许.
+            # 矛盾解决场景属异常 — 用户已主动纠正, 应该入库.
+            logger.warning(
+                f"contradiction.apply: store_memory returned None for "
+                f"new_memory='{new_memory_text[:40]}' (likely dedup or "
+                f"taxonomy block); 新条目未入库",
+                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                       "change_type": change_type, "outcome": "new_l1_blocked",
+                       "new_main": main_category, "new_sub": sub_category,
+                       "new_memory_text_len": len(new_memory_text)},
+            )
+    except Exception as e:
+        # 不让写入失败炸掉 resolution 流程 — 老条目状态已确定, 对话可继续.
+        # 新条目缺失是 degraded-but-recoverable (用户下次提及会走正常 extraction).
+        logger.warning(
+            f"contradiction.apply: failed to write new memory: {e}",
+            extra={"event": EVT_LLM_FAIL, "stage": "contradiction_apply_new",
+                   "change_type": change_type, "error_type": type(e).__name__},
+        )
 
 
 # ── Conversation-level state management ──────────────────────────────────

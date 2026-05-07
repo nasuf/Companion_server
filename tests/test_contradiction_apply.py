@@ -109,33 +109,135 @@ async def test_apply_skips_new_l1_when_new_memory_empty():
 
 
 @pytest.mark.asyncio
-async def test_apply_skips_demote_for_新增():
-    """change_type=新增 → 不 demote, 不 写新 L1 (走 extraction pipeline)."""
+async def test_apply_新增_writes_new_with_llm_categories():
+    """change_type=新增 → 老 L1 不 demote, 用 LLM 给的类目写新条目.
+
+    spec §4.4: "新增: 新内容作为新增记忆按正常流程拆分/打分/存对应层级 (可与
+    原L1共存)". 之前代码完全不操作 (注释说由 extraction pipeline 处理), 但
+    extraction 跑在用户的"确认"消息上抽不到新事实, 同 bug 跟变化/错误 case.
+    """
     from app.services.memory.interaction.contradiction import apply_contradiction_resolution
+
+    old_mem = MagicMock(
+        id="独生女-id", userId="u1", importance=0.95,
+        mainCategory="身份", subCategory="亲属关系",  # 老条目"独生女"也归亲属关系
+        source="user", workspaceId="ws1",
+    )
 
     with (
         patch(
             "app.services.memory.interaction.contradiction.memory_repo.find_unique",
-            new_callable=AsyncMock,
-        ) as mock_find,
+            new_callable=AsyncMock, return_value=old_mem,
+        ),
         patch(
             "app.services.memory.interaction.contradiction.memory_repo.update",
             new_callable=AsyncMock,
         ) as mock_update,
         patch(
             "app.services.memory.interaction.contradiction.store_memory",
+            new_callable=AsyncMock, return_value="new-mei-id",
+        ) as mock_store,
+    ):
+        await apply_contradiction_resolution(
+            conflict={"conflicting_memory_id": "独生女-id"},
+            analysis={
+                "change_type": "新增",
+                "new_memory": "用户有个妹妹叫小芳",
+                "new_memory_main_category": "身份",
+                "new_memory_sub_category": "亲属关系",
+            },
+        )
+
+    # 新增 case: 老 L1 NOT demoted
+    mock_update.assert_not_called()
+    # 但新条目要入库
+    mock_store.assert_called_once()
+    kwargs = mock_store.call_args.kwargs
+    assert kwargs["content"] == "用户有个妹妹叫小芳"
+    assert kwargs["level"] == 1
+    assert kwargs["main_category"] == "身份"  # 用 LLM 给的, 不是老条目
+    assert kwargs["sub_category"] == "亲属关系"
+
+
+@pytest.mark.asyncio
+async def test_apply_变化_prefers_llm_categories_over_old():
+    """change_type=变化 + LLM 给了 new categories → 用 LLM 的, 不复用老条目.
+
+    一般 case 变化 LLM 应该给跟老一样的类目 (e.g. 28岁→29岁 都是 身份/年龄).
+    若 LLM 给不一样的 (罕见, 可能 LLM 误判), 还是用 LLM 给的, 让 taxonomy
+    resolver 兜底校正. 老条目类目作为 fallback 仅在 LLM 没给时用.
+    """
+    from app.services.memory.interaction.contradiction import apply_contradiction_resolution
+
+    old_mem = MagicMock(
+        id="old-id", userId="u1", importance=0.95,
+        mainCategory="身份", subCategory="年龄",
+        source="user", workspaceId="ws1",
+    )
+
+    with (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_unique",
+            new_callable=AsyncMock, return_value=old_mem,
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.update",
             new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.store_memory",
+            new_callable=AsyncMock, return_value="new-id",
         ) as mock_store,
     ):
         await apply_contradiction_resolution(
             conflict={"conflicting_memory_id": "old-id"},
-            analysis={"change_type": "新增", "new_memory": "用户有个表妹叫小芳"},
+            analysis={
+                "change_type": "变化",
+                "new_memory": "用户今年 29 岁",
+                "new_memory_main_category": "身份",
+                "new_memory_sub_category": "年龄",
+            },
         )
 
-    # 新增 case: 老 L1 不动, 新条目由 extraction pipeline 处理
-    mock_find.assert_not_called()
-    mock_update.assert_not_called()
-    mock_store.assert_not_called()
+    kwargs = mock_store.call_args.kwargs
+    assert kwargs["main_category"] == "身份"
+    assert kwargs["sub_category"] == "年龄"
+
+
+@pytest.mark.asyncio
+async def test_apply_falls_back_to_old_categories_when_llm_omits():
+    """LLM 没输出 new_memory_main/sub_category → fallback 复用老条目类目."""
+    from app.services.memory.interaction.contradiction import apply_contradiction_resolution
+
+    old_mem = MagicMock(
+        id="old-id", userId="u1", importance=0.95,
+        mainCategory="身份", subCategory="年龄",
+        source="user", workspaceId="ws1",
+    )
+
+    with (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_unique",
+            new_callable=AsyncMock, return_value=old_mem,
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.update",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.store_memory",
+            new_callable=AsyncMock, return_value="new-id",
+        ) as mock_store,
+    ):
+        await apply_contradiction_resolution(
+            conflict={"conflicting_memory_id": "old-id"},
+            analysis={"change_type": "错误", "new_memory": "用户今年 29 岁"},
+            # 没传 new_memory_main_category / new_memory_sub_category
+        )
+
+    kwargs = mock_store.call_args.kwargs
+    assert kwargs["main_category"] == "身份"  # fallback 老的
+    assert kwargs["sub_category"] == "年龄"
 
 
 @pytest.mark.asyncio

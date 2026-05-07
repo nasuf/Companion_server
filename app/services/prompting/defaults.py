@@ -916,8 +916,14 @@ MEMORY_CONTRADICTION_ANALYSIS_PROMPT = """【任务】分析用户对矛盾询�
   "change_type": "变化" 或 "新增" 或 "错误",
   "reason": "变化原因（≤20字）",
   "updated_memory": "原记忆应更新为的内容（如适用，否则为空字符串）",
-  "new_memory": "需新增的记忆内容（如适用，否则为空字符串）"
-}}"""
+  "new_memory": "需新增的记忆内容（如适用，否则为空字符串）",
+  "new_memory_main_category": "新记忆主类(身份/偏好/生活/情绪/思维 之一; new_memory 为空时给空字符串)",
+  "new_memory_sub_category": "新记忆子类(如 姓名/年龄/性别/亲属关系/饮食喜好/工作 等; new_memory 为空时给空字符串)"
+}}
+
+【注意】
+- 变化/错误: new_memory 跟 original_memory 是同一属性的不同取值, new_memory_main_category 和 new_memory_sub_category 应跟 original_memory 一致
+- 新增: new_memory 是用户补充的不同维度事实, 类目按新事实自然归类"""
 
 
 # Spec 第二部分 §4.5 + 指令模版 P8-9「矛盾回复」
