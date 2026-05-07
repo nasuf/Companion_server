@@ -1017,35 +1017,77 @@ def test_split_multi_intent_passes_context():
 
 
 def test_cancel_keyword_detection():
-    """生产观察: '算了算了，别提醒了，我吃过了' 被 LLM 拆成乱七八糟的
-    sub-intent, AI 回了离题的话. handler 必须能基于关键词识别取消语义,
-    跳过 LLM 直接 deactivate active reminder."""
-    from app.services.chat.intent_handlers import _is_cancel_reminder
+    """Phase 0.1 重构: classify_cancel_intent 分级 high/low/none.
 
-    # 各种取消语义都要命中
-    assert _is_cancel_reminder("算了算了，别提醒了，我吃过了")
+    历史 bug: _is_cancel_reminder 关键词命中即一刀切 deactivate 全部 active
+    reminder, 用户在普通聊天说"我吃过午饭了" → 误删开会提醒. 重构后:
+    - HIGH (含"提醒/记"明确语义): 可直接动作 (单个 reminder 时直接撤)
+    - LOW  (歧义口语): 必须 confirm, 内容无关时不打扰
+    """
+    from app.services.chat.intent_handlers import (
+        _is_cancel_reminder, classify_cancel_intent, _is_undo_cancel,
+    )
+
+    # === HIGH: 明确含 "提醒/记" 的取消语义 ===
+    assert classify_cancel_intent("算了算了，别提醒了，我吃过了") == "high"
+    assert classify_cancel_intent("算了别提醒了") == "high"
+    assert classify_cancel_intent("不用提醒了") == "high"
+    assert classify_cancel_intent("取消那个提醒") == "high"
+    assert classify_cancel_intent("不记了") == "high"
+    assert classify_cancel_intent("撤销提醒") == "high"
+    # _is_cancel_reminder 是 HIGH 的别名
     assert _is_cancel_reminder("算了别提醒了")
     assert _is_cancel_reminder("不用提醒了")
-    assert _is_cancel_reminder("取消那个提醒")
-    assert _is_cancel_reminder("我吃过了")
-    assert _is_cancel_reminder("已经做了")
-    # 正常设置提醒不该命中
-    assert not _is_cancel_reminder("一分钟后提醒我喝水")
-    assert not _is_cancel_reminder("提醒我明天去开会")
-    assert not _is_cancel_reminder("帮我记一下")
+
+    # === LOW: 歧义口语, 必须 confirm ===
+    assert classify_cancel_intent("我吃过了") == "low"
+    assert classify_cancel_intent("已经做了") == "low"
+    assert classify_cancel_intent("已经吃了") == "low"
+    assert classify_cancel_intent("算了") == "low"
+    # LOW 不应被 _is_cancel_reminder (HIGH alias) 命中
+    assert not _is_cancel_reminder("我吃过了")
+    assert not _is_cancel_reminder("已经做了")
+
+    # === NONE: 正常设置/无关消息 ===
+    assert classify_cancel_intent("一分钟后提醒我喝水") == "none"
+    assert classify_cancel_intent("提醒我明天去开会") == "none"
+    assert classify_cancel_intent("帮我记一下") == "none"
+    assert classify_cancel_intent("你今天怎么样?") == "none"
+
+    # === 撤回语义 ===
+    assert _is_undo_cancel("撤回")
+    assert _is_undo_cancel("撤回刚才的取消")
+    assert _is_undo_cancel("恢复刚才取消的提醒")
+    assert _is_undo_cancel("我反悔了")
+    assert not _is_undo_cancel("撤了")  # "撤" 单字不算 (避免 "撤掉" 误中)
+    assert not _is_undo_cancel("提醒我吃药")
 
 
 @pytest.mark.asyncio
-async def test_handle_record_request_cancel_branch():
-    """handle_record_request 收到取消语义时, 必须 deactivate active reminders
-    并返回简短确认, 不能走 _direct_create_reminder 试图建新 trigger."""
+async def test_handle_record_request_cancel_high_single():
+    """Phase 0.1: HIGH cancel + 1 active reminder → 直接撤 + undo 提示.
+
+    用户说 "算了别提醒了" (HIGH), 当前仅 1 个 active reminder, 直接 deactivate
+    那个 trigger, 不再一刀切删全部. 返回包含 undo 提示的 reply.
+    """
     from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+    from datetime import datetime, timezone
 
     update_many_calls = []
 
     async def _update_many(*, where, data):
         update_many_calls.append((where, data))
-        return 2  # 模拟 deactivated 2 行
+        return 1
+
+    # 模拟 1 个 active reminder
+    fake_trigger = SimpleNamespace(
+        id="trig-1",
+        triggerTime=datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc),
+        actionData={"summary": "明天 10 点开会", "memory_id": "m-1",
+                    "recurrence": "once", "memory_side": "user"},
+        actionType="reminder",
+        aiAgentId="a1",
+    )
 
     ctx = ShortCircuitCtx(
         conversation_id="c1", agent_id="a1", user_id="u1",
@@ -1059,28 +1101,455 @@ async def test_handle_record_request_cancel_branch():
         cached_patience=100,
     )
 
-    with patch("app.db.db.timetrigger") as mock_table:
-        mock_table.update_many = AsyncMock(side_effect=_update_many)
-        # 不让 _direct_create_reminder 跑
-        with patch(
+    with (
+        patch(
+            "app.services.reminder.scheduling.find_active_reminder_triggers",
+            new_callable=AsyncMock, return_value=[fake_trigger],
+        ),
+        patch("app.db.db.timetrigger") as mock_table,
+        patch(
             "app.services.chat.intent_handlers._direct_create_reminder",
             new_callable=AsyncMock, return_value=None,
-        ) as mock_direct:
-            handled, events = await handle_record_request(
-                "算了别提醒了，我吃过了", ctx,
-            )
-            # _direct_create_reminder 不应被调用 (取消分支早返)
-            assert mock_direct.call_count == 0
+        ) as mock_direct,
+        patch(
+            "app.services.reminder.scheduling.notify_reminder_changed",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.reminder.scheduling.save_cancel_undo",
+            new_callable=AsyncMock,
+        ) as mock_save_undo,
+        patch(
+            "app.services.memory.storage.persistence.log_memory_changelog",
+            new_callable=AsyncMock,
+        ) as mock_changelog,
+    ):
+        mock_table.update_many = AsyncMock(side_effect=_update_many)
+        handled, events = await handle_record_request(
+            "算了别提醒了", ctx,
+        )
+        # 取消分支早返 — 不该跑设置流程
+        assert mock_direct.call_count == 0
 
     assert handled is True
     assert events is not None
-    # 单 update_many 调用 deactivate (不再 N+1)
+    # 仅撤指定 trigger (按 id), 不一刀切
     assert len(update_many_calls) == 1
     where, data = update_many_calls[0]
-    assert where["userId"] == "u1"
-    assert where["aiAgentId"] == "a1"
-    assert where["isActive"] is True
+    assert where == {"id": {"in": ["trig-1"]}, "isActive": True}
     assert data == {"isActive": False}
+    # audit log + undo state 都被调用
+    assert mock_changelog.call_count == 1
+    assert mock_save_undo.call_count == 1
+    # consumed_full_message=True (防 sub-intent 误处理)
+    assert ctx.consumed_full_message is True
+
+
+@pytest.mark.asyncio
+async def test_handle_record_request_cancel_low_topic_unrelated_skips():
+    """Phase 0.1 关键修复: LOW cancel ('我吃过了') + 已有 reminder 但内容
+    不相关 ('明天开会') → 不进入 cancel 流程, 不打扰用户.
+
+    历史 bug: '我吃过午饭了' 直接 deactivate '明天开会提醒'.
+    新行为: handler 返 (False, None), 让外层 fall-through 到正常 reply.
+    """
+    from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+    from datetime import datetime, timezone
+
+    fake_trigger = SimpleNamespace(
+        id="trig-1",
+        triggerTime=datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc),
+        actionData={"summary": "明天 10 点开会",  # 跟 "我吃过了" 完全不相关
+                    "memory_id": "m-1", "recurrence": "once", "memory_side": "user"},
+        actionType="reminder",
+        aiAgentId="a1",
+    )
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+
+    update_many_calls = []
+    async def _update_many(*, where, data):
+        update_many_calls.append((where, data))
+        return 1
+
+    with (
+        patch(
+            "app.services.reminder.scheduling.find_active_reminder_triggers",
+            new_callable=AsyncMock, return_value=[fake_trigger],
+        ),
+        patch("app.db.db.timetrigger") as mock_table,
+        patch(
+            "app.services.chat.intent_handlers._direct_create_reminder",
+            new_callable=AsyncMock, return_value=("scheduled", "10 点"),
+        ) as mock_direct,
+        patch(
+            "app.services.chat.intent_handlers.record_confirm_reply",
+            new_callable=AsyncMock, return_value="好嘞~",
+        ),
+    ):
+        mock_table.update_many = AsyncMock(side_effect=_update_many)
+        handled, events = await handle_record_request("我吃过了", ctx)
+
+    # 关键: 没有 deactivate (内容不相关 → 不打扰)
+    assert len(update_many_calls) == 0, (
+        f"LOW + 内容不相关时绝不能 deactivate; got update_many calls: {update_many_calls}"
+    )
+    # fall-through 到设置流程 (虽然 mock 里 _direct_create_reminder 也被调用了, 但
+    # 不应有 deactivate 副作用)
+    # (这个 case fall-through 后 _direct_create_reminder 处理"我吃过了", parse 不
+    #  到时间会 ask 反问 — 但本测试只关心 cancel 不被触发)
+
+
+@pytest.mark.asyncio
+async def test_handle_record_request_cancel_low_topic_related_asks():
+    """Phase 0.1: LOW cancel ('我吃过了') + 1 reminder 内容相关 ('提醒我吃药') →
+    ask confirmation, 不直接撤. 用户回'对'第二轮才真撤.
+
+    bigram overlap "我吃" 出现在两边 → 内容相关 → ask.
+    """
+    from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+    from datetime import datetime, timezone
+
+    fake_trigger = SimpleNamespace(
+        id="trig-1",
+        triggerTime=datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc),
+        actionData={"summary": "提醒我吃药", "memory_id": "m-1",
+                    "recurrence": "once", "memory_side": "user"},
+        actionType="reminder",
+        aiAgentId="a1",
+    )
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+
+    update_many_calls = []
+    async def _update_many(*, where, data):
+        update_many_calls.append((where, data))
+        return 1
+
+    save_pending_calls = []
+    async def _save_pending(conv_id, *, action, candidates=None, summary=None, **kw):
+        save_pending_calls.append({"action": action, "candidates": candidates,
+                                   "summary": summary})
+
+    with (
+        patch(
+            "app.services.reminder.scheduling.find_active_reminder_triggers",
+            new_callable=AsyncMock, return_value=[fake_trigger],
+        ),
+        patch("app.db.db.timetrigger") as mock_table,
+        patch(
+            "app.services.chat.intent_handlers.save_pending_action",
+            side_effect=_save_pending,
+        ),
+    ):
+        mock_table.update_many = AsyncMock(side_effect=_update_many)
+        handled, events = await handle_record_request("我吃过了", ctx)
+
+    # ask 模式: 不直接撤
+    assert len(update_many_calls) == 0
+    # save pending 写入 (action=cancel_reminder)
+    assert len(save_pending_calls) == 1
+    assert save_pending_calls[0]["action"] == "cancel_reminder"
+    assert save_pending_calls[0]["candidates"] == [
+        {  # 期望整个 trigger meta 字典
+            "trigger_id": "trig-1",
+            "summary": "提醒我吃药",
+            "when_text": save_pending_calls[0]["candidates"][0]["when_text"],
+            "trigger_time": fake_trigger.triggerTime.isoformat(),
+            "memory_id": "m-1",
+            "recurrence": "once",
+            "memory_side": "user",
+            "action_data": dict(fake_trigger.actionData),
+        }
+    ]
+    assert handled is True
+    assert ctx.consumed_full_message is True
+
+
+@pytest.mark.asyncio
+async def test_handle_record_request_cancel_high_multi_lists():
+    """Phase 0.1: HIGH cancel + 2+ reminder → 列出让用户选, 不一刀切."""
+    from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+    from datetime import datetime, timezone
+
+    triggers = [
+        SimpleNamespace(
+            id=f"trig-{i}",
+            triggerTime=datetime(2026, 5, 8, 10 + i, 0, tzinfo=timezone.utc),
+            actionData={"summary": f"提醒 {i}", "memory_id": f"m-{i}",
+                        "recurrence": "once", "memory_side": "user"},
+            actionType="reminder",
+            aiAgentId="a1",
+        )
+        for i in range(3)
+    ]
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+
+    save_pending_calls = []
+    async def _save_pending(conv_id, *, action, candidates=None, **kw):
+        save_pending_calls.append({"action": action, "n_candidates": len(candidates or [])})
+
+    update_many_calls = []
+    async def _update_many(*, where, data):
+        update_many_calls.append((where, data))
+
+    with (
+        patch(
+            "app.services.reminder.scheduling.find_active_reminder_triggers",
+            new_callable=AsyncMock, return_value=triggers,
+        ),
+        patch("app.db.db.timetrigger") as mock_table,
+        patch(
+            "app.services.chat.intent_handlers.save_pending_action",
+            side_effect=_save_pending,
+        ),
+    ):
+        mock_table.update_many = AsyncMock(side_effect=_update_many)
+        handled, events = await handle_record_request("算了别提醒了", ctx)
+
+    # 列出让选 → 不直接撤, save pending 含全部 3 个候选
+    assert len(update_many_calls) == 0
+    assert save_pending_calls == [{"action": "cancel_reminder", "n_candidates": 3}]
+    assert handled is True
+    assert ctx.consumed_full_message is True
+
+
+@pytest.mark.asyncio
+async def test_handle_record_request_cancel_high_zero_friendly():
+    """Phase 0.1: HIGH cancel + 0 reminder → 友好告知, 不报错."""
+    from app.services.chat.intent_handlers import handle_record_request, ShortCircuitCtx
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+
+    update_many_calls = []
+    async def _update_many(*, where, data):
+        update_many_calls.append((where, data))
+
+    with (
+        patch(
+            "app.services.reminder.scheduling.find_active_reminder_triggers",
+            new_callable=AsyncMock, return_value=[],  # 0 reminder
+        ),
+        patch("app.db.db.timetrigger") as mock_table,
+    ):
+        mock_table.update_many = AsyncMock(side_effect=_update_many)
+        handled, events = await handle_record_request("算了别提醒了", ctx)
+
+    assert handled is True
+    assert len(update_many_calls) == 0  # 没东西可撤
+    assert ctx.consumed_full_message is True
+
+
+@pytest.mark.asyncio
+async def test_preflight_resolve_recent_undo_cancel():
+    """Phase 0.2: 用户说"撤回" → preflight 优先恢复 cancel reminder undo state."""
+    from app.services.chat.preflight import PreflightCtx, resolve_recent_undo
+
+    short_circuit_calls = []
+    async def _short_circuit(reply, conv, agent, user, *, trace_id=None):
+        short_circuit_calls.append({"reply": reply, "conv": conv})
+        return [{"type": "reply", "content": reply}]
+
+    ctx = PreflightCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False, close=MagicMock()),
+        short_circuit_fn=_short_circuit,
+    )
+
+    update_many_calls = []
+    async def _update_many(*, where, data):
+        update_many_calls.append((where, data))
+        return 2
+
+    with (
+        patch(
+            "app.services.memory.interaction.deletion.load_delete_undo",
+            new_callable=AsyncMock, return_value=None,  # 无 delete undo
+        ),
+        patch(
+            "app.services.reminder.scheduling.load_cancel_undo",
+            new_callable=AsyncMock, return_value={
+                "triggers": [
+                    {"trigger_id": "trig-1"}, {"trigger_id": "trig-2"},
+                ],
+                "cancelled_at": "2026-05-07T10:00:00+00:00",
+            },
+        ),
+        patch(
+            "app.services.reminder.scheduling.clear_cancel_undo",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.reminder.scheduling.notify_reminder_changed",
+            new_callable=AsyncMock,
+        ),
+        patch("app.db.db.timetrigger") as mock_table,
+    ):
+        mock_table.update_many = AsyncMock(side_effect=_update_many)
+        events = []
+        async for evt in resolve_recent_undo("撤回刚才的取消", ctx):
+            events.append(evt)
+
+    assert ctx.stopped is True  # preflight 短路了
+    assert len(short_circuit_calls) == 1
+    assert "已经把刚才取消的 2 个提醒都恢复" in short_circuit_calls[0]["reply"]
+    # reactivate update_many 被调用 (isActive=True), 且 where 加 isActive=False filter
+    assert len(update_many_calls) == 1
+    where, data = update_many_calls[0]
+    assert where == {"id": {"in": ["trig-1", "trig-2"]}, "isActive": False}
+    assert data == {"isActive": True}
+
+
+@pytest.mark.asyncio
+async def test_preflight_resolve_recent_undo_delete_priority():
+    """Phase 0.2: delete undo 优先级高于 cancel undo (用户最可能想撤回最近删除)."""
+    from app.services.chat.preflight import PreflightCtx, resolve_recent_undo
+
+    short_circuit_calls = []
+    async def _short_circuit(reply, conv, agent, user, *, trace_id=None):
+        short_circuit_calls.append(reply)
+        return [{"type": "reply", "content": reply}]
+
+    ctx = PreflightCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False, close=MagicMock()),
+        short_circuit_fn=_short_circuit,
+    )
+
+    snapshots = [
+        {"id": "old-id-1", "userId": "u1", "workspaceId": "w1",
+         "source": "user", "content": "我喜欢咖啡", "summary": "喜欢咖啡",
+         "type": "preference", "level": 1, "importance": 0.9},
+    ]
+
+    with (
+        patch(
+            "app.services.memory.interaction.deletion.load_delete_undo",
+            new_callable=AsyncMock,
+            return_value={"snapshots": snapshots, "deleted_at": "2026-05-07T10:00:00"},
+        ),
+        patch(
+            "app.services.memory.interaction.deletion.clear_delete_undo",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.memory.interaction.deletion.restore_deleted_memories",
+            new_callable=AsyncMock, return_value=1,
+        ) as mock_restore,
+        # cancel undo 也存在但应该被忽略 (delete 优先)
+        patch(
+            "app.services.reminder.scheduling.load_cancel_undo",
+            new_callable=AsyncMock, return_value={"triggers": [{"trigger_id": "trig-1"}],
+                                                   "cancelled_at": "2026-05-07T10:00:00"},
+        ),
+    ):
+        async for evt in resolve_recent_undo("撤回", ctx):
+            pass
+
+    assert ctx.stopped is True
+    assert mock_restore.call_count == 1  # delete restore 被调用
+    assert "已经把刚才删除的 1 条记忆恢复" in short_circuit_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_preflight_resolve_recent_undo_no_state():
+    """撤回但无任何 undo state → 友好告知 (避免用户困惑)."""
+    from app.services.chat.preflight import PreflightCtx, resolve_recent_undo
+
+    short_circuit_calls = []
+    async def _short_circuit(reply, conv, agent, user, *, trace_id=None):
+        short_circuit_calls.append(reply)
+        return [{"type": "reply", "content": reply}]
+
+    ctx = PreflightCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False, close=MagicMock()),
+        short_circuit_fn=_short_circuit,
+    )
+
+    with (
+        patch(
+            "app.services.memory.interaction.deletion.load_delete_undo",
+            new_callable=AsyncMock, return_value=None,
+        ),
+        patch(
+            "app.services.reminder.scheduling.load_cancel_undo",
+            new_callable=AsyncMock, return_value=None,
+        ),
+    ):
+        async for evt in resolve_recent_undo("撤回刚才的", ctx):
+            pass
+
+    assert ctx.stopped is True
+    assert "没有可撤回的操作" in short_circuit_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_preflight_resolve_recent_undo_no_undo_keyword():
+    """非 undo 关键词消息 → no-op fall-through."""
+    from app.services.chat.preflight import PreflightCtx, resolve_recent_undo
+
+    short_circuit_calls = []
+    async def _short_circuit(reply, conv, agent, user, *, trace_id=None):
+        short_circuit_calls.append(reply)
+        return [{"type": "reply", "content": reply}]
+
+    ctx = PreflightCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False, close=MagicMock()),
+        short_circuit_fn=_short_circuit,
+    )
+
+    async for evt in resolve_recent_undo("你今天怎么样", ctx):
+        pass
+
+    assert ctx.stopped is False  # 没短路, fall through
+    assert short_circuit_calls == []
 
 
 @pytest.mark.asyncio

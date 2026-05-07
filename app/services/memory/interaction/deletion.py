@@ -85,9 +85,17 @@ async def detect_deletion_intent(message: str) -> dict | None:
 async def find_matching_memories(
     user_id: str,
     description: str,
-    threshold: float = 0.7,
+    threshold: float = 0.78,
 ) -> list[dict]:
-    """查找匹配的记忆但不删除，返回候选列表。"""
+    """查找匹配的记忆但不删除，返回候选列表.
+
+    Phase 0.2 提高默认阈值 0.7 → 0.78: 0.7 太松, "忘了我喜欢咖啡" 召回了
+    "喜欢茶/喜欢热饮" 等不该删的相似条目 (用户回 '嗯' 一刀切删全部 → 用户
+    数据丢失). 0.78 是 bge-m3 上 "明确指代同一事实" 的近似下限, 既能召回真正
+    要删的, 又能滤掉只是话题相关的.
+
+    callers 仍可显式传 threshold 覆盖 (e.g. find_for_audit 用更松 0.6).
+    """
     embedding = await generate_embedding(description)
     results = await search_by_embedding(embedding, user_id, top_k=5)
     matches = []
@@ -382,26 +390,187 @@ async def generate_deletion_confirmation_prompt(
 
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Phase 0.2: 删除 undo 机制 — 1h 内 snapshot 可恢复
+#
+# 当前架构无 deletedAt 字段, 删除是物理 delete + embedding cascade.
+# 真正 soft delete 需要 schema migration (Phase 4 范畴), 这里用 Redis
+# snapshot 提供 1h 撤销窗口: delete 前把完整 record 写 Redis, undo 时从
+# Redis 还原 (重新 insert + 重新生成 embedding 异步).
+#
+# 局限 (vs 真 soft delete):
+# - undo 后 ID 变了 (新 UUID) — 用户感知不到, 但跟外部引用 (e.g. 其他
+#   memory 的 embedding 关联) 会断
+# - 30 天后无法 undo (vs schema 方案的 30 天 grace)
+# - Redis 失效 / 大对象超 512KB 截断风险 (mitigation: snapshot 只存关键字段)
+# ═══════════════════════════════════════════════════════════════════
+
+_DELETE_UNDO_PREFIX = "memory:delete_undo:"
+_DELETE_UNDO_TTL = 3600  # 1 小时撤销窗口
+
+
+async def save_delete_undo(
+    *, conversation_id: str, snapshots: list[dict],
+) -> None:
+    """存被删 memory 的快照到 Redis, 1h 内可 undo.
+
+    snapshots 每项: {id, userId, workspaceId, source, content, summary,
+                     mainCategory, subCategory, level, importance, type,
+                     occurTime, statementTime, recurrence}
+    """
+    from datetime import datetime, UTC
+    redis = await get_redis()
+    payload = {
+        "snapshots": snapshots,
+        "deleted_at": datetime.now(UTC).isoformat(),
+    }
+    await redis.set(
+        f"{_DELETE_UNDO_PREFIX}{conversation_id}",
+        json.dumps(payload, ensure_ascii=False, default=str),
+        ex=_DELETE_UNDO_TTL,
+    )
+
+
+async def load_delete_undo(conversation_id: str) -> dict | None:
+    """读 undo state."""
+    redis = await get_redis()
+    raw = await redis.get(f"{_DELETE_UNDO_PREFIX}{conversation_id}")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw if isinstance(raw, str) else raw.decode())
+        if isinstance(data, dict) and isinstance(data.get("snapshots"), list):
+            return data
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return None
+
+
+async def clear_delete_undo(conversation_id: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"{_DELETE_UNDO_PREFIX}{conversation_id}")
+
+
+def _snapshot_memory(record) -> dict:
+    """提取 memory 关键字段做 snapshot, 给 undo 用. 排除会变的字段
+    (createdAt/updatedAt/mentionCount). embedding 不在 snapshot 里 — undo
+    时由 store_memory 重新生成 (cost ~50ms/条).
+    """
+    from datetime import datetime
+    def _iso(dt):
+        return dt.isoformat() if isinstance(dt, datetime) else None
+
+    return {
+        "id": record.id,
+        "userId": record.userId,
+        "workspaceId": getattr(record, "workspaceId", None),
+        "source": record.source,
+        "content": record.content,
+        "summary": record.summary,
+        "type": record.type,
+        "mainCategory": getattr(record, "mainCategory", None),
+        "subCategory": getattr(record, "subCategory", None),
+        "level": record.level,
+        "importance": record.importance,
+        "isArchived": record.isArchived,
+        "occurTime": _iso(getattr(record, "occurTime", None)),
+        "statementTime": _iso(getattr(record, "statementTime", None)),
+        "recurrence": getattr(record, "recurrence", None),
+    }
+
+
+async def restore_deleted_memories(snapshots: list[dict]) -> int:
+    """从 snapshot 恢复被删 memory. 返成功数.
+
+    重新 store_memory + 重新生成 embedding (异步). ID 会变 (新 UUID),
+    但内容 + 元数据完整保留.
+    """
+    from app.services.memory.storage.persistence import store_memory
+    from datetime import datetime
+
+    def _parse_dt(s):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
+    restored = 0
+    for snap in snapshots:
+        try:
+            new_id = await store_memory(
+                user_id=snap["userId"],
+                content=snap["content"],
+                summary=snap.get("summary") or snap["content"],
+                level=snap.get("level", 3),
+                importance=snap.get("importance", 0.5),
+                memory_type=snap.get("type", "life"),
+                main_category=snap.get("mainCategory"),
+                sub_category=snap.get("subCategory"),
+                source=snap.get("source", "user"),
+                workspace_id=snap.get("workspaceId"),
+                occur_time=_parse_dt(snap.get("occurTime")),
+                statement_time=_parse_dt(snap.get("statementTime")),
+                recurrence=snap.get("recurrence"),
+            )
+            if new_id:
+                restored += 1
+                logger.info(
+                    f"[DELETE-UNDO] restored memory '{snap['content'][:40]}' "
+                    f"as new_id={new_id[:8]} (was {snap.get('id', '?')[:8]})"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[DELETE-UNDO] restore failed for '{snap.get('content', '')[:40]}': {e}"
+            )
+    return restored
+
+
 async def execute_confirmed_deletion(
     user_id: str,
     candidates: list[dict],
+    *,
+    conversation_id: str | None = None,
 ) -> int:
-    """Spec §5.3-5.4: execute physical deletion after confirmation."""
+    """Spec §5.3-5.4: execute physical deletion after confirmation.
+
+    Phase 0.2: 删除前对每条 record 做完整 snapshot 存 Redis (1h TTL),
+    用户说"撤回刚才的删除" 在 1h 内可全部 undo 还原. snapshot 包含所有
+    关键字段, undo 走 store_memory 重新插入 (新 UUID, 内容完整).
+    """
     deleted = 0
+    snapshots: list[dict] = []
     for c in candidates:
         memory_id = c.get("id")
         if not memory_id:
             continue
         memory = await memory_repo.find_unique(memory_id)
         if memory:
-            await log_memory_changelog(user_id, memory_id, "delete", old_value=memory.content)
+            # snapshot 在 delete 前抓 — delete 后 record 已 gone
+            snapshots.append(_snapshot_memory(memory))
+            await log_memory_changelog(
+                user_id, memory_id, "delete",
+                old_value=memory.content,
+            )
         try:
             await memory_repo.delete(memory_id)
             deleted += 1
         except Exception as e:
             logger.warning(f"Confirmed deletion failed for {memory_id}: {e}")
+
+    # 存 undo state (即使部分 delete 失败, 成功的那部分仍可 undo)
+    if conversation_id and snapshots:
+        try:
+            await save_delete_undo(
+                conversation_id=conversation_id, snapshots=snapshots,
+            )
+        except Exception as e:
+            logger.warning(f"[DELETE] save undo state failed: {e}")
+
     logger.info(
-        f"execute_confirmed_deletion: {deleted}/{len(candidates)} memories deleted",
+        f"execute_confirmed_deletion: {deleted}/{len(candidates)} memories deleted "
+        f"(undo snapshot saved={bool(snapshots and conversation_id)})",
         extra={
             "event": EVT_MEMORY_DELETED,
             "n_candidates": len(candidates),

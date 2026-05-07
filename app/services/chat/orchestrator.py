@@ -74,6 +74,7 @@ from app.services.chat.preflight import (
     PreflightCtx,
     resolve_pending_contradiction,
     resolve_pending_deletion,
+    resolve_recent_undo,
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
 from app.services.chat.data_fetch_phase import fetch_parallel_context, format_recent_context, maybe_awaken_l3
@@ -419,6 +420,13 @@ async def stream_chat_response(
                 tracer=tracer,
                 short_circuit_fn=_short_circuit_reply,
             )
+
+            # Phase 0.2: 用户说"撤回/恢复" 时优先 short-circuit, 跳过任何 pending
+            # 状态. 1h 内的 cancel_reminder + delete 都可恢复, 都未命中则告知.
+            async for evt in resolve_recent_undo(user_message, preflight_ctx):
+                yield evt
+            if preflight_ctx.stopped:
+                return
 
             async for evt in resolve_pending_contradiction(user_message, preflight_ctx):
                 yield evt

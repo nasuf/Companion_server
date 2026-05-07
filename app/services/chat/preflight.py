@@ -60,6 +60,92 @@ class PreflightCtx:
     last_short_circuit_reply: str | None = None
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Phase 0.2: Universal undo preflight — 统一 cancel_reminder + delete undo.
+# 用户说"撤回/恢复"时优先检查 undo state, 不依赖任何 intent 路径
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def resolve_recent_undo(
+    user_message: str,
+    ctx: PreflightCtx,
+) -> AsyncGenerator[dict, None]:
+    """Check if user wants to undo recent cancel-reminder OR delete.
+
+    优先级: 在 contradiction/deletion pending 之前 check (用户说"撤回" 应该
+    跳过任何 pending 状态). 1h 内可恢复, 都未命中则 no-op fall-through.
+    """
+    from app.services.chat.intent_handlers import (
+        _is_undo_cancel, _undo_recent_cancel,
+    )
+    from app.services.memory.interaction.deletion import (
+        load_delete_undo, clear_delete_undo, restore_deleted_memories,
+    )
+
+    if not _is_undo_cancel(user_message):
+        return
+
+    # 检查 delete undo state — 优先 (用户最可能记得"刚才删的")
+    delete_undo = await load_delete_undo(ctx.conversation_id)
+    if delete_undo:
+        snapshots = delete_undo.get("snapshots") or []
+        n = await restore_deleted_memories(snapshots)
+        if n > 0:
+            await clear_delete_undo(ctx.conversation_id)
+            reply = f"嗯, 已经把刚才删除的 {n} 条记忆恢复啦~"
+        else:
+            reply = "诶, 帮你恢复的时候出了点问题, 你再确认一下?"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        logger.info(
+            f"[PREFLIGHT-UNDO] restored {n} deleted memories",
+            extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "undo_delete",
+                   "n_restored": n},
+        )
+        return
+
+    # 否则检查 cancel reminder undo state
+    n = await _undo_recent_cancel(conversation_id=ctx.conversation_id)
+    if n > 0:
+        from app.services.reminder.scheduling import notify_reminder_changed
+        await notify_reminder_changed(ctx.conversation_id, kind="restored")
+        reply = (
+            f"嗯, 已经把刚才取消的 {n} 个提醒都恢复啦~ "
+            "如果还想取消, 跟我说一声哈."
+        )
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        logger.info(
+            f"[PREFLIGHT-UNDO] restored {n} cancelled reminders",
+            extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "undo_cancel",
+                   "n_restored": n},
+        )
+        return
+
+    # 都没有 undo state — 友好告知 (避免用户困惑)
+    reply = "嗯, 没有可撤回的操作哦 (1 小时内的取消/删除才能撤回)~"
+    ctx.last_short_circuit_reply = reply
+    for evt in await ctx.short_circuit_fn(
+        reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+        trace_id=ctx.tracer.safe_trace_id,
+    ):
+        yield evt
+    ctx.tracer.close()
+    ctx.stopped = True
+
+
 async def resolve_pending_contradiction(
     user_message: str,
     ctx: PreflightCtx,
@@ -127,20 +213,87 @@ async def resolve_pending_deletion(
         async for evt in _handle_pending_set_reminder(user_message, pending, ctx):
             yield evt
         return
+    if pending.get("action") == "cancel_reminder":
+        async for evt in _handle_pending_cancel_reminder(user_message, pending, ctx):
+            yield evt
+        return
     candidates = pending.get("candidates") or []
     action = pending.get("action") or "delete"
     new_time = pending.get("new_time")
     try:
-        if is_deletion_confirmed(user_message):
+        # Phase 0.2: 多候选删除场景必须用数字选择, 不接受模糊"嗯"一刀切.
+        # reschedule 仍走老逻辑 (改期是把所有 candidate 同时挪到 new_time, 语义
+        # 是"批量改时间"不是"挑选删哪条", 一刀切是合理的).
+        is_multi_delete = action == "delete" and len(candidates) > 1
+        chosen_indices: list[int] | None = None
+
+        if is_multi_delete:
+            chosen_indices = _parse_user_choice(user_message, len(candidates))
+            msg_clean = user_message.strip().lower()
+
+            # 否定 → 取消
+            if msg_clean in _CANCEL_DENY_KEYWORDS or any(
+                kw in user_message for kw in ("不是", "保留", "别动", "算了")
+            ):
+                await clear_pending_deletion(ctx.conversation_id)
+                reply = "好的，那就不删了，继续聊吧~"
+                ctx.last_short_circuit_reply = reply
+                for evt in await ctx.short_circuit_fn(
+                    reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+                    trace_id=ctx.tracer.safe_trace_id,
+                ):
+                    yield evt
+                ctx.tracer.close()
+                ctx.stopped = True
+                return
+
+            # 模糊 confirm ("嗯/好") 不接受 → 二次反问要求编号
+            if chosen_indices is None and is_deletion_confirmed(user_message):
+                preview_list = "\n".join(
+                    f"{i + 1}) {c.get('content', c.get('summary', ''))[:60]}"
+                    for i, c in enumerate(candidates[:5])
+                )
+                reply = (
+                    f"诶, 我需要你说清楚删哪一条 (避免误删):\n{preview_list}\n"
+                    "回数字 (如 '1' 或 '1和3'), '全部', 或 '算了'~"
+                )
+                # 不清 pending — 让用户继续在该 pending 状态回答
+                ctx.last_short_circuit_reply = reply
+                for evt in await ctx.short_circuit_fn(
+                    reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+                    trace_id=ctx.tracer.safe_trace_id,
+                ):
+                    yield evt
+                ctx.tracer.close()
+                ctx.stopped = True
+                return
+
+            # 没解析出 indices 也不是 deny/confirm → 答非所问, 清 pending fall-through
+            if chosen_indices is None:
+                await clear_pending_deletion(ctx.conversation_id)
+                logger.info(
+                    f"[PREFLIGHT] deletion: no choice from {user_message[:30]!r}; "
+                    "clearing pending, falling through to main reply"
+                )
+                return  # 不 stop, 让正常 reply
+
+        # 单候选 / reschedule / 多候选+已选号: 按 confirmed 路径
+        if chosen_indices is not None or is_deletion_confirmed(user_message):
             agent_name = ctx.agent.name if ctx.agent else "伙伴"
+            # 用户实际选的 candidates (单候选 / reschedule = 全部, 多候选 = 编号)
+            target_candidates = (
+                [candidates[i] for i in chosen_indices]
+                if chosen_indices is not None
+                else candidates
+            )
             preview = "\n".join(
                 f"- {c.get('content', c.get('summary', ''))[:60]}"
-                for c in candidates[:5]
+                for c in target_candidates[:5]
             ) or "(无)"
 
             if action == "reschedule" and new_time:
                 updated = await apply_reschedule(
-                    ctx.user_id, candidates, new_time, agent_id=ctx.agent_id,
+                    ctx.user_id, target_candidates, new_time, agent_id=ctx.agent_id,
                 )
                 await clear_pending_deletion(ctx.conversation_id)
                 reply = (
@@ -154,9 +307,16 @@ async def resolve_pending_deletion(
                            "n_updated": updated, "new_time": new_time},
                 )
             else:
-                deleted = await execute_confirmed_deletion(ctx.user_id, candidates)
+                # Phase 0.2: 传 conversation_id 让 execute_confirmed_deletion 存
+                # snapshot 到 Redis (1h 内可 undo).
+                deleted = await execute_confirmed_deletion(
+                    ctx.user_id, target_candidates,
+                    conversation_id=ctx.conversation_id,
+                )
                 await clear_pending_deletion(ctx.conversation_id)
-                reply = (
+                # reply 加 undo 提示, 让用户知道有撤回机会
+                undo_hint = " (1 小时内说'撤回刚才的删除' 还能恢复)"
+                base_reply = (
                     await deletion_done_reply(
                         message=user_message,
                         personality_brief=agent_name,
@@ -164,10 +324,11 @@ async def resolve_pending_deletion(
                     )
                     or await generate_deletion_reply(agent_name, "之前提到的", deleted)
                 )
+                reply = base_reply + undo_hint if deleted > 0 else base_reply
                 logger.info(
                     f"[PREFLIGHT] deletion confirmed n_deleted={deleted}",
                     extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "deletion",
-                           "n_deleted": deleted, "n_candidates": len(candidates)},
+                           "n_deleted": deleted, "n_candidates": len(target_candidates)},
                 )
         else:
             await clear_pending_deletion(ctx.conversation_id)
@@ -194,6 +355,169 @@ async def resolve_pending_deletion(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Phase 0.1: cancel_reminder 第二轮 — 用户回答"对/不是/数字/全部"
+# ═══════════════════════════════════════════════════════════════════
+
+
+_CANCEL_CONFIRM_KEYWORDS = {
+    "对", "对的", "是", "是的", "好", "好的", "嗯", "嗯嗯",
+    "确认", "撤", "撤掉", "撤了", "ok", "yes",
+}
+_CANCEL_DENY_KEYWORDS = {
+    "不是", "不", "不对", "算了", "不要", "不用", "保留",
+    "继续", "no", "别动",
+}
+
+
+def _parse_user_choice(message: str, n_candidates: int) -> list[int] | None:
+    """从用户回复解析数字选择: '1' / '1和3' / '1,2' / '全部' / 'all'.
+
+    返回 0-indexed 的下标列表, 或 None (没解析出数字).
+    """
+    import re
+    msg = message.strip().lower()
+    if msg in {"全部", "都", "全删", "all"}:
+        return list(range(n_candidates))
+    nums = re.findall(r"\d+", msg)
+    if not nums:
+        return None
+    indices = []
+    for s in nums:
+        try:
+            idx = int(s) - 1  # 1-indexed → 0-indexed
+            if 0 <= idx < n_candidates:
+                indices.append(idx)
+        except ValueError:
+            continue
+    return indices if indices else None
+
+
+async def _handle_pending_cancel_reminder(
+    user_message: str,
+    pending: dict,
+    ctx: PreflightCtx,
+) -> AsyncGenerator[dict, None]:
+    """cancel_reminder 第二轮: 用户回复"对"/"不是"/"数字"/"全部"/"算了"/answer-elsewhere.
+
+    分支:
+    - DENY ("不是/算了") → 清 pending + 友好放弃
+    - 单候选 + CONFIRM ("对/嗯") → 撤 + undo 提示
+    - 多候选 + 数字 ("1" / "1和3" / "全部") → 撤指定 + undo 提示
+    - 多候选 + CONFIRM 但无数字 → 二次反问 (避免一刀切全删)
+    - 答非所问 (没匹配上面任何) → 清 pending + 不阻塞主流程 (走正常 reply)
+    """
+    from app.services.chat.intent_handlers import _cancel_active_reminders
+    from app.services.memory.interaction.deletion import clear_pending_deletion
+    from app.services.reminder.scheduling import notify_reminder_changed
+
+    candidates = pending.get("candidates") or []
+    if not candidates:
+        await clear_pending_deletion(ctx.conversation_id)
+        return
+
+    msg_clean = user_message.strip().lower()
+
+    # 否定语义最高优先级 — 防误删
+    if msg_clean in _CANCEL_DENY_KEYWORDS or any(
+        kw in user_message for kw in ("不是", "保留", "别动", "算了")
+    ):
+        await clear_pending_deletion(ctx.conversation_id)
+        reply = "好嘞, 那就保留着, 该响的时候我喊你~"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        logger.info(
+            f"[CANCEL-REMINDER-PENDING] user denied ({user_message[:30]!r})",
+            extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "cancel_reminder",
+                   "outcome": "denied"},
+        )
+        return
+
+    # 数字选择 (多候选场景)
+    chosen_indices = _parse_user_choice(user_message, len(candidates))
+
+    # 单候选 + CONFIRM (无需选择).
+    # 长回复 (>6 字) 含 "对/撤/好" 容易假阳 (e.g. "对方有事别提了" 含"对"),
+    # 限定短回复 (≤6 字) 才走 loose match. 即使误判, 1h 内可 undo, 安全网兜底.
+    if len(candidates) == 1 and (
+        msg_clean in _CANCEL_CONFIRM_KEYWORDS
+        or (len(msg_clean) <= 6 and any(kw in user_message for kw in ("对", "撤", "好")))
+    ):
+        chosen_indices = [0]
+
+    # 多候选 + CONFIRM 但用户没指定数字 → 二次反问 (不一刀切)
+    if len(candidates) > 1 and chosen_indices is None and msg_clean in _CANCEL_CONFIRM_KEYWORDS:
+        reply = (
+            "嗯, 你想撤哪个呀? 回数字 (如 '1', '1和3'), "
+            "或者'全部', 或者'算了'~"
+        )
+        # 不清 pending — 让用户继续在该 pending 状态回答
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    # 答非所问 → 放弃 pending, 让主流程接管 (用户在聊别的)
+    if chosen_indices is None:
+        await clear_pending_deletion(ctx.conversation_id)
+        logger.info(
+            f"[CANCEL-REMINDER-PENDING] no choice parsed from {user_message[:30]!r}; "
+            "clearing pending, falling through to main reply"
+        )
+        return  # 不 stop, 让 user_message 走正常 orchestrator
+
+    # 执行 cancel
+    chosen_triggers = [candidates[i]["trigger_id"] for i in chosen_indices]
+    n = await _cancel_active_reminders(
+        user_id=ctx.user_id,
+        agent_id=ctx.agent_id,
+        trigger_ids=chosen_triggers,
+        user_message=user_message,
+        conversation_id=ctx.conversation_id,
+    )
+    await clear_pending_deletion(ctx.conversation_id)
+
+    if n > 0:
+        await notify_reminder_changed(ctx.conversation_id, kind="cancelled")
+        if n == 1:
+            chosen_summary = candidates[chosen_indices[0]]["summary"]
+            chosen_when = candidates[chosen_indices[0]]["when_text"]
+            reply = (
+                f"好嘞, 已经把'{chosen_summary}'({chosen_when})撤掉啦~ "
+                "1 小时内说'撤回'还能恢复."
+            )
+        else:
+            reply = f"好嘞, 已经把 {n} 个提醒都撤掉啦~ 1 小时内说'撤回'能全部恢复."
+    else:
+        reply = "诶, 帮你撤的时候出了点小问题, 你再说一遍?"
+
+    logger.info(
+        f"[CANCEL-REMINDER-PENDING] cancelled {n} of {len(candidates)} "
+        f"({user_message[:30]!r})",
+        extra={"event": EVT_PREFLIGHT_RESOLVED, "kind": "cancel_reminder",
+               "outcome": "executed", "n_cancelled": n},
+    )
+    ctx.last_short_circuit_reply = reply
+    for evt in await ctx.short_circuit_fn(
+        reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+        trace_id=ctx.tracer.safe_trace_id,
+    ):
+        yield evt
+    ctx.tracer.close()
+    ctx.stopped = True
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Round-3 工程扩展: RECORD_REQUEST 时间没说清, 第二轮反问后的 4 分支处理
 # ═══════════════════════════════════════════════════════════════════
 
@@ -213,14 +537,15 @@ async def _handle_pending_set_reminder(
     4. 完全没时间表达 (用户在聊别的) → 清 pending + 不阻塞主流程 (不 stop,
        让 user_message 走正常意图识别 + 回复)
     """
-    from app.services.chat.intent_handlers import _is_cancel_reminder
+    from app.services.chat.intent_handlers import classify_cancel_intent
     from app.services.reminder.scheduling import create_user_reminder
     from app.services.workspace.workspaces import get_active_workspace
 
     summary = pending.get("summary") or "(未指定事项)"
 
-    # 分支 1: 取消语义
-    if _is_cancel_reminder(user_message):
+    # 分支 1: 取消语义 — pending set_reminder 还没建 trigger, 用 high+low 都接受
+    # (避免用户回 "算了" 时被当成"答非所问")
+    if classify_cancel_intent(user_message) != "none":
         await clear_pending_deletion(ctx.conversation_id)
         reply = "嗯嗯, 那不记了, 想起来再说~"
         logger.info(f"[SET-REMINDER-PENDING] user cancelled: {user_message[:30]!r}")

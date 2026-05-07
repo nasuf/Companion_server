@@ -220,18 +220,45 @@ async def store_memory(
     # Store embedding. If this fails the memory row exists but would never
     # be retrievable by vector search — delete the orphan to keep state
     # consistent. The caller sees the error and can retry.
+    #
+    # Phase 0.4: store_embedding 自身已有 retry (3 attempts), 走到 except 表示
+    # PG 真实故障 (非 transient). Rollback 也 retry, rollback 失败就 emit
+    # EVT_MEMORY_ORPHAN 让 admin 可查 (背景 cure 脚本扫这个事件).
     try:
         await store_embedding(memory.id, embedding)
-    except Exception:
+    except Exception as embed_err:
         logger.error(
-            f"Embedding store failed for memory {memory.id}; rolling back memory row"
+            f"Embedding store failed for memory {memory.id} after retries; "
+            f"rolling back memory row. Error: {embed_err}"
         )
-        try:
-            await memory_repo.delete(memory.id, source=source)  # type: ignore[arg-type]
-        except Exception as cleanup_err:
-            logger.error(
-                f"Rollback failed for orphan memory {memory.id}: {cleanup_err}"
-            )
+        rollback_succeeded = False
+        for attempt in range(3):
+            try:
+                await memory_repo.delete(memory.id, source=source)  # type: ignore[arg-type]
+                rollback_succeeded = True
+                break
+            except Exception as cleanup_err:
+                if attempt == 2:
+                    # Rollback 终极失败 — orphan 留在 DB, 标 observability
+                    from app.observability.events import EVT_MEMORY_ORPHAN
+                    logger.error(
+                        f"[ORPHAN] memory {memory.id} rollback failed 3x: "
+                        f"{cleanup_err}; orphan row retained in DB",
+                        extra={
+                            "event": EVT_MEMORY_ORPHAN,
+                            "memory_id": memory.id,
+                            "source": source,
+                            "user_id": user_id,
+                            "rollback_error": str(cleanup_err)[:100],
+                            "embed_error": str(embed_err)[:100],
+                        },
+                    )
+                else:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(0.1 * (attempt + 1))
+        if not rollback_succeeded:
+            # changelog 也不写 (orphan 已记 EVT_MEMORY_ORPHAN, 不再额外污染 changelog)
+            pass
         raise
 
     # Changelog is advisory (portrait generation input); a failure here is

@@ -230,10 +230,23 @@ async def top_entities(
 ) -> list[dict]:
     """Top-N entities by mention count, optionally scoped to a category.
 
+    Phase 0.5: 严格 workspace_id 过滤. 历史 SQL 用 ($2 IS NULL OR workspace_id = $2)
+    模式, workspace_id=None 时跨 workspace 全查 — 用户产品 1:1 (1 user 1 agent
+    1 workspace), workspace_id 不该 None. None 可能因为 resolve 失败 / 数据漂移,
+    fail-loud (返空 + 告警) 比 silent cross-workspace 安全.
+
     When main_categories / sub_categories are given, we join through
     memory_mentions → memories and group by entity to only count mentions
     in matching memories. Otherwise we read the pre-aggregated counter.
     """
+    if not workspace_id:
+        logger.warning(
+            f"[ENTITY-SCOPE] top_entities called with workspace_id=None for "
+            f"user={user_id[:8]}; returning empty (防 cross-workspace leak). "
+            "调用方应先 resolve_workspace_id."
+        )
+        return []
+
     if main_categories or sub_categories:
         rows = await db.query_raw(
             """
@@ -244,7 +257,7 @@ async def top_entities(
             LEFT JOIN memories_user mu ON mu.id = mm.memory_id AND mm.memory_source = 'user'
             LEFT JOIN memories_ai   ma ON ma.id = mm.memory_id AND mm.memory_source = 'ai'
             WHERE e.user_id = $1
-              AND ($2::text  IS NULL OR e.workspace_id = $2)
+              AND e.workspace_id = $2
               AND ($3::text  IS NULL OR e.entity_type = $3)
               AND e.is_archived = false
               AND ($4::text[] IS NULL
@@ -269,7 +282,7 @@ async def top_entities(
             SELECT canonical_name AS name, entity_type AS type, role, mention_count
             FROM memory_entities
             WHERE user_id = $1
-              AND ($2::text IS NULL OR workspace_id = $2)
+              AND workspace_id = $2
               AND ($3::text IS NULL OR entity_type = $3)
               AND is_archived = false
               AND mention_count > 0
@@ -315,34 +328,42 @@ async def get_relationship_context(
         if e["type"] in {"person", "place", "org", "pet"}
     ][:10]
 
-    category_rows = await db.query_raw(
-        """
-        SELECT main_category, sub_category, COUNT(*) AS count FROM (
-            SELECT main_category, sub_category FROM memories_user
-            WHERE user_id = $1
-              AND ($2::text IS NULL OR workspace_id = $2)
-              AND is_archived = false
-              AND main_category IS NOT NULL AND sub_category IS NOT NULL
-              AND ($3::text[] IS NULL OR main_category = ANY($3))
-              AND ($4::text[] IS NULL OR sub_category = ANY($4))
-            UNION ALL
-            SELECT main_category, sub_category FROM memories_ai
-            WHERE user_id = $1
-              AND ($2::text IS NULL OR workspace_id = $2)
-              AND is_archived = false
-              AND main_category IS NOT NULL AND sub_category IS NOT NULL
-              AND ($3::text[] IS NULL OR main_category = ANY($3))
-              AND ($4::text[] IS NULL OR sub_category = ANY($4))
-        ) x
-        GROUP BY main_category, sub_category
-        ORDER BY count DESC
-        LIMIT 12
-        """,
-        user_id,
-        workspace_id,
-        main_categories,
-        sub_categories,
-    )
+    # Phase 0.5: 严格 workspace_id 过滤 (防 cross-workspace 数据漂移)
+    if not workspace_id:
+        logger.warning(
+            f"[ENTITY-SCOPE] get_relationship_context workspace_id=None for "
+            f"user={user_id[:8]}; categories empty (防 cross-workspace leak)"
+        )
+        category_rows: list = []
+    else:
+        category_rows = await db.query_raw(
+            """
+            SELECT main_category, sub_category, COUNT(*) AS count FROM (
+                SELECT main_category, sub_category FROM memories_user
+                WHERE user_id = $1
+                  AND workspace_id = $2
+                  AND is_archived = false
+                  AND main_category IS NOT NULL AND sub_category IS NOT NULL
+                  AND ($3::text[] IS NULL OR main_category = ANY($3))
+                  AND ($4::text[] IS NULL OR sub_category = ANY($4))
+                UNION ALL
+                SELECT main_category, sub_category FROM memories_ai
+                WHERE user_id = $1
+                  AND workspace_id = $2
+                  AND is_archived = false
+                  AND main_category IS NOT NULL AND sub_category IS NOT NULL
+                  AND ($3::text[] IS NULL OR main_category = ANY($3))
+                  AND ($4::text[] IS NULL OR sub_category = ANY($4))
+            ) x
+            GROUP BY main_category, sub_category
+            ORDER BY count DESC
+            LIMIT 12
+            """,
+            user_id,
+            workspace_id,
+            main_categories,
+            sub_categories,
+        )
 
     return {
         "topics": [t["name"] for t in top_topics],
@@ -364,13 +385,20 @@ async def get_user_preferences(
     """Return all preferences the user has expressed.
 
     Shape: [{"category": "food", "value": "ramen", "count": 3}, ...]
+    Phase 0.5: 严格 workspace_id (None 返空, 防 cross-workspace).
     """
+    if not workspace_id:
+        logger.warning(
+            f"[ENTITY-SCOPE] get_user_preferences workspace_id=None for "
+            f"user={user_id[:8]}; returning empty"
+        )
+        return []
     rows = await db.query_raw(
         """
         SELECT role AS category, canonical_name AS value, mention_count AS count
         FROM memory_entities
         WHERE user_id = $1
-          AND ($2::text IS NULL OR workspace_id = $2)
+          AND workspace_id = $2
           AND entity_type = 'preference'
           AND is_archived = false
         ORDER BY mention_count DESC
@@ -390,13 +418,22 @@ async def get_related_memories(
     entity_name: str,
     limit: int = 10,
 ) -> list[dict]:
-    """All memories mentioning an entity by its canonical name or any alias."""
+    """All memories mentioning an entity by its canonical name or any alias.
+
+    Phase 0.5: 严格 workspace_id (None 返空, 防 cross-workspace).
+    """
+    if not workspace_id:
+        logger.warning(
+            f"[ENTITY-SCOPE] get_related_memories workspace_id=None for "
+            f"user={user_id[:8]}; returning empty"
+        )
+        return []
     rows = await db.query_raw(
         """
         WITH matched_entities AS (
             SELECT id FROM memory_entities
             WHERE user_id = $1
-              AND ($2::text IS NULL OR workspace_id = $2)
+              AND workspace_id = $2
               AND ($3 = canonical_name OR $3 = ANY(aliases))
         )
         SELECT * FROM (

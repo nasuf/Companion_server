@@ -215,6 +215,94 @@ async def renew_periodic_trigger(
         return None
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Cancel undo state — Phase 0.1: 1h 内可恢复刚取消的 reminder
+# ═══════════════════════════════════════════════════════════════════
+
+_CANCEL_UNDO_PREFIX = "reminder:cancel_undo:"
+_CANCEL_UNDO_TTL = 3600  # 1 小时撤销窗口
+
+
+async def save_cancel_undo(
+    *,
+    conversation_id: str,
+    triggers: list[dict],
+) -> None:
+    """存"被取消的 trigger 快照", 1h 内可通过 reactivate_reminder_triggers 恢复.
+
+    triggers 每项: {trigger_id, trigger_time(iso), action_type, action_data, ai_agent_id}
+    用 Python list[dict] 序列化为 JSON, 避免存 Prisma model object.
+    """
+    import json
+    from datetime import datetime, UTC
+    from app.redis_client import get_redis
+
+    payload = {
+        "triggers": triggers,
+        "cancelled_at": datetime.now(UTC).isoformat(),
+    }
+    redis = await get_redis()
+    await redis.set(
+        f"{_CANCEL_UNDO_PREFIX}{conversation_id}",
+        json.dumps(payload, ensure_ascii=False),
+        ex=_CANCEL_UNDO_TTL,
+    )
+
+
+async def load_cancel_undo(conversation_id: str) -> dict | None:
+    """读 undo state. 返 {triggers: [...], cancelled_at} 或 None."""
+    import json
+    from app.redis_client import get_redis
+
+    redis = await get_redis()
+    raw = await redis.get(f"{_CANCEL_UNDO_PREFIX}{conversation_id}")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw if isinstance(raw, str) else raw.decode())
+        if isinstance(data, dict) and isinstance(data.get("triggers"), list):
+            return data
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return None
+
+
+async def clear_cancel_undo(conversation_id: str) -> None:
+    from app.redis_client import get_redis
+    redis = await get_redis()
+    await redis.delete(f"{_CANCEL_UNDO_PREFIX}{conversation_id}")
+
+
+async def reactivate_reminder_triggers(triggers: list[dict]) -> int:
+    """从 undo snapshot 恢复 trigger isActive=True. 返成功数.
+
+    每项 trigger 要含 trigger_id (必需). 仅更新 isActive 字段, 不动 triggerTime
+    (因为如果取消后已过 trigger_time, 即使恢复 trigger 也不会再触发了 — 这是
+    可接受的边缘 case, 真要恢复"过期 trigger" 应该走 reschedule 流程).
+
+    注意: where 加 isActive=False filter, 避免 undo 时把用户已手动 reactivate
+    的 trigger "再次激活" (no-op, 但避免日志误导).
+    """
+    if not triggers:
+        return 0
+    trigger_ids = [t.get("trigger_id") for t in triggers if t.get("trigger_id")]
+    if not trigger_ids:
+        return 0
+    try:
+        result = await db.timetrigger.update_many(
+            where={"id": {"in": trigger_ids}, "isActive": False},
+            data={"isActive": True},
+        )
+        n = int(result) if result is not None else len(trigger_ids)
+        logger.info(
+            f"[REMINDER] reactivated {n}/{len(trigger_ids)} trigger(s) from undo"
+        )
+        return n
+    except Exception as e:
+        logger.warning(f"[REMINDER] reactivate failed: {e}")
+        return 0
+
+
 async def deactivate_reminder_triggers(
     *,
     user_id: str,

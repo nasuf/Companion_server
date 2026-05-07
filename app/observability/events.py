@@ -45,6 +45,10 @@ EVT_MEMORY_DELETED = "memory.deleted"
 EVT_MEMORY_DELETION_PENDING = "memory.deletion_pending"
 EVT_MEMORY_EXTRACTED = "memory.extracted"  # LLM 抽出 N 条记忆
 EVT_MEMORY_L2_ADJUSTED = "memory.l2_adjusted"  # cron 完成统计
+# Phase 0.4: embedding 链路可观测性 (区分 transient retry vs 终极失败 vs 孤儿 row)
+EVT_EMBEDDING_RETRY = "memory.embedding_retry"  # 单次重试 (transient Ollama/PG hiccup)
+EVT_EMBEDDING_FAIL = "memory.embedding_fail"  # 重试用尽, 用户记忆丢失
+EVT_MEMORY_ORPHAN = "memory.orphan_row"  # memory 已写但 embedding 失败 + rollback 也失败
 
 # Boundary
 EVT_BOUNDARY_PATIENCE = "boundary.patience_delta"

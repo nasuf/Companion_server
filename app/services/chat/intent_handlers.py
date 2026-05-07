@@ -17,6 +17,7 @@ from typing import Any, Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.services.chat.tracing import LangSmithTracer
 
+from app.db import db
 from app.observability.events import EVT_INTENT_SHORT_CIRCUIT
 from app.services.chat.intent_replies import (
     apology_reply,
@@ -614,94 +615,418 @@ async def _direct_create_reminder(
     return ("scheduled", when_text)
 
 
-# 取消提醒的口语关键词. 用户说"算了别提醒了"/"不用提醒了"/"取消那个提醒" 时
-# 走取消分支, 直接 deactivate 该用户最近 active reminder + 简短确认.
-# 不依赖 LLM (这种短句关键词足够明确), 跟 RECORD_REQUEST 主路径互斥.
+# 取消提醒的口语关键词分级 (Phase 0.1 重构):
 #
-# 直接命中: 完整短语
-_CANCEL_DIRECT_KEYWORDS = (
-    "算了", "别提醒", "不用提醒", "不用了",
-    "不记了", "别记了", "我吃过了", "我做过了", "已经做了",
-    "已经吃了", "已经喝了",
+# 历史 bug: 单一 _CANCEL_DIRECT_KEYWORDS 含 "我吃过了/已经吃了" 等口语短语,
+# 用户在普通聊天说 "我吃过午饭了" 命中 → 一刀切 deactivate 全部 active reminder.
+# 例如 user 设了 "明天 8 点开会提醒", 之后聊"我吃过午饭了" → 开会提醒被秒删.
+#
+# 修复策略: 把关键词拆 high/low confidence + 引入 confirmation 中间态:
+#
+#   HIGH (含"提醒/记"语义, 直接动作可接受):
+#     1 reminder  → 立即撤 + 撤销窗口 (1h 内说"撤回"恢复)
+#     2+ reminders → 列出让用户选 (不假设 user 想全撤)
+#     0 reminders  → 友好告知 "我没在帮你记什么提醒哦"
+#
+#   LOW (歧义口语, 必须确认):
+#     1 reminder + 内容相关 → ask confirmation
+#     其他 LOW 命中           → 完全忽略 (走正常 reply 流程, 防止打扰)
+#
+# 关键洞察: 含"提醒/记" 字的关键词 = 用户主动 mention reminder = 高置信度;
+# 不含的口语 ("算了/我吃过了") 在普通对话中假阳率高 = 必须 confirm.
+
+_HIGH_CONFIDENCE_CANCEL_KEYWORDS = (
+    # 明确包含 "提醒"/"记" 的取消短语
+    "别提醒", "不用提醒", "取消提醒", "撤销提醒", "撤回提醒",
+    "不记了", "别记了", "不用记", "别再记",
 )
-# 共现命中: 任一负向词 + "提醒"/"记" 同时出现 (覆盖"取消那个提醒"/"删掉那个提醒"等)
-_CANCEL_NEG_TOKENS = ("取消", "删掉", "删除", "撤销", "不要")
+
+_LOW_CONFIDENCE_CANCEL_KEYWORDS = (
+    # 歧义口语 - 在普通对话中也常见, 必须 confirm
+    "算了", "不用了",
+    "我吃过了", "我做过了", "我喝过了",
+    "已经做了", "已经吃了", "已经喝了", "已经办了",
+)
+
+# 共现命中视为 HIGH: 任一负向词 + "提醒"/"记" 同时出现
+# (覆盖 "取消那个提醒"/"删掉那个提醒"/"不要再记这个" 等)
+_CANCEL_NEG_TOKENS = ("取消", "删掉", "删除", "撤销", "不要", "别")
 
 
-def _is_cancel_reminder(message: str) -> bool:
-    """口语 + 关键词级别的取消语义判定 (不调 LLM, ~0ms).
+# 撤回上一次取消的关键词 (1h 内有效)
+_UNDO_CANCEL_KEYWORDS = (
+    "撤回", "撤销", "恢复", "复原", "我反悔", "刚才取消错了", "撤回刚才",
+    "恢复刚才", "把刚才的", "撤回提醒", "恢复提醒",
+)
+
+
+def classify_cancel_intent(message: str) -> str:
+    """口语取消语义分级判定 (不调 LLM, ~0ms).
+
+    返回:
+    - "high": 用户明确表达取消 (含"提醒/记" 关键词)
+    - "low":  歧义口语, 可能是取消也可能是日常 (含"算了/我吃过了" 等)
+    - "none": 没有任何取消信号
 
     仅 RECORD_REQUEST intent 已确认时调用; 不会跟正常聊天里的"算了"误匹配.
     """
     msg = message.strip()
-    if any(kw in msg for kw in _CANCEL_DIRECT_KEYWORDS):
-        return True
-    # 共现规则: "取消X提醒" / "删掉提醒" 等 (X 可以是"那个"/"这个"/空)
+
+    # 高置信度: 明确 mention "提醒/记"
+    if any(kw in msg for kw in _HIGH_CONFIDENCE_CANCEL_KEYWORDS):
+        return "high"
+    # 共现规则也算 HIGH
     if any(neg in msg for neg in _CANCEL_NEG_TOKENS) and ("提醒" in msg or "记" in msg):
-        return True
+        return "high"
+    # 低置信度: 仅口语命中
+    if any(kw in msg for kw in _LOW_CONFIDENCE_CANCEL_KEYWORDS):
+        return "low"
+    return "none"
+
+
+# 向后兼容 alias — preflight._handle_pending_set_reminder 仍 import 这个名字.
+# 仅判 "明确取消" 用; pending set_reminder 反问场景下用户回复歧义不会误删 trigger
+# (因为 pending 还没建 trigger). 故只看 high.
+def _is_cancel_reminder(message: str) -> bool:
+    return classify_cancel_intent(message) == "high"
+
+
+def _is_undo_cancel(message: str) -> bool:
+    """识别 "撤回刚才的取消" 语义."""
+    msg = message.strip()
+    return any(kw in msg for kw in _UNDO_CANCEL_KEYWORDS)
+
+
+def _topic_overlap(user_message: str, reminder_summary: str) -> bool:
+    """LOW confidence 命中时, 用户消息跟某 reminder 内容相关吗?
+
+    简单 substring 匹配 (中文不分词, 用 ≥2 字 substring 求交集). 避免 LLM 调用.
+
+    例:
+      msg="我吃过药了" vs summary="提醒我吃药" → 共现 "吃药" → True
+      msg="我吃过午饭了" vs summary="提醒我吃药" → 仅 "吃" 1 字不算 → False
+    """
+    msg_clean = user_message.strip()
+    sum_clean = reminder_summary.strip()
+    if not msg_clean or not sum_clean:
+        return False
+
+    # 提取消息中所有 ≥2 字 substring
+    msg_bigrams = {msg_clean[i:i + 2] for i in range(len(msg_clean) - 1)}
+    # 滤掉极常见无信息 bigram
+    stop_bigrams = {"我的", "你的", "了的", "的我", "的你", "你了", "我了"}
+    msg_bigrams -= stop_bigrams
+
+    for bg in msg_bigrams:
+        if bg in sum_clean:
+            return True
     return False
+
+
+async def _list_active_reminders_with_meta(
+    *, user_id: str, agent_id: str | None,
+) -> list[dict]:
+    """查 (user, agent) 的所有 active reminder, 返回带 trigger_id/summary/when_text/memory_id 的 list.
+
+    返给 ask confirmation 用. 按 triggerTime 升序 (最早响的在前).
+    """
+    from app.services.reminder.scheduling import (
+        find_active_reminder_triggers, format_when_text,
+    )
+    triggers = await find_active_reminder_triggers(
+        user_id=user_id, agent_id=agent_id,
+    )
+    items = []
+    for t in triggers:
+        action = t.actionData or {}
+        items.append({
+            "trigger_id": t.id,
+            "summary": (action.get("summary") or "")[:80],
+            "when_text": format_when_text(t.triggerTime),
+            "trigger_time": t.triggerTime.isoformat() if t.triggerTime else None,
+            "memory_id": action.get("memory_id"),
+            "recurrence": action.get("recurrence", "once"),
+            "memory_side": action.get("memory_side", "user"),
+            "action_data": dict(action),  # 完整保留, undo 时复用
+        })
+    items.sort(key=lambda x: x.get("trigger_time") or "")
+    return items
 
 
 async def _cancel_active_reminders(
     *, user_id: str, agent_id: str | None = None,
+    trigger_ids: list[str] | None = None,
+    user_message: str = "",
+    conversation_id: str | None = None,
 ) -> int:
-    """deactivate 该 (user, agent) 的所有 active reminder timetrigger. 返回处理条数.
+    """deactivate 指定 trigger (或全部) reminder + 写 audit log + 存 undo state.
 
-    Round-2 review bug fix: 必须按 agent_id 过滤. 不传则跨 agent 误删 (用户在
-    agent A 上说"算了别提醒"会把 agent B 的所有 active reminder 一起 deactivate).
-    handler 拿 ctx.agent_id 传入.
+    参数:
+    - agent_id: 必传 (用户路径), 不传跨 agent 误删
+    - trigger_ids: 指定 ID 列表; None 表示全部 active
+    - user_message: 触发取消的用户原话 (audit log 用)
+    - conversation_id: 用于存 undo state (1h 内可恢复)
 
-    用户说"算了别提醒了"时调用. 不用 LLM 判别要取消哪一个 — 用户当前对话
-    的语境通常只关心最近一次刚设的, 一刀切 deactivate 所有 active 是最朴素
-    可靠的选择.
+    返回 deactivate 条数. 同步写 changelog 和 Redis undo state.
     """
-    from app.services.reminder.scheduling import deactivate_reminder_triggers
-    return await deactivate_reminder_triggers(
+    from app.services.reminder.scheduling import (
+        deactivate_reminder_triggers, save_cancel_undo,
+        find_active_reminder_triggers,
+    )
+    from app.services.memory.storage.persistence import log_memory_changelog
+
+    # 取消前先抓出待 deactivate 的 trigger 完整信息 (audit + undo 用)
+    all_active = await find_active_reminder_triggers(
         user_id=user_id, agent_id=agent_id,
     )
+    if trigger_ids is not None:
+        target = [t for t in all_active if t.id in set(trigger_ids)]
+    else:
+        target = all_active
+
+    if not target:
+        return 0
+
+    # 真删 (其实是 isActive=False soft delete)
+    if trigger_ids is not None:
+        # 只删指定的: 用 update_many with id in [...]
+        try:
+            result = await db.timetrigger.update_many(
+                where={"id": {"in": [t.id for t in target]}, "isActive": True},
+                data={"isActive": False},
+            )
+            n = int(result) if result is not None else len(target)
+        except Exception as e:
+            logger.warning(f"[REMINDER-CANCEL] selective deactivate failed: {e}")
+            return 0
+    else:
+        # 全部: 复用现有 helper
+        n = await deactivate_reminder_triggers(
+            user_id=user_id, agent_id=agent_id,
+        )
+
+    # audit log: 每条 trigger 一条 changelog
+    for t in target:
+        memory_id = (t.actionData or {}).get("memory_id")
+        if not memory_id:
+            continue
+        try:
+            audit_value = (
+                f"trigger={t.id} cancelled by user; "
+                f"original_msg={user_message[:60]!r}"
+            )
+            await log_memory_changelog(
+                user_id, memory_id, "reminder_cancelled_by_user",
+                new_value=audit_value,
+            )
+        except Exception:
+            pass  # changelog 失败不阻塞主流程
+
+    # undo state: 1 小时内可恢复
+    if conversation_id and target:
+        try:
+            await save_cancel_undo(
+                conversation_id=conversation_id,
+                triggers=[
+                    {
+                        "trigger_id": t.id,
+                        "trigger_time": (
+                            t.triggerTime.isoformat() if t.triggerTime else None
+                        ),
+                        "action_type": t.actionType,
+                        "action_data": dict(t.actionData or {}),
+                        "ai_agent_id": t.aiAgentId,
+                    }
+                    for t in target
+                ],
+            )
+        except Exception as e:
+            logger.warning(f"[REMINDER-CANCEL] save undo state failed: {e}")
+
+    logger.info(
+        f"[REMINDER-CANCEL] deactivated {n} trigger(s) for user={user_id[:8]} "
+        f"agent={(agent_id or 'all')[:8]}; user_msg={user_message[:30]!r}; "
+        f"undo window 1h"
+    )
+    return n
+
+
+async def _undo_recent_cancel(*, conversation_id: str) -> int:
+    """撤回最近 1h 内的 cancel: 重新激活 trigger + 清 undo state.
+
+    返回恢复条数. 0 表示没 undo state 可恢复.
+    """
+    from app.services.reminder.scheduling import (
+        load_cancel_undo, clear_cancel_undo, reactivate_reminder_triggers,
+    )
+    undo = await load_cancel_undo(conversation_id)
+    if not undo:
+        return 0
+    triggers = undo.get("triggers") or []
+    if not triggers:
+        return 0
+    n = await reactivate_reminder_triggers(triggers)
+    if n > 0:
+        await clear_cancel_undo(conversation_id)
+    logger.info(
+        f"[REMINDER-UNDO] reactivated {n}/{len(triggers)} trigger(s) "
+        f"for conversation={conversation_id[:8]}"
+    )
+    return n
+
+
+def _format_cancel_candidate_list(items: list[dict]) -> str:
+    """渲染 reminder 列表给用户选 (1-indexed)."""
+    return "\n".join(
+        f"{i + 1}) {item['summary']} ({item['when_text']})"
+        for i, item in enumerate(items)
+    )
+
+
+async def _handle_cancel_intent(
+    *,
+    user_message: str,
+    cancel_level: str,
+    ctx: ShortCircuitCtx,
+) -> tuple[bool, AsyncGenerator[dict, None] | None]:
+    """取消语义分级处理.
+
+    返回 (handled, gen):
+    - handled=True: 已生成 reply (短路完成或 ask confirmation)
+    - handled=False: 不该走取消流程 (LOW + 无相关 reminder), 让外层 fall-through
+
+    Cancel level:
+    - high: 含 "提醒/记" 明确语义
+    - low:  仅口语命中 ("算了/我吃过了"), 容易假阳
+
+    Decision matrix:
+                     0 reminder    1 reminder    2+ reminders
+    HIGH 关键词       友好告知       直接撤+undo    列出让用户选
+    LOW 关键词        ❌不打扰        内容相关才ask  ❌不打扰
+    """
+    # save_pending_action 已在模块顶部 import (跟 deletion handler 共享 pending Redis key)
+    from app.services.reminder.scheduling import notify_reminder_changed
+
+    items = await _list_active_reminders_with_meta(
+        user_id=ctx.user_id, agent_id=ctx.agent_id,
+    )
+
+    # === LOW + 无 reminder OR 多 reminder → 不打扰用户 ===
+    if cancel_level == "low" and len(items) != 1:
+        logger.info(
+            f"[RECORD-CANCEL] LOW confidence, {len(items)} reminders, "
+            f"NOT entering cancel flow ({user_message[:30]!r})"
+        )
+        return False, None
+
+    # === LOW + 1 reminder, 但内容不相关 → 不打扰 ===
+    if cancel_level == "low" and len(items) == 1:
+        if not _topic_overlap(user_message, items[0]["summary"]):
+            logger.info(
+                f"[RECORD-CANCEL] LOW confidence + 1 reminder but topic mismatch, "
+                f"NOT entering cancel flow ({user_message[:30]!r} vs "
+                f"{items[0]['summary'][:30]!r})"
+            )
+            return False, None
+
+    # === 0 reminder (HIGH only, LOW already returned above) ===
+    if not items:
+        # HIGH + 0 reminder: 友好告知
+        ctx.consumed_full_message = True
+        return True, ctx.finalize(
+            "嗯嗯, 我没在帮你记什么提醒哦, 不用担心~",
+            kind="record_request_cancel_no_active",
+        )
+
+    # === HIGH + 1 reminder → 直接撤 + undo 提示 (用户体感最自然) ===
+    if cancel_level == "high" and len(items) == 1:
+        only = items[0]
+        n = await _cancel_active_reminders(
+            user_id=ctx.user_id, agent_id=ctx.agent_id,
+            trigger_ids=[only["trigger_id"]],
+            user_message=user_message,
+            conversation_id=ctx.conversation_id,
+        )
+        if n > 0:
+            await notify_reminder_changed(ctx.conversation_id, kind="cancelled")
+            reply = (
+                f"好嘞, 已经把'{only['summary']}'({only['when_text']})撤掉啦~ "
+                f"如果反悔了, 1 小时内跟我说'撤回'就能恢复."
+            )
+        else:
+            reply = "嗯, 帮你撤的时候出了点小问题, 你再说一遍?"
+        ctx.consumed_full_message = True
+        return True, ctx.finalize(reply, kind="record_request_cancel_single")
+
+    # === LOW + 1 reminder + 相关 → ask confirmation (低置信度必须确认) ===
+    if cancel_level == "low" and len(items) == 1:
+        only = items[0]
+        await save_pending_action(
+            ctx.conversation_id,
+            action="cancel_reminder",
+            candidates=[only],
+            summary=user_message[:200],  # 原话存 audit 用
+        )
+        reply = (
+            f"诶, 你是想让我取消'{only['summary']}'({only['when_text']})吗? "
+            "回'对'就撤掉, 回'不是'就保留~"
+        )
+        ctx.consumed_full_message = True
+        return True, ctx.finalize(reply, kind="record_request_cancel_ask_low")
+
+    # === HIGH + 2+ reminders → 列出让用户选 ===
+    candidate_list = _format_cancel_candidate_list(items)
+    await save_pending_action(
+        ctx.conversation_id,
+        action="cancel_reminder",
+        candidates=items,
+        summary=user_message[:200],
+    )
+    reply = (
+        "嗯, 你想取消哪个? 我现在帮你记着这些:\n"
+        f"{candidate_list}\n"
+        "回数字 (比如 '1' 或 '1和3'), 或者'全部', 或者'算了'~"
+    )
+    ctx.consumed_full_message = True
+    return True, ctx.finalize(reply, kind="record_request_cancel_ask_multi")
 
 
 async def handle_record_request(
     user_message: str,
     ctx: ShortCircuitCtx,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
-    """RECORD_REQUEST 短路: 用户请求 AI 记一件事 / 设提醒 / 取消提醒.
+    """RECORD_REQUEST 短路: 用户请求 AI 记一件事 / 设提醒 / 取消提醒 / 撤回取消.
 
-    分支:
-    - 取消语义 (含"算了/别提醒/我吃过了" 等) → deactivate user 所有 active
-      reminder + 短确认. 跳过 LLM, 体感: "好嘞, 那就不提醒了~"
+    分支 (Phase 0.1 重构):
+    - 撤回语义 ("撤回/恢复刚才的取消") → 1h 内可恢复; 复活 trigger
+    - 取消语义 → 分级处理:
+        HIGH 关键词 + 1 reminder  → 直接撤 + 撤销窗口提示
+        HIGH 关键词 + 2+ reminder → 列出让用户选 (save pending)
+        HIGH 关键词 + 0 reminder  → 友好告知
+        LOW  关键词 + 1 内容相关  → ask confirmation (save pending)
+        其他 LOW 命中             → 走正常 reply (不打扰)
     - 设置语义 (有时间) → 落库 + confirm reply ("好嘞, 8 点叫你~")
-    - 设置语义 (无时间) → save_pending + 反问 ("下周哪天呀?"); 第二轮由
-      preflight.resolve_pending_set_reminder 拿到时间后落库. Round-3 工程扩展,
-      之前的 fuzzy fallback 是 silent correctness bug (假装记下但没建 trigger).
+    - 设置语义 (无时间) → save_pending + 反问 ("下周哪天呀?")
 
-    背景: 生产观察到 LLM 把"算了别提醒了, 我吃过了"硬塞到 RECORD_REQUEST + 拆出
-    "计划查询" sub-intent → AI 回了一堆离题的话. 加取消分支让取消语义有正确
-    路径处理.
+    历史背景: 单一 _is_cancel_reminder 关键词命中即一刀切 deactivate 全部
+    active reminder, 用户在普通对话说"我吃过午饭了"也会误删开会提醒. 重构
+    为分级 + confirmation + undo, 防止 silent 数据丢失.
     """
     try:
-        # 取消语义优先 — 即使 LLM intent 输出 "记录请求", 关键词命中也走取消.
-        if _is_cancel_reminder(user_message) and ctx.user_id:
-            # 必须传 agent_id, 否则跨 agent 误删 (round-2 review bug fix)
-            n = await _cancel_active_reminders(
-                user_id=ctx.user_id, agent_id=ctx.agent_id,
+        # 撤回语义已统一到 preflight.resolve_recent_undo (在主流程之前运行,
+        # 同时处理 cancel_reminder 和 delete undo). 不在这里重复处理.
+
+        # 取消语义分级判定
+        cancel_level = classify_cancel_intent(user_message)
+        if cancel_level != "none" and ctx.user_id:
+            handled, gen = await _handle_cancel_intent(
+                user_message=user_message,
+                cancel_level=cancel_level,
+                ctx=ctx,
             )
-            if n > 0:
-                reply = "好嘞, 那就不提醒了, 已经帮你撤掉啦~"
-            else:
-                # 没 active reminder 可取消 — 用户可能误说或上下文断了
-                reply = "嗯嗯, 我没在帮你记什么提醒哦, 不用担心~"
-            logger.info(
-                f"[RECORD-CANCEL] user said cancel ({user_message[:30]!r}); "
-                f"deactivated {n} active reminder(s)"
-            )
-            if n > 0:
-                from app.services.reminder.scheduling import notify_reminder_changed
-                await notify_reminder_changed(ctx.conversation_id, kind="cancelled")
-            # 取消是整句消化的语义 — 不让 sub-intent 处理用户残句 ("别提醒了"
-            # 不该再被当成"计划查询"询问 AI 日程, 反过来给离题回复).
-            ctx.consumed_full_message = True
-            return True, ctx.finalize(reply, kind="record_request_cancel")
+            if handled:
+                return True, gen
+            # 未 handle (LOW + 内容无关 / 0 reminder + LOW) → fall-through 到设置流程
 
         # 设置/新增提醒走 _direct_create_reminder. 三态返回:
         status, when_text = await _direct_create_reminder(

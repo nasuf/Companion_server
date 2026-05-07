@@ -448,3 +448,190 @@ async def test_save_load_pending_set_reminder_roundtrip():
     }, f"roundtrip 失败; loaded={loaded}"
     # 校验 redis 实际存的 JSON 也保留 summary
     assert "summary" in json.loads(captured["raw"])
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 0.2: 删除多候选必须编号选择 + undo snapshot
+# ═══════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_delete_multi_candidate_requires_numbered_choice():
+    """Phase 0.2: 多候选删除场景, 用户回 '嗯' (模糊 confirm) → 二次反问要编号,
+    防止一刀切删全部 (历史 bug: '忘了我喜欢咖啡' 召回 [咖啡, 茶, 热饮], 用户 '嗯'
+    → 全删)."""
+    from app.services.chat.preflight import resolve_pending_deletion
+
+    ctx = _make_preflight_ctx()
+    candidates = [
+        {"id": f"m-{i}", "content": f"喜欢 {kw}", "summary": f"喜欢 {kw}", "source": "user"}
+        for i, kw in enumerate(["咖啡", "茶", "热饮"])
+    ]
+
+    async def _load(*_a, **_kw):
+        return {"action": "delete", "candidates": candidates,
+                "new_time": None, "summary": None}
+
+    deletion_called = []
+    async def _execute(*args, **kw):
+        deletion_called.append((args, kw))
+        return 3
+
+    cleared = []
+    async def _clear(conv_id):
+        cleared.append(conv_id)
+
+    with (
+        patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
+        patch("app.services.chat.preflight.execute_confirmed_deletion",
+              side_effect=_execute),
+        patch("app.services.chat.preflight.clear_pending_deletion", side_effect=_clear),
+    ):
+        events = []
+        async for evt in resolve_pending_deletion("嗯", ctx):  # 模糊 confirm
+            events.append(evt)
+
+    # 关键: 没真删 (二次反问中)
+    assert deletion_called == [], (
+        f"模糊 confirm 不能直接删多候选; got {deletion_called}"
+    )
+    # pending 没被清 (用户还在选阶段)
+    assert cleared == [], "pending 不该清 — 让用户继续在状态里回答"
+    # 反问回复
+    assert ctx.stopped is True
+    assert "数字" in (ctx.last_short_circuit_reply or "") or \
+           "编号" in (ctx.last_short_circuit_reply or "")
+
+
+@pytest.mark.asyncio
+async def test_delete_multi_candidate_numbered_selection():
+    """Phase 0.2: 用户回数字 '1和3' → 仅删第 1 和第 3 个 candidate."""
+    from app.services.chat.preflight import resolve_pending_deletion
+
+    ctx = _make_preflight_ctx()
+    candidates = [
+        {"id": f"m-{i}", "content": f"喜欢 {kw}", "summary": f"喜欢 {kw}", "source": "user"}
+        for i, kw in enumerate(["咖啡", "茶", "热饮"])
+    ]
+
+    async def _load(*_a, **_kw):
+        return {"action": "delete", "candidates": candidates,
+                "new_time": None, "summary": None}
+
+    target_seen = []
+    async def _execute(user_id, target_candidates, *, conversation_id=None):
+        target_seen.extend(c["id"] for c in target_candidates)
+        return len(target_candidates)
+
+    with (
+        patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
+        patch("app.services.chat.preflight.execute_confirmed_deletion",
+              side_effect=_execute),
+        patch("app.services.chat.preflight.clear_pending_deletion",
+              new_callable=AsyncMock),
+        patch("app.services.chat.preflight.deletion_done_reply",
+              new_callable=AsyncMock, return_value="好的~"),
+    ):
+        async for _ in resolve_pending_deletion("1 和 3", ctx):
+            pass
+
+    # 仅删 index 0 和 2 (1-indexed → 0-indexed)
+    assert target_seen == ["m-0", "m-2"], (
+        f"应该删第 1 (m-0) 和第 3 (m-2); got {target_seen}"
+    )
+    assert ctx.stopped is True
+    # 回复加了 undo 提示
+    assert "撤回" in (ctx.last_short_circuit_reply or "")
+
+
+@pytest.mark.asyncio
+async def test_delete_single_candidate_emoji_confirm_works():
+    """单候选场景下 '嗯' 仍能 confirm (不要求编号, 只 1 个明确无歧义)."""
+    from app.services.chat.preflight import resolve_pending_deletion
+
+    ctx = _make_preflight_ctx()
+    candidates = [
+        {"id": "m-1", "content": "喜欢咖啡", "summary": "喜欢咖啡", "source": "user"},
+    ]
+
+    async def _load(*_a, **_kw):
+        return {"action": "delete", "candidates": candidates,
+                "new_time": None, "summary": None}
+
+    target_seen = []
+    async def _execute(user_id, target_candidates, *, conversation_id=None):
+        target_seen.extend(c["id"] for c in target_candidates)
+        return 1
+
+    with (
+        patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
+        patch("app.services.chat.preflight.execute_confirmed_deletion",
+              side_effect=_execute),
+        patch("app.services.chat.preflight.clear_pending_deletion",
+              new_callable=AsyncMock),
+        patch("app.services.chat.preflight.deletion_done_reply",
+              new_callable=AsyncMock, return_value="好的~"),
+    ):
+        async for _ in resolve_pending_deletion("嗯", ctx):
+            pass
+
+    assert target_seen == ["m-1"]
+    assert ctx.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_delete_undo_roundtrip():
+    """Phase 0.2: 删除后 1h 内说"撤回" → restore 全部 snapshot."""
+    from app.services.chat.preflight import resolve_recent_undo
+
+    ctx = _make_preflight_ctx()
+
+    snapshots = [
+        {"id": "old-1", "userId": "u1", "workspaceId": "w1", "source": "user",
+         "content": "我喜欢咖啡", "summary": "喜欢咖啡", "type": "preference",
+         "level": 1, "importance": 0.9, "isArchived": False},
+        {"id": "old-2", "userId": "u1", "workspaceId": "w1", "source": "user",
+         "content": "我喜欢热饮", "summary": "喜欢热饮", "type": "preference",
+         "level": 2, "importance": 0.6, "isArchived": False},
+    ]
+
+    restore_called = []
+    async def _restore(snaps):
+        restore_called.extend(snaps)
+        return len(snaps)
+
+    with (
+        patch(
+            "app.services.memory.interaction.deletion.load_delete_undo",
+            new_callable=AsyncMock,
+            return_value={"snapshots": snapshots, "deleted_at": "2026-05-07T10:00:00"},
+        ),
+        patch(
+            "app.services.memory.interaction.deletion.clear_delete_undo",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.memory.interaction.deletion.restore_deleted_memories",
+            side_effect=_restore,
+        ),
+    ):
+        async for _ in resolve_recent_undo("撤回刚才的删除", ctx):
+            pass
+
+    assert ctx.stopped is True
+    assert len(restore_called) == 2
+    assert "已经把刚才删除的 2 条记忆恢复" in (ctx.last_short_circuit_reply or "")
+
+
+@pytest.mark.asyncio
+async def test_find_matching_memories_default_threshold_tightened():
+    """Phase 0.2: 默认阈值从 0.7 提到 0.78, 防止 '忘了我喜欢咖啡' 召回 '喜欢茶' 等
+    话题相关但非同一事实的条目."""
+    import inspect
+    from app.services.memory.interaction.deletion import find_matching_memories
+
+    sig = inspect.signature(find_matching_memories)
+    threshold_default = sig.parameters["threshold"].default
+    assert threshold_default >= 0.78, (
+        f"删除候选阈值必须 ≥ 0.78 (历史 0.7 太松导致一刀切误删); got {threshold_default}"
+    )
