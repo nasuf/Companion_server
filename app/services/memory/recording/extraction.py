@@ -15,7 +15,6 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.observability.events import EVT_LLM_FAIL, EVT_MEMORY_EXTRACTED
 from app.services.llm.models import get_chat_model, invoke_json
-from app.services.llm.resilience import get_profile
 from app.services.memory.taxonomy import TAXONOMY_MATRIX
 from app.services.prompting.store import get_prompt_text
 
@@ -77,7 +76,12 @@ async def extract_memories(
         # chat_extract (45s 总 timeout). 解决用户一次发"画像 dump" 20+ 条事实
         # 时 LLM 输出 1500-2500 tokens 接近 chat_extract 上限 → wait_for cancel
         # → langsmith pending → silent failure 全丢. 生产 trace 019dd808.
-        result = await invoke_json(model, prompt, profile=get_profile("memory_extract"))
+        #
+        # ⚠️ profile 必须传字符串 NAME, 不要传 get_profile(...) 拿到的 CallProfile
+        # 对象 — invoke_json 内部 `_provider_and_profile` 自己会再调 get_profile,
+        # 误传对象会变成 get_profile(get_profile("...")) → KeyError(CallProfile(...))
+        # → except 吃掉返空 dict → DB 0 条. 生产 trace 019e0004 (2026-05-07).
+        result = await invoke_json(model, prompt, profile="memory_extract")
         # Validate structure
         result.setdefault("memories", [])
         result.setdefault("entities", [])

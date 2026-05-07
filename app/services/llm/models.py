@@ -309,22 +309,34 @@ def _extract_json(text: str) -> Any:
 
 
 def _provider_and_profile(
-    model: BaseChatModel, override: str | None,
+    model: BaseChatModel, override: "str | CallProfile | None",
 ):
     """自动从 model 识别 provider 和默认 profile. override 可强制指定 profile.
 
     默认按"是否是 get_chat_model() 返回的 lru_cache 单例"区分: chat_model →
     chat_extract (45s, 1 retry); utility_model 或自建 model → utility_fast
     (8s, 2 retry). 调用方可传 profile="background" 等 override.
+
+    override 接受两种形式 (防 foot-gun):
+    - str: profile 名字, 内部 get_profile 查 registry (主流用法)
+    - CallProfile: 已构造好的对象直接用 (用于动态构造 / 测试注入)
+    误传非 str 非 CallProfile 的对象 (e.g. get_profile(...) 嵌套调用产生的旧
+    bug) 会被 isinstance 兜住直接抛 TypeError, 不再静默 KeyError 吞异常 →
+    extract_memories 永远返空 dict 这类 silent failure (trace 019e0004).
     """
-    from app.services.llm.resilience import get_profile, provider_name
+    from app.services.llm.resilience import CallProfile, get_profile, provider_name
 
     provider = provider_name(model)
-    if override:
+    if override is None:
+        resolved = get_profile("chat_extract") if model is get_chat_model() else get_profile("utility_fast")
+        return provider, resolved
+    if isinstance(override, CallProfile):
+        return provider, override
+    if isinstance(override, str):
         return provider, get_profile(override)
-    if model is get_chat_model():
-        return provider, get_profile("chat_extract")
-    return provider, get_profile("utility_fast")
+    raise TypeError(  # type: ignore[unreachable]
+        f"profile override must be str | CallProfile | None, got {type(override).__name__}"
+    )
 
 
 async def _invoke_with_resilience(

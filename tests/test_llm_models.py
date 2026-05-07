@@ -208,3 +208,36 @@ class TestInvokeJsonStreaming:
         assert result == {"x": 1}
         assert ainvoke_called["flag"] is True
         assert astream_called["flag"] is False
+
+
+# ── _provider_and_profile override 形参 ──
+# 防 silent failure regression — 生产 trace 019e0004 (2026-05-07): extraction 误传
+# CallProfile 对象给 invoke_json profile=, 嵌套 get_profile(get_profile("...")) →
+# KeyError(CallProfile) → silent. 现在 _provider_and_profile 接受 str | CallProfile
+# | None, 错误类型直接 TypeError 让调用方一眼看到, 不再静默吃掉.
+
+class TestProviderAndProfile:
+    def test_string_override_resolves_via_get_profile(self):
+        from unittest.mock import MagicMock
+        provider, profile = models._provider_and_profile(MagicMock(), "chat_extract")
+        assert profile is resilience.get_profile("chat_extract")
+
+    def test_callprofile_override_passed_through(self):
+        """传 CallProfile 对象直接用 (动态构造 / 测试注入), 不再被嵌套 get_profile 撞死."""
+        from unittest.mock import MagicMock
+        from app.services.llm.resilience import CallProfile
+        custom = CallProfile(timeout_s=99.0, max_retries=0, retry_backoff_s=())
+        _provider, profile = models._provider_and_profile(MagicMock(), custom)
+        assert profile is custom
+
+    def test_none_override_uses_default(self):
+        """None override 走默认 (utility_fast for non-chat-model)."""
+        from unittest.mock import MagicMock
+        _provider, profile = models._provider_and_profile(MagicMock(), None)
+        assert profile is resilience.get_profile("utility_fast")
+
+    def test_wrong_type_raises_typeerror_not_keyerror(self):
+        """关键: 错误类型 → TypeError loud failure, 不再 KeyError silent (019e0004 regression)."""
+        from unittest.mock import MagicMock
+        with pytest.raises(TypeError, match="profile override must be"):
+            models._provider_and_profile(MagicMock(), 12345)  # type: ignore[arg-type]

@@ -22,8 +22,17 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_extract_memories_uses_memory_extract_profile():
-    """extract_memories 调 invoke_json 时必须显式传 profile=memory_extract."""
+    """extract_memories 调 invoke_json 时必须传 profile="memory_extract" (字符串名).
+
+    ⚠️ 关键: profile 必须是 **字符串名字**, 不是 get_profile(...) 拿到的 CallProfile
+    对象. 因为 invoke_json → _invoke_with_resilience → _provider_and_profile 内部
+    自己会调 get_profile(override) 解析, 误传 CallProfile 对象会变成
+    get_profile(get_profile("memory_extract")) → KeyError(CallProfile(...)) →
+    extract_memories 的 try/except 吃掉返空 dict → DB 0 条. 生产 trace 019e0004
+    (2026-05-07) 全双侧 user/ai 同时 silent failure.
+    """
     from app.services.memory.recording.extraction import extract_memories
+    from app.services.llm.resilience import get_profile
 
     captured_profile = {"value": None}
 
@@ -51,11 +60,17 @@ async def test_extract_memories_uses_memory_extract_profile():
     ):
         await extract_memories("user: 测试", side="user")
 
-    profile = captured_profile["value"]
-    assert profile is not None, "extract_memories must pass profile=... to invoke_json"
+    profile_arg = captured_profile["value"]
+    # 必须是字符串名字, 不是 CallProfile 对象 (regression guard for 019e0004)
+    assert profile_arg == "memory_extract", (
+        f"extract_memories must pass profile='memory_extract' string, got {profile_arg!r}. "
+        "传 CallProfile 对象会导致 invoke_json 内部嵌套 get_profile 调用 → "
+        "KeyError(CallProfile) → silent failure"
+    )
 
-    # 关键属性: streaming 启用 + idle_timeout 保护 + 总 timeout 比 chat_extract (45s)
-    # 大很多 + 允许 ollama fallback (extraction 失败比丢 silent 还差)
+    # 独立从 registry 拿 profile, 验证它的 streaming + idle_timeout 防护属性
+    # (确保 registry 注册的 memory_extract 真有这些保护)
+    profile = get_profile("memory_extract")
     assert profile.stream_mode is True, "memory_extract must use streaming for idle_timeout protection"
     assert profile.idle_timeout_s is not None and profile.idle_timeout_s >= 30
     assert profile.timeout_s >= 120, f"timeout_s={profile.timeout_s} 太短 (chat_extract=45 已是 bug 边界)"
