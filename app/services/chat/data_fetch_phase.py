@@ -60,16 +60,22 @@ class FetchedContext:
     schedule_context: str | None = None
 
 
-async def _classify_relevance(user_message: str, context: str = "") -> str:
+async def _classify_relevance(user_message: str, context: str = ""):
+    """Phase 2.4: 返回 RelevanceResult(level, enhanced_query). 调用方拆字段."""
     return await classify_memory_relevance(user_message, context=context)
 
 
 async def _do_retrieval(
     user_message: str, user_id: str, workspace_id: str | None,
+    enhanced_query: str = "",
 ) -> dict:
+    """Phase 2.4: 优先用 enhanced_query 做向量检索 (省略式追问还原后的完整短语).
+    enhanced_query 空时 fallback 到原 user_message.
+    """
     return await hybrid_retrieve(
         user_message, user_id,
         workspace_id=workspace_id,
+        enhanced_query=enhanced_query or None,
     )
 
 
@@ -288,19 +294,46 @@ async def fetch_parallel_context(
         return_exceptions=True,
     )
 
+    # Phase 2.4: relevance 返 RelevanceResult(level, enhanced_query). 历史返 str.
     memory_relevance = "medium"
+    enhanced_query = ""
     if isinstance(relevance_result, Exception):
         logger.warning(f"Memory relevance classification failed: {relevance_result}")
-    elif isinstance(relevance_result, str):
-        memory_relevance = relevance_result
+    else:
+        # 兼容: 新 RelevanceResult 取 .level + .enhanced_query;
+        # 历史路径 (test mock 返 str) 直接用 str.
+        level_attr = getattr(relevance_result, "level", None)
+        if level_attr:
+            memory_relevance = level_attr
+            enhanced_query = getattr(relevance_result, "enhanced_query", "") or ""
+        elif isinstance(relevance_result, str):
+            memory_relevance = relevance_result
+
     logger.info(
-        f"[DEBUG-MEM] relevance='{memory_relevance}' for '{user_message[:60]}'",
+        f"[DEBUG-MEM] relevance='{memory_relevance}' enhanced='{enhanced_query[:40]}' "
+        f"for '{user_message[:60]}'",
         extra={
             "event": EVT_MEMORY_RELEVANCE,
             "memory_relevance": memory_relevance,
             "msg_len": len(user_message),
+            "has_enhanced_query": bool(enhanced_query),
         },
     )
+
+    # Phase 2.4: 省略指代场景 (enhanced_query 非空 + 非 weak) → 重检索, 提升召回率.
+    # 初次并行检索用原 message embedding 做 (relevance 还没返回), 命中率低; 拿到
+    # enhanced_query 后用它重 search 一次. 仅在指代场景 (~10% 流量) 跑, 加 ~200ms.
+    if enhanced_query and memory_relevance != "weak":
+        logger.info(
+            f"[DEBUG-MEM] re-retrieve with enhanced_query='{enhanced_query[:40]}'"
+        )
+        try:
+            retrieval_result = await _do_retrieval(
+                user_message, user_id, workspace_id,
+                enhanced_query=enhanced_query,
+            )
+        except Exception as e:
+            logger.warning(f"Enhanced retrieval failed, keep original: {e}")
 
     classified_memories, memory_strings, graph_context = _post_process_retrieval(
         memory_relevance, retrieval_result,

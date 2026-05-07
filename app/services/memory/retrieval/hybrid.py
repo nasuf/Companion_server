@@ -73,23 +73,31 @@ async def hybrid_retrieve(
     user_id: str,
     workspace_id: str | None = None,
     token_budget: int = 800,
+    enhanced_query: str | None = None,
 ) -> dict:
     """Perform hybrid retrieval and return context for prompt.
 
     No LLM calls — only vector search + graph queries + ranking.
+
+    Phase 2.4: enhanced_query 是 LLM 解省略指代后的完整短语 (e.g. "妈妈病情"
+    替代原"那他怎样了"). 优先用 enhanced_query 做 vector embedding, fallback
+    到 message. 时间解析仍用原 message (时间词通常在原话, e.g. "上周那个事").
     """
     # 快速跳过无意义短消息（避免向量搜索的开销）
     if _is_trivial_message(message):
         logger.debug("Skipping retrieval for trivial message: %s", message[:20])
         return _EMPTY_RESULT
 
-    cached = await cache_retrieval(message, user_id, workspace_id=workspace_id)
+    # Phase 2.4: cache key 用 effective_query (含 enhanced) 避免不同指代复用同 cache
+    effective_query = enhanced_query or message
+    cache_key = effective_query if enhanced_query else message
+    cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id)
     if cached:
-        logger.debug("Hybrid retrieval cache hit")
+        logger.debug("Hybrid retrieval cache hit (key=%s)", cache_key[:30])
         return cached
 
     # Spec §3.2 step 1: 向量搜索 L1+L2 + 时间搜索（若有显式时间）
-    # 时间范围由时间系统（纯规则）解析，无 LLM 调用。
+    # 时间范围由时间系统（纯规则）解析，无 LLM 调用. 时间词通常在原话, 用 message.
     time_range: tuple[datetime, datetime] | None = None
     if has_explicit_time(message):
         parsed = parse_time_expressions(message)
@@ -100,8 +108,14 @@ async def hybrid_retrieve(
 
     levels = [1, 2]
 
+    # Phase 2.4: vector embedding 用 effective_query (enhanced 优先)
+    if enhanced_query:
+        logger.info(
+            f"[DEBUG-VEC] using enhanced_query='{enhanced_query[:40]}' "
+            f"(original message='{message[:40]}')"
+        )
     vector_task = search_similar(
-        message, user_id, top_k=50, workspace_id=workspace_id, levels=levels,
+        effective_query, user_id, top_k=50, workspace_id=workspace_id, levels=levels,
     )
     graph_task = get_relationship_context(
         user_id=user_id, workspace_id=workspace_id,

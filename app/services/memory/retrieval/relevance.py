@@ -7,15 +7,23 @@ Product spec §3.1：每条用户消息先判断与记忆的相关程度 (强/�
 中: 话题与记忆有关联但不强制 → 搜 L1+L2 前50, 不触发 L3
 弱: 与记忆完全无关 → 不调任何记忆
 
-工程偏离 spec §3.1：spec 输入只列了"用户消息"单条文本, 实测对省略式追问
-("颜色呢？") 误判为弱 → 漏召回. 这里复用 intent.unified 已用的最近几轮对话
-上下文格式让 LLM 自己解指代——prompt 走 registry (memory.relevance), 仅在
-模板基础上新增 {context} 占位符, 其他 spec 措辞 / 输出格式保持不变。
+工程偏离 spec §3.1：
+- 输入: 复用 intent.unified 的最近几轮对话上下文格式让 LLM 解指代
+  ("颜色呢？" → 解出"颜色"指代上一轮的具体话题)
+- Phase 2.4 输出: JSON {"level": "强|中|弱", "enhanced_query": "..."}
+  - level 同 spec
+  - enhanced_query 是 LLM 把省略指代还原后的可检索 query
+    (e.g. "那他怎样了?" + 上下文有"妈妈" → enhanced_query="用户的妈妈现状")
+  - hybrid retrieval 用 enhanced_query 做 embedding, 提升省略式追问召回率
+  - 弱相关时 enhanced_query 可空 (反正不检索)
+- 输出 schema 升级 + 兼容旧单字符响应 (LLM 偶尔忽略 schema)
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -29,14 +37,71 @@ RelevanceLevel = Literal["strong", "medium", "weak"]
 _LEVEL_MAP: dict[str, RelevanceLevel] = {"强": "strong", "中": "medium", "弱": "weak"}
 
 
+@dataclass
+class RelevanceResult:
+    """Phase 2.4: relevance 分类 + LLM 解指代后的增强 query.
+
+    enhanced_query: 用户原话经 LLM 解省略指代后的完整可检索查询. 空串表示
+    LLM 没解码出有用 query (无指代/弱相关), retrieval 应 fallback 到原 message.
+    """
+    level: RelevanceLevel
+    enhanced_query: str = ""
+
+
+def _parse_relevance_response(raw: str) -> RelevanceResult:
+    """解析 LLM 输出. 优先 JSON, 失败 fallback 到旧"强/中/弱"单字符模式.
+
+    LLM 可能的输出形态:
+    1. 标准 JSON: {"level": "强", "enhanced_query": "..."}
+    2. JSON 含前后缀文字: "好的, {...JSON...}"
+    3. 旧格式单字符: "强"
+    4. 多字符废话: "我觉得是中"
+    """
+    text = (raw or "").strip()
+    if not text:
+        return RelevanceResult(level="medium", enhanced_query="")
+
+    # Try JSON first
+    json_text = text
+    # 容忍前后冗余文字, 提取 {...} 部分
+    if "{" in text and "}" in text:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        json_text = text[start:end]
+    try:
+        data = json.loads(json_text)
+        if isinstance(data, dict):
+            level_raw = str(data.get("level", "")).strip()
+            level = _LEVEL_MAP.get(level_raw[:1], None) if level_raw else None
+            enhanced = str(data.get("enhanced_query", "")).strip()
+            if level:
+                # cap enhanced_query 长度防 LLM 啰嗦 (>50 字反而稀释 embedding 信号)
+                if len(enhanced) > 50:
+                    enhanced = enhanced[:50]
+                return RelevanceResult(level=level, enhanced_query=enhanced)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # Fallback: 旧单字符模式
+    for ch in text:
+        if ch in _LEVEL_MAP:
+            return RelevanceResult(level=_LEVEL_MAP[ch], enhanced_query="")
+
+    # 完全解析失败 → medium 默认 (跟历史行为一致)
+    return RelevanceResult(level="medium", enhanced_query="")
+
+
 async def classify_memory_relevance(
     user_message: str,
     context: str = "",
-) -> RelevanceLevel:
-    """spec §3.1 小模型「判断回忆相关」, 输出 strong/medium/weak.
+) -> RelevanceResult:
+    """Phase 2.4: 返回 RelevanceResult(level, enhanced_query).
 
     `context` 与 intent.unified 同格式: 最近几轮 "AI: ... / 用户: ..." 换行拼接,
-    用于解析省略式追问. 空串时填 "(无)" — LLM 退化到仅看当前消息。
+    用于解析省略式追问. 空串时填 "(无)" — LLM 退化到仅看当前消息且 enhanced_query 空。
+
+    返回 RelevanceResult 而非 RelevanceLevel (历史 ABI 改造) — 旧 caller 取 .level
+    字段即可获得原 RelevanceLevel str.
     """
     try:
         raw = await render_prompt(
@@ -44,15 +109,10 @@ async def classify_memory_relevance(
             {"message": user_message, "context": context or "(无)"},
             lambda p: invoke_text(get_utility_model(), p),
         )
-        text = (raw or "").strip()
-        # spec 输出是单字 "强"/"中"/"弱", 取首个匹配字符兜底 LLM 多嘴
-        for ch in text:
-            if ch in _LEVEL_MAP:
-                return _LEVEL_MAP[ch]
-        return "medium"
+        return _parse_relevance_response(raw or "")
     except Exception as e:
         logger.warning(f"Memory relevance classification failed: {e}; defaulting to 'medium'")
-        return "medium"
+        return RelevanceResult(level="medium", enhanced_query="")
 
 
 def compute_display_score(

@@ -1,0 +1,294 @@
+"""Phase 2.4: enhanced_query 多轮上下文增强检索 集成测试.
+
+历史 bug: relevance LLM 已经看 context 解了"那他怎样" → "妈妈情况", 但 hybrid
+retrieval 还是用原文"那他怎样" 做 embedding → 召回噪声/空.
+
+修复后流程:
+1. relevance 输出 {"level": "强", "enhanced_query": "用户的妈妈现状"}
+2. data_fetch_phase 拿到 enhanced_query, 调 _do_retrieval(..., enhanced_query=...)
+3. hybrid_retrieve 用 enhanced_query 做 vector search (effective_query)
+4. 时间解析仍用原 message (时间词通常在原话)
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieve_uses_enhanced_query_for_embedding():
+    """enhanced_query 非空 → search_similar 用 enhanced_query 做 embedding."""
+    from app.services.memory.retrieval import hybrid
+
+    captured_query = []
+    async def _capture_search(query, *args, **kwargs):
+        captured_query.append(query)
+        return []
+
+    with (
+        patch.object(hybrid, "search_similar", side_effect=_capture_search),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "get_relationship_context",
+                     new_callable=AsyncMock, return_value={}),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval",
+                     new_callable=AsyncMock),
+        patch.object(hybrid, "cache_set_graph_context",
+                     new_callable=AsyncMock),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="那他怎样了?",
+            user_id="u1",
+            workspace_id="w1",
+            enhanced_query="用户的妈妈最近住院的情况",
+        )
+
+    # search_similar 用了 enhanced_query, 不是原 message
+    assert captured_query == ["用户的妈妈最近住院的情况"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieve_falls_back_to_message_when_no_enhanced():
+    """enhanced_query 空 → search_similar 用原 message (向后兼容)."""
+    from app.services.memory.retrieval import hybrid
+
+    captured_query = []
+    async def _capture_search(query, *args, **kwargs):
+        captured_query.append(query)
+        return []
+
+    with (
+        patch.object(hybrid, "search_similar", side_effect=_capture_search),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "get_relationship_context",
+                     new_callable=AsyncMock, return_value={}),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval",
+                     new_callable=AsyncMock),
+        patch.object(hybrid, "cache_set_graph_context",
+                     new_callable=AsyncMock),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="我喜欢咖啡",
+            user_id="u1",
+            workspace_id="w1",
+            # enhanced_query 不传, 默认 None
+        )
+
+    assert captured_query == ["我喜欢咖啡"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_cache_key_uses_enhanced_query():
+    """cache key 用 effective_query (enhanced 或 message), 避免不同指代复用同 cache.
+
+    场景: 用户先说"那他怎样" (enhanced='妈妈现状') → cache 写 key='妈妈现状'
+    后续用户说"她呢?" (enhanced='妹妹现状') → 不同 key, cache miss, 重新搜.
+    防 bug: 用 message 做 cache key, 两条指代消息会共用第一次的 cache.
+    """
+    from app.services.memory.retrieval import hybrid
+
+    captured_keys = []
+    async def _capture_cache_get(key, user_id, workspace_id=None):
+        captured_keys.append(key)
+        return None
+
+    with (
+        patch.object(hybrid, "search_similar",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "get_relationship_context",
+                     new_callable=AsyncMock, return_value={}),
+        patch.object(hybrid, "cache_retrieval", side_effect=_capture_cache_get),
+        patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
+        patch.object(hybrid, "cache_set_graph_context", new_callable=AsyncMock),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="那他呢?", user_id="u1", workspace_id="w1",
+            enhanced_query="妈妈情况",
+        )
+        await hybrid.hybrid_retrieve(
+            message="她呢?", user_id="u1", workspace_id="w1",
+            enhanced_query="妹妹情况",
+        )
+
+    # 两次 cache 查询用了不同的 key (enhanced_query 各异)
+    assert captured_keys == ["妈妈情况", "妹妹情况"]
+
+
+@pytest.mark.asyncio
+async def test_data_fetch_re_retrieves_when_enhanced_query_present():
+    """data_fetch_phase: relevance 返 enhanced_query 非空 + 非 weak → 重检索.
+
+    流程: 初次并行用 message 搜 (relevance 还没返回), 拿到 enhanced_query 后
+    用它重 search 一次 (省略指代场景, 提升召回).
+    """
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+    from app.services.memory.retrieval.relevance import RelevanceResult
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    relevance_result = RelevanceResult(level="strong", enhanced_query="妈妈最近情况")
+
+    retrieval_calls = []
+    async def _track_retrieve(message, user_id, workspace_id=None,
+                               enhanced_query=None, **kw):
+        retrieval_calls.append({"message": message, "enhanced": enhanced_query})
+        return {"memories": [], "memory_strings": [], "graph_context": None}
+
+    with (
+        patch("app.services.chat.data_fetch_phase.classify_memory_relevance",
+              new_callable=AsyncMock, return_value=relevance_result),
+        patch("app.services.chat.data_fetch_phase.hybrid_retrieve",
+              side_effect=_track_retrieve),
+        patch("app.services.chat.data_fetch_phase.compute_ai_pad",
+              new_callable=AsyncMock, return_value={"pleasure": 0, "arousal": 0.5, "dominance": 0.5}),
+        patch("app.services.chat.data_fetch_phase.extract_emotion",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_latest_portrait",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_cached_schedule",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_topic_intimacy",
+              new_callable=AsyncMock, return_value=50.0),
+    ):
+        ctx = await fetch_parallel_context(
+            user_id="u1", agent_id="a1", workspace_id="w1",
+            user_message="那他怎样了?",
+            messages_dicts=[{"role": "user", "content": "..."}],
+            parsed_times=[],
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+        )
+
+    # 应该有 2 次 retrieval: 第 1 次并行(用 message), 第 2 次 enhanced (重检索)
+    assert len(retrieval_calls) == 2
+    assert retrieval_calls[0]["enhanced"] is None  # 第 1 次没 enhanced
+    assert retrieval_calls[1]["enhanced"] == "妈妈最近情况"  # 第 2 次有
+    assert ctx.memory_relevance == "strong"
+
+
+@pytest.mark.asyncio
+async def test_data_fetch_no_re_retrieve_when_weak():
+    """relevance=weak 即便有 enhanced_query 也不重检索 (反正 weak 跳过 retrieval)."""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+    from app.services.memory.retrieval.relevance import RelevanceResult
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    relevance_result = RelevanceResult(level="weak", enhanced_query="any")
+
+    retrieval_calls = []
+    async def _track_retrieve(message, user_id, workspace_id=None,
+                               enhanced_query=None, **kw):
+        retrieval_calls.append({"enhanced": enhanced_query})
+        return {"memories": [], "memory_strings": [], "graph_context": None}
+
+    with (
+        patch("app.services.chat.data_fetch_phase.classify_memory_relevance",
+              new_callable=AsyncMock, return_value=relevance_result),
+        patch("app.services.chat.data_fetch_phase.hybrid_retrieve",
+              side_effect=_track_retrieve),
+        patch("app.services.chat.data_fetch_phase.compute_ai_pad",
+              new_callable=AsyncMock, return_value={"pleasure": 0, "arousal": 0.5, "dominance": 0.5}),
+        patch("app.services.chat.data_fetch_phase.extract_emotion",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_latest_portrait",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_cached_schedule",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_topic_intimacy",
+              new_callable=AsyncMock, return_value=50.0),
+    ):
+        ctx = await fetch_parallel_context(
+            user_id="u1", agent_id="a1", workspace_id="w1",
+            user_message="嗨",
+            messages_dicts=[{"role": "user", "content": "..."}],
+            parsed_times=[],
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+        )
+
+    # 仅 1 次 retrieval (并行的那次), 不重 retrieve
+    assert len(retrieval_calls) == 1
+    assert ctx.memory_relevance == "weak"
+
+
+@pytest.mark.asyncio
+async def test_data_fetch_no_re_retrieve_when_no_enhanced():
+    """enhanced_query 空 (用户消息已完整) → 不重 retrieve."""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+    from app.services.memory.retrieval.relevance import RelevanceResult
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    relevance_result = RelevanceResult(level="medium", enhanced_query="")
+
+    retrieval_calls = []
+    async def _track_retrieve(message, user_id, workspace_id=None,
+                               enhanced_query=None, **kw):
+        retrieval_calls.append({"enhanced": enhanced_query})
+        return {"memories": [], "memory_strings": [], "graph_context": None}
+
+    with (
+        patch("app.services.chat.data_fetch_phase.classify_memory_relevance",
+              new_callable=AsyncMock, return_value=relevance_result),
+        patch("app.services.chat.data_fetch_phase.hybrid_retrieve",
+              side_effect=_track_retrieve),
+        patch("app.services.chat.data_fetch_phase.compute_ai_pad",
+              new_callable=AsyncMock, return_value={"pleasure": 0, "arousal": 0.5, "dominance": 0.5}),
+        patch("app.services.chat.data_fetch_phase.extract_emotion",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_latest_portrait",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_cached_schedule",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_topic_intimacy",
+              new_callable=AsyncMock, return_value=50.0),
+    ):
+        await fetch_parallel_context(
+            user_id="u1", agent_id="a1", workspace_id="w1",
+            user_message="我喜欢咖啡",
+            messages_dicts=[{"role": "user", "content": "..."}],
+            parsed_times=[],
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+        )
+
+    assert len(retrieval_calls) == 1  # 仅初次并行
+
+
+@pytest.mark.asyncio
+async def test_relevance_parser_handles_malformed_json():
+    """LLM 输出不规范 JSON (引号错/缺括号) → fallback 到旧单字符模式 + 默认 medium."""
+    from app.services.memory.retrieval.relevance import _parse_relevance_response
+
+    # 引号错: 单引号
+    r = _parse_relevance_response("{'level': '强', 'enhanced_query': ''}")
+    # JSON 解析失败 → fallback 找单字符 → 找到 '强' → strong
+    assert r.level == "strong"
+
+    # 完全乱码
+    r = _parse_relevance_response("xyz123!@#")
+    assert r.level == "medium"
+
+    # 中文混合
+    r = _parse_relevance_response("我觉得是中等吧")
+    # fallback 找到 '中' → medium
+    assert r.level == "medium"
+
+
+@pytest.mark.asyncio
+async def test_relevance_parser_extracts_json_from_noise():
+    """LLM 输出含前后冗余文字 → 提取 {} 部分解析."""
+    from app.services.memory.retrieval.relevance import _parse_relevance_response
+
+    raw = '好的, 这里是判断: {"level": "强", "enhanced_query": "用户的妈妈"} 完毕.'
+    r = _parse_relevance_response(raw)
+    assert r.level == "strong"
+    assert r.enhanced_query == "用户的妈妈"
