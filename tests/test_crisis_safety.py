@@ -154,6 +154,104 @@ def test_crisis_followup_safety_check_not_due_on_release():
     ) == "none"
 
 
+class _FakeCrisisRedis:
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    async def set(self, key: str, value: str, *, ex: int | None = None):
+        self.store[key] = value
+        return True
+
+    async def get(self, key: str):
+        return self.store.get(key)
+
+    async def delete(self, key: str):
+        return self.store.pop(key, None) is not None
+
+    async def ttl(self, key: str):
+        return 120 if key in self.store else -2
+
+
+@pytest.mark.asyncio
+async def test_crisis_care_state_is_scoped_by_workspace_and_agent(monkeypatch):
+    from app.services.chat import crisis_state
+
+    redis = _FakeCrisisRedis()
+    monkeypatch.setattr(crisis_state, "get_redis", AsyncMock(return_value=redis))
+
+    await crisis_state.mark_crisis_care_active(
+        "conv1",
+        "user1",
+        workspace_id="workspace-a",
+        agent_id="agent-a",
+        context="用户: 我想死",
+        source="direct_crisis",
+    )
+    await crisis_state.mark_crisis_care_active(
+        "conv1",
+        "user1",
+        workspace_id="workspace-b",
+        agent_id="agent-a",
+        context="用户: 第二个 workspace 的状态",
+        source="direct_crisis",
+    )
+
+    assert len(redis.store) == 2
+    keys = sorted(redis.store)
+    assert "workspace-a" in keys[0]
+    assert "agent-a" in keys[0]
+    assert "conv1" in keys[0]
+    assert "user1" in keys[0]
+
+    state_a = await crisis_state.load_crisis_care_state(
+        "conv1",
+        "user1",
+        workspace_id="workspace-a",
+        agent_id="agent-a",
+    )
+    state_b = await crisis_state.load_crisis_care_state(
+        "conv1",
+        "user1",
+        workspace_id="workspace-b",
+        agent_id="agent-a",
+    )
+    state_wrong_agent = await crisis_state.load_crisis_care_state(
+        "conv1",
+        "user1",
+        workspace_id="workspace-a",
+        agent_id="agent-b",
+    )
+
+    assert state_a and "我想死" in state_a["context"]
+    assert state_a["workspace_id"] == "workspace-a"
+    assert state_a["agent_id"] == "agent-a"
+    assert state_b and "第二个 workspace" in state_b["context"]
+    assert state_wrong_agent is None
+
+    payload = json.loads(redis.store[keys[0]])
+    assert payload["workspace_id"] == "workspace-a"
+    assert payload["agent_id"] == "agent-a"
+
+    await crisis_state.clear_crisis_care_state(
+        "conv1",
+        "user1",
+        workspace_id="workspace-a",
+        agent_id="agent-a",
+    )
+    assert await crisis_state.load_crisis_care_state(
+        "conv1",
+        "user1",
+        workspace_id="workspace-a",
+        agent_id="agent-a",
+    ) is None
+    assert await crisis_state.load_crisis_care_state(
+        "conv1",
+        "user1",
+        workspace_id="workspace-b",
+        agent_id="agent-a",
+    ) is not None
+
+
 def test_recent_unresolved_crisis_detects_followup_state():
     from app.services.chat.orchestrator import _recent_unresolved_crisis_message
 

@@ -145,7 +145,13 @@ class TestConversationsOwnership:
         assert r.status_code == 403
 
     def test_crisis_care_owner_200(self, client):
-        conv = SimpleNamespace(id="c1", userId="u1", isDeleted=False)
+        conv = SimpleNamespace(
+            id="c1",
+            userId="u1",
+            agentId="a1",
+            workspaceId="w1",
+            isDeleted=False,
+        )
         with (
             patch("app.api.ownership.db") as db_mock,
             patch(
@@ -157,12 +163,16 @@ class TestConversationsOwnership:
                     "ttl_seconds": 120,
                     "context_preview": "recent crisis care active",
                 },
-            ),
+            ) as crisis_status,
         ):
             db_mock.conversation.find_unique = AsyncMock(return_value=conv)
             r = client.get("/conversations/c1/crisis-care", headers=_hdr("u1"))
         assert r.status_code == 200
         assert r.json()["active"] is True
+        assert crisis_status.await_args.kwargs == {
+            "workspace_id": "w1",
+            "agent_id": "a1",
+        }
 
     def test_create_wrong_user_id_403(self, client):
         """POST body 携带的 user_id 不是自己的, 拒绝."""

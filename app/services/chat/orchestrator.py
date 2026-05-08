@@ -753,7 +753,10 @@ async def stream_chat_response(
         crisis_followup_check_mode = "none"
         if not crisis_force_intent and not sub_intent_mode:
             crisis_state = await load_crisis_care_state(
-                conversation_id, user_id,
+                conversation_id,
+                user_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
             )
             if crisis_state is not None:
                 recent_crisis_context = str(crisis_state.get("context") or "").strip()
@@ -787,6 +790,8 @@ async def stream_chat_response(
                     await mark_crisis_care_active(
                         conversation_id,
                         user_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
                         context=f"{recent_crisis_context}\n用户: {user_message}",
                         source="followup_release_pending",
                         release_count=crisis_release_count,
@@ -794,7 +799,12 @@ async def stream_chat_response(
                         turns_since_safety_check=0,
                     )
                 else:
-                    await clear_crisis_care_state(conversation_id, user_id)
+                    await clear_crisis_care_state(
+                        conversation_id,
+                        user_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
+                    )
             else:
                 next_turns_since_safety_check = crisis_turns_since_safety_check + 1
                 crisis_followup_check_mode = _crisis_followup_safety_check_mode(
@@ -808,6 +818,8 @@ async def stream_chat_response(
                 await mark_crisis_care_active(
                     conversation_id,
                     user_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
                     context=f"{recent_crisis_context}\n用户: {user_message}",
                     source="followup_guard",
                     release_count=0,
@@ -821,6 +833,8 @@ async def stream_chat_response(
             await mark_crisis_care_active(
                 conversation_id,
                 user_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
                 context=f"用户: {user_message}",
                 source="direct_crisis",
                 release_count=0,

@@ -161,7 +161,12 @@ async def list_messages(
 @router.get("/{conversation_id}/crisis-care")
 async def get_conversation_crisis_care(conv=Depends(require_conversation_owner)):
     """获取当前会话的危机后续关怀状态。需 JWT 且会话属于本人或 admin."""
-    return await get_crisis_care_status(conv.id, conv.userId)
+    return await get_crisis_care_status(
+        conv.id,
+        conv.userId,
+        workspace_id=conv.workspaceId,
+        agent_id=conv.agentId,
+    )
 
 
 @router.delete("/{conversation_id}")
