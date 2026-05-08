@@ -56,6 +56,7 @@ from app.services.relationship.intimacy import get_relationship_stage
 from app.services.chat.intent_dispatcher import (
     detect_current_state_fast_path,
     detect_intent_unified,
+    is_explicit_current_state_query,
     IntentType,
     IntentResult,
     LABEL_TO_INTENT,
@@ -142,6 +143,34 @@ async def _short_circuit_reply(
         include_done=include_done,
         extra_metadata=extra_metadata,
         trace_id=trace_id,
+    )
+
+
+def _downgrade_non_explicit_current_state(
+    detected_intent: IntentResult,
+    user_message: str,
+    response_diagnostics: dict[str, Any],
+) -> IntentResult:
+    """Keep CURRENT_STATE only for explicit AI state questions.
+
+    LLM intent can over-label memory/identity recall questions as current-state.
+    If that label survives, the reply path cannot use memory tier prompts even
+    after retrieval. Demote those misses to normal chat so memory relevance can
+    drive the final reply.
+    """
+    if detected_intent.intent != IntentType.CURRENT_STATE:
+        return detected_intent
+    if is_explicit_current_state_query(user_message):
+        return detected_intent
+
+    metadata = dict(detected_intent.metadata or {})
+    metadata["downgraded_from"] = IntentType.CURRENT_STATE.value
+    metadata["downgrade_reason"] = "not_explicit_current_state"
+    response_diagnostics["intent_downgrade_reason"] = "not_explicit_current_state"
+    return IntentResult(
+        intent=IntentType.NONE,
+        confidence=detected_intent.confidence,
+        metadata=metadata,
     )
 
 
@@ -1349,6 +1378,12 @@ async def stream_chat_response(
                     yield evt
                 await _cancel_l3_task()
                 return
+
+        detected_intent = _downgrade_non_explicit_current_state(
+            detected_intent,
+            user_message,
+            response_diagnostics,
+        )
 
         # §3.4.3 询问当前状态
         if detected_intent.intent == IntentType.CURRENT_STATE:

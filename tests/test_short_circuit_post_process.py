@@ -189,6 +189,40 @@ async def test_handle_current_state_rejects_previous_reply_followup():
     reply_mock.assert_not_awaited()
 
 
+def test_orchestrator_downgrades_memory_recall_misrouted_as_current_state():
+    """身份/记忆追问被 LLM 误归 CURRENT_STATE 时, 应回到普通聊天记忆路径。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_current_state
+
+    diagnostics = {}
+    result = _downgrade_non_explicit_current_state(
+        IntentResult(intent=IntentType.CURRENT_STATE, confidence=0.8),
+        "我叫什么名字？还记得吗？",
+        diagnostics,
+    )
+
+    assert result.intent == IntentType.NONE
+    assert result.metadata["downgraded_from"] == IntentType.CURRENT_STATE.value
+    assert diagnostics["intent_downgrade_reason"] == "not_explicit_current_state"
+
+
+def test_orchestrator_keeps_explicit_current_state_intent():
+    """真正询问 AI 当前状态的消息仍保留 CURRENT_STATE 短路。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_current_state
+
+    diagnostics = {}
+    original = IntentResult(intent=IntentType.CURRENT_STATE, confidence=0.9)
+    result = _downgrade_non_explicit_current_state(
+        original,
+        "你最近怎么样？",
+        diagnostics,
+    )
+
+    assert result is original
+    assert diagnostics == {}
+
+
 @pytest.mark.asyncio
 async def test_handle_schedule_query_date_does_not_inject_current_activity():
     """未来日程查询不能把当前正在做的事注入 prompt。"""
