@@ -118,6 +118,55 @@ async def test_hybrid_cache_write_serializes_classified_memories(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hybrid_retrieve_passes_effective_query_to_selector(monkeypatch):
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+    from app.services.memory.retrieval import hybrid as hybrid_mod
+
+    captured: dict = {}
+
+    def _select_context(candidates, token_budget, max_items=10, query=None):
+        captured["query"] = query
+        return [
+            ClassifiedMemory(
+                id="m1",
+                text="用户的直属领导叫陈姐",
+                relevance="strong",
+                score=0.8,
+                source="user",
+            )
+        ]
+
+    monkeypatch.setattr(hybrid_mod, "cache_retrieval", AsyncMock(return_value=None))
+    monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", AsyncMock())
+    monkeypatch.setattr(hybrid_mod, "has_explicit_time", lambda _: False)
+    monkeypatch.setattr(hybrid_mod, "search_by_time_range", AsyncMock(return_value=[]))
+    monkeypatch.setattr(hybrid_mod, "search_related_memories_for_query", AsyncMock(return_value=[]))
+    monkeypatch.setattr(hybrid_mod, "select_context", _select_context)
+    monkeypatch.setattr(
+        hybrid_mod,
+        "search_similar",
+        AsyncMock(return_value=[{
+            "id": "m1",
+            "summary": "用户的直属领导叫陈姐",
+            "content": "用户的直属领导叫陈姐",
+            "level": 2,
+            "importance": 0.8,
+            "similarity": 0.7,
+            "source": "user",
+        }]),
+    )
+
+    await hybrid_mod.hybrid_retrieve(
+        "她叫什么",
+        "u1",
+        workspace_id="ws1",
+        enhanced_query="用户的直属领导叫什么",
+    )
+
+    assert captured["query"] == "用户的直属领导叫什么"
+
+
+@pytest.mark.asyncio
 async def test_entity_recall_keeps_l1_l2_scope(monkeypatch):
     from app.services.memory.retrieval import hybrid as hybrid_mod
 

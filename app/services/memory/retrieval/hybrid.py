@@ -332,7 +332,11 @@ async def hybrid_retrieve(
     all_candidates.sort(key=lambda m: float(m.get("rank_score", 0)), reverse=True)
 
     # Select within token budget (returns ClassifiedMemory list)
-    classified_memories = select_context(all_candidates, token_budget)
+    classified_memories = select_context(
+        all_candidates,
+        token_budget,
+        query=effective_query,
+    )
     record_retrieval_session(
         strategy="hybrid_l1_l2",
         query=message,

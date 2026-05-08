@@ -210,16 +210,51 @@ async def _build_memory_section(
             return m.text
         return f"({' · '.join(tags)}) {m.text}"
 
-    user_texts = [_format_memory(m) for m in memories if m.source != "ai"]
+    user_memory_items = [
+        (m, _format_memory(m)) for m in memories if m.source != "ai"
+    ]
+    user_texts = [text for _, text in user_memory_items]
     ai_texts = [_format_memory(m) for m in memories if m.source == "ai"]
+    named_relation_texts = [
+        text for m, text in user_memory_items
+        if any(
+            reason.startswith("保护槽:关系命名")
+            for reason in (m.rank_reasons or [])
+        )
+    ]
+    literal_task_texts = [
+        text for m, text in user_memory_items
+        if text not in named_relation_texts and any(
+            reason.startswith("保护槽:字面命中")
+            for reason in (m.rank_reasons or [])
+        )
+    ]
+    task_user_texts = named_relation_texts + literal_task_texts
+    safety_user_texts = [
+        text for m, text in user_memory_items
+        if any(
+            reason.startswith("保护槽:安全情绪") or reason == "安全/情绪相关"
+            for reason in (m.rank_reasons or [])
+        ) and text not in task_user_texts
+    ]
+    other_user_texts = [
+        text for text in user_texts
+        if text not in task_user_texts and text not in safety_user_texts
+    ]
 
     def _numbered(label: str, items: list[str]) -> str:
         body = "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
         return f"{label}\n{body}"
 
     parts: list[str] = []
-    if user_texts:
-        parts.append(_numbered("【用户告诉过你的事情】", user_texts))
+    if named_relation_texts:
+        parts.append(_numbered("【回答当前关系 / 名字问题优先参考】", named_relation_texts))
+    if literal_task_texts:
+        parts.append(_numbered("【回答当前问题可参考】", literal_task_texts))
+    if safety_user_texts:
+        parts.append(_numbered("【安全 / 情绪背景】", safety_user_texts))
+    if other_user_texts:
+        parts.append(_numbered("【用户告诉过你的其他事情】", other_user_texts))
     if ai_texts:
         parts.append(_numbered("【你自己的相关经历 / 人设】", ai_texts))
 
@@ -227,7 +262,11 @@ async def _build_memory_section(
         return None
 
     body = (
-        "以下是与当前话题相关的事实, 已按归属分组. 回答时必须与这些保持一致, "
+        "以下是与当前话题相关的事实, 已按用途和归属分组. "
+        "若有【回答当前关系 / 名字问题优先参考】, 回答关系、称呼、名字类事实追问时优先使用该组; "
+        "若有【回答当前问题可参考】, 回答其他事实追问时优先使用该组; "
+        "【安全 / 情绪背景】只用于把握语气和风险, 不要拿它替代事实答案。"
+        "回答时必须与这些保持一致, "
         "不得编造矛盾信息, 也不要把对方的记忆误当成自己的、或反之。"
         "括号里的标记只供你判断轻重缓急, 回复时不要复述这些标记。\n\n"
         + "\n\n".join(parts)

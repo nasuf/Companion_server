@@ -237,10 +237,10 @@ async def test_retrieval_downweights_pos_when_user_negates():
     captured_scores = {}
     original_select = hybrid.select_context
 
-    def _spy_select(candidates, budget):
+    def _spy_select(candidates, budget, **kwargs):
         for c in candidates:
             captured_scores[c["id"]] = c.get("rank_score", 0)
-        return original_select(candidates, budget)
+        return original_select(candidates, budget, **kwargs)
 
     with (
         patch.object(hybrid, "search_similar",
@@ -284,10 +284,10 @@ async def test_retrieval_no_downweight_when_user_positive():
     captured_scores = {}
     original_select = hybrid.select_context
 
-    def _spy_select(candidates, budget):
+    def _spy_select(candidates, budget, **kwargs):
         for c in candidates:
             captured_scores[c["id"]] = c.get("rank_score", 0)
-        return original_select(candidates, budget)
+        return original_select(candidates, budget, **kwargs)
 
     with (
         patch.object(hybrid, "search_similar",
@@ -330,11 +330,11 @@ async def test_retrieval_downweights_dislike_when_query_likes():
     captured_reasons = {}
     original_select = hybrid.select_context
 
-    def _spy_select(candidates, budget):
+    def _spy_select(candidates, budget, **kwargs):
         for c in candidates:
             captured_scores[c["id"]] = c.get("rank_score", 0)
             captured_reasons[c["id"]] = c.get("rank_reasons", [])
-        return original_select(candidates, budget)
+        return original_select(candidates, budget, **kwargs)
 
     with (
         patch.object(hybrid, "search_similar",
@@ -374,10 +374,10 @@ async def test_retrieval_downweights_wrong_partner_role():
     captured_scores = {}
     original_select = hybrid.select_context
 
-    def _spy_select(candidates, budget):
+    def _spy_select(candidates, budget, **kwargs):
         for c in candidates:
             captured_scores[c["id"]] = c.get("rank_score", 0)
-        return original_select(candidates, budget)
+        return original_select(candidates, budget, **kwargs)
 
     with (
         patch.object(hybrid, "search_similar",
@@ -416,10 +416,10 @@ async def test_retrieval_downweights_medical_status_mismatch():
     captured_scores = {}
     original_select = hybrid.select_context
 
-    def _spy_select(candidates, budget):
+    def _spy_select(candidates, budget, **kwargs):
         for c in candidates:
             captured_scores[c["id"]] = c.get("rank_score", 0)
-        return original_select(candidates, budget)
+        return original_select(candidates, budget, **kwargs)
 
     with (
         patch.object(hybrid, "search_similar",
