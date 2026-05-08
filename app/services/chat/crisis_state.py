@@ -37,6 +37,42 @@ async def load_crisis_care_context(conversation_id: str, user_id: str) -> str | 
         return None
 
 
+async def get_crisis_care_status(conversation_id: str, user_id: str) -> dict[str, Any]:
+    """Return UI-safe crisis-care status for a conversation."""
+    try:
+        redis = await get_redis()
+        key = _crisis_care_key(conversation_id, user_id)
+        raw = await redis.get(key)
+        if not raw:
+            return {
+                "active": False,
+                "unavailable": False,
+                "source": None,
+                "ttl_seconds": None,
+                "context_preview": None,
+            }
+        data = json.loads(raw)
+        context = str(data.get("context") or "").strip()
+        ttl = await redis.ttl(key)
+        source = data.get("source")
+        return {
+            "active": True,
+            "unavailable": False,
+            "source": str(source) if source else None,
+            "ttl_seconds": ttl if isinstance(ttl, int) and ttl >= 0 else None,
+            "context_preview": context[-160:] if context else None,
+        }
+    except Exception as e:
+        logger.warning(f"get crisis care status failed: {e}")
+        return {
+            "active": False,
+            "unavailable": True,
+            "source": None,
+            "ttl_seconds": None,
+            "context_preview": None,
+        }
+
+
 async def mark_crisis_care_active(
     conversation_id: str,
     user_id: str,

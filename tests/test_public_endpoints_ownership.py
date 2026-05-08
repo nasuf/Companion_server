@@ -133,6 +133,37 @@ class TestConversationsOwnership:
             r = client.get("/conversations/c1/messages", headers=_hdr("u1"))
         assert r.status_code == 403
 
+    def test_crisis_care_no_token_401(self, client):
+        r = client.get("/conversations/c1/crisis-care")
+        assert r.status_code == 401
+
+    def test_crisis_care_wrong_owner_403(self, client):
+        conv = SimpleNamespace(id="c1", userId="other-user", isDeleted=False)
+        with patch("app.api.ownership.db") as db_mock:
+            db_mock.conversation.find_unique = AsyncMock(return_value=conv)
+            r = client.get("/conversations/c1/crisis-care", headers=_hdr("u1"))
+        assert r.status_code == 403
+
+    def test_crisis_care_owner_200(self, client):
+        conv = SimpleNamespace(id="c1", userId="u1", isDeleted=False)
+        with (
+            patch("app.api.ownership.db") as db_mock,
+            patch(
+                "app.api.public.conversations.get_crisis_care_status",
+                new_callable=AsyncMock,
+                return_value={
+                    "active": True,
+                    "source": "direct_crisis",
+                    "ttl_seconds": 120,
+                    "context_preview": "recent crisis care active",
+                },
+            ),
+        ):
+            db_mock.conversation.find_unique = AsyncMock(return_value=conv)
+            r = client.get("/conversations/c1/crisis-care", headers=_hdr("u1"))
+        assert r.status_code == 200
+        assert r.json()["active"] is True
+
     def test_create_wrong_user_id_403(self, client):
         """POST body 携带的 user_id 不是自己的, 拒绝."""
         r = client.post(

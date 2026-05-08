@@ -7,6 +7,7 @@ from app.api.ownership import require_conversation_owner, require_user_self
 from app.db import db
 from app.models.conversation import ConversationCreate, ConversationResponse
 from app.models.message import MessageResponse
+from app.services.chat.crisis_state import get_crisis_care_status
 from app.services.workspace.workspaces import ensure_workspace, get_workspace_by_id
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -155,6 +156,12 @@ async def list_messages(
         )
         for m in messages
     ]
+
+
+@router.get("/{conversation_id}/crisis-care")
+async def get_conversation_crisis_care(conv=Depends(require_conversation_owner)):
+    """获取当前会话的危机后续关怀状态。需 JWT 且会话属于本人或 admin."""
+    return await get_crisis_care_status(conv.id, conv.userId)
 
 
 @router.delete("/{conversation_id}")
