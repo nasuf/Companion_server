@@ -439,6 +439,75 @@ async def test_reply_generate_tier_weak_bypasses_main_llm():
 
 
 @pytest.mark.asyncio
+async def test_reply_generate_tier_does_not_call_chat_messages_factory():
+    """tier 成功时不构建主 prompt。"""
+    from app.services.chat.reply_generate import generate_reply
+
+    chat_messages_factory = AsyncMock(return_value=[{"role": "system", "content": "main"}])
+    kwargs = _make_reply_generate_kwargs(
+        memory_relevance="weak",
+        chat_messages=None,
+        chat_messages_factory=chat_messages_factory,
+    )
+    with patch("app.services.chat.reply_generate._run_main_llm", new=AsyncMock()) as run_main:
+        replies, raw, _, _ = await generate_reply(**kwargs)
+
+    chat_messages_factory.assert_not_awaited()
+    run_main.assert_not_awaited()
+    assert replies == ["弱相关回复"]
+    assert raw == "弱相关回复"
+
+
+@pytest.mark.asyncio
+async def test_reply_generate_main_llm_awaits_chat_messages_factory():
+    """主 LLM 路径按需构建 prompt，且只构建一次。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.reply_generate import generate_reply
+
+    chat_messages = [{"role": "system", "content": "main"}]
+    chat_messages_factory = AsyncMock(return_value=chat_messages)
+    kwargs = _make_reply_generate_kwargs(
+        memory_relevance="weak",
+        detected_intent=IntentResult(intent=IntentType.SCHEDULE_ADJUST, confidence=1.0),
+        chat_messages=None,
+        chat_messages_factory=chat_messages_factory,
+    )
+    run_main = AsyncMock(return_value=("主 LLM 回复", False))
+    with patch("app.services.chat.reply_generate._run_main_llm", new=run_main):
+        replies, raw, _, _ = await generate_reply(**kwargs)
+
+    chat_messages_factory.assert_awaited_once()
+    run_main.assert_awaited_once_with(chat_messages)
+    kwargs["tier_fns"]["weak"].assert_not_called()
+    assert replies == ["主 LLM 回复"]
+    assert raw == "主 LLM 回复"
+
+
+@pytest.mark.asyncio
+async def test_reply_generate_tier_failure_falls_back_to_chat_messages_factory():
+    """tier 返回空时才构建主 prompt 并回退主 LLM。"""
+    from app.services.chat.reply_generate import generate_reply
+
+    chat_messages = [{"role": "system", "content": "main"}]
+    chat_messages_factory = AsyncMock(return_value=chat_messages)
+    kwargs = _make_reply_generate_kwargs(
+        memory_relevance="weak",
+        chat_messages=None,
+        chat_messages_factory=chat_messages_factory,
+    )
+    kwargs["tier_fns"]["weak"].return_value = None
+    run_main = AsyncMock(return_value=("主 LLM 回复", False))
+    with patch("app.services.chat.reply_generate._run_main_llm", new=run_main):
+        replies, raw, _, _ = await generate_reply(**kwargs)
+
+    kwargs["tier_fns"]["weak"].assert_awaited_once()
+    chat_messages_factory.assert_awaited_once()
+    run_main.assert_awaited_once_with(chat_messages)
+    assert replies == ["主 LLM 回复"]
+    assert raw == "主 LLM 回复"
+
+
+@pytest.mark.asyncio
 async def test_reply_generate_schedule_context_does_not_disable_tier():
     """schedule_context 不再注入 §4 主回复, 因此不能阻塞轻量 tier prompt。"""
     from app.services.chat.reply_generate import generate_reply

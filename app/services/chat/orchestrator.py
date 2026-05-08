@@ -1023,31 +1023,33 @@ async def stream_chat_response(
             except (asyncio.CancelledError, Exception) as e:
                 logger.warning(f"L3 awakening failed: {e}")
 
-        # Build prompt (pure string operations — instant)
-        # Phase 6: 删 relational_context / graph_context 入参 — 实证冗余/幻觉源
-        system_prompt = await build_system_prompt(
-            agent=agent,
-            memories=classified_memories,
-            delay_context=delay_context,
-            portrait=portrait,
-            topic_context=topic_context,
-            user_emotion=prompt_user_emotion,
-            # schedule_context 故意不传给 §4 主回复 prompt: spec §4 不要求 AI 当前活动,
-            # 只有 §3.4.3 询问当前状态走 short-circuit 时才需要 (handle_current_state
-            # 有自己的参数路径). 详见 prompt_builder.py 注释 + commit 0038a13 上下文.
-            # ai_status 单独传: 仅供"AI 自洽性约束"段使用 (告知状态 + 禁止主动展开),
-            # 防 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动.
-            ai_status=ai_status,
-            patience_instruction=patience_instruction,
-            reply_count=reply_count,
-            reply_total=max_total,
-            intimacy_stage=intimacy_stage,
-            time_context=time_context,
-            time_memories=time_memories or None,
-            l3_memories=l3_memories or None,
-            memory_relevance=memory_relevance,
-        )
-        chat_messages = build_chat_messages(system_prompt, messages_dicts)
+        async def _build_main_chat_messages() -> list[dict]:
+            # Build prompt only if generate_reply reaches the main LLM fallback path.
+            # Tier replies and contradiction inquiries short-circuit before this.
+            # Phase 6: 删 relational_context / graph_context 入参 — 实证冗余/幻觉源
+            system_prompt = await build_system_prompt(
+                agent=agent,
+                memories=classified_memories,
+                delay_context=delay_context,
+                portrait=portrait,
+                topic_context=topic_context,
+                user_emotion=prompt_user_emotion,
+                # schedule_context 故意不传给 §4 主回复 prompt: spec §4 不要求 AI 当前活动,
+                # 只有 §3.4.3 询问当前状态走 short-circuit 时才需要 (handle_current_state
+                # 有自己的参数路径). 详见 prompt_builder.py 注释 + commit 0038a13 上下文.
+                # ai_status 单独传: 仅供"AI 自洽性约束"段使用 (告知状态 + 禁止主动展开),
+                # 防 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动.
+                ai_status=ai_status,
+                patience_instruction=patience_instruction,
+                reply_count=reply_count,
+                reply_total=max_total,
+                intimacy_stage=intimacy_stage,
+                time_context=time_context,
+                time_memories=time_memories or None,
+                l3_memories=l3_memories or None,
+                memory_relevance=memory_relevance,
+            )
+            return build_chat_messages(system_prompt, messages_dicts)
 
         # Log memory access for L2 frequency tracking (background, non-blocking)
         accessed_ids: list[str] = []
@@ -1087,7 +1089,7 @@ async def stream_chat_response(
             prompt_user_emotion=prompt_user_emotion,
             user_message=user_message,
             agent=agent,
-            chat_messages=chat_messages,
+            chat_messages_factory=_build_main_chat_messages,
             reply_count=reply_count,
             max_reply_count=max_reply_count,
             max_total=max_total,

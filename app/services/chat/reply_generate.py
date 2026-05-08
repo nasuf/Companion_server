@@ -156,13 +156,14 @@ async def generate_reply(
     prompt_user_emotion: dict | None,
     user_message: str,
     agent: Any,
-    chat_messages: list[dict],
     reply_count: int,
     max_reply_count: int,
     max_total: int,
     tier_fns: dict[str, Callable[..., Awaitable[str | None]]],
     truncate_fn: Callable[[str, int], str],
     pipe_fallback_fn: Callable[[str, int, int, int], list[str]],
+    chat_messages: list[dict] | None = None,
+    chat_messages_factory: Callable[[], Awaitable[list[dict]]] | None = None,
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
@@ -175,7 +176,17 @@ async def generate_reply(
     跟 _split_replies 同时跑 (两者都只依赖 raw_response, 互不依赖). 命中时
     返回 dict; 未传 / tier 路径短路 / contradiction_inquiry 路径返 None,
     调用方需 fallback 自行调 _ai_reply_emotion.
+
+    chat_messages_factory 用于懒构建主 prompt；只有兜底到主 LLM 时才会被 await。
     """
+
+    async def _get_chat_messages() -> list[dict]:
+        if chat_messages is not None:
+            return chat_messages
+        if chat_messages_factory is None:
+            raise ValueError("generate_reply requires chat_messages or chat_messages_factory")
+        return await chat_messages_factory()
+
     if contradiction_inquiry:
         return [contradiction_inquiry], contradiction_inquiry, False, None
 
@@ -238,7 +249,7 @@ async def generate_reply(
         )
         return tier_replies, tier_reply_text, False, None
 
-    raw_response, is_fallback = await _run_main_llm(chat_messages)
+    raw_response, is_fallback = await _run_main_llm(await _get_chat_messages())
     logger.info(
         f"[REPLY-LLM] main reply len={len(raw_response)} fallback={is_fallback}",
         extra={
