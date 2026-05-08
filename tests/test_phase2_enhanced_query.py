@@ -301,8 +301,8 @@ async def test_data_fetch_no_re_retrieve_when_weak():
             l3_trigger_classify_fn=AsyncMock(return_value="无"),
         )
 
-    # 仅 1 次 retrieval (并行的那次), 不重 retrieve
-    assert len(retrieval_calls) == 1
+    # weak relevance 直接跳过 retrieval, enhanced_query 也不会触发补救检索。
+    assert len(retrieval_calls) == 0
     assert ctx.memory_relevance == "weak"
 
 

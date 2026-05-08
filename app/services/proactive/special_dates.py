@@ -29,6 +29,7 @@ from app.db import db
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.storage import repo as memory_repo
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.utils import render_template
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
     can_send_proactive,
@@ -336,7 +337,12 @@ async def send_special_date_proactive(
     prompt_key, fields = await _pick_prompt_key_and_fields(occasions, personality_brief)
     try:
         tpl = await get_prompt_text(prompt_key)
-        prompt = tpl.format(**fields)
+        prompt = render_template(
+            tpl,
+            fields,
+            optional_keys={"user_portrait"},
+            safe=False,
+        )
     except (KeyError, ValueError) as e:
         logger.warning(f"Special date prompt format failed key={prompt_key}: {e}")
         return False

@@ -16,6 +16,16 @@ from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, render_prompt
 logger = logging.getLogger(__name__)
 
 
+_OPTIONAL_REFERENCE_KEYS = frozenset({
+    "context",
+    "user_portrait",
+    "user_memory",
+    "ai_memory",
+    "candidate_memories",
+    "deleted_memories",
+    "l3_memory",
+})
+
 
 async def _render_llm(
     prompt_key: str,
@@ -29,6 +39,7 @@ async def _render_llm(
         params,
         lambda p: invoke_text(get_chat_model(), p),
         max_chars=max_chars,
+        optional_keys=_OPTIONAL_REFERENCE_KEYS,
     )
     return result or None
 
@@ -156,6 +167,7 @@ async def schedule_adjust_reply(
         "intent.schedule_adjust_reply",
         params,
         lambda p: invoke_json(get_chat_model(), p),
+        optional_keys=_OPTIONAL_REFERENCE_KEYS,
     )
     if not isinstance(result, dict):
         return None
@@ -434,6 +446,7 @@ async def _render_tier_reply(
         lambda p: invoke_text(get_chat_model(), p),
         max_chars=max_total,
         strip_split=False,
+        optional_keys=_OPTIONAL_REFERENCE_KEYS,
     )
 
 

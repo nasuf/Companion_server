@@ -43,6 +43,7 @@ from app.services.proactive.state import (
     mark_proactive_sent,
 )
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.utils import render_template
 from app.services.interaction.reply_context import save_last_reply_timestamp
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,13 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     ("scheduled_scene", "ai_schedule"): "proactive.scheduled_scene",
 }
 
+_OPTIONAL_REFERENCE_KEYS = frozenset({
+    "ai_memory",
+    "user_memory",
+    "user_portrait",
+    "recent_context",
+})
+
 
 def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     """按 prompt key 选定填充字段."""
@@ -269,7 +277,12 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     try:
         # tpl is fetched async by caller (this is a sync helper for clarity)
         tpl = ctx["__tpl"]
-        return tpl.format(**fields)
+        return render_template(
+            tpl,
+            fields,
+            optional_keys=_OPTIONAL_REFERENCE_KEYS,
+            safe=False,
+        )
     except (KeyError, ValueError) as e:
         logger.warning(f"Prompt format failed key={key}: {e}")
         return None
