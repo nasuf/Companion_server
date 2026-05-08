@@ -104,6 +104,17 @@ def test_current_state_prompt_does_not_include_full_schedule():
     prompt = defaults.CURRENT_STATE_REPLY_PROMPT
     assert "AI当前的作息：{current_activity}" in prompt
     assert "AI当前的作息表：{ai_schedule}" not in prompt
+    assert "不允许新增具体物件、书名、页面、剧情、地点或巧合细节" in prompt
+    assert "云彩分类的书" in prompt
+
+
+def test_intent_prompt_keeps_current_state_followup_disambiguation():
+    """上一轮内容追问不能被 current_state 短路吞掉。"""
+    from app.services.prompting import defaults
+
+    prompt = defaults.INTENT_UNIFIED_PROMPT
+    assert "用户基于上一轮 AI 的说法表达惊讶、质疑或追问" in prompt
+    assert "这么晚还能看到X啊" in prompt
 
 
 def test_schedule_query_prompt_forbids_using_current_state_for_future_query():

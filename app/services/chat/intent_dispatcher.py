@@ -113,6 +113,30 @@ _CURRENT_STATE_TIME_BLOCKERS = (
     "上午", "中午", "凌晨", "周末", "星期", "礼拜", "几点", "什么时候",
     "等会", "待会", "一会", "以后", "之前", "刚才",
 )
+_CURRENT_STATE_HISTORY_BLOCKERS = (
+    "刚才", "刚刚", "刚说", "刚说的", "之前说", "前面说", "上一句", "上句",
+)
+_CURRENT_STATE_EXPLICIT_PHRASES = frozenset({
+    "忙吗",
+    "不忙吗",
+    "你忙吗",
+    "你不忙吗",
+    "有空吗",
+    "你有空吗",
+    "现在有空吗",
+    "你现在有空吗",
+    "最近怎么样",
+    "你最近怎么样",
+    "你怎么样",
+    "你还好吗",
+    "你开心吗",
+    "你心情怎么样",
+})
+_CURRENT_STATE_SUBJECT_TERMS = ("你", "你现在", "你最近", "你今天", "你那边")
+_CURRENT_STATE_PREDICATE_TERMS = (
+    "干嘛", "做什么", "做啥", "忙", "有空", "怎么样", "还好吗",
+    "心情", "感觉", "开心", "难过", "状态",
+)
 
 def detect_current_state_fast_path(message: str) -> bool:
     """Hot-path for common "what are you doing now" messages.
@@ -126,6 +150,27 @@ def detect_current_state_fast_path(message: str) -> bool:
     if any(word in normalized for word in _CURRENT_STATE_TIME_BLOCKERS):
         return False
     return normalized in _CURRENT_STATE_FAST_PHRASES
+
+
+def is_explicit_current_state_query(message: str) -> bool:
+    """Return true only for direct questions about AI's current/recent state.
+
+    The LLM intent classifier can over-label follow-ups about the previous AI
+    reply as CURRENT_STATE. This gate keeps the short-circuit narrow so
+    context follow-ups fall back to the normal reply path.
+    """
+    normalized = re.sub(r"[\s，。！？!?~～…,.、]+", "", message.strip())
+    if not normalized:
+        return False
+    if any(word in normalized for word in _CURRENT_STATE_HISTORY_BLOCKERS):
+        return False
+    if detect_current_state_fast_path(message):
+        return True
+    if normalized in _CURRENT_STATE_EXPLICIT_PHRASES:
+        return True
+    if not any(term in normalized for term in _CURRENT_STATE_SUBJECT_TERMS):
+        return False
+    return any(term in normalized for term in _CURRENT_STATE_PREDICATE_TERMS)
 
 
 def infer_schedule_query_type(message: str, *, require_query_cue: bool = True) -> str | None:

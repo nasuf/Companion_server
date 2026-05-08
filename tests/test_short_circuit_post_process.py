@@ -147,6 +147,49 @@ async def test_handle_current_state_does_not_pass_full_schedule_to_reply_prompt(
 
 
 @pytest.mark.asyncio
+async def test_handle_current_state_rejects_previous_reply_followup():
+    """追问上一轮 AI 说法不应走 current_state 短路，否则容易用当前作息硬编细节。"""
+    from app.services.chat.intent_handlers import ShortCircuitCtx, handle_current_state
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id=None, user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+        recent_context="AI: 不忙，刚在窗边看云发呆。\n用户: 这么晚还能看到云啊",
+    )
+
+    with (
+        patch(
+            "app.services.chat.intent_handlers.resolve_implicit_time",
+            new=AsyncMock(return_value=(None, "看剧/看书")),
+        ) as time_mock,
+        patch(
+            "app.services.chat.intent_handlers.current_state_reply",
+            new=AsyncMock(return_value="刚才在翻一本讲云彩分类的书"),
+        ) as reply_mock,
+    ):
+        handled, events = await handle_current_state(
+            "这么晚还能看到云啊",
+            ctx,
+            ai_status={"activity": "看剧/看书"},
+            schedule_context="",
+            portrait=None,
+            user_emotion=None,
+        )
+
+    assert handled is False
+    assert events is None
+    time_mock.assert_not_awaited()
+    reply_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_handle_schedule_query_date_does_not_inject_current_activity():
     """未来日程查询不能把当前正在做的事注入 prompt。"""
     from app.services.chat.intent_handlers import ShortCircuitCtx, handle_schedule_query

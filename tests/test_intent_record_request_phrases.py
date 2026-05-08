@@ -60,12 +60,21 @@ RECORD_REQUEST_MUST_MISS: tuple[tuple[str, str, str], ...] = (
 
 def test_current_state_fast_path_is_narrow():
     """常见当前状态问句走本地 fast path；带未来/过去时间的仍交给 LLM。"""
-    from app.services.chat.intent_dispatcher import detect_current_state_fast_path
+    from app.services.chat.intent_dispatcher import (
+        detect_current_state_fast_path,
+        is_explicit_current_state_query,
+    )
 
     assert detect_current_state_fast_path("你在干嘛呢")
     assert detect_current_state_fast_path("忙啥？")
     assert not detect_current_state_fast_path("你明天在干嘛")
     assert not detect_current_state_fast_path("你刚才在干嘛")
+
+    assert is_explicit_current_state_query("忙吗")
+    assert is_explicit_current_state_query("你最近怎么样")
+    assert is_explicit_current_state_query("你心情怎么样")
+    assert not is_explicit_current_state_query("这么晚还能看到云啊")
+    assert not is_explicit_current_state_query("你刚才说在看云？")
 
 
 # ═══════════════════════════════════════════════════════════════════

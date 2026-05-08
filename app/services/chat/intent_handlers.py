@@ -30,6 +30,7 @@ from app.services.chat.intent_replies import (
     record_confirm_reply,
     schedule_query_reply,
 )
+from app.services.chat.intent_dispatcher import is_explicit_current_state_query
 from app.services.chat.multi_intent import finalize_short_circuit
 from app.services.memory.interaction.deletion import (
     detect_deletion_intent,
@@ -383,6 +384,9 @@ async def handle_current_state(
     portrait: Any,
     user_emotion: dict | None,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
+    if not is_explicit_current_state_query(user_message):
+        return False, None
+
     # spec §3.2 隐性时间解析: 走时间中枢 helper, 复用 caller 已加载的 ai_status
     _, current_activity = await resolve_implicit_time(ctx.agent_id or "", ai_status)
     try:
