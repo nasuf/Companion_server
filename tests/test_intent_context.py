@@ -14,6 +14,7 @@ from app.services.chat.intent_dispatcher import (
     IntentResult,
     IntentType,
     detect_intent_llm,
+    detect_intent,
     detect_intent_unified,
 )
 
@@ -242,6 +243,59 @@ class TestIntentLlmFallback:
                 "明天周末有空吗", context="",  # 故意含多个 schedule keyword
             )
         assert result.intent == IntentType.NONE
+
+
+class TestScheduleQueryType:
+    def test_keyword_fallback_prefers_date_over_current(self):
+        """你明天忙吗 同时含 date/current 词，date 必须优先。"""
+        result = detect_intent("你明天忙吗？")
+
+        assert result.intent == IntentType.SCHEDULE_QUERY
+        assert result.metadata["query_type"] == "date"
+
+    def test_keyword_fallback_does_not_treat_bare_date_as_schedule_query(self):
+        """显式时间不是计划查询意图本身：明天是事实陈述时不能短路日程。"""
+        result = detect_intent("明天是我的生日")
+
+        assert result.intent == IntentType.NONE
+
+    def test_keyword_fallback_does_not_treat_first_person_plan_as_schedule_query(self):
+        """fallback 要保守：用户陈述自己的计划，不应被安排/计划词误路由。"""
+        result = detect_intent("我明天计划去看牙")
+
+        assert result.intent == IntentType.NONE
+
+    def test_keyword_fallback_uses_parser_for_next_weekday(self):
+        """非固定关键词日期也应由时间解析器统一归为 date 查询。"""
+        result = detect_intent("你下周三忙吗？")
+
+        assert result.intent == IntentType.SCHEDULE_QUERY
+        assert result.metadata["query_type"] == "date"
+
+    def test_keyword_fallback_uses_parser_for_week_range(self):
+        result = detect_intent("你下周忙吗？")
+
+        assert result.intent == IntentType.SCHEDULE_QUERY
+        assert result.metadata["query_type"] == "date"
+
+    def test_keyword_fallback_keeps_today_how_are_you_as_current(self):
+        """今天怎么样 是当前状态问法，不应被 今天 解析成 date 查询。"""
+        result = detect_intent("你今天怎么样？")
+
+        assert result.intent == IntentType.SCHEDULE_QUERY
+        assert result.metadata["query_type"] == "current"
+
+    @pytest.mark.asyncio
+    async def test_llm_schedule_query_gets_structured_query_type(self):
+        """LLM 只返回计划查询标签时，仍要从原文补 query_type。"""
+        with patch(
+            "app.services.chat.intent_replies.unified_intent_recognize",
+            new=AsyncMock(return_value=["计划查询"]),
+        ):
+            result = await detect_intent_unified("你下周三忙吗？", context="")
+
+        assert result.intent == IntentType.SCHEDULE_QUERY
+        assert result.metadata["query_type"] == "date"
 
 
 class TestSpecExampleEndToEnd:

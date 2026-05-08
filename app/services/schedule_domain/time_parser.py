@@ -43,7 +43,9 @@ _RELATIVE_DAYS: list[tuple[str, int]] = sorted(
 )
 
 # Pre-compiled patterns for hot path
-_WEEK_PAT = re.compile(r"(上上?|下下?|这)(?:个)?周([一二三四五六日天])")
+_WEEK_PAT = re.compile(r"(上上?|下下?|这|本)(?:个)?周([一二三四五六日天])")
+_WEEK_RANGE_PAT = re.compile(r"(上上|下下|上|下|这|本)(?:个)?周(?![一二三四五六日天末])")
+_WEEKEND_PAT = re.compile(r"(上上|下下|上|下|这|本)?(?:个)?周末")
 _DATE_PAT = re.compile(r"(\d{1,2})月(\d{1,2})[日号]")
 _YEAR_PAT = re.compile(r"(去年|前年|今年)(?:(\d{1,2})月)?")
 _HOUR_PAT = re.compile(r"(?:(早上|上午|中午|下午|晚上|凌晨))?(\d{1,2})[点时](?:(\d{1,2})分?)?")
@@ -53,7 +55,7 @@ _REL_OFFSET_PAT = re.compile(
     r"([一二三四五六七八九十百两\d]{1,4})\s*(分钟|小时|天|周|月)(?:之)?(前|后)"
 )
 _QUICK_TIME_PAT = re.compile(
-    r"[今昨明前后]天|[上下这]周|[上下这]个月"
+    r"[今昨明前后]天|[上下这本]周|周末|[上下这]个月"
     r"|\d{1,2}月\d{1,2}[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
     r"|早上|上午|中午|下午|晚上|凌晨"
@@ -220,6 +222,35 @@ def parse_time_expressions(
         d = today + timedelta(days=diff)
         s, e = _day_range(d)
         _add(m.group(), s, e, "relative", 0.9, m.span())
+
+    # --- 2b. 整周 / 周末范围 ---
+    def _week_offset(prefix: str | None) -> int:
+        if prefix == "上上":
+            return -2
+        if prefix == "上":
+            return -1
+        if prefix == "下":
+            return 1
+        if prefix == "下下":
+            return 2
+        return 0
+
+    monday = today - timedelta(days=today.weekday())
+    for m in _WEEK_RANGE_PAT.finditer(message):
+        prefix = m.group(1)
+        start_day = monday + timedelta(weeks=_week_offset(prefix))
+        end_day = start_day + timedelta(days=6)
+        s = datetime.combine(start_day, time.min, tzinfo=_TZ)
+        e = datetime.combine(end_day, time.max, tzinfo=_TZ)
+        _add(m.group(), s, e, "relative", 0.82, m.span())
+
+    for m in _WEEKEND_PAT.finditer(message):
+        prefix = m.group(1)
+        start_day = monday + timedelta(weeks=_week_offset(prefix), days=5)
+        end_day = start_day + timedelta(days=1)
+        s = datetime.combine(start_day, time.min, tzinfo=_TZ)
+        e = datetime.combine(end_day, time.max, tzinfo=_TZ)
+        _add(m.group(), s, e, "relative", 0.82, m.span())
 
     # --- 3. 相对月 ---
     for word, delta in _MONTH_MAP:

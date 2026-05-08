@@ -91,6 +91,8 @@ def test_relative_weekday_combinations():
         ("上上周一", today + timedelta(days=-16)),
         # 这周五 = 周三 + 2 = 4/24
         ("这周五", today + timedelta(days=2)),
+        # 本周五 同义于这周五
+        ("本周五", today + timedelta(days=2)),
     ]
     for text, expected_date in cases:
         results = parse_time_expressions(text, now=now)
@@ -98,6 +100,20 @@ def test_relative_weekday_combinations():
         assert results[0].start.date() == expected_date, (
             f"{text} expected {expected_date}, got {results[0].start.date()}"
         )
+
+
+def test_relative_week_and_weekend_ranges():
+    """下周 / 周末 这类范围词必须解析成日期范围，供日程查询复用。"""
+    now = _now()  # 周三
+    results = parse_time_expressions("下周忙吗", now=now)
+    assert results, "无解析: 下周"
+    assert results[0].start.date().isoformat() == "2026-04-27"
+    assert results[0].end.date().isoformat() == "2026-05-03"
+
+    weekend = parse_time_expressions("周末有空吗", now=now)
+    assert weekend, "无解析: 周末"
+    assert weekend[0].start.date().isoformat() == "2026-04-25"
+    assert weekend[0].end.date().isoformat() == "2026-04-26"
 
 
 def test_absolute_year_with_month():

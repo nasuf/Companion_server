@@ -170,6 +170,7 @@ async def _bg_memory_pipeline(
     messages: list[dict],
     conversation_id: str | None = None,
     workspace_id: str | None = None,
+    skip_ai_side: bool = False,
 ) -> None:
     """spec §2.1 / §2.2：用户侧与 AI 侧走两条独立管线，owner 由路径决定。
 
@@ -191,10 +192,16 @@ async def _bg_memory_pipeline(
     """
     if conversation_id is not None:
         async with _get_pipeline_lock(conversation_id):
-            await _do_memory_pipeline(user_id, messages, conversation_id, workspace_id)
+            await _do_memory_pipeline(
+                user_id, messages, conversation_id, workspace_id,
+                skip_ai_side=skip_ai_side,
+            )
     else:
         # proactive 等无 conv 入口: 调用方天然不并发同源, 无需上锁.
-        await _do_memory_pipeline(user_id, messages, None, workspace_id)
+        await _do_memory_pipeline(
+            user_id, messages, None, workspace_id,
+            skip_ai_side=skip_ai_side,
+        )
 
 
 async def _do_memory_pipeline(
@@ -202,6 +209,8 @@ async def _do_memory_pipeline(
     messages: list[dict],
     conversation_id: str | None,
     workspace_id: str | None,
+    *,
+    skip_ai_side: bool = False,
 ) -> None:
     """_bg_memory_pipeline 的实现体. 由外层确保同 conv 不并发后被调用."""
     try:
@@ -212,8 +221,13 @@ async def _do_memory_pipeline(
         roles = {m.get("role") for m in recent}
         sides_to_run: list[tuple[Literal["user", "ai"], str]] = [
             ("user", "user"),
-            ("ai", "assistant"),
         ]
+        if not skip_ai_side:
+            sides_to_run.append(("ai", "assistant"))
+        elif conversation_id:
+            await _advance_side_watermark_without_extraction(
+                recent, conversation_id, side="ai",
+            )
         tasks = [
             _pipeline_with_watermark(
                 user_id, recent, conversation_id,
@@ -299,6 +313,35 @@ async def _pipeline_with_watermark(
         await set_watermark(conversation_id, side, max_side_ts)
 
     return len(stored_ids)
+
+
+async def _advance_side_watermark_without_extraction(
+    recent: list[dict],
+    conversation_id: str,
+    *,
+    side: Literal["user", "ai"],
+) -> None:
+    """Advance watermark for a side intentionally skipped from extraction.
+
+    Schedule/current-state replies are ephemeral answers. If we skip AI memory
+    extraction without moving the AI watermark, a later non-skipped turn would
+    see this assistant reply as "new" and extract it retroactively.
+    """
+    target_role = "user" if side == "user" else "assistant"
+    fallback_now = datetime.now(UTC)
+    max_side_ts: datetime | None = None
+    for msg in recent:
+        if msg.get("role") != target_role:
+            continue
+        effective = _parse_ts(msg) or fallback_now
+        if max_side_ts is None or effective > max_side_ts:
+            max_side_ts = effective
+    if max_side_ts is None:
+        return
+
+    wm = _ensure_aware(await get_watermark(conversation_id, side))
+    if wm is None or max_side_ts > wm:
+        await set_watermark(conversation_id, side, max_side_ts)
 
 
 def _parse_ts(m: dict) -> datetime | None:
@@ -402,6 +445,7 @@ async def run_post_process(
     messages_dicts: list[dict],
     user_emotion: dict | None = None,
     ai_emotion: dict | None = None,
+    skip_ai_memory: bool = False,
 ) -> None:
     """5 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 记忆抽取 / 性格反馈 / 耐心恢复。
 
@@ -416,7 +460,12 @@ async def run_post_process(
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
             _bg_user_emotion(user_message_id, user_emotion),
-            _bg_memory_pipeline(user_id, full_messages, conversation_id=conversation_id),
+            _bg_memory_pipeline(
+                user_id,
+                full_messages,
+                conversation_id=conversation_id,
+                skip_ai_side=skip_ai_memory,
+            ),
         ]
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))

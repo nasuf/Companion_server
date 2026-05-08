@@ -177,6 +177,32 @@ async def test_watermark_advances_past_ts_in_mixed_new_msgs():
 
 
 @pytest.mark.asyncio
+async def test_skip_ai_side_advances_ai_watermark_without_extraction():
+    """跳过 AI 自我记忆时也要推进 AI 水位线，防止下一轮被补抽。"""
+    from app.services.chat.post_process import _bg_memory_pipeline
+
+    wm_old = datetime.now(UTC) - timedelta(hours=1)
+    base = datetime.now(UTC)
+    msgs = [
+        _msg("user", "你明天忙吗", base),
+        _msg("assistant", "明天上午有点安排", base + timedelta(seconds=1)),
+    ]
+
+    with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=wm_old)), \
+         patch("app.services.chat.post_process.set_watermark", AsyncMock()) as mock_set, \
+         patch("app.services.chat.post_process.process_memory_pipeline", AsyncMock()) as mock_pipeline:
+        await _bg_memory_pipeline(
+            "u1", msgs, conversation_id="c1", skip_ai_side=True,
+        )
+
+    assert mock_pipeline.await_count == 1
+    assert mock_pipeline.await_args.kwargs["side"] == "user"
+    side_ts = {call.args[1]: call.args[2] for call in mock_set.await_args_list}
+    assert "user" in side_ts
+    assert side_ts["ai"] == base + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_watermark_advances_with_now_when_new_msgs_lack_timestamp():
     """无 createdAt 的新消息 (新 AI reply / boundary 手工构造) 抽取后水位线仍推进到 now(),
     否则下一轮持久化后 createdAt > 老 wm 会被重抽."""

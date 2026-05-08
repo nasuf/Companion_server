@@ -70,6 +70,7 @@ from app.services.chat.intent_handlers import (
     handle_apology_promise,
     handle_conversation_end,
     handle_crisis,
+    handle_crisis_followup,
     handle_current_state,
     handle_deletion,
     handle_record_request,
@@ -78,6 +79,7 @@ from app.services.chat.intent_handlers import (
 )
 from app.services.chat.intent_replies import (
     delay_explanation_reply as _delay_explanation_reply,
+    crisis_followup_classify as _crisis_followup_classify,
     memory_weak_reply as _memory_weak_reply,
     memory_medium_reply as _memory_medium_reply,
     memory_strong_reply as _memory_strong_reply,
@@ -274,6 +276,51 @@ def _is_crisis_message(text: str) -> bool:
     if not text:
         return False
     return any(keyword in text for keyword in _CRISIS_KEYWORDS)
+
+
+_CRISIS_RELEASE_KEYWORDS = (
+    "我安全", "安全了", "现在安全", "没事了", "好多了", "缓过来了",
+    "不想死了", "不想了", "不会了", "不会自杀", "不会自残",
+    "刚才是气话", "只是气话", "开玩笑", "别担心",
+)
+
+
+def _is_crisis_released(text: str) -> bool:
+    """用户明确表示已安全/缓和时, 解除近期危机 follow-up guard."""
+    if not text:
+        return False
+    return any(keyword in text for keyword in _CRISIS_RELEASE_KEYWORDS)
+
+
+def _recent_unresolved_crisis_message(
+    messages: list[dict],
+    *,
+    exclude_id: str | None = None,
+    window: int = 8,
+) -> str | None:
+    """Return the latest recent crisis user message unless later user text released it.
+
+    This is deliberately conversational-state logic, not intent detection. It
+    prevents a follow-up like "你开心吗" right after "我想死" from being routed as a
+    normal current-state question.
+    """
+    checked = 0
+    for msg in reversed(messages):
+        if exclude_id and msg.get("id") == exclude_id:
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = str(msg.get("content") or "")
+        if not content:
+            continue
+        checked += 1
+        if checked > window:
+            return None
+        if _is_crisis_released(content):
+            return None
+        if _is_crisis_message(content):
+            return content
+    return None
 
 
 def truncate_at_sentence(text: str, max_len: int) -> str:
@@ -561,6 +608,26 @@ async def stream_chat_response(
         crisis_force_intent = (
             (not sub_intent_mode) and _is_crisis_message(user_message)
         )
+        recent_crisis_message = (
+            None if crisis_force_intent or sub_intent_mode
+            else _recent_unresolved_crisis_message(
+                messages_dicts, exclude_id=user_message_id,
+            )
+        )
+        crisis_followup_active = False
+        if recent_crisis_message is not None:
+            if _is_crisis_released(user_message):
+                crisis_followup_active = False
+            else:
+                try:
+                    followup_status = await _crisis_followup_classify(
+                        message=user_message,
+                        context=boundary_ctx.recent_context,
+                    )
+                except Exception as e:
+                    logger.warning(f"Crisis followup classifier failed, guarding: {e}")
+                    followup_status = "guard"
+                crisis_followup_active = followup_status != "release"
         if crisis_force_intent:
             logger.warning(
                 f"[CRISIS] keyword detected, forcing CRISIS intent (len={len(user_message)})",
@@ -569,11 +636,20 @@ async def stream_chat_response(
                     "user_message_len": len(user_message),
                 },
             )
+        elif crisis_followup_active:
+            logger.warning(
+                "[CRISIS-FOLLOWUP] recent unresolved crisis detected, guarding reply",
+                extra={
+                    "event": EVT_CHAT_CRISIS_DETECTED,
+                    "user_message_len": len(user_message),
+                    "crisis_followup": True,
+                },
+            )
 
         # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
         # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
         # crisis 路径也跳过: 用户求救信号优先级高于一切, pending 留着等用户安全后处理.
-        if not sub_intent_mode and not crisis_force_intent:
+        if not sub_intent_mode and not crisis_force_intent and not crisis_followup_active:
             preflight_ctx = PreflightCtx(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
@@ -614,6 +690,7 @@ async def stream_chat_response(
             forced_intent is None
             and not sub_intent_mode
             and not crisis_force_intent
+            and not crisis_followup_active
             and detect_current_state_fast_path(user_message)
         )
         response_diagnostics: dict[str, Any] = {
@@ -647,14 +724,18 @@ async def stream_chat_response(
         crisis_memory_task: asyncio.Task | None = None
         crisis_portrait_task: asyncio.Task | None = None
         early_parsed_times: list = []
-        if crisis_force_intent:
+        if crisis_force_intent or crisis_followup_active:
             # 轻量 fetch — 仅 handle_crisis 必需的两项 (lazy import 防循环依赖).
             # crisis memory 走专用安全召回, 避免通用 top-10 把轻生/强负面历史挤掉.
             from app.services.memory.retrieval.safety import retrieve_crisis_memories
             from app.services.portrait import get_latest_portrait
+            crisis_query = (
+                user_message if crisis_force_intent
+                else f"{recent_crisis_message}\n{user_message}"
+            )
             crisis_memory_task = asyncio.create_task(
                 retrieve_crisis_memories(
-                    user_message, user_id, workspace_id=workspace_id,
+                    crisis_query, user_id, workspace_id=workspace_id,
                 )
             )
             if agent_id:
@@ -685,6 +766,12 @@ async def stream_chat_response(
             detected_intent = IntentResult(intent=forced_intent, confidence=1.0)
         elif crisis_force_intent:
             detected_intent = IntentResult(intent=IntentType.CRISIS, confidence=1.0)
+        elif crisis_followup_active:
+            detected_intent = IntentResult(
+                intent=IntentType.CRISIS,
+                confidence=1.0,
+                metadata={"followup": True},
+            )
         elif current_state_fast_path:
             detected_intent = IntentResult(
                 intent=IntentType.CURRENT_STATE,
@@ -716,7 +803,7 @@ async def stream_chat_response(
         # crisis 路径下 detected_intent 是手动构造的 CRISIS, metadata={} 没 fragments,
         # 这里 if 分支自然不进; 但显式 `not crisis_force_intent` 防御 future 改动加进 metadata.
         # (crisis 优先级最高, 不该被多意图拆分稀释)
-        if forced_intent is None and not crisis_force_intent:
+        if forced_intent is None and not crisis_force_intent and not crisis_followup_active:
             # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
             fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
             if fragments and len(fragments) > 1:
@@ -816,9 +903,13 @@ async def stream_chat_response(
             await _cancel_fetch_task()
             if crisis_memory_task is None:
                 from app.services.memory.retrieval.safety import retrieve_crisis_memories
+                crisis_query = (
+                    user_message if not detected_intent.metadata.get("followup")
+                    else f"{recent_crisis_message}\n{user_message}"
+                )
                 crisis_memory_task = asyncio.create_task(
                     retrieve_crisis_memories(
-                        user_message, user_id, workspace_id=workspace_id,
+                        crisis_query, user_id, workspace_id=workspace_id,
                     )
                 )
             if crisis_portrait_task is None and agent_id:
@@ -850,12 +941,20 @@ async def stream_chat_response(
                 _fire_background(
                     log_memory_access(user_id, crisis_accessed_ids, workspace_id=workspace_id)
                 )
-            async for evt in handle_crisis(
-                user_message, sc_ctx,
-                classified_memories=crisis_classified,
-                portrait=crisis_portrait,
-            ):
-                yield evt
+            if detected_intent.metadata.get("followup"):
+                async for evt in handle_crisis_followup(
+                    user_message, sc_ctx,
+                    classified_memories=crisis_classified,
+                    portrait=crisis_portrait,
+                ):
+                    yield evt
+            else:
+                async for evt in handle_crisis(
+                    user_message, sc_ctx,
+                    classified_memories=crisis_classified,
+                    portrait=crisis_portrait,
+                ):
+                    yield evt
             # finally 兜底 fire post_process (用 None emotion, _bg_user_emotion +
             # save_ai_emotion 都 gracefully 跳过). memory pipeline 仍跑 — crisis
             # 消息应该被记忆.
@@ -1309,6 +1408,7 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
             ai_emotion=emotion,
+            skip_ai_memory=False,
         ))
         post_process_fired = True
 
@@ -1390,4 +1490,8 @@ async def stream_chat_response(
                 messages_dicts=messages_dicts,
                 user_emotion=prompt_user_emotion,
                 ai_emotion=emotion,
+                skip_ai_memory=(
+                    sc_ctx is not None
+                    and sc_ctx.last_short_circuit_kind in {"schedule_query", "current_state"}
+                ),
             ))

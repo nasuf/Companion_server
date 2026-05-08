@@ -11,6 +11,7 @@ P0 BUG: orchestrator 主路径末尾才 fire post_process, 短路 intent 直接 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -143,6 +144,112 @@ async def test_handle_current_state_does_not_pass_full_schedule_to_reply_prompt(
     assert events is not None
     assert reply_mock.await_args.kwargs["current_activity"] == "正在工作室打磨齿轮"
     assert reply_mock.await_args.kwargs["ai_schedule"] == ""
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_query_date_does_not_inject_current_activity():
+    """未来日程查询不能把当前正在做的事注入 prompt。"""
+    from app.services.chat.intent_handlers import ShortCircuitCtx, handle_schedule_query
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+    tomorrow_schedule = [
+        {"start": "09:00", "end": "10:00", "activity": "看书"},
+        {"start": "10:00", "end": "12:00", "activity": "整理工作台"},
+    ]
+
+    with (
+        patch(
+            "app.services.chat.intent_handlers.get_cached_schedule",
+            new=AsyncMock(return_value=tomorrow_schedule),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.schedule_query_reply",
+            new=AsyncMock(return_value="明天上午有点安排"),
+        ) as reply_mock,
+    ):
+        handled, events, schedule_context = await handle_schedule_query(
+            "你明天忙吗？",
+            ctx,
+            schedule=[{"start": "15:00", "end": "16:00", "activity": "当前齿轮活"}],
+            ai_status={"status": "very_busy", "activity": "正在焊音乐盒关节"},
+            portrait=None,
+            user_emotion=None,
+            query_type="date",
+        )
+
+    assert handled is True
+    assert events is not None
+    assert schedule_context is not None
+    assert "明天" in schedule_context
+    assert "当前状态" not in schedule_context
+    assert "正在焊音乐盒关节" not in schedule_context
+    assert reply_mock.await_args.kwargs["current_activity"] == ""
+    assert "看书" in reply_mock.await_args.kwargs["ai_schedule"]
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_query_uses_parser_target_date():
+    """handler 通过统一 scope 解析目标日期，不再自己维护零散日期关键词。"""
+    from app.services.chat.intent_handlers import ShortCircuitCtx, handle_schedule_query
+
+    ctx = ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="A"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+    fixed_now = datetime.fromisoformat("2026-05-08T15:00:00+08:00")
+    next_wednesday_schedule = [
+        {"start": "14:00", "end": "15:00", "activity": "去旧货市场"},
+    ]
+
+    with (
+        patch(
+            "app.services.chat.intent_handlers.get_current_time",
+            return_value=SimpleNamespace(now=fixed_now),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.get_cached_schedule",
+            new=AsyncMock(return_value=next_wednesday_schedule),
+        ) as cached_mock,
+        patch(
+            "app.services.chat.intent_handlers.schedule_query_reply",
+            new=AsyncMock(return_value="下周三下午有安排"),
+        ) as reply_mock,
+    ):
+        handled, events, schedule_context = await handle_schedule_query(
+            "你下周三忙吗？",
+            ctx,
+            schedule=[{"start": "15:00", "end": "16:00", "activity": "当前齿轮活"}],
+            ai_status={"status": "very_busy", "activity": "正在焊音乐盒关节"},
+            portrait=None,
+            user_emotion=None,
+            query_type="date",
+        )
+
+    assert handled is True
+    assert events is not None
+    assert schedule_context is not None
+    assert "下周三" in schedule_context
+    assert "当前状态" not in schedule_context
+    assert "去旧货市场" in reply_mock.await_args.kwargs["ai_schedule"]
+    target_date = cached_mock.await_args.args[1]
+    assert target_date.date().isoformat() == "2026-05-13"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -285,6 +392,16 @@ def test_orchestrator_current_state_fast_path_precedes_full_fetch_and_intent_llm
         "轻量 current-state fetch 必须作为 fetch_task 分支的 elif；"
         "fast path 下 fetch_task 为 None，因此不会进入 full fetch await"
     )
+
+
+def test_orchestrator_skips_ai_memory_for_state_and_schedule_short_circuits():
+    """当前状态/计划查询回复是临场回答，不应进入 AI 自我记忆。"""
+    import inspect
+    from app.services.chat import orchestrator as orch_mod
+
+    src = inspect.getsource(orch_mod.stream_chat_response)
+    assert "skip_ai_memory=(" in src
+    assert '{"schedule_query", "current_state"}' in src
 
 
 @pytest.mark.skip(reason="full orchestrator integration test — too many lazy imports to mock cleanly; covered by manual e2e DB verification")

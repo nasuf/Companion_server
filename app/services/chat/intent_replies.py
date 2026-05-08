@@ -25,6 +25,7 @@ _OPTIONAL_REFERENCE_KEYS = frozenset({
     "deleted_memories",
     "l3_memory",
     "ai_schedule",
+    "current_activity",
 })
 
 
@@ -132,8 +133,8 @@ async def schedule_query_reply(
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
-            "user_portrait": user_portrait or "(未知)",
-            "current_activity": current_activity or "(未知)",
+            "user_portrait": user_portrait or "",
+            "current_activity": current_activity or "",
             "ai_schedule": ai_schedule or "(未知)",
             "ai_portrait": ai_portrait or "(未知)",
         },
@@ -228,6 +229,49 @@ async def crisis_reply(
         },
         max_chars=200,
     )
+
+
+async def crisis_followup_reply(
+    *,
+    message: str,
+    context: str = "",
+    personality_brief: str = "",
+    user_portrait: str = "",
+    user_memory: str = "",
+) -> str | None:
+    """危机后一段时间内的普通追问仍需安全优先。"""
+    return await _render_llm(
+        "intent.crisis_followup_reply",
+        {
+            "message": message,
+            "context": context or "(无)",
+            "personality_brief": personality_brief or "真诚朋友",
+            "user_portrait": user_portrait or "(未知)",
+            "user_memory": user_memory or "(无)",
+        },
+        max_chars=200,
+    )
+
+
+async def crisis_followup_classify(
+    *,
+    message: str,
+    context: str = "",
+) -> str:
+    """Return guard/release for recent-crisis follow-up state."""
+    result = await render_prompt(
+        "intent.crisis_followup_classify",
+        {
+            "message": message,
+            "context": context or "(无)",
+        },
+        lambda p: invoke_json(get_utility_model(), p),
+    )
+    if isinstance(result, dict):
+        status = str(result.get("status", "")).strip().lower()
+        if status in {"guard", "release"}:
+            return status
+    return "guard"
 
 
 async def deletion_confirm_reply(
@@ -769,6 +813,9 @@ __all__ = [
     "schedule_query_reply",
     "schedule_adjust_reply",
     "current_state_reply",
+    "crisis_reply",
+    "crisis_followup_reply",
+    "crisis_followup_classify",
     "deletion_confirm_reply",
     "deletion_done_reply",
     "record_confirm_reply",

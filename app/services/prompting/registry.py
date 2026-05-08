@@ -20,6 +20,8 @@ from app.services.prompting.defaults import (
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
     CONSISTENCY_RULES_PROMPT,
+    CRISIS_FOLLOWUP_CLASSIFY_PROMPT,
+    CRISIS_FOLLOWUP_REPLY_PROMPT,
     CRISIS_REPLY_PROMPT,
     CURRENT_STATE_REPLY_PROMPT,
     DAILY_SCHEDULE_PROMPT,
@@ -150,6 +152,19 @@ PROMPT_DEFINITIONS = [
         "依赖 LLM 意图分类 (实证 LLM 把'我想跳楼'误归'询问当前状态'). "
         "原则化措辞 (不举具体关键词反例) + 三步顺序 + 强禁项. 详见 defaults.py 注释.",
         CRISIS_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.crisis_followup_reply", "危机后续跟进回复", "聊天热路径", "聊天",
+        "【工程主导】危机后的下一段对话仍需安全优先。用户不再重复危机关键词、"
+        "但最近上下文存在未解除危机时, intent_handlers.handle_crisis_followup "
+        "调用本 prompt, 避免 current_state/schedule 等普通短路把话题带偏。",
+        CRISIS_FOLLOWUP_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.crisis_followup_classify", "危机后续状态判定", "聊天热路径", "聊天",
+        "【工程主导】近期存在未解除危机时, 用小模型判断当前消息是否明确解除危机。"
+        "默认 guard, 仅高置信 explicit release 才解除, 避免普通问候/问 AI 状态误回普通路径。",
+        CRISIS_FOLLOWUP_CLASSIFY_PROMPT,
     ),
 
     # ── 初始化 (背景生成) ──

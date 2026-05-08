@@ -21,6 +21,7 @@ from app.db import db
 from app.observability.events import EVT_INTENT_SHORT_CIRCUIT
 from app.services.chat.intent_replies import (
     apology_reply,
+    crisis_followup_reply,
     crisis_reply,
     current_state_reply,
     deletion_confirm_reply,
@@ -46,10 +47,12 @@ from app.services.interaction.boundary import (
 from app.services.schedule_domain.schedule import (
     format_full_schedule_for_query,
     format_schedule_context,
+    get_cached_schedule,
     handle_schedule_adjustment,
+    resolve_schedule_query_scope,
     update_schedule_slot,
 )
-from app.services.schedule_domain.time_service import resolve_implicit_time
+from app.services.schedule_domain.time_service import get_current_time, resolve_implicit_time
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 
 logger = logging.getLogger(__name__)
@@ -86,12 +89,14 @@ class ShortCircuitCtx:
     # 在主意图消化整句时 (典型: RECORD_REQUEST 取消分支) 设此 flag = True,
     # finalize 跳过 sub-intent 递归. 详见 CLAUDE.md §6 偏离表.
     consumed_full_message: bool = False
+    last_short_circuit_kind: str | None = None
     response_diagnostics: dict[str, Any] | None = None
 
     async def finalize(self, reply: str, *, kind: str) -> AsyncGenerator[dict, None]:
         """`kind` 是该 handler 的 intent 名 (e.g. "apology_promise", "deletion_delete"),
         作为 EVT_INTENT_SHORT_CIRCUIT 的查询维度. 必填以防止 handler 漏标."""
         self.last_short_circuit_reply = reply
+        self.last_short_circuit_kind = kind
         logger.info(
             f"[INTENT-SC] kind={kind} reply_len={len(reply)}",
             extra={
@@ -316,15 +321,44 @@ async def handle_schedule_query(
     """
     if not schedule:
         return False, None, None
-    schedule_context = format_full_schedule_for_query(schedule, query_type, ai_status)
+    scope = resolve_schedule_query_scope(
+        user_message,
+        now=get_current_time().now,
+        require_query_cue=False,
+    )
+    resolved_query_type = scope.query_type if scope else query_type
+    target_schedule = schedule
+    target_status = ai_status if resolved_query_type == "current" else None
+    date_label = (
+        scope.date_label if scope
+        else ("今天" if resolved_query_type in {"current", "routine"} else "相关日期")
+    )
+    if resolved_query_type == "date":
+        target_schedule = []
+        if ctx.agent_id and scope and scope.target_date is not None:
+            cached = await get_cached_schedule(ctx.agent_id, scope.target_date)
+            if cached:
+                target_schedule = cached
+    if target_schedule:
+        schedule_context = format_full_schedule_for_query(
+            target_schedule, resolved_query_type, target_status, date_label=date_label,
+        )
+    else:
+        schedule_context = (
+            f"用户问的是{date_label}。目前没有这天的具体作息缓存；"
+            "请如实说明还没看到具体安排，不要用当前正在做的事代替。"
+        )
     try:
         response = await schedule_query_reply(
             message=user_message,
             context=ctx.recent_context,
             user_emotion=user_emotion,
             personality_brief=_agent_name(ctx.agent),
-            user_portrait=str(portrait) if portrait else "(未知)",
-            current_activity=format_schedule_context(ai_status) if ai_status else "(未知)",
+            user_portrait=str(portrait) if portrait else "",
+            current_activity=(
+                format_schedule_context(ai_status)
+                if resolved_query_type == "current" and ai_status else ""
+            ),
             ai_schedule=schedule_context or "(未知)",
         )
         if not response:
@@ -454,6 +488,41 @@ async def handle_crisis(
     # 多个 sub 把"危机 + 别的意图"拆出后 sub 再跑离题回复).
     ctx.consumed_full_message = True
     async for evt in ctx.finalize(response, kind="crisis"):
+        yield evt
+
+
+async def handle_crisis_followup(
+    user_message: str,
+    ctx: ShortCircuitCtx,
+    *,
+    classified_memories: list,
+    portrait: Any,
+) -> AsyncGenerator[dict, None]:
+    """Crisis aftercare for follow-up messages that no longer repeat keywords.
+
+    Example: user says "我想死"; AI responds safely; user then asks "你开心吗".
+    That question is literally about the AI's current feeling, but the active
+    conversational state is still unresolved crisis. This handler prevents the
+    current-state branch from describing AI activities and drifting away.
+    """
+    user_memory_block = _format_user_memory_for_crisis(classified_memories)
+    try:
+        response = await crisis_followup_reply(
+            message=user_message,
+            context=ctx.recent_context,
+            personality_brief=_agent_name(ctx.agent),
+            user_portrait=str(portrait) if portrait else "(未知)",
+            user_memory=user_memory_block,
+        )
+        if not response:
+            response = _CRISIS_STATIC_FALLBACK
+            logger.warning("[CRISIS-FOLLOWUP] LLM returned empty, using static fallback")
+    except Exception as e:
+        logger.warning(f"Crisis followup handler LLM failed, using static fallback: {e}")
+        response = _CRISIS_STATIC_FALLBACK
+
+    ctx.consumed_full_message = True
+    async for evt in ctx.finalize(response, kind="crisis_followup"):
         yield evt
 
 

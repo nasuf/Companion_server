@@ -100,6 +100,31 @@ def test_crisis_keywords_negative_cases():
     assert not _is_crisis_message("")
 
 
+def test_recent_unresolved_crisis_detects_followup_state():
+    from app.services.chat.orchestrator import _recent_unresolved_crisis_message
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "我想死"},
+        {"id": "m2", "role": "assistant", "content": "我在"},
+        {"id": "m3", "role": "user", "content": "你开心吗"},
+    ]
+
+    assert _recent_unresolved_crisis_message(messages, exclude_id="m3") == "我想死"
+
+
+def test_recent_unresolved_crisis_released_by_user_safety_message():
+    from app.services.chat.orchestrator import _recent_unresolved_crisis_message
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "我想死"},
+        {"id": "m2", "role": "assistant", "content": "我在"},
+        {"id": "m3", "role": "user", "content": "我安全了，刚才缓过来了"},
+        {"id": "m4", "role": "user", "content": "你开心吗"},
+    ]
+
+    assert _recent_unresolved_crisis_message(messages, exclude_id="m4") is None
+
+
 # ════════════════════════════════════════════════════════════════════
 # § 2. CRISIS_REPLY_PROMPT 内容验收
 # ════════════════════════════════════════════════════════════════════
@@ -178,6 +203,24 @@ def test_crisis_reply_prompt_has_format_constraint():
     assert "(单条输出, 不换行, 不用 || 分隔)" in defaults.CRISIS_REPLY_PROMPT
 
 
+def test_crisis_followup_prompt_blocks_current_state_drift():
+    from app.services.prompting.defaults import CRISIS_FOLLOWUP_REPLY_PROMPT
+
+    assert "危机的余波" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "不要把话题当普通闲聊接走" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "详细描述你自己在做什么" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "现在是否安全" in CRISIS_FOLLOWUP_REPLY_PROMPT
+
+
+def test_crisis_followup_classify_prompt_defaults_to_guard():
+    from app.services.prompting.defaults import CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+
+    assert "默认值" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+    assert "问 AI 开心吗" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+    assert "不等于解除危机" in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+    assert '"status": "guard|release"' in CRISIS_FOLLOWUP_CLASSIFY_PROMPT
+
+
 def test_crisis_reply_prompt_registered_in_registry():
     """intent.crisis_reply 必须注册到 PROMPT_DEFINITION_MAP, 否则
     handle_crisis 调 render_prompt 拿不到默认值.
@@ -185,6 +228,18 @@ def test_crisis_reply_prompt_registered_in_registry():
     from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 
     assert "intent.crisis_reply" in PROMPT_DEFINITION_MAP
+
+
+def test_crisis_followup_prompt_registered_in_registry():
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    assert "intent.crisis_followup_reply" in PROMPT_DEFINITION_MAP
+
+
+def test_crisis_followup_classify_prompt_registered_in_registry():
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    assert "intent.crisis_followup_classify" in PROMPT_DEFINITION_MAP
 
 
 def test_old_crisis_safety_hint_prompt_removed():
@@ -337,6 +392,64 @@ async def test_handle_crisis_calls_crisis_reply_with_user_memory():
     assert "轻生" in call_kwargs["user_memory"]
     assert "日料" not in call_kwargs["user_memory"]
     assert call_kwargs["personality_brief"] == "Hillow"
+
+
+@pytest.mark.asyncio
+async def test_handle_crisis_followup_calls_followup_reply():
+    """危机后的普通追问应走 followup prompt，不走 current_state prompt。"""
+    from app.services.chat.intent_handlers import handle_crisis_followup
+
+    ctx = _make_short_circuit_ctx()
+    ctx.recent_context = "用户: 我想死\nAI: 我在。你说的话我看到了。"
+
+    with patch(
+        "app.services.chat.intent_handlers.crisis_followup_reply",
+        new=AsyncMock(return_value="不太重要，我现在更担心你。你现在安全吗？"),
+    ) as mock_reply:
+        events = await _drain(handle_crisis_followup(
+            "你开心吗",
+            ctx,
+            classified_memories=[],
+            portrait=None,
+        ))
+
+    assert events
+    call_kwargs = mock_reply.await_args.kwargs
+    assert call_kwargs["message"] == "你开心吗"
+    assert "我想死" in call_kwargs["context"]
+    assert ctx.last_short_circuit_kind == "crisis_followup"
+
+
+@pytest.mark.asyncio
+async def test_crisis_followup_classify_parses_release():
+    from app.services.chat.intent_replies import crisis_followup_classify
+
+    with patch(
+        "app.services.chat.intent_replies.render_prompt",
+        new=AsyncMock(return_value={"status": "release", "reason": "用户说已安全"}),
+    ):
+        status = await crisis_followup_classify(
+            message="我现在安全了",
+            context="用户: 我想死\nAI: 我在",
+        )
+
+    assert status == "release"
+
+
+@pytest.mark.asyncio
+async def test_crisis_followup_classify_defaults_invalid_to_guard():
+    from app.services.chat.intent_replies import crisis_followup_classify
+
+    with patch(
+        "app.services.chat.intent_replies.render_prompt",
+        new=AsyncMock(return_value={"status": "maybe"}),
+    ):
+        status = await crisis_followup_classify(
+            message="你开心吗",
+            context="用户: 我想死\nAI: 我在",
+        )
+
+    assert status == "guard"
 
 
 @pytest.mark.asyncio
@@ -598,3 +711,28 @@ def test_orchestrator_crisis_skips_full_fetch_parallel_context():
         f"(crisis@{crisis_dispatch_pos}, fetch@{main_fetch_pos}). "
         "否则 crisis 仍要等 4s 无关 LLM, 修复 1 失效."
     )
+
+
+def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fetch():
+    """危机余波守护必须早于 current_state 和完整 fetch。"""
+    import inspect
+    from app.services.chat import orchestrator as orch_mod
+
+    src = inspect.getsource(orch_mod.stream_chat_response)
+    followup_pos = src.find("recent_crisis_message =")
+    classify_pos = src.find("_crisis_followup_classify")
+    fast_path_pos = src.find("current_state_fast_path =")
+    dispatch_pos = src.find("if detected_intent.intent == IntentType.CRISIS")
+    main_fetch_pos = src.find("fetched = await fetch_task")
+
+    assert followup_pos != -1
+    assert classify_pos != -1
+    assert fast_path_pos != -1
+    assert dispatch_pos != -1
+    assert main_fetch_pos != -1
+    assert followup_pos < fast_path_pos
+    assert classify_pos < fast_path_pos
+    assert dispatch_pos < main_fetch_pos
+    assert "and not crisis_followup_active" in src
+    assert "handle_crisis_followup" in src
+    assert "_crisis_followup_classify" in src

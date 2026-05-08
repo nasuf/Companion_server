@@ -106,6 +106,16 @@ def test_current_state_prompt_does_not_include_full_schedule():
     assert "AI当前的作息表：{ai_schedule}" not in prompt
 
 
+def test_schedule_query_prompt_forbids_using_current_state_for_future_query():
+    """未来日程查询不能展开当前作息故事。"""
+    from app.services.prompting import defaults
+
+    prompt = defaults.SCHEDULE_QUERY_REPLY_PROMPT
+    assert "如果用户问明天/后天/周末/未来，不要提你现在正在做什么" in prompt
+    assert "不要编造突发事故" in prompt
+    assert "刚才发生的经历" in prompt
+
+
 def test_tier_reply_prompts_forbid_ungrounded_self_context():
     """tier reply 使用率提升后, 必须防无依据自我活动/经历编造。"""
     from app.services.prompting import defaults

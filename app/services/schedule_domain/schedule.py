@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -21,6 +22,11 @@ from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
 from app.services.schedule_domain.time_service import classify_day_kind, is_holiday
+from app.services.schedule_domain.time_parser import (
+    ParsedTime,
+    has_explicit_time,
+    parse_time_expressions,
+)
 from app.services.mbti import get_mbti, signal as mbti_signal
 
 _WEEKDAY_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -473,12 +479,163 @@ _SCHEDULE_QUERY_KEYWORDS = {
 }
 
 
+@dataclass(frozen=True)
+class ScheduleQueryScope:
+    """Structured scope for a schedule query.
+
+    Intent detection answers "is this a schedule query"; this scope answers
+    "which part of the schedule should be used".  Keeping it here prevents
+    date/current branching from being re-implemented in chat handlers.
+    """
+
+    query_type: str
+    target_date: datetime | None = None
+    date_label: str = "相关日期"
+    explicit_time_text: str | None = None
+    source: str = "keyword"
+
+
+_SCHEDULE_QUERY_CUES = tuple(dict.fromkeys(
+    _SCHEDULE_QUERY_KEYWORDS["current"]
+    + _SCHEDULE_QUERY_KEYWORDS["routine"]
+    + [
+        "忙", "有空", "空不空", "方便吗", "有时间", "安排",
+        "日程", "计划", "排满", "满不满",
+    ]
+))
+
+_DATE_ANCHOR_WORDS = {
+    "今天", "明天", "后天", "大后天", "昨天", "前天", "大前天",
+}
+_PERIOD_LABELS = {
+    "早上": "早上",
+    "早晨": "早上",
+    "上午": "上午",
+    "中午": "中午",
+    "下午": "下午",
+    "晚上": "晚上",
+    "凌晨": "凌晨",
+}
+_CURRENT_STATE_SCOPE_PHRASES = (
+    "最近怎么样",
+    "最近好吗",
+    "今天怎么样",
+)
+
+
+def _has_schedule_query_cue(message: str) -> bool:
+    if not any(cue in message for cue in _SCHEDULE_QUERY_CUES):
+        return False
+    if "你" in message or "Hillow" in message:
+        return True
+    return any(marker in message for marker in (
+        "吗", "呢", "？", "?", "几", "什么", "有没有", "忙不忙", "空不空",
+    ))
+
+
+def _duration_seconds(parsed: ParsedTime) -> float:
+    return (parsed.end - parsed.start).total_seconds()
+
+
+def _pick_schedule_time(parsed_times: list[ParsedTime]) -> ParsedTime | None:
+    if not parsed_times:
+        return None
+
+    def _is_date_anchor(item: ParsedTime) -> bool:
+        text = item.original_text
+        return (
+            text in _DATE_ANCHOR_WORDS
+            or "周" in text
+            or "月" in text
+            or "年" in text
+            or "日" in text
+            or "号" in text
+        )
+
+    date_anchors = [item for item in parsed_times if _is_date_anchor(item)]
+    if date_anchors:
+        return max(date_anchors, key=lambda item: (item.confidence, -_duration_seconds(item)))
+    return min(parsed_times, key=lambda item: (_duration_seconds(item), -item.confidence))
+
+
+def _date_label_for(parsed: ParsedTime, message: str, now: datetime) -> str:
+    text = parsed.original_text
+    period = next((label for word, label in _PERIOD_LABELS.items() if word in message), "")
+
+    if "大后天" in message:
+        return f"大后天{period}" if period else "大后天"
+    if "后天" in message:
+        return f"后天{period}" if period else "后天"
+    if "明天" in message:
+        if period == "晚上":
+            return "明晚"
+        return f"明天{period}" if period else "明天"
+    if "今天" in message:
+        if period == "晚上":
+            return "今晚"
+        return f"今天{period}" if period else "今天"
+    if text in _PERIOD_LABELS:
+        return "今晚" if text == "晚上" else f"今天{_PERIOD_LABELS[text]}"
+    if parsed.start.date() == now.date() and period:
+        return "今晚" if period == "晚上" else f"今天{period}"
+    return text or "相关日期"
+
+
+def resolve_schedule_query_scope(
+    message: str,
+    *,
+    now: datetime | None = None,
+    require_query_cue: bool = False,
+) -> ScheduleQueryScope | None:
+    """Resolve the schedule range requested by a user message.
+
+    `require_query_cue=True` is for keyword fallback intent detection, where a
+    bare explicit date like "明天是我的生日" must not become a schedule query.
+    When the LLM has already classified the message as SCHEDULE_QUERY, callers
+    should leave it False so parsed time expressions can determine the scope.
+    """
+    if require_query_cue and not _has_schedule_query_cue(message):
+        return None
+
+    now = now or _local_now()
+
+    if any(phrase in message for phrase in _CURRENT_STATE_SCOPE_PHRASES):
+        return ScheduleQueryScope(
+            query_type="current",
+            target_date=now,
+            date_label="今天",
+            source="keyword",
+        )
+
+    if has_explicit_time(message):
+        parsed_times = parse_time_expressions(message, now=now)
+        parsed = _pick_schedule_time(parsed_times)
+        if parsed:
+            return ScheduleQueryScope(
+                query_type="date",
+                target_date=parsed.start,
+                date_label=_date_label_for(parsed, message, now),
+                explicit_time_text=parsed.original_text,
+                source="time_parser",
+            )
+
+    for query_type in ("routine", "current"):
+        keywords = _SCHEDULE_QUERY_KEYWORDS.get(query_type, [])
+        if any(kw in message for kw in keywords):
+            return ScheduleQueryScope(
+                query_type=query_type,
+                target_date=now if query_type == "current" else None,
+                date_label="今天" if query_type in {"current", "routine"} else "相关日期",
+                source="keyword",
+            )
+
+    return None
+
+
 def detect_schedule_query(message: str) -> str | None:
     """检测作息查询意图。返回 'current'/'routine'/'date' 或 None。"""
-    for intent, keywords in _SCHEDULE_QUERY_KEYWORDS.items():
-        if any(kw in message for kw in keywords):
-            return intent
-    return None
+    scope = resolve_schedule_query_scope(message, require_query_cue=True)
+    return scope.query_type if scope else None
 
 
 def format_schedule_context(status: dict) -> str:
@@ -641,6 +798,7 @@ def format_full_schedule_for_query(
     schedule: list[dict],
     query_type: str,
     status: dict | None = None,
+    date_label: str = "今天",
 ) -> str:
     """格式化完整日程供查询意图的 prompt 注入。"""
     lines = [
@@ -650,7 +808,7 @@ def format_full_schedule_for_query(
     full_text = "\n".join(lines)
 
     current = ""
-    if status:
+    if query_type == "current" and status:
         current = f"\n当前状态：{format_schedule_context(status)}"
 
     if query_type == "current":
@@ -658,9 +816,9 @@ def format_full_schedule_for_query(
     elif query_type == "routine":
         instruction = "用户在问你的日程安排。自然地描述你今天的计划，用你的性格说话。"
     else:
-        instruction = "用户在问你的日程安排。根据你的作息表自然回答。"
+        instruction = f"用户在问你{date_label}的日程安排。只根据这份{date_label}作息表自然回答。"
 
-    return f"以下是你今天的完整作息：\n{full_text}{current}\n{instruction}"
+    return f"以下是你{date_label}的作息：\n{full_text}{current}\n{instruction}"
 
 
 # --- 每日作息回顾 ---

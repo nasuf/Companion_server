@@ -15,7 +15,7 @@ from app.observability.events import EVT_INTENT_DETECTED, EVT_LLM_FAIL
 from app.services.chat.conversation_end import CONVERSATION_END_KEYWORDS
 from app.services.memory.interaction.deletion import DELETION_KEYWORDS
 from app.services.interaction.boundary import APOLOGY_KEYWORDS
-from app.services.schedule_domain.schedule import _SCHEDULE_QUERY_KEYWORDS
+from app.services.schedule_domain.schedule import resolve_schedule_query_scope
 
 
 class IntentType(Enum):
@@ -114,7 +114,6 @@ _CURRENT_STATE_TIME_BLOCKERS = (
     "等会", "待会", "一会", "以后", "之前", "刚才",
 )
 
-
 def detect_current_state_fast_path(message: str) -> bool:
     """Hot-path for common "what are you doing now" messages.
 
@@ -127,6 +126,12 @@ def detect_current_state_fast_path(message: str) -> bool:
     if any(word in normalized for word in _CURRENT_STATE_TIME_BLOCKERS):
         return False
     return normalized in _CURRENT_STATE_FAST_PHRASES
+
+
+def infer_schedule_query_type(message: str, *, require_query_cue: bool = True) -> str | None:
+    """Infer schedule query subtype through the schedule-domain scope parser."""
+    scope = resolve_schedule_query_scope(message, require_query_cue=require_query_cue)
+    return scope.query_type if scope else None
 
 # 优先级顺序：前面的优先匹配。spec §3.3 道歉承诺合并为一个意图
 _CHECKS: list[tuple[IntentType, list[str]]] = [
@@ -155,13 +160,13 @@ def detect_intent(message: str, patience_zone: str = "normal") -> IntentResult:
             return IntentResult(intent=intent_type, confidence=0.8)
 
     # SCHEDULE_QUERY：结构化关键词，返回 query_type
-    for query_type, keywords in _SCHEDULE_QUERY_KEYWORDS.items():
-        if any(kw in msg for kw in keywords):
-            return IntentResult(
-                intent=IntentType.SCHEDULE_QUERY,
-                confidence=0.7,
-                metadata={"query_type": query_type},
-            )
+    query_type = infer_schedule_query_type(msg)
+    if query_type:
+        return IntentResult(
+            intent=IntentType.SCHEDULE_QUERY,
+            confidence=0.7,
+            metadata={"query_type": query_type},
+        )
 
     return IntentResult()
 
@@ -243,6 +248,10 @@ async def detect_intent_llm(message: str, *, context: str = "") -> IntentResult:
         return IntentResult()
 
     metadata: dict[str, Any] = {"llm_labels": labels}
+    if intent == IntentType.SCHEDULE_QUERY:
+        metadata["query_type"] = infer_schedule_query_type(
+            message, require_query_cue=False,
+        ) or "current"
     if fragments:
         metadata["fragments"] = fragments
     return IntentResult(intent=intent, confidence=0.75, metadata=metadata)
