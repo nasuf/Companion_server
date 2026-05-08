@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import re
+from time import perf_counter
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -1023,10 +1024,23 @@ async def stream_chat_response(
             except (asyncio.CancelledError, Exception) as e:
                 logger.warning(f"L3 awakening failed: {e}")
 
+        response_diagnostics: dict[str, Any] = {
+            "version": 1,
+            "memory_relevance": memory_relevance,
+            "main_prompt_built": False,
+            "main_prompt_build_ms": None,
+            "memory_retrieval_skipped_reason": (
+                "weak_relevance" if memory_relevance == "weak" else None
+            ),
+            "empty_prompt_sections_removed_count": None,
+        }
+
         async def _build_main_chat_messages() -> list[dict]:
             # Build prompt only if generate_reply reaches the main LLM fallback path.
             # Tier replies and contradiction inquiries short-circuit before this.
             # Phase 6: 删 relational_context / graph_context 入参 — 实证冗余/幻觉源
+            started = perf_counter()
+            prompt_diagnostics: dict[str, Any] = {}
             system_prompt = await build_system_prompt(
                 agent=agent,
                 memories=classified_memories,
@@ -1048,7 +1062,14 @@ async def stream_chat_response(
                 time_memories=time_memories or None,
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
+                diagnostics=prompt_diagnostics,
             )
+            response_diagnostics["main_prompt_built"] = True
+            response_diagnostics["main_prompt_build_ms"] = round(
+                (perf_counter() - started) * 1000,
+                3,
+            )
+            response_diagnostics.update(prompt_diagnostics)
             return build_chat_messages(system_prompt, messages_dicts)
 
         # Log memory access for L2 frequency tracking (background, non-blocking)
@@ -1109,6 +1130,7 @@ async def stream_chat_response(
             # 直接拿 reply_emotion_pre 返回, 无需再串行多调一次. tier / contradiction
             # 路径返 None, fallback 兜底见下方.
             reply_emotion_fn=_ai_reply_emotion,
+            diagnostics=response_diagnostics,
         )
 
         # spec §5 step 1：AI 语句情绪识别（基于回复文本，不是 AI PAD 缓存）
@@ -1157,6 +1179,14 @@ async def stream_chat_response(
             if isinstance(first, dict):
                 first.setdefault("covered_until_user_ts", covered_until_user_ts.isoformat())
         if emitted_replies:
+            first = emitted_replies[0]
+            if isinstance(first, dict):
+                first.setdefault("response_diagnostics", response_diagnostics)
+            else:
+                emitted_replies[0] = {
+                    "text": str(first),
+                    "response_diagnostics": response_diagnostics,
+                }
             from app.services.memory.retrieval.trace import (
                 build_retrieval_quality_analysis,
                 snapshot_retrieval_traces,

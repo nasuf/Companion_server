@@ -168,3 +168,21 @@ class TestReadTraceMirror:
         result = trace_mirror._row_to_detail(row)
         assert result["trace"]["trace_id"] == "t1"
         assert result["steps"] == []
+
+
+def test_attach_message_trace_metadata_adds_response_diagnostics():
+    from app.services.chat.tracing import _attach_message_trace_metadata
+
+    detail = _detail()
+    diagnostics = {
+        "version": 1,
+        "reply_path": "tier",
+        "main_prompt_built": False,
+    }
+    result = _attach_message_trace_metadata(
+        detail,
+        {"response_diagnostics": diagnostics},
+    )
+
+    assert result["response_diagnostics"] == diagnostics
+    assert result["trace"]["response_diagnostics"] == diagnostics

@@ -55,18 +55,27 @@ async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
         "app.services.chat.prompt_builder.get_prompt_text",
         AsyncMock(side_effect=_prompt_text),
     ):
+        diagnostics = {}
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
             memories=None,
             memory_relevance="weak",
             reply_count=1,
             reply_total=150,
+            diagnostics=diagnostics,
         )
 
     assert "## 核心规则" in prompt
     assert "## 反幻觉硬约束" not in prompt
     assert "## 对话一致性" not in prompt
     assert "## 你记得的事情" not in prompt
+    assert diagnostics["system_prompt_section_count"] >= 3
+    assert diagnostics["empty_prompt_sections_removed_count"] == len(
+        diagnostics["empty_prompt_sections_removed"]
+    )
+    assert "反幻觉硬约束" in diagnostics["empty_prompt_sections_removed"]
+    assert "对话一致性" in diagnostics["empty_prompt_sections_removed"]
+    assert "你记得的事情" in diagnostics["empty_prompt_sections_removed"]
 
 
 @pytest.mark.asyncio

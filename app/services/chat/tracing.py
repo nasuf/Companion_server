@@ -204,6 +204,7 @@ def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> di
     retrievals = metadata.get("memory_retrievals")
     analysis = metadata.get("memory_retrieval_analysis")
     feedback = metadata.get("memory_retrieval_feedback")
+    response_diagnostics = metadata.get("response_diagnostics")
     trace = detail.setdefault("trace", {})
     if isinstance(retrievals, list):
         if isinstance(trace, dict):
@@ -217,6 +218,10 @@ def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> di
         if isinstance(trace, dict):
             trace["memory_retrieval_feedback"] = feedback
         detail["memory_retrieval_feedback"] = feedback
+    if isinstance(response_diagnostics, dict):
+        if isinstance(trace, dict):
+            trace["response_diagnostics"] = response_diagnostics
+        detail["response_diagnostics"] = response_diagnostics
     return detail
 
 

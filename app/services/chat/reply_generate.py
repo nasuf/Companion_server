@@ -165,6 +165,7 @@ async def generate_reply(
     chat_messages: list[dict] | None = None,
     chat_messages_factory: Callable[[], Awaitable[list[dict]]] | None = None,
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
 
@@ -188,16 +189,22 @@ async def generate_reply(
         return await chat_messages_factory()
 
     if contradiction_inquiry:
+        if diagnostics is not None:
+            diagnostics["reply_path"] = "contradiction"
         return [contradiction_inquiry], contradiction_inquiry, False, None
 
     tier_reply_text: str | None = None
-    if can_use_tier_reply(
+    tier_eligible = can_use_tier_reply(
         intent=detected_intent.intent,
         memory_relevance=memory_relevance,
         relational_context=relational_context,
         schedule_context=schedule_context,
         delay_context=delay_context,
-    ):
+    )
+    if diagnostics is not None:
+        diagnostics["tier_eligible"] = tier_eligible
+        diagnostics["memory_relevance"] = memory_relevance
+    if tier_eligible:
         personality_brief = getattr(agent, "name", "") or ""
         context_text = "\n".join(
             f"{m['role']}: {m['content']}" for m in messages_dicts[-6:]
@@ -223,13 +230,21 @@ async def generate_reply(
             user_memory=user_memory_text, ai_memory=ai_memory_text,
             tier_fns=tier_fns,
         )
+        if diagnostics is not None:
+            diagnostics["tier_kind"] = (
+                "l3" if l3_memories else memory_relevance
+            )
         try:
             tier_reply_text = await tier_fn(**base_params, **extra)
         except Exception as e:
             logger.warning(f"Memory tier reply failed, falling back to main prompt: {e}")
             tier_reply_text = None
+            if diagnostics is not None:
+                diagnostics["tier_error"] = type(e).__name__
 
     if tier_reply_text:
+        if diagnostics is not None:
+            diagnostics["reply_path"] = "tier"
         # Phase: tier reply 输出可能含 || 多条 (n≥2 时), 走 split_and_validate_replies
         # 拆分. n=1 单条时也走 (含 || 时仍能正确切, 不含时返单条).
         tier_replies = pipe_fallback_fn(
@@ -249,6 +264,10 @@ async def generate_reply(
         )
         return tier_replies, tier_reply_text, False, None
 
+    if diagnostics is not None:
+        diagnostics["reply_path"] = "main_llm"
+        if tier_eligible:
+            diagnostics["tier_empty_or_failed"] = True
     raw_response, is_fallback = await _run_main_llm(await _get_chat_messages())
     logger.info(
         f"[REPLY-LLM] main reply len={len(raw_response)} fallback={is_fallback}",

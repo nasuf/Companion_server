@@ -97,6 +97,14 @@ def _optional_section(title: str, body: str | None) -> str | None:
     return _section(title, str(body).strip())
 
 
+def _record_skipped_section(diagnostics: dict[str, Any] | None, title: str) -> None:
+    if diagnostics is None:
+        return
+    skipped = diagnostics.setdefault("empty_prompt_sections_removed", [])
+    if isinstance(skipped, list):
+        skipped.append(title)
+
+
 async def _build_personality_section(agent: Any) -> str:
     """Build the personality section using MBTI (spec §1.2)."""
     name = getattr(agent, "name", None) or "伙伴"
@@ -272,6 +280,7 @@ async def build_system_prompt(
     l3_memories: list[str] | None = None,
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
+    diagnostics: dict[str, Any] | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
     # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
     **_deprecated_kwargs,
@@ -301,24 +310,34 @@ async def build_system_prompt(
     anti_hallucination_section = _optional_section("反幻觉硬约束", anti_hallucination)
     if anti_hallucination_section:
         sections.append(anti_hallucination_section)
+    else:
+        _record_skipped_section(diagnostics, "反幻觉硬约束")
     sections.append(await _build_personality_section(agent))   # per-agent 稳定
     consistency_section = _optional_section("对话一致性", consistency_rules)
     if consistency_section:
         sections.append(consistency_section)
+    else:
+        _record_skipped_section(diagnostics, "对话一致性")
 
     # ═══ VARIABLE SUFFIX (每请求变化, cache miss 起点) ═══════════════════
 
     emo = await _build_emotion_section(user_emotion, intimacy_stage)
     if emo:
         sections.append(emo)
+    else:
+        _record_skipped_section(diagnostics, "当前情绪")
 
     port = _build_portrait_section(portrait)
     if port:
         sections.append(port)
+    else:
+        _record_skipped_section(diagnostics, "用户画像")
 
     delay = _build_delay_context_section(delay_context)
     if delay:
         sections.append(delay)
+    else:
+        _record_skipped_section(diagnostics, "回复时机说明")
 
     # Phase 6: 删 relational_context 注入 (实证冗余 SYSTEM_BASE)
 
@@ -330,11 +349,15 @@ async def build_system_prompt(
     )
     if mem:
         sections.append(mem)
+    else:
+        _record_skipped_section(diagnostics, "你记得的事情")
 
     # Phase 6: 删 graph_context 注入 (信息冗余 memory section, 抽象列表诱导编造)
 
     if topic_context:
         sections.append(_section("话题上下文", topic_context))
+    else:
+        _record_skipped_section(diagnostics, "话题上下文")
 
     # 时间上下文: 仅注入日期/星期/节假日, 不注入 AI 当前活动 (schedule_context).
     # spec §4 日常交流 步骤 4.3 / 5B.3 的"汇总参考信息"明确不包含 AI 当前作息;
@@ -348,11 +371,15 @@ async def build_system_prompt(
     # 单独注入 (delay_context_section), 不依赖 schedule_context.
     if time_context:
         sections.append(_section("时间", time_context))
+    else:
+        _record_skipped_section(diagnostics, "时间")
 
     # 时间相关记忆
     if time_memories:
         numbered = "\n".join(f"- {m}" for m in time_memories)
         sections.append(_section("相关时间记忆", f"用户提到的时间对应的记忆：\n{numbered}"))
+    else:
+        _record_skipped_section(diagnostics, "相关时间记忆")
 
     # Spec §3.2 step 3: L3 distant memories (awakened only when relevant)
     if l3_memories:
@@ -362,10 +389,14 @@ async def build_system_prompt(
             "以下是你很久以前的模糊记忆，用户正在回忆相关内容。"
             "回忆时语气自然，可以说\"我好像记得...\"或\"那好像是...\"：\n" + l3_block
         ))
+    else:
+        _record_skipped_section(diagnostics, "久远记忆（L3）")
 
     # 5B.4: 耐心区间语气描述
     if patience_instruction:
         sections.append(_section("情绪状态提醒", patience_instruction))
+    else:
+        _record_skipped_section(diagnostics, "情绪状态提醒")
 
     # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 禁止主动展开,
     # 防止 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动. 详见
@@ -379,6 +410,10 @@ async def build_system_prompt(
                 "你的隐性状态约束",
                 tpl.format(activity=activity, status=status_label),
             ))
+        else:
+            _record_skipped_section(diagnostics, "你的隐性状态约束")
+    else:
+        _record_skipped_section(diagnostics, "你的隐性状态约束")
 
     # 回复要求 (n=random 1-3 每轮变, 不可 cache, 排末尾)
     sections.append(
@@ -387,6 +422,13 @@ async def build_system_prompt(
             response_instruction.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY),
         )
     )
+
+    if diagnostics is not None:
+        skipped = diagnostics.get("empty_prompt_sections_removed")
+        diagnostics["empty_prompt_sections_removed_count"] = (
+            len(skipped) if isinstance(skipped, list) else 0
+        )
+        diagnostics["system_prompt_section_count"] = len(sections)
 
     return "\n\n".join(sections)
 
