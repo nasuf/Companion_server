@@ -283,6 +283,9 @@ def test_crisis_followup_prompt_forbids_memory_fact_fabrication():
     assert "记忆事实问题" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "只能依据【最近对话】" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "没出现就说你这里没有看到" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "回答当前关系 / 名字问题优先参考" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "关系表述不完全一致" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "带限定地回答" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "编造任何未出现在参考信息里的姓名" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "你之前一直这么叫 TA" in CRISIS_FOLLOWUP_REPLY_PROMPT
 
@@ -678,6 +681,53 @@ def test_format_user_memory_for_crisis_followup_includes_factual_memory():
     assert "陈姐" not in crisis_only
     assert "想死" in followup
     assert "陈姐" in followup
+
+
+def test_format_user_memory_for_crisis_followup_groups_named_relation_memory():
+    """crisis follow-up prompt must surface relationship/name facts separately.
+
+    Otherwise a selected named relation can be flattened under safety memories
+    and the follow-up LLM may answer "I do not know" despite the fact being
+    injected.
+    """
+    from app.services.chat.intent_handlers import _format_user_memory_for_crisis
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    classified = [
+        ClassifiedMemory(
+            id="safety",
+            text="用户表达过强烈负面情绪，有轻生念头",
+            source="user",
+            relevance="strong",
+            score=0.95,
+            rank_reasons=["保护槽:安全情绪"],
+        ),
+        ClassifiedMemory(
+            id="relation",
+            text="用户的朋友叫阿岚，周末常一起散步",
+            source="user",
+            relevance="medium",
+            score=0.77,
+            rank_reasons=["关键词命中", "保护槽:关系命名"],
+        ),
+        ClassifiedMemory(
+            id="name",
+            text="用户叫林小满",
+            source="user",
+            relevance="strong",
+            score=0.83,
+            rank_reasons=["关键词命中", "保护槽:字面命中"],
+        ),
+    ]
+
+    followup = _format_user_memory_for_crisis(classified, include_factual=True)
+
+    assert "【回答当前关系 / 名字问题优先参考】" in followup
+    assert "用户的朋友叫阿岚" in followup
+    assert "【回答当前问题可参考】" in followup
+    assert "用户叫林小满" in followup
+    assert "【安全 / 情绪背景】" in followup
+    assert followup.index("用户的朋友叫阿岚") < followup.index("用户叫林小满")
 
 
 @pytest.mark.asyncio

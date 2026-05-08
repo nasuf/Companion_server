@@ -433,9 +433,23 @@ def _format_user_memory_for_crisis(
     筛选不调 LLM (热路径首位), 只用关键字粗筛. 没命中相关条目时返"(无)" —
     就当 Ta 第一次说, prompt 自己有兜底措辞.
     """
-    from app.services.memory.retrieval.context_selector import split_by_source
+    def _source(memory: Any) -> str:
+        if isinstance(memory, dict):
+            return str(memory.get("source") or "user")
+        return str(getattr(memory, "source", "user") or "user")
 
-    user_lines, _ = split_by_source(classified_memories)
+    def _text(memory: Any) -> str:
+        if isinstance(memory, dict):
+            return str(memory.get("text") or memory.get("summary") or memory.get("content") or "")
+        return str(getattr(memory, "text", "") or "")
+
+    def _rank_reasons(memory: Any) -> list[str]:
+        if isinstance(memory, dict):
+            return [str(reason) for reason in (memory.get("rank_reasons") or [])]
+        return [str(reason) for reason in (getattr(memory, "rank_reasons", None) or [])]
+
+    user_memories = [m for m in (classified_memories or []) if _source(m) != "ai" and _text(m)]
+    user_lines = [_text(m) for m in user_memories]
     if not user_lines:
         return "(无)"
     # 跟情绪/求助/求救相关的关键词. 跟 _CRISIS_KEYWORDS 重叠是 OK 的
@@ -446,11 +460,46 @@ def _format_user_memory_for_crisis(
         "自伤", "自残", "轻生", "想死", "活不下去", "活着没",
         "跳楼", "跳河", "自杀",
     )
-    hits = [t for t in user_lines if any(kw in t for kw in relevance_kw)]
+
     if include_factual:
-        for text in user_lines:
-            if text not in hits:
-                hits.append(text)
+        seen: set[str] = set()
+
+        def _take(items: list[str], limit: int) -> list[str]:
+            result: list[str] = []
+            for item in items:
+                if item in seen:
+                    continue
+                seen.add(item)
+                result.append(item)
+                if len(result) >= limit:
+                    break
+            return result
+
+        named_relation = [
+            _text(m) for m in user_memories
+            if any(reason.startswith("保护槽:关系命名") for reason in _rank_reasons(m))
+        ]
+        literal = [
+            _text(m) for m in user_memories
+            if any(reason.startswith("保护槽:字面命中") for reason in _rank_reasons(m))
+        ]
+        safety = [t for t in user_lines if any(kw in t for kw in relevance_kw)]
+        other = [t for t in user_lines]
+
+        sections: list[str] = []
+
+        def _append_section(label: str, items: list[str]) -> None:
+            if items:
+                sections.append(label)
+                sections.extend(f"- {item}" for item in items)
+
+        _append_section("【回答当前关系 / 名字问题优先参考】", _take(named_relation, 2))
+        _append_section("【回答当前问题可参考】", _take(literal, 2))
+        _append_section("【安全 / 情绪背景】", _take(safety, 3))
+        _append_section("【其他已选记忆】", _take(other, 2))
+        return "\n".join(sections) if sections else "(无)"
+
+    hits = [t for t in user_lines if any(kw in t for kw in relevance_kw)]
     if not hits:
         return "(无)"
     max_items = 7 if include_factual else 5
