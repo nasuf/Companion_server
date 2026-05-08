@@ -506,6 +506,22 @@ def _format_user_memory_for_crisis(
     return "\n".join(f"- {t}" for t in hits[:max_items])  # 避免 token 爆
 
 
+def _crisis_followup_safety_check_instruction(mode: str) -> str:
+    """Instruction string rendered into the crisis follow-up prompt."""
+    if mode == "soft":
+        return (
+            "本轮需要做一次轻量安全复核。先自然回应用户当前话题, "
+            "再用一句不审问的方式确认 Ta 现在是否安全、是否还有伤害自己的冲动。"
+        )
+    if mode == "annoyed":
+        return (
+            "本轮需要做一次安全复核, 但用户可能已经嫌问题烦。"
+            "先承认这些确认会烦, 简短说明只是因为刚才的风险需要确认安全, "
+            "然后只请 Ta 用一句话确认现在是否安全。"
+        )
+    return "本轮不主动复核安全状态; 除非用户主动提到风险, 不要追问安全。"
+
+
 async def handle_crisis(
     user_message: str,
     ctx: ShortCircuitCtx,
@@ -558,6 +574,7 @@ async def handle_crisis_followup(
     *,
     classified_memories: list,
     portrait: Any,
+    safety_check_mode: str = "none",
 ) -> AsyncGenerator[dict, None]:
     """Crisis aftercare for follow-up messages that no longer repeat keywords.
 
@@ -570,6 +587,9 @@ async def handle_crisis_followup(
         classified_memories,
         include_factual=True,
     )
+    safety_check_instruction = _crisis_followup_safety_check_instruction(
+        safety_check_mode,
+    )
     try:
         response = await crisis_followup_reply(
             message=user_message,
@@ -577,6 +597,7 @@ async def handle_crisis_followup(
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "(未知)",
             user_memory=user_memory_block,
+            safety_check_instruction=safety_check_instruction,
         )
         if not response:
             response = _CRISIS_STATIC_FALLBACK

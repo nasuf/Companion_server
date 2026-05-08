@@ -110,6 +110,50 @@ def test_crisis_release_does_not_hide_new_crisis_signal():
     assert _is_crisis_message("不会自杀，但有自残冲动")
 
 
+def test_crisis_followup_safety_check_due_after_pending_release():
+    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+
+    assert _crisis_followup_safety_check_mode(
+        followup_status="guard",
+        prior_release_count=1,
+        turns_since_safety_check=1,
+        user_message="你在干嘛",
+    ) == "soft"
+
+
+def test_crisis_followup_safety_check_due_after_guard_turn_interval():
+    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+
+    assert _crisis_followup_safety_check_mode(
+        followup_status="guard",
+        prior_release_count=0,
+        turns_since_safety_check=2,
+        user_message="讲点别的",
+    ) == "soft"
+
+
+def test_crisis_followup_safety_check_annoyed_mode():
+    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+
+    assert _crisis_followup_safety_check_mode(
+        followup_status="guard",
+        prior_release_count=1,
+        turns_since_safety_check=1,
+        user_message="你问这么多无聊的问题干嘛",
+    ) == "annoyed"
+
+
+def test_crisis_followup_safety_check_not_due_on_release():
+    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+
+    assert _crisis_followup_safety_check_mode(
+        followup_status="release",
+        prior_release_count=0,
+        turns_since_safety_check=3,
+        user_message="我现在安全了",
+    ) == "none"
+
+
 def test_recent_unresolved_crisis_detects_followup_state():
     from app.services.chat.orchestrator import _recent_unresolved_crisis_message
 
@@ -275,6 +319,8 @@ def test_crisis_followup_prompt_allows_user_requested_distraction():
     assert "不要在同一轮再追问" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "不要把策略说出来" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "向 Ta 解释你的回复策略" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "本轮安全复核要求" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "如果它要求轻量复核" in CRISIS_FOLLOWUP_REPLY_PROMPT
 
 
 def test_crisis_followup_prompt_forbids_memory_fact_fabrication():
@@ -489,12 +535,14 @@ async def test_handle_crisis_followup_calls_followup_reply():
             ctx,
             classified_memories=[],
             portrait=None,
+            safety_check_mode="soft",
         ))
 
     assert events
     call_kwargs = mock_reply.await_args.kwargs
     assert call_kwargs["message"] == "你开心吗"
     assert "我想死" in call_kwargs["context"]
+    assert "轻量安全复核" in call_kwargs["safety_check_instruction"]
     assert ctx.last_short_circuit_kind == "crisis_followup"
 
 

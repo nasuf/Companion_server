@@ -313,11 +313,38 @@ _CRISIS_CARE_ASSISTANT_MARKERS = (
     "我不会跳过",
 )
 
+_CRISIS_SOFT_CHECK_TURN_INTERVAL = 2
+_CRISIS_CHECK_ANNOYED_TERMS = (
+    "无聊的问题", "问这么多", "别问", "不要问", "烦不烦",
+    "烦死", "审问", "查户口",
+)
+
 
 def _is_crisis_care_assistant_message(text: str) -> bool:
     if not text:
         return False
     return any(marker in text for marker in _CRISIS_CARE_ASSISTANT_MARKERS)
+
+
+def _crisis_followup_safety_check_mode(
+    *,
+    followup_status: str,
+    prior_release_count: int,
+    turns_since_safety_check: int,
+    user_message: str,
+) -> str:
+    """Return none/soft/annoyed for deterministic aftercare safety check cadence."""
+    if followup_status != "guard":
+        return "none"
+    due = (
+        prior_release_count > 0
+        or turns_since_safety_check >= _CRISIS_SOFT_CHECK_TURN_INTERVAL
+    )
+    if not due:
+        return "none"
+    if any(term in user_message for term in _CRISIS_CHECK_ANNOYED_TERMS):
+        return "annoyed"
+    return "soft"
 
 
 def _format_crisis_context(items: list[tuple[str, str]], max_items: int = 10) -> str:
@@ -721,6 +748,9 @@ async def stream_chat_response(
         )
         recent_crisis_context: str | None = None
         crisis_release_count = 0
+        crisis_aftercare_turn_count = 0
+        crisis_turns_since_safety_check = 0
+        crisis_followup_check_mode = "none"
         if not crisis_force_intent and not sub_intent_mode:
             crisis_state = await load_crisis_care_state(
                 conversation_id, user_id,
@@ -728,12 +758,20 @@ async def stream_chat_response(
             if crisis_state is not None:
                 recent_crisis_context = str(crisis_state.get("context") or "").strip()
                 crisis_release_count = int(crisis_state.get("release_count") or 0)
+                crisis_aftercare_turn_count = int(
+                    crisis_state.get("aftercare_turn_count") or 0
+                )
+                crisis_turns_since_safety_check = int(
+                    crisis_state.get("turns_since_safety_check") or 0
+                )
             else:
                 recent_crisis_context = _recent_unresolved_crisis_context(
                     messages_dicts, exclude_id=user_message_id,
                 )
         crisis_followup_active = False
         if recent_crisis_context is not None:
+            prior_release_count = crisis_release_count
+            next_aftercare_turn_count = crisis_aftercare_turn_count + 1
             try:
                 followup_status = await _crisis_followup_classify(
                     message=user_message,
@@ -752,10 +790,19 @@ async def stream_chat_response(
                         context=f"{recent_crisis_context}\n用户: {user_message}",
                         source="followup_release_pending",
                         release_count=crisis_release_count,
+                        aftercare_turn_count=next_aftercare_turn_count,
+                        turns_since_safety_check=0,
                     )
                 else:
                     await clear_crisis_care_state(conversation_id, user_id)
             else:
+                next_turns_since_safety_check = crisis_turns_since_safety_check + 1
+                crisis_followup_check_mode = _crisis_followup_safety_check_mode(
+                    followup_status=followup_status,
+                    prior_release_count=prior_release_count,
+                    turns_since_safety_check=next_turns_since_safety_check,
+                    user_message=user_message,
+                )
                 crisis_release_count = 0
                 crisis_followup_active = True
                 await mark_crisis_care_active(
@@ -764,6 +811,11 @@ async def stream_chat_response(
                     context=f"{recent_crisis_context}\n用户: {user_message}",
                     source="followup_guard",
                     release_count=0,
+                    aftercare_turn_count=next_aftercare_turn_count,
+                    turns_since_safety_check=(
+                        0 if crisis_followup_check_mode != "none"
+                        else next_turns_since_safety_check
+                    ),
                 )
         if crisis_force_intent:
             await mark_crisis_care_active(
@@ -772,6 +824,8 @@ async def stream_chat_response(
                 context=f"用户: {user_message}",
                 source="direct_crisis",
                 release_count=0,
+                aftercare_turn_count=0,
+                turns_since_safety_check=0,
             )
         if crisis_force_intent:
             logger.warning(
@@ -788,6 +842,7 @@ async def stream_chat_response(
                     "event": EVT_CHAT_CRISIS_DETECTED,
                     "user_message_len": len(user_message),
                     "crisis_followup": True,
+                    "crisis_followup_check_mode": crisis_followup_check_mode,
                 },
             )
 
@@ -915,7 +970,10 @@ async def stream_chat_response(
             detected_intent = IntentResult(
                 intent=IntentType.CRISIS,
                 confidence=1.0,
-                metadata={"followup": True},
+                metadata={
+                    "followup": True,
+                    "safety_check_mode": crisis_followup_check_mode,
+                },
             )
         elif current_state_fast_path:
             detected_intent = IntentResult(
@@ -1001,6 +1059,9 @@ async def stream_chat_response(
             # 因为 prompt 里 {context} 是 "(无)").
             recent_context=boundary_ctx.recent_context,
             response_diagnostics=response_diagnostics,
+        )
+        response_diagnostics["crisis_followup_check_mode"] = (
+            crisis_followup_check_mode if crisis_followup_active else None
         )
 
         # §3.4.6 终结意图
@@ -1091,6 +1152,9 @@ async def stream_chat_response(
                     user_message, sc_ctx,
                     classified_memories=crisis_classified,
                     portrait=crisis_portrait,
+                    safety_check_mode=detected_intent.metadata.get(
+                        "safety_check_mode", "none",
+                    ),
                 ):
                     yield evt
             else:

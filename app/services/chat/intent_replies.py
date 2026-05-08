@@ -238,6 +238,7 @@ async def crisis_followup_reply(
     personality_brief: str = "",
     user_portrait: str = "",
     user_memory: str = "",
+    safety_check_instruction: str = "",
 ) -> str | None:
     """危机后一段时间内的普通追问仍需安全优先。"""
     return await _render_llm(
@@ -248,6 +249,10 @@ async def crisis_followup_reply(
             "personality_brief": personality_brief or "真诚朋友",
             "user_portrait": user_portrait or "(未知)",
             "user_memory": user_memory or "(无)",
+            "safety_check_instruction": (
+                safety_check_instruction
+                or "本轮不主动复核安全状态; 除非用户主动提到风险, 不要追问安全。"
+            ),
         },
         max_chars=200,
     )

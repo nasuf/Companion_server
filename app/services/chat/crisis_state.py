@@ -22,6 +22,13 @@ def _crisis_care_key(conversation_id: str, user_id: str) -> str:
     return f"chat:crisis_care:{conversation_id}:{user_id}"
 
 
+def _coerce_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 async def load_crisis_care_state(conversation_id: str, user_id: str) -> dict[str, Any] | None:
     """Return active crisis-care state if present. Redis is best-effort."""
     try:
@@ -31,16 +38,17 @@ async def load_crisis_care_state(conversation_id: str, user_id: str) -> dict[str
             return None
         data = json.loads(raw)
         context = str(data.get("context") or "").strip()
-        release_count = data.get("release_count", 0)
-        try:
-            release_count = int(release_count)
-        except (TypeError, ValueError):
-            release_count = 0
         source = data.get("source")
         return {
             "context": context or "(recent crisis care active)",
             "source": str(source) if source else None,
-            "release_count": max(0, release_count),
+            "release_count": _coerce_nonnegative_int(data.get("release_count")),
+            "aftercare_turn_count": _coerce_nonnegative_int(
+                data.get("aftercare_turn_count"),
+            ),
+            "turns_since_safety_check": _coerce_nonnegative_int(
+                data.get("turns_since_safety_check"),
+            ),
         }
     except Exception as e:
         logger.warning(f"load crisis care state failed: {e}")
@@ -67,6 +75,8 @@ async def get_crisis_care_status(conversation_id: str, user_id: str) -> dict[str
                 "unavailable": False,
                 "source": None,
                 "release_count": 0,
+                "aftercare_turn_count": 0,
+                "turns_since_safety_check": 0,
                 "ttl_seconds": None,
                 "context_preview": None,
             }
@@ -78,7 +88,13 @@ async def get_crisis_care_status(conversation_id: str, user_id: str) -> dict[str
             "active": True,
             "unavailable": False,
             "source": str(source) if source else None,
-            "release_count": int(data.get("release_count") or 0),
+            "release_count": _coerce_nonnegative_int(data.get("release_count")),
+            "aftercare_turn_count": _coerce_nonnegative_int(
+                data.get("aftercare_turn_count"),
+            ),
+            "turns_since_safety_check": _coerce_nonnegative_int(
+                data.get("turns_since_safety_check"),
+            ),
             "ttl_seconds": ttl if isinstance(ttl, int) and ttl >= 0 else None,
             "context_preview": context[-160:] if context else None,
         }
@@ -89,6 +105,8 @@ async def get_crisis_care_status(conversation_id: str, user_id: str) -> dict[str
             "unavailable": True,
             "source": None,
             "release_count": 0,
+            "aftercare_turn_count": 0,
+            "turns_since_safety_check": 0,
             "ttl_seconds": None,
             "context_preview": None,
         }
@@ -101,6 +119,8 @@ async def mark_crisis_care_active(
     context: str,
     source: str,
     release_count: int = 0,
+    aftercare_turn_count: int = 0,
+    turns_since_safety_check: int = 0,
 ) -> None:
     """Persist active crisis-care state with a bounded TTL."""
     try:
@@ -109,6 +129,8 @@ async def mark_crisis_care_active(
             "context": context[-1200:],
             "source": source,
             "release_count": max(0, int(release_count)),
+            "aftercare_turn_count": max(0, int(aftercare_turn_count)),
+            "turns_since_safety_check": max(0, int(turns_since_safety_check)),
         }
         await redis.set(
             _crisis_care_key(conversation_id, user_id),
