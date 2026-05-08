@@ -97,6 +97,22 @@ def test_multi_reply_prompts_have_pipe_format():
         assert "{total}" in prompt, f"{name} 必须含 {{total}} 占位符"
 
 
+def test_tier_reply_prompts_forbid_ungrounded_self_context():
+    """tier reply 使用率提升后, 必须防无依据自我活动/经历编造。"""
+    from app.services.prompting import defaults
+
+    for name in (
+        "WEAK_MEMORY_REPLY_PROMPT",
+        "MEDIUM_MEMORY_REPLY_PROMPT",
+        "STRONG_MEMORY_REPLY_PROMPT",
+        "L3_MEMORY_REPLY_PROMPT",
+    ):
+        prompt = getattr(defaults, name)
+        assert "不要主动编造你正在做什么" in prompt, f"{name} 缺少当前活动编造约束"
+        assert "过去经历" in prompt, f"{name} 缺少过往经历编造约束"
+        assert "和用户的共同经历" in prompt, f"{name} 缺少共同经历编造约束"
+
+
 def test_decision_prompts_not_polluted_with_format_constraint():
     """决策/标签/JSON 类 prompt 不该有"单条输出, 不换行" 约束 (它们输出标签
     /分类/JSON, 不是 reply 文本)."""
