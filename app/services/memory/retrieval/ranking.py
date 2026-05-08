@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.services.memory.polarity import has_negation
+from app.services.memory.polarity import query_semantic_conflict_reasons
 from app.services.memory.retrieval.relevance import compute_display_score
 
 
@@ -178,9 +178,14 @@ def rank_memory_candidate(
 
     # Crisis/distress phrases often contain "不" ("活不下去") but are not asking
     # for negated preferences/facts. Do not downweight safety memories there.
-    if has_negation(query) and not is_distress_or_safety_query(query):
-        if not has_negation(text):
-            score *= 0.3
-            reasons.append("极性降权")
+    if not is_distress_or_safety_query(query):
+        conflict_reasons = query_semantic_conflict_reasons(query, text)
+        if conflict_reasons:
+            severe = any(
+                reason in {"否定极性", "偏好立场", "伴侣状态", "伴侣身份", "就医状态"}
+                for reason in conflict_reasons
+            )
+            score *= 0.3 if severe else 0.55
+            reasons.append(f"语义对立降权:{'、'.join(conflict_reasons)}")
 
     return score, reasons

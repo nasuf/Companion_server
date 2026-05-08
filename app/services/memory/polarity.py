@@ -18,6 +18,7 @@
 修复策略 (规则层, 不引入 cross-encoder 模型 / 不加 schema 字段):
 - has_negation(text): 检测显式否定标记
 - is_polarity_match(a, b): 两文本极性是否一致
+- semantic_conflict_reasons(a, b): 检测非否定词也能表达的语义对立
 - 用法 1 (DEDUP): 极性不一致 → 不算重复
 - 用法 2 (RETRIEVAL): 用户 query 有否定 + candidate 无否定 (或反之) → 降权
 
@@ -27,6 +28,9 @@
 - 否定常见非否定语境 ("不错"/"差不多"/"不止") 用 _NEUTRALIZE_PHRASES 排除,
   但无穷举. 接受 ~5-10% 假阳率: dedup 假阳 = 多存一条 (无数据丢失);
   retrieval 假阳 = 降权 0.3 (仍召回, LLM 可见).
+- 语义对立规则只覆盖高风险高频维度: 偏好立场、伴侣状态/身份、就医状态/阶段。
+  它不替代 cross-encoder 或更强 embedding, 但能挡住最常见的"喜欢/讨厌"、
+  "前男友/前女友"、"住院/出院"类张冠李戴。
 """
 
 from __future__ import annotations
@@ -50,6 +54,99 @@ _NEUTRALIZE_PHRASES: tuple[str, ...] = (
     "不过", "不到", "不久", "差不多", "对不起", "对不住", "可不可以",
     "不用谢", "不客气", "没事", "没错",
 )
+
+_SEMANTIC_DIMENSIONS: dict[str, tuple[str, dict[str, tuple[str, ...]]]] = {
+    "preference": (
+        "偏好立场",
+        {
+            "negative": (
+                "不喜欢", "不爱", "不吃", "不喝", "讨厌", "厌恶",
+                "反感", "排斥", "雷区", "过敏",
+            ),
+            "positive": (
+                "喜欢", "爱吃", "爱喝", "爱用", "爱看", "最爱",
+                "偏爱", "钟意", "很爱",
+            ),
+        },
+    ),
+    "partner_status": (
+        "伴侣状态",
+        {
+            "ex": ("前男友", "前女友", "前任男友", "前任女友", "前夫", "前妻", "前任"),
+            "current": (
+                "男朋友", "女朋友", "男友", "女友", "对象", "伴侣",
+                "老公", "老婆", "丈夫", "妻子",
+            ),
+        },
+    ),
+    "partner_gender": (
+        "伴侣身份",
+        {
+            "male": ("前男友", "前任男友", "前夫", "男朋友", "男友", "老公", "丈夫"),
+            "female": ("前女友", "前任女友", "前妻", "女朋友", "女友", "老婆", "妻子"),
+        },
+    ),
+    "hospital_status": (
+        "就医状态",
+        {
+            "admitted": ("住院", "入院", "住进医院", "进医院", "留院"),
+            "discharged": (
+                "出院", "不用住院", "不住院", "回家休养", "回家了",
+            ),
+        },
+    ),
+    "medical_phase": (
+        "就医阶段",
+        {
+            "surgery": ("手术", "开刀"),
+            "discharged": ("出院", "回家休养"),
+        },
+    ),
+}
+
+
+def _detect_dimension_stance(
+    text: str,
+    groups: dict[str, tuple[str, ...]],
+) -> str | None:
+    """Return a single semantic stance for one dimension, or None when mixed.
+
+    Longer phrases are consumed first so "前女友" does not also become "女友",
+    and "不喜欢" does not also become "喜欢".
+    """
+    remaining = text
+    hits: list[str] = []
+    keyword_items = [
+        (label, keyword)
+        for label, keywords in groups.items()
+        for keyword in keywords
+    ]
+    for label, keyword in sorted(keyword_items, key=lambda item: len(item[1]), reverse=True):
+        if keyword and keyword in remaining:
+            hits.append(label)
+            remaining = remaining.replace(keyword, "")
+
+    unique_hits = set(hits)
+    if len(unique_hits) == 1:
+        return hits[0]
+    return None
+
+
+def detect_semantic_stances(text: str) -> dict[str, str]:
+    """Detect coarse semantic stances that bge-style embeddings often confuse."""
+    if not text:
+        return {}
+    stances: dict[str, str] = {}
+    for dimension, (_, groups) in _SEMANTIC_DIMENSIONS.items():
+        stance = _detect_dimension_stance(text, groups)
+        if stance:
+            stances[dimension] = stance
+    return stances
+
+
+def _semantic_label(dimension: str) -> str:
+    label, _ = _SEMANTIC_DIMENSIONS.get(dimension, (dimension, {}))
+    return label
 
 
 def has_negation(text: str) -> bool:
@@ -85,3 +182,51 @@ def is_polarity_match(text_a: str, text_b: str) -> bool:
     False → 反义对, embedding 高 cosine 但语义相反, 不该 dedup
     """
     return has_negation(text_a) == has_negation(text_b)
+
+
+def semantic_conflict_reasons(text_a: str, text_b: str) -> list[str]:
+    """Symmetric semantic conflict check for storage dedup.
+
+    False positives are intentionally safer than false negatives here: a false
+    positive stores two near-duplicate rows, while a false negative can discard
+    a corrected fact forever.
+    """
+    reasons: list[str] = []
+    stances_a = detect_semantic_stances(text_a)
+    stances_b = detect_semantic_stances(text_b)
+    same_explicit_stance = any(
+        stances_b.get(dimension) == stance
+        for dimension, stance in stances_a.items()
+    )
+    if has_negation(text_a) != has_negation(text_b) and not same_explicit_stance:
+        reasons.append("否定极性")
+
+    for dimension, stance_a in stances_a.items():
+        stance_b = stances_b.get(dimension)
+        if stance_b and stance_a != stance_b:
+            reasons.append(_semantic_label(dimension))
+    return reasons
+
+
+def query_semantic_conflict_reasons(query: str, candidate_text: str) -> list[str]:
+    """Directional semantic conflict check for retrieval reranking.
+
+    Only downweight when the query itself expresses a stance/status. A broad
+    query like "我对咖啡的看法" should still be allowed to retrieve both "喜欢"
+    and "不喜欢/讨厌" memories for context.
+    """
+    reasons: list[str] = []
+    query_stances = detect_semantic_stances(query)
+    candidate_stances = detect_semantic_stances(candidate_text)
+    same_explicit_stance = any(
+        candidate_stances.get(dimension) == stance
+        for dimension, stance in query_stances.items()
+    )
+    if has_negation(query) and not has_negation(candidate_text) and not same_explicit_stance:
+        reasons.append("否定极性")
+
+    for dimension, query_stance in query_stances.items():
+        candidate_stance = candidate_stances.get(dimension)
+        if candidate_stance and query_stance != candidate_stance:
+            reasons.append(_semantic_label(dimension))
+    return reasons

@@ -93,7 +93,7 @@ async def find_duplicate_id(
     才能 update occurTime + 重建 timetrigger (旧 trigger 已 fired 完, 新一次
     的"提醒我X"必须建新 trigger).
     """
-    from app.services.memory.polarity import is_polarity_match
+    from app.services.memory.polarity import semantic_conflict_reasons
 
     results = await search_by_embedding(embedding, user_id, top_k=5, workspace_id=workspace_id)
     for r in results:
@@ -104,11 +104,13 @@ async def find_duplicate_id(
             mid = r.get("id")
             if not mid:
                 continue
-            # Phase 3.1: 极性校验 — 反义对不算重复
+            # Phase 3.1/3.B: 极性/语义对立校验 — 反义对不算重复
             cand_text = r.get("summary") or r.get("content") or ""
-            if not is_polarity_match(content, cand_text):
+            conflict_reasons = semantic_conflict_reasons(content, cand_text)
+            if conflict_reasons:
                 logger.info(
-                    f"Dedup polarity mismatch (sim={sim:.3f}): "
+                    f"Dedup semantic conflict ({','.join(conflict_reasons)}, "
+                    f"sim={sim:.3f}): "
                     f"new='{content[:30]}' vs existing='{cand_text[:30]}'; "
                     f"NOT treating as duplicate (saves both)"
                 )

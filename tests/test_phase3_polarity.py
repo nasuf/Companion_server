@@ -72,6 +72,28 @@ def test_is_polarity_match():
     assert not is_polarity_match("我住北京", "我不住北京")
 
 
+def test_semantic_conflict_detects_non_negation_opposites():
+    from app.services.memory.polarity import semantic_conflict_reasons
+
+    assert "偏好立场" in semantic_conflict_reasons("用户喜欢咖啡", "用户讨厌咖啡")
+    assert "伴侣身份" in semantic_conflict_reasons("用户前男友联系她", "用户前女友联系她")
+    assert "伴侣状态" in semantic_conflict_reasons("用户男朋友来杭州", "用户前男友来杭州")
+    assert semantic_conflict_reasons("用户前任联系她", "用户前男友联系她") == []
+    assert "就医状态" in semantic_conflict_reasons("用户妈妈住院", "用户妈妈出院")
+    assert "就医阶段" in semantic_conflict_reasons("用户妈妈手术", "用户妈妈出院")
+    assert semantic_conflict_reasons("用户不喜欢咖啡", "用户讨厌咖啡") == []
+
+
+def test_query_semantic_conflict_is_directional():
+    from app.services.memory.polarity import query_semantic_conflict_reasons
+
+    assert query_semantic_conflict_reasons("我对咖啡的看法", "用户讨厌咖啡") == []
+    assert "偏好立场" in query_semantic_conflict_reasons("我喜欢咖啡吗", "用户讨厌咖啡")
+    assert "伴侣身份" in query_semantic_conflict_reasons("前男友那件事", "用户前女友联系她")
+    assert query_semantic_conflict_reasons("前任那件事", "用户前男友联系她") == []
+    assert query_semantic_conflict_reasons("我不喜欢咖啡吗", "用户讨厌咖啡") == []
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 3.1: dedup polarity check
 # ═══════════════════════════════════════════════════════════════════
@@ -127,6 +149,27 @@ async def test_dedup_still_fires_for_paraphrase():
 
     # 同极性 → 视为重复
     assert result == "old-mem-1"
+
+
+@pytest.mark.asyncio
+async def test_dedup_skips_semantic_conflict_without_negation():
+    """喜欢/讨厌等无显式否定的反义事实也不能被高 cosine 吃掉。"""
+    from app.services.memory.storage.persistence import find_duplicate_id
+
+    fake_results = [
+        {"id": "old-mem-1", "summary": "用户喜欢咖啡",
+         "content": "用户喜欢咖啡", "similarity": 0.92},
+    ]
+
+    with patch(
+        "app.services.memory.storage.persistence.search_by_embedding",
+        new_callable=AsyncMock, return_value=fake_results,
+    ):
+        result = await find_duplicate_id(
+            user_id="u1", content="用户讨厌咖啡", embedding=[0.1] * 1024,
+        )
+
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -246,3 +289,132 @@ async def test_retrieval_no_downweight_when_user_positive():
         f"positive query 不该降权 negation candidate; got "
         f"pos={captured_scores['m-pos']:.3f}, neg={captured_scores['m-neg']:.3f}"
     )
+
+
+@pytest.mark.asyncio
+async def test_retrieval_downweights_dislike_when_query_likes():
+    """用户明确问喜欢时, 讨厌/过敏类反向偏好应被降权。"""
+    from app.services.memory.retrieval import hybrid
+
+    pos_cand = {
+        "id": "m-pos", "summary": "用户喜欢咖啡", "content": "用户喜欢咖啡",
+        "importance": 0.7, "similarity": 0.8, "created_at": None,
+    }
+    neg_cand = {
+        "id": "m-neg", "summary": "用户讨厌咖啡", "content": "用户讨厌咖啡",
+        "importance": 0.7, "similarity": 0.8, "created_at": None,
+    }
+
+    captured_scores = {}
+    captured_reasons = {}
+    original_select = hybrid.select_context
+
+    def _spy_select(candidates, budget):
+        for c in candidates:
+            captured_scores[c["id"]] = c.get("rank_score", 0)
+            captured_reasons[c["id"]] = c.get("rank_reasons", [])
+        return original_select(candidates, budget)
+
+    with (
+        patch.object(hybrid, "search_similar",
+                     new_callable=AsyncMock, return_value=[pos_cand, neg_cand]),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_related_memories_for_query",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
+        patch.object(hybrid, "select_context", side_effect=_spy_select),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="我喜欢咖啡吗?",
+            user_id="u1", workspace_id="w1",
+        )
+
+    assert captured_scores["m-pos"] > captured_scores["m-neg"]
+    assert any("语义对立降权" in r for r in captured_reasons["m-neg"])
+
+
+@pytest.mark.asyncio
+async def test_retrieval_downweights_wrong_partner_role():
+    """前男友/前女友这类 embedding 高相似但角色相反的记忆要降权。"""
+    from app.services.memory.retrieval import hybrid
+
+    male_ex = {
+        "id": "m-male", "summary": "用户前男友曾联系她", "content": "用户前男友曾联系她",
+        "importance": 0.7, "similarity": 0.8, "created_at": None,
+    }
+    female_ex = {
+        "id": "m-female", "summary": "用户前女友曾联系她", "content": "用户前女友曾联系她",
+        "importance": 0.7, "similarity": 0.8, "created_at": None,
+    }
+
+    captured_scores = {}
+    original_select = hybrid.select_context
+
+    def _spy_select(candidates, budget):
+        for c in candidates:
+            captured_scores[c["id"]] = c.get("rank_score", 0)
+        return original_select(candidates, budget)
+
+    with (
+        patch.object(hybrid, "search_similar",
+                     new_callable=AsyncMock, return_value=[female_ex, male_ex]),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_related_memories_for_query",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
+        patch.object(hybrid, "select_context", side_effect=_spy_select),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="前男友后来怎么样了?",
+            user_id="u1", workspace_id="w1",
+        )
+
+    assert captured_scores["m-male"] > captured_scores["m-female"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_downweights_medical_status_mismatch():
+    """问出院时, 住院状态记忆不应压过出院状态记忆。"""
+    from app.services.memory.retrieval import hybrid
+
+    admitted = {
+        "id": "m-admitted", "summary": "用户妈妈最近住院", "content": "用户妈妈最近住院",
+        "importance": 0.7, "similarity": 0.8, "created_at": None,
+    }
+    discharged = {
+        "id": "m-discharged", "summary": "用户妈妈已经出院", "content": "用户妈妈已经出院",
+        "importance": 0.7, "similarity": 0.8, "created_at": None,
+    }
+
+    captured_scores = {}
+    original_select = hybrid.select_context
+
+    def _spy_select(candidates, budget):
+        for c in candidates:
+            captured_scores[c["id"]] = c.get("rank_score", 0)
+        return original_select(candidates, budget)
+
+    with (
+        patch.object(hybrid, "search_similar",
+                     new_callable=AsyncMock, return_value=[admitted, discharged]),
+        patch.object(hybrid, "search_by_time_range",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "search_related_memories_for_query",
+                     new_callable=AsyncMock, return_value=[]),
+        patch.object(hybrid, "cache_retrieval",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(hybrid, "cache_set_retrieval", new_callable=AsyncMock),
+        patch.object(hybrid, "select_context", side_effect=_spy_select),
+    ):
+        await hybrid.hybrid_retrieve(
+            message="妈妈出院了吗?",
+            user_id="u1", workspace_id="w1",
+        )
+
+    assert captured_scores["m-discharged"] > captured_scores["m-admitted"]

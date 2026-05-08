@@ -249,6 +249,36 @@ def test_build_retrieval_quality_analysis_reports_weak_gate_drop():
     assert analysis["quality_metrics"]["has_final_gate_drop"] is True
 
 
+def test_build_retrieval_quality_analysis_reports_semantic_conflict_signal():
+    from app.services.memory.retrieval.trace import build_retrieval_quality_analysis
+
+    analysis = build_retrieval_quality_analysis(
+        [{
+            "session_id": "hybrid_l1_l2_semantic",
+            "strategy": "hybrid_l1_l2",
+            "query": "我喜欢咖啡吗",
+            "candidate_count": 2,
+            "candidates": [
+                {
+                    "id": "m1",
+                    "text": "用户讨厌咖啡",
+                    "rank_reasons": ["关键词命中", "语义对立降权:偏好立场"],
+                },
+                {"id": "m2", "text": "用户喜欢咖啡", "rank_reasons": ["关键词命中"]},
+            ],
+            "selected": [{"id": "m2", "text": "用户喜欢咖啡"}],
+            "notes": {"final_injected": True},
+        }],
+        assistant_reply="你之前说过喜欢咖啡。",
+        user_message="我喜欢咖啡吗",
+    )
+
+    assert analysis is not None
+    assert analysis["signal_counts"]["semantic_conflict"] == 1
+    observation_codes = {item["code"] for item in analysis["observations"]}
+    assert "semantic_conflict" in observation_codes
+
+
 def test_build_memory_retrieval_feedback_detects_next_turn_correction():
     from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
 

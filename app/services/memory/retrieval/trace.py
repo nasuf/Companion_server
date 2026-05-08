@@ -101,7 +101,9 @@ def build_retrieval_quality_analysis(
         "l3": 0,
         "enhanced_query": 0,
         "cache_hit": 0,
+        "semantic_conflict": 0,
     }
+    semantic_conflict_keys: set[str] = set()
 
     for session in sessions:
         notes = session.get("notes") if isinstance(session.get("notes"), dict) else {}
@@ -115,6 +117,12 @@ def build_retrieval_quality_analysis(
             signal_counts["cache_hit"] += 1
         if session.get("enhanced_query"):
             signal_counts["enhanced_query"] += 1
+        for candidate in candidates:
+            if isinstance(candidate, dict) and _has_semantic_conflict_reason(candidate):
+                key = _memory_signal_key(candidate)
+                if key not in semantic_conflict_keys:
+                    semantic_conflict_keys.add(key)
+                    signal_counts["semantic_conflict"] += 1
         strategy = str(session.get("strategy") or "")
         if (
             notes.get("final_injected") is False
@@ -149,6 +157,11 @@ def build_retrieval_quality_analysis(
             signal_counts["entity"] += 1
         if any("安全" in reason or "情绪" in reason for reason in reasons):
             signal_counts["safety"] += 1
+        if _has_semantic_conflict_reason(item):
+            key = _memory_signal_key(item)
+            if key not in semantic_conflict_keys:
+                semantic_conflict_keys.add(key)
+                signal_counts["semantic_conflict"] += 1
         if strategy == "explicit_time":
             signal_counts["time"] += 1
         if strategy == "l3_awaken":
@@ -184,6 +197,11 @@ def build_retrieval_quality_analysis(
         observations.append(_notice("entity_recall", "本轮有实体命中信号参与召回。"))
     if signal_counts["keyword"]:
         observations.append(_notice("keyword_recall", "本轮有关键词命中信号参与重排。"))
+    if signal_counts["semantic_conflict"]:
+        observations.append(_notice(
+            "semantic_conflict",
+            f"{signal_counts['semantic_conflict']} 条候选被语义对立规则降权。",
+        ))
     if signal_counts["safety"]:
         observations.append(_notice("safety_memory", "本轮注入了安全/情绪相关记忆。"))
     if signal_counts["time"]:
@@ -396,6 +414,17 @@ def _matched_terms(memory_text: str, assistant_reply: str) -> list[str]:
     # Prefer longer terms first; they are more informative than generic bigrams.
     matches.sort(key=lambda term: (-len(term), term))
     return matches[:_MAX_MATCH_TERMS]
+
+
+def _has_semantic_conflict_reason(item: dict[str, Any]) -> bool:
+    reasons = item.get("rank_reasons")
+    if not isinstance(reasons, list):
+        return False
+    return any("语义对立" in str(reason) for reason in reasons)
+
+
+def _memory_signal_key(item: dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("text") or item.get("summary") or item.get("content") or "")
 
 
 def _notice(code: str, message: str, severity: str = "info") -> dict[str, str]:
