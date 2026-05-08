@@ -15,6 +15,11 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
 
 def test_contradiction_detection_forbids_inference_as_conflict_source():
     """detection prompt 必须显式禁止把 LLM **推断/常识**当 conflict 的来源.
@@ -97,6 +102,16 @@ def test_contradiction_reply_handles_empty_context():
     )
 
 
+def test_contradiction_grounding_rejects_single_weak_overlap():
+    """后验 grounding 不能因一个泛化短词重叠就放行。"""
+    from app.services.memory.interaction.contradiction import _conflict_new_info_grounded
+
+    assert not _conflict_new_info_grounded(
+        {"new_info": "用户喜欢上海"},
+        "我讨厌上海，但现在住杭州",
+    )
+
+
 def test_no_specific_production_case_phrases_in_prompts():
     """守门: 这两个 prompt 不该含生产 trace 的具体 phrase ('钓鱼'/'水库'/'生日'
     等). 这些是抽 general principle 的反例时容易 lift 进 prompt 的痕迹, 但
@@ -118,3 +133,82 @@ def test_no_specific_production_case_phrases_in_prompts():
                 f"{prompt_name} prompt 含生产 case phrase '{phrase}' — 这是过拟合, "
                 f"应该用抽象表述 (X/Y 属性) 替代具体名词"
             )
+
+
+@pytest.mark.asyncio
+async def test_contradiction_detector_discards_l1_to_l1_conflict_not_in_current_message():
+    """LLM 把两条旧 L1 互相冲突误报为当前矛盾时, 后验校验必须丢弃。"""
+    from app.services.memory.interaction.contradiction import detect_l1_contradiction
+
+    memories = [
+        SimpleNamespace(id="m-old", summary="用户是独生女，无兄弟姐妹", content=None),
+        SimpleNamespace(id="m-new", summary="用户有个妹妹叫辽能", content=None),
+    ]
+    llm_result = {
+        "has_conflict": True,
+        "conflicting_memory_id": "m-old",
+        "old_content": "用户是独生女，无兄弟姐妹",
+        "new_info": "用户有个妹妹叫辽能",
+        "conflict_description": "有妹妹与独生女矛盾",
+    }
+
+    with (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_many",
+            new=AsyncMock(return_value=memories),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.get_prompt_text",
+            new=AsyncMock(return_value="{user_message}\n{existing_l1_memory}"),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.invoke_json",
+            new=AsyncMock(return_value=llm_result),
+        ),
+    ):
+        result = await detect_l1_contradiction(
+            "我身高184，体重54公斤，最喜欢的明星是艾克",
+            "u1",
+            workspace_id="w1",
+        )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_contradiction_detector_keeps_conflict_grounded_in_current_message():
+    """当前用户消息字面支撑 new_info 时, 不应误杀真实矛盾。"""
+    from app.services.memory.interaction.contradiction import detect_l1_contradiction
+
+    memories = [
+        SimpleNamespace(id="m-city", summary="用户现在住北京", content=None),
+    ]
+    llm_result = {
+        "has_conflict": True,
+        "conflicting_memory_id": "m-city",
+        "old_content": "用户现在住北京",
+        "new_info": "用户现在住上海",
+        "conflict_description": "现居地从北京变为上海",
+    }
+
+    with (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_many",
+            new=AsyncMock(return_value=memories),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.get_prompt_text",
+            new=AsyncMock(return_value="{user_message}\n{existing_l1_memory}"),
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.invoke_json",
+            new=AsyncMock(return_value=llm_result),
+        ),
+    ):
+        result = await detect_l1_contradiction(
+            "我现在住上海了",
+            "u1",
+            workspace_id="w1",
+        )
+
+    assert result == llm_result

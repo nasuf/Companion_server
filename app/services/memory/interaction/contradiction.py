@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from app.observability.events import (
     EVT_LLM_FAIL,
@@ -35,6 +36,51 @@ _PENDING_KEY_PREFIX = "contradiction:pending:"
 _PENDING_TTL = 1800  # 30 min — generous window for user to reply
 
 logger = logging.getLogger(__name__)
+
+
+_CONFLICT_META_WORD_RE = re.compile(
+    r"用户|本人|自己|对方|当前|刚才|新信息|提到|提及|表示|透露|声称|"
+    r"称|说|为|是|的|了"
+)
+
+
+def _normalize_conflict_grounding_text(text: str) -> str:
+    """Normalize role/meta wording while preserving literal fact content."""
+    compact = re.sub(r"[\s，。！？!?~～…,.、:：；;\"'“”‘’（）()【】\[\]{}]+", "", text or "")
+    compact = _CONFLICT_META_WORD_RE.sub("", compact)
+    return compact.lower()
+
+
+def _char_bigrams(text: str) -> set[str]:
+    if len(text) < 2:
+        return {text} if text else set()
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _conflict_new_info_grounded(result: dict, user_message: str) -> bool:
+    """Return true only if reported new_info is supported by current message.
+
+    The detector compares current user message against all L1 memories. Small
+    models sometimes report conflicts between two old L1 memories and place one
+    of those old memories in `new_info`. That must not trigger the interactive
+    contradiction flow.
+    """
+    new_info = str(result.get("new_info") or "").strip()
+    if not new_info:
+        return False
+    user_text = _normalize_conflict_grounding_text(user_message)
+    new_text = _normalize_conflict_grounding_text(new_info)
+    if not user_text or not new_text:
+        return False
+    if new_text in user_text:
+        return True
+
+    new_bigrams = _char_bigrams(new_text)
+    user_bigrams = _char_bigrams(user_text)
+    if not new_bigrams:
+        return False
+    overlap = len(new_bigrams & user_bigrams) / len(new_bigrams)
+    return overlap >= 0.6
 
 
 async def detect_l1_contradiction(
@@ -77,6 +123,17 @@ async def detect_l1_contradiction(
         }))
         result = await invoke_json(get_utility_model(), prompt)
         if isinstance(result, dict) and result.get("has_conflict"):
+            if not _conflict_new_info_grounded(result, user_message):
+                logger.info(
+                    "contradiction.detect: discarded ungrounded conflict",
+                    extra={
+                        "event": EVT_MEMORY_CONTRADICTION_STEP, "step": "detect",
+                        "outcome": "ungrounded_conflict",
+                        "n_l1_checked": len(l1_user),
+                        "old_memory_id": result.get("conflicting_memory_id"),
+                    },
+                )
+                return None
             logger.info(
                 f"contradiction.detect: conflict found in {len(l1_user)} L1",
                 extra={
