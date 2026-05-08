@@ -464,6 +464,112 @@ async def get_related_memories(
     return [dict(r) for r in rows]
 
 
+async def search_related_memories_for_query(
+    *,
+    user_id: str,
+    workspace_id: str | None,
+    query: str,
+    entity_limit: int = 5,
+    memory_limit: int = 20,
+    levels: list[int] | None = None,
+) -> list[dict]:
+    """Recall concrete memories linked to entities explicitly named in query.
+
+    This is a retrieval channel, not prompt graph injection. It returns memory
+    rows so the normal ranking/selection pipeline can decide whether they are
+    worth injecting.
+    """
+    if not workspace_id:
+        logger.warning(
+            f"[ENTITY-SCOPE] search_related_memories_for_query workspace_id=None "
+            f"for user={user_id[:8]}; returning empty"
+        )
+        return []
+    query = (query or "").strip()
+    if len(query) < 2:
+        return []
+
+    rows = await db.query_raw(
+        """
+        WITH matched_entities AS (
+            SELECT id, canonical_name, mention_count, last_mentioned_at
+            FROM memory_entities
+            WHERE user_id = $1
+              AND workspace_id = $2
+              AND is_archived = false
+              AND (
+                (
+                  char_length(canonical_name) >= 2
+                  AND POSITION(canonical_name IN $3) > 0
+                )
+                OR EXISTS (
+                  SELECT 1 FROM unnest(aliases) AS a(alias_name)
+                  WHERE char_length(alias_name) >= 2
+                    AND POSITION(alias_name IN $3) > 0
+                )
+              )
+            ORDER BY mention_count DESC, last_mentioned_at DESC NULLS LAST
+            LIMIT $4
+        ),
+        related AS (
+            SELECT
+                mm.memory_id AS id, mu.content, mu.summary, mu.level,
+                mu.importance, mu.mention_count, mu.type,
+                mu.main_category, mu.sub_category,
+                mu.occur_time, mu.created_at, mu.updated_at,
+                COALESCE(mu.updated_at, mu.created_at) AS last_accessed_at,
+                'user' AS source,
+                me.canonical_name AS matched_entity
+            FROM memory_mentions mm
+            JOIN matched_entities me ON me.id = mm.entity_id
+            JOIN memories_user mu ON mu.id = mm.memory_id
+                AND mm.memory_source = 'user'
+            WHERE mm.user_id = $1
+              AND mm.workspace_id = $2
+              AND mu.user_id = $1
+              AND mu.workspace_id = $2
+              AND mu.is_archived = false
+              AND ($6::int[] IS NULL OR mu.level = ANY($6::int[]))
+
+            UNION ALL
+
+            SELECT
+                mm.memory_id AS id, ma.content, ma.summary, ma.level,
+                ma.importance, ma.mention_count, ma.type,
+                ma.main_category, ma.sub_category,
+                ma.occur_time, ma.created_at, ma.updated_at,
+                COALESCE(ma.updated_at, ma.created_at) AS last_accessed_at,
+                'ai' AS source,
+                me.canonical_name AS matched_entity
+            FROM memory_mentions mm
+            JOIN matched_entities me ON me.id = mm.entity_id
+            JOIN memories_ai ma ON ma.id = mm.memory_id
+                AND mm.memory_source = 'ai'
+            WHERE mm.user_id = $1
+              AND mm.workspace_id = $2
+              AND ma.user_id = $1
+              AND ma.workspace_id = $2
+              AND ma.is_archived = false
+              AND ($6::int[] IS NULL OR ma.level = ANY($6::int[]))
+        )
+        SELECT * FROM (
+            SELECT DISTINCT ON (id, source) *
+            FROM related
+            ORDER BY id, source, importance DESC, created_at DESC
+        ) dedup
+        ORDER BY importance DESC, created_at DESC
+        LIMIT $5
+        """,
+        user_id,
+        workspace_id,
+        query,
+        entity_limit,
+        memory_limit,
+        levels or None,
+    )
+    return [dict(r) for r in rows]
+
+
 # ── maintenance ──
 
 # Archive an entity if we haven't seen it in this many days AND it was

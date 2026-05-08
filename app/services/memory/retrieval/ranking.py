@@ -160,6 +160,11 @@ def rank_memory_candidate(
         boost += 0.25
         reasons.append("话题类别匹配")
 
+    retrieval_source = str(memory.get("_retrieval_source") or "")
+    if memory.get("_entity_match") or "entity" in retrieval_source:
+        boost += 0.20
+        reasons.append("实体命中")
+
     if is_distress_or_safety_query(query) and is_safety_memory(memory):
         boost += 0.80 if is_safety_query(query) else 0.45
         reasons.append("安全/情绪相关")

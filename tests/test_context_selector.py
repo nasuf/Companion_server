@@ -55,3 +55,90 @@ def test_select_context_budget_limit():
     result = select_context(candidates, token_budget=400)
     # Should not include all 10
     assert len(result) < 10
+
+
+def test_select_context_protects_safety_memory_from_top10_truncation():
+    """Safety/emotional user memories must not be silently pushed to #11."""
+    candidates = [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 人设记忆 {i}",
+            "source": "ai",
+            "importance": 1.0,
+            "similarity": 0.9,
+            "rank_score": 0.95 - i * 0.01,
+        }
+        for i in range(10)
+    ]
+    candidates.append({
+        "id": "safety",
+        "summary": "用户表达过强烈负面情绪，有轻生念头",
+        "source": "user",
+        "main_category": "情绪",
+        "sub_category": "悲伤",
+        "importance": 0.95,
+        "similarity": 0.54,
+        "rank_score": 0.42,
+        "rank_reasons": ["安全/情绪相关"],
+    })
+
+    result = select_context(candidates, token_budget=800, max_items=10)
+
+    assert len(result) == 10
+    safety = next((m for m in result if m.id == "safety"), None)
+    assert safety is not None
+    assert "保护槽:安全情绪" in (safety.rank_reasons or [])
+    assert sum(1 for m in result if m.source == "ai") == 9
+
+
+def test_select_context_keeps_user_memory_floor_when_ai_scores_dominate():
+    """User-facing companion chat should not inject only AI persona memories."""
+    candidates = [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 高分记忆 {i}",
+            "source": "ai",
+            "rank_score": 0.98 - i * 0.01,
+        }
+        for i in range(6)
+    ] + [
+        {
+            "id": f"user-{i}",
+            "summary": f"用户相关事实 {i}",
+            "source": "user",
+            "rank_score": 0.52 - i * 0.01,
+        }
+        for i in range(3)
+    ]
+
+    result = select_context(candidates, token_budget=800, max_items=6)
+
+    assert len(result) == 6
+    user_memories = [m for m in result if m.source == "user"]
+    assert len(user_memories) == 3
+    assert all("保护槽:用户记忆" in (m.rank_reasons or []) for m in user_memories)
+
+
+def test_select_context_protects_literal_user_keyword_match():
+    candidates = [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 高分记忆 {i}",
+            "source": "ai",
+            "rank_score": 0.9 - i * 0.01,
+        }
+        for i in range(5)
+    ]
+    candidates.append({
+        "id": "wife-surgery",
+        "summary": "用户的妻子之前做过手术",
+        "source": "user",
+        "rank_score": 0.4,
+        "rank_reasons": ["关键词命中"],
+    })
+
+    result = select_context(candidates, token_budget=800, max_items=5)
+
+    assert any(m.id == "wife-surgery" for m in result)
+    matched = next(m for m in result if m.id == "wife-surgery")
+    assert "保护槽:字面命中" in (matched.rank_reasons or [])

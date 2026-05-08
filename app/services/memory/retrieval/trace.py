@@ -145,6 +145,82 @@ def memory_trace_item(memory: Any, *, selected: bool = False) -> dict[str, Any]:
     }
 
 
+def _selected_id_set(selected: list[Any]) -> set[str]:
+    ids = {
+        str(item.get("id"))
+        for item in selected
+        if isinstance(item, dict) and item.get("id")
+    }
+    ids.update(
+        str(getattr(item, "id", ""))
+        for item in selected
+        if getattr(item, "id", "")
+    )
+    return {mid for mid in ids if mid}
+
+
+def _selected_trace_items(selected: list[Any]) -> list[dict[str, Any]]:
+    return [memory_trace_item(memory, selected=True) for memory in selected]
+
+
+def _mark_candidate_selection(
+    candidates: list[dict[str, Any]],
+    selected_ids: set[str],
+) -> list[dict[str, Any]]:
+    marked: list[dict[str, Any]] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        mid = str(item.get("id") or "")
+        item["selected"] = bool(mid and mid in selected_ids)
+        marked.append(item)
+    return marked
+
+
+def replace_latest_retrieval_selection(
+    *,
+    strategy: str,
+    selected: list[Any] | None,
+    final_injected: bool,
+) -> None:
+    """Align trace selection with memories that actually reached the prompt.
+
+    Retrieval can run before the relevance gate finishes. If relevance later
+    returns weak, or an enhanced-query retry supersedes the first retrieval,
+    the earlier selected list is not truly prompt-injected. This function marks
+    older sessions as superseded and rewrites the latest session's selected
+    list to match the final prompt input.
+    """
+    sessions = _current_sessions.get()
+    if sessions is None:
+        return
+    matching = [s for s in sessions if s.get("strategy") == strategy]
+    if not matching:
+        return
+
+    selected_list = selected or []
+    selected_items = _selected_trace_items(selected_list)
+    selected_ids = _selected_id_set(selected_list)
+    latest = matching[-1]
+    for session in matching:
+        notes = dict(session.get("notes") or {})
+        if session is latest:
+            notes["final_injected"] = bool(final_injected and selected_items)
+            session["selected"] = selected_items
+            session["selected_count"] = len(selected_items)
+            candidates = session.get("candidates")
+            if isinstance(candidates, list):
+                session["candidates"] = _mark_candidate_selection(candidates, selected_ids)
+        else:
+            notes["final_injected"] = False
+            notes["superseded_by_later_retrieval"] = True
+            session["selected"] = []
+            session["selected_count"] = 0
+            candidates = session.get("candidates")
+            if isinstance(candidates, list):
+                session["candidates"] = _mark_candidate_selection(candidates, set())
+        session["notes"] = notes
+
+
 def record_retrieval_session(
     *,
     strategy: str,
@@ -166,24 +242,14 @@ def record_retrieval_session(
     if sessions is None:
         return None
 
-    selected_ids = {
-        item.get("id")
-        for item in (selected or [])
-        if isinstance(item, dict) and item.get("id")
-    }
-    if selected:
-        selected_ids.update(
-            getattr(item, "id", "")
-            for item in selected
-            if getattr(item, "id", "")
-        )
+    selected_ids = _selected_id_set(selected or [])
 
     candidate_items = []
     for memory in (candidates or [])[:_MAX_CANDIDATES_PER_SESSION]:
         mid = memory.get("id") if isinstance(memory, dict) else getattr(memory, "id", "")
         candidate_items.append(memory_trace_item(memory, selected=bool(mid and mid in selected_ids)))
 
-    selected_items = [memory_trace_item(memory, selected=True) for memory in (selected or [])]
+    selected_items = _selected_trace_items(selected or [])
     session_id = make_retrieval_session_id(strategy)
     sessions.append({
         "session_id": session_id,

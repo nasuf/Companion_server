@@ -27,7 +27,10 @@ from app.services.memory.retrieval.relevance import (
     compute_display_score,
 )
 from app.services.memory.retrieval.ranking import is_recall_query
-from app.services.memory.retrieval.trace import record_retrieval_session
+from app.services.memory.retrieval.trace import (
+    record_retrieval_session,
+    replace_latest_retrieval_selection,
+)
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.relationship.emotion import compute_ai_pad, extract_emotion
@@ -98,6 +101,37 @@ def _should_wait_for_enhanced_query(user_message: str) -> bool:
     if not text or len(text) > 24:
         return False
     return any(hint in text for hint in _ENHANCED_QUERY_FIRST_HINTS)
+
+
+def _retrieved_memory_count(retrieval_result: Any) -> int:
+    if isinstance(retrieval_result, Exception) or not isinstance(retrieval_result, dict):
+        return 0
+    memories = retrieval_result.get("memories")
+    if isinstance(memories, list):
+        return len(memories)
+    strings = retrieval_result.get("memory_strings")
+    if isinstance(strings, list):
+        return len(strings)
+    return 0
+
+
+def _should_reretrieve_with_enhanced_query(
+    *,
+    enhanced_query: str,
+    retrieval_result: Any,
+    sparse_threshold: int = 3,
+) -> bool:
+    """完整消息的 enhanced_query 只在初次检索稀疏时重跑。
+
+    Relevance LLM 常把完整句子轻微改写成 "用户的xxx", 这类增强不值得
+    额外支付一次向量/实体/时间检索。若初次检索少于 sparse_threshold 条,
+    再用 enhanced_query 作为补救查询。
+    """
+    if not enhanced_query:
+        return False
+    if isinstance(retrieval_result, Exception):
+        return True
+    return _retrieved_memory_count(retrieval_result) < sparse_threshold
 
 
 def _unwrap(result: _T, default: _T, label: str) -> _T:
@@ -213,7 +247,11 @@ def _post_process_retrieval(
     memory_relevance: str,
     retrieval_result: Any,
 ) -> tuple[list | None, list[str] | None, dict | None]:
-    """Spec §3.2/3.3：rerank by display_score, cap at top 10。返回 (memories, strings, graph)。"""
+    """Spec §3.2/3.3：补齐 display_score。返回 (memories, strings, graph)。
+
+    最终 top-N / quota 选择权在 context_selector.select_context 内完成。
+    这里不再二次排序/截断，避免破坏安全、字面命中、用户记忆保护槽。
+    """
     if memory_relevance == "weak":
         logger.info("[DEBUG-MEM] SKIPPED — weak relevance, no memories injected")
         return None, None, None
@@ -256,10 +294,9 @@ def _post_process_retrieval(
                 ),
                 similarity=getattr(m, "similarity", 0.8),
             )
-    classified_memories.sort(key=lambda m: m.display_score, reverse=True)
-    classified_memories = classified_memories[:10]
+    memory_strings = [m.text for m in classified_memories]
     logger.info(
-        f"[DEBUG-MEM] after rerank, top {len(classified_memories)} injected into prompt:"
+        f"[DEBUG-MEM] after post-process, {len(classified_memories)} injected into prompt:"
     )
     for m in classified_memories[:5]:
         logger.info(f"[DEBUG-MEM]   ds={m.display_score:.3f} text='{m.text[:60]}'")
@@ -432,7 +469,8 @@ async def fetch_parallel_context(
 
     # Phase 2.4 + retrieval latency fix:
     # - 明显省略式追问 ("那他呢?" / "颜色呢?") 先等 enhanced_query, 再只检索一次。
-    # - 完整消息仍保持 relevance/retrieval 并行; 若 LLM 额外给 enhanced_query, 再重检索。
+    # - 完整消息仍保持 relevance/retrieval 并行; 若 LLM 额外给 enhanced_query,
+    #   仅在初次检索稀疏/失败时重检索，避免完整消息无意义多跑一次。
     if wait_for_enhanced_query and memory_relevance != "weak":
         try:
             retrieval_result = await _do_retrieval(
@@ -442,7 +480,13 @@ async def fetch_parallel_context(
         except Exception as e:
             logger.warning(f"Enhanced-first retrieval failed: {e}")
             retrieval_result = _EMPTY_RETRIEVAL_RESULT
-    elif enhanced_query and memory_relevance != "weak":
+    elif (
+        memory_relevance != "weak"
+        and _should_reretrieve_with_enhanced_query(
+            enhanced_query=enhanced_query,
+            retrieval_result=retrieval_result,
+        )
+    ):
         logger.info(
             f"[DEBUG-MEM] re-retrieve with enhanced_query='{enhanced_query[:40]}'"
         )
@@ -456,6 +500,11 @@ async def fetch_parallel_context(
 
     classified_memories, memory_strings, graph_context = _post_process_retrieval(
         memory_relevance, retrieval_result,
+    )
+    replace_latest_retrieval_selection(
+        strategy="hybrid_l1_l2",
+        selected=classified_memories or [],
+        final_injected=memory_relevance != "weak",
     )
 
     portrait = _unwrap(portrait, None, "Loading portrait")

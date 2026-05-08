@@ -57,6 +57,100 @@ def estimate_tokens(text: str) -> int:
 
 
 MAX_MEMORIES_INJECTED = 10  # spec §3.2 step 4: 前 10 条硬上限
+_SAFETY_MEMORY_QUOTA = 3
+_KEYWORD_USER_MEMORY_QUOTA = 2
+_MIN_USER_MEMORY_QUOTA = 3
+_MIN_PROTECTED_SCORE = 0.35
+_SAFETY_REASON = "安全/情绪相关"
+_KEYWORD_REASON = "关键词命中"
+_PROTECTED_SAFETY_REASON = "保护槽:安全情绪"
+_PROTECTED_KEYWORD_REASON = "保护槽:字面命中"
+_PROTECTED_USER_REASON = "保护槽:用户记忆"
+_EMOTIONAL_MAIN_CATEGORY = "情绪"
+_EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独", "遗憾"}
+
+
+def _memory_text(mem: dict) -> str:
+    return mem.get("summary") or mem.get("content") or ""
+
+
+def _memory_key(mem: dict) -> str:
+    return str(mem.get("id") or _memory_text(mem))
+
+
+def _memory_score(mem: dict) -> float:
+    return float(mem.get("rank_score", mem.get("score", 0.5)) or 0.0)
+
+
+def _memory_source(mem: dict) -> MemorySource:
+    return "ai" if mem.get("source") == "ai" else "user"
+
+
+def _rank_reasons(mem: dict) -> set[str]:
+    return {str(reason) for reason in (mem.get("rank_reasons") or [])}
+
+
+def _append_rank_reason(mem: dict, reason: str) -> None:
+    reasons = list(mem.get("rank_reasons") or [])
+    if reason not in reasons:
+        reasons.append(reason)
+        mem["rank_reasons"] = reasons
+
+
+def _is_safety_memory(mem: dict) -> bool:
+    if _memory_source(mem) != "user":
+        return False
+    reasons = _rank_reasons(mem)
+    importance = float(mem.get("importance", 0.0) or 0.0)
+    return (
+        _SAFETY_REASON in reasons
+        or (
+            mem.get("main_category") == _EMOTIONAL_MAIN_CATEGORY
+            and importance >= 0.75
+        )
+        or (
+            mem.get("sub_category") in _EMOTIONAL_SUBCATEGORIES
+            and importance >= 0.65
+        )
+    )
+
+
+def _is_keyword_user_memory(mem: dict) -> bool:
+    return (
+        _memory_source(mem) == "user"
+        and _KEYWORD_REASON in _rank_reasons(mem)
+        and _memory_score(mem) >= _MIN_PROTECTED_SCORE
+    )
+
+
+def _is_eligible_user_memory(mem: dict) -> bool:
+    return _memory_source(mem) == "user" and _memory_score(mem) >= _MIN_PROTECTED_SCORE
+
+
+def _to_classified_memory(mem: dict) -> ClassifiedMemory:
+    text = _memory_text(mem)
+    score = _memory_score(mem)
+    relevance = "strong" if score >= 0.7 else "medium"
+    return ClassifiedMemory(
+        text=text,
+        relevance=relevance,
+        score=score,
+        id=mem.get("id", ""),
+        importance=float(mem.get("importance", 0.5)),
+        similarity=float(mem.get("similarity", 0.8)),
+        mention_count=int(mem.get("mention_count") or 0),
+        main_category=mem.get("main_category"),
+        sub_category=mem.get("sub_category"),
+        created_at=mem.get("created_at"),
+        last_accessed_at=(
+            mem.get("last_accessed_at")
+            or mem.get("updated_at")
+            or mem.get("created_at")
+        ),
+        display_score=score,
+        rank_reasons=list(mem.get("rank_reasons") or []),
+        source=_memory_source(mem),
+    )
 
 
 def select_context(
@@ -75,51 +169,59 @@ def select_context(
 
     Returns list of ClassifiedMemory.
     """
-    selected: list[ClassifiedMemory] = []
+    if max_items <= 0 or token_budget <= 0:
+        return []
+
+    selected_rows: list[dict] = []
     used_tokens = 0
     seen_ids: set[str] = set()
 
-    for mem in ranked_memories:
-        if len(selected) >= max_items:
-            break
-
-        mid = mem.get("id", "")
-        if mid in seen_ids:
-            continue
-
-        text = mem.get("summary") or mem.get("content", "")
+    def try_add(mem: dict, protected_reason: str | None = None) -> bool:
+        nonlocal used_tokens
+        if len(selected_rows) >= max_items:
+            return False
+        key = _memory_key(mem)
+        if not key or key in seen_ids:
+            return False
+        text = _memory_text(mem)
         if not text:
-            continue
+            return False
         tokens = estimate_tokens(text)
-
         if used_tokens + tokens > token_budget:
-            continue
-
-        score = float(mem.get("rank_score", mem.get("score", 0.5)))
-        relevance = "strong" if score >= 0.7 else "medium"
-
-        seen_ids.add(mid)
-        # source 透传自上游 SQL 的 'user'/'ai' AS source 列.
-        source: MemorySource = "ai" if mem.get("source") == "ai" else "user"
-        selected.append(ClassifiedMemory(
-            text=text,
-            relevance=relevance,
-            score=score,
-            id=mid,
-            importance=float(mem.get("importance", 0.5)),
-            similarity=float(mem.get("similarity", 0.8)),
-            mention_count=int(mem.get("mention_count") or 0),
-            main_category=mem.get("main_category"),
-            sub_category=mem.get("sub_category"),
-            created_at=mem.get("created_at"),
-            last_accessed_at=(
-                mem.get("last_accessed_at")
-                or mem.get("updated_at")
-                or mem.get("created_at")
-            ),
-            rank_reasons=list(mem.get("rank_reasons") or []),
-            source=source,
-        ))
+            return False
+        if protected_reason:
+            _append_rank_reason(mem, protected_reason)
+        seen_ids.add(key)
+        selected_rows.append(mem)
         used_tokens += tokens
+        return True
 
-    return selected
+    safety_added = 0
+    for mem in ranked_memories:
+        if safety_added >= min(_SAFETY_MEMORY_QUOTA, max_items):
+            break
+        if _is_safety_memory(mem) and try_add(mem, _PROTECTED_SAFETY_REASON):
+            safety_added += 1
+
+    keyword_added = 0
+    for mem in ranked_memories:
+        if keyword_added >= min(_KEYWORD_USER_MEMORY_QUOTA, max_items - len(selected_rows)):
+            break
+        if _is_keyword_user_memory(mem) and try_add(mem, _PROTECTED_KEYWORD_REASON):
+            keyword_added += 1
+
+    min_user_quota = min(_MIN_USER_MEMORY_QUOTA, max_items)
+    selected_user_count = sum(1 for mem in selected_rows if _memory_source(mem) == "user")
+    if selected_user_count < min_user_quota:
+        for mem in ranked_memories:
+            if selected_user_count >= min_user_quota:
+                break
+            if _is_eligible_user_memory(mem) and try_add(mem, _PROTECTED_USER_REASON):
+                selected_user_count += 1
+
+    for mem in ranked_memories:
+        if len(selected_rows) >= max_items:
+            break
+        try_add(mem)
+
+    return [_to_classified_memory(mem) for mem in selected_rows]

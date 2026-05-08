@@ -85,3 +85,89 @@ def test_memory_trace_item_handles_cached_string_payload():
     assert item["text"] == "ClassifiedMemory(text='用户最近压力很大')"
     assert item["selected"] is True
     assert item["score"] is None
+
+
+def test_replace_latest_retrieval_selection_supersedes_old_sessions():
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+    from app.services.memory.retrieval.trace import (
+        record_retrieval_session,
+        replace_latest_retrieval_selection,
+        reset_retrieval_trace,
+        snapshot_retrieval_traces,
+        start_retrieval_trace,
+    )
+
+    token = start_retrieval_trace()
+    try:
+        record_retrieval_session(
+            strategy="hybrid_l1_l2",
+            query="那他呢",
+            candidates=[{"id": "old", "summary": "旧 query 命中的记忆"}],
+            selected=[{"id": "old", "summary": "旧 query 命中的记忆"}],
+        )
+        record_retrieval_session(
+            strategy="hybrid_l1_l2",
+            query="那他呢",
+            enhanced_query="妈妈最近情况",
+            candidates=[
+                {"id": "m1", "summary": "用户妈妈最近住院", "rank_score": 0.8},
+                {"id": "m2", "summary": "用户喜欢咖啡", "rank_score": 0.6},
+            ],
+            selected=[{"id": "m2", "summary": "用户喜欢咖啡"}],
+        )
+        replace_latest_retrieval_selection(
+            strategy="hybrid_l1_l2",
+            selected=[
+                ClassifiedMemory(
+                    id="m1",
+                    text="用户妈妈最近住院",
+                    relevance="strong",
+                    score=0.8,
+                )
+            ],
+            final_injected=True,
+        )
+        snapshot = snapshot_retrieval_traces()
+    finally:
+        reset_retrieval_trace(token)
+
+    assert snapshot[0]["selected"] == []
+    assert snapshot[0]["selected_count"] == 0
+    assert snapshot[0]["notes"]["superseded_by_later_retrieval"] is True
+    assert snapshot[1]["selected_count"] == 1
+    assert snapshot[1]["selected"][0]["id"] == "m1"
+    assert snapshot[1]["notes"]["final_injected"] is True
+    assert snapshot[1]["candidates"][0]["selected"] is True
+    assert snapshot[1]["candidates"][1]["selected"] is False
+
+
+def test_replace_latest_retrieval_selection_can_mark_weak_gate_not_injected():
+    from app.services.memory.retrieval.trace import (
+        record_retrieval_session,
+        replace_latest_retrieval_selection,
+        reset_retrieval_trace,
+        snapshot_retrieval_traces,
+        start_retrieval_trace,
+    )
+
+    token = start_retrieval_trace()
+    try:
+        record_retrieval_session(
+            strategy="hybrid_l1_l2",
+            query="哈哈",
+            candidates=[{"id": "m1", "summary": "候选记忆"}],
+            selected=[{"id": "m1", "summary": "候选记忆"}],
+        )
+        replace_latest_retrieval_selection(
+            strategy="hybrid_l1_l2",
+            selected=[],
+            final_injected=False,
+        )
+        snapshot = snapshot_retrieval_traces()
+    finally:
+        reset_retrieval_trace(token)
+
+    assert snapshot[0]["selected"] == []
+    assert snapshot[0]["selected_count"] == 0
+    assert snapshot[0]["notes"]["final_injected"] is False
+    assert snapshot[0]["candidates"][0]["selected"] is False
