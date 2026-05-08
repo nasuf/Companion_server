@@ -206,6 +206,23 @@ def test_orchestrator_downgrades_memory_recall_misrouted_as_current_state():
     assert diagnostics["intent_downgrade_reason"] == "not_explicit_current_state"
 
 
+def test_orchestrator_downgrades_past_experience_question_as_current_state():
+    """追问 AI 去过哪些城市是经历/聊天，不是当前状态。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_current_state
+
+    diagnostics = {}
+    result = _downgrade_non_explicit_current_state(
+        IntentResult(intent=IntentType.CURRENT_STATE, confidence=0.8),
+        "去过哪些城市呢",
+        diagnostics,
+    )
+
+    assert result.intent == IntentType.NONE
+    assert result.metadata["downgraded_from"] == IntentType.CURRENT_STATE.value
+    assert diagnostics["intent_downgrade_reason"] == "not_explicit_current_state"
+
+
 def test_orchestrator_keeps_explicit_current_state_intent():
     """真正询问 AI 当前状态的消息仍保留 CURRENT_STATE 短路。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType

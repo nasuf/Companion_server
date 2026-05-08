@@ -75,6 +75,7 @@ def test_current_state_fast_path_is_narrow():
     assert is_explicit_current_state_query("你心情怎么样")
     assert not is_explicit_current_state_query("这么晚还能看到云啊")
     assert not is_explicit_current_state_query("你刚才说在看云？")
+    assert not is_explicit_current_state_query("去过哪些城市呢")
 
 
 def test_l3_recall_requires_explicit_oldness():
