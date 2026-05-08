@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,89 @@ async def _drain(agen):
     async for evt in agen:
         events.append(evt)
     return events
+
+
+def test_ensure_current_user_message_appends_missing_current_turn():
+    """Queued/delayed paths must not let the main prompt end at the previous user turn."""
+    from app.services.chat.orchestrator import (
+        _ensure_current_user_message,
+        _max_user_created_at,
+    )
+
+    received_at = "2026-04-28T07:24:35.953289+00:00"
+    messages = [
+        {
+            "id": "m-prev",
+            "role": "user",
+            "content": "你平时喜欢做什么啊",
+            "createdAt": "2026-04-28T07:24:06.412570+00:00",
+        },
+        {
+            "id": "a-prev",
+            "role": "assistant",
+            "content": "我喜欢看老电影。",
+            "createdAt": "2026-04-28T07:24:21.210610+00:00",
+        },
+    ]
+
+    ensured = _ensure_current_user_message(
+        messages,
+        user_message="啊",
+        user_message_id="m-current",
+        reply_context={"received_at": received_at},
+    )
+
+    assert ensured[-1] == {
+        "id": "m-current",
+        "role": "user",
+        "content": "啊",
+        "createdAt": received_at,
+        "synthetic_current": True,
+    }
+    assert _max_user_created_at(ensured) == datetime(
+        2026, 4, 28, 7, 24, 35, 953289, tzinfo=timezone.utc,
+    )
+
+
+def test_ensure_current_user_message_does_not_duplicate_present_turn():
+    from app.services.chat.orchestrator import _ensure_current_user_message
+
+    messages = [
+        {
+            "id": "m-current",
+            "role": "user",
+            "content": "啊",
+            "createdAt": "2026-04-28T07:24:35.953289+00:00",
+        }
+    ]
+
+    ensured = _ensure_current_user_message(
+        messages,
+        user_message="啊",
+        user_message_id="m-current",
+        reply_context=None,
+    )
+
+    assert ensured is messages
+    assert len(ensured) == 1
+
+
+def test_synthetic_current_without_message_id_does_not_expand_coverage():
+    """Sub-intent synthetic turns can guide the prompt but must not widen scheduler dedup."""
+    from app.services.chat.orchestrator import (
+        _ensure_current_user_message,
+        _max_user_created_at,
+    )
+
+    ensured = _ensure_current_user_message(
+        [],
+        user_message="顺便问一句",
+        user_message_id=None,
+        reply_context={"received_at": "2026-04-28T07:24:35.953289+00:00"},
+    )
+
+    assert ensured[-1]["createdAt"] is None
+    assert _max_user_created_at(ensured) is None
 
 
 def _make_boundary_ctx(**overrides):

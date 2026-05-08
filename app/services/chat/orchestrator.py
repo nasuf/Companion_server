@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import re
+from datetime import UTC, datetime
 from time import perf_counter
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -202,6 +203,70 @@ def _previous_assistant_message(recent_messages: list[Any], current_user_message
         if getattr(message, "role", None) == "assistant":
             return message
     return None
+
+
+def _ensure_current_user_message(
+    messages: list[dict],
+    *,
+    user_message: str,
+    user_message_id: str | None,
+    reply_context: dict | None,
+) -> list[dict]:
+    """Ensure the prompt context contains the current user turn.
+
+    Normal chat saves the user message before fetching history, but delayed /
+    aggregated delivery can hit visibility or payload races. If the current
+    turn is absent, the main LLM sees the previous user turn as latest and can
+    regenerate the prior reply. Add a synthetic current turn as a final guard.
+    """
+    if user_message_id:
+        if any(m.get("id") == user_message_id for m in messages):
+            return messages
+    elif messages:
+        last = messages[-1]
+        if last.get("role") == "user" and last.get("content") == user_message:
+            return messages
+
+    received_at = None
+    if user_message_id and reply_context:
+        received_at = reply_context.get("latest_received_at") or reply_context.get("received_at")
+    if user_message_id and (not isinstance(received_at, str) or not received_at):
+        received_at = datetime.now(UTC).isoformat()
+
+    return [
+        *messages,
+        {
+            "id": user_message_id,
+            "role": "user",
+            "content": user_message,
+            "createdAt": received_at,
+            "synthetic_current": True,
+        },
+    ]
+
+
+def _parse_message_created_at(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _max_user_created_at(messages: list[dict]) -> datetime | None:
+    times = [
+        ts for ts in (
+            _parse_message_created_at(m.get("createdAt"))
+            for m in messages
+            if m.get("role") == "user"
+        )
+        if ts is not None
+    ]
+    return max(times, default=None)
 
 
 async def _record_memory_retrieval_feedback(
@@ -722,6 +787,12 @@ async def stream_chat_response(
             }
             for m in recent_messages
         ]
+        messages_dicts = _ensure_current_user_message(
+            messages_dicts,
+            user_message=user_message,
+            user_message_id=user_message_id,
+            reply_context=reply_context,
+        )
         if not sub_intent_mode:
             previous_assistant = _previous_assistant_message(
                 recent_messages, user_message_id,
@@ -1216,10 +1287,7 @@ async def stream_chat_response(
         # 若用户连发多条非碎片, 第一条 LLM 调用的 history 已经隐式包含后续所有 user
         # 消息 → reply 实际覆盖了它们; 写到 reply metadata 后, scheduler 处理后续
         # payload 时凭此跳过, 避免重复回复 (见 jobs/scheduler.py dedup gate).
-        covered_until_user_ts = max(
-            (m.createdAt for m in recent_messages if m.role == "user" and m.createdAt is not None),
-            default=None,
-        )
+        covered_until_user_ts = _max_user_created_at(messages_dicts)
 
         # --- Topic tracking (Redis, no LLM) ---
         topic_info = await push_topic(conversation_id, user_message)
