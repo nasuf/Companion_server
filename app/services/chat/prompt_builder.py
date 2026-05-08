@@ -81,6 +81,22 @@ def _section(title: str, body: str) -> str:
     return f"## {title}\n{body}"
 
 
+def _has_prompt_body(body: str | None) -> bool:
+    """Treat empty/admin-placeholder prompt text as absent."""
+    if not body:
+        return False
+    stripped = body.strip()
+    if not stripped:
+        return False
+    return bool(stripped.strip("。．.；;：:-—_ \n\t"))
+
+
+def _optional_section(title: str, body: str | None) -> str | None:
+    if not _has_prompt_body(body):
+        return None
+    return _section(title, str(body).strip())
+
+
 async def _build_personality_section(agent: Any) -> str:
     """Build the personality section using MBTI (spec §1.2)."""
     name = getattr(agent, "name", None) or "伙伴"
@@ -138,6 +154,8 @@ async def _build_emotion_section(
 
 async def _build_memory_section(
     memories: list[ClassifiedMemory] | None,
+    *,
+    include_empty_anchor: bool = True,
 ) -> str | None:
     """按 owner 分两段渲染. 见 ClassifiedMemory.source 分组原因.
 
@@ -147,6 +165,8 @@ async def _build_memory_section(
     顺承编造. 详见 CLAUDE.md 偏离表对应章节.
     """
     if not memories:
+        if not include_empty_anchor:
+            return None
         return _section(
             "你记得的事情",
             "(本次没有联想到任何与当前话题相关的记忆)",
@@ -251,6 +271,7 @@ async def build_system_prompt(
     time_memories: list[str] | None = None,
     l3_memories: list[str] | None = None,
     ai_status: dict | None = None,
+    memory_relevance: str = "medium",
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
     # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
     **_deprecated_kwargs,
@@ -277,9 +298,13 @@ async def build_system_prompt(
     # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════
     # 同 agent 跨请求字节级一致, dashscope prefix cache 应命中.
     sections: list[str] = [_section("核心规则", system_base)]
-    sections.append(_section("反幻觉硬约束", anti_hallucination))
+    anti_hallucination_section = _optional_section("反幻觉硬约束", anti_hallucination)
+    if anti_hallucination_section:
+        sections.append(anti_hallucination_section)
     sections.append(await _build_personality_section(agent))   # per-agent 稳定
-    sections.append(_section("对话一致性", consistency_rules))
+    consistency_section = _optional_section("对话一致性", consistency_rules)
+    if consistency_section:
+        sections.append(consistency_section)
 
     # ═══ VARIABLE SUFFIX (每请求变化, cache miss 起点) ═══════════════════
 
@@ -297,7 +322,12 @@ async def build_system_prompt(
 
     # Phase 6: 删 relational_context 注入 (实证冗余 SYSTEM_BASE)
 
-    mem = await _build_memory_section(memories)
+    mem = await _build_memory_section(
+        memories,
+        include_empty_anchor=(
+            memory_relevance != "weak" and anti_hallucination_section is not None
+        ),
+    )
     if mem:
         sections.append(mem)
 

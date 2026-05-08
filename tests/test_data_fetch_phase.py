@@ -107,12 +107,17 @@ async def test_fetch_parallel_context_happy_path():
 
 @pytest.mark.asyncio
 async def test_fetch_parallel_context_skips_retrieval_on_weak():
-    """relevance=weak 时跳过 retrieval 后处理，classified_memories=None。"""
+    """relevance=weak 时不调用 hybrid retrieval，classified_memories=None。"""
     from app.services.chat.data_fetch_phase import fetch_parallel_context
 
+    retrieval = AsyncMock(return_value={
+        "memories": ["should_not_use"],
+        "memory_strings": [],
+        "graph_context": None,
+    })
     with _patch_data_fetch(
         classify_memory_relevance=AsyncMock(return_value="weak"),
-        hybrid_retrieve=AsyncMock(return_value={"memories": ["should_not_use"], "memory_strings": [], "graph_context": None}),
+        hybrid_retrieve=retrieval,
     ):
         ctx = await fetch_parallel_context(
             user_message="今天随便聊点别的吧",
@@ -124,6 +129,7 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
     assert ctx.memory_relevance == "weak"
     assert ctx.classified_memories is None
     assert ctx.l3_memories == []
+    retrieval.assert_not_awaited()
 
 
 @pytest.mark.asyncio

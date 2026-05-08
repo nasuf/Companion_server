@@ -1045,6 +1045,7 @@ async def stream_chat_response(
             time_context=time_context,
             time_memories=time_memories or None,
             l3_memories=l3_memories or None,
+            memory_relevance=memory_relevance,
         )
         chat_messages = build_chat_messages(system_prompt, messages_dicts)
 

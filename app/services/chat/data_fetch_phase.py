@@ -1,7 +1,8 @@
-"""Spec §3.1 + §3.2 step 2-3：聊天热路径的并行数据拉取阶段。
+"""Spec §3.1 + §3.2 step 2-3：聊天热路径的数据拉取阶段。
 
 把 orchestrator 中 9 个 _load_* / _classify_relevance / _do_retrieval 的
-asyncio.gather 块和后续的 L3 awakening、ai_status 派生、reranking 全部封装。
+上下文拉取和后续的 L3 awakening、ai_status 派生、reranking 全部封装。
+弱相关消息会在 relevance gate 后跳过 hybrid retrieval。
 
 输出 `FetchedContext` 数据类，下游 prompt 构建只需读字段。
 """
@@ -464,7 +465,7 @@ async def fetch_parallel_context(
     detected_intent: IntentResult | None = None,
     l3_trigger_classify_fn: Callable[[str], Awaitable[str]] | None = None,
 ) -> FetchedContext:
-    """spec §3.1+§3.2 step 2-3：并行拉取记忆/情绪/画像/作息 + L3 awakening。
+    """spec §3.1+§3.2 step 2-3：拉取记忆/情绪/画像/作息 + L3 awakening。
 
     detected_intent / l3_trigger_classify_fn 二者均给定时, 内部会做 L3 唤醒;
     任一为 None 时跳过 L3 (调用方负责后续单独调 maybe_awaken_l3). 这是 P0-2
@@ -491,10 +492,7 @@ async def fetch_parallel_context(
         retrieval_awaitable = asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
     else:
         relevance_awaitable = _classify_relevance(user_message, context=recent_context)
-        retrieval_awaitable = (
-            asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
-            if wait_for_enhanced_query else _do_retrieval(user_message, user_id, workspace_id)
-        )
+        retrieval_awaitable = asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
     (
         relevance_result, retrieval_result,
         portrait, topic_intimacy,
@@ -555,8 +553,17 @@ async def fetch_parallel_context(
         except Exception as e:
             logger.warning(f"Enhanced-first retrieval failed: {e}")
             retrieval_result = _EMPTY_RETRIEVAL_RESULT
-    elif (
+    elif memory_relevance != "weak":
+        try:
+            retrieval_result = await _do_retrieval(
+                user_message, user_id, workspace_id,
+            )
+        except Exception as e:
+            logger.warning(f"Hybrid retrieval failed: {e}")
+            retrieval_result = e
+    if (
         memory_relevance != "weak"
+        and not wait_for_enhanced_query
         and _should_reretrieve_with_enhanced_query(
             enhanced_query=enhanced_query,
             retrieval_result=retrieval_result,

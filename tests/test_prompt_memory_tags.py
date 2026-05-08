@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -35,3 +37,63 @@ async def test_memory_section_adds_lightweight_importance_tags():
     assert "(重要 · 多次提及 · 近期提到 · 和当前话题高度相关) 用户表达过强烈负面情绪" in section
     assert "回复时不要复述这些标记" in section
     assert "AI 喜欢手作" in section
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
+    from app.services.chat.prompt_builder import build_system_prompt
+
+    async def _prompt_text(key: str) -> str:
+        return {
+            "chat.system_base": "像朋友一样回复。",
+            "chat.consistency_rules": "。",
+            "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
+            "chat.anti_hallucination_hard_rule": "。",
+        }[key]
+
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text",
+        AsyncMock(side_effect=_prompt_text),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
+            memories=None,
+            memory_relevance="weak",
+            reply_count=1,
+            reply_total=150,
+        )
+
+    assert "## 核心规则" in prompt
+    assert "## 反幻觉硬约束" not in prompt
+    assert "## 对话一致性" not in prompt
+    assert "## 你记得的事情" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_keeps_empty_memory_anchor_when_hard_rule_active():
+    from app.services.chat.prompt_builder import build_system_prompt
+
+    async def _prompt_text(key: str) -> str:
+        return {
+            "chat.system_base": "像朋友一样回复。",
+            "chat.consistency_rules": "",
+            "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
+            "chat.anti_hallucination_hard_rule": "用户问记忆时必须检查记忆段。",
+        }[key]
+
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text",
+        AsyncMock(side_effect=_prompt_text),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
+            memories=None,
+            memory_relevance="medium",
+            reply_count=1,
+            reply_total=150,
+        )
+
+    assert "## 反幻觉硬约束" in prompt
+    assert "## 对话一致性" not in prompt
+    assert "## 你记得的事情" in prompt
+    assert "(本次没有联想到任何与当前话题相关的记忆)" in prompt
