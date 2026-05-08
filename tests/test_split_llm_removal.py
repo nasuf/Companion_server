@@ -91,8 +91,8 @@ def test_main_llm_double_newline_splits_too():
     assert result == ["你好啊", "最近怎么样"]
 
 
-def test_split_replies_truncates_per_reply_max():
-    """主 LLM 给 1 条但很长 → truncate_fn 截到 max_per_reply."""
+def test_split_replies_bounds_overlong_single_reply_without_split_llm():
+    """主 LLM 给 1 条但很长 → 本地按标点切短, 不再调用 split LLM 扩写。"""
     import asyncio
     from app.services.chat.reply_generate import _split_replies
     from app.services.chat.orchestrator import (
@@ -109,6 +109,7 @@ def test_split_replies_truncates_per_reply_max():
         pipe_fallback_fn=split_and_validate_replies,
     ))
 
-    # 单条 (无 ||), 但内容被 truncate 到合理长度
-    assert len(result) == 1
-    assert len(result[0]) <= 60
+    assert 1 <= len(result) <= 3
+    assert all(len(part) <= 60 for part in result)
+    assert "".join(result).startswith("这是一段很长的回复。")
+    assert source == "main_split"

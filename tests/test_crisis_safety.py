@@ -98,6 +98,16 @@ def test_crisis_keywords_negative_cases():
     assert not _is_crisis_message("你在干嘛")
     assert not _is_crisis_message("好的, 我知道了")
     assert not _is_crisis_message("")
+    assert not _is_crisis_message("我不想死了")
+    assert not _is_crisis_message("不会自杀，别担心")
+
+
+def test_crisis_release_does_not_hide_new_crisis_signal():
+    from app.services.chat.orchestrator import _is_crisis_message
+
+    assert _is_crisis_message("我安全了但还是想死")
+    assert _is_crisis_message("没事了但还是想死")
+    assert _is_crisis_message("不会自杀，但有自残冲动")
 
 
 def test_recent_unresolved_crisis_detects_followup_state():
@@ -123,6 +133,31 @@ def test_recent_unresolved_crisis_released_by_user_safety_message():
     ]
 
     assert _recent_unresolved_crisis_message(messages, exclude_id="m4") is None
+
+
+def test_recent_unresolved_crisis_context_survives_aftercare_turns():
+    """危机陪伴期不能只靠原始危机词窗口；assistant 安全追问也是状态锚点。"""
+    from app.services.chat.orchestrator import _recent_unresolved_crisis_context
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "我想死"},
+        {"id": "m2", "role": "assistant", "content": "我在。你现在安全吗？"},
+        {"id": "m3", "role": "user", "content": "不是很好"},
+        {"id": "m4", "role": "assistant", "content": "我还在看着你刚才那句话，没翻过去。"},
+        {"id": "m5", "role": "user", "content": "没有人，真的没有人"},
+        {"id": "m6", "role": "assistant", "content": "我不走，想认真确认你有没有伤害自己的冲动。"},
+        {"id": "m7", "role": "user", "content": "我没伤害自己"},
+        {"id": "m8", "role": "assistant", "content": "那种孤独感是不是还在？"},
+        {"id": "m9", "role": "user", "content": "是的"},
+        {"id": "m10", "role": "assistant", "content": "我会一直在这里。"},
+        {"id": "m11", "role": "user", "content": "能跟我讲讲你的工作吗"},
+    ]
+
+    context = _recent_unresolved_crisis_context(messages, exclude_id="m11", window=8)
+
+    assert context is not None
+    assert "我会一直在这里" in context
+    assert "是的" in context
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -719,7 +754,7 @@ def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fet
     from app.services.chat import orchestrator as orch_mod
 
     src = inspect.getsource(orch_mod.stream_chat_response)
-    followup_pos = src.find("recent_crisis_message =")
+    followup_pos = src.find("recent_crisis_context:")
     classify_pos = src.find("_crisis_followup_classify")
     fast_path_pos = src.find("current_state_fast_path =")
     dispatch_pos = src.find("if detected_intent.intent == IntentType.CRISIS")

@@ -77,6 +77,11 @@ from app.services.chat.intent_handlers import (
     handle_schedule_adjust,
     handle_schedule_query,
 )
+from app.services.chat.crisis_state import (
+    clear_crisis_care_state,
+    load_crisis_care_context,
+    mark_crisis_care_active,
+)
 from app.services.chat.intent_replies import (
     delay_explanation_reply as _delay_explanation_reply,
     crisis_followup_classify as _crisis_followup_classify,
@@ -223,6 +228,7 @@ _REPLY_SPLIT_RE = re.compile(r'\|\||\n{2,}')
 # 单条回复内部残留的换行 (单个 \n 或单个 \r) 收敛为空格,
 # 避免句子内 "你好\n吗" 这种意外换行被 pre-wrap 渲染成断行.
 _INTRA_REPLY_WS_RE = re.compile(r'[\r\n]+')
+_LONG_REPLY_SOFT_BREAK_CHARS = "。！？…～~!?，,；;、"
 
 
 def _clean_reply_part(text: str) -> str:
@@ -266,6 +272,22 @@ _CRISIS_KEYWORDS = (
 )
 
 
+_CRISIS_RELEASE_KEYWORDS = (
+    # Keep this fast path conservative. Broader phrases like "没事了/好多了"
+    # still go through the LLM release classifier with context.
+    "我安全", "安全了", "现在安全",
+    "不想死了", "不会自杀", "不会自残",
+    "刚才是气话", "只是气话", "刚才是开玩笑",
+)
+
+
+def _is_crisis_released(text: str) -> bool:
+    """用户明确表示已安全/缓和时, 解除近期危机 follow-up guard."""
+    if not text:
+        return False
+    return any(keyword in text for keyword in _CRISIS_RELEASE_KEYWORDS)
+
+
 def _is_crisis_message(text: str) -> bool:
     """检测用户消息是否含自伤 / 极端念头 / 对生命负面想法等危机信号.
 
@@ -275,21 +297,36 @@ def _is_crisis_message(text: str) -> bool:
     """
     if not text:
         return False
-    return any(keyword in text for keyword in _CRISIS_KEYWORDS)
+    candidate = text
+    for release in _CRISIS_RELEASE_KEYWORDS:
+        candidate = candidate.replace(release, "")
+    return any(keyword in candidate for keyword in _CRISIS_KEYWORDS)
 
 
-_CRISIS_RELEASE_KEYWORDS = (
-    "我安全", "安全了", "现在安全", "没事了", "好多了", "缓过来了",
-    "不想死了", "不想了", "不会了", "不会自杀", "不会自残",
-    "刚才是气话", "只是气话", "开玩笑", "别担心",
+_CRISIS_CARE_ASSISTANT_MARKERS = (
+    # Stable phrases emitted by intent.crisis_reply / intent.crisis_followup_reply.
+    "你现在安全吗",
+    "有没有伤害自己",
+    "伤害自己的冲动",
+    "我还在看着你刚才",
+    "没翻过去",
+    "我不会跳过",
 )
 
 
-def _is_crisis_released(text: str) -> bool:
-    """用户明确表示已安全/缓和时, 解除近期危机 follow-up guard."""
+def _is_crisis_care_assistant_message(text: str) -> bool:
     if not text:
         return False
-    return any(keyword in text for keyword in _CRISIS_RELEASE_KEYWORDS)
+    return any(marker in text for marker in _CRISIS_CARE_ASSISTANT_MARKERS)
+
+
+def _format_crisis_context(items: list[tuple[str, str]], max_items: int = 10) -> str:
+    recent = items[-max_items:]
+    lines = []
+    for role, content in recent:
+        speaker = "用户" if role == "user" else "AI"
+        lines.append(f"{speaker}: {content[:220]}")
+    return "\n".join(lines)
 
 
 def _recent_unresolved_crisis_message(
@@ -323,6 +360,48 @@ def _recent_unresolved_crisis_message(
     return None
 
 
+def _recent_unresolved_crisis_context(
+    messages: list[dict],
+    *,
+    exclude_id: str | None = None,
+    window: int = 24,
+) -> str | None:
+    """Infer unresolved crisis-care context from recent conversation history.
+
+    The active state may outlive the original "我想死" message.  We therefore
+    treat our own recent safety-care replies as stable state markers and still
+    let the LLM classifier decide guard/release.  This avoids routing a later
+    "陪我说说别的" turn through the ordinary chat path while the user is still
+    in aftercare.
+    """
+    checked = 0
+    seen_care_signal = False
+    collected_reversed: list[tuple[str, str]] = []
+    for msg in reversed(messages):
+        if exclude_id and msg.get("id") == exclude_id:
+            continue
+        role = msg.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(msg.get("content") or "").strip()
+        if not content:
+            continue
+        checked += 1
+        if checked > window:
+            break
+        if role == "user" and _is_crisis_released(content):
+            return None
+        if role == "user" and _is_crisis_message(content):
+            seen_care_signal = True
+        if role == "assistant" and _is_crisis_care_assistant_message(content):
+            seen_care_signal = True
+        collected_reversed.append((role, content))
+
+    if not seen_care_signal:
+        return None
+    return _format_crisis_context(list(reversed(collected_reversed)))
+
+
 def truncate_at_sentence(text: str, max_len: int) -> str:
     """截断至max_len内最后一个句子边界。"""
     if len(text) <= max_len:
@@ -334,6 +413,36 @@ def truncate_at_sentence(text: str, max_len: int) -> str:
     if match and match.end() > max_len // 2:
         return truncated[:match.end()]
     return truncated
+
+
+def _find_soft_reply_cut(text: str, max_len: int) -> int:
+    """Find a punctuation cut point for long single-bubble fallbacks."""
+    window = text[:max_len]
+    min_cut = max(8, max_len // 3)
+    best = -1
+    for idx, ch in enumerate(window):
+        if ch in _LONG_REPLY_SOFT_BREAK_CHARS and idx + 1 >= min_cut:
+            best = idx + 1
+    return best
+
+
+def _split_long_reply_part(text: str, max_len: int, max_count: int) -> list[str]:
+    """Split an overlong no-delimiter reply at punctuation instead of mid-clause."""
+    remaining = text.strip()
+    parts: list[str] = []
+    while remaining and len(parts) < max_count:
+        if len(remaining) <= max_len:
+            parts.append(remaining)
+            break
+        cut = _find_soft_reply_cut(remaining, max_len)
+        if cut <= 0:
+            parts.append(truncate_at_sentence(remaining, max_len))
+            break
+        part = remaining[:cut].strip()
+        if part:
+            parts.append(part)
+        remaining = remaining[cut:].strip()
+    return parts
 
 
 def split_and_validate_replies(
@@ -348,12 +457,16 @@ def split_and_validate_replies(
     \\n\\n 渲染成单气泡里的空行, 视觉跟正常多条回复混淆. 这里把空行也当
     分隔符. 单条内的孤立 \\n 由 _clean_reply_part 折叠成空格.
     """
+    has_explicit_split = bool(_REPLY_SPLIT_RE.search(raw))
     parts = [_clean_reply_part(p) for p in _REPLY_SPLIT_RE.split(raw)]
     parts = [p for p in parts if p]
     if not parts:
         return [_clean_reply_part(raw) or "..."]
-    parts = parts[:max_count]
-    parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
+    if not has_explicit_split and len(parts) == 1 and len(parts[0]) > max_per_reply:
+        parts = _split_long_reply_part(parts[0], max_per_reply, max_count)
+    else:
+        parts = parts[:max_count]
+        parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
     result: list[str] = []
     total = 0
     for p in parts:
@@ -608,26 +721,46 @@ async def stream_chat_response(
         crisis_force_intent = (
             (not sub_intent_mode) and _is_crisis_message(user_message)
         )
-        recent_crisis_message = (
-            None if crisis_force_intent or sub_intent_mode
-            else _recent_unresolved_crisis_message(
-                messages_dicts, exclude_id=user_message_id,
+        recent_crisis_context: str | None = None
+        if not crisis_force_intent and not sub_intent_mode:
+            recent_crisis_context = await load_crisis_care_context(
+                conversation_id, user_id,
             )
-        )
+            if recent_crisis_context is None:
+                recent_crisis_context = _recent_unresolved_crisis_context(
+                    messages_dicts, exclude_id=user_message_id,
+                )
         crisis_followup_active = False
-        if recent_crisis_message is not None:
+        if recent_crisis_context is not None:
             if _is_crisis_released(user_message):
+                await clear_crisis_care_state(conversation_id, user_id)
                 crisis_followup_active = False
             else:
                 try:
                     followup_status = await _crisis_followup_classify(
                         message=user_message,
-                        context=boundary_ctx.recent_context,
+                        context=recent_crisis_context,
                     )
                 except Exception as e:
                     logger.warning(f"Crisis followup classifier failed, guarding: {e}")
                     followup_status = "guard"
                 crisis_followup_active = followup_status != "release"
+                if crisis_followup_active:
+                    await mark_crisis_care_active(
+                        conversation_id,
+                        user_id,
+                        context=f"{recent_crisis_context}\n用户: {user_message}",
+                        source="followup_guard",
+                    )
+                else:
+                    await clear_crisis_care_state(conversation_id, user_id)
+        if crisis_force_intent:
+            await mark_crisis_care_active(
+                conversation_id,
+                user_id,
+                context=f"用户: {user_message}",
+                source="direct_crisis",
+            )
         if crisis_force_intent:
             logger.warning(
                 f"[CRISIS] keyword detected, forcing CRISIS intent (len={len(user_message)})",
@@ -731,7 +864,7 @@ async def stream_chat_response(
             from app.services.portrait import get_latest_portrait
             crisis_query = (
                 user_message if crisis_force_intent
-                else f"{recent_crisis_message}\n{user_message}"
+                else f"{recent_crisis_context}\n{user_message}"
             )
             crisis_memory_task = asyncio.create_task(
                 retrieve_crisis_memories(
@@ -905,7 +1038,7 @@ async def stream_chat_response(
                 from app.services.memory.retrieval.safety import retrieve_crisis_memories
                 crisis_query = (
                     user_message if not detected_intent.metadata.get("followup")
-                    else f"{recent_crisis_message}\n{user_message}"
+                    else f"{recent_crisis_context}\n{user_message}"
                 )
                 crisis_memory_task = asyncio.create_task(
                     retrieve_crisis_memories(

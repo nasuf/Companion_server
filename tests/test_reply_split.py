@@ -75,6 +75,19 @@ class TestSplitAndValidateReplies:
         assert len(result) == 1
         assert len(result[0]) <= 20
 
+    def test_overlong_single_reply_splits_at_punctuation(self):
+        """主 LLM 忘记输出 || 时，不能把气泡截断在半句话中间。"""
+        raw = (
+            "好呀，我的工作说起来有点野生——我专门给机械小动物做义肢和升级，"
+            "比如给瘸腿兔子装音乐关节，或者给断翅膀的鸟做碳纤维翅膀。"
+        )
+        result = split_and_validate_replies(raw, max_count=3, max_per_reply=36, max_total=120)
+
+        assert len(result) > 1
+        assert all(len(part) <= 36 for part in result)
+        assert not result[0].endswith("或者给断翅膀的")
+        assert "".join(result).startswith("好呀，我的工作说起来")
+
 
 class TestTruncateAtSentence:
     def test_under_max_no_change(self):
