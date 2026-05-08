@@ -20,7 +20,8 @@
 - is_polarity_match(a, b): 两文本极性是否一致
 - semantic_conflict_reasons(a, b): 检测非否定词也能表达的语义对立
 - 用法 1 (DEDUP): 极性不一致 → 不算重复
-- 用法 2 (RETRIEVAL): 用户 query 有否定 + candidate 无否定 (或反之) → 降权
+- 用法 2 (RETRIEVAL): 用户 query 表达明确反向 stance/status, 或事实否定目标能
+  与 candidate 对齐时 → 降权
 
 局限 (诚实记录):
 - 不识别"几乎不/很少/不一定" 等模糊否定
@@ -34,6 +35,8 @@
 """
 
 from __future__ import annotations
+
+import re
 
 # 中文否定词. 单字符级 substring 匹配; 大多场景"否定词 + 动词" 模式.
 _CN_NEGATIONS: tuple[str, ...] = (
@@ -104,6 +107,39 @@ _SEMANTIC_DIMENSIONS: dict[str, tuple[str, dict[str, tuple[str, ...]]]] = {
     ),
 }
 
+# Retrieval should be conservative with bare negation. A sentence can contain a
+# negation marker without asserting the opposite of a stored fact, e.g. "不是特别复杂"
+# or "没那么严重". These patterns identify degree/modality negation so it does
+# not become a generic semantic-conflict signal.
+_CN_DEGREE_NEGATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:不|并不)(?:是)?(?:很|太|大|特别|非常|十分|那么|这么|"
+        r"算|够|怎么|咋|至于|一定|完全|见得)"
+    ),
+    re.compile(r"(?:没|没有)(?:很|太|那么|这么|多|少|大|严重|复杂|困难|容易)"),
+)
+
+_CN_FACTUAL_NEGATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:不|并不)(?P<predicate>是|叫|姓|住在|住|在|属于|来自|"
+        r"去过|做过|学过|写过|会|用|吃|喝|看|听|认识|养|需要|要|想|记得)"
+        r"(?P<target>[\u4e00-\u9fffA-Za-z0-9_《》“”\"'·\-]{1,24})?"
+    ),
+    re.compile(
+        r"(?:没|没有|未)(?P<predicate>有|去过|做过|住过|见过|看过|听过|"
+        r"吃过|喝过|买过|用过|养过|学过|写过|认识|记得)?"
+        r"(?P<target>[\u4e00-\u9fffA-Za-z0-9_《》“”\"'·\-]{1,24})"
+    ),
+    re.compile(
+        r"(?:无|非)(?P<target>[\u4e00-\u9fffA-Za-z0-9_《》“”\"'·\-]{1,24})"
+    ),
+)
+
+_TARGET_PREFIXES: tuple[str, ...] = (
+    "一个", "一名", "一种", "一位", "这个", "那个", "这位", "那位",
+    "任何", "什么", "特别", "非常", "很", "太", "比较",
+)
+
 
 def _detect_dimension_stance(
     text: str,
@@ -142,6 +178,61 @@ def detect_semantic_stances(text: str) -> dict[str, str]:
         if stance:
             stances[dimension] = stance
     return stances
+
+
+def _remove_degree_negation(text: str) -> str:
+    cleaned = text
+    for pattern in _CN_DEGREE_NEGATION_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned
+
+
+def _clean_factual_target(target: str | None) -> str:
+    if not target:
+        return ""
+    cleaned = re.split(r"[，。！？?、,.\s]", target, maxsplit=1)[0]
+    cleaned = re.sub(r"(吗|嘛|呢|啊|呀|吧|了|过|着|的)$", "", cleaned)
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _TARGET_PREFIXES:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):]
+                changed = True
+    return cleaned.strip(" “”、\"'《》")
+
+
+def _extract_factual_negation_targets(text: str) -> list[str]:
+    """Extract concrete targets from factual negation.
+
+    This intentionally ignores generic/degree negation. The target is used only
+    when it can be aligned with a candidate memory, so ambiguous negation does
+    not suppress unrelated memories.
+    """
+    if not text:
+        return []
+
+    cleaned = _remove_degree_negation(text)
+    targets: list[str] = []
+    for pattern in _CN_FACTUAL_NEGATION_PATTERNS:
+        for match in pattern.finditer(cleaned):
+            target = _clean_factual_target(match.groupdict().get("target"))
+            if target:
+                targets.append(target)
+    return targets
+
+
+def _target_overlaps_candidate(target: str, candidate_text: str) -> bool:
+    return len(target) >= 2 and target in candidate_text
+
+
+def _has_factual_negation_conflict(negated_text: str, affirmative_text: str) -> bool:
+    if has_negation(affirmative_text):
+        return False
+    return any(
+        _target_overlaps_candidate(target, affirmative_text)
+        for target in _extract_factual_negation_targets(negated_text)
+    )
 
 
 def _semantic_label(dimension: str) -> str:
@@ -198,7 +289,13 @@ def semantic_conflict_reasons(text_a: str, text_b: str) -> list[str]:
         stances_b.get(dimension) == stance
         for dimension, stance in stances_a.items()
     )
-    if has_negation(text_a) != has_negation(text_b) and not same_explicit_stance:
+    if (
+        not same_explicit_stance
+        and (
+            _has_factual_negation_conflict(text_a, text_b)
+            or _has_factual_negation_conflict(text_b, text_a)
+        )
+    ):
         reasons.append("否定极性")
 
     for dimension, stance_a in stances_a.items():
@@ -211,9 +308,9 @@ def semantic_conflict_reasons(text_a: str, text_b: str) -> list[str]:
 def query_semantic_conflict_reasons(query: str, candidate_text: str) -> list[str]:
     """Directional semantic conflict check for retrieval reranking.
 
-    Only downweight when the query itself expresses a stance/status. A broad
-    query like "我对咖啡的看法" should still be allowed to retrieve both "喜欢"
-    and "不喜欢/讨厌" memories for context.
+    Only downweight when the query itself expresses a stance/status or an
+    aligned factual negation. A broad query like "我对咖啡的看法" should still be
+    allowed to retrieve both "喜欢" and "不喜欢/讨厌" memories for context.
     """
     reasons: list[str] = []
     query_stances = detect_semantic_stances(query)
@@ -222,7 +319,10 @@ def query_semantic_conflict_reasons(query: str, candidate_text: str) -> list[str
         candidate_stances.get(dimension) == stance
         for dimension, stance in query_stances.items()
     )
-    if has_negation(query) and not has_negation(candidate_text) and not same_explicit_stance:
+    if (
+        not same_explicit_stance
+        and _has_factual_negation_conflict(query, candidate_text)
+    ):
         reasons.append("否定极性")
 
     for dimension, query_stance in query_stances.items():

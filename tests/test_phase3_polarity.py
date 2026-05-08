@@ -94,6 +94,27 @@ def test_query_semantic_conflict_is_directional():
     assert query_semantic_conflict_reasons("我不喜欢咖啡吗", "用户讨厌咖啡") == []
 
 
+def test_query_semantic_conflict_only_downweights_aligned_factual_negation():
+    from app.services.memory.polarity import query_semantic_conflict_reasons
+
+    assert query_semantic_conflict_reasons(
+        "一个不是特别复杂的coding",
+        "用户是一名程序员",
+    ) == []
+    assert query_semantic_conflict_reasons(
+        "一个不是特别复杂的coding",
+        "用户被老板要求两天内完成一个项目，觉得很难",
+    ) == []
+    assert "否定极性" in query_semantic_conflict_reasons(
+        "我不是程序员",
+        "用户是一名程序员",
+    )
+    assert "否定极性" in query_semantic_conflict_reasons(
+        "我不住北京",
+        "用户住在北京",
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 3.1: dedup polarity check
 # ═══════════════════════════════════════════════════════════════════
