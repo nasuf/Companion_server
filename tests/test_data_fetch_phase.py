@@ -330,6 +330,63 @@ async def test_l3_awakening_uses_trigger_retrieval_query_when_enhanced_query_emp
 
 
 @pytest.mark.asyncio
+async def test_l3_intent_does_not_awaken_when_trigger_says_none():
+    """统一意图误判 L3 时，专门 trigger 返回"无"必须阻止 L3 召回。"""
+    from app.services.chat.data_fetch_phase import maybe_awaken_l3
+
+    search = AsyncMock(return_value=[{"content": "不该被召回"}])
+    trigger = AsyncMock(return_value="无")
+    with patch("app.services.chat.data_fetch_phase.search_l3_memories", search):
+        memories, label = await maybe_awaken_l3(
+            user_message="你记得我上次和你说的那家书店吗 我五一准备去",
+            user_id="u1",
+            workspace_id="ws1",
+            detected_intent=IntentResult(intent=IntentType.L3_RECALL, confidence=0.75),
+            memory_relevance="strong",
+            l3_trigger_classify_fn=trigger,
+            enhanced_query="用户上次说过的书店",
+            l1_l2_count=5,
+            recent_context="",
+        )
+
+    assert label == "无"
+    assert memories == []
+    search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_l3_intent_awakens_when_trigger_confirms_old_recall():
+    """明确久远记忆请求仍可通过 L3 intent + trigger 召回。"""
+    from app.services.chat.data_fetch_phase import maybe_awaken_l3
+
+    search = AsyncMock(return_value=[{"content": "半年前你说过想去独立书店"}])
+    trigger = AsyncMock(return_value=SimpleNamespace(
+        label="请求更久",
+        retrieval_query="半年前用户说过的书店",
+    ))
+    with patch("app.services.chat.data_fetch_phase.search_l3_memories", search):
+        memories, label = await maybe_awaken_l3(
+            user_message="你还记得半年前我说的那家书店吗",
+            user_id="u1",
+            workspace_id="ws1",
+            detected_intent=IntentResult(intent=IntentType.L3_RECALL, confidence=0.75),
+            memory_relevance="strong",
+            l3_trigger_classify_fn=trigger,
+            enhanced_query="",
+            l1_l2_count=0,
+            recent_context="",
+        )
+
+    assert label == "请求更久"
+    assert memories == ["半年前你说过想去独立书店"]
+    search.assert_awaited_once_with(
+        "半年前用户说过的书店",
+        "u1",
+        workspace_id="ws1",
+    )
+
+
+@pytest.mark.asyncio
 async def test_l3_sparse_fallback_runs_for_medium_recall_with_few_l1_l2():
     """medium + 明确回忆线索 + L1/L2 稀疏时, 应补搜 L3。"""
     from app.services.chat.data_fetch_phase import maybe_awaken_l3

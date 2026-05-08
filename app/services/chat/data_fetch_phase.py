@@ -493,8 +493,9 @@ async def maybe_awaken_l3(
             label = "无"
             trigger_query = ""
 
-    # §3.4.5 调用久远记忆意图 → 无论分类结果都召回；§4 强相关 → 仅前两类召回
-    if not (should_call_l3 or sparse_fallback or label in ("不满纠正", "请求更久")):
+    # L3_RECALL 只负责进入专门判定；是否召回由 trigger label 确认。
+    # 这样 broad intent 的误判不会绕过 L3 trigger 直接拉久远记忆。
+    if not (sparse_fallback or label in ("不满纠正", "请求更久")):
         logger.info(
             f"[L3-TRIGGER] label='{label}' for '{user_message[:40]}' — skip awaken",
             extra={

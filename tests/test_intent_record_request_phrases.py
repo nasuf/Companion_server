@@ -49,7 +49,7 @@ RECORD_REQUEST_MUST_HIT: tuple[tuple[str, str], ...] = (
 
 RECORD_REQUEST_MUST_MISS: tuple[tuple[str, str, str], ...] = (
     # (phrase, expected_intent, why)
-    ("你还记得我之前说的X吗", "调用久远记忆", "用户问 AI 是否记得, 不是让 AI 记"),
+    ("你还记得我之前说的X吗", "日常交流", "普通记忆查询, 不是让 AI 记, 也不是久远记忆"),
     ("你记得我家在哪吗", "日常交流", "stable fact 查询 (走记忆路径), 不是 RECORD_REQUEST"),
     ("你明天有空吗", "计划查询", "问 AI 自己日程, 不是设提醒"),
     ("你周末忙吗", "计划查询", "问 AI 日程"),
@@ -75,6 +75,20 @@ def test_current_state_fast_path_is_narrow():
     assert is_explicit_current_state_query("你心情怎么样")
     assert not is_explicit_current_state_query("这么晚还能看到云啊")
     assert not is_explicit_current_state_query("你刚才说在看云？")
+
+
+def test_l3_recall_requires_explicit_oldness():
+    """普通 "上次/之前说过" 记忆查询走日常交流; 只有明确久远才进 L3。"""
+    from app.services.chat.intent_dispatcher import is_explicit_l3_recall_query
+
+    assert not is_explicit_l3_recall_query("你记得我上次和你说的那家书店吗")
+    assert not is_explicit_l3_recall_query("你还记得我之前说的X吗")
+    assert not is_explicit_l3_recall_query("你记得我家在哪吗")
+    assert not is_explicit_l3_recall_query("去年上映的那个电影你看了吗")
+
+    assert is_explicit_l3_recall_query("你还记得半年前我说的X吗")
+    assert is_explicit_l3_recall_query("你能想起更早之前我说的事吗")
+    assert is_explicit_l3_recall_query("第一次见面我说过什么")
 
 
 # ═══════════════════════════════════════════════════════════════════

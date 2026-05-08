@@ -138,6 +138,37 @@ _CURRENT_STATE_PREDICATE_TERMS = (
     "心情", "感觉", "开心", "难过", "状态",
 )
 
+_L3_EXPLICIT_OLD_RE = re.compile(
+    r"("
+    r"更早|更久|久远|很久以前|很久之前|好久以前|好久之前|"
+    r"很早以前|多年前|几年前|"
+    r"半年前|[六七八九十]个?月前|[6-9]个?月前|[1-9]\d+个?月前|"
+    r"去年|前年|大前年|"
+    r"第一次|初次|刚认识|刚见面|"
+    r"小时候|童年|小学|初中|高中|大学(时候|那会|时期)?"
+    r")"
+)
+_L3_RECALL_CUE_RE = re.compile(
+    r"(记得|想起|回忆|回想|说过|提过|聊过|告诉过|讲过|记不记得)"
+)
+
+
+def is_explicit_l3_recall_query(message: str) -> bool:
+    """Return true only when the user explicitly asks for distant memories.
+
+    Plain recall wording such as "上次/之前说过" is normal chat that should use
+    the regular memory path. L3 is reserved for older/fuzzier memories: "更早",
+    "半年前", "去年", "第一次见面", school-age memories, etc.
+    """
+    normalized = re.sub(r"[\s，。！？!?~～…,.、]+", "", message.strip())
+    if not normalized:
+        return False
+    return bool(
+        _L3_EXPLICIT_OLD_RE.search(normalized)
+        and _L3_RECALL_CUE_RE.search(normalized)
+    )
+
+
 def detect_current_state_fast_path(message: str) -> bool:
     """Hot-path for common "what are you doing now" messages.
 
@@ -272,6 +303,10 @@ async def detect_intent_llm(message: str, *, context: str = "") -> IntentResult:
     # 把 NONE 当 "弱信号" 又跑 keyword scan, 用户 "明天是我的生日" 被 "明天" 关键词
     # 错路由到 SCHEDULE_QUERY)
     labels = await unified_intent_recognize(message, context=context)
+    if "调用久远记忆" in labels and not is_explicit_l3_recall_query(message):
+        labels = [label for label in labels if label != "调用久远记忆"]
+        if not labels:
+            labels = ["日常交流"]
 
     if not labels or labels == ["日常交流"]:
         return IntentResult()

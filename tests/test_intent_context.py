@@ -102,6 +102,32 @@ class TestDetectIntentUnifiedForwardsContext:
         mock_recognize.assert_awaited_once()
 
 
+class TestL3RecallIntentGuard:
+    """L3 只用于明确久远记忆；普通记忆查询留在日常交流路径。"""
+
+    @pytest.mark.asyncio
+    async def test_plain_previous_recall_downgraded_to_daily_chat(self):
+        with patch(
+            "app.services.chat.intent_replies.unified_intent_recognize",
+            new=AsyncMock(return_value=["调用久远记忆"]),
+        ):
+            result = await detect_intent_llm(
+                "你记得我上次和你说的那家书店吗 我五一准备去"
+            )
+
+        assert result.intent == IntentType.NONE
+
+    @pytest.mark.asyncio
+    async def test_explicit_old_recall_keeps_l3_intent(self):
+        with patch(
+            "app.services.chat.intent_replies.unified_intent_recognize",
+            new=AsyncMock(return_value=["调用久远记忆"]),
+        ):
+            result = await detect_intent_llm("你还记得半年前我说的那家书店吗")
+
+        assert result.intent == IntentType.L3_RECALL
+
+
 class TestIntentContextFetching:
     """orchestrator._fetch_intent_context 从 DB 拉最近消息组装成 prompt 段落."""
 
