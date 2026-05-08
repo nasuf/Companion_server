@@ -160,6 +160,24 @@ def test_recent_unresolved_crisis_context_survives_aftercare_turns():
     assert "是的" in context
 
 
+def test_recent_unresolved_crisis_context_not_released_by_one_safety_message():
+    """单句安全/好转不直接解除 aftercare；仍交给连续 release 计数处理。"""
+    from app.services.chat.orchestrator import _recent_unresolved_crisis_context
+
+    messages = [
+        {"id": "m1", "role": "user", "content": "我想死"},
+        {"id": "m2", "role": "assistant", "content": "我在。你现在安全吗？"},
+        {"id": "m3", "role": "user", "content": "我安全了"},
+        {"id": "m4", "role": "assistant", "content": "我还在看着你刚才那句话，没翻过去。"},
+        {"id": "m5", "role": "user", "content": "聊点别的吧"},
+    ]
+
+    context = _recent_unresolved_crisis_context(messages, exclude_id="m5")
+
+    assert context is not None
+    assert "我安全了" in context
+
+
 # ════════════════════════════════════════════════════════════════════
 # § 2. CRISIS_REPLY_PROMPT 内容验收
 # ════════════════════════════════════════════════════════════════════
@@ -771,3 +789,5 @@ def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fet
     assert "and not crisis_followup_active" in src
     assert "handle_crisis_followup" in src
     assert "_crisis_followup_classify" in src
+    assert "crisis_release_count < 2" in src
+    assert "followup_release_pending" in src

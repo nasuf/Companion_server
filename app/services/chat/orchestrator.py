@@ -79,7 +79,7 @@ from app.services.chat.intent_handlers import (
 )
 from app.services.chat.crisis_state import (
     clear_crisis_care_state,
-    load_crisis_care_context,
+    load_crisis_care_state,
     mark_crisis_care_active,
 )
 from app.services.chat.intent_replies import (
@@ -389,8 +389,6 @@ def _recent_unresolved_crisis_context(
         checked += 1
         if checked > window:
             break
-        if role == "user" and _is_crisis_released(content):
-            return None
         if role == "user" and _is_crisis_message(content):
             seen_care_signal = True
         if role == "assistant" and _is_crisis_care_assistant_message(content):
@@ -722,44 +720,58 @@ async def stream_chat_response(
             (not sub_intent_mode) and _is_crisis_message(user_message)
         )
         recent_crisis_context: str | None = None
+        crisis_release_count = 0
         if not crisis_force_intent and not sub_intent_mode:
-            recent_crisis_context = await load_crisis_care_context(
+            crisis_state = await load_crisis_care_state(
                 conversation_id, user_id,
             )
-            if recent_crisis_context is None:
+            if crisis_state is not None:
+                recent_crisis_context = str(crisis_state.get("context") or "").strip()
+                crisis_release_count = int(crisis_state.get("release_count") or 0)
+            else:
                 recent_crisis_context = _recent_unresolved_crisis_context(
                     messages_dicts, exclude_id=user_message_id,
                 )
         crisis_followup_active = False
         if recent_crisis_context is not None:
-            if _is_crisis_released(user_message):
-                await clear_crisis_care_state(conversation_id, user_id)
-                crisis_followup_active = False
-            else:
-                try:
-                    followup_status = await _crisis_followup_classify(
-                        message=user_message,
-                        context=recent_crisis_context,
-                    )
-                except Exception as e:
-                    logger.warning(f"Crisis followup classifier failed, guarding: {e}")
-                    followup_status = "guard"
-                crisis_followup_active = followup_status != "release"
+            try:
+                followup_status = await _crisis_followup_classify(
+                    message=user_message,
+                    context=recent_crisis_context,
+                )
+            except Exception as e:
+                logger.warning(f"Crisis followup classifier failed, guarding: {e}")
+                followup_status = "guard"
+            if followup_status == "release":
+                crisis_release_count += 1
+                crisis_followup_active = crisis_release_count < 2
                 if crisis_followup_active:
                     await mark_crisis_care_active(
                         conversation_id,
                         user_id,
                         context=f"{recent_crisis_context}\n用户: {user_message}",
-                        source="followup_guard",
+                        source="followup_release_pending",
+                        release_count=crisis_release_count,
                     )
                 else:
                     await clear_crisis_care_state(conversation_id, user_id)
+            else:
+                crisis_release_count = 0
+                crisis_followup_active = True
+                await mark_crisis_care_active(
+                    conversation_id,
+                    user_id,
+                    context=f"{recent_crisis_context}\n用户: {user_message}",
+                    source="followup_guard",
+                    release_count=0,
+                )
         if crisis_force_intent:
             await mark_crisis_care_active(
                 conversation_id,
                 user_id,
                 context=f"用户: {user_message}",
                 source="direct_crisis",
+                release_count=0,
             )
         if crisis_force_intent:
             logger.warning(
