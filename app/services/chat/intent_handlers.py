@@ -417,11 +417,18 @@ _CRISIS_STATIC_FALLBACK = (
 )
 
 
-def _format_user_memory_for_crisis(classified_memories: list) -> str:
+def _format_user_memory_for_crisis(
+    classified_memories: list,
+    *,
+    include_factual: bool = False,
+) -> str:
     """从已检索 classified_memories 中筛出"用户侧 + 跟情绪/求助/边界相关"的条目,
     给 crisis prompt 的 {user_memory} 占位符. 主线: 让 LLM 知道这是不是 Ta 第一次
     这样表达 — 已知历史 (e.g. L1 `用户表达过强烈负面情绪`) 帮助 LLM 用"我记得你
     上次也..."的连贯语气, 而不是干巴巴的通用模板.
+
+    crisis follow-up 里用户可能转而问普通记忆事实; include_factual=True 时保留
+    已选中的普通事实, 防止事实问答只看到情绪记忆后编造.
 
     筛选不调 LLM (热路径首位), 只用关键字粗筛. 没命中相关条目时返"(无)" —
     就当 Ta 第一次说, prompt 自己有兜底措辞.
@@ -440,9 +447,14 @@ def _format_user_memory_for_crisis(classified_memories: list) -> str:
         "跳楼", "跳河", "自杀",
     )
     hits = [t for t in user_lines if any(kw in t for kw in relevance_kw)]
+    if include_factual:
+        for text in user_lines:
+            if text not in hits:
+                hits.append(text)
     if not hits:
         return "(无)"
-    return "\n".join(f"- {t}" for t in hits[:5])  # 最多 5 条避免 token 爆
+    max_items = 7 if include_factual else 5
+    return "\n".join(f"- {t}" for t in hits[:max_items])  # 避免 token 爆
 
 
 async def handle_crisis(
@@ -505,7 +517,10 @@ async def handle_crisis_followup(
     conversational state is still unresolved crisis. This handler prevents the
     current-state branch from describing AI activities and drifting away.
     """
-    user_memory_block = _format_user_memory_for_crisis(classified_memories)
+    user_memory_block = _format_user_memory_for_crisis(
+        classified_memories,
+        include_factual=True,
+    )
     try:
         response = await crisis_followup_reply(
             message=user_message,

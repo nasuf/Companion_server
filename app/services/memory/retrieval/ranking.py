@@ -67,6 +67,18 @@ _LEXICAL_KEYWORDS: tuple[str, ...] = tuple(
     )
 )
 
+_NAME_QUERY_TERMS: tuple[str, ...] = ("叫什么", "名字", "姓名", "叫啥", "叫作")
+_NAMED_MEMORY_TERMS: tuple[str, ...] = ("叫", "名字", "姓名")
+_RELATION_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("老板", "上司", "领导", "直属领导", "主管", "经理", "leader"),
+    ("妈妈", "母亲", "妈"),
+    ("爸爸", "父亲", "爸"),
+    ("妻子", "老婆", "太太"),
+    ("丈夫", "老公", "先生"),
+    ("男朋友", "男友"),
+    ("女朋友", "女友"),
+)
+
 
 def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(kw in text for kw in keywords)
@@ -109,6 +121,13 @@ def _memory_text(memory: dict[str, Any]) -> str:
 
 def _keyword_overlap_count(query: str, memory_text: str) -> int:
     count = sum(1 for kw in _LEXICAL_KEYWORDS if kw in query and kw in memory_text)
+    if contains_any(query, _NAME_QUERY_TERMS) and contains_any(
+        memory_text, _NAMED_MEMORY_TERMS
+    ):
+        count += 1
+    for aliases in _RELATION_ALIAS_GROUPS:
+        if contains_any(query, aliases) and contains_any(memory_text, aliases):
+            count += 1
     ascii_query_words = set(re.findall(r"[A-Za-z0-9_]{3,}", query.lower()))
     if ascii_query_words:
         ascii_memory_words = set(re.findall(r"[A-Za-z0-9_]{3,}", memory_text.lower()))

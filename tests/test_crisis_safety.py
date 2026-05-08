@@ -277,6 +277,16 @@ def test_crisis_followup_prompt_allows_user_requested_distraction():
     assert "向 Ta 解释你的回复策略" in CRISIS_FOLLOWUP_REPLY_PROMPT
 
 
+def test_crisis_followup_prompt_forbids_memory_fact_fabrication():
+    from app.services.prompting.defaults import CRISIS_FOLLOWUP_REPLY_PROMPT
+
+    assert "记忆事实问题" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "只能依据【最近对话】" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "没出现就说你这里没有看到" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "编造任何未出现在参考信息里的姓名" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "你之前一直这么叫 TA" in CRISIS_FOLLOWUP_REPLY_PROMPT
+
+
 def test_crisis_followup_classify_prompt_defaults_to_guard():
     from app.services.prompting.defaults import CRISIS_FOLLOWUP_CLASSIFY_PROMPT
 
@@ -637,6 +647,39 @@ def test_format_user_memory_filters_to_emotion_relevant():
     assert "AI 是设计师" not in out
 
 
+def test_format_user_memory_for_crisis_followup_includes_factual_memory():
+    """crisis follow-up can contain ordinary memory questions; facts must be
+    available to the follow-up prompt instead of being filtered out as non-emotional.
+    """
+    from app.services.chat.intent_handlers import _format_user_memory_for_crisis
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    classified = [
+        ClassifiedMemory(
+            id="m1",
+            text="用户表达过想死念头",
+            source="user",
+            relevance="strong",
+            score=0.95,
+        ),
+        ClassifiedMemory(
+            id="m2",
+            text="用户的直属领导叫陈姐，人挺好但要求特别细",
+            source="user",
+            relevance="medium",
+            score=0.68,
+        ),
+    ]
+
+    crisis_only = _format_user_memory_for_crisis(classified)
+    followup = _format_user_memory_for_crisis(classified, include_factual=True)
+
+    assert "想死" in crisis_only
+    assert "陈姐" not in crisis_only
+    assert "想死" in followup
+    assert "陈姐" in followup
+
+
 @pytest.mark.asyncio
 async def test_retrieve_crisis_memories_keeps_safety_memory_outside_generic_vector_top(monkeypatch):
     """crisis 专用召回必须能捞出安全记忆, 不能被通用 L1 top10 挤掉。"""
@@ -677,6 +720,66 @@ async def test_retrieve_crisis_memories_keeps_safety_memory_outside_generic_vect
     ids = [m.id for m in memories]
     assert "safety-memory" in ids
     assert ids[0] == "safety-memory"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_query(monkeypatch):
+    """When crisis aftercare asks a concrete memory question, factual user memory
+    should not be crowded out by safety memories.
+    """
+    from app.services.memory.retrieval import safety
+
+    rows = [
+        {
+            "id": f"safety-{i}",
+            "summary": f"用户表达过强烈负面情绪 {i}",
+            "content": f"用户表达过强烈负面情绪 {i}",
+            "level": 1,
+            "importance": 0.9,
+            "similarity": 0.75 - i * 0.01,
+            "main_category": "情绪",
+            "sub_category": "悲伤",
+            "source": "user",
+        }
+        for i in range(3)
+    ]
+    rows.extend([
+        {
+            "id": "boss-project",
+            "summary": "用户被老板要求两天内完成一个项目，觉得很难",
+            "content": "用户被老板要求两天内完成一个项目，觉得很难",
+            "level": 2,
+            "importance": 0.7,
+            "similarity": 0.55,
+            "main_category": "生活",
+            "sub_category": "其他",
+            "source": "user",
+        },
+        {
+            "id": "direct-leader",
+            "summary": "用户的直属领导叫陈姐，人挺好但要求特别细",
+            "content": "用户的直属领导叫陈姐，人挺好但要求特别细",
+            "level": 2,
+            "importance": 0.8,
+            "similarity": 0.57,
+            "main_category": "身份",
+            "sub_category": "社会关系",
+            "source": "user",
+        },
+    ])
+
+    monkeypatch.setattr(safety, "search_similar", AsyncMock(return_value=rows))
+    with patch("app.services.memory.retrieval.safety.db") as mock_db:
+        mock_db.query_raw = AsyncMock(return_value=[])
+        memories = await safety.retrieve_crisis_memories(
+            "他叫什么你还记得吗\n我是想问她的名字叫什么",
+            "u1",
+            workspace_id="ws1",
+            limit=5,
+        )
+
+    ids = [m.id for m in memories]
+    assert "direct-leader" in ids
 
 
 # ════════════════════════════════════════════════════════════════════
