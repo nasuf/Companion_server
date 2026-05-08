@@ -171,3 +171,141 @@ def test_replace_latest_retrieval_selection_can_mark_weak_gate_not_injected():
     assert snapshot[0]["selected_count"] == 0
     assert snapshot[0]["notes"]["final_injected"] is False
     assert snapshot[0]["candidates"][0]["selected"] is False
+
+
+def test_build_retrieval_quality_analysis_marks_likely_used_and_warnings():
+    from app.services.memory.retrieval.trace import build_retrieval_quality_analysis
+
+    retrievals = [{
+        "session_id": "hybrid_l1_l2_abc",
+        "strategy": "hybrid_l1_l2",
+        "query": "妈妈怎么样了",
+        "enhanced_query": "用户妈妈最近住院情况",
+        "raw_count": 5,
+        "candidate_count": 5,
+        "selected": [
+            {
+                "id": "m1",
+                "source": "user",
+                "text": "用户妈妈最近住院，用户很担心她",
+                "score": 0.82,
+                "rank_reasons": ["实体命中", "关键词命中"],
+            },
+            {
+                "id": "m2",
+                "source": "ai",
+                "text": "AI 喜欢在晚上做手作",
+                "score": 0.58,
+                "rank_reasons": [],
+            },
+        ],
+        "notes": {"final_injected": True},
+    }]
+
+    analysis = build_retrieval_quality_analysis(
+        retrievals,
+        assistant_reply="你妈妈住院这件事我记得，你担心很正常。",
+        user_message="妈妈怎么样了",
+    )
+
+    assert analysis is not None
+    assert analysis["session_count"] == 1
+    assert analysis["selected_count"] == 2
+    assert analysis["selected_user_count"] == 1
+    assert analysis["selected_ai_count"] == 1
+    assert analysis["likely_used_count"] == 1
+    assert analysis["likely_unused_count"] == 1
+    assert analysis["signal_counts"]["entity"] == 1
+    assert analysis["signal_counts"]["keyword"] == 1
+    assert analysis["signal_counts"]["enhanced_query"] == 1
+    assert analysis["quality_metrics"]["visible_use_rate"] == 0.5
+    assert analysis["quality_metrics"]["user_memory_share"] == 0.5
+    assert analysis["quality_metrics"]["selection_rate"] == 0.4
+    assert analysis["items"][0]["likely_used"] is True
+    assert {"妈妈", "住院"} & set(analysis["items"][0]["matched_terms"])
+
+
+def test_build_retrieval_quality_analysis_reports_weak_gate_drop():
+    from app.services.memory.retrieval.trace import build_retrieval_quality_analysis
+
+    analysis = build_retrieval_quality_analysis(
+        [{
+            "session_id": "hybrid_l1_l2_weak",
+            "strategy": "hybrid_l1_l2",
+            "query": "哈哈",
+            "candidate_count": 1,
+            "candidates": [{"id": "m1", "text": "候选记忆"}],
+            "selected": [],
+            "notes": {"final_injected": False},
+        }],
+        assistant_reply="哈哈",
+        user_message="哈哈",
+    )
+
+    assert analysis is not None
+    warning_codes = {item["code"] for item in analysis["warnings"]}
+    assert "candidates_not_injected" in warning_codes
+    assert "final_gate_dropped_candidates" in warning_codes
+    assert analysis["quality_metrics"]["has_final_gate_drop"] is True
+
+
+def test_build_memory_retrieval_feedback_detects_next_turn_correction():
+    from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
+
+    feedback = build_memory_retrieval_feedback(
+        user_message="不是啊，你记错了，我从来没说过我喜欢芒果。",
+        previous_assistant_reply="我记得你喜欢芒果，所以给你推荐这个。",
+        previous_metadata={
+            "memory_retrieval_analysis": {
+                "likely_used_count": 1,
+                "items": [
+                    {
+                        "id": "m1",
+                        "text": "用户喜欢芒果",
+                        "likely_used": True,
+                    }
+                ],
+            },
+            "memory_retrievals": [
+                {
+                    "selected": [
+                        {"id": "m1", "text": "用户喜欢芒果"},
+                    ]
+                }
+            ],
+        },
+    )
+
+    assert feedback is not None
+    assert feedback["signal"] == "potential_memory_correction"
+    assert feedback["confidence"] >= 0.9
+    assert "记错" in feedback["matched_phrases"]
+    assert feedback["memory_ids"] == ["m1"]
+
+
+def test_build_memory_retrieval_feedback_ignores_plain_negation():
+    from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
+
+    feedback = build_memory_retrieval_feedback(
+        user_message="不是很舒服，今天有点累。",
+        previous_assistant_reply="你今天怎么样？",
+        previous_metadata={
+            "memory_retrievals": [
+                {"selected": [{"id": "m1", "text": "用户最近压力大"}]},
+            ],
+        },
+    )
+
+    assert feedback is None
+
+
+def test_build_memory_retrieval_feedback_requires_retrieval_metadata():
+    from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
+
+    feedback = build_memory_retrieval_feedback(
+        user_message="你记错了。",
+        previous_assistant_reply="我记得你喜欢咖啡。",
+        previous_metadata={"trace_id": "t1"},
+    )
+
+    assert feedback is None

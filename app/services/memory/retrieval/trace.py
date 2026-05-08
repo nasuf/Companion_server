@@ -9,6 +9,7 @@ render it next to the LLM trace without adding a new hot-path table.
 from __future__ import annotations
 
 import copy
+import re
 import uuid
 from contextvars import ContextVar, Token
 from datetime import datetime
@@ -22,6 +23,35 @@ _current_sessions: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 
 _MAX_CANDIDATES_PER_SESSION = 20
 _MAX_TEXT_PREVIEW = 160
+_MAX_ANALYSIS_ITEMS = 12
+_MAX_MATCH_TERMS = 8
+_MAX_FEEDBACK_MEMORY_IDS = 10
+_CJK_STOP_TERMS = {
+    "用户", "自己", "这个", "那个", "这些", "那些", "事情", "相关",
+    "之前", "最近", "现在", "已经", "没有", "不是", "一个", "时候",
+    "表达", "告诉", "觉得", "知道", "可以", "需要", "应该", "可能",
+}
+_MISTAKE_VERBS = "记错|记岔|搞错|弄错|理解错|误会|说错|说反|弄反|搞反"
+_CORRECTION_REGEXES: tuple[tuple[str, str, float], ...] = (
+    (
+        "记错",
+        rf"(?:你|ai|它)[^，。！？!?]{{0,8}}(?:{_MISTAKE_VERBS})"
+        rf"|(?<!我)(?:{_MISTAKE_VERBS})(?:了|啦|啊|呀|，|,|。|！|!|$)",
+        0.88,
+    ),
+    (
+        "没说过",
+        r"(?:我)?(?:没|没有)说过|(?:我)?(?:没|没有)说这个|没这回事|哪有|别乱说|不要乱说|别瞎说",
+        0.86,
+    ),
+    (
+        "直接否定",
+        r"^(?:不是|不对|错了|不是这样|不是这个|不是那样)(?:啊|呀|啦|哦|噢|，|,|。|\.|！|!|\s|$)",
+        0.72,
+    ),
+    ("澄清", r"不是这个意思|我说的是|我是说|我的意思是", 0.78),
+)
+_FEEDBACK_CONTEXT_TERMS = ("你", "记", "记忆", "记得", "说", "刚刚", "刚才", "回复", "上条")
 
 
 def start_retrieval_trace() -> Token:
@@ -36,6 +66,259 @@ def reset_retrieval_trace(token: Token) -> None:
 def snapshot_retrieval_traces() -> list[dict[str, Any]]:
     sessions = _current_sessions.get() or []
     return copy.deepcopy(sessions)
+
+
+def build_retrieval_quality_analysis(
+    retrievals: list[dict[str, Any]] | None,
+    *,
+    assistant_reply: str = "",
+    user_message: str = "",
+) -> dict[str, Any] | None:
+    """Build a compact, deterministic quality report for the Trace modal.
+
+    This is intentionally heuristic. It does not claim that the LLM truly
+    "used" a memory; it only marks `likely_used` when the final reply contains
+    visible lexical anchors from an injected memory. The goal is fast debugging
+    and trend analysis without another hot-path LLM call.
+    """
+    if not retrievals:
+        return None
+
+    sessions = [s for s in retrievals if isinstance(s, dict)]
+    if not sessions:
+        return None
+
+    selected_items: list[dict[str, Any]] = []
+    candidate_count = 0
+    raw_count = 0
+    superseded_count = 0
+    final_gate_dropped_candidates = 0
+    signal_counts = {
+        "keyword": 0,
+        "entity": 0,
+        "safety": 0,
+        "time": 0,
+        "l3": 0,
+        "enhanced_query": 0,
+        "cache_hit": 0,
+    }
+
+    for session in sessions:
+        notes = session.get("notes") if isinstance(session.get("notes"), dict) else {}
+        selected = session.get("selected") if isinstance(session.get("selected"), list) else []
+        candidates = session.get("candidates") if isinstance(session.get("candidates"), list) else []
+        candidate_count += int(session.get("candidate_count") or len(candidates) or 0)
+        raw_count += int(session.get("raw_count") or 0)
+        if notes.get("superseded_by_later_retrieval"):
+            superseded_count += 1
+        if session.get("cache_hit"):
+            signal_counts["cache_hit"] += 1
+        if session.get("enhanced_query"):
+            signal_counts["enhanced_query"] += 1
+        strategy = str(session.get("strategy") or "")
+        if (
+            notes.get("final_injected") is False
+            and not notes.get("superseded_by_later_retrieval")
+            and candidates
+        ):
+            final_gate_dropped_candidates += len(candidates)
+        for item in selected:
+            if isinstance(item, dict):
+                row = dict(item)
+                row["_session_id"] = session.get("session_id")
+                row["_strategy"] = strategy
+                selected_items.append(row)
+
+    user_selected = sum(1 for item in selected_items if item.get("source") == "user")
+    ai_selected = sum(1 for item in selected_items if item.get("source") == "ai")
+    likely_used_count = 0
+    analyzed_items: list[dict[str, Any]] = []
+
+    for item in selected_items:
+        reasons = [str(r) for r in (item.get("rank_reasons") or [])]
+        text = str(item.get("text") or "")
+        retrieval_source = str(item.get("retrieval_source") or "")
+        strategy = str(item.get("_strategy") or "")
+        matched = _matched_terms(text, assistant_reply)
+        likely_used = bool(matched)
+        if likely_used:
+            likely_used_count += 1
+        if any("关键词" in reason for reason in reasons):
+            signal_counts["keyword"] += 1
+        if any("实体" in reason for reason in reasons) or "entity" in retrieval_source:
+            signal_counts["entity"] += 1
+        if any("安全" in reason or "情绪" in reason for reason in reasons):
+            signal_counts["safety"] += 1
+        if strategy == "explicit_time":
+            signal_counts["time"] += 1
+        if strategy == "l3_awaken":
+            signal_counts["l3"] += 1
+
+        if len(analyzed_items) < _MAX_ANALYSIS_ITEMS:
+            analyzed_items.append({
+                "id": item.get("id") or "",
+                "session_id": item.get("_session_id"),
+                "strategy": strategy,
+                "source": item.get("source") or "",
+                "score": item.get("score"),
+                "text": _text_preview(text),
+                "rank_reasons": reasons,
+                "likely_used": likely_used,
+                "matched_terms": matched,
+            })
+
+    selected_count = len(selected_items)
+    likely_unused_count = max(0, selected_count - likely_used_count)
+    visible_use_rate = likely_used_count / selected_count if selected_count else 0.0
+    user_memory_share = user_selected / selected_count if selected_count else 0.0
+    selection_rate = selected_count / candidate_count if candidate_count else 0.0
+    observations: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+
+    if signal_counts["enhanced_query"]:
+        observations.append(_notice(
+            "enhanced_query",
+            f"{signal_counts['enhanced_query']} 次召回使用了 enhanced_query。",
+        ))
+    if signal_counts["entity"]:
+        observations.append(_notice("entity_recall", "本轮有实体命中信号参与召回。"))
+    if signal_counts["keyword"]:
+        observations.append(_notice("keyword_recall", "本轮有关键词命中信号参与重排。"))
+    if signal_counts["safety"]:
+        observations.append(_notice("safety_memory", "本轮注入了安全/情绪相关记忆。"))
+    if signal_counts["time"]:
+        observations.append(_notice("time_recall", "本轮包含显式时间记忆召回。"))
+    if signal_counts["l3"]:
+        observations.append(_notice("l3_recall", "本轮包含 L3 久远记忆召回。"))
+    if superseded_count:
+        observations.append(_notice(
+            "superseded_retrieval",
+            f"{superseded_count} 次早期召回被后续召回结果替换。",
+        ))
+
+    if selected_count == 0 and candidate_count > 0:
+        warnings.append(_notice(
+            "candidates_not_injected",
+            "有候选记忆但最终没有注入 prompt，需检查 relevance gate 或 token/quota。",
+            "warning",
+        ))
+    has_final_gate_drop = bool(final_gate_dropped_candidates)
+    if has_final_gate_drop:
+        warnings.append(_notice(
+            "final_gate_dropped_candidates",
+            f"{final_gate_dropped_candidates} 条候选没有进入最终 prompt。",
+            "warning",
+        ))
+    has_prompt_dilution = False
+    if selected_count > 0 and likely_used_count == 0:
+        has_prompt_dilution = True
+        warnings.append(_notice(
+            "no_visible_memory_use",
+            "回复文本里没有看到明显引用已注入记忆的词面线索。",
+            "warning",
+        ))
+    elif selected_count >= 5 and likely_unused_count / selected_count >= 0.7:
+        has_prompt_dilution = True
+        warnings.append(_notice(
+            "many_injected_not_visible",
+            "注入记忆较多，但大部分没有在回复文本中出现明显引用线索，可能存在 prompt 稀释。",
+            "warning",
+        ))
+    if selected_count > 0 and user_selected == 0 and ai_selected > 0:
+        warnings.append(_notice(
+            "no_user_memory_selected",
+            "本轮只注入了 AI 侧记忆，没有用户侧记忆。",
+            "warning",
+        ))
+
+    return {
+        "version": 1,
+        "method": "lexical_overlap_v1",
+        "user_message_preview": _text_preview(user_message),
+        "reply_preview": _text_preview(assistant_reply),
+        "session_count": len(sessions),
+        "raw_count": raw_count,
+        "candidate_count": candidate_count,
+        "selected_count": selected_count,
+        "selected_user_count": user_selected,
+        "selected_ai_count": ai_selected,
+        "likely_used_count": likely_used_count,
+        "likely_unused_count": likely_unused_count,
+        "signal_counts": signal_counts,
+        "quality_metrics": {
+            "visible_use_rate": round(visible_use_rate, 4),
+            "user_memory_share": round(user_memory_share, 4),
+            "selection_rate": round(selection_rate, 4),
+            "warning_count": len(warnings),
+            "has_final_gate_drop": has_final_gate_drop,
+            "has_prompt_dilution": has_prompt_dilution,
+        },
+        "observations": observations,
+        "warnings": warnings,
+        "items": analyzed_items,
+    }
+
+
+def build_memory_retrieval_feedback(
+    *,
+    user_message: str,
+    previous_assistant_reply: str,
+    previous_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Detect whether the next user turn may be correcting memory usage.
+
+    This is an observability signal, not a memory mutation. It only fires when
+    the previous assistant message actually had retrieval metadata and the next
+    user turn contains a correction-like phrase. The frontend can then surface
+    it on the previous reply's Trace modal for retrieval quality analysis.
+    """
+    metadata = previous_metadata if isinstance(previous_metadata, dict) else {}
+    if not metadata:
+        return None
+    analysis = metadata.get("memory_retrieval_analysis")
+    retrievals = metadata.get("memory_retrievals")
+    if not isinstance(analysis, dict) and not isinstance(retrievals, list):
+        return None
+
+    text = str(user_message or "").strip()
+    if not text:
+        return None
+
+    matched_phrases: list[str] = []
+    confidence = 0.0
+    for label, pattern, score in _CORRECTION_REGEXES:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            matched_phrases.append(label)
+            confidence = max(confidence, score)
+
+    if not matched_phrases:
+        return None
+
+    if any(term in text for term in _FEEDBACK_CONTEXT_TERMS):
+        confidence += 0.08
+    if isinstance(analysis, dict) and (_safe_int(analysis.get("likely_used_count")) or 0) > 0:
+        confidence += 0.06
+    confidence = round(min(confidence, 0.98), 2)
+
+    memory_ids = _feedback_memory_ids(metadata)
+    notes = [
+        "下一轮用户可能在纠正本次回复中的记忆使用。",
+        "这是关键词启发式信号，不代表系统已确认哪条记忆错误。",
+    ]
+    if memory_ids:
+        notes.append("memory_ids 优先来自本次回复可能使用或最终注入的记忆。")
+
+    return {
+        "version": 1,
+        "method": "correction_keyword_v1",
+        "signal": "potential_memory_correction",
+        "confidence": confidence,
+        "user_message_preview": _text_preview(text),
+        "assistant_reply_preview": _text_preview(previous_assistant_reply),
+        "matched_phrases": matched_phrases,
+        "memory_ids": memory_ids,
+        "notes": notes,
+    }
 
 
 def make_retrieval_session_id(prefix: str = "ret") -> str:
@@ -74,6 +357,84 @@ def _text_preview(value: Any) -> str:
     if len(text) <= _MAX_TEXT_PREVIEW:
         return text
     return text[:_MAX_TEXT_PREVIEW] + "..."
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").lower())
+
+
+def _cjk_terms(text: str) -> set[str]:
+    terms: set[str] = set()
+    for segment in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        if len(segment) <= 4 and segment not in _CJK_STOP_TERMS:
+            terms.add(segment)
+        for size in (2, 3, 4):
+            if len(segment) < size:
+                continue
+            for idx in range(0, len(segment) - size + 1):
+                term = segment[idx:idx + size]
+                if term not in _CJK_STOP_TERMS and "用户" not in term:
+                    terms.add(term)
+    return terms
+
+
+def _lexical_terms(text: str) -> set[str]:
+    normalized = _normalize_text(text)
+    terms = _cjk_terms(normalized)
+    terms.update(re.findall(r"[a-z0-9_]{3,}", normalized))
+    return terms
+
+
+def _matched_terms(memory_text: str, assistant_reply: str) -> list[str]:
+    reply_text = _normalize_text(assistant_reply)
+    if not reply_text:
+        return []
+    matches = [
+        term for term in _lexical_terms(memory_text)
+        if term and term in reply_text
+    ]
+    # Prefer longer terms first; they are more informative than generic bigrams.
+    matches.sort(key=lambda term: (-len(term), term))
+    return matches[:_MAX_MATCH_TERMS]
+
+
+def _notice(code: str, message: str, severity: str = "info") -> dict[str, str]:
+    return {"code": code, "severity": severity, "message": message}
+
+
+def _feedback_memory_ids(metadata: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    analysis = metadata.get("memory_retrieval_analysis")
+    if isinstance(analysis, dict):
+        items = analysis.get("items")
+        if isinstance(items, list):
+            likely_used = [
+                item for item in items
+                if isinstance(item, dict) and item.get("likely_used")
+            ]
+            for item in likely_used or items:
+                if isinstance(item, dict) and item.get("id"):
+                    ids.append(str(item["id"]))
+
+    retrievals = metadata.get("memory_retrievals")
+    if isinstance(retrievals, list):
+        for session in retrievals:
+            if not isinstance(session, dict):
+                continue
+            selected = session.get("selected")
+            if not isinstance(selected, list):
+                continue
+            for item in selected:
+                if isinstance(item, dict) and item.get("id"):
+                    ids.append(str(item["id"]))
+
+    unique_ids: list[str] = []
+    for mid in ids:
+        if mid and mid not in unique_ids:
+            unique_ids.append(mid)
+        if len(unique_ids) >= _MAX_FEEDBACK_MEMORY_IDS:
+            break
+    return unique_ids
 
 
 def memory_trace_item(memory: Any, *, selected: bool = False) -> dict[str, Any]:

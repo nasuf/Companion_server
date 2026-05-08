@@ -202,11 +202,21 @@ async def _patch_message_metadata(message_id: str, current_meta: dict, **patch) 
 def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> dict[str, Any]:
     """Merge app-local trace payloads stored on message.metadata into trace detail."""
     retrievals = metadata.get("memory_retrievals")
+    analysis = metadata.get("memory_retrieval_analysis")
+    feedback = metadata.get("memory_retrieval_feedback")
+    trace = detail.setdefault("trace", {})
     if isinstance(retrievals, list):
-        trace = detail.setdefault("trace", {})
         if isinstance(trace, dict):
             trace["memory_retrievals"] = retrievals
         detail["memory_retrievals"] = retrievals
+    if isinstance(analysis, dict):
+        if isinstance(trace, dict):
+            trace["memory_retrieval_analysis"] = analysis
+        detail["memory_retrieval_analysis"] = analysis
+    if isinstance(feedback, dict):
+        if isinstance(trace, dict):
+            trace["memory_retrieval_feedback"] = feedback
+        detail["memory_retrieval_feedback"] = feedback
     return detail
 
 

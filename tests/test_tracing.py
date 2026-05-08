@@ -246,17 +246,30 @@ class TestResolveTraceForMessage:
 
     @_pytest.mark.asyncio
     async def test_existing_url_mirror_includes_message_memory_retrievals(self, monkeypatch):
-        """消息 metadata 上的本地 retrieval trace 应合并进 cached trace detail."""
+        """消息 metadata 上的本地 retrieval trace / analysis 应合并进 cached trace detail."""
         from app.services.chat import tracing
         retrievals = [{
             "session_id": "hybrid_l1_l2_x",
             "strategy": "hybrid_l1_l2",
             "selected": [{"id": "m1", "text": "用户害怕失眠"}],
         }]
+        analysis = {
+            "version": 1,
+            "selected_count": 1,
+            "likely_used_count": 1,
+            "warnings": [],
+        }
+        feedback = {
+            "version": 1,
+            "signal": "potential_memory_correction",
+            "confidence": 0.92,
+        }
         msg = self._make_msg(metadata={
             "trace_id": "t1",
             "trace_url": "https://existing",
             "memory_retrievals": retrievals,
+            "memory_retrieval_analysis": analysis,
+            "memory_retrieval_feedback": feedback,
         })
         cached = {"trace": {"trace_id": "t1"}, "steps": [{"id": "s1"}]}
         async def fake_get_mirror(_): return cached
@@ -268,6 +281,10 @@ class TestResolveTraceForMessage:
         detail = result["detail"]
         assert detail["memory_retrievals"] == retrievals
         assert detail["trace"]["memory_retrievals"] == retrievals
+        assert detail["memory_retrieval_analysis"] == analysis
+        assert detail["trace"]["memory_retrieval_analysis"] == analysis
+        assert detail["memory_retrieval_feedback"] == feedback
+        assert detail["trace"]["memory_retrieval_feedback"] == feedback
 
     @_pytest.mark.asyncio
     async def test_first_share_loads_writes_mirror_and_pushes_ws(self, monkeypatch):
@@ -306,4 +323,3 @@ class TestResolveTraceForMessage:
         assert write_calls == [(loaded_detail, "m1")]
         assert captured["patch"] == {"trace_url": "https://smith/new"}
         assert ws_calls and ws_calls[0][1] == "trace_ready"
-

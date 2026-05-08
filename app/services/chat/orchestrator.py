@@ -15,6 +15,8 @@ import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from prisma import Json
+
 from app.db import db
 from app.observability.events import (
     EVT_CHAT_CRISIS_DETECTED,
@@ -36,6 +38,9 @@ from app.services.memory.interaction.contradiction import (
     detect_l1_contradiction, generate_contradiction_inquiry,
     save_pending_contradiction,
 )  # analyze/apply/load/clear 已由 preflight.resolve_pending_contradiction 接管
+from app.services.memory.interaction.retrieval_feedback import (
+    resolve_retrieval_feedback_correction,
+)
 from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.time_service import build_time_context
@@ -132,6 +137,62 @@ async def _intent_llm_reply(
         {"role": "user", "content": user_message},
     ]))
     return result.content.strip().split("||")[0][:60]
+
+
+def _previous_assistant_message(recent_messages: list[Any], current_user_message_id: str | None) -> Any | None:
+    """Find the assistant turn immediately before the current user turn."""
+    current_index = len(recent_messages)
+    if current_user_message_id:
+        for idx, message in enumerate(recent_messages):
+            if getattr(message, "id", None) == current_user_message_id:
+                current_index = idx
+                break
+    for message in reversed(recent_messages[:current_index]):
+        if getattr(message, "role", None) == "assistant":
+            return message
+    return None
+
+
+async def _record_memory_retrieval_feedback(
+    *,
+    assistant_message_id: str,
+    assistant_reply: str,
+    user_message: str,
+    user_message_id: str | None,
+) -> None:
+    """Write a diagnostic signal when the next user turn may correct memory use."""
+    try:
+        from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
+
+        previous = await db.message.find_unique(where={"id": assistant_message_id})
+        if not previous:
+            return
+        metadata = previous.metadata if isinstance(previous.metadata, dict) else {}
+        feedback = build_memory_retrieval_feedback(
+            user_message=user_message,
+            previous_assistant_reply=getattr(previous, "content", None) or assistant_reply,
+            previous_metadata=metadata,
+        )
+        if not feedback:
+            return
+
+        feedback["assistant_message_id"] = assistant_message_id
+        feedback["user_message_id"] = user_message_id
+        existing = metadata.get("memory_retrieval_feedback")
+        if (
+            isinstance(existing, dict)
+            and existing.get("user_message_id") == user_message_id
+        ):
+            return
+        if isinstance(existing, dict):
+            feedback = {**existing, **feedback}
+
+        await db.message.update(
+            where={"id": assistant_message_id},
+            data={"metadata": Json({**metadata, "memory_retrieval_feedback": feedback})},
+        )
+    except Exception:
+        logger.exception("[MEM-FEEDBACK] failed to record memory retrieval feedback")
 
 
 # --- Multi-reply split & validate (PRD §3.2.1/§3.2.2) ---
@@ -432,6 +493,17 @@ async def stream_chat_response(
             }
             for m in recent_messages
         ]
+        if not sub_intent_mode:
+            previous_assistant = _previous_assistant_message(
+                recent_messages, user_message_id,
+            )
+            if previous_assistant is not None:
+                _fire_background(_record_memory_retrieval_feedback(
+                    assistant_message_id=previous_assistant.id,
+                    assistant_reply=previous_assistant.content,
+                    user_message=user_message,
+                    user_message_id=user_message_id,
+                ))
 
         # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
         # boundary_ctx.recent_context 给 short-circuit handler 的 prompt {context} 用,
@@ -509,6 +581,16 @@ async def stream_chat_response(
                 return
 
             async for evt in resolve_pending_deletion(user_message, preflight_ctx):
+                yield evt
+            if preflight_ctx.stopped:
+                return
+
+            async for evt in resolve_retrieval_feedback_correction(
+                user_message=user_message,
+                previous_assistant=previous_assistant,
+                ctx=preflight_ctx,
+                workspace_id=workspace_id,
+            ):
                 yield evt
             if preflight_ctx.stopped:
                 return
@@ -1072,17 +1154,29 @@ async def stream_chat_response(
             if isinstance(first, dict):
                 first.setdefault("covered_until_user_ts", covered_until_user_ts.isoformat())
         if emitted_replies:
-            from app.services.memory.retrieval.trace import snapshot_retrieval_traces
+            from app.services.memory.retrieval.trace import (
+                build_retrieval_quality_analysis,
+                snapshot_retrieval_traces,
+            )
             retrieval_traces = snapshot_retrieval_traces()
             if retrieval_traces:
+                retrieval_analysis = build_retrieval_quality_analysis(
+                    retrieval_traces,
+                    assistant_reply=full_response,
+                    user_message=user_message,
+                )
                 first = emitted_replies[0]
                 if isinstance(first, dict):
                     first.setdefault("memory_retrievals", retrieval_traces)
+                    if retrieval_analysis:
+                        first.setdefault("memory_retrieval_analysis", retrieval_analysis)
                 else:
                     emitted_replies[0] = {
                         "text": str(first),
                         "memory_retrievals": retrieval_traces,
                     }
+                    if retrieval_analysis:
+                        emitted_replies[0]["memory_retrieval_analysis"] = retrieval_analysis
         first_assistant_message_id = await _save_replies(
             conversation_id,
             emitted_replies,
