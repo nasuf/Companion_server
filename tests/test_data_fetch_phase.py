@@ -47,7 +47,10 @@ _DEFAULT_CALL = dict(
 
 def test_fast_weak_relevance_gate_is_conservative():
     """语气词可跳过; 省略追问/回忆/危机线索不能被规则误挡。"""
-    from app.services.chat.data_fetch_phase import _should_fast_weak_relevance
+    from app.services.chat.data_fetch_phase import (
+        _apply_memory_relevance_floor,
+        _should_fast_weak_relevance,
+    )
 
     assert _should_fast_weak_relevance("哈哈哈") is True
     assert _should_fast_weak_relevance("哈哈哈！") is True
@@ -59,6 +62,18 @@ def test_fast_weak_relevance_gate_is_conservative():
     assert _should_fast_weak_relevance("颜色呢") is False
     assert _should_fast_weak_relevance("还记得去年那次吗") is False
     assert _should_fast_weak_relevance("不是") is False
+
+    for message in (
+        "你知道王家卫吗",
+        "你听过黑胶唱片吗",
+        "你看过重庆森林吗",
+        "你喜欢拿铁吗",
+        "你觉得上海怎么样",
+    ):
+        assert _should_fast_weak_relevance(message) is False
+        assert _apply_memory_relevance_floor("weak", message) == "medium"
+
+    assert _apply_memory_relevance_floor("weak", "你知道吗") == "weak"
 
 
 @pytest.mark.asyncio
@@ -130,6 +145,31 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
     assert ctx.classified_memories is None
     assert ctx.l3_memories == []
     retrieval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_parallel_context_upgrades_ai_relation_query_from_weak():
+    """询问 AI 与具体对象的关系时, weak 结果也要升到 medium 并召回 A/B 库。"""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+
+    retrieval = AsyncMock(return_value={
+        "memories": [],
+        "memory_strings": [],
+        "graph_context": None,
+    })
+    with _patch_data_fetch(
+        classify_memory_relevance=AsyncMock(return_value="weak"),
+        hybrid_retrieve=retrieval,
+    ):
+        ctx = await fetch_parallel_context(
+            user_message="你知道某个独立音乐人吗",
+            messages_dicts=[{"role": "user", "content": "你知道某个独立音乐人吗"}],
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+            **_DEFAULT_CALL,
+        )
+
+    assert ctx.memory_relevance == "medium"
+    retrieval.assert_awaited_once()
 
 
 @pytest.mark.asyncio

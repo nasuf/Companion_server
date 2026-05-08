@@ -121,6 +121,50 @@ _FAST_WEAK_PROTECTED_HINTS = (
     "活不下去", "想死", "自杀", "轻生",
 )
 
+_AI_RELATION_VERBS = (
+    "知道", "认识", "了解", "熟悉", "听过", "看过", "读过", "玩过",
+    "吃过", "喝过", "去过", "用过", "喜欢", "爱", "讨厌", "不喜欢",
+    "觉得", "认为",
+)
+_AI_RELATION_OBJECT_STRIP = "吗嘛呢么呀吧啊？?！!，,。."
+
+
+def _has_relation_object(text: str) -> bool:
+    obj = text.strip(_AI_RELATION_OBJECT_STRIP).strip()
+    if not obj:
+        return False
+    if obj in {"这个", "那个", "这些", "那些", "这", "那", "它", "他", "她"}:
+        return False
+    return len(obj) >= 2
+
+
+def _asks_ai_stable_relation(user_message: str) -> bool:
+    """用户在问 AI 与某对象/话题的稳定关系时，至少需要中等记忆召回。
+
+    这类问题不是问通用知识本身，而是在探测 AI 的熟悉度、偏好、经历或
+    观点；如果 A 库里已有相关自我记忆，不召回会破坏人格一致性。
+    """
+    text = user_message.strip()
+    if not text:
+        return False
+
+    for verb in _AI_RELATION_VERBS:
+        prefix = f"你{verb}"
+        if text.startswith(prefix) and _has_relation_object(text[len(prefix):]):
+            return True
+
+        infix = f"你{verb}"
+        if text.endswith(("吗", "嘛", "呢", "么", "？", "?")) and infix in text:
+            before, _, after = text.partition(infix)
+            if _has_relation_object(before) or _has_relation_object(after):
+                return True
+
+    for prefix in ("你怎么看", "你如何看", "你对"):
+        if text.startswith(prefix) and _has_relation_object(text[len(prefix):]):
+            return True
+
+    return False
+
 
 def _should_wait_for_enhanced_query(user_message: str) -> bool:
     """省略式追问先等 enhanced_query, 避免用错误 query 做一次无效检索."""
@@ -151,6 +195,8 @@ def _should_fast_weak_relevance(user_message: str) -> bool:
         return True
     if _has_fast_gate_protected_hint(text):
         return False
+    if _asks_ai_stable_relation(text):
+        return False
 
     cleaned = _FAST_WEAK_NOISE_RE.sub("", text)
     cleaned = _FAST_WEAK_EMOJI_RE.sub("", cleaned)
@@ -166,6 +212,16 @@ def _should_fast_weak_relevance(user_message: str) -> bool:
     ):
         return True
     return False
+
+
+def _apply_memory_relevance_floor(
+    memory_relevance: str,
+    user_message: str,
+) -> str:
+    """Apply deterministic lower bounds for recall-sensitive message classes."""
+    if memory_relevance == "weak" and _asks_ai_stable_relation(user_message):
+        return "medium"
+    return memory_relevance
 
 
 def _retrieved_memory_count(retrieval_result: Any) -> int:
@@ -527,6 +583,8 @@ async def fetch_parallel_context(
             enhanced_query = getattr(relevance_result, "enhanced_query", "") or ""
         elif isinstance(relevance_result, str):
             memory_relevance = relevance_result
+
+    memory_relevance = _apply_memory_relevance_floor(memory_relevance, user_message)
 
     logger.info(
         f"[DEBUG-MEM] relevance='{memory_relevance}' enhanced='{enhanced_query[:40]}' "
