@@ -92,6 +92,31 @@ async def test_memory_section_groups_task_and_safety_memories():
 
 
 @pytest.mark.asyncio
+async def test_memory_section_declares_fact_precedence_over_history_and_l3():
+    from app.services.chat.prompt_builder import _build_memory_section
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    section = await _build_memory_section([
+        ClassifiedMemory(
+            id="age",
+            text="用户今年 28 岁",
+            relevance="strong",
+            score=0.92,
+            source="user",
+            rank_reasons=["保护槽:字面命中"],
+        ),
+    ])
+
+    assert section is not None
+    assert "事实优先级" in section
+    assert "当前用户消息明确说出新事实或纠正旧事实时, 以当前用户消息为准" in section
+    assert "以下方当前问题相关记忆为准" in section
+    assert "不要用历史对话或 L3 模糊记忆覆盖它" in section
+    assert "若历史对话或 L3 与这些记忆冲突" in section
+    assert "不要直接采用冲突值" in section
+
+
+@pytest.mark.asyncio
 async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
     from app.services.chat.prompt_builder import build_system_prompt
 
@@ -158,3 +183,45 @@ async def test_system_prompt_keeps_empty_memory_anchor_when_hard_rule_active():
     assert "## 对话一致性" not in prompt
     assert "## 你记得的事情" in prompt
     assert "(本次没有联想到任何与当前话题相关的记忆)" in prompt
+
+
+@pytest.mark.asyncio
+async def test_l3_section_cannot_override_current_memory_facts():
+    from app.services.chat.prompt_builder import build_system_prompt
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    async def _prompt_text(key: str) -> str:
+        return {
+            "chat.system_base": "像朋友一样回复。",
+            "chat.consistency_rules": "不要说出与记忆矛盾的话。",
+            "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
+            "chat.anti_hallucination_hard_rule": "用户问记忆时必须检查记忆段。",
+        }[key]
+
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text",
+        AsyncMock(side_effect=_prompt_text),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
+            memories=[
+                ClassifiedMemory(
+                    id="age",
+                    text="用户今年 28 岁",
+                    relevance="strong",
+                    score=0.92,
+                    source="user",
+                    rank_reasons=["保护槽:字面命中"],
+                ),
+            ],
+            l3_memories=["用户之前说自己 28 岁是说错了。"],
+            memory_relevance="strong",
+            reply_count=1,
+            reply_total=150,
+        )
+
+    assert "用户今年 28 岁" in prompt
+    assert "用户之前说自己 28 岁是说错了" in prompt
+    assert "L3 是低置信历史线索" in prompt
+    assert "不能覆盖「你记得的事情」里的当前事实" in prompt
+    assert "若两者冲突，以当前记忆为准" in prompt
