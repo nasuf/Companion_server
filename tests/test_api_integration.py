@@ -231,6 +231,46 @@ def test_admin_memory_overview(mock_deps):
         app.dependency_overrides.pop(require_admin_jwt, None)
 
 
+def test_admin_agent_memories_scope_by_workspace_and_user(mock_deps):
+    """Admin agent memory list must not rely on workspace_id alone."""
+    client = mock_deps
+    from app.main import app
+    from app.api.jwt_auth import require_admin_jwt
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    try:
+        with patch("app.api.admin.agents.db") as mock_db:
+            mock_db.query_raw = AsyncMock(
+                side_effect=[
+                    [{"workspace_id": "ws-1", "user_id": "user-1"}],
+                    [{
+                        "id": "mem-1",
+                        "content": "用户的直属领导叫陈姐",
+                        "summary": "用户的直属领导叫陈姐",
+                        "level": 2,
+                        "importance": 0.8,
+                        "main_category": "身份",
+                        "sub_category": "社会关系",
+                        "type": "identity",
+                        "mention_count": 0,
+                        "created_at": "2026-05-08T00:00:00+00:00",
+                    }],
+                ]
+            )
+
+            response = client.get("/admin-api/agents/agent-1/memories?source=user")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data[0]["id"] == "mem-1"
+            memory_query = mock_db.query_raw.await_args_list[1]
+            assert "workspace_id = $1" in memory_query.args[0]
+            assert "user_id = $2" in memory_query.args[0]
+            assert memory_query.args[1:3] == ("ws-1", "user-1")
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
 def test_admin_agent_proactive_detail(mock_deps):
     """GET /admin-api/users/{user_id}/agents/{agent_id}/proactive returns state/events/logs."""
     client = mock_deps

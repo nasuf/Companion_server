@@ -22,6 +22,25 @@ async def _resolve_workspace_id(agent_id: str) -> str | None:
     return str(rows[0]["id"]) if rows else None
 
 
+async def _resolve_workspace_context(agent_id: str) -> tuple[str, str] | None:
+    """Resolve active workspace and owner user for an agent."""
+    rows = await db.query_raw(
+        """
+        SELECT w.id AS workspace_id, w.user_id AS user_id
+        FROM chat_workspaces w
+        JOIN ai_agents a ON a.id = w.agent_id
+        WHERE w.agent_id = $1
+          AND w.status = 'active'
+          AND a.user_id = w.user_id
+        LIMIT 1
+        """,
+        agent_id,
+    )
+    if not rows:
+        return None
+    return str(rows[0]["workspace_id"]), str(rows[0]["user_id"])
+
+
 def _memory_row(r: dict, source: str = "") -> dict:
     """Convert a raw SQL memory row to API response dict."""
     d = {
@@ -131,13 +150,14 @@ async def get_memories(
     _: str = Depends(require_admin_jwt),
 ):
     """Get agent memories with server-side filtering and pagination."""
-    workspace_id = await _resolve_workspace_id(agent_id)
-    if not workspace_id:
+    workspace_context = await _resolve_workspace_context(agent_id)
+    if not workspace_context:
         return []
+    workspace_id, user_id = workspace_context
 
-    conditions = ["is_archived = FALSE", "workspace_id = $1"]
-    params: list = [workspace_id]
-    idx = 2
+    conditions = ["is_archived = FALSE", "workspace_id = $1", "user_id = $2"]
+    params: list = [workspace_id, user_id]
+    idx = 3
 
     if main_category:
         conditions.append(f"main_category = ${idx}")

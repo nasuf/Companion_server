@@ -58,18 +58,21 @@ def estimate_tokens(text: str) -> int:
 
 MAX_MEMORIES_INJECTED = 10  # spec §3.2 step 4: 前 10 条硬上限
 _SAFETY_MEMORY_QUOTA = 3
+_HIGH_SIMILARITY_MEMORY_QUOTA = 2
 _KEYWORD_USER_MEMORY_QUOTA = 2
 _NAMED_RELATION_MEMORY_QUOTA = 1
 _MIN_USER_MEMORY_QUOTA = 3
 _MIN_PROTECTED_SCORE = 0.35
+_HIGH_SIMILARITY_THRESHOLD = 0.86
 _SAFETY_REASON = "安全/情绪相关"
+_HIGH_SIMILARITY_REASON = "高相似向量命中"
 _KEYWORD_REASON = "关键词命中"
 _PROTECTED_SAFETY_REASON = "保护槽:安全情绪"
+_PROTECTED_HIGH_SIMILARITY_REASON = "保护槽:高相似向量"
 _PROTECTED_KEYWORD_REASON = "保护槽:字面命中"
 _PROTECTED_NAMED_RELATION_REASON = "保护槽:关系命名"
 _PROTECTED_USER_REASON = "保护槽:用户记忆"
-_EMOTIONAL_MAIN_CATEGORY = "情绪"
-_EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独", "遗憾"}
+_EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独"}
 _NAME_QUERY_TERMS = ("叫什么", "名字", "姓名", "叫啥", "叫作")
 _THIRD_PERSON_TERMS = ("她", "他", "ta", "TA", "对方", "那个人")
 _RELATION_TERMS = (
@@ -91,6 +94,10 @@ def _memory_key(mem: dict) -> str:
 
 def _memory_score(mem: dict) -> float:
     return float(mem.get("rank_score", mem.get("score", 0.5)) or 0.0)
+
+
+def _memory_similarity(mem: dict) -> float:
+    return float(mem.get("similarity", 0.0) or 0.0)
 
 
 def _memory_source(mem: dict) -> MemorySource:
@@ -116,10 +123,6 @@ def _is_safety_memory(mem: dict) -> bool:
     return (
         _SAFETY_REASON in reasons
         or (
-            mem.get("main_category") == _EMOTIONAL_MAIN_CATEGORY
-            and importance >= 0.75
-        )
-        or (
             mem.get("sub_category") in _EMOTIONAL_SUBCATEGORIES
             and importance >= 0.65
         )
@@ -136,6 +139,14 @@ def _is_keyword_user_memory(mem: dict) -> bool:
 
 def _is_eligible_user_memory(mem: dict) -> bool:
     return _memory_source(mem) == "user" and _memory_score(mem) >= _MIN_PROTECTED_SCORE
+
+
+def _is_high_similarity_memory(mem: dict) -> bool:
+    return (
+        _memory_similarity(mem) >= _HIGH_SIMILARITY_THRESHOLD
+        or _HIGH_SIMILARITY_REASON in _rank_reasons(mem)
+        or "精确文本命中" in _rank_reasons(mem)
+    )
 
 
 def _is_named_relation_query(query: str | None) -> bool:
@@ -246,6 +257,24 @@ def select_context(
                 mem, _PROTECTED_NAMED_RELATION_REASON,
             ):
                 named_relation_added += 1
+
+    high_similarity_added = 0
+    high_similarity_candidates = sorted(
+        ranked_memories,
+        key=lambda mem: _memory_similarity(mem),
+        reverse=True,
+    )
+    for mem in high_similarity_candidates:
+        if high_similarity_added >= min(
+            _HIGH_SIMILARITY_MEMORY_QUOTA,
+            max_items - len(selected_rows),
+        ):
+            break
+        if _is_high_similarity_memory(mem) and try_add(
+            mem,
+            _PROTECTED_HIGH_SIMILARITY_REASON,
+        ):
+            high_similarity_added += 1
 
     keyword_added = 0
     for mem in ranked_memories:

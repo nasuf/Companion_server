@@ -144,6 +144,88 @@ def test_select_context_protects_literal_user_keyword_match():
     assert "保护槽:字面命中" in (matched.rank_reasons or [])
 
 
+def test_select_context_protects_high_similarity_vector_hit():
+    candidates = [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 高分记忆 {i}",
+            "source": "ai",
+            "similarity": 0.62,
+            "rank_score": 0.95 - i * 0.01,
+        }
+        for i in range(8)
+    ]
+    candidates.append({
+        "id": "exact-vector-hit",
+        "summary": "自由时间无特别安排",
+        "source": "user",
+        "similarity": 0.99,
+        "rank_score": 0.32,
+        "rank_reasons": ["高相似向量命中"],
+    })
+
+    result = select_context(candidates, token_budget=800, max_items=6)
+
+    matched = next((m for m in result if m.id == "exact-vector-hit"), None)
+    assert matched is not None
+    assert "保护槽:高相似向量" in (matched.rank_reasons or [])
+
+
+def test_select_context_does_not_treat_positive_emotion_as_safety_slot():
+    candidates = [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 高分记忆 {i}",
+            "source": "ai",
+            "rank_score": 0.9 - i * 0.01,
+        }
+        for i in range(5)
+    ]
+    candidates.extend([
+        {
+            "id": "love-ai",
+            "summary": "用户表达了对 AI 的喜爱之情",
+            "source": "user",
+            "main_category": "情绪",
+            "sub_category": "感激",
+            "importance": 0.95,
+            "rank_score": 0.3,
+        },
+        {
+            "id": "apology",
+            "summary": "用户向AI道歉并承诺以后不再犯类似错误",
+            "source": "user",
+            "main_category": "情绪",
+            "sub_category": "遗憾",
+            "importance": 0.8,
+            "rank_score": 0.29,
+        },
+        {
+            "id": "sadness",
+            "summary": "用户最近感到很难过",
+            "source": "user",
+            "main_category": "情绪",
+            "sub_category": "悲伤",
+            "importance": 0.8,
+            "rank_score": 0.28,
+        },
+    ])
+
+    result = select_context(
+        candidates,
+        token_budget=800,
+        max_items=5,
+        query="我刚才状态不好，你记得吗",
+    )
+
+    ids = [m.id for m in result]
+    assert "sadness" in ids
+    assert "love-ai" not in ids
+    assert "apology" not in ids
+    matched = next(m for m in result if m.id == "sadness")
+    assert "保护槽:安全情绪" in (matched.rank_reasons or [])
+
+
 def test_select_context_protects_named_relation_memory_before_self_name():
     candidates = [
         {
@@ -200,3 +282,221 @@ def test_select_context_protects_named_relation_memory_before_self_name():
     assert "direct-leader" in ids
     matched = next(m for m in result if m.id == "direct-leader")
     assert "保护槽:关系命名" in (matched.rank_reasons or [])
+
+
+def test_ranker_prioritizes_relation_name_over_self_and_ai_names():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    query = "她叫什么"
+    leader = {
+        "id": "leader",
+        "summary": "用户的直属领导叫陈姐，人挺好但要求特别细",
+        "source": "user",
+        "main_category": "身份",
+        "sub_category": "社会关系",
+        "importance": 0.8,
+        "similarity": 0.57,
+    }
+    user_name = {
+        "id": "user-name",
+        "summary": "用户叫林小满",
+        "source": "user",
+        "main_category": "身份",
+        "sub_category": "姓名",
+        "importance": 0.95,
+        "similarity": 0.51,
+    }
+    ai_name = {
+        "id": "ai-name",
+        "summary": "我叫Hillow",
+        "source": "ai",
+        "main_category": "身份",
+        "sub_category": "姓名",
+        "importance": 0.95,
+        "similarity": 0.53,
+    }
+
+    leader_score, leader_reasons = rank_memory_candidate(leader, query)
+    user_score, user_reasons = rank_memory_candidate(user_name, query)
+    ai_score, ai_reasons = rank_memory_candidate(ai_name, query)
+
+    assert "关系命名相关" in leader_reasons
+    assert "关系名查询降权:用户本人姓名" in user_reasons
+    assert "关系名查询降权:AI记忆" in ai_reasons
+    assert leader_score > user_score
+    assert leader_score > ai_score
+
+
+def test_ranker_protects_exact_text_even_with_low_importance():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    exact = {
+        "id": "exact",
+        "summary": "早上被流浪猫吵醒",
+        "source": "user",
+        "importance": 0.2,
+        "similarity": 1.0,
+    }
+    generic = {
+        "id": "generic",
+        "summary": "去公园观察流浪猫狗的行为模式，顺便投喂食物",
+        "source": "ai",
+        "importance": 0.95,
+        "similarity": 0.67,
+    }
+
+    exact_score, exact_reasons = rank_memory_candidate(exact, "早上被流浪猫吵醒")
+    generic_score, _ = rank_memory_candidate(generic, "早上被流浪猫吵醒")
+
+    assert "精确文本命中" in exact_reasons
+    assert exact_score > generic_score
+
+
+def test_ranker_prioritizes_user_safety_over_ai_emotion_story():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    user_safety = {
+        "id": "user-safety",
+        "summary": "用户表达了强烈的负面情绪，有轻生念头",
+        "source": "user",
+        "main_category": "情绪",
+        "sub_category": "悲伤",
+        "importance": 0.85,
+        "similarity": 0.55,
+    }
+    ai_story = {
+        "id": "ai-story",
+        "summary": "生病发烧躺在出租屋床上，那一刻觉得世界好空旷。",
+        "source": "ai",
+        "main_category": "情绪",
+        "sub_category": "孤独",
+        "importance": 0.95,
+        "similarity": 0.72,
+    }
+
+    user_score, user_reasons = rank_memory_candidate(
+        user_safety,
+        "我现在好多了，但还是有点空",
+    )
+    ai_score, ai_reasons = rank_memory_candidate(
+        ai_story,
+        "我现在好多了，但还是有点空",
+    )
+
+    assert "安全/情绪相关" in user_reasons
+    assert "安全查询降权:AI情绪记忆" in ai_reasons
+    assert user_score > ai_score
+
+
+def test_ranker_prioritizes_user_preference_over_ai_preference():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    user_pref = {
+        "id": "user-pref",
+        "summary": "用户对芒果过敏",
+        "source": "user",
+        "main_category": "偏好",
+        "sub_category": "饮食禁忌",
+        "importance": 0.8,
+        "similarity": 0.56,
+    }
+    ai_pref = {
+        "id": "ai-pref",
+        "summary": "我讨厌吃动物内脏",
+        "source": "ai",
+        "main_category": "偏好",
+        "sub_category": "饮食禁忌",
+        "importance": 0.95,
+        "similarity": 0.70,
+    }
+
+    user_score, user_reasons = rank_memory_candidate(user_pref, "我不喜欢什么")
+    ai_score, ai_reasons = rank_memory_candidate(ai_pref, "我不喜欢什么")
+
+    assert "用户偏好相关" in user_reasons
+    assert "用户偏好查询降权:AI记忆" in ai_reasons
+    assert user_score > ai_score
+
+
+def test_ranker_prioritizes_user_reminders_over_generic_identity():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    reminder = {
+        "id": "reminder",
+        "summary": "用户周三晚上 8 点要跟陈姐开 review",
+        "source": "user",
+        "main_category": "生活",
+        "sub_category": "提醒",
+        "importance": 0.7,
+        "similarity": 0.46,
+    }
+    identity = {
+        "id": "identity",
+        "summary": "用户今年27岁",
+        "source": "user",
+        "main_category": "身份",
+        "sub_category": "年龄",
+        "importance": 1.0,
+        "similarity": 0.59,
+    }
+
+    reminder_score, reminder_reasons = rank_memory_candidate(
+        reminder,
+        "我最近有什么提醒事项",
+    )
+    identity_score, _ = rank_memory_candidate(identity, "我最近有什么提醒事项")
+
+    assert "用户提醒相关" in reminder_reasons
+    assert reminder_score > identity_score
+
+
+def test_ranker_prioritizes_user_identity_over_ai_identity():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    user_identity = {
+        "id": "user-age",
+        "summary": "用户今年27岁",
+        "source": "user",
+        "main_category": "身份",
+        "sub_category": "年龄",
+        "importance": 0.8,
+        "similarity": 0.54,
+    }
+    ai_identity = {
+        "id": "ai-age",
+        "summary": "我今年21岁",
+        "source": "ai",
+        "main_category": "身份",
+        "sub_category": "年龄",
+        "importance": 0.95,
+        "similarity": 0.62,
+    }
+    relation_memory = {
+        "id": "leader",
+        "summary": "用户的直属领导叫陈姐",
+        "source": "user",
+        "main_category": "身份",
+        "sub_category": "社会关系",
+        "importance": 0.8,
+        "similarity": 0.57,
+    }
+
+    user_score, user_reasons = rank_memory_candidate(
+        user_identity,
+        "你记得我的基本信息吗",
+    )
+    ai_score, ai_reasons = rank_memory_candidate(
+        ai_identity,
+        "你记得我的基本信息吗",
+    )
+    relation_score, relation_reasons = rank_memory_candidate(
+        relation_memory,
+        "我的老板叫什么名字",
+    )
+
+    assert "用户身份相关" in user_reasons
+    assert "用户身份查询降权:AI身份记忆" in ai_reasons
+    assert user_score > ai_score
+    assert "关系命名相关" in relation_reasons
+    assert "用户身份相关" not in relation_reasons
+    assert relation_score > user_score

@@ -23,11 +23,11 @@ SAFETY_QUERY_KEYWORDS: tuple[str, ...] = (
 DISTRESS_KEYWORDS: tuple[str, ...] = (
     "难过", "委屈", "崩溃", "压力", "焦虑", "抑郁", "孤独",
     "想哭", "哭", "绝望", "痛苦", "撑不住", "心情不好", "很累",
-    "低落", "沮丧", "受不了",
+    "低落", "沮丧", "受不了", "空落落", "空唠唠", "心里空", "有点空",
 )
 
 EMOTIONAL_SAFETY_SUBCATEGORIES: tuple[str, ...] = (
-    "悲伤", "恐惧", "焦虑", "失望", "孤独", "遗憾",
+    "悲伤", "恐惧", "焦虑", "失望", "孤独",
 )
 
 RECALL_HINT_KEYWORDS: tuple[str, ...] = (
@@ -69,6 +69,7 @@ _LEXICAL_KEYWORDS: tuple[str, ...] = tuple(
 
 _NAME_QUERY_TERMS: tuple[str, ...] = ("叫什么", "名字", "姓名", "叫啥", "叫作")
 _NAMED_MEMORY_TERMS: tuple[str, ...] = ("叫", "名字", "姓名")
+_THIRD_PERSON_TERMS: tuple[str, ...] = ("她", "他", "ta", "TA", "对方", "那个人")
 _RELATION_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("老板", "上司", "领导", "直属领导", "主管", "经理", "leader"),
     ("妈妈", "母亲", "妈"),
@@ -78,6 +79,28 @@ _RELATION_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("男朋友", "男友"),
     ("女朋友", "女友"),
 )
+_RELATION_SUBCATEGORIES: tuple[str, ...] = ("社会关系", "亲属关系")
+_USER_SELF_TERMS: tuple[str, ...] = ("我", "我的", "我最近", "我之前")
+_PREFERENCE_QUERY_TERMS: tuple[str, ...] = (
+    "喜欢", "不喜欢", "讨厌", "爱吃", "不吃", "偏好", "雷区", "习惯", "口味",
+)
+_REMINDER_QUERY_TERMS: tuple[str, ...] = (
+    "提醒", "待办", "事项", "闹钟", "review", "复盘",
+)
+_REMINDER_SUBCATEGORIES: tuple[str, ...] = ("提醒",)
+_IDENTITY_QUERY_TERMS: tuple[str, ...] = (
+    "基本信息", "个人信息", "信息", "资料", "名字", "姓名", "叫什么",
+    "年龄", "几岁", "生日", "住哪", "哪里人", "职业", "性别", "身高",
+    "体型",
+)
+_USER_IDENTITY_SUBCATEGORIES: tuple[str, ...] = (
+    "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
+    "体型", "居住", "其他",
+)
+
+_EXACT_TEXT_MATCH_FLOOR = 1.20
+_HIGH_SIMILARITY_THRESHOLD = 0.86
+_HIGH_SIMILARITY_FLOOR = 0.94
 
 
 def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -117,6 +140,110 @@ def is_safety_memory(memory: dict[str, Any]) -> bool:
 
 def _memory_text(memory: dict[str, Any]) -> str:
     return f"{memory.get('summary') or ''} {memory.get('content') or ''}".strip()
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _is_exact_or_contained_match(query: str, memory_text: str) -> bool:
+    q = _compact(query)
+    m = _compact(memory_text)
+    return bool(q and m and (q == m or q in m or m in q))
+
+
+def _is_name_query(query: str) -> bool:
+    return contains_any(query, _NAME_QUERY_TERMS)
+
+
+def _is_named_relation_query(query: str) -> bool:
+    return _is_name_query(query) and (
+        contains_any(query, _THIRD_PERSON_TERMS)
+        or any(contains_any(query, aliases) for aliases in _RELATION_ALIAS_GROUPS)
+    )
+
+
+def _is_named_relation_memory(memory: dict[str, Any]) -> bool:
+    text = _memory_text(memory)
+    return (
+        memory.get("source") == "user"
+        and (
+            memory.get("sub_category") in _RELATION_SUBCATEGORIES
+            or any(contains_any(text, aliases) for aliases in _RELATION_ALIAS_GROUPS)
+        )
+        and contains_any(text, _NAMED_MEMORY_TERMS)
+    )
+
+
+def _is_user_self_name_memory(memory: dict[str, Any]) -> bool:
+    return (
+        memory.get("source") == "user"
+        and memory.get("main_category") == "身份"
+        and memory.get("sub_category") == "姓名"
+    )
+
+
+def _is_user_preference_query(query: str) -> bool:
+    return contains_any(query, _USER_SELF_TERMS) and contains_any(
+        query, _PREFERENCE_QUERY_TERMS,
+    )
+
+
+def _is_user_reminder_query(query: str) -> bool:
+    return contains_any(query, _USER_SELF_TERMS) and contains_any(
+        query, _REMINDER_QUERY_TERMS,
+    )
+
+
+def _is_user_identity_query(query: str) -> bool:
+    return (
+        not _is_named_relation_query(query)
+        and contains_any(query, _USER_SELF_TERMS)
+        and contains_any(query, _IDENTITY_QUERY_TERMS)
+    )
+
+
+def _is_user_preference_memory(memory: dict[str, Any]) -> bool:
+    text = _memory_text(memory)
+    return (
+        memory.get("source") == "user"
+        and (
+            memory.get("main_category") == "偏好"
+            or contains_any(text, _PREFERENCE_QUERY_TERMS)
+            or "过敏" in text
+        )
+    )
+
+
+def _is_user_reminder_memory(memory: dict[str, Any]) -> bool:
+    text = _memory_text(memory)
+    return (
+        memory.get("source") == "user"
+        and (
+            memory.get("sub_category") in _REMINDER_SUBCATEGORIES
+            or contains_any(text, _REMINDER_QUERY_TERMS)
+        )
+    )
+
+
+def _is_user_identity_memory(memory: dict[str, Any]) -> bool:
+    return (
+        memory.get("source") == "user"
+        and (
+            memory.get("main_category") == "身份"
+            or memory.get("sub_category") in _USER_IDENTITY_SUBCATEGORIES
+        )
+    )
+
+
+def _is_ai_identity_memory(memory: dict[str, Any]) -> bool:
+    return (
+        memory.get("source") == "ai"
+        and (
+            memory.get("main_category") == "身份"
+            or memory.get("sub_category") in _USER_IDENTITY_SUBCATEGORIES
+        )
+    )
 
 
 def _keyword_overlap_count(query: str, memory_text: str) -> int:
@@ -173,6 +300,14 @@ def rank_memory_candidate(
         boost += min(0.30, 0.08 * overlap)
         reasons.append("关键词命中")
 
+    exact_text_match = _is_exact_or_contained_match(query, text)
+    if exact_text_match:
+        score = max(score, _EXACT_TEXT_MATCH_FLOOR)
+        reasons.append("精确文本命中")
+    elif similarity >= _HIGH_SIMILARITY_THRESHOLD:
+        score = max(score, _HIGH_SIMILARITY_FLOOR)
+        reasons.append("高相似向量命中")
+
     inferred_categories = infer_query_main_categories(query)
     main_category = memory.get("main_category")
     if main_category and main_category in inferred_categories:
@@ -187,6 +322,53 @@ def rank_memory_candidate(
     if is_distress_or_safety_query(query) and is_safety_memory(memory):
         boost += 0.80 if is_safety_query(query) else 0.45
         reasons.append("安全/情绪相关")
+
+    if _is_named_relation_query(query) and not exact_text_match:
+        if _is_named_relation_memory(memory):
+            boost += 0.60
+            reasons.append("关系命名相关")
+        elif memory.get("source") == "ai":
+            boost *= 0.55
+            reasons.append("关系名查询降权:AI记忆")
+        elif _is_user_self_name_memory(memory):
+            boost *= 0.65
+            reasons.append("关系名查询降权:用户本人姓名")
+
+    if _is_user_preference_query(query) and not exact_text_match:
+        if _is_user_preference_memory(memory):
+            boost += 0.45
+            reasons.append("用户偏好相关")
+        elif memory.get("source") == "ai":
+            boost *= 0.65
+            reasons.append("用户偏好查询降权:AI记忆")
+
+    if _is_user_reminder_query(query) and not exact_text_match:
+        if _is_user_reminder_memory(memory):
+            boost += 0.95
+            reasons.append("用户提醒相关")
+        elif memory.get("source") == "ai":
+            boost *= 0.55
+            reasons.append("用户提醒查询降权:AI记忆")
+
+    if _is_user_identity_query(query) and not exact_text_match:
+        if _is_user_identity_memory(memory):
+            boost += 0.55
+            reasons.append("用户身份相关")
+        elif _is_ai_identity_memory(memory):
+            boost *= 0.50
+            reasons.append("用户身份查询降权:AI身份记忆")
+
+    if (
+        is_distress_or_safety_query(query)
+        and not exact_text_match
+        and memory.get("source") == "ai"
+        and (
+            memory.get("main_category") == "情绪"
+            or contains_any(text, SAFETY_QUERY_KEYWORDS + DISTRESS_KEYWORDS)
+        )
+    ):
+        boost *= 0.65
+        reasons.append("安全查询降权:AI情绪记忆")
 
     mention_count = int(memory.get("mention_count") or 0)
     if mention_count >= 3:

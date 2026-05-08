@@ -19,6 +19,7 @@ build/
 
 # Server runtime
 .server.pid
+reports/
 
 # IDE
 .idea/
