@@ -157,3 +157,36 @@ async def test_delay_explanation_received_time_normalized():
         f"received_time 必须转 Shanghai, got {captured['received_time']!r}"
     )
     assert captured["current_time"] == "08:56"
+
+
+@pytest.mark.asyncio
+async def test_delay_explanation_received_time_prefers_latest_received_at():
+    """合并多条异步消息时, 延迟解释必须按最新用户消息描述时间。"""
+    from app.services.chat import reply_post_process as rpp
+
+    morning_shanghai = datetime(2026, 5, 3, 8, 56, tzinfo=SHANGHAI)
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    async def _fb(*a, **k):
+        return ""
+
+    with patch("app.services.chat.reply_post_process._now_corrected",
+               return_value=morning_shanghai):
+        await rpp._build_delay_explanation_text(
+            reply_context={
+                "received_at": "2026-05-03T00:51:00+00:00",
+                "latest_received_at": "2026-05-03T00:55:50+00:00",
+                "received_status": {"activity": "X", "status": "idle"},
+            },
+            elapsed=10.0,
+            delay_reply_fn=_capture,
+            fallback_fn=_fb,
+            agent=MagicMock(),
+            user_message="嗨",
+        )
+
+    assert captured["received_time"] == "08:55"

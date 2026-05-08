@@ -1,11 +1,13 @@
 """Tests for delayed reply queue helpers."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.services.interaction import delayed_queue
 from app.services.interaction.delayed_queue import merge_delayed_payloads
+from app.services.interaction.reply_context import actual_delay_seconds
 
 
 def test_merge_delayed_payloads_combines_all_messages_and_keeps_first_context():
@@ -42,6 +44,40 @@ def test_merge_delayed_payloads_combines_all_messages_and_keeps_first_context():
     assert merged["queued_messages"] == ["第一句", "第二句"]
     assert merged["reply_context"]["received_status"]["activity"] == "工作"
     assert merged["reply_context"]["latest_received_at"] == "2026-03-19T00:00:10+00:00"
+
+
+def test_merged_payload_delay_uses_latest_message_time():
+    merged = merge_delayed_payloads([
+        {
+            "conversation_id": "conv-1",
+            "agent_id": "agent-1",
+            "user_id": "user-1",
+            "message": "第一句",
+            "message_id": "msg-1",
+            "reply_context": {
+                "received_at": "2026-03-19T00:00:00+00:00",
+                "received_status": {"activity": "工作", "status": "busy"},
+            },
+        },
+        {
+            "conversation_id": "conv-1",
+            "agent_id": "agent-1",
+            "user_id": "user-1",
+            "message": "第二句",
+            "message_id": "msg-2",
+            "reply_context": {
+                "received_at": "2026-03-19T00:00:55+00:00",
+                "received_status": {"activity": "自由时间", "status": "idle"},
+            },
+        },
+    ])
+
+    elapsed = actual_delay_seconds(
+        merged["reply_context"],
+        now=datetime(2026, 3, 19, 0, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert elapsed == 5
 
 
 def test_merge_delayed_payloads_falls_back_to_last_non_empty_text():

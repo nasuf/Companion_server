@@ -189,10 +189,15 @@ def actual_delay_seconds(
     reply_context: dict[str, Any] | None,
     now: datetime | None = None,
 ) -> float | None:
-    """Compute actual elapsed seconds since the first received message."""
+    """Compute actual elapsed seconds for delay-explanation gating.
+
+    For merged delayed payloads, use the latest user-visible message time.  The
+    first receipt time is still retained on ``received_at`` for context/status,
+    but it must not make a fresh follow-up look like a minute-long silence.
+    """
     if not reply_context:
         return None
-    raw = reply_context.get("received_at")
+    raw = reply_context.get("latest_received_at") or reply_context.get("received_at")
     if not raw:
         return None
     try:

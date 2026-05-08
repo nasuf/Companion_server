@@ -72,7 +72,10 @@ async def _build_delay_explanation_text(
     # received_at 从 reply_context 拿到的是 UTC ISO ("2026-05-03T00:51+00:00").
     # 直接喂 LLM 会让它跟 current_time (HH:MM Shanghai) 混淆: "你在 00:51 收到...
     # 现在 08:51" — LLM 可能编出"早上 8 点"之类离谱话. 统一格式化成 Shanghai HH:MM.
-    raw_received = (reply_context or {}).get("received_at", "")
+    raw_received = (
+        (reply_context or {}).get("latest_received_at")
+        or (reply_context or {}).get("received_at", "")
+    )
     received_time_str = _format_received_at(str(raw_received))
     try:
         text = await delay_reply_fn(

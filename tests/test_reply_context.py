@@ -77,3 +77,15 @@ def test_actual_delay_seconds_works():
     value = actual_delay_seconds(context, now=now)
     assert value is not None
     assert 89 <= value <= 91
+
+
+def test_actual_delay_seconds_prefers_latest_received_at():
+    now = datetime(2026, 3, 19, 0, 1, 0, tzinfo=timezone.utc)
+    context = {
+        "received_at": "2026-03-19T00:00:00+00:00",
+        "latest_received_at": "2026-03-19T00:00:55+00:00",
+    }
+
+    value = actual_delay_seconds(context, now=now)
+
+    assert value == 5
