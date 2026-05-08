@@ -260,9 +260,18 @@ def test_crisis_followup_prompt_blocks_current_state_drift():
     from app.services.prompting.defaults import CRISIS_FOLLOWUP_REPLY_PROMPT
 
     assert "危机的余波" in CRISIS_FOLLOWUP_REPLY_PROMPT
-    assert "不要把话题当普通闲聊接走" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "不是普通闲聊接走" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "详细描述你自己在做什么" in CRISIS_FOLLOWUP_REPLY_PROMPT
     assert "现在是否安全" in CRISIS_FOLLOWUP_REPLY_PROMPT
+
+
+def test_crisis_followup_prompt_allows_user_requested_distraction():
+    from app.services.prompting.defaults import CRISIS_FOLLOWUP_REPLY_PROMPT
+
+    assert "不要机械地每轮追问" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "主动要求笑话、趣事" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "温和转移注意力" in CRISIS_FOLLOWUP_REPLY_PROMPT
+    assert "不要在同一轮再追问" in CRISIS_FOLLOWUP_REPLY_PROMPT
 
 
 def test_crisis_followup_classify_prompt_defaults_to_guard():
