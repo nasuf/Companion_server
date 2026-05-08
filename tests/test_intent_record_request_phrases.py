@@ -58,6 +58,16 @@ RECORD_REQUEST_MUST_MISS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def test_current_state_fast_path_is_narrow():
+    """常见当前状态问句走本地 fast path；带未来/过去时间的仍交给 LLM。"""
+    from app.services.chat.intent_dispatcher import detect_current_state_fast_path
+
+    assert detect_current_state_fast_path("你在干嘛呢")
+    assert detect_current_state_fast_path("忙啥？")
+    assert not detect_current_state_fast_path("你明天在干嘛")
+    assert not detect_current_state_fast_path("你刚才在干嘛")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Prompt 结构守门 — 防 future 编辑误删 ontology hooks
 # ═══════════════════════════════════════════════════════════════════

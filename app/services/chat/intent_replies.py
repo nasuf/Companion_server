@@ -24,6 +24,7 @@ _OPTIONAL_REFERENCE_KEYS = frozenset({
     "candidate_memories",
     "deleted_memories",
     "l3_memory",
+    "ai_schedule",
 })
 
 
@@ -194,9 +195,9 @@ async def current_state_reply(
             "message": message,
             "context": context or "(无)",
             "personality_brief": personality_brief or "真诚朋友",
-            "user_portrait": user_portrait or "(未知)",
+            "user_portrait": user_portrait or "",
             "current_activity": current_activity or "(未知)",
-            "ai_schedule": ai_schedule or "(未知)",
+            "ai_schedule": ai_schedule or "",
         },
     )
 

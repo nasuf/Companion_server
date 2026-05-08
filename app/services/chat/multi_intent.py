@@ -158,6 +158,7 @@ async def finalize_short_circuit(
     sub_intent_mode: bool,
     reply_index_offset: int,
     cached_patience: int,
+    extra_metadata: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -173,6 +174,7 @@ async def finalize_short_circuit(
         sub_intent_mode=sub_intent_mode,
         reply_index_offset=reply_index_offset,
         include_done=False,
+        extra_metadata=extra_metadata,
         trace_id=trace_id,
     )
     for evt in events:

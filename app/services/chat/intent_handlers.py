@@ -86,6 +86,7 @@ class ShortCircuitCtx:
     # 在主意图消化整句时 (典型: RECORD_REQUEST 取消分支) 设此 flag = True,
     # finalize 跳过 sub-intent 递归. 详见 CLAUDE.md §6 偏离表.
     consumed_full_message: bool = False
+    response_diagnostics: dict[str, Any] | None = None
 
     async def finalize(self, reply: str, *, kind: str) -> AsyncGenerator[dict, None]:
         """`kind` 是该 handler 的 intent 名 (e.g. "apology_promise", "deletion_delete"),
@@ -106,6 +107,14 @@ class ShortCircuitCtx:
         sub_fragments = (
             {} if self.consumed_full_message else self.pending_sub_fragments
         )
+        extra_metadata: dict[str, Any] | None = None
+        if self.response_diagnostics is not None:
+            self.response_diagnostics.update({
+                "reply_path": "short_circuit",
+                "short_circuit_kind": kind,
+                "main_prompt_built": False,
+            })
+            extra_metadata = {"response_diagnostics": self.response_diagnostics}
         async for evt in finalize_short_circuit(
             reply,
             conversation_id=self.conversation_id,
@@ -119,6 +128,7 @@ class ShortCircuitCtx:
             sub_intent_mode=self.sub_intent_mode,
             reply_index_offset=self.reply_index_offset,
             cached_patience=self.cached_patience,
+            extra_metadata=extra_metadata,
         ):
             yield evt
 
@@ -349,7 +359,7 @@ async def handle_current_state(
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "(未知)",
             current_activity=current_activity,
-            ai_schedule=schedule_context or "(未知)",
+            ai_schedule="",
         )
         if not response:
             return False, None

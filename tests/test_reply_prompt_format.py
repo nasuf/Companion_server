@@ -97,6 +97,15 @@ def test_multi_reply_prompts_have_pipe_format():
         assert "{total}" in prompt, f"{name} 必须含 {{total}} 占位符"
 
 
+def test_current_state_prompt_does_not_include_full_schedule():
+    """当前状态问句只需要当前活动；完整日程会增加 token 且诱导长回复。"""
+    from app.services.prompting import defaults
+
+    prompt = defaults.CURRENT_STATE_REPLY_PROMPT
+    assert "AI当前的作息：{current_activity}" in prompt
+    assert "AI当前的作息表：{ai_schedule}" not in prompt
+
+
 def test_tier_reply_prompts_forbid_ungrounded_self_context():
     """tier reply 使用率提升后, 必须防无依据自我活动/经历编造。"""
     from app.services.prompting import defaults

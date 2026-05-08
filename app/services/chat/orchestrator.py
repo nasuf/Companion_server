@@ -46,10 +46,19 @@ from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic, format_topic_context
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
+from app.services.schedule_domain.schedule import (
+    format_schedule_context,
+    get_cached_schedule,
+    get_current_status,
+)
 from app.services.interaction.boundary import get_patience_prompt_instruction
 from app.services.relationship.intimacy import get_relationship_stage
 from app.services.chat.intent_dispatcher import (
-    detect_intent_unified, IntentType, IntentResult, LABEL_TO_INTENT,
+    detect_current_state_fast_path,
+    detect_intent_unified,
+    IntentType,
+    IntentResult,
+    LABEL_TO_INTENT,
 )
 from app.services.chat.multi_intent import (
     finalize_short_circuit as _finalize_short_circuit,
@@ -86,7 +95,12 @@ from app.services.chat.preflight import (
     resolve_recent_undo,
 )
 from app.services.chat.boundary_phase import BoundaryPhaseCtx, run_boundary
-from app.services.chat.data_fetch_phase import fetch_parallel_context, format_recent_context, maybe_awaken_l3
+from app.services.chat.data_fetch_phase import (
+    FetchedContext,
+    fetch_parallel_context,
+    format_recent_context,
+    maybe_awaken_l3,
+)
 from app.services.chat.post_process import (
     save_replies as _save_replies,
     run_post_process as _background_post_process,
@@ -596,6 +610,25 @@ async def stream_chat_response(
             if preflight_ctx.stopped:
                 return
 
+        current_state_fast_path = (
+            forced_intent is None
+            and not sub_intent_mode
+            and not crisis_force_intent
+            and detect_current_state_fast_path(user_message)
+        )
+        response_diagnostics: dict[str, Any] = {
+            "version": 1,
+            "reply_path": None,
+            "memory_relevance": None,
+            "main_prompt_built": False,
+            "main_prompt_build_ms": None,
+            "memory_retrieval_skipped_reason": None,
+            "empty_prompt_sections_removed_count": None,
+            "intent_fast_path": (
+                "current_state_phrase" if current_state_fast_path else None
+            ),
+        }
+
         # P0-2: auto-intent 路径下提前 kick off fetch 与 intent 并行 (节省 600-1500ms).
         # 短路意图 (CONVERSATION_END/APOLOGY_PROMISE/DELETION) 命中时 cancel fetch_task
         # 避免浪费已 in-flight 的 LLM. 非短路场景 await fetch 后单独跑 L3 awakening
@@ -628,7 +661,7 @@ async def stream_chat_response(
                 crisis_portrait_task = asyncio.create_task(
                     get_latest_portrait(user_id, agent_id)
                 )
-        elif forced_intent is None:
+        elif forced_intent is None and not current_state_fast_path:
             early_parsed_times = (
                 parse_time_expressions(user_message)
                 if has_explicit_time(user_message) else []
@@ -652,6 +685,12 @@ async def stream_chat_response(
             detected_intent = IntentResult(intent=forced_intent, confidence=1.0)
         elif crisis_force_intent:
             detected_intent = IntentResult(intent=IntentType.CRISIS, confidence=1.0)
+        elif current_state_fast_path:
+            detected_intent = IntentResult(
+                intent=IntentType.CURRENT_STATE,
+                confidence=1.0,
+                metadata={"fast_path": "current_state_phrase"},
+            )
         else:
             context_text = await _fetch_intent_context(
                 conversation_id,
@@ -729,6 +768,7 @@ async def stream_chat_response(
             # 用户问"你看到什么段子" → AI 编了一个跟自己当下划船活动巧合的段子,
             # 因为 prompt 里 {context} 是 "(无)").
             recent_context=boundary_ctx.recent_context,
+            response_diagnostics=response_diagnostics,
         )
 
         # §3.4.6 终结意图
@@ -856,6 +896,19 @@ async def stream_chat_response(
                 enhanced_query=fetched.enhanced_query,
                 l1_l2_count=len(fetched.classified_memories or []),
             ))
+        elif current_state_fast_path:
+            schedule = await get_cached_schedule(agent_id) if agent_id else None
+            ai_status = get_current_status(schedule) if schedule else None
+            schedule_context = format_schedule_context(ai_status) if ai_status else None
+            fetched = FetchedContext(
+                memory_relevance="weak",
+                classified_memories=[],
+                memory_strings=[],
+                schedule=schedule,
+                ai_status=ai_status,
+                schedule_context=schedule_context,
+            )
+            response_diagnostics["memory_retrieval_skipped_reason"] = "current_state_fast_path"
         else:
             parsed_times = (
                 parse_time_expressions(user_message)
@@ -879,6 +932,13 @@ async def stream_chat_response(
         l3_memories = fetched.l3_memories
         ai_status = fetched.ai_status
         schedule_context = fetched.schedule_context
+        response_diagnostics.update({
+            "memory_relevance": memory_relevance,
+            "memory_retrieval_skipped_reason": (
+                response_diagnostics.get("memory_retrieval_skipped_reason")
+                or ("weak_relevance" if memory_relevance == "weak" else None)
+            ),
+        })
 
         async def _cancel_l3_task() -> None:
             """短路 / 异常时调用: cancel L3 task + 等待 propagate, 防 orphan task warning."""
@@ -1024,16 +1084,14 @@ async def stream_chat_response(
             except (asyncio.CancelledError, Exception) as e:
                 logger.warning(f"L3 awakening failed: {e}")
 
-        response_diagnostics: dict[str, Any] = {
-            "version": 1,
+        response_diagnostics.update({
             "memory_relevance": memory_relevance,
-            "main_prompt_built": False,
-            "main_prompt_build_ms": None,
             "memory_retrieval_skipped_reason": (
-                "weak_relevance" if memory_relevance == "weak" else None
+                response_diagnostics.get("memory_retrieval_skipped_reason")
+                or ("weak_relevance" if memory_relevance == "weak" else None)
             ),
             "empty_prompt_sections_removed_count": None,
-        }
+        })
 
         async def _build_main_chat_messages() -> list[dict]:
             # Build prompt only if generate_reply reaches the main LLM fallback path.

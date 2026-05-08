@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -81,6 +82,51 @@ SCHEDULE_ADJUST_KEYWORDS = [
     "能不能抽空", "陪我聊", "别忙了", "你先别忙", "能不能陪我",
     "你今天早点", "今天晚点",
 ]
+
+_CURRENT_STATE_FAST_PHRASES = frozenset({
+    "你在干嘛",
+    "你在干嘛呢",
+    "在干嘛",
+    "在干嘛呢",
+    "干嘛呢",
+    "你干嘛呢",
+    "忙啥",
+    "你忙啥",
+    "在忙啥",
+    "你在忙啥",
+    "在忙什么",
+    "你在忙什么",
+    "现在忙吗",
+    "你现在忙吗",
+    "你现在在干嘛",
+    "你现在在干嘛呢",
+    "你现在做什么",
+    "你现在在做什么",
+    "你在做什么",
+    "你在做啥",
+    "你现在干啥",
+    "你现在干啥呢",
+})
+
+_CURRENT_STATE_TIME_BLOCKERS = (
+    "明天", "后天", "大后天", "昨天", "前天", "今晚", "晚上", "下午",
+    "上午", "中午", "凌晨", "周末", "星期", "礼拜", "几点", "什么时候",
+    "等会", "待会", "一会", "以后", "之前", "刚才",
+)
+
+
+def detect_current_state_fast_path(message: str) -> bool:
+    """Hot-path for common "what are you doing now" messages.
+
+    Keep this deliberately narrow. Future/past/scheduled variants still go
+    through the LLM classifier so they can become schedule queries when needed.
+    """
+    normalized = re.sub(r"[\s，。！？!?~～…,.、]+", "", message.strip())
+    if not normalized:
+        return False
+    if any(word in normalized for word in _CURRENT_STATE_TIME_BLOCKERS):
+        return False
+    return normalized in _CURRENT_STATE_FAST_PHRASES
 
 # 优先级顺序：前面的优先匹配。spec §3.3 道歉承诺合并为一个意图
 _CHECKS: list[tuple[IntentType, list[str]]] = [

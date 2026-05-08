@@ -1656,7 +1656,6 @@ CURRENT_STATE_REPLY_PROMPT = """【任务】用户正在询问你当前在做什
 - 最近对话：{context}
 - 你的性格：{personality_brief}
 - 用户画像：{user_portrait}
-- AI当前的作息表：{ai_schedule}
 - AI当前的作息：{current_activity}
 【要求】
 - 像真人朋友一样自然地回答，口语化表达
