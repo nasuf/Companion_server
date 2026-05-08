@@ -142,3 +142,61 @@ def test_select_context_protects_literal_user_keyword_match():
     assert any(m.id == "wife-surgery" for m in result)
     matched = next(m for m in result if m.id == "wife-surgery")
     assert "保护槽:字面命中" in (matched.rank_reasons or [])
+
+
+def test_select_context_protects_named_relation_memory_before_self_name():
+    candidates = [
+        {
+            "id": f"safety-{i}",
+            "summary": f"用户表达过强烈负面情绪 {i}",
+            "source": "user",
+            "main_category": "情绪",
+            "sub_category": "悲伤",
+            "importance": 0.9,
+            "rank_score": 1.2 - i * 0.01,
+            "rank_reasons": ["安全/情绪相关"],
+        }
+        for i in range(3)
+    ]
+    candidates.extend([
+        {
+            "id": "self-name",
+            "summary": "用户叫林小满",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "姓名",
+            "rank_score": 0.85,
+            "rank_reasons": ["关键词命中", "话题类别匹配"],
+        },
+        {
+            "id": "direct-leader",
+            "summary": "用户的直属领导叫陈姐，人挺好但要求特别细",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "社会关系",
+            "rank_score": 0.78,
+            "rank_reasons": ["关键词命中", "话题类别匹配"],
+        },
+        {
+            "id": "empty-feeling",
+            "summary": "用户感到心里空落落的",
+            "source": "user",
+            "main_category": "情绪",
+            "sub_category": "孤独",
+            "importance": 0.6,
+            "rank_score": 0.98,
+            "rank_reasons": ["安全/情绪相关"],
+        },
+    ])
+
+    result = select_context(
+        candidates,
+        token_budget=800,
+        max_items=5,
+        query="还好吧。我只想问你记得她叫什么吗",
+    )
+
+    ids = [m.id for m in result]
+    assert "direct-leader" in ids
+    matched = next(m for m in result if m.id == "direct-leader")
+    assert "保护槽:关系命名" in (matched.rank_reasons or [])

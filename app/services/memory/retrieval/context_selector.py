@@ -59,15 +59,26 @@ def estimate_tokens(text: str) -> int:
 MAX_MEMORIES_INJECTED = 10  # spec §3.2 step 4: 前 10 条硬上限
 _SAFETY_MEMORY_QUOTA = 3
 _KEYWORD_USER_MEMORY_QUOTA = 2
+_NAMED_RELATION_MEMORY_QUOTA = 1
 _MIN_USER_MEMORY_QUOTA = 3
 _MIN_PROTECTED_SCORE = 0.35
 _SAFETY_REASON = "安全/情绪相关"
 _KEYWORD_REASON = "关键词命中"
 _PROTECTED_SAFETY_REASON = "保护槽:安全情绪"
 _PROTECTED_KEYWORD_REASON = "保护槽:字面命中"
+_PROTECTED_NAMED_RELATION_REASON = "保护槽:关系命名"
 _PROTECTED_USER_REASON = "保护槽:用户记忆"
 _EMOTIONAL_MAIN_CATEGORY = "情绪"
 _EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独", "遗憾"}
+_NAME_QUERY_TERMS = ("叫什么", "名字", "姓名", "叫啥", "叫作")
+_THIRD_PERSON_TERMS = ("她", "他", "ta", "TA", "对方", "那个人")
+_RELATION_TERMS = (
+    "老板", "上司", "领导", "直属领导", "主管", "经理",
+    "妈妈", "母亲", "爸爸", "父亲",
+    "妻子", "老婆", "丈夫", "老公",
+    "男朋友", "男友", "女朋友", "女友",
+)
+_RELATION_SUBCATEGORIES = {"社会关系", "亲属关系"}
 
 
 def _memory_text(mem: dict) -> str:
@@ -127,6 +138,25 @@ def _is_eligible_user_memory(mem: dict) -> bool:
     return _memory_source(mem) == "user" and _memory_score(mem) >= _MIN_PROTECTED_SCORE
 
 
+def _is_named_relation_query(query: str | None) -> bool:
+    if not query:
+        return False
+    return any(term in query for term in _NAME_QUERY_TERMS) and (
+        any(term in query for term in _THIRD_PERSON_TERMS)
+        or any(term in query for term in _RELATION_TERMS)
+    )
+
+
+def _is_named_relation_memory(mem: dict) -> bool:
+    if _memory_source(mem) != "user" or _memory_score(mem) < _MIN_PROTECTED_SCORE:
+        return False
+    text = _memory_text(mem)
+    return (
+        mem.get("sub_category") in _RELATION_SUBCATEGORIES
+        or any(term in text for term in _RELATION_TERMS)
+    ) and ("叫" in text or "名字" in text or "姓名" in text)
+
+
 def _to_classified_memory(mem: dict) -> ClassifiedMemory:
     text = _memory_text(mem)
     score = _memory_score(mem)
@@ -157,6 +187,7 @@ def select_context(
     ranked_memories: list[dict],
     token_budget: int = 800,
     max_items: int = MAX_MEMORIES_INJECTED,
+    query: str | None = None,
 ) -> list[ClassifiedMemory]:
     """Select memories to fit within token budget, with relevance classification.
 
@@ -202,6 +233,19 @@ def select_context(
             break
         if _is_safety_memory(mem) and try_add(mem, _PROTECTED_SAFETY_REASON):
             safety_added += 1
+
+    named_relation_added = 0
+    if _is_named_relation_query(query):
+        for mem in ranked_memories:
+            if named_relation_added >= min(
+                _NAMED_RELATION_MEMORY_QUOTA,
+                max_items - len(selected_rows),
+            ):
+                break
+            if _is_named_relation_memory(mem) and try_add(
+                mem, _PROTECTED_NAMED_RELATION_REASON,
+            ):
+                named_relation_added += 1
 
     keyword_added = 0
     for mem in ranked_memories:

@@ -745,6 +745,17 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
     ]
     rows.extend([
         {
+            "id": "self-name",
+            "summary": "用户叫林小满",
+            "content": "用户叫林小满",
+            "level": 1,
+            "importance": 0.95,
+            "similarity": 0.55,
+            "main_category": "身份",
+            "sub_category": "姓名",
+            "source": "user",
+        },
+        {
             "id": "boss-project",
             "summary": "用户被老板要求两天内完成一个项目，觉得很难",
             "content": "用户被老板要求两天内完成一个项目，觉得很难",
@@ -772,7 +783,7 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
     with patch("app.services.memory.retrieval.safety.db") as mock_db:
         mock_db.query_raw = AsyncMock(return_value=[])
         memories = await safety.retrieve_crisis_memories(
-            "他叫什么你还记得吗\n我是想问她的名字叫什么",
+            "还好吧。我只想问你记得她叫什么吗",
             "u1",
             workspace_id="ws1",
             limit=5,

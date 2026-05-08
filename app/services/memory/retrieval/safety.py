@@ -121,6 +121,7 @@ async def retrieve_crisis_memories(
         candidates,
         token_budget=_CRISIS_TOKEN_BUDGET,
         max_items=limit,
+        query=message,
     )
     record_retrieval_session(
         strategy="crisis_safety",
