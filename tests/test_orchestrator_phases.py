@@ -439,6 +439,24 @@ async def test_reply_generate_tier_weak_bypasses_main_llm():
 
 
 @pytest.mark.asyncio
+async def test_reply_generate_schedule_context_does_not_disable_tier():
+    """schedule_context 不再注入 §4 主回复, 因此不能阻塞轻量 tier prompt。"""
+    from app.services.chat.reply_generate import generate_reply
+
+    kwargs = _make_reply_generate_kwargs(
+        memory_relevance="weak",
+        schedule_context="当前正在工作",
+    )
+    with patch("app.services.chat.reply_generate.get_chat_model") as mock_model:
+        replies, raw, _, _ = await generate_reply(**kwargs)
+
+    mock_model.assert_not_called()
+    kwargs["tier_fns"]["weak"].assert_awaited_once()
+    assert replies == ["弱相关回复"]
+    assert raw == "弱相关回复"
+
+
+@pytest.mark.asyncio
 async def test_reply_generate_tier_l3_when_l3_memories_present():
     """有 l3_memories → 使用 l3 tier，即使 relevance=strong。"""
     from app.services.chat.reply_generate import generate_reply

@@ -43,11 +43,14 @@ def can_use_tier_reply(
     schedule_context: str | None,
     delay_context: str | None,
 ) -> bool:
-    """spec §4：仅纯聊天 + NONE/L3_RECALL 意图 + 三种 context 都不需要时可走分级 prompt。"""
+    """spec §4：纯聊天 + 无关系/延迟特殊处理时可走轻量分级 prompt.
+
+    schedule_context 是作息查询分支的参考信息；§4 主回复 prompt 已不再注入它，
+    因此不能用它阻塞 tier reply。真正的作息类消息由 intent 条件拦截。
+    """
     return (
         intent in (IntentType.NONE, IntentType.L3_RECALL)
         and not relational_context
-        and not schedule_context
         and not delay_context
         and memory_relevance in ("weak", "medium", "strong")
     )
