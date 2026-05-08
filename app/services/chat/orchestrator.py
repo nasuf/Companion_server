@@ -90,7 +90,7 @@ from app.services.chat.intent_replies import (
     memory_medium_reply as _memory_medium_reply,
     memory_strong_reply as _memory_strong_reply,
     memory_l3_reply as _memory_l3_reply,
-    l3_trigger_classify as _l3_trigger_classify,
+    l3_trigger_analyze as _l3_trigger_analyze,
     # split_reply_to_n_sentences 已删除 — 主 LLM 直接按 || 输出
     ai_reply_emotion as _ai_reply_emotion,
 )
@@ -1243,9 +1243,10 @@ async def stream_chat_response(
             l3_task = asyncio.create_task(maybe_awaken_l3(
                 user_message, user_id, workspace_id,
                 detected_intent, fetched.memory_relevance,
-                _l3_trigger_classify,
+                _l3_trigger_analyze,
                 enhanced_query=fetched.enhanced_query,
                 l1_l2_count=len(fetched.classified_memories or []),
+                recent_context=format_recent_context(messages_dicts),
             ))
         elif current_state_fast_path:
             schedule = await get_cached_schedule(agent_id) if agent_id else None
@@ -1270,7 +1271,7 @@ async def stream_chat_response(
                 user_message=user_message,
                 messages_dicts=messages_dicts, parsed_times=parsed_times,
                 detected_intent=detected_intent,
-                l3_trigger_classify_fn=_l3_trigger_classify,
+                l3_trigger_classify_fn=_l3_trigger_analyze,
             )
         memory_relevance = fetched.memory_relevance
         classified_memories = fetched.classified_memories

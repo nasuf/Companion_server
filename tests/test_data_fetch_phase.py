@@ -294,6 +294,42 @@ async def test_fetch_parallel_context_l3_awakened_on_strong_relevance():
 
 
 @pytest.mark.asyncio
+async def test_l3_awakening_uses_trigger_retrieval_query_when_enhanced_query_empty():
+    """L3 判定产出的 retrieval_query 应接到同一次 L3 检索。"""
+    from app.services.chat.data_fetch_phase import maybe_awaken_l3
+
+    search = AsyncMock(return_value=[{"content": "第一次见面时用户说了你好"}])
+    trigger = AsyncMock(return_value=SimpleNamespace(
+        label="请求更久",
+        retrieval_query="用户第一次见面时说的话",
+    ))
+    with patch("app.services.chat.data_fetch_phase.search_l3_memories", search):
+        memories, label = await maybe_awaken_l3(
+            user_message="就是第一次说的话",
+            user_id="u1",
+            workspace_id="ws1",
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            memory_relevance="strong",
+            l3_trigger_classify_fn=trigger,
+            enhanced_query="",
+            l1_l2_count=1,
+            recent_context="用户: 我想你回想一下，第一次见面我说了啥",
+        )
+
+    assert label == "请求更久"
+    assert memories == ["第一次见面时用户说了你好"]
+    trigger.assert_awaited_once_with(
+        "就是第一次说的话",
+        "用户: 我想你回想一下，第一次见面我说了啥",
+    )
+    search.assert_awaited_once_with(
+        "用户第一次见面时说的话",
+        "u1",
+        workspace_id="ws1",
+    )
+
+
+@pytest.mark.asyncio
 async def test_l3_sparse_fallback_runs_for_medium_recall_with_few_l1_l2():
     """medium + 明确回忆线索 + L1/L2 稀疏时, 应补搜 L3。"""
     from app.services.chat.data_fetch_phase import maybe_awaken_l3

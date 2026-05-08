@@ -8,12 +8,19 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, render_prompt
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class L3TriggerResult:
+    label: str
+    retrieval_query: str = ""
 
 
 _OPTIONAL_REFERENCE_KEYS = frozenset({
@@ -770,13 +777,63 @@ async def attack_level_classify(message: str) -> str | None:
     )
 
 
-async def l3_trigger_classify(message: str) -> str:
-    """§4 step 5.1-5.2：「调用L3」判断。失败保守返回 "无"。"""
-    return await _classify_label(
+def _parse_l3_trigger_result(raw: Any) -> L3TriggerResult:
+    labels = ("不满纠正", "请求更久", "无")
+    label = ""
+    retrieval_query = ""
+    if isinstance(raw, dict):
+        label = str(raw.get("label", "")).strip()
+        retrieval_query = str(raw.get("retrieval_query", "")).strip()
+    elif isinstance(raw, str):
+        text = raw.strip()
+        for candidate in labels:
+            if candidate in text:
+                label = candidate
+                break
+    if label not in labels:
+        label = "无"
+    if label == "无":
+        retrieval_query = ""
+    if len(retrieval_query) > 50:
+        retrieval_query = retrieval_query[:50]
+    return L3TriggerResult(label=label, retrieval_query=retrieval_query)
+
+
+async def l3_trigger_analyze(
+    message: str,
+    recent_context: str = EMPTY_RECENT_CONTEXT,
+) -> L3TriggerResult:
+    """§4 step 5.1-5.2：L3 唤醒判断 + 同源检索 query。"""
+    params = {
+        "message": message,
+        "recent_context": recent_context or EMPTY_RECENT_CONTEXT,
+    }
+    raw = await render_prompt(
         "memory.l3_trigger",
-        {"message": message},
+        params,
+        lambda p: invoke_json(get_utility_model(), p),
+    )
+    result = _parse_l3_trigger_result(raw)
+    if result.label != "无":
+        return result
+
+    # Backward compatibility for deployed/custom prompts that still emit a bare label.
+    label = await _classify_label(
+        "memory.l3_trigger",
+        params,
         ("不满纠正", "请求更久", "无"),
-    ) or "无"
+    )
+    if label and label != "无":
+        return L3TriggerResult(label=label)
+    return result
+
+
+async def l3_trigger_classify(
+    message: str,
+    recent_context: str = EMPTY_RECENT_CONTEXT,
+) -> str:
+    """§4 step 5.1-5.2：「调用L3」判断。失败保守返回 "无"。"""
+    return (await l3_trigger_analyze(message, recent_context)).label
 
 
 async def ai_reply_emotion(reply_text: str) -> dict:
@@ -838,6 +895,8 @@ __all__ = [
     "positive_interaction_check",
     "attack_target_classify",
     "attack_level_classify",
+    "L3TriggerResult",
+    "l3_trigger_analyze",
     "l3_trigger_classify",
     "ai_reply_emotion",
 ]

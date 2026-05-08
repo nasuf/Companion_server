@@ -202,7 +202,7 @@ _register("分析用户当前消息的主要意图，从以下选项中选出最
 _register("用户的一句话包含多个意图。请结合对话上下文，将原话拆分成多个片段", _PromptMeta(
     "intent.split_multi", "多意图拆分", "decision", _label_passthrough,
 ))
-_register("是否对当前提到的记忆表示不满/纠正，或是否在请求回忆更久之前", _PromptMeta(
+_register("判断用户消息是否需要唤醒 L3 久远记忆，并给出同一语义下的检索 query", _PromptMeta(
     "intent.l3_trigger", "L3 唤醒判定", "decision", _label_passthrough,
 ))
 _register("判断用户当前提及的内容是否与你已有的关于该用户的核心记忆", _PromptMeta(

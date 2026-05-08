@@ -255,6 +255,30 @@ def _should_reretrieve_with_enhanced_query(
     return _retrieved_memory_count(retrieval_result) < sparse_threshold
 
 
+def _extract_l3_trigger_decision(raw: Any) -> tuple[str, str]:
+    labels = ("不满纠正", "请求更久", "稀疏补召", "无")
+    label = ""
+    retrieval_query = ""
+    if isinstance(raw, dict):
+        label = str(raw.get("label", "")).strip()
+        retrieval_query = str(raw.get("retrieval_query", "")).strip()
+    else:
+        label = str(getattr(raw, "label", "") or "").strip()
+        retrieval_query = str(getattr(raw, "retrieval_query", "") or "").strip()
+        if not label and isinstance(raw, str):
+            for candidate in labels:
+                if candidate in raw:
+                    label = candidate
+                    break
+    if label not in labels:
+        label = "无"
+    if label == "无":
+        retrieval_query = ""
+    if len(retrieval_query) > 50:
+        retrieval_query = retrieval_query[:50]
+    return label, retrieval_query
+
+
 def _unwrap(result: _T, default: _T, label: str) -> _T:
     """Unwrap one slot of an asyncio.gather(return_exceptions=True) call: log + fallback on Exception."""
     if isinstance(result, Exception):
@@ -430,9 +454,10 @@ async def maybe_awaken_l3(
     workspace_id: str | None,
     detected_intent: IntentResult,
     memory_relevance: str,
-    l3_trigger_classify_fn: Callable[[str], Awaitable[str]],
+    l3_trigger_classify_fn: Callable[..., Awaitable[Any]],
     enhanced_query: str = "",
     l1_l2_count: int | None = None,
+    recent_context: str = "",
 ) -> tuple[list[str], str]:
     """spec §4 step 5 + §3.4.5：强相关或调用久远记忆意图 → 调 L3 trigger 判定.
 
@@ -452,15 +477,21 @@ async def maybe_awaken_l3(
 
     if sparse_fallback and memory_relevance == "medium" and not should_call_l3:
         label = "稀疏补召"
+        trigger_query = ""
     else:
         try:
-            label = await l3_trigger_classify_fn(user_message)
+            try:
+                trigger_result = await l3_trigger_classify_fn(user_message, recent_context)
+            except TypeError:
+                trigger_result = await l3_trigger_classify_fn(user_message)
+            label, trigger_query = _extract_l3_trigger_decision(trigger_result)
         except Exception as e:
             logger.warning(
                 f"L3 trigger classify failed: {e}",
                 extra={"event": EVT_LLM_FAIL, "stage": "l3_trigger_classify"},
             )
             label = "无"
+            trigger_query = ""
 
     # §3.4.5 调用久远记忆意图 → 无论分类结果都召回；§4 强相关 → 仅前两类召回
     if not (should_call_l3 or sparse_fallback or label in ("不满纠正", "请求更久")):
@@ -475,14 +506,15 @@ async def maybe_awaken_l3(
         )
         return [], label
 
-    # Phase 2.4: enhanced_query 优先 (省略指代场景), fallback 到原 message
-    search_query = enhanced_query or user_message
+    # L3 trigger query 优先，因为它和"是否唤醒 L3"来自同一次上下文判断；
+    # 没有 trigger query 时再退回通用 enhanced_query / 原消息。
+    search_query = trigger_query or enhanced_query or user_message
     l3_results = await search_l3_memories(search_query, user_id, workspace_id=workspace_id)
     l3_memories = [r.get("content") or r.get("summary", "") for r in l3_results if r]
     record_retrieval_session(
         strategy="l3_awaken",
         query=search_query,
-        enhanced_query=enhanced_query or None,
+        enhanced_query=trigger_query or enhanced_query or None,
         workspace_id=workspace_id,
         memory_relevance=memory_relevance,
         trigger_label=label,
@@ -494,6 +526,7 @@ async def maybe_awaken_l3(
         notes={
             "intent": detected_intent.intent.value,
             "l1_l2_count": l1_l2_count,
+            "trigger_query": trigger_query or None,
         },
     )
     logger.info(
@@ -504,7 +537,8 @@ async def maybe_awaken_l3(
             "trigger_label": label,
             "awakened": bool(l3_memories),
             "n_l3_retrieved": len(l3_memories),
-            "used_enhanced_query": bool(enhanced_query),
+            "used_enhanced_query": bool(enhanced_query and not trigger_query),
+            "used_trigger_query": bool(trigger_query),
         },
     )
     return l3_memories, label
@@ -519,7 +553,7 @@ async def fetch_parallel_context(
     messages_dicts: list[dict],
     parsed_times: list,
     detected_intent: IntentResult | None = None,
-    l3_trigger_classify_fn: Callable[[str], Awaitable[str]] | None = None,
+    l3_trigger_classify_fn: Callable[..., Awaitable[Any]] | None = None,
 ) -> FetchedContext:
     """spec §3.1+§3.2 step 2-3：拉取记忆/情绪/画像/作息 + L3 awakening。
 
@@ -662,6 +696,7 @@ async def fetch_parallel_context(
             l3_trigger_classify_fn,
             enhanced_query=enhanced_query,
             l1_l2_count=l1_l2_count,
+            recent_context=recent_context,
         )
     else:
         l3_memories, l3_trigger_label = [], "无"
