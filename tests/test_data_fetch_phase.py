@@ -45,6 +45,22 @@ _DEFAULT_CALL = dict(
 )
 
 
+def test_fast_weak_relevance_gate_is_conservative():
+    """语气词可跳过; 省略追问/回忆/危机线索不能被规则误挡。"""
+    from app.services.chat.data_fetch_phase import _should_fast_weak_relevance
+
+    assert _should_fast_weak_relevance("哈哈哈") is True
+    assert _should_fast_weak_relevance("哈哈哈！") is True
+    assert _should_fast_weak_relevance("嗯嗯") is True
+    assert _should_fast_weak_relevance("ok!") is True
+    assert _should_fast_weak_relevance("🙂🙂") is True
+
+    assert _should_fast_weak_relevance("妈妈呢") is False
+    assert _should_fast_weak_relevance("颜色呢") is False
+    assert _should_fast_weak_relevance("还记得去年那次吗") is False
+    assert _should_fast_weak_relevance("不是") is False
+
+
 @pytest.mark.asyncio
 async def test_fetch_parallel_context_happy_path():
     """关键字段从 9 个并行 fetch 中正确解包。"""
@@ -68,8 +84,8 @@ async def test_fetch_parallel_context_happy_path():
         "app.services.chat.data_fetch_phase.format_schedule_context", return_value="(工作中)",
     ):
         ctx = await fetch_parallel_context(
-            user_message="嗨",
-            messages_dicts=[{"role": "user", "content": "嗨"}],
+            user_message="最近工作有点忙",
+            messages_dicts=[{"role": "user", "content": "最近工作有点忙"}],
             l3_trigger_classify_fn=AsyncMock(return_value="无"),
             **_DEFAULT_CALL,
         )
@@ -99,8 +115,8 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
         hybrid_retrieve=AsyncMock(return_value={"memories": ["should_not_use"], "memory_strings": [], "graph_context": None}),
     ):
         ctx = await fetch_parallel_context(
-            user_message="嗨",
-            messages_dicts=[{"role": "user", "content": "嗨"}],
+            user_message="今天随便聊点别的吧",
+            messages_dicts=[{"role": "user", "content": "今天随便聊点别的吧"}],
             l3_trigger_classify_fn=AsyncMock(return_value="无"),
             **_DEFAULT_CALL,
         )
@@ -108,6 +124,63 @@ async def test_fetch_parallel_context_skips_retrieval_on_weak():
     assert ctx.memory_relevance == "weak"
     assert ctx.classified_memories is None
     assert ctx.l3_memories == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_parallel_context_fast_weak_skips_relevance_and_retrieval():
+    """明显无记忆价值的短消息不应调用 relevance LLM / hybrid retrieval。"""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+
+    relevance = AsyncMock(return_value="medium")
+    retrieval = AsyncMock(return_value={
+        "memories": ["should_not_use"],
+        "memory_strings": [],
+        "graph_context": None,
+    })
+
+    with _patch_data_fetch(
+        classify_memory_relevance=relevance,
+        hybrid_retrieve=retrieval,
+    ):
+        ctx = await fetch_parallel_context(
+            user_message="哈哈哈",
+            messages_dicts=[{"role": "user", "content": "哈哈哈"}],
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+            **_DEFAULT_CALL,
+        )
+
+    assert ctx.memory_relevance == "weak"
+    assert ctx.classified_memories is None
+    relevance.assert_not_awaited()
+    retrieval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_parallel_context_fast_weak_preserves_entity_followup():
+    """短实体追问仍需 LLM 解上下文/召回, 不能被 fast weak gate 吞掉。"""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+
+    relevance = AsyncMock(return_value="medium")
+    retrieval = AsyncMock(return_value={
+        "memories": [],
+        "memory_strings": [],
+        "graph_context": None,
+    })
+
+    with _patch_data_fetch(
+        classify_memory_relevance=relevance,
+        hybrid_retrieve=retrieval,
+    ):
+        ctx = await fetch_parallel_context(
+            user_message="妈妈呢",
+            messages_dicts=[{"role": "user", "content": "妈妈最近怎么样"}],
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+            **_DEFAULT_CALL,
+        )
+
+    assert ctx.memory_relevance == "medium"
+    relevance.assert_awaited_once()
+    retrieval.assert_awaited_once()
 
 
 @pytest.mark.asyncio

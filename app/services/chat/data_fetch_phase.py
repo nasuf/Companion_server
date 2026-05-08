@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -23,6 +24,7 @@ from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
 from app.services.memory.retrieval.relevance import (
+    RelevanceResult,
     classify_memory_relevance,
     compute_display_score,
 )
@@ -41,6 +43,7 @@ from app.services.schedule_domain.schedule import (
     get_current_status,
 )
 from app.services.schedule_domain.time_service import get_current_time
+from app.services.schedule_domain.time_parser import has_explicit_time
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,29 @@ _ENHANCED_QUERY_FIRST_HINTS = (
     "情况呢", "怎么样了", "怎样了", "怎么了", "咋样了",
 )
 
+_FAST_WEAK_WORDS = {
+    "嗯", "嗯嗯", "哦", "哦哦", "好", "好的", "行", "行吧", "好吧",
+    "ok", "okay", "收到", "知道了", "可以", "当然",
+    "哈哈", "哈哈哈", "呵呵", "嘻嘻", "嘿嘿", "hh", "hhh", "666",
+    "哇", "啊", "啊啊", "额", "呃", "唔", "喔", "噢",
+    "是", "是的", "对", "对的", "对对",
+    "谢谢", "感谢",
+    "早", "早上好", "晚安", "你好", "hello", "hi", "嗨",
+    "了", "吧", "呢", "吗", "呀",
+}
+_FAST_WEAK_REPEAT_CHARS = set("嗯哦喔噢啊哈呵嘻嘿呃额唔哇吧呀呢吗啦了")
+_FAST_WEAK_NOISE_RE = re.compile(r"[\s.,!?。，！？…~～、]+")
+_FAST_WEAK_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0E\uFE0F\u200D]+")
+_FAST_WEAK_PROTECTED_HINTS = (
+    "记得", "忘了", "忘记", "以前", "之前", "上次", "那次", "当时",
+    "去年", "前年", "小时候",
+    "妈妈", "母亲", "爸爸", "父亲", "家人", "老婆", "妻子", "老公", "丈夫",
+    "女朋友", "男朋友", "前任",
+    "名字", "年龄", "生日", "工作", "职业", "学校", "公司",
+    "喜欢", "不喜欢", "讨厌", "过敏", "手术", "住院", "出院",
+    "活不下去", "想死", "自杀", "轻生",
+)
+
 
 def _should_wait_for_enhanced_query(user_message: str) -> bool:
     """省略式追问先等 enhanced_query, 避免用错误 query 做一次无效检索."""
@@ -101,6 +127,44 @@ def _should_wait_for_enhanced_query(user_message: str) -> bool:
     if not text or len(text) > 24:
         return False
     return any(hint in text for hint in _ENHANCED_QUERY_FIRST_HINTS)
+
+
+def _has_fast_gate_protected_hint(text: str) -> bool:
+    """有记忆/时间/指代线索时, 即使很短也交给 relevance LLM 判断。"""
+    return (
+        _should_wait_for_enhanced_query(text)
+        or is_recall_query(text)
+        or has_explicit_time(text)
+        or any(hint in text for hint in _FAST_WEAK_PROTECTED_HINTS)
+    )
+
+
+def _should_fast_weak_relevance(user_message: str) -> bool:
+    """规则 fast path: 明显无记忆价值的短消息直接判 weak。
+
+    这里刻意比 hybrid 的 trivial gate 更保守: 不把"不是/没有"这类否定纠正词
+    直接判弱，避免挡住后续纠错/上下文判断；实体短追问如"妈妈呢"也会继续走 LLM。
+    """
+    text = user_message.strip()
+    if not text:
+        return True
+    if _has_fast_gate_protected_hint(text):
+        return False
+
+    cleaned = _FAST_WEAK_NOISE_RE.sub("", text)
+    cleaned = _FAST_WEAK_EMOJI_RE.sub("", cleaned)
+    if not cleaned:
+        return True
+    normalized = cleaned.lower()
+    if normalized in _FAST_WEAK_WORDS:
+        return True
+    if (
+        len(cleaned) <= 6
+        and len(set(cleaned)) <= 2
+        and all(ch in _FAST_WEAK_REPEAT_CHARS for ch in cleaned)
+    ):
+        return True
+    return False
 
 
 def _retrieved_memory_count(retrieval_result: Any) -> int:
@@ -416,17 +480,27 @@ async def fetch_parallel_context(
     current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
     recent_context = format_recent_context(messages_dicts)
 
-    wait_for_enhanced_query = _should_wait_for_enhanced_query(user_message)
-    retrieval_awaitable = (
-        asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
-        if wait_for_enhanced_query else _do_retrieval(user_message, user_id, workspace_id)
+    fast_weak_relevance = _should_fast_weak_relevance(user_message)
+    wait_for_enhanced_query = (
+        False if fast_weak_relevance else _should_wait_for_enhanced_query(user_message)
     )
+    if fast_weak_relevance:
+        relevance_awaitable = asyncio.sleep(
+            0, result=RelevanceResult(level="weak", enhanced_query="")
+        )
+        retrieval_awaitable = asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
+    else:
+        relevance_awaitable = _classify_relevance(user_message, context=recent_context)
+        retrieval_awaitable = (
+            asyncio.sleep(0, result=_EMPTY_RETRIEVAL_RESULT)
+            if wait_for_enhanced_query else _do_retrieval(user_message, user_id, workspace_id)
+        )
     (
         relevance_result, retrieval_result,
         portrait, topic_intimacy,
         time_memories_result, user_emotion_result, emotion_result,
     ) = await asyncio.gather(
-        _classify_relevance(user_message, context=recent_context),
+        relevance_awaitable,
         retrieval_awaitable,
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
@@ -464,6 +538,7 @@ async def fetch_parallel_context(
             "memory_relevance": memory_relevance,
             "msg_len": len(user_message),
             "has_enhanced_query": bool(enhanced_query),
+            "fast_gate": fast_weak_relevance,
         },
     )
 

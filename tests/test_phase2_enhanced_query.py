@@ -294,7 +294,7 @@ async def test_data_fetch_no_re_retrieve_when_weak():
     ):
         ctx = await fetch_parallel_context(
             user_id="u1", agent_id="a1", workspace_id="w1",
-            user_message="嗨",
+            user_message="今天随便聊点没有记忆关系的话题吧",
             messages_dicts=[{"role": "user", "content": "..."}],
             parsed_times=[],
             detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
