@@ -245,6 +245,100 @@ async def test_pending_set_reminder_branch_scheduled():
 
 
 @pytest.mark.asyncio
+async def test_pending_update_reminder_content_branch_numeric_choice():
+    """多 active reminder 时，第一轮问数字后第二轮必须能接住选择并更新内容。"""
+    from app.services.chat.preflight import resolve_pending_deletion
+
+    ctx = _make_preflight_ctx()
+    updates = []
+    cleared = []
+
+    async def _load(*_args, **_kw):
+        return {
+            "action": "update_reminder_content",
+            "summary": "练手冲",
+            "candidates": [
+                {
+                    "trigger_id": "trig-1",
+                    "summary": "提醒 A",
+                    "action_data": {"summary": "提醒 A", "memory_id": "m-1"},
+                    "memory_id": "m-1",
+                    "memory_side": "user",
+                },
+                {
+                    "trigger_id": "trig-2",
+                    "summary": "提醒 B",
+                    "action_data": {"summary": "提醒 B", "memory_id": "m-2"},
+                    "memory_id": "m-2",
+                    "memory_side": "user",
+                },
+            ],
+        }
+
+    async def _update(*, where, data):
+        updates.append({"where": where, "data": data})
+
+    async def _clear(conv_id):
+        cleared.append(conv_id)
+
+    with (
+        patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
+        patch("app.services.chat.preflight.clear_pending_deletion", side_effect=_clear),
+        patch("app.db.db.timetrigger", new=SimpleNamespace(update=_update)),
+        patch("app.services.memory.storage.repo.update", new_callable=AsyncMock),
+        patch("app.services.reminder.scheduling.notify_reminder_changed", new_callable=AsyncMock),
+    ):
+        events = []
+        async for evt in resolve_pending_deletion("2", ctx):
+            events.append(evt)
+
+    assert updates and updates[0]["where"] == {"id": "trig-2"}
+    assert cleared == ["c1"]
+    assert ctx.stopped is True
+    assert events
+
+
+@pytest.mark.asyncio
+async def test_pending_update_reminder_content_accepts_raw_text_after_single_choice():
+    """用户被追问“改成哪一句”后，直接回正文也应更新，不要求固定句式。"""
+    from app.services.chat.preflight import resolve_pending_deletion
+
+    ctx = _make_preflight_ctx()
+    updates = []
+
+    async def _load(*_args, **_kw):
+        return {
+            "action": "update_reminder_content",
+            "summary": "",
+            "candidates": [
+                {
+                    "trigger_id": "trig-1",
+                    "summary": "提醒 A",
+                    "action_data": {"summary": "提醒 A", "memory_id": "m-1"},
+                    "memory_id": "m-1",
+                    "memory_side": "user",
+                },
+            ],
+        }
+
+    async def _update(*, where, data):
+        updates.append({"where": where, "data": data})
+
+    with (
+        patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
+        patch("app.services.chat.preflight.clear_pending_deletion", new_callable=AsyncMock),
+        patch("app.db.db.timetrigger", new=SimpleNamespace(update=_update)),
+        patch("app.services.memory.storage.repo.update", new_callable=AsyncMock),
+        patch("app.services.reminder.scheduling.notify_reminder_changed", new_callable=AsyncMock),
+    ):
+        async for _ in resolve_pending_deletion("练手冲", ctx):
+            pass
+
+    assert updates and updates[0]["where"] == {"id": "trig-1"}
+    assert ctx.stopped is True
+
+
+@pytest.mark.asyncio
 async def test_pending_set_reminder_branch_fuzzy_no_reask():
     """分支 3: 用户又给模糊时间 ("过会儿吧") → parse 出表达但非 future →
     清 pending + 提示放弃 (不无限反问 loop)."""

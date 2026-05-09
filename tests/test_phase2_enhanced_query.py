@@ -163,6 +163,77 @@ async def test_data_fetch_enhanced_first_for_elliptical_followup():
 
 
 @pytest.mark.asyncio
+async def test_data_fetch_retrieves_for_ai_self_preference_even_when_llm_says_weak():
+    """Agent self-preference questions must still search memory."""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+    from app.services.memory.retrieval.relevance import RelevanceResult
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    relevance_result = RelevanceResult(level="weak", enhanced_query="")
+    retrieval_calls = []
+    ai_memory = ClassifiedMemory(
+        id="ai-movie",
+        text="我喜欢烧脑科幻电影",
+        relevance="medium",
+        score=0.6,
+        source="ai",
+    )
+
+    async def _track_retrieve(message, user_id, workspace_id=None,
+                              enhanced_query=None, **kw):
+        retrieval_calls.append({"message": message, "enhanced": enhanced_query})
+        return {"memories": [ai_memory], "memory_strings": [ai_memory.text], "graph_context": None}
+
+    with (
+        patch("app.services.chat.data_fetch_phase.classify_memory_relevance",
+              new_callable=AsyncMock, return_value=relevance_result),
+        patch("app.services.chat.data_fetch_phase.hybrid_retrieve",
+              side_effect=_track_retrieve),
+        patch("app.services.chat.data_fetch_phase.compute_ai_pad",
+              new_callable=AsyncMock, return_value={"pleasure": 0, "arousal": 0.5, "dominance": 0.5}),
+        patch("app.services.chat.data_fetch_phase.extract_emotion",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_latest_portrait",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_cached_schedule",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.chat.data_fetch_phase.get_topic_intimacy",
+              new_callable=AsyncMock, return_value=50.0),
+    ):
+        ctx = await fetch_parallel_context(
+            user_id="u1", agent_id="a1", workspace_id="w1",
+            user_message="你喜欢什么电影啊",
+            messages_dicts=[],
+            parsed_times=[],
+            detected_intent=IntentResult(intent=IntentType.NONE, confidence=0.0),
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+        )
+
+    assert ctx.memory_relevance == "medium"
+    assert len(retrieval_calls) == 1
+    assert ctx.classified_memories == [ai_memory]
+
+
+def test_ai_self_relation_query_pattern_is_generic_and_user_safe():
+    from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
+
+    assert asks_ai_stable_relation("你喜欢什么电影啊")
+    assert asks_ai_stable_relation("你最喜欢哪类电影")
+    assert asks_ai_stable_relation("电影方面你偏哪一类")
+    assert asks_ai_stable_relation("我想知道你喜欢什么电影")
+    assert asks_ai_stable_relation("你有没有喜欢的电影")
+    assert asks_ai_stable_relation("你去过哪些城市")
+    assert asks_ai_stable_relation("哪些城市你去过")
+    assert asks_ai_stable_relation("你怎么看科幻片")
+
+    assert not asks_ai_stable_relation("你觉得我怎么样")
+    assert not asks_ai_stable_relation("你知道我喜欢什么电影吗")
+    assert not asks_ai_stable_relation("你还记得我喜欢什么电影吗")
+    assert not asks_ai_stable_relation("那个呢")
+
+
+@pytest.mark.asyncio
 async def test_data_fetch_still_retrieves_in_parallel_for_complete_message_with_enhanced_query():
     """完整消息保持 retrieval/relevance 并行; 初次检索稀疏时再重检索."""
     from app.services.chat.data_fetch_phase import fetch_parallel_context

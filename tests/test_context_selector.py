@@ -119,6 +119,69 @@ def test_select_context_keeps_user_memory_floor_when_ai_scores_dominate():
     assert all("保护槽:用户记忆" in (m.rank_reasons or []) for m in user_memories)
 
 
+def test_select_context_protects_ai_self_memory_for_agent_preference_query():
+    """Agent self-preference questions should not be filled by unrelated user memories."""
+    candidates = [
+        {
+            "id": f"user-{i}",
+            "summary": f"用户普通记忆 {i}",
+            "source": "user",
+            "rank_score": 0.82 - i * 0.01,
+        }
+        for i in range(8)
+    ]
+    candidates.append({
+        "id": "ai-movie",
+        "summary": "我喜欢烧脑科幻电影，也喜欢轻松喜剧",
+        "source": "ai",
+        "rank_score": 0.41,
+    })
+
+    result = select_context(
+        candidates,
+        token_budget=800,
+        max_items=5,
+        query="你喜欢什么电影啊",
+    )
+
+    matched = next((m for m in result if m.id == "ai-movie"), None)
+    assert matched is not None
+    assert "保护槽:AI自我记忆" in (matched.rank_reasons or [])
+    assert sum(1 for m in result if m.source == "user") < 5
+
+
+def test_select_context_keeps_user_floor_for_user_preference_recall_query():
+    """Recall questions about the user are not mistaken for AI self queries."""
+    candidates = [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 记忆 {i}",
+            "source": "ai",
+            "rank_score": 0.9 - i * 0.01,
+        }
+        for i in range(5)
+    ] + [
+        {
+            "id": f"user-{i}",
+            "summary": f"用户偏好记忆 {i}",
+            "source": "user",
+            "rank_score": 0.45 - i * 0.01,
+        }
+        for i in range(3)
+    ]
+
+    result = select_context(
+        candidates,
+        token_budget=800,
+        max_items=5,
+        query="你还记得我喜欢什么电影吗",
+    )
+
+    user_memories = [m for m in result if m.source == "user"]
+    assert len(user_memories) == 3
+    assert all("保护槽:用户记忆" in (m.rank_reasons or []) for m in user_memories)
+
+
 def test_select_context_protects_literal_user_keyword_match():
     candidates = [
         {
@@ -416,6 +479,36 @@ def test_ranker_prioritizes_user_preference_over_ai_preference():
     assert "用户偏好相关" in user_reasons
     assert "用户偏好查询降权:AI记忆" in ai_reasons
     assert user_score > ai_score
+
+
+def test_ranker_prioritizes_ai_preference_for_agent_self_query():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    ai_pref = {
+        "id": "ai-pref",
+        "summary": "我喜欢烧脑科幻电影",
+        "source": "ai",
+        "main_category": "偏好",
+        "sub_category": "审美爱好",
+        "importance": 0.7,
+        "similarity": 0.56,
+    }
+    user_pref = {
+        "id": "user-pref",
+        "summary": "用户喜欢爱情片",
+        "source": "user",
+        "main_category": "偏好",
+        "sub_category": "审美爱好",
+        "importance": 0.95,
+        "similarity": 0.72,
+    }
+
+    ai_score, ai_reasons = rank_memory_candidate(ai_pref, "你喜欢什么电影啊")
+    user_score, user_reasons = rank_memory_candidate(user_pref, "你喜欢什么电影啊")
+
+    assert "AI自我记忆相关" in ai_reasons
+    assert "AI自我查询降权:用户记忆" in user_reasons
+    assert ai_score > user_score
 
 
 def test_ranker_prioritizes_user_reminders_over_generic_identity():

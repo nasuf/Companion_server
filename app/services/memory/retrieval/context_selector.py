@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
+
 MemorySource = Literal["user", "ai"]
 
 
@@ -61,6 +63,7 @@ _SAFETY_MEMORY_QUOTA = 3
 _HIGH_SIMILARITY_MEMORY_QUOTA = 2
 _KEYWORD_USER_MEMORY_QUOTA = 2
 _NAMED_RELATION_MEMORY_QUOTA = 1
+_AI_SELF_MEMORY_QUOTA = 2
 _MIN_USER_MEMORY_QUOTA = 3
 _MIN_PROTECTED_SCORE = 0.35
 _HIGH_SIMILARITY_THRESHOLD = 0.86
@@ -72,6 +75,7 @@ _PROTECTED_HIGH_SIMILARITY_REASON = "保护槽:高相似向量"
 _PROTECTED_KEYWORD_REASON = "保护槽:字面命中"
 _PROTECTED_NAMED_RELATION_REASON = "保护槽:关系命名"
 _PROTECTED_USER_REASON = "保护槽:用户记忆"
+_PROTECTED_AI_SELF_REASON = "保护槽:AI自我记忆"
 _EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独"}
 _NAME_QUERY_TERMS = ("叫什么", "名字", "姓名", "叫啥", "叫作")
 _THIRD_PERSON_TERMS = ("她", "他", "ta", "TA", "对方", "那个人")
@@ -258,6 +262,21 @@ def select_context(
             ):
                 named_relation_added += 1
 
+    ai_self_added = 0
+    if asks_ai_stable_relation(query or ""):
+        for mem in ranked_memories:
+            if ai_self_added >= min(
+                _AI_SELF_MEMORY_QUOTA,
+                max_items - len(selected_rows),
+            ):
+                break
+            if (
+                _memory_source(mem) == "ai"
+                and _memory_score(mem) >= _MIN_PROTECTED_SCORE
+                and try_add(mem, _PROTECTED_AI_SELF_REASON)
+            ):
+                ai_self_added += 1
+
     high_similarity_added = 0
     high_similarity_candidates = sorted(
         ranked_memories,
@@ -283,7 +302,10 @@ def select_context(
         if _is_keyword_user_memory(mem) and try_add(mem, _PROTECTED_KEYWORD_REASON):
             keyword_added += 1
 
-    min_user_quota = min(_MIN_USER_MEMORY_QUOTA, max_items)
+    min_user_quota = (
+        0 if asks_ai_stable_relation(query or "")
+        else min(_MIN_USER_MEMORY_QUOTA, max_items)
+    )
     selected_user_count = sum(1 for mem in selected_rows if _memory_source(mem) == "user")
     if selected_user_count < min_user_quota:
         for mem in ranked_memories:

@@ -640,6 +640,94 @@ _RECURRENCE_KEYWORDS: tuple[tuple[str, str], ...] = (
 )
 
 
+_REMINDER_ACTION_CUES = (
+    "提醒", "叫我", "喊我", "闹钟", "到时候", "盯着", "催我",
+)
+_RECORD_MEMORY_CUES = (
+    "记住", "记一下", "记下来", "记着", "帮我记", "替我记",
+)
+_SELF_NOTE_CUES = (
+    "我想记下来", "我想记一下", "我想写下来", "我能贴在备忘录",
+    "贴在备忘录", "备忘录里的话", "备忘录里的一句话",
+)
+_REMINDER_CONTENT_CUES = (
+    "提醒内容", "提醒文案", "内容就写", "内容写成", "文案写成",
+    "改成那句", "还是那句",
+)
+_TIME_OR_EVENT_CUES = (
+    "明天", "后天", "大后天", "今晚", "今天", "下周", "下星期", "下个月",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天",
+    "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日", "星期天",
+    "每周", "每月", "每天", "每日", "每年", "点", "号", "月",
+)
+
+
+def classify_record_request_action(message: str) -> str:
+    """把 RECORD_REQUEST 再分成提醒管理 / 普通记忆 / 用户自记笔记。
+
+    intent 识别只负责把“记 / 提醒 / 改期 / 取消”类消息粗路由进来。这里再用
+    保守的关键词和结构规则决定是否真的进入 reminder 写库，避免“记一下我的
+    偏好”被错误反问时间。
+
+    返回:
+    - "reminder": 创建/改期/取消/周期提醒等事项管理
+    - "memory_note": 用户明确让 AI 记住一个事实/偏好/原则
+    - "self_note": 用户在整理自己要写下来的句子，不是让 AI 设提醒
+    - "reminder_content": 修改已有提醒的文案/内容
+    - "none": 不应由 RECORD_REQUEST 短路消费
+    """
+    msg = message.strip()
+    if not msg:
+        return "none"
+
+    if (
+        any(cue in msg for cue in ("你记得", "还记得", "记不记得"))
+        and any(q in msg for q in ("吗", "么", "？", "?"))
+    ):
+        return "none"
+
+    if any(cue in msg for cue in _REMINDER_CONTENT_CUES):
+        return "reminder_content"
+    if any(cue in msg for cue in _REMINDER_ACTION_CUES):
+        return "reminder"
+    if any(cue in msg for cue in _SELF_NOTE_CUES):
+        return "self_note"
+
+    has_record_cue = any(cue in msg for cue in _RECORD_MEMORY_CUES)
+    if has_record_cue:
+        # “记得帮我盯着报告” 已被 REMINDER_ACTION_CUES 捕获; 这里剩下的是
+        # “记住我…” “记一下：…” 这类长期记忆请求。
+        if (
+            "我" in msg
+            or "：" in msg
+            or ":" in msg
+            or msg.startswith(("记一下", "记住", "帮我记", "替我记"))
+        ):
+            return "memory_note"
+        return "none"
+
+    # 无显式“提醒我”但有明确未来/周期事项的历史行为仍保留为 reminder。
+    if any(cue in msg for cue in _TIME_OR_EVENT_CUES):
+        return "reminder"
+    return "none"
+
+
+def extract_record_memory_text(message: str) -> str:
+    """从“记一下：X / 你可以记住X”里抽要记住的主体文本。"""
+    msg = message.strip()
+    for sep in ("：", ":"):
+        if sep in msg:
+            return msg.split(sep, 1)[1].strip() or msg
+    prefixes = (
+        "你可以记住", "可以记住", "帮我记一下", "替我记一下", "帮我记",
+        "替我记", "记一下", "记住", "记下来", "记着",
+    )
+    for prefix in prefixes:
+        if msg.startswith(prefix):
+            return msg[len(prefix):].strip(" ，,。") or msg
+    return msg
+
+
 def _detect_recurrence(message: str) -> str:
     """从用户消息识别 recurrence (once/daily/weekly/monthly/yearly).
     `_RECURRENCE_KEYWORDS` 命中即返对应周期, 否则 "once".
@@ -1140,6 +1228,109 @@ def _format_cancel_candidate_list(items: list[dict]) -> str:
     )
 
 
+def extract_reminder_content_update(message: str) -> str | None:
+    """抽取“提醒内容/文案改成 X”的新内容。"""
+    msg = message.strip()
+    for sep in ("：", ":"):
+        if sep in msg:
+            tail = msg.split(sep, 1)[1].strip()
+            if tail:
+                return tail
+    markers = (
+        "提醒内容就写", "提醒内容写成", "提醒内容改成",
+        "提醒文案写成", "提醒文案改成", "内容就写", "内容写成",
+        "文案写成", "改成",
+    )
+    for marker in markers:
+        if marker in msg:
+            tail = msg.split(marker, 1)[1].strip(" ，,。")
+            if tail:
+                return tail
+    return None
+
+
+async def _update_reminder_content(
+    *,
+    ctx: ShortCircuitCtx,
+    user_message: str,
+) -> tuple[bool, AsyncGenerator[dict, None] | None]:
+    """修改已有 active reminder 的展示/触发文案。
+
+    只在目标唯一时直接改; 多个 active reminder 时反问，避免猜错用户要改哪一个。
+    """
+    from prisma import Json
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.memory.interaction.deletion import save_pending_action
+    from app.services.reminder.scheduling import notify_reminder_changed
+
+    if not ctx.agent_id:
+        return False, None
+
+    content = extract_reminder_content_update(user_message)
+    items = await _list_active_reminders_with_meta(
+        user_id=ctx.user_id, agent_id=ctx.agent_id,
+    )
+    if not items:
+        return False, None
+    if len(items) > 1:
+        await save_pending_action(
+            ctx.conversation_id,
+            action="update_reminder_content",
+            candidates=items,
+            summary=content or "",
+        )
+        candidate_list = _format_cancel_candidate_list(items)
+        reply = (
+            "你想改哪个提醒的内容? 我现在有这些:\n"
+            f"{candidate_list}\n"
+            "回数字就行。"
+        )
+        ctx.consumed_full_message = True
+        return True, ctx.finalize(reply, kind="record_request_content_ask_multi")
+    if not content:
+        await save_pending_action(
+            ctx.conversation_id,
+            action="update_reminder_content",
+            candidates=[items[0]],
+            summary="",
+        )
+        reply = "可以，提醒内容想改成哪一句?"
+        ctx.consumed_full_message = True
+        return True, ctx.finalize(reply, kind="record_request_content_ask_text")
+
+    item = items[0]
+    summary = f"我让 AI 提醒: {content[:120]}"
+    action_data = dict(item.get("action_data") or {})
+    action_data["summary"] = summary
+    try:
+        await db.timetrigger.update(
+            where={"id": item["trigger_id"]},
+            data={"actionData": Json(action_data)},
+        )
+        memory_id = item.get("memory_id")
+        if memory_id:
+            try:
+                await memory_repo.update(
+                    memory_id, source=item.get("memory_side") or "user",
+                    content=summary, summary=summary,
+                )
+            except Exception as e:
+                logger.warning(f"[REMINDER-CONTENT] memory update failed: {e}")
+        await notify_reminder_changed(ctx.conversation_id, kind="updated")
+    except Exception as e:
+        logger.warning(f"[REMINDER-CONTENT] update failed: {e}")
+        return True, ctx.finalize(
+            "这边改提醒内容时出了点问题，你再说一遍?",
+            kind="record_request_content_failed",
+        )
+
+    ctx.consumed_full_message = True
+    return True, ctx.finalize(
+        f"好，提醒内容改成「{content[:60]}」了。",
+        kind="record_request_content_updated",
+    )
+
+
 async def _handle_cancel_intent(
     *,
     user_message: str,
@@ -1284,6 +1475,25 @@ async def handle_record_request(
             if handled:
                 return True, gen
             # 未 handle (LOW + 内容无关 / 0 reminder + LOW) → fall-through 到设置流程
+
+        action = classify_record_request_action(user_message)
+        if action == "self_note" or action == "none":
+            return False, None
+        if action == "memory_note":
+            content = extract_record_memory_text(user_message)
+            ctx.consumed_full_message = True
+            return True, ctx.finalize(
+                f"好，我记住这点: {content[:60]}",
+                kind="record_request_memory_note",
+            )
+        if action == "reminder_content":
+            handled, gen = await _update_reminder_content(
+                ctx=ctx,
+                user_message=user_message,
+            )
+            if handled:
+                return True, gen
+            return False, None
 
         # 设置/新增提醒走 _direct_create_reminder. 三态返回:
         status, when_text = await _direct_create_reminder(

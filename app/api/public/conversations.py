@@ -137,6 +137,7 @@ async def list_messages(
     conversation_id: str,
     limit: int = Query(default=100, le=100000),
     offset: int = 0,
+    include_metadata: bool = Query(default=True),
     _conv=Depends(require_conversation_owner),
 ):
     messages = await db.message.find_many(
@@ -151,7 +152,7 @@ async def list_messages(
             conversation_id=m.conversationId,
             role=m.role,
             content=m.content,
-            metadata=m.metadata,
+            metadata=m.metadata if include_metadata else None,
             created_at=str(m.createdAt),
         )
         for m in messages

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from collections.abc import AsyncGenerator
 from datetime import datetime as _dt
 from typing import Any, Awaitable, Callable
@@ -20,6 +21,24 @@ from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_stic
 from app.services.sticker import recommend_sticker
 
 logger = logging.getLogger(__name__)
+
+
+_DELAY_PREFACE_RE = re.compile(
+    r"^\s*(不好意思|抱歉|刚才|刚刚|我刚|才看到|才回过神|睡着了|眯过去了|"
+    r"刚醒|没看到消息|回复慢了)[，,\s]*(?:[^。！？!?]{0,28}"
+    r"(?:才看到|没看到|睡着|刚醒|回复慢|回得慢|耽误了|现在才回)[。！？!?，,\s]*)?"
+)
+
+
+def strip_duplicate_delay_preface(text: str) -> str:
+    """已有独立 delay explanation 时，移除主回复开头重复的迟复道歉/解释。"""
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    cleaned, n = _DELAY_PREFACE_RE.subn("", stripped, count=1)
+    if n:
+        return cleaned.strip()
+    return stripped
 
 
 def _format_received_at(iso_str: str) -> str:
@@ -145,7 +164,13 @@ async def emit_replies(
             delay_explain_offset = 1
 
     # §5 逐条 emoji / sticker / 推送
+    normal_reply_count = 0
     for i, reply_text in enumerate(replies):
+        if delay_explain_offset and not reply_is_fallback:
+            reply_text = strip_duplicate_delay_preface(reply_text)
+            if not reply_text:
+                continue
+
         added_emoji = False
         emoji_used: str | None = None
         if should_add_emoji(ai_arousal):
@@ -184,12 +209,12 @@ async def emit_replies(
             },
         )
 
-        if i > 0 or delay_explain_offset or reply_index_offset > 0:
+        if normal_reply_count > 0 or delay_explain_offset or reply_index_offset > 0:
             await asyncio.sleep(random.uniform(0.3, 0.8))
 
         data: dict = {
             "text": reply_text,
-            "index": reply_index_offset + i + delay_explain_offset,
+            "index": reply_index_offset + normal_reply_count + delay_explain_offset,
         }
         if sticker_url:
             data["sticker_url"] = sticker_url
@@ -198,4 +223,5 @@ async def emit_replies(
             # 前端可据此显示"重新回答"按钮或隐藏 emoji 等非必要装饰.
             data["reply_failed"] = True
         emitted_replies.append(data)
+        normal_reply_count += 1
         yield {"event": "reply", "data": json.dumps(data)}

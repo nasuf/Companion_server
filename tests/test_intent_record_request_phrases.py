@@ -92,6 +92,26 @@ def test_l3_recall_requires_explicit_oldness():
     assert is_explicit_l3_recall_query("第一次见面我说过什么")
 
 
+def test_record_request_action_classifier_separates_memory_from_reminder():
+    """RECORD_REQUEST 二级分流不能把所有“记”都当成提醒。"""
+    from app.services.chat.intent_handlers import classify_record_request_action
+
+    assert classify_record_request_action(
+        "你可以记住我会用书店、咖啡、散步这种东西给自己回血。"
+    ) == "memory_note"
+    assert classify_record_request_action(
+        "记一下：我处理关系时会倾向先保留余地"
+    ) == "memory_note"
+    assert classify_record_request_action("这句话我想记下来") == "self_note"
+    assert classify_record_request_action(
+        "你帮我把它压缩成一句我能贴在备忘录里的话"
+    ) == "self_note"
+    assert classify_record_request_action("你记得我家在哪吗") == "none"
+    assert classify_record_request_action("你还记得我喜欢的那个舞蹈家吗") == "none"
+    assert classify_record_request_action("明天十点半提醒我练手冲") == "reminder"
+    assert classify_record_request_action("提醒内容还是那句：练手冲") == "reminder_content"
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Prompt 结构守门 — 防 future 编辑误删 ontology hooks
 # ═══════════════════════════════════════════════════════════════════

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
@@ -201,7 +202,7 @@ async def resolve_pending_deletion(
 ) -> AsyncGenerator[dict, None]:
     """spec §5 step 3 + Phase 5: 若有待确认删除/改期/补全提醒时间, 根据用户回答执行或放弃.
 
-    pending.action ∈ {delete, reschedule, set_reminder}:
+    pending.action ∈ {delete, reschedule, set_reminder, update_reminder_content}:
     - delete / reschedule: 旧路径, 用户确认/放弃删除或改期
     - set_reminder: Round-3 工程扩展, 第一轮 RECORD_REQUEST 时间没说清存的 pending,
       第二轮根据用户回答 (给具体时间 / 取消 / 答非所问) 分发到 _handle_pending_set_reminder
@@ -215,6 +216,10 @@ async def resolve_pending_deletion(
         return
     if pending.get("action") == "cancel_reminder":
         async for evt in _handle_pending_cancel_reminder(user_message, pending, ctx):
+            yield evt
+        return
+    if pending.get("action") == "update_reminder_content":
+        async for evt in _handle_pending_update_reminder_content(user_message, pending, ctx):
             yield evt
         return
     candidates = pending.get("candidates") or []
@@ -517,6 +522,128 @@ async def _handle_pending_cancel_reminder(
     ctx.stopped = True
 
 
+async def _handle_pending_update_reminder_content(
+    user_message: str,
+    pending: dict,
+    ctx: PreflightCtx,
+) -> AsyncGenerator[dict, None]:
+    """修改提醒内容第二轮: 多 active reminder 时接住用户的数字选择。"""
+    from prisma import Json
+    from app.db import db
+    from app.services.chat.intent_handlers import extract_reminder_content_update
+    from app.services.memory.storage import repo as memory_repo
+    from app.services.reminder.scheduling import notify_reminder_changed
+
+    candidates = pending.get("candidates") or []
+    if not candidates:
+        await clear_pending_deletion(ctx.conversation_id)
+        return
+
+    msg_clean = user_message.strip().lower()
+    if msg_clean in _CANCEL_DENY_KEYWORDS or any(
+        kw in user_message for kw in ("不是", "保留", "别动", "算了", "不改")
+    ):
+        await clear_pending_deletion(ctx.conversation_id)
+        reply = "好的，那就不改了。"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    explicit_content = extract_reminder_content_update(user_message)
+    chosen_indices = _parse_user_choice(user_message, len(candidates))
+    if chosen_indices is None and len(candidates) == 1 and explicit_content:
+        chosen_indices = [0]
+    if chosen_indices is None and len(candidates) == 1 and not explicit_content:
+        chosen_indices = [0]
+    if not chosen_indices:
+        preview_list = "\n".join(
+            f"{i + 1}) {c.get('summary', '')[:60]}"
+            for i, c in enumerate(candidates[:5])
+        )
+        reply = f"我需要你说清楚改哪一个:\n{preview_list}\n回数字就行。"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+    if len(chosen_indices) != 1:
+        reply = "提醒内容一次先改一个，回一个数字就行。"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    choice_only = bool(re.fullmatch(r"\s*(?:第?\s*)?\d+\s*", user_message.strip()))
+    content = explicit_content or str(pending.get("summary") or "").strip()
+    if not content and len(candidates) == 1 and not choice_only:
+        content = user_message.strip()
+    if not content:
+        selected = candidates[chosen_indices[0]]
+        await save_pending_action(
+            ctx.conversation_id,
+            action="update_reminder_content",
+            candidates=[selected],
+            summary="",
+        )
+        reply = "好，提醒内容想改成哪一句?"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
+
+    selected = candidates[chosen_indices[0]]
+    summary = f"我让 AI 提醒: {content[:120]}"
+    action_data = dict(selected.get("action_data") or {})
+    action_data["summary"] = summary
+    await db.timetrigger.update(
+        where={"id": selected["trigger_id"]},
+        data={"actionData": Json(action_data)},
+    )
+    memory_id = selected.get("memory_id")
+    if memory_id:
+        try:
+            await memory_repo.update(
+                memory_id,
+                source=selected.get("memory_side") or "user",
+                content=summary,
+                summary=summary,
+            )
+        except Exception as e:
+            logger.warning(f"[REMINDER-CONTENT-PENDING] memory update failed: {e}")
+    await notify_reminder_changed(ctx.conversation_id, kind="updated")
+    await clear_pending_deletion(ctx.conversation_id)
+
+    reply = f"好，已把第 {chosen_indices[0] + 1} 个提醒内容改成「{content[:60]}」。"
+    ctx.last_short_circuit_reply = reply
+    for evt in await ctx.short_circuit_fn(
+        reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+        trace_id=ctx.tracer.safe_trace_id,
+    ):
+        yield evt
+    ctx.tracer.close()
+    ctx.stopped = True
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Round-3 工程扩展: RECORD_REQUEST 时间没说清, 第二轮反问后的 4 分支处理
 # ═══════════════════════════════════════════════════════════════════
@@ -537,11 +664,38 @@ async def _handle_pending_set_reminder(
     4. 完全没时间表达 (用户在聊别的) → 清 pending + 不阻塞主流程 (不 stop,
        让 user_message 走正常意图识别 + 回复)
     """
-    from app.services.chat.intent_handlers import classify_cancel_intent
+    from app.services.chat.intent_handlers import (
+        classify_cancel_intent,
+        classify_record_request_action,
+        extract_reminder_content_update,
+    )
     from app.services.reminder.scheduling import create_user_reminder
     from app.services.workspace.workspaces import get_active_workspace
 
     summary = pending.get("summary") or "(未指定事项)"
+
+    # 用户在反问时间之后补的是“提醒内容/文案”，这不是取消，也不应清掉 pending。
+    # 保留原待办状态，更新 summary 后继续要时间。
+    if classify_record_request_action(user_message) == "reminder_content":
+        content = extract_reminder_content_update(user_message)
+        if content:
+            from app.services.memory.interaction.deletion import save_pending_action
+            await save_pending_action(
+                ctx.conversation_id,
+                action="set_reminder",
+                summary=content[:200],
+            )
+            summary = content
+        reply = "好，提醒内容我按这句来。具体什么时候提醒你?"
+        ctx.last_short_circuit_reply = reply
+        for evt in await ctx.short_circuit_fn(
+            reply, ctx.conversation_id, ctx.agent_id, ctx.user_id,
+            trace_id=ctx.tracer.safe_trace_id,
+        ):
+            yield evt
+        ctx.tracer.close()
+        ctx.stopped = True
+        return
 
     # 分支 1: 取消语义 — pending set_reminder 还没建 trigger, 用 high+low 都接受
     # (避免用户回 "算了" 时被当成"答非所问")

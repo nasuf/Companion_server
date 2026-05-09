@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from app.services.memory.polarity import query_semantic_conflict_reasons
+from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
 from app.services.memory.retrieval.relevance import compute_display_score
 
 
@@ -246,6 +247,10 @@ def _is_ai_identity_memory(memory: dict[str, Any]) -> bool:
     )
 
 
+def _is_ai_self_memory(memory: dict[str, Any]) -> bool:
+    return memory.get("source") == "ai"
+
+
 def _keyword_overlap_count(query: str, memory_text: str) -> int:
     count = sum(1 for kw in _LEXICAL_KEYWORDS if kw in query and kw in memory_text)
     if contains_any(query, _NAME_QUERY_TERMS) and contains_any(
@@ -357,6 +362,14 @@ def rank_memory_candidate(
         elif _is_ai_identity_memory(memory):
             boost *= 0.50
             reasons.append("用户身份查询降权:AI身份记忆")
+
+    if asks_ai_stable_relation(query) and not exact_text_match:
+        if _is_ai_self_memory(memory):
+            boost += 0.55
+            reasons.append("AI自我记忆相关")
+        elif memory.get("source") == "user":
+            boost *= 0.60
+            reasons.append("AI自我查询降权:用户记忆")
 
     if (
         is_distress_or_safety_query(query)
