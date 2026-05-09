@@ -80,6 +80,19 @@ class TestReload:
         assert got.name == "特殊节日"
 
     @pytest.mark.asyncio
+    async def test_workday_swap_only_is_not_primary_holiday(self):
+        entries = [
+            HolidayEntry(date=date(2026, 2, 15), name="调休上班", type="custom", is_workday_swap=True),
+        ]
+        with patch(
+            "app.services.schedule_domain.holiday_cache.list_holidays",
+            return_value=entries,
+        ):
+            await holiday_cache.reload()
+
+        assert holiday_cache.get_by_date(date(2026, 2, 15)) is None
+
+    @pytest.mark.asyncio
     async def test_canonical_name_aliases_to_same_dates(self):
         """"春节假期" (metadata.canonical_name='春节') 让 "春节" 也能解析到所有假期日."""
         with patch(
@@ -124,6 +137,22 @@ class TestTimeServiceIntegration:
         assert info.name == "元旦"
         assert info.type == "legal"
         assert info.days_away == 0
+
+    @pytest.mark.asyncio
+    async def test_workday_swap_cache_hit_returns_none(self):
+        from app.services.schedule_domain.time_service import is_holiday
+
+        with patch(
+            "app.services.schedule_domain.holiday_cache.list_holidays",
+            return_value=SAMPLE_ENTRIES,
+        ):
+            await holiday_cache.reload()
+
+        with patch(
+            "app.services.schedule_domain.time_service._lunar_holiday_today",
+            return_value=None,
+        ):
+            assert is_holiday(date(2026, 2, 15)) is None
 
     @pytest.mark.asyncio
     async def test_cache_miss_falls_back_to_lunardate(self):

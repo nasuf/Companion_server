@@ -98,10 +98,11 @@ def is_loaded() -> bool:
 
 
 def get_by_date(d: date) -> HolidayEntry | None:
-    """Return the primary (first) holiday on `d`, or None.
+    """Return the primary holiday on `d`, or None.
 
-    "Primary" prefers non-workday-swap entries; multi-country on same day
-    falls back to insertion order.
+    Workday-swap rows are schedule modifiers, not holidays. If a date only
+    has swap rows (e.g. "调休上班"), callers should see no holiday and use
+    `is_workday_swap()` for the workday override.
     """
     with _lock:
         entries = _by_date.get(d)
@@ -111,7 +112,7 @@ def get_by_date(d: date) -> HolidayEntry | None:
     for e in entries:
         if not e.is_workday_swap:
             return e
-    return entries[0]
+    return None
 
 
 def is_workday_swap(d: date) -> bool:

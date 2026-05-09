@@ -21,7 +21,11 @@ from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.models import get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
-from app.services.schedule_domain.time_service import classify_day_kind, is_holiday
+from app.services.schedule_domain.time_service import (
+    classify_day_kind,
+    is_holiday,
+    is_workday_swap,
+)
 from app.services.schedule_domain.time_parser import (
     ParsedTime,
     has_explicit_time,
@@ -147,7 +151,8 @@ async def generate_daily_schedule(
 
     # 检测节日 + 当日属性
     holiday = is_holiday(date.date())
-    day_kind = classify_day_kind(date.date(), holiday)
+    workday_swap = is_workday_swap(date.date())
+    day_kind = classify_day_kind(date.date(), holiday, workday_swap=workday_swap)
 
     # Age / occupation 懒查: 调用方未传时从 DB 拉 agent
     if age is None or occupation is None:
@@ -208,18 +213,30 @@ async def generate_daily_schedule(
             logger.warning(f"LLM schedule generation failed, falling back to template: {e}")
 
     # 兜底: 无 life_overview 或 LLM 失败时用模板
-    schedule = _personalize_template(mbti, date, holiday=holiday)
+    schedule = _personalize_template(mbti, date, holiday=holiday, workday_swap=workday_swap)
     await _cache_schedule(agent_id, date, schedule)
     return schedule
 
 
-def _personalize_template(mbti: dict | None, date: datetime, *, holiday=None) -> list[dict]:
-    """根据 MBTI 派生信号微调基准模板。法定节日将 work 替换为 leisure/rest。"""
+def _personalize_template(
+    mbti: dict | None,
+    date: datetime,
+    *,
+    holiday=None,
+    workday_swap: bool | None = None,
+) -> list[dict]:
+    """根据 MBTI 派生信号微调基准模板。
+
+    法定节日将 work 替换为 leisure/rest；调休上班日按工作日处理。
+    """
     schedule = [slot.copy() for slot in _BASE_SCHEDULE_TEMPLATE]
     lively = mbti_signal(mbti, "E")
     planned = mbti_signal(mbti, "J")
 
-    is_weekend = date.weekday() >= 5
+    is_workday_swap_day = (
+        is_workday_swap(date.date()) if workday_swap is None else workday_swap
+    )
+    is_weekend = date.weekday() >= 5 and not is_workday_swap_day
     is_legal_holiday = holiday is not None and holiday.type == "legal"
 
     for slot in schedule:

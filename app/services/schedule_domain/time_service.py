@@ -195,17 +195,23 @@ def is_workday_swap(d: date | None = None) -> bool:
     return holiday_cache.is_workday_swap(d)
 
 
-def classify_day_kind(d: date, holiday_info: HolidayInfo | None = None) -> str:
+def classify_day_kind(
+    d: date,
+    holiday_info: HolidayInfo | None = None,
+    *,
+    workday_swap: bool | None = None,
+) -> str:
     """Spec Part 5 §3.2: 当日属性分类 — 节假日·X / 调休上班日 / 周末 / 工作日.
 
-    holiday_info 省略时自查一次; 调用方若已持有节假日对象可直接传入
+    holiday_info / workday_swap 省略时自查; 调用方若已持有结果可直接传入
     (作息生成热路径用这条避免重复 DB/cache 查询).
     """
     info = holiday_info if holiday_info is not None else is_holiday(d)
+    is_swap = is_workday_swap(d) if workday_swap is None else workday_swap
+    if is_swap and (info is None or info.name == "调休上班"):
+        return "调休上班日"
     if info is not None:
         return f"节假日·{info.name}"
-    if is_workday_swap(d):
-        return "调休上班日"
     if d.weekday() >= 5:
         return "周末"
     return "工作日"

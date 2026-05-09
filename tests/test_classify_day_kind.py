@@ -29,6 +29,19 @@ class TestClassifyDayKind:
         ):
             assert classify_day_kind(d) == "调休上班日"
 
+    def test_prefetched_workday_swap_marker_is_not_holiday(self):
+        """历史脏数据/调用方传入调休标记时, 仍归为调休上班日."""
+        d = date(2026, 10, 11)
+        info = HolidayInfo(name="调休上班", date=d, type="custom", days_away=0)
+        with patch(
+            "app.services.schedule_domain.time_service.is_holiday",
+        ) as mock_is_holiday, patch(
+            "app.services.schedule_domain.time_service.is_workday_swap",
+        ) as mock_is_workday_swap:
+            assert classify_day_kind(d, holiday_info=info, workday_swap=True) == "调休上班日"
+        mock_is_holiday.assert_not_called()
+        mock_is_workday_swap.assert_not_called()
+
     def test_weekend(self):
         d = date(2026, 4, 25)  # Saturday
         with patch(
@@ -59,10 +72,13 @@ class TestClassifyDayKind:
         assert kind == "节假日·国庆节"
 
     def test_prefetched_info_skips_lookup(self):
-        """传了 holiday_info 时不应再查 is_holiday (避免热路径重复 cache hit)."""
+        """传了预取结果时不应重复查询 holiday / workday-swap."""
         d = date(2026, 10, 1)
         with patch(
             "app.services.schedule_domain.time_service.is_holiday",
-        ) as mock_is_holiday:
-            classify_day_kind(d, holiday_info=_info("国庆节", d))
+        ) as mock_is_holiday, patch(
+            "app.services.schedule_domain.time_service.is_workday_swap",
+        ) as mock_is_workday_swap:
+            classify_day_kind(d, holiday_info=_info("国庆节", d), workday_swap=False)
         mock_is_holiday.assert_not_called()
+        mock_is_workday_swap.assert_not_called()
