@@ -22,7 +22,10 @@ from app.services.memory.storage.entity_repo import (
 )
 from app.services.memory.recording.extraction import extract_memories
 from app.services.memory.recording.filter import should_extract_memory
-from app.services.memory.recording.pre_filter import should_memorize
+from app.services.memory.recording.pre_filter import (
+    is_user_fact_acknowledgement,
+    should_memorize,
+)
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
 from app.services.memory.config import RECURRENCE_PERIODIC
 from app.services.memory.taxonomy import SUBCATEGORY_ALIASES
@@ -192,6 +195,11 @@ async def process_memory_pipeline(
     # Step 3: Store each memory with dedup and conflict check
     for mem in memories:
         summary = mem.get("summary", "")
+        if side == "ai" and is_user_fact_acknowledgement(summary):
+            logger.info(
+                f"[MEM-{side}] skipped user-fact acknowledgement: {summary[:40]}"
+            )
+            continue
         importance = mem.get("importance", 0.5)
         memory_type = mem.get("type")
         main_category = mem.get("main_category")

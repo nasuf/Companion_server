@@ -1,6 +1,7 @@
 """记忆消息过滤器测试。"""
 
 from app.services.memory.recording.filter import should_extract_memory
+from app.services.memory.recording.pre_filter import is_user_fact_acknowledgement
 
 
 class TestShouldExtractMemory:
@@ -54,3 +55,10 @@ class TestShouldExtractMemory:
         """Simple questions without self-info."""
         assert not should_extract_memory("你呢")
         assert not should_extract_memory("是吗")
+
+
+def test_ai_user_fact_acknowledgement_not_self_memory():
+    """AI 说“我记住了用户事实”不是 AI 自我长期记忆."""
+    assert is_user_fact_acknowledgement("我记住了用户的名字叫馒头，并觉得这个名字很可爱。")
+    assert is_user_fact_acknowledgement("好的，馒头。这个名字很可爱，我记住了。")
+    assert not is_user_fact_acknowledgement("我喜欢听德彪西，经常深夜单曲循环。")

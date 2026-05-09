@@ -168,11 +168,12 @@ def _patch_storage_chain(*, existing_l1: list | None = None, create_id: str = "n
         patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
         patch(f"{P}.generate_embedding", new_callable=AsyncMock, return_value=[0.1]) as mock_embed,
         patch(f"{P}.is_duplicate", new_callable=AsyncMock, return_value=False),
+        patch(f"{P}.memory_repo.update", new_callable=AsyncMock) as mock_update,
         patch(f"{P}.memory_repo.create", new_callable=AsyncMock, return_value=MagicMock(id=create_id)) as mock_create,
         patch(f"{P}.store_embedding", new_callable=AsyncMock),
         patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
     ):
-        yield {"embed": mock_embed, "create": mock_create}
+        yield {"embed": mock_embed, "create": mock_create, "update": mock_update}
 
 
 @pytest.mark.asyncio
@@ -231,3 +232,32 @@ class TestL1SingletonGate:
             )
         assert result == "new-id"
         mocks["create"].assert_called_once()
+
+    async def test_user_singleton_replaces_old_current_value(self):
+        """用户侧 L1 singleton 新事实应替换旧当前值，而不是被旧 L1 永久挡住."""
+        existing = MagicMock(id="old-name-id")
+        existing.content = "用户叫花卷"
+        existing.summary = "用户叫花卷"
+        with _patch_storage_chain(existing_l1=[existing]) as mocks:
+            result = await store_memory(
+                user_id="u1", content="用户叫馒头", level=1, importance=0.9,
+                main_category="身份", sub_category="姓名", source="user",
+            )
+        assert result == "new-id"
+        mocks["update"].assert_awaited_once()
+        assert mocks["update"].await_args.kwargs["isArchived"] is True
+        mocks["create"].assert_called_once()
+
+    async def test_user_singleton_same_text_still_blocked(self):
+        """同一条 singleton 文本重复写入仍应短路，避免无意义 churn."""
+        existing = MagicMock(id="old-name-id")
+        existing.content = "用户叫花卷"
+        existing.summary = "用户叫花卷"
+        with _patch_storage_chain(existing_l1=[existing]) as mocks:
+            result = await store_memory(
+                user_id="u1", content="用户叫花卷", level=1, importance=0.9,
+                main_category="身份", sub_category="姓名", source="user",
+            )
+        assert result is None
+        mocks["update"].assert_not_called()
+        mocks["create"].assert_not_called()

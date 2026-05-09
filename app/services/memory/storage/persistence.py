@@ -52,6 +52,19 @@ def normalize_memory_type(memory_type: str | None) -> str | None:
     return _TYPE_NORMALIZE_MAP.get(memory_type, memory_type)
 
 
+def _normalize_singleton_text(text: str | None) -> str:
+    """Normalize a singleton fact for cheap same-fact blocking.
+
+    This is not semantic understanding. The semantic signal is the structured
+    taxonomy tuple `(source, mainCategory, subCategory, level)`. Normalization
+    only avoids churn when the extractor emits the exact same singleton string
+    with minor punctuation or whitespace differences.
+    """
+    if not text:
+        return ""
+    return "".join(ch for ch in text if not ch.isspace() and ch not in "，。！？?~～,.、:：；;")
+
+
 async def log_memory_changelog(
     user_id: str,
     memory_id: str,
@@ -199,12 +212,49 @@ async def store_memory(
             take=1,
         )
         if existing:
-            logger.info(
-                f"L1 SINGLETON blocked: ({repo_source}, {taxonomy.main_category}/"
-                f"{taxonomy.sub_category}) 已有 L1 {existing[0].id}, 拒收新条目. "
-                f"new_content={content[:60]}"
-            )
-            return None
+            # 用户姓名是对话里高频纠正/重设的当前称呼。新的姓名事实已经过
+            # extraction 分类为 (user, 身份/姓名, L1)，因此应替换旧当前值，
+            # 而不是被旧 L1 永久挡住；完全相同文本仍短路，避免重复写入。
+            if repo_source == "user" and taxonomy.main_category == "身份" and taxonomy.sub_category == "姓名":
+                old_record = existing[0]
+                old_text = getattr(old_record, "summary", None) or getattr(old_record, "content", None)
+                if _normalize_singleton_text(old_text) != _normalize_singleton_text(summary or content):
+                    await memory_repo.update(
+                        old_record.id,
+                        source=repo_source,
+                        record=old_record,
+                        isArchived=True,
+                    )
+                    try:
+                        await log_memory_changelog(
+                            user_id,
+                            old_record.id,
+                            "singleton_replaced",
+                            old_value=getattr(old_record, "content", None),
+                            new_value=content,
+                            workspace_id=workspace_id,
+                        )
+                    except Exception:
+                        pass
+                    logger.info(
+                        f"L1 SINGLETON replaced: ({repo_source}, {taxonomy.main_category}/"
+                        f"{taxonomy.sub_category}) old_id={old_record.id} "
+                        f"new_content={content[:60]}"
+                    )
+                else:
+                    logger.info(
+                        f"L1 SINGLETON blocked: ({repo_source}, {taxonomy.main_category}/"
+                        f"{taxonomy.sub_category}) 已有 L1 {existing[0].id}, 拒收新条目. "
+                        f"new_content={content[:60]}"
+                    )
+                    return None
+            else:
+                logger.info(
+                    f"L1 SINGLETON blocked: ({repo_source}, {taxonomy.main_category}/"
+                    f"{taxonomy.sub_category}) 已有 L1 {existing[0].id}, 拒收新条目. "
+                    f"new_content={content[:60]}"
+                )
+                return None
 
     # Generate embedding
     embedding = await generate_embedding(content)

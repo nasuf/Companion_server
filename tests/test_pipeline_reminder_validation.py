@@ -33,6 +33,49 @@ def _mem_extraction(occur_time_iso: str | None, summary="提醒事项", recurren
 
 
 @pytest.mark.asyncio
+async def test_ai_side_skips_user_fact_acknowledgement_after_extraction():
+    """即使 AI extraction 误抽了“我记住了用户事实”，pipeline 也不写入 A 库."""
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    extraction = {
+        "memories": [{
+            "summary": "我记住了用户的名字叫馒头，并觉得这个名字很可爱。",
+            "importance": 0.8,
+            "type": "life",
+            "main_category": "生活",
+            "sub_category": "人际",
+            "occur_time": None,
+            "recurrence": None,
+        }],
+        "entities": [], "topics": [], "preferences": [],
+    }
+
+    with (
+        patch("app.services.memory.recording.pipeline.resolve_workspace_id",
+              new_callable=AsyncMock, return_value="ws1"),
+        patch("app.services.memory.recording.pipeline.should_extract_memory",
+              return_value=True),
+        patch("app.services.memory.recording.pipeline.should_memorize",
+              new_callable=AsyncMock, return_value=True),
+        patch("app.services.memory.recording.pipeline.extract_memories",
+              new_callable=AsyncMock, return_value=extraction),
+        patch("app.services.memory.recording.pipeline.has_explicit_time",
+              return_value=False),
+        patch("app.services.memory.recording.pipeline.store_memory",
+              new_callable=AsyncMock) as mock_store,
+    ):
+        stored = await process_memory_pipeline(
+            user_id="u1",
+            new_conversation="assistant: 好的，馒头。这个名字很可爱，我记住了。",
+            statement_time=_now(),
+            side="ai",
+        )
+
+    assert stored == []
+    mock_store.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reminder_with_past_occur_time_demoted_to_other():
     """sub_category="提醒" + occur_time<now → 降级"其他"."""
     from app.services.memory.recording.pipeline import process_memory_pipeline

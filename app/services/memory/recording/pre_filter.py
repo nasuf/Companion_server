@@ -37,10 +37,30 @@ _STABLE_AI_SELF_MEMORY_PATTERNS = [
     re.compile(r"(现在|如今).{0,16}(还是|仍然|依然).{0,24}(喜欢|爱|有感觉|怀念|会想起)"),
 ]
 
+_AI_ACK_VERBS_RE = re.compile(
+    r"(我.{0,4}(记住|记下|知道|明白|了解)了|我不会忘|我会记得)"
+)
+_USER_FACT_ACK_TERMS = (
+    "用户", "你", "你的", "你叫", "名字", "姓名", "这个名字",
+    "下次", "以后", "提醒你", "帮你",
+)
+
 
 def _has_stable_ai_self_memory(message: str) -> bool:
     """Detect AI-side stable preferences, long-running experiences, or views."""
     return any(pattern.search(message) for pattern in _STABLE_AI_SELF_MEMORY_PATTERNS)
+
+
+def is_user_fact_acknowledgement(message: str) -> bool:
+    """Detect assistant acknowledgements of user facts, not AI self-memory.
+
+    Examples: "我记住了用户的名字叫馒头", "这个名字很可爱，我记住了",
+    "我记下了，下次去试试". These are conversational commitments about the
+    user or future action, not stable facts about the AI.
+    """
+    if not _AI_ACK_VERBS_RE.search(message or ""):
+        return False
+    return any(term in message for term in _USER_FACT_ACK_TERMS)
 
 
 async def should_memorize(message: str, side: Side = "user") -> bool:
@@ -53,8 +73,11 @@ async def should_memorize(message: str, side: Side = "user") -> bool:
     Uses the smallest available model for speed. Expected latency: <500ms.
     On LLM failure we fail open (return True) so the big model decides.
     """
-    if side == "ai" and _has_stable_ai_self_memory(message):
-        return True
+    if side == "ai":
+        if is_user_fact_acknowledgement(message):
+            return False
+        if _has_stable_ai_self_memory(message):
+            return True
 
     try:
         template = await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])

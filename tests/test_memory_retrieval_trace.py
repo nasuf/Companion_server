@@ -329,6 +329,58 @@ def test_build_memory_retrieval_feedback_ignores_plain_negation():
     assert feedback is None
 
 
+def test_build_memory_retrieval_feedback_ignores_ambiguous_social_denial():
+    from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
+
+    feedback = build_memory_retrieval_feedback(
+        user_message="哪有，只是好奇而已嘛",
+        previous_assistant_reply="你是不是有点在意这个？",
+        previous_metadata={
+            "memory_retrieval_analysis": {
+                "likely_used_count": 1,
+                "items": [
+                    {
+                        "id": "m1",
+                        "text": "用户感到不被在乎",
+                        "likely_used": True,
+                    }
+                ],
+            },
+            "memory_retrievals": [
+                {"selected": [{"id": "m1", "text": "用户感到不被在乎"}]},
+            ],
+        },
+    )
+
+    assert feedback is None
+
+
+def test_build_memory_retrieval_feedback_ignores_ambiguous_denial_with_weak_context():
+    from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
+
+    feedback = build_memory_retrieval_feedback(
+        user_message="哪有，你想多了，只是好奇而已嘛",
+        previous_assistant_reply="你是不是有点在意这个？",
+        previous_metadata={
+            "memory_retrieval_analysis": {
+                "likely_used_count": 1,
+                "items": [
+                    {
+                        "id": "m1",
+                        "text": "用户感到不被在乎",
+                        "likely_used": True,
+                    }
+                ],
+            },
+            "memory_retrievals": [
+                {"selected": [{"id": "m1", "text": "用户感到不被在乎"}]},
+            ],
+        },
+    )
+
+    assert feedback is None
+
+
 def test_build_memory_retrieval_feedback_requires_retrieval_metadata():
     from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
 

@@ -558,11 +558,23 @@ async def clear_pending_deletion(conversation_id: str) -> None:
 
 
 _CONFIRM_KEYWORDS = {"对", "是", "是的", "确认", "删掉", "删吧", "好", "好的", "嗯", "ok", "yes"}
+_CONFIRM_DELETE_ACTION_RE = re.compile(r"(忘掉|忘记|删掉|删除|去掉|移除|别记|不要记)")
+_CONFIRM_DENY_RE = re.compile(r"(不删|别删|不要删|不用删|不删除|保留|算了|别动)")
+_SELF_FORGOT_RE = re.compile(r"^我.{0,3}忘(记|了)")
 
 
 def is_deletion_confirmed(user_reply: str) -> bool:
     """Check if user's reply is a confirmation to proceed with deletion."""
-    return user_reply.strip().lower() in _CONFIRM_KEYWORDS
+    reply = (user_reply or "").strip()
+    if not reply:
+        return False
+    if reply.lower() in _CONFIRM_KEYWORDS:
+        return True
+    if _CONFIRM_DENY_RE.search(reply):
+        return False
+    if _SELF_FORGOT_RE.search(reply):
+        return False
+    return bool(_CONFIRM_DELETE_ACTION_RE.search(reply))
 
 
 async def generate_deletion_confirmation_prompt(

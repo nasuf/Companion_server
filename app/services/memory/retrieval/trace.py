@@ -41,7 +41,7 @@ _CORRECTION_REGEXES: tuple[tuple[str, str, float], ...] = (
     ),
     (
         "没说过",
-        r"(?:我)?(?:没|没有)说过|(?:我)?(?:没|没有)说这个|没这回事|哪有|别乱说|不要乱说|别瞎说",
+        r"(?:我)?(?:没|没有)说过|(?:我)?(?:没|没有)说这个|没这回事|别乱说|不要乱说|别瞎说",
         0.86,
     ),
     (
@@ -49,9 +49,16 @@ _CORRECTION_REGEXES: tuple[tuple[str, str, float], ...] = (
         r"^(?:不是|不对|错了|不是这样|不是这个|不是那样)(?:啊|呀|啦|哦|噢|，|,|。|\.|！|!|\s|$)",
         0.72,
     ),
+    (
+        "泛否定",
+        r"^(?:哪有)(?:啊|呀|啦|嘛|，|,|。|\.|！|!|\s|$)",
+        0.68,
+    ),
     ("澄清", r"不是这个意思|我说的是|我是说|我的意思是", 0.78),
 )
+_AMBIGUOUS_CORRECTION_LABELS = {"泛否定"}
 _FEEDBACK_CONTEXT_TERMS = ("你", "记", "记忆", "记得", "说", "刚刚", "刚才", "回复", "上条")
+_AMBIGUOUS_FEEDBACK_CONTEXT_TERMS = ("记", "记忆", "记得", "说", "回复", "上条")
 
 
 def start_retrieval_trace() -> Token:
@@ -312,7 +319,14 @@ def build_memory_retrieval_feedback(
     if not matched_phrases:
         return None
 
-    if any(term in text for term in _FEEDBACK_CONTEXT_TERMS):
+    has_feedback_context = any(term in text for term in _FEEDBACK_CONTEXT_TERMS)
+    if (
+        set(matched_phrases).issubset(_AMBIGUOUS_CORRECTION_LABELS)
+        and not any(term in text for term in _AMBIGUOUS_FEEDBACK_CONTEXT_TERMS)
+    ):
+        return None
+
+    if has_feedback_context:
         confidence += 0.08
     if isinstance(analysis, dict) and (_safe_int(analysis.get("likely_used_count")) or 0) > 0:
         confidence += 0.06

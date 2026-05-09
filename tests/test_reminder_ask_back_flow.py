@@ -850,6 +850,51 @@ async def test_delete_single_candidate_emoji_confirm_works():
 
 
 @pytest.mark.asyncio
+async def test_delete_single_candidate_repeated_delete_phrase_confirms():
+    """pending 删除确认轮里，用户再次说“忘掉我的名字”应视为确认删除."""
+    from app.services.chat.preflight import resolve_pending_deletion
+
+    ctx = _make_preflight_ctx()
+    candidates = [
+        {"id": "m-name", "content": "用户叫花卷", "summary": "用户叫花卷", "source": "user"},
+    ]
+
+    async def _load(*_a, **_kw):
+        return {"action": "delete", "candidates": candidates,
+                "new_time": None, "summary": None}
+
+    target_seen = []
+    async def _execute(user_id, target_candidates, *, conversation_id=None):
+        target_seen.extend(c["id"] for c in target_candidates)
+        return 1
+
+    with (
+        patch("app.services.chat.preflight.load_pending_action", side_effect=_load),
+        patch("app.services.chat.preflight.execute_confirmed_deletion",
+              side_effect=_execute),
+        patch("app.services.chat.preflight.clear_pending_deletion",
+              new_callable=AsyncMock),
+        patch("app.services.chat.preflight.deletion_done_reply",
+              new_callable=AsyncMock, return_value="忘掉了"),
+    ):
+        async for _ in resolve_pending_deletion("忘掉我的名字", ctx):
+            pass
+
+    assert target_seen == ["m-name"]
+    assert ctx.stopped is True
+
+
+def test_deletion_confirmation_action_phrase_guards_self_forgot():
+    """确认轮允许“忘掉我的名字”，但不能把“我忘记了”误当确认删除."""
+    from app.services.memory.interaction.deletion import is_deletion_confirmed
+
+    assert is_deletion_confirmed("忘掉我的名字")
+    assert is_deletion_confirmed("我是说让你忘掉我的名字吧")
+    assert not is_deletion_confirmed("我忘记了")
+    assert not is_deletion_confirmed("不要删除")
+
+
+@pytest.mark.asyncio
 async def test_delete_undo_roundtrip():
     """Phase 0.2: 删除后 1h 内说"撤回" → restore 全部 snapshot."""
     from app.services.chat.preflight import resolve_recent_undo
