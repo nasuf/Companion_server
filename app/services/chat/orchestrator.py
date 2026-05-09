@@ -21,7 +21,6 @@ from prisma import Json
 
 from app.db import db
 from app.observability.events import (
-    EVT_CHAT_CRISIS_DETECTED,
     EVT_INTENT_SPLIT,
     EVT_MEMORY_CONTRADICTION,
     EVT_REPLY_EMITTED,
@@ -54,9 +53,7 @@ from app.services.schedule_domain.schedule import (
 )
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
-    check_banned_keywords,
     get_patience_prompt_instruction,
-    restore_patience_for_crisis_care,
 )
 from app.services.relationship.intimacy import get_relationship_stage
 from app.services.chat.intent_dispatcher import (
@@ -84,14 +81,9 @@ from app.services.chat.intent_handlers import (
     handle_schedule_adjust,
     handle_schedule_query,
 )
-from app.services.chat.crisis_state import (
-    clear_crisis_care_state,
-    load_crisis_care_state,
-    mark_crisis_care_active,
-)
+from app.services.chat.crisis_guard_phase import run_crisis_guard
 from app.services.chat.intent_replies import (
     delay_explanation_reply as _delay_explanation_reply,
-    crisis_followup_classify as _crisis_followup_classify,
     memory_weak_reply as _memory_weak_reply,
     memory_medium_reply as _memory_medium_reply,
     memory_strong_reply as _memory_strong_reply,
@@ -342,189 +334,6 @@ _DISTRESS_KEYWORDS = [
     "不好", "难受", "烦", "委屈", "崩溃", "糟糕", "不开心", "很累", "想哭",
     "好难过", "撑不住", "心情不好",
 ]
-
-# 危机安全网触发关键字 — 自伤 / 自杀 / 想结束生命的明确表达.
-# 设计:
-# - 子串匹配, 不调 LLM (热路径首位 + 不依赖 intent LLM 误判. 生产 trace
-#   2026-05-07 已确认 dashscope 把"我想跳楼"误归"询问当前状态" → AI 答"刚做完手工",
-#   彻底错过用户求救信号).
-# - 宁可"误命中"不可"漏命中". 误命中代价: 普通用户碰巧说到 "想死了" 这种夸张词,
-#   AI 用温柔语气接情绪 — 对正常用户**无伤害, 还是好回复**;
-#   漏命中代价: 用户求救被 AI 当作普通话题接过, 真出事**人命关天**.
-# - 不放泛化情绪词 (难过/累了/烦) — 那些是日常情绪表达, 用 _DISTRESS_KEYWORDS
-#   走 relational_context 路径, 不需要升级到 crisis 等级.
-# - 关键字只放"已定式"短语. 不放对话语境敏感的词 (e.g. "完了"/"结束了" 这些
-#   日常用法太广, 单独拿出来误命中率太高).
-_CRISIS_KEYWORDS = (
-    # 跳类
-    "跳楼", "跳河", "跳桥", "跳轨", "跳海",
-    # 自杀 / 自伤系列
-    "自杀", "自残", "自伤", "轻生",
-    # 不想活类 (对生命的负面想法)
-    "想死", "我去死", "去死算了", "不想活", "活不下去",
-    "活着没意思", "活着没意义", "活够了",
-    "结束生命", "结束自己", "了结自己", "了结我自己",
-    # 具体方式
-    "上吊", "割腕", "吃药自尽",
-    # 存在性消极
-    "不想存在", "消失算了", "消失就好",
-)
-
-
-_CRISIS_RELEASE_KEYWORDS = (
-    # Keep this fast path conservative. Broader phrases like "没事了/好多了"
-    # still go through the LLM release classifier with context.
-    "我安全", "安全了", "现在安全",
-    "不想死了", "不会自杀", "不会自残",
-    "刚才是气话", "只是气话", "刚才是开玩笑",
-)
-
-
-def _is_crisis_released(text: str) -> bool:
-    """用户明确表示已安全/缓和时, 解除近期危机 follow-up guard."""
-    if not text:
-        return False
-    return any(keyword in text for keyword in _CRISIS_RELEASE_KEYWORDS)
-
-
-def _is_crisis_message(text: str) -> bool:
-    """检测用户消息是否含自伤 / 极端念头 / 对生命负面想法等危机信号.
-
-    简单子串匹配, 不调 LLM (热路径首位 + 防 intent LLM 误判).
-    宁可误命中 (回复用温柔语气接情绪, 对正常用户无伤害)
-    也不可漏命中 (漏命中 → AI 离题, 用户求救被忽略 → 严重事故).
-    """
-    if not text:
-        return False
-    candidate = text
-    for release in _CRISIS_RELEASE_KEYWORDS:
-        candidate = candidate.replace(release, "")
-    return any(keyword in candidate for keyword in _CRISIS_KEYWORDS)
-
-
-_CRISIS_CARE_ASSISTANT_MARKERS = (
-    # Stable phrases emitted by intent.crisis_reply / intent.crisis_followup_reply.
-    "你现在安全吗",
-    "有没有伤害自己",
-    "伤害自己的冲动",
-    "我还在看着你刚才",
-    "没翻过去",
-    "我不会跳过",
-)
-
-_CRISIS_SOFT_CHECK_TURN_INTERVAL = 2
-_CRISIS_CHECK_ANNOYED_TERMS = (
-    "无聊的问题", "问这么多", "别问", "不要问", "烦不烦",
-    "烦死", "审问", "查户口",
-)
-
-
-def _is_crisis_care_assistant_message(text: str) -> bool:
-    if not text:
-        return False
-    return any(marker in text for marker in _CRISIS_CARE_ASSISTANT_MARKERS)
-
-
-def _crisis_followup_safety_check_mode(
-    *,
-    followup_status: str,
-    prior_release_count: int,
-    turns_since_safety_check: int,
-    user_message: str,
-) -> str:
-    """Return none/soft/annoyed for deterministic aftercare safety check cadence."""
-    if followup_status != "guard":
-        return "none"
-    due = (
-        prior_release_count > 0
-        or turns_since_safety_check >= _CRISIS_SOFT_CHECK_TURN_INTERVAL
-    )
-    if not due:
-        return "none"
-    if any(term in user_message for term in _CRISIS_CHECK_ANNOYED_TERMS):
-        return "annoyed"
-    return "soft"
-
-
-def _format_crisis_context(items: list[tuple[str, str]], max_items: int = 10) -> str:
-    recent = items[-max_items:]
-    lines = []
-    for role, content in recent:
-        speaker = "用户" if role == "user" else "AI"
-        lines.append(f"{speaker}: {content[:220]}")
-    return "\n".join(lines)
-
-
-def _recent_unresolved_crisis_message(
-    messages: list[dict],
-    *,
-    exclude_id: str | None = None,
-    window: int = 8,
-) -> str | None:
-    """Return the latest recent crisis user message unless later user text released it.
-
-    This is deliberately conversational-state logic, not intent detection. It
-    prevents a follow-up like "你开心吗" right after "我想死" from being routed as a
-    normal current-state question.
-    """
-    checked = 0
-    for msg in reversed(messages):
-        if exclude_id and msg.get("id") == exclude_id:
-            continue
-        if msg.get("role") != "user":
-            continue
-        content = str(msg.get("content") or "")
-        if not content:
-            continue
-        checked += 1
-        if checked > window:
-            return None
-        if _is_crisis_released(content):
-            return None
-        if _is_crisis_message(content):
-            return content
-    return None
-
-
-def _recent_unresolved_crisis_context(
-    messages: list[dict],
-    *,
-    exclude_id: str | None = None,
-    window: int = 24,
-) -> str | None:
-    """Infer unresolved crisis-care context from recent conversation history.
-
-    The active state may outlive the original "我想死" message.  We therefore
-    treat our own recent safety-care replies as stable state markers and still
-    let the LLM classifier decide guard/release.  This avoids routing a later
-    "陪我说说别的" turn through the ordinary chat path while the user is still
-    in aftercare.
-    """
-    checked = 0
-    seen_care_signal = False
-    collected_reversed: list[tuple[str, str]] = []
-    for msg in reversed(messages):
-        if exclude_id and msg.get("id") == exclude_id:
-            continue
-        role = msg.get("role")
-        if role not in {"user", "assistant"}:
-            continue
-        content = str(msg.get("content") or "").strip()
-        if not content:
-            continue
-        checked += 1
-        if checked > window:
-            break
-        if role == "user" and _is_crisis_message(content):
-            seen_care_signal = True
-        if role == "assistant" and _is_crisis_care_assistant_message(content):
-            seen_care_signal = True
-        collected_reversed.append((role, content))
-
-    if not seen_care_signal:
-        return None
-    return _format_crisis_context(list(reversed(collected_reversed)))
-
 
 def truncate_at_sentence(text: str, max_len: int) -> str:
     """截断至max_len内最后一个句子边界。"""
@@ -810,150 +619,36 @@ async def stream_chat_response(
                     user_message_id=user_message_id,
                 ))
 
-        # ── 危机安全网 (P0) ────────────────────────────────────────────
-        # 关键字命中 → force IntentType.CRISIS, 走 handle_crisis short-circuit
-        # (跟 conversation_end / current_state 等同模式). 早于 boundary + preflight + intent
-        # LLM, 因为:
-        # - 用户已被拉黑 / 正在辱骂时仍可能发出真实求救信号, 危机安全优先级必须
-        #   高于关系边界, 不能被 blacklist_reply / attack_reply 吞掉
-        # - 实证 LLM intent 把"我想跳楼"误归"询问当前状态" → AI 答"我在做手工",
-        #   彻底错过求救信号 (生产 trace 2026-05-07 已确认)
-        # - 用户在 pending 矛盾/删除状态突然说"我想跳楼", preflight 会把它当成
-        #   "对追问的回答" 走错分支
-        # 关键字层兜底是 must-have, 不能依赖 intent LLM 准确性.
-        # sub_intent_mode 跳过: 父调用已用整句判定过, 子片段不重复.
-        crisis_force_intent = (
-            (not sub_intent_mode) and _is_crisis_message(user_message)
+        # ── 危机守护 (P0) ──────────────────────────────────────────────
+        # 统一入口: 直接危机、含蓄危机、危机照护延续、release、边界跳过、
+        # 以及非攻击危机照护下的耐心恢复都由 crisis_guard_phase 决策。
+        # Orchestrator 只消费结构化结果，避免安全规则散落在多个分支。
+        crisis_decision = await run_crisis_guard(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            user_message=user_message,
+            sub_intent_mode=sub_intent_mode,
+            messages_dicts=messages_dicts,
+            user_message_id=user_message_id,
         )
-        recent_crisis_context: str | None = None
-        crisis_release_count = 0
-        crisis_aftercare_turn_count = 0
-        crisis_turns_since_safety_check = 0
-        crisis_followup_check_mode = "none"
-        crisis_care_turn = crisis_force_intent
-        if not crisis_force_intent and not sub_intent_mode:
-            crisis_state = await load_crisis_care_state(
-                conversation_id,
-                user_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-            )
-            if crisis_state is not None:
-                recent_crisis_context = str(crisis_state.get("context") or "").strip()
-                crisis_release_count = int(crisis_state.get("release_count") or 0)
-                crisis_aftercare_turn_count = int(
-                    crisis_state.get("aftercare_turn_count") or 0
-                )
-                crisis_turns_since_safety_check = int(
-                    crisis_state.get("turns_since_safety_check") or 0
-                )
-            else:
-                recent_crisis_context = _recent_unresolved_crisis_context(
-                    messages_dicts, exclude_id=user_message_id,
-                )
-            crisis_care_turn = recent_crisis_context is not None
-        crisis_followup_active = False
-        if recent_crisis_context is not None:
-            prior_release_count = crisis_release_count
-            next_aftercare_turn_count = crisis_aftercare_turn_count + 1
-            try:
-                followup_status = await _crisis_followup_classify(
-                    message=user_message,
-                    context=recent_crisis_context,
-                )
-            except Exception as e:
-                logger.warning(f"Crisis followup classifier failed, guarding: {e}")
-                followup_status = "guard"
-            if followup_status == "release":
-                crisis_release_count += 1
-                crisis_followup_active = crisis_release_count < 2
-                if crisis_followup_active:
-                    await mark_crisis_care_active(
-                        conversation_id,
-                        user_id,
-                        workspace_id=workspace_id,
-                        agent_id=agent_id,
-                        context=f"{recent_crisis_context}\n用户: {user_message}",
-                        source="followup_release_pending",
-                        release_count=crisis_release_count,
-                        aftercare_turn_count=next_aftercare_turn_count,
-                        turns_since_safety_check=0,
-                    )
-                else:
-                    await clear_crisis_care_state(
-                        conversation_id,
-                        user_id,
-                        workspace_id=workspace_id,
-                        agent_id=agent_id,
-                    )
-            else:
-                next_turns_since_safety_check = crisis_turns_since_safety_check + 1
-                crisis_followup_check_mode = _crisis_followup_safety_check_mode(
-                    followup_status=followup_status,
-                    prior_release_count=prior_release_count,
-                    turns_since_safety_check=next_turns_since_safety_check,
-                    user_message=user_message,
-                )
-                crisis_release_count = 0
-                crisis_followup_active = True
-                await mark_crisis_care_active(
-                    conversation_id,
-                    user_id,
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    context=f"{recent_crisis_context}\n用户: {user_message}",
-                    source="followup_guard",
-                    release_count=0,
-                    aftercare_turn_count=next_aftercare_turn_count,
-                    turns_since_safety_check=(
-                        0 if crisis_followup_check_mode != "none"
-                        else next_turns_since_safety_check
-                    ),
-                )
-        if crisis_force_intent:
-            await mark_crisis_care_active(
-                conversation_id,
-                user_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                context=f"用户: {user_message}",
-                source="direct_crisis",
-                release_count=0,
-                aftercare_turn_count=0,
-                turns_since_safety_check=0,
-            )
-        if crisis_force_intent:
-            logger.warning(
-                f"[CRISIS] keyword detected, forcing CRISIS intent (len={len(user_message)})",
-                extra={
-                    "event": EVT_CHAT_CRISIS_DETECTED,
-                    "user_message_len": len(user_message),
-                },
-            )
-        elif crisis_followup_active:
-            logger.warning(
-                "[CRISIS-FOLLOWUP] recent unresolved crisis detected, guarding reply",
-                extra={
-                    "event": EVT_CHAT_CRISIS_DETECTED,
-                    "user_message_len": len(user_message),
-                    "crisis_followup": True,
-                    "crisis_followup_check_mode": crisis_followup_check_mode,
-                },
-            )
+        crisis_force_intent = crisis_decision.crisis_force_intent
+        crisis_followup_active = crisis_decision.crisis_followup_active
+        crisis_care_turn = crisis_decision.crisis_care_turn
+        recent_crisis_context = crisis_decision.recent_crisis_context
+        crisis_followup_check_mode = crisis_decision.crisis_followup_check_mode
 
         # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
-        # Crisis / crisis-care 路径不跑 boundary: 安全照护优先于拉黑和攻击扣分。
-        # 若本轮没有边界攻击命中, 危机照护会恢复 patience, 避免危机解除后立刻
-        # 回到拉黑/冷处理；若仍在辱骂, 只跳过本轮边界回复, 不恢复耐心。
-        # 注意 release_count 达标并清掉 crisis state 的那一轮仍属于 crisis-care
-        # turn, 也必须跳过 boundary, 否则"我现在安全了"可能立刻触发拉黑回复。
         cached_patience = (
-            parent_patience if parent_patience is not None else PATIENCE_MAX
+            crisis_decision.cached_patience
+            if crisis_decision.cached_patience is not None
+            else (parent_patience if parent_patience is not None else PATIENCE_MAX)
         )
         recent_context_text = format_recent_context(
             messages_dicts, exclude_message_id=user_message_id,
         )
-        if not crisis_care_turn:
+        if not crisis_decision.skip_boundary:
             # boundary_ctx.recent_context 给 short-circuit handler 的 prompt {context} 用,
             # 排除当前 user_message_id 防 LLM 看到该消息两遍 ({message} + {context} 重复,
             # 实测 trace 2026-05-07 16:57 已确认).
@@ -978,13 +673,6 @@ async def stream_chat_response(
                 # blocked 故意跳 per CLAUDE.md §3.3) — finally 通过 boundary_ctx.stopped 跳过兜底.
                 return
             cached_patience = boundary_ctx.cached_patience
-        elif agent_id and not check_banned_keywords(user_message):
-            try:
-                cached_patience = await restore_patience_for_crisis_care(
-                    agent_id, user_id,
-                )
-            except Exception as e:
-                logger.warning(f"Crisis-care patience restore failed: {e}")
 
         # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
         # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
@@ -1042,6 +730,14 @@ async def stream_chat_response(
             "empty_prompt_sections_removed_count": None,
             "intent_fast_path": (
                 "current_state_phrase" if current_state_fast_path else None
+            ),
+            "crisis_guard_status": crisis_decision.status,
+            "crisis_guard_reason": crisis_decision.reason,
+            "crisis_semantic_checked": crisis_decision.semantic_checked,
+            "crisis_semantic_detected": crisis_decision.semantic_detected,
+            "crisis_boundary_attack_present": (
+                crisis_decision.boundary_attack_present
+                if crisis_decision.crisis_care_turn else None
             ),
         }
 
@@ -1109,10 +805,7 @@ async def stream_chat_response(
             detected_intent = IntentResult(
                 intent=IntentType.CRISIS,
                 confidence=1.0,
-                metadata={
-                    "followup": True,
-                    "safety_check_mode": crisis_followup_check_mode,
-                },
+                metadata=crisis_decision.intent_metadata,
             )
         elif current_state_fast_path:
             detected_intent = IntentResult(

@@ -238,6 +238,25 @@ async def crisis_reply(
     )
 
 
+async def crisis_message_classify(
+    *,
+    message: str,
+    context: str = "",
+) -> bool:
+    """Return True when an ambiguous message is semantically a crisis signal."""
+    result = await render_prompt(
+        "intent.crisis_message_classify",
+        {
+            "message": message,
+            "context": context or EMPTY_RECENT_CONTEXT,
+        },
+        lambda p: invoke_json(get_utility_model(), p),
+    )
+    if isinstance(result, dict):
+        return bool(result.get("is_crisis", False))
+    return False
+
+
 async def crisis_followup_reply(
     *,
     message: str,
@@ -876,6 +895,7 @@ __all__ = [
     "schedule_adjust_reply",
     "current_state_reply",
     "crisis_reply",
+    "crisis_message_classify",
     "crisis_followup_reply",
     "crisis_followup_classify",
     "deletion_confirm_reply",

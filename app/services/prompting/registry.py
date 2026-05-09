@@ -22,6 +22,7 @@ from app.services.prompting.defaults import (
     CONSISTENCY_RULES_PROMPT,
     CRISIS_FOLLOWUP_CLASSIFY_PROMPT,
     CRISIS_FOLLOWUP_REPLY_PROMPT,
+    CRISIS_MESSAGE_CLASSIFY_PROMPT,
     CRISIS_REPLY_PROMPT,
     CURRENT_STATE_REPLY_PROMPT,
     DAILY_SCHEDULE_PROMPT,
@@ -152,6 +153,13 @@ PROMPT_DEFINITIONS = [
         "依赖 LLM 意图分类 (实证 LLM 把'我想跳楼'误归'询问当前状态'). "
         "原则化措辞 (不举具体关键词反例) + 三步顺序 + 强禁项. 详见 defaults.py 注释.",
         CRISIS_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.crisis_message_classify", "危机消息语义判定", "聊天热路径", "聊天",
+        "【工程主导】关键词安全网没有命中但消息带告别/诀别/世界/最后一次等弱信号时,"
+        "在 boundary 前用小模型判定是否为真实危机。用于覆盖含蓄求救, 避免拉黑/低耐心"
+        "短路吞掉自杀隐喻。",
+        CRISIS_MESSAGE_CLASSIFY_PROMPT,
     ),
     PromptDefinition(
         "intent.crisis_followup_reply", "危机后续跟进回复", "聊天热路径", "聊天",

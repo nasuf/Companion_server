@@ -10,7 +10,7 @@
 我在忙乌龟但..."句式 — flag 路径治标不治本.
 
 修复 (B 路 — 当前架构):
-1. 关键字层 _is_crisis_message 检测求救信号 (跟 A 路一样)
+1. crisis_guard_phase 关键字层检测求救信号 (跟 A 路一样)
 2. 命中后 force `IntentType.CRISIS` (新增的第 10 个 intent)
 3. orchestrator 在 fetch 完后 dispatch 到 handle_crisis short-circuit handler
 4. handle_crisis 用专属 intent.crisis_reply prompt (defaults.py.CRISIS_REPLY_PROMPT)
@@ -32,13 +32,13 @@ import pytest
 
 
 # ════════════════════════════════════════════════════════════════════
-# § 1. 关键字检测 (_is_crisis_message) — 不变, 跟 A 路一致
+# § 1. crisis_guard_phase 关键字检测 — 不变, 跟 A 路一致
 # ════════════════════════════════════════════════════════════════════
 
 
 def test_crisis_keywords_detect_jump():
     """跳楼/跳河/跳桥/跳轨/跳海 全命中."""
-    from app.services.chat.orchestrator import _is_crisis_message
+    from app.services.chat.crisis_guard_phase import is_crisis_message as _is_crisis_message
 
     assert _is_crisis_message("我想跳楼")
     assert _is_crisis_message("不行了，要跳河")
@@ -49,7 +49,7 @@ def test_crisis_keywords_detect_jump():
 
 def test_crisis_keywords_detect_self_harm_terms():
     """自杀/自残/自伤/轻生 命中."""
-    from app.services.chat.orchestrator import _is_crisis_message
+    from app.services.chat.crisis_guard_phase import is_crisis_message as _is_crisis_message
 
     assert _is_crisis_message("我想自杀")
     assert _is_crisis_message("最近又自残了")
@@ -59,7 +59,7 @@ def test_crisis_keywords_detect_self_harm_terms():
 
 def test_crisis_keywords_detect_no_will_to_live():
     """想死/不想活/活不下去/活够了 命中."""
-    from app.services.chat.orchestrator import _is_crisis_message
+    from app.services.chat.crisis_guard_phase import is_crisis_message as _is_crisis_message
 
     assert _is_crisis_message("我想死")
     assert _is_crisis_message("真的不想活了")
@@ -73,7 +73,7 @@ def test_crisis_keywords_detect_no_will_to_live():
 
 def test_crisis_keywords_detect_within_longer_message():
     """关键字嵌在长消息里也命中 (生产 trace 真实场景)."""
-    from app.services.chat.orchestrator import _is_crisis_message
+    from app.services.chat.crisis_guard_phase import is_crisis_message as _is_crisis_message
 
     # 真实 case (2026-05-07 trace)
     assert _is_crisis_message("哎不开心，我想跳楼")
@@ -82,11 +82,14 @@ def test_crisis_keywords_detect_within_longer_message():
     # 混合上下文
     assert _is_crisis_message("今天工作太累了，真的想死，受不了了")
     assert _is_crisis_message("最近压力很大，活着没意思")
+    assert _is_crisis_message("没事，那就让我跟这个世界说再见吧，再见了")
+    assert _is_crisis_message("可能就是对这个世界的最后一次发泄吧")
+    assert _is_crisis_message("我想告别这个世界了")
 
 
 def test_crisis_keywords_negative_cases():
     """日常情绪/夸张说法不命中 (避免误命中)."""
-    from app.services.chat.orchestrator import _is_crisis_message
+    from app.services.chat.crisis_guard_phase import is_crisis_message as _is_crisis_message
 
     # 普通低落 — 走 _DISTRESS_KEYWORDS 不该升级到 crisis
     assert not _is_crisis_message("今天好累")
@@ -100,10 +103,21 @@ def test_crisis_keywords_negative_cases():
     assert not _is_crisis_message("")
     assert not _is_crisis_message("我不想死了")
     assert not _is_crisis_message("不会自杀，别担心")
+    assert not _is_crisis_message("再见，明天聊")
+    assert not _is_crisis_message("这是我最后一次提醒你")
+
+
+def test_semantic_crisis_check_gate_for_ambiguous_farewell():
+    from app.services.chat.crisis_guard_phase import should_semantic_crisis_check as _should_semantic_crisis_check
+
+    assert _should_semantic_crisis_check("可能这是最后一次跟你说话了，真的撑不住了")
+    assert _should_semantic_crisis_check("没事，我只是想跟一切说再见")
+    assert not _should_semantic_crisis_check("再见，明天聊")
+    assert not _should_semantic_crisis_check("这是我最后一次提醒你")
 
 
 def test_crisis_release_does_not_hide_new_crisis_signal():
-    from app.services.chat.orchestrator import _is_crisis_message
+    from app.services.chat.crisis_guard_phase import is_crisis_message as _is_crisis_message
 
     assert _is_crisis_message("我安全了但还是想死")
     assert _is_crisis_message("没事了但还是想死")
@@ -111,7 +125,7 @@ def test_crisis_release_does_not_hide_new_crisis_signal():
 
 
 def test_crisis_followup_safety_check_due_after_pending_release():
-    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
 
     assert _crisis_followup_safety_check_mode(
         followup_status="guard",
@@ -122,7 +136,7 @@ def test_crisis_followup_safety_check_due_after_pending_release():
 
 
 def test_crisis_followup_safety_check_due_after_guard_turn_interval():
-    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
 
     assert _crisis_followup_safety_check_mode(
         followup_status="guard",
@@ -133,7 +147,7 @@ def test_crisis_followup_safety_check_due_after_guard_turn_interval():
 
 
 def test_crisis_followup_safety_check_annoyed_mode():
-    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
 
     assert _crisis_followup_safety_check_mode(
         followup_status="guard",
@@ -144,7 +158,7 @@ def test_crisis_followup_safety_check_annoyed_mode():
 
 
 def test_crisis_followup_safety_check_not_due_on_release():
-    from app.services.chat.orchestrator import _crisis_followup_safety_check_mode
+    from app.services.chat.crisis_guard_phase import crisis_followup_safety_check_mode as _crisis_followup_safety_check_mode
 
     assert _crisis_followup_safety_check_mode(
         followup_status="release",
@@ -253,7 +267,7 @@ async def test_crisis_care_state_is_scoped_by_workspace_and_agent(monkeypatch):
 
 
 def test_recent_unresolved_crisis_detects_followup_state():
-    from app.services.chat.orchestrator import _recent_unresolved_crisis_message
+    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_message as _recent_unresolved_crisis_message
 
     messages = [
         {"id": "m1", "role": "user", "content": "我想死"},
@@ -265,7 +279,7 @@ def test_recent_unresolved_crisis_detects_followup_state():
 
 
 def test_recent_unresolved_crisis_released_by_user_safety_message():
-    from app.services.chat.orchestrator import _recent_unresolved_crisis_message
+    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_message as _recent_unresolved_crisis_message
 
     messages = [
         {"id": "m1", "role": "user", "content": "我想死"},
@@ -279,7 +293,7 @@ def test_recent_unresolved_crisis_released_by_user_safety_message():
 
 def test_recent_unresolved_crisis_context_survives_aftercare_turns():
     """危机陪伴期不能只靠原始危机词窗口；assistant 安全追问也是状态锚点。"""
-    from app.services.chat.orchestrator import _recent_unresolved_crisis_context
+    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_context as _recent_unresolved_crisis_context
 
     messages = [
         {"id": "m1", "role": "user", "content": "我想死"},
@@ -304,7 +318,7 @@ def test_recent_unresolved_crisis_context_survives_aftercare_turns():
 
 def test_recent_unresolved_crisis_context_not_released_by_one_safety_message():
     """单句安全/好转不直接解除 aftercare；仍交给连续 release 计数处理。"""
-    from app.services.chat.orchestrator import _recent_unresolved_crisis_context
+    from app.services.chat.crisis_guard_phase import recent_unresolved_crisis_context as _recent_unresolved_crisis_context
 
     messages = [
         {"id": "m1", "role": "user", "content": "我想死"},
@@ -320,6 +334,84 @@ def test_recent_unresolved_crisis_context_not_released_by_one_safety_message():
     assert "我安全了" in context
 
 
+@pytest.mark.asyncio
+async def test_crisis_guard_semantic_crisis_owns_boundary_and_patience_decision():
+    """含蓄危机由 crisis_guard_phase 统一升级、跳过边界并恢复耐心。"""
+    from app.services.chat import crisis_guard_phase as phase
+
+    mark_active = AsyncMock()
+    restore = AsyncMock(return_value=72)
+    semantic = AsyncMock(return_value=True)
+
+    with (
+        patch.object(phase, "mark_crisis_care_active", mark_active),
+        patch.object(phase, "restore_patience_for_crisis_care", restore),
+    ):
+        decision = await phase.run_crisis_guard(
+            conversation_id="conv1",
+            user_id="user1",
+            workspace_id=None,
+            agent_id="agent1",
+            user_message="可能这是最后一次跟你说话了，真的撑不住了",
+            sub_intent_mode=False,
+            messages_dicts=[],
+            user_message_id=None,
+            semantic_classify_fn=semantic,
+        )
+
+    assert decision.status == "semantic_crisis"
+    assert decision.crisis_force_intent is True
+    assert decision.skip_boundary is True
+    assert decision.should_restore_patience is True
+    assert decision.cached_patience == 72
+    semantic.assert_awaited_once()
+    mark_active.assert_awaited_once()
+    restore.assert_awaited_once_with("agent1", "user1")
+
+
+@pytest.mark.asyncio
+async def test_crisis_guard_followup_attack_skips_boundary_without_restoring_patience():
+    """危机照护期继续辱骂时仍走危机 follow-up, 但不恢复耐心。"""
+    from app.services.chat import crisis_guard_phase as phase
+
+    load_state = AsyncMock(return_value={
+        "context": "用户: 我想跳楼\nAI: 我在这儿。",
+        "release_count": 0,
+        "aftercare_turn_count": 1,
+        "turns_since_safety_check": 1,
+    })
+    mark_active = AsyncMock()
+    restore = AsyncMock(return_value=72)
+    followup = AsyncMock(return_value="guard")
+
+    with (
+        patch.object(phase, "load_crisis_care_state", load_state),
+        patch.object(phase, "mark_crisis_care_active", mark_active),
+        patch.object(phase, "restore_patience_for_crisis_care", restore),
+    ):
+        decision = await phase.run_crisis_guard(
+            conversation_id="conv1",
+            user_id="user1",
+            workspace_id=None,
+            agent_id="agent1",
+            user_message="傻逼",
+            sub_intent_mode=False,
+            messages_dicts=[],
+            user_message_id=None,
+            followup_classify_fn=followup,
+        )
+
+    assert decision.status == "crisis_followup"
+    assert decision.crisis_followup_active is True
+    assert decision.skip_boundary is True
+    assert decision.boundary_attack_present is True
+    assert decision.should_restore_patience is False
+    assert decision.crisis_followup_check_mode == "soft"
+    followup.assert_awaited_once()
+    mark_active.assert_awaited_once()
+    restore.assert_not_awaited()
+
+
 # ════════════════════════════════════════════════════════════════════
 # § 2. CRISIS_REPLY_PROMPT 内容验收
 # ════════════════════════════════════════════════════════════════════
@@ -328,7 +420,7 @@ def test_recent_unresolved_crisis_context_not_released_by_one_safety_message():
 def test_crisis_reply_prompt_uses_principle_phrasing_not_specific_keywords():
     """prompt 不该直接写"跳楼/自杀" 等具体关键字 — 防 LLM 反向参考.
 
-    设计原则: 关键字只放 orchestrator 的 _CRISIS_KEYWORDS 触发判定层,
+    设计原则: 关键字只放 crisis_guard_phase 触发判定层,
     进了 prompt 后 LLM 只看"该怎么回 / 不该怎么回".
     """
     from app.services.prompting import defaults
@@ -462,6 +554,12 @@ def test_crisis_followup_classify_prompt_registered_in_registry():
     from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 
     assert "intent.crisis_followup_classify" in PROMPT_DEFINITION_MAP
+
+
+def test_crisis_message_classify_prompt_registered_in_registry():
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    assert "intent.crisis_message_classify" in PROMPT_DEFINITION_MAP
 
 
 def test_old_crisis_safety_hint_prompt_removed():
@@ -677,6 +775,23 @@ async def test_crisis_followup_classify_defaults_invalid_to_guard():
 
 
 @pytest.mark.asyncio
+async def test_crisis_message_classify_parses_true():
+    from app.services.chat.intent_replies import crisis_message_classify
+
+    with patch(
+        "app.services.chat.intent_replies.render_prompt",
+        new=AsyncMock(return_value={"is_crisis": True, "reason": "诀别"}),
+    ) as mock_render:
+        is_crisis = await crisis_message_classify(
+            message="可能这是最后一次跟你说话了，真的撑不住了",
+            context="用户很低落",
+        )
+
+    assert is_crisis is True
+    assert mock_render.await_args.args[0] == "intent.crisis_message_classify"
+
+
+@pytest.mark.asyncio
 async def test_handle_crisis_uses_static_fallback_on_llm_failure():
     """LLM 抛异常 → handle_crisis 必须用静态兜底文案, 不能让 crisis 漏掉.
 
@@ -787,9 +902,10 @@ async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked():
         patch("app.services.runtime_config.reset_current_agent"),
         patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
         patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
-        patch.object(orch_mod, "mark_crisis_care_active", new_callable=AsyncMock),
-        patch.object(orch_mod, "restore_patience_for_crisis_care",
-                     new_callable=AsyncMock, return_value=70) as mock_restore,
+        patch("app.services.chat.crisis_guard_phase.mark_crisis_care_active",
+              new_callable=AsyncMock),
+        patch("app.services.chat.crisis_guard_phase.restore_patience_for_crisis_care",
+              new_callable=AsyncMock, return_value=70) as mock_restore,
         patch(
             "app.services.memory.retrieval.safety.retrieve_crisis_memories",
             new_callable=AsyncMock,
@@ -826,6 +942,144 @@ async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_farewell_crisis_bypasses_boundary_when_blocked():
+    """拉黑态下的告别世界隐喻也必须命中 crisis, 不能走 blacklist_reply。"""
+    from app.services.chat import orchestrator as orch_mod
+
+    agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
+    conv = SimpleNamespace(workspaceId=None)
+    crisis_calls = []
+
+    async def _boundary_should_not_run(_ctx):
+        raise AssertionError("farewell crisis must bypass boundary")
+        if False:
+            yield {}
+
+    async def _fake_handle_crisis(message, ctx, **kwargs):
+        crisis_calls.append((message, ctx, kwargs))
+        yield {"event": "reply", "data": json.dumps({"text": "别走，我在"})}
+
+    with (
+        patch.object(orch_mod, "db", new=MagicMock(
+            message=MagicMock(
+                create=AsyncMock(return_value=SimpleNamespace(id="msg1")),
+                find_many=AsyncMock(return_value=[]),
+            ),
+            conversation=MagicMock(find_unique=AsyncMock(return_value=conv)),
+        )),
+        patch("app.services.runtime_config.bind_agent_context",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.runtime_config.reset_current_agent"),
+        patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
+        patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
+        patch("app.services.chat.crisis_guard_phase.mark_crisis_care_active",
+              new_callable=AsyncMock),
+        patch("app.services.chat.crisis_guard_phase.restore_patience_for_crisis_care",
+              new_callable=AsyncMock, return_value=70),
+        patch(
+            "app.services.memory.retrieval.safety.retrieve_crisis_memories",
+            new_callable=AsyncMock,
+            return_value={"memories": []},
+        ),
+        patch(
+            "app.services.portrait.get_latest_portrait",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch.object(orch_mod, "handle_crisis", side_effect=_fake_handle_crisis),
+        patch.object(orch_mod, "_fire_background", side_effect=_close_background_arg),
+    ):
+        mock_tracer = MagicMock(
+            trace_id=None, is_active=False, safe_trace_id=None,
+            close=MagicMock(),
+        )
+        mock_tracer_cls.return_value.enter.return_value = mock_tracer
+        mock_tracer_cls.return_value.attach_to_parent.return_value = mock_tracer
+
+        events = await _drain(orch_mod.stream_chat_response(
+            conversation_id="conv1",
+            user_message="没事，那就让我跟这个世界说再见吧，再见了",
+            agent=agent,
+            user_id="user1",
+            save_user_message=False,
+        ))
+
+    assert events
+    assert crisis_calls
+    assert crisis_calls[0][0] == "没事，那就让我跟这个世界说再见吧，再见了"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_semantic_crisis_bypasses_boundary_when_blocked():
+    """关键词未直接命中但语义判定为 crisis 时, 拉黑态也不能吞掉。"""
+    from app.services.chat import orchestrator as orch_mod
+
+    agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
+    conv = SimpleNamespace(workspaceId=None)
+    crisis_calls = []
+
+    async def _boundary_should_not_run(_ctx):
+        raise AssertionError("semantic crisis must bypass boundary")
+        if False:
+            yield {}
+
+    async def _fake_handle_crisis(message, ctx, **kwargs):
+        crisis_calls.append((message, ctx, kwargs))
+        yield {"event": "reply", "data": json.dumps({"text": "先别走"})}
+
+    with (
+        patch.object(orch_mod, "db", new=MagicMock(
+            message=MagicMock(
+                create=AsyncMock(return_value=SimpleNamespace(id="msg1")),
+                find_many=AsyncMock(return_value=[]),
+            ),
+            conversation=MagicMock(find_unique=AsyncMock(return_value=conv)),
+        )),
+        patch("app.services.runtime_config.bind_agent_context",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.runtime_config.reset_current_agent"),
+        patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
+        patch("app.services.chat.crisis_guard_phase.crisis_message_classify",
+              new_callable=AsyncMock, return_value=True) as mock_classify,
+        patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
+        patch("app.services.chat.crisis_guard_phase.mark_crisis_care_active",
+              new_callable=AsyncMock),
+        patch("app.services.chat.crisis_guard_phase.restore_patience_for_crisis_care",
+              new_callable=AsyncMock, return_value=70),
+        patch(
+            "app.services.memory.retrieval.safety.retrieve_crisis_memories",
+            new_callable=AsyncMock,
+            return_value={"memories": []},
+        ),
+        patch(
+            "app.services.portrait.get_latest_portrait",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch.object(orch_mod, "handle_crisis", side_effect=_fake_handle_crisis),
+        patch.object(orch_mod, "_fire_background", side_effect=_close_background_arg),
+    ):
+        mock_tracer = MagicMock(
+            trace_id=None, is_active=False, safe_trace_id=None,
+            close=MagicMock(),
+        )
+        mock_tracer_cls.return_value.enter.return_value = mock_tracer
+        mock_tracer_cls.return_value.attach_to_parent.return_value = mock_tracer
+
+        events = await _drain(orch_mod.stream_chat_response(
+            conversation_id="conv1",
+            user_message="可能这是最后一次跟你说话了，真的撑不住了",
+            agent=agent,
+            user_id="user1",
+            save_user_message=False,
+        ))
+
+    assert events
+    mock_classify.assert_awaited_once()
+    assert crisis_calls
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary():
     """危机照护仍活跃时, 用户辱骂也必须先走 follow-up 守护而不是攻击回复。"""
     from app.services.chat import orchestrator as orch_mod
@@ -855,19 +1109,21 @@ async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary():
               new_callable=AsyncMock, return_value=None),
         patch("app.services.runtime_config.reset_current_agent"),
         patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
-        patch.object(orch_mod, "load_crisis_care_state", new_callable=AsyncMock,
-                     return_value={
-                         "context": "用户: 我想跳楼\nAI: 我在这儿。",
-                         "release_count": 0,
-                         "aftercare_turn_count": 1,
-                         "turns_since_safety_check": 1,
-                     }),
-        patch.object(orch_mod, "_crisis_followup_classify",
-                     new_callable=AsyncMock, return_value="guard"),
-        patch.object(orch_mod, "mark_crisis_care_active", new_callable=AsyncMock),
+        patch("app.services.chat.crisis_guard_phase.load_crisis_care_state",
+              new_callable=AsyncMock,
+              return_value={
+                  "context": "用户: 我想跳楼\nAI: 我在这儿。",
+                  "release_count": 0,
+                  "aftercare_turn_count": 1,
+                  "turns_since_safety_check": 1,
+              }),
+        patch("app.services.chat.crisis_guard_phase.crisis_followup_classify",
+              new_callable=AsyncMock, return_value="guard"),
+        patch("app.services.chat.crisis_guard_phase.mark_crisis_care_active",
+              new_callable=AsyncMock),
         patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
-        patch.object(orch_mod, "restore_patience_for_crisis_care",
-                     new_callable=AsyncMock, return_value=70) as mock_restore,
+        patch("app.services.chat.crisis_guard_phase.restore_patience_for_crisis_care",
+              new_callable=AsyncMock, return_value=70) as mock_restore,
         patch(
             "app.services.memory.retrieval.safety.retrieve_crisis_memories",
             new_callable=AsyncMock,
@@ -936,19 +1192,21 @@ async def test_orchestrator_crisis_release_completion_still_bypasses_boundary():
               new_callable=AsyncMock, return_value=None),
         patch("app.services.runtime_config.reset_current_agent"),
         patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
-        patch.object(orch_mod, "load_crisis_care_state", new_callable=AsyncMock,
-                     return_value={
-                         "context": "用户: 我想跳楼\nAI: 我在这儿。",
-                         "release_count": 1,
-                         "aftercare_turn_count": 3,
-                         "turns_since_safety_check": 0,
-                     }),
-        patch.object(orch_mod, "_crisis_followup_classify",
-                     new_callable=AsyncMock, return_value="release"),
-        patch.object(orch_mod, "clear_crisis_care_state", new_callable=AsyncMock),
+        patch("app.services.chat.crisis_guard_phase.load_crisis_care_state",
+              new_callable=AsyncMock,
+              return_value={
+                  "context": "用户: 我想跳楼\nAI: 我在这儿。",
+                  "release_count": 1,
+                  "aftercare_turn_count": 3,
+                  "turns_since_safety_check": 0,
+              }),
+        patch("app.services.chat.crisis_guard_phase.crisis_followup_classify",
+              new_callable=AsyncMock, return_value="release"),
+        patch("app.services.chat.crisis_guard_phase.clear_crisis_care_state",
+              new_callable=AsyncMock),
         patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
-        patch.object(orch_mod, "restore_patience_for_crisis_care",
-                     new_callable=AsyncMock, return_value=70) as mock_restore,
+        patch("app.services.chat.crisis_guard_phase.restore_patience_for_crisis_care",
+              new_callable=AsyncMock, return_value=70) as mock_restore,
         patch.object(orch_mod, "detect_intent_unified", new_callable=AsyncMock,
                      return_value=IntentResult(
                          intent=IntentType.CONVERSATION_END,
@@ -1323,24 +1581,24 @@ def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fet
     """危机余波守护必须早于 current_state 和完整 fetch。"""
     import inspect
     from app.services.chat import orchestrator as orch_mod
+    from app.services.chat import crisis_guard_phase
 
     src = inspect.getsource(orch_mod.stream_chat_response)
-    followup_pos = src.find("recent_crisis_context:")
-    classify_pos = src.find("_crisis_followup_classify")
+    guard_src = inspect.getsource(crisis_guard_phase.run_crisis_guard)
+    guard_pos = src.find("run_crisis_guard(")
     fast_path_pos = src.find("current_state_fast_path =")
     dispatch_pos = src.find("if detected_intent.intent == IntentType.CRISIS")
     main_fetch_pos = src.find("fetched = await fetch_task")
 
-    assert followup_pos != -1
-    assert classify_pos != -1
+    assert guard_pos != -1
     assert fast_path_pos != -1
     assert dispatch_pos != -1
     assert main_fetch_pos != -1
-    assert followup_pos < fast_path_pos
-    assert classify_pos < fast_path_pos
+    assert guard_pos < fast_path_pos
     assert dispatch_pos < main_fetch_pos
     assert "and not crisis_care_turn" in src
     assert "handle_crisis_followup" in src
-    assert "_crisis_followup_classify" in src
-    assert "crisis_release_count < 2" in src
-    assert "followup_release_pending" in src
+    assert "crisis_followup_classify" in guard_src
+    assert "release_count < 2" in guard_src
+    assert "followup_release_pending" in guard_src
+    assert "decision.skip_boundary = decision.crisis_care_turn" in guard_src
