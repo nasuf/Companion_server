@@ -101,6 +101,17 @@ _USER_IDENTITY_SUBCATEGORIES: tuple[str, ...] = (
     "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
     "体型", "居住", "其他",
 )
+_PROFILE_QUERY_SUBCATEGORIES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("多大", "几岁", "年龄", "哪年出生", "出生年份", "出生"), ("年龄",)),
+    (("生日", "出生日期"), ("生日", "年龄")),
+    (("叫什么", "叫啥", "名字", "姓名", "是谁"), ("姓名",)),
+    (("做什么", "干什么", "职业", "工作"), ("职业/与经济",)),
+    (("哪里人", "家乡"), ("现居地", "居住", "其他")),
+    (("住哪", "住址", "现居地"), ("现居地", "居住")),
+    (("学历", "学校", "大学", "专业"), ("教育背景",)),
+    (("性别",), ("性别",)),
+    (("身高",), ("身高",)),
+)
 
 _EXACT_TEXT_MATCH_FLOOR = 1.20
 _HIGH_SIMILARITY_THRESHOLD = 0.86
@@ -240,6 +251,16 @@ def _is_user_identity_memory(memory: dict[str, Any]) -> bool:
     )
 
 
+def _is_matching_user_profile_context(memory: dict[str, Any], query: str) -> bool:
+    if not _is_user_identity_memory(memory):
+        return False
+    sub_category = str(memory.get("sub_category") or "")
+    for query_terms, sub_categories in _PROFILE_QUERY_SUBCATEGORIES:
+        if contains_any(query, query_terms) and sub_category in sub_categories:
+            return True
+    return False
+
+
 def _is_ai_identity_memory(memory: dict[str, Any]) -> bool:
     return (
         memory.get("source") == "ai"
@@ -371,9 +392,12 @@ def rank_memory_candidate(
         if _is_ai_self_memory(memory):
             boost += 0.55
             reasons.append("AI自我记忆相关")
-        elif ai_profile_query and _is_user_identity_memory(memory):
-            boost += 0.25
+        elif ai_profile_query and _is_matching_user_profile_context(memory, query):
+            boost *= 0.75
             reasons.append("AI资料查询:用户同类资料")
+        elif ai_profile_query and _is_user_identity_memory(memory):
+            boost *= 0.35
+            reasons.append("AI资料查询降权:非同类用户身份")
         elif memory.get("source") == "user":
             boost *= 0.60
             reasons.append("AI自我查询降权:用户记忆")

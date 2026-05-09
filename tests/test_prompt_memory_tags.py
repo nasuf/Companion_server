@@ -92,6 +92,36 @@ async def test_memory_section_groups_task_and_safety_memories():
 
 
 @pytest.mark.asyncio
+async def test_memory_section_separates_user_profile_context_from_answer_facts():
+    from app.services.chat.prompt_builder import _build_memory_section
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    section = await _build_memory_section([
+        ClassifiedMemory(
+            id="user-age",
+            text="用户28岁",
+            relevance="medium",
+            score=0.6,
+            source="user",
+            rank_reasons=["AI资料查询:用户同类资料"],
+        ),
+        ClassifiedMemory(
+            id="ai-age",
+            text="我今年24岁",
+            relevance="strong",
+            score=0.9,
+            source="ai",
+        ),
+    ])
+
+    assert section is not None
+    assert "【用户同类资料（仅用于避免重复追问）】" in section
+    assert "不要把它当成你的资料或答案依据" in section
+    assert "【你自己的相关经历 / 人设】" in section
+    assert section.index("用户28岁") < section.index("我今年24岁")
+
+
+@pytest.mark.asyncio
 async def test_memory_section_declares_fact_precedence_over_history_and_l3():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
@@ -153,6 +183,34 @@ async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
     assert "反幻觉硬约束" in diagnostics["empty_prompt_sections_removed"]
     assert "对话一致性" in diagnostics["empty_prompt_sections_removed"]
     assert "你记得的事情" in diagnostics["empty_prompt_sections_removed"]
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_includes_agent_age_from_identity():
+    from app.services.chat.prompt_builder import build_system_prompt
+
+    async def _prompt_text(key: str) -> str:
+        return {
+            "chat.system_base": "像朋友一样回复。",
+            "chat.consistency_rules": "。",
+            "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
+            "chat.anti_hallucination_hard_rule": "。",
+        }[key]
+
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text",
+        AsyncMock(side_effect=_prompt_text),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="Hia", age=24, values={"gender": "female"}),
+            memories=None,
+            memory_relevance="weak",
+            reply_count=1,
+            reply_total=150,
+        )
+
+    assert "你的名字叫Hia" in prompt
+    assert "你的年龄是24岁" in prompt
 
 
 @pytest.mark.asyncio

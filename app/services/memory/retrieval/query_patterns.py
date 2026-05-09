@@ -115,10 +115,12 @@ def asks_ai_profile_relation(user_message: str) -> bool:
 def ai_profile_search_query(user_message: str) -> str:
     """Expanded retrieval query for agent profile questions.
 
-    Profile questions often need two memory lanes at once: the agent's own
-    answer and matching user facts that prevent stale follow-up questions
-    ("你呢?") when the user already told us. Return an empty string for non
-    profile questions so callers can keep the original query.
+    Profile questions need two isolated memory lanes: the agent's own profile
+    facts are answer evidence, while matching user facts are only dialogue
+    context (for example, avoid asking "你呢" when the user already told us).
+    Downstream ranking/selection must keep those roles separate. Return an
+    empty string for non profile questions so callers can keep the original
+    query.
     """
     text = _normalize(user_message)
     if not asks_ai_profile_relation(text):

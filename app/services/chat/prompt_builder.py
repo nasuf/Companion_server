@@ -108,6 +108,7 @@ def _record_skipped_section(diagnostics: dict[str, Any] | None, title: str) -> N
 async def _build_personality_section(agent: Any) -> str:
     """Build the personality section using MBTI (spec §1.2)."""
     name = getattr(agent, "name", None) or "伙伴"
+    age = getattr(agent, "age", None)
 
     values = getattr(agent, "values", None)
     gender = "female"
@@ -124,8 +125,12 @@ async def _build_personality_section(agent: Any) -> str:
     # Phase 6: 删 personality_rules 拼接. 实证内容跟 SYSTEM_BASE / RESPONSE_INSTRUCTION
     # 4 句全重叠 ("不要正式 / 不要客服 / 不要堆砌语气词 / 保持性格"). 删除节省 ~50
     # tokens 静态段, 减少噪声.
+    identity_line = f"你的名字叫{name}，是一个{gender_text}。"
+    if isinstance(age, int) and age > 0:
+        identity_line += f"你的年龄是{age}岁。"
+
     body = (
-        f"你的名字叫{name}，是一个{gender_text}。\n"
+        f"{identity_line}\n"
         f"你的性格画像：{mbti_line or '中性'}\n\n"
         f"四个维度详情：\n{detail}\n\n"
         f"你的说话风格：\n{style}"
@@ -237,9 +242,21 @@ async def _build_memory_section(
             for reason in (m.rank_reasons or [])
         ) and text not in task_user_texts
     ]
+    user_profile_context_texts = [
+        text for m, text in user_memory_items
+        if (
+            "AI资料查询:用户同类资料" in (m.rank_reasons or [])
+            and text not in task_user_texts
+            and text not in safety_user_texts
+        )
+    ]
     other_user_texts = [
         text for text in user_texts
-        if text not in task_user_texts and text not in safety_user_texts
+        if (
+            text not in task_user_texts
+            and text not in safety_user_texts
+            and text not in user_profile_context_texts
+        )
     ]
 
     def _numbered(label: str, items: list[str]) -> str:
@@ -253,6 +270,8 @@ async def _build_memory_section(
         parts.append(_numbered("【回答当前问题可参考】", literal_task_texts))
     if safety_user_texts:
         parts.append(_numbered("【安全 / 情绪背景】", safety_user_texts))
+    if user_profile_context_texts:
+        parts.append(_numbered("【用户同类资料（仅用于避免重复追问）】", user_profile_context_texts))
     if other_user_texts:
         parts.append(_numbered("【用户告诉过你的其他事情】", other_user_texts))
     if ai_texts:
@@ -266,6 +285,8 @@ async def _build_memory_section(
         "若有【回答当前关系 / 名字问题优先参考】, 回答关系、称呼、名字类事实追问时优先使用该组; "
         "若有【回答当前问题可参考】, 回答其他事实追问时优先使用该组; "
         "【安全 / 情绪背景】只用于把握语气和风险, 不要拿它替代事实答案。"
+        "【用户同类资料（仅用于避免重复追问）】只用于判断用户是否已经告诉过对应资料, "
+        "不要把它当成你的资料或答案依据。"
         "事实优先级: 当前用户消息明确说出新事实或纠正旧事实时, 以当前用户消息为准; "
         "否则回答姓名、年龄、生日、关系、住址、偏好等稳定事实时, "
         "以下方当前问题相关记忆为准, 不要用历史对话或 L3 模糊记忆覆盖它。"

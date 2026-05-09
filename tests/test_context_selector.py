@@ -537,7 +537,7 @@ def test_ranker_prioritizes_ai_preference_for_agent_self_query():
     assert ai_score > user_score
 
 
-def test_ranker_keeps_user_identity_as_context_for_ai_profile_query():
+def test_ranker_prioritizes_ai_identity_over_user_identity_for_ai_profile_query():
     from app.services.memory.retrieval.ranking import rank_memory_candidate
 
     ai_age = {
@@ -565,11 +565,10 @@ def test_ranker_keeps_user_identity_as_context_for_ai_profile_query():
     assert "AI自我记忆相关" in ai_reasons
     assert "AI资料查询:用户同类资料" in user_reasons
     assert "AI自我查询降权:用户记忆" not in user_reasons
-    assert ai_score > 0
-    assert user_score > 0
+    assert ai_score > user_score
 
 
-def test_select_context_keeps_user_identity_for_ai_profile_query():
+def test_select_context_keeps_same_user_identity_as_profile_context_only():
     candidates = [
         {
             "id": "ai-age",
@@ -588,6 +587,16 @@ def test_select_context_keeps_user_identity_for_ai_profile_query():
             "sub_category": "年龄",
             "rank_score": 0.36,
             "similarity": 0.49,
+            "rank_reasons": ["AI资料查询:用户同类资料"],
+        },
+        {
+            "id": "user-school",
+            "summary": "用户毕业于清华大学",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "教育背景",
+            "rank_score": 0.9,
+            "similarity": 0.78,
         },
     ] + [
         {
@@ -605,6 +614,34 @@ def test_select_context_keeps_user_identity_for_ai_profile_query():
 
     assert "我今年26岁" in texts
     assert "用户28岁" in texts
+    assert "用户毕业于清华大学" not in texts
+
+
+def test_select_context_drops_unscoped_user_identity_for_ai_profile_query():
+    candidates = [
+        {
+            "id": "user-age",
+            "summary": "用户28岁",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "年龄",
+            "rank_score": 1.51,
+            "similarity": 0.90,
+        },
+        {
+            "id": "user-job",
+            "summary": "用户是一名咖啡师",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "职业/与经济",
+            "rank_score": 1.43,
+            "similarity": 0.78,
+        },
+    ]
+
+    result = select_context(candidates, token_budget=800, query="AI 年龄 用户 年龄")
+
+    assert result == []
 
 
 def test_ranker_prioritizes_user_reminders_over_generic_identity():

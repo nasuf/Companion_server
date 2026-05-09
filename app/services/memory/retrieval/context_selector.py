@@ -81,6 +81,7 @@ _PROTECTED_KEYWORD_REASON = "保护槽:字面命中"
 _PROTECTED_NAMED_RELATION_REASON = "保护槽:关系命名"
 _PROTECTED_USER_REASON = "保护槽:用户记忆"
 _PROTECTED_AI_SELF_REASON = "保护槽:AI自我记忆"
+_AI_PROFILE_USER_CONTEXT_REASON = "AI资料查询:用户同类资料"
 _EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独"}
 _NAME_QUERY_TERMS = ("叫什么", "名字", "姓名", "叫啥", "叫作")
 _THIRD_PERSON_TERMS = ("她", "他", "ta", "TA", "对方", "那个人")
@@ -91,6 +92,10 @@ _RELATION_TERMS = (
     "男朋友", "男友", "女朋友", "女友",
 )
 _RELATION_SUBCATEGORIES = {"社会关系", "亲属关系"}
+_USER_IDENTITY_SUBCATEGORIES = {
+    "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
+    "体型", "居住", "其他", "教育背景",
+}
 
 
 def _memory_text(mem: dict) -> str:
@@ -181,6 +186,23 @@ def _is_named_relation_memory(mem: dict) -> bool:
     ) and ("叫" in text or "名字" in text or "姓名" in text)
 
 
+def _is_user_identity_memory(mem: dict) -> bool:
+    return (
+        _memory_source(mem) == "user"
+        and (
+            mem.get("main_category") == "身份"
+            or mem.get("sub_category") in _USER_IDENTITY_SUBCATEGORIES
+        )
+    )
+
+
+def _is_ai_profile_user_context_memory(mem: dict) -> bool:
+    return (
+        _is_user_identity_memory(mem)
+        and _AI_PROFILE_USER_CONTEXT_REASON in _rank_reasons(mem)
+    )
+
+
 def _to_classified_memory(mem: dict) -> ClassifiedMemory:
     text = _memory_text(mem)
     score = _memory_score(mem)
@@ -235,6 +257,8 @@ def select_context(
     per_item_token_limit = min(token_budget, MAX_MEMORY_TOKENS_PER_ITEM)
     if per_item_token_limit <= 0:
         return []
+    ai_stable_query = asks_ai_stable_relation(query or "")
+    ai_profile_query = asks_ai_profile_relation(query or "")
 
     selected_rows: list[dict] = []
     seen_ids: set[str] = set()
@@ -250,6 +274,12 @@ def select_context(
         if len(selected_rows) >= selected_total_limit():
             return False
         source = _memory_source(mem)
+        if (
+            ai_profile_query
+            and _is_user_identity_memory(mem)
+            and not _is_ai_profile_user_context_memory(mem)
+        ):
+            return False
         if selected_counts[source] >= source_limit(source):
             return False
         key = _memory_key(mem)
@@ -331,12 +361,7 @@ def select_context(
         if _is_keyword_user_memory(mem) and try_add(mem, _PROTECTED_KEYWORD_REASON):
             keyword_added += 1
 
-    ai_stable_query = asks_ai_stable_relation(query or "")
-    ai_profile_query = asks_ai_profile_relation(query or "")
-    min_user_quota = (
-        0 if ai_stable_query and not ai_profile_query
-        else min(_MIN_USER_MEMORY_QUOTA, user_limit)
-    )
+    min_user_quota = 0 if ai_stable_query else min(_MIN_USER_MEMORY_QUOTA, user_limit)
     if selected_counts["user"] < min_user_quota:
         for mem in ranked_memories:
             if selected_counts["user"] >= min_user_quota:
