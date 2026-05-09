@@ -1365,6 +1365,42 @@ def test_format_user_memory_for_crisis_followup_groups_named_relation_memory():
     assert followup.index("用户的朋友叫阿岚") < followup.index("用户叫林小满")
 
 
+def test_format_user_memory_for_crisis_followup_groups_current_topic_memory():
+    """Crisis aftercare should keep normal topic memories available.
+
+    Users often regulate by moving to another topic; those memories must not be
+    flattened behind safety background.
+    """
+    from app.services.chat.intent_handlers import _format_user_memory_for_crisis
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    classified = [
+        ClassifiedMemory(
+            id="safety",
+            text="用户表达过想跳楼的自杀念头",
+            source="user",
+            relevance="strong",
+            score=0.95,
+            rank_reasons=["保护槽:危机安全背景"],
+        ),
+        ClassifiedMemory(
+            id="topic",
+            text="用户喜欢那个一头脏辫的酷女孩",
+            source="user",
+            relevance="medium",
+            score=0.72,
+            rank_reasons=["保护槽:当前话题"],
+        ),
+    ]
+
+    followup = _format_user_memory_for_crisis(classified, include_factual=True)
+
+    assert "【当前话题相关记忆】" in followup
+    assert "用户喜欢那个一头脏辫的酷女孩" in followup
+    assert "【安全 / 情绪背景】" in followup
+    assert followup.index("用户喜欢那个一头脏辫的酷女孩") < followup.index("用户表达过想跳楼")
+
+
 @pytest.mark.asyncio
 async def test_retrieve_crisis_memories_keeps_safety_memory_outside_generic_vector_top(monkeypatch):
     """crisis 专用召回必须能捞出安全记忆, 不能被通用 L1 top10 挤掉。"""
@@ -1476,6 +1512,65 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
 
     ids = [m.id for m in memories]
     assert "direct-leader" in ids
+
+
+@pytest.mark.asyncio
+async def test_retrieve_crisis_followup_memories_uses_safety_and_current_topic(monkeypatch):
+    """Follow-up retrieval is two-channel: safety stays, current topic is restored."""
+    from app.services.memory.retrieval import safety
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    safety_memory = ClassifiedMemory(
+        id="safety",
+        text="用户表达了想跳楼的自杀念头",
+        source="user",
+        relevance="strong",
+        score=0.95,
+        rank_reasons=["保护槽:安全情绪"],
+    )
+    topical_memory = ClassifiedMemory(
+        id="braids",
+        text="用户喜欢那个一头脏辫的酷女孩",
+        source="user",
+        relevance="medium",
+        score=0.72,
+    )
+    married_memory = ClassifiedMemory(
+        id="married",
+        text="用户不知道脏辫女孩有对象且已结婚",
+        source="user",
+        relevance="medium",
+        score=0.67,
+    )
+
+    retrieve_mock = AsyncMock(return_value=[safety_memory])
+    hybrid_mock = AsyncMock(return_value={"memories": [topical_memory, married_memory]})
+    monkeypatch.setattr(safety, "retrieve_crisis_memories", retrieve_mock)
+    monkeypatch.setattr(safety, "hybrid_retrieve", hybrid_mock)
+
+    memories = await safety.retrieve_crisis_followup_memories(
+        "你知道我说的是谁吗",
+        "u1",
+        recent_context=(
+            "用户: 我活不下去了，想跳楼\n"
+            "用户: 我还是很难过，但我想先聊聊咖啡\n"
+            "用户: 我就是忘不了她\n"
+            "用户: 就是那个我喜欢的，但是却结了婚我也不知道的人"
+        ),
+        workspace_id="ws1",
+    )
+
+    ids = [m.id for m in memories]
+    assert ids == ["safety", "braids", "married"]
+    assert any(reason == "保护槽:危机安全背景" for reason in memories[0].rank_reasons or [])
+    assert any(reason == "保护槽:当前话题" for reason in memories[1].rank_reasons or [])
+    hybrid_mock.assert_awaited_once()
+    _, args, kwargs = hybrid_mock.mock_calls[0]
+    assert args[:2] == ("你知道我说的是谁吗", "u1")
+    assert "忘不了她" in kwargs["enhanced_query"]
+    assert "咖啡" in kwargs["enhanced_query"]
+    assert "难过" not in kwargs["enhanced_query"]
+    assert "想跳楼" not in kwargs["enhanced_query"]
 
 
 # ════════════════════════════════════════════════════════════════════

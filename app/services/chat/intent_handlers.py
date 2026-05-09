@@ -431,8 +431,9 @@ def _format_user_memory_for_crisis(
     这样表达 — 已知历史 (e.g. L1 `用户表达过强烈负面情绪`) 帮助 LLM 用"我记得你
     上次也..."的连贯语气, 而不是干巴巴的通用模板.
 
-    crisis follow-up 里用户可能转而问普通记忆事实; include_factual=True 时保留
-    已选中的普通事实, 防止事实问答只看到情绪记忆后编造.
+    crisis follow-up 里用户可能转而问普通记忆事实, 或主动转移到别的话题
+    来稳定情绪; include_factual=True 时保留当前话题相关记忆, 防止 aftercare
+    只看到安全记忆后断掉正常朋友式承接.
 
     筛选不调 LLM (热路径首位), 只用关键字粗筛. 没命中相关条目时返"(无)" —
     就当 Ta 第一次说, prompt 自己有兜底措辞.
@@ -479,15 +480,26 @@ def _format_user_memory_for_crisis(
                     break
             return result
 
+        def _has_reason(memory: Any, prefix: str) -> bool:
+            return any(reason.startswith(prefix) for reason in _rank_reasons(memory))
+
         named_relation = [
             _text(m) for m in user_memories
-            if any(reason.startswith("保护槽:关系命名") for reason in _rank_reasons(m))
+            if _has_reason(m, "保护槽:关系命名")
         ]
         literal = [
             _text(m) for m in user_memories
-            if any(reason.startswith("保护槽:字面命中") for reason in _rank_reasons(m))
+            if _has_reason(m, "保护槽:字面命中")
         ]
-        safety = [t for t in user_lines if any(kw in t for kw in relevance_kw)]
+        topical = [
+            _text(m) for m in user_memories
+            if _has_reason(m, "保护槽:当前话题")
+        ]
+        safety = [
+            _text(m) for m in user_memories
+            if _has_reason(m, "保护槽:危机安全背景")
+            or any(kw in _text(m) for kw in relevance_kw)
+        ]
         other = [t for t in user_lines]
 
         sections: list[str] = []
@@ -499,6 +511,7 @@ def _format_user_memory_for_crisis(
 
         _append_section("【回答当前关系 / 名字问题优先参考】", _take(named_relation, 2))
         _append_section("【回答当前问题可参考】", _take(literal, 2))
+        _append_section("【当前话题相关记忆】", _take(topical, 4))
         _append_section("【安全 / 情绪背景】", _take(safety, 3))
         _append_section("【其他已选记忆】", _take(other, 2))
         return "\n".join(sections) if sections else "(无)"

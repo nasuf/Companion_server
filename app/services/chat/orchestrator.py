@@ -761,18 +761,28 @@ async def stream_chat_response(
         early_parsed_times: list = []
         if crisis_force_intent or crisis_followup_active:
             # 轻量 fetch — 仅 handle_crisis 必需的两项 (lazy import 防循环依赖).
-            # crisis memory 走专用安全召回, 避免通用混合召回把轻生/强负面历史挤掉.
-            from app.services.memory.retrieval.safety import retrieve_crisis_memories
+            # crisis 首轮走专用安全召回; follow-up 用双通道召回: 安全背景 +
+            # 当前话题记忆, 避免用户尝试转移话题时只看到危机记忆.
+            from app.services.memory.retrieval.safety import (
+                retrieve_crisis_followup_memories,
+                retrieve_crisis_memories,
+            )
             from app.services.portrait import get_latest_portrait
-            crisis_query = (
-                user_message if crisis_force_intent
-                else f"{recent_crisis_context}\n{user_message}"
-            )
-            crisis_memory_task = asyncio.create_task(
-                retrieve_crisis_memories(
-                    crisis_query, user_id, workspace_id=workspace_id,
+            if crisis_followup_active:
+                crisis_memory_task = asyncio.create_task(
+                    retrieve_crisis_followup_memories(
+                        user_message,
+                        user_id,
+                        recent_context=recent_crisis_context,
+                        workspace_id=workspace_id,
+                    )
                 )
-            )
+            else:
+                crisis_memory_task = asyncio.create_task(
+                    retrieve_crisis_memories(
+                        user_message, user_id, workspace_id=workspace_id,
+                    )
+                )
             if agent_id:
                 crisis_portrait_task = asyncio.create_task(
                     get_latest_portrait(user_id, agent_id)
@@ -940,16 +950,25 @@ async def stream_chat_response(
         if detected_intent.intent == IntentType.CRISIS:
             await _cancel_fetch_task()
             if crisis_memory_task is None:
-                from app.services.memory.retrieval.safety import retrieve_crisis_memories
-                crisis_query = (
-                    user_message if not detected_intent.metadata.get("followup")
-                    else f"{recent_crisis_context}\n{user_message}"
+                from app.services.memory.retrieval.safety import (
+                    retrieve_crisis_followup_memories,
+                    retrieve_crisis_memories,
                 )
-                crisis_memory_task = asyncio.create_task(
-                    retrieve_crisis_memories(
-                        crisis_query, user_id, workspace_id=workspace_id,
+                if detected_intent.metadata.get("followup"):
+                    crisis_memory_task = asyncio.create_task(
+                        retrieve_crisis_followup_memories(
+                            user_message,
+                            user_id,
+                            recent_context=recent_crisis_context,
+                            workspace_id=workspace_id,
+                        )
                     )
-                )
+                else:
+                    crisis_memory_task = asyncio.create_task(
+                        retrieve_crisis_memories(
+                            user_message, user_id, workspace_id=workspace_id,
+                        )
+                    )
             if crisis_portrait_task is None and agent_id:
                 from app.services.portrait import get_latest_portrait
                 crisis_portrait_task = asyncio.create_task(
