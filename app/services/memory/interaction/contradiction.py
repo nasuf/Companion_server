@@ -309,7 +309,16 @@ async def apply_contradiction_resolution(
     """
     change_type = analysis.get("change_type", "新增")
     old_id = conflict.get("conflicting_memory_id")
+    # Prompt schema has both:
+    # - updated_memory: replacement value for the original conflicting fact
+    # - new_memory: additional fact to insert
+    #
+    # For 变化/错误, the replacement is the new current memory. Older code only
+    # read new_memory, so traces like "用户改名字了" archived the old name but
+    # dropped updated_memory="用户叫馒头".
     new_memory_text = (analysis.get("new_memory") or "").strip()
+    if not new_memory_text and change_type in ("变化", "错误"):
+        new_memory_text = (analysis.get("updated_memory") or "").strip()
     new_main = (analysis.get("new_memory_main_category") or "").strip()
     new_sub = (analysis.get("new_memory_sub_category") or "").strip()
 

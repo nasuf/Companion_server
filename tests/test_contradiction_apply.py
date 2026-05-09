@@ -129,6 +129,65 @@ async def test_apply_变化_archives_old_writes_l1_inheriting_importance():
     assert store_kwargs["importance"] == pytest.approx(0.90, abs=0.01)
 
 
+@pytest.mark.parametrize(
+    ("old_content", "updated_memory", "main_category", "sub_category"),
+    [
+        ("用户叫花卷", "用户叫馒头", "身份", "姓名"),
+        ("用户住在苏州", "用户住在上海", "身份", "居住地"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_apply_变化_uses_updated_memory_when_new_memory_empty(
+    old_content, updated_memory, main_category, sub_category,
+):
+    """矛盾分析常把替换事实放在 updated_memory；不能 archive 旧条目后丢新事实."""
+    from app.services.memory.interaction.contradiction import apply_contradiction_resolution
+
+    old_mem = MagicMock(
+        id="old-memory-id", userId="u1", importance=0.9,
+        content=old_content,
+        mainCategory=main_category, subCategory=sub_category,
+        source="user", workspaceId="ws1",
+    )
+
+    with (
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.find_unique",
+            new_callable=AsyncMock, return_value=old_mem,
+        ),
+        patch(
+            "app.services.memory.interaction.contradiction.memory_repo.update",
+            new_callable=AsyncMock,
+        ) as mock_update,
+        patch(
+            "app.services.memory.interaction.contradiction.store_memory",
+            new_callable=AsyncMock, return_value="new-name-id",
+        ) as mock_store,
+        patch(
+            "app.services.memory.interaction.contradiction.log_memory_changelog",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await apply_contradiction_resolution(
+            conflict={"conflicting_memory_id": "old-memory-id"},
+            analysis={
+                "change_type": "变化",
+                "updated_memory": updated_memory,
+                "new_memory": "",
+                "new_memory_main_category": "",
+                "new_memory_sub_category": "",
+            },
+        )
+
+    assert mock_update.call_args.kwargs["isArchived"] is True
+    mock_store.assert_called_once()
+    store_kwargs = mock_store.call_args.kwargs
+    assert store_kwargs["content"] == updated_memory
+    assert store_kwargs["main_category"] == main_category
+    assert store_kwargs["sub_category"] == sub_category
+    assert store_kwargs["level"] == 1
+
+
 @pytest.mark.asyncio
 async def test_apply_skips_new_when_new_memory_empty():
     """new_memory 空字符串 → 只 archive 老条目, 不调 store_memory."""
