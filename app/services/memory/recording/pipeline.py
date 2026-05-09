@@ -286,6 +286,8 @@ async def process_memory_pipeline(
             workspace_id=workspace_id,
             source=side,
             recurrence=recurrence,
+            entities=[str(e) for e in mem.get("entities", []) if e],
+            topics=[str(t) for t in mem.get("topics", []) if t],
         )
 
         if memory_id:

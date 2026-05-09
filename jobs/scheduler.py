@@ -13,6 +13,7 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.observability.events import EVT_SCHEDULER_JOB
+from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
 from app.services.reflection import run_weekly_reflection
 from app.services.portrait import update_portrait_weekly
@@ -140,6 +141,19 @@ def setup_scheduler():
         hour=4,
         minute=0,
         id="weekly_reflection",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Weekly memory hygiene after reflection: conservative fact evolution and
+    # duplicate cleanup inside each top-level memory category.
+    scheduler.add_job(
+        _run_memory_hygiene,
+        "cron",
+        day_of_week="sun",
+        hour=4,
+        minute=20,
+        id="memory_hygiene",
         replace_existing=True,
         max_instances=1,
     )
@@ -316,6 +330,16 @@ async def _run_l2_adjustment():
             logger.info(f"L2 adjustment: {stats}")
     except Exception as e:
         logger.warning(f"L2 adjustment failed: {e}")
+
+
+async def _run_memory_hygiene():
+    """Run weekly memory duplicate cleanup and fact evolution."""
+    try:
+        stats = await run_memory_hygiene()
+        if stats.get("archived") or stats.get("merged") or stats.get("updated"):
+            logger.info(f"Memory hygiene: {stats}")
+    except Exception as e:
+        logger.warning(f"Memory hygiene failed: {e}")
 
 
 async def _run_daily_intimacy():

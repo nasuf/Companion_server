@@ -11,6 +11,7 @@ from app.db import db
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.config import DEDUP_THRESHOLD
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
+from app.services.memory.storage.reconciliation import resolve_memory_write
 from app.services.memory.taxonomy import is_singleton, resolve_taxonomy
 from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.workspace.workspaces import resolve_workspace_id
@@ -161,6 +162,8 @@ async def store_memory(
     statement_time: datetime | None = None,
     workspace_id: str | None = None,
     recurrence: str | None = None,
+    entities: list[str] | None = None,
+    topics: list[str] | None = None,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -259,9 +262,93 @@ async def store_memory(
     # Generate embedding
     embedding = await generate_embedding(content)
 
-    # Deduplication check
-    if await is_duplicate(user_id, content, embedding, workspace_id=workspace_id):
+    # Reconciliation check: duplicate detection, richer update, and recall-echo
+    # suppression all happen here. This supersedes the old boolean dedup gate
+    # for the main write path; is_duplicate/find_duplicate_id remain for legacy
+    # callers that only need a yes/no answer.
+    decision = await resolve_memory_write(
+        user_id=user_id,
+        source=repo_source,
+        workspace_id=workspace_id,
+        content=content,
+        summary=summary,
+        embedding=embedding,
+        main_category=taxonomy.main_category,
+        sub_category=taxonomy.sub_category,
+        entities=entities,
+        topics=topics,
+    )
+    if decision.action == "drop_duplicate":
+        try:
+            from app.services.memory.lifecycle.decay import increment_mention_count
+
+            if decision.existing_id:
+                await increment_mention_count(decision.existing_id)
+        except Exception:
+            pass
+        try:
+            if decision.existing_id:
+                await log_memory_changelog(
+                    user_id,
+                    decision.existing_id,
+                    "dedup_drop",
+                    old_value=getattr(decision.existing_record, "content", None),
+                    new_value=content,
+                    workspace_id=workspace_id,
+                )
+        except Exception:
+            pass
+        logger.info(
+            f"Memory reconciliation dropped duplicate "
+            f"(matched_id={str(decision.existing_id)[:8]}): {content[:50]}"
+        )
         return None
+
+    if decision.action in {"update_existing", "merge_existing"} and decision.existing_id and decision.existing_record:
+        updated_content = decision.merged_content or content
+        updated_summary = decision.merged_summary or summary or updated_content[:200]
+        update_data = dict(
+            content=updated_content,
+            summary=updated_summary,
+            level=min(decision.existing_record.level, level),
+            importance=max(float(decision.existing_record.importance or 0), float(importance)),
+            type=memory_type,
+            mainCategory=taxonomy.main_category,
+            subCategory=taxonomy.sub_category,
+            statementTime=statement_time or datetime.now(timezone.utc),
+        )
+        if occur_time is not None:
+            update_data["occurTime"] = occur_time
+        if recurrence and taxonomy.sub_category == "提醒":
+            update_data["recurrence"] = recurrence
+
+        # Keep vector and row consistent: update the embedding first, then row.
+        updated_embedding = embedding
+        if updated_content != content:
+            updated_embedding = await generate_embedding(updated_content)
+        await store_embedding(decision.existing_id, updated_embedding)
+        await memory_repo.update(
+            decision.existing_id,
+            source=repo_source,
+            record=decision.existing_record,
+            **update_data,
+        )
+        try:
+            await log_memory_changelog(
+                user_id,
+                decision.existing_id,
+                "reconciliation_merge" if decision.action == "merge_existing" else "reconciliation_update",
+                old_value=getattr(decision.existing_record, "content", None),
+                new_value=update_data["content"],
+                workspace_id=workspace_id,
+            )
+        except Exception as e:
+            logger.warning(f"Changelog write failed for memory {decision.existing_id}: {e}")
+        logger.info(
+            f"Memory reconciliation updated existing "
+            f"(id={decision.existing_id[:8]}): {content[:50]}"
+        )
+        return decision.existing_id
 
     # Store in PostgreSQL (routed to memories_user or memories_ai)
     create_data = dict(

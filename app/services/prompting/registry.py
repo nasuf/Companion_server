@@ -50,6 +50,7 @@ from app.services.prompting.defaults import (
     MEMORY_EXTRACTION_AI_PROMPT,
     MEMORY_EXTRACTION_USER_PROMPT,
     MEMORY_PAIRWISE_CONTRADICTION_PROMPT,
+    MEMORY_RECONCILIATION_PROMPT,
     MEMORY_RELEVANCE_PROMPT,
     PERSONALITY_RULES_PROMPT,
     PORTRAIT_GENERATION_PROMPT,
@@ -251,6 +252,11 @@ PROMPT_DEFINITIONS = [
         "memory.pairwise_contradiction", "L1 一致性扫描", "交互矛盾", "记忆",
         "《背景信息》§1.4: agent 创建期 L1 记忆两两扫描矛盾对, 自动 drop 低 importance 那条, 防止人设自相矛盾.",
         MEMORY_PAIRWISE_CONTRADICTION_PROMPT,
+    ),
+    PromptDefinition(
+        "memory.reconciliation", "记忆事实演化裁决", "异步记忆", "记忆",
+        "写入前对相似旧记忆做事实关系判定: 重复丢弃、更新旧记忆、合并互补事实、保留或确认冲突.",
+        MEMORY_RECONCILIATION_PROMPT,
     ),
 
     # ── 记忆: 删除 (Memory §5) ──

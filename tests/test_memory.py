@@ -19,6 +19,10 @@ from app.services.memory.retrieval.legacy import (
     retrieve_memories,
 )
 from app.services.memory.storage.persistence import DEDUP_THRESHOLD, is_duplicate, store_memory
+from app.services.memory.storage.reconciliation import (
+    ReconciliationDecision,
+    resolve_memory_write,
+)
 
 
 # --- _memory_to_dict ---
@@ -155,6 +159,278 @@ def test_dedup_threshold_value():
     assert DEDUP_THRESHOLD == 0.85
 
 
+# --- write reconciliation ---
+
+
+def _record(
+    *,
+    id: str,
+    content: str,
+    source: str = "ai",
+    main: str = "身份",
+    sub: str = "宠物",
+    level: int = 1,
+    importance: float = 0.85,
+) -> MemoryRecord:
+    return MemoryRecord(
+        id=id,
+        userId="u1",
+        type="identity",
+        source=source,
+        level=level,
+        content=content,
+        summary=content,
+        importance=importance,
+        mentionCount=0,
+        isArchived=False,
+        occurTime=None,
+        createdAt="2026-01-01",
+        updatedAt="2026-01-01",
+        mainCategory=main,
+        subCategory=sub,
+        workspaceId="ws1",
+    )
+
+
+@pytest.mark.asyncio
+class TestMemoryReconciliation:
+    async def test_drops_new_memory_when_existing_covers_it(self):
+        existing = _record(
+            id="old-pet",
+            content="养了一只叫“芝麻”的黑猫，是从灵隐寺附近的草丛里捡来的流浪猫，当时它只有巴掌大。",
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="ai",
+                workspace_id="ws1",
+                content="我养了一只叫“芝麻”的黑猫",
+                summary="我养了一只叫“芝麻”的黑猫",
+                embedding=[0.1],
+                main_category="身份",
+                sub_category="宠物",
+                entities=["芝麻", "黑猫"],
+                topics=["宠物", "猫"],
+            )
+
+        assert decision.action == "drop_duplicate"
+        assert decision.existing_id == "old-pet"
+
+    async def test_updates_existing_when_new_memory_is_richer_within_main_category(self):
+        existing = _record(
+            id="old-pref",
+            content="用户喜欢咖啡",
+            source="user",
+            main="偏好",
+            sub="饮食喜好",
+            level=2,
+            importance=0.7,
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="user",
+                workspace_id="ws1",
+                content="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
+                summary="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
+                embedding=[0.1],
+                main_category="偏好",
+                sub_category="饮食喜好",
+                entities=["咖啡豆"],
+                topics=["咖啡", "饮食喜好"],
+            )
+
+        assert decision.action == "update_existing"
+        assert decision.existing_id == "old-pref"
+
+    async def test_does_not_merge_across_main_categories(self):
+        existing = _record(
+            id="old-job",
+            content="用户是一名咖啡师",
+            source="user",
+            main="身份",
+            sub="职业/与经济",
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="user",
+                workspace_id="ws1",
+                content="用户喜欢咖啡",
+                summary="用户喜欢咖啡",
+                embedding=[0.1],
+                main_category="偏好",
+                sub_category="饮食喜好",
+                entities=["咖啡"],
+                topics=["饮食喜好"],
+            )
+
+        assert decision.action == "insert_new"
+
+    async def test_does_not_update_across_main_categories_even_when_text_contains_old(self):
+        existing = _record(
+            id="old-job",
+            content="用户是一名咖啡师",
+            source="user",
+            main="身份",
+            sub="职业/与经济",
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="user",
+                workspace_id="ws1",
+                content="用户是一名咖啡师，也很喜欢咖啡",
+                summary="用户是一名咖啡师，也很喜欢咖啡",
+                embedding=[0.1],
+                main_category="偏好",
+                sub_category="饮食喜好",
+                entities=["咖啡"],
+                topics=["饮食喜好"],
+            )
+
+        assert decision.action == "insert_new"
+
+    async def test_ambiguous_related_pair_can_use_llm_merge_decision(self):
+        existing = _record(
+            id="old-life",
+            content="用户周末经常去花鸟市场逛干花摊",
+            source="user",
+            main="生活",
+            sub="生活",
+            level=2,
+            importance=0.7,
+        )
+        llm_decision = ReconciliationDecision(
+            action="merge_existing",
+            merged_summary="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
+            merged_content="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+            patch("app.services.memory.storage.reconciliation._relation", return_value="keep_separate"),
+            patch("app.services.memory.storage.reconciliation._related_enough_for_llm", return_value=True),
+            patch("app.services.memory.storage.reconciliation._llm_adjudicate", new_callable=AsyncMock, return_value=llm_decision) as mock_llm,
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="user",
+                workspace_id="ws1",
+                content="用户在花鸟市场买过多肉植物",
+                summary="用户在花鸟市场买过多肉植物",
+                embedding=[0.1],
+                main_category="生活",
+                sub_category="生活",
+                entities=["花鸟市场", "多肉植物"],
+                topics=["花鸟市场", "植物"],
+            )
+
+        assert decision.action == "merge_existing"
+        assert decision.existing_id == "old-life"
+        assert decision.merged_summary == "用户周末会去花鸟市场逛干花摊，也买过多肉植物"
+        mock_llm.assert_awaited_once()
+
+    async def test_store_memory_updates_existing_when_reconciliation_says_update(self):
+        existing = _record(
+            id="old-pref",
+            content="用户喜欢咖啡",
+            source="user",
+            main="偏好",
+            sub="饮食喜好",
+            level=2,
+            importance=0.7,
+        )
+        decision = ReconciliationDecision(
+            action="update_existing",
+            existing_id="old-pref",
+            existing_record=existing,
+            merged_content="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
+            merged_summary="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
+        )
+        P = "app.services.memory.storage.persistence"
+        with (
+            patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
+            patch(f"{P}.generate_embedding", new_callable=AsyncMock, return_value=[0.1]),
+            patch(f"{P}.resolve_memory_write", new_callable=AsyncMock, return_value=decision),
+            patch(f"{P}.store_embedding", new_callable=AsyncMock) as mock_store_embedding,
+            patch(f"{P}.memory_repo.update", new_callable=AsyncMock) as mock_update,
+            patch(f"{P}.memory_repo.create", new_callable=AsyncMock) as mock_create,
+            patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
+        ):
+            result = await store_memory(
+                user_id="u1",
+                content="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
+                summary="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
+                level=2,
+                importance=0.8,
+                main_category="偏好",
+                sub_category="饮食喜好",
+                source="user",
+            )
+
+        assert result == "old-pref"
+        mock_store_embedding.assert_awaited_once_with("old-pref", [0.1])
+        mock_update.assert_awaited_once()
+        mock_create.assert_not_called()
+
+    async def test_store_memory_reembeds_merged_content_when_llm_merges(self):
+        existing = _record(
+            id="old-life",
+            content="用户周末经常去花鸟市场逛干花摊",
+            source="user",
+            main="生活",
+            sub="生活",
+            level=2,
+            importance=0.7,
+        )
+        decision = ReconciliationDecision(
+            action="merge_existing",
+            existing_id="old-life",
+            existing_record=existing,
+            merged_content="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
+            merged_summary="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
+        )
+        P = "app.services.memory.storage.persistence"
+        with (
+            patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
+            patch(f"{P}.generate_embedding", new_callable=AsyncMock, side_effect=[[0.1], [0.2]]) as mock_embed,
+            patch(f"{P}.resolve_memory_write", new_callable=AsyncMock, return_value=decision),
+            patch(f"{P}.store_embedding", new_callable=AsyncMock) as mock_store_embedding,
+            patch(f"{P}.memory_repo.update", new_callable=AsyncMock),
+            patch(f"{P}.memory_repo.create", new_callable=AsyncMock) as mock_create,
+            patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
+        ):
+            result = await store_memory(
+                user_id="u1",
+                content="用户在花鸟市场买过多肉植物",
+                summary="用户在花鸟市场买过多肉植物",
+                level=2,
+                importance=0.8,
+                main_category="生活",
+                sub_category="生活",
+                source="user",
+            )
+
+        assert result == "old-life"
+        assert mock_embed.await_count == 2
+        mock_embed.assert_any_await("用户周末会去花鸟市场逛干花摊，也买过多肉植物")
+        mock_store_embedding.assert_awaited_once_with("old-life", [0.2])
+        mock_create.assert_not_called()
+
+
 # --- L1 SINGLETON 闸门 (spec §1.5.1) ---
 
 
@@ -168,6 +444,7 @@ def _patch_storage_chain(*, existing_l1: list | None = None, create_id: str = "n
         patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
         patch(f"{P}.generate_embedding", new_callable=AsyncMock, return_value=[0.1]) as mock_embed,
         patch(f"{P}.is_duplicate", new_callable=AsyncMock, return_value=False),
+        patch(f"{P}.resolve_memory_write", new_callable=AsyncMock, return_value=ReconciliationDecision(action="insert_new")),
         patch(f"{P}.memory_repo.update", new_callable=AsyncMock) as mock_update,
         patch(f"{P}.memory_repo.create", new_callable=AsyncMock, return_value=MagicMock(id=create_id)) as mock_create,
         patch(f"{P}.store_embedding", new_callable=AsyncMock),

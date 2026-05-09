@@ -315,6 +315,9 @@ _register("判断用户提醒事项当前状态. 用户在原定提醒时间到�
 _register("扫描下面的 L1 记忆列表, 找出语义上互相矛盾的对", _PromptMeta(
     "memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough,
 ))
+_register("判断一条新抽取的长期记忆和一条已有长期记忆的关系", _PromptMeta(
+    "memory.reconciliation", "记忆事实演化裁决", "decision", _label_passthrough,
+))
 _register("判断用户当前消息是否透露出真实的自伤 / 自杀 / 想结束生命", _PromptMeta(
     "intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message,
 ))

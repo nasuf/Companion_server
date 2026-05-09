@@ -1012,6 +1012,57 @@ MEMORY_PAIRWISE_CONTRADICTION_PROMPT = """【任务】扫描下面的 L1 记忆�
 无矛盾时返回 {{"contradictions": []}}. 只输出 JSON, 不要解释."""
 
 
+MEMORY_RECONCILIATION_PROMPT = """【任务】判断一条新抽取的长期记忆和一条已有长期记忆的关系, 决定写入动作。
+
+【硬边界】
+- 只比较事实关系, 不要因为有相同关键词就合并。
+- 二级分类可能不稳定, 不要把 sub_category 不同当作不能合并的理由。
+- 但一级分类表达的事实维度很重要: 身份、偏好、生活、情绪、思维不同维度时通常 keep_separate。
+- 如果新旧事实冲突, 不要覆盖, 输出 needs_confirmation。
+
+【动作定义】
+- drop_duplicate: 新记忆完全被旧记忆覆盖, 没有新增信息。
+- update_existing: 新记忆是旧记忆的更完整版本, 可以直接用新记忆替换旧记忆。
+- merge_existing: 新旧是同一事实/同一对象的互补信息, 合并后比任一单条都更好。
+- keep_separate: 同主题但不是同一事实, 或合并会损失粒度。
+- needs_confirmation: 同一属性出现不同取值或明显矛盾。
+- insert_new: 没有关联, 应写新记忆。
+
+【已有记忆】
+- source: {source}
+- category: {old_main}/{old_sub}
+- text: {old_text}
+
+【新记忆】
+- category: {new_main}/{new_sub}
+- text: {new_text}
+
+【输出 JSON】
+{{
+  "action": "drop_duplicate|update_existing|merge_existing|keep_separate|needs_confirmation|insert_new",
+  "merged_summary": "仅 action=merge_existing 或 update_existing 时填写合并/更新后的自然中文记忆, 否则空串",
+  "reason": "≤30字说明"
+}}
+
+【例子】
+旧: 用户喜欢咖啡
+新: 用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆
+→ update_existing, merged_summary=用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆
+
+旧: 用户是一名咖啡师
+新: 用户喜欢咖啡
+→ keep_separate
+
+旧: 我养了一只叫“芝麻”的黑猫，是从灵隐寺附近捡来的
+新: 我养了一只叫“芝麻”的黑猫
+→ drop_duplicate
+
+旧: 用户现在住在杭州
+新: 用户现在住在上海
+→ needs_confirmation
+"""
+
+
 # Spec 第二部分 §4.2 + 指令模版 P7「矛盾询问」
 # 大模型生成友好追问。输入：用户消息 + 原记忆 + 矛盾描述 + 上下文 + PAD + 性格/画像。
 MEMORY_CONTRADICTION_INQUIRY_PROMPT = """【限定】
