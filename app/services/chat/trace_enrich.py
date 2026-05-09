@@ -169,6 +169,19 @@ def _label_reply_text(output: str) -> str | None:
     return text[:40] + ("…" if len(text) > 40 else "")
 
 
+def _label_crisis_followup_classify(output: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    status = str(data.get("status") or "").strip()
+    if status not in {"guard", "release"}:
+        return None
+    reason = str(data.get("reason") or "").strip()
+    label = "继续保护" if status == "guard" else "解除危机"
+    return f"{label}: {reason[:20]}" if reason else label
+
+
 # ─────────────────────────────────────────────────────────────────
 # Prompt 指纹映射表 — 用每条 prompt 内的"独特子串"做 substring 匹配,
 # 不能用头部前缀 — 多个 prompt 共享 "【限定】..." / "用户刚才对你说" 等
@@ -250,6 +263,13 @@ _register("分析用户消息的情绪，输出PAD三维值", _PromptMeta(
 # Reply 类 — short-circuit handlers
 _register("用户正在询问你当前在做什么或最近怎么样。作为朋友，自然地回答对方", _PromptMeta(
     "intent.current_state_reply", "询问当前状态回复 (§3.4.3)", "reply", _label_reply_text,
+))
+_register("结合最近对话和用户当前消息, 判断刚才的危机/陪伴状态是否已经明确解除", _PromptMeta(
+    "intent.crisis_followup_classify", "危机后续状态判定", "decision",
+    _label_crisis_followup_classify,
+))
+_register("用户刚刚表达过自伤 / 对生命的负面想法 / 想结束某种状态", _PromptMeta(
+    "intent.crisis_followup_reply", "危机后续跟进回复", "reply", _label_reply_text,
 ))
 _register("用户希望你忘记某件事。作为朋友，你需要先确认对方具体想忘记什么", _PromptMeta(
     "memory.deletion_confirm", "删除确认", "reply", _label_reply_text,

@@ -59,6 +59,8 @@ def _fake_llm_step(prompt_text: str, output_text: str = "") -> dict:
     (defaults.AI_PAD_PROMPT, "emotion.ai_pad"),
     (defaults.EMOTION_EXTRACTION_PROMPT, "emotion.user_pad"),
     (defaults.CURRENT_STATE_REPLY_PROMPT, "intent.current_state_reply"),
+    (defaults.CRISIS_FOLLOWUP_CLASSIFY_PROMPT, "intent.crisis_followup_classify"),
+    (defaults.CRISIS_FOLLOWUP_REPLY_PROMPT, "intent.crisis_followup_reply"),
     (defaults.DELETION_CONFIRM_PROMPT, "memory.deletion_confirm"),
     (defaults.DELETION_REPLY_PROMPT, "memory.deletion_reply"),
     (defaults.MEMORY_CONTRADICTION_INQUIRY_PROMPT, "memory.contradiction_inquiry"),
@@ -174,6 +176,15 @@ def test_label_extractor_failure_falls_back_to_truncated_output():
     # _label_pad 解析失败 → fallback 截断
     assert enriched["decision_label"] is not None
     assert "not valid json" in enriched["decision_label"]
+
+
+def test_label_crisis_followup_classify_summarized():
+    output = '{"status": "guard", "reason": "用户仅回复谢谢，未明确表示安全"}'
+    step = _fake_llm_step(defaults.CRISIS_FOLLOWUP_CLASSIFY_PROMPT, output)
+    enriched = trace_enrich.enrich_step(step)
+    assert enriched["display_name"] == "危机后续状态判定"
+    assert enriched["prompt_key"] == "intent.crisis_followup_classify"
+    assert "继续保护" in enriched["decision_label"]
 
 
 def test_enrich_steps_batch_inplace():
