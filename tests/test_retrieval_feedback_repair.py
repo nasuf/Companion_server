@@ -94,6 +94,30 @@ async def test_build_retrieval_feedback_conflict_rejects_cross_workspace(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_build_retrieval_feedback_conflict_rejects_ai_memory(monkeypatch):
+    from app.services.memory.interaction import retrieval_feedback
+
+    monkeypatch.setattr(
+        retrieval_feedback.memory_repo,
+        "find_unique",
+        AsyncMock(return_value=_Memory(
+            source="ai",
+            content="29岁生日前夜突然失眠",
+            summary="29岁生日前夜突然失眠",
+        )),
+    )
+
+    result = await retrieval_feedback.build_retrieval_feedback_conflict(
+        user_message="不对啊，我到底多大你不记得了吗，我跟你说过的",
+        previous_assistant=_previous_assistant(_metadata()),
+        user_id="u1",
+        workspace_id="w1",
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_resolve_retrieval_feedback_correction_short_circuits(monkeypatch):
     from app.services.memory.interaction import retrieval_feedback
 

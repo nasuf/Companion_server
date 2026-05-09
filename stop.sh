@@ -100,7 +100,7 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 # Also kill anything on the port
-EXISTING=$(lsof -i :"$PORT" -t 2>/dev/null || true)
+EXISTING=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$EXISTING" ]; then
     echo "Stopping process(es) listening on port $PORT: $EXISTING"
     for PID in $EXISTING; do
@@ -111,7 +111,7 @@ fi
 sleep 2
 
 # Force kill if still alive
-EXISTING_AGAIN=$(lsof -i :"$PORT" -t 2>/dev/null || true)
+EXISTING_AGAIN=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$EXISTING_AGAIN" ]; then
     for PID in $EXISTING_AGAIN; do
         force_kill_pid_group "$PID" "port $PORT"

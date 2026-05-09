@@ -78,6 +78,7 @@ _KEYWORD_REASON = "关键词命中"
 _PROTECTED_SAFETY_REASON = "保护槽:安全情绪"
 _PROTECTED_HIGH_SIMILARITY_REASON = "保护槽:高相似向量"
 _PROTECTED_KEYWORD_REASON = "保护槽:字面命中"
+_PROTECTED_CURRENT_FACT_REASON = "保护槽:当前问题事实"
 _PROTECTED_NAMED_RELATION_REASON = "保护槽:关系命名"
 _PROTECTED_USER_REASON = "保护槽:用户记忆"
 _PROTECTED_AI_SELF_REASON = "保护槽:AI自我记忆"
@@ -96,6 +97,18 @@ _USER_IDENTITY_SUBCATEGORIES = {
     "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
     "体型", "居住", "其他", "教育背景",
 }
+_PROFILE_QUERY_SUBCATEGORIES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("多大", "几岁", "年龄", "哪年出生", "出生年份", "出生"), ("年龄",)),
+    (("生日", "出生日期"), ("生日", "年龄")),
+    (("叫什么", "叫啥", "名字", "姓名", "是谁"), ("姓名",)),
+    (("做什么", "干什么", "职业", "工作"), ("职业/与经济",)),
+    (("哪里人", "家乡"), ("现居地", "居住", "其他")),
+    (("住哪", "住址", "现居地"), ("现居地", "居住")),
+    (("学历", "学校", "大学", "专业"), ("教育背景",)),
+    (("性别",), ("性别",)),
+    (("身高",), ("身高",)),
+    (("体型",), ("体型",)),
+)
 
 
 def _memory_text(mem: dict) -> str:
@@ -194,6 +207,16 @@ def _is_user_identity_memory(mem: dict) -> bool:
             or mem.get("sub_category") in _USER_IDENTITY_SUBCATEGORIES
         )
     )
+
+
+def _is_current_user_profile_answer(query: str | None, mem: dict) -> bool:
+    if not query or not _is_user_identity_memory(mem):
+        return False
+    sub_category = str(mem.get("sub_category") or "")
+    for query_terms, sub_categories in _PROFILE_QUERY_SUBCATEGORIES:
+        if any(term in query for term in query_terms) and sub_category in sub_categories:
+            return True
+    return False
 
 
 def _is_ai_profile_user_context_memory(mem: dict) -> bool:
@@ -332,6 +355,16 @@ def select_context(
                 and try_add(mem, _PROTECTED_AI_SELF_REASON)
             ):
                 ai_self_added += 1
+
+    current_fact_added = 0
+    if not ai_stable_query:
+        for mem in ranked_memories:
+            if current_fact_added >= min(2, user_limit - selected_counts["user"]):
+                break
+            if _is_current_user_profile_answer(query, mem) and try_add(
+                mem, _PROTECTED_CURRENT_FACT_REASON,
+            ):
+                current_fact_added += 1
 
     high_similarity_added = 0
     high_similarity_candidates = sorted(

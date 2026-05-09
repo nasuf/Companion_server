@@ -70,6 +70,14 @@ async def test_memory_section_groups_task_and_safety_memories():
             rank_reasons=["保护槽:字面命中"],
         ),
         ClassifiedMemory(
+            id="current-profile-fact",
+            text="用户28岁",
+            relevance="strong",
+            score=0.83,
+            source="user",
+            rank_reasons=["保护槽:当前问题事实"],
+        ),
+        ClassifiedMemory(
             id="other",
             text="用户喜欢日料",
             relevance="medium",
@@ -83,6 +91,7 @@ async def test_memory_section_groups_task_and_safety_memories():
     assert "用户的直属领导叫陈姐" in section
     assert "【回答当前问题可参考】" in section
     assert "用户叫林小满" in section
+    assert "用户28岁" in section
     assert "【安全 / 情绪背景】" in section
     assert "用户表达过强烈负面情绪" in section
     assert "【用户告诉过你的其他事情】" in section

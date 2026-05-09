@@ -143,6 +143,8 @@ async def _first_repairable_memory(
             continue
         if memory.userId != user_id:
             continue
+        if memory.source != "user":
+            continue
         if workspace_id is not None and memory.workspaceId != workspace_id:
             continue
         return memory

@@ -231,6 +231,7 @@ async def _build_memory_section(
         text for m, text in user_memory_items
         if text not in named_relation_texts and any(
             reason.startswith("保护槽:字面命中")
+            or reason.startswith("保护槽:当前问题事实")
             for reason in (m.rank_reasons or [])
         )
     ]

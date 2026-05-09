@@ -6,6 +6,42 @@ cd "$(dirname "$0")"
 PORT="${PORT:-8000}"
 PID_FILE=".server.pid"
 
+pid_alive() {
+    kill -0 "$1" 2>/dev/null
+}
+
+cleanup_orphan_prisma_engines() {
+    local pid
+    local ppid
+    local cwd
+    local orphan_pids=""
+
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+        [ "$ppid" = "1" ] || continue
+        cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+        [ "$cwd" = "$PWD" ] || continue
+        orphan_pids="$orphan_pids $pid"
+    done < <(pgrep -f "prisma/query-engine" 2>/dev/null || true)
+
+    if [ -n "$orphan_pids" ]; then
+        echo "Stopping orphan Prisma query-engine process(es):$orphan_pids"
+        kill $orphan_pids 2>/dev/null || true
+        sleep 1
+        local still_alive=""
+        for pid in $orphan_pids; do
+            if pid_alive "$pid"; then
+                still_alive="$still_alive $pid"
+            fi
+        done
+        if [ -n "$still_alive" ]; then
+            echo "Force killing orphan Prisma query-engine process(es):$still_alive"
+            kill -9 $still_alive 2>/dev/null || true
+        fi
+    fi
+}
+
 # ── Check if already running ──
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE")
@@ -17,18 +53,23 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 # ── Kill anything on the port ──
-EXISTING=$(lsof -i :"$PORT" -t 2>/dev/null || true)
+EXISTING=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$EXISTING" ]; then
     echo "Killing existing process on port $PORT (PID $EXISTING)..."
     kill $EXISTING 2>/dev/null || true
     sleep 2
     # Force kill if still alive
-    EXISTING_AGAIN=$(lsof -i :"$PORT" -t 2>/dev/null || true)
+    EXISTING_AGAIN=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$EXISTING_AGAIN" ]; then
         kill -9 $EXISTING_AGAIN 2>/dev/null || true
     fi
     sleep 1
 fi
+
+# Uvicorn --reload can leave Prisma query-engine children orphaned. Those
+# engines keep DB sessions open without listening on the API port, so clean
+# project-local orphans before starting a fresh dev server.
+cleanup_orphan_prisma_engines
 
 # ── Check Docker ──
 if ! command -v docker &>/dev/null; then

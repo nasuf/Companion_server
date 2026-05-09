@@ -208,6 +208,70 @@ def test_select_context_keeps_user_floor_for_user_preference_recall_query():
     assert all("保护槽:用户记忆" in (m.rank_reasons or []) for m in user_memories)
 
 
+def test_select_context_marks_matching_user_profile_fact_as_current_answer():
+    candidates = [
+        {
+            "id": "user-age",
+            "summary": "用户28岁",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "年龄",
+            "rank_score": 0.8,
+            "similarity": 0.78,
+        },
+        {
+            "id": "user-school",
+            "summary": "用户毕业于清华大学",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "教育背景",
+            "rank_score": 0.8,
+            "similarity": 0.78,
+        },
+        {
+            "id": "user-job",
+            "summary": "用户是一名咖啡师",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "职业/与经济",
+            "rank_score": 0.8,
+            "similarity": 0.78,
+        },
+    ]
+
+    result = select_context(candidates, token_budget=800, max_items=5, query="我年龄呢")
+    by_id = {m.id: m for m in result}
+
+    assert "保护槽:当前问题事实" in (by_id["user-age"].rank_reasons or [])
+    assert "保护槽:当前问题事实" not in (by_id["user-school"].rank_reasons or [])
+    assert "保护槽:当前问题事实" not in (by_id["user-job"].rank_reasons or [])
+
+
+def test_select_context_does_not_mark_user_age_as_answer_for_ai_age_query():
+    candidates = [
+        {
+            "id": "user-age",
+            "summary": "用户28岁",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "年龄",
+            "rank_score": 0.8,
+            "similarity": 0.78,
+            "rank_reasons": ["AI资料查询:用户同类资料"],
+        },
+    ]
+
+    result = select_context(
+        candidates,
+        token_budget=800,
+        max_items=5,
+        query="AI年龄和用户年龄",
+    )
+
+    assert result
+    assert "保护槽:当前问题事实" not in (result[0].rank_reasons or [])
+
+
 def test_select_context_protects_literal_user_keyword_match():
     candidates = [
         {

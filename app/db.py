@@ -2,16 +2,156 @@ import asyncio
 import logging
 import os
 import time
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
+from dotenv import load_dotenv
 from prisma import Prisma
 
 logger = logging.getLogger(__name__)
 
+load_dotenv()
+
+# Supabase session pooler has a small per-session client pool. Keep Prisma's
+# own pool below that limit and throttle app-side bursts so one API process
+# cannot exhaust all database sessions.
+_DB_CONNECTION_LIMIT_DEFAULT = 5
+_DB_POOL_TIMEOUT_DEFAULT = 30
+_DB_CONNECT_TIMEOUT_DEFAULT = 30
+
+
+def _parse_positive_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+_DB_QUERY_MAX_RETRIES = _parse_positive_int(os.getenv("DB_QUERY_MAX_RETRIES")) or 2
+
+
+def _with_safe_database_params(
+    url: str,
+    *,
+    default_connection_limit: int = _DB_CONNECTION_LIMIT_DEFAULT,
+    default_pool_timeout: int = _DB_POOL_TIMEOUT_DEFAULT,
+    default_connect_timeout: int = _DB_CONNECT_TIMEOUT_DEFAULT,
+    forced_connection_limit: int | None = None,
+) -> str:
+    """Return DATABASE_URL with conservative runtime pool settings.
+
+    Prisma reads connection parameters from DATABASE_URL when its query engine
+    starts. If local/prod env accidentally sets `connection_limit` above the
+    Supabase session pool cap, a single process can consume the whole pool and
+    cause EMAXCONNSESSION. We cap only the runtime URL; migration URLs are
+    handled separately by Prisma commands.
+    """
+    if not url.startswith(("postgres://", "postgresql://")):
+        return url
+
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+
+    existing_limit = _parse_positive_int(query.get("connection_limit"))
+    safe_limit = forced_connection_limit or default_connection_limit
+    if existing_limit is None or existing_limit > safe_limit:
+        query["connection_limit"] = str(safe_limit)
+
+    query.setdefault("pool_timeout", str(default_pool_timeout))
+    query.setdefault("connect_timeout", str(default_connect_timeout))
+
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+
+
+def _install_safe_database_url() -> None:
+    raw_url = os.getenv("DATABASE_URL")
+    if not raw_url:
+        return
+
+    forced_limit = _parse_positive_int(os.getenv("DB_CONNECTION_LIMIT"))
+    safe_url = _with_safe_database_params(raw_url, forced_connection_limit=forced_limit)
+    if safe_url == raw_url:
+        return
+
+    os.environ["DATABASE_URL"] = safe_url
+    logger.info(
+        "Adjusted DATABASE_URL runtime pool params "
+        "(connection_limit<=%s, pool_timeout=%s, connect_timeout=%s)",
+        forced_limit or _DB_CONNECTION_LIMIT_DEFAULT,
+        _DB_POOL_TIMEOUT_DEFAULT,
+        _DB_CONNECT_TIMEOUT_DEFAULT,
+    )
+
+
+def _is_db_pool_exhaustion_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "emaxconnsession" in text
+        or "max clients reached" in text
+        or "too many clients already" in text
+        or "remaining connection slots are reserved" in text
+    )
+
+
+def _connection_limit_from_database_url(
+    url: str | None,
+    *,
+    default: int = _DB_CONNECTION_LIMIT_DEFAULT,
+) -> int:
+    if not url:
+        return default
+    query = dict(parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    return _parse_positive_int(query.get("connection_limit")) or default
+
+
+_install_safe_database_url()
+
+_RUNTIME_CONNECTION_LIMIT = _connection_limit_from_database_url(os.getenv("DATABASE_URL"))
+_CONFIGURED_MAX_CONCURRENT_QUERIES = (
+    _parse_positive_int(os.getenv("DB_MAX_CONCURRENT_QUERIES"))
+    or _RUNTIME_CONNECTION_LIMIT
+)
+_DB_MAX_CONCURRENT_QUERIES = min(
+    _CONFIGURED_MAX_CONCURRENT_QUERIES, _RUNTIME_CONNECTION_LIMIT
+)
+_query_semaphore = asyncio.Semaphore(_DB_MAX_CONCURRENT_QUERIES)
+
+
+class ThrottledPrisma(Prisma):
+    async def _execute(self, *args: Any, **kwargs: Any) -> Any:
+        async with _query_semaphore:
+            for attempt in range(_DB_QUERY_MAX_RETRIES + 1):
+                try:
+                    return await super()._execute(*args, **kwargs)
+                except Exception as exc:
+                    if (
+                        attempt >= _DB_QUERY_MAX_RETRIES
+                        or not _is_db_pool_exhaustion_error(exc)
+                    ):
+                        raise
+                    delay = min(0.2 * (2**attempt), 1.0)
+                    logger.warning(
+                        "DB pool exhausted, retrying query in %.1fs "
+                        "(attempt %s/%s): %s",
+                        delay,
+                        attempt + 1,
+                        _DB_QUERY_MAX_RETRIES,
+                        str(exc)[:200],
+                    )
+                    await asyncio.sleep(delay)
+
 # Prisma Python client 通过 httpx 连接本地 Prisma engine 子进程。
 # 默认超时很短（~10s），当 LLM 生成长时间占用 event loop 时，
 # 其他并发的 DB 查询可能被饿死超时。延长到 120s 避免误杀。
-db = Prisma(http={"timeout": httpx.Timeout(120.0)})
+db = ThrottledPrisma(http={"timeout": httpx.Timeout(120.0)})
 
 # ── 启动时连接重试参数 (可通过环境变量覆盖) ──
 # Supabase pooler 本地启动时偶有抖动, 需要比较宽松的重试:
