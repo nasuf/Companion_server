@@ -30,6 +30,7 @@ from app.services.interaction.boundary import (
     handle_apology,
     init_patience,
     recover_patience_hourly,
+    restore_patience_for_crisis_care,
     set_patience,
 )
 
@@ -258,6 +259,20 @@ class TestHandleApology:
         patch_boundary_redis.eval = AsyncMock(return_value=100)
         val = await handle_apology("agent1", "user1")
         assert val == 100  # min(80 + 70, 100)
+
+
+@pytest.mark.asyncio
+class TestCrisisCarePatienceRestore:
+    async def test_crisis_care_from_blocked_restores_to_70(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "0"
+        val = await restore_patience_for_crisis_care("agent1", "user1")
+        assert val == PATIENCE_NORMAL_MIN
+
+    async def test_crisis_care_from_low_adds_70(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "20"
+        patch_boundary_redis.eval = AsyncMock(return_value=90)
+        val = await restore_patience_for_crisis_care("agent1", "user1")
+        assert val == 90
 
 
 # --- check_boundary (热路径) ---

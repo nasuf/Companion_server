@@ -52,7 +52,12 @@ from app.services.schedule_domain.schedule import (
     get_cached_schedule,
     get_current_status,
 )
-from app.services.interaction.boundary import get_patience_prompt_instruction
+from app.services.interaction.boundary import (
+    PATIENCE_MAX,
+    check_banned_keywords,
+    get_patience_prompt_instruction,
+    restore_patience_for_crisis_care,
+)
 from app.services.relationship.intimacy import get_relationship_stage
 from app.services.chat.intent_dispatcher import (
     detect_current_state_fast_path,
@@ -805,38 +810,12 @@ async def stream_chat_response(
                     user_message_id=user_message_id,
                 ))
 
-        # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
-        # boundary_ctx.recent_context 给 short-circuit handler 的 prompt {context} 用,
-        # 排除当前 user_message_id 防 LLM 看到该消息两遍 ({message} + {context} 重复,
-        # 实测 trace 2026-05-07 16:57 已确认).
-        boundary_ctx = BoundaryPhaseCtx(
-            conversation_id=conversation_id,
-            agent_id=agent_id,
-            user_id=user_id,
-            agent=agent,
-            user_message=user_message,
-            sub_intent_mode=sub_intent_mode,
-            parent_patience=parent_patience,
-            tracer=tracer,
-            short_circuit_fn=_short_circuit_reply,
-            fire_background_fn=_fire_background,
-            bg_memory_pipeline_fn=_bg_memory_pipeline,
-            recent_context=format_recent_context(
-                messages_dicts, exclude_message_id=user_message_id,
-            ),
-        )
-        async for evt in run_boundary(boundary_ctx):
-            yield evt
-        if boundary_ctx.stopped:
-            # boundary phase 自己决定是否进 memory pipeline (apology fires _bg_memory_pipeline,
-            # blocked 故意跳 per CLAUDE.md §3.3) — finally 通过 boundary_ctx.stopped 跳过兜底.
-            return
-        cached_patience = boundary_ctx.cached_patience
-
         # ── 危机安全网 (P0) ────────────────────────────────────────────
         # 关键字命中 → force IntentType.CRISIS, 走 handle_crisis short-circuit
-        # (跟 conversation_end / current_state 等同模式). 早于 preflight + intent
+        # (跟 conversation_end / current_state 等同模式). 早于 boundary + preflight + intent
         # LLM, 因为:
+        # - 用户已被拉黑 / 正在辱骂时仍可能发出真实求救信号, 危机安全优先级必须
+        #   高于关系边界, 不能被 blacklist_reply / attack_reply 吞掉
         # - 实证 LLM intent 把"我想跳楼"误归"询问当前状态" → AI 答"我在做手工",
         #   彻底错过求救信号 (生产 trace 2026-05-07 已确认)
         # - 用户在 pending 矛盾/删除状态突然说"我想跳楼", preflight 会把它当成
@@ -851,6 +830,7 @@ async def stream_chat_response(
         crisis_aftercare_turn_count = 0
         crisis_turns_since_safety_check = 0
         crisis_followup_check_mode = "none"
+        crisis_care_turn = crisis_force_intent
         if not crisis_force_intent and not sub_intent_mode:
             crisis_state = await load_crisis_care_state(
                 conversation_id,
@@ -871,6 +851,7 @@ async def stream_chat_response(
                 recent_crisis_context = _recent_unresolved_crisis_context(
                     messages_dicts, exclude_id=user_message_id,
                 )
+            crisis_care_turn = recent_crisis_context is not None
         crisis_followup_active = False
         if recent_crisis_context is not None:
             prior_release_count = crisis_release_count
@@ -960,10 +941,55 @@ async def stream_chat_response(
                 },
             )
 
+        # spec §2.6 边界系统全流程（含步骤 2-6 + 步骤 6 中/低耐心短路）
+        # Crisis / crisis-care 路径不跑 boundary: 安全照护优先于拉黑和攻击扣分。
+        # 若本轮没有边界攻击命中, 危机照护会恢复 patience, 避免危机解除后立刻
+        # 回到拉黑/冷处理；若仍在辱骂, 只跳过本轮边界回复, 不恢复耐心。
+        # 注意 release_count 达标并清掉 crisis state 的那一轮仍属于 crisis-care
+        # turn, 也必须跳过 boundary, 否则"我现在安全了"可能立刻触发拉黑回复。
+        cached_patience = (
+            parent_patience if parent_patience is not None else PATIENCE_MAX
+        )
+        recent_context_text = format_recent_context(
+            messages_dicts, exclude_message_id=user_message_id,
+        )
+        if not crisis_care_turn:
+            # boundary_ctx.recent_context 给 short-circuit handler 的 prompt {context} 用,
+            # 排除当前 user_message_id 防 LLM 看到该消息两遍 ({message} + {context} 重复,
+            # 实测 trace 2026-05-07 16:57 已确认).
+            boundary_ctx = BoundaryPhaseCtx(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                agent=agent,
+                user_message=user_message,
+                sub_intent_mode=sub_intent_mode,
+                parent_patience=parent_patience,
+                tracer=tracer,
+                short_circuit_fn=_short_circuit_reply,
+                fire_background_fn=_fire_background,
+                bg_memory_pipeline_fn=_bg_memory_pipeline,
+                recent_context=recent_context_text,
+            )
+            async for evt in run_boundary(boundary_ctx):
+                yield evt
+            if boundary_ctx.stopped:
+                # boundary phase 自己决定是否进 memory pipeline (apology fires _bg_memory_pipeline,
+                # blocked 故意跳 per CLAUDE.md §3.3) — finally 通过 boundary_ctx.stopped 跳过兜底.
+                return
+            cached_patience = boundary_ctx.cached_patience
+        elif agent_id and not check_banned_keywords(user_message):
+            try:
+                cached_patience = await restore_patience_for_crisis_care(
+                    agent_id, user_id,
+                )
+            except Exception as e:
+                logger.warning(f"Crisis-care patience restore failed: {e}")
+
         # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
         # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
         # crisis 路径也跳过: 用户求救信号优先级高于一切, pending 留着等用户安全后处理.
-        if not sub_intent_mode and not crisis_force_intent and not crisis_followup_active:
+        if not sub_intent_mode and not crisis_care_turn:
             preflight_ctx = PreflightCtx(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
@@ -1003,8 +1029,7 @@ async def stream_chat_response(
         current_state_fast_path = (
             forced_intent is None
             and not sub_intent_mode
-            and not crisis_force_intent
-            and not crisis_followup_active
+            and not crisis_care_turn
             and detect_current_state_fast_path(user_message)
         )
         response_diagnostics: dict[str, Any] = {
@@ -1120,7 +1145,7 @@ async def stream_chat_response(
         # crisis 路径下 detected_intent 是手动构造的 CRISIS, metadata={} 没 fragments,
         # 这里 if 分支自然不进; 但显式 `not crisis_force_intent` 防御 future 改动加进 metadata.
         # (crisis 优先级最高, 不该被多意图拆分稀释)
-        if forced_intent is None and not crisis_force_intent and not crisis_followup_active:
+        if forced_intent is None and not crisis_care_turn:
             # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
             fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
             if fragments and len(fragments) > 1:
@@ -1166,12 +1191,12 @@ async def stream_chat_response(
             sub_intent_mode=sub_intent_mode,
             reply_index_offset=reply_index_offset,
             cached_patience=cached_patience,
-            # 复用 boundary_phase 算好的同一份 recent_context, 避免二次格式化.
+            # 复用 boundary/preflight 之前算好的同一份 recent_context, 避免二次格式化.
             # handler 把它传进 *_reply prompt 的 {context} 占位符 — 否则短路路径
             # LLM 看不到对话历史, 只能从 AI 当前作息编内容 (生产 bug 2026-05-05:
             # 用户问"你看到什么段子" → AI 编了一个跟自己当下划船活动巧合的段子,
             # 因为 prompt 里 {context} 是 "(无)").
-            recent_context=boundary_ctx.recent_context,
+            recent_context=recent_context_text,
             response_diagnostics=response_diagnostics,
         )
         response_diagnostics["crisis_followup_check_mode"] = (

@@ -747,6 +747,237 @@ async def test_handle_crisis_consumes_full_message():
     assert ctx.consumed_full_message is True
 
 
+def _close_background_arg(arg):
+    close = getattr(arg, "close", None)
+    if callable(close):
+        close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_direct_crisis_bypasses_boundary_when_blocked():
+    """已拉黑时的直接危机消息必须跳过 boundary blacklist_reply。"""
+    from app.services.chat import orchestrator as orch_mod
+
+    agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
+    conv = SimpleNamespace(workspaceId=None)
+    boundary_called = False
+    crisis_calls = []
+
+    async def _boundary_should_not_run(_ctx):
+        nonlocal boundary_called
+        boundary_called = True
+        raise AssertionError("direct crisis must bypass boundary")
+        if False:
+            yield {}
+
+    async def _fake_handle_crisis(message, ctx, **kwargs):
+        crisis_calls.append((message, ctx, kwargs))
+        yield {"event": "reply", "data": json.dumps({"text": "我在"})}
+
+    with (
+        patch.object(orch_mod, "db", new=MagicMock(
+            message=MagicMock(
+                create=AsyncMock(return_value=SimpleNamespace(id="msg1")),
+                find_many=AsyncMock(return_value=[]),
+            ),
+            conversation=MagicMock(find_unique=AsyncMock(return_value=conv)),
+        )),
+        patch("app.services.runtime_config.bind_agent_context",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.runtime_config.reset_current_agent"),
+        patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
+        patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
+        patch.object(orch_mod, "mark_crisis_care_active", new_callable=AsyncMock),
+        patch.object(orch_mod, "restore_patience_for_crisis_care",
+                     new_callable=AsyncMock, return_value=70) as mock_restore,
+        patch(
+            "app.services.memory.retrieval.safety.retrieve_crisis_memories",
+            new_callable=AsyncMock,
+            return_value={"memories": []},
+        ),
+        patch(
+            "app.services.portrait.get_latest_portrait",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch.object(orch_mod, "handle_crisis", side_effect=_fake_handle_crisis),
+        patch.object(orch_mod, "_fire_background", side_effect=_close_background_arg),
+    ):
+        mock_tracer = MagicMock(
+            trace_id=None, is_active=False, safe_trace_id=None,
+            close=MagicMock(),
+        )
+        mock_tracer_cls.return_value.enter.return_value = mock_tracer
+        mock_tracer_cls.return_value.attach_to_parent.return_value = mock_tracer
+
+        events = await _drain(orch_mod.stream_chat_response(
+            conversation_id="conv1",
+            user_message="我想跳楼",
+            agent=agent,
+            user_id="user1",
+            save_user_message=False,
+        ))
+
+    assert events
+    assert not boundary_called
+    mock_restore.assert_awaited_once_with("agent1", "user1")
+    assert crisis_calls
+    assert crisis_calls[0][0] == "我想跳楼"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_crisis_followup_insult_bypasses_attack_boundary():
+    """危机照护仍活跃时, 用户辱骂也必须先走 follow-up 守护而不是攻击回复。"""
+    from app.services.chat import orchestrator as orch_mod
+
+    agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
+    conv = SimpleNamespace(workspaceId=None)
+    crisis_calls = []
+
+    async def _boundary_should_not_run(_ctx):
+        raise AssertionError("crisis followup must bypass attack boundary")
+        if False:
+            yield {}
+
+    async def _fake_handle_followup(message, ctx, **kwargs):
+        crisis_calls.append((message, ctx, kwargs))
+        yield {"event": "reply", "data": json.dumps({"text": "我还在"})}
+
+    with (
+        patch.object(orch_mod, "db", new=MagicMock(
+            message=MagicMock(
+                create=AsyncMock(return_value=SimpleNamespace(id="msg1")),
+                find_many=AsyncMock(return_value=[]),
+            ),
+            conversation=MagicMock(find_unique=AsyncMock(return_value=conv)),
+        )),
+        patch("app.services.runtime_config.bind_agent_context",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.runtime_config.reset_current_agent"),
+        patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
+        patch.object(orch_mod, "load_crisis_care_state", new_callable=AsyncMock,
+                     return_value={
+                         "context": "用户: 我想跳楼\nAI: 我在这儿。",
+                         "release_count": 0,
+                         "aftercare_turn_count": 1,
+                         "turns_since_safety_check": 1,
+                     }),
+        patch.object(orch_mod, "_crisis_followup_classify",
+                     new_callable=AsyncMock, return_value="guard"),
+        patch.object(orch_mod, "mark_crisis_care_active", new_callable=AsyncMock),
+        patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
+        patch.object(orch_mod, "restore_patience_for_crisis_care",
+                     new_callable=AsyncMock, return_value=70) as mock_restore,
+        patch(
+            "app.services.memory.retrieval.safety.retrieve_crisis_memories",
+            new_callable=AsyncMock,
+            return_value={"memories": []},
+        ),
+        patch(
+            "app.services.portrait.get_latest_portrait",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch.object(
+            orch_mod,
+            "handle_crisis_followup",
+            side_effect=_fake_handle_followup,
+        ),
+        patch.object(orch_mod, "_fire_background", side_effect=_close_background_arg),
+    ):
+        mock_tracer = MagicMock(
+            trace_id=None, is_active=False, safe_trace_id=None,
+            close=MagicMock(),
+        )
+        mock_tracer_cls.return_value.enter.return_value = mock_tracer
+        mock_tracer_cls.return_value.attach_to_parent.return_value = mock_tracer
+
+        events = await _drain(orch_mod.stream_chat_response(
+            conversation_id="conv1",
+            user_message="傻逼",
+            agent=agent,
+            user_id="user1",
+            save_user_message=False,
+        ))
+
+    assert events
+    mock_restore.assert_not_awaited()
+    assert crisis_calls
+    assert crisis_calls[0][0] == "傻逼"
+    assert crisis_calls[0][2]["safety_check_mode"] == "soft"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_crisis_release_completion_still_bypasses_boundary():
+    """第二次安全确认清掉 crisis state 的当轮, 也不能立刻回到拉黑回复。"""
+    from app.services.chat import orchestrator as orch_mod
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+
+    agent = SimpleNamespace(id="agent1", name="Hia", userId="user1")
+    conv = SimpleNamespace(workspaceId=None)
+
+    async def _boundary_should_not_run(_ctx):
+        raise AssertionError("crisis release turn must bypass boundary")
+        if False:
+            yield {}
+
+    async def _fake_end(message, ctx, _fallback_fn):
+        yield {"event": "reply", "data": json.dumps({"text": "好，先稳住"})}
+
+    with (
+        patch.object(orch_mod, "db", new=MagicMock(
+            message=MagicMock(
+                create=AsyncMock(return_value=SimpleNamespace(id="msg1")),
+                find_many=AsyncMock(return_value=[]),
+            ),
+            conversation=MagicMock(find_unique=AsyncMock(return_value=conv)),
+        )),
+        patch("app.services.runtime_config.bind_agent_context",
+              new_callable=AsyncMock, return_value=None),
+        patch("app.services.runtime_config.reset_current_agent"),
+        patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
+        patch.object(orch_mod, "load_crisis_care_state", new_callable=AsyncMock,
+                     return_value={
+                         "context": "用户: 我想跳楼\nAI: 我在这儿。",
+                         "release_count": 1,
+                         "aftercare_turn_count": 3,
+                         "turns_since_safety_check": 0,
+                     }),
+        patch.object(orch_mod, "_crisis_followup_classify",
+                     new_callable=AsyncMock, return_value="release"),
+        patch.object(orch_mod, "clear_crisis_care_state", new_callable=AsyncMock),
+        patch.object(orch_mod, "run_boundary", side_effect=_boundary_should_not_run),
+        patch.object(orch_mod, "restore_patience_for_crisis_care",
+                     new_callable=AsyncMock, return_value=70) as mock_restore,
+        patch.object(orch_mod, "detect_intent_unified", new_callable=AsyncMock,
+                     return_value=IntentResult(
+                         intent=IntentType.CONVERSATION_END,
+                         confidence=1.0,
+                     )),
+        patch.object(orch_mod, "_fetch_intent_context",
+                     new_callable=AsyncMock, return_value=""),
+        patch.object(orch_mod, "handle_conversation_end", side_effect=_fake_end),
+        patch.object(orch_mod, "_fire_background", side_effect=_close_background_arg),
+    ):
+        mock_tracer = MagicMock(
+            trace_id=None, is_active=False, safe_trace_id=None,
+            close=MagicMock(),
+        )
+        mock_tracer_cls.return_value.enter.return_value = mock_tracer
+        mock_tracer_cls.return_value.attach_to_parent.return_value = mock_tracer
+
+        events = await _drain(orch_mod.stream_chat_response(
+            conversation_id="conv1",
+            user_message="我现在安全了",
+            agent=agent,
+            user_id="user1",
+            save_user_message=False,
+        ))
+
+    assert events
+    mock_restore.assert_awaited_once_with("agent1", "user1")
+
+
 def test_handle_crisis_signature():
     """signature lock — handler 必须接 classified_memories + portrait kwargs.
     防回归: 调用方 (orchestrator) 必须传这两个, 否则 LLM 失去 user 上下文.
@@ -1108,7 +1339,7 @@ def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fet
     assert followup_pos < fast_path_pos
     assert classify_pos < fast_path_pos
     assert dispatch_pos < main_fetch_pos
-    assert "and not crisis_followup_active" in src
+    assert "and not crisis_care_turn" in src
     assert "handle_crisis_followup" in src
     assert "_crisis_followup_classify" in src
     assert "crisis_release_count < 2" in src

@@ -7,7 +7,8 @@
 - ≤0: 拉黑（固定模板回复）
 
 5B增强：500+违禁词库、拼音变体检测、正面互动恢复。
-spec §2 拉黑态只能通过用户真诚道歉恢复 (spec §2.5 / §2.6.2.1), 不做超时自动解封.
+spec §2 拉黑态主要通过用户真诚道歉恢复 (spec §2.5 / §2.6.2.1), 不做超时自动解封；
+危机照护中的非攻击互动是安全例外, 避免危机解除后立刻回到拉黑回复。
 Redis缓存 + DB持久化，热路径无LLM调用。
 """
 
@@ -155,7 +156,8 @@ async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:
     防 cold-start 漏 DB 状态 (Redis miss → Lua 默认 PATIENCE_MAX → 累积低 patience
     被静默重置).
 
-    spec §2 拉黑恢复只能走道歉路径 (handle_apology), 不做超时自动解封.
+    spec §2 拉黑恢复主要走道歉路径 (handle_apology), 不做超时自动解封；
+    crisis-care 非攻击互动通过 restore_patience_for_crisis_care 作为安全例外。
     """
     # 暖 Redis: get_patience miss 时回填 DB 值, 防 cold-start 漏 DB 持久化的低 patience.
     await get_patience(agent_id, user_id)
@@ -464,7 +466,16 @@ async def detect_apology(message: str) -> dict:
         return {"is_apology": False, "sincerity": 0.0}
 
 
-async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_floor: int) -> int:
+async def _restore_patience(
+    agent_id: str,
+    user_id: str,
+    delta: int,
+    blocked_floor: int,
+    *,
+    blocked_reason: str = "apology_unblock",
+    restore_reason: str = "restore",
+    blocked_event: str = EVT_BOUNDARY_APOLOGY,
+) -> int:
     """恢复耐心值的共享逻辑：非拉黑 +delta (上限 100, 走原子 adjust), 拉黑恢复到 blocked_floor.
 
     拉黑分支用 set_patience 显式重写 (不是 delta 操作), 非拉黑分支走 adjust_patience
@@ -475,25 +486,25 @@ async def _restore_patience(agent_id: str, user_id: str, delta: int, blocked_flo
         new_val = await set_patience(agent_id, user_id, blocked_floor)
         logger.info(
             f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
-            f"reason=apology_unblock current=0 new={new_val}",
+            f"reason={blocked_reason} current=0 new={new_val}",
             extra={
-                "event": EVT_BOUNDARY_APOLOGY,
+                "event": blocked_event,
                 "patience_before": 0,
                 "patience_after": new_val,
-                "reason": "apology_unblock",
+                "reason": blocked_reason,
             },
         )
         return new_val
     new_val = await adjust_patience(agent_id, user_id, +delta)
     logger.info(
         f"[PATIENCE-DELTA] agent={agent_id} user={user_id} "
-        f"reason=restore delta=+{delta} current={current} new={new_val}",
+        f"reason={restore_reason} delta=+{delta} current={current} new={new_val}",
         extra={
             "event": EVT_BOUNDARY_PATIENCE,
             "patience_before": current,
             "patience_after": new_val,
             "delta": delta,
-            "reason": "restore",
+            "reason": restore_reason,
         },
     )
     return new_val
@@ -505,6 +516,24 @@ async def handle_apology(agent_id: str, user_id: str) -> int:
     spec §3.4.4 把"道歉"和"承诺"合并为一个意图，使用同一恢复规则。
     """
     return await _restore_patience(agent_id, user_id, delta=70, blocked_floor=PATIENCE_NORMAL_MIN)
+
+
+async def restore_patience_for_crisis_care(agent_id: str, user_id: str) -> int:
+    """危机照护中的非攻击互动恢复耐心。
+
+    Crisis 优先级高于边界；如果用户在照护过程中没有继续攻击 agent, 不应在
+    危机解除后立刻回到拉黑/冷处理状态。恢复规则复用道歉强度：拉黑态恢复到
+    normal 下限, 非拉黑低耐心 +70。
+    """
+    return await _restore_patience(
+        agent_id,
+        user_id,
+        delta=70,
+        blocked_floor=PATIENCE_NORMAL_MIN,
+        blocked_reason="crisis_care_unblock",
+        restore_reason="crisis_care_restore",
+        blocked_event=EVT_BOUNDARY_PATIENCE,
+    )
 
 
 # --- 正面互动恢复耐心 ---
