@@ -69,6 +69,10 @@ def test_fast_weak_relevance_gate_is_conservative():
         "你看过重庆森林吗",
         "你喜欢拿铁吗",
         "你觉得上海怎么样",
+        "你多大了",
+        "你叫什么名字",
+        "你是做什么的",
+        "你大学学什么专业",
     ):
         assert _should_fast_weak_relevance(message) is False
         assert _apply_memory_relevance_floor("weak", message) == "medium"
@@ -170,6 +174,34 @@ async def test_fetch_parallel_context_upgrades_ai_relation_query_from_weak():
 
     assert ctx.memory_relevance == "medium"
     retrieval.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fetch_parallel_context_upgrades_ai_profile_query_and_expands_retrieval():
+    """询问 AI 稳态资料时, weak 也要召回 AI 自己资料和用户同类资料。"""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+
+    retrieval = AsyncMock(return_value={
+        "memories": [],
+        "memory_strings": [],
+        "graph_context": None,
+    })
+    with _patch_data_fetch(
+        classify_memory_relevance=AsyncMock(return_value="weak"),
+        hybrid_retrieve=retrieval,
+    ):
+        ctx = await fetch_parallel_context(
+            user_message="你多大了？",
+            messages_dicts=[{"role": "user", "content": "你多大了？"}],
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+            **_DEFAULT_CALL,
+        )
+
+    assert ctx.memory_relevance == "medium"
+    retrieval.assert_awaited_once()
+    _, _, kwargs = retrieval.mock_calls[0]
+    assert "AI 年龄" in kwargs["enhanced_query"]
+    assert "用户 年龄" in kwargs["enhanced_query"]
 
 
 @pytest.mark.asyncio

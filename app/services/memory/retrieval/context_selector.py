@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
+from app.services.memory.retrieval.query_patterns import (
+    asks_ai_profile_relation,
+    asks_ai_stable_relation,
+)
 
 MemorySource = Literal["user", "ai"]
 
@@ -328,8 +331,10 @@ def select_context(
         if _is_keyword_user_memory(mem) and try_add(mem, _PROTECTED_KEYWORD_REASON):
             keyword_added += 1
 
+    ai_stable_query = asks_ai_stable_relation(query or "")
+    ai_profile_query = asks_ai_profile_relation(query or "")
     min_user_quota = (
-        0 if asks_ai_stable_relation(query or "")
+        0 if ai_stable_query and not ai_profile_query
         else min(_MIN_USER_MEMORY_QUOTA, user_limit)
     )
     if selected_counts["user"] < min_user_quota:

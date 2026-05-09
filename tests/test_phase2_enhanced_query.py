@@ -216,7 +216,11 @@ async def test_data_fetch_retrieves_for_ai_self_preference_even_when_llm_says_we
 
 
 def test_ai_self_relation_query_pattern_is_generic_and_user_safe():
-    from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
+    from app.services.memory.retrieval.query_patterns import (
+        ai_profile_search_query,
+        asks_ai_profile_relation,
+        asks_ai_stable_relation,
+    )
 
     assert asks_ai_stable_relation("你喜欢什么电影啊")
     assert asks_ai_stable_relation("你最喜欢哪类电影")
@@ -226,10 +230,29 @@ def test_ai_self_relation_query_pattern_is_generic_and_user_safe():
     assert asks_ai_stable_relation("你去过哪些城市")
     assert asks_ai_stable_relation("哪些城市你去过")
     assert asks_ai_stable_relation("你怎么看科幻片")
+    assert asks_ai_stable_relation("你多大了")
+    assert asks_ai_stable_relation("我想知道你多大了")
+    assert asks_ai_stable_relation("你叫什么名字")
+    assert asks_ai_stable_relation("你是做什么的")
+    assert asks_ai_stable_relation("你做什么工作")
+    assert asks_ai_stable_relation("你大学学什么专业")
+
+    assert asks_ai_profile_relation("你多大了")
+    assert asks_ai_profile_relation("我想知道你多大了")
+    assert asks_ai_profile_relation("你生日是哪天")
+    assert asks_ai_profile_relation("你是哪里人")
+    assert asks_ai_profile_relation("你是什么职业")
+    assert asks_ai_profile_relation("你在哪里工作")
+    assert "AI 年龄" in ai_profile_search_query("你多大了")
+    assert "用户 年龄" in ai_profile_search_query("你多大了")
 
     assert not asks_ai_stable_relation("你觉得我怎么样")
     assert not asks_ai_stable_relation("你知道我喜欢什么电影吗")
     assert not asks_ai_stable_relation("你还记得我喜欢什么电影吗")
+    assert not asks_ai_stable_relation("你猜我多大")
+    assert not asks_ai_profile_relation("你知道我多大吗")
+    assert not ai_profile_search_query("你知道我多大吗")
+    assert not asks_ai_profile_relation("你工作忙吗")
     assert not asks_ai_stable_relation("那个呢")
 
 

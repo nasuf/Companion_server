@@ -24,7 +24,10 @@ from app.observability.events import (
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
-from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
+from app.services.memory.retrieval.query_patterns import (
+    ai_profile_search_query,
+    asks_ai_stable_relation,
+)
 from app.services.memory.retrieval.relevance import (
     RelevanceResult,
     classify_memory_relevance,
@@ -576,6 +579,9 @@ async def fetch_parallel_context(
             memory_relevance = relevance_result
 
     memory_relevance = _apply_memory_relevance_floor(memory_relevance, user_message)
+    profile_enhanced_query = ai_profile_search_query(user_message)
+    if profile_enhanced_query and not enhanced_query:
+        enhanced_query = profile_enhanced_query
 
     logger.info(
         f"[DEBUG-MEM] relevance='{memory_relevance}' enhanced='{enhanced_query[:40]}' "
@@ -606,6 +612,7 @@ async def fetch_parallel_context(
         try:
             retrieval_result = await _do_retrieval(
                 user_message, user_id, workspace_id,
+                enhanced_query=profile_enhanced_query,
             )
         except Exception as e:
             logger.warning(f"Hybrid retrieval failed: {e}")
@@ -613,6 +620,7 @@ async def fetch_parallel_context(
     if (
         memory_relevance != "weak"
         and not wait_for_enhanced_query
+        and not profile_enhanced_query
         and _should_reretrieve_with_enhanced_query(
             enhanced_query=enhanced_query,
             retrieval_result=retrieval_result,

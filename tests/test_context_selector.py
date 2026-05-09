@@ -537,6 +537,76 @@ def test_ranker_prioritizes_ai_preference_for_agent_self_query():
     assert ai_score > user_score
 
 
+def test_ranker_keeps_user_identity_as_context_for_ai_profile_query():
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    ai_age = {
+        "id": "ai-age",
+        "summary": "我今年26岁",
+        "source": "ai",
+        "main_category": "身份",
+        "sub_category": "年龄",
+        "importance": 0.95,
+        "similarity": 0.62,
+    }
+    user_age = {
+        "id": "user-age",
+        "summary": "用户28岁",
+        "source": "user",
+        "main_category": "身份",
+        "sub_category": "年龄",
+        "importance": 0.95,
+        "similarity": 0.58,
+    }
+
+    ai_score, ai_reasons = rank_memory_candidate(ai_age, "AI 年龄 用户 年龄")
+    user_score, user_reasons = rank_memory_candidate(user_age, "AI 年龄 用户 年龄")
+
+    assert "AI自我记忆相关" in ai_reasons
+    assert "AI资料查询:用户同类资料" in user_reasons
+    assert "AI自我查询降权:用户记忆" not in user_reasons
+    assert ai_score > 0
+    assert user_score > 0
+
+
+def test_select_context_keeps_user_identity_for_ai_profile_query():
+    candidates = [
+        {
+            "id": "ai-age",
+            "summary": "我今年26岁",
+            "source": "ai",
+            "main_category": "身份",
+            "sub_category": "年龄",
+            "rank_score": 0.7,
+            "similarity": 0.62,
+        },
+        {
+            "id": "user-age",
+            "summary": "用户28岁",
+            "source": "user",
+            "main_category": "身份",
+            "sub_category": "年龄",
+            "rank_score": 0.36,
+            "similarity": 0.49,
+        },
+    ] + [
+        {
+            "id": f"ai-other-{i}",
+            "summary": f"AI 其他资料 {i}",
+            "source": "ai",
+            "rank_score": 0.69 - i * 0.01,
+            "similarity": 0.4,
+        }
+        for i in range(4)
+    ]
+
+    result = select_context(candidates, token_budget=800, query="AI 年龄 用户 年龄")
+    texts = [m.text for m in result]
+
+    assert "我今年26岁" in texts
+    assert "用户28岁" in texts
+
+
 def test_ranker_prioritizes_user_reminders_over_generic_identity():
     from app.services.memory.retrieval.ranking import rank_memory_candidate
 

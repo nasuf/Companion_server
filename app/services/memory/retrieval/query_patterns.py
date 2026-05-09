@@ -14,7 +14,10 @@ _AI_RELATION_VERBS = (
 )
 _AI_RELATION_OBJECT_STRIP = "吗嘛呢么呀吧啊？?！!，,。."
 _AI_OPINION_PREFIXES = ("你怎么看", "你如何看", "你对")
-_USER_TARGET_PREFIXES = ("你觉得我", "你认为我", "你怎么看我", "你对我")
+_USER_TARGET_PREFIXES = (
+    "你觉得我", "你认为我", "你怎么看我", "你对我",
+    "你猜我", "你看我", "你说我",
+)
 _USER_INFO_QUERY_PREFIXES = (
     "你知道我", "你了解我", "你还记得我", "你记得我",
     "你记不记得我", "你是否记得我",
@@ -28,6 +31,31 @@ _SUBJECT_FILLERS = (
     "通常", "一般", "经常", "常常", "偶尔", "最爱",
 )
 _OBJECT_PLACEHOLDERS = {"这个", "那个", "这些", "那些", "这", "那", "它", "他", "她"}
+_AI_PROFILE_QUERY_TERMS = (
+    "多大", "几岁", "年龄", "哪年出生", "什么时候出生", "出生",
+    "生日", "叫什么", "叫啥", "名字", "姓名", "是谁",
+    "做什么", "干什么", "职业", "什么工作", "工作是什么", "工作是啥",
+    "在哪工作", "在哪里工作", "哪里人", "哪的人",
+    "家乡", "住哪", "住在哪里", "现居", "学历", "大学", "专业",
+    "学校", "毕业", "星座", "生肖", "血型", "身高", "性别",
+)
+_PROFILE_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("多大", "几岁", "年龄", "哪年出生", "出生"), "年龄 几岁 多大 出生年份"),
+    (("生日",), "生日 出生日期"),
+    (("叫什么", "叫啥", "名字", "姓名", "是谁"), "姓名 名字 叫什么"),
+    (
+        ("做什么", "干什么", "职业", "什么工作", "工作是什么", "工作是啥", "在哪工作", "在哪里工作"),
+        "职业 工作 做什么",
+    ),
+    (("哪里人", "哪的人", "家乡"), "家乡 哪里人"),
+    (("住哪", "住在哪里", "现居"), "现居地 住址 住哪"),
+    (("学历", "大学", "专业", "学校", "毕业"), "学历 学校 大学 专业"),
+    (("星座",), "星座"),
+    (("生肖",), "生肖"),
+    (("血型",), "血型"),
+    (("身高",), "身高"),
+    (("性别",), "性别"),
+)
 
 
 def _normalize(text: str) -> str:
@@ -61,10 +89,53 @@ def _has_ai_subject_before(text: str, verb_index: int) -> bool:
     return len(between) <= 8 and "我" not in between
 
 
+def asks_ai_profile_relation(user_message: str) -> bool:
+    """Whether the user asks the agent's stable profile/identity facts.
+
+    This covers shape-level profile questions such as age, name, job, hometown,
+    education, birthday, etc. It intentionally excludes "你觉得我/你知道我..."
+    cases where the answer should be about the user instead of the agent.
+    """
+    text = _normalize(user_message)
+    if not text:
+        return False
+    if text.startswith(_USER_TARGET_PREFIXES):
+        return False
+    if text.startswith(_USER_INFO_QUERY_PREFIXES):
+        return False
+    lower = text.lower()
+    has_ai_subject = (
+        "你" in text[:8]
+        or lower.startswith("ai")
+        or lower.startswith("agent")
+    )
+    return has_ai_subject and any(term in text for term in _AI_PROFILE_QUERY_TERMS)
+
+
+def ai_profile_search_query(user_message: str) -> str:
+    """Expanded retrieval query for agent profile questions.
+
+    Profile questions often need two memory lanes at once: the agent's own
+    answer and matching user facts that prevent stale follow-up questions
+    ("你呢?") when the user already told us. Return an empty string for non
+    profile questions so callers can keep the original query.
+    """
+    text = _normalize(user_message)
+    if not asks_ai_profile_relation(text):
+        return ""
+    parts: list[str] = []
+    for terms, expansion in _PROFILE_QUERY_EXPANSIONS:
+        if any(term in text for term in terms):
+            parts.append(expansion)
+    if not parts:
+        parts.append("身份 个人资料")
+    return f"AI {' '.join(parts)} 用户 {' '.join(parts)}"
+
+
 def asks_ai_stable_relation(user_message: str) -> bool:
     """Whether the user asks about the agent's stable relation to a topic.
 
-    Examples: "你喜欢什么电影", "你去过哪些城市", "你怎么看科幻片".
+    Examples: "你喜欢什么电影", "你去过哪些城市", "你怎么看科幻片", "你多大了".
     Counterexamples: "你觉得我怎么样", "你还记得我喜欢什么电影吗".
     """
     text = _normalize(user_message)
@@ -74,6 +145,8 @@ def asks_ai_stable_relation(user_message: str) -> bool:
         return False
     if text.startswith(_USER_INFO_QUERY_PREFIXES):
         return False
+    if asks_ai_profile_relation(text):
+        return True
 
     for verb in _AI_RELATION_VERBS:
         idx = text.find(verb)

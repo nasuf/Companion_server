@@ -11,7 +11,10 @@ import re
 from typing import Any
 
 from app.services.memory.polarity import query_semantic_conflict_reasons
-from app.services.memory.retrieval.query_patterns import asks_ai_stable_relation
+from app.services.memory.retrieval.query_patterns import (
+    asks_ai_profile_relation,
+    asks_ai_stable_relation,
+)
 from app.services.memory.retrieval.relevance import compute_display_score
 
 
@@ -46,7 +49,7 @@ _CATEGORY_QUERY_KEYWORDS: dict[str, tuple[str, ...]] = {
         "住院", "出院", "手术", "生病", "健康", "宠物", "生活",
     ),
     "身份": (
-        "名字", "几岁", "年龄", "生日", "家人", "妈妈", "爸爸", "父母",
+        "名字", "多大", "几岁", "年龄", "生日", "家人", "妈妈", "爸爸", "父母",
         "妻子", "丈夫", "女朋友", "男朋友", "职业", "住哪", "哪里人",
     ),
     "偏好": (
@@ -91,8 +94,8 @@ _REMINDER_QUERY_TERMS: tuple[str, ...] = (
 _REMINDER_SUBCATEGORIES: tuple[str, ...] = ("提醒",)
 _IDENTITY_QUERY_TERMS: tuple[str, ...] = (
     "基本信息", "个人信息", "信息", "资料", "名字", "姓名", "叫什么",
-    "年龄", "几岁", "生日", "住哪", "哪里人", "职业", "性别", "身高",
-    "体型",
+    "年龄", "多大", "几岁", "生日", "住哪", "哪里人", "职业", "性别",
+    "身高", "体型",
 )
 _USER_IDENTITY_SUBCATEGORIES: tuple[str, ...] = (
     "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
@@ -363,10 +366,14 @@ def rank_memory_candidate(
             boost *= 0.50
             reasons.append("用户身份查询降权:AI身份记忆")
 
+    ai_profile_query = asks_ai_profile_relation(query)
     if asks_ai_stable_relation(query) and not exact_text_match:
         if _is_ai_self_memory(memory):
             boost += 0.55
             reasons.append("AI自我记忆相关")
+        elif ai_profile_query and _is_user_identity_memory(memory):
+            boost += 0.25
+            reasons.append("AI资料查询:用户同类资料")
         elif memory.get("source") == "user":
             boost *= 0.60
             reasons.append("AI自我查询降权:用户记忆")
