@@ -1517,17 +1517,25 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
 @pytest.mark.asyncio
 async def test_retrieve_crisis_followup_memories_uses_safety_and_current_topic(monkeypatch):
     """Follow-up retrieval is two-channel: safety stays, current topic is restored."""
+    from app.services.chat.intent_handlers import _format_user_memory_for_crisis
     from app.services.memory.retrieval import safety
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    safety_memory = ClassifiedMemory(
-        id="safety",
-        text="用户表达了想跳楼的自杀念头",
-        source="user",
-        relevance="strong",
-        score=0.95,
-        rank_reasons=["保护槽:安全情绪"],
-    )
+    crisis_candidates = [
+        {
+            "id": "safety",
+            "summary": "用户表达了想跳楼的自杀念头",
+            "content": "用户表达了想跳楼的自杀念头",
+            "level": 2,
+            "importance": 0.9,
+            "similarity": 0.8,
+            "main_category": "情绪",
+            "sub_category": "悲伤",
+            "source": "user",
+            "rank_score": 0.95,
+            "rank_reasons": ["安全/情绪相关"],
+        },
+    ]
     topical_memory = ClassifiedMemory(
         id="braids",
         text="用户喜欢那个一头脏辫的酷女孩",
@@ -1542,11 +1550,34 @@ async def test_retrieve_crisis_followup_memories_uses_safety_and_current_topic(m
         relevance="medium",
         score=0.67,
     )
+    colleague_memory = ClassifiedMemory(
+        id="colleague",
+        text="脏辫女孩是用户的同事",
+        source="user",
+        relevance="medium",
+        score=0.66,
+    )
+    ai_noise = [
+        ClassifiedMemory(
+            id=f"ai-{idx}",
+            text=f"AI 自我记忆 {idx}",
+            source="ai",
+            relevance="medium",
+            score=0.8,
+        )
+        for idx in range(6)
+    ]
 
-    retrieve_mock = AsyncMock(return_value=[safety_memory])
-    hybrid_mock = AsyncMock(return_value={"memories": [topical_memory, married_memory]})
-    monkeypatch.setattr(safety, "retrieve_crisis_memories", retrieve_mock)
+    crisis_candidates_mock = AsyncMock(return_value=(crisis_candidates, len(crisis_candidates)))
+    hybrid_mock = AsyncMock(
+        return_value={
+            "memories": [*ai_noise, topical_memory, married_memory, colleague_memory]
+        }
+    )
+    trace_mock = MagicMock()
+    monkeypatch.setattr(safety, "_collect_crisis_memory_candidates", crisis_candidates_mock)
     monkeypatch.setattr(safety, "hybrid_retrieve", hybrid_mock)
+    monkeypatch.setattr(safety, "record_retrieval_session", trace_mock)
 
     memories = await safety.retrieve_crisis_followup_memories(
         "你知道我说的是谁吗",
@@ -1561,9 +1592,16 @@ async def test_retrieve_crisis_followup_memories_uses_safety_and_current_topic(m
     )
 
     ids = [m.id for m in memories]
-    assert ids == ["safety", "braids", "married"]
+    assert ids == ["safety", "braids", "married", "colleague"]
     assert any(reason == "保护槽:危机安全背景" for reason in memories[0].rank_reasons or [])
     assert any(reason == "保护槽:当前话题" for reason in memories[1].rank_reasons or [])
+    followup_block = _format_user_memory_for_crisis(memories, include_factual=True)
+    assert "【当前话题相关记忆】" in followup_block
+    assert "用户喜欢那个一头脏辫的酷女孩" in followup_block
+    assert "用户不知道脏辫女孩有对象且已结婚" in followup_block
+    assert "脏辫女孩是用户的同事" in followup_block
+    assert "AI 自我记忆" not in followup_block
+    crisis_candidates_mock.assert_awaited_once()
     hybrid_mock.assert_awaited_once()
     _, args, kwargs = hybrid_mock.mock_calls[0]
     assert args[:2] == ("你知道我说的是谁吗", "u1")
@@ -1571,6 +1609,102 @@ async def test_retrieve_crisis_followup_memories_uses_safety_and_current_topic(m
     assert "咖啡" in kwargs["enhanced_query"]
     assert "难过" not in kwargs["enhanced_query"]
     assert "想跳楼" not in kwargs["enhanced_query"]
+    assert trace_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_crisis_followup_memories_falls_back_to_crisis_candidates(monkeypatch):
+    """If normal topical retrieval misses, use non-safety crisis candidates.
+
+    This covers the production trace where crisis_safety had the braids/colleague
+    memories as candidates, while hybrid_l1_l2 returned zero rows.
+    """
+    from app.services.memory.retrieval import safety
+
+    crisis_candidates = [
+        {
+            "id": "safety",
+            "summary": "用户表达了想跳楼的自杀念头",
+            "content": "用户表达了想跳楼的自杀念头",
+            "level": 2,
+            "importance": 0.9,
+            "similarity": 0.8,
+            "main_category": "情绪",
+            "sub_category": "悲伤",
+            "source": "user",
+            "rank_score": 0.95,
+            "rank_reasons": ["安全/情绪相关"],
+        },
+        *[
+            {
+                "id": f"ai-topic-{idx}",
+                "summary": f"AI 自我记忆 {idx}",
+                "content": f"AI 自我记忆 {idx}",
+                "level": 2,
+                "importance": 0.9,
+                "similarity": 0.72,
+                "main_category": "偏好",
+                "sub_category": "人际关系观",
+                "source": "ai",
+                "rank_score": 0.75,
+                "rank_reasons": ["AI自我记忆相关"],
+            }
+            for idx in range(6)
+        ],
+        {
+            "id": "braids",
+            "summary": "用户喜欢那个一头脏辫的酷女孩",
+            "content": "用户喜欢那个一头脏辫的酷女孩",
+            "level": 2,
+            "importance": 0.7,
+            "similarity": 0.51,
+            "main_category": "偏好",
+            "sub_category": "人际喜好",
+            "source": "user",
+            "rank_score": 0.45,
+            "rank_reasons": ["关键词命中", "话题类别匹配"],
+        },
+        {
+            "id": "married",
+            "summary": "用户不知道脏辫女孩有对象且已结婚",
+            "content": "用户不知道脏辫女孩有对象且已结婚",
+            "level": 2,
+            "importance": 0.6,
+            "similarity": 0.60,
+            "main_category": "生活",
+            "sub_category": "人际",
+            "source": "user",
+            "rank_score": 0.31,
+            "rank_reasons": [],
+        },
+    ]
+
+    monkeypatch.setattr(
+        safety,
+        "_collect_crisis_memory_candidates",
+        AsyncMock(return_value=(crisis_candidates, len(crisis_candidates))),
+    )
+    monkeypatch.setattr(safety, "hybrid_retrieve", AsyncMock(return_value={"memories": []}))
+    monkeypatch.setattr(safety, "record_retrieval_session", MagicMock())
+
+    memories = await safety.retrieve_crisis_followup_memories(
+        "不是，你还没想起来我说的是谁，你总是在重复我的话",
+        "u1",
+        recent_context=(
+            "用户: 我就是忘不了她\n"
+            "用户: 就是那个我喜欢的，但是却结了婚我也不知道的人"
+        ),
+        workspace_id="ws1",
+    )
+
+    by_id = {memory.id: memory for memory in memories}
+    assert "safety" in by_id
+    assert "braids" in by_id
+    assert "married" in by_id
+    assert all(not memory.id.startswith("ai-topic-") for memory in memories)
+    assert any(reason == "保护槽:危机安全背景" for reason in by_id["safety"].rank_reasons or [])
+    assert any(reason == "保护槽:当前话题" for reason in by_id["braids"].rank_reasons or [])
+    assert any(reason == "保护槽:当前话题" for reason in by_id["married"].rank_reasons or [])
 
 
 # ════════════════════════════════════════════════════════════════════

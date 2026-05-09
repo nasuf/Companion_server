@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from app.db import db
 from app.services.memory.retrieval.context_selector import ClassifiedMemory, select_context
@@ -35,6 +36,9 @@ _CRISIS_FOLLOWUP_TOPIC_BUDGET = 700
 _CRISIS_SAFETY_REASON = "保护槽:危机安全背景"
 _CRISIS_TOPICAL_REASON = "保护槽:当前话题"
 _TOPIC_CONTEXT_MAX_LINES = 8
+_TOPIC_FALLBACK_MIN_SCORE = 0.30
+_TOPIC_FALLBACK_CATEGORIES = {"生活", "偏好", "身份", "情绪", "思维"}
+_TOPIC_FALLBACK_SAFETY_SUBCATEGORIES = set(EMOTIONAL_SAFETY_SUBCATEGORIES)
 
 
 async def _search_crisis_keyword_memories(
@@ -76,19 +80,12 @@ async def _search_crisis_keyword_memories(
     )
 
 
-async def retrieve_crisis_memories(
+async def _collect_crisis_memory_candidates(
     message: str,
     user_id: str,
     *,
     workspace_id: str | None = None,
-    limit: int = 5,
-) -> list[ClassifiedMemory]:
-    """Return safety-relevant user memories for a crisis reply.
-
-    The vector side keeps semantic recall; the keyword/category side guarantees
-    that known emotional or self-harm memories are candidates even if generic
-    L1 facts would otherwise crowd them out.
-    """
+) -> tuple[list[dict[str, Any]], int]:
     vector_task = search_similar(
         message,
         user_id,
@@ -101,7 +98,7 @@ async def retrieve_crisis_memories(
         vector_task, keyword_task, return_exceptions=True,
     )
 
-    candidates: list[dict] = []
+    candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     for source_results, source_label in (
         (vector_results, "vector"),
@@ -116,6 +113,7 @@ async def retrieve_crisis_memories(
             mid = row.get("id", "")
             if not mid or mid in seen:
                 continue
+            row = dict(row)
             row["_retrieval_source"] = source_label
             score, reasons = rank_memory_candidate(row, message)
             row["rank_score"] = score
@@ -124,6 +122,31 @@ async def retrieve_crisis_memories(
             candidates.append(row)
 
     candidates.sort(key=lambda r: float(r.get("rank_score", 0)), reverse=True)
+    raw_count = (
+        (len(vector_results) if isinstance(vector_results, list) else 0)
+        + (len(keyword_results) if isinstance(keyword_results, list) else 0)
+    )
+    return candidates, raw_count
+
+
+async def retrieve_crisis_memories(
+    message: str,
+    user_id: str,
+    *,
+    workspace_id: str | None = None,
+    limit: int = 5,
+) -> list[ClassifiedMemory]:
+    """Return safety-relevant user memories for a crisis reply.
+
+    The vector side keeps semantic recall; the keyword/category side guarantees
+    that known emotional or self-harm memories are candidates even if generic
+    L1 facts would otherwise crowd them out.
+    """
+    candidates, raw_count = await _collect_crisis_memory_candidates(
+        message,
+        user_id,
+        workspace_id=workspace_id,
+    )
     selected = select_context(
         candidates,
         token_budget=_CRISIS_TOKEN_BUDGET,
@@ -134,10 +157,7 @@ async def retrieve_crisis_memories(
         strategy="crisis_safety",
         query=message,
         workspace_id=workspace_id,
-        raw_count=(
-            (len(vector_results) if isinstance(vector_results, list) else 0)
-            + (len(keyword_results) if isinstance(keyword_results, list) else 0)
-        ),
+        raw_count=raw_count,
         candidate_count=len(candidates),
         selected_count=len(selected),
         candidates=candidates,
@@ -158,6 +178,23 @@ def _append_memory_reason(memory: ClassifiedMemory, reason: str) -> ClassifiedMe
     return memory
 
 
+def _memory_text(row: dict[str, Any]) -> str:
+    return str(row.get("summary") or row.get("content") or "")
+
+
+def _is_safety_memory_row(row: dict[str, Any]) -> bool:
+    text = _memory_text(row)
+    reasons = {str(reason) for reason in (row.get("rank_reasons") or [])}
+    return (
+        "安全/情绪相关" in reasons
+        or (
+            row.get("main_category") == "情绪"
+            and row.get("sub_category") in _TOPIC_FALLBACK_SAFETY_SUBCATEGORIES
+        )
+        or any(term in text for term in SAFETY_QUERY_KEYWORDS + DISTRESS_KEYWORDS)
+    )
+
+
 def _build_followup_topic_query(message: str, recent_context: str) -> str:
     """Build a topic-focused query for crisis aftercare retrieval.
 
@@ -174,14 +211,62 @@ def _build_followup_topic_query(message: str, recent_context: str) -> str:
             cleaned = cleaned.replace(term, " ")
         return " ".join(cleaned.split()).strip(punctuation)
 
-    topic_lines = [
-        cleaned
-        for line in (recent_context or "").splitlines()
-        if (cleaned := strip_safety_terms(line))
-    ]
+    user_topic_lines: list[str] = []
+    other_topic_lines: list[str] = []
+    for line in (recent_context or "").splitlines():
+        cleaned = strip_safety_terms(line)
+        if not cleaned:
+            continue
+        if line.lstrip().startswith("用户:"):
+            user_topic_lines.append(cleaned)
+        elif not line.lstrip().startswith("AI:"):
+            other_topic_lines.append(cleaned)
+    topic_lines = user_topic_lines or other_topic_lines
     topic_lines = topic_lines[-_TOPIC_CONTEXT_MAX_LINES:]
     parts = [*topic_lines, message.strip()]
     return "\n".join(part for part in parts if part).strip() or message
+
+
+def _select_topical_from_candidates(
+    candidates: list[dict[str, Any]],
+    topic_query: str,
+    *,
+    limit: int,
+    seen_keys: set[str],
+) -> list[ClassifiedMemory]:
+    reranked: list[dict[str, Any]] = []
+    for row in candidates:
+        if row.get("source") == "ai":
+            continue
+        if _is_safety_memory_row(row):
+            continue
+        main_category = row.get("main_category")
+        if main_category and main_category not in _TOPIC_FALLBACK_CATEGORIES:
+            continue
+        item = dict(row)
+        score, reasons = rank_memory_candidate(item, topic_query)
+        if score < _TOPIC_FALLBACK_MIN_SCORE and float(item.get("similarity", 0) or 0) < 0.5:
+            continue
+        item["rank_score"] = score
+        item["rank_reasons"] = reasons
+        reranked.append(item)
+
+    reranked.sort(key=lambda item: float(item.get("rank_score", 0)), reverse=True)
+    selected = select_context(
+        reranked,
+        token_budget=_CRISIS_FOLLOWUP_TOPIC_BUDGET,
+        max_items=limit,
+        query=topic_query,
+    )
+    result: list[ClassifiedMemory] = []
+    for memory in selected:
+        key = memory.id or memory.text
+        if not key or key in seen_keys:
+            continue
+        result.append(memory)
+        if len(result) >= limit:
+            break
+    return result
 
 
 async def retrieve_crisis_followup_memories(
@@ -202,11 +287,10 @@ async def retrieve_crisis_followup_memories(
     """
     safety_query = f"{recent_context}\n{message}".strip()
     topic_query = _build_followup_topic_query(message, recent_context)
-    safety_task = retrieve_crisis_memories(
+    crisis_candidates_task = _collect_crisis_memory_candidates(
         safety_query or message,
         user_id,
         workspace_id=workspace_id,
-        limit=safety_limit,
     )
     topical_task = hybrid_retrieve(
         message,
@@ -215,14 +299,16 @@ async def retrieve_crisis_followup_memories(
         token_budget=_CRISIS_FOLLOWUP_TOPIC_BUDGET,
         enhanced_query=topic_query if topic_query != message else None,
     )
-    safety_result, topical_result = await asyncio.gather(
-        safety_task,
+    crisis_candidate_result, topical_result = await asyncio.gather(
+        crisis_candidates_task,
         topical_task,
         return_exceptions=True,
     )
 
     merged: list[ClassifiedMemory] = []
     seen: set[str] = set()
+    crisis_candidates: list[dict[str, Any]] = []
+    crisis_raw_count = 0
 
     def add(memory: ClassifiedMemory, reason: str) -> None:
         key = memory.id or memory.text
@@ -231,26 +317,66 @@ async def retrieve_crisis_followup_memories(
         seen.add(key)
         merged.append(_append_memory_reason(memory, reason))
 
-    if isinstance(safety_result, Exception):
-        logger.warning(f"crisis followup safety memory search failed: {safety_result}")
+    if isinstance(crisis_candidate_result, Exception):
+        logger.warning(
+            f"crisis followup candidate memory search failed: {crisis_candidate_result}"
+        )
     else:
+        crisis_candidates, crisis_raw_count = crisis_candidate_result
+        safety_candidates = [
+            row for row in crisis_candidates
+            if _is_safety_memory_row(row)
+        ]
+        safety_result = select_context(
+            safety_candidates,
+            token_budget=_CRISIS_TOKEN_BUDGET,
+            max_items=safety_limit,
+            query=safety_query or message,
+        )
+        record_retrieval_session(
+            strategy="crisis_safety",
+            query=safety_query or message,
+            workspace_id=workspace_id,
+            raw_count=crisis_raw_count,
+            candidate_count=len(crisis_candidates),
+            selected_count=len(safety_result),
+            candidates=crisis_candidates,
+            selected=safety_result,
+            notes={
+                "vector_top_k": _CRISIS_VECTOR_TOP_K,
+                "keyword_limit": _CRISIS_KEYWORD_LIMIT,
+                "followup_topic_query": topic_query[:120],
+            },
+        )
         for memory in safety_result or []:
             add(memory, _CRISIS_SAFETY_REASON)
 
+    topical_added = 0
     if isinstance(topical_result, Exception):
         logger.warning(f"crisis followup topical memory search failed: {topical_result}")
     else:
         topical_memories = (
             topical_result.get("memories") if isinstance(topical_result, dict) else []
         ) or []
-        topical_added = 0
         for memory in topical_memories:
             if topical_added >= topical_limit:
                 break
             if isinstance(memory, ClassifiedMemory):
+                if memory.source == "ai":
+                    continue
                 before = len(merged)
                 add(memory, _CRISIS_TOPICAL_REASON)
                 if len(merged) > before:
                     topical_added += 1
+
+    if topical_added < topical_limit and crisis_candidates:
+        fallback_memories = _select_topical_from_candidates(
+            crisis_candidates,
+            topic_query,
+            limit=topical_limit - topical_added,
+            seen_keys=seen,
+        )
+        for memory in fallback_memories:
+            add(memory, _CRISIS_TOPICAL_REASON)
 
     return merged
