@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,17 +15,6 @@ from app.services.llm.models import get_chat_model, get_utility_model, invoke_js
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, render_prompt
 
 logger = logging.getLogger(__name__)
-
-_AI_FAMILY_FACT_QUERY_RE = re.compile(
-    r"(?:你(?:妈|妈妈|母亲|爸|爸爸|父亲|兄弟姐妹|哥哥|姐姐|弟弟|妹妹)"
-    r".*(?:叫|名字|叫什么|是谁|还记得|记得吗|有没有|有吗|在哪|怎么样|多大|几岁)"
-    r"|你(?:有|有没有)(?:妈|妈妈|母亲|爸|爸爸|父亲|兄弟姐妹|哥哥|姐姐|弟弟|妹妹))"
-)
-_AI_FAMILY_CLEAR_INSULT_RE = re.compile(
-    r"(?:草|操|艹|日|去|滚)?你妈(?:的|逼|批|b|死|死了|没了|炸了|臭|傻|垃圾)|"
-    r"(?:傻逼|废物|垃圾|滚|去死|nmsl|cnm|sb)",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
@@ -793,12 +781,6 @@ async def attack_target_classify(
     `recent_context`: 最近几轮对话, 帮 LLM 在连续骂战里识别"你"指 AI
     (e.g. 用户上轮骂"你个傻逼", 这轮"不然呢" 也是攻击 AI).
     """
-    compact_message = re.sub(r"\s+", "", message or "")
-    if (
-        _AI_FAMILY_FACT_QUERY_RE.search(compact_message)
-        and not _AI_FAMILY_CLEAR_INSULT_RE.search(compact_message)
-    ):
-        return "无负面意图"
     return await _classify_label(
         "boundary.attack_target",
         {"message": message, "recent_context": recent_context},

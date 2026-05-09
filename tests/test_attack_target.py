@@ -9,10 +9,10 @@ from app.services.prompting import defaults
 
 
 @pytest.mark.asyncio
-async def test_attack_target_family_name_question_is_not_attack():
+async def test_attack_target_family_name_question_delegates_to_semantic_classifier():
     with patch(
         "app.services.chat.intent_replies._classify_label",
-        AsyncMock(return_value="攻击AI"),
+        AsyncMock(return_value="无负面意图"),
     ) as classify_mock:
         result = await attack_target_classify(
             "没，你妈妈叫什么还记得吗",
@@ -20,7 +20,14 @@ async def test_attack_target_family_name_question_is_not_attack():
         )
 
     assert result == "无负面意图"
-    classify_mock.assert_not_awaited()
+    classify_mock.assert_awaited_once_with(
+        "boundary.attack_target",
+        {
+            "message": "没，你妈妈叫什么还记得吗",
+            "recent_context": "用户: 你有兄弟姐妹吗\nAI: 没有呢，我是独生女",
+        },
+        ("攻击AI", "攻击第三方", "无负面意图", "无目标脏话"),
+    )
 
 
 @pytest.mark.asyncio
