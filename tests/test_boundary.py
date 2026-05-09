@@ -10,6 +10,7 @@
 - 热路径边界检查
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,9 +28,23 @@ from app.services.interaction.boundary import (
     get_patience,
     get_patience_zone,
     handle_apology,
+    init_patience,
     recover_patience_hourly,
     set_patience,
 )
+
+
+def _fake_boundary_db(*, find_unique_result=None, find_unique_side_effect=None):
+    find_unique = AsyncMock(
+        side_effect=find_unique_side_effect,
+        return_value=find_unique_result,
+    )
+    return SimpleNamespace(
+        patiencestate=SimpleNamespace(
+            find_unique=find_unique,
+            upsert=AsyncMock(),
+        ),
+    )
 
 
 # --- get_patience_zone ---
@@ -105,13 +120,39 @@ class TestGenerateBoundaryResponse:
 class TestPatienceRedis:
     async def test_get_patience_default(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = None
-        val = await get_patience("agent1", "user1")
+        fake_db = _fake_boundary_db(find_unique_result=None)
+        with patch(
+            "app.services.interaction.boundary.db",
+            new=fake_db,
+        ):
+            val = await get_patience("agent1", "user1")
         assert val == PATIENCE_MAX
 
     async def test_get_patience_existing(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "55"
         val = await get_patience("agent1", "user1")
         assert val == 55
+
+    async def test_get_patience_redis_miss_uses_db(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = None
+        record = MagicMock(value=0)
+        fake_db = _fake_boundary_db(find_unique_result=record)
+        with patch(
+            "app.services.interaction.boundary.db",
+            new=fake_db,
+        ):
+            val = await get_patience("agent1", "user1")
+        assert val == 0
+        patch_boundary_redis.set.assert_awaited_once()
+
+    async def test_get_patience_db_error_does_not_default_to_full(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = None
+        fake_db = _fake_boundary_db(find_unique_side_effect=RuntimeError("db down"))
+        with patch(
+            "app.services.interaction.boundary.db",
+            new=fake_db,
+        ), pytest.raises(RuntimeError):
+            await get_patience("agent1", "user1")
 
     async def test_set_patience_clamp_max(self, patch_boundary_redis):
         val = await set_patience("agent1", "user1", 150)
@@ -124,6 +165,7 @@ class TestPatienceRedis:
 
     async def test_adjust_patience(self, patch_boundary_redis):
         # 现在 adjust_patience 走 Redis Lua, eval 返结果即新值
+        patch_boundary_redis.get.return_value = "80"
         patch_boundary_redis.eval = AsyncMock(return_value=65)
         val = await adjust_patience("agent1", "user1", -15)
         assert val == 65
@@ -140,6 +182,20 @@ class TestPatienceRedis:
         val = await recover_patience_hourly("agent1", "user1")
         assert val == 60  # spec §2.5: 每小时 +10
 
+    async def test_recover_hourly_redis_miss_rehydrates_blocked_from_db(
+        self, patch_boundary_redis,
+    ):
+        patch_boundary_redis.get.return_value = None
+        record = MagicMock(value=0)
+        fake_db = _fake_boundary_db(find_unique_result=record)
+        with patch(
+            "app.services.interaction.boundary.db",
+            new=fake_db,
+        ):
+            val = await recover_patience_hourly("agent1", "user1")
+        assert val == 0
+        patch_boundary_redis.set.assert_awaited_once()
+
     async def test_recover_hourly_skip_max(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = "100"
         val = await recover_patience_hourly("agent1", "user1")
@@ -154,8 +210,30 @@ class TestPatienceRedis:
 
     async def test_recover_hourly_no_record(self, patch_boundary_redis):
         patch_boundary_redis.get.return_value = None
-        val = await recover_patience_hourly("agent1", "user1")
+        fake_db = _fake_boundary_db(find_unique_result=None)
+        with patch(
+            "app.services.interaction.boundary.db",
+            new=fake_db,
+        ):
+            val = await recover_patience_hourly("agent1", "user1")
         assert val == PATIENCE_MAX
+
+    async def test_init_patience_does_not_overwrite_existing_blocked(
+        self, patch_boundary_redis,
+    ):
+        patch_boundary_redis.get.return_value = None
+        record = MagicMock(value=0)
+        fake_db = _fake_boundary_db(find_unique_result=record)
+        with patch(
+            "app.services.interaction.boundary.db",
+            new=fake_db,
+        ), patch(
+            "app.services.interaction.boundary.set_patience",
+            new=AsyncMock(),
+        ) as mock_set_patience:
+            val = await init_patience("agent1", "user1")
+        assert val == 0
+        mock_set_patience.assert_not_called()
 
 
 # --- handle_apology ---
@@ -187,6 +265,7 @@ class TestHandleApology:
 @pytest.mark.asyncio
 class TestCheckBoundary:
     async def test_no_banned_words_returns_none(self, patch_boundary_redis):
+        patch_boundary_redis.get.return_value = "100"
         result, patience = await check_boundary("agent1", "user1", "你好")
         assert result is None
         assert patience == 100

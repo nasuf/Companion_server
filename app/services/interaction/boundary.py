@@ -88,6 +88,7 @@ async def get_patience(agent_id: str, user_id: str) -> int:
             return record.value
     except Exception as e:
         logger.warning(f"DB patience lookup failed: {e}")
+        raise
 
     return PATIENCE_MAX
 
@@ -118,7 +119,15 @@ async def set_patience(agent_id: str, user_id: str, value: int) -> int:
 
 
 async def init_patience(agent_id: str, user_id: str) -> int:
-    """创建时显式初始化耐心值为100（Redis + DB）。"""
+    """创建时显式初始化耐心值为100（Redis + DB）。
+
+    如果状态已存在, 只回填 Redis, 不覆盖已有低耐心/拉黑状态。
+    """
+    current = await get_patience(agent_id, user_id)
+    if current != PATIENCE_MAX:
+        redis = await get_redis()
+        await redis.set(_patience_key(agent_id, user_id), str(current))
+        return current
     return await set_patience(agent_id, user_id, PATIENCE_MAX)
 
 
@@ -178,11 +187,7 @@ async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:
 
 async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
     """每小时自然恢复耐心值。满值或拉黑时跳过。"""
-    redis = await get_redis()
-    val = await redis.get(_patience_key(agent_id, user_id))
-    if val is None:
-        return PATIENCE_MAX  # 无记录=满值，跳过写入
-    current = int(val)
+    current = await get_patience(agent_id, user_id)
     if current <= 0 or current >= PATIENCE_MAX:
         return current
     return await set_patience(agent_id, user_id, current + PATIENCE_HOURLY_RECOVERY)
