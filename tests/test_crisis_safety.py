@@ -743,6 +743,102 @@ async def test_handle_crisis_followup_calls_followup_reply():
 
 
 @pytest.mark.asyncio
+async def test_handle_crisis_followup_memory_question_does_not_fabricate_absent_fact():
+    """普通记忆追问在危机 aftercare 中也不能让 LLM 编造事实。"""
+    from app.services.chat.intent_handlers import handle_crisis_followup
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    ctx = _make_short_circuit_ctx()
+    ctx.recent_context = "用户: 我想死\nAI: 我在。你说的话我看到了。"
+    classified = [
+        ClassifiedMemory(
+            id="coffee",
+            text="用户喜欢咖啡",
+            source="user",
+            relevance="medium",
+            score=0.8,
+            rank_reasons=["保护槽:当前话题"],
+        ),
+    ]
+
+    with patch(
+        "app.services.chat.intent_handlers.crisis_followup_reply",
+        new=AsyncMock(return_value="啊，我记得！你喜欢周兴哲。"),
+    ) as mock_reply:
+        events = await _drain(handle_crisis_followup(
+            "你还记得我跟你说过我喜欢的歌手吗",
+            ctx,
+            classified_memories=classified,
+            portrait=None,
+            safety_check_mode="none",
+        ))
+
+    assert events
+    mock_reply.assert_not_awaited()
+    assert "没有看到" in ctx.last_short_circuit_reply
+    assert "喜欢的歌手" in ctx.last_short_circuit_reply
+    assert "周兴哲" not in ctx.last_short_circuit_reply
+    assert ctx.last_short_circuit_kind == "crisis_followup"
+
+
+@pytest.mark.asyncio
+async def test_handle_crisis_followup_memory_absence_keeps_required_safety_check():
+    """如果本轮本来需要复核安全，确定性缺失回复也要保留轻量复核。"""
+    from app.services.chat.intent_handlers import handle_crisis_followup
+
+    ctx = _make_short_circuit_ctx()
+    with patch(
+        "app.services.chat.intent_handlers.crisis_followup_reply",
+        new=AsyncMock(return_value="不应调用"),
+    ) as mock_reply:
+        await _drain(handle_crisis_followup(
+            "你记得我喜欢的电影吗",
+            ctx,
+            classified_memories=[],
+            portrait=None,
+            safety_check_mode="soft",
+        ))
+
+    mock_reply.assert_not_awaited()
+    assert "没有看到" in ctx.last_short_circuit_reply
+    assert "安全" in ctx.last_short_circuit_reply
+
+
+@pytest.mark.asyncio
+async def test_handle_crisis_followup_memory_question_calls_llm_when_topic_evidence_exists():
+    """检索块里有同主题事实时，继续走 followup LLM 生成自然回复。"""
+    from app.services.chat.intent_handlers import handle_crisis_followup
+    from app.services.memory.retrieval.context_selector import ClassifiedMemory
+
+    ctx = _make_short_circuit_ctx()
+    classified = [
+        ClassifiedMemory(
+            id="coffee",
+            text="用户喜欢咖啡",
+            source="user",
+            relevance="medium",
+            score=0.8,
+            rank_reasons=["保护槽:当前话题"],
+        ),
+    ]
+
+    with patch(
+        "app.services.chat.intent_handlers.crisis_followup_reply",
+        new=AsyncMock(return_value="记得，你喜欢咖啡。"),
+    ) as mock_reply:
+        await _drain(handle_crisis_followup(
+            "你还记得我喜欢的咖啡吗",
+            ctx,
+            classified_memories=classified,
+            portrait=None,
+            safety_check_mode="none",
+        ))
+
+    mock_reply.assert_awaited_once()
+    assert ctx.last_short_circuit_reply == "记得，你喜欢咖啡。"
+
+
+@pytest.mark.asyncio
 async def test_crisis_followup_classify_parses_release():
     from app.services.chat.intent_replies import crisis_followup_classify
 

@@ -9,6 +9,7 @@ handler 作为 async generator 产出 SSE 事件，orchestrator 只需 `async fo
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
@@ -542,6 +543,60 @@ def _crisis_followup_safety_check_instruction(mode: str) -> str:
     return "本轮不主动复核安全状态; 除非用户主动提到风险, 不要追问安全。"
 
 
+_MEMORY_FACT_RECALL_CUES = (
+    "还记得", "记得", "记不记得", "记得吗", "记得嘛",
+    "我跟你说过", "我和你说过", "告诉过你", "跟你讲过",
+)
+
+
+def _extract_memory_preference_topics(message: str) -> list[str]:
+    """Extract concrete preference topics from recall-style questions.
+
+    Crisis follow-up can keep guarding safety while the user moves to an
+    ordinary memory question. For preference recall, absence is meaningful when
+    the user asks "我喜欢的 X"; if the retrieved user-memory block does not
+    contain X, the reply should say that directly instead of letting the LLM
+    invent a remembered fact.
+    """
+    msg = (message or "").strip()
+    if not msg or not any(cue in msg for cue in _MEMORY_FACT_RECALL_CUES):
+        return []
+
+    match = re.search(r"喜欢的\s*([^吗嘛么呀啊呢了，。！？?\s、]{1,20})", msg)
+    if match:
+        topic = match.group(1).strip()
+        if topic:
+            return [topic]
+    return []
+
+
+def _crisis_followup_memory_absence_reply(
+    message: str,
+    user_memory: str,
+    safety_check_mode: str,
+) -> str | None:
+    topics = _extract_memory_preference_topics(message)
+    if not topics:
+        return None
+
+    memory_text = (user_memory or "").strip()
+    primary_topic = topics[0]
+    if memory_text and memory_text != "(无)" and primary_topic in memory_text:
+        return None
+
+    if "喜欢" in message and not primary_topic.startswith("喜欢"):
+        fact_label = f"你喜欢的{primary_topic}"
+    else:
+        fact_label = primary_topic
+
+    reply = f"我这里没有看到你跟我说过{fact_label}，不能乱猜。你愿意的话再告诉我一次。"
+    if safety_check_mode == "soft":
+        reply += " 也跟我确认一下，你现在是安全的吗？"
+    elif safety_check_mode == "annoyed":
+        reply += " 我知道一直确认会烦，但刚才那种风险我还是得问一句：你现在安全吗？"
+    return reply
+
+
 async def handle_crisis(
     user_message: str,
     ctx: ShortCircuitCtx,
@@ -610,6 +665,17 @@ async def handle_crisis_followup(
     safety_check_instruction = _crisis_followup_safety_check_instruction(
         safety_check_mode,
     )
+    memory_absence_reply = _crisis_followup_memory_absence_reply(
+        user_message,
+        user_memory_block,
+        safety_check_mode,
+    )
+    if memory_absence_reply:
+        ctx.consumed_full_message = True
+        async for evt in ctx.finalize(memory_absence_reply, kind="crisis_followup"):
+            yield evt
+        return
+
     try:
         response = await crisis_followup_reply(
             message=user_message,
