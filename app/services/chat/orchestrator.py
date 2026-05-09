@@ -1040,7 +1040,7 @@ async def stream_chat_response(
         early_parsed_times: list = []
         if crisis_force_intent or crisis_followup_active:
             # 轻量 fetch — 仅 handle_crisis 必需的两项 (lazy import 防循环依赖).
-            # crisis memory 走专用安全召回, 避免通用 top-10 把轻生/强负面历史挤掉.
+            # crisis memory 走专用安全召回, 避免通用混合召回把轻生/强负面历史挤掉.
             from app.services.memory.retrieval.safety import retrieve_crisis_memories
             from app.services.portrait import get_latest_portrait
             crisis_query = (

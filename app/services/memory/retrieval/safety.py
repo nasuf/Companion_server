@@ -1,6 +1,6 @@
 """Safety-sensitive memory retrieval.
 
-Crisis replies should not depend on the generic top-10 memory budget. This
+Crisis replies should not depend on generic mixed-source memory selection. This
 module retrieves user-side emotional/safety memories directly and ranks them
 with the same lightweight signals as the normal retriever.
 """

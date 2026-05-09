@@ -1,6 +1,6 @@
 """Context selector.
 
-Selects memories to fit within the 800-token prompt budget.
+Selects complete memory items using source-specific quotas.
 Classifies each memory by relevance: strong (score ≥ 0.7) / medium (0.4-0.7).
 """
 
@@ -58,7 +58,9 @@ def estimate_tokens(text: str) -> int:
     return int(cjk * 1.5 + ascii_chars * 0.25)
 
 
-MAX_MEMORIES_INJECTED = 10  # spec §3.2 step 4: 前 10 条硬上限
+MAX_MEMORIES_PER_SOURCE = 10
+MAX_MEMORIES_INJECTED = MAX_MEMORIES_PER_SOURCE  # backward-compatible alias
+MAX_MEMORY_TOKENS_PER_ITEM = 180
 _SAFETY_MEMORY_QUOTA = 3
 _HIGH_SIMILARITY_MEMORY_QUOTA = 2
 _KEYWORD_USER_MEMORY_QUOTA = 2
@@ -153,6 +155,10 @@ def _is_high_similarity_memory(mem: dict) -> bool:
     )
 
 
+def _is_final_fill_memory(mem: dict) -> bool:
+    return _memory_score(mem) >= _MIN_PROTECTED_SCORE or _memory_similarity(mem) >= 0.5
+
+
 def _is_named_relation_query(query: str | None) -> bool:
     if not query:
         return False
@@ -203,11 +209,15 @@ def select_context(
     token_budget: int = 800,
     max_items: int = MAX_MEMORIES_INJECTED,
     query: str | None = None,
+    user_max_items: int | None = None,
+    ai_max_items: int | None = None,
 ) -> list[ClassifiedMemory]:
-    """Select memories to fit within token budget, with relevance classification.
+    """Select complete memories using independent user/AI quotas.
 
-    spec §3.2 step 4: 前 `max_items` 条 + 不超过 `token_budget` tokens。
-    两条限制取较严的一个。
+    `max_items` is retained for compatibility and now means "default per-source
+    item quota". Use `user_max_items` / `ai_max_items` to override either side.
+    `token_budget` is no longer an aggregate truncation budget; it only caps
+    abnormal single memories. We either include a memory intact or skip it.
 
     Classification:
     - strong: rank_score ≥ 0.7 → "你清楚记得的事"
@@ -215,16 +225,29 @@ def select_context(
 
     Returns list of ClassifiedMemory.
     """
-    if max_items <= 0 or token_budget <= 0:
+    user_limit = max_items if user_max_items is None else user_max_items
+    ai_limit = max_items if ai_max_items is None else ai_max_items
+    if user_limit <= 0 and ai_limit <= 0:
+        return []
+    per_item_token_limit = min(token_budget, MAX_MEMORY_TOKENS_PER_ITEM)
+    if per_item_token_limit <= 0:
         return []
 
     selected_rows: list[dict] = []
-    used_tokens = 0
     seen_ids: set[str] = set()
+    selected_counts: dict[MemorySource, int] = {"user": 0, "ai": 0}
+
+    def source_limit(source: MemorySource) -> int:
+        return ai_limit if source == "ai" else user_limit
+
+    def selected_total_limit() -> int:
+        return max(0, user_limit) + max(0, ai_limit)
 
     def try_add(mem: dict, protected_reason: str | None = None) -> bool:
-        nonlocal used_tokens
-        if len(selected_rows) >= max_items:
+        if len(selected_rows) >= selected_total_limit():
+            return False
+        source = _memory_source(mem)
+        if selected_counts[source] >= source_limit(source):
             return False
         key = _memory_key(mem)
         if not key or key in seen_ids:
@@ -233,18 +256,18 @@ def select_context(
         if not text:
             return False
         tokens = estimate_tokens(text)
-        if used_tokens + tokens > token_budget:
+        if tokens > per_item_token_limit:
             return False
         if protected_reason:
             _append_rank_reason(mem, protected_reason)
         seen_ids.add(key)
         selected_rows.append(mem)
-        used_tokens += tokens
+        selected_counts[source] += 1
         return True
 
     safety_added = 0
     for mem in ranked_memories:
-        if safety_added >= min(_SAFETY_MEMORY_QUOTA, max_items):
+        if safety_added >= min(_SAFETY_MEMORY_QUOTA, user_limit):
             break
         if _is_safety_memory(mem) and try_add(mem, _PROTECTED_SAFETY_REASON):
             safety_added += 1
@@ -254,7 +277,7 @@ def select_context(
         for mem in ranked_memories:
             if named_relation_added >= min(
                 _NAMED_RELATION_MEMORY_QUOTA,
-                max_items - len(selected_rows),
+                user_limit - selected_counts["user"],
             ):
                 break
             if _is_named_relation_memory(mem) and try_add(
@@ -267,7 +290,7 @@ def select_context(
         for mem in ranked_memories:
             if ai_self_added >= min(
                 _AI_SELF_MEMORY_QUOTA,
-                max_items - len(selected_rows),
+                ai_limit - selected_counts["ai"],
             ):
                 break
             if (
@@ -286,7 +309,7 @@ def select_context(
     for mem in high_similarity_candidates:
         if high_similarity_added >= min(
             _HIGH_SIMILARITY_MEMORY_QUOTA,
-            max_items - len(selected_rows),
+            selected_total_limit() - len(selected_rows),
         ):
             break
         if _is_high_similarity_memory(mem) and try_add(
@@ -297,26 +320,29 @@ def select_context(
 
     keyword_added = 0
     for mem in ranked_memories:
-        if keyword_added >= min(_KEYWORD_USER_MEMORY_QUOTA, max_items - len(selected_rows)):
+        if keyword_added >= min(
+            _KEYWORD_USER_MEMORY_QUOTA,
+            user_limit - selected_counts["user"],
+        ):
             break
         if _is_keyword_user_memory(mem) and try_add(mem, _PROTECTED_KEYWORD_REASON):
             keyword_added += 1
 
     min_user_quota = (
         0 if asks_ai_stable_relation(query or "")
-        else min(_MIN_USER_MEMORY_QUOTA, max_items)
+        else min(_MIN_USER_MEMORY_QUOTA, user_limit)
     )
-    selected_user_count = sum(1 for mem in selected_rows if _memory_source(mem) == "user")
-    if selected_user_count < min_user_quota:
+    if selected_counts["user"] < min_user_quota:
         for mem in ranked_memories:
-            if selected_user_count >= min_user_quota:
+            if selected_counts["user"] >= min_user_quota:
                 break
             if _is_eligible_user_memory(mem) and try_add(mem, _PROTECTED_USER_REASON):
-                selected_user_count += 1
+                continue
 
     for mem in ranked_memories:
-        if len(selected_rows) >= max_items:
+        if len(selected_rows) >= selected_total_limit():
             break
-        try_add(mem)
+        if _is_final_fill_memory(mem):
+            try_add(mem)
 
     return [_to_classified_memory(mem) for mem in selected_rows]

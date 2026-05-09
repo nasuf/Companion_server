@@ -7,8 +7,8 @@ from app.services.memory.retrieval.context_selector import (
 )
 
 
-def test_select_context_within_budget():
-    """Memories within token budget are included."""
+def test_select_context_includes_complete_short_memories():
+    """Short memories are included as complete items."""
     candidates = [
         {"id": "1", "summary": "Short memory one", "importance": 0.9, "created_at": "2025-01-01T00:00:00"},
         {"id": "2", "summary": "Short memory two", "importance": 0.8, "created_at": "2025-01-01T00:00:00", "source": "ai"},
@@ -44,17 +44,43 @@ def test_select_context_empty():
     assert result == []
 
 
-def test_select_context_budget_limit():
-    """Stops adding when token budget exceeded."""
-    # Each "word" ~1.3 tokens; create memories that will exceed budget
+def test_select_context_skips_abnormally_long_single_memory():
+    """Token budget is only a per-item guard; long memories are skipped intact."""
+    # Each long item is skipped as a whole instead of being truncated.
     long_text = "word " * 200  # ~260 tokens each
     candidates = [
         {"id": str(i), "summary": long_text, "importance": 0.5, "created_at": "2025-01-01T00:00:00"}
         for i in range(10)
     ]
     result = select_context(candidates, token_budget=400)
-    # Should not include all 10
-    assert len(result) < 10
+    assert result == []
+
+
+def test_select_context_uses_independent_source_quotas_not_global_top10():
+    """User and AI memories each get their own quota, so one side cannot crowd out the other."""
+    candidates = [
+        {
+            "id": f"user-{i}",
+            "summary": f"用户记忆 {i}",
+            "source": "user",
+            "rank_score": 0.8 - i * 0.01,
+        }
+        for i in range(12)
+    ] + [
+        {
+            "id": f"ai-{i}",
+            "summary": f"AI 记忆 {i}",
+            "source": "ai",
+            "rank_score": 0.78 - i * 0.01,
+        }
+        for i in range(12)
+    ]
+
+    result = select_context(candidates, token_budget=80)
+
+    assert len(result) == 20
+    assert sum(1 for m in result if m.source == "user") == 10
+    assert sum(1 for m in result if m.source == "ai") == 10
 
 
 def test_select_context_protects_safety_memory_from_top10_truncation():
@@ -84,11 +110,11 @@ def test_select_context_protects_safety_memory_from_top10_truncation():
 
     result = select_context(candidates, token_budget=800, max_items=10)
 
-    assert len(result) == 10
+    assert len(result) == 11
     safety = next((m for m in result if m.id == "safety"), None)
     assert safety is not None
     assert "保护槽:安全情绪" in (safety.rank_reasons or [])
-    assert sum(1 for m in result if m.source == "ai") == 9
+    assert sum(1 for m in result if m.source == "ai") == 10
 
 
 def test_select_context_keeps_user_memory_floor_when_ai_scores_dominate():
@@ -113,7 +139,7 @@ def test_select_context_keeps_user_memory_floor_when_ai_scores_dominate():
 
     result = select_context(candidates, token_budget=800, max_items=6)
 
-    assert len(result) == 6
+    assert len(result) == 9
     user_memories = [m for m in result if m.source == "user"]
     assert len(user_memories) == 3
     assert all("保护槽:用户记忆" in (m.rank_reasons or []) for m in user_memories)
@@ -147,7 +173,7 @@ def test_select_context_protects_ai_self_memory_for_agent_preference_query():
     matched = next((m for m in result if m.id == "ai-movie"), None)
     assert matched is not None
     assert "保护槽:AI自我记忆" in (matched.rank_reasons or [])
-    assert sum(1 for m in result if m.source == "user") < 5
+    assert sum(1 for m in result if m.source == "ai") == 1
 
 
 def test_select_context_keeps_user_floor_for_user_preference_recall_query():

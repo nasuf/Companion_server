@@ -331,7 +331,7 @@ async def hybrid_retrieve(
         m["rank_reasons"] = reasons
     all_candidates.sort(key=lambda m: float(m.get("rank_score", 0)), reverse=True)
 
-    # Select within token budget (returns ClassifiedMemory list)
+    # Select complete memories with independent user/AI quotas.
     classified_memories = select_context(
         all_candidates,
         token_budget,
