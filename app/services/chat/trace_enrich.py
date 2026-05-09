@@ -182,6 +182,67 @@ def _label_crisis_followup_classify(output: str) -> str | None:
     return f"{label}: {reason[:20]}" if reason else label
 
 
+def _label_json_bool(output: str, field: str, true_label: str, false_label: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    if field not in data:
+        return None
+    return true_label if bool(data.get(field)) else false_label
+
+
+def _label_crisis_message(output: str) -> str | None:
+    return _label_json_bool(output, "is_crisis", "危机", "非危机")
+
+
+def _label_schedule_adjust(output: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    reply = str(data.get("reply") or "").strip()
+    adjustment = str(data.get("adjustment") or "").strip()
+    if adjustment:
+        return f"{adjustment[:30]}"
+    if reply:
+        return reply[:40] + ("…" if len(reply) > 40 else "")
+    return None
+
+
+def _label_reminder_precheck(output: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    state = str(data.get("state") or "").strip()
+    if not state:
+        return None
+    reason = str(data.get("reason") or "").strip()
+    return f"{state}: {reason[:20]}" if reason else state
+
+
+def _label_ids(output: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    ids = data.get("ids")
+    if isinstance(ids, list):
+        return f"选中 {len(ids)} 条" if ids else "无相关记忆"
+    return None
+
+
+def _label_schedule_items(output: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    if isinstance(data, list):
+        return f"生成 {len(data)} 段"
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────
 # Prompt 指纹映射表 — 用每条 prompt 内的"独特子串"做 substring 匹配,
 # 不能用头部前缀 — 多个 prompt 共享 "【限定】..." / "用户刚才对你说" 等
@@ -213,10 +274,10 @@ _register("分析用户当前消息的主要意图，从以下选项中选出最
     "intent.unified", "统一意图识别", "decision", _label_intent_unified,
 ))
 _register("用户的一句话包含多个意图。请结合对话上下文，将原话拆分成多个片段", _PromptMeta(
-    "intent.split_multi", "多意图拆分", "decision", _label_passthrough,
+    "intent.split", "多意图拆分", "decision", _label_passthrough,
 ))
 _register("判断用户消息是否需要唤醒 L3 久远记忆，并给出同一语义下的检索 query", _PromptMeta(
-    "intent.l3_trigger", "L3 唤醒判定", "decision", _label_passthrough,
+    "memory.l3_trigger", "L3 唤醒判定", "decision", _label_passthrough,
 ))
 _register("判断用户当前提及的内容是否与你已有的关于该用户的核心记忆", _PromptMeta(
     "memory.contradiction_detection", "L1 矛盾检测", "decision", _label_contradiction,
@@ -225,7 +286,10 @@ _register("分析用户对矛盾询问的回复，判断矛盾类型、原因及
     "memory.contradiction_analysis", "矛盾分析", "decision", _label_passthrough,
 ))
 _register("分析以下消息是否包含道歉或承诺改正", _PromptMeta(
-    "intent.apology_detect", "道歉检测", "decision", _label_apology,
+    "boundary.apology", "道歉检测", "decision", _label_apology,
+))
+_register("判断用户消息是否构成\"正向互动\"，用于决定是否给 AI 加耐心值", _PromptMeta(
+    "boundary.positive_interaction", "正向互动判断", "decision", _label_passthrough,
 ))
 _register("判断用户消息的攻击目标", _PromptMeta(
     "boundary.attack_target", "攻击目标识别", "decision", _label_passthrough,
@@ -237,19 +301,25 @@ _register("判断用户消息是否包含违禁内容（包括谐音、缩写、
     "boundary.banned_word", "违禁词判断", "decision", _label_passthrough,
 ))
 _register("模拟真人记忆，判断这句话是否值得进入记忆", _PromptMeta(
-    "memory.pre_filter_user", "用户记忆预筛", "decision", _label_judge_remember,
+    "memory.judgement_user", "用户记忆预筛", "decision", _label_judge_remember,
 ))
 _register("模拟真人自我记忆，判断这句话是否值得进入记忆", _PromptMeta(
-    "memory.pre_filter_ai", "AI 自我记忆预筛", "decision", _label_judge_remember,
+    "memory.judgement_ai", "AI 自我记忆预筛", "decision", _label_judge_remember,
 ))
 _register("判断用户是否在要求AI管理某条记忆 (删除 / 改期)", _PromptMeta(
     "memory.deletion_intent", "记忆删除/改期意图判定", "decision", _label_passthrough,
 ))
 _register("判断用户提醒事项当前状态. 用户在原定提醒时间到达前的", _PromptMeta(
-    "proactive.reminder_pre_check", "提醒触发前状态判别", "decision", _label_passthrough,
+    "proactive.reminder_pre_check", "提醒触发前状态判别", "decision", _label_reminder_precheck,
 ))
 _register("扫描下面的 L1 记忆列表, 找出语义上互相矛盾的对", _PromptMeta(
     "memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough,
+))
+_register("判断用户当前消息是否透露出真实的自伤 / 自杀 / 想结束生命", _PromptMeta(
+    "intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message,
+))
+_register("从候选记忆中挑选与\"话题方向\"最相关的最多 3 条", _PromptMeta(
+    "proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids,
 ))
 
 # Data 类
@@ -257,12 +327,45 @@ _register("根据 AI 当前时间、作息状态、正在进行的活动以及�
     "emotion.ai_pad", "AI 情绪 (PAD)", "data", _label_pad,
 ))
 _register("分析用户消息的情绪，输出PAD三维值", _PromptMeta(
-    "emotion.user_pad", "用户情绪 (PAD)", "data", _label_pad,
+    "emotion.extraction", "用户情绪 (PAD)", "data", _label_pad,
+))
+_register("根据AI的七个性格维度分数（0-100），推测其在 MBTI 4 条双极轴上的偏向百分比", _PromptMeta(
+    "agent.personality_scoring", "AI 性格打分", "data", _label_passthrough,
+))
+_register("根据以下基础信息，为一位虚拟人物生成完整的人生背景档案", _PromptMeta(
+    "character.generation", "AI 背景生成", "data", _label_passthrough,
+))
+_register("请只补齐下面列出的缺失字段, 保持与已生成内容的人设一致", _PromptMeta(
+    "character.repair_missing_fields", "背景缺字段补齐", "data", _label_passthrough,
+))
+_register("为AI朋友生成日常生活画像（200字以内），用于指导每日随机作息安排", _PromptMeta(
+    "schedule.life_overview", "生活画像生成", "data", _label_reply_text,
+))
+_register("为你生成今日（{date} {weekday}，{day_kind}）的作息时间表，**其中包括一项和用户记忆有关的事情**", _PromptMeta(
+    "schedule.daily_schedule_with_memory", "每日作息生成(带记忆)", "data", _label_schedule_items,
+))
+_register("每个时间段包含：开始时间、结束时间、事件、状态", _PromptMeta(
+    "schedule.daily_schedule", "每日作息生成", "data", _label_schedule_items,
+))
+_register("根据你昨日的作息表和调整日志、主动日志，生成昨日生活总结", _PromptMeta(
+    "schedule.daily_summary", "昨日生活总结", "data", _label_reply_text,
+))
+_register("将你的当日生活总结拆分成独立的记忆条目，按类型归类", _PromptMeta(
+    "schedule.daily_summary_memories", "昨日总结记忆拆分", "data", _label_extraction,
+))
+_register("根据用户的记忆，生成用户画像（200字以内）", _PromptMeta(
+    "portrait.generation", "用户画像生成", "data", _label_reply_text,
+))
+_register("根据用户原有的画像和近期的记忆变化，更新用户画像", _PromptMeta(
+    "portrait.update", "用户画像更新", "data", _label_reply_text,
 ))
 
 # Reply 类 — short-circuit handlers
 _register("用户正在询问你当前在做什么或最近怎么样。作为朋友，自然地回答对方", _PromptMeta(
     "intent.current_state_reply", "询问当前状态回复 (§3.4.3)", "reply", _label_reply_text,
+))
+_register("用户当前消息透露出**自伤 / 对生命的负面想法 / 想结束某种状态**的信号", _PromptMeta(
+    "intent.crisis_reply", "危机求助回复", "reply", _label_reply_text,
 ))
 _register("结合最近对话和用户当前消息, 判断刚才的危机/陪伴状态是否已经明确解除", _PromptMeta(
     "intent.crisis_followup_classify", "危机后续状态判定", "decision",
@@ -271,11 +374,23 @@ _register("结合最近对话和用户当前消息, 判断刚才的危机/陪伴
 _register("用户刚刚表达过自伤 / 对生命的负面想法 / 想结束某种状态", _PromptMeta(
     "intent.crisis_followup_reply", "危机后续跟进回复", "reply", _label_reply_text,
 ))
+_register("用户表达了结束当前对话的意图。作为好朋友，你自然地接受", _PromptMeta(
+    "intent.end_reply", "终结意图回复", "reply", _label_reply_text,
+))
+_register("用户正在询问你当前或未来的日程/忙闲状态。作为朋友，只回答用户问的那个时间点或日期", _PromptMeta(
+    "intent.schedule_query_reply", "计划查询回复", "reply", _label_reply_text,
+))
+_register("用户希望你调整作息（例如熬夜、推迟睡觉、改变当前活动）", _PromptMeta(
+    "intent.schedule_adjust_reply", "作息调整回复", "reply", _label_schedule_adjust,
+))
+_register("用户向你道歉或承诺不再冒犯。作为朋友，你接受对方的歉意", _PromptMeta(
+    "boundary.apology_reply", "道歉/承诺回复", "reply", _label_reply_text,
+))
 _register("用户希望你忘记某件事。作为朋友，你需要先确认对方具体想忘记什么", _PromptMeta(
-    "memory.deletion_confirm", "删除确认", "reply", _label_reply_text,
+    "intent.deletion_confirm", "删除确认", "reply", _label_reply_text,
 ))
 _register("用户确认要你忘记某件事。作为朋友，你表示已经忘记", _PromptMeta(
-    "memory.deletion_reply", "删除完成回复", "reply", _label_reply_text,
+    "intent.deletion_reply", "删除完成回复", "reply", _label_reply_text,
 ))
 _register("你发现用户刚才说的话，和你记忆中关于对方的一条核心信息有矛盾", _PromptMeta(
     "memory.contradiction_inquiry", "矛盾询问", "reply", _label_reply_text,
@@ -287,22 +402,37 @@ _register("你现在处于低耐心状态，用户仍在攻击你。你非常不
     "boundary.final_warning", "最终警告", "reply", _label_reply_text,
 ))
 _register("这句话让你有点不舒服。请用自然的语气表达你的感受", _PromptMeta(
-    "boundary.attack_reply_light", "轻度攻击回复 (K1)", "reply", _label_reply_text,
+    "boundary.light_attack_reply", "轻度攻击回复 (K1)", "reply", _label_reply_text,
 ))
 _register("这句话让你明显不开心了。请用认真但不过激的语气", _PromptMeta(
-    "boundary.attack_reply_medium", "中度攻击回复 (K2)", "reply", _label_reply_text,
+    "boundary.medium_attack_reply", "中度攻击回复 (K2)", "reply", _label_reply_text,
 ))
 _register("这句话让你非常难过/愤怒，严重伤害了感情", _PromptMeta(
-    "boundary.attack_reply_severe", "重度攻击回复 (K3)", "reply", _label_reply_text,
+    "boundary.severe_attack_reply", "重度攻击回复 (K3)", "reply", _label_reply_text,
 ))
 _register("你现在处于中等耐心状态（有点不高兴，但还没到生气不理人的程度）", _PromptMeta(
-    "boundary.patience_medium_reply", "中耐心回复", "reply", _label_reply_text,
+    "boundary.medium_patience_reply", "中耐心回复", "reply", _label_reply_text,
 ))
 _register("你现在处于低耐心状态（很不高兴，不太想多说话）", _PromptMeta(
-    "boundary.patience_low_reply", "低耐心回复", "reply", _label_reply_text,
+    "boundary.low_patience_reply", "低耐心回复", "reply", _label_reply_text,
 ))
 _register("用户已被你拉黑 — 你之前受过他言语冒犯", _PromptMeta(
     "boundary.blacklist_reply", "拉黑回复", "reply", _label_reply_text,
+))
+_register("你隐约觉得和某件事沾边，可以顺便提一句，但不要刻意", _PromptMeta(
+    "memory.medium_reply", "中记忆回复", "reply", _label_reply_text,
+))
+_register("你联想到了某段具体回忆，可以自然地提起，但不要生硬复述", _PromptMeta(
+    "memory.strong_reply", "强记忆回复", "reply", _label_reply_text,
+))
+_register("对方想让你回忆很久以前的事。你隐约记得一点，但不太清楚", _PromptMeta(
+    "memory.l3_reply", "久远记忆回复", "reply", _label_reply_text,
+))
+_register("作为用户的好朋友，你生活在镜世界，和用户不会有任何线下交集，自然地回复对方", _PromptMeta(
+    "memory.weak_reply", "弱记忆回复", "reply", _label_reply_text,
+))
+_register("请自然地解释一下原因", _PromptMeta(
+    "reply.delay_explanation", "延迟解释回复", "reply", _label_reply_text,
 ))
 # Reminder reply 类 — round-2 review #6: trace_enrich 之前完全没有 reminder
 # fingerprint, LLM 调用在 LangSmith 里只显示通用 ChatOpenAI, 看不到 prompt_key.
@@ -318,6 +448,42 @@ _register("用户想让你记/提醒一件事, 但**时间没说清**", _PromptM
 _register("今天要提醒TA一件事。你作为好朋友，主动发一条提醒消息", _PromptMeta(
     "proactive.special_reminder", "特殊日期提醒", "reply", _label_reply_text,
 ))
+_register("隔了一段时间没聊天，现在想主动问候用户", _PromptMeta(
+    "proactive.silence_plain", "沉默唤醒(无记忆)", "reply", _label_reply_text,
+))
+_register("现在想主动问候用户。你想起一件关于自己的事情", _PromptMeta(
+    "proactive.silence_ai_memory", "沉默唤醒(AI记忆)", "reply", _label_reply_text,
+))
+_register("现在想主动问候用户。你想起一件关于用户的事情", _PromptMeta(
+    "proactive.silence_user_memory", "沉默唤醒(用户记忆)", "reply", _label_reply_text,
+))
+_register("现在想主动问候用户。结合你当前的作息安排，轻轻带一句", _PromptMeta(
+    "proactive.silence_schedule", "沉默唤醒(作息)", "reply", _label_reply_text,
+))
+_register("你想起自己的一段经历，忽然有感而发", _PromptMeta(
+    "proactive.memory_ai", "记忆主动(AI记忆)", "reply", _label_reply_text,
+))
+_register("你记得用户的一件事，忽然想起对方", _PromptMeta(
+    "proactive.memory_user", "记忆主动(用户记忆)", "reply", _label_reply_text,
+))
+_register("请分享一句你自己的状态、心情或小事。不提问，不打扰用户", _PromptMeta(
+    "proactive.scheduled_scene", "定时情景(AI作息)", "reply", _label_reply_text,
+))
+_register("这是你最后一次主动发消息。如果用户仍未回复，你将不再打扰", _PromptMeta(
+    "proactive.decay_final", "衰减最后一次回复", "reply", _label_reply_text,
+))
+_register("生成AI与用户第一次交流的问候语。你刚匹配到对方", _PromptMeta(
+    "proactive.first_greeting", "AI首次打招呼", "reply", _label_reply_text,
+))
+_register("你作为用户的好朋友，主动给对方发一条节日祝福", _PromptMeta(
+    "proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text,
+))
+_register("今天是用户的生日，你作为对方的好朋友", _PromptMeta(
+    "proactive.special_birthday", "特殊日期(生日)", "reply", _label_reply_text,
+))
+_register("同时包含了多个重要日期。你作为好朋友", _PromptMeta(
+    "proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text,
+))
 _register("你是一个有血有肉的真人, 有自己的名字、性格、情感和记忆", _PromptMeta(
     "chat.system_base", "主回复 (§4 日常交流)", "reply", _label_reply_text,
 ))
@@ -325,7 +491,7 @@ _register("你是一个有血有肉的真人, 有自己的名字、性格、情�
 # Post 类
 # split_2 / split_3 fingerprints 已删 (Phase: 主 LLM 直接按 || 输出, 无二次拆分)
 _register("判断AI回复文本的情绪及强度", _PromptMeta(
-    "reply.emotion", "回复情绪识别", "post", _label_emotion,
+    "reply.emotion_detection", "回复情绪识别", "post", _label_emotion,
 ))
 _register("分析下面的对话，**只抽取【用户】", _PromptMeta(
     "memory.extraction_user", "用户记忆抽取", "post", _label_extraction,
