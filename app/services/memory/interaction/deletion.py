@@ -16,6 +16,7 @@ load_pending_deletion 同时识别两种 shape 保持向后兼容.
 
 import json
 import logging
+import re
 from datetime import datetime
 
 from app.db import db
@@ -56,7 +57,120 @@ DELETION_RESPONSE_TEMPLATES = [
 ]
 
 
-async def detect_deletion_intent(message: str) -> dict | None:
+_DEICTIC_DELETION_TERMS = (
+    "这一点", "这点", "这个", "这件事", "刚才那个", "刚刚那个",
+    "上面那个", "那一点", "那点", "那个",
+)
+
+
+def _ensure_deletion_prompt_has_context(prompt: str) -> str:
+    """兼容数据库里尚未刷新 defaults 的旧 prompt.
+
+    prompt registry 的默认模板改了不代表线上 DB 里的模板立刻同步；删除链路如果
+    继续只给当前句子，"这一点/这个"这类请求就仍然无法解析。这里在运行时补
+    上最近对话，保证能力不依赖 prompt 种子状态。
+    """
+    if "{context}" in prompt:
+        return prompt
+    return (
+        "最近对话（旧→新）：\n{context}\n\n"
+        f"{prompt}\n\n"
+        "补充规则：如果用户说\"这一点/这个/刚才那个\"，必须根据最近对话还原 "
+        "target_description，而不是返回 null。"
+    )
+
+
+def _last_prefixed_line(context: str, prefixes: tuple[str, ...]) -> str | None:
+    """从 format_recent_context 文本里取最后一条指定说话人的内容."""
+    for raw in reversed((context or "").splitlines()):
+        line = raw.strip()
+        for prefix in prefixes:
+            marker = f"{prefix}:"
+            if line.startswith(marker):
+                value = line[len(marker):].strip()
+                return value or None
+    return None
+
+
+def _clean_short_answer(text: str | None) -> str | None:
+    if not text:
+        return None
+    cleaned = re.sub(r"[，。！？?~～]", " ", text)
+    cleaned = re.sub(r"(对吧|是吧|应该是|我记得|你是|你叫)", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:40] if cleaned else None
+
+
+def _structured_target_from_recent_qa(last_user: str | None, last_ai: str | None) -> str | None:
+    """对稳定身份事实做保守规则化兜底.
+
+    这不是主要语义理解层；主要层是带 context 的 deletion_intent LLM。这里仅在
+    LLM 没给 target_description 时处理高置信、短答案的事实问答。
+    """
+    if not (last_user and last_ai):
+        return None
+
+    age_match = re.search(r"(?<!\d)(\d{1,3})\s*岁", last_ai)
+    if re.search(r"(我.*(多大|几岁)|年龄)", last_user) and age_match:
+        return f"用户{age_match.group(1)}岁"
+
+    if re.search(r"(我.*(叫什?么|名字)|怎么称呼我)", last_user):
+        name_match = re.search(r"(?:叫|是)\s*([^，。！？?\s]{1,16})", last_ai)
+        if name_match:
+            return f"用户叫{name_match.group(1)}"
+        answer = _clean_short_answer(last_ai)
+        if answer and len(answer) <= 16:
+            return f"用户叫{answer}"
+
+    if re.search(r"(我.*(做什么|职业|工作)|我是干什么)", last_user):
+        answer = _clean_short_answer(last_ai)
+        if answer:
+            return f"用户是{answer}"
+
+    if re.search(r"(毕业|大学|学校)", last_user):
+        school_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]{2,30}(?:大学|学院|学校))", last_ai)
+        if school_match:
+            return f"用户毕业于{school_match.group(1)}"
+
+    if re.search(r"(专业|大学学.*什么|学的.*什么)", last_user):
+        major_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]{2,30}专业)", last_ai)
+        if major_match:
+            return f"用户大学学的是{major_match.group(1)}"
+
+    return None
+
+
+def resolve_contextual_deletion_target(
+    message: str,
+    recent_context: str | None = None,
+) -> str | None:
+    """还原"忘了这一点吧"这类省略删除目标.
+
+    删除链路不能只靠当前句子；用户常在 AI 刚回答某个事实后说"忘了这个"。
+    这里先做低风险确定性还原，避免 LLM target_description 为空时整条删除
+    intent 掉回主回复。
+    """
+    if not any(term in message for term in _DEICTIC_DELETION_TERMS):
+        return None
+
+    last_user = _last_prefixed_line(recent_context or "", ("用户", "User", "human"))
+    last_ai = _last_prefixed_line(recent_context or "", ("AI", "assistant", "Hia"))
+
+    structured_target = _structured_target_from_recent_qa(last_user, last_ai)
+    if structured_target:
+        return structured_target
+
+    if last_ai:
+        cleaned = re.sub(r"\s+", " ", last_ai).strip()
+        if cleaned:
+            return cleaned[:80]
+    return None
+
+
+async def detect_deletion_intent(
+    message: str,
+    recent_context: str | None = None,
+) -> dict | None:
     """Detect if user wants to delete a memory.
 
     Returns deletion intent info or None.
@@ -67,7 +181,13 @@ async def detect_deletion_intent(message: str) -> dict | None:
         return None
 
     # Confirm with LLM
-    prompt = (await get_prompt_text("memory.deletion_intent")).format(message=message)
+    prompt_template = _ensure_deletion_prompt_has_context(
+        await get_prompt_text("memory.deletion_intent")
+    )
+    prompt = prompt_template.format(
+        message=message,
+        context=recent_context or "（无）",
+    )
     try:
         result = await invoke_json(get_utility_model(), prompt)
     except Exception as e:
@@ -79,7 +199,77 @@ async def detect_deletion_intent(message: str) -> dict | None:
     if result.get("confidence", 0) < LLM_INTENT_MIN_CONFIDENCE:
         return None
 
+    if not result.get("target_description"):
+        target = resolve_contextual_deletion_target(message, recent_context)
+        if target:
+            result["target_description"] = target
+
     return result
+
+
+def _memory_to_candidate(record, *, similarity: float = 1.0) -> dict:
+    return {
+        "id": record.id,
+        "content": record.content,
+        "summary": record.summary,
+        "level": record.level,
+        "importance": record.importance,
+        "type": record.type,
+        "main_category": record.mainCategory,
+        "sub_category": record.subCategory,
+        "source": record.source,
+        "similarity": similarity,
+    }
+
+
+def _literal_candidate_score(description: str, content: str) -> float:
+    """给删除候选做保守字面兜底评分.
+
+    只覆盖确定性强的事实型匹配；例如"用户28岁"和"用户年龄是28岁"。
+    不用它扩大相似主题召回，避免误删。
+    """
+    desc = re.sub(r"\s+", "", description or "")
+    text = re.sub(r"\s+", "", content or "")
+    if not desc or not text:
+        return 0.0
+    if desc in text or text in desc:
+        return 1.0
+
+    desc_age = re.search(r"(?<!\d)(\d{1,3})岁", desc)
+    text_age = re.search(r"(?<!\d)(\d{1,3})岁", text)
+    if desc_age and text_age and desc_age.group(1) == text_age.group(1):
+        desc_is_age = "用户" in desc and ("年龄" in desc or "岁" in desc)
+        text_is_age = "用户" in text and ("年龄" in text or "岁" in text)
+        if desc_is_age and text_is_age:
+            return 0.99
+    return 0.0
+
+
+async def _find_literal_matching_memories(
+    user_id: str,
+    description: str,
+    *,
+    limit: int = 5,
+) -> list[dict]:
+    records = await memory_repo.find_many(
+        source=None,
+        where={"userId": user_id, "isArchived": False},
+        take=200,
+    )
+    candidates: list[dict] = []
+    for record in records:
+        score = max(
+            _literal_candidate_score(description, record.content or ""),
+            _literal_candidate_score(description, record.summary or ""),
+        )
+        if score <= 0:
+            continue
+        candidates.append(_memory_to_candidate(record, similarity=score))
+    candidates.sort(
+        key=lambda c: (float(c.get("similarity") or 0), float(c.get("importance") or 0)),
+        reverse=True,
+    )
+    return candidates[:limit]
 
 
 async def find_matching_memories(
@@ -96,13 +286,17 @@ async def find_matching_memories(
 
     callers 仍可显式传 threshold 覆盖 (e.g. find_for_audit 用更松 0.6).
     """
+    literal_matches = await _find_literal_matching_memories(user_id, description)
+
     embedding = await generate_embedding(description)
     results = await search_by_embedding(embedding, user_id, top_k=5)
-    matches = []
+    matches = list(literal_matches)
+    seen_ids = {m.get("id") for m in matches}
     for r in results:
         sim = float(r.get("similarity", 0))
-        if sim >= threshold:
+        if sim >= threshold and r.get("id") not in seen_ids:
             matches.append(r)
+            seen_ids.add(r.get("id"))
     return matches
 
 

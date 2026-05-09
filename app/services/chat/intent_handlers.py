@@ -218,7 +218,10 @@ async def handle_deletion(
     """spec §5 删除 + Phase 5 改期合一: detect_deletion_intent 同时识别两类,
     intent ∈ {delete, reschedule} 决定 pending shape 与 confirmation 文案."""
     try:
-        deletion_result = await detect_deletion_intent(user_message)
+        deletion_result = await detect_deletion_intent(
+            user_message,
+            recent_context=ctx.recent_context,
+        )
         description = (deletion_result or {}).get("target_description")
         if not description:
             return False, None

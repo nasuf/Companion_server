@@ -549,6 +549,182 @@ async def test_save_load_pending_set_reminder_roundtrip():
 # ═══════════════════════════════════════════════════════════════════
 
 
+def test_contextual_deletion_target_resolves_previous_age_answer():
+    """用户说"忘了这一点"时，删除目标要从最近问答还原出来。"""
+    from app.services.memory.interaction.deletion import resolve_contextual_deletion_target
+
+    target = resolve_contextual_deletion_target(
+        "嗯，忘了这一点吧",
+        "用户: 对了你还记得我多大了吗\nAI: 28岁，对吧？",
+    )
+
+    assert target == "用户28岁"
+
+
+def test_contextual_deletion_target_resolves_previous_name_answer():
+    """同一机制不应只服务年龄；名字等稳定事实也要能还原。"""
+    from app.services.memory.interaction.deletion import resolve_contextual_deletion_target
+
+    target = resolve_contextual_deletion_target(
+        "这个别记了",
+        "用户: 你还记得我叫什么吗\nAI: 你叫花卷，对吧？",
+    )
+
+    assert target == "用户叫花卷"
+
+
+@pytest.mark.asyncio
+async def test_detect_deletion_intent_injects_context_for_legacy_prompt():
+    """即使 DB 里还是不含 {context} 的旧 prompt，运行时也必须补上下文。"""
+    from app.services.memory.interaction import deletion as del_mod
+
+    seen: dict = {}
+
+    async def _invoke(_model, prompt):
+        seen["prompt"] = prompt
+        return {
+            "is_deletion_request": True,
+            "target_description": "用户叫花卷",
+            "intent": "delete",
+            "new_time": None,
+            "confidence": 0.9,
+        }
+
+    with (
+        patch.object(del_mod, "get_prompt_text",
+                     new_callable=AsyncMock,
+                     return_value="用户消息：{message}"),
+        patch.object(del_mod, "invoke_json", side_effect=_invoke),
+    ):
+        result = await del_mod.detect_deletion_intent(
+            "这个别记了",
+            recent_context="用户: 你还记得我叫什么吗\nAI: 你叫花卷，对吧？",
+        )
+
+    assert result and result["target_description"] == "用户叫花卷"
+    assert "最近对话" in seen["prompt"]
+    assert "你叫花卷" in seen["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_handle_deletion_passes_context_and_asks_confirmation_for_age():
+    """生产复现: 删除意图有上下文省略时，必须进入 pending confirmation 而不是落回主回复。"""
+    from app.services.chat import intent_handlers as ih
+
+    ctx = _make_short_circuit_ctx()
+    ctx.recent_context = "用户: 对了你还记得我多大了吗\nAI: 28岁，对吧？"
+
+    captured: dict = {}
+
+    async def _detect(message, recent_context=None):
+        captured["message"] = message
+        captured["recent_context"] = recent_context
+        if recent_context and "28岁" in recent_context:
+            return {
+                "is_deletion_request": True,
+                "target_description": "用户28岁",
+                "intent": "delete",
+                "new_time": None,
+                "confidence": 0.9,
+            }
+        return {
+            "is_deletion_request": True,
+            "target_description": None,
+            "intent": "delete",
+            "new_time": None,
+            "confidence": 0.9,
+        }
+
+    candidates = [
+        {"id": "age-1", "content": "用户28岁", "summary": "用户28岁", "source": "user"},
+    ]
+    saved: dict = {}
+
+    async def _save(conv_id, target_candidates):
+        saved["conv_id"] = conv_id
+        saved["candidates"] = target_candidates
+
+    with (
+        patch.object(ih, "detect_deletion_intent", side_effect=_detect),
+        patch.object(ih, "find_matching_memories",
+                     new_callable=AsyncMock, return_value=candidates) as mock_find,
+        patch.object(ih, "save_pending_deletion", side_effect=_save),
+        patch.object(ih, "deletion_confirm_reply",
+                     new_callable=AsyncMock, return_value=None),
+    ):
+        handled, events = await ih.handle_deletion("嗯，忘了这一点吧", ctx)
+
+    assert handled is True
+    assert events is not None
+    assert captured["recent_context"] == ctx.recent_context
+    mock_find.assert_awaited_once_with("u1", "用户28岁")
+    assert saved == {"conv_id": "c1", "candidates": candidates}
+
+
+@pytest.mark.asyncio
+async def test_find_matching_memories_literal_age_fallback():
+    """精确 L1 事实不能只依赖向量阈值；用户28岁这类要字面召回。"""
+    from app.services.memory.interaction import deletion as del_mod
+
+    record = SimpleNamespace(
+        id="age-1",
+        content="用户28岁",
+        summary="用户28岁",
+        level=1,
+        importance=0.9,
+        type="identity",
+        mainCategory="身份",
+        subCategory="年龄",
+        source="user",
+    )
+
+    with (
+        patch.object(del_mod.memory_repo, "find_many",
+                     new_callable=AsyncMock, return_value=[record]),
+        patch.object(del_mod, "generate_embedding",
+                     new_callable=AsyncMock, return_value=[0.1, 0.2]),
+        patch.object(del_mod, "search_by_embedding",
+                     new_callable=AsyncMock, return_value=[]),
+    ):
+        matches = await del_mod.find_matching_memories("u1", "用户年龄是28岁")
+
+    assert [m["id"] for m in matches] == ["age-1"]
+    assert matches[0]["source"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_find_matching_memories_literal_fallback_keeps_ai_source():
+    """字面兜底要保持原删除检索的双表语义，不能只覆盖用户记忆。"""
+    from app.services.memory.interaction import deletion as del_mod
+
+    record = SimpleNamespace(
+        id="ai-1",
+        content="我喜欢安静的咖啡馆",
+        summary="我喜欢安静的咖啡馆",
+        level=1,
+        importance=0.8,
+        type="preference",
+        mainCategory="偏好",
+        subCategory="环境",
+        source="ai",
+    )
+
+    with (
+        patch.object(del_mod.memory_repo, "find_many",
+                     new_callable=AsyncMock, return_value=[record]) as mock_find_many,
+        patch.object(del_mod, "generate_embedding",
+                     new_callable=AsyncMock, return_value=[0.1, 0.2]),
+        patch.object(del_mod, "search_by_embedding",
+                     new_callable=AsyncMock, return_value=[]),
+    ):
+        matches = await del_mod.find_matching_memories("u1", "我喜欢安静的咖啡馆")
+
+    mock_find_many.assert_awaited_once()
+    assert mock_find_many.await_args.kwargs["source"] is None
+    assert [m["id"] for m in matches] == ["ai-1"]
+    assert matches[0]["source"] == "ai"
+
+
 @pytest.mark.asyncio
 async def test_delete_multi_candidate_requires_numbered_choice():
     """Phase 0.2: 多候选删除场景, 用户回 '嗯' (模糊 confirm) → 二次反问要编号,

@@ -1332,6 +1332,9 @@ tags 类型必须返回数组. 不要重复输出已有字段, 也不要包含�
 
 DELETION_INTENT_PROMPT = """判断用户是否在要求AI管理某条记忆 (删除 / 改期).
 
+最近对话（旧→新）：
+{context}
+
 用户消息：{message}
 
 返回JSON：
@@ -1345,6 +1348,7 @@ DELETION_INTENT_PROMPT = """判断用户是否在要求AI管理某条记忆 (删
 
 规则：
 - 用户说"忘了吧"、"别记了"、"删掉那个"、"不用提醒了" → intent=delete, new_time=null
+- 如果用户说"这一点/这个/刚才那个"，必须根据最近对话还原 target_description，例如 AI 刚回答"28岁"时用户说"忘了这一点吧" → target_description="用户28岁"
 - 用户说"把明天的提醒挪到后天"、"改到 9 点"、"推迟到下周" → intent=reschedule, new_time 必填 ISO 8601
 - 用户说"我忘了"（表达自己忘记）不是删除请求, is_deletion_request=false
 - 只有明确要求 AI 管理记忆时才返回 is_deletion_request=true; intent 默认 delete"""
