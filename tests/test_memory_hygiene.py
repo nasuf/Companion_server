@@ -67,6 +67,9 @@ async def test_memory_hygiene_archives_duplicate_record():
     assert stats["checked"] == 1
     assert stats["archived"] == 1
     assert stats["errors"] == 0
+    assert stats["changes"][0]["action"] == "archived_duplicate"
+    assert stats["changes"][0]["removed"]["id"] == "short"
+    assert stats["changes"][0]["kept"]["id"] == "rich"
     mock_resolve.assert_awaited_once()
     assert mock_resolve.await_args.kwargs["exclude_id"] == "short"
     assert mock_resolve.await_args.kwargs["main_category"] == "身份"
@@ -120,6 +123,10 @@ async def test_memory_hygiene_merges_then_archives_absorbed_record():
     assert stats["archived"] == 1
     assert stats["merged"] == 1
     assert stats["errors"] == 0
+    assert stats["changes"][0]["action"] == "merged"
+    assert stats["changes"][0]["kept"]["id"] == "old-generic"
+    assert stats["changes"][0]["removed"]["id"] == "new-rich"
+    assert stats["changes"][0]["after"] == "用户喜欢咖啡，也喜欢研究浅烘埃塞咖啡豆"
     mock_store_embedding.assert_awaited_once_with("old-generic", [0.2])
     assert mock_update.await_count == 2
     first_update = mock_update.await_args_list[0]
@@ -142,3 +149,38 @@ def test_scheduler_registers_memory_hygiene_job():
     source = inspect.getsource(scheduler_mod.setup_scheduler)
     assert 'id="memory_hygiene"' in source
     assert "_run_memory_hygiene" in source
+
+
+@pytest.mark.asyncio
+async def test_memory_hygiene_endpoint_scopes_to_user_workspace():
+    from app.api.public.memories import run_memory_hygiene_now
+    from app.models.memory import MemoryHygieneRequest
+
+    P = "app.api.public.memories"
+    report = {
+        "scopes": 1,
+        "checked": 2,
+        "archived": 1,
+        "merged": 0,
+        "updated": 0,
+        "errors": 0,
+        "changes": [],
+    }
+    with (
+        patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
+        patch(f"{P}.run_memory_hygiene", new_callable=AsyncMock, return_value=report) as mock_run,
+    ):
+        result = await run_memory_hygiene_now(
+            MemoryHygieneRequest(workspace_id=None, allow_llm=False, max_memories_per_scope=123),
+            user_id="u1",
+            _user={"sub": "u1"},
+        )
+
+    assert result == report
+    mock_run.assert_awaited_once_with(
+        user_id="u1",
+        workspace_id="ws1",
+        allow_llm=False,
+        max_scopes=2,
+        max_memories_per_scope=123,
+    )

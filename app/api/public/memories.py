@@ -5,11 +5,14 @@ from fastapi import APIRouter, Depends, Query
 from app.api.ownership import require_memory_owner, require_user_self
 from app.db import db
 from app.models.memory import (
+    MemoryHygieneRequest,
+    MemoryHygieneResponse,
     MemoryResponse,
     MemorySearchRequest,
     MemoryStatsGroup,
     MemoryStatsResponse,
 )
+from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.retrieval.legacy import retrieve_memories
 from app.services.workspace.workspaces import resolve_workspace_id
@@ -142,6 +145,22 @@ async def search_memories(
         sub_category=data.sub_category,
     )
     return results
+
+
+@router.post("/hygiene", response_model=MemoryHygieneResponse)
+async def run_memory_hygiene_now(
+    data: MemoryHygieneRequest,
+    user_id: str = Query(...),
+    _user=Depends(require_user_self),
+):
+    workspace_id = data.workspace_id or await resolve_workspace_id(user_id=user_id)
+    return await run_memory_hygiene(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        allow_llm=data.allow_llm,
+        max_scopes=2,
+        max_memories_per_scope=data.max_memories_per_scope,
+    )
 
 
 @router.get("/{memory_id}", response_model=MemoryResponse)

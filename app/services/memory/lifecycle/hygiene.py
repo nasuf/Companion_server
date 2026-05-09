@@ -29,6 +29,30 @@ class HygieneStats(TypedDict):
     merged: int
     updated: int
     errors: int
+    changes: list["HygieneChange"]
+
+
+class HygieneMemory(TypedDict):
+    id: str
+    source: Source
+    level: int
+    main_category: str | None
+    sub_category: str | None
+    content: str
+    summary: str | None
+    importance: float
+
+
+class HygieneChange(TypedDict):
+    action: str
+    source: Source
+    main_category: str | None
+    sub_category: str | None
+    kept: HygieneMemory | None
+    removed: HygieneMemory | None
+    before: str | None
+    after: str | None
+    reason: str
 
 
 async def _active_scopes(
@@ -94,6 +118,21 @@ def _text_of(record: MemoryRecord) -> str:
     return record.summary or record.content or ""
 
 
+def _snapshot(record: MemoryRecord | None) -> HygieneMemory | None:
+    if record is None:
+        return None
+    return {
+        "id": record.id,
+        "source": record.source,
+        "level": record.level,
+        "main_category": record.mainCategory,
+        "sub_category": record.subCategory,
+        "content": record.content,
+        "summary": record.summary,
+        "importance": float(record.importance or 0),
+    }
+
+
 def _group_by_main(records: list[MemoryRecord]) -> dict[str, list[MemoryRecord]]:
     grouped: dict[str, list[MemoryRecord]] = defaultdict(list)
     for record in records:
@@ -124,6 +163,7 @@ async def run_memory_hygiene(
         "merged": 0,
         "updated": 0,
         "errors": 0,
+        "changes": [],
     }
     scopes = await _active_scopes(
         user_id=user_id,
@@ -210,6 +250,17 @@ async def _hygiene_one(
         )
         archived_ids.add(record.id)
         stats["archived"] += 1
+        stats["changes"].append({
+            "action": "archived_duplicate",
+            "source": source,
+            "main_category": record.mainCategory,
+            "sub_category": record.subCategory,
+            "kept": _snapshot(decision.existing_record),
+            "removed": _snapshot(record),
+            "before": record.content,
+            "after": None,
+            "reason": decision.reason or "existing_covers_new",
+        })
         return
 
     if decision.action not in {"update_existing", "merge_existing"} or not decision.existing_record:
@@ -253,6 +304,17 @@ async def _hygiene_one(
         stats["merged"] += 1
     else:
         stats["updated"] += 1
+    stats["changes"].append({
+        "action": "merged" if decision.action == "merge_existing" else "updated",
+        "source": source,
+        "main_category": existing.mainCategory or record.mainCategory,
+        "sub_category": existing.subCategory or record.subCategory,
+        "kept": _snapshot(existing),
+        "removed": _snapshot(record),
+        "before": existing.content,
+        "after": merged_text,
+        "reason": decision.reason or decision.action,
+    })
 
 
 async def _archive_absorbed(
