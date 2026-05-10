@@ -8,11 +8,12 @@ handler 作为 async generator 产出 SSE 事件，orchestrator 只需 `async fo
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -76,6 +77,10 @@ from app.services.rules.chat_keywords import (
 
 logger = logging.getLogger(__name__)
 
+_SHORT_CIRCUIT_REPEAT_COOLDOWN = timedelta(seconds=90)
+_CURRENT_STATE_METADATA_KEY = "current_state_context"
+_SHORT_CIRCUIT_REPEAT_METADATA_KEY = "short_circuit_repeat"
+
 
 @dataclass
 class ShortCircuitCtx:
@@ -111,7 +116,13 @@ class ShortCircuitCtx:
     last_short_circuit_kind: str | None = None
     response_diagnostics: dict[str, Any] | None = None
 
-    async def finalize(self, reply: str, *, kind: str) -> AsyncGenerator[dict, None]:
+    async def finalize(
+        self,
+        reply: str,
+        *,
+        kind: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict, None]:
         """`kind` 是该 handler 的 intent 名 (e.g. "apology_promise", "deletion_delete"),
         作为 EVT_INTENT_SHORT_CIRCUIT 的查询维度. 必填以防止 handler 漏标."""
         self.last_short_circuit_reply = reply
@@ -131,14 +142,14 @@ class ShortCircuitCtx:
         sub_fragments = (
             {} if self.consumed_full_message else self.pending_sub_fragments
         )
-        extra_metadata: dict[str, Any] | None = None
+        extra_metadata: dict[str, Any] | None = dict(metadata or {})
         if self.response_diagnostics is not None:
             self.response_diagnostics.update({
                 "reply_path": "short_circuit",
                 "short_circuit_kind": kind,
                 "main_prompt_built": False,
             })
-            extra_metadata = {"response_diagnostics": self.response_diagnostics}
+            extra_metadata["response_diagnostics"] = self.response_diagnostics
         async for evt in finalize_short_circuit(
             reply,
             conversation_id=self.conversation_id,
@@ -326,6 +337,92 @@ async def handle_schedule_adjust(
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _normalize_repeat_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _metadata_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    data = getattr(value, "data", None)
+    return data if isinstance(data, dict) else {}
+
+
+def _as_aware_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _hashed_repeat_key(*parts: Any) -> str:
+    normalized = "\n".join(
+        _normalize_repeat_key(part) for part in parts if part is not None
+    )
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _repeat_metadata(kind: str, repeat_key: str, **extra: Any) -> dict[str, Any] | None:
+    if not repeat_key:
+        return None
+    context = {
+        "kind": kind,
+        "key": repeat_key,
+        **{k: v for k, v in extra.items() if v is not None},
+    }
+    return {_SHORT_CIRCUIT_REPEAT_METADATA_KEY: context}
+
+
+def _recent_repeat_context_matches(metadata: dict[str, Any], kind: str, repeat_key: str) -> bool:
+    context = metadata.get(_SHORT_CIRCUIT_REPEAT_METADATA_KEY)
+    if isinstance(context, dict):
+        return context.get("kind") == kind and context.get("key") == repeat_key
+
+    # Backward-compatible read for current-state metadata written before the
+    # generic repeat context existed in this branch.
+    if kind == "current_state":
+        legacy = metadata.get(_CURRENT_STATE_METADATA_KEY)
+        if isinstance(legacy, dict):
+            return legacy.get("activity_key") == repeat_key
+    return False
+
+
+async def _has_recent_short_circuit_repeat(
+    conversation_id: str,
+    *,
+    kind: str,
+    repeat_key: str,
+) -> bool:
+    if not conversation_id or not kind or not repeat_key:
+        return False
+    try:
+        rows = await db.message.find_many(
+            where={"conversationId": conversation_id, "role": "assistant"},
+            order={"createdAt": "desc"},
+            take=6,
+        )
+    except Exception as e:
+        logger.warning(f"Short-circuit repeat lookup failed: {e}")
+        return False
+
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        created_at = _as_aware_utc(getattr(row, "createdAt", None))
+        if created_at and now - created_at > _SHORT_CIRCUIT_REPEAT_COOLDOWN:
+            continue
+        metadata = _metadata_dict(getattr(row, "metadata", None))
+        if _recent_repeat_context_matches(metadata, kind, repeat_key):
+            return True
+    return False
+
+
+def _schedule_repeat_reply() -> str:
+    return "刚才那段安排没变。你想看具体哪一段，我再帮你拎出来。"
+
+
 async def handle_schedule_query(
     user_message: str,
     ctx: ShortCircuitCtx,
@@ -366,6 +463,27 @@ async def handle_schedule_query(
         )
     else:
         schedule_context = SCHEDULE_MISSING_CONTEXT_PROMPT.format(date_label=date_label)
+    repeat_key = _hashed_repeat_key(resolved_query_type, date_label, schedule_context)
+    repeat_metadata = _repeat_metadata(
+        "schedule_query",
+        repeat_key,
+        query_type=resolved_query_type,
+        date_label=date_label,
+    )
+    if await _has_recent_short_circuit_repeat(
+        ctx.conversation_id,
+        kind="schedule_query",
+        repeat_key=repeat_key,
+    ):
+        return (
+            True,
+            ctx.finalize(
+                _schedule_repeat_reply(),
+                kind="schedule_query",
+                metadata=repeat_metadata,
+            ),
+            schedule_context,
+        )
     try:
         response = await schedule_query_reply(
             message=user_message,
@@ -381,7 +499,11 @@ async def handle_schedule_query(
         )
         if not response:
             return False, None, schedule_context
-        return True, ctx.finalize(response, kind="schedule_query"), schedule_context
+        return (
+            True,
+            ctx.finalize(response, kind="schedule_query", metadata=repeat_metadata),
+            schedule_context,
+        )
     except Exception as e:
         logger.warning(f"Schedule query short-circuit failed, falling through: {e}")
         return False, None, schedule_context
@@ -390,6 +512,30 @@ async def handle_schedule_query(
 # ═══════════════════════════════════════════════════════════════════
 # §3.4.3 询问当前状态
 # ═══════════════════════════════════════════════════════════════════
+
+
+def _normalize_current_activity(activity: Any) -> str:
+    """Stable key for "same current state" checks.
+
+    This intentionally keys on resolved activity, not the user's text, so
+    variants like "在忙吗" / "干嘛呢" / "你现在做什么" share the same cooldown.
+    """
+    return re.sub(r"\s+", " ", str(activity or "")).strip()
+
+
+def _current_state_metadata(activity_key: str) -> dict[str, Any]:
+    metadata = _repeat_metadata("current_state", activity_key) or {}
+    metadata.update({
+        _CURRENT_STATE_METADATA_KEY: {
+            "intent": "current_state",
+            "activity_key": activity_key,
+        }
+    })
+    return metadata
+
+
+def _repeat_current_state_reply() -> str:
+    return "还在刚才那个状态呢。怎么啦，找我有事？"
 
 
 async def handle_current_state(
@@ -406,6 +552,18 @@ async def handle_current_state(
 
     # spec §3.2 隐性时间解析: 走时间中枢 helper, 复用 caller 已加载的 ai_status
     _, current_activity = await resolve_implicit_time(ctx.agent_id or "", ai_status)
+    activity_key = _normalize_current_activity(current_activity)
+    metadata = _current_state_metadata(activity_key) if activity_key else None
+    if await _has_recent_short_circuit_repeat(
+        ctx.conversation_id,
+        kind="current_state",
+        repeat_key=activity_key,
+    ):
+        return True, ctx.finalize(
+            _repeat_current_state_reply(),
+            kind="current_state",
+            metadata=metadata,
+        )
     try:
         response = await current_state_reply(
             message=user_message,
@@ -418,7 +576,7 @@ async def handle_current_state(
         )
         if not response:
             return False, None
-        return True, ctx.finalize(response, kind="current_state")
+        return True, ctx.finalize(response, kind="current_state", metadata=metadata)
     except Exception as e:
         logger.warning(f"Current state short-circuit failed, falling through: {e}")
         return False, None

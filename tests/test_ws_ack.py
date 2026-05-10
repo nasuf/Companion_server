@@ -70,8 +70,8 @@ async def test_turn_aggregation_bypass_for_record_requests():
 
 
 @pytest.mark.asyncio
-async def test_turn_aggregation_bypass_for_current_state_queries():
-    """询问 AI 当前状态属于控制型短路意图, 不进入普通回合聚合。"""
+async def test_turn_aggregation_keeps_current_state_queries_in_turn_window():
+    """询问 AI 当前状态仍是聊天回合的一部分, 需要等待短 turn window 合并追问。"""
     with (
         patch.object(turn_mod, "is_crisis_message", return_value=False),
         patch.object(turn_mod, "check_banned_keywords", return_value=[]),
@@ -80,7 +80,21 @@ async def test_turn_aggregation_bypass_for_current_state_queries():
         patch.object(turn_mod, "load_pending_action",
                      new_callable=AsyncMock, return_value=None),
     ):
-        assert await turn_mod.should_bypass_user_turn_aggregation("conv-1", "你现在在干嘛")
+        assert not await turn_mod.should_bypass_user_turn_aggregation("conv-1", "你现在在干嘛")
+
+
+@pytest.mark.asyncio
+async def test_turn_aggregation_keeps_schedule_queries_in_turn_window():
+    """计划查询是只读聊天意图, 连续追问应先聚合, 避免重复播报日程。"""
+    with (
+        patch.object(turn_mod, "is_crisis_message", return_value=False),
+        patch.object(turn_mod, "check_banned_keywords", return_value=[]),
+        patch.object(turn_mod, "load_pending_contradiction",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(turn_mod, "load_pending_action",
+                     new_callable=AsyncMock, return_value=None),
+    ):
+        assert not await turn_mod.should_bypass_user_turn_aggregation("conv-1", "你明天忙吗")
 
 
 @pytest.mark.asyncio

@@ -66,12 +66,16 @@ def test_current_state_fast_path_is_narrow():
     )
 
     assert detect_current_state_fast_path("你在干嘛呢")
+    assert detect_current_state_fast_path("在忙吗")
     assert detect_current_state_fast_path("忙啥？")
+    assert detect_current_state_fast_path("在忙吗\n干嘛呢")
     assert not detect_current_state_fast_path("你明天在干嘛")
     assert not detect_current_state_fast_path("你刚才在干嘛")
+    assert not detect_current_state_fast_path("在忙吗\n我刚看完第二季")
 
     assert is_explicit_current_state_query("忙吗")
     assert is_explicit_current_state_query("你最近怎么样")
+    assert is_explicit_current_state_query("在忙吗\n干嘛呢")
     assert is_explicit_current_state_query("你心情怎么样")
     assert not is_explicit_current_state_query("这么晚还能看到云啊")
     assert not is_explicit_current_state_query("你刚才说在看云？")

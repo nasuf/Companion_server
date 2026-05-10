@@ -51,6 +51,11 @@ _TURN_BYPASS_RECORD_CUES = (
     *UNDO_CANCEL_KEYWORDS,
 )
 
+_TURN_AGGREGATED_INTENTS = {
+    IntentType.CURRENT_STATE,
+    IntentType.SCHEDULE_QUERY,
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,7 +90,9 @@ async def should_bypass_user_turn_aggregation(
         return True
     if any(cue in text for cue in _TURN_BYPASS_RECORD_CUES):
         return True
-    if is_explicit_current_state_query(text) or is_explicit_l3_recall_query(text):
+    if is_explicit_current_state_query(text):
+        return False
+    if is_explicit_l3_recall_query(text):
         return True
 
     try:
@@ -99,6 +106,8 @@ async def should_bypass_user_turn_aggregation(
         logger.warning(f"[TURN-BYPASS] pending-state lookup failed: {e}")
 
     detected = detect_intent(text)
+    if detected.intent in _TURN_AGGREGATED_INTENTS:
+        return False
     return detected.intent is not IntentType.NONE
 
 

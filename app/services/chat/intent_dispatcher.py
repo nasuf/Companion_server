@@ -100,12 +100,20 @@ def is_explicit_l3_recall_query(message: str) -> bool:
     )
 
 
+def _split_turn_text(message: str) -> list[str]:
+    """Return separately submitted user messages after turn aggregation."""
+    return [part.strip() for part in (message or "").splitlines() if part.strip()]
+
+
 def detect_current_state_fast_path(message: str) -> bool:
     """Hot-path for common "what are you doing now" messages.
 
     Keep this deliberately narrow. Future/past/scheduled variants still go
     through the LLM classifier so they can become schedule queries when needed.
     """
+    parts = _split_turn_text(message)
+    if len(parts) > 1:
+        return all(detect_current_state_fast_path(part) for part in parts)
     normalized = compact_chat_text(message)
     if not normalized:
         return False
@@ -121,6 +129,9 @@ def is_explicit_current_state_query(message: str) -> bool:
     reply as CURRENT_STATE. This gate keeps the short-circuit narrow so
     context follow-ups fall back to the normal reply path.
     """
+    parts = _split_turn_text(message)
+    if len(parts) > 1:
+        return all(is_explicit_current_state_query(part) for part in parts)
     normalized = compact_chat_text(message)
     if not normalized:
         return False

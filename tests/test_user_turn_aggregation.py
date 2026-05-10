@@ -90,6 +90,38 @@ async def test_plan_normal_message_uses_turn_window(fake_aggregation_redis):
 
 
 @pytest.mark.asyncio
+async def test_plan_current_state_message_uses_turn_window(fake_aggregation_redis):
+    redis = fake_aggregation_redis
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        plan = await plan_user_message_aggregation(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="你现在在干嘛",
+            reply_context={"delay_seconds": 0},
+        )
+
+    assert plan.route == "turn_window"
+    assert plan.metadata == {"queued": True}
+
+
+@pytest.mark.asyncio
+async def test_plan_schedule_query_message_uses_turn_window(fake_aggregation_redis):
+    redis = fake_aggregation_redis
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        plan = await plan_user_message_aggregation(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="你明天忙吗",
+            reply_context={"delay_seconds": 0},
+        )
+
+    assert plan.route == "turn_window"
+    assert plan.metadata == {"queued": True}
+
+
+@pytest.mark.asyncio
 async def test_plan_record_request_bypasses_turn_window(fake_aggregation_redis):
     redis = fake_aggregation_redis
     with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
