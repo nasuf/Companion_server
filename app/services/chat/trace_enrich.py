@@ -60,25 +60,15 @@ def _label_strip_codeblock(output: str) -> str:
     return text
 
 
-def _label_pad(output: str) -> str | None:
-    """PAD JSON → '愉悦P · 唤醒A · 支配D' 简短摘要."""
+def _label_emotion(output: str) -> str | None:
+    """Emotion label JSON → '标签 (强度 N)' 摘要."""
     try:
         data = json.loads(_label_strip_codeblock(output))
-        p = float(data.get("pleasure", 0))
-        a = float(data.get("arousal", 0))
-        d = float(data.get("dominance", 0))
+        label = str(data.get("emotion") or "").strip()
+        intensity = int(float(data.get("intensity", 0)))
     except Exception:
         return None
-    parts = []
-    if p > 0.3:
-        parts.append("偏积极")
-    elif p < -0.3:
-        parts.append("偏消极")
-    else:
-        parts.append("中性")
-    parts.append("激动" if a > 0.6 else ("平静" if a < 0.3 else "中等"))
-    parts.append("掌控" if d > 0.6 else ("无助" if d < 0.3 else "中性"))
-    return " · ".join(parts)
+    return f"{label or '中性'} (强度 {max(0, min(100, intensity))})"
 
 
 def _label_contradiction(output: str) -> str | None:
@@ -326,11 +316,8 @@ _register("从候选记忆中挑选与\"话题方向\"最相关的最多 3 条",
 ))
 
 # Data 类
-_register("根据 AI 当前时间、作息状态、正在进行的活动以及对话上下文，推测 AI 此刻的真实情绪", _PromptMeta(
-    "emotion.ai_pad", "AI 情绪 (PAD)", "data", _label_pad,
-))
-_register("分析用户消息的情绪，输出PAD三维值", _PromptMeta(
-    "emotion.extraction", "用户情绪 (PAD)", "data", _label_pad,
+_register("分析用户消息的主要情绪，输出情绪标签、强度和置信度", _PromptMeta(
+    "emotion.user_label", "用户情绪标签", "data", _label_emotion,
 ))
 _register("根据AI的七个性格维度分数（0-100），推测其在 MBTI 4 条双极轴上的偏向百分比", _PromptMeta(
     "agent.personality_scoring", "AI 性格打分", "data", _label_passthrough,

@@ -12,7 +12,6 @@ from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import render_prompt
-from app.services.relationship.emotion import get_ai_emotion
 from app.services.relationship.intimacy import get_relationship_stage, get_topic_intimacy
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.core_memory import load_core_memory_strings
@@ -36,13 +35,12 @@ async def build_proactive_context(
     # 9 个独立 I/O 并发 (DB / Redis / LLM rerank). _load_proactive_memories
     # 含 utility LLM 调用是最长尾, 跟其余 DB 读并行可让 LLM 时间被吸收.
     (
-        agent, schedule, emotion, core_memories,
+        agent, schedule, core_memories,
         proactive_memories_pair, topic_intimacy, silence_hours,
         user_portrait, recent_context,
     ) = await asyncio.gather(
         db.aiagent.find_unique(where={"id": agent_id}),
         get_cached_schedule(agent_id),
-        get_ai_emotion(agent_id),
         load_core_memory_strings(user_id=user_id, workspace_id=workspace_id, source="user"),
         _load_proactive_memories(
             user_id=user_id,
@@ -67,7 +65,6 @@ async def build_proactive_context(
     return {
         "agent": agent,
         "schedule_status": schedule_status,
-        "emotion": emotion,
         # core_memory now returns (category, text) tuples; extract text for
         # downstream consumers that expect plain strings.
         "core_memories": [t[1] if isinstance(t, tuple) else t for t in core_memories[:8]],

@@ -1,6 +1,6 @@
 """表情包推荐服务。
 
-PRD §5.7: 根据目标情感向量从表情包库中推荐合适的表情包。
+根据目标情绪标签和强度从表情包库中推荐合适的表情包。
 算法: emotion匹配 + intensity距离 → match_score → 过滤(≥0.3) → 随机选一个。
 """
 
@@ -11,55 +11,29 @@ import random
 
 from app.db import db
 
-# 12类情绪标签典型PAD值 (PRD §5.10.1)
-_EMOTION_PAD: dict[str, tuple[float, float, float]] = {
-    "高兴": (0.8, 0.7, 0.6),
-    "悲伤": (-0.6, 0.3, 0.2),
-    "愤怒": (-0.7, 0.8, 0.7),
-    "恐惧": (-0.5, 0.8, 0.1),
-    "惊讶": (0.2, 0.9, 0.3),
-    "厌恶": (-0.4, 0.5, 0.4),
-    "中性": (0.0, 0.3, 0.5),
-    "焦虑": (-0.3, 0.7, 0.2),
-    "失望": (-0.5, 0.2, 0.1),
-    "欣慰": (0.5, 0.2, 0.5),
-    "感激": (0.7, 0.3, 0.4),
-    "戏谑": (0.6, 0.6, 0.7),
+_KNOWN_EMOTIONS = {
+    "高兴", "悲伤", "愤怒", "恐惧", "惊讶", "厌恶",
+    "中性", "焦虑", "失望", "欣慰", "感激", "戏谑",
 }
 
 
-def _pad_to_emotion(p: float, a: float, d: float) -> str:
-    """将PAD向量映射到最近的情绪标签（欧氏距离）。"""
-    best, best_dist = "中性", float("inf")
-    for label, (ep, ea, ed) in _EMOTION_PAD.items():
-        dist = (p - ep) ** 2 + (a - ea) ** 2 + (d - ed) ** 2
-        if dist < best_dist:
-            best, best_dist = label, dist
-    return best
-
-
-def _arousal_to_intensity(arousal: float) -> int:
-    """arousal(0~1) → intensity(1~5)。PRD §5.7.2.2。"""
-    clamped = max(0.0, min(1.0, arousal))
-    return min(5, int(clamped * 4) + 1)
+def _label_to_intensity_bucket(intensity: int) -> int:
+    """0-100 intensity -> 1-5 sticker intensity bucket."""
+    clamped = max(0, min(100, int(intensity or 0)))
+    return min(5, clamped // 25 + 1)
 
 
 async def recommend_sticker(
-    pleasure: float = 0.0,
-    arousal: float = 0.0,
-    dominance: float = 0.5,
     primary_emotion: str | None = None,
+    intensity: int = 50,
 ) -> dict | None:
     """推荐一个表情包。
 
     Returns:
         {"id": int, "url": str, "match_score": float} 或 None
     """
-    if primary_emotion and primary_emotion in _EMOTION_PAD:
-        target_emotion = primary_emotion
-    else:
-        target_emotion = _pad_to_emotion(pleasure, arousal, dominance)
-    target_intensity = _arousal_to_intensity(arousal)
+    target_emotion = primary_emotion if primary_emotion in _KNOWN_EMOTIONS else "中性"
+    target_intensity = _label_to_intensity_bucket(intensity)
 
     # 查询包含 target_emotion 的表情包（PostgreSQL jsonb 查询）
     rows = await db.query_raw(

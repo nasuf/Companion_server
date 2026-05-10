@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
-    AI_PAD_PROMPT,
     AI_REPLY_EMOTION_PROMPT,
     ANTI_HALLUCINATION_HARD_RULE_PROMPT,
     APOLOGY_PROMPT,
@@ -30,7 +29,6 @@ from app.services.prompting.defaults import (
     DELETION_CONFIRM_PROMPT,
     DELETION_INTENT_PROMPT,
     DELETION_REPLY_PROMPT,
-    EMOTION_EXTRACTION_PROMPT,
     END_REPLY_PROMPT,
     PERSONALITY_SCORING_PROMPT,
     INTENT_SPLIT_PROMPT,
@@ -85,6 +83,7 @@ from app.services.prompting.defaults import (
     SEVERE_ATTACK_REPLY_PROMPT,
     STRONG_MEMORY_REPLY_PROMPT,
     SYSTEM_BASE_PROMPT,
+    USER_EMOTION_LABEL_PROMPT,
     WEAK_MEMORY_REPLY_PROMPT,
 )
 
@@ -267,18 +266,11 @@ PROMPT_DEFINITIONS = [
         DELETION_INTENT_PROMPT,
     ),
 
-    # ── 情绪 (PAD) ──
+    # ── 情绪标签 ──
     PromptDefinition(
-        "emotion.extraction", "用户 PAD 值判断", "异步情绪", "情绪",
-        "《记忆部分产品手册》§3.3 + 《终稿·指令模版 4.19》P26: 从用户消息抽 "
-        "PAD (Pleasure / Arousal / Dominance) 三维值.",
-        EMOTION_EXTRACTION_PROMPT,
-    ),
-    PromptDefinition(
-        "emotion.ai_pad", "AI PAD 值判断", "前置情感", "情绪",
-        "《终稿·第三部分 交互系统》§5.3 / §5.4 / §6.2: AI PAD 决定 emoji / sticker 概率与回复时机. "
-        "本 prompt 从 AI 当前作息 + 上下文推 PAD 值.",
-        AI_PAD_PROMPT,
+        "emotion.user_label", "用户情绪标签判断", "异步情绪", "情绪",
+        "从用户消息抽取主要情绪标签、强度和置信度；不再输出三维向量。",
+        USER_EMOTION_LABEL_PROMPT,
     ),
 
     # ── 作息系统 (Part 1) ──

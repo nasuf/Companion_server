@@ -164,8 +164,6 @@ async def test_handle_message_fragment_sends_ack_with_client_id(fake_ws):
                      return_value=[{"activity": "自由时间", "type": "leisure"}]),
         patch.object(ws_mod, "get_current_status",
                      return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
-        patch.object(ws_mod, "get_ai_emotion",
-                     new_callable=AsyncMock, return_value=None),
         patch.object(ws_mod, "build_reply_timing_context",
                      new_callable=AsyncMock, return_value={}),
     ):
@@ -214,8 +212,6 @@ async def test_handle_message_fragment_joins_open_turn_window(fake_ws):
                      return_value=[{"activity": "自由时间", "type": "leisure"}]),
         patch.object(ws_mod, "get_current_status",
                      return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
-        patch.object(ws_mod, "get_ai_emotion",
-                     new_callable=AsyncMock, return_value=None),
         patch.object(ws_mod, "build_reply_timing_context",
                      new_callable=AsyncMock, return_value={"delay_seconds": 0}),
     ):
@@ -252,8 +248,6 @@ async def test_handle_message_non_fragment_sends_ack_with_client_id(fake_ws):
                      return_value=[{"activity": "自由时间", "type": "leisure"}]),
         patch.object(ws_mod, "get_current_status",
                      return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
-        patch.object(ws_mod, "get_ai_emotion",
-                     new_callable=AsyncMock, return_value=None),
         patch.object(ws_mod, "build_reply_timing_context",
                      new_callable=AsyncMock, return_value={}),
     ):
@@ -291,8 +285,6 @@ async def test_handle_message_normal_turn_aggregates_before_queue(fake_ws):
                      return_value=[{"activity": "自由时间", "type": "leisure"}]),
         patch.object(ws_mod, "get_current_status",
                      return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
-        patch.object(ws_mod, "get_ai_emotion",
-                     new_callable=AsyncMock, return_value=None),
         patch.object(ws_mod, "build_reply_timing_context",
                      new_callable=AsyncMock, return_value={"delay_seconds": 0}),
     ):
@@ -342,8 +334,6 @@ async def test_handle_message_default_client_id_none(fake_ws):
                      return_value=[{"activity": "自由时间", "type": "leisure"}]),
         patch.object(ws_mod, "get_current_status",
                      return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
-        patch.object(ws_mod, "get_ai_emotion",
-                     new_callable=AsyncMock, return_value=None),
         patch.object(ws_mod, "build_reply_timing_context",
                      new_callable=AsyncMock, return_value={}),
     ):

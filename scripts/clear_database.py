@@ -27,7 +27,6 @@ _TABLES = [
     "trait_feedback_logs",
     "schedule_adjust_logs",
     "ai_daily_schedules",
-    "ai_emotion_states",
     "user_portraits",
     "user_profiles",
     "intimacies",

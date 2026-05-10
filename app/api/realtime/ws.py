@@ -24,7 +24,7 @@ from app.services.schedule_domain.schedule import generate_daily_schedule, get_c
 from app.services.mbti import get_mbti
 from app.services.proactive.state import mark_user_replied_for_conversation
 from app.services.proactive.sender import send_first_greeting
-from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
+from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.runtime.ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -282,14 +282,11 @@ async def _handle_message(
             agent.id, agent.name, get_mbti(agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
-    # Spec §6.2 延迟计算用缓存 PAD（消息入队前，在 orchestrator compute_ai_pad 之前）
-    ai_emotion = await get_ai_emotion(agent.id)
     current_context = await build_reply_timing_context(
         agent_id=agent.id,
         user_id=user_id,
         received_status=received_status,
         user_emotion=quick_emotion_estimate(text),
-        ai_emotion=ai_emotion,
     )
 
     plan = await plan_user_message_aggregation(

@@ -60,7 +60,6 @@ model AiAgent {
   updatedAt          DateTime            @updatedAt @map("updated_at")
   workspaces         ChatWorkspace[]
   conversations      Conversation[]
-  emotionState       AiEmotionState?
   schedules          AiDailySchedule[]
   intimacies         Intimacy[]
   proactiveLogs      ProactiveChatLog[]
@@ -291,23 +290,6 @@ model UserProfile {
 
   @@index([userId])
   @@map("user_profiles")
-}
-
-// Cache of last-computed AI PAD from chat turn (not authoritative state).
-// Spec §3.2: 聊天热路径每条消息都通过 compute_ai_pad 重新计算 AI PAD，
-// 结果回写此表供 (a) 下一条消息收到时的延迟计算 (§6.2 高情绪判定)
-//            (b) Proactive 主动消息的 mood label
-//            (c) GET /emotions/{agent_id}/current 读接口
-model AiEmotionState {
-  id        String   @id @default(uuid())
-  agentId   String   @unique @map("agent_id")
-  agent     AiAgent  @relation(fields: [agentId], references: [id])
-  pleasure  Float    @default(0.0) @map("pleasure")
-  arousal   Float    @default(0.5)
-  dominance Float    @default(0.5)
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@map("ai_emotion_states")
 }
 
 model PatienceState {

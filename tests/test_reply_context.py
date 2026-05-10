@@ -37,7 +37,7 @@ def test_compute_delay_profile_high_emotion(reply_delay_enabled):
         last_reply_at=now - timedelta(hours=2),
         received_at=now,
         received_status={"status": "very_busy"},
-        user_emotion={"arousal": 0.9, "pleasure": -0.4},
+        user_emotion={"emotion": "焦虑", "intensity": 80},
     )
     assert profile["interaction_mode"] == "high_emotion"
 
@@ -49,7 +49,7 @@ def test_compute_delay_profile_disabled_by_default():
         last_reply_at=now - timedelta(minutes=5),
         received_at=now,
         received_status={"status": "busy"},
-        user_emotion={"arousal": 0.9, "pleasure": -0.4},
+        user_emotion={"emotion": "焦虑", "intensity": 80},
     )
     assert profile["interaction_mode"] == "disabled"
     assert profile["delay_seconds"] == 0.0

@@ -3,11 +3,10 @@
 `save_replies` 是热路径同步调用（持久化分段回复）；
 `run_post_process` 是 fire-and-forget，把以下任务并行执行：
 
-- _bg_user_emotion: 写用户 PAD 到消息 metadata（值由热路径已算好）
+- _bg_user_emotion: 写用户情绪标签到消息 metadata（值由热路径已算好）
 - _bg_memory_pipeline: spec §2.1/§2.2 记忆抽取（user + AI）
 - _bg_trait_adjustment: 检测用户反馈调整 agent 性格
 - _bg_positive_recovery: 正向互动 +20 耐心（spec §2.5）
-- save_ai_emotion: 回写 AI PAD 缓存
 
 `_bg_memory_pipeline` 还被 boundary_phase 通过 bg_memory_pipeline_fn 注入使用。
 """
@@ -31,7 +30,6 @@ from app.services.interaction.boundary import (
 )
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.memory.recording.watermark import get_watermark, set_watermark
-from app.services.relationship.emotion import save_ai_emotion
 from app.services.runtime.ws_manager import manager
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
@@ -141,7 +139,7 @@ async def _bg_user_emotion(
     user_message_id: str | None,
     user_emotion: dict | None,
 ) -> None:
-    """Spec §3.2 用户侧：写 LLM 算好的用户 PAD 到消息 metadata。"""
+    """写 LLM 算好的用户情绪标签到消息 metadata。"""
     if not user_message_id or not user_emotion:
         return
     try:
@@ -154,7 +152,8 @@ async def _bg_user_emotion(
             extra={
                 "event": EVT_BG_DONE, "kind": "user_emotion",
                 "user_message_id": user_message_id,
-                "primary_emotion": user_emotion.get("primary"),
+                "emotion": user_emotion.get("emotion"),
+                "intensity": user_emotion.get("intensity"),
             },
         )
     except Exception as e:
@@ -444,10 +443,9 @@ async def run_post_process(
     full_response: str,
     messages_dicts: list[dict],
     user_emotion: dict | None = None,
-    ai_emotion: dict | None = None,
     skip_ai_memory: bool = False,
 ) -> None:
-    """5 个后台任务并发：写用户 PAD / 写 AI PAD 缓存 / 记忆抽取 / 性格反馈 / 耐心恢复。
+    """后台任务并发：写用户情绪 / 记忆抽取 / 性格反馈 / 耐心恢复。
 
     起独立 usage session: fire_background 已把 ContextVar 隔离,
     这里重新开让记忆/trait 的 token 落到 llm_usage 自己一行 (scope=post_process).
@@ -470,6 +468,4 @@ async def run_post_process(
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
             tasks.append(_bg_positive_recovery(agent_id, user_id, user_message))
-            if ai_emotion:
-                tasks.append(save_ai_emotion(agent_id, ai_emotion))
         await asyncio.gather(*tasks, return_exceptions=True)

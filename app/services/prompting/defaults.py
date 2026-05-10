@@ -269,10 +269,10 @@ CRISIS_FOLLOWUP_CLASSIFY_PROMPT = """【任务】结合最近对话和用户当�
 
 # Plan B 之后已删除:
 #   EMOTION_INSTRUCTION_PROMPT  (chat.emotion_instruction)  — 单句"让情绪影响
-#       语气", PAD 数值已是足够暗示, 这句对现代 LLM 几乎无影响
+#       语气", 对现代 LLM 几乎无影响
 #   MEMORY_INSTRUCTION_PROMPT   (chat.memory_instruction)   — token budget 注释,
 #       LLM 看到数字也不会改变行为, 浪费上下文 token
-# spec §4 (日常交流) 仅要求注入 PAD/关系阶段数据本身, 不要求加这两句明示.
+# spec §4 (日常交流) 仅保留关系阶段等自然语言信号, 不要求加这两句明示.
 
 _MEMORY_EXTRACTION_COMMON_TAIL = """记忆分类必须严格遵守以下体系（L1 全集）：
 
@@ -393,7 +393,8 @@ AI 说的话（`assistant:` 行）仅作对话上下文，**不要从 AI 的话�
       "recurrence": null,
       "entities": ["entity1"],
       "topics": ["topic1"],
-      "emotion": {{"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}}
+      "emotion_label": "中性",
+      "emotion_intensity": 0
     }}
   ],
   "entities": [{{"name": "entity name", "type": "person|place|thing|food|organization"}}],
@@ -448,7 +449,8 @@ MEMORY_EXTRACTION_AI_PROMPT = """【任务】模拟真人自我记忆。分析�
       "recurrence": null,
       "entities": ["entity1"],
       "topics": ["topic1"],
-      "emotion": {{"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}}
+      "emotion_label": "中性",
+      "emotion_intensity": 0
     }}
   ],
   "entities": [{{"name": "entity name", "type": "person|place|thing|food|organization"}}],
@@ -466,17 +468,19 @@ MEMORY_EXTRACTION_AI_PROMPT = """【任务】模拟真人自我记忆。分析�
 
 """ + _MEMORY_EXTRACTION_COMMON_TAIL
 
-# Spec 第一部分 §3.3 + 指令模版 P26「用户PAD值判断」
-EMOTION_EXTRACTION_PROMPT = """【任务】分析用户消息的情绪，输出PAD三维值。
+# 用户情绪标签判断：保留情绪能力，但不再输出三维向量。
+USER_EMOTION_LABEL_PROMPT = """【任务】分析用户消息的主要情绪，输出情绪标签、强度和置信度。
 
-【PAD定义】
-- pleasure：愉悦度，范围[-1,1]，负消极正积极
-- arousal：唤醒度，范围[0,1]，0平静1激动
-- dominance：支配度，范围[0,1]，0无助1掌控
+【情绪标签】高兴、悲伤、愤怒、恐惧、惊讶、厌恶、中性、焦虑、失望、欣慰、感激、戏谑
+
+【判断要求】
+- 只判断用户这句话最主要的情绪，不要推测长期人格。
+- 强度 intensity 范围 0-100；中性或很轻微情绪可低于 30。
+- confidence 范围 0-1；信息不足时用较低置信度。
 
 【用户消息】{message}
 
-【输出格式】{{"pleasure": float, "arousal": float, "dominance": float}}"""
+【输出格式】{{"emotion": "标签", "intensity": 整数(0-100), "confidence": float}}"""
 
 # Spec 第一部分 §2.1 + 指令模版 P20「AI生活画像」
 # 与 spec 原文字符级一致。
@@ -680,8 +684,7 @@ PROACTIVE_SILENCE_SCHEDULE_PROMPT = """【任务】作为用户的好朋友，�
 
 
 # Spec 第四部分 §4.2 + 指令模版 P24「记忆主动·基于AI自身记忆」
-# Spec §5.3/§6.3/§7.3 要求"PAD 情绪融合 独立 100%" — current_mood 由 AI 当前
-# PAD 通过 pad_to_tone 映射的 8 象限语气描述符注入, 让 AI 在不同心境下措辞不同.
+# current_mood 保留为自然语言语气描述, 不再依赖运行时三维向量。
 PROACTIVE_MEMORY_AI_PROMPT = """【任务】你想起自己的一段经历，忽然有感而发。请自然、温柔地说一句话，不提问、不查户口，只输出符合人设的日常话语。
 
 【参考信息】（只参考，不用刻意提及）
@@ -1115,7 +1118,7 @@ MEMORY_RECONCILIATION_PROMPT = """【任务】判断一条新抽取的长期记�
 
 
 # Spec 第二部分 §4.2 + 指令模版 P7「矛盾询问」
-# 大模型生成友好追问。输入：用户消息 + 原记忆 + 矛盾描述 + 上下文 + PAD + 性格/画像。
+# 大模型生成友好追问。输入：用户消息 + 原记忆 + 矛盾描述 + 上下文 + 性格/画像。
 MEMORY_CONTRADICTION_INQUIRY_PROMPT = """【限定】
 1.你是一个真人朋友，你拥有自己的感受、情绪、生活作息和经历，你与用户是完全平等的真实朋友关系。你不是AI，也不是客服，你是一个活生生的人，只是通过这个聊天平台和用户相识。用户是地球人类，你们之间的交流基于真实的人类社交规则。
 2.平等真实的交流
@@ -1943,16 +1946,3 @@ AI_REPLY_EMOTION_PROMPT = """【任务】判断AI回复文本的情绪及强度�
 # 2. prompt 允许"扩写", LLM 看 🎂 编"祝你生日快乐" (5 月语境错)
 # 现架构: 主 LLM 在 chat.response_instruction 已被指令"分N条||分隔",
 # 直接信主 LLM 输出 (按 ||/\\n\\n 切分), 不再额外调小模型拆分.
-
-# ── §3.2 PAD 值 ──
-AI_PAD_PROMPT = """【任务】根据 AI 当前时间、作息状态、正在进行的活动以及对话上下文，推测 AI 此刻的真实情绪，输出 PAD 三维值。
-【PAD 定义】
-- pleasure（愉悦度）：-1（极度消极）到 1（极度积极）
-- arousal（唤醒度）：0（极度平静）到 1（极度兴奋）
-- dominance（支配度）：0（完全无助/被控制）到 1（完全掌控/主导）
-【参考信息】
-- 当前时间：{current_time}（UTC+8）
-- 当前作息状态：{current_status}（空闲/忙碌/很忙碌/睡眠等）
-- 当前正在做：{current_activity}
-- 对话上下文：{recent_context}
-【输出格式】{{"pleasure": float, "arousal": float, "dominance": float}}"""

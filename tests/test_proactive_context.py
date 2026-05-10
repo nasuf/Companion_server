@@ -128,7 +128,7 @@ async def test_determine_proactive_stage_4_tier():
 
 
 def test_silence_prompts_carry_current_mood():
-    """Spec §5.3/§6.3/§7.3: 4 个 silence_* prompt 必须带 PAD 心境描述符 (current_mood)."""
+    """4 个 silence_* prompt 必须带 current_mood."""
     from app.services.proactive.sender import _format_prompt
     from app.services.prompting.defaults import (
         PROACTIVE_SILENCE_PLAIN_PROMPT,
@@ -144,8 +144,7 @@ def test_silence_prompts_carry_current_mood():
         "proactive.silence_schedule": PROACTIVE_SILENCE_SCHEDULE_PROMPT,
     }
 
-    # PAD = (-0.5, 0.8, 0.2) → "焦虑而紧绷" (TONE_MAP[(-1, 1, -1)])
-    emotion = {"pleasure": -0.5, "arousal": 0.8, "dominance": 0.2}
+    emotion = {"emotion": "焦虑", "intensity": 80}
     for key, tpl in prompt_by_key.items():
         ctx = {
             "topic_theme": "天气",

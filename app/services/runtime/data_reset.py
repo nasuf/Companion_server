@@ -72,7 +72,6 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
 
     # 精确 key 列表
     exact_keys = [
-        f"emotion:{agent_id}",
         f"life_overview:{agent_id}",
         f"patience:{agent_id}:{user_id}",
         f"attack_history:{agent_id}:{user_id}",
@@ -307,7 +306,6 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     # 逐表列举容易遗漏，这里用通用列表一次性处理
     _FK_TABLES_TO_DELETE = [
         "patience_states",
-        "ai_emotion_states",
         "ai_daily_schedules",
         "trait_feedback_logs",
         "intimacies",

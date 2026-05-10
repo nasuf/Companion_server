@@ -39,7 +39,7 @@ from app.services.memory.retrieval.trace import (
 )
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
-from app.services.relationship.emotion import compute_ai_pad, extract_emotion
+from app.services.relationship.emotion import analyze_user_emotion
 from app.services.relationship.intimacy import get_topic_intimacy
 from app.services.rules.chat_keywords import (
     ENHANCED_QUERY_FIRST_HINTS,
@@ -54,7 +54,6 @@ from app.services.schedule_domain.schedule import (
     get_cached_schedule,
     get_current_status,
 )
-from app.services.schedule_domain.time_service import get_current_time
 from app.services.schedule_domain.time_parser import has_explicit_time
 
 logger = logging.getLogger(__name__)
@@ -68,8 +67,7 @@ class FetchedContext:
     classified_memories: list | None = None
     memory_strings: list[str] | None = None
     graph_context: dict | None = None
-    emotion: dict | None = None             # AI PAD (spec §3.2)
-    user_emotion: dict | None = None        # 用户 PAD (spec §3.2 用户侧)
+    user_emotion: dict | None = None        # 用户情绪标签: emotion/intensity/confidence
     portrait: Any = None
     schedule: Any = None
     topic_intimacy: float = 50.0
@@ -232,12 +230,11 @@ def format_recent_context(
     max_chars: int = 400,
     exclude_message_id: str | None = None,
 ) -> str:
-    """Spec §3.2 AIPAD值判断 的 recent_context 输入：最近 N 条用户/AI 消息。
+    """Format recent user/assistant turns for lightweight classifiers and prompts.
 
     exclude_message_id: 排除指定 ID 的消息. 用法: short-circuit handler 的 prompt
     同时有 {message} (当前用户消息) + {context} (recent_context) 占位符, 如果不
-    排除当前消息, LLM 会看到它两遍 (生产 trace 2026-05-07 16:57 实测). AI PAD
-    路径不传 exclude — 那条路径需要看完整含当前消息的上下文做情绪判断.
+    排除当前消息, LLM 会看到它两遍 (生产 trace 2026-05-07 16:57 实测).
     """
     if not messages_dicts:
         return EMPTY_RECENT_CONTEXT
@@ -494,20 +491,16 @@ async def fetch_parallel_context(
     detected_intent: IntentResult | None = None,
     l3_trigger_classify_fn: Callable[..., Awaitable[Any]] | None = None,
 ) -> FetchedContext:
-    """spec §3.1+§3.2 step 2-3：拉取记忆/情绪/画像/作息 + L3 awakening。
+    """spec §3.1+§3.2 step 2-3：拉取记忆/用户情绪/画像/作息 + L3 awakening。
 
     detected_intent / l3_trigger_classify_fn 二者均给定时, 内部会做 L3 唤醒;
     任一为 None 时跳过 L3 (调用方负责后续单独调 maybe_awaken_l3). 这是 P0-2
     优化打开的口子: 让 intent 与本函数能并行, 短路意图早返回时无需等 fetch.
     """
-    # Schedule 提前 (Redis 缓存)，使 compute_ai_pad 能进 gather 并行块
+    # Schedule 提前 (Redis 缓存)，供状态类短路和 prompt 自洽性约束复用。
     schedule = await _load_schedule(agent_id)
     ai_status = get_current_status(schedule) if schedule else None
     schedule_context = format_schedule_context(ai_status) if ai_status else None
-    status_label = (ai_status or {}).get("status", "空闲")
-    activity_label = (ai_status or {}).get("activity", "自由活动")
-    time_info = get_current_time()
-    current_time_str = time_info.now.strftime("%Y-%m-%d %H:%M") + f" {time_info.weekday}"
     recent_context = format_recent_context(messages_dicts)
 
     fast_weak_relevance = _should_fast_weak_relevance(user_message)
@@ -525,20 +518,14 @@ async def fetch_parallel_context(
     (
         relevance_result, retrieval_result,
         portrait, topic_intimacy,
-        time_memories_result, user_emotion_result, emotion_result,
+        time_memories_result, user_emotion_result,
     ) = await asyncio.gather(
         relevance_awaitable,
         retrieval_awaitable,
         _load_portrait(user_id, agent_id),
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times, workspace_id),
-        extract_emotion(user_message),
-        compute_ai_pad(
-            current_time=current_time_str,
-            schedule_status=status_label,
-            current_activity=activity_label,
-            recent_context=recent_context,
-        ),
+        analyze_user_emotion(user_message),
         return_exceptions=True,
     )
 
@@ -628,8 +615,7 @@ async def fetch_parallel_context(
     portrait = _unwrap(portrait, None, "Loading portrait")
     topic_intimacy = _unwrap(topic_intimacy, 50.0, "Loading topic intimacy")
     time_memories: list[str] = _unwrap(time_memories_result, [], "Loading time memories") or []
-    user_emotion: dict | None = _unwrap(user_emotion_result, None, "extract_emotion")
-    emotion: dict | None = _unwrap(emotion_result, None, "compute_ai_pad")
+    user_emotion: dict | None = _unwrap(user_emotion_result, None, "analyze_user_emotion")
 
     if detected_intent is not None and l3_trigger_classify_fn is not None:
         # Phase 2.4: L3 也用 enhanced_query 做向量检索 (省略指代场景)
@@ -650,7 +636,6 @@ async def fetch_parallel_context(
         classified_memories=classified_memories,
         memory_strings=memory_strings,
         graph_context=graph_context,
-        emotion=emotion,
         user_emotion=user_emotion,
         portrait=portrait,
         schedule=schedule,

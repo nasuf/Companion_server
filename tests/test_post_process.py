@@ -79,7 +79,7 @@ async def test_save_replies_first_carries_trace_id():
 
 @pytest.mark.asyncio
 async def test_run_post_process_fires_all_tasks_for_agent():
-    """有 agent_id 时，4 个后台任务都被并行 await（不含可选 save_ai_emotion）。"""
+    """有 agent_id 时，后台任务都被并行 await。"""
     from app.services.chat import post_process
 
     with patch.object(post_process, "_bg_user_emotion", AsyncMock()) as e, \

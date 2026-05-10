@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.redis_client import get_redis
+from app.services.relationship.emotion import is_high_emotion
 
 logger = logging.getLogger(__name__)
 
@@ -54,25 +55,9 @@ def _normalize_received_at(received_at: datetime | None = None) -> datetime:
     return ts.astimezone(timezone.utc)
 
 
-def _is_high_emotion(
-    user_emotion: dict[str, Any] | None,
-    ai_emotion: dict[str, Any] | None = None,
-) -> bool:
-    """spec §6.2: 高情绪判定。
-
-    - 用户侧：唤醒度>0.6 且愉悦度<0.4，或唤醒度>0.7
-    - AI 侧：AI PAD 唤醒度 > 0.7
-    任一条件满足即进入高情绪状态。
-    """
-    if user_emotion:
-        arousal = float(user_emotion.get("arousal", 0.5))
-        pleasure = float(user_emotion.get("pleasure", 0.0))
-        if (arousal > 0.6 and pleasure < 0.4) or arousal > 0.7:
-            return True
-    if ai_emotion:
-        if float(ai_emotion.get("arousal", 0.0)) > 0.7:
-            return True
-    return False
+def _is_high_emotion(user_emotion: dict[str, Any] | None) -> bool:
+    """spec §6.2: high emotion now uses user emotion label + intensity."""
+    return is_high_emotion(user_emotion)
 
 
 def _schedule_delay_for_status(status: str) -> float:
@@ -87,7 +72,6 @@ def compute_delay_profile(
     received_at: datetime,
     received_status: dict[str, Any] | None,
     user_emotion: dict[str, Any] | None = None,
-    ai_emotion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute PRD-aligned delay mode and duration.
 
@@ -116,7 +100,7 @@ def compute_delay_profile(
             "delay_reason": "conversation_mode",
             "delay_seconds": random.uniform(1, 5),
         }
-    elif _is_high_emotion(user_emotion, ai_emotion):
+    elif _is_high_emotion(user_emotion):
         # spec §6.2: 高情绪 0-5s(90%), 5-10s(10%)
         delay = random.uniform(0, 5) if random.random() < 0.9 else random.uniform(5, 10)
         profile = {
@@ -144,7 +128,6 @@ async def build_reply_timing_context(
     user_id: str,
     received_status: dict[str, Any] | None,
     user_emotion: dict[str, Any] | None = None,
-    ai_emotion: dict[str, Any] | None = None,
     received_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build structured timing context at message receipt time."""
@@ -155,13 +138,11 @@ async def build_reply_timing_context(
         received_at=received_ts,
         received_status=received_status,
         user_emotion=user_emotion,
-        ai_emotion=ai_emotion,
     )
     return {
         "received_at": received_ts.isoformat(),
         "received_status": received_status or {},
         "user_emotion": user_emotion or {},
-        "ai_emotion": ai_emotion or {},
         **profile,
     }
 

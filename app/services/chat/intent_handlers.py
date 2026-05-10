@@ -100,7 +100,7 @@ class ShortCircuitCtx:
     recent_context: str = EMPTY_RECENT_CONTEXT
     # 短路 handler 经 ctx.finalize(reply) 把回复文本回写到这里, 让 orchestrator
     # finally 兜底 fire post_process 时拿到正确的 full_response (否则 short-circuit
-    # 路径直接 return, post_process 永不跑, 记忆/PAD/trait 全丢失).
+    # 路径直接 return, post_process 永不跑, 记忆/用户情绪/trait 全丢失).
     last_short_circuit_reply: str | None = None
     # spec §3.3 step 2 假设多意图能字面拆分 (示例"我好难过，不想聊了" → 2 个独立
     # 子句). 但生产场景的口语融合句 (e.g. "算了别提醒了, 我吃过了" 整体语义 =

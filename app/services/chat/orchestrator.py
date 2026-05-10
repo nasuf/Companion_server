@@ -4,7 +4,7 @@ Hot path (user-facing, ~2s):
   save msg → parallel(vector retrieval + load cached context) → prompt → stream LLM
 
 Background (fire-and-forget, after response):
-  user PAD metadata + AI PAD cache write + memory pipeline + trait/patience updates
+  user emotion metadata + memory pipeline + trait/patience updates
 """
 
 import asyncio
@@ -57,6 +57,7 @@ from app.services.interaction.boundary import (
     get_patience_prompt_instruction,
 )
 from app.services.relationship.intimacy import get_relationship_stage
+from app.services.relationship.emotion import is_negative_emotion
 from app.services.chat.intent_dispatcher import (
     detect_current_state_fast_path,
     detect_intent_unified,
@@ -438,11 +439,7 @@ def detect_relational_context(message: str, user_emotion: dict | None) -> str | 
             "不要一上来就长解释，也不要立刻抛万能反问。"
         )
 
-    negative_emotion = bool(
-        user_emotion
-        and float(user_emotion.get("pleasure", 0.0)) < -0.2
-        and float(user_emotion.get("arousal", 0.0)) > 0.25
-    )
+    negative_emotion = is_negative_emotion(user_emotion)
     if any(keyword in text for keyword in DISTRESS_KEYWORDS) or negative_emotion:
         return (
             "用户这句带明显低落或烦闷情绪。"
@@ -587,7 +584,7 @@ async def stream_chat_response(
     # spec §2.1/§2.2 全消息走 post_process. 短路路径直接 return 跳过主路径末尾的
     # _fire_background(post_process) → 必须 finally 兜底, 否则 7 个短路意图 (终结/计划查询/
     # 询问当前状态/作息调整/道歉/删除/L3) 跟 2 个 preflight (矛盾追问/删除确认) 命中时
-    # 全部丢失记忆抽取 + PAD + trait + 正向恢复 5 个后台任务. boundary 路径例外:
+    # 全部丢失记忆抽取 + 用户情绪 metadata + trait + 正向恢复后台任务. boundary 路径例外:
     # CLAUDE.md §3.3 design — apology 自己 fire memory pipeline, blocked 故意跳;
     # finally 通过 `boundary_ctx.stopped` 直接判别, 无需独立 flag.
     post_process_fired = False
@@ -595,7 +592,6 @@ async def stream_chat_response(
     preflight_ctx: PreflightCtx | None = None
     sc_ctx: ShortCircuitCtx | None = None
     prompt_user_emotion: dict | None = None
-    emotion: dict | None = None
     messages_dicts: list[dict] = []
 
     try:
@@ -763,13 +759,12 @@ async def stream_chat_response(
         # sub_intent_mode (forced_intent != None) 同步取得 intent 无需并行, fetch_task=None
         # 走原同步路径在下方 fetch_parallel_context.
         #
-        # crisis 路径 (P0): 跳过 fetch_parallel_context 的 7 个并行子任务 (relevance LLM /
-        # AI PAD LLM / user PAD LLM / topic_intimacy / time_memories / schedule / 等),
+        # crisis 路径 (P0): 跳过 fetch_parallel_context 的并行子任务 (relevance LLM /
+        # user emotion LLM / topic_intimacy / time_memories / schedule / 等),
         # 只起安全专用记忆召回 + portrait 两个 (handle_crisis 仅需这俩). 实测 trace
         # 2026-05-07 16:57: crisis 路径走完整 fetch 浪费 4s 无关 LLM (relevance 1.2s
-        # + AI PAD 1.4s + user PAD 1.4s) — 求救场景下用户体感冷漠. 牺牲: user/ai PAD
-        # cache 不更新, message metadata 缺 emotion 字段 (post_process 的 _bg_user_emotion
-        # 和 save_ai_emotion 都 gracefully 跳过 None).
+        # + 用户情绪 1.4s) — 求救场景下用户体感冷漠. 牺牲: message metadata 缺 emotion 字段
+        # (post_process 的 _bg_user_emotion 会 gracefully 跳过 None).
         fetch_task: asyncio.Task | None = None
         crisis_memory_task: asyncio.Task | None = None
         crisis_portrait_task: asyncio.Task | None = None
@@ -958,7 +953,7 @@ async def stream_chat_response(
 
         # ── P0 危机安全网 短路 (排在主路径 fetch_parallel_context 之前) ─────────
         # 关键: 必须在 await fetch_parallel_context 之前 dispatch, 否则等完整
-        # fetch (含 relevance/AI PAD/user PAD 三个无关 LLM ~4s) 才到 handle_crisis.
+        # fetch (含 relevance/user emotion 等无关 LLM) 才到 handle_crisis.
         # 实测 trace 2026-05-07 16:57: 走完整 fetch 总延迟 18s 中 4s 是浪费 LLM.
         # 跳过完整 fetch, 只 await 我们提前 kick off 的 crisis_memory_task +
         # crisis_portrait_task (handle_crisis 仅需这俩).
@@ -989,7 +984,7 @@ async def stream_chat_response(
                 crisis_portrait_task = asyncio.create_task(
                     get_latest_portrait(user_id, agent_id)
                 )
-            # 等轻量 fetch (memory + portrait), 跳所有 PAD/relevance/topic/schedule LLM
+            # 等轻量 fetch (memory + portrait), 跳 user emotion/relevance/topic/schedule LLM
             crisis_classified: list = []
             crisis_portrait: Any = None
             if crisis_memory_task is not None:
@@ -1030,9 +1025,8 @@ async def stream_chat_response(
                     portrait=crisis_portrait,
                 ):
                     yield evt
-            # finally 兜底 fire post_process (用 None emotion, _bg_user_emotion +
-            # save_ai_emotion 都 gracefully 跳过). memory pipeline 仍跑 — crisis
-            # 消息应该被记忆.
+            # finally 兜底 fire post_process (用 None user_emotion, _bg_user_emotion
+            # gracefully 跳过). memory pipeline 仍跑 — crisis 消息应该被记忆.
             return
 
         # 记录 LLM 数据拉取时刻能看到的最新 user 消息时间, 用于 scheduler dedup gate.
@@ -1095,7 +1089,6 @@ async def stream_chat_response(
             )
         memory_relevance = fetched.memory_relevance
         classified_memories = fetched.classified_memories
-        emotion = fetched.emotion
         prompt_user_emotion = fetched.user_emotion
         portrait = fetched.portrait
         schedule = fetched.schedule
@@ -1369,7 +1362,7 @@ async def stream_chat_response(
             diagnostics=response_diagnostics,
         )
 
-        # spec §5 step 1：AI 语句情绪识别（基于回复文本，不是 AI PAD 缓存）
+        # spec §5 step 1：AI 语句情绪识别（基于回复文本）
         # 主 LLM 路径已在 generate_reply 内并行算好, 直接复用; tier/contradiction 路径
         # reply_emotion_pre=None 时兜底再调一次 (这两条路径都是单 LLM, 增量小).
         # full_response 必须无条件计算 — 下方 background post_process 总是引用它.
@@ -1397,7 +1390,6 @@ async def stream_chat_response(
             reply_context=reply_context,
             reply_index_offset=reply_index_offset,
             sub_intent_mode=sub_intent_mode,
-            emotion=emotion,
             agent=agent,
             user_message=user_message,
             delay_reply_fn=_delay_explanation_reply,
@@ -1486,7 +1478,6 @@ async def stream_chat_response(
             full_response=full_response,
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
-            ai_emotion=emotion,
             skip_ai_memory=False,
         ))
         post_process_fired = True
@@ -1542,9 +1533,9 @@ async def stream_chat_response(
         reset_current_agent(_agent_ctx_token)
 
         # spec §2.1/§2.2 兜底: 短路意图早 return 跳过主路径末尾的 post_process fire,
-        # 这里补 fire 让 memory/PAD/trait/recovery 5 个后台任务跑全. boundary 短路
+        # 这里补 fire 让 memory/user-emotion/trait/recovery 后台任务跑全. boundary 短路
         # 已自行处理 (apology fires _bg_memory_pipeline, blocked skips per CLAUDE.md §3.3
-        # — 注: blocked 仍丢 PAD/trait/recovery, 是已知 spec 偏离, 见 CLAUDE.md) → 跳过.
+        # — 注: blocked 仍丢 user-emotion/trait/recovery, 是已知 spec 偏离, 见 CLAUDE.md) → 跳过.
         # sub_intent_mode 由父调用统一处理后台任务, 子片段不重复 fire.
         # 用 `is not None` 正向判别 last_short_circuit_reply: 短路 handler 完成才 set
         # ctx field, 中途异常 / 未到短路点 → 字段仍为 None → 不会 phantom fire 空 reply.
@@ -1568,7 +1559,6 @@ async def stream_chat_response(
                 full_response=sc_reply,
                 messages_dicts=messages_dicts,
                 user_emotion=prompt_user_emotion,
-                ai_emotion=emotion,
                 skip_ai_memory=(
                     sc_ctx is not None
                     and sc_ctx.last_short_circuit_kind in {"schedule_query", "current_state"}

@@ -1,164 +1,144 @@
-"""Emotion system — PAD (Pleasure-Arousal-Dominance) model.
+"""Emotion label helpers.
 
-Spec §3.2: per-message LLM 计算 AI/用户 PAD。`ai_emotion_states` 表是**只读缓存**——
-hot path 每次重算并回写，proactive / GET / 延迟计算等只读路径直接读缓存。
+The runtime no longer computes three-axis emotion vectors.  Emotion handling is kept as a
+coarse label plus intensity signal that is easy to reason about in prompts,
+reply timing, emoji/sticker decoration, and diagnostics.
 """
 
-import logging
+from __future__ import annotations
 
-from app.db import db
-from app.redis_client import get_redis, DEFAULT_TTL
+import logging
+from typing import Any
+
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
-_PAD_DIMS = ("pleasure", "arousal", "dominance")
+EMOTION_LABELS = (
+    "高兴", "悲伤", "愤怒", "恐惧", "惊讶", "厌恶",
+    "中性", "焦虑", "失望", "欣慰", "感激", "戏谑",
+)
 
-# PAD to tone descriptor mapping
-TONE_MAP = {
-    (1, 1, 1): "热情而笃定",
-    (1, 1, -1): "兴奋但不太踏实",
-    (1, -1, 1): "平静而满足",
-    (1, -1, -1): "安宁而接纳",
-    (-1, 1, 1): "烦躁但强撑着",
-    (-1, 1, -1): "焦虑而紧绷",
-    (-1, -1, 1): "低落但克制",
-    (-1, -1, -1): "难过而退缩",
+POSITIVE_EMOTIONS = {"高兴", "欣慰", "感激", "戏谑"}
+NEGATIVE_EMOTIONS = {"悲伤", "愤怒", "恐惧", "厌恶", "焦虑", "失望"}
+HIGH_ENERGY_EMOTIONS = {"愤怒", "恐惧", "惊讶", "焦虑", "高兴", "戏谑"}
+
+_TONE_BY_LABEL = {
+    "高兴": "轻快而亲近",
+    "悲伤": "低落但克制",
+    "愤怒": "烦躁但强撑着",
+    "恐惧": "不安而紧绷",
+    "惊讶": "惊讶但清醒",
+    "厌恶": "抗拒而克制",
+    "中性": "平稳而克制",
+    "焦虑": "焦虑而紧绷",
+    "失望": "失落但克制",
+    "欣慰": "平静而满足",
+    "感激": "温和而感激",
+    "戏谑": "轻松而俏皮",
 }
 
-# --- 3B.3 12标签 PAD 映射表 ---
-
-PAD_LABEL_TABLE: dict[str, dict[str, float]] = {
-    "高兴":  {"pleasure": 0.8,  "arousal": 0.7, "dominance": 0.6},
-    "悲伤":  {"pleasure": -0.6, "arousal": 0.3, "dominance": 0.2},
-    "愤怒":  {"pleasure": -0.7, "arousal": 0.8, "dominance": 0.7},
-    "恐惧":  {"pleasure": -0.5, "arousal": 0.8, "dominance": 0.1},
-    "惊讶":  {"pleasure": 0.2,  "arousal": 0.9, "dominance": 0.3},
-    "厌恶":  {"pleasure": -0.4, "arousal": 0.5, "dominance": 0.4},
-    "中性":  {"pleasure": 0.0,  "arousal": 0.3, "dominance": 0.5},
-    "焦虑":  {"pleasure": -0.3, "arousal": 0.7, "dominance": 0.2},
-    "失望":  {"pleasure": -0.5, "arousal": 0.2, "dominance": 0.1},
-    "欣慰":  {"pleasure": 0.5,  "arousal": 0.2, "dominance": 0.5},
-    "感激":  {"pleasure": 0.7,  "arousal": 0.3, "dominance": 0.4},
-    "戏谑":  {"pleasure": 0.6,  "arousal": 0.6, "dominance": 0.7},
-}
-
-# --- Quick keyword emotion estimate (no LLM) ---
-
-# Only covers high-confidence keyword-detectable emotions (5/12).
 _QUICK_EMOTION_KEYWORDS: dict[str, list[str]] = {
     "高兴": ["哈哈", "开心", "太好了", "好棒", "耶", "太开心", "好高兴"],
-    "悲伤": ["难过", "伤心", "哭", "呜呜", "好难受", "心碎", "委屈", "不好", "不开心", "想哭"],
-    "愤怒": ["生气", "气死", "烦死", "讨厌", "受不了", "烦", "火大", "气炸"],
-    "焦虑": ["焦虑", "紧张", "担心", "害怕", "不安", "崩溃", "撑不住", "糟糕", "很累"],
-    "感激": ["谢谢", "感谢", "多谢", "感恩"],
+    "悲伤": ["难过", "伤心", "想哭", "哭", "呜呜", "好难受", "心碎", "委屈", "不好", "不开心"],
+    "愤怒": ["生气", "气死", "烦死", "讨厌", "受不了", "火大", "气炸"],
+    "恐惧": ["害怕", "恐惧", "吓死", "怕死", "很怕"],
+    "焦虑": ["焦虑", "紧张", "担心", "不安", "崩溃", "撑不住", "糟糕", "很累"],
+    "失望": ["失望", "没意思", "算了", "白期待", "心凉"],
+    "感激": ["谢谢", "感谢", "多谢", "感恩", "辛苦了"],
+    "惊讶": ["啊？", "啊?", "真的假的", "不会吧", "震惊"],
+    "厌恶": ["恶心", "反感", "膈应", "厌恶"],
 }
 
 
-def quick_emotion_estimate(message: str) -> dict | None:
-    """快速关键词情绪推断（无LLM），用于热路径填补当前消息情绪空缺。"""
+def _clamp_intensity(value: Any, default: int = 50) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0, min(100, parsed))
+
+
+def _clamp_confidence(value: Any, default: float = 0.5) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0.0, min(1.0, parsed))
+
+
+def normalize_emotion_label(value: Any) -> str:
+    label = str(value or "").strip()
+    return label if label in EMOTION_LABELS else "中性"
+
+
+def neutral_emotion(*, source: str = "fallback") -> dict[str, Any]:
+    return {
+        "emotion": "中性",
+        "intensity": 0,
+        "confidence": 0.0,
+        "source": source,
+    }
+
+
+def quick_emotion_estimate(message: str) -> dict[str, Any] | None:
+    """Fast keyword emotion estimate used before the async LLM result exists."""
+    text = message or ""
     for label, keywords in _QUICK_EMOTION_KEYWORDS.items():
-        if any(kw in message for kw in keywords):
-            entry = PAD_LABEL_TABLE.get(label)
-            return dict(entry) if entry else None
+        if any(keyword in text for keyword in keywords):
+            intensity = 72 if label in HIGH_ENERGY_EMOTIONS else 58
+            return {
+                "emotion": label,
+                "intensity": intensity,
+                "confidence": 0.65,
+                "source": "quick",
+            }
     return None
 
 
-_PAD_RANGES = {"pleasure": (-1.0, 1.0), "arousal": (0.0, 1.0), "dominance": (0.0, 1.0)}
-_PAD_DEFAULTS = {dim: (lo + hi) / 2 for dim, (lo, hi) in _PAD_RANGES.items()}
-# → {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
+def normalize_emotion_result(result: Any, *, source: str = "llm") -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return neutral_emotion(source="fallback")
+    return {
+        "emotion": normalize_emotion_label(result.get("emotion")),
+        "intensity": _clamp_intensity(result.get("intensity"), default=50),
+        "confidence": _clamp_confidence(result.get("confidence"), default=0.6),
+        "source": source,
+    }
 
 
-def _clamp_pad(dim: str, value: float) -> float:
-    """Clamp a PAD dimension value to its valid range."""
-    lo, hi = _PAD_RANGES[dim]
-    return max(lo, min(hi, value))
+async def analyze_user_emotion(message: str) -> dict[str, Any]:
+    """Analyze the user's current message as label + intensity.
 
-
-async def _invoke_pad(prompt_key: str, **format_args) -> dict:
-    """Format a PAD prompt and invoke utility LLM; clamp 3 dims, fallback to neutral on error."""
-    prompt = (await get_prompt_text(prompt_key)).format(**format_args)
+    This replaces the former user vector extraction.  The output is deliberately
+    compact and prompt-readable: downstream code should reason on the label and
+    coarse intensity rather than abstract vector dimensions.
+    """
+    prompt = (await get_prompt_text("emotion.user_label")).format(message=message)
     try:
         result = await invoke_json(get_utility_model(), prompt)
-        return {
-            dim: _clamp_pad(dim, float(result.get(dim, _PAD_DEFAULTS[dim])))
-            for dim in _PAD_DIMS
-        }
+        return normalize_emotion_result(result, source="llm")
     except Exception as e:
-        logger.warning(f"{prompt_key} failed, falling back to neutral defaults: {e}")
-        return dict(_PAD_DEFAULTS)
+        logger.warning(f"emotion.user_label failed, falling back to keyword estimate: {e}")
+        return quick_emotion_estimate(message) or neutral_emotion(source="fallback")
 
 
-async def compute_ai_pad(
-    *,
-    current_time: str,
-    schedule_status: str,
-    current_activity: str,
-    recent_context: str,
-) -> dict:
-    """Spec §3.2 AIPAD值判断：4 项参考信息 → AI PAD。失败回退中性默认。"""
-    return await _invoke_pad(
-        "emotion.ai_pad",
-        current_time=current_time or "（未知）",
-        current_status=schedule_status or "空闲",
-        current_activity=current_activity or "自由活动",
-        recent_context=recent_context or "（无）",
-    )
+def is_negative_emotion(emotion: dict[str, Any] | None) -> bool:
+    if not emotion:
+        return False
+    label = normalize_emotion_label(emotion.get("emotion"))
+    return label in NEGATIVE_EMOTIONS and _clamp_intensity(emotion.get("intensity"), default=0) >= 35
 
 
-async def extract_emotion(message: str) -> dict:
-    """Spec §3.3 + 指令模版 P26「用户PAD值判断」：只输出 PAD 三维值。"""
-    return await _invoke_pad("emotion.extraction", message=message)
+def is_high_emotion(emotion: dict[str, Any] | None) -> bool:
+    if not emotion:
+        return False
+    label = normalize_emotion_label(emotion.get("emotion"))
+    intensity = _clamp_intensity(emotion.get("intensity"), default=0)
+    return intensity >= 70 or (label in HIGH_ENERGY_EMOTIONS and intensity >= 55)
 
 
-def emotion_to_tone(emotion: dict | None) -> str:
-    """Map PAD emotion (or None/empty) to a TONE_MAP 8-quadrant descriptor."""
-    e = emotion or {}
-    v_sign = 1 if e.get("pleasure", _PAD_DEFAULTS["pleasure"]) >= 0 else -1
-    a_sign = 1 if e.get("arousal", _PAD_DEFAULTS["arousal"]) >= 0.5 else -1
-    d_sign = 1 if e.get("dominance", _PAD_DEFAULTS["dominance"]) >= 0.5 else -1
-    return TONE_MAP.get((v_sign, a_sign, d_sign), "平稳而克制")
-
-
-# --- Cache (ai_emotion_states) ---
-
-async def get_ai_emotion(agent_id: str) -> dict:
-    """读上一轮 compute_ai_pad 回写的缓存，供 proactive / GET / 延迟计算等只读路径使用。"""
-    redis = await get_redis()
-    cache_key = f"emotion:{agent_id}"
-
-    cached = await redis.hgetall(cache_key)
-    if cached:
-        return {dim: float(cached.get(dim, _PAD_DEFAULTS[dim])) for dim in _PAD_DIMS}
-
-    state = await db.aiemotionstate.find_unique(where={"agentId": agent_id})
-    if state:
-        emotion = {dim: getattr(state, dim) for dim in _PAD_DIMS}
-    else:
-        emotion = dict(_PAD_DEFAULTS)
-
-    await redis.hset(cache_key, mapping={k: str(v) for k, v in emotion.items()})
-    await redis.expire(cache_key, DEFAULT_TTL)
-    return emotion
-
-
-async def save_ai_emotion(agent_id: str, emotion: dict) -> None:
-    """Write computed PAD to cache (DB + Redis) for downstream readers."""
-    pad = {dim: _clamp_pad(dim, emotion.get(dim, _PAD_DEFAULTS[dim])) for dim in _PAD_DIMS}
-
-    await db.aiemotionstate.upsert(
-        where={"agentId": agent_id},
-        data={
-            "create": {
-                "agent": {"connect": {"id": agent_id}},
-                **pad,
-            },
-            "update": pad,
-        },
-    )
-
-    redis = await get_redis()
-    cache_key = f"emotion:{agent_id}"
-    await redis.hset(cache_key, mapping={k: str(v) for k, v in pad.items()})
-    await redis.expire(cache_key, DEFAULT_TTL)
+def emotion_to_tone(emotion: dict[str, Any] | None) -> str:
+    label = normalize_emotion_label((emotion or {}).get("emotion"))
+    return _TONE_BY_LABEL.get(label, "平稳而克制")

@@ -127,7 +127,7 @@ SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
     },
 }
 
-# 记忆主动 (PAD 情绪融合独立 100% 不参与抽签)
+# 记忆主动独立 100% 不参与抽签
 _MEMORY_COLD = {
     "ai_l1": 1.00, "ai_l2": 0.00,
     "user_l1": 0.00, "user_l2": 0.00,

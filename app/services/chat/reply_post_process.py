@@ -1,6 +1,6 @@
 """Spec §5 回复加工 + §6.5 延迟解释的组合工具。
 
-从 orchestrator 尾部抽出：情绪抽取 → 延迟解释（≥1min）→ 逐条 emoji/表情包 → yield。
+从 orchestrator 尾部抽出：延迟解释（≥1min）→ 逐条 emoji/表情包 → yield。
 """
 
 from __future__ import annotations
@@ -57,22 +57,16 @@ def _format_received_at(iso_str: str) -> str:
     return dt.astimezone(_TZ).strftime("%H:%M")
 
 
-def extract_pad_for_decoration(emotion: Any) -> tuple[float, float, float, str | None]:
-    """从 AI 情绪字段抽 (pleasure, arousal, dominance, primary_emotion)。"""
-    emo = emotion if isinstance(emotion, dict) else {}
-    return (
-        float(emo.get("pleasure", 0.0)),
-        float(emo.get("arousal", 0.0)),
-        float(emo.get("dominance", 0.5)),
-        emo.get("primary_emotion"),
-    )
-
-
-def _resolve_primary_emotion(reply_emotion: dict | None, pad_primary: str | None) -> str | None:
-    """spec §5：优先用 ai_reply_emotion 输出的 emotion 标签，回退到 AI PAD 缓存。"""
-    if reply_emotion and reply_emotion.get("emotion"):
-        return reply_emotion["emotion"]
-    return pad_primary
+def _reply_decoration_signal(reply_emotion: dict | None) -> tuple[str | None, int]:
+    """Return (emotion label, intensity) from ai_reply_emotion output."""
+    if not isinstance(reply_emotion, dict):
+        return None, 0
+    label = str(reply_emotion.get("emotion") or "").strip() or None
+    try:
+        intensity = int(float(reply_emotion.get("intensity", 0)))
+    except (TypeError, ValueError):
+        intensity = 0
+    return label, max(0, min(100, intensity))
 
 
 async def _build_delay_explanation_text(
@@ -127,7 +121,6 @@ async def emit_replies(
     reply_context: dict | None,
     reply_index_offset: int,
     sub_intent_mode: bool,
-    emotion: Any,
     agent,
     user_message: str,
     delay_reply_fn: Callable[..., Awaitable[str | None]],
@@ -140,11 +133,9 @@ async def emit_replies(
 
     emitted_replies 传入的空列表会被原地填充（用于后续 `_save_replies`）。
     sub_intent_mode=True 时跳过延迟解释（父调用已推送）。
-    reply_emotion: spec §5 step 1 的 ai_reply_emotion 输出 `{emotion, intensity}`，
-    若提供则优先用其 emotion 标签匹配 EMOJI_MAP，否则回退到 AI PAD 缓存的 primary_emotion。
+    reply_emotion: spec §5 step 1 的 ai_reply_emotion 输出 `{emotion, intensity}`。
     """
-    ai_pleasure, ai_arousal, ai_dominance, pad_primary = extract_pad_for_decoration(emotion)
-    ai_primary_emotion = _resolve_primary_emotion(reply_emotion, pad_primary)
+    ai_primary_emotion, emotion_intensity = _reply_decoration_signal(reply_emotion)
     sticker_used = False  # 一个回合最多一个表情包
 
     # §6.4/§6.5 延迟解释
@@ -176,18 +167,19 @@ async def emit_replies(
 
         added_emoji = False
         emoji_used: str | None = None
-        if should_add_emoji(ai_arousal):
-            emoji = pick_one_emoji(ai_pleasure, ai_arousal, ai_primary_emotion)
+        if should_add_emoji(emotion_intensity):
+            emoji = pick_one_emoji(ai_primary_emotion)
             if emoji:
                 reply_text += emoji
                 added_emoji = True
                 emoji_used = emoji
 
         sticker_url: str | None = None
-        if not added_emoji and not sticker_used and should_add_sticker(ai_arousal):
+        if not added_emoji and not sticker_used and should_add_sticker(emotion_intensity):
             try:
                 result = await recommend_sticker(
-                    ai_pleasure, ai_arousal, ai_dominance, ai_primary_emotion,
+                    primary_emotion=ai_primary_emotion,
+                    intensity=emotion_intensity,
                 )
                 if result:
                     sticker_url = result["url"]
@@ -208,7 +200,8 @@ async def emit_replies(
                 "decoration_kind": decoration_kind,
                 "emoji": emoji_used,
                 "sticker_url": sticker_url,
-                "ai_arousal": ai_arousal,
+                "ai_emotion": ai_primary_emotion,
+                "emotion_intensity": emotion_intensity,
             },
         )
 
@@ -219,6 +212,9 @@ async def emit_replies(
             "text": reply_text,
             "index": reply_index_offset + normal_reply_count + delay_explain_offset,
         }
+        if ai_primary_emotion:
+            data["ai_emotion"] = ai_primary_emotion
+            data["emotion_intensity"] = emotion_intensity
         if sticker_url:
             data["sticker_url"] = sticker_url
         if reply_is_fallback:

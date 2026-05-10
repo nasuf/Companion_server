@@ -216,8 +216,7 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
     status = str(schedule_status.get("status") or "idle")
     memory_text = "\n".join(f"- {m}" for m in memories) if memories else "（暂无）"
 
-    # Spec §5.3/§6.3/§7.3: silence_wakeup + memory_proactive 都要求 PAD 融合
-    # → emotion_to_tone 8 象限映射注入 {current_mood}.
+    # 主动消息保留 current_mood 字段；无运行时 AI 情绪向量时使用标签情绪助手的中性语气。
     user_portrait = ctx.get("user_portrait") or "(未知)"
     recent_context = ctx.get("recent_context") or "(无)"
     current_mood = emotion_to_tone(ctx.get("emotion"))
@@ -247,7 +246,7 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "current_activity": f"{activity}({status})",
             **silence_shared,
         },
-        # Spec §4.2 + 指令模版 P24-25: 性格 / 当前心境(PAD融合) / 记忆 / 话题主题
+        # Spec §4.2 + 指令模版 P24-25: 性格 / 当前心境 / 记忆 / 话题主题
         "proactive.memory_ai": {
             "personality_brief": personality_brief,
             "current_mood": current_mood,

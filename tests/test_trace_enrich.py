@@ -62,8 +62,7 @@ def _fake_llm_step(prompt_text: str, output_text: str = "") -> dict:
     (defaults.MEMORY_PAIRWISE_CONTRADICTION_PROMPT, "memory.pairwise_contradiction"),
     (defaults.CRISIS_MESSAGE_CLASSIFY_PROMPT, "intent.crisis_message_classify"),
     (defaults.PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT, "proactive.memory_topic_rerank"),
-    (defaults.AI_PAD_PROMPT, "emotion.ai_pad"),
-    (defaults.EMOTION_EXTRACTION_PROMPT, "emotion.extraction"),
+    (defaults.USER_EMOTION_LABEL_PROMPT, "emotion.user_label"),
     (defaults.PERSONALITY_SCORING_PROMPT, "agent.personality_scoring"),
     (defaults.CHARACTER_GENERATION_PROMPT, "character.generation"),
     (defaults.CHARACTER_REPAIR_MISSING_FIELDS_PROMPT, "character.repair_missing_fields"),
@@ -233,12 +232,12 @@ def test_label_memory_relevance_passthrough():
     assert enriched["decision_label"] == "强"
 
 
-def test_label_pad_summarized():
-    output = '{"pleasure": 0.7, "arousal": 0.4, "dominance": 0.6}'
-    step = _fake_llm_step(defaults.AI_PAD_PROMPT, output)
+def test_label_user_emotion_summarized():
+    output = '{"emotion": "焦虑", "intensity": 70, "confidence": 0.8}'
+    step = _fake_llm_step(defaults.USER_EMOTION_LABEL_PROMPT, output)
     enriched = trace_enrich.enrich_step(step)
-    assert "偏积极" in enriched["decision_label"]
-    assert "中等" in enriched["decision_label"] or "平静" in enriched["decision_label"]
+    assert "焦虑" in enriched["decision_label"]
+    assert "70" in enriched["decision_label"]
 
 
 def test_label_contradiction_no_conflict():
@@ -270,9 +269,8 @@ def test_label_emotion():
 def test_label_extractor_failure_falls_back_to_truncated_output():
     """label_extractor 抛异常时, 回落到 output 前 30 字."""
     output = "not valid json {{{garbled"
-    step = _fake_llm_step(defaults.AI_PAD_PROMPT, output)
+    step = _fake_llm_step(defaults.USER_EMOTION_LABEL_PROMPT, output)
     enriched = trace_enrich.enrich_step(step)
-    # _label_pad 解析失败 → fallback 截断
     assert enriched["decision_label"] is not None
     assert "not valid json" in enriched["decision_label"]
 
@@ -289,12 +287,12 @@ def test_label_crisis_followup_classify_summarized():
 def test_enrich_steps_batch_inplace():
     steps = [
         _fake_llm_step(defaults.MEMORY_RELEVANCE_PROMPT, "弱"),
-        _fake_llm_step(defaults.AI_PAD_PROMPT, '{"pleasure": -0.5, "arousal": 0.2, "dominance": 0.3}'),
+        _fake_llm_step(defaults.USER_EMOTION_LABEL_PROMPT, '{"emotion": "悲伤", "intensity": 55}'),
     ]
     result = trace_enrich.enrich_steps(steps)
     assert result is steps  # in-place
     assert steps[0]["prompt_key"] == "memory.relevance"
-    assert steps[1]["prompt_key"] == "emotion.ai_pad"
+    assert steps[1]["prompt_key"] == "emotion.user_label"
 
 
 # ──────────────────────────────────────────────────────────────────────

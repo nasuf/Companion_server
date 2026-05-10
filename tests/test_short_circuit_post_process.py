@@ -1,4 +1,4 @@
-"""短路意图必须仍走 post_process (memory/PAD/trait/recovery 等 5 后台任务) 单测.
+"""短路意图必须仍走 post_process (memory/user-emotion/trait/recovery 等后台任务) 单测.
 
 P0 BUG: orchestrator 主路径末尾才 fire post_process, 短路 intent 直接 return →
 跳过整个 post_process. 本测试锁:
@@ -559,19 +559,16 @@ async def test_orchestrator_intent_short_circuit_fires_post_process():
                          memory_relevance="weak",
                          retrieval_result=([], [], None),
                          portrait=None,
-                         user_emotion={"pleasure": 0, "arousal": 0, "dominance": 0.5},
+                         user_emotion={"emotion": "中性", "intensity": 0, "confidence": 0.0},
                          time_memories=[],
                          schedule=None,
                          topic_intimacy=0.5,
-                         emotion={"pleasure": 0.5, "arousal": 0.5, "dominance": 0.5},
                          ai_status=None,
                          schedule_context=None,
                      )),
         patch.object(orch_mod, "maybe_awaken_l3", new_callable=AsyncMock, return_value=([], "无")),
         patch.object(orch_mod, "handle_schedule_query", side_effect=_empty_handler),
         patch.object(orch_mod, "push_topic", new_callable=AsyncMock, return_value=None),
-        patch.object(orch_mod, "extract_emotion", new_callable=AsyncMock,
-                     return_value={"pleasure": 0, "arousal": 0, "dominance": 0.5}),
     ):
         # 配置 boundary / preflight 不命中 (空 generator + ctx.stopped=False)
         async def _empty_gen(*args, **kwargs):

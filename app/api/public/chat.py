@@ -9,7 +9,7 @@ from app.api.deps import require_redis
 from app.db import db
 from app.models.message import ChatRequest
 from app.services.interaction.delayed_queue import enqueue_or_append_delayed
-from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
+from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.interaction.reply_context import build_reply_timing_context
 from app.services.interaction.user_turn_aggregation import (
     enqueue_planned_user_message,
@@ -84,14 +84,11 @@ async def chat(conversation_id: str, data: ChatRequest):
             conv.agent.id, conv.agent.name, get_mbti(conv.agent), user_id=user_id,
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
-    # Spec §6.2 延迟计算用缓存 PAD（消息入队前，在 orchestrator compute_ai_pad 之前）
-    ai_emotion = await get_ai_emotion(conv.agent.id)
     current_context = await build_reply_timing_context(
         agent_id=conv.agent.id,
         user_id=user_id,
         received_status=received_status,
         user_emotion=quick_emotion_estimate(data.message),
-        ai_emotion=ai_emotion,
     )
 
     plan = await plan_user_message_aggregation(

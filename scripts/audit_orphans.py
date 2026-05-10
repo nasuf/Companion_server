@@ -21,9 +21,8 @@ from app.redis_client import get_redis, close_redis
 
 
 # agent_id 键位于 Redis key 的第 N 段 (冒号分隔, 0-indexed)
-# 例: "emotion:{agent_id}" → pos=1, "memgen:lock:{agent_id}" → pos=2
+# 例: "life_overview:{agent_id}" → pos=1, "memgen:lock:{agent_id}" → pos=2
 _REDIS_PATTERNS: list[tuple[str, int]] = [
-    ("emotion:*", 1),
     ("life_overview:*", 1),
     ("patience:*", 1),
     ("attack_history:*", 1),
@@ -59,7 +58,6 @@ _DB_AGENT_TABLES: list[tuple[str, str]] = [
     ("conversations", "agent_id"),
     ("intimacies", "agent_id"),
     ("patience_states", "agent_id"),
-    ("ai_emotion_states", "agent_id"),
     ("ai_daily_schedules", "agent_id"),
     ("trait_feedback_logs", "agent_id"),
     ("proactive_chat_logs", "agent_id"),

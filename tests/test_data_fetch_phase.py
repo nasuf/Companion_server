@@ -12,7 +12,7 @@ import pytest
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 
 
-_NEUTRAL_PAD = {"pleasure": 0.0, "arousal": 0.5, "dominance": 0.5}
+_NEUTRAL_EMOTION = {"emotion": "中性", "intensity": 0, "confidence": 0.0}
 _BUSY_STATUS = {"activity": "工作", "status": "busy"}
 
 
@@ -24,8 +24,7 @@ def _patch_data_fetch(**overrides) -> ExitStack:
     defaults = {
         "classify_memory_relevance": AsyncMock(return_value="medium"),
         "hybrid_retrieve": AsyncMock(return_value={"memories": [], "memory_strings": [], "graph_context": None}),
-        "compute_ai_pad": AsyncMock(return_value=dict(_NEUTRAL_PAD)),
-        "extract_emotion": AsyncMock(return_value=dict(_NEUTRAL_PAD)),
+        "analyze_user_emotion": AsyncMock(return_value=dict(_NEUTRAL_EMOTION)),
         "get_latest_portrait": AsyncMock(return_value=None),
         "get_cached_schedule": AsyncMock(return_value=None),
         "get_topic_intimacy": AsyncMock(return_value=50.0),
@@ -82,7 +81,7 @@ def test_fast_weak_relevance_gate_is_conservative():
 
 @pytest.mark.asyncio
 async def test_fetch_parallel_context_happy_path():
-    """关键字段从 9 个并行 fetch 中正确解包。"""
+    """关键字段从并行 fetch 中正确解包。"""
     from app.services.chat.data_fetch_phase import fetch_parallel_context
 
     classified = [
@@ -92,8 +91,7 @@ async def test_fetch_parallel_context_happy_path():
 
     with _patch_data_fetch(
         hybrid_retrieve=AsyncMock(return_value={"memories": classified, "memory_strings": ["a"], "graph_context": None}),
-        compute_ai_pad=AsyncMock(return_value={"pleasure": 0.1, "arousal": 0.5, "dominance": 0.5}),
-        extract_emotion=AsyncMock(return_value={"pleasure": 0.2, "arousal": 0.4, "dominance": 0.5}),
+        analyze_user_emotion=AsyncMock(return_value={"emotion": "焦虑", "intensity": 62, "confidence": 0.8}),
         get_latest_portrait=AsyncMock(return_value="user portrait"),
         get_cached_schedule=AsyncMock(return_value=[{"start": "09:00", "activity": "工作"}]),
         get_topic_intimacy=AsyncMock(return_value=65.0),
@@ -114,8 +112,7 @@ async def test_fetch_parallel_context_happy_path():
     assert len(ctx.classified_memories) == 3
     scores = [m.display_score for m in ctx.classified_memories]
     assert scores == sorted(scores, reverse=True)  # rerank 后按 display_score 降序
-    assert ctx.emotion == {"pleasure": 0.1, "arousal": 0.5, "dominance": 0.5}
-    assert ctx.user_emotion == {"pleasure": 0.2, "arousal": 0.4, "dominance": 0.5}
+    assert ctx.user_emotion == {"emotion": "焦虑", "intensity": 62, "confidence": 0.8}
     assert ctx.portrait == "user portrait"
     assert ctx.topic_intimacy == 65.0
     assert ctx.ai_status == _BUSY_STATUS

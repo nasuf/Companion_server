@@ -361,15 +361,28 @@ def _as_user(client_sub: str, agent_owner_id: str = "user-1", agent_id: str = "a
 def test_get_emotion(mock_deps):
     """GET /emotions/{agent_id}/current returns emotion state for owner."""
     client = mock_deps
-    with _as_user(client_sub="user-1"), patch(
-        "app.api.public.emotions.get_ai_emotion", new_callable=AsyncMock,
-        return_value={"pleasure": 0.5, "arousal": 0.3, "dominance": 0.4},
-    ):
+    with _as_user(client_sub="user-1"), patch("app.api.public.emotions.db") as mock_db:
+        mock_db.message.find_first = AsyncMock(return_value=SimpleNamespace(
+            metadata={"ai_emotion": "高兴", "emotion_intensity": 73}
+        ))
         response = client.get("/emotions/agent-id/current")
     assert response.status_code == 200
     data = response.json()
-    assert data["pleasure"] == 0.5
+    assert data["emotion"] == "高兴"
+    assert data["intensity"] == 73
     assert "tone" in data
+
+
+def test_get_emotion_defaults_without_reply_metadata(mock_deps):
+    """GET /emotions/{agent_id}/current returns neutral if no assistant label exists."""
+    client = mock_deps
+    with _as_user(client_sub="user-1"), patch("app.api.public.emotions.db") as mock_db:
+        mock_db.message.find_first = AsyncMock(return_value=None)
+        response = client.get("/emotions/agent-id/current")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["emotion"] == "中性"
+    assert data["intensity"] == 0
 
 
 def test_get_emotion_rejects_non_owner(mock_deps):

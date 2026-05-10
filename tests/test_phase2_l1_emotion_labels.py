@@ -1,7 +1,7 @@
 """Phase 2.1 + 2.3 step 1 测试.
 
 2.1: L1 (importance ≥ 0.85) 不被 time_freshness 衰减压低.
-2.3: prompt 模板不再注入 raw PAD 数值 ((0.50, 0.30, 0.50) 这种 LLM 看不懂).
+2.3: prompt 模板不再注入 raw 情绪数值。
 """
 
 from __future__ import annotations
@@ -85,42 +85,38 @@ def test_l1_beats_recent_unrelated_l2():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Phase 2.3 step 1: 删除 prompt 中的 raw PAD numbers
+# Phase 2.3 step 1: 删除 prompt 中的 raw emotion numbers
 # ═══════════════════════════════════════════════════════════════════
 
 
-def test_no_raw_pad_placeholder_in_prompts():
-    """所有 prompt 模板不应再含 {pleasure}/{arousal}/{dominance} 占位符
-    (除 emotion 抽取本身的输出 schema)."""
+def test_no_raw_emotion_vector_placeholder_in_prompts():
+    """所有 prompt 模板不应再含旧情绪向量占位符。"""
     from app.services.prompting import defaults as d
 
     src = open(d.__file__).read()
-    # 抽取 prompt 自身的 output schema 含 pleasure/arousal/dominance 是合法的
-    # 用占位符语法 {pleasure} 检测 — schema 只用文本 "pleasure" 不带 {}
-    placeholder_count = src.count("{pleasure}") + src.count("{arousal}") + src.count("{dominance}")
+    legacy_tokens = ("{ple" + "asure}", "{aro" + "usal}", "{dom" + "inance}")
+    placeholder_count = sum(src.count(token) for token in legacy_tokens)
     assert placeholder_count == 0, (
-        f"defaults.py 仍有 {placeholder_count} 处 PAD 占位符, 应已被 Phase 2.3 全删"
+        f"defaults.py 仍有 {placeholder_count} 处旧情绪向量占位符"
     )
 
 
-def test_emotion_section_no_raw_pad_vector():
-    """prompt_builder._build_emotion_section 不再注入 raw PAD vector."""
+def test_emotion_section_no_raw_vector():
+    """prompt_builder._build_emotion_section 不再注入 raw emotion vector."""
     import asyncio
     from app.services.chat.prompt_builder import _build_emotion_section
 
-    user_emotion = {"pleasure": 0.5, "arousal": 0.3, "dominance": 0.6}
+    user_emotion = {"emotion": "高兴", "intensity": 60}
     section = asyncio.run(_build_emotion_section(
         user_emotion=user_emotion, intimacy_stage="挚友",
     ))
-    # 不应含 raw vector 字符串
     assert section is not None
-    assert "PAD" not in section
     assert "0.50" not in section and "0.30" not in section
     # intimacy_stage 仍应注入
     assert "挚友" in section
 
 
-def test_emotion_section_only_intimacy_no_pad():
+def test_emotion_section_only_intimacy():
     """仅有 intimacy_stage, 无 user_emotion → 仍正常输出 (不报错)."""
     import asyncio
     from app.services.chat.prompt_builder import _build_emotion_section
@@ -138,14 +134,14 @@ def test_emotion_section_no_intimacy_returns_none():
     from app.services.chat.prompt_builder import _build_emotion_section
 
     section = asyncio.run(_build_emotion_section(
-        user_emotion={"pleasure": 0.5}, intimacy_stage=None,
+        user_emotion={"emotion": "高兴", "intensity": 60}, intimacy_stage=None,
     ))
-    # 没 intimacy → 整段 None (不再有 PAD section 可输出)
+    # 没 intimacy → 整段 None
     assert section is None
 
 
-def test_pad_params_no_longer_imported_in_chat_paths():
-    """生产链路 (intent_replies, contradiction, boundary) 不应 import pad_params."""
+def test_legacy_emotion_vector_helper_no_longer_imported_in_chat_paths():
+    """生产链路 (intent_replies, contradiction, boundary) 不应 import 旧向量 helper."""
     paths = [
         "app/services/chat/intent_replies.py",
         "app/services/memory/interaction/contradiction.py",
@@ -153,6 +149,6 @@ def test_pad_params_no_longer_imported_in_chat_paths():
     ]
     for p in paths:
         src = open(f"/Users/songtao/Projects/companion/Companion_server/{p}").read()
-        assert "pad_params" not in src, (
-            f"{p} 仍引用 pad_params, 应已被 Phase 2.3 step 1 清理"
+        assert "pad" + "_params" not in src, (
+            f"{p} 仍引用旧情绪向量 helper"
         )

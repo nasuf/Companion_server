@@ -1,34 +1,61 @@
-"""Emotion API routes.
-
-Provides endpoints for querying AI emotion state and emotion timeline.
-"""
+"""Emotion API routes."""
 
 from fastapi import APIRouter, Depends
 
 from app.api.ownership import require_agent_owner
 from app.db import db
-from app.services.relationship.emotion import get_ai_emotion, emotion_to_tone
+from app.services.relationship.emotion import (
+    emotion_to_tone,
+    neutral_emotion,
+    normalize_emotion_result,
+)
 from app.services.emoji import recommend_emoji
 
 router = APIRouter(prefix="/emotions", tags=["emotions"])
 
 
+async def _latest_assistant_reply_emotion(agent) -> dict:
+    """Derive current display emotion from latest assistant reply metadata."""
+    msg = await db.message.find_first(
+        where={
+            "role": "assistant",
+            "conversation": {
+                "agentId": agent.id,
+                "userId": agent.userId,
+            },
+        },
+        order={"createdAt": "desc"},
+    )
+    metadata = getattr(msg, "metadata", None) if msg else None
+    if not isinstance(metadata, dict):
+        return neutral_emotion(source="current_default")
+    if not metadata.get("ai_emotion"):
+        return neutral_emotion(source="current_default")
+    return normalize_emotion_result(
+        {
+            "emotion": metadata.get("ai_emotion"),
+            "intensity": metadata.get("emotion_intensity", 0),
+            "confidence": metadata.get("emotion_confidence", 0.8),
+        },
+        source="latest_reply",
+    )
+
+
 @router.get("/{agent_id}/current")
 async def get_current_emotion(agent=Depends(require_agent_owner)):
-    """返回 AI 最近一次（上次聊天）计算出的 PAD 缓存值。
+    """Return current coarse emotion state for compatibility.
 
-    Spec §3.2 AI PAD 每条用户消息动态计算（见 compute_ai_pad），本接口不触发
-    重新生成，只返回上次 compute_ai_pad 回写的缓存。agent 刚创建还没聊过天时
-    返回中性默认 {0.0, 0.5, 0.5}。
+    Runtime AI emotion-vector cache has been removed; current mood is derived
+    from the latest assistant reply label when available.
     """
-    emotion = await get_ai_emotion(agent.id)
+    emotion = await _latest_assistant_reply_emotion(agent)
     tone = emotion_to_tone(emotion)
 
     return {
         "agent_id": agent.id,
-        "pleasure": emotion["pleasure"],
-        "arousal": emotion["arousal"],
-        "dominance": emotion["dominance"],
+        "emotion": emotion["emotion"],
+        "intensity": emotion["intensity"],
+        "confidence": emotion["confidence"],
         "tone": tone,
     }
 
@@ -68,9 +95,9 @@ async def get_emotion_timeline(
             emo = metadata["emotion"]
             timeline.append({
                 "timestamp": str(msg.createdAt),
-                "pleasure": emo.get("pleasure", 0.0),
-                "arousal": emo.get("arousal", 0.0),
-                "dominance": emo.get("dominance", 0.0),
+                "emotion": emo.get("emotion", "中性"),
+                "intensity": emo.get("intensity", 0),
+                "confidence": emo.get("confidence", 0.0),
                 "message_preview": msg.content[:80],
             })
 
@@ -79,11 +106,10 @@ async def get_emotion_timeline(
 
 @router.post("/emoji/recommend")
 async def recommend_emoji_api(
-    pleasure: float = 0.0,
-    arousal: float = 0.0,
+    emotion: str | None = None,
     primary_emotion: str | None = None,
     count: int = 3,
 ):
     """推荐表情。"""
-    emojis = recommend_emoji(pleasure, arousal, primary_emotion, count)
+    emojis = recommend_emoji(primary_emotion or emotion, count)
     return {"emojis": emojis}

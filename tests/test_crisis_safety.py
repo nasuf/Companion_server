@@ -1869,7 +1869,7 @@ def test_orchestrator_crisis_skips_full_fetch_parallel_context():
     而是只起 retrieve_crisis_memories + portrait 轻量 fetch.
 
     防回归: 实测 trace 2026-05-07 16:57 走完整 fetch 浪费 4s 无关 LLM
-    (relevance + AI PAD + user PAD). 修复后 crisis 路径不应再触发这些.
+    (relevance + 用户情绪等). 修复后 crisis 路径不应再触发这些.
 
     用 inspect.getsource 验证: orchestrator 中 crisis_force_intent 分支
     不包含 fetch_parallel_context() 调用, 包含 retrieve_crisis_memories + get_latest_portrait.

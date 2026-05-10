@@ -93,7 +93,7 @@ def test_proactive_prompt_filters_empty_optional_reference_rows():
             "schedule_status": {"activity": "散步", "status": "idle"},
             "user_portrait": "(未知)",
             "recent_context": "(无)",
-            "emotion": {"pleasure": 0.0, "arousal": 0.3, "dominance": 0.5},
+            "emotion": {"emotion": "中性", "intensity": 0},
             "__tpl": PROACTIVE_SILENCE_AI_MEMORY_PROMPT,
         },
         "温和",

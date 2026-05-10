@@ -684,7 +684,7 @@ async def test_emit_replies_uses_ai_reply_emotion_for_emoji():
 
     captured: dict = {}
 
-    def _capture(pleasure, arousal, primary_emotion=None):
+    def _capture(primary_emotion=None):
         captured["primary_emotion"] = primary_emotion
         return "🎉"
 
@@ -701,7 +701,6 @@ async def test_emit_replies_uses_ai_reply_emotion_for_emoji():
             reply_context=None,
             reply_index_offset=0,
             sub_intent_mode=False,
-            emotion={"primary_emotion": "悲伤"},  # PAD 缓存说悲伤
             agent=SimpleNamespace(name="A"),
             user_message="嗨",
             delay_reply_fn=AsyncMock(return_value=None),
@@ -711,18 +710,19 @@ async def test_emit_replies_uses_ai_reply_emotion_for_emoji():
         ):
             pass
 
-    # LLM 输出的"高兴"应覆盖缓存的"悲伤"
     assert captured["primary_emotion"] == "高兴"
+    assert emitted[0]["ai_emotion"] == "高兴"
+    assert emitted[0]["emotion_intensity"] == 80
 
 
 @pytest.mark.asyncio
-async def test_emit_replies_falls_back_to_pad_emotion_when_no_reply_emotion():
-    """reply_emotion 缺失/空 → 回退到 PAD primary_emotion。"""
+async def test_emit_replies_uses_neutral_when_no_reply_emotion():
+    """reply_emotion 缺失/空 → 不再回退到旧 AI 情绪缓存。"""
     from app.services.chat.reply_post_process import emit_replies
 
     captured: dict = {}
 
-    def _capture(pleasure, arousal, primary_emotion=None):
+    def _capture(primary_emotion=None):
         captured["primary_emotion"] = primary_emotion
         return "😢"
 
@@ -739,7 +739,6 @@ async def test_emit_replies_falls_back_to_pad_emotion_when_no_reply_emotion():
             reply_context=None,
             reply_index_offset=0,
             sub_intent_mode=False,
-            emotion={"primary_emotion": "悲伤"},
             agent=SimpleNamespace(name="A"),
             user_message="嗨",
             delay_reply_fn=AsyncMock(return_value=None),
@@ -749,7 +748,7 @@ async def test_emit_replies_falls_back_to_pad_emotion_when_no_reply_emotion():
         ):
             pass
 
-    assert captured["primary_emotion"] == "悲伤"
+    assert captured["primary_emotion"] is None
 
 
 @pytest.mark.asyncio

@@ -154,7 +154,7 @@ def test_decision_prompts_not_polluted_with_format_constraint():
         "MEMORY_JUDGEMENT_AI_PROMPT",
         "MEMORY_EXTRACTION_USER_PROMPT",
         "MEMORY_EXTRACTION_AI_PROMPT",
-        "EMOTION_EXTRACTION_PROMPT",
+        "USER_EMOTION_LABEL_PROMPT",
         "ATTACK_TARGET_PROMPT",
         "ATTACK_LEVEL_PROMPT",
         "BANNED_WORD_PROMPT",

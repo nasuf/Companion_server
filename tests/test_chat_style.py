@@ -11,7 +11,7 @@ def test_detect_relational_context_for_complaint():
 
 
 def test_detect_relational_context_for_distress():
-    context = detect_relational_context("我现在很不好", {"pleasure": -0.5, "arousal": 0.6})
+    context = detect_relational_context("我现在很不好", {"emotion": "悲伤", "intensity": 60})
     assert context is not None
     assert "低落" in context or "烦闷" in context
 
@@ -19,4 +19,5 @@ def test_detect_relational_context_for_distress():
 def test_quick_emotion_estimate_catches_short_negative_message():
     result = quick_emotion_estimate("我现在很烦，不好")
     assert result is not None
-    assert result["pleasure"] < 0
+    assert result["emotion"] in {"悲伤", "愤怒", "焦虑"}
+    assert result["intensity"] > 0
