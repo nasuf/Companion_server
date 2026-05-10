@@ -60,6 +60,19 @@ from app.services.prompting.defaults import (
     SCHEDULE_MISSING_CONTEXT_PROMPT,
 )
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
+from app.services.rules.chat_keywords import (
+    CANCEL_NEG_TOKENS,
+    HIGH_CONFIDENCE_CANCEL_KEYWORDS,
+    LOW_CONFIDENCE_CANCEL_KEYWORDS,
+    MEMORY_FACT_RECALL_CUES,
+    RECURRENCE_KEYWORDS,
+    RECORD_MEMORY_CUES,
+    REMINDER_ACTION_CUES,
+    REMINDER_CONTENT_CUES,
+    SELF_NOTE_CUES,
+    TIME_OR_EVENT_CUES,
+    UNDO_CANCEL_KEYWORDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -461,7 +474,7 @@ def _format_user_memory_for_crisis(
     user_lines = [_text(m) for m in user_memories]
     if not user_lines:
         return "(无)"
-    # 跟情绪/求助/求救相关的关键词. 跟 _CRISIS_KEYWORDS 重叠是 OK 的
+    # 跟情绪/求助/求救相关的关键词. 跟 CRISIS_KEYWORDS 重叠是 OK 的
     # (那些是触发判定, 这些是召回筛选), 同时加宽到泛情绪词避免漏召回.
     relevance_kw = (
         "情绪", "难过", "委屈", "崩溃", "压力", "焦虑", "抑郁",
@@ -543,12 +556,6 @@ def _crisis_followup_safety_check_instruction(mode: str) -> str:
     return "本轮不主动复核安全状态; 除非用户主动提到风险, 不要追问安全。"
 
 
-_MEMORY_FACT_RECALL_CUES = (
-    "还记得", "记得", "记不记得", "记得吗", "记得嘛",
-    "我跟你说过", "我和你说过", "告诉过你", "跟你讲过",
-)
-
-
 def _extract_memory_preference_topics(message: str) -> list[str]:
     """Extract concrete preference topics from recall-style questions.
 
@@ -559,7 +566,7 @@ def _extract_memory_preference_topics(message: str) -> list[str]:
     invent a remembered fact.
     """
     msg = (message or "").strip()
-    if not msg or not any(cue in msg for cue in _MEMORY_FACT_RECALL_CUES):
+    if not msg or not any(cue in msg for cue in MEMORY_FACT_RECALL_CUES):
         return []
 
     match = re.search(r"喜欢的\s*([^吗嘛么呀啊呢了，。！？?\s、]{1,20})", msg)
@@ -709,41 +716,6 @@ def _format_when_text(occur_dt) -> str:
     return format_when_text(occur_dt)
 
 
-# 周期性提醒关键词识别. 用户口语 "每天提醒我吃药" / "每月 1 号交房租" 走
-# RECORD_REQUEST 短路时 _direct_create_reminder 必须识别这些, 否则硬编码
-# recurrence="once" 让周期信息丢失, 提醒只响一次. 关键词级判断, 不调 LLM.
-_RECURRENCE_KEYWORDS: tuple[tuple[str, str], ...] = (
-    # 顺序重要 — "每年" 必须在 "每" 单字之前匹配
-    ("每年", "yearly"), ("每月", "monthly"), ("每周", "weekly"),
-    ("每星期", "weekly"), ("每天", "daily"), ("每日", "daily"),
-    ("每晚", "daily"), ("每早", "daily"), ("每个月", "monthly"),
-    ("每一年", "yearly"), ("每一月", "monthly"), ("每一周", "weekly"),
-    ("每一天", "daily"),
-)
-
-
-_REMINDER_ACTION_CUES = (
-    "提醒", "叫我", "喊我", "闹钟", "到时候", "盯着", "催我",
-)
-_RECORD_MEMORY_CUES = (
-    "记住", "记一下", "记下来", "记着", "帮我记", "替我记",
-)
-_SELF_NOTE_CUES = (
-    "我想记下来", "我想记一下", "我想写下来", "我能贴在备忘录",
-    "贴在备忘录", "备忘录里的话", "备忘录里的一句话",
-)
-_REMINDER_CONTENT_CUES = (
-    "提醒内容", "提醒文案", "内容就写", "内容写成", "文案写成",
-    "改成那句", "还是那句",
-)
-_TIME_OR_EVENT_CUES = (
-    "明天", "后天", "大后天", "今晚", "今天", "下周", "下星期", "下个月",
-    "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天",
-    "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日", "星期天",
-    "每周", "每月", "每天", "每日", "每年", "点", "号", "月",
-)
-
-
 def classify_record_request_action(message: str) -> str:
     """把 RECORD_REQUEST 再分成提醒管理 / 普通记忆 / 用户自记笔记。
 
@@ -768,14 +740,14 @@ def classify_record_request_action(message: str) -> str:
     ):
         return "none"
 
-    if any(cue in msg for cue in _REMINDER_CONTENT_CUES):
+    if any(cue in msg for cue in REMINDER_CONTENT_CUES):
         return "reminder_content"
-    if any(cue in msg for cue in _REMINDER_ACTION_CUES):
+    if any(cue in msg for cue in REMINDER_ACTION_CUES):
         return "reminder"
-    if any(cue in msg for cue in _SELF_NOTE_CUES):
+    if any(cue in msg for cue in SELF_NOTE_CUES):
         return "self_note"
 
-    has_record_cue = any(cue in msg for cue in _RECORD_MEMORY_CUES)
+    has_record_cue = any(cue in msg for cue in RECORD_MEMORY_CUES)
     if has_record_cue:
         # “记得帮我盯着报告” 已被 REMINDER_ACTION_CUES 捕获; 这里剩下的是
         # “记住我…” “记一下：…” 这类长期记忆请求。
@@ -789,7 +761,7 @@ def classify_record_request_action(message: str) -> str:
         return "none"
 
     # 无显式“提醒我”但有明确未来/周期事项的历史行为仍保留为 reminder。
-    if any(cue in msg for cue in _TIME_OR_EVENT_CUES):
+    if any(cue in msg for cue in TIME_OR_EVENT_CUES):
         return "reminder"
     return "none"
 
@@ -812,10 +784,10 @@ def extract_record_memory_text(message: str) -> str:
 
 def _detect_recurrence(message: str) -> str:
     """从用户消息识别 recurrence (once/daily/weekly/monthly/yearly).
-    `_RECURRENCE_KEYWORDS` 命中即返对应周期, 否则 "once".
+    `RECURRENCE_KEYWORDS` 命中即返对应周期, 否则 "once".
     """
     msg = message.strip()
-    for kw, rec in _RECURRENCE_KEYWORDS:
+    for kw, rec in RECURRENCE_KEYWORDS:
         if kw in msg:
             return rec
     return "once"
@@ -1062,31 +1034,6 @@ async def _direct_create_reminder(
 # 关键洞察: 含"提醒/记" 字的关键词 = 用户主动 mention reminder = 高置信度;
 # 不含的口语 ("算了/我吃过了") 在普通对话中假阳率高 = 必须 confirm.
 
-_HIGH_CONFIDENCE_CANCEL_KEYWORDS = (
-    # 明确包含 "提醒"/"记" 的取消短语
-    "别提醒", "不用提醒", "取消提醒", "撤销提醒", "撤回提醒",
-    "不记了", "别记了", "不用记", "别再记",
-)
-
-_LOW_CONFIDENCE_CANCEL_KEYWORDS = (
-    # 歧义口语 - 在普通对话中也常见, 必须 confirm
-    "算了", "不用了",
-    "我吃过了", "我做过了", "我喝过了",
-    "已经做了", "已经吃了", "已经喝了", "已经办了",
-)
-
-# 共现命中视为 HIGH: 任一负向词 + "提醒"/"记" 同时出现
-# (覆盖 "取消那个提醒"/"删掉那个提醒"/"不要再记这个" 等)
-_CANCEL_NEG_TOKENS = ("取消", "删掉", "删除", "撤销", "不要", "别")
-
-
-# 撤回上一次取消的关键词 (1h 内有效)
-_UNDO_CANCEL_KEYWORDS = (
-    "撤回", "撤销", "恢复", "复原", "我反悔", "刚才取消错了", "撤回刚才",
-    "恢复刚才", "把刚才的", "撤回提醒", "恢复提醒",
-)
-
-
 def classify_cancel_intent(message: str) -> str:
     """口语取消语义分级判定 (不调 LLM, ~0ms).
 
@@ -1100,13 +1047,13 @@ def classify_cancel_intent(message: str) -> str:
     msg = message.strip()
 
     # 高置信度: 明确 mention "提醒/记"
-    if any(kw in msg for kw in _HIGH_CONFIDENCE_CANCEL_KEYWORDS):
+    if any(kw in msg for kw in HIGH_CONFIDENCE_CANCEL_KEYWORDS):
         return "high"
     # 共现规则也算 HIGH
-    if any(neg in msg for neg in _CANCEL_NEG_TOKENS) and ("提醒" in msg or "记" in msg):
+    if any(neg in msg for neg in CANCEL_NEG_TOKENS) and ("提醒" in msg or "记" in msg):
         return "high"
     # 低置信度: 仅口语命中
-    if any(kw in msg for kw in _LOW_CONFIDENCE_CANCEL_KEYWORDS):
+    if any(kw in msg for kw in LOW_CONFIDENCE_CANCEL_KEYWORDS):
         return "low"
     return "none"
 
@@ -1121,7 +1068,7 @@ def _is_cancel_reminder(message: str) -> bool:
 def _is_undo_cancel(message: str) -> bool:
     """识别 "撤回刚才的取消" 语义."""
     msg = message.strip()
-    return any(kw in msg for kw in _UNDO_CANCEL_KEYWORDS)
+    return any(kw in msg for kw in UNDO_CANCEL_KEYWORDS)
 
 
 def _topic_overlap(user_message: str, reminder_summary: str) -> bool:

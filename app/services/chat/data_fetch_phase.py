@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -42,6 +41,14 @@ from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.relationship.emotion import compute_ai_pad, extract_emotion
 from app.services.relationship.intimacy import get_topic_intimacy
+from app.services.rules.chat_keywords import (
+    ENHANCED_QUERY_FIRST_HINTS,
+    FAST_WEAK_EMOJI_RE,
+    FAST_WEAK_NOISE_RE,
+    FAST_WEAK_PROTECTED_HINTS,
+    FAST_WEAK_REPEAT_CHARS,
+    FAST_WEAK_WORDS,
+)
 from app.services.schedule_domain.schedule import (
     format_schedule_context,
     get_cached_schedule,
@@ -96,41 +103,13 @@ async def _do_retrieval(
 _T = Any  # gather result type alias
 _EMPTY_RETRIEVAL_RESULT = {"memories": None, "memory_strings": None, "graph_context": None}
 
-_ENHANCED_QUERY_FIRST_HINTS = (
-    "他呢", "她呢", "它呢", "这个呢", "那个呢", "这件事", "那件事",
-    "那次", "上次", "当时", "后来呢", "然后呢", "颜色呢", "名字呢",
-    "情况呢", "怎么样了", "怎样了", "怎么了", "咋样了",
-)
-
-_FAST_WEAK_WORDS = {
-    "嗯", "嗯嗯", "哦", "哦哦", "好", "好的", "行", "行吧", "好吧",
-    "ok", "okay", "收到", "知道了", "可以", "当然",
-    "哈哈", "哈哈哈", "呵呵", "嘻嘻", "嘿嘿", "hh", "hhh", "666",
-    "哇", "啊", "啊啊", "额", "呃", "唔", "喔", "噢",
-    "是", "是的", "对", "对的", "对对",
-    "谢谢", "感谢",
-    "早", "早上好", "晚安", "你好", "hello", "hi", "嗨",
-    "了", "吧", "呢", "吗", "呀",
-}
-_FAST_WEAK_REPEAT_CHARS = set("嗯哦喔噢啊哈呵嘻嘿呃额唔哇吧呀呢吗啦了")
-_FAST_WEAK_NOISE_RE = re.compile(r"[\s.,!?。，！？…~～、]+")
-_FAST_WEAK_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0E\uFE0F\u200D]+")
-_FAST_WEAK_PROTECTED_HINTS = (
-    "记得", "忘了", "忘记", "以前", "之前", "上次", "那次", "当时",
-    "去年", "前年", "小时候",
-    "妈妈", "母亲", "爸爸", "父亲", "家人", "老婆", "妻子", "老公", "丈夫",
-    "女朋友", "男朋友", "前任",
-    "名字", "年龄", "生日", "工作", "职业", "学校", "公司",
-    "喜欢", "不喜欢", "讨厌", "过敏", "手术", "住院", "出院",
-    "活不下去", "想死", "自杀", "轻生",
-)
 
 def _should_wait_for_enhanced_query(user_message: str) -> bool:
     """省略式追问先等 enhanced_query, 避免用错误 query 做一次无效检索."""
     text = user_message.strip()
     if not text or len(text) > 24:
         return False
-    return any(hint in text for hint in _ENHANCED_QUERY_FIRST_HINTS)
+    return any(hint in text for hint in ENHANCED_QUERY_FIRST_HINTS)
 
 
 def _has_fast_gate_protected_hint(text: str) -> bool:
@@ -139,7 +118,7 @@ def _has_fast_gate_protected_hint(text: str) -> bool:
         _should_wait_for_enhanced_query(text)
         or is_recall_query(text)
         or has_explicit_time(text)
-        or any(hint in text for hint in _FAST_WEAK_PROTECTED_HINTS)
+        or any(hint in text for hint in FAST_WEAK_PROTECTED_HINTS)
     )
 
 
@@ -157,17 +136,17 @@ def _should_fast_weak_relevance(user_message: str) -> bool:
     if asks_ai_stable_relation(text):
         return False
 
-    cleaned = _FAST_WEAK_NOISE_RE.sub("", text)
-    cleaned = _FAST_WEAK_EMOJI_RE.sub("", cleaned)
+    cleaned = FAST_WEAK_NOISE_RE.sub("", text)
+    cleaned = FAST_WEAK_EMOJI_RE.sub("", cleaned)
     if not cleaned:
         return True
     normalized = cleaned.lower()
-    if normalized in _FAST_WEAK_WORDS:
+    if normalized in FAST_WEAK_WORDS:
         return True
     if (
         len(cleaned) <= 6
         and len(set(cleaned)) <= 2
-        and all(ch in _FAST_WEAK_REPEAT_CHARS for ch in cleaned)
+        and all(ch in FAST_WEAK_REPEAT_CHARS for ch in cleaned)
     ):
         return True
     return False

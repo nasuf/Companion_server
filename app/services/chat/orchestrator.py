@@ -117,6 +117,10 @@ from app.services.chat.tracing import LangSmithTracer
 from app.services.mbti import get_mbti
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
+from app.services.rules.chat_keywords import (
+    DISTRESS_KEYWORDS,
+    RELATIONAL_COMPLAINT_KEYWORDS,
+)
 from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
@@ -327,15 +331,6 @@ def _clean_reply_part(text: str) -> str:
     """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格."""
     return _INTRA_REPLY_WS_RE.sub(" ", text).strip()
 
-_RELATIONAL_COMPLAINT_KEYWORDS = [
-    "怎么不理我", "不理我", "不回我", "不想理我", "你在忙吗", "你还在吗",
-    "你是不是不想理我", "是不是不想聊", "是不是烦我", "怎么才回",
-]
-_DISTRESS_KEYWORDS = [
-    "不好", "难受", "烦", "委屈", "崩溃", "糟糕", "不开心", "很累", "想哭",
-    "好难过", "撑不住", "心情不好",
-]
-
 def truncate_at_sentence(text: str, max_len: int) -> str:
     """截断至max_len内最后一个句子边界。"""
     if len(text) <= max_len:
@@ -417,7 +412,7 @@ def split_and_validate_replies(
 def detect_relational_context(message: str, user_emotion: dict | None) -> str | None:
     """Detect relationship repair / distress cues that need more human handling."""
     text = message.strip()
-    if any(keyword in text for keyword in _RELATIONAL_COMPLAINT_KEYWORDS):
+    if any(keyword in text for keyword in RELATIONAL_COMPLAINT_KEYWORDS):
         return (
             "用户这句更像是在确认你有没有在意Ta，或者在表达被忽略感。"
             "先短促地接住关系情绪，比如安抚、解释半句、表明你不是故意的；"
@@ -429,7 +424,7 @@ def detect_relational_context(message: str, user_emotion: dict | None) -> str | 
         and float(user_emotion.get("pleasure", 0.0)) < -0.2
         and float(user_emotion.get("arousal", 0.0)) > 0.25
     )
-    if any(keyword in text for keyword in _DISTRESS_KEYWORDS) or negative_emotion:
+    if any(keyword in text for keyword in DISTRESS_KEYWORDS) or negative_emotion:
         return (
             "用户这句带明显低落或烦闷情绪。"
             "先回应当下感受，语气真一点、短一点；"

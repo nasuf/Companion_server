@@ -16,60 +16,16 @@ from app.services.memory.retrieval.query_patterns import (
     asks_ai_stable_relation,
 )
 from app.services.memory.retrieval.relevance import compute_display_score
-
-
-SAFETY_QUERY_KEYWORDS: tuple[str, ...] = (
-    "想死", "不想活", "活不下去", "活着没意思", "活着没意义",
-    "轻生", "自杀", "自残", "自伤", "跳楼", "跳河", "跳桥", "跳轨",
-    "结束生命", "结束自己", "了结自己", "消失算了", "撑不住",
+from app.services.rules.memory_keywords import (
+    CATEGORY_QUERY_KEYWORDS,
+    DISTRESS_QUERY_KEYWORDS,
+    EMOTIONAL_SAFETY_SUBCATEGORIES,
+    LEXICAL_MEMORY_KEYWORDS,
+    RECALL_HINT_KEYWORDS,
+    SAFETY_QUERY_KEYWORDS,
 )
 
-DISTRESS_KEYWORDS: tuple[str, ...] = (
-    "难过", "委屈", "崩溃", "压力", "焦虑", "抑郁", "孤独",
-    "想哭", "哭", "绝望", "痛苦", "撑不住", "心情不好", "很累",
-    "低落", "沮丧", "受不了", "空落落", "空唠唠", "心里空", "有点空",
-)
-
-EMOTIONAL_SAFETY_SUBCATEGORIES: tuple[str, ...] = (
-    "悲伤", "恐惧", "焦虑", "失望", "孤独",
-)
-
-RECALL_HINT_KEYWORDS: tuple[str, ...] = (
-    "还记得", "记不记得", "记得", "以前", "之前", "去年", "前年",
-    "上次", "那次", "那件事", "当时", "那时候", "很久", "小时候",
-    "过去", "曾经", "后来呢", "然后呢",
-)
-
-_CATEGORY_QUERY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "情绪": SAFETY_QUERY_KEYWORDS + DISTRESS_KEYWORDS + (
-        "开心", "高兴", "生气", "害怕", "恐惧", "失望", "遗憾",
-    ),
-    "生活": (
-        "工作", "上班", "老板", "同事", "学校", "考试", "旅行", "搬家",
-        "住院", "出院", "手术", "生病", "健康", "宠物", "生活",
-    ),
-    "身份": (
-        "名字", "多大", "几岁", "年龄", "生日", "家人", "妈妈", "爸爸", "父母",
-        "妻子", "丈夫", "女朋友", "男朋友", "职业", "住哪", "哪里人",
-    ),
-    "偏好": (
-        "喜欢", "不喜欢", "讨厌", "爱吃", "不吃", "偏好", "雷区",
-        "习惯", "口味", "审美",
-    ),
-    "思维": (
-        "想法", "观点", "价值观", "人生", "目标", "理想", "信仰",
-        "怎么看", "觉得",
-    ),
-}
-
-_LEXICAL_KEYWORDS: tuple[str, ...] = tuple(
-    dict.fromkeys(
-        kw
-        for kws in _CATEGORY_QUERY_KEYWORDS.values()
-        for kw in kws
-        if len(kw) >= 2
-    )
-)
+DISTRESS_KEYWORDS = DISTRESS_QUERY_KEYWORDS
 
 _NAME_QUERY_TERMS: tuple[str, ...] = ("叫什么", "名字", "姓名", "叫啥", "叫作")
 _NAMED_MEMORY_TERMS: tuple[str, ...] = ("叫", "名字", "姓名")
@@ -137,7 +93,7 @@ def is_recall_query(query: str) -> bool:
 def infer_query_main_categories(query: str) -> set[str]:
     return {
         category
-        for category, keywords in _CATEGORY_QUERY_KEYWORDS.items()
+        for category, keywords in CATEGORY_QUERY_KEYWORDS.items()
         if contains_any(query, keywords)
     }
 
@@ -276,7 +232,7 @@ def _is_ai_self_memory(memory: dict[str, Any]) -> bool:
 
 
 def _keyword_overlap_count(query: str, memory_text: str) -> int:
-    count = sum(1 for kw in _LEXICAL_KEYWORDS if kw in query and kw in memory_text)
+    count = sum(1 for kw in LEXICAL_MEMORY_KEYWORDS if kw in query and kw in memory_text)
     if contains_any(query, _NAME_QUERY_TERMS) and contains_any(
         memory_text, _NAMED_MEMORY_TERMS
     ):

@@ -6,15 +6,27 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from app.observability.events import EVT_INTENT_DETECTED, EVT_LLM_FAIL
-from app.services.chat.conversation_end import CONVERSATION_END_KEYWORDS
 from app.services.memory.interaction.deletion import DELETION_KEYWORDS
 from app.services.interaction.boundary import APOLOGY_KEYWORDS
+from app.services.rules.chat_keywords import (
+    CONVERSATION_END_KEYWORDS,
+    CURRENT_STATE_EXPLICIT_PHRASES,
+    CURRENT_STATE_FAST_PHRASES,
+    CURRENT_STATE_HISTORY_BLOCKERS,
+    CURRENT_STATE_PREDICATE_TERMS,
+    CURRENT_STATE_SUBJECT_TERMS,
+    CURRENT_STATE_TIME_BLOCKERS,
+    L3_EXPLICIT_OLD_RE,
+    L3_RECALL_CUE_RE,
+    PROMISE_KEYWORDS,
+    SCHEDULE_ADJUST_KEYWORDS,
+)
+from app.services.rules.keyword_policy import compact_chat_text
 from app.services.schedule_domain.schedule import resolve_schedule_query_scope
 
 
@@ -72,87 +84,6 @@ class IntentResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-PROMISE_KEYWORDS = [
-    "我以后不会了", "我保证", "我发誓", "不会再这样", "再也不会",
-    "保证不再", "我承诺", "绝对不会", "我答应你",
-]
-
-SCHEDULE_ADJUST_KEYWORDS = [
-    "你能不能晚点睡", "晚点睡", "早点睡", "早点休息", "别睡了",
-    "能不能抽空", "陪我聊", "别忙了", "你先别忙", "能不能陪我",
-    "你今天早点", "今天晚点",
-]
-
-_CURRENT_STATE_FAST_PHRASES = frozenset({
-    "你在干嘛",
-    "你在干嘛呢",
-    "在干嘛",
-    "在干嘛呢",
-    "干嘛呢",
-    "你干嘛呢",
-    "忙啥",
-    "你忙啥",
-    "在忙啥",
-    "你在忙啥",
-    "在忙什么",
-    "你在忙什么",
-    "现在忙吗",
-    "你现在忙吗",
-    "你现在在干嘛",
-    "你现在在干嘛呢",
-    "你现在做什么",
-    "你现在在做什么",
-    "你在做什么",
-    "你在做啥",
-    "你现在干啥",
-    "你现在干啥呢",
-})
-
-_CURRENT_STATE_TIME_BLOCKERS = (
-    "明天", "后天", "大后天", "昨天", "前天", "今晚", "晚上", "下午",
-    "上午", "中午", "凌晨", "周末", "星期", "礼拜", "几点", "什么时候",
-    "等会", "待会", "一会", "以后", "之前", "刚才",
-)
-_CURRENT_STATE_HISTORY_BLOCKERS = (
-    "刚才", "刚刚", "刚说", "刚说的", "之前说", "前面说", "上一句", "上句",
-)
-_CURRENT_STATE_EXPLICIT_PHRASES = frozenset({
-    "忙吗",
-    "不忙吗",
-    "你忙吗",
-    "你不忙吗",
-    "有空吗",
-    "你有空吗",
-    "现在有空吗",
-    "你现在有空吗",
-    "最近怎么样",
-    "你最近怎么样",
-    "你怎么样",
-    "你还好吗",
-    "你开心吗",
-    "你心情怎么样",
-})
-_CURRENT_STATE_SUBJECT_TERMS = ("你", "你现在", "你最近", "你今天", "你那边")
-_CURRENT_STATE_PREDICATE_TERMS = (
-    "干嘛", "做什么", "做啥", "忙", "有空", "怎么样", "还好吗",
-    "心情", "感觉", "开心", "难过", "状态",
-)
-
-_L3_EXPLICIT_OLD_RE = re.compile(
-    r"("
-    r"更早|更久|久远|很久以前|很久之前|好久以前|好久之前|"
-    r"很早以前|多年前|几年前|"
-    r"半年前|[六七八九十]个?月前|[6-9]个?月前|[1-9]\d+个?月前|"
-    r"去年|前年|大前年|"
-    r"第一次|初次|刚认识|刚见面|"
-    r"小时候|童年|小学|初中|高中|大学(时候|那会|时期)?"
-    r")"
-)
-_L3_RECALL_CUE_RE = re.compile(
-    r"(记得|想起|回忆|回想|说过|提过|聊过|告诉过|讲过|记不记得)"
-)
-
-
 def is_explicit_l3_recall_query(message: str) -> bool:
     """Return true only when the user explicitly asks for distant memories.
 
@@ -160,12 +91,12 @@ def is_explicit_l3_recall_query(message: str) -> bool:
     the regular memory path. L3 is reserved for older/fuzzier memories: "更早",
     "半年前", "去年", "第一次见面", school-age memories, etc.
     """
-    normalized = re.sub(r"[\s，。！？!?~～…,.、]+", "", message.strip())
+    normalized = compact_chat_text(message)
     if not normalized:
         return False
     return bool(
-        _L3_EXPLICIT_OLD_RE.search(normalized)
-        and _L3_RECALL_CUE_RE.search(normalized)
+        L3_EXPLICIT_OLD_RE.search(normalized)
+        and L3_RECALL_CUE_RE.search(normalized)
     )
 
 
@@ -175,12 +106,12 @@ def detect_current_state_fast_path(message: str) -> bool:
     Keep this deliberately narrow. Future/past/scheduled variants still go
     through the LLM classifier so they can become schedule queries when needed.
     """
-    normalized = re.sub(r"[\s，。！？!?~～…,.、]+", "", message.strip())
+    normalized = compact_chat_text(message)
     if not normalized:
         return False
-    if any(word in normalized for word in _CURRENT_STATE_TIME_BLOCKERS):
+    if any(word in normalized for word in CURRENT_STATE_TIME_BLOCKERS):
         return False
-    return normalized in _CURRENT_STATE_FAST_PHRASES
+    return normalized in CURRENT_STATE_FAST_PHRASES
 
 
 def is_explicit_current_state_query(message: str) -> bool:
@@ -190,18 +121,18 @@ def is_explicit_current_state_query(message: str) -> bool:
     reply as CURRENT_STATE. This gate keeps the short-circuit narrow so
     context follow-ups fall back to the normal reply path.
     """
-    normalized = re.sub(r"[\s，。！？!?~～…,.、]+", "", message.strip())
+    normalized = compact_chat_text(message)
     if not normalized:
         return False
-    if any(word in normalized for word in _CURRENT_STATE_HISTORY_BLOCKERS):
+    if any(word in normalized for word in CURRENT_STATE_HISTORY_BLOCKERS):
         return False
     if detect_current_state_fast_path(message):
         return True
-    if normalized in _CURRENT_STATE_EXPLICIT_PHRASES:
+    if normalized in CURRENT_STATE_EXPLICIT_PHRASES:
         return True
-    if not any(term in normalized for term in _CURRENT_STATE_SUBJECT_TERMS):
+    if not any(term in normalized for term in CURRENT_STATE_SUBJECT_TERMS):
         return False
-    return any(term in normalized for term in _CURRENT_STATE_PREDICATE_TERMS)
+    return any(term in normalized for term in CURRENT_STATE_PREDICATE_TERMS)
 
 
 def infer_schedule_query_type(message: str, *, require_query_cue: bool = True) -> str | None:
@@ -210,8 +141,8 @@ def infer_schedule_query_type(message: str, *, require_query_cue: bool = True) -
     return scope.query_type if scope else None
 
 # 优先级顺序：前面的优先匹配。spec §3.3 道歉承诺合并为一个意图
-_CHECKS: list[tuple[IntentType, list[str]]] = [
-    (IntentType.APOLOGY_PROMISE, APOLOGY_KEYWORDS + PROMISE_KEYWORDS),
+_CHECKS: list[tuple[IntentType, tuple[str, ...] | list[str]]] = [
+    (IntentType.APOLOGY_PROMISE, tuple(APOLOGY_KEYWORDS) + PROMISE_KEYWORDS),
     (IntentType.CONVERSATION_END, CONVERSATION_END_KEYWORDS),
     (IntentType.DELETION, DELETION_KEYWORDS),
     (IntentType.SCHEDULE_ADJUST, SCHEDULE_ADJUST_KEYWORDS),

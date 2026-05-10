@@ -32,6 +32,14 @@ from app.services.interaction.boundary import (
     check_banned_keywords,
     restore_patience_for_crisis_care,
 )
+from app.services.rules.chat_keywords import (
+    CRISIS_CARE_ASSISTANT_MARKERS,
+    CRISIS_CHECK_ANNOYED_TERMS,
+    CRISIS_KEYWORDS,
+    CRISIS_RELEASE_KEYWORDS,
+    CRISIS_SEMANTIC_DIRECT_PHRASES,
+    CRISIS_SEMANTIC_HINTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,53 +83,12 @@ class CrisisGuardDecision:
         }
 
 
-# 危机安全网触发关键字 — 自伤 / 自杀 / 想结束生命的明确表达.
-# 关键词层是硬兜底, 不是完整检测系统。含蓄表达由语义分类器负责。
-_CRISIS_KEYWORDS = (
-    "跳楼", "跳河", "跳桥", "跳轨", "跳海",
-    "自杀", "自残", "自伤", "轻生",
-    "想死", "我去死", "去死算了", "不想活", "活不下去",
-    "活着没意思", "活着没意义", "活够了",
-    "结束生命", "结束自己", "了结自己", "了结我自己",
-    "上吊", "割腕", "吃药自尽",
-    "不想存在", "消失算了", "消失就好",
-    "跟这个世界说再见", "和这个世界说再见", "向这个世界说再见",
-    "跟世界说再见", "和世界说再见", "向世界说再见",
-    "告别这个世界", "告别世界", "离开这个世界", "离开世界",
-    "对这个世界的最后一次", "在这个世界的最后一次",
-)
-
-_CRISIS_RELEASE_KEYWORDS = (
-    "我安全", "安全了", "现在安全",
-    "不想死了", "不会自杀", "不会自残",
-    "刚才是气话", "只是气话", "刚才是开玩笑",
-)
-
-_CRISIS_SEMANTIC_HINTS = (
-    "再见", "永别", "告别", "最后一次", "世界", "离开", "消失",
-    "撑不住", "受不了", "没意义", "没意思", "解脱", "放弃",
-    "不想继续", "别管我", "算了", "下辈子",
-)
-
-_CRISIS_CARE_ASSISTANT_MARKERS = (
-    "你现在安全吗",
-    "有没有伤害自己",
-    "伤害自己的冲动",
-    "我还在看着你刚才",
-    "没翻过去",
-    "我不会跳过",
-)
-
 _CRISIS_SOFT_CHECK_TURN_INTERVAL = 2
-_CRISIS_CHECK_ANNOYED_TERMS = (
-    "无聊的问题", "问这么多", "别问", "不要问", "烦不烦",
-    "烦死", "审问", "查户口",
-)
 
 
 def _strip_release_phrases(text: str) -> str:
     candidate = text or ""
-    for release in _CRISIS_RELEASE_KEYWORDS:
+    for release in CRISIS_RELEASE_KEYWORDS:
         candidate = candidate.replace(release, "")
     return candidate
 
@@ -130,7 +97,7 @@ def is_crisis_released(text: str) -> bool:
     """Fast conservative release signal."""
     if not text:
         return False
-    return any(keyword in text for keyword in _CRISIS_RELEASE_KEYWORDS)
+    return any(keyword in text for keyword in CRISIS_RELEASE_KEYWORDS)
 
 
 def is_crisis_message(text: str) -> bool:
@@ -138,7 +105,7 @@ def is_crisis_message(text: str) -> bool:
     if not text:
         return False
     candidate = _strip_release_phrases(text)
-    return any(keyword in candidate for keyword in _CRISIS_KEYWORDS)
+    return any(keyword in candidate for keyword in CRISIS_KEYWORDS)
 
 
 def should_semantic_crisis_check(text: str) -> bool:
@@ -146,22 +113,16 @@ def should_semantic_crisis_check(text: str) -> bool:
     if not text:
         return False
     candidate = _strip_release_phrases(text)
-    hit_count = sum(1 for hint in _CRISIS_SEMANTIC_HINTS if hint in candidate)
+    hit_count = sum(1 for hint in CRISIS_SEMANTIC_HINTS if hint in candidate)
     if hit_count >= 2:
         return True
-    return any(
-        phrase in candidate
-        for phrase in (
-            "说再见", "最后一次发泄", "最后一次告别", "让我走",
-            "不想继续了", "不想撑了", "撑不下去了",
-        )
-    )
+    return any(phrase in candidate for phrase in CRISIS_SEMANTIC_DIRECT_PHRASES)
 
 
 def is_crisis_care_assistant_message(text: str) -> bool:
     if not text:
         return False
-    return any(marker in text for marker in _CRISIS_CARE_ASSISTANT_MARKERS)
+    return any(marker in text for marker in CRISIS_CARE_ASSISTANT_MARKERS)
 
 
 def crisis_followup_safety_check_mode(
@@ -180,7 +141,7 @@ def crisis_followup_safety_check_mode(
     )
     if not due:
         return "none"
-    if any(term in user_message for term in _CRISIS_CHECK_ANNOYED_TERMS):
+    if any(term in user_message for term in CRISIS_CHECK_ANNOYED_TERMS):
         return "annoyed"
     return "soft"
 

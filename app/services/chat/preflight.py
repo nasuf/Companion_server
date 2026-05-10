@@ -37,6 +37,11 @@ from app.services.memory.interaction.deletion import (
     is_deletion_confirmed,
     load_pending_action,
 )
+from app.services.rules.chat_keywords import (
+    CANCEL_CHOICE_ALL_KEYWORDS,
+    CANCEL_CONFIRM_KEYWORDS,
+    CANCEL_DENY_KEYWORDS,
+)
 from app.services.schedule_domain.time_parser import (
     parse_loose_offset,
     parse_with_statement_time,
@@ -237,7 +242,7 @@ async def resolve_pending_deletion(
             msg_clean = user_message.strip().lower()
 
             # 否定 → 取消
-            if msg_clean in _CANCEL_DENY_KEYWORDS or any(
+            if msg_clean in CANCEL_DENY_KEYWORDS or any(
                 kw in user_message for kw in ("不是", "保留", "别动", "算了")
             ):
                 await clear_pending_deletion(ctx.conversation_id)
@@ -364,16 +369,6 @@ async def resolve_pending_deletion(
 # ═══════════════════════════════════════════════════════════════════
 
 
-_CANCEL_CONFIRM_KEYWORDS = {
-    "对", "对的", "是", "是的", "好", "好的", "嗯", "嗯嗯",
-    "确认", "撤", "撤掉", "撤了", "ok", "yes",
-}
-_CANCEL_DENY_KEYWORDS = {
-    "不是", "不", "不对", "算了", "不要", "不用", "保留",
-    "继续", "no", "别动",
-}
-
-
 def _parse_user_choice(message: str, n_candidates: int) -> list[int] | None:
     """从用户回复解析数字选择: '1' / '1和3' / '1,2' / '全部' / 'all'.
 
@@ -381,7 +376,7 @@ def _parse_user_choice(message: str, n_candidates: int) -> list[int] | None:
     """
     import re
     msg = message.strip().lower()
-    if msg in {"全部", "都", "全删", "all"}:
+    if msg in CANCEL_CHOICE_ALL_KEYWORDS:
         return list(range(n_candidates))
     nums = re.findall(r"\d+", msg)
     if not nums:
@@ -423,7 +418,7 @@ async def _handle_pending_cancel_reminder(
     msg_clean = user_message.strip().lower()
 
     # 否定语义最高优先级 — 防误删
-    if msg_clean in _CANCEL_DENY_KEYWORDS or any(
+    if msg_clean in CANCEL_DENY_KEYWORDS or any(
         kw in user_message for kw in ("不是", "保留", "别动", "算了")
     ):
         await clear_pending_deletion(ctx.conversation_id)
@@ -450,13 +445,13 @@ async def _handle_pending_cancel_reminder(
     # 长回复 (>6 字) 含 "对/撤/好" 容易假阳 (e.g. "对方有事别提了" 含"对"),
     # 限定短回复 (≤6 字) 才走 loose match. 即使误判, 1h 内可 undo, 安全网兜底.
     if len(candidates) == 1 and (
-        msg_clean in _CANCEL_CONFIRM_KEYWORDS
+        msg_clean in CANCEL_CONFIRM_KEYWORDS
         or (len(msg_clean) <= 6 and any(kw in user_message for kw in ("对", "撤", "好")))
     ):
         chosen_indices = [0]
 
     # 多候选 + CONFIRM 但用户没指定数字 → 二次反问 (不一刀切)
-    if len(candidates) > 1 and chosen_indices is None and msg_clean in _CANCEL_CONFIRM_KEYWORDS:
+    if len(candidates) > 1 and chosen_indices is None and msg_clean in CANCEL_CONFIRM_KEYWORDS:
         reply = (
             "嗯, 你想撤哪个呀? 回数字 (如 '1', '1和3'), "
             "或者'全部', 或者'算了'~"
@@ -540,7 +535,7 @@ async def _handle_pending_update_reminder_content(
         return
 
     msg_clean = user_message.strip().lower()
-    if msg_clean in _CANCEL_DENY_KEYWORDS or any(
+    if msg_clean in CANCEL_DENY_KEYWORDS or any(
         kw in user_message for kw in ("不是", "保留", "别动", "算了", "不改")
     ):
         await clear_pending_deletion(ctx.conversation_id)
