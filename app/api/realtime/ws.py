@@ -323,6 +323,26 @@ async def _handle_message(
         )
         return
 
+    if plan.metadata.get("append_delayed"):
+        delay_seconds = float((plan.final_context or {}).get("delay_seconds", 0.0) or 0.0)
+        await enqueue_or_append_delayed(
+            conversation_id,
+            {
+                "conversation_id": conversation_id,
+                "agent_id": agent.id,
+                "user_id": user_id,
+                "message": plan.final_message,
+                "message_id": user_message_id,
+                "reply_context": plan.final_context,
+            },
+            delay_seconds,
+        )
+        await ws.send_json({
+            "type": "pending",
+            "data": {"status": "queued", "delay": delay_seconds},
+        })
+        return
+
     await _queue_reply_or_error(
         ws,
         conversation_id=conversation_id,

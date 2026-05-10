@@ -32,7 +32,10 @@ from app.services.chat.intent_replies import (
     record_confirm_reply,
     schedule_query_reply,
 )
-from app.services.chat.intent_dispatcher import is_explicit_current_state_query
+from app.services.chat.intent_dispatcher import (
+    infer_schedule_query_type,
+    is_explicit_current_state_query,
+)
 from app.services.chat.multi_intent import finalize_short_circuit
 from app.services.memory.interaction.deletion import (
     detect_deletion_intent,
@@ -78,6 +81,18 @@ from app.services.rules.chat_keywords import (
 logger = logging.getLogger(__name__)
 
 _SHORT_CIRCUIT_REPEAT_COOLDOWN = timedelta(seconds=90)
+_SHORT_CIRCUIT_REPEAT_CONTEXT_MAX_AGE = timedelta(minutes=15)
+_SHORT_CIRCUIT_REPEAT_RECENT_TAKE = 12
+_SCHEDULE_REPEAT_CONTEXT_HINT = (
+    "【重复追问处理】用户刚才已经问过相同时间段的忙闲或安排。"
+    "这次只自然承接当前这句，简短回答即可；不要复述完整日程，"
+    "不要说“安排没变”“具体哪一段”“拎出来”等工具化话术。"
+)
+_CURRENT_STATE_REPEAT_CONTEXT_HINT = (
+    "【重复追问处理】用户刚才已经问过你当前状态。"
+    "这次只自然承接当前这句，简短回答即可；不要重复完整活动细节，"
+    "不要使用固定模板。"
+)
 _CURRENT_STATE_METADATA_KEY = "current_state_context"
 _SHORT_CIRCUIT_REPEAT_METADATA_KEY = "short_circuit_repeat"
 
@@ -115,6 +130,7 @@ class ShortCircuitCtx:
     consumed_full_message: bool = False
     last_short_circuit_kind: str | None = None
     response_diagnostics: dict[str, Any] | None = None
+    covered_until_user_ts: datetime | None = None
 
     async def finalize(
         self,
@@ -143,6 +159,11 @@ class ShortCircuitCtx:
             {} if self.consumed_full_message else self.pending_sub_fragments
         )
         extra_metadata: dict[str, Any] | None = dict(metadata or {})
+        if self.covered_until_user_ts is not None:
+            extra_metadata.setdefault(
+                "covered_until_user_ts",
+                self.covered_until_user_ts.isoformat(),
+            )
         if self.response_diagnostics is not None:
             self.response_diagnostics.update({
                 "reply_path": "short_circuit",
@@ -376,6 +397,13 @@ def _repeat_metadata(kind: str, repeat_key: str, **extra: Any) -> dict[str, Any]
     return {_SHORT_CIRCUIT_REPEAT_METADATA_KEY: context}
 
 
+def _with_repeat_context_hint(context: str | None, hint: str) -> str:
+    base = (context or "").strip()
+    if not base or base == EMPTY_RECENT_CONTEXT:
+        return hint
+    return f"{base}\n{hint}"
+
+
 def _recent_repeat_context_matches(metadata: dict[str, Any], kind: str, repeat_key: str) -> bool:
     context = metadata.get(_SHORT_CIRCUIT_REPEAT_METADATA_KEY)
     if isinstance(context, dict):
@@ -390,38 +418,65 @@ def _recent_repeat_context_matches(metadata: dict[str, Any], kind: str, repeat_k
     return False
 
 
+def _is_same_short_circuit_topic(kind: str, text: str) -> bool:
+    if kind == "current_state":
+        return is_explicit_current_state_query(text)
+    if kind == "schedule_query":
+        return infer_schedule_query_type(text, require_query_cue=False) is not None
+    return False
+
+
+def _has_short_circuit_topic_break(kind: str, user_messages: list[str]) -> bool:
+    return any(
+        content and not _is_same_short_circuit_topic(kind, content)
+        for content in user_messages
+    )
+
+
 async def _has_recent_short_circuit_repeat(
     conversation_id: str,
     *,
     kind: str,
     repeat_key: str,
+    current_message: str | None = None,
 ) -> bool:
     if not conversation_id or not kind or not repeat_key:
         return False
     try:
         rows = await db.message.find_many(
-            where={"conversationId": conversation_id, "role": "assistant"},
+            where={"conversationId": conversation_id},
             order={"createdAt": "desc"},
-            take=6,
+            take=_SHORT_CIRCUIT_REPEAT_RECENT_TAKE,
         )
     except Exception as e:
         logger.warning(f"Short-circuit repeat lookup failed: {e}")
         return False
 
     now = datetime.now(timezone.utc)
+    newer_user_messages = (
+        [_normalize_repeat_key(current_message)] if current_message else []
+    )
     for row in rows:
-        created_at = _as_aware_utc(getattr(row, "createdAt", None))
-        if created_at and now - created_at > _SHORT_CIRCUIT_REPEAT_COOLDOWN:
+        content = _normalize_repeat_key(getattr(row, "content", ""))
+        role = getattr(row, "role", "")
+        if role == "user":
+            if content and content not in newer_user_messages:
+                newer_user_messages.append(content)
             continue
+        if role != "assistant":
+            continue
+        created_at = _as_aware_utc(getattr(row, "createdAt", None))
         metadata = _metadata_dict(getattr(row, "metadata", None))
-        if _recent_repeat_context_matches(metadata, kind, repeat_key):
+        if not _recent_repeat_context_matches(metadata, kind, repeat_key):
+            continue
+        if _has_short_circuit_topic_break(kind, newer_user_messages):
+            return False
+        age = now - created_at if created_at else None
+        if age is None or age <= _SHORT_CIRCUIT_REPEAT_COOLDOWN:
+            return True
+        if age <= _SHORT_CIRCUIT_REPEAT_CONTEXT_MAX_AGE:
             return True
     return False
-
-
-def _schedule_repeat_reply() -> str:
-    return "刚才那段安排没变。你想看具体哪一段，我再帮你拎出来。"
-
 
 async def handle_schedule_query(
     user_message: str,
@@ -470,24 +525,20 @@ async def handle_schedule_query(
         query_type=resolved_query_type,
         date_label=date_label,
     )
-    if await _has_recent_short_circuit_repeat(
+    is_repeat_query = await _has_recent_short_circuit_repeat(
         ctx.conversation_id,
         kind="schedule_query",
         repeat_key=repeat_key,
-    ):
-        return (
-            True,
-            ctx.finalize(
-                _schedule_repeat_reply(),
-                kind="schedule_query",
-                metadata=repeat_metadata,
-            ),
-            schedule_context,
-        )
+        current_message=user_message,
+    )
     try:
+        reply_context = (
+            _with_repeat_context_hint(ctx.recent_context, _SCHEDULE_REPEAT_CONTEXT_HINT)
+            if is_repeat_query else ctx.recent_context
+        )
         response = await schedule_query_reply(
             message=user_message,
-            context=ctx.recent_context,
+            context=reply_context,
             user_emotion=user_emotion,
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "",
@@ -533,11 +584,6 @@ def _current_state_metadata(activity_key: str) -> dict[str, Any]:
     })
     return metadata
 
-
-def _repeat_current_state_reply() -> str:
-    return "还在刚才那个状态呢。怎么啦，找我有事？"
-
-
 async def handle_current_state(
     user_message: str,
     ctx: ShortCircuitCtx,
@@ -554,20 +600,20 @@ async def handle_current_state(
     _, current_activity = await resolve_implicit_time(ctx.agent_id or "", ai_status)
     activity_key = _normalize_current_activity(current_activity)
     metadata = _current_state_metadata(activity_key) if activity_key else None
-    if await _has_recent_short_circuit_repeat(
+    is_repeat_query = await _has_recent_short_circuit_repeat(
         ctx.conversation_id,
         kind="current_state",
         repeat_key=activity_key,
-    ):
-        return True, ctx.finalize(
-            _repeat_current_state_reply(),
-            kind="current_state",
-            metadata=metadata,
-        )
+        current_message=user_message,
+    )
     try:
+        reply_context = (
+            _with_repeat_context_hint(ctx.recent_context, _CURRENT_STATE_REPEAT_CONTEXT_HINT)
+            if is_repeat_query else ctx.recent_context
+        )
         response = await current_state_reply(
             message=user_message,
-            context=ctx.recent_context,
+            context=reply_context,
             user_emotion=user_emotion,
             personality_brief=_agent_name(ctx.agent),
             user_portrait=str(portrait) if portrait else "(未知)",

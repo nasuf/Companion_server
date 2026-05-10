@@ -1833,6 +1833,26 @@ def test_format_recent_context_excludes_current_message_id():
     assert "听到了" in excluded
 
 
+def test_format_recent_context_excludes_current_turn_message_ids():
+    """聚合回合有多个 user message id 时, recent context 应整组排除。"""
+    from app.services.chat.data_fetch_phase import format_recent_context
+
+    msgs = [
+        {"id": "m1", "role": "assistant", "content": "刚才说到电影"},
+        {"id": "m2", "role": "user", "content": "你多大了？"},
+        {"id": "m3", "role": "user", "content": "几岁？"},
+    ]
+
+    excluded = format_recent_context(
+        msgs,
+        exclude_message_ids={"m2", "m3"},
+    )
+
+    assert "你多大" not in excluded
+    assert "几岁" not in excluded
+    assert "电影" in excluded
+
+
 def test_format_recent_context_exclude_none_keeps_default():
     """exclude_message_id=None (默认) → 行为不变 (向后兼容现有 caller)."""
     from app.services.chat.data_fetch_phase import format_recent_context

@@ -22,6 +22,7 @@ from typing import Any
 from app.observability.events import EVT_AGG_FLUSHED, EVT_AGG_PUSHED, EVT_AGG_SCAN
 from app.redis_client import get_redis
 from app.services.interaction.reply_context import merge_reply_contexts
+from app.services.interaction.turn_coalescing import coalesce_turn_messages
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,7 @@ async def flush_turn_pending(
         return value if isinstance(value, str) else value.decode()
 
     texts: list[str] = []
+    message_ids: list[str] = []
     reply_context = None
     latest_message_id: str | None = None
     for raw in raw_msgs:
@@ -359,8 +361,16 @@ async def flush_turn_pending(
         msg_id = item.get("message_id")
         if isinstance(msg_id, str) and msg_id.strip():
             latest_message_id = msg_id
+            message_ids.append(msg_id)
 
-    combined = "\n".join(texts).strip() if texts else None
+    coalesced_turn = coalesce_turn_messages(texts)
+    combined = coalesced_turn.combined_text
+    if message_ids or coalesced_turn.metadata:
+        reply_context = dict(reply_context or {})
+        if message_ids:
+            reply_context["turn_message_ids"] = message_ids
+        if coalesced_turn.metadata:
+            reply_context["turn_coalescing"] = coalesced_turn.metadata
     if combined:
         logger.info(
             f"[TURN-FLUSH] agent_id={agent_id} user_id={user_id} parts={len(texts)} "
@@ -368,6 +378,7 @@ async def flush_turn_pending(
             extra={
                 "event": EVT_AGG_FLUSHED,
                 "n_parts": len(texts),
+                "n_coalesced": len(coalesced_turn.coalesced),
                 "combined_len": len(combined),
             },
         )

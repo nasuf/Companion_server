@@ -170,6 +170,39 @@ async def test_scan_turn_expired_returns_combined_turn(fake_aggregation_redis):
 
 
 @pytest.mark.asyncio
+async def test_scan_turn_expired_coalesces_duplicate_queries(fake_aggregation_redis):
+    """turn flush 在进入 reply 链路前归并同回合重复问题。"""
+    import time as _time
+
+    redis = fake_aggregation_redis
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        await push_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="你多大了？",
+            message_id="m1",
+        )
+        await push_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="几岁？",
+            message_id="m2",
+        )
+        redis.zsets["turn:delayed"]["agent-A:u1"] = _time.time() - 10
+
+        results = await scan_turn_expired()
+
+    assert len(results) == 1
+    _agent_id, _user_id, text, _conv_id, ctx, msg_id = results[0]
+    assert text == "你多大了？"
+    assert msg_id == "m2"
+    assert ctx["turn_coalescing"]["coalesced_count"] == 1
+    assert ctx["turn_coalescing"]["dropped"][0]["text"] == "几岁？"
+
+
+@pytest.mark.asyncio
 async def test_scan_turn_expired_purges_empty_turn_token(fake_aggregation_redis):
     """turn ZSET 残留但 list 已空时应清掉 token, 避免 scheduler 每秒重复扫描。"""
     import time as _time

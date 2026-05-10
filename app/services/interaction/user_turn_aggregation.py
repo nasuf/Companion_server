@@ -20,6 +20,7 @@ from app.services.chat.intent_dispatcher import (
     is_explicit_current_state_query,
     is_explicit_l3_recall_query,
 )
+from app.services.interaction.delayed_queue import has_pending_delayed_messages
 from app.services.interaction.aggregation import (
     flush_pending,
     has_turn_pending,
@@ -173,6 +174,20 @@ async def plan_user_message_aggregation(
             conversation_id=conversation_id,
             text=text,
             metadata={"queued": True},
+            final_message=text,
+            final_context=reply_context,
+            fallback_message=text,
+            fallback_context=reply_context,
+        )
+
+    if await has_pending_delayed_messages(conversation_id):
+        return UserMessageAggregationPlan(
+            route="immediate",
+            agent_id=agent_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            text=text,
+            metadata={"queued": True, "append_delayed": True},
             final_message=text,
             final_context=reply_context,
             fallback_message=text,

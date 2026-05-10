@@ -122,6 +122,28 @@ async def test_plan_schedule_query_message_uses_turn_window(fake_aggregation_red
 
 
 @pytest.mark.asyncio
+async def test_plan_appends_readonly_message_to_existing_delayed_reply(fake_aggregation_redis):
+    redis = fake_aggregation_redis
+    with (
+        patch("app.services.interaction.aggregation.get_redis", return_value=redis),
+        patch(
+            "app.services.interaction.user_turn_aggregation.has_pending_delayed_messages",
+            return_value=True,
+        ),
+    ):
+        plan = await plan_user_message_aggregation(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="忙啥呢",
+            reply_context={"delay_seconds": 0},
+        )
+
+    assert plan.route == "immediate"
+    assert plan.metadata == {"queued": True, "append_delayed": True}
+
+
+@pytest.mark.asyncio
 async def test_plan_record_request_bypasses_turn_window(fake_aggregation_redis):
     redis = fake_aggregation_redis
     with patch("app.services.interaction.aggregation.get_redis", return_value=redis):

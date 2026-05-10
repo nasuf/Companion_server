@@ -176,6 +176,30 @@ class TestIntentContextFetching:
         assert "AI: 今天累吗?" in context
 
     @pytest.mark.asyncio
+    async def test_fetch_excludes_all_current_turn_message_ids(self):
+        """聚合回合里多条用户消息都不应进入 intent context。"""
+        from app.services.chat.orchestrator import _fetch_intent_context
+
+        rows = [
+            _row("user", "几岁？", id="msg-current"),
+            _row("user", "你多大了？", id="msg-first"),
+            _row("assistant", "刚在聊电影", id="msg-ai1"),
+        ]
+        with patch("app.services.chat.orchestrator.db") as mock_db:
+            mock_db.message = MagicMock()
+            mock_db.message.find_many = AsyncMock(return_value=rows)
+
+            context = await _fetch_intent_context(
+                "conv-1",
+                exclude_id="msg-current",
+                exclude_ids={"msg-current", "msg-first"},
+            )
+
+        assert "几岁" not in context
+        assert "你多大" not in context
+        assert "AI: 刚在聊电影" in context
+
+    @pytest.mark.asyncio
     async def test_exclude_content_fallback_matches_first_only(self):
         """未传 exclude_id 时按 content 回退, 只过滤最后出现的那一条 (避免误伤历史重复)."""
         from app.services.chat.orchestrator import _fetch_intent_context

@@ -212,8 +212,8 @@ async def test_handle_current_state_persists_intent_level_cooldown_metadata():
 
 
 @pytest.mark.asyncio
-async def test_handle_current_state_repeated_variant_uses_short_cooldown_reply():
-    """不同文案但同一 current_state 意图 + 同一活动, 不再重复完整 LLM 回复。"""
+async def test_handle_current_state_repeated_variant_adds_repeat_hint():
+    """不同文案但同一 current_state 意图 + 同一活动, 给 LLM 去重提示。"""
     from app.services.chat import intent_handlers as handlers
     from app.services.chat.intent_handlers import ShortCircuitCtx, handle_current_state
 
@@ -229,6 +229,8 @@ async def test_handle_current_state_repeated_variant_uses_short_cooldown_reply()
         cached_patience=100,
     )
     previous_reply = SimpleNamespace(
+        role="assistant",
+        content="我在吃晚饭",
         createdAt=datetime.now(timezone.utc) - timedelta(seconds=20),
         metadata={
             "current_state_context": {
@@ -248,7 +250,7 @@ async def test_handle_current_state_repeated_variant_uses_short_cooldown_reply()
         patch.object(handlers, "db", fake_db),
         patch(
             "app.services.chat.intent_handlers.current_state_reply",
-            new=AsyncMock(return_value="重复的完整晚饭描述"),
+            new=AsyncMock(return_value="自然承接的状态回复"),
         ) as reply_mock,
     ):
         handled, events = await handle_current_state(
@@ -262,8 +264,9 @@ async def test_handle_current_state_repeated_variant_uses_short_cooldown_reply()
         assert handled is True
         await _drain(events)
 
-    reply_mock.assert_not_awaited()
-    assert ctx.last_short_circuit_reply == "还在刚才那个状态呢。怎么啦，找我有事？"
+    reply_mock.assert_awaited_once()
+    assert "重复追问处理" in reply_mock.await_args.kwargs["context"]
+    assert ctx.last_short_circuit_reply == "自然承接的状态回复"
 
 
 @pytest.mark.asyncio
@@ -274,6 +277,8 @@ async def test_short_circuit_repeat_lookup_is_generic_across_intents():
     fake_db = MagicMock()
     fake_db.message.find_many = AsyncMock(return_value=[
         SimpleNamespace(
+            role="assistant",
+            content="明天上午有点安排",
             createdAt=datetime.now(timezone.utc) - timedelta(seconds=10),
             metadata={
                 "short_circuit_repeat": {
@@ -294,6 +299,134 @@ async def test_short_circuit_repeat_lookup_is_generic_across_intents():
             "c1",
             kind="current_state",
             repeat_key="same-schedule",
+        )
+
+
+@pytest.mark.asyncio
+async def test_short_circuit_repeat_lookup_extends_beyond_time_without_topic_break():
+    """超过 90 秒但仍在最近几轮同一意图上下文里, 继续判为重复追问。"""
+    from app.services.chat import intent_handlers as handlers
+
+    fake_db = MagicMock()
+    fake_db.message.find_many = AsyncMock(return_value=[
+        SimpleNamespace(
+            role="assistant",
+            content="我在吃晚饭",
+            createdAt=datetime.now(timezone.utc) - timedelta(minutes=3),
+            metadata={
+                "short_circuit_repeat": {
+                    "kind": "current_state",
+                    "key": "晚餐：香草烤鸡腿配烤蔬菜",
+                }
+            },
+        )
+    ])
+
+    with patch.object(handlers, "db", fake_db):
+        assert await handlers._has_recent_short_circuit_repeat(
+            "c1",
+            kind="current_state",
+            repeat_key="晚餐：香草烤鸡腿配烤蔬菜",
+            current_message="你现在在做什么",
+        )
+
+
+@pytest.mark.asyncio
+async def test_short_circuit_repeat_lookup_rejects_after_topic_break():
+    """超过时间窗口后, 中间出现其他话题则不沿用旧短路上下文。"""
+    from app.services.chat import intent_handlers as handlers
+
+    fake_db = MagicMock()
+    fake_db.message.find_many = AsyncMock(return_value=[
+        SimpleNamespace(
+            role="user",
+            content="我刚看完第二季",
+            createdAt=datetime.now(timezone.utc) - timedelta(minutes=2),
+            metadata=None,
+        ),
+        SimpleNamespace(
+            role="assistant",
+            content="我在吃晚饭",
+            createdAt=datetime.now(timezone.utc) - timedelta(minutes=3),
+            metadata={
+                "short_circuit_repeat": {
+                    "kind": "current_state",
+                    "key": "晚餐：香草烤鸡腿配烤蔬菜",
+                }
+            },
+        ),
+    ])
+
+    with patch.object(handlers, "db", fake_db):
+        assert not await handlers._has_recent_short_circuit_repeat(
+            "c1",
+            kind="current_state",
+            repeat_key="晚餐：香草烤鸡腿配烤蔬菜",
+            current_message="你现在在做什么",
+        )
+
+
+@pytest.mark.asyncio
+async def test_short_circuit_repeat_lookup_rejects_recent_topic_break():
+    """即使还在 90 秒内, 明显话题切换也应打断重复冷却。"""
+    from app.services.chat import intent_handlers as handlers
+
+    fake_db = MagicMock()
+    fake_db.message.find_many = AsyncMock(return_value=[
+        SimpleNamespace(
+            role="user",
+            content="我刚看完第二季",
+            createdAt=datetime.now(timezone.utc) - timedelta(seconds=20),
+            metadata=None,
+        ),
+        SimpleNamespace(
+            role="assistant",
+            content="我在吃晚饭",
+            createdAt=datetime.now(timezone.utc) - timedelta(seconds=40),
+            metadata={
+                "short_circuit_repeat": {
+                    "kind": "current_state",
+                    "key": "晚餐：香草烤鸡腿配烤蔬菜",
+                }
+            },
+        ),
+    ])
+
+    with patch.object(handlers, "db", fake_db):
+        assert not await handlers._has_recent_short_circuit_repeat(
+            "c1",
+            kind="current_state",
+            repeat_key="晚餐：香草烤鸡腿配烤蔬菜",
+            current_message="你现在在做什么",
+        )
+
+
+@pytest.mark.asyncio
+async def test_short_circuit_repeat_lookup_rejects_stale_message_window():
+    """没有话题切换也不能无限靠消息数量沿用过旧状态。"""
+    from app.services.chat import intent_handlers as handlers
+
+    fake_db = MagicMock()
+    fake_db.message.find_many = AsyncMock(return_value=[
+        SimpleNamespace(
+            role="assistant",
+            content="我在吃晚饭",
+            createdAt=datetime.now(timezone.utc) - timedelta(minutes=30),
+            metadata={
+                "short_circuit_repeat": {
+                    "kind": "current_state",
+                    "key": "晚餐：香草烤鸡腿配烤蔬菜",
+                }
+            },
+        )
+    ])
+
+    with patch.object(handlers, "db", fake_db):
+        assert not await handlers._has_recent_short_circuit_repeat(
+            "c1",
+            kind="current_state",
+            repeat_key="晚餐：香草烤鸡腿配烤蔬菜",
+            current_message="你现在在做什么",
         )
 
 
@@ -355,8 +488,8 @@ async def test_handle_schedule_query_persists_generic_repeat_metadata():
 
 
 @pytest.mark.asyncio
-async def test_handle_schedule_query_repeated_variant_uses_short_cooldown_reply():
-    """计划查询不同问法命中同一日程上下文时, 不重复调用 LLM 播报。"""
+async def test_handle_schedule_query_repeated_variant_adds_repeat_hint():
+    """计划查询不同问法命中同一日程上下文时, 只给 LLM 去重提示, 不走固定话术。"""
     from app.services.chat.intent_handlers import ShortCircuitCtx, handle_schedule_query
 
     ctx = ShortCircuitCtx(
@@ -378,7 +511,7 @@ async def test_handle_schedule_query_repeated_variant_uses_short_cooldown_reply(
         ),
         patch(
             "app.services.chat.intent_handlers.schedule_query_reply",
-            new=AsyncMock(return_value="重复的完整日程播报"),
+            new=AsyncMock(return_value="自然承接的忙闲回复"),
         ) as reply_mock,
     ):
         handled, events, schedule_context = await handle_schedule_query(
@@ -394,8 +527,9 @@ async def test_handle_schedule_query_repeated_variant_uses_short_cooldown_reply(
         assert schedule_context is not None
         await _drain(events)
 
-    reply_mock.assert_not_awaited()
-    assert ctx.last_short_circuit_reply == "刚才那段安排没变。你想看具体哪一段，我再帮你拎出来。"
+    reply_mock.assert_awaited_once()
+    assert "重复追问处理" in reply_mock.await_args.kwargs["context"]
+    assert ctx.last_short_circuit_reply == "自然承接的忙闲回复"
 
 
 @pytest.mark.asyncio
@@ -485,6 +619,48 @@ def test_orchestrator_keeps_explicit_current_state_intent():
     result = _downgrade_non_explicit_current_state(
         original,
         "你最近怎么样？",
+        diagnostics,
+    )
+
+    assert result is original
+    assert diagnostics == {}
+
+
+def test_orchestrator_reroutes_current_schedule_query_to_current_state():
+    """现在忙吗这类当前可用性问题不应走日程表播报路径。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _route_current_schedule_query_to_current_state
+
+    diagnostics = {}
+    result = _route_current_schedule_query_to_current_state(
+        IntentResult(
+            intent=IntentType.SCHEDULE_QUERY,
+            confidence=0.8,
+            metadata={"query_type": "current"},
+        ),
+        "你忙吗现在",
+        diagnostics,
+    )
+
+    assert result.intent == IntentType.CURRENT_STATE
+    assert result.metadata["rerouted_from"] == IntentType.SCHEDULE_QUERY.value
+    assert diagnostics["intent_reroute_reason"] == "current_availability_as_current_state"
+
+
+def test_orchestrator_keeps_future_schedule_query_as_schedule():
+    """未来忙闲问题仍保留计划查询，不被当前状态路径吞掉。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _route_current_schedule_query_to_current_state
+
+    diagnostics = {}
+    original = IntentResult(
+        intent=IntentType.SCHEDULE_QUERY,
+        confidence=0.8,
+        metadata={"query_type": "date"},
+    )
+    result = _route_current_schedule_query_to_current_state(
+        original,
+        "你明天忙吗",
         diagnostics,
     )
 

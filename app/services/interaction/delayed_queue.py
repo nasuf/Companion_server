@@ -13,12 +13,25 @@ from typing import Any
 
 from app.redis_client import get_redis
 from app.services.interaction.reply_context import merge_reply_contexts
+from app.services.interaction.turn_coalescing import coalesce_turn_messages
 
 logger = logging.getLogger(__name__)
 
 _DELAYED_LIST_KEY = "delayed:msgs:{cid}"
 _DELAYED_ZSET_KEY = "delayed:due"
 _DELAYED_TTL = 86400
+
+
+async def has_pending_delayed_messages(conversation_id: str) -> bool:
+    """Return whether a conversation already has a queued reply payload."""
+    if not conversation_id:
+        return False
+    redis = await get_redis()
+    try:
+        return await redis.zscore(_DELAYED_ZSET_KEY, conversation_id) is not None
+    except Exception as e:
+        logger.warning(f"[DELAY-CHECK] Redis zscore failed conv={conversation_id}: {e}")
+        return False
 
 # Lua script: atomically read + remove due items from per-conversation ZSET,
 # then update or clean the global index ZSET.  Prevents race conditions when
@@ -138,15 +151,34 @@ def merge_delayed_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any] | N
     latest = payloads[-1]
     reply_context = None
     texts: list[str] = []
+    message_ids: list[str] = []
     for item in payloads:
         reply_context = merge_reply_contexts(reply_context, item.get("reply_context"))
         text = str(item.get("message", "")).strip()
         if text:
             texts.append(text)
+        msg_id = item.get("message_id")
+        if isinstance(msg_id, str) and msg_id.strip():
+            message_ids.append(msg_id)
 
-    merged_text = " ".join(texts).strip()
+    coalesced_turn = coalesce_turn_messages(texts)
+    merged_text = " ".join(coalesced_turn.texts).strip()
     if not merged_text:
         merged_text = str(latest.get("message", "")).strip()
+    if message_ids or coalesced_turn.metadata:
+        reply_context = dict(reply_context or {})
+        if message_ids:
+            existing_ids = reply_context.get("turn_message_ids")
+            all_ids = [
+                item for item in (
+                    *(existing_ids if isinstance(existing_ids, list) else []),
+                    *message_ids,
+                )
+                if isinstance(item, str) and item
+            ]
+            reply_context["turn_message_ids"] = list(dict.fromkeys(all_ids))
+        if coalesced_turn.metadata:
+            reply_context["turn_coalescing"] = coalesced_turn.metadata
 
     return {
         "conversation_id": str(base.get("conversation_id", "")),

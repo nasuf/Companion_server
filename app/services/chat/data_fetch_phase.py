@@ -229,6 +229,7 @@ def format_recent_context(
     turns: int = 4,
     max_chars: int = 400,
     exclude_message_id: str | None = None,
+    exclude_message_ids: set[str] | None = None,
 ) -> str:
     """Format recent user/assistant turns for lightweight classifiers and prompts.
 
@@ -238,11 +239,14 @@ def format_recent_context(
     """
     if not messages_dicts:
         return EMPTY_RECENT_CONTEXT
+    excluded_ids = set(exclude_message_ids or set())
+    if exclude_message_id:
+        excluded_ids.add(exclude_message_id)
     tail = messages_dicts[-turns:]
     lines: list[str] = []
     for m in tail:
         # 排除指定 ID (典型: 当前 user_message 已经在 prompt 的 {message} 占位符)
-        if exclude_message_id and m.get("id") == exclude_message_id:
+        if m.get("id") in excluded_ids:
             continue
         role = m.get("role") or "user"
         text = (m.get("content") or "").strip()

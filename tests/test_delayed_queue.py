@@ -44,6 +44,35 @@ def test_merge_delayed_payloads_combines_all_messages_and_keeps_first_context():
     assert merged["queued_messages"] == ["第一句", "第二句"]
     assert merged["reply_context"]["received_status"]["activity"] == "工作"
     assert merged["reply_context"]["latest_received_at"] == "2026-03-19T00:00:10+00:00"
+    assert merged["reply_context"]["turn_message_ids"] == ["msg-1", "msg-2"]
+
+
+def test_merge_delayed_payloads_coalesces_same_turn_state_rewrites():
+    merged = merge_delayed_payloads([
+        {
+            "conversation_id": "conv-1",
+            "agent_id": "agent-1",
+            "user_id": "user-1",
+            "message": "你忙吗现在",
+            "message_id": "msg-1",
+            "reply_context": {"delay_seconds": 0},
+        },
+        {
+            "conversation_id": "conv-1",
+            "agent_id": "agent-1",
+            "user_id": "user-1",
+            "message": "忙啥呢",
+            "message_id": "msg-2",
+            "reply_context": {"delay_seconds": 0},
+        },
+    ])
+
+    assert merged is not None
+    assert merged["user_message"] == "你忙吗现在"
+    assert merged["user_message_id"] == "msg-2"
+    assert merged["reply_context"]["turn_message_ids"] == ["msg-1", "msg-2"]
+    assert merged["reply_context"]["turn_coalescing"]["coalesced_count"] == 1
+    assert merged["reply_context"]["turn_coalescing"]["dropped"][0]["text"] == "忙啥呢"
 
 
 def test_merged_payload_delay_uses_latest_message_time():

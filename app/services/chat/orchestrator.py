@@ -178,6 +178,35 @@ def _downgrade_non_explicit_current_state(
     )
 
 
+def _route_current_schedule_query_to_current_state(
+    detected_intent: IntentResult,
+    user_message: str,
+    response_diagnostics: dict[str, Any],
+) -> IntentResult:
+    """Treat present-tense availability questions as current-state chat.
+
+    The schedule-query path is for concrete schedule/routine/date lookups. For
+    "现在忙吗/你现在有空吗", using that path exposes the full schedule table to
+    the reply prompt and makes the assistant sound like it is reading a diary.
+    """
+    if detected_intent.intent != IntentType.SCHEDULE_QUERY:
+        return detected_intent
+    if (detected_intent.metadata or {}).get("query_type") != "current":
+        return detected_intent
+    if not is_explicit_current_state_query(user_message):
+        return detected_intent
+
+    metadata = dict(detected_intent.metadata or {})
+    metadata["rerouted_from"] = IntentType.SCHEDULE_QUERY.value
+    metadata["reroute_reason"] = "current_availability_as_current_state"
+    response_diagnostics["intent_reroute_reason"] = "current_availability_as_current_state"
+    return IntentResult(
+        intent=IntentType.CURRENT_STATE,
+        confidence=detected_intent.confidence,
+        metadata=metadata,
+    )
+
+
 async def _intent_llm_reply(
     agent,
     user_message: str,
@@ -206,6 +235,19 @@ def _previous_assistant_message(recent_messages: list[Any], current_user_message
         if getattr(message, "role", None) == "assistant":
             return message
     return None
+
+
+def _current_turn_message_ids(
+    reply_context: dict | None,
+    current_user_message_id: str | None,
+) -> set[str]:
+    ids: set[str] = set()
+    raw_ids = (reply_context or {}).get("turn_message_ids")
+    if isinstance(raw_ids, list):
+        ids.update(item for item in raw_ids if isinstance(item, str) and item)
+    if current_user_message_id:
+        ids.add(current_user_message_id)
+    return ids
 
 
 def _ensure_current_user_message(
@@ -458,6 +500,7 @@ async def _fetch_intent_context(
     conversation_id: str,
     *,
     exclude_id: str | None = None,
+    exclude_ids: set[str] | None = None,
     exclude_content: str | None = None,
 ) -> str:
     """拉最近 N 条消息拼成意图识别 prompt 的上下文段落。
@@ -481,6 +524,10 @@ async def _fetch_intent_context(
         logger.warning(f"intent context fetch failed: {e}")
         return ""
 
+    excluded_ids = set(exclude_ids or set())
+    if exclude_id:
+        excluded_ids.add(exclude_id)
+
     # Prisma desc 排序下, 首条即最新; 当前消息通常在这里.
     # 回退按内容匹配时只过滤第一条 (即最新那条) 命中的用户消息,
     # 避免用户连发两条相同短消息 ("好" / "好") 把上一轮的 "好" 也丢掉.
@@ -491,7 +538,7 @@ async def _fetch_intent_context(
         if not content:
             continue
         role = "AI" if getattr(row, "role", "") == "assistant" else "用户"
-        if exclude_id and getattr(row, "id", None) == exclude_id:
+        if getattr(row, "id", None) in excluded_ids:
             continue
         if (
             not exclude_id
@@ -618,6 +665,8 @@ async def stream_chat_response(
             user_message_id=user_message_id,
             reply_context=reply_context,
         )
+        current_turn_ids = _current_turn_message_ids(reply_context, user_message_id)
+        covered_until_user_ts = _max_user_created_at(messages_dicts)
         if not sub_intent_mode:
             previous_assistant = _previous_assistant_message(
                 recent_messages, user_message_id,
@@ -657,7 +706,9 @@ async def stream_chat_response(
             else (parent_patience if parent_patience is not None else PATIENCE_MAX)
         )
         recent_context_text = format_recent_context(
-            messages_dicts, exclude_message_id=user_message_id,
+            messages_dicts,
+            exclude_message_id=user_message_id,
+            exclude_message_ids=current_turn_ids,
         )
         if not crisis_decision.skip_boundary:
             # boundary_ctx.recent_context 给 short-circuit handler 的 prompt {context} 用,
@@ -837,6 +888,7 @@ async def stream_chat_response(
             context_text = await _fetch_intent_context(
                 conversation_id,
                 exclude_id=user_message_id,
+                exclude_ids=current_turn_ids,
                 exclude_content=user_message if not user_message_id else None,
             )
             detected_intent = await detect_intent_unified(user_message, context=context_text)
@@ -911,6 +963,7 @@ async def stream_chat_response(
             # 因为 prompt 里 {context} 是 "(无)").
             recent_context=recent_context_text,
             response_diagnostics=response_diagnostics,
+            covered_until_user_ts=covered_until_user_ts,
         )
         response_diagnostics["crisis_followup_check_mode"] = (
             crisis_followup_check_mode if crisis_followup_active else None
@@ -1033,8 +1086,6 @@ async def stream_chat_response(
         # 若用户连发多条非碎片, 第一条 LLM 调用的 history 已经隐式包含后续所有 user
         # 消息 → reply 实际覆盖了它们; 写到 reply metadata 后, scheduler 处理后续
         # payload 时凭此跳过, 避免重复回复 (见 jobs/scheduler.py dedup gate).
-        covered_until_user_ts = _max_user_created_at(messages_dicts)
-
         # --- Topic tracking (Redis, no LLM) ---
         topic_info = await push_topic(conversation_id, user_message)
         topic_context = format_topic_context(topic_info) if topic_info else None
@@ -1060,7 +1111,10 @@ async def stream_chat_response(
                 _l3_trigger_analyze,
                 enhanced_query=fetched.enhanced_query,
                 l1_l2_count=len(fetched.classified_memories or []),
-                recent_context=format_recent_context(messages_dicts),
+                recent_context=format_recent_context(
+                    messages_dicts,
+                    exclude_message_ids=current_turn_ids,
+                ),
             ))
         elif current_state_fast_path:
             schedule = await get_cached_schedule(agent_id) if agent_id else None
@@ -1175,6 +1229,12 @@ async def stream_chat_response(
                     yield evt
                 await _cancel_l3_task()
                 return
+
+        detected_intent = _route_current_schedule_query_to_current_state(
+            detected_intent,
+            user_message,
+            response_diagnostics,
+        )
 
         # §3.4.1 计划查询
         if detected_intent.intent == IntentType.SCHEDULE_QUERY:
