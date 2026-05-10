@@ -120,6 +120,34 @@ _IMPORTANCE_EXPRESSIONS = (
     "很重要", "一定要记住", "千万别忘", "记住了", "别忘了",
     "这很关键", "非常重要", "特别重要", "务必记住",
 )
+_AI_EPISTEMIC_UNCERTAINTY_MARKERS = (
+    "记不清", "记不太清", "不太记得", "没印象", "没有印象",
+    "不确定", "不太确定", "好像", "大概", "可能", "应该", "似乎",
+    "印象里", "猜", "估计",
+)
+
+
+def _compact_text(text: str | None) -> str:
+    return "".join((text or "").split())
+
+
+def _is_uncertain_ai_self_memory(
+    *,
+    side: Side,
+    new_conversation: str,
+    summary: str,
+) -> bool:
+    """Guard against persisting epistemically weak AI self claims.
+
+    The extraction model may turn a conversational hedge ("记不清/好像/可能")
+    into a structured self-memory. Those claims are not stable facts; keeping
+    them out of memories_ai is safer than later asking retrieval to distinguish
+    truth from a previous guess.
+    """
+    if side != "ai":
+        return False
+    text = _compact_text(f"{new_conversation}\n{summary}")
+    return any(marker in text for marker in _AI_EPISTEMIC_UNCERTAINTY_MARKERS)
 
 
 async def process_memory_pipeline(
@@ -198,6 +226,15 @@ async def process_memory_pipeline(
         if side == "ai" and is_user_fact_acknowledgement(summary):
             logger.info(
                 f"[MEM-{side}] skipped user-fact acknowledgement: {summary[:40]}"
+            )
+            continue
+        if _is_uncertain_ai_self_memory(
+            side=side,
+            new_conversation=new_conversation,
+            summary=summary,
+        ):
+            logger.info(
+                f"[MEM-{side}] skipped uncertain self-memory: {summary[:40]}"
             )
             continue
         importance = mem.get("importance", 0.5)

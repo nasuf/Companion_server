@@ -232,19 +232,28 @@ def test_ai_self_relation_query_pattern_is_generic_and_user_safe():
     assert asks_ai_stable_relation("你怎么看科幻片")
     assert asks_ai_stable_relation("你多大了")
     assert asks_ai_stable_relation("我想知道你多大了")
+    assert asks_ai_stable_relation("你什么时候出生")
     assert asks_ai_stable_relation("你叫什么名字")
     assert asks_ai_stable_relation("你是做什么的")
     assert asks_ai_stable_relation("你做什么工作")
     assert asks_ai_stable_relation("你大学学什么专业")
+    assert asks_ai_stable_relation("你还记得自己是哪个学校读的高中？")
 
     assert asks_ai_profile_relation("你多大了")
+    assert asks_ai_profile_relation("你什么时候出生")
     assert asks_ai_profile_relation("我想知道你多大了")
     assert asks_ai_profile_relation("你生日是哪天")
     assert asks_ai_profile_relation("你是哪里人")
     assert asks_ai_profile_relation("你是什么职业")
     assert asks_ai_profile_relation("你在哪里工作")
+    assert asks_ai_profile_relation("你还记得自己是哪个学校读的高中？")
     assert "AI 年龄" in ai_profile_search_query("你多大了")
     assert "用户 年龄" in ai_profile_search_query("你多大了")
+    high_school_query = ai_profile_search_query("你还记得自己是哪个学校读的高中？")
+    assert high_school_query.startswith("你还记得自己是哪个学校读的高中？")
+    assert "AI 教育背景" in high_school_query
+    assert "用户 教育背景" in high_school_query
+    assert "高中" in high_school_query
 
     assert not asks_ai_stable_relation("你觉得我怎么样")
     assert not asks_ai_stable_relation("你知道我喜欢什么电影吗")

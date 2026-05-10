@@ -13,6 +13,7 @@ from typing import Literal
 from app.services.memory.retrieval.query_patterns import (
     asks_ai_profile_relation,
     asks_ai_stable_relation,
+    profile_query_subcategories,
 )
 
 MemorySource = Literal["user", "ai"]
@@ -97,19 +98,6 @@ _USER_IDENTITY_SUBCATEGORIES = {
     "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
     "体型", "居住", "其他", "教育背景",
 }
-_PROFILE_QUERY_SUBCATEGORIES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (("多大", "几岁", "年龄", "哪年出生", "出生年份", "出生"), ("年龄",)),
-    (("生日", "出生日期"), ("生日", "年龄")),
-    (("叫什么", "叫啥", "名字", "姓名", "是谁"), ("姓名",)),
-    (("做什么", "干什么", "职业", "工作"), ("职业/与经济",)),
-    (("哪里人", "家乡"), ("现居地", "居住", "其他")),
-    (("住哪", "住址", "现居地"), ("现居地", "居住")),
-    (("学历", "学校", "大学", "专业"), ("教育背景",)),
-    (("性别",), ("性别",)),
-    (("身高",), ("身高",)),
-    (("体型",), ("体型",)),
-)
-
 
 def _memory_text(mem: dict) -> str:
     return mem.get("summary") or mem.get("content") or ""
@@ -213,10 +201,7 @@ def _is_current_user_profile_answer(query: str | None, mem: dict) -> bool:
     if not query or not _is_user_identity_memory(mem):
         return False
     sub_category = str(mem.get("sub_category") or "")
-    for query_terms, sub_categories in _PROFILE_QUERY_SUBCATEGORIES:
-        if any(term in query for term in query_terms) and sub_category in sub_categories:
-            return True
-    return False
+    return sub_category in profile_query_subcategories(query)
 
 
 def _is_ai_profile_user_context_memory(mem: dict) -> bool:

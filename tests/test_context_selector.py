@@ -632,6 +632,39 @@ def test_ranker_prioritizes_ai_identity_over_user_identity_for_ai_profile_query(
     assert ai_score > user_score
 
 
+def test_ranker_preserves_profile_stage_anchors_for_ai_education_query():
+    from app.services.memory.retrieval.query_patterns import ai_profile_search_query
+    from app.services.memory.retrieval.ranking import rank_memory_candidate
+
+    query = ai_profile_search_query("你还记得自己是哪个学校读的高中？")
+    ai_education = {
+        "id": "ai-education",
+        "summary": "我初中毕业后主动提出不再就读普通高中。",
+        "source": "ai",
+        "main_category": "身份",
+        "sub_category": "教育背景",
+        "importance": 0.95,
+        "similarity": 0.56,
+    }
+    unrelated_ai = {
+        "id": "ai-other",
+        "summary": "我昨天答应了要提醒用户某件事。",
+        "source": "ai",
+        "main_category": "生活",
+        "sub_category": "提醒",
+        "importance": 0.8,
+        "similarity": 0.56,
+    }
+
+    education_score, education_reasons = rank_memory_candidate(ai_education, query)
+    unrelated_score, _ = rank_memory_candidate(unrelated_ai, query)
+
+    assert "高中" in query
+    assert "关键词命中" in education_reasons
+    assert "话题类别匹配" in education_reasons
+    assert education_score > unrelated_score
+
+
 def test_select_context_keeps_same_user_identity_as_profile_context_only():
     candidates = [
         {

@@ -76,6 +76,52 @@ async def test_ai_side_skips_user_fact_acknowledgement_after_extraction():
 
 
 @pytest.mark.asyncio
+async def test_ai_side_skips_uncertain_self_memory_after_extraction():
+    """AI 侧不把记不清/猜测式自述固化成稳定自我记忆。"""
+    from app.services.memory.recording.pipeline import process_memory_pipeline
+
+    extraction = {
+        "memories": [{
+            "summary": "我高中是在本地一所普通学校读的，具体名字记不清了。",
+            "importance": 0.9,
+            "type": "identity",
+            "main_category": "身份",
+            "sub_category": "教育背景",
+            "occur_time": None,
+            "recurrence": None,
+        }],
+        "entities": [], "topics": [], "preferences": [],
+    }
+
+    with (
+        patch("app.services.memory.recording.pipeline.resolve_workspace_id",
+              new_callable=AsyncMock, return_value="ws1"),
+        patch("app.services.memory.recording.pipeline.should_extract_memory",
+              return_value=True),
+        patch("app.services.memory.recording.pipeline.should_memorize",
+              new_callable=AsyncMock, return_value=True),
+        patch("app.services.memory.recording.pipeline.extract_memories",
+              new_callable=AsyncMock, return_value=extraction),
+        patch("app.services.memory.recording.pipeline.has_explicit_time",
+              return_value=False),
+        patch("app.services.memory.recording.pipeline.store_memory",
+              new_callable=AsyncMock) as mock_store,
+    ):
+        stored = await process_memory_pipeline(
+            user_id="u1",
+            new_conversation=(
+                "assistant: 我高中在本地一所普通学校读的，"
+                "不过具体名字记不太清了。"
+            ),
+            statement_time=_now(),
+            side="ai",
+        )
+
+    assert stored == []
+    mock_store.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_reminder_with_past_occur_time_demoted_to_other():
     """sub_category="提醒" + occur_time<now → 降级"其他"."""
     from app.services.memory.recording.pipeline import process_memory_pipeline

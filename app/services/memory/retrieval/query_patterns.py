@@ -31,35 +31,60 @@ _SUBJECT_FILLERS = (
     "通常", "一般", "经常", "常常", "偶尔", "最爱",
 )
 _OBJECT_PLACEHOLDERS = {"这个", "那个", "这些", "那些", "这", "那", "它", "他", "她"}
-_AI_PROFILE_QUERY_TERMS = (
-    "多大", "几岁", "年龄", "哪年出生", "什么时候出生", "出生",
-    "生日", "叫什么", "叫啥", "名字", "姓名", "是谁",
-    "做什么", "干什么", "职业", "什么工作", "工作是什么", "工作是啥",
-    "在哪工作", "在哪里工作", "哪里人", "哪的人",
-    "家乡", "住哪", "住在哪里", "现居", "学历", "大学", "专业",
-    "学校", "毕业", "星座", "生肖", "血型", "身高", "性别",
-)
-_PROFILE_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("多大", "几岁", "年龄", "哪年出生", "出生"), "年龄 几岁 多大 出生年份"),
-    (("生日",), "生日 出生日期"),
-    (("叫什么", "叫啥", "名字", "姓名", "是谁"), "姓名 名字 叫什么"),
+_PROFILE_QUERY_DIMENSIONS: tuple[
+    tuple[tuple[str, ...], str, tuple[str, ...]], ...
+] = (
     (
-        ("做什么", "干什么", "职业", "什么工作", "工作是什么", "工作是啥", "在哪工作", "在哪里工作"),
-        "职业 工作 做什么",
+        ("多大", "几岁", "年龄", "哪年出生", "什么时候出生", "出生年份", "出生"),
+        "年龄 几岁 多大 出生年份",
+        ("年龄",),
     ),
-    (("哪里人", "哪的人", "家乡"), "家乡 哪里人"),
-    (("住哪", "住在哪里", "现居"), "现居地 住址 住哪"),
-    (("学历", "大学", "专业", "学校", "毕业"), "学历 学校 大学 专业"),
-    (("星座",), "星座"),
-    (("生肖",), "生肖"),
-    (("血型",), "血型"),
-    (("身高",), "身高"),
-    (("性别",), "性别"),
+    (("生日",), "生日 出生日期", ("生日", "年龄")),
+    (("叫什么", "叫啥", "名字", "姓名", "是谁"), "姓名 名字 叫什么", ("姓名",)),
+    (
+        (
+            "做什么", "干什么", "职业", "什么工作", "工作是什么",
+            "工作是啥", "在哪工作", "在哪里工作",
+        ),
+        "职业 工作 做什么",
+        ("职业/与经济",),
+    ),
+    (("哪里人", "哪的人", "家乡"), "家乡 哪里人", ("现居地", "居住", "其他")),
+    (("住哪", "住在哪里", "现居"), "现居地 住址 住哪", ("现居地", "居住")),
+    (
+        (
+            "学历", "教育背景", "学校", "上学", "读书", "毕业",
+            "初中", "高中", "中学", "普通高中", "大学", "本科",
+            "研究生", "专业",
+        ),
+        "教育背景 学历 学校 上学 读书 初中 高中 中学 普通高中 大学 本科 研究生 专业 毕业",
+        ("教育背景",),
+    ),
+    (("星座",), "星座", ("星座",)),
+    (("生肖",), "生肖", ("生肖",)),
+    (("血型",), "血型", ("血型",)),
+    (("身高",), "身高", ("身高",)),
+    (("体型",), "体型", ("体型",)),
+    (("性别",), "性别", ("性别",)),
+)
+_AI_PROFILE_QUERY_TERMS = tuple(
+    dict.fromkeys(term for terms, _, _ in _PROFILE_QUERY_DIMENSIONS for term in terms)
 )
 
 
 def _normalize(text: str) -> str:
     return "".join(text.split())
+
+
+def _join_unique_words(parts: list[str]) -> str:
+    words: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for word in part.split():
+            if word and word not in seen:
+                seen.add(word)
+                words.append(word)
+    return " ".join(words)
 
 
 def _has_relation_object(text: str) -> bool:
@@ -126,12 +151,28 @@ def ai_profile_search_query(user_message: str) -> str:
     if not asks_ai_profile_relation(text):
         return ""
     parts: list[str] = []
-    for terms, expansion in _PROFILE_QUERY_EXPANSIONS:
+    for terms, expansion, _ in _PROFILE_QUERY_DIMENSIONS:
         if any(term in text for term in terms):
             parts.append(expansion)
     if not parts:
         parts.append("身份 个人资料")
-    return f"AI {' '.join(parts)} 用户 {' '.join(parts)}"
+    expanded = _join_unique_words(parts)
+    return f"{text} AI {expanded} 用户 {expanded}"
+
+
+def profile_query_subcategories(query: str) -> set[str]:
+    """Return structured profile subcategories implied by a query.
+
+    This helper is intentionally source-agnostic: selector/ranker can use it for
+    AI profile questions and user profile questions without duplicating the
+    profile taxonomy term map.
+    """
+    text = _normalize(query)
+    matched: set[str] = set()
+    for terms, _, sub_categories in _PROFILE_QUERY_DIMENSIONS:
+        if any(term in text for term in terms):
+            matched.update(sub_categories)
+    return matched
 
 
 def asks_ai_stable_relation(user_message: str) -> bool:

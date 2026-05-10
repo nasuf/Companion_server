@@ -205,6 +205,36 @@ async def test_fetch_parallel_context_upgrades_ai_profile_query_and_expands_retr
 
 
 @pytest.mark.asyncio
+async def test_fetch_parallel_context_preserves_profile_query_anchors():
+    """AI profile 增强检索必须保留原始具体锚点, 不能只传泛化资料词。"""
+    from app.services.chat.data_fetch_phase import fetch_parallel_context
+
+    retrieval = AsyncMock(return_value={
+        "memories": [],
+        "memory_strings": [],
+        "graph_context": None,
+    })
+    with _patch_data_fetch(
+        classify_memory_relevance=AsyncMock(return_value="weak"),
+        hybrid_retrieve=retrieval,
+    ):
+        await fetch_parallel_context(
+            user_message="你还记得自己是哪个学校读的高中？",
+            messages_dicts=[{"role": "user", "content": "你还记得自己是哪个学校读的高中？"}],
+            l3_trigger_classify_fn=AsyncMock(return_value="无"),
+            **_DEFAULT_CALL,
+        )
+
+    retrieval.assert_awaited_once()
+    _, _, kwargs = retrieval.mock_calls[0]
+    enhanced_query = kwargs["enhanced_query"]
+    assert enhanced_query.startswith("你还记得自己是哪个学校读的高中？")
+    assert "高中" in enhanced_query
+    assert "AI 教育背景" in enhanced_query
+    assert "用户 教育背景" in enhanced_query
+
+
+@pytest.mark.asyncio
 async def test_fetch_parallel_context_fast_weak_skips_relevance_and_retrieval():
     """明显无记忆价值的短消息不应调用 relevance LLM / hybrid retrieval。"""
     from app.services.chat.data_fetch_phase import fetch_parallel_context
