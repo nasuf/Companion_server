@@ -8,10 +8,13 @@ from sse_starlette.sse import EventSourceResponse
 from app.api.deps import require_redis
 from app.db import db
 from app.models.message import ChatRequest
-from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
 from app.services.interaction.delayed_queue import enqueue_or_append_delayed
 from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
-from app.services.interaction.reply_context import build_reply_timing_context, merge_reply_contexts
+from app.services.interaction.reply_context import build_reply_timing_context
+from app.services.interaction.user_turn_aggregation import (
+    enqueue_planned_user_message,
+    plan_user_message_aggregation,
+)
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
 from app.services.proactive import get_proactive_history
@@ -23,7 +26,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 async def _empty_stream() -> AsyncGenerator[dict, None]:
-    """空SSE流：碎片消息已入队，暂无AI回复。"""
+    """空SSE流：用户消息已进入聚合窗口，暂无AI回复。"""
     yield {"event": "pending", "data": json.dumps({"status": "aggregating"})}
     yield {"event": "done", "data": json.dumps({"message_id": "pending"})}
 
@@ -74,8 +77,7 @@ async def chat(conversation_id: str, data: ChatRequest):
 
     user_id = conv.userId
 
-    # --- 12E: 碎片化消息聚合 (PRD §3.4) ---
-    # 先检查是否有待聚合碎片（被当前消息打断）
+    # --- 用户回合聚合：fragment/turn 策略由 user_turn_aggregation 统一决定 ---
     schedule = await get_cached_schedule(conv.agent.id)
     if not schedule:
         schedule = await generate_daily_schedule(
@@ -92,56 +94,39 @@ async def chat(conversation_id: str, data: ChatRequest):
         ai_emotion=ai_emotion,
     )
 
-    pending_text, _, pending_context, _ = await flush_pending(
-        agent_id=conv.agent.id, user_id=user_id,
+    plan = await plan_user_message_aggregation(
+        agent_id=conv.agent.id,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        text=data.message,
+        reply_context=current_context,
     )
-
-    if is_short_message(data.message) and not pending_text:
-        # 短消息，加入聚合队列，暂不触发AI回复
-        message_id = await _persist_user_message(
-            conversation_id,
-            data.message,
-            metadata={"fragment": True},
-        )
-        pushed = await push_pending(
-            agent_id=conv.agent.id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            text=data.message,
-            reply_context=current_context,
-            message_id=message_id,
-        )
+    message_id = await _persist_user_message(
+        conversation_id,
+        data.message,
+        metadata=plan.metadata,
+    )
+    if plan.should_wait:
+        pushed = await enqueue_planned_user_message(plan, message_id=message_id)
         if pushed:
             return EventSourceResponse(_empty_stream())
         # Redis 挂 → 聚合失败, 当作完整消息入延迟队列 (跳聚合, 不合并)
-        delay_seconds = float((current_context or {}).get("delay_seconds", 0.0) or 0.0)
+        delay_seconds = float((plan.fallback_context or {}).get("delay_seconds", 0.0) or 0.0)
         await enqueue_or_append_delayed(
             conversation_id,
             {
                 "conversation_id": conversation_id,
                 "agent_id": conv.agent.id,
                 "user_id": user_id,
-                "message": data.message,
+                "message": plan.fallback_message,
                 "message_id": message_id,
-                "reply_context": current_context,
+                "reply_context": plan.fallback_context,
             },
             delay_seconds,
         )
         return EventSourceResponse(_queued_stream(delay_seconds))
 
-    # 有聚合文本：拼接后处理
-    final_message = data.message
-    final_context = current_context
-    if pending_text:
-        final_message = " ".join(part for part in [pending_text, data.message] if part)
-        final_context = merge_reply_contexts(pending_context, current_context)
-
-    message_id = await _persist_user_message(
-        conversation_id,
-        data.message,
-        metadata={"queued": True},
-    )
-    delay_seconds = float((final_context or {}).get("delay_seconds", 0.0) or 0.0)
+    delay_seconds = float((plan.final_context or {}).get("delay_seconds", 0.0) or 0.0)
     # 原子入队：若已有待处理消息则追加（不延长等待），否则新建
     await enqueue_or_append_delayed(
         conversation_id,
@@ -149,9 +134,9 @@ async def chat(conversation_id: str, data: ChatRequest):
             "conversation_id": conversation_id,
             "agent_id": conv.agent.id,
             "user_id": user_id,
-            "message": final_message,
+            "message": plan.final_message,
             "message_id": message_id,
-            "reply_context": final_context,
+            "reply_context": plan.final_context,
         },
         delay_seconds,
     )

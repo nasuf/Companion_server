@@ -151,7 +151,7 @@ class FakeAggregationRedis:
 
     Supports rpush / lrange / set / get / del / zadd / zrangebyscore / zrem
     / expire / pipeline / eval — the minimum subset needed by
-    push_pending / flush_pending / scan_expired.
+    fragment and turn aggregation primitives.
     Extend with lock CAS via FakeRedis if ever both contracts are needed
     in the same test.
     """
@@ -168,6 +168,12 @@ class FakeAggregationRedis:
     async def rpush(self, key, *values):
         self.lists[key].extend(values)
         return len(self.lists[key])
+
+    async def lrange(self, key, start, end):
+        values = self.lists.get(key, [])
+        if end == -1:
+            return values[start:]
+        return values[start:end + 1]
 
     async def expire(self, key, ttl):  # noqa: ARG002 — interface shim
         return True

@@ -1,7 +1,11 @@
-"""碎片化消息聚合服务。
+"""Low-level Redis storage for user-message aggregation windows.
 
-短消息(≤2字且非常用应答词)进入聚合队列，等待5秒窗口后合并处理。
-PRD §3.4
+Public chat entrypoints should use `user_turn_aggregation.py` instead of calling
+this module directly.  This file owns the Redis key layout and primitive
+operations for the two internal strategies:
+
+- fragment window: incomplete ≤2 character fragments, 5 second window
+- turn window: rapid complete user messages, short quiet window
 
 Key scope: 所有 key 和 ZSET 成员都以 (agent_id, user_id) 双维度隔离，
 防止同一用户并行与两个 agent 会话时碎片串扰（pending:msgs:{A}:{uid}
@@ -17,6 +21,7 @@ from typing import Any
 
 from app.observability.events import EVT_AGG_FLUSHED, EVT_AGG_PUSHED, EVT_AGG_SCAN
 from app.redis_client import get_redis
+from app.services.interaction.reply_context import merge_reply_contexts
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,14 @@ _PENDING_CTX_KEY = "pending:ctx:{aid}:{uid}"
 _PENDING_DELAYED_KEY = "pending:delayed"
 _AGGREGATION_WINDOW = 5  # seconds
 _PENDING_TTL = 30  # seconds, fallback TTL
+
+_TURN_MSG_KEY = "turn:msgs:{aid}:{uid}"
+_TURN_CONV_KEY = "turn:conv:{aid}:{uid}"
+_TURN_FIRST_AT_KEY = "turn:first_at:{aid}:{uid}"
+_TURN_DELAYED_KEY = "turn:delayed"
+_TURN_QUIET_WINDOW = 1.2
+_TURN_MAX_WAIT = 4.0
+_TURN_TTL = 30
 
 
 def _scope_token(agent_id: str, user_id: str) -> str:
@@ -220,6 +233,173 @@ async def scan_expired() -> list[tuple[str, str, str, str, dict | None, str | No
         # 仅有命中才打 — 否则 1s/tick 会刷屏 (scheduler 调度间隔)
         logger.debug(
             f"[AGG-SCAN] flushed {len(results)} expired window(s)",
+            extra={"event": EVT_AGG_SCAN, "n_flushed": len(results)},
+        )
+    return results
+
+
+async def push_turn_pending(
+    *,
+    agent_id: str,
+    user_id: str,
+    conversation_id: str,
+    text: str,
+    reply_context: dict | None = None,
+    message_id: str | None = None,
+) -> bool:
+    """Append a normal user message to the short turn-level quiet window."""
+    r = await get_redis()
+    msg_key = _TURN_MSG_KEY.format(aid=agent_id, uid=user_id)
+    conv_key = _TURN_CONV_KEY.format(aid=agent_id, uid=user_id)
+    first_key = _TURN_FIRST_AT_KEY.format(aid=agent_id, uid=user_id)
+    token = _scope_token(agent_id, user_id)
+    now = time.time()
+    try:
+        raw_first_at = await r.get(first_key)
+    except Exception as e:
+        logger.warning(
+            f"[TURN-PUSH] Redis get failed agent_id={agent_id} user_id={user_id}: {e}"
+        )
+        return False
+    try:
+        first_at = float(raw_first_at if isinstance(raw_first_at, str) else raw_first_at.decode())
+    except (AttributeError, TypeError, ValueError):
+        first_at = now
+
+    due_at = min(now + _TURN_QUIET_WINDOW, first_at + _TURN_MAX_WAIT)
+    payload: dict[str, Any] = {"text": text}
+    if message_id:
+        payload["message_id"] = message_id
+    if reply_context:
+        payload["reply_context"] = reply_context
+
+    pipe = r.pipeline()
+    pipe.rpush(msg_key, json.dumps(payload, ensure_ascii=False))
+    pipe.expire(msg_key, _TURN_TTL)
+    pipe.set(conv_key, conversation_id, ex=_TURN_TTL)
+    if raw_first_at is None:
+        pipe.set(first_key, str(first_at), ex=_TURN_TTL)
+    pipe.zadd(_TURN_DELAYED_KEY, {token: due_at})
+    try:
+        await pipe.execute()
+    except Exception as e:
+        logger.warning(
+            f"[TURN-PUSH] Redis push failed agent_id={agent_id} user_id={user_id}: {e}"
+        )
+        return False
+    logger.info(
+        f"[TURN-PUSH] agent_id={agent_id} user_id={user_id} text={text[:60]!r} "
+        f"due_in={max(0, due_at - now):.2f}s",
+        extra={
+            "event": EVT_AGG_PUSHED,
+            "fragment_len": len(text),
+            "window_sec": _TURN_QUIET_WINDOW,
+        },
+    )
+    return True
+
+
+async def has_turn_pending(*, agent_id: str, user_id: str) -> bool:
+    """Return whether a normal turn quiet window is already open."""
+    r = await get_redis()
+    first_key = _TURN_FIRST_AT_KEY.format(aid=agent_id, uid=user_id)
+    try:
+        return bool(await r.get(first_key))
+    except Exception as e:
+        logger.warning(
+            f"[TURN-CHECK] Redis get failed agent_id={agent_id} user_id={user_id}: {e}"
+        )
+        return False
+
+
+async def flush_turn_pending(
+    *, agent_id: str, user_id: str,
+) -> tuple[str | None, str | None, dict | None, str | None]:
+    """Flush one normal user turn. Returns (combined_text, conv_id, merged_context, latest_message_id)."""
+    r = await get_redis()
+    msg_key = _TURN_MSG_KEY.format(aid=agent_id, uid=user_id)
+    conv_key = _TURN_CONV_KEY.format(aid=agent_id, uid=user_id)
+    first_key = _TURN_FIRST_AT_KEY.format(aid=agent_id, uid=user_id)
+    token = _scope_token(agent_id, user_id)
+    try:
+        raw_msgs = await r.lrange(msg_key, 0, -1)
+        conv_id = await r.get(conv_key)
+        if not raw_msgs:
+            await r.delete(msg_key, conv_key, first_key)
+            await r.zrem(_TURN_DELAYED_KEY, token)
+            return None, None, None, None
+        await r.delete(msg_key, conv_key, first_key)
+        await r.zrem(_TURN_DELAYED_KEY, token)
+    except Exception as e:
+        logger.warning(
+            f"[TURN-FLUSH] Redis flush failed agent_id={agent_id} user_id={user_id}: {e}"
+        )
+        return None, None, None, None
+
+    def _coerce(value):
+        if value is None or value is False:
+            return None
+        return value if isinstance(value, str) else value.decode()
+
+    texts: list[str] = []
+    reply_context = None
+    latest_message_id: str | None = None
+    for raw in raw_msgs:
+        item_raw = _coerce(raw)
+        if item_raw is None:
+            continue
+        try:
+            item = json.loads(item_raw)
+        except json.JSONDecodeError:
+            item = {"text": item_raw}
+        text = str(item.get("text", "")).strip()
+        if text:
+            texts.append(text)
+        reply_context = merge_reply_contexts(reply_context, item.get("reply_context"))
+        msg_id = item.get("message_id")
+        if isinstance(msg_id, str) and msg_id.strip():
+            latest_message_id = msg_id
+
+    combined = "\n".join(texts).strip() if texts else None
+    if combined:
+        logger.info(
+            f"[TURN-FLUSH] agent_id={agent_id} user_id={user_id} parts={len(texts)} "
+            f"combined={combined[:80]!r}",
+            extra={
+                "event": EVT_AGG_FLUSHED,
+                "n_parts": len(texts),
+                "combined_len": len(combined),
+            },
+        )
+    return combined, _coerce(conv_id), reply_context, latest_message_id
+
+
+async def scan_turn_expired() -> list[tuple[str, str, str, str, dict | None, str | None]]:
+    """Scan normal turn quiet windows that are due."""
+    r = await get_redis()
+    now = time.time()
+    try:
+        expired = await r.zrangebyscore(_TURN_DELAYED_KEY, 0, now)
+    except Exception as e:
+        logger.warning(f"[TURN-SCAN] Redis zrangebyscore failed: {e}")
+        return []
+    results = []
+    for raw in expired:
+        token = raw.decode() if isinstance(raw, bytes) else raw
+        parsed = _parse_scope_token(token)
+        if parsed is None:
+            await r.zrem(_TURN_DELAYED_KEY, token)
+            continue
+        agent_id, user_id = parsed
+        text, conv_id, ctx, latest_message_id = await flush_turn_pending(
+            agent_id=agent_id,
+            user_id=user_id,
+        )
+        if text and conv_id:
+            results.append((agent_id, user_id, text, conv_id, ctx, latest_message_id))
+    if results:
+        logger.debug(
+            f"[TURN-SCAN] flushed {len(results)} quiet window(s)",
             extra={"event": EVT_AGG_SCAN, "n_flushed": len(results)},
         )
     return results

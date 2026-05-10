@@ -25,11 +25,11 @@ from app.services.mbti import get_mbti
 from app.services.interaction.boundary import recover_patience_hourly
 from app.services.relationship.intimacy import compute_growth_intimacy, compute_topic_intimacy
 from app.services.proactive.orchestrator import scan_proactive_states
-from app.services.interaction.aggregation import scan_expired
 from app.services.interaction.delayed_queue import (
     enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
     try_lock_conversation, unlock_conversation
 )
+from app.services.interaction.user_turn_aggregation import scan_due_user_turns
 from app.services.proactive.triggers import scan_triggers
 from app.services.proactive.special_dates import scan_special_dates_today
 
@@ -444,6 +444,28 @@ async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
     return False
 
 
+async def _enqueue_scanned_aggregation_results(results, manager) -> None:
+    """Move scanned aggregation windows into the shared delayed reply queue."""
+    for agent_id, user_id, combined_text, conv_id, reply_context, latest_message_id in results:
+        delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
+        await enqueue_delayed_message(
+            conv_id,
+            {
+                "conversation_id": conv_id,
+                "agent_id": agent_id,
+                "user_id": user_id,
+                "message": combined_text,
+                "message_id": latest_message_id,
+                "reply_context": reply_context,
+            },
+            delay_seconds,
+        )
+        # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
+        if delay_seconds > 5:
+            await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
+        await manager.send_event(conv_id, "pending", {"status": "queued", "delay": delay_seconds})
+
+
 async def _run_aggregation_scan():
     """Scan aggregation windows and due delayed replies, then deliver asynchronously."""
     from app.services.chat.orchestrator import stream_chat_response
@@ -452,26 +474,8 @@ async def _run_aggregation_scan():
     from app.db import db
 
     try:
-        expired = await scan_expired()
-        for agent_id, user_id, combined_text, conv_id, reply_context, latest_message_id in expired:
-            delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
-            await enqueue_delayed_message(
-                conv_id,
-                {
-                    "conversation_id": conv_id,
-                    "agent_id": agent_id,
-                    "user_id": user_id,
-                    "message": combined_text,
-                    "message_id": latest_message_id,
-                    "reply_context": reply_context,
-                },
-                delay_seconds,
-            )
-            # 12E: Update frontend after aggregation window ends.
-            # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
-            if delay_seconds > 5:
-                await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
-            await manager.send_event(conv_id, "pending", {"status": "queued", "delay": delay_seconds})
+        due_user_turns = await scan_due_user_turns()
+        await _enqueue_scanned_aggregation_results(due_user_turns, manager)
 
         due_conversations = await scan_due_delayed_messages()
         for conv_id, payloads in due_conversations:

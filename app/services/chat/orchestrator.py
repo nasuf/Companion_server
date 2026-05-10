@@ -325,11 +325,29 @@ _REPLY_SPLIT_RE = re.compile(r'\|\||\n{2,}')
 # 避免句子内 "你好\n吗" 这种意外换行被 pre-wrap 渲染成断行.
 _INTRA_REPLY_WS_RE = re.compile(r'[\r\n]+')
 _LONG_REPLY_SOFT_BREAK_CHARS = "。！？…～~!?，,；;、"
+_NON_TERMINAL_REPLY_END_RE = re.compile(r"[，,、；;：:]+$")
 
 
 def _clean_reply_part(text: str) -> str:
     """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格."""
     return _INTRA_REPLY_WS_RE.sub(" ", text).strip()
+
+
+def _strip_non_terminal_reply_end(text: str) -> str:
+    """Remove dangling boundary punctuation from a split message bubble."""
+    return _NON_TERMINAL_REPLY_END_RE.sub("", text.rstrip()).rstrip()
+
+
+def _polish_split_boundaries(parts: list[str]) -> list[str]:
+    """Clean punctuation that only exists because a reply was split."""
+    if len(parts) <= 1:
+        return parts
+    polished = [
+        _strip_non_terminal_reply_end(part) if idx < len(parts) - 1 else part
+        for idx, part in enumerate(parts)
+    ]
+    return [part for part in polished if part]
+
 
 def truncate_at_sentence(text: str, max_len: int) -> str:
     """截断至max_len内最后一个句子边界。"""
@@ -406,6 +424,7 @@ def split_and_validate_replies(
             break
         result.append(p)
         total += len(p)
+    result = _polish_split_boundaries(result)
     return result or [parts[0][:max_per_reply]]
 
 

@@ -14,8 +14,11 @@ from app.services.interaction.aggregation import (
     _parse_scope_token,
     _scope_token,
     flush_pending,
+    flush_turn_pending,
     push_pending,
+    push_turn_pending,
     scan_expired,
+    scan_turn_expired,
 )
 
 
@@ -96,6 +99,89 @@ async def test_scan_expired_purges_legacy_tokens(fake_aggregation_redis):
 
     assert results == []
     assert "legacy-user-no-colon" not in redis.zsets["pending:delayed"]
+
+
+@pytest.mark.asyncio
+async def test_turn_pending_combines_rapid_normal_messages(fake_aggregation_redis):
+    """普通连续消息使用短 quiet window 合成同一 user turn, 且保留最后一条 message_id。"""
+    redis = fake_aggregation_redis
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        await push_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="我最近在看一部美剧《大群》",
+            reply_context={"received_at": "2026-05-10T00:00:00+00:00", "delay_seconds": 0},
+            message_id="m1",
+        )
+        await push_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="你看过吗",
+            reply_context={"received_at": "2026-05-10T00:00:01+00:00", "delay_seconds": 0},
+            message_id="m2",
+        )
+
+        text, conv_id, ctx, msg_id = await flush_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+        )
+
+    assert text == "我最近在看一部美剧《大群》\n你看过吗"
+    assert conv_id == "conv-A"
+    assert msg_id == "m2"
+    assert ctx["received_at"] == "2026-05-10T00:00:00+00:00"
+    assert ctx["latest_received_at"] == "2026-05-10T00:00:01+00:00"
+
+
+@pytest.mark.asyncio
+async def test_scan_turn_expired_returns_combined_turn(fake_aggregation_redis):
+    """turn quiet window 到期后 scheduler 可拿到完整合并文本。"""
+    import time as _time
+
+    redis = fake_aggregation_redis
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        await push_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="第一句",
+            message_id="m1",
+        )
+        await push_turn_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="第二句",
+            message_id="m2",
+        )
+        redis.zsets["turn:delayed"]["agent-A:u1"] = _time.time() - 10
+
+        results = await scan_turn_expired()
+
+    assert len(results) == 1
+    agent_id, user_id, text, conv_id, _ctx, msg_id = results[0]
+    assert agent_id == "agent-A"
+    assert user_id == "u1"
+    assert text == "第一句\n第二句"
+    assert conv_id == "conv-A"
+    assert msg_id == "m2"
+
+
+@pytest.mark.asyncio
+async def test_scan_turn_expired_purges_empty_turn_token(fake_aggregation_redis):
+    """turn ZSET 残留但 list 已空时应清掉 token, 避免 scheduler 每秒重复扫描。"""
+    import time as _time
+
+    redis = fake_aggregation_redis
+    redis.zsets["turn:delayed"]["agent-A:u1"] = _time.time() - 10
+
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        results = await scan_turn_expired()
+
+    assert results == []
+    assert "agent-A:u1" not in redis.zsets["turn:delayed"]
 
 
 def test_scope_token_round_trip():

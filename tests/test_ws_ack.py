@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.api.realtime import ws as ws_mod
+from app.services.interaction import user_turn_aggregation as turn_mod
+from app.services.interaction.user_turn_aggregation import UserMessageAggregationPlan
 
 
 @pytest.fixture
@@ -31,6 +33,68 @@ def _ack_payloads(ws_mock) -> list[dict]:
         for call in ws_mock.send_json.call_args_list
         if isinstance(call.args[0], dict) and call.args[0].get("type") == "ack"
     ]
+
+
+def _aggregation_plan(
+    route: str,
+    *,
+    text: str = "测试消息",
+    metadata: dict | None = None,
+) -> UserMessageAggregationPlan:
+    return UserMessageAggregationPlan(
+        route=route,
+        agent_id="a1",
+        user_id="user-1",
+        conversation_id="conv-1",
+        text=text,
+        metadata=metadata or {"queued": True},
+        final_message=text,
+        final_context={},
+        fallback_message=text,
+        fallback_context={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_aggregation_bypass_for_record_requests():
+    """提醒/记忆类控制消息不等待 turn quiet window。"""
+    with (
+        patch.object(turn_mod, "is_crisis_message", return_value=False),
+        patch.object(turn_mod, "check_banned_keywords", return_value=[]),
+        patch.object(turn_mod, "load_pending_contradiction",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(turn_mod, "load_pending_action",
+                     new_callable=AsyncMock, return_value=None),
+    ):
+        assert await turn_mod.should_bypass_user_turn_aggregation("conv-1", "明天提醒我交报告")
+
+
+@pytest.mark.asyncio
+async def test_turn_aggregation_bypass_for_current_state_queries():
+    """询问 AI 当前状态属于控制型短路意图, 不进入普通回合聚合。"""
+    with (
+        patch.object(turn_mod, "is_crisis_message", return_value=False),
+        patch.object(turn_mod, "check_banned_keywords", return_value=[]),
+        patch.object(turn_mod, "load_pending_contradiction",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(turn_mod, "load_pending_action",
+                     new_callable=AsyncMock, return_value=None),
+    ):
+        assert await turn_mod.should_bypass_user_turn_aggregation("conv-1", "你现在在干嘛")
+
+
+@pytest.mark.asyncio
+async def test_turn_aggregation_bypass_for_pending_confirmations():
+    """删除/矛盾等跨消息确认状态下, 下一句需要立即进入 preflight。"""
+    with (
+        patch.object(turn_mod, "is_crisis_message", return_value=False),
+        patch.object(turn_mod, "check_banned_keywords", return_value=[]),
+        patch.object(turn_mod, "load_pending_contradiction",
+                     new_callable=AsyncMock, return_value={"id": "pending"}),
+        patch.object(turn_mod, "load_pending_action",
+                     new_callable=AsyncMock, return_value=None),
+    ):
+        assert await turn_mod.should_bypass_user_turn_aggregation("conv-1", "对，更新吧")
 
 
 @pytest.mark.asyncio
@@ -81,13 +145,18 @@ async def test_handle_message_fragment_sends_ack_with_client_id(fake_ws):
     async def _fake_persist(*args, **kwargs):
         return "db-msg-fragment-1"
 
-    async def _fake_push(*args, **kwargs):
-        return True
+    plan = _aggregation_plan(
+        "fragment_window",
+        text="嗯",
+        metadata={"fragment": True},
+    )
 
     with (
         patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
-        patch.object(ws_mod, "is_short_message", return_value=True),
-        patch.object(ws_mod, "push_pending", side_effect=_fake_push),
+        patch.object(ws_mod, "plan_user_message_aggregation",
+                     new_callable=AsyncMock, return_value=plan),
+        patch.object(ws_mod, "enqueue_planned_user_message",
+                     new_callable=AsyncMock, return_value=True),
         # 非空 schedule 让 _handle_message 跳过 generate_daily_schedule (后者
         # 会真的调 redis, 测试不该接触外部资源)
         patch.object(ws_mod, "get_cached_schedule",
@@ -124,6 +193,43 @@ async def test_handle_message_fragment_sends_ack_with_client_id(fake_ws):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_fragment_joins_open_turn_window(fake_ws):
+    """普通消息后紧接 1-2 字碎片时, 碎片应追加到 turn window, 不另起 5s fragment window。"""
+    agent = SimpleNamespace(id="a1", name="A")
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-fragment-join-1"
+
+    plan = _aggregation_plan("turn_window", text="吗")
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(ws_mod, "plan_user_message_aggregation",
+                     new_callable=AsyncMock, return_value=plan),
+        patch.object(ws_mod, "enqueue_planned_user_message",
+                     new_callable=AsyncMock, return_value=True) as enqueue_plan,
+        patch.object(ws_mod, "_queue_reply", new_callable=AsyncMock) as queue_reply,
+        patch.object(ws_mod, "get_cached_schedule",
+                     new_callable=AsyncMock,
+                     return_value=[{"activity": "自由时间", "type": "leisure"}]),
+        patch.object(ws_mod, "get_current_status",
+                     return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
+        patch.object(ws_mod, "get_ai_emotion",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(ws_mod, "build_reply_timing_context",
+                     new_callable=AsyncMock, return_value={"delay_seconds": 0}),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "吗",
+            client_id="client-frag-join-uuid",
+        )
+
+    enqueue_plan.assert_awaited_once()
+    assert enqueue_plan.await_args.args[0].route == "turn_window"
+    queue_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_non_fragment_sends_ack_with_client_id(fake_ws):
     """非碎片分支 (直接入延迟队列): persist → ack → _queue_reply.
     ack 仍带 client_id."""
@@ -132,13 +238,12 @@ async def test_handle_message_non_fragment_sends_ack_with_client_id(fake_ws):
     async def _fake_persist(*args, **kwargs):
         return "db-msg-full-1"
 
-    async def _fake_flush(*args, **kwargs):
-        return (None, None, None, None)
+    plan = _aggregation_plan("immediate", text="完整一句话哈哈")
 
     with (
         patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
-        patch.object(ws_mod, "is_short_message", return_value=False),
-        patch.object(ws_mod, "flush_pending", side_effect=_fake_flush),
+        patch.object(ws_mod, "plan_user_message_aggregation",
+                     new_callable=AsyncMock, return_value=plan),
         patch.object(ws_mod, "_queue_reply", new_callable=AsyncMock),
         # 非空 schedule 让 _handle_message 跳过 generate_daily_schedule (后者
         # 会真的调 redis, 测试不该接触外部资源)
@@ -164,6 +269,52 @@ async def test_handle_message_non_fragment_sends_ack_with_client_id(fake_ws):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_normal_turn_aggregates_before_queue(fake_ws):
+    """普通非碎片消息先进入 turn quiet window, 不立刻触发 reply。"""
+    agent = SimpleNamespace(id="a1", name="A")
+    queue_reply = AsyncMock()
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-turn-1"
+
+    plan = _aggregation_plan("turn_window", text="我最近在看一部美剧")
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(ws_mod, "plan_user_message_aggregation",
+                     new_callable=AsyncMock, return_value=plan),
+        patch.object(ws_mod, "enqueue_planned_user_message",
+                     new_callable=AsyncMock, return_value=True) as enqueue_plan,
+        patch.object(ws_mod, "_queue_reply", queue_reply),
+        patch.object(ws_mod, "get_cached_schedule",
+                     new_callable=AsyncMock,
+                     return_value=[{"activity": "自由时间", "type": "leisure"}]),
+        patch.object(ws_mod, "get_current_status",
+                     return_value={"activity": "自由时间", "type": "leisure", "status": "idle"}),
+        patch.object(ws_mod, "get_ai_emotion",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(ws_mod, "build_reply_timing_context",
+                     new_callable=AsyncMock, return_value={"delay_seconds": 0}),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "我最近在看一部美剧",
+            client_id="client-turn-uuid",
+        )
+
+    enqueue_plan.assert_awaited_once()
+    assert enqueue_plan.await_args.kwargs["message_id"] == "db-msg-turn-1"
+    queue_reply.assert_not_awaited()
+    payloads = [
+        call.args[0] for call in fake_ws.send_json.call_args_list
+        if isinstance(call.args[0], dict)
+    ]
+    assert any(
+        p.get("type") == "pending" and p.get("data", {}).get("status") == "aggregating"
+        for p in payloads
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_message_default_client_id_none(fake_ws):
     """旧前端不传 client_id (向后兼容): _handle_message 默认 None,
     ack 仍发出 (仅缺 client_id 字段)."""
@@ -172,13 +323,18 @@ async def test_handle_message_default_client_id_none(fake_ws):
     async def _fake_persist(*args, **kwargs):
         return "db-1"
 
-    async def _fake_push(*args, **kwargs):
-        return True
+    plan = _aggregation_plan(
+        "fragment_window",
+        text="嗯",
+        metadata={"fragment": True},
+    )
 
     with (
         patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
-        patch.object(ws_mod, "is_short_message", return_value=True),
-        patch.object(ws_mod, "push_pending", side_effect=_fake_push),
+        patch.object(ws_mod, "plan_user_message_aggregation",
+                     new_callable=AsyncMock, return_value=plan),
+        patch.object(ws_mod, "enqueue_planned_user_message",
+                     new_callable=AsyncMock, return_value=True),
         # 非空 schedule 让 _handle_message 跳过 generate_daily_schedule (后者
         # 会真的调 redis, 测试不该接触外部资源)
         patch.object(ws_mod, "get_cached_schedule",

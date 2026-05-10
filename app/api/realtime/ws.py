@@ -1,6 +1,6 @@
 """WebSocket 聊天端点。
 
-替代 SSE 的持久双向连接，支持碎片聚合推送和主动消息推送。
+替代 SSE 的持久双向连接，支持用户回合聚合推送和主动消息推送。
 """
 
 import asyncio
@@ -14,14 +14,17 @@ from app.db import db
 from app.observability import bind_context
 from app.observability.events import EVT_WS_CONNECT, EVT_WS_DISCONNECT, EVT_WS_MESSAGE_RECV
 from app.redis_client import is_redis_healthy
-from app.services.interaction.aggregation import is_short_message, push_pending, flush_pending
 from app.services.interaction.delayed_queue import enqueue_or_append_delayed
-from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
-from app.services.interaction.reply_context import build_reply_timing_context, merge_reply_contexts
+from app.services.interaction.reply_context import build_reply_timing_context
+from app.services.interaction.user_turn_aggregation import (
+    enqueue_planned_user_message,
+    plan_user_message_aggregation,
+)
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
 from app.services.proactive.state import mark_user_replied_for_conversation
 from app.services.proactive.sender import send_first_greeting
+from app.services.relationship.emotion import quick_emotion_estimate, get_ai_emotion
 from app.services.runtime.ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -29,6 +32,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websocket"])
 
 _IDLE_TIMEOUT = 90.0
+
+
+def _message_metadata(
+    base: dict | None = None,
+    *,
+    client_id: str | None = None,
+) -> dict | None:
+    metadata = dict(base or {})
+    if client_id:
+        metadata["client_id"] = client_id
+    return metadata or None
 
 
 async def _persist_user_message(
@@ -96,6 +110,32 @@ async def _queue_reply(
     if delay_seconds > 5 and not appended:
         await ws.send_json({"type": "delay", "data": {"duration": delay_seconds}})
     await ws.send_json({"type": "pending", "data": {"status": "queued", "delay": delay_seconds}})
+
+
+async def _queue_reply_or_error(
+    ws: WebSocket,
+    *,
+    conversation_id: str,
+    agent,
+    user_id: str,
+    user_message: str,
+    user_message_id: str | None,
+    reply_context: dict | None,
+) -> None:
+    """Queue or stream a reply and surface failures to the active websocket."""
+    try:
+        await _queue_reply(
+            ws,
+            conversation_id=conversation_id,
+            agent=agent,
+            user_id=user_id,
+            user_message=user_message,
+            user_message_id=user_message_id,
+            reply_context=reply_context,
+        )
+    except Exception as e:
+        logger.error(f"Chat queue failed for conv={conversation_id[:8]}: {e}")
+        await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
 
 
 @router.websocket("/ws/{conversation_id}")
@@ -252,82 +292,49 @@ async def _handle_message(
         ai_emotion=ai_emotion,
     )
 
-    # spec §1.3 窗口管理规则
-    # - 碎片 + 无 pending → 新建窗口
-    # - 碎片 + 已有 pending → 追加 + 刷新窗口（push_pending 里的 zadd 自动刷新 due_at）
-    # - 非碎片 + 已有 pending → 打断触发（flush 合并后处理）
-    # - 非碎片 + 无 pending → 直接处理
-    is_fragment = is_short_message(text)
-
-    if is_fragment:
-        message_id = await _persist_user_message(
-            conversation_id,
-            text,
-            metadata={"fragment": True},
-        )
-        await _send_ack(ws, message_id=message_id, client_id=client_id)
-        # push_pending 内部 zadd 刷新 due_at = now + 5，同时覆盖最新 reply_context
-        pushed = await push_pending(
-            agent_id=agent.id,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            text=text,
-            reply_context=current_context,
-            message_id=message_id,
-        )
-        if pushed:
-            await ws.send_json({"type": "pending", "data": {"status": "aggregating"}})
-            return
-        # Redis 挂 → 聚合失败, 消息已持久化 (fragment=True); 直接入延迟队列走同步回复
-        logger.warning(
-            f"[WS] push_pending failed conv={conversation_id[:8]}, fallback to sync queue"
-        )
-        try:
-            await _queue_reply(
-                ws,
-                conversation_id=conversation_id,
-                agent=agent,
-                user_id=user_id,
-                user_message=text,
-                user_message_id=message_id,
-                reply_context=current_context,
-            )
-        except Exception as e:
-            logger.error(f"Chat queue failed for conv={conversation_id[:8]}: {e}")
-            await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
-        return
-
-    # 非碎片：若有 pending，先打断触发合并；否则直接处理当前消息
-    pending_text, _, pending_context, _ = await flush_pending(
-        agent_id=agent.id, user_id=user_id,
+    plan = await plan_user_message_aggregation(
+        agent_id=agent.id,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        text=text,
+        reply_context=current_context,
     )
-
-    final_message = text
-    final_context = current_context
-    if pending_text:
-        # spec §1.5: 按原始顺序直接连接（中文不加空格），当前非碎片作为最后一条
-        final_message = "".join(part for part in [pending_text, text] if part)
-        final_context = merge_reply_contexts(pending_context, current_context)
     user_message_id = await _persist_user_message(
         conversation_id,
         text,
-        metadata={"queued": True},
+        metadata=_message_metadata(plan.metadata, client_id=client_id),
     )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
 
-    try:
-        await _queue_reply(
+    if plan.should_wait:
+        pushed = await enqueue_planned_user_message(plan, message_id=user_message_id)
+        if pushed:
+            await ws.send_json({"type": "pending", "data": {"status": "aggregating"}})
+            return
+        logger.warning(
+            f"[WS] aggregation enqueue failed route={plan.route} "
+            f"conv={conversation_id[:8]}, fallback to sync queue"
+        )
+        await _queue_reply_or_error(
             ws,
             conversation_id=conversation_id,
             agent=agent,
             user_id=user_id,
-            user_message=final_message,
+            user_message=plan.fallback_message,
             user_message_id=user_message_id,
-            reply_context=final_context,
+            reply_context=plan.fallback_context,
         )
-    except Exception as e:
-        logger.error(f"Chat queue failed for conv={conversation_id[:8]}: {e}")
-        await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
+        return
+
+    await _queue_reply_or_error(
+        ws,
+        conversation_id=conversation_id,
+        agent=agent,
+        user_id=user_id,
+        user_message=plan.final_message,
+        user_message_id=user_message_id,
+        reply_context=plan.final_context,
+    )
 
 
 async def stream_to_ws(generator, conversation_id: str) -> None:

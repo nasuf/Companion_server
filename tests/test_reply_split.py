@@ -57,6 +57,20 @@ class TestSplitAndValidateReplies:
         result = split_and_validate_replies("一\n\n二||三")
         assert result == ["一", "二", "三"]
 
+    def test_strips_dangling_comma_from_split_boundary(self):
+        result = split_and_validate_replies("还有《小森林》，||那种慢慢生活的感觉很好")
+        assert result == ["还有《小森林》", "那种慢慢生活的感觉很好"]
+
+    def test_preserves_terminal_punctuation_at_split_boundary(self):
+        result = split_and_validate_replies("我超喜欢！||你呢？||可以聊聊。")
+        assert result == ["我超喜欢！", "你呢？", "可以聊聊。"]
+
+    def test_strips_soft_punctuation_from_overlong_local_split(self):
+        raw = "好呀，我也喜欢那种很慢的电影，像《小森林》，那种按季节生活的感觉很舒服。"
+        result = split_and_validate_replies(raw, max_count=3, max_per_reply=24, max_total=90)
+        assert len(result) > 1
+        assert not result[0].endswith(("，", ",", "、", "；", ";", "：", ":"))
+
     def test_single_reply_no_split(self):
         result = split_and_validate_replies("整个就是一句话。")
         assert result == ["整个就是一句话。"]
