@@ -18,6 +18,7 @@ from app.observability.events import EVT_LLM_FAIL, EVT_REPLY_DECORATION
 from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
+from app.services.prompting.defaults import DELAY_EXPLANATION_FALLBACK_INSTRUCTION_PROMPT
 from app.services.sticker import recommend_sticker
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,9 @@ async def _build_delay_explanation_text(
         if not text:
             text = await fallback_fn(
                 agent, user_message,
-                f"你{minutes}分钟前收到用户消息但在忙，现在才回复。用1句简短自然的解释。",
+                DELAY_EXPLANATION_FALLBACK_INSTRUCTION_PROMPT.format(
+                    delay_minutes=minutes,
+                ),
             )
         return (text or "").strip() or None
     except Exception as e:

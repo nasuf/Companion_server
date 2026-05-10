@@ -55,6 +55,10 @@ from app.services.schedule_domain.schedule import (
     update_schedule_slot,
 )
 from app.services.schedule_domain.time_service import get_current_time, resolve_implicit_time
+from app.services.prompting.defaults import (
+    CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
+    SCHEDULE_MISSING_CONTEXT_PROMPT,
+)
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 
 logger = logging.getLogger(__name__)
@@ -161,8 +165,7 @@ async def handle_conversation_end(
     )
     if not farewell:
         farewell = await fallback_fn(
-            ctx.agent, user_message,
-            "用户要结束对话了。用你的性格风格生成一句简短的道别，不超过30字。不要用||分隔。",
+            ctx.agent, user_message, CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
         )
     async for evt in ctx.finalize(farewell, kind="conversation_end"):
         yield evt
@@ -349,10 +352,7 @@ async def handle_schedule_query(
             target_schedule, resolved_query_type, target_status, date_label=date_label,
         )
     else:
-        schedule_context = (
-            f"用户问的是{date_label}。目前没有这天的具体作息缓存；"
-            "请如实说明还没看到具体安排，不要用当前正在做的事代替。"
-        )
+        schedule_context = SCHEDULE_MISSING_CONTEXT_PROMPT.format(date_label=date_label)
     try:
         response = await schedule_query_reply(
             message=user_message,

@@ -12,6 +12,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
+from app.services.prompting.defaults import (
+    CHAT_L3_MEMORY_SECTION_PROMPT,
+    CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
+    CHAT_MEMORY_SECTION_BODY_PROMPT,
+    CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
+    CHAT_TIME_MEMORIES_SECTION_PROMPT,
+)
 from app.services.prompting.store import get_prompt_text
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti
@@ -157,7 +164,9 @@ async def _build_emotion_section(
     if not intimacy_stage:
         return None
 
-    parts: list[str] = [f"你们目前的关系是{intimacy_stage}。"]
+    parts: list[str] = [
+        CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT.format(intimacy_stage=intimacy_stage)
+    ]
 
     return _section("当前情绪", "\n".join(parts))
 
@@ -182,7 +191,7 @@ async def _build_memory_section(
             return None
         return _section(
             "你记得的事情",
-            "(本次没有联想到任何与当前话题相关的记忆)",
+            CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
         )
 
     def _days_since(value: Any) -> int | None:
@@ -281,26 +290,7 @@ async def _build_memory_section(
     if not parts:
         return None
 
-    body = (
-        "以下是与当前话题相关的事实, 已按用途和归属分组. "
-        "若有【回答当前关系 / 名字问题优先参考】, 回答关系、称呼、名字类事实追问时优先使用该组; "
-        "若有【回答当前问题可参考】, 回答其他事实追问时优先使用该组; "
-        "【安全 / 情绪背景】只用于把握语气和风险, 不要拿它替代事实答案。"
-        "【用户同类资料（仅用于避免重复追问）】只用于判断用户是否已经告诉过对应资料, "
-        "不要把它当成你的资料或答案依据。"
-        "事实优先级: 当前用户消息明确说出新事实或纠正旧事实时, 以当前用户消息为准; "
-        "否则回答姓名、年龄、生日、关系、住址、偏好等稳定事实时, "
-        "以下方当前问题相关记忆为准, 不要用历史对话或 L3 模糊记忆覆盖它。"
-        "若历史对话或 L3 与这些记忆冲突, 只能说明你记得的是哪一版并请用户确认, "
-        "不要直接采用冲突值。"
-        "回答时必须与这些保持一致, "
-        "不得编造矛盾信息, 也不要把对方的记忆误当成自己的、或反之。"
-        "当用户问你的经历、去过哪里、看过什么、做过什么时, "
-        "只参考【你自己的相关经历 / 人设】里明确相关的条目; "
-        "没有明确相关条目就说不太确定, 不要用用户记忆或无关人设补细节。"
-        "括号里的标记只供你判断轻重缓急, 回复时不要复述这些标记。\n\n"
-        + "\n\n".join(parts)
-    )
+    body = CHAT_MEMORY_SECTION_BODY_PROMPT.format(memory_groups="\n\n".join(parts))
     return _section("你记得的事情", body)
 
 
@@ -446,7 +436,10 @@ async def build_system_prompt(
     # 时间相关记忆
     if time_memories:
         numbered = "\n".join(f"- {m}" for m in time_memories)
-        sections.append(_section("相关时间记忆", f"用户提到的时间对应的记忆：\n{numbered}"))
+        sections.append(_section(
+            "相关时间记忆",
+            CHAT_TIME_MEMORIES_SECTION_PROMPT.format(time_memories=numbered),
+        ))
     else:
         _record_skipped_section(diagnostics, "相关时间记忆")
 
@@ -455,10 +448,7 @@ async def build_system_prompt(
         l3_block = "\n".join(f"- {m}" for m in l3_memories)
         sections.append(_section(
             "久远记忆（L3）",
-            "以下是你很久以前的模糊记忆，用户正在回忆相关内容。"
-            "L3 是低置信历史线索，不能覆盖「你记得的事情」里的当前事实；"
-            "若两者冲突，以当前记忆为准，或向用户确认。"
-            "回忆时语气自然，可以说\"我好像记得...\"或\"那好像是...\"：\n" + l3_block
+            CHAT_L3_MEMORY_SECTION_PROMPT.format(l3_memories=l3_block),
         ))
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")

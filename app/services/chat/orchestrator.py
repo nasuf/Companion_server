@@ -28,6 +28,7 @@ from app.observability.events import (
 )
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
+from app.services.prompting.defaults import CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
@@ -179,7 +180,7 @@ async def _intent_llm_reply(
 ) -> str:
     """Generate a short LLM reply for a special intent (farewell, reconciliation, etc.)."""
     prompt = await build_system_prompt(agent=agent, reply_count=1, reply_total=60)
-    prompt += f"\n\n## 特殊指令\n{instruction}"
+    prompt += CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT.format(instruction=instruction)
     model = get_chat_model()
     result = await model.ainvoke(convert_messages([
         {"role": "system", "content": prompt},
