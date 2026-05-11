@@ -3,12 +3,12 @@
 把 LangSmith 原始 step (run_type='llm', name='ChatOpenAI' 等) 映射到带语义的字段:
 - display_name: 让 PM 一眼看懂的中文功能名 (e.g. "记忆相关度判定")
 - category: decision / data / reply / post / other (前端配色用)
-- prompt_key: 关联到 prompting registry, 详情面板提供"跳转 admin 编辑"
+- prompt_key: 关联到 prompting registry, 详情面板提供 trace 内编辑
 - decision_label: 提取关键决策 (e.g. "弱" / "无矛盾" / "偏积极"), 替代生 output
 
-实现思路: 用每条 prompt 的头部 60 字作为指纹 (defaults.py 里都是固定文本头部),
-runtime 比对 LLM 调用 input.messages 的第一条 HumanMessage content. 头部稳定 →
-匹配可靠. 头部改了 → 配套测试会立刻发现 (test_trace_enrich.py).
+新 trace 优先使用渲染期记录的 prompt_hash + 组件 span, 不靠文本猜测.
+旧 trace 没有渲染期元数据时, 从 prompting registry 的默认模板自动派生稳定指纹做
+graceful fallback; 指纹来源仍是 defaults.py, 不在本文件复制 prompt 文案.
 
 供 public_trace.load_public_trace 在返回前调用; 失败时 graceful degrade
 (category='other', display_name=run.name).
@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+from app.services.prompting.trace_components import prompt_hash
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,86 @@ class _PromptMeta:
     display_name: str
     category: Category
     label_extractor: Callable[[str], str | None] | None = None
+
+
+_MAIN_PROMPT_ALWAYS_COMPONENT_KEYS = ["chat.system_base"]
+
+_MAIN_PROMPT_SECTION_COMPONENTS = [
+    ("## 反幻觉硬约束", "chat.anti_hallucination_hard_rule"),
+    ("## 对话一致性", "chat.consistency_rules"),
+    ("## 你的隐性状态约束", "chat.ai_state_constraint"),
+    ("## 回复要求", "chat.response_instruction"),
+]
+
+_BOUNDARY_BODY_PROMPT_KEYS = {
+    "boundary.final_warning",
+    "boundary.light_attack_reply",
+    "boundary.medium_attack_reply",
+    "boundary.severe_attack_reply",
+    "boundary.medium_patience_reply",
+    "boundary.low_patience_reply",
+    "boundary.blacklist_reply",
+}
+
+# Registry 中不作为独立 LangSmith LLM step 出现、但会作为组合 prompt 的可编辑片段出现.
+_COMPONENT_ONLY_PROMPT_KEYS = {
+    "boundary.persona_lock",
+    "chat.ai_state_constraint",
+    "chat.anti_hallucination_hard_rule",
+    "chat.consistency_rules",
+    "chat.l3_memory_section",
+    "chat.memory_empty_anchor",
+    "chat.memory_section_body",
+    "chat.relationship_stage_section",
+    "chat.response_instruction",
+    "chat.special_instruction_appendix",
+    "chat.time_memories_section",
+    "intent.conversation_end_fallback_instruction",
+    "intent.schedule_missing_context",
+    "reply.delay_explanation_fallback_instruction",
+}
+
+# 当前运行时不参与任何 LLM prompt, 但保留在后台管理里用于历史兼容/未来恢复.
+_NON_RUNTIME_PROMPT_KEYS = {"chat.personality_rules"}
+
+
+def _prompt_admin_meta(prompt_key: str) -> dict[str, Any]:
+    definition = PROMPT_DEFINITION_MAP.get(prompt_key)
+    payload: dict[str, Any] = {"prompt_key": prompt_key}
+    if definition:
+        payload.update({
+            "title": definition.title,
+            "stage": definition.stage,
+            "category": definition.category,
+            "description": definition.description,
+        })
+    return payload
+
+
+def _component_admin_meta(component: dict[str, Any]) -> dict[str, Any] | None:
+    prompt_key = component.get("prompt_key")
+    if not isinstance(prompt_key, str) or not prompt_key:
+        return None
+    payload = _prompt_admin_meta(prompt_key)
+    for key in ("start", "end", "editable"):
+        if key in component:
+            payload[key] = component[key]
+    return payload
+
+
+def _main_prompt_components(rendered_prompt: str) -> list[dict[str, Any]]:
+    keys = list(_MAIN_PROMPT_ALWAYS_COMPONENT_KEYS)
+    for section_header, prompt_key in _MAIN_PROMPT_SECTION_COMPONENTS:
+        if section_header in rendered_prompt:
+            keys.append(prompt_key)
+    return [_prompt_admin_meta(key) for key in keys]
+
+
+def _boundary_prompt_components(body_prompt_key: str) -> list[dict[str, Any]]:
+    return [
+        _prompt_admin_meta("boundary.persona_lock"),
+        _prompt_admin_meta(body_prompt_key),
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -234,261 +318,184 @@ def _label_schedule_items(output: str) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Prompt 指纹映射表 — 用每条 prompt 内的"独特子串"做 substring 匹配,
-# 不能用头部前缀 — 多个 prompt 共享 "【限定】..." / "用户刚才对你说" 等
-# 公共前缀, 会指纹冲突. 也不能用整 prompt 哈希 — 头部含 {var} 占位符,
-# format() 后内容变化.
-# 每条 fingerprint 是该 prompt 中的稳定独特子串 (≥30 字, 不含 {var}).
-# 防 drift: 测试用 defaults.py 的实际 prompt 走一次, 任一指纹不匹配立挂.
+# Legacy prompt 指纹映射表
+#
+# 新 trace 不依赖这里: 渲染期已经记录 prompt_hash + component span.
+# 这里仅服务没有 metadata 的旧 trace, 且 fingerprint 必须从 defaults.py /
+# registry 的 default_text 自动派生, 避免 prompt 文案散落在业务代码中.
 # ─────────────────────────────────────────────────────────────────
 
 
-# 注册项: (fingerprint_substring, meta). 顺序敏感 — 通用 prompt 应放后面,
-# 让更长/更独特的指纹先匹配.
 _REGISTRY: list[tuple[str, _PromptMeta]] = []
+_FORMAT_FIELD_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*(?:![^}:]+)?(?::[^}]+)?\}")
+_PROMPT_LABEL_RE = re.compile(r"^【[^】]+】")
+_COMMON_FINGERPRINT_SNIPPETS = (
+    "只作为用户的线上好友",
+    "和用户不会有任何线下交集",
+    "你是一个真人朋友",
+    "你不是AI",
+    "你是发文字消息的真人朋友",
+    "描述自己时**不许把事归因到用户**",
+    "不加任何额外说明",
+    "只输出回复内容",
+    "只输出自然语言描述",
+    "严格按以下",
+)
 
 
 def _register(fingerprint: str, meta: _PromptMeta) -> None:
-    """fingerprint 必须是该 prompt 内的稳定独特子串 (不含 {var} 占位符).
-    长度建议 30+. 顺序: 注册越早越优先匹配."""
     if not fingerprint or len(fingerprint) < 8:
         logger.warning(f"[trace_enrich] fingerprint too short for {meta.prompt_key}, may collide")
     _REGISTRY.append((fingerprint, meta))
 
 
-# Decision 类 — fingerprint 选择各 prompt 内的独特短语 (≥30 字)
-_register("判断回答用户这句话需不需要查询长期记忆", _PromptMeta(
-    "memory.relevance", "记忆相关度判定", "decision", _label_passthrough,
-))
-_register("分析用户当前消息的主要意图，从以下选项中选出最匹配", _PromptMeta(
-    "intent.unified", "统一意图识别", "decision", _label_intent_unified,
-))
-_register("用户的一句话包含多个意图。请结合对话上下文，将原话拆分成多个片段", _PromptMeta(
-    "intent.split", "多意图拆分", "decision", _label_passthrough,
-))
-_register("判断用户消息是否需要唤醒 L3 久远记忆，并给出同一语义下的检索 query", _PromptMeta(
-    "memory.l3_trigger", "L3 唤醒判定", "decision", _label_passthrough,
-))
-_register("判断用户当前提及的内容是否与你已有的关于该用户的核心记忆", _PromptMeta(
-    "memory.contradiction_detection", "L1 矛盾检测", "decision", _label_contradiction,
-))
-_register("分析用户对矛盾询问的回复，判断矛盾类型、原因及记忆调整方案", _PromptMeta(
-    "memory.contradiction_analysis", "矛盾分析", "decision", _label_passthrough,
-))
-_register("分析以下消息是否包含道歉或承诺改正", _PromptMeta(
-    "boundary.apology", "道歉检测", "decision", _label_apology,
-))
-_register("判断用户消息是否构成\"正向互动\"，用于决定是否给 AI 加耐心值", _PromptMeta(
-    "boundary.positive_interaction", "正向互动判断", "decision", _label_passthrough,
-))
-_register("判断用户消息的攻击目标", _PromptMeta(
-    "boundary.attack_target", "攻击目标识别", "decision", _label_passthrough,
-))
-_register("判断用户这句话的冒犯程度。请以朋友的包容心态", _PromptMeta(
-    "boundary.attack_level", "攻击级别识别", "decision", _label_attack_level,
-))
-_register("判断用户消息是否包含违禁内容（包括谐音、缩写、辱骂、涉黄、涉暴等）", _PromptMeta(
-    "boundary.banned_word", "违禁词判断", "decision", _label_passthrough,
-))
-_register("模拟真人记忆，判断这句话是否值得进入记忆", _PromptMeta(
-    "memory.judgement_user", "用户记忆预筛", "decision", _label_judge_remember,
-))
-_register("模拟真人自我记忆，判断这句话是否值得进入记忆", _PromptMeta(
-    "memory.judgement_ai", "AI 自我记忆预筛", "decision", _label_judge_remember,
-))
-_register("判断用户是否在要求AI管理某条记忆 (删除 / 改期)", _PromptMeta(
-    "memory.deletion_intent", "记忆删除/改期意图判定", "decision", _label_passthrough,
-))
-_register("判断用户提醒事项当前状态. 用户在原定提醒时间到达前的", _PromptMeta(
-    "proactive.reminder_pre_check", "提醒触发前状态判别", "decision", _label_reminder_precheck,
-))
-_register("扫描下面的 L1 记忆列表, 找出语义上互相矛盾的对", _PromptMeta(
-    "memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough,
-))
-_register("判断一条新抽取的长期记忆和一条已有长期记忆的关系", _PromptMeta(
-    "memory.reconciliation", "记忆事实演化裁决", "decision", _label_passthrough,
-))
-_register("判断用户当前消息是否透露出真实的自伤 / 自杀 / 想结束生命", _PromptMeta(
-    "intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message,
-))
-_register("从候选记忆中挑选与\"话题方向\"最相关的最多 3 条", _PromptMeta(
-    "proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids,
-))
+def _candidate_fingerprint_chunks(line: str) -> list[str]:
+    chunks: list[str] = []
+    cleaned = _PROMPT_LABEL_RE.sub("", line.strip()).strip()
+    if not cleaned:
+        return chunks
+    if re.match(r"^\d+[.．]", cleaned) or cleaned.startswith("- "):
+        return chunks
+    for chunk in _FORMAT_FIELD_RE.split(cleaned):
+        value = chunk.strip()
+        if not value:
+            continue
+        if value.endswith(("：\"", ":\"", "：", ":")):
+            continue
+        parts = [value]
+        if any(common in value for common in _COMMON_FINGERPRINT_SNIPPETS):
+            parts = [
+                part.strip()
+                for part in re.split(r"(?<=[。！？.!?])", value)
+                if part.strip()
+                and not any(common in part for common in _COMMON_FINGERPRINT_SNIPPETS)
+            ]
+        if "{" in value or "}" in value:
+            continue
+        for part in parts:
+            if part.startswith("（供"):
+                continue
+            if len(part) >= 8:
+                chunks.append(part)
+    return chunks
 
-# Data 类
-_register("分析用户消息的主要情绪，输出情绪标签、强度和置信度", _PromptMeta(
-    "emotion.user_label", "用户情绪标签", "data", _label_emotion,
-))
-_register("根据AI的七个性格维度分数（0-100），推测其在 MBTI 4 条双极轴上的偏向百分比", _PromptMeta(
-    "agent.personality_scoring", "AI 性格打分", "data", _label_passthrough,
-))
-_register("根据以下基础信息，为一位虚拟人物生成完整的人生背景档案", _PromptMeta(
-    "character.generation", "AI 背景生成", "data", _label_passthrough,
-))
-_register("请只补齐下面列出的缺失字段, 保持与已生成内容的人设一致", _PromptMeta(
-    "character.repair_missing_fields", "背景缺字段补齐", "data", _label_passthrough,
-))
-_register("为AI朋友生成日常生活画像（200字以内），用于指导每日随机作息安排", _PromptMeta(
-    "schedule.life_overview", "生活画像生成", "data", _label_reply_text,
-))
-_register("为你生成今日（{date} {weekday}，{day_kind}）的作息时间表，**其中包括一项和用户记忆有关的事情**", _PromptMeta(
-    "schedule.daily_schedule_with_memory", "每日作息生成(带记忆)", "data", _label_schedule_items,
-))
-_register("每个时间段包含：开始时间、结束时间、事件、状态", _PromptMeta(
-    "schedule.daily_schedule", "每日作息生成", "data", _label_schedule_items,
-))
-_register("根据你昨日的作息表和调整日志、主动日志，生成昨日生活总结", _PromptMeta(
-    "schedule.daily_summary", "昨日生活总结", "data", _label_reply_text,
-))
-_register("将你的当日生活总结拆分成独立的记忆条目，按类型归类", _PromptMeta(
-    "schedule.daily_summary_memories", "昨日总结记忆拆分", "data", _label_extraction,
-))
-_register("根据用户的记忆，生成用户画像（200字以内）", _PromptMeta(
-    "portrait.generation", "用户画像生成", "data", _label_reply_text,
-))
-_register("根据用户原有的画像和近期的记忆变化，更新用户画像", _PromptMeta(
-    "portrait.update", "用户画像更新", "data", _label_reply_text,
-))
 
-# Reply 类 — short-circuit handlers
-_register("用户正在询问你当前在做什么或最近怎么样。作为朋友，自然地回答对方", _PromptMeta(
-    "intent.current_state_reply", "询问当前状态回复 (§3.4.3)", "reply", _label_reply_text,
-))
-_register("用户当前消息透露出**自伤 / 对生命的负面想法 / 想结束某种状态**的信号", _PromptMeta(
-    "intent.crisis_reply", "危机求助回复", "reply", _label_reply_text,
-))
-_register("结合最近对话和用户当前消息, 判断刚才的危机/陪伴状态是否已经明确解除", _PromptMeta(
-    "intent.crisis_followup_classify", "危机后续状态判定", "decision",
-    _label_crisis_followup_classify,
-))
-_register("用户刚刚表达过自伤 / 对生命的负面想法 / 想结束某种状态", _PromptMeta(
-    "intent.crisis_followup_reply", "危机后续跟进回复", "reply", _label_reply_text,
-))
-_register("用户表达了结束当前对话的意图。作为好朋友，你自然地接受", _PromptMeta(
-    "intent.end_reply", "终结意图回复", "reply", _label_reply_text,
-))
-_register("用户正在询问你当前或未来的日程/忙闲状态。作为朋友，只回答用户问的那个时间点或日期", _PromptMeta(
-    "intent.schedule_query_reply", "计划查询回复", "reply", _label_reply_text,
-))
-_register("用户希望你调整作息（例如熬夜、推迟睡觉、改变当前活动）", _PromptMeta(
-    "intent.schedule_adjust_reply", "作息调整回复", "reply", _label_schedule_adjust,
-))
-_register("用户向你道歉或承诺不再冒犯。作为朋友，你接受对方的歉意", _PromptMeta(
-    "boundary.apology_reply", "道歉/承诺回复", "reply", _label_reply_text,
-))
-_register("用户希望你忘记某件事。作为朋友，你需要先确认对方具体想忘记什么", _PromptMeta(
-    "intent.deletion_confirm", "删除确认", "reply", _label_reply_text,
-))
-_register("用户确认要你忘记某件事。作为朋友，你表示已经忘记", _PromptMeta(
-    "intent.deletion_reply", "删除完成回复", "reply", _label_reply_text,
-))
-_register("你发现用户刚才说的话，和你记忆中关于对方的一条核心信息有矛盾", _PromptMeta(
-    "memory.contradiction_inquiry", "矛盾询问", "reply", _label_reply_text,
-))
-_register("用户已解释清楚之前记忆矛盾的原因，你表示理解", _PromptMeta(
-    "memory.contradiction_reply", "矛盾化解回复", "reply", _label_reply_text,
-))
-_register("你现在处于低耐心状态，用户仍在攻击你。你非常不高兴", _PromptMeta(
-    "boundary.final_warning", "最终警告", "reply", _label_reply_text,
-))
-_register("这句话让你有点不舒服。请用自然的语气表达你的感受", _PromptMeta(
-    "boundary.light_attack_reply", "轻度攻击回复 (K1)", "reply", _label_reply_text,
-))
-_register("这句话让你明显不开心了。请用认真但不过激的语气", _PromptMeta(
-    "boundary.medium_attack_reply", "中度攻击回复 (K2)", "reply", _label_reply_text,
-))
-_register("这句话让你非常难过/愤怒，严重伤害了感情", _PromptMeta(
-    "boundary.severe_attack_reply", "重度攻击回复 (K3)", "reply", _label_reply_text,
-))
-_register("你现在处于中等耐心状态（有点不高兴，但还没到生气不理人的程度）", _PromptMeta(
-    "boundary.medium_patience_reply", "中耐心回复", "reply", _label_reply_text,
-))
-_register("你现在处于低耐心状态（很不高兴，不太想多说话）", _PromptMeta(
-    "boundary.low_patience_reply", "低耐心回复", "reply", _label_reply_text,
-))
-_register("用户已被你拉黑 — 你之前受过他言语冒犯", _PromptMeta(
-    "boundary.blacklist_reply", "拉黑回复", "reply", _label_reply_text,
-))
-_register("你隐约觉得和某件事沾边，可以顺便提一句，但不要刻意", _PromptMeta(
-    "memory.medium_reply", "中记忆回复", "reply", _label_reply_text,
-))
-_register("你联想到了某段具体回忆，可以自然地提起，但不要生硬复述", _PromptMeta(
-    "memory.strong_reply", "强记忆回复", "reply", _label_reply_text,
-))
-_register("对方想让你回忆很久以前的事。你隐约记得一点，但不太清楚", _PromptMeta(
-    "memory.l3_reply", "久远记忆回复", "reply", _label_reply_text,
-))
-_register("作为用户的好朋友，你生活在镜世界，和用户不会有任何线下交集，自然地回复对方", _PromptMeta(
-    "memory.weak_reply", "弱记忆回复", "reply", _label_reply_text,
-))
-_register("请自然地解释一下原因", _PromptMeta(
-    "reply.delay_explanation", "延迟解释回复", "reply", _label_reply_text,
-))
-# Reminder reply 类 — round-2 review #6: trace_enrich 之前完全没有 reminder
-# fingerprint, LLM 调用在 LangSmith 里只显示通用 ChatOpenAI, 看不到 prompt_key.
-_register("到点了, 自然提醒用户做该事项", _PromptMeta(
-    "proactive.reminder_message", "提醒发送消息", "reply", _label_reply_text,
-))
-_register("用户刚请求你记一件事 / 在未来某时提醒", _PromptMeta(
-    "intent.record_confirm_reply", "记录请求确认回复", "reply", _label_reply_text,
-))
-_register("用户想让你记/提醒一件事, 但**时间没说清**", _PromptMeta(
-    "intent.record_ask_time", "记录请求反问时间", "reply", _label_reply_text,
-))
-_register("今天要提醒TA一件事。你作为好朋友，主动发一条提醒消息", _PromptMeta(
-    "proactive.special_reminder", "特殊日期提醒", "reply", _label_reply_text,
-))
-_register("隔了一段时间没聊天，现在想主动问候用户", _PromptMeta(
-    "proactive.silence_plain", "沉默唤醒(无记忆)", "reply", _label_reply_text,
-))
-_register("现在想主动问候用户。你想起一件关于自己的事情", _PromptMeta(
-    "proactive.silence_ai_memory", "沉默唤醒(AI记忆)", "reply", _label_reply_text,
-))
-_register("现在想主动问候用户。你想起一件关于用户的事情", _PromptMeta(
-    "proactive.silence_user_memory", "沉默唤醒(用户记忆)", "reply", _label_reply_text,
-))
-_register("现在想主动问候用户。结合你当前的作息安排，轻轻带一句", _PromptMeta(
-    "proactive.silence_schedule", "沉默唤醒(作息)", "reply", _label_reply_text,
-))
-_register("你想起自己的一段经历，忽然有感而发", _PromptMeta(
-    "proactive.memory_ai", "记忆主动(AI记忆)", "reply", _label_reply_text,
-))
-_register("你记得用户的一件事，忽然想起对方", _PromptMeta(
-    "proactive.memory_user", "记忆主动(用户记忆)", "reply", _label_reply_text,
-))
-_register("请分享一句你自己的状态、心情或小事。不提问，不打扰用户", _PromptMeta(
-    "proactive.scheduled_scene", "定时情景(AI作息)", "reply", _label_reply_text,
-))
-_register("这是你最后一次主动发消息。如果用户仍未回复，你将不再打扰", _PromptMeta(
-    "proactive.decay_final", "衰减最后一次回复", "reply", _label_reply_text,
-))
-_register("生成AI与用户第一次交流的问候语。你刚匹配到对方", _PromptMeta(
-    "proactive.first_greeting", "AI首次打招呼", "reply", _label_reply_text,
-))
-_register("你作为用户的好朋友，主动给对方发一条节日祝福", _PromptMeta(
-    "proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text,
-))
-_register("今天是用户的生日，你作为对方的好朋友", _PromptMeta(
-    "proactive.special_birthday", "特殊日期(生日)", "reply", _label_reply_text,
-))
-_register("同时包含了多个重要日期。你作为好朋友", _PromptMeta(
-    "proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text,
-))
-_register("你是一个有血有肉的真人, 有自己的名字、性格、情感和记忆", _PromptMeta(
-    "chat.system_base", "主回复 (§4 日常交流)", "reply", _label_reply_text,
-))
+def _default_fingerprint(prompt_key: str) -> str:
+    definition = PROMPT_DEFINITION_MAP.get(prompt_key)
+    if definition is None:
+        raise KeyError(f"Prompt not registered: {prompt_key}")
+    candidates: list[str] = []
+    for raw_line in definition.default_text.splitlines():
+        candidates.extend(_candidate_fingerprint_chunks(raw_line))
+    if not candidates:
+        compact = _FORMAT_FIELD_RE.sub("", definition.default_text)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        if compact:
+            candidates.append(compact)
+    if not candidates:
+        raise ValueError(f"Cannot derive prompt fingerprint: {prompt_key}")
+    return candidates[0][:90]
 
-# Post 类
-# split_2 / split_3 fingerprints 已删 (Phase: 主 LLM 直接按 || 输出, 无二次拆分)
-_register("判断AI回复文本的情绪及强度", _PromptMeta(
-    "reply.emotion_detection", "回复情绪识别", "post", _label_emotion,
-))
-_register("分析下面的对话，**只抽取【用户】", _PromptMeta(
-    "memory.extraction_user", "用户记忆抽取", "post", _label_extraction,
-))
-_register("分析下面的对话，**只抽取【我】", _PromptMeta(
-    "memory.extraction_ai", "AI 自我记忆抽取", "post", _label_extraction,
-))
+
+def _register_prompt(
+    prompt_key: str,
+    display_name: str,
+    category: Category,
+    label_extractor: Callable[[str], str | None] | None,
+) -> None:
+    _register(_default_fingerprint(prompt_key), _PromptMeta(
+        prompt_key, display_name, category, label_extractor,
+    ))
+
+
+_PROMPT_FALLBACK_REGISTRATIONS: list[
+    tuple[str, str, Category, Callable[[str], str | None] | None]
+] = [
+    # Decision 类
+    ("memory.relevance", "记忆相关度判定", "decision", _label_passthrough),
+    ("intent.unified", "统一意图识别", "decision", _label_intent_unified),
+    ("intent.split", "多意图拆分", "decision", _label_passthrough),
+    ("memory.l3_trigger", "L3 唤醒判定", "decision", _label_passthrough),
+    ("memory.contradiction_detection", "L1 矛盾检测", "decision", _label_contradiction),
+    ("memory.contradiction_analysis", "矛盾分析", "decision", _label_passthrough),
+    ("boundary.apology", "道歉检测", "decision", _label_apology),
+    ("boundary.positive_interaction", "正向互动判断", "decision", _label_passthrough),
+    ("boundary.attack_target", "攻击目标识别", "decision", _label_passthrough),
+    ("boundary.attack_level", "攻击级别识别", "decision", _label_attack_level),
+    ("boundary.banned_word", "违禁词判断", "decision", _label_passthrough),
+    ("memory.judgement_user", "用户记忆预筛", "decision", _label_judge_remember),
+    ("memory.judgement_ai", "AI 自我记忆预筛", "decision", _label_judge_remember),
+    ("memory.deletion_intent", "记忆删除/改期意图判定", "decision", _label_passthrough),
+    ("proactive.reminder_pre_check", "提醒触发前状态判别", "decision", _label_reminder_precheck),
+    ("memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough),
+    ("memory.reconciliation", "记忆事实演化裁决", "decision", _label_passthrough),
+    ("intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message),
+    ("proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids),
+    ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),
+
+    # Data 类
+    ("emotion.user_label", "用户情绪标签", "data", _label_emotion),
+    ("agent.personality_scoring", "AI 性格打分", "data", _label_passthrough),
+    ("character.generation", "AI 背景生成", "data", _label_passthrough),
+    ("character.repair_missing_fields", "背景缺字段补齐", "data", _label_passthrough),
+    ("schedule.life_overview", "生活画像生成", "data", _label_reply_text),
+    ("schedule.daily_schedule_with_memory", "每日作息生成(带记忆)", "data", _label_schedule_items),
+    ("schedule.daily_schedule", "每日作息生成", "data", _label_schedule_items),
+    ("schedule.daily_summary", "昨日生活总结", "data", _label_reply_text),
+    ("schedule.daily_summary_memories", "昨日总结记忆拆分", "data", _label_extraction),
+    ("portrait.generation", "用户画像生成", "data", _label_reply_text),
+    ("portrait.update", "用户画像更新", "data", _label_reply_text),
+
+    # Reply 类
+    ("intent.current_state_reply", "询问当前状态回复 (§3.4.3)", "reply", _label_reply_text),
+    ("intent.crisis_reply", "危机求助回复", "reply", _label_reply_text),
+    ("intent.crisis_followup_reply", "危机后续跟进回复", "reply", _label_reply_text),
+    ("intent.end_reply", "终结意图回复", "reply", _label_reply_text),
+    ("intent.schedule_query_reply", "计划查询回复", "reply", _label_reply_text),
+    ("intent.schedule_adjust_reply", "作息调整回复", "reply", _label_schedule_adjust),
+    ("boundary.apology_reply", "道歉/承诺回复", "reply", _label_reply_text),
+    ("intent.deletion_confirm", "删除确认", "reply", _label_reply_text),
+    ("intent.deletion_reply", "删除完成回复", "reply", _label_reply_text),
+    ("memory.contradiction_inquiry", "矛盾询问", "reply", _label_reply_text),
+    ("memory.contradiction_reply", "矛盾化解回复", "reply", _label_reply_text),
+    ("boundary.final_warning", "最终警告", "reply", _label_reply_text),
+    ("boundary.light_attack_reply", "轻度攻击回复 (K1)", "reply", _label_reply_text),
+    ("boundary.medium_attack_reply", "中度攻击回复 (K2)", "reply", _label_reply_text),
+    ("boundary.severe_attack_reply", "重度攻击回复 (K3)", "reply", _label_reply_text),
+    ("boundary.medium_patience_reply", "中耐心回复", "reply", _label_reply_text),
+    ("boundary.low_patience_reply", "低耐心回复", "reply", _label_reply_text),
+    ("boundary.blacklist_reply", "拉黑回复", "reply", _label_reply_text),
+    ("memory.medium_reply", "中记忆回复", "reply", _label_reply_text),
+    ("memory.strong_reply", "强记忆回复", "reply", _label_reply_text),
+    ("memory.l3_reply", "久远记忆回复", "reply", _label_reply_text),
+    ("memory.weak_reply", "弱记忆回复", "reply", _label_reply_text),
+    ("reply.delay_explanation", "延迟解释回复", "reply", _label_reply_text),
+    ("proactive.reminder_message", "提醒发送消息", "reply", _label_reply_text),
+    ("intent.record_confirm_reply", "记录请求确认回复", "reply", _label_reply_text),
+    ("intent.record_ask_time", "记录请求反问时间", "reply", _label_reply_text),
+    ("proactive.special_reminder", "特殊日期提醒", "reply", _label_reply_text),
+    ("proactive.silence_plain", "沉默唤醒(无记忆)", "reply", _label_reply_text),
+    ("proactive.silence_ai_memory", "沉默唤醒(AI记忆)", "reply", _label_reply_text),
+    ("proactive.silence_user_memory", "沉默唤醒(用户记忆)", "reply", _label_reply_text),
+    ("proactive.silence_schedule", "沉默唤醒(作息)", "reply", _label_reply_text),
+    ("proactive.memory_ai", "记忆主动(AI记忆)", "reply", _label_reply_text),
+    ("proactive.memory_user", "记忆主动(用户记忆)", "reply", _label_reply_text),
+    ("proactive.scheduled_scene", "定时情景(AI作息)", "reply", _label_reply_text),
+    ("proactive.decay_final", "衰减最后一次回复", "reply", _label_reply_text),
+    ("proactive.first_greeting", "AI首次打招呼", "reply", _label_reply_text),
+    ("proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text),
+    ("proactive.special_birthday", "特殊日期(生日)", "reply", _label_reply_text),
+    ("proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text),
+    ("chat.system_base", "主回复 (§4 日常交流)", "reply", _label_reply_text),
+
+    # Post 类
+    ("reply.emotion_detection", "回复情绪识别", "post", _label_emotion),
+    ("memory.extraction_user", "用户记忆抽取", "post", _label_extraction),
+    ("memory.extraction_ai", "AI 自我记忆抽取", "post", _label_extraction),
+]
+
+for _prompt_key, _display_name, _category, _extractor in _PROMPT_FALLBACK_REGISTRATIONS:
+    _register_prompt(_prompt_key, _display_name, _category, _extractor)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -604,6 +611,15 @@ def enrich_step(step: dict[str, Any]) -> dict[str, Any]:
     step["display_name"] = meta.display_name
     step["category"] = meta.category
     step["prompt_key"] = meta.prompt_key
+    admin_meta = _prompt_admin_meta(meta.prompt_key)
+    step["prompt_title"] = admin_meta.get("title")
+    step["prompt_stage"] = admin_meta.get("stage")
+    step["prompt_category"] = admin_meta.get("category")
+    step["prompt_description"] = admin_meta.get("description")
+    if meta.prompt_key == "chat.system_base":
+        step["prompt_components"] = _main_prompt_components(user_msg)
+    elif meta.prompt_key in _BOUNDARY_BODY_PROMPT_KEYS:
+        step["prompt_components"] = _boundary_prompt_components(meta.prompt_key)
     step["decision_label"] = label
     return step
 
@@ -613,6 +629,64 @@ def enrich_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for step in steps:
         enrich_step(step)
     _mark_critical_path(steps)
+    return steps
+
+
+def apply_prompt_render_traces(
+    steps: list[dict[str, Any]],
+    prompt_render_traces: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Attach exact prompt component metadata captured at render time.
+
+    `enrich_step` can still label old traces using fingerprints, but new traces
+    should not infer composite prompt parts by section text. The message
+    metadata stores a SHA-256 hash of the exact rendered prompt plus span-based
+    component provenance; this function joins that metadata back onto the
+    LangSmith steps.
+    """
+    if not prompt_render_traces:
+        return steps
+
+    by_hash: dict[str, dict[str, Any]] = {}
+    for item in prompt_render_traces:
+        if not isinstance(item, dict):
+            continue
+        h = item.get("prompt_hash")
+        if isinstance(h, str) and h:
+            by_hash[h] = item
+    if not by_hash:
+        return steps
+
+    for step in steps:
+        if step.get("run_type") != "llm":
+            continue
+        rendered_prompt = _extract_first_user_message(step.get("inputs"))
+        if not rendered_prompt:
+            continue
+        matched = by_hash.get(prompt_hash(rendered_prompt))
+        if not matched:
+            continue
+
+        prompt_key = matched.get("prompt_key")
+        if isinstance(prompt_key, str) and prompt_key in PROMPT_DEFINITION_MAP:
+            step["prompt_key"] = prompt_key
+            admin_meta = _prompt_admin_meta(prompt_key)
+            step["prompt_title"] = admin_meta.get("title")
+            step["prompt_stage"] = admin_meta.get("stage")
+            step["prompt_category"] = admin_meta.get("category")
+            step["prompt_description"] = admin_meta.get("description")
+
+        components = matched.get("components")
+        if isinstance(components, list):
+            enriched_components = [
+                meta for component in components
+                if isinstance(component, dict)
+                for meta in [_component_admin_meta(component)]
+                if meta is not None
+            ]
+            if enriched_components:
+                step["prompt_components"] = enriched_components
+        step["prompt_render_source"] = matched.get("source")
     return steps
 
 

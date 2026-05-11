@@ -8,18 +8,13 @@ Uses seven-dim personality (0-100) to build role-play personality descriptions.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
-from app.services.prompting.defaults import (
-    CHAT_L3_MEMORY_SECTION_PROMPT,
-    CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
-    CHAT_MEMORY_SECTION_BODY_PROMPT,
-    CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
-    CHAT_TIME_MEMORIES_SECTION_PROMPT,
-)
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.trace_components import record_prompt_render
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti
 from app.services.prompts.system_prompts import (
@@ -83,6 +78,12 @@ def _format_mbti_detail(mbti: dict) -> str:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _PromptBody:
+    body: str
+    prompt_key: str | None = None
+
+
 def _section(title: str, body: str) -> str:
     """Return a clearly-labelled prompt section."""
     return f"## {title}\n{body}"
@@ -102,6 +103,29 @@ def _optional_section(title: str, body: str | None) -> str | None:
     if not _has_prompt_body(body):
         return None
     return _section(title, str(body).strip())
+
+
+def _append_section(
+    sections: list[str],
+    components: list[dict[str, Any]],
+    title: str,
+    body: str,
+    *,
+    prompt_key: str | None = None,
+) -> None:
+    prefix_len = 2 if sections else 0  # "\n\n" inserted by final join before this section
+    section_header = f"## {title}\n"
+    start = sum(len(part) for part in sections) + max(0, len(sections) - 1) * 2
+    body_start = start + prefix_len + len(section_header)
+    section = section_header + body
+    sections.append(section)
+    if prompt_key:
+        components.append({
+            "prompt_key": prompt_key,
+            "start": body_start,
+            "end": body_start + len(body),
+            "editable": True,
+        })
 
 
 def _record_skipped_section(diagnostics: dict[str, Any] | None, title: str) -> None:
@@ -148,16 +172,17 @@ async def _build_personality_section(agent: Any) -> str:
 async def _build_emotion_section(
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
-) -> str | None:
+) -> _PromptBody | None:
     """Only inject intimacy stage; runtime emotion vectors have been removed."""
     if not intimacy_stage:
         return None
 
+    tpl = await get_prompt_text("chat.relationship_stage_section")
     parts: list[str] = [
-        CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT.format(intimacy_stage=intimacy_stage)
+        tpl.format(intimacy_stage=intimacy_stage)
     ]
 
-    return _section("当前情绪", "\n".join(parts))
+    return _PromptBody("\n".join(parts), "chat.relationship_stage_section")
 
 
     # (core_memory permanent injection removed — spec §3 uses retrieval only)
@@ -167,7 +192,7 @@ async def _build_memory_section(
     memories: list[ClassifiedMemory] | None,
     *,
     include_empty_anchor: bool = True,
-) -> str | None:
+) -> _PromptBody | None:
     """按 owner 分两段渲染. 见 ClassifiedMemory.source 分组原因.
 
     即便 memories 为空 (弱路径不调记忆 / 强中路径召回为空) 也注入空 section,
@@ -178,10 +203,8 @@ async def _build_memory_section(
     if not memories:
         if not include_empty_anchor:
             return None
-        return _section(
-            "你记得的事情",
-            CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
-        )
+        anchor = await get_prompt_text("chat.memory_empty_anchor")
+        return _PromptBody(str(anchor), "chat.memory_empty_anchor")
 
     def _days_since(value: Any) -> int | None:
         if value is None:
@@ -279,8 +302,9 @@ async def _build_memory_section(
     if not parts:
         return None
 
-    body = CHAT_MEMORY_SECTION_BODY_PROMPT.format(memory_groups="\n\n".join(parts))
-    return _section("你记得的事情", body)
+    tpl = await get_prompt_text("chat.memory_section_body")
+    body = tpl.format(memory_groups="\n\n".join(parts))
+    return _PromptBody(body, "chat.memory_section_body")
 
 
 def _build_delay_context_section(delay_context: str | None) -> str | None:
@@ -354,16 +378,29 @@ async def build_system_prompt(
 
     # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════
     # 同 agent 跨请求字节级一致, dashscope prefix cache 应命中.
-    sections: list[str] = [_section("核心规则", system_base)]
-    anti_hallucination_section = _optional_section("反幻觉硬约束", anti_hallucination)
+    sections: list[str] = []
+    components: list[dict[str, Any]] = []
+    _append_section(
+        sections, components, "核心规则", str(system_base),
+        prompt_key="chat.system_base",
+    )
+    anti_hallucination_body = str(anti_hallucination).strip()
+    anti_hallucination_section = anti_hallucination_body if _has_prompt_body(anti_hallucination_body) else None
     if anti_hallucination_section:
-        sections.append(anti_hallucination_section)
+        _append_section(
+            sections, components, "反幻觉硬约束", anti_hallucination_section,
+            prompt_key="chat.anti_hallucination_hard_rule",
+        )
     else:
         _record_skipped_section(diagnostics, "反幻觉硬约束")
     sections.append(await _build_personality_section(agent))   # per-agent 稳定
-    consistency_section = _optional_section("对话一致性", consistency_rules)
+    consistency_body = str(consistency_rules).strip()
+    consistency_section = consistency_body if _has_prompt_body(consistency_body) else None
     if consistency_section:
-        sections.append(consistency_section)
+        _append_section(
+            sections, components, "对话一致性", consistency_section,
+            prompt_key="chat.consistency_rules",
+        )
     else:
         _record_skipped_section(diagnostics, "对话一致性")
 
@@ -371,7 +408,10 @@ async def build_system_prompt(
 
     emo = await _build_emotion_section(user_emotion, intimacy_stage)
     if emo:
-        sections.append(emo)
+        _append_section(
+            sections, components, "当前情绪", emo.body,
+            prompt_key=emo.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "当前情绪")
 
@@ -396,7 +436,10 @@ async def build_system_prompt(
         ),
     )
     if mem:
-        sections.append(mem)
+        _append_section(
+            sections, components, "你记得的事情", mem.body,
+            prompt_key=mem.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "你记得的事情")
 
@@ -425,20 +468,24 @@ async def build_system_prompt(
     # 时间相关记忆
     if time_memories:
         numbered = "\n".join(f"- {m}" for m in time_memories)
-        sections.append(_section(
-            "相关时间记忆",
-            CHAT_TIME_MEMORIES_SECTION_PROMPT.format(time_memories=numbered),
-        ))
+        tpl = await get_prompt_text("chat.time_memories_section")
+        _append_section(
+            sections, components, "相关时间记忆",
+            tpl.format(time_memories=numbered),
+            prompt_key="chat.time_memories_section",
+        )
     else:
         _record_skipped_section(diagnostics, "相关时间记忆")
 
     # Spec §3.2 step 3: L3 distant memories (awakened only when relevant)
     if l3_memories:
         l3_block = "\n".join(f"- {m}" for m in l3_memories)
-        sections.append(_section(
-            "久远记忆（L3）",
-            CHAT_L3_MEMORY_SECTION_PROMPT.format(l3_memories=l3_block),
-        ))
+        tpl = await get_prompt_text("chat.l3_memory_section")
+        _append_section(
+            sections, components, "久远记忆（L3）",
+            tpl.format(l3_memories=l3_block),
+            prompt_key="chat.l3_memory_section",
+        )
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")
 
@@ -456,21 +503,21 @@ async def build_system_prompt(
         status_label = str(ai_status.get("status", "idle")).strip()
         if activity:
             tpl = await get_prompt_text("chat.ai_state_constraint")
-            sections.append(_section(
-                "你的隐性状态约束",
+            _append_section(
+                sections, components, "你的隐性状态约束",
                 tpl.format(activity=activity, status=status_label),
-            ))
+                prompt_key="chat.ai_state_constraint",
+            )
         else:
             _record_skipped_section(diagnostics, "你的隐性状态约束")
     else:
         _record_skipped_section(diagnostics, "你的隐性状态约束")
 
     # 回复要求 (n=random 1-3 每轮变, 不可 cache, 排末尾)
-    sections.append(
-        _section(
-            "回复要求",
-            response_instruction.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY),
-        )
+    _append_section(
+        sections, components, "回复要求",
+        response_instruction.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY),
+        prompt_key="chat.response_instruction",
     )
 
     if diagnostics is not None:
@@ -480,7 +527,14 @@ async def build_system_prompt(
         )
         diagnostics["system_prompt_section_count"] = len(sections)
 
-    return "\n\n".join(sections)
+    system_prompt = "\n\n".join(sections)
+    record_prompt_render(
+        system_prompt,
+        prompt_key="chat.system_base",
+        components=components,
+        source="chat.system_prompt",
+    )
+    return system_prompt
 
 
 def build_chat_messages(

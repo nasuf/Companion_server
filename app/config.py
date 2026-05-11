@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/companion"
     direct_database_url: str = ""
+    db_connection_limit: int = 3
+    db_connection_limit_max: int = 5
+    db_max_concurrent_queries: int = 3
+    db_query_max_retries: int = 4
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

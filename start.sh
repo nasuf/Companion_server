@@ -10,34 +10,97 @@ pid_alive() {
     kill -0 "$1" 2>/dev/null
 }
 
-cleanup_orphan_prisma_engines() {
-    local pid
-    local ppid
+process_cwd() {
+    lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+}
+
+process_command() {
+    ps -o command= -p "$1" 2>/dev/null || true
+}
+
+is_project_process() {
+    local pid="$1"
     local cwd
-    local orphan_pids=""
+    local command
+
+    cwd="$(process_cwd "$pid")"
+    command="$(process_command "$pid")"
+    [[ "$cwd" == "$PWD"* || "$command" == *"$PWD"* ]]
+}
+
+kill_process_tree() {
+    local pid="$1"
+    local signal="${2:-TERM}"
+    local child
+
+    while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        kill_process_tree "$child" "$signal"
+    done < <(pgrep -P "$pid" 2>/dev/null || true)
+
+    kill "-$signal" "$pid" 2>/dev/null || true
+}
+
+cleanup_project_prisma_engines() {
+    local pid
+    local engine_pids=""
 
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
-        ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-        [ "$ppid" = "1" ] || continue
-        cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
-        [ "$cwd" = "$PWD" ] || continue
-        orphan_pids="$orphan_pids $pid"
-    done < <(pgrep -f "prisma/query-engine" 2>/dev/null || true)
+        if is_project_process "$pid"; then
+            engine_pids="$engine_pids $pid"
+        fi
+    done < <(pgrep -f "query-engine" 2>/dev/null || true)
 
-    if [ -n "$orphan_pids" ]; then
-        echo "Stopping orphan Prisma query-engine process(es):$orphan_pids"
-        kill $orphan_pids 2>/dev/null || true
+    if [ -n "$engine_pids" ]; then
+        echo "Stopping project Prisma query-engine process(es):$engine_pids"
+        for pid in $engine_pids; do
+            kill_process_tree "$pid" TERM
+        done
         sleep 1
         local still_alive=""
-        for pid in $orphan_pids; do
+        for pid in $engine_pids; do
             if pid_alive "$pid"; then
                 still_alive="$still_alive $pid"
             fi
         done
         if [ -n "$still_alive" ]; then
-            echo "Force killing orphan Prisma query-engine process(es):$still_alive"
-            kill -9 $still_alive 2>/dev/null || true
+            echo "Force killing project Prisma query-engine process(es):$still_alive"
+            for pid in $still_alive; do
+                kill_process_tree "$pid" KILL
+            done
+        fi
+    fi
+}
+
+cleanup_project_uvicorn_processes() {
+    local pid
+    local server_pids=""
+
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        if is_project_process "$pid"; then
+            server_pids="$server_pids $pid"
+        fi
+    done < <(pgrep -f "uvicorn .*app.main:app|uvicorn app.main:app|app.main:app --reload" 2>/dev/null || true)
+
+    if [ -n "$server_pids" ]; then
+        echo "Stopping stale project uvicorn process(es):$server_pids"
+        for pid in $server_pids; do
+            kill_process_tree "$pid" TERM
+        done
+        sleep 1
+        local still_alive=""
+        for pid in $server_pids; do
+            if pid_alive "$pid"; then
+                still_alive="$still_alive $pid"
+            fi
+        done
+        if [ -n "$still_alive" ]; then
+            echo "Force killing stale project uvicorn process(es):$still_alive"
+            for pid in $still_alive; do
+                kill_process_tree "$pid" KILL
+            done
         fi
     fi
 }
@@ -56,20 +119,25 @@ fi
 EXISTING=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$EXISTING" ]; then
     echo "Killing existing process on port $PORT (PID $EXISTING)..."
-    kill $EXISTING 2>/dev/null || true
+    for pid in $EXISTING; do
+        kill_process_tree "$pid" TERM
+    done
     sleep 2
     # Force kill if still alive
     EXISTING_AGAIN=$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$EXISTING_AGAIN" ]; then
-        kill -9 $EXISTING_AGAIN 2>/dev/null || true
+        for pid in $EXISTING_AGAIN; do
+            kill_process_tree "$pid" KILL
+        done
     fi
     sleep 1
 fi
 
-# Uvicorn --reload can leave Prisma query-engine children orphaned. Those
-# engines keep DB sessions open without listening on the API port, so clean
-# project-local orphans before starting a fresh dev server.
-cleanup_orphan_prisma_engines
+# Uvicorn reloads and interrupted shell sessions can leave Python/Prisma child
+# processes alive without listening on the API port. Those children keep DB
+# sessions open, so clean project-local leftovers before starting a fresh server.
+cleanup_project_uvicorn_processes
+cleanup_project_prisma_engines
 
 # ── Check Docker ──
 if ! command -v docker &>/dev/null; then
@@ -170,7 +238,21 @@ fi
 # ── Start server ──
 echo ""
 echo "Starting server on port $PORT..."
-.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port "$PORT" &
+export DB_CONNECTION_LIMIT="${DB_CONNECTION_LIMIT:-3}"
+export DB_CONNECTION_LIMIT_MAX="${DB_CONNECTION_LIMIT_MAX:-5}"
+export DB_MAX_CONCURRENT_QUERIES="${DB_MAX_CONCURRENT_QUERIES:-$DB_CONNECTION_LIMIT}"
+export DB_QUERY_MAX_RETRIES="${DB_QUERY_MAX_RETRIES:-4}"
+
+UVICORN_ARGS=(app.main:app --host 0.0.0.0 --port "$PORT")
+if [ "${RELOAD:-0}" = "1" ] || [ "${RELOAD:-0}" = "true" ]; then
+    UVICORN_ARGS=(app.main:app --reload --host 0.0.0.0 --port "$PORT")
+    echo "  Reload: enabled"
+else
+    echo "  Reload: disabled (use RELOAD=1 ./start.sh to enable)"
+fi
+echo "  DB connection_limit=$DB_CONNECTION_LIMIT max_concurrent_queries=$DB_MAX_CONCURRENT_QUERIES"
+
+.venv/bin/uvicorn "${UVICORN_ARGS[@]}" &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
 

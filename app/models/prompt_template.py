@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -30,3 +32,16 @@ class PromptTemplateVersionResponse(BaseModel):
 
 class PromptTemplateRestoreVersionRequest(BaseModel):
     version_id: str
+
+
+class PromptTemplateReplayRequest(BaseModel):
+    prompt_key: str
+    rendered_prompt: str
+    model_kind: Literal["chat", "utility"] = "utility"
+    messages: list[dict[str, str]] | None = None
+
+
+class PromptTemplateReplayResponse(BaseModel):
+    prompt_key: str
+    output: str
+    rendered_prompt: str

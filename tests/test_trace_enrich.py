@@ -140,6 +140,131 @@ def test_registered_prompt_keys_exist_in_prompt_registry():
     assert unknown == set()
 
 
+def test_enriched_prompt_includes_admin_registry_metadata():
+    """Trace step 和提示词管理页必须用同一 registry metadata 对齐。"""
+    step = _fake_llm_step(defaults.INTENT_UNIFIED_PROMPT)
+    enriched = trace_enrich.enrich_step(step)
+
+    definition = PROMPT_DEFINITION_MAP["intent.unified"]
+    assert enriched["prompt_key"] == definition.key
+    assert enriched["prompt_title"] == definition.title
+    assert enriched["prompt_stage"] == definition.stage
+    assert enriched["prompt_category"] == definition.category
+
+
+def test_main_reply_exposes_component_prompt_keys():
+    """主回复是拼接 prompt, trace 应列出可编辑组件而不是只给一个泛化标题。"""
+    prompt = "\n\n".join([
+        f"## 核心规则\n{defaults.SYSTEM_BASE_PROMPT}",
+        f"## 反幻觉硬约束\n{defaults.ANTI_HALLUCINATION_HARD_RULE_PROMPT}",
+        f"## 你的身份\n你的名字叫Lua。",
+        f"## 对话一致性\n{defaults.CONSISTENCY_RULES_PROMPT}",
+        f"## 回复要求\n{defaults.RESPONSE_INSTRUCTION_PROMPT.format(n=2, total=220, max_per=80)}",
+    ])
+    step = _fake_llm_step(prompt)
+    enriched = trace_enrich.enrich_step(step)
+
+    keys = [item["prompt_key"] for item in enriched["prompt_components"]]
+    assert keys == [
+        "chat.system_base",
+        "chat.anti_hallucination_hard_rule",
+        "chat.consistency_rules",
+        "chat.response_instruction",
+    ]
+    assert "chat.personality_rules" not in keys
+    assert "chat.ai_state_constraint" not in keys
+
+
+def test_structured_prompt_render_trace_overrides_legacy_section_guessing():
+    """新 trace 用渲染期 hash+span 元数据定位组件, 不靠 section 标题猜。"""
+    prompt = "\n\n".join([
+        f"## 核心规则\n{defaults.SYSTEM_BASE_PROMPT}",
+        "## 当前情绪\n你们目前的关系是初识。",
+        "## 你记得的事情\n(本次没有联想到任何与当前话题相关的记忆)",
+    ])
+    step = trace_enrich.enrich_step(_fake_llm_step(prompt))
+    legacy_keys = [item["prompt_key"] for item in step.get("prompt_components", [])]
+    assert legacy_keys == ["chat.system_base"]
+
+    start = prompt.index("你们目前的关系")
+    end = start + len("你们目前的关系是初识。")
+    trace_enrich.apply_prompt_render_traces([step], [{
+        "prompt_hash": trace_enrich.prompt_hash(prompt),
+        "prompt_key": "chat.system_base",
+        "source": "chat.system_prompt",
+        "components": [
+            {"prompt_key": "chat.relationship_stage_section", "start": start, "end": end},
+        ],
+    }])
+
+    components = step["prompt_components"]
+    assert [item["prompt_key"] for item in components] == ["chat.relationship_stage_section"]
+    assert components[0]["start"] == start
+    assert components[0]["end"] == end
+
+
+def test_main_reply_exposes_ai_state_component_only_when_rendered():
+    prompt = "\n\n".join([
+        f"## 核心规则\n{defaults.SYSTEM_BASE_PROMPT}",
+        f"## 你的隐性状态约束\n{defaults.CHAT_AI_STATE_CONSTRAINT_PROMPT.format(activity='看书', status='busy')}",
+        f"## 回复要求\n{defaults.RESPONSE_INSTRUCTION_PROMPT.format(n=1, total=220, max_per=80)}",
+    ])
+    enriched = trace_enrich.enrich_step(_fake_llm_step(prompt))
+
+    keys = [item["prompt_key"] for item in enriched["prompt_components"]]
+    assert keys == ["chat.system_base", "chat.ai_state_constraint", "chat.response_instruction"]
+
+
+def test_boundary_reply_exposes_persona_lock_component():
+    prompt = defaults.BOUNDARY_PERSONA_LOCK_PROMPT + defaults.LIGHT_ATTACK_REPLY_PROMPT
+    enriched = trace_enrich.enrich_step(_fake_llm_step(prompt))
+
+    keys = [item["prompt_key"] for item in enriched["prompt_components"]]
+    assert keys == ["boundary.persona_lock", "boundary.light_attack_reply"]
+
+
+def test_trace_prompt_key_coverage_matches_runtime_surfaces():
+    """后台 prompt 要么是独立 LLM step, 要么是组合组件, 要么明确标成非运行时。"""
+    registered = {meta.prompt_key for _, meta in trace_enrich._REGISTRY}
+    covered = (
+        registered
+        | trace_enrich._COMPONENT_ONLY_PROMPT_KEYS
+        | trace_enrich._NON_RUNTIME_PROMPT_KEYS
+    )
+    assert set(PROMPT_DEFINITION_MAP) - covered == set()
+
+
+def test_all_defaults_prompt_constants_are_registered():
+    """defaults.py 是唯一 prompt 文案源; 其中每个 *_PROMPT 都必须出现在后台 registry。"""
+    import ast
+    from pathlib import Path
+
+    defaults_path = Path(defaults.__file__)
+    tree = ast.parse(defaults_path.read_text(encoding="utf-8"))
+    prompt_constant_names = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id.endswith("_PROMPT")
+    }
+
+    registered_names = {
+        definition.default_text
+        for definition in PROMPT_DEFINITION_MAP.values()
+    }
+    defaults_by_name = {
+        name: getattr(defaults, name)
+        for name in prompt_constant_names
+    }
+    missing = {
+        name
+        for name, value in defaults_by_name.items()
+        if value not in registered_names
+    }
+    assert missing == set()
+
+
 @pytest.mark.parametrize("prompt_const,expected_key,params", [
     (
         defaults.SCHEDULE_QUERY_REPLY_PROMPT,

@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -149,3 +151,68 @@ def test_personality_rules_text_dropped_from_static_prompts():
     )
     # body 拼接行不该含 {personality_rules}
     assert "{personality_rules}" not in src
+
+
+def _is_string_literal_expr(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _is_string_literal_expr(node.left) and _is_string_literal_expr(node.right)
+    return False
+
+
+def _prompt_assignment_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for item in target.elts:
+            names.extend(_prompt_assignment_names(item))
+        return names
+    return []
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def test_runtime_code_has_no_inline_llm_prompt_literals():
+    """LLM 运行时 prompt 不允许散落在业务代码中。
+
+    新 prompt 必须先放进 app/services/prompting/defaults.py 并注册到 registry/store,
+    业务代码只能通过 get_prompt_text/render_prompt 取模板后填充。
+    """
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    defaults_path = app_root / "services" / "prompting" / "defaults.py"
+    llm_call_names = {"invoke_text", "invoke_json", "invoke_json_with_usage"}
+    violations: list[str] = []
+
+    for path in app_root.rglob("*.py"):
+        if path == defaults_path:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(app_root)
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+                if value is None or not _is_string_literal_expr(value):
+                    continue
+                for target in targets:
+                    for name in _prompt_assignment_names(target):
+                        if name == "prompt" or name.endswith("_prompt"):
+                            violations.append(f"{rel}:{node.lineno} inline prompt literal assigned to {name}")
+
+            if isinstance(node, ast.Call) and _call_name(node.func) in llm_call_names:
+                # invoke_text(model, prompt) / invoke_json(model, prompt): 第二个位置参数是 prompt.
+                if len(node.args) >= 2 and _is_string_literal_expr(node.args[1]):
+                    violations.append(f"{rel}:{node.lineno} inline prompt literal passed to {_call_name(node.func)}")
+
+    assert violations == []

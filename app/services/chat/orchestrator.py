@@ -28,7 +28,14 @@ from app.observability.events import (
 )
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
-from app.services.prompting.defaults import CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT
+from app.services.prompting.store import get_prompt_text
+from app.services.prompting.trace_components import (
+    prompt_hash,
+    record_prompt_render,
+    reset_prompt_render_trace,
+    snapshot_prompt_render_traces,
+    start_prompt_render_trace,
+)
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
@@ -214,7 +221,32 @@ async def _intent_llm_reply(
 ) -> str:
     """Generate a short LLM reply for a special intent (farewell, reconciliation, etc.)."""
     prompt = await build_system_prompt(agent=agent, reply_count=1, reply_total=60)
-    prompt += CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT.format(instruction=instruction)
+    base_prompt_hash = prompt_hash(prompt)
+    base_components: list[dict[str, Any]] = []
+    for trace in reversed(snapshot_prompt_render_traces()):
+        if trace.get("prompt_hash") == base_prompt_hash:
+            raw_components = trace.get("components")
+            if isinstance(raw_components, list):
+                base_components = [dict(item) for item in raw_components if isinstance(item, dict)]
+            break
+    appendix_tpl = await get_prompt_text("chat.special_instruction_appendix")
+    appendix_start = len(prompt)
+    appendix = appendix_tpl.format(instruction=instruction)
+    prompt += appendix
+    record_prompt_render(
+        prompt,
+        prompt_key="chat.system_base",
+        components=[
+            *base_components,
+            {
+                "prompt_key": "chat.special_instruction_appendix",
+                "start": appendix_start,
+                "end": appendix_start + len(appendix),
+                "editable": True,
+            },
+        ],
+        source="chat.special_instruction",
+    )
     model = get_chat_model()
     result = await model.ainvoke(convert_messages([
         {"role": "system", "content": prompt},
@@ -624,9 +656,11 @@ async def stream_chat_response(
     else:
         tracer = LangSmithTracer(user_message, conversation_id).enter()
     retrieval_trace_token = None
+    prompt_trace_token = None
     if not sub_intent_mode:
         from app.services.memory.retrieval.trace import start_retrieval_trace
         retrieval_trace_token = start_retrieval_trace()
+        prompt_trace_token = start_prompt_render_trace()
 
     # spec §2.1/§2.2 全消息走 post_process. 短路路径直接 return 跳过主路径末尾的
     # _fire_background(post_process) → 必须 finally 兜底, 否则 7 个短路意图 (终结/计划查询/
@@ -1475,6 +1509,16 @@ async def stream_chat_response(
                     "text": str(first),
                     "response_diagnostics": response_diagnostics,
                 }
+            prompt_render_traces = snapshot_prompt_render_traces()
+            if prompt_render_traces:
+                first = emitted_replies[0]
+                if isinstance(first, dict):
+                    first.setdefault("prompt_render_traces", prompt_render_traces)
+                else:
+                    emitted_replies[0] = {
+                        "text": str(first),
+                        "prompt_render_traces": prompt_render_traces,
+                    }
             from app.services.memory.retrieval.trace import (
                 build_retrieval_quality_analysis,
                 snapshot_retrieval_traces,
@@ -1590,6 +1634,8 @@ async def stream_chat_response(
         if retrieval_trace_token is not None:
             from app.services.memory.retrieval.trace import reset_retrieval_trace
             reset_retrieval_trace(retrieval_trace_token)
+        if prompt_trace_token is not None:
+            reset_prompt_render_trace(prompt_trace_token)
         reset_current_agent(_agent_ctx_token)
 
         # spec §2.1/§2.2 兜底: 短路意图早 return 跳过主路径末尾的 post_process fire,

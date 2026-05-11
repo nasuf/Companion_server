@@ -59,10 +59,7 @@ from app.services.schedule_domain.schedule import (
     update_schedule_slot,
 )
 from app.services.schedule_domain.time_service import get_current_time, resolve_implicit_time
-from app.services.prompting.defaults import (
-    CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
-    SCHEDULE_MISSING_CONTEXT_PROMPT,
-)
+from app.services.prompting.store import get_prompt_text
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.rules.chat_keywords import (
     CANCEL_NEG_TOKENS,
@@ -209,8 +206,9 @@ async def handle_conversation_end(
         personality_brief=_agent_name(ctx.agent),
     )
     if not farewell:
+        fallback_instruction = await get_prompt_text("intent.conversation_end_fallback_instruction")
         farewell = await fallback_fn(
-            ctx.agent, user_message, CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
+            ctx.agent, user_message, str(fallback_instruction),
         )
     async for evt in ctx.finalize(farewell, kind="conversation_end"):
         yield evt
@@ -517,7 +515,8 @@ async def handle_schedule_query(
             target_schedule, resolved_query_type, target_status, date_label=date_label,
         )
     else:
-        schedule_context = SCHEDULE_MISSING_CONTEXT_PROMPT.format(date_label=date_label)
+        missing_tpl = await get_prompt_text("intent.schedule_missing_context")
+        schedule_context = missing_tpl.format(date_label=date_label)
     repeat_key = _hashed_repeat_key(resolved_query_type, date_label, schedule_context)
     repeat_metadata = _repeat_metadata(
         "schedule_query",

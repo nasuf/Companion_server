@@ -5,8 +5,14 @@ services:
       context: .
     container_name: companion-server
     restart: unless-stopped
+    init: true
     env_file:
       - .env
+    environment:
+      DB_CONNECTION_LIMIT: "${DB_CONNECTION_LIMIT:-3}"
+      DB_CONNECTION_LIMIT_MAX: "${DB_CONNECTION_LIMIT_MAX:-5}"
+      DB_MAX_CONCURRENT_QUERIES: "${DB_MAX_CONCURRENT_QUERIES:-3}"
+      DB_QUERY_MAX_RETRIES: "${DB_QUERY_MAX_RETRIES:-4}"
     ports:
       - "127.0.0.1:8000:8000"
     extra_hosts:
@@ -17,3 +23,4 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    stop_grace_period: 30s

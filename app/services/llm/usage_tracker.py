@@ -125,7 +125,12 @@ async def traced_usage_session(
 ):
     """LangSmith trace + usage_session 组合, 给 yield 出来的 tracer 让调用方读 safe_trace_id."""
     from app.services.chat.tracing import LangSmithTracer
+    from app.services.prompting.trace_components import (
+        reset_prompt_render_trace,
+        start_prompt_render_trace,
+    )
     tracer = LangSmithTracer(name, conversation_id or "").enter()
+    prompt_trace_token = start_prompt_render_trace()
     try:
         async with usage_session(
             scope=scope, conversation_id=conversation_id,
@@ -134,4 +139,5 @@ async def traced_usage_session(
         ):
             yield tracer
     finally:
+        reset_prompt_render_trace(prompt_trace_token)
         tracer.close()

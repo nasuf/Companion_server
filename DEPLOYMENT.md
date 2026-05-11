@@ -59,17 +59,18 @@ Optional:
 ### Database
 
 ```env
-DATABASE_URL=postgresql://postgres.lzmeacugbmdzqhasitog:Hellocompanion713%21@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require
-MIGRATION_DATABASE_URL=postgresql://postgres.lzmeacugbmdzqhasitog:Hellocompanion713%21@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1
-DB_CONNECTION_LIMIT=5
-DB_MAX_CONCURRENT_QUERIES=5
-DB_QUERY_MAX_RETRIES=2
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:5432/postgres?sslmode=require
+MIGRATION_DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1
+DB_CONNECTION_LIMIT=3
+DB_CONNECTION_LIMIT_MAX=5
+DB_MAX_CONCURRENT_QUERIES=3
+DB_QUERY_MAX_RETRIES=4
 ```
 
 ### Redis
 
 ```env
-REDIS_URL=redis://:nasuf713%21@192.210.235.115:6380/4
+REDIS_URL=redis://:<password>@<host>:6380/4
 ```
 
 ### Model switch
@@ -115,7 +116,8 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
 
 - Best practice for Supabase:
   - `DATABASE_URL` uses session mode (`5432`) for the long-running server process.
-  - Keep runtime `connection_limit` below the Supabase session pool cap. This app defaults to `5` and also rewrites an oversized runtime URL down to that value at startup.
+  - Keep runtime `connection_limit` well below the Supabase session pool cap. This app defaults to `3` and rewrites an oversized runtime URL down to the safe cap at startup.
+  - `DB_CONNECTION_LIMIT_MAX` is a hard runtime cap for accidental oversized values. Increase it only after the Supabase session pool size is increased.
   - Keep `DB_MAX_CONCURRENT_QUERIES` less than or equal to `DB_CONNECTION_LIMIT` so request bursts queue in the app instead of exhausting database sessions.
   - `MIGRATION_DATABASE_URL` uses transaction mode (`6543`) for Prisma admin commands.
   - For Prisma against Supabase transaction pooler, keep `pgbouncer=true&connection_limit=1`.

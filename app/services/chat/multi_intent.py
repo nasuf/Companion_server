@@ -64,6 +64,13 @@ async def short_circuit_reply(
                 metadata.setdefault("memory_retrievals", retrieval_traces)
         except Exception:
             pass
+        try:
+            from app.services.prompting.trace_components import snapshot_prompt_render_traces
+            prompt_traces = snapshot_prompt_render_traces()
+            if prompt_traces:
+                metadata.setdefault("prompt_render_traces", prompt_traces)
+        except Exception:
+            pass
     if metadata:
         reply_payload = {"text": reply, **metadata}
     _fire_background(save_replies_fn(

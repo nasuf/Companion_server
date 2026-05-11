@@ -33,60 +33,79 @@ async def _timed(name: str, coro):
 async def lifespan(app: FastAPI):
     t_start = time.monotonic()
     logger.info("Starting up...")
+    scheduler_started = False
+    ws_manager = None
 
-    # Phase 1: Connect to all services in parallel
-    # DB 是硬依赖, 启动失败直接 crash; Redis 软依赖, 失败降级到 readonly mode
-    # (GET 端点仍可用, 写端点 require_redis 返 503, scheduler 每 30s 重检自愈).
-    await _timed("Database", connect_db())
     try:
-        await _timed("Redis", get_redis())
-        mark_redis_healthy(True)
-    except Exception as e:
-        logger.error(f"Redis connect failed ({e!r}); starting in readonly mode")
-        mark_redis_healthy(False)
+        # Phase 1: Connect to all services in parallel
+        # DB 是硬依赖, 启动失败直接 crash; Redis 软依赖, 失败降级到 readonly mode
+        # (GET 端点仍可用, 写端点 require_redis 返 503, scheduler 每 30s 重检自愈).
+        await _timed("Database", connect_db())
+        try:
+            await _timed("Redis", get_redis())
+            mark_redis_healthy(True)
+        except Exception as e:
+            logger.error(f"Redis connect failed ({e!r}); starting in readonly mode")
+            mark_redis_healthy(False)
 
-    # Phase 2: Schema + seeding
-    await asyncio.gather(
-        _timed("Prompt templates", ensure_prompt_templates()),
-        _timed("Career templates", ensure_default_careers()),
-    )
-
-    # Phase 2b: Holiday cache preload. Runs sequentially (not in the gather
-    # above) to avoid exhausting the Prisma pool when the other seed tasks
-    # hold connections for several seconds. Failure here must not crash
-    # startup — cache stays empty and `is_holiday()` falls back to lunardate.
-    try:
-        await _timed("Holiday cache", reload_holiday_cache())
-    except Exception as e:
-        logger.warning(
-            f"Holiday cache preload failed ({e!r}); lunardate fallback active."
+        # Phase 2: Schema + seeding
+        await asyncio.gather(
+            _timed("Prompt templates", ensure_prompt_templates()),
+            _timed("Career templates", ensure_default_careers()),
         )
 
-    # Phase 2c: Runtime config preload (system + agent overrides). 失败时全部
-    # fallback 到 env 默认, 不阻断启动.
-    try:
-        from app.services.runtime_config import load_caches
-        await _timed("Runtime config", load_caches())
-    except Exception as e:
-        logger.warning(
-            f"Runtime config load failed ({e!r}); env defaults active."
-        )
+        # Phase 2b: Holiday cache preload. Runs sequentially (not in the gather
+        # above) to avoid exhausting the Prisma pool when the other seed tasks
+        # hold connections for several seconds. Failure here must not crash
+        # startup — cache stays empty and `is_holiday()` falls back to lunardate.
+        try:
+            await _timed("Holiday cache", reload_holiday_cache())
+        except Exception as e:
+            logger.warning(
+                f"Holiday cache preload failed ({e!r}); lunardate fallback active."
+            )
 
-    # Phase 3: Scheduler + WS subscriber (跨进程 Pub/Sub)
-    setup_scheduler()
-    logger.info("  ✓ Scheduler")
-    from app.services.runtime.ws_manager import manager as ws_manager
-    await ws_manager.start_subscriber()
-    logger.info("  ✓ WS subscriber")
+        # Phase 2c: Runtime config preload (system + agent overrides). 失败时全部
+        # fallback 到 env 默认, 不阻断启动.
+        try:
+            from app.services.runtime_config import load_caches
+            await _timed("Runtime config", load_caches())
+        except Exception as e:
+            logger.warning(
+                f"Runtime config load failed ({e!r}); env defaults active."
+            )
 
-    total = (time.monotonic() - t_start) * 1000
-    logger.info(f"Startup complete ({total:.0f}ms)")
-    yield
-    # Shutdown
-    await ws_manager.stop_subscriber()
-    shutdown_scheduler()
-    await disconnect_db()
-    await close_redis()
+        # Phase 3: Scheduler + WS subscriber (跨进程 Pub/Sub)
+        setup_scheduler()
+        scheduler_started = True
+        logger.info("  ✓ Scheduler")
+        from app.services.runtime.ws_manager import manager as runtime_ws_manager
+        ws_manager = runtime_ws_manager
+        await ws_manager.start_subscriber()
+        logger.info("  ✓ WS subscriber")
+
+        total = (time.monotonic() - t_start) * 1000
+        logger.info(f"Startup complete ({total:.0f}ms)")
+        yield
+    finally:
+        if ws_manager is not None:
+            try:
+                await ws_manager.stop_subscriber()
+            except Exception as e:
+                logger.warning(f"WS subscriber shutdown failed: {e!r}")
+        if scheduler_started:
+            try:
+                shutdown_scheduler()
+            except Exception as e:
+                logger.warning(f"Scheduler shutdown failed: {e!r}")
+        try:
+            await disconnect_db()
+        except Exception as e:
+            logger.warning(f"DB disconnect failed: {e!r}")
+        try:
+            await close_redis()
+        except Exception as e:
+            logger.warning(f"Redis disconnect failed: {e!r}")
 
 
 app = FastAPI(title="AI Companion", version="0.1.0", lifespan=lifespan)

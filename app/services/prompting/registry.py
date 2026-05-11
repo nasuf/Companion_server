@@ -18,13 +18,21 @@ from app.services.prompting.defaults import (
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    CHAT_L3_MEMORY_SECTION_PROMPT,
+    CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
+    CHAT_MEMORY_SECTION_BODY_PROMPT,
+    CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
+    CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
+    CHAT_TIME_MEMORIES_SECTION_PROMPT,
     CONSISTENCY_RULES_PROMPT,
+    CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
     CRISIS_FOLLOWUP_CLASSIFY_PROMPT,
     CRISIS_FOLLOWUP_REPLY_PROMPT,
     CRISIS_MESSAGE_CLASSIFY_PROMPT,
     CRISIS_REPLY_PROMPT,
     CURRENT_STATE_REPLY_PROMPT,
     DAILY_SCHEDULE_PROMPT,
+    DELAY_EXPLANATION_FALLBACK_INSTRUCTION_PROMPT,
     DELAY_EXPLANATION_PROMPT,
     DELETION_CONFIRM_PROMPT,
     DELETION_INTENT_PROMPT,
@@ -73,6 +81,7 @@ from app.services.prompting.defaults import (
     REMINDER_MESSAGE_PROMPT,
     REMINDER_PRE_CHECK_PROMPT,
     RESPONSE_INSTRUCTION_PROMPT,
+    SCHEDULE_MISSING_CONTEXT_PROMPT,
     DAILY_SCHEDULE_WITH_USER_MEMORY_PROMPT,
     MEMORY_JUDGEMENT_AI_PROMPT,
     MEMORY_JUDGEMENT_USER_PROMPT,
@@ -143,6 +152,53 @@ PROMPT_DEFINITIONS = [
         "告诉 LLM 状态但禁止主动展开, 避免跟 §3.4.3 询问当前状态分支撞主题. "
         "占位符: {activity} {status}.",
         CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.relationship_stage_section", "关系阶段段落", "聊天热路径", "聊天",
+        "主回复 system prompt 的「当前情绪」段固定模板。运行时只注入 {intimacy_stage}, "
+        "trace 内编辑时只允许修改这段模板文本。",
+        CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_empty_anchor", "无相关记忆锚点", "聊天热路径", "记忆",
+        "主回复 system prompt 的「你记得的事情」空结果锚点。用于告诉 LLM 本轮已检索但无相关记忆, "
+        "避免顺承用户预设编造事实。",
+        CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_section_body", "记忆段落说明", "聊天热路径", "记忆",
+        "主回复 system prompt 的「你记得的事情」段固定说明。运行时注入 {memory_groups}。",
+        CHAT_MEMORY_SECTION_BODY_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.time_memories_section", "时间相关记忆段落", "聊天热路径", "记忆",
+        "主回复 system prompt 的「相关时间记忆」段固定模板。运行时注入 {time_memories}。",
+        CHAT_TIME_MEMORIES_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.l3_memory_section", "久远记忆段落", "聊天热路径", "记忆",
+        "主回复 system prompt 的「久远记忆(L3)」段固定模板。运行时注入 {l3_memories}。",
+        CHAT_L3_MEMORY_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.special_instruction_appendix", "特殊指令追加段", "聊天热路径", "聊天",
+        "特殊意图 fallback 复用主回复 system prompt 时追加的固定段。运行时注入 {instruction}。",
+        CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.conversation_end_fallback_instruction", "终结意图兜底指令", "意图处理", "意图",
+        "终结意图在专用回复失败时, 追加到主回复 prompt 的兜底指令。",
+        CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_explanation_fallback_instruction", "延迟解释兜底指令", "异步回复", "回复加工",
+        "延迟解释回复失败时, 追加到主回复 prompt 的兜底指令。占位符 {delay_minutes}。",
+        DELAY_EXPLANATION_FALLBACK_INSTRUCTION_PROMPT,
+    ),
+    PromptDefinition(
+        "intent.schedule_missing_context", "计划查询无作息上下文", "意图处理", "意图",
+        "计划查询命中未来/指定日期但没有缓存作息时注入的固定上下文。占位符 {date_label}。",
+        SCHEDULE_MISSING_CONTEXT_PROMPT,
     ),
     PromptDefinition(
         "intent.crisis_reply", "危机求助回复", "聊天热路径", "聊天",

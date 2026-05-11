@@ -9,6 +9,7 @@ from dataclasses import asdict
 from app.db import db
 from app.redis_client import get_redis
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP, PROMPT_DEFINITIONS, PromptDefinition
+from app.services.prompting.trace_components import ManagedPromptText
 
 logger = logging.getLogger(__name__)
 
@@ -153,12 +154,12 @@ async def get_prompt_text(key: str) -> str:
     redis = await get_redis()
     cached = await redis.get(_redis_key(key))
     if cached:
-        return cached
+        return ManagedPromptText(cached, key)
 
     record = await db.prompttemplate.find_unique(where={"key": key})
     content = record.content if record and record.content else definition.default_text
     await redis.set(_redis_key(key), content)
-    return content
+    return ManagedPromptText(content, key)
 
 
 async def list_prompts() -> list[dict]:

@@ -14,9 +14,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Supabase session pooler has a small per-session client pool. Keep Prisma's
-# own pool below that limit and throttle app-side bursts so one API process
-# cannot exhaust all database sessions.
-_DB_CONNECTION_LIMIT_DEFAULT = 5
+# own pool well below that limit and throttle app-side bursts so one API
+# process cannot exhaust all database sessions. The hard cap is intentional:
+# local reloads, stale Prisma query-engine children, and deploy restarts can
+# briefly overlap, so one process should not be allowed to reserve the whole
+# Supabase session pool.
+_DB_CONNECTION_LIMIT_DEFAULT = 3
+_DB_CONNECTION_LIMIT_MAX_DEFAULT = 5
 _DB_POOL_TIMEOUT_DEFAULT = 30
 _DB_CONNECT_TIMEOUT_DEFAULT = 30
 
@@ -34,6 +38,24 @@ def _parse_positive_int(value: str | None) -> int | None:
 
 
 _DB_QUERY_MAX_RETRIES = _parse_positive_int(os.getenv("DB_QUERY_MAX_RETRIES")) or 2
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _runtime_connection_limit_cap() -> int:
+    return (
+        _parse_positive_int(os.getenv("DB_CONNECTION_LIMIT_MAX"))
+        or _DB_CONNECTION_LIMIT_MAX_DEFAULT
+    )
+
+
+def _safe_runtime_connection_limit(requested: int | None = None) -> int:
+    requested_limit = requested or _DB_CONNECTION_LIMIT_DEFAULT
+    if _env_flag_enabled("DB_ALLOW_UNSAFE_CONNECTION_LIMIT"):
+        return requested_limit
+    return min(requested_limit, _runtime_connection_limit_cap())
 
 
 def _with_safe_database_params(
@@ -59,7 +81,8 @@ def _with_safe_database_params(
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
 
     existing_limit = _parse_positive_int(query.get("connection_limit"))
-    safe_limit = forced_connection_limit or default_connection_limit
+    requested_limit = forced_connection_limit or default_connection_limit
+    safe_limit = _safe_runtime_connection_limit(requested_limit)
     if existing_limit is None or existing_limit > safe_limit:
         query["connection_limit"] = str(safe_limit)
 
@@ -77,6 +100,19 @@ def _install_safe_database_url() -> None:
         return
 
     forced_limit = _parse_positive_int(os.getenv("DB_CONNECTION_LIMIT"))
+    effective_limit = _safe_runtime_connection_limit(forced_limit)
+    if (
+        forced_limit is not None
+        and forced_limit > effective_limit
+        and not _env_flag_enabled("DB_ALLOW_UNSAFE_CONNECTION_LIMIT")
+    ):
+        logger.warning(
+            "DB_CONNECTION_LIMIT=%s exceeds safe cap; using %s instead "
+            "(set DB_CONNECTION_LIMIT_MAX or DB_ALLOW_UNSAFE_CONNECTION_LIMIT=1 "
+            "only if the database pool size has been increased)",
+            forced_limit,
+            effective_limit,
+        )
     safe_url = _with_safe_database_params(raw_url, forced_connection_limit=forced_limit)
     if safe_url == raw_url:
         return
@@ -85,7 +121,7 @@ def _install_safe_database_url() -> None:
     logger.info(
         "Adjusted DATABASE_URL runtime pool params "
         "(connection_limit<=%s, pool_timeout=%s, connect_timeout=%s)",
-        forced_limit or _DB_CONNECTION_LIMIT_DEFAULT,
+        effective_limit,
         _DB_POOL_TIMEOUT_DEFAULT,
         _DB_CONNECT_TIMEOUT_DEFAULT,
     )
@@ -123,6 +159,14 @@ _DB_MAX_CONCURRENT_QUERIES = min(
     _CONFIGURED_MAX_CONCURRENT_QUERIES, _RUNTIME_CONNECTION_LIMIT
 )
 _query_semaphore = asyncio.Semaphore(_DB_MAX_CONCURRENT_QUERIES)
+logger.info(
+    "DB runtime pool guard enabled (pid=%s, connection_limit=%s, "
+    "max_concurrent_queries=%s, retries=%s)",
+    os.getpid(),
+    _RUNTIME_CONNECTION_LIMIT,
+    _DB_MAX_CONCURRENT_QUERIES,
+    _DB_QUERY_MAX_RETRIES,
+)
 
 
 class ThrottledPrisma(Prisma):

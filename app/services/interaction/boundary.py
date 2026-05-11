@@ -31,6 +31,7 @@ from app.observability.events import (
 from app.redis_client import get_redis
 from app.services.llm.models import get_chat_model, get_utility_model, invoke_json, invoke_text
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.trace_components import record_prompt_render
 from app.services.prompting.utils import SafeDict
 
 logger = logging.getLogger(__name__)
@@ -423,7 +424,27 @@ async def generate_boundary_reply_llm(
         persona_lock = await get_prompt_text("boundary.persona_lock")
         template = await get_prompt_text(key)
         body = template.format_map(SafeDict(params))
-        prompt = persona_lock.format_map(SafeDict(params)) + body
+        persona = persona_lock.format_map(SafeDict(params))
+        prompt = persona + body
+        record_prompt_render(
+            prompt,
+            prompt_key=key,
+            components=[
+                {
+                    "prompt_key": "boundary.persona_lock",
+                    "start": 0,
+                    "end": len(persona),
+                    "editable": True,
+                },
+                {
+                    "prompt_key": key,
+                    "start": len(persona),
+                    "end": len(prompt),
+                    "editable": True,
+                },
+            ],
+            source="boundary.composite",
+        )
         return (await invoke_text(get_chat_model(), prompt)).strip().split("||")[0][:120]
     except Exception as e:
         logger.warning(f"Boundary LLM reply failed ({key}): {e}")

@@ -11,6 +11,7 @@ import re
 from typing import Any, Awaitable, Callable, Iterable
 
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.trace_components import record_prompt_render
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +135,14 @@ def render_template(
 ) -> str:
     """Format a prompt template after dropping optional empty reference rows."""
     compacted = compact_optional_reference_rows(template, params, optional_keys)
+    prompt_key = getattr(template, "prompt_key", None)
     if safe:
-        return compacted.format_map(SafeDict(params))
-    return compacted.format(**params)
+        rendered = compacted.format_map(SafeDict(params))
+    else:
+        rendered = compacted.format(**params)
+    if isinstance(prompt_key, str) and prompt_key:
+        record_prompt_render(rendered, prompt_key=prompt_key)
+    return rendered
 
 
 class SafeDict(dict):

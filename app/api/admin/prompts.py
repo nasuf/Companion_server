@@ -4,11 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.prompt_template import (
+    PromptTemplateReplayRequest,
+    PromptTemplateReplayResponse,
     PromptTemplateRestoreVersionRequest,
     PromptTemplateResponse,
     PromptTemplateUpdateRequest,
     PromptTemplateVersionResponse,
 )
+from app.services.llm.models import convert_messages, get_chat_model, get_utility_model, invoke_text
+from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from app.services.prompting.store import (
     list_prompt_versions,
     list_prompts,
@@ -18,6 +22,21 @@ from app.services.prompting.store import (
 )
 
 router = APIRouter(prefix="/admin-api/prompts", tags=["admin-prompts"])
+
+_ALLOWED_REPLAY_ROLES = {"system", "user", "assistant"}
+
+
+def _normalize_replay_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for index, message in enumerate(messages):
+        role = str(message.get("role") or "").strip().lower()
+        content = message.get("content")
+        if role not in _ALLOWED_REPLAY_ROLES:
+            raise HTTPException(status_code=400, detail=f"messages[{index}].role is invalid")
+        if not isinstance(content, str) or not content.strip():
+            raise HTTPException(status_code=400, detail=f"messages[{index}].content is required")
+        normalized.append({"role": role, "content": content})
+    return normalized
 
 
 @router.get("", response_model=list[PromptTemplateResponse])
@@ -39,6 +58,33 @@ async def update_prompt(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return PromptTemplateResponse(**prompt)
+
+
+@router.post("/replay", response_model=PromptTemplateReplayResponse)
+async def replay_prompt_step(
+    payload: PromptTemplateReplayRequest,
+    _: str = Depends(require_admin_jwt),
+):
+    if payload.prompt_key not in PROMPT_DEFINITION_MAP:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    rendered_prompt = payload.rendered_prompt
+    if not rendered_prompt.strip():
+        raise HTTPException(status_code=400, detail="rendered_prompt is required")
+    model = get_chat_model() if payload.model_kind == "chat" else get_utility_model()
+    try:
+        if payload.messages:
+            replay_messages = _normalize_replay_messages(payload.messages)
+            result = await model.ainvoke(convert_messages(replay_messages))
+            output = str(getattr(result, "content", "") or "")
+        else:
+            output = await invoke_text(model, rendered_prompt)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Prompt replay failed: {exc}") from exc
+    return PromptTemplateReplayResponse(
+        prompt_key=payload.prompt_key,
+        rendered_prompt=rendered_prompt,
+        output=output,
+    )
 
 
 @router.get("/{key}/versions", response_model=list[PromptTemplateVersionResponse])

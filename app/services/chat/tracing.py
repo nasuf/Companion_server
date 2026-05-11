@@ -29,6 +29,7 @@ from app.services.chat.trace_mirror import (
 )
 from app.services.public_trace import load_public_trace
 from app.services.runtime.ws_manager import manager
+from app.services.chat.trace_enrich import apply_prompt_render_traces
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,7 @@ def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> di
     analysis = metadata.get("memory_retrieval_analysis")
     feedback = metadata.get("memory_retrieval_feedback")
     response_diagnostics = metadata.get("response_diagnostics")
+    prompt_render_traces = metadata.get("prompt_render_traces")
     trace = detail.setdefault("trace", {})
     if isinstance(retrievals, list):
         if isinstance(trace, dict):
@@ -222,6 +224,13 @@ def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> di
         if isinstance(trace, dict):
             trace["response_diagnostics"] = response_diagnostics
         detail["response_diagnostics"] = response_diagnostics
+    if isinstance(prompt_render_traces, list):
+        if isinstance(trace, dict):
+            trace["prompt_render_traces"] = prompt_render_traces
+        detail["prompt_render_traces"] = prompt_render_traces
+        steps = detail.get("steps")
+        if isinstance(steps, list):
+            apply_prompt_render_traces(steps, prompt_render_traces)
     return detail
 
 

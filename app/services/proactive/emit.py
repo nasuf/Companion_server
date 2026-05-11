@@ -17,6 +17,7 @@ from prisma import Json
 
 from app.db import db
 from app.services.runtime.ws_manager import manager
+from app.services.prompting.trace_components import snapshot_prompt_render_traces
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,9 @@ async def emit_proactive_message(
         metadata["skip_post_process"] = True
     if trace_id:
         metadata["trace_id"] = trace_id
+    prompt_traces = snapshot_prompt_render_traces()
+    if prompt_traces:
+        metadata["prompt_render_traces"] = prompt_traces
     if extra_metadata:
         metadata.update(extra_metadata)
 
