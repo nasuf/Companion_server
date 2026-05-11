@@ -46,11 +46,13 @@ _saved_https_lc="${https_proxy:-}"
 _saved_all_lc="${all_proxy:-}"
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy 2>/dev/null || true
 
-# Migration 必须使用专用 URL。运行时 DATABASE_URL 通常走 Supabase session
-# pooler(5432), 长跑服务占用连接后容易让 prisma migrate deploy 撞
-# EMAXCONNSESSION。MIGRATION_DATABASE_URL 使用 transaction pooler(6543) +
-# connection_limit=1, 并显式覆盖 DIRECT_DATABASE_URL, 避免 Prisma migrate
-# 因 schema.prisma 的 directUrl 回退到运行时连接。
+# Migration 必须使用专用 URL。运行时 DATABASE_URL 通常被长跑服务使用,
+# 容易让 prisma migrate deploy 撞 EMAXCONNSESSION。MIGRATION_DATABASE_URL
+# 应使用 Supabase direct connection；如果本地/服务器不支持 direct URL,
+# 使用 session pooler(5432) + connection_limit=1。不要用 transaction
+# pooler(6543)，Prisma Migrate 需要稳定连接。
+# 这里同时覆盖 DIRECT_DATABASE_URL，避免 Prisma migrate 因 schema.prisma
+# 的 directUrl 回退到运行时连接。
 MIGRATION_URL="${MIGRATION_DATABASE_URL:-$(read_env_value MIGRATION_DATABASE_URL)}"
 if [ -n "$MIGRATION_URL" ]; then
     export DATABASE_URL="$MIGRATION_URL"
@@ -59,7 +61,7 @@ if [ -n "$MIGRATION_URL" ]; then
 else
     echo "WARNING: MIGRATION_DATABASE_URL is not set; falling back to DATABASE_URL."
     echo "         Supabase deployments should set MIGRATION_DATABASE_URL to the"
-    echo "         transaction pooler URL (:6543?pgbouncer=true&connection_limit=1)."
+    echo "         direct URL or session pooler URL (:5432?connection_limit=1)."
 fi
 
 # 诊断：检查 migration 数据库端口是否可达

@@ -59,8 +59,8 @@ Optional:
 ### Database
 
 ```env
-DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:5432/postgres?sslmode=require
-MIGRATION_DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:5432/postgres?sslmode=require&connection_limit=3&pool_timeout=30&connect_timeout=30
+MIGRATION_DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:5432/postgres?sslmode=require&connection_limit=1&pool_timeout=60&connect_timeout=30
 DB_CONNECTION_LIMIT=3
 DB_CONNECTION_LIMIT_MAX=5
 DB_MAX_CONCURRENT_QUERIES=3
@@ -119,8 +119,8 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
   - Keep runtime `connection_limit` well below the Supabase session pool cap. This app defaults to `3` and rewrites an oversized runtime URL down to the safe cap at startup.
   - `DB_CONNECTION_LIMIT_MAX` is a hard runtime cap for accidental oversized values. Increase it only after the Supabase session pool size is increased.
   - Keep `DB_MAX_CONCURRENT_QUERIES` less than or equal to `DB_CONNECTION_LIMIT` so request bursts queue in the app instead of exhausting database sessions.
-  - `MIGRATION_DATABASE_URL` uses transaction mode (`6543`) for Prisma admin commands.
-  - For Prisma against Supabase transaction pooler, keep `pgbouncer=true&connection_limit=1`.
+  - `MIGRATION_DATABASE_URL` is for Prisma CLI / migrations only. Prefer Supabase's direct connection URL when the environment supports it; otherwise use the session pooler (`5432`) with `connection_limit=1`.
+  - Do not run Prisma migrations through the transaction pooler (`6543`) because Prisma Migrate needs a stable database connection.
 - The memory system still uses embeddings internally, but you do not need to configure an embedding model separately anymore.
 - `ONLINE_MODEL=true` means chat / utility / embedding all use DashScope defaults.
 - `ONLINE_MODEL=false` means the same roles all use local Ollama defaults.
