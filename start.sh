@@ -43,10 +43,14 @@ kill_process_tree() {
 
 cleanup_project_prisma_engines() {
     local pid
+    local command
     local engine_pids=""
 
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
+        [ "$pid" != "$$" ] || continue
+        command="$(process_command "$pid")"
+        [[ "$command" == *"prisma/query-engine"* ]] || continue
         if is_project_process "$pid"; then
             engine_pids="$engine_pids $pid"
         fi
@@ -75,14 +79,20 @@ cleanup_project_prisma_engines() {
 
 cleanup_project_uvicorn_processes() {
     local pid
+    local command
     local server_pids=""
 
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
+        [ "$pid" != "$$" ] || continue
+        command="$(process_command "$pid")"
+        [[ "$command" == *"uvicorn"* ]] || continue
+        [[ "$command" == *"app.main:app"* ]] || continue
+        [[ "$command" != *"pgrep -f app.main:app"* ]] || continue
         if is_project_process "$pid"; then
             server_pids="$server_pids $pid"
         fi
-    done < <(pgrep -f "uvicorn .*app.main:app|uvicorn app.main:app|app.main:app --reload" 2>/dev/null || true)
+    done < <(pgrep -f "app.main:app" 2>/dev/null || true)
 
     if [ -n "$server_pids" ]; then
         echo "Stopping stale project uvicorn process(es):$server_pids"

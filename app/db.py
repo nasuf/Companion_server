@@ -195,7 +195,16 @@ class ThrottledPrisma(Prisma):
 # Prisma Python client 通过 httpx 连接本地 Prisma engine 子进程。
 # 默认超时很短（~10s），当 LLM 生成长时间占用 event loop 时，
 # 其他并发的 DB 查询可能被饿死超时。延长到 120s 避免误杀。
-db = ThrottledPrisma(http={"timeout": httpx.Timeout(120.0)})
+#
+# 这里必须禁用 trust_env: Prisma client 访问的是本机 query-engine
+# (http://127.0.0.1:<port>/status)。如果系统或 shell 设置了 HTTP_PROXY /
+# ALL_PROXY，httpx 会把这个本地请求转发给代理，导致启动时 DB connect 卡死。
+db = ThrottledPrisma(
+    http={
+        "timeout": httpx.Timeout(120.0),
+        "trust_env": False,
+    }
+)
 
 # ── 启动时连接重试参数 (可通过环境变量覆盖) ──
 # Supabase pooler 本地启动时偶有抖动, 需要比较宽松的重试:

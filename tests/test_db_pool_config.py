@@ -2,6 +2,7 @@ from app.db import (
     _connection_limit_from_database_url,
     _is_db_pool_exhaustion_error,
     _with_safe_database_params,
+    db,
 )
 from app.config import Settings
 
@@ -88,3 +89,7 @@ def test_settings_accepts_db_pool_environment(monkeypatch):
     assert settings.db_connection_limit_max == 5
     assert settings.db_max_concurrent_queries == 3
     assert settings.db_query_max_retries == 4
+
+
+def test_prisma_local_engine_http_ignores_proxy_environment():
+    assert db._http_config["trust_env"] is False
