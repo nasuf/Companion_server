@@ -329,6 +329,7 @@ def _label_schedule_items(output: str) -> str | None:
 _REGISTRY: list[tuple[str, _PromptMeta]] = []
 _FORMAT_FIELD_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*(?:![^}:]+)?(?::[^}]+)?\}")
 _PROMPT_LABEL_RE = re.compile(r"^【[^】]+】")
+_DISPLAY_SPEC_SUFFIX_RE = re.compile(r"\s*[（(][^）)]*(?:§|spec)[^）)]*[）)]", re.IGNORECASE)
 _COMMON_FINGERPRINT_SNIPPETS = (
     "只作为用户的线上好友",
     "和用户不会有任何线下交集",
@@ -341,6 +342,11 @@ _COMMON_FINGERPRINT_SNIPPETS = (
     "只输出自然语言描述",
     "严格按以下",
 )
+
+
+def _clean_display_name(display_name: str) -> str:
+    """Trace step names are product labels; hide implementation/spec section refs."""
+    return _DISPLAY_SPEC_SUFFIX_RE.sub("", display_name).strip()
 
 
 def _register(fingerprint: str, meta: _PromptMeta) -> None:
@@ -404,7 +410,7 @@ def _register_prompt(
     label_extractor: Callable[[str], str | None] | None,
 ) -> None:
     _register(_default_fingerprint(prompt_key), _PromptMeta(
-        prompt_key, display_name, category, label_extractor,
+        prompt_key, _clean_display_name(display_name), category, label_extractor,
     ))
 
 
@@ -447,7 +453,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("portrait.update", "用户画像更新", "data", _label_reply_text),
 
     # Reply 类
-    ("intent.current_state_reply", "询问当前状态回复 (§3.4.3)", "reply", _label_reply_text),
+    ("intent.current_state_reply", "询问当前状态回复", "reply", _label_reply_text),
     ("intent.crisis_reply", "危机求助回复", "reply", _label_reply_text),
     ("intent.crisis_followup_reply", "危机后续跟进回复", "reply", _label_reply_text),
     ("intent.end_reply", "终结意图回复", "reply", _label_reply_text),
@@ -486,7 +492,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text),
     ("proactive.special_birthday", "特殊日期(生日)", "reply", _label_reply_text),
     ("proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text),
-    ("chat.system_base", "主回复 (§4 日常交流)", "reply", _label_reply_text),
+    ("chat.system_base", "主回复", "reply", _label_reply_text),
 
     # Post 类
     ("reply.emotion_detection", "回复情绪识别", "post", _label_emotion),

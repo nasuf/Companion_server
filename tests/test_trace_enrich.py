@@ -140,6 +140,23 @@ def test_registered_prompt_keys_exist_in_prompt_registry():
     assert unknown == set()
 
 
+def test_trace_display_names_hide_spec_section_refs():
+    """Trace 步骤展示名只显示业务语义, 不泄漏 spec 章节编号。"""
+    assert trace_enrich._clean_display_name("主回复 (§4 日常交流)") == "主回复"
+    assert trace_enrich._clean_display_name("主回复 (spec §4 日常交流)") == "主回复"
+
+    leaked = {
+        meta.prompt_key: meta.display_name
+        for _, meta in trace_enrich._REGISTRY
+        if "§" in meta.display_name or "spec" in meta.display_name.lower()
+    }
+    assert leaked == {}
+
+    enriched = trace_enrich.enrich_step(_fake_llm_step(defaults.SYSTEM_BASE_PROMPT))
+    assert enriched["prompt_key"] == "chat.system_base"
+    assert enriched["display_name"] == "主回复"
+
+
 def test_enriched_prompt_includes_admin_registry_metadata():
     """Trace step 和提示词管理页必须用同一 registry metadata 对齐。"""
     step = _fake_llm_step(defaults.INTENT_UNIFIED_PROMPT)
