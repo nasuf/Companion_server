@@ -52,6 +52,7 @@ jobs:
             sed 's/^ *//' > .env <<EOF
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             DIRECT_DATABASE_URL=${{ secrets.DIRECT_DATABASE_URL }}
+            MIGRATION_DATABASE_URL=${{ secrets.MIGRATION_DATABASE_URL }}
             REDIS_URL=${{ secrets.REDIS_URL }}
             OLLAMA_BASE_URL=${{ vars.OLLAMA_BASE_URL }}
             DASHSCOPE_API_KEY=${{ secrets.DASHSCOPE_API_KEY }}
@@ -82,8 +83,19 @@ jobs:
             echo "==> Building server image"
             docker compose -f docker-compose.deploy.yml build server
 
+            echo "==> Stopping existing server stack before migration"
+            docker compose -f docker-compose.deploy.yml down --remove-orphans || true
+
             echo "==> Running database migrations"
-            docker compose -f docker-compose.deploy.yml run --rm --no-deps server prisma migrate deploy
+            MIGRATION_DATABASE_URL_VALUE="$(grep -E '^MIGRATION_DATABASE_URL=' .env | cut -d= -f2-)"
+            if [ -z "$MIGRATION_DATABASE_URL_VALUE" ]; then
+              echo "MIGRATION_DATABASE_URL secret is required for Prisma migrations"
+              exit 1
+            fi
+            docker compose -f docker-compose.deploy.yml run --rm --no-deps \
+              -e DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
+              -e DIRECT_DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
+              server prisma migrate deploy
 
             echo "==> Starting server stack"
             docker compose -f docker-compose.deploy.yml up -d --remove-orphans
