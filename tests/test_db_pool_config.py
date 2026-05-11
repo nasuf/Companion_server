@@ -72,6 +72,10 @@ def test_connection_limit_from_database_url_reads_runtime_limit():
 
 
 def test_settings_accepts_db_pool_environment(monkeypatch):
+    monkeypatch.setenv(
+        "MIGRATION_DATABASE_URL",
+        "postgresql://user:pass@host:5432/db?sslmode=require&connection_limit=1",
+    )
     monkeypatch.setenv("DB_CONNECTION_LIMIT", "3")
     monkeypatch.setenv("DB_CONNECTION_LIMIT_MAX", "5")
     monkeypatch.setenv("DB_MAX_CONCURRENT_QUERIES", "3")
@@ -79,6 +83,7 @@ def test_settings_accepts_db_pool_environment(monkeypatch):
 
     settings = Settings(_env_file=None)
 
+    assert settings.migration_database_url.startswith("postgresql://")
     assert settings.db_connection_limit == 3
     assert settings.db_connection_limit_max == 5
     assert settings.db_max_concurrent_queries == 3
