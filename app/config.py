@@ -2,6 +2,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Runtime environment
+    app_env: str = "development"
+
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/companion"
     direct_database_url: str = ""
@@ -74,9 +77,10 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days
 
-    # Admin prompt management
-    admin_username: str = ""
-    admin_password: str = ""
+    # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
+    # Development defaults to "*" for local convenience; production must configure
+    # an explicit allowlist.
+    cors_allowed_origins: str = ""
 
     # LLM resilience layer (app/services/llm/resilience.py)
     # 紧急 kill switch: 设为 False 时, 所有 LLM 调用只保留 per-profile timeout,
@@ -112,7 +116,44 @@ class Settings(BaseSettings):
     redis_connect_timeout_s: float = 2.0
     redis_max_connections: int = 50
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
+
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() in {"prod", "production"}
+
+    def cors_origins(self) -> list[str]:
+        raw = self.cors_allowed_origins.strip()
+        if not raw:
+            return [] if self.is_production() else ["*"]
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    def validate_security_config(self) -> None:
+        """Fail fast on unsafe production security settings.
+
+        Development stays permissive so local tests and prototypes do not need a
+        full deployment secret set. Production must be explicit.
+        """
+        if not self.is_production():
+            return
+
+        weak_jwt_values = {"", "change_me", "changeme", "secret", "dev", "development"}
+        jwt_secret = self.jwt_secret.strip()
+        if jwt_secret.lower() in weak_jwt_values or len(jwt_secret) < 32:
+            raise RuntimeError(
+                "Unsafe production config: JWT_SECRET must be set to a strong value "
+                "with at least 32 characters."
+            )
+
+        origins = self.cors_origins()
+        if not origins or "*" in origins:
+            raise RuntimeError(
+                "Unsafe production config: CORS_ALLOWED_ORIGINS must be an explicit "
+                "comma-separated allowlist."
+            )
 
 
 settings = Settings()

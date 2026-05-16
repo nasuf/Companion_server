@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from prisma import Json
 
+from app.config import settings
 from app.db import db
 from app.observability.events import EVT_BG_DONE
 from app.services.chat.intent_replies import positive_interaction_check
@@ -30,6 +31,10 @@ from app.services.interaction.boundary import (
 )
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.memory.recording.watermark import get_watermark, set_watermark
+from app.services.runtime.distributed_lock import (
+    DistributedLockNotAcquired,
+    distributed_lock,
+)
 from app.services.runtime.ws_manager import manager
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
@@ -58,6 +63,7 @@ logger = logging.getLogger(__name__)
 # weakref 化 (WeakValueDictionary 在无人持锁时会丢对象, 下次新建的 lock 跟
 # 在飞的 lock 不是同一个 → race 复现). 长期运行需 cleanup 时再加 LRU.
 _pipeline_locks: dict[str, asyncio.Lock] = {}
+_PIPELINE_DISTRIBUTED_LOCK_TTL = 600
 
 
 def _get_pipeline_lock(conversation_id: str) -> asyncio.Lock:
@@ -191,10 +197,39 @@ async def _bg_memory_pipeline(
     """
     if conversation_id is not None:
         async with _get_pipeline_lock(conversation_id):
-            await _do_memory_pipeline(
-                user_id, messages, conversation_id, workspace_id,
-                skip_ai_side=skip_ai_side,
-            )
+            if not settings.is_production():
+                await _do_memory_pipeline(
+                    user_id, messages, conversation_id, workspace_id,
+                    skip_ai_side=skip_ai_side,
+                )
+                return
+            try:
+                async with distributed_lock(
+                    f"memory_pipeline:{conversation_id}",
+                    ttl_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
+                    wait_timeout_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
+                    retry_interval_s=0.5,
+                    fail_open=True,
+                ):
+                    await _do_memory_pipeline(
+                        user_id, messages, conversation_id, workspace_id,
+                        skip_ai_side=skip_ai_side,
+                    )
+            except DistributedLockNotAcquired:
+                logger.error(
+                    "Memory pipeline distributed lock wait timed out; running with "
+                    "local lock only",
+                    extra={
+                        "event": EVT_BG_DONE,
+                        "kind": "memory_pipeline",
+                        "outcome": "distributed_lock_timeout",
+                        "conversation_id": conversation_id,
+                    },
+                )
+                await _do_memory_pipeline(
+                    user_id, messages, conversation_id, workspace_id,
+                    skip_ai_side=skip_ai_side,
+                )
     else:
         # proactive 等无 conv 入口: 调用方天然不并发同源, 无需上锁.
         await _do_memory_pipeline(

@@ -1,7 +1,6 @@
 name: CI / Deploy Companion Server
 
 on:
-  pull_request:
   push:
     branches:
       - main
@@ -53,6 +52,8 @@ jobs:
             DATABASE_URL=${{ secrets.DATABASE_URL }}
             DIRECT_DATABASE_URL=${{ secrets.DIRECT_DATABASE_URL }}
             MIGRATION_DATABASE_URL=${{ secrets.MIGRATION_DATABASE_URL }}
+            APP_ENV=production
+            CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}
             REDIS_URL=${{ secrets.REDIS_URL }}
             OLLAMA_BASE_URL=${{ vars.OLLAMA_BASE_URL }}
             DASHSCOPE_API_KEY=${{ secrets.DASHSCOPE_API_KEY }}
@@ -73,12 +74,18 @@ jobs:
             AXIOM_DATASET=${{ vars.AXIOM_DATASET }}
             AXIOM_ORG_ID=${{ vars.AXIOM_ORG_ID }}
             AXIOM_LOG_LEVEL=${{ vars.AXIOM_LOG_LEVEL }}
-            ADMIN_USERNAME=${{ vars.ADMIN_USERNAME }}
-            ADMIN_PASSWORD=${{ secrets.ADMIN_PASSWORD }}
             EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL }}
             EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             EOF
+
+            for key in DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS; do
+              value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+              if [ -z "$value" ]; then
+                echo "$key is required for production deploy"
+                exit 1
+              fi
+            done
 
             echo "==> Building server image"
             docker compose -f docker-compose.deploy.yml build server

@@ -12,6 +12,7 @@ from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.config import settings
 from app.observability.events import EVT_SCHEDULER_JOB
 from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
@@ -32,10 +33,52 @@ from app.services.interaction.delayed_queue import (
 from app.services.interaction.user_turn_aggregation import scan_due_user_turns
 from app.services.proactive.triggers import scan_triggers
 from app.services.proactive.special_dates import scan_special_dates_today
+from app.services.runtime.distributed_lock import (
+    DistributedLockNotAcquired,
+    DistributedLockUnavailable,
+    distributed_lock,
+)
 
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+
+
+async def _run_distributed_job(
+    job_name: str,
+    ttl_s: int,
+    fn: Callable[[], object],
+) -> None:
+    """Run one scheduler job once across all server instances.
+
+    Development fails open so local Redis outages do not make cron debugging
+    painful. Production fails closed: if Redis cannot provide the lock, the job
+    skips instead of risking duplicate reminder/proactive sends.
+    """
+    try:
+        async with distributed_lock(
+            f"scheduler:{job_name}",
+            ttl_s=ttl_s,
+            fail_open=not settings.is_production(),
+        ):
+            result = fn()
+            if asyncio.iscoroutine(result):
+                await result
+    except DistributedLockNotAcquired:
+        logger.debug(
+            f"[CRON] {job_name} skipped: another instance holds the lock",
+            extra={"event": EVT_SCHEDULER_JOB, "task_name": job_name, "phase": "skipped_lock"},
+        )
+    except DistributedLockUnavailable as e:
+        logger.warning(
+            f"[CRON] {job_name} skipped: distributed lock unavailable ({e})",
+            extra={
+                "event": EVT_SCHEDULER_JOB,
+                "task_name": job_name,
+                "phase": "skipped_lock_unavailable",
+                "error_type": type(e).__name__,
+            },
+        )
 
 
 async def _run_for_all_agents(
@@ -135,7 +178,7 @@ def setup_scheduler():
 
     # Weekly reflection on Sunday at 4 AM
     scheduler.add_job(
-        run_weekly_reflection,
+        _run_weekly_reflection,
         "cron",
         day_of_week="sun",
         hour=4,
@@ -274,101 +317,144 @@ def setup_scheduler():
 
 
 async def _run_weekly_portraits():
-    await _run_for_all_agents(
-        lambda a: update_portrait_weekly(a.userId, a.id),
-        concurrency=3, task_name="Portrait update",
+    await _run_distributed_job(
+        "weekly_portrait",
+        3600,
+        lambda: _run_for_all_agents(
+            lambda a: update_portrait_weekly(a.userId, a.id),
+            concurrency=3, task_name="Portrait update",
+        ),
     )
 
 
+async def _run_weekly_reflection():
+    await _run_distributed_job("weekly_reflection", 7200, run_weekly_reflection)
+
+
 async def _run_daily_schedules():
-    async def _gen(agent):
-        overview = await get_life_overview(agent.id)
-        mbti = get_mbti(agent)
-        await generate_daily_schedule(
-            agent.id, agent.name, mbti,
-            life_overview=overview, user_id=agent.userId,
-        )
+    async def _body():
+        async def _gen(agent):
+            overview = await get_life_overview(agent.id)
+            mbti = get_mbti(agent)
+            await generate_daily_schedule(
+                agent.id, agent.name, mbti,
+                life_overview=overview, user_id=agent.userId,
+            )
 
-    await _run_for_all_agents(_gen, concurrency=3, task_name="Daily schedule")
+        await _run_for_all_agents(_gen, concurrency=3, task_name="Daily schedule")
 
-    # spec Part 5 §4.3: "每日凌晨**生成 AI 作息表时**" 触发特殊日期扫描.
-    # 链式 await 保证 scan 一定读到当天新作息 (不是昨天 cache).
-    # 历史: 独立 cron 在 3:35 跑, 若 daily_schedule 慢于 5 min 仍读旧 cache.
-    try:
-        await scan_special_dates_today()
-    except Exception as e:
-        logger.warning(f"Special dates scan (chained) failed: {e}")
+        # spec Part 5 §4.3: "每日凌晨**生成 AI 作息表时**" 触发特殊日期扫描.
+        # 链式 await 保证 scan 一定读到当天新作息 (不是昨天 cache).
+        # 历史: 独立 cron 在 3:35 跑, 若 daily_schedule 慢于 5 min 仍读旧 cache.
+        try:
+            await scan_special_dates_today()
+        except Exception as e:
+            logger.warning(f"Special dates scan (chained) failed: {e}")
+
+    await _run_distributed_job("daily_schedule", 7200, _body)
 
 
 async def _run_monthly_overview_refresh():
     async def _refresh(agent):
         await generate_and_save_life_overview(agent)
 
-    await _run_for_all_agents(_refresh, concurrency=2, task_name="Monthly overview")
+    await _run_distributed_job(
+        "monthly_overview",
+        7200,
+        lambda: _run_for_all_agents(_refresh, concurrency=2, task_name="Monthly overview"),
+    )
 
 
 async def _run_schedule_review():
-    await _run_for_all_agents(
-        lambda a: review_daily_schedule(a.id, a.userId, a.name),
-        concurrency=3, task_name="Schedule review",
+    await _run_distributed_job(
+        "schedule_review",
+        3600,
+        lambda: _run_for_all_agents(
+            lambda a: review_daily_schedule(a.id, a.userId, a.name),
+            concurrency=3, task_name="Schedule review",
+        ),
     )
 
 
 async def _run_proactive_orchestrator_scan():
     """扫描主动状态机。第一阶段仅做区间推进和互斥检查。"""
-    try:
-        await scan_proactive_states()
-    except Exception as e:
-        logger.warning(f"Proactive orchestrator scan failed: {e}")
+    async def _body():
+        try:
+            await scan_proactive_states()
+        except Exception as e:
+            logger.warning(f"Proactive orchestrator scan failed: {e}")
+
+    await _run_distributed_job("proactive_orchestrator_scan", 55, _body)
 
 
 async def _run_l2_adjustment():
     """Spec §1.5.2: recalculate L2 scores, promote/demote."""
-    try:
-        stats = await run_l2_adjustment()
-        if stats.get("promoted") or stats.get("demoted"):
-            logger.info(f"L2 adjustment: {stats}")
-    except Exception as e:
-        logger.warning(f"L2 adjustment failed: {e}")
+    async def _body():
+        try:
+            stats = await run_l2_adjustment()
+            if stats.get("promoted") or stats.get("demoted"):
+                logger.info(f"L2 adjustment: {stats}")
+        except Exception as e:
+            logger.warning(f"L2 adjustment failed: {e}")
+
+    await _run_distributed_job("l2_adjustment", 3600, _body)
 
 
 async def _run_memory_hygiene():
     """Run weekly memory duplicate cleanup and fact evolution."""
-    try:
-        stats = await run_memory_hygiene()
-        if stats.get("archived") or stats.get("merged") or stats.get("updated"):
-            logger.info(f"Memory hygiene: {stats}")
-    except Exception as e:
-        logger.warning(f"Memory hygiene failed: {e}")
+    async def _body():
+        try:
+            stats = await run_memory_hygiene()
+            if stats.get("archived") or stats.get("merged") or stats.get("updated"):
+                logger.info(f"Memory hygiene: {stats}")
+        except Exception as e:
+            logger.warning(f"Memory hygiene failed: {e}")
+
+    await _run_distributed_job("memory_hygiene", 7200, _body)
 
 
 async def _run_daily_intimacy():
-    await _run_for_all_agents(
-        lambda a: compute_growth_intimacy(a.id, a.userId, a.createdAt),
-        concurrency=3, task_name="Growth intimacy",
+    await _run_distributed_job(
+        "daily_intimacy",
+        3600,
+        lambda: _run_for_all_agents(
+            lambda a: compute_growth_intimacy(a.id, a.userId, a.createdAt),
+            concurrency=3, task_name="Growth intimacy",
+        ),
     )
 
 
 async def _run_weekly_topic_intimacy():
-    await _run_for_all_agents(
-        lambda a: compute_topic_intimacy(a.id, a.userId, a.createdAt),
-        concurrency=3, task_name="Topic intimacy",
+    await _run_distributed_job(
+        "weekly_topic_intimacy",
+        3600,
+        lambda: _run_for_all_agents(
+            lambda a: compute_topic_intimacy(a.id, a.userId, a.createdAt),
+            concurrency=3, task_name="Topic intimacy",
+        ),
     )
 
 
 async def _run_patience_recovery():
-    await _run_for_all_agents(
-        lambda a: recover_patience_hourly(a.id, a.userId),
-        concurrency=5, task_name="Patience recovery",
+    await _run_distributed_job(
+        "patience_recovery",
+        900,
+        lambda: _run_for_all_agents(
+            lambda a: recover_patience_hourly(a.id, a.userId),
+            concurrency=5, task_name="Patience recovery",
+        ),
     )
 
 
 async def _run_trigger_scan():
     """§9.5: 扫描到期的时间触发器。"""
-    try:
-        await scan_triggers()
-    except Exception as e:
-        logger.warning(f"Trigger scan failed: {e}")
+    async def _body():
+        try:
+            await scan_triggers()
+        except Exception as e:
+            logger.warning(f"Trigger scan failed: {e}")
+
+    await _run_distributed_job("trigger_scan", 120, _body)
 
 
 async def _run_redis_health_recheck():
@@ -384,89 +470,30 @@ async def _run_redis_health_recheck():
 
 async def _run_ntp_calibration():
     """Part 5 §2.1: NTP 校准, 漂移 > 阈值时告警."""
-    import asyncio
-    from app.services.schedule_domain.time_service import calibrate_against_ntp
-    try:
-        # ntplib 是同步阻塞调用, 放线程池
-        drift = await asyncio.to_thread(calibrate_against_ntp)
-        if drift is None:
-            logger.warning("NTP calibration failed (network or lib unavailable)")
-            return
-        if abs(drift) > 1.0:
-            logger.warning(f"NTP drift {drift:+.3f}s exceeds 1s threshold; investigate clock source")
-        else:
-            logger.info(f"NTP drift {drift:+.3f}s (within threshold)")
-    except Exception as e:
-        logger.warning(f"NTP calibration job failed: {e}")
-
-
-
-
-async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
-    """检查是否已有 assistant 回复在 prompt 中显式覆盖了这条 user 消息.
-
-    依赖 orchestrator 主路径在 save_replies 时写入的 metadata.covered_until_user_ts
-    (LLM 数据拉取时刻能看到的最新 user 消息时间). user_msg.createdAt 早于或等于
-    任一 assistant 的 covered_until_user_ts → 视为已被覆盖, 跳过避免双发。
-
-    短路/边界回复不写此字段 → 不会误判, 这类回复对应的 user 消息仍按原路处理。
-    """
-    from app.db import db
-
-    user_msg = await db.message.find_unique(where={"id": user_msg_id})
-    if not user_msg or user_msg.createdAt is None:
-        return False
-
-    # 拉取此消息之后的所有 assistant 消息 (上限 10 条防长会话扫描过大).
-    later_ai = await db.message.find_many(
-        where={
-            "conversationId": conversation_id,
-            "role": "assistant",
-            "createdAt": {"gt": user_msg.createdAt},
-        },
-        order={"createdAt": "asc"},
-        take=10,
-    )
-    for ai_msg in later_ai:
-        md = getattr(ai_msg, "metadata", None) or {}
-        covered = md.get("covered_until_user_ts") if isinstance(md, dict) else None
-        if not covered:
-            continue
+    async def _body():
+        import asyncio
+        from app.services.schedule_domain.time_service import calibrate_against_ntp
         try:
-            cutoff = datetime.fromisoformat(covered) if isinstance(covered, str) else None
-        except ValueError:
-            cutoff = None
-        if cutoff is None:
-            continue
-        # 比较时统一带 tz, prisma 默认返回 aware datetime; isoformat 也带 tz.
-        if cutoff >= user_msg.createdAt:
-            return True
-    return False
+            # ntplib 是同步阻塞调用, 放线程池
+            drift = await asyncio.to_thread(calibrate_against_ntp)
+            if drift is None:
+                logger.warning("NTP calibration failed (network or lib unavailable)")
+                return
+            if abs(drift) > 1.0:
+                logger.warning(f"NTP drift {drift:+.3f}s exceeds 1s threshold; investigate clock source")
+            else:
+                logger.info(f"NTP drift {drift:+.3f}s (within threshold)")
+        except Exception as e:
+            logger.warning(f"NTP calibration job failed: {e}")
 
-
-async def _enqueue_scanned_aggregation_results(results, manager) -> None:
-    """Move scanned aggregation windows into the shared delayed reply queue."""
-    for agent_id, user_id, combined_text, conv_id, reply_context, latest_message_id in results:
-        delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
-        await enqueue_delayed_message(
-            conv_id,
-            {
-                "conversation_id": conv_id,
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "message": combined_text,
-                "message_id": latest_message_id,
-                "reply_context": reply_context,
-            },
-            delay_seconds,
-        )
-        # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
-        if delay_seconds > 5:
-            await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
-        await manager.send_event(conv_id, "pending", {"status": "queued", "delay": delay_seconds})
+    await _run_distributed_job("ntp_calibration", 900, _body)
 
 
 async def _run_aggregation_scan():
+    await _run_distributed_job("aggregation_scan", 120, _run_aggregation_scan_body)
+
+
+async def _run_aggregation_scan_body():
     """Scan aggregation windows and due delayed replies, then deliver asynchronously."""
     from app.services.chat.orchestrator import stream_chat_response
     from app.services.runtime.ws_manager import manager
@@ -545,6 +572,70 @@ async def _run_aggregation_scan():
                 await unlock_conversation(conv_id)
     except Exception as e:
         logger.warning(f"Aggregation scan failed: {e}")
+
+
+async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
+    """检查是否已有 assistant 回复在 prompt 中显式覆盖了这条 user 消息.
+
+    依赖 orchestrator 主路径在 save_replies 时写入的 metadata.covered_until_user_ts
+    (LLM 数据拉取时刻能看到的最新 user 消息时间). user_msg.createdAt 早于或等于
+    任一 assistant 的 covered_until_user_ts → 视为已被覆盖, 跳过避免双发。
+
+    短路/边界回复不写此字段 → 不会误判, 这类回复对应的 user 消息仍按原路处理。
+    """
+    from app.db import db
+
+    user_msg = await db.message.find_unique(where={"id": user_msg_id})
+    if not user_msg or user_msg.createdAt is None:
+        return False
+
+    # 拉取此消息之后的所有 assistant 消息 (上限 10 条防长会话扫描过大).
+    later_ai = await db.message.find_many(
+        where={
+            "conversationId": conversation_id,
+            "role": "assistant",
+            "createdAt": {"gt": user_msg.createdAt},
+        },
+        order={"createdAt": "asc"},
+        take=10,
+    )
+    for ai_msg in later_ai:
+        md = getattr(ai_msg, "metadata", None) or {}
+        covered = md.get("covered_until_user_ts") if isinstance(md, dict) else None
+        if not covered:
+            continue
+        try:
+            cutoff = datetime.fromisoformat(covered) if isinstance(covered, str) else None
+        except ValueError:
+            cutoff = None
+        if cutoff is None:
+            continue
+        # 比较时统一带 tz, prisma 默认返回 aware datetime; isoformat 也带 tz.
+        if cutoff >= user_msg.createdAt:
+            return True
+    return False
+
+
+async def _enqueue_scanned_aggregation_results(results, manager) -> None:
+    """Move scanned aggregation windows into the shared delayed reply queue."""
+    for agent_id, user_id, combined_text, conv_id, reply_context, latest_message_id in results:
+        delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
+        await enqueue_delayed_message(
+            conv_id,
+            {
+                "conversation_id": conv_id,
+                "agent_id": agent_id,
+                "user_id": user_id,
+                "message": combined_text,
+                "message_id": latest_message_id,
+                "reply_context": reply_context,
+            },
+            delay_seconds,
+        )
+        # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
+        if delay_seconds > 5:
+            await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
+        await manager.send_event(conv_id, "pending", {"status": "queued", "delay": delay_seconds})
 
 
 def shutdown_scheduler():

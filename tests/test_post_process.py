@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -312,3 +313,34 @@ async def test_get_pipeline_lock_returns_same_object_per_conv():
     lock_b = post_process._get_pipeline_lock("conv-B")
     assert lock_a1 is lock_a2, "same conv must return same Lock object"
     assert lock_a1 is not lock_b, "different convs must have distinct Lock objects"
+
+
+@pytest.mark.asyncio
+async def test_memory_pipeline_uses_distributed_lock_in_production():
+    """Production path adds a Redis distributed lock around the local conv lock."""
+    from app.services.chat import post_process
+
+    post_process._pipeline_locks.clear()
+    lock_calls: list[dict] = []
+
+    @asynccontextmanager
+    async def fake_distributed_lock(*args, **kwargs):
+        lock_calls.append({"args": args, "kwargs": kwargs})
+        yield True
+
+    with (
+        patch.object(post_process.settings, "app_env", "production"),
+        patch.object(post_process, "distributed_lock", fake_distributed_lock),
+        patch.object(post_process, "_do_memory_pipeline", AsyncMock()) as do_pipeline,
+    ):
+        await post_process._bg_memory_pipeline(
+            "u1",
+            [{"role": "user", "content": "a"}],
+            conversation_id="conv-prod",
+        )
+
+    do_pipeline.assert_awaited_once()
+    assert lock_calls
+    assert lock_calls[0]["args"] == ("memory_pipeline:conv-prod",)
+    assert lock_calls[0]["kwargs"]["ttl_s"] == post_process._PIPELINE_DISTRIBUTED_LOCK_TTL
+    assert lock_calls[0]["kwargs"]["fail_open"] is True

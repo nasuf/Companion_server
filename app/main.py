@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import settings
 from app.db import connect_db, disconnect_db
 from app.redis_client import get_redis, close_redis, mark_redis_healthy
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
@@ -37,6 +38,8 @@ async def lifespan(app: FastAPI):
     ws_manager = None
 
     try:
+        settings.validate_security_config()
+
         # Phase 1: Connect to all services in parallel
         # DB 是硬依赖, 启动失败直接 crash; Redis 软依赖, 失败降级到 readonly mode
         # (GET 端点仍可用, 写端点 require_redis 返 503, scheduler 每 30s 重检自愈).
@@ -113,7 +116,7 @@ app = FastAPI(title="AI Companion", version="0.1.0", lifespan=lifespan)
 app.add_middleware(RequestTimingMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

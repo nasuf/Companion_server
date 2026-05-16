@@ -20,6 +20,7 @@ build/
 # Server runtime
 .server.pid
 reports/
+evals/results/
 
 # IDE
 .idea/
