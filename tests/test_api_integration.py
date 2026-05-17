@@ -271,6 +271,61 @@ def test_admin_agent_memories_scope_by_workspace_and_user(mock_deps):
         app.dependency_overrides.pop(require_admin_jwt, None)
 
 
+def test_admin_agent_memories_include_quality(mock_deps):
+    """Admin memory quality enrichment should derive from changelog rows."""
+    client = mock_deps
+    from app.main import app
+    from app.api.jwt_auth import require_admin_jwt
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    try:
+        with patch("app.api.admin.agents.db") as mock_db:
+            mock_db.query_raw = AsyncMock(
+                side_effect=[
+                    [{"workspace_id": "ws-1", "user_id": "user-1"}],
+                    [{
+                        "id": "mem-1",
+                        "content": "用户喜欢爵士乐",
+                        "summary": "用户喜欢爵士乐",
+                        "level": 2,
+                        "importance": 0.7,
+                        "main_category": "偏好边界",
+                        "sub_category": "音乐偏好",
+                        "type": "preference",
+                        "mention_count": 0,
+                        "created_at": "2026-05-08T00:00:00+00:00",
+                    }],
+                    [
+                        {
+                            "memory_id": "mem-1",
+                            "operation": "evidence_linked",
+                            "old_value": None,
+                            "new_value": '{"message_ids":["msg-1"]}',
+                            "created_at": "2026-05-08T00:01:00+00:00",
+                        },
+                        {
+                            "memory_id": "mem-1",
+                            "operation": "access",
+                            "old_value": None,
+                            "new_value": None,
+                            "created_at": "2026-05-08T00:02:00+00:00",
+                        },
+                    ],
+                ]
+            )
+
+            response = client.get("/admin-api/agents/agent-1/memories?source=user&include_quality=true")
+
+            assert response.status_code == 200
+            data = response.json()
+            quality = data[0]["quality"]
+            assert quality["evidence_message_ids"] == ["msg-1"]
+            assert quality["access_count"] == 1
+            assert quality["confidence"] >= 0.7
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
 def test_admin_agent_proactive_detail(mock_deps):
     """GET /admin-api/users/{user_id}/agents/{agent_id}/proactive returns state/events/logs."""
     client = mock_deps

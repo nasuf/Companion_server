@@ -58,7 +58,7 @@
 
 ## P0. 后台任务企业化
 
-**执行状态**：已完成第一版跨实例防重保护。新增 Redis 分布式锁工具，生产环境下 scheduler 高风险 cron 统一走单实例执行，memory pipeline 在生产环境按 conversation 增加跨实例锁。完整 durable queue、任务状态表、DLQ 和恢复语义仍是下一阶段。
+**执行状态**：已完成第一版跨实例防重保护 + Redis runtime job queue。生产环境下 scheduler 高风险 cron 统一走单实例执行，memory pipeline 在生产环境按 conversation 增加跨实例锁；新增 runtime job queue（queued/running/succeeded/dead-letter 状态、retry、stale running recovery、DLQ），并将 agent 初始化从裸 `asyncio.create_task` 迁入队列。更完整的后台任务产品化（可视化任务状态、更多 job 类型迁移、人工重放 DLQ）进入 P1/P1.5。
 
 ### 源码依据
 
@@ -91,7 +91,7 @@
 
 ## P0. 安全与隐私基线
 
-**执行状态**：已完成第一版 production fail-fast。新增 `APP_ENV`、`CORS_ALLOWED_ORIGINS`、生产强校验、部署前必需项检查和 `tests/test_security_config.py`。注意：生产部署前必须在 GitHub variables 配置 `CORS_ALLOWED_ORIGINS`，否则会按预期阻断部署。旧 BasicAuth env 已确认不再挂载使用并删除。
+**执行状态**：已完成第一版 production fail-fast + auth abuse control + memory privacy API。新增 `APP_ENV`、`CORS_ALLOWED_ORIGINS`、生产强校验、部署前必需项检查、登录/注册 rate limit 与 auth audit、记忆 export/edit/bulk delete/workspace wipe，以及对应安全回归测试。注意：生产部署前必须在 GitHub variables 配置 `CORS_ALLOWED_ORIGINS`，否则会按预期阻断部署。旧 BasicAuth env 已确认不再挂载使用并从部署文档/脚本环境读取中删除。
 
 ### 源码依据
 
@@ -122,6 +122,8 @@
 - 跨用户 trace/memory 访问有自动测试覆盖。
 
 ## P1. 记忆治理升级
+
+**执行状态**：已完成第一版 schema-stable 质量信号层。新增记忆 evidence changelog、`include_quality=true` 派生视图（confidence / evidence_message_ids / last_verified_at / contradiction_state / user_corrected_count / access_count），并把质量因子接入 L2 动态分数。尚未做数据库字段迁移、长期 consolidation 物化表或人工修复队列 UI。
 
 ### 源码依据
 
@@ -155,6 +157,8 @@
 
 ## P1. CI/CD 质量流水线
 
+**执行状态**：已完成第一版 CI gate。`ci.yml` 现在执行依赖安装、Prisma validate/generate、Python compileall、eval validate 和 backend quality pytest；`deploy.yml` 改为 CI 成功后的 `workflow_run` 触发，并保留 `workflow_dispatch` 手动部署入口。后续仍可扩展 lint/type check、部署后 smoke chat。
+
 ### 源码依据
 
 - `.github/workflows/deploy.yml` 当前 push/PR 都进入部署 job。
@@ -183,6 +187,8 @@
 
 ## P1. 观测与运营指标产品化
 
+**执行状态**：已完成第一版运营健康 endpoint + bug report → eval case 闭环。新增 `/admin-api/stats/operations`，聚合 `memory_changelogs`、`llm_usage`、`proactive_event_logs`、`proactive_states`、`time_triggers`、`bug_reports` 与 Redis DLQ/queue 计数，覆盖记忆写入/召回、LLM 用量、主动交流、提醒、runtime jobs、人工 bug report 的基础健康视图。新增 `/admin-api/bug-reports/{report_id}/eval-case`，可从人工标注的问题回复生成 validated JSONL eval draft，显式 `append_to_cases=true` 时才写入 `evals/cases.jsonl`。当前 LLM latency/fallback/circuit 仍只在结构化日志中，endpoint 已在 `data_quality` 明确标注为尚未结构化落库，后续需要把这些事件持久化后再做准确趋势统计。
+
 ### 源码依据
 
 - `app/observability/events.py` 已有结构化 event 常量。
@@ -196,19 +202,19 @@
    - LLM latency
    - fallback rate
    - circuit breaker open count
-   - memory extraction success
-   - retrieval selected count
-   - visible use rate
-   - reminder DLQ
-   - proactive sent/skipped
-   - crisis count
+   - memory extraction success（第一版：`memory_changelogs.operation='insert'`）
+   - retrieval selected count（第一版：`memory_changelogs.operation='access'`）
+   - visible use rate（第一版暂未落库；需打通 injected vs replied evidence）
+   - reminder DLQ（第一版：Redis `reminder:dlq` 计数）
+   - proactive sent/skipped（第一版：`proactive_event_logs` 聚合）
+   - crisis count（第一版暂未落库；当前只有结构化日志事件）
 2. P0 事件告警：
    - memory pipeline failed
    - embedding orphan
    - reminder DLQ
    - scheduler repeated failure
    - LLM circuit open
-3. bug report 一键生成 eval case。
+3. bug report 一键生成 eval case。（第一版：生成 deterministic JSONL draft，可显式 append）
 
 ### 验收标准
 

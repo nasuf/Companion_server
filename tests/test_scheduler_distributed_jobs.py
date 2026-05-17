@@ -46,3 +46,10 @@ def test_weekly_reflection_is_registered_through_distributed_wrapper():
 
     assert "scheduler.add_job(\n        run_weekly_reflection," not in source
     assert "_run_weekly_reflection," in source
+
+
+def test_runtime_job_queue_is_registered():
+    source = inspect.getsource(scheduler_mod.setup_scheduler)
+
+    assert "_run_runtime_job_queue," in source
+    assert 'id="runtime_job_queue"' in source

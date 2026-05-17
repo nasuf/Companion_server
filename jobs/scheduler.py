@@ -38,6 +38,7 @@ from app.services.runtime.distributed_lock import (
     DistributedLockUnavailable,
     distributed_lock,
 )
+from app.services.runtime.job_queue import process_runtime_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,15 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        _run_runtime_job_queue,
+        "interval",
+        seconds=5,
+        id="runtime_job_queue",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Patience recovery every hour
     scheduler.add_job(
         _run_patience_recovery,
@@ -385,6 +395,31 @@ async def _run_proactive_orchestrator_scan():
             logger.warning(f"Proactive orchestrator scan failed: {e}")
 
     await _run_distributed_job("proactive_orchestrator_scan", 55, _body)
+
+
+async def _run_runtime_job_queue():
+    try:
+        processed = await process_runtime_jobs(max_jobs=20)
+        if processed:
+            logger.info(
+                f"[CRON] runtime job queue processed {processed} jobs",
+                extra={
+                    "event": EVT_SCHEDULER_JOB,
+                    "task_name": "runtime_job_queue",
+                    "phase": "completed",
+                    "processed": processed,
+                },
+            )
+    except Exception as e:
+        logger.warning(
+            f"Runtime job queue scan failed: {e}",
+            extra={
+                "event": EVT_SCHEDULER_JOB,
+                "task_name": "runtime_job_queue",
+                "phase": "failed",
+                "error_type": type(e).__name__,
+            },
+        )
 
 
 async def _run_l2_adjustment():

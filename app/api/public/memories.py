@@ -1,23 +1,55 @@
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.ownership import require_memory_owner, require_user_self
 from app.db import db
 from app.models.memory import (
+    MemoryBulkDeleteRequest,
+    MemoryBulkDeleteResponse,
+    MemoryExportResponse,
     MemoryHygieneRequest,
     MemoryHygieneResponse,
     MemoryResponse,
     MemorySearchRequest,
     MemoryStatsGroup,
     MemoryStatsResponse,
+    MemoryUpdateRequest,
+    WorkspaceMemoryWipeRequest,
+    WorkspaceMemoryWipeResponse,
 )
+from app.services.memory.lifecycle.quality import derive_memory_quality, serialize_quality
+from app.services.memory.storage.embedding import generate_embedding, store_embedding
+from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.retrieval.legacy import retrieve_memories
 from app.services.workspace.workspaces import resolve_workspace_id
 
 router = APIRouter(prefix="/memories", tags=["memories"])
+
+
+def _serialize_memory(m, quality=None) -> MemoryResponse:
+    return MemoryResponse(
+        id=m.id,
+        user_id=m.userId,
+        type=m.type,
+        main_category=m.mainCategory,
+        sub_category=m.subCategory,
+        source=m.source,
+        level=m.level,
+        content=m.content,
+        summary=m.summary,
+        importance=m.importance,
+        created_at=str(m.createdAt),
+        quality=serialize_quality(quality),
+    )
+
+
+async def _quality_map(memories: list, include_quality: bool) -> dict[str, object]:
+    if not include_quality or not memories:
+        return {}
+    return await derive_memory_quality(memories)
 
 
 async def _compute_stats(
@@ -72,6 +104,7 @@ async def list_memories(
     search: str | None = None,
     limit: int = Query(default=50, le=200),
     offset: int = 0,
+    include_quality: bool = False,
     _user=Depends(require_user_self),
 ):
     where: dict = {"userId": user_id, "isArchived": False}
@@ -100,22 +133,31 @@ async def list_memories(
         take=limit,
         skip=offset,
     )
-    return [
-        MemoryResponse(
-            id=m.id,
-            user_id=m.userId,
-            type=m.type,
-            main_category=m.mainCategory,
-            sub_category=m.subCategory,
-            source=m.source,
-            level=m.level,
-            content=m.content,
-            summary=m.summary,
-            importance=m.importance,
-            created_at=str(m.createdAt),
-        )
-        for m in memories
-    ]
+    qualities = await _quality_map(memories, include_quality)
+    return [_serialize_memory(m, qualities.get(m.id)) for m in memories]
+
+
+@router.get("/export", response_model=MemoryExportResponse)
+async def export_memories(
+    user_id: str,
+    workspace_id: str | None = None,
+    source: Literal["user", "ai"] | None = None,
+    include_quality: bool = False,
+    _user=Depends(require_user_self),
+):
+    ws_id = workspace_id or await resolve_workspace_id(user_id=user_id)
+    memories = await memory_repo.find_many(
+        source=source,
+        where={"userId": user_id, "workspaceId": ws_id, "isArchived": False},
+        order={"createdAt": "desc"},
+    )
+    qualities = await _quality_map(memories, include_quality)
+    return MemoryExportResponse(
+        user_id=user_id,
+        workspace_id=ws_id,
+        total=len(memories),
+        memories=[_serialize_memory(m, qualities.get(m.id)) for m in memories],
+    )
 
 
 @router.get("/stats", response_model=MemoryStatsResponse)
@@ -163,18 +205,142 @@ async def run_memory_hygiene_now(
     )
 
 
-@router.get("/{memory_id}", response_model=MemoryResponse)
-async def get_memory(m=Depends(require_memory_owner)):
-    return MemoryResponse(
-        id=m.id,
-        user_id=m.userId,
-        type=m.type,
-        main_category=m.mainCategory,
-        sub_category=m.subCategory,
-        source=m.source,
-        level=m.level,
-        content=m.content,
-        summary=m.summary,
-        importance=m.importance,
-        created_at=str(m.createdAt),
+@router.patch("/{memory_id}", response_model=MemoryResponse)
+async def update_memory(
+    data: MemoryUpdateRequest,
+    m=Depends(require_memory_owner),
+):
+    if m.isArchived:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    update_data: dict = {}
+    old_content = m.content
+    if data.content is not None:
+        update_data["content"] = data.content
+        await store_embedding(m.id, await generate_embedding(data.content))
+    if data.summary is not None:
+        update_data["summary"] = data.summary
+    elif data.content is not None:
+        update_data["summary"] = data.content[:200]
+    if not update_data:
+        return _serialize_memory(m)
+
+    await memory_repo.update(m.id, source=m.source, record=m, **update_data)
+    await log_memory_changelog(
+        m.userId,
+        m.id,
+        "user_edit",
+        old_value=old_content,
+        new_value=update_data.get("content", m.content),
+        workspace_id=m.workspaceId,
     )
+    updated = await memory_repo.find_unique(m.id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return _serialize_memory(updated)
+
+
+@router.post("/bulk-delete", response_model=MemoryBulkDeleteResponse)
+async def bulk_delete_memories(
+    data: MemoryBulkDeleteRequest,
+    user_id: str = Query(...),
+    _user=Depends(require_user_self),
+):
+    requested = list(dict.fromkeys(data.memory_ids))
+    archived = 0
+    missing_or_forbidden: list[str] = []
+    for memory_id in requested:
+        rec = await memory_repo.find_unique(memory_id)
+        if not rec or rec.userId != user_id or rec.isArchived:
+            missing_or_forbidden.append(memory_id)
+            continue
+        await memory_repo.update(
+            rec.id,
+            source=rec.source,
+            record=rec,
+            isArchived=True,
+        )
+        await log_memory_changelog(
+            rec.userId,
+            rec.id,
+            "user_bulk_delete",
+            old_value=rec.content,
+            new_value=None,
+            workspace_id=rec.workspaceId,
+        )
+        archived += 1
+    return MemoryBulkDeleteResponse(
+        requested=len(requested),
+        archived=archived,
+        missing_or_forbidden=missing_or_forbidden,
+    )
+
+
+@router.post("/workspace-wipe", response_model=WorkspaceMemoryWipeResponse)
+async def wipe_workspace_memories(
+    data: WorkspaceMemoryWipeRequest,
+    user_id: str = Query(...),
+    _user=Depends(require_user_self),
+):
+    workspace = await db.chatworkspace.find_unique(where={"id": data.workspace_id})
+    if not workspace or workspace.userId != user_id:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not data.include_user and not data.include_ai:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one memory source must be selected",
+        )
+
+    archived_user = 0
+    archived_ai = 0
+    where = {
+        "userId": user_id,
+        "workspaceId": data.workspace_id,
+        "isArchived": False,
+    }
+    if data.include_user:
+        records = await memory_repo.find_many(source="user", where=where)
+        archived_user = await memory_repo.update_many(
+            source="user",
+            where=where,
+            data={"isArchived": True},
+        )
+        for rec in records:
+            await log_memory_changelog(
+                rec.userId,
+                rec.id,
+                "workspace_wipe",
+                old_value=rec.content,
+                new_value=None,
+                workspace_id=rec.workspaceId,
+            )
+    if data.include_ai:
+        records = await memory_repo.find_many(source="ai", where=where)
+        archived_ai = await memory_repo.update_many(
+            source="ai",
+            where=where,
+            data={"isArchived": True},
+        )
+        for rec in records:
+            await log_memory_changelog(
+                rec.userId,
+                rec.id,
+                "workspace_wipe",
+                old_value=rec.content,
+                new_value=None,
+                workspace_id=rec.workspaceId,
+            )
+    return WorkspaceMemoryWipeResponse(
+        workspace_id=data.workspace_id,
+        archived_user=archived_user,
+        archived_ai=archived_ai,
+    )
+
+
+@router.get("/{memory_id}", response_model=MemoryResponse)
+async def get_memory(
+    include_quality: bool = False,
+    m=Depends(require_memory_owner),
+):
+    qualities = await _quality_map([m], include_quality)
+    return _serialize_memory(m, qualities.get(m.id))

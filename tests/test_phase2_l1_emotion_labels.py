@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -107,13 +108,17 @@ def test_emotion_section_no_raw_vector():
     from app.services.chat.prompt_builder import _build_emotion_section
 
     user_emotion = {"emotion": "高兴", "intensity": 60}
-    section = asyncio.run(_build_emotion_section(
-        user_emotion=user_emotion, intimacy_stage="挚友",
-    ))
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text",
+        AsyncMock(return_value="你们目前的关系是{intimacy_stage}。"),
+    ):
+        section = asyncio.run(_build_emotion_section(
+            user_emotion=user_emotion, intimacy_stage="挚友",
+        ))
     assert section is not None
-    assert "0.50" not in section and "0.30" not in section
+    assert "0.50" not in section.body and "0.30" not in section.body
     # intimacy_stage 仍应注入
-    assert "挚友" in section
+    assert "挚友" in section.body
 
 
 def test_emotion_section_only_intimacy():
@@ -121,11 +126,15 @@ def test_emotion_section_only_intimacy():
     import asyncio
     from app.services.chat.prompt_builder import _build_emotion_section
 
-    section = asyncio.run(_build_emotion_section(
-        user_emotion=None, intimacy_stage="初识",
-    ))
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text",
+        AsyncMock(return_value="你们目前的关系是{intimacy_stage}。"),
+    ):
+        section = asyncio.run(_build_emotion_section(
+            user_emotion=None, intimacy_stage="初识",
+        ))
     assert section is not None
-    assert "初识" in section
+    assert "初识" in section.body
 
 
 def test_emotion_section_no_intimacy_returns_none():

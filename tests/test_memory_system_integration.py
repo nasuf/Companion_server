@@ -13,13 +13,14 @@ Covers:
 """
 
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.memory.retrieval.relevance import compute_display_score, RelevanceLevel
-from app.services.memory.lifecycle.l2_dynamics import _time_factor, _frequency_factor
+from app.services.memory.lifecycle.l2_dynamics import _time_factor, _frequency_factor, _quality_factor
 from app.services.memory.retrieval.l3_awakening import should_awaken_l3
 
 
@@ -38,7 +39,8 @@ class TestRelevanceGating:
     """Spec §3.1: weak relevance → skip memory injection."""
 
     def test_display_score_recent_high_importance(self):
-        score = compute_display_score(0.9, "2026-04-16T12:00:00Z", 0.85)
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
+        score = compute_display_score(0.8, recent, 0.85)
         assert score > 0.8  # high importance × 1.2 freshness × 0.85 similarity
 
     def test_display_score_old_low_importance(self):
@@ -75,6 +77,13 @@ class TestL2Dynamics:
         assert _frequency_factor(6) == 1.2
         assert _frequency_factor(10) == 1.2
         assert _frequency_factor(11) == 1.3
+
+    def test_quality_factor_ranges(self):
+        assert _quality_factor(0, 0) == 1.0
+        assert _quality_factor(1, 0) == 0.9
+        assert _quality_factor(0, 2) == 1.06
+        assert _quality_factor(10, 0) == 0.7
+        assert _quality_factor(0, 10) == 1.1
 
     def test_combined_score_promotion_threshold(self):
         """Score 0.85 + 10 mentions → should promote to L1."""

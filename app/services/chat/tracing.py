@@ -28,6 +28,10 @@ from app.services.chat.trace_mirror import (
     write_trace_mirror,
 )
 from app.services.public_trace import load_public_trace
+from app.services.memory.lifecycle.quality import (
+    derive_memory_quality_from_changelog_rows,
+    serialize_quality,
+)
 from app.services.runtime.ws_manager import manager
 from app.services.chat.trace_enrich import apply_prompt_render_traces
 
@@ -234,6 +238,115 @@ def _attach_message_trace_metadata(detail: dict[str, Any], metadata: dict) -> di
     return detail
 
 
+def _collect_trace_memory_ids(value: Any) -> set[str]:
+    ids: set[str] = set()
+    if isinstance(value, dict):
+        mid = value.get("id")
+        if mid:
+            ids.add(str(mid))
+        for child in value.values():
+            ids.update(_collect_trace_memory_ids(child))
+    elif isinstance(value, list):
+        for item in value:
+            ids.update(_collect_trace_memory_ids(item))
+    return ids
+
+
+def _collect_trace_memory_importance(value: Any) -> dict[str, float]:
+    values: dict[str, float] = {}
+    if isinstance(value, dict):
+        mid = value.get("id")
+        if mid and mid not in values:
+            try:
+                values[str(mid)] = float(value.get("importance") or 0.5)
+            except (TypeError, ValueError):
+                values[str(mid)] = 0.5
+        for child in value.values():
+            values.update({
+                key: val for key, val in _collect_trace_memory_importance(child).items()
+                if key not in values
+            })
+    elif isinstance(value, list):
+        for item in value:
+            values.update({
+                key: val for key, val in _collect_trace_memory_importance(item).items()
+                if key not in values
+            })
+    return values
+
+
+def _apply_trace_memory_quality(value: Any, qualities: dict[str, dict]) -> None:
+    if isinstance(value, dict):
+        mid = value.get("id")
+        if mid and str(mid) in qualities and "quality" not in value:
+            value["quality"] = qualities[str(mid)]
+        for child in value.values():
+            _apply_trace_memory_quality(child, qualities)
+    elif isinstance(value, list):
+        for item in value:
+            _apply_trace_memory_quality(item, qualities)
+
+
+async def _enrich_memory_quality_for_trace(metadata: dict) -> dict:
+    """Attach memory quality to trace-local retrieval payloads on demand.
+
+    Trace resolve is an admin/debug path, so deriving quality here keeps chat hot
+    path unchanged while making the trace panel more useful for memory defects.
+    """
+    retrievals = metadata.get("memory_retrievals")
+    analysis = metadata.get("memory_retrieval_analysis")
+    if not isinstance(retrievals, list) and not isinstance(analysis, dict):
+        return metadata
+
+    memory_ids = _collect_trace_memory_ids(retrievals)
+    memory_ids.update(_collect_trace_memory_ids(analysis))
+    importance_by_id = _collect_trace_memory_importance(retrievals)
+    importance_by_id.update({
+        key: val for key, val in _collect_trace_memory_importance(analysis).items()
+        if key not in importance_by_id
+    })
+    if not memory_ids:
+        return metadata
+
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT memory_id, operation, old_value, new_value, created_at
+            FROM memory_changelogs
+            WHERE memory_id = ANY($1::text[])
+            ORDER BY created_at ASC
+            """,
+            list(memory_ids),
+        )
+    except Exception as e:
+        logger.debug("[TRACE] memory quality enrich skipped: %s", type(e).__name__)
+        return metadata
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["memory_id"]), []).append(row)
+    if not grouped:
+        return metadata
+
+    enriched = dict(metadata)
+    qualities = {
+        memory_id: serialize_quality(derive_memory_quality_from_changelog_rows(
+            memory_id=memory_id,
+            importance=importance_by_id.get(memory_id, 0.5),
+            rows=records,
+        ))
+        for memory_id, records in grouped.items()
+    }
+    if isinstance(retrievals, list):
+        enriched_retrievals = [dict(item) if isinstance(item, dict) else item for item in retrievals]
+        _apply_trace_memory_quality(enriched_retrievals, qualities)
+        enriched["memory_retrievals"] = enriched_retrievals
+    if isinstance(analysis, dict):
+        enriched_analysis = dict(analysis)
+        _apply_trace_memory_quality(enriched_analysis, qualities)
+        enriched["memory_retrieval_analysis"] = enriched_analysis
+    return enriched
+
+
 async def resolve_trace_for_message(
     message_id: str, *, user_id: str, is_admin: bool = False,
 ) -> dict[str, Any]:
@@ -270,10 +383,12 @@ async def resolve_trace_for_message(
     if existing_url:
         cached = await get_trace_mirror_by_message(message_id)
         if cached:
-            _attach_message_trace_metadata(cached, meta)
+            enriched_meta = await _enrich_memory_quality_for_trace(meta)
+            _attach_message_trace_metadata(cached, enriched_meta)
             return {"trace_url": str(existing_url), "detail": cached}
         detail = await load_public_trace(str(existing_url))
-        _attach_message_trace_metadata(detail, meta)
+        enriched_meta = await _enrich_memory_quality_for_trace(meta)
+        _attach_message_trace_metadata(detail, enriched_meta)
         await write_trace_mirror(detail=detail, message_id=msg.id)
         return {"trace_url": str(existing_url), "detail": detail}
 
@@ -282,7 +397,8 @@ async def resolve_trace_for_message(
         trace_id, conversation_id=conv.id,
     )
     detail = await load_public_trace(public_url)
-    _attach_message_trace_metadata(detail, meta)
+    enriched_meta = await _enrich_memory_quality_for_trace(meta)
+    _attach_message_trace_metadata(detail, enriched_meta)
     await write_trace_mirror(detail=detail, message_id=msg.id)
     await _patch_message_metadata(msg.id, meta, trace_url=public_url)
     await manager.send_event(

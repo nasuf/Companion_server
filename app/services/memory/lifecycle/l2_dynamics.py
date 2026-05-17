@@ -5,6 +5,7 @@ time and grows with mention frequency. Periodically (daily cron) we
 recalculate current scores and promote/demote as needed:
 
   current_score = initial_importance × time_factor × frequency_factor
+  P1 adds a bounded quality factor derived from changelog signals.
 
 Time factor (days since last accessed/mentioned):
   <30d → 1.0 | 30-90d → 0.9 | 90-180d → 0.8 | 180-365d → 0.7
@@ -64,6 +65,18 @@ def _frequency_factor(mentions_1y: int) -> float:
     if mentions_1y <= 10:
         return 1.2
     return 1.3
+
+
+def _quality_factor(corrections_1y: int, evidence_links: int) -> float:
+    """Bounded quality modifier for P1 memory governance.
+
+    Confirmed/user corrections reduce confidence in a memory's current form;
+    source evidence links give a small stability boost. The factor stays close
+    to 1.0 so spec time/frequency dynamics remain the dominant signal.
+    """
+    penalty = min(0.30, max(0, corrections_1y) * 0.10)
+    boost = min(0.10, max(0, evidence_links) * 0.03)
+    return round(max(0.70, min(1.10, 1.0 - penalty + boost)), 3)
 
 
 async def _check_promotion_conditions(mem, side: str) -> bool:
@@ -169,6 +182,7 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
 
     mem_ids = [m.id for m in l2_memories]
     mention_counts: dict[str, int] = {}
+    quality_counts: dict[str, dict[str, int]] = {}
     if mem_ids:
         rows = await db.query_raw(
             """
@@ -184,6 +198,31 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
         )
         for r in rows:
             mention_counts[r.get("memory_id", "")] = r.get("cnt", 0)
+        quality_rows = await db.query_raw(
+            """
+            SELECT
+              memory_id,
+              SUM(CASE WHEN operation IN (
+                'user_edit',
+                'contradiction_archived',
+                'contradiction_new',
+                'retrieval_feedback_confirmed'
+              ) THEN 1 ELSE 0 END)::int AS corrections,
+              SUM(CASE WHEN operation = 'evidence_linked' THEN 1 ELSE 0 END)::int AS evidence_links
+            FROM memory_changelogs
+            WHERE memory_id = ANY($1::text[])
+              AND created_at >= $2
+            GROUP BY memory_id
+            """,
+            mem_ids,
+            one_year_ago,
+        )
+        for r in quality_rows:
+            mid = r.get("memory_id", "")
+            quality_counts[mid] = {
+                "corrections": int(r.get("corrections") or 0),
+                "evidence_links": int(r.get("evidence_links") or 0),
+            }
 
     promoted = 0
     demoted = 0
@@ -202,7 +241,12 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
         tf = _time_factor(days)
         mc = mention_counts.get(mem.id, 0)
         ff = _frequency_factor(mc)
-        current_score = initial_importance * tf * ff
+        q_counts = quality_counts.get(mem.id, {})
+        qf = _quality_factor(
+            q_counts.get("corrections", 0),
+            q_counts.get("evidence_links", 0),
+        )
+        current_score = initial_importance * tf * ff * qf
 
         # Track the continuous-below-threshold streak regardless of outcome
         sustained_low = await _track_low_score_streak(

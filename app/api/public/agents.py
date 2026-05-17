@@ -41,10 +41,192 @@ from app.services.workspace.workspaces import (
     restore_staged_workspaces,
     stage_active_workspaces_for_user,
 )
+from app.services.runtime.job_queue import enqueue_runtime_job, register_job_handler
+from app.services.runtime.tasks import fire_background
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+async def _safe_life_overview(agent) -> str | None:
+    try:
+        return await generate_and_save_life_overview(agent)
+    except Exception as e:
+        logger.warning(f"Life overview failed for {agent.id}: {e}")
+        return None
+
+
+async def _run_agent_initialization_job(payload: dict) -> None:
+    agent_id = str(payload["agent_id"])
+    user_id = str(payload["user_id"])
+    workspace_id = payload.get("workspace_id")
+    personality_dict = dict(payload.get("personality") or {})
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent or getattr(agent, "status", None) == "archived":
+        logger.info(f"Skipping agent initialization job for missing/archived agent {agent_id}")
+        return
+
+    await init_patience(agent.id, user_id)
+
+    from app.services.llm.usage_tracker import usage_session
+
+    async with usage_session(
+        scope="agent_creation",
+        conversation_id=None,
+        agent_id=agent.id,
+        user_id=user_id,
+    ):
+        await _run_agent_initialization_inner(agent, user_id, workspace_id, personality_dict)
+
+
+async def _run_agent_initialization_inner(
+    agent,
+    user_id: str,
+    workspace_id: str | None,
+    personality_dict: dict,
+) -> None:
+    """Plan B 主管线（9 段进度）."""
+    await set_progress(agent.id, "initializing", message="正在创建空间...")
+
+    await set_progress(agent.id, "mbti_deriving", message="正在推导 MBTI 性格...")
+    mbti: dict | None = None
+    try:
+        mbti_input = await seven_dim_to_mbti(personality_dict)
+        summary = mbti_input.pop("summary", "")
+        mbti = await build_mbti(mbti_input, summary=summary)
+        await db.aiagent.update(
+            where={"id": agent.id},
+            data={"mbti": Json(mbti), "currentMbti": Json(mbti)},
+        )
+        agent.mbti = mbti
+        agent.currentMbti = mbti
+    except Exception as e:
+        logger.error(f"MBTI init failed for agent {agent.id}: {e}")
+    await set_progress(agent.id, "mbti_done", message="MBTI 推导完成")
+
+    await set_progress(agent.id, "prompt_building", message="正在构建生成提示...")
+    try:
+        career = await pick_random_active_career()
+    except Exception as e:
+        logger.warning(f"Career pool query failed for {agent.id}: {e}")
+        career = None
+
+    await set_progress(agent.id, "llm_generating", message="正在生成 AI 背景...")
+    try:
+        profile = await generate_full_profile(
+            name=agent.name,
+            gender=agent.gender,
+            mbti=mbti,
+            personality=personality_dict,
+            career_template=career,
+        )
+    except Exception as e:
+        logger.error(f"Background generation failed for {agent.id}: {e}", exc_info=True)
+        await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
+        return
+    await set_progress(agent.id, "llm_done", message="背景生成完成, 正在解析...")
+
+    identity = profile.get("identity", {}) if isinstance(profile, dict) else {}
+    update_payload: dict = {}
+    if career and isinstance(career.get("title"), str) and career["title"].strip():
+        update_payload["occupation"] = career["title"].strip()
+    city = identity.get("location")
+    if isinstance(city, str) and city.strip():
+        update_payload["city"] = city.strip()
+    derived_age = identity.get("age")
+    if isinstance(derived_age, int):
+        update_payload["age"] = derived_age
+    if update_payload:
+        try:
+            await db.aiagent.update(where={"id": agent.id}, data=update_payload)
+            for k, v in update_payload.items():
+                setattr(agent, k, v)
+        except Exception as e:
+            logger.warning(f"Persisting derived agent fields failed for {agent.id}: {e}")
+
+    memories_failed = False
+
+    async def _run_memories():
+        nonlocal memories_failed
+        try:
+            stored = await generate_l1_coverage(
+                agent_id=agent.id,
+                user_id=user_id,
+                profile=profile,
+                career_template=career,
+                workspace_id=workspace_id,
+            )
+        except Exception as e:
+            memories_failed = True
+            logger.error(f"Life story memories failed for {agent.id}: {e}", exc_info=True)
+            await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
+            return
+        if stored == 0:
+            memories_failed = True
+            logger.warning(f"L1 generation produced 0 memories for {agent.id} (lock held or empty profile)")
+            await set_progress(agent.id, "failed", message="生成失败: 记忆库为空, 请删除重建")
+
+    _, overview_text = await asyncio.gather(_run_memories(), _safe_life_overview(agent))
+
+    if not memories_failed:
+        await set_progress(agent.id, "complete", message="生成完成")
+
+    if overview_text and not memories_failed:
+        try:
+            await generate_daily_schedule(
+                agent.id,
+                agent.name,
+                mbti,
+                life_overview=overview_text,
+            )
+        except Exception as e:
+            logger.warning(f"Daily schedule init failed for agent {agent.id}: {e}")
+
+    if not memories_failed:
+        await activate_agent(agent.id)
+        try:
+            await dispatch_first_greeting_for_agent(
+                agent_id=agent.id,
+                user_id=agent.userId,
+            )
+        except Exception as e:
+            logger.warning(f"first_greeting dispatch failed for agent {agent.id}: {e}")
+
+
+register_job_handler("agent_initialization", _run_agent_initialization_job)
+
+
+async def _enqueue_agent_initialization(
+    *,
+    agent_id: str,
+    user_id: str,
+    workspace_id: str | None,
+    personality: dict,
+) -> None:
+    payload = {
+        "agent_id": agent_id,
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+        "personality": personality,
+    }
+    try:
+        job_id = await enqueue_runtime_job(
+            "agent_initialization",
+            payload,
+            idempotency_key=f"agent_initialization:{agent_id}",
+            max_attempts=3,
+        )
+        logger.info(
+            f"Queued agent initialization job {job_id} for {agent_id}",
+            extra={"event": "runtime_job", "job_type": "agent_initialization", "job_id": job_id},
+        )
+    except Exception as e:
+        logger.warning(
+            f"Queue unavailable for agent initialization; falling back to local task: {e}",
+            extra={"event": "runtime_job", "job_type": "agent_initialization", "phase": "fallback"},
+        )
+        fire_background(_run_agent_initialization_job(payload))
 
 
 @router.post("", response_model=AgentResponse)
@@ -111,165 +293,17 @@ async def create_agent(
         raise
 
     # Spec §1.3：7 维 → MBTI 4 轴用大模型推导，再 §1.4 单步 LLM 生 background。
-    # 整个 Plan B pipeline 在后台 asyncio.create_task 里跑，不阻塞 API 响应。
+    # P0: 长生命周期初始化进入 runtime job queue, 避免进程重启后静默丢任务。
     personality_dict = data.personality.model_dump()
 
-    # Initialize patience value (Redis + DB)
-    asyncio.create_task(init_patience(agent.id, data.user_id))
+    await set_progress(agent.id, "queued", message="已进入生成队列...")
 
-    async def _safe_overview() -> str | None:
-        try:
-            return await generate_and_save_life_overview(agent)
-        except Exception as e:
-            logger.warning(f"Life overview failed for {agent.id}: {e}")
-            return None
-
-    async def _init_and_generate_story():
-        """Plan B 主管线（9 段进度）.
-
-        1. initializing → mbti_deriving → 推导 MBTI 写库 → mbti_done
-        2. prompt_building → 抽 career → llm_generating
-        3. generate_full_profile (单步 LLM, 含 MBTI + career)
-        4. llm_done → 写 agent.occupation/age/city
-        5. converting/embedding/storing 由 generate_l1_coverage 内部推进；
-           与 life_overview 并行
-        6. complete (任一步 failed 则保留 failed 状态, 仍兜底激活)
-        """
-        from app.services.llm.usage_tracker import usage_session
-        async with usage_session(
-            scope="agent_creation", conversation_id=None,
-            agent_id=agent.id, user_id=data.user_id,
-        ):
-            await _init_and_generate_story_inner()
-
-    async def _init_and_generate_story_inner():
-        ws_id = workspace.id if workspace else None
-        await set_progress(agent.id, "initializing", message="正在创建空间...")
-
-        # ── Step 1: MBTI ──
-        await set_progress(agent.id, "mbti_deriving", message="正在推导 MBTI 性格...")
-        mbti: dict | None = None
-        try:
-            mbti_input = await seven_dim_to_mbti(personality_dict)
-            # seven_dim_to_mbti 同步产出 4 轴 + summary; 拆开传给 build_mbti
-            # (build_mbti 单独签名仅取 4 轴 percentages, summary 走 kwarg).
-            summary = mbti_input.pop("summary", "")
-            mbti = await build_mbti(mbti_input, summary=summary)
-            await db.aiagent.update(
-                where={"id": agent.id},
-                data={"mbti": Json(mbti), "currentMbti": Json(mbti)},
-            )
-            agent.mbti = mbti
-            agent.currentMbti = mbti
-        except Exception as e:
-            logger.error(f"MBTI init failed for agent {agent.id}: {e}")
-        await set_progress(agent.id, "mbti_done", message="MBTI 推导完成")
-
-        # ── Step 2: career_template + prompt build ──
-        await set_progress(agent.id, "prompt_building", message="正在构建生成提示...")
-        try:
-            career = await pick_random_active_career()
-        except Exception as e:
-            logger.warning(f"Career pool query failed for {agent.id}: {e}")
-            career = None
-
-        # ── Step 3: 单步 LLM 生成 background ──
-        await set_progress(agent.id, "llm_generating", message="正在生成 AI 背景...")
-        try:
-            profile = await generate_full_profile(
-                name=agent.name,
-                gender=agent.gender,
-                mbti=mbti,
-                personality=personality_dict,
-                career_template=career,
-            )
-        except Exception as e:
-            logger.error(f"Background generation failed for {agent.id}: {e}", exc_info=True)
-            await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
-            # 不激活: 失败时 agent 保持 provisioning, 让 /provision-status 仍能
-            # 返回 stage="failed" → 前端显示「请删除重建」UI; 若 activate_agent
-            # 写 status=active, /provision-status 会被 active 短路返回 complete
-            # 状态, 失败信息丢失.
-            return
-        await set_progress(agent.id, "llm_done", message="背景生成完成, 正在解析...")
-
-        # ── Step 4: persist derived agent fields (occupation/age/city) ──
-        identity = profile.get("identity", {}) if isinstance(profile, dict) else {}
-        update_payload: dict = {}
-        if career and isinstance(career.get("title"), str) and career["title"].strip():
-            update_payload["occupation"] = career["title"].strip()
-        city = identity.get("location")
-        if isinstance(city, str) and city.strip():
-            update_payload["city"] = city.strip()
-        derived_age = identity.get("age")
-        if isinstance(derived_age, int):
-            update_payload["age"] = derived_age
-        if update_payload:
-            try:
-                await db.aiagent.update(where={"id": agent.id}, data=update_payload)
-                for k, v in update_payload.items():
-                    setattr(agent, k, v)
-            except Exception as e:
-                logger.warning(f"Persisting derived agent fields failed for {agent.id}: {e}")
-
-        # ── Step 5: L1 记忆生成 ∥ 生活画像 ──
-        # 用 nonlocal 闭包标志取代 get_progress 回查 Redis (省一次 round-trip).
-        memories_failed = False
-
-        async def _run_memories():
-            nonlocal memories_failed
-            try:
-                stored = await generate_l1_coverage(
-                    agent_id=agent.id,
-                    user_id=data.user_id,
-                    profile=profile,
-                    career_template=career,
-                    workspace_id=ws_id,
-                )
-            except Exception as e:
-                memories_failed = True
-                logger.error(f"Life story memories failed for {agent.id}: {e}", exc_info=True)
-                await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
-                return
-            # 0 条 = 锁被占 (MemoryGenerationLocked 内部 catch + return 0) 或转换全空,
-            # 任何一种都不能激活成"空记忆"agent. spec §1.4 要求至少覆盖 5 大类.
-            if stored == 0:
-                memories_failed = True
-                logger.warning(f"L1 generation produced 0 memories for {agent.id} (lock held or empty profile)")
-                await set_progress(agent.id, "failed", message="生成失败: 记忆库为空, 请删除重建")
-
-        _, overview_text = await asyncio.gather(_run_memories(), _safe_overview())
-
-        if not memories_failed:
-            await set_progress(agent.id, "complete", message="生成完成")
-
-        # daily_schedule 只在 memory 生成成功时跑: 失败 agent 不会被激活, 跑 schedule
-        # 是浪费 LLM token; 且 schedule 依赖记忆库 / agent.occupation 等已落地数据.
-        if overview_text and not memories_failed:
-            try:
-                await generate_daily_schedule(
-                    agent.id, agent.name, mbti,
-                    life_overview=overview_text,
-                )
-            except Exception as e:
-                logger.warning(f"Daily schedule init failed for agent {agent.id}: {e}")
-
-        # 仅在没有失败的情况下激活. 失败 agent 保持 provisioning, 让 /provision-status
-        # 仍能返回 failed → 前端显示「请删除重建」UI (active 状态会被短路成 complete).
-        if not memories_failed:
-            await activate_agent(agent.id)
-            # provisioning 期间用户的 WS 已连上但 send_first_greeting 被 status
-            # gate 跳过. 前端 chatSocket 是 module-level singleton, App remount
-            # 不重连 WS — 因此必须由后端在转 active 后主动 dispatch, 否则
-            # 第一句话永远不会发. send_first_greeting 内有 Redis SETNX 幂等锁.
-            try:
-                await dispatch_first_greeting_for_agent(
-                    agent_id=agent.id, user_id=agent.userId,
-                )
-            except Exception as e:
-                logger.warning(f"first_greeting dispatch failed for agent {agent.id}: {e}")
-
-    asyncio.create_task(_init_and_generate_story())
+    await _enqueue_agent_initialization(
+        agent_id=agent.id,
+        user_id=data.user_id,
+        workspace_id=workspace.id if workspace else None,
+        personality=personality_dict,
+    )
 
     return AgentResponse(
         id=agent.id,

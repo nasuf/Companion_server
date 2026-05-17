@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.db import db
 from app.models.auth import RegisterRequest, LoginRequest, AuthResponse
 from app.services.auth import hash_password, verify_password, create_jwt
+from app.services.auth_security import (
+    audit_auth_request_event,
+    clear_login_failures,
+    enforce_login_rate_limit,
+    enforce_register_rate_limit,
+    record_login_failure,
+)
 from app.api.jwt_auth import require_user
 from app.services.workspace.workspaces import get_active_workspace
 
@@ -42,9 +49,16 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
 
 
 @router.post("/register", response_model=AuthResponse)
-async def register(data: RegisterRequest):
+async def register(data: RegisterRequest, request: Request):
+    await enforce_register_rate_limit(request)
     existing = await db.user.find_unique(where={"username": data.username})
     if existing:
+        audit_auth_request_event(
+            "register_conflict",
+            request,
+            username=data.username,
+            outcome="failed",
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="用户名已被注册",
@@ -60,27 +74,45 @@ async def register(data: RegisterRequest):
     )
 
     token = create_jwt(user.id, user.role)
-    logger.info(f"User registered: {user.username} ({user.id})")
+    audit_auth_request_event(
+        "register_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    logger.info("User registered", extra={"event": "auth_register", "user_id": user.id})
     return await _build_auth_response(user, token)
 
 
 @router.post("/login", response_model=AuthResponse)
-async def login(data: LoginRequest):
+async def login(data: LoginRequest, request: Request):
+    await enforce_login_rate_limit(request, data.username)
     user = await db.user.find_unique(where={"username": data.username})
     if not user:
+        await record_login_failure(request, data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
         )
 
     if not verify_password(data.password, user.hashedPassword):
+        await record_login_failure(request, data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
         )
 
+    await clear_login_failures(request, data.username)
     token = create_jwt(user.id, user.role)
-    logger.info(f"User logged in: {user.username} ({user.id})")
+    audit_auth_request_event(
+        "login_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    logger.info("User logged in", extra={"event": "auth_login", "user_id": user.id})
     return await _build_auth_response(user, token)
 
 

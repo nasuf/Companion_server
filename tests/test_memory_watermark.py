@@ -22,6 +22,12 @@ def _msg(role: str, content: str, ts: datetime) -> dict:
     return {"role": role, "content": content, "createdAt": ts.isoformat()}
 
 
+def _msg_with_id(message_id: str, role: str, content: str, ts: datetime) -> dict:
+    msg = _msg(role, content, ts)
+    msg["id"] = message_id
+    return msg
+
+
 @pytest.mark.asyncio
 async def test_watermark_absent_extracts_target_role_only():
     """首次运行 (无水位线) → target_role 新消息进 new, cross-role 进 context (反幻觉切回路)."""
@@ -50,6 +56,26 @@ async def test_watermark_absent_extracts_target_role_only():
     assert "user: hi" in by_side["ai"]["context_conversation"]
     # 推进水位线: user 一次 + ai 一次
     assert mock_set.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_watermark_passes_evidence_message_ids_to_pipeline():
+    from app.services.chat.post_process import _bg_memory_pipeline
+
+    t0 = datetime.now(UTC)
+    msgs = [
+        _msg_with_id("user-msg-1", "user", "我喜欢手冲", t0),
+        _msg_with_id("assistant-msg-1", "assistant", "我记住啦", t0 + timedelta(seconds=1)),
+    ]
+
+    with patch("app.services.chat.post_process.get_watermark", AsyncMock(return_value=None)), \
+         patch("app.services.chat.post_process.set_watermark", AsyncMock()), \
+         patch("app.services.chat.post_process.process_memory_pipeline", AsyncMock()) as mock_pipeline:
+        await _bg_memory_pipeline("u1", msgs, conversation_id="c1")
+
+    by_side = {c.kwargs["side"]: c.kwargs for c in mock_pipeline.await_args_list}
+    assert by_side["user"]["evidence_message_ids"] == ["user-msg-1"]
+    assert by_side["ai"]["evidence_message_ids"] == ["assistant-msg-1"]
 
 
 @pytest.mark.asyncio

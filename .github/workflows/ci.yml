@@ -8,8 +8,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  eval-smoke:
+  backend-quality:
     runs-on: ubuntu-24.04
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
 
     steps:
       - name: Checkout code
@@ -26,9 +29,33 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Validate Prisma schema
+        run: prisma validate --schema prisma/schema.prisma
+
+      - name: Generate Prisma client
+        run: prisma generate --schema prisma/schema.prisma
+
+      - name: Compile Python sources
+        run: python -m compileall -q app jobs scripts evals tests
+
       - name: Validate agent eval cases
         run: python evals/run_local.py --validate-only
 
-      - name: Run eval harness tests
-        run: pytest tests/test_agent_evals.py -q
-
+      - name: Run backend quality tests
+        run: |
+          pytest \
+            tests/test_agent_evals.py \
+            tests/test_security_config.py \
+            tests/test_auth_security.py \
+            tests/test_memory_privacy_api.py \
+            tests/test_memory_quality.py \
+            tests/test_memory_watermark.py \
+            tests/test_memory_system_integration.py \
+            tests/test_l2_dynamics_workspace_scope.py \
+            tests/test_runtime_job_queue.py \
+            tests/test_agent_initialization_queue.py \
+            tests/test_scheduler_distributed_jobs.py \
+            tests/test_public_endpoints_ownership.py \
+            tests/test_ownership_dependencies.py \
+            tests/test_api_integration.py \
+            -q

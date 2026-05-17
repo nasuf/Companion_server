@@ -6,6 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
+from app.services.memory.lifecycle.quality import (
+    derive_memory_quality_from_changelog_rows,
+    serialize_quality,
+)
 from app.services.runtime.data_reset import hard_delete_agent_data
 
 router = APIRouter(prefix="/admin-api/agents", tags=["admin-agents"])
@@ -59,6 +63,35 @@ def _memory_row(r: dict, source: str = "") -> dict:
     if "mention_count" in r:
         d["mention_count"] = int(r.get("mention_count", 0))
     return d
+
+
+async def _admin_quality_map(rows: list[dict], include_quality: bool) -> dict[str, dict]:
+    if not include_quality or not rows:
+        return {}
+    row_by_id = {str(row.get("id", "")): row for row in rows if row.get("id")}
+    changelog_rows = await db.query_raw(
+        """
+        SELECT memory_id, operation, old_value, new_value, created_at
+        FROM memory_changelogs
+        WHERE memory_id = ANY($1::text[])
+        ORDER BY created_at ASC
+        """,
+        [str(row.get("id", "")) for row in rows],
+    )
+    grouped: dict[str, list[dict]] = {}
+    for row in changelog_rows:
+        grouped.setdefault(str(row["memory_id"]), []).append(row)
+    return {
+        memory_id: serialize_quality(
+            derive_memory_quality_from_changelog_rows(
+                memory_id=memory_id,
+                importance=float(row_by_id.get(memory_id, {}).get("importance", 0.5)),
+                source=str(row_by_id.get(memory_id, {}).get("source", "user")),
+                rows=records,
+            )
+        )
+        for memory_id, records in grouped.items()
+    }
 
 
 # ── endpoints ──
@@ -147,6 +180,7 @@ async def get_memories(
     search: str = "",
     limit: int = 50,
     offset: int = 0,
+    include_quality: bool = False,
     _: str = Depends(require_admin_jwt),
 ):
     """Get agent memories with server-side filtering and pagination."""
@@ -203,6 +237,10 @@ async def get_memories(
             all_rows.append(_memory_row(r, source=src_label))
 
     all_rows.sort(key=lambda x: -x["importance"])
+    qualities = await _admin_quality_map(all_rows, include_quality)
+    for row in all_rows:
+        if row["id"] in qualities:
+            row["quality"] = qualities[row["id"]]
     return all_rows
 
 

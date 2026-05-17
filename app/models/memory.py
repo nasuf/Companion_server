@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MemoryResponse(BaseModel):
@@ -13,6 +13,53 @@ class MemoryResponse(BaseModel):
     summary: str | None = None
     importance: float
     created_at: str | None = None
+    quality: "MemoryQualityResponse | None" = None
+
+
+class MemoryQualityResponse(BaseModel):
+    confidence: float
+    evidence_message_ids: list[str] = Field(default_factory=list)
+    last_verified_at: str | None = None
+    contradiction_state: str = "none"
+    user_corrected_count: int = 0
+    access_count: int = 0
+    signals: list[str] = Field(default_factory=list)
+
+
+class MemoryExportResponse(BaseModel):
+    user_id: str
+    workspace_id: str | None = None
+    total: int
+    memories: list[MemoryResponse]
+
+
+class MemoryUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | None = Field(default=None, min_length=1, max_length=4000)
+    summary: str | None = Field(default=None, max_length=1000)
+
+
+class MemoryBulkDeleteRequest(BaseModel):
+    memory_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class MemoryBulkDeleteResponse(BaseModel):
+    requested: int
+    archived: int
+    missing_or_forbidden: list[str] = Field(default_factory=list)
+
+
+class WorkspaceMemoryWipeRequest(BaseModel):
+    workspace_id: str
+    include_ai: bool = True
+    include_user: bool = True
+
+
+class WorkspaceMemoryWipeResponse(BaseModel):
+    workspace_id: str
+    archived_user: int
+    archived_ai: int
 
 
 class MemorySearchRequest(BaseModel):

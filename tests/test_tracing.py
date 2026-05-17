@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 def test_tracer_disabled_no_op():
@@ -285,6 +285,54 @@ class TestResolveTraceForMessage:
         assert detail["trace"]["memory_retrieval_analysis"] == analysis
         assert detail["memory_retrieval_feedback"] == feedback
         assert detail["trace"]["memory_retrieval_feedback"] == feedback
+
+    @_pytest.mark.asyncio
+    async def test_existing_url_mirror_enriches_memory_quality(self, monkeypatch):
+        """Trace resolve should attach derived quality without returning 503."""
+        from datetime import datetime, timezone
+        from app.services.chat import tracing
+
+        retrievals = [{
+            "session_id": "ret_quality",
+            "strategy": "hybrid_l1_l2",
+            "selected": [{"id": "mem-quality", "text": "用户喜欢爵士", "importance": 0.7}],
+        }]
+        msg = self._make_msg(metadata={
+            "trace_id": "t1",
+            "trace_url": "https://existing",
+            "memory_retrievals": retrievals,
+        })
+        cached = {"trace": {"trace_id": "t1"}, "steps": [{"id": "s1"}]}
+
+        async def fake_get_mirror(_):
+            return cached
+
+        fake_db = self._fake_db(msg)
+        fake_db.query_raw = AsyncMock(return_value=[
+            {
+                "memory_id": "mem-quality",
+                "operation": "evidence_linked",
+                "old_value": None,
+                "new_value": '{"message_ids":["msg-user-1"]}',
+                "created_at": datetime.now(timezone.utc),
+            },
+            {
+                "memory_id": "mem-quality",
+                "operation": "access",
+                "old_value": None,
+                "new_value": None,
+                "created_at": datetime.now(timezone.utc),
+            },
+        ])
+        monkeypatch.setattr(tracing, "get_trace_mirror_by_message", fake_get_mirror)
+
+        with patch.object(tracing, "db", fake_db):
+            result = await tracing.resolve_trace_for_message("m1", user_id="u1")
+
+        quality = result["detail"]["memory_retrievals"][0]["selected"][0]["quality"]
+        assert quality["evidence_message_ids"] == ["msg-user-1"]
+        assert quality["access_count"] == 1
+        assert quality["confidence"] >= 0.7
 
     @_pytest.mark.asyncio
     async def test_first_share_loads_writes_mirror_and_pushes_ws(self, monkeypatch):

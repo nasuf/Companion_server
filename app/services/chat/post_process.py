@@ -332,6 +332,11 @@ async def _pipeline_with_watermark(
 
     if max_side_ts is None:
         return 0  # 该 side 无新消息, 跳过 LLM
+    evidence_message_ids = [
+        str(m.get("id"))
+        for m in new_target_msgs
+        if m.get("id")
+    ]
 
     stored_ids = await process_memory_pipeline(
         user_id=user_id,
@@ -340,6 +345,7 @@ async def _pipeline_with_watermark(
         statement_time=max_side_ts,
         side=side,
         workspace_id=workspace_id,
+        evidence_message_ids=evidence_message_ids,
     )
 
     # 防时钟回退: 仅当新候选 > wm 才推进

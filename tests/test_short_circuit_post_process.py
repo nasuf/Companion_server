@@ -463,6 +463,10 @@ async def test_handle_schedule_query_persists_generic_repeat_metadata():
             "app.services.chat.intent_handlers.schedule_query_reply",
             new=AsyncMock(return_value="明天上午有点安排"),
         ),
+        patch(
+            "app.services.chat.intent_handlers.get_prompt_text",
+            new=AsyncMock(return_value="用户问的是{date_label}。目前没有这天的具体作息缓存。"),
+        ),
         patch("app.services.chat.multi_intent._fire_background", side_effect=_capture_background),
     ):
         handled, events, schedule_context = await handle_schedule_query(

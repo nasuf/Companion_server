@@ -265,17 +265,25 @@ def run(args: argparse.Namespace) -> int:
     summary_path = reports / f"agent_dialogue_test_{stamp}.summary.json"
 
     client = httpx.Client(timeout=httpx.Timeout(args.http_timeout), trust_env=False)
-    admin_username = args.admin_username or os.getenv("ADMIN_USERNAME", "admin")
-    admin_password = args.admin_password or os.getenv("ADMIN_PASSWORD")
-    if not admin_password:
+    login_username = (
+        args.login_username
+        or args.admin_username
+        or os.getenv("COMPANION_TEST_USERNAME", "admin")
+    )
+    login_password = (
+        args.login_password
+        or args.admin_password
+        or os.getenv("COMPANION_TEST_PASSWORD")
+    )
+    if not login_password:
         raise RuntimeError(
-            "HTTP transport requires --admin-password or ADMIN_PASSWORD in the environment."
+            "HTTP transport requires --login-password or COMPANION_TEST_PASSWORD in the environment."
         )
     login = client.post(
         f"{BASE_URL}/auth/login",
         json={
-            "username": admin_username,
-            "password": admin_password,
+            "username": login_username,
+            "password": login_password,
         },
     )
     login.raise_for_status()
@@ -580,8 +588,10 @@ def main() -> int:
     parser.add_argument("--http-timeout", type=float, default=180.0)
     parser.add_argument("--transport", choices=["ws", "http"], default="ws")
     parser.add_argument("--ws-connect-attempts", type=int, default=6)
-    parser.add_argument("--admin-username")
-    parser.add_argument("--admin-password")
+    parser.add_argument("--login-username")
+    parser.add_argument("--login-password")
+    parser.add_argument("--admin-username", help=argparse.SUPPRESS)
+    parser.add_argument("--admin-password", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.start_turn < 1 or args.start_turn > len(DIALOGUE):
         print(f"--start-turn must be between 1 and {len(DIALOGUE)}.", file=sys.stderr)

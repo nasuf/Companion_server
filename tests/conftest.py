@@ -88,6 +88,7 @@ def mock_redis():
     mock.expire = AsyncMock()
     mock.ping = AsyncMock(return_value=True)
     mock.incr = AsyncMock(return_value=1)
+    mock.delete = AsyncMock(return_value=1)
     return mock
 
 

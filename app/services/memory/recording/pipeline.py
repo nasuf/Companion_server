@@ -27,6 +27,7 @@ from app.services.memory.recording.pre_filter import (
     should_memorize,
 )
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
+from app.services.memory.lifecycle.quality import log_memory_evidence
 from app.services.memory.config import RECURRENCE_PERIODIC
 from app.services.memory.taxonomy import SUBCATEGORY_ALIASES
 from app.services.schedule_domain.time_parser import (
@@ -158,6 +159,7 @@ async def process_memory_pipeline(
     statement_time: datetime | None = None,
     side: Side = "user",
     workspace_id: str | None = None,
+    evidence_message_ids: list[str] | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
 
@@ -329,6 +331,15 @@ async def process_memory_pipeline(
 
         if memory_id:
             stored_ids.append(memory_id)
+            try:
+                await log_memory_evidence(
+                    user_id=user_id,
+                    memory_id=memory_id,
+                    message_ids=evidence_message_ids or [],
+                    workspace_id=workspace_id,
+                )
+            except Exception as e:
+                logger.debug(f"[MEM-{side}] evidence link failed for {memory_id}: {e}")
 
             # 提醒入库 → 同步建 timetrigger (统一提醒系统).
             # 限 side=="user": 用户主动设置的事项才该建实际的提醒计划.
