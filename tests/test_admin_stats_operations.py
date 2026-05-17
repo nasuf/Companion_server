@@ -45,6 +45,11 @@ def test_admin_operations_stats_aggregates_db_and_redis(api_client):
                 "input_tokens": 1000,
                 "output_tokens": 250,
                 "cost_cny": 0.1234567,
+                "latency_ms_total": 2800,
+                "latency_count": 4,
+                "failure_count": 2,
+                "fallback_count": 1,
+                "circuit_open_count": 1,
             }],
             [{"scope": "chat", "request_count": 8}],
             [
@@ -86,6 +91,11 @@ def test_admin_operations_stats_aggregates_db_and_redis(api_client):
         assert data["memory"]["correction_count"] == 1
         assert data["memory"]["deletion_count"] == 2
         assert data["llm"]["cost_cny"] == 0.123457
+        assert data["llm"]["avg_latency_ms"] == 700
+        assert data["llm"]["failure_count"] == 2
+        assert data["llm"]["fallback_count"] == 1
+        assert data["llm"]["fallback_rate"] == 0.25
+        assert data["llm"]["circuit_open_count"] == 1
         assert data["proactive"]["sent_count"] == 3
         assert data["proactive"]["skipped_count"] == 3
         assert data["proactive"]["waiting_user_count"] == 2
@@ -96,6 +106,8 @@ def test_admin_operations_stats_aggregates_db_and_redis(api_client):
         assert data["runtime_jobs"]["dlq_count"] == 5
         assert data["bug_reports"]["created_count"] == 3
         assert data["data_quality"]["redis_available"] is True
+        assert data["data_quality"]["llm_latency_available"] is True
+        assert data["data_quality"]["llm_fallback_available"] is True
 
         reminder_call = fake_db.query_raw.await_args_list[6]
         reminder_sql = reminder_call.args[0]
@@ -113,7 +125,18 @@ def test_admin_operations_stats_survives_redis_failure(api_client):
     fake_db.query_raw = AsyncMock(
         side_effect=[
             [],
-            [{"request_count": 0, "call_count": 0, "input_tokens": 0, "output_tokens": 0, "cost_cny": 0.0}],
+            [{
+                "request_count": 0,
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_cny": 0.0,
+                "latency_ms_total": 0,
+                "latency_count": 0,
+                "failure_count": 0,
+                "fallback_count": 0,
+                "circuit_open_count": 0,
+            }],
             [],
             [],
             [],

@@ -300,6 +300,7 @@ def _log_attempt(
     """统一 [LLM] 结构化日志. result in {ok, timeout, error, mid_timeout,
     mid_error, first_chunk_fail}. 成功用 info, 其他 warning."""
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    _record_runtime_event(result=result, latency_ms=elapsed_ms)
     parts = [f"provider={provider}", f"op={op}", f"result={result}", f"latency_ms={elapsed_ms}"]
     if attempt is not None:
         parts.append(f"attempt={attempt}")
@@ -307,6 +308,15 @@ def _log_attempt(
         parts.append(f"exc={type(exc).__name__}: {exc}")
     line = "[LLM] " + " ".join(parts)
     (logger.info if result == "ok" else logger.warning)(line)
+
+
+def _record_runtime_event(*, result: str, latency_ms: int | None = None) -> None:
+    """Best-effort bridge from resilience decisions to llm_usage metrics."""
+    try:
+        from app.services.llm import usage_tracker
+        usage_tracker.record_runtime_event(result=result, latency_ms=latency_ms)
+    except Exception:
+        return
 
 
 async def _run_with_retry(
@@ -322,6 +332,7 @@ async def _run_with_retry(
 
     breaker = _get_breaker(provider)
     if not breaker.try_acquire():
+        _record_runtime_event(result="circuit_open")
         raise LLMCircuitOpenError(f"circuit open for {provider} on {op}")
 
     last_exc: Exception | None = None
@@ -381,6 +392,7 @@ async def call_with_resilience(
     except LLMFailedError as primary_exc:
         if fallback_factory is None or not profile.allow_ollama_fallback:
             raise
+        _record_runtime_event(result="fallback")
         logger.warning(
             f"[LLM-FALLBACK] op={op} primary={primary_provider} failed: "
             f"{type(primary_exc).__name__}: {primary_exc}; trying ollama",
@@ -439,6 +451,7 @@ async def astream_with_resilience(
         # 已经推过 token 或无 fallback → 直接让异常穿出, 调用方自己兜底
         if got_first_chunk or fallback_factory is None:
             raise
+        _record_runtime_event(result="fallback")
         logger.warning(
             f"[LLM-FALLBACK] op={op} primary={primary_provider} stream failed "
             f"pre-first-chunk: {type(primary_exc).__name__}: {primary_exc}; trying ollama",
@@ -537,6 +550,7 @@ async def _stream_provider(
 
     breaker = _get_breaker(provider)
     if not breaker.try_acquire():
+        _record_runtime_event(result="circuit_open")
         raise LLMCircuitOpenError(f"circuit open for {provider} on {op}")
 
     started = time.monotonic()

@@ -187,7 +187,7 @@
 
 ## P1. 观测与运营指标产品化
 
-**执行状态**：已完成第一版运营健康 endpoint + bug report → eval case 闭环。新增 `/admin-api/stats/operations`，聚合 `memory_changelogs`、`llm_usage`、`proactive_event_logs`、`proactive_states`、`time_triggers`、`bug_reports` 与 Redis DLQ/queue 计数，覆盖记忆写入/召回、LLM 用量、主动交流、提醒、runtime jobs、人工 bug report 的基础健康视图。新增 `/admin-api/bug-reports/{report_id}/eval-case`，可从人工标注的问题回复生成 validated JSONL eval draft，显式 `append_to_cases=true` 时才写入 `evals/cases.jsonl`。当前 LLM latency/fallback/circuit 仍只在结构化日志中，endpoint 已在 `data_quality` 明确标注为尚未结构化落库，后续需要把这些事件持久化后再做准确趋势统计。
+**执行状态**：已完成第一版运营健康 endpoint + bug report → eval case 闭环，并完成 P1.5 LLM runtime metrics 落库。新增 `/admin-api/stats/operations`，聚合 `memory_changelogs`、`llm_usage`、`proactive_event_logs`、`proactive_states`、`time_triggers`、`bug_reports` 与 Redis DLQ/queue 计数，覆盖记忆写入/召回、LLM 用量、LLM latency/fallback/circuit、主动交流、提醒、runtime jobs、人工 bug report 的基础健康视图。新增 `/admin-api/bug-reports/{report_id}/eval-case`，可从人工标注的问题回复生成 validated JSONL eval draft，显式 `append_to_cases=true` 时才写入 `evals/cases.jsonl`。当前 visible use rate 与 crisis count 仍未独立结构化落库，后续需要打通 injected-vs-replied evidence 与 crisis 事件持久化。
 
 ### 源码依据
 

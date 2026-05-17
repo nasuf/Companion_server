@@ -376,7 +376,12 @@ async def operations(
                 COALESCE(SUM(l.call_count), 0)::int AS call_count,
                 COALESCE(SUM(l.input_tokens), 0)::int AS input_tokens,
                 COALESCE(SUM(l.output_tokens), 0)::int AS output_tokens,
-                COALESCE(SUM(l.cost_cny), 0)::float AS cost_cny
+                COALESCE(SUM(l.cost_cny), 0)::float AS cost_cny,
+                COALESCE(SUM(l.latency_ms_total), 0)::int AS latency_ms_total,
+                COALESCE(SUM(l.latency_count), 0)::int AS latency_count,
+                COALESCE(SUM(l.failure_count), 0)::int AS failure_count,
+                COALESCE(SUM(l.fallback_count), 0)::int AS fallback_count,
+                COALESCE(SUM(l.circuit_open_count), 0)::int AS circuit_open_count
             FROM llm_usage l
             WHERE {llm_where}
             """,
@@ -485,6 +490,11 @@ async def operations(
         "input_tokens": 0,
         "output_tokens": 0,
         "cost_cny": 0.0,
+        "latency_ms_total": 0,
+        "latency_count": 0,
+        "failure_count": 0,
+        "fallback_count": 0,
+        "circuit_open_count": 0,
     }
     reminder = reminder_rows[0] if reminder_rows else {
         "total_count": 0,
@@ -501,6 +511,11 @@ async def operations(
         "retrieval_feedback_confirmed",
     }
     deletion_ops = {"delete", "user_bulk_delete", "workspace_wipe"}
+    llm_latency_count = int(llm_totals["latency_count"] or 0)
+    llm_call_count = int(llm_totals["call_count"] or 0)
+    llm_event_denominator = llm_latency_count or llm_call_count
+    llm_fallback_count = int(llm_totals["fallback_count"] or 0)
+    llm_failure_count = int(llm_totals["failure_count"] or 0)
 
     return {
         "window": {
@@ -518,6 +533,17 @@ async def operations(
             "input_tokens": int(llm_totals["input_tokens"] or 0),
             "output_tokens": int(llm_totals["output_tokens"] or 0),
             "cost_cny": round(float(llm_totals["cost_cny"] or 0.0), 6),
+            "latency_ms_total": int(llm_totals["latency_ms_total"] or 0),
+            "latency_count": llm_latency_count,
+            "avg_latency_ms": round(
+                int(llm_totals["latency_ms_total"] or 0) / llm_latency_count,
+                2,
+            ) if llm_latency_count else 0.0,
+            "failure_count": llm_failure_count,
+            "fallback_count": llm_fallback_count,
+            "fallback_rate": round(llm_fallback_count / llm_event_denominator, 4)
+            if llm_event_denominator else 0.0,
+            "circuit_open_count": int(llm_totals["circuit_open_count"] or 0),
             "by_scope": [
                 {
                     "scope": row["scope"],
@@ -565,10 +591,10 @@ async def operations(
         },
         "data_quality": {
             "redis_available": redis_counts["ok"],
-            "llm_latency_available": False,
-            "llm_fallback_available": False,
+            "llm_latency_available": True,
+            "llm_fallback_available": True,
             "notes": [
-                "LLM latency/fallback currently live in structured logs, not queryable DB rows.",
+                "LLM latency/fallback/circuit metrics are session-level aggregates from llm_usage rows.",
                 "Redis queue/DLQ counters are point-in-time health signals and ignore the days window.",
             ],
         },

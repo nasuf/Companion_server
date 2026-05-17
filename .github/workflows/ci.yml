@@ -58,4 +58,6 @@ jobs:
             tests/test_public_endpoints_ownership.py \
             tests/test_ownership_dependencies.py \
             tests/test_api_integration.py \
+            tests/test_llm_resilience.py \
+            tests/test_admin_stats_operations.py \
             -q

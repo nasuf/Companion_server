@@ -186,6 +186,31 @@ class TestCallWithResilience:
         assert fallback_calls["n"] == 1
 
     @pytest.mark.asyncio
+    async def test_fallback_records_runtime_metrics_in_usage_session(self):
+        from app.services.llm import usage_tracker
+
+        async def primary_fail():
+            raise RuntimeError("dashscope down")
+
+        async def fallback_ok():
+            return "fallback-reply"
+
+        token = usage_tracker.start_session()
+        result = await call_with_resilience(
+            primary_fail, primary_provider="dashscope",
+            profile=_profile(max_retries=0, retry_backoff_s=()),
+            op="test",
+            fallback_factory=fallback_ok,
+        )
+        summary = usage_tracker.flush_session(token)
+
+        assert result == "fallback-reply"
+        assert summary is not None
+        assert summary["fallback_count"] == 1
+        assert summary["failure_count"] == 1
+        assert summary["latency_count"] >= 2
+
+    @pytest.mark.asyncio
     async def test_both_primary_and_fallback_fail_raises(self):
         async def fail():
             raise RuntimeError("x")
@@ -221,6 +246,34 @@ class TestCallWithResilience:
             await call_with_resilience(
                 fail, primary_provider="dashscope", profile=profile, op="test",
             )
+
+    @pytest.mark.asyncio
+    async def test_circuit_open_records_runtime_metrics_in_usage_session(self):
+        from app.config import settings
+        from app.services.llm import usage_tracker
+
+        async def fail():
+            raise RuntimeError("x")
+
+        profile = _profile(max_retries=0, retry_backoff_s=())
+        for _ in range(settings.llm_cb_failure_threshold):
+            try:
+                await call_with_resilience(
+                    fail, primary_provider="dashscope", profile=profile, op="test",
+                )
+            except LLMFailedError:
+                pass
+
+        token = usage_tracker.start_session()
+        with pytest.raises(LLMCircuitOpenError):
+            await call_with_resilience(
+                fail, primary_provider="dashscope", profile=profile, op="test",
+            )
+        summary = usage_tracker.flush_session(token)
+
+        assert summary is not None
+        assert summary["circuit_open_count"] == 1
+        assert summary["failure_count"] == 1
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -632,6 +632,12 @@ model LlmUsage {
   tokensByModel  Json     @map("tokens_by_model")
   costCny        Float    @map("cost_cny")
   callCount      Int      @map("call_count")
+  // Session-level runtime health metrics, accumulated by resilience.py.
+  latencyMsTotal  Int     @default(0) @map("latency_ms_total")
+  latencyCount    Int     @default(0) @map("latency_count")
+  failureCount    Int     @default(0) @map("failure_count")
+  fallbackCount   Int     @default(0) @map("fallback_count")
+  circuitOpenCount Int    @default(0) @map("circuit_open_count")
   createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([agentId, createdAt(sort: Desc)])

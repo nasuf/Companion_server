@@ -43,6 +43,11 @@ async def write_usage_row(
                 "tokensByModel": Json(summary["tokens_by_model"]),
                 "costCny": cost,
                 "callCount": summary["call_count"],
+                "latencyMsTotal": summary["latency_ms_total"],
+                "latencyCount": summary["latency_count"],
+                "failureCount": summary["failure_count"],
+                "fallbackCount": summary["fallback_count"],
+                "circuitOpenCount": summary["circuit_open_count"],
             }
         )
     except Exception as e:

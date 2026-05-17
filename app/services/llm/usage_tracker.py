@@ -36,6 +36,11 @@ class UsageSummary(TypedDict):
     input_tokens: int
     output_tokens: int
     call_count: int
+    latency_ms_total: int
+    latency_count: int
+    failure_count: int
+    fallback_count: int
+    circuit_open_count: int
 
 
 _current: ContextVar[UsageSummary | None] = ContextVar("llm_usage_session", default=None)
@@ -48,6 +53,11 @@ def start_session() -> Token:
         "input_tokens": 0,
         "output_tokens": 0,
         "call_count": 0,
+        "latency_ms_total": 0,
+        "latency_count": 0,
+        "failure_count": 0,
+        "fallback_count": 0,
+        "circuit_open_count": 0,
     }
     return _current.set(summary)
 
@@ -72,12 +82,46 @@ def record(model: str, input_tokens: int, output_tokens: int) -> None:
     summary["call_count"] += 1
 
 
+def record_runtime_event(
+    *,
+    result: str,
+    latency_ms: int | None = None,
+) -> None:
+    """Record session-level LLM runtime signals.
+
+    Token usage and runtime health are both written to `llm_usage`. This keeps
+    dashboard queries cheap and avoids a separate hot-path insert per LLM call.
+    """
+    summary = _current.get()
+    if summary is None:
+        return
+    if latency_ms is not None:
+        summary["latency_ms_total"] += int(latency_ms)
+        summary["latency_count"] += 1
+    if result == "fallback":
+        summary["fallback_count"] += 1
+    elif result == "circuit_open":
+        summary["circuit_open_count"] += 1
+        summary["failure_count"] += 1
+    elif result != "ok":
+        summary["failure_count"] += 1
+
+
 def flush_session(token: Token) -> UsageSummary | None:
-    """关闭 session, 返回累加结果. 只有 call_count > 0 才返回, 否则 None
-    (调用方拿 None 不写 DB, 避免空行污染统计表)."""
+    """关闭 session, 返回累加结果.
+
+    有 token usage 或 runtime health signal 时才写 DB; 这样全失败但被熔断/
+    fallback 的请求也能进入运营统计。
+    """
     summary = _current.get()
     _current.reset(token)
-    if summary is None or summary["call_count"] == 0:
+    if summary is None:
+        return None
+    has_runtime_signal = any(
+        summary[key] > 0
+        for key in ("latency_count", "failure_count", "fallback_count", "circuit_open_count")
+    )
+    if summary["call_count"] == 0 and not has_runtime_signal:
         return None
     return summary
 
