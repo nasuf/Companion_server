@@ -27,7 +27,9 @@ from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.recording.pipeline import process_memory_pipeline
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
-    can_send_proactive, increment_proactive_count,
+    can_send_proactive,
+    get_proactive_fatigue_score,
+    increment_proactive_count,
 )
 from app.services.proactive.context import build_proactive_context
 from app.services.schedule_domain.time_service import _now_corrected
@@ -105,6 +107,14 @@ async def _check_send_eligibility(
     """spec §9 互斥: 检查日限/workspace/conversation. 失败返回 None."""
     if not await can_send_proactive(state.agent_id, state.user_id):
         await _log_skip(state, trigger_type, "daily_limit")
+        return None
+    fatigue = await get_proactive_fatigue_score(
+        state.agent_id,
+        state.user_id,
+        workspace_id=state.workspace_id,
+    )
+    if fatigue.get("block"):
+        await _log_skip(state, trigger_type, "fatigue_score", extra=fatigue)
         return None
 
     workspace_context = await get_active_workspace_context(state.workspace_id)

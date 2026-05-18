@@ -108,6 +108,9 @@ def validate_case(case: dict[str, Any]) -> list[str]:
         errors.append("priority must be P0, P1, or P2")
     if not isinstance(case.get("category"), str) or not case.get("category"):
         errors.append("category must be a non-empty string")
+    grade_target = case.get("grade_target", "all_replies")
+    if grade_target not in {"all_replies", "last_reply"}:
+        errors.append("grade_target must be all_replies or last_reply")
 
     turns = case.get("turns")
     if not isinstance(turns, list) or not turns:

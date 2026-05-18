@@ -152,6 +152,50 @@ async def test_orchestrator_defers_when_recent_proactive_exists():
     assert mock_send.call_count == 0, "不该 fire generate_and_send_proactive"
 
 
+@pytest.mark.asyncio
+async def test_sender_blocks_when_fatigue_score_is_high():
+    """主动消息发送前应看用户级 fatigue score, 不只看固定日上限."""
+    from app.services.proactive import sender as sender_mod
+
+    fake_state = MagicMock(
+        id="state-1",
+        workspace_id="ws-1",
+        agent_id="a1",
+        user_id="u1",
+        conversation_id="conv-1",
+        current_window_index=2,
+        stage="warming",
+    )
+
+    events = []
+
+    async def _capture_event(**kwargs):
+        events.append(kwargs)
+
+    with (
+        patch.object(sender_mod, "can_send_proactive",
+                     new_callable=AsyncMock, return_value=True),
+        patch.object(sender_mod, "get_proactive_fatigue_score",
+                     new_callable=AsyncMock,
+                     return_value={
+                         "score": 0.91,
+                         "threshold": 0.85,
+                         "block": True,
+                         "components": {"today_count": 2},
+                     }),
+        patch.object(sender_mod, "get_active_workspace_context",
+                     new_callable=AsyncMock) as mock_workspace,
+        patch.object(sender_mod, "log_proactive_event", side_effect=_capture_event),
+    ):
+        result = await sender_mod._check_send_eligibility(fake_state, "memory_proactive")
+
+    assert result is None
+    mock_workspace.assert_not_called()
+    assert events[0]["event_type"] == "send_skipped"
+    assert events[0]["payload"]["reason"] == "fatigue_score"
+    assert events[0]["payload"]["score"] == 0.91
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Reminder fire 带 trace_id (前端 Trace 按钮可点)
 # ═══════════════════════════════════════════════════════════════════

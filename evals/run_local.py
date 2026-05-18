@@ -132,6 +132,13 @@ def _wait_for_assistant_reply(
     return []
 
 
+def _grade_text_for_case(replies: list[dict[str, Any]], case: dict[str, Any]) -> str:
+    all_reply_text = "\n".join(str(item.get("content") or "") for item in replies)
+    if case.get("grade_target") == "last_reply" and replies:
+        return str(replies[-1].get("content") or "")
+    return all_reply_text
+
+
 def run_case(
     client: httpx.Client,
     headers: dict[str, str],
@@ -142,8 +149,10 @@ def run_case(
     before = _latest_messages(client, conversation_id, headers)
     known_ids = {str(m.get("id")) for m in before if m.get("id")}
     sse_events: list[dict[str, Any]] = []
+    replies: list[dict[str, Any]] = []
+    turn_results: list[dict[str, Any]] = []
 
-    for turn in case["turns"]:
+    for index, turn in enumerate(case["turns"]):
         resp = client.post(
             f"/chat/{conversation_id}",
             json={"message": turn["content"]},
@@ -151,16 +160,35 @@ def run_case(
         )
         sse_events.extend(_parse_sse(resp.text))
         resp.raise_for_status()
+        turn_replies = _wait_for_assistant_reply(
+            client,
+            conversation_id,
+            headers,
+            known_ids,
+            timeout_s,
+        )
+        for reply in turn_replies:
+            if reply.get("id"):
+                known_ids.add(str(reply["id"]))
+        replies.extend(turn_replies)
+        turn_results.append({
+            "turn_index": index,
+            "user": turn["content"],
+            "assistant_message_ids": [item.get("id") for item in turn_replies],
+            "reply": "\n".join(str(item.get("content") or "") for item in turn_replies),
+        })
 
-    replies = _wait_for_assistant_reply(client, conversation_id, headers, known_ids, timeout_s)
-    reply_text = "\n".join(str(item.get("content") or "") for item in replies)
-    grade = grade_reply(reply_text, case["assertions"])
+    all_reply_text = "\n".join(str(item.get("content") or "") for item in replies)
+    grade_text = _grade_text_for_case(replies, case)
+    grade = grade_reply(grade_text, case["assertions"])
     return {
         "id": case["id"],
         "category": case["category"],
         "priority": case["priority"],
         "passed": grade["passed"],
-        "reply": reply_text,
+        "reply": grade_text,
+        "all_replies": all_reply_text,
+        "turn_results": turn_results,
         "assistant_message_ids": [item.get("id") for item in replies],
         "sse_events": sse_events,
         "grade": grade,
@@ -224,4 +252,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

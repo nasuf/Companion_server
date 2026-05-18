@@ -60,4 +60,6 @@ jobs:
             tests/test_api_integration.py \
             tests/test_llm_resilience.py \
             tests/test_admin_stats_operations.py \
+            tests/test_proactive_history.py \
+            tests/test_proactive_reminder_double_fire.py \
             -q

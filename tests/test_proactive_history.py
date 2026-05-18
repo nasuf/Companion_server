@@ -25,6 +25,7 @@ def history_mocks():
     mock_db.proactivecounter.find_unique = AsyncMock(return_value=None)
     mock_db.proactivecounter.find_many = AsyncMock(return_value=[])
     mock_db.proactivecounter.upsert = AsyncMock()
+    mock_db.query_raw = AsyncMock(return_value=[])
 
     with patch("app.services.proactive.history.db", mock_db), \
          patch("app.services.proactive.history.get_redis",
@@ -127,3 +128,40 @@ async def test_increment_redis_down_still_upserts_db(history_mocks):
     await asyncio.sleep(0.01)
 
     mock_db.proactivecounter.upsert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_proactive_fatigue_score_blocks_when_user_is_saturated(history_mocks):
+    from app.services.proactive.history import get_proactive_fatigue_score
+
+    mock_db, _mock_redis = history_mocks
+    mock_db.proactivecounter.find_unique = AsyncMock(return_value=_row(count=3))
+    mock_db.query_raw = AsyncMock(return_value=[{
+        "sent_72h": 6,
+        "reply_timeout_72h": 2,
+        "skipped_24h": 4,
+    }])
+
+    fatigue = await get_proactive_fatigue_score("a1", "u1", workspace_id="ws-1")
+
+    assert fatigue["block"] is True
+    assert fatigue["score"] >= fatigue["threshold"]
+    assert fatigue["components"]["today_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_proactive_fatigue_score_allows_low_pressure(history_mocks):
+    from app.services.proactive.history import get_proactive_fatigue_score
+
+    mock_db, _mock_redis = history_mocks
+    mock_db.proactivecounter.find_unique = AsyncMock(return_value=_row(count=0))
+    mock_db.query_raw = AsyncMock(return_value=[{
+        "sent_72h": 1,
+        "reply_timeout_72h": 0,
+        "skipped_24h": 0,
+    }])
+
+    fatigue = await get_proactive_fatigue_score("a1", "u1", workspace_id="ws-1")
+
+    assert fatigue["block"] is False
+    assert 0 < fatigue["score"] < fatigue["threshold"]

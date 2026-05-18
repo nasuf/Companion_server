@@ -9,7 +9,7 @@ Redis 挂时降级读 DB; 写时 Redis incr + fire_background 异步 upsert DB.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.db import db
 from app.redis_client import get_redis
@@ -19,6 +19,7 @@ from app.services.workspace.workspaces import resolve_workspace_id
 logger = logging.getLogger(__name__)
 
 MAX_DAILY_PROACTIVE = 3
+PROACTIVE_FATIGUE_BLOCK_THRESHOLD = 0.85
 _DAILY_TTL_SEC = 86400
 
 
@@ -63,6 +64,80 @@ async def can_send_proactive(agent_id: str, user_id: str) -> bool:
     except Exception:
         pass
     return total < MAX_DAILY_PROACTIVE
+
+
+async def get_proactive_fatigue_score(
+    agent_id: str,
+    user_id: str,
+    *,
+    workspace_id: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Return a user-level proactive fatigue score in [0, 1].
+
+    The fixed daily cap remains the hard guard. This softer score catches cases
+    where the user is near the cap, has received several proactive messages over
+    a few days, or repeatedly does not respond.
+    """
+    now_ts = (now or datetime.now(UTC)).astimezone(UTC)
+    today_count = await _daily_count_from_db(agent_id, user_id, _today_key())
+    sent_72h = 0
+    reply_timeout_72h = 0
+    skipped_24h = 0
+    try:
+        workspace_clause = "AND workspace_id = $4" if workspace_id else ""
+        params = [
+            agent_id,
+            user_id,
+            (now_ts - timedelta(hours=72)).replace(tzinfo=None).isoformat(),
+        ]
+        if workspace_id:
+            params.append(workspace_id)
+        skipped_since_idx = len(params) + 1
+        rows = await db.query_raw(
+            f"""
+            SELECT
+                COUNT(*) FILTER (WHERE event_type = 'message_sent')::int AS sent_72h,
+                COUNT(*) FILTER (WHERE event_type = 'reply_timeout')::int AS reply_timeout_72h,
+                COUNT(*) FILTER (
+                    WHERE event_type IN ('send_skipped', 'window_deferred')
+                      AND created_at >= ${skipped_since_idx}::timestamp
+                )::int AS skipped_24h
+            FROM proactive_event_logs
+            WHERE agent_id = $1
+              AND user_id = $2
+              AND created_at >= $3::timestamp
+              {workspace_clause}
+            """,
+            *params,
+            (now_ts - timedelta(hours=24)).replace(tzinfo=None).isoformat(),
+        )
+        row = rows[0] if rows else {}
+        sent_72h = int(row.get("sent_72h") or 0)
+        reply_timeout_72h = int(row.get("reply_timeout_72h") or 0)
+        skipped_24h = int(row.get("skipped_24h") or 0)
+    except Exception as e:
+        logger.warning(f"[PROACTIVE-FATIGUE] DB read failed: {e}")
+
+    components = {
+        "today_count": today_count,
+        "sent_72h": sent_72h,
+        "reply_timeout_72h": reply_timeout_72h,
+        "skipped_24h": skipped_24h,
+    }
+    score = min(
+        1.0,
+        (today_count / MAX_DAILY_PROACTIVE) * 0.45
+        + min(sent_72h / 6.0, 1.0) * 0.25
+        + min(reply_timeout_72h / 2.0, 1.0) * 0.20
+        + min(skipped_24h / 4.0, 1.0) * 0.10,
+    )
+    return {
+        "score": round(score, 3),
+        "threshold": PROACTIVE_FATIGUE_BLOCK_THRESHOLD,
+        "block": score >= PROACTIVE_FATIGUE_BLOCK_THRESHOLD,
+        "components": components,
+    }
 
 
 async def _upsert_counter(agent_id: str, user_id: str, date: str) -> None:

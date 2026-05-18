@@ -222,6 +222,8 @@
 
 ## P2. 长期陪伴体验策略
 
+**执行状态**：已完成第一版长期陪伴 eval 基线，并接入主动交流 fatigue score。`evals/run_local.py` 现在按 turn 顺序发送并等待每轮 assistant 回复，支持 `grade_target=last_reply`，可验证多轮承接而不是只看最终批量回复。`evals/cases.jsonl` 新增 P2 专项 case：关系/长期目标追踪、低落陪伴非机械安慰、睡前降速、高频确认不重复。主动发送前除固定日上限外，会基于近 24/72h 主动消息、reply timeout、跳过/延迟事件计算用户级疲劳分，高于阈值则跳过并写入 `send_skipped(reason=fatigue_score)`。后续仍需把更细粒度的用户节奏学习接入窗口概率。
+
 ### 源码依据
 
 - `app/services/proactive/` 有主动交流状态机。
