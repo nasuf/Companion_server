@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import get_prompt_text, get_prompt_text_for_context
 from app.services.prompting.trace_components import record_prompt_render
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti
@@ -353,6 +353,7 @@ async def build_system_prompt(
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
     diagnostics: dict[str, Any] | None = None,
+    canary_user_id: str | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
     # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
     **_deprecated_kwargs,
@@ -369,11 +370,16 @@ async def build_system_prompt(
     cache miss 从这里开始, 但稳定段 ~1500 tokens 已经命中, 收益占比 80%+.
     """
     # Parallel — 4 independent prompt reads (each turn, hot path).
+    agent_id = str(getattr(agent, "id", "") or "") or None
     system_base, consistency_rules, response_instruction, anti_hallucination = await asyncio.gather(
-        get_prompt_text("chat.system_base"),
-        get_prompt_text("chat.consistency_rules"),
-        get_prompt_text("chat.response_instruction"),
-        get_prompt_text("chat.anti_hallucination_hard_rule"),
+        get_prompt_text_for_context("chat.system_base", agent_id=agent_id, user_id=canary_user_id),
+        get_prompt_text_for_context("chat.consistency_rules", agent_id=agent_id, user_id=canary_user_id),
+        get_prompt_text_for_context("chat.response_instruction", agent_id=agent_id, user_id=canary_user_id),
+        get_prompt_text_for_context(
+            "chat.anti_hallucination_hard_rule",
+            agent_id=agent_id,
+            user_id=canary_user_id,
+        ),
     )
 
     # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════

@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.prompt_template import (
+    PromptCanaryConfigRequest,
+    PromptCanaryConfigResponse,
     PromptTemplateReplayRequest,
     PromptTemplateReplayResponse,
     PromptTemplateRestoreVersionRequest,
@@ -14,10 +16,13 @@ from app.models.prompt_template import (
 from app.services.llm.models import convert_messages, get_chat_model, get_utility_model, invoke_text
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from app.services.prompting.store import (
+    disable_prompt_canary,
+    get_prompt_canary_config,
     list_prompt_versions,
     list_prompts,
     reset_prompt_text,
     restore_prompt_version,
+    update_prompt_canary_config,
     update_prompt_text,
 )
 
@@ -94,6 +99,46 @@ async def get_prompt_versions(key: str, _: str = Depends(require_admin_jwt)):
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
     return [PromptTemplateVersionResponse(**version) for version in versions]
+
+
+@router.get("/{key}/canary", response_model=PromptCanaryConfigResponse)
+async def get_prompt_canary(key: str, _: str = Depends(require_admin_jwt)):
+    try:
+        config = await get_prompt_canary_config(key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt not found") from None
+    return PromptCanaryConfigResponse(**config)
+
+
+@router.put("/{key}/canary", response_model=PromptCanaryConfigResponse)
+async def update_prompt_canary(
+    key: str,
+    payload: PromptCanaryConfigRequest,
+    _: str = Depends(require_admin_jwt),
+):
+    try:
+        config = await update_prompt_canary_config(
+            key,
+            is_enabled=payload.is_enabled,
+            mode=payload.mode,
+            content=payload.content,
+            agent_ids=payload.agent_ids,
+            rollout_percent=payload.rollout_percent,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return PromptCanaryConfigResponse(**config)
+
+
+@router.delete("/{key}/canary", response_model=PromptCanaryConfigResponse)
+async def delete_prompt_canary(key: str, _: str = Depends(require_admin_jwt)):
+    try:
+        config = await disable_prompt_canary(key)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt not found") from None
+    return PromptCanaryConfigResponse(**config)
 
 
 @router.post("/{key}/reset", response_model=PromptTemplateResponse)

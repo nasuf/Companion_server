@@ -41,6 +41,7 @@ def record_prompt_render(
     rendered_prompt: str,
     *,
     prompt_key: str | None = None,
+    prompt_variant: str | None = None,
     components: list[dict[str, Any]] | None = None,
     source: str = "managed",
 ) -> None:
@@ -53,6 +54,8 @@ def record_prompt_render(
     }
     if prompt_key:
         payload["prompt_key"] = prompt_key
+    if prompt_variant:
+        payload["prompt_variant"] = prompt_variant
     if components:
         payload["components"] = [dict(item) for item in components]
     elif prompt_key:
@@ -68,17 +71,26 @@ def record_prompt_render(
 class ManagedPromptText(str):
     """str subclass that records direct `.format*()` prompt render calls."""
 
-    def __new__(cls, value: str, prompt_key: str):
+    def __new__(cls, value: str, prompt_key: str, prompt_variant: str = "active"):
         obj = str.__new__(cls, value)
         obj.prompt_key = prompt_key
+        obj.prompt_variant = prompt_variant
         return obj
 
     def format(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
         rendered = str(self).format(*args, **kwargs)
-        record_prompt_render(rendered, prompt_key=self.prompt_key)
+        record_prompt_render(
+            rendered,
+            prompt_key=self.prompt_key,
+            prompt_variant=self.prompt_variant,
+        )
         return rendered
 
     def format_map(self, mapping: Any) -> str:  # type: ignore[override]
         rendered = str(self).format_map(mapping)
-        record_prompt_render(rendered, prompt_key=self.prompt_key)
+        record_prompt_render(
+            rendered,
+            prompt_key=self.prompt_key,
+            prompt_variant=self.prompt_variant,
+        )
         return rendered

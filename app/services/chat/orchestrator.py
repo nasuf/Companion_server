@@ -28,7 +28,11 @@ from app.observability.events import (
 )
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import (
+    get_prompt_text,
+    reset_prompt_runtime_context,
+    set_prompt_runtime_context,
+)
 from app.services.prompting.trace_components import (
     prompt_hash,
     record_prompt_render,
@@ -638,6 +642,7 @@ async def stream_chat_response(
     from app.services.runtime_config import bind_agent_context, reset_current_agent
     _agent_ctx_token = None
     _agent_ctx_token = await bind_agent_context(agent_id)
+    _prompt_ctx_token = set_prompt_runtime_context(agent_id=agent_id, user_id=user_id)
 
     # --- LLM usage 累加 session ---
     # 父调用启 session, 所有 phase 内 LLM wrapper 自动 record 进来; 出口 finally 写一行
@@ -1386,6 +1391,7 @@ async def stream_chat_response(
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
                 diagnostics=prompt_diagnostics,
+                canary_user_id=user_id,
             )
             response_diagnostics["main_prompt_built"] = True
             response_diagnostics["main_prompt_build_ms"] = round(
@@ -1636,6 +1642,7 @@ async def stream_chat_response(
             reset_retrieval_trace(retrieval_trace_token)
         if prompt_trace_token is not None:
             reset_prompt_render_trace(prompt_trace_token)
+        reset_prompt_runtime_context(_prompt_ctx_token)
         reset_current_agent(_agent_ctx_token)
 
         # spec §2.1/§2.2 兜底: 短路意图早 return 跳过主路径末尾的 post_process fire,

@@ -244,7 +244,7 @@
 
 ## P2. Prompt 运营闭环
 
-**执行状态**：已完成第一版问题聚合与 trace 风险入口。`/admin-api/stats/operations` 现在除基础 bug report 状态外，还返回 `by_error_type`、`by_eval_category`，并固定给出最近 24 小时 `high_risk_traces` 列表；风险条件覆盖 trace 总耗时 ≥20s、LLM step ≥8、trace share 失败和未解决人工标注。Web 端运营健康面板同步展示“问题分类”和“高风险 Trace”，让人工标注、trace 复盘和 eval case 生成之间形成最小闭环。尚未完成 prompt 改动绑定 eval run 结果与 prompt canary。
+**执行状态**：已完成第一版 Prompt 运营闭环。`/admin-api/stats/operations` 现在除基础 bug report 状态外，还返回 `by_error_type`、`by_eval_category`，并固定给出最近 24 小时 `high_risk_traces` 列表；风险条件覆盖 trace 总耗时 ≥20s、LLM step ≥8、trace share 失败和未解决人工标注。Web 端运营健康面板同步展示“问题分类”和“高风险 Trace”。Prompt 保存、重置、回退、代码同步会在 `prompt_template_versions.eval_result` 绑定离线 eval 校验快照；`prompt_templates.canary_config` 支持按 agent allowlist 或稳定百分比流量启用 canary prompt，Web 提示词编辑器可查看/保存 canary 配置与 eval 结果。
 
 ### 源码依据
 
@@ -252,11 +252,12 @@
 - `app/api/admin/prompts.py` 支持管理 prompt。
 - trace enrich 能映射 prompt 组件。
 - `/admin-api/stats/operations` 已聚合人工 bug 分类与最近 24h 高风险 trace。
+- `prompt_template_versions.eval_result` 与 `prompt_templates.canary_config` 已承载变更校验与 canary 配置。
 
 ### 要做
 
-1. 每次 prompt 改动绑定 eval run 结果。
-2. 支持 prompt canary：按 agent 或小流量启用。
+1. 每次 prompt 改动绑定 eval run 结果。（第一版：离线 validate-only 快照）
+2. 支持 prompt canary：按 agent 或小流量启用。（第一版：agent allowlist / 稳定百分比）
 3. admin bug report 分类聚合。（第一版已接入 operations stats）
 4. 后台提供最近 24h 高风险 trace 列表。（第一版已接入 operations stats + Web 面板）
 

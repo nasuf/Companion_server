@@ -61,6 +61,8 @@ jobs:
             tests/test_ownership_dependencies.py \
             tests/test_api_integration.py \
             tests/test_llm_resilience.py \
+            tests/test_prompt_store.py \
+            tests/test_admin_prompt_replay.py \
             tests/test_admin_stats_operations.py \
             tests/test_proactive_history.py \
             tests/test_proactive_policy.py \
