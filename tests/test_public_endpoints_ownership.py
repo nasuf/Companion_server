@@ -244,6 +244,30 @@ class TestAgentsOwnership:
             r = client.get("/agents/a-arch", headers=_hdr("u1"))
         assert r.status_code == 404
 
+    def test_delete_agent_owner_uses_hard_delete(self, client):
+        """DELETE /agents/{id} 允许 owner 触发与 web admin 相同的 hard delete."""
+        agent = SimpleNamespace(id="a1", userId="u1", status="active")
+        with (
+            patch("app.api.ownership.db") as db_owner,
+            patch(
+                "app.api.public.agents.hard_delete_agent_data",
+                new_callable=AsyncMock,
+                return_value={"messages": 2, "ai_agents": 1},
+            ) as hard_delete,
+        ):
+            db_owner.aiagent.find_unique = AsyncMock(return_value=agent)
+            r = client.delete("/agents/a1", headers=_hdr("u1"))
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "stats": {"messages": 2, "ai_agents": 1}}
+        hard_delete.assert_awaited_once_with("a1", "u1")
+
+    def test_delete_agent_wrong_owner_403(self, client):
+        agent = SimpleNamespace(id="a1", userId="other-user", status="active")
+        with patch("app.api.ownership.db") as db_owner:
+            db_owner.aiagent.find_unique = AsyncMock(return_value=agent)
+            r = client.delete("/agents/a1", headers=_hdr("u1"))
+        assert r.status_code == 403
+
 
 # ───────────────────── /memories/* ─────────────────────
 

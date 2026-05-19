@@ -23,6 +23,7 @@ from app.services.life_story import (
     get_progress,
     set_progress,
 )
+from app.services.runtime.data_reset import hard_delete_agent_data
 from app.services.proactive.sender import dispatch_first_greeting_for_agent
 from app.services.schedule_domain.schedule import (
     generate_and_save_life_overview,
@@ -341,6 +342,21 @@ async def get_agent(agent_id: str, agent=Depends(require_agent_owner_any_status)
         life_overview=agent.lifeOverview,
         created_at=str(agent.createdAt),
     )
+
+
+@router.delete("/{agent_id}")
+async def delete_agent(agent_id: str, agent=Depends(require_agent_owner_any_status)):
+    """Owner-scoped hard delete for the current agent.
+
+    This mirrors the web admin delete path by delegating to
+    hard_delete_agent_data, but keeps the public endpoint scoped to the
+    authenticated owner so mobile clients can reset and recreate their own
+    agent without admin credentials.
+    """
+    if getattr(agent, "status", "active") == "archived":
+        raise HTTPException(status_code=404, detail="Agent not found")
+    stats = await hard_delete_agent_data(agent.id, agent.userId)
+    return {"ok": True, "stats": stats}
 
 
 @router.get("", response_model=list[AgentResponse])
