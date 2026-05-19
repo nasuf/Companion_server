@@ -30,6 +30,7 @@ from app.services.proactive.policy import (
     select_trigger_type,
     should_hit_window,
 )
+from app.services.proactive.history import get_proactive_rhythm_adjustment
 from app.services.proactive.sender import generate_and_send_proactive
 from app.services.proactive.state import (
     advance_to_next_window,
@@ -234,13 +235,26 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
             )
     else:
         # 正常概率流程
-        hit, final_rate = should_hit_window(state)
+        rhythm = await get_proactive_rhythm_adjustment(
+            state.agent_id,
+            state.user_id,
+            workspace_id=state.workspace_id,
+            now=_now_dt,
+        )
+        hit, final_rate = should_hit_window(
+            state,
+            rate_multiplier=float(rhythm.get("multiplier") or 1.0),
+        )
         if not hit:
             await advance_to_next_window(
                 state,
                 now=now,
                 event_type="window_missed",
-                payload={"reason": "probability_miss", "final_rate": final_rate},
+                payload={
+                    "reason": "probability_miss",
+                    "final_rate": final_rate,
+                    "rhythm": rhythm,
+                },
             )
             return
 
@@ -273,7 +287,7 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
             event_type="window_due",
             window_index=state.current_window_index,
             trigger_type=trigger_type,
-            payload={"stage": state.stage, "final_rate": final_rate},
+            payload={"stage": state.stage, "final_rate": final_rate, "rhythm": rhythm},
         )
 
         sent = await generate_and_send_proactive(state, trigger_type=trigger_type, now=now)

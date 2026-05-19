@@ -49,6 +49,28 @@ def test_should_hit_window_zero_rate_never_hits():
     assert final_rate == 0.0
 
 
+def test_should_hit_window_applies_user_rhythm_multiplier():
+    with patch("app.services.proactive.policy.random.random", return_value=0.18):
+        hit, final_rate = should_hit_window(
+            _state(current_window_index=4),
+            rate_multiplier=0.5,
+        )
+
+    assert hit is False
+    assert final_rate == 0.175
+
+
+def test_should_hit_window_caps_rhythm_boost():
+    with patch("app.services.proactive.policy.random.random", return_value=0.49):
+        hit, final_rate = should_hit_window(
+            _state(current_window_index=4),
+            rate_multiplier=2.0,
+        )
+
+    assert hit is True
+    assert final_rate == 0.5
+
+
 def test_scene_candidate_unavailable_when_sleeping():
     assert (
         scene_candidate_available(

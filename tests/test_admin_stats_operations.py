@@ -70,6 +70,24 @@ def test_admin_operations_stats_aggregates_db_and_redis(api_client):
                 {"status": "open", "count": 2},
                 {"status": "resolved", "count": 1},
             ],
+            [
+                {"error_type": "memory_mixup", "reason": "记忆编造", "count": 2},
+                {"error_type": "memory_mixup", "reason": "记忆幻觉", "count": 1},
+                {"error_type": "tone_robot", "reason": "像机器人", "count": 1},
+            ],
+            [{
+                "trace_id": "trace-1",
+                "message_id": "msg-1",
+                "conversation_id": "conv-1",
+                "agent_id": "agent-1",
+                "user_id": "user-1",
+                "root_message": "我今天状态很差",
+                "total_duration_ms": 32000,
+                "llm_step_count": 9,
+                "share_status": "shared",
+                "open_bug_count": 1,
+                "created_at": "2026-05-19T10:00:00",
+            }],
         ],
     )
 
@@ -105,6 +123,19 @@ def test_admin_operations_stats_aggregates_db_and_redis(api_client):
         assert data["runtime_jobs"]["running_count"] == 4
         assert data["runtime_jobs"]["dlq_count"] == 5
         assert data["bug_reports"]["created_count"] == 3
+        assert data["bug_reports"]["by_error_type"]["memory_mixup"] == 3
+        assert data["bug_reports"]["by_eval_category"]["memory_safety"] == 3
+        assert data["bug_reports"]["by_eval_category"]["tone"] == 1
+        assert data["high_risk_traces"]["window_hours"] == 24
+        assert data["high_risk_traces"]["count"] == 1
+        trace = data["high_risk_traces"]["items"][0]
+        assert trace["trace_id"] == "trace-1"
+        assert trace["risk_score"] == 8
+        assert trace["risk_reasons"] == [
+            "slow_trace_30s",
+            "many_llm_steps_8",
+            "open_bug_report",
+        ]
         assert data["data_quality"]["redis_available"] is True
         assert data["data_quality"]["llm_latency_available"] is True
         assert data["data_quality"]["llm_fallback_available"] is True
@@ -115,6 +146,13 @@ def test_admin_operations_stats_aggregates_db_and_redis(api_client):
         assert "t.user_id = $2" in reminder_sql
         assert "t.trigger_time < $3::timestamp" in reminder_sql
         assert reminder_call.args[1:3] == ("agent-1", "user-1")
+
+        high_risk_call = fake_db.query_raw.await_args_list[10]
+        high_risk_sql = high_risk_call.args[0]
+        assert "mt.created_at >= $1::timestamp" in high_risk_sql
+        assert "c.agent_id = $2" in high_risk_sql
+        assert "c.user_id = $3" in high_risk_sql
+        assert high_risk_call.args[2:4] == ("agent-1", "user-1")
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
 
@@ -144,6 +182,8 @@ def test_admin_operations_stats_survives_redis_failure(api_client):
             [{"total_count": 0, "active_count": 0, "overdue_active_count": 0, "due_next_24h_count": 0}],
             [{"fired_count": 0}],
             [],
+            [],
+            [],
         ],
     )
 
@@ -159,5 +199,6 @@ def test_admin_operations_stats_survives_redis_failure(api_client):
         assert data["data_quality"]["redis_available"] is False
         assert data["reminders"]["dlq_count"] == 0
         assert data["runtime_jobs"]["dlq_count"] == 0
+        assert data["high_risk_traces"]["items"] == []
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)

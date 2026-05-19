@@ -16,14 +16,19 @@ UTC = timezone.utc
 # 不再进此函数), 频率维度不做额外折扣.
 
 
-def should_hit_window(state: ProactiveStateRecord) -> tuple[bool, float]:
+def should_hit_window(
+    state: ProactiveStateRecord,
+    *,
+    rate_multiplier: float = 1.0,
+) -> tuple[bool, float]:
     base_rate = 0.0
     for window in PROACTIVE_WINDOWS:
         if int(window["index"]) == int(state.current_window_index or 0):
             base_rate = float(window["hit_rate"])
             break
 
-    return random.random() < base_rate, base_rate
+    final_rate = max(0.0, min(0.50, base_rate * rate_multiplier))
+    return random.random() < final_rate, final_rate
 
 
 def scene_candidate_available(

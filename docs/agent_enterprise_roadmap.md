@@ -222,7 +222,7 @@
 
 ## P2. 长期陪伴体验策略
 
-**执行状态**：已完成第一版长期陪伴 eval 基线，并接入主动交流 fatigue score。`evals/run_local.py` 现在按 turn 顺序发送并等待每轮 assistant 回复，支持 `grade_target=last_reply`，可验证多轮承接而不是只看最终批量回复。`evals/cases.jsonl` 新增 P2 专项 case：关系/长期目标追踪、低落陪伴非机械安慰、睡前降速、高频确认不重复。主动发送前除固定日上限外，会基于近 24/72h 主动消息、reply timeout、跳过/延迟事件计算用户级疲劳分，高于阈值则跳过并写入 `send_skipped(reason=fatigue_score)`。后续仍需把更细粒度的用户节奏学习接入窗口概率。
+**执行状态**：已完成第一版长期陪伴 eval 基线、主动交流 fatigue score、用户级节奏学习和 30 天模拟评测 harness。`evals/run_local.py` 现在按 turn 顺序发送并等待每轮 assistant 回复，支持 `grade_target=last_reply`，可验证多轮承接而不是只看最终批量回复。`evals/cases.jsonl` 新增 P2 专项 case：关系/长期目标追踪、低落陪伴非机械安慰、睡前降速、高频确认不重复。主动发送前除固定日上限外，会基于近 24/72h 主动消息、reply timeout、跳过/延迟事件计算用户级疲劳分，高于阈值则跳过并写入 `send_skipped(reason=fatigue_score)`。正常概率窗口会根据近 30 天同本地小时的发送、回复、reply timeout、疲劳跳过事件得到 `rate_multiplier`，保守调整 `should_hit_window()` 的 final_rate。`evals/long_companion_sim.py` 可对 30 天 transcript 做 deterministic 检查，覆盖人格泄漏、机械安慰、目标连续性和主动过度。
 
 ### 源码依据
 
@@ -244,18 +244,21 @@
 
 ## P2. Prompt 运营闭环
 
+**执行状态**：已完成第一版问题聚合与 trace 风险入口。`/admin-api/stats/operations` 现在除基础 bug report 状态外，还返回 `by_error_type`、`by_eval_category`，并固定给出最近 24 小时 `high_risk_traces` 列表；风险条件覆盖 trace 总耗时 ≥20s、LLM step ≥8、trace share 失败和未解决人工标注。Web 端运营健康面板同步展示“问题分类”和“高风险 Trace”，让人工标注、trace 复盘和 eval case 生成之间形成最小闭环。尚未完成 prompt 改动绑定 eval run 结果与 prompt canary。
+
 ### 源码依据
 
 - `app/services/prompting/store.py` 支持 prompt template/version/cache。
 - `app/api/admin/prompts.py` 支持管理 prompt。
 - trace enrich 能映射 prompt 组件。
+- `/admin-api/stats/operations` 已聚合人工 bug 分类与最近 24h 高风险 trace。
 
 ### 要做
 
 1. 每次 prompt 改动绑定 eval run 结果。
 2. 支持 prompt canary：按 agent 或小流量启用。
-3. admin bug report 分类聚合。
-4. 后台提供最近 24h 高风险 trace 列表。
+3. admin bug report 分类聚合。（第一版已接入 operations stats）
+4. 后台提供最近 24h 高风险 trace 列表。（第一版已接入 operations stats + Web 面板）
 
 ### 验收标准
 

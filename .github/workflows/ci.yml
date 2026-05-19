@@ -39,7 +39,9 @@ jobs:
         run: python -m compileall -q app jobs scripts evals tests
 
       - name: Validate agent eval cases
-        run: python evals/run_local.py --validate-only
+        run: |
+          python evals/run_local.py --validate-only
+          python evals/long_companion_sim.py --validate-only
 
       - name: Run backend quality tests
         run: |
@@ -61,5 +63,6 @@ jobs:
             tests/test_llm_resilience.py \
             tests/test_admin_stats_operations.py \
             tests/test_proactive_history.py \
+            tests/test_proactive_policy.py \
             tests/test_proactive_reminder_double_fire.py \
             -q

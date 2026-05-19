@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 MAX_DAILY_PROACTIVE = 3
 PROACTIVE_FATIGUE_BLOCK_THRESHOLD = 0.85
 _DAILY_TTL_SEC = 86400
+_RHYTHM_TZ = "Asia/Shanghai"
 
 
 def _today_key() -> str:
@@ -137,6 +138,90 @@ async def get_proactive_fatigue_score(
         "threshold": PROACTIVE_FATIGUE_BLOCK_THRESHOLD,
         "block": score >= PROACTIVE_FATIGUE_BLOCK_THRESHOLD,
         "components": components,
+    }
+
+
+async def get_proactive_rhythm_adjustment(
+    agent_id: str,
+    user_id: str,
+    *,
+    workspace_id: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Learn a small send-probability adjustment from recent user rhythm.
+
+    This is intentionally conservative: with little evidence it returns 1.0.
+    Same-local-hour reply events are positive signals; reply timeouts and recent
+    fatigue skips are negative signals.
+    """
+    now_ts = (now or datetime.now(UTC)).astimezone(UTC)
+    local_hour = now_ts.astimezone().hour
+    try:
+        from app.services.schedule_domain.time_service import _TZ
+        local_hour = now_ts.astimezone(_TZ).hour
+    except Exception:
+        pass
+
+    workspace_clause = "AND workspace_id = $5" if workspace_id else ""
+    params = [
+        agent_id,
+        user_id,
+        (now_ts - timedelta(days=30)).replace(tzinfo=None).isoformat(),
+        local_hour,
+    ]
+    if workspace_id:
+        params.append(workspace_id)
+
+    sent_same_hour = 0
+    replied_same_hour = 0
+    timeout_same_hour = 0
+    skipped_same_hour = 0
+    try:
+        rows = await db.query_raw(
+            f"""
+            SELECT
+                COUNT(*) FILTER (WHERE event_type = 'message_sent')::int AS sent_same_hour,
+                COUNT(*) FILTER (WHERE event_type = 'user_replied')::int AS replied_same_hour,
+                COUNT(*) FILTER (WHERE event_type = 'reply_timeout')::int AS timeout_same_hour,
+                COUNT(*) FILTER (
+                    WHERE event_type = 'send_skipped'
+                      AND payload->>'reason' = 'fatigue_score'
+                )::int AS skipped_same_hour
+            FROM proactive_event_logs
+            WHERE agent_id = $1
+              AND user_id = $2
+              AND created_at >= $3::timestamp
+              AND EXTRACT(HOUR FROM created_at AT TIME ZONE '{_RHYTHM_TZ}')::int = $4
+              {workspace_clause}
+            """,
+            *params,
+        )
+        row = rows[0] if rows else {}
+        sent_same_hour = int(row.get("sent_same_hour") or 0)
+        replied_same_hour = int(row.get("replied_same_hour") or 0)
+        timeout_same_hour = int(row.get("timeout_same_hour") or 0)
+        skipped_same_hour = int(row.get("skipped_same_hour") or 0)
+    except Exception as e:
+        logger.warning(f"[PROACTIVE-RHYTHM] DB read failed: {e}")
+
+    signal_count = sent_same_hour + replied_same_hour + timeout_same_hour + skipped_same_hour
+    if signal_count < 3:
+        multiplier = 1.0
+    else:
+        positive = min(replied_same_hour / 3.0, 1.0) * 0.25
+        negative = min((timeout_same_hour + skipped_same_hour) / 3.0, 1.0) * 0.35
+        no_reply_penalty = 0.15 if sent_same_hour >= 3 and replied_same_hour == 0 else 0.0
+        multiplier = max(0.55, min(1.25, 1.0 + positive - negative - no_reply_penalty))
+
+    return {
+        "multiplier": round(multiplier, 3),
+        "local_hour": local_hour,
+        "components": {
+            "sent_same_hour": sent_same_hour,
+            "replied_same_hour": replied_same_hour,
+            "timeout_same_hour": timeout_same_hour,
+            "skipped_same_hour": skipped_same_hour,
+        },
     }
 
 

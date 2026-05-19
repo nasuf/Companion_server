@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from evals.graders import grade_reply
+from evals.long_companion_sim import build_reference_transcript, score_transcript, validate_transcript
 from evals.run_local import _grade_text_for_case, load_cases, validate_cases
 
 
@@ -52,3 +53,27 @@ def test_eval_grade_target_can_use_last_reply_only():
         {"content": "最后一轮才是要评分的回复"},
     ]
     assert _grade_text_for_case(replies, case) == "最后一轮才是要评分的回复"
+
+
+def test_long_companion_reference_simulation_passes():
+    rows = build_reference_transcript()
+    assert validate_transcript(rows) == []
+    result = score_transcript(rows)
+    assert result["passed"] is True
+    assert result["metrics"]["goal_mentions_after_intro"] >= 3
+
+
+def test_long_companion_simulation_fails_persona_leak_and_overactive_proactive():
+    rows = [
+        {"day": 1, "role": "user", "content": "我想睡前复盘，坚持代码学习。"},
+        {"day": 1, "role": "assistant", "content": "作为AI，我会提醒你。"},
+        {"day": 2, "role": "assistant", "content": "积极一点就好了。", "proactive": True},
+        {"day": 2, "role": "assistant", "content": "继续提醒。", "proactive": True},
+        {"day": 2, "role": "assistant", "content": "继续提醒。", "proactive": True},
+        {"day": 2, "role": "assistant", "content": "继续提醒。", "proactive": True},
+    ]
+    result = score_transcript(rows)
+    assert result["passed"] is False
+    assert result["metrics"]["persona_leak_count"] == 1
+    assert result["metrics"]["mechanical_comfort_count"] == 1
+    assert result["metrics"]["max_proactive_per_day"] == 4

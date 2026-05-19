@@ -55,6 +55,86 @@ def _count_by(rows: list[dict], key_field: str, count_field: str = "count") -> d
     }
 
 
+def _sum_by(rows: list[dict], key_field: str, count_field: str = "count") -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get(key_field) or "unknown")
+        counts[key] = counts.get(key, 0) + int(row.get(count_field) or 0)
+    return counts
+
+
+def _classify_bug_category(error_type: str, reason: str | None) -> str:
+    text = f"{error_type} {reason or ''}".lower()
+    if any(k in text for k in ("crisis", "安全", "自伤", "轻生", "危险")):
+        return "crisis_safety"
+    if any(k in text for k in ("memory", "记忆", "失忆", "幻觉", "编造")):
+        return "memory_safety"
+    if any(k in text for k in ("reminder", "提醒", "日程")):
+        return "reminder"
+    if any(k in text for k in ("tone", "语气", "人设", "persona", "机器人")):
+        return "tone"
+    return "bug_report"
+
+
+def _aggregate_bug_categories(rows: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        category = _classify_bug_category(
+            str(row.get("error_type") or ""),
+            row.get("reason"),
+        )
+        counts[category] = counts.get(category, 0) + int(row.get("count") or 0)
+    return counts
+
+
+def _trace_risk_reasons(row: dict) -> tuple[list[str], int]:
+    reasons: list[str] = []
+    score = 0
+    duration = int(row.get("total_duration_ms") or 0)
+    llm_steps = int(row.get("llm_step_count") or 0)
+    open_bugs = int(row.get("open_bug_count") or 0)
+    share_status = str(row.get("share_status") or "")
+    if duration >= 30_000:
+        reasons.append("slow_trace_30s")
+        score += 3
+    elif duration >= 20_000:
+        reasons.append("slow_trace_20s")
+        score += 2
+    if llm_steps >= 10:
+        reasons.append("many_llm_steps_10")
+        score += 2
+    elif llm_steps >= 8:
+        reasons.append("many_llm_steps_8")
+        score += 1
+    if share_status == "failed":
+        reasons.append("trace_share_failed")
+        score += 2
+    if open_bugs > 0:
+        reasons.append("open_bug_report")
+        score += 4
+    return reasons, score
+
+
+def _serialize_high_risk_trace(row: dict) -> dict:
+    reasons, score = _trace_risk_reasons(row)
+    created_at = row.get("created_at")
+    return {
+        "trace_id": row.get("trace_id"),
+        "message_id": row.get("message_id"),
+        "conversation_id": row.get("conversation_id"),
+        "agent_id": row.get("agent_id"),
+        "user_id": row.get("user_id"),
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+        "total_duration_ms": int(row.get("total_duration_ms") or 0),
+        "llm_step_count": int(row.get("llm_step_count") or 0),
+        "share_status": row.get("share_status"),
+        "open_bug_count": int(row.get("open_bug_count") or 0),
+        "risk_reasons": reasons,
+        "risk_score": score,
+        "root_message": row.get("root_message"),
+    }
+
+
 async def _redis_ops_counts() -> dict:
     """Best-effort Redis queue/DLQ counters for ops dashboards."""
     try:
@@ -343,6 +423,14 @@ async def operations(
         agent_expr="c.agent_id",
         user_expr="c.user_id",
     )
+    trace_where, trace_params = _build_ops_where(
+        start=end - timedelta(hours=24),
+        agent_id=agent_id,
+        user_id=user_id,
+        created_expr="mt.created_at",
+        agent_expr="c.agent_id",
+        user_expr="c.user_id",
+    )
     reminder_now_idx = len(reminder_params) + 1
     reminder_next_idx = len(reminder_params) + 2
 
@@ -356,6 +444,8 @@ async def operations(
         reminder_rows,
         reminder_recent_rows,
         bug_rows,
+        bug_error_rows,
+        high_risk_trace_rows,
         redis_counts,
     ) = await asyncio.gather(
         db.query_raw(
@@ -475,6 +565,67 @@ async def operations(
             """,
             *bug_params,
         ),
+        db.query_raw(
+            f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(et.error_type), ''), 'uncategorized') AS error_type,
+                b.reason,
+                COUNT(*)::int AS count
+            FROM bug_reports b
+            JOIN messages m ON m.id = b.message_id
+            JOIN conversations c ON c.id = m.conversation_id
+            LEFT JOIN LATERAL unnest(
+                CASE
+                    WHEN array_length(b.error_types, 1) IS NULL
+                    THEN ARRAY['uncategorized']::text[]
+                    ELSE b.error_types
+                END
+            ) AS et(error_type) ON true
+            WHERE {bug_where}
+            GROUP BY COALESCE(NULLIF(TRIM(et.error_type), ''), 'uncategorized'), b.reason
+            ORDER BY count DESC
+            LIMIT 50
+            """,
+            *bug_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                mt.trace_id,
+                mt.message_id,
+                mt.conversation_id,
+                c.agent_id,
+                c.user_id,
+                mt.root_message,
+                mt.total_duration_ms,
+                mt.llm_step_count,
+                mt.share_status,
+                mt.created_at,
+                COALESCE(open_bugs.open_count, 0)::int AS open_bug_count
+            FROM message_traces mt
+            LEFT JOIN conversations c ON c.id = mt.conversation_id
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS open_count
+                FROM bug_reports br
+                WHERE br.message_id = mt.message_id
+                  AND br.status = 'open'
+            ) open_bugs ON true
+            WHERE {trace_where}
+              AND (
+                COALESCE(mt.total_duration_ms, 0) >= 20000
+                OR COALESCE(mt.llm_step_count, 0) >= 8
+                OR mt.share_status = 'failed'
+                OR COALESCE(open_bugs.open_count, 0) > 0
+              )
+            ORDER BY
+                COALESCE(open_bugs.open_count, 0) DESC,
+                COALESCE(mt.total_duration_ms, 0) DESC,
+                COALESCE(mt.llm_step_count, 0) DESC,
+                mt.created_at DESC
+            LIMIT 20
+            """,
+            *trace_params,
+        ),
         _redis_ops_counts(),
     )
 
@@ -483,6 +634,9 @@ async def operations(
     proactive_triggers = _count_by(proactive_trigger_rows, "trigger_type")
     proactive_states = _count_by(proactive_state_rows, "status")
     bug_statuses = _count_by(bug_rows, "status")
+    bug_error_types = _sum_by(bug_error_rows, "error_type")
+    bug_categories = _aggregate_bug_categories(bug_error_rows)
+    high_risk_traces = [_serialize_high_risk_trace(row) for row in high_risk_trace_rows]
 
     llm_totals = llm_totals_rows[0] if llm_totals_rows else {
         "request_count": 0,
@@ -585,9 +739,16 @@ async def operations(
         "runtime_jobs": redis_counts["runtime_jobs"],
         "bug_reports": {
             "by_status": bug_statuses,
+            "by_error_type": bug_error_types,
+            "by_eval_category": bug_categories,
             "created_count": sum(bug_statuses.values()),
             "open_count": bug_statuses.get("open", 0),
             "resolved_count": bug_statuses.get("resolved", 0),
+        },
+        "high_risk_traces": {
+            "window_hours": 24,
+            "items": high_risk_traces,
+            "count": len(high_risk_traces),
         },
         "data_quality": {
             "redis_available": redis_counts["ok"],
@@ -596,6 +757,7 @@ async def operations(
             "notes": [
                 "LLM latency/fallback/circuit metrics are session-level aggregates from llm_usage rows.",
                 "Redis queue/DLQ counters are point-in-time health signals and ignore the days window.",
+                "High-risk traces always use the latest 24h window, independent of the dashboard days filter.",
             ],
         },
     }

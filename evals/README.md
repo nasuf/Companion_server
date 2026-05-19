@@ -8,6 +8,7 @@ Validate cases without a running server:
 
 ```bash
 .venv/bin/python evals/run_local.py --validate-only
+.venv/bin/python evals/long_companion_sim.py --validate-only
 ```
 
 Run cases against a local backend:
@@ -55,3 +56,4 @@ Assertions are deliberately simple and deterministic so they can run in CI witho
 ## Report Output
 
 Server mode writes `evals/results/latest.json`. The file is ignored by git.
+Long-companion simulation writes `evals/results/long_companion_latest.json` by default.

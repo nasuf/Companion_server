@@ -6,6 +6,7 @@ Redis miss/down 时应从 proactive_counters 表读取, 避免计数丢失导致
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -165,3 +166,67 @@ async def test_proactive_fatigue_score_allows_low_pressure(history_mocks):
 
     assert fatigue["block"] is False
     assert 0 < fatigue["score"] < fatigue["threshold"]
+
+
+@pytest.mark.asyncio
+async def test_proactive_rhythm_adjustment_boosts_replied_hour(history_mocks):
+    from app.services.proactive.history import get_proactive_rhythm_adjustment
+
+    mock_db, _mock_redis = history_mocks
+    mock_db.query_raw = AsyncMock(return_value=[{
+        "sent_same_hour": 3,
+        "replied_same_hour": 3,
+        "timeout_same_hour": 0,
+        "skipped_same_hour": 0,
+    }])
+
+    rhythm = await get_proactive_rhythm_adjustment(
+        "a1",
+        "u1",
+        workspace_id="ws-1",
+        now=datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert rhythm["multiplier"] == 1.25
+    assert rhythm["local_hour"] == 18
+    assert rhythm["components"]["replied_same_hour"] == 3
+
+
+@pytest.mark.asyncio
+async def test_proactive_rhythm_adjustment_downranks_no_reply_hour(history_mocks):
+    from app.services.proactive.history import get_proactive_rhythm_adjustment
+
+    mock_db, _mock_redis = history_mocks
+    mock_db.query_raw = AsyncMock(return_value=[{
+        "sent_same_hour": 4,
+        "replied_same_hour": 0,
+        "timeout_same_hour": 2,
+        "skipped_same_hour": 1,
+    }])
+
+    rhythm = await get_proactive_rhythm_adjustment(
+        "a1",
+        "u1",
+        workspace_id="ws-1",
+        now=datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert rhythm["multiplier"] == 0.55
+    assert rhythm["components"]["timeout_same_hour"] == 2
+
+
+@pytest.mark.asyncio
+async def test_proactive_rhythm_adjustment_neutral_with_sparse_signal(history_mocks):
+    from app.services.proactive.history import get_proactive_rhythm_adjustment
+
+    mock_db, _mock_redis = history_mocks
+    mock_db.query_raw = AsyncMock(return_value=[{
+        "sent_same_hour": 1,
+        "replied_same_hour": 0,
+        "timeout_same_hour": 0,
+        "skipped_same_hour": 0,
+    }])
+
+    rhythm = await get_proactive_rhythm_adjustment("a1", "u1")
+
+    assert rhythm["multiplier"] == 1.0
