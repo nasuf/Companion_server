@@ -66,6 +66,36 @@ class FakeJobRedis:
             removed += 1 if zset.pop(str(member), None) is not None else 0
         return removed
 
+    async def llen(self, key):
+        return len(self.lists.setdefault(key, []))
+
+    async def lrange(self, key, start, end):
+        values = self.lists.setdefault(key, [])
+        stop = None if end == -1 else end + 1
+        return values[start:stop]
+
+    async def lrem(self, key, _count, value):
+        values = self.lists.setdefault(key, [])
+        removed = 0
+        while str(value) in values:
+            values.remove(str(value))
+            removed += 1
+        return removed
+
+    async def ltrim(self, key, start, end):
+        values = self.lists.setdefault(key, [])
+        stop = None if end == -1 else end + 1
+        self.lists[key] = values[start:stop]
+        return True
+
+    async def zcard(self, key):
+        return len(self.zsets.setdefault(key, {}))
+
+    async def zrange(self, key, start, end):
+        items = sorted(self.zsets.setdefault(key, {}).items(), key=lambda item: item[1])
+        stop = None if end == -1 else end + 1
+        return [member for member, _score in items[start:stop]]
+
 
 @pytest.mark.asyncio
 async def test_runtime_job_queue_runs_registered_handler():
@@ -82,10 +112,12 @@ async def test_runtime_job_queue_runs_registered_handler():
     ):
         job_id = await job_queue.enqueue_runtime_job("test.job", {"x": 1})
         processed = await job_queue.process_runtime_jobs(max_jobs=1)
+        listed = await job_queue.list_runtime_jobs(status="succeeded")
 
     assert processed == 1
     assert calls == [{"x": 1}]
     assert redis.hashes[job_queue._job_key(job_id)]["status"] == "succeeded"
+    assert listed["items"][0]["id"] == job_id
 
 
 @pytest.mark.asyncio
@@ -131,6 +163,34 @@ async def test_runtime_job_queue_idempotency_returns_existing_job():
         for record in redis.hashes.values()
     ]
     assert payloads == [{"x": 1}]
+
+
+@pytest.mark.asyncio
+async def test_runtime_job_admin_list_retry_and_resolve():
+    redis = FakeJobRedis()
+
+    async def handler(_payload):
+        raise RuntimeError("boom")
+
+    job_queue.register_job_handler("test.admin", handler)
+    with (
+        patch.object(job_queue, "get_redis", AsyncMock(return_value=redis)),
+        patch.object(job_queue, "distributed_lock", _lock_acquired),
+    ):
+        job_id = await job_queue.enqueue_runtime_job("test.admin", {"x": 1}, max_attempts=1)
+        await job_queue.process_runtime_jobs(max_jobs=1)
+        listed = await job_queue.list_runtime_jobs(status="dead_letter")
+        batch = await job_queue.retry_runtime_jobs([job_id])
+        retried = batch["items"][0]
+        resolved = await job_queue.resolve_runtime_job(job_id)
+
+    assert listed["items"][0]["id"] == job_id
+    assert listed["counts"]["dead_letter"] == 1
+    assert batch["retried_count"] == 1
+    assert retried is not None
+    assert retried["status"] == "queued"
+    assert resolved is not None
+    assert resolved["status"] == "resolved"
 
 
 class _lock_acquired:

@@ -17,6 +17,11 @@ from app.services.memory.repair_queue import (
     list_memory_repair_items,
     update_memory_repair_item_status,
 )
+from app.services.memory.lifecycle.hygiene import run_memory_hygiene
+from app.services.memory.lifecycle.quality_state import (
+    backfill_memory_quality_states,
+    list_low_quality_memory_states,
+)
 
 router = APIRouter(prefix="/admin-api/memory-repairs", tags=["admin-memory-repairs"])
 
@@ -43,6 +48,20 @@ class MemoryRepairActionRequest(BaseModel):
     main_category: str | None = None
     sub_category: str | None = None
     reason: str | None = Field(default=None, max_length=1000)
+
+
+class QualityBackfillRequest(BaseModel):
+    user_id: str | None = None
+    workspace_id: str | None = None
+    limit: int = Field(default=500, ge=1, le=2000)
+
+
+class ConsolidationRunRequest(BaseModel):
+    user_id: str | None = None
+    workspace_id: str | None = None
+    allow_llm: bool = True
+    max_scopes: int = Field(default=50, ge=1, le=200)
+    max_memories_per_scope: int = Field(default=200, ge=10, le=1000)
 
 
 @router.get("")
@@ -73,6 +92,45 @@ async def list_memory_repairs(
         "offset": offset,
         "count": len(items),
     }
+
+
+@router.get("/quality-states")
+async def list_memory_quality_states(
+    limit: int = Query(100, ge=1, le=500),
+    max_confidence: float = Query(0.55, ge=0.0, le=0.99),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    items = await list_low_quality_memory_states(
+        limit=limit,
+        max_confidence=max_confidence,
+    )
+    return {"items": items, "count": len(items), "limit": limit}
+
+
+@router.post("/quality-states/backfill")
+async def backfill_memory_quality(
+    payload: QualityBackfillRequest,
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    return await backfill_memory_quality_states(
+        user_id=payload.user_id,
+        workspace_id=payload.workspace_id,
+        limit=payload.limit,
+    )
+
+
+@router.post("/consolidation/run")
+async def run_consolidation_now(
+    payload: ConsolidationRunRequest,
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    return await run_memory_hygiene(
+        user_id=payload.user_id,
+        workspace_id=payload.workspace_id,
+        allow_llm=payload.allow_llm,
+        max_scopes=payload.max_scopes,
+        max_memories_per_scope=payload.max_memories_per_scope,
+    )
 
 
 @router.patch("/{item_id}")

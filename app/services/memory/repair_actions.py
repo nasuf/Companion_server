@@ -9,6 +9,7 @@ from typing import Any, Literal
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.storage.persistence import log_memory_changelog, store_memory
+from app.services.memory.lifecycle.quality_state import mark_memory_superseded
 from app.services.memory.repair_queue import (
     get_memory_repair_item,
     update_memory_repair_item_status,
@@ -222,6 +223,16 @@ async def _insert_replacement_memory(
         new_value=_audit_json(admin_id=admin_id, repair_item=repair_item, payload=payload, after={"content": content}),
         workspace_id=workspace_id,
     )
+    if old_record is not None:
+        try:
+            await mark_memory_superseded(
+                memory_id=old_record.id,
+                source=old_record.source,
+                superseded_by_memory_id=new_id,
+                repair_item_id=repair_item.get("id"),
+            )
+        except Exception:
+            pass
     return {"action": payload.action, "memory_id": new_id}
 
 

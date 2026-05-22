@@ -35,6 +35,7 @@ from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     distributed_lock,
 )
+from app.services.runtime.tasks import fire_background
 from app.services.runtime.ws_manager import manager
 from app.services.trait_adjustment import (
     apply_trait_adjustment,
@@ -133,6 +134,17 @@ async def save_replies(
                     "metadata": Json(metadata),
                 }
             )
+            if i == 0:
+                try:
+                    from app.services.operations.metrics import record_reply_operational_metrics
+
+                    fire_background(record_reply_operational_metrics(
+                        message_id=created.id,
+                        conversation_id=conversation_id,
+                        metadata=metadata,
+                    ))
+                except Exception as metric_err:
+                    logger.debug(f"Reply operational metrics skipped: {metric_err}")
             if i == 0:
                 first_message_id = created.id
         return first_message_id

@@ -29,6 +29,7 @@ _READY_KEY = "runtime:jobs:ready"
 _DELAYED_KEY = "runtime:jobs:delayed"
 _RUNNING_KEY = "runtime:jobs:running"
 _DLQ_KEY = "runtime:jobs:dlq"
+_SUCCEEDED_KEY = "runtime:jobs:succeeded"
 _JOB_KEY_PREFIX = "runtime:job:"
 _IDEMP_KEY_PREFIX = "runtime:job_idem:"
 _DEFAULT_MAX_ATTEMPTS = 3
@@ -220,3 +221,186 @@ async def _run_job_with_lock(job_id: str) -> None:
         _job_key(job_id),
         mapping={"status": "succeeded", "updated_at": str(int(time.time())), "last_error": ""},
     )
+    await redis.lpush(_SUCCEEDED_KEY, job_id)
+    await _safe_ltrim(redis, _SUCCEEDED_KEY, 0, 499)
+
+
+async def inspect_runtime_job(job_id: str) -> dict[str, Any] | None:
+    redis = await get_redis()
+    raw = await redis.hgetall(_job_key(job_id))
+    return _serialize_job(_decode_hash(raw)) if raw else None
+
+
+async def list_runtime_jobs(
+    *,
+    status: str | None = None,
+    job_type: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    redis = await get_redis()
+    limit = max(1, min(limit, 200))
+    status_keys = [status] if status else ["queued", "delayed", "running", "dead_letter", "succeeded"]
+    ids: list[str] = []
+    for key in status_keys:
+        if key == "queued":
+            ids.extend(await _list_ids(redis, _READY_KEY, limit))
+        elif key == "delayed":
+            ids.extend(await _zset_ids(redis, _DELAYED_KEY, limit))
+        elif key == "running":
+            ids.extend(await _zset_ids(redis, _RUNNING_KEY, limit))
+        elif key in {"dead_letter", "dlq", "failed"}:
+            ids.extend(await _list_ids(redis, _DLQ_KEY, limit))
+        elif key == "succeeded":
+            ids.extend(await _list_ids(redis, _SUCCEEDED_KEY, limit))
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for job_id in ids:
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+        item = await inspect_runtime_job(job_id)
+        if not item:
+            continue
+        if job_type and item.get("type") != job_type:
+            continue
+        items.append(item)
+        if len(items) >= limit:
+            break
+    counts = await runtime_job_counts()
+    return {"items": items, "count": len(items), "limit": limit, "counts": counts}
+
+
+async def retry_runtime_job(job_id: str) -> dict[str, Any] | None:
+    redis = await get_redis()
+    job = await inspect_runtime_job(job_id)
+    if job is None:
+        return None
+    now = str(int(time.time()))
+    await redis.hset(
+        _job_key(job_id),
+        mapping={"status": "queued", "updated_at": now, "last_error": ""},
+    )
+    await redis.zrem(_RUNNING_KEY, job_id)
+    await redis.zrem(_DELAYED_KEY, job_id)
+    await _safe_lrem(redis, _DLQ_KEY, job_id)
+    await _safe_lrem(redis, _SUCCEEDED_KEY, job_id)
+    await redis.lpush(_READY_KEY, job_id)
+    return await inspect_runtime_job(job_id)
+
+
+async def retry_runtime_jobs(job_ids: list[str]) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for job_id in list(dict.fromkeys(job_ids))[:200]:
+        job = await retry_runtime_job(job_id)
+        if job is None:
+            missing.append(job_id)
+        else:
+            results.append(job)
+    return {
+        "items": results,
+        "retried_count": len(results),
+        "missing_ids": missing,
+    }
+
+
+async def resolve_runtime_job(job_id: str) -> dict[str, Any] | None:
+    redis = await get_redis()
+    job = await inspect_runtime_job(job_id)
+    if job is None:
+        return None
+    await redis.hset(
+        _job_key(job_id),
+        mapping={"status": "resolved", "updated_at": str(int(time.time()))},
+    )
+    await redis.zrem(_RUNNING_KEY, job_id)
+    await redis.zrem(_DELAYED_KEY, job_id)
+    await _safe_lrem(redis, _DLQ_KEY, job_id)
+    await _safe_lrem(redis, _SUCCEEDED_KEY, job_id)
+    return await inspect_runtime_job(job_id)
+
+
+async def runtime_job_counts() -> dict[str, int]:
+    redis = await get_redis()
+    return {
+        "queued": int(await redis.llen(_READY_KEY) or 0),
+        "delayed": int(await redis.zcard(_DELAYED_KEY) or 0),
+        "running": int(await redis.zcard(_RUNNING_KEY) or 0),
+        "dead_letter": int(await redis.llen(_DLQ_KEY) or 0),
+        "succeeded": int(await redis.llen(_SUCCEEDED_KEY) or 0),
+    }
+
+
+async def _list_ids(redis, key: str, limit: int) -> list[str]:
+    if hasattr(redis, "lrange"):
+        raw = await redis.lrange(key, 0, limit - 1)
+        return [v for v in (_decode(item) for item in raw) if v]
+    values = getattr(redis, "lists", {}).get(key, [])
+    return [str(v) for v in values[:limit]]
+
+
+async def _zset_ids(redis, key: str, limit: int) -> list[str]:
+    if hasattr(redis, "zrange"):
+        raw = await redis.zrange(key, 0, limit - 1)
+        return [v for v in (_decode(item) for item in raw) if v]
+    zset = getattr(redis, "zsets", {}).get(key, {})
+    return [
+        str(member)
+        for member, _score in sorted(zset.items(), key=lambda item: item[1])[:limit]
+    ]
+
+
+async def _safe_lrem(redis, key: str, value: str) -> None:
+    if hasattr(redis, "lrem"):
+        await redis.lrem(key, 0, value)
+        return
+    values = getattr(redis, "lists", {}).get(key)
+    if isinstance(values, list):
+        while value in values:
+            values.remove(value)
+
+
+async def _safe_ltrim(redis, key: str, start: int, end: int) -> None:
+    if hasattr(redis, "ltrim"):
+        await redis.ltrim(key, start, end)
+        return
+    values = getattr(redis, "lists", {}).get(key)
+    if isinstance(values, list):
+        stop = None if end == -1 else end + 1
+        values[:] = values[start:stop]
+
+
+def _serialize_job(job: dict[str, str]) -> dict[str, Any]:
+    payload: Any = {}
+    try:
+        payload = json.loads(job.get("payload") or "{}")
+    except Exception:
+        payload = {}
+    created_at = _ts_iso(job.get("created_at"))
+    updated_at = _ts_iso(job.get("updated_at"))
+    return {
+        "id": job.get("id"),
+        "type": job.get("type"),
+        "status": job.get("status"),
+        "attempts": int(job.get("attempts") or 0),
+        "max_attempts": int(job.get("max_attempts") or 0),
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "last_error": job.get("last_error") or "",
+        "payload": payload,
+    }
+
+
+def _ts_iso(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return datetime_from_epoch(int(value))
+    except Exception:
+        return None
+
+
+def datetime_from_epoch(value: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()

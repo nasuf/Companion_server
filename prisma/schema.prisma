@@ -364,6 +364,105 @@ model MemoryRepairItem {
   @@map("memory_repair_items")
 }
 
+model MemoryQualityState {
+  memoryId             String    @map("memory_id")
+  memorySource         String    @map("memory_source")
+  userId               String    @map("user_id")
+  workspaceId          String?   @map("workspace_id")
+  confidence           Float     @default(0.5)
+  evidenceMessageIds   String[]  @default([]) @map("evidence_message_ids")
+  lastVerifiedAt       DateTime? @map("last_verified_at")
+  verifiedBy           String?   @map("verified_by")
+  contradictionState   String    @default("none") @map("contradiction_state")
+  userCorrectedCount   Int       @default(0) @map("user_corrected_count")
+  adminRepairedCount   Int       @default(0) @map("admin_repaired_count")
+  accessCount          Int       @default(0) @map("access_count")
+  lastRepairItemId     String?   @map("last_repair_item_id")
+  supersededByMemoryId String?   @map("superseded_by_memory_id")
+  signals              Json      @default("{}")
+  sourceUpdatedAt      DateTime? @map("source_updated_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@id([memoryId, memorySource])
+  @@index([userId, workspaceId, confidence])
+  @@index([contradictionState, updatedAt])
+  @@index([supersededByMemoryId])
+  @@map("memory_quality_states")
+}
+
+model MemoryConsolidationRun {
+  id          String   @id @default(uuid())
+  status      String   @default("succeeded")
+  userId      String?  @map("user_id")
+  workspaceId String?  @map("workspace_id")
+  source      String?
+  scopes      Int      @default(0)
+  checked     Int      @default(0)
+  archived    Int      @default(0)
+  merged      Int      @default(0)
+  updated     Int      @default(0)
+  errors      Int      @default(0)
+  changes     Json     @default("[]")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt(sort: Desc)])
+  @@index([userId, workspaceId, createdAt(sort: Desc)])
+  @@map("memory_consolidation_runs")
+}
+
+model MemoryVisibleUseEvent {
+  id                        String   @id @default(uuid())
+  messageId                 String?  @map("message_id")
+  conversationId            String   @map("conversation_id")
+  agentId                   String?  @map("agent_id")
+  userId                    String?  @map("user_id")
+  workspaceId               String?  @map("workspace_id")
+  traceId                   String?  @map("trace_id")
+  method                    String   @default("lexical_overlap_v1")
+  selectedCount             Int      @default(0) @map("selected_count")
+  likelyUsedCount           Int      @default(0) @map("likely_used_count")
+  likelyUnusedCount         Int      @default(0) @map("likely_unused_count")
+  visibleUseRate            Float    @default(0) @map("visible_use_rate")
+  unsupportedReferenceCount Int      @default(0) @map("unsupported_reference_count")
+  warningCount              Int      @default(0) @map("warning_count")
+  hasPromptDilution         Boolean  @default(false) @map("has_prompt_dilution")
+  hasFinalGateDrop          Boolean  @default(false) @map("has_final_gate_drop")
+  memoryIds                 String[] @default([]) @map("memory_ids")
+  payload                   Json     @default("{}")
+  createdAt                 DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt(sort: Desc)])
+  @@index([agentId, userId, createdAt(sort: Desc)])
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@map("memory_visible_use_events")
+}
+
+model CrisisEvent {
+  id                  String   @id @default(uuid())
+  messageId           String?  @map("message_id")
+  conversationId      String   @map("conversation_id")
+  agentId             String?  @map("agent_id")
+  userId              String?  @map("user_id")
+  workspaceId         String?  @map("workspace_id")
+  traceId             String?  @map("trace_id")
+  status              String
+  category            String?
+  severity            String?
+  handlerPath         String?  @map("handler_path")
+  aftercareTriggered  Boolean  @default(false) @map("aftercare_triggered")
+  safetyCheckMode     String?  @map("safety_check_mode")
+  semanticChecked     Boolean  @default(false) @map("semantic_checked")
+  semanticDetected    Boolean  @default(false) @map("semantic_detected")
+  payload             Json     @default("{}")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt(sort: Desc)])
+  @@index([agentId, userId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("crisis_events")
+}
+
 model Intimacy {
   id              String   @id @default(uuid())
   agentId         String   @map("agent_id")

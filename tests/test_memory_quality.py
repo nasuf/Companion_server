@@ -78,3 +78,57 @@ async def test_derive_memory_quality_caps_archived_confidence():
 
     assert result["m1"].confidence <= 0.2
     assert "archived" in result["m1"].signals
+
+
+@pytest.mark.asyncio
+async def test_refresh_memory_quality_state_materializes_row(monkeypatch):
+    from app.services.memory.lifecycle import quality_state
+
+    record = _record("m1")
+    monkeypatch.setattr(quality_state.memory_repo, "find_unique", AsyncMock(return_value=record))
+    monkeypatch.setattr(
+        quality_state,
+        "derive_memory_quality",
+        AsyncMock(return_value={
+            "m1": type("Q", (), {
+                "confidence": 0.82,
+                "evidence_message_ids": ["msg-1"],
+                "last_verified_at": datetime(2026, 5, 4, tzinfo=timezone.utc),
+                "contradiction_state": "none",
+                "user_corrected_count": 0,
+                "access_count": 3,
+                "signals": ["has_evidence_messages"],
+            })(),
+        }),
+    )
+    fake_db = type("DB", (), {})()
+    fake_db.query_raw = AsyncMock(side_effect=[
+        [],
+        [{
+            "memory_id": "m1",
+            "memory_source": "user",
+            "user_id": "u1",
+            "workspace_id": "ws1",
+            "confidence": 0.82,
+            "evidence_message_ids": ["msg-1"],
+            "last_verified_at": datetime(2026, 5, 4, tzinfo=timezone.utc),
+            "verified_by": None,
+            "contradiction_state": "none",
+            "user_corrected_count": 0,
+            "admin_repaired_count": 0,
+            "access_count": 3,
+            "last_repair_item_id": None,
+            "superseded_by_memory_id": None,
+            "signals": {"signals": ["has_evidence_messages"]},
+            "source_updated_at": datetime(2026, 5, 1, tzinfo=timezone.utc),
+            "updated_at": datetime(2026, 5, 5, tzinfo=timezone.utc),
+        }],
+    ])
+    monkeypatch.setattr(quality_state, "db", fake_db)
+
+    state = await quality_state.refresh_memory_quality_state("m1")
+
+    assert state is not None
+    assert state["confidence"] == 0.82
+    assert state["evidence_message_ids"] == ["msg-1"]
+    assert fake_db.query_raw.await_count == 2

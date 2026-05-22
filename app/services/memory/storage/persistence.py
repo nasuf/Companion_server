@@ -87,6 +87,16 @@ async def log_memory_changelog(
                 "workspaceId": workspace_id,
             }
         )
+        try:
+            from app.services.memory.lifecycle.quality_state import refresh_quality_state_for_changelog
+
+            # "access" can be emitted on every retrieval and should not turn the
+            # recall hot path into a full quality recomputation. Backfill and
+            # non-access writes keep the materialized state fresh enough for ops.
+            if operation != "access":
+                await refresh_quality_state_for_changelog(memory_id)
+        except Exception as state_err:
+            logger.debug(f"Memory quality state refresh skipped: {state_err}")
     except Exception as e:
         logger.warning(f"Failed to write changelog: {e}")
 

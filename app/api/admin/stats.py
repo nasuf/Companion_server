@@ -11,6 +11,7 @@ from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.pricing import estimate_cost_cny
+from app.services.operations.metrics import summarize_crisis_events, summarize_visible_use
 from app.services.proactive import triggers as proactive_triggers
 from app.services.runtime import job_queue as runtime_job_queue
 
@@ -139,12 +140,13 @@ async def _redis_ops_counts() -> dict:
     """Best-effort Redis queue/DLQ counters for ops dashboards."""
     try:
         redis = await get_redis()
-        reminder_dlq, runtime_dlq, runtime_ready, runtime_delayed, runtime_running = await asyncio.gather(
+        reminder_dlq, runtime_dlq, runtime_ready, runtime_delayed, runtime_running, runtime_succeeded = await asyncio.gather(
             redis.zcard(proactive_triggers._DLQ_KEY),
             redis.llen(runtime_job_queue._DLQ_KEY),
             redis.llen(runtime_job_queue._READY_KEY),
             redis.zcard(runtime_job_queue._DELAYED_KEY),
             redis.zcard(runtime_job_queue._RUNNING_KEY),
+            redis.llen(runtime_job_queue._SUCCEEDED_KEY),
         )
         return {
             "ok": True,
@@ -154,6 +156,7 @@ async def _redis_ops_counts() -> dict:
                 "delayed_count": int(runtime_delayed or 0),
                 "running_count": int(runtime_running or 0),
                 "dlq_count": int(runtime_dlq or 0),
+                "succeeded_count": int(runtime_succeeded or 0),
             },
         }
     except Exception as e:
@@ -167,6 +170,7 @@ async def _redis_ops_counts() -> dict:
                 "delayed_count": 0,
                 "running_count": 0,
                 "dlq_count": 0,
+                "succeeded_count": 0,
             },
         }
 
@@ -446,6 +450,8 @@ async def operations(
         bug_rows,
         bug_error_rows,
         high_risk_trace_rows,
+        visible_use_summary,
+        crisis_summary,
         redis_counts,
     ) = await asyncio.gather(
         db.query_raw(
@@ -626,6 +632,8 @@ async def operations(
             """,
             *trace_params,
         ),
+        summarize_visible_use(start=start, agent_id=agent_id, user_id=user_id, db_client=db),
+        summarize_crisis_events(start=start, agent_id=agent_id, user_id=user_id, db_client=db),
         _redis_ops_counts(),
     )
 
@@ -717,6 +725,7 @@ async def operations(
                 count for op, count in memory_ops.items()
                 if op.startswith("contradiction_")
             ),
+            "visible_use": visible_use_summary,
         },
         "proactive": {
             "by_event_type": proactive_events,
@@ -745,6 +754,7 @@ async def operations(
             "open_count": bug_statuses.get("open", 0),
             "resolved_count": bug_statuses.get("resolved", 0),
         },
+        "crisis_events": crisis_summary,
         "high_risk_traces": {
             "window_hours": 24,
             "items": high_risk_traces,

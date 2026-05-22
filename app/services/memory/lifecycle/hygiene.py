@@ -9,6 +9,8 @@ evolution principle inside each top-level memory category.
 from __future__ import annotations
 
 import logging
+import json
+import uuid
 from collections import defaultdict
 from typing import TypedDict, cast
 
@@ -205,6 +207,11 @@ async def run_memory_hygiene(
                     stats["errors"] += 1
                     logger.warning(f"Memory hygiene failed for memory {record.id}: {e}")
 
+    await _best_effort_record_consolidation_run(
+        stats,
+        user_id=user_id,
+        workspace_id=workspace_id,
+    )
     return stats
 
 
@@ -340,3 +347,41 @@ async def _archive_absorbed(
         new_value=new_value,
         workspace_id=workspace_id,
     )
+
+
+async def _best_effort_record_consolidation_run(
+    stats: HygieneStats,
+    *,
+    user_id: str | None,
+    workspace_id: str | None,
+) -> None:
+    try:
+        rows = await db.query_raw(
+            """
+            INSERT INTO memory_consolidation_runs (
+                id, status, user_id, workspace_id, scopes, checked,
+                archived, merged, updated, errors, changes
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11::jsonb
+            )
+            RETURNING id
+            """,
+            str(uuid.uuid4()),
+            "succeeded" if int(stats.get("errors") or 0) == 0 else "completed_with_errors",
+            user_id,
+            workspace_id,
+            int(stats.get("scopes") or 0),
+            int(stats.get("checked") or 0),
+            int(stats.get("archived") or 0),
+            int(stats.get("merged") or 0),
+            int(stats.get("updated") or 0),
+            int(stats.get("errors") or 0),
+            json.dumps(stats.get("changes") or [], ensure_ascii=False),
+        )
+        run_id = rows[0].get("id") if rows else None
+        if run_id:
+            stats["run_id"] = run_id  # type: ignore[typeddict-unknown-key]
+    except Exception as e:
+        logger.debug("memory consolidation run audit skipped: %s", e)

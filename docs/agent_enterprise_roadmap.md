@@ -193,7 +193,7 @@
 
 ## P1. 观测与运营指标产品化 `[完成-第一版 / P3继续]`
 
-**执行状态**：已完成第一版运营健康 endpoint + bug report → eval case 闭环，并完成 P1.5 LLM runtime metrics 落库。新增 `/admin-api/stats/operations`，聚合 `memory_changelogs`、`llm_usage`、`proactive_event_logs`、`proactive_states`、`time_triggers`、`bug_reports` 与 Redis DLQ/queue 计数，覆盖记忆写入/召回、LLM 用量、LLM latency/fallback/circuit、主动交流、提醒、runtime jobs、人工 bug report 的基础健康视图。新增 `/admin-api/bug-reports/{report_id}/eval-case`，可从人工标注的问题回复生成 validated JSONL eval draft，显式 `append_to_cases=true` 时才写入 `evals/cases.jsonl`。当前 visible use rate 与 crisis count 仍未独立结构化落库，后续需要打通 injected-vs-replied evidence 与 crisis 事件持久化。
+**执行状态**：已完成第一版运营健康 endpoint + bug report → eval case 闭环，并完成 P1.5 LLM runtime metrics 落库。新增 `/admin-api/stats/operations`，聚合 `memory_changelogs`、`llm_usage`、`proactive_event_logs`、`proactive_states`、`time_triggers`、`bug_reports`、`memory_visible_use_events`、`crisis_events` 与 Redis DLQ/queue 计数，覆盖记忆写入/召回、可见使用率、危机事件、LLM 用量、LLM latency/fallback/circuit、主动交流、提醒、runtime jobs、人工 bug report 的基础健康视图。新增 `/admin-api/bug-reports/{report_id}/eval-case`，可从人工标注的问题回复生成 validated JSONL eval draft，显式 `append_to_cases=true` 时才写入 `evals/cases.jsonl`。
 
 ### 源码依据
 
@@ -210,10 +210,10 @@
    - circuit breaker open count
    - memory extraction success（第一版：`memory_changelogs.operation='insert'`）
    - retrieval selected count（第一版：`memory_changelogs.operation='access'`）
-   - visible use rate（第一版暂未落库；需打通 injected vs replied evidence）
+   - visible use rate（P3 已落库：`memory_visible_use_events`）
    - reminder DLQ（第一版：Redis `reminder:dlq` 计数）
    - proactive sent/skipped（第一版：`proactive_event_logs` 聚合）
-   - crisis count（第一版暂未落库；当前只有结构化日志事件）
+   - crisis count（P3 已落库：`crisis_events`）
 2. P0 事件告警：
    - memory pipeline failed
    - embedding orphan
@@ -277,10 +277,10 @@
 |------|------|------|
 | P0 Agent Eval 质量门禁 | `[完成-第一版]` | 已有 versioned cases、deterministic grader、CI validate；真实 server mode 多轮回归仍可增强。 |
 | P0 安全与隐私基线 | `[完成-第一版]` | 已有生产 fail-fast、CORS allowlist、auth abuse control、memory privacy API；生产环境变量仍需部署时严格配置。 |
-| P0 后台任务企业化 | `[完成-第一版 / P3继续]` | 已有 runtime queue、retry、DLQ、跨实例防重；可视化任务状态、更多 job 迁移、DLQ 人工重放未完成。 |
+| P0 后台任务企业化 | `[完成-第一版 / P3继续]` | 已有 runtime queue、retry、DLQ、跨实例防重、任务状态可视化和 DLQ 人工重放；更多 job 类型迁移仍可继续。 |
 | P1 记忆治理升级 | `[完成-第一版 / P3继续]` | 已有质量信号派生视图和 L2 质量因子；长期 consolidation、物化字段、人工修复队列未完成。 |
 | P1 CI/CD 质量流水线 | `[完成-第一版 / P3继续]` | 已有 CI gate 与 deploy workflow_run；lint/type check、部署后 smoke chat、真实 server eval 未完成。 |
-| P1 观测与运营指标产品化 | `[完成-第一版 / P3继续]` | 已有 operations stats、LLM runtime metrics、bug report eval draft；visible use rate、crisis count、告警闭环未完成。 |
+| P1 观测与运营指标产品化 | `[完成-第一版 / P3继续]` | 已有 operations stats、LLM runtime metrics、bug report eval draft、visible use rate 和 crisis count 结构化落库；告警闭环仍未完成。 |
 | P2 长期陪伴体验策略 | `[完成-第一版]` | 已有 fatigue score、节奏学习、长期陪伴 eval、30 天模拟 harness；后续可继续扩大真实长周期样本。 |
 | P2 Prompt 运营闭环 | `[完成-第一版]` | 已有 eval snapshot、canary config、Web prompt 管理和高风险 trace 面板；before/after 真实质量报告仍可增强。 |
 
@@ -288,20 +288,20 @@
 
 P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭环：线上能发现问题、定位问题、修复问题，并且让长期记忆在数千条规模下仍可追溯、可合并、可纠错。
 
-### P3-1. 记忆 consolidation + 人工修复队列 `[进行中-人工修复动作已接入]`
+### P3-1. 记忆 consolidation + 人工修复队列 `[完成-运营闭环第一版]`
 
 **为什么优先**：长期陪伴型 agent 的核心资产是记忆。当前系统能派生质量信号，但还没有把“低置信 / 被纠错 / 互相冲突 / 碎片重复”的记忆推进到稳定画像或人工修复流。
 
-**执行状态**：已完成 repair queue MVP 闭环，并接入第一版人工修复动作。后端新增 `memory_repair_items` 旁路表、repair queue service 与 admin API；接入 `bug_report_memory_safety`、`retrieval_feedback_unresolved`、`contradiction_*` 写入来源。Web admin 已新增“记忆修复”入口，可按状态/来源查看候选、查看证据 JSON，并执行标记已解决/忽略/重新打开；证据面板已支持归档、降级、编辑、插入替代记忆、标记已验证、合并记忆。涉及内容变化的动作会重建 embedding，所有动作写入 `memory_changelogs` 并自动关闭 repair item。当前仍未完成自动 consolidation job、质量字段物化和更细粒度的独立审计表。
+**执行状态**：已完成 repair queue MVP 闭环、人工修复动作、质量状态物化和自动 consolidation 审计。后端新增 `memory_repair_items`、`memory_quality_states`、`memory_consolidation_runs` 旁路表；接入 `bug_report_memory_safety`、`retrieval_feedback_unresolved`、`contradiction_*` 写入来源。Web admin 已新增“记忆修复”入口，可按状态/来源查看候选、查看证据 JSON，并执行标记已解决/忽略/重新打开；证据面板已支持归档、降级、编辑、插入替代记忆、标记已验证、合并记忆。涉及内容变化的动作会重建 embedding，所有动作写入 `memory_changelogs` 并自动关闭 repair item；repair/consolidation/changelog 会刷新 `memory_quality_states`，consolidation run 保留合并/归档 evidence。当前仍未完成独立细粒度操作审计表，第一版先复用 changelog + consolidation run。
 
 **要做**：
 
-1. 设计记忆质量物化字段或旁路表，承载 confidence、evidence、verified、contradiction、correction 等长期状态。
+1. 设计记忆质量物化字段或旁路表，承载 confidence、evidence、verified、contradiction、correction 等长期状态。`[x]`
 2. 建立 memory repair queue：
    - 用户纠错过的记忆。
    - 被 trace 标记为 unsupported / wrong recall 的记忆。
    - evidence 缺失或冲突的高重要度记忆。
-3. 做 consolidation job：
+3. 做 consolidation job：`[x]`
    - 将多条碎片事实合并成稳定画像。
    - 保留来源 memory/message/changelog evidence。
    - 更新 embedding 与 changelog。
@@ -320,25 +320,27 @@ P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭�
 - 用户纠错后，相关记忆会进入 repair queue 或自动降权。
 - 1000+ 条记忆下，重复碎片不会持续挤占检索上下文。
 
-### P3-2. visible use rate + crisis count 结构化落库 `[未完成]`
+### P3-2. visible use rate + crisis count 结构化落库 `[完成-第一版]`
 
 **为什么优先**：现在能看到“记忆被注入/访问”，但还不能稳定衡量“最终回复有没有真的使用这些记忆”；危机事件也还没有独立结构化统计。
 
+**执行状态**：已新增 `memory_visible_use_events` 与 `crisis_events`。聊天回复保存首条 assistant message 时，会从现有 `memory_retrieval_analysis` / `response_diagnostics` metadata 中 best-effort 落库，不增加额外 LLM 调用。Operations 面板已展示平均可见使用率、可见使用条数、未支撑引用数与危机事件数量/严重度。
+
 **要做**：
 
-1. 在回复生成后记录 injected memory 与 replied evidence 的匹配结果。
-2. 新增 visible use rate 聚合：
+1. 在回复生成后记录 injected memory 与 replied evidence 的匹配结果。`[x]`
+2. 新增 visible use rate 聚合：`[x]`
    - injected_count。
    - visibly_used_count。
    - unsupported_reference_count。
    - by prompt / agent / user / time window。
-3. 危机事件结构化落库：
+3. 危机事件结构化落库：`[x]`
    - crisis detected。
    - crisis category / severity。
    - handler path。
    - aftercare 是否触发。
    - 人工标注结果。
-4. Web operations / trace 面板展示：
+4. Web operations / trace 面板展示：`[x]`
    - 记忆可见使用率。
    - 危机事件趋势。
    - 高风险 agent / conversation。
@@ -348,26 +350,28 @@ P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭�
 - 可以回答“召回的记忆有多少真正进入用户可见回复”。
 - 可以按天/agent/user 统计危机事件，并追溯到 trace 与回复。
 
-### P3-3. Runtime job admin 面板 + DLQ 重放 `[未完成]`
+### P3-3. Runtime job admin 面板 + DLQ 重放 `[完成-第一版]`
 
 **为什么优先**：后台任务已经有 queue / retry / DLQ，但生产运营需要可视化和人工恢复能力，否则问题还是只能查日志和 Redis。
 
+**执行状态**：已新增 `/admin-api/runtime-jobs` 查询、inspect、retry、resolve API，并在 Web admin 增加“任务队列”面板，可查看 queued/delayed/running/dead-letter 任务、payload、错误原因，并执行重放或标记解决。第一版仍以 Redis job queue 为 source of truth，后续如需要跨重启长周期审计，再增加 DB-backed runtime_jobs 表。
+
 **要做**：
 
-1. 后端增加 runtime job 查询 API：
+1. 后端增加 runtime job 查询 API：`[x]`
    - queued / running / succeeded / failed / dead-letter。
-   - by job type / agent / conversation / time range。
-2. 增加 DLQ 操作：
+   - by job type。
+2. 增加 DLQ 操作：`[x]`
    - inspect。
    - retry once。
    - retry batch。
    - mark resolved。
-3. Web admin 增加任务面板：
+3. Web admin 增加任务面板：`[x]`
    - job 状态列表。
    - 失败原因。
    - retry 按钮。
    - stale running 提示。
-4. 将更多后台路径迁入 runtime queue：
+4. 将更多后台路径迁入 runtime queue：`[部分完成]`
    - memory pipeline。
    - reminder trigger emit。
    - proactive scan/send。
