@@ -69,9 +69,6 @@ def mock_db():
     mock.conversation.find_unique = AsyncMock(return_value=None)
     mock.aiagent = MagicMock()
     mock.aiagent.find_unique = AsyncMock(return_value=None)
-    mock.aiemotionstate = MagicMock()
-    mock.aiemotionstate.find_unique = AsyncMock(return_value=None)
-    mock.aiemotionstate.upsert = AsyncMock()
     mock.execute_raw = AsyncMock()
     mock.query_raw = AsyncMock(return_value=[])
     return mock

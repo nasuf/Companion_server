@@ -235,7 +235,6 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
         pass
 
     for model_name, model in [
-        ("emotion_states", db.aiemotionstate),
         ("schedules", db.aidailyschedule),
         ("trait_logs", db.traitfeedbacklog),
         ("proactive_logs", db.proactivechatlog),
