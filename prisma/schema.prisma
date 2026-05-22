@@ -335,6 +335,35 @@ model MemoryChangelog {
   @@map("memory_changelogs")
 }
 
+model MemoryRepairItem {
+  id              String    @id @default(uuid())
+  sourceType      String    @map("source_type")
+  sourceId        String?   @map("source_id")
+  status          String    @default("open")
+  severity        String    @default("medium")
+  userId          String?   @map("user_id")
+  agentId         String?   @map("agent_id")
+  workspaceId     String?   @map("workspace_id")
+  conversationId  String?   @map("conversation_id")
+  messageId       String?   @map("message_id")
+  memoryId        String?   @map("memory_id")
+  memorySource    String?   @map("memory_source")
+  reason          String?
+  suggestedAction String?   @map("suggested_action")
+  evidence        Json?
+  resolutionNote  String?   @map("resolution_note")
+  resolvedById    String?   @map("resolved_by_id")
+  resolvedAt      DateTime? @map("resolved_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([sourceType, sourceId])
+  @@index([memoryId, status])
+  @@index([userId, status])
+  @@map("memory_repair_items")
+}
+
 model Intimacy {
   id              String   @id @default(uuid())
   agentId         String   @map("agent_id")

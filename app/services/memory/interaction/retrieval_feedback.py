@@ -20,6 +20,7 @@ from app.services.memory.interaction.contradiction import (
     generate_contradiction_inquiry,
     save_pending_contradiction,
 )
+from app.services.memory.repair_queue import best_effort_create_memory_repair_item
 from app.services.memory.retrieval.trace import build_memory_retrieval_feedback
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.repo import MemoryRecord
@@ -56,6 +57,23 @@ async def build_retrieval_feedback_conflict(
         workspace_id=workspace_id,
     )
     if memory is None:
+        await best_effort_create_memory_repair_item(
+            source_type="retrieval_feedback_unresolved",
+            source_id=getattr(previous_assistant, "id", None),
+            severity="medium",
+            user_id=user_id,
+            workspace_id=workspace_id,
+            conversation_id=getattr(previous_assistant, "conversationId", None),
+            message_id=getattr(previous_assistant, "id", None),
+            reason="User likely corrected a memory-backed reply, but no repairable user memory could be identified.",
+            suggested_action="inspect_previous_reply_trace_and_memory_retrievals",
+            evidence={
+                "feedback": feedback,
+                "user_message": user_message,
+                "assistant_message_id": getattr(previous_assistant, "id", None),
+                "assistant_reply_preview": (getattr(previous_assistant, "content", "") or "")[:500],
+            },
+        )
         return None
 
     old_text = memory.summary or memory.content

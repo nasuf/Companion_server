@@ -393,6 +393,10 @@ async def test_apply_handles_old_mem_not_found():
             "app.services.memory.interaction.contradiction.store_memory",
             new_callable=AsyncMock,
         ) as mock_store,
+        patch(
+            "app.services.memory.interaction.contradiction.best_effort_create_memory_repair_item",
+            new_callable=AsyncMock,
+        ) as mock_repair,
     ):
         # Should not raise
         await apply_contradiction_resolution(
@@ -402,6 +406,8 @@ async def test_apply_handles_old_mem_not_found():
 
     mock_update.assert_not_called()
     mock_store.assert_not_called()
+    mock_repair.assert_awaited_once()
+    assert mock_repair.await_args.kwargs["source_type"] == "contradiction_missing_old_memory"
 
 
 @pytest.mark.asyncio
@@ -431,6 +437,10 @@ async def test_apply_logs_warning_when_store_returns_none():
         patch(
             "app.services.memory.interaction.contradiction.logger.warning",
         ) as mock_warning,
+        patch(
+            "app.services.memory.interaction.contradiction.best_effort_create_memory_repair_item",
+            new_callable=AsyncMock,
+        ) as mock_repair,
     ):
         await apply_contradiction_resolution(
             conflict={"conflicting_memory_id": "old-id"},
@@ -450,3 +460,5 @@ async def test_apply_logs_warning_when_store_returns_none():
             found = True
             break
     assert found, "must log warning about new memory not being stored"
+    mock_repair.assert_awaited_once()
+    assert mock_repair.await_args.kwargs["source_type"] == "contradiction_new_memory_blocked"

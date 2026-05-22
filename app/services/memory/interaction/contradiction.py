@@ -29,6 +29,7 @@ from app.services.llm.models import (
 )
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.persistence import log_memory_changelog, store_memory
+from app.services.memory.repair_queue import best_effort_create_memory_repair_item
 from app.services.prompting.store import get_prompt_text
 from app.services.prompting.utils import SafeDict
 
@@ -327,6 +328,19 @@ async def apply_contradiction_resolution(
     if change_type in ("变化", "错误") and old_id:
         old_mem = await memory_repo.find_unique(old_id)
         if not old_mem:
+            await best_effort_create_memory_repair_item(
+                source_type="contradiction_missing_old_memory",
+                source_id=f"{old_id}:missing",
+                severity="high",
+                memory_id=old_id,
+                reason="Contradiction resolution could not find the old memory to update.",
+                suggested_action="inspect_contradiction_pending_state_and_memory_lifecycle",
+                evidence={
+                    "conflict": conflict,
+                    "analysis": analysis,
+                    "change_type": change_type,
+                },
+            )
             return  # 老条目已被删/找不到, 静默退出
 
         # archive 而非 demote — 防止旧错事实留在检索通路造成"双重事实"污染
@@ -365,6 +379,23 @@ async def apply_contradiction_resolution(
             extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
                    "change_type": change_type, "outcome": "no_new"},
         )
+        await best_effort_create_memory_repair_item(
+            source_type="contradiction_no_new_memory",
+            source_id=f"{old_id or 'unknown'}:{change_type}:no_new",
+            severity="high" if change_type in ("变化", "错误") else "medium",
+            user_id=getattr(old_mem, "userId", None) if old_mem else None,
+            workspace_id=getattr(old_mem, "workspaceId", None) if old_mem else None,
+            memory_id=old_id,
+            memory_source=getattr(old_mem, "source", None) if old_mem else None,
+            reason="Contradiction analysis produced no replacement memory text.",
+            suggested_action="review_archived_memory_and_user_confirmation",
+            evidence={
+                "conflict": conflict,
+                "analysis": analysis,
+                "change_type": change_type,
+                "old_memory_content": getattr(old_mem, "content", None) if old_mem else None,
+            },
+        )
         return
 
     if not old_mem:
@@ -373,6 +404,20 @@ async def apply_contradiction_resolution(
             f"(change_type={change_type}, old_id={old_id})",
             extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
                    "change_type": change_type, "outcome": "no_old_context"},
+        )
+        await best_effort_create_memory_repair_item(
+            source_type="contradiction_no_old_context",
+            source_id=f"{old_id or 'unknown'}:{change_type}:no_old_context",
+            severity="high",
+            memory_id=old_id,
+            reason="Contradiction resolution had replacement text but no old memory context for user/workspace.",
+            suggested_action="manually_verify_user_scope_and_insert_or_dismiss_replacement",
+            evidence={
+                "conflict": conflict,
+                "analysis": analysis,
+                "change_type": change_type,
+                "new_memory_text": new_memory_text,
+            },
         )
         return
 
@@ -435,11 +480,49 @@ async def apply_contradiction_resolution(
                        "new_main": main_category, "new_sub": sub_category,
                        "new_memory_text_len": len(new_memory_text)},
             )
+            await best_effort_create_memory_repair_item(
+                source_type="contradiction_new_memory_blocked",
+                source_id=f"{old_id or 'unknown'}:{change_type}:new_blocked",
+                severity="high",
+                user_id=getattr(old_mem, "userId", None),
+                workspace_id=getattr(old_mem, "workspaceId", None),
+                memory_id=old_id,
+                memory_source=getattr(old_mem, "source", None),
+                reason="Contradiction archived or reviewed an old memory, but replacement memory was not stored.",
+                suggested_action="review_taxonomy_dedup_result_and_insert_replacement_if_needed",
+                evidence={
+                    "conflict": conflict,
+                    "analysis": analysis,
+                    "change_type": change_type,
+                    "new_memory_text": new_memory_text,
+                    "new_main": main_category,
+                    "new_sub": sub_category,
+                },
+            )
     except Exception as e:
         logger.warning(
             f"contradiction.apply: failed to write new memory: {e}",
             extra={"event": EVT_LLM_FAIL, "stage": "contradiction_apply_new",
                    "change_type": change_type, "error_type": type(e).__name__},
+        )
+        await best_effort_create_memory_repair_item(
+            source_type="contradiction_new_memory_failed",
+            source_id=f"{old_id or 'unknown'}:{change_type}:write_failed",
+            severity="critical",
+            user_id=getattr(old_mem, "userId", None),
+            workspace_id=getattr(old_mem, "workspaceId", None),
+            memory_id=old_id,
+            memory_source=getattr(old_mem, "source", None),
+            reason="Contradiction replacement memory write raised an exception.",
+            suggested_action="inspect_exception_and_replay_or_manually_insert_replacement",
+            evidence={
+                "conflict": conflict,
+                "analysis": analysis,
+                "change_type": change_type,
+                "new_memory_text": new_memory_text,
+                "error_type": type(e).__name__,
+                "error": str(e)[:500],
+            },
         )
 
 

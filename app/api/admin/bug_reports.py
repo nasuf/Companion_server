@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
+from app.services.memory.repair_queue import best_effort_create_memory_repair_item
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,58 @@ async def create_bug_report(
         },
         include=_INCLUDE_USERS,
     )
+    try:
+        await _maybe_create_memory_repair_from_bug_report(report, msg)
+    except Exception as e:
+        logger.warning(
+            "failed to create memory repair item from bug report: %s",
+            e,
+            extra={"bug_report_id": report.id, "message_id": payload.message_id},
+        )
     return _serialize(report)
+
+
+async def _maybe_create_memory_repair_from_bug_report(report, msg) -> None:
+    category, _priority = _classify_eval_category(
+        [str(v) for v in (report.errorTypes or []) if str(v)],
+        report.reason,
+    )
+    if category != "memory_safety":
+        return
+
+    rows = await db.query_raw(
+        """
+        SELECT id, user_id, agent_id, workspace_id
+        FROM conversations
+        WHERE id = $1
+        LIMIT 1
+        """,
+        msg.conversationId,
+    )
+    conversation = rows[0] if rows else {}
+    metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+    await best_effort_create_memory_repair_item(
+        source_type="bug_report_memory_safety",
+        source_id=report.id,
+        severity="high",
+        user_id=conversation.get("user_id"),
+        agent_id=conversation.get("agent_id"),
+        workspace_id=conversation.get("workspace_id"),
+        conversation_id=conversation.get("id") or msg.conversationId,
+        message_id=msg.id,
+        reason=report.reason or "Admin marked assistant reply as memory safety issue.",
+        suggested_action="review_assistant_reply_and_related_memory_retrieval",
+        evidence={
+            "bug_report_id": report.id,
+            "error_types": list(report.errorTypes or []),
+            "reason": report.reason,
+            "assistant_message_id": msg.id,
+            "assistant_reply_preview": (msg.content or "")[:500],
+            "memory_retrievals": metadata.get("memory_retrievals"),
+            "memory_retrieval_analysis": metadata.get("memory_retrieval_analysis"),
+            "memory_retrieval_feedback": metadata.get("memory_retrieval_feedback"),
+        },
+    )
 
 
 @router.get("/counts-by-agent")

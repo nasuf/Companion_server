@@ -77,11 +77,13 @@ async def test_build_retrieval_feedback_conflict_uses_retrieved_memory(monkeypat
 async def test_build_retrieval_feedback_conflict_rejects_cross_workspace(monkeypatch):
     from app.services.memory.interaction import retrieval_feedback
 
+    created = AsyncMock()
     monkeypatch.setattr(
         retrieval_feedback.memory_repo,
         "find_unique",
         AsyncMock(return_value=_Memory(workspaceId="other")),
     )
+    monkeypatch.setattr(retrieval_feedback, "best_effort_create_memory_repair_item", created)
 
     result = await retrieval_feedback.build_retrieval_feedback_conflict(
         user_message="你记错了，我从来没说过我喜欢芒果。",
@@ -91,12 +93,15 @@ async def test_build_retrieval_feedback_conflict_rejects_cross_workspace(monkeyp
     )
 
     assert result is None
+    created.assert_awaited_once()
+    assert created.await_args.kwargs["source_type"] == "retrieval_feedback_unresolved"
 
 
 @pytest.mark.asyncio
 async def test_build_retrieval_feedback_conflict_rejects_ai_memory(monkeypatch):
     from app.services.memory.interaction import retrieval_feedback
 
+    created = AsyncMock()
     monkeypatch.setattr(
         retrieval_feedback.memory_repo,
         "find_unique",
@@ -106,6 +111,7 @@ async def test_build_retrieval_feedback_conflict_rejects_ai_memory(monkeypatch):
             summary="29岁生日前夜突然失眠",
         )),
     )
+    monkeypatch.setattr(retrieval_feedback, "best_effort_create_memory_repair_item", created)
 
     result = await retrieval_feedback.build_retrieval_feedback_conflict(
         user_message="不对啊，我到底多大你不记得了吗，我跟你说过的",
@@ -115,6 +121,8 @@ async def test_build_retrieval_feedback_conflict_rejects_ai_memory(monkeypatch):
     )
 
     assert result is None
+    created.assert_awaited_once()
+    assert created.await_args.kwargs["source_type"] == "retrieval_feedback_unresolved"
 
 
 @pytest.mark.asyncio
