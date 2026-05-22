@@ -184,7 +184,7 @@ async def test_memory_section_declares_fact_precedence_over_history_and_l3():
 async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
     from app.services.chat.prompt_builder import build_system_prompt
 
-    async def _prompt_text(key: str) -> str:
+    async def _prompt_text(key: str, **_kwargs) -> str:
         return {
             "chat.system_base": "像朋友一样回复。",
             "chat.consistency_rules": "。",
@@ -192,9 +192,9 @@ async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
             "chat.anti_hallucination_hard_rule": "。",
         }[key]
 
-    with patch(
-        "app.services.chat.prompt_builder.get_prompt_text",
-        AsyncMock(side_effect=_prompt_text),
+    with (
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
     ):
         diagnostics = {}
         prompt = await build_system_prompt(
@@ -223,7 +223,7 @@ async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
 async def test_system_prompt_includes_agent_age_from_identity():
     from app.services.chat.prompt_builder import build_system_prompt
 
-    async def _prompt_text(key: str) -> str:
+    async def _prompt_text(key: str, **_kwargs) -> str:
         return {
             "chat.system_base": "像朋友一样回复。",
             "chat.consistency_rules": "。",
@@ -231,9 +231,9 @@ async def test_system_prompt_includes_agent_age_from_identity():
             "chat.anti_hallucination_hard_rule": "。",
         }[key]
 
-    with patch(
-        "app.services.chat.prompt_builder.get_prompt_text",
-        AsyncMock(side_effect=_prompt_text),
+    with (
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hia", age=24, values={"gender": "female"}),
@@ -251,7 +251,7 @@ async def test_system_prompt_includes_agent_age_from_identity():
 async def test_system_prompt_keeps_empty_memory_anchor_when_hard_rule_active():
     from app.services.chat.prompt_builder import build_system_prompt
 
-    async def _prompt_text(key: str) -> str:
+    async def _prompt_text(key: str, **_kwargs) -> str:
         return {
             "chat.system_base": "像朋友一样回复。",
             "chat.consistency_rules": "",
@@ -260,9 +260,9 @@ async def test_system_prompt_keeps_empty_memory_anchor_when_hard_rule_active():
             "chat.memory_empty_anchor": "(本次没有联想到任何与当前话题相关的记忆)",
         }.get(key, "")
 
-    with patch(
-        "app.services.chat.prompt_builder.get_prompt_text",
-        AsyncMock(side_effect=_prompt_text),
+    with (
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
@@ -283,7 +283,7 @@ async def test_l3_section_cannot_override_current_memory_facts():
     from app.services.chat.prompt_builder import build_system_prompt
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    async def _prompt_text(key: str) -> str:
+    async def _prompt_text(key: str, **_kwargs) -> str:
         from app.services.prompting import defaults
 
         return {
@@ -295,9 +295,9 @@ async def test_l3_section_cannot_override_current_memory_facts():
             "chat.l3_memory_section": defaults.CHAT_L3_MEMORY_SECTION_PROMPT,
         }.get(key, "")
 
-    with patch(
-        "app.services.chat.prompt_builder.get_prompt_text",
-        AsyncMock(side_effect=_prompt_text),
+    with (
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
