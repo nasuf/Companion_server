@@ -42,6 +42,25 @@ def _repair_row(**overrides):
     return row
 
 
+def _memory_record(memory_id="mem1", **overrides):
+    row = {
+        "id": memory_id,
+        "userId": "u1",
+        "workspaceId": "w1",
+        "source": "user",
+        "type": "life",
+        "mainCategory": "生活",
+        "subCategory": "工作",
+        "level": 2,
+        "content": "旧内容",
+        "summary": "旧摘要",
+        "importance": 0.7,
+        "isArchived": False,
+    }
+    row.update(overrides)
+    return SimpleNamespace(**row)
+
+
 @pytest.mark.asyncio
 async def test_create_memory_repair_item_dedupes_existing_source(monkeypatch):
     from app.services.memory import repair_queue
@@ -221,5 +240,177 @@ def test_admin_memory_repairs_update_endpoint(api_client):
         assert response.json()["status"] == "resolved"
         update.assert_awaited_once()
         assert update.await_args.kwargs["resolved_by_id"] == "admin-1"
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+@pytest.mark.asyncio
+async def test_repair_action_edit_updates_embedding_changelog_and_resolves(monkeypatch):
+    from app.services.memory import repair_actions
+
+    repair = _repair_row()
+    memory = _memory_record()
+    monkeypatch.setattr(repair_actions, "get_memory_repair_item", AsyncMock(return_value=repair))
+    monkeypatch.setattr(repair_actions.memory_repo, "find_unique", AsyncMock(return_value=memory))
+    monkeypatch.setattr(repair_actions.memory_repo, "update", AsyncMock())
+    monkeypatch.setattr(repair_actions, "generate_embedding", AsyncMock(return_value=[0.1, 0.2]))
+    monkeypatch.setattr(repair_actions, "store_embedding", AsyncMock())
+    changelog = AsyncMock()
+    monkeypatch.setattr(repair_actions, "log_memory_changelog", changelog)
+    resolve = AsyncMock(return_value=_repair_row(status="resolved"))
+    monkeypatch.setattr(repair_actions, "update_memory_repair_item_status", resolve)
+
+    result = await repair_actions.apply_memory_repair_action(
+        "repair-1",
+        payload=repair_actions.MemoryRepairActionPayload(
+            action="edit_memory",
+            content="新内容",
+            reason="人工核对用户纠错",
+        ),
+        admin_id="admin-1",
+    )
+
+    assert result["action"] == "edit_memory"
+    repair_actions.store_embedding.assert_awaited_once()
+    repair_actions.memory_repo.update.assert_awaited_once()
+    assert repair_actions.memory_repo.update.await_args.kwargs["content"] == "新内容"
+    changelog.assert_awaited_once()
+    assert changelog.await_args.args[2] == "repair_edit"
+    resolve.assert_awaited_once()
+    assert resolve.await_args.kwargs["status"] == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_repair_action_rejects_cross_workspace_memory(monkeypatch):
+    from app.services.memory import repair_actions
+
+    monkeypatch.setattr(repair_actions, "get_memory_repair_item", AsyncMock(return_value=_repair_row(workspace_id="w1")))
+    monkeypatch.setattr(
+        repair_actions.memory_repo,
+        "find_unique",
+        AsyncMock(return_value=_memory_record(workspaceId="other")),
+    )
+
+    with pytest.raises(repair_actions.MemoryRepairActionError) as exc:
+        await repair_actions.apply_memory_repair_action(
+            "repair-1",
+            payload=repair_actions.MemoryRepairActionPayload(action="archive_memory"),
+            admin_id="admin-1",
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "memory_workspace_does_not_match_repair_item"
+
+
+@pytest.mark.asyncio
+async def test_repair_action_rejects_closed_repair_item(monkeypatch):
+    from app.services.memory import repair_actions
+
+    monkeypatch.setattr(
+        repair_actions,
+        "get_memory_repair_item",
+        AsyncMock(return_value=_repair_row(status="resolved")),
+    )
+
+    with pytest.raises(repair_actions.MemoryRepairActionError) as exc:
+        await repair_actions.apply_memory_repair_action(
+            "repair-1",
+            payload=repair_actions.MemoryRepairActionPayload(action="mark_verified"),
+            admin_id="admin-1",
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "memory_repair_item_is_not_open"
+
+
+@pytest.mark.asyncio
+async def test_repair_action_merge_updates_target_and_archives_absorbed(monkeypatch):
+    from app.services.memory import repair_actions
+
+    target = _memory_record("mem1")
+    absorbed = _memory_record("mem2")
+
+    async def _find(memory_id):
+        return {"mem1": target, "mem2": absorbed}.get(memory_id)
+
+    monkeypatch.setattr(repair_actions, "get_memory_repair_item", AsyncMock(return_value=_repair_row(memory_id="mem1")))
+    monkeypatch.setattr(repair_actions.memory_repo, "find_unique", AsyncMock(side_effect=_find))
+    monkeypatch.setattr(repair_actions.memory_repo, "update", AsyncMock())
+    monkeypatch.setattr(repair_actions, "generate_embedding", AsyncMock(return_value=[0.1, 0.2]))
+    monkeypatch.setattr(repair_actions, "store_embedding", AsyncMock())
+    monkeypatch.setattr(repair_actions, "log_memory_changelog", AsyncMock())
+    monkeypatch.setattr(
+        repair_actions,
+        "update_memory_repair_item_status",
+        AsyncMock(return_value=_repair_row(status="resolved")),
+    )
+
+    result = await repair_actions.apply_memory_repair_action(
+        "repair-1",
+        payload=repair_actions.MemoryRepairActionPayload(
+            action="merge_memories",
+            memory_ids=["mem2"],
+            content="合并后的稳定事实",
+        ),
+        admin_id="admin-1",
+    )
+
+    assert result["memory_id"] == "mem1"
+    assert result["absorbed_memory_ids"] == ["mem2"]
+    assert repair_actions.memory_repo.update.await_count == 2
+    assert repair_actions.memory_repo.update.await_args_list[1].kwargs["isArchived"] is True
+
+
+@pytest.mark.asyncio
+async def test_repair_action_insert_replacement_can_use_archived_old_context(monkeypatch):
+    from app.services.memory import repair_actions
+
+    old = _memory_record("old-mem", isArchived=True, mainCategory="身份", subCategory="现居地")
+    monkeypatch.setattr(repair_actions, "get_memory_repair_item", AsyncMock(return_value=_repair_row(memory_id="old-mem")))
+    monkeypatch.setattr(repair_actions.memory_repo, "find_unique", AsyncMock(return_value=old))
+    store = AsyncMock(return_value="new-mem")
+    monkeypatch.setattr(repair_actions, "store_memory", store)
+    monkeypatch.setattr(repair_actions, "log_memory_changelog", AsyncMock())
+    monkeypatch.setattr(
+        repair_actions,
+        "update_memory_repair_item_status",
+        AsyncMock(return_value=_repair_row(status="resolved")),
+    )
+
+    result = await repair_actions.apply_memory_repair_action(
+        "repair-1",
+        payload=repair_actions.MemoryRepairActionPayload(
+            action="insert_replacement_memory",
+            content="用户现在住在上海。",
+        ),
+        admin_id="admin-1",
+    )
+
+    assert result["memory_id"] == "new-mem"
+    assert store.await_args.kwargs["workspace_id"] == "w1"
+    assert store.await_args.kwargs["main_category"] == "身份"
+    assert store.await_args.kwargs["sub_category"] == "现居地"
+
+
+def test_admin_memory_repairs_action_endpoint(api_client):
+    app, require_admin_jwt = _admin_override()
+
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            apply = AsyncMock(return_value={
+                "action": "mark_verified",
+                "memory_id": "mem1",
+                "repair_item": _repair_row(status="resolved"),
+            })
+            mp.setattr("app.api.admin.memory_repairs.apply_memory_repair_action", apply)
+            response = api_client.post(
+                "/admin-api/memory-repairs/repair-1/actions",
+                json={"action": "mark_verified", "memory_id": "mem1", "reason": "人工确认"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["action"] == "mark_verified"
+        apply.assert_awaited_once()
+        assert apply.await_args.kwargs["admin_id"] == "admin-1"
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)

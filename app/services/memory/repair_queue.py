@@ -188,6 +188,19 @@ async def list_memory_repair_items(
     return [serialize_repair_item(row) for row in rows]
 
 
+async def get_memory_repair_item(item_id: str) -> dict[str, Any] | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM memory_repair_items
+        WHERE id = $1
+        LIMIT 1
+        """,
+        item_id,
+    )
+    return serialize_repair_item(rows[0]) if rows else None
+
+
 async def update_memory_repair_item_status(
     item_id: str,
     *,

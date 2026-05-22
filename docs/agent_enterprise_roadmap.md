@@ -288,11 +288,11 @@
 
 P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭环：线上能发现问题、定位问题、修复问题，并且让长期记忆在数千条规模下仍可追溯、可合并、可纠错。
 
-### P3-1. 记忆 consolidation + 人工修复队列 `[进行中-MVP闭环]`
+### P3-1. 记忆 consolidation + 人工修复队列 `[进行中-人工修复动作已接入]`
 
 **为什么优先**：长期陪伴型 agent 的核心资产是记忆。当前系统能派生质量信号，但还没有把“低置信 / 被纠错 / 互相冲突 / 碎片重复”的记忆推进到稳定画像或人工修复流。
 
-**执行状态**：已完成 repair queue MVP 闭环。后端新增 `memory_repair_items` 旁路表、repair queue service 与 admin API；接入 `bug_report_memory_safety`、`retrieval_feedback_unresolved`、`contradiction_*` 写入来源。Web admin 已新增“记忆修复”入口，可按状态/来源查看候选、查看证据 JSON，并执行标记已解决/忽略/重新打开。当前仍未完成人工合并动作、自动 consolidation job 与 embedding/changelog 重写闭环。
+**执行状态**：已完成 repair queue MVP 闭环，并接入第一版人工修复动作。后端新增 `memory_repair_items` 旁路表、repair queue service 与 admin API；接入 `bug_report_memory_safety`、`retrieval_feedback_unresolved`、`contradiction_*` 写入来源。Web admin 已新增“记忆修复”入口，可按状态/来源查看候选、查看证据 JSON，并执行标记已解决/忽略/重新打开；证据面板已支持归档、降级、编辑、插入替代记忆、标记已验证、合并记忆。涉及内容变化的动作会重建 embedding，所有动作写入 `memory_changelogs` 并自动关闭 repair item。当前仍未完成自动 consolidation job、质量字段物化和更细粒度的独立审计表。
 
 **要做**：
 
@@ -309,8 +309,10 @@ P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭�
    - [x] 查看候选。
    - [x] 查看证据与上下文。
    - [x] 标记已解决 / 忽略 / 重新打开。
-   - [ ] 合并 / 降级 / archive / 标记已验证。
-   - [ ] 记录细粒度操作审计。
+   - [x] 合并 / 降级 / archive / 标记已验证。
+   - [x] 编辑记忆 / 插入替代记忆。
+   - [x] 通过 `memory_changelogs` 记录 repair action、admin、repair item、原因和 before/after。
+   - [ ] 独立细粒度操作审计表。
 
 **验收标准**：
 

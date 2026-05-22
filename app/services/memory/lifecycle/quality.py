@@ -26,6 +26,10 @@ _VERIFICATION_OPS = {
     "user_emphasized",
     "contradiction_new",
     "user_edit",
+    "admin_verified",
+    "repair_edit",
+    "repair_merge",
+    "repair_insert_replacement",
 }
 _NEGATIVE_OPS = {
     "contradiction_archived",
