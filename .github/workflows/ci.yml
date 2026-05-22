@@ -13,6 +13,7 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      JWT_SECRET: ci-test-jwt-secret-for-backend-quality-tests
 
     steps:
       - name: Checkout code
