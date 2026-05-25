@@ -25,8 +25,13 @@ class Settings(BaseSettings):
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_enable_thinking: bool = False
 
+    # DeepSeek direct API (OpenAI-compatible)
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+
     # Simple model switch
     online_model: bool = False
+    remote_provider: str = "dashscope"
     local_chat_model: str = "qwen2.5:14b"
     local_small_model: str = "qwen2.5:7b"
     remote_chat_model: str = "qwen3.5-plus"

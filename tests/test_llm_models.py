@@ -9,6 +9,7 @@ def _reset_caches() -> None:
     models.get_chat_model.cache_clear()
     models.get_utility_model.cache_clear()
     models.get_embedding_model.cache_clear()
+    models.get_fallback_chat_model.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +54,20 @@ def test_ollama_provider_still_supported(monkeypatch):
 
     assert isinstance(chat_model, ChatOllama)
     assert isinstance(embedding_model, OllamaEmbeddings)
+
+
+def test_deepseek_chat_provider_uses_direct_openai_compatible_endpoint(monkeypatch):
+    _reset_caches()
+    monkeypatch.setattr(models.settings, "llm_provider", "ollama")
+    monkeypatch.setattr(models.settings, "chat_provider", "deepseek")
+    monkeypatch.setattr(models.settings, "deepseek_api_key", "test-key")
+    monkeypatch.setattr(models.settings, "deepseek_base_url", "https://api.deepseek.com")
+    monkeypatch.setattr(models.settings, "chat_model", "deepseek-v4-pro")
+
+    chat_model = models.get_chat_model()
+
+    assert isinstance(chat_model, ChatOpenAI)
+    assert resilience.provider_name(chat_model) == "deepseek"
 
 
 # ── _extract_json + 截断救援 ──

@@ -278,6 +278,9 @@ def provider_name(model: Any) -> str:
     if isinstance(model, ChatOllama):
         return "ollama"
     if isinstance(model, ChatOpenAI):
+        tagged = getattr(model, "_companion_provider", "")
+        if isinstance(tagged, str) and tagged:
+            return tagged
         return "dashscope"
     if isinstance(model, ChatAnthropic):
         return "claude"

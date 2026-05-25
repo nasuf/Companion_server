@@ -787,6 +787,7 @@ model LlmUsage {
 model SystemConfig {
   id               Int      @id @default(1)
   onlineModel      Boolean? @map("online_model")
+  remoteProvider   String?  @map("remote_provider")
   localChatModel   String?  @map("local_chat_model")
   localSmallModel  String?  @map("local_small_model")
   remoteChatModel  String?  @map("remote_chat_model")
@@ -802,6 +803,7 @@ model SystemConfig {
 model AgentConfigOverride {
   agentId          String   @id @map("agent_id")
   onlineModel      Boolean? @map("online_model")
+  remoteProvider   String?  @map("remote_provider")
   localChatModel   String?  @map("local_chat_model")
   localSmallModel  String?  @map("local_small_model")
   remoteChatModel  String?  @map("remote_chat_model")
@@ -819,7 +821,7 @@ model AgentConfigOverride {
 //
 // 设计:
 //   - identifier (SDK 用的 model id) 唯一, 创建后不可改 (改 = 新建一行)
-//   - provider 派生 local (ollama) / remote (dashscope/claude) 分组
+//   - provider 派生 local (ollama) / remote (dashscope/deepseek/claude) 分组
 //   - enabled=false 软隐藏, 不影响已配置 (现有 system_config/agent override 仍指向它)
 //   - 价格 nullable + Decimal(10,4) 元/1M tokens; 本地默认 0
 //   - contextWindow / notes 留 hook 给未来 prompt budget / admin 备注
@@ -829,7 +831,7 @@ model ModelRegistry {
   id                   String   @id @default(uuid())
   identifier           String   @unique
   displayName          String?  @map("display_name")
-  provider             String   // ollama | dashscope | claude
+  provider             String   // ollama | dashscope | deepseek | claude
   enabled              Boolean  @default(true)
   contextWindow        Int?     @map("context_window")
   // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是

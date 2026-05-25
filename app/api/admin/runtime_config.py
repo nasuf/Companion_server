@@ -8,8 +8,8 @@ Endpoints:
   PUT    /admin-api/runtime-config/agents/{agent_id}     — 更新该 agent override + invalidate
   DELETE /admin-api/runtime-config/agents/{agent_id}     — 删除 override (回归全局)
 
-字段范围: online_model / local_chat_model / local_small_model / remote_chat_model /
-remote_small_model. 全部 nullable (null = 不设, fallback 上层).
+字段范围: online_model / remote_provider / local_chat_model / local_small_model /
+remote_chat_model / remote_small_model. 全部 nullable (null = 不设, fallback 上层).
 embedding 不在此 — 跨 agent 共享 vector store 不能动态切.
 """
 
@@ -23,6 +23,7 @@ from prisma.errors import RecordNotFoundError
 from pydantic import BaseModel
 
 from app.api.jwt_auth import require_admin_jwt
+from app.config import settings
 from app.db import db
 from app.services.runtime_config import (
     ResolvedConfig, ensure_loaded, invalidate_caches, load_caches,
@@ -39,12 +40,13 @@ router = APIRouter(
 
 
 _LOCAL_PROVIDERS = {"ollama"}
-_REMOTE_PROVIDERS = {"dashscope", "claude"}
+_REMOTE_PROVIDERS = {"dashscope", "deepseek", "claude"}
 
 
 class ConfigPayload(BaseModel):
     """所有字段 None = 不设/清除. PUT 接受这个用作 set/unset 单字段."""
     online_model: bool | None = None
+    remote_provider: str | None = None
     local_chat_model: str | None = None
     local_small_model: str | None = None
     remote_chat_model: str | None = None
@@ -54,11 +56,12 @@ class ConfigPayload(BaseModel):
 def _row_to_payload(row) -> dict[str, Any]:
     if row is None:
         return {k: None for k in (
-            "online_model", "local_chat_model", "local_small_model",
+            "online_model", "remote_provider", "local_chat_model", "local_small_model",
             "remote_chat_model", "remote_small_model",
         )}
     return {
         "online_model": row.onlineModel,
+        "remote_provider": row.remoteProvider,
         "local_chat_model": row.localChatModel,
         "local_small_model": row.localSmallModel,
         "remote_chat_model": row.remoteChatModel,
@@ -70,6 +73,7 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
     """ResolvedConfig → JSON dict (4 endpoints 共用)."""
     return {
         "online_model": r.online_model,
+        "remote_provider": r.remote_provider,
         "local_chat_model": r.local_chat_model,
         "local_small_model": r.local_small_model,
         "remote_chat_model": r.remote_chat_model,
@@ -81,6 +85,7 @@ def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
     """payload → prisma 字段 dict. None 值保留 (清除该字段 override)."""
     return {
         "onlineModel": payload.online_model,
+        "remoteProvider": payload.remote_provider.strip().lower() if payload.remote_provider else None,
         "localChatModel": payload.local_chat_model,
         "localSmallModel": payload.local_small_model,
         "remoteChatModel": payload.remote_chat_model,
@@ -88,8 +93,45 @@ def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
     }
 
 
+async def _model_provider(identifier: str) -> str | None:
+    row = await db.modelregistry.find_unique(where={"identifier": identifier})
+    return row.provider if row else None
+
+
+def _normalize_remote_provider(value: str | None, fallback: str) -> str:
+    provider = (value or fallback or "dashscope").strip().lower()
+    if provider not in _REMOTE_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"remote_provider 必须是 {sorted(_REMOTE_PROVIDERS)} 之一, 收到 {provider!r}",
+        )
+    return provider
+
+
+async def _validate_payload_models(payload: ConfigPayload, *, fallback_remote_provider: str) -> None:
+    provider = _normalize_remote_provider(payload.remote_provider, fallback_remote_provider)
+
+    checks = [
+        (payload.local_chat_model, _LOCAL_PROVIDERS, "local_chat_model"),
+        (payload.local_small_model, _LOCAL_PROVIDERS, "local_small_model"),
+        (payload.remote_chat_model, {provider}, "remote_chat_model"),
+        (payload.remote_small_model, {provider}, "remote_small_model"),
+    ]
+    for identifier, allowed, field in checks:
+        if not identifier:
+            continue
+        actual = await _model_provider(identifier)
+        if actual is None:
+            raise HTTPException(status_code=400, detail=f"{field} 指向未知模型 {identifier!r}")
+        if actual not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field}={identifier!r} 的 provider 是 {actual!r}, 不匹配 {sorted(allowed)}",
+            )
+
+
 @router.get("/options")
-async def list_options() -> dict[str, list[str]]:
+async def list_options() -> dict[str, Any]:
     """前端 dropdown 用. 来源 model_registry (admin "系统设置 → 模型库" 维护).
 
     按 provider 分桶: ollama → local_*, dashscope/claude → remote_*.
@@ -99,13 +141,17 @@ async def list_options() -> dict[str, list[str]]:
     rows = await db.modelregistry.find_many(
         where={"enabled": True}, order=[{"identifier": "asc"}],
     )
-    local = [r.identifier for r in rows if r.provider in _LOCAL_PROVIDERS]
-    remote = [r.identifier for r in rows if r.provider in _REMOTE_PROVIDERS]
+    by_provider: dict[str, list[str]] = {p: [] for p in sorted(_LOCAL_PROVIDERS | _REMOTE_PROVIDERS)}
+    for r in rows:
+        by_provider.setdefault(r.provider, []).append(r.identifier)
+    local = [identifier for p in _LOCAL_PROVIDERS for identifier in by_provider.get(p, [])]
+    remote = [identifier for p in _REMOTE_PROVIDERS for identifier in by_provider.get(p, [])]
     return {
         "local_chat": local,
         "local_small": local,
         "remote_chat": remote,
         "remote_small": remote,
+        "by_provider": by_provider,
     }
 
 
@@ -123,6 +169,7 @@ async def get_system_config() -> dict[str, Any]:
 @router.put("")
 async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
     """更新全局 SystemConfig + 重 load 缓存 + 清模型 lru_cache. 立即生效 (in-flight chain 仍旧)."""
+    await _validate_payload_models(payload, fallback_remote_provider=settings.remote_provider)
     data = _payload_to_data(payload)
     row = await db.systemconfig.upsert(
         where={"id": 1},
@@ -162,6 +209,8 @@ async def put_agent_config(agent_id: str, payload: ConfigPayload) -> dict[str, A
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    await ensure_loaded()
+    await _validate_payload_models(payload, fallback_remote_provider=resolve_config_sync(agent_id=None).remote_provider)
     data = _payload_to_data(payload)
     row = await db.agentconfigoverride.upsert(
         where={"agentId": agent_id},

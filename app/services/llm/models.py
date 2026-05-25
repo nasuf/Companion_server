@@ -72,8 +72,12 @@ def _provider_for(role: str) -> Provider:
         provider = (override or settings.llm_provider or "ollama").strip().lower()
     else:
         cfg = _resolved()
-        provider = (override or settings.llm_provider or _default_provider(cfg.online_model)).strip().lower()
-    if provider not in {"ollama", "dashscope", "claude"}:
+        provider = (
+            override
+            or settings.llm_provider
+            or (cfg.remote_provider if cfg.online_model else _default_provider(False))
+        ).strip().lower()
+    if provider not in {"ollama", "dashscope", "deepseek", "claude"}:
         raise ValueError(f"Unsupported provider for {role}: {provider}")
     return provider
 
@@ -87,7 +91,7 @@ def _current_agent_key() -> str | None:
 def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
     if not settings.dashscope_api_key:
         raise ValueError("DASHSCOPE_API_KEY is required when provider is dashscope")
-    return ChatOpenAI(
+    model = ChatOpenAI(
         model=model_name,
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_base_url,
@@ -103,6 +107,23 @@ def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
         stream_usage=True,
         extra_body={"enable_thinking": settings.dashscope_enable_thinking},
     )
+    object.__setattr__(model, "_companion_provider", "dashscope")
+    return model
+
+
+def _deepseek_chat_model(model_name: str) -> ChatOpenAI:
+    if not settings.deepseek_api_key:
+        raise ValueError("DEEPSEEK_API_KEY is required when provider is deepseek")
+    model = ChatOpenAI(
+        model=model_name,
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+        temperature=0.7,
+        max_tokens=8192,
+        stream_usage=True,
+    )
+    object.__setattr__(model, "_companion_provider", "deepseek")
+    return model
 
 
 def _claude_model() -> ChatAnthropic:
@@ -130,6 +151,8 @@ def _build_chat_model(_agent_key: str | None) -> BaseChatModel:
     provider = _provider_for("chat")
     if provider == "claude":
         return _claude_model()
+    if provider == "deepseek":
+        return _deepseek_chat_model(_chat_model_name())
     if provider == "dashscope":
         return _dashscope_chat_model(_chat_model_name())
     return _ollama_chat_model(_chat_model_name())
@@ -140,6 +163,8 @@ def _build_utility_model(_agent_key: str | None) -> BaseChatModel:
     provider = _provider_for("utility")
     if provider == "claude":
         return _claude_model()
+    if provider == "deepseek":
+        return _deepseek_chat_model(_utility_model_name())
     if provider == "dashscope":
         return _dashscope_chat_model(_utility_model_name())
     return _ollama_chat_model(_utility_model_name())
@@ -189,6 +214,8 @@ def get_embedding_model() -> Embeddings:
         )
     if provider == "claude":
         raise ValueError("Claude does not provide embeddings; use ollama or dashscope")
+    if provider == "deepseek":
+        raise ValueError("DeepSeek does not provide embeddings; use ollama or dashscope")
     return OllamaEmbeddings(
         model=_embedding_model_name(),
         base_url=settings.ollama_base_url,

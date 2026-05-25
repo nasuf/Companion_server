@@ -34,7 +34,7 @@ router = APIRouter(
 )
 
 
-_PROVIDERS = {"ollama", "dashscope", "claude"}
+_PROVIDERS = {"ollama", "dashscope", "deepseek", "claude"}
 
 
 class ModelCreatePayload(BaseModel):
