@@ -78,6 +78,8 @@ model AiAgent {
   occupation         String?
   city               String?
   gender             String?             @map("gender")
+  avatarKey          String?             @map("avatar_key")
+  avatarUrl          String?             @map("avatar_url")
   createdAt          DateTime            @default(now()) @map("created_at")
   updatedAt          DateTime            @updatedAt @map("updated_at")
   workspaces         ChatWorkspace[]

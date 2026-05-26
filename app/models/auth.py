@@ -34,5 +34,7 @@ class AuthResponse(BaseModel):
     has_agent: bool
     agent_id: str | None = None
     agent_name: str | None = None
+    agent_avatar_key: str | None = None
+    agent_avatar_url: str | None = None
     workspace_id: str | None = None
     conversation_id: str | None = None

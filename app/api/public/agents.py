@@ -17,6 +17,7 @@ from app.services.interaction.boundary import init_patience
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.career import pick_random_active_career
 from app.services.character_generation import generate_full_profile
+from app.services.agent_avatars import pick_agent_avatar
 from app.services.life_story import (
     activate_agent,
     generate_l1_coverage,
@@ -48,6 +49,23 @@ from app.services.runtime.tasks import fire_background
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+def _agent_response(agent, *, workspace_id: str | None = None) -> AgentResponse:
+    return AgentResponse(
+        id=agent.id,
+        name=agent.name,
+        user_id=agent.userId,
+        workspace_id=workspace_id,
+        mbti=get_mbti(agent),
+        background=agent.background,
+        values=agent.values,
+        gender=agent.gender,
+        life_overview=agent.lifeOverview,
+        avatar_key=getattr(agent, "avatarKey", None),
+        avatar_url=getattr(agent, "avatarUrl", None),
+        created_at=str(agent.createdAt),
+    )
 
 
 async def _safe_life_overview(agent) -> str | None:
@@ -263,6 +281,9 @@ async def create_agent(
     if data.gender is not None:
         # 前端约定已传 "male"/"female", 直接存
         create_data["gender"] = data.gender
+    avatar = pick_agent_avatar(data.gender)
+    create_data["avatarKey"] = avatar.key
+    create_data["avatarUrl"] = avatar.url
     agent = None
     workspace = None
     try:
@@ -306,18 +327,7 @@ async def create_agent(
         personality=personality_dict,
     )
 
-    return AgentResponse(
-        id=agent.id,
-        name=agent.name,
-        user_id=agent.userId,
-        workspace_id=workspace.id,
-        mbti=get_mbti(agent),
-        background=agent.background,
-        values=agent.values,
-        gender=agent.gender,
-        life_overview=agent.lifeOverview,
-        created_at=str(agent.createdAt),
-    )
+    return _agent_response(agent, workspace_id=workspace.id)
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
@@ -330,18 +340,7 @@ async def get_agent(agent_id: str, agent=Depends(require_agent_owner_any_status)
     workspace = await get_active_workspace(agent_id=agent_id)
     if not workspace:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return AgentResponse(
-        id=agent.id,
-        name=agent.name,
-        user_id=agent.userId,
-        workspace_id=workspace.id,
-        mbti=get_mbti(agent),
-        background=agent.background,
-        values=agent.values,
-        gender=agent.gender,
-        life_overview=agent.lifeOverview,
-        created_at=str(agent.createdAt),
-    )
+    return _agent_response(agent, workspace_id=workspace.id)
 
 
 @router.delete("/{agent_id}")
@@ -365,21 +364,7 @@ async def list_agents(
     _user=Depends(require_user_self),
 ):
     agents = await db.aiagent.find_many(where={"status": "active", "userId": user_id})
-    return [
-        AgentResponse(
-            id=a.id,
-            name=a.name,
-            user_id=a.userId,
-            workspace_id=None,
-            mbti=get_mbti(a),
-            background=a.background,
-            values=a.values,
-            gender=a.gender,
-            life_overview=a.lifeOverview,
-            created_at=str(a.createdAt),
-        )
-        for a in agents
-    ]
+    return [_agent_response(a) for a in agents]
 
 
 @router.patch("/{agent_id}", response_model=AgentResponse)
@@ -401,17 +386,7 @@ async def update_agent(
     agent = await db.aiagent.update(where={"id": agent_id}, data=update_data)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return AgentResponse(
-        id=agent.id,
-        name=agent.name,
-        user_id=agent.userId,
-        mbti=get_mbti(agent),
-        background=agent.background,
-        values=agent.values,
-        gender=agent.gender,
-        life_overview=agent.lifeOverview,
-        created_at=str(agent.createdAt),
-    )
+    return _agent_response(agent)
 
 
 @router.post("/{agent_id}/regenerate-mbti", response_model=AgentResponse)
@@ -438,17 +413,7 @@ async def regenerate_mbti(
         data={"mbti": Json(new_mbti), "currentMbti": Json(new_mbti)},
     )
 
-    return AgentResponse(
-        id=refreshed.id,
-        name=refreshed.name,
-        user_id=refreshed.userId,
-        mbti=get_mbti(refreshed),
-        background=refreshed.background,
-        values=refreshed.values,
-        gender=refreshed.gender,
-        life_overview=refreshed.lifeOverview,
-        created_at=str(refreshed.createdAt),
-    )
+    return _agent_response(refreshed)
 
 
 async def _resolve_schedule(agent_id: str):
