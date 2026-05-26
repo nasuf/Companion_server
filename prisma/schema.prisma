@@ -14,7 +14,7 @@ generator client {
 model User {
   id               String              @id @default(uuid())
   username         String              @unique
-  hashedPassword   String              @map("hashed_password")
+  hashedPassword   String?             @map("hashed_password")
   role             String              @default("user") @map("role")
   email            String?             @unique
   status           String              @default("active")
@@ -32,10 +32,32 @@ model User {
   proactiveStates  ProactiveState[]
   proactiveEvents  ProactiveEventLog[]
   patienceStates   PatienceState[]
+  authIdentities    AuthIdentity[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
   bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
   @@map("users")
+}
+
+model AuthIdentity {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider          String
+  providerAccountId String   @map("provider_account_id")
+  openid            String?
+  unionid           String?
+  scope             String?
+  rawProfile        Json?    @map("raw_profile")
+  lastLoginAt       DateTime @default(now()) @map("last_login_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([provider, providerAccountId], map: "auth_identities_provider_account_unique")
+  @@index([userId], map: "auth_identities_user_id_idx")
+  @@index([openid], map: "auth_identities_openid_idx")
+  @@index([unionid], map: "auth_identities_unionid_idx")
+  @@map("auth_identities")
 }
 
 model AiAgent {

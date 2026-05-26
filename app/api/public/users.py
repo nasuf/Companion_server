@@ -7,8 +7,8 @@ from app.services.portrait import get_latest_portrait
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-# 注: POST /users 创建匿名 user 的旧端点已删除. schema 要求 hashedPassword
-# 必填, 旧端点没传 → 隐式废弃。所有新建用户必须走 /auth/register。
+# 注: POST /users 创建匿名 user 的旧端点已删除。新建用户必须走
+# /auth/register 或受控的第三方登录入口，避免绕过身份初始化。
 
 
 @router.get("/{user_id}", response_model=UserResponse)

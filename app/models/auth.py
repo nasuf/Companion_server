@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class RegisterRequest(BaseModel):
@@ -9,6 +11,19 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class WeChatMobileLoginRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=512)
+    platform: Literal["ios", "android", "harmony"] = "ios"
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        code = value.strip()
+        if not code:
+            raise ValueError("code must not be blank")
+        return code
 
 
 class AuthResponse(BaseModel):

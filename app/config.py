@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days
 
+    # WeChat Open Platform mobile app login. AppSecret must stay server-side.
+    wechat_login_enabled: bool = False
+    wechat_mobile_app_id: str = ""
+    wechat_mobile_app_secret: str = ""
+    wechat_oauth_timeout_s: float = 6.0
+
     # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
     # Development defaults to "*" for local convenience; production must configure
     # an explicit allowlist.
@@ -158,6 +164,15 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Unsafe production config: CORS_ALLOWED_ORIGINS must be an explicit "
                 "comma-separated allowlist."
+            )
+
+        if self.wechat_login_enabled and (
+            not self.wechat_mobile_app_id.strip()
+            or not self.wechat_mobile_app_secret.strip()
+        ):
+            raise RuntimeError(
+                "Unsafe production config: WECHAT_LOGIN_ENABLED=true requires "
+                "WECHAT_MOBILE_APP_ID and WECHAT_MOBILE_APP_SECRET."
             )
 
 

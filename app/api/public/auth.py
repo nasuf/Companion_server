@@ -5,7 +5,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.db import db
-from app.models.auth import RegisterRequest, LoginRequest, AuthResponse
+from app.models.auth import (
+    AuthResponse,
+    LoginRequest,
+    RegisterRequest,
+    WeChatMobileLoginRequest,
+)
 from app.services.auth import hash_password, verify_password, create_jwt
 from app.services.auth_security import (
     audit_auth_request_event,
@@ -16,6 +21,11 @@ from app.services.auth_security import (
 )
 from app.api.jwt_auth import require_user
 from app.services.workspace.workspaces import get_active_workspace
+from app.services.wechat_auth import (
+    WeChatLoginError,
+    exchange_wechat_code,
+    find_or_create_wechat_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +106,7 @@ async def login(data: LoginRequest, request: Request):
             detail="用户名或密码错误",
         )
 
-    if not verify_password(data.password, user.hashedPassword):
+    if not user.hashedPassword or not verify_password(data.password, user.hashedPassword):
         await record_login_failure(request, data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -113,6 +123,47 @@ async def login(data: LoginRequest, request: Request):
         outcome="success",
     )
     logger.info("User logged in", extra={"event": "auth_login", "user_id": user.id})
+    return await _build_auth_response(user, token)
+
+
+@router.post("/wechat/mobile", response_model=AuthResponse)
+async def wechat_mobile_login(data: WeChatMobileLoginRequest, request: Request):
+    rate_limit_key = f"wechat:{data.platform}"
+    await enforce_login_rate_limit(request, rate_limit_key)
+    try:
+        token_payload = await exchange_wechat_code(data.code)
+        user = await find_or_create_wechat_user(token_payload)
+    except WeChatLoginError:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录失败，请稍后重试",
+        )
+
+    if not user:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录失败，请稍后重试",
+        )
+
+    await clear_login_failures(request, rate_limit_key)
+    token = create_jwt(user.id, user.role)
+    audit_auth_request_event(
+        "wechat_mobile_login_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    logger.info(
+        "User logged in with WeChat",
+        extra={
+            "event": "auth_wechat_login",
+            "user_id": user.id,
+            "platform": data.platform,
+        },
+    )
     return await _build_auth_response(user, token)
 
 
