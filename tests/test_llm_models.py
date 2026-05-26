@@ -68,6 +68,7 @@ def test_deepseek_chat_provider_uses_direct_openai_compatible_endpoint(monkeypat
 
     assert isinstance(chat_model, ChatOpenAI)
     assert resilience.provider_name(chat_model) == "deepseek"
+    assert models._resolve_usage_model_key(chat_model) == "deepseek/deepseek-v4-pro"
 
 
 # ── _extract_json + 截断救援 ──

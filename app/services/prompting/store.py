@@ -498,6 +498,12 @@ async def update_prompt_text(key: str, content: str) -> dict:
     normalized = content.strip()
     if not normalized:
         raise ValueError("Prompt content cannot be empty")
+    missing = _missing_required_placeholders(definition.default_text, normalized)
+    if missing:
+        raise ValueError(
+            "Prompt content is missing required placeholders: "
+            + ", ".join(f"{{{name}}}" for name in missing)
+        )
 
     redis = await get_redis()
     await redis.set(_redis_key(key), normalized)

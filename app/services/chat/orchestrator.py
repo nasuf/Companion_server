@@ -72,6 +72,7 @@ from app.services.relationship.emotion import is_negative_emotion
 from app.services.chat.intent_dispatcher import (
     detect_current_state_fast_path,
     detect_intent_unified,
+    infer_schedule_query_type,
     is_explicit_current_state_query,
     IntentType,
     IntentResult,
@@ -216,6 +217,65 @@ def _route_current_schedule_query_to_current_state(
         confidence=detected_intent.confidence,
         metadata=metadata,
     )
+
+
+def _downgrade_non_explicit_current_schedule_query(
+    detected_intent: IntentResult,
+    user_message: str,
+    response_diagnostics: dict[str, Any],
+) -> IntentResult:
+    """Keep current schedule-query only when the user actually asks.
+
+    The unified classifier can over-label social openers such as "好几天没找你聊了"
+    as "计划查询" with query_type=current. If that survives, a plain greeting
+    takes the schedule short-circuit path and may spawn extra sub-intents.
+    """
+    if detected_intent.intent != IntentType.SCHEDULE_QUERY:
+        return detected_intent
+    if (detected_intent.metadata or {}).get("query_type") != "current":
+        return detected_intent
+    if infer_schedule_query_type(user_message, require_query_cue=True):
+        return detected_intent
+    if is_explicit_current_state_query(user_message):
+        return detected_intent
+
+    metadata = dict(detected_intent.metadata or {})
+    metadata["downgraded_from"] = IntentType.SCHEDULE_QUERY.value
+    metadata["downgrade_reason"] = "not_explicit_current_schedule_query"
+    metadata.pop("fragments", None)
+    response_diagnostics["intent_downgrade_reason"] = "not_explicit_current_schedule_query"
+    return IntentResult(
+        intent=IntentType.NONE,
+        confidence=detected_intent.confidence,
+        metadata=metadata,
+    )
+
+
+def _filter_non_explicit_sub_fragments(
+    fragments: dict[str, str],
+    response_diagnostics: dict[str, Any],
+) -> dict[str, str]:
+    """Drop over-eager current-state/schedule sub-fragments from casual text."""
+    filtered: dict[str, str] = {}
+    dropped: list[str] = []
+    for label, text in fragments.items():
+        fragment = str(text).strip()
+        if not fragment:
+            continue
+        if label == "询问当前状态" and not is_explicit_current_state_query(fragment):
+            dropped.append(label)
+            continue
+        if (
+            label == "计划查询"
+            and not infer_schedule_query_type(fragment, require_query_cue=True)
+            and not is_explicit_current_state_query(fragment)
+        ):
+            dropped.append(label)
+            continue
+        filtered[label] = fragment
+    if dropped:
+        response_diagnostics["intent_sub_fragments_dropped"] = dropped
+    return filtered
 
 
 async def _intent_llm_reply(
@@ -936,6 +996,11 @@ async def stream_chat_response(
                     f"[INTENT-LLM] '{user_message[:30]}' → {detected_intent.intent.value} "
                     f"(labels={detected_intent.metadata.get('llm_labels')})"
                 )
+            detected_intent = _downgrade_non_explicit_current_schedule_query(
+                detected_intent,
+                user_message,
+                response_diagnostics,
+            )
 
         async def _cancel_fetch_task() -> None:
             """短路 / 异常时调用: cancel + 等待 propagate, 避免 orphan task warning."""
@@ -952,6 +1017,13 @@ async def stream_chat_response(
         if forced_intent is None and not crisis_care_turn:
             # spec §3.3 step 3: 多意图 → 待处理子片段列表（主意图片段替换 user_message，其它稍后递归处理）
             fragments = detected_intent.metadata.get("fragments") if detected_intent.metadata else None
+            if fragments and len(fragments) > 1:
+                fragments = _filter_non_explicit_sub_fragments(
+                    fragments,
+                    response_diagnostics,
+                )
+                if len(fragments) <= 1:
+                    fragments = None
             if fragments and len(fragments) > 1:
                 primary_label = next(
                     (lb for lb, it in LABEL_TO_INTENT.items()

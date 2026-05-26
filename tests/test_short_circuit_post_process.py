@@ -672,6 +672,74 @@ def test_orchestrator_keeps_future_schedule_query_as_schedule():
     assert diagnostics == {}
 
 
+def test_orchestrator_downgrades_social_opener_misrouted_as_current_schedule():
+    """寒暄被 LLM 误归 current schedule 时，应回到普通聊天路径。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_current_schedule_query
+
+    diagnostics = {}
+    result = _downgrade_non_explicit_current_schedule_query(
+        IntentResult(
+            intent=IntentType.SCHEDULE_QUERY,
+            confidence=0.75,
+            metadata={
+                "query_type": "current",
+                "fragments": {
+                    "计划查询": "早啊，好几天没找你聊了",
+                    "日常交流": "早啊",
+                },
+            },
+        ),
+        "早啊，好几天没找你聊了",
+        diagnostics,
+    )
+
+    assert result.intent == IntentType.NONE
+    assert result.metadata["downgraded_from"] == IntentType.SCHEDULE_QUERY.value
+    assert "fragments" not in result.metadata
+    assert diagnostics["intent_downgrade_reason"] == "not_explicit_current_schedule_query"
+
+
+def test_orchestrator_keeps_explicit_current_schedule_query():
+    """真正问日程/忙闲时仍保留 schedule query。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_current_schedule_query
+
+    diagnostics = {}
+    original = IntentResult(
+        intent=IntentType.SCHEDULE_QUERY,
+        confidence=0.75,
+        metadata={"query_type": "current"},
+    )
+    result = _downgrade_non_explicit_current_schedule_query(
+        original,
+        "你今天有什么安排？",
+        diagnostics,
+    )
+
+    assert result is original
+    assert diagnostics == {}
+
+
+def test_orchestrator_filters_non_explicit_current_sub_fragments():
+    from app.services.chat.orchestrator import _filter_non_explicit_sub_fragments
+
+    diagnostics = {}
+    result = _filter_non_explicit_sub_fragments(
+        {
+            "询问当前状态": "好几天没找你聊了",
+            "日常交流": "早啊",
+            "计划查询": "你今天有什么安排？",
+        },
+        diagnostics,
+    )
+
+    assert "询问当前状态" not in result
+    assert result["日常交流"] == "早啊"
+    assert result["计划查询"] == "你今天有什么安排？"
+    assert diagnostics["intent_sub_fragments_dropped"] == ["询问当前状态"]
+
+
 @pytest.mark.asyncio
 async def test_handle_schedule_query_date_does_not_inject_current_activity():
     """未来日程查询不能把当前正在做的事注入 prompt。"""

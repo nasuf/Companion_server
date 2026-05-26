@@ -330,7 +330,7 @@ async def token_usage(
             "days": days,
         },
         "pricing": {
-            r.identifier: {
+            f"{r.provider}/{r.identifier}": {
                 "input": r.inputCostPerMillion or 0.0,
                 "output": r.outputCostPerMillion or 0.0,
                 "unit": "CNY per 1M tokens",

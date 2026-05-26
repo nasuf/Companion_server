@@ -40,7 +40,7 @@ router = APIRouter(
 
 
 _LOCAL_PROVIDERS = {"ollama"}
-_REMOTE_PROVIDERS = {"dashscope", "deepseek", "claude"}
+_REMOTE_PROVIDERS = {"dashscope", "deepseek"}
 
 
 class ConfigPayload(BaseModel):
@@ -93,9 +93,11 @@ def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
     }
 
 
-async def _model_provider(identifier: str) -> str | None:
-    row = await db.modelregistry.find_unique(where={"identifier": identifier})
-    return row.provider if row else None
+async def _model_exists_for_provider(identifier: str, provider: str) -> bool:
+    row = await db.modelregistry.find_first(
+        where={"identifier": identifier, "provider": provider},
+    )
+    return row is not None
 
 
 def _normalize_remote_provider(value: str | None, fallback: str) -> str:
@@ -112,21 +114,18 @@ async def _validate_payload_models(payload: ConfigPayload, *, fallback_remote_pr
     provider = _normalize_remote_provider(payload.remote_provider, fallback_remote_provider)
 
     checks = [
-        (payload.local_chat_model, _LOCAL_PROVIDERS, "local_chat_model"),
-        (payload.local_small_model, _LOCAL_PROVIDERS, "local_small_model"),
-        (payload.remote_chat_model, {provider}, "remote_chat_model"),
-        (payload.remote_small_model, {provider}, "remote_small_model"),
+        (payload.local_chat_model, "ollama", "local_chat_model"),
+        (payload.local_small_model, "ollama", "local_small_model"),
+        (payload.remote_chat_model, provider, "remote_chat_model"),
+        (payload.remote_small_model, provider, "remote_small_model"),
     ]
-    for identifier, allowed, field in checks:
+    for identifier, expected_provider, field in checks:
         if not identifier:
             continue
-        actual = await _model_provider(identifier)
-        if actual is None:
-            raise HTTPException(status_code=400, detail=f"{field} 指向未知模型 {identifier!r}")
-        if actual not in allowed:
+        if not await _model_exists_for_provider(identifier, expected_provider):
             raise HTTPException(
                 status_code=400,
-                detail=f"{field}={identifier!r} 的 provider 是 {actual!r}, 不匹配 {sorted(allowed)}",
+                detail=f"{field}={identifier!r} 在 provider {expected_provider!r} 下不存在",
             )
 
 
@@ -134,7 +133,7 @@ async def _validate_payload_models(payload: ConfigPayload, *, fallback_remote_pr
 async def list_options() -> dict[str, Any]:
     """前端 dropdown 用. 来源 model_registry (admin "系统设置 → 模型库" 维护).
 
-    按 provider 分桶: ollama → local_*, dashscope/claude → remote_*.
+    按 provider 分桶: ollama → local_*, dashscope/deepseek → remote_*.
     chat/small 不分角色, 同 provider 模型在两个 dropdown 都出现 (admin 自由选).
     禁用模型 (enabled=false) 不出现.
     """

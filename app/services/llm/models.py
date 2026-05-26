@@ -463,7 +463,7 @@ async def _invoke_via_stream(
     fb_model_name = ""
     if provider != "ollama" and profile.allow_ollama_fallback:
         _fb_model = get_fallback_chat_model()
-        fb_model_name = _resolve_model_name(_fb_model)
+        fb_model_name = _resolve_usage_model_key(_fb_model)
         fb_kwargs = {**kwargs}
         if force_json:
             fb_kwargs.setdefault("format", "json")
@@ -478,7 +478,7 @@ async def _invoke_via_stream(
         profile=profile,
         op=op,
         fallback_factory=fallback_factory,
-        primary_model_name=_resolve_model_name(model),
+        primary_model_name=_resolve_usage_model_key(model),
         fallback_model_name=fb_model_name,
     )
     return AIMessage(content=text)
@@ -503,6 +503,19 @@ def _resolve_model_name(model: BaseChatModel) -> str:
     return ""
 
 
+def _resolve_usage_model_key(model: BaseChatModel) -> str:
+    """Return provider-qualified model key for usage/pricing disambiguation."""
+    from app.services.llm.resilience import provider_name
+
+    name = _resolve_model_name(model)
+    provider = provider_name(model)
+    if not name:
+        return provider or "unknown"
+    if provider and provider != "unknown":
+        return f"{provider}/{name}"
+    return name
+
+
 def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
     """提取 response.usage_metadata 并 record 到当前 chat session, 返回 usage dict."""
     from app.services.llm import usage_tracker
@@ -512,7 +525,7 @@ def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
         return {}
     input_tok = int(meta.get("input_tokens", 0) or 0)
     output_tok = int(meta.get("output_tokens", 0) or 0)
-    usage_tracker.record(_resolve_model_name(model), input_tok, output_tok)
+    usage_tracker.record(_resolve_usage_model_key(model), input_tok, output_tok)
     return {"input_tokens": input_tok, "output_tokens": output_tok}
 
 

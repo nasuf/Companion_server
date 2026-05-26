@@ -2,7 +2,7 @@
 
 Endpoints:
   GET    /admin-api/model-registry            列表 (含 disabled, admin 视图)
-  POST   /admin-api/model-registry            新增 (identifier 唯一)
+  POST   /admin-api/model-registry            新增 (provider + identifier 唯一)
   PATCH  /admin-api/model-registry/{id}       更新 (identifier 不可改)
 
 DELETE 暂不开放: 已被 system_config / agent_config_overrides 引用的模型 hard
@@ -34,7 +34,7 @@ router = APIRouter(
 )
 
 
-_PROVIDERS = {"ollama", "dashscope", "deepseek", "claude"}
+_PROVIDERS = {"ollama", "dashscope", "deepseek"}
 
 
 class ModelCreatePayload(BaseModel):
@@ -109,7 +109,7 @@ async def create_model(payload: ModelCreatePayload) -> dict[str, Any]:
     except UniqueViolationError:
         raise HTTPException(
             status_code=409,
-            detail=f"identifier {payload.identifier!r} 已存在",
+            detail=f"provider={payload.provider!r} identifier={payload.identifier!r} 已存在",
         )
     await load_caches()
     invalidate_caches()
@@ -148,7 +148,14 @@ async def update_model(model_id: str, payload: ModelUpdatePayload) -> dict[str, 
     if not row:
         raise HTTPException(status_code=404, detail="model not found")
 
-    updated = await db.modelregistry.update(where={"id": model_id}, data=data)
+    try:
+        updated = await db.modelregistry.update(where={"id": model_id}, data=data)
+    except UniqueViolationError:
+        next_provider = data.get("provider", row.provider)
+        raise HTTPException(
+            status_code=409,
+            detail=f"provider={next_provider!r} identifier={row.identifier!r} 已存在",
+        )
     if updated is None:
         raise HTTPException(status_code=404, detail="model not found")
     await load_caches()

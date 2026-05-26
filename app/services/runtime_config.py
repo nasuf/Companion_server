@@ -44,7 +44,9 @@ class ResolvedConfig:
 # 跨 worker 同步靠 Redis pub/sub, 暂不实现 — 单 worker 部署足够).
 _GLOBAL_CACHE: dict | None = None
 _AGENT_CACHE: dict[str, dict] = {}
-# {identifier: {"input": float, "output": float}} — pricing.estimate_cost_cny 同步读取
+# {"provider/identifier": {"input": float, "output": float}}.
+# 单 provider 模型额外保留 bare identifier 兼容历史 usage 行; 跨 provider 重名时
+# bare identifier 不写入, 避免价格串账.
 _PRICING_CACHE: dict[str, dict[str, float]] = {}
 _CACHE_LOADED = False
 # 防并发 ensure_loaded 触发 N 次 load_caches (每次都打 DB)
@@ -115,11 +117,17 @@ async def load_caches() -> None:
         # 装载 model_registry 的价格 (只 enabled, 因为 disabled 模型不会被新调用,
         # 但已有 llm_usage 行的归桶若指向它仍能匹配 → 保险起见 disabled 也装).
         registry = await db.modelregistry.find_many()
+        identifier_counts: dict[str, int] = {}
         for r in registry:
-            new_pricing[r.identifier] = {
+            identifier_counts[r.identifier] = identifier_counts.get(r.identifier, 0) + 1
+        for r in registry:
+            pricing = {
                 "input": r.inputCostPerMillion or 0.0,
                 "output": r.outputCostPerMillion or 0.0,
             }
+            new_pricing[f"{r.provider}/{r.identifier}"] = pricing
+            if identifier_counts.get(r.identifier, 0) == 1:
+                new_pricing[r.identifier] = pricing
     except Exception as e:
         # DB 不可用 (e.g. 测试无连接) → 缓存空, 全部 fallback 到 env / 价格当 0.
         logger.warning(f"[RUNTIME-CONFIG] load failed, falling back to env only: {e}")

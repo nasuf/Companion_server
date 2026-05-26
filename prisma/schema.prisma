@@ -817,11 +817,12 @@ model AgentConfigOverride {
 
 
 // 模型库 — admin "系统设置 → 模型库" 维护. system_config / agent_config_overrides
-// 的 chat/small 字段从这里选 identifier; pricing.estimate_cost_cny 也从这里取价格.
+// 的 chat/small 字段从这里选 identifier, remote_provider/local provider 用于消歧;
+// pricing.estimate_cost_cny 也从这里取价格.
 //
 // 设计:
-//   - identifier (SDK 用的 model id) 唯一, 创建后不可改 (改 = 新建一行)
-//   - provider 派生 local (ollama) / remote (dashscope/deepseek/claude) 分组
+//   - identifier 是 SDK 用的 model id; 同一 provider 内唯一, 跨 provider 可重名
+//   - provider 派生 local (ollama) / remote (dashscope/deepseek) 分组
 //   - enabled=false 软隐藏, 不影响已配置 (现有 system_config/agent override 仍指向它)
 //   - 价格 nullable + Decimal(10,4) 元/1M tokens; 本地默认 0
 //   - contextWindow / notes 留 hook 给未来 prompt budget / admin 备注
@@ -829,9 +830,9 @@ model AgentConfigOverride {
 // 暂不支持删除 — 改 enabled=false 即可. 删了被引用会让 system_config 指 "幽灵 ID".
 model ModelRegistry {
   id                   String   @id @default(uuid())
-  identifier           String   @unique
+  identifier           String
   displayName          String?  @map("display_name")
-  provider             String   // ollama | dashscope | deepseek | claude
+  provider             String   // ollama | dashscope | deepseek
   enabled              Boolean  @default(true)
   contextWindow        Int?     @map("context_window")
   // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是
@@ -844,5 +845,6 @@ model ModelRegistry {
   updatedAt            DateTime @updatedAt @map("updated_at")
 
   @@index([provider, enabled])
+  @@unique([provider, identifier])
   @@map("model_registry")
 }

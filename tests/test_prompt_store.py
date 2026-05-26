@@ -221,6 +221,21 @@ async def test_prompt_update_version_attaches_eval_result(prompt_store_mocks):
 
 
 @pytest.mark.asyncio
+async def test_prompt_update_rejects_missing_required_placeholders(prompt_store_mocks):
+    from app.services.prompting.store import update_prompt_text
+
+    _mock_db, _fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_definition(
+        key="test.key",
+        default_text="请根据 {message} 和 {context} 输出",
+    )
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
+        with pytest.raises(ValueError, match=r"\{context\}"):
+            await update_prompt_text("test.key", "请根据 {message} 输出")
+
+
+@pytest.mark.asyncio
 async def test_prompt_canary_agent_rollout_overrides_runtime_text(prompt_store_mocks):
     from app.services.prompting.store import (
         get_prompt_text_for_context,

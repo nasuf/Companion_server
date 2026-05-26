@@ -1,7 +1,8 @@
 """LLM 计价 (元/1M token) — 价格来源 model_registry DB 表.
 
-调用方走 estimate_cost_cny(model, input_tokens, output_tokens) 算钱.
-未知 model_name (registry 没有该 identifier 或 DB 整体不可达) → 返回 0,
+调用方走 estimate_cost_cny(model, input_tokens, output_tokens) 算钱. 新 usage
+行使用 provider-qualified key, 例如 `deepseek/deepseek-v4-pro`.
+未知 model_name (registry 没有该 key 或 DB 整体不可达) → 返回 0,
 不挂主流程, 但 admin 加新模型后填价格才会被正确计入统计.
 
 价格读 runtime_config._PRICING_CACHE (sync, 由 load_caches 装载, admin

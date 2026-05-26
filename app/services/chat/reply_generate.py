@@ -86,7 +86,7 @@ async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
     返回 (text, is_fallback). is_fallback=True 表示走了静态兜底 (两级 LLM 全挂),
     调用方可据此给 reply metadata 打 `{reply_failed: true}` 让前端显示重试按钮等.
     """
-    from app.services.llm.models import _resolve_model_name
+    from app.services.llm.models import _resolve_usage_model_key
 
     primary = get_chat_model()
     primary_prov = provider_name(primary)
@@ -108,8 +108,8 @@ async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
             profile=get_profile("chat_stream"),
             op="reply_stream",
             fallback_factory=(_fallback_stream if fallback is not None else None),
-            primary_model_name=_resolve_model_name(primary),
-            fallback_model_name=_resolve_model_name(fallback) if fallback else "",
+            primary_model_name=_resolve_usage_model_key(primary),
+            fallback_model_name=_resolve_usage_model_key(fallback) if fallback else "",
         )
         return text, False
     except LLMFailedError as e:
