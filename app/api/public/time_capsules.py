@@ -1,6 +1,8 @@
 from datetime import UTC, date, datetime, time
 from typing import Any
 import base64
+import logging
+import time as time_module
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from prisma import Json
@@ -14,6 +16,7 @@ from app.models.time_capsule import (
 )
 
 router = APIRouter(prefix="/capsules", tags=["time-capsules"])
+logger = logging.getLogger(__name__)
 
 _VALID_STATUSES = {"draft", "sealed"}
 _VALID_STATES = {"draft", "pending", "opened"}
@@ -179,6 +182,24 @@ def _normalize_media(media: dict | None) -> dict | None:
     return normalized
 
 
+def _media_summary(media: dict | None) -> str:
+    if not media:
+        return "none"
+    images = media.get("images") or []
+    image_bytes = sum(int(item.get("size") or 0) for item in images if isinstance(item, dict))
+    audio = media.get("audio")
+    audio_bytes = int(audio.get("size") or 0) if isinstance(audio, dict) else 0
+    duration = audio.get("duration_seconds") if isinstance(audio, dict) else None
+    return (
+        f"images={len(images)} image_bytes={image_bytes} "
+        f"audio={'yes' if audio else 'no'} audio_bytes={audio_bytes} duration={duration}"
+    )
+
+
+def _elapsed_ms(start: float) -> int:
+    return int((time_module.perf_counter() - start) * 1000)
+
+
 def _normalize_skin(skin: str | None) -> str:
     value = (skin or "paper").strip()
     if value not in _VALID_SKINS:
@@ -232,14 +253,24 @@ async def create_capsule(
     data: TimeCapsuleCreate,
     user: dict = Depends(require_user),
 ):
+    started = time_module.perf_counter()
+    logger.info(
+        "[capsule:create] start agent=%s workspace=%s status=%s media=%s",
+        data.agent_id,
+        data.workspace_id,
+        data.status,
+        _media_summary(data.media),
+    )
     await _ensure_agent_scope(
         agent_id=data.agent_id,
         workspace_id=data.workspace_id,
         user=user,
     )
+    logger.info("[capsule:create] scope_ok elapsed_ms=%s", _elapsed_ms(started))
     status, open_date, sealed_at = _normalize_create(data)
     content = data.content.strip()
     media = _normalize_media(data.media)
+    logger.info("[capsule:create] normalized elapsed_ms=%s", _elapsed_ms(started))
     create_data: dict[str, Any] = {
         "user": {"connect": {"id": user["sub"]}},
         "agent": {"connect": {"id": data.agent_id}},
@@ -259,6 +290,7 @@ async def create_capsule(
     row = await db.timecapsule.create(
         data=create_data,
     )
+    logger.info("[capsule:create] db_done elapsed_ms=%s", _elapsed_ms(started))
     return _response(row)
 
 
@@ -268,7 +300,20 @@ async def update_capsule(
     data: TimeCapsuleUpdate,
     user: dict = Depends(require_user),
 ):
+    started = time_module.perf_counter()
+    fields_set = (
+        data.model_fields_set
+        if hasattr(data, "model_fields_set")
+        else getattr(data, "__fields_set__", set())
+    )
+    logger.info(
+        "[capsule:update] start id=%s fields=%s media=%s",
+        capsule_id,
+        sorted(fields_set),
+        _media_summary(data.media) if "media" in fields_set else "omitted",
+    )
     row = await db.timecapsule.find_unique(where={"id": capsule_id})
+    logger.info("[capsule:update] loaded elapsed_ms=%s", _elapsed_ms(started))
     if not row:
         raise HTTPException(status_code=404, detail="Capsule not found")
     if user.get("role") != "admin" and row.userId != user.get("sub"):
@@ -281,11 +326,6 @@ async def update_capsule(
             update_data["title"] = _title_from_content(content)
     if data.title is not None:
         update_data["title"] = data.title.strip()[:80] or None
-    fields_set = (
-        data.model_fields_set
-        if hasattr(data, "model_fields_set")
-        else getattr(data, "__fields_set__", set())
-    )
     clear_media = False
     if "media" in fields_set:
         media = _normalize_media(data.media)
@@ -306,7 +346,14 @@ async def update_capsule(
             raise HTTPException(status_code=400, detail="open_date is required when sealing")
         update_data["status"] = data.status
         update_data["sealedAt"] = datetime.now(UTC) if data.status == "sealed" else None
+    logger.info(
+        "[capsule:update] normalized fields=%s clear_media=%s elapsed_ms=%s",
+        sorted(update_data.keys()),
+        clear_media,
+        _elapsed_ms(started),
+    )
     if not update_data and not clear_media:
+        logger.info("[capsule:update] noop elapsed_ms=%s", _elapsed_ms(started))
         return _response(row)
     updated = row
     if update_data:
@@ -314,11 +361,15 @@ async def update_capsule(
             where={"id": capsule_id},
             data=update_data,
         )
+        logger.info("[capsule:update] prisma_update_done elapsed_ms=%s", _elapsed_ms(started))
     if clear_media:
         await _clear_capsule_media(capsule_id)
+        logger.info("[capsule:update] clear_media_done elapsed_ms=%s", _elapsed_ms(started))
         updated = await db.timecapsule.find_unique(where={"id": capsule_id})
         if not updated:
             raise HTTPException(status_code=404, detail="Capsule not found")
+        logger.info("[capsule:update] refetch_done elapsed_ms=%s", _elapsed_ms(started))
+    logger.info("[capsule:update] done elapsed_ms=%s", _elapsed_ms(started))
     return _response(updated)
 
 
