@@ -1,16 +1,19 @@
 from datetime import UTC, date, datetime, time
 from typing import Any
 import base64
+import json
 import logging
+import os
+from pathlib import Path
 import time as time_module
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from prisma import Json
-
 from app.api.jwt_auth import require_user
 from app.db import db
 from app.models.time_capsule import (
     TimeCapsuleCreate,
+    TimeCapsuleMediaUpload,
     TimeCapsuleResponse,
     TimeCapsuleUpdate,
 )
@@ -33,6 +36,7 @@ _VALID_SKINS = {
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIO_SECONDS = 20
 _MAX_AUDIO_BYTES = 512 * 1024
+_MEDIA_DIR = Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media"))
 
 
 def _date_to_datetime(value: date | None) -> datetime | None:
@@ -71,22 +75,129 @@ def _json_dict(value: Any) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _response(row) -> TimeCapsuleResponse:
+def _strip_base64_prefix(value: str) -> str:
+    raw = value.strip()
+    comma = raw.find(",")
+    return raw[comma + 1 :] if comma >= 0 else raw
+
+
+def _mime_ext(mime: str, fallback: str) -> str:
+    mapping = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "audio/mp4": ".m4a",
+        "audio/aac": ".m4a",
+        "audio/mpeg": ".mp3",
+    }
+    return mapping.get(mime.lower(), fallback)
+
+
+def _storage_path(storage_key: str) -> Path:
+    if "/" in storage_key or "\\" in storage_key or ".." in storage_key:
+        raise HTTPException(status_code=400, detail="Invalid media storage key")
+    return _MEDIA_DIR / storage_key
+
+
+def _read_media_base64(storage_key: str) -> str | None:
+    path = _storage_path(storage_key)
+    if not path.exists() or not path.is_file():
+        return None
+    return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _validate_media_storage_key(storage_key: str, user_id: str | None) -> None:
+    path = _storage_path(storage_key)
+    if user_id is not None and not storage_key.startswith(f"{user_id}_"):
+        raise HTTPException(status_code=403, detail="Media does not belong to this user")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=400, detail="Media file not found")
+
+
+def _hydrate_media(media: dict | None) -> dict | None:
+    if not media:
+        return None
+    hydrated = dict(media)
+    images = hydrated.get("images")
+    if isinstance(images, list):
+        clean_images = []
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            item = dict(image)
+            if "base64" not in item and item.get("storage_key"):
+                data = _read_media_base64(str(item["storage_key"]))
+                if data is not None:
+                    item["base64"] = data
+            clean_images.append(item)
+        hydrated["images"] = clean_images
+    audio = hydrated.get("audio")
+    if isinstance(audio, dict):
+        item = dict(audio)
+        if "base64" not in item and item.get("storage_key"):
+            data = _read_media_base64(str(item["storage_key"]))
+            if data is not None:
+                item["base64"] = data
+        hydrated["audio"] = item
+    return hydrated
+
+
+def _media_storage_keys(media: dict | None) -> set[str]:
+    if not media:
+        return set()
+    keys: set[str] = set()
+    images = media.get("images")
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict) and image.get("storage_key"):
+                keys.add(str(image["storage_key"]))
+    audio = media.get("audio")
+    if isinstance(audio, dict) and audio.get("storage_key"):
+        keys.add(str(audio["storage_key"]))
+    return keys
+
+
+def _delete_media_files(media: dict | None, *, keep_keys: set[str] | None = None) -> None:
+    keep = keep_keys or set()
+    for storage_key in _media_storage_keys(media) - keep:
+        try:
+            path = _storage_path(storage_key)
+            if path.exists() and path.is_file():
+                path.unlink()
+        except Exception:
+            logger.warning("[capsule:media] failed to delete storage_key=%s", storage_key, exc_info=True)
+
+
+def _field(row: Any, name: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name)
+
+
+def _iso_string(value: Any) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _response(row, *, include_media: bool = True, hydrate_media: bool = False) -> TimeCapsuleResponse:
+    open_date = _field(row, "openDate")
+    sealed_at = _field(row, "sealedAt")
+    media = _json_dict(_field(row, "media")) if include_media else None
     return TimeCapsuleResponse(
-        id=row.id,
-        user_id=row.userId,
-        agent_id=row.agentId,
-        workspace_id=row.workspaceId,
-        title=row.title,
-        content=row.content,
-        media=_json_dict(row.media),
-        skin=row.skin or "paper",
-        open_date=_date_string(row.openDate),
-        status=row.status,
-        state=_derive_state(row.status, row.openDate),
-        sealed_at=row.sealedAt.isoformat() if row.sealedAt else None,
-        created_at=row.createdAt.isoformat(),
-        updated_at=row.updatedAt.isoformat(),
+        id=_field(row, "id"),
+        user_id=_field(row, "userId"),
+        agent_id=_field(row, "agentId"),
+        workspace_id=_field(row, "workspaceId"),
+        title=_field(row, "title"),
+        content=_field(row, "content"),
+        media=_hydrate_media(media) if hydrate_media else media,
+        skin=_field(row, "skin") or "paper",
+        open_date=_date_string(open_date),
+        status=_field(row, "status"),
+        state=_derive_state(_field(row, "status"), open_date),
+        sealed_at=_iso_string(sealed_at) if sealed_at else None,
+        created_at=_iso_string(_field(row, "createdAt")),
+        updated_at=_iso_string(_field(row, "updatedAt")),
     )
 
 
@@ -124,12 +235,12 @@ def _normalize_create(data: TimeCapsuleCreate) -> tuple[str, datetime | None, da
 
 def _decoded_size(base64_value: str) -> int:
     try:
-        return len(base64.b64decode(base64_value, validate=True))
+        return len(base64.b64decode(_strip_base64_prefix(base64_value), validate=True))
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid media base64") from exc
 
 
-def _normalize_media(media: dict | None) -> dict | None:
+def _normalize_media(media: dict | None, *, user_id: str | None = None) -> dict | None:
     if not media:
         return None
     images = media.get("images") or []
@@ -142,17 +253,25 @@ def _normalize_media(media: dict | None) -> dict | None:
         if not isinstance(image, dict):
             raise HTTPException(status_code=400, detail="Invalid image media")
         data = str(image.get("base64") or "")
-        if not data:
-            raise HTTPException(status_code=400, detail="Image base64 is required")
-        size = int(image.get("size") or _decoded_size(data))
+        storage_key = str(image.get("storage_key") or "")
+        if not data and not storage_key:
+            raise HTTPException(status_code=400, detail="Image media reference is required")
+        size = int(image.get("size") or (_decoded_size(data) if data else 0))
         if size > _MAX_IMAGE_BYTES:
             raise HTTPException(status_code=400, detail="Image must be under 2MB")
-        clean_images.append({
+        clean_image = {
             "name": str(image.get("name") or "capsule-image")[:120],
             "mime": str(image.get("mime") or "image/jpeg")[:80],
             "size": size,
-            "base64": data,
-        })
+        }
+        if storage_key:
+            _validate_media_storage_key(storage_key, user_id)
+            clean_image["storage_key"] = storage_key
+            if image.get("url"):
+                clean_image["url"] = str(image.get("url"))[:300]
+        else:
+            clean_image["base64"] = _strip_base64_prefix(data)
+        clean_images.append(clean_image)
 
     audio = media.get("audio")
     clean_audio = None
@@ -160,12 +279,13 @@ def _normalize_media(media: dict | None) -> dict | None:
         if not isinstance(audio, dict):
             raise HTTPException(status_code=400, detail="Invalid audio media")
         data = str(audio.get("base64") or "")
-        if not data:
-            raise HTTPException(status_code=400, detail="Audio base64 is required")
+        storage_key = str(audio.get("storage_key") or "")
+        if not data and not storage_key:
+            raise HTTPException(status_code=400, detail="Audio media reference is required")
         duration = float(audio.get("duration_seconds") or 0)
         if duration <= 0 or duration > _MAX_AUDIO_SECONDS:
             raise HTTPException(status_code=400, detail="Audio must be 20 seconds or shorter")
-        size = int(audio.get("size") or _decoded_size(data))
+        size = int(audio.get("size") or (_decoded_size(data) if data else 0))
         if size > _MAX_AUDIO_BYTES:
             raise HTTPException(status_code=400, detail="Audio is too large")
         clean_audio = {
@@ -173,8 +293,14 @@ def _normalize_media(media: dict | None) -> dict | None:
             "mime": str(audio.get("mime") or "audio/mp4")[:80],
             "size": size,
             "duration_seconds": duration,
-            "base64": data,
         }
+        if storage_key:
+            _validate_media_storage_key(storage_key, user_id)
+            clean_audio["storage_key"] = storage_key
+            if audio.get("url"):
+                clean_audio["url"] = str(audio.get("url"))[:300]
+        else:
+            clean_audio["base64"] = _strip_base64_prefix(data)
 
     normalized = {"images": clean_images}
     if clean_audio is not None:
@@ -214,14 +340,116 @@ def _title_from_content(content: str) -> str:
     return first_line[:18]
 
 
-async def _clear_capsule_media(capsule_id: str) -> None:
-    await db.execute_raw(
+async def _fetch_capsule_light(capsule_id: str) -> Any | None:
+    rows = await db.query_raw(
         """
-        UPDATE "time_capsules"
-        SET "media" = NULL, "updated_at" = NOW()
-        WHERE "id" = $1
+        SELECT
+            id,
+            user_id AS "userId",
+            agent_id AS "agentId",
+            workspace_id AS "workspaceId",
+            title,
+            content,
+            NULL AS media,
+            skin,
+            open_date AS "openDate",
+            status,
+            sealed_at AS "sealedAt",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+        FROM time_capsules
+        WHERE id = $1
+        LIMIT 1
         """,
         capsule_id,
+    )
+    return rows[0] if rows else None
+
+
+async def _insert_capsule_raw(
+    *,
+    capsule_id: str,
+    user_id: str,
+    agent_id: str,
+    workspace_id: str | None,
+    title: str,
+    content: str,
+    media: dict | None,
+    skin: str,
+    status: str,
+    open_date: datetime | None,
+    sealed_at: datetime | None,
+) -> None:
+    columns = [
+        "id",
+        "user_id",
+        "agent_id",
+        "title",
+        "content",
+        "skin",
+        "status",
+    ]
+    values: list[Any] = [capsule_id, user_id, agent_id, title, content, skin, status]
+    placeholders = [f"${index}" for index in range(1, len(values) + 1)]
+
+    if workspace_id is not None:
+        columns.append("workspace_id")
+        values.append(workspace_id)
+        placeholders.append(f"${len(values)}")
+    if media is not None:
+        columns.append("media")
+        values.append(json.dumps(media, ensure_ascii=False))
+        placeholders.append(f"${len(values)}::jsonb")
+    if open_date is not None:
+        columns.append("open_date")
+        values.append(open_date)
+        placeholders.append(f"${len(values)}::timestamp")
+    if sealed_at is not None:
+        columns.append("sealed_at")
+        values.append(sealed_at)
+        placeholders.append(f"${len(values)}::timestamp")
+
+    await db.execute_raw(
+        f"""
+        INSERT INTO time_capsules ({", ".join(columns)})
+        VALUES ({", ".join(placeholders)})
+        """,
+        *values,
+    )
+
+
+async def _update_capsule_raw(
+    capsule_id: str,
+    *,
+    fields: dict[str, Any],
+    media: dict | None,
+    set_media: bool,
+    clear_media: bool,
+) -> None:
+    assignments: list[str] = []
+    values: list[Any] = []
+    for column, value in fields.items():
+        values.append(value)
+        cast = "::timestamp" if column in {"open_date", "sealed_at"} else ""
+        assignments.append(f"{column} = ${len(values)}{cast}")
+    if set_media:
+        values.append(json.dumps(media, ensure_ascii=False))
+        assignments.append(f"media = ${len(values)}::jsonb")
+    elif clear_media:
+        assignments.append("media = NULL")
+
+    if not assignments:
+        return
+
+    assignments.append("updated_at = NOW()")
+    values.append(capsule_id)
+    await db.execute_raw(
+        f"""
+        UPDATE time_capsules
+        SET {", ".join(assignments)}
+        WHERE id = ${len(values)}
+        """,
+        *values,
     )
 
 
@@ -232,20 +460,154 @@ async def list_capsules(
     state: str | None = Query(default=None),
     user: dict = Depends(require_user),
 ):
+    started = time_module.perf_counter()
     if state is not None and state not in _VALID_STATES:
         raise HTTPException(status_code=400, detail="Invalid capsule state")
     await _ensure_agent_scope(agent_id=agent_id, workspace_id=workspace_id, user=user)
-    where: dict[str, Any] = {"agentId": agent_id, "userId": user.get("sub")}
     if workspace_id:
-        where["workspaceId"] = workspace_id
-    rows = await db.timecapsule.find_many(
-        where=where,
-        order=[{"openDate": "asc"}, {"updatedAt": "desc"}],
+        rows = await db.query_raw(
+            """
+            SELECT
+                id,
+                user_id AS "userId",
+                agent_id AS "agentId",
+                workspace_id AS "workspaceId",
+                title,
+                content,
+                NULL AS media,
+                skin,
+                open_date AS "openDate",
+                status,
+                sealed_at AS "sealedAt",
+                created_at AS "createdAt",
+                updated_at AS "updatedAt"
+            FROM time_capsules
+            WHERE agent_id = $1 AND user_id = $2 AND workspace_id = $3
+            ORDER BY open_date ASC, updated_at DESC
+            """,
+            agent_id,
+            user.get("sub"),
+            workspace_id,
+        )
+    else:
+        rows = await db.query_raw(
+            """
+            SELECT
+                id,
+                user_id AS "userId",
+                agent_id AS "agentId",
+                workspace_id AS "workspaceId",
+                title,
+                content,
+                NULL AS media,
+                skin,
+                open_date AS "openDate",
+                status,
+                sealed_at AS "sealedAt",
+                created_at AS "createdAt",
+                updated_at AS "updatedAt"
+            FROM time_capsules
+            WHERE agent_id = $1 AND user_id = $2
+            ORDER BY open_date ASC, updated_at DESC
+            """,
+            agent_id,
+            user.get("sub"),
+        )
+    logger.info(
+        "[capsule:list] loaded rows=%s workspace=%s elapsed_ms=%s",
+        len(rows),
+        workspace_id,
+        _elapsed_ms(started),
     )
-    responses = [_response(row) for row in rows]
+    responses = [_response(row, include_media=False) for row in rows]
     if state:
         responses = [item for item in responses if item.state == state]
+    logger.info(
+        "[capsule:list] done rows=%s state=%s elapsed_ms=%s",
+        len(responses),
+        state,
+        _elapsed_ms(started),
+    )
     return responses
+
+
+@router.post("/media")
+async def upload_capsule_media(
+    data: TimeCapsuleMediaUpload,
+    user: dict = Depends(require_user),
+):
+    started = time_module.perf_counter()
+    kind = data.kind.strip().lower()
+    if kind not in {"image", "audio"}:
+        raise HTTPException(status_code=400, detail="Invalid media kind")
+    raw_base64 = _strip_base64_prefix(data.base64)
+    try:
+        blob = base64.b64decode(raw_base64, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid media base64") from exc
+    size = data.size or len(blob)
+    if size != len(blob):
+        size = len(blob)
+    mime = (data.mime or ("image/jpeg" if kind == "image" else "audio/mp4")).strip()
+    if kind == "image" and size > _MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Image must be under 2MB")
+    if kind == "audio":
+        duration = float(data.duration_seconds or 0)
+        if duration <= 0 or duration > _MAX_AUDIO_SECONDS:
+            raise HTTPException(status_code=400, detail="Audio must be 20 seconds or shorter")
+        if size > _MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=400, detail="Audio is too large")
+    else:
+        duration = None
+
+    _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    ext = _mime_ext(mime, ".jpg" if kind == "image" else ".m4a")
+    storage_key = f"{user['sub']}_{uuid.uuid4().hex}{ext}"
+    _storage_path(storage_key).write_bytes(blob)
+    logger.info(
+        "[capsule:media] uploaded kind=%s size=%s elapsed_ms=%s",
+        kind,
+        size,
+        _elapsed_ms(started),
+    )
+    response: dict[str, Any] = {
+        "name": (data.name or ("capsule-image" if kind == "image" else "capsule-voice.m4a"))[:120],
+        "mime": mime[:80],
+        "size": size,
+        "storage_key": storage_key,
+        "url": f"/capsules/media/{storage_key}",
+    }
+    if duration is not None:
+        response["duration_seconds"] = duration
+    return response
+
+
+@router.get("/media/{storage_key}")
+async def get_capsule_media(
+    storage_key: str,
+    user: dict = Depends(require_user),
+):
+    path = _storage_path(storage_key)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Media not found")
+    if user.get("role") != "admin" and not storage_key.startswith(f"{user['sub']}_"):
+        raise HTTPException(status_code=403, detail="Not your media")
+    return Response(content=path.read_bytes())
+
+
+@router.get("/{capsule_id}", response_model=TimeCapsuleResponse)
+async def get_capsule(
+    capsule_id: str,
+    user: dict = Depends(require_user),
+):
+    started = time_module.perf_counter()
+    row = await db.timecapsule.find_unique(where={"id": capsule_id})
+    logger.info("[capsule:detail] loaded id=%s elapsed_ms=%s", capsule_id, _elapsed_ms(started))
+    if not row:
+        raise HTTPException(status_code=404, detail="Capsule not found")
+    if user.get("role") != "admin" and row.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your capsule")
+    return _response(row, include_media=True, hydrate_media=True)
 
 
 @router.post("", response_model=TimeCapsuleResponse)
@@ -269,29 +631,28 @@ async def create_capsule(
     logger.info("[capsule:create] scope_ok elapsed_ms=%s", _elapsed_ms(started))
     status, open_date, sealed_at = _normalize_create(data)
     content = data.content.strip()
-    media = _normalize_media(data.media)
+    media = _normalize_media(data.media, user_id=user["sub"])
     logger.info("[capsule:create] normalized elapsed_ms=%s", _elapsed_ms(started))
-    create_data: dict[str, Any] = {
-        "user": {"connect": {"id": user["sub"]}},
-        "agent": {"connect": {"id": data.agent_id}},
-        "title": (data.title or _title_from_content(content)).strip()[:80],
-        "content": content,
-        "skin": _normalize_skin(data.skin),
-        "status": status,
-    }
-    if data.workspace_id:
-        create_data["workspace"] = {"connect": {"id": data.workspace_id}}
-    if media is not None:
-        create_data["media"] = Json(media)
-    if open_date is not None:
-        create_data["openDate"] = open_date
-    if sealed_at is not None:
-        create_data["sealedAt"] = sealed_at
-    row = await db.timecapsule.create(
-        data=create_data,
+    capsule_id = str(uuid.uuid4())
+    await _insert_capsule_raw(
+        capsule_id=capsule_id,
+        user_id=user["sub"],
+        agent_id=data.agent_id,
+        workspace_id=data.workspace_id,
+        title=(data.title or _title_from_content(content)).strip()[:80],
+        content=content,
+        media=media,
+        skin=_normalize_skin(data.skin),
+        status=status,
+        open_date=open_date,
+        sealed_at=sealed_at,
     )
-    logger.info("[capsule:create] db_done elapsed_ms=%s", _elapsed_ms(started))
-    return _response(row)
+    logger.info("[capsule:create] insert_done elapsed_ms=%s", _elapsed_ms(started))
+    row = await _fetch_capsule_light(capsule_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Capsule not found")
+    logger.info("[capsule:create] fetch_light_done elapsed_ms=%s", _elapsed_ms(started))
+    return _response(row, include_media=False)
 
 
 @router.patch("/{capsule_id}", response_model=TimeCapsuleResponse)
@@ -318,25 +679,28 @@ async def update_capsule(
         raise HTTPException(status_code=404, detail="Capsule not found")
     if user.get("role") != "admin" and row.userId != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your capsule")
-    update_data: dict[str, Any] = {}
+    previous_media = _json_dict(row.media)
+    update_fields: dict[str, Any] = {}
     if data.content is not None:
         content = data.content.strip()
-        update_data["content"] = content
+        update_fields["content"] = content
         if data.title is None:
-            update_data["title"] = _title_from_content(content)
+            update_fields["title"] = _title_from_content(content)
     if data.title is not None:
-        update_data["title"] = data.title.strip()[:80] or None
+        update_fields["title"] = data.title.strip()[:80] or None
     clear_media = False
+    set_media = False
+    media: dict | None = None
     if "media" in fields_set:
-        media = _normalize_media(data.media)
+        media = _normalize_media(data.media, user_id=user["sub"])
         if media is not None:
-            update_data["media"] = Json(media)
+            set_media = True
         else:
             clear_media = True
     if data.skin is not None:
-        update_data["skin"] = _normalize_skin(data.skin)
+        update_fields["skin"] = _normalize_skin(data.skin)
     if data.open_date is not None:
-        update_data["openDate"] = _date_to_datetime(data.open_date)
+        update_fields["open_date"] = _date_to_datetime(data.open_date)
     if data.status is not None:
         if data.status not in _VALID_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid capsule status")
@@ -344,33 +708,33 @@ async def update_capsule(
             data.open_date is None and row.openDate is None
         ):
             raise HTTPException(status_code=400, detail="open_date is required when sealing")
-        update_data["status"] = data.status
-        update_data["sealedAt"] = datetime.now(UTC) if data.status == "sealed" else None
+        update_fields["status"] = data.status
+        update_fields["sealed_at"] = datetime.now(UTC) if data.status == "sealed" else None
     logger.info(
         "[capsule:update] normalized fields=%s clear_media=%s elapsed_ms=%s",
-        sorted(update_data.keys()),
+        sorted(update_fields.keys()) + (["media"] if set_media else []),
         clear_media,
         _elapsed_ms(started),
     )
-    if not update_data and not clear_media:
+    if not update_fields and not set_media and not clear_media:
         logger.info("[capsule:update] noop elapsed_ms=%s", _elapsed_ms(started))
-        return _response(row)
-    updated = row
-    if update_data:
-        updated = await db.timecapsule.update(
-            where={"id": capsule_id},
-            data=update_data,
-        )
-        logger.info("[capsule:update] prisma_update_done elapsed_ms=%s", _elapsed_ms(started))
-    if clear_media:
-        await _clear_capsule_media(capsule_id)
-        logger.info("[capsule:update] clear_media_done elapsed_ms=%s", _elapsed_ms(started))
-        updated = await db.timecapsule.find_unique(where={"id": capsule_id})
-        if not updated:
-            raise HTTPException(status_code=404, detail="Capsule not found")
-        logger.info("[capsule:update] refetch_done elapsed_ms=%s", _elapsed_ms(started))
+        return _response(row, include_media=False)
+    await _update_capsule_raw(
+        capsule_id,
+        fields=update_fields,
+        media=media,
+        set_media=set_media,
+        clear_media=clear_media,
+    )
+    if set_media or clear_media:
+        _delete_media_files(previous_media, keep_keys=_media_storage_keys(media))
+    logger.info("[capsule:update] raw_update_done elapsed_ms=%s", _elapsed_ms(started))
+    updated = await _fetch_capsule_light(capsule_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Capsule not found")
+    logger.info("[capsule:update] fetch_light_done elapsed_ms=%s", _elapsed_ms(started))
     logger.info("[capsule:update] done elapsed_ms=%s", _elapsed_ms(started))
-    return _response(updated)
+    return _response(updated, include_media=False)
 
 
 @router.delete("/{capsule_id}", status_code=204)
@@ -383,5 +747,7 @@ async def delete_capsule(
         raise HTTPException(status_code=404, detail="Capsule not found")
     if user.get("role") != "admin" and row.userId != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your capsule")
+    media = _json_dict(row.media)
     await db.timecapsule.delete(where={"id": capsule_id})
+    _delete_media_files(media)
     return Response(status_code=204)

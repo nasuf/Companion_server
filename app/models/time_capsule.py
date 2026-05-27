@@ -23,6 +23,15 @@ class TimeCapsuleUpdate(BaseModel):
     status: str | None = None
 
 
+class TimeCapsuleMediaUpload(BaseModel):
+    kind: str
+    name: str | None = None
+    mime: str | None = None
+    size: int | None = None
+    duration_seconds: float | None = None
+    base64: str = Field(min_length=1)
+
+
 class TimeCapsuleResponse(BaseModel):
     id: str
     user_id: str

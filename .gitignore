@@ -21,6 +21,7 @@ build/
 .server.pid
 reports/
 evals/results/
+var/
 
 # IDE
 .idea/
