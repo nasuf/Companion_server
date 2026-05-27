@@ -38,11 +38,37 @@ def _message_metadata(
     base: dict | None = None,
     *,
     client_id: str | None = None,
+    component_card: dict | None = None,
 ) -> dict | None:
     metadata = dict(base or {})
     if client_id:
         metadata["client_id"] = client_id
+    if component_card:
+        metadata["component_card"] = component_card
     return metadata or None
+
+
+def _sanitize_component_card(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    card_type = raw.get("type")
+    if card_type not in {"time_capsule", "weather"}:
+        return None
+    payload = raw.get("payload")
+    if payload is not None and not isinstance(payload, dict):
+        payload = None
+    card: dict = {
+        "version": 1,
+        "type": card_type,
+        "title": str(raw.get("title") or "")[:80],
+        "subtitle": str(raw.get("subtitle") or "")[:120],
+        "body": str(raw.get("body") or "")[:1000],
+        "footer": str(raw.get("footer") or "")[:120],
+        "accent": str(raw.get("accent") or "#7C3CFF")[:16],
+    }
+    if payload is not None:
+        card["payload"] = payload
+    return card
 
 
 async def _persist_user_message(
@@ -215,6 +241,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
                     # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
                     client_id = payload.get("client_id")
+                    component_card = _sanitize_component_card(payload.get("component_card"))
                     logger.info(
                         "ws message received",
                         extra={"event": EVT_WS_MESSAGE_RECV, "msg_len": len(text)},
@@ -222,6 +249,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     await _handle_message(
                         websocket, conversation_id, user_id, agent, text,
                         client_id=client_id,
+                        component_card=component_card,
                     )
 
         except WebSocketDisconnect:
@@ -274,6 +302,7 @@ async def _handle_message(
     text: str,
     *,
     client_id: str | None = None,
+    component_card: dict | None = None,
 ) -> None:
     """处理用户消息：聚合检查 → 生成回复 → 推送。"""
     schedule = await get_cached_schedule(agent.id)
@@ -299,7 +328,11 @@ async def _handle_message(
     user_message_id = await _persist_user_message(
         conversation_id,
         text,
-        metadata=_message_metadata(plan.metadata, client_id=client_id),
+        metadata=_message_metadata(
+            plan.metadata,
+            client_id=client_id,
+            component_card=component_card,
+        ),
     )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
 

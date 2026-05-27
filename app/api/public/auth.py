@@ -55,6 +55,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         agent_name=agent.name if agent else None,
         agent_avatar_key=getattr(agent, "avatarKey", None) if agent else None,
         agent_avatar_url=getattr(agent, "avatarUrl", None) if agent else None,
+        agent_city=getattr(agent, "city", None) if agent else None,
         workspace_id=workspace.id if workspace else None,
         conversation_id=conversation.id if conversation else None,
     )

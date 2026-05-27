@@ -61,6 +61,7 @@ def _agent_response(agent, *, workspace_id: str | None = None) -> AgentResponse:
         background=agent.background,
         values=agent.values,
         gender=agent.gender,
+        city=getattr(agent, "city", None),
         life_overview=agent.lifeOverview,
         avatar_key=getattr(agent, "avatarKey", None),
         avatar_url=getattr(agent, "avatarUrl", None),

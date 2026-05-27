@@ -55,6 +55,35 @@ def _aggregation_plan(
     )
 
 
+def test_sanitize_component_card_keeps_allowlisted_payload():
+    """聊天卡片 metadata 只保留可回放渲染需要的通用字段。"""
+    card = ws_mod._sanitize_component_card({
+        "type": "time_capsule",
+        "title": "未来胶囊",
+        "subtitle": "2026年6月1日开启",
+        "body": "一段写给未来的话",
+        "footer": "时间胶囊 · 已开启",
+        "accent": "#7C3CFF",
+        "payload": {"capsule_id": "cap-1", "content": "secret"},
+        "ignored": "x",
+    })
+
+    assert card == {
+        "version": 1,
+        "type": "time_capsule",
+        "title": "未来胶囊",
+        "subtitle": "2026年6月1日开启",
+        "body": "一段写给未来的话",
+        "footer": "时间胶囊 · 已开启",
+        "accent": "#7C3CFF",
+        "payload": {"capsule_id": "cap-1", "content": "secret"},
+    }
+
+
+def test_sanitize_component_card_rejects_unknown_type():
+    assert ws_mod._sanitize_component_card({"type": "unknown"}) is None
+
+
 @pytest.mark.asyncio
 async def test_turn_aggregation_bypass_for_record_requests():
     """提醒/记忆类控制消息不等待 turn quiet window。"""

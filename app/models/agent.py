@@ -57,6 +57,7 @@ class AgentResponse(BaseModel):
     background: str | None = None
     values: dict | None = None
     gender: str | None = None
+    city: str | None = None
     life_overview: str | None = None
     avatar_key: str | None = None
     avatar_url: str | None = None

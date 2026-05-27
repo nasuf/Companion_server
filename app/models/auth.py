@@ -36,5 +36,6 @@ class AuthResponse(BaseModel):
     agent_name: str | None = None
     agent_avatar_key: str | None = None
     agent_avatar_url: str | None = None
+    agent_city: str | None = None
     workspace_id: str | None = None
     conversation_id: str | None = None

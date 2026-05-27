@@ -33,6 +33,7 @@ model User {
   proactiveEvents  ProactiveEventLog[]
   patienceStates   PatienceState[]
   authIdentities    AuthIdentity[]
+  timeCapsules      TimeCapsule[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
   bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
@@ -93,6 +94,7 @@ model AiAgent {
   proactiveEvents    ProactiveEventLog[]
   patienceStates     PatienceState[]
   configOverride     AgentConfigOverride?
+  timeCapsules        TimeCapsule[]
 
   @@map("ai_agents")
 }
@@ -115,6 +117,7 @@ model ChatWorkspace {
   proactiveLogs   ProactiveChatLog[]
   proactiveState  ProactiveState?
   proactiveEvents ProactiveEventLog[]
+  timeCapsules    TimeCapsule[]
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -154,6 +157,29 @@ model Message {
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@map("messages")
+}
+
+model TimeCapsule {
+  id          String         @id @default(uuid())
+  userId      String         @map("user_id")
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId     String         @map("agent_id")
+  agent       AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId String?        @map("workspace_id")
+  workspace   ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  title       String?
+  content     String
+  media       Json?
+  skin        String         @default("paper")
+  openDate    DateTime?      @map("open_date")
+  status      String         @default("draft") // "draft" | "sealed"; opened is derived by date.
+  sealedAt    DateTime?      @map("sealed_at")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+
+  @@index([userId, agentId, status, openDate], map: "time_capsules_user_agent_state_idx")
+  @@index([workspaceId, status, openDate], map: "time_capsules_workspace_state_idx")
+  @@map("time_capsules")
 }
 
 // Admin 测试时对单条 AI 回复打标的 bug 标签. 跟 Message 是 N:1
