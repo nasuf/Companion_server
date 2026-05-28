@@ -157,25 +157,51 @@ fi
 
 # ── Check & start Redis ──
 echo "Checking Redis..."
-REDIS_RUNNING=$(docker ps --filter "publish=6379" --format "{{.Names}}" 2>/dev/null || true)
-if [ -z "$REDIS_RUNNING" ]; then
-    # Try starting existing stopped container
-    REDIS_STOPPED=$(docker ps -a --filter "publish=6379" --format "{{.Names}}" 2>/dev/null | head -1)
-    if [ -n "$REDIS_STOPPED" ]; then
-        echo "Starting stopped Redis container ($REDIS_STOPPED)..."
-        docker start "$REDIS_STOPPED"
-    else
-        echo "Starting new Redis container..."
-        docker run -d --name companion-redis -p 6379:6379 redis:7-alpine
+REDIS_URL_RAW="redis://localhost:6379/0"
+if [ -f ".env" ]; then
+    env_redis_url=$(grep -E "^REDIS_URL=" .env | head -1 | cut -d= -f2- | tr -d "'\"")
+    if [ -n "$env_redis_url" ]; then
+        REDIS_URL_RAW="$env_redis_url"
     fi
-    sleep 1
 fi
-# Verify Redis is reachable
-if redis-cli -p 6379 ping 2>/dev/null | grep -q PONG; then
-    echo "  Redis: OK"
+REDIS_HOST=$(.venv/bin/python - <<PYEOF
+from urllib.parse import urlparse
+url = urlparse("$REDIS_URL_RAW")
+print(url.hostname or "localhost")
+PYEOF
+)
+REDIS_PORT=$(.venv/bin/python - <<PYEOF
+from urllib.parse import urlparse
+url = urlparse("$REDIS_URL_RAW")
+print(url.port or 6379)
+PYEOF
+)
+
+if [ "$REDIS_HOST" = "localhost" ] || [ "$REDIS_HOST" = "127.0.0.1" ]; then
+    REDIS_RUNNING=$(docker ps --filter "publish=${REDIS_PORT}" --format "{{.Names}}" 2>/dev/null || true)
+    if [ -z "$REDIS_RUNNING" ] && [ "$REDIS_PORT" = "6379" ]; then
+        # Try starting existing stopped container only for the default local Redis.
+        REDIS_STOPPED=$(docker ps -a --filter "publish=6379" --format "{{.Names}}" 2>/dev/null | head -1)
+        if [ -n "$REDIS_STOPPED" ]; then
+            echo "Starting stopped Redis container ($REDIS_STOPPED)..."
+            docker start "$REDIS_STOPPED"
+        else
+            echo "Starting new Redis container..."
+            docker run -d --name companion-redis -p 6379:6379 redis:7-alpine
+        fi
+        sleep 1
+    fi
+fi
+
+if redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping 2>/dev/null | grep -q PONG; then
+    echo "  Redis: OK ($REDIS_HOST:$REDIS_PORT)"
 else
-    echo "  Redis: started (waiting for ready...)"
-    sleep 2
+    echo "  Redis: $REDIS_HOST:$REDIS_PORT unreachable"
+    if [ "$REDIS_PORT" != "6379" ]; then
+        echo "  If this is the Tencent tunnel, run:"
+        echo "    ssh -i ~/.ssh/companion_tencent -fN -o ExitOnForwardFailure=yes -L 127.0.0.1:${REDIS_PORT}:172.18.0.2:6379 ubuntu@106.52.115.80"
+    fi
+    exit 1
 fi
 
 # ── Ensure Prisma client is generated ──
