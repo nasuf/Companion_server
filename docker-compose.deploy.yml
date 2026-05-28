@@ -95,6 +95,8 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/capsule_media:/data/capsule_media"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s

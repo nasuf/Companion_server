@@ -3,6 +3,7 @@ from typing import Any
 import base64
 import json
 import logging
+import mimetypes
 import os
 from pathlib import Path
 import time as time_module
@@ -37,6 +38,11 @@ _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 _MAX_AUDIO_SECONDS = 20
 _MAX_AUDIO_BYTES = 512 * 1024
 _MEDIA_DIR = Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media"))
+_MEDIA_PUBLIC_PREFIX = (
+    os.getenv("CAPSULE_MEDIA_PUBLIC_PREFIX", "/capsules/media").strip().rstrip("/")
+    or "/capsules/media"
+)
+mimetypes.add_type("audio/mp4", ".m4a")
 
 
 def _date_to_datetime(value: date | None) -> datetime | None:
@@ -98,6 +104,10 @@ def _storage_path(storage_key: str) -> Path:
     if "/" in storage_key or "\\" in storage_key or ".." in storage_key:
         raise HTTPException(status_code=400, detail="Invalid media storage key")
     return _MEDIA_DIR / storage_key
+
+
+def _media_url(storage_key: str) -> str:
+    return f"{_MEDIA_PUBLIC_PREFIX}/{storage_key}"
 
 
 def _read_media_base64(storage_key: str) -> str | None:
@@ -267,8 +277,7 @@ def _normalize_media(media: dict | None, *, user_id: str | None = None) -> dict 
         if storage_key:
             _validate_media_storage_key(storage_key, user_id)
             clean_image["storage_key"] = storage_key
-            if image.get("url"):
-                clean_image["url"] = str(image.get("url"))[:300]
+            clean_image["url"] = _media_url(storage_key)
         else:
             clean_image["base64"] = _strip_base64_prefix(data)
         clean_images.append(clean_image)
@@ -297,8 +306,7 @@ def _normalize_media(media: dict | None, *, user_id: str | None = None) -> dict 
         if storage_key:
             _validate_media_storage_key(storage_key, user_id)
             clean_audio["storage_key"] = storage_key
-            if audio.get("url"):
-                clean_audio["url"] = str(audio.get("url"))[:300]
+            clean_audio["url"] = _media_url(storage_key)
         else:
             clean_audio["base64"] = _strip_base64_prefix(data)
 
@@ -575,7 +583,7 @@ async def upload_capsule_media(
         "mime": mime[:80],
         "size": size,
         "storage_key": storage_key,
-        "url": f"/capsules/media/{storage_key}",
+        "url": _media_url(storage_key),
     }
     if duration is not None:
         response["duration_seconds"] = duration
@@ -592,7 +600,11 @@ async def get_capsule_media(
         raise HTTPException(status_code=404, detail="Media not found")
     if user.get("role") != "admin" and not storage_key.startswith(f"{user['sub']}_"):
         raise HTTPException(status_code=403, detail="Not your media")
-    return Response(content=path.read_bytes())
+    media_type, _ = mimetypes.guess_type(path.name)
+    return Response(
+        content=path.read_bytes(),
+        media_type=media_type or "application/octet-stream",
+    )
 
 
 @router.get("/{capsule_id}", response_model=TimeCapsuleResponse)
