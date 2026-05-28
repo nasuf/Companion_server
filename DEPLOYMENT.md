@@ -81,7 +81,7 @@ DB_QUERY_MAX_RETRIES=4
 ### Redis
 
 ```env
-REDIS_URL=redis://redis:6379/4
+REDIS_URL=redis://redis:6379/0
 ```
 
 ### Model switch
@@ -149,6 +149,6 @@ REMOTE_SMALL_MODEL=qwen3.5-flash
 - Embeddings stay on the embedding provider path and are not switched to DeepSeek by `REMOTE_PROVIDER`.
 - The backend API is not exposed directly to the public internet in this deploy shape; Nginx on the web repo proxies requests to `127.0.0.1:8000`.
 - Admin APIs, including the prompt console endpoints, are protected by JWT admin role checks.
-- Keep local and deployed environments on different Redis DBs. Recommended:
-  - local: `redis://localhost:6380/0`
-  - production container network: `redis://redis:6379/4`
+- This deployment uses Redis DB 0 because the Tencent CVM Redis instance is dedicated to Companion.
+  - local tunnel: `redis://localhost:6380/0`
+  - production container network: `redis://redis:6379/0`

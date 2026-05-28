@@ -75,7 +75,7 @@ jobs:
             MIGRATION_DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=1&pool_timeout=60&connect_timeout=30
             APP_ENV=production
             CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}
-            REDIS_URL=redis://redis:6379/4
+            REDIS_URL=redis://redis:6379/0
             OLLAMA_BASE_URL=${{ vars.OLLAMA_BASE_URL }}
             DASHSCOPE_API_KEY=${{ secrets.DASHSCOPE_API_KEY }}
             DASHSCOPE_BASE_URL=${{ vars.DASHSCOPE_BASE_URL }}
