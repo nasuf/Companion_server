@@ -45,5 +45,6 @@ class TimeCapsuleResponse(BaseModel):
     status: str
     state: str
     sealed_at: str | None = None
+    opened_at: str | None = None
     created_at: str
     updated_at: str

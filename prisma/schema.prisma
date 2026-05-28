@@ -172,8 +172,9 @@ model TimeCapsule {
   media       Json?
   skin        String         @default("paper")
   openDate    DateTime?      @map("open_date")
-  status      String         @default("draft") // "draft" | "sealed"; opened is derived by date.
+  status      String         @default("draft") // "draft" | "sealed"; opening requires explicit user action.
   sealedAt    DateTime?      @map("sealed_at")
+  openedAt    DateTime?      @map("opened_at")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
 

@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 import base64
 import json
@@ -23,7 +23,7 @@ router = APIRouter(prefix="/capsules", tags=["time-capsules"])
 logger = logging.getLogger(__name__)
 
 _VALID_STATUSES = {"draft", "sealed"}
-_VALID_STATES = {"draft", "pending", "opened"}
+_VALID_STATES = {"draft", "pending", "ready", "opened"}
 _VALID_SKINS = {
     "paper",
     "warm",
@@ -43,6 +43,7 @@ _MEDIA_PUBLIC_PREFIX = (
     or "/capsules/media"
 )
 mimetypes.add_type("audio/mp4", ".m4a")
+_LOCAL_TZ = timezone(timedelta(hours=8))
 
 
 def _date_to_datetime(value: date | None) -> datetime | None:
@@ -61,9 +62,11 @@ def _date_string(value: Any) -> str | None:
     return str(value)[:10]
 
 
-def _derive_state(status: str, open_date: Any) -> str:
+def _derive_state(status: str, open_date: Any, opened_at: Any = None) -> str:
     if status == "draft":
         return "draft"
+    if opened_at is not None:
+        return "opened"
     raw = _date_string(open_date)
     if not raw:
         return "pending"
@@ -71,7 +74,7 @@ def _derive_state(status: str, open_date: Any) -> str:
         target = date.fromisoformat(raw)
     except ValueError:
         return "pending"
-    return "opened" if target <= datetime.now(UTC).date() else "pending"
+    return "ready" if target <= datetime.now(_LOCAL_TZ).date() else "pending"
 
 
 def _json_dict(value: Any) -> dict | None:
@@ -182,7 +185,7 @@ def _delete_media_files(media: dict | None, *, keep_keys: set[str] | None = None
 def _field(row: Any, name: str) -> Any:
     if isinstance(row, dict):
         return row.get(name)
-    return getattr(row, name)
+    return getattr(row, name, None)
 
 
 def _iso_string(value: Any) -> str:
@@ -192,6 +195,7 @@ def _iso_string(value: Any) -> str:
 def _response(row, *, include_media: bool = True, hydrate_media: bool = False) -> TimeCapsuleResponse:
     open_date = _field(row, "openDate")
     sealed_at = _field(row, "sealedAt")
+    opened_at = _field(row, "openedAt")
     media = _json_dict(_field(row, "media")) if include_media else None
     return TimeCapsuleResponse(
         id=_field(row, "id"),
@@ -204,8 +208,9 @@ def _response(row, *, include_media: bool = True, hydrate_media: bool = False) -
         skin=_field(row, "skin") or "paper",
         open_date=_date_string(open_date),
         status=_field(row, "status"),
-        state=_derive_state(_field(row, "status"), open_date),
+        state=_derive_state(_field(row, "status"), open_date, opened_at),
         sealed_at=_iso_string(sealed_at) if sealed_at else None,
+        opened_at=_iso_string(opened_at) if opened_at else None,
         created_at=_iso_string(_field(row, "createdAt")),
         updated_at=_iso_string(_field(row, "updatedAt")),
     )
@@ -363,6 +368,34 @@ async def _fetch_capsule_light(capsule_id: str) -> Any | None:
             open_date AS "openDate",
             status,
             sealed_at AS "sealedAt",
+            opened_at AS "openedAt",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+        FROM time_capsules
+        WHERE id = $1
+        LIMIT 1
+        """,
+        capsule_id,
+    )
+    return rows[0] if rows else None
+
+
+async def _fetch_capsule_full(capsule_id: str) -> Any | None:
+    rows = await db.query_raw(
+        """
+        SELECT
+            id,
+            user_id AS "userId",
+            agent_id AS "agentId",
+            workspace_id AS "workspaceId",
+            title,
+            content,
+            media,
+            skin,
+            open_date AS "openDate",
+            status,
+            sealed_at AS "sealedAt",
+            opened_at AS "openedAt",
             created_at AS "createdAt",
             updated_at AS "updatedAt"
         FROM time_capsules
@@ -487,6 +520,7 @@ async def list_capsules(
                 open_date AS "openDate",
                 status,
                 sealed_at AS "sealedAt",
+                opened_at AS "openedAt",
                 created_at AS "createdAt",
                 updated_at AS "updatedAt"
             FROM time_capsules
@@ -512,6 +546,7 @@ async def list_capsules(
                 open_date AS "openDate",
                 status,
                 sealed_at AS "sealedAt",
+                opened_at AS "openedAt",
                 created_at AS "createdAt",
                 updated_at AS "updatedAt"
             FROM time_capsules
@@ -613,12 +648,49 @@ async def get_capsule(
     user: dict = Depends(require_user),
 ):
     started = time_module.perf_counter()
-    row = await db.timecapsule.find_unique(where={"id": capsule_id})
+    row = await _fetch_capsule_full(capsule_id)
     logger.info("[capsule:detail] loaded id=%s elapsed_ms=%s", capsule_id, _elapsed_ms(started))
     if not row:
         raise HTTPException(status_code=404, detail="Capsule not found")
-    if user.get("role") != "admin" and row.userId != user.get("sub"):
+    if user.get("role") != "admin" and _field(row, "userId") != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your capsule")
+    return _response(row, include_media=True, hydrate_media=True)
+
+
+@router.post("/{capsule_id}/open", response_model=TimeCapsuleResponse)
+async def open_capsule(
+    capsule_id: str,
+    user: dict = Depends(require_user),
+):
+    started = time_module.perf_counter()
+    row = await _fetch_capsule_full(capsule_id)
+    logger.info("[capsule:open] loaded id=%s elapsed_ms=%s", capsule_id, _elapsed_ms(started))
+    if not row:
+        raise HTTPException(status_code=404, detail="Capsule not found")
+    if user.get("role") != "admin" and _field(row, "userId") != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your capsule")
+    state = _derive_state(
+        _field(row, "status"),
+        _field(row, "openDate"),
+        _field(row, "openedAt"),
+    )
+    if state == "draft":
+        raise HTTPException(status_code=400, detail="Draft capsule cannot be opened")
+    if state == "pending":
+        raise HTTPException(status_code=400, detail="Capsule is not ready to open")
+    if state != "opened":
+        await db.execute_raw(
+            """
+            UPDATE time_capsules
+            SET opened_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            """,
+            capsule_id,
+        )
+        row = await _fetch_capsule_full(capsule_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Capsule not found")
+    logger.info("[capsule:open] done id=%s elapsed_ms=%s", capsule_id, _elapsed_ms(started))
     return _response(row, include_media=True, hydrate_media=True)
 
 
