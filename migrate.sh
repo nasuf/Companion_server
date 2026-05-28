@@ -36,7 +36,7 @@ read_env_value() {
 }
 
 # ── 临时卸载代理 ──
-# Prisma CLI 的 Rust 引擎不尊重 NO_PROXY，代理会拦截 TCP 连接导致连不上 Supabase。
+# Prisma CLI 的 Rust 引擎不尊重 NO_PROXY，代理会拦截 TCP 连接导致连不上数据库。
 # 在运行 prisma 命令期间完全卸载代理环境变量，跑完后恢复。
 _saved_http="${HTTP_PROXY:-}"
 _saved_https="${HTTPS_PROXY:-}"
@@ -48,9 +48,8 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy 2>/dev/n
 
 # Migration 必须使用专用 URL。运行时 DATABASE_URL 通常被长跑服务使用,
 # 容易让 prisma migrate deploy 撞 EMAXCONNSESSION。MIGRATION_DATABASE_URL
-# 应使用 Supabase direct connection；如果本地/服务器不支持 direct URL,
-# 使用 session pooler(5432) + connection_limit=1。不要用 transaction
-# pooler(6543)，Prisma Migrate 需要稳定连接。
+# 应使用稳定的 Postgres 连接 URL，并设置 connection_limit=1。不要用 transaction
+# pooler，Prisma Migrate 需要稳定连接。
 # 这里同时覆盖 DIRECT_DATABASE_URL，避免 Prisma migrate 因 schema.prisma
 # 的 directUrl 回退到运行时连接。
 MIGRATION_URL="${MIGRATION_DATABASE_URL:-$(read_env_value MIGRATION_DATABASE_URL)}"
@@ -60,8 +59,8 @@ if [ -n "$MIGRATION_URL" ]; then
     echo "Using MIGRATION_DATABASE_URL for Prisma migrations."
 else
     echo "WARNING: MIGRATION_DATABASE_URL is not set; falling back to DATABASE_URL."
-    echo "         Supabase deployments should set MIGRATION_DATABASE_URL to the"
-    echo "         direct URL or session pooler URL (:5432?connection_limit=1)."
+    echo "         Production deployments should set MIGRATION_DATABASE_URL to a"
+    echo "         stable Postgres URL with connection_limit=1."
 fi
 
 # 诊断：检查 migration 数据库端口是否可达

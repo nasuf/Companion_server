@@ -424,7 +424,7 @@ P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭�
    - 数据盘挂载。
    - Docker / Nginx / certbot。
    - firewall / security group checklist。
-2. Supabase → 国内 Postgres 迁移流程：
+2. 云数据库 → 国内自托管 Postgres 迁移流程：
    - schema。
    - data dump / restore。
    - pgvector extension。

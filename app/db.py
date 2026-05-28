@@ -13,12 +13,11 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Supabase session pooler has a small per-session client pool. Keep Prisma's
-# own pool well below that limit and throttle app-side bursts so one API
+# Keep Prisma's own pool conservative and throttle app-side bursts so one API
 # process cannot exhaust all database sessions. The hard cap is intentional:
 # local reloads, stale Prisma query-engine children, and deploy restarts can
 # briefly overlap, so one process should not be allowed to reserve the whole
-# Supabase session pool.
+# database connection budget.
 _DB_CONNECTION_LIMIT_DEFAULT = 3
 _DB_CONNECTION_LIMIT_MAX_DEFAULT = 5
 _DB_POOL_TIMEOUT_DEFAULT = 30
@@ -70,9 +69,9 @@ def _with_safe_database_params(
 
     Prisma reads connection parameters from DATABASE_URL when its query engine
     starts. If local/prod env accidentally sets `connection_limit` above the
-    Supabase session pool cap, a single process can consume the whole pool and
-    cause EMAXCONNSESSION. We cap only the runtime URL; migration URLs are
-    handled separately by Prisma commands.
+    configured database connection budget, a single process can consume the
+    whole pool and cause connection exhaustion. We cap only the runtime URL;
+    migration URLs are handled separately by Prisma commands.
     """
     if not url.startswith(("postgres://", "postgresql://")):
         return url
@@ -207,10 +206,10 @@ db = ThrottledPrisma(
 )
 
 # ── 启动时连接重试参数 (可通过环境变量覆盖) ──
-# Supabase pooler 本地启动时偶有抖动, 需要比较宽松的重试:
+# 数据库启动或网络偶有抖动, 需要比较宽松的重试:
 #   - 每次尝试给 engine 30s 完成 TLS 握手 + 首次查询 (默认 10s 太短)
 #   - 指数退避 2/4/8/16/30s (cap), 共 8 次, 最差 ~4 min 后放弃
-#   - 放弃阈值大于典型 pooler 冷启动 (30-90s)
+#   - 放弃阈值大于典型数据库冷启动 / 网络抖动窗口 (30-90s)
 _CONNECT_MAX_ATTEMPTS = int(os.getenv("DB_CONNECT_MAX_ATTEMPTS", "8"))
 _CONNECT_TIMEOUT_S = int(os.getenv("DB_CONNECT_TIMEOUT_S", "30"))
 _CONNECT_BACKOFF_BASE = float(os.getenv("DB_CONNECT_BACKOFF_BASE", "2.0"))
@@ -223,7 +222,7 @@ def _backoff_seconds(attempt: int) -> float:
 
 
 async def _ping() -> None:
-    """主动验证连接确实可用。Supabase pooler 可能在 db.connect() 后立即关闭连接，
+    """主动验证连接确实可用。数据库连接可能在 db.connect() 后立即关闭，
     必须发一个真实查询才能确认。"""
     await db.execute_raw("SELECT 1")
 
@@ -231,7 +230,7 @@ async def _ping() -> None:
 async def connect_db():
     """带重试的数据库连接。
 
-    Supabase session pooler 偶尔会在 connect 后立刻关闭连接（idle timeout / network blip），
+    Postgres 或连接池偶尔会在 connect 后立刻关闭连接（idle timeout / network blip），
     导致首次查询触发 "Error { kind: Closed }"。这里通过 connect → ping 校验 → 失败重连
     的循环来保证启动时拿到的是真正可用的连接。
     """
@@ -277,7 +276,7 @@ async def connect_db():
 async def ensure_connected() -> None:
     """Verify DB connection is alive; reconnect if stale.
 
-    Supabase pooler may close idle connections during long-running tasks
+    Postgres or its connection pool may close idle connections during long-running tasks
     (e.g. batch embedding). Call this before write-heavy phases.
     """
     try:

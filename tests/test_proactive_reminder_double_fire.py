@@ -85,9 +85,36 @@ async def test_has_recent_proactive_query_filters_by_metadata_proactive_true():
     assert len(captured_sql) == 1
     sql = captured_sql[0]
     assert "role = 'assistant'" in sql, "必须只看 AI 消息"
+    assert "created_at >= $2::timestamp" in sql
     assert "metadata" in sql and "proactive" in sql, (
         "必须按 metadata.proactive 过滤, 防普通 chat reply 误算"
     )
+    assert isinstance(captured_args[0][1], str)
+
+
+@pytest.mark.asyncio
+async def test_has_recent_user_activity_query_casts_since_as_timestamp():
+    """prisma-py 会把 datetime 参数传成 text, timestamp 比较必须显式 cast."""
+    from app.services.proactive import state as state_mod
+
+    captured_sql = []
+    captured_args = []
+    now = datetime(2026, 5, 3, 14, 1, tzinfo=_TZ)
+
+    async def _fake_query(sql, *args):
+        captured_sql.append(sql)
+        captured_args.append(args)
+        return []
+
+    with patch.object(state_mod, "db") as mock_db:
+        mock_db.query_raw = AsyncMock(side_effect=_fake_query)
+        await state_mod.has_recent_user_activity("ws-1", now=now)
+
+    assert len(captured_sql) == 1
+    sql = captured_sql[0]
+    assert "role = 'user'" in sql
+    assert "created_at >= $2::timestamp" in sql
+    assert isinstance(captured_args[0][1], str)
 
 
 @pytest.mark.asyncio

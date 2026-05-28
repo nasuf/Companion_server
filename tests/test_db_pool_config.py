@@ -53,7 +53,7 @@ def test_with_safe_database_params_honors_configured_safe_cap(monkeypatch):
     assert "connection_limit=2" in result
 
 
-def test_is_db_pool_exhaustion_error_matches_supabase_session_pool_message():
+def test_is_db_pool_exhaustion_error_matches_session_pool_message():
     exc = RuntimeError(
         "FATAL: (EMAXCONNSESSION) max clients reached in session mode - "
         "max clients are limited to pool_size: 15"

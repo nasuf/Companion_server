@@ -1,5 +1,5 @@
 -- Phase 0: Add new tables for PRD 2-7
--- Run this migration against the Supabase database
+-- Run this archived migration against the target Postgres database
 -- Note: public schema uses TEXT for IDs (not UUID)
 
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;

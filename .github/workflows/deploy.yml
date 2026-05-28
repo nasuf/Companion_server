@@ -27,7 +27,7 @@ jobs:
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ vars.VPS_USERNAME }}
-          password: ${{ secrets.VPS_PASSWORD }}
+          key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ vars.VPS_PORT }}
           source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example"
           target: "/app/companion-server"
@@ -37,46 +37,62 @@ jobs:
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ vars.VPS_USERNAME }}
-          password: ${{ secrets.VPS_PASSWORD }}
+          key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ vars.VPS_PORT }}
           script: |
-            set -e
+            set -euo pipefail
 
             if ! command -v docker >/dev/null 2>&1; then
               curl -fsSL https://get.docker.com | sh
-              systemctl enable --now docker
+              sudo systemctl enable --now docker
             fi
 
             if ! docker compose version >/dev/null 2>&1; then
-              apt-get update
-              apt-get install -y docker-compose-plugin
+              sudo apt-get update
+              sudo apt-get install -y docker-compose-plugin
             fi
 
-            mkdir -p /app/companion-server
+            DOCKER="docker"
+            if ! docker ps >/dev/null 2>&1; then
+              DOCKER="sudo docker"
+            fi
+
+            sudo mkdir -p /app/companion-server /mnt/datadisk0/companion/{postgres,redis,ollama,logs,docker}
+            sudo chown -R "$USER:$USER" /app/companion-server /mnt/datadisk0/companion/logs
             cd /app/companion-server
 
-            sed 's/^ *//' > .env <<EOF
-            DATABASE_URL=${{ secrets.DATABASE_URL }}
-            DIRECT_DATABASE_URL=${{ secrets.DIRECT_DATABASE_URL }}
-            MIGRATION_DATABASE_URL=${{ secrets.MIGRATION_DATABASE_URL }}
+            POSTGRES_USER="${{ vars.POSTGRES_USER || 'companion' }}"
+            POSTGRES_DB="${{ vars.POSTGRES_DB || 'companion' }}"
+            POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}"
+
+            cat > .env <<EOF
+            POSTGRES_USER=$POSTGRES_USER
+            POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+            POSTGRES_DB=$POSTGRES_DB
+            COMPANION_DATA_DIR=/mnt/datadisk0/companion
+            DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=3&pool_timeout=30&connect_timeout=30
+            DIRECT_DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=1&pool_timeout=60&connect_timeout=30
+            MIGRATION_DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=1&pool_timeout=60&connect_timeout=30
             APP_ENV=production
             CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}
-            REDIS_URL=${{ secrets.REDIS_URL }}
+            REDIS_URL=redis://redis:6379/4
             OLLAMA_BASE_URL=${{ vars.OLLAMA_BASE_URL }}
             DASHSCOPE_API_KEY=${{ secrets.DASHSCOPE_API_KEY }}
             DASHSCOPE_BASE_URL=${{ vars.DASHSCOPE_BASE_URL }}
             DASHSCOPE_ENABLE_THINKING=${{ vars.DASHSCOPE_ENABLE_THINKING }}
             ONLINE_MODEL=${{ vars.ONLINE_MODEL }}
+            REMOTE_PROVIDER=${{ vars.REMOTE_PROVIDER }}
             LOCAL_CHAT_MODEL=${{ vars.LOCAL_CHAT_MODEL }}
             LOCAL_SMALL_MODEL=${{ vars.LOCAL_SMALL_MODEL }}
             REMOTE_CHAT_MODEL=${{ vars.REMOTE_CHAT_MODEL }}
             REMOTE_SMALL_MODEL=${{ vars.REMOTE_SMALL_MODEL }}
+            DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
             REPLY_DELAY_ENABLED=${{ vars.REPLY_DELAY_ENABLED }}
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}
-            LANGSMITH_ORG_ID=${{ secrets.LANGSMITH_ORG_ID }}
-            LANGSMITH_PROJECT_ID=${{ secrets.LANGSMITH_PROJECT_ID }}
+            LANGSMITH_ORG_ID=${{ vars.LANGSMITH_ORG_ID }}
+            LANGSMITH_PROJECT_ID=${{ vars.LANGSMITH_PROJECT_ID }}
             AXIOM_TOKEN=${{ secrets.AXIOM_TOKEN }}
             AXIOM_DATASET=${{ vars.AXIOM_DATASET }}
             AXIOM_ORG_ID=${{ vars.AXIOM_ORG_ID }}
@@ -84,9 +100,12 @@ jobs:
             EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL }}
             EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
+            WECHAT_LOGIN_ENABLED=${{ vars.WECHAT_LOGIN_ENABLED || 'false' }}
+            WECHAT_MOBILE_APP_ID=${{ vars.WECHAT_MOBILE_APP_ID }}
+            WECHAT_MOBILE_APP_SECRET=${{ secrets.WECHAT_MOBILE_APP_SECRET }}
             EOF
 
-            for key in DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS; do
+            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER; do
               value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
               if [ -z "$value" ]; then
                 echo "$key is required for production deploy"
@@ -95,10 +114,19 @@ jobs:
             done
 
             echo "==> Building server image"
-            docker compose -f docker-compose.deploy.yml build server
+            $DOCKER compose -f docker-compose.deploy.yml build server
 
-            echo "==> Stopping existing server stack before migration"
-            docker compose -f docker-compose.deploy.yml down --remove-orphans || true
+            echo "==> Starting data services"
+            $DOCKER compose -f docker-compose.deploy.yml up -d postgres redis ollama
+
+            EMBEDDING_MODEL_VALUE="$(grep -E '^EMBEDDING_MODEL=' .env | cut -d= -f2-)"
+            if ! $DOCKER compose -f docker-compose.deploy.yml exec -T ollama ollama list | awk 'NR > 1 {print $1}' | grep -Eq "^${EMBEDDING_MODEL_VALUE}(:|$)"; then
+              echo "==> Pulling embedding model: ${EMBEDDING_MODEL_VALUE}"
+              $DOCKER compose -f docker-compose.deploy.yml exec -T ollama ollama pull "$EMBEDDING_MODEL_VALUE"
+            fi
+
+            echo "==> Stopping server before migrations"
+            $DOCKER compose -f docker-compose.deploy.yml stop server || true
 
             echo "==> Running database migrations"
             MIGRATION_DATABASE_URL_VALUE="$(grep -E '^MIGRATION_DATABASE_URL=' .env | cut -d= -f2-)"
@@ -106,18 +134,34 @@ jobs:
               echo "MIGRATION_DATABASE_URL secret is required for Prisma migrations"
               exit 1
             fi
-            docker compose -f docker-compose.deploy.yml run --rm --no-deps \
+            $DOCKER compose -f docker-compose.deploy.yml run --rm --no-deps \
               -e DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
               -e DIRECT_DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
               server prisma migrate deploy
 
             echo "==> Starting server stack"
-            docker compose -f docker-compose.deploy.yml up -d --remove-orphans
-            docker compose -f docker-compose.deploy.yml ps
+            $DOCKER compose -f docker-compose.deploy.yml up -d --no-deps server
+            $DOCKER compose -f docker-compose.deploy.yml ps
+
+            echo "==> Waiting for server health"
+            for i in $(seq 1 40); do
+              status="$($DOCKER inspect -f '{{.State.Health.Status}}' companion-server 2>/dev/null || true)"
+              if [ "$status" = "healthy" ]; then
+                curl -fsS http://127.0.0.1:8000/health
+                echo
+                break
+              fi
+              if [ "$i" -eq 40 ]; then
+                echo "companion-server did not become healthy"
+                $DOCKER compose -f docker-compose.deploy.yml logs --tail=200 server || true
+                exit 1
+              fi
+              sleep 3
+            done
 
             echo "==> Cleaning up old docker images (>72h old, dangling, untagged)"
             # 防止历史 deploy 镜像层堆积撑爆磁盘 (Redis bgsave 一旦失败就锁所有
             # 写命令, 整个后端起不来). until=72h 安全保留近 3 天回滚目标; -a
             # 包含未被任何容器引用的具名 image, -f 跳过交互确认.
-            docker image prune -af --filter "until=72h" || true
-            docker builder prune -af --filter "until=72h" || true
+            $DOCKER image prune -af --filter "until=72h" || true
+            $DOCKER builder prune -af --filter "until=72h" || true

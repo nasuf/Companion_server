@@ -185,13 +185,13 @@ export PATH="$(pwd)/.venv/bin:$PATH"
 
 # ── 绕过代理 ──
 # 本地开发时如果开启了代理 (HTTP_PROXY/HTTPS_PROXY)，
-# Prisma engine / Ollama / Supabase 连接会被代理拦截。
-# 把 localhost + .env 里所有 Supabase host 加到 NO_PROXY 白名单绕过代理直连。
+# Prisma engine / Ollama / Postgres 连接会被代理拦截。
+# 把 localhost + .env 里所有 database host 加到 NO_PROXY 白名单绕过代理直连。
 # 仅影响通过 start.sh 启动的本地开发环境，生产部署不走此脚本。
 NO_PROXY_ENTRIES="localhost 127.0.0.1 0.0.0.0 ::1"
 if [ -f ".env" ]; then
-    # 同时抓 DATABASE_URL (pooler) 和 DIRECT_DATABASE_URL (direct) 两个 host,
-    # Supabase 两种 URL 的子域可能不同, 漏掉一个会让某一路径被代理拦截.
+    # 同时抓 DATABASE_URL 和 DIRECT_DATABASE_URL 两个 host,
+    # 运行时和迁移 URL 可能不同, 漏掉一个会让某一路径被代理拦截.
     for var in DATABASE_URL DIRECT_DATABASE_URL; do
         url=$(grep -E "^${var}=" .env | head -1 | cut -d= -f2- | tr -d "'\"")
         host=$(echo "$url" | sed -nE 's|^.*@([^:/]+).*$|\1|p')
@@ -199,8 +199,6 @@ if [ -f ".env" ]; then
             NO_PROXY_ENTRIES="$NO_PROXY_ENTRIES $host"
         fi
     done
-    # Supabase 不同 region 的 pooler 子域名不一致, 用域后缀兜底
-    NO_PROXY_ENTRIES="$NO_PROXY_ENTRIES .supabase.com .supabase.co"
 fi
 # 去重 + 逗号拼接
 LOCAL_NO_PROXY=$(echo "$NO_PROXY_ENTRIES" | tr ' ' '\n' | awk '!seen[$0]++' | paste -sd, -)
@@ -220,7 +218,7 @@ echo "  NO_PROXY=$NO_PROXY"
 
 # ── TCP preflight: 在 uvicorn 启动前直接用 python socket 握手 DB 端口 ──
 # socket 不受 HTTP_PROXY 影响, 所以这个预检能精确告诉用户: 是 TCP 不通 (VPN/
-# 防火墙/Supabase down), 还是 Prisma 特有的代理问题.
+# 防火墙/数据库不可达), 还是 Prisma 特有的代理问题.
 if [ -f ".env" ]; then
     echo "Testing DB TCP connectivity..."
     for var in DATABASE_URL DIRECT_DATABASE_URL; do

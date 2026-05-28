@@ -567,11 +567,11 @@ async def has_recent_user_activity(workspace_id: str, *, now: datetime | None = 
             WHERE c.workspace_id = $1
               AND c.is_deleted = FALSE
               AND m.role = 'user'
-              AND m.created_at >= $2
+              AND m.created_at >= $2::timestamp
             LIMIT 1
             """,
             workspace_id,
-            since,
+            _ts(since),
         )
     except Exception as e:
         _log_if_unavailable("recent activity check", e)
@@ -608,12 +608,12 @@ async def has_recent_proactive_or_reminder(
             WHERE c.workspace_id = $1
               AND c.is_deleted = FALSE
               AND m.role = 'assistant'
-              AND m.created_at >= $2
+              AND m.created_at >= $2::timestamp
               AND (m.metadata->>'proactive')::boolean = TRUE
             LIMIT 1
             """,
             workspace_id,
-            since,
+            _ts(since),
         )
     except Exception as e:
         _log_if_unavailable("recent proactive check", e)
