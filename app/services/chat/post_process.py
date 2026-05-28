@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -157,13 +158,22 @@ async def _bg_user_emotion(
     user_message_id: str | None,
     user_emotion: dict | None,
 ) -> None:
-    """写 LLM 算好的用户情绪标签到消息 metadata。"""
+    """写 LLM 算好的用户情绪标签到消息 metadata。
+
+    用 DB 侧 jsonb merge 保留已有 client_id/component_card 等渲染字段；
+    不能整列覆盖 metadata。
+    """
     if not user_message_id or not user_emotion:
         return
     try:
-        await db.message.update(
-            where={"id": user_message_id},
-            data={"metadata": Json({"emotion": user_emotion})},
+        await db.execute_raw(
+            """
+            UPDATE messages
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+            WHERE id = $2
+            """,
+            json.dumps({"emotion": user_emotion}, ensure_ascii=False),
+            user_message_id,
         )
         logger.info(
             f"[BG] user_emotion written to msg {user_message_id[:8]}",

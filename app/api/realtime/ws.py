@@ -85,6 +85,19 @@ async def _persist_user_message(
             **({"metadata": Json(metadata)} if metadata else {}),
         }
     )
+    metadata_keys = sorted((metadata or {}).keys())
+    logger.info(
+        "ws user message persisted "
+        f"message_id={saved.id[:8]} metadata_keys={metadata_keys} "
+        f"has_component_card={bool((metadata or {}).get('component_card'))} "
+        f"has_client_id={bool((metadata or {}).get('client_id'))}",
+        extra={
+            "message_id": saved.id,
+            "metadata_keys": metadata_keys,
+            "has_component_card": bool((metadata or {}).get("component_card")),
+            "has_client_id": bool((metadata or {}).get("client_id")),
+        },
+    )
     await mark_user_replied_for_conversation(conversation_id)
     return saved.id
 
@@ -241,10 +254,28 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
                     # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
                     client_id = payload.get("client_id")
-                    component_card = _sanitize_component_card(payload.get("component_card"))
+                    raw_component_card = payload.get("component_card")
+                    component_card = _sanitize_component_card(raw_component_card)
+                    client_id_present = isinstance(client_id, str) and bool(client_id)
+                    component_card_type = (
+                        raw_component_card.get("type")
+                        if isinstance(raw_component_card, dict)
+                        else None
+                    )
                     logger.info(
-                        "ws message received",
-                        extra={"event": EVT_WS_MESSAGE_RECV, "msg_len": len(text)},
+                        "ws message received "
+                        f"len={len(text)} client_id_present={client_id_present} "
+                        f"component_card_present={raw_component_card is not None} "
+                        f"component_card_type={component_card_type} "
+                        f"component_card_sanitized={component_card is not None}",
+                        extra={
+                            "event": EVT_WS_MESSAGE_RECV,
+                            "msg_len": len(text),
+                            "client_id_present": client_id_present,
+                            "component_card_present": raw_component_card is not None,
+                            "component_card_type": component_card_type,
+                            "component_card_sanitized": component_card is not None,
+                        },
                     )
                     await _handle_message(
                         websocket, conversation_id, user_id, agent, text,

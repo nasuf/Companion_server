@@ -124,6 +124,28 @@ async def test_run_post_process_skips_agent_only_tasks_when_no_agent():
     pr.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_bg_user_emotion_preserves_existing_message_metadata():
+    """用户情绪后台写入必须使用 jsonb merge, 不能覆盖组件渲染 metadata。"""
+    from app.services.chat import post_process
+
+    fake_db = MagicMock()
+    fake_db.execute_raw = AsyncMock(return_value=1)
+
+    with patch.object(post_process, "db", fake_db):
+        await post_process._bg_user_emotion(
+            "msg-1",
+            {"emotion": "高兴", "intensity": 72},
+        )
+
+    fake_db.execute_raw.assert_awaited_once()
+    sql, patch_json, message_id = fake_db.execute_raw.await_args.args
+    assert "COALESCE(metadata" in sql
+    assert "|| $1::jsonb" in sql
+    assert patch_json == '{"emotion": {"emotion": "高兴", "intensity": 72}}'
+    assert message_id == "msg-1"
+
+
 # --- _bg_positive_recovery: spec §2.5 LLM 语义判定门 ---
 
 

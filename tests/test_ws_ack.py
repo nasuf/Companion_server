@@ -306,6 +306,63 @@ async def test_handle_message_non_fragment_sends_ack_with_client_id(fake_ws):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_persists_component_card_metadata(fake_ws):
+    """组件卡片必须跟 client_id 一起进入用户消息 metadata, 供历史记录回放渲染。"""
+    agent = SimpleNamespace(id="a1", name="A")
+    captured_metadata = None
+
+    async def _fake_persist(*args, **kwargs):
+        nonlocal captured_metadata
+        captured_metadata = kwargs.get("metadata")
+        return "db-msg-card-1"
+
+    card = {
+        "version": 1,
+        "type": "time_capsule",
+        "title": "Hi there",
+        "subtitle": "2026年5月28日开启",
+        "body": "Hi there🙌",
+        "footer": "时间胶囊 · 已开启",
+        "accent": "#7C3CFF",
+        "payload": {"capsule_id": "cap-1"},
+    }
+    plan = _aggregation_plan("immediate", text="胶囊消息", metadata={"queued": True})
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(ws_mod, "_queue_reply", new_callable=AsyncMock),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "胶囊消息",
+            client_id="client-card-uuid",
+            component_card=card,
+        )
+
+    assert captured_metadata == {
+        "queued": True,
+        "client_id": "client-card-uuid",
+        "component_card": card,
+    }
+
+
+@pytest.mark.asyncio
 async def test_handle_message_normal_turn_aggregates_before_queue(fake_ws):
     """普通非碎片消息先进入 turn quiet window, 不立刻触发 reply。"""
     agent = SimpleNamespace(id="a1", name="A")
