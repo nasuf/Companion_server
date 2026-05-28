@@ -86,7 +86,7 @@ async def _persist_user_message(
         }
     )
     metadata_keys = sorted((metadata or {}).keys())
-    logger.info(
+    logger.debug(
         "ws user message persisted "
         f"message_id={saved.id[:8]} metadata_keys={metadata_keys} "
         f"has_component_card={bool((metadata or {}).get('component_card'))} "
@@ -262,7 +262,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                         if isinstance(raw_component_card, dict)
                         else None
                     )
-                    logger.info(
+                    logger.debug(
                         "ws message received "
                         f"len={len(text)} client_id_present={client_id_present} "
                         f"component_card_present={raw_component_card is not None} "
