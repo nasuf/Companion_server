@@ -19,6 +19,7 @@ model User {
   email            String?             @unique
   status           String              @default("active")
   archivedAt       DateTime?           @map("archived_at")
+  lastSeenAt       DateTime?           @map("last_seen_at")
   createdAt        DateTime            @default(now()) @map("created_at")
   updatedAt        DateTime            @updatedAt @map("updated_at")
   agents           AiAgent[]
@@ -34,6 +35,8 @@ model User {
   patienceStates   PatienceState[]
   authIdentities    AuthIdentity[]
   timeCapsules      TimeCapsule[]
+  lastWills         LastWill[]
+  dailyActivities   UserDailyActivity[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
   bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
@@ -95,6 +98,7 @@ model AiAgent {
   patienceStates     PatienceState[]
   configOverride     AgentConfigOverride?
   timeCapsules        TimeCapsule[]
+  lastWills           LastWill[]
 
   @@map("ai_agents")
 }
@@ -118,6 +122,7 @@ model ChatWorkspace {
   proactiveState  ProactiveState?
   proactiveEvents ProactiveEventLog[]
   timeCapsules    TimeCapsule[]
+  lastWills       LastWill[]
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -181,6 +186,65 @@ model TimeCapsule {
   @@index([userId, agentId, status, openDate], map: "time_capsules_user_agent_state_idx")
   @@index([workspaceId, status, openDate], map: "time_capsules_workspace_state_idx")
   @@map("time_capsules")
+}
+
+model LastWill {
+  id             String             @id @default(uuid())
+  userId         String             @map("user_id")
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String             @map("agent_id")
+  agent          AiAgent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId    String?            @map("workspace_id")
+  workspace      ChatWorkspace?     @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  content        String
+  inactivityDays Int                @default(30) @map("inactivity_days")
+  contacts       Json               @default("[]")
+  status         String             @default("draft") // draft | active | paused | triggered | cancelled
+  startedAt      DateTime?          @map("started_at")
+  triggeredAt    DateTime?          @map("triggered_at")
+  deliveredAt    DateTime?          @map("delivered_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  deliveries     LastWillDelivery[]
+
+  @@unique([userId, agentId], map: "last_wills_user_agent_unique")
+  @@index([userId, agentId, status], map: "last_wills_user_agent_status_idx")
+  @@index([status, startedAt], map: "last_wills_status_started_idx")
+  @@map("last_wills")
+}
+
+model LastWillDelivery {
+  id         String   @id @default(uuid())
+  lastWillId String   @map("last_will_id")
+  lastWill   LastWill @relation(fields: [lastWillId], references: [id], onDelete: Cascade)
+  channel    String
+  contact    Json
+  dedupeKey  String   @map("dedupe_key")
+  status     String   @default("pending")
+  error      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([lastWillId, channel, dedupeKey], map: "last_will_deliveries_unique_contact_channel")
+  @@index([status, createdAt], map: "last_will_deliveries_status_idx")
+  @@map("last_will_deliveries")
+}
+
+model UserDailyActivity {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  localDate   DateTime @map("local_date") @db.Date
+  source      String
+  seenCount   Int      @default(1) @map("seen_count")
+  firstSeenAt DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, localDate], map: "user_daily_activity_user_date_key")
+  @@index([userId, localDate], map: "user_daily_activity_user_date_idx")
+  @@map("user_daily_activity")
 }
 
 // Admin 测试时对单条 AI 回复打标的 bug 标签. 跟 Message 是 N:1

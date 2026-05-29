@@ -33,6 +33,7 @@ from app.services.interaction.delayed_queue import (
 from app.services.interaction.user_turn_aggregation import scan_due_user_turns
 from app.services.proactive.triggers import scan_triggers
 from app.services.proactive.special_dates import scan_special_dates_today
+from app.services.last_will import scan_due_last_wills
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     DistributedLockUnavailable,
@@ -308,6 +309,15 @@ def setup_scheduler():
     )
     logger.info("Scheduler: trigger_scan registered (interval=15s)")
 
+    scheduler.add_job(
+        _run_last_will_scan,
+        "interval",
+        hours=1,
+        id="last_will_scan",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Part 5 §2.1: NTP 校准每 6 小时跑一次
     scheduler.add_job(
         _run_ntp_calibration,
@@ -490,6 +500,19 @@ async def _run_trigger_scan():
             logger.warning(f"Trigger scan failed: {e}")
 
     await _run_distributed_job("trigger_scan", 120, _body)
+
+
+async def _run_last_will_scan():
+    """Scan inactive-login last wills and create pending deliveries."""
+    async def _body():
+        try:
+            stats = await scan_due_last_wills()
+            if stats.get("triggered") or stats.get("deliveries"):
+                logger.info(f"Last will scan: {stats}")
+        except Exception as e:
+            logger.warning(f"Last will scan failed: {e}")
+
+    await _run_distributed_job("last_will_scan", 3600, _body)
 
 
 async def _run_redis_health_recheck():

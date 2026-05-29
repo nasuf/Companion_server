@@ -26,6 +26,7 @@ from app.services.wechat_auth import (
     exchange_wechat_code,
     find_or_create_wechat_user,
 )
+from app.services.user_activity import record_user_activity
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ async def register(data: RegisterRequest, request: Request):
         outcome="success",
     )
     logger.info("User registered", extra={"event": "auth_register", "user_id": user.id})
+    await record_user_activity(user.id, source="register")
     return await _build_auth_response(user, token)
 
 
@@ -126,6 +128,7 @@ async def login(data: LoginRequest, request: Request):
         outcome="success",
     )
     logger.info("User logged in", extra={"event": "auth_login", "user_id": user.id})
+    await record_user_activity(user.id, source="password_login")
     return await _build_auth_response(user, token)
 
 
@@ -167,6 +170,7 @@ async def wechat_mobile_login(data: WeChatMobileLoginRequest, request: Request):
             "platform": data.platform,
         },
     )
+    await record_user_activity(user.id, source="wechat_login")
     return await _build_auth_response(user, token)
 
 
@@ -180,4 +184,5 @@ async def get_me(payload: dict = Depends(require_user)):
         )
 
     token = create_jwt(user.id, user.role)
+    await record_user_activity(user.id, source="auth_me")
     return await _build_auth_response(user, token)
