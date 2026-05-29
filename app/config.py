@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # JWT authentication
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days
+    # Optional separate key for last-will content/contact encryption. If unset,
+    # production falls back to the strong JWT secret enforced below.
+    last_will_encryption_key: str = ""
 
     # WeChat Open Platform mobile app login. AppSecret must stay server-side.
     wechat_login_enabled: bool = False

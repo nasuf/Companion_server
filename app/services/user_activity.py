@@ -10,6 +10,10 @@ logger = logging.getLogger(__name__)
 _LOCAL_TZ = timezone(timedelta(hours=8))
 
 
+class UserActivityWriteError(RuntimeError):
+    """Raised when an online heartbeat could not be recorded anywhere."""
+
+
 def local_activity_date(now: datetime | None = None) -> date:
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
@@ -22,6 +26,7 @@ async def record_user_activity(
     *,
     source: str,
     now: datetime | None = None,
+    raise_on_total_failure: bool = False,
 ) -> None:
     """Record one app/auth activity heartbeat per local calendar day.
 
@@ -33,6 +38,29 @@ async def record_user_activity(
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     day = local_activity_date(current)
+
+    user_seen_error: Exception | None = None
+    ledger_error: Exception | None = None
+
+    try:
+        await db.execute_raw(
+            """
+            UPDATE users
+            SET last_seen_at = $2::timestamp, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            """,
+            user_id,
+            current,
+        )
+    except Exception as exc:
+        user_seen_error = exc
+        logger.warning(
+            "record_user_activity failed to touch user last_seen_at for user=%s source=%s: %r",
+            user_id,
+            source,
+            exc,
+        )
+
     try:
         await db.execute_raw(
             """
@@ -55,22 +83,18 @@ async def record_user_activity(
             source[:40],
             current,
         )
-        await db.execute_raw(
-            """
-            UPDATE users
-            SET last_seen_at = $2::timestamp, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-            """,
-            user_id,
-            current,
-        )
     except Exception as exc:
+        ledger_error = exc
         logger.warning(
-            "record_user_activity failed for user=%s source=%s: %r",
+            "record_user_activity failed to upsert daily ledger for user=%s source=%s: %r",
             user_id,
             source,
             exc,
         )
+    if user_seen_error is not None and ledger_error is not None and raise_on_total_failure:
+        raise UserActivityWriteError(
+            f"failed to record activity heartbeat for user={user_id}"
+        ) from ledger_error
 
 
 async def get_login_streak_days(user_id: str, *, today: date | None = None) -> int:

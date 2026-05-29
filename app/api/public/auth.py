@@ -26,11 +26,25 @@ from app.services.wechat_auth import (
     exchange_wechat_code,
     find_or_create_wechat_user,
 )
-from app.services.user_activity import record_user_activity
+from app.services.user_activity import UserActivityWriteError, record_user_activity
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+async def _record_auth_activity(user_id: str, *, source: str) -> None:
+    try:
+        await record_user_activity(
+            user_id,
+            source=source,
+            raise_on_total_failure=True,
+        )
+    except UserActivityWriteError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="上线记录失败，请稍后重试",
+        )
 
 
 async def _build_auth_response(user, token: str) -> AuthResponse:
@@ -96,7 +110,7 @@ async def register(data: RegisterRequest, request: Request):
         outcome="success",
     )
     logger.info("User registered", extra={"event": "auth_register", "user_id": user.id})
-    await record_user_activity(user.id, source="register")
+    await _record_auth_activity(user.id, source="register")
     return await _build_auth_response(user, token)
 
 
@@ -128,7 +142,7 @@ async def login(data: LoginRequest, request: Request):
         outcome="success",
     )
     logger.info("User logged in", extra={"event": "auth_login", "user_id": user.id})
-    await record_user_activity(user.id, source="password_login")
+    await _record_auth_activity(user.id, source="password_login")
     return await _build_auth_response(user, token)
 
 
@@ -170,7 +184,7 @@ async def wechat_mobile_login(data: WeChatMobileLoginRequest, request: Request):
             "platform": data.platform,
         },
     )
-    await record_user_activity(user.id, source="wechat_login")
+    await _record_auth_activity(user.id, source="wechat_login")
     return await _build_auth_response(user, token)
 
 
@@ -184,5 +198,5 @@ async def get_me(payload: dict = Depends(require_user)):
         )
 
     token = create_jwt(user.id, user.role)
-    await record_user_activity(user.id, source="auth_me")
+    await _record_auth_activity(user.id, source="auth_me")
     return await _build_auth_response(user, token)

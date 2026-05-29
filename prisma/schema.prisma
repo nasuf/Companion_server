@@ -197,9 +197,9 @@ model LastWill {
   workspaceId    String?            @map("workspace_id")
   workspace      ChatWorkspace?     @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   content        String
-  inactivityDays Int                @default(30) @map("inactivity_days")
-  contacts       Json               @default("[]")
-  status         String             @default("draft") // draft | active | paused | triggered | cancelled
+  inactivityDays Int                @default(30) @map("inactivity_days") // DB CHECK: 5..365
+  contacts       Json               @default("[]") // DB CHECK: JSON array, max 3
+  status         String             @default("draft") // DB CHECK: draft | active | paused | triggered | cancelled
   startedAt      DateTime?          @map("started_at")
   triggeredAt    DateTime?          @map("triggered_at")
   deliveredAt    DateTime?          @map("delivered_at")
@@ -217,10 +217,10 @@ model LastWillDelivery {
   id         String   @id @default(uuid())
   lastWillId String   @map("last_will_id")
   lastWill   LastWill @relation(fields: [lastWillId], references: [id], onDelete: Cascade)
-  channel    String
+  channel    String // DB CHECK: email | phone
   contact    Json
   dedupeKey  String   @map("dedupe_key")
-  status     String   @default("pending")
+  status     String   @default("pending") // DB CHECK: pending | sent | failed | cancelled
   error      String?
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")

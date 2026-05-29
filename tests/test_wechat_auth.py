@@ -130,6 +130,7 @@ async def test_wechat_mobile_login_returns_existing_auth_response(monkeypatch):
     monkeypatch.setattr(auth_api, "exchange_wechat_code", AsyncMock(return_value="payload"))
     monkeypatch.setattr(auth_api, "find_or_create_wechat_user", AsyncMock(return_value=user))
     monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
     monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=expected))
 
     response = await auth_api.wechat_mobile_login(request, FakeRequest())
@@ -137,6 +138,7 @@ async def test_wechat_mobile_login_returns_existing_auth_response(monkeypatch):
     assert response == expected
     auth_api.enforce_login_rate_limit.assert_awaited_once()
     auth_api.clear_login_failures.assert_awaited_once()
+    auth_api._record_auth_activity.assert_awaited_once_with("user-1", source="wechat_login")
 
 
 @pytest.mark.asyncio

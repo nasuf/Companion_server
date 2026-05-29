@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_PHONE_RE = re.compile(r"^[0-9+()\-\s]{5,40}$")
 
 
 class LastWillContact(BaseModel):
@@ -16,6 +20,24 @@ class LastWillContact(BaseModel):
     def _strip_string(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip()
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str | None) -> str | None:
+        if not value:
+            return value
+        if not _EMAIL_RE.fullmatch(value):
+            raise ValueError("邮箱格式不正确")
+        return value
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, value: str | None) -> str | None:
+        if not value:
+            return value
+        if not _PHONE_RE.fullmatch(value):
+            raise ValueError("电话格式不正确")
         return value
 
     @model_validator(mode="after")

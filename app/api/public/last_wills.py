@@ -16,6 +16,12 @@ from app.models.last_will import (
     LastWillResponse,
     LastWillUpdate,
 )
+from app.services.last_will_crypto import (
+    protect_contact,
+    protect_text,
+    reveal_contact,
+    reveal_text,
+)
 
 router = APIRouter(prefix="/last-wills", tags=["last-wills"])
 
@@ -38,17 +44,26 @@ def _json_list(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if isinstance(value, str):
-        value = json.loads(value)
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
     data = getattr(value, "data", value)
     return data if isinstance(data, list) else []
 
 
 def _contacts(value: Any) -> list[LastWillContact]:
-    return [LastWillContact.model_validate(item) for item in _json_list(value)[:3]]
+    contacts: list[LastWillContact] = []
+    for item in _json_list(value)[:3]:
+        try:
+            contacts.append(LastWillContact.model_validate(reveal_contact(item)))
+        except Exception:
+            continue
+    return contacts
 
 
 def _contact_payload(contacts: list[LastWillContact] | None) -> str:
-    data = [contact.model_dump() for contact in (contacts or [])]
+    data = [protect_contact(contact.model_dump()) for contact in (contacts or [])]
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -58,7 +73,7 @@ def _response(row: Any) -> LastWillResponse:
         user_id=_field(row, "userId"),
         agent_id=_field(row, "agentId"),
         workspace_id=_field(row, "workspaceId"),
-        content=_field(row, "content") or "",
+        content=reveal_text(_field(row, "content")),
         inactivity_days=int(_field(row, "inactivityDays") or 30),
         contacts=_contacts(_field(row, "contacts")),
         status=_field(row, "status") or "draft",
@@ -151,59 +166,31 @@ async def list_last_wills(
     user: dict = Depends(require_user),
 ):
     await _ensure_agent_scope(agent_id=agent_id, workspace_id=workspace_id, user=user)
-    if workspace_id:
-        rows = await db.query_raw(
-            """
-            SELECT
-                lw.id,
-                lw.user_id AS "userId",
-                lw.agent_id AS "agentId",
-                lw.workspace_id AS "workspaceId",
-                lw.content,
-                lw.inactivity_days AS "inactivityDays",
-                lw.contacts,
-                lw.status,
-                u.last_seen_at AS "lastSeenAt",
-                lw.started_at AS "startedAt",
-                lw.triggered_at AS "triggeredAt",
-                lw.delivered_at AS "deliveredAt",
-                lw.created_at AS "createdAt",
-                lw.updated_at AS "updatedAt"
-            FROM last_wills lw
-            JOIN users u ON u.id = lw.user_id
-            WHERE lw.agent_id = $1 AND lw.user_id = $2 AND lw.workspace_id = $3
-            ORDER BY lw.updated_at DESC
-            """,
-            agent_id,
-            user.get("sub"),
-            workspace_id,
-        )
-    else:
-        rows = await db.query_raw(
-            """
-            SELECT
-                lw.id,
-                lw.user_id AS "userId",
-                lw.agent_id AS "agentId",
-                lw.workspace_id AS "workspaceId",
-                lw.content,
-                lw.inactivity_days AS "inactivityDays",
-                lw.contacts,
-                lw.status,
-                u.last_seen_at AS "lastSeenAt",
-                lw.started_at AS "startedAt",
-                lw.triggered_at AS "triggeredAt",
-                lw.delivered_at AS "deliveredAt",
-                lw.created_at AS "createdAt",
-                lw.updated_at AS "updatedAt"
-            FROM last_wills lw
-            JOIN users u ON u.id = lw.user_id
-            WHERE lw.agent_id = $1 AND lw.user_id = $2
-            ORDER BY lw.updated_at DESC
-            """,
-            agent_id,
-            user.get("sub"),
-        )
+    rows = await db.query_raw(
+        """
+        SELECT
+            lw.id,
+            lw.user_id AS "userId",
+            lw.agent_id AS "agentId",
+            lw.workspace_id AS "workspaceId",
+            lw.content,
+            lw.inactivity_days AS "inactivityDays",
+            lw.contacts,
+            lw.status,
+            u.last_seen_at AS "lastSeenAt",
+            lw.started_at AS "startedAt",
+            lw.triggered_at AS "triggeredAt",
+            lw.delivered_at AS "deliveredAt",
+            lw.created_at AS "createdAt",
+            lw.updated_at AS "updatedAt"
+        FROM last_wills lw
+        JOIN users u ON u.id = lw.user_id
+        WHERE lw.agent_id = $1 AND lw.user_id = $2
+        ORDER BY lw.updated_at DESC
+        """,
+        agent_id,
+        user.get("sub"),
+    )
     return [_response(row) for row in rows]
 
 
@@ -217,22 +204,10 @@ async def create_last_will(
         workspace_id=data.workspace_id,
         user=user,
     )
-    existing = await db.query_raw(
-        """
-        SELECT id
-        FROM last_wills
-        WHERE user_id = $1 AND agent_id = $2
-        LIMIT 1
-        """,
-        user["sub"],
-        data.agent_id,
-    )
-    if existing:
-        raise HTTPException(status_code=409, detail="Only one last will is allowed")
     status = _normalize_status(data.status, data.contacts, data.content)
     started_at = datetime.now(UTC) if status == "active" else None
     will_id = str(uuid.uuid4())
-    await db.execute_raw(
+    inserted = await db.query_raw(
         """
         INSERT INTO last_wills (
             id, user_id, agent_id, workspace_id, content, inactivity_days,
@@ -242,17 +217,21 @@ async def create_last_will(
             $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::timestamp,
             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         )
+        ON CONFLICT (user_id, agent_id) DO NOTHING
+        RETURNING id
         """,
         will_id,
         user["sub"],
         data.agent_id,
         data.workspace_id,
-        data.content,
+        protect_text(data.content),
         data.inactivity_days,
         _contact_payload(data.contacts),
         status,
         started_at,
     )
+    if not inserted:
+        raise HTTPException(status_code=409, detail="Only one last will is allowed")
     row = await _fetch_will(will_id)
     if not row:
         raise HTTPException(status_code=404, detail="Last will not found")
@@ -269,7 +248,8 @@ async def update_last_will(
     current_contacts = _contacts(_field(row, "contacts"))
     target_contacts = data.contacts if data.contacts is not None else current_contacts
     target_status = data.status if data.status is not None else _field(row, "status")
-    target_content = data.content if data.content is not None else (_field(row, "content") or "")
+    current_content = reveal_text(_field(row, "content"))
+    target_content = data.content if data.content is not None else current_content
     status = _normalize_status(target_status, target_contacts, target_content)
 
     fields_set = (
@@ -280,7 +260,7 @@ async def update_last_will(
     assignments: list[str] = []
     values: list[Any] = []
     if data.content is not None:
-        values.append(data.content)
+        values.append(protect_text(data.content))
         assignments.append(f"content = ${len(values)}")
     if data.inactivity_days is not None:
         values.append(data.inactivity_days)
@@ -368,7 +348,19 @@ async def delete_last_will(
     user: dict = Depends(require_user),
 ):
     await _require_will_owner(will_id, user)
-    await db.execute_raw("DELETE FROM last_wills WHERE id = $1", will_id)
+    await db.execute_raw(
+        """
+        UPDATE last_wills
+        SET content = '',
+            status = 'cancelled',
+            started_at = NULL,
+            triggered_at = NULL,
+            delivered_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        """,
+        will_id,
+    )
     return Response(status_code=204)
 
 
@@ -395,16 +387,22 @@ async def list_deliveries(
         """,
         will_id,
     )
-    return [
-        LastWillDelivery(
-            id=_field(row, "id"),
-            last_will_id=_field(row, "lastWillId"),
-            channel=_field(row, "channel"),
-            contact=LastWillContact.model_validate(_field(row, "contact")),
-            status=_field(row, "status"),
-            error=_field(row, "error"),
-            created_at=_iso(_field(row, "createdAt")) or "",
-            updated_at=_iso(_field(row, "updatedAt")) or "",
+    deliveries: list[LastWillDelivery] = []
+    for row in rows:
+        try:
+            contact = LastWillContact.model_validate(reveal_contact(_field(row, "contact")))
+        except Exception:
+            continue
+        deliveries.append(
+            LastWillDelivery(
+                id=_field(row, "id"),
+                last_will_id=_field(row, "lastWillId"),
+                channel=_field(row, "channel"),
+                contact=contact,
+                status=_field(row, "status"),
+                error=_field(row, "error"),
+                created_at=_iso(_field(row, "createdAt")) or "",
+                updated_at=_iso(_field(row, "updatedAt")) or "",
+            )
         )
-        for row in rows
-    ]
+    return deliveries

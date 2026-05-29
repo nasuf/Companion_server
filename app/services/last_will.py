@@ -8,6 +8,7 @@ from typing import Any
 
 from app.db import db
 from app.models.last_will import LastWillContact
+from app.services.last_will_crypto import protect_contact, reveal_contact
 from app.services.user_activity import local_activity_date
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,9 @@ def _json_contacts(value: Any) -> list[dict[str, Any]]:
     for item in data:
         if isinstance(item, dict):
             try:
-                contacts.append(LastWillContact.model_validate(item).model_dump())
+                contacts.append(
+                    LastWillContact.model_validate(reveal_contact(item)).model_dump()
+                )
             except Exception:
                 continue
     return contacts[:3]
@@ -83,6 +86,10 @@ async def scan_due_last_wills(now: datetime | None = None, *, limit: int = 500) 
         LEFT JOIN user_daily_activity uda ON uda.user_id = lw.user_id
         WHERE lw.status = 'active'
           AND lw.triggered_at IS NULL
+          AND lw.inactivity_days BETWEEN 5 AND 365
+          AND btrim(lw.content) <> ''
+          AND jsonb_typeof(lw.contacts) = 'array'
+          AND jsonb_array_length(lw.contacts) > 0
         GROUP BY lw.id, u.id
         ORDER BY lw.started_at ASC NULLS LAST, lw.updated_at ASC
         LIMIT $1
@@ -102,7 +109,12 @@ async def scan_due_last_wills(now: datetime | None = None, *, limit: int = 500) 
             continue
 
         will_id = str(_field(row, "id"))
-        await db.execute_raw(
+        contacts = _json_contacts(_field(row, "contacts"))
+        if not contacts:
+            logger.warning("[last_will] skip active will with no valid contacts id=%s", will_id)
+            continue
+
+        updated_rows = await db.query_raw(
             """
             UPDATE last_wills
             SET status = 'triggered',
@@ -111,11 +123,16 @@ async def scan_due_last_wills(now: datetime | None = None, *, limit: int = 500) 
             WHERE id = $1
               AND status = 'active'
               AND triggered_at IS NULL
+            RETURNING id
             """,
             will_id,
             current,
         )
-        created = await _create_pending_deliveries(will_id, _json_contacts(_field(row, "contacts")))
+        if not updated_rows:
+            logger.info("[last_will] trigger skipped after concurrent update id=%s", will_id)
+            continue
+
+        created = await _create_pending_deliveries(will_id, contacts)
         deliveries += created
         triggered += 1
         logger.info(
@@ -136,7 +153,7 @@ async def _create_pending_deliveries(will_id: str, contacts: list[dict[str, Any]
             value = contact.get(channel)
             if not value:
                 continue
-            await db.execute_raw(
+            inserted = await db.query_raw(
                 """
                 INSERT INTO last_will_deliveries (
                     id, last_will_id, channel, contact, dedupe_key, status,
@@ -147,13 +164,15 @@ async def _create_pending_deliveries(will_id: str, contacts: list[dict[str, Any]
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
                 ON CONFLICT (last_will_id, channel, dedupe_key) DO NOTHING
+                RETURNING id
                 """,
                 will_id,
                 channel,
-                json.dumps(contact, ensure_ascii=False),
+                json.dumps(protect_contact(contact), ensure_ascii=False),
                 _delivery_dedupe_key(channel, str(value)),
             )
-            created += 1
+            if inserted:
+                created += 1
     return created
 
 
