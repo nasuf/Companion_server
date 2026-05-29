@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,7 +10,14 @@ from app.api.public import time_capsules
 from app.models.time_capsule import TimeCapsuleUpdate
 
 
-def _capsule_row(*, content: str, media=None):
+def _capsule_row(
+    *,
+    content: str,
+    media=None,
+    status: str = "draft",
+    open_date=None,
+    opened_at=None,
+):
     now = datetime(2026, 5, 27, tzinfo=UTC)
     return SimpleNamespace(
         id="capsule-id",
@@ -20,9 +28,10 @@ def _capsule_row(*, content: str, media=None):
         content=content,
         media=media,
         skin="paper",
-        openDate=None,
-        status="draft",
+        openDate=open_date,
+        status=status,
         sealedAt=None,
+        openedAt=opened_at,
         createdAt=now,
         updatedAt=now,
     )
@@ -59,6 +68,74 @@ async def test_update_capsule_clears_media_with_raw_sql(monkeypatch):
     db.query_raw.assert_awaited_once()
     assert response.content == "新内容"
     assert response.media is None
+
+
+@pytest.mark.asyncio
+async def test_update_capsule_rejects_opened_capsule(monkeypatch):
+    opened = _capsule_row(
+        content="旧内容",
+        status="sealed",
+        opened_at=datetime(2026, 5, 28, tzinfo=UTC),
+    )
+    db = SimpleNamespace(
+        timecapsule=SimpleNamespace(find_unique=AsyncMock(return_value=opened)),
+    )
+    monkeypatch.setattr(time_capsules, "db", db)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await time_capsules.update_capsule(
+            "capsule-id",
+            TimeCapsuleUpdate(content="新内容"),
+            user={"sub": "user-id", "role": "user"},
+        )
+
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_get_capsule_rejects_unopened_locked_content(monkeypatch):
+    pending = _capsule_row(
+        content="秘密内容",
+        status="sealed",
+        open_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        time_capsules,
+        "_fetch_capsule_full",
+        AsyncMock(return_value=pending),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await time_capsules.get_capsule(
+            "capsule-id",
+            user={"sub": "user-id", "role": "user"},
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_list_capsules_redacts_locked_content_and_pushes_state_to_sql(monkeypatch):
+    pending = _capsule_row(
+        content="秘密内容",
+        status="sealed",
+        open_date=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    db = SimpleNamespace(query_raw=AsyncMock(return_value=[pending.__dict__]))
+    monkeypatch.setattr(time_capsules, "db", db)
+    monkeypatch.setattr(time_capsules, "_ensure_agent_scope", AsyncMock())
+
+    response = await time_capsules.list_capsules(
+        agent_id="agent-id",
+        workspace_id="workspace-id",
+        state="pending",
+        user={"sub": "user-id", "role": "user"},
+    )
+
+    sql = db.query_raw.await_args.args[0]
+    assert "open_date::date >" in sql
+    assert response[0].content == ""
+    assert response[0].title is None
 
 
 @pytest.mark.asyncio
@@ -176,3 +253,41 @@ def test_normalize_media_rejects_foreign_storage_key(monkeypatch, tmp_path):
         )
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_cleanup_unreferenced_media_keeps_referenced_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(time_capsules, "_MEDIA_DIR", tmp_path)
+    referenced = tmp_path / "user-id_keep.jpg"
+    orphan = tmp_path / "user-id_orphan.m4a"
+    fresh = tmp_path / "user-id_fresh.jpg"
+    referenced.write_bytes(b"image")
+    orphan.write_bytes(b"audio")
+    fresh.write_bytes(b"new")
+    old_time = 1_700_000_000
+    now = old_time + 100_000
+    os.utime(referenced, (old_time, old_time))
+    os.utime(orphan, (old_time, old_time))
+    os.utime(fresh, (now, now))
+    monkeypatch.setattr(time_capsules.time_module, "time", lambda: now)
+    db = SimpleNamespace(
+        query_raw=AsyncMock(
+            return_value=[
+                {
+                    "media": {
+                        "images": [{"storage_key": referenced.name}],
+                    }
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(time_capsules, "db", db)
+
+    await time_capsules._cleanup_unreferenced_media(
+        "user-id",
+        max_age_seconds=3600,
+    )
+
+    assert referenced.exists()
+    assert not orphan.exists()
+    assert fresh.exists()

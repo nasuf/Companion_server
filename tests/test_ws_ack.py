@@ -64,7 +64,7 @@ def test_sanitize_component_card_keeps_allowlisted_payload():
         "body": "一段写给未来的话",
         "footer": "时间胶囊 · 已开启",
         "accent": "#7C3CFF",
-        "payload": {"capsule_id": "cap-1", "content": "secret"},
+        "payload": {"capsule_id": "cap-1", "content": "secret", "ignored": "x"},
         "ignored": "x",
     })
 
@@ -78,6 +78,22 @@ def test_sanitize_component_card_keeps_allowlisted_payload():
         "accent": "#7C3CFF",
         "payload": {"capsule_id": "cap-1", "content": "secret"},
     }
+
+
+def test_sanitize_component_card_limits_payload_size():
+    card = ws_mod._sanitize_component_card({
+        "type": "time_capsule",
+        "body": "x",
+        "payload": {
+            "capsule_id": "cap-1",
+            "content": "a" * 1200,
+            "nested": {"large": "ignored"},
+        },
+    })
+
+    assert card is not None
+    assert set(card["payload"]) == {"capsule_id", "content"}
+    assert len(card["payload"]["content"]) == 1000
 
 
 def test_sanitize_component_card_rejects_unknown_type():

@@ -18,6 +18,7 @@ from app.models.time_capsule import (
     TimeCapsuleResponse,
     TimeCapsuleUpdate,
 )
+from app.services.runtime.tasks import fire_background
 
 router = APIRouter(prefix="/capsules", tags=["time-capsules"])
 logger = logging.getLogger(__name__)
@@ -179,7 +180,49 @@ def _delete_media_files(media: dict | None, *, keep_keys: set[str] | None = None
             if path.exists() and path.is_file():
                 path.unlink()
         except Exception:
-            logger.warning("[capsule:media] failed to delete storage_key=%s", storage_key, exc_info=True)
+            logger.warning(
+                "[capsule:media] failed to delete storage_key=%s",
+                storage_key,
+                exc_info=True,
+            )
+
+
+async def _cleanup_unreferenced_media(user_id: str, *, max_age_seconds: int = 86400) -> None:
+    try:
+        if not _MEDIA_DIR.exists():
+            return
+        now = time_module.time()
+        candidates = {
+            path.name
+            for path in _MEDIA_DIR.glob(f"{user_id}_*")
+            if path.is_file() and now - path.stat().st_mtime > max_age_seconds
+        }
+        if not candidates:
+            return
+        rows = await db.query_raw(
+            """
+            SELECT media
+            FROM time_capsules
+            WHERE user_id = $1 AND media IS NOT NULL
+            """,
+            user_id,
+        )
+        used: set[str] = set()
+        for row in rows:
+            used.update(_media_storage_keys(_json_dict(_field(row, "media"))))
+        for storage_key in candidates - used:
+            try:
+                path = _storage_path(storage_key)
+                if path.exists() and path.is_file():
+                    path.unlink()
+            except Exception:
+                logger.warning(
+                    "[capsule:media] failed to cleanup orphan storage_key=%s",
+                    storage_key,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.warning("[capsule:media] orphan cleanup failed", exc_info=True)
 
 
 def _field(row: Any, name: str) -> Any:
@@ -214,6 +257,19 @@ def _response(row, *, include_media: bool = True, hydrate_media: bool = False) -
         created_at=_iso_string(_field(row, "createdAt")),
         updated_at=_iso_string(_field(row, "updatedAt")),
     )
+
+
+def _redact_locked_response(response: TimeCapsuleResponse) -> TimeCapsuleResponse:
+    if response.state not in {"pending", "ready"}:
+        return response
+    update = {
+        "title": None,
+        "content": "",
+        "media": None,
+    }
+    if hasattr(response, "model_copy"):
+        return response.model_copy(update=update)
+    return response.copy(update=update)
 
 
 async def _ensure_agent_scope(
@@ -407,6 +463,25 @@ async def _fetch_capsule_full(capsule_id: str) -> Any | None:
     return rows[0] if rows else None
 
 
+def _state_sql_clause(state: str) -> str:
+    today_sql = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date"
+    if state == "draft":
+        return "status = 'draft'"
+    if state == "opened":
+        return "status = 'sealed' AND opened_at IS NOT NULL"
+    if state == "ready":
+        return (
+            "status = 'sealed' AND opened_at IS NULL "
+            f"AND open_date IS NOT NULL AND open_date::date <= {today_sql}"
+        )
+    if state == "pending":
+        return (
+            "status = 'sealed' AND opened_at IS NULL "
+            f"AND (open_date IS NULL OR open_date::date > {today_sql})"
+        )
+    raise HTTPException(status_code=400, detail="Invalid capsule state")
+
+
 async def _insert_capsule_raw(
     *,
     capsule_id: str,
@@ -430,7 +505,15 @@ async def _insert_capsule_raw(
         "skin",
         "status",
     ]
-    values: list[Any] = [capsule_id, user_id, agent_id, title, content, skin, status]
+    values: list[Any] = [
+        capsule_id,
+        user_id,
+        agent_id,
+        title,
+        content,
+        skin,
+        status,
+    ]
     placeholders = [f"${index}" for index in range(1, len(values) + 1)]
 
     if workspace_id is not None:
@@ -499,15 +582,27 @@ async def list_capsules(
     agent_id: str = Query(...),
     workspace_id: str | None = None,
     state: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     user: dict = Depends(require_user),
 ):
     started = time_module.perf_counter()
     if state is not None and state not in _VALID_STATES:
         raise HTTPException(status_code=400, detail="Invalid capsule state")
     await _ensure_agent_scope(agent_id=agent_id, workspace_id=workspace_id, user=user)
+    values: list[Any] = [agent_id, user.get("sub")]
+    where = ["agent_id = $1", "user_id = $2"]
     if workspace_id:
-        rows = await db.query_raw(
-            """
+        values.append(workspace_id)
+        where.append(f"workspace_id = ${len(values)}")
+    if state:
+        where.append(_state_sql_clause(state))
+    values.append(limit)
+    limit_placeholder = f"${len(values)}"
+    values.append(offset)
+    offset_placeholder = f"${len(values)}"
+    rows = await db.query_raw(
+        f"""
             SELECT
                 id,
                 user_id AS "userId",
@@ -524,47 +619,23 @@ async def list_capsules(
                 created_at AS "createdAt",
                 updated_at AS "updatedAt"
             FROM time_capsules
-            WHERE agent_id = $1 AND user_id = $2 AND workspace_id = $3
+            WHERE {" AND ".join(where)}
             ORDER BY open_date ASC, updated_at DESC
+            LIMIT {limit_placeholder}
+            OFFSET {offset_placeholder}
             """,
-            agent_id,
-            user.get("sub"),
-            workspace_id,
-        )
-    else:
-        rows = await db.query_raw(
-            """
-            SELECT
-                id,
-                user_id AS "userId",
-                agent_id AS "agentId",
-                workspace_id AS "workspaceId",
-                title,
-                content,
-                NULL AS media,
-                skin,
-                open_date AS "openDate",
-                status,
-                sealed_at AS "sealedAt",
-                opened_at AS "openedAt",
-                created_at AS "createdAt",
-                updated_at AS "updatedAt"
-            FROM time_capsules
-            WHERE agent_id = $1 AND user_id = $2
-            ORDER BY open_date ASC, updated_at DESC
-            """,
-            agent_id,
-            user.get("sub"),
-        )
+        *values,
+    )
     logger.info(
         "[capsule:list] loaded rows=%s workspace=%s elapsed_ms=%s",
         len(rows),
         workspace_id,
         _elapsed_ms(started),
     )
-    responses = [_response(row, include_media=False) for row in rows]
-    if state:
-        responses = [item for item in responses if item.state == state]
+    responses = [
+        _redact_locked_response(_response(row, include_media=False))
+        for row in rows
+    ]
     logger.info(
         "[capsule:list] done rows=%s state=%s elapsed_ms=%s",
         len(responses),
@@ -607,6 +678,7 @@ async def upload_capsule_media(
     ext = _mime_ext(mime, ".jpg" if kind == "image" else ".m4a")
     storage_key = f"{user['sub']}_{uuid.uuid4().hex}{ext}"
     _storage_path(storage_key).write_bytes(blob)
+    fire_background(_cleanup_unreferenced_media(user["sub"]))
     logger.info(
         "[capsule:media] uploaded kind=%s size=%s elapsed_ms=%s",
         kind,
@@ -654,7 +726,10 @@ async def get_capsule(
         raise HTTPException(status_code=404, detail="Capsule not found")
     if user.get("role") != "admin" and _field(row, "userId") != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your capsule")
-    return _response(row, include_media=True, hydrate_media=True)
+    response = _response(row, include_media=True, hydrate_media=True)
+    if response.state in {"pending", "ready"}:
+        raise HTTPException(status_code=403, detail="Capsule is not opened yet")
+    return response
 
 
 @router.post("/{capsule_id}/open", response_model=TimeCapsuleResponse)
@@ -763,6 +838,8 @@ async def update_capsule(
         raise HTTPException(status_code=404, detail="Capsule not found")
     if user.get("role") != "admin" and row.userId != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your capsule")
+    if row.openedAt is not None:
+        raise HTTPException(status_code=409, detail="Opened capsules are read-only")
     previous_media = _json_dict(row.media)
     update_fields: dict[str, Any] = {}
     if data.content is not None:

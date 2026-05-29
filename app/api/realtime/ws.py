@@ -54,9 +54,7 @@ def _sanitize_component_card(raw: object) -> dict | None:
     card_type = raw.get("type")
     if card_type not in {"time_capsule", "weather"}:
         return None
-    payload = raw.get("payload")
-    if payload is not None and not isinstance(payload, dict):
-        payload = None
+    payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
     card: dict = {
         "version": 1,
         "type": card_type,
@@ -69,6 +67,36 @@ def _sanitize_component_card(raw: object) -> dict | None:
     if payload is not None:
         card["payload"] = payload
     return card
+
+
+def _truncate_payload_value(value: object, limit: int) -> str:
+    return str(value or "")[:limit]
+
+
+def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    if card_type == "time_capsule":
+        payload: dict = {}
+        capsule_id = _truncate_payload_value(raw.get("capsule_id"), 80).strip()
+        if capsule_id:
+            payload["capsule_id"] = capsule_id
+        for key in ("created_date", "open_date"):
+            value = _truncate_payload_value(raw.get(key), 32).strip()
+            if value:
+                payload[key] = value
+        content = _truncate_payload_value(raw.get("content"), 1000)
+        if content:
+            payload["content"] = content
+        return payload or None
+    if card_type == "weather":
+        payload = {}
+        for key in ("location", "date", "condition", "temperature", "unit"):
+            value = _truncate_payload_value(raw.get(key), 80).strip()
+            if value:
+                payload[key] = value
+        return payload or None
+    return None
 
 
 async def _persist_user_message(
