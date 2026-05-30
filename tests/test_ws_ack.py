@@ -100,6 +100,136 @@ def test_sanitize_component_card_rejects_unknown_type():
     assert ws_mod._sanitize_component_card({"type": "unknown"}) is None
 
 
+def test_sanitize_component_card_allows_checkin_types():
+    reminder = ws_mod._sanitize_component_card({
+        "type": "checkin_reminder",
+        "title": "打卡提醒",
+        "subtitle": "今天 23:00",
+        "body": "睡前收尾",
+        "footer": "一次提醒",
+        "accent": "#4F6DF5",
+    })
+    habit = ws_mod._sanitize_component_card({
+        "type": "checkin_habit",
+        "title": "习惯打卡",
+        "subtitle": "每天",
+        "body": "早起",
+        "footer": "周期习惯",
+        "accent": "#22C66B",
+    })
+
+    assert reminder and reminder["type"] == "checkin_reminder"
+    assert habit and habit["type"] == "checkin_habit"
+
+
+def test_sanitize_checkin_card_preserves_weekdays_and_ai_flag():
+    card = ws_mod._sanitize_component_card({
+        "type": "checkin_habit",
+        "title": "习惯打卡",
+        "subtitle": "每周五、周六、周日 11:00",
+        "body": "Testing - 5",
+        "footer": "打卡 · 周期习惯",
+        "accent": "#22C66B",
+        "payload": {
+            "trigger_id": "trigger-1",
+            "summary": "Testing - 5",
+            "recurrence": "weekly",
+            "trigger_time": "2026-06-05T03:00:00Z",
+            "habit_weekdays": [5, 6, 7],
+            "sent_to_ai": True,
+        },
+    })
+
+    assert card is not None
+    assert card["payload"]["habit_weekdays"] == [5, 6, 7]
+    assert card["payload"]["sent_to_ai"] is True
+
+
+def test_checkin_component_reply_message_prevents_recreating_reminder():
+    card = ws_mod._sanitize_component_card({
+        "type": "checkin_habit",
+        "title": "习惯打卡",
+        "subtitle": "每周五、周六、周日 11:00",
+        "body": "Testing - 5",
+        "footer": "打卡 · 周期习惯",
+        "payload": {
+            "summary": "Testing - 5",
+            "recurrence": "weekly",
+            "trigger_time": "2026-06-05T03:00:00Z",
+            "habit_weekdays": [5, 6, 7],
+        },
+    })
+
+    message = ws_mod._component_card_reply_message("原始文字", card)
+
+    assert message is not None
+    assert "已创建的周期习惯打卡卡片" in message
+    assert "Testing - 5" in message
+    assert "每周五、周六、周日 11:00" in message
+    assert "2026-06-05T03:00:00Z" not in message
+    assert "不要重新创建提醒、不要反问时间" in message
+
+
+@pytest.mark.asyncio
+async def test_handle_message_checkin_card_skips_time_memory_lookup(fake_ws):
+    """打卡卡片进入聊天时保留卡片时间语义, 但不触发普通显式时间记忆检索。"""
+    agent = SimpleNamespace(id="a1", name="A")
+    queued_kwargs = None
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-checkin-card-1"
+
+    async def _fake_queue(*args, **kwargs):
+        nonlocal queued_kwargs
+        queued_kwargs = kwargs
+
+    card = ws_mod._sanitize_component_card({
+        "type": "checkin_reminder",
+        "title": "打卡提醒",
+        "subtitle": "2026年05月30日 21:59",
+        "body": "Testing - 9",
+        "footer": "打卡 · 一次提醒",
+        "payload": {
+            "summary": "Testing - 9",
+            "recurrence": "once",
+            "trigger_time": "2026-05-30T13:59:00Z",
+        },
+    })
+    plan = _aggregation_plan("immediate", text="打卡提醒", metadata={"queued": True})
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(ws_mod, "_queue_reply_or_error", side_effect=_fake_queue),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "打卡提醒",
+            client_id="client-checkin-card-uuid",
+            component_card=card,
+        )
+
+    assert queued_kwargs is not None
+    assert queued_kwargs["reply_context"]["component_card_reply"] is True
+    assert queued_kwargs["reply_context"]["skip_time_memory_lookup"] is True
+    assert "2026-05-30T13:59:00Z" not in queued_kwargs["user_message"]
+
+
 @pytest.mark.asyncio
 async def test_turn_aggregation_bypass_for_record_requests():
     """提醒/记忆类控制消息不等待 turn quiet window。"""

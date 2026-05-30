@@ -105,6 +105,33 @@ def _next_occurrence(current: datetime, recurrence: str) -> datetime | None:
     return None  # once / unknown
 
 
+def _normalize_habit_weekdays(value: object) -> list[int]:
+    """Return sorted ISO weekdays (Mon=1..Sun=7) from reminder actionData."""
+    if not isinstance(value, list):
+        return []
+    days: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            continue
+        if 1 <= item <= 7 and item not in days:
+            days.append(item)
+    return sorted(days)
+
+
+def _next_habit_weekday_occurrence(
+    current: datetime,
+    habit_weekdays: list[int],
+) -> datetime | None:
+    """Next selected weekday after current, preserving the original time."""
+    if not habit_weekdays:
+        return None
+    for offset in range(1, 8):
+        candidate = current + timedelta(days=offset)
+        if candidate.isoweekday() in habit_weekdays:
+            return candidate
+    return current + timedelta(weeks=1)
+
+
 async def scan_triggers() -> None:
     """每 15 秒扫描到期触发器，检查规则后执行。"""
     now = datetime.now(_TZ)
@@ -414,6 +441,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
     memory_id = data.get("memory_id")
     summary = (data.get("summary") or "").strip()
     recurrence = data.get("recurrence") or "once"
+    sent_to_ai = bool(data.get("sent_to_ai", True))
     side = data.get("memory_side") or "user"
 
     if not summary:
@@ -472,37 +500,44 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
     redis = await get_redis()
     daily_key = f"trigger_count:{agent_id}:{user_id}:{now.strftime('%Y%m%d')}"
 
-    # pre-check: 看最近 30min 对话, 判别隐式完成 / 取消 / 改期 / 仍需要
-    recent = await _fetch_recent_messages_for_reminder(agent_id, user_id, now)
-    state_info = await reminder_pre_check(
-        summary=summary,
-        trigger_time=trigger.triggerTime.isoformat(),
-        recent_messages=recent,
-    )
-    state = state_info.get("state", "needed")
-
-    logger.info(
-        f"[REMINDER-PRECHECK] {trigger.id[:8]} → {state}",
-        extra={
-            "event": EVT_REMINDER_PRECHECK,
-            "trigger_id": trigger.id,
-            "precheck_state": state,
-            "reason": state_info.get("reason"),
-            "recurrence": recurrence,
-        },
-    )
-
-    if state in ("completed", "cancelled") and memory_id:
-        await _archive_reminder_memory(
-            memory_id, side, reason=f"{state}:{state_info.get('reason', '')}",
+    if sent_to_ai:
+        # pre-check: 看最近 30min 对话, 判别隐式完成 / 取消 / 改期 / 仍需要
+        recent = await _fetch_recent_messages_for_reminder(agent_id, user_id, now)
+        state_info = await reminder_pre_check(
+            summary=summary,
+            trigger_time=trigger.triggerTime.isoformat(),
+            recent_messages=recent,
         )
+        state = state_info.get("state", "needed")
+
+        logger.info(
+            f"[REMINDER-PRECHECK] {trigger.id[:8]} → {state}",
+            extra={
+                "event": EVT_REMINDER_PRECHECK,
+                "trigger_id": trigger.id,
+                "precheck_state": state,
+                "reason": state_info.get("reason"),
+                "recurrence": recurrence,
+            },
+        )
+    else:
+        # 打卡页创建但未“发聊天”的事项只属于系统打卡提醒, 不让 AI
+        # 读取上下文/生成聊天, 避免用户没授权就被 AI 主动介入。
+        state_info = {"state": "needed", "reason": "system_only_checkin"}
+        state = "needed"
+
+    if state in ("completed", "cancelled"):
+        if memory_id:
+            await _archive_reminder_memory(
+                memory_id, side, reason=f"{state}:{state_info.get('reason', '')}",
+            )
         await db.timetrigger.update(
             where={"id": trigger.id},
             data={"isActive": False, "lastFired": now},
         )
         logger.info(
             f"reminder {trigger.id} archived as {state} "
-            f"memory={memory_id[:8]} reason={state_info.get('reason')}",
+            f"memory={memory_id and memory_id[:8]} reason={state_info.get('reason')}",
             extra={
                 "event": EVT_REMINDER_HANDLED,
                 "outcome": state,  # completed / cancelled
@@ -569,7 +604,12 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
     )
 
     if recurrence != "once":
-        next_occur = _next_occurrence(trigger.triggerTime, recurrence)
+        habit_weekdays = _normalize_habit_weekdays(data.get("habit_weekdays"))
+        next_occur = (
+            _next_habit_weekday_occurrence(trigger.triggerTime, habit_weekdays)
+            if recurrence == "weekly" and habit_weekdays
+            else _next_occurrence(trigger.triggerTime, recurrence)
+        )
         if next_occur:
             try:
                 from app.services.reminder.scheduling import renew_periodic_trigger
@@ -592,6 +632,27 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
                 )
             except Exception as e:
                 logger.warning(f"reminder {trigger.id} renewal failed: {e}")
+
+    if not sent_to_ai:
+        conversation_id = str(data.get("conversation_id") or "")
+        if conversation_id:
+            from app.services.reminder.scheduling import notify_reminder_changed
+            await notify_reminder_changed(
+                conversation_id, kind="fired", trigger_id=trigger.id,
+            )
+        logger.info(
+            f"reminder {trigger.id} handled as system-only check-in "
+            f"memory={memory_id and memory_id[:8]} recurrence={recurrence}",
+            extra={
+                "event": EVT_REMINDER_HANDLED,
+                "outcome": "system_notification_only",
+                "trigger_id": trigger.id,
+                "memory_id": memory_id,
+                "recurrence": recurrence,
+                "summary_preview": summary[:40],
+            },
+        )
+        return
 
     # emit 段统一 try/except → 失败走 _handle_emit_failure (重试 / DLQ).
     # 之前任何中途 return (workspace 缺失 / agent 没了 / message 空 /

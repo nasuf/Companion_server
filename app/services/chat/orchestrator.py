@@ -678,6 +678,9 @@ async def stream_chat_response(
     子调用共享 reply_context 沿用首条消息的 due_at（spec §6 延迟批处理）。
     """
     pending_sub_fragments: dict[str, str] = {}
+    skip_time_memory_lookup = bool(
+        (reply_context or {}).get("skip_time_memory_lookup")
+    )
 
     # 碎片聚合/延迟队列在入队时已落库；sub_intent_mode 共享父调用的原始消息
     if save_user_message and not sub_intent_mode:
@@ -950,7 +953,7 @@ async def stream_chat_response(
         elif forced_intent is None and not current_state_fast_path:
             early_parsed_times = (
                 parse_time_expressions(user_message)
-                if has_explicit_time(user_message) else []
+                if not skip_time_memory_lookup and has_explicit_time(user_message) else []
             )
             fetch_task = asyncio.create_task(fetch_parallel_context(
                 user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,
@@ -1243,7 +1246,7 @@ async def stream_chat_response(
         else:
             parsed_times = (
                 parse_time_expressions(user_message)
-                if has_explicit_time(user_message) else []
+                if not skip_time_memory_lookup and has_explicit_time(user_message) else []
             )
             fetched = await fetch_parallel_context(
                 user_id=user_id, agent_id=agent_id, workspace_id=workspace_id,

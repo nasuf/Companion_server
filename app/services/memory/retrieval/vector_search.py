@@ -42,7 +42,7 @@ async def search_by_embedding(
                 m.created_at, m.updated_at,
                 COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
                 'user' AS source,
-                1 - (me.embedding <=> $1::extensions.vector) AS similarity
+                1 - (me.embedding OPERATOR(extensions.<=>) $1::extensions.vector) AS similarity
             FROM memory_embeddings me
             JOIN memories_user m ON m.id = me.memory_id
             WHERE m.user_id = $2
@@ -51,7 +51,7 @@ async def search_by_embedding(
               AND ($4::text[] IS NULL OR m.main_category = ANY($4::text[]))
               AND ($5::text[] IS NULL OR m.sub_category = ANY($5::text[]))
               AND ($6::int[] IS NULL OR m.level = ANY($6::int[]))
-            ORDER BY me.embedding <=> $1::extensions.vector
+            ORDER BY me.embedding OPERATOR(extensions.<=>) $1::extensions.vector
             LIMIT $7)
             UNION ALL
             (SELECT
@@ -60,7 +60,7 @@ async def search_by_embedding(
                 m.created_at, m.updated_at,
                 COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
                 'ai' AS source,
-                1 - (me.embedding <=> $1::extensions.vector) AS similarity
+                1 - (me.embedding OPERATOR(extensions.<=>) $1::extensions.vector) AS similarity
             FROM memory_embeddings me
             JOIN memories_ai m ON m.id = me.memory_id
             WHERE m.user_id = $2
@@ -69,7 +69,7 @@ async def search_by_embedding(
               AND ($4::text[] IS NULL OR m.main_category = ANY($4::text[]))
               AND ($5::text[] IS NULL OR m.sub_category = ANY($5::text[]))
               AND ($6::int[] IS NULL OR m.level = ANY($6::int[]))
-            ORDER BY me.embedding <=> $1::extensions.vector
+            ORDER BY me.embedding OPERATOR(extensions.<=>) $1::extensions.vector
             LIMIT $7)
         ) combined
         ORDER BY similarity DESC
@@ -130,7 +130,7 @@ async def search_by_time_range(
                    'user' AS source
             FROM memories_user
             WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
-              AND occur_time >= $3 AND occur_time < $4
+              AND occur_time >= $3::timestamp AND occur_time < $4::timestamp
             ORDER BY importance DESC
             LIMIT $5
             """,
@@ -146,7 +146,7 @@ async def search_by_time_range(
                    'ai' AS source
             FROM memories_ai
             WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
-              AND occur_time >= $3 AND occur_time < $4
+              AND occur_time >= $3::timestamp AND occur_time < $4::timestamp
             ORDER BY importance DESC
             LIMIT $5
             """,
@@ -163,7 +163,7 @@ async def search_by_time_range(
                     'user' AS source
              FROM memories_user
              WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
-               AND occur_time >= $3 AND occur_time < $4
+               AND occur_time >= $3::timestamp AND occur_time < $4::timestamp
              ORDER BY importance DESC
              LIMIT $5)
             UNION ALL
@@ -174,7 +174,7 @@ async def search_by_time_range(
                     'ai' AS source
              FROM memories_ai
              WHERE user_id = $1 AND workspace_id = $2 AND is_archived = false
-               AND occur_time >= $3 AND occur_time < $4
+               AND occur_time >= $3::timestamp AND occur_time < $4::timestamp
              ORDER BY importance DESC
              LIMIT $5)
         ) combined

@@ -8,20 +8,30 @@
 - dlq      : 从 Redis ZSET reminder:dlq 读, 是 emit 失败 retry 耗尽的死信
 
 支持 limit + offset 分页, 默认 limit=50 (跟 memories 对齐).
+status=open 给打卡页用: active trigger + 已响过但用户尚未完成/删除的一次性提醒.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from prisma import Json
 
+from app.api.jwt_auth import require_user
 from app.api.ownership import require_user_self
 from app.db import db
 from app.redis_client import get_redis
-from app.services.reminder.scheduling import REMINDER_ACTION_TYPE
+from app.services.reminder.scheduling import (
+    REMINDER_ACTION_TYPE,
+    RecurrenceKind,
+    archive_reminder_memory,
+    create_user_reminder,
+    notify_reminder_changed,
+)
 from app.services.proactive.triggers import _DLQ_KEY
 
 router = APIRouter(prefix="/reminders", tags=["reminders"])
@@ -34,11 +44,37 @@ class ReminderItem(BaseModel):
     summary: str
     trigger_time: str  # ISO
     last_fired: str | None  # ISO
+    completed_at: str | None = None
     recurrence: str  # once | daily | weekly | monthly | yearly
     status: Literal["active", "fired", "cancelled"]
     retry_count: int  # 0 if never retried
+    pinned: bool = False
+    habit_weekdays: list[int] = Field(default_factory=list)
+    completed_dates: list[str] = Field(default_factory=list)
+    sent_to_ai: bool = False
     agent_id: str
     created_at: str  # ISO
+
+
+class ReminderCreate(BaseModel):
+    agent_id: str
+    workspace_id: str | None = None
+    summary: str
+    trigger_time: str
+    recurrence: RecurrenceKind = "once"
+    habit_weekdays: list[int] | None = None
+    sent_to_ai: bool = False
+    conversation_id: str | None = None
+
+
+class ReminderUpdate(BaseModel):
+    summary: str | None = None
+    trigger_time: str | None = None
+    recurrence: RecurrenceKind | None = None
+    habit_weekdays: list[int] | None = None
+    pinned: bool | None = None
+    sent_to_ai: bool | None = None
+    conversation_id: str | None = None
 
 
 class DlqItem(BaseModel):
@@ -68,27 +104,180 @@ def _classify_status(trigger) -> Literal["active", "fired", "cancelled"]:
     return "cancelled"
 
 
+def _is_open_checkin_item(trigger) -> bool:
+    data = trigger.actionData or {}
+    if data.get("deleted_at"):
+        return False
+    if trigger.isActive:
+        return True
+    recurrence = str(data.get("recurrence") or "once")
+    return recurrence == "once" and trigger.lastFired is not None
+
+
+def _is_deleted_checkin_item(trigger) -> bool:
+    data = trigger.actionData or {}
+    return bool(data.get("deleted_at"))
+
+
+def _is_completed_once_checkin_item(trigger) -> bool:
+    data = trigger.actionData or {}
+    recurrence = str(data.get("recurrence") or "once")
+    return recurrence == "once" and bool(data.get("completed_at"))
+
+
 def _to_item(trigger) -> ReminderItem:
     data = trigger.actionData or {}
+    habit_weekdays = _normalize_weekdays(data.get("habit_weekdays"), allow_empty=True)
+    completed_dates = [
+        str(item)
+        for item in (data.get("completed_dates") or [])
+        if isinstance(item, str)
+    ]
     return ReminderItem(
         id=trigger.id,
         memory_id=data.get("memory_id") or None,
         summary=str(data.get("summary") or "")[:200],
         trigger_time=trigger.triggerTime.isoformat(),
         last_fired=trigger.lastFired.isoformat() if trigger.lastFired else None,
+        completed_at=data.get("completed_at") or None,
         recurrence=str(data.get("recurrence") or "once"),
         status=_classify_status(trigger),
         retry_count=int(data.get("retry_count") or 0),
+        pinned=bool(data.get("pinned") or False),
+        habit_weekdays=habit_weekdays,
+        completed_dates=completed_dates,
+        sent_to_ai=bool(data.get("sent_to_ai") or False),
         agent_id=trigger.aiAgentId,
         created_at=trigger.createdAt.isoformat(),
     )
+
+
+def _parse_datetime(value: str, field: str) -> datetime:
+    raw = (value or "").strip()
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {field}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _normalize_weekdays(value, *, allow_empty: bool = False) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        if allow_empty:
+            return []
+        raise HTTPException(status_code=400, detail="habit_weekdays must be a list")
+    weekdays: list[int] = []
+    for item in value:
+        if not isinstance(item, int) or isinstance(item, bool) or item < 1 or item > 7:
+            if allow_empty:
+                continue
+            raise HTTPException(
+                status_code=400,
+                detail="habit_weekdays must contain integers from 1 to 7",
+            )
+        if item not in weekdays:
+            weekdays.append(item)
+    weekdays.sort()
+    if not weekdays and not allow_empty:
+        raise HTTPException(status_code=400, detail="habit_weekdays cannot be empty")
+    return weekdays
+
+
+def _normalize_date_key(value: str | None) -> str:
+    if not value:
+        return datetime.now(UTC).date().isoformat()
+    raw = value.strip()
+    try:
+        return datetime.fromisoformat(raw).date().isoformat()
+    except ValueError:
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d").date().isoformat()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid occurrence_date") from exc
+
+
+async def _ensure_agent_scope(
+    *,
+    agent_id: str,
+    workspace_id: str | None,
+    user: dict,
+):
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent or getattr(agent, "status", "active") == "archived":
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if user.get("role") != "admin" and agent.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your agent")
+    if workspace_id:
+        workspace = await db.chatworkspace.find_unique(where={"id": workspace_id})
+        if (
+            not workspace
+            or workspace.userId != agent.userId
+            or workspace.agentId != agent_id
+        ):
+            raise HTTPException(status_code=400, detail="Workspace does not match agent")
+    return agent
+
+
+async def _require_trigger_owner(trigger_id: str, user: dict):
+    trigger = await db.timetrigger.find_unique(where={"id": trigger_id})
+    if not trigger or trigger.actionType != REMINDER_ACTION_TYPE:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    if user.get("role") != "admin" and trigger.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your reminder")
+    return trigger
+
+
+async def _fetch_trigger_for_memory(memory_id: str, user_id: str, agent_id: str):
+    rows = await db.timetrigger.find_many(
+        where={
+            "userId": user_id,
+            "aiAgentId": agent_id,
+            "actionType": REMINDER_ACTION_TYPE,
+            "isActive": True,
+        },
+        order={"createdAt": "desc"},
+        take=20,
+    )
+    return next(
+        (row for row in rows if (row.actionData or {}).get("memory_id") == memory_id),
+        None,
+    )
+
+
+async def _patch_reminder_memory(
+    memory_id: str | None,
+    *,
+    summary: str | None = None,
+    trigger_time: datetime | None = None,
+    recurrence: RecurrenceKind | None = None,
+) -> None:
+    if not memory_id:
+        return
+    from app.services.memory.storage import repo as memory_repo
+
+    data = {}
+    if summary is not None:
+        data["content"] = summary
+        data["summary"] = summary
+    if trigger_time is not None:
+        data["occurTime"] = trigger_time
+    if recurrence is not None:
+        data["recurrence"] = recurrence
+    if data:
+        await memory_repo.update(memory_id, source="user", **data)
 
 
 @router.get("", response_model=RemindersResponse)
 async def list_reminders(
     user_id: str,
     agent_id: str | None = None,
-    status: Literal["active", "fired", "cancelled", "all"] = "all",
+    status: Literal["active", "fired", "cancelled", "all", "open"] = "all",
     limit: int = Query(default=50, le=200),
     offset: int = 0,
     _user=Depends(require_user_self),
@@ -114,15 +303,40 @@ async def list_reminders(
     elif status == "cancelled":
         where["isActive"] = False
         where["lastFired"] = None
-    # status == "all": 不加 isActive/lastFired 过滤
-
-    total = await db.timetrigger.count(where=where)
-    rows = await db.timetrigger.find_many(
-        where=where,
-        order={"triggerTime": "desc"},
-        take=limit,
-        skip=offset,
-    )
+    # status == "all" / "open": 不加 isActive/lastFired 过滤.
+    # open 需要看 actionData.completed_at/deleted_at，Prisma JSON 条件表达有限，
+    # 这里按 limit+offset 之前的小量列表在 Python 侧过滤。
+    if status == "open":
+        rows = []
+        total = 0
+        skip = 0
+        batch_size = 500
+        while True:
+            batch = await db.timetrigger.find_many(
+                where=where,
+                order={"triggerTime": "desc"},
+                take=batch_size,
+                skip=skip,
+            )
+            if not batch:
+                break
+            for row in batch:
+                if not _is_open_checkin_item(row):
+                    continue
+                if offset <= total < offset + limit:
+                    rows.append(row)
+                total += 1
+            if len(batch) < batch_size:
+                break
+            skip += batch_size
+    else:
+        total = await db.timetrigger.count(where=where)
+        rows = await db.timetrigger.find_many(
+            where=where,
+            order={"triggerTime": "desc"},
+            take=limit,
+            skip=offset,
+        )
 
     # DLQ count — Redis ZSET cardinality. 失败不冒泡 (DLQ 是观察性数据).
     dlq_count = 0
@@ -137,6 +351,195 @@ async def list_reminders(
         total=total,
         dlq_count=dlq_count,
     )
+
+
+@router.post("", response_model=ReminderItem)
+async def create_reminder(
+    data: ReminderCreate,
+    user: dict = Depends(require_user),
+):
+    agent = await _ensure_agent_scope(
+        agent_id=data.agent_id,
+        workspace_id=data.workspace_id,
+        user=user,
+    )
+    summary = data.summary.strip()
+    if not summary:
+        raise HTTPException(status_code=400, detail="summary is required")
+    trigger_time = _parse_datetime(data.trigger_time, "trigger_time")
+    habit_weekdays = _normalize_weekdays(
+        data.habit_weekdays,
+        allow_empty=data.habit_weekdays is None,
+    )
+    if habit_weekdays and data.recurrence != "weekly":
+        raise HTTPException(status_code=400, detail="habit_weekdays requires weekly recurrence")
+    if trigger_time <= datetime.now(UTC):
+        raise HTTPException(status_code=400, detail="提醒时间必须在未来")
+
+    memory_id = await create_user_reminder(
+        user_id=agent.userId,
+        agent_id=data.agent_id,
+        workspace_id=data.workspace_id,
+        summary=summary[:200],
+        occur_time=trigger_time,
+        statement_time=datetime.now(UTC),
+        recurrence=data.recurrence,
+    )
+    if not memory_id:
+        raise HTTPException(status_code=500, detail="Reminder create failed")
+    trigger = await _fetch_trigger_for_memory(memory_id, agent.userId, data.agent_id)
+    if not trigger:
+        raise HTTPException(status_code=500, detail="Reminder trigger missing")
+    action_data = dict(trigger.actionData or {})
+    if habit_weekdays:
+        action_data["habit_weekdays"] = habit_weekdays
+    action_data["sent_to_ai"] = bool(data.sent_to_ai)
+    action_data["conversation_id"] = data.conversation_id
+    trigger = await db.timetrigger.update(
+        where={"id": trigger.id},
+        data={"actionData": Json(action_data)},
+    )
+    await notify_reminder_changed(data.conversation_id, kind="created", trigger_id=trigger.id)
+    return _to_item(trigger)
+
+
+@router.patch("/{trigger_id}", response_model=ReminderItem)
+async def update_reminder(
+    trigger_id: str,
+    data: ReminderUpdate,
+    user: dict = Depends(require_user),
+):
+    trigger = await _require_trigger_owner(trigger_id, user)
+    if _is_deleted_checkin_item(trigger):
+        raise HTTPException(status_code=409, detail="提醒已删除")
+    immutable_update = (
+        data.summary is not None
+        or data.trigger_time is not None
+        or data.recurrence is not None
+        or data.habit_weekdays is not None
+        or data.sent_to_ai is not None
+    )
+    if _is_completed_once_checkin_item(trigger) and immutable_update:
+        raise HTTPException(status_code=409, detail="已完成提醒不允许编辑")
+    action_data = dict(trigger.actionData or {})
+    update_data: dict = {}
+
+    if data.summary is not None:
+        summary = data.summary.strip()
+        if not summary:
+            raise HTTPException(status_code=400, detail="summary cannot be empty")
+        action_data["summary"] = summary[:200]
+    if data.recurrence is not None:
+        action_data["recurrence"] = data.recurrence
+        if data.recurrence != "weekly":
+            action_data.pop("habit_weekdays", None)
+    if data.habit_weekdays is not None:
+        habit_weekdays = _normalize_weekdays(data.habit_weekdays)
+        recurrence = data.recurrence or action_data.get("recurrence") or "once"
+        if recurrence != "weekly":
+            raise HTTPException(status_code=400, detail="habit_weekdays requires weekly recurrence")
+        action_data["habit_weekdays"] = habit_weekdays
+    if data.pinned is not None:
+        action_data["pinned"] = data.pinned
+    if data.sent_to_ai is not None:
+        action_data["sent_to_ai"] = bool(data.sent_to_ai)
+    if data.conversation_id is not None:
+        action_data["conversation_id"] = data.conversation_id
+    if data.trigger_time is not None:
+        trigger_time = _parse_datetime(data.trigger_time, "trigger_time")
+        if trigger_time <= datetime.now(UTC):
+            raise HTTPException(status_code=400, detail="提醒时间必须在未来")
+        update_data["triggerTime"] = trigger_time
+
+    update_data["actionData"] = Json(action_data)
+    updated = await db.timetrigger.update(where={"id": trigger_id}, data=update_data)
+    await _patch_reminder_memory(
+        action_data.get("memory_id"),
+        summary=action_data.get("summary") if data.summary is not None else None,
+        trigger_time=update_data.get("triggerTime"),
+        recurrence=data.recurrence,
+    )
+    await notify_reminder_changed(data.conversation_id, kind="rescheduled", trigger_id=trigger_id)
+    return _to_item(updated)
+
+
+@router.post("/{trigger_id}/complete", response_model=ReminderItem)
+async def complete_reminder(
+    trigger_id: str,
+    conversation_id: str | None = None,
+    occurrence_date: str | None = None,
+    user: dict = Depends(require_user),
+):
+    trigger = await _require_trigger_owner(trigger_id, user)
+    if _is_deleted_checkin_item(trigger):
+        raise HTTPException(status_code=409, detail="提醒已删除")
+    data = dict(trigger.actionData or {})
+    recurrence = str(data.get("recurrence") or "once")
+    if recurrence != "once":
+        date_key = _normalize_date_key(occurrence_date)
+        completed_dates = [
+            str(item)
+            for item in (data.get("completed_dates") or [])
+            if isinstance(item, str)
+        ]
+        if date_key not in completed_dates:
+            completed_dates.append(date_key)
+            completed_dates.sort()
+        data["completed_dates"] = completed_dates
+        updated = await db.timetrigger.update(
+            where={"id": trigger_id},
+            data={"actionData": Json(data)},
+        )
+        await notify_reminder_changed(conversation_id, kind="archived", trigger_id=trigger_id)
+        return _to_item(updated)
+
+    if data.get("completed_at"):
+        return _to_item(trigger)
+
+    data["completed_at"] = datetime.now(UTC).isoformat()
+    updated = await db.timetrigger.update(
+        where={"id": trigger_id},
+        data={
+            "isActive": False,
+            "lastFired": datetime.now(UTC),
+            "actionData": Json(data),
+        },
+    )
+    memory_id = data.get("memory_id")
+    if memory_id:
+        await archive_reminder_memory(
+            memory_id=memory_id,
+            side=data.get("memory_side") or "user",
+            reason="completed_from_checkin",
+        )
+    await notify_reminder_changed(conversation_id, kind="archived", trigger_id=trigger_id)
+    return _to_item(updated)
+
+
+@router.delete("/{trigger_id}", status_code=204)
+async def delete_reminder(
+    trigger_id: str,
+    conversation_id: str | None = None,
+    user: dict = Depends(require_user),
+):
+    trigger = await _require_trigger_owner(trigger_id, user)
+    data = dict(trigger.actionData or {})
+    if data.get("deleted_at"):
+        return None
+    data["deleted_at"] = datetime.now(UTC).isoformat()
+    await db.timetrigger.update(
+        where={"id": trigger_id},
+        data={"isActive": False, "actionData": Json(data)},
+    )
+    memory_id = data.get("memory_id")
+    if memory_id:
+        await archive_reminder_memory(
+            memory_id=memory_id,
+            side=data.get("memory_side") or "user",
+            reason="deleted_from_checkin",
+        )
+    await notify_reminder_changed(conversation_id, kind="cancelled", trigger_id=trigger_id)
+    return None
 
 
 @router.get("/dlq", response_model=list[DlqItem])

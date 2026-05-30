@@ -52,7 +52,7 @@ def _sanitize_component_card(raw: object) -> dict | None:
     if not isinstance(raw, dict):
         return None
     card_type = raw.get("type")
-    if card_type not in {"time_capsule", "weather"}:
+    if card_type not in {"time_capsule", "weather", "checkin_reminder", "checkin_habit"}:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
     card: dict = {
@@ -96,7 +96,79 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
             if value:
                 payload[key] = value
         return payload or None
+    if card_type in {"checkin_reminder", "checkin_habit"}:
+        payload = {}
+        for key in (
+            "trigger_id",
+            "reminder_id",
+            "habit_id",
+            "summary",
+            "recurrence",
+            "trigger_time",
+        ):
+            value = _truncate_payload_value(raw.get(key), 120).strip()
+            if value:
+                payload[key] = value
+        weekdays = _sanitize_weekdays(raw.get("habit_weekdays"))
+        if weekdays:
+            payload["habit_weekdays"] = weekdays
+        sent_to_ai = raw.get("sent_to_ai")
+        if isinstance(sent_to_ai, bool):
+            payload["sent_to_ai"] = sent_to_ai
+        return payload or None
     return None
+
+
+def _sanitize_weekdays(raw: object) -> list[int]:
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, str):
+        values = [part.strip() for part in raw.strip("[]").split(",")]
+    else:
+        return []
+    days: list[int] = []
+    for value in values:
+        try:
+            day = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= day <= 7 and day not in days:
+            days.append(day)
+    return sorted(days)
+
+
+def _component_card_reply_message(text: str, component_card: dict | None) -> str | None:
+    if not component_card:
+        return None
+    card_type = component_card.get("type")
+    if card_type not in {"checkin_reminder", "checkin_habit"}:
+        return None
+
+    payload = component_card.get("payload") if isinstance(component_card.get("payload"), dict) else {}
+    summary = str(payload.get("summary") or component_card.get("body") or text).strip()
+    subtitle = str(component_card.get("subtitle") or "").strip()
+    recurrence = str(payload.get("recurrence") or "").strip()
+    weekdays = payload.get("habit_weekdays")
+    weekday_text = ""
+    if isinstance(weekdays, list) and weekdays:
+        labels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        picked = [labels[day - 1] for day in weekdays if isinstance(day, int) and 1 <= day <= 7]
+        if picked:
+            weekday_text = "每" + "、".join(picked)
+
+    kind = "周期习惯打卡" if card_type == "checkin_habit" else "单次打卡提醒"
+    # `trigger_time` is a machine ISO timestamp. Feeding it into the chat hot path
+    # makes the message look like a normal explicit-time query and can trigger
+    # time-memory retrieval. The user-visible subtitle already carries the date/time.
+    details = [part for part in (subtitle, weekday_text) if part]
+    detail_text = "；".join(dict.fromkeys(details))
+    return (
+        f"用户发送了一张已创建的{kind}卡片。"
+        f"事项：{summary[:200]}。"
+        f"{f'时间设置：{detail_text}。' if detail_text else ''}"
+        "这张卡片已经由打卡系统保存并同步给你；不要重新创建提醒、不要反问时间，"
+        "只需要基于卡片里的事项、周期和时间自然确认你会按这个设置提醒用户。"
+    )
 
 
 async def _persist_user_message(
@@ -139,6 +211,7 @@ async def _queue_reply(
     user_message: str,
     user_message_id: str | None,
     reply_context: dict | None,
+    forced_intent=None,
 ) -> None:
     delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
 
@@ -156,6 +229,7 @@ async def _queue_reply(
             save_user_message=False,
             user_message_id=user_message_id,
             delivered_from_queue=True,
+            forced_intent=forced_intent,
         )
         await stream_to_ws(gen, conversation_id)
         return
@@ -171,6 +245,7 @@ async def _queue_reply(
             "message": user_message,
             "message_id": user_message_id,
             "reply_context": reply_context,
+            "forced_intent": getattr(forced_intent, "value", None),
         },
         delay_seconds,
     )
@@ -188,6 +263,7 @@ async def _queue_reply_or_error(
     user_message: str,
     user_message_id: str | None,
     reply_context: dict | None,
+    forced_intent=None,
 ) -> None:
     """Queue or stream a reply and surface failures to the active websocket."""
     try:
@@ -199,6 +275,7 @@ async def _queue_reply_or_error(
             user_message=user_message,
             user_message_id=user_message_id,
             reply_context=reply_context,
+            forced_intent=forced_intent,
         )
     except Exception as e:
         logger.error(f"Chat queue failed for conv={conversation_id[:8]}: {e}")
@@ -394,6 +471,26 @@ async def _handle_message(
         ),
     )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+
+    card_reply_message = _component_card_reply_message(plan.final_message, component_card)
+    if card_reply_message:
+        from app.services.chat.intent_dispatcher import IntentType
+
+        card_context = dict(plan.final_context or {})
+        card_context["delay_seconds"] = 0.0
+        card_context["component_card_reply"] = True
+        card_context["skip_time_memory_lookup"] = True
+        await _queue_reply_or_error(
+            ws,
+            conversation_id=conversation_id,
+            agent=agent,
+            user_id=user_id,
+            user_message=card_reply_message,
+            user_message_id=user_message_id,
+            reply_context=card_context,
+            forced_intent=IntentType.NONE,
+        )
+        return
 
     if plan.should_wait:
         pushed = await enqueue_planned_user_message(plan, message_id=user_message_id)

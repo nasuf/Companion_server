@@ -29,6 +29,26 @@ import pytest
 _TZ = timezone.utc
 
 
+def test_weekly_habit_next_occurrence_uses_selected_weekdays():
+    """A Mon/Wed/Fri habit fired on Monday should renew to Wednesday, not +7d."""
+    from app.services.proactive import triggers as trig_mod
+
+    current = datetime(2026, 6, 1, 9, 0, tzinfo=_TZ)  # Monday
+    next_occur = trig_mod._next_habit_weekday_occurrence(current, [1, 3, 5])
+
+    assert next_occur == datetime(2026, 6, 3, 9, 0, tzinfo=_TZ)
+
+
+def test_weekly_habit_next_occurrence_wraps_to_next_week():
+    """A Mon/Wed/Fri habit fired on Friday should renew to next Monday."""
+    from app.services.proactive import triggers as trig_mod
+
+    current = datetime(2026, 6, 5, 9, 0, tzinfo=_TZ)  # Friday
+    next_occur = trig_mod._next_habit_weekday_occurrence(current, [1, 3, 5])
+
+    assert next_occur == datetime(2026, 6, 8, 9, 0, tzinfo=_TZ)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # has_recent_proactive_or_reminder
 # ═══════════════════════════════════════════════════════════════════
@@ -291,3 +311,106 @@ async def test_reminder_fire_passes_trace_id_to_emit():
         "reminder fire 必须传 trace_id= 给 emit_proactive_message, "
         "否则前端 Trace 按钮不显示 (生产 bug 2026-05-03)"
     )
+
+
+@pytest.mark.asyncio
+async def test_system_only_checkin_does_not_generate_ai_chat():
+    """打卡页创建但未发聊天的事项只走系统通知/状态刷新, 不调用 AI pre-check、
+    不生成主动聊天消息。"""
+    from app.services.proactive import triggers as trig_mod
+    from types import SimpleNamespace
+
+    now = datetime(2026, 5, 3, 14, 0, 5, tzinfo=_TZ)
+    trigger = SimpleNamespace(
+        id="t-system-only",
+        aiAgentId="agent-A",
+        userId="u1",
+        actionData={
+            "summary": "喝水",
+            "memory_id": "m1",
+            "recurrence": "once",
+            "sent_to_ai": False,
+            "conversation_id": "conv-1",
+        },
+        actionType="reminder",
+        triggerTime=now - timedelta(seconds=5),
+        lastFired=None,
+        repeatRule=None,
+        isActive=True,
+    )
+
+    with (
+        patch.object(trig_mod, "db") as mock_db,
+        patch.object(trig_mod, "get_redis", new_callable=AsyncMock,
+                     return_value=MagicMock(incr=AsyncMock(), expire=AsyncMock())),
+        patch.object(trig_mod, "_fetch_recent_messages_for_reminder",
+                     new_callable=AsyncMock) as fetch_recent,
+        patch("app.services.chat.intent_replies.reminder_pre_check",
+              new_callable=AsyncMock) as pre_check,
+        patch("app.services.chat.intent_replies.reminder_message",
+              new_callable=AsyncMock) as reminder_message,
+        patch("app.services.proactive.emit.emit_proactive_message",
+              new_callable=AsyncMock) as emit_message,
+        patch("app.services.reminder.scheduling.notify_reminder_changed",
+              new_callable=AsyncMock) as notify_changed,
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.update = AsyncMock()
+        await trig_mod._handle_reminder_trigger(trigger, now)
+
+    fetch_recent.assert_not_awaited()
+    pre_check.assert_not_awaited()
+    reminder_message.assert_not_awaited()
+    emit_message.assert_not_awaited()
+    mock_db.timetrigger.update.assert_awaited_once_with(
+        where={"id": "t-system-only"},
+        data={"isActive": False, "lastFired": now},
+    )
+    notify_changed.assert_awaited_once_with(
+        "conv-1", kind="fired", trigger_id="t-system-only",
+    )
+
+
+@pytest.mark.asyncio
+async def test_precheck_completed_without_memory_id_still_deactivates_trigger():
+    """LLM pre-check 判定已完成/取消时, 即使旧数据缺 memory_id 也不能继续发提醒。"""
+    from app.services.proactive import triggers as trig_mod
+    from types import SimpleNamespace
+
+    now = datetime(2026, 5, 3, 14, 0, 5, tzinfo=_TZ)
+    trigger = SimpleNamespace(
+        id="t-no-memory",
+        aiAgentId="agent-A",
+        userId="u1",
+        actionData={"summary": "喝水", "recurrence": "once", "sent_to_ai": True},
+        actionType="reminder",
+        triggerTime=now - timedelta(seconds=5),
+        lastFired=None,
+        repeatRule=None,
+        isActive=True,
+    )
+
+    with (
+        patch.object(trig_mod, "db") as mock_db,
+        patch.object(trig_mod, "get_redis", new_callable=AsyncMock,
+                     return_value=MagicMock(incr=AsyncMock(), expire=AsyncMock())),
+        patch.object(trig_mod, "_fetch_recent_messages_for_reminder",
+                     new_callable=AsyncMock, return_value="刚刚已经喝过了"),
+        patch("app.services.chat.intent_replies.reminder_pre_check",
+              new_callable=AsyncMock,
+              return_value={"state": "completed", "reason": "用户已完成"}),
+        patch("app.services.chat.intent_replies.reminder_message",
+              new_callable=AsyncMock) as reminder_message,
+        patch("app.services.proactive.emit.emit_proactive_message",
+              new_callable=AsyncMock) as emit_message,
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.update = AsyncMock()
+        await trig_mod._handle_reminder_trigger(trigger, now)
+
+    mock_db.timetrigger.update.assert_awaited_once_with(
+        where={"id": "t-no-memory"},
+        data={"isActive": False, "lastFired": now},
+    )
+    reminder_message.assert_not_awaited()
+    emit_message.assert_not_awaited()
