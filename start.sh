@@ -155,14 +155,6 @@ if ! command -v docker &>/dev/null; then
     exit 1
 fi
 
-# ── Ensure local SSH tunnels for Tencent-hosted data services ──
-# Local .env can point at 127.0.0.1 ports that are actually SSH forwards to
-# Tencent CVM. These tunnels disappear after reboot or network changes, so
-# restore them before Redis and DB preflight checks.
-if [ "${SKIP_TENCENT_TUNNELS:-0}" != "1" ] && [ -x "scripts/start_tencent_tunnels.sh" ]; then
-    scripts/start_tencent_tunnels.sh
-fi
-
 # ── Check & start Redis ──
 echo "Checking Redis..."
 REDIS_URL_RAW="redis://localhost:6379/0"
