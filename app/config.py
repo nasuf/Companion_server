@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     wechat_mobile_app_secret: str = ""
     wechat_oauth_timeout_s: float = 6.0
 
+    # SUD / SudGIP mini-game integration. The Flutter client uses app_id/app_key
+    # to initialize SudGIP, while app_secret stays server-side for short-lived
+    # code / ss_token signing and callback validation.
+    sud_app_id: str = ""
+    sud_app_key: str = ""
+    sud_app_secret: str = ""
+    sud_default_mg_id: str = ""
+    sud_bundle_id: str = ""
+    sud_is_test_env: bool = True
+    sud_callback_public_base_url: str = ""
+
     # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
     # Development defaults to "*" for local convenience; production must configure
     # an explicit allowlist.

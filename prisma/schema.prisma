@@ -37,6 +37,7 @@ model User {
   timeCapsules      TimeCapsule[]
   lastWills         LastWill[]
   dailyActivities   UserDailyActivity[]
+  gameSessions      GameSession[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
   bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
@@ -99,6 +100,7 @@ model AiAgent {
   configOverride     AgentConfigOverride?
   timeCapsules        TimeCapsule[]
   lastWills           LastWill[]
+  gameSessions        GameSession[]
 
   @@map("ai_agents")
 }
@@ -123,6 +125,7 @@ model ChatWorkspace {
   proactiveEvents ProactiveEventLog[]
   timeCapsules    TimeCapsule[]
   lastWills       LastWill[]
+  gameSessions    GameSession[]
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -146,6 +149,7 @@ model Conversation {
   proactiveLogs   ProactiveChatLog[]
   proactiveStates ProactiveState[]
   proactiveEvents ProactiveEventLog[]
+  gameSessions    GameSession[]
 
   @@map("conversations")
 }
@@ -162,6 +166,60 @@ model Message {
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@map("messages")
+}
+
+model GameSession {
+  id                String        @id @default(uuid())
+  provider          String        @default("sud")
+  status            String        @default("created")
+  userId            String        @map("user_id")
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId           String        @map("agent_id")
+  agent             AiAgent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId       String?       @map("workspace_id")
+  workspace         ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId    String?       @map("conversation_id")
+  conversation      Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  mgId              String        @map("mg_id")
+  roomId            String        @map("room_id")
+  playMode          String        @default("versus") @map("play_mode")
+  difficulty        String        @default("newbie")
+  aiLevel           Int           @default(1) @map("ai_level")
+  sdkEnabled        Boolean       @default(false) @map("sdk_enabled")
+  sudCode           String        @map("sud_code")
+  sudCodeExpiresAt  DateTime      @map("sud_code_expires_at")
+  userPlayer        Json          @map("user_player")
+  aiPlayer          Json          @map("ai_player")
+  companionReply    String?       @map("companion_reply")
+  result            Json?
+  durationSeconds   Int?          @map("duration_seconds")
+  startedAt         DateTime?     @map("started_at")
+  endedAt           DateTime?     @map("ended_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+  events            GameEvent[]
+
+  @@index([userId, createdAt(sort: Desc)], map: "game_sessions_user_created_idx")
+  @@index([agentId, createdAt(sort: Desc)], map: "game_sessions_agent_created_idx")
+  @@index([conversationId, createdAt(sort: Desc)], map: "game_sessions_conversation_created_idx")
+  @@index([roomId], map: "game_sessions_room_idx")
+  @@map("game_sessions")
+}
+
+model GameEvent {
+  id             String      @id @default(uuid())
+  sessionId      String      @map("session_id")
+  session        GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  eventType      String      @map("event_type")
+  state          String?
+  source         String      @default("client")
+  payload        Json        @default("{}")
+  companionReply String?     @map("companion_reply")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  @@index([sessionId, createdAt(sort: Desc)], map: "game_events_session_created_idx")
+  @@index([eventType, createdAt(sort: Desc)], map: "game_events_type_created_idx")
+  @@map("game_events")
 }
 
 model TimeCapsule {
