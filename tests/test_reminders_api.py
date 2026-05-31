@@ -77,8 +77,8 @@ def test_list_happy_returns_items_total_dlq(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -99,8 +99,8 @@ def test_list_happy_returns_items_total_dlq(client):
 def test_list_dlq_count_from_redis(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=7))
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -116,8 +116,8 @@ def test_list_dlq_redis_failure_does_not_500(client):
     """Redis 挂 → dlq_count=0 但端点正常返 (DLQ 是观察性数据, 不能挂主流程)."""
     fake_redis = MagicMock(zcard=AsyncMock(side_effect=ConnectionError("redis down")))
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -145,8 +145,8 @@ def _capture_where(client, status_param: str) -> dict:
 
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -219,8 +219,8 @@ def test_status_open_keeps_fired_once_until_user_closes(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -243,8 +243,8 @@ def test_status_open_paginates_after_python_filtering(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -273,8 +273,8 @@ def test_pagination_limit_offset_passed_through(client):
 
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -293,8 +293,8 @@ def test_pagination_limit_capped_at_200(client):
     """Pydantic Query(le=200) 防止前端误传超大 limit 拖崩 DB."""
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -328,8 +328,8 @@ def test_dlq_returns_user_filtered_entries(client):
     user_triggers = [SimpleNamespace(id="t-mine")]
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -346,7 +346,7 @@ def test_dlq_redis_failure_returns_empty(client):
     """Redis 挂 → 返空列表, 不 500."""
     fake_redis = MagicMock(zrevrange=AsyncMock(side_effect=ConnectionError("redis down")))
     with patch(
-        "app.api.public.reminders.get_redis",
+        "app.services.reminder.checkin.get_redis",
         new_callable=AsyncMock, return_value=fake_redis,
     ):
         r = client.get("/reminders/dlq?user_id=u1", headers=_hdr("u1"))
@@ -368,8 +368,8 @@ def test_item_shape_includes_retry_count(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -391,8 +391,8 @@ def test_item_shape_includes_sent_to_ai(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -408,8 +408,8 @@ def test_item_shape_includes_habit_weekdays(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -428,8 +428,8 @@ def test_item_classify_status_cancelled_when_inactive_no_lastfired(client):
     fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.get_redis",
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
               new_callable=AsyncMock, return_value=fake_redis),
     ):
         mock_db.timetrigger = MagicMock()
@@ -449,8 +449,8 @@ def test_update_reminder_pinned_round_trips(client):
     updated.actionData["pinned"] = True
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock) as notify,
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock) as notify,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -473,8 +473,8 @@ def test_update_reminder_habit_weekdays_round_trips(client):
     updated = _trigger(tid="t-weekly", recurrence="weekly", habit_weekdays=[1, 3, 5])
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock),
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -496,8 +496,8 @@ def test_update_reminder_sent_to_ai_round_trips(client):
     updated = _trigger(tid="t-ai", sent_to_ai=True)
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock),
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -518,7 +518,7 @@ def test_update_reminder_sent_to_ai_round_trips(client):
 def test_update_deleted_reminder_rejected(client):
     trigger = _trigger(tid="t-deleted", deleted_at="2026-05-03T10:00:00+00:00")
 
-    with patch("app.api.public.reminders.db") as mock_db:
+    with patch("app.services.reminder.checkin.db") as mock_db:
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
         mock_db.timetrigger.update = AsyncMock()
@@ -548,8 +548,8 @@ def test_update_completed_once_allows_pin_but_rejects_content_edit(client):
     updated.actionData["pinned"] = True
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock),
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -575,8 +575,8 @@ def test_update_weekly_reminder_rejects_past_trigger_time(client):
     trigger = _trigger(tid="t-weekly-past", recurrence="weekly")
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock),
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -601,9 +601,9 @@ def test_complete_reminder_archives_memory_and_marks_inactive(client):
     )
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.archive_reminder_memory", new_callable=AsyncMock) as archive,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock) as notify,
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.archive_reminder_memory", new_callable=AsyncMock) as archive,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock) as notify,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -634,9 +634,9 @@ def test_complete_once_is_idempotent_when_already_completed(client):
     )
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.archive_reminder_memory", new_callable=AsyncMock) as archive,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock) as notify,
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.archive_reminder_memory", new_callable=AsyncMock) as archive,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock) as notify,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -663,9 +663,9 @@ def test_complete_weekly_marks_occurrence_without_archiving_habit(client):
     )
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.archive_reminder_memory", new_callable=AsyncMock) as archive,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock) as notify,
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.archive_reminder_memory", new_callable=AsyncMock) as archive,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock) as notify,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -689,9 +689,9 @@ def test_delete_reminder_archives_memory_and_returns_204(client):
     trigger = _trigger(tid="t-delete")
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.archive_reminder_memory", new_callable=AsyncMock) as archive,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock) as notify,
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.archive_reminder_memory", new_callable=AsyncMock) as archive,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock) as notify,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
@@ -717,9 +717,9 @@ def test_delete_reminder_is_idempotent_when_already_deleted(client):
     trigger = _trigger(tid="t-deleted", deleted_at="2026-05-03T10:00:00+00:00")
 
     with (
-        patch("app.api.public.reminders.db") as mock_db,
-        patch("app.api.public.reminders.archive_reminder_memory", new_callable=AsyncMock) as archive,
-        patch("app.api.public.reminders.notify_reminder_changed", new_callable=AsyncMock) as notify,
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.archive_reminder_memory", new_callable=AsyncMock) as archive,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock) as notify,
     ):
         mock_db.timetrigger = MagicMock()
         mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
