@@ -97,6 +97,18 @@ async def log_memory_changelog(
                 await refresh_quality_state_for_changelog(memory_id)
         except Exception as state_err:
             logger.debug(f"Memory quality state refresh skipped: {state_err}")
+        try:
+            if operation != "access":
+                from app.services.achievements.service import process_memory_changelog
+
+                await process_memory_changelog(
+                    user_id=user_id,
+                    memory_id=memory_id,
+                    operation=operation,
+                    workspace_id=workspace_id,
+                )
+        except Exception as achievement_err:
+            logger.debug(f"Achievement memory hook skipped: {achievement_err}")
     except Exception as e:
         logger.warning(f"Failed to write changelog: {e}")
 

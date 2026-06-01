@@ -10,6 +10,7 @@ from app.services.memory.lifecycle.quality import (
     derive_memory_quality_from_changelog_rows,
     serialize_quality,
 )
+from app.services.achievements.service import list_achievements
 from app.services.runtime.data_reset import hard_delete_agent_data
 
 router = APIRouter(prefix="/admin-api/agents", tags=["admin-agents"])
@@ -168,6 +169,47 @@ async def get_memory_stats(
     from app.api.public.memories import _compute_stats
     workspace_id = await _resolve_workspace_id(agent_id)
     return await _compute_stats(workspace_id, source or None)
+
+
+@router.get("/{agent_id}/achievements")
+async def get_agent_achievements(
+    agent_id: str,
+    _: str = Depends(require_admin_jwt),
+):
+    """Return achievement completion analytics for one agent."""
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    data = await list_achievements(user_id=agent.userId, agent_id=agent_id)
+    items = data["items"]
+    category_stats: dict[str, dict] = {}
+    level_stats: dict[str, dict] = {}
+    recent = []
+    for item in items:
+        category = str(item.get("category") or "未分类")
+        level = str(item.get("level_name") or "未分级")
+        unlocked = bool(item.get("unlocked"))
+        score = int(item.get("score") or 0)
+        category_row = category_stats.setdefault(category, {"category": category, "total": 0, "unlocked": 0, "score": 0})
+        level_row = level_stats.setdefault(level, {"level_name": level, "total": 0, "unlocked": 0, "score": 0})
+        category_row["total"] += 1
+        level_row["total"] += 1
+        if unlocked:
+            category_row["unlocked"] += 1
+            category_row["score"] += score
+            level_row["unlocked"] += 1
+            level_row["score"] += score
+            recent.append(item)
+    recent.sort(key=lambda item: str(item.get("unlocked_at") or ""), reverse=True)
+    return {
+        **data,
+        "agent_id": agent_id,
+        "agent_name": agent.name,
+        "category_stats": sorted(category_stats.values(), key=lambda row: (-row["unlocked"], row["category"])),
+        "level_stats": sorted(level_stats.values(), key=lambda row: (-row["unlocked"], row["level_name"])),
+        "recent_unlocks": recent[:8],
+    }
 
 
 @router.get("/{agent_id}/memories")

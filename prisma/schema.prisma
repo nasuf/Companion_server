@@ -38,6 +38,8 @@ model User {
   lastWills         LastWill[]
   dailyActivities   UserDailyActivity[]
   gameSessions      GameSession[]
+  achievementUnlocks AchievementUnlock[]
+  achievementEvents  AchievementEvent[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
   bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
@@ -101,6 +103,8 @@ model AiAgent {
   timeCapsules        TimeCapsule[]
   lastWills           LastWill[]
   gameSessions        GameSession[]
+  achievementUnlocks AchievementUnlock[]
+  achievementEvents  AchievementEvent[]
 
   @@map("ai_agents")
 }
@@ -126,6 +130,8 @@ model ChatWorkspace {
   timeCapsules    TimeCapsule[]
   lastWills       LastWill[]
   gameSessions    GameSession[]
+  achievementUnlocks AchievementUnlock[]
+  achievementEvents  AchievementEvent[]
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -150,6 +156,8 @@ model Conversation {
   proactiveStates ProactiveState[]
   proactiveEvents ProactiveEventLog[]
   gameSessions    GameSession[]
+  achievementUnlocks AchievementUnlock[]
+  achievementEvents  AchievementEvent[]
 
   @@map("conversations")
 }
@@ -303,6 +311,51 @@ model UserDailyActivity {
   @@unique([userId, localDate], map: "user_daily_activity_user_date_key")
   @@index([userId, localDate], map: "user_daily_activity_user_date_idx")
   @@map("user_daily_activity")
+}
+
+model AchievementUnlock {
+  id            String         @id @default(uuid())
+  userId        String         @map("user_id")
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId       String         @map("agent_id")
+  agent         AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId   String?        @map("workspace_id")
+  workspace     ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId String?       @map("conversation_id")
+  conversation  Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  achievementId Int            @map("achievement_id")
+  metadata      Json           @default("{}")
+  notifiedAt    DateTime?      @map("notified_at")
+  unlockedAt    DateTime       @default(now()) @map("unlocked_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  @@unique([userId, agentId, achievementId], map: "achievement_unlocks_user_agent_achievement_key")
+  @@index([userId, agentId, unlockedAt(sort: Desc)], map: "achievement_unlocks_user_agent_idx")
+  @@map("achievement_unlocks")
+}
+
+model AchievementEvent {
+  id             String         @id @default(uuid())
+  userId         String         @map("user_id")
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String         @map("agent_id")
+  agent          AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId    String?        @map("workspace_id")
+  workspace      ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId String?        @map("conversation_id")
+  conversation   Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  eventType      String         @map("event_type")
+  sourceId       String?        @map("source_id")
+  valueInt       Int?           @map("value_int")
+  valueText      String?        @map("value_text")
+  metadata       Json           @default("{}")
+  occurredAt     DateTime       @default(now()) @map("occurred_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  @@index([userId, agentId, eventType, occurredAt(sort: Desc)], map: "achievement_events_scope_type_time_idx")
+  @@index([workspaceId, eventType, occurredAt(sort: Desc)], map: "achievement_events_workspace_type_time_idx")
+  @@map("achievement_events")
 }
 
 // Admin 测试时对单条 AI 回复打标的 bug 标签. 跟 Message 是 N:1

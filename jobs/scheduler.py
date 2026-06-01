@@ -156,6 +156,17 @@ def setup_scheduler():
         replace_existing=True,
     )
 
+    # Achievement exact/end-of-day rollups shortly after local midnight.
+    scheduler.add_job(
+        _run_achievement_daily_rollup,
+        "cron",
+        hour=0,
+        minute=5,
+        id="achievement_daily_rollup",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Weekly topic intimacy on Sunday at 2 AM
     scheduler.add_job(
         _run_weekly_topic_intimacy,
@@ -345,6 +356,18 @@ async def _run_weekly_portraits():
             concurrency=3, task_name="Portrait update",
         ),
     )
+
+
+async def _run_achievement_daily_rollup():
+    async def _body():
+        try:
+            from app.services.achievements.service import run_daily_rollup
+
+            await run_daily_rollup()
+        except Exception as e:
+            logger.warning(f"Achievement daily rollup failed: {e}")
+
+    await _run_distributed_job("achievement_daily_rollup", 1800, _body)
 
 
 async def _run_weekly_reflection():

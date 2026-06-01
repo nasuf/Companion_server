@@ -26,6 +26,7 @@ from app.services.proactive.state import mark_user_replied_for_conversation
 from app.services.proactive.sender import send_first_greeting
 from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.runtime.ws_manager import manager
+from app.services.runtime.tasks import fire_background
 
 logger = logging.getLogger(__name__)
 
@@ -384,6 +385,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     )
                     await _handle_message(
                         websocket, conversation_id, user_id, agent, text,
+                        workspace_id=workspace_id,
                         client_id=client_id,
                         component_card=component_card,
                     )
@@ -437,6 +439,7 @@ async def _handle_message(
     agent,
     text: str,
     *,
+    workspace_id: str | None = None,
     client_id: str | None = None,
     component_card: dict | None = None,
 ) -> None:
@@ -471,6 +474,23 @@ async def _handle_message(
         ),
     )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+    try:
+        from app.services.achievements.service import process_user_message
+
+        fire_background(process_user_message(
+            user_id=user_id,
+            agent_id=agent.id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            message_id=user_message_id,
+            text=text,
+            agent_name=getattr(agent, "name", None),
+            reply_context=current_context,
+            aggregation_route=plan.route,
+            component_card=component_card,
+        ))
+    except Exception as achievement_err:
+        logger.debug(f"[ACH] user message hook skipped: {achievement_err}")
 
     card_reply_message = _component_card_reply_message(plan.final_message, component_card)
     if card_reply_message:

@@ -148,6 +148,18 @@ async def save_replies(
                     logger.debug(f"Reply operational metrics skipped: {metric_err}")
             if i == 0:
                 first_message_id = created.id
+            try:
+                from app.services.achievements.service import process_assistant_message
+
+                fire_background(process_assistant_message(
+                    conversation_id=conversation_id,
+                    message_id=created.id,
+                    text=text,
+                    metadata=metadata,
+                    occurred_at=getattr(created, "createdAt", None),
+                ))
+            except Exception as achievement_err:
+                logger.debug(f"[ACH] assistant message hook skipped: {achievement_err}")
         return first_message_id
     except Exception as e:
         logger.error(f"Failed to save replies: {e}")
