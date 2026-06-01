@@ -66,7 +66,7 @@ async def _evaluate_user_message(
     component_card: dict | None = None,
     occurred_at: datetime | None = None,
 ) -> None:
-    occurred_at = _aware(occurred_at or _now())
+    occurred_at = await _message_created_at(message_id, user_id, agent_id) or _aware(occurred_at or _now())
     char_count = count_chars(text)
     normalized = _normalized_message(text)
     await record_event(
@@ -188,6 +188,32 @@ async def _evaluate_user_message(
     await _check_proactive_response(user_id, agent_id, workspace_id, conversation_id, message_id, occurred_at)
     await _check_daily_chat_day_milestones(user_id, agent_id, workspace_id, conversation_id)
     await _check_intimacy(user_id, agent_id, workspace_id, conversation_id)
+
+
+async def _message_created_at(message_id: str, user_id: str, agent_id: str) -> datetime | None:
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT m.created_at
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.id = $1
+              AND m.role = 'user'
+              AND c.user_id = $2
+              AND c.agent_id = $3
+              AND c.is_deleted = FALSE
+            LIMIT 1
+            """,
+            message_id,
+            user_id,
+            agent_id,
+        )
+    except Exception:
+        return None
+    if not rows:
+        return None
+    created_at = _field(rows[0], "created_at")
+    return _aware(created_at) if created_at else None
 
 
 async def _record_daily_once(user_id: str, agent_id: str, workspace_id: str | None, conversation_id: str | None, event_type: str, source_id: str, local: datetime) -> None:
