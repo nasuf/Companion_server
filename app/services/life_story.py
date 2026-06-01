@@ -92,6 +92,7 @@ _STAGE_PERCENT: dict[str, int] = {
     "converting": 78,
     "embedding": 85,
     "storing": 92,
+    "first_greeting": 96,
     "complete": 100,
     "failed": -1,
     # 旧名兼容

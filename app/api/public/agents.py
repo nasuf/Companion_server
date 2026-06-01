@@ -189,9 +189,6 @@ async def _run_agent_initialization_inner(
 
     _, overview_text = await asyncio.gather(_run_memories(), _safe_life_overview(agent))
 
-    if not memories_failed:
-        await set_progress(agent.id, "complete", message="生成完成")
-
     if overview_text and not memories_failed:
         try:
             await generate_daily_schedule(
@@ -204,6 +201,7 @@ async def _run_agent_initialization_inner(
             logger.warning(f"Daily schedule init failed for agent {agent.id}: {e}")
 
     if not memories_failed:
+        await set_progress(agent.id, "first_greeting", message="正在准备第一句问候...")
         await activate_agent(agent.id)
         try:
             await dispatch_first_greeting_for_agent(
@@ -212,6 +210,7 @@ async def _run_agent_initialization_inner(
             )
         except Exception as e:
             logger.warning(f"first_greeting dispatch failed for agent {agent.id}: {e}")
+        await set_progress(agent.id, "complete", message="生成完成")
 
 
 register_job_handler("agent_initialization", _run_agent_initialization_job)

@@ -35,7 +35,7 @@ from app.services.proactive.context import build_proactive_context
 from app.services.schedule_domain.time_service import _now_corrected
 from app.services.proactive.policy import select_topic_source, select_topic_theme
 from app.services.relationship.emotion import emotion_to_tone
-from app.services.workspace.workspaces import resolve_workspace_id
+from app.services.workspace.workspaces import get_active_workspace, resolve_workspace_id
 from app.services.proactive.state import (
     ProactiveStateRecord,
     determine_proactive_stage,
@@ -630,17 +630,16 @@ async def send_first_greeting(
 
 
 async def dispatch_first_greeting_for_agent(*, agent_id: str, user_id: str) -> None:
-    """activate_agent 后兜底触发: 找该 agent 所有未删除会话, 对消息数=0 的发开场白.
+    """activate_agent 后兜底触发: 找/建该 agent 会话, 对消息数=0 的发开场白.
 
     解决前端 WS singleton 不会随 App remount 重连导致 send_first_greeting 永远
     不被再次调用的问题. send_first_greeting 内部用 Redis SETNX 保证幂等.
     """
-    try:
-        convs = await db.conversation.find_many(
-            where={"agentId": agent_id, "isDeleted": False},
-        )
-    except Exception as e:
-        logger.warning(f"dispatch_first_greeting_for_agent: list convs failed for {agent_id[:8]}: {e}")
+    convs = await _ensure_first_greeting_conversations(
+        agent_id=agent_id,
+        user_id=user_id,
+    )
+    if not convs:
         return
     # 一次查询 agent_name + username, 整个 dispatch 复用 — 避免每 conv 各查一次
     agent = await db.aiagent.find_unique(where={"id": agent_id})
@@ -668,6 +667,65 @@ async def dispatch_first_greeting_for_agent(*, agent_id: str, user_id: str) -> N
                 f"dispatch_first_greeting_for_agent: send failed for "
                 f"conv={conv.id[:8]} agent={agent_id[:8]}: {e}"
             )
+
+
+async def _ensure_first_greeting_conversations(
+    *, agent_id: str, user_id: str
+) -> list[Any]:
+    """Return existing conversations, or create the default one before greeting.
+
+    Flutter may still be on the creation progress screen when provisioning
+    finishes. If no conversation exists yet, create the same default active
+    workspace conversation that /conversations would create later so the first
+    greeting can be generated before the user lands in chat.
+    """
+    try:
+        convs = await db.conversation.find_many(
+            where={"agentId": agent_id, "isDeleted": False},
+        )
+    except Exception as e:
+        logger.warning(
+            f"dispatch_first_greeting_for_agent: list convs failed for {agent_id[:8]}: {e}"
+        )
+        return []
+    if convs:
+        return convs
+
+    workspace = await get_active_workspace(user_id=user_id, agent_id=agent_id)
+    if not workspace:
+        logger.info(
+            f"dispatch_first_greeting_for_agent: no active workspace for agent={agent_id[:8]}"
+        )
+        return []
+
+    try:
+        conv = await db.conversation.create(
+            data={
+                "user": {"connect": {"id": user_id}},
+                "agent": {"connect": {"id": agent_id}},
+                "workspace": {"connect": {"id": workspace.id}},
+                "title": None,
+            }
+        )
+        return [conv]
+    except Exception as e:
+        logger.warning(
+            f"dispatch_first_greeting_for_agent: create default conv failed "
+            f"agent={agent_id[:8]} workspace={workspace.id[:8]}: {e}"
+        )
+        try:
+            existing = await db.conversation.find_first(
+                where={
+                    "workspaceId": workspace.id,
+                    "agentId": agent_id,
+                    "userId": user_id,
+                    "isDeleted": False,
+                },
+                order={"updatedAt": "desc"},
+            )
+        except Exception:
+            existing = None
+        return [existing] if existing else []
 
 
 # ────────────────────────────────────────────────────────────────────
