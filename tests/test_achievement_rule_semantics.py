@@ -4,6 +4,7 @@ import pytest
 
 from app.services.achievements import engine
 from app.services.achievements import service
+from app.services.achievements.rules import assistant_message_rules
 from app.services.achievements.rules import intent_rules
 from app.services.achievements.rules import memory_rules
 
@@ -102,3 +103,84 @@ async def test_memory_changelog_does_not_unlock_for_mismatched_user():
 
     unlock.assert_not_awaited()
     fake_db.query_raw.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_assistant_emoji_counts_for_achievement_59():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 1))),
+        patch.object(assistant_message_rules, "_check_pair_100", AsyncMock()),
+        patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
+        patch.object(assistant_message_rules, "record_event", AsyncMock()) as record,
+        patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=100)),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_message_event(
+            conversation_id="c1",
+            message_id="a-msg-1",
+            text="好呀😊",
+            metadata={"reply_index": 0},
+        )
+
+    event_types = [call.kwargs["event_type"] for call in record.await_args_list]
+    assert "assistant_emoji" in event_types
+    assert any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_plain_assistant_message_does_not_count_for_achievement_59():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 1))),
+        patch.object(assistant_message_rules, "_check_pair_100", AsyncMock()),
+        patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
+        patch.object(assistant_message_rules, "record_event", AsyncMock()) as record,
+        patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=100)),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_message_event(
+            conversation_id="c1",
+            message_id="a-msg-2",
+            text="好呀",
+            metadata={"reply_index": 0},
+        )
+
+    event_types = [call.kwargs["event_type"] for call in record.await_args_list]
+    assert "assistant_emoji" not in event_types
+    assert not any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_assistant_sticker_metadata_does_not_count_for_achievement_59():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 1))),
+        patch.object(assistant_message_rules, "_check_pair_100", AsyncMock()),
+        patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
+        patch.object(assistant_message_rules, "record_event", AsyncMock()) as record,
+        patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=100)),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_message_event(
+            conversation_id="c1",
+            message_id="a-msg-3",
+            text="好呀",
+            metadata={"reply_index": 0, "sticker_url": "https://example.com/s.png"},
+        )
+
+    event_types = [call.kwargs["event_type"] for call in record.await_args_list]
+    assert "assistant_emoji" not in event_types
+    assert not any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
