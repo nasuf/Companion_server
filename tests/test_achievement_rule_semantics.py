@@ -7,6 +7,7 @@ from app.services.achievements import service
 from app.services.achievements.rules import assistant_message_rules
 from app.services.achievements.rules import intent_rules
 from app.services.achievements.rules import memory_rules
+from app.services.achievements.rules import user_message_rules
 
 
 def test_public_service_exports_event_entrypoints_not_rule_helpers():
@@ -157,6 +158,34 @@ async def test_plain_assistant_message_does_not_count_for_achievement_59():
     event_types = [call.kwargs["event_type"] for call in record.await_args_list]
     assert "assistant_emoji" not in event_types
     assert not any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_reduplicated_words_do_not_unlock_disabled_achievement_17():
+    with (
+        patch.object(user_message_rules, "record_event", AsyncMock()),
+        patch.object(user_message_rules, "_day_user_messages", AsyncMock(return_value=[])),
+        patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
+        patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_check_sequences", AsyncMock()),
+        patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
+        patch.object(user_message_rules, "_check_proactive_response", AsyncMock()),
+        patch.object(user_message_rules, "_check_daily_chat_day_milestones", AsyncMock()),
+        patch.object(user_message_rules, "_check_intimacy", AsyncMock()),
+        patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_user_message_event(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            message_id="m1",
+            text="哈哈，好好休息",
+        )
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 17 not in unlocked_ids
 
 
 @pytest.mark.asyncio

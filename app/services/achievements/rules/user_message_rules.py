@@ -32,7 +32,6 @@ from app.services.achievements.utils import (
 )
 from app.services.relationship.emotion import is_high_emotion, quick_emotion_estimate
 
-REDUP_WORDS = ("哈哈", "嘿嘿", "好好", "乖乖", "拜拜")
 CURRENT_STATE_CUES = ("在干嘛", "在做什么", "你现在", "忙吗", "睡了吗")
 FUTURE_PLAN_CUES = ("之后有什么安排", "接下来有什么安排", "明天干嘛", "今晚干嘛", "计划")
 
@@ -100,8 +99,6 @@ async def _evaluate_user_message(
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=14)
     if any(cue in text for cue in CURRENT_STATE_CUES):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=15)
-    if any(cue in text for cue in REDUP_WORDS):
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=17)
     if text.rstrip().endswith("～"):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=27)
     if any(ch.isdigit() for ch in text):
