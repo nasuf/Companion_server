@@ -5,6 +5,7 @@ import pytest
 
 from app.services.achievements import engine
 from app.services.achievements import service
+from app.services.achievements import repository
 from app.services.achievements.rules import assistant_message_rules
 from app.services.achievements.rules import intent_rules
 from app.services.achievements.rules import memory_rules
@@ -61,6 +62,105 @@ async def test_schedule_adjust_achievement_unlocks_after_50_intents():
         )
 
     assert [call.kwargs["achievement_id"] for call in unlock.await_args_list] == [20, 87]
+
+
+@pytest.mark.asyncio
+async def test_unlock_achievement_redis_hit_skips_db_insert():
+    fake_redis = MagicMock()
+    fake_redis.sismember = AsyncMock(return_value=True)
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock()
+
+    with (
+        patch.object(repository, "get_redis", AsyncMock(return_value=fake_redis)),
+        patch.object(repository, "db", fake_db),
+    ):
+        unlocked = await repository.unlock_achievement(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            achievement_id=27,
+        )
+
+    assert unlocked is False
+    fake_redis.sismember.assert_awaited_once_with("achievements:unlocked:u1:a1", "27")
+    fake_db.query_raw.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unlock_achievement_db_conflict_backfills_redis_cache():
+    fake_redis = MagicMock()
+    fake_redis.sismember = AsyncMock(return_value=False)
+    fake_redis.sadd = AsyncMock()
+    fake_redis.expire = AsyncMock()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[])
+
+    with (
+        patch.object(repository, "get_redis", AsyncMock(return_value=fake_redis)),
+        patch.object(repository, "db", fake_db),
+    ):
+        unlocked = await repository.unlock_achievement(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            achievement_id=27,
+        )
+
+    assert unlocked is False
+    fake_db.query_raw.assert_awaited_once()
+    fake_redis.sadd.assert_awaited_once_with("achievements:unlocked:u1:a1", "27")
+    fake_redis.expire.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unlock_achievement_redis_down_falls_back_to_db():
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[{"id": "unlock-1", "unlocked_at": datetime(2026, 6, 1, tzinfo=timezone.utc)}])
+
+    with (
+        patch.object(repository, "get_redis", AsyncMock(side_effect=Exception("redis down"))),
+        patch.object(repository, "db", fake_db),
+    ):
+        unlocked = await repository.unlock_achievement(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            achievement_id=27,
+            notify=False,
+        )
+
+    assert unlocked is True
+    fake_db.query_raw.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_list_achievements_backfills_user_agent_redis_cache():
+    fake_redis = MagicMock()
+    fake_redis.sadd = AsyncMock()
+    fake_redis.expire = AsyncMock()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(
+        return_value=[
+            {"achievement_id": 27, "unlocked_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+            {"achievement_id": 64, "unlocked_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+        ]
+    )
+
+    with (
+        patch.object(repository, "get_redis", AsyncMock(return_value=fake_redis)),
+        patch.object(repository, "db", fake_db),
+    ):
+        result = await repository.list_achievements(user_id="u1", agent_id="a1")
+
+    assert result["unlocked"] == 2
+    fake_redis.sadd.assert_awaited_once()
+    assert fake_redis.sadd.await_args.args[0] == "achievements:unlocked:u1:a1"
+    assert set(fake_redis.sadd.await_args.args[1:]) == {"27", "64"}
+    fake_redis.expire.assert_awaited_once()
 
 
 @pytest.mark.asyncio

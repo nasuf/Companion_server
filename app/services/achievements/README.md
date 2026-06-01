@@ -25,4 +25,10 @@ Internal layout:
   layer where achievement ids, counters, and unlock conditions should be
   handled.
 - `repository.py`: persistence helpers for events and unlocked achievements.
+  `unlock_achievement` also owns the Redis unlocked-state cache. Cache keys are
+  scoped by `user_id + agent_id` (`achievements:unlocked:{user_id}:{agent_id}`),
+  so each user-agent relationship has an independent completion set. Redis is
+  only an optimization: DB unique constraints remain the source of truth, Redis
+  misses fall through to DB, DB conflicts backfill Redis, and Redis failures
+  degrade to the DB path.
 - `definitions.py`: achievement metadata loaded by UI/admin APIs.

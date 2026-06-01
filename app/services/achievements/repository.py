@@ -8,11 +8,39 @@ from datetime import datetime
 from typing import Any
 
 from app.db import db
+from app.redis_client import get_redis
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID, ACHIEVEMENTS
 from app.services.achievements.utils import _day_bounds, _field, _json, _local, _now, count_chars
 from app.services.runtime.ws_manager import manager
 
 logger = logging.getLogger(__name__)
+
+_UNLOCKED_CACHE_TTL_S = 86400 * 30
+
+
+def _unlocked_cache_key(user_id: str, agent_id: str) -> str:
+    return f"achievements:unlocked:{user_id}:{agent_id}"
+
+
+async def _is_unlock_cached(user_id: str, agent_id: str, achievement_id: int) -> bool:
+    try:
+        redis = await get_redis()
+        return bool(await redis.sismember(_unlocked_cache_key(user_id, agent_id), str(achievement_id)))
+    except Exception as e:
+        logger.debug(f"[ACH] unlock cache read skipped id={achievement_id}: {e}")
+        return False
+
+
+async def _cache_unlocked_achievements(user_id: str, agent_id: str, achievement_ids: list[int] | set[int]) -> None:
+    if not achievement_ids:
+        return
+    try:
+        redis = await get_redis()
+        key = _unlocked_cache_key(user_id, agent_id)
+        await redis.sadd(key, *[str(achievement_id) for achievement_id in achievement_ids])
+        await redis.expire(key, _UNLOCKED_CACHE_TTL_S)
+    except Exception as e:
+        logger.debug(f"[ACH] unlock cache write skipped: {e}")
 
 
 async def record_event(
@@ -73,6 +101,8 @@ async def unlock_achievement(
     definition = ACHIEVEMENT_BY_ID.get(achievement_id)
     if not definition:
         return False
+    if await _is_unlock_cached(user_id, agent_id, achievement_id):
+        return False
     try:
         rows = await db.query_raw(
             """
@@ -94,7 +124,9 @@ async def unlock_achievement(
         logger.warning(f"[ACH] unlock failed id={achievement_id}: {e}")
         return False
     if not rows:
+        await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
         return False
+    await _cache_unlocked_achievements(user_id, agent_id, {achievement_id})
     unlocked_at = _field(rows[0], "unlocked_at") or _now()
     payload = {
         **definition.to_dict(),
@@ -132,6 +164,7 @@ async def list_achievements(user_id: str, agent_id: str) -> dict:
         agent_id,
     )
     unlocked = {int(_field(row, "achievement_id")): _field(row, "unlocked_at") for row in rows}
+    await _cache_unlocked_achievements(user_id, agent_id, set(unlocked.keys()))
     items = []
     score = 0
     for definition in ACHIEVEMENTS:
