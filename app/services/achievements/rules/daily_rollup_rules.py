@@ -74,8 +74,6 @@ async def run_daily_rollup(target_local_day: datetime | None = None) -> None:
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=45)
         if len(rows) >= 10 and all(count % 2 == 1 for count in counts):
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=46)
-        if ai_chars and user_chars >= ai_chars * 2:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=40)
         if user_chars and ai_chars > user_chars * 3:
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=44)
         if chat_total >= 10000:
