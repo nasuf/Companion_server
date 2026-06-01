@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.public import time_capsules
-from app.models.time_capsule import TimeCapsuleUpdate
+from app.models.time_capsule import TimeCapsuleCreate, TimeCapsuleUpdate
 
 
 def _capsule_row(
@@ -17,12 +17,13 @@ def _capsule_row(
     status: str = "draft",
     open_date=None,
     opened_at=None,
+    agent_id="agent-id",
 ):
     now = datetime(2026, 5, 27, tzinfo=UTC)
     return SimpleNamespace(
         id="capsule-id",
         userId="user-id",
-        agentId="agent-id",
+        agentId=agent_id,
         workspaceId="workspace-id",
         title=content[:18],
         content=content,
@@ -115,27 +116,55 @@ async def test_get_capsule_rejects_unopened_locked_content(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_capsules_redacts_locked_content_and_pushes_state_to_sql(monkeypatch):
+async def test_list_capsules_redacts_locked_content_and_does_not_filter_agent(monkeypatch):
     pending = _capsule_row(
         content="秘密内容",
         status="sealed",
         open_date=datetime(2026, 6, 1, tzinfo=UTC),
+        agent_id="old-agent-id",
     )
     db = SimpleNamespace(query_raw=AsyncMock(return_value=[pending.__dict__]))
     monkeypatch.setattr(time_capsules, "db", db)
-    monkeypatch.setattr(time_capsules, "_ensure_agent_scope", AsyncMock())
 
     response = await time_capsules.list_capsules(
-        agent_id="agent-id",
-        workspace_id="workspace-id",
+        agent_id="new-agent-id",
+        workspace_id="new-workspace-id",
         state="pending",
         user={"sub": "user-id", "role": "user"},
     )
 
     sql = db.query_raw.await_args.args[0]
+    assert "agent_id =" not in sql
+    assert "workspace_id =" not in sql
+    assert db.query_raw.await_args.args[1] == "user-id"
     assert "open_date::date >" in sql
     assert response[0].content == ""
     assert response[0].title is None
+
+
+@pytest.mark.asyncio
+async def test_create_capsule_allows_user_owned_capsule_without_agent(monkeypatch):
+    inserted = {}
+
+    async def fake_insert(**kwargs):
+        inserted.update(kwargs)
+
+    created = _capsule_row(content="给未来的我", agent_id=None)
+    monkeypatch.setattr(time_capsules, "_ensure_capsule_context_scope", AsyncMock())
+    monkeypatch.setattr(time_capsules, "_insert_capsule_raw", fake_insert)
+    monkeypatch.setattr(
+        time_capsules,
+        "_fetch_capsule_light",
+        AsyncMock(return_value=created),
+    )
+
+    response = await time_capsules.create_capsule(
+        TimeCapsuleCreate(content="给未来的我", status="draft"),
+        user={"sub": "user-id", "role": "user"},
+    )
+
+    assert inserted["agent_id"] is None
+    assert response.agent_id is None
 
 
 @pytest.mark.asyncio

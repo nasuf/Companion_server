@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class TimeCapsuleCreate(BaseModel):
-    agent_id: str
+    agent_id: str | None = None
     workspace_id: str | None = None
     title: str | None = None
     content: str = Field(min_length=1, max_length=4000)
@@ -35,7 +35,7 @@ class TimeCapsuleMediaUpload(BaseModel):
 class TimeCapsuleResponse(BaseModel):
     id: str
     user_id: str
-    agent_id: str
+    agent_id: str | None = None
     workspace_id: str | None = None
     title: str | None = None
     content: str

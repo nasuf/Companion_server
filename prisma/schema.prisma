@@ -234,8 +234,8 @@ model TimeCapsule {
   id          String         @id @default(uuid())
   userId      String         @map("user_id")
   user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId     String         @map("agent_id")
-  agent       AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId     String?        @map("agent_id")
+  agent       AiAgent?       @relation(fields: [agentId], references: [id], onDelete: SetNull)
   workspaceId String?        @map("workspace_id")
   workspace   ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   title       String?
@@ -249,6 +249,8 @@ model TimeCapsule {
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
 
+  @@index([userId, status, openDate], map: "time_capsules_user_state_idx")
+  @@index([userId, openedAt], map: "time_capsules_user_opened_idx")
   @@index([userId, agentId, status, openDate], map: "time_capsules_user_agent_state_idx")
   @@index([workspaceId, status, openDate], map: "time_capsules_workspace_state_idx")
   @@map("time_capsules")

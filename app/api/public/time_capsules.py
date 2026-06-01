@@ -272,24 +272,25 @@ def _redact_locked_response(response: TimeCapsuleResponse) -> TimeCapsuleRespons
     return response.copy(update=update)
 
 
-async def _ensure_agent_scope(
+async def _ensure_capsule_context_scope(
     *,
-    agent_id: str,
+    agent_id: str | None,
     workspace_id: str | None,
     user: dict,
 ) -> None:
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent or getattr(agent, "status", "active") == "archived":
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if user.get("role") != "admin" and agent.userId != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Not your agent")
+    if agent_id:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        if not agent or getattr(agent, "status", "active") == "archived":
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if user.get("role") != "admin" and agent.userId != user.get("sub"):
+            raise HTTPException(status_code=403, detail="Not your agent")
     if workspace_id:
         workspace = await db.chatworkspace.find_unique(where={"id": workspace_id})
-        if (
-            not workspace
-            or workspace.userId != agent.userId
-            or workspace.agentId != agent_id
+        if not workspace or (
+            user.get("role") != "admin" and workspace.userId != user.get("sub")
         ):
+            raise HTTPException(status_code=400, detail="Workspace does not belong to user")
+        if agent_id and workspace.agentId != agent_id:
             raise HTTPException(status_code=400, detail="Workspace does not match agent")
 
 
@@ -486,7 +487,7 @@ async def _insert_capsule_raw(
     *,
     capsule_id: str,
     user_id: str,
-    agent_id: str,
+    agent_id: str | None,
     workspace_id: str | None,
     title: str,
     content: str,
@@ -579,7 +580,7 @@ async def _update_capsule_raw(
 
 @router.get("", response_model=list[TimeCapsuleResponse])
 async def list_capsules(
-    agent_id: str = Query(...),
+    agent_id: str | None = Query(default=None),
     workspace_id: str | None = None,
     state: str | None = Query(default=None),
     limit: int = Query(default=200, ge=1, le=500),
@@ -589,12 +590,8 @@ async def list_capsules(
     started = time_module.perf_counter()
     if state is not None and state not in _VALID_STATES:
         raise HTTPException(status_code=400, detail="Invalid capsule state")
-    await _ensure_agent_scope(agent_id=agent_id, workspace_id=workspace_id, user=user)
-    values: list[Any] = [agent_id, user.get("sub")]
-    where = ["agent_id = $1", "user_id = $2"]
-    if workspace_id:
-        values.append(workspace_id)
-        where.append(f"workspace_id = ${len(values)}")
+    values: list[Any] = [user.get("sub")]
+    where = ["user_id = $1"]
     if state:
         where.append(_state_sql_clause(state))
     values.append(limit)
@@ -782,7 +779,7 @@ async def create_capsule(
         data.status,
         _media_summary(data.media),
     )
-    await _ensure_agent_scope(
+    await _ensure_capsule_context_scope(
         agent_id=data.agent_id,
         workspace_id=data.workspace_id,
         user=user,
