@@ -99,9 +99,9 @@ async def log_memory_changelog(
             logger.debug(f"Memory quality state refresh skipped: {state_err}")
         try:
             if operation != "access":
-                from app.services.achievements.service import process_memory_changelog
+                from app.services.achievements.service import handle_memory_changelog_event
 
-                await process_memory_changelog(
+                await handle_memory_changelog_event(
                     user_id=user_id,
                     memory_id=memory_id,
                     operation=operation,

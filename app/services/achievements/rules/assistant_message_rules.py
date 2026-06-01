@@ -1,15 +1,26 @@
-"""Achievement evaluators driven by assistant and proactive messages."""
+"""Achievement rules driven by assistant and proactive messages."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 from app.db import db
+from app.services.achievements.events import AssistantMessageAchievementEvent
 from app.services.achievements.repository import _birthday_mmdd, _day_role_char_counts, _event_count, record_event, unlock_achievement
 from app.services.achievements.utils import _aware, _field, _local, _now, count_chars
 
 
-async def process_assistant_message(
+async def evaluate_assistant_message(event: AssistantMessageAchievementEvent) -> None:
+    await _evaluate_assistant_message(
+        conversation_id=event.conversation_id,
+        message_id=event.message_id,
+        text=event.text,
+        metadata=event.metadata,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def _evaluate_assistant_message(
     *,
     conversation_id: str,
     message_id: str,

@@ -149,9 +149,9 @@ async def save_replies(
             if i == 0:
                 first_message_id = created.id
             try:
-                from app.services.achievements.service import process_assistant_message
+                from app.services.achievements.service import handle_assistant_message_event
 
-                fire_background(process_assistant_message(
+                fire_background(handle_assistant_message_event(
                     conversation_id=conversation_id,
                     message_id=created.id,
                     text=text,

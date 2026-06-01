@@ -1083,6 +1083,25 @@ async def stream_chat_response(
             crisis_followup_check_mode if crisis_followup_active else None
         )
 
+        if agent_id:
+            try:
+                from app.services.achievements.service import handle_intent_event
+
+                intent_metadata = dict(detected_intent.metadata or {})
+                intent_metadata["confidence"] = detected_intent.confidence
+                intent_metadata["source"] = "chat_intent"
+                _fire_background(handle_intent_event(
+                    intent=detected_intent.intent.value,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    message_id=user_message_id,
+                    metadata=intent_metadata,
+                ))
+            except Exception as achievement_err:
+                logger.debug(f"[ACH] intent event hook skipped: {achievement_err}")
+
         # §3.4.6 终结意图
         if detected_intent.intent == IntentType.CONVERSATION_END:
             await _cancel_fetch_task()

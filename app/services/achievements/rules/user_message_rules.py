@@ -1,10 +1,11 @@
-"""Achievement evaluators driven by persisted user chat messages."""
+"""Achievement rules driven by persisted user chat messages."""
 
 from __future__ import annotations
 
 from datetime import datetime, time, timezone
 
 from app.db import db
+from app.services.achievements.events import UserMessageAchievementEvent
 from app.services.achievements.repository import (
     _birthday_mmdd,
     _day_role_char_counts,
@@ -32,14 +33,27 @@ from app.services.achievements.utils import (
 from app.services.relationship.emotion import is_high_emotion, quick_emotion_estimate
 
 REDUP_WORDS = ("哈哈", "嘿嘿", "好好", "乖乖", "拜拜")
-SCHEDULE_ADJUST_CUES = ("调整作息", "改作息", "安排作息", "换个作息")
-SCHEDULE_ADJUST_TIME_CUES = ("早点睡", "晚点睡", "早睡", "晚睡", "早起", "晚起")
-SCHEDULE_ADJUST_TARGET_CUES = ("你", "给你", "让你", "帮你", "安排你", "调整你", "改你", "换你")
 CURRENT_STATE_CUES = ("在干嘛", "在做什么", "你现在", "忙吗", "睡了吗")
 FUTURE_PLAN_CUES = ("之后有什么安排", "接下来有什么安排", "明天干嘛", "今晚干嘛", "计划")
 
 
-async def process_user_message(
+async def evaluate_user_message(event: UserMessageAchievementEvent) -> None:
+    await _evaluate_user_message(
+        user_id=event.user_id,
+        agent_id=event.agent_id,
+        workspace_id=event.workspace_id,
+        conversation_id=event.conversation_id,
+        message_id=event.message_id,
+        text=event.text,
+        agent_name=event.agent_name,
+        reply_context=event.reply_context,
+        aggregation_route=event.aggregation_route,
+        component_card=event.component_card,
+        occurred_at=event.occurred_at,
+    )
+
+
+async def _evaluate_user_message(
     *,
     user_id: str,
     agent_id: str,
@@ -92,11 +106,6 @@ async def process_user_message(
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=27)
     if any(ch.isdigit() for ch in text):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=32)
-    if _is_schedule_adjust_request(text):
-        await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="schedule_adjust_request", source_id=message_id)
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=20)
-        if await _event_count(user_id, agent_id, "schedule_adjust_request") >= 50:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=87)
     if any(cue in text for cue in FUTURE_PLAN_CUES):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=21)
     if is_high_emotion(quick_emotion_estimate(text)):
@@ -194,18 +203,6 @@ async def _record_daily_once(user_id: str, agent_id: str, workspace_id: str | No
         source_id=f"{event_type}:{local.date().isoformat()}",
         metadata={"message_id": source_id},
         occurred_at=local.astimezone(timezone.utc),
-    )
-
-
-def _is_schedule_adjust_request(text: str) -> bool:
-    if any(cue in text for cue in SCHEDULE_ADJUST_CUES):
-        return True
-    joiners = ("", "今晚", "明天", "以后", "之后")
-    return any(
-        f"{target}{joiner}{cue}" in text
-        for target in SCHEDULE_ADJUST_TARGET_CUES
-        for joiner in joiners
-        for cue in SCHEDULE_ADJUST_TIME_CUES
     )
 
 

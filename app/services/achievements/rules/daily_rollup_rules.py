@@ -1,4 +1,4 @@
-"""End-of-day achievement rollups for exact daily conditions."""
+"""Achievement rules for end-of-day exact daily conditions."""
 
 from __future__ import annotations
 

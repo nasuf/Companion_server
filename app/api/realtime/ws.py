@@ -475,9 +475,9 @@ async def _handle_message(
     )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
     try:
-        from app.services.achievements.service import process_user_message
+        from app.services.achievements.service import handle_user_message_event
 
-        fire_background(process_user_message(
+        fire_background(handle_user_message_event(
             user_id=user_id,
             agent_id=agent.id,
             workspace_id=workspace_id,

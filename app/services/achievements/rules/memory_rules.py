@@ -1,13 +1,23 @@
-"""Achievement evaluators driven by user memory changelog rows."""
+"""Achievement rules driven by user memory changelog rows."""
 
 from __future__ import annotations
 
 from app.db import db
+from app.services.achievements.events import MemoryChangelogAchievementEvent
 from app.services.achievements.repository import _memory_count, unlock_achievement
 from app.services.achievements.utils import _field
 
 
-async def process_memory_changelog(user_id: str, memory_id: str, operation: str, workspace_id: str | None = None) -> None:
+async def evaluate_memory_changelog(event: MemoryChangelogAchievementEvent) -> None:
+    await _evaluate_memory_changelog(
+        user_id=event.user_id,
+        memory_id=event.memory_id,
+        operation=event.operation,
+        workspace_id=event.workspace_id,
+    )
+
+
+async def _evaluate_memory_changelog(user_id: str, memory_id: str, operation: str, workspace_id: str | None = None) -> None:
     if operation == "access" or not memory_id:
         return
     rows = await db.query_raw(
