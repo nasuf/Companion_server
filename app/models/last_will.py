@@ -48,12 +48,22 @@ class LastWillContact(BaseModel):
 
 
 class LastWillCreate(BaseModel):
-    agent_id: str
+    agent_id: str | None = None
     workspace_id: str | None = None
     content: str = Field(default="", max_length=8000)
     inactivity_days: int = Field(default=30, ge=5, le=365)
     contacts: list[LastWillContact] = Field(default_factory=list, max_length=3)
     status: str = "draft"
+
+    @field_validator("agent_id", "workspace_id", mode="before")
+    @classmethod
+    def _strip_optional_ids(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
 
     @field_validator("content")
     @classmethod
@@ -76,7 +86,7 @@ class LastWillUpdate(BaseModel):
 class LastWillResponse(BaseModel):
     id: str
     user_id: str
-    agent_id: str
+    agent_id: str | None = None
     workspace_id: str | None = None
     content: str
     inactivity_days: int

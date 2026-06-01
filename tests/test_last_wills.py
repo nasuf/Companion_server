@@ -33,9 +33,21 @@ def test_active_last_will_requires_content():
 
 
 def test_draft_last_will_allows_empty_content():
-    draft = LastWillCreate(agent_id="agent-id", content="", status="draft")
+    draft = LastWillCreate(content="", status="draft")
 
     assert draft.content == ""
+
+
+def test_create_last_will_normalizes_blank_optional_scope_ids():
+    draft = LastWillCreate(
+        agent_id=" ",
+        workspace_id="",
+        content="留给重要的人",
+        status="draft",
+    )
+
+    assert draft.agent_id is None
+    assert draft.workspace_id is None
 
 
 def test_contact_requires_email_or_phone():
@@ -65,15 +77,6 @@ def test_last_will_crypto_round_trips_new_sensitive_payloads(monkeypatch):
 @pytest.mark.asyncio
 async def test_create_last_will_rejects_second_will(monkeypatch):
     db = SimpleNamespace(
-        aiagent=SimpleNamespace(
-            find_unique=AsyncMock(
-                return_value=SimpleNamespace(
-                    id="agent-id",
-                    userId="user-id",
-                    status="active",
-                )
-            )
-        ),
         query_raw=AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(last_wills, "db", db)
@@ -81,7 +84,6 @@ async def test_create_last_will_rejects_second_will(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         await last_wills.create_last_will(
             LastWillCreate(
-                agent_id="agent-id",
                 content="留给重要的人",
                 contacts=[],
                 status="draft",
@@ -93,7 +95,49 @@ async def test_create_last_will_rejects_second_will(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_last_wills_is_agent_level_after_workspace_validation(monkeypatch):
+async def test_create_last_will_can_be_user_scoped_without_agent(monkeypatch):
+    created = datetime(2026, 5, 29, 3, 0, tzinfo=UTC)
+    row = {
+        "id": "will-id",
+        "userId": "user-id",
+        "agentId": None,
+        "workspaceId": None,
+        "content": "留给重要的人",
+        "inactivityDays": 30,
+        "contacts": [{"name": "妈妈", "email": "mom@example.com"}],
+        "status": "draft",
+        "lastSeenAt": None,
+        "startedAt": None,
+        "triggeredAt": None,
+        "deliveredAt": None,
+        "createdAt": created,
+        "updatedAt": created,
+    }
+    db = SimpleNamespace(
+        aiagent=SimpleNamespace(find_unique=AsyncMock()),
+        query_raw=AsyncMock(side_effect=[[{"id": "will-id"}], [row]]),
+    )
+    monkeypatch.setattr(last_wills, "db", db)
+
+    item = await last_wills.create_last_will(
+        LastWillCreate(
+            content="留给重要的人",
+            contacts=[LastWillContact(name="妈妈", email="mom@example.com")],
+            status="draft",
+        ),
+        user={"sub": "user-id", "role": "user"},
+    )
+
+    insert_sql = db.query_raw.await_args_list[0].args[0]
+    insert_args = db.query_raw.await_args_list[0].args[1:]
+    assert "ON CONFLICT (user_id) DO NOTHING" in insert_sql
+    assert insert_args[2] is None
+    db.aiagent.find_unique.assert_not_awaited()
+    assert item.agent_id is None
+
+
+@pytest.mark.asyncio
+async def test_list_last_wills_is_user_level_after_optional_agent_validation(monkeypatch):
     updated = datetime(2026, 5, 29, 3, 0, tzinfo=UTC)
     db = SimpleNamespace(
         aiagent=SimpleNamespace(
@@ -111,7 +155,7 @@ async def test_list_last_wills_is_agent_level_after_workspace_validation(monkeyp
                 {
                     "id": "will-id",
                     "userId": "user-id",
-                    "agentId": "agent-id",
+                    "agentId": None,
                     "workspaceId": "other-workspace",
                     "content": "留给重要的人",
                     "inactivityDays": 30,
@@ -136,8 +180,45 @@ async def test_list_last_wills_is_agent_level_after_workspace_validation(monkeyp
     )
 
     query_sql = db.query_raw.await_args.args[0]
-    assert "lw.workspace_id = $3" not in query_sql
+    assert "lw.agent_id =" not in query_sql
+    assert "lw.workspace_id =" not in query_sql
     assert items[0].id == "will-id"
+
+
+@pytest.mark.asyncio
+async def test_list_last_wills_without_agent_does_not_touch_agent_scope(monkeypatch):
+    updated = datetime(2026, 5, 29, 3, 0, tzinfo=UTC)
+    db = SimpleNamespace(
+        aiagent=SimpleNamespace(find_unique=AsyncMock()),
+        query_raw=AsyncMock(
+            return_value=[
+                {
+                    "id": "will-id",
+                    "userId": "user-id",
+                    "agentId": None,
+                    "workspaceId": None,
+                    "content": "留给重要的人",
+                    "inactivityDays": 30,
+                    "contacts": [{"name": "妈妈", "email": "mom@example.com"}],
+                    "status": "draft",
+                    "lastSeenAt": None,
+                    "startedAt": None,
+                    "triggeredAt": None,
+                    "deliveredAt": None,
+                    "createdAt": updated,
+                    "updatedAt": updated,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(last_wills, "db", db)
+
+    items = await last_wills.list_last_wills(
+        user={"sub": "user-id", "role": "user"},
+    )
+
+    db.aiagent.find_unique.assert_not_awaited()
+    assert items[0].agent_id is None
 
 
 @pytest.mark.asyncio

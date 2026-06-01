@@ -34,6 +34,10 @@ def _field(row: Any, name: str) -> Any:
     return getattr(row, name, None)
 
 
+def _optional_query(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _iso(value: Any) -> str | None:
     if value is None:
         return None
@@ -86,24 +90,25 @@ def _response(row: Any) -> LastWillResponse:
     )
 
 
-async def _ensure_agent_scope(
+async def _ensure_context_scope(
     *,
-    agent_id: str,
+    agent_id: str | None,
     workspace_id: str | None,
     user: dict,
 ) -> None:
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
-    if not agent or getattr(agent, "status", "active") == "archived":
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if user.get("role") != "admin" and agent.userId != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Not your agent")
+    if agent_id:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+        if not agent or getattr(agent, "status", "active") == "archived":
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if user.get("role") != "admin" and agent.userId != user.get("sub"):
+            raise HTTPException(status_code=403, detail="Not your agent")
     if workspace_id:
         workspace = await db.chatworkspace.find_unique(where={"id": workspace_id})
-        if (
-            not workspace
-            or workspace.userId != agent.userId
-            or workspace.agentId != agent_id
-        ):
+        if not workspace:
+            raise HTTPException(status_code=400, detail="Workspace does not match user")
+        if user.get("role") != "admin" and workspace.userId != user.get("sub"):
+            raise HTTPException(status_code=403, detail="Not your workspace")
+        if agent_id and workspace.agentId != agent_id:
             raise HTTPException(status_code=400, detail="Workspace does not match agent")
 
 
@@ -161,11 +166,13 @@ async def _require_will_owner(will_id: str, user: dict) -> Any:
 
 @router.get("", response_model=list[LastWillResponse])
 async def list_last_wills(
-    agent_id: str = Query(...),
+    agent_id: str | None = Query(None),
     workspace_id: str | None = None,
     user: dict = Depends(require_user),
 ):
-    await _ensure_agent_scope(agent_id=agent_id, workspace_id=workspace_id, user=user)
+    agent_id = _optional_query(agent_id)
+    workspace_id = _optional_query(workspace_id)
+    await _ensure_context_scope(agent_id=agent_id, workspace_id=workspace_id, user=user)
     rows = await db.query_raw(
         """
         SELECT
@@ -185,10 +192,9 @@ async def list_last_wills(
             lw.updated_at AS "updatedAt"
         FROM last_wills lw
         JOIN users u ON u.id = lw.user_id
-        WHERE lw.agent_id = $1 AND lw.user_id = $2
+        WHERE lw.user_id = $1
         ORDER BY lw.updated_at DESC
         """,
-        agent_id,
         user.get("sub"),
     )
     return [_response(row) for row in rows]
@@ -199,7 +205,7 @@ async def create_last_will(
     data: LastWillCreate,
     user: dict = Depends(require_user),
 ):
-    await _ensure_agent_scope(
+    await _ensure_context_scope(
         agent_id=data.agent_id,
         workspace_id=data.workspace_id,
         user=user,
@@ -217,7 +223,7 @@ async def create_last_will(
             $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::timestamp,
             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         )
-        ON CONFLICT (user_id, agent_id) DO NOTHING
+        ON CONFLICT (user_id) DO NOTHING
         RETURNING id
         """,
         will_id,
@@ -303,7 +309,7 @@ async def start_last_will(
 ):
     row = await _require_will_owner(will_id, user)
     contacts = _contacts(_field(row, "contacts"))
-    _normalize_status("active", contacts, _field(row, "content") or "")
+    _normalize_status("active", contacts, reveal_text(_field(row, "content")))
     await db.execute_raw(
         """
         UPDATE last_wills

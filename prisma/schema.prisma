@@ -260,8 +260,8 @@ model LastWill {
   id             String             @id @default(uuid())
   userId         String             @map("user_id")
   user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId        String             @map("agent_id")
-  agent          AiAgent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  agentId        String?            @map("agent_id")
+  agent          AiAgent?           @relation(fields: [agentId], references: [id], onDelete: SetNull)
   workspaceId    String?            @map("workspace_id")
   workspace      ChatWorkspace?     @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   content        String
@@ -275,8 +275,8 @@ model LastWill {
   updatedAt      DateTime           @updatedAt @map("updated_at")
   deliveries     LastWillDelivery[]
 
-  @@unique([userId, agentId], map: "last_wills_user_agent_unique")
-  @@index([userId, agentId, status], map: "last_wills_user_agent_status_idx")
+  @@unique([userId], map: "last_wills_user_unique")
+  @@index([userId, status], map: "last_wills_user_status_idx")
   @@index([status, startedAt], map: "last_wills_status_started_idx")
   @@map("last_wills")
 }
