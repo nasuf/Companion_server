@@ -7,6 +7,7 @@ from app.services.achievements import engine
 from app.services.achievements import service
 from app.services.achievements import repository
 from app.services.achievements.rules import assistant_message_rules
+from app.services.achievements.rules import daily_rollup_rules
 from app.services.achievements.rules import intent_rules
 from app.services.achievements.rules import memory_rules
 from app.services.achievements.rules import user_message_rules
@@ -166,6 +167,56 @@ async def test_list_achievements_backfills_user_agent_redis_cache():
     assert fake_redis.sadd.await_args.args[0] == "achievements:unlocked:u1:a1"
     assert set(fake_redis.sadd.await_args.args[1:]) == {"27", "64"}
     fake_redis.expire.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_single_message_does_not_unlock_first_last_length_match():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": "你好", "created_at": day}]
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(2, 0))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 2 in unlocked_ids
+    assert 43 not in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_unlocks_first_last_length_match_with_two_messages():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [
+        {"content": "哈！", "created_at": day},
+        {"content": "嗯😊", "created_at": day + timedelta(hours=1)},
+    ]
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(4, 0))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 43 in unlocked_ids
 
 
 @pytest.mark.asyncio
