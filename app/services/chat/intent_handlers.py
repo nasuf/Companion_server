@@ -128,6 +128,7 @@ class ShortCircuitCtx:
     last_short_circuit_kind: str | None = None
     response_diagnostics: dict[str, Any] | None = None
     covered_until_user_ts: datetime | None = None
+    achievement_turn_final: bool = True
 
     async def finalize(
         self,
@@ -182,6 +183,7 @@ class ShortCircuitCtx:
             reply_index_offset=self.reply_index_offset,
             cached_patience=self.cached_patience,
             extra_metadata=extra_metadata,
+            achievement_turn_final=self.achievement_turn_final,
         ):
             yield evt
 

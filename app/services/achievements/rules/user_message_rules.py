@@ -237,7 +237,7 @@ async def _check_sequences(user_id: str, agent_id: str, workspace_id: str | None
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=8)
     if len(texts) >= 3 and len(set(norms[-3:])) == 1 and len(norms[-1]) > 3:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=57)
-    if norms and norms[-1] and norms.count(norms[-1]) >= 10:
+    if texts and texts[-1].strip() and texts.count(texts[-1]) >= 10:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=71)
     if len(texts) >= 3 and len({_first_counted_char(t) for t in texts[-3:]}) == 1 and _first_counted_char(texts[-1]):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=19)

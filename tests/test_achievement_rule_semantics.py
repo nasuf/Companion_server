@@ -220,6 +220,84 @@ async def test_daily_rollup_unlocks_first_last_length_match_with_two_messages():
 
 
 @pytest.mark.asyncio
+async def test_assistant_turn_pair_100_counts_whole_user_and_ai_turn():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+    fake_db.query_raw = AsyncMock(
+        side_effect=[
+            [{"content": "a" * 30}, {"content": "b" * 30}],
+            [{"content": "我" * 20}, {"content": "你" * 20}],
+        ]
+    )
+
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_turn_event(
+            conversation_id="c1",
+            message_id="a-msg-1",
+            assistant_texts=["a" * 30, "b" * 30],
+            user_message_ids=["u-msg-1", "u-msg-2"],
+            turn_id="user-turn:u-msg-1,u-msg-2",
+        )
+
+    unlock.assert_awaited_once()
+    assert unlock.await_args.kwargs["achievement_id"] == 81
+
+
+@pytest.mark.asyncio
+async def test_assistant_turn_pair_100_does_not_unlock_from_partial_ai_bubble():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+    fake_db.query_raw = AsyncMock(
+        side_effect=[
+            [{"content": "a" * 30}, {"content": "b" * 10}],
+            [{"content": "我" * 70}],
+        ]
+    )
+
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_turn_event(
+            conversation_id="c1",
+            message_id="a-msg-1",
+            assistant_texts=["a" * 30],
+            user_message_ids=["u-msg-1"],
+            turn_id="user-turn:u-msg-1",
+        )
+
+    unlock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_repeat_message_achievement_71_requires_exact_user_text_match():
+    rows = [{"content": "你好"} for _ in range(9)]
+    rows.append({"content": "你好！"})
+
+    with patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock:
+        await user_message_rules._check_sequences("u1", "a1", "w1", "c1", rows)
+
+    assert not any(call.kwargs["achievement_id"] == 71 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_repeat_message_achievement_71_unlocks_after_ten_exact_user_texts():
+    rows = [{"content": "你好！"} for _ in range(10)]
+
+    with patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock:
+        await user_message_rules._check_sequences("u1", "a1", "w1", "c1", rows)
+
+    assert any(call.kwargs["achievement_id"] == 71 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_non_schedule_adjust_intent_does_not_count_schedule_adjustment():
     with (
         patch.object(intent_rules, "record_event", AsyncMock()) as record,
@@ -272,7 +350,6 @@ async def test_assistant_emoji_counts_for_achievement_59():
     with (
         patch.object(assistant_message_rules, "db", fake_db),
         patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 1))),
-        patch.object(assistant_message_rules, "_check_pair_100", AsyncMock()),
         patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
         patch.object(assistant_message_rules, "record_event", AsyncMock()) as record,
         patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=100)),
@@ -299,7 +376,6 @@ async def test_plain_assistant_message_does_not_count_for_achievement_59():
     with (
         patch.object(assistant_message_rules, "db", fake_db),
         patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 1))),
-        patch.object(assistant_message_rules, "_check_pair_100", AsyncMock()),
         patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
         patch.object(assistant_message_rules, "record_event", AsyncMock()) as record,
         patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=100)),
@@ -386,7 +462,6 @@ async def test_assistant_sticker_metadata_does_not_count_for_achievement_59():
     with (
         patch.object(assistant_message_rules, "db", fake_db),
         patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 1))),
-        patch.object(assistant_message_rules, "_check_pair_100", AsyncMock()),
         patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
         patch.object(assistant_message_rules, "record_event", AsyncMock()) as record,
         patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=100)),

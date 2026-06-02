@@ -7,12 +7,14 @@ from typing import overload
 
 from app.services.achievements.events import (
     AssistantMessageAchievementEvent,
+    AssistantTurnAchievementEvent,
     IntentAchievementEvent,
     MemoryChangelogAchievementEvent,
     UserMessageAchievementEvent,
 )
 from app.services.achievements.rules.assistant_message_rules import (
     evaluate_assistant_message,
+    evaluate_assistant_turn,
 )
 from app.services.achievements.rules.intent_rules import evaluate_intent
 from app.services.achievements.rules.memory_rules import evaluate_memory_changelog
@@ -21,6 +23,7 @@ from app.services.achievements.rules.user_message_rules import evaluate_user_mes
 AchievementEvent = (
     UserMessageAchievementEvent
     | AssistantMessageAchievementEvent
+    | AssistantTurnAchievementEvent
     | MemoryChangelogAchievementEvent
     | IntentAchievementEvent
 )
@@ -32,6 +35,10 @@ async def handle_achievement_event(event: UserMessageAchievementEvent) -> None: 
 
 @overload
 async def handle_achievement_event(event: AssistantMessageAchievementEvent) -> None: ...
+
+
+@overload
+async def handle_achievement_event(event: AssistantTurnAchievementEvent) -> None: ...
 
 
 @overload
@@ -49,6 +56,9 @@ async def handle_achievement_event(event: AchievementEvent) -> None:
         return
     if isinstance(event, AssistantMessageAchievementEvent):
         await evaluate_assistant_message(event)
+        return
+    if isinstance(event, AssistantTurnAchievementEvent):
+        await evaluate_assistant_turn(event)
         return
     if isinstance(event, MemoryChangelogAchievementEvent):
         await evaluate_memory_changelog(event)
@@ -103,6 +113,29 @@ async def handle_assistant_message_event(
             conversation_id=conversation_id,
             message_id=message_id,
             text=text,
+            metadata=metadata,
+            occurred_at=occurred_at,
+        )
+    )
+
+
+async def handle_assistant_turn_event(
+    *,
+    conversation_id: str,
+    message_id: str,
+    assistant_texts: list[str],
+    user_message_ids: list[str],
+    turn_id: str | None = None,
+    metadata: dict | None = None,
+    occurred_at: datetime | None = None,
+) -> None:
+    await handle_achievement_event(
+        AssistantTurnAchievementEvent(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            assistant_texts=assistant_texts,
+            user_message_ids=user_message_ids,
+            turn_id=turn_id,
             metadata=metadata,
             occurred_at=occurred_at,
         )

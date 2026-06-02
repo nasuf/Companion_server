@@ -103,6 +103,9 @@ async def save_replies(
     conversation_id: str,
     replies: list[str | dict],
     trace_id: str | None = None,
+    turn_user_message_ids: list[str] | None = None,
+    achievement_turn_id: str | None = None,
+    achievement_turn_final: bool = True,
 ) -> str | None:
     """spec 持久化：把分段回复写入消息表，返回首条 message_id。
 
@@ -111,6 +114,9 @@ async def save_replies(
     """
     try:
         first_message_id: str | None = None
+        first_created_at: datetime | None = None
+        first_metadata: dict | None = None
+        assistant_texts: list[str] = []
         for i, reply in enumerate(replies):
             if isinstance(reply, dict):
                 text = str(reply.get("text", ""))
@@ -126,6 +132,8 @@ async def save_replies(
             # /traces/resolve endpoint 触发 share + mirror 写入.
             if i == 0 and trace_id:
                 metadata["trace_id"] = trace_id
+            if achievement_turn_id:
+                metadata["achievement_turn_id"] = achievement_turn_id
 
             created = await db.message.create(
                 data={
@@ -148,6 +156,9 @@ async def save_replies(
                     logger.debug(f"Reply operational metrics skipped: {metric_err}")
             if i == 0:
                 first_message_id = created.id
+                first_created_at = getattr(created, "createdAt", None)
+                first_metadata = metadata
+            assistant_texts.append(text)
             try:
                 from app.services.achievements.service import handle_assistant_message_event
 
@@ -160,6 +171,21 @@ async def save_replies(
                 ))
             except Exception as achievement_err:
                 logger.debug(f"[ACH] assistant message hook skipped: {achievement_err}")
+        if achievement_turn_final and first_message_id and assistant_texts:
+            try:
+                from app.services.achievements.service import handle_assistant_turn_event
+
+                fire_background(handle_assistant_turn_event(
+                    conversation_id=conversation_id,
+                    message_id=first_message_id,
+                    assistant_texts=assistant_texts,
+                    user_message_ids=turn_user_message_ids or [],
+                    turn_id=achievement_turn_id,
+                    metadata=first_metadata,
+                    occurred_at=first_created_at,
+                ))
+            except Exception as achievement_err:
+                logger.debug(f"[ACH] assistant turn hook skipped: {achievement_err}")
         return first_message_id
     except Exception as e:
         logger.error(f"Failed to save replies: {e}")

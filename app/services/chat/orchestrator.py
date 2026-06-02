@@ -346,6 +346,12 @@ def _current_turn_message_ids(
     return ids
 
 
+def _achievement_turn_id(turn_message_ids: set[str]) -> str | None:
+    if not turn_message_ids:
+        return None
+    return "user-turn:" + ",".join(sorted(turn_message_ids))
+
+
 def _ensure_current_user_message(
     messages: list[dict],
     *,
@@ -668,6 +674,7 @@ async def stream_chat_response(
     reply_index_offset: int = 0,
     parent_patience: int | None = None,
     parent_trace_id: str | None = None,
+    achievement_turn_final: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """spec §3.3 step 3：多意图拆分后递归调用本函数处理每个子片段。
 
@@ -768,6 +775,10 @@ async def stream_chat_response(
             reply_context=reply_context,
         )
         current_turn_ids = _current_turn_message_ids(reply_context, user_message_id)
+        if current_turn_ids:
+            reply_context = dict(reply_context or {})
+            reply_context["turn_message_ids"] = sorted(current_turn_ids)
+        current_achievement_turn_id = _achievement_turn_id(current_turn_ids)
         covered_until_user_ts = _max_user_created_at(messages_dicts)
         if not sub_intent_mode:
             previous_assistant = _previous_assistant_message(
@@ -1078,6 +1089,7 @@ async def stream_chat_response(
             recent_context=recent_context_text,
             response_diagnostics=response_diagnostics,
             covered_until_user_ts=covered_until_user_ts,
+            achievement_turn_final=achievement_turn_final,
         )
         response_diagnostics["crisis_followup_check_mode"] = (
             crisis_followup_check_mode if crisis_followup_active else None
@@ -1646,6 +1658,9 @@ async def stream_chat_response(
             conversation_id,
             emitted_replies,
             trace_id=tracer.trace_id if tracer.is_active else None,
+            turn_user_message_ids=list(current_turn_ids),
+            achievement_turn_id=current_achievement_turn_id,
+            achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
         )
         # spec §6.4-§6.5 已经 emit; 这里记 final 信号 — Axiom 用 event=reply.emitted
         # 切分一次"完成回复"维度 (跟 reply.llm_main / reply.split 区别: 那两条是

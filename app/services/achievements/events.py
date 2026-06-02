@@ -31,6 +31,17 @@ class AssistantMessageAchievementEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class AssistantTurnAchievementEvent:
+    conversation_id: str
+    message_id: str
+    assistant_texts: list[str]
+    user_message_ids: list[str]
+    turn_id: str | None = None
+    metadata: dict | None = None
+    occurred_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryChangelogAchievementEvent:
     user_id: str
     memory_id: str

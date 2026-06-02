@@ -31,6 +31,21 @@ logger = logging.getLogger(__name__)
 _DONE_EVENT = {"event": "done", "data": json.dumps({"message_id": "complete"})}
 
 
+def _turn_user_message_ids(reply_context: dict | None) -> list[str]:
+    if not isinstance(reply_context, dict):
+        return []
+    raw_ids = reply_context.get("turn_message_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    return list(dict.fromkeys(item for item in raw_ids if isinstance(item, str) and item))
+
+
+def _achievement_turn_id(turn_user_message_ids: list[str]) -> str | None:
+    if not turn_user_message_ids:
+        return None
+    return "user-turn:" + ",".join(sorted(turn_user_message_ids))
+
+
 async def short_circuit_reply(
     reply: str,
     conversation_id: str,
@@ -43,6 +58,8 @@ async def short_circuit_reply(
     include_done: bool = True,
     extra_metadata: dict | None = None,
     trace_id: str | None = None,
+    turn_user_message_ids: list[str] | None = None,
+    achievement_turn_final: bool = True,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
@@ -74,7 +91,12 @@ async def short_circuit_reply(
     if metadata:
         reply_payload = {"text": reply, **metadata}
     _fire_background(save_replies_fn(
-        conversation_id, [reply_payload], trace_id=trace_id,
+        conversation_id,
+        [reply_payload],
+        trace_id=trace_id,
+        turn_user_message_ids=turn_user_message_ids or [],
+        achievement_turn_id=_achievement_turn_id(turn_user_message_ids or []),
+        achievement_turn_final=achievement_turn_final,
     ))
     if not sub_intent_mode and agent_id:
         await save_last_reply_timestamp(agent_id, user_id)
@@ -117,8 +139,9 @@ async def process_sub_intents(
         key=lambda kv: INTENT_PRIORITY.index(kv[0]) if kv[0] in INTENT_PRIORITY else float("inf"),
     )
     cur_index = start_index
-    for label, text in ordered:
+    for index, (label, text) in enumerate(ordered):
         intent_type = LABEL_TO_INTENT.get(label, IntentType.NONE)
+        is_last_sub_intent = index == len(ordered) - 1
         logger.info(
             f"[INTENT-SUB] label={label} intent={intent_type.value} "
             f"index={cur_index} text={text[:40]!r}",
@@ -143,6 +166,7 @@ async def process_sub_intents(
             reply_index_offset=cur_index,
             parent_patience=parent_patience,
             parent_trace_id=parent_trace_id,
+            achievement_turn_final=is_last_sub_intent,
         ):
             if evt.get("event") == "done":
                 continue
@@ -166,6 +190,7 @@ async def finalize_short_circuit(
     reply_index_offset: int,
     cached_patience: int,
     extra_metadata: dict | None = None,
+    achievement_turn_final: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -183,6 +208,8 @@ async def finalize_short_circuit(
         include_done=False,
         extra_metadata=extra_metadata,
         trace_id=trace_id,
+        turn_user_message_ids=_turn_user_message_ids(reply_context),
+        achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
     )
     for evt in events:
         yield evt
