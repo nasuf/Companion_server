@@ -10,6 +10,7 @@ from app.services.achievements.rules import assistant_message_rules
 from app.services.achievements.rules import intent_rules
 from app.services.achievements.rules import memory_rules
 from app.services.achievements.rules import user_message_rules
+from app.services.achievements.utils import count_chars
 
 
 def test_public_service_exports_event_entrypoints_not_rule_helpers():
@@ -19,6 +20,10 @@ def test_public_service_exports_event_entrypoints_not_rule_helpers():
     assert "unlock_achievement" not in service.__all__
     assert not hasattr(service, "record_event")
     assert not hasattr(service, "unlock_achievement")
+
+
+def test_achievement_count_chars_includes_punctuation_and_emoji():
+    assert count_chars("哈！😊 ~") == 4
 
 
 @pytest.mark.asyncio

@@ -41,8 +41,8 @@ def _day_bounds(local_day: datetime | None = None) -> tuple[datetime, datetime]:
 
 
 def count_chars(text: str) -> int:
-    """Count letters/numbers only; punctuation, symbols, emoji and spaces do not count."""
-    return sum(1 for ch in text if unicodedata.category(ch)[0] in {"L", "N"})
+    """Count visible message characters for achievement word-count rules."""
+    return sum(1 for ch in text if not ch.isspace())
 
 
 def _normalized_message(text: str) -> str:
