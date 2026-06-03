@@ -38,6 +38,8 @@ model User {
   lastWills         LastWill[]
   dailyActivities   UserDailyActivity[]
   gameSessions      GameSession[]
+  musicFavorites    MusicFavorite[]
+  musicPlaybacks    MusicPlayback[]
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
@@ -103,6 +105,8 @@ model AiAgent {
   timeCapsules        TimeCapsule[]
   lastWills           LastWill[]
   gameSessions        GameSession[]
+  musicFavorites      MusicFavorite[]
+  musicPlaybacks      MusicPlayback[]
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
 
@@ -130,6 +134,8 @@ model ChatWorkspace {
   timeCapsules    TimeCapsule[]
   lastWills       LastWill[]
   gameSessions    GameSession[]
+  musicFavorites  MusicFavorite[]
+  musicPlaybacks  MusicPlayback[]
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
 
@@ -228,6 +234,65 @@ model GameEvent {
   @@index([sessionId, createdAt(sort: Desc)], map: "game_events_session_created_idx")
   @@index([eventType, createdAt(sort: Desc)], map: "game_events_type_created_idx")
   @@map("game_events")
+}
+
+model MusicFavorite {
+  id              String         @id @default(uuid())
+  userId          String         @map("user_id")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId         String         @map("agent_id")
+  agent           AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId     String?        @map("workspace_id")
+  workspace       ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  trackExternalId String         @map("track_external_id")
+  title           String
+  artist          String         @default("AudioLib")
+  album           String         @default("Curated Library")
+  library         String         @default("audio.focus")
+  audioUrl        String         @default("") @map("audio_url")
+  durationSec     Int            @default(0) @map("duration_sec")
+  coverKey        String         @default("music-cover-01.jpg") @map("cover_key")
+  accentA         String         @default("#1f6fff") @map("accent_a")
+  accentB         String         @default("#18c6c0") @map("accent_b")
+  source          String         @default("audiolib")
+  metadata        Json           @default("{}")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  @@unique([userId, agentId, trackExternalId], map: "music_favorites_user_agent_track_key")
+  @@index([userId, agentId, createdAt(sort: Desc)], map: "music_favorites_user_agent_created_idx")
+  @@index([workspaceId, createdAt(sort: Desc)], map: "music_favorites_workspace_created_idx")
+  @@map("music_favorites")
+}
+
+model MusicPlayback {
+  id              String         @id @default(uuid())
+  userId          String         @map("user_id")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId         String         @map("agent_id")
+  agent           AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId     String?        @map("workspace_id")
+  workspace       ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  trackExternalId String         @map("track_external_id")
+  title           String
+  artist          String         @default("AudioLib")
+  album           String         @default("Curated Library")
+  library         String         @default("audio.focus")
+  audioUrl        String         @default("") @map("audio_url")
+  durationSec     Int            @default(0) @map("duration_sec")
+  coverKey        String         @default("music-cover-01.jpg") @map("cover_key")
+  accentA         String         @default("#1f6fff") @map("accent_a")
+  accentB         String         @default("#18c6c0") @map("accent_b")
+  source          String         @default("audiolib")
+  metadata        Json           @default("{}")
+  positionSeconds Int            @default(0) @map("position_seconds")
+  isPlaying       Boolean        @default(true) @map("is_playing")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  @@unique([userId, agentId], map: "music_playbacks_user_agent_key")
+  @@index([workspaceId, updatedAt(sort: Desc)], map: "music_playbacks_workspace_updated_idx")
+  @@map("music_playbacks")
 }
 
 model TimeCapsule {

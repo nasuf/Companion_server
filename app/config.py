@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     sud_is_test_env: bool = True
     sud_callback_public_base_url: str = ""
 
+    # AudioLib music integration. The API key must stay server-side; Flutter
+    # receives only track metadata and playable URLs from our /music endpoints.
+    audiolib_api_key: str = ""
+    audiolib_base_url: str = "https://api.audiolib.ai"
+    audiolib_default_libraries: str = "audio.focus,audio.ambient,audio.sleep"
+
     # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
     # Development defaults to "*" for local convenience; production must configure
     # an explicit allowlist.
