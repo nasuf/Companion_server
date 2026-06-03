@@ -54,8 +54,6 @@ async def _evaluate_assistant_message(
     user_chars, ai_chars = await _day_role_char_counts(user_id, agent_id, occurred_at)
     if user_chars + ai_chars >= 10000:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=60)
-    if metadata and metadata.get("delay_explanation"):
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=24)
     if _has_emoji(text):
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type=_ASSISTANT_EMOJI_EVENT, source_id=message_id)
         if await _event_count(user_id, agent_id, _ASSISTANT_EMOJI_EVENT) >= 100:

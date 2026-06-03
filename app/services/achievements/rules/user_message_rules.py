@@ -24,15 +24,12 @@ from app.services.achievements.utils import (
     _day_bounds,
     _field,
     _first_counted_char,
-    _has_emoji,
     _local,
     _normalized_message,
     _now,
     count_chars,
 )
-from app.services.relationship.emotion import is_high_emotion, quick_emotion_estimate
 
-CURRENT_STATE_CUES = ("在干嘛", "在做什么", "你现在", "忙吗", "睡了吗")
 FUTURE_PLAN_CUES = ("之后有什么安排", "接下来有什么安排", "明天干嘛", "今晚干嘛", "计划")
 
 
@@ -87,29 +84,15 @@ async def _evaluate_user_message(
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="component_card_sent", source_id=message_id)
 
     today = await _day_user_messages(user_id, agent_id, occurred_at)
-    today_counts = [count_chars(str(row["content"])) for row in today]
 
-    if len(today) == 1 and char_count <= 3:
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=3)
-    if agent_name and agent_name in text:
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=4)
     if normalized == "哈哈":
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=9)
-    if _has_emoji(text):
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=14)
-    if any(cue in text for cue in CURRENT_STATE_CUES):
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=15)
     if text.rstrip().endswith("～"):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=27)
-    if any(ch.isdigit() for ch in text):
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=32)
     if any(cue in text for cue in FUTURE_PLAN_CUES):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=21)
-    if is_high_emotion(quick_emotion_estimate(text)):
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=22)
     if aggregation_route == "fragment_window":
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="aggregation_fragment", source_id=message_id)
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=34)
         if await _event_count(user_id, agent_id, "aggregation_fragment") >= 50:
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=86)
 
@@ -177,6 +160,8 @@ async def _evaluate_user_message(
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=64)
     if len(today) >= 200:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=73)
+    if _has_scene_experience_windows(today):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=63)
     user_chars, ai_chars = await _day_role_char_counts(user_id, agent_id, occurred_at)
     if user_chars + ai_chars >= 10000:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=60)
@@ -259,6 +244,15 @@ async def _check_sequences(user_id: str, agent_id: str, workspace_id: str | None
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=47)
     if len(texts) >= 10 and all(t.rstrip().endswith(QUESTION_END) for t in texts[-10:]):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=70)
+
+
+def _has_scene_experience_windows(rows: list[dict]) -> bool:
+    local_times = [_local(_field(row, "created_at")) for row in rows if _field(row, "created_at")]
+    return (
+        any(9 <= ts.hour < 10 for ts in local_times)
+        and any(19 <= ts.hour < 20 for ts in local_times)
+        and any(ts.hour == 23 for ts in local_times)
+    )
 
 
 async def _check_reply_timing_and_echo(

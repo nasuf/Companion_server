@@ -297,6 +297,25 @@ async def test_repeat_message_achievement_71_unlocks_after_ten_exact_user_texts(
     assert any(call.kwargs["achievement_id"] == 71 for call in unlock.await_args_list)
 
 
+def test_scene_experience_achievement_63_detects_three_daily_windows():
+    rows = [
+        {"created_at": datetime(2026, 6, 1, 1, 30, tzinfo=timezone.utc)},
+        {"created_at": datetime(2026, 6, 1, 11, 15, tzinfo=timezone.utc)},
+        {"created_at": datetime(2026, 6, 1, 15, 5, tzinfo=timezone.utc)},
+    ]
+
+    assert user_message_rules._has_scene_experience_windows(rows)
+
+
+def test_scene_experience_achievement_63_requires_all_three_windows():
+    rows = [
+        {"created_at": datetime(2026, 6, 1, 1, 30, tzinfo=timezone.utc)},
+        {"created_at": datetime(2026, 6, 1, 11, 15, tzinfo=timezone.utc)},
+    ]
+
+    assert not user_message_rules._has_scene_experience_windows(rows)
+
+
 @pytest.mark.asyncio
 async def test_non_schedule_adjust_intent_does_not_count_schedule_adjustment():
     with (
@@ -400,6 +419,7 @@ async def test_reduplicated_words_do_not_unlock_disabled_achievement_17():
         patch.object(user_message_rules, "_day_user_messages", AsyncMock(return_value=[])),
         patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
         patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_event_count", AsyncMock(return_value=0)),
         patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
         patch.object(user_message_rules, "_check_sequences", AsyncMock()),
         patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
@@ -419,6 +439,114 @@ async def test_reduplicated_words_do_not_unlock_disabled_achievement_17():
 
     unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
     assert 17 not in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_disabled_user_message_achievements_do_not_unlock_from_legacy_triggers():
+    disabled_ids = {3, 4, 14, 15, 22, 32, 34}
+    occurred_at = datetime(2026, 6, 1, 2, 9, tzinfo=timezone.utc)
+    legacy_trigger_texts = [
+        ("m-short-name", "小芜"),
+        ("m-emoji-number-state", "小芜123😊你现在在干嘛"),
+        ("m-high-emotion", "我超级激动开心到爆炸！！！"),
+    ]
+
+    with (
+        patch.object(user_message_rules, "_message_created_at", AsyncMock(return_value=occurred_at)),
+        patch.object(user_message_rules, "record_event", AsyncMock()),
+        patch.object(
+            user_message_rules,
+            "_day_user_messages",
+            AsyncMock(return_value=[{"content": "测试消息", "created_at": occurred_at}]),
+        ),
+        patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
+        patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_event_count", AsyncMock(return_value=0)),
+        patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_check_sequences", AsyncMock()),
+        patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
+        patch.object(user_message_rules, "_check_proactive_response", AsyncMock()),
+        patch.object(user_message_rules, "_check_daily_chat_day_milestones", AsyncMock()),
+        patch.object(user_message_rules, "_check_intimacy", AsyncMock()),
+        patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        for message_id, text in legacy_trigger_texts:
+            await engine.handle_user_message_event(
+                user_id="u1",
+                agent_id="a1",
+                workspace_id="w1",
+                conversation_id="c1",
+                message_id=message_id,
+                text=text,
+                agent_name="小芜",
+                aggregation_route="fragment_window",
+            )
+
+    unlocked_ids = {call.kwargs["achievement_id"] for call in unlock.await_args_list}
+    assert unlocked_ids.isdisjoint(disabled_ids)
+
+
+@pytest.mark.asyncio
+async def test_delay_explanation_metadata_does_not_unlock_disabled_achievement_24():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 4))),
+        patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
+        patch.object(assistant_message_rules, "record_event", AsyncMock()),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_message_event(
+            conversation_id="c1",
+            message_id="a-delay",
+            text="刚才有点事，现在回来啦",
+            metadata={"delay_explanation": True},
+        )
+
+    assert not any(call.kwargs["achievement_id"] == 24 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_disabled_memory_category_achievements_do_not_unlock():
+    disabled_cases = [
+        ("身份", "年龄", 10),
+        ("身份", "性别", 11),
+        ("身份", "现居地", 12),
+        ("身份", "出生地", 12),
+        ("身份", "成长地", 12),
+        ("身份", "职业/与经济", 13),
+        ("情绪", "高兴", 16),
+    ]
+
+    fake_db = MagicMock()
+    with (
+        patch.object(memory_rules, "db", fake_db),
+        patch.object(memory_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        for index, (main, sub, _achievement_id) in enumerate(disabled_cases, start=1):
+            fake_db.query_raw = AsyncMock(
+                side_effect=[
+                    [
+                        {
+                            "source": "user",
+                            "user_id": "u1",
+                            "workspace_id": "ws1",
+                            "main_category": main,
+                            "sub_category": sub,
+                            "content": f"{main}/{sub}",
+                        }
+                    ],
+                    [{"agent_id": "a1"}],
+                ]
+            )
+            await engine.handle_memory_changelog_event("u1", f"mem-{index}", "create", "ws1")
+
+    unlocked_ids = {call.kwargs["achievement_id"] for call in unlock.await_args_list}
+    assert unlocked_ids.isdisjoint({10, 11, 12, 13, 16})
 
 
 @pytest.mark.asyncio

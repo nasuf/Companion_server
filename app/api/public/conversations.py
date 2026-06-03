@@ -7,6 +7,7 @@ from app.api.ownership import require_conversation_owner, require_user_self
 from app.db import db
 from app.models.conversation import ConversationCreate, ConversationResponse
 from app.models.message import MessageResponse
+from app.services.achievements.definitions import ACHIEVEMENT_BY_ID
 from app.services.chat.crisis_state import get_crisis_care_status
 from app.services.workspace.workspaces import ensure_workspace, get_workspace_by_id
 
@@ -138,7 +139,8 @@ async def list_messages(
     limit: int = Query(default=100, le=100000),
     offset: int = 0,
     include_metadata: bool = Query(default=True),
-    _conv=Depends(require_conversation_owner),
+    include_achievements: bool = Query(default=False),
+    conv=Depends(require_conversation_owner),
 ):
     messages = await db.message.find_many(
         where={"conversationId": conversation_id},
@@ -146,7 +148,7 @@ async def list_messages(
         take=limit,
         skip=offset,
     )
-    return [
+    items = [
         MessageResponse(
             id=m.id,
             conversation_id=m.conversationId,
@@ -157,6 +159,107 @@ async def list_messages(
         )
         for m in messages
     ]
+    if include_achievements:
+        items.extend(
+            await _achievement_timeline_items(
+                conversation_id=conversation_id,
+                user_id=conv.userId,
+                agent_id=conv.agentId,
+                messages=messages,
+                is_latest_page=offset == 0,
+                include_metadata=include_metadata,
+            )
+        )
+        items.sort(
+            key=lambda item: _parse_timeline_at(item.created_at),
+            reverse=True,
+        )
+    return items
+
+
+async def _achievement_timeline_items(
+    *,
+    conversation_id: str,
+    user_id: str,
+    agent_id: str,
+    messages: list,
+    is_latest_page: bool,
+    include_metadata: bool,
+) -> list[MessageResponse]:
+    if messages:
+        message_times = [m.createdAt for m in messages if m.createdAt]
+        if not message_times:
+            return []
+        lower = min(message_times)
+        upper = datetime.now(UTC) if is_latest_page else max(message_times)
+    elif not is_latest_page:
+        return []
+    else:
+        lower = datetime.fromtimestamp(0, UTC)
+        upper = datetime.now(UTC)
+
+    rows = await db.query_raw(
+        """
+        SELECT id, achievement_id, unlocked_at
+        FROM achievement_unlocks
+        WHERE user_id = $1
+          AND agent_id = $2
+          AND conversation_id = $3
+          AND unlocked_at >= $4::timestamp
+          AND unlocked_at <= $5::timestamp
+        ORDER BY unlocked_at DESC
+        """,
+        user_id,
+        agent_id,
+        conversation_id,
+        lower,
+        upper,
+    )
+    timeline: list[MessageResponse] = []
+    for row in rows:
+        achievement_id = int(_row_value(row, "achievement_id"))
+        definition = ACHIEVEMENT_BY_ID.get(achievement_id)
+        if not definition:
+            continue
+        unlock_id = _row_value(row, "id")
+        unlocked_at = _row_value(row, "unlocked_at")
+        payload = {
+            **definition.to_dict(),
+            "achievement_id": definition.id,
+            "unlocked": True,
+            "unlocked_at": unlocked_at.isoformat()
+            if hasattr(unlocked_at, "isoformat")
+            else str(unlocked_at),
+        }
+        timeline.append(
+            MessageResponse(
+                id=f"achievement-{unlock_id}",
+                conversation_id=conversation_id,
+                role="achievement",
+                content=definition.name,
+                metadata={"achievement": payload} if include_metadata else None,
+                created_at=payload["unlocked_at"],
+            )
+        )
+    return timeline
+
+
+def _row_value(row, key: str):
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
+def _parse_timeline_at(value: str | None) -> datetime:
+    if not value:
+        return datetime.fromtimestamp(0, UTC)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.fromtimestamp(0, UTC)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 @router.get("/{conversation_id}/crisis-care")

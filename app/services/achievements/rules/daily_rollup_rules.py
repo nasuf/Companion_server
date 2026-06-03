@@ -89,12 +89,6 @@ async def run_daily_rollup(target_local_day: datetime | None = None) -> None:
             await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "evening_3_day", local_day)
             if await _has_consecutive_day_flags(user_id, agent_id, "evening_3_day", local_day, 3):
                 await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=6)
-        if (
-            any(9 <= ts.hour < 10 for ts in local_times)
-            and any(19 <= ts.hour < 20 for ts in local_times)
-            and any(ts.hour == 23 for ts in local_times)
-        ):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=63)
         if len(rows) >= 20 and all(not _has_symbol_or_punctuation(str(row["content"])) for row in rows):
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=36)
             await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "clean_chat_day", local_day)

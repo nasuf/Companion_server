@@ -52,13 +52,6 @@ async def _evaluate_memory_changelog(user_id: str, memory_id: str, operation: st
     sub = str(_field(row, "sub_category") or "")
     mapping = {
         ("身份", "姓名"): 29,
-        ("身份", "年龄"): 10,
-        ("身份", "性别"): 11,
-        ("身份", "现居地"): 12,
-        ("身份", "出生地"): 12,
-        ("身份", "成长地"): 12,
-        ("身份", "职业/与经济"): 13,
-        ("情绪", "高兴"): 16,
         ("情绪", "悲伤"): 23,
         ("思维", "理想与目标"): 49,
     }
