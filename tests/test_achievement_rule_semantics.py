@@ -386,6 +386,76 @@ async def test_daily_rollup_clean_chat_rejects_punctuation_and_emoji_symbols():
 
 
 @pytest.mark.asyncio
+async def test_daily_rollup_unlocks_odd_length_user_messages_only():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": f"奇数{i}", "created_at": day + timedelta(minutes=i)} for i in range(10)]
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(50, 999))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 46 in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_odd_length_rejects_any_even_user_message():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": f"奇数{i}", "created_at": day + timedelta(minutes=i)} for i in range(9)]
+    rows.append({"content": "偶数字数", "created_at": day + timedelta(minutes=9)})
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(49, 999))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 46 not in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_odd_length_ignores_assistant_message_lengths():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": f"奇数{i}", "created_at": day + timedelta(minutes=i)} for i in range(10)]
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(50, 998))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 46 in unlocked_ids
+
+
+@pytest.mark.asyncio
 async def test_assistant_turn_pair_100_counts_whole_user_and_ai_turn():
     fake_db = MagicMock()
     fake_db.conversation.find_unique = AsyncMock(
