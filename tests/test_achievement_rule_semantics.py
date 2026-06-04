@@ -170,6 +170,98 @@ async def test_list_achievements_backfills_user_agent_redis_cache():
 
 
 @pytest.mark.asyncio
+async def test_day_user_messages_uses_local_natural_day_bounds():
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[])
+    at = datetime(2026, 6, 1, 20, 30, tzinfo=timezone.utc)
+
+    with patch.object(repository, "db", fake_db):
+        await repository._day_user_messages("u1", "a1", at)
+
+    args = fake_db.query_raw.await_args.args
+    assert args[3] == datetime(2026, 6, 1, 16, 0, tzinfo=timezone.utc)
+    assert args[4] == datetime(2026, 6, 2, 16, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_question_achievement_31_unlocks_on_fifth_natural_day_question():
+    occurred_at = datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc)
+    rows = [
+        {"content": "你在吗？"},
+        {"content": "今天忙吗?"},
+        {"content": "现在方便吗？"},
+        {"content": "要不要聊会儿？"},
+        {"content": "你觉得呢?"},
+    ]
+
+    with (
+        patch.object(user_message_rules, "_message_created_at", AsyncMock(return_value=occurred_at)),
+        patch.object(user_message_rules, "record_event", AsyncMock()),
+        patch.object(user_message_rules, "_day_user_messages", AsyncMock(return_value=rows)) as day_messages,
+        patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
+        patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_event_count", AsyncMock(return_value=0)),
+        patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_check_sequences", AsyncMock()),
+        patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
+        patch.object(user_message_rules, "_check_proactive_response", AsyncMock()),
+        patch.object(user_message_rules, "_check_daily_chat_day_milestones", AsyncMock()),
+        patch.object(user_message_rules, "_check_intimacy", AsyncMock()),
+        patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_user_message_event(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            message_id="m-question-5",
+            text="你觉得呢?",
+        )
+
+    day_messages.assert_awaited_once_with("u1", "a1", occurred_at)
+    assert any(call.kwargs["achievement_id"] == 31 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_question_achievement_31_waits_for_five_natural_day_questions():
+    occurred_at = datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc)
+    rows = [
+        {"content": "你在吗？"},
+        {"content": "今天忙吗?"},
+        {"content": "现在方便吗？"},
+        {"content": "要不要聊会儿？"},
+        {"content": "这个不算？！"},
+        {"content": "这个也不算？😊"},
+    ]
+
+    with (
+        patch.object(user_message_rules, "_message_created_at", AsyncMock(return_value=occurred_at)),
+        patch.object(user_message_rules, "record_event", AsyncMock()),
+        patch.object(user_message_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
+        patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_event_count", AsyncMock(return_value=0)),
+        patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_check_sequences", AsyncMock()),
+        patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
+        patch.object(user_message_rules, "_check_proactive_response", AsyncMock()),
+        patch.object(user_message_rules, "_check_daily_chat_day_milestones", AsyncMock()),
+        patch.object(user_message_rules, "_check_intimacy", AsyncMock()),
+        patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_user_message_event(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            message_id="m-question-4",
+            text="这个也不算？😊",
+        )
+
+    assert not any(call.kwargs["achievement_id"] == 31 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_daily_rollup_single_message_does_not_unlock_first_last_length_match():
     day = datetime(2026, 6, 1, tzinfo=timezone.utc)
     pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
@@ -217,6 +309,80 @@ async def test_daily_rollup_unlocks_first_last_length_match_with_two_messages():
 
     unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
     assert 43 in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_unlocks_clean_chat_after_twenty_symbol_free_messages():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": f"纯文字{i}", "created_at": day + timedelta(minutes=i)} for i in range(20)]
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(80, 0))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_consecutive_day_flags", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 36 in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_clean_chat_requires_twenty_user_messages():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": f"纯文字{i}", "created_at": day + timedelta(minutes=i)} for i in range(19)]
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(76, 0))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 36 not in unlocked_ids
+
+
+@pytest.mark.asyncio
+async def test_daily_rollup_clean_chat_rejects_punctuation_and_emoji_symbols():
+    day = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pair = {"user_id": "u1", "agent_id": "a1", "workspace_id": "w1", "conversation_id": "c1"}
+    rows = [{"content": f"纯文字{i}", "created_at": day + timedelta(minutes=i)} for i in range(18)]
+    rows.extend([
+        {"content": "带标点！", "created_at": day + timedelta(minutes=18)},
+        {"content": "带表情😊", "created_at": day + timedelta(minutes=19)},
+    ])
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[pair])
+
+    with (
+        patch.object(daily_rollup_rules, "db", fake_db),
+        patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
+        patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(80, 0))),
+        patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
+        patch.object(daily_rollup_rules, "record_event", AsyncMock()),
+        patch.object(daily_rollup_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await daily_rollup_rules.run_daily_rollup(day)
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert 36 not in unlocked_ids
 
 
 @pytest.mark.asyncio
