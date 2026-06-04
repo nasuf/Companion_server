@@ -85,7 +85,7 @@ async def _evaluate_user_message(
 
     today = await _day_user_messages(user_id, agent_id, occurred_at)
 
-    if normalized == "哈哈":
+    if text == "哈哈":
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=9)
     if text.rstrip().endswith("～"):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=27)

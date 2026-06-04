@@ -262,6 +262,96 @@ async def test_question_achievement_31_waits_for_five_natural_day_questions():
 
 
 @pytest.mark.asyncio
+async def test_single_haha_achievement_9_unlocks_only_for_exact_user_haha():
+    occurred_at = datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc)
+
+    with (
+        patch.object(user_message_rules, "_message_created_at", AsyncMock(return_value=occurred_at)),
+        patch.object(user_message_rules, "record_event", AsyncMock()),
+        patch.object(user_message_rules, "_day_user_messages", AsyncMock(return_value=[])),
+        patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
+        patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_event_count", AsyncMock(return_value=0)),
+        patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_check_sequences", AsyncMock()),
+        patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
+        patch.object(user_message_rules, "_check_proactive_response", AsyncMock()),
+        patch.object(user_message_rules, "_check_daily_chat_day_milestones", AsyncMock()),
+        patch.object(user_message_rules, "_check_intimacy", AsyncMock()),
+        patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_user_message_event(
+            user_id="u1",
+            agent_id="a1",
+            workspace_id="w1",
+            conversation_id="c1",
+            message_id="m-haha",
+            text="哈哈",
+        )
+
+    unlocked_ids = [call.kwargs["achievement_id"] for call in unlock.await_args_list]
+    assert unlocked_ids.count(9) == 1
+
+
+@pytest.mark.asyncio
+async def test_single_haha_achievement_9_rejects_any_decorated_or_extended_form():
+    occurred_at = datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc)
+    rejected_texts = ["  哈哈  ", "哈哈！", "哈哈～", "哈哈😊", "哈 哈", "哈，哈", "哈哈哈", "我哈哈", "哈哈1"]
+
+    with (
+        patch.object(user_message_rules, "_message_created_at", AsyncMock(return_value=occurred_at)),
+        patch.object(user_message_rules, "record_event", AsyncMock()),
+        patch.object(user_message_rules, "_day_user_messages", AsyncMock(return_value=[])),
+        patch.object(user_message_rules, "_day_role_char_counts", AsyncMock(return_value=(0, 0))),
+        patch.object(user_message_rules, "_birthday_mmdd", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_event_count", AsyncMock(return_value=0)),
+        patch.object(user_message_rules, "record_schedule_status_chat", AsyncMock(return_value=None)),
+        patch.object(user_message_rules, "_check_sequences", AsyncMock()),
+        patch.object(user_message_rules, "_check_reply_timing_and_echo", AsyncMock()),
+        patch.object(user_message_rules, "_check_proactive_response", AsyncMock()),
+        patch.object(user_message_rules, "_check_daily_chat_day_milestones", AsyncMock()),
+        patch.object(user_message_rules, "_check_intimacy", AsyncMock()),
+        patch.object(user_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        for index, text in enumerate(rejected_texts, start=1):
+            await engine.handle_user_message_event(
+                user_id="u1",
+                agent_id="a1",
+                workspace_id="w1",
+                conversation_id="c1",
+                message_id=f"m-reject-haha-{index}",
+                text=text,
+            )
+
+    assert not any(call.kwargs["achievement_id"] == 9 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_single_haha_achievement_9_does_not_unlock_from_assistant_message():
+    fake_db = MagicMock()
+    fake_db.conversation.find_unique = AsyncMock(
+        return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
+    )
+
+    with (
+        patch.object(assistant_message_rules, "db", fake_db),
+        patch.object(assistant_message_rules, "record_event", AsyncMock()),
+        patch.object(assistant_message_rules, "_event_count", AsyncMock(return_value=0)),
+        patch.object(assistant_message_rules, "_check_slow_assistant_reply", AsyncMock()),
+        patch.object(assistant_message_rules, "unlock_achievement", AsyncMock()) as unlock,
+    ):
+        await engine.handle_assistant_message_event(
+            conversation_id="c1",
+            message_id="m-assistant-haha",
+            text="哈哈",
+            metadata={},
+            occurred_at=datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc),
+        )
+
+    assert not any(call.kwargs["achievement_id"] == 9 for call in unlock.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_user_message_achievement_60_counts_only_user_chars_realtime():
     occurred_at = datetime(2026, 6, 1, 4, 30, tzinfo=timezone.utc)
 
