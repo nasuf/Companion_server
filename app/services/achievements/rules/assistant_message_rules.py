@@ -6,7 +6,7 @@ from datetime import datetime
 
 from app.db import db
 from app.services.achievements.events import AssistantMessageAchievementEvent, AssistantTurnAchievementEvent
-from app.services.achievements.repository import _birthday_mmdd, _day_role_char_counts, _event_count, record_event, unlock_achievement
+from app.services.achievements.repository import _birthday_mmdd, _event_count, record_event, unlock_achievement
 from app.services.achievements.utils import _aware, _field, _has_emoji, _local, _now, count_chars
 
 _ASSISTANT_EMOJI_EVENT = "assistant_emoji"
@@ -51,9 +51,6 @@ async def _evaluate_assistant_message(
     occurred_at = _aware(occurred_at or _now())
     char_count = count_chars(text)
     await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="assistant_message", source_id=message_id, value_int=char_count, metadata=metadata, occurred_at=occurred_at)
-    user_chars, ai_chars = await _day_role_char_counts(user_id, agent_id, occurred_at)
-    if user_chars + ai_chars >= 10000:
-        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=60)
     if _has_emoji(text):
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type=_ASSISTANT_EMOJI_EVENT, source_id=message_id)
         if await _event_count(user_id, agent_id, _ASSISTANT_EMOJI_EVENT) >= 100:

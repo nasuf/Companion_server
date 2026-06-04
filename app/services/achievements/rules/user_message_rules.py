@@ -162,8 +162,8 @@ async def _evaluate_user_message(
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=73)
     if _has_scene_experience_windows(today):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=63)
-    user_chars, ai_chars = await _day_role_char_counts(user_id, agent_id, occurred_at)
-    if user_chars + ai_chars >= 10000:
+    user_chars, _ = await _day_role_char_counts(user_id, agent_id, occurred_at)
+    if user_chars >= 10000:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=60)
     if sum(1 for row in today if str(row["content"]).rstrip().endswith(QUESTION_END)) >= 5:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=31)
