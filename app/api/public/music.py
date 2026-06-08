@@ -22,6 +22,8 @@ from app.models.music import (
     MusicTracksResponse,
 )
 from app.services import music
+from app.services import music_status
+from app.services.runtime.tasks import fire_background
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/music", tags=["music"])
@@ -328,6 +330,14 @@ async def update_music_now_playing(
         )
     except ValueError as exc:
         _handle_value_error(exc)
+    if data.conversation_id and not data.is_playing:
+        fire_background(
+            music_status.end_if_paused_after_timeout(
+                user_id=user["sub"],
+                agent_id=data.agent_id,
+                conversation_id=data.conversation_id,
+            )
+        )
     return MusicPlaybackResponse(
         track=track,
         position_seconds=position_seconds,
@@ -348,6 +358,13 @@ async def end_music_co_listening(
             conversation_id=data.conversation_id,
             reason=data.reason,
         )
+        if ended is not None:
+            await music_status.persist_and_emit_music_status(
+                conversation_id=data.conversation_id,
+                status="ended",
+                track=ended.track,
+                reason=data.reason,
+            )
     except ValueError as exc:
         _handle_value_error(exc)
     return ended or MusicCoListeningResponse(status="ended")

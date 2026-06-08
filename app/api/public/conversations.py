@@ -76,13 +76,32 @@ async def _conversation_response(conv, *, ensure_idle_music: bool = False) -> Co
         from app.services import music as music_service
 
         if ensure_idle_music:
-            music_co_listening = await music_service.ensure_idle_auto_listening(
-                user_id=conv.userId,
-                agent_id=conv.agentId,
-                conversation_id=conv.id,
-                workspace_id=conv.workspaceId,
-                schedule_status=(status or {}).get("ai_status"),
-            )
+            status_code = str((status or {}).get("ai_status") or "idle")
+            if status_code and status_code != "idle":
+                from app.services.music_status import end_co_listening_with_notice
+
+                activity = (
+                    str((status or {}).get("ai_activity") or "").strip()
+                    or str((status or {}).get("ai_status_label") or "").strip()
+                    or "处理自己的事"
+                )
+                await end_co_listening_with_notice(
+                    user_id=conv.userId,
+                    agent_id=conv.agentId,
+                    conversation_id=conv.id,
+                    reason=f"ai_{status_code}",
+                    prompt_key="music.busy_exit",
+                    activity=activity,
+                )
+                music_co_listening = None
+            else:
+                music_co_listening = await music_service.ensure_idle_auto_listening(
+                    user_id=conv.userId,
+                    agent_id=conv.agentId,
+                    conversation_id=conv.id,
+                    workspace_id=conv.workspaceId,
+                    schedule_status=status_code,
+                )
         else:
             music_co_listening = await music_service.get_active_co_listening(
                 conversation_id=conv.id,

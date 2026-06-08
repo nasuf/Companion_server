@@ -834,6 +834,17 @@ MUSIC_BUSY_EXIT_PROMPT = """【任务】你原本在和用户一起听歌，现�
 【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 70 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
+MUSIC_USER_PAUSE_EXIT_PROMPT = """【任务】你原本在和用户一起听歌，但用户把音乐暂停超过了一分钟。刚才一起听的是《{song_name}》- {artist}。
+
+【要求】
+- 语气像朋友轻轻问一句，不要责备
+- 询问用户是不是去忙什么了，为什么不一起听了
+- 不要说系统检测、超时、后台、状态变化这类技术词
+- 不要自行编造用户去做了什么
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
 MUSIC_PROACTIVE_RECOMMEND_PROMPT = """【任务】你想主动分享一首歌作为话题。你要推荐的是《{song_name}》- {artist}。
 
 【参考】

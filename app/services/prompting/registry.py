@@ -56,6 +56,7 @@ from app.services.prompting.defaults import (
     MUSIC_PROACTIVE_RECOMMEND_PROMPT,
     MUSIC_SLEEP_REJECT_PROMPT,
     MUSIC_USER_EXIT_PROMPT,
+    MUSIC_USER_PAUSE_EXIT_PROMPT,
     MEMORY_CONTRADICTION_ANALYSIS_PROMPT,
     MEMORY_CONTRADICTION_DETECTION_PROMPT,
     MEMORY_CONTRADICTION_INQUIRY_PROMPT,
@@ -464,6 +465,11 @@ PROMPT_DEFINITIONS = [
         "music.busy_exit", "音乐共听(AI忙碌退出)", "聊天热路径", "音乐共听",
         "【工程扩展】共听中 AI 状态转忙时的被动退出回复.",
         MUSIC_BUSY_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.user_pause_exit", "音乐共听(用户暂停退出)", "聊天热路径", "音乐共听",
+        "【工程扩展】共听中用户暂停超过阈值时的轻量询问回复.",
+        MUSIC_USER_PAUSE_EXIT_PROMPT,
     ),
     PromptDefinition(
         "music.proactive_recommend", "音乐主动推荐", "主动交流", "音乐共听",

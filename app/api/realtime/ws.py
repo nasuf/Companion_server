@@ -134,7 +134,16 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         track = _sanitize_music_track_payload(raw_track)
         if track is None:
             return None
-        return {"intent": intent, "source": source, "track": track}
+        payload = {"intent": intent, "source": source, "track": track}
+        for key, limit in (
+            ("mode", 40),
+            ("library", 120),
+            ("library_title", 120),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        return payload
     return None
 
 
@@ -291,6 +300,7 @@ async def _handle_music_component_card(
     from app.models.music import MusicTrackPayload
     from app.services import music
     from app.services.music_chat import render_music_reply
+    from app.services.music_status import persist_and_emit_music_status
     from app.services.runtime.tasks import fire_background
 
     try:
@@ -343,20 +353,6 @@ async def _handle_music_component_card(
         reply,
         metadata=metadata,
     )
-    music_status_message_id = None
-    music_status_text = f"你们开始一起听《{track.title}》"
-    if accepted:
-        music_status_message_id = await _persist_assistant_message(
-            conversation_id,
-            music_status_text,
-            metadata={
-                "music_status": "started",
-                "music_track_title": track.title,
-                "music_track_id": track.id,
-                "music_co_listening": True,
-                "reply_index": 1,
-            },
-        )
     try:
         from app.services.chat.post_process import _bg_memory_pipeline
 
@@ -383,17 +379,12 @@ async def _handle_music_component_card(
             "music_co_listening": accepted,
         },
     })
-    if accepted and music_status_message_id:
-        await ws.send_json({
-            "type": "music_status",
-            "data": {
-                "text": music_status_text,
-                "status": "started",
-                "track_title": track.title,
-                "track_id": track.id,
-                "message_id": music_status_message_id,
-            },
-        })
+    if accepted:
+        await persist_and_emit_music_status(
+            conversation_id=conversation_id,
+            status="started",
+            track=track,
+        )
     await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
     return True
 
@@ -599,6 +590,18 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         finally:
             logger.info("ws disconnected", extra={"event": EVT_WS_DISCONNECT})
             await manager.disconnect(conversation_id)
+            try:
+                from app.services.music_status import end_if_disconnected_after_timeout
+
+                fire_background(
+                    end_if_disconnected_after_timeout(
+                        user_id=user_id,
+                        agent_id=agent.id,
+                        conversation_id=conversation_id,
+                    )
+                )
+            except Exception as exc:
+                logger.debug("music disconnect timeout scheduling skipped: %s", exc)
 
 
 async def _send_ack(

@@ -606,15 +606,15 @@ async def ensure_idle_auto_listening(
     current = await get_active_co_listening(conversation_id=conversation_id)
     status = _clean_text(schedule_status) or "idle"
     if status != "idle":
-        if current and current.initiated_by == "agent_auto":
+        if current:
             await end_co_listening(
                 user_id=user_id,
                 agent_id=agent_id,
                 conversation_id=conversation_id,
-                reason=f"auto_{status}",
+                reason=f"ai_{status}",
             )
             return None
-        return current
+        return None
     if current is not None:
         return current
     if await _recent_user_exit_cooldown(conversation_id):
@@ -835,6 +835,46 @@ async def end_co_listening(
     return current.model_copy(
         update={"status": "ended", "is_playing": False, "ended_reason": reason}
     )
+
+
+async def end_paused_co_listening_if_stale(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    paused_seconds: int,
+    reason: str = "user_pause_timeout",
+) -> MusicCoListeningResponse | None:
+    await ensure_conversation_owner(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+    )
+    rows = await db.query_raw(
+        """
+        UPDATE music_co_listening_sessions
+        SET status = 'ended',
+            ended_reason = $5,
+            ended_at = now(),
+            is_playing = false,
+            updated_at = now()
+        WHERE conversation_id = $1
+          AND user_id = $2
+          AND agent_id = $3
+          AND status = 'active'
+          AND is_playing = false
+          AND updated_at <= now() - make_interval(secs => $4::int)
+        RETURNING *
+        """,
+        conversation_id,
+        user_id,
+        agent_id,
+        paused_seconds,
+        reason,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
 
 
 def _mock_track(library: str, *, index: int) -> MusicTrack:

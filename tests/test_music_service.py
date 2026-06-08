@@ -641,7 +641,7 @@ async def test_ensure_idle_auto_listening_ends_agent_auto_when_busy(monkeypatch)
 
     assert result is None
     assert "UPDATE music_co_listening_sessions" in fake_db.execs[0][0]
-    assert fake_db.execs[0][1][-1] == "auto_busy"
+    assert fake_db.execs[0][1][-1] == "ai_busy"
 
 
 @pytest.mark.asyncio
