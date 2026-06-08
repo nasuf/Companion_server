@@ -400,15 +400,17 @@ async def _create_prompt_version(
         prompt_key=prompt_key,
         change_type=change_type,
     ) if attach_eval else None
+    data = {
+        "promptId": prompt_id,
+        "promptKey": prompt_key,
+        "content": content,
+        "source": source,
+        "changeType": change_type,
+    }
+    if eval_result is not None:
+        data["evalResult"] = Json(eval_result)
     await db.prompttemplateversion.create(
-        data={
-            "promptId": prompt_id,
-            "promptKey": prompt_key,
-            "content": content,
-            "source": source,
-            "changeType": change_type,
-            "evalResult": Json(eval_result) if eval_result is not None else None,
-        }
+        data=data
     )
 
 

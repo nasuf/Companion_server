@@ -197,6 +197,24 @@ async def test_metadata_only_change_preserves_content(prompt_store_mocks):
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_prompt_version_omits_null_eval_result(prompt_store_mocks):
+    from app.services.prompting import store
+
+    mock_db, _fake_redis, _set_defs = prompt_store_mocks
+
+    await store._create_prompt_version(
+        prompt_id="prompt-1",
+        prompt_key="test.key",
+        content="default prompt",
+        source="default",
+        change_type="bootstrap",
+    )
+
+    ver_data = mock_db.prompttemplateversion.create.call_args.kwargs["data"]
+    assert "evalResult" not in ver_data
+
+
+@pytest.mark.asyncio
 async def test_prompt_update_version_attaches_eval_result(prompt_store_mocks):
     from app.services.prompting import store
 

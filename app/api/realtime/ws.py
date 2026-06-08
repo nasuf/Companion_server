@@ -53,7 +53,13 @@ def _sanitize_component_card(raw: object) -> dict | None:
     if not isinstance(raw, dict):
         return None
     card_type = raw.get("type")
-    if card_type not in {"time_capsule", "weather", "checkin_reminder", "checkin_habit"}:
+    if card_type not in {
+        "time_capsule",
+        "weather",
+        "checkin_reminder",
+        "checkin_habit",
+        "music_track",
+    }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
     card: dict = {
@@ -117,7 +123,50 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         if isinstance(sent_to_ai, bool):
             payload["sent_to_ai"] = sent_to_ai
         return payload or None
+    if card_type == "music_track":
+        intent = _truncate_payload_value(raw.get("intent"), 40).strip()
+        if intent not in {"invite", "recommend"}:
+            intent = "invite"
+        source = _truncate_payload_value(raw.get("source"), 80).strip() or "music_page"
+        raw_track = raw.get("track")
+        if not isinstance(raw_track, dict):
+            return None
+        track = _sanitize_music_track_payload(raw_track)
+        if track is None:
+            return None
+        return {"intent": intent, "source": source, "track": track}
     return None
+
+
+def _sanitize_music_track_payload(raw: dict) -> dict | None:
+    track_id = _truncate_payload_value(raw.get("id"), 160).strip()
+    title = _truncate_payload_value(raw.get("title"), 240).strip()
+    if not track_id or not title:
+        return None
+    metadata = raw.get("metadata")
+    safe_metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        "id": track_id,
+        "title": title,
+        "artist": _truncate_payload_value(raw.get("artist") or "Jamendo", 160),
+        "album": _truncate_payload_value(raw.get("album") or "Jamendo Library", 240),
+        "library": _truncate_payload_value(raw.get("library") or "focus", 120),
+        "url": _truncate_payload_value(raw.get("url"), 2000),
+        "duration_sec": _safe_int(raw.get("duration_sec"), min_value=0, max_value=24 * 60 * 60),
+        "cover_key": _truncate_payload_value(raw.get("cover_key") or "music-cover-01.jpg", 160),
+        "accent_a": _truncate_payload_value(raw.get("accent_a") or "#1f6fff", 32),
+        "accent_b": _truncate_payload_value(raw.get("accent_b") or "#18c6c0", 32),
+        "source": _truncate_payload_value(raw.get("source") or "jamendo", 80),
+        "metadata": safe_metadata,
+    }
+
+
+def _safe_int(value: object, *, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    return max(min_value, min(max_value, parsed))
 
 
 def _sanitize_weekdays(raw: object) -> list[int]:
@@ -201,6 +250,152 @@ async def _persist_user_message(
     )
     await mark_user_replied_for_conversation(conversation_id)
     return saved.id
+
+
+async def _persist_assistant_message(
+    conversation_id: str,
+    text: str,
+    *,
+    metadata: dict | None = None,
+) -> str:
+    created = await db.message.create(
+        data={
+            "conversation": {"connect": {"id": conversation_id}},
+            "role": "assistant",
+            "content": text,
+            **({"metadata": Json(metadata)} if metadata else {}),
+        }
+    )
+    return created.id
+
+
+async def _handle_music_component_card(
+    ws: WebSocket,
+    *,
+    conversation_id: str,
+    user_id: str,
+    agent,
+    workspace_id: str | None,
+    user_name: str | None,
+    user_message_id: str,
+    component_card: dict,
+    received_status: dict,
+) -> bool:
+    payload = component_card.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    track_payload = payload.get("track")
+    if not isinstance(track_payload, dict):
+        return False
+
+    from app.models.music import MusicTrackPayload
+    from app.services import music
+    from app.services.music_chat import render_music_reply
+    from app.services.runtime.tasks import fire_background
+
+    try:
+        track = MusicTrackPayload(**track_payload)
+    except Exception:
+        return False
+
+    status = str((received_status or {}).get("status") or "idle")
+    activity = str((received_status or {}).get("activity") or (received_status or {}).get("event") or "处理自己的事")
+    accepted = status not in {"sleep", "busy", "very_busy"}
+    if status == "sleep":
+        prompt_key = "music.sleep_reject"
+    elif status in {"busy", "very_busy"}:
+        prompt_key = "music.busy_reject"
+    else:
+        prompt_key = "music.accept_invite"
+        try:
+            await music.start_co_listening(
+                user_id=user_id,
+                agent_id=agent.id,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                payload=track,
+                initiated_by="user",
+                is_playing=True,
+            )
+        except ValueError:
+            logger.warning("music co-listening start skipped: invalid ownership")
+            return False
+
+    try:
+        reply = await render_music_reply(
+            prompt_key,
+            user_name=user_name or "你",
+            ai_name=getattr(agent, "name", "") or "我",
+            track=track,
+            activity=activity,
+        )
+    except Exception as exc:
+        logger.warning("music reply generation failed: %s", exc)
+        reply = "我先把这首歌记下，等会儿好好听。"
+
+    metadata = {
+        "music_co_listening": accepted,
+        "music_prompt_key": prompt_key,
+        "reply_index": 0,
+    }
+    assistant_message_id = await _persist_assistant_message(
+        conversation_id,
+        reply,
+        metadata=metadata,
+    )
+    music_status_message_id = None
+    music_status_text = f"你们开始一起听《{track.title}》"
+    if accepted:
+        music_status_message_id = await _persist_assistant_message(
+            conversation_id,
+            music_status_text,
+            metadata={
+                "music_status": "started",
+                "music_track_title": track.title,
+                "music_track_id": track.id,
+                "music_co_listening": True,
+                "reply_index": 1,
+            },
+        )
+    try:
+        from app.services.chat.post_process import _bg_memory_pipeline
+
+        fire_background(_bg_memory_pipeline(
+            user_id,
+            [
+                {
+                    "role": "user",
+                    "content": f"我给你推荐了《{track.title}》- {track.artist}，想和你一起听。",
+                },
+                {"role": "assistant", "content": reply},
+            ],
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+        ))
+    except Exception as memory_err:
+        logger.debug(f"[MUSIC] memory pipeline skipped: {memory_err}")
+
+    await ws.send_json({
+        "type": "reply",
+        "data": {
+            "text": reply,
+            "assistant_message_id": assistant_message_id,
+            "music_co_listening": accepted,
+        },
+    })
+    if accepted and music_status_message_id:
+        await ws.send_json({
+            "type": "music_status",
+            "data": {
+                "text": music_status_text,
+                "status": "started",
+                "track_title": track.title,
+                "track_id": track.id,
+                "message_id": music_status_message_id,
+            },
+        })
+    await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
+    return True
 
 
 async def _queue_reply(
@@ -355,13 +550,13 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 elif msg_type == "message":
                     payload = raw.get("data") or {}
                     text = (payload.get("message") or "").strip()
-                    if not text:
-                        continue
                     # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
                     # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
                     client_id = payload.get("client_id")
                     raw_component_card = payload.get("component_card")
                     component_card = _sanitize_component_card(raw_component_card)
+                    if not text and component_card is None:
+                        continue
                     client_id_present = isinstance(client_id, str) and bool(client_id)
                     component_card_type = (
                         raw_component_card.get("type")
@@ -388,6 +583,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                         workspace_id=workspace_id,
                         client_id=client_id,
                         component_card=component_card,
+                        user_name=cached_username,
                     )
 
         except WebSocketDisconnect:
@@ -442,6 +638,7 @@ async def _handle_message(
     workspace_id: str | None = None,
     client_id: str | None = None,
     component_card: dict | None = None,
+    user_name: str | None = None,
 ) -> None:
     """处理用户消息：聚合检查 → 生成回复 → 推送。"""
     schedule = await get_cached_schedule(agent.id)
@@ -491,6 +688,21 @@ async def _handle_message(
         ))
     except Exception as achievement_err:
         logger.debug(f"[ACH] user message hook skipped: {achievement_err}")
+
+    if component_card and component_card.get("type") == "music_track":
+        handled = await _handle_music_component_card(
+            ws,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            agent=agent,
+            workspace_id=workspace_id,
+            user_name=user_name,
+            user_message_id=user_message_id,
+            component_card=component_card,
+            received_status=received_status,
+        )
+        if handled:
+            return
 
     card_reply_message = _component_card_reply_message(plan.final_message, component_card)
     if card_reply_message:

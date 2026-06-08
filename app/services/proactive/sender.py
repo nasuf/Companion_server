@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -202,6 +203,7 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     ("silence_wakeup", "user_l2"): "proactive.silence_user_memory",
     ("silence_wakeup", "ai_schedule"): "proactive.silence_schedule",
     ("silence_wakeup", "greeting"): "proactive.silence_plain",
+    ("silence_wakeup", "music"): "music.proactive_recommend",
     ("memory_proactive", "ai_l1"): "proactive.memory_ai",
     ("memory_proactive", "ai_l2"): "proactive.memory_ai",
     ("memory_proactive", "user_l1"): "proactive.memory_user",
@@ -278,6 +280,12 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "time": _now_corrected().strftime("%H:%M"),
             "activity": activity,
             "status": status,
+        },
+        "music.proactive_recommend": {
+            "personality_brief": personality_brief,
+            "song_name": getattr(ctx.get("music_track"), "title", "这首歌"),
+            "artist": getattr(ctx.get("music_track"), "artist", "Jamendo"),
+            "scene_hint": ctx.get("scene_hint") or "轻量分享一首适合此刻的歌。",
         },
     }
     fields = fields_by_key.get(key)
@@ -357,6 +365,28 @@ async def _persist_proactive_state(
     await save_last_reply_timestamp(state.agent_id, state.user_id, when=now_ts)
 
 
+def _should_use_music_source(trigger_type: str) -> bool:
+    if trigger_type != "silence_wakeup":
+        return False
+    return random.random() < 0.18
+
+
+async def _prepare_music_recommendation_source(
+    ctx: dict[str, Any],
+    *,
+    conversation_id: str,
+) -> str:
+    from app.services import music
+
+    active = await music.get_active_co_listening(conversation_id=conversation_id)
+    if active is not None:
+        return "greeting"
+    library = music.default_libraries()[0]
+    track = await music.fetch_random_track(library, index=0, use_cache=True)
+    ctx["music_track"] = track
+    return "music"
+
+
 # ────────────────────────────────────────────────────────────────────
 # Main entry: generate_and_send_proactive
 # ────────────────────────────────────────────────────────────────────
@@ -386,6 +416,8 @@ async def generate_and_send_proactive(
     # spec §3.2 话题方向 + §4.1/§4.2 来源概率表
     topic_theme = select_topic_theme(stage)
     source = select_topic_source(stage, trigger_type)
+    if _should_use_music_source(trigger_type):
+        source = "music"
 
     ctx = await build_proactive_context(
         workspace_id=state.workspace_id,
@@ -397,6 +429,12 @@ async def generate_and_send_proactive(
         source=source,
         topic_theme=topic_theme,
     )
+    if source == "music":
+        source = await _prepare_music_recommendation_source(
+            ctx,
+            conversation_id=prep.conversation_id,
+        )
+        ctx["source"] = source
 
     # spec §4.1 沉默唤醒兜底; §4.2 记忆主动失败时取消
     if source in _MEMORY_SOURCES and not ctx.get("proactive_memories"):
@@ -431,6 +469,23 @@ async def generate_and_send_proactive(
             )
             return False
 
+        extra_metadata: dict[str, Any] = {"stage": stage}
+        ws_payload_extra: dict[str, Any] | None = None
+        if source == "music" and ctx.get("music_track") is not None:
+            from app.services.music_chat import card_from_track
+
+            card = card_from_track(
+                ctx["music_track"],
+                intent="recommend",
+                source="proactive",
+            )
+            extra_metadata.update({
+                "component_card": card,
+                "music_proactive": True,
+                "topic_source": "music",
+            })
+            ws_payload_extra = {"component_card": card}
+
         assistant_message_id = await emit_proactive_message(
             conversation_id=prep.conversation_id,
             user_id=state.user_id,
@@ -438,7 +493,8 @@ async def generate_and_send_proactive(
             workspace_id=state.workspace_id,
             message=message,
             trigger_type=trigger_type,
-            extra_metadata={"stage": stage},
+            extra_metadata=extra_metadata,
+            ws_payload_extra=ws_payload_extra,
             trace_id=tracer.safe_trace_id,
         )
     logger.info(

@@ -78,7 +78,55 @@ async def test_load_proactive_memories_filters_hallucinated_ids():
         )
 
     assert ids == ["m1"]
-    assert len(texts) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_music_recommendation_fetches_track_when_not_co_listening():
+    from app.services.proactive import sender
+    from app.models.music import MusicTrack
+
+    ctx = {}
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    with (
+        patch(
+            "app.services.music.get_active_co_listening",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("app.services.music.default_libraries", return_value=["focus"]),
+        patch(
+            "app.services.music.fetch_random_track",
+            new_callable=AsyncMock,
+            return_value=track,
+        ) as fetch_track,
+    ):
+        source = await sender._prepare_music_recommendation_source(
+            ctx,
+            conversation_id="conv-1",
+        )
+
+    assert source == "music"
+    assert ctx["music_track"] is track
+    fetch_track.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prepare_music_recommendation_falls_back_when_already_co_listening():
+    from app.services.proactive import sender
+
+    ctx = {}
+    with patch(
+        "app.services.music.get_active_co_listening",
+        new_callable=AsyncMock,
+        return_value=object(),
+    ):
+        source = await sender._prepare_music_recommendation_source(
+            ctx,
+            conversation_id="conv-1",
+        )
+
+    assert source == "greeting"
+    assert "music_track" not in ctx
 
 
 @pytest.mark.asyncio

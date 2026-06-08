@@ -342,6 +342,7 @@ async def build_system_prompt(
     delay_context: str | None = None,
     portrait: str | None = None,
     topic_context: str | None = None,
+    music_context: str | None = None,
     user_emotion: dict | None = None,
     patience_instruction: str | None = None,
     reply_count: int = 2,
@@ -455,6 +456,11 @@ async def build_system_prompt(
         sections.append(_section("话题上下文", topic_context))
     else:
         _record_skipped_section(diagnostics, "话题上下文")
+
+    if music_context:
+        sections.append(_section("一起听音乐", music_context))
+    else:
+        _record_skipped_section(diagnostics, "一起听音乐")
 
     # 时间上下文: 仅注入日期/星期/节假日, 不注入 AI 当前活动 (schedule_context).
     # spec §4 日常交流 步骤 4.3 / 5B.3 的"汇总参考信息"明确不包含 AI 当前作息;

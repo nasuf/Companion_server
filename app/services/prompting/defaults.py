@@ -773,6 +773,82 @@ PROACTIVE_FIRST_GREETING_PROMPT = """【限定】
 【输出】只输出问候内容(单条输出, 不换行, 不用 || 分隔)""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
+MUSIC_ACCEPT_INVITE_PROMPT = """【任务】{user_name} 把《{song_name}》- {artist} 分享给你，邀请你一起听。你当前是空闲状态，可以接受。
+
+【要求】
+- 像真人朋友一样自然接受邀请
+- 简短表达你对这首歌的第一感受、氛围想象或听歌心情
+- 这是刚开始一起听，不要说“下次”“下次再一起听”“以后再听”等结束语
+- 不要说自己是 AI，不要像客服确认工单
+- 不要承诺现实线下行为
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_BUSY_REJECT_PROMPT = """【任务】{user_name} 邀请你一起听《{song_name}》- {artist}，但你现在正在{activity}，暂时不能一起听。
+
+【要求】
+- 先自然说明你正在忙什么
+- 表达对这首歌有兴趣或有点遗憾
+- 明确说忙完会专门去听/回来看
+- 语气像朋友，不要冷冰冰拒绝
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 70 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_SLEEP_REJECT_PROMPT = """【任务】{user_name} 邀请你一起听《{song_name}》- {artist}，但你正在睡觉。
+
+【要求】
+- 语气带一点迷糊睡意，但不要夸张表演
+- 可以轻轻念到歌名
+- 承诺醒后会去听
+- 不要写动作旁白或括号描写
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_CO_LISTENING_CONTEXT_PROMPT = (
+    "你正在和用户一起听《{current_song}》- {current_artist}。"
+    "这只是当前聊天背景，不要每条都硬提；当用户聊到音乐、心情、歌词、切歌或听感时，"
+    "可以自然带入这首歌。"
+)
+
+
+MUSIC_USER_EXIT_PROMPT = """【任务】用户结束了和你的共同听歌。刚才一起听的是《{song_name}》- {artist}。
+
+【要求】
+- 用轻松、朋友式的语气结束共听
+- 可以简单带一句刚才的听歌感受
+- 不要过度强调“下次”，避免像刚开始就结束
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_BUSY_EXIT_PROMPT = """【任务】你原本在和用户一起听歌，现在突然需要去{activity}，不得不停止。当前歌曲是《{song_name}》- {artist}。
+
+【要求】
+- 告诉用户你要去忙什么
+- 对中断表示一点遗憾
+- 约定下次继续
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 70 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_PROACTIVE_RECOMMEND_PROMPT = """【任务】你想主动分享一首歌作为话题。你要推荐的是《{song_name}》- {artist}。
+
+【参考】
+- 你的性格：{personality_brief}
+- 当前场景：{scene_hint}
+
+【要求】
+- 先轻轻开启话题，不要突兀
+- 简单说一个推荐理由，例如旋律、氛围、适合现在心情
+- 自然邀请用户要不要听听
+- 不要说歌曲来自接口或推荐池
+
+【输出】只输出一条自然主动消息，不换行，不用 || 分隔，不超过 80 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
 PROACTIVE_SPECIAL_HOLIDAY_PROMPT = """【限定】只作为用户的线上好友，和用户不会有任何线下交集（只参考不用刻意提及）
 
 【任务】今天是{holiday_name}，你作为用户的好朋友，主动给对方发一条节日祝福。消息要自然、真诚，像朋友之间随手发的问候，不要太正式或像群发短信。

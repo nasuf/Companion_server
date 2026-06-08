@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.config import settings
 from app.api.jwt_auth import require_user
 from app.api.ownership import require_conversation_owner, require_user_self
 from app.db import db
@@ -9,9 +11,77 @@ from app.models.conversation import ConversationCreate, ConversationResponse
 from app.models.message import MessageResponse
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID
 from app.services.chat.crisis_state import get_crisis_care_status
+from app.services.schedule_domain.schedule import (
+    get_cached_schedule,
+    get_current_status,
+    status_label,
+)
 from app.services.workspace.workspaces import ensure_workspace, get_workspace_by_id
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+def _parse_created_at(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _interaction_days(created_at) -> int | None:
+    created = _parse_created_at(created_at)
+    if created is None:
+        return None
+    return max(1, (datetime.now(UTC).date() - created.astimezone(UTC).date()).days + 1)
+
+
+async def _current_ai_status(agent_id: str | None) -> dict | None:
+    if not agent_id:
+        return None
+    schedule = None
+    try:
+        schedule = await get_cached_schedule(agent_id)
+    except Exception:
+        schedule = None
+    if not schedule:
+        try:
+            local_now = datetime.now(ZoneInfo(settings.schedule_timezone))
+            date_only = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            row = await db.aidailyschedule.find_unique(
+                where={"agentId_date": {"agentId": agent_id, "date": date_only}}
+            )
+            schedule = getattr(row, "scheduleData", None) if row else None
+        except Exception:
+            schedule = None
+    if not schedule:
+        return None
+    status = get_current_status(schedule)
+    code = str(status.get("status") or "")
+    return {
+        "ai_status": code or None,
+        "ai_status_label": status_label(code) if code else None,
+        "ai_activity": status.get("activity") or status.get("event"),
+    }
+
+
+async def _conversation_response(conv) -> ConversationResponse:
+    status = await _current_ai_status(getattr(conv, "agentId", None))
+    return ConversationResponse(
+        id=conv.id,
+        user_id=conv.userId,
+        agent_id=conv.agentId,
+        workspace_id=conv.workspaceId,
+        title=conv.title,
+        created_at=str(conv.createdAt),
+        updated_at=str(conv.updatedAt),
+        interaction_days=_interaction_days(conv.createdAt),
+        **(status or {}),
+    )
 
 
 @router.post("", response_model=ConversationResponse)
@@ -50,15 +120,7 @@ async def create_conversation(
         order={"updatedAt": "desc"},
     )
     if existing:
-        return ConversationResponse(
-            id=existing.id,
-            user_id=existing.userId,
-            agent_id=existing.agentId,
-            workspace_id=existing.workspaceId,
-            title=existing.title,
-            created_at=str(existing.createdAt),
-            updated_at=str(existing.updatedAt),
-        )
+        return await _conversation_response(existing)
 
     try:
         conv = await db.conversation.create(
@@ -81,28 +143,12 @@ async def create_conversation(
             raise
         conv = existing
 
-    return ConversationResponse(
-        id=conv.id,
-        user_id=conv.userId,
-        agent_id=conv.agentId,
-        workspace_id=conv.workspaceId,
-        title=conv.title,
-        created_at=str(conv.createdAt),
-        updated_at=str(conv.updatedAt),
-    )
+    return await _conversation_response(conv)
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(conv=Depends(require_conversation_owner)):
-    return ConversationResponse(
-        id=conv.id,
-        user_id=conv.userId,
-        agent_id=conv.agentId,
-        workspace_id=conv.workspaceId,
-        title=conv.title,
-        created_at=str(conv.createdAt),
-        updated_at=str(conv.updatedAt),
-    )
+    return await _conversation_response(conv)
 
 
 @router.get("", response_model=list[ConversationResponse])
@@ -119,18 +165,7 @@ async def list_conversations(
     convs = await db.conversation.find_many(
         where=where, order={"createdAt": "desc"}, take=limit, skip=offset
     )
-    return [
-        ConversationResponse(
-            id=c.id,
-            user_id=c.userId,
-            agent_id=c.agentId,
-            workspace_id=c.workspaceId,
-            title=c.title,
-            created_at=str(c.createdAt),
-            updated_at=str(c.updatedAt),
-        )
-        for c in convs
-    ]
+    return [await _conversation_response(c) for c in convs]
 
 
 @router.get("/{conversation_id}/messages", response_model=list[MessageResponse])

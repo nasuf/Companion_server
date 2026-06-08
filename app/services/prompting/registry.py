@@ -49,6 +49,13 @@ from app.services.prompting.defaults import (
     MEDIUM_ATTACK_REPLY_PROMPT,
     MEDIUM_MEMORY_REPLY_PROMPT,
     MEDIUM_PATIENCE_REPLY_PROMPT,
+    MUSIC_ACCEPT_INVITE_PROMPT,
+    MUSIC_BUSY_EXIT_PROMPT,
+    MUSIC_BUSY_REJECT_PROMPT,
+    MUSIC_CO_LISTENING_CONTEXT_PROMPT,
+    MUSIC_PROACTIVE_RECOMMEND_PROMPT,
+    MUSIC_SLEEP_REJECT_PROMPT,
+    MUSIC_USER_EXIT_PROMPT,
     MEMORY_CONTRADICTION_ANALYSIS_PROMPT,
     MEMORY_CONTRADICTION_DETECTION_PROMPT,
     MEMORY_CONTRADICTION_INQUIRY_PROMPT,
@@ -427,6 +434,41 @@ PROMPT_DEFINITIONS = [
         "《终稿·第四部分 主动交流》§12 开场主动第一句话: "
         "用户首次进入聊天 / WS 建联且历史为空时 AI 的开场白.",
         PROACTIVE_FIRST_GREETING_PROMPT,
+    ),
+    PromptDefinition(
+        "music.accept_invite", "音乐共听(接受邀请)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户从音乐页发送 music_track 邀请卡片且 AI 当前 idle 时的接受回复.",
+        MUSIC_ACCEPT_INVITE_PROMPT,
+    ),
+    PromptDefinition(
+        "music.busy_reject", "音乐共听(忙碌拒绝)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户发送 music_track 邀请卡片但 AI 当前 busy/very_busy 时的委婉拒绝.",
+        MUSIC_BUSY_REJECT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.sleep_reject", "音乐共听(睡眠拒绝)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户发送 music_track 邀请卡片但 AI 当前 sleep 时的睡眠拒绝.",
+        MUSIC_SLEEP_REJECT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.co_listening_context", "音乐共听(上下文注入)", "聊天热路径", "音乐共听",
+        "【工程扩展】会话处于共听中时注入主聊天 prompt 的当前歌曲上下文.",
+        MUSIC_CO_LISTENING_CONTEXT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.user_exit", "音乐共听(用户退出)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户主动结束共听时的轻量告别回复.",
+        MUSIC_USER_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.busy_exit", "音乐共听(AI忙碌退出)", "聊天热路径", "音乐共听",
+        "【工程扩展】共听中 AI 状态转忙时的被动退出回复.",
+        MUSIC_BUSY_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.proactive_recommend", "音乐主动推荐", "主动交流", "音乐共听",
+        "【工程扩展】主动交流系统选择音乐作为话题时的推荐语.",
+        MUSIC_PROACTIVE_RECOMMEND_PROMPT,
     ),
     PromptDefinition(
         "proactive.special_holiday", "特殊日期(节日)", "主动交流", "主动消息",

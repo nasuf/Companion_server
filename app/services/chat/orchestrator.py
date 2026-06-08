@@ -1475,12 +1475,29 @@ async def stream_chat_response(
             # Phase 6: 删 relational_context / graph_context 入参 — 实证冗余/幻觉源
             started = perf_counter()
             prompt_diagnostics: dict[str, Any] = {}
+            music_context = None
+            try:
+                from app.services import music as music_service
+                from app.services.prompting.store import get_prompt_text
+
+                active_music = await music_service.get_active_co_listening(
+                    conversation_id=conversation_id,
+                )
+                if active_music and active_music.track:
+                    tpl = await get_prompt_text("music.co_listening_context")
+                    music_context = tpl.format(
+                        current_song=active_music.track.title,
+                        current_artist=active_music.track.artist,
+                    )
+            except Exception as music_context_err:
+                logger.debug(f"[MUSIC] co-listening context skipped: {music_context_err}")
             system_prompt = await build_system_prompt(
                 agent=agent,
                 memories=classified_memories,
                 delay_context=delay_context,
                 portrait=portrait,
                 topic_context=topic_context,
+                music_context=music_context,
                 user_emotion=prompt_user_emotion,
                 # schedule_context 故意不传给 §4 主回复 prompt: spec §4 不要求 AI 当前活动,
                 # 只有 §3.4.3 询问当前状态走 short-circuit 时才需要 (handle_current_state

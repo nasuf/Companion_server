@@ -122,6 +122,41 @@ def test_sanitize_component_card_allows_checkin_types():
     assert habit and habit["type"] == "checkin_habit"
 
 
+def test_sanitize_component_card_allows_music_track_payload():
+    card = ws_mod._sanitize_component_card({
+        "type": "music_track",
+        "title": "Quiet Realm",
+        "subtitle": "Jamendo Artist",
+        "body": "Focus 频道",
+        "footer": "邀请一起听",
+        "accent": "#1f6fff",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {
+                "id": "track-1",
+                "title": "Quiet Realm",
+                "artist": "Jamendo Artist",
+                "album": "Jamendo Focus",
+                "library": "focus",
+                "url": "https://cdn.example.test/a.mp3",
+                "duration_sec": 240,
+                "cover_key": "music-cover-02.jpg",
+                "accent_a": "#1f6fff",
+                "accent_b": "#18c6c0",
+                "source": "jamendo",
+                "metadata": {"lyrics": "line"},
+            },
+        },
+    })
+
+    assert card is not None
+    assert card["type"] == "music_track"
+    assert card["payload"]["intent"] == "invite"
+    assert card["payload"]["track"]["id"] == "track-1"
+    assert card["payload"]["track"]["metadata"] == {"lyrics": "line"}
+
+
 def test_sanitize_checkin_card_preserves_weekdays_and_ai_flag():
     card = ws_mod._sanitize_component_card({
         "type": "checkin_habit",
@@ -228,6 +263,154 @@ async def test_handle_message_checkin_card_skips_time_memory_lookup(fake_ws):
     assert queued_kwargs["reply_context"]["component_card_reply"] is True
     assert queued_kwargs["reply_context"]["skip_time_memory_lookup"] is True
     assert "2026-05-30T13:59:00Z" not in queued_kwargs["user_message"]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-music-card-1"
+
+    async def _fake_assistant(*args, **kwargs):
+        return "assistant-music-1"
+
+    card = ws_mod._sanitize_component_card({
+        "type": "music_track",
+        "title": "Quiet Realm",
+        "subtitle": "Jamendo Artist",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "track-1", "title": "Quiet Realm"},
+        },
+    })
+    plan = _aggregation_plan("immediate", text="一起听")
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(ws_mod, "_persist_assistant_message", side_effect=_fake_assistant),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.music.start_co_listening",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as start_co,
+        patch(
+            "app.services.music_chat.render_music_reply",
+            new_callable=AsyncMock,
+            return_value="好呀，一起听。",
+        ) as render_reply,
+        patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
+    ):
+        await ws_mod._handle_message(
+            fake_ws,
+            "conv-1",
+            "user-1",
+            agent,
+            "一起听",
+            workspace_id="ws-1",
+            component_card=card,
+            user_name="Song",
+        )
+
+    start_co.assert_awaited_once()
+    render_reply.assert_awaited_once()
+    assert render_reply.await_args.args[0] == "music.accept_invite"
+    envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
+    assert any(item.get("type") == "reply" and item["data"]["music_co_listening"] for item in envelopes)
+    assert any(
+        item.get("type") == "music_status"
+        and item["data"]["status"] == "started"
+        and item["data"]["track_title"] == "Quiet Realm"
+        for item in envelopes
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-music-card-2"
+
+    async def _fake_assistant(*args, **kwargs):
+        return "assistant-music-2"
+
+    card = ws_mod._sanitize_component_card({
+        "type": "music_track",
+        "title": "Quiet Realm",
+        "subtitle": "Jamendo Artist",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "track-1", "title": "Quiet Realm"},
+        },
+    })
+    plan = _aggregation_plan("immediate", text="一起听")
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(ws_mod, "_persist_assistant_message", side_effect=_fake_assistant),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "写报告", "type": "work"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "写报告", "status": "very_busy"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
+        patch(
+            "app.services.music_chat.render_music_reply",
+            new_callable=AsyncMock,
+            return_value="我在写报告，忙完听。",
+        ) as render_reply,
+        patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
+    ):
+        await ws_mod._handle_message(
+            fake_ws,
+            "conv-1",
+            "user-1",
+            agent,
+            "一起听",
+            workspace_id="ws-1",
+            component_card=card,
+            user_name="Song",
+        )
+
+    start_co.assert_not_awaited()
+    assert render_reply.await_args.args[0] == "music.busy_reject"
+    envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
+    assert any(item.get("type") == "reply" and not item["data"]["music_co_listening"] for item in envelopes)
+    assert not any(item.get("type") == "music_status" for item in envelopes)
 
 
 @pytest.mark.asyncio

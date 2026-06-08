@@ -16,3 +16,7 @@ class ConversationResponse(BaseModel):
     title: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    interaction_days: int | None = None
+    ai_status: str | None = None
+    ai_status_label: str | None = None
+    ai_activity: str | None = None
