@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 
+from app.models.music import MusicCoListeningResponse
+
 
 class ConversationCreate(BaseModel):
     user_id: str
@@ -20,3 +22,4 @@ class ConversationResponse(BaseModel):
     ai_status: str | None = None
     ai_status_label: str | None = None
     ai_activity: str | None = None
+    music_co_listening: MusicCoListeningResponse | None = None

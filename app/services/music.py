@@ -23,6 +23,7 @@ DEFAULT_LIBRARIES = ["focus", "ambient", "sleep"]
 DEFAULT_TRACK_LIMIT = 1
 AUDIO_CACHE_TTL_SECONDS = 5 * 60
 STREAM_TOKEN_TTL_SECONDS = 60 * 30
+AUTO_LISTENING_EXIT_COOLDOWN_SECONDS = 10 * 60
 _TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 _audio_cache: dict[tuple[str, str, str, int], tuple[float, MusicTrack]] = {}
 _LIBRARY_CATALOG = {
@@ -349,10 +350,10 @@ async def resolve_play_url(
             data = _first_jamendo_result(response.json())
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("Jamendo play URL refresh failed: %s", exc)
-        return ""
+        return stream_url_path(clean_track_id)
     url = _jamendo_audio_url(data)
     if not url:
-        raise ValueError("track_not_found")
+        return stream_url_path(clean_track_id)
     return stream_url_path(clean_track_id)
 
 
@@ -587,6 +588,64 @@ async def get_active_co_listening(
     if not rows:
         return None
     return _co_listening_row_to_response(_row(rows[0]))
+
+
+async def ensure_idle_auto_listening(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    workspace_id: str | None,
+    schedule_status: str | None,
+) -> MusicCoListeningResponse | None:
+    """Ensure an idle AI has a current self-started listening state.
+
+    This is intentionally conversation-scoped so the chat header can show a live
+    listening badge without sending an unsolicited timeline message.
+    """
+    current = await get_active_co_listening(conversation_id=conversation_id)
+    status = _clean_text(schedule_status) or "idle"
+    if status != "idle":
+        if current and current.initiated_by == "agent_auto":
+            await end_co_listening(
+                user_id=user_id,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                reason=f"auto_{status}",
+            )
+            return None
+        return current
+    if current is not None:
+        return current
+    if await _recent_user_exit_cooldown(conversation_id):
+        return None
+
+    library = default_libraries()[0]
+    track = await fetch_random_track(library, index=0, use_cache=True)
+    payload = _track_to_payload(track)
+    session = await start_co_listening(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        payload=payload,
+        initiated_by="agent_auto",
+        position_seconds=0,
+        is_playing=True,
+    )
+    try:
+        await upsert_now_playing(
+            user_id=user_id,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            conversation_id=None,
+            payload=payload,
+            position_seconds=0,
+            is_playing=True,
+        )
+    except Exception as exc:
+        logger.warning("AI auto-listening now-playing sync skipped: %s", exc)
+    return session
 
 
 async def start_co_listening(
@@ -943,6 +1002,40 @@ def _payload_to_track(
         played_by_agent=played_by_agent,
         metadata=payload.metadata,
     )
+
+
+def _track_to_payload(track: MusicTrack) -> MusicTrackPayload:
+    return MusicTrackPayload(
+        id=track.id,
+        title=track.title,
+        artist=track.artist,
+        album=track.album,
+        library=track.library,
+        url=track.url,
+        duration_sec=track.duration_sec,
+        cover_key=track.cover_key,
+        accent_a=track.accent_a,
+        accent_b=track.accent_b,
+        source=track.source,
+        metadata=track.metadata,
+    )
+
+
+async def _recent_user_exit_cooldown(conversation_id: str) -> bool:
+    rows = await db.query_raw(
+        """
+        SELECT 1
+        FROM music_co_listening_sessions
+        WHERE conversation_id = $1
+          AND status = 'ended'
+          AND ended_reason = 'user_exit'
+          AND updated_at > now() - make_interval(secs => $2::int)
+        LIMIT 1
+        """,
+        conversation_id,
+        AUTO_LISTENING_EXIT_COOLDOWN_SECONDS,
+    )
+    return bool(rows)
 
 
 def _favorite_row_to_track(row: dict[str, Any]) -> MusicTrack:

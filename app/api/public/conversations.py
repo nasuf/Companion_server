@@ -69,8 +69,26 @@ async def _current_ai_status(agent_id: str | None) -> dict | None:
     }
 
 
-async def _conversation_response(conv) -> ConversationResponse:
+async def _conversation_response(conv, *, ensure_idle_music: bool = False) -> ConversationResponse:
     status = await _current_ai_status(getattr(conv, "agentId", None))
+    music_co_listening = None
+    try:
+        from app.services import music as music_service
+
+        if ensure_idle_music:
+            music_co_listening = await music_service.ensure_idle_auto_listening(
+                user_id=conv.userId,
+                agent_id=conv.agentId,
+                conversation_id=conv.id,
+                workspace_id=conv.workspaceId,
+                schedule_status=(status or {}).get("ai_status"),
+            )
+        else:
+            music_co_listening = await music_service.get_active_co_listening(
+                conversation_id=conv.id,
+            )
+    except Exception:
+        music_co_listening = None
     return ConversationResponse(
         id=conv.id,
         user_id=conv.userId,
@@ -80,6 +98,7 @@ async def _conversation_response(conv) -> ConversationResponse:
         created_at=str(conv.createdAt),
         updated_at=str(conv.updatedAt),
         interaction_days=_interaction_days(conv.createdAt),
+        music_co_listening=music_co_listening,
         **(status or {}),
     )
 
@@ -120,7 +139,7 @@ async def create_conversation(
         order={"updatedAt": "desc"},
     )
     if existing:
-        return await _conversation_response(existing)
+        return await _conversation_response(existing, ensure_idle_music=True)
 
     try:
         conv = await db.conversation.create(
@@ -143,12 +162,12 @@ async def create_conversation(
             raise
         conv = existing
 
-    return await _conversation_response(conv)
+    return await _conversation_response(conv, ensure_idle_music=True)
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(conv=Depends(require_conversation_owner)):
-    return await _conversation_response(conv)
+    return await _conversation_response(conv, ensure_idle_music=True)
 
 
 @router.get("", response_model=list[ConversationResponse])

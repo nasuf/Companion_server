@@ -368,6 +368,38 @@ async def test_resolve_play_url_refreshes_jamendo_audio_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resolve_play_url_returns_fresh_proxy_token_when_jamendo_lookup_fails(monkeypatch):
+    fake_db = _FakeDb([[{"id": "agent-1", "name": "小芜", "user_id": "user-1"}]])
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *args, **kwargs):
+            raise music.httpx.ConnectTimeout("timeout")
+
+    monkeypatch.setattr(music, "db", fake_db)
+    monkeypatch.setattr(music.settings, "jamendo_client_id", "jam_test_client")
+    monkeypatch.setattr(music.settings, "jamendo_base_url", "https://api.jamendo.com/v3.0")
+    monkeypatch.setattr(music.httpx, "AsyncClient", _FakeAsyncClient)
+
+    url = await music.resolve_play_url(
+        user_id="user-1",
+        agent_id="agent-1",
+        track_id="12345",
+    )
+
+    assert url.startswith("/music/tracks/12345/stream.mp3?token=")
+    assert music.validate_stream_token("12345", url.split("token=", 1)[1])
+
+
+@pytest.mark.asyncio
 async def test_resolve_stream_audio_urls_prefers_download_candidate(monkeypatch):
     class _FakeResponse:
         def raise_for_status(self):
@@ -503,6 +535,113 @@ async def test_start_co_listening_upserts_conversation_state(monkeypatch):
     assert fake_db.execs
     assert "music_co_listening_sessions" in fake_db.execs[0][0]
     assert "ON CONFLICT (conversation_id)" in fake_db.execs[0][0]
+
+
+@pytest.mark.asyncio
+async def test_ensure_idle_auto_listening_starts_track(monkeypatch):
+    fake_db = _FakeDb(
+        [
+            [],
+            [],
+            [{"id": "agent-1", "name": "小芜", "user_id": "user-1"}],
+            [{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1", "workspace_id": None}],
+            [{"id": "agent-1", "name": "小芜", "user_id": "user-1"}],
+            [],
+        ]
+    )
+    monkeypatch.setattr(music, "db", fake_db)
+
+    async def fake_fetch_random_track(library: str, *, index: int = 0, use_cache: bool = True, excluded_ids=None):
+        return music.MusicTrack(
+            id="auto-track",
+            title="Auto Track",
+            artist="Jamendo Artist",
+            library=library,
+            url="/music/tracks/auto-track/stream.mp3?token=test",
+            duration_sec=180,
+        )
+
+    monkeypatch.setattr(music, "fetch_random_track", fake_fetch_random_track)
+
+    result = await music.ensure_idle_auto_listening(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id=None,
+        schedule_status="idle",
+    )
+
+    assert result is not None
+    assert result.status == "active"
+    assert result.initiated_by == "agent_auto"
+    assert result.track and result.track.id == "auto-track"
+    assert len(fake_db.execs) == 2
+    assert fake_db.execs[0][1][5] == "agent_auto"
+    assert "INSERT INTO music_playbacks" in fake_db.execs[1][0]
+
+
+@pytest.mark.asyncio
+async def test_ensure_idle_auto_listening_respects_user_exit_cooldown(monkeypatch):
+    fake_db = _FakeDb([[], [{"cooldown": 1}]])
+    monkeypatch.setattr(music, "db", fake_db)
+
+    async def fake_fetch_random_track(*args, **kwargs):
+        raise AssertionError("should not fetch during user-exit cooldown")
+
+    monkeypatch.setattr(music, "fetch_random_track", fake_fetch_random_track)
+
+    result = await music.ensure_idle_auto_listening(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id=None,
+        schedule_status="idle",
+    )
+
+    assert result is None
+    assert not fake_db.execs
+
+
+@pytest.mark.asyncio
+async def test_ensure_idle_auto_listening_ends_agent_auto_when_busy(monkeypatch):
+    active_row = {
+        "status": "active",
+        "track_external_id": "auto-track",
+        "title": "Auto Track",
+        "artist": "Jamendo Artist",
+        "album": "Jamendo Focus",
+        "library": "focus",
+        "audio_url": "",
+        "duration_sec": 180,
+        "cover_key": "music-cover-01.jpg",
+        "accent_a": "#1f6fff",
+        "accent_b": "#18c6c0",
+        "source": "jamendo",
+        "metadata": {},
+        "position_seconds": 0,
+        "is_playing": True,
+        "initiated_by": "agent_auto",
+    }
+    fake_db = _FakeDb(
+        [
+            [active_row],
+            [{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1", "workspace_id": None}],
+            [active_row],
+        ]
+    )
+    monkeypatch.setattr(music, "db", fake_db)
+
+    result = await music.ensure_idle_auto_listening(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id=None,
+        schedule_status="busy",
+    )
+
+    assert result is None
+    assert "UPDATE music_co_listening_sessions" in fake_db.execs[0][0]
+    assert fake_db.execs[0][1][-1] == "auto_busy"
 
 
 @pytest.mark.asyncio
