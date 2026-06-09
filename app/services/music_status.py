@@ -75,6 +75,8 @@ async def end_co_listening_with_notice(
     )
     if ended is None:
         return False
+    if _is_agent_auto_listening(ended):
+        return False
     if prompt_key and ended.track is not None:
         reply = await _render_exit_reply(
             prompt_key,
@@ -127,6 +129,8 @@ async def end_if_paused_after_timeout(
     )
     if ended is None:
         return
+    if _is_agent_auto_listening(ended):
+        return
     if ended.track is not None:
         reply = await _render_exit_reply(
             "music.user_pause_exit",
@@ -177,6 +181,10 @@ async def end_if_disconnected_after_timeout(
         conversation_id=conversation_id,
         reason="connection_lost",
     )
+
+
+def _is_agent_auto_listening(session: Any) -> bool:
+    return getattr(session, "initiated_by", None) == "agent_auto"
 
 
 async def _render_exit_reply(

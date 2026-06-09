@@ -358,7 +358,7 @@ async def end_music_co_listening(
             conversation_id=data.conversation_id,
             reason=data.reason,
         )
-        if ended is not None:
+        if ended is not None and ended.initiated_by != "agent_auto":
             await music_status.persist_and_emit_music_status(
                 conversation_id=data.conversation_id,
                 status="ended",
