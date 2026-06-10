@@ -50,6 +50,8 @@ from app.services.prompting.defaults import (
     MEDIUM_MEMORY_REPLY_PROMPT,
     MEDIUM_PATIENCE_REPLY_PROMPT,
     MUSIC_ACCEPT_INVITE_PROMPT,
+    MUSIC_AGENT_JOIN_AFTER_BUSY_PROMPT,
+    MUSIC_AGENT_LATE_MISSED_PROMPT,
     MUSIC_BUSY_EXIT_PROMPT,
     MUSIC_BUSY_REJECT_PROMPT,
     MUSIC_CO_LISTENING_CONTEXT_PROMPT,
@@ -470,6 +472,16 @@ PROMPT_DEFINITIONS = [
         "music.user_pause_exit", "音乐共听(用户暂停退出)", "聊天热路径", "音乐共听",
         "【工程扩展】共听中用户暂停超过阈值时的轻量询问回复.",
         MUSIC_USER_PAUSE_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.agent_join_after_busy", "音乐共听(AI忙后加入)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户发起共听但 AI 忙碌，AI 后续空闲时主动加入.",
+        MUSIC_AGENT_JOIN_AFTER_BUSY_PROMPT,
+    ),
+    PromptDefinition(
+        "music.agent_late_missed", "音乐共听(AI错过加入)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户发起共听后停止播放，AI 后续空闲时表达错过.",
+        MUSIC_AGENT_LATE_MISSED_PROMPT,
     ),
     PromptDefinition(
         "music.proactive_recommend", "音乐主动推荐", "主动交流", "音乐共听",

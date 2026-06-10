@@ -393,6 +393,10 @@ async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
             new_callable=AsyncMock,
             return_value="我在写报告，忙完听。",
         ) as render_reply,
+        patch(
+            "app.services.music_status.persist_and_emit_music_status",
+            new_callable=AsyncMock,
+        ) as persist_status,
         patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
         patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
     ):
@@ -407,11 +411,13 @@ async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
             user_name="Song",
         )
 
-    start_co.assert_not_awaited()
+    start_co.assert_awaited_once()
+    assert start_co.await_args.kwargs["status"] == "pending_agent"
     assert render_reply.await_args.args[0] == "music.busy_reject"
+    persist_status.assert_awaited_once()
+    assert persist_status.await_args.kwargs["actor"] == "user"
     envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
     assert any(item.get("type") == "reply" and not item["data"]["music_co_listening"] for item in envelopes)
-    assert not any(item.get("type") == "music_status" for item in envelopes)
 
 
 @pytest.mark.asyncio

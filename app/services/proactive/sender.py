@@ -368,7 +368,7 @@ async def _persist_proactive_state(
 def _should_use_music_source(trigger_type: str) -> bool:
     if trigger_type != "silence_wakeup":
         return False
-    return random.random() < 0.18
+    return random.random() < 0.04
 
 
 async def _prepare_music_recommendation_source(
@@ -378,8 +378,11 @@ async def _prepare_music_recommendation_source(
 ) -> str:
     from app.services import music
 
-    active = await music.get_active_co_listening(conversation_id=conversation_id)
-    if active is not None:
+    schedule_status = ctx.get("schedule_status") or {}
+    if str(schedule_status.get("status") or "idle") != "idle":
+        return "music_skip_not_idle"
+    open_session = await music.get_open_co_listening(conversation_id=conversation_id)
+    if open_session is not None:
         return "greeting"
     library = music.default_libraries()[0]
     track = await music.fetch_random_track(library, index=0, use_cache=True)
@@ -434,6 +437,14 @@ async def generate_and_send_proactive(
             ctx,
             conversation_id=prep.conversation_id,
         )
+        if source == "music_skip_not_idle":
+            await _log_skip(
+                state,
+                trigger_type,
+                "music_source_not_idle",
+                conversation_id=prep.conversation_id,
+            )
+            return False
         ctx["source"] = source
 
     # spec §4.1 沉默唤醒兜底; §4.2 记忆主动失败时取消
@@ -497,6 +508,44 @@ async def generate_and_send_proactive(
             ws_payload_extra=ws_payload_extra,
             trace_id=tracer.safe_trace_id,
         )
+        if source == "music" and ctx.get("music_track") is not None:
+            from app.services import music
+            from app.models.music import MusicTrackPayload
+            from app.services.music_status import persist_and_emit_music_status
+
+            proactive_track = ctx["music_track"]
+
+            await music.start_co_listening(
+                user_id=state.user_id,
+                agent_id=state.agent_id,
+                conversation_id=prep.conversation_id,
+                workspace_id=state.workspace_id,
+                payload=MusicTrackPayload(
+                    id=proactive_track.id,
+                    title=proactive_track.title,
+                    artist=proactive_track.artist,
+                    album=proactive_track.album,
+                    library=proactive_track.library,
+                    url=proactive_track.url,
+                    duration_sec=proactive_track.duration_sec,
+                    cover_key=proactive_track.cover_key,
+                    accent_a=proactive_track.accent_a,
+                    accent_b=proactive_track.accent_b,
+                    source=proactive_track.source,
+                    metadata=proactive_track.metadata,
+                ),
+                initiated_by="agent",
+                status="active",
+                position_seconds=0,
+                is_playing=True,
+            )
+            await persist_and_emit_music_status(
+                conversation_id=prep.conversation_id,
+                status="started",
+                track=proactive_track,
+                actor="agent",
+                actor_name=getattr(ctx.get("agent"), "name", None) or "我",
+            )
     logger.info(
         f"proactive sent: trigger={trigger_type} source={source} stage={stage}",
         extra={

@@ -89,7 +89,7 @@ async def test_prepare_music_recommendation_fetches_track_when_not_co_listening(
     track = MusicTrack(id="track-1", title="Quiet Realm")
     with (
         patch(
-            "app.services.music.get_active_co_listening",
+            "app.services.music.get_open_co_listening",
             new_callable=AsyncMock,
             return_value=None,
         ),
@@ -116,7 +116,7 @@ async def test_prepare_music_recommendation_falls_back_when_already_co_listening
 
     ctx = {}
     with patch(
-        "app.services.music.get_active_co_listening",
+        "app.services.music.get_open_co_listening",
         new_callable=AsyncMock,
         return_value=object(),
     ):
@@ -126,6 +126,20 @@ async def test_prepare_music_recommendation_falls_back_when_already_co_listening
         )
 
     assert source == "greeting"
+    assert "music_track" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_prepare_music_recommendation_skips_when_agent_not_idle():
+    from app.services.proactive import sender
+
+    ctx = {"schedule_status": {"status": "busy", "activity": "写报告"}}
+    source = await sender._prepare_music_recommendation_source(
+        ctx,
+        conversation_id="conv-1",
+    )
+
+    assert source == "music_skip_not_idle"
     assert "music_track" not in ctx
 
 

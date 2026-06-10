@@ -590,6 +590,87 @@ async def get_active_co_listening(
     return _co_listening_row_to_response(_row(rows[0]))
 
 
+async def get_open_co_listening(
+    *,
+    conversation_id: str,
+) -> MusicCoListeningResponse | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM music_co_listening_sessions
+        WHERE conversation_id = $1
+          AND status IN ('active', 'pending_agent')
+        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, updated_at DESC
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
+
+
+async def get_pending_agent_co_listening(
+    *,
+    conversation_id: str,
+) -> MusicCoListeningResponse | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM music_co_listening_sessions
+        WHERE conversation_id = $1
+          AND status = 'pending_agent'
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
+
+
+async def get_recent_unacknowledged_user_music_stop(
+    *,
+    conversation_id: str,
+) -> MusicCoListeningResponse | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM music_co_listening_sessions
+        WHERE conversation_id = $1
+          AND status = 'ended'
+          AND initiated_by IN ('user', 'user_pending')
+          AND ended_reason IN ('user_pause_timeout', 'user_exit', 'connection_lost')
+          AND ended_at >= now() - interval '24 hours'
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
+
+
+async def mark_user_music_stop_acknowledged(
+    *,
+    conversation_id: str,
+    reason: str = "agent_late_join_missed",
+) -> None:
+    await db.execute_raw(
+        """
+        UPDATE music_co_listening_sessions
+        SET ended_reason = $2,
+            updated_at = now()
+        WHERE conversation_id = $1
+          AND status = 'ended'
+          AND initiated_by IN ('user', 'user_pending')
+          AND ended_reason IN ('user_pause_timeout', 'user_exit', 'connection_lost')
+        """,
+        conversation_id,
+        reason,
+    )
+
+
 async def ensure_idle_auto_listening(
     *,
     user_id: str,
@@ -603,7 +684,7 @@ async def ensure_idle_auto_listening(
     This is intentionally conversation-scoped so the chat header can show a live
     listening badge without sending an unsolicited timeline message.
     """
-    current = await get_active_co_listening(conversation_id=conversation_id)
+    current = await get_open_co_listening(conversation_id=conversation_id)
     status = _clean_text(schedule_status) or "idle"
     if status != "idle":
         if current:
@@ -656,6 +737,7 @@ async def start_co_listening(
     workspace_id: str | None,
     payload: MusicTrackPayload,
     initiated_by: str = "user",
+    status: str = "active",
     position_seconds: int = 0,
     is_playing: bool = True,
 ) -> MusicCoListeningResponse:
@@ -680,7 +762,7 @@ async def start_co_listening(
             metadata, position_seconds, is_playing, ended_reason, ended_at
         )
         VALUES (
-            $1, $2, $3, $4, $5, 'active',
+            $1, $2, $3, $4, $5, $21,
             $6, $7, $8, $9, $10, $11,
             $12, $13, $14, $15, $16, $17,
             $18::jsonb, $19, $20, NULL, NULL
@@ -690,7 +772,7 @@ async def start_co_listening(
             user_id = EXCLUDED.user_id,
             agent_id = EXCLUDED.agent_id,
             workspace_id = EXCLUDED.workspace_id,
-            status = 'active',
+            status = EXCLUDED.status,
             initiated_by = EXCLUDED.initiated_by,
             track_external_id = EXCLUDED.track_external_id,
             title = EXCLUDED.title,
@@ -730,9 +812,10 @@ async def start_co_listening(
         json.dumps(track.metadata, ensure_ascii=False),
         position_seconds,
         is_playing,
+        status,
     )
     return MusicCoListeningResponse(
-        status="active",
+        status=status,
         track=track,
         position_seconds=position_seconds,
         is_playing=is_playing,
@@ -776,7 +859,7 @@ async def update_active_co_listening(
         WHERE conversation_id = $1
           AND user_id = $2
           AND agent_id = $3
-          AND status = 'active'
+          AND status IN ('active', 'pending_agent')
         """,
         conversation_id,
         user_id,
@@ -811,7 +894,7 @@ async def end_co_listening(
         agent_id=agent_id,
         conversation_id=conversation_id,
     )
-    current = await get_active_co_listening(conversation_id=conversation_id)
+    current = await get_open_co_listening(conversation_id=conversation_id)
     if current is None:
         return None
     await db.execute_raw(
@@ -825,7 +908,7 @@ async def end_co_listening(
         WHERE conversation_id = $1
           AND user_id = $2
           AND agent_id = $3
-          AND status = 'active'
+          AND status IN ('active', 'pending_agent')
         """,
         conversation_id,
         user_id,
@@ -861,7 +944,7 @@ async def end_paused_co_listening_if_stale(
         WHERE conversation_id = $1
           AND user_id = $2
           AND agent_id = $3
-          AND status = 'active'
+          AND status IN ('active', 'pending_agent')
           AND is_playing = false
           AND updated_at <= now() - make_interval(secs => $4::int)
         RETURNING *

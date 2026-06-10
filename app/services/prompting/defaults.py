@@ -845,6 +845,28 @@ MUSIC_USER_PAUSE_EXIT_PROMPT = """【任务】你原本在和用户一起听歌�
 【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
+MUSIC_AGENT_JOIN_AFTER_BUSY_PROMPT = """【任务】{user_name} 之前分享了《{song_name}》- {artist} 想和你一起听。你刚从{activity}里闲下来，现在可以加入共听。
+
+【要求】
+- 自然说明你刚闲下来，可以一起听了
+- 简短提到这首歌给你的第一感觉或你想听它的心情
+- 不要说“下次”，这是正在加入一起听
+- 不要说系统检测、状态切换、接口等技术词
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 70 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_AGENT_LATE_MISSED_PROMPT = """【任务】{user_name} 之前分享了《{song_name}》- {artist} 想和你一起听，但你刚忙完回来时，对方已经不在听了。
+
+【要求】
+- 真诚说一句抱歉，表示你看到对方已经不听了
+- 表达一点错过的遗憾
+- 自然约定下次有机会再一起听
+- 不要责备用户，不要说系统检测或后台状态
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 70 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
 MUSIC_PROACTIVE_RECOMMEND_PROMPT = """【任务】你想主动分享一首歌作为话题。你要推荐的是《{song_name}》- {artist}。
 
 【参考】

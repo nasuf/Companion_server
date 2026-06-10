@@ -40,6 +40,16 @@ def _interaction_days(created_at) -> int | None:
     return max(1, (datetime.now(UTC).date() - created.astimezone(UTC).date()).days + 1)
 
 
+async def _agent_name(agent_id: str | None) -> str:
+    if not agent_id:
+        return "我"
+    try:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+    except Exception:
+        return "我"
+    return (getattr(agent, "name", None) or "我").strip() or "我"
+
+
 async def _current_ai_status(agent_id: str | None) -> dict | None:
     if not agent_id:
         return None
@@ -74,34 +84,24 @@ async def _conversation_response(conv, *, ensure_idle_music: bool = False) -> Co
     music_co_listening = None
     try:
         from app.services import music as music_service
+        from app.services import music_status
 
         if ensure_idle_music:
             status_code = str((status or {}).get("ai_status") or "idle")
-            if status_code and status_code != "idle":
-                from app.services.music_status import end_co_listening_with_notice
-
-                activity = (
-                    str((status or {}).get("ai_activity") or "").strip()
-                    or str((status or {}).get("ai_status_label") or "").strip()
-                    or "处理自己的事"
-                )
-                await end_co_listening_with_notice(
-                    user_id=conv.userId,
-                    agent_id=conv.agentId,
-                    conversation_id=conv.id,
-                    reason=f"ai_{status_code}",
-                    prompt_key="music.busy_exit",
-                    activity=activity,
-                )
-                music_co_listening = None
-            else:
-                music_co_listening = await music_service.ensure_idle_auto_listening(
-                    user_id=conv.userId,
-                    agent_id=conv.agentId,
-                    conversation_id=conv.id,
-                    workspace_id=conv.workspaceId,
-                    schedule_status=status_code,
-                )
+            activity = (
+                str((status or {}).get("ai_activity") or "").strip()
+                or str((status or {}).get("ai_status_label") or "").strip()
+                or "处理自己的事"
+            )
+            music_co_listening = await music_status.reconcile_co_listening_for_status(
+                user_id=conv.userId,
+                agent_id=conv.agentId,
+                conversation_id=conv.id,
+                workspace_id=conv.workspaceId,
+                status_code=status_code,
+                activity=activity,
+                ai_name=await _agent_name(conv.agentId),
+            )
         else:
             music_co_listening = await music_service.get_active_co_listening(
                 conversation_id=conv.id,

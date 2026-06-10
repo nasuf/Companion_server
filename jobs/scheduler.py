@@ -33,6 +33,7 @@ from app.services.interaction.delayed_queue import (
 from app.services.interaction.user_turn_aggregation import scan_due_user_turns
 from app.services.proactive.triggers import scan_triggers
 from app.services.proactive.special_dates import scan_special_dates_today
+from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import scan_due_last_wills
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
@@ -271,6 +272,15 @@ def setup_scheduler():
     )
 
     scheduler.add_job(
+        _run_music_schedule_transition_scan,
+        "interval",
+        minutes=1,
+        id="music_schedule_transition_scan",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
         _run_runtime_job_queue,
         "interval",
         seconds=5,
@@ -428,6 +438,16 @@ async def _run_proactive_orchestrator_scan():
             logger.warning(f"Proactive orchestrator scan failed: {e}")
 
     await _run_distributed_job("proactive_orchestrator_scan", 55, _body)
+
+
+async def _run_music_schedule_transition_scan():
+    async def _body():
+        try:
+            await scan_music_schedule_transitions()
+        except Exception as e:
+            logger.warning(f"Music schedule transition scan failed: {e}")
+
+    await _run_distributed_job("music_schedule_transition_scan", 55, _body)
 
 
 async def _run_runtime_job_queue():

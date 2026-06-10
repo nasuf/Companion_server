@@ -311,25 +311,28 @@ async def _handle_music_component_card(
     status = str((received_status or {}).get("status") or "idle")
     activity = str((received_status or {}).get("activity") or (received_status or {}).get("event") or "处理自己的事")
     accepted = status not in {"sleep", "busy", "very_busy"}
+    session_status = "active" if accepted else "pending_agent"
+    try:
+        await music.start_co_listening(
+            user_id=user_id,
+            agent_id=agent.id,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            payload=track,
+            initiated_by="user",
+            status=session_status,
+            is_playing=True,
+        )
+    except ValueError:
+        logger.warning("music co-listening start skipped: invalid ownership")
+        return False
+
     if status == "sleep":
         prompt_key = "music.sleep_reject"
     elif status in {"busy", "very_busy"}:
         prompt_key = "music.busy_reject"
     else:
         prompt_key = "music.accept_invite"
-        try:
-            await music.start_co_listening(
-                user_id=user_id,
-                agent_id=agent.id,
-                conversation_id=conversation_id,
-                workspace_id=workspace_id,
-                payload=track,
-                initiated_by="user",
-                is_playing=True,
-            )
-        except ValueError:
-            logger.warning("music co-listening start skipped: invalid ownership")
-            return False
 
     try:
         reply = await render_music_reply(
@@ -379,12 +382,12 @@ async def _handle_music_component_card(
             "music_co_listening": accepted,
         },
     })
-    if accepted:
-        await persist_and_emit_music_status(
-            conversation_id=conversation_id,
-            status="started",
-            track=track,
-        )
+    await persist_and_emit_music_status(
+        conversation_id=conversation_id,
+        status="started",
+        track=track,
+        actor="user",
+    )
     await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
     return True
 

@@ -352,19 +352,50 @@ async def end_music_co_listening(
     user: dict = Depends(require_user),
 ):
     try:
-        ended = await music.end_co_listening(
-            user_id=user["sub"],
-            agent_id=data.agent_id,
-            conversation_id=data.conversation_id,
-            reason=data.reason,
-        )
-        if ended is not None and ended.initiated_by != "agent_auto":
-            await music_status.persist_and_emit_music_status(
+        if data.reason == "user_pause_timeout":
+            current = await music.get_open_co_listening(
                 conversation_id=data.conversation_id,
-                status="ended",
-                track=ended.track,
+            )
+            if current is not None and current.status == "active":
+                did_end = await music_status.end_co_listening_with_notice(
+                    user_id=user["sub"],
+                    agent_id=data.agent_id,
+                    conversation_id=data.conversation_id,
+                    reason=data.reason,
+                    prompt_key="music.user_pause_exit",
+                    status_actor="user",
+                )
+                ended = None if did_end else None
+            else:
+                ended = await music.end_co_listening(
+                    user_id=user["sub"],
+                    agent_id=data.agent_id,
+                    conversation_id=data.conversation_id,
+                    reason=data.reason,
+                )
+                if ended is not None and ended.initiated_by != "agent_auto":
+                    await music_status.persist_and_emit_music_status(
+                        conversation_id=data.conversation_id,
+                        status="ended",
+                        track=ended.track,
+                        reason=data.reason,
+                        actor="user",
+                    )
+        else:
+            ended = await music.end_co_listening(
+                user_id=user["sub"],
+                agent_id=data.agent_id,
+                conversation_id=data.conversation_id,
                 reason=data.reason,
             )
+            if ended is not None and ended.initiated_by != "agent_auto":
+                await music_status.persist_and_emit_music_status(
+                    conversation_id=data.conversation_id,
+                    status="ended",
+                    track=ended.track,
+                    reason=data.reason,
+                    actor="user",
+                )
     except ValueError as exc:
         _handle_value_error(exc)
     return ended or MusicCoListeningResponse(status="ended")
