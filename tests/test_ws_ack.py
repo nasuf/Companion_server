@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.api.realtime import ws as ws_mod
+from app.models.music import MusicCoListeningResponse, MusicTrack
 from app.services.interaction import user_turn_aggregation as turn_mod
 from app.services.interaction.user_turn_aggregation import UserMessageAggregationPlan
 
@@ -308,6 +309,11 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
             new_callable=AsyncMock, return_value={},
         ),
         patch(
+            "app.services.music.get_open_co_listening",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
             "app.services.music.start_co_listening",
             new_callable=AsyncMock,
             return_value=None,
@@ -339,8 +345,186 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
     start_co.assert_awaited_once()
     render_reply.assert_awaited_once()
     assert render_reply.await_args.args[0] == "music.accept_invite"
+    assert music_status.await_count == 2
+    first_status = music_status.await_args_list[0].kwargs
+    second_status = music_status.await_args_list[1].kwargs
+    assert first_status["status"] == "started"
+    assert first_status["actor"] == "user"
+    assert second_status["status"] == "started"
+    assert second_status["actor"] == "agent"
+    assert second_status["actor_name"] == "A"
+    envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
+    assert any(item.get("type") == "reply" and item["data"]["music_co_listening"] for item in envelopes)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_music_card_while_agent_waiting_only_rejoins_user(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-music-card-waiting"
+
+    async def _fake_assistant(*args, **kwargs):
+        return "assistant-music-waiting"
+
+    card = ws_mod._sanitize_component_card({
+        "type": "music_track",
+        "title": "Quiet Realm",
+        "subtitle": "Jamendo Artist",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "track-1", "title": "Quiet Realm"},
+        },
+    })
+    plan = _aggregation_plan("immediate", text="一起听")
+    waiting = MusicCoListeningResponse(
+        status="agent_waiting_user",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=False,
+        initiated_by="user",
+    )
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(ws_mod, "_persist_assistant_message", side_effect=_fake_assistant),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.music.get_open_co_listening",
+            new_callable=AsyncMock,
+            return_value=waiting,
+        ),
+        patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
+        patch(
+            "app.services.music_chat.render_music_reply",
+            new_callable=AsyncMock,
+            return_value="好呀，继续听。",
+        ),
+        patch(
+            "app.services.music_status.persist_and_emit_music_status",
+            new_callable=AsyncMock,
+            return_value="music-status-1",
+        ) as music_status,
+        patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
+    ):
+        await ws_mod._handle_message(
+            fake_ws,
+            "conv-1",
+            "user-1",
+            agent,
+            "一起听",
+            workspace_id="ws-1",
+            component_card=card,
+            user_name="Song",
+        )
+
+    start_co.assert_awaited_once()
+    assert start_co.await_args.kwargs["status"] == "active"
     music_status.assert_awaited_once()
     assert music_status.await_args.kwargs["status"] == "started"
+    assert music_status.await_args.kwargs["actor"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_music_card_while_active_switches_track_without_status(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-music-card-switch"
+
+    async def _fake_assistant(*args, **kwargs):
+        return "assistant-music-switch"
+
+    card = ws_mod._sanitize_component_card({
+        "type": "music_track",
+        "title": "Quiet Realm",
+        "subtitle": "Jamendo Artist",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "track-1", "title": "Quiet Realm"},
+        },
+    })
+    plan = _aggregation_plan("immediate", text="换这首")
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=True,
+        initiated_by="user",
+    )
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(ws_mod, "_persist_assistant_message", side_effect=_fake_assistant),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.music.get_open_co_listening",
+            new_callable=AsyncMock,
+            return_value=active,
+        ),
+        patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
+        patch(
+            "app.services.music_chat.render_music_reply",
+            new_callable=AsyncMock,
+            return_value="切歌啦，这首也一起听。",
+        ) as render_reply,
+        patch(
+            "app.services.music_status.persist_and_emit_music_status",
+            new_callable=AsyncMock,
+            return_value="music-status-1",
+        ) as music_status,
+        patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
+    ):
+        await ws_mod._handle_message(
+            fake_ws,
+            "conv-1",
+            "user-1",
+            agent,
+            "换这首",
+            workspace_id="ws-1",
+            component_card=card,
+            user_name="Song",
+        )
+
+    start_co.assert_awaited_once()
+    assert start_co.await_args.kwargs["status"] == "active"
+    render_reply.assert_awaited_once()
+    assert render_reply.await_args.args[0] == "music.switch_track"
+    music_status.assert_not_awaited()
     envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
     assert any(item.get("type") == "reply" and item["data"]["music_co_listening"] for item in envelopes)
 
@@ -386,6 +570,11 @@ async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
         patch.object(
             ws_mod, "build_reply_timing_context",
             new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.music.get_open_co_listening",
+            new_callable=AsyncMock,
+            return_value=None,
         ),
         patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
         patch(

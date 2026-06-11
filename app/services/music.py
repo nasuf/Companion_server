@@ -599,8 +599,12 @@ async def get_open_co_listening(
         SELECT *
         FROM music_co_listening_sessions
         WHERE conversation_id = $1
-          AND status IN ('active', 'pending_agent')
-        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, updated_at DESC
+          AND status IN ('active', 'pending_agent', 'agent_waiting_user')
+        ORDER BY CASE
+            WHEN status = 'active' THEN 0
+            WHEN status = 'pending_agent' THEN 1
+            ELSE 2
+        END, updated_at DESC
         LIMIT 1
         """,
         conversation_id,
@@ -640,7 +644,11 @@ async def get_recent_unacknowledged_user_music_stop(
         WHERE conversation_id = $1
           AND status = 'ended'
           AND initiated_by IN ('user', 'user_pending')
-          AND ended_reason IN ('user_pause_timeout', 'user_exit', 'connection_lost')
+          AND ended_reason IN (
+              'user_pause_timeout_before_agent_join',
+              'user_exit_before_agent_join',
+              'connection_lost_before_agent_join'
+          )
           AND ended_at >= now() - interval '24 hours'
         LIMIT 1
         """,
@@ -664,7 +672,11 @@ async def mark_user_music_stop_acknowledged(
         WHERE conversation_id = $1
           AND status = 'ended'
           AND initiated_by IN ('user', 'user_pending')
-          AND ended_reason IN ('user_pause_timeout', 'user_exit', 'connection_lost')
+          AND ended_reason IN (
+              'user_pause_timeout_before_agent_join',
+              'user_exit_before_agent_join',
+              'connection_lost_before_agent_join'
+          )
         """,
         conversation_id,
         reason,
@@ -855,11 +867,14 @@ async def update_active_co_listening(
             metadata = $15::jsonb,
             position_seconds = $16,
             is_playing = $17,
+            status = CASE WHEN $17 THEN 'active' ELSE status END,
+            ended_reason = CASE WHEN $17 THEN NULL ELSE ended_reason END,
+            ended_at = CASE WHEN $17 THEN NULL ELSE ended_at END,
             updated_at = now()
         WHERE conversation_id = $1
           AND user_id = $2
           AND agent_id = $3
-          AND status IN ('active', 'pending_agent')
+          AND status IN ('active', 'pending_agent', 'agent_waiting_user')
         """,
         conversation_id,
         user_id,
@@ -908,7 +923,7 @@ async def end_co_listening(
         WHERE conversation_id = $1
           AND user_id = $2
           AND agent_id = $3
-          AND status IN ('active', 'pending_agent')
+          AND status IN ('active', 'pending_agent', 'agent_waiting_user')
         """,
         conversation_id,
         user_id,
@@ -918,6 +933,122 @@ async def end_co_listening(
     return current.model_copy(
         update={"status": "ended", "is_playing": False, "ended_reason": reason}
     )
+
+
+async def move_active_co_listening_to_agent_waiting(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    reason: str,
+) -> MusicCoListeningResponse | None:
+    await ensure_conversation_owner(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+    )
+    rows = await db.query_raw(
+        """
+        UPDATE music_co_listening_sessions
+        SET status = 'agent_waiting_user',
+            ended_reason = $4,
+            ended_at = NULL,
+            is_playing = false,
+            updated_at = now()
+        WHERE conversation_id = $1
+          AND user_id = $2
+          AND agent_id = $3
+          AND status = 'active'
+        RETURNING *
+        """,
+        conversation_id,
+        user_id,
+        agent_id,
+        reason,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
+
+
+async def move_paused_active_co_listening_to_agent_waiting_if_stale(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    paused_seconds: int,
+    reason: str,
+) -> MusicCoListeningResponse | None:
+    await ensure_conversation_owner(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+    )
+    rows = await db.query_raw(
+        """
+        UPDATE music_co_listening_sessions
+        SET status = 'agent_waiting_user',
+            ended_reason = $5,
+            ended_at = NULL,
+            is_playing = false,
+            updated_at = now()
+        WHERE conversation_id = $1
+          AND user_id = $2
+          AND agent_id = $3
+          AND status = 'active'
+          AND is_playing = false
+          AND updated_at <= now() - make_interval(secs => $4::int)
+        RETURNING *
+        """,
+        conversation_id,
+        user_id,
+        agent_id,
+        paused_seconds,
+        reason,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
+
+
+async def end_agent_waiting_if_stale(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    waiting_seconds: int,
+    reason: str = "user_absent_timeout",
+) -> MusicCoListeningResponse | None:
+    await ensure_conversation_owner(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+    )
+    rows = await db.query_raw(
+        """
+        UPDATE music_co_listening_sessions
+        SET status = 'ended',
+            ended_reason = $5,
+            ended_at = now(),
+            is_playing = false,
+            updated_at = now()
+        WHERE conversation_id = $1
+          AND user_id = $2
+          AND agent_id = $3
+          AND status = 'agent_waiting_user'
+          AND is_playing = false
+          AND updated_at <= now() - make_interval(secs => $4::int)
+        RETURNING *
+        """,
+        conversation_id,
+        user_id,
+        agent_id,
+        waiting_seconds,
+        reason,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
 
 
 async def end_paused_co_listening_if_stale(

@@ -10,6 +10,7 @@ from app.db import db
 from app.models.music import MusicTrack, MusicTrackPayload
 from app.services import music
 from app.services.music_chat import render_music_reply
+from app.services.runtime.tasks import fire_background
 from app.services.runtime.ws_manager import manager
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
 
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 PAUSE_EXIT_SECONDS = 60
 DISCONNECT_EXIT_SECONDS = 90
+AGENT_WAIT_EXIT_SECONDS = 60
 
 
 async def persist_and_emit_music_status(
@@ -31,7 +33,7 @@ async def persist_and_emit_music_status(
     """Persist a co-listening timeline status and push it to active clients."""
     normalized = "ended" if status == "ended" else "started"
     actor_label = _actor_label(actor=actor, actor_name=actor_name)
-    text = f"{actor_label}{'已退出共听' if normalized == 'ended' else '已进入共听'}"
+    text = f"{actor_label}{'已退出共听' if normalized == 'ended' else '已加入共听'}"
     track_title = (track.title if track else "") or ""
     track_id = (track.id if track else "") or ""
     message_id = await _persist_assistant_message(
@@ -176,6 +178,13 @@ async def reconcile_co_listening_for_status(
                 reason="user_stopped_before_agent_join",
             )
             if ended and ended.track is not None:
+                await persist_and_emit_music_status(
+                    conversation_id=conversation_id,
+                    status="ended",
+                    track=ended.track,
+                    reason="user_stopped_before_agent_join",
+                    actor="user",
+                )
                 await _emit_rendered_reply(
                     conversation_id=conversation_id,
                     prompt_key="music.agent_late_missed",
@@ -204,7 +213,7 @@ async def reconcile_co_listening_for_status(
             )
         return current if current and current.status == "active" else None
 
-    if current and current.status == "active":
+    if current and current.status in {"active", "agent_waiting_user"}:
         if _is_agent_auto_listening(current):
             await music.end_co_listening(
                 user_id=user_id,
@@ -240,7 +249,7 @@ async def scan_music_schedule_transitions(limit: int = 100) -> None:
             a.name AS agent_name
         FROM music_co_listening_sessions m
         JOIN ai_agents a ON a.id = m.agent_id
-        WHERE m.status IN ('active', 'pending_agent')
+        WHERE m.status IN ('active', 'pending_agent', 'agent_waiting_user')
         ORDER BY m.updated_at DESC
         LIMIT $1
         """,
@@ -275,12 +284,22 @@ async def end_if_paused_after_timeout(
 ) -> None:
     await asyncio.sleep(seconds)
     current = await music.get_open_co_listening(conversation_id=conversation_id)
+    if current is not None and current.status == "active":
+        await begin_user_exit_waiting_with_notice(
+            user_id=user_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            reason="user_pause_timeout",
+            stale_seconds=seconds,
+        )
+        return
+    reason = "user_pause_timeout_before_agent_join"
     ended = await music.end_paused_co_listening_if_stale(
         user_id=user_id,
         agent_id=agent_id,
         conversation_id=conversation_id,
         paused_seconds=seconds,
-        reason="user_pause_timeout",
+        reason=reason,
     )
     if ended is None:
         return
@@ -291,13 +310,102 @@ async def end_if_paused_after_timeout(
             conversation_id=conversation_id,
             status="ended",
             track=ended.track,
-            reason="user_pause_timeout",
+            reason=reason,
             actor="user",
         )
         return
-    if ended.track is not None:
+
+
+async def begin_user_exit_waiting_with_notice(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    reason: str,
+    stale_seconds: int | None = None,
+) -> bool:
+    if stale_seconds is None:
+        waiting = await music.move_active_co_listening_to_agent_waiting(
+            user_id=user_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            reason=reason,
+        )
+    else:
+        waiting = await music.move_paused_active_co_listening_to_agent_waiting_if_stale(
+            user_id=user_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            paused_seconds=stale_seconds,
+            reason=reason,
+        )
+    if waiting is None:
+        return False
+    if _is_agent_auto_listening(waiting):
+        return False
+    if waiting.track is not None:
         reply = await _render_exit_reply(
             "music.user_pause_exit",
+            user_name="你",
+            ai_name="我",
+            activity="等你继续听歌",
+            track=waiting.track,
+        )
+        assistant_message_id = await _persist_assistant_message(
+            conversation_id,
+            reply,
+            metadata={
+                "music_co_listening": False,
+                "music_prompt_key": "music.user_pause_exit",
+                "music_ended_reason": reason,
+            },
+        )
+        await manager.send_event(
+            conversation_id,
+            "reply",
+            {
+                "text": reply,
+                "assistant_message_id": assistant_message_id,
+                "music_co_listening": False,
+            },
+        )
+    await persist_and_emit_music_status(
+        conversation_id=conversation_id,
+        status="ended",
+        track=waiting.track,
+        reason=reason,
+        actor="user",
+    )
+    fire_background(
+        end_agent_waiting_after_timeout(
+            user_id=user_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+        )
+    )
+    return True
+
+
+async def end_agent_waiting_after_timeout(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    seconds: int = AGENT_WAIT_EXIT_SECONDS,
+) -> None:
+    await asyncio.sleep(seconds)
+    ended = await music.end_agent_waiting_if_stale(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+        waiting_seconds=seconds,
+        reason="user_absent_timeout",
+    )
+    if ended is None or _is_agent_auto_listening(ended):
+        return
+    if ended.track is not None:
+        reply = await _render_exit_reply(
+            "music.user_absent_exit",
             user_name="你",
             ai_name="我",
             activity="等你继续听歌",
@@ -308,8 +416,8 @@ async def end_if_paused_after_timeout(
             reply,
             metadata={
                 "music_co_listening": False,
-                "music_prompt_key": "music.user_pause_exit",
-                "music_ended_reason": "user_pause_timeout",
+                "music_prompt_key": "music.user_absent_exit",
+                "music_ended_reason": "user_absent_timeout",
             },
         )
         await manager.send_event(
@@ -325,8 +433,9 @@ async def end_if_paused_after_timeout(
         conversation_id=conversation_id,
         status="ended",
         track=ended.track,
-        reason="user_pause_timeout",
-        actor="user",
+        reason="user_absent_timeout",
+        actor="agent",
+        actor_name=await _resolve_agent_name(agent_id),
     )
 
 
@@ -341,14 +450,30 @@ async def end_if_disconnected_after_timeout(
     if manager.get(conversation_id) is not None:
         return
     current = await music.get_open_co_listening(conversation_id=conversation_id)
+    if current is not None and current.status == "active":
+        await begin_user_exit_waiting_with_notice(
+            user_id=user_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            reason="connection_lost",
+        )
+        return
     if current is None or current.status != "active":
         if current is not None:
-            await music.end_co_listening(
+            ended = await music.end_co_listening(
                 user_id=user_id,
                 agent_id=agent_id,
                 conversation_id=conversation_id,
-                reason="connection_lost",
+                reason="connection_lost_before_agent_join",
             )
+            if ended is not None and not _is_agent_auto_listening(ended):
+                await persist_and_emit_music_status(
+                    conversation_id=conversation_id,
+                    status="ended",
+                    track=ended.track,
+                    reason="connection_lost_before_agent_join",
+                    actor="user",
+                )
         return
     await end_co_listening_with_notice(
         user_id=user_id,
@@ -429,6 +554,10 @@ async def _render_exit_reply(
         logger.warning("music exit reply generation failed: %s", exc)
         if prompt_key == "music.user_pause_exit":
             return "你怎么停了呀，是去忙什么了吗？"
+        if prompt_key == "music.user_absent_exit":
+            return "你看起来去忙了，那我们下次再一起听。"
+        if prompt_key == "music.switch_track":
+            return f"切到《{track.title}》啦，我们继续听。"
         if prompt_key == "music.busy_exit":
             return f"我得先去{activity}了，有点可惜，下次我们继续听。"
         if prompt_key == "music.agent_join_after_busy":
@@ -436,6 +565,14 @@ async def _render_exit_reply(
         if prompt_key == "music.agent_late_missed":
             return f"抱歉我来晚了，看到你已经不听《{track.title}》了，下次我们再一起听。"
         return "先暂停一起听啦，等会儿再接着。"
+
+
+async def _resolve_agent_name(agent_id: str) -> str:
+    try:
+        agent = await db.aiagent.find_unique(where={"id": agent_id})
+    except Exception:
+        return "对方"
+    return (getattr(agent, "name", None) or "对方").strip() or "对方"
 
 
 async def _persist_assistant_message(

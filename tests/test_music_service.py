@@ -5,7 +5,7 @@ from starlette.requests import Request
 from unittest.mock import AsyncMock
 
 from app.api.public import music as music_api
-from app.models.music import MusicCoListeningEndRequest, MusicCoListeningResponse, MusicTrack
+from app.models.music import MusicCoListeningEndRequest, MusicCoListeningResponse, MusicPlaybackRequest, MusicTrack
 from app.models.music import MusicTrackPayload
 from app.services import music
 from app.services import music_status
@@ -750,6 +750,150 @@ async def test_reconcile_pending_music_joins_when_agent_becomes_idle(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_music_status_text_uses_join_and_exit_labels(monkeypatch):
+    persisted = AsyncMock(return_value="status-msg")
+    send_event = AsyncMock()
+    monkeypatch.setattr(music_status, "_persist_assistant_message", persisted)
+    monkeypatch.setattr(music_status.manager, "send_event", send_event)
+
+    await music_status.persist_and_emit_music_status(
+        conversation_id="conv-1",
+        status="started",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        actor="agent",
+        actor_name="小芜",
+    )
+    await music_status.persist_and_emit_music_status(
+        conversation_id="conv-1",
+        status="ended",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        actor="user",
+    )
+
+    assert persisted.await_args_list[0].args[1] == "小芜已加入共听"
+    assert persisted.await_args_list[1].args[1] == "你已退出共听"
+    assert send_event.await_args_list[0].args[2]["text"] == "小芜已加入共听"
+    assert send_event.await_args_list[1].args[2]["text"] == "你已退出共听"
+
+
+@pytest.mark.asyncio
+async def test_pause_timeout_active_music_moves_to_agent_waiting(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=False,
+        initiated_by="user",
+    )
+    waiting = active.model_copy(update={
+        "status": "agent_waiting_user",
+        "ended_reason": "user_pause_timeout",
+    })
+    scheduled = []
+
+    def _fake_fire_background(coro):
+        scheduled.append(coro)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(
+        music,
+        "move_paused_active_co_listening_to_agent_waiting_if_stale",
+        AsyncMock(return_value=waiting),
+    )
+    monkeypatch.setattr(music_status, "_render_exit_reply", AsyncMock(return_value="我还在等你回来一起听。"))
+    monkeypatch.setattr(music_status, "_persist_assistant_message", AsyncMock(return_value="assistant-msg"))
+    monkeypatch.setattr(music_status.manager, "send_event", AsyncMock())
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", AsyncMock(return_value="status-msg"))
+    monkeypatch.setattr(music_status, "fire_background", _fake_fire_background)
+
+    await music_status.end_if_paused_after_timeout(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        seconds=0,
+    )
+
+    music.move_paused_active_co_listening_to_agent_waiting_if_stale.assert_awaited_once()
+    assert music.move_paused_active_co_listening_to_agent_waiting_if_stale.await_args.kwargs["reason"] == "user_pause_timeout"
+    music_status._render_exit_reply.assert_awaited_once()
+    assert music_status._render_exit_reply.await_args.args[0] == "music.user_pause_exit"
+    music_status.persist_and_emit_music_status.assert_awaited_once()
+    assert music_status.persist_and_emit_music_status.await_args.kwargs["actor"] == "user"
+    assert music_status.persist_and_emit_music_status.await_args.kwargs["reason"] == "user_pause_timeout"
+    assert len(scheduled) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_waiting_timeout_exits_agent(monkeypatch):
+    waiting = MusicCoListeningResponse(
+        status="agent_waiting_user",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=False,
+        initiated_by="user",
+    )
+    ended = waiting.model_copy(update={
+        "status": "ended",
+        "ended_reason": "user_absent_timeout",
+    })
+    monkeypatch.setattr(music, "end_agent_waiting_if_stale", AsyncMock(return_value=ended))
+    monkeypatch.setattr(music_status, "_render_exit_reply", AsyncMock(return_value="那我们下次再一起听。"))
+    monkeypatch.setattr(music_status, "_persist_assistant_message", AsyncMock(return_value="assistant-msg"))
+    monkeypatch.setattr(music_status.manager, "send_event", AsyncMock())
+    monkeypatch.setattr(music_status, "_resolve_agent_name", AsyncMock(return_value="小芜"))
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", AsyncMock(return_value="status-msg"))
+
+    await music_status.end_agent_waiting_after_timeout(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        seconds=0,
+    )
+
+    music.end_agent_waiting_if_stale.assert_awaited_once()
+    assert music.end_agent_waiting_if_stale.await_args.kwargs["reason"] == "user_absent_timeout"
+    music_status._render_exit_reply.assert_awaited_once()
+    assert music_status._render_exit_reply.await_args.args[0] == "music.user_absent_exit"
+    music_status.persist_and_emit_music_status.assert_awaited_once()
+    assert music_status.persist_and_emit_music_status.await_args.kwargs["actor"] == "agent"
+    assert music_status.persist_and_emit_music_status.await_args.kwargs["actor_name"] == "小芜"
+
+
+@pytest.mark.asyncio
+async def test_resume_music_while_agent_waiting_only_emits_user_join(monkeypatch):
+    waiting = MusicCoListeningResponse(
+        status="agent_waiting_user",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=False,
+        initiated_by="user",
+    )
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=waiting))
+    monkeypatch.setattr(
+        music,
+        "upsert_now_playing",
+        AsyncMock(return_value=(track, 12, True, "2026-06-11T12:00:00Z")),
+    )
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", AsyncMock(return_value="status-msg"))
+
+    response = await music_api.update_music_now_playing(
+        MusicPlaybackRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            track=MusicTrackPayload(id="track-1", title="Quiet Realm"),
+            position_seconds=12,
+            is_playing=True,
+        ),
+        user={"sub": "user-1"},
+    )
+
+    assert response.is_playing
+    music_status.persist_and_emit_music_status.assert_awaited_once()
+    assert music_status.persist_and_emit_music_status.await_args.kwargs["status"] == "started"
+    assert music_status.persist_and_emit_music_status.await_args.kwargs["actor"] == "user"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_active_music_exits_when_agent_becomes_busy(monkeypatch):
     active = MusicCoListeningResponse(
         status="active",
@@ -779,7 +923,7 @@ async def test_reconcile_active_music_exits_when_agent_becomes_busy(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_reconcile_pending_stopped_music_has_no_agent_exit_status(monkeypatch):
+async def test_reconcile_pending_stopped_music_emits_user_exit_and_late_missed(monkeypatch):
     pending = MusicCoListeningResponse(
         status="pending_agent",
         track=MusicTrack(id="track-1", title="Quiet Realm"),
@@ -807,9 +951,13 @@ async def test_reconcile_pending_stopped_music_has_no_agent_exit_status(monkeypa
 
     assert result is None
     end_session.assert_awaited_once()
+    assert end_session.await_args.kwargs["reason"] == "user_stopped_before_agent_join"
+    persist_status.assert_awaited_once()
+    assert persist_status.await_args.kwargs["status"] == "ended"
+    assert persist_status.await_args.kwargs["actor"] == "user"
+    assert persist_status.await_args.kwargs["reason"] == "user_stopped_before_agent_join"
     emit_reply.assert_awaited_once()
     assert emit_reply.await_args.kwargs["prompt_key"] == "music.agent_late_missed"
-    persist_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -819,7 +967,7 @@ async def test_reconcile_late_missed_music_has_no_agent_exit_status(monkeypatch)
         track=MusicTrack(id="track-1", title="Quiet Realm"),
         is_playing=False,
         initiated_by="user",
-        ended_reason="user_pause_timeout",
+        ended_reason="user_pause_timeout_before_agent_join",
     )
     emit_reply = AsyncMock(return_value="assistant-msg")
     persist_status = AsyncMock(return_value="status-msg")
@@ -852,6 +1000,25 @@ async def test_reconcile_late_missed_music_has_no_agent_exit_status(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_recent_user_music_stop_only_matches_before_agent_join_reasons(monkeypatch):
+    fake_db = _FakeDb()
+    monkeypatch.setattr(music, "db", fake_db)
+
+    result = await music.get_recent_unacknowledged_user_music_stop(
+        conversation_id="conv-1",
+    )
+
+    assert result is None
+    query = fake_db.queries[0][0]
+    assert "user_pause_timeout_before_agent_join" in query
+    assert "user_exit_before_agent_join" in query
+    assert "connection_lost_before_agent_join" in query
+    assert "'user_pause_timeout'," not in query
+    assert "'user_exit'," not in query
+    assert "'connection_lost'" not in query
+
+
+@pytest.mark.asyncio
 async def test_pause_timeout_pending_music_emits_status_without_agent_reply(monkeypatch):
     pending = MusicCoListeningResponse(
         status="pending_agent",
@@ -859,7 +1026,10 @@ async def test_pause_timeout_pending_music_emits_status_without_agent_reply(monk
         is_playing=False,
         initiated_by="user",
     )
-    ended = pending.model_copy(update={"status": "ended", "ended_reason": "user_pause_timeout"})
+    ended = pending.model_copy(update={
+        "status": "ended",
+        "ended_reason": "user_pause_timeout_before_agent_join",
+    })
     render_reply = AsyncMock(return_value="不该发送")
     persist_message = AsyncMock(return_value="assistant-msg")
     persist_status = AsyncMock(return_value="status-msg")
@@ -880,7 +1050,7 @@ async def test_pause_timeout_pending_music_emits_status_without_agent_reply(monk
     persist_message.assert_not_awaited()
     persist_status.assert_awaited_once()
     assert persist_status.await_args.kwargs["actor"] == "user"
-    assert persist_status.await_args.kwargs["reason"] == "user_pause_timeout"
+    assert persist_status.await_args.kwargs["reason"] == "user_pause_timeout_before_agent_join"
 
 
 @pytest.mark.asyncio
@@ -910,5 +1080,67 @@ async def test_end_music_co_listening_pending_pause_has_no_agent_reply(monkeypat
 
     end_with_notice.assert_not_awaited()
     end_session.assert_awaited_once()
+    assert end_session.await_args.kwargs["reason"] == "user_pause_timeout_before_agent_join"
     persist_status.assert_awaited_once()
     assert persist_status.await_args.kwargs["actor"] == "user"
+    assert persist_status.await_args.kwargs["reason"] == "user_pause_timeout_before_agent_join"
+
+
+@pytest.mark.asyncio
+async def test_end_music_co_listening_pause_is_idempotent_while_agent_waiting(monkeypatch):
+    waiting = MusicCoListeningResponse(
+        status="agent_waiting_user",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=False,
+        initiated_by="user",
+    )
+    end_session = AsyncMock(return_value=waiting.model_copy(update={"status": "ended"}))
+    persist_status = AsyncMock(return_value="status-msg")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=waiting))
+    monkeypatch.setattr(music, "end_co_listening", end_session)
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", persist_status)
+
+    await music_api.end_music_co_listening(
+        MusicCoListeningEndRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            reason="user_pause_timeout",
+        ),
+        user={"sub": "user-1"},
+    )
+
+    end_session.assert_not_awaited()
+    persist_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_pending_music_emits_user_exit_status(monkeypatch):
+    pending = MusicCoListeningResponse(
+        status="pending_agent",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    ended = pending.model_copy(update={
+        "status": "ended",
+        "ended_reason": "connection_lost_before_agent_join",
+    })
+    persist_status = AsyncMock(return_value="status-msg")
+    monkeypatch.setattr(music_status.manager, "get", lambda _conversation_id: None)
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=pending))
+    monkeypatch.setattr(music, "end_co_listening", AsyncMock(return_value=ended))
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", persist_status)
+
+    await music_status.end_if_disconnected_after_timeout(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        seconds=0,
+    )
+
+    music.end_co_listening.assert_awaited_once()
+    assert music.end_co_listening.await_args.kwargs["reason"] == "connection_lost_before_agent_join"
+    persist_status.assert_awaited_once()
+    assert persist_status.await_args.kwargs["status"] == "ended"
+    assert persist_status.await_args.kwargs["actor"] == "user"
+    assert persist_status.await_args.kwargs["reason"] == "connection_lost_before_agent_join"

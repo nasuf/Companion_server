@@ -312,6 +312,16 @@ async def _handle_music_component_card(
     activity = str((received_status or {}).get("activity") or (received_status or {}).get("event") or "处理自己的事")
     accepted = status not in {"sleep", "busy", "very_busy"}
     session_status = "active" if accepted else "pending_agent"
+    current_session = await music.get_open_co_listening(conversation_id=conversation_id)
+    agent_was_waiting = (
+        current_session is not None
+        and current_session.status == "agent_waiting_user"
+    )
+    already_co_listening = (
+        current_session is not None
+        and current_session.status == "active"
+        and accepted
+    )
     try:
         await music.start_co_listening(
             user_id=user_id,
@@ -331,6 +341,8 @@ async def _handle_music_component_card(
         prompt_key = "music.sleep_reject"
     elif status in {"busy", "very_busy"}:
         prompt_key = "music.busy_reject"
+    elif already_co_listening:
+        prompt_key = "music.switch_track"
     else:
         prompt_key = "music.accept_invite"
 
@@ -382,12 +394,21 @@ async def _handle_music_component_card(
             "music_co_listening": accepted,
         },
     })
-    await persist_and_emit_music_status(
-        conversation_id=conversation_id,
-        status="started",
-        track=track,
-        actor="user",
-    )
+    if not already_co_listening:
+        await persist_and_emit_music_status(
+            conversation_id=conversation_id,
+            status="started",
+            track=track,
+            actor="user",
+        )
+    if accepted and not agent_was_waiting and not already_co_listening:
+        await persist_and_emit_music_status(
+            conversation_id=conversation_id,
+            status="started",
+            track=track,
+            actor="agent",
+            actor_name=getattr(agent, "name", "") or "我",
+        )
     await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
     return True
 

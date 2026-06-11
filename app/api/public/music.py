@@ -319,6 +319,11 @@ async def update_music_now_playing(
     user: dict = Depends(require_user),
 ):
     try:
+        current_co_listening = None
+        if data.conversation_id and data.is_playing:
+            current_co_listening = await music.get_open_co_listening(
+                conversation_id=data.conversation_id,
+            )
         track, position_seconds, is_playing, updated_at = await music.upsert_now_playing(
             user_id=user["sub"],
             agent_id=data.agent_id,
@@ -337,6 +342,18 @@ async def update_music_now_playing(
                 agent_id=data.agent_id,
                 conversation_id=data.conversation_id,
             )
+        )
+    if (
+        data.conversation_id
+        and data.is_playing
+        and current_co_listening is not None
+        and current_co_listening.status == "agent_waiting_user"
+    ):
+        await music_status.persist_and_emit_music_status(
+            conversation_id=data.conversation_id,
+            status="started",
+            track=track,
+            actor="user",
         )
     return MusicPlaybackResponse(
         track=track,
@@ -357,43 +374,56 @@ async def end_music_co_listening(
                 conversation_id=data.conversation_id,
             )
             if current is not None and current.status == "active":
-                did_end = await music_status.end_co_listening_with_notice(
+                did_begin_waiting = await music_status.begin_user_exit_waiting_with_notice(
                     user_id=user["sub"],
                     agent_id=data.agent_id,
                     conversation_id=data.conversation_id,
                     reason=data.reason,
-                    prompt_key="music.user_pause_exit",
-                    status_actor="user",
                 )
-                ended = None if did_end else None
+                ended = None if did_begin_waiting else None
+            elif current is not None and current.status == "agent_waiting_user":
+                ended = None
             else:
+                end_reason = (
+                    "user_pause_timeout_before_agent_join"
+                    if current is not None and current.status == "pending_agent"
+                    else data.reason
+                )
                 ended = await music.end_co_listening(
                     user_id=user["sub"],
                     agent_id=data.agent_id,
                     conversation_id=data.conversation_id,
-                    reason=data.reason,
+                    reason=end_reason,
                 )
                 if ended is not None and ended.initiated_by != "agent_auto":
                     await music_status.persist_and_emit_music_status(
                         conversation_id=data.conversation_id,
                         status="ended",
                         track=ended.track,
-                        reason=data.reason,
+                        reason=end_reason,
                         actor="user",
                     )
         else:
+            current = await music.get_open_co_listening(
+                conversation_id=data.conversation_id,
+            )
+            end_reason = (
+                f"{data.reason}_before_agent_join"
+                if current is not None and current.status == "pending_agent"
+                else data.reason
+            )
             ended = await music.end_co_listening(
                 user_id=user["sub"],
                 agent_id=data.agent_id,
                 conversation_id=data.conversation_id,
-                reason=data.reason,
+                reason=end_reason,
             )
             if ended is not None and ended.initiated_by != "agent_auto":
                 await music_status.persist_and_emit_music_status(
                     conversation_id=data.conversation_id,
                     status="ended",
                     track=ended.track,
-                    reason=data.reason,
+                    reason=end_reason,
                     actor="user",
                 )
     except ValueError as exc:

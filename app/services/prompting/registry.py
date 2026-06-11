@@ -57,6 +57,8 @@ from app.services.prompting.defaults import (
     MUSIC_CO_LISTENING_CONTEXT_PROMPT,
     MUSIC_PROACTIVE_RECOMMEND_PROMPT,
     MUSIC_SLEEP_REJECT_PROMPT,
+    MUSIC_SWITCH_TRACK_PROMPT,
+    MUSIC_USER_ABSENT_EXIT_PROMPT,
     MUSIC_USER_EXIT_PROMPT,
     MUSIC_USER_PAUSE_EXIT_PROMPT,
     MEMORY_CONTRADICTION_ANALYSIS_PROMPT,
@@ -472,6 +474,16 @@ PROMPT_DEFINITIONS = [
         "music.user_pause_exit", "音乐共听(用户暂停退出)", "聊天热路径", "音乐共听",
         "【工程扩展】共听中用户暂停超过阈值时的轻量询问回复.",
         MUSIC_USER_PAUSE_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.user_absent_exit", "音乐共听(用户离开后AI退出)", "聊天热路径", "音乐共听",
+        "【工程扩展】用户暂停/断线退出后未恢复，AI 等待一段时间后退出共听.",
+        MUSIC_USER_ABSENT_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.switch_track", "音乐共听(切歌)", "聊天热路径", "音乐共听",
+        "【工程扩展】双方正在共听时用户分享另一首歌，AI 以切歌方式接住.",
+        MUSIC_SWITCH_TRACK_PROMPT,
     ),
     PromptDefinition(
         "music.agent_join_after_busy", "音乐共听(AI忙后加入)", "聊天热路径", "音乐共听",
