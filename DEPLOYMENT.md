@@ -119,6 +119,25 @@ REMOTE_CHAT_MODEL=deepseek-v4-pro
 REMOTE_SMALL_MODEL=deepseek-v4-flash
 ```
 
+### Music provider
+
+Jamendo is configured on the server during GitHub Actions deploy. Store the
+client id as a GitHub secret and keep non-secret provider defaults as GitHub
+variables:
+
+```env
+# GitHub Secret
+JAMENDO_CLIENT_ID=2721f58a
+
+# GitHub Variables
+JAMENDO_BASE_URL=https://api.jamendo.com/v3.0
+JAMENDO_DEFAULT_LIBRARIES=focus,ambient,sleep
+```
+
+`deploy.yml` writes these values into the server `.env` on the VPS. `JAMENDO_CLIENT_ID`
+is required for production deploy; the base URL and default libraries have deploy
+fallbacks matching the values above.
+
 For local Ollama:
 
 ```env
