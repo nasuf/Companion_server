@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 PAUSE_EXIT_SECONDS = 60
 DISCONNECT_EXIT_SECONDS = 90
 AGENT_WAIT_EXIT_SECONDS = 60
+MANUAL_TRACK_CHANGE_REPLY_SECONDS = 120
+AUTO_TRACK_CHANGE_REPLY_SECONDS = 600
+
+_MANUAL_TRACK_CHANGE_SOURCES = {"manual_next", "manual_previous"}
+_AUTO_TRACK_CHANGE_SOURCES = {"auto_next"}
+_TRACK_CHANGE_PROMPT_KEYS = {
+    "music.track_changed_manual",
+    "music.track_changed_auto",
+}
 
 
 async def persist_and_emit_music_status(
@@ -236,6 +245,46 @@ async def reconcile_co_listening_for_status(
         )
         return None
     return current
+
+
+async def maybe_emit_track_change_reply(
+    *,
+    conversation_id: str,
+    current_session: music.MusicCoListeningResponse,
+    next_track: MusicTrack,
+    change_source: str | None,
+) -> bool:
+    """Emit a lightweight AI reply when a real track change happens in co-listening."""
+    normalized_source = (change_source or "sync").strip()
+    if current_session.status != "active" or _is_agent_auto_listening(current_session):
+        return False
+    previous_track = current_session.track
+    if previous_track is None or previous_track.id == next_track.id:
+        return False
+    if normalized_source in _MANUAL_TRACK_CHANGE_SOURCES:
+        prompt_key = "music.track_changed_manual"
+        throttle_seconds = MANUAL_TRACK_CHANGE_REPLY_SECONDS
+    elif normalized_source in _AUTO_TRACK_CHANGE_SOURCES:
+        prompt_key = "music.track_changed_auto"
+        throttle_seconds = AUTO_TRACK_CHANGE_REPLY_SECONDS
+    else:
+        return False
+    if await _recent_music_prompt_exists(
+        conversation_id=conversation_id,
+        prompt_keys=_TRACK_CHANGE_PROMPT_KEYS,
+        seconds=throttle_seconds,
+    ):
+        return False
+    await _emit_rendered_reply(
+        conversation_id=conversation_id,
+        prompt_key=prompt_key,
+        user_name="你",
+        ai_name="我",
+        activity="一起听歌",
+        track=next_track,
+        music_co_listening=True,
+    )
+    return True
 
 
 async def scan_music_schedule_transitions(limit: int = 100) -> None:
@@ -497,6 +546,31 @@ def _actor_label(*, actor: str | None, actor_name: str | None) -> str:
     return ""
 
 
+async def _recent_music_prompt_exists(
+    *,
+    conversation_id: str,
+    prompt_keys: set[str],
+    seconds: int,
+) -> bool:
+    if not prompt_keys:
+        return False
+    rows = await db.query_raw(
+        """
+        SELECT id
+        FROM messages
+        WHERE conversation_id = $1
+          AND role = 'assistant'
+          AND metadata ->> 'music_prompt_key' = ANY($2::text[])
+          AND created_at >= now() - make_interval(secs => $3::int)
+        LIMIT 1
+        """,
+        conversation_id,
+        list(prompt_keys),
+        seconds,
+    )
+    return bool(rows)
+
+
 async def _emit_rendered_reply(
     *,
     conversation_id: str,
@@ -558,6 +632,10 @@ async def _render_exit_reply(
             return "你看起来去忙了，那我们下次再一起听。"
         if prompt_key == "music.switch_track":
             return f"切到《{track.title}》啦，我们继续听。"
+        if prompt_key == "music.track_changed_manual":
+            return f"切到《{track.title}》啦，这首我们继续听。"
+        if prompt_key == "music.track_changed_auto":
+            return f"下一首是《{track.title}》，感觉可以接着听下去。"
         if prompt_key == "music.busy_exit":
             return f"我得先去{activity}了，有点可惜，下次我们继续听。"
         if prompt_key == "music.agent_join_after_busy":

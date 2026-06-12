@@ -894,6 +894,114 @@ async def test_resume_music_while_agent_waiting_only_emits_user_join(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_manual_track_change_in_active_co_listening_emits_reply(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(
+        music,
+        "upsert_now_playing",
+        AsyncMock(return_value=(track, 12, True, "2026-06-11T12:00:00Z")),
+    )
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", AsyncMock())
+    emit_reply = AsyncMock(return_value="assistant-msg")
+    monkeypatch.setattr(music_status, "_emit_rendered_reply", emit_reply)
+    monkeypatch.setattr(music_status, "_recent_music_prompt_exists", AsyncMock(return_value=False))
+
+    response = await music_api.update_music_now_playing(
+        MusicPlaybackRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            track=MusicTrackPayload(id="track-1", title="Quiet Realm"),
+            position_seconds=12,
+            is_playing=True,
+            change_source="manual_next",
+        ),
+        user={"sub": "user-1"},
+    )
+
+    assert response.is_playing
+    music_status.persist_and_emit_music_status.assert_not_awaited()
+    emit_reply.assert_awaited_once()
+    assert emit_reply.await_args.kwargs["prompt_key"] == "music.track_changed_manual"
+    assert emit_reply.await_args.kwargs["music_co_listening"] is True
+
+
+@pytest.mark.asyncio
+async def test_auto_track_change_throttles_reply(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(
+        music,
+        "upsert_now_playing",
+        AsyncMock(return_value=(track, 12, True, "2026-06-11T12:00:00Z")),
+    )
+    monkeypatch.setattr(music_status, "_recent_music_prompt_exists", AsyncMock(return_value=True))
+    emit_reply = AsyncMock(return_value="assistant-msg")
+    monkeypatch.setattr(music_status, "_emit_rendered_reply", emit_reply)
+
+    await music_api.update_music_now_playing(
+        MusicPlaybackRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            track=MusicTrackPayload(id="track-1", title="Quiet Realm"),
+            position_seconds=12,
+            is_playing=True,
+            change_source="auto_next",
+        ),
+        user={"sub": "user-1"},
+    )
+
+    music_status._recent_music_prompt_exists.assert_awaited_once()
+    assert music_status._recent_music_prompt_exists.await_args.kwargs["seconds"] == music_status.AUTO_TRACK_CHANGE_REPLY_SECONDS
+    emit_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_track_change_does_not_emit_reply(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(
+        music,
+        "upsert_now_playing",
+        AsyncMock(return_value=(track, 12, True, "2026-06-11T12:00:00Z")),
+    )
+    emit_reply = AsyncMock(return_value="assistant-msg")
+    monkeypatch.setattr(music_status, "_emit_rendered_reply", emit_reply)
+
+    await music_api.update_music_now_playing(
+        MusicPlaybackRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            track=MusicTrackPayload(id="track-1", title="Quiet Realm"),
+            position_seconds=12,
+            is_playing=True,
+            change_source="sync",
+        ),
+        user={"sub": "user-1"},
+    )
+
+    emit_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_active_music_exits_when_agent_becomes_busy(monkeypatch):
     active = MusicCoListeningResponse(
         status="active",

@@ -88,6 +88,7 @@ class MusicPlaybackRequest(BaseModel):
     track: MusicTrackPayload
     position_seconds: int = Field(default=0, ge=0, le=24 * 60 * 60)
     is_playing: bool = True
+    change_source: str = Field(default="sync", max_length=40)
 
 
 class MusicPlaybackResponse(BaseModel):

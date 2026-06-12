@@ -355,6 +355,18 @@ async def update_music_now_playing(
             track=track,
             actor="user",
         )
+    elif (
+        data.conversation_id
+        and data.is_playing
+        and current_co_listening is not None
+        and current_co_listening.status == "active"
+    ):
+        await music_status.maybe_emit_track_change_reply(
+            conversation_id=data.conversation_id,
+            current_session=current_co_listening,
+            next_track=track,
+            change_source=data.change_source,
+        )
     return MusicPlaybackResponse(
         track=track,
         position_seconds=position_seconds,

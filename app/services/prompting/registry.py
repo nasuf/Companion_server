@@ -58,6 +58,8 @@ from app.services.prompting.defaults import (
     MUSIC_PROACTIVE_RECOMMEND_PROMPT,
     MUSIC_SLEEP_REJECT_PROMPT,
     MUSIC_SWITCH_TRACK_PROMPT,
+    MUSIC_TRACK_CHANGED_AUTO_PROMPT,
+    MUSIC_TRACK_CHANGED_MANUAL_PROMPT,
     MUSIC_USER_ABSENT_EXIT_PROMPT,
     MUSIC_USER_EXIT_PROMPT,
     MUSIC_USER_PAUSE_EXIT_PROMPT,
@@ -484,6 +486,16 @@ PROMPT_DEFINITIONS = [
         "music.switch_track", "音乐共听(切歌)", "聊天热路径", "音乐共听",
         "【工程扩展】双方正在共听时用户分享另一首歌，AI 以切歌方式接住.",
         MUSIC_SWITCH_TRACK_PROMPT,
+    ),
+    PromptDefinition(
+        "music.track_changed_manual", "音乐共听(手动切歌)", "聊天热路径", "音乐共听",
+        "【工程扩展】双方正在共听时用户手动上一首/下一首或点旧卡切歌，AI 轻量回应.",
+        MUSIC_TRACK_CHANGED_MANUAL_PROMPT,
+    ),
+    PromptDefinition(
+        "music.track_changed_auto", "音乐共听(自动连播)", "聊天热路径", "音乐共听",
+        "【工程扩展】双方正在共听时歌曲自然播完自动下一首，AI 低频回应.",
+        MUSIC_TRACK_CHANGED_AUTO_PROMPT,
     ),
     PromptDefinition(
         "music.agent_join_after_busy", "音乐共听(AI忙后加入)", "聊天热路径", "音乐共听",

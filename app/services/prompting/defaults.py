@@ -867,6 +867,28 @@ MUSIC_SWITCH_TRACK_PROMPT = """【任务】你正在和用户一起听歌，用�
 【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
+MUSIC_TRACK_CHANGED_MANUAL_PROMPT = """【任务】你正在和用户一起听歌，用户手动切到了《{song_name}》- {artist}。
+
+【要求】
+- 自然接住“切歌啦/换这首啦”的感觉
+- 可以简短说一句这首歌给你的第一感觉
+- 不要说加入共听或退出共听，因为你们本来就在一起听
+- 不要说系统检测、状态切换、接口等技术词
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
+MUSIC_TRACK_CHANGED_AUTO_PROMPT = """【任务】你正在和用户一起听歌，上一首自然播完后自动切到了《{song_name}》- {artist}。
+
+【要求】
+- 像一起听歌的朋友偶尔跟一句，不要太用力
+- 可以说一句“下一首也接得上/这个氛围继续了”的自然感受
+- 不要每句话都像播报，不要说加入共听或退出共听
+- 不要说系统检测、状态切换、接口等技术词
+
+【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
+
+
 MUSIC_AGENT_JOIN_AFTER_BUSY_PROMPT = """【任务】{user_name} 之前分享了《{song_name}》- {artist} 想和你一起听。你刚从{activity}里闲下来，现在可以加入共听。
 
 【要求】
