@@ -30,6 +30,8 @@ class AuthResponse(BaseModel):
     token: str
     user_id: str
     username: str
+    user_display_name: str | None = None
+    user_avatar_url: str | None = None
     role: str
     has_agent: bool
     agent_id: str | None = None

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
+from prisma import Json
 
 from app.api.public import auth as auth_api
 from app.services import wechat_auth
@@ -45,6 +46,27 @@ class FakeAsyncClient:
         return FakeResponse(self.payload)
 
 
+class FakeTransaction:
+    def __init__(self):
+        self.created_identity_data = None
+        self.user = SimpleNamespace(
+            create=AsyncMock(
+                return_value=SimpleNamespace(id="user-new", username="wx_new", role="user")
+            )
+        )
+        self.authidentity = SimpleNamespace(create=AsyncMock(side_effect=self._create_identity))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def _create_identity(self, *, data):
+        self.created_identity_data = data
+        return SimpleNamespace(id="identity-new")
+
+
 def test_wechat_login_request_strips_code():
     payload = auth_api.WeChatMobileLoginRequest(code="  abc  ", platform="ios")
 
@@ -71,6 +93,13 @@ async def test_exchange_wechat_code_returns_identity_without_leaking_secret(monk
         "openid": "open-1",
         "unionid": "union-1",
         "scope": "snsapi_userinfo",
+        "nickname": "小伴",
+        "headimgurl": "https://avatar",
+        "sex": 1,
+        "province": "Guangdong",
+        "city": "Shenzhen",
+        "country": "CN",
+        "privilege": ["tester"],
     }
 
     with patch.object(wechat_auth.httpx, "AsyncClient", FakeAsyncClient):
@@ -79,6 +108,14 @@ async def test_exchange_wechat_code_returns_identity_without_leaking_secret(monk
     assert payload.openid == "open-1"
     assert payload.unionid == "union-1"
     assert payload.provider_account_id == "union-1"
+    assert payload.raw["nickname"] == "小伴"
+    assert payload.raw["headimgurl"] == "https://avatar"
+    assert payload.raw["sex"] == 1
+    assert payload.raw["province"] == "Guangdong"
+    assert payload.raw["city"] == "Shenzhen"
+    assert payload.raw["country"] == "CN"
+    assert payload.raw["privilege"] == ["tester"]
+    assert payload.raw["scope"] == "snsapi_userinfo"
     assert "access_token" not in payload.raw
 
 
@@ -111,6 +148,34 @@ async def test_find_or_create_wechat_user_updates_openid_identity_to_unionid(mon
     assert {"unionid": "union-1"} in where["OR"]
     update_data = fake_db.authidentity.update.await_args.kwargs["data"]
     assert update_data["providerAccountId"] == "union-1"
+    assert isinstance(update_data["rawProfile"], Json)
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_wechat_user_creates_identity_with_relation_connect(monkeypatch):
+    tx = FakeTransaction()
+    fake_db = SimpleNamespace(
+        authidentity=SimpleNamespace(find_first=AsyncMock(return_value=None)),
+        tx=lambda: tx,
+    )
+    monkeypatch.setattr(wechat_auth, "db", fake_db)
+
+    user = await wechat_auth.find_or_create_wechat_user(
+        WeChatTokenPayload(
+            openid="open-1",
+            unionid=None,
+            scope="snsapi_userinfo",
+            raw={"openid": "open-1", "nickname": "小伴", "headimgurl": "https://avatar"},
+        )
+    )
+
+    assert user.id == "user-new"
+    tx.user.create.assert_awaited_once()
+    tx.authidentity.create.assert_awaited_once()
+    data = tx.created_identity_data
+    assert data["user"] == {"connect": {"id": "user-new"}}
+    assert "userId" not in data
+    assert isinstance(data["rawProfile"], Json)
 
 
 @pytest.mark.asyncio

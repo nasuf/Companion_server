@@ -31,6 +31,7 @@ from app.services.user_activity import UserActivityWriteError, record_user_activ
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+_WECHAT_PROVIDER = "wechat"
 
 
 async def _record_auth_activity(user_id: str, *, source: str) -> None:
@@ -47,6 +48,22 @@ async def _record_auth_activity(user_id: str, *, source: str) -> None:
         )
 
 
+async def _wechat_profile_for_user(user_id: str) -> tuple[str | None, str | None]:
+    identity = await db.authidentity.find_first(
+        where={"userId": user_id, "provider": _WECHAT_PROVIDER},
+        order={"updatedAt": "desc"},
+    )
+    profile = getattr(identity, "rawProfile", None) if identity else None
+    if not isinstance(profile, dict):
+        return None, None
+
+    nickname = profile.get("nickname")
+    avatar_url = profile.get("headimgurl")
+    display_name = nickname.strip() if isinstance(nickname, str) else None
+    avatar = avatar_url.strip() if isinstance(avatar_url, str) else None
+    return display_name or None, avatar or None
+
+
 async def _build_auth_response(user, token: str) -> AuthResponse:
     workspace = await get_active_workspace(user_id=user.id)
     agent = None
@@ -60,10 +77,13 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
             },
             order={"updatedAt": "desc"},
         )
+    user_display_name, user_avatar_url = await _wechat_profile_for_user(user.id)
     return AuthResponse(
         token=token,
         user_id=user.id,
         username=user.username,
+        user_display_name=user_display_name or user.username,
+        user_avatar_url=user_avatar_url,
         role=user.role,
         has_agent=workspace is not None and agent is not None,
         agent_id=agent.id if agent else None,

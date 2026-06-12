@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException, status
+from prisma import Json
 from prisma.errors import UniqueViolationError
 
 from app.config import settings
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _WECHAT_PROVIDER = "wechat"
 _TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
+_USERINFO_URL = "https://api.weixin.qq.com/sns/userinfo"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,46 @@ def _identity_lookup_where(token: WeChatTokenPayload) -> dict[str, Any]:
     return {"provider": _WECHAT_PROVIDER, "OR": candidates}
 
 
+def _safe_wechat_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "openid",
+        "unionid",
+        "nickname",
+        "sex",
+        "province",
+        "city",
+        "country",
+        "headimgurl",
+        "privilege",
+    }
+    return {key: value for key, value in payload.items() if key in allowed}
+
+
+async def _fetch_wechat_userinfo(
+    client: httpx.AsyncClient,
+    *,
+    access_token: str,
+    openid: str,
+) -> dict[str, Any]:
+    response = await client.get(
+        _USERINFO_URL,
+        params={
+            "access_token": access_token,
+            "openid": openid,
+            "lang": "zh_CN",
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("errcode") is not None:
+        logger.info(
+            "WeChat userinfo request rejected",
+            extra={"event": "wechat_userinfo_rejected", "errcode": payload.get("errcode")},
+        )
+        return {}
+    return _safe_wechat_profile(payload)
+
+
 async def exchange_wechat_code(code: str) -> WeChatTokenPayload:
     if not _wechat_configured():
         raise HTTPException(
@@ -75,11 +117,37 @@ async def exchange_wechat_code(code: str) -> WeChatTokenPayload:
         "grant_type": "authorization_code",
     }
     timeout = httpx.Timeout(settings.wechat_oauth_timeout_s, connect=3.0)
+    profile: dict[str, Any] = {}
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.get(_TOKEN_URL, params=params)
             response.raise_for_status()
             payload = response.json()
+            access_token = payload.get("access_token")
+            openid_for_profile = payload.get("openid")
+            scope_for_profile = payload.get("scope")
+            if (
+                isinstance(access_token, str)
+                and access_token
+                and isinstance(openid_for_profile, str)
+                and openid_for_profile
+                and isinstance(scope_for_profile, str)
+                and "snsapi_userinfo" in scope_for_profile.split(",")
+            ):
+                try:
+                    profile = await _fetch_wechat_userinfo(
+                        client,
+                        access_token=access_token,
+                        openid=openid_for_profile,
+                    )
+                except (httpx.HTTPError, ValueError) as exc:
+                    logger.info(
+                        "WeChat userinfo fetch failed",
+                        extra={
+                            "event": "wechat_userinfo_failed",
+                            "reason": type(exc).__name__,
+                        },
+                    )
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning(
             "WeChat code exchange failed",
@@ -100,7 +168,7 @@ async def exchange_wechat_code(code: str) -> WeChatTokenPayload:
         logger.warning("WeChat response missing openid", extra={"event": "wechat_missing_openid"})
         raise WeChatLoginError("wechat_missing_openid")
 
-    unionid = payload.get("unionid")
+    unionid = payload.get("unionid") or profile.get("unionid")
     scope = payload.get("scope")
     return WeChatTokenPayload(
         openid=openid,
@@ -110,6 +178,7 @@ async def exchange_wechat_code(code: str) -> WeChatTokenPayload:
             "openid": openid,
             "unionid": unionid if isinstance(unionid, str) else None,
             "scope": scope if isinstance(scope, str) else None,
+            **profile,
         },
     )
 
@@ -124,7 +193,7 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
                 "openid": token.openid,
                 "unionid": token.unionid,
                 "scope": token.scope,
-                "rawProfile": token.raw,
+                "rawProfile": Json(token.raw),
                 "lastLoginAt": datetime.now(UTC),
             },
         )
@@ -142,13 +211,13 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
             )
             await tx.authidentity.create(
                 data={
-                    "userId": user.id,
+                    "user": {"connect": {"id": user.id}},
                     "provider": _WECHAT_PROVIDER,
                     "providerAccountId": token.provider_account_id,
                     "openid": token.openid,
                     "unionid": token.unionid,
                     "scope": token.scope,
-                    "rawProfile": token.raw,
+                    "rawProfile": Json(token.raw),
                     "lastLoginAt": datetime.now(UTC),
                 }
             )
@@ -164,7 +233,7 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
                 "openid": token.openid,
                 "unionid": token.unionid,
                 "scope": token.scope,
-                "rawProfile": token.raw,
+                "rawProfile": Json(token.raw),
                 "lastLoginAt": datetime.now(UTC),
             },
         )
