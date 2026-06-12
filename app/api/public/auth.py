@@ -26,6 +26,7 @@ from app.services.wechat_auth import (
     exchange_wechat_code,
     find_or_create_wechat_user,
 )
+from app.services.agent_avatars import build_cached_avatar_url
 from app.services.user_activity import UserActivityWriteError, record_user_activity
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
             order={"updatedAt": "desc"},
         )
     user_display_name, user_avatar_url = await _wechat_profile_for_user(user.id)
+    agent_avatar_key = getattr(agent, "avatarKey", None) if agent else None
     return AuthResponse(
         token=token,
         user_id=user.id,
@@ -88,8 +90,11 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         has_agent=workspace is not None and agent is not None,
         agent_id=agent.id if agent else None,
         agent_name=agent.name if agent else None,
-        agent_avatar_key=getattr(agent, "avatarKey", None) if agent else None,
-        agent_avatar_url=getattr(agent, "avatarUrl", None) if agent else None,
+        agent_avatar_key=agent_avatar_key,
+        agent_avatar_url=(
+            build_cached_avatar_url(agent_avatar_key)
+            or (getattr(agent, "avatarUrl", None) if agent else None)
+        ),
         agent_city=getattr(agent, "city", None) if agent else None,
         workspace_id=workspace.id if workspace else None,
         conversation_id=conversation.id if conversation else None,

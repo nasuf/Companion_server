@@ -78,6 +78,12 @@ async def lifespan(app: FastAPI):
                 f"Runtime config load failed ({e!r}); env defaults active."
             )
 
+        try:
+            from app.api.public.agents import warm_default_agent_avatars
+            await _timed("Agent avatars", warm_default_agent_avatars())
+        except Exception as e:
+            logger.warning(f"Agent avatar warmup failed ({e!r})")
+
         # Phase 3: Scheduler + WS subscriber (跨进程 Pub/Sub)
         setup_scheduler()
         scheduler_started = True

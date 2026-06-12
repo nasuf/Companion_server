@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from prisma import Json
 
 from app.api.jwt_auth import require_user
@@ -17,7 +17,12 @@ from app.services.interaction.boundary import init_patience
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.career import pick_random_active_career
 from app.services.character_generation import generate_full_profile
-from app.services.agent_avatars import pick_agent_avatar
+from app.services.agent_avatars import (
+    build_cached_avatar_url,
+    ensure_cached_avatar,
+    pick_agent_avatar,
+    warm_avatar_pool,
+)
 from app.services.life_story import (
     activate_agent,
     generate_l1_coverage,
@@ -52,6 +57,7 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 
 def _agent_response(agent, *, workspace_id: str | None = None) -> AgentResponse:
+    avatar_key = getattr(agent, "avatarKey", None)
     return AgentResponse(
         id=agent.id,
         name=agent.name,
@@ -63,10 +69,25 @@ def _agent_response(agent, *, workspace_id: str | None = None) -> AgentResponse:
         gender=agent.gender,
         city=getattr(agent, "city", None),
         life_overview=agent.lifeOverview,
-        avatar_key=getattr(agent, "avatarKey", None),
-        avatar_url=getattr(agent, "avatarUrl", None),
+        avatar_key=avatar_key,
+        avatar_url=build_cached_avatar_url(avatar_key) or getattr(agent, "avatarUrl", None),
         created_at=str(agent.createdAt),
     )
+
+
+async def _warm_agent_avatar_cache(avatar_key: str | None) -> None:
+    if not avatar_key:
+        return
+    try:
+        await ensure_cached_avatar(avatar_key)
+    except Exception as exc:
+        logger.warning("[agent-avatar] warm cache failed key=%s error=%s", avatar_key, exc)
+
+
+async def warm_default_agent_avatars() -> None:
+    results = await warm_avatar_pool()
+    ok = sum(1 for value in results.values() if value)
+    logger.info("[agent-avatar] warmed %s/%s default avatars", ok, len(results))
 
 
 async def _safe_life_overview(agent) -> str | None:
@@ -319,6 +340,7 @@ async def create_agent(
     personality_dict = data.personality.model_dump()
 
     await set_progress(agent.id, "queued", message="已进入生成队列...")
+    await _warm_agent_avatar_cache(getattr(agent, "avatarKey", None))
 
     await _enqueue_agent_initialization(
         agent_id=agent.id,
@@ -328,6 +350,16 @@ async def create_agent(
     )
 
     return _agent_response(agent, workspace_id=workspace.id)
+
+
+@router.get("/avatar/{avatar_key}.png")
+async def get_agent_avatar(avatar_key: str):
+    avatar = await ensure_cached_avatar(avatar_key)
+    return Response(
+        content=avatar.image_bytes,
+        media_type=avatar.content_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
