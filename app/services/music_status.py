@@ -150,7 +150,14 @@ async def reconcile_co_listening_for_status(
     normalized = (status_code or "idle").strip() or "idle"
     current = await music.get_open_co_listening(conversation_id=conversation_id)
     if normalized == "idle":
-        if current and current.status == "pending_agent" and current.track is not None:
+        if (
+            current
+            and await _is_waiting_for_agent_join(
+                current,
+                conversation_id=conversation_id,
+            )
+            and current.track is not None
+        ):
             if current.is_playing:
                 joined = await music.start_co_listening(
                     user_id=user_id,
@@ -222,7 +229,10 @@ async def reconcile_co_listening_for_status(
             )
         return current if current and current.status == "active" else None
 
-    if current and current.status in {"active", "agent_waiting_user"}:
+    if current and await _has_agent_joined(
+        current,
+        conversation_id=conversation_id,
+    ):
         if _is_agent_auto_listening(current):
             await music.end_co_listening(
                 user_id=user_id,
@@ -536,6 +546,49 @@ async def end_if_disconnected_after_timeout(
 
 def _is_agent_auto_listening(session: Any) -> bool:
     return getattr(session, "initiated_by", None) == "agent_auto"
+
+
+async def _has_agent_joined(session: Any, *, conversation_id: str) -> bool:
+    status = getattr(session, "status", None)
+    if status not in {"active", "agent_waiting_user"}:
+        return False
+    initiated_by = getattr(session, "initiated_by", None)
+    if initiated_by == "user_pending":
+        return False
+    if initiated_by in {"agent", "agent_auto"}:
+        return True
+    if initiated_by == "user":
+        return await _agent_join_status_exists(conversation_id=conversation_id)
+    return True
+
+
+async def _is_waiting_for_agent_join(session: Any, *, conversation_id: str) -> bool:
+    if getattr(session, "status", None) == "pending_agent":
+        return True
+    if getattr(session, "status", None) != "active":
+        return False
+    initiated_by = getattr(session, "initiated_by", None)
+    if initiated_by == "user_pending":
+        return True
+    if initiated_by == "user":
+        return not await _agent_join_status_exists(conversation_id=conversation_id)
+    return False
+
+
+async def _agent_join_status_exists(*, conversation_id: str) -> bool:
+    rows = await db.query_raw(
+        """
+        SELECT id
+        FROM messages
+        WHERE conversation_id = $1
+          AND role = 'assistant'
+          AND metadata ->> 'music_status' = 'started'
+          AND metadata ->> 'music_status_actor' = 'agent'
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    return bool(rows)
 
 
 def _actor_label(*, actor: str | None, actor_name: str | None) -> str:

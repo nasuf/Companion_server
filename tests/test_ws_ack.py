@@ -602,6 +602,7 @@ async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
 
     start_co.assert_awaited_once()
     assert start_co.await_args.kwargs["status"] == "pending_agent"
+    assert start_co.await_args.kwargs["initiated_by"] == "user_pending"
     assert render_reply.await_args.args[0] == "music.busy_reject"
     persist_status.assert_awaited_once()
     assert persist_status.await_args.kwargs["actor"] == "user"

@@ -670,6 +670,41 @@ async def test_update_active_co_listening_updates_current_track(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_active_co_listening_does_not_promote_pending_agent(monkeypatch):
+    fake_db = _FakeDb(
+        [[{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1", "workspace_id": None}]]
+    )
+    monkeypatch.setattr(music, "db", fake_db)
+
+    updated = await music.update_active_co_listening(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        payload=MusicTrackPayload(id="track-2", title="New Track"),
+        position_seconds=42,
+        is_playing=True,
+    )
+
+    assert updated
+    query = fake_db.execs[0][0]
+    assert "status <> 'pending_agent'" in query
+    assert "WHEN $17 THEN 'active'" not in query
+
+
+@pytest.mark.asyncio
+async def test_get_active_co_listening_excludes_user_pending(monkeypatch):
+    fake_db = _FakeDb()
+    monkeypatch.setattr(music, "db", fake_db)
+
+    result = await music.get_active_co_listening(conversation_id="conv-1")
+
+    assert result is None
+    query = fake_db.queries[0][0]
+    assert "status = 'active'" in query
+    assert "initiated_by <> 'user_pending'" in query
+
+
+@pytest.mark.asyncio
 async def test_end_co_listening_marks_session_ended(monkeypatch):
     fake_db = _FakeDb(
         [
@@ -747,6 +782,79 @@ async def test_reconcile_pending_music_joins_when_agent_becomes_idle(monkeypatch
     persist_status.assert_awaited_once()
     assert persist_status.await_args.kwargs["actor"] == "agent"
     assert persist_status.await_args.kwargs["actor_name"] == "小芜"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_user_pending_active_music_joins_when_agent_becomes_idle(monkeypatch):
+    pending = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        position_seconds=12,
+        is_playing=True,
+        initiated_by="user_pending",
+    )
+    joined = pending.model_copy(update={"initiated_by": "user"})
+    start = AsyncMock(return_value=joined)
+    emit_reply = AsyncMock(return_value="assistant-msg")
+    persist_status = AsyncMock(return_value="status-msg")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=pending))
+    monkeypatch.setattr(music, "start_co_listening", start)
+    monkeypatch.setattr(music_status, "_emit_rendered_reply", emit_reply)
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", persist_status)
+
+    result = await music_status.reconcile_co_listening_for_status(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id="ws-1",
+        status_code="idle",
+        activity="自由时间",
+        ai_name="小青",
+    )
+
+    assert result == joined
+    start.assert_awaited_once()
+    assert start.await_args.kwargs["initiated_by"] == "user"
+    assert start.await_args.kwargs["status"] == "active"
+    assert emit_reply.await_args.kwargs["prompt_key"] == "music.agent_join_after_busy"
+    assert persist_status.await_args.kwargs["actor"] == "agent"
+    assert persist_status.await_args.kwargs["actor_name"] == "小青"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_legacy_active_user_without_agent_status_joins_when_idle(monkeypatch):
+    pending = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        position_seconds=12,
+        is_playing=True,
+        initiated_by="user",
+    )
+    joined = pending.model_copy(update={"initiated_by": "user"})
+    start = AsyncMock(return_value=joined)
+    emit_reply = AsyncMock(return_value="assistant-msg")
+    persist_status = AsyncMock(return_value="status-msg")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=pending))
+    monkeypatch.setattr(music, "start_co_listening", start)
+    monkeypatch.setattr(music_status, "_agent_join_status_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(music_status, "_emit_rendered_reply", emit_reply)
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", persist_status)
+
+    result = await music_status.reconcile_co_listening_for_status(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id="ws-1",
+        status_code="idle",
+        activity="自由时间",
+        ai_name="小青",
+    )
+
+    assert result == joined
+    start.assert_awaited_once()
+    emit_reply.assert_awaited_once()
+    assert emit_reply.await_args.kwargs["prompt_key"] == "music.agent_join_after_busy"
+    assert persist_status.await_args.kwargs["actor"] == "agent"
 
 
 @pytest.mark.asyncio
@@ -1012,6 +1120,11 @@ async def test_reconcile_active_music_exits_when_agent_becomes_busy(monkeypatch)
     end_notice = AsyncMock(return_value=True)
     monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
     monkeypatch.setattr(music_status, "end_co_listening_with_notice", end_notice)
+    monkeypatch.setattr(
+        music_status,
+        "_agent_join_status_exists",
+        AsyncMock(return_value=True),
+    )
 
     result = await music_status.reconcile_co_listening_for_status(
         user_id="user-1",
@@ -1028,6 +1141,85 @@ async def test_reconcile_active_music_exits_when_agent_becomes_busy(monkeypatch)
     assert end_notice.await_args.kwargs["prompt_key"] == "music.busy_exit"
     assert end_notice.await_args.kwargs["status_actor"] == "agent"
     assert end_notice.await_args.kwargs["status_actor_name"] == "小芜"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_music_does_not_emit_agent_busy_exit(monkeypatch):
+    pending = MusicCoListeningResponse(
+        status="pending_agent",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    end_notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=pending))
+    monkeypatch.setattr(music_status, "end_co_listening_with_notice", end_notice)
+
+    result = await music_status.reconcile_co_listening_for_status(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id="ws-1",
+        status_code="busy",
+        activity="写报告",
+        ai_name="小芜",
+    )
+
+    assert result == pending
+    end_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_user_pending_active_music_does_not_emit_agent_busy_exit(monkeypatch):
+    pending = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=True,
+        initiated_by="user_pending",
+    )
+    end_notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=pending))
+    monkeypatch.setattr(music_status, "end_co_listening_with_notice", end_notice)
+
+    result = await music_status.reconcile_co_listening_for_status(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id="ws-1",
+        status_code="very_busy",
+        activity="搬设备",
+        ai_name="小青",
+    )
+
+    assert result == pending
+    end_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_legacy_active_user_without_agent_status_does_not_emit_busy_exit(monkeypatch):
+    pending = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    end_notice = AsyncMock(return_value=True)
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=pending))
+    monkeypatch.setattr(music_status, "_agent_join_status_exists", AsyncMock(return_value=False))
+    monkeypatch.setattr(music_status, "end_co_listening_with_notice", end_notice)
+
+    result = await music_status.reconcile_co_listening_for_status(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        workspace_id="ws-1",
+        status_code="busy",
+        activity="搬设备",
+        ai_name="小青",
+    )
+
+    assert result == pending
+    end_notice.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -580,7 +580,20 @@ async def get_active_co_listening(
         """
         SELECT *
         FROM music_co_listening_sessions
-        WHERE conversation_id = $1 AND status = 'active'
+        WHERE conversation_id = $1
+          AND status = 'active'
+          AND initiated_by <> 'user_pending'
+          AND (
+              initiated_by <> 'user'
+              OR EXISTS (
+                  SELECT 1
+                  FROM messages msg
+                  WHERE msg.conversation_id = music_co_listening_sessions.conversation_id
+                    AND msg.role = 'assistant'
+                    AND msg.metadata ->> 'music_status' = 'started'
+                    AND msg.metadata ->> 'music_status_actor' = 'agent'
+              )
+          )
         LIMIT 1
         """,
         conversation_id,
@@ -867,9 +880,18 @@ async def update_active_co_listening(
             metadata = $15::jsonb,
             position_seconds = $16,
             is_playing = $17,
-            status = CASE WHEN $17 THEN 'active' ELSE status END,
-            ended_reason = CASE WHEN $17 THEN NULL ELSE ended_reason END,
-            ended_at = CASE WHEN $17 THEN NULL ELSE ended_at END,
+            status = CASE
+                WHEN $17 AND status <> 'pending_agent' THEN 'active'
+                ELSE status
+            END,
+            ended_reason = CASE
+                WHEN $17 AND status <> 'pending_agent' THEN NULL
+                ELSE ended_reason
+            END,
+            ended_at = CASE
+                WHEN $17 AND status <> 'pending_agent' THEN NULL
+                ELSE ended_at
+            END,
             updated_at = now()
         WHERE conversation_id = $1
           AND user_id = $2
