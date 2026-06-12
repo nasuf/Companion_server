@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -9,7 +10,9 @@ from prisma import Json
 from app.db import db
 from app.models.music import MusicTrack, MusicTrackPayload
 from app.services import music
+from app.services.llm.models import get_utility_model, invoke_text
 from app.services.music_chat import render_music_reply
+from app.services.prompting.utils import render_prompt
 from app.services.runtime.tasks import fire_background
 from app.services.runtime.ws_manager import manager
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
@@ -28,6 +31,27 @@ _TRACK_CHANGE_PROMPT_KEYS = {
     "music.track_changed_manual",
     "music.track_changed_auto",
 }
+_PAUSE_FOLLOWUP_SKIP_KEYWORDS = (
+    "睡觉",
+    "睡了",
+    "睡啦",
+    "睡去",
+    "要睡",
+    "准备睡",
+    "先睡",
+    "晚安",
+    "好梦",
+    "困了",
+    "明天",
+    "下次再",
+    "不听了",
+    "先不听",
+    "去忙",
+    "有事",
+    "忙去了",
+    "洗澡",
+    "开会",
+)
 
 
 async def persist_and_emit_music_status(
@@ -165,7 +189,7 @@ async def reconcile_co_listening_for_status(
                     conversation_id=conversation_id,
                     workspace_id=workspace_id,
                     payload=_track_to_payload(current.track),
-                    initiated_by="user",
+                    initiated_by="user_joined",
                     status="active",
                     position_seconds=current.position_seconds,
                     is_playing=True,
@@ -211,6 +235,11 @@ async def reconcile_co_listening_for_status(
                     music_co_listening=False,
                 )
             return None
+        if current and await _has_agent_joined(
+            current,
+            conversation_id=conversation_id,
+        ):
+            return current if current.status == "active" else None
         missed = await music.get_recent_unacknowledged_user_music_stop(
             conversation_id=conversation_id,
         )
@@ -402,7 +431,20 @@ async def begin_user_exit_waiting_with_notice(
         return False
     if _is_agent_auto_listening(waiting):
         return False
+    should_follow_up = False
     if waiting.track is not None:
+        should_follow_up = await should_emit_user_pause_followup(
+            conversation_id=conversation_id,
+            track=waiting.track,
+        )
+    await persist_and_emit_music_status(
+        conversation_id=conversation_id,
+        status="ended",
+        track=waiting.track,
+        reason=reason,
+        actor="user",
+    )
+    if waiting.track is not None and should_follow_up:
         reply = await _render_exit_reply(
             "music.user_pause_exit",
             user_name="你",
@@ -428,13 +470,6 @@ async def begin_user_exit_waiting_with_notice(
                 "music_co_listening": False,
             },
         )
-    await persist_and_emit_music_status(
-        conversation_id=conversation_id,
-        status="ended",
-        track=waiting.track,
-        reason=reason,
-        actor="user",
-    )
     fire_background(
         end_agent_waiting_after_timeout(
             user_id=user_id,
@@ -443,6 +478,47 @@ async def begin_user_exit_waiting_with_notice(
         )
     )
     return True
+
+
+async def should_emit_user_pause_followup(
+    *,
+    conversation_id: str,
+    track: MusicTrack,
+) -> bool:
+    """Decide whether a pause-timeout exit should ask why the user left.
+
+    Pause timeout is only a signal. If recent chat already explains the stop
+    (sleeping, saying good night, going busy, explicitly ending), sending a
+    "where did you go" follow-up feels mechanical.
+    """
+    try:
+        lines, recent_user_text = await _recent_non_status_chat_context(
+            conversation_id=conversation_id,
+            limit=8,
+        )
+    except Exception as exc:
+        logger.debug("music pause follow-up context unavailable: %s", exc)
+        return True
+    if not lines:
+        return True
+    if _has_clear_pause_reason(recent_user_text):
+        return False
+    try:
+        raw = await render_prompt(
+            "music.user_pause_followup_decision",
+            {
+                "recent_context": "\n".join(lines),
+                "song_name": track.title,
+                "artist": track.artist or "Jamendo",
+            },
+            lambda p: invoke_text(get_utility_model(), p),
+            strip_split=False,
+        )
+    except Exception as exc:
+        logger.debug("music pause follow-up decision failed: %s", exc)
+        return True
+    decision = _parse_pause_followup_decision(str(raw or ""))
+    return True if decision is None else decision
 
 
 async def end_agent_waiting_after_timeout(
@@ -555,7 +631,7 @@ async def _has_agent_joined(session: Any, *, conversation_id: str) -> bool:
     initiated_by = getattr(session, "initiated_by", None)
     if initiated_by == "user_pending":
         return False
-    if initiated_by in {"agent", "agent_auto"}:
+    if initiated_by in {"agent", "agent_auto", "user_joined"}:
         return True
     if initiated_by == "user":
         return await _agent_join_status_exists(conversation_id=conversation_id)
@@ -570,6 +646,8 @@ async def _is_waiting_for_agent_join(session: Any, *, conversation_id: str) -> b
     initiated_by = getattr(session, "initiated_by", None)
     if initiated_by == "user_pending":
         return True
+    if initiated_by == "user_joined":
+        return False
     if initiated_by == "user":
         return not await _agent_join_status_exists(conversation_id=conversation_id)
     return False
@@ -622,6 +700,85 @@ async def _recent_music_prompt_exists(
         seconds,
     )
     return bool(rows)
+
+
+async def _recent_non_status_chat_context(
+    *,
+    conversation_id: str,
+    limit: int,
+) -> tuple[list[str], str]:
+    rows = await db.query_raw(
+        """
+        SELECT role, content
+        FROM messages
+        WHERE conversation_id = $1
+          AND content IS NOT NULL
+          AND content <> ''
+          AND (
+              metadata IS NULL
+              OR metadata ->> 'music_status' IS NULL
+          )
+        ORDER BY created_at DESC
+        LIMIT $2
+        """,
+        conversation_id,
+        limit,
+    )
+    normalized = list(reversed([_message_row(row) for row in rows]))
+    lines: list[str] = []
+    user_parts: list[str] = []
+    for row in normalized:
+        role = str(row.get("role") or "").strip()
+        content = " ".join(str(row.get("content") or "").split())
+        if not content:
+            continue
+        if len(content) > 120:
+            content = content[:120].rstrip() + "…"
+        label = "用户" if role == "user" else "AI"
+        lines.append(f"{label}: {content}")
+        if role == "user":
+            user_parts.append(content)
+    return lines, "\n".join(user_parts[-4:])
+
+
+def _message_row(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return row
+    try:
+        return dict(row)
+    except Exception:
+        return {}
+
+
+def _has_clear_pause_reason(user_text: str) -> bool:
+    compact = "".join((user_text or "").lower().split())
+    if not compact:
+        return False
+    return any(keyword in compact for keyword in _PAUSE_FOLLOWUP_SKIP_KEYWORDS)
+
+
+def _parse_pause_followup_decision(raw: str) -> bool | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if "{" in text and "}" in text:
+        text = text[text.index("{") : text.rindex("}") + 1]
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("should_ask")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "ask", "需要", "追问"}:
+            return True
+        if normalized in {"false", "no", "0", "skip", "不需要", "不追问"}:
+            return False
+    return None
 
 
 async def _emit_rendered_reply(

@@ -63,6 +63,7 @@ from app.services.prompting.defaults import (
     MUSIC_USER_ABSENT_EXIT_PROMPT,
     MUSIC_USER_EXIT_PROMPT,
     MUSIC_USER_PAUSE_EXIT_PROMPT,
+    MUSIC_USER_PAUSE_FOLLOWUP_DECISION_PROMPT,
     MEMORY_CONTRADICTION_ANALYSIS_PROMPT,
     MEMORY_CONTRADICTION_DETECTION_PROMPT,
     MEMORY_CONTRADICTION_INQUIRY_PROMPT,
@@ -476,6 +477,11 @@ PROMPT_DEFINITIONS = [
         "music.user_pause_exit", "音乐共听(用户暂停退出)", "聊天热路径", "音乐共听",
         "【工程扩展】共听中用户暂停超过阈值时的轻量询问回复.",
         MUSIC_USER_PAUSE_EXIT_PROMPT,
+    ),
+    PromptDefinition(
+        "music.user_pause_followup_decision", "音乐共听(暂停追问判断)", "聊天热路径", "音乐共听",
+        "【工程扩展】共听中用户暂停超过阈值后，结合最近对话判断是否需要追问.",
+        MUSIC_USER_PAUSE_FOLLOWUP_DECISION_PROMPT,
     ),
     PromptDefinition(
         "music.user_absent_exit", "音乐共听(用户离开后AI退出)", "聊天热路径", "音乐共听",

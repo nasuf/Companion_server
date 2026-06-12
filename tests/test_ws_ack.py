@@ -276,6 +276,18 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
     async def _fake_assistant(*args, **kwargs):
         return "assistant-music-1"
 
+    event_order: list[str] = []
+
+    async def _fake_send_json(payload):
+        if isinstance(payload, dict) and payload.get("type") == "reply":
+            event_order.append("agent_reply")
+
+    async def _fake_music_status(*args, **kwargs):
+        event_order.append(f"status:{kwargs.get('actor')}")
+        return "music-status-1"
+
+    fake_ws.send_json.side_effect = _fake_send_json
+
     card = ws_mod._sanitize_component_card({
         "type": "music_track",
         "title": "Quiet Realm",
@@ -325,8 +337,7 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
         ) as render_reply,
         patch(
             "app.services.music_status.persist_and_emit_music_status",
-            new_callable=AsyncMock,
-            return_value="music-status-1",
+            new=AsyncMock(side_effect=_fake_music_status),
         ) as music_status,
         patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
         patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
@@ -343,6 +354,7 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
         )
 
     start_co.assert_awaited_once()
+    assert start_co.await_args.kwargs["initiated_by"] == "user_joined"
     render_reply.assert_awaited_once()
     assert render_reply.await_args.args[0] == "music.accept_invite"
     assert music_status.await_count == 2
@@ -353,6 +365,7 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
     assert second_status["status"] == "started"
     assert second_status["actor"] == "agent"
     assert second_status["actor_name"] == "A"
+    assert event_order[:3] == ["agent_reply", "status:user", "status:agent"]
     envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
     assert any(item.get("type") == "reply" and item["data"]["music_co_listening"] for item in envelopes)
 

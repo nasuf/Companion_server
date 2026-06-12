@@ -312,7 +312,7 @@ async def _handle_music_component_card(
     activity = str((received_status or {}).get("activity") or (received_status or {}).get("event") or "处理自己的事")
     accepted = status not in {"sleep", "busy", "very_busy"}
     session_status = "active" if accepted else "pending_agent"
-    initiated_by = "user" if accepted else "user_pending"
+    initiated_by = "user_joined" if accepted else "user_pending"
     current_session = await music.get_open_co_listening(conversation_id=conversation_id)
     agent_was_waiting = (
         current_session is not None

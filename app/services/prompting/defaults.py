@@ -845,6 +845,24 @@ MUSIC_USER_PAUSE_EXIT_PROMPT = """【任务】你原本在和用户一起听歌�
 【输出】只输出一条自然回复，不换行，不用 || 分隔，不超过 60 字。""" + _NO_ROLEPLAY_RULE + _NO_USER_FABRICATION_RULE
 
 
+MUSIC_USER_PAUSE_FOLLOWUP_DECISION_PROMPT = """【任务】判断用户暂停共听超过一分钟后，AI 是否应该主动追问“你是不是去忙了/怎么不听了”。
+
+【最近对话】
+{recent_context}
+
+【当前歌曲】
+《{song_name}》- {artist}
+
+【判断标准】
+- 如果用户最近已经明确说明原因，例如要睡觉、说晚安、要去忙、有事、洗澡、开会、下次再听、不想继续听等，should_ask=false。
+- 如果 AI 最近已经围绕这个原因自然回应过，也 should_ask=false。
+- 只有当用户突然暂停/消失，最近对话里没有明确原因，AI 才需要轻轻追问，should_ask=true。
+- 不要因为“音乐停止”本身就默认追问，要以最近对话语义为准。
+
+【输出 JSON】
+{{"should_ask": true/false, "reason": "≤20字说明"}}"""
+
+
 MUSIC_USER_ABSENT_EXIT_PROMPT = """【任务】你等了用户一会儿，但用户没有继续播放，也没有分享新的音乐。刚才一起听的是《{song_name}》- {artist}。
 
 【要求】
