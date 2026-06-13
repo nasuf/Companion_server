@@ -43,6 +43,8 @@ model User {
   musicCoListeningSessions MusicCoListeningSession[]
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
+  wallet          UserWallet?
+  walletLedger    WalletLedger[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
   bugReportsResolved BugReport[] @relation("BugReportsResolved")
 
@@ -477,6 +479,36 @@ model AchievementEvent {
   @@index([userId, agentId, eventType, occurredAt(sort: Desc)], map: "achievement_events_scope_type_time_idx")
   @@index([workspaceId, eventType, occurredAt(sort: Desc)], map: "achievement_events_workspace_type_time_idx")
   @@map("achievement_events")
+}
+
+model UserWallet {
+  id                       String   @id @default(uuid())
+  userId                   String   @unique @map("user_id")
+  user                     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticketBalance            Int      @default(0) @map("ticket_balance")
+  pointBalance             Int      @default(0) @map("point_balance")
+  achievementPointsSynced  Int      @default(0) @map("achievement_points_synced")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  @@map("user_wallets")
+}
+
+model WalletLedger {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency     String
+  delta        Int
+  balanceAfter Int      @map("balance_after")
+  source       String
+  sourceId     String?  @map("source_id")
+  metadata     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([userId, currency, createdAt(sort: Desc)], map: "wallet_ledger_user_currency_time_idx")
+  @@index([source, sourceId], map: "wallet_ledger_source_idx")
+  @@map("wallet_ledger")
 }
 
 // Admin 测试时对单条 AI 回复打标的 bug 标签. 跟 Message 是 N:1
