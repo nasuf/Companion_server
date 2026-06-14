@@ -98,10 +98,12 @@ async def _dispatch_one(row: Any) -> None:
         workspace_id=str(workspace_id) if workspace_id else None,
         conversation_id=str(conversation_id) if conversation_id else None,
     ):
+        logger.info(f"[PUSH] event={event_id} suppressed reason=app_foreground")
         await _mark_status(event_id, "suppressed", "app_foreground")
         return
 
     if not apns_client.configured:
+        logger.warning(f"[PUSH] event={event_id} suppressed reason=apns_not_configured")
         await _mark_status(event_id, "suppressed", "apns_not_configured")
         return
 
@@ -110,6 +112,10 @@ async def _dispatch_one(row: Any) -> None:
         environment=apns_client.environment,
     )
     if not devices:
+        logger.info(
+            f"[PUSH] event={event_id} suppressed reason=no_enabled_devices "
+            f"user={user_id[:8]} environment={apns_client.environment}"
+        )
         await _mark_status(event_id, "suppressed", "no_enabled_devices")
         return
 
@@ -131,6 +137,7 @@ async def _dispatch_one(row: Any) -> None:
                 thread_id=thread_id,
             )
         except ApnsConfigurationError as e:
+            logger.warning(f"[PUSH] event={event_id} suppressed reason={e}")
             await _mark_status(event_id, "suppressed", str(e))
             return
         if result.ok:
@@ -142,6 +149,10 @@ async def _dispatch_one(row: Any) -> None:
                 await disable_device_token(device.token)
 
     if successes:
+        logger.info(
+            f"[PUSH] event={event_id} sent successes={successes} "
+            f"devices={len(devices)} apns_id={last_apns_id}"
+        )
         await db.execute_raw(
             """
             UPDATE notification_events
@@ -157,6 +168,10 @@ async def _dispatch_one(row: Any) -> None:
             event_id,
         )
         return
+    logger.warning(
+        f"[PUSH] event={event_id} send_failed devices={len(devices)} "
+        f"errors={'; '.join(errors)[:240] or 'apns_send_failed'}"
+    )
     await _mark_retry_or_failed(row, "; ".join(errors)[:240] or "apns_send_failed")
 
 

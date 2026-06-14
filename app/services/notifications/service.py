@@ -26,6 +26,16 @@ def _trim(text: str, limit: int) -> str:
     return f"{value[: max(0, limit - 1)]}…"
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _raw_timestamp(value: datetime) -> str:
+    return _as_utc(value).replace(tzinfo=None).isoformat()
+
+
 async def enqueue_notification(
     *,
     user_id: str,
@@ -45,7 +55,7 @@ async def enqueue_notification(
     clean_body = _trim(body, 160)
     if not user_id or not type or not clean_title or not clean_body or not dedupe_key:
         return None
-    scheduled = scheduled_for or datetime.now(UTC)
+    scheduled = _as_utc(scheduled_for or datetime.now(UTC))
     rows = await db.query_raw(
         """
         INSERT INTO notification_events (
@@ -69,7 +79,7 @@ async def enqueue_notification(
         clean_body,
         json.dumps(payload or {}, ensure_ascii=False),
         dedupe_key,
-        scheduled,
+        _raw_timestamp(scheduled),
     )
     if not rows:
         return None

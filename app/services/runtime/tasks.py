@@ -49,4 +49,4 @@ def _on_task_error(t: asyncio.Task) -> None:
         return
     exc = t.exception()
     if exc is not None:
-        logger.warning(f"Background task failed: {exc}")
+        logger.warning(f"Background task failed: {exc}", exc_info=exc)
