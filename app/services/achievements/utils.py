@@ -25,7 +25,12 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _aware(value: datetime) -> datetime:
+def _aware(value: datetime | str) -> datetime:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
+        value = datetime.fromisoformat(normalized)
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 

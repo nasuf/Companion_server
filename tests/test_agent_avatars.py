@@ -117,6 +117,23 @@ def test_avatar_from_row_accepts_base64_image_bytes():
     assert avatar.image_bytes == b"png-bytes"
 
 
+def test_avatar_from_row_accepts_prisma_base64_like_image_bytes():
+    class _Base64Like:
+        def decode(self):
+            return b"png-bytes"
+
+    row = SimpleNamespace(
+        key="bansheng-female-01",
+        contentType="image/png",
+        imageBytes=_Base64Like(),
+    )
+
+    avatar = agent_avatars._avatar_from_row(row)
+
+    assert avatar is not None
+    assert avatar.image_bytes == b"png-bytes"
+
+
 def test_build_cached_avatar_url_rejects_path_like_keys():
     with pytest.raises(HTTPException):
         agent_avatars.build_cached_avatar_url("../secret")

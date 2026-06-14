@@ -220,6 +220,14 @@ def _coerce_image_bytes(raw) -> bytes | None:
         return bytes(raw)
     if isinstance(raw, memoryview):
         return raw.tobytes()
+    if hasattr(raw, "decode"):
+        try:
+            return _coerce_image_bytes(raw.decode())
+        except Exception:
+            pass
+    data = getattr(raw, "data", None)
+    if data is not None:
+        return _coerce_image_bytes(data)
     if isinstance(raw, str):
         try:
             return base64.b64decode(raw)

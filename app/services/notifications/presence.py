@@ -35,6 +35,10 @@ async def update_presence(
         redis = await get_redis()
         if not foreground:
             await redis.delete(_key(user_id, device_id))
+            logger.info(
+                f"[PUSH] presence user={user_id[:8]} device={device_id[:16]} "
+                "foreground=false"
+            )
             return
         payload = {
             "workspace_id": workspace_id,
@@ -42,6 +46,10 @@ async def update_presence(
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         await redis.set(_key(user_id, device_id), json.dumps(payload), ex=_TTL_SECONDS)
+        logger.info(
+            f"[PUSH] presence user={user_id[:8]} device={device_id[:16]} "
+            f"foreground=true workspace={workspace_id} conversation={conversation_id}"
+        )
     except Exception as e:
         logger.debug(f"[PUSH] presence update skipped: {e}")
 
