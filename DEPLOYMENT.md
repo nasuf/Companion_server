@@ -149,17 +149,18 @@ fallbacks matching the values above.
 ### iOS remote notifications
 
 Remote notifications use APNs token-based authentication. Store the `.p8`
-private key file on the VPS under `/app/companion-server/secrets/` and set the
-GitHub secret `APNS_AUTH_KEY` to that server-side file path. The deploy
-workflow writes that path into `APNS_AUTH_KEY_PATH` in the generated `.env`.
-`docker-compose.deploy.yml` mounts `/app/companion-server/secrets` read-only
-into the server container, so the path must be readable both on the host and
-inside the container.
+private key file on the VPS at
+`/app/companion-secrets/apns/AuthKey_SG87KSNWZH.p8` and set the GitHub secret
+`APNS_AUTH_KEY` to that exact server-side file path. The deploy workflow writes
+that path into `APNS_AUTH_KEY_PATH` in the generated `.env`.
+`docker-compose.deploy.yml` mounts `/app/companion-secrets` read-only into the
+server container, so the same path is readable both on the host and inside the
+container.
 
 ```env
 # GitHub Secrets
 APNS_KEY_ID=SG87KSNWZH
-APNS_AUTH_KEY=/app/companion-server/secrets/AuthKey_SG87KSNWZH.p8
+APNS_AUTH_KEY=/app/companion-secrets/apns/AuthKey_SG87KSNWZH.p8
 
 # GitHub Variables
 APNS_ENABLED=true

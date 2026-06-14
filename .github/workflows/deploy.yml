@@ -57,7 +57,7 @@ jobs:
               DOCKER="sudo docker"
             fi
 
-            sudo mkdir -p /app/companion-server /mnt/datadisk0/companion/{postgres,redis,ollama,logs,docker,capsule_media}
+            sudo mkdir -p /app/companion-server /app/companion-secrets/apns /mnt/datadisk0/companion/{postgres,redis,ollama,logs,docker,capsule_media}
             sudo chown -R "$USER:$USER" /app/companion-server /mnt/datadisk0/companion/{logs,capsule_media}
             cd /app/companion-server
 
@@ -139,18 +139,15 @@ jobs:
                 fi
               done
               APNS_AUTH_KEY_PATH_VALUE="$(grep -E '^APNS_AUTH_KEY_PATH=' .env | cut -d= -f2-)"
-              case "$APNS_AUTH_KEY_PATH_VALUE" in
-                /app/companion-server/secrets/*) ;;
-                *)
-                  echo "APNS_AUTH_KEY must point to a .p8 file under /app/companion-server/secrets/"
-                  exit 1
-                  ;;
-              esac
-              if [ ! -r "$APNS_AUTH_KEY_PATH_VALUE" ]; then
+              if [ "$APNS_AUTH_KEY_PATH_VALUE" != "/app/companion-secrets/apns/AuthKey_SG87KSNWZH.p8" ]; then
+                echo "APNS_AUTH_KEY must be /app/companion-secrets/apns/AuthKey_SG87KSNWZH.p8"
+                exit 1
+              fi
+              if ! sudo test -r "$APNS_AUTH_KEY_PATH_VALUE"; then
                 echo "APNS_AUTH_KEY must be a readable .p8 file path on the VPS when APNS_ENABLED=true"
                 exit 1
               fi
-              if ! grep -q "BEGIN PRIVATE KEY" "$APNS_AUTH_KEY_PATH_VALUE"; then
+              if ! sudo grep -q "BEGIN PRIVATE KEY" "$APNS_AUTH_KEY_PATH_VALUE"; then
                 echo "APNS_AUTH_KEY path does not point to a valid .p8 private key file"
                 exit 1
               fi
