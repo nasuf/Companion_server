@@ -107,14 +107,11 @@ async def _dispatch_one(row: Any) -> None:
         await _mark_status(event_id, "suppressed", "apns_not_configured")
         return
 
-    devices = await list_enabled_apns_devices(
-        user_id=user_id,
-        environment=apns_client.environment,
-    )
+    devices = await list_enabled_apns_devices(user_id=user_id)
     if not devices:
         logger.info(
             f"[PUSH] event={event_id} suppressed reason=no_enabled_devices "
-            f"user={user_id[:8]} environment={apns_client.environment}"
+            f"user={user_id[:8]}"
         )
         await _mark_status(event_id, "suppressed", "no_enabled_devices")
         return
@@ -133,6 +130,7 @@ async def _dispatch_one(row: Any) -> None:
                 body=str(_field(row, "body")),
                 payload=payload,
                 topic=device.bundle_id or None,
+                environment=device.environment,
                 collapse_id=collapse_id,
                 thread_id=thread_id,
             )
@@ -144,7 +142,10 @@ async def _dispatch_one(row: Any) -> None:
             successes += 1
             last_apns_id = result.apns_id
         else:
-            errors.append(f"{result.status_code}:{result.reason or 'unknown'}")
+            errors.append(
+                f"{device.environment}:{result.status_code}:"
+                f"{result.reason or 'unknown'}"
+            )
             if result.unregister:
                 await disable_device_token(device.token)
 

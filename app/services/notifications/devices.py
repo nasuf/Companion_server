@@ -106,27 +106,41 @@ async def disable_device_token(token: str) -> None:
 async def list_enabled_apns_devices(
     *,
     user_id: str,
-    environment: str,
+    environment: str | None = None,
 ) -> list[PushDevice]:
-    rows = await db.query_raw(
-        """
-        SELECT id, token, environment, bundle_id AS "bundleId"
-        FROM push_devices
-        WHERE user_id = $1
-          AND platform = 'ios'
-          AND provider = 'apns'
-          AND enabled = TRUE
-          AND environment = $2
-        ORDER BY last_seen_at DESC
-        """,
-        user_id,
-        environment,
-    )
+    if environment:
+        rows = await db.query_raw(
+            """
+            SELECT id, token, environment, bundle_id AS "bundleId"
+            FROM push_devices
+            WHERE user_id = $1
+              AND platform = 'ios'
+              AND provider = 'apns'
+              AND enabled = TRUE
+              AND environment = $2
+            ORDER BY last_seen_at DESC
+            """,
+            user_id,
+            environment,
+        )
+    else:
+        rows = await db.query_raw(
+            """
+            SELECT id, token, environment, bundle_id AS "bundleId"
+            FROM push_devices
+            WHERE user_id = $1
+              AND platform = 'ios'
+              AND provider = 'apns'
+              AND enabled = TRUE
+            ORDER BY last_seen_at DESC
+            """,
+            user_id,
+        )
     return [
         PushDevice(
             id=str(_field(row, "id")),
             token=str(_field(row, "token")),
-            environment=str(_field(row, "environment")),
+            environment=str(_field(row, "environment") or "sandbox"),
             bundle_id=_field(row, "bundleId"),
         )
         for row in rows

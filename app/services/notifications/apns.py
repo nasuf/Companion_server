@@ -47,7 +47,10 @@ class ApnsClient:
 
     @property
     def _base_url(self) -> str:
-        if settings.apns_use_sandbox:
+        return self._base_url_for(self.environment)
+
+    def _base_url_for(self, environment: str | None) -> str:
+        if environment == "sandbox":
             return "https://api.sandbox.push.apple.com"
         return "https://api.push.apple.com"
 
@@ -84,6 +87,7 @@ class ApnsClient:
         body: str,
         payload: dict[str, Any],
         topic: str | None = None,
+        environment: str | None = None,
         collapse_id: str | None = None,
         thread_id: str | None = None,
     ) -> ApnsResult:
@@ -108,7 +112,8 @@ class ApnsClient:
 
         async with httpx.AsyncClient(http2=True, timeout=8.0) as client:
             response = await client.post(
-                f"{self._base_url}/3/device/{token}",
+                f"{self._base_url_for(environment or self.environment)}/3/device/"
+                f"{token}",
                 json=body_json,
                 headers=headers,
             )
