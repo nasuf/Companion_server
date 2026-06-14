@@ -640,6 +640,21 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
             await notify_reminder_changed(
                 conversation_id, kind="fired", trigger_id=trigger.id,
             )
+        try:
+            from app.services.notifications.service import notify_checkin_reminder
+
+            workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+            await notify_checkin_reminder(
+                user_id=user_id,
+                agent_id=agent_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id or None,
+                trigger_id=trigger.id,
+                memory_id=memory_id,
+                summary=summary,
+            )
+        except Exception as push_err:
+            logger.debug(f"[PUSH] system check-in notification skipped: {push_err}")
         logger.info(
             f"reminder {trigger.id} handled as system-only check-in "
             f"memory={memory_id and memory_id[:8]} recurrence={recurrence}",

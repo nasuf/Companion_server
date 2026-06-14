@@ -136,6 +136,17 @@ async def unlock_achievement(
     }
     if notify:
         try:
+            from app.services.notifications.service import notify_achievement_unlocked
+            from app.services.runtime.tasks import fire_background
+
+            fire_background(notify_achievement_unlocked(
+                user_id=user_id,
+                agent_id=agent_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                achievement_id=achievement_id,
+                title=definition.name,
+            ))
             delivered = False
             if conversation_id:
                 delivered = await manager.send_event(conversation_id, "achievement_unlocked", payload)

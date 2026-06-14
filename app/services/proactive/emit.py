@@ -66,6 +66,7 @@ async def emit_proactive_message(
     )
     try:
         from app.services.achievements.service import handle_assistant_message_event
+        from app.services.notifications.service import notify_agent_message_created
         from app.services.runtime.tasks import fire_background
 
         fire_background(handle_assistant_message_event(
@@ -75,8 +76,17 @@ async def emit_proactive_message(
             metadata=metadata,
             occurred_at=getattr(created, "createdAt", None),
         ))
+        fire_background(notify_agent_message_created(
+            conversation_id=conversation_id,
+            message_id=created.id,
+            text=message,
+            metadata=metadata,
+            user_id=user_id,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+        ))
     except Exception as achievement_err:
-        logger.debug(f"[ACH] proactive message hook skipped: {achievement_err}")
+        logger.debug(f"[ACH/PUSH] proactive message hook skipped: {achievement_err}")
 
     # 审计日志写失败不影响主流程.
     # 注: 跟 timetrigger 一样, 这个 prisma client 版本对混合 scalar+relation

@@ -102,6 +102,18 @@ class Settings(BaseSettings):
     sud_is_test_env: bool = True
     sud_callback_public_base_url: str = ""
 
+    # iOS remote notifications via APNs. Disabled unless APNS_ENABLED=true and
+    # token-auth credentials are configured.
+    apns_enabled: bool = False
+    apns_team_id: str = ""
+    apns_key_id: str = ""
+    apns_auth_key: str = ""
+    apns_auth_key_path: str = ""
+    apns_topic: str = ""
+    apns_use_sandbox: bool = True
+    notification_max_attempts: int = 3
+    notification_dispatch_batch_size: int = 50
+
     # Jamendo music integration. The client id is configured on the server;
     # Flutter receives normalized metadata plus Jamendo file endpoint URLs.
     jamendo_client_id: str = ""

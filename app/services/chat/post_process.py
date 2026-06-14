@@ -154,6 +154,17 @@ async def save_replies(
                     ))
                 except Exception as metric_err:
                     logger.debug(f"Reply operational metrics skipped: {metric_err}")
+                try:
+                    from app.services.notifications.service import notify_agent_message_created
+
+                    fire_background(notify_agent_message_created(
+                        conversation_id=conversation_id,
+                        message_id=created.id,
+                        text=text,
+                        metadata=metadata,
+                    ))
+                except Exception as push_err:
+                    logger.debug(f"[PUSH] assistant reply notification skipped: {push_err}")
             if i == 0:
                 first_message_id = created.id
                 first_created_at = getattr(created, "createdAt", None)

@@ -43,6 +43,8 @@ model User {
   musicCoListeningSessions MusicCoListeningSession[]
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
+  pushDevices     PushDevice[]
+  notificationEvents NotificationEvent[]
   wallet          UserWallet?
   walletLedger    WalletLedger[]
   bugReportsFiled    BugReport[] @relation("BugReportsFiled")
@@ -479,6 +481,58 @@ model AchievementEvent {
   @@index([userId, agentId, eventType, occurredAt(sort: Desc)], map: "achievement_events_scope_type_time_idx")
   @@index([workspaceId, eventType, occurredAt(sort: Desc)], map: "achievement_events_workspace_type_time_idx")
   @@map("achievement_events")
+}
+
+model PushDevice {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform      String
+  provider      String    @default("apns")
+  token         String
+  environment   String    @default("sandbox")
+  bundleId      String?   @map("bundle_id")
+  deviceId      String?   @map("device_id")
+  appVersion    String?   @map("app_version")
+  enabled       Boolean   @default(true)
+  lastSeenAt    DateTime  @default(now()) @map("last_seen_at")
+  disabledAt    DateTime? @map("disabled_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@unique([provider, token], map: "push_devices_provider_token_key")
+  @@index([userId, enabled, lastSeenAt(sort: Desc)], map: "push_devices_user_enabled_idx")
+  @@index([userId, deviceId], map: "push_devices_user_device_idx")
+  @@map("push_devices")
+}
+
+model NotificationEvent {
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId            String?   @map("agent_id")
+  workspaceId        String?   @map("workspace_id")
+  conversationId     String?   @map("conversation_id")
+  messageId          String?   @map("message_id")
+  type               String
+  title              String
+  body               String
+  payload            Json      @default("{}")
+  dedupeKey          String    @map("dedupe_key")
+  status             String    @default("pending")
+  provider           String    @default("apns")
+  providerMessageId  String?   @map("provider_message_id")
+  attempts           Int       @default(0)
+  error              String?
+  scheduledFor       DateTime  @default(now()) @map("scheduled_for")
+  sentAt             DateTime? @map("sent_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@unique([userId, type, dedupeKey], map: "notification_events_user_type_dedupe_key")
+  @@index([status, scheduledFor], map: "notification_events_status_scheduled_idx")
+  @@index([userId, createdAt(sort: Desc)], map: "notification_events_user_created_idx")
+  @@map("notification_events")
 }
 
 model UserWallet {

@@ -372,6 +372,7 @@ async def _handle_music_component_card(
     )
     try:
         from app.services.chat.post_process import _bg_memory_pipeline
+        from app.services.notifications.service import notify_agent_message_created
 
         fire_background(_bg_memory_pipeline(
             user_id,
@@ -385,8 +386,18 @@ async def _handle_music_component_card(
             conversation_id=conversation_id,
             workspace_id=workspace_id,
         ))
+        fire_background(notify_agent_message_created(
+            conversation_id=conversation_id,
+            message_id=assistant_message_id,
+            text=reply,
+            metadata=metadata,
+            user_id=user_id,
+            agent_id=agent.id,
+            workspace_id=workspace_id,
+            agent_name=getattr(agent, "name", None),
+        ))
     except Exception as memory_err:
-        logger.debug(f"[MUSIC] memory pipeline skipped: {memory_err}")
+        logger.debug(f"[MUSIC] background hooks skipped: {memory_err}")
 
     await ws.send_json({
         "type": "reply",

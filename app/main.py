@@ -146,6 +146,7 @@ from app.api.public.games import router as games_router
 from app.api.public.music import router as music_router
 from app.api.public.achievements import router as achievements_router
 from app.api.public.wallet import router as wallet_router
+from app.api.public.notifications import router as notifications_router
 from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
@@ -178,6 +179,7 @@ app.include_router(games_router)
 app.include_router(music_router)
 app.include_router(achievements_router)
 app.include_router(wallet_router)
+app.include_router(notifications_router)
 app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)

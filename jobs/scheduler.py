@@ -33,6 +33,8 @@ from app.services.interaction.delayed_queue import (
 from app.services.interaction.user_turn_aggregation import scan_due_user_turns
 from app.services.proactive.triggers import scan_triggers
 from app.services.proactive.special_dates import scan_special_dates_today
+from app.services.notifications.capsules import scan_ready_capsule_notifications
+from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import scan_due_last_wills
 from app.services.runtime.distributed_lock import (
@@ -289,6 +291,25 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    scheduler.add_job(
+        _run_notification_dispatch,
+        "interval",
+        seconds=15,
+        id="notification_dispatch",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
+        _run_capsule_ready_notifications,
+        "cron",
+        hour=9,
+        minute=0,
+        id="capsule_ready_notifications",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Patience recovery every hour
     scheduler.add_job(
         _run_patience_recovery,
@@ -473,6 +494,30 @@ async def _run_runtime_job_queue():
                 "error_type": type(e).__name__,
             },
         )
+
+
+async def _run_notification_dispatch():
+    async def _body():
+        try:
+            processed = await dispatch_due_notifications()
+            if processed:
+                logger.info(f"[CRON] notification dispatch processed {processed} events")
+        except Exception as e:
+            logger.warning(f"Notification dispatch failed: {e}")
+
+    await _run_distributed_job("notification_dispatch", 120, _body)
+
+
+async def _run_capsule_ready_notifications():
+    async def _body():
+        try:
+            processed = await scan_ready_capsule_notifications()
+            if processed:
+                logger.info(f"[CRON] capsule ready notifications queued for {processed} scopes")
+        except Exception as e:
+            logger.warning(f"Capsule ready notification scan failed: {e}")
+
+    await _run_distributed_job("capsule_ready_notifications", 1800, _body)
 
 
 async def _run_l2_adjustment():

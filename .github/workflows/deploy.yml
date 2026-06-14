@@ -29,7 +29,7 @@ jobs:
           username: ${{ vars.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ vars.VPS_PORT }}
-          source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example"
+          source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example,.env.sample"
           target: "/app/companion-server"
 
       - name: Deploy server stack on VPS
@@ -64,6 +64,9 @@ jobs:
             POSTGRES_USER="${{ vars.POSTGRES_USER || 'companion' }}"
             POSTGRES_DB="${{ vars.POSTGRES_DB || 'companion' }}"
             POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}"
+            APNS_ENABLED="${{ vars.APNS_ENABLED || 'false' }}"
+            mkdir -p /app/companion-server/secrets
+            chmod 700 /app/companion-server/secrets
 
             cat > .env <<EOF
             POSTGRES_USER=$POSTGRES_USER
@@ -108,6 +111,15 @@ jobs:
             JAMENDO_CLIENT_ID=${{ secrets.JAMENDO_CLIENT_ID }}
             JAMENDO_BASE_URL=${{ vars.JAMENDO_BASE_URL || 'https://api.jamendo.com/v3.0' }}
             JAMENDO_DEFAULT_LIBRARIES=${{ vars.JAMENDO_DEFAULT_LIBRARIES || 'focus,ambient,sleep' }}
+            APNS_ENABLED=$APNS_ENABLED
+            APNS_TEAM_ID=${{ vars.APNS_TEAM_ID }}
+            APNS_KEY_ID=${{ secrets.APNS_KEY_ID }}
+            APNS_AUTH_KEY_PATH=${{ secrets.APNS_AUTH_KEY }}
+            APNS_AUTH_KEY=
+            APNS_TOPIC=${{ vars.APNS_TOPIC || 'com.bansheng.dev' }}
+            APNS_USE_SANDBOX=${{ vars.APNS_USE_SANDBOX || 'false' }}
+            NOTIFICATION_MAX_ATTEMPTS=${{ vars.NOTIFICATION_MAX_ATTEMPTS || '3' }}
+            NOTIFICATION_DISPATCH_BATCH_SIZE=${{ vars.NOTIFICATION_DISPATCH_BATCH_SIZE || '50' }}
             EOF
 
             for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES; do
@@ -117,6 +129,32 @@ jobs:
                 exit 1
               fi
             done
+
+            if [ "$APNS_ENABLED" = "true" ]; then
+              for key in APNS_TEAM_ID APNS_KEY_ID APNS_AUTH_KEY_PATH APNS_TOPIC APNS_USE_SANDBOX; do
+                value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+                if [ -z "$value" ]; then
+                  echo "$key is required when APNS_ENABLED=true"
+                  exit 1
+                fi
+              done
+              APNS_AUTH_KEY_PATH_VALUE="$(grep -E '^APNS_AUTH_KEY_PATH=' .env | cut -d= -f2-)"
+              case "$APNS_AUTH_KEY_PATH_VALUE" in
+                /app/companion-server/secrets/*) ;;
+                *)
+                  echo "APNS_AUTH_KEY must point to a .p8 file under /app/companion-server/secrets/"
+                  exit 1
+                  ;;
+              esac
+              if [ ! -r "$APNS_AUTH_KEY_PATH_VALUE" ]; then
+                echo "APNS_AUTH_KEY must be a readable .p8 file path on the VPS when APNS_ENABLED=true"
+                exit 1
+              fi
+              if ! grep -q "BEGIN PRIVATE KEY" "$APNS_AUTH_KEY_PATH_VALUE"; then
+                echo "APNS_AUTH_KEY path does not point to a valid .p8 private key file"
+                exit 1
+              fi
+            fi
 
             echo "==> Building server image"
             $DOCKER compose -f docker-compose.deploy.yml build server

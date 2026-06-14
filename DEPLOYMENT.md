@@ -37,6 +37,8 @@ Use both repository `Secrets` and repository `Variables`.
 Optional:
 
 - `ANTHROPIC_API_KEY`
+- `APNS_AUTH_KEY`
+- `APNS_KEY_ID`
 
 ### Repository Variables
 
@@ -58,6 +60,12 @@ Optional:
 - `CORS_ALLOWED_ORIGINS`
 - `WECHAT_LOGIN_ENABLED`
 - `WECHAT_MOBILE_APP_ID`
+- `APNS_ENABLED`
+- `APNS_TEAM_ID`
+- `APNS_TOPIC`
+- `APNS_USE_SANDBOX`
+- `NOTIFICATION_MAX_ATTEMPTS`
+- `NOTIFICATION_DISPATCH_BATCH_SIZE`
 
 ### Database and cache
 
@@ -137,6 +145,35 @@ JAMENDO_DEFAULT_LIBRARIES=focus,ambient,sleep
 `deploy.yml` writes these values into the server `.env` on the VPS. `JAMENDO_CLIENT_ID`
 is required for production deploy; the base URL and default libraries have deploy
 fallbacks matching the values above.
+
+### iOS remote notifications
+
+Remote notifications use APNs token-based authentication. Store the `.p8`
+private key file on the VPS under `/app/companion-server/secrets/` and set the
+GitHub secret `APNS_AUTH_KEY` to that server-side file path. The deploy
+workflow writes that path into `APNS_AUTH_KEY_PATH` in the generated `.env`.
+`docker-compose.deploy.yml` mounts `/app/companion-server/secrets` read-only
+into the server container, so the path must be readable both on the host and
+inside the container.
+
+```env
+# GitHub Secrets
+APNS_KEY_ID=SG87KSNWZH
+APNS_AUTH_KEY=/app/companion-server/secrets/AuthKey_SG87KSNWZH.p8
+
+# GitHub Variables
+APNS_ENABLED=true
+APNS_TEAM_ID=F3FB94L862
+APNS_TOPIC=com.bansheng.dev
+APNS_USE_SANDBOX=false
+NOTIFICATION_MAX_ATTEMPTS=3
+NOTIFICATION_DISPATCH_BATCH_SIZE=50
+```
+
+Use `APNS_USE_SANDBOX=true` only for a development server that sends to Debug
+builds installed directly from Xcode/Flutter. TestFlight and App Store builds
+use the production APNs environment, so the production deploy should keep
+`APNS_USE_SANDBOX=false`.
 
 For local Ollama:
 
