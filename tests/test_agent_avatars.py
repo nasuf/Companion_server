@@ -92,6 +92,9 @@ async def test_ensure_cached_avatar_downloads_and_reuses_db_cache(monkeypatch):
     assert first.image_bytes == b"png-bytes"
     assert first.content_type == "image/png"
     assert cache.rows["bansheng-female-01"].gender == "female"
+    assert cache.rows["bansheng-female-01"].imageBytes == base64.b64encode(b"png-bytes").decode(
+        "ascii"
+    )
     assert len(_FakeAsyncClient.calls) == 1
 
 

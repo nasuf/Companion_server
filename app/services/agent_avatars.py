@@ -97,6 +97,7 @@ async def ensure_cached_avatar(key: str) -> CachedAvatar:
         return cached
 
     content_type, blob, source_url = await _download_avatar(safe_key)
+    serialized_blob = _serialize_image_bytes(blob)
     try:
         row = await db.agentavatarcache.upsert(
             where={"key": safe_key},
@@ -105,13 +106,13 @@ async def ensure_cached_avatar(key: str) -> CachedAvatar:
                     "key": safe_key,
                     "gender": _gender_for_key(safe_key),
                     "contentType": content_type,
-                    "imageBytes": blob,
+                    "imageBytes": serialized_blob,
                     "sourceUrl": source_url,
                 },
                 "update": {
                     "gender": _gender_for_key(safe_key),
                     "contentType": content_type,
-                    "imageBytes": blob,
+                    "imageBytes": serialized_blob,
                     "sourceUrl": source_url,
                 },
             },
@@ -225,3 +226,7 @@ def _coerce_image_bytes(raw) -> bytes | None:
         except ValueError:
             return raw.encode("utf-8")
     return bytes(raw)
+
+
+def _serialize_image_bytes(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
