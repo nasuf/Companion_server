@@ -9,6 +9,7 @@ from app.config import settings
 from app.models.game import (
     SudCallbackGetSsTokenRequest,
     SudCallbackGetUserInfoRequest,
+    SudCallbackNotifyRequest,
     SudCallbackReportGameInfoRequest,
     SudCallbackUpdateSsTokenRequest,
     SudConfigResponse,
@@ -40,8 +41,10 @@ async def get_sud_config(_: dict = Depends(require_user)):
         missing_config=sud.missing_config(),
         callbacks={
             "get_sstoken": f"{base}/get_sstoken",
+            "update_sstoken": f"{base}/update_sstoken",
             "get_user_info": f"{base}/get_user_info",
             "report_game_info": f"{base}/report_game_info",
+            "notify": f"{base}/notify",
         },
     )
 
@@ -194,6 +197,30 @@ async def callback_report_game_info(data: SudCallbackReportGameInfoRequest):
                 "data": {},
             }
     session = await sud.handle_sud_report(data.report_type, data.report_msg)
+    return {
+        "ret_code": 0,
+        "ret_msg": "",
+        "sdk_error_code": 0,
+        "data": {
+            "session_id": session.id if session else None,
+            "received_at": datetime.now(UTC).isoformat(),
+        },
+    }
+
+
+@router.post("/callback/notify")
+async def callback_notify(data: SudCallbackNotifyRequest):
+    if data.ss_token:
+        try:
+            sud.decode_token(data.ss_token)
+        except Exception:
+            return {
+                "ret_code": 1,
+                "ret_msg": "invalid ss_token",
+                "sdk_error_code": 1005,
+                "data": {},
+            }
+    session = await sud.handle_sud_notify(data.notify_event, data.data)
     return {
         "ret_code": 0,
         "ret_msg": "",

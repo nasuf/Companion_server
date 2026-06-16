@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -18,6 +19,9 @@ logger = logging.getLogger(__name__)
 CODE_TTL_SECONDS = 30 * 60
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 DEFAULT_DEMO_MG_ID = "1461227817776713818"
+MONSTER_CRUSH_MG_ID = "1664525565526667266"
+_TERMINAL_STATUSES = {"settled", "aborted"}
+_GAME_STATUS_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
 def _now() -> datetime:
@@ -314,7 +318,7 @@ async def _resolve_owned_context(
     return resolved_workspace_id, conversation_id
 
 
-async def list_sessions(user_id: str, limit: int = 12) -> list[SudSessionResponse]:
+async def list_sessions(user_id: str, limit: int = 50) -> list[SudSessionResponse]:
     rows = await db.query_raw(
         """
         SELECT *
@@ -366,8 +370,10 @@ async def handle_client_event(
         source=source,
         companion_reply=reply,
     )
-    await _persist_reply_to_chat_if_needed(session, event_type, state, reply)
-    return await get_session(session_id, user_id=user_id), reply, event_id
+    updated = await get_session(session_id, user_id=user_id)
+    await _persist_game_status_to_chat_if_needed(session, updated, event_type, state, payload)
+    await _persist_reply_to_chat_if_needed(updated, event_type, state, reply)
+    return updated, reply, event_id
 
 
 async def handle_sud_report(
@@ -396,8 +402,53 @@ async def handle_sud_report(
         source="sud_callback",
         companion_reply=reply,
     )
-    await _persist_reply_to_chat_if_needed(session, event_type, None, reply)
-    return await get_session(session.id)
+    updated = await get_session(session.id)
+    await _persist_game_status_to_chat_if_needed(session, updated, event_type, None, report_msg)
+    await _persist_reply_to_chat_if_needed(updated, event_type, None, reply)
+    return updated
+
+
+async def handle_sud_notify(
+    notify_event: str,
+    data: dict[str, Any],
+) -> SudSessionResponse | None:
+    room_id = str(data.get("room_id") or data.get("roomId") or "")
+    if not room_id:
+        return None
+    rows = await db.query_raw(
+        "SELECT * FROM game_sessions WHERE room_id = $1 ORDER BY created_at DESC LIMIT 1",
+        room_id,
+    )
+    if not rows:
+        logger.info("SUD notify for unknown room_id=%s event=%s", room_id, notify_event)
+        return None
+    session = _row_to_session(rows[0])
+    event_type = _event_type_for_notify(notify_event)
+    state = str(data.get("event") or data.get("state") or "") or None
+    reply = _reply_for_event(session, event_type, state, data)
+    await _update_session_from_event(session, event_type, state, data, reply)
+    await _append_event(
+        session_id=session.id,
+        event_type=event_type,
+        state=state,
+        payload={"notify_event": notify_event, **data},
+        source="sud_callback",
+        companion_reply=reply,
+    )
+    updated = await get_session(session.id)
+    await _persist_game_status_to_chat_if_needed(session, updated, event_type, state, data)
+    await _persist_reply_to_chat_if_needed(updated, event_type, state, reply)
+    return updated
+
+
+def _event_type_for_notify(notify_event: str) -> str:
+    if notify_event == "sud.mg.merchant.game.process":
+        return "sud_game_process"
+    if notify_event.endswith(".game.process"):
+        return "sud_game_process"
+    if "settle" in notify_event.lower():
+        return "sud_game_settle"
+    return "sud_notify"
 
 
 async def user_info_from_token(token: str) -> SudPlayerInfo:
@@ -462,9 +513,9 @@ async def _write_game_message(
     role: str,
     content: str,
     metadata: dict[str, Any],
-) -> None:
+) -> str | None:
     try:
-        await db.message.create(
+        created = await db.message.create(
             data={
                 "conversation": {"connect": {"id": conversation_id}},
                 "role": role,
@@ -472,8 +523,134 @@ async def _write_game_message(
                 "metadata": Json(metadata),
             }
         )
+        return str(getattr(created, "id", "") or "")
     except Exception as exc:
         logger.warning("failed to persist game chat message: %r", exc)
+        return None
+
+
+async def _persist_game_status_to_chat_if_needed(
+    previous: SudSessionResponse,
+    updated: SudSessionResponse,
+    event_type: str,
+    state: str | None,
+    payload: dict[str, Any],
+) -> None:
+    if not updated.conversation_id:
+        return
+    status = _status_transition(previous, updated, event_type, state)
+    if status is None:
+        return
+    lock_key = (updated.conversation_id, updated.id, status)
+    lock = _GAME_STATUS_LOCKS.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        if await _game_status_message_exists(updated.conversation_id, updated.id, status):
+            return
+        game_title = _game_title(updated, payload)
+        actor_name = updated.ai_player.nick_name or "AI"
+        text = f"{actor_name} 和你已{'退出' if status == 'ended' else '进入'}游戏《{game_title}》"
+        metadata = {
+            "kind": "game_status",
+            "game_status": status,
+            "game_title": game_title,
+            "game_status_actor": "both",
+            "game_status_actor_name": actor_name,
+            "session_id": updated.id,
+            "mg_id": updated.mg_id,
+            "event_type": event_type,
+            "state": state,
+        }
+        if status == "ended":
+            metadata["game_ended_reason"] = _ended_reason(updated, event_type, state, payload)
+        message_id = await _write_game_message(
+            conversation_id=updated.conversation_id,
+            role="assistant",
+            content=text,
+            metadata=metadata,
+        )
+        try:
+            from app.services.runtime.ws_manager import manager
+
+            await manager.send_event(
+                updated.conversation_id,
+                "game_status",
+                {
+                    "text": text,
+                    "status": status,
+                    "game_title": game_title,
+                    "session_id": updated.id,
+                    "mg_id": updated.mg_id,
+                    "message_id": message_id or "",
+                    "actor": "both",
+                    "actor_name": actor_name,
+                    "reason": metadata.get("game_ended_reason", ""),
+                },
+            )
+        except Exception as exc:
+            logger.debug("failed to emit game status websocket event: %r", exc)
+
+
+async def _game_status_message_exists(
+    conversation_id: str,
+    session_id: str,
+    status: str,
+) -> bool:
+    rows = await db.query_raw(
+        """
+        SELECT id
+        FROM messages
+        WHERE conversation_id = $1
+          AND metadata->>'kind' = 'game_status'
+          AND metadata->>'session_id' = $2
+          AND metadata->>'game_status' = $3
+        LIMIT 1
+        """,
+        conversation_id,
+        session_id,
+        status,
+    )
+    return bool(rows)
+
+
+def _status_transition(
+    previous: SudSessionResponse,
+    updated: SudSessionResponse,
+    event_type: str,
+    state: str | None,
+) -> str | None:
+    if updated.status == "playing" and previous.status != "playing":
+        return "started"
+    if updated.status in _TERMINAL_STATUSES and previous.status not in _TERMINAL_STATUSES:
+        return "ended"
+    return None
+
+
+def _game_title(session: SudSessionResponse, payload: dict[str, Any]) -> str:
+    title = str(payload.get("game_title") or payload.get("gameName") or "").strip()
+    if title:
+        return title
+    if session.mg_id == MONSTER_CRUSH_MG_ID:
+        return "怪物消消乐"
+    if session.mg_id == settings.sud_default_mg_id.strip():
+        return "五子棋"
+    return session.mg_id
+
+
+def _ended_reason(
+    session: SudSessionResponse,
+    event_type: str,
+    state: str | None,
+    payload: dict[str, Any],
+) -> str:
+    if session.status == "aborted":
+        return str(payload.get("reason") or payload.get("exit_reason") or "aborted")
+    result = session.result or {}
+    raw_reason = (
+        result.get("game_over_reason")
+        or payload.get("gameOverReason")
+        or payload.get("game_over_reason")
+    )
+    return str(raw_reason or "settled")
 
 
 async def _persist_reply_to_chat_if_needed(
@@ -486,7 +663,7 @@ async def _persist_reply_to_chat_if_needed(
         return
     if not _should_persist_reply_to_chat(event_type, state):
         return
-    await _write_game_message(
+    message_id = await _write_game_message(
         conversation_id=session.conversation_id,
         role="assistant",
         content=reply,
@@ -497,6 +674,23 @@ async def _persist_reply_to_chat_if_needed(
             "state": state,
         },
     )
+    try:
+        from app.services.runtime.ws_manager import manager
+
+        await manager.send_event(
+            session.conversation_id,
+            "proactive",
+            {
+                "text": reply,
+                "assistant_message_id": message_id or "",
+                "trigger_type": "game",
+                "session_id": session.id,
+                "event_type": event_type,
+                "state": state,
+            },
+        )
+    except Exception as exc:
+        logger.debug("failed to emit game reply websocket event: %r", exc)
 
 
 async def _update_session_from_event(
@@ -518,11 +712,41 @@ async def _update_session_from_event(
             status = "playing"
             started_at = started_at or _now().isoformat()
 
+    if event_type in {"game_player_scores"} or state == "mg_common_game_player_scores":
+        result = _merge_process_result(session, result, event_type, state, payload)
+
+    if event_type == "sud_game_process":
+        result = _merge_process_result(session, result, event_type, state, payload)
+
     if event_type in {"game_settle", "sud_game_settle"} or state == "mg_common_game_settle":
         status = "settled"
         ended_at = _now().isoformat()
-        result = _extract_result(session, payload)
+        result = _merge_process_result(
+            session,
+            _extract_result(session, payload),
+            event_type,
+            state,
+            payload,
+            previous_result=result,
+        )
         duration_seconds = payload.get("battle_duration")
+
+    if (
+        _is_abort_event(event_type, state, payload)
+        and status not in _TERMINAL_STATUSES
+        and (session.status == "playing" or started_at)
+    ):
+        status = "aborted"
+        ended_at = _now().isoformat()
+        result = _merge_process_result(session, result, event_type, state, payload)
+        result = {
+            **(result or {}),
+            "game_round_id": payload.get("gameRoundId") or payload.get("game_round_id"),
+            "room_id": payload.get("room_id") or session.room_id,
+            "mg_id": payload.get("mg_id") or session.mg_id,
+            "ended_reason": payload.get("reason") or payload.get("exit_reason") or "aborted",
+            "user_outcome": "aborted",
+        }
 
     await db.execute_raw(
         """
@@ -573,6 +797,7 @@ def _row_to_session(row: dict[str, Any]) -> SudSessionResponse:
         ai_player=ai_player,
         companion_reply=row.get("companion_reply"),
         result=_loads(row.get("result"), None),
+        duration_seconds=row.get("duration_seconds"),
         started_at=_iso(row.get("started_at")),
         ended_at=_iso(row.get("ended_at")),
         created_at=_iso(row.get("created_at")),
@@ -613,20 +838,57 @@ def _reply_for_event(
     if event_type == "level_failed":
         return "没关系，我们换个思路再来。我会帮你盯住刚才卡住的位置。"
     if event_type in {"game_settle", "sud_game_settle"} or state == "mg_common_game_settle":
-        result = _extract_result(session, payload)
+        result = _merge_process_result(
+            session,
+            _extract_result(session, payload),
+            event_type,
+            state,
+            payload,
+            previous_result=session.result,
+        )
         outcome = result.get("user_outcome")
-        duration = result.get("duration_seconds")
-        duration_text = f"，这局大约 {duration} 秒" if duration else ""
+        process_text = _process_reply_fragment(result)
         if outcome == "win":
-            return f"这局你赢了{duration_text}。刚才中后段节奏抓得很稳，我已经把这次对局当成我们的共同经历记下来了。"
+            return f"可以啊，这局你拿下了。{process_text}我刚才有点被你节奏带着跑，下局我得认真一点了。"
         if outcome == "lose":
-            return f"这局我赢了{duration_text}，但你有几步已经很接近关键点了。下次我可以先放慢一点，陪你把那个节奏练出来。"
-        return f"这局打平{duration_text}。我们都没彻底让对方舒服起来，下一局可以换个更主动的开局。"
+            return f"哈哈，这把先算我小赢一局。{process_text}你不是乱输的，后面有几手已经很接近反超了。下局我陪你把那个节奏找回来。"
+        return f"这局居然打平了。{process_text}感觉我们俩都没完全舒服起来，下一局可以换个更大胆的开局。"
+    if _is_abort_event(event_type, state, payload):
+        if session.status in _TERMINAL_STATUSES or session.status != "playing":
+            return None
+        title = str(payload.get("game_title") or "").strip()
+        suffix = f"《{title}》" if title else "这局"
+        return f"{suffix}先停在这里。我已经把进行到一半的分数和过程记录下来了，等你想继续玩的时候我们再接着来。"
     return None
 
 
 def _should_persist_reply_to_chat(event_type: str, state: str | None) -> bool:
-    return event_type in {"game_settle", "sud_game_settle", "level_success", "level_failed"} or state == "mg_common_game_settle"
+    if event_type == "game_settle":
+        return False
+    return (
+        event_type
+        in {
+            "sud_game_settle",
+            "level_success",
+            "level_failed",
+            "game_exited",
+            "game_destroyed",
+        }
+        or state in {"mg_common_game_settle", "mg_common_destroy_game_scene"}
+    )
+
+
+def _is_abort_event(
+    event_type: str,
+    state: str | None,
+    payload: dict[str, Any],
+) -> bool:
+    if event_type in {"game_exited", "game_destroyed"}:
+        return True
+    if state == "mg_common_destroy_game_scene":
+        return True
+    game_state = str(payload.get("gameState") or payload.get("game_state") or "").lower()
+    return event_type == "sud_game_state" and game_state in {"destroyed", "closed", "aborted"}
 
 
 def _extract_result(session: SudSessionResponse, payload: dict[str, Any]) -> dict[str, Any]:
@@ -665,8 +927,217 @@ def _extract_result(session: SudSessionResponse, payload: dict[str, Any]) -> dic
         "duration_seconds": payload.get("battle_duration"),
         "user": user_row,
         "ai": ai_row,
+        "user_extras": _extract_extras(user_row),
+        "ai_extras": _extract_extras(ai_row),
+        "game_over_reason": _extract_game_over_reason(payload),
         "user_outcome": normalize_outcome((user_row or {}).get("isWin", (user_row or {}).get("is_win"))),
     }
+
+
+def _extract_extras(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    raw = row.get("extras") or row.get("extra")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            decoded = json.loads(raw)
+            return decoded if isinstance(decoded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _extract_game_over_reason(payload: dict[str, Any]) -> Any:
+    direct = payload.get("gameOverReason") or payload.get("game_over_reason")
+    if direct is not None:
+        return direct
+    extras = payload.get("extras")
+    if isinstance(extras, str):
+        try:
+            extras = json.loads(extras)
+        except json.JSONDecodeError:
+            extras = {}
+    if isinstance(extras, dict):
+        return extras.get("gameOverReason") or extras.get("game_over_reason")
+    return None
+
+
+def _merge_process_result(
+    session: SudSessionResponse,
+    result: dict[str, Any] | None,
+    event_type: str,
+    state: str | None,
+    payload: dict[str, Any],
+    *,
+    previous_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged = {**(previous_result or session.result or {}), **(result or {})}
+    process = dict(merged.get("process") or {})
+    if event_type == "game_player_scores" or state == "mg_common_game_player_scores":
+        process = _merge_score_process(session, process, payload)
+    if event_type == "sud_game_process":
+        events = list(process.get("events") or [])
+        event_name = str(payload.get("event") or state or "").strip()
+        if event_name:
+            events.append(
+                {
+                    "event": event_name,
+                    "players": payload.get("players") or [],
+                    "results": payload.get("results") or [],
+                    "at": _now().isoformat(),
+                }
+            )
+            process["events"] = events[-20:]
+    if process:
+        merged["process"] = process
+    return merged
+
+
+def _merge_score_process(
+    session: SudSessionResponse,
+    process: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    raw_scores = payload.get("scores") or []
+    if not isinstance(raw_scores, list):
+        return process
+    latest_scores = {
+        str(item.get("uid")): int(item.get("score") or 0)
+        for item in raw_scores
+        if isinstance(item, dict) and item.get("uid") is not None
+    }
+    if not latest_scores:
+        return process
+    user_score = latest_scores.get(session.user_player.uid)
+    ai_score = latest_scores.get(session.ai_player.uid)
+    leader = None
+    lead = 0
+    if user_score is not None and ai_score is not None:
+        lead = user_score - ai_score
+        if lead > 0:
+            leader = "user"
+        elif lead < 0:
+            leader = "ai"
+        else:
+            leader = "tie"
+    previous_leader = process.get("last_leader")
+    lead_changes = int(process.get("lead_changes") or 0)
+    if leader and previous_leader and leader != previous_leader and "tie" not in {leader, previous_leader}:
+        lead_changes += 1
+    return {
+        **process,
+        "score_updates": int(process.get("score_updates") or 0) + 1,
+        "latest_scores": latest_scores,
+        "user_score": user_score,
+        "ai_score": ai_score,
+        "last_leader": leader or previous_leader,
+        "lead_changes": lead_changes,
+        "max_user_lead": max(int(process.get("max_user_lead") or 0), lead),
+        "max_ai_lead": max(int(process.get("max_ai_lead") or 0), -lead),
+        "peak_user_score": max(int(process.get("peak_user_score") or 0), user_score or 0),
+        "peak_ai_score": max(int(process.get("peak_ai_score") or 0), ai_score or 0),
+        "last_score_at": _now().isoformat(),
+    }
+
+
+def _process_reply_fragment(result: dict[str, Any]) -> str:
+    process = result.get("process") if isinstance(result, dict) else None
+    if not isinstance(process, dict):
+        process = {}
+    user_row = result.get("user")
+    ai_row = result.get("ai")
+    user_score = process.get("user_score") or _score_from_result_row(user_row)
+    ai_score = process.get("ai_score") or _score_from_result_row(ai_row)
+    observations: list[str] = []
+    lead_changes = int(process.get("lead_changes") or 0)
+    if lead_changes:
+        observations.append("中间还来回翻过一次节奏")
+    user_extras = result.get("user_extras")
+    if isinstance(user_extras, dict):
+        good = user_extras.get("numGood")
+        crazy = user_extras.get("numCrazy")
+        perfect = user_extras.get("numPerfect")
+        excellent = user_extras.get("numExcellent")
+        highlight = _friendly_combo_highlight(
+            good=good,
+            perfect=perfect,
+            excellent=excellent,
+            crazy=crazy,
+        )
+        if highlight:
+            observations.append(highlight)
+    score_observation = _friendly_score_observation(
+        user_score=user_score,
+        ai_score=ai_score,
+    )
+    if score_observation:
+        observations.append(score_observation)
+    if not observations:
+        return "这局手感我已经记下来了，"
+    return "，".join(observations[:2]) + "。"
+
+
+def _friendly_combo_highlight(
+    *,
+    good: Any,
+    perfect: Any,
+    excellent: Any,
+    crazy: Any,
+) -> str | None:
+    perfect_count = _int_or_zero(perfect)
+    excellent_count = _int_or_zero(excellent)
+    crazy_count = _int_or_zero(crazy)
+    good_count = _int_or_zero(good)
+    if crazy_count:
+        return "你刚才有一波连得挺凶"
+    if excellent_count:
+        return "有几手消得很漂亮"
+    if perfect_count:
+        return f"你那 {perfect_count} 个 Perfect 挺漂亮"
+    if good_count >= 6:
+        return "你后面手感其实慢慢起来了"
+    if good_count:
+        return "有几步选择是对的"
+    return None
+
+
+def _friendly_score_observation(
+    *,
+    user_score: int | None,
+    ai_score: int | None,
+) -> str | None:
+    if user_score is None or ai_score is None:
+        return None
+    gap = abs(user_score - ai_score)
+    high_score = max(user_score, ai_score)
+    if gap == 0:
+        return "分数咬得很死"
+    if high_score and gap / high_score <= 0.18:
+        return "分差其实很小"
+    if gap <= 15000:
+        return "分差也没被拉到离谱"
+    if user_score > ai_score:
+        return "你这局把分数压得挺稳"
+    return "我只是中段多攒出了一点优势"
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _score_from_result_row(row: Any) -> int | None:
+    if not isinstance(row, dict):
+        return None
+    raw_score = row.get("score")
+    try:
+        return int(raw_score)
+    except Exception:
+        return None
 
 
 def expire_ms(value: datetime) -> int:

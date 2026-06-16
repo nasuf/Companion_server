@@ -146,7 +146,157 @@ def test_only_game_end_replies_are_persisted_to_chat():
     assert not sud._should_persist_reply_to_chat("session_created", None)
     assert not sud._should_persist_reply_to_chat("sdk_ready", None)
     assert not sud._should_persist_reply_to_chat("sud_player_state", "mg_common_self_ready")
-    assert sud._should_persist_reply_to_chat("game_settle", "mg_common_game_settle")
+    assert not sud._should_persist_reply_to_chat("game_settle", "mg_common_game_settle")
+    assert sud._should_persist_reply_to_chat("game_exited", None)
+    assert sud._should_persist_reply_to_chat("sud_game_settle", None)
+
+
+def test_monster_crush_score_process_tracks_lead_changes():
+    session = SudSessionResponse(
+        id="s1",
+        status="playing",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id=sud.MONSTER_CRUSH_MG_ID,
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+    )
+
+    result = sud._merge_process_result(
+        session,
+        None,
+        "game_player_scores",
+        "mg_common_game_player_scores",
+        {"scores": [{"uid": "u1", "score": 30}, {"uid": "agent:a1", "score": 40}]},
+    )
+    result = sud._merge_process_result(
+        session,
+        result,
+        "game_player_scores",
+        "mg_common_game_player_scores",
+        {"scores": [{"uid": "u1", "score": 70}, {"uid": "agent:a1", "score": 55}]},
+    )
+
+    process = result["process"]
+    assert process["score_updates"] == 2
+    assert process["user_score"] == 70
+    assert process["ai_score"] == 55
+    assert process["lead_changes"] == 1
+    assert process["max_ai_lead"] == 10
+    assert process["max_user_lead"] == 15
+
+
+def test_monster_crush_settlement_reply_uses_process_and_extras():
+    session = SudSessionResponse(
+        id="s1",
+        status="playing",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id=sud.MONSTER_CRUSH_MG_ID,
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+        result={
+            "process": {
+                "user_score": 70,
+                "ai_score": 55,
+                "lead_changes": 1,
+            }
+        },
+    )
+
+    reply = sud._reply_for_event(
+        session,
+        "sud_game_settle",
+        None,
+        {
+            "battle_duration": 88,
+            "results": [
+                {
+                    "uid": "u1",
+                    "isWin": 2,
+                    "extras": '{"numGood":3,"numPerfect":4,"numExcellent":5,"numCrazy":6}',
+                },
+                {"uid": "agent:a1", "isWin": 1},
+            ],
+        },
+    )
+
+    assert reply is not None
+    assert "可以啊，这局你拿下了" in reply
+    assert "中间还来回翻过一次节奏" in reply
+    assert "你刚才有一波连得挺凶" in reply
+    assert "最后分数是" not in reply
+
+
+def test_settlement_reply_uses_scores_and_extras_without_process_stream():
+    result = {
+        "user": {"score": 29410},
+        "ai": {"score": 41710},
+        "user_extras": {
+            "numGood": 9,
+            "numPerfect": 3,
+            "numExcellent": 0,
+            "numCrazy": 0,
+        },
+    }
+
+    fragment = sud._process_reply_fragment(result)
+
+    assert "你那 3 个 Perfect 挺漂亮" in fragment
+    assert "分差也没被拉到离谱" in fragment
+    assert "29410" not in fragment
+
+
+def test_abort_reply_is_suppressed_after_terminal_state():
+    session = SudSessionResponse(
+        id="s1",
+        status="settled",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id="mg1",
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+    )
+
+    assert sud._reply_for_event(session, "game_exited", None, {"reason": "page_disposed"}) is None
+
+
+def test_notify_event_type_mapping():
+    assert sud._event_type_for_notify("sud.mg.merchant.game.process") == "sud_game_process"
+    assert sud._event_type_for_notify("custom.settle") == "sud_game_settle"
 
 
 @pytest.mark.asyncio
@@ -199,6 +349,103 @@ async def test_sud_report_settlement_reply_is_persisted_to_chat(monkeypatch):
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_game_status_message_is_deduplicated(monkeypatch):
+    previous = SudSessionResponse(
+        id="s1",
+        status="created",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        conversation_id="c1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id=sud.MONSTER_CRUSH_MG_ID,
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+    )
+    updated = previous.model_copy(update={"status": "playing"})
+    writes = []
+
+    async def fake_status_exists(conversation_id, session_id, status):
+        assert conversation_id == "c1"
+        assert session_id == "s1"
+        assert status == "started"
+        return True
+
+    async def fake_write_game_message(**kwargs):
+        writes.append(kwargs)
+
+    monkeypatch.setattr(sud, "_game_status_message_exists", fake_status_exists)
+    monkeypatch.setattr(sud, "_write_game_message", fake_write_game_message)
+
+    await sud._persist_game_status_to_chat_if_needed(
+        previous,
+        updated,
+        "game_started",
+        None,
+        {"game_title": "怪物消消乐"},
+    )
+
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_game_status_message_wraps_game_title_in_brackets(monkeypatch):
+    previous = SudSessionResponse(
+        id="s1",
+        status="created",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        conversation_id="c1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id=sud.MONSTER_CRUSH_MG_ID,
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="小芜", is_ai=1),
+    )
+    updated = previous.model_copy(update={"status": "playing"})
+    writes = []
+
+    async def fake_status_exists(*_args):
+        return False
+
+    async def fake_write_game_message(**kwargs):
+        writes.append(kwargs)
+        return "m1"
+
+    monkeypatch.setattr(sud, "_game_status_message_exists", fake_status_exists)
+    monkeypatch.setattr(sud, "_write_game_message", fake_write_game_message)
+
+    await sud._persist_game_status_to_chat_if_needed(
+        previous,
+        updated,
+        "game_started",
+        None,
+        {"game_title": "怪物消消乐"},
+    )
+
+    assert writes[0]["content"] == "小芜 和你已进入游戏《怪物消消乐》"
+    assert writes[0]["metadata"]["game_title"] == "怪物消消乐"
 
 
 @pytest.mark.asyncio

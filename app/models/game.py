@@ -65,6 +65,7 @@ class SudSessionResponse(BaseModel):
     ai_player: SudPlayerInfo
     companion_reply: str | None = None
     result: dict[str, Any] | None = None
+    duration_seconds: int | None = None
     started_at: str | None = None
     ended_at: str | None = None
     created_at: str | None = None
@@ -99,4 +100,13 @@ class SudCallbackReportGameInfoRequest(BaseModel):
     report_type: str
     report_msg: dict[str, Any]
     uid: str | None = None
+    ss_token: str | None = None
+
+
+class SudCallbackNotifyRequest(BaseModel):
+    app_id: str | None = None
+    notify_id: str | None = None
+    notify_time: str | None = None
+    notify_event: str
+    data: dict[str, Any] = Field(default_factory=dict)
     ss_token: str | None = None
