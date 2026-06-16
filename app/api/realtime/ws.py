@@ -300,7 +300,7 @@ async def _handle_music_component_card(
     from app.models.music import MusicTrackPayload
     from app.services import music
     from app.services.music_chat import render_music_reply
-    from app.services.music_status import persist_and_emit_music_status
+    from app.services.music_status import persist_and_emit_music_status, reconcile_co_listening_for_status
     from app.services.runtime.tasks import fire_background
 
     try:
@@ -324,6 +324,24 @@ async def _handle_music_component_card(
         and current_session.initiated_by != "user_pending"
         and accepted
     )
+    previously_joined = (
+        current_session is not None
+        and current_session.status in {"active", "agent_waiting_user"}
+        and current_session.initiated_by != "user_pending"
+    )
+    if previously_joined and not accepted:
+        await reconcile_co_listening_for_status(
+            user_id=user_id,
+            agent_id=agent.id,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            status_code=status,
+            activity=activity,
+            ai_name=getattr(agent, "name", "") or "我",
+            user_name=user_name or "你",
+        )
+        await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
+        return True
     try:
         await music.start_co_listening(
             user_id=user_id,

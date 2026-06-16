@@ -881,15 +881,15 @@ async def update_active_co_listening(
             position_seconds = $16,
             is_playing = $17,
             status = CASE
-                WHEN $17 AND status <> 'pending_agent' THEN 'active'
+                WHEN $17 AND status = 'active' THEN 'active'
                 ELSE status
             END,
             ended_reason = CASE
-                WHEN $17 AND status <> 'pending_agent' THEN NULL
+                WHEN $17 AND status = 'active' THEN NULL
                 ELSE ended_reason
             END,
             ended_at = CASE
-                WHEN $17 AND status <> 'pending_agent' THEN NULL
+                WHEN $17 AND status = 'active' THEN NULL
                 ELSE ended_at
             END,
             updated_at = now()

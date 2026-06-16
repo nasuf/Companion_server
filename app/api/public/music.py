@@ -349,12 +349,35 @@ async def update_music_now_playing(
         and current_co_listening is not None
         and current_co_listening.status == "agent_waiting_user"
     ):
-        await music_status.persist_and_emit_music_status(
-            conversation_id=data.conversation_id,
-            status="started",
-            track=track,
-            actor="user",
-        )
+        schedule_state = await music_status.get_agent_current_schedule_state(data.agent_id)
+        if schedule_state["status"] == "idle":
+            await music.start_co_listening(
+                user_id=user["sub"],
+                agent_id=data.agent_id,
+                workspace_id=data.workspace_id,
+                conversation_id=data.conversation_id,
+                payload=data.track,
+                position_seconds=position_seconds,
+                is_playing=True,
+                initiated_by="user_joined",
+                status="active",
+            )
+            await music_status.persist_and_emit_music_status(
+                conversation_id=data.conversation_id,
+                status="started",
+                track=track,
+                actor="user",
+            )
+        else:
+            await music_status.reconcile_co_listening_for_status(
+                user_id=user["sub"],
+                agent_id=data.agent_id,
+                conversation_id=data.conversation_id,
+                workspace_id=data.workspace_id,
+                status_code=schedule_state["status"],
+                activity=schedule_state["activity"],
+                ai_name=schedule_state["ai_name"],
+            )
     elif (
         data.conversation_id
         and data.is_playing

@@ -624,6 +624,82 @@ async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
 
 
 @pytest.mark.asyncio
+async def test_handle_message_music_card_while_agent_waiting_busy_exits_instead_of_pending(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+
+    async def _fake_persist(*args, **kwargs):
+        return "db-msg-music-waiting-busy"
+
+    card = ws_mod._sanitize_component_card({
+        "type": "music_track",
+        "title": "Quiet Realm",
+        "subtitle": "Jamendo Artist",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "track-1", "title": "Quiet Realm"},
+        },
+    })
+    plan = _aggregation_plan("immediate", text="继续听")
+    waiting = MusicCoListeningResponse(
+        status="agent_waiting_user",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=False,
+        initiated_by="user_joined",
+    )
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", side_effect=_fake_persist),
+        patch.object(
+            ws_mod, "plan_user_message_aggregation",
+            new_callable=AsyncMock, return_value=plan,
+        ),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "写报告", "type": "work"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "写报告", "status": "busy"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.music.get_open_co_listening",
+            new_callable=AsyncMock,
+            return_value=waiting,
+        ),
+        patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
+        patch(
+            "app.services.music_status.reconcile_co_listening_for_status",
+            new_callable=AsyncMock,
+        ) as reconcile,
+        patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
+    ):
+        await ws_mod._handle_message(
+            fake_ws,
+            "conv-1",
+            "user-1",
+            agent,
+            "继续听",
+            workspace_id="ws-1",
+            component_card=card,
+            user_name="Song",
+        )
+
+    start_co.assert_not_awaited()
+    reconcile.assert_awaited_once()
+    assert reconcile.await_args.kwargs["status_code"] == "busy"
+    assert reconcile.await_args.kwargs["activity"] == "写报告"
+    envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
+    assert envelopes[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
 async def test_turn_aggregation_bypass_for_record_requests():
     """提醒/记忆类控制消息不等待 turn quiet window。"""
     with (

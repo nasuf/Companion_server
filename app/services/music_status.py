@@ -286,6 +286,40 @@ async def reconcile_co_listening_for_status(
     return current
 
 
+async def reconcile_co_listening_for_current_schedule(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    workspace_id: str | None,
+    user_name: str = "你",
+) -> music.MusicCoListeningResponse | None:
+    state = await get_agent_current_schedule_state(agent_id)
+    return await reconcile_co_listening_for_status(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        status_code=state["status"],
+        activity=state["activity"],
+        ai_name=state["ai_name"],
+        user_name=user_name,
+    )
+
+
+async def get_agent_current_schedule_state(agent_id: str) -> dict[str, str]:
+    schedule = await get_cached_schedule(agent_id)
+    status = get_current_status(schedule) if schedule else {
+        "status": "idle",
+        "activity": "自由时间",
+    }
+    return {
+        "status": str(status.get("status") or "idle"),
+        "activity": str(status.get("activity") or status.get("event") or "处理自己的事"),
+        "ai_name": await _resolve_agent_name(agent_id),
+    }
+
+
 async def maybe_emit_track_change_reply(
     *,
     conversation_id: str,
@@ -345,19 +379,11 @@ async def scan_music_schedule_transitions(limit: int = 100) -> None:
     )
     for raw in rows or []:
         try:
-            schedule = await get_cached_schedule(str(raw.get("agent_id")))
-            status = get_current_status(schedule) if schedule else {
-                "status": "idle",
-                "activity": "自由时间",
-            }
-            await reconcile_co_listening_for_status(
+            await reconcile_co_listening_for_current_schedule(
                 user_id=str(raw.get("user_id")),
                 agent_id=str(raw.get("agent_id")),
                 conversation_id=str(raw.get("conversation_id")),
                 workspace_id=raw.get("workspace_id"),
-                status_code=str(status.get("status") or "idle"),
-                activity=str(status.get("activity") or status.get("event") or "处理自己的事"),
-                ai_name=str(raw.get("agent_name") or "我"),
             )
         except Exception as exc:
             logger.debug("music schedule transition scan skipped row: %s", exc)
@@ -592,6 +618,8 @@ async def end_if_disconnected_after_timeout(
             conversation_id=conversation_id,
             reason="connection_lost",
         )
+        return
+    if current is not None and current.status == "agent_waiting_user":
         return
     if current is None or current.status != "active":
         if current is not None:
