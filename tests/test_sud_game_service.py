@@ -299,6 +299,137 @@ def test_notify_event_type_mapping():
     assert sud._event_type_for_notify("custom.settle") == "sud_game_settle"
 
 
+def test_empty_default_mg_id_does_not_mark_empty_session_as_gomoku(monkeypatch):
+    monkeypatch.setattr(sud.settings, "sud_default_mg_id", "")
+    session = SudSessionResponse(
+        id="s1",
+        status="playing",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id="",
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+    )
+
+    assert sud._is_gomoku_session(session) is False
+
+
+def test_gomoku_process_normalizes_moves_and_deduplicates():
+    session = SudSessionResponse(
+        id="s1",
+        status="playing",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id=sud.GOMOKU_MG_ID,
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+    )
+
+    result = sud._merge_process_result(
+        session,
+        None,
+        "move",
+        None,
+        {"uid": "u1", "move_index": 32, "piece": "X"},
+    )
+    result = sud._merge_process_result(
+        session,
+        result,
+        "move",
+        None,
+        {"uid": "u1", "move_index": 32, "piece": "X"},
+    )
+
+    gomoku = result["process"]["gomoku"]
+    assert gomoku["move_count"] == 1
+    assert gomoku["user_moves"] == 1
+    assert gomoku["last_move"]["x"] == 2
+    assert gomoku["last_move"]["y"] == 2
+    assert gomoku["last_move"]["actor"] == "user"
+
+
+def test_gomoku_settlement_records_winning_line_and_reply_observation():
+    session = SudSessionResponse(
+        id="s1",
+        status="playing",
+        sdk_enabled=True,
+        user_id="u1",
+        agent_id="a1",
+        app_id="app",
+        app_key="key",
+        bundle_id="bundle",
+        is_test_env=True,
+        mg_id=sud.GOMOKU_MG_ID,
+        room_id="room1",
+        code="code",
+        code_expires_at="2026-05-31T10:00:00+00:00",
+        play_mode="versus",
+        difficulty="newbie",
+        ai_level=1,
+        user_player=SudPlayerInfo(uid="u1", nick_name="玩家"),
+        ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
+        result={
+            "process": {
+                "gomoku": {
+                    "move_count": 16,
+                    "last_move": {"x": 7, "y": 8, "actor": "user"},
+                }
+            }
+        },
+    )
+
+    payload = {
+        "duration": 120,
+        "winningLine": [
+            {"x": 3, "y": 6},
+            {"x": 4, "y": 6},
+            {"x": 5, "y": 6},
+            {"x": 6, "y": 6},
+            {"x": 7, "y": 6},
+        ],
+        "results": [
+            {"uid": "u1", "isWin": 2},
+            {"uid": "agent:a1", "isWin": 1},
+        ],
+    }
+    result = sud._merge_process_result(
+        session,
+        sud._extract_result(session, payload),
+        "sud_game_settle",
+        None,
+        payload,
+        previous_result=session.result,
+    )
+    reply = sud._reply_for_event(session, "sud_game_settle", None, payload)
+
+    assert result["gomoku"]["win_direction"] == "horizontal"
+    assert result["process"]["gomoku"]["winning_line"][0] == {"x": 3, "y": 6}
+    assert reply is not None
+    assert "这盘不是几手就崩的" in reply
+
+
 @pytest.mark.asyncio
 async def test_sud_report_settlement_reply_is_persisted_to_chat(monkeypatch):
     session = SudSessionResponse(

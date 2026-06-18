@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 CODE_TTL_SECONDS = 30 * 60
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 DEFAULT_DEMO_MG_ID = "1461227817776713818"
+GOMOKU_MG_ID = "1676069429630722049"
 MONSTER_CRUSH_MG_ID = "1664525565526667266"
 _TERMINAL_STATUSES = {"settled", "aborted"}
 _GAME_STATUS_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
@@ -631,6 +632,8 @@ def _game_title(session: SudSessionResponse, payload: dict[str, Any]) -> str:
         return title
     if session.mg_id == MONSTER_CRUSH_MG_ID:
         return "怪物消消乐"
+    if _is_gomoku_session(session):
+        return "五子棋"
     if session.mg_id == settings.sud_default_mg_id.strip():
         return "五子棋"
     return session.mg_id
@@ -715,7 +718,7 @@ async def _update_session_from_event(
     if event_type in {"game_player_scores"} or state == "mg_common_game_player_scores":
         result = _merge_process_result(session, result, event_type, state, payload)
 
-    if event_type == "sud_game_process":
+    if event_type in {"move", "sud_game_process", "sud_game_info", "game_process_info"}:
         result = _merge_process_result(session, result, event_type, state, payload)
 
     if event_type in {"game_settle", "sud_game_settle"} or state == "mg_common_game_settle":
@@ -729,7 +732,7 @@ async def _update_session_from_event(
             payload,
             previous_result=result,
         )
-        duration_seconds = payload.get("battle_duration")
+        duration_seconds = payload.get("battle_duration") or payload.get("duration")
 
     if (
         _is_abort_event(event_type, state, payload)
@@ -920,11 +923,11 @@ def _extract_result(session: SudSessionResponse, payload: dict[str, Any]) -> dic
         if uid == session.ai_player.uid:
             ai_row = row
 
-    return {
+    result = {
         "game_round_id": payload.get("gameRoundId") or payload.get("game_round_id"),
         "room_id": payload.get("room_id") or session.room_id,
         "mg_id": payload.get("mg_id") or payload.get("mg_id_str") or session.mg_id,
-        "duration_seconds": payload.get("battle_duration"),
+        "duration_seconds": payload.get("battle_duration") or payload.get("duration"),
         "user": user_row,
         "ai": ai_row,
         "user_extras": _extract_extras(user_row),
@@ -932,6 +935,11 @@ def _extract_result(session: SudSessionResponse, payload: dict[str, Any]) -> dic
         "game_over_reason": _extract_game_over_reason(payload),
         "user_outcome": normalize_outcome((user_row or {}).get("isWin", (user_row or {}).get("is_win"))),
     }
+    if _is_gomoku_session(session):
+        gomoku = _extract_gomoku_settlement(session, result, payload)
+        if gomoku:
+            result["gomoku"] = gomoku
+    return result
 
 
 def _extract_extras(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -964,6 +972,231 @@ def _extract_game_over_reason(payload: dict[str, Any]) -> Any:
     return None
 
 
+def _is_gomoku_session(session: SudSessionResponse) -> bool:
+    default_mg_id = settings.sud_default_mg_id.strip()
+    return session.mg_id == GOMOKU_MG_ID or (
+        bool(default_mg_id) and session.mg_id == default_mg_id
+    )
+
+
+def _extract_gomoku_settlement(
+    session: SudSessionResponse,
+    result: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    user = result.get("user")
+    ai = result.get("ai")
+    user_extras = result.get("user_extras")
+    ai_extras = result.get("ai_extras")
+    gomoku: dict[str, Any] = {}
+    move_count = _first_number(
+        payload,
+        ("moveCount", "move_count", "stepCount", "step_count", "roundCount", "round_count"),
+    )
+    if move_count is None:
+        move_count = _first_number(user_extras, ("moveCount", "move_count", "stepCount", "step_count"))
+    if move_count is not None:
+        gomoku["move_count"] = int(move_count)
+    winning_line = _extract_gomoku_line(payload) or _extract_gomoku_line(user_extras) or _extract_gomoku_line(ai_extras)
+    if winning_line:
+        gomoku["winning_line"] = winning_line
+        gomoku["win_direction"] = _gomoku_line_direction(winning_line)
+    winner_uid = _winner_uid_from_result(session, user, ai)
+    if winner_uid:
+        gomoku["winner_uid"] = winner_uid
+        gomoku["winner"] = "user" if winner_uid == session.user_player.uid else "ai"
+    last_move = _extract_gomoku_move(session, payload)
+    if last_move:
+        gomoku["last_move"] = last_move
+    return gomoku
+
+
+def _winner_uid_from_result(
+    session: SudSessionResponse,
+    user: Any,
+    ai: Any,
+) -> str | None:
+    if isinstance(user, dict) and _int_or_zero(user.get("isWin") or user.get("is_win")) == 2:
+        return session.user_player.uid
+    if isinstance(ai, dict) and _int_or_zero(ai.get("isWin") or ai.get("is_win")) == 2:
+        return session.ai_player.uid
+    return None
+
+
+def _extract_gomoku_line(source: Any) -> list[dict[str, int]]:
+    if not isinstance(source, dict):
+        return []
+    raw = (
+        source.get("winningLine")
+        or source.get("winning_line")
+        or source.get("winLine")
+        or source.get("win_line")
+        or source.get("line")
+    )
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = []
+    if not isinstance(raw, list):
+        return []
+    points: list[dict[str, int]] = []
+    for item in raw:
+        point = _normalize_gomoku_point(item)
+        if point is not None:
+            points.append(point)
+    return points
+
+
+def _normalize_gomoku_point(value: Any) -> dict[str, int] | None:
+    if isinstance(value, dict):
+        x = _first_number(value, ("x", "col", "column", "chessX", "chess_x"))
+        y = _first_number(value, ("y", "row", "chessY", "chess_y"))
+        index = _first_number(value, ("index", "move_index", "pos", "position"))
+        if (x is None or y is None) and index is not None:
+            x = int(index) % 15
+            y = int(index) // 15
+        if x is not None and y is not None:
+            return {"x": int(x), "y": int(y)}
+    if isinstance(value, (int, float)):
+        index = int(value)
+        return {"x": index % 15, "y": index // 15}
+    return None
+
+
+def _gomoku_line_direction(line: list[dict[str, int]]) -> str | None:
+    if len(line) < 2:
+        return None
+    first = line[0]
+    last = line[-1]
+    dx = last["x"] - first["x"]
+    dy = last["y"] - first["y"]
+    if dy == 0:
+        return "horizontal"
+    if dx == 0:
+        return "vertical"
+    if abs(dx) == abs(dy):
+        return "diagonal"
+    return None
+
+
+def _merge_gomoku_process(
+    session: SudSessionResponse,
+    process: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    gomoku = dict(process.get("gomoku") or {})
+    move = _extract_gomoku_move(session, payload)
+    if move:
+        moves = list(gomoku.get("moves") or [])
+        added = False
+        if not _gomoku_move_exists(moves, move):
+            move["turn"] = int(gomoku.get("move_count") or len(moves)) + 1
+            moves.append(move)
+            added = True
+        gomoku["moves"] = moves[-80:]
+        gomoku["move_count"] = len(moves)
+        gomoku["last_move"] = move
+        actor = move.get("actor")
+        if added and actor in {"user", "ai"}:
+            gomoku[f"{actor}_moves"] = int(gomoku.get(f"{actor}_moves") or 0) + 1
+    raw_moves = payload.get("moves") or payload.get("steps") or payload.get("chessList") or payload.get("chess_list")
+    if isinstance(raw_moves, list):
+        for item in raw_moves:
+            item_move = _extract_gomoku_move(session, item if isinstance(item, dict) else {"index": item})
+            if item_move:
+                moves = list(gomoku.get("moves") or [])
+                if not _gomoku_move_exists(moves, item_move):
+                    item_move["turn"] = len(moves) + 1
+                    moves.append(item_move)
+                    gomoku["moves"] = moves[-80:]
+                    gomoku["move_count"] = len(moves)
+                    gomoku["last_move"] = item_move
+    winning_line = _extract_gomoku_line(payload)
+    if winning_line:
+        gomoku["winning_line"] = winning_line
+        gomoku["win_direction"] = _gomoku_line_direction(winning_line)
+    winner_uid = str(payload.get("winnerUid") or payload.get("winner_uid") or payload.get("winner") or "")
+    if winner_uid:
+        gomoku["winner_uid"] = winner_uid
+        if winner_uid == session.user_player.uid:
+            gomoku["winner"] = "user"
+        elif winner_uid == session.ai_player.uid:
+            gomoku["winner"] = "ai"
+    if gomoku:
+        process["gomoku"] = gomoku
+    return process
+
+
+def _extract_gomoku_move(
+    session: SudSessionResponse,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    move_source = payload.get("move") if isinstance(payload.get("move"), dict) else payload
+    point = _normalize_gomoku_point(move_source)
+    if point is None:
+        point = _normalize_gomoku_point(
+            {
+                "index": payload.get("move_index")
+                or payload.get("pos")
+                or payload.get("position")
+                or payload.get("index")
+            }
+        )
+    if point is None:
+        return None
+    uid = str(
+        payload.get("uid")
+        or payload.get("userId")
+        or payload.get("user_id")
+        or payload.get("playerId")
+        or payload.get("player_id")
+        or ""
+    )
+    piece = str(payload.get("piece") or payload.get("chess") or payload.get("color") or "").strip()
+    actor = None
+    if uid == session.user_player.uid:
+        actor = "user"
+    elif uid == session.ai_player.uid:
+        actor = "ai"
+    elif piece.upper() in {"X", "BLACK", "B", "1", "黑"}:
+        actor = "user"
+    elif piece.upper() in {"O", "WHITE", "W", "2", "白"}:
+        actor = "ai"
+    move = {**point}
+    if uid:
+        move["uid"] = uid
+    if actor:
+        move["actor"] = actor
+    if piece:
+        move["piece"] = piece
+    return move
+
+
+def _gomoku_move_exists(moves: list[Any], move: dict[str, Any]) -> bool:
+    for item in moves:
+        if not isinstance(item, dict):
+            continue
+        if item.get("x") == move.get("x") and item.get("y") == move.get("y"):
+            return True
+    return False
+
+
+def _first_number(source: Any, keys: tuple[str, ...]) -> int | float | None:
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        value = source.get(key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except Exception:
+            continue
+        return int(number) if number.is_integer() else number
+    return None
+
+
 def _merge_process_result(
     session: SudSessionResponse,
     result: dict[str, Any] | None,
@@ -977,6 +1210,8 @@ def _merge_process_result(
     process = dict(merged.get("process") or {})
     if event_type == "game_player_scores" or state == "mg_common_game_player_scores":
         process = _merge_score_process(session, process, payload)
+    if _is_gomoku_session(session):
+        process = _merge_gomoku_process(session, process, payload)
     if event_type == "sud_game_process":
         events = list(process.get("events") or [])
         event_name = str(payload.get("event") or state or "").strip()
@@ -1054,6 +1289,9 @@ def _process_reply_fragment(result: dict[str, Any]) -> str:
     lead_changes = int(process.get("lead_changes") or 0)
     if lead_changes:
         observations.append("中间还来回翻过一次节奏")
+    gomoku_observation = _friendly_gomoku_observation(result, process)
+    if gomoku_observation:
+        observations.append(gomoku_observation)
     user_extras = result.get("user_extras")
     if isinstance(user_extras, dict):
         good = user_extras.get("numGood")
@@ -1100,6 +1338,34 @@ def _friendly_combo_highlight(
         return "你后面手感其实慢慢起来了"
     if good_count:
         return "有几步选择是对的"
+    return None
+
+
+def _friendly_gomoku_observation(
+    result: dict[str, Any],
+    process: dict[str, Any],
+) -> str | None:
+    gomoku = process.get("gomoku")
+    if not isinstance(gomoku, dict):
+        gomoku = {}
+    settled = result.get("gomoku")
+    if isinstance(settled, dict):
+        gomoku = {**gomoku, **settled}
+    move_count = _int_or_zero(gomoku.get("move_count"))
+    direction = gomoku.get("win_direction")
+    if move_count >= 20:
+        return "这盘拖到中后段才分出来，挺有来回"
+    if move_count >= 10:
+        return "这盘不是几手就崩的，前面有几步防得住"
+    if direction == "diagonal":
+        return "最后那条斜线其实藏得挺深"
+    if direction == "horizontal":
+        return "最后横向那条线收得很快"
+    if direction == "vertical":
+        return "最后竖线压下来那一下挺关键"
+    last_move = gomoku.get("last_move")
+    if isinstance(last_move, dict) and last_move:
+        return "最后那手位置我记下来了，下次可以提前一拍防"
     return None
 
 
