@@ -134,6 +134,7 @@ from app.api.public.users import router as users_router
 from app.api.public.agents import router as agents_router
 from app.api.public.conversations import router as conversations_router
 from app.api.public.chat import router as chat_router
+from app.api.public.chat_media import router as chat_media_router
 from app.api.public.memories import router as memories_router
 from app.api.public.reminders import router as reminders_router
 from app.api.public.emotions import router as emotions_router
@@ -166,6 +167,7 @@ app.include_router(health_router)
 app.include_router(users_router)
 app.include_router(agents_router)
 app.include_router(conversations_router)
+app.include_router(chat_media_router)
 app.include_router(chat_router)
 app.include_router(memories_router)
 app.include_router(reminders_router)

@@ -27,6 +27,9 @@ from app.services.proactive.sender import send_first_greeting
 from app.services.relationship.emotion import quick_emotion_estimate
 from app.services.runtime.ws_manager import manager
 from app.services.runtime.tasks import fire_background
+from app.services.chat_media import repo as chat_media_repo
+from app.services.chat_media.prompt import render_user_message_with_attachments
+from app.services.chat_media.vision import ensure_vision_summaries
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +43,31 @@ def _message_metadata(
     *,
     client_id: str | None = None,
     component_card: dict | None = None,
+    attachments: list[dict] | None = None,
 ) -> dict | None:
     metadata = dict(base or {})
     if client_id:
         metadata["client_id"] = client_id
     if component_card:
         metadata["component_card"] = component_card
+    if attachments:
+        metadata["attachments"] = attachments
     return metadata or None
+
+
+def _sanitize_attachment_ids(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    ids: list[str] = []
+    for item in raw[:3]:
+        if isinstance(item, dict):
+            raw_id = item.get("id")
+        else:
+            raw_id = item
+        value = str(raw_id or "").strip()
+        if value and len(value) <= 80:
+            ids.append(value)
+    return list(dict.fromkeys(ids))
 
 
 def _sanitize_component_card(raw: object) -> dict | None:
@@ -601,7 +622,8 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     client_id = payload.get("client_id")
                     raw_component_card = payload.get("component_card")
                     component_card = _sanitize_component_card(raw_component_card)
-                    if not text and component_card is None:
+                    attachment_ids = _sanitize_attachment_ids(payload.get("attachments"))
+                    if not text and component_card is None and not attachment_ids:
                         continue
                     client_id_present = isinstance(client_id, str) and bool(client_id)
                     component_card_type = (
@@ -629,6 +651,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                         workspace_id=workspace_id,
                         client_id=client_id,
                         component_card=component_card,
+                        attachment_ids=attachment_ids,
                         user_name=cached_username,
                     )
 
@@ -696,9 +719,24 @@ async def _handle_message(
     workspace_id: str | None = None,
     client_id: str | None = None,
     component_card: dict | None = None,
+    attachment_ids: list[str] | None = None,
     user_name: str | None = None,
 ) -> None:
     """处理用户消息：聚合检查 → 生成回复 → 推送。"""
+    attachments = await chat_media_repo.get_message_attachments(
+        attachment_ids=attachment_ids or [],
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
+    if attachment_ids and len(attachments) != len(set(attachment_ids)):
+        await ws.send_json({"type": "error", "data": {"message": "图片附件无效或已发送"}})
+        return
+    attachment_metadata = await ensure_vision_summaries(
+        attachments,
+        user_text=text,
+    )
+    prompt_text = render_user_message_with_attachments(text, attachment_metadata)
+
     schedule = await get_cached_schedule(agent.id)
     if not schedule:
         schedule = await generate_daily_schedule(
@@ -709,14 +747,14 @@ async def _handle_message(
         agent_id=agent.id,
         user_id=user_id,
         received_status=received_status,
-        user_emotion=quick_emotion_estimate(text),
+        user_emotion=quick_emotion_estimate(prompt_text),
     )
 
     plan = await plan_user_message_aggregation(
         agent_id=agent.id,
         user_id=user_id,
         conversation_id=conversation_id,
-        text=text,
+        text=prompt_text,
         reply_context=current_context,
     )
     user_message_id = await _persist_user_message(
@@ -726,7 +764,14 @@ async def _handle_message(
             plan.metadata,
             client_id=client_id,
             component_card=component_card,
+            attachments=attachment_metadata,
         ),
+    )
+    await chat_media_repo.bind_attachments_to_message(
+        attachment_ids=[item.id for item in attachments],
+        message_id=user_message_id,
+        user_id=user_id,
+        conversation_id=conversation_id,
     )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
     try:

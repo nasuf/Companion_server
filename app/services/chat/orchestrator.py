@@ -28,6 +28,7 @@ from app.observability.events import (
 )
 from app.services.llm.models import get_chat_model, convert_messages
 from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
+from app.services.chat_media.prompt import render_message_content_for_prompt
 from app.services.prompting.store import (
     get_prompt_text,
     reset_prompt_runtime_context,
@@ -763,7 +764,10 @@ async def stream_chat_response(
             {
                 "id": getattr(m, "id", None),  # 给 format_recent_context 排除当前消息用
                 "role": m.role,
-                "content": m.content,
+                "content": render_message_content_for_prompt(
+                    m.content,
+                    m.metadata if isinstance(m.metadata, dict) else None,
+                ),
                 "createdAt": m.createdAt.isoformat() if getattr(m, "createdAt", None) else None,
             }
             for m in recent_messages
