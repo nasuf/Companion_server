@@ -29,7 +29,7 @@ jobs:
           username: ${{ vars.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ vars.VPS_PORT }}
-          source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example,.env.sample"
+          source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example"
           target: "/app/companion-server"
 
       - name: Deploy server stack on VPS
@@ -92,6 +92,9 @@ jobs:
             REMOTE_CHAT_MODEL=${{ vars.REMOTE_CHAT_MODEL }}
             REMOTE_SMALL_MODEL=${{ vars.REMOTE_SMALL_MODEL }}
             DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
+            ARK_API_KEY=${{ secrets.ARK_API_KEY }}
+            ARK_BASE_URL=${{ vars.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3' }}
+            DOUBAO_VISION_MODEL=${{ vars.DOUBAO_VISION_MODEL || 'doubao-1-5-vision-pro-32k-250115' }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
             REPLY_DELAY_ENABLED=${{ vars.REPLY_DELAY_ENABLED }}
@@ -122,7 +125,7 @@ jobs:
             NOTIFICATION_DISPATCH_BATCH_SIZE=${{ vars.NOTIFICATION_DISPATCH_BATCH_SIZE || '50' }}
             EOF
 
-            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES; do
+            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES ARK_API_KEY ARK_BASE_URL DOUBAO_VISION_MODEL; do
               value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
               if [ -z "$value" ]; then
                 echo "$key is required for production deploy"
