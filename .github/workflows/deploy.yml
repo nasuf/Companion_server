@@ -121,6 +121,12 @@ jobs:
             JAMENDO_CLIENT_ID=${{ secrets.JAMENDO_CLIENT_ID }}
             JAMENDO_BASE_URL=${{ vars.JAMENDO_BASE_URL || 'https://api.jamendo.com/v3.0' }}
             JAMENDO_DEFAULT_LIBRARIES=${{ vars.JAMENDO_DEFAULT_LIBRARIES || 'focus,ambient,sleep' }}
+            PROACTIVE_LINK_RECOMMENDATION_ENABLED=${{ vars.PROACTIVE_LINK_RECOMMENDATION_ENABLED || 'true' }}
+            PROACTIVE_LINK_RECOMMENDATION_PROBABILITY=${{ vars.PROACTIVE_LINK_RECOMMENDATION_PROBABILITY || '0.03' }}
+            CHAT_LINK_SEARCH_PROVIDER=${{ vars.CHAT_LINK_SEARCH_PROVIDER || 'custom' }}
+            TAVILY_SEARCH_ENDPOINT=${{ vars.TAVILY_SEARCH_ENDPOINT || 'https://api.tavily.com/search' }}
+            CHAT_LINK_SEARCH_TIMEOUT_S=${{ vars.CHAT_LINK_SEARCH_TIMEOUT_S || '8' }}
+            TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
             APNS_ENABLED=$APNS_ENABLED
             APNS_TEAM_ID=${{ vars.APNS_TEAM_ID }}
             APNS_KEY_ID=${{ secrets.APNS_KEY_ID }}
@@ -139,6 +145,17 @@ jobs:
                 exit 1
               fi
             done
+
+            CHAT_LINK_SEARCH_PROVIDER_VALUE="$(grep -E '^CHAT_LINK_SEARCH_PROVIDER=' .env | cut -d= -f2-)"
+            if [ "$CHAT_LINK_SEARCH_PROVIDER_VALUE" = "tavily" ]; then
+              for key in TAVILY_API_KEY TAVILY_SEARCH_ENDPOINT CHAT_LINK_SEARCH_TIMEOUT_S; do
+                value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+                if [ -z "$value" ]; then
+                  echo "$key is required when CHAT_LINK_SEARCH_PROVIDER=tavily"
+                  exit 1
+                fi
+              done
+            fi
 
             if [ "$APNS_ENABLED" = "true" ]; then
               for key in APNS_TEAM_ID APNS_KEY_ID APNS_AUTH_KEY_PATH APNS_TOPIC APNS_USE_SANDBOX; do
