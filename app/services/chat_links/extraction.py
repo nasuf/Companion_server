@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import httpx
 
@@ -110,6 +110,7 @@ async def extract_link_metadata(
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "accept-language": "zh-CN,zh;q=0.9,en;q=0.6",
         }
+        api_platform_data: dict[str, str] = {}
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=timeout,
@@ -119,6 +120,19 @@ async def extract_link_metadata(
             final_url = str(response.url)
             platform = platform_for_url(final_url)
             if response.status_code >= 400:
+                if platform_for_url(source_url) == "微博" or platform == "微博":
+                    api_platform_data = await _fetch_weibo_status_metadata(
+                        client,
+                        source_url,
+                        final_url,
+                    )
+                    if api_platform_data:
+                        return _metadata_from_platform_data(
+                            base=base,
+                            platform_data=api_platform_data,
+                            final_url=_safe_final_url(source_url, final_url),
+                            platform="微博",
+                        )
                 return _with_error(
                     base,
                     final_url=final_url,
@@ -126,6 +140,16 @@ async def extract_link_metadata(
                     error=f"页面返回 HTTP {response.status_code}",
                 )
             html = response.text[:1_500_000]
+            if platform_for_url(source_url) == "微博" or platform == "微博":
+                api_platform_data = await _fetch_weibo_status_metadata(
+                    client,
+                    source_url,
+                    final_url,
+                )
+            if platform_for_url(source_url) == "今日头条" or platform == "今日头条":
+                api_platform_data.update(
+                    await _fetch_toutiao_article_metadata(client, source_url, final_url)
+                )
     except Exception as exc:
         return _with_error(base, error=f"请求页面失败: {str(exc)[:180]}")
 
@@ -135,7 +159,11 @@ async def extract_link_metadata(
     except Exception:
         logger.debug("[chat-links] html parser failed", exc_info=True)
 
-    platform_data = _platform_json_metadata(html, platform_for_url(str(response.url)))
+    final_url = _safe_final_url(source_url, str(response.url))
+    platform = platform_for_url(final_url)
+    platform_data = _platform_json_metadata(html, platform)
+    if api_platform_data:
+        platform_data.update(api_platform_data)
     title = _first_non_empty(
         platform_data.get("title"),
         parsed.meta.get("og:title"),
@@ -167,8 +195,8 @@ async def extract_link_metadata(
     summary = _summary_from_text(content_text or description or title or shared)
     return LinkMetadata(
         source_url=source_url,
-        final_url=str(response.url),
-        platform=platform_for_url(str(response.url)),
+        final_url=final_url,
+        platform=platform,
         title=_clean_text(title or "未命名链接")[:240],
         description=_clean_text(description)[:1000],
         author=_clean_text(author)[:120] if author else None,
@@ -198,6 +226,37 @@ def platform_for_url(raw_url: str) -> str:
 
 def accent_for_platform(platform: str) -> str:
     return _APP_ACCENTS.get(platform, "#177DDC")
+
+
+def app_url_for_link(*, platform: str, source_url: str, final_url: str) -> str | None:
+    raw_url = final_url or source_url
+    if platform == "今日头条":
+        article_id = _first_regex_group(raw_url, r"/article/(\d+)")
+        if article_id:
+            return f"snssdk141://detail?groupid={article_id}"
+    if platform == "微博":
+        status_id = _weibo_status_id(raw_url) or _weibo_status_id(source_url)
+        if status_id:
+            return f"sinaweibo://detail?mblogid={status_id}"
+    if platform == "抖音":
+        video_id = _first_regex_group(raw_url, r"/video/(\d+)")
+        if video_id:
+            return f"snssdk1128://aweme/detail/{video_id}"
+    if platform == "知乎":
+        answer_id = _first_regex_group(raw_url, r"/answer/(\d+)")
+        if answer_id:
+            return f"zhihu://answers/{answer_id}"
+        question_id = _first_regex_group(raw_url, r"/question/(\d+)")
+        if question_id:
+            return f"zhihu://questions/{question_id}"
+    if platform == "小红书":
+        note_id = (
+            _first_regex_group(raw_url, r"/(?:explore|discovery/item)/([0-9a-fA-F]+)")
+            or _first_regex_group(source_url, r"/(?:explore|discovery/item)/([0-9a-fA-F]+)")
+        )
+        if note_id:
+            return f"xhsdiscover://item/{note_id}"
+    return None
 
 
 def _resolve_source_url(*, url: str | None, shared_text: str | None) -> str:
@@ -234,6 +293,41 @@ def _summary_from_text(text: str) -> str:
     return cleaned[:360]
 
 
+def _metadata_from_platform_data(
+    *,
+    base: LinkMetadata,
+    platform_data: dict[str, str],
+    final_url: str,
+    platform: str,
+) -> LinkMetadata:
+    title = _first_non_empty(platform_data.get("title"), base.title) or "未命名链接"
+    description = _first_non_empty(platform_data.get("description"), base.description) or ""
+    content_text = _clean_text(
+        platform_data.get("content_text")
+        or "\n\n".join(part for part in (title, description) if part)
+        or base.content_text
+    )
+    original_text = _clean_text(platform_data.get("original_text") or content_text)
+    return LinkMetadata(
+        source_url=base.source_url,
+        final_url=final_url,
+        platform=platform,
+        title=_clean_text(title)[:240],
+        description=_clean_text(description)[:1000],
+        author=_clean_text(platform_data.get("author"))[:120]
+        if platform_data.get("author")
+        else base.author,
+        image_url=_clean_text(platform_data.get("image_url"))[:2000]
+        if platform_data.get("image_url")
+        else base.image_url,
+        content_text=content_text[:6000],
+        original_text=original_text[:6000],
+        summary=_summary_from_text(content_text or description or title),
+        status="ready",
+        error=None,
+    )
+
+
 def _with_error(
     base: LinkMetadata,
     *,
@@ -263,6 +357,248 @@ def _first_non_empty(*values: str | None) -> str | None:
         cleaned = _clean_text(value)
         if cleaned:
             return cleaned
+    return None
+
+
+def _safe_final_url(source_url: str, final_url: str) -> str:
+    parsed = urlparse(final_url)
+    host = (parsed.hostname or "").lower()
+    if host in {"passport.weibo.com", "visitor.passport.weibo.cn"}:
+        target = parse_qs(parsed.query).get("url", [""])[0]
+        if target:
+            return target
+        return source_url
+    return final_url
+
+
+def _first_regex_group(raw: str, pattern: str) -> str | None:
+    match = re.search(pattern, raw)
+    return match.group(1) if match else None
+
+
+def _weibo_status_id(raw_url: str) -> str | None:
+    parsed = urlparse(raw_url)
+    path_matches = [
+        segment
+        for segment in parsed.path.split("/")
+        if re.fullmatch(r"\d{10,}", segment)
+    ]
+    if path_matches:
+        return path_matches[-1]
+    query = parse_qs(parsed.query)
+    for key in ("id", "mid", "mblogid"):
+        raw = query.get(key, [""])[0]
+        if re.fullmatch(r"\d{10,}", raw):
+            return raw
+    matches = re.findall(r"\b\d{10,}\b", raw_url)
+    return matches[-1] if matches else None
+
+
+async def _fetch_weibo_status_metadata(
+    client: httpx.AsyncClient,
+    source_url: str,
+    final_url: str,
+) -> dict[str, str]:
+    status_id = _weibo_status_id(source_url) or _weibo_status_id(final_url)
+    if not status_id:
+        return {}
+    cookie = await _weibo_visitor_cookie(client)
+    if not cookie:
+        return {}
+    try:
+        response = await client.get(
+            f"https://weibo.com/ajax/statuses/show?id={quote(status_id)}",
+            headers={
+                "user-agent": "Mozilla/5.0",
+                "referer": "https://weibo.com/",
+                "accept": "application/json",
+                "cookie": cookie,
+            },
+        )
+        response.raise_for_status()
+        value = response.json()
+    except Exception:
+        logger.debug("[chat-links] weibo ajax metadata failed", exc_info=True)
+        return {}
+    return _weibo_metadata_from_api_value(value)
+
+
+async def _fetch_toutiao_article_metadata(
+    client: httpx.AsyncClient,
+    source_url: str,
+    final_url: str,
+) -> dict[str, str]:
+    article_id = (
+        _first_regex_group(source_url, r"/article/(\d+)")
+        or _first_regex_group(final_url, r"/article/(\d+)")
+        or _first_regex_group(source_url, r"/i(\d+)")
+        or _first_regex_group(final_url, r"/i(\d+)")
+    )
+    if not article_id:
+        return {}
+    urls = [
+        f"https://m.toutiao.com/i{article_id}/info/",
+        f"https://www.toutiao.com/api/pc/detail/?group_id={article_id}",
+    ]
+    for api_url in urls:
+        try:
+            response = await client.get(
+                api_url,
+                headers={
+                    "user-agent": _USER_AGENT,
+                    "referer": "https://www.toutiao.com/",
+                    "accept": "application/json",
+                },
+            )
+            response.raise_for_status()
+            value = response.json()
+        except Exception:
+            logger.debug("[chat-links] toutiao article metadata failed", exc_info=True)
+            continue
+        data = value.get("data") if isinstance(value, dict) else None
+        if not isinstance(data, dict):
+            continue
+        metadata = _toutiao_metadata_from_api_value(data)
+        if metadata:
+            return metadata
+    return {}
+
+
+def _toutiao_metadata_from_api_value(value: dict[str, Any]) -> dict[str, str]:
+    raw_content = value.get("content")
+    content = raw_content if isinstance(raw_content, str) else ""
+    title = _first_non_empty(
+        _json_string(value.get("title")),
+        _first_img_alt(content),
+    )
+    description = _clean_text(content)
+    author = _first_non_empty(
+        _json_string(value.get("source")),
+        _json_string(value.get("detail_source")),
+        _json_string(value.get("media_name")),
+    )
+    media_user = value.get("media_user")
+    if not author and isinstance(media_user, dict):
+        author = _first_non_empty(
+            _json_string(media_user.get("screen_name")),
+            _json_string(media_user.get("name")),
+        )
+    image_url = _first_img_src(content) or _json_string(value.get("poster_url"))
+    data = {
+        "title": title or "",
+        "description": description,
+        "author": author or "",
+        "image_url": image_url or "",
+        "content_text": "\n\n".join(part for part in (title, description) if part),
+        "original_text": description,
+    }
+    return {key: val for key, val in data.items() if val}
+
+
+async def _weibo_visitor_cookie(client: httpx.AsyncClient) -> str | None:
+    visitor_url = (
+        "https://passport.weibo.com/visitor/genvisitor?cb=gen_callback&fp="
+        "%7B%22os%22%3A%221%22%2C%22browser%22%3A%22Chrome%22%2C"
+        "%22fonts%22%3A%22undefined%22%2C%22screenInfo%22%3A%221920*1080*24%22%2C"
+        "%22plugins%22%3A%22%22%7D"
+    )
+    try:
+        visitor_response = await client.get(
+            visitor_url,
+            headers={"user-agent": "Mozilla/5.0"},
+        )
+        visitor = _jsonp_value(visitor_response.text)
+        tid = (
+            visitor.get("data", {}).get("tid")
+            if isinstance(visitor.get("data"), dict)
+            else None
+        )
+        if not tid:
+            return None
+        incarnate_url = (
+            "https://passport.weibo.com/visitor/visitor"
+            f"?a=incarnate&t={quote(str(tid))}&w=2&c=095&gc=&cb=cross_domain&from=weibo"
+        )
+        incarnate_response = await client.get(
+            incarnate_url,
+            headers={"user-agent": "Mozilla/5.0"},
+        )
+        incarnate = _jsonp_value(incarnate_response.text)
+        data = incarnate.get("data") if isinstance(incarnate.get("data"), dict) else {}
+        sub = data.get("sub")
+        subp = data.get("subp")
+        if isinstance(sub, str) and isinstance(subp, str):
+            return f"SUB={sub}; SUBP={subp}"
+    except Exception:
+        logger.debug("[chat-links] weibo visitor token failed", exc_info=True)
+    return None
+
+
+def _jsonp_value(raw: str) -> dict[str, Any]:
+    match = re.search(r"\((\{.*\})\)\s*;?\s*$", raw.strip(), re.S)
+    if not match:
+        return {}
+    try:
+        value = json.loads(match.group(1))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _weibo_metadata_from_api_value(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or value.get("error"):
+        return {}
+    description = _first_non_empty(
+        _json_string(value.get("text_raw")),
+        _json_string(value.get("text")),
+    )
+    author = None
+    user = value.get("user")
+    if isinstance(user, dict):
+        author = _json_string(user.get("screen_name"))
+    image_url = _weibo_image_url(value)
+    title = _summary_from_text(description or "")
+    data = {
+        "title": title[:80] if title else "",
+        "description": description or "",
+        "author": author or "",
+        "image_url": image_url or "",
+        "content_text": description or "",
+        "original_text": description or "",
+    }
+    return {key: val for key, val in data.items() if val}
+
+
+def _first_img_src(html: str) -> str | None:
+    match = re.search(r"""<img\b[^>]*\bsrc=["']([^"']+)["']""", html, re.I)
+    return unescape(match.group(1)) if match else None
+
+
+def _first_img_alt(html: str) -> str | None:
+    match = re.search(r"""<img\b[^>]*\balt=["']([^"']+)["']""", html, re.I)
+    return _clean_text(unescape(match.group(1))) if match else None
+
+
+def _json_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        return _clean_text(value)
+    return None
+
+
+def _weibo_image_url(value: dict[str, Any]) -> str | None:
+    pic_infos = value.get("pic_infos")
+    if not isinstance(pic_infos, dict):
+        return None
+    for pic in pic_infos.values():
+        if not isinstance(pic, dict):
+            continue
+        for key in ("largest", "large", "original", "bmiddle", "thumbnail"):
+            image = pic.get(key)
+            if not isinstance(image, dict):
+                continue
+            url = image.get("url")
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                return url
     return None
 
 
@@ -347,7 +683,26 @@ def _platform_json_metadata(html: str, platform: str) -> dict[str, str]:
         "title": ("title", "displayTitle", "questionTitle", "headline", "text_raw"),
         "description": ("desc", "description", "excerpt", "content", "text", "articleBody"),
         "author": ("nickname", "nickName", "screen_name", "authorName", "name"),
-        "image_url": ("urlDefault", "urlPre", "cover", "poster", "thumbnailUrl", "image", "pic"),
+        "image_url": (
+            "urlDefault",
+            "urlPre",
+            "url",
+            "url_list",
+            "imageList",
+            "image_list",
+            "large_image_url",
+            "middle_image",
+            "thumb_image",
+            "thumbnail",
+            "thumbnailUrl",
+            "cover",
+            "cover_url",
+            "coverUrl",
+            "poster",
+            "image",
+            "pic",
+            "pics",
+        ),
     }
     data: dict[str, str] = {}
     for output_key, keys in fields.items():
@@ -462,6 +817,9 @@ def _find_first_json_string(values: list[Any], keys: tuple[str, ...]) -> str | N
                 if isinstance(raw, str) and _clean_text(raw):
                     return _clean_text(raw)
                 if isinstance(raw, list):
+                    for item in raw:
+                        if isinstance(item, str) and _clean_text(item):
+                            return _clean_text(item)
                     nested = walk(raw)
                     if nested:
                         return nested

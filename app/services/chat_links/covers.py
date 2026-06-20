@@ -40,7 +40,7 @@ async def cache_link_cover(
     if not _should_cache(remote_url):
         return CachedCoverResult(metadata=metadata, extra_metadata={})
     try:
-        blob, mime = await _download_image(remote_url)
+        blob, mime = await _download_image(remote_url, referer_url=metadata.final_url or metadata.source_url)
         storage_key = storage.save_image_blob(user_id=user_id, blob=blob, mime=mime)
         cached_url = storage.media_url(storage_key)
     except Exception as exc:
@@ -63,11 +63,11 @@ def _should_cache(raw_url: str) -> bool:
     return True
 
 
-async def _download_image(url: str) -> tuple[bytes, str]:
+async def _download_image(url: str, referer_url: str | None = None) -> tuple[bytes, str]:
     headers = {
         "user-agent": _USER_AGENT,
         "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        "referer": _origin(url),
+        "referer": _origin(referer_url or url),
     }
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers=headers, follow_redirects=True) as client:
         response = await client.get(url)

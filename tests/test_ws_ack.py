@@ -97,6 +97,26 @@ def test_sanitize_component_card_limits_payload_size():
     assert len(card["payload"]["content"]) == 1000
 
 
+def test_sanitize_external_link_card_preserves_app_url():
+    card = ws_mod._sanitize_component_card({
+        "type": "external_link",
+        "title": "头条文章",
+        "payload": {
+            "link_id": "link-1",
+            "app_url": "snssdk141://detail?groupid=7651359327906710016",
+            "final_url": "https://www.toutiao.com/article/7651359327906710016/",
+            "ignored": "x",
+        },
+    })
+
+    assert card is not None
+    assert card["payload"] == {
+        "link_id": "link-1",
+        "app_url": "snssdk141://detail?groupid=7651359327906710016",
+        "final_url": "https://www.toutiao.com/article/7651359327906710016/",
+    }
+
+
 def test_sanitize_component_card_rejects_unknown_type():
     assert ws_mod._sanitize_component_card({"type": "unknown"}) is None
 

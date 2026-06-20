@@ -183,6 +183,7 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         payload = {}
         for key, limit in (
             ("link_id", 80),
+            ("app_url", 2000),
             ("source_url", 2000),
             ("final_url", 2000),
             ("platform", 40),

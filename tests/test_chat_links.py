@@ -7,6 +7,10 @@ from app.services.chat_links.extraction import (
     LinkMetadata,
     _absolute_http_url,
     _platform_json_metadata,
+    _toutiao_metadata_from_api_value,
+    _weibo_metadata_from_api_value,
+    _weibo_status_id,
+    app_url_for_link,
     extract_first_url,
     extract_urls,
     platform_for_url,
@@ -123,6 +127,18 @@ def test_platform_json_metadata_reads_common_embedded_shapes():
     }
 
 
+def test_platform_json_metadata_reads_nested_image_lists():
+    html = """
+    <script id="RENDER_DATA" type="application/json">
+      {"article":{"title":"有图文章","content":"正文","imageList":[{"url_list":["https://img.example/cover.jpg"]}]}}
+    </script>
+    """
+
+    assert _platform_json_metadata(html, "今日头条")["image_url"] == (
+        "https://img.example/cover.jpg"
+    )
+
+
 def test_absolute_http_url_normalizes_cover_candidates():
     assert _absolute_http_url("//cdn.example.com/a.jpg", "https://xhslink.com/abc") == (
         "https://cdn.example.com/a.jpg"
@@ -149,6 +165,24 @@ def test_link_card_prompt_rendering_is_model_visible():
     assert "平台：知乎" in rendered
     assert "标题：一个关于长期记忆的问题" in rendered
     assert "摘要：讨论伴侣型 AI 如何处理长期记忆边界。" in rendered
+    assert "围绕链接卡片中已读取到的内容回应" in rendered
+
+
+@pytest.mark.asyncio
+async def test_daily_link_groups_ignore_unbound_preview_cards(monkeypatch):
+    captured = {}
+
+    async def fake_query_raw(query, *args):
+        captured["query"] = query
+        captured["args"] = args
+        return []
+
+    monkeypatch.setattr(repo_mod.db, "query_raw", fake_query_raw)
+
+    groups = await repo_mod.list_user_link_groups("user-1")
+
+    assert groups == []
+    assert "l.message_id IS NOT NULL" in captured["query"]
 
 
 def test_component_card_for_link_has_openable_payload():
@@ -177,6 +211,61 @@ def test_component_card_for_link_has_openable_payload():
     assert card["type"] == "external_link"
     assert card["payload"]["link_id"] == "link-1"
     assert card["payload"]["final_url"] == "https://www.douyin.com/video/1"
+    assert card["payload"]["app_url"] == "snssdk1128://aweme/detail/1"
+
+
+def test_app_url_for_toutiao_prefers_native_detail_scheme():
+    assert (
+        app_url_for_link(
+            platform="今日头条",
+            source_url="https://www.toutiao.com/article/7651359327906710016/",
+            final_url="https://www.toutiao.com/article/7651359327906710016/?wid=1",
+        )
+        == "snssdk141://detail?groupid=7651359327906710016"
+    )
+
+
+def test_weibo_ajax_metadata_beats_visitor_page_title():
+    metadata = _weibo_metadata_from_api_value(
+        {
+            "text_raw": "Codex 做游戏的首周销量出了，39份。",
+            "user": {"screen_name": "一起 Vibe"},
+            "pic_infos": {
+                "pic1": {
+                    "large": {
+                        "url": "https://wx1.sinaimg.cn/large/example.jpg",
+                    }
+                }
+            },
+        }
+    )
+
+    assert metadata["title"] == "Codex 做游戏的首周销量出了，39份。"
+    assert metadata["description"] == "Codex 做游戏的首周销量出了，39份。"
+    assert metadata["author"] == "一起 Vibe"
+    assert metadata["image_url"] == "https://wx1.sinaimg.cn/large/example.jpg"
+
+
+def test_toutiao_api_metadata_extracts_first_article_image():
+    metadata = _toutiao_metadata_from_api_value(
+        {
+            "title": "头条标题",
+            "source": "上观新闻",
+            "content": '<html><body><img src="https://p3-sign.toutiaoimg.com/cover.jpeg" alt="头条标题">正文内容</body></html>',
+        }
+    )
+
+    assert metadata["title"] == "头条标题"
+    assert metadata["author"] == "上观新闻"
+    assert metadata["image_url"] == "https://p3-sign.toutiaoimg.com/cover.jpeg"
+    assert "正文内容" in metadata["description"]
+
+
+def test_weibo_status_id_uses_last_numeric_path_segment():
+    assert (
+        _weibo_status_id("https://weibo.com/2657550845/5311209856304539")
+        == "5311209856304539"
+    )
 
 
 def test_proactive_candidate_urls_only_keep_supported_platforms():
@@ -572,8 +661,9 @@ async def test_prepare_proactive_link_recommendation_records_search_source(monke
 async def test_cache_link_cover_rewrites_remote_image_to_local_media(monkeypatch, tmp_path):
     monkeypatch.setattr(cover_mod.storage, "_MEDIA_DIR", tmp_path)
 
-    async def fake_download_image(url):
+    async def fake_download_image(url, referer_url=None):
         assert url == "https://sns-webpic-qc.xhscdn.com/cover.jpg"
+        assert referer_url == "https://www.xiaohongshu.com/explore/1"
         return b"image-bytes", "image/jpeg"
 
     monkeypatch.setattr(cover_mod, "_download_image", fake_download_image)
@@ -595,7 +685,7 @@ async def test_cache_link_cover_rewrites_remote_image_to_local_media(monkeypatch
 
 
 async def test_cache_link_cover_skips_non_remote_images(monkeypatch):
-    async def fail_download_image(url):
+    async def fail_download_image(url, referer_url=None):
         raise AssertionError("local images should not be downloaded")
 
     monkeypatch.setattr(cover_mod, "_download_image", fail_download_image)

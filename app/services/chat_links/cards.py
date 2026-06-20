@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.chat_links.extraction import accent_for_platform
+from app.services.chat_links.extraction import accent_for_platform, app_url_for_link
 
 
 def component_card_for_link(link: Any) -> dict[str, Any]:
@@ -19,6 +19,13 @@ def component_card_for_link(link: Any) -> dict[str, Any]:
         payload["image_url"] = link.image_url
     if link.summary:
         payload["summary"] = link.summary
+    app_url = app_url_for_link(
+        platform=link.platform,
+        source_url=link.source_url,
+        final_url=link.final_url,
+    )
+    if app_url:
+        payload["app_url"] = app_url
     if link.error:
         payload["error"] = link.error
     return {

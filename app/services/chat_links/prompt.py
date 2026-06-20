@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-_LINK_PLACEHOLDER = "用户分享了一个链接"
+_LINK_PLACEHOLDER = "用户分享了一个链接，请阅读链接卡片内容并自然回应"
 
 
 def render_message_content_for_prompt(
@@ -61,6 +61,7 @@ def _link_lines(link: dict[str, Any]) -> list[str]:
         lines.append(f"链接：{final_url}")
     if status == "partial" and error:
         lines.append(f"读取状态：内容读取不完整（{error}），回复时不要编造未读取到的细节。")
+    lines.append("回复要求：围绕链接卡片中已读取到的内容回应，像正常聊天一样接住用户的分享。")
     return lines
 
 

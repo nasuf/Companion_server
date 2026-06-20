@@ -173,6 +173,7 @@ async def list_user_link_groups(
     WHERE l.user_id = $1
       AND c.user_id = $1
       AND c.is_deleted = FALSE
+      AND l.message_id IS NOT NULL
     ORDER BY COALESCE(m.created_at, l.created_at) DESC, l.created_at DESC
     """
     if limit is None:
