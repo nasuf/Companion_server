@@ -39,6 +39,9 @@ Optional:
 - `ANTHROPIC_API_KEY`
 - `APNS_AUTH_KEY`
 - `APNS_KEY_ID`
+- `CHAT_LINK_SEARCH_API_KEY` (custom provider)
+- `TAVILY_API_KEY` (Tavily provider)
+- `BRAVE_SEARCH_API_KEY` (Brave provider)
 
 ### Repository Variables
 
@@ -66,6 +69,14 @@ Optional:
 - `APNS_USE_SANDBOX`
 - `NOTIFICATION_MAX_ATTEMPTS`
 - `NOTIFICATION_DISPATCH_BATCH_SIZE`
+- `PROACTIVE_LINK_RECOMMENDATION_ENABLED`
+- `PROACTIVE_LINK_RECOMMENDATION_PROBABILITY`
+- `PROACTIVE_LINK_CANDIDATE_URLS`
+- `CHAT_LINK_SEARCH_PROVIDER`
+- `CHAT_LINK_SEARCH_ENDPOINT`
+- `CHAT_LINK_SEARCH_TIMEOUT_S`
+- `TAVILY_SEARCH_ENDPOINT`
+- `BRAVE_SEARCH_ENDPOINT`
 
 ### Database and cache
 
@@ -145,6 +156,59 @@ JAMENDO_DEFAULT_LIBRARIES=focus,ambient,sleep
 `deploy.yml` writes these values into the server `.env` on the VPS. `JAMENDO_CLIENT_ID`
 is required for production deploy; the base URL and default libraries have deploy
 fallbacks matching the values above.
+
+### Chat link cards and proactive link search
+
+Link cards are created when users paste/share links from Xiaohongshu, Weibo,
+Toutiao, Douyin, and Zhihu. Proactive link recommendations can also search
+those platforms and send an `external_link` card from the agent. The agent
+never invents URLs: search results are filtered to supported platform domains
+before the backend fetches metadata and creates a card.
+
+Choose one provider:
+
+```env
+# Disable live search and use only PROACTIVE_LINK_CANDIDATE_URLS fallback.
+CHAT_LINK_SEARCH_PROVIDER=custom
+CHAT_LINK_SEARCH_ENDPOINT=
+
+# Custom internal provider. It must accept:
+#   POST <endpoint> {"query": "...", "platforms": [...], "limit": 5}
+# and return either {"results": [{"url": "..."}]} or a list of URLs/items.
+CHAT_LINK_SEARCH_PROVIDER=custom
+CHAT_LINK_SEARCH_ENDPOINT=https://your-search-service.example.com/chat-links
+CHAT_LINK_SEARCH_API_KEY=<secret>
+
+# Tavily Search API.
+CHAT_LINK_SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=<secret>
+TAVILY_SEARCH_ENDPOINT=https://api.tavily.com/search
+
+# Brave Web Search API.
+CHAT_LINK_SEARCH_PROVIDER=brave
+BRAVE_SEARCH_API_KEY=<secret>
+BRAVE_SEARCH_ENDPOINT=https://api.search.brave.com/res/v1/web/search
+```
+
+Recommended defaults:
+
+```env
+PROACTIVE_LINK_RECOMMENDATION_ENABLED=true
+PROACTIVE_LINK_RECOMMENDATION_PROBABILITY=0.03
+PROACTIVE_LINK_CANDIDATE_URLS=
+CHAT_LINK_SEARCH_TIMEOUT_S=8
+```
+
+After the deploy writes `.env`, run a live smoke test on the server:
+
+```bash
+cd /app/companion-server
+uv run python scripts/smoke_chat_link_provider.py --query "周末咖啡 分享" --require-live
+```
+
+Expected success output includes `"status": "ok"`, at least one supported
+platform URL in `results`, and a `first_card` with `platform`, `title`,
+`final_url`, and `has_content`.
 
 ### iOS remote notifications
 

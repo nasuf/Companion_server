@@ -28,23 +28,29 @@ def render_message_content_for_prompt(
 ) -> str:
     text = (content or "").strip()
     attachments = _metadata_attachments(metadata)
-    if not attachments:
-        return content
+    link_card = _metadata_link_card(metadata)
+    rendered = content
 
-    image_lines: list[str] = []
-    for index, attachment in enumerate(attachments, start=1):
-        if attachment.get("kind") != "image":
-            continue
-        summary = str(attachment.get("vision_summary") or "").strip()
-        if summary:
-            image_lines.append(f"图片{index}：{summary}")
-        else:
-            image_lines.append(f"图片{index}：当前无法识别图片内容，回复时不要猜测图片细节。")
+    if attachments:
+        image_lines: list[str] = []
+        for index, attachment in enumerate(attachments, start=1):
+            if attachment.get("kind") != "image":
+                continue
+            summary = str(attachment.get("vision_summary") or "").strip()
+            if summary:
+                image_lines.append(f"图片{index}：{summary}")
+            else:
+                image_lines.append(f"图片{index}：当前无法识别图片内容，回复时不要猜测图片细节。")
 
-    if not image_lines:
-        return content
-    prefix = text or _IMAGE_PLACEHOLDER
-    return f"{prefix}\n\n[图片内容]\n" + "\n".join(image_lines)
+        if image_lines:
+            prefix = text or _IMAGE_PLACEHOLDER
+            rendered = f"{prefix}\n\n[图片内容]\n" + "\n".join(image_lines)
+
+    if link_card:
+        from app.services.chat_links.prompt import render_message_content_for_prompt as render_link
+
+        rendered = render_link(rendered, {"link_card": link_card})
+    return rendered
 
 
 def render_user_message_with_attachments(
@@ -61,3 +67,10 @@ def _metadata_attachments(metadata: dict[str, Any] | None) -> list[dict[str, Any
     if not isinstance(raw, list):
         return []
     return [dict(item) for item in raw if isinstance(item, dict)]
+
+
+def _metadata_link_card(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("link_card")
+    return dict(raw) if isinstance(raw, dict) else None

@@ -30,6 +30,16 @@ from app.services.runtime.tasks import fire_background
 from app.services.chat_media import repo as chat_media_repo
 from app.services.chat_media.prompt import render_user_message_with_attachments
 from app.services.chat_media.vision import ensure_vision_summaries
+from app.services.chat_links import (
+    bind_link_card_to_message,
+    component_card_for_link,
+    create_or_update_link_card,
+    extract_first_url,
+    extract_link_metadata,
+    find_link_card,
+    metadata_for_link_card,
+)
+from app.services.chat_links.prompt import render_user_message_with_link
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +54,7 @@ def _message_metadata(
     client_id: str | None = None,
     component_card: dict | None = None,
     attachments: list[dict] | None = None,
+    link_card: dict | None = None,
 ) -> dict | None:
     metadata = dict(base or {})
     if client_id:
@@ -52,6 +63,8 @@ def _message_metadata(
         metadata["component_card"] = component_card
     if attachments:
         metadata["attachments"] = attachments
+    if link_card:
+        metadata["link_card"] = link_card
     return metadata or None
 
 
@@ -80,6 +93,7 @@ def _sanitize_component_card(raw: object) -> dict | None:
         "checkin_reminder",
         "checkin_habit",
         "music_track",
+        "external_link",
     }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
@@ -164,6 +178,25 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
             value = _truncate_payload_value(raw.get(key), limit).strip()
             if value:
                 payload[key] = value
+        return payload
+    if card_type == "external_link":
+        payload = {}
+        for key, limit in (
+            ("link_id", 80),
+            ("source_url", 2000),
+            ("final_url", 2000),
+            ("platform", 40),
+            ("author", 120),
+            ("image_url", 2000),
+            ("summary", 1000),
+            ("status", 40),
+            ("error", 300),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        if not payload.get("link_id") and not payload.get("source_url") and not payload.get("final_url"):
+            return None
         return payload
     return None
 
@@ -709,6 +742,64 @@ async def _send_ack(
         logger.warning(f"[WS] send_ack failed: {e}")
 
 
+async def _ensure_link_card_for_turn(
+    *,
+    user_id: str,
+    conversation_id: str,
+    text: str,
+    component_card: dict | None,
+) -> tuple[dict | None, dict | None]:
+    """Return (component_card, model-visible link metadata) for this user turn."""
+    link = None
+    if component_card and component_card.get("type") == "external_link":
+        payload = component_card.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        link_id = str(payload.get("link_id") or "").strip()
+        if link_id:
+            link = await find_link_card(
+                link_id=link_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        if link is None:
+            source_url = str(payload.get("source_url") or payload.get("final_url") or "").strip()
+            shared_text = "\n".join(
+                part
+                for part in (
+                    text,
+                    str(component_card.get("title") or ""),
+                    str(component_card.get("body") or ""),
+                    source_url,
+                )
+                if part.strip()
+            )
+            if source_url or extract_first_url(shared_text):
+                metadata = await extract_link_metadata(
+                    url=source_url or None,
+                    shared_text=shared_text,
+                )
+                link = await create_or_update_link_card(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    metadata=metadata,
+                    role="user",
+                    source_app=str(payload.get("source_app") or "component_card"),
+                )
+    elif extract_first_url(text):
+        metadata = await extract_link_metadata(url=None, shared_text=text)
+        link = await create_or_update_link_card(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            metadata=metadata,
+            role="user",
+            source_app="chat_text",
+        )
+
+    if link is None:
+        return component_card, None
+    return component_card_for_link(link), metadata_for_link_card(link)
+
+
 async def _handle_message(
     ws: WebSocket,
     conversation_id: str,
@@ -736,6 +827,13 @@ async def _handle_message(
         user_text=text,
     )
     prompt_text = render_user_message_with_attachments(text, attachment_metadata)
+    component_card, link_card_metadata = await _ensure_link_card_for_turn(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        text=text,
+        component_card=component_card,
+    )
+    prompt_text = render_user_message_with_link(prompt_text, link_card_metadata)
 
     schedule = await get_cached_schedule(agent.id)
     if not schedule:
@@ -765,6 +863,7 @@ async def _handle_message(
             client_id=client_id,
             component_card=component_card,
             attachments=attachment_metadata,
+            link_card=link_card_metadata,
         ),
     )
     await chat_media_repo.bind_attachments_to_message(
@@ -773,6 +872,13 @@ async def _handle_message(
         user_id=user_id,
         conversation_id=conversation_id,
     )
+    if link_card_metadata and link_card_metadata.get("id"):
+        await bind_link_card_to_message(
+            link_id=str(link_card_metadata["id"]),
+            message_id=user_message_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
     try:
         from app.services.achievements.service import handle_user_message_event

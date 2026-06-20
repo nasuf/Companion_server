@@ -26,6 +26,7 @@ model User {
   workspaces       ChatWorkspace[]
   conversations    Conversation[]
   chatAttachments  ChatMessageAttachment[]
+  chatLinkCards    ChatLinkCard[]
   profiles         UserProfile[]
   portraits        UserPortrait[]
   memoryChangelogs MemoryChangelog[]
@@ -180,6 +181,7 @@ model Conversation {
   updatedAt       DateTime            @updatedAt @map("updated_at")
   messages        Message[]
   chatAttachments ChatMessageAttachment[]
+  chatLinkCards   ChatLinkCard[]
   proactiveLogs   ProactiveChatLog[]
   proactiveStates ProactiveState[]
   proactiveEvents ProactiveEventLog[]
@@ -201,6 +203,7 @@ model Message {
   createdAt      DateTime     @default(now()) @map("created_at")
   bugReports     BugReport[]
   attachments    ChatMessageAttachment[]
+  linkCards       ChatLinkCard[]
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@map("messages")
@@ -232,6 +235,40 @@ model ChatMessageAttachment {
   @@index([messageId])
   @@index([userId, messageId, createdAt])
   @@map("chat_message_attachments")
+}
+
+model ChatLinkCard {
+  id             String       @id @default(uuid())
+  userId         String       @map("user_id")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String       @map("conversation_id")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId      String?      @map("message_id")
+  message        Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  role           String       @default("user")
+  sourceApp      String?      @map("source_app")
+  sourceUrl      String       @map("source_url")
+  finalUrl       String       @map("final_url")
+  platform       String
+  title          String
+  description    String      @default("")
+  author         String?
+  imageUrl       String?     @map("image_url")
+  contentText    String      @default("") @map("content_text")
+  originalText   String      @default("") @map("original_text")
+  summary        String      @default("")
+  status         String      @default("ready")
+  error          String?
+  metadata       Json?
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  @@index([conversationId, createdAt(sort: Desc)], map: "chat_link_cards_conversation_created_idx")
+  @@index([userId, createdAt(sort: Desc)], map: "chat_link_cards_user_created_idx")
+  @@index([messageId], map: "chat_link_cards_message_idx")
+  @@index([platform, createdAt(sort: Desc)], map: "chat_link_cards_platform_created_idx")
+  @@unique([userId, conversationId, finalUrl, role], map: "chat_link_cards_user_conv_final_role_unique")
+  @@map("chat_link_cards")
 }
 
 model GameSession {

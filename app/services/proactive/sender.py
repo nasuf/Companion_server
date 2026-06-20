@@ -496,6 +496,27 @@ async def generate_and_send_proactive(
                 "topic_source": "music",
             })
             ws_payload_extra = {"component_card": card}
+        proactive_link = None
+        if ws_payload_extra is None:
+            from app.services.chat_links import maybe_prepare_proactive_link_recommendation
+
+            proactive_link = await maybe_prepare_proactive_link_recommendation(
+                user_id=state.user_id,
+                conversation_id=prep.conversation_id,
+                trigger_type=trigger_type,
+                source=source,
+                topic=ctx.get("topic_theme"),
+                stage=stage,
+                message=message,
+            )
+            if proactive_link is not None:
+                extra_metadata.update({
+                    "component_card": proactive_link.component_card,
+                    "link_card": proactive_link.link_card_metadata,
+                    "link_proactive": True,
+                    "topic_source": "link",
+                })
+                ws_payload_extra = {"component_card": proactive_link.component_card}
 
         assistant_message_id = await emit_proactive_message(
             conversation_id=prep.conversation_id,
@@ -508,6 +529,15 @@ async def generate_and_send_proactive(
             ws_payload_extra=ws_payload_extra,
             trace_id=tracer.safe_trace_id,
         )
+        if proactive_link is not None:
+            from app.services.chat_links import bind_link_card_to_message
+
+            await bind_link_card_to_message(
+                link_id=proactive_link.link.id,
+                message_id=assistant_message_id,
+                user_id=state.user_id,
+                conversation_id=prep.conversation_id,
+            )
         if source == "music" and ctx.get("music_track") is not None:
             from app.services import music
             from app.models.music import MusicTrackPayload

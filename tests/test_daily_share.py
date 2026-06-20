@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.api.public import daily_share
+from app.models.chat_links import DailyShareLink, DailyShareLinkGroup
 from app.services.daily_share import photos
 
 
@@ -103,3 +104,65 @@ def test_daily_share_classification_scores_vision_summary_content():
     assert [group.id for group in grouped] == ["on-the-road", "little-things"]
     assert grouped[0].photos[0].id == "att-road"
     assert grouped[1].photos[0].id == "att-object"
+
+
+@pytest.mark.asyncio
+async def test_list_daily_share_links_groups_link_cards(monkeypatch):
+    groups = [
+        DailyShareLinkGroup(
+            id="links-2026-06-20",
+            title="今天",
+            subtitle="小红书、知乎",
+            count=2,
+            links=[
+                DailyShareLink(
+                    id="link-1",
+                    message_id="msg-1",
+                    conversation_id="conv-1",
+                    role="user",
+                    source_app="system_share_sheet",
+                    source_url="https://xhslink.com/a",
+                    final_url="https://xhslink.com/a",
+                    platform="小红书",
+                    title="咖啡店笔记",
+                    summary="窗边阳光很好。",
+                    component_card={
+                        "version": 1,
+                        "type": "external_link",
+                        "title": "咖啡店笔记",
+                        "payload": {"final_url": "https://xhslink.com/a"},
+                    },
+                ),
+                DailyShareLink(
+                    id="link-2",
+                    message_id="msg-2",
+                    conversation_id="conv-1",
+                    role="assistant",
+                    source_app="proactive_link_recommendation",
+                    source_url="https://www.zhihu.com/question/1",
+                    final_url="https://www.zhihu.com/question/1",
+                    platform="知乎",
+                    title="长期记忆讨论",
+                    summary="关于长期记忆边界。",
+                    component_card={
+                        "version": 1,
+                        "type": "external_link",
+                        "title": "长期记忆讨论",
+                        "payload": {"final_url": "https://www.zhihu.com/question/1"},
+                    },
+                ),
+            ],
+        )
+    ]
+    list_groups = AsyncMock(return_value=groups)
+    monkeypatch.setattr(daily_share, "list_user_link_groups", list_groups)
+
+    response = await daily_share.list_daily_share_links(
+        user={"sub": "user-id", "role": "user"},
+    )
+
+    assert response.total == 2
+    assert response.groups[0].id == "links-2026-06-20"
+    assert response.groups[0].links[0].platform == "小红书"
+    assert response.groups[0].links[1].role == "assistant"
+    list_groups.assert_awaited_once_with("user-id", limit=None)

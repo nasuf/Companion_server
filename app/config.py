@@ -125,6 +125,21 @@ class Settings(BaseSettings):
     jamendo_base_url: str = "https://api.jamendo.com/v3.0"
     jamendo_default_libraries: str = "focus,ambient,sleep"
 
+    # Link-card proactive recommendations. The search endpoint is optional: if
+    # configured it should return JSON with `results: [{url: "..."}]` for a
+    # query/platform payload. Candidate URLs are a deterministic fallback pool.
+    proactive_link_recommendation_enabled: bool = True
+    proactive_link_recommendation_probability: float = 0.03
+    proactive_link_candidate_urls: str = ""
+    chat_link_search_provider: str = "custom"
+    chat_link_search_endpoint: str = ""
+    chat_link_search_api_key: str = ""
+    chat_link_search_timeout_s: float = 8.0
+    tavily_api_key: str = ""
+    tavily_search_endpoint: str = "https://api.tavily.com/search"
+    brave_search_api_key: str = ""
+    brave_search_endpoint: str = "https://api.search.brave.com/res/v1/web/search"
+
     # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
     # Development defaults to "*" for local convenience; production must configure
     # an explicit allowlist.
