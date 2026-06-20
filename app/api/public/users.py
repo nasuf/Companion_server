@@ -1,14 +1,35 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.jwt_auth import require_user
 from app.db import db
-from app.models.user import UserUpdate, UserResponse
+from app.models.user import ProfileStatsResponse, UserResponse, UserUpdate
 from app.services.portrait import get_latest_portrait
+from app.services.profile_stats import get_profile_stats_for_workspace
+from app.services.workspace.workspaces import get_active_workspace, get_workspace_by_id
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
 # 注: POST /users 创建匿名 user 的旧端点已删除。新建用户必须走
 # /auth/register 或受控的第三方登录入口，避免绕过身份初始化。
+
+
+@router.get("/me/profile-stats", response_model=ProfileStatsResponse)
+async def get_my_profile_stats(
+    workspace_id: str | None = None,
+    user: dict = Depends(require_user),
+):
+    user_id = user.get("sub")
+    workspace = (
+        await get_workspace_by_id(workspace_id)
+        if workspace_id
+        else await get_active_workspace(user_id=user_id)
+    )
+    if not workspace or getattr(workspace, "status", "active") != "active":
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if user.get("role") != "admin" and workspace.userId != user_id:
+        raise HTTPException(status_code=403, detail="Not your workspace")
+    return await get_profile_stats_for_workspace(user_id=user_id, workspace=workspace)
 
 
 @router.get("/{user_id}", response_model=UserResponse)
