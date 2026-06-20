@@ -4,11 +4,85 @@
 """
 
 import logging
+from typing import Any
 
 from app.db import db
 from app.redis_client import get_redis
+from app.services.chat_media import storage as chat_media_storage
 
 logger = logging.getLogger(__name__)
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
+def _delete_chat_media_files(storage_keys: list[str]) -> int:
+    deleted = 0
+    for storage_key in sorted({key for key in storage_keys if key}):
+        try:
+            path = chat_media_storage.storage_path(storage_key)
+            existed = path.exists() and path.is_file()
+            chat_media_storage.delete_media_file(storage_key)
+            if existed and not path.exists():
+                deleted += 1
+        except Exception as exc:
+            logger.warning(
+                "[chat-media] failed to delete storage_key=%s during agent reset: %s",
+                storage_key,
+                exc,
+            )
+    return deleted
+
+
+async def _delete_chat_media_for_conversations(
+    *, user_id: str, conversation_ids: list[str],
+) -> dict[str, int]:
+    if not conversation_ids:
+        return {}
+
+    stats: dict[str, int] = {}
+    storage_keys: list[str] = []
+
+    attachment_rows = await db.query_raw(
+        """
+        DELETE FROM chat_message_attachments
+        WHERE user_id = $1
+          AND conversation_id = ANY($2::text[])
+        RETURNING storage_key
+        """,
+        user_id,
+        conversation_ids,
+    )
+    stats["chat_attachments"] = len(attachment_rows or [])
+    storage_keys.extend(
+        str(key)
+        for row in (attachment_rows or [])
+        if (key := _row_value(row, "storage_key"))
+    )
+
+    cover_rows = await db.query_raw(
+        """
+        SELECT metadata ->> 'cover_storage_key' AS storage_key
+        FROM chat_link_cards
+        WHERE user_id = $1
+          AND conversation_id = ANY($2::text[])
+          AND metadata ? 'cover_storage_key'
+        """,
+        user_id,
+        conversation_ids,
+    )
+    stats["chat_link_cover_media"] = len(cover_rows or [])
+    storage_keys.extend(
+        str(key)
+        for row in (cover_rows or [])
+        if (key := _row_value(row, "storage_key"))
+    )
+
+    stats["chat_media_files"] = _delete_chat_media_files(storage_keys)
+    return stats
 
 
 async def clear_agent_runtime_state(
@@ -163,21 +237,29 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     )
     conv_ids = [c.id for c in conversations]
 
-    # 3. 删除 messages
+    # 3. 先清理聊天媒体。message/conversation 外键会删除 DB 行，但不会删除磁盘文件。
+    stats.update(
+        await _delete_chat_media_for_conversations(
+            user_id=user_id,
+            conversation_ids=conv_ids,
+        ),
+    )
+
+    # 4. 删除 messages
     if conv_ids:
         cnt = await db.message.delete_many(
             where={"conversationId": {"in": conv_ids}},
         )
         stats["messages"] = cnt
 
-    # 4. 删除 conversations
+    # 5. 删除 conversations
     if conv_ids:
         cnt = await db.conversation.delete_many(
             where={"id": {"in": conv_ids}},
         )
         stats["conversations"] = cnt
 
-    # 5. 删除 workspace 下的 memories + embeddings
+    # 6. 删除 workspace 下的 memories + embeddings
     if workspace_ids:
         # 收集 memory ids 用于删除 embeddings
         user_mems = await db.usermemory.find_many(
@@ -225,7 +307,7 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     )
     stats["workspaces"] = cnt
 
-    # 6. 删除 agent 级别数据
+    # 7. 删除 agent 级别数据
     try:
         cnt = await db.intimacy.delete_many(
             where={"agentId": agent_id, "userId": user_id},
@@ -287,7 +369,7 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     except Exception:
         pass
 
-    # 7. 清理可能遗漏的无 workspace 的 memories (workspaceId=null, userId匹配)
+    # 8. 清理可能遗漏的无 workspace 的 memories (workspaceId=null, userId匹配)
     try:
         cnt = await db.execute_raw(
             "DELETE FROM memories_user WHERE user_id = $1 AND workspace_id IS NULL "
@@ -301,7 +383,7 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     except Exception:
         pass
 
-    # 8. 清除所有引用 agent_id 的表（防止 FK 约束阻止 agent 删除）
+    # 9. 清除所有引用 agent_id 的表（防止 FK 约束阻止 agent 删除）
     # 逐表列举容易遗漏，这里用通用列表一次性处理
     _FK_TABLES_TO_DELETE = [
         "patience_states",
@@ -321,14 +403,14 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     # Plan B 后已无 character_profiles 表 (DROP 见 migration 20260427180000),
     # 旧 UPDATE 解绑逻辑随之失效, 此处不再需要任何 hook.
 
-    # 9. 删除 Agent 本身
+    # 10. 删除 Agent 本身
     await db.aiagent.delete(where={"id": agent_id})
     stats["agent"] = 1
 
-    # 8. 清理 Redis
+    # 11. 清理 Redis
     stats["redis"] = await _clear_redis(agent_id, user_id, conv_ids)
 
-    # 9. 清理 entity knowledge layer (memory_mentions 由 memories_* 删除
+    # 12. 清理 entity knowledge layer (memory_mentions 由 memories_* 删除
     # 触发器自动级联；memory_entities 按 workspace + user 清干净即可)
     if workspace_ids:
         try:
