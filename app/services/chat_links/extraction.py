@@ -107,6 +107,14 @@ async def extract_link_metadata(
         original_text=shared,
         summary=_summary_from_text(shared),
     )
+    if base.platform == "B站":
+        bilibili_metadata = await _fetch_bilibili_video_metadata(
+            source_url=source_url,
+            shared_text=shared,
+            timeout=timeout,
+        )
+        if bilibili_metadata:
+            return bilibili_metadata
     try:
         headers = {
             "user-agent": _USER_AGENT,
@@ -544,6 +552,151 @@ async def _fetch_toutiao_article_metadata(
         if metadata:
             return metadata
     return {}
+
+
+async def _fetch_bilibili_video_metadata(
+    *,
+    source_url: str,
+    shared_text: str,
+    timeout: float,
+) -> LinkMetadata | None:
+    bvid = _bilibili_bvid(source_url) or _bilibili_bvid(shared_text)
+    final_url = source_url
+    if not bvid:
+        final_url = await _resolve_bilibili_final_url(source_url, timeout=timeout)
+        bvid = _bilibili_bvid(final_url)
+    if not bvid:
+        return None
+    api_data = await _fetch_bilibili_api_metadata(bvid=bvid, timeout=timeout)
+    if not api_data:
+        title = _bilibili_title_from_shared_text(shared_text) or f"B站视频 {bvid}"
+        canonical_url = final_url if _bilibili_bvid(final_url) else f"https://www.bilibili.com/video/{bvid}"
+        return LinkMetadata(
+            source_url=source_url,
+            final_url=canonical_url,
+            platform="B站",
+            title=title[:240],
+            description=title,
+            content_text=title,
+            original_text=_clean_text(shared_text),
+            summary=_summary_from_text(title, platform="B站"),
+            status="ready",
+            error=None,
+        )
+    final_url = final_url if _bilibili_bvid(final_url) else f"https://www.bilibili.com/video/{bvid}"
+    return _metadata_from_platform_data(
+        base=LinkMetadata(
+            source_url=source_url,
+            final_url=source_url,
+            platform="B站",
+            title=_first_meaningful_line(shared_text) or api_data.get("title") or "B站视频",
+            description=shared_text,
+            content_text=shared_text,
+            original_text=shared_text,
+            summary=_summary_from_text(shared_text),
+        ),
+        platform_data=api_data,
+        final_url=final_url,
+        platform="B站",
+    )
+
+
+async def _resolve_bilibili_final_url(source_url: str, *, timeout: float) -> str:
+    headers = {
+        "user-agent": _USER_AGENT,
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=min(max(timeout, 3.0), 12.0),
+            headers=headers,
+            trust_env=False,
+        ) as client:
+            for method in ("HEAD", "GET"):
+                response = await client.request(method, source_url)
+                location = response.headers.get("location")
+                if location:
+                    return urljoin(source_url, location)
+                if _bilibili_bvid(str(response.url)):
+                    return str(response.url)
+    except Exception:
+        logger.debug("[chat-links] bilibili short url resolve failed", exc_info=True)
+    return source_url
+
+
+async def _fetch_bilibili_api_metadata(*, bvid: str, timeout: float) -> dict[str, str]:
+    try:
+        async with httpx.AsyncClient(
+            timeout=min(max(timeout, 3.0), 12.0),
+            headers={
+                "user-agent": _USER_AGENT,
+                "referer": "https://www.bilibili.com/",
+                "accept": "application/json",
+            },
+            trust_env=False,
+        ) as client:
+            response = await client.get(
+                "https://api.bilibili.com/x/web-interface/view",
+                params={"bvid": bvid},
+            )
+            response.raise_for_status()
+            value = response.json()
+    except Exception:
+        logger.debug("[chat-links] bilibili api metadata failed", exc_info=True)
+        return {}
+    data = value.get("data") if isinstance(value, dict) else None
+    if not isinstance(data, dict) or value.get("code") != 0:
+        return {}
+    return _bilibili_metadata_from_api_value(data)
+
+
+def _bilibili_metadata_from_api_value(value: dict[str, Any]) -> dict[str, str]:
+    title = _json_string(value.get("title")) or ""
+    description = _bilibili_description(value)
+    owner = value.get("owner")
+    author = ""
+    if isinstance(owner, dict):
+        author = _json_string(owner.get("name")) or ""
+    image_url = _json_string(value.get("pic")) or ""
+    if image_url.startswith("http://"):
+        image_url = "https://" + image_url.removeprefix("http://")
+    data = {
+        "title": title,
+        "description": description,
+        "author": author,
+        "image_url": image_url,
+        "content_text": description or title,
+        "original_text": description or title,
+    }
+    return {key: val for key, val in data.items() if val}
+
+
+def _bilibili_title_from_shared_text(shared_text: str | None) -> str:
+    text = _clean_text(shared_text)
+    if not text:
+        return ""
+    text = re.sub(r"https?://\S+", " ", text).strip()
+    if text.startswith("【") and text.endswith("】"):
+        text = text[1:-1].strip()
+    text = re.sub(r"[-－—]\s*(?:哔哩哔哩|bilibili|B站)\s*$", "", text).strip()
+    if text.startswith("【") and text.endswith("】"):
+        text = text[1:-1].strip()
+    return text
+
+
+def _bilibili_description(value: dict[str, Any]) -> str:
+    desc_v2 = value.get("desc_v2")
+    if isinstance(desc_v2, list):
+        parts = [
+            _json_string(item.get("raw_text"))
+            for item in desc_v2
+            if isinstance(item, dict)
+        ]
+        text = _clean_text("\n".join(part for part in parts if part))
+        if text:
+            return text
+    return _json_string(value.get("desc")) or ""
 
 
 def _toutiao_metadata_from_api_value(value: dict[str, Any]) -> dict[str, str]:

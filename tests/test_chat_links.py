@@ -1,11 +1,14 @@
 import pytest
 
 from app.services.chat_links.cards import component_card_for_link
+from app.services.chat_links import extraction as extraction_mod
 from app.services.chat_links import covers as cover_mod
 from app.services.chat_links.covers import cache_link_cover
 from app.services.chat_links.extraction import (
     LinkMetadata,
     _absolute_http_url,
+    _bilibili_metadata_from_api_value,
+    _bilibili_title_from_shared_text,
     _clean_link_author,
     _is_weibo_visitor_page,
     _normalize_post_body_text,
@@ -15,6 +18,7 @@ from app.services.chat_links.extraction import (
     _weibo_status_id,
     app_url_for_link,
     extract_first_url,
+    extract_link_metadata,
     extract_urls,
     platform_for_url,
 )
@@ -290,6 +294,88 @@ def test_clean_link_author_drops_title_duplicate():
         )
         is None
     )
+
+
+def test_bilibili_api_metadata_extracts_video_body():
+    metadata = _bilibili_metadata_from_api_value({
+        "title": "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑",
+        "desc": "被人负责造词，我负责帮大家吃词",
+        "desc_v2": [{"raw_text": "被人负责造词，我负责帮大家吃词"}],
+        "owner": {"name": "闪客"},
+        "pic": "http://i2.hdslb.com/bfs/archive/cover.jpg",
+    })
+
+    assert metadata["title"] == "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑"
+    assert metadata["description"] == "被人负责造词，我负责帮大家吃词"
+    assert metadata["author"] == "闪客"
+    assert metadata["image_url"] == "https://i2.hdslb.com/bfs/archive/cover.jpg"
+
+
+def test_bilibili_title_from_shared_text_removes_share_suffix():
+    title = _bilibili_title_from_shared_text(
+        "【【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑-哔哩哔哩】 https://b23.tv/PDWEj3U"
+    )
+
+    assert title == "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑"
+
+
+@pytest.mark.asyncio
+async def test_bilibili_short_link_uses_api_metadata(monkeypatch):
+    async def fake_resolve(source_url, *, timeout):
+        assert source_url == "https://b23.tv/PDWEj3U"
+        return "https://m.bilibili.com/video/BV1ojfDBSEPv?p=1"
+
+    async def fake_api(bvid, *, timeout):
+        assert bvid == "BV1ojfDBSEPv"
+        return {
+            "title": "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑",
+            "description": "被人负责造词，我负责帮大家吃词",
+            "author": "闪客",
+            "image_url": "https://i2.hdslb.com/bfs/archive/cover.jpg",
+            "content_text": "被人负责造词，我负责帮大家吃词",
+            "original_text": "被人负责造词，我负责帮大家吃词",
+        }
+
+    monkeypatch.setattr(extraction_mod, "_resolve_bilibili_final_url", fake_resolve)
+    monkeypatch.setattr(extraction_mod, "_fetch_bilibili_api_metadata", fake_api)
+
+    metadata = await extract_link_metadata(
+        url="https://b23.tv/PDWEj3U",
+        shared_text="【【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑-哔哩哔哩】 https://b23.tv/PDWEj3U",
+    )
+
+    assert metadata.status == "ready"
+    assert metadata.error is None
+    assert metadata.platform == "B站"
+    assert metadata.final_url == "https://m.bilibili.com/video/BV1ojfDBSEPv?p=1"
+    assert metadata.title == "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑"
+    assert metadata.summary == "被人负责造词，我负责帮大家吃词"
+
+
+@pytest.mark.asyncio
+async def test_bilibili_short_link_falls_back_to_shared_title(monkeypatch):
+    async def fake_resolve(source_url, *, timeout):
+        assert source_url == "https://b23.tv/PDWEj3U"
+        return "https://m.bilibili.com/video/BV1ojfDBSEPv?p=1"
+
+    async def fake_api(bvid, *, timeout):
+        assert bvid == "BV1ojfDBSEPv"
+        return {}
+
+    monkeypatch.setattr(extraction_mod, "_resolve_bilibili_final_url", fake_resolve)
+    monkeypatch.setattr(extraction_mod, "_fetch_bilibili_api_metadata", fake_api)
+
+    metadata = await extract_link_metadata(
+        url="https://b23.tv/PDWEj3U",
+        shared_text="【【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑-哔哩哔哩】 https://b23.tv/PDWEj3U",
+    )
+
+    assert metadata.status == "ready"
+    assert metadata.error is None
+    assert metadata.platform == "B站"
+    assert metadata.final_url == "https://m.bilibili.com/video/BV1ojfDBSEPv?p=1"
+    assert metadata.title == "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑"
+    assert metadata.summary == "【闪客】一口气拆穿Skill/MCP/RAG/Agent/OpenClaw底层逻辑"
 
 
 def test_weibo_ajax_metadata_beats_visitor_page_title():
