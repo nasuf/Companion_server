@@ -150,6 +150,21 @@ async def extract_link_metadata(
                 api_platform_data.update(
                     await _fetch_toutiao_article_metadata(client, source_url, final_url)
                 )
+            if _is_weibo_visitor_page(html, source_url=source_url, final_url=final_url):
+                final_url = _safe_final_url(source_url, final_url)
+                if api_platform_data:
+                    return _metadata_from_platform_data(
+                        base=base,
+                        platform_data=api_platform_data,
+                        final_url=final_url,
+                        platform="微博",
+                    )
+                return _with_error(
+                    base,
+                    final_url=final_url,
+                    platform="微博",
+                    error="微博访客系统拦截，未能读取正文",
+                )
     except Exception as exc:
         return _with_error(base, error=f"请求页面失败: {str(exc)[:180]}")
 
@@ -399,6 +414,25 @@ def _safe_final_url(source_url: str, final_url: str) -> str:
             return target
         return source_url
     return final_url
+
+
+def _is_weibo_visitor_page(
+    html: str | None,
+    *,
+    source_url: str = "",
+    final_url: str = "",
+) -> bool:
+    if platform_for_url(source_url) != "微博" and platform_for_url(final_url) != "微博":
+        parsed = urlparse(final_url)
+        host = (parsed.hostname or "").lower()
+        if host not in {"passport.weibo.com", "visitor.passport.weibo.cn"}:
+            return False
+    text = (html or "")[:20_000]
+    return (
+        "Sina Visitor System" in text
+        or "visitor/visitor" in final_url
+        or "visitor.passport.weibo.cn" in final_url
+    )
 
 
 def _first_regex_group(raw: str, pattern: str) -> str | None:

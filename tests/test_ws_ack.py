@@ -121,6 +121,33 @@ def test_sanitize_component_card_rejects_unknown_type():
     assert ws_mod._sanitize_component_card({"type": "unknown"}) is None
 
 
+def test_weibo_visitor_link_card_needs_refresh():
+    link = SimpleNamespace(
+        platform="微博",
+        title="Sina Visitor System",
+        description=(
+            "Sina Visitor System https://weibo.com/6305330504/5311661846303790 "
+            "https://weibo.com/6305330504/5311661846303790"
+        ),
+        summary="",
+        content_text="",
+    )
+
+    assert ws_mod._link_card_needs_refresh(link)
+
+
+def test_normal_weibo_link_card_does_not_need_refresh():
+    link = SimpleNamespace(
+        platform="微博",
+        title="马斯克又当爹",
+        description="马斯克又当爹！这次是和 Neuralink 女高管相关的新闻。",
+        summary="马斯克又当爹！这次是和 Neuralink 女高管相关的新闻。",
+        content_text="马斯克又当爹！这次是和 Neuralink 女高管相关的新闻。",
+    )
+
+    assert not ws_mod._link_card_needs_refresh(link)
+
+
 def test_sanitize_component_card_allows_checkin_types():
     reminder = ws_mod._sanitize_component_card({
         "type": "checkin_reminder",

@@ -36,6 +36,7 @@ from app.services.chat_links import (
     create_or_update_link_card,
     extract_first_url,
     extract_link_metadata,
+    extract_urls,
     find_link_card,
     metadata_for_link_card,
 )
@@ -762,6 +763,31 @@ async def _ensure_link_card_for_turn(
                 user_id=user_id,
                 conversation_id=conversation_id,
             )
+            if link and _link_card_needs_refresh(link):
+                source_url = str(link.source_url or link.final_url or "").strip()
+                shared_text = "\n".join(
+                    part
+                    for part in (
+                        text,
+                        str(component_card.get("title") or ""),
+                        str(component_card.get("body") or ""),
+                        source_url,
+                    )
+                    if part.strip()
+                )
+                if source_url or extract_first_url(shared_text):
+                    metadata = await extract_link_metadata(
+                        url=source_url or None,
+                        shared_text=shared_text,
+                    )
+                    link = await create_or_update_link_card(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        metadata=metadata,
+                        role="user",
+                        source_app="component_card_refresh",
+                        extra_metadata={"refreshed_from_link_id": link.id},
+                    )
         if link is None:
             source_url = str(payload.get("source_url") or payload.get("final_url") or "").strip()
             shared_text = "\n".join(
@@ -799,6 +825,23 @@ async def _ensure_link_card_for_turn(
     if link is None:
         return component_card, None
     return component_card_for_link(link), metadata_for_link_card(link)
+
+
+def _link_card_needs_refresh(link) -> bool:
+    if str(getattr(link, "platform", "") or "") != "微博":
+        return False
+    fields = (
+        getattr(link, "title", ""),
+        getattr(link, "description", ""),
+        getattr(link, "summary", ""),
+        getattr(link, "content_text", ""),
+    )
+    text = " ".join(str(field or "") for field in fields)
+    if "Sina Visitor System" in text:
+        return True
+    body = " ".join(str(field or "") for field in fields[1:]).strip()
+    url_count = len(extract_urls(body))
+    return url_count > 0 and len(body.replace(" ", "")) <= 120 + url_count * 80
 
 
 async def _handle_message(

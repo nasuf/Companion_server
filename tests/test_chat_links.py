@@ -6,6 +6,7 @@ from app.services.chat_links.covers import cache_link_cover
 from app.services.chat_links.extraction import (
     LinkMetadata,
     _absolute_http_url,
+    _is_weibo_visitor_page,
     _normalize_post_body_text,
     _platform_json_metadata,
     _toutiao_metadata_from_api_value,
@@ -306,6 +307,16 @@ def test_weibo_status_id_uses_last_numeric_path_segment():
     assert (
         _weibo_status_id("https://weibo.com/2657550845/5311209856304539")
         == "5311209856304539"
+    )
+
+
+def test_weibo_visitor_page_is_detected_before_html_fallback():
+    html = "<title>Sina Visitor System</title><body>visitor/visitor</body>"
+
+    assert _is_weibo_visitor_page(
+        html,
+        source_url="https://weibo.com/6305330504/5311661846303790",
+        final_url="https://visitor.passport.weibo.cn/visitor/visitor",
     )
 
 
