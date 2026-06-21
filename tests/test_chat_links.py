@@ -6,6 +6,7 @@ from app.services.chat_links.covers import cache_link_cover
 from app.services.chat_links.extraction import (
     LinkMetadata,
     _absolute_http_url,
+    _normalize_post_body_text,
     _platform_json_metadata,
     _toutiao_metadata_from_api_value,
     _weibo_metadata_from_api_value,
@@ -136,6 +137,46 @@ def test_platform_json_metadata_reads_nested_image_lists():
 
     assert _platform_json_metadata(html, "今日头条")["image_url"] == (
         "https://img.example/cover.jpg"
+    )
+
+
+def test_normalizes_xhs_card_body_to_post_text_only():
+    raw = (
+        '1/3 fur baby 关注 测一测！ 原来“适合自己的城市”身体会知道 '
+        '#话题测试w #测试话题 005 #测试话题 99 #请做出你的选择'
+    )
+
+    assert _normalize_post_body_text(raw, platform="小红书") == (
+        '测一测！ 原来“适合自己的城市”身体会知道'
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "raw", "expected"),
+    [
+        ("小红书", "1/3 fur baby 关注 正文第一句 #话题A #话题B", "正文第一句"),
+        ("抖音", "2/4 creator 关注 视频正文 #挑战 #热门", "视频正文"),
+        ("微博", "微博正文 #AI#", "微博正文"),
+        ("今日头条", "新闻正文。", "新闻正文。"),
+        ("知乎", "回答正文。", "回答正文。"),
+    ],
+)
+def test_normalizes_supported_platform_card_body(platform, raw, expected):
+    assert _normalize_post_body_text(raw, platform=platform) == expected
+
+
+def test_platform_json_metadata_strips_social_chrome_from_description():
+    html = """
+    <script id="RENDER_DATA" type="application/json">
+      {"note":{"title":"适合的城市","desc":"1/3 fur baby 关注 测一测！ 原来“适合自己的城市”身体会知道 #话题测试w #测试话题 005","nickname":"fur baby"}}
+    </script>
+    """
+
+    metadata = _platform_json_metadata(html, "小红书")
+
+    assert metadata["description"] == '测一测！ 原来“适合自己的城市”身体会知道'
+    assert metadata["content_text"] == (
+        '适合的城市\n\n测一测！ 原来“适合自己的城市”身体会知道'
     )
 
 

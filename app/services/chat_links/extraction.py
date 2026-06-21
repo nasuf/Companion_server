@@ -189,10 +189,23 @@ async def extract_link_metadata(
         parsed.meta.get("twitter:image"),
     )
     image_url = _absolute_http_url(image_url, str(response.url))
-    visible_text = _clean_text(platform_data.get("content_text") or parsed.visible_text)
-    content_text = visible_text or _clean_text("\n".join([title or "", description, shared]))
-    original_text = _clean_text(platform_data.get("original_text") or content_text or shared)
-    summary = _summary_from_text(content_text or description or title or shared)
+    raw_body = _first_non_empty(
+        platform_data.get("original_text"),
+        platform_data.get("description"),
+        description,
+        platform_data.get("content_text"),
+        parsed.visible_text,
+        shared,
+    ) or ""
+    body_text = _normalize_post_body_text(raw_body, platform=platform, author=author)
+    description = body_text or _normalize_post_body_text(
+        description,
+        platform=platform,
+        author=author,
+    )
+    content_text = body_text or _clean_text("\n".join([title or "", description, shared]))
+    original_text = _clean_text(platform_data.get("original_text") or raw_body or shared)
+    summary = _summary_from_text(content_text or description or title or shared, platform=platform, author=author)
     return LinkMetadata(
         source_url=source_url,
         final_url=final_url,
@@ -286,11 +299,17 @@ def _first_meaningful_line(text: str) -> str | None:
     return None
 
 
-def _summary_from_text(text: str) -> str:
+def _summary_from_text(
+    text: str,
+    *,
+    platform: str = "",
+    author: str | None = None,
+) -> str:
     cleaned = _clean_text(text)
     if not cleaned:
         return ""
-    return cleaned[:360]
+    normalized = _normalize_post_body_text(cleaned, platform=platform, author=author)
+    return (normalized or cleaned)[:360]
 
 
 def _metadata_from_platform_data(
@@ -302,10 +321,17 @@ def _metadata_from_platform_data(
 ) -> LinkMetadata:
     title = _first_non_empty(platform_data.get("title"), base.title) or "未命名链接"
     description = _first_non_empty(platform_data.get("description"), base.description) or ""
-    content_text = _clean_text(
+    content_text = _normalize_post_body_text(
         platform_data.get("content_text")
         or "\n\n".join(part for part in (title, description) if part)
-        or base.content_text
+        or base.content_text,
+        platform=platform,
+        author=platform_data.get("author") or base.author,
+    )
+    description = _normalize_post_body_text(
+        description,
+        platform=platform,
+        author=platform_data.get("author") or base.author,
     )
     original_text = _clean_text(platform_data.get("original_text") or content_text)
     return LinkMetadata(
@@ -322,7 +348,11 @@ def _metadata_from_platform_data(
         else base.image_url,
         content_text=content_text[:6000],
         original_text=original_text[:6000],
-        summary=_summary_from_text(content_text or description or title),
+        summary=_summary_from_text(
+            content_text or description or title,
+            platform=platform,
+            author=platform_data.get("author") or base.author,
+        ),
         status="ready",
         error=None,
     )
@@ -557,7 +587,7 @@ def _weibo_metadata_from_api_value(value: Any) -> dict[str, str]:
     if isinstance(user, dict):
         author = _json_string(user.get("screen_name"))
     image_url = _weibo_image_url(value)
-    title = _summary_from_text(description or "")
+    title = _summary_from_text(description or "", platform="微博", author=author)
     data = {
         "title": title[:80] if title else "",
         "description": description or "",
@@ -607,6 +637,51 @@ def _clean_text(value: str | None) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _normalize_post_body_text(
+    value: str | None,
+    *,
+    platform: str = "",
+    author: str | None = None,
+) -> str:
+    original = _clean_text(value)
+    if not original:
+        return ""
+    text = re.sub(r"^(?:图\s*)?\d+\s*/\s*\d+\s+", "", original).strip()
+    text = _strip_leading_author_follow(text, author)
+    text = _strip_platform_noise(text)
+    text = _strip_trailing_topic_tags(text, aggressive=platform in {"小红书", "抖音"})
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or original
+
+
+def _strip_leading_author_follow(text: str, author: str | None) -> str:
+    author_text = _clean_text(author)
+    if author_text:
+        pattern = rf"^{re.escape(author_text)}\s+(?:关注|已关注|Follow|follow)\s+"
+        text = re.sub(pattern, "", text).strip()
+    match = re.match(r"^(.{1,40}?)\s+(?:关注|已关注|Follow|follow)\s+", text)
+    if match:
+        prefix = match.group(1)
+        if not re.search(r"[，。！？!?：:；;#]", prefix):
+            text = text[match.end() :].strip()
+    return text
+
+
+def _strip_platform_noise(text: str) -> str:
+    text = re.sub(r"\s*(?:展开|收起|全文|更多)\s*$", "", text)
+    text = re.sub(r"\s*(?:点击|打开).{0,12}(?:App|APP|网页|原文)\s*$", "", text)
+    return text.strip()
+
+
+def _strip_trailing_topic_tags(text: str, *, aggressive: bool) -> str:
+    if aggressive:
+        match = re.search(r"\s#[^#]+", text)
+        if match and len(text[: match.start()].strip()) >= 4:
+            return text[: match.start()].strip()
+    cleaned = re.sub(r"(?:\s*#[^\s#]+#?)+\s*$", "", text).strip()
+    return cleaned or text
 
 
 def _absolute_http_url(raw_url: str | None, base_url: str) -> str | None:
@@ -710,10 +785,16 @@ def _platform_json_metadata(html: str, platform: str) -> dict[str, str]:
         if found:
             data[output_key] = found
     if "description" in data:
-        data["content_text"] = "\n\n".join(
-            part for part in (data.get("title"), data["description"]) if part
+        body = _normalize_post_body_text(
+            data["description"],
+            platform=platform,
+            author=data.get("author"),
         )
-    if platform == "小红书" and "description" in data:
+        data["description"] = body
+        data["content_text"] = "\n\n".join(
+            part for part in (data.get("title"), body) if part
+        )
+    if "description" in data:
         data["original_text"] = data["description"]
     return data
 
