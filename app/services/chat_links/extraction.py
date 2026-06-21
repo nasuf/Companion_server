@@ -30,6 +30,8 @@ _SUPPORTED_BARE_HOSTS = {
     "snssdk.com",
     "zhihu.com",
     "zhuanlan.zhihu.com",
+    "bilibili.com",
+    "b23.tv",
 }
 _URL_TRAILING_PUNCT = ",.;:)]}，。；：）】》"
 _APP_ACCENTS = {
@@ -38,6 +40,7 @@ _APP_ACCENTS = {
     "今日头条": "#D7262E",
     "抖音": "#111827",
     "知乎": "#1772F6",
+    "B站": "#00A1D6",
 }
 
 
@@ -221,13 +224,15 @@ async def extract_link_metadata(
     content_text = body_text or _clean_text("\n".join([title or "", description, shared]))
     original_text = _clean_text(platform_data.get("original_text") or raw_body or shared)
     summary = _summary_from_text(content_text or description or title or shared, platform=platform, author=author)
+    clean_title = _clean_text(title or "未命名链接")[:240]
+    clean_author = _clean_link_author(author, title=clean_title)
     return LinkMetadata(
         source_url=source_url,
         final_url=final_url,
         platform=platform,
-        title=_clean_text(title or "未命名链接")[:240],
+        title=clean_title,
         description=_clean_text(description)[:1000],
-        author=_clean_text(author)[:120] if author else None,
+        author=clean_author,
         image_url=_clean_text(image_url)[:2000] if image_url else None,
         content_text=content_text[:6000],
         original_text=original_text[:6000],
@@ -249,6 +254,8 @@ def platform_for_url(raw_url: str) -> str:
         return "抖音"
     if host.endswith("zhihu.com"):
         return "知乎"
+    if host.endswith("bilibili.com") or host == "b23.tv":
+        return "B站"
     return "链接"
 
 
@@ -284,6 +291,10 @@ def app_url_for_link(*, platform: str, source_url: str, final_url: str) -> str |
         )
         if note_id:
             return f"xhsdiscover://item/{note_id}"
+    if platform == "B站":
+        bvid = _bilibili_bvid(raw_url) or _bilibili_bvid(source_url)
+        if bvid:
+            return f"bilibili://video/{bvid}"
     return None
 
 
@@ -438,6 +449,13 @@ def _is_weibo_visitor_page(
 def _first_regex_group(raw: str, pattern: str) -> str | None:
     match = re.search(pattern, raw)
     return match.group(1) if match else None
+
+
+def _bilibili_bvid(raw_url: str) -> str | None:
+    return _first_regex_group(raw_url, r"/video/(BV[0-9A-Za-z]+)") or _first_regex_group(
+        raw_url,
+        r"\b(BV[0-9A-Za-z]{8,})\b",
+    )
 
 
 def _weibo_status_id(raw_url: str) -> str | None:
@@ -671,6 +689,19 @@ def _clean_text(value: str | None) -> str:
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _clean_link_author(value: str | None, *, title: str = "") -> str | None:
+    author = _clean_text(value)
+    if not author:
+        return None
+    if title and _compact_compare(author) == _compact_compare(title):
+        return None
+    return author[:120]
+
+
+def _compact_compare(value: str) -> str:
+    return re.sub(r"\W+", "", value, flags=re.UNICODE).lower()
 
 
 def _normalize_post_body_text(

@@ -19,7 +19,7 @@ from app.services.chat_links.repo import ChatLinkCard, create_or_update_link_car
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PLATFORMS = ("小红书", "微博", "今日头条", "抖音", "知乎")
+SUPPORTED_PLATFORMS = ("小红书", "微博", "今日头条", "抖音", "知乎", "B站")
 _SEARCH_DOMAINS = (
     "xhslink.com",
     "xiaohongshu.com",
@@ -28,6 +28,8 @@ _SEARCH_DOMAINS = (
     "toutiao.com",
     "douyin.com",
     "zhihu.com",
+    "bilibili.com",
+    "b23.tv",
 )
 
 

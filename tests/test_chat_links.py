@@ -6,6 +6,7 @@ from app.services.chat_links.covers import cache_link_cover
 from app.services.chat_links.extraction import (
     LinkMetadata,
     _absolute_http_url,
+    _clean_link_author,
     _is_weibo_visitor_page,
     _normalize_post_body_text,
     _platform_json_metadata,
@@ -54,6 +55,8 @@ def test_maps_required_platforms():
         ("https://www.toutiao.com/article/1", "今日头条"),
         ("https://v.douyin.com/abc", "抖音"),
         ("https://www.zhihu.com/question/1", "知乎"),
+        ("https://b23.tv/DXN57e3", "B站"),
+        ("https://m.bilibili.com/video/BV1oNER6AEXD", "B站"),
     ]
     for url, expected in cases:
         assert platform_for_url(url) == expected
@@ -67,6 +70,7 @@ def test_maps_required_platforms():
         ("https://www.toutiao.com/article/1", "今日头条", "头条文章", "#D7262E"),
         ("https://v.douyin.com/abc", "抖音", "抖音视频", "#111827"),
         ("https://www.zhihu.com/question/1", "知乎", "知乎问答", "#1772F6"),
+        ("https://b23.tv/DXN57e3", "B站", "B站视频", "#00A1D6"),
     ],
 )
 def test_required_platforms_render_same_card_and_prompt_flow(url, platform, title, accent):
@@ -264,6 +268,27 @@ def test_app_url_for_toutiao_prefers_native_detail_scheme():
             final_url="https://www.toutiao.com/article/7651359327906710016/?wid=1",
         )
         == "snssdk141://detail?groupid=7651359327906710016"
+    )
+
+
+def test_app_url_for_bilibili_prefers_native_video_scheme():
+    assert (
+        app_url_for_link(
+            platform="B站",
+            source_url="https://b23.tv/DXN57e3",
+            final_url="https://m.bilibili.com/video/BV1oNER6AEXD?p=1",
+        )
+        == "bilibili://video/BV1oNER6AEXD"
+    )
+
+
+def test_clean_link_author_drops_title_duplicate():
+    assert (
+        _clean_link_author(
+            "3天从入门到精通LangChain 1.0+",
+            title="3天从入门到精通LangChain 1.0+",
+        )
+        is None
     )
 
 
