@@ -113,8 +113,13 @@ def test_required_platforms_render_same_card_and_prompt_flow(url, platform, titl
     assert platform_for_url(url) == platform
     assert card["type"] == "external_link"
     assert card["accent"] == accent
+    assert card["title"] == platform
+    assert card["subtitle"] == ""
+    assert card["body"] == link.original_text
+    assert card["footer"] == f"点击打开{platform}app/网页"
     assert metadata["final_url"] == url
     assert metadata["platform"] == platform
+    assert metadata["original_text"] == link.original_text
     assert "[链接卡片内容]" in rendered
     assert f"平台：{platform}" in rendered
     assert f"标题：{title}" in rendered
@@ -259,8 +264,13 @@ def test_component_card_for_link_has_openable_payload():
     )
     card = component_card_for_link(link)
     assert card["type"] == "external_link"
+    assert card["title"] == "抖音"
+    assert card["subtitle"] == ""
+    assert card["body"] == "视频标题"
+    assert card["footer"] == "点击打开抖音app/网页"
     assert card["payload"]["link_id"] == "link-1"
     assert card["payload"]["final_url"] == "https://www.douyin.com/video/1"
+    assert card["payload"]["original_text"] == "视频标题"
     assert card["payload"]["app_url"] == "snssdk1128://aweme/detail/1"
 
 
