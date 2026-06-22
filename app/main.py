@@ -51,7 +51,8 @@ async def lifespan(app: FastAPI):
             logger.error(f"Redis connect failed ({e!r}); starting in readonly mode")
             mark_redis_healthy(False)
 
-        # Phase 2: Schema + seeding
+        # Phase 2: Seeding
+        # Database schema changes are managed exclusively by Prisma migrations.
         await asyncio.gather(
             _timed("Prompt templates", ensure_prompt_templates()),
             _timed("Career templates", ensure_default_careers()),
@@ -150,6 +151,7 @@ from app.api.public.music import router as music_router
 from app.api.public.achievements import router as achievements_router
 from app.api.public.wallet import router as wallet_router
 from app.api.public.notifications import router as notifications_router
+from app.api.public.offline import router as offline_router
 from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
@@ -186,6 +188,7 @@ app.include_router(music_router)
 app.include_router(achievements_router)
 app.include_router(wallet_router)
 app.include_router(notifications_router)
+app.include_router(offline_router)
 app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)

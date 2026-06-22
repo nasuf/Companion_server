@@ -37,6 +37,7 @@ from app.services.notifications.capsules import scan_ready_capsule_notifications
 from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import scan_due_last_wills
+from app.services.offline.scheduler import scan_offline_triggers
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     DistributedLockUnavailable,
@@ -310,6 +311,16 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    scheduler.add_job(
+        _run_offline_trigger_scan,
+        "cron",
+        hour=10,
+        minute=20,
+        id="offline_trigger_scan",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Patience recovery every hour
     scheduler.add_job(
         _run_patience_recovery,
@@ -518,6 +529,18 @@ async def _run_capsule_ready_notifications():
             logger.warning(f"Capsule ready notification scan failed: {e}")
 
     await _run_distributed_job("capsule_ready_notifications", 1800, _body)
+
+
+async def _run_offline_trigger_scan():
+    async def _body():
+        try:
+            stats = await scan_offline_triggers()
+            if stats.get("activities") or stats.get("gifts") or stats.get("failed"):
+                logger.info(f"[CRON] offline trigger scan: {stats}")
+        except Exception as e:
+            logger.warning(f"Offline trigger scan failed: {e}")
+
+    await _run_distributed_job("offline_trigger_scan", 3600, _body)
 
 
 async def _run_l2_adjustment():

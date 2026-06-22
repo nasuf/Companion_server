@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.services.offline.providers.search import tavily_search
 from app.services.chat_links.cards import component_card_for_link, metadata_for_link_card
 from app.services.chat_links.extraction import (
     extract_first_url,
@@ -195,35 +196,17 @@ async def _custom_endpoint_urls(*, query: str) -> list[str]:
 
 
 async def _tavily_search_urls(*, query: str) -> list[str]:
-    api_key = settings.tavily_api_key.strip()
-    endpoint = settings.tavily_search_endpoint.strip()
-    if not api_key or not endpoint:
-        return []
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "authorization": f"Bearer {api_key}",
-    }
-    payload = {
-        "query": _clean_search_query(query),
-        "max_results": 8,
-        "include_answer": False,
-        "include_raw_content": False,
-        "include_domains": list(_SEARCH_DOMAINS),
-    }
-    try:
-        async with httpx.AsyncClient(
-            timeout=settings.chat_link_search_timeout_s,
-            headers=headers,
-            trust_env=False,
-        ) as client:
-            response = await client.post(endpoint, json=payload)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as exc:
-        logger.warning("[chat-links] tavily search failed: %s", exc)
-        return []
-    return _urls_from_search_response(data)
+    results = await tavily_search(
+        _clean_search_query(query),
+        max_results=8,
+        include_domains=list(_SEARCH_DOMAINS),
+        timeout_s=settings.chat_link_search_timeout_s,
+    )
+    urls: list[str] = []
+    for result in results:
+        if platform_for_url(result.url) in SUPPORTED_PLATFORMS and result.url not in urls:
+            urls.append(result.url)
+    return urls
 
 
 async def _brave_search_urls(*, query: str) -> list[str]:

@@ -49,6 +49,9 @@ from app.services.prompting.defaults import (
     MEDIUM_ATTACK_REPLY_PROMPT,
     MEDIUM_MEMORY_REPLY_PROMPT,
     MEDIUM_PATIENCE_REPLY_PROMPT,
+    OFFLINE_ACTIVITY_CARD_PROMPT,
+    OFFLINE_GIFT_SELECTION_PROMPT,
+    OFFLINE_GIFT_THANKS_REPLY_PROMPT,
     MUSIC_ACCEPT_INVITE_PROMPT,
     MUSIC_AGENT_JOIN_AFTER_BUSY_PROMPT,
     MUSIC_AGENT_LATE_MISSED_PROMPT,
@@ -75,6 +78,7 @@ from app.services.prompting.defaults import (
     MEMORY_RELEVANCE_PROMPT,
     PERSONALITY_RULES_PROMPT,
     PORTRAIT_GENERATION_PROMPT,
+    PORTRAIT_TAGS_PROMPT,
     POSITIVE_INTERACTION_PROMPT,
     PORTRAIT_UPDATE_PROMPT,
     PROACTIVE_SILENCE_PLAIN_PROMPT,
@@ -159,6 +163,21 @@ PROMPT_DEFINITIONS = [
         " v3 升级: 三分判断 (有 X / 有内容但无 X / 段空) + 顶部位置 + 警示用户问句不是记忆,"
         " 防 LLM 顺承预设性问句编造过往. 详见 prompt 顶部注释.",
         ANTI_HALLUCINATION_HARD_RULE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_card", "线下活动推荐卡生成", "线下互动", "线下活动",
+        "【工程扩展】V3 现实世界互动. 基于城市、记忆标签和 Tavily 搜索结果生成结构化活动推荐卡.",
+        OFFLINE_ACTIVITY_CARD_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.gift_selection", "线下礼物选择", "线下互动", "礼物",
+        "【工程扩展】V3 现实世界互动. 在预算内基于用户记忆选择 mock provider 可下单的小礼物.",
+        OFFLINE_GIFT_SELECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.gift_thanks_reply", "礼物感谢回应", "线下互动", "礼物",
+        "【工程扩展】V3 现实世界互动. 用户收到礼物并发送感谢后生成一句亲密回应.",
+        OFFLINE_GIFT_THANKS_REPLY_PROMPT,
     ),
     PromptDefinition(
         "chat.ai_state_constraint", "AI 自洽性隐性约束", "聊天热路径", "聊天",
@@ -385,6 +404,11 @@ PROMPT_DEFINITIONS = [
         "《记忆部分产品手册》§1.6 + 《终稿·指令模版 4.19》P23: "
         "根据记忆变化增量更新画像 (覆盖式重写, 不追加).",
         PORTRAIT_UPDATE_PROMPT,
+    ),
+    PromptDefinition(
+        "portrait.tags", "用户画像标签生成", "异步画像", "画像标签",
+        "根据用户画像和 L1/L2 记忆生成结构化 UI 标签, 带置信度和来源记忆 id.",
+        PORTRAIT_TAGS_PROMPT,
     ),
 
     # ── 主动交流 (Part 4) ──

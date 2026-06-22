@@ -10,10 +10,29 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.services.memory.storage import repo as memory_repo
 from app.services.llm.models import get_utility_model, invoke_text
+from app.services.profile_tags import has_active_profile_tags, refresh_profile_tags
 from app.services.prompting.store import get_prompt_text
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
+
+
+async def _refresh_tags_best_effort(
+    user_id: str,
+    agent_id: str,
+    *,
+    workspace_id: str | None,
+    portrait: str | None,
+) -> None:
+    try:
+        await refresh_profile_tags(
+            user_id,
+            agent_id,
+            workspace_id=workspace_id,
+            portrait=portrait,
+        )
+    except Exception as exc:
+        logger.warning("Profile tag refresh failed for user=%s agent=%s: %s", user_id, agent_id, exc)
 
 
 async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
@@ -110,6 +129,12 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
             "content": portrait,
         }
     )
+    await _refresh_tags_best_effort(
+        user_id,
+        agent_id,
+        workspace_id=workspace_id,
+        portrait=portrait,
+    )
 
     logger.info(f"Generated portrait v{version} for user {user_id}")
     return portrait
@@ -142,6 +167,17 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
 
     if not changelogs:
         logger.info(f"No changes this week for user {user_id}, keeping portrait")
+        if not await has_active_profile_tags(
+            user_id,
+            workspace_id,
+            agent_id=agent_id,
+        ):
+            await _refresh_tags_best_effort(
+                user_id,
+                agent_id,
+                workspace_id=workspace_id,
+                portrait=previous.content,
+            )
         return previous.content
 
     changes_text = "\n".join(
@@ -167,6 +203,12 @@ async def update_portrait_weekly(user_id: str, agent_id: str) -> str | None:
             "version": previous.version + 1,
             "content": portrait,
         }
+    )
+    await _refresh_tags_best_effort(
+        user_id,
+        agent_id,
+        workspace_id=workspace_id,
+        portrait=portrait,
     )
 
     # 清理已消费的变更日志

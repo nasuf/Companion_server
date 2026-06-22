@@ -118,6 +118,41 @@ CHAT_L3_MEMORY_SECTION_PROMPT = (
     "回忆时语气自然，可以说\"我好像记得...\"或\"那好像是...\"：\n{l3_memories}"
 )
 
+OFFLINE_ACTIVITY_CARD_PROMPT = (
+    "你是一个个性化活动与地点推荐专家。请根据用户所在城市、记忆标签和搜索结果，"
+    "推荐一个真实世界的低成本/免费线下活动或地点。\n\n"
+    "用户城市：{city}\n"
+    "搜索位置锚点：{search_anchor}\n"
+    "用户标签：{tags}\n"
+    "用户记忆摘要：\n{memory}\n\n"
+    "搜索结果 JSON：\n{sources_json}\n\n"
+    "要求：\n"
+    "- 推荐必须适合独自完成或低社交压力，不要有安全风险。\n"
+    "- 只能推荐搜索结果 JSON 中真实出现的活动/地点；official_url 必须来自搜索结果 url，不要编造其他官网。\n"
+    "- 不要使用 AI/agent 所在城市、用户记忆里旧城市或你自己的常识替代搜索位置锚点。\n"
+    "- 若是地点推荐，时间可为“长期”；若是活动推荐，给出可读时间。\n"
+    "- 彩蛋任务在用户接受前不展示，所以可以写在 easter_egg_task。\n"
+    "- 输出严格 JSON，不要 markdown，不要解释。\n\n"
+    "JSON 字段：\n"
+    "title, summary, description, category, location_name, address, starts_at, ends_at,\n"
+    "official_url, image_urls, task_hint, easter_egg_task={{title, body, principle}}"
+)
+
+OFFLINE_GIFT_SELECTION_PROMPT = (
+    "请根据用户标签和记忆，选择一个适合寄送的小礼物。不要选择高风险、食品过敏风险或昂贵物品。\n\n"
+    "预算上限：{budget_yuan} 元\n"
+    "用户标签：{tags}\n"
+    "记忆摘要：\n{memory}\n\n"
+    "输出严格 JSON：\n"
+    "{{\"gift_name\":\"商品名，8-18字\",\"gift_reason\":\"为什么适合TA，40字内\","
+    "\"gift_note\":\"一小段寄语，80字内\",\"amount_cents\":整数}}"
+)
+
+OFFLINE_GIFT_THANKS_REPLY_PROMPT = (
+    "用户收到了 AI 送出的礼物「{gift_name}」，并说：{message}\n"
+    "请用亲密但不过度煽情的中文回复一句，30 字以内。"
+)
+
 CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT = "\n\n## 特殊指令\n{instruction}"
 
 CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT = (
@@ -1142,6 +1177,36 @@ PORTRAIT_UPDATE_PROMPT = """【任务】根据用户原有的画像和近期的�
 - 像在描述一个真实的人，语言自然连贯
 - 不罗列记忆，提炼高层特点
 - 只输出画像文本"""
+
+PORTRAIT_TAGS_PROMPT = """【任务】根据用户画像和用户记忆，生成适合在 UI 上展示的用户画像标签。
+
+【已有用户画像】
+{portrait}
+
+【用户记忆】
+{memories}
+
+【标签要求】
+- 输出 3-9 个标签，优先描述稳定偏好、行为模式、创作/工作特征、生活方式、性格倾向。
+- 标签要像「咖啡成瘾」「水彩爱好者」「喜欢户外」「爱逛书店」「慢热型」这种短标签。
+- 不要输出姓名、性别、年龄、职业与经济、价值观等分类名。
+- 不要输出隐私、敏感、负面创伤、危机、自伤、政治立场、亲密冲突类标签。
+- 不要直接截断单条记忆；必须做归纳。
+- 每个标签必须引用 1-5 个来源记忆 id；如果证据不足，不要输出该标签。
+
+【输出 JSON】
+{{
+  "tags": [
+    {{
+      "label": "短标签，2-12字",
+      "category": "preference|behavior|personality|lifestyle|creative|relationship|work",
+      "confidence": 0.0,
+      "source_memory_ids": ["记忆id"]
+    }}
+  ]
+}}
+
+只输出 JSON，不要解释。"""
 
 APOLOGY_PROMPT = """分析以下消息是否包含道歉或承诺改正，并评估道歉的真诚程度。
 
