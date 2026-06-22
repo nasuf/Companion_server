@@ -73,6 +73,7 @@ def _fake_llm_step(prompt_text: str, output_text: str = "") -> dict:
     (defaults.SCHEDULE_DAILY_SUMMARY_MEMORIES_PROMPT, "schedule.daily_summary_memories"),
     (defaults.PORTRAIT_GENERATION_PROMPT, "portrait.generation"),
     (defaults.PORTRAIT_UPDATE_PROMPT, "portrait.update"),
+    (defaults.PORTRAIT_TAGS_PROMPT, "portrait.tags"),
     (defaults.CURRENT_STATE_REPLY_PROMPT, "intent.current_state_reply"),
     (defaults.CRISIS_REPLY_PROMPT, "intent.crisis_reply"),
     (defaults.CRISIS_FOLLOWUP_CLASSIFY_PROMPT, "intent.crisis_followup_classify"),

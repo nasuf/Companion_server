@@ -438,6 +438,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message),
     ("proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids),
     ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),
+    ("music.user_pause_followup_decision", "共听暂停后跟进判定", "decision", _label_passthrough),
 
     # Data 类
     ("emotion.user_label", "用户情绪标签", "data", _label_emotion),
@@ -451,6 +452,10 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("schedule.daily_summary_memories", "昨日总结记忆拆分", "data", _label_extraction),
     ("portrait.generation", "用户画像生成", "data", _label_reply_text),
     ("portrait.update", "用户画像更新", "data", _label_reply_text),
+    ("portrait.tags", "用户画像标签生成", "data", _label_passthrough),
+    ("offline.activity_card", "线下活动推荐卡生成", "data", _label_reply_text),
+    ("offline.gift_selection", "线下礼物选择", "data", _label_reply_text),
+    ("music.co_listening_context", "共听上下文", "data", _label_reply_text),
 
     # Reply 类
     ("intent.current_state_reply", "询问当前状态回复", "reply", _label_reply_text),
@@ -492,6 +497,20 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text),
     ("proactive.special_birthday", "特殊日期(生日)", "reply", _label_reply_text),
     ("proactive.special_combined", "特殊日期(合并)", "reply", _label_reply_text),
+    ("offline.gift_thanks_reply", "礼物感谢回应", "reply", _label_reply_text),
+    ("music.accept_invite", "接受共听邀请", "reply", _label_reply_text),
+    ("music.agent_join_after_busy", "忙碌后加入共听", "reply", _label_reply_text),
+    ("music.agent_late_missed", "错过共听", "reply", _label_reply_text),
+    ("music.busy_exit", "忙碌退出共听", "reply", _label_reply_text),
+    ("music.busy_reject", "忙碌拒绝共听", "reply", _label_reply_text),
+    ("music.proactive_recommend", "主动推荐共听", "reply", _label_reply_text),
+    ("music.sleep_reject", "睡眠拒绝共听", "reply", _label_reply_text),
+    ("music.switch_track", "切换共听曲目", "reply", _label_reply_text),
+    ("music.track_changed_auto", "自动换歌提醒", "reply", _label_reply_text),
+    ("music.track_changed_manual", "手动换歌提醒", "reply", _label_reply_text),
+    ("music.user_absent_exit", "用户缺席退出共听", "reply", _label_reply_text),
+    ("music.user_exit", "用户退出共听", "reply", _label_reply_text),
+    ("music.user_pause_exit", "用户暂停退出共听", "reply", _label_reply_text),
     ("chat.system_base", "主回复", "reply", _label_reply_text),
 
     # Post 类
