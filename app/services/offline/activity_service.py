@@ -54,7 +54,7 @@ async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
         "shipping_gift_count": len(shipping),
         "has_location": bool(ctx and ctx.get("has_location")),
         "tags": tags,
-        "latest_activity": pending[0] if pending else (activities[0] if activities else None),
+        "latest_activity": pending[0] if pending else None,
         "gift_summary": "礼物正在向你飞奔" if shipping else "你有一份惊喜在路上",
     }
 
@@ -76,6 +76,11 @@ async def list_activities(
             OfflineActivityItem(**a)
             for a in items
             if a["status"] in {"pending", "accepted"}
+        ],
+        ignored=[
+            OfflineActivityItem(**a)
+            for a in items
+            if a["status"] == "ignored"
         ],
         completed=[
             OfflineActivityItem(**a)

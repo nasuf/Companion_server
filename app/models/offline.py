@@ -65,6 +65,7 @@ class OfflineHomeResponse(BaseModel):
 class OfflineActivitiesResponse(BaseModel):
     latest: OfflineActivityItem | None = None
     pending: list[OfflineActivityItem] = Field(default_factory=list)
+    ignored: list[OfflineActivityItem] = Field(default_factory=list)
     completed: list[OfflineActivityItem] = Field(default_factory=list)
 
 
