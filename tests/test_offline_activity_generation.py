@@ -2,8 +2,11 @@ import base64
 from unittest.mock import AsyncMock
 
 from app.api.public import offline
+from app.services.offline import activity_service
 from app.services.offline.activity_generation import (
+    _card_repeats_history,
     _fallback_card,
+    _filter_repeated_results,
     _search_query,
     _usable_results,
 )
@@ -44,6 +47,44 @@ def test_fallback_card_does_not_promote_unverified_source_title_to_place():
 
     assert "Paulaner" not in card["title"]
     assert card["location_name"] == "镇江"
+
+
+def test_repeated_activity_search_results_are_filtered_by_recent_location():
+    recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
+    library = SearchResult(
+        title="镇江市图书馆：在书页的伤痕里看见光阴",
+        url="https://example.com/library",
+        content="镇江市图书馆活动公告",
+    )
+    museum = SearchResult(
+        title="镇江博物馆常设展",
+        url="https://example.com/museum",
+        content="镇江博物馆开放信息",
+    )
+
+    assert _filter_repeated_results([library, museum], recent) == [museum]
+
+
+def test_repeated_activity_search_results_return_empty_when_all_candidates_repeat():
+    recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
+    library = SearchResult(
+        title="镇江市图书馆：在书页的伤痕里看见光阴",
+        url="https://example.com/library",
+        content="镇江市图书馆活动公告",
+    )
+
+    assert _filter_repeated_results([library], recent) == []
+
+
+def test_activity_card_repeats_history_when_location_matches_recent_place():
+    recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
+    card = {
+        "title": "镇江市图书馆阅读节",
+        "location_name": "镇江市图书馆",
+        "address": "镇江市图书馆",
+    }
+
+    assert _card_repeats_history(card, recent) is True
 
 
 async def test_clear_user_activities_deletes_feedback_and_recommendations(monkeypatch):
@@ -114,3 +155,55 @@ async def test_upload_offline_activity_image_saves_file_and_returns_media(
     create_media.assert_awaited_once()
     assert response.id == "media-1"
     assert response.url == "/offline/media/user-1_activity.jpg"
+
+
+async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
+    activity = {
+        "id": "activity-1",
+        "status": "ignored",
+        "title": "镇江博物馆常设展",
+        "summary": "",
+        "description": "",
+        "workspace_id": "workspace-1",
+        "created_at": "2026-06-21T10:00:00Z",
+        "updated_at": "2026-06-21T10:00:00Z",
+    }
+    updated = {**activity, "status": "accepted"}
+    feedback = AsyncMock()
+    emit = AsyncMock()
+
+    monkeypatch.setattr(
+        activity_service.repo,
+        "get_activity",
+        AsyncMock(return_value=activity),
+    )
+    monkeypatch.setattr(
+        activity_service.repo,
+        "update_activity_status",
+        AsyncMock(return_value=updated),
+    )
+    monkeypatch.setattr(activity_service.repo, "create_activity_feedback", feedback)
+    monkeypatch.setattr(
+        activity_service.repo,
+        "resolve_user_context",
+        AsyncMock(
+            return_value={
+                "conversation_id": "conversation-1",
+                "agent_id": "agent-1",
+                "workspace_id": "workspace-1",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        activity_service.repo,
+        "update_next_activity_due",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(activity_service, "emit_assistant", emit)
+    monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
+
+    result = await activity_service.accept_activity("user-1", "activity-1")
+
+    assert result.status == "accepted"
+    assert "重新接受" in feedback.await_args.kwargs["text"]
+    assert emit.await_args.kwargs["trigger_type"] == "offline_activity_reaccepted"

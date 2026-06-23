@@ -94,6 +94,7 @@ async def clear_all_activities(user_id: str) -> dict[str, int]:
     media = await activity_media_repo.delete_user_activity_media(user_id)
     for item in media:
         activity_media_storage.delete_media_file(item.storage_key)
+    activity_media_storage.delete_user_media_files(user_id)
     return await repo.clear_user_activities(user_id)
 
 
@@ -158,8 +159,26 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
-    if activity["status"] not in {"pending", "accepted"}:
+    if activity["status"] not in {"pending", "accepted", "ignored"}:
         raise HTTPException(status_code=409, detail="Activity cannot be accepted")
+    was_ignored = activity["status"] == "ignored"
+    if was_ignored:
+        feedback_text = f"用户重新接受了活动推荐：{activity['title']}"
+        chat_message = (
+            f"好呀，我把「{activity['title']}」重新放回待出行里。"
+            "彩蛋任务也还在，等你想去的时候慢慢看。"
+        )
+        memory_text = f"用户重新接受了线下活动推荐：{activity['title']}"
+    else:
+        feedback_text = f"用户接受了活动推荐：{activity['title']}"
+        chat_message = (
+            f"好，我把「{activity['title']}」先替你放进待确定里。"
+            "彩蛋任务也解锁啦，等你想去的时候再慢慢看。"
+        )
+        memory_text = f"用户接受了线下活动推荐：{activity['title']}"
+    trigger_type = (
+        "offline_activity_reaccepted" if was_ignored else "offline_activity_accepted"
+    )
     updated = await repo.update_activity_status(activity_id, user_id, "accepted")
     if not updated:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -167,7 +186,7 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
         recommendation_id=activity_id,
         user_id=user_id,
         kind="accept",
-        text=f"用户接受了活动推荐：{activity['title']}",
+        text=feedback_text,
     )
     ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
     if ctx:
@@ -176,10 +195,10 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             user_id=user_id,
             agent_id=ctx["agent_id"],
             workspace_id=ctx["workspace_id"],
-            message=f"好，我把「{activity['title']}」先替你放进待确定里。彩蛋任务也解锁啦，等你想去的时候再慢慢看。",
+            message=chat_message,
             real_world_type="activity",
             source_id=activity_id,
-            trigger_type="offline_activity_accepted",
+            trigger_type=trigger_type,
         )
         await repo.update_next_activity_due(
             user_id,
@@ -190,7 +209,7 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
     remember_user_event(
         user_id=user_id,
         workspace_id=activity.get("workspace_id"),
-        text=f"用户接受了线下活动推荐：{activity['title']}",
+        text=memory_text,
     )
     return OfflineActivityItem(**updated)
 

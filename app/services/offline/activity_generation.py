@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.services.llm.models import get_chat_model, invoke_text
+from app.services.offline.activity_images import persist_activity_images
 from app.services.offline.providers.search import SearchResult, tavily_search
 from app.services.offline import repository as repo
 from app.services.prompting.store import get_prompt_text
@@ -34,6 +35,9 @@ _UNRELIABLE_ACTIVITY_DOMAINS = {
 _GENERIC_ACTIVITY_TITLE_RE = re.compile(
     r"\b(the best|things to do|free things|attractions|travel guide|calendar)\b",
     flags=re.I,
+)
+_TOKEN_SPLIT_RE = re.compile(
+    r"[\s,，。；;:：/\\|·「」『』《》()（）\[\]【】\"'“”‘’]+"
 )
 
 
@@ -65,6 +69,86 @@ def _search_query(city: str, tags: list[str]) -> str:
         f"{anchor or city} 近期 本周 周末 官方 活动公告 免费 低成本 小众 "
         f"展览 市集 音乐 书店 咖啡 公园 {tag_text}"
     ).strip()
+
+
+def _normalize_fingerprint(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = _TOKEN_SPLIT_RE.sub("", text)
+    return re.sub(r"(市|区|县|省|官方|活动|常设展|推荐)$", "", text)
+
+
+def _significant_terms(*values: Any) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        normalized = _normalize_fingerprint(value)
+        if len(normalized) >= 3 and normalized not in terms:
+            terms.append(normalized)
+    return terms
+
+
+def _avoid_terms(recent_activities: list[dict[str, str]]) -> list[str]:
+    terms: list[str] = []
+    for item in recent_activities:
+        for term in _significant_terms(
+            item.get("location_name"),
+            item.get("address"),
+            item.get("title"),
+        ):
+            if term not in terms:
+                terms.append(term)
+    return terms[:30]
+
+
+def _avoid_text(recent_activities: list[dict[str, str]]) -> str:
+    if not recent_activities:
+        return "暂无"
+    parts: list[str] = []
+    for item in recent_activities[:12]:
+        location = item.get("location_name") or item.get("address") or "未知地点"
+        title = item.get("title") or "未知活动"
+        parts.append(f"- {title} / {location}")
+    return "\n".join(parts)
+
+
+def _mentions_avoided(value: str, avoid_terms: list[str]) -> bool:
+    normalized = _normalize_fingerprint(value)
+    if not normalized:
+        return False
+    return any(term in normalized or normalized in term for term in avoid_terms)
+
+
+def _filter_repeated_results(
+    results: list[SearchResult],
+    recent_activities: list[dict[str, str]],
+) -> list[SearchResult]:
+    avoid_terms = _avoid_terms(recent_activities)
+    if not avoid_terms:
+        return results
+    filtered = [
+        result
+        for result in results
+        if not _mentions_avoided(f"{result.title}\n{result.content}", avoid_terms)
+    ]
+    return filtered
+
+
+def _card_repeats_history(
+    card: dict[str, Any],
+    recent_activities: list[dict[str, str]],
+) -> bool:
+    if not recent_activities:
+        return False
+    card_terms = _significant_terms(
+        card.get("location_name"),
+        card.get("address"),
+        card.get("title"),
+    )
+    history_terms = _avoid_terms(recent_activities)
+    return any(
+        term in historical or historical in term
+        for term in card_terms
+        for historical in history_terms
+    )
 
 
 def _sources(results: list[SearchResult]) -> list[dict[str, Any]]:
@@ -167,18 +251,34 @@ async def generate_activity_card(
     memory = await repo.memory_brief(user_id, workspace_id, limit=60)
     query = _search_query(search_location or city, tags)
     raw_results = await tavily_search(query, max_results=8)
-    results = _usable_results(raw_results, city)[:6]
+    recent_activities = await repo.list_recent_activity_fingerprints(
+        user_id,
+        workspace_id,
+        limit=20,
+    )
+    results = _filter_repeated_results(
+        _usable_results(raw_results, city),
+        recent_activities,
+    )[:6]
     sources = _sources(results)
     card: dict[str, Any] | None = None
     if sources:
         try:
-            prompt_text = (await get_prompt_text("offline.activity_card")).format(
+            prompt_template = await get_prompt_text("offline.activity_card")
+            prompt_text = prompt_template.format(
                 city=city,
                 search_anchor=search_location or city,
                 tags=", ".join(tags) if tags else "暂无",
                 memory=memory or "暂无足够记忆，使用城市热门和季节普适活动兜底。",
+                avoid_text=_avoid_text(recent_activities),
                 sources_json=json.dumps(sources, ensure_ascii=False),
             )
+            if "{avoid_text}" not in prompt_template:
+                prompt_text += (
+                    "\n\n最近已推荐过的活动/地点，必须尽量避开：\n"
+                    f"{_avoid_text(recent_activities)}\n"
+                    "不要重复推荐同一地点、同一场馆或高度相似主题。"
+                )
             raw = await invoke_text(get_chat_model(), prompt_text)
             card = _json_object(raw)
         except Exception as exc:
@@ -188,6 +288,14 @@ async def generate_activity_card(
             "[offline] discarded unbacked activity card title=%r official_url=%r query=%r",
             card.get("title"),
             card.get("official_url"),
+            query,
+        )
+        card = None
+    if card and _card_repeats_history(card, recent_activities):
+        logger.warning(
+            "[offline] discarded repeated activity card title=%r location=%r query=%r",
+            card.get("title"),
+            card.get("location_name"),
             query,
         )
         card = None
@@ -204,6 +312,15 @@ async def generate_activity_card(
         or search_images[:3]
         or _FALLBACK_IMAGES[:2]
     )
+    persisted_images = await persist_activity_images(
+        user_id=user_id,
+        card=card,
+        city=city,
+        search_results=results,
+        limit=3,
+    )
+    if persisted_images:
+        card["image_urls"] = persisted_images
     card["search_sources"] = sources
     card["city"] = city
     card["source"] = source

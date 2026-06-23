@@ -80,6 +80,18 @@ def delete_media_file(storage_key: str | None) -> None:
         path.unlink()
 
 
+def delete_user_media_files(user_id: str) -> int:
+    if not _MEDIA_DIR.exists() or not _MEDIA_DIR.is_dir():
+        return 0
+    prefix = f"{user_id}_"
+    deleted = 0
+    for path in _MEDIA_DIR.iterdir():
+        if path.is_file() and path.name.startswith(prefix):
+            path.unlink()
+            deleted += 1
+    return deleted
+
+
 def serve_media(storage_key: str, *, user_id: str, is_admin: bool = False) -> Response:
     path = storage_path(storage_key)
     if not path.exists() or not path.is_file():

@@ -477,6 +477,40 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> list
     return [activity_from_row(row) for row in rows or []]
 
 
+async def list_recent_activity_fingerprints(
+    user_id: str,
+    workspace_id: str | None = None,
+    *,
+    limit: int = 20,
+) -> list[dict[str, str]]:
+    rows = await db.query_raw(
+        """
+        SELECT title, location_name, address, category
+        FROM offline_activity_recommendations
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR workspace_id = $2)
+        ORDER BY created_at DESC
+        LIMIT $3
+        """,
+        user_id,
+        workspace_id,
+        limit,
+    )
+    items: list[dict[str, str]] = []
+    for row in rows or []:
+        items.append(
+            {
+                "title": str(_field(row, "title") or "").strip(),
+                "location_name": str(
+                    _field(row, "location_name", "locationName") or ""
+                ).strip(),
+                "address": str(_field(row, "address") or "").strip(),
+                "category": str(_field(row, "category") or "").strip(),
+            }
+        )
+    return items
+
+
 async def clear_user_activities(user_id: str) -> dict[str, int]:
     feedback_rows = await db.query_raw(
         """
