@@ -86,6 +86,8 @@ services:
       DB_CONNECTION_LIMIT_MAX: "${DB_CONNECTION_LIMIT_MAX:-5}"
       DB_MAX_CONCURRENT_QUERIES: "${DB_MAX_CONCURRENT_QUERIES:-3}"
       DB_QUERY_MAX_RETRIES: "${DB_QUERY_MAX_RETRIES:-4}"
+      OFFLINE_MEDIA_DIR: "${OFFLINE_MEDIA_DIR:-/data/offline_media}"
+      OFFLINE_MEDIA_PUBLIC_PREFIX: "${OFFLINE_MEDIA_PUBLIC_PREFIX:-/offline/media}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +99,7 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/chat_media:/data/chat_media"
+      - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/offline_media:/data/offline_media"
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/capsule_media:/data/capsule_media"
       - "/app/companion-secrets:/app/companion-secrets:ro"
     healthcheck:

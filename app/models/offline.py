@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.models.chat_media import ChatAttachmentResponse
+
 
 ActivityStatus = Literal["pending", "accepted", "ignored", "expired", "completed"]
 GiftStatus = Literal[
@@ -38,8 +40,15 @@ class OfflineActivityItem(BaseModel):
     ignored_at: str | None = None
     completed_at: str | None = None
     expires_at: str | None = None
+    completion_feedback: "OfflineActivityCompletionFeedback | None" = None
     created_at: str
     updated_at: str
+
+
+class OfflineActivityCompletionFeedback(BaseModel):
+    text: str = ""
+    photo_attachments: list[ChatAttachmentResponse] = Field(default_factory=list)
+    created_at: str | None = None
 
 
 class OfflineHomeResponse(BaseModel):
@@ -66,7 +75,16 @@ class OfflineActivityClearResponse(BaseModel):
 
 class OfflineActivityCompleteRequest(BaseModel):
     text: str = Field(default="", max_length=1000)
-    photo_attachment_ids: list[str] = Field(default_factory=list, max_length=9)
+    photo_attachment_ids: list[str] = Field(default_factory=list, max_length=3)
+
+
+class OfflineActivityImageUpload(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    mime: str = Field(default="image/jpeg", max_length=40)
+    size: int = Field(ge=1, le=2 * 1024 * 1024)
+    width: int | None = Field(default=None, ge=1, le=10000)
+    height: int | None = Field(default=None, ge=1, le=10000)
+    base64: str = Field(min_length=1)
 
 
 class GiftAddressResponse(BaseModel):

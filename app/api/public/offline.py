@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt, require_user
+from app.models.chat_media import ChatAttachmentResponse
 from app.models.offline import (
     GiftAddressRequest,
     GiftAddressResponse,
@@ -13,11 +14,17 @@ from app.models.offline import (
     OfflineActivitiesResponse,
     OfflineActivityClearResponse,
     OfflineActivityCompleteRequest,
+    OfflineActivityImageUpload,
     OfflineActivityItem,
     OfflineHomeResponse,
     RealWorldGiftItem,
 )
-from app.services.offline import activity_service, gift_service
+from app.services.offline import (
+    activity_media_repo,
+    activity_media_storage,
+    activity_service,
+    gift_service,
+)
 
 router = APIRouter(prefix="/offline", tags=["offline"])
 
@@ -97,6 +104,56 @@ async def complete_offline_activity(
     )
 
 
+@router.post(
+    "/activities/{activity_id}/media",
+    response_model=ChatAttachmentResponse,
+)
+async def upload_offline_activity_image(
+    activity_id: str,
+    data: OfflineActivityImageUpload,
+    user: dict = Depends(require_user),
+):
+    user_id = str(user["sub"])
+    if not await activity_media_repo.activity_belongs_to_user(activity_id, user_id):
+        raise HTTPException(status_code=404, detail="Activity not found")
+    mime = activity_media_storage.normalize_image_mime(data.mime)
+    blob = activity_media_storage.decode_image_base64(data.base64)
+    activity_media_storage.validate_image_size(blob)
+    storage_key = activity_media_storage.save_image_blob(
+        user_id=user_id,
+        blob=blob,
+        mime=mime,
+    )
+    try:
+        media = await activity_media_repo.create_media(
+            recommendation_id=activity_id,
+            user_id=user_id,
+            storage_key=storage_key,
+            url=activity_media_storage.media_url(storage_key),
+            mime=mime,
+            size=len(blob),
+            name=data.name,
+            width=data.width,
+            height=data.height,
+        )
+    except Exception:
+        activity_media_storage.delete_media_file(storage_key)
+        raise
+    return _media_response(media)
+
+
+@router.get("/media/{storage_key}")
+async def get_offline_activity_media(
+    storage_key: str,
+    user: dict = Depends(require_user),
+):
+    return activity_media_storage.serve_media(
+        storage_key,
+        user_id=str(user["sub"]),
+        is_admin=user.get("role") == "admin",
+    )
+
+
 @router.get("/gifts", response_model=GiftsHomeResponse)
 async def get_offline_gifts(
     workspace_id: str | None = Query(default=None),
@@ -141,3 +198,21 @@ async def thank_gift(
     user: dict = Depends(require_user),
 ):
     return await gift_service.send_thanks(str(user["sub"]), gift_id, data.message)
+
+
+def _media_response(
+    media: activity_media_repo.OfflineActivityMedia,
+) -> ChatAttachmentResponse:
+    return ChatAttachmentResponse(
+        id=media.id,
+        kind=media.kind,
+        name=media.name,
+        mime=media.mime,
+        size=media.size,
+        width=media.width,
+        height=media.height,
+        url=media.url,
+        vision_status="ready",
+        vision_summary=None,
+        created_at=str(media.created_at) if media.created_at else None,
+    )

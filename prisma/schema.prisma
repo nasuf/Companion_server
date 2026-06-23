@@ -60,6 +60,7 @@ model User {
   walletLedger    WalletLedger[]
   offlineActivities OfflineActivityRecommendation[]
   offlineActivityFeedback OfflineActivityFeedback[]
+  offlineActivityMedia OfflineActivityMedia[]
   giftAddresses   GiftAddress[]
   realWorldGifts  RealWorldGift[]
   realWorldTriggerStates RealWorldTriggerState[]
@@ -1352,6 +1353,7 @@ model OfflineActivityRecommendation {
   easterEggTask  Json?        @map("easter_egg_task")
   taskHint       String?      @map("task_hint")
   feedback       OfflineActivityFeedback[]
+  media          OfflineActivityMedia[]
   acceptedAt     DateTime?    @map("accepted_at")
   ignoredAt      DateTime?    @map("ignored_at")
   completedAt    DateTime?    @map("completed_at")
@@ -1362,6 +1364,28 @@ model OfflineActivityRecommendation {
   @@index([userId, status, createdAt(sort: Desc)], map: "offline_activity_user_status_idx")
   @@index([workspaceId, createdAt(sort: Desc)], map: "offline_activity_workspace_idx")
   @@map("offline_activity_recommendations")
+}
+
+model OfflineActivityMedia {
+  id               String       @id @default(uuid())
+  recommendationId String       @map("recommendation_id")
+  recommendation   OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  userId           String       @map("user_id")
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind             String       @default("image")
+  name             String?
+  mime             String
+  size             Int
+  width            Int?
+  height           Int?
+  storageKey       String       @unique @map("storage_key")
+  url              String
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@index([recommendationId, createdAt(sort: Desc)], map: "offline_activity_media_recommendation_idx")
+  @@index([userId, createdAt(sort: Desc)], map: "offline_activity_media_user_idx")
+  @@map("offline_activity_media")
 }
 
 model OfflineActivityFeedback {

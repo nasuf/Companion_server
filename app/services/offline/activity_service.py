@@ -5,15 +5,17 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from app.models.offline import OfflineActivitiesResponse, OfflineActivityItem
-from app.services.chat_media import repo as media_repo
+from app.services.offline import activity_media_repo, activity_media_storage
 from app.services.offline import repository as repo
 from app.services.offline.activity_generation import generate_activity_card
-from app.services.offline.chat_emit import emit_assistant
+from app.services.offline.chat_emit import emit_assistant, insert_user_component_message
 from app.services.offline.memory_hooks import remember_user_event
 
 
 def _location_for_activity(ctx: dict) -> tuple[str, str | None]:
-    city = (ctx.get("user_location_city") or ctx.get("user_location_region") or "").strip()
+    city = (
+        ctx.get("user_location_city") or ctx.get("user_location_region") or ""
+    ).strip()
     if city:
         return city, None
     latitude = ctx.get("user_location_latitude")
@@ -28,8 +30,14 @@ def _location_for_activity(ctx: dict) -> tuple[str, str | None]:
 
 async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
     ctx = await repo.resolve_user_context(user_id, workspace_id)
-    activities = await repo.list_activities(user_id, ctx["workspace_id"] if ctx else workspace_id)
-    gifts = await repo.list_gifts(user_id, ctx["workspace_id"] if ctx else workspace_id)
+    activities = await repo.list_activities(
+        user_id,
+        ctx["workspace_id"] if ctx else workspace_id,
+    )
+    gifts = await repo.list_gifts(
+        user_id,
+        ctx["workspace_id"] if ctx else workspace_id,
+    )
     pending = [a for a in activities if a["status"] in {"pending", "accepted"}]
     completed = [a for a in activities if a["status"] == "completed"]
     shipping = [g for g in gifts if g["status"] in {"ordered", "shipping"}]
@@ -51,27 +59,36 @@ async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
     }
 
 
-async def list_activities(user_id: str, workspace_id: str | None = None) -> OfflineActivitiesResponse:
+async def list_activities(
+    user_id: str,
+    workspace_id: str | None = None,
+) -> OfflineActivitiesResponse:
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     resolved_workspace = ctx["workspace_id"] if ctx else workspace_id
     rows = await repo.list_activities(user_id, resolved_workspace)
     latest = next((a for a in rows if a["status"] in {"pending", "accepted"}), None)
+    items = [await _with_completion_feedback(a) for a in rows]
     return OfflineActivitiesResponse(
-        latest=OfflineActivityItem(**latest) if latest else None,
+        latest=OfflineActivityItem(**(await _with_completion_feedback(latest)))
+        if latest
+        else None,
         pending=[
             OfflineActivityItem(**a)
-            for a in rows
+            for a in items
             if a["status"] in {"pending", "accepted"}
         ],
         completed=[
             OfflineActivityItem(**a)
-            for a in rows
+            for a in items
             if a["status"] == "completed"
         ],
     )
 
 
 async def clear_all_activities(user_id: str) -> dict[str, int]:
+    media = await activity_media_repo.delete_user_activity_media(user_id)
+    for item in media:
+        activity_media_storage.delete_media_file(item.storage_key)
     return await repo.clear_user_activities(user_id)
 
 
@@ -79,6 +96,7 @@ async def get_activity(user_id: str, activity_id: str) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
+    activity = await _with_completion_feedback(activity)
     return OfflineActivityItem(**activity)
 
 
@@ -224,17 +242,24 @@ async def complete_activity(
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
     if activity["status"] not in {"accepted", "completed"}:
-        raise HTTPException(status_code=409, detail="Accept the activity before completing it")
+        raise HTTPException(
+            status_code=409,
+            detail="Accept the activity before completing it",
+        )
     ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
-    conversation_id = ctx.get("conversation_id") if ctx else activity.get("conversation_id")
-    if photo_attachment_ids and conversation_id:
-        found = await media_repo.get_message_attachments(
-            attachment_ids=photo_attachment_ids,
+    conversation_id = (
+        ctx.get("conversation_id") if ctx else activity.get("conversation_id")
+    )
+    if photo_attachment_ids:
+        found = await activity_media_repo.get_activity_media(
+            media_ids=photo_attachment_ids,
             user_id=user_id,
-            conversation_id=conversation_id,
+            recommendation_id=activity_id,
         )
         if len(found) != len(photo_attachment_ids):
-            raise HTTPException(status_code=400, detail="Invalid photo attachment")
+            raise HTTPException(status_code=400, detail="Invalid activity media")
+    else:
+        found = []
     updated = await repo.update_activity_status(activity_id, user_id, "completed")
     if not updated:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -245,6 +270,18 @@ async def complete_activity(
         text=text,
         photo_attachment_ids=photo_attachment_ids,
     )
+    if conversation_id and (text.strip() or found):
+        await insert_user_component_message(
+            conversation_id=conversation_id,
+            workspace_id=activity.get("workspace_id"),
+            content=text.strip() or "分享了活动完成情况",
+            metadata={
+                "real_world_type": "activity",
+                "source_id": activity_id,
+                "trigger_type": "offline_activity_completion_share",
+                "attachments": [_media_to_metadata(item) for item in found],
+            },
+        )
     if ctx:
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
@@ -261,4 +298,31 @@ async def complete_activity(
         workspace_id=activity.get("workspace_id"),
         text=f"用户完成了线下活动「{activity['title']}」。分享内容：{text}",
     )
+    updated = await _with_completion_feedback(updated)
     return OfflineActivityItem(**updated)
+
+
+async def _with_completion_feedback(activity: dict | None) -> dict:
+    if not activity:
+        return {}
+    if activity.get("status") != "completed":
+        return activity
+    feedback = await repo.get_activity_completion_feedback(
+        recommendation_id=activity["id"],
+        user_id=activity["user_id"],
+    )
+    return {**activity, "completion_feedback": feedback}
+
+
+def _media_to_metadata(media: activity_media_repo.OfflineActivityMedia) -> dict:
+    return {
+        "id": media.id,
+        "kind": media.kind,
+        "name": media.name,
+        "mime": media.mime,
+        "size": media.size,
+        "width": media.width,
+        "height": media.height,
+        "url": media.url,
+        "vision_status": "ready",
+    }

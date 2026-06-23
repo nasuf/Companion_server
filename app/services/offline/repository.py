@@ -109,6 +109,7 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "ignored_at": _iso(_field(row, "ignored_at", "ignoredAt")),
         "completed_at": _iso(_field(row, "completed_at", "completedAt")),
         "expires_at": _iso(_field(row, "expires_at", "expiresAt")),
+        "completion_feedback": None,
         "created_at": _iso(_field(row, "created_at", "createdAt")) or "",
         "updated_at": _iso(_field(row, "updated_at", "updatedAt")) or "",
     }
@@ -563,6 +564,77 @@ async def create_activity_feedback(
         json.dumps(photo_attachment_ids or [], ensure_ascii=False),
         json.dumps(metadata or {}, ensure_ascii=False),
     )
+
+
+async def get_activity_completion_feedback(
+    *,
+    recommendation_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM offline_activity_feedback
+        WHERE recommendation_id = $1
+          AND user_id = $2
+          AND kind = 'completion'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        recommendation_id,
+        user_id,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    attachment_ids = [
+        str(item)
+        for item in _json(
+            _field(row, "photo_attachment_ids", "photoAttachmentIds"),
+            [],
+        )
+        if str(item).strip()
+    ][:3]
+    attachments: list[dict[str, Any]] = []
+    if attachment_ids:
+        attachment_rows = await db.query_raw(
+            """
+            SELECT id, kind, name, mime, size, width, height, url,
+                   created_at
+            FROM offline_activity_media
+            WHERE id = ANY($1::text[])
+              AND user_id = $2
+              AND recommendation_id = $3
+            """,
+            attachment_ids,
+            user_id,
+            recommendation_id,
+        )
+        by_id = {str(_field(item, "id")): item for item in attachment_rows or []}
+        for attachment_id in attachment_ids:
+            item = by_id.get(attachment_id)
+            if not item:
+                continue
+            attachments.append(
+                {
+                    "id": str(_field(item, "id")),
+                    "kind": str(_field(item, "kind") or "image"),
+                    "name": _field(item, "name"),
+                    "mime": str(_field(item, "mime") or "image/jpeg"),
+                    "size": int(_field(item, "size") or 0),
+                    "width": _field(item, "width"),
+                    "height": _field(item, "height"),
+                    "url": str(_field(item, "url") or ""),
+                    "vision_status": "ready",
+                    "vision_summary": None,
+                    "created_at": _iso(_field(item, "created_at", "createdAt")),
+                }
+            )
+    return {
+        "text": str(_field(row, "text") or ""),
+        "photo_attachments": attachments,
+        "created_at": _iso(_field(row, "created_at", "createdAt")),
+    }
 
 
 async def default_address(user_id: str, *, masked: bool = True) -> dict[str, Any] | None:
