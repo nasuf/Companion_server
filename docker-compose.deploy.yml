@@ -96,6 +96,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
+      - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/chat_media:/data/chat_media"
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/capsule_media:/data/capsule_media"
       - "/app/companion-secrets:/app/companion-secrets:ro"
     healthcheck:

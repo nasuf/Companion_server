@@ -73,6 +73,8 @@ jobs:
             POSTGRES_PASSWORD=$POSTGRES_PASSWORD
             POSTGRES_DB=$POSTGRES_DB
             COMPANION_DATA_DIR=/mnt/datadisk0/companion
+            CHAT_MEDIA_DIR=/data/chat_media
+            CHAT_MEDIA_PUBLIC_PREFIX=/chat/media
             CAPSULE_MEDIA_DIR=/data/capsule_media
             CAPSULE_MEDIA_PUBLIC_PREFIX=/api/capsules/media
             DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=3&pool_timeout=30&connect_timeout=30
