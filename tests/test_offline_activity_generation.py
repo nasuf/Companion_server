@@ -3,6 +3,7 @@ from app.services.offline.activity_generation import (
     _search_query,
     _usable_results,
 )
+from app.services.offline import repository as offline_repo
 from app.services.offline.providers.search import SearchResult
 
 
@@ -39,3 +40,22 @@ def test_fallback_card_does_not_promote_unverified_source_title_to_place():
 
     assert "Paulaner" not in card["title"]
     assert card["location_name"] == "镇江"
+
+
+async def test_clear_user_activities_deletes_feedback_and_recommendations(monkeypatch):
+    captured = []
+
+    async def fake_query_raw(sql, user_id):
+        captured.append((sql, user_id))
+        if "offline_activity_feedback" in sql:
+            return [{"id": "feedback-1"}, {"id": "feedback-2"}]
+        return [{"id": "activity-1"}, {"id": "activity-2"}, {"id": "activity-3"}]
+
+    monkeypatch.setattr(offline_repo.db, "query_raw", fake_query_raw)
+
+    result = await offline_repo.clear_user_activities("user-1")
+
+    assert result == {"deleted_activities": 3, "deleted_feedback": 2}
+    assert [user_id for _, user_id in captured] == ["user-1", "user-1"]
+    assert "DELETE FROM offline_activity_feedback" in captured[0][0]
+    assert "DELETE FROM offline_activity_recommendations" in captured[1][0]

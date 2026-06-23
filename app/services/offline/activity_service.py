@@ -71,6 +71,10 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> Offl
     )
 
 
+async def clear_all_activities(user_id: str) -> dict[str, int]:
+    return await repo.clear_user_activities(user_id)
+
+
 async def get_activity(user_id: str, activity_id: str) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:

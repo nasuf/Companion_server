@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.jwt_auth import require_user
+from app.api.jwt_auth import require_admin_jwt, require_user
 from app.models.offline import (
     GiftAddressRequest,
     GiftAddressResponse,
@@ -11,6 +11,7 @@ from app.models.offline import (
     GiftTrackingResponse,
     GiftsHomeResponse,
     OfflineActivitiesResponse,
+    OfflineActivityClearResponse,
     OfflineActivityCompleteRequest,
     OfflineActivityItem,
     OfflineHomeResponse,
@@ -48,6 +49,14 @@ async def create_offline_activity_recommendation(
         source="manual",
     )
     return OfflineActivityItem(**activity) if activity else None
+
+
+@router.delete("/admin/activities", response_model=OfflineActivityClearResponse)
+async def clear_current_user_offline_activities(
+    user: dict = Depends(require_admin_jwt),
+):
+    result = await activity_service.clear_all_activities(str(user["sub"]))
+    return OfflineActivityClearResponse(**result)
 
 
 @router.get("/activities/{activity_id}", response_model=OfflineActivityItem)

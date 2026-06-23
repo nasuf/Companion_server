@@ -476,6 +476,31 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> list
     return [activity_from_row(row) for row in rows or []]
 
 
+async def clear_user_activities(user_id: str) -> dict[str, int]:
+    feedback_rows = await db.query_raw(
+        """
+        DELETE FROM offline_activity_feedback
+        WHERE recommendation_id IN (
+            SELECT id FROM offline_activity_recommendations WHERE user_id = $1
+        )
+        RETURNING id
+        """,
+        user_id,
+    )
+    activity_rows = await db.query_raw(
+        """
+        DELETE FROM offline_activity_recommendations
+        WHERE user_id = $1
+        RETURNING id
+        """,
+        user_id,
+    )
+    return {
+        "deleted_activities": len(activity_rows or []),
+        "deleted_feedback": len(feedback_rows or []),
+    }
+
+
 async def get_activity(activity_id: str, user_id: str, *, reveal_task: bool = False) -> dict[str, Any] | None:
     rows = await db.query_raw(
         "SELECT * FROM offline_activity_recommendations WHERE id = $1 AND user_id = $2 LIMIT 1",

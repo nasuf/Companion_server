@@ -59,6 +59,11 @@ class OfflineActivitiesResponse(BaseModel):
     completed: list[OfflineActivityItem] = Field(default_factory=list)
 
 
+class OfflineActivityClearResponse(BaseModel):
+    deleted_activities: int = 0
+    deleted_feedback: int = 0
+
+
 class OfflineActivityCompleteRequest(BaseModel):
     text: str = Field(default="", max_length=1000)
     photo_attachment_ids: list[str] = Field(default_factory=list, max_length=9)
