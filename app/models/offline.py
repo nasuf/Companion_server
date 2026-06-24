@@ -48,6 +48,7 @@ class OfflineActivityItem(BaseModel):
 class OfflineActivityCompletionFeedback(BaseModel):
     text: str = ""
     photo_attachments: list[ChatAttachmentResponse] = Field(default_factory=list)
+    audio_attachment: ChatAttachmentResponse | None = None
     created_at: str | None = None
 
 
@@ -78,14 +79,17 @@ class OfflineActivityClearResponse(BaseModel):
 class OfflineActivityCompleteRequest(BaseModel):
     text: str = Field(default="", max_length=1000)
     photo_attachment_ids: list[str] = Field(default_factory=list, max_length=3)
+    audio_attachment_id: str | None = Field(default=None, max_length=80)
 
 
 class OfflineActivityImageUpload(BaseModel):
+    kind: Literal["image", "audio"] = "image"
     name: str | None = Field(default=None, max_length=120)
-    mime: str = Field(default="image/jpeg", max_length=40)
-    size: int = Field(ge=1, le=2 * 1024 * 1024)
+    mime: str = Field(default="image/jpeg", max_length=80)
+    size: int = Field(ge=1, le=5 * 1024 * 1024)
     width: int | None = Field(default=None, ge=1, le=10000)
     height: int | None = Field(default=None, ge=1, le=10000)
+    duration_seconds: int | None = Field(default=None, ge=1, le=180)
     base64: str = Field(min_length=1)
 
 

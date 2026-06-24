@@ -581,14 +581,16 @@ async def create_activity_feedback(
     kind: str,
     text: str = "",
     photo_attachment_ids: list[str] | None = None,
+    audio_attachment_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     await db.execute_raw(
         """
         INSERT INTO offline_activity_feedback (
-            id, recommendation_id, user_id, kind, text, photo_attachment_ids, metadata
+            id, recommendation_id, user_id, kind, text,
+            photo_attachment_ids, audio_attachment_id, metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb)
         """,
         new_id(),
         recommendation_id,
@@ -596,6 +598,7 @@ async def create_activity_feedback(
         kind,
         text,
         json.dumps(photo_attachment_ids or [], ensure_ascii=False),
+        audio_attachment_id,
         json.dumps(metadata or {}, ensure_ascii=False),
     )
 
@@ -629,44 +632,55 @@ async def get_activity_completion_feedback(
         )
         if str(item).strip()
     ][:3]
+    audio_attachment_id = str(
+        _field(row, "audio_attachment_id", "audioAttachmentId") or ""
+    ).strip()
+    media_ids = attachment_ids + ([audio_attachment_id] if audio_attachment_id else [])
     attachments: list[dict[str, Any]] = []
-    if attachment_ids:
+    audio_attachment: dict[str, Any] | None = None
+    if media_ids:
         attachment_rows = await db.query_raw(
             """
-            SELECT id, kind, name, mime, size, width, height, url,
+            SELECT id, kind, name, mime, size, width, height, duration_seconds, url,
                    created_at
             FROM offline_activity_media
             WHERE id = ANY($1::text[])
               AND user_id = $2
               AND recommendation_id = $3
             """,
-            attachment_ids,
+            media_ids,
             user_id,
             recommendation_id,
         )
         by_id = {str(_field(item, "id")): item for item in attachment_rows or []}
-        for attachment_id in attachment_ids:
+        for attachment_id in media_ids:
             item = by_id.get(attachment_id)
             if not item:
                 continue
-            attachments.append(
-                {
-                    "id": str(_field(item, "id")),
-                    "kind": str(_field(item, "kind") or "image"),
-                    "name": _field(item, "name"),
-                    "mime": str(_field(item, "mime") or "image/jpeg"),
-                    "size": int(_field(item, "size") or 0),
-                    "width": _field(item, "width"),
-                    "height": _field(item, "height"),
-                    "url": str(_field(item, "url") or ""),
-                    "vision_status": "ready",
-                    "vision_summary": None,
-                    "created_at": _iso(_field(item, "created_at", "createdAt")),
-                }
-            )
+            payload = {
+                "id": str(_field(item, "id")),
+                "kind": str(_field(item, "kind") or "image"),
+                "name": _field(item, "name"),
+                "mime": str(_field(item, "mime") or "image/jpeg"),
+                "size": int(_field(item, "size") or 0),
+                "width": _field(item, "width"),
+                "height": _field(item, "height"),
+                "duration_seconds": _field(
+                    item, "duration_seconds", "durationSeconds"
+                ),
+                "url": str(_field(item, "url") or ""),
+                "vision_status": "ready",
+                "vision_summary": None,
+                "created_at": _iso(_field(item, "created_at", "createdAt")),
+            }
+            if attachment_id == audio_attachment_id:
+                audio_attachment = payload
+            else:
+                attachments.append(payload)
     return {
         "text": str(_field(row, "text") or ""),
         "photo_attachments": attachments,
+        "audio_attachment": audio_attachment,
         "created_at": _iso(_field(row, "created_at", "createdAt")),
     }
 

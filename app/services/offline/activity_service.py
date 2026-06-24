@@ -300,6 +300,7 @@ async def complete_activity(
     *,
     text: str,
     photo_attachment_ids: list[str],
+    audio_attachment_id: str | None = None,
 ) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
@@ -313,16 +314,25 @@ async def complete_activity(
     conversation_id = (
         ctx.get("conversation_id") if ctx else activity.get("conversation_id")
     )
-    if photo_attachment_ids:
+    media_ids = list(photo_attachment_ids)
+    if audio_attachment_id:
+        media_ids.append(audio_attachment_id)
+    found: list[activity_media_repo.OfflineActivityMedia] = []
+    if media_ids:
         found = await activity_media_repo.get_activity_media(
-            media_ids=photo_attachment_ids,
+            media_ids=media_ids,
             user_id=user_id,
             recommendation_id=activity_id,
         )
-        if len(found) != len(photo_attachment_ids):
+        if len(found) != len(media_ids):
             raise HTTPException(status_code=400, detail="Invalid activity media")
-    else:
-        found = []
+    by_id = {item.id: item for item in found}
+    photos = [by_id[item_id] for item_id in photo_attachment_ids if item_id in by_id]
+    audio = by_id.get(audio_attachment_id) if audio_attachment_id else None
+    if any(item.kind != "image" for item in photos):
+        raise HTTPException(status_code=400, detail="Invalid activity photo")
+    if audio and audio.kind != "audio":
+        raise HTTPException(status_code=400, detail="Invalid activity audio")
     updated = await repo.update_activity_status(activity_id, user_id, "completed")
     if not updated:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -332,8 +342,10 @@ async def complete_activity(
         kind="completion",
         text=text,
         photo_attachment_ids=photo_attachment_ids,
+        audio_attachment_id=audio_attachment_id if audio else None,
     )
-    if conversation_id and (text.strip() or found):
+    media_for_message = [*photos, *([audio] if audio else [])]
+    if conversation_id and (text.strip() or media_for_message):
         await insert_user_component_message(
             conversation_id=conversation_id,
             workspace_id=activity.get("workspace_id"),
@@ -342,7 +354,7 @@ async def complete_activity(
                 "real_world_type": "activity",
                 "source_id": activity_id,
                 "trigger_type": "offline_activity_completion_share",
-                "attachments": [_media_to_metadata(item) for item in found],
+                "attachments": [_media_to_metadata(item) for item in media_for_message],
             },
         )
     if ctx:
@@ -366,7 +378,11 @@ async def complete_activity(
     remember_user_event(
         user_id=user_id,
         workspace_id=activity.get("workspace_id"),
-        text=f"用户完成了线下活动「{activity['title']}」。分享内容：{text}",
+        text=(
+            f"用户完成了线下活动「{activity['title']}」。"
+            f"分享内容：{text}"
+            + ("（包含语音）" if audio else "")
+        ),
     )
     updated = await _with_completion_feedback(updated)
     return OfflineActivityItem(**updated)
@@ -393,6 +409,7 @@ def _media_to_metadata(media: activity_media_repo.OfflineActivityMedia) -> dict:
         "size": media.size,
         "width": media.width,
         "height": media.height,
+        "duration_seconds": media.duration_seconds,
         "url": media.url,
         "vision_status": "ready",
     }

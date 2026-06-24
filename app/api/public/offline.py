@@ -101,6 +101,7 @@ async def complete_offline_activity(
         activity_id,
         text=data.text,
         photo_attachment_ids=data.photo_attachment_ids,
+        audio_attachment_id=data.audio_attachment_id,
     )
 
 
@@ -116,25 +117,39 @@ async def upload_offline_activity_image(
     user_id = str(user["sub"])
     if not await activity_media_repo.activity_belongs_to_user(activity_id, user_id):
         raise HTTPException(status_code=404, detail="Activity not found")
-    mime = activity_media_storage.normalize_image_mime(data.mime)
-    blob = activity_media_storage.decode_image_base64(data.base64)
-    activity_media_storage.validate_image_size(blob)
-    storage_key = activity_media_storage.save_image_blob(
-        user_id=user_id,
-        blob=blob,
-        mime=mime,
-    )
+    if data.kind == "audio":
+        mime = activity_media_storage.normalize_audio_mime(data.mime)
+        blob = activity_media_storage.decode_audio_base64(data.base64)
+        storage_key = activity_media_storage.save_audio_blob(
+            user_id=user_id,
+            blob=blob,
+            mime=mime,
+        )
+        width = None
+        height = None
+    else:
+        mime = activity_media_storage.normalize_image_mime(data.mime)
+        blob = activity_media_storage.decode_image_base64(data.base64)
+        storage_key = activity_media_storage.save_image_blob(
+            user_id=user_id,
+            blob=blob,
+            mime=mime,
+        )
+        width = data.width
+        height = data.height
     try:
         media = await activity_media_repo.create_media(
             recommendation_id=activity_id,
             user_id=user_id,
+            kind=data.kind,
             storage_key=storage_key,
             url=activity_media_storage.media_url(storage_key),
             mime=mime,
             size=len(blob),
             name=data.name,
-            width=data.width,
-            height=data.height,
+            width=width,
+            height=height,
+            duration_seconds=data.duration_seconds if data.kind == "audio" else None,
         )
     except Exception:
         activity_media_storage.delete_media_file(storage_key)
@@ -211,6 +226,7 @@ def _media_response(
         size=media.size,
         width=media.width,
         height=media.height,
+        duration_seconds=media.duration_seconds,
         url=media.url,
         vision_status="ready",
         vision_summary=None,

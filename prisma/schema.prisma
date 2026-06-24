@@ -1378,6 +1378,7 @@ model OfflineActivityMedia {
   size             Int
   width            Int?
   height           Int?
+  durationSeconds  Int?         @map("duration_seconds")
   storageKey       String       @unique @map("storage_key")
   url              String
   createdAt        DateTime     @default(now()) @map("created_at")
@@ -1397,6 +1398,7 @@ model OfflineActivityFeedback {
   kind               String
   text               String       @default("")
   photoAttachmentIds Json         @default("[]") @map("photo_attachment_ids")
+  audioAttachmentId  String?      @map("audio_attachment_id")
   metadata           Json         @default("{}")
   createdAt          DateTime     @default(now()) @map("created_at")
 

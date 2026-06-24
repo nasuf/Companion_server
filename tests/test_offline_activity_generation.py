@@ -168,7 +168,7 @@ async def test_upload_offline_activity_image_saves_file_and_returns_media(
     monkeypatch.setattr(
         offline.activity_media_storage,
         "storage_key_for",
-        lambda _user_id, _mime: "user-1_activity.jpg",
+        lambda _user_id, _mime, kind="image": "user-1_activity.jpg",
     )
     monkeypatch.setattr(
         offline.activity_media_repo,
@@ -185,6 +185,7 @@ async def test_upload_offline_activity_image_saves_file_and_returns_media(
         size=5,
         width=800,
         height=600,
+        duration_seconds=None,
         storage_key="user-1_activity.jpg",
         url="/offline/media/user-1_activity.jpg",
         created_at=None,
@@ -209,6 +210,59 @@ async def test_upload_offline_activity_image_saves_file_and_returns_media(
     create_media.assert_awaited_once()
     assert response.id == "media-1"
     assert response.url == "/offline/media/user-1_activity.jpg"
+
+
+async def test_upload_offline_activity_audio_saves_file_and_returns_media(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(offline.activity_media_storage, "_MEDIA_DIR", tmp_path)
+    monkeypatch.setattr(
+        offline.activity_media_storage,
+        "storage_key_for",
+        lambda _user_id, _mime, kind="image": "user-1_voice.m4a",
+    )
+    monkeypatch.setattr(
+        offline.activity_media_repo,
+        "activity_belongs_to_user",
+        AsyncMock(return_value=True),
+    )
+    created = activity_media_repo.OfflineActivityMedia(
+        id="media-voice-1",
+        recommendation_id="activity-1",
+        user_id="user-1",
+        kind="audio",
+        name="voice.m4a",
+        mime="audio/mp4",
+        size=5,
+        width=None,
+        height=None,
+        duration_seconds=12,
+        storage_key="user-1_voice.m4a",
+        url="/offline/media/user-1_voice.m4a",
+        created_at=None,
+    )
+    create_media = AsyncMock(return_value=created)
+    monkeypatch.setattr(offline.activity_media_repo, "create_media", create_media)
+
+    response = await offline.upload_offline_activity_image(
+        "activity-1",
+        offline.OfflineActivityImageUpload(
+            kind="audio",
+            name="voice.m4a",
+            mime="audio/mp4",
+            size=5,
+            duration_seconds=12,
+            base64=base64.b64encode(b"voice").decode("ascii"),
+        ),
+        user={"sub": "user-1", "role": "user"},
+    )
+
+    assert (tmp_path / "user-1_voice.m4a").read_bytes() == b"voice"
+    create_media.assert_awaited_once()
+    assert response.kind == "audio"
+    assert response.duration_seconds == 12
+    assert response.url == "/offline/media/user-1_voice.m4a"
 
 
 async def test_create_recommendation_requires_resolved_user_city(monkeypatch):

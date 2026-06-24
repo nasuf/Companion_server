@@ -9,6 +9,7 @@ import uuid
 from fastapi import HTTPException, Response
 
 _MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_AUDIO_BYTES = 5 * 1024 * 1024
 _MEDIA_DIR = Path(os.getenv("OFFLINE_MEDIA_DIR", "var/offline_media"))
 _MEDIA_PUBLIC_PREFIX = (
     os.getenv("OFFLINE_MEDIA_PUBLIC_PREFIX", "/offline/media").strip().rstrip("/")
@@ -20,9 +21,16 @@ _ALLOWED_IMAGE_MIMES = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+_ALLOWED_AUDIO_MIMES = {
+    "audio/mp4": ".m4a",
+    "audio/aac": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/mpeg": ".mp3",
+}
 
 
-def decode_image_base64(value: str) -> bytes:
+def _decode_base64(value: str, *, label: str) -> bytes:
     raw = value.strip()
     comma = raw.find(",")
     if comma >= 0:
@@ -30,7 +38,15 @@ def decode_image_base64(value: str) -> bytes:
     try:
         return base64.b64decode(raw, validate=True)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid image base64") from exc
+        raise HTTPException(status_code=400, detail=f"Invalid {label} base64") from exc
+
+
+def decode_image_base64(value: str) -> bytes:
+    return _decode_base64(value, label="image")
+
+
+def decode_audio_base64(value: str) -> bytes:
+    return _decode_base64(value, label="audio")
 
 
 def normalize_image_mime(mime: str | None) -> str:
@@ -42,6 +58,15 @@ def normalize_image_mime(mime: str | None) -> str:
     return normalized
 
 
+def normalize_audio_mime(mime: str | None) -> str:
+    normalized = (mime or "audio/mp4").strip().lower()
+    if normalized in {"audio/x-m4a", "audio/m4a"}:
+        return "audio/mp4"
+    if normalized not in _ALLOWED_AUDIO_MIMES:
+        raise HTTPException(status_code=400, detail="Unsupported audio type")
+    return normalized
+
+
 def validate_image_size(blob: bytes) -> None:
     if not blob:
         raise HTTPException(status_code=400, detail="Image is empty")
@@ -49,9 +74,19 @@ def validate_image_size(blob: bytes) -> None:
         raise HTTPException(status_code=400, detail="Image must be under 2MB")
 
 
-def storage_key_for(user_id: str, mime: str) -> str:
+def validate_audio_size(blob: bytes) -> None:
+    if not blob:
+        raise HTTPException(status_code=400, detail="Audio is empty")
+    if len(blob) > _MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=400, detail="Audio must be under 5MB")
+
+
+def storage_key_for(user_id: str, mime: str, *, kind: str = "image") -> str:
+    if kind == "audio":
+        ext = _ALLOWED_AUDIO_MIMES.get(mime, ".m4a")
+        return f"{user_id}_voice_{uuid.uuid4().hex}{ext}"
     ext = _ALLOWED_IMAGE_MIMES.get(mime, ".jpg")
-    return f"{user_id}_{uuid.uuid4().hex}{ext}"
+    return f"{user_id}_image_{uuid.uuid4().hex}{ext}"
 
 
 def storage_path(storage_key: str) -> Path:
@@ -67,7 +102,15 @@ def media_url(storage_key: str) -> str:
 def save_image_blob(*, user_id: str, blob: bytes, mime: str) -> str:
     validate_image_size(blob)
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    key = storage_key_for(user_id, mime)
+    key = storage_key_for(user_id, mime, kind="image")
+    storage_path(key).write_bytes(blob)
+    return key
+
+
+def save_audio_blob(*, user_id: str, blob: bytes, mime: str) -> str:
+    validate_audio_size(blob)
+    _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    key = storage_key_for(user_id, mime, kind="audio")
     storage_path(key).write_bytes(blob)
     return key
 

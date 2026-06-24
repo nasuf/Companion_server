@@ -17,6 +17,7 @@ class OfflineActivityMedia:
     size: int
     width: int | None
     height: int | None
+    duration_seconds: int | None
     storage_key: str
     url: str
     created_at: Any = None
@@ -56,6 +57,7 @@ def media_from_row(row: Any) -> OfflineActivityMedia:
         size=int(_value(row, "size") or 0),
         width=_int_or_none(_value(row, "width")),
         height=_int_or_none(_value(row, "height")),
+        duration_seconds=_int_or_none(_value(row, "duration_seconds", "durationSeconds")),
         storage_key=str(_value(row, "storage_key", "storageKey") or ""),
         url=str(_value(row, "url") or ""),
         created_at=_value(row, "created_at", "createdAt"),
@@ -84,26 +86,30 @@ async def create_media(
     url: str,
     mime: str,
     size: int,
+    kind: str = "image",
     name: str | None = None,
     width: int | None = None,
     height: int | None = None,
+    duration_seconds: int | None = None,
 ) -> OfflineActivityMedia:
     rows = await db.query_raw(
         """
         INSERT INTO offline_activity_media (
             recommendation_id, user_id, kind, name, mime, size,
-            width, height, storage_key, url
+            width, height, duration_seconds, storage_key, url
         )
-        VALUES ($1, $2, 'image', $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
         """,
         recommendation_id,
         user_id,
+        kind,
         name,
         mime,
         size,
         width,
         height,
+        duration_seconds,
         storage_key,
         url,
     )

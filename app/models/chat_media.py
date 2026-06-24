@@ -22,6 +22,7 @@ class ChatAttachmentResponse(BaseModel):
     size: int
     width: int | None = None
     height: int | None = None
+    duration_seconds: int | None = None
     url: str
     vision_status: str = "pending"
     vision_summary: str | None = None
