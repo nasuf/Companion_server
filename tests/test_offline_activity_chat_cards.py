@@ -109,7 +109,7 @@ async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
     updated = {**activity, "status": "accepted"}
     feedback = AsyncMock()
     emit = AsyncMock()
-    emit_card = AsyncMock()
+    insert_card = AsyncMock()
 
     monkeypatch.setattr(
         activity_service.repo,
@@ -135,18 +135,20 @@ async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
     )
     monkeypatch.setattr(activity_service.repo, "update_next_activity_due", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_assistant", emit)
-    monkeypatch.setattr(activity_service, "emit_activity_card", emit_card)
+    monkeypatch.setattr(activity_service, "insert_user_activity_card", insert_card)
     monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
 
     result = await activity_service.accept_activity("user-1", "activity-1")
 
     assert result.status == "accepted"
     assert "重新接受" in feedback.await_args.kwargs["text"]
-    assert emit.await_args.kwargs["trigger_type"] == "offline_activity_reaccepted"
-    assert emit_card.await_args.kwargs["trigger_type"] == (
+    insert_card.assert_awaited_once()
+    assert insert_card.await_args.kwargs["activity"] == updated
+    assert insert_card.await_args.kwargs["trigger_type"] == (
         "offline_activity_reaccepted_card"
     )
-    assert emit_card.await_args.kwargs["status_label"] == "已接受"
+    assert insert_card.await_args.kwargs["status_label"] == "已接受"
+    assert emit.await_args.kwargs["trigger_type"] == "offline_activity_reaccepted"
 
 
 async def test_ignore_activity_emits_ignored_activity_card(monkeypatch):
@@ -162,7 +164,7 @@ async def test_ignore_activity_emits_ignored_activity_card(monkeypatch):
         "updated_at": "2026-06-21T10:00:00Z",
     }
     updated = {**activity, "status": "ignored"}
-    emit_card = AsyncMock()
+    insert_card = AsyncMock()
 
     monkeypatch.setattr(
         activity_service.repo,
@@ -188,16 +190,18 @@ async def test_ignore_activity_emits_ignored_activity_card(monkeypatch):
     )
     monkeypatch.setattr(activity_service.repo, "update_next_activity_due", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_assistant", AsyncMock())
-    monkeypatch.setattr(activity_service, "emit_activity_card", emit_card)
+    monkeypatch.setattr(activity_service, "insert_user_activity_card", insert_card)
     monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
 
     result = await activity_service.ignore_activity("user-1", "activity-1")
 
     assert result.status == "ignored"
-    emit_card.assert_awaited_once()
-    assert emit_card.await_args.kwargs["activity"] == updated
-    assert emit_card.await_args.kwargs["trigger_type"] == "offline_activity_ignored_card"
-    assert emit_card.await_args.kwargs["status_label"] == "暂不考虑"
+    insert_card.assert_awaited_once()
+    assert insert_card.await_args.kwargs["activity"] == updated
+    assert insert_card.await_args.kwargs["trigger_type"] == (
+        "offline_activity_ignored_card"
+    )
+    assert insert_card.await_args.kwargs["status_label"] == "暂不考虑"
 
 
 async def test_complete_activity_emits_completed_card_with_share_metadata(monkeypatch):
@@ -214,7 +218,7 @@ async def test_complete_activity_emits_completed_card_with_share_metadata(monkey
         "updated_at": "2026-06-21T10:00:00Z",
     }
     updated = {**activity, "status": "completed"}
-    emit_card = AsyncMock()
+    insert_card = AsyncMock()
     insert_share = AsyncMock()
 
     monkeypatch.setattr(
@@ -246,7 +250,7 @@ async def test_complete_activity_emits_completed_card_with_share_metadata(monkey
     )
     monkeypatch.setattr(activity_service, "insert_user_component_message", insert_share)
     monkeypatch.setattr(activity_service, "emit_assistant", AsyncMock())
-    monkeypatch.setattr(activity_service, "emit_activity_card", emit_card)
+    monkeypatch.setattr(activity_service, "insert_user_activity_card", insert_card)
     monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
 
     result = await activity_service.complete_activity(
@@ -262,9 +266,9 @@ async def test_complete_activity_emits_completed_card_with_share_metadata(monkey
     assert insert_share.await_args.kwargs["metadata"]["trigger_type"] == (
         "offline_activity_completion_share"
     )
-    emit_card.assert_awaited_once()
-    assert emit_card.await_args.kwargs["activity"] == updated
-    assert emit_card.await_args.kwargs["trigger_type"] == (
+    insert_card.assert_awaited_once()
+    assert insert_card.await_args.kwargs["activity"] == updated
+    assert insert_card.await_args.kwargs["trigger_type"] == (
         "offline_activity_completed_card"
     )
-    assert emit_card.await_args.kwargs["status_label"] == "已完成"
+    assert insert_card.await_args.kwargs["status_label"] == "已完成"

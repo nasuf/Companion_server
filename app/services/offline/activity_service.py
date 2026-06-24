@@ -14,6 +14,7 @@ from app.services.offline.activity_generation import (
 from app.services.offline.chat_emit import (
     emit_activity_card,
     emit_assistant,
+    insert_user_activity_card,
     insert_user_component_message,
 )
 from app.services.offline.memory_hooks import remember_user_event
@@ -212,6 +213,13 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
     )
     ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
     if ctx:
+        await insert_user_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type=f"{trigger_type}_card",
+            status_label="已接受",
+        )
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
             user_id=user_id,
@@ -221,15 +229,6 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             real_world_type="activity",
             source_id=activity_id,
             trigger_type=trigger_type,
-        )
-        await emit_activity_card(
-            conversation_id=ctx.get("conversation_id"),
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx["workspace_id"],
-            activity=updated,
-            trigger_type=f"{trigger_type}_card",
-            status_label="已接受",
         )
         await repo.update_next_activity_due(
             user_id,
@@ -262,6 +261,13 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
     )
     ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
     if ctx:
+        await insert_user_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type="offline_activity_ignored_card",
+            status_label="暂不考虑",
+        )
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
             user_id=user_id,
@@ -271,15 +277,6 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             real_world_type="activity",
             source_id=activity_id,
             trigger_type="offline_activity_ignored",
-        )
-        await emit_activity_card(
-            conversation_id=ctx.get("conversation_id"),
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx["workspace_id"],
-            activity=updated,
-            trigger_type="offline_activity_ignored_card",
-            status_label="暂不考虑",
         )
         await repo.update_next_activity_due(
             user_id,
@@ -347,6 +344,13 @@ async def complete_activity(
             },
         )
     if ctx:
+        await insert_user_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type="offline_activity_completed_card",
+            status_label="已完成",
+        )
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
             user_id=user_id,
@@ -356,15 +360,6 @@ async def complete_activity(
             real_world_type="activity",
             source_id=activity_id,
             trigger_type="offline_activity_completed",
-        )
-        await emit_activity_card(
-            conversation_id=ctx.get("conversation_id"),
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx["workspace_id"],
-            activity=updated,
-            trigger_type="offline_activity_completed_card",
-            status_label="已完成",
         )
     remember_user_event(
         user_id=user_id,

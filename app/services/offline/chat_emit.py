@@ -97,6 +97,30 @@ async def emit_activity_card(
     )
 
 
+async def insert_user_activity_card(
+    *,
+    conversation_id: str | None,
+    workspace_id: str | None,
+    activity: dict[str, Any],
+    trigger_type: str,
+    status_label: str,
+) -> str | None:
+    if not conversation_id:
+        return None
+    card = build_activity_component_card(activity, status_label=status_label)
+    return await insert_user_component_message(
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        content=f"活动卡片：{activity.get('title') or '线下活动'}",
+        metadata={
+            "real_world_type": "activity",
+            "source_id": activity.get("id"),
+            "trigger_type": trigger_type,
+            "component_card": card,
+        },
+    )
+
+
 async def insert_user_component_message(
     *,
     conversation_id: str | None,
