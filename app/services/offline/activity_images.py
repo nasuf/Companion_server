@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 import httpx
 
@@ -10,6 +11,40 @@ from app.services.offline.providers.search import SearchResult, tavily_image_sea
 logger = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT_S = 8.0
+_BAD_IMAGE_URL_RE = (
+    "map",
+    "maps",
+    "staticmap",
+    "location",
+    "gps",
+    "route",
+    "marker",
+    "icon",
+    "logo",
+    "vector",
+    "sprite",
+)
+_BAD_IMAGE_HOST_RE = (
+    "map.qq.com",
+    "maps.googleapis.com",
+    "amap.com",
+    "openstreetmap",
+    "help.apple.com",
+    "telegramy.com",
+)
+
+
+def _is_generic_location(value: str) -> bool:
+    text = value.strip().lower()
+    return text in {
+        "当前位置附近",
+        "当前位置",
+        "附近",
+        "本地",
+        "当前城市",
+        "nearby",
+        "current location",
+    }
 
 
 def _image_queries(card: dict, city: str) -> list[str]:
@@ -17,7 +52,7 @@ def _image_queries(card: dict, city: str) -> list[str]:
     title = str(card.get("title") or "").strip()
     category = str(card.get("category") or "").strip()
     queries: list[str] = []
-    if location:
+    if location and not _is_generic_location(location):
         queries.append(f"{city} {location} 现场 图片 官方")
         queries.append(f"{city} {location} 实景图")
     if title:
@@ -30,6 +65,15 @@ def _image_queries(card: dict, city: str) -> list[str]:
         if query and query not in deduped:
             deduped.append(query)
     return deduped[:4]
+
+
+def _is_bad_image_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = f"{parsed.path}?{parsed.query}".lower()
+    if any(bad in host for bad in _BAD_IMAGE_HOST_RE):
+        return True
+    return any(bad in path for bad in _BAD_IMAGE_URL_RE)
 
 
 def _remote_image_candidates(
@@ -70,6 +114,9 @@ async def persist_activity_images(
     seen: set[str] = set()
     for image_url in candidates:
         if image_url in seen:
+            continue
+        if _is_bad_image_url(image_url):
+            logger.debug("[offline] skipped unsuitable activity image url=%s", image_url)
             continue
         seen.add(image_url)
         local_url = await _download_and_store_image(user_id=user_id, url=image_url)

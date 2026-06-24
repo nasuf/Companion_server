@@ -5,11 +5,13 @@ from app.api.public import offline
 from app.services.offline import activity_service
 from app.services.offline.activity_generation import (
     _card_repeats_history,
+    _card_has_concrete_place,
     _fallback_card,
     _filter_repeated_results,
     _search_query,
     _usable_results,
 )
+from app.services.offline.activity_images import _is_bad_image_url
 from app.services.offline import activity_media_repo, repository as offline_repo
 from app.services.offline.providers.search import SearchResult
 
@@ -36,6 +38,25 @@ def test_tripadvisor_generic_review_source_is_not_usable_activity_source():
     assert _usable_results([result], "Zhenjiang") == []
 
 
+def test_social_and_video_sources_are_not_usable_activity_sources():
+    results = [
+        SearchResult(
+            title="《消费主张》江苏镇江",
+            url="https://www.youtube.com/watch?v=SVi68CHJb4c",
+            content="江苏镇江 半城山水半城诗",
+            score=0.5,
+        ),
+        SearchResult(
+            title="好玩江苏 镇江打卡墙",
+            url="https://www.facebook.com/ExploreJiangsu/photos/example",
+            content="猜猜看这些打卡墙都在镇江哪里",
+            score=0.5,
+        ),
+    ]
+
+    assert _usable_results(results, "Zhenjiang") == []
+
+
 def test_fallback_card_does_not_promote_unverified_source_title_to_place():
     result = SearchResult(
         title="THE BEST Free Things to Do in Zhenjiang (2026) - Tripadvisor",
@@ -45,8 +66,41 @@ def test_fallback_card_does_not_promote_unverified_source_title_to_place():
 
     card = _fallback_card("Zhenjiang", ["音乐爱好者"], [result])
 
-    assert "Paulaner" not in card["title"]
-    assert card["location_name"] == "镇江"
+    assert card is None
+
+
+def test_activity_card_requires_a_concrete_place():
+    assert (
+        _card_has_concrete_place(
+            {
+                "title": "当前位置附近轻松散步小计划",
+                "location_name": "当前位置附近",
+                "address": "当前位置附近",
+            },
+            "Zhenjiang",
+        )
+        is False
+    )
+    assert (
+        _card_has_concrete_place(
+            {
+                "title": "镇江博物馆常设展",
+                "location_name": "镇江博物馆",
+                "address": "镇江博物馆",
+            },
+            "Zhenjiang",
+        )
+        is True
+    )
+
+
+def test_activity_image_filters_map_and_icon_urls():
+    assert _is_bad_image_url("https://map.qq.com/staticmap?markers=1") is True
+    assert _is_bad_image_url("https://example.com/assets/logo.png") is True
+    assert (
+        _is_bad_image_url("https://example.com/zhenjiang-museum-hall-photo.jpg")
+        is False
+    )
 
 
 def test_repeated_activity_search_results_are_filtered_by_recent_location():
@@ -157,32 +211,8 @@ async def test_upload_offline_activity_image_saves_file_and_returns_media(
     assert response.url == "/offline/media/user-1_activity.jpg"
 
 
-async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
-    activity = {
-        "id": "activity-1",
-        "status": "ignored",
-        "title": "镇江博物馆常设展",
-        "summary": "",
-        "description": "",
-        "workspace_id": "workspace-1",
-        "created_at": "2026-06-21T10:00:00Z",
-        "updated_at": "2026-06-21T10:00:00Z",
-    }
-    updated = {**activity, "status": "accepted"}
-    feedback = AsyncMock()
-    emit = AsyncMock()
-
-    monkeypatch.setattr(
-        activity_service.repo,
-        "get_activity",
-        AsyncMock(return_value=activity),
-    )
-    monkeypatch.setattr(
-        activity_service.repo,
-        "update_activity_status",
-        AsyncMock(return_value=updated),
-    )
-    monkeypatch.setattr(activity_service.repo, "create_activity_feedback", feedback)
+async def test_create_recommendation_requires_resolved_user_city(monkeypatch):
+    generate = AsyncMock()
     monkeypatch.setattr(
         activity_service.repo,
         "resolve_user_context",
@@ -191,19 +221,20 @@ async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
                 "conversation_id": "conversation-1",
                 "agent_id": "agent-1",
                 "workspace_id": "workspace-1",
+                "user_location_latitude": 32.19,
+                "user_location_longitude": 119.45,
+                "user_location_city": None,
+                "user_location_region": None,
             }
         ),
     )
-    monkeypatch.setattr(
-        activity_service.repo,
-        "update_next_activity_due",
-        AsyncMock(),
+    monkeypatch.setattr(activity_service, "generate_activity_card", generate)
+
+    result = await activity_service.create_recommendation_for_user(
+        user_id="user-1",
+        workspace_id="workspace-1",
+        source="manual",
     )
-    monkeypatch.setattr(activity_service, "emit_assistant", emit)
-    monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
 
-    result = await activity_service.accept_activity("user-1", "activity-1")
-
-    assert result.status == "accepted"
-    assert "重新接受" in feedback.await_args.kwargs["text"]
-    assert emit.await_args.kwargs["trigger_type"] == "offline_activity_reaccepted"
+    assert result is None
+    generate.assert_not_awaited()

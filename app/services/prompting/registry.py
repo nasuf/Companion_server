@@ -50,6 +50,7 @@ from app.services.prompting.defaults import (
     MEDIUM_MEMORY_REPLY_PROMPT,
     MEDIUM_PATIENCE_REPLY_PROMPT,
     OFFLINE_ACTIVITY_CARD_PROMPT,
+    OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
     OFFLINE_GIFT_SELECTION_PROMPT,
     OFFLINE_GIFT_THANKS_REPLY_PROMPT,
     MUSIC_ACCEPT_INVITE_PROMPT,
@@ -168,6 +169,11 @@ PROMPT_DEFINITIONS = [
         "offline.activity_card", "线下活动推荐卡生成", "线下互动", "线下活动",
         "【工程扩展】V3 现实世界互动. 基于城市、记忆标签和 Tavily 搜索结果生成结构化活动推荐卡.",
         OFFLINE_ACTIVITY_CARD_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_invite_message", "线下活动朋友式推荐语", "线下互动", "线下活动",
+        "【工程扩展】V3 现实世界互动. 给生成的活动卡配一条不像通知模板的主动聊天消息.",
+        OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
     ),
     PromptDefinition(
         "offline.gift_selection", "线下礼物选择", "线下互动", "礼物",

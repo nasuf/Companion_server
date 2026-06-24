@@ -142,6 +142,23 @@ OFFLINE_ACTIVITY_CARD_PROMPT = (
     "official_url, image_urls, task_hint, easter_egg_task={{title, body, principle}}"
 )
 
+OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT = (
+    "你是用户的亲近朋友，正在给用户推荐一个真实线下活动。"
+    "请根据活动内容写一条自然的微信消息，像朋友刚刷到一个适合 TA 的地方，"
+    "不要像产品通知、不要模板化、不要复述字段名。\n\n"
+    "活动标题：{title}\n"
+    "地点：{location}\n"
+    "活动摘要：{summary}\n"
+    "用户标签：{tags}\n"
+    "用户记忆摘要：\n{memory}\n\n"
+    "要求：\n"
+    "- 只写一条消息，45 字以内。\n"
+    "- 语气轻一点，有一点个人判断，但不要夸张。\n"
+    "- 必须提到这个具体地点或活动标题。\n"
+    "- 不要说“我正好刷到一个也许适合你的地方”这类固定句式。\n"
+    "- 不要用 markdown，不要解释。"
+)
+
 OFFLINE_GIFT_SELECTION_PROMPT = (
     "请根据用户标签和记忆，选择一个适合寄送的小礼物。不要选择高风险、食品过敏风险或昂贵物品。\n\n"
     "预算上限：{budget_yuan} 元\n"

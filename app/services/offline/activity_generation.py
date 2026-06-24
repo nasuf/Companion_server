@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 _FALLBACK_IMAGES = [
-    "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee",
-    "https://images.unsplash.com/photo-1492684223066-81342ee5ff30",
-    "https://images.unsplash.com/photo-1506744038136-46273834b3fb",
+    "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=80",
+    "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1200&q=80",
+    "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1200&q=80",
 ]
 
 _LOCALIZED_CITY_ALIASES = {
@@ -27,8 +27,23 @@ _LOCALIZED_CITY_ALIASES = {
     "jiangsu": ("江苏", "Jiangsu"),
 }
 
+_GENERIC_LOCATION_RE = re.compile(
+    r"^(当前位置附近|当前位置|附近|本地|当前城市|城市附近|周边|附近区域|"
+    r"local|nearby|current\s*location)$",
+    flags=re.I,
+)
+_CONCRETE_PLACE_HINT_RE = re.compile(
+    r"(博物馆|图书馆|美术馆|展览馆|文化馆|书店|咖啡|茶|公园|花园|景区|"
+    r"街区|市集|广场|剧场|影院|音乐厅|中心|码头|古镇|寺|山|湖|江|馆|园|店)"
+)
+
 _UNRELIABLE_ACTIVITY_DOMAINS = {
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
     "tripadvisor.com",
+    "youtube.com",
+    "youtu.be",
     "calendar.yahoo.com",
 }
 
@@ -62,12 +77,19 @@ def _localized_city_terms(city: str) -> tuple[str, ...]:
     return _LOCALIZED_CITY_ALIASES.get(key, (city.strip(),))
 
 
+def _display_city(city: str) -> str:
+    terms = [term for term in _localized_city_terms(city) if term]
+    if len(terms) >= 2:
+        return terms[1]
+    return terms[0] if terms else city.strip()
+
+
 def _search_query(city: str, tags: list[str]) -> str:
     tag_text = " ".join(tags[:5])
     anchor = " ".join(term for term in _localized_city_terms(city) if term)
     return (
-        f"{anchor or city} 近期 本周 周末 官方 活动公告 免费 低成本 小众 "
-        f"展览 市集 音乐 书店 咖啡 公园 {tag_text}"
+        f"{anchor or city} 官方 文旅 场馆 公告 开放时间 免费 低成本 小众 "
+        f"博物馆 图书馆 展览 市集 音乐 书店 咖啡 公园 {tag_text}"
     ).strip()
 
 
@@ -191,6 +213,52 @@ def _source_is_usable(result: SearchResult, city: str) -> bool:
     return True
 
 
+def _is_generic_location(value: Any, city: str | None = None) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if _GENERIC_LOCATION_RE.search(text):
+        return True
+    normalized = _normalize_fingerprint(text)
+    if not normalized:
+        return True
+    if city:
+        city_terms = [
+            _normalize_fingerprint(term)
+            for term in _localized_city_terms(city)
+            if term
+        ]
+        if normalized in city_terms:
+            return True
+    return False
+
+
+def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
+    title = str(card.get("title") or "").strip()
+    location = str(card.get("location_name") or card.get("address") or "").strip()
+    if not title or _is_generic_location(location, city):
+        return False
+    if len(_normalize_fingerprint(location)) < 2:
+        return False
+    combined = f"{title}\n{location}\n{card.get('address') or ''}"
+    return bool(_CONCRETE_PLACE_HINT_RE.search(combined))
+
+
+def _place_from_source(result: SearchResult, city: str) -> str | None:
+    title = result.title.strip()
+    for part in _TOKEN_SPLIT_RE.split(title):
+        part = part.strip()
+        if not part:
+            continue
+        if _is_generic_location(part, city):
+            continue
+        if _CONCRETE_PLACE_HINT_RE.search(part):
+            return part
+    if not _is_generic_location(title, city) and _CONCRETE_PLACE_HINT_RE.search(title):
+        return title[:32]
+    return None
+
+
 def _usable_results(results: list[SearchResult], city: str) -> list[SearchResult]:
     return [result for result in results if _source_is_usable(result, city)]
 
@@ -209,29 +277,37 @@ def _card_is_source_backed(card: dict[str, Any], sources: list[dict[str, Any]]) 
     )
 
 
-def _fallback_card(city: str, tags: list[str], results: list[SearchResult]) -> dict[str, Any]:
-    localized_terms = _localized_city_terms(city)
-    city_label = localized_terms[1] if len(localized_terms) > 1 else city
-    title = f"{city_label}轻松散步小计划"
-    task = "到现场后，拍下一处你觉得有一点可爱的细节，发给我看看。"
+def _fallback_card(
+    city: str,
+    tags: list[str],
+    results: list[SearchResult],
+) -> dict[str, Any] | None:
+    source = next((item for item in results if _place_from_source(item, city)), None)
+    if source is None:
+        return None
+    location = _place_from_source(source, city)
+    if not location:
+        return None
+    city_label = _display_city(city)
+    title = source.title.strip()[:36] or f"{location}轻量出门计划"
+    task = f"到{location}后，拍下一处你觉得有一点可爱的细节，发给我看看。"
     return {
         "title": title,
-        "summary": "一个低压力、可以独立完成的小出门计划。",
+        "summary": source.content.strip()[:80] or "一个低压力、可以独立完成的小出门计划。",
         "description": (
-            f"我帮你在{city_label}附近保留了一个轻量出门计划。"
+            f"我帮你在{city_label}找到一个可以独自慢慢看的地方：{location}。"
             "不需要社交表现，也不用赶时间，就当给今天换一点空气。"
         ),
         "category": tags[0] if tags else "城市漫游",
-        "location_name": city_label,
-        "address": city_label,
+        "location_name": location,
+        "address": location,
         "starts_at": None,
         "ends_at": None,
-        "official_url": results[0].url if results else None,
-        "image_urls": [r.image_url for r in results if r.image_url][:3]
-        or _FALLBACK_IMAGES[:2],
+        "official_url": source.url,
+        "image_urls": [source.image_url] if source.image_url else [],
         "task_hint": "接受后解锁一个小彩蛋任务",
         "easter_egg_task": {
-            "title": "秘密彩蛋任务",
+            "title": "小彩蛋任务",
             "body": task,
             "principle": "低社交压力、可独立完成、无安全风险",
         },
@@ -246,7 +322,7 @@ async def generate_activity_card(
     city: str,
     source: str,
     search_location: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=9)
     memory = await repo.memory_brief(user_id, workspace_id, limit=60)
     query = _search_query(search_location or city, tags)
@@ -291,6 +367,14 @@ async def generate_activity_card(
             query,
         )
         card = None
+    if card and not _card_has_concrete_place(card, city):
+        logger.warning(
+            "[offline] discarded generic activity card title=%r location=%r query=%r",
+            card.get("title"),
+            card.get("location_name") or card.get("address"),
+            query,
+        )
+        card = None
     if card and _card_repeats_history(card, recent_activities):
         logger.warning(
             "[offline] discarded repeated activity card title=%r location=%r query=%r",
@@ -301,6 +385,9 @@ async def generate_activity_card(
         card = None
     if not card:
         card = _fallback_card(city, tags, results)
+    if not card:
+        logger.warning("[offline] no concrete activity card generated query=%r", query)
+        return None
 
     now = datetime.now(UTC)
     image_urls = card.get("image_urls")
@@ -326,3 +413,35 @@ async def generate_activity_card(
     card["source"] = source
     card["expires_at"] = now + timedelta(days=14)
     return card
+
+
+async def generate_activity_invite_message(
+    *,
+    activity: dict[str, Any],
+    user_id: str,
+    workspace_id: str | None,
+) -> str:
+    tags = await repo.list_user_tags(user_id, workspace_id, limit=6)
+    memory = await repo.memory_brief(user_id, workspace_id, limit=20)
+    fallback = (
+        f"我看到「{activity.get('title') or '这个地方'}」还挺适合你，"
+        "不是很吵，也不用赶流程。要不要看看这张小卡？"
+    )
+    try:
+        prompt_template = await get_prompt_text("offline.activity_invite_message")
+        prompt_text = prompt_template.format(
+            title=activity.get("title") or "线下活动",
+            location=activity.get("location_name")
+            or activity.get("address")
+            or activity.get("city")
+            or "附近",
+            summary=activity.get("summary") or activity.get("description") or "",
+            tags=", ".join(tags) if tags else "暂无",
+            memory=memory or "暂无",
+        )
+        text = (await invoke_text(get_chat_model(), prompt_text)).strip()
+        text = re.sub(r"^['\"“”]+|['\"“”]+$", "", text).strip()
+        return text[:80] or fallback
+    except Exception as exc:
+        logger.warning("[offline] activity invite message generation failed: %s", exc)
+        return fallback

@@ -7,8 +7,15 @@ from fastapi import HTTPException
 from app.models.offline import OfflineActivitiesResponse, OfflineActivityItem
 from app.services.offline import activity_media_repo, activity_media_storage
 from app.services.offline import repository as repo
-from app.services.offline.activity_generation import generate_activity_card
-from app.services.offline.chat_emit import emit_assistant, insert_user_component_message
+from app.services.offline.activity_generation import (
+    generate_activity_card,
+    generate_activity_invite_message,
+)
+from app.services.offline.chat_emit import (
+    emit_activity_card,
+    emit_assistant,
+    insert_user_component_message,
+)
 from app.services.offline.memory_hooks import remember_user_event
 
 
@@ -23,7 +30,7 @@ def _location_for_activity(ctx: dict) -> tuple[str, str | None]:
     if latitude is None or longitude is None:
         return "", None
     try:
-        return "当前位置附近", f"{float(latitude):.5f},{float(longitude):.5f} 附近"
+        return "", f"{float(latitude):.5f},{float(longitude):.5f} 附近"
     except (TypeError, ValueError):
         return "", None
 
@@ -125,6 +132,8 @@ async def create_recommendation_for_user(
         source=source,
         search_location=search_location,
     )
+    if not card:
+        return None
     activity = await repo.create_activity(
         {
             **card,
@@ -135,7 +144,11 @@ async def create_recommendation_for_user(
             "status": "pending",
         }
     )
-    message = f"我正好刷到一个也许适合你的地方：{activity['title']}。最近如果想出门换换空气，可以先看看这张小卡。"
+    message = await generate_activity_invite_message(
+        activity=activity,
+        user_id=user_id,
+        workspace_id=ctx["workspace_id"],
+    )
     await emit_assistant(
         conversation_id=ctx["conversation_id"],
         user_id=user_id,
@@ -145,6 +158,15 @@ async def create_recommendation_for_user(
         real_world_type="activity",
         source_id=activity["id"],
         trigger_type="offline_activity_recommendation",
+    )
+    await emit_activity_card(
+        conversation_id=ctx["conversation_id"],
+        user_id=user_id,
+        agent_id=ctx["agent_id"],
+        workspace_id=ctx["workspace_id"],
+        activity=activity,
+        trigger_type="offline_activity_recommendation_card",
+        status_label="待回复",
     )
     await repo.update_next_activity_due(
         user_id,
@@ -200,6 +222,15 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             source_id=activity_id,
             trigger_type=trigger_type,
         )
+        await emit_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type=f"{trigger_type}_card",
+            status_label="已接受",
+        )
         await repo.update_next_activity_due(
             user_id,
             ctx["agent_id"],
@@ -240,6 +271,15 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             real_world_type="activity",
             source_id=activity_id,
             trigger_type="offline_activity_ignored",
+        )
+        await emit_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type="offline_activity_ignored_card",
+            status_label="暂不考虑",
         )
         await repo.update_next_activity_due(
             user_id,
@@ -316,6 +356,15 @@ async def complete_activity(
             real_world_type="activity",
             source_id=activity_id,
             trigger_type="offline_activity_completed",
+        )
+        await emit_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type="offline_activity_completed_card",
+            status_label="已完成",
         )
     remember_user_event(
         user_id=user_id,
