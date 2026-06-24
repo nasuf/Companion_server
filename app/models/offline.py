@@ -53,6 +53,7 @@ class OfflineActivityCompletionFeedback(BaseModel):
 
 class OfflineHomeResponse(BaseModel):
     pending_activity_count: int = 0
+    accepted_activity_count: int = 0
     completed_activity_count: int = 0
     gift_count: int = 0
     shipping_gift_count: int = 0

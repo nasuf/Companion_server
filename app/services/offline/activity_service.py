@@ -46,7 +46,8 @@ async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
         user_id,
         ctx["workspace_id"] if ctx else workspace_id,
     )
-    pending = [a for a in activities if a["status"] in {"pending", "accepted"}]
+    pending = [a for a in activities if a["status"] == "pending"]
+    accepted = [a for a in activities if a["status"] == "accepted"]
     completed = [a for a in activities if a["status"] == "completed"]
     shipping = [g for g in gifts if g["status"] in {"ordered", "shipping"}]
     tags = await repo.list_user_tags(
@@ -57,12 +58,13 @@ async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
     )
     return {
         "pending_activity_count": len(pending),
+        "accepted_activity_count": len(accepted),
         "completed_activity_count": len(completed),
         "gift_count": len(gifts),
         "shipping_gift_count": len(shipping),
         "has_location": bool(ctx and ctx.get("has_location")),
         "tags": tags,
-        "latest_activity": pending[0] if pending else None,
+        "latest_activity": (pending or accepted or completed or [None])[0],
         "gift_summary": "礼物正在向你飞奔" if shipping else "你有一份惊喜在路上",
     }
 
