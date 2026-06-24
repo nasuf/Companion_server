@@ -4,11 +4,13 @@ from unittest.mock import AsyncMock
 from app.api.public import offline
 from app.services.offline import activity_service
 from app.services.offline.activity_generation import (
+    ACTIVITY_PLACE_CATEGORIES,
     _card_repeats_history,
     _card_has_concrete_place,
     _fallback_card,
     _filter_repeated_results,
     _search_query,
+    _search_queries,
     _usable_results,
 )
 from app.services.offline.activity_images import _is_bad_image_url
@@ -22,6 +24,35 @@ def test_search_query_localizes_zhenjiang_for_chinese_sources():
     assert "江苏 镇江" in query
     assert "Zhenjiang" in query
     assert "音乐爱好者" in query
+    assert "咖啡馆" in query
+    assert "手作" in query
+    assert "河边" in query
+    assert "菜市场" in query
+    assert "创意园" in query
+
+
+def test_activity_place_categories_cover_small_city_options():
+    category_names = {category.name for category in ACTIVITY_PLACE_CATEGORIES}
+
+    assert {
+        "阅读与文化",
+        "咖啡与茶饮",
+        "手作与小店",
+        "公园与绿地",
+        "水边散步",
+        "山与轻户外",
+        "街区与市集",
+        "小吃与轻食",
+        "城市观察",
+    }.issubset(category_names)
+
+
+def test_search_queries_push_recently_used_place_category_back():
+    recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
+    queries = _search_queries("Zhenjiang", ["音乐爱好者"], recent)
+
+    assert "图书馆" not in queries[1]
+    assert any("图书馆" in query for query in queries[2:])
 
 
 def test_tripadvisor_generic_review_source_is_not_usable_activity_source():
@@ -117,6 +148,17 @@ def test_repeated_activity_search_results_are_filtered_by_recent_location():
     )
 
     assert _filter_repeated_results([library, museum], recent) == [museum]
+
+
+def test_repeated_activity_filter_ignores_old_place_in_source_snippet():
+    recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
+    cafe = SearchResult(
+        title="镇江安静咖啡馆与茶室整理",
+        url="https://example.com/cafe",
+        content="这条整理也提到镇江市图书馆附近适合散步。",
+    )
+
+    assert _filter_repeated_results([cafe], recent) == [cafe]
 
 
 def test_repeated_activity_search_results_return_empty_when_all_candidates_repeat():

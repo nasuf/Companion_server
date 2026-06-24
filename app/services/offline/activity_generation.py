@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -33,8 +34,13 @@ _GENERIC_LOCATION_RE = re.compile(
     flags=re.I,
 )
 _CONCRETE_PLACE_HINT_RE = re.compile(
-    r"(博物馆|图书馆|美术馆|展览馆|文化馆|书店|咖啡|茶|公园|花园|景区|"
-    r"街区|市集|广场|剧场|影院|音乐厅|中心|码头|古镇|寺|山|湖|江|馆|园|店)"
+    r"(博物馆|图书馆|美术馆|展览馆|纪念馆|科技馆|文化馆|艺术馆|非遗馆|"
+    r"书店|书房|书屋|书吧|咖啡|咖啡馆|茶馆|茶室|奶茶|甜品|烘焙|蛋糕|"
+    r"手作|陶艺|花艺|画室|文创|工坊|小店|杂货|唱片|胶片|"
+    r"商场|购物中心|创意园|园区|社区|市民中心|游客中心|"
+    r"公园|花园|植物园|湿地|绿道|步道|滨江|江边|河边|湖边|海边|码头|渡口|"
+    r"景区|古镇|古街|老街|街区|步行街|市集|夜市|广场|剧场|影院|音乐厅|"
+    r"体育馆|运动公园|球场|菜场|菜市场|集市|桥|寺|山|湖|江|河|海|馆|园|店)"
 )
 
 _UNRELIABLE_ACTIVITY_DOMAINS = {
@@ -53,6 +59,91 @@ _GENERIC_ACTIVITY_TITLE_RE = re.compile(
 )
 _TOKEN_SPLIT_RE = re.compile(
     r"[\s,，。；;:：/\\|·「」『』《》()（）\[\]【】\"'“”‘’]+"
+)
+
+
+@dataclass(frozen=True)
+class ActivityPlaceCategory:
+    name: str
+    keywords: tuple[str, ...]
+    query_hint: str
+
+
+ACTIVITY_PLACE_CATEGORIES: tuple[ActivityPlaceCategory, ...] = (
+    ActivityPlaceCategory(
+        "阅读与文化",
+        ("图书馆", "书店", "城市书房", "书吧", "旧书店", "独立书店"),
+        "图书馆 城市书房 书店 旧书店 独立书店 阅读 空间",
+    ),
+    ActivityPlaceCategory(
+        "展览与博物馆",
+        ("博物馆", "美术馆", "纪念馆", "展览馆", "科技馆", "非遗馆"),
+        "博物馆 美术馆 纪念馆 展览馆 非遗馆 常设展 免费 开放",
+    ),
+    ActivityPlaceCategory(
+        "咖啡与茶饮",
+        ("咖啡馆", "茶馆", "茶室", "奶茶店", "甜品店", "烘焙店"),
+        "咖啡馆 茶馆 茶室 奶茶店 甜品店 烘焙店 安静 小店",
+    ),
+    ActivityPlaceCategory(
+        "手作与小店",
+        ("手作店", "陶艺", "花艺", "画室", "文创店", "杂货店", "工坊"),
+        "手作 陶艺 花艺 画室 文创店 杂货店 工坊 体验",
+    ),
+    ActivityPlaceCategory(
+        "公园与绿地",
+        ("公园", "花园", "植物园", "湿地公园", "城市绿道", "运动公园"),
+        "公园 花园 植物园 湿地公园 城市绿道 免费 散步",
+    ),
+    ActivityPlaceCategory(
+        "水边散步",
+        ("江边", "河边", "湖边", "海边", "滨江步道", "码头", "湿地"),
+        "江边 河边 湖边 滨江步道 码头 湿地 散步 夜景",
+    ),
+    ActivityPlaceCategory(
+        "山与轻户外",
+        ("山", "步道", "森林公园", "郊野公园", "观景台", "古道"),
+        "山 步道 森林公园 郊野公园 观景台 轻徒步 免费",
+    ),
+    ActivityPlaceCategory(
+        "街区与市集",
+        ("步行街", "老街", "古街", "文旅街区", "市集", "夜市", "广场", "菜市场"),
+        "步行街 老街 古街 文旅街区 市集 夜市 菜市场 广场",
+    ),
+    ActivityPlaceCategory(
+        "小吃与轻食",
+        ("小吃街", "面包店", "甜品店", "茶饮店", "轻食店", "老字号"),
+        "小吃街 面包店 甜品店 茶饮店 轻食店 老字号 低消费",
+    ),
+    ActivityPlaceCategory(
+        "演出与电影",
+        ("剧场", "影院", "音乐厅", "livehouse", "露天电影", "音乐会"),
+        "剧场 影院 音乐厅 livehouse 露天电影 音乐会 低成本",
+    ),
+    ActivityPlaceCategory(
+        "轻运动",
+        ("体育公园", "球场", "骑行绿道", "健身步道", "滑板公园"),
+        "体育公园 球场 骑行绿道 健身步道 滑板公园",
+    ),
+    ActivityPlaceCategory(
+        "安静角落",
+        ("校园", "书院", "寺庙", "教堂", "社区中心", "市民中心"),
+        "校园 书院 寺庙 教堂 社区中心 市民中心 安静 参观",
+    ),
+    ActivityPlaceCategory(
+        "城市观察",
+        ("桥", "渡口", "码头", "老建筑", "火车站", "创意园", "老厂房"),
+        "桥 渡口 码头 老建筑 火车站 创意园 老厂房 城市观察",
+    ),
+    ActivityPlaceCategory(
+        "室内避雨",
+        ("商场", "购物中心", "文化中心", "市民中心", "游客中心", "社区空间"),
+        "商场 购物中心 文化中心 市民中心 游客中心 社区空间 室内 免费",
+    ),
+)
+
+_ACTIVITY_CATEGORY_HINT = " ".join(
+    category.query_hint for category in ACTIVITY_PLACE_CATEGORIES
 )
 
 
@@ -88,9 +179,67 @@ def _search_query(city: str, tags: list[str]) -> str:
     tag_text = " ".join(tags[:5])
     anchor = " ".join(term for term in _localized_city_terms(city) if term)
     return (
-        f"{anchor or city} 官方 文旅 场馆 公告 开放时间 免费 低成本 小众 "
-        f"博物馆 图书馆 展览 市集 音乐 书店 咖啡 公园 {tag_text}"
+        f"{anchor or city} 真实地点 免费 低成本 独自 安静 小众 "
+        f"{_ACTIVITY_CATEGORY_HINT} {tag_text}"
     ).strip()
+
+
+def _category_matches_recent(
+    category: ActivityPlaceCategory,
+    recent_activities: list[dict[str, str]],
+) -> bool:
+    if not recent_activities:
+        return False
+    recent_text = _normalize_fingerprint(
+        " ".join(
+            " ".join(
+                str(item.get(key) or "")
+                for key in ("title", "location_name", "address")
+            )
+            for item in recent_activities[:12]
+        )
+    )
+    return any(
+        _normalize_fingerprint(keyword) in recent_text
+        for keyword in category.keywords
+    )
+
+
+def _ordered_place_categories(
+    recent_activities: list[dict[str, str]],
+) -> list[ActivityPlaceCategory]:
+    categories = list(ACTIVITY_PLACE_CATEGORIES)
+    return sorted(
+        categories,
+        key=lambda category: _category_matches_recent(category, recent_activities),
+    )
+
+
+def _search_queries(
+    city: str,
+    tags: list[str],
+    recent_activities: list[dict[str, str]] | None = None,
+) -> list[str]:
+    tag_text = " ".join(tags[:4])
+    anchor = " ".join(term for term in _localized_city_terms(city) if term)
+    base = anchor or city
+    queries = [_search_query(city, tags)]
+    for category in _ordered_place_categories(recent_activities or []):
+        queries.append(
+            f"{base} {category.query_hint} 真实地点 开放时间 推荐 {tag_text}".strip()
+        )
+    queries.extend(
+        [
+            f"{base} 周末 一个人 可以去的地方 安静 低成本 {tag_text}".strip(),
+            f"{base} 附近 小众 去处 公园 书店 咖啡 手作 河边 {tag_text}".strip(),
+        ]
+    )
+    deduped: list[str] = []
+    for query in queries:
+        compact = " ".join(query.split())
+        if compact and compact not in deduped:
+            deduped.append(compact)
+    return deduped
 
 
 def _normalize_fingerprint(value: Any) -> str:
@@ -149,7 +298,10 @@ def _filter_repeated_results(
     filtered = [
         result
         for result in results
-        if not _mentions_avoided(f"{result.title}\n{result.content}", avoid_terms)
+        if not _mentions_avoided(
+            f"{result.title}\n{_place_from_source(result, '') or ''}",
+            avoid_terms,
+        )
     ]
     return filtered
 
@@ -184,6 +336,32 @@ def _sources(results: list[SearchResult]) -> list[dict[str, Any]]:
         }
         for result in results[:6]
     ]
+
+
+async def _search_activity_candidates(
+    city: str,
+    tags: list[str],
+    recent_activities: list[dict[str, str]],
+    *,
+    max_queries: int = 10,
+) -> tuple[list[SearchResult], list[SearchResult], str]:
+    all_usable: list[SearchResult] = []
+    filtered: list[SearchResult] = []
+    seen_urls: set[str] = set()
+    first_query = ""
+    for query in _search_queries(city, tags, recent_activities)[:max_queries]:
+        first_query = first_query or query
+        raw_results = await tavily_search(query, max_results=8)
+        usable = _usable_results(raw_results, city)
+        for result in usable:
+            if result.url in seen_urls:
+                continue
+            seen_urls.add(result.url)
+            all_usable.append(result)
+        filtered = _filter_repeated_results(all_usable, recent_activities)
+        if len(filtered) >= 4:
+            return filtered, all_usable, first_query
+    return filtered, all_usable, first_query
 
 
 def _domain(url: str | None) -> str:
@@ -325,17 +503,17 @@ async def generate_activity_card(
 ) -> dict[str, Any] | None:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=9)
     memory = await repo.memory_brief(user_id, workspace_id, limit=60)
-    query = _search_query(search_location or city, tags)
-    raw_results = await tavily_search(query, max_results=8)
     recent_activities = await repo.list_recent_activity_fingerprints(
         user_id,
         workspace_id,
         limit=20,
     )
-    results = _filter_repeated_results(
-        _usable_results(raw_results, city),
+    filtered_results, all_usable_results, query = await _search_activity_candidates(
+        search_location or city,
+        tags,
         recent_activities,
-    )[:6]
+    )
+    results = (filtered_results or all_usable_results)[:6]
     sources = _sources(results)
     card: dict[str, Any] | None = None
     if sources:
