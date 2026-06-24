@@ -74,7 +74,7 @@ async def list_activities(
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     resolved_workspace = ctx["workspace_id"] if ctx else workspace_id
     rows = await repo.list_activities(user_id, resolved_workspace)
-    latest = next((a for a in rows if a["status"] in {"pending", "accepted"}), None)
+    latest = next((a for a in rows if a["status"] == "pending"), None)
     items = [await _with_completion_feedback(a) for a in rows]
     return OfflineActivitiesResponse(
         latest=OfflineActivityItem(**(await _with_completion_feedback(latest)))
@@ -167,7 +167,7 @@ async def create_recommendation_for_user(
         workspace_id=ctx["workspace_id"],
         activity=activity,
         trigger_type="offline_activity_recommendation_card",
-        status_label="待回复",
+        status_label="待确定",
     )
     await repo.update_next_activity_due(
         user_id,

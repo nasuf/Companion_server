@@ -6,6 +6,54 @@ from app.services.offline import activity_service, chat_emit
 from app.services.offline.chat_emit import build_activity_component_card
 
 
+def _activity_row(activity_id: str, status: str, title: str) -> dict:
+    return {
+        "id": activity_id,
+        "user_id": "user-1",
+        "agent_id": "agent-1",
+        "workspace_id": "workspace-1",
+        "conversation_id": "conversation-1",
+        "status": status,
+        "title": title,
+        "summary": "",
+        "description": "",
+        "created_at": "2026-06-21T10:00:00Z",
+        "updated_at": "2026-06-21T10:00:00Z",
+    }
+
+
+async def test_list_activities_features_pending_activity_when_accepted_is_newer(
+    monkeypatch,
+):
+    accepted = _activity_row("accepted-1", "accepted", "已接受活动")
+    pending = _activity_row("pending-1", "pending", "待确定活动")
+
+    monkeypatch.setattr(
+        activity_service.repo,
+        "resolve_user_context",
+        AsyncMock(return_value={"workspace_id": "workspace-1"}),
+    )
+    monkeypatch.setattr(
+        activity_service.repo,
+        "list_activities",
+        AsyncMock(return_value=[accepted, pending]),
+    )
+    monkeypatch.setattr(
+        activity_service,
+        "_with_completion_feedback",
+        AsyncMock(side_effect=lambda activity: activity),
+    )
+
+    result = await activity_service.list_activities("user-1", "workspace-1")
+
+    assert result.latest is not None
+    assert result.latest.id == "pending-1"
+    assert [activity.id for activity in result.pending] == [
+        "accepted-1",
+        "pending-1",
+    ]
+
+
 def test_activity_component_card_uses_status_and_image_payload():
     card = build_activity_component_card(
         {
@@ -16,13 +64,13 @@ def test_activity_component_card_uses_status_and_image_payload():
             "location_name": "镇江博物馆",
             "image_urls": ["/offline/media/user_activity.jpg"],
         },
-        status_label="待回复",
+        status_label="待确定",
     )
 
     assert card["type"] == "offline_activity"
     assert card["payload"]["activity_id"] == "activity-1"
     assert card["payload"]["image_url"] == "/offline/media/user_activity.jpg"
-    assert card["subtitle"] == "待回复 · 镇江博物馆"
+    assert card["subtitle"] == "待确定 · 镇江博物馆"
 
 
 async def test_create_recommendation_emits_invite_message_and_activity_card(monkeypatch):
@@ -94,7 +142,7 @@ async def test_create_recommendation_emits_invite_message_and_activity_card(monk
     assert emit_card.await_args.kwargs["trigger_type"] == (
         "offline_activity_recommendation_card"
     )
-    assert emit_card.await_args.kwargs["status_label"] == "待回复"
+    assert emit_card.await_args.kwargs["status_label"] == "待确定"
 
 
 async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
