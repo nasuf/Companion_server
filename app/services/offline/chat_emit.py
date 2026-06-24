@@ -143,8 +143,12 @@ async def insert_user_component_message(
         "message",
         {
             "message_id": created.id,
+            "conversation_id": conversation_id,
             "role": "user",
             "text": content.strip(),
+            "created_at": created.createdAt.isoformat()
+            if getattr(created, "createdAt", None)
+            else None,
             **metadata,
         },
     )

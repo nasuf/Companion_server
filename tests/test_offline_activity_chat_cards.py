@@ -1,6 +1,8 @@
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from app.services.offline import activity_service
+from app.services.offline import activity_service, chat_emit
 from app.services.offline.chat_emit import build_activity_component_card
 
 
@@ -272,3 +274,49 @@ async def test_complete_activity_emits_completed_card_with_share_metadata(monkey
         "offline_activity_completed_card"
     )
     assert insert_card.await_args.kwargs["status_label"] == "已完成"
+
+
+async def test_insert_user_activity_card_persists_user_role_and_pushes_message_event(
+    monkeypatch,
+):
+    created_at = datetime(2026, 6, 24, 3, 10, tzinfo=UTC)
+    created = SimpleNamespace(id="message-1", createdAt=created_at)
+    create = AsyncMock(return_value=created)
+    send_to_workspace = AsyncMock()
+    monkeypatch.setattr(
+        chat_emit,
+        "db",
+        SimpleNamespace(message=SimpleNamespace(create=create)),
+    )
+    monkeypatch.setattr(chat_emit.manager, "send_to_workspace", send_to_workspace)
+
+    message_id = await chat_emit.insert_user_activity_card(
+        conversation_id="conversation-1",
+        workspace_id="workspace-1",
+        activity={
+            "id": "activity-1",
+            "status": "ignored",
+            "title": "镇江博物馆常设展",
+            "summary": "安静看展",
+            "location_name": "镇江博物馆",
+            "image_urls": ["/offline/media/activity.jpg"],
+        },
+        trigger_type="offline_activity_ignored_card",
+        status_label="暂不考虑",
+    )
+
+    assert message_id == "message-1"
+    data = create.await_args.kwargs["data"]
+    assert data["role"] == "user"
+    metadata = data["metadata"].data
+    assert metadata["trigger_type"] == "offline_activity_ignored_card"
+    assert metadata["component_card"]["payload"]["status_label"] == "暂不考虑"
+    send_to_workspace.assert_awaited_once()
+    assert send_to_workspace.await_args.args[0] == "workspace-1"
+    assert send_to_workspace.await_args.args[1] == "message"
+    payload = send_to_workspace.await_args.args[2]
+    assert payload["message_id"] == "message-1"
+    assert payload["conversation_id"] == "conversation-1"
+    assert payload["role"] == "user"
+    assert payload["trigger_type"] == "offline_activity_ignored_card"
+    assert payload["component_card"]["payload"]["activity_id"] == "activity-1"
