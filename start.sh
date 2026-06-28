@@ -214,6 +214,10 @@ export PATH="$(pwd)/.venv/bin:$PATH"
 # Prisma engine / Ollama / Postgres 连接会被代理拦截。
 # 把 localhost + .env 里所有 database host 加到 NO_PROXY 白名单绕过代理直连。
 # 仅影响通过 start.sh 启动的本地开发环境，生产部署不走此脚本。
+# httpx 在看到 socks:// 代理变量时会在 Client 初始化阶段就要求 socksio，
+# 即使请求目标命中 NO_PROXY 也可能先失败。因此本地脚本直接清理代理变量，
+# 避免 Ollama/LangChain import 阶段被宿主 shell 的代理设置绊倒。
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 NO_PROXY_ENTRIES="localhost 127.0.0.1 0.0.0.0 ::1"
 if [ -f ".env" ]; then
     # 同时抓 DATABASE_URL 和 DIRECT_DATABASE_URL 两个 host,
@@ -241,6 +245,10 @@ echo "  HTTP_PROXY=${HTTP_PROXY:-<unset>}"
 echo "  HTTPS_PROXY=${HTTPS_PROXY:-<unset>}"
 echo "  ALL_PROXY=${ALL_PROXY:-<unset>}"
 echo "  NO_PROXY=$NO_PROXY"
+echo "  http_proxy=${http_proxy:-<unset>}"
+echo "  https_proxy=${https_proxy:-<unset>}"
+echo "  all_proxy=${all_proxy:-<unset>}"
+echo "  no_proxy=$no_proxy"
 
 # ── TCP preflight: 在 uvicorn 启动前直接用 python socket 握手 DB 端口 ──
 # socket 不受 HTTP_PROXY 影响, 所以这个预检能精确告诉用户: 是 TCP 不通 (VPN/
