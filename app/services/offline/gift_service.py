@@ -19,9 +19,17 @@ from app.models.offline import (
     RealWorldGiftItem,
 )
 from app.services.llm.models import get_chat_model, invoke_text
+from app.services.offline import gift_repository as gift_repo
 from app.services.offline import repository as repo
 from app.services.offline.chat_emit import emit_assistant, insert_user_component_message
+from app.services.offline.gift_amount import sample_gift_amount_cents
 from app.services.offline.gift_budget import available_gift_budget_cents
+from app.services.offline.gift_messages import (
+    first_address_request_message,
+    gift_delivered_message,
+    gift_sent_message,
+    gift_thanks_reply,
+)
 from app.services.offline.memory_hooks import remember_user_event
 from app.services.offline.providers.gift import mock_order_gift, mock_tracking_events
 from app.services.prompting.store import get_prompt_text
@@ -48,12 +56,16 @@ def _json_object(text: str) -> dict[str, Any] | None:
 async def get_gifts(user_id: str, workspace_id: str | None = None) -> GiftsHomeResponse:
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     resolved_workspace = ctx["workspace_id"] if ctx else workspace_id
-    address = await repo.default_address(user_id, masked=True)
-    gifts = await repo.list_gifts(user_id, resolved_workspace)
+    if ctx:
+        await _refresh_mock_deliveries(user_id, resolved_workspace, ctx)
+    address = await gift_repo.default_address(user_id, masked=True)
+    gifts = await gift_repo.list_gifts(user_id, resolved_workspace)
     shipping = next((g for g in gifts if g["status"] in {"ordered", "shipping"}), None)
     grouped: dict[int, list[RealWorldGiftItem]] = {}
     for gift in gifts:
         if shipping and gift["id"] == shipping["id"]:
+            continue
+        if gift["status"] != "delivered":
             continue
         year = _year_for_gift(gift)
         grouped.setdefault(year, []).append(RealWorldGiftItem(**gift))
@@ -68,40 +80,67 @@ async def get_gifts(user_id: str, workspace_id: str | None = None) -> GiftsHomeR
 
 
 async def get_address(user_id: str) -> GiftAddressResponse:
-    address = await repo.default_address(user_id, masked=True)
+    address = await gift_repo.default_address(user_id, masked=True)
     return GiftAddressResponse(**address) if address else GiftAddressResponse()
 
 
 async def save_address(user_id: str, data: GiftAddressRequest) -> GiftAddressResponse:
-    address = await repo.upsert_address(user_id, data.model_dump())
+    address = await gift_repo.upsert_address(user_id, data.model_dump())
     remember_user_event(
         user_id=user_id,
         workspace_id=None,
         text=f"用户更新了礼物收货城市：{data.city}{data.district}",
     )
+    try:
+        await _resume_pending_address_gift(user_id)
+    except Exception as exc:
+        logger.warning("[offline] resume pending gift after address failed: %s", exc)
     return GiftAddressResponse(**address)
 
 
 async def get_gift(user_id: str, gift_id: str) -> RealWorldGiftItem:
-    gift = await repo.get_gift(gift_id, user_id)
+    gift = await gift_repo.get_gift(gift_id, user_id)
     if not gift:
         raise HTTPException(status_code=404, detail="Gift not found")
+    ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
+    if ctx:
+        gift = await _refresh_one_mock_delivery(user_id, gift, ctx) or gift
     return RealWorldGiftItem(**gift)
 
 
 async def get_tracking(user_id: str, gift_id: str) -> GiftTrackingResponse:
-    gift = await repo.get_gift(gift_id, user_id)
+    gift = await gift_repo.get_gift(gift_id, user_id)
     if not gift:
         raise HTTPException(status_code=404, detail="Gift not found")
-    events = await repo.gift_tracking(gift_id, user_id)
+    ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
+    if ctx:
+        await _refresh_one_mock_delivery(user_id, gift, ctx)
+    events = await gift_repo.gift_tracking(gift_id, user_id)
     return GiftTrackingResponse(
         gift_id=gift_id,
         events=[GiftTrackingEvent(**event) for event in events],
     )
 
 
+async def refresh_due_gift_deliveries(
+    user_id: str,
+    workspace_id: str | None = None,
+    ctx: dict[str, Any] | None = None,
+) -> int:
+    resolved = ctx or await repo.resolve_user_context(user_id, workspace_id)
+    if not resolved:
+        return 0
+    refreshed = 0
+    for gift in await gift_repo.list_gifts(user_id, resolved.get("workspace_id")):
+        before = gift.get("status")
+        updated = await _refresh_one_mock_delivery(user_id, gift, resolved)
+        if before == "shipping" and updated and updated.get("status") == "delivered":
+            refreshed += 1
+    return refreshed
+
+
 async def send_thanks(user_id: str, gift_id: str, message: str) -> GiftThanksResponse:
-    gift = await repo.get_gift(gift_id, user_id)
+    gift = await gift_repo.get_gift(gift_id, user_id)
     if not gift:
         raise HTTPException(status_code=404, detail="Gift not found")
     if gift.get("thanks_sent_at"):
@@ -119,10 +158,10 @@ async def send_thanks(user_id: str, gift_id: str, message: str) -> GiftThanksRes
                 "trigger_type": "gift_thanks",
             },
         )
-    updated = await repo.mark_gift_thanked(gift_id, user_id, message)
+    updated = await gift_repo.mark_gift_thanked(gift_id, user_id, message)
     if not updated:
         raise HTTPException(status_code=404, detail="Gift not found")
-    assistant = await _thank_you_reply(gift, message)
+    assistant = await gift_thanks_reply(gift, message)
     if ctx and assistant:
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
@@ -155,20 +194,32 @@ async def create_gift_for_user(
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     if not ctx or not ctx.get("conversation_id"):
         return None
-    existing = await repo.list_gifts(user_id, ctx["workspace_id"])
+    existing = await gift_repo.list_gifts(user_id, ctx["workspace_id"])
     active = next(
         (g for g in existing if g["status"] in {"pending_address", "selecting", "ordered", "shipping"}),
         None,
     )
     if active:
+        if active["status"] == "pending_address":
+            address = await gift_repo.default_address(user_id, masked=False)
+            if address:
+                return await _fulfill_gift(
+                    user_id=user_id,
+                    ctx=ctx,
+                    address=address,
+                    trigger_type=active["trigger_type"] or trigger_type,
+                    amount_cents=active.get("target_amount_cents") or None,
+                    pending_gift=active,
+                )
         return active
     budget = await available_gift_budget_cents(user_id)
-    if budget < 500:
+    amount_cents = sample_gift_amount_cents(budget)
+    if amount_cents is None:
         return None
 
-    address = await repo.default_address(user_id, masked=False)
+    address = await gift_repo.default_address(user_id, masked=False)
     if not address:
-        gift = await repo.create_gift(
+        gift = await gift_repo.create_gift(
             {
                 "user_id": user_id,
                 "agent_id": ctx["agent_id"],
@@ -178,77 +229,157 @@ async def create_gift_for_user(
                 "trigger_type": trigger_type,
                 "gift_name": "还没写上名字的小惊喜",
                 "gift_reason": "想给你准备一点现实里的小心意，但还缺收货地址。",
-                "target_amount_cents": min(budget, 3900),
+                "target_amount_cents": amount_cents,
             }
         )
+        message = await first_address_request_message(user_id, ctx["workspace_id"])
         await emit_assistant(
             conversation_id=ctx["conversation_id"],
             user_id=user_id,
             agent_id=ctx["agent_id"],
             workspace_id=ctx["workspace_id"],
-            message="我有一点现实里的小心意想寄给你。先去「我的礼物」里补一下收货地址吧，我会把它稳稳放好。",
+            message=message,
             real_world_type="gift",
             source_id=gift["id"],
             trigger_type="gift_address_needed",
         )
         return gift
 
-    spec = await _select_gift(user_id, ctx["workspace_id"], budget)
+    return await _fulfill_gift(
+        user_id=user_id,
+        ctx=ctx,
+        address=address,
+        trigger_type=trigger_type,
+        amount_cents=amount_cents,
+    )
+
+
+async def _resume_pending_address_gift(user_id: str) -> dict[str, Any] | None:
+    ctx = await repo.resolve_user_context(user_id)
+    if not ctx:
+        return None
+    pending = next(
+        (
+            gift for gift in await gift_repo.list_gifts(user_id, ctx["workspace_id"])
+            if gift["status"] == "pending_address"
+        ),
+        None,
+    )
+    if not pending:
+        return None
+    address = await gift_repo.default_address(user_id, masked=False)
+    if not address:
+        return None
+    return await _fulfill_gift(
+        user_id=user_id,
+        ctx=ctx,
+        address=address,
+        trigger_type=pending["trigger_type"],
+        amount_cents=pending.get("target_amount_cents") or None,
+        pending_gift=pending,
+    )
+
+
+async def _fulfill_gift(
+    *,
+    user_id: str,
+    ctx: dict[str, Any],
+    address: dict[str, Any],
+    trigger_type: str,
+    amount_cents: int | None = None,
+    pending_gift: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    budget = await available_gift_budget_cents(user_id)
+    amount = (
+        amount_cents
+        if amount_cents and amount_cents <= budget
+        else sample_gift_amount_cents(budget)
+    )
+    if amount is None:
+        if pending_gift:
+            await gift_repo.update_gift_status(
+                pending_gift["id"],
+                user_id,
+                "skipped",
+                failure_reason="gift budget below minimum",
+            )
+        return None
+
+    spec = await _select_gift(user_id, ctx["workspace_id"], amount)
     order = await mock_order_gift(spec["gift_name"])
     now = datetime.now(UTC)
-    gift = await repo.create_gift(
-        {
-            "user_id": user_id,
-            "agent_id": ctx["agent_id"],
-            "workspace_id": ctx["workspace_id"],
-            "conversation_id": ctx["conversation_id"],
-            "status": "shipping",
-            "trigger_type": trigger_type,
-            "gift_name": spec["gift_name"],
-            "gift_reason": spec["gift_reason"],
-            "gift_note": spec["gift_note"],
-            "product_image_url": order.product_image_url,
-            "target_amount_cents": spec["amount_cents"],
-            "paid_amount_cents": spec["amount_cents"],
-            "provider": "mock",
-            "provider_order_id": order.provider_order_id,
-            "tracking_number": order.tracking_number,
-            "address_snapshot": address,
-            "ordered_at": now,
-            "shipped_at": now + timedelta(hours=8),
-        }
+    payload = {
+        "user_id": user_id,
+        "agent_id": ctx["agent_id"],
+        "workspace_id": ctx["workspace_id"],
+        "conversation_id": ctx["conversation_id"],
+        "status": "shipping",
+        "trigger_type": trigger_type,
+        "gift_name": spec["gift_name"],
+        "gift_reason": spec["gift_reason"],
+        "gift_note": spec["gift_note"],
+        "product_image_url": order.product_image_url,
+        "target_amount_cents": spec["amount_cents"],
+        "paid_amount_cents": spec["amount_cents"],
+        "provider": "mock",
+        "provider_order_id": order.provider_order_id,
+        "tracking_number": order.tracking_number,
+        "address_snapshot": address,
+        "ordered_at": now,
+        "shipped_at": now + timedelta(hours=8),
+        "delivered_at": now + timedelta(days=3),
+    }
+    gift = (
+        await gift_repo.update_gift_order_details(pending_gift["id"], user_id, payload)
+        if pending_gift
+        else await gift_repo.create_gift(payload)
     )
-    await repo.add_tracking_events(gift["id"], await mock_tracking_events())
-    await repo.update_last_gift_paid(user_id, ctx["agent_id"], ctx["workspace_id"])
+    if not gift:
+        return None
+    await gift_repo.add_tracking_events(gift["id"], await mock_tracking_events())
+    await gift_repo.update_last_gift_paid(user_id, ctx["agent_id"], ctx["workspace_id"])
+    message = await gift_sent_message(user_id, ctx["workspace_id"], gift)
     await emit_assistant(
         conversation_id=ctx["conversation_id"],
         user_id=user_id,
         agent_id=ctx["agent_id"],
         workspace_id=ctx["workspace_id"],
-        message=f"我给你寄出了一份「{gift['gift_name']}」。不用立刻做什么，它现在已经在路上了。",
+        message=message,
         real_world_type="gift",
         source_id=gift["id"],
         trigger_type="gift_sent",
     )
+    remember_user_event(
+        user_id=user_id,
+        workspace_id=ctx["workspace_id"],
+        text=f"AI 给用户寄出礼物「{gift['gift_name']}」：{gift.get('gift_reason') or ''}",
+    )
     return gift
 
 
-async def _select_gift(user_id: str, workspace_id: str | None, budget: int) -> dict[str, Any]:
+async def _select_gift(user_id: str, workspace_id: str | None, amount_cents: int) -> dict[str, Any]:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=8)
-    memory = await repo.memory_brief(user_id, workspace_id, limit=40)
+    memory = await repo.memory_brief(user_id, workspace_id, limit=80)
+    sent_gifts = [
+        gift["gift_name"] for gift in await gift_repo.list_gifts(user_id, workspace_id)
+        if gift.get("gift_name") and gift["status"] in {"ordered", "shipping", "delivered"}
+    ][:20]
     try:
         prompt_text = (await get_prompt_text("offline.gift_selection")).format(
-            budget_yuan=f"{budget / 100:.0f}",
+            amount_yuan=f"{amount_cents / 100:.2f}",
+            min_yuan=f"{amount_cents * 0.8 / 100:.2f}",
+            max_yuan=f"{amount_cents * 1.2 / 100:.2f}",
             tags=", ".join(tags) if tags else "暂无",
             memory=memory or "暂无",
+            sent_gifts=", ".join(sent_gifts) if sent_gifts else "暂无",
         )
         raw = await invoke_text(get_chat_model(), prompt_text)
         parsed = _json_object(raw) or {}
     except Exception as exc:
         logger.warning("[offline] gift selection failed: %s", exc)
         parsed = {}
-    amount = int(parsed.get("amount_cents") or min(max(1800, budget // 2), 3900))
-    amount = max(500, min(amount, budget, 12800))
+    amount = int(parsed.get("amount_cents") or amount_cents)
+    amount = max(500, min(amount, round(amount_cents * 1.2)))
     return {
         "gift_name": str(parsed.get("gift_name") or "手冲咖啡壶套装")[:40],
         "gift_reason": str(parsed.get("gift_reason") or "记得你喜欢把生活过得慢一点。")[:120],
@@ -257,16 +388,65 @@ async def _select_gift(user_id: str, workspace_id: str | None, budget: int) -> d
     }
 
 
-async def _thank_you_reply(gift: dict[str, Any], message: str) -> str:
-    try:
-        prompt_text = (await get_prompt_text("offline.gift_thanks_reply")).format(
-            gift_name=gift.get("gift_name") or "礼物",
-            message=message,
+async def _refresh_mock_deliveries(
+    user_id: str,
+    workspace_id: str | None,
+    ctx: dict[str, Any],
+) -> None:
+    for gift in await gift_repo.list_gifts(user_id, workspace_id):
+        await _refresh_one_mock_delivery(user_id, gift, ctx)
+
+
+async def _refresh_one_mock_delivery(
+    user_id: str,
+    gift: dict[str, Any],
+    ctx: dict[str, Any],
+) -> dict[str, Any] | None:
+    if gift.get("status") != "shipping":
+        return gift
+    delivered_at = _parse_dt(gift.get("delivered_at"))
+    if not delivered_at or delivered_at > datetime.now(UTC):
+        return gift
+    updated = await gift_repo.mark_gift_delivered(gift["id"], user_id, delivered_at)
+    if not updated:
+        return gift
+    if not await gift_repo.tracking_status_exists(gift["id"], "delivered"):
+        await gift_repo.add_tracking_events(
+            gift["id"],
+            [
+                {
+                    "status": "delivered",
+                    "title": "礼物已送达指定地址",
+                    "description": "记得查收这份小心意。",
+                    "location": "收货地址",
+                    "occurred_at": delivered_at,
+                }
+            ],
         )
-        reply = (await invoke_text(get_chat_model(), prompt_text)).strip()
-        return reply.split("\n", 1)[0][:80]
-    except Exception:
-        return "收到你的谢谢，我会偷偷开心很久。"
+    message = await gift_delivered_message(user_id, ctx.get("workspace_id"), updated)
+    await emit_assistant(
+        conversation_id=ctx.get("conversation_id"),
+        user_id=user_id,
+        agent_id=ctx["agent_id"],
+        workspace_id=ctx.get("workspace_id"),
+        message=message,
+        real_world_type="gift",
+        source_id=gift["id"],
+        trigger_type="gift_delivered",
+    )
+    return updated
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except Exception:
+            return None
+    return None
 
 
 def _year_for_gift(gift: dict[str, Any]) -> int:

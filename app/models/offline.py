@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.chat_media import ChatAttachmentResponse
 
@@ -111,6 +112,19 @@ class GiftAddressRequest(BaseModel):
     city: str = Field(min_length=1, max_length=40)
     district: str = Field(default="", max_length=40)
     detail: str = Field(min_length=3, max_length=160)
+
+    @field_validator("recipient_name", "phone", "province", "city", "district", "detail", mode="before")
+    @classmethod
+    def _trim_string(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_phone(cls, value: str) -> str:
+        compact = re.sub(r"[\s-]+", "", value)
+        if not re.fullmatch(r"\+?\d{6,20}", compact):
+            raise ValueError("invalid phone number")
+        return compact
 
 
 class GiftTrackingEvent(BaseModel):

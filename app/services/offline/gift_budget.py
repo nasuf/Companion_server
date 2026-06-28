@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.offline import repository as repo
+from app.services.offline import gift_repository as repo
 
 
 async def available_gift_budget_cents(user_id: str) -> int:

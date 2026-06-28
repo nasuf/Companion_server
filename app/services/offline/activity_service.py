@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from app.models.offline import OfflineActivitiesResponse, OfflineActivityItem
-from app.services.offline import activity_media_repo, activity_media_storage
+from app.services.offline import activity_media_repo, activity_media_storage, gift_repository
 from app.services.offline import repository as repo
 from app.services.offline.activity_generation import (
     generate_activity_card,
@@ -42,7 +42,7 @@ async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
         user_id,
         ctx["workspace_id"] if ctx else workspace_id,
     )
-    gifts = await repo.list_gifts(
+    gifts = await gift_repository.list_gifts(
         user_id,
         ctx["workspace_id"] if ctx else workspace_id,
     )
