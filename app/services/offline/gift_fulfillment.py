@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.offline import gift_repository as gift_repo
+from app.services.offline.gift_selection import select_best_candidate
 from app.services.offline.providers.gift_types import (
     GiftOrderResult,
     GiftProductCandidate,
@@ -38,7 +39,7 @@ async def purchase_gift(
     )
     if not candidates:
         raise GiftProviderError(f"no purchasable product found for {spec['gift_name']}")
-    candidate = candidates[0]
+    candidate = await select_best_candidate(candidates, spec)
     order = await provider.place_order(
         candidate=candidate,
         address=RecipientAddress.from_dict(address),

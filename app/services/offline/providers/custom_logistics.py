@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from app.services.offline.providers._provider_utils import parse_provider_dt
 from app.services.offline.providers.gift_types import (
     GiftProviderError,
     GiftTrackingSnapshot,
@@ -74,7 +75,7 @@ def _event_from_payload(data: dict[str, Any]) -> GiftTrackingUpdate | None:
         title=title[:120],
         description=data.get("description") or data.get("remark"),
         location=data.get("location") or data.get("city"),
-        occurred_at=_parse_dt(data.get("occurred_at") or data.get("time")) or datetime.now(UTC),
+        occurred_at=parse_provider_dt(data.get("occurred_at") or data.get("time")) or datetime.now(UTC),
         raw=data,
     )
 
@@ -92,13 +93,3 @@ def _normalize_tracking_status(value: Any) -> str | None:
     return status or None
 
 
-def _parse_dt(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=UTC)
-    if isinstance(value, str) and value.strip():
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        except Exception:
-            return None
-    return None

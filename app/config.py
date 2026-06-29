@@ -152,6 +152,16 @@ class Settings(BaseSettings):
     gift_logistics_api_key: str = ""
     gift_logistics_timeout_s: float = 10.0
 
+    # 1688 开放平台采购接入（gift_commerce_provider / gift_logistics_provider = "ali1688"）。
+    # app_key/app_secret 在 open.1688.com 创建应用获得；access_token 走 OAuth 授权采购账号后获得，
+    # 会过期，需用 refresh_token 定期续期（建议另起 cron 刷新后写回此处）。
+    ali1688_app_key: str = ""
+    ali1688_app_secret: str = ""
+    ali1688_access_token: str = ""
+    ali1688_refresh_token: str = ""  # OAuth 授权得到，cron 用它定期换新 access_token
+    ali1688_search_recall: int = 40  # 关键词召回条数（再做硬过滤+粗排）
+    ali1688_require_one_piece: bool = True  # 是否强制只要支持一件代发/起订量<=1 的商品
+
     # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
     # Development defaults to "*" for local convenience; production must configure
     # an explicit allowlist.

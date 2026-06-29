@@ -255,6 +255,92 @@ async def create_gift_for_user(
     )
 
 
+_MOCK_GIFT_SPECS: list[dict[str, Any]] = [
+    {
+        "gift_name": "暖手宝",
+        "gift_reason": "天冷了，想让你随手揣个暖手的小物件。",
+        "gift_note": "焐着手再敲键盘，别老把指尖冻得冰凉。",
+        "amount_cents": 3900,
+    },
+    {
+        "gift_name": "桂花乌龙茶",
+        "gift_reason": "你提过喜欢带花香的茶。",
+        "gift_note": "忙里偷闲泡一杯，给自己几分钟发个呆。",
+        "amount_cents": 5800,
+    },
+    {
+        "gift_name": "帆布手账本",
+        "gift_reason": "你常说想把零碎灵感记下来。",
+        "gift_note": "随手写写画画，日子也会更有痕迹。",
+        "amount_cents": 4600,
+    },
+]
+
+_MOCK_ADDRESS: dict[str, Any] = {
+    "recipient_name": "测试收件人",
+    "phone": "13800000000",
+    "province": "上海市",
+    "city": "上海市",
+    "district": "黄浦区",
+    "detail": "南京东路 100 号测试大厦 1001 室",
+    "is_default": True,
+}
+
+
+async def create_mock_gift_for_user(
+    *,
+    user_id: str,
+    workspace_id: str | None = None,
+    delivered: bool = False,
+) -> dict[str, Any] | None:
+    """管理员测试：为当前用户注入一份礼物，用于验证前端展示。
+
+    仅在 mock provider 下可用：跳过触发判定、预算门控与 LLM 选礼，直接造一份 spec 走
+    purchase_gift（mock 下单）+ sync_tracking_events（mock 物流轨迹），
+    用于在前端验证礼物卡 / 物流时间线 / 送达态 / 感谢交互的完整性。
+    delivered=True 时额外强制标记送达并推送送达消息。
+
+    ⚠️ 若当前 GIFT_COMMERCE_PROVIDER 是真实 provider（如 ali1688），此接口会触发
+    真实下单+真实扣款，故显式拒绝——测试注入只允许在 mock 下进行。
+    """
+    if gift_fulfillment.commerce_provider_name() != "mock":
+        raise HTTPException(
+            status_code=400,
+            detail="测试注入仅在 mock provider 下可用；当前 provider 会产生真实下单/扣款。",
+        )
+
+    ctx = await repo.resolve_user_context(user_id, workspace_id)
+    if not ctx or not ctx.get("conversation_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="需要先创建一个 AI 伙伴并有聊天会话，才能注入测试礼物。",
+        )
+
+    address = await gift_repo.default_address(user_id, masked=False)
+    if not address:
+        await gift_repo.upsert_address(user_id, dict(_MOCK_ADDRESS))
+        address = await gift_repo.default_address(user_id, masked=False)
+    if not address:
+        raise HTTPException(status_code=500, detail="测试收货地址创建失败。")
+
+    existing_count = len(await gift_repo.list_gifts(user_id, ctx["workspace_id"]))
+    spec = dict(_MOCK_GIFT_SPECS[existing_count % len(_MOCK_GIFT_SPECS)])
+
+    gift = await _fulfill_gift(
+        user_id=user_id,
+        ctx=ctx,
+        address=address,
+        trigger_type="admin_mock",
+        spec_override=spec,
+    )
+    if not gift:
+        raise HTTPException(status_code=500, detail="测试礼物下单失败，请检查 gift provider 配置。")
+
+    if delivered:
+        gift = await _emit_delivery_once(user_id, gift, ctx, datetime.now(UTC)) or gift
+    return gift
+
+
 async def _resume_pending_address_gift(user_id: str) -> dict[str, Any] | None:
     ctx = await repo.resolve_user_context(user_id)
     if not ctx:
@@ -289,24 +375,30 @@ async def _fulfill_gift(
     trigger_type: str,
     amount_cents: int | None = None,
     pending_gift: dict[str, Any] | None = None,
+    spec_override: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    budget = await available_gift_budget_cents(user_id)
-    amount = (
-        amount_cents
-        if amount_cents and amount_cents <= budget
-        else sample_gift_amount_cents(budget)
-    )
-    if amount is None:
-        if pending_gift:
-            await gift_repo.update_gift_status(
-                pending_gift["id"],
-                user_id,
-                "skipped",
-                failure_reason="gift budget below minimum",
-            )
-        return None
+    # spec_override 仅用于管理员测试注入：跳过预算门控与 LLM 选礼，直接用给定 spec
+    # 走真实的 provider 下单 + 物流同步链路（默认 mock provider）。
+    if spec_override is not None:
+        spec = spec_override
+    else:
+        budget = await available_gift_budget_cents(user_id)
+        amount = (
+            amount_cents
+            if amount_cents and amount_cents <= budget
+            else sample_gift_amount_cents(budget)
+        )
+        if amount is None:
+            if pending_gift:
+                await gift_repo.update_gift_status(
+                    pending_gift["id"],
+                    user_id,
+                    "skipped",
+                    failure_reason="gift budget below minimum",
+                )
+            return None
 
-    spec = await _select_gift(user_id, ctx["workspace_id"], amount)
+        spec = await _select_gift(user_id, ctx["workspace_id"], amount)
     try:
         commerce_provider_name = gift_fulfillment.commerce_provider_name()
         logistics_provider_name = gift_fulfillment.logistics_provider_name()

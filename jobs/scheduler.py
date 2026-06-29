@@ -38,6 +38,7 @@ from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import scan_due_last_wills
 from app.services.offline.scheduler import scan_offline_triggers
+from app.services.offline.providers.ali1688_token import refresh_access_token
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     DistributedLockUnavailable,
@@ -385,6 +386,17 @@ def setup_scheduler():
     # 11-12 月发布次年安排), 运营需要时在 admin UI "查询外部源" 拉候选挑
     # 选保存即可 — preview + bulk_save 工作流覆盖所有使用场景.
 
+    # 1688 access_token 每 6 小时刷新一次 (token 有效期通常 1 天, 提前续期防过期).
+    # 仅在启用 ali1688 provider 时实际执行刷新, 否则空跑跳过.
+    scheduler.add_job(
+        _run_ali1688_token_refresh,
+        "interval",
+        hours=6,
+        id="ali1688_token_refresh",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -656,6 +668,25 @@ async def _run_ntp_calibration():
             logger.warning(f"NTP calibration job failed: {e}")
 
     await _run_distributed_job("ntp_calibration", 900, _body)
+
+
+async def _run_ali1688_token_refresh():
+    """每 6h 刷新 1688 access_token；仅在启用 ali1688 provider 时执行。"""
+    async def _body():
+        if "ali1688" not in {
+            settings.gift_commerce_provider,
+            settings.gift_logistics_provider,
+        }:
+            return  # 未启用 1688，空跑跳过
+        try:
+            result = await refresh_access_token()
+            logger.info("ali1688 token refreshed: expires_in=%ss", result.get("expires_in"))
+        except Exception as e:
+            # 用 error 级别：刷新连续失败会让 Redis 内 token 过期后回退到可能已失效的
+            # 初始 token，导致下单全失败——需要运维介入（重新授权拿 refresh_token）。
+            logger.error(f"ali1688 token refresh FAILED, gift ordering will break if this persists: {e}")
+
+    await _run_distributed_job("ali1688_token_refresh", 300, _body)
 
 
 async def _run_aggregation_scan():

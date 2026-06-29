@@ -66,6 +66,20 @@ async def clear_current_user_offline_activities(
     return OfflineActivityClearResponse(**result)
 
 
+@router.post("/admin/gifts/mock", response_model=RealWorldGiftItem)
+async def create_mock_gift(
+    workspace_id: str | None = Query(default=None),
+    delivered: bool = Query(default=False),
+    user: dict = Depends(require_admin_jwt),
+):
+    gift = await gift_service.create_mock_gift_for_user(
+        user_id=str(user["sub"]),
+        workspace_id=workspace_id,
+        delivered=delivered,
+    )
+    return RealWorldGiftItem(**gift)
+
+
 @router.get("/activities/{activity_id}", response_model=OfflineActivityItem)
 async def get_offline_activity(
     activity_id: str,

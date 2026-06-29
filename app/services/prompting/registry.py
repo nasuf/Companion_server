@@ -52,6 +52,7 @@ from app.services.prompting.defaults import (
     OFFLINE_ACTIVITY_CARD_PROMPT,
     OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
     OFFLINE_GIFT_DELIVERED_MESSAGE_PROMPT,
+    OFFLINE_GIFT_CANDIDATE_PICK_PROMPT,
     OFFLINE_GIFT_FIRST_ADDRESS_REQUEST_PROMPT,
     OFFLINE_GIFT_SELECTION_PROMPT,
     OFFLINE_GIFT_SENT_MESSAGE_PROMPT,
@@ -182,6 +183,11 @@ PROMPT_DEFINITIONS = [
         "offline.gift_selection", "线下礼物选择", "线下互动", "礼物",
         "【工程扩展】V3 现实世界互动. 在预算内基于用户记忆选择 mock provider 可下单的小礼物.",
         OFFLINE_GIFT_SELECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.gift_candidate_pick", "礼物候选精选", "线下互动", "礼物",
+        "【工程扩展】真实电商接入. 关键词搜出多个候选时, 小模型语义复核挑出最适合做礼物的一件.",
+        OFFLINE_GIFT_CANDIDATE_PICK_PROMPT,
     ),
     PromptDefinition(
         "offline.gift_first_address_request", "首次送礼地址提醒", "线下互动", "礼物",

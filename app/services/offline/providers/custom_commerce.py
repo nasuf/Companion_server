@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
+from app.services.offline.providers._provider_utils import parse_provider_dt
 from app.services.offline.providers.gift_types import (
     GiftOrderResult,
     GiftProductCandidate,
@@ -89,8 +89,8 @@ class CustomHttpGiftCommerceProvider:
             paid_amount_cents=_int_cents(data.get("paid_amount_cents"), candidate.price_cents),
             product_image_url=data.get("product_image_url") or candidate.image_url,
             tracking_number=data.get("tracking_number"),
-            shipped_at=_parse_dt(data.get("shipped_at")),
-            delivered_at=_parse_dt(data.get("delivered_at")),
+            shipped_at=parse_provider_dt(data.get("shipped_at")),
+            delivered_at=parse_provider_dt(data.get("delivered_at")),
             raw=data,
         )
 
@@ -146,15 +146,3 @@ def _int_cents(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return default
-
-
-def _parse_dt(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=UTC)
-    if isinstance(value, str) and value.strip():
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        except Exception:
-            return None
-    return None
