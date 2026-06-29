@@ -13,6 +13,13 @@ from app.services.offline.gift_trigger_policy import (
     gift_cooldown_days,
     gift_trigger_probability,
 )
+from app.services.offline.providers.gift_types import (
+    GiftOrderResult,
+    GiftProductCandidate,
+    RecipientAddress,
+)
+from app.services.offline.providers.mock_commerce import MockGiftCommerceProvider
+from app.services.offline.providers.mock_logistics import MockGiftLogisticsProvider
 
 
 def test_gift_amount_uses_lognormal_formula_and_minimum():
@@ -48,6 +55,36 @@ def test_gift_probability_and_cooldown_match_spec_formula():
     assert gift_trigger_probability(400, 200) == 0.15
     assert gift_cooldown_days(0.3) == 30
     assert gift_cooldown_days(0.0) == 183
+
+
+@pytest.mark.asyncio
+async def test_mock_gift_providers_follow_search_order_tracking_contract():
+    commerce = MockGiftCommerceProvider()
+    logistics = MockGiftLogisticsProvider()
+
+    candidates = await commerce.search_products(
+        query="手冲咖啡壶套装",
+        min_amount_cents=1600,
+        max_amount_cents=2400,
+    )
+    assert candidates
+    assert candidates[0].source == "mock"
+
+    order = await commerce.place_order(
+        candidate=candidates[0],
+        address=RecipientAddress(recipient_name="小悠", phone="13812345678", city="镇江", detail="路 1 号"),
+        idempotency_key="gift-1",
+    )
+    assert order.provider_order_id.startswith("MOCK-")
+    assert order.status == "shipping"
+
+    tracking = await logistics.fetch_tracking(
+        provider=order.provider,
+        provider_order_id=order.provider_order_id,
+        tracking_number=order.tracking_number,
+    )
+    assert tracking.current_status == "shipping"
+    assert [event.status for event in tracking.events] == ["ordered", "packed", "shipping"]
 
 
 @pytest.mark.asyncio
@@ -136,6 +173,11 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
         "gift_reason": "慢一点也很好。",
         "gift_note": "给你一点热气。",
         "product_image_url": "https://example.com/gift.jpg",
+        "provider": "mock",
+        "provider_product_id": "mock-product-1",
+        "provider_order_id": "MOCK-1",
+        "product_url": "https://example.com/product",
+        "logistics_provider": "mock",
         "paid_amount_cents": 2000,
         "tracking_number": "RW1",
         "created_at": "2026-06-27T10:00:00Z",
@@ -156,21 +198,31 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
         }
     )
     monkeypatch.setattr(gift_service, "_select_gift", select_gift)
-    monkeypatch.setattr(
-        gift_service,
-        "mock_order_gift",
-        AsyncMock(
-            return_value=SimpleNamespace(
+    purchase = AsyncMock(
+        return_value=(
+            GiftProductCandidate(
+                external_product_id="mock-product-1",
+                title="手冲咖啡壶套装",
+                price_cents=2_000,
+                image_url="https://example.com/gift.jpg",
+                product_url="https://example.com/product",
+                source="mock",
+            ),
+            GiftOrderResult(
+                provider="mock",
                 provider_order_id="MOCK-1",
-                tracking_number="RW1",
+                status="shipping",
+                paid_amount_cents=2_000,
                 product_image_url="https://example.com/gift.jpg",
-            )
-        ),
+                tracking_number="RW1",
+            ),
+        )
     )
-    update_order = AsyncMock(return_value=fulfilled)
+    monkeypatch.setattr(gift_service.gift_fulfillment, "purchase_gift", purchase)
+    update_order = AsyncMock(side_effect=[{**fulfilled, "status": "selecting"}, fulfilled])
     monkeypatch.setattr(gift_service.gift_repo, "update_gift_order_details", update_order)
-    monkeypatch.setattr(gift_service.gift_repo, "add_tracking_events", AsyncMock())
-    monkeypatch.setattr(gift_service, "mock_tracking_events", AsyncMock(return_value=[]))
+    sync_tracking = AsyncMock(return_value=None)
+    monkeypatch.setattr(gift_service.gift_fulfillment, "sync_tracking_events", sync_tracking)
     monkeypatch.setattr(gift_service.gift_repo, "update_last_gift_paid", AsyncMock())
     monkeypatch.setattr(gift_service, "gift_sent_message", AsyncMock(return_value="我给你寄了个小东西。"))
     monkeypatch.setattr(gift_service, "emit_assistant", AsyncMock())
@@ -179,9 +231,11 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
 
     assert result == fulfilled
     select_gift.assert_awaited_once_with("user-1", "workspace-1", 3_000)
-    update_order.assert_awaited_once()
-    assert update_order.await_args.args[0] == "gift-pending"
-    assert update_order.await_args.args[2]["status"] == "shipping"
+    purchase.assert_awaited_once()
+    sync_tracking.assert_awaited_once()
+    assert update_order.await_count == 2
+    assert update_order.await_args_list[-1].args[0] == "gift-pending"
+    assert update_order.await_args_list[-1].args[2]["status"] == "shipping"
 
 
 @pytest.mark.asyncio
@@ -303,7 +357,7 @@ async def test_gifts_home_only_groups_delivered_history(monkeypatch):
         "resolve_user_context",
         AsyncMock(return_value={"workspace_id": "workspace-1", "agent_id": "agent-1"}),
     )
-    monkeypatch.setattr(gift_service, "_refresh_mock_deliveries", AsyncMock())
+    monkeypatch.setattr(gift_service, "_refresh_deliveries", AsyncMock())
     monkeypatch.setattr(gift_service.gift_repo, "default_address", AsyncMock(return_value=None))
     monkeypatch.setattr(gift_service.gift_repo, "list_gifts", AsyncMock(return_value=gifts))
 

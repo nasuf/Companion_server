@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -19,6 +19,7 @@ from app.models.offline import (
     RealWorldGiftItem,
 )
 from app.services.llm.models import get_chat_model, invoke_text
+from app.services.offline import gift_fulfillment
 from app.services.offline import gift_repository as gift_repo
 from app.services.offline import repository as repo
 from app.services.offline.chat_emit import emit_assistant, insert_user_component_message
@@ -31,7 +32,7 @@ from app.services.offline.gift_messages import (
     gift_thanks_reply,
 )
 from app.services.offline.memory_hooks import remember_user_event
-from app.services.offline.providers.gift import mock_order_gift, mock_tracking_events
+from app.services.offline.providers.gift_types import GiftProviderError
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ async def get_gifts(user_id: str, workspace_id: str | None = None) -> GiftsHomeR
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     resolved_workspace = ctx["workspace_id"] if ctx else workspace_id
     if ctx:
-        await _refresh_mock_deliveries(user_id, resolved_workspace, ctx)
+        await _refresh_deliveries(user_id, resolved_workspace, ctx)
     address = await gift_repo.default_address(user_id, masked=True)
     gifts = await gift_repo.list_gifts(user_id, resolved_workspace)
     shipping = next((g for g in gifts if g["status"] in {"ordered", "shipping"}), None)
@@ -104,7 +105,7 @@ async def get_gift(user_id: str, gift_id: str) -> RealWorldGiftItem:
         raise HTTPException(status_code=404, detail="Gift not found")
     ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
     if ctx:
-        gift = await _refresh_one_mock_delivery(user_id, gift, ctx) or gift
+        gift = await _refresh_one_delivery(user_id, gift, ctx) or gift
     return RealWorldGiftItem(**gift)
 
 
@@ -114,7 +115,7 @@ async def get_tracking(user_id: str, gift_id: str) -> GiftTrackingResponse:
         raise HTTPException(status_code=404, detail="Gift not found")
     ctx = await repo.resolve_user_context(user_id, gift.get("workspace_id"))
     if ctx:
-        await _refresh_one_mock_delivery(user_id, gift, ctx)
+        await _refresh_one_delivery(user_id, gift, ctx)
     events = await gift_repo.gift_tracking(gift_id, user_id)
     return GiftTrackingResponse(
         gift_id=gift_id,
@@ -133,8 +134,8 @@ async def refresh_due_gift_deliveries(
     refreshed = 0
     for gift in await gift_repo.list_gifts(user_id, resolved.get("workspace_id")):
         before = gift.get("status")
-        updated = await _refresh_one_mock_delivery(user_id, gift, resolved)
-        if before == "shipping" and updated and updated.get("status") == "delivered":
+        updated = await _refresh_one_delivery(user_id, gift, resolved)
+        if before in {"ordered", "shipping"} and updated and updated.get("status") == "delivered":
             refreshed += 1
     return refreshed
 
@@ -306,37 +307,87 @@ async def _fulfill_gift(
         return None
 
     spec = await _select_gift(user_id, ctx["workspace_id"], amount)
-    order = await mock_order_gift(spec["gift_name"])
+    try:
+        commerce_provider_name = gift_fulfillment.commerce_provider_name()
+        logistics_provider_name = gift_fulfillment.logistics_provider_name()
+    except GiftProviderError as exc:
+        logger.warning("[offline] gift provider is not configured: %s", exc)
+        if pending_gift:
+            await gift_repo.update_gift_status(
+                pending_gift["id"],
+                user_id,
+                "failed",
+                failure_reason=str(exc)[:300],
+            )
+        return None
+    now = datetime.now(UTC)
+    staging_payload = _gift_staging_payload(
+        user_id=user_id,
+        ctx=ctx,
+        address=address,
+        trigger_type=trigger_type,
+        spec=spec,
+        provider_name=commerce_provider_name,
+        status="selecting",
+        ordered_at=now,
+    )
+    gift = (
+        await gift_repo.update_gift_order_details(pending_gift["id"], user_id, staging_payload)
+        if pending_gift
+        else await gift_repo.create_gift(staging_payload)
+    )
+    if not gift:
+        return None
+
+    try:
+        candidate, order = await gift_fulfillment.purchase_gift(
+            gift_id=gift["id"],
+            spec=spec,
+            address=address,
+        )
+    except GiftProviderError as exc:
+        logger.warning("[offline] gift purchase failed gift_id=%s: %s", gift["id"], exc)
+        await gift_repo.update_gift_status(
+            gift["id"],
+            user_id,
+            "failed",
+            failure_reason=str(exc)[:300],
+        )
+        return None
+
     now = datetime.now(UTC)
     payload = {
         "user_id": user_id,
         "agent_id": ctx["agent_id"],
         "workspace_id": ctx["workspace_id"],
         "conversation_id": ctx["conversation_id"],
-        "status": "shipping",
+        "status": order.status if order.status in {"ordered", "shipping", "delivered"} else "ordered",
         "trigger_type": trigger_type,
         "gift_name": spec["gift_name"],
         "gift_reason": spec["gift_reason"],
         "gift_note": spec["gift_note"],
-        "product_image_url": order.product_image_url,
+        "product_image_url": order.product_image_url or candidate.image_url,
+        "provider_product_id": candidate.external_product_id,
+        "product_url": candidate.product_url,
+        "product_snapshot": gift_fulfillment.candidate_snapshot(candidate),
         "target_amount_cents": spec["amount_cents"],
-        "paid_amount_cents": spec["amount_cents"],
-        "provider": "mock",
+        "paid_amount_cents": order.paid_amount_cents,
+        "provider": order.provider,
         "provider_order_id": order.provider_order_id,
         "tracking_number": order.tracking_number,
+        "logistics_provider": logistics_provider_name,
+        "provider_payload": order.raw,
+        "logistics_payload": {},
         "address_snapshot": address,
         "ordered_at": now,
-        "shipped_at": now + timedelta(hours=8),
-        "delivered_at": now + timedelta(days=3),
+        "shipped_at": order.shipped_at,
+        "delivered_at": order.delivered_at,
+        "last_tracking_synced_at": None,
     }
-    gift = (
-        await gift_repo.update_gift_order_details(pending_gift["id"], user_id, payload)
-        if pending_gift
-        else await gift_repo.create_gift(payload)
-    )
+    gift = await gift_repo.update_gift_order_details(gift["id"], user_id, payload)
     if not gift:
         return None
-    await gift_repo.add_tracking_events(gift["id"], await mock_tracking_events())
+    await gift_fulfillment.sync_tracking_events(user_id, gift)
     await gift_repo.update_last_gift_paid(user_id, ctx["agent_id"], ctx["workspace_id"])
     message = await gift_sent_message(user_id, ctx["workspace_id"], gift)
     await emit_assistant(
@@ -355,6 +406,35 @@ async def _fulfill_gift(
         text=f"AI 给用户寄出礼物「{gift['gift_name']}」：{gift.get('gift_reason') or ''}",
     )
     return gift
+
+
+def _gift_staging_payload(
+    *,
+    user_id: str,
+    ctx: dict[str, Any],
+    address: dict[str, Any],
+    trigger_type: str,
+    spec: dict[str, Any],
+    provider_name: str,
+    status: str,
+    ordered_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "agent_id": ctx["agent_id"],
+        "workspace_id": ctx["workspace_id"],
+        "conversation_id": ctx["conversation_id"],
+        "status": status,
+        "trigger_type": trigger_type,
+        "gift_name": spec["gift_name"],
+        "gift_reason": spec["gift_reason"],
+        "gift_note": spec["gift_note"],
+        "target_amount_cents": spec["amount_cents"],
+        "paid_amount_cents": 0,
+        "provider": provider_name,
+        "address_snapshot": address,
+        "ordered_at": ordered_at,
+    }
 
 
 async def _select_gift(user_id: str, workspace_id: str | None, amount_cents: int) -> dict[str, Any]:
@@ -388,25 +468,43 @@ async def _select_gift(user_id: str, workspace_id: str | None, amount_cents: int
     }
 
 
-async def _refresh_mock_deliveries(
+async def _refresh_deliveries(
     user_id: str,
     workspace_id: str | None,
     ctx: dict[str, Any],
 ) -> None:
     for gift in await gift_repo.list_gifts(user_id, workspace_id):
-        await _refresh_one_mock_delivery(user_id, gift, ctx)
+        await _refresh_one_delivery(user_id, gift, ctx)
 
 
-async def _refresh_one_mock_delivery(
+async def _refresh_one_delivery(
     user_id: str,
     gift: dict[str, Any],
     ctx: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if gift.get("status") != "shipping":
+    if gift.get("status") not in {"ordered", "shipping"}:
         return gift
+    try:
+        snapshot = await gift_fulfillment.sync_tracking_events(user_id, gift)
+    except GiftProviderError as exc:
+        logger.warning("[offline] gift tracking refresh failed gift_id=%s: %s", gift["id"], exc)
+        return gift
+    if snapshot and snapshot.current_status == "delivered":
+        delivered_event = gift_fulfillment.latest_tracking_event(snapshot.events, "delivered")
+        delivered_at = delivered_event.occurred_at if delivered_event else datetime.now(UTC)
+        return await _emit_delivery_once(user_id, gift, ctx, delivered_at)
     delivered_at = _parse_dt(gift.get("delivered_at"))
     if not delivered_at or delivered_at > datetime.now(UTC):
         return gift
+    return await _emit_delivery_once(user_id, gift, ctx, delivered_at)
+
+
+async def _emit_delivery_once(
+    user_id: str,
+    gift: dict[str, Any],
+    ctx: dict[str, Any],
+    delivered_at: datetime,
+) -> dict[str, Any] | None:
     updated = await gift_repo.mark_gift_delivered(gift["id"], user_id, delivered_at)
     if not updated:
         return gift

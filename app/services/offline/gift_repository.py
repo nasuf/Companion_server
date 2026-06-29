@@ -22,6 +22,15 @@ def gift_from_row(row: Any) -> dict[str, Any]:
         "gift_reason": _field(row, "gift_reason", "giftReason"),
         "gift_note": _field(row, "gift_note", "giftNote"),
         "product_image_url": _field(row, "product_image_url", "productImageUrl"),
+        "provider_product_id": _field(row, "provider_product_id", "providerProductId"),
+        "product_url": _field(row, "product_url", "productUrl"),
+        "product_snapshot": _field(row, "product_snapshot", "productSnapshot") or {},
+        "provider": str(_field(row, "provider") or "mock"),
+        "provider_order_id": _field(row, "provider_order_id", "providerOrderId"),
+        "logistics_provider": _field(row, "logistics_provider", "logisticsProvider"),
+        "provider_payload": _field(row, "provider_payload", "providerPayload") or {},
+        "logistics_payload": _field(row, "logistics_payload", "logisticsPayload") or {},
+        "last_tracking_synced_at": _iso(_field(row, "last_tracking_synced_at", "lastTrackingSyncedAt")),
         "paid_amount_cents": int(_field(row, "paid_amount_cents", "paidAmountCents", 0) or 0),
         "tracking_number": _field(row, "tracking_number", "trackingNumber"),
         "thanks_sent_at": _iso(_field(row, "thanks_sent_at", "thanksSentAt")),
@@ -109,15 +118,20 @@ async def create_gift(data: dict[str, Any]) -> dict[str, Any]:
         INSERT INTO real_world_gifts (
             id, user_id, agent_id, workspace_id, conversation_id, status, trigger_type,
             gift_name, gift_reason, gift_note, product_image_url,
+            provider_product_id, product_url, product_snapshot,
             target_amount_cents, paid_amount_cents, provider, provider_order_id,
-            tracking_number, address_snapshot, failure_reason, ordered_at, shipped_at, delivered_at
+            tracking_number, logistics_provider, provider_payload, logistics_payload,
+            last_tracking_synced_at, address_snapshot, failure_reason,
+            ordered_at, shipped_at, delivered_at
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11,
-            $12, $13, $14, $15,
-            $16, $17::jsonb, $18,
-            $19::timestamptz, $20::timestamptz, $21::timestamptz
+            $12, $13, $14::jsonb,
+            $15, $16, $17, $18,
+            $19, $20, $21::jsonb, $22::jsonb,
+            $23::timestamptz, $24::jsonb, $25,
+            $26::timestamptz, $27::timestamptz, $28::timestamptz
         )
         RETURNING *
         """,
@@ -132,11 +146,18 @@ async def create_gift(data: dict[str, Any]) -> dict[str, Any]:
         data.get("gift_reason"),
         data.get("gift_note"),
         data.get("product_image_url"),
+        data.get("provider_product_id"),
+        data.get("product_url"),
+        json.dumps(data.get("product_snapshot") or {}, ensure_ascii=False),
         int(data.get("target_amount_cents") or 0),
         int(data.get("paid_amount_cents") or 0),
         data.get("provider", "mock"),
         data.get("provider_order_id"),
         data.get("tracking_number"),
+        data.get("logistics_provider"),
+        json.dumps(data.get("provider_payload") or {}, ensure_ascii=False),
+        json.dumps(data.get("logistics_payload") or {}, ensure_ascii=False),
+        data.get("last_tracking_synced_at"),
         json.dumps(data.get("address_snapshot") or {}, ensure_ascii=False),
         data.get("failure_reason"),
         data.get("ordered_at"),
@@ -180,16 +201,23 @@ async def update_gift_order_details(gift_id: str, user_id: str, data: dict[str, 
             gift_reason = $5,
             gift_note = $6,
             product_image_url = $7,
-            target_amount_cents = $8,
-            paid_amount_cents = $9,
-            provider = $10,
-            provider_order_id = $11,
-            tracking_number = $12,
-            address_snapshot = $13::jsonb,
+            provider_product_id = $8,
+            product_url = $9,
+            product_snapshot = $10::jsonb,
+            target_amount_cents = $11,
+            paid_amount_cents = $12,
+            provider = $13,
+            provider_order_id = $14,
+            tracking_number = $15,
+            logistics_provider = $16,
+            provider_payload = $17::jsonb,
+            logistics_payload = $18::jsonb,
+            last_tracking_synced_at = $19::timestamptz,
+            address_snapshot = $20::jsonb,
             failure_reason = NULL,
-            ordered_at = $14::timestamptz,
-            shipped_at = $15::timestamptz,
-            delivered_at = $16::timestamptz,
+            ordered_at = $21::timestamptz,
+            shipped_at = $22::timestamptz,
+            delivered_at = $23::timestamptz,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND user_id = $2
         RETURNING *
@@ -201,11 +229,18 @@ async def update_gift_order_details(gift_id: str, user_id: str, data: dict[str, 
         data.get("gift_reason"),
         data.get("gift_note"),
         data.get("product_image_url"),
+        data.get("provider_product_id"),
+        data.get("product_url"),
+        json.dumps(data.get("product_snapshot") or {}, ensure_ascii=False),
         int(data.get("target_amount_cents") or 0),
         int(data.get("paid_amount_cents") or 0),
         data.get("provider", "mock"),
         data.get("provider_order_id"),
         data.get("tracking_number"),
+        data.get("logistics_provider"),
+        json.dumps(data.get("provider_payload") or {}, ensure_ascii=False),
+        json.dumps(data.get("logistics_payload") or {}, ensure_ascii=False),
+        data.get("last_tracking_synced_at"),
         json.dumps(data.get("address_snapshot") or {}, ensure_ascii=False),
         data.get("ordered_at"),
         data.get("shipped_at"),
@@ -278,6 +313,24 @@ async def mark_gift_thanked(gift_id: str, user_id: str, message: str) -> dict[st
 
 async def add_tracking_events(gift_id: str, events: list[dict[str, Any]]) -> None:
     for event in events:
+        occurred_at = event.get("occurred_at") or now_utc()
+        exists = await db.query_raw(
+            """
+            SELECT 1
+            FROM gift_tracking_events
+            WHERE gift_id = $1
+              AND status = $2
+              AND title = $3
+              AND occurred_at = $4::timestamptz
+            LIMIT 1
+            """,
+            gift_id,
+            event["status"],
+            event["title"],
+            occurred_at,
+        )
+        if exists:
+            continue
         await db.execute_raw(
             """
             INSERT INTO gift_tracking_events (
@@ -291,8 +344,39 @@ async def add_tracking_events(gift_id: str, events: list[dict[str, Any]]) -> Non
             event["title"],
             event.get("description"),
             event.get("location"),
-            event.get("occurred_at") or now_utc(),
+            occurred_at,
         )
+
+
+async def update_tracking_snapshot(
+    gift_id: str,
+    user_id: str,
+    *,
+    status: str | None = None,
+    tracking_number: str | None = None,
+    logistics_provider: str | None = None,
+    logistics_payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    rows = await db.query_raw(
+        """
+        UPDATE real_world_gifts
+        SET status = COALESCE($3, status),
+            tracking_number = COALESCE($4, tracking_number),
+            logistics_provider = COALESCE($5, logistics_provider),
+            logistics_payload = COALESCE($6::jsonb, logistics_payload),
+            last_tracking_synced_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2
+        RETURNING *
+        """,
+        gift_id,
+        user_id,
+        status,
+        tracking_number,
+        logistics_provider,
+        json.dumps(logistics_payload, ensure_ascii=False) if logistics_payload is not None else None,
+    )
+    return gift_from_row(rows[0]) if rows else None
 
 
 async def gift_tracking(gift_id: str, user_id: str) -> list[dict[str, Any]]:

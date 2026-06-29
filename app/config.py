@@ -140,6 +140,18 @@ class Settings(BaseSettings):
     brave_search_api_key: str = ""
     brave_search_endpoint: str = "https://api.search.brave.com/res/v1/web/search"
 
+    # Real-world gift commerce/logistics. Keep the default mock provider for
+    # local/dev. In production, point custom_http at a buyer-side purchasing
+    # service that can legally search, order, pay, and track gifts.
+    gift_commerce_provider: str = "mock"
+    gift_commerce_base_url: str = ""
+    gift_commerce_api_key: str = ""
+    gift_commerce_timeout_s: float = 12.0
+    gift_logistics_provider: str = "mock"
+    gift_logistics_base_url: str = ""
+    gift_logistics_api_key: str = ""
+    gift_logistics_timeout_s: float = 10.0
+
     # CORS. Comma-separated list, e.g. "https://app.example.com,https://admin.example.com".
     # Development defaults to "*" for local convenience; production must configure
     # an explicit allowlist.

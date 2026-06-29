@@ -144,8 +144,14 @@ class RealWorldGiftItem(BaseModel):
     gift_reason: str | None = None
     gift_note: str | None = None
     product_image_url: str | None = None
+    provider: str = "mock"
+    provider_product_id: str | None = None
+    provider_order_id: str | None = None
+    product_url: str | None = None
     paid_amount_cents: int = 0
     tracking_number: str | None = None
+    logistics_provider: str | None = None
+    last_tracking_synced_at: str | None = None
     thanks_sent_at: str | None = None
     ordered_at: str | None = None
     shipped_at: str | None = None
