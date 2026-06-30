@@ -314,6 +314,8 @@ async def mark_gift_thanked(gift_id: str, user_id: str, message: str) -> dict[st
 async def add_tracking_events(gift_id: str, events: list[dict[str, Any]]) -> None:
     for event in events:
         occurred_at = event.get("occurred_at") or now_utc()
+        description = event.get("description")
+        location = event.get("location")
         exists = await db.query_raw(
             """
             SELECT 1
@@ -321,13 +323,15 @@ async def add_tracking_events(gift_id: str, events: list[dict[str, Any]]) -> Non
             WHERE gift_id = $1
               AND status = $2
               AND title = $3
-              AND occurred_at = $4::timestamptz
+              AND COALESCE(description, '') = COALESCE($4::text, '')
+              AND COALESCE(location, '') = COALESCE($5::text, '')
             LIMIT 1
             """,
             gift_id,
             event["status"],
             event["title"],
-            occurred_at,
+            description,
+            location,
         )
         if exists:
             continue
@@ -342,8 +346,8 @@ async def add_tracking_events(gift_id: str, events: list[dict[str, Any]]) -> Non
             gift_id,
             event["status"],
             event["title"],
-            event.get("description"),
-            event.get("location"),
+            description,
+            location,
             occurred_at,
         )
 
@@ -382,11 +386,25 @@ async def update_tracking_snapshot(
 async def gift_tracking(gift_id: str, user_id: str) -> list[dict[str, Any]]:
     rows = await db.query_raw(
         """
-        SELECT e.*
-        FROM gift_tracking_events e
-        JOIN real_world_gifts g ON g.id = e.gift_id
-        WHERE e.gift_id = $1 AND g.user_id = $2
-        ORDER BY e.occurred_at ASC
+        SELECT *
+        FROM (
+            SELECT DISTINCT ON (
+                e.status,
+                e.title,
+                COALESCE(e.description, ''),
+                COALESCE(e.location, '')
+            ) e.*
+            FROM gift_tracking_events e
+            JOIN real_world_gifts g ON g.id = e.gift_id
+            WHERE e.gift_id = $1 AND g.user_id = $2
+            ORDER BY
+                e.status,
+                e.title,
+                COALESCE(e.description, ''),
+                COALESCE(e.location, ''),
+                e.occurred_at ASC
+        ) deduped
+        ORDER BY occurred_at ASC
         """,
         gift_id,
         user_id,
