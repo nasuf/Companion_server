@@ -225,7 +225,8 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
     monkeypatch.setattr(gift_service.gift_fulfillment, "sync_tracking_events", sync_tracking)
     monkeypatch.setattr(gift_service.gift_repo, "update_last_gift_paid", AsyncMock())
     monkeypatch.setattr(gift_service, "gift_sent_message", AsyncMock(return_value="我给你寄了个小东西。"))
-    monkeypatch.setattr(gift_service, "emit_assistant", AsyncMock())
+    emit_gift_card = AsyncMock()
+    monkeypatch.setattr(gift_service, "emit_gift_card", emit_gift_card)
 
     result = await gift_service.create_gift_for_user(user_id="user-1", workspace_id="workspace-1")
 
@@ -236,6 +237,9 @@ async def test_create_gift_resumes_pending_address_task(monkeypatch):
     assert update_order.await_count == 2
     assert update_order.await_args_list[-1].args[0] == "gift-pending"
     assert update_order.await_args_list[-1].args[2]["status"] == "shipping"
+    emit_gift_card.assert_awaited_once()
+    assert emit_gift_card.await_args.kwargs["trigger_type"] == "gift_sent"
+    assert emit_gift_card.await_args.kwargs["status_label"] == "在路上"
 
 
 @pytest.mark.asyncio

@@ -121,6 +121,37 @@ def test_sanitize_component_card_rejects_unknown_type():
     assert ws_mod._sanitize_component_card({"type": "unknown"}) is None
 
 
+def test_sanitize_component_card_allows_offline_gift_payload():
+    card = ws_mod._sanitize_component_card({
+        "type": "offline_gift",
+        "title": "暖手宝",
+        "subtitle": "在路上",
+        "body": "我给你寄了个小东西。",
+        "footer": "点击查看礼物详情",
+        "accent": "#F6A64B",
+        "payload": {
+            "gift_id": "gift-1",
+            "status": "shipping",
+            "status_label": "在路上",
+            "gift_name": "暖手宝",
+            "image_url": "/offline/gifts/gift-1/image",
+            "real_world_type": "gift",
+            "ignored": "x",
+        },
+    })
+
+    assert card is not None
+    assert card["type"] == "offline_gift"
+    assert card["payload"] == {
+        "gift_id": "gift-1",
+        "status": "shipping",
+        "status_label": "在路上",
+        "gift_name": "暖手宝",
+        "image_url": "/offline/gifts/gift-1/image",
+        "real_world_type": "gift",
+    }
+
+
 def test_weibo_visitor_link_card_needs_refresh():
     link = SimpleNamespace(
         platform="微博",

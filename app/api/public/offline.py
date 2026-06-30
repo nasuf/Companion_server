@@ -226,7 +226,12 @@ async def thank_gift(
     data: GiftThanksRequest,
     user: dict = Depends(require_user),
 ):
-    return await gift_service.send_thanks(str(user["sub"]), gift_id, data.message)
+    return await gift_service.send_thanks(
+        str(user["sub"]),
+        gift_id,
+        data.message,
+        client_id=data.client_id,
+    )
 
 
 def _media_response(

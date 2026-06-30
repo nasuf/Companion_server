@@ -22,7 +22,11 @@ from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline import gift_fulfillment
 from app.services.offline import gift_repository as gift_repo
 from app.services.offline import repository as repo
-from app.services.offline.chat_emit import emit_assistant, insert_user_component_message
+from app.services.offline.chat_emit import (
+    emit_assistant,
+    emit_gift_card,
+    insert_user_component_message,
+)
 from app.services.offline.gift_amount import sample_gift_amount_cents
 from app.services.offline.gift_budget import available_gift_budget_cents
 from app.services.offline.gift_messages import (
@@ -140,7 +144,13 @@ async def refresh_due_gift_deliveries(
     return refreshed
 
 
-async def send_thanks(user_id: str, gift_id: str, message: str) -> GiftThanksResponse:
+async def send_thanks(
+    user_id: str,
+    gift_id: str,
+    message: str,
+    *,
+    client_id: str | None = None,
+) -> GiftThanksResponse:
     gift = await gift_repo.get_gift(gift_id, user_id)
     if not gift:
         raise HTTPException(status_code=404, detail="Gift not found")
@@ -152,6 +162,7 @@ async def send_thanks(user_id: str, gift_id: str, message: str) -> GiftThanksRes
             conversation_id=ctx.get("conversation_id"),
             workspace_id=ctx.get("workspace_id"),
             content=f"我收到了「{gift['gift_name']}」，想说：{message}",
+            client_id=client_id,
             metadata={
                 "user_id": user_id,
                 "real_world_type": "gift",
@@ -482,15 +493,15 @@ async def _fulfill_gift(
     await gift_fulfillment.sync_tracking_events(user_id, gift)
     await gift_repo.update_last_gift_paid(user_id, ctx["agent_id"], ctx["workspace_id"])
     message = await gift_sent_message(user_id, ctx["workspace_id"], gift)
-    await emit_assistant(
+    await emit_gift_card(
         conversation_id=ctx["conversation_id"],
         user_id=user_id,
         agent_id=ctx["agent_id"],
         workspace_id=ctx["workspace_id"],
-        message=message,
-        real_world_type="gift",
-        source_id=gift["id"],
+        gift=gift,
         trigger_type="gift_sent",
+        status_label="在路上",
+        message=message,
     )
     remember_user_event(
         user_id=user_id,
@@ -614,15 +625,15 @@ async def _emit_delivery_once(
             ],
         )
     message = await gift_delivered_message(user_id, ctx.get("workspace_id"), updated)
-    await emit_assistant(
+    await emit_gift_card(
         conversation_id=ctx.get("conversation_id"),
         user_id=user_id,
         agent_id=ctx["agent_id"],
         workspace_id=ctx.get("workspace_id"),
-        message=message,
-        real_world_type="gift",
-        source_id=gift["id"],
+        gift=updated,
         trigger_type="gift_delivered",
+        status_label="已送达",
+        message=message,
     )
     return updated
 

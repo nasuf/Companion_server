@@ -173,6 +173,7 @@ class GiftsHomeResponse(BaseModel):
 
 class GiftThanksRequest(BaseModel):
     message: str = Field(min_length=1, max_length=300)
+    client_id: str | None = Field(default=None, max_length=120)
 
 
 class GiftThanksResponse(BaseModel):

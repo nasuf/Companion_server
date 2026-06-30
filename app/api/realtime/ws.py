@@ -95,6 +95,8 @@ def _sanitize_component_card(raw: object) -> dict | None:
         "checkin_habit",
         "music_track",
         "external_link",
+        "offline_activity",
+        "offline_gift",
     }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
@@ -198,6 +200,25 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
             if value:
                 payload[key] = value
         if not payload.get("link_id") and not payload.get("source_url") and not payload.get("final_url"):
+            return None
+        return payload
+    if card_type in {"offline_activity", "offline_gift"}:
+        payload = {}
+        for key, limit in (
+            ("activity_id", 80),
+            ("gift_id", 80),
+            ("status", 40),
+            ("status_label", 40),
+            ("location_name", 160),
+            ("gift_name", 160),
+            ("image_url", 2000),
+            ("real_world_type", 40),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        required_key = "activity_id" if card_type == "offline_activity" else "gift_id"
+        if not payload.get(required_key):
             return None
         return payload
     return None
