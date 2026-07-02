@@ -17,10 +17,25 @@ class ProfileStatsResponse(BaseModel):
     intimacy_stage: str
     intimacy_stage_label: str
     topic_intimacy: float
+    intimacy_subtitle: str
     companion_days: int
+    companion_started_on: str | None = None
     chat_hours: int
+    chat_minutes: int
+    chat_duration_label: str
+    chat_duration_subtitle: str
     message_count: int
+    recent_7d_message_count: int
+    recent_7d_message_label: str
     companion_summary: str
+    backpack_count: int = 0
+    member_is_active: bool = False
+    member_expires_on: str | None = None
+
+
+class ChatRecordsClearResponse(BaseModel):
+    workspace_id: str
+    cleared_conversations: int
 
 
 class UserLocationRequest(BaseModel):

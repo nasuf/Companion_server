@@ -22,7 +22,17 @@ async def test_profile_stats_uses_workspace_messages_and_intimacy_stage():
     fake_db = SimpleNamespace(
         aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=agent)),
         query_raw=AsyncMock(
-            return_value=[{"message_count": 3284, "active_chat_hours": 48}]
+            side_effect=[
+                [
+                    {
+                        "message_count": 3284,
+                        "active_chat_hours": 48,
+                        "active_chat_minutes": 2912,
+                        "recent_7d_message_count": 213,
+                    }
+                ],
+                [{"count": 5}],
+            ]
         ),
     )
 
@@ -40,8 +50,19 @@ async def test_profile_stats_uses_workspace_messages_and_intimacy_stage():
     assert stats.intimacy_stage == "P4"
     assert stats.intimacy_stage_label == "稳定陪伴"
     assert stats.companion_days == 126
+    assert stats.companion_started_on is not None
     assert stats.chat_hours == 48
+    assert stats.chat_minutes == 2912
+    assert stats.chat_duration_label == "48h32m"
+    assert stats.chat_duration_subtitle == "≈ 一起看了26场电影"
     assert stats.message_count == 3284
+    assert stats.recent_7d_message_count == 213
+    assert stats.recent_7d_message_label == "近7天 +213条"
     assert stats.companion_summary == "唯一伴生对象 · 女 · ENFP"
-    fake_db.query_raw.assert_awaited_once()
-    assert fake_db.query_raw.await_args.args[1:] == ("workspace-1", "user-1")
+    assert stats.backpack_count == 5
+    assert fake_db.query_raw.await_count == 2
+    assert fake_db.query_raw.await_args_list[0].args[1:3] == (
+        "workspace-1",
+        "user-1",
+    )
+    assert fake_db.query_raw.await_args_list[1].args[1:] == ("user-1",)

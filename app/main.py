@@ -144,6 +144,7 @@ from app.api.public.emotions import router as emotions_router
 from app.api.public.intimacy import router as intimacy_router
 from app.api.public.boundary import router as boundary_router
 from app.api.public.stickers import router as stickers_router
+from app.api.public.store import router as store_router
 from app.api.public.time_capsules import router as time_capsules_router
 from app.api.public.last_wills import router as last_wills_router
 from app.api.public.games import router as games_router
@@ -187,6 +188,7 @@ app.include_router(games_router)
 app.include_router(music_router)
 app.include_router(achievements_router)
 app.include_router(wallet_router)
+app.include_router(store_router)
 app.include_router(notifications_router)
 app.include_router(offline_router)
 app.include_router(ws_router)

@@ -1,8 +1,11 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_user
 from app.db import db
 from app.models.user import (
+    ChatRecordsClearResponse,
     ProfileStatsResponse,
     UserLocationRequest,
     UserLocationResponse,
@@ -36,6 +39,47 @@ async def get_my_profile_stats(
     if user.get("role") != "admin" and workspace.userId != user_id:
         raise HTTPException(status_code=403, detail="Not your workspace")
     return await get_profile_stats_for_workspace(user_id=user_id, workspace=workspace)
+
+
+async def _get_owned_active_workspace(*, workspace_id: str | None, user: dict):
+    user_id = user.get("sub")
+    workspace = (
+        await get_workspace_by_id(workspace_id)
+        if workspace_id
+        else await get_active_workspace(user_id=user_id)
+    )
+    if not workspace or getattr(workspace, "status", "active") != "active":
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if user.get("role") != "admin" and workspace.userId != user_id:
+        raise HTTPException(status_code=403, detail="Not your workspace")
+    return workspace
+
+
+@router.delete("/me/chat-records", response_model=ChatRecordsClearResponse)
+async def clear_my_chat_records(
+    workspace_id: str | None = None,
+    user: dict = Depends(require_user),
+):
+    user_id = str(user.get("sub"))
+    workspace = await _get_owned_active_workspace(
+        workspace_id=workspace_id,
+        user=user,
+    )
+    result = await db.conversation.update_many(
+        where={
+            "workspaceId": workspace.id,
+            "userId": user_id,
+            "isDeleted": False,
+        },
+        data={
+            "isDeleted": True,
+            "archivedAt": datetime.now(UTC),
+        },
+    )
+    return ChatRecordsClearResponse(
+        workspace_id=workspace.id,
+        cleared_conversations=getattr(result, "count", 0),
+    )
 
 
 def _location_response(row) -> UserLocationResponse:
