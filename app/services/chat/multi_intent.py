@@ -17,6 +17,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from app.services.chat.message_utils import _achievement_turn_id
 from app.observability.events import EVT_INTENT_SUB_RECURSED
 from app.services.chat.intent_dispatcher import (
     INTENT_PRIORITY,
@@ -38,12 +39,6 @@ def _turn_user_message_ids(reply_context: dict | None) -> list[str]:
     if not isinstance(raw_ids, list):
         return []
     return list(dict.fromkeys(item for item in raw_ids if isinstance(item, str) and item))
-
-
-def _achievement_turn_id(turn_user_message_ids: list[str]) -> str | None:
-    if not turn_user_message_ids:
-        return None
-    return "user-turn:" + ",".join(sorted(turn_user_message_ids))
 
 
 async def short_circuit_reply(

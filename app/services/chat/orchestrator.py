@@ -11,8 +11,6 @@ import asyncio
 import json
 import logging
 import random
-import re
-from datetime import UTC, datetime
 from time import perf_counter
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -49,7 +47,7 @@ from app.services.prompting.trace_components import (
     start_prompt_render_trace,
 )
 from app.services.prompts.system_prompts import (
-    MAX_PER_REPLY, MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
+    MAX_REPLY_COUNT, MAX_TOTAL_CHARS,
 )
 from app.services.schedule_domain.timing import (
     calculate_reply_delay,
@@ -76,18 +74,14 @@ from app.services.interaction.boundary import (
     get_patience_prompt_instruction,
 )
 from app.services.relationship.intimacy import get_relationship_stage
-from app.services.relationship.emotion import is_negative_emotion
 from app.services.chat.intent_dispatcher import (
     detect_current_state_fast_path,
     detect_intent_unified,
-    infer_schedule_query_type,
-    is_explicit_current_state_query,
     IntentType,
     IntentResult,
     LABEL_TO_INTENT,
 )
 from app.services.chat.multi_intent import (
-    finalize_short_circuit as _finalize_short_circuit,
     process_sub_intents as _process_sub_intents,
     short_circuit_reply as _short_circuit_reply_impl,
 )
@@ -124,6 +118,31 @@ from app.services.relationship.relation_meta import (
     get_relation_meta,
 )
 from app.services.chat.filler_reply import build_filler_emoji_reply
+# R1 拆分: 消息上下文工具函数移至 message_utils; 此处 re-export 保持
+# 既有导入路径兼容 (tests / multi_intent 等 from orchestrator import).
+# R3 拆分: 意图路由修正移至 intent_routes; re-export 兼容既有导入.
+from app.services.chat.intent_routes import (
+    _downgrade_non_explicit_current_schedule_query,
+    _downgrade_non_explicit_current_state,
+    _filter_non_explicit_sub_fragments,
+    _route_current_schedule_query_to_current_state,
+)
+# R2 拆分: 回复切分纯函数移至 reply_formatting; re-export 兼容既有导入.
+from app.services.chat.reply_formatting import (
+    _clean_reply_part,
+    split_and_validate_replies,
+    truncate_at_sentence,
+)
+# R4 拆分: 关系情绪线索检测移至 relationship/relation_context; re-export 兼容.
+from app.services.relationship.relation_context import detect_relational_context
+from app.services.chat.message_utils import (
+    _achievement_turn_id,
+    _current_turn_message_ids,
+    _ensure_current_user_message,
+    _max_user_created_at,
+    _parse_message_created_at,
+    _previous_assistant_message,
+)
 from app.services.chat.preflight import (
     PreflightCtx,
     discard_pending_states_for_crisis,
@@ -147,10 +166,6 @@ from app.services.chat.tracing import LangSmithTracer
 from app.services.mbti import get_mbti
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
-from app.services.rules.chat_keywords import (
-    DISTRESS_KEYWORDS,
-    RELATIONAL_COMPLAINT_KEYWORDS,
-)
 from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
@@ -177,122 +192,6 @@ async def _short_circuit_reply(
         extra_metadata=extra_metadata,
         trace_id=trace_id,
     )
-
-
-def _downgrade_non_explicit_current_state(
-    detected_intent: IntentResult,
-    user_message: str,
-    response_diagnostics: dict[str, Any],
-) -> IntentResult:
-    """Keep CURRENT_STATE only for explicit AI state questions.
-
-    LLM intent can over-label memory/identity recall questions as current-state.
-    If that label survives, the reply path cannot use memory tier prompts even
-    after retrieval. Demote those misses to normal chat so memory relevance can
-    drive the final reply.
-    """
-    if detected_intent.intent != IntentType.CURRENT_STATE:
-        return detected_intent
-    if is_explicit_current_state_query(user_message):
-        return detected_intent
-
-    metadata = dict(detected_intent.metadata or {})
-    metadata["downgraded_from"] = IntentType.CURRENT_STATE.value
-    metadata["downgrade_reason"] = "not_explicit_current_state"
-    response_diagnostics["intent_downgrade_reason"] = "not_explicit_current_state"
-    return IntentResult(
-        intent=IntentType.NONE,
-        confidence=detected_intent.confidence,
-        metadata=metadata,
-    )
-
-
-def _route_current_schedule_query_to_current_state(
-    detected_intent: IntentResult,
-    user_message: str,
-    response_diagnostics: dict[str, Any],
-) -> IntentResult:
-    """Treat present-tense availability questions as current-state chat.
-
-    The schedule-query path is for concrete schedule/routine/date lookups. For
-    "现在忙吗/你现在有空吗", using that path exposes the full schedule table to
-    the reply prompt and makes the assistant sound like it is reading a diary.
-    """
-    if detected_intent.intent != IntentType.SCHEDULE_QUERY:
-        return detected_intent
-    if (detected_intent.metadata or {}).get("query_type") != "current":
-        return detected_intent
-    if not is_explicit_current_state_query(user_message):
-        return detected_intent
-
-    metadata = dict(detected_intent.metadata or {})
-    metadata["rerouted_from"] = IntentType.SCHEDULE_QUERY.value
-    metadata["reroute_reason"] = "current_availability_as_current_state"
-    response_diagnostics["intent_reroute_reason"] = "current_availability_as_current_state"
-    return IntentResult(
-        intent=IntentType.CURRENT_STATE,
-        confidence=detected_intent.confidence,
-        metadata=metadata,
-    )
-
-
-def _downgrade_non_explicit_current_schedule_query(
-    detected_intent: IntentResult,
-    user_message: str,
-    response_diagnostics: dict[str, Any],
-) -> IntentResult:
-    """Keep current schedule-query only when the user actually asks.
-
-    The unified classifier can over-label social openers such as "好几天没找你聊了"
-    as "计划查询" with query_type=current. If that survives, a plain greeting
-    takes the schedule short-circuit path and may spawn extra sub-intents.
-    """
-    if detected_intent.intent != IntentType.SCHEDULE_QUERY:
-        return detected_intent
-    if (detected_intent.metadata or {}).get("query_type") != "current":
-        return detected_intent
-    if infer_schedule_query_type(user_message, require_query_cue=True):
-        return detected_intent
-    if is_explicit_current_state_query(user_message):
-        return detected_intent
-
-    metadata = dict(detected_intent.metadata or {})
-    metadata["downgraded_from"] = IntentType.SCHEDULE_QUERY.value
-    metadata["downgrade_reason"] = "not_explicit_current_schedule_query"
-    metadata.pop("fragments", None)
-    response_diagnostics["intent_downgrade_reason"] = "not_explicit_current_schedule_query"
-    return IntentResult(
-        intent=IntentType.NONE,
-        confidence=detected_intent.confidence,
-        metadata=metadata,
-    )
-
-
-def _filter_non_explicit_sub_fragments(
-    fragments: dict[str, str],
-    response_diagnostics: dict[str, Any],
-) -> dict[str, str]:
-    """Drop over-eager current-state/schedule sub-fragments from casual text."""
-    filtered: dict[str, str] = {}
-    dropped: list[str] = []
-    for label, text in fragments.items():
-        fragment = str(text).strip()
-        if not fragment:
-            continue
-        if label == "询问当前状态" and not is_explicit_current_state_query(fragment):
-            dropped.append(label)
-            continue
-        if (
-            label == "计划查询"
-            and not infer_schedule_query_type(fragment, require_query_cue=True)
-            and not is_explicit_current_state_query(fragment)
-        ):
-            dropped.append(label)
-            continue
-        filtered[label] = fragment
-    if dropped:
-        response_diagnostics["intent_sub_fragments_dropped"] = dropped
-    return filtered
 
 
 async def _intent_llm_reply(
@@ -340,103 +239,6 @@ async def _intent_llm_reply(
     return result.content.strip().split("||")[0][:60]
 
 
-def _previous_assistant_message(recent_messages: list[Any], current_user_message_id: str | None) -> Any | None:
-    """Find the assistant turn immediately before the current user turn."""
-    current_index = len(recent_messages)
-    if current_user_message_id:
-        for idx, message in enumerate(recent_messages):
-            if getattr(message, "id", None) == current_user_message_id:
-                current_index = idx
-                break
-    for message in reversed(recent_messages[:current_index]):
-        if getattr(message, "role", None) == "assistant":
-            return message
-    return None
-
-
-def _current_turn_message_ids(
-    reply_context: dict | None,
-    current_user_message_id: str | None,
-) -> set[str]:
-    ids: set[str] = set()
-    raw_ids = (reply_context or {}).get("turn_message_ids")
-    if isinstance(raw_ids, list):
-        ids.update(item for item in raw_ids if isinstance(item, str) and item)
-    if current_user_message_id:
-        ids.add(current_user_message_id)
-    return ids
-
-
-def _achievement_turn_id(turn_message_ids: set[str]) -> str | None:
-    if not turn_message_ids:
-        return None
-    return "user-turn:" + ",".join(sorted(turn_message_ids))
-
-
-def _ensure_current_user_message(
-    messages: list[dict],
-    *,
-    user_message: str,
-    user_message_id: str | None,
-    reply_context: dict | None,
-) -> list[dict]:
-    """Ensure the prompt context contains the current user turn.
-
-    Normal chat saves the user message before fetching history, but delayed /
-    aggregated delivery can hit visibility or payload races. If the current
-    turn is absent, the main LLM sees the previous user turn as latest and can
-    regenerate the prior reply. Add a synthetic current turn as a final guard.
-    """
-    if user_message_id:
-        if any(m.get("id") == user_message_id for m in messages):
-            return messages
-    elif messages:
-        last = messages[-1]
-        if last.get("role") == "user" and last.get("content") == user_message:
-            return messages
-
-    received_at = None
-    if user_message_id and reply_context:
-        received_at = reply_context.get("latest_received_at") or reply_context.get("received_at")
-    if user_message_id and (not isinstance(received_at, str) or not received_at):
-        received_at = datetime.now(UTC).isoformat()
-
-    return [
-        *messages,
-        {
-            "id": user_message_id,
-            "role": "user",
-            "content": user_message,
-            "createdAt": received_at,
-            "synthetic_current": True,
-        },
-    ]
-
-
-def _parse_message_created_at(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-
-
-def _max_user_created_at(messages: list[dict]) -> datetime | None:
-    times = [
-        ts for ts in (
-            _parse_message_created_at(m.get("createdAt"))
-            for m in messages
-            if m.get("role") == "user"
-        )
-        if ts is not None
-    ]
-    return max(times, default=None)
-
-
 async def _record_memory_retrieval_feedback(
     *,
     assistant_message_id: str,
@@ -477,141 +279,6 @@ async def _record_memory_retrieval_feedback(
         )
     except Exception:
         logger.exception("[MEM-FEEDBACK] failed to record memory retrieval feedback")
-
-
-# --- Multi-reply split & validate (PRD §3.2.1/§3.2.2) ---
-
-_SENTENCE_END = re.compile(r'[。！？…～~!?]+')
-
-# 切分分隔符: 优先 || (我们要求 LLM 输出的); 兼容 LLM 自作主张用空行分段的情况
-# (\n\n+) — 不切就会被前端 pre-wrap 渲染成同一气泡内带空行.
-_REPLY_SPLIT_RE = re.compile(r'\|\||\n{2,}')
-
-# 单条回复内部残留的换行 (单个 \n 或单个 \r) 收敛为空格,
-# 避免句子内 "你好\n吗" 这种意外换行被 pre-wrap 渲染成断行.
-_INTRA_REPLY_WS_RE = re.compile(r'[\r\n]+')
-_LONG_REPLY_SOFT_BREAK_CHARS = "。！？…～~!?，,；;、"
-_NON_TERMINAL_REPLY_END_RE = re.compile(r"[，,、；;：:]+$")
-
-
-def _clean_reply_part(text: str) -> str:
-    """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格."""
-    return _INTRA_REPLY_WS_RE.sub(" ", text).strip()
-
-
-def _strip_non_terminal_reply_end(text: str) -> str:
-    """Remove dangling boundary punctuation from a split message bubble."""
-    return _NON_TERMINAL_REPLY_END_RE.sub("", text.rstrip()).rstrip()
-
-
-def _polish_split_boundaries(parts: list[str]) -> list[str]:
-    """Clean punctuation that only exists because a reply was split."""
-    if len(parts) <= 1:
-        return parts
-    polished = [
-        _strip_non_terminal_reply_end(part) if idx < len(parts) - 1 else part
-        for idx, part in enumerate(parts)
-    ]
-    return [part for part in polished if part]
-
-
-def truncate_at_sentence(text: str, max_len: int) -> str:
-    """截断至max_len内最后一个句子边界。"""
-    if len(text) <= max_len:
-        return text
-    truncated = text[:max_len]
-    match = None
-    for m in _SENTENCE_END.finditer(truncated):
-        match = m
-    if match and match.end() > max_len // 2:
-        return truncated[:match.end()]
-    return truncated
-
-
-def _find_soft_reply_cut(text: str, max_len: int) -> int:
-    """Find a punctuation cut point for long single-bubble fallbacks."""
-    window = text[:max_len]
-    min_cut = max(8, max_len // 3)
-    best = -1
-    for idx, ch in enumerate(window):
-        if ch in _LONG_REPLY_SOFT_BREAK_CHARS and idx + 1 >= min_cut:
-            best = idx + 1
-    return best
-
-
-def _split_long_reply_part(text: str, max_len: int, max_count: int) -> list[str]:
-    """Split an overlong no-delimiter reply at punctuation instead of mid-clause."""
-    remaining = text.strip()
-    parts: list[str] = []
-    while remaining and len(parts) < max_count:
-        if len(remaining) <= max_len:
-            parts.append(remaining)
-            break
-        cut = _find_soft_reply_cut(remaining, max_len)
-        if cut <= 0:
-            parts.append(truncate_at_sentence(remaining, max_len))
-            break
-        part = remaining[:cut].strip()
-        if part:
-            parts.append(part)
-        remaining = remaining[cut:].strip()
-    return parts
-
-
-def split_and_validate_replies(
-    raw: str,
-    max_count: int = MAX_REPLY_COUNT,
-    max_per_reply: int = MAX_PER_REPLY,
-    max_total: int = MAX_TOTAL_CHARS,
-) -> list[str]:
-    """按 || 或空行分割 LLM 输出, 校验条数/单条长度/总长度.
-
-    LLM 偶尔不按 prompt 用 ||, 改用空行分段 — 不切的话前端 pre-wrap 会把
-    \\n\\n 渲染成单气泡里的空行, 视觉跟正常多条回复混淆. 这里把空行也当
-    分隔符. 单条内的孤立 \\n 由 _clean_reply_part 折叠成空格.
-    """
-    has_explicit_split = bool(_REPLY_SPLIT_RE.search(raw))
-    parts = [_clean_reply_part(p) for p in _REPLY_SPLIT_RE.split(raw)]
-    parts = [p for p in parts if p]
-    if not parts:
-        return [_clean_reply_part(raw) or "..."]
-    if not has_explicit_split and len(parts) == 1 and len(parts[0]) > max_per_reply:
-        parts = _split_long_reply_part(parts[0], max_per_reply, max_count)
-    else:
-        parts = parts[:max_count]
-        parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
-    result: list[str] = []
-    total = 0
-    for p in parts:
-        if total + len(p) > max_total:
-            remaining = max_total - total
-            if remaining > 5:
-                result.append(truncate_at_sentence(p, remaining))
-            break
-        result.append(p)
-        total += len(p)
-    result = _polish_split_boundaries(result)
-    return result or [parts[0][:max_per_reply]]
-
-
-def detect_relational_context(message: str, user_emotion: dict | None) -> str | None:
-    """Detect relationship repair / distress cues that need more human handling."""
-    text = message.strip()
-    if any(keyword in text for keyword in RELATIONAL_COMPLAINT_KEYWORDS):
-        return (
-            "用户这句更像是在确认你有没有在意Ta，或者在表达被忽略感。"
-            "先短促地接住关系情绪，比如安抚、解释半句、表明你不是故意的；"
-            "不要一上来就长解释，也不要立刻抛万能反问。"
-        )
-
-    negative_emotion = is_negative_emotion(user_emotion)
-    if any(keyword in text for keyword in DISTRESS_KEYWORDS) or negative_emotion:
-        return (
-            "用户这句带明显低落或烦闷情绪。"
-            "先回应当下感受，语气真一点、短一点；"
-            "不要套模板安慰，不要一下子给很多建议，追问也只问最贴当前情绪的一句。"
-        )
-    return None
 
 
 # 最近 6 条 ≈ 3 轮对话, 覆盖 "好" / "嗯" / "对" 类短应答对前一两轮
