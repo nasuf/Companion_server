@@ -18,6 +18,8 @@ from app.config import settings
 from app.observability.events import EVT_LLM_FAIL, EVT_REPLY_DECORATION
 from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
+from app.services.relationship.ai_mood import save_ai_mood
+from app.services.runtime.recent_items import load_recent_items, remember_item
 from app.services.chat.typo import maybe_typo
 from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
 from app.services.prompting.store import get_prompt_text_or_default
@@ -123,41 +125,25 @@ async def _build_delay_explanation_text(
 
 _RECENT_EMOJI_KEY = "emoji:recent:{conversation_id}"
 _RECENT_EMOJI_KEEP = 3
-_RECENT_EMOJI_TTL_S = 6 * 3600
 
 
 async def _load_recent_emojis(conversation_id: str | None) -> set[str]:
-    """读最近用过的 emoji (跨轮重复回避). Redis 不可用时静默返回空集."""
+    """读最近用过的 emoji (跨轮重复回避). 公共实现见 runtime/recent_items.py."""
     if not conversation_id:
         return set()
-    try:
-        from app.redis_client import get_redis
-
-        redis = await get_redis()
-        items = await redis.lrange(
-            _RECENT_EMOJI_KEY.format(conversation_id=conversation_id),
-            0, _RECENT_EMOJI_KEEP - 1,
-        )
-        return {i.decode() if isinstance(i, bytes) else str(i) for i in items}
-    except Exception:
-        return set()
+    return await load_recent_items(
+        _RECENT_EMOJI_KEY.format(conversation_id=conversation_id),
+        _RECENT_EMOJI_KEEP,
+    )
 
 
 async def _remember_emoji(conversation_id: str | None, emoji: str) -> None:
-    if not conversation_id or not emoji:
+    if not conversation_id:
         return
-    try:
-        from app.redis_client import get_redis
-
-        redis = await get_redis()
-        key = _RECENT_EMOJI_KEY.format(conversation_id=conversation_id)
-        pipe = redis.pipeline()
-        pipe.lpush(key, emoji)
-        pipe.ltrim(key, 0, _RECENT_EMOJI_KEEP - 1)
-        pipe.expire(key, _RECENT_EMOJI_TTL_S)
-        await pipe.execute()
-    except Exception:
-        pass
+    await remember_item(
+        _RECENT_EMOJI_KEY.format(conversation_id=conversation_id),
+        emoji, _RECENT_EMOJI_KEEP,
+    )
 
 
 def _should_explain_delay(elapsed_s: float) -> bool:
@@ -201,6 +187,8 @@ async def emit_replies(
     conversation_id: 供 emoji 跨轮重复回避 (C4); 不传则只做轮内去重。
     """
     ai_primary_emotion, emotion_intensity = _reply_decoration_signal(reply_emotion)
+    # W4 AI 情绪连续性: 记录本轮情绪 (Redis ~1ms), 下一轮衰减后作为"当下心情"
+    await save_ai_mood(conversation_id, ai_primary_emotion, emotion_intensity)
     sticker_used = False  # 一个回合最多一个表情包
     # C4 拟人度: 一个回合最多一个 emoji (原来每条 reply 独立掷骰, 2-3 条回复
     # 可能条条带表情, 是"装饰感"的主要来源); 且排除最近几轮用过的, 防复读.
@@ -258,6 +246,7 @@ async def emit_replies(
                 result = await recommend_sticker(
                     primary_emotion=ai_primary_emotion,
                     intensity=emotion_intensity,
+                    conversation_id=conversation_id,  # W6 跨轮去重
                 )
                 if result:
                     sticker_url = result["url"]

@@ -1,20 +1,49 @@
 """表情包推荐服务。
 
 根据目标情绪标签和强度从表情包库中推荐合适的表情包。
-算法: emotion匹配 + intensity距离 → match_score → 过滤(≥0.3) → 随机选一个。
+算法: emotion匹配 + intensity距离 → match_score → 过滤(≥0.3) →
+排除最近用过的(跨轮去重, W6 与 emoji 对齐) → 随机选一个。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import random
 
 from app.db import db
+from app.services.runtime.recent_items import load_recent_items, remember_item
+
+logger = logging.getLogger(__name__)
 
 _KNOWN_EMOTIONS = {
     "高兴", "悲伤", "愤怒", "恐惧", "惊讶", "厌恶",
     "中性", "焦虑", "失望", "欣慰", "感激", "戏谑",
 }
+
+# W6 跨轮去重 (与 reply_post_process 的 emoji:recent:* 同模式):
+# 多轮同情绪对话下 random.choice 可能连续抽中同一张表情包, 真人不会这样.
+_RECENT_STICKER_KEY = "sticker:recent:{conversation_id}"
+_RECENT_STICKER_KEEP = 2
+
+
+async def _load_recent_sticker_ids(conversation_id: str | None) -> set[str]:
+    """读最近用过的 sticker id。公共实现见 runtime/recent_items.py。"""
+    if not conversation_id:
+        return set()
+    return await load_recent_items(
+        _RECENT_STICKER_KEY.format(conversation_id=conversation_id),
+        _RECENT_STICKER_KEEP,
+    )
+
+
+async def _remember_sticker(conversation_id: str | None, sticker_id: object) -> None:
+    if not conversation_id or sticker_id is None:
+        return
+    await remember_item(
+        _RECENT_STICKER_KEY.format(conversation_id=conversation_id),
+        str(sticker_id), _RECENT_STICKER_KEEP,
+    )
 
 
 def _label_to_intensity_bucket(intensity: int) -> int:
@@ -26,8 +55,11 @@ def _label_to_intensity_bucket(intensity: int) -> int:
 async def recommend_sticker(
     primary_emotion: str | None = None,
     intensity: int = 50,
+    conversation_id: str | None = None,
 ) -> dict | None:
     """推荐一个表情包。
+
+    conversation_id: 供跨轮去重 (W6)；不传则退回无去重的旧行为。
 
     Returns:
         {"id": int, "url": str, "match_score": float} 或 None
@@ -63,5 +95,13 @@ async def recommend_sticker(
     if not candidates:
         return None
 
-    chosen, score = random.choice(candidates)
+    # W6 跨轮去重: 排除最近用过的; 全部被排除时回退全池 (小库存不至于没得选)
+    recent_ids = await _load_recent_sticker_ids(conversation_id)
+    fresh = [
+        (row, score) for row, score in candidates
+        if str(row["id"]) not in recent_ids
+    ] or candidates
+
+    chosen, score = random.choice(fresh)
+    await _remember_sticker(conversation_id, chosen["id"])
     return {"id": chosen["id"], "url": chosen["url"], "match_score": round(score, 2)}

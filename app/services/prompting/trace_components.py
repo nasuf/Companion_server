@@ -9,8 +9,11 @@ message metadata should stay compact.
 from __future__ import annotations
 
 import hashlib
+import logging
 from contextvars import ContextVar, Token
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _prompt_render_traces: ContextVar[list[dict[str, Any]] | None] = ContextVar(
     "prompt_render_traces",
@@ -68,8 +71,23 @@ def record_prompt_render(
     traces.append(payload)
 
 
+class _SafeRenderDict(dict):
+    """format_map 兜底：未知占位符渲染为 "(无)"（与 prompting.utils.SafeDict
+    同语义；定义在此处避免 utils ↔ trace_components 循环 import）。"""
+
+    def __missing__(self, key: str) -> str:
+        return "(无)"
+
+
 class ManagedPromptText(str):
-    """str subclass that records direct `.format*()` prompt render calls."""
+    """str subclass that records direct `.format*()` prompt render calls.
+
+    W5 防炸渲染：admin 可在后台编辑这些模板，两类人为失误不该炸掉调用
+    链路——误删/写错占位符（KeyError/IndexError → SafeDict 补 "(无)" 重试）、
+    写入字面大括号如 JSON 示例（ValueError 无效 format spec → 返回未渲染
+    原文并告警）。在 str 子类层修一次，所有 get_prompt_text().format(...)
+    调用站点（15+ 文件）自动获得防护，无需逐站点迁移。
+    """
 
     def __new__(cls, value: str, prompt_key: str, prompt_variant: str = "active"):
         obj = str.__new__(cls, value)
@@ -77,8 +95,31 @@ class ManagedPromptText(str):
         obj.prompt_variant = prompt_variant
         return obj
 
+    def _render_safely(self, render_fn, fallback_params: dict) -> str:
+        try:
+            return render_fn()
+        except (KeyError, IndexError) as e:
+            logger.warning(
+                f"prompt '{self.prompt_key}' strict render failed "
+                f"({type(e).__name__}: {e}); retrying with SafeDict fallback",
+            )
+            try:
+                return str(self).format_map(_SafeRenderDict(fallback_params))
+            except (ValueError, KeyError, IndexError):
+                return str(self)
+        except ValueError as e:
+            # 模板含字面大括号 (如 JSON 示例没写成 {{...}}) — 返回原文,
+            # LLM 看到 {placeholder} 原文通常也能理解任务, 好过链路炸掉.
+            logger.warning(
+                f"prompt '{self.prompt_key}' has invalid format spec ({e}); "
+                f"returning unrendered template. 检查模板字面大括号是否写成 {{{{...}}}}",
+            )
+            return str(self)
+
     def format(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
-        rendered = str(self).format(*args, **kwargs)
+        rendered = self._render_safely(
+            lambda: str(self).format(*args, **kwargs), kwargs,
+        )
         record_prompt_render(
             rendered,
             prompt_key=self.prompt_key,
@@ -87,7 +128,10 @@ class ManagedPromptText(str):
         return rendered
 
     def format_map(self, mapping: Any) -> str:  # type: ignore[override]
-        rendered = str(self).format_map(mapping)
+        rendered = self._render_safely(
+            lambda: str(self).format_map(mapping),
+            dict(mapping) if isinstance(mapping, dict) else {},
+        )
         record_prompt_render(
             rendered,
             prompt_key=self.prompt_key,

@@ -31,7 +31,12 @@ RESPONSE_INSTRUCTION_PROMPT = (
     "聊天是文字交流，不是小说也不是角色扮演——"
     "禁止在回复里写任何描述自己动作 / 神态 / 表情 / 心理活动的旁白片段，"
     "无论用全角括号（）、半角括号()、星号*…*、还是直接陈述句。"
-    "情绪和态度通过用词、语气词、emoji 自然体现，不要旁白说出来。"
+    "情绪和态度通过用词、语气词、emoji 自然体现，不要旁白说出来。\n"
+    # W1b: 情绪标记尾 — 解析成功省掉串行的 ai_reply_emotion 小模型调用
+    # (reply_generate.extract_emotion_marker), 失败自动回退, 标记始终被剥除.
+    "回复的最后另起一行，输出 [EMO:标签/强度] 标记这条回复的情绪——"
+    "标签从 高兴/悲伤/愤怒/惊讶/恐惧/厌恶/中性/焦虑/失望/欣慰/感激/戏谑 中选一个，"
+    "强度是 0-100 的数字。这一行是给系统看的，用户看不到，正文里不要提到它。"
 )
 
 PERSONALITY_RULES_PROMPT = (
@@ -106,6 +111,29 @@ CHAT_REENGAGEMENT_DAY_PROMPT = (
     "上次聊到一半的话题已经过去了，除非对方主动提起，不要接着旧话题说。"
 )
 
+# W4 AI 情绪连续性: 上一轮回复情绪按时间衰减后作为"当下心情"注入,
+# 让情绪影响语气和话量 (行为) 而不只是 emoji (装饰). {mood_text} 由
+# relationship/ai_mood.py 渲染 ("高兴（还挺明显），可以活泼话多一点").
+CHAT_AI_MOOD_SECTION_PROMPT = (
+    "你此刻的心情：{mood_text}。"
+    "让这个状态自然影响你的语气和话量就好，不用跟对方解释你为什么这个心情，"
+    "对方的情绪永远优先于你自己的状态。"
+)
+
+# W2 中期记忆: 重逢时对间隔前对话做 1-2 句摘要 (session_recap.py).
+# 只概括聊了什么和情绪走向, 不复述细节 — 细节由记忆系统负责, 摘要负责"接续感".
+CHAT_SESSION_RECAP_PROMPT = (
+    "用 1-2 句话概括下面这段对话聊了什么（谁说了什么关键的事、什么情绪收尾），"
+    "不超过 50 字，直接输出概括本身，不加前缀：\n\n{conversation}"
+)
+
+# 「上次聊到」段包装. {recap} 为 session_recap 生成的摘要文本.
+CHAT_SESSION_RECAP_SECTION_PROMPT = (
+    "上次你们聊到：{recap}\n"
+    "如果自然的话可以主动接续或关心后续（比如问问后来怎么样了），"
+    "但对方明显想聊新话题时就跟着新话题走，不要硬拉回去。"
+)
+
 # Phase E3 (表达学习): 从对话中提取用户的说话方式. 借鉴 MaiBot learn_style —
 # 只学用户不学 AI 自己 (防自我强化), 只学方式不学私人事实 (那是记忆系统的事).
 EXPRESSION_LEARN_STYLE_PROMPT = (
@@ -127,7 +155,13 @@ CHAT_EXPRESSION_HABITS_SECTION_PROMPT = (
     "{habits}"
 )
 
-CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT = "你们目前的关系是{intimacy_stage}。"
+# W3: {relation_meta_line} 为关系时长素材 ("你们认识 42 天了，聊过大约 320 轮。"),
+# 由 relationship/relation_meta.py 渲染, 无数据时为空串 (原地消失).
+# 给 LLM "都认识仨月了" 类表达的事实依据, 不是让它每轮复述.
+CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT = (
+    "你们目前的关系是{intimacy_stage}。{relation_meta_line}"
+    "这些是背景感觉，自然带在语气里就好，不用主动复述数字。"
+)
 
 CHAT_MEMORY_EMPTY_ANCHOR_PROMPT = "(本次没有联想到任何与当前话题相关的记忆)"
 

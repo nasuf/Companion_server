@@ -105,6 +105,7 @@ EVT_INTENT_SUB_RECURSED = "intent.sub_recursed"  # sub fragment 递归入口
 EVT_REPLY_DECORATION = "reply.decoration"  # emoji / sticker / none
 EVT_FILLER_EMOJI = "reply.filler_emoji"  # E2 纯语气词仅表情短路
 EVT_EXPR_LEARN = "expression.learned"  # E3 表达学习批次入库
+EVT_SESSION_RECAP = "chat.session_recap_built"  # W2 重逢摘要生成 (LLM)
 
 # Proactive (扩展)
 EVT_PROACTIVE_DEFERRED = "proactive.deferred"  # mutex defer (recent_user / topic_fatigue / etc)

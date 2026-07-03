@@ -210,8 +210,13 @@ async def _build_personality_section(agent: Any) -> _PromptBody | None:
 async def _build_emotion_section(
     user_emotion: dict | None = None,
     intimacy_stage: str | None = None,
+    relation_meta_line: str = "",
 ) -> _PromptBody | None:
-    """Only inject intimacy stage; runtime emotion vectors have been removed."""
+    """Only inject intimacy stage; runtime emotion vectors have been removed.
+
+    relation_meta_line (W3): "你们认识 N 天了，聊过大约 M 轮。" 的时长素材,
+    空串时模板占位符原地消失 (兼容 admin 旧版覆盖模板无该占位符).
+    """
     if not intimacy_stage:
         return None
 
@@ -219,7 +224,10 @@ async def _build_emotion_section(
     if tpl is None:
         return None
     parts: list[str] = [
-        _render_section(tpl, {"intimacy_stage": intimacy_stage})
+        _render_section(tpl, {
+            "intimacy_stage": intimacy_stage,
+            "relation_meta_line": relation_meta_line,
+        })
     ]
 
     return _PromptBody("\n".join(parts), "chat.relationship_stage_section")
@@ -480,6 +488,9 @@ async def build_system_prompt(
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
     reengagement_gap_seconds: float | None = None,
+    session_recap: str | None = None,
+    relation_meta_line: str = "",
+    ai_mood_text: str = "",
     expression_habits: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
     canary_user_id: str | None = None,
@@ -552,7 +563,7 @@ async def build_system_prompt(
 
     # ═══ VARIABLE SUFFIX (每请求变化, cache miss 起点) ═══════════════════
 
-    emo = await _build_emotion_section(user_emotion, intimacy_stage)
+    emo = await _build_emotion_section(user_emotion, intimacy_stage, relation_meta_line)
     if emo:
         _append_section(
             sections, components, "当前情绪", emo.body,
@@ -560,6 +571,16 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "当前情绪")
+
+    # W4 AI 情绪连续性: 上一轮情绪衰减后的"当下心情", 驱动语气/话量
+    mood_section = await _build_ai_mood_section(ai_mood_text)
+    if mood_section:
+        _append_section(
+            sections, components, "你的心情", mood_section.body,
+            prompt_key=mood_section.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "你的心情")
 
     port = await _build_portrait_section(portrait)
     if port:
@@ -589,6 +610,16 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "重逢感知")
+
+    # W2 中期记忆: 重逢时的「上次聊到」摘要, 与重逢感知段配对注入
+    recap_section = await _build_session_recap_section(session_recap)
+    if recap_section:
+        _append_section(
+            sections, components, "上次聊到", recap_section.body,
+            prompt_key=recap_section.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "上次聊到")
 
     # Phase 6: 删 relational_context 注入 (实证冗余 SYSTEM_BASE)
 
@@ -823,6 +854,37 @@ async def _build_reengagement_section(
         return None
     return _PromptBody(
         _render_section(tpl, {"gap_text": format_gap_text(gap_seconds)}), key,
+    )
+
+
+async def _build_ai_mood_section(ai_mood_text: str) -> _PromptBody | None:
+    """「你的心情」段 (W4 AI 情绪连续性): 上一轮情绪衰减后驱动本轮语气."""
+    if not ai_mood_text:
+        return None
+    tpl = await _get_optional_prompt("chat.ai_mood_section")
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(tpl, {"mood_text": ai_mood_text}),
+        "chat.ai_mood_section",
+    )
+
+
+async def _build_session_recap_section(
+    session_recap: str | None,
+) -> _PromptBody | None:
+    """「上次聊到」段 (W2 中期记忆): 重逢时注入间隔前对话摘要。
+
+    与重逢感知段配对——重逢段管"怎么打招呼", 本段管"记得聊过什么"。
+    """
+    if not session_recap:
+        return None
+    tpl = await _get_optional_prompt("chat.session_recap_section")
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(tpl, {"recap": session_recap}),
+        "chat.session_recap_section",
     )
 
 

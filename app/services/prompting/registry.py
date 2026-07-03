@@ -30,6 +30,7 @@ from app.services.prompting.defaults import (
     CHAT_MEMORY_LABEL_OTHER_PROMPT,
     CHAT_MEMORY_LABEL_PROFILE_CONTEXT_PROMPT,
     CHAT_MEMORY_LABEL_SAFETY_PROMPT,
+    CHAT_AI_MOOD_SECTION_PROMPT,
     CHAT_EXPRESSION_HABITS_SECTION_PROMPT,
     CHAT_MEMORY_SECTION_BODY_PROMPT,
     CHAT_MUSIC_CONTEXT_SECTION_PROMPT,
@@ -39,6 +40,8 @@ from app.services.prompting.defaults import (
     CHAT_REENGAGEMENT_LONG_PROMPT,
     CHAT_REENGAGEMENT_SHORT_PROMPT,
     CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
+    CHAT_SESSION_RECAP_PROMPT,
+    CHAT_SESSION_RECAP_SECTION_PROMPT,
     CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
     CHAT_STYLE_BASE_RULE_PROMPT,
     CHAT_STYLE_CLOSING_RULE_PROMPT,
@@ -275,6 +278,24 @@ PROMPT_DEFINITIONS = [
         "口头禅), 每 20 条用户消息触发一次。只学用户不学 AI, 只学方式不学私人"
         "事实。占位符: {conversation}。",
         EXPRESSION_LEARN_STYLE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.ai_mood_section", "AI 心情段落", "聊天热路径", "聊天",
+        "【工程扩展·拟人度】W4 AI 情绪连续性: 上一轮回复情绪按 30min 半衰期"
+        "衰减后作为「你的心情」注入, 驱动语气/话量。运行时注入 {mood_text}。",
+        CHAT_AI_MOOD_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.session_recap", "重逢摘要生成", "聊天热路径", "中期记忆",
+        "【工程扩展·拟人度】W2 中期记忆 MVP: 重逢 gap ≥3h 时对间隔前对话生成"
+        " 1-2 句摘要 (小模型, Redis 按锚点消息缓存 7 天)。占位符: {conversation}。",
+        CHAT_SESSION_RECAP_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.session_recap_section", "上次聊到段落", "聊天热路径", "中期记忆",
+        "【工程扩展·拟人度】主回复 system prompt 的「上次聊到」段包装模板, "
+        "紧跟重逢感知段注入。运行时注入 {recap}。",
+        CHAT_SESSION_RECAP_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.expression_habits_section", "表达习惯参考段落", "聊天热路径", "表达学习",

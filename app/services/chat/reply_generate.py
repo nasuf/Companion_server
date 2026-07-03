@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Awaitable, Callable
 
 from app.observability.events import EVT_REPLY_LLM, EVT_REPLY_SPLIT, EVT_REPLY_TIER
@@ -33,6 +34,40 @@ logger = logging.getLogger(__name__)
 # 让用户意识到异常又不吓到. 搭配 reply metadata {reply_failed: true},
 # 前端未来可选提供"重新回答"按钮.
 _MAIN_REPLY_ULTIMATE_FALLBACK = "诶,我这会儿有点走神……你刚说的是什么?"
+
+# W1b: 主 LLM 情绪标记 [EMO:标签/强度]. 标签集必须与 EMOJI_MAP / sticker
+# _KNOWN_EMOTIONS 的 12 类对齐 (spec §5 step 1), 否则 emoji/sticker 选择失配.
+# 解析 (严格) 与剥除 (宽松) 分开: LLM 输出畸形标签时解析失败回退小模型,
+# 但畸形标记本身也必须从正文剥除 — 防泄漏优先于防误伤.
+_EMOTION_MARKER_RE = re.compile(
+    r"[\[【]\s*EMO\s*[:：]\s*([一-鿿]{1,3})\s*[/／]\s*(\d{1,3})\s*[\]】]",
+)
+_EMOTION_MARKER_STRIP_RE = re.compile(r"[\[【]\s*EMO\s*[:：][^\]】]{0,24}[\]】]")
+_VALID_REPLY_EMOTIONS = frozenset({
+    "高兴", "悲伤", "愤怒", "惊讶", "恐惧", "厌恶",
+    "中性", "焦虑", "失望", "欣慰", "感激", "戏谑",
+})
+
+
+def extract_emotion_marker(raw: str) -> tuple[str, dict | None]:
+    """从主 LLM 输出中解析并剥除 [EMO:标签/强度] 情绪标记。
+
+    返回 (剥除标记后的正文, {"emotion","intensity"} 或 None)。
+    - 无论解析成功与否，所有 EMO 标记都从正文剥除（防泄漏给用户）。
+    - 多个标记取最后一个（LLM 偶尔会在拆分段各写一个）。
+    - 标签不在 12 类集合内 → 视为解析失败返回 None（调用方回退小模型）。
+    """
+    matches = list(_EMOTION_MARKER_RE.finditer(raw or ""))
+    cleaned = _EMOTION_MARKER_STRIP_RE.sub("", raw or "").strip()
+    if not matches:
+        return cleaned, None
+    label, intensity_str = matches[-1].group(1), matches[-1].group(2)
+    if label not in _VALID_REPLY_EMOTIONS:
+        return cleaned, None
+    return cleaned, {
+        "emotion": label,
+        "intensity": max(0, min(100, int(intensity_str))),
+    }
 
 
 def can_use_tier_reply(
@@ -282,13 +317,26 @@ async def generate_reply(
         },
     )
 
-    # split + emotion 都只依赖 raw_response, 互不依赖 → 并行省 ~400-1000ms.
+    # W1b: 主 LLM 已被指令在末尾输出 [EMO:标签/强度] 情绪标记 — 解析成功即省掉
+    # 串行的 ai_reply_emotion 小模型调用 (关键路径 -300~600ms + 每条消息 -1 次
+    # LLM). 解析失败 (LLM 漏输出/格式不对/admin 覆盖模板没有该指令) → 回退原
+    # 小模型路径, 行为不变. 任何情况下标记都会从正文剥除, 不会泄漏给用户.
+    raw_response, marker_emotion = extract_emotion_marker(raw_response)
+    if diagnostics is not None:
+        diagnostics["reply_emotion_source"] = (
+            "main_marker" if marker_emotion else "fallback_llm"
+        )
+
+    # split + emotion 都只依赖 raw_response, 互不依赖 → 并行执行.
     # is_fallback=True (主+本地全挂) 时 raw_response 是静态兜底文案, 仍可情绪识别.
     split_coro = _split_replies(
         raw_response, max_reply_count, MAX_PER_REPLY,
         max_total, truncate_fn, pipe_fallback_fn,
     )
-    if reply_emotion_fn is not None:
+    if marker_emotion is not None:
+        replies, split_source = await split_coro
+        reply_emotion = marker_emotion
+    elif reply_emotion_fn is not None:
         emotion_coro = reply_emotion_fn(raw_response)
         (replies, split_source), reply_emotion = await asyncio.gather(
             split_coro, emotion_coro, return_exceptions=False,

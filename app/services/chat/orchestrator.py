@@ -117,6 +117,12 @@ from app.services.chat.intent_replies import (
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
 from app.services.chat.reply_generate import generate_reply as _generate_reply
 from app.services.chat.expression_learner import sample_expression_habits
+from app.services.chat.session_recap import get_or_build_session_recap
+from app.services.relationship.ai_mood import format_ai_mood_text, load_ai_mood
+from app.services.relationship.relation_meta import (
+    format_relation_meta_line,
+    get_relation_meta,
+)
 from app.services.chat.filler_reply import build_filler_emoji_reply
 from app.services.chat.preflight import (
     PreflightCtx,
@@ -803,6 +809,9 @@ async def stream_chat_response(
         reengagement_gap_seconds = compute_reengagement_gap_seconds(
             messages_dicts, exclude_ids=current_turn_ids,
         )
+        # W2 中期记忆: 摘要任务延后到主路径分支创建 (与 fetch_task 同处),
+        # 避免 boundary/crisis/filler 短路回合白跑 LLM. 这里只声明.
+        session_recap_task: asyncio.Task | None = None
         if not sub_intent_mode:
             previous_assistant = _previous_assistant_message(
                 recent_messages, user_message_id,
@@ -1026,6 +1035,16 @@ async def stream_chat_response(
                 # detected_intent / l3_trigger_classify_fn 都不传 → fetch 跳过 L3,
                 # 由 orchestrator 在 intent 出来后单独跑.
             ))
+            # W2 中期记忆: 重逢 (gap≥3h) 时并行生成「上次聊到」摘要.
+            # 模块内部有 gap 阈值判断 + Redis 缓存 (同一次重逢只调一次 LLM);
+            # gap 不足时任务瞬时返回 None, 零成本.
+            # 生命周期: 意图短路路径由 _cancel_fetch_task 一并 cancel; tier 路径
+            # 不消费但任务自然完成 (模块全链路吞异常, 结果落 Redis 缓存反而预热).
+            session_recap_task = asyncio.create_task(get_or_build_session_recap(
+                conversation_id, messages_dicts,
+                gap_seconds=reengagement_gap_seconds,
+                exclude_ids=current_turn_ids,
+            ))
 
         # --- 统一意图识别：spec §3.3 step 1 严格实现 ---
         # 每条用户消息都调小模型做意图分类, 并把最近对话历史作为上下文注入.
@@ -1070,14 +1089,19 @@ async def stream_chat_response(
             )
 
         async def _cancel_fetch_task() -> None:
-            """短路 / 异常时调用: cancel + 等待 propagate, 避免 orphan task warning."""
-            if fetch_task is None or fetch_task.done():
-                return
-            fetch_task.cancel()
-            try:
-                await fetch_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            """短路 / 异常时调用: cancel + 等待 propagate, 避免 orphan task warning.
+
+            session_recap_task 一并取消 (review 发现): 意图短路路径不消费摘要,
+            让它跑完是浪费一次 LLM 调用. 模块内部全链路吞异常, cancel 安全.
+            """
+            for task in (fetch_task, session_recap_task):
+                if task is None or task.done():
+                    continue
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         # crisis 路径下 detected_intent 是手动构造的 CRISIS, metadata={} 没 fragments,
         # 这里 if 分支自然不进; 但显式 `not crisis_force_intent` 防御 future 改动加进 metadata.
         # (crisis 优先级最高, 不该被多意图拆分稀释)
@@ -1555,6 +1579,23 @@ async def stream_chat_response(
             except Exception as expr_err:
                 logger.debug(f"[EXPR] habits sample skipped: {expr_err}")
                 expression_habits = []
+            # W2 中期记忆: 摘要任务已并行跑完/进行中, 这里取结果 (失败不注入)
+            session_recap = None
+            if session_recap_task is not None:
+                try:
+                    session_recap = await session_recap_task
+                except Exception as recap_err:
+                    logger.debug(f"[RECAP] session recap skipped: {recap_err}")
+            # W3 关系时长感知: Redis 缓存 6h, miss 时 2 个轻量 DB 查询
+            try:
+                relation_meta_line = format_relation_meta_line(
+                    await get_relation_meta(conversation_id),
+                )
+            except Exception as meta_err:
+                logger.debug(f"[RELMETA] skipped: {meta_err}")
+                relation_meta_line = ""
+            # W4 AI 情绪连续性: 上一轮回复情绪衰减后作为本轮"当下心情"
+            ai_mood_text = format_ai_mood_text(await load_ai_mood(conversation_id))
             system_prompt = await build_system_prompt(
                 agent=agent,
                 memories=classified_memories,
@@ -1578,6 +1619,9 @@ async def stream_chat_response(
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
                 reengagement_gap_seconds=reengagement_gap_seconds,
+                session_recap=session_recap,
+                relation_meta_line=relation_meta_line,
+                ai_mood_text=ai_mood_text,
                 expression_habits=expression_habits or None,
                 diagnostics=prompt_diagnostics,
                 canary_user_id=user_id,
@@ -1647,6 +1691,8 @@ async def stream_chat_response(
             # P0-3: 主 LLM 路径下 split + emotion 在 generate_reply 内并行,
             # 直接拿 reply_emotion_pre 返回, 无需再串行多调一次. tier / contradiction
             # 路径返 None, fallback 兜底见下方.
+            # W1b 后语义: 主 LLM 的 [EMO] 标记命中时此 fn 不会被调用,
+            # 仅作标记缺失/失效时的回退路径 (见 extract_emotion_marker).
             reply_emotion_fn=_ai_reply_emotion,
             diagnostics=response_diagnostics,
         )

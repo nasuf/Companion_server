@@ -117,3 +117,85 @@ class TestSafeTemplateRendering:
             # format_map + SafeDict 仍炸 (invalid format spec) — safe_format 的兜底价值
             from app.services.prompting.utils import SafeDict
             '输出 JSON: {"result": "..."}'.format_map(SafeDict({}))
+
+
+class TestManagedPromptTextSafety:
+    """W5 回归: ManagedPromptText.format 在源头防炸 — 覆盖全部 15+ 个
+    get_prompt_text().format(...) 站点, 无需逐站点迁移."""
+
+    def _tpl(self, text):
+        from app.services.prompting.trace_components import ManagedPromptText
+
+        return ManagedPromptText(text, "test.key")
+
+    def test_normal_render_unchanged(self):
+        assert self._tpl("你好 {name}").format(name="小满") == "你好 小满"
+
+    def test_unknown_placeholder_falls_back_to_safedict(self):
+        out = self._tpl("你好 {name}, 未知 {oops}").format(name="小满")
+        assert "小满" in out and "(无)" in out
+
+    def test_literal_json_braces_return_original(self):
+        tpl = '输出 JSON: {"result": "..."} 任务: {task}'
+        out = self._tpl(tpl).format(task="x")
+        assert out == tpl  # 无效 format spec → 原文返回, 不抛 ValueError
+
+    def test_format_map_also_safe(self):
+        out = self._tpl("你好 {name} {oops}").format_map({"name": "小满"})
+        assert "小满" in out and "(无)" in out
+
+
+@pytest.mark.asyncio
+class TestStickerCrossTurnDedup:
+    """W6 回归: sticker 跨轮去重 (与 emoji 对齐)."""
+
+    def _rows(self):
+        return [
+            {"id": 1, "url": "u1", "emotion_tags": [{"emotion": "高兴", "weight": 1.0}], "intensity": 3},
+            {"id": 2, "url": "u2", "emotion_tags": [{"emotion": "高兴", "weight": 1.0}], "intensity": 3},
+        ]
+
+    async def test_recent_sticker_excluded(self):
+        from app.services import sticker as sticker_mod
+
+        fake_db = AsyncMock()
+        fake_db.query_raw = AsyncMock(return_value=self._rows())
+        with (
+            patch.object(sticker_mod, "db", fake_db),
+            patch.object(sticker_mod, "_load_recent_sticker_ids",
+                         AsyncMock(return_value={"1"})),
+            patch.object(sticker_mod, "_remember_sticker", AsyncMock()) as remember,
+        ):
+            for _ in range(10):
+                result = await sticker_mod.recommend_sticker(
+                    primary_emotion="高兴", intensity=60, conversation_id="c1",
+                )
+                assert result["id"] == 2  # id=1 被去重排除
+        remember.assert_awaited()
+
+    async def test_all_excluded_falls_back_to_full_pool(self):
+        from app.services import sticker as sticker_mod
+
+        fake_db = AsyncMock()
+        fake_db.query_raw = AsyncMock(return_value=self._rows())
+        with (
+            patch.object(sticker_mod, "db", fake_db),
+            patch.object(sticker_mod, "_load_recent_sticker_ids",
+                         AsyncMock(return_value={"1", "2"})),
+            patch.object(sticker_mod, "_remember_sticker", AsyncMock()),
+        ):
+            result = await sticker_mod.recommend_sticker(
+                primary_emotion="高兴", intensity=60, conversation_id="c1",
+            )
+        assert result is not None  # 全排除时回退全池, 不至于没得选
+
+    async def test_no_conversation_id_backward_compatible(self):
+        from app.services import sticker as sticker_mod
+
+        fake_db = AsyncMock()
+        fake_db.query_raw = AsyncMock(return_value=self._rows())
+        with patch.object(sticker_mod, "db", fake_db):
+            result = await sticker_mod.recommend_sticker(
+                primary_emotion="高兴", intensity=60,
+            )
+        assert result is not None
