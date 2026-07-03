@@ -684,7 +684,7 @@ async def test_emit_replies_uses_ai_reply_emotion_for_emoji():
 
     captured: dict = {}
 
-    def _capture(primary_emotion=None):
+    def _capture(primary_emotion=None, exclude=None):
         captured["primary_emotion"] = primary_emotion
         return "🎉"
 
@@ -722,7 +722,7 @@ async def test_emit_replies_uses_neutral_when_no_reply_emotion():
 
     captured: dict = {}
 
-    def _capture(primary_emotion=None):
+    def _capture(primary_emotion=None, exclude=None):
         captured["primary_emotion"] = primary_emotion
         return "😢"
 

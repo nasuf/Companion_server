@@ -55,10 +55,26 @@ async def get_topic_stack(conversation_id: str) -> list[dict]:
     return result
 
 
-async def push_topic(conversation_id: str, message: str) -> dict:
-    """分类并推入话题栈，返回当前话题信息。"""
+# 与重逢感知「大间隔」档 (prompt_builder._REENGAGE_LONG_S) 对齐: 隔 ≥3h 回来,
+# 上一个话题的"持续 N 轮"语义已失效.
+TOPIC_RESET_GAP_SECONDS = 3 * 3600
+
+
+async def push_topic(
+    conversation_id: str,
+    message: str,
+    gap_seconds: float | None = None,
+) -> dict:
+    """分类并推入话题栈，返回当前话题信息。
+
+    gap_seconds ≥ TOPIC_RESET_GAP_SECONDS 时先清空话题栈再入栈：用户隔了
+    几小时回来，不清空会让主 prompt 拖着聊天间隔前的旧话题（turns 累计），
+    放大"无缝续聊"的错觉；清空后当前消息作为全新话题 turns=1。
+    """
     redis = await get_redis()
     key = f"topics:{conversation_id}"
+    if gap_seconds is not None and gap_seconds >= TOPIC_RESET_GAP_SECONDS:
+        await redis.delete(key)
     category = classify_topic(message)
 
     # 检查栈顶是否同一话题类别

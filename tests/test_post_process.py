@@ -366,3 +366,32 @@ async def test_memory_pipeline_uses_distributed_lock_in_production():
     assert lock_calls[0]["args"] == ("memory_pipeline:conv-prod",)
     assert lock_calls[0]["kwargs"]["ttl_s"] == post_process._PIPELINE_DISTRIBUTED_LOCK_TTL
     assert lock_calls[0]["kwargs"]["fail_open"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_pipeline_skips_batch_on_distributed_lock_timeout():
+    """A1 修复回归: 分布式锁等待超时 → 跳过本批, 绝不并发执行.
+
+    旧行为是超时后"降级为仅本地锁继续跑", 多实例下与持锁实例并发 →
+    水位线 race + L1 SINGLETON 重复 (生产 case 2026-05-07). 新契约:
+    DistributedLockNotAcquired → 直接 return, _do_memory_pipeline 不被调用,
+    水位线不推进, 消息留给后续 batch 覆盖.
+    """
+    from app.services.chat import post_process
+    from app.services.runtime.distributed_lock import DistributedLockNotAcquired
+
+    def raise_not_acquired(*args, **kwargs):
+        raise DistributedLockNotAcquired("lock held: memory_pipeline:conv-prod")
+
+    with (
+        patch.object(post_process.settings, "app_env", "production"),
+        patch.object(post_process, "distributed_lock", raise_not_acquired),
+        patch.object(post_process, "_do_memory_pipeline", AsyncMock()) as do_pipeline,
+    ):
+        await post_process._bg_memory_pipeline(
+            "u1",
+            [{"role": "user", "content": "a"}],
+            conversation_id="conv-prod",
+        )
+
+    do_pipeline.assert_not_called()

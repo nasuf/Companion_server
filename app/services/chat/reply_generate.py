@@ -206,8 +206,12 @@ async def generate_reply(
         diagnostics["memory_relevance"] = memory_relevance
     if tier_eligible:
         personality_brief = getattr(agent, "name", "") or ""
+        # 与主路径 build_chat_messages 一致: 带时间前缀让 tier 回复也感知对话时间轴
+        from app.services.chat.prompt_builder import format_message_timestamp
+
         context_text = "\n".join(
-            f"{m['role']}: {m['content']}" for m in messages_dicts[-6:]
+            f"{format_message_timestamp(m.get('createdAt'))}{m['role']}: {m['content']}"
+            for m in messages_dicts[-6:]
         ) or "(无)"
         portrait_text = str(portrait) if portrait else "(未知)"
         user_lines, ai_lines = split_by_source(classified_memories)

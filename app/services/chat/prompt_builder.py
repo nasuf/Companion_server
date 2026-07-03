@@ -11,6 +11,9 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from app.config import settings
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import (
@@ -20,7 +23,7 @@ from app.services.prompting.store import (
 )
 from app.services.prompting.trace_components import record_prompt_render
 from app.services.prompting.utils import render_template
-from app.services.style import generate_style_instruction
+from app.services.style import generate_style_examples, generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY as _MAX_PER_REPLY,
@@ -196,6 +199,8 @@ async def _build_personality_section(agent: Any) -> _PromptBody | None:
         "mbti_line": mbti_line or "中性",
         "mbti_detail": detail,
         "style_rules": style,
+        # C2: MBTI 四象限说话示例 (few-shot). per-agent 稳定 — 不破坏 cache 前缀.
+        "style_examples": generate_style_examples(mbti),
     })
     if not _has_prompt_body(body):
         return None
@@ -401,6 +406,27 @@ async def _build_topic_context_section(
     return _PromptBody(body, "chat.topic_context_section")
 
 
+async def _build_expression_habits_section(
+    expression_habits: list[str] | None,
+) -> _PromptBody | None:
+    """表达习惯参考段 (Phase E3 表达学习).
+
+    habits 为 expression_learner.sample_expression_habits 渲染好的行
+    ("当「X」时，可以「Y」"); 空 → 不注入 (新用户/未学到时零成本).
+    """
+    if not expression_habits:
+        return None
+    tpl = await _get_optional_prompt("chat.expression_habits_section")
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(
+            tpl, {"habits": "\n".join(f"- {h}" for h in expression_habits)},
+        ),
+        "chat.expression_habits_section",
+    )
+
+
 async def _build_time_context_section(time_context: str | None) -> _PromptBody | None:
     """Build the time section (时间日期系统数据文本 + registry 包装模板)."""
     if not time_context:
@@ -453,6 +479,8 @@ async def build_system_prompt(
     l3_memories: list[str] | None = None,
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
+    reengagement_gap_seconds: float | None = None,
+    expression_habits: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
     canary_user_id: str | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
@@ -551,6 +579,17 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "回复时机说明")
 
+    # 重逢感知 (拟人度): 用户离开 ≥30min 后回来, 指引 LLM 不要无缝续聊.
+    # 与「回复时机说明」相邻 — 都是对话时间轴语义.
+    reengage = await _build_reengagement_section(reengagement_gap_seconds)
+    if reengage:
+        _append_section(
+            sections, components, "重逢感知", reengage.body,
+            prompt_key=reengage.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "重逢感知")
+
     # Phase 6: 删 relational_context 注入 (实证冗余 SYSTEM_BASE)
 
     mem = await _build_memory_section(
@@ -577,6 +616,16 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "话题上下文")
+
+    # E3 表达学习: 已学表达按 count 加权抽样注入 (随轮次变化, 归变化段)
+    expr = await _build_expression_habits_section(expression_habits)
+    if expr:
+        _append_section(
+            sections, components, "表达习惯参考", expr.body,
+            prompt_key=expr.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "表达习惯参考")
 
     music = await _build_music_context_section(music_context)
     if music:
@@ -665,6 +714,8 @@ async def build_system_prompt(
     if response_instruction is not None:
         _append_section(
             sections, components, "回复要求",
+            # "n" 已不在默认模板中 (C1 删除强制条数), 但 admin 后台可能存有
+            # 含 {n} 的旧版覆盖模板 — 继续传参保证旧模板渲染不出 "(无)".
             _render_section(response_instruction, {
                 "n": reply_count, "total": reply_total, "max_per": _MAX_PER_REPLY,
             }),
@@ -690,6 +741,116 @@ async def build_system_prompt(
     return system_prompt
 
 
+_MSG_TZ = ZoneInfo(settings.schedule_timezone)
+
+# 重逢感知分档阈值（秒）。<SHORT 不注入；SHORT-LONG 小间隔；LONG-DAY 大间隔；>DAY 隔天。
+_REENGAGE_SHORT_S = 30 * 60
+_REENGAGE_LONG_S = 3 * 3600
+_REENGAGE_DAY_S = 24 * 3600
+# 距 now 小于该值的消息视为当前轮（合成消息无 id 时的兜底判定）
+_CURRENT_TURN_GRACE_S = 10.0
+
+
+def format_gap_text(seconds: float) -> str:
+    """把间隔渲染成粗粒度可读中文："45 分钟" / "5 小时" / "2 天"。
+
+    粗粒度是刻意的：重逢寒暄只需要量级，精确到分钟反而像系统播报。
+    """
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{max(1, minutes)} 分钟"
+    hours = int(seconds // 3600)
+    if hours < 24:
+        return f"{hours} 小时"
+    return f"{int(seconds // 86400)} 天"
+
+
+def compute_reengagement_gap_seconds(
+    messages: list[dict],
+    exclude_ids: set[str] | None = None,
+    now: datetime | None = None,
+) -> float | None:
+    """当前轮距上一轮最后一条消息的间隔秒数；没有可用历史返回 None。
+
+    从最新往回找第一条「不属于当前轮」的消息（exclude_ids 排除当前轮，
+    _CURRENT_TURN_GRACE_S 兜底排除刚落库的合成消息），间隔 = now − 它的
+    createdAt。用户隔几小时回来时，这个间隔驱动「重逢感知」段注入。
+    """
+    exclude = exclude_ids or set()
+    now = now or datetime.now(timezone.utc)
+    for msg in reversed(messages):
+        mid = msg.get("id")
+        if mid and mid in exclude:
+            continue
+        created = msg.get("createdAt")
+        if not created:
+            continue
+        try:
+            dt = (
+                datetime.fromisoformat(created)
+                if isinstance(created, str)
+                else created
+            )
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        gap = (now - dt).total_seconds()
+        if gap < _CURRENT_TURN_GRACE_S:
+            continue  # 当前轮消息（无 id 或 exclude 漏网），继续往前找
+        return max(0.0, gap)
+    return None
+
+
+async def _build_reengagement_section(
+    gap_seconds: float | None,
+) -> _PromptBody | None:
+    """重逢感知段（借鉴 MaiBot context-restore wakeup 叙事，分三档）。
+
+    <30min 不注入——正常聊天节奏不需要重逢语义；模板由 registry 管理，
+    admin 停用任一档即该档不注入。
+    """
+    if gap_seconds is None or gap_seconds < _REENGAGE_SHORT_S:
+        return None
+    if gap_seconds < _REENGAGE_LONG_S:
+        key = "chat.reengagement_short"
+    elif gap_seconds < _REENGAGE_DAY_S:
+        key = "chat.reengagement_long"
+    else:
+        key = "chat.reengagement_day"
+    tpl = await _get_optional_prompt(key)
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(tpl, {"gap_text": format_gap_text(gap_seconds)}), key,
+    )
+
+
+def format_message_timestamp(created_at: str | datetime | None) -> str:
+    """历史消息的时间前缀 `[MM-DD HH:MM] `（UTC+8，与 time_context 同基准）。
+
+    用绝对时间而非 MaiBot 式相对时间（"5分钟前"）：相对时间每轮请求都变，
+    会把 system prompt 之后整段历史的 prompt cache 打穿；绝对时间 append-only
+    稳定。LLM 结合 time_context 里的"当前时间"自行推算对话间隔——用户隔了
+    几小时回来时，模型能看到时间轴而不是把历史当作无缝连续对话。
+
+    解析失败/缺 createdAt 返回 ""（消息不带前缀，兼容合成消息）。
+    """
+    if not created_at:
+        return ""
+    try:
+        dt = (
+            datetime.fromisoformat(created_at)
+            if isinstance(created_at, str)
+            else created_at
+        )
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"[{dt.astimezone(_MSG_TZ).strftime('%m-%d %H:%M')}] "
+    except Exception:
+        return ""
+
+
 def build_chat_messages(
     system_prompt: str,
     messages: list[dict],
@@ -702,6 +863,9 @@ def build_chat_messages(
       until the budget is exhausted.
     - Short exchanges (嗯/好/哈哈) → more rounds of context.
     - Long messages (深度倾诉) → fewer rounds but full content.
+
+    每条带 createdAt 的历史消息前缀 `[MM-DD HH:MM]`，让 LLM 感知对话时间轴
+    （时区/缓存权衡见 format_message_timestamp docstring）。
     """
     from app.services.memory.retrieval.context_selector import estimate_tokens
 
@@ -709,7 +873,7 @@ def build_chat_messages(
     used_tokens = 0
 
     for msg in reversed(messages):
-        content = msg.get("content", "")
+        content = f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
         tokens = estimate_tokens(content)
         if used_tokens + tokens > token_budget and selected:
             break  # budget exhausted (always include at least the latest message)

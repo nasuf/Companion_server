@@ -60,7 +60,7 @@ async def test_memory_section_adds_lightweight_importance_tags():
     assert section is not None
     section_text = _body(section)
     assert "(重要 · 多次提及 · 近期提到 · 和当前话题高度相关) 用户表达过强烈负面情绪" in section_text
-    assert "回复时不要复述这些标记" in section_text
+    assert "不要复述分组标签或括号标记" in section_text
     assert "AI 喜欢手作" in section_text
 
 
@@ -115,17 +115,17 @@ async def test_memory_section_groups_task_and_safety_memories():
 
     assert section is not None
     section_text = _body(section)
-    assert "【回答当前关系 / 名字问题优先参考】" in section_text
+    assert "【你们之间的关系与称呼】" in section_text
     assert "用户的直属领导叫陈姐" in section_text
-    assert "【回答当前问题可参考】" in section_text
+    assert "【对方问到的事】" in section_text
     assert "用户叫林小满" in section_text
     assert "用户28岁" in section_text
     assert "【安全 / 情绪背景】" in section_text
     assert "用户表达过强烈负面情绪" in section_text
-    assert "【用户告诉过你的其他事情】" in section_text
-    assert "回答关系、称呼、名字类事实追问时优先使用该组" in section_text
-    assert "【安全 / 情绪背景】只用于把握语气和风险" in section_text
-    assert section_text.index("【回答当前关系 / 名字问题优先参考】") < section_text.index("【回答当前问题可参考】")
+    assert "【关于对方的其他事】" in section_text
+    # C3: 优先级由分组排列顺序表达, 不再写进标签文字
+    assert "【安全 / 情绪背景】只用来把握语气和分寸" in section_text
+    assert section_text.index("【你们之间的关系与称呼】") < section_text.index("【对方问到的事】")
 
 
 @pytest.mark.asyncio
@@ -155,8 +155,8 @@ async def test_memory_section_separates_user_profile_context_from_answer_facts()
 
     assert section is not None
     section_text = _body(section)
-    assert "【用户同类资料（仅用于避免重复追问）】" in section_text
-    assert "不要把它当成你的资料或答案依据" in section_text
+    assert "【对方自己的资料（不是你的）】" in section_text
+    assert "不要拿来当你自己的答案" in section_text
     assert "【你自己的相关经历 / 人设】" in section_text
     assert section_text.index("用户28岁") < section_text.index("我今年24岁")
 
@@ -181,11 +181,12 @@ async def test_memory_section_declares_fact_precedence_over_history_and_l3():
 
     assert section is not None
     section_text = _body(section)
-    assert "事实优先级" in section_text
-    assert "当前用户消息明确说出新事实或纠正旧事实时, 以当前用户消息为准" in section_text
-    assert "以下方当前问题相关记忆为准" in section_text
-    assert "不要用历史对话或 L3 模糊记忆覆盖它" in section_text
-    assert "若历史对话或 L3 与这些记忆冲突" in section_text
+    # C3: "事实优先级" 标题词删除, 优先级语义由下句表达
+    assert "以对方这句话为准" in section_text
+    assert "对方这句话里明确说出新事实或纠正时, 以对方这句话为准" in section_text
+    assert "以下面的条目为准" in section_text
+    assert "历史对话和 L3 模糊记忆都不能覆盖它" in section_text
+    assert "记不清或有冲突时" in section_text
     assert "不要直接采用冲突值" in section_text
 
 

@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 _SENTENCE_END_PAT = re.compile(r"[。?!？！]+[\s]*")
 
 
+def safe_format(template: Any, params: dict[str, Any]) -> str:
+    """registry 模板的防炸渲染: 未知占位符→"(无)", 无效 format spec→原文返回.
+
+    admin 可在后台编辑模板, 两类人为失误都不该炸掉调用链路:
+    1. 误删/写错占位符 → SafeDict.__missing__ 兜底 "(无)"
+    2. 写入字面大括号 (最常见: prompt 里的 JSON 输出示例 `{"result": ...}`
+       没写成 `{{...}}`) → format_map 抛 ValueError. 此时返回未渲染原文并
+       告警 — 比链路 KeyError/ValueError 静默失败好, LLM 看到 {placeholder}
+       原文通常也能理解任务.
+    """
+    text = str(template)
+    try:
+        return text.format_map(SafeDict(params))
+    except (ValueError, IndexError, KeyError) as e:
+        logger.warning(
+            f"prompt template render failed ({type(e).__name__}: {e}); "
+            f"returning unrendered template. 检查模板是否把字面大括号写成了 {{...}}",
+            extra={"prompt_key": getattr(template, "prompt_key", None)},
+        )
+        return text
+
+
 def _truncate_at_sentence_boundary(text: str, max_len: int) -> str:
     """裁到 max_len 内最后一个句末符号. 找不到合理边界 → 退回硬切但优先在
     标点处. 防 raw[:max_len] 切到中文字符中段 (生产 bug 复现 2026-05-03
@@ -137,7 +159,9 @@ def render_template(
     compacted = compact_optional_reference_rows(template, params, optional_keys)
     prompt_key = getattr(template, "prompt_key", None)
     if safe:
-        rendered = compacted.format_map(SafeDict(params))
+        # D3: safe_format 同时防未知占位符 (SafeDict) 与无效 format spec
+        # (模板含字面 JSON 大括号时 format_map 抛 ValueError).
+        rendered = safe_format(compacted, params)
     else:
         rendered = compacted.format(**params)
     if isinstance(prompt_key, str) and prompt_key:

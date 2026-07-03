@@ -360,8 +360,11 @@ def setup_scheduler():
         seconds=15,
         id="trigger_scan",
         replace_existing=True,
+        # D2: 多实例错峰 — 无 jitter 时所有实例同刻抢分布式锁 (thundering herd).
+        # ±3s 不影响 reminder 最坏延迟量级 (15s → 18s), 换取锁竞争均摊.
+        jitter=3,
     )
-    logger.info("Scheduler: trigger_scan registered (interval=15s)")
+    logger.info("Scheduler: trigger_scan registered (interval=15s, jitter=3s)")
 
     scheduler.add_job(
         _run_last_will_scan,
@@ -370,6 +373,7 @@ def setup_scheduler():
         id="last_will_scan",
         replace_existing=True,
         max_instances=1,
+        jitter=300,
     )
 
     # Part 5 §2.1: NTP 校准每 6 小时跑一次

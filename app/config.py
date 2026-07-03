@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     #   入 delayed queue, scheduler 每秒扫到期推送, 模拟真人间隔回复.
     reply_delay_enabled: bool = False
 
+    # Phase E1 (拟人度): 错别字生成器 — 以 typo_rate 概率给回复注入一个高频
+    # 同音错字, ~50% 概率追加 "*正确字" 纠正气泡 (typo.py).
+    # 2026-07-03 产品决策: 默认开启 (rate=0.05, 每 20 条约 1 条错字).
+    # 用户负反馈时可 .env TYPO_ENABLED=false 一键关闭.
+    typo_enabled: bool = True
+    typo_rate: float = 0.05
+
     # LangSmith tracing
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""

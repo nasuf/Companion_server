@@ -36,6 +36,7 @@ from app.services.memory.interaction.deletion import (
     generate_deletion_reply,
     is_deletion_confirmed,
     load_pending_action,
+    save_pending_action,
 )
 from app.services.rules.chat_keywords import (
     CANCEL_CHOICE_ALL_KEYWORDS,
@@ -64,6 +65,23 @@ class PreflightCtx:
     stopped: bool = False
     # 短路 reply 文本回写: orchestrator finally 兜底 fire post_process 用
     last_short_circuit_reply: str | None = None
+
+
+async def discard_pending_states_for_crisis(conversation_id: str) -> None:
+    """危机回合显式丢弃跨消息 pending 状态（矛盾追问 / 删除确认）。
+
+    危机对话使追问上下文失效：用户脱离危机后的第一条消息绝不该被误解析成
+    "对矛盾追问的回答"或"删除确认"。丢弃是安全的——矛盾在后续相关消息中
+    会被重新检测，删除可由用户重新发起。清理失败不阻塞危机回复主路径。
+    """
+    try:
+        await clear_pending_contradiction(conversation_id)
+        await clear_pending_deletion(conversation_id)
+    except Exception as e:
+        logger.warning(
+            f"crisis pending-state cleanup failed conv={conversation_id}: {e}",
+            extra={"event": EVT_PREFLIGHT_FAILED, "stage": "crisis_discard"},
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════

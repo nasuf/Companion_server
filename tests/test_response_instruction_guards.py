@@ -43,3 +43,34 @@ def test_response_instruction_no_specific_trace_phrases():
             f"response_instruction 含生产 trace phrase '{phrase}' — 应该用"
             f"抽象表述 (动作/神态/心理 旁白) 替代具体反例"
         )
+
+
+def test_response_instruction_no_forced_reply_count():
+    """C1 拟人度契约: 不允许回到"分{n}条消息回复"强制装配模式.
+
+    条数应由 LLM 按内容/情绪自然决定 (最多三条), 硬上限由
+    split_and_validate_replies 的 MAX_REPLY_COUNT 保证, 不靠 prompt 强制."""
+    from app.services.prompting.defaults import (
+        L3_MEMORY_REPLY_PROMPT,
+        MEDIUM_MEMORY_REPLY_PROMPT,
+        RESPONSE_INSTRUCTION_PROMPT,
+        STRONG_MEMORY_REPLY_PROMPT,
+        WEAK_MEMORY_REPLY_PROMPT,
+    )
+
+    for p in (
+        RESPONSE_INSTRUCTION_PROMPT,
+        WEAK_MEMORY_REPLY_PROMPT,
+        MEDIUM_MEMORY_REPLY_PROMPT,
+        STRONG_MEMORY_REPLY_PROMPT,
+        L3_MEMORY_REPLY_PROMPT,
+    ):
+        assert "分{n}条" not in p, "不允许恢复强制条数指令"
+        assert "||" in p, "仍需说明 || 分隔符 (下游 split 依赖该约定)"
+
+
+def test_response_instruction_forbids_timestamp_prefix_mimicry():
+    """B1 配套: 历史消息带 [MM-DD HH:MM] 前缀后, 必须显式告知 LLM 输出不带前缀/时间戳."""
+    from app.services.prompting.defaults import RESPONSE_INSTRUCTION_PROMPT
+
+    assert "时间戳" in RESPONSE_INSTRUCTION_PROMPT or "前缀" in RESPONSE_INSTRUCTION_PROMPT

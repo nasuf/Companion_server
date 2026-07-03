@@ -29,6 +29,7 @@ from app.services.memory.storage.embedding import generate_embedding
 from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.prompting.store import get_prompt_text
+from app.services.prompting.utils import safe_format
 
 logger = logging.getLogger(__name__)
 
@@ -184,10 +185,11 @@ async def detect_deletion_intent(
     prompt_template = _ensure_deletion_prompt_has_context(
         await get_prompt_text("memory.deletion_intent")
     )
-    prompt = prompt_template.format(
-        message=message,
-        context=recent_context or "（无）",
-    )
+    # D3: SafeDict 渲染, 模板含字面大括号时不 KeyError (admin 可编辑模板)
+    prompt = safe_format(prompt_template, {
+        "message": message,
+        "context": recent_context or "（无）",
+    })
     try:
         result = await invoke_json(get_utility_model(), prompt)
     except Exception as e:

@@ -287,19 +287,20 @@ async def _bg_memory_pipeline(
                         skip_ai_side=skip_ai_side,
                     )
             except DistributedLockNotAcquired:
+                # 等满 wait_timeout 仍拿不到锁 = 另一实例的管线卡死或超长运行.
+                # 此时继续执行会跨实例并发 → 水位线 race + L1 SINGLETON 重复
+                # (生产 case 2026-05-07). 改为跳过本批: 水位线未推进, 只要用户
+                # 还在聊, 后续 batch 的窗口会重新覆盖这些消息; 宁可少抽一批,
+                # 不可重复入库.
                 logger.error(
-                    "Memory pipeline distributed lock wait timed out; running with "
-                    "local lock only",
+                    "Memory pipeline distributed lock wait timed out; skipping "
+                    "batch (watermark not advanced, later batches re-cover)",
                     extra={
                         "event": EVT_BG_DONE,
                         "kind": "memory_pipeline",
-                        "outcome": "distributed_lock_timeout",
+                        "outcome": "distributed_lock_timeout_skip",
                         "conversation_id": conversation_id,
                     },
-                )
-                await _do_memory_pipeline(
-                    user_id, messages, conversation_id, workspace_id,
-                    skip_ai_side=skip_ai_side,
                 )
     else:
         # proactive 等无 conv 入口: 调用方天然不并发同源, 无需上锁.
@@ -580,4 +581,25 @@ async def run_post_process(
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
             tasks.append(_bg_positive_recovery(agent_id, user_id, user_message))
+            # E3 表达学习: 计数节流, 每 LEARN_EVERY_N 条用户消息批量学一次
+            tasks.append(_bg_expression_learning(agent_id, user_id, full_messages))
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _bg_expression_learning(
+    agent_id: str, user_id: str, messages: list[dict],
+) -> None:
+    """E3 表达学习后台任务: 节流计数, 到批次阈值才调 LLM 提取.
+
+    单条消息成本为 1 次 Redis INCR; 每 LEARN_EVERY_N 条才有 1 次小模型调用.
+    失败静默 — 表达学习是增强项, 不该影响其他后台任务.
+    """
+    try:
+        from app.services.chat.expression_learner import (
+            bump_message_counter,
+            learn_expressions,
+        )
+        if await bump_message_counter(agent_id, user_id):
+            await learn_expressions(agent_id, user_id, messages)
+    except Exception as e:
+        logger.debug(f"expression learning skipped: {e}")

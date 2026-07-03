@@ -7,6 +7,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_typo_off(monkeypatch):
+    """typo_enabled 生产默认开启 (2026-07-03 产品决策), 但 5% 概率的随机错字
+    会让所有断言精确回复文本的测试 flaky — 测试环境统一关闭.
+    typo 行为本身由 test_typo_generator.py 显式 patch settings 覆盖测试."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "typo_enabled", False)
+
+
 # ── 共享 JWT / TestClient helpers ────────────────────────────────────────
 
 def make_auth_header(user_id: str = "user-id", role: str = "user") -> dict:

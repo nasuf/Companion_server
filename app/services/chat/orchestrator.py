@@ -21,13 +21,18 @@ from prisma import Json
 
 from app.db import db
 from app.observability.events import (
+    EVT_FILLER_EMOJI,
     EVT_INTENT_SPLIT,
     EVT_MEMORY_CONTRADICTION,
     EVT_REPLY_EMITTED,
     EVT_REPLY_EMOTION,
 )
 from app.services.llm.models import get_chat_model, convert_messages
-from app.services.chat.prompt_builder import build_system_prompt, build_chat_messages
+from app.services.chat.prompt_builder import (
+    build_system_prompt,
+    build_chat_messages,
+    compute_reengagement_gap_seconds,
+)
 from app.services.chat_media.prompt import render_message_content_for_prompt
 from app.services.prompting.store import (
     get_prompt_text,
@@ -35,6 +40,7 @@ from app.services.prompting.store import (
     reset_prompt_runtime_context,
     set_prompt_runtime_context,
 )
+from app.services.prompting.utils import safe_format
 from app.services.prompting.trace_components import (
     prompt_hash,
     record_prompt_render,
@@ -110,8 +116,11 @@ from app.services.chat.intent_replies import (
 )
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
 from app.services.chat.reply_generate import generate_reply as _generate_reply
+from app.services.chat.expression_learner import sample_expression_habits
+from app.services.chat.filler_reply import build_filler_emoji_reply
 from app.services.chat.preflight import (
     PreflightCtx,
+    discard_pending_states_for_crisis,
     resolve_pending_contradiction,
     resolve_pending_deletion,
     resolve_recent_undo,
@@ -299,7 +308,9 @@ async def _intent_llm_reply(
     # 停用包装模板时退回代码默认, 否则指令整体丢失、LLM 退化成普通闲聊回复.
     appendix_tpl = await get_prompt_text_or_default("chat.special_instruction_appendix")
     appendix_start = len(prompt)
-    appendix = appendix_tpl.format(instruction=instruction)
+    # D3: SafeDict 渲染 — admin 编辑模板写入字面大括号 (如 JSON 示例) 或误删
+    # 占位符时不 KeyError 炸链路, 未知占位符渲染为 "(无)".
+    appendix = safe_format(appendix_tpl, {"instruction": instruction})
     prompt += appendix
     record_prompt_render(
         prompt,
@@ -787,6 +798,11 @@ async def stream_chat_response(
             reply_context["turn_message_ids"] = sorted(current_turn_ids)
         current_achievement_turn_id = _achievement_turn_id(current_turn_ids)
         covered_until_user_ts = _max_user_created_at(messages_dicts)
+        # 重逢感知 (拟人度): 当前轮距上一轮最后一条消息的间隔. ≥30min 时
+        # build_system_prompt 注入分档「重逢感知」段, B3 同时用它重置话题上下文.
+        reengagement_gap_seconds = compute_reengagement_gap_seconds(
+            messages_dicts, exclude_ids=current_turn_ids,
+        )
         if not sub_intent_mode:
             previous_assistant = _previous_assistant_message(
                 recent_messages, user_message_id,
@@ -858,7 +874,11 @@ async def stream_chat_response(
 
         # Pending 跨消息状态：矛盾追问 / 删除确认。用户的回答不会带意图关键词，
         # 必须在意图识别前先匹配 Redis 里的待处理状态。sub_intent_mode 下跳过。
-        # crisis 路径也跳过: 用户求救信号优先级高于一切, pending 留着等用户安全后处理.
+        # crisis 路径不消费 pending（求救信号优先级高于一切），但也不能留着——
+        # 否则用户脱离危机后的第一条消息会被误解析成"矛盾追问的回答/删除确认"。
+        # 显式丢弃：矛盾之后会被重新检测，删除可由用户重新发起。
+        if crisis_care_turn and not sub_intent_mode:
+            await discard_pending_states_for_crisis(conversation_id)
         if not sub_intent_mode and not crisis_care_turn:
             preflight_ctx = PreflightCtx(
                 conversation_id=conversation_id,
@@ -894,6 +914,32 @@ async def stream_chat_response(
             ):
                 yield evt
             if preflight_ctx.stopped:
+                return
+
+            # E2 拟人度: 纯语气词概率性"仅表情"轻回应 — 真人收到"嗯/哈哈"
+            # 不会每次都认真回一句话. AI 上一句是提问时不走此路径 (那是答复,
+            # 交给意图管线); 未命中概率仍走完整管线. 位置在 preflight 之后:
+            # pending 矛盾/删除确认的 "嗯/好" 已被上方消费, 不会误吞.
+            filler_emoji = build_filler_emoji_reply(
+                user_message,
+                previous_assistant_text=getattr(previous_assistant, "content", None),
+            )
+            if filler_emoji is not None:
+                logger.info(
+                    f"[FILLER-EMOJI] reply={filler_emoji}",
+                    extra={
+                        "event": EVT_FILLER_EMOJI,
+                        "filler_preview": user_message[:10],
+                        "emoji": filler_emoji,
+                    },
+                )
+                preflight_ctx.last_short_circuit_reply = filler_emoji
+                for evt in await _short_circuit_reply(
+                    filler_emoji, conversation_id, agent_id, user_id,
+                    trace_id=tracer.safe_trace_id,
+                ):
+                    yield evt
+                tracer.close()
                 return
 
         current_state_fast_path = (
@@ -1241,7 +1287,10 @@ async def stream_chat_response(
         # --- Topic tracking (Redis, no LLM) ---
         # topic_info dict 直传 prompt_builder, 由 chat.topic_context_section
         # 模板渲染 (registry 管理, trace 内可编辑).
-        topic_info = await push_topic(conversation_id, user_message)
+        topic_info = await push_topic(
+            conversation_id, user_message,
+            gap_seconds=reengagement_gap_seconds,  # B3: ≥3h 间隔清空话题栈
+        )
         topic_context = topic_info or None
 
         # --- Pre-compute personality (MBTI) for downstream timing/emotion calls ---
@@ -1494,12 +1543,18 @@ async def stream_chat_response(
                 )
                 if active_music and active_music.track:
                     tpl = await get_prompt_text("music.co_listening_context")
-                    music_context = tpl.format(
-                        current_song=active_music.track.title,
-                        current_artist=active_music.track.artist,
-                    )
+                    music_context = safe_format(tpl, {
+                        "current_song": active_music.track.title,
+                        "current_artist": active_music.track.artist,
+                    })
             except Exception as music_context_err:
                 logger.debug(f"[MUSIC] co-listening context skipped: {music_context_err}")
+            # E3 表达学习: 抽样已学表达 (Redis 读, ~1ms; 失败/为空则不注入)
+            try:
+                expression_habits = await sample_expression_habits(agent_id, user_id)
+            except Exception as expr_err:
+                logger.debug(f"[EXPR] habits sample skipped: {expr_err}")
+                expression_habits = []
             system_prompt = await build_system_prompt(
                 agent=agent,
                 memories=classified_memories,
@@ -1522,6 +1577,8 @@ async def stream_chat_response(
                 time_memories=time_memories or None,
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
+                reengagement_gap_seconds=reengagement_gap_seconds,
+                expression_habits=expression_habits or None,
                 diagnostics=prompt_diagnostics,
                 canary_user_id=user_id,
             )
@@ -1629,6 +1686,7 @@ async def stream_chat_response(
             emitted_replies=emitted_replies,
             reply_emotion=reply_emotion,
             reply_is_fallback=reply_is_fallback,
+            conversation_id=conversation_id,
         ):
             yield evt
 

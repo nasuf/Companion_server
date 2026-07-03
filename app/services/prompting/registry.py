@@ -30,10 +30,14 @@ from app.services.prompting.defaults import (
     CHAT_MEMORY_LABEL_OTHER_PROMPT,
     CHAT_MEMORY_LABEL_PROFILE_CONTEXT_PROMPT,
     CHAT_MEMORY_LABEL_SAFETY_PROMPT,
+    CHAT_EXPRESSION_HABITS_SECTION_PROMPT,
     CHAT_MEMORY_SECTION_BODY_PROMPT,
     CHAT_MUSIC_CONTEXT_SECTION_PROMPT,
     CHAT_PERSONALITY_SECTION_PROMPT,
     CHAT_PORTRAIT_SECTION_PROMPT,
+    CHAT_REENGAGEMENT_DAY_PROMPT,
+    CHAT_REENGAGEMENT_LONG_PROMPT,
+    CHAT_REENGAGEMENT_SHORT_PROMPT,
     CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
     CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
     CHAT_STYLE_BASE_RULE_PROMPT,
@@ -55,6 +59,7 @@ from app.services.prompting.defaults import (
     DELETION_INTENT_PROMPT,
     DELETION_REPLY_PROMPT,
     END_REPLY_PROMPT,
+    EXPRESSION_LEARN_STYLE_PROMPT,
     PERSONALITY_SCORING_PROMPT,
     INTENT_SPLIT_PROMPT,
     INTENT_UNIFIED_PROMPT,
@@ -247,6 +252,37 @@ PROMPT_DEFINITIONS = [
         CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
     ),
     PromptDefinition(
+        "chat.reengagement_short", "重逢感知·小间隔", "聊天热路径", "聊天",
+        "【工程扩展·拟人度】用户离开 30min-3h 后回来时注入主回复的「重逢感知」段, "
+        "防止 AI 把隔了一段时间的对话当无缝续聊。占位符: {gap_text}。",
+        CHAT_REENGAGEMENT_SHORT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.reengagement_long", "重逢感知·大间隔", "聊天热路径", "聊天",
+        "【工程扩展·拟人度】用户离开 3h-24h 后回来时注入主回复的「重逢感知」段, "
+        "指引先回应重逢再看话题、不硬接旧话题。占位符: {gap_text}。",
+        CHAT_REENGAGEMENT_LONG_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.reengagement_day", "重逢感知·隔天", "聊天热路径", "聊天",
+        "【工程扩展·拟人度】用户超过 24h 未联系后回来时注入主回复的「重逢感知」段, "
+        "带重逢感但不夸张、不责怪、不接旧话题。占位符: {gap_text}。",
+        CHAT_REENGAGEMENT_DAY_PROMPT,
+    ),
+    PromptDefinition(
+        "expression.learn_style", "表达学习提取", "表达学习", "表达学习",
+        "【工程扩展·拟人度】后台批量提取用户的说话方式 (situation→style, 含梗/"
+        "口头禅), 每 20 条用户消息触发一次。只学用户不学 AI, 只学方式不学私人"
+        "事实。占位符: {conversation}。",
+        EXPRESSION_LEARN_STYLE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.expression_habits_section", "表达习惯参考段落", "聊天热路径", "表达学习",
+        "【工程扩展·拟人度】主回复 system prompt 的「表达习惯参考」段包装模板。"
+        "运行时注入 {habits} (已学表达按 count 加权抽样渲染的行)。",
+        CHAT_EXPRESSION_HABITS_SECTION_PROMPT,
+    ),
+    PromptDefinition(
         "chat.memory_empty_anchor", "无相关记忆锚点", "聊天热路径", "记忆",
         "主回复 system prompt 的「你记得的事情」空结果锚点。用于告诉 LLM 本轮已检索但无相关记忆, "
         "避免顺承用户预设编造事实。",
@@ -324,13 +360,13 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "chat.memory_label_named_relation", "记忆分组标签·关系命名", "聊天热路径", "记忆",
-        "「你记得的事情」段内【回答当前关系 / 名字问题优先参考】分组标签。"
+        "「你记得的事情」段内【你们之间的关系与称呼】分组标签。"
         "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
         CHAT_MEMORY_LABEL_NAMED_RELATION_PROMPT,
     ),
     PromptDefinition(
         "chat.memory_label_literal_task", "记忆分组标签·当前问题", "聊天热路径", "记忆",
-        "「你记得的事情」段内【回答当前问题可参考】分组标签。"
+        "「你记得的事情」段内【对方问到的事】分组标签。"
         "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
         CHAT_MEMORY_LABEL_LITERAL_TASK_PROMPT,
     ),

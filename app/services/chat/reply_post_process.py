@@ -14,11 +14,14 @@ from collections.abc import AsyncGenerator
 from datetime import datetime as _dt
 from typing import Any, Awaitable, Callable
 
+from app.config import settings
 from app.observability.events import EVT_LLM_FAIL, EVT_REPLY_DECORATION
 from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
+from app.services.chat.typo import maybe_typo
 from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
 from app.services.prompting.store import get_prompt_text_or_default
+from app.services.prompting.utils import safe_format
 from app.services.sticker import recommend_sticker
 
 logger = logging.getLogger(__name__)
@@ -110,14 +113,69 @@ async def _build_delay_explanation_text(
             )
             text = await fallback_fn(
                 agent, user_message,
-                fallback_tpl.format(
-                    delay_minutes=minutes,
-                ),
+                safe_format(fallback_tpl, {"delay_minutes": minutes}),
             )
         return (text or "").strip() or None
     except Exception as e:
         logger.warning(f"Delay explanation generation failed: {e}")
         return None
+
+
+_RECENT_EMOJI_KEY = "emoji:recent:{conversation_id}"
+_RECENT_EMOJI_KEEP = 3
+_RECENT_EMOJI_TTL_S = 6 * 3600
+
+
+async def _load_recent_emojis(conversation_id: str | None) -> set[str]:
+    """读最近用过的 emoji (跨轮重复回避). Redis 不可用时静默返回空集."""
+    if not conversation_id:
+        return set()
+    try:
+        from app.redis_client import get_redis
+
+        redis = await get_redis()
+        items = await redis.lrange(
+            _RECENT_EMOJI_KEY.format(conversation_id=conversation_id),
+            0, _RECENT_EMOJI_KEEP - 1,
+        )
+        return {i.decode() if isinstance(i, bytes) else str(i) for i in items}
+    except Exception:
+        return set()
+
+
+async def _remember_emoji(conversation_id: str | None, emoji: str) -> None:
+    if not conversation_id or not emoji:
+        return
+    try:
+        from app.redis_client import get_redis
+
+        redis = await get_redis()
+        key = _RECENT_EMOJI_KEY.format(conversation_id=conversation_id)
+        pipe = redis.pipeline()
+        pipe.lpush(key, emoji)
+        pipe.ltrim(key, 0, _RECENT_EMOJI_KEEP - 1)
+        pipe.expire(key, _RECENT_EMOJI_TTL_S)
+        await pipe.execute()
+    except Exception:
+        pass
+
+
+def _should_explain_delay(elapsed_s: float) -> bool:
+    """C5 拟人度: 延迟解释按延迟时长概率化, 不再 ≥1min 必解释.
+
+    真人不会每次迟回都交代原因 — 短延迟多数不说, 隔得越久越可能带一句
+    "刚才在忙". spec §6.5 字面是 ≥1min 必发延迟解释; 概率化是刻意的拟人度
+    偏离 (每次都解释反而暴露"系统在管理 AI 的时间").
+    """
+    if elapsed_s < 60:
+        return False
+    if elapsed_s < 300:
+        p = 0.35
+    elif elapsed_s < 1800:
+        p = 0.6
+    else:
+        p = 0.85
+    return random.random() < p
 
 
 async def emit_replies(
@@ -133,20 +191,26 @@ async def emit_replies(
     emitted_replies: list[dict],
     reply_emotion: dict | None = None,
     reply_is_fallback: bool = False,
+    conversation_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §5/§6.4-§6.5：延迟解释 + emoji/sticker + reply SSE 事件流。
 
     emitted_replies 传入的空列表会被原地填充（用于后续 `_save_replies`）。
     sub_intent_mode=True 时跳过延迟解释（父调用已推送）。
     reply_emotion: spec §5 step 1 的 ai_reply_emotion 输出 `{emotion, intensity}`。
+    conversation_id: 供 emoji 跨轮重复回避 (C4); 不传则只做轮内去重。
     """
     ai_primary_emotion, emotion_intensity = _reply_decoration_signal(reply_emotion)
     sticker_used = False  # 一个回合最多一个表情包
+    # C4 拟人度: 一个回合最多一个 emoji (原来每条 reply 独立掷骰, 2-3 条回复
+    # 可能条条带表情, 是"装饰感"的主要来源); 且排除最近几轮用过的, 防复读.
+    emoji_used_this_turn = False
+    recent_emojis = await _load_recent_emojis(conversation_id)
 
     # §6.4/§6.5 延迟解释
     elapsed = None if sub_intent_mode else actual_delay_seconds(reply_context)
     delay_explain_offset = 0
-    if elapsed is not None and elapsed >= 60:
+    if elapsed is not None and _should_explain_delay(elapsed):
         explain_text = await _build_delay_explanation_text(
             reply_context, elapsed,
             delay_reply_fn=delay_reply_fn, fallback_fn=fallback_fn,
@@ -170,14 +234,23 @@ async def emit_replies(
             if not reply_text:
                 continue
 
+        # E1 拟人度: 错别字注入 (默认关). 在 emoji 装饰前做, 只动正文汉字.
+        typo_correction: str | None = None
+        if settings.typo_enabled and not reply_is_fallback:
+            reply_text, typo_correction = maybe_typo(
+                reply_text, rate=settings.typo_rate,
+            )
+
         added_emoji = False
         emoji_used: str | None = None
-        if should_add_emoji(emotion_intensity):
-            emoji = pick_one_emoji(ai_primary_emotion)
+        if not emoji_used_this_turn and should_add_emoji(emotion_intensity):
+            emoji = pick_one_emoji(ai_primary_emotion, exclude=recent_emojis)
             if emoji:
                 reply_text += emoji
                 added_emoji = True
                 emoji_used = emoji
+                emoji_used_this_turn = True
+                await _remember_emoji(conversation_id, emoji)
 
         sticker_url: str | None = None
         if not added_emoji and not sticker_used and should_add_sticker(emotion_intensity):
@@ -229,3 +302,16 @@ async def emit_replies(
         emitted_replies.append(data)
         normal_reply_count += 1
         yield {"event": "reply", "data": json.dumps(data)}
+
+        # E1: 自我纠正气泡 ("*正确字", 微信惯例). 短暂停顿后追加, 像真人
+        # 发出去才发现打错. 只对 maybe_typo 决定需要纠正的错字触发.
+        if typo_correction:
+            await asyncio.sleep(random.uniform(0.5, 1.2))
+            correction_data: dict = {
+                "text": f"*{typo_correction}",
+                "index": reply_index_offset + normal_reply_count + delay_explain_offset,
+                "typo_correction": True,
+            }
+            emitted_replies.append(correction_data)
+            normal_reply_count += 1
+            yield {"event": "reply", "data": json.dumps(correction_data)}

@@ -538,3 +538,103 @@ class TestL1SingletonGate:
         assert result is None
         mocks["update"].assert_not_called()
         mocks["create"].assert_not_called()
+
+
+# --- A2: L1 SINGLETON 写锁 (TOCTOU 修复) ---
+
+
+@pytest.mark.asyncio
+class TestSingletonWriteLock:
+    """singleton 检查→create 之间隔着 embedding + reconciliation (秒级窗口),
+    并发写会双双通过 find_many 检查 → L1 重复. 修复后整段被 per-类目
+    distributed_lock 串行化.
+    """
+
+    async def test_concurrent_singleton_writes_only_one_insert(self):
+        """并发两条同类目 singleton 写入 → 只有 1 条 create, 另一条被闸门拦下.
+
+        用 asyncio.Lock 模拟 distributed_lock 的互斥语义; generate_embedding
+        故意 sleep 拉宽 TOCTOU 窗口 — 修复前该场景两条都会 create (生产
+        case 2026-05-07 复现), 修复后 create 恰好 1 次.
+        """
+        import asyncio
+        from contextlib import asynccontextmanager
+
+        P = "app.services.memory.storage.persistence"
+        created: list[str] = []
+        mutex = asyncio.Lock()
+
+        @asynccontextmanager
+        async def fake_lock(name, **kwargs):
+            assert name.startswith("singleton_write:")
+            async with mutex:
+                yield True
+
+        async def fake_find_many(*args, **kwargs):
+            return [MagicMock(id="m1")] if created else []
+
+        async def fake_create(**kwargs):
+            created.append(f"m{len(created) + 1}")
+            return MagicMock(id=created[-1])
+
+        async def slow_embed(content):
+            await asyncio.sleep(0.05)  # 拉宽检查→create 的竞争窗口
+            return [0.1]
+
+        with (
+            patch(f"{P}.distributed_lock", fake_lock),
+            patch(f"{P}.memory_repo.find_many", side_effect=fake_find_many),
+            patch(f"{P}.resolve_workspace_id", new_callable=AsyncMock, return_value="ws1"),
+            patch(f"{P}.generate_embedding", side_effect=slow_embed),
+            patch(f"{P}.resolve_memory_write", new_callable=AsyncMock,
+                  return_value=ReconciliationDecision(action="insert_new")),
+            patch(f"{P}.memory_repo.create", side_effect=fake_create),
+            patch(f"{P}.memory_repo.update", new_callable=AsyncMock),
+            patch(f"{P}.store_embedding", new_callable=AsyncMock),
+            patch(f"{P}.log_memory_changelog", new_callable=AsyncMock),
+        ):
+            r1, r2 = await asyncio.gather(
+                store_memory(
+                    user_id="u1", content="我今年28岁", level=1, importance=0.9,
+                    main_category="身份", sub_category="年龄", source="user",
+                ),
+                store_memory(
+                    user_id="u1", content="我今年28岁，生日是3月15号", level=1,
+                    importance=0.9, main_category="身份", sub_category="年龄",
+                    source="user",
+                ),
+            )
+
+        assert len(created) == 1  # 恰好一条入库
+        assert sorted([r1, r2], key=lambda x: (x is None, x)) == ["m1", None]
+
+    async def test_singleton_lock_contention_drops_write(self):
+        """等锁超时 (另一写入者持锁 >10s) → 按重复丢弃, 不 create."""
+        from app.services.runtime.distributed_lock import DistributedLockNotAcquired
+
+        P = "app.services.memory.storage.persistence"
+
+        def raise_not_acquired(*args, **kwargs):
+            raise DistributedLockNotAcquired("lock held")
+
+        with _patch_storage_chain(existing_l1=[]) as mocks:
+            with patch(f"{P}.distributed_lock", raise_not_acquired):
+                result = await store_memory(
+                    user_id="u1", content="我今年28岁", level=1, importance=0.9,
+                    main_category="身份", sub_category="年龄", source="user",
+                )
+        assert result is None
+        mocks["create"].assert_not_called()
+
+    async def test_non_singleton_write_does_not_touch_lock(self):
+        """非 singleton 写入不应产生锁开销 (热路径性能契约)."""
+        P = "app.services.memory.storage.persistence"
+        with _patch_storage_chain(existing_l1=[]) as mocks:
+            with patch(f"{P}.distributed_lock") as mock_lock:
+                result = await store_memory(
+                    user_id="u1", content="我喜欢吃辣", level=2, importance=0.7,
+                    main_category="偏好", sub_category="饮食喜好", source="user",
+                )
+        assert result == "new-id"
+        mock_lock.assert_not_called()
+        mocks["create"].assert_called_once()

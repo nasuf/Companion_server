@@ -85,14 +85,18 @@ def test_all_user_facing_reply_prompts_have_format_constraint():
 
 
 def test_multi_reply_prompts_have_pipe_format():
-    """主回复 + 4 个 tier reply prompt 必须含 "分{n}条 || 分隔" 多条指令."""
+    """主回复 + 4 个 tier reply prompt 必须说明 || 分隔约定与长度上限.
+
+    Phase C1 (拟人度): 不再强制 "分{n}条" — 条数由 LLM 按内容自然决定
+    (最多三条), 硬上限由 split_and_validate_replies 兜底. 因此 {n} 占位符
+    从必需变为禁止 (见 test_response_instruction_guards 的守卫)."""
     from app.services.prompting import defaults
 
     for name in MULTI_REPLY_PROMPT_CONSTS:
         prompt = getattr(defaults, name)
-        # 必须含 || 分隔 + {n}/{max_per}/{total} 占位符
+        # 必须含 || 分隔约定 + {max_per}/{total} 长度占位符
         assert "||" in prompt, f"{name} 必须含 || 多条指令"
-        assert "{n}" in prompt, f"{name} 必须含 {{n}} 占位符"
+        assert "分{n}条" not in prompt, f"{name} 不允许恢复强制条数指令"
         assert "{max_per}" in prompt, f"{name} 必须含 {{max_per}} 占位符"
         assert "{total}" in prompt, f"{name} 必须含 {{total}} 占位符"
 

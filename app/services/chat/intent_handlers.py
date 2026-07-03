@@ -60,7 +60,7 @@ from app.services.schedule_domain.schedule import (
 )
 from app.services.schedule_domain.time_service import get_current_time, resolve_implicit_time
 from app.services.prompting.store import get_prompt_text_or_default
-from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
+from app.services.prompting.utils import EMPTY_RECENT_CONTEXT, safe_format
 from app.services.rules.chat_keywords import (
     CANCEL_NEG_TOKENS,
     HIGH_CONFIDENCE_CANCEL_KEYWORDS,
@@ -522,7 +522,7 @@ async def handle_schedule_query(
     else:
         # 结构性兜底上下文: 停用时退回代码默认 (计划查询必须有上下文说明).
         missing_tpl = await get_prompt_text_or_default("intent.schedule_missing_context")
-        schedule_context = missing_tpl.format(date_label=date_label)
+        schedule_context = safe_format(missing_tpl, {"date_label": date_label})
     repeat_key = _hashed_repeat_key(resolved_query_type, date_label, schedule_context)
     repeat_metadata = _repeat_metadata(
         "schedule_query",
@@ -735,8 +735,8 @@ def _format_user_memory_for_crisis(
                 sections.append(label)
                 sections.extend(f"- {item}" for item in items)
 
-        _append_section("【回答当前关系 / 名字问题优先参考】", _take(named_relation, 2))
-        _append_section("【回答当前问题可参考】", _take(literal, 2))
+        _append_section("【你们之间的关系与称呼】", _take(named_relation, 2))
+        _append_section("【对方问到的事】", _take(literal, 2))
         _append_section("【当前话题相关记忆】", _take(topical, 4))
         _append_section("【安全 / 情绪背景】", _take(safety, 3))
         _append_section("【其他已选记忆】", _take(other, 2))

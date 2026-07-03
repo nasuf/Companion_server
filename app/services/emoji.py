@@ -48,10 +48,16 @@ def should_add_emoji(intensity: int = 0) -> bool:
 
 def pick_one_emoji(
     primary_emotion: str | None = None,
+    exclude: set[str] | frozenset[str] | None = None,
 ) -> str:
-    """从推荐列表中随机选一个emoji。"""
-    candidates = recommend_emoji(primary_emotion, count=3)
-    return random.choice(candidates) if candidates else ""
+    """从情绪池随机选一个 emoji。
+
+    exclude: 最近几轮已用过的 emoji（跨轮重复回避, C4 拟人度 — 真人不会
+    连着几条都用同一个表情）。整池被排除时回退全池, 保证总能选出。
+    """
+    pool = EMOJI_MAP.get(primary_emotion or "中性", EMOJI_MAP["中性"])
+    candidates = [e for e in pool if e not in (exclude or ())] or list(pool)
+    return random.choice(candidates)
 
 
 def should_add_sticker(intensity: int = 0) -> bool:

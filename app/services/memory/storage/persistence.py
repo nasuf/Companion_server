@@ -14,6 +14,10 @@ from app.services.memory.storage.embedding import generate_embedding, store_embe
 from app.services.memory.storage.reconciliation import resolve_memory_write
 from app.services.memory.taxonomy import is_singleton, resolve_taxonomy
 from app.services.memory.retrieval.vector_search import search_by_embedding
+from app.services.runtime.distributed_lock import (
+    DistributedLockNotAcquired,
+    distributed_lock,
+)
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -186,6 +190,7 @@ async def store_memory(
     recurrence: str | None = None,
     entities: list[str] | None = None,
     topics: list[str] | None = None,
+    _singleton_locked: bool = False,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -194,6 +199,7 @@ async def store_memory(
         source: "user" for memories about the user, "ai" for AI self-memories.
         recurrence: Part 5 §4.2 提醒重复规则 (once|yearly|monthly|weekly|daily).
             仅 sub_category="提醒" 时有效, 其他子类传 None.
+        _singleton_locked: 内部标志 — singleton 写锁已持有的重入调用, 勿外部使用.
     """
     # Source narrows to the literal Source type expected by the taxonomy
     repo_source = "ai" if source == "ai" else "user"
@@ -217,6 +223,43 @@ async def store_memory(
     memory_type = normalize_memory_type(taxonomy.legacy_type)
 
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
+
+    # TOCTOU 修复: singleton 的 find_many 检查与最终 create 之间隔着 embedding
+    # 生成 + reconciliation 向量搜索 (秒级窗口), 并发 extraction 会双双通过检查
+    # → L1 重复 (生产 case 2026-05-07). 用 per-(source, user, ws, 类目) Redis 锁
+    # 把「检查→创建」整段串行化后重入自身; 等锁 10s 拿不到说明另一写入者正在写
+    # 同类目 singleton, 本条按重复丢弃 (与 dedup drop 同语义, 后到的合并表述
+    # 本来也会被 singleton 闸门拦下).
+    if (
+        level == 1
+        and is_singleton(taxonomy.main_category, taxonomy.sub_category)
+        and not _singleton_locked
+    ):
+        lock_name = (
+            f"singleton_write:{repo_source}:{user_id}:{workspace_id}:"
+            f"{taxonomy.main_category}:{taxonomy.sub_category}"
+        )
+        try:
+            async with distributed_lock(
+                lock_name, ttl_s=30, wait_timeout_s=10,
+                retry_interval_s=0.2, fail_open=True,
+            ):
+                return await store_memory(
+                    user_id, content, summary=summary, level=level,
+                    importance=importance, memory_type=memory_type,
+                    main_category=main_category, sub_category=sub_category,
+                    source=source, occur_time=occur_time,
+                    statement_time=statement_time, workspace_id=workspace_id,
+                    recurrence=recurrence, entities=entities, topics=topics,
+                    _singleton_locked=True,
+                )
+        except DistributedLockNotAcquired:
+            logger.info(
+                f"L1 SINGLETON write lock contention: ({repo_source}, "
+                f"{taxonomy.main_category}/{taxonomy.sub_category}) held >10s "
+                f"by another writer; dropping as duplicate. content={content[:60]}"
+            )
+            return None
 
     # spec §1.5.1 闸门: L1 SINGLETON 子类 (姓名/年龄/生日 等身份硬唯一字段) 永
     # 远只能 1 条 L1. 即便 LLM 把"我今年28岁"复述为"我今年28岁，生日是3月15号"
