@@ -43,7 +43,14 @@ _MAIN_PROMPT_ALWAYS_COMPONENT_KEYS = ["chat.system_base"]
 
 _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 反幻觉硬约束", "chat.anti_hallucination_hard_rule"),
+    ("## 你的身份", "chat.personality_section"),
     ("## 对话一致性", "chat.consistency_rules"),
+    ("## 当前情绪", "chat.relationship_stage_section"),
+    ("## 用户画像", "chat.portrait_section"),
+    ("## 回复时机说明", "chat.delay_context_section"),
+    ("## 话题上下文", "chat.topic_context_section"),
+    ("## 一起听音乐", "chat.music_context_section"),
+    ("## 时间\n", "chat.time_context_section"),
     ("## 你的隐性状态约束", "chat.ai_state_constraint"),
     ("## 回复要求", "chat.response_instruction"),
 ]
@@ -60,20 +67,43 @@ _BOUNDARY_BODY_PROMPT_KEYS = {
 
 # Registry 中不作为独立 LangSmith LLM step 出现、但会作为组合 prompt 的可编辑片段出现.
 _COMPONENT_ONLY_PROMPT_KEYS = {
+    "boundary.patience_instruction_blocked",
+    "boundary.patience_instruction_low",
+    "boundary.patience_instruction_medium",
     "boundary.persona_lock",
     "chat.ai_state_constraint",
     "chat.anti_hallucination_hard_rule",
     "chat.consistency_rules",
+    "chat.delay_context_section",
     "chat.l3_memory_section",
     "chat.memory_empty_anchor",
+    "chat.memory_label_ai_self",
+    "chat.memory_label_literal_task",
+    "chat.memory_label_named_relation",
+    "chat.memory_label_other",
+    "chat.memory_label_profile_context",
+    "chat.memory_label_safety",
     "chat.memory_section_body",
+    "chat.music_context_section",
+    "chat.personality_section",
+    "chat.portrait_section",
     "chat.relationship_stage_section",
     "chat.response_instruction",
     "chat.special_instruction_appendix",
+    "chat.style_base_rule",
+    "chat.style_closing_rule",
+    "chat.time_context_section",
     "chat.time_memories_section",
+    "chat.topic_context_section",
     "intent.conversation_end_fallback_instruction",
     "intent.schedule_missing_context",
     "reply.delay_explanation_fallback_instruction",
+    "reply.delay_reason_busy",
+    "reply.delay_reason_conversation_mode",
+    "reply.delay_reason_default",
+    "reply.delay_reason_high_emotion",
+    "reply.delay_reason_sleep",
+    "reply.delay_reason_very_busy",
 }
 
 # 当前运行时不参与任何 LLM prompt, 但保留在后台管理里用于历史兼容/未来恢复.

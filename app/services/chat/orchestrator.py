@@ -31,6 +31,7 @@ from app.services.chat.prompt_builder import build_system_prompt, build_chat_mes
 from app.services.chat_media.prompt import render_message_content_for_prompt
 from app.services.prompting.store import (
     get_prompt_text,
+    get_prompt_text_or_default,
     reset_prompt_runtime_context,
     set_prompt_runtime_context,
 )
@@ -56,7 +57,7 @@ from app.services.memory.interaction.retrieval_feedback import (
     resolve_retrieval_feedback_correction,
 )
 from app.services.memory.retrieval.access_log import log_memory_access
-from app.services.topic import push_topic, format_topic_context
+from app.services.topic import push_topic
 from app.services.schedule_domain.time_service import build_time_context
 from app.services.schedule_domain.time_parser import parse_time_expressions, has_explicit_time
 from app.services.schedule_domain.schedule import (
@@ -294,7 +295,9 @@ async def _intent_llm_reply(
             if isinstance(raw_components, list):
                 base_components = [dict(item) for item in raw_components if isinstance(item, dict)]
             break
-    appendix_tpl = await get_prompt_text("chat.special_instruction_appendix")
+    # 结构性包装: instruction 是本次 LLM 调用的全部任务指令 (道别/延迟解释兜底),
+    # 停用包装模板时退回代码默认, 否则指令整体丢失、LLM 退化成普通闲聊回复.
+    appendix_tpl = await get_prompt_text_or_default("chat.special_instruction_appendix")
     appendix_start = len(prompt)
     appendix = appendix_tpl.format(instruction=instruction)
     prompt += appendix
@@ -1236,8 +1239,10 @@ async def stream_chat_response(
         # 消息 → reply 实际覆盖了它们; 写到 reply metadata 后, scheduler 处理后续
         # payload 时凭此跳过, 避免重复回复 (见 jobs/scheduler.py dedup gate).
         # --- Topic tracking (Redis, no LLM) ---
+        # topic_info dict 直传 prompt_builder, 由 chat.topic_context_section
+        # 模板渲染 (registry 管理, trace 内可编辑).
         topic_info = await push_topic(conversation_id, user_message)
-        topic_context = format_topic_context(topic_info) if topic_info else None
+        topic_context = topic_info or None
 
         # --- Pre-compute personality (MBTI) for downstream timing/emotion calls ---
         mbti = get_mbti(agent)
@@ -1331,19 +1336,20 @@ async def stream_chat_response(
             # spec §6.5: ≥1min 时会单独推送"延迟解释回复"，主回复不再重复注入解释
             if elapsed is not None and elapsed < 60:
                 rounded_delay = max(1, round(elapsed))
-                delay_reason_text = explain_delay_reason(
+                delay_reason_text = await explain_delay_reason(
                     str(reply_context.get("delay_reason", "")),
                     activity=received_activity,
                     status=received_status_label,
                 )
-                delay_context = (
-                    f"你在 {received_at} 收到用户消息时，正在{received_activity}"
-                    f"（状态：{received_status_label}）。\n"
-                    f"现在距离收到消息已经过去约 {rounded_delay} 秒。\n"
-                    f"{delay_reason_text}\n"
-                    "只有在确实需要时，才用半句自然带过刚才在忙什么；"
-                    "优先回应用户当下情绪或关系信号，解释不要压过聊天本身。"
-                )
+                # 结构化 dict 直传 prompt_builder, 由 chat.delay_context_section
+                # 模板渲染 (registry 管理, trace 内可编辑).
+                delay_context = {
+                    "received_at": received_at,
+                    "activity": received_activity,
+                    "status": received_status_label,
+                    "delay_seconds": rounded_delay,
+                    "delay_reason": delay_reason_text,
+                }
 
         relational_context = detect_relational_context(user_message, prompt_user_emotion)
 
@@ -1422,7 +1428,7 @@ async def stream_chat_response(
                 return
 
         # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
-        patience_instruction = get_patience_prompt_instruction(cached_patience)
+        patience_instruction = await get_patience_prompt_instruction(cached_patience)
 
         # Spec §4 step 1-2: detect NEW contradictions (resolution already handled
         # at the top of the function via pending state check)
@@ -1482,7 +1488,6 @@ async def stream_chat_response(
             music_context = None
             try:
                 from app.services import music as music_service
-                from app.services.prompting.store import get_prompt_text
 
                 active_music = await music_service.get_active_co_listening(
                     conversation_id=conversation_id,

@@ -19,6 +19,13 @@ class PromptTemplateResponse(BaseModel):
 
 class PromptTemplateUpdateRequest(BaseModel):
     content: str
+    # 乐观锁: 前端携带其所见的 updated_at 快照; 与 DB 当前值不一致 → 409,
+    # 防止两个管理员并发编辑时后保存者静默覆盖前者.
+    expected_updated_at: str | None = None
+
+
+class PromptTemplateEnabledRequest(BaseModel):
+    is_enabled: bool
 
 
 class PromptTemplateVersionResponse(BaseModel):

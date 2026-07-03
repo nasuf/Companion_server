@@ -41,7 +41,7 @@ def can_use_tier_reply(
     memory_relevance: str,
     relational_context: str | None,
     schedule_context: str | None,
-    delay_context: str | None,
+    delay_context: dict | None,
 ) -> bool:
     """spec §4：纯聊天 + 无关系/延迟特殊处理时可走轻量分级 prompt.
 
@@ -148,7 +148,7 @@ async def generate_reply(
     memory_relevance: str,
     relational_context: str | None,
     schedule_context: str | None,
-    delay_context: str | None,
+    delay_context: dict | None,
     l3_memories: list[str],
     classified_memories: list,
     messages_dicts: list[dict],

@@ -28,7 +28,7 @@ from typing import Any, Literal
 from app.db import db
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.memory.storage import repo as memory_repo
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import PromptDisabledError, get_prompt_text
 from app.services.prompting.utils import render_template
 from app.services.proactive.emit import emit_proactive_message
 from app.services.proactive.history import (
@@ -343,6 +343,11 @@ async def send_special_date_proactive(
             optional_keys={"user_portrait"},
             safe=False,
         )
+    except PromptDisabledError:
+        # admin 停用该模板 → 本次特殊日期消息按"跳过"处理 (return False 让
+        # trigger 正常收尾), 不能让异常穿透到 trigger 执行层引发重试风暴.
+        logger.info(f"Special date prompt disabled, skipping: key={prompt_key}")
+        return False
     except (KeyError, ValueError) as e:
         logger.warning(f"Special date prompt format failed key={prompt_key}: {e}")
         return False

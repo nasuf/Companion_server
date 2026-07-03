@@ -14,16 +14,33 @@ from app.services.prompting.defaults import (
     BANNED_WORD_PROMPT,
     BLACKLIST_REPLY_PROMPT,
     BOUNDARY_FINAL_WARNING_PROMPT,
+    BOUNDARY_PATIENCE_BLOCKED_INSTRUCTION_PROMPT,
+    BOUNDARY_PATIENCE_LOW_INSTRUCTION_PROMPT,
+    BOUNDARY_PATIENCE_MEDIUM_INSTRUCTION_PROMPT,
     BOUNDARY_PERSONA_LOCK_PROMPT,
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    CHAT_DELAY_CONTEXT_SECTION_PROMPT,
     CHAT_L3_MEMORY_SECTION_PROMPT,
     CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
+    CHAT_MEMORY_LABEL_AI_SELF_PROMPT,
+    CHAT_MEMORY_LABEL_LITERAL_TASK_PROMPT,
+    CHAT_MEMORY_LABEL_NAMED_RELATION_PROMPT,
+    CHAT_MEMORY_LABEL_OTHER_PROMPT,
+    CHAT_MEMORY_LABEL_PROFILE_CONTEXT_PROMPT,
+    CHAT_MEMORY_LABEL_SAFETY_PROMPT,
     CHAT_MEMORY_SECTION_BODY_PROMPT,
+    CHAT_MUSIC_CONTEXT_SECTION_PROMPT,
+    CHAT_PERSONALITY_SECTION_PROMPT,
+    CHAT_PORTRAIT_SECTION_PROMPT,
     CHAT_RELATIONSHIP_STAGE_SECTION_PROMPT,
     CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
+    CHAT_STYLE_BASE_RULE_PROMPT,
+    CHAT_STYLE_CLOSING_RULE_PROMPT,
+    CHAT_TIME_CONTEXT_SECTION_PROMPT,
     CHAT_TIME_MEMORIES_SECTION_PROMPT,
+    CHAT_TOPIC_CONTEXT_SECTION_PROMPT,
     CONSISTENCY_RULES_PROMPT,
     CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
     CRISIS_FOLLOWUP_CLASSIFY_PROMPT,
@@ -104,6 +121,12 @@ from app.services.prompting.defaults import (
     RECORD_CONFIRM_REPLY_PROMPT,
     REMINDER_MESSAGE_PROMPT,
     REMINDER_PRE_CHECK_PROMPT,
+    REPLY_DELAY_REASON_BUSY_PROMPT,
+    REPLY_DELAY_REASON_CONVERSATION_MODE_PROMPT,
+    REPLY_DELAY_REASON_DEFAULT_PROMPT,
+    REPLY_DELAY_REASON_HIGH_EMOTION_PROMPT,
+    REPLY_DELAY_REASON_SLEEP_PROMPT,
+    REPLY_DELAY_REASON_VERY_BUSY_PROMPT,
     RESPONSE_INSTRUCTION_PROMPT,
     SCHEDULE_MISSING_CONTEXT_PROMPT,
     DAILY_SCHEDULE_WITH_USER_MEMORY_PROMPT,
@@ -246,22 +269,111 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "chat.special_instruction_appendix", "特殊指令追加段", "聊天热路径", "聊天",
-        "特殊意图 fallback 复用主回复 system prompt 时追加的固定段。运行时注入 {instruction}。",
+        "【结构性包装】特殊意图 fallback 复用主回复 system prompt 时追加的固定段。运行时注入 {instruction}"
+        "(道别/延迟解释兜底的全部任务指令)。⚠️ 停用时退回代码默认文案, 否则指令整体丢失。",
         CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
     ),
     PromptDefinition(
+        "chat.personality_section", "身份与性格段落", "聊天热路径", "聊天",
+        "主回复 system prompt 的「你的身份」段固定模板。运行时注入 {name}/{gender_text}/"
+        "{age_text}/{mbti_line}/{mbti_detail}/{style_rules}——后三者由 MBTI 数值生成，"
+        "编辑时不要删除任何 {} 占位符。",
+        CHAT_PERSONALITY_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.style_base_rule", "说话风格·通用开头规则", "聊天热路径", "聊天",
+        "「你的说话风格」的第一条通用规则（不随 MBTI 变化）。"
+        "MBTI 条件性风格片段由 style.py 按性格数值动态生成拼在其后。",
+        CHAT_STYLE_BASE_RULE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.style_closing_rule", "说话风格·通用收尾规则", "聊天热路径", "聊天",
+        "「你的说话风格」的收尾通用规则（防万能追问 + 先接情绪，不随 MBTI 变化）。",
+        CHAT_STYLE_CLOSING_RULE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.portrait_section", "用户画像段落", "聊天热路径", "聊天",
+        "主回复 system prompt 的「用户画像」段包装模板。运行时注入 {portrait}"
+        "（异步画像任务生成的画像文本）。可在占位符前后加指令约束画像的使用方式。",
+        CHAT_PORTRAIT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.delay_context_section", "回复时机说明段落", "聊天热路径", "聊天",
+        "《终稿·第三部分 交互系统》§6: 延迟 <1min 时注入主回复的「回复时机说明」段。"
+        "运行时注入 {received_at}/{activity}/{status}/{delay_seconds}/{delay_reason}。"
+        "≥1min 时由独立的 reply.delay_explanation 承担，本段不注入。",
+        CHAT_DELAY_CONTEXT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.topic_context_section", "话题上下文段落", "聊天热路径", "聊天",
+        "【工程补丁】主回复 system prompt 的「话题上下文」段模板（防话题跳跃）。"
+        "运行时注入 {topic_category}/{topic_turns}。",
+        CHAT_TOPIC_CONTEXT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.time_context_section", "时间段落", "聊天热路径", "聊天",
+        "PRD §9 时间上下文的「时间」段包装模板。运行时注入 {time_context}"
+        "（当前时间/星期/节假日数据文本）。可在占位符前后加使用约束。",
+        CHAT_TIME_CONTEXT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.music_context_section", "一起听音乐段落", "聊天热路径", "音乐共听",
+        "主回复 system prompt 的「一起听音乐」段包装模板。运行时注入 {music_context}"
+        "（由 music.co_listening_context 渲染的共听上下文）。",
+        CHAT_MUSIC_CONTEXT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_label_named_relation", "记忆分组标签·关系命名", "聊天热路径", "记忆",
+        "「你记得的事情」段内【回答当前关系 / 名字问题优先参考】分组标签。"
+        "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
+        CHAT_MEMORY_LABEL_NAMED_RELATION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_label_literal_task", "记忆分组标签·当前问题", "聊天热路径", "记忆",
+        "「你记得的事情」段内【回答当前问题可参考】分组标签。"
+        "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
+        CHAT_MEMORY_LABEL_LITERAL_TASK_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_label_safety", "记忆分组标签·安全情绪", "聊天热路径", "记忆",
+        "「你记得的事情」段内【安全 / 情绪背景】分组标签。"
+        "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
+        CHAT_MEMORY_LABEL_SAFETY_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_label_profile_context", "记忆分组标签·用户同类资料", "聊天热路径", "记忆",
+        "「你记得的事情」段内【用户同类资料（仅用于避免重复追问）】分组标签。"
+        "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
+        CHAT_MEMORY_LABEL_PROFILE_CONTEXT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_label_other", "记忆分组标签·其他用户事实", "聊天热路径", "记忆",
+        "「你记得的事情」段内【用户告诉过你的其他事情】分组标签。"
+        "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
+        CHAT_MEMORY_LABEL_OTHER_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.memory_label_ai_self", "记忆分组标签·AI 自身经历", "聊天热路径", "记忆",
+        "「你记得的事情」段内【你自己的相关经历 / 人设】分组标签。"
+        "【结构性】停用时退回代码默认标签, 不会连带丢弃该组已检索的记忆。",
+        CHAT_MEMORY_LABEL_AI_SELF_PROMPT,
+    ),
+    PromptDefinition(
         "intent.conversation_end_fallback_instruction", "终结意图兜底指令", "意图处理", "意图",
-        "终结意图在专用回复失败时, 追加到主回复 prompt 的兜底指令。",
+        "【结构性兜底】终结意图在专用回复失败时, 追加到主回复 prompt 的兜底指令。"
+        "⚠️ 停用时退回代码默认文案 (道别链路必须产出), 不会从输入中移除。",
         CONVERSATION_END_FALLBACK_INSTRUCTION_PROMPT,
     ),
     PromptDefinition(
         "reply.delay_explanation_fallback_instruction", "延迟解释兜底指令", "异步回复", "回复加工",
-        "延迟解释回复失败时, 追加到主回复 prompt 的兜底指令。占位符 {delay_minutes}。",
+        "【结构性兜底】延迟解释回复失败时, 追加到主回复 prompt 的兜底指令。占位符 {delay_minutes}。"
+        "⚠️ 停用时退回代码默认文案, 不会从输入中移除。",
         DELAY_EXPLANATION_FALLBACK_INSTRUCTION_PROMPT,
     ),
     PromptDefinition(
         "intent.schedule_missing_context", "计划查询无作息上下文", "意图处理", "意图",
-        "计划查询命中未来/指定日期但没有缓存作息时注入的固定上下文。占位符 {date_label}。",
+        "【结构性兜底】计划查询命中未来/指定日期但没有缓存作息时注入的固定上下文。占位符 {date_label}。"
+        "⚠️ 停用时退回代码默认文案, 不会从输入中移除。",
         SCHEDULE_MISSING_CONTEXT_PROMPT,
     ),
     PromptDefinition(
@@ -701,6 +813,24 @@ PROMPT_DEFINITIONS = [
         APOLOGY_REPLY_PROMPT,
     ),
     PromptDefinition(
+        "boundary.patience_instruction_medium", "情绪状态提醒(中耐心)", "边界系统", "边界",
+        "《终稿·第三部分 交互系统》§2.3 / 5B.4: 耐心 30-69 (medium) 时注入主回复"
+        " system prompt 的「情绪状态提醒」段——语气带点冷淡。",
+        BOUNDARY_PATIENCE_MEDIUM_INSTRUCTION_PROMPT,
+    ),
+    PromptDefinition(
+        "boundary.patience_instruction_low", "情绪状态提醒(低耐心)", "边界系统", "边界",
+        "《终稿·第三部分 交互系统》§2.3 / 5B.4: 耐心 1-29 (low) 时注入主回复"
+        " system prompt 的「情绪状态提醒」段——简短冷漠。",
+        BOUNDARY_PATIENCE_LOW_INSTRUCTION_PROMPT,
+    ),
+    PromptDefinition(
+        "boundary.patience_instruction_blocked", "情绪状态提醒(拉黑态)", "边界系统", "边界",
+        "《终稿·第三部分 交互系统》§2.3 / 5B.4: 拉黑态 (仅道歉消息可达) 时注入主回复"
+        " system prompt 的「情绪状态提醒」段——还在生气但不完全无视。",
+        BOUNDARY_PATIENCE_BLOCKED_INSTRUCTION_PROMPT,
+    ),
+    PromptDefinition(
         "boundary.apology", "道歉真诚度检测", "边界系统", "边界",
         "【工程扩展】拉黑态防 spam-unblock: sincerity ≥ 0.5 阈值闸门用户是否真心道歉. "
         "《终稿·第三部分 交互系统》§2.6.2.1 的 intent.unified 仅做意图分类, 不评估真诚度——"
@@ -795,6 +925,42 @@ PROMPT_DEFINITIONS = [
         "《终稿·第三部分 交互系统》§6.5: "
         "实际延迟 ≥ 1 分钟时, 在主回复之前独立推送的延迟解释消息 (例「刚在忙...」).",
         DELAY_EXPLANATION_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_reason_conversation_mode", "延迟原因(交流状态)", "异步回复", "回复加工",
+        "《终稿·第三部分 交互系统》§6: 「回复时机说明」段 {delay_reason} 的分场景文案——"
+        "连续聊天中回复更快。",
+        REPLY_DELAY_REASON_CONVERSATION_MODE_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_reason_high_emotion", "延迟原因(高情绪)", "异步回复", "回复加工",
+        "《终稿·第三部分 交互系统》§6: 「回复时机说明」段 {delay_reason} 的分场景文案——"
+        "用户高情绪时更快接住。",
+        REPLY_DELAY_REASON_HIGH_EMOTION_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_reason_sleep", "延迟原因(睡眠)", "异步回复", "回复加工",
+        "《终稿·第三部分 交互系统》§6: 「回复时机说明」段 {delay_reason} 的分场景文案——"
+        "睡眠中没看到消息。占位符 {activity}。",
+        REPLY_DELAY_REASON_SLEEP_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_reason_very_busy", "延迟原因(很忙碌)", "异步回复", "回复加工",
+        "《终稿·第三部分 交互系统》§6: 「回复时机说明」段 {delay_reason} 的分场景文案——"
+        "当天最忙时段。占位符 {activity}。",
+        REPLY_DELAY_REASON_VERY_BUSY_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_reason_busy", "延迟原因(忙碌)", "异步回复", "回复加工",
+        "《终稿·第三部分 交互系统》§6: 「回复时机说明」段 {delay_reason} 的分场景文案——"
+        "忙碌导致回复拖后。占位符 {activity}。",
+        REPLY_DELAY_REASON_BUSY_PROMPT,
+    ),
+    PromptDefinition(
+        "reply.delay_reason_default", "延迟原因(默认)", "异步回复", "回复加工",
+        "《终稿·第三部分 交互系统》§6: 「回复时机说明」段 {delay_reason} 的兜底文案。"
+        "占位符 {activity}。",
+        REPLY_DELAY_REASON_DEFAULT_PROMPT,
     ),
     PromptDefinition(
         "reply.emotion_detection", "AI 语句情绪识别", "回复加工", "回复加工",

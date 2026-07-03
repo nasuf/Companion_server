@@ -121,3 +121,61 @@ def test_admin_prompt_canary_update_exposes_eval_result(api_client, monkeypatch)
     data = response.json()
     assert data["is_enabled"] is True
     assert data["eval_result"]["ok"] is True
+
+
+def test_admin_prompt_enabled_endpoint(api_client, monkeypatch):
+    from app.api.jwt_auth import require_admin_jwt
+    from app.main import app
+
+    calls: list[tuple[str, bool]] = []
+
+    async def fake_set_prompt_enabled(key: str, enabled: bool) -> dict:
+        calls.append((key, enabled))
+        return {
+            "key": key,
+            "title": "回忆相关度判断",
+            "stage": "日常交流",
+            "category": "记忆",
+            "description": "d",
+            "default_text": "t",
+            "content": "t",
+            "is_enabled": enabled,
+            "canary_config": None,
+            "updated_at": None,
+            "source": "redis",
+        }
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    monkeypatch.setattr("app.api.admin.prompts.set_prompt_enabled", fake_set_prompt_enabled)
+    try:
+        response = api_client.put(
+            "/admin-api/prompts/memory.relevance/enabled",
+            json={"is_enabled": False},
+        )
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+    assert response.status_code == 200
+    assert response.json()["is_enabled"] is False
+    assert calls == [("memory.relevance", False)]
+
+
+def test_admin_prompt_update_conflict_returns_409(api_client, monkeypatch):
+    from app.api.jwt_auth import require_admin_jwt
+    from app.main import app
+    from app.services.prompting.store import PromptUpdateConflictError
+
+    async def fake_update_prompt_text(key: str, content: str, *, expected_updated_at=None):
+        raise PromptUpdateConflictError("concurrent edit")
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    monkeypatch.setattr("app.api.admin.prompts.update_prompt_text", fake_update_prompt_text)
+    try:
+        response = api_client.put(
+            "/admin-api/prompts/memory.relevance",
+            json={"content": "new", "expected_updated_at": "2020-01-01T00:00:00+00:00"},
+        )
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+    assert response.status_code == 409

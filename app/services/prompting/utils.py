@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Any, Awaitable, Callable, Iterable
 
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import PromptDisabledError, get_prompt_text
 from app.services.prompting.trace_components import record_prompt_render
 
 logger = logging.getLogger(__name__)
@@ -178,6 +178,10 @@ async def render_prompt(
                 return _truncate_at_sentence_boundary(raw, max_chars)
             return raw
         return raw
+    except PromptDisabledError:
+        # admin 停用了该模板 → 本次 LLM 调用彻底跳过, 调用方走自身 fallback.
+        logger.info(f"render_prompt skipped: prompt disabled ({prompt_key})")
+        return None
     except Exception as e:
         logger.warning(f"render_prompt failed ({prompt_key}): {e}")
         return None

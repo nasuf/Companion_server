@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.prompt_template import (
     PromptCanaryConfigRequest,
     PromptCanaryConfigResponse,
+    PromptTemplateEnabledRequest,
     PromptTemplateReplayRequest,
     PromptTemplateReplayResponse,
     PromptTemplateRestoreVersionRequest,
@@ -16,12 +17,14 @@ from app.models.prompt_template import (
 from app.services.llm.models import convert_messages, get_chat_model, get_utility_model, invoke_text
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from app.services.prompting.store import (
+    PromptUpdateConflictError,
     disable_prompt_canary,
     get_prompt_canary_config,
     list_prompt_versions,
     list_prompts,
     reset_prompt_text,
     restore_prompt_version,
+    set_prompt_enabled,
     update_prompt_canary_config,
     update_prompt_text,
 )
@@ -57,11 +60,32 @@ async def update_prompt(
     _: str = Depends(require_admin_jwt),
 ):
     try:
-        prompt = await update_prompt_text(key, payload.content)
+        prompt = await update_prompt_text(
+            key,
+            payload.content,
+            expected_updated_at=payload.expected_updated_at,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
+    except PromptUpdateConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return PromptTemplateResponse(**prompt)
+
+
+@router.put("/{key}/enabled", response_model=PromptTemplateResponse)
+async def update_prompt_enabled(
+    key: str,
+    payload: PromptTemplateEnabledRequest,
+    _: str = Depends(require_admin_jwt),
+):
+    """启用/停用提示词. 停用后该模板从运行时最终输入中彻底移除:
+    组合 section → 该段不注入; 独立步骤 prompt → 该 LLM 调用跳过走 fallback."""
+    try:
+        prompt = await set_prompt_enabled(key, payload.is_enabled)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt not found") from None
     return PromptTemplateResponse(**prompt)
 
 
@@ -93,9 +117,13 @@ async def replay_prompt_step(
 
 
 @router.get("/{key}/versions", response_model=list[PromptTemplateVersionResponse])
-async def get_prompt_versions(key: str, _: str = Depends(require_admin_jwt)):
+async def get_prompt_versions(
+    key: str,
+    limit: int = Query(default=20, ge=1, le=200),
+    _: str = Depends(require_admin_jwt),
+):
     try:
-        versions = await list_prompt_versions(key)
+        versions = await list_prompt_versions(key, limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
     return [PromptTemplateVersionResponse(**version) for version in versions]

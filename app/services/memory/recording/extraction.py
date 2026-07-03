@@ -16,7 +16,7 @@ from app.config import settings
 from app.observability.events import EVT_LLM_FAIL, EVT_MEMORY_EXTRACTED
 from app.services.llm.models import get_chat_model, invoke_json
 from app.services.memory.taxonomy import TAXONOMY_MATRIX
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import PromptDisabledError, get_prompt_text
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,14 @@ async def extract_memories(
     """
     model = get_chat_model()  # spec §2.1.3 / §2.2.3: 大模型精细处理
     now = datetime.now(ZoneInfo(settings.schedule_timezone))
-    prompt = (await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])).format(
+    try:
+        tpl = await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])
+    except PromptDisabledError:
+        # admin 停用抽取模板 → 本条消息不抽记忆, 但不能让异常打断整条
+        # _bg_memory_pipeline (否则时间解析/changelog/提醒 timetrigger 全部连坐).
+        logger.info(f"memory extraction prompt disabled, skipping side={side}")
+        return {"memories": [], "entities": [], "preferences": [], "topics": []}
+    prompt = tpl.format(
         new_conversation=new_conversation,
         context_conversation=context_conversation or "(无)",
         current_time=now.strftime("%Y-%m-%d %H:%M %A"),

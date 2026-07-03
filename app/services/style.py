@@ -2,15 +2,32 @@
 
 将 MBTI 性格映射到具体的语言风格指令——语气词、标点、句式、用词偏好。
 spec §1.2 起，所有性格描述统一用 MBTI 表达。
+
+通用规则 (不随 MBTI 变化的开头/收尾) 由 prompting registry 管理
+(chat.style_base_rule / chat.style_closing_rule)，prompt_builder 取到后作为
+参数传入；MBTI 条件性片段仍由本模块按性格数值生成。
 """
 
 from __future__ import annotations
 
 from app.services.mbti import signal
+from app.services.prompting.defaults import (
+    CHAT_STYLE_BASE_RULE_PROMPT,
+    CHAT_STYLE_CLOSING_RULE_PROMPT,
+)
 
 
-def generate_style_instruction(mbti: dict | None) -> str:
-    """根据 MBTI 4 维度生成语言风格指令。spec §1.2: MBTI 是 canonical。"""
+def generate_style_instruction(
+    mbti: dict | None,
+    *,
+    base_rule: str | None = CHAT_STYLE_BASE_RULE_PROMPT,
+    closing_rule: str | None = CHAT_STYLE_CLOSING_RULE_PROMPT,
+) -> str:
+    """根据 MBTI 4 维度生成语言风格指令。spec §1.2: MBTI 是 canonical。
+
+    base_rule / closing_rule: registry 管理的通用规则文本；显式传 None 表示
+    该条已被 admin 停用，需从输出中彻底省略。
+    """
     e = signal(mbti, "E")
     t = signal(mbti, "T")
     f = signal(mbti, "F")
@@ -20,7 +37,8 @@ def generate_style_instruction(mbti: dict | None) -> str:
 
     parts: list[str] = []
 
-    parts.append("口语自然一点，但不要刻意卖萌、不要堆语气词，也不要每句都带波浪号")
+    if base_rule:
+        parts.append(base_rule)
 
     # E → 语气轻快程度
     if e >= 0.7:
@@ -63,7 +81,7 @@ def generate_style_instruction(mbti: dict | None) -> str:
     else:
         parts.append("回复长度适中，1-3句话就够")
 
-    parts.append('不要频繁反问，不要每轮都用"你呢""咋样呀""说说看"这类万能追问')
-    parts.append("如果用户在闹情绪、抱怨你、或者明显低落，先接住情绪，再决定要不要解释和追问")
+    if closing_rule:
+        parts.append(closing_rule)
 
     return "；".join(parts) + "。"

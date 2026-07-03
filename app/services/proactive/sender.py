@@ -45,7 +45,7 @@ from app.services.proactive.state import (
     log_proactive_event,
     mark_proactive_sent,
 )
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import PromptDisabledError, get_prompt_text
 from app.services.prompting.utils import render_template
 from app.services.interaction.reply_context import save_last_reply_timestamp
 
@@ -314,18 +314,24 @@ async def _generate_message(ctx: dict) -> str | None:
     source = ctx.get("source") or "greeting"
     personality_brief = _build_personality_brief(agent)
 
-    if ctx.get("is_decay_final"):
-        tpl = await get_prompt_text("proactive.decay_final")
-        prompt = tpl.format(personality_brief=personality_brief)
-    else:
-        key = _PROMPT_KEY_BY_SOURCE.get(
-            (trigger_type, source), "proactive.silence_plain"
-        )
-        tpl = await get_prompt_text(key)
-        ctx["__tpl"] = tpl
-        prompt = _format_prompt(key, ctx, personality_brief)
-        if not prompt:
-            return None
+    try:
+        if ctx.get("is_decay_final"):
+            tpl = await get_prompt_text("proactive.decay_final")
+            prompt = tpl.format(personality_brief=personality_brief)
+        else:
+            key = _PROMPT_KEY_BY_SOURCE.get(
+                (trigger_type, source), "proactive.silence_plain"
+            )
+            tpl = await get_prompt_text(key)
+            ctx["__tpl"] = tpl
+            prompt = _format_prompt(key, ctx, personality_brief)
+            if not prompt:
+                return None
+    except PromptDisabledError as e:
+        # admin 停用该主动消息模板 → 按"本次未生成"处理 (return None),
+        # 让上游正常推进窗口, 不能让异常卡死 proactive 状态机.
+        logger.info(f"Proactive prompt disabled, skipping: {e}")
+        return None
 
     response = (await invoke_text(get_chat_model(), prompt)).strip()
     if response == "SKIP" or len(response) < 4:
@@ -711,7 +717,14 @@ async def send_first_greeting(
             scope="proactive", conversation_id=conversation_id,
             agent_id=agent_id, user_id=user_id,
         ) as tracer:
-            tpl = await get_prompt_text("proactive.first_greeting")
+            try:
+                tpl = await get_prompt_text("proactive.first_greeting")
+            except PromptDisabledError:
+                # 停用开场白模板 → 释放 NX 锁再跳过, 否则重新启用后 24h 内
+                # 该会话的开场白被烧掉的锁永久吞掉.
+                logger.info("first_greeting prompt disabled, skipping")
+                await redis.delete(lock_key)
+                return False
             prompt = tpl.format(
                 ai_name=agent.name,
                 personality_brief=_build_personality_brief(agent),

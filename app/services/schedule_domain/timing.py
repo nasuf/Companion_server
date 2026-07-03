@@ -62,16 +62,36 @@ def calculate_status_delay(status: str) -> float:
     return random.uniform(4, 6)
 
 
-def explain_delay_reason(reason: str, activity: str | None = None, status: str | None = None) -> str:
-    """Human-readable delay reason summary for prompt injection."""
-    if reason == "conversation_mode":
-        return "你们刚刚一直在连续聊天，所以通常会回得更快。"
-    if reason == "high_emotion":
-        return "用户情绪较强烈，你会倾向于更快接住对方的情绪。"
-    if reason == "schedule_sleep":
-        return f"收到消息时你正在{activity or '睡觉'}，因此没有立刻看到消息。"
-    if reason == "schedule_very_busy":
-        return f"收到消息时你正在{activity or '忙事情'}，而且是当天最忙的时段。"
-    if reason == "schedule_busy":
-        return f"收到消息时你正在{activity or '处理日常安排'}，所以回复被拖后了。"
-    return f"收到消息时你在{activity or '安排自己的事情'}，回复节奏受当时状态影响。"
+# reason → (registry prompt key, {activity} 兜底默认值). 文案由 registry 管理
+# (reply.delay_reason_*), 停用某条 → 该场景延迟原因说明从最终输入中彻底移除.
+_DELAY_REASON_PROMPT_KEYS: dict[str, tuple[str, str]] = {
+    "conversation_mode": ("reply.delay_reason_conversation_mode", ""),
+    "high_emotion": ("reply.delay_reason_high_emotion", ""),
+    "schedule_sleep": ("reply.delay_reason_sleep", "睡觉"),
+    "schedule_very_busy": ("reply.delay_reason_very_busy", "忙事情"),
+    "schedule_busy": ("reply.delay_reason_busy", "处理日常安排"),
+}
+_DELAY_REASON_DEFAULT_KEY = ("reply.delay_reason_default", "安排自己的事情")
+
+
+async def explain_delay_reason(reason: str, activity: str | None = None, status: str | None = None) -> str:
+    """Human-readable delay reason summary for prompt injection.
+
+    文案取自 prompting registry; 停用时返回空串 (delay section 模板经
+    render_template 会把空行剔除). registry 读取失败退回代码默认文案.
+    """
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+    from app.services.prompting.store import PromptDisabledError, get_prompt_text
+
+    prompt_key, default_activity = _DELAY_REASON_PROMPT_KEYS.get(reason, _DELAY_REASON_DEFAULT_KEY)
+    params = {"activity": activity or default_activity}
+    try:
+        tpl = await get_prompt_text(prompt_key)
+    except PromptDisabledError:
+        return ""
+    except Exception:
+        tpl = PROMPT_DEFINITION_MAP[prompt_key].default_text
+    try:
+        return tpl.format(**params)
+    except Exception:
+        return str(tpl)

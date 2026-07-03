@@ -186,6 +186,7 @@ def test_main_reply_exposes_component_prompt_keys():
     assert keys == [
         "chat.system_base",
         "chat.anti_hallucination_hard_rule",
+        "chat.personality_section",
         "chat.consistency_rules",
         "chat.response_instruction",
     ]
@@ -202,7 +203,7 @@ def test_structured_prompt_render_trace_overrides_legacy_section_guessing():
     ])
     step = trace_enrich.enrich_step(_fake_llm_step(prompt))
     legacy_keys = [item["prompt_key"] for item in step.get("prompt_components", [])]
-    assert legacy_keys == ["chat.system_base"]
+    assert legacy_keys == ["chat.system_base", "chat.relationship_stage_section"]
 
     start = prompt.index("你们目前的关系")
     end = start + len("你们目前的关系是初识。")

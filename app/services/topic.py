@@ -108,12 +108,8 @@ def detect_topic_fatigue(topic_info: dict, recent_messages: list[str] | None = N
     return False
 
 
-def format_topic_context(current_topic: dict) -> str | None:
-    """格式化当前话题上下文供Prompt注入。"""
-    if not current_topic:
-        return None
-    return f"当前话题：{current_topic['category']}（已持续{current_topic['turns']}轮）"
-
+# format_topic_context 已删除: orchestrator 直传 push_topic 的 dict 给
+# prompt_builder, 由 chat.topic_context_section 模板渲染 (registry 管理).
 
 # --- 2I.6 话题推荐 ---
 

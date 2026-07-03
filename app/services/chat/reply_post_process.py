@@ -18,7 +18,7 @@ from app.observability.events import EVT_LLM_FAIL, EVT_REPLY_DECORATION
 from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
-from app.services.prompting.store import get_prompt_text
+from app.services.prompting.store import get_prompt_text_or_default
 from app.services.sticker import recommend_sticker
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,11 @@ async def _build_delay_explanation_text(
             delay_minutes=minutes,
         )
         if not text:
-            fallback_tpl = await get_prompt_text("reply.delay_explanation_fallback_instruction")
+            # 结构性兜底指令: 停用时退回代码默认 (与 conversation_end_fallback /
+            # schedule_missing_context 两个 sibling 语义一致, 延迟解释链路不断).
+            fallback_tpl = await get_prompt_text_or_default(
+                "reply.delay_explanation_fallback_instruction"
+            )
             text = await fallback_fn(
                 agent, user_message,
                 fallback_tpl.format(

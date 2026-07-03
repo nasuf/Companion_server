@@ -464,8 +464,8 @@ APOLOGY_KEYWORDS = [
 
 async def detect_apology(message: str) -> dict:
     """检测道歉意图。后台异步调用。"""
-    prompt = (await get_prompt_text("boundary.apology")).format(message=message)
     try:
+        prompt = (await get_prompt_text("boundary.apology")).format(message=message)
         result = await invoke_json(get_utility_model(), prompt)
         return {
             "is_apology": bool(result.get("is_apology", False)),
@@ -578,26 +578,41 @@ async def check_positive_recovery(
 
 # --- 5B.4 耐心区间描述（供Prompt注入） ---
 
-def get_patience_prompt_instruction(patience: int) -> str | None:
+# zone → 「情绪状态提醒」段的 registry key. 文案由 registry 管理, 停用某档 →
+# 该段从主回复 system prompt 中彻底移除.
+_ZONE_TO_PATIENCE_INSTRUCTION_KEY = {
+    "blocked": "boundary.patience_instruction_blocked",
+    "medium": "boundary.patience_instruction_medium",
+    "low": "boundary.patience_instruction_low",
+}
+
+
+async def get_patience_prompt_instruction(patience: int) -> str | None:
     """5B.4 根据耐心区间返回语气描述，注入系统提示。
 
     - normal (70-100): 无额外描述
     - medium (30-69): "你对用户有些不满"
     - low (1-29): "你非常不开心"
     - blocked (≤0): 用户正在道歉（只有道歉消息才能到达此处）
+
+    返回 ManagedPromptText (携带 prompt_key), prompt_builder 据此把该段标记为
+    trace 内可编辑组件. registry 读取失败退回代码默认文案.
     """
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+    from app.services.prompting.store import PromptDisabledError, get_prompt_text
+    from app.services.prompting.trace_components import ManagedPromptText
+
     zone = get_patience_zone(patience)
-    if zone == "blocked":
-        return (
-            "你之前因为用户的冒犯非常生气，已经不想理用户了。"
-            "现在用户在向你道歉。你可以表现得还在生气、委屈，"
-            "但不要完全无视。根据你的性格决定是否接受道歉，回复要简短。"
-        )
-    if zone == "medium":
-        return "你对用户有些不满，因为用户之前说了一些不好听的话。你的回复会带点冷淡，不那么热情。"
-    elif zone == "low":
-        return "你非常不开心，用户之前对你很不友善。你的回复非常简短冷漠，明确表达你的不满。"
-    return None
+    key = _ZONE_TO_PATIENCE_INSTRUCTION_KEY.get(zone)
+    if not key:
+        return None
+    try:
+        return await get_prompt_text(key)
+    except PromptDisabledError:
+        return None
+    except Exception as e:
+        logger.warning(f"patience instruction fetch failed ({key}): {e}")
+        return ManagedPromptText(PROMPT_DEFINITION_MAP[key].default_text, key)
 
 
 # --- 热路径入口：边界检查 ---

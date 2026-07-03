@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import string
+import time
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -24,6 +25,29 @@ logger = logging.getLogger(__name__)
 
 PROMPT_KEY_PREFIX = "prompt_template:"
 PROMPT_CANARY_KEY_PREFIX = "prompt_canary:"
+PROMPT_ENABLED_KEY_PREFIX = "prompt_enabled:"
+
+# enabled 状态的进程内缓存 TTL. 热路径每次 get_prompt_text 都要判断 enabled,
+# 不能每次打 Redis; 10s 内以本进程缓存为准 (多 worker 下停用最多 10s 后全量生效,
+# 跟 canary 配置的 5min Redis TTL 相比已经严格得多).
+_ENABLED_LOCAL_TTL_SECONDS = 10.0
+_enabled_local_cache: dict[str, tuple[bool, float]] = {}
+
+
+class PromptDisabledError(Exception):
+    """Raised when a prompt template is disabled by admin.
+
+    - render_prompt 捕获后返回 None (调用方已有 fallback 语义).
+    - prompt_builder 捕获后跳过对应 section (从最终模型输入中彻底移除).
+    """
+
+    def __init__(self, key: str):
+        super().__init__(f"Prompt disabled: {key}")
+        self.key = key
+
+
+class PromptUpdateConflictError(Exception):
+    """Raised when an optimistic-lock save detects a concurrent modification."""
 _ROOT = Path(__file__).resolve().parents[3]
 _EVAL_CASES = _ROOT / "evals" / "cases.jsonl"
 _prompt_runtime_context: ContextVar[dict[str, str | None] | None] = ContextVar(
@@ -38,6 +62,87 @@ def _redis_key(key: str) -> str:
 
 def _canary_redis_key(key: str) -> str:
     return f"{PROMPT_CANARY_KEY_PREFIX}{key}"
+
+
+def _enabled_redis_key(key: str) -> str:
+    return f"{PROMPT_ENABLED_KEY_PREFIX}{key}"
+
+
+def _cache_enabled_local(key: str, enabled: bool) -> None:
+    _enabled_local_cache[key] = (enabled, time.monotonic() + _ENABLED_LOCAL_TTL_SECONDS)
+
+
+async def is_prompt_enabled(key: str) -> bool:
+    """Return the admin enable/disable state (local cache → Redis → DB)."""
+    if key not in PROMPT_DEFINITION_MAP:
+        raise KeyError(f"Unknown prompt key: {key}")
+    cached = _enabled_local_cache.get(key)
+    if cached is not None and cached[1] > time.monotonic():
+        return cached[0]
+
+    redis = await get_redis()
+    raw = await redis.get(_enabled_redis_key(key))
+    if raw is None:
+        record = await db.prompttemplate.find_unique(where={"key": key})
+        enabled = bool(record.isEnabled) if record else True
+        await redis.set(_enabled_redis_key(key), "1" if enabled else "0")
+    else:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "ignore")
+        enabled = str(raw) != "0"
+    _cache_enabled_local(key, enabled)
+    return enabled
+
+
+async def set_prompt_enabled(key: str, enabled: bool) -> dict:
+    """Persist enable/disable to DB + Redis and record an audit version entry."""
+    definition = PROMPT_DEFINITION_MAP.get(key)
+    if not definition:
+        raise KeyError(f"Unknown prompt key: {key}")
+
+    row = await db.prompttemplate.find_unique(where={"key": key})
+    if row:
+        row = await db.prompttemplate.update(
+            where={"key": key},
+            data={"isEnabled": enabled},
+        )
+    else:
+        row = await db.prompttemplate.create(
+            data={
+                "key": key,
+                "stage": definition.stage,
+                "category": definition.category,
+                "title": definition.title,
+                "description": definition.description,
+                "content": definition.default_text,
+                "defaultContent": definition.default_text,
+                "isEnabled": enabled,
+            }
+        )
+
+    redis = await get_redis()
+    await redis.set(_enabled_redis_key(key), "1" if enabled else "0")
+    _cache_enabled_local(key, enabled)
+
+    # enable/disable 也进版本表留审计痕迹 (content 记录当时生效内容, 便于追溯).
+    await _create_prompt_version(
+        prompt_id=row.id,
+        prompt_key=key,
+        content=row.content,
+        source="redis",
+        change_type="enable" if enabled else "disable",
+    )
+    logger.info("[PROMPT-ENABLED] key=%s enabled=%s", key, enabled)
+
+    cached = await redis.get(_redis_key(key))
+    return {
+        **asdict(definition),
+        "content": cached or row.content,
+        "is_enabled": enabled,
+        "canary_config": _json_or_none(getattr(row, "canaryConfig", None)),
+        "updated_at": row.updatedAt.isoformat() if getattr(row, "updatedAt", None) else None,
+        "source": "redis" if cached else "db",
+    }
 
 
 def set_prompt_runtime_context(
@@ -237,6 +342,7 @@ async def ensure_prompt_templates() -> None:
         await db.prompttemplate.delete_many(where={"key": {"in": orphan_keys}})
         for k in orphan_keys:
             pipe.delete(_redis_key(k))
+            pipe.delete(_enabled_redis_key(k))
 
     # 代码 default 视为 prompt 终极真理: defaultContent 与代码不一致时同步覆盖
     # content, UI 定制作废; default 未变期间保留 UI 定制 (update_prompt_text
@@ -244,6 +350,10 @@ async def ensure_prompt_templates() -> None:
     code_sync_keys: list[str] = []
     for definition in PROMPT_DEFINITIONS:
         existing = existing_map.get(definition.key)
+        pipe.set(
+            _enabled_redis_key(definition.key),
+            "0" if (existing and not existing.isEnabled) else "1",
+        )
         if existing:
             default_changed = existing.defaultContent != definition.default_text
             metadata_changed = (
@@ -342,10 +452,17 @@ async def get_prompt_text_for_context(
     agent_id: str | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Fetch latest prompt text from Redis, falling back to DB/default."""
+    """Fetch latest prompt text from Redis, falling back to DB/default.
+
+    Raises PromptDisabledError when the template is disabled by admin —
+    callers must treat that as "本段/本功能提示词彻底不存在".
+    """
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
         raise KeyError(f"Unknown prompt key: {key}")
+
+    if not await is_prompt_enabled(key):
+        raise PromptDisabledError(key)
 
     if agent_id or user_id:
         config = await _load_canary_config(key)
@@ -361,6 +478,21 @@ async def get_prompt_text_for_context(
     content = record.content if record and record.content else definition.default_text
     await redis.set(_redis_key(key), content)
     return ManagedPromptText(content, key)
+
+
+async def get_prompt_text_or_default(key: str) -> str:
+    """Like get_prompt_text, but disabled prompts fall back to code default.
+
+    仅用于「停用会让必需链路断裂」的结构性兜底指令 (如终结意图兜底/作息缺上下文),
+    这些场景必须有文本可用; 停用语义退化为「回到代码默认文案」。
+    普通模板请用 get_prompt_text 并处理 PromptDisabledError.
+    """
+    try:
+        return await get_prompt_text(key)
+    except PromptDisabledError:
+        definition = PROMPT_DEFINITION_MAP[key]
+        logger.info("[PROMPT-DISABLED] structural key=%s falls back to code default", key)
+        return ManagedPromptText(definition.default_text, key, prompt_variant="default")
 
 
 async def list_prompts() -> list[dict]:
@@ -387,6 +519,22 @@ async def list_prompts() -> list[dict]:
     return prompts
 
 
+async def _attach_eval_to_version(version_id: str, prompt_key: str, change_type: str) -> None:
+    """Background eval snapshot — 版本行先落库保证持久性, eval 慢跑后回填."""
+    try:
+        eval_result = await asyncio.to_thread(
+            _prompt_eval_result,
+            prompt_key=prompt_key,
+            change_type=change_type,
+        )
+        await db.prompttemplateversion.update(
+            where={"id": version_id},
+            data={"evalResult": Json(eval_result)},
+        )
+    except Exception as exc:
+        logger.warning("[PROMPT-EVAL] attach failed version=%s key=%s: %s", version_id, prompt_key, exc)
+
+
 async def _create_prompt_version(
     *,
     prompt_id: str,
@@ -396,22 +544,22 @@ async def _create_prompt_version(
     change_type: str,
     attach_eval: bool = False,
 ) -> None:
-    eval_result = _prompt_eval_result(
-        prompt_key=prompt_key,
-        change_type=change_type,
-    ) if attach_eval else None
-    data = {
-        "promptId": prompt_id,
-        "promptKey": prompt_key,
-        "content": content,
-        "source": source,
-        "changeType": change_type,
-    }
-    if eval_result is not None:
-        data["evalResult"] = Json(eval_result)
-    await db.prompttemplateversion.create(
-        data=data
+    version = await db.prompttemplateversion.create(
+        data={
+            "promptId": prompt_id,
+            "promptKey": prompt_key,
+            "content": content,
+            "source": source,
+            "changeType": change_type,
+        }
     )
+    if attach_eval:
+        # eval 快照可能要跑本地模拟 (秒级), 移出保存关键路径; 失败只丢 eval 徽章,
+        # 不影响版本记录本身的持久性. fire_background 统一处理错误日志/取消/
+        # request-scoped ContextVar 隔离.
+        from app.services.runtime.tasks import fire_background
+
+        fire_background(_attach_eval_to_version(version.id, prompt_key, change_type))
 
 
 async def list_prompt_versions(key: str, limit: int = 20) -> list[dict]:
@@ -445,7 +593,15 @@ async def _persist_prompt_update(
     *,
     source: str,
     change_type: str,
-) -> dict:
+    require_updated_at: Any = None,
+) -> Any:
+    """Persist content + version row.
+
+    require_updated_at: 乐观锁的原子形态 — 提供时用条件 update_many
+    (where key AND updatedAt) 代替无条件 update, 命中 0 行说明校验与写入的
+    间隙有并发修改, 抛 PromptUpdateConflictError. 仅 check-then-act 的
+    find_unique 比对挡不住毫秒级并发双写.
+    """
     definition = PROMPT_DEFINITION_MAP[key]
     try:
         existing = await db.prompttemplate.find_unique(where={"key": key})
@@ -454,16 +610,28 @@ async def _persist_prompt_update(
             # 代码 default 的快照), 只归 bootstrap + startup sync 写. UI 保存 / reset
             # / restore 路径不能触它, 否则下次代码改 default 时 sync 认为"哨兵对得
             # 上" → 放弃覆盖 → UI 永远停在旧版本.
-            row = await db.prompttemplate.update(
-                where={"key": key},
-                data={
-                    "content": content,
-                    "stage": definition.stage,
-                    "category": definition.category,
-                    "title": definition.title,
-                    "description": definition.description,
-                },
-            )
+            data = {
+                "content": content,
+                "stage": definition.stage,
+                "category": definition.category,
+                "title": definition.title,
+                "description": definition.description,
+            }
+            if require_updated_at is not None:
+                count = await db.prompttemplate.update_many(
+                    where={"key": key, "updatedAt": require_updated_at},
+                    data=data,
+                )
+                if not count:
+                    raise PromptUpdateConflictError(
+                        f"Prompt {key} was modified concurrently during save"
+                    )
+                row = await db.prompttemplate.find_unique(where={"key": key})
+            else:
+                row = await db.prompttemplate.update(
+                    where={"key": key},
+                    data=data,
+                )
         else:
             row = await db.prompttemplate.create(
                 data={
@@ -491,8 +659,23 @@ async def _persist_prompt_update(
         raise
 
 
-async def update_prompt_text(key: str, content: str) -> dict:
-    """Write prompt to Redis immediately and persist to DB asynchronously."""
+async def update_prompt_text(
+    key: str,
+    content: str,
+    *,
+    expected_updated_at: str | None = None,
+) -> dict:
+    """Persist prompt update: Redis 先写立即生效, DB + 版本记录同步落库.
+
+    历史实现 DB 持久化是 fire-and-forget task, 存在两类丢失窗口:
+    1. 进程在 task 完成前崩溃 → 版本历史缺条, 且下次启动 Redis 被 DB 旧值覆盖;
+    2. 并发保存 task 完成顺序不定 → DB 内容与 Redis 分叉.
+    现改为: 校验 → 内容去重 → (可选) 乐观锁 → Redis 写入 → DB 同步落库,
+    DB 失败时回滚 Redis 并抛错, 保证 Redis/DB/版本表三者一致.
+
+    expected_updated_at: 前端携带其所见的 updated_at 快照; 与 DB 当前值不一致说明
+    有人并发改过 → 抛 PromptUpdateConflictError (API 层转 409), 防止静默互相覆盖.
+    """
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
         raise KeyError(f"Unknown prompt key: {key}")
@@ -507,23 +690,69 @@ async def update_prompt_text(key: str, content: str) -> dict:
             + ", ".join(f"{{{name}}}" for name in missing)
         )
 
+    existing = await db.prompttemplate.find_unique(where={"key": key})
+    if (
+        expected_updated_at
+        and existing
+        and existing.updatedAt
+        and existing.updatedAt.isoformat() != expected_updated_at
+    ):
+        raise PromptUpdateConflictError(
+            f"Prompt {key} was modified by someone else at {existing.updatedAt.isoformat()}"
+        )
+
     redis = await get_redis()
-    await redis.set(_redis_key(key), normalized)
+    previous_cached = await redis.get(_redis_key(key))
+    current_effective = previous_cached or (
+        existing.content if existing and existing.content else definition.default_text
+    )
     canary_config = await _load_canary_config(key)
-    task = asyncio.create_task(
-        _persist_prompt_update(
+
+    if (
+        normalized == current_effective
+        and existing is not None
+        and existing.content == normalized
+    ):
+        # 内容没变: 不产生重复版本记录, 直接返回当前状态.
+        # 必须同时要求 DB 一致 — 若 Redis 与 DB 分叉 (历史异步落库失败的存量),
+        # 管理员原样保存当前可见内容应当落 DB 修复分叉, 而不是静默 no-op
+        # (否则下次重启 ensure_prompt_templates 会用 DB 旧值覆盖 Redis 回退文案).
+        return {
+            **asdict(definition),
+            "content": normalized,
+            "is_enabled": bool(existing.isEnabled),
+            "canary_config": canary_config,
+            "updated_at": existing.updatedAt.isoformat() if existing.updatedAt else None,
+            "source": "redis" if previous_cached else "db",
+        }
+
+    await redis.set(_redis_key(key), normalized)
+    try:
+        row = await _persist_prompt_update(
             key,
             normalized,
             source="redis",
             change_type="manual_save",
+            # 带乐观锁请求时把校验下推为原子条件更新, 覆盖 find_unique 比对
+            # 与 update 之间的并发窗口.
+            require_updated_at=(
+                existing.updatedAt if expected_updated_at and existing else None
+            ),
         )
-    )
-    task.add_done_callback(lambda t: t.exception() and logger.error("Prompt save task failed: %s", t.exception()))
+    except Exception:
+        # DB 落库失败 / 并发冲突 → 回滚 Redis, 保持一致性 (宁可保存失败也不要静默分叉).
+        if previous_cached is not None:
+            await redis.set(_redis_key(key), previous_cached)
+        else:
+            await redis.delete(_redis_key(key))
+        raise
 
     return {
         **asdict(definition),
         "content": normalized,
+        "is_enabled": bool(getattr(row, "isEnabled", True)),
         "canary_config": canary_config,
+        "updated_at": row.updatedAt.isoformat() if getattr(row, "updatedAt", None) else None,
         "source": "redis",
     }
 
@@ -545,6 +774,9 @@ async def reset_prompt_text(key: str) -> dict:
     return {
         **asdict(definition),
         "content": definition.default_text,
+        # is_enabled 必须回传真实 DB 值: PromptTemplateResponse 默认 True,
+        # 漏传会让前端把已停用模板显示成已启用 (UI 与运行时状态分叉).
+        "is_enabled": bool(getattr(row, "isEnabled", True)),
         "canary_config": _json_or_none(getattr(row, "canaryConfig", None)),
         "source": "default",
         "updated_at": row.updatedAt.isoformat() if row else None,
@@ -571,6 +803,7 @@ async def restore_prompt_version(key: str, version_id: str) -> dict:
     return {
         **asdict(definition),
         "content": version.content,
+        "is_enabled": bool(getattr(row, "isEnabled", True)),
         "canary_config": _json_or_none(getattr(row, "canaryConfig", None)),
         "source": "redis",
         "updated_at": row.updatedAt.isoformat() if row else None,

@@ -7,17 +7,22 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
-async def _prompt_text(key: str) -> str:
+async def _prompt_text(key: str, **_kwargs) -> str:
     from app.services.prompting import defaults
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 
-    return {
+    overrides = {
         "chat.system_base": "像朋友一样回复。",
         "chat.consistency_rules": "不要说出与记忆矛盾的话。",
         "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
         "chat.anti_hallucination_hard_rule": "用户问记忆时必须检查记忆段。",
         "chat.memory_empty_anchor": defaults.CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
         "chat.memory_section_body": defaults.CHAT_MEMORY_SECTION_BODY_PROMPT,
-    }.get(key, "")
+    }
+    if key in overrides:
+        return overrides[key]
+    definition = PROMPT_DEFINITION_MAP.get(key)
+    return definition.default_text if definition else ""
 
 
 def _body(section) -> str:
@@ -29,7 +34,8 @@ async def test_memory_section_adds_lightweight_importance_tags():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)):
+    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
                 id="m1",
@@ -63,7 +69,8 @@ async def test_memory_section_groups_task_and_safety_memories():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)):
+    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
                 id="task",
@@ -126,7 +133,8 @@ async def test_memory_section_separates_user_profile_context_from_answer_facts()
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)):
+    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
                 id="user-age",
@@ -158,7 +166,8 @@ async def test_memory_section_declares_fact_precedence_over_history_and_l3():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)):
+    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
                 id="age",
@@ -185,16 +194,22 @@ async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
     from app.services.chat.prompt_builder import build_system_prompt
 
     async def _prompt_text(key: str, **_kwargs) -> str:
-        return {
+        from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+        overrides = {
             "chat.system_base": "像朋友一样回复。",
             "chat.consistency_rules": "。",
             "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
             "chat.anti_hallucination_hard_rule": "。",
-        }[key]
+        }
+        if key in overrides:
+            return overrides[key]
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         diagnostics = {}
         prompt = await build_system_prompt(
@@ -224,16 +239,22 @@ async def test_system_prompt_includes_agent_age_from_identity():
     from app.services.chat.prompt_builder import build_system_prompt
 
     async def _prompt_text(key: str, **_kwargs) -> str:
-        return {
+        from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+        overrides = {
             "chat.system_base": "像朋友一样回复。",
             "chat.consistency_rules": "。",
             "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
             "chat.anti_hallucination_hard_rule": "。",
-        }[key]
+        }
+        if key in overrides:
+            return overrides[key]
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hia", age=24, values={"gender": "female"}),
@@ -261,8 +282,8 @@ async def test_system_prompt_keeps_empty_memory_anchor_when_hard_rule_active():
         }.get(key, "")
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
@@ -286,18 +307,24 @@ async def test_l3_section_cannot_override_current_memory_facts():
     async def _prompt_text(key: str, **_kwargs) -> str:
         from app.services.prompting import defaults
 
-        return {
+        from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+        overrides = {
             "chat.system_base": "像朋友一样回复。",
             "chat.consistency_rules": "不要说出与记忆矛盾的话。",
             "chat.response_instruction": "分{n}条消息回复，总共不超过{total}字。",
             "chat.anti_hallucination_hard_rule": "用户问记忆时必须检查记忆段。",
             "chat.memory_section_body": defaults.CHAT_MEMORY_SECTION_BODY_PROMPT,
             "chat.l3_memory_section": defaults.CHAT_L3_MEMORY_SECTION_PROMPT,
-        }.get(key, "")
+        }
+        if key in overrides:
+            return overrides[key]
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
@@ -322,3 +349,39 @@ async def test_l3_section_cannot_override_current_memory_facts():
     assert "L3 是低置信历史线索" in prompt
     assert "不能覆盖「你记得的事情」里的当前事实" in prompt
     assert "若两者冲突，以当前记忆为准" in prompt
+
+
+@pytest.mark.asyncio
+async def test_disabled_prompt_section_completely_removed_from_system_prompt():
+    """admin 停用某 section 模板 → 该段 (含标题) 从最终 system prompt 中彻底消失."""
+    from app.services.chat.prompt_builder import build_system_prompt
+    from app.services.prompting.store import PromptDisabledError
+
+    async def _prompt_text_with_disabled(key: str, **_kwargs) -> str:
+        if key in ("chat.anti_hallucination_hard_rule", "chat.time_context_section"):
+            raise PromptDisabledError(key)
+        return await _prompt_text(key)
+
+    with patch(
+        "app.services.chat.prompt_builder.get_prompt_text_for_context",
+        AsyncMock(side_effect=_prompt_text_with_disabled),
+    ):
+        diagnostics = {}
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="Hillow", values={"gender": "female"}),
+            memories=None,
+            memory_relevance="weak",
+            time_context="当前时间：2026年07月02日 10:00 周四",
+            reply_count=1,
+            reply_total=150,
+            diagnostics=diagnostics,
+        )
+
+    assert "## 核心规则" in prompt
+    assert "## 你的身份" in prompt
+    # 停用的两段完整移除 (标题 + 内容 + 动态注入都不在)
+    assert "反幻觉硬约束" not in prompt
+    assert "## 时间" not in prompt
+    assert "2026年07月02日" not in prompt
+    assert "反幻觉硬约束" in diagnostics["empty_prompt_sections_removed"]
+    assert "时间" in diagnostics["empty_prompt_sections_removed"]

@@ -13,8 +13,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
-from app.services.prompting.store import get_prompt_text, get_prompt_text_for_context
+from app.services.prompting.store import (
+    PromptDisabledError,
+    get_prompt_text_for_context,
+    get_prompt_text_or_default,
+)
 from app.services.prompting.trace_components import record_prompt_render
+from app.services.prompting.utils import render_template
 from app.services.style import generate_style_instruction
 from app.services.mbti import format_mbti_for_prompt, get_mbti
 from app.services.prompts.system_prompts import (
@@ -84,11 +89,6 @@ class _PromptBody:
     prompt_key: str | None = None
 
 
-def _section(title: str, body: str) -> str:
-    """Return a clearly-labelled prompt section."""
-    return f"## {title}\n{body}"
-
-
 def _has_prompt_body(body: str | None) -> bool:
     """Treat empty/admin-placeholder prompt text as absent."""
     if not body:
@@ -97,12 +97,6 @@ def _has_prompt_body(body: str | None) -> bool:
     if not stripped:
         return False
     return bool(stripped.strip("。．.；;：:-—_ \n\t"))
-
-
-def _optional_section(title: str, body: str | None) -> str | None:
-    if not _has_prompt_body(body):
-        return None
-    return _section(title, str(body).strip())
 
 
 def _append_section(
@@ -136,8 +130,45 @@ def _record_skipped_section(diagnostics: dict[str, Any] | None, title: str) -> N
         skipped.append(title)
 
 
-async def _build_personality_section(agent: Any) -> str:
-    """Build the personality section using MBTI (spec §1.2)."""
+async def _get_optional_prompt(
+    key: str,
+    *,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+) -> str | None:
+    """Fetch a section template; admin 停用 → None (该段从最终输入中彻底移除)."""
+    try:
+        return await get_prompt_text_for_context(key, agent_id=agent_id, user_id=user_id)
+    except PromptDisabledError:
+        return None
+
+
+def _render_section(template: str, params: dict[str, Any]) -> str:
+    """Section 模板统一走 SafeDict 安全渲染.
+
+    admin 可在线编辑这些模板; 裸 str.format 遇到编辑时新加的未知占位符
+    (如 {备注}) 会 KeyError 打崩整条聊天热路径. SafeDict 把未知占位符渲染
+    为 "(无)", 保存侧的括号配对校验 (_template_fields) 拦截语法错误.
+    """
+    return render_template(template, params)
+
+
+async def _build_personality_section(agent: Any) -> _PromptBody | None:
+    """Build the personality section using MBTI (spec §1.2).
+
+    段模板 chat.personality_section 由 registry 管理; MBTI 详情与风格片段为
+    动态注入 ({mbti_detail}/{style_rules}); 说话风格的通用规则
+    (chat.style_base_rule / chat.style_closing_rule) 同样走 registry,
+    停用时从风格指令中彻底移除.
+    """
+    tpl, base_rule, closing_rule = await asyncio.gather(
+        _get_optional_prompt("chat.personality_section"),
+        _get_optional_prompt("chat.style_base_rule"),
+        _get_optional_prompt("chat.style_closing_rule"),
+    )
+    if tpl is None:
+        return None
+
     name = getattr(agent, "name", None) or "伙伴"
     age = getattr(agent, "age", None)
 
@@ -149,24 +180,26 @@ async def _build_personality_section(agent: Any) -> str:
 
     mbti = get_mbti(agent)
     mbti_line = format_mbti_for_prompt(mbti)
-    style = generate_style_instruction(mbti)
+    style = generate_style_instruction(mbti, base_rule=base_rule, closing_rule=closing_rule)
 
     detail = _format_mbti_detail(mbti) if mbti else "（性格未生成，将使用默认中性表达）"
 
     # Phase 6: 删 personality_rules 拼接. 实证内容跟 SYSTEM_BASE / RESPONSE_INSTRUCTION
     # 4 句全重叠 ("不要正式 / 不要客服 / 不要堆砌语气词 / 保持性格"). 删除节省 ~50
     # tokens 静态段, 减少噪声.
-    identity_line = f"你的名字叫{name}，是一个{gender_text}。"
-    if isinstance(age, int) and age > 0:
-        identity_line += f"你的年龄是{age}岁。"
+    age_text = f"你的年龄是{age}岁。" if isinstance(age, int) and age > 0 else ""
 
-    body = (
-        f"{identity_line}\n"
-        f"你的性格画像：{mbti_line or '中性'}\n\n"
-        f"四个维度详情：\n{detail}\n\n"
-        f"你的说话风格：\n{style}"
-    )
-    return _section("你的身份", body)
+    body = _render_section(tpl, {
+        "name": name,
+        "gender_text": gender_text,
+        "age_text": age_text,
+        "mbti_line": mbti_line or "中性",
+        "mbti_detail": detail,
+        "style_rules": style,
+    })
+    if not _has_prompt_body(body):
+        return None
+    return _PromptBody(body, "chat.personality_section")
 
 
 async def _build_emotion_section(
@@ -177,9 +210,11 @@ async def _build_emotion_section(
     if not intimacy_stage:
         return None
 
-    tpl = await get_prompt_text("chat.relationship_stage_section")
+    tpl = await _get_optional_prompt("chat.relationship_stage_section")
+    if tpl is None:
+        return None
     parts: list[str] = [
-        tpl.format(intimacy_stage=intimacy_stage)
+        _render_section(tpl, {"intimacy_stage": intimacy_stage})
     ]
 
     return _PromptBody("\n".join(parts), "chat.relationship_stage_section")
@@ -203,7 +238,9 @@ async def _build_memory_section(
     if not memories:
         if not include_empty_anchor:
             return None
-        anchor = await get_prompt_text("chat.memory_empty_anchor")
+        anchor = await _get_optional_prompt("chat.memory_empty_anchor")
+        if anchor is None:
+            return None
         return _PromptBody(str(anchor), "chat.memory_empty_anchor")
 
     def _days_since(value: Any) -> int | None:
@@ -285,40 +322,103 @@ async def _build_memory_section(
         body = "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
         return f"{label}\n{body}"
 
+    # 分组标签是结构性 glue (chat.memory_label_*): 停用/清空标签绝不能连带
+    # 丢弃已检索出的记忆本身 (尤其【安全 / 情绪背景】组), 因此走 or_default —
+    # 停用退回代码默认标签文案, 记忆数据照常注入. 分组顺序与 label_keys 严格对应.
+    label_keys_and_texts = [
+        ("chat.memory_label_named_relation", named_relation_texts),
+        ("chat.memory_label_literal_task", literal_task_texts),
+        ("chat.memory_label_safety", safety_user_texts),
+        ("chat.memory_label_profile_context", user_profile_context_texts),
+        ("chat.memory_label_other", other_user_texts),
+        ("chat.memory_label_ai_self", ai_texts),
+    ]
+    tpl, *labels = await asyncio.gather(
+        _get_optional_prompt("chat.memory_section_body"),
+        *(get_prompt_text_or_default(key) for key, _ in label_keys_and_texts),
+    )
+    if tpl is None:
+        return None
+
     parts: list[str] = []
-    if named_relation_texts:
-        parts.append(_numbered("【回答当前关系 / 名字问题优先参考】", named_relation_texts))
-    if literal_task_texts:
-        parts.append(_numbered("【回答当前问题可参考】", literal_task_texts))
-    if safety_user_texts:
-        parts.append(_numbered("【安全 / 情绪背景】", safety_user_texts))
-    if user_profile_context_texts:
-        parts.append(_numbered("【用户同类资料（仅用于避免重复追问）】", user_profile_context_texts))
-    if other_user_texts:
-        parts.append(_numbered("【用户告诉过你的其他事情】", other_user_texts))
-    if ai_texts:
-        parts.append(_numbered("【你自己的相关经历 / 人设】", ai_texts))
+    for (_, texts), label in zip(label_keys_and_texts, labels):
+        if texts:
+            parts.append(_numbered(str(label), texts))
 
     if not parts:
         return None
 
-    tpl = await get_prompt_text("chat.memory_section_body")
-    body = tpl.format(memory_groups="\n\n".join(parts))
+    body = _render_section(tpl, {"memory_groups": "\n\n".join(parts)})
     return _PromptBody(body, "chat.memory_section_body")
 
 
-def _build_delay_context_section(delay_context: str | None) -> str | None:
-    """Build the delayed-reply explanation section."""
+async def _build_delay_context_section(
+    delay_context: dict[str, Any] | None,
+) -> _PromptBody | None:
+    """Build the delayed-reply explanation section (spec §6, <1min 延迟).
+
+    只接受结构化 dict (received_at/activity/status/delay_seconds/delay_reason),
+    段模板 chat.delay_context_section 由 registry 管理. 不接受预拼 str —
+    那会让该段脱离 registry/trace 编辑, 违背"所有 section 走 registry"不变量.
+    """
     if not delay_context:
         return None
-    return _section("回复时机说明", delay_context)
+    tpl = await _get_optional_prompt("chat.delay_context_section")
+    if tpl is None:
+        return None
+    # delay_reason 被停用时为空串, render_template 会剔除该空行.
+    body = render_template(tpl, dict(delay_context), optional_keys=["delay_reason"])
+    return _PromptBody(body, "chat.delay_context_section")
 
 
-def _build_portrait_section(portrait: str | None) -> str | None:
-    """Build the user portrait section."""
+async def _build_portrait_section(portrait: str | None) -> _PromptBody | None:
+    """Build the user portrait section (模板包装 registry 管理)."""
     if not portrait:
         return None
-    return _section("用户画像", portrait)
+    tpl = await _get_optional_prompt("chat.portrait_section")
+    if tpl is None:
+        return None
+    return _PromptBody(_render_section(tpl, {"portrait": portrait}), "chat.portrait_section")
+
+
+async def _build_topic_context_section(
+    topic_context: dict[str, Any] | None,
+) -> _PromptBody | None:
+    """Build the topic context section (防话题跳跃).
+
+    只接受 push_topic 返回的 dict ({category, turns}), 由
+    chat.topic_context_section 模板渲染 (registry 管理, trace 内可编辑).
+    """
+    if not topic_context:
+        return None
+    tpl = await _get_optional_prompt("chat.topic_context_section")
+    if tpl is None:
+        return None
+    body = _render_section(tpl, {
+        "topic_category": topic_context.get("category", ""),
+        "topic_turns": topic_context.get("turns", 1),
+    })
+    return _PromptBody(body, "chat.topic_context_section")
+
+
+async def _build_time_context_section(time_context: str | None) -> _PromptBody | None:
+    """Build the time section (时间日期系统数据文本 + registry 包装模板)."""
+    if not time_context:
+        return None
+    tpl = await _get_optional_prompt("chat.time_context_section")
+    if tpl is None:
+        return None
+    return _PromptBody(_render_section(tpl, {"time_context": time_context}), "chat.time_context_section")
+
+
+async def _build_music_context_section(music_context: str | None) -> _PromptBody | None:
+    """Build the co-listening section (music.co_listening_context 渲染结果 + 包装模板)."""
+    if not music_context:
+        return None
+    tpl = await _get_optional_prompt("chat.music_context_section")
+    if tpl is None:
+        return None
+    return _PromptBody(_render_section(tpl, {"music_context": music_context}), "chat.music_context_section")
 
 
 # Phase 6: 删除 _build_relational_context_section + _build_graph_context_section.
@@ -339,9 +439,9 @@ def _build_portrait_section(portrait: str | None) -> str | None:
 async def build_system_prompt(
     agent: Any,
     memories: list[ClassifiedMemory] | None = None,
-    delay_context: str | None = None,
+    delay_context: dict[str, Any] | None = None,
     portrait: str | None = None,
-    topic_context: str | None = None,
+    topic_context: dict[str, Any] | None = None,
     music_context: str | None = None,
     user_emotion: dict | None = None,
     patience_instruction: str | None = None,
@@ -371,12 +471,13 @@ async def build_system_prompt(
     cache miss 从这里开始, 但稳定段 ~1500 tokens 已经命中, 收益占比 80%+.
     """
     # Parallel — 4 independent prompt reads (each turn, hot path).
+    # admin 停用任一模板 → 返回 None → 对应 section 从最终输入中彻底移除.
     agent_id = str(getattr(agent, "id", "") or "") or None
     system_base, consistency_rules, response_instruction, anti_hallucination = await asyncio.gather(
-        get_prompt_text_for_context("chat.system_base", agent_id=agent_id, user_id=canary_user_id),
-        get_prompt_text_for_context("chat.consistency_rules", agent_id=agent_id, user_id=canary_user_id),
-        get_prompt_text_for_context("chat.response_instruction", agent_id=agent_id, user_id=canary_user_id),
-        get_prompt_text_for_context(
+        _get_optional_prompt("chat.system_base", agent_id=agent_id, user_id=canary_user_id),
+        _get_optional_prompt("chat.consistency_rules", agent_id=agent_id, user_id=canary_user_id),
+        _get_optional_prompt("chat.response_instruction", agent_id=agent_id, user_id=canary_user_id),
+        _get_optional_prompt(
             "chat.anti_hallucination_hard_rule",
             agent_id=agent_id,
             user_id=canary_user_id,
@@ -387,11 +488,14 @@ async def build_system_prompt(
     # 同 agent 跨请求字节级一致, dashscope prefix cache 应命中.
     sections: list[str] = []
     components: list[dict[str, Any]] = []
-    _append_section(
-        sections, components, "核心规则", str(system_base),
-        prompt_key="chat.system_base",
-    )
-    anti_hallucination_body = str(anti_hallucination).strip()
+    if system_base is not None:
+        _append_section(
+            sections, components, "核心规则", str(system_base),
+            prompt_key="chat.system_base",
+        )
+    else:
+        _record_skipped_section(diagnostics, "核心规则")
+    anti_hallucination_body = str(anti_hallucination).strip() if anti_hallucination is not None else ""
     anti_hallucination_section = anti_hallucination_body if _has_prompt_body(anti_hallucination_body) else None
     if anti_hallucination_section:
         _append_section(
@@ -400,8 +504,15 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "反幻觉硬约束")
-    sections.append(await _build_personality_section(agent))   # per-agent 稳定
-    consistency_body = str(consistency_rules).strip()
+    personality = await _build_personality_section(agent)   # per-agent 稳定
+    if personality:
+        _append_section(
+            sections, components, "你的身份", personality.body,
+            prompt_key=personality.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "你的身份")
+    consistency_body = str(consistency_rules).strip() if consistency_rules is not None else ""
     consistency_section = consistency_body if _has_prompt_body(consistency_body) else None
     if consistency_section:
         _append_section(
@@ -422,15 +533,21 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "当前情绪")
 
-    port = _build_portrait_section(portrait)
+    port = await _build_portrait_section(portrait)
     if port:
-        sections.append(port)
+        _append_section(
+            sections, components, "用户画像", port.body,
+            prompt_key=port.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "用户画像")
 
-    delay = _build_delay_context_section(delay_context)
+    delay = await _build_delay_context_section(delay_context)
     if delay:
-        sections.append(delay)
+        _append_section(
+            sections, components, "回复时机说明", delay.body,
+            prompt_key=delay.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "回复时机说明")
 
@@ -452,13 +569,21 @@ async def build_system_prompt(
 
     # Phase 6: 删 graph_context 注入 (信息冗余 memory section, 抽象列表诱导编造)
 
-    if topic_context:
-        sections.append(_section("话题上下文", topic_context))
+    topic = await _build_topic_context_section(topic_context)
+    if topic:
+        _append_section(
+            sections, components, "话题上下文", topic.body,
+            prompt_key=topic.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "话题上下文")
 
-    if music_context:
-        sections.append(_section("一起听音乐", music_context))
+    music = await _build_music_context_section(music_context)
+    if music:
+        _append_section(
+            sections, components, "一起听音乐", music.body,
+            prompt_key=music.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "一起听音乐")
 
@@ -472,65 +597,81 @@ async def build_system_prompt(
     # 已确认这个失效, 见 commit 3d0417d 上下文.
     # NOTE: 回复时机说明已通过 reply_context.delay_seconds / received_at 路径
     # 单独注入 (delay_context_section), 不依赖 schedule_context.
-    if time_context:
-        sections.append(_section("时间", time_context))
+    time_section = await _build_time_context_section(time_context)
+    if time_section:
+        _append_section(
+            sections, components, "时间", time_section.body,
+            prompt_key=time_section.prompt_key,
+        )
     else:
         _record_skipped_section(diagnostics, "时间")
 
     # 时间相关记忆
-    if time_memories:
+    time_mem_tpl = (
+        await _get_optional_prompt("chat.time_memories_section") if time_memories else None
+    )
+    if time_memories and time_mem_tpl is not None:
         numbered = "\n".join(f"- {m}" for m in time_memories)
-        tpl = await get_prompt_text("chat.time_memories_section")
         _append_section(
             sections, components, "相关时间记忆",
-            tpl.format(time_memories=numbered),
+            _render_section(time_mem_tpl, {"time_memories": numbered}),
             prompt_key="chat.time_memories_section",
         )
     else:
         _record_skipped_section(diagnostics, "相关时间记忆")
 
     # Spec §3.2 step 3: L3 distant memories (awakened only when relevant)
-    if l3_memories:
+    l3_tpl = await _get_optional_prompt("chat.l3_memory_section") if l3_memories else None
+    if l3_memories and l3_tpl is not None:
         l3_block = "\n".join(f"- {m}" for m in l3_memories)
-        tpl = await get_prompt_text("chat.l3_memory_section")
         _append_section(
             sections, components, "久远记忆（L3）",
-            tpl.format(l3_memories=l3_block),
+            _render_section(l3_tpl, {"l3_memories": l3_block}),
             prompt_key="chat.l3_memory_section",
         )
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")
 
-    # 5B.4: 耐心区间语气描述
+    # 5B.4: 耐心区间语气描述 (boundary.patience_instruction_* 渲染结果,
+    # ManagedPromptText 自带 prompt_key → trace 内可编辑)
     if patience_instruction:
-        sections.append(_section("情绪状态提醒", patience_instruction))
+        _append_section(
+            sections, components, "情绪状态提醒", str(patience_instruction),
+            prompt_key=getattr(patience_instruction, "prompt_key", None),
+        )
     else:
         _record_skipped_section(diagnostics, "情绪状态提醒")
 
     # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 禁止主动展开,
     # 防止 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动. 详见
     # CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).
+    ai_state_appended = False
     if ai_status:
         activity = str(ai_status.get("activity", "")).strip()
         status_label = str(ai_status.get("status", "idle")).strip()
         if activity:
-            tpl = await get_prompt_text("chat.ai_state_constraint")
-            _append_section(
-                sections, components, "你的隐性状态约束",
-                tpl.format(activity=activity, status=status_label),
-                prompt_key="chat.ai_state_constraint",
-            )
-        else:
-            _record_skipped_section(diagnostics, "你的隐性状态约束")
-    else:
+            tpl = await _get_optional_prompt("chat.ai_state_constraint")
+            if tpl is not None:
+                _append_section(
+                    sections, components, "你的隐性状态约束",
+                    _render_section(tpl, {"activity": activity, "status": status_label}),
+                    prompt_key="chat.ai_state_constraint",
+                )
+                ai_state_appended = True
+    if not ai_state_appended:
         _record_skipped_section(diagnostics, "你的隐性状态约束")
 
     # 回复要求 (n=random 1-3 每轮变, 不可 cache, 排末尾)
-    _append_section(
-        sections, components, "回复要求",
-        response_instruction.format(n=reply_count, total=reply_total, max_per=_MAX_PER_REPLY),
-        prompt_key="chat.response_instruction",
-    )
+    if response_instruction is not None:
+        _append_section(
+            sections, components, "回复要求",
+            _render_section(response_instruction, {
+                "n": reply_count, "total": reply_total, "max_per": _MAX_PER_REPLY,
+            }),
+            prompt_key="chat.response_instruction",
+        )
+    else:
+        _record_skipped_section(diagnostics, "回复要求")
 
     if diagnostics is not None:
         skipped = diagnostics.get("empty_prompt_sections_removed")

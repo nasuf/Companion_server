@@ -464,7 +464,7 @@ async def test_handle_schedule_query_persists_generic_repeat_metadata():
             new=AsyncMock(return_value="明天上午有点安排"),
         ),
         patch(
-            "app.services.chat.intent_handlers.get_prompt_text",
+            "app.services.chat.intent_handlers.get_prompt_text_or_default",
             new=AsyncMock(return_value="用户问的是{date_label}。目前没有这天的具体作息缓存。"),
         ),
         patch("app.services.chat.multi_intent._fire_background", side_effect=_capture_background),

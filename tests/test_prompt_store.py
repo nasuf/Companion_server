@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -223,6 +224,8 @@ async def test_prompt_update_version_attaches_eval_result(prompt_store_mocks):
     existing = _make_existing(key="test.key", defaultContent="default")
     mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
     mock_db.prompttemplate.update = AsyncMock(return_value=existing)
+    mock_db.prompttemplateversion.create = AsyncMock(return_value=SimpleNamespace(id="ver-1"))
+    mock_db.prompttemplateversion.update = AsyncMock()
 
     with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}), \
          patch("app.services.prompting.store._prompt_eval_result", return_value={"ok": True}):
@@ -232,10 +235,20 @@ async def test_prompt_update_version_attaches_eval_result(prompt_store_mocks):
             source="redis",
             change_type="manual_save",
         )
+        # eval 快照已移出保存关键路径 (后台任务回填), 等其跑完再断言.
+        pending = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        if pending:
+            await asyncio.gather(*pending)
 
     ver_data = mock_db.prompttemplateversion.create.call_args.kwargs["data"]
     assert ver_data["changeType"] == "manual_save"
-    assert ver_data["evalResult"] is not None
+    assert "evalResult" not in ver_data  # 版本行先落库保证持久性, 不带 eval
+    update_kwargs = mock_db.prompttemplateversion.update.call_args.kwargs
+    assert update_kwargs["where"] == {"id": "ver-1"}
+    assert update_kwargs["data"]["evalResult"] is not None  # 后台回填
 
 
 @pytest.mark.asyncio
@@ -350,3 +363,188 @@ async def test_prompt_canary_rejects_missing_required_placeholders(prompt_store_
             )
 
     mock_db.prompttemplate.update.assert_not_called()
+
+
+def _make_dc_definition(key: str = "test.key", default_text: str = "default"):
+    """真实 PromptDefinition dataclass — set_prompt_enabled/update_prompt_text 走 asdict()."""
+    from app.services.prompting.registry import PromptDefinition
+
+    return PromptDefinition(
+        key=key,
+        title="测试 prompt",
+        stage="聊天",
+        category="回复",
+        description="for tests",
+        default_text=default_text,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# enable/disable 端到端 + 版本管理加固
+# ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _clear_enabled_local_cache():
+    from app.services.prompting import store
+
+    store._enabled_local_cache.clear()
+    yield
+    store._enabled_local_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_set_prompt_enabled_false_blocks_get_prompt_text(prompt_store_mocks):
+    """停用后 get_prompt_text 抛 PromptDisabledError → 该模板从运行时彻底消失."""
+    from app.services.prompting.store import (
+        PromptDisabledError,
+        get_prompt_text,
+        set_prompt_enabled,
+    )
+
+    mock_db, fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(key="test.key", default_text="default")
+    existing = _make_existing(key="test.key", content="active", defaultContent="default")
+    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+    mock_db.prompttemplate.update = AsyncMock(return_value=existing)
+    mock_db.prompttemplateversion.create = AsyncMock(return_value=SimpleNamespace(id="ver-1"))
+    fake_redis.strings["prompt_template:test.key"] = "active"
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
+        result = await set_prompt_enabled("test.key", False)
+        assert result["is_enabled"] is False
+        # Redis enabled 缓存写入
+        assert fake_redis.strings["prompt_enabled:test.key"] == "0"
+        # 审计版本记录
+        ver_data = mock_db.prompttemplateversion.create.call_args.kwargs["data"]
+        assert ver_data["changeType"] == "disable"
+
+        with pytest.raises(PromptDisabledError):
+            await get_prompt_text("test.key")
+
+        # 重新启用后恢复可读
+        await set_prompt_enabled("test.key", True)
+        text = await get_prompt_text("test.key")
+        assert str(text) == "active"
+
+
+@pytest.mark.asyncio
+async def test_render_prompt_returns_none_for_disabled(prompt_store_mocks):
+    """render_prompt 捕获 PromptDisabledError → None (调用方 fallback 语义)."""
+    from app.services.prompting.store import set_prompt_enabled
+    from app.services.prompting.utils import render_prompt
+
+    mock_db, _fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(key="test.key", default_text="hello {name}")
+    existing = _make_existing(key="test.key", content="hello {name}", defaultContent="hello {name}")
+    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+    mock_db.prompttemplate.update = AsyncMock(return_value=existing)
+    mock_db.prompttemplateversion.create = AsyncMock(return_value=SimpleNamespace(id="ver-1"))
+
+    invoked = []
+
+    async def _invoke(prompt: str):
+        invoked.append(prompt)
+        return "reply"
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
+        await set_prompt_enabled("test.key", False)
+        result = await render_prompt("test.key", {"name": "A"}, _invoke)
+
+    assert result is None
+    assert invoked == []  # LLM 调用彻底跳过
+
+
+@pytest.mark.asyncio
+async def test_update_prompt_text_dedup_skips_duplicate_version(prompt_store_mocks):
+    """内容未变 → 不落新版本, 不写 DB (防版本表被重复保存刷爆)."""
+    from app.services.prompting.store import update_prompt_text
+
+    mock_db, fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(key="test.key", default_text="default")
+    existing = _make_existing(key="test.key", content="same text", defaultContent="default")
+    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+    fake_redis.strings["prompt_template:test.key"] = "same text"
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
+        result = await update_prompt_text("test.key", "same text")
+
+    assert result["content"] == "same text"
+    mock_db.prompttemplate.update.assert_not_called()
+    mock_db.prompttemplateversion.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_prompt_text_optimistic_lock_conflict(prompt_store_mocks):
+    """expected_updated_at 与 DB 不一致 → PromptUpdateConflictError (API 409)."""
+    from app.services.prompting.store import PromptUpdateConflictError, update_prompt_text
+
+    mock_db, _fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(key="test.key", default_text="default")
+    existing = _make_existing(key="test.key", content="server text", defaultContent="default")
+    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
+        with pytest.raises(PromptUpdateConflictError):
+            await update_prompt_text(
+                "test.key",
+                "my new text",
+                expected_updated_at="2020-01-01T00:00:00+00:00",  # 过期快照
+            )
+
+    mock_db.prompttemplate.update.assert_not_called()
+    mock_db.prompttemplateversion.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_prompt_text_rolls_back_redis_on_db_failure(prompt_store_mocks):
+    """DB 落库失败 → Redis 回滚旧值, 保存报错 (不静默分叉)."""
+    from app.services.prompting.store import update_prompt_text
+
+    mock_db, fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(key="test.key", default_text="default")
+    existing = _make_existing(key="test.key", content="old text", defaultContent="default")
+    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+    mock_db.prompttemplate.update = AsyncMock(side_effect=RuntimeError("db down"))
+    fake_redis.strings["prompt_template:test.key"] = "old text"
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
+        with pytest.raises(RuntimeError, match="db down"):
+            await update_prompt_text("test.key", "new text")
+
+    # Redis 回滚到编辑前值
+    assert fake_redis.strings["prompt_template:test.key"] == "old text"
+    mock_db.prompttemplateversion.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_prompt_text_persists_synchronously(prompt_store_mocks):
+    """保存路径同步落库: 返回时 DB update + 版本记录已完成 (无 crash 丢失窗口)."""
+    from app.services.prompting.store import update_prompt_text
+
+    mock_db, fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(key="test.key", default_text="default")
+    existing = _make_existing(key="test.key", content="old text", defaultContent="default")
+    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+    mock_db.prompttemplate.update = AsyncMock(return_value=existing)
+    mock_db.prompttemplateversion.create = AsyncMock(return_value=SimpleNamespace(id="ver-1"))
+    mock_db.prompttemplateversion.update = AsyncMock()
+    fake_redis.strings["prompt_template:test.key"] = "old text"
+
+    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}), \
+         patch("app.services.prompting.store._prompt_eval_result", return_value={"ok": True}):
+        result = await update_prompt_text("test.key", "new text")
+        # 返回即已持久化 (同步), 不依赖后台 task
+        mock_db.prompttemplate.update.assert_called()
+        ver_data = mock_db.prompttemplateversion.create.call_args.kwargs["data"]
+        assert ver_data["changeType"] == "manual_save"
+        assert ver_data["content"] == "new text"
+        pending = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        if pending:
+            await asyncio.gather(*pending)
+
+    assert result["content"] == "new text"
+    assert fake_redis.strings["prompt_template:test.key"] == "new text"
