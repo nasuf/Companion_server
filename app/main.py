@@ -45,7 +45,11 @@ async def lifespan(app: FastAPI):
         # (GET 端点仍可用, 写端点 require_redis 返 503, scheduler 每 30s 重检自愈).
         await _timed("Database", connect_db())
         try:
-            await _timed("Redis", get_redis())
+            # get_redis 是懒初始化 (只建 client 不建连接) — 必须 ping 才真正
+            # 建连+验证可达: 否则 Redis 已挂也会被误标 healthy (直到 30s 健康
+            # 检查才纠正), 且首个用户请求要付连接建立成本 (预热).
+            redis_client = await get_redis()
+            await _timed("Redis", redis_client.ping())
             mark_redis_healthy(True)
         except Exception as e:
             logger.error(f"Redis connect failed ({e!r}); starting in readonly mode")

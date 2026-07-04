@@ -247,3 +247,55 @@ class TestTopicResetOnReengagement:
             entry = await push_topic("c1", "加班真多", gap_seconds=None)
         assert not fake.deleted
         assert entry["turns"] == 3
+
+
+# ─────────────────────────────────────────────────────────────────
+# 时间感知收口: tier 路径重逢豁免
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestTierReunionExemption:
+    """gap ≥3h 的重逢轮必须走主 prompt — tier 轻量 prompt 没有重逢感知/
+    上次聊到段, 会把隔了半天的对话当无缝续聊."""
+
+    def _base_kwargs(self):
+        from app.services.chat.intent_dispatcher import IntentType
+
+        return dict(
+            intent=IntentType.NONE,
+            memory_relevance="weak",
+            relational_context=None,
+            schedule_context=None,
+            delay_context=None,
+        )
+
+    def test_long_gap_blocks_tier(self):
+        from app.services.chat.reply_generate import can_use_tier_reply
+        from app.services.chat.session_recap import RECAP_GAP_SECONDS
+
+        assert can_use_tier_reply(
+            **self._base_kwargs(), reengagement_gap_seconds=RECAP_GAP_SECONDS,
+        ) is False
+
+    def test_short_gap_keeps_tier(self):
+        """30min-3h 小间隔只有可选寒暄语义, tier 保持可用 (成本权衡)."""
+        from app.services.chat.reply_generate import can_use_tier_reply
+
+        assert can_use_tier_reply(
+            **self._base_kwargs(), reengagement_gap_seconds=60 * 60,
+        ) is True
+
+    def test_no_gap_backward_compatible(self):
+        from app.services.chat.reply_generate import can_use_tier_reply
+
+        assert can_use_tier_reply(**self._base_kwargs()) is True
+        assert can_use_tier_reply(
+            **self._base_kwargs(), reengagement_gap_seconds=None,
+        ) is True
+
+    def test_threshold_single_source_of_truth(self):
+        """守卫: tier 豁免阈值必须与话题重置/重逢摘要同线 (3h), 不允许漂移."""
+        from app.services.chat.session_recap import RECAP_GAP_SECONDS
+        from app.services.topic import TOPIC_RESET_GAP_SECONDS
+
+        assert RECAP_GAP_SECONDS == TOPIC_RESET_GAP_SECONDS == 3 * 3600

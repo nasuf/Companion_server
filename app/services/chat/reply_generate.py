@@ -24,6 +24,7 @@ from app.services.llm.resilience import (
     get_profile,
     provider_name,
 )
+from app.services.chat.session_recap import RECAP_GAP_SECONDS
 from app.services.memory.retrieval.context_selector import split_by_source
 from app.services.prompts.system_prompts import MAX_PER_REPLY
 
@@ -77,12 +78,20 @@ def can_use_tier_reply(
     relational_context: str | None,
     schedule_context: str | None,
     delay_context: dict | None,
+    reengagement_gap_seconds: float | None = None,
 ) -> bool:
     """spec §4：纯聊天 + 无关系/延迟特殊处理时可走轻量分级 prompt.
 
     schedule_context 是作息查询分支的参考信息；§4 主回复 prompt 已不再注入它，
     因此不能用它阻塞 tier reply。真正的作息类消息由 intent 条件拦截。
+
+    重逢豁免 (时间感知收口): gap ≥3h 的重逢轮必须走主 prompt — tier 轻量
+    prompt 没有「重逢感知/上次聊到」段, 会让 AI 把隔了半天的对话当无缝续聊
+    (正是时间感知改造要消灭的体感). 30min-3h 小间隔档只有可选寒暄语义,
+    tier 丢失可接受; 阈值与话题栈重置/重逢摘要同线 (RECAP_GAP_SECONDS).
     """
+    if reengagement_gap_seconds is not None and reengagement_gap_seconds >= RECAP_GAP_SECONDS:
+        return False
     return (
         intent in (IntentType.NONE, IntentType.L3_RECALL)
         and not relational_context
@@ -200,6 +209,7 @@ async def generate_reply(
     chat_messages: list[dict] | None = None,
     chat_messages_factory: Callable[[], Awaitable[list[dict]]] | None = None,
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
+    reengagement_gap_seconds: float | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
@@ -235,7 +245,13 @@ async def generate_reply(
         relational_context=relational_context,
         schedule_context=schedule_context,
         delay_context=delay_context,
+        reengagement_gap_seconds=reengagement_gap_seconds,
     )
+    if diagnostics is not None and (
+        reengagement_gap_seconds is not None
+        and reengagement_gap_seconds >= RECAP_GAP_SECONDS
+    ):
+        diagnostics["tier_blocked_by_reengagement"] = True
     if diagnostics is not None:
         diagnostics["tier_eligible"] = tier_eligible
         diagnostics["memory_relevance"] = memory_relevance

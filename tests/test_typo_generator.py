@@ -1,4 +1,4 @@
-"""Phase E1 回归: 错别字生成器 (默认关闭, 灰度开启)."""
+"""Phase E1 回归: 错别字生成器 (2026-07-03 起默认开启, .env 可关)."""
 
 from __future__ import annotations
 

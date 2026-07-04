@@ -1361,6 +1361,8 @@ async def stream_chat_response(
             # W1b 后语义: 主 LLM 的 [EMO] 标记命中时此 fn 不会被调用,
             # 仅作标记缺失/失效时的回退路径 (见 extract_emotion_marker).
             reply_emotion_fn=_ai_reply_emotion,
+            # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
+            reengagement_gap_seconds=reengagement_gap_seconds,
             diagnostics=response_diagnostics,
         )
 
