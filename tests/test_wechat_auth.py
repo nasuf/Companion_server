@@ -227,3 +227,40 @@ async def test_password_login_rejects_social_user_without_hash(monkeypatch):
 
     assert exc.value.status_code == 401
     auth_api.record_login_failure.assert_awaited_once()
+
+
+class TestMergedRawProfile:
+    """Regression: re-login must not wipe the saved 头像昵称 profile fields."""
+
+    def _token(self, raw: dict) -> WeChatTokenPayload:
+        return WeChatTokenPayload(
+            openid="openid-1", unionid="union-1", scope="miniprogram", raw=raw,
+        )
+
+    def test_miniprogram_relogin_preserves_saved_nickname_and_avatar(self):
+        existing = {
+            "openid": "openid-1",
+            "nickname": "小明",
+            "headimgurl": "/chat/media/u_abc.jpg",
+        }
+        token = self._token({"openid": "openid-1", "unionid": None, "source": "miniprogram"})
+        merged = wechat_auth._merged_raw_profile(existing, token)
+        assert merged["nickname"] == "小明"
+        assert merged["headimgurl"] == "/chat/media/u_abc.jpg"
+        assert merged["source"] == "miniprogram"
+
+    def test_fresh_values_from_token_win(self):
+        existing = {"nickname": "旧名", "headimgurl": "old.jpg"}
+        token = self._token({
+            "openid": "openid-1",
+            "nickname": "新名",
+            "headimgurl": "new.jpg",
+        })
+        merged = wechat_auth._merged_raw_profile(existing, token)
+        assert merged["nickname"] == "新名"
+        assert merged["headimgurl"] == "new.jpg"
+
+    def test_handles_missing_existing_profile(self):
+        token = self._token({"openid": "openid-1", "source": "miniprogram"})
+        merged = wechat_auth._merged_raw_profile(None, token)
+        assert merged == {"openid": "openid-1", "source": "miniprogram"}

@@ -299,6 +299,22 @@ async def update_wechat_profile(
     return profile.get("nickname"), profile.get("headimgurl")
 
 
+def _merged_raw_profile(existing: object, token: WeChatTokenPayload) -> dict[str, Any]:
+    """Merge this login's raw payload into the stored profile (never wipe it).
+
+    The Mini Program flow's ``token.raw`` carries only ``openid/unionid/source``;
+    replacing ``rawProfile`` wholesale would erase the nickname/headimgurl saved
+    via the 头像昵称填写 step, sending returning users back to the profile page
+    on every login. Keys the new payload actually provides (e.g. fresh
+    nickname/headimgurl from the mobile OAuth userinfo fetch) still win.
+    """
+    profile = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in token.raw.items():
+        if value is not None and value != "":
+            profile[key] = value
+    return profile
+
+
 async def find_or_create_wechat_user(token: WeChatTokenPayload):
     identity = await db.authidentity.find_first(where=_identity_lookup_where(token))
     if identity:
@@ -309,7 +325,9 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
                 "openid": token.openid,
                 "unionid": token.unionid,
                 "scope": token.scope,
-                "rawProfile": Json(token.raw),
+                "rawProfile": Json(
+                    _merged_raw_profile(getattr(identity, "rawProfile", None), token)
+                ),
                 "lastLoginAt": datetime.now(UTC),
             },
         )
@@ -349,7 +367,9 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
                 "openid": token.openid,
                 "unionid": token.unionid,
                 "scope": token.scope,
-                "rawProfile": Json(token.raw),
+                "rawProfile": Json(
+                    _merged_raw_profile(getattr(identity, "rawProfile", None), token)
+                ),
                 "lastLoginAt": datetime.now(UTC),
             },
         )
