@@ -27,11 +27,38 @@ class TestCleanReplyPart:
     def test_preserves_content(self):
         assert _clean_reply_part("正常一句话。") == "正常一句话。"
 
+    def test_strips_leading_full_timestamp_prefix(self):
+        # LLM 模仿注入的历史时间前缀 [MM-DD HH:MM], 不应泄漏到回复
+        assert _clean_reply_part("[07-04 16:56] 啊？你昨天不就夸了句月亮。") == (
+            "啊？你昨天不就夸了句月亮。"
+        )
+
+    def test_strips_leading_bare_hhmm_prefix(self):
+        assert _clean_reply_part("[16:56] 在忙呢") == "在忙呢"
+
+    def test_strips_repeated_timestamp_prefix(self):
+        assert _clean_reply_part("[07-04 16:56] [07-04 16:56] 内容") == "内容"
+
+    def test_keeps_non_timestamp_bracket(self):
+        # 只剥时间戳格式, 不误删普通方括号内容
+        assert _clean_reply_part("[重要] 记得喝水") == "[重要] 记得喝水"
+
 
 class TestSplitAndValidateReplies:
     def test_pipe_separator(self):
         result = split_and_validate_replies("第一句||第二句")
         assert result == ["第一句", "第二句"]
+
+    def test_strips_timestamp_prefix_on_each_split_part(self):
+        # 复现生产 bug: LLM 两条回复都带 [MM-DD HH:MM] 前缀
+        result = split_and_validate_replies(
+            "[07-04 16:56] 啊？你昨天不就夸了句月亮好圆嘛。"
+            "||[07-04 16:56] 难道你昨天还干了啥大事没汇报？"
+        )
+        assert result == [
+            "啊？你昨天不就夸了句月亮好圆嘛。",
+            "难道你昨天还干了啥大事没汇报？",
+        ]
 
     def test_double_newline_treated_as_pipe(self):
         """LLM 用空行分段 — 必须切, 不能让 \\n\\n 留在单条内被 pre-wrap 渲染."""

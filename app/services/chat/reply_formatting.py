@@ -27,10 +27,24 @@ _INTRA_REPLY_WS_RE = re.compile(r'[\r\n]+')
 _LONG_REPLY_SOFT_BREAK_CHARS = "。！？…～~!?，,；;、"
 _NON_TERMINAL_REPLY_END_RE = re.compile(r"[，,、；;：:]+$")
 
+# LLM 偶尔会模仿注入到 prompt 里的历史消息时间前缀 (Phase B1 的 [MM-DD HH:MM] /
+# 兼容纯 [HH:MM]), 把它写进自己的回复开头 — 主回复与 tier 回复路径都注入了带时间
+# 前缀的历史, 都可能被模仿. prompt 层「防模仿」指令不可靠, 这里在文本规范化时统一
+# 剥掉行首时间戳前缀 (可能连续多个), 保证不泄漏到用户可见回复 / 落库 content.
+_LEADING_TIMESTAMP_RE = re.compile(
+    r'^\s*(?:\[(?:\d{1,2}-\d{1,2}\s+)?\d{1,2}:\d{2}\]\s*)+'
+)
+
+
+def _strip_leading_timestamp(text: str) -> str:
+    """Remove one-or-more leading `[MM-DD HH:MM]` / `[HH:MM]` timestamp prefixes."""
+    return _LEADING_TIMESTAMP_RE.sub("", text)
+
 
 def _clean_reply_part(text: str) -> str:
-    """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格."""
-    return _INTRA_REPLY_WS_RE.sub(" ", text).strip()
+    """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格 + 剥行首时间戳前缀."""
+    cleaned = _INTRA_REPLY_WS_RE.sub(" ", text).strip()
+    return _strip_leading_timestamp(cleaned).strip()
 
 
 def _strip_non_terminal_reply_end(text: str) -> str:
