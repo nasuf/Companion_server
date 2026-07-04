@@ -269,18 +269,26 @@ async def _enqueue_agent_initialization(
         fire_background(_run_agent_initialization_job(payload))
 
 
-@router.post("", response_model=AgentResponse)
-async def create_agent(
-    data: AgentCreate,
-    user: dict = Depends(require_user),
+async def create_agent_with_provisioning(
+    *,
+    user_id: str,
+    name: str,
+    personality: dict,
+    background: str | None = None,
+    values: dict | None = None,
+    gender: str | None = None,
 ):
-    if data.user_id != user.get("sub"):
-        raise HTTPException(status_code=403, detail="Not your user_id")
+    """Create an agent + workspace and enqueue the full provisioning job.
+
+    Shared by the public create_agent endpoint and admin template creation so
+    both paths yield identical agent data (persona + L1 memory + embeddings +
+    schedule). Returns ``(agent, workspace)``.
+    """
     # 防双击 / 重试竞态: 用户已有 provisioning agent 时拒绝新建. 否则两次并发
     # 会 (a) 重复扣 LLM 配额, (b) 后入的 stage_active_workspaces_for_user 把
     # 前一份的 workspace 归档, 造成前一份在已 archived 的 workspace 写记忆.
     pending = await db.aiagent.find_first(
-        where={"userId": data.user_id, "status": "provisioning"},
+        where={"userId": user_id, "status": "provisioning"},
     )
     if pending is not None:
         raise HTTPException(
@@ -290,26 +298,26 @@ async def create_agent(
     # Per spec §1.2: 7-dim / Big Five 用户输入仅作为 MBTI 计算的临时输入,
     # 不再常驻 DB. MBTI 在 _init_mbti() 里生成并写入.
     create_data: dict = {
-        "name": data.name,
-        "user": {"connect": {"id": data.user_id}},
+        "name": name,
+        "user": {"connect": {"id": user_id}},
         "status": "provisioning",
         "archivedAt": None,
     }
-    if data.background is not None:
-        create_data["background"] = data.background
-    if data.values is not None:
-        create_data["values"] = Json(data.values)
-    if data.gender is not None:
+    if background is not None:
+        create_data["background"] = background
+    if values is not None:
+        create_data["values"] = Json(values)
+    if gender is not None:
         # 前端约定已传 "male"/"female", 直接存
-        create_data["gender"] = data.gender
-    avatar = pick_agent_avatar(data.gender)
+        create_data["gender"] = gender
+    avatar = pick_agent_avatar(gender)
     create_data["avatarKey"] = avatar.key
     create_data["avatarUrl"] = avatar.url
     agent = None
     workspace = None
     try:
         agent = await db.aiagent.create(data=create_data)
-        workspace = await create_provisioning_workspace(data.user_id, agent.id)
+        workspace = await create_provisioning_workspace(user_id, agent.id)
     except Exception:
         if agent is not None:
             await db.aiagent.update(
@@ -319,7 +327,7 @@ async def create_agent(
         raise
     staged_workspaces: list = []
     try:
-        staged_workspaces = await stage_active_workspaces_for_user(data.user_id)
+        staged_workspaces = await stage_active_workspaces_for_user(user_id)
         # status 保持 "provisioning" — 等人生经历生成完成后再设为 "active"
         workspace = await activate_workspace(workspace.id)
         await finalize_archived_workspaces(staged_workspaces)
@@ -337,18 +345,33 @@ async def create_agent(
 
     # Spec §1.3：7 维 → MBTI 4 轴用大模型推导，再 §1.4 单步 LLM 生 background。
     # P0: 长生命周期初始化进入 runtime job queue, 避免进程重启后静默丢任务。
-    personality_dict = data.personality.model_dump()
-
     await set_progress(agent.id, "queued", message="已进入生成队列...")
     await _warm_agent_avatar_cache(getattr(agent, "avatarKey", None))
 
     await _enqueue_agent_initialization(
         agent_id=agent.id,
-        user_id=data.user_id,
+        user_id=user_id,
         workspace_id=workspace.id if workspace else None,
-        personality=personality_dict,
+        personality=personality,
     )
+    return agent, workspace
 
+
+@router.post("", response_model=AgentResponse)
+async def create_agent(
+    data: AgentCreate,
+    user: dict = Depends(require_user),
+):
+    if data.user_id != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your user_id")
+    agent, workspace = await create_agent_with_provisioning(
+        user_id=data.user_id,
+        name=data.name,
+        personality=data.personality.model_dump(),
+        background=data.background,
+        values=data.values,
+        gender=data.gender,
+    )
     return _agent_response(agent, workspace_id=workspace.id)
 
 

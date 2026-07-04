@@ -102,6 +102,18 @@ class Settings(BaseSettings):
     wechat_mobile_app_id: str = ""
     wechat_mobile_app_secret: str = ""
     wechat_oauth_timeout_s: float = 6.0
+    # WeChat Mini Program login (jscode2session). Uses the Mini Program's own
+    # AppID/AppSecret. UnionID is only returned when the Mini Program is bound to
+    # the same WeChat Open Platform account as the mobile app, which is required
+    # for cross-platform account/conversation continuity.
+    wechat_mini_app_id: str = ""
+    wechat_mini_app_secret: str = ""
+    # Optional: a fully-provisioned "template" agent id. When set, a brand-new
+    # user (e.g. first WeChat Mini Program login) is given an instant clone of
+    # this agent (persona + L1 memory + embeddings copied, no LLM), so they can
+    # chat immediately. Each clone is fully isolated per user. Empty = disabled
+    # (new users stay agent-less until they build one via the normal flow).
+    default_template_agent_id: str = ""
 
     # SUD / SudGIP mini-game integration. The Flutter client uses app_id/app_key
     # to initialize SudGIP, while app_secret stays server-side for short-lived

@@ -26,6 +26,25 @@ class WeChatMobileLoginRequest(BaseModel):
         return code
 
 
+class WeChatMiniLoginRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=512)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        code = value.strip()
+        if not code:
+            raise ValueError("code must not be blank")
+        return code
+
+
+class WeChatProfileUpdate(BaseModel):
+    nickname: str | None = Field(default=None, max_length=64)
+    # Optional base64 avatar image (from the Mini Program chooseAvatar button).
+    avatar_base64: str | None = None
+    avatar_mime: str | None = None
+
+
 class AuthResponse(BaseModel):
     token: str
     user_id: str

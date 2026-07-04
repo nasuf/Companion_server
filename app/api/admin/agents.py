@@ -103,10 +103,18 @@ async def list_agents(
     status: str = "",
     _: str = Depends(require_admin_jwt),
 ):
-    """List all agents with basic info."""
+    """List all agents with basic info.
+
+    Template agents (owned by the reserved template system user) are excluded —
+    they are managed in the dedicated 模板管理 tab, not mixed with real users.
+    """
+    from app.services.agent_template import get_or_create_template_user
+
     where: dict = {}
     if status:
         where["status"] = status
+
+    template_owner = await get_or_create_template_user()
 
     agents = await db.aiagent.find_many(
         where=where,
@@ -117,6 +125,8 @@ async def list_agents(
 
     result = []
     for a in agents:
+        if a.userId == template_owner.id:
+            continue
         if search:
             haystack = f"{a.name} {a.user.username if a.user else ''}".lower()
             if search.lower() not in haystack:

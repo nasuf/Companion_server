@@ -9,7 +9,9 @@ from app.models.auth import (
     AuthResponse,
     LoginRequest,
     RegisterRequest,
+    WeChatMiniLoginRequest,
     WeChatMobileLoginRequest,
+    WeChatProfileUpdate,
 )
 from app.services.auth import hash_password, verify_password, create_jwt
 from app.services.auth_security import (
@@ -24,9 +26,12 @@ from app.services.workspace.workspaces import get_active_workspace
 from app.services.wechat_auth import (
     WeChatLoginError,
     exchange_wechat_code,
+    exchange_wechat_miniprogram_code,
     find_or_create_wechat_user,
+    update_wechat_profile,
 )
 from app.services.agent_avatars import build_cached_avatar_url
+from app.services.agent_template import ensure_default_agent_for_user
 from app.services.user_activity import UserActivityWriteError, record_user_activity
 
 logger = logging.getLogger(__name__)
@@ -135,6 +140,7 @@ async def register(data: RegisterRequest, request: Request):
         outcome="success",
     )
     logger.info("User registered", extra={"event": "auth_register", "user_id": user.id})
+    await ensure_default_agent_for_user(user.id)
     await _record_auth_activity(user.id, source="register")
     return await _build_auth_response(user, token)
 
@@ -167,6 +173,7 @@ async def login(data: LoginRequest, request: Request):
         outcome="success",
     )
     logger.info("User logged in", extra={"event": "auth_login", "user_id": user.id})
+    await ensure_default_agent_for_user(user.id)
     await _record_auth_activity(user.id, source="password_login")
     return await _build_auth_response(user, token)
 
@@ -210,6 +217,80 @@ async def wechat_mobile_login(data: WeChatMobileLoginRequest, request: Request):
         },
     )
     await _record_auth_activity(user.id, source="wechat_login")
+    return await _build_auth_response(user, token)
+
+
+@router.post("/wechat/miniprogram", response_model=AuthResponse)
+async def wechat_miniprogram_login(data: WeChatMiniLoginRequest, request: Request):
+    rate_limit_key = "wechat:miniprogram"
+    await enforce_login_rate_limit(request, rate_limit_key)
+    try:
+        token_payload = await exchange_wechat_miniprogram_code(data.code)
+        user = await find_or_create_wechat_user(token_payload)
+    except WeChatLoginError:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录失败，请稍后重试",
+        )
+
+    if not user:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录失败，请稍后重试",
+        )
+
+    await clear_login_failures(request, rate_limit_key)
+    # Give brand-new users an instant cloned default agent (if configured) so the
+    # Mini Program can go straight to chat. No-op for returning users.
+    await ensure_default_agent_for_user(user.id)
+    token = create_jwt(user.id, user.role)
+    audit_auth_request_event(
+        "wechat_miniprogram_login_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    logger.info(
+        "User logged in with WeChat Mini Program",
+        extra={"event": "auth_wechat_mini_login", "user_id": user.id},
+    )
+    await _record_auth_activity(user.id, source="wechat_miniprogram_login")
+    return await _build_auth_response(user, token)
+
+
+@router.post("/wechat/profile", response_model=AuthResponse)
+async def update_wechat_profile_endpoint(
+    data: WeChatProfileUpdate,
+    payload: dict = Depends(require_user),
+):
+    """Persist the Mini Program 头像昵称填写能力 result (nickname + avatar)."""
+    user_id = payload["sub"]
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在",
+        )
+
+    avatar_url: str | None = None
+    if data.avatar_base64:
+        from app.services.chat_media import storage
+
+        mime = storage.normalize_image_mime(data.avatar_mime)
+        blob = storage.decode_image_base64(data.avatar_base64)
+        storage.validate_image_size(blob)
+        storage_key = storage.save_image_blob(user_id=user_id, blob=blob, mime=mime)
+        avatar_url = storage.media_url(storage_key)
+
+    await update_wechat_profile(
+        user_id,
+        nickname=data.nickname,
+        avatar_url=avatar_url,
+    )
+    token = create_jwt(user.id, user.role)
     return await _build_auth_response(user, token)
 
 

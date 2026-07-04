@@ -164,6 +164,7 @@ from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
 from app.api.admin.career import router as admin_career_router
 from app.api.admin.agents import router as admin_agents_router
+from app.api.admin.agent_templates import router as admin_agent_templates_router
 from app.api.public.traces import router as traces_router
 from app.api.admin.bug_reports import router as admin_bug_reports_router
 from app.api.admin.stats import router as admin_stats_router
@@ -202,6 +203,7 @@ app.include_router(auth_router)
 app.include_router(admin_users_router)
 app.include_router(admin_career_router)
 app.include_router(admin_agents_router)
+app.include_router(admin_agent_templates_router)
 app.include_router(traces_router)
 app.include_router(admin_bug_reports_router)
 app.include_router(admin_stats_router)

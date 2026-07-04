@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _WECHAT_PROVIDER = "wechat"
 _TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
 _USERINFO_URL = "https://api.weixin.qq.com/sns/userinfo"
+_JSCODE2SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,14 @@ def _wechat_configured() -> bool:
         settings.wechat_login_enabled
         and settings.wechat_mobile_app_id.strip()
         and settings.wechat_mobile_app_secret.strip()
+    )
+
+
+def _wechat_mini_configured() -> bool:
+    return bool(
+        settings.wechat_login_enabled
+        and settings.wechat_mini_app_id.strip()
+        and settings.wechat_mini_app_secret.strip()
     )
 
 
@@ -181,6 +190,113 @@ async def exchange_wechat_code(code: str) -> WeChatTokenPayload:
             **profile,
         },
     )
+
+
+async def exchange_wechat_miniprogram_code(code: str) -> WeChatTokenPayload:
+    """Exchange a Mini Program ``wx.login()`` code via ``jscode2session``.
+
+    Returns the same ``WeChatTokenPayload`` shape as the mobile OAuth flow so it
+    can reuse ``find_or_create_wechat_user`` and write to the identical
+    ``users`` / ``auth_identities`` tables. ``unionid`` is only present when the
+    Mini Program is bound to the same WeChat Open Platform account as the mobile
+    app; that shared ``unionid`` is what keeps the account (and its
+    conversations) continuous across Mini Program and the future app.
+
+    The ``session_key`` returned by WeChat is deliberately NOT persisted: it is a
+    sensitive credential only needed for decrypting encrypted payloads, which we
+    do not use here.
+    """
+    if not _wechat_mini_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="微信登录暂未开放",
+        )
+
+    params = {
+        "appid": settings.wechat_mini_app_id.strip(),
+        "secret": settings.wechat_mini_app_secret.strip(),
+        "js_code": code,
+        "grant_type": "authorization_code",
+    }
+    timeout = httpx.Timeout(settings.wechat_oauth_timeout_s, connect=3.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            response = await client.get(_JSCODE2SESSION_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "WeChat mini code exchange failed",
+            extra={"event": "wechat_mini_exchange_failed", "reason": type(exc).__name__},
+        )
+        raise WeChatLoginError("wechat_exchange_failed") from exc
+
+    errcode = payload.get("errcode")
+    if errcode:
+        logger.info(
+            "WeChat rejected mini login code",
+            extra={"event": "wechat_mini_login_rejected", "errcode": errcode},
+        )
+        raise WeChatLoginError("wechat_rejected_code")
+
+    openid = payload.get("openid")
+    if not isinstance(openid, str) or not openid:
+        logger.warning(
+            "WeChat mini response missing openid",
+            extra={"event": "wechat_mini_missing_openid"},
+        )
+        raise WeChatLoginError("wechat_missing_openid")
+
+    unionid = payload.get("unionid")
+    unionid = unionid if isinstance(unionid, str) and unionid else None
+    return WeChatTokenPayload(
+        openid=openid,
+        unionid=unionid,
+        scope="miniprogram",
+        raw={
+            "openid": openid,
+            "unionid": unionid,
+            "source": "miniprogram",
+        },
+    )
+
+
+async def update_wechat_profile(
+    user_id: str,
+    *,
+    nickname: str | None = None,
+    avatar_url: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Merge user-supplied nickname/avatar into the WeChat identity rawProfile.
+
+    Backs the Mini Program "头像昵称填写能力": WeChat no longer returns nickname /
+    avatar silently, so the client collects them via chooseAvatar + nickname
+    input and we persist them here (into ``nickname`` / ``headimgurl`` so
+    ``_build_auth_response`` surfaces them as display name / avatar).
+
+    Returns the resulting ``(display_name, avatar_url)``. No-op for users without
+    a WeChat identity (e.g. password accounts).
+    """
+    identity = await db.authidentity.find_first(
+        where={"userId": user_id, "provider": _WECHAT_PROVIDER},
+        order={"updatedAt": "desc"},
+    )
+    if not identity:
+        return None, None
+
+    profile = dict(getattr(identity, "rawProfile", None) or {})
+    if nickname is not None:
+        cleaned = nickname.strip()
+        if cleaned:
+            profile["nickname"] = cleaned[:64]
+    if avatar_url is not None and avatar_url.strip():
+        profile["headimgurl"] = avatar_url.strip()
+
+    await db.authidentity.update(
+        where={"id": identity.id},
+        data={"rawProfile": Json(profile), "updatedAt": datetime.now(UTC)},
+    )
+    return profile.get("nickname"), profile.get("headimgurl")
 
 
 async def find_or_create_wechat_user(token: WeChatTokenPayload):
