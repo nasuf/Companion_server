@@ -50,6 +50,9 @@ Trace 面板是"真实场景端到端验证"，Replay 是"单点文案验证"—
 | `boundary.patience_instruction_*` | 耐心 <100 后正常聊天，主 prompt 内出现该段 |
 | `chat.special_instruction_appendix` | 道别/延迟解释兜底路径（终结意图即可见） |
 | `music.co_listening_context` | web 端发起共听后聊天 |
+| `music.accept_invite` / `busy_reject` / `sleep_reject` / `switch_track` | web 端分享歌曲发起共听（AI 空闲/忙碌/睡眠状态下分别触发），回复消息带 Trace 按钮 |
+| `music.busy_exit` / `agent_join_after_busy` / `agent_late_missed` 等共听事件 | 共听中暂停超时/AI 作息切换等事件，回复消息带 Trace 按钮 |
+| `offline.gift_sent_message` / `gift_delivered_message` / `gift_thanks_reply` / `gift_first_address_request` / `activity_invite_message` | 礼物寄出/送达/感谢/首次要地址/活动邀请消息，均带 Trace 按钮（2026-07-04 已接 tracer） |
 
 ### 2.3 主动消息（主动消息本体带 Trace 按钮）
 `proactive.silence_*`（4）/ `proactive.memory_ai|user` / `proactive.scheduled_scene` / `proactive.decay_final` / `proactive.first_greeting`（新会话首条）/ `proactive.special_*`（4，特殊日期）/ `proactive.reminder_message` + `proactive.reminder_pre_check`（设一个"2 分钟后提醒我X"最快）/ `proactive.memory_topic_rerank`。
@@ -63,15 +66,14 @@ Trace 面板是"真实场景端到端验证"，Replay 是"单点文案验证"—
 | 作息 cron | `schedule.daily_schedule(_with_memory)` / `schedule.daily_summary(_memories)` / `schedule.life_overview` | 每日定时任务，无消息载体 |
 | 画像 | `portrait.generation` / `portrait.update` / `portrait.tags` | 后台画像任务 |
 | L1 扫描 | `memory.pairwise_contradiction` / `memory.reconciliation`* | cron / 深层管线（*reconciliation 在聊天 post 链上理论可见，但依赖去重命中，replay 更可控） |
-| 线下互动 | `offline.*`（8 个礼物/活动） | **缺口**：礼物消息经 emit_proactive_message 入库但未接 tracer（见 §4） |
-| 音乐事件 | `music.accept_invite` / `busy_reject` / `sleep_reject` / `switch_track` / `busy_exit` / `agent_join_after_busy` / `agent_late_missed` / `music.proactive_recommend` 外的共听事件回复 | **缺口**：WS 音乐事件处理不在聊天 tracer 内 |
+| 线下互动·非 LLM | `offline.gift_candidate_pick` / `gift_selection` / `activity_card`（后台挑选/生成类，无消息载体） | 后台任务，replay 验证 |
 | 兜底文案 | `reply.delay_explanation_fallback_instruction` 等结构性兜底 | 仅主链路失败时出现，replay 验证文案即可 |
 
 ## 四、已知缺口与建议（工程侧后续项）
 
-1. **offline 礼物/活动消息无 Trace 按钮**：chat_emit 走 emit_proactive_message 但未创建 traced_usage_session。修法与 proactive/sender.py 一致（~半天）。
-2. **music WS 事件回复无 tracer**：ws.py 音乐事件处理独立于 stream_chat_response。同上修法。
-3. 上述两组在补 tracer 前，运维用 replay 端点验证文案 + Axiom 验证触发。
+1. ~~offline 礼物/活动消息无 Trace 按钮~~（✅ 2026-07-04 已修：5 条 LLM 链包 offline_trace，消息带 trace_id）
+2. ~~music WS 事件回复无 tracer~~（✅ 同日已修：共听邀请响应 + 事件回复漏斗均包 traced_usage_session）
+3. 仍无消息载体的组（初始化/作息 cron/画像/L1 扫描/礼物挑选后台步骤）继续用 replay 端点。
 4. 概率性行为（延迟解释概率、语气词仅表情、错别字）不是 prompt 文案问题，用 Axiom event 验证：`reply.filler_emoji` / `chat.session_recap_built` / `expression.learned` / `reply.decoration`。
 
 ## 五、测试环境快捷操作备忘

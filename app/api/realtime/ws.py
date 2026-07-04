@@ -443,28 +443,39 @@ async def _handle_music_component_card(
     else:
         prompt_key = "music.accept_invite"
 
-    try:
-        reply = await render_music_reply(
-            prompt_key,
-            user_name=user_name or "你",
-            ai_name=getattr(agent, "name", "") or "我",
-            track=track,
-            activity=activity,
-        )
-    except Exception as exc:
-        logger.warning("music reply generation failed: %s", exc)
-        reply = "我先把这首歌记下，等会儿好好听。"
+    # trace 包装 (测试手册 §4 缺口): 共听邀请响应带 Trace 按钮,
+    # music.accept_invite / busy_reject / sleep_reject / switch_track 可面板调试.
+    from app.services.llm.usage_tracker import traced_usage_session
 
-    metadata = {
-        "music_co_listening": accepted,
-        "music_prompt_key": prompt_key,
-        "reply_index": 0,
-    }
-    assistant_message_id = await _persist_assistant_message(
-        conversation_id,
-        reply,
-        metadata=metadata,
-    )
+    async with traced_usage_session(
+        name=f"[music:{prompt_key}]", scope="music",
+        conversation_id=conversation_id,
+        agent_id=getattr(agent, "id", None), user_id=user_id,
+    ) as tracer:
+        try:
+            reply = await render_music_reply(
+                prompt_key,
+                user_name=user_name or "你",
+                ai_name=getattr(agent, "name", "") or "我",
+                track=track,
+                activity=activity,
+            )
+        except Exception as exc:
+            logger.warning("music reply generation failed: %s", exc)
+            reply = "我先把这首歌记下，等会儿好好听。"
+
+        metadata = {
+            "music_co_listening": accepted,
+            "music_prompt_key": prompt_key,
+            "reply_index": 0,
+        }
+        if tracer.safe_trace_id:
+            metadata["trace_id"] = tracer.safe_trace_id
+        assistant_message_id = await _persist_assistant_message(
+            conversation_id,
+            reply,
+            metadata=metadata,
+        )
     try:
         from app.services.chat.post_process import _bg_memory_pipeline
         from app.services.notifications.service import notify_agent_message_created

@@ -26,6 +26,7 @@ from app.services.offline.chat_emit import (
     emit_assistant,
     emit_gift_card,
     insert_user_component_message,
+    offline_trace,
 )
 from app.services.offline.gift_amount import sample_gift_amount_cents
 from app.services.offline.gift_budget import available_gift_budget_cents
@@ -173,18 +174,24 @@ async def send_thanks(
     updated = await gift_repo.mark_gift_thanked(gift_id, user_id, message)
     if not updated:
         raise HTTPException(status_code=404, detail="Gift not found")
-    assistant = await gift_thanks_reply(gift, message)
-    if ctx and assistant:
-        await emit_assistant(
-            conversation_id=ctx.get("conversation_id"),
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx["workspace_id"],
-            message=assistant,
-            real_world_type="gift",
-            source_id=gift_id,
-            trigger_type="gift_thanks_reply",
-        )
+    async with offline_trace(
+        "gift_thanks",
+        conversation_id=(ctx or {}).get("conversation_id"),
+        agent_id=(ctx or {}).get("agent_id"), user_id=user_id,
+    ) as tracer:
+        assistant = await gift_thanks_reply(gift, message)
+        if ctx and assistant:
+            await emit_assistant(
+                conversation_id=ctx.get("conversation_id"),
+                user_id=user_id,
+                agent_id=ctx["agent_id"],
+                workspace_id=ctx["workspace_id"],
+                message=assistant,
+                real_world_type="gift",
+                source_id=gift_id,
+                trigger_type="gift_thanks_reply",
+                trace_id=tracer.safe_trace_id,
+            )
     remember_user_event(
         user_id=user_id,
         workspace_id=gift.get("workspace_id"),
@@ -244,17 +251,23 @@ async def create_gift_for_user(
                 "target_amount_cents": amount_cents,
             }
         )
-        message = await first_address_request_message(user_id, ctx["workspace_id"])
-        await emit_assistant(
+        async with offline_trace(
+            "gift_address_request",
             conversation_id=ctx["conversation_id"],
-            user_id=user_id,
-            agent_id=ctx["agent_id"],
-            workspace_id=ctx["workspace_id"],
-            message=message,
-            real_world_type="gift",
-            source_id=gift["id"],
-            trigger_type="gift_address_needed",
-        )
+            agent_id=ctx["agent_id"], user_id=user_id,
+        ) as tracer:
+            message = await first_address_request_message(user_id, ctx["workspace_id"])
+            await emit_assistant(
+                conversation_id=ctx["conversation_id"],
+                user_id=user_id,
+                agent_id=ctx["agent_id"],
+                workspace_id=ctx["workspace_id"],
+                message=message,
+                real_world_type="gift",
+                source_id=gift["id"],
+                trigger_type="gift_address_needed",
+                trace_id=tracer.safe_trace_id,
+            )
         return gift
 
     return await _fulfill_gift(
@@ -492,17 +505,23 @@ async def _fulfill_gift(
         return None
     await gift_fulfillment.sync_tracking_events(user_id, gift)
     await gift_repo.update_last_gift_paid(user_id, ctx["agent_id"], ctx["workspace_id"])
-    message = await gift_sent_message(user_id, ctx["workspace_id"], gift)
-    await emit_gift_card(
+    async with offline_trace(
+        "gift_sent",
         conversation_id=ctx["conversation_id"],
-        user_id=user_id,
-        agent_id=ctx["agent_id"],
-        workspace_id=ctx["workspace_id"],
-        gift=gift,
-        trigger_type="gift_sent",
-        status_label="在路上",
-        message=message,
-    )
+        agent_id=ctx["agent_id"], user_id=user_id,
+    ) as tracer:
+        message = await gift_sent_message(user_id, ctx["workspace_id"], gift)
+        await emit_gift_card(
+            conversation_id=ctx["conversation_id"],
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            gift=gift,
+            trigger_type="gift_sent",
+            status_label="在路上",
+            message=message,
+            trace_id=tracer.safe_trace_id,
+        )
     remember_user_event(
         user_id=user_id,
         workspace_id=ctx["workspace_id"],
@@ -624,17 +643,23 @@ async def _emit_delivery_once(
                 }
             ],
         )
-    message = await gift_delivered_message(user_id, ctx.get("workspace_id"), updated)
-    await emit_gift_card(
+    async with offline_trace(
+        "gift_delivered",
         conversation_id=ctx.get("conversation_id"),
-        user_id=user_id,
-        agent_id=ctx["agent_id"],
-        workspace_id=ctx.get("workspace_id"),
-        gift=updated,
-        trigger_type="gift_delivered",
-        status_label="已送达",
-        message=message,
-    )
+        agent_id=ctx["agent_id"], user_id=user_id,
+    ) as tracer:
+        message = await gift_delivered_message(user_id, ctx.get("workspace_id"), updated)
+        await emit_gift_card(
+            conversation_id=ctx.get("conversation_id"),
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx.get("workspace_id"),
+            gift=updated,
+            trigger_type="gift_delivered",
+            status_label="已送达",
+            message=message,
+            trace_id=tracer.safe_trace_id,
+        )
     return updated
 
 

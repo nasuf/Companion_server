@@ -819,21 +819,32 @@ async def _emit_rendered_reply(
     track: MusicTrack,
     music_co_listening: bool,
 ) -> str:
-    reply = await _render_exit_reply(
-        prompt_key,
-        user_name=user_name,
-        ai_name=ai_name,
-        activity=activity,
-        track=track,
-    )
-    assistant_message_id = await _persist_assistant_message(
-        conversation_id,
-        reply,
-        metadata={
+    # trace 包装 (测试手册 §4 缺口): 音乐事件回复也带 Trace 按钮,
+    # 运维可在面板内调试 music.busy_exit / agent_join_after_busy 等 prompt.
+    from app.services.llm.usage_tracker import traced_usage_session
+
+    async with traced_usage_session(
+        name=f"[music:{prompt_key}]", scope="music",
+        conversation_id=conversation_id, agent_id=None, user_id=None,
+    ) as tracer:
+        reply = await _render_exit_reply(
+            prompt_key,
+            user_name=user_name,
+            ai_name=ai_name,
+            activity=activity,
+            track=track,
+        )
+        metadata = {
             "music_co_listening": music_co_listening,
             "music_prompt_key": prompt_key,
-        },
-    )
+        }
+        if tracer.safe_trace_id:
+            metadata["trace_id"] = tracer.safe_trace_id
+        assistant_message_id = await _persist_assistant_message(
+            conversation_id,
+            reply,
+            metadata=metadata,
+        )
     await manager.send_event(
         conversation_id,
         "reply",

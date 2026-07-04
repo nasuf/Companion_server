@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 from prisma import Json
@@ -7,6 +8,29 @@ from prisma import Json
 from app.db import db
 from app.services.proactive.emit import emit_proactive_message
 from app.services.runtime.ws_manager import manager
+
+
+@asynccontextmanager
+async def offline_trace(
+    kind: str,
+    *,
+    conversation_id: str | None,
+    agent_id: str | None,
+    user_id: str | None,
+):
+    """offline 礼物/活动消息的 trace 包装（对齐 proactive/sender 模式）。
+
+    包住「LLM 生成 + 发射」整段：LLM run 进 LangSmith trace、prompt 渲染
+    组件被记录、emit 时把 tracer.safe_trace_id 挂进消息 metadata → 前端
+    Trace 按钮可点，运维可在面板内调试 offline.* prompt（测试手册 §4 缺口）。
+    """
+    from app.services.llm.usage_tracker import traced_usage_session
+
+    async with traced_usage_session(
+        name=f"[offline:{kind}]", scope="offline",
+        conversation_id=conversation_id, agent_id=agent_id, user_id=user_id,
+    ) as tracer:
+        yield tracer
 
 
 async def emit_assistant(
@@ -20,6 +44,7 @@ async def emit_assistant(
     source_id: str,
     trigger_type: str,
     extra_metadata: dict[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> str | None:
     if not conversation_id or not message.strip():
         return None
@@ -36,6 +61,7 @@ async def emit_assistant(
         message=message.strip(),
         trigger_type=trigger_type,
         extra_metadata=metadata,
+        trace_id=trace_id,
     )
 
 
@@ -148,6 +174,7 @@ async def emit_gift_card(
     trigger_type: str,
     status_label: str,
     message: str | None = None,
+    trace_id: str | None = None,
 ) -> str | None:
     if not conversation_id:
         return None
@@ -166,6 +193,7 @@ async def emit_gift_card(
         trigger_type=trigger_type,
         extra_metadata=metadata,
         ws_payload_extra={"component_card": card},
+        trace_id=trace_id,
     )
 
 

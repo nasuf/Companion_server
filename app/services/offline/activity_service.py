@@ -12,6 +12,7 @@ from app.services.offline.activity_generation import (
     generate_activity_invite_message,
 )
 from app.services.offline.chat_emit import (
+    offline_trace,
     emit_activity_card,
     emit_assistant,
     insert_user_activity_card,
@@ -147,21 +148,27 @@ async def create_recommendation_for_user(
             "status": "pending",
         }
     )
-    message = await generate_activity_invite_message(
-        activity=activity,
-        user_id=user_id,
-        workspace_id=ctx["workspace_id"],
-    )
-    await emit_assistant(
+    async with offline_trace(
+        "activity_invite",
         conversation_id=ctx["conversation_id"],
-        user_id=user_id,
-        agent_id=ctx["agent_id"],
-        workspace_id=ctx["workspace_id"],
-        message=message,
-        real_world_type="activity",
-        source_id=activity["id"],
-        trigger_type="offline_activity_recommendation",
-    )
+        agent_id=ctx["agent_id"], user_id=user_id,
+    ) as tracer:
+        message = await generate_activity_invite_message(
+            activity=activity,
+            user_id=user_id,
+            workspace_id=ctx["workspace_id"],
+        )
+        await emit_assistant(
+            conversation_id=ctx["conversation_id"],
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            message=message,
+            real_world_type="activity",
+            source_id=activity["id"],
+            trigger_type="offline_activity_recommendation",
+            trace_id=tracer.safe_trace_id,
+        )
     await emit_activity_card(
         conversation_id=ctx["conversation_id"],
         user_id=user_id,

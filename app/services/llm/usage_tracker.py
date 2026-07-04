@@ -21,6 +21,7 @@ from typing import Callable, Literal, TypedDict
 
 UsageScope = Literal[
     "chat", "post_process", "proactive", "agent_creation", "schedule_cron",
+    "offline", "music",
 ]
 
 logger = logging.getLogger(__name__)
