@@ -142,13 +142,50 @@ async def test_find_or_create_wechat_user_updates_openid_identity_to_unionid(mon
     )
 
     assert user is existing_user
+    # Priority lookup: the unionid match is checked first and wins immediately.
     fake_db.authidentity.find_first.assert_awaited_once()
     where = fake_db.authidentity.find_first.await_args.kwargs["where"]
-    assert {"openid": "open-1"} in where["OR"]
-    assert {"unionid": "union-1"} in where["OR"]
+    assert where == {"provider": "wechat", "unionid": "union-1"}
     update_data = fake_db.authidentity.update.await_args.kwargs["data"]
     assert update_data["providerAccountId"] == "union-1"
     assert isinstance(update_data["rawProfile"], Json)
+
+
+@pytest.mark.asyncio
+async def test_identity_lookup_priority_falls_back_union_account_openid(monkeypatch):
+    """unionid > providerAccountId > openid — the openid-only duplicate is the
+    last resort, so post-binding logins deterministically land on the
+    canonical (unionid) account when it exists."""
+    duplicate_identity = SimpleNamespace(id="identity-dup", userId="user-dup")
+    fake_db = SimpleNamespace(
+        authidentity=SimpleNamespace(
+            find_first=AsyncMock(side_effect=[None, None, duplicate_identity]),
+            update=AsyncMock(),
+        ),
+        user=SimpleNamespace(
+            find_unique=AsyncMock(
+                return_value=SimpleNamespace(id="user-dup", username="wx_dup", role="user")
+            )
+        ),
+    )
+    monkeypatch.setattr(wechat_auth, "db", fake_db)
+
+    user = await wechat_auth.find_or_create_wechat_user(
+        WeChatTokenPayload(
+            openid="open-mini",
+            unionid="union-1",
+            scope="miniprogram",
+            raw={"openid": "open-mini", "unionid": "union-1", "source": "miniprogram"},
+        )
+    )
+
+    assert user.id == "user-dup"
+    wheres = [c.kwargs["where"] for c in fake_db.authidentity.find_first.await_args_list]
+    assert wheres == [
+        {"provider": "wechat", "unionid": "union-1"},
+        {"provider": "wechat", "providerAccountId": "union-1"},
+        {"provider": "wechat", "openid": "open-mini"},
+    ]
 
 
 @pytest.mark.asyncio

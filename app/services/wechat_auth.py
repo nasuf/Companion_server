@@ -72,6 +72,36 @@ def _identity_lookup_where(token: WeChatTokenPayload) -> dict[str, Any]:
     return {"provider": _WECHAT_PROVIDER, "OR": candidates}
 
 
+async def _find_identity_preferring_union(token: WeChatTokenPayload):
+    """Deterministic identity lookup: unionid > providerAccountId > openid.
+
+    Before the Mini Program was bound to the Open Platform, its logins carried
+    only an openid, so a duplicate identity/user may exist alongside the mobile
+    app's unionid identity. Once binding activates, both rows match an
+    unordered OR lookup — which account wins becomes arbitrary, and updating
+    the openid-only row's providerAccountId to the unionid collides with the
+    mobile row's unique(provider, providerAccountId). Preferring the unionid
+    match routes cross-platform logins into the one canonical account.
+    """
+    if token.unionid:
+        found = await db.authidentity.find_first(
+            where={"provider": _WECHAT_PROVIDER, "unionid": token.unionid}
+        )
+        if found:
+            return found
+    found = await db.authidentity.find_first(
+        where={
+            "provider": _WECHAT_PROVIDER,
+            "providerAccountId": token.provider_account_id,
+        }
+    )
+    if found:
+        return found
+    return await db.authidentity.find_first(
+        where={"provider": _WECHAT_PROVIDER, "openid": token.openid}
+    )
+
+
 def _safe_wechat_profile(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "openid",
@@ -316,21 +346,39 @@ def _merged_raw_profile(existing: object, token: WeChatTokenPayload) -> dict[str
 
 
 async def find_or_create_wechat_user(token: WeChatTokenPayload):
-    identity = await db.authidentity.find_first(where=_identity_lookup_where(token))
+    identity = await _find_identity_preferring_union(token)
     if identity:
-        await db.authidentity.update(
-            where={"id": identity.id},
-            data={
-                "providerAccountId": token.provider_account_id,
-                "openid": token.openid,
-                "unionid": token.unionid,
-                "scope": token.scope,
-                "rawProfile": Json(
-                    _merged_raw_profile(getattr(identity, "rawProfile", None), token)
-                ),
-                "lastLoginAt": datetime.now(UTC),
-            },
-        )
+        try:
+            await db.authidentity.update(
+                where={"id": identity.id},
+                data={
+                    "providerAccountId": token.provider_account_id,
+                    "openid": token.openid,
+                    "unionid": token.unionid,
+                    "scope": token.scope,
+                    "rawProfile": Json(
+                        _merged_raw_profile(getattr(identity, "rawProfile", None), token)
+                    ),
+                    "lastLoginAt": datetime.now(UTC),
+                },
+            )
+        except UniqueViolationError:
+            # Another identity already owns this providerAccountId (duplicate
+            # pre-binding account) — route the login into that canonical row
+            # instead of failing the whole login.
+            logger.warning(
+                "WeChat identity update conflict; falling back to canonical row",
+                extra={"event": "wechat_identity_conflict"},
+            )
+            canonical = await db.authidentity.find_first(
+                where={
+                    "provider": _WECHAT_PROVIDER,
+                    "providerAccountId": token.provider_account_id,
+                }
+            )
+            if canonical:
+                return await db.user.find_unique(where={"id": canonical.userId})
+            raise
         return await db.user.find_unique(where={"id": identity.userId})
 
     username = _provider_username(token.provider_account_id)
@@ -357,7 +405,7 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
             )
             return user
     except UniqueViolationError:
-        identity = await db.authidentity.find_first(where=_identity_lookup_where(token))
+        identity = await _find_identity_preferring_union(token)
         if not identity:
             raise
         await db.authidentity.update(
