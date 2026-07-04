@@ -112,6 +112,8 @@ model AiAgent {
   gender             String?             @map("gender")
   avatarKey          String?             @map("avatar_key")
   avatarUrl          String?             @map("avatar_url")
+  // 若该 agent 是从某个模板克隆而来, 记录源模板 agent id (用于「模板被使用次数」统计).
+  sourceTemplateId   String?             @map("source_template_id")
   createdAt          DateTime            @default(now()) @map("created_at")
   updatedAt          DateTime            @updatedAt @map("updated_at")
   workspaces         ChatWorkspace[]
@@ -138,6 +140,7 @@ model AiAgent {
   realWorldGifts  RealWorldGift[]
   realWorldTriggerStates RealWorldTriggerState[]
 
+  @@index([sourceTemplateId], map: "ai_agents_source_template_idx")
   @@map("ai_agents")
 }
 

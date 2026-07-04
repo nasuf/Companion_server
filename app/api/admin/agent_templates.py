@@ -25,6 +25,7 @@ from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.models.agent import PersonalityInput
 from app.services.agent_template import (
+    count_active_clones,
     get_default_template_agent_id,
     get_or_create_template_user,
     list_template_agents,
@@ -82,6 +83,7 @@ async def _template_summary(agent, *, default_id: str | None) -> dict:
         "created_at": str(agent.createdAt),
         "is_default": agent.id == default_id,
         "l1_memory_count": await _l1_memory_count(agent.id),
+        "clone_count": await count_active_clones(agent.id),
         "progress": progress,
     }
 

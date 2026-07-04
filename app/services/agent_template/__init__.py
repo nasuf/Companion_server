@@ -17,6 +17,7 @@ from app.services.agent_template.clone import (
     ensure_default_agent_for_user,
 )
 from app.services.agent_template.registry import (
+    count_active_clones,
     get_default_template_agent_id,
     get_or_create_template_user,
     is_template_agent,
@@ -26,6 +27,7 @@ from app.services.agent_template.registry import (
 
 __all__ = [
     "clone_template_agent_for_user",
+    "count_active_clones",
     "ensure_default_agent_for_user",
     "get_default_template_agent_id",
     "get_or_create_template_user",

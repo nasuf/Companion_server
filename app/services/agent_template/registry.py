@@ -56,6 +56,20 @@ async def is_template_agent(agent_id: str) -> bool:
     return bool(agent and agent.userId == owner.id)
 
 
+async def count_active_clones(template_agent_id: str) -> int:
+    """How many in-use (active) agents were cloned from this template."""
+    try:
+        rows = await db.query_raw(
+            "SELECT count(*)::int AS n FROM ai_agents "
+            "WHERE source_template_id = $1 AND status = 'active'",
+            template_agent_id,
+        )
+        return int(rows[0]["n"]) if rows else 0
+    except Exception as exc:
+        logger.warning("[TEMPLATE] count_active_clones failed: %s", exc)
+        return 0
+
+
 async def get_default_template_agent_id() -> str | None:
     """Resolve the default template agent id: DB pointer first, then env."""
     try:

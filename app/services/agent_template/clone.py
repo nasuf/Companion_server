@@ -171,6 +171,16 @@ async def clone_template_agent_for_user(user_id: str, template_agent_id: str):
         raise ValueError("template agent has no active workspace")
 
     agent = await db.aiagent.create(data=_clone_persona_data(template, user_id))
+    # Record provenance via raw SQL so this works even before a Prisma client
+    # regen picks up the new column. Failure here must not break the clone.
+    try:
+        await db.execute_raw(
+            "UPDATE ai_agents SET source_template_id = $1 WHERE id = $2",
+            template_agent_id,
+            agent.id,
+        )
+    except Exception as exc:
+        logger.warning("[AGENT-CLONE] source_template_id write failed: %s", exc)
 
     staged: list[dict[str, Any]] = []
     workspace = None
