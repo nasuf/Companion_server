@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     utility_model: str = ""
     prefilter_model: str = ""  # Override for pre-filter model (default: utility_model)
     enable_memory_prefilter: bool = True  # Spec §2.1.2: small model "记/不记" before big model extraction
+    # When a message hits a high-precision emotion keyword, skip the utility LLM
+    # emotion call (~300-400 tok + 200-600ms saved). Ambiguous messages (no
+    # keyword) still use the LLM. Emotion is a soft signal (emoji/tone), so the
+    # coarser keyword estimate is an acceptable trade for the latency/cost win.
+    emotion_keyword_fast_path: bool = True
     ollama_model: str = ""
     llm_provider: str = ""
     chat_provider: str = ""
@@ -93,6 +98,11 @@ class Settings(BaseSettings):
     # JWT authentication
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days
+    # WebSocket / realtime auth. When True, /ws/{conversation_id} requires a
+    # valid JWT (query param `?token=` or Authorization header) whose `sub`
+    # owns the conversation. Kept as a flag so a staged client rollout can
+    # temporarily disable enforcement; default is secure.
+    ws_require_auth: bool = True
     # Optional separate key for last-will content/contact encryption. If unset,
     # production falls back to the strong JWT secret enforced below.
     last_will_encryption_key: str = ""
@@ -219,6 +229,19 @@ class Settings(BaseSettings):
     redis_socket_timeout_s: float = 5.0
     redis_connect_timeout_s: float = 2.0
     redis_max_connections: int = 50
+
+    # Proactive: a state claimed into `processing` that never reaches a terminal
+    # transition (instance OOM/killed mid-send) would stall that workspace's
+    # proactive messaging forever. The scan reclaims `processing` states whose
+    # last claim is older than this many seconds back to a re-eligible status.
+    proactive_processing_timeout_s: int = 300
+
+    # fire_background concurrency ceiling. Each user turn fans out several
+    # background tasks (memory extraction, PAD, trait, achievements, ...); under
+    # a storm this bounds concurrent execution (tasks queue, never drop) so the
+    # event loop / memory can't be overwhelmed. Set high enough that normal
+    # traffic never queues; crossing the high-water mark logs a warning.
+    background_task_max_concurrency: int = 256
 
     model_config = {
         "env_file": ".env",

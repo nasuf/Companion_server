@@ -252,10 +252,17 @@ async def _find_literal_matching_memories(
     description: str,
     *,
     limit: int = 5,
+    workspace_id: str | None = None,
 ) -> list[dict]:
+    # 用户删除只作用于用户自己的记忆 (source="user"): AI 自我记忆是人设的一
+    # 部分, 不应被用户一句"忘了X"删掉。workspace_id 限定当前会话的伴侣, 防多
+    # 伴侣用户跨 workspace 误删。
+    where: dict = {"userId": user_id, "isArchived": False}
+    if workspace_id:
+        where["workspaceId"] = workspace_id
     records = await memory_repo.find_many(
-        source=None,
-        where={"userId": user_id, "isArchived": False},
+        source="user",
+        where=where,
         take=200,
     )
     candidates: list[dict] = []
@@ -278,20 +285,26 @@ async def find_matching_memories(
     user_id: str,
     description: str,
     threshold: float = 0.78,
+    workspace_id: str | None = None,
 ) -> list[dict]:
-    """查找匹配的记忆但不删除，返回候选列表.
+    """查找匹配的记忆但不删除，返回候选列表 (仅用户自己的记忆).
 
     Phase 0.2 提高默认阈值 0.7 → 0.78: 0.7 太松, "忘了我喜欢咖啡" 召回了
     "喜欢茶/喜欢热饮" 等不该删的相似条目 (用户回 '嗯' 一刀切删全部 → 用户
     数据丢失). 0.78 是 bge-m3 上 "明确指代同一事实" 的近似下限, 既能召回真正
     要删的, 又能滤掉只是话题相关的.
 
-    callers 仍可显式传 threshold 覆盖 (e.g. find_for_audit 用更松 0.6).
+    候选严格限定 `source="user"` + 当前会话 workspace: 避免误删 AI 自我记忆
+    或另一伴侣会话的记忆。callers 仍可显式传 threshold 覆盖。
     """
-    literal_matches = await _find_literal_matching_memories(user_id, description)
+    literal_matches = await _find_literal_matching_memories(
+        user_id, description, workspace_id=workspace_id,
+    )
 
     embedding = await generate_embedding(description)
-    results = await search_by_embedding(embedding, user_id, top_k=5)
+    results = await search_by_embedding(
+        embedding, user_id, top_k=5, workspace_id=workspace_id, sources=["user"],
+    )
     matches = list(literal_matches)
     seen_ids = {m.get("id") for m in matches}
     for r in results:
@@ -324,16 +337,19 @@ async def generate_deletion_reply(
 async def delete_memories_by_description(
     user_id: str,
     description: str,
+    workspace_id: str | None = None,
 ) -> int:
-    """Find and delete memories matching the description.
+    """Find and delete memories matching the description (user-owned only).
 
     Returns number of deleted memories.
     """
     # Generate embedding for the target description
     embedding = await generate_embedding(description)
 
-    # Find similar memories
-    results = await search_by_embedding(embedding, user_id, top_k=5)
+    # Find similar memories — scoped to the user's own memories in this workspace.
+    results = await search_by_embedding(
+        embedding, user_id, top_k=5, workspace_id=workspace_id, sources=["user"],
+    )
 
     deleted = 0
     for r in results:

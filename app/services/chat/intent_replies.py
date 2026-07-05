@@ -675,10 +675,16 @@ async def delay_explanation_reply(
 # §3 意图识别（小模型）
 # ═══════════════════════════════════════════════════════════════════
 
-_INTENT_LABELS = {
-    "终结意图", "计划查询", "作息调整", "询问当前状态",
-    "道歉承诺", "删除", "调用久远记忆", "记录请求", "日常交流",
-}
+# Single source of the accepted intent labels: derive from LABEL_TO_INTENT so a
+# label added there can't silently drift out of the recognizer's whitelist.
+# "危机求助" is excluded on purpose — crisis is detected upstream in
+# crisis_guard_phase (keyword + semantic), never through the unified LLM path.
+def _accepted_intent_labels() -> set[str]:
+    from app.services.chat.intent_dispatcher import LABEL_TO_INTENT
+    return {label for label in LABEL_TO_INTENT if label != "危机求助"}
+
+
+_INTENT_LABELS = _accepted_intent_labels()
 
 
 async def unified_intent_recognize(

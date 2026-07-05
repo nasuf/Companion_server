@@ -476,6 +476,7 @@ async def create_user_reminder(
             embedding = await generate_embedding(summary)
             memory_id = await find_duplicate_id(
                 user_id, summary, embedding, workspace_id=workspace_id,
+                source="user",
             )
             if memory_id:
                 await memory_repo.update(

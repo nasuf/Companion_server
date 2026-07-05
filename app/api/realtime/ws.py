@@ -10,6 +10,8 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prisma import Json
 
+from app.api.jwt_auth import authenticate_ws
+from app.config import settings
 from app.db import db
 from app.observability import bind_context
 from app.observability.events import EVT_WS_CONNECT, EVT_WS_DISCONNECT, EVT_WS_MESSAGE_RECV
@@ -631,6 +633,19 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
 
     user_id = conv.userId
     agent = conv.agent
+
+    # Auth: conversation_id alone must not be a capability token. Require a JWT
+    # whose `sub` owns this conversation (admins bypass). Close before accept so
+    # an unauthenticated socket never enters the message loop. Gated by
+    # settings.ws_require_auth to allow a staged client rollout.
+    if settings.ws_require_auth:
+        payload = authenticate_ws(websocket)
+        if payload is None:
+            await websocket.close(code=4401, reason="auth_required")
+            return
+        if payload.get("role") != "admin" and payload.get("sub") != user_id:
+            await websocket.close(code=4403, reason="forbidden")
+            return
     workspace_id = getattr(conv, "workspaceId", None)
     # username 一次性查询缓存 — 整个 WS 生命周期复用, 避免每条 message 查 DB
     user_record = await db.user.find_unique(where={"id": user_id})
@@ -734,7 +749,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 pass
         finally:
             logger.info("ws disconnected", extra={"event": EVT_WS_DISCONNECT})
-            await manager.disconnect(conversation_id)
+            await manager.disconnect(conversation_id, websocket)
             try:
                 from app.services.music_status import end_if_disconnected_after_timeout
 

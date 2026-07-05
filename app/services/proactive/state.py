@@ -375,6 +375,65 @@ async def claim_waiting_timeout_state(
     return _row_to_state(rows[0])
 
 
+async def reclaim_stale_processing_states(
+    *,
+    now: datetime | None = None,
+    timeout_s: int | None = None,
+) -> int:
+    """Recover states stuck in a transient `processing*` status.
+
+    A state claimed into `processing` (or `processing_timeout`) that never
+    reaches a terminal transition — because the claiming instance was OOM-killed
+    or crashed mid-send — would otherwise stall that workspace's proactive
+    messaging forever (`list_due_proactive_states` only sees `running`, and
+    `list_waiting_timeout_states` only sees `waiting_user`).
+
+    Reset such states, guarded by `last_attempt_at` age, back to their
+    re-eligible predecessor status so the next scan can retry:
+      - processing          → running       (re-picked via window_due_at)
+      - processing_timeout  → waiting_user  (re-picked via response_deadline_at)
+
+    Returns the number of states reclaimed.
+    """
+    from app.config import settings
+
+    now_ts = _now(now)
+    timeout = timeout_s if timeout_s is not None else settings.proactive_processing_timeout_s
+    cutoff = now_ts - timedelta(seconds=timeout)
+    try:
+        rows = await db.query_raw(
+            """
+            UPDATE proactive_states
+            SET
+                status = CASE status
+                    WHEN 'processing' THEN 'running'
+                    WHEN 'processing_timeout' THEN 'waiting_user'
+                    ELSE status
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status IN ('processing', 'processing_timeout')
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at < $1::timestamp
+            RETURNING id, workspace_id
+            """,
+            _ts(cutoff),
+        )
+    except Exception as e:
+        _log_if_unavailable("reclaim stale processing", e)
+        return 0
+    if rows:
+        logger.warning(
+            f"[PROACTIVE] reclaimed {len(rows)} stale processing state(s) "
+            f"(timeout={timeout}s)",
+            extra={
+                "event": EVT_PROACTIVE_STATE_TRANSITION,
+                "transition": "processing_reclaimed",
+                "n_reclaimed": len(rows),
+            },
+        )
+    return len(rows)
+
+
 async def start_or_restart_proactive_session(
     *,
     workspace_id: str,

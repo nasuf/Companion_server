@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 
 Side = Literal["user", "ai"]
 
+
+class MemoryExtractionError(RuntimeError):
+    """Raised when the extraction LLM hard-fails (timeout / provider error).
+
+    Distinct from a legitimately empty extraction: the caller must NOT advance
+    the per-side watermark on this error, otherwise the un-extracted messages
+    are lost forever. A later batch will re-cover them.
+    """
+
 async def _create_reminder_timetrigger(
     *,
     user_id: str,
@@ -200,6 +209,13 @@ async def process_memory_pipeline(
         context_conversation=context_conversation,
         side=side,
     )
+    # Hard LLM failure → propagate so the caller keeps the watermark put and a
+    # later batch retries. An empty-but-successful extraction (no error flag)
+    # falls through and legitimately advances the watermark.
+    if extraction.get("_extraction_error"):
+        raise MemoryExtractionError(
+            f"extraction LLM failed for side={side}; watermark must not advance"
+        )
     memories = extraction.get("memories", [])
 
     if not memories:
@@ -216,6 +232,19 @@ async def process_memory_pipeline(
             rule_based_occur_time = ensure_aware(parsed.event_times[0].start)
 
     stored_ids: list[str] = []
+
+    # Batch-level entity type hints (name → type) recovered from the extraction
+    # aggregate; per-memory entities are bare names, so we resolve their type
+    # here without linking the whole aggregate to every memory.
+    entity_type_by_name: dict[str, str] = {}
+    for ent in extraction.get("entities", []):
+        if isinstance(ent, dict):
+            name = str(ent.get("name") or "").strip()
+            if name:
+                entity_type_by_name[name] = str(ent.get("type") or "other")
+    batch_preferences = [
+        pref for pref in extraction.get("preferences", []) if isinstance(pref, dict)
+    ]
 
     # Spec §1.5.2 user emphasis only drives user-side L2→L1 promotion.
     user_emphasized = side == "user" and any(
@@ -387,31 +416,49 @@ async def process_memory_pipeline(
                 except Exception:
                     pass
 
-            # Step 3: Link entities / topics / preferences to this memory.
-            # Best-effort: failure here is advisory (retrieval still works
-            # from the memory row + pgvector) so we log-and-continue.
+            # Step 3: Link entities / topics / preferences to THIS memory.
+            # Must use the memory's own entities/topics (not the batch-level
+            # aggregate) — otherwise a batch that extracts N memories links
+            # every entity/topic/preference to all N rows, polluting the entity
+            # graph and entity-recall (e.g. a "cat" memory tagged with "work").
+            # Best-effort: failure here is advisory (retrieval still works from
+            # the memory row + pgvector) so we log-and-continue.
             try:
+                mem_entities = [
+                    {"name": name, "type": entity_type_by_name.get(name, "other")}
+                    for name in mem.get("entities", [])
+                    if name
+                ]
                 await record_entities_for_memory(
                     memory_id=memory_id,
                     memory_source=side,
                     user_id=user_id,
                     workspace_id=workspace_id,
-                    entities=extraction.get("entities", []),
+                    entities=mem_entities,
                 )
                 await record_topics_for_memory(
                     memory_id=memory_id,
                     memory_source=side,
                     user_id=user_id,
                     workspace_id=workspace_id,
-                    topics=extraction.get("topics", []),
+                    topics=[str(t) for t in mem.get("topics", []) if t],
                 )
-                await record_preferences_for_memory(
-                    memory_id=memory_id,
-                    memory_source=side,
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    preferences=extraction.get("preferences", []),
-                )
+                # Preferences have no per-memory field in the schema; attribute
+                # each batch preference only to the memory whose text actually
+                # mentions its value (no cross-memory pollution).
+                mem_prefs = [
+                    pref for pref in batch_preferences
+                    if str(pref.get("value") or "").strip()
+                    and str(pref.get("value")).strip() in summary
+                ]
+                if mem_prefs:
+                    await record_preferences_for_memory(
+                        memory_id=memory_id,
+                        memory_source=side,
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        preferences=mem_prefs,
+                    )
             except Exception as e:
                 logger.warning(f"Entity linking failed for memory {memory_id}: {e}")
 

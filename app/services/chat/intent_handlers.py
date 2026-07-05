@@ -129,6 +129,9 @@ class ShortCircuitCtx:
     response_diagnostics: dict[str, Any] | None = None
     covered_until_user_ts: datetime | None = None
     achievement_turn_final: bool = True
+    # 当前会话所属 workspace, 供删除等需按会话隔离的 handler 使用 (防多伴侣
+    # 跨 workspace 误删/误查)。
+    workspace_id: str | None = None
 
     async def finalize(
         self,
@@ -278,7 +281,9 @@ async def handle_deletion(
         if not description:
             return False, None
 
-        candidates = await find_matching_memories(ctx.user_id, description)
+        candidates = await find_matching_memories(
+            ctx.user_id, description, workspace_id=ctx.workspace_id,
+        )
         agent_name = ctx.agent.name if ctx.agent else "伙伴"
         if not candidates:
             return True, ctx.finalize("嗯...我好像没有关于这个的记忆呢。", kind="deletion_no_match")
@@ -1047,6 +1052,7 @@ async def _persist_one_reminder(
             embedding = await generate_embedding(summary)
             memory_id = await find_duplicate_id(
                 user_id, summary, embedding, workspace_id=workspace_id,
+                source="user",
             )
             if memory_id:
                 await memory_repo.update(

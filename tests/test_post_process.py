@@ -365,7 +365,8 @@ async def test_memory_pipeline_uses_distributed_lock_in_production():
     assert lock_calls
     assert lock_calls[0]["args"] == ("memory_pipeline:conv-prod",)
     assert lock_calls[0]["kwargs"]["ttl_s"] == post_process._PIPELINE_DISTRIBUTED_LOCK_TTL
-    assert lock_calls[0]["kwargs"]["fail_open"] is True
+    # Phase 4: 生产 fail-closed — Redis 锁不可用时跳过本批而非无锁并发执行。
+    assert lock_calls[0]["kwargs"]["fail_open"] is False
 
 
 @pytest.mark.asyncio

@@ -84,6 +84,49 @@ def _ensure_current_user_message(
     ]
 
 
+def collapse_turn_fragments(
+    messages: list[dict],
+    *,
+    turn_message_ids: set[str],
+    combined_text: str,
+    combined_id: str | None,
+) -> list[dict]:
+    """Fold the current turn's fragment rows into one coherent user message.
+
+    Fragment aggregation persists each piece ("我" / "喜欢" / "你") as a separate
+    DB row, then processes them as one combined message ("我喜欢你"). Left as-is,
+    the reply prompt shows the fragments as N separate user turns and the model
+    may answer only the last one. This rebuilds the tail as a single user turn
+    with the combined text so the LLM sees the message the user actually meant.
+
+    Only affects the reply prompt — the memory pipeline still reads the original
+    per-row messages (its watermark tracks message ids individually).
+
+    No-op when there is 0/1 fragment or nothing combined to inject.
+    """
+    if len(turn_message_ids) <= 1 or not combined_text.strip():
+        return messages
+
+    kept = [m for m in messages if m.get("id") not in turn_message_ids]
+    if len(kept) == len(messages):
+        return messages  # none of the turn ids are in this window
+
+    fragment_times = [
+        _parse_message_created_at(m.get("createdAt"))
+        for m in messages
+        if m.get("id") in turn_message_ids
+    ]
+    latest = max((t for t in fragment_times if t is not None), default=None)
+    kept.append({
+        "id": combined_id,
+        "role": "user",
+        "content": combined_text,
+        "createdAt": latest.isoformat() if latest else None,
+        "coalesced_turn": True,
+    })
+    return kept
+
+
 def _parse_message_created_at(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)

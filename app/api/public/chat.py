@@ -6,6 +6,8 @@ from prisma import Json
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import require_redis
+from app.api.jwt_auth import require_user
+from app.api.ownership import require_user_self
 from app.db import db
 from app.models.message import ChatRequest
 from app.services.interaction.delayed_queue import enqueue_or_append_delayed
@@ -58,7 +60,11 @@ async def _persist_user_message(
 
 
 @router.post("/{conversation_id}", dependencies=[Depends(require_redis)])
-async def chat(conversation_id: str, data: ChatRequest):
+async def chat(
+    conversation_id: str,
+    data: ChatRequest,
+    user: dict = Depends(require_user),
+):
     conv = await db.conversation.find_unique(
         where={"id": conversation_id},
         include={"agent": True},
@@ -67,6 +73,9 @@ async def chat(conversation_id: str, data: ChatRequest):
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conv.isDeleted:
         raise HTTPException(status_code=410, detail="Conversation deleted")
+    # Ownership: conversation_id is not a capability token (admins bypass).
+    if user.get("role") != "admin" and conv.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your conversation")
 
     # 阻断: agent 还在初始化中（人生经历生成未完成）
     if conv.agent and conv.agent.status == "provisioning":
@@ -142,7 +151,9 @@ async def chat(conversation_id: str, data: ChatRequest):
 
 
 @router.post("/proactive/{agent_id}", dependencies=[Depends(require_redis)])
-async def trigger_proactive(agent_id: str, user_id: str):
+async def trigger_proactive(
+    agent_id: str, user_id: str, _user=Depends(require_user_self),
+):
     """触发AI主动消息。"""
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     if not workspace_id:
@@ -157,7 +168,9 @@ async def trigger_proactive(agent_id: str, user_id: str):
 
 
 @router.get("/proactive/{agent_id}/history")
-async def proactive_history(agent_id: str, user_id: str, limit: int = 10):
+async def proactive_history(
+    agent_id: str, user_id: str, limit: int = 10, _user=Depends(require_user_self),
+):
     """获取主动消息历史。"""
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     history = await get_proactive_history(agent_id, user_id, limit, workspace_id=workspace_id)

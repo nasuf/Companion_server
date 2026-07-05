@@ -710,8 +710,10 @@ async def _run_aggregation_scan_body():
 
         due_conversations = await scan_due_delayed_messages()
         for conv_id, payloads in due_conversations:
-            # Prevent concurrent processing of the same conversation
-            if not await try_lock_conversation(conv_id, ttl=120):
+            # Prevent concurrent processing of the same conversation.
+            # Capture the owner token so unlock only releases our own lock (CAS).
+            lock_token = await try_lock_conversation(conv_id, ttl=120)
+            if not lock_token:
                 logger.debug(f"Conversation {conv_id[:8]} is locked, skipping this scan")
                 continue
 
@@ -773,7 +775,7 @@ async def _run_aggregation_scan_body():
                             f"Failed to notify conv {conv_id[:8]} of error: {notify_err}"
                         )
             finally:
-                await unlock_conversation(conv_id)
+                await unlock_conversation(conv_id, lock_token)
     except Exception as e:
         logger.warning(f"Aggregation scan failed: {e}")
 

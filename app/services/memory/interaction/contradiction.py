@@ -324,7 +324,10 @@ async def apply_contradiction_resolution(
     new_sub = (analysis.get("new_memory_sub_category") or "").strip()
 
     # Step 1: 处理老条目 — archive (变化/错误) 或保留 (新增)
+    # old_archived 追踪是否已归档: 若后续写新条目失败/被拦, 必须 un-archive
+    # 补偿, 否则"旧 L1 已归档 + 新事实未写入" = 检索空洞 (数据丢失)。
     old_mem = None
+    old_archived = False
     if change_type in ("变化", "错误") and old_id:
         old_mem = await memory_repo.find_unique(old_id)
         if not old_mem:
@@ -350,6 +353,7 @@ async def apply_contradiction_resolution(
             record=old_mem,
             isArchived=True,
         )
+        old_archived = True
         # audit log: 记录 contradiction-driven archive (跟正常 archive 区分)
         try:
             await log_memory_changelog(
@@ -434,6 +438,34 @@ async def apply_contradiction_resolution(
     # level 跟 importance 同步: imp >= 0.85 → L1, >= 0.5 → L2, else L3
     new_level = 1 if new_imp >= 0.85 else 2 if new_imp >= 0.50 else 3
 
+    async def _unarchive_old_on_failure() -> None:
+        """补偿: 新条目未成功入库时, 撤销老条目的 archive, 避免检索空洞。
+
+        旧事实留下比"旧的没了新的也没写"更安全 — 后者会让用户核心事实凭空
+        消失。撤销失败才落 memory_repair 兜底。
+        """
+        if not (old_archived and old_mem and old_id):
+            return
+        try:
+            await memory_repo.update(
+                old_id,
+                source=getattr(old_mem, "source", "user"),
+                record=old_mem,
+                isArchived=False,
+            )
+            logger.info(
+                f"contradiction.apply: un-archived {old_id[:8]} after new-memory "
+                f"write failed (compensation)",
+                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                       "outcome": "old_unarchived_compensation", "old_memory_id": old_id},
+            )
+        except Exception as unarchive_err:
+            logger.error(
+                f"contradiction.apply: failed to un-archive {old_id[:8]}: {unarchive_err}",
+                extra={"event": EVT_MEMORY_CONTRADICTION_STEP, "step": "apply",
+                       "outcome": "old_unarchive_failed", "old_memory_id": old_id},
+            )
+
     try:
         new_id = await store_memory(
             user_id=old_mem.userId,
@@ -480,6 +512,8 @@ async def apply_contradiction_resolution(
                        "new_main": main_category, "new_sub": sub_category,
                        "new_memory_text_len": len(new_memory_text)},
             )
+            # 新条目被 dedup/taxonomy 拦下 → 撤销老条目 archive 防丢失
+            await _unarchive_old_on_failure()
             await best_effort_create_memory_repair_item(
                 source_type="contradiction_new_memory_blocked",
                 source_id=f"{old_id or 'unknown'}:{change_type}:new_blocked",
@@ -500,6 +534,8 @@ async def apply_contradiction_resolution(
                 },
             )
     except Exception as e:
+        # 写新条目抛异常 → 撤销老条目 archive 防"旧没了新也没写"
+        await _unarchive_old_on_failure()
         logger.warning(
             f"contradiction.apply: failed to write new memory: {e}",
             extra={"event": EVT_LLM_FAIL, "stage": "contradiction_apply_new",

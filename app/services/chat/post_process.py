@@ -30,10 +30,14 @@ from app.services.interaction.boundary import (
     check_positive_recovery,
     get_patience,
 )
-from app.services.memory.recording.pipeline import process_memory_pipeline
+from app.services.memory.recording.pipeline import (
+    MemoryExtractionError,
+    process_memory_pipeline,
+)
 from app.services.memory.recording.watermark import get_watermark, set_watermark
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
+    DistributedLockUnavailable,
     distributed_lock,
 )
 from app.services.runtime.tasks import fire_background
@@ -275,30 +279,34 @@ async def _bg_memory_pipeline(
                 )
                 return
             try:
+                # 生产 fail-closed: Redis 锁不可用时**不**退回无锁执行 — 否则两
+                # 实例并发跑同一 conv 管线会重现 L1 SINGLETON 重复 (2026-05-07).
+                # 宁可跳过本批 (水位线未推进, 后续 batch 重新覆盖). 与 scheduler
+                # 的分布式锁策略一致。
                 async with distributed_lock(
                     f"memory_pipeline:{conversation_id}",
                     ttl_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
                     wait_timeout_s=_PIPELINE_DISTRIBUTED_LOCK_TTL,
                     retry_interval_s=0.5,
-                    fail_open=True,
+                    fail_open=False,
                 ):
                     await _do_memory_pipeline(
                         user_id, messages, conversation_id, workspace_id,
                         skip_ai_side=skip_ai_side,
                     )
-            except DistributedLockNotAcquired:
-                # 等满 wait_timeout 仍拿不到锁 = 另一实例的管线卡死或超长运行.
-                # 此时继续执行会跨实例并发 → 水位线 race + L1 SINGLETON 重复
-                # (生产 case 2026-05-07). 改为跳过本批: 水位线未推进, 只要用户
-                # 还在聊, 后续 batch 的窗口会重新覆盖这些消息; 宁可少抽一批,
-                # 不可重复入库.
+            except (DistributedLockNotAcquired, DistributedLockUnavailable) as e:
+                # NotAcquired: 等满 wait_timeout 仍拿不到锁 = 另一实例的管线卡死或
+                # 超长运行. Unavailable: Redis 锁后端不可用. 两者都跳过本批: 水位线
+                # 未推进, 只要用户还在聊, 后续 batch 的窗口会重新覆盖这些消息;
+                # 宁可少抽一批, 不可重复入库 / 跨实例并发。
                 logger.error(
-                    "Memory pipeline distributed lock wait timed out; skipping "
-                    "batch (watermark not advanced, later batches re-cover)",
+                    f"Memory pipeline distributed lock unavailable ({type(e).__name__}); "
+                    "skipping batch (watermark not advanced, later batches re-cover)",
                     extra={
                         "event": EVT_BG_DONE,
                         "kind": "memory_pipeline",
-                        "outcome": "distributed_lock_timeout_skip",
+                        "outcome": "distributed_lock_skip",
+                        "error_type": type(e).__name__,
                         "conversation_id": conversation_id,
                     },
                 )
@@ -410,17 +418,27 @@ async def _pipeline_with_watermark(
         if m.get("id")
     ]
 
-    stored_ids = await process_memory_pipeline(
-        user_id=user_id,
-        new_conversation=_fmt_conversation(new_target_msgs),
-        context_conversation=_fmt_conversation(context_msgs),
-        statement_time=max_side_ts,
-        side=side,
-        workspace_id=workspace_id,
-        evidence_message_ids=evidence_message_ids,
-    )
+    try:
+        stored_ids = await process_memory_pipeline(
+            user_id=user_id,
+            new_conversation=_fmt_conversation(new_target_msgs),
+            context_conversation=_fmt_conversation(context_msgs),
+            statement_time=max_side_ts,
+            side=side,
+            workspace_id=workspace_id,
+            evidence_message_ids=evidence_message_ids,
+        )
+    except MemoryExtractionError:
+        # Transient extraction LLM failure: leave the watermark untouched so a
+        # later batch re-covers these messages instead of silently dropping them.
+        logger.warning(
+            f"[BG] extraction failed for side={side}; watermark held for retry",
+            extra={"event": EVT_BG_DONE, "kind": "memory_pipeline",
+                   "outcome": "extraction_error_watermark_held", "side": side},
+        )
+        return 0
 
-    # 防时钟回退: 仅当新候选 > wm 才推进
+    # 防时钟回退: 仅当新候选 > wm 才推进 (且抽取成功, 见上方 except)
     if conversation_id and (wm is None or max_side_ts > wm):
         await set_watermark(conversation_id, side, max_side_ts)
 
@@ -478,7 +496,20 @@ def _ensure_aware(dt: datetime | None) -> datetime | None:
 
 
 def _fmt_conversation(msgs: list[dict]) -> str:
-    return "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in msgs)
+    """Format messages as `role: content` lines for the extraction prompt.
+
+    Only `user`/`assistant` roles are emitted. A message missing a valid role
+    is skipped rather than defaulted to `user` — mislabeling an AI/system line
+    as the user would let it be extracted as a user fact (owner corruption).
+    """
+    lines: list[str] = []
+    for m in msgs:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = m.get("content", "")
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
 
 
 async def _bg_trait_adjustment(agent_id: str, user_message: str) -> None:
@@ -557,11 +588,15 @@ async def run_post_process(
     messages_dicts: list[dict],
     user_emotion: dict | None = None,
     skip_ai_memory: bool = False,
+    workspace_id: str | None = None,
 ) -> None:
     """后台任务并发：写用户情绪 / 记忆抽取 / 性格反馈 / 耐心恢复。
 
     起独立 usage session: fire_background 已把 ContextVar 隔离,
     这里重新开让记忆/trait 的 token 落到 llm_usage 自己一行 (scope=post_process).
+
+    workspace_id: 热路径已知的会话 workspace, 直接透传给记忆管线, 避免
+    _do_memory_pipeline 回退到 "latest active workspace" (多伴侣用户会错库)。
     """
     from app.services.llm.usage_tracker import usage_session
     async with usage_session(
@@ -575,6 +610,7 @@ async def run_post_process(
                 user_id,
                 full_messages,
                 conversation_id=conversation_id,
+                workspace_id=workspace_id,
                 skip_ai_side=skip_ai_memory,
             ),
         ]

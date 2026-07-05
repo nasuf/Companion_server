@@ -657,7 +657,8 @@ async def test_handle_deletion_passes_context_and_asks_confirmation_for_age():
     assert handled is True
     assert events is not None
     assert captured["recent_context"] == ctx.recent_context
-    mock_find.assert_awaited_once_with("u1", "用户28岁")
+    # Phase 2: 删除按会话 workspace 隔离 — handler 透传 ctx.workspace_id (此处默认 None)
+    mock_find.assert_awaited_once_with("u1", "用户28岁", workspace_id=None)
     assert saved == {"conv_id": "c1", "candidates": candidates}
 
 
@@ -693,20 +694,21 @@ async def test_find_matching_memories_literal_age_fallback():
 
 
 @pytest.mark.asyncio
-async def test_find_matching_memories_literal_fallback_keeps_ai_source():
-    """字面兜底要保持原删除检索的双表语义，不能只覆盖用户记忆。"""
+async def test_find_matching_memories_literal_fallback_user_scoped():
+    """Phase 2 修复: 删除只作用于用户自己的记忆 (source='user'), 字面兜底
+    也不再检索 AI 自我记忆——否则用户一句"忘了X"可能删掉 AI 人设记忆。"""
     from app.services.memory.interaction import deletion as del_mod
 
     record = SimpleNamespace(
-        id="ai-1",
+        id="user-1",
         content="我喜欢安静的咖啡馆",
         summary="我喜欢安静的咖啡馆",
-        level=1,
+        level=2,
         importance=0.8,
         type="preference",
         mainCategory="偏好",
         subCategory="环境",
-        source="ai",
+        source="user",
     )
 
     with (
@@ -715,14 +717,20 @@ async def test_find_matching_memories_literal_fallback_keeps_ai_source():
         patch.object(del_mod, "generate_embedding",
                      new_callable=AsyncMock, return_value=[0.1, 0.2]),
         patch.object(del_mod, "search_by_embedding",
-                     new_callable=AsyncMock, return_value=[]),
+                     new_callable=AsyncMock, return_value=[]) as mock_vec,
     ):
-        matches = await del_mod.find_matching_memories("u1", "我喜欢安静的咖啡馆")
+        matches = await del_mod.find_matching_memories(
+            "u1", "我喜欢安静的咖啡馆", workspace_id="w1",
+        )
 
+    # literal 兜底限定 user 表 + 当前 workspace
     mock_find_many.assert_awaited_once()
-    assert mock_find_many.await_args.kwargs["source"] is None
-    assert [m["id"] for m in matches] == ["ai-1"]
-    assert matches[0]["source"] == "ai"
+    assert mock_find_many.await_args.kwargs["source"] == "user"
+    assert mock_find_many.await_args.kwargs["where"]["workspaceId"] == "w1"
+    # 向量检索同样只搜 user 源
+    assert mock_vec.await_args.kwargs["sources"] == ["user"]
+    assert [m["id"] for m in matches] == ["user-1"]
+    assert matches[0]["source"] == "user"
 
 
 @pytest.mark.asyncio

@@ -114,7 +114,18 @@ async def analyze_user_emotion(message: str) -> dict[str, Any]:
     This replaces the former user vector extraction.  The output is deliberately
     compact and prompt-readable: downstream code should reason on the label and
     coarse intensity rather than abstract vector dimensions.
+
+    Cost optimization: a high-precision keyword hit ("哈哈"→高兴, "谢谢"→感激)
+    short-circuits the utility LLM. Only ambiguous messages (no keyword) pay for
+    the model call. Gated by settings.emotion_keyword_fast_path.
     """
+    from app.config import settings
+
+    if settings.emotion_keyword_fast_path:
+        quick = quick_emotion_estimate(message)
+        if quick is not None:
+            return quick
+
     prompt = (await get_prompt_text("emotion.user_label")).format(message=message)
     try:
         result = await invoke_json(get_utility_model(), prompt)

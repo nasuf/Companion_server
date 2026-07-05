@@ -41,13 +41,15 @@ def test_emotion_intensity_helpers():
 async def test_analyze_user_emotion_invokes_label_prompt():
     from app.services.relationship.emotion import analyze_user_emotion
 
+    # Disable the keyword fast-path so this exercises the LLM label path
+    # explicitly (keyword-hit messages intentionally skip the LLM now).
     with patch(
         "app.services.relationship.emotion.get_prompt_text",
         AsyncMock(return_value="M={message}"),
     ), patch(
         "app.services.relationship.emotion.invoke_json",
         AsyncMock(return_value={"emotion": "悲伤", "intensity": 83, "confidence": 0.9}),
-    ):
+    ), patch("app.config.settings.emotion_keyword_fast_path", False):
         result = await analyze_user_emotion("我有点难过")
 
     assert result == {

@@ -110,5 +110,10 @@ async def test_extract_memories_handles_timeout_silently_returns_empty():
     ):
         result = await extract_memories("user: 测试", side="user")
 
-    # Silent fallback: 返回空结构 (不抛, 不破坏 post_process pipeline)
-    assert result == {"memories": [], "entities": [], "preferences": [], "topics": []}
+    # Silent fallback: 不抛异常, 不破坏 post_process pipeline. 但带
+    # _extraction_error 标记, 让上层 pipeline 抛 MemoryExtractionError → 水位线
+    # 不推进 → 后续 batch 重试 (Phase 3 修复: 防瞬时失败永久漏录).
+    assert result == {
+        "memories": [], "entities": [], "preferences": [], "topics": [],
+        "_extraction_error": True,
+    }

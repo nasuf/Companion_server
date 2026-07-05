@@ -121,9 +121,15 @@ async def find_duplicate_id(
     content: str,
     embedding: list[float],
     workspace_id: str | None = None,
+    source: str = "user",
 ) -> str | None:
     """If a near-duplicate memory already exists (cosine > DEDUP_THRESHOLD),
     return its id. Otherwise None.
+
+    `source` scopes the search to the same owner table. Without it the UNION
+    search could return an AI self-memory id for a user-side dedup — the caller
+    would then update the wrong table (a non-existent id) and silently drop the
+    reminder. Owner is a hard boundary here.
 
     Phase 3.1: 极性校验防反义误判. bge-m3 反义对 cosine 0.84-0.89, 容易超
     DEDUP_THRESHOLD=0.85 → 后写的"我不住北京"被当成已存"我住北京"的重复 →
@@ -135,7 +141,9 @@ async def find_duplicate_id(
     """
     from app.services.memory.polarity import semantic_conflict_reasons
 
-    results = await search_by_embedding(embedding, user_id, top_k=5, workspace_id=workspace_id)
+    results = await search_by_embedding(
+        embedding, user_id, top_k=5, workspace_id=workspace_id, sources=[source],
+    )
     for r in results:
         sim = r.get("similarity", 0)
         if isinstance(sim, str):
@@ -168,9 +176,12 @@ async def is_duplicate(
     content: str,
     embedding: list[float],
     workspace_id: str | None = None,
+    source: str = "user",
 ) -> bool:
     """向后兼容 wrapper. 新调用方应直接用 find_duplicate_id 拿 id."""
-    matched = await find_duplicate_id(user_id, content, embedding, workspace_id=workspace_id)
+    matched = await find_duplicate_id(
+        user_id, content, embedding, workspace_id=workspace_id, source=source,
+    )
     return matched is not None
 
 

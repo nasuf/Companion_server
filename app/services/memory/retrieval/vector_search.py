@@ -18,6 +18,34 @@ def format_vector(embedding: list[float]) -> str:
     return "[" + ",".join(str(v) for v in embedding) + "]"
 
 
+def _embedding_search_arm(table: str, source: str) -> str:
+    """One UNION arm of the embedding search, parameterized only by table/source.
+
+    Keeping a single template guarantees the user/ai arms stay byte-identical
+    except for the table name and the `source` literal — avoids the two arms
+    silently drifting apart on future column changes.
+    """
+    return f"""
+        (SELECT
+            m.id, m.content, m.summary, m.level, m.importance, m.mention_count,
+            m.type, m.main_category, m.sub_category,
+            m.created_at, m.updated_at,
+            COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
+            '{source}' AS source,
+            1 - (me.embedding OPERATOR(extensions.<=>) $1::extensions.vector) AS similarity
+        FROM memory_embeddings me
+        JOIN {table} m ON m.id = me.memory_id
+        WHERE m.user_id = $2
+          AND m.workspace_id = $3
+          AND m.is_archived = false
+          AND ($4::text[] IS NULL OR m.main_category = ANY($4::text[]))
+          AND ($5::text[] IS NULL OR m.sub_category = ANY($5::text[]))
+          AND ($6::int[] IS NULL OR m.level = ANY($6::int[]))
+        ORDER BY me.embedding OPERATOR(extensions.<=>) $1::extensions.vector
+        LIMIT $7)
+    """
+
+
 async def search_by_embedding(
     embedding: list[float],
     user_id: str,
@@ -26,55 +54,34 @@ async def search_by_embedding(
     main_categories: list[str] | None = None,
     sub_categories: list[str] | None = None,
     levels: list[int] | None = None,
+    sources: list[str] | None = None,
 ) -> list[dict]:
     """Search using a pre-computed embedding vector.
 
-    Searches across both memories_user and memories_ai via UNION.
+    By default searches both memories_user and memories_ai (UNION). Pass
+    `sources=["user"]` / `["ai"]` to scope to a single owner — critical for
+    dedup, where matching a user memory against an AI self-memory (or vice
+    versa) would drop or mis-route data across the owner boundary.
     """
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
     vec_str = format_vector(embedding)
+
+    wanted = {s for s in (sources or ["user", "ai"]) if s in ("user", "ai")}
+    if not wanted:
+        wanted = {"user", "ai"}
+    arms: list[str] = []
+    if "user" in wanted:
+        arms.append(_embedding_search_arm("memories_user", "user"))
+    if "ai" in wanted:
+        arms.append(_embedding_search_arm("memories_ai", "ai"))
+
+    query = (
+        "SELECT * FROM (\n"
+        + "\n            UNION ALL\n".join(arms)
+        + "\n        ) combined\n        ORDER BY similarity DESC\n        LIMIT $7"
+    )
     return await db.query_raw(
-        """
-        SELECT * FROM (
-            (SELECT
-                m.id, m.content, m.summary, m.level, m.importance, m.mention_count,
-                m.type, m.main_category, m.sub_category,
-                m.created_at, m.updated_at,
-                COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
-                'user' AS source,
-                1 - (me.embedding OPERATOR(extensions.<=>) $1::extensions.vector) AS similarity
-            FROM memory_embeddings me
-            JOIN memories_user m ON m.id = me.memory_id
-            WHERE m.user_id = $2
-              AND m.workspace_id = $3
-              AND m.is_archived = false
-              AND ($4::text[] IS NULL OR m.main_category = ANY($4::text[]))
-              AND ($5::text[] IS NULL OR m.sub_category = ANY($5::text[]))
-              AND ($6::int[] IS NULL OR m.level = ANY($6::int[]))
-            ORDER BY me.embedding OPERATOR(extensions.<=>) $1::extensions.vector
-            LIMIT $7)
-            UNION ALL
-            (SELECT
-                m.id, m.content, m.summary, m.level, m.importance, m.mention_count,
-                m.type, m.main_category, m.sub_category,
-                m.created_at, m.updated_at,
-                COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
-                'ai' AS source,
-                1 - (me.embedding OPERATOR(extensions.<=>) $1::extensions.vector) AS similarity
-            FROM memory_embeddings me
-            JOIN memories_ai m ON m.id = me.memory_id
-            WHERE m.user_id = $2
-              AND m.workspace_id = $3
-              AND m.is_archived = false
-              AND ($4::text[] IS NULL OR m.main_category = ANY($4::text[]))
-              AND ($5::text[] IS NULL OR m.sub_category = ANY($5::text[]))
-              AND ($6::int[] IS NULL OR m.level = ANY($6::int[]))
-            ORDER BY me.embedding OPERATOR(extensions.<=>) $1::extensions.vector
-            LIMIT $7)
-        ) combined
-        ORDER BY similarity DESC
-        LIMIT $7
-        """,
+        query,
         vec_str,
         user_id,
         workspace_id,

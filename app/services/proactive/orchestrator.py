@@ -42,6 +42,7 @@ from app.services.proactive.state import (
     list_due_proactive_states,
     list_waiting_timeout_states,
     log_proactive_event,
+    reclaim_stale_processing_states,
     stop_proactive_state,
 )
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
@@ -63,6 +64,10 @@ def _is_in_active_hours(now: datetime) -> bool:
 
 
 async def scan_proactive_states(now: datetime | None = None) -> None:
+    # Recover states stranded in a transient `processing*` status (instance
+    # crash mid-send) before listing due states, so a stalled workspace resumes.
+    await reclaim_stale_processing_states(now=now)
+
     states = await list_due_proactive_states(now=now)
     waiting_states = await list_waiting_timeout_states(now=now)
     if not states and not waiting_states:

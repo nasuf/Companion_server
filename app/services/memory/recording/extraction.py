@@ -130,4 +130,10 @@ async def extract_memories(
             extra={"event": EVT_LLM_FAIL, "stage": "memory_extract", "side": side,
                    "error_type": type(e).__name__, "elapsed_ms": round(elapsed_ms, 1)},
         )
-        return {"memories": [], "entities": [], "preferences": [], "topics": []}
+        # `_extraction_error` lets the pipeline distinguish a hard LLM failure
+        # (must NOT advance the watermark, else those messages are lost forever)
+        # from a legitimately empty extraction (safe to advance).
+        return {
+            "memories": [], "entities": [], "preferences": [], "topics": [],
+            "_extraction_error": True,
+        }

@@ -124,7 +124,8 @@ async def test_prompt_builder_renders_recap_section():
     assert section is not None
     assert section.prompt_key == "chat.session_recap_section"
     assert "聊了面试准备" in section.body
-    assert "不要硬拉回去" in section.body
+    # Phase 7: recap 现在明确让位于「重逢感知」段, 避免"接旧话题 vs 不接"矛盾
+    assert "重逢感知为准" in section.body
 
     assert await _build_session_recap_section(None) is None
     assert await _build_session_recap_section("") is None

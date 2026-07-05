@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from typing import Any
 
 from app.redis_client import get_redis
@@ -253,20 +254,43 @@ async def enqueue_or_append_delayed(
 
 _LOCK_KEY = "lock:chat:{cid}"
 
-async def try_lock_conversation(conversation_id: str, ttl: int = 60) -> bool:
-    """Try to acquire a distributed lock for a conversation.
-    
-    Returns True if lock acquired, False otherwise.
-    TTL prevents deadlocks if a process crashes.
+# Compare-and-delete: only release the lock if we still own it. Prevents a
+# worker whose lock already expired (TTL) from deleting a lock a *different*
+# worker has since acquired for the same conversation.
+_RELEASE_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
+
+async def try_lock_conversation(conversation_id: str, ttl: int = 60) -> str | None:
+    """Try to acquire a per-conversation lock.
+
+    Returns an opaque owner token on success (pass it back to
+    `unlock_conversation`), or None if the lock is already held. TTL prevents
+    deadlocks if a process crashes before releasing.
     """
     redis = await get_redis()
     lock_key = _LOCK_KEY.format(cid=conversation_id)
+    token = uuid.uuid4().hex
     # nx=True: only set if key doesn't exist
-    return bool(await redis.set(lock_key, "locked", ex=ttl, nx=True))
+    ok = await redis.set(lock_key, token, ex=ttl, nx=True)
+    return token if ok else None
 
 
-async def unlock_conversation(conversation_id: str) -> None:
-    """Release the lock for a conversation."""
+async def unlock_conversation(conversation_id: str, token: str | None = None) -> None:
+    """Release the lock. With a token, only deletes if we still own it (CAS)."""
     redis = await get_redis()
     lock_key = _LOCK_KEY.format(cid=conversation_id)
-    await redis.delete(lock_key)
+    if token is None:
+        # Legacy best-effort release (no ownership check). Retained for callers
+        # that never captured a token; new callers should pass the token.
+        await redis.delete(lock_key)
+        return
+    try:
+        await redis.eval(_RELEASE_LUA, 1, lock_key, token)
+    except Exception as e:
+        logger.warning(f"[LOCK] conversation unlock CAS failed conv={conversation_id}: {e}")

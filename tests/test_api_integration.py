@@ -168,7 +168,13 @@ def test_memory_stats(mock_deps):
 def test_search_memories_forwards_workspace_and_taxonomy_filters(mock_deps):
     """POST /memories/search forwards workspace/category filters to retrieval."""
     client = mock_deps
-    with patch("app.api.public.memories.retrieve_memories", new_callable=AsyncMock, return_value=[]) as mock_retrieve:
+    own_ws = SimpleNamespace(id="ws-1", userId="test-user")
+    with (
+        patch("app.api.public.memories.retrieve_memories", new_callable=AsyncMock, return_value=[]) as mock_retrieve,
+        patch("app.api.public.memories.db") as db_mock,
+    ):
+        # 显式传入的 workspace 必须归属校验 (Phase 2 defense-in-depth)
+        db_mock.chatworkspace.find_unique = AsyncMock(return_value=own_ws)
         response = client.post(
             "/memories/search?user_id=test-user",
             headers=_auth_header("test-user"),

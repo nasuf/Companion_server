@@ -29,6 +29,21 @@ from app.services.workspace.workspaces import resolve_workspace_id
 router = APIRouter(prefix="/memories", tags=["memories"])
 
 
+async def _verify_workspace_owner(workspace_id: str | None, user_id: str) -> None:
+    """Reject an explicitly-supplied workspace the caller doesn't own.
+
+    All memory queries are already user_id-scoped (so a foreign workspace_id
+    currently yields an empty result), but this turns cross-workspace access
+    into an explicit 403 and keeps the guarantee even if a future query path
+    forgets the user_id filter. No-op when workspace_id is omitted.
+    """
+    if not workspace_id:
+        return
+    workspace = await db.chatworkspace.find_unique(where={"id": workspace_id})
+    if not workspace or workspace.userId != user_id:
+        raise HTTPException(status_code=403, detail="Not your workspace")
+
+
 def _serialize_memory(m, quality=None) -> MemoryResponse:
     return MemoryResponse(
         id=m.id,
@@ -107,6 +122,7 @@ async def list_memories(
     include_quality: bool = False,
     _user=Depends(require_user_self),
 ):
+    await _verify_workspace_owner(workspace_id, user_id)
     where: dict = {"userId": user_id, "isArchived": False}
     if workspace_id:
         where["workspaceId"] = workspace_id
@@ -145,6 +161,7 @@ async def export_memories(
     include_quality: bool = False,
     _user=Depends(require_user_self),
 ):
+    await _verify_workspace_owner(workspace_id, user_id)
     ws_id = workspace_id or await resolve_workspace_id(user_id=user_id)
     memories = await memory_repo.find_many(
         source=source,
@@ -168,6 +185,7 @@ async def memory_stats(
     _user=Depends(require_user_self),
 ):
     """Return raw grouped counts. Frontend computes cross-filtered totals."""
+    await _verify_workspace_owner(workspace_id, user_id)
     ws_id = workspace_id or await resolve_workspace_id(user_id=user_id)
     return await _compute_stats(ws_id, source)
 
@@ -178,6 +196,7 @@ async def search_memories(
     user_id: str = Query(...),
     _user=Depends(require_user_self),
 ):
+    await _verify_workspace_owner(data.workspace_id, user_id)
     results = await retrieve_memories(
         data.query,
         user_id=user_id,
@@ -195,6 +214,7 @@ async def run_memory_hygiene_now(
     user_id: str = Query(...),
     _user=Depends(require_user_self),
 ):
+    await _verify_workspace_owner(data.workspace_id, user_id)
     workspace_id = data.workspace_id or await resolve_workspace_id(user_id=user_id)
     return await run_memory_hygiene(
         user_id=user_id,

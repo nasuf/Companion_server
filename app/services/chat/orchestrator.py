@@ -25,7 +25,7 @@ from app.observability.events import (
     EVT_REPLY_EMITTED,
     EVT_REPLY_EMOTION,
 )
-from app.services.llm.models import get_chat_model, convert_messages
+from app.services.llm.models import get_chat_model, convert_messages, invoke_text
 from app.services.chat.prompt_builder import (
     build_system_prompt,
     build_chat_messages,
@@ -142,6 +142,7 @@ from app.services.chat.message_utils import (
     _max_user_created_at,
     _parse_message_created_at,
     _previous_assistant_message,
+    collapse_turn_fragments,
 )
 from app.services.chat.preflight import (
     PreflightCtx,
@@ -231,12 +232,17 @@ async def _intent_llm_reply(
         ],
         source="chat.special_instruction",
     )
-    model = get_chat_model()
-    result = await model.ainvoke(convert_messages([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": user_message},
-    ]))
-    return result.content.strip().split("||")[0][:60]
+    # Route through invoke_text (not raw model.ainvoke) so this call gets the
+    # resilience layer (timeout / retry / circuit-breaker / Ollama fallback)
+    # AND lands in usage_tracker — a raw ainvoke silently bypassed both.
+    content = await invoke_text(
+        get_chat_model(),
+        convert_messages([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_message},
+        ]),
+    )
+    return (content or "").strip().split("||")[0][:60]
 
 
 async def _record_memory_retrieval_feedback(
@@ -469,6 +475,10 @@ async def stream_chat_response(
         if current_turn_ids:
             reply_context = dict(reply_context or {})
             reply_context["turn_message_ids"] = sorted(current_turn_ids)
+        # Combined text of this turn, captured before multi-intent may replace
+        # user_message with the primary fragment. Used to collapse aggregated
+        # fragment rows into one coherent user turn in the reply prompt.
+        aggregated_turn_text = user_message
         current_achievement_turn_id = _achievement_turn_id(current_turn_ids)
         covered_until_user_ts = _max_user_created_at(messages_dicts)
         # 重逢感知 (拟人度): 当前轮距上一轮最后一条消息的间隔. ≥30min 时
@@ -817,6 +827,7 @@ async def stream_chat_response(
             conversation_id=conversation_id,
             agent_id=agent_id,
             user_id=user_id,
+            workspace_id=workspace_id,
             agent=agent,
             reply_context=reply_context,
             tracer=tracer,
@@ -1299,7 +1310,17 @@ async def stream_chat_response(
                 3,
             )
             response_diagnostics.update(prompt_diagnostics)
-            return build_chat_messages(system_prompt, messages_dicts)
+            # Aggregated fragment turns: collapse the per-fragment DB rows into
+            # one coherent user turn so the reply LLM sees the message the user
+            # actually meant (not just the last fragment). No-op for single-row
+            # turns. Memory pipeline is unaffected (reads original rows).
+            reply_messages = collapse_turn_fragments(
+                messages_dicts,
+                turn_message_ids=current_turn_ids,
+                combined_text=aggregated_turn_text,
+                combined_id=user_message_id,
+            )
+            return build_chat_messages(system_prompt, reply_messages)
 
         # Log memory access for L2 frequency tracking (background, non-blocking)
         accessed_ids: list[str] = []
@@ -1497,6 +1518,7 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
             skip_ai_memory=False,
+            workspace_id=workspace_id,
         ))
         post_process_fired = True
 
@@ -1584,4 +1606,5 @@ async def stream_chat_response(
                     sc_ctx is not None
                     and sc_ctx.last_short_circuit_kind in {"schedule_query", "current_state"}
                 ),
+                workspace_id=workspace_id,
             ))
