@@ -110,6 +110,10 @@ jobs:
             EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL }}
             EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
+            WS_REQUIRE_AUTH=${{ vars.WS_REQUIRE_AUTH || 'true' }}
+            PROACTIVE_PROCESSING_TIMEOUT_S=${{ vars.PROACTIVE_PROCESSING_TIMEOUT_S || '300' }}
+            EMOTION_KEYWORD_FAST_PATH=${{ vars.EMOTION_KEYWORD_FAST_PATH || 'true' }}
+            BACKGROUND_TASK_MAX_CONCURRENCY=${{ vars.BACKGROUND_TASK_MAX_CONCURRENCY || '256' }}
             SUD_APP_ID=${{ vars.SUD_APP_ID }}
             SUD_APP_KEY=${{ vars.SUD_APP_KEY }}
             SUD_APP_SECRET=${{ secrets.SUD_APP_SECRET }}
