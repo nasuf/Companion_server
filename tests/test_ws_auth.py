@@ -82,10 +82,12 @@ def _conv(user_id="u1"):
 
 
 def test_ws_rejects_without_token(ws_client):
+    # accept-first design: the connection opens, then the server closes with the
+    # real code (surfaced to the client instead of a generic 1006).
     p_redis, p_db = _patch_ws_env(_conv())
     with p_redis, p_db, pytest.raises(WebSocketDisconnect) as exc:
-        with ws_client.websocket_connect("/ws/c1"):
-            pass
+        with ws_client.websocket_connect("/ws/c1") as ws:
+            ws.receive_json()
     assert exc.value.code == 4401
 
 
@@ -93,8 +95,8 @@ def test_ws_rejects_wrong_user(ws_client):
     token = create_jwt("intruder", role="user")
     p_redis, p_db = _patch_ws_env(_conv(user_id="u1"))
     with p_redis, p_db, pytest.raises(WebSocketDisconnect) as exc:
-        with ws_client.websocket_connect(f"/ws/c1?token={token}"):
-            pass
+        with ws_client.websocket_connect(f"/ws/c1?token={token}") as ws:
+            ws.receive_json()
     assert exc.value.code == 4403
 
 

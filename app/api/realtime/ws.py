@@ -617,6 +617,15 @@ async def _queue_reply_or_error(
 @router.websocket("/ws/{conversation_id}")
 async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     """WebSocket 聊天连接。"""
+    # Accept FIRST, then validate and close with an explicit code on failure.
+    # A pre-accept close is surfaced to browsers as a generic 1006 (the custom
+    # 4401/4403/4004 code is lost), so the client can't distinguish an auth
+    # failure from a transient network blip and reconnects forever ("重连中"
+    # 死循环). Accepting first lets the real close code reach every client so it
+    # can stop reconnecting on auth-fatal codes. No message loop is entered
+    # until all checks pass.
+    await websocket.accept()
+
     if not is_redis_healthy():
         # readonly mode: 无 Redis 无法跑聚合 / 延迟队列 / 计数, 拒绝新连接
         # code=1011: Internal Server Error (WebSocket 协议语义)
@@ -635,15 +644,35 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     agent = conv.agent
 
     # Auth: conversation_id alone must not be a capability token. Require a JWT
-    # whose `sub` owns this conversation (admins bypass). Close before accept so
-    # an unauthenticated socket never enters the message loop. Gated by
+    # whose `sub` owns this conversation (admins bypass). Gated by
     # settings.ws_require_auth to allow a staged client rollout.
     if settings.ws_require_auth:
         payload = authenticate_ws(websocket)
         if payload is None:
+            has_token = bool(
+                websocket.query_params.get("token")
+                or websocket.headers.get("authorization")
+            )
+            logger.warning(
+                "ws auth rejected (%s)",
+                "invalid_token" if has_token else "no_token",
+                extra={
+                    "event": EVT_WS_DISCONNECT,
+                    "ws_auth_outcome": "invalid_token" if has_token else "no_token",
+                    "conversation_id": conversation_id,
+                },
+            )
             await websocket.close(code=4401, reason="auth_required")
             return
         if payload.get("role") != "admin" and payload.get("sub") != user_id:
+            logger.warning(
+                "ws auth rejected (owner_mismatch)",
+                extra={
+                    "event": EVT_WS_DISCONNECT,
+                    "ws_auth_outcome": "owner_mismatch",
+                    "conversation_id": conversation_id,
+                },
+            )
             await websocket.close(code=4403, reason="forbidden")
             return
     workspace_id = getattr(conv, "workspaceId", None)
@@ -661,7 +690,8 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         user_id=user_id,
         username=cached_username,
     ):
-        await websocket.accept()
+        # accept() already happened at the top (before auth) so failures could
+        # deliver a real close code; here we only register the live connection.
         await manager.connect(
             conversation_id, user_id, websocket, workspace_id=workspace_id,
         )
