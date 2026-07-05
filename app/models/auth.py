@@ -38,6 +38,20 @@ class WeChatMiniLoginRequest(BaseModel):
         return code
 
 
+class WeChatH5LoginRequest(BaseModel):
+    """公众号网页授权 (H5) 登录: 前端携带 OAuth 回调的 code."""
+
+    code: str = Field(min_length=1, max_length=512)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        code = value.strip()
+        if not code:
+            raise ValueError("code must not be blank")
+        return code
+
+
 class WeChatProfileUpdate(BaseModel):
     nickname: str | None = Field(default=None, max_length=64)
     # Optional base64 avatar image (from the Mini Program chooseAvatar button).

@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     # for cross-platform account/conversation continuity.
     wechat_mini_app_id: str = ""
     wechat_mini_app_secret: str = ""
+    # WeChat Official Account (服务号) credentials for the H5 web-page OAuth
+    # login (公众号网页授权). Same sns/oauth2 flow as the mobile app but with the
+    # OA's appid/secret; unionid continuity likewise requires the OA to be bound
+    # to the same WeChat Open Platform account.
+    wechat_h5_app_id: str = ""
+    wechat_h5_app_secret: str = ""
     # Optional: a fully-provisioned "template" agent id. When set, a brand-new
     # user (e.g. first WeChat Mini Program login) is given an instant clone of
     # this agent (persona + L1 memory + embeddings copied, no LLM), so they can

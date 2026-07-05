@@ -9,6 +9,7 @@ from app.models.auth import (
     AuthResponse,
     LoginRequest,
     RegisterRequest,
+    WeChatH5LoginRequest,
     WeChatMiniLoginRequest,
     WeChatMobileLoginRequest,
     WeChatProfileUpdate,
@@ -25,7 +26,9 @@ from app.api.jwt_auth import require_user
 from app.services.workspace.workspaces import get_active_workspace
 from app.services.wechat_auth import (
     WeChatLoginError,
+    _wechat_h5_configured,
     exchange_wechat_code,
+    exchange_wechat_h5_code,
     exchange_wechat_miniprogram_code,
     find_or_create_wechat_user,
     update_wechat_profile,
@@ -258,6 +261,62 @@ async def wechat_miniprogram_login(data: WeChatMiniLoginRequest, request: Reques
         extra={"event": "auth_wechat_mini_login", "user_id": user.id},
     )
     await _record_auth_activity(user.id, source="wechat_miniprogram_login")
+    return await _build_auth_response(user, token)
+
+
+@router.get("/wechat/h5/config")
+async def wechat_h5_config():
+    """H5 页面启动时探测: 是否展示微信一键登录 + OAuth 跳转所需的公众号 appid.
+
+    appid 本身是公开信息 (会出现在 OAuth 跳转 URL 里), 无需鉴权.
+    """
+    from app.config import settings
+
+    enabled = _wechat_h5_configured()
+    return {
+        "enabled": enabled,
+        "app_id": settings.wechat_h5_app_id.strip() or None if enabled else None,
+    }
+
+
+@router.post("/wechat/h5", response_model=AuthResponse)
+async def wechat_h5_login(data: WeChatH5LoginRequest, request: Request):
+    """公众号网页授权登录 (H5). 与小程序/移动端写同一套身份表, unionid 归一."""
+    rate_limit_key = "wechat:h5"
+    await enforce_login_rate_limit(request, rate_limit_key)
+    try:
+        token_payload = await exchange_wechat_h5_code(data.code)
+        user = await find_or_create_wechat_user(token_payload)
+    except WeChatLoginError:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录失败，请稍后重试",
+        )
+
+    if not user:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信登录失败，请稍后重试",
+        )
+
+    await clear_login_failures(request, rate_limit_key)
+    # New users get the default cloned agent so H5 can go straight to chat.
+    await ensure_default_agent_for_user(user.id)
+    token = create_jwt(user.id, user.role)
+    audit_auth_request_event(
+        "wechat_h5_login_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    logger.info(
+        "User logged in with WeChat H5",
+        extra={"event": "auth_wechat_h5_login", "user_id": user.id},
+    )
+    await _record_auth_activity(user.id, source="wechat_h5_login")
     return await _build_auth_response(user, token)
 
 

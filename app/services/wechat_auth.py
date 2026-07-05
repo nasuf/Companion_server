@@ -142,16 +142,53 @@ async def _fetch_wechat_userinfo(
     return _safe_wechat_profile(payload)
 
 
-async def exchange_wechat_code(code: str) -> WeChatTokenPayload:
-    if not _wechat_configured():
+def _wechat_h5_configured() -> bool:
+    return bool(
+        settings.wechat_login_enabled
+        and settings.wechat_h5_app_id.strip()
+        and settings.wechat_h5_app_secret.strip()
+    )
+
+
+async def exchange_wechat_h5_code(code: str) -> WeChatTokenPayload:
+    """Exchange an Official Account web-page OAuth code (公众号网页授权).
+
+    Identical sns/oauth2 + sns/userinfo flow as the mobile app — only the
+    credentials differ — so it reuses ``exchange_wechat_code`` and therefore the
+    same ``users`` / ``auth_identities`` unionid continuity.
+    """
+    if not _wechat_h5_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="微信登录暂未开放",
         )
+    return await exchange_wechat_code(
+        code,
+        app_id=settings.wechat_h5_app_id.strip(),
+        app_secret=settings.wechat_h5_app_secret.strip(),
+    )
+
+
+async def exchange_wechat_code(
+    code: str,
+    *,
+    app_id: str | None = None,
+    app_secret: str | None = None,
+) -> WeChatTokenPayload:
+    # Default credentials = mobile app (Open Platform OAuth); callers may pass
+    # another appid/secret pair (e.g. the Official Account for H5 login).
+    if app_id is None or app_secret is None:
+        if not _wechat_configured():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="微信登录暂未开放",
+            )
+        app_id = settings.wechat_mobile_app_id.strip()
+        app_secret = settings.wechat_mobile_app_secret.strip()
 
     params = {
-        "appid": settings.wechat_mobile_app_id.strip(),
-        "secret": settings.wechat_mobile_app_secret.strip(),
+        "appid": app_id,
+        "secret": app_secret,
         "code": code,
         "grant_type": "authorization_code",
     }
