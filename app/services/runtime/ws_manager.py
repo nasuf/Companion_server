@@ -101,20 +101,8 @@ class ConnectionManager:
             f"workspace={(workspace_id or 'none')[:8]}"
         )
 
-    async def disconnect(self, conv_id: str, ws: WebSocket | None = None) -> None:
-        """Deregister a connection.
-
-        `ws` guards against the replace/disconnect race: when device B replaces
-        device A (connect() closes A's socket), A's endpoint `finally` calls
-        disconnect(). Without the identity check it would evict B's live entry.
-        Only remove the mapping when it still points at the caller's socket (or
-        when no ws is supplied, for legacy callers).
-        """
+    async def disconnect(self, conv_id: str) -> None:
         async with self._lock:
-            current = self._connections.get(conv_id)
-            if ws is not None and current is not ws:
-                # A newer connection已接管此 conv — 不要误删活跃连接。
-                return
             self._connections.pop(conv_id, None)
             user_id = self._conv_users.pop(conv_id, None)
             workspace_id = self._conv_workspace.pop(conv_id, None)
@@ -192,7 +180,7 @@ class ConnectionManager:
             return True
         except Exception as e:
             logger.warning(f"WS send failed conv={conv_id[:8]} type={event_type}: {e}")
-            await self.disconnect(conv_id, ws)
+            await self.disconnect(conv_id)
             return False
 
     async def _publish(self, channel: str, event_type: str, data: Any) -> bool:

@@ -98,11 +98,6 @@ class Settings(BaseSettings):
     # JWT authentication
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days
-    # WebSocket / realtime auth. When True, /ws/{conversation_id} requires a
-    # valid JWT (query param `?token=` or Authorization header) whose `sub`
-    # owns the conversation. Kept as a flag so a staged client rollout can
-    # temporarily disable enforcement; default is secure.
-    ws_require_auth: bool = True
     # Optional separate key for last-will content/contact encryption. If unset,
     # production falls back to the strong JWT secret enforced below.
     last_will_encryption_key: str = ""
