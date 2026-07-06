@@ -6,8 +6,6 @@ from app.api.jwt_auth import require_admin_jwt
 from app.models.prompt_template import (
     PromptCanaryConfigRequest,
     PromptCanaryConfigResponse,
-    PromptSectionOrderResponse,
-    PromptSectionOrderUpdateRequest,
     PromptTemplateEnabledRequest,
     PromptTemplateReplayRequest,
     PromptTemplateReplayResponse,
@@ -19,11 +17,6 @@ from app.models.prompt_template import (
 from app.services.llm.models import convert_messages, get_chat_model, get_utility_model, invoke_text
 from app.services.llm.resilience import CallProfile
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
-from app.services.prompting.section_order import (
-    get_chat_section_order_info,
-    reset_chat_section_order,
-    set_chat_section_order,
-)
 from app.services.prompting.store import (
     PromptUpdateConflictError,
     disable_prompt_canary,
@@ -71,37 +64,6 @@ def _normalize_replay_messages(messages: list[dict[str, str]]) -> list[dict[str,
 async def get_prompts(_: str = Depends(require_admin_jwt)):
     prompts = await list_prompts()
     return [PromptTemplateResponse(**prompt) for prompt in prompts]
-
-
-# NOTE: /section-order 必须注册在 /{key} 通配路由之前, 否则会被当成
-# key="section-order" 吞掉返回 404.
-@router.get("/section-order", response_model=PromptSectionOrderResponse)
-async def get_section_order(_: str = Depends(require_admin_jwt)):
-    """主回复系统提示词的段落顺序 (生效值 + 代码默认 + slot 元数据)."""
-    return PromptSectionOrderResponse(**(await get_chat_section_order_info()))
-
-
-@router.put("/section-order", response_model=PromptSectionOrderResponse)
-async def update_section_order(
-    payload: PromptSectionOrderUpdateRequest,
-    _: str = Depends(require_admin_jwt),
-):
-    """覆写段落顺序 (必须是全部 slot 的排列). 对新请求 ≤10s 内生效.
-
-    ⚠️ 顺序影响 dashscope prefix cache: 稳定段 (core_rules/personality/
-    consistency) 应尽量保持在最前, 否则前缀缓存被打穿, input 成本上升.
-    """
-    try:
-        info = await set_chat_section_order(payload.order)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return PromptSectionOrderResponse(**info)
-
-
-@router.delete("/section-order", response_model=PromptSectionOrderResponse)
-async def delete_section_order(_: str = Depends(require_admin_jwt)):
-    """删除覆写, 回到代码默认顺序."""
-    return PromptSectionOrderResponse(**(await reset_chat_section_order()))
 
 
 @router.put("/{key}", response_model=PromptTemplateResponse)

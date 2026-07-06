@@ -73,17 +73,3 @@ class PromptCanaryConfigResponse(BaseModel):
     rollout_percent: int
     eval_result: dict[str, Any] | None = None
     updated_at: str | None = None
-
-
-class PromptSectionOrderUpdateRequest(BaseModel):
-    # 必须是全部已知 slot 的一个排列 (不多不少不重), 由 section_order 校验.
-    order: list[str]
-
-
-class PromptSectionOrderResponse(BaseModel):
-    prompt_key: str
-    order: list[str]
-    default_order: list[str]
-    source: Literal["default", "custom"]
-    updated_at: str | None = None
-    slots: list[dict[str, Any]] = Field(default_factory=list)

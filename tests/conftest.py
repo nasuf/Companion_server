@@ -16,24 +16,6 @@ def _deterministic_typo_off(monkeypatch):
     monkeypatch.setattr(settings, "typo_enabled", False)
 
 
-@pytest.fixture(autouse=True)
-def _deterministic_section_order(monkeypatch):
-    """段落顺序配置存 Redis/DB; 测试统一走代码默认顺序, 防止本地 Redis 里
-    残留的 admin 覆写污染 prompt 结构断言 (也避免单测真连 Redis).
-    覆写行为由 test_section_order.py 显式 patch 验证."""
-    from app.services.prompting import section_order
-
-    section_order.invalidate_local_cache()
-
-    async def _default_order():
-        return list(section_order.DEFAULT_CHAT_SECTION_ORDER)
-
-    monkeypatch.setattr(
-        "app.services.chat.prompt_builder.get_chat_section_order",
-        _default_order,
-    )
-
-
 # ── 共享 JWT / TestClient helpers ────────────────────────────────────────
 
 def make_auth_header(user_id: str = "user-id", role: str = "user") -> dict:
