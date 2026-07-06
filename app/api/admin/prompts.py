@@ -15,6 +15,7 @@ from app.models.prompt_template import (
     PromptTemplateVersionResponse,
 )
 from app.services.llm.models import convert_messages, get_chat_model, get_utility_model, invoke_text
+from app.services.llm.resilience import CallProfile
 from app.services.prompting.registry import PROMPT_DEFINITION_MAP
 from app.services.prompting.store import (
     PromptUpdateConflictError,
@@ -32,6 +33,18 @@ from app.services.prompting.store import (
 router = APIRouter(prefix="/admin-api/prompts", tags=["admin-prompts"])
 
 _ALLOWED_REPLAY_ROLES = {"system", "user", "assistant"}
+
+# Replay is a prompt-debugging tool: it must exercise the *exact* selected
+# model. Ollama fallback is disabled on purpose — silently answering with a
+# different local model would make the admin evaluate the wrong output. No
+# retry either: the admin can just click again; a hung upstream should surface
+# as an error instead of blocking the HTTP request for minutes.
+_REPLAY_PROFILE = CallProfile(
+    timeout_s=60.0,
+    max_retries=0,
+    retry_backoff_s=(),
+    allow_ollama_fallback=False,
+)
 
 
 def _normalize_replay_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -94,25 +107,35 @@ async def replay_prompt_step(
     payload: PromptTemplateReplayRequest,
     _: str = Depends(require_admin_jwt),
 ):
+    """Side-effect-free single-step replay for the trace debug panel.
+
+    `output` is intentionally the model's *raw* text: no timestamp stripping,
+    no `||` bubble splitting, no [EMO:] marker removal. The admin needs to see
+    exactly what the prompt produced; production-only post-processing is
+    explained in the web UI next to the output.
+    """
     if payload.prompt_key not in PROMPT_DEFINITION_MAP:
         raise HTTPException(status_code=404, detail="Prompt not found")
     rendered_prompt = payload.rendered_prompt
     if not rendered_prompt.strip():
         raise HTTPException(status_code=400, detail="rendered_prompt is required")
     model = get_chat_model() if payload.model_kind == "chat" else get_utility_model()
+    # Validate outside the try: a malformed payload must surface as 400, not be
+    # re-wrapped by the generic 502 "replay failed" handler below.
+    replay_messages = _normalize_replay_messages(payload.messages) if payload.messages else None
     try:
-        if payload.messages:
-            replay_messages = _normalize_replay_messages(payload.messages)
-            result = await model.ainvoke(convert_messages(replay_messages))
-            output = str(getattr(result, "content", "") or "")
+        if replay_messages:
+            output = await invoke_text(
+                model, convert_messages(replay_messages), profile=_REPLAY_PROFILE,
+            )
         else:
-            output = await invoke_text(model, rendered_prompt)
+            output = await invoke_text(model, rendered_prompt, profile=_REPLAY_PROFILE)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Prompt replay failed: {exc}") from exc
     return PromptTemplateReplayResponse(
         prompt_key=payload.prompt_key,
         rendered_prompt=rendered_prompt,
-        output=output,
+        output=str(output or ""),
     )
 
 

@@ -217,6 +217,15 @@ def _stable_bucket(*values: str | None) -> int:
     return int(digest[:8], 16) % 100
 
 
+# Cosmetic reply-formatting placeholders that the runtime *supplies* but the
+# admin may legitimately drop (e.g. hardcoding "最多3条/每条15字" instead of
+# {n}/{max_per}/{total}). Rendering tolerates unused params, so removing these
+# is safe. Data-input placeholders ({message}/{context}/{new_conversation}/…)
+# are NOT in this set and stay required — dropping them would silently break
+# the prompt (LLM never sees the user input).
+_OPTIONAL_TEMPLATE_PLACEHOLDERS = {"n", "max_per", "total", "max_total", "max_reply"}
+
+
 def _template_fields(text: str) -> set[str]:
     fields: set[str] = set()
     for _, field_name, _, _ in string.Formatter().parse(text):
@@ -226,7 +235,15 @@ def _template_fields(text: str) -> set[str]:
 
 
 def _missing_required_placeholders(reference: str, candidate: str) -> list[str]:
-    return sorted(_template_fields(reference) - _template_fields(candidate))
+    """Placeholders the default has but the new content dropped, excluding the
+    cosmetic reply-formatting ones an admin may intentionally remove.
+
+    The admin already verifies output via the trace replay before saving, and
+    rendering is crash-safe for missing params, so only *data-input*
+    placeholders are treated as required.
+    """
+    required = _template_fields(reference) - _OPTIONAL_TEMPLATE_PLACEHOLDERS
+    return sorted(required - _template_fields(candidate))
 
 
 def _normalize_canary_config(

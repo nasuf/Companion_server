@@ -266,6 +266,22 @@ async def test_prompt_update_rejects_missing_required_placeholders(prompt_store_
             await update_prompt_text("test.key", "请根据 {message} 输出")
 
 
+def test_missing_required_placeholders_allows_cosmetic_removal():
+    """装饰性占位符 ({max_per}/{total}/{n}/…) 可被管理员合法删除, 不算缺失;
+    数据类占位符 ({message}/{context}/…) 删除仍算缺失。"""
+    from app.services.prompting.store import _missing_required_placeholders
+
+    default = "每条不超过{max_per}字，总共{total}字，分{n}条；根据{message}和{context}回复"
+    # 只去掉装饰性占位符 → 不算缺失
+    assert _missing_required_placeholders(
+        default, "根据{message}和{context}回复，最多3条每条15字",
+    ) == []
+    # 去掉数据类 {context} → 仍算缺失
+    assert _missing_required_placeholders(
+        default, "根据{message}回复",
+    ) == ["context"]
+
+
 @pytest.mark.asyncio
 async def test_prompt_canary_agent_rollout_overrides_runtime_text(prompt_store_mocks):
     from app.services.prompting.store import (
