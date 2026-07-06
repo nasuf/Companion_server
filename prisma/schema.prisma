@@ -753,6 +753,16 @@ model PromptTemplateVersion {
   @@map("prompt_template_versions")
 }
 
+// 组合 prompt 的段落顺序覆写 (目前仅 chat.system_base). 行不存在 = 用代码
+// 默认顺序 (build_system_prompt / section_order.py 的 CHAT_SECTION_SLOTS).
+model PromptSectionOrder {
+  promptKey String   @id @map("prompt_key")
+  orderJson Json     @map("order_json")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("prompt_section_orders")
+}
+
 model UserMemory {
   id            String         @id @default(uuid())
   userId        String         @map("user_id")

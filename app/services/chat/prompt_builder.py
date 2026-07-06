@@ -8,6 +8,7 @@ Uses seven-dim personality (0-100) to build role-play personality descriptions.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +22,10 @@ from app.services.prompting.store import (
     get_prompt_text_for_context,
     get_prompt_text_or_default,
 )
+from app.services.prompting.section_order import (
+    DEFAULT_CHAT_SECTION_ORDER,
+    get_chat_section_order,
+)
 from app.services.prompting.trace_components import record_prompt_render
 from app.services.prompting.utils import render_template
 from app.services.style import generate_style_examples, generate_style_instruction
@@ -30,6 +35,8 @@ from app.services.prompts.system_prompts import (
     MAX_TOTAL_CHARS as _MAX_TOTAL_CHARS,
     CHAT_HISTORY_TOKEN_BUDGET,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -523,41 +530,38 @@ async def build_system_prompt(
         ),
     )
 
-    # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════
-    # 同 agent 跨请求字节级一致, dashscope prefix cache 应命中.
+    # ═══ Phase A: 逐段构建 (staged), 顺序由 section_order 统一决定 ═══════
+    # 默认顺序 = CHAT_SECTION_SLOTS (稳定前缀在前, cache 友好); admin 可在
+    # 后台覆写. 这里只负责"该段是否注入 + 内容", 排列交给 Phase B.
     sections: list[str] = []
     components: list[dict[str, Any]] = []
+    staged: list[tuple[str, str, str, str | None]] = []
+
+    def _stage(slot: str, title: str, body: str, prompt_key: str | None) -> None:
+        staged.append((slot, title, body, prompt_key))
+
     if system_base is not None:
-        _append_section(
-            sections, components, "核心规则", str(system_base),
-            prompt_key="chat.system_base",
-        )
+        _stage("core_rules", "核心规则", str(system_base), "chat.system_base")
     else:
         _record_skipped_section(diagnostics, "核心规则")
     anti_hallucination_body = str(anti_hallucination).strip() if anti_hallucination is not None else ""
     anti_hallucination_section = anti_hallucination_body if _has_prompt_body(anti_hallucination_body) else None
     if anti_hallucination_section:
-        _append_section(
-            sections, components, "反幻觉硬约束", anti_hallucination_section,
-            prompt_key="chat.anti_hallucination_hard_rule",
+        _stage(
+            "anti_hallucination", "反幻觉硬约束", anti_hallucination_section,
+            "chat.anti_hallucination_hard_rule",
         )
     else:
         _record_skipped_section(diagnostics, "反幻觉硬约束")
     personality = await _build_personality_section(agent)   # per-agent 稳定
     if personality:
-        _append_section(
-            sections, components, "你的身份", personality.body,
-            prompt_key=personality.prompt_key,
-        )
+        _stage("personality", "你的身份", personality.body, personality.prompt_key)
     else:
         _record_skipped_section(diagnostics, "你的身份")
     consistency_body = str(consistency_rules).strip() if consistency_rules is not None else ""
     consistency_section = consistency_body if _has_prompt_body(consistency_body) else None
     if consistency_section:
-        _append_section(
-            sections, components, "对话一致性", consistency_section,
-            prompt_key="chat.consistency_rules",
-        )
+        _stage("consistency", "对话一致性", consistency_section, "chat.consistency_rules")
     else:
         _record_skipped_section(diagnostics, "对话一致性")
 
@@ -565,38 +569,26 @@ async def build_system_prompt(
 
     emo = await _build_emotion_section(user_emotion, intimacy_stage, relation_meta_line)
     if emo:
-        _append_section(
-            sections, components, "当前情绪", emo.body,
-            prompt_key=emo.prompt_key,
-        )
+        _stage("emotion", "当前情绪", emo.body, emo.prompt_key)
     else:
         _record_skipped_section(diagnostics, "当前情绪")
 
     # W4 AI 情绪连续性: 上一轮情绪衰减后的"当下心情", 驱动语气/话量
     mood_section = await _build_ai_mood_section(ai_mood_text)
     if mood_section:
-        _append_section(
-            sections, components, "你的心情", mood_section.body,
-            prompt_key=mood_section.prompt_key,
-        )
+        _stage("ai_mood", "你的心情", mood_section.body, mood_section.prompt_key)
     else:
         _record_skipped_section(diagnostics, "你的心情")
 
     port = await _build_portrait_section(portrait)
     if port:
-        _append_section(
-            sections, components, "用户画像", port.body,
-            prompt_key=port.prompt_key,
-        )
+        _stage("portrait", "用户画像", port.body, port.prompt_key)
     else:
         _record_skipped_section(diagnostics, "用户画像")
 
     delay = await _build_delay_context_section(delay_context)
     if delay:
-        _append_section(
-            sections, components, "回复时机说明", delay.body,
-            prompt_key=delay.prompt_key,
-        )
+        _stage("delay_context", "回复时机说明", delay.body, delay.prompt_key)
     else:
         _record_skipped_section(diagnostics, "回复时机说明")
 
@@ -604,20 +596,14 @@ async def build_system_prompt(
     # 与「回复时机说明」相邻 — 都是对话时间轴语义.
     reengage = await _build_reengagement_section(reengagement_gap_seconds)
     if reengage:
-        _append_section(
-            sections, components, "重逢感知", reengage.body,
-            prompt_key=reengage.prompt_key,
-        )
+        _stage("reengagement", "重逢感知", reengage.body, reengage.prompt_key)
     else:
         _record_skipped_section(diagnostics, "重逢感知")
 
     # W2 中期记忆: 重逢时的「上次聊到」摘要, 与重逢感知段配对注入
     recap_section = await _build_session_recap_section(session_recap)
     if recap_section:
-        _append_section(
-            sections, components, "上次聊到", recap_section.body,
-            prompt_key=recap_section.prompt_key,
-        )
+        _stage("session_recap", "上次聊到", recap_section.body, recap_section.prompt_key)
     else:
         _record_skipped_section(diagnostics, "上次聊到")
 
@@ -630,10 +616,7 @@ async def build_system_prompt(
         ),
     )
     if mem:
-        _append_section(
-            sections, components, "你记得的事情", mem.body,
-            prompt_key=mem.prompt_key,
-        )
+        _stage("memory", "你记得的事情", mem.body, mem.prompt_key)
     else:
         _record_skipped_section(diagnostics, "你记得的事情")
 
@@ -641,29 +624,20 @@ async def build_system_prompt(
 
     topic = await _build_topic_context_section(topic_context)
     if topic:
-        _append_section(
-            sections, components, "话题上下文", topic.body,
-            prompt_key=topic.prompt_key,
-        )
+        _stage("topic_context", "话题上下文", topic.body, topic.prompt_key)
     else:
         _record_skipped_section(diagnostics, "话题上下文")
 
     # E3 表达学习: 已学表达按 count 加权抽样注入 (随轮次变化, 归变化段)
     expr = await _build_expression_habits_section(expression_habits)
     if expr:
-        _append_section(
-            sections, components, "表达习惯参考", expr.body,
-            prompt_key=expr.prompt_key,
-        )
+        _stage("expression_habits", "表达习惯参考", expr.body, expr.prompt_key)
     else:
         _record_skipped_section(diagnostics, "表达习惯参考")
 
     music = await _build_music_context_section(music_context)
     if music:
-        _append_section(
-            sections, components, "一起听音乐", music.body,
-            prompt_key=music.prompt_key,
-        )
+        _stage("music_context", "一起听音乐", music.body, music.prompt_key)
     else:
         _record_skipped_section(diagnostics, "一起听音乐")
 
@@ -679,10 +653,7 @@ async def build_system_prompt(
     # 单独注入 (delay_context_section), 不依赖 schedule_context.
     time_section = await _build_time_context_section(time_context)
     if time_section:
-        _append_section(
-            sections, components, "时间", time_section.body,
-            prompt_key=time_section.prompt_key,
-        )
+        _stage("time_context", "时间", time_section.body, time_section.prompt_key)
     else:
         _record_skipped_section(diagnostics, "时间")
 
@@ -692,10 +663,10 @@ async def build_system_prompt(
     )
     if time_memories and time_mem_tpl is not None:
         numbered = "\n".join(f"- {m}" for m in time_memories)
-        _append_section(
-            sections, components, "相关时间记忆",
+        _stage(
+            "time_memories", "相关时间记忆",
             _render_section(time_mem_tpl, {"time_memories": numbered}),
-            prompt_key="chat.time_memories_section",
+            "chat.time_memories_section",
         )
     else:
         _record_skipped_section(diagnostics, "相关时间记忆")
@@ -704,10 +675,10 @@ async def build_system_prompt(
     l3_tpl = await _get_optional_prompt("chat.l3_memory_section") if l3_memories else None
     if l3_memories and l3_tpl is not None:
         l3_block = "\n".join(f"- {m}" for m in l3_memories)
-        _append_section(
-            sections, components, "久远记忆（L3）",
+        _stage(
+            "l3_memories", "久远记忆（L3）",
             _render_section(l3_tpl, {"l3_memories": l3_block}),
-            prompt_key="chat.l3_memory_section",
+            "chat.l3_memory_section",
         )
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")
@@ -715,9 +686,9 @@ async def build_system_prompt(
     # 5B.4: 耐心区间语气描述 (boundary.patience_instruction_* 渲染结果,
     # ManagedPromptText 自带 prompt_key → trace 内可编辑)
     if patience_instruction:
-        _append_section(
-            sections, components, "情绪状态提醒", str(patience_instruction),
-            prompt_key=getattr(patience_instruction, "prompt_key", None),
+        _stage(
+            "patience", "情绪状态提醒", str(patience_instruction),
+            getattr(patience_instruction, "prompt_key", None),
         )
     else:
         _record_skipped_section(diagnostics, "情绪状态提醒")
@@ -732,28 +703,45 @@ async def build_system_prompt(
         if activity:
             tpl = await _get_optional_prompt("chat.ai_state_constraint")
             if tpl is not None:
-                _append_section(
-                    sections, components, "你的隐性状态约束",
+                _stage(
+                    "ai_state_constraint", "你的隐性状态约束",
                     _render_section(tpl, {"activity": activity, "status": status_label}),
-                    prompt_key="chat.ai_state_constraint",
+                    "chat.ai_state_constraint",
                 )
                 ai_state_appended = True
     if not ai_state_appended:
         _record_skipped_section(diagnostics, "你的隐性状态约束")
 
-    # 回复要求 (n=random 1-3 每轮变, 不可 cache, 排末尾)
+    # 回复要求 (n=random 1-3 每轮变, 不可 cache, 默认排末尾)
     if response_instruction is not None:
-        _append_section(
-            sections, components, "回复要求",
+        _stage(
+            "response_instruction", "回复要求",
             # "n" 已不在默认模板中 (C1 删除强制条数), 但 admin 后台可能存有
             # 含 {n} 的旧版覆盖模板 — 继续传参保证旧模板渲染不出 "(无)".
             _render_section(response_instruction, {
                 "n": reply_count, "total": reply_total, "max_per": _MAX_PER_REPLY,
             }),
-            prompt_key="chat.response_instruction",
+            "chat.response_instruction",
         )
     else:
         _record_skipped_section(diagnostics, "回复要求")
+
+    # ═══ Phase B: 按配置顺序发射 (代码默认顺序 = cache 友好; admin 可覆写) ═══
+    order = await get_chat_section_order()
+    staged_by_slot = {entry[0]: entry for entry in staged}
+    emitted: set[str] = set()
+    for slot in order:
+        entry = staged_by_slot.get(slot)
+        if entry is None:
+            continue
+        _append_section(sections, components, entry[1], entry[2], prompt_key=entry[3])
+        emitted.add(slot)
+    # 防御: staged 里存在但 order 漏掉的 slot (正常被 normalize 兜住) 按
+    # 构建顺序补到末尾, 保证任何 section 不静默消失.
+    for entry in staged:
+        if entry[0] not in emitted:
+            logger.warning(f"[SECTION-ORDER] slot '{entry[0]}' missing from order, appended at tail")
+            _append_section(sections, components, entry[1], entry[2], prompt_key=entry[3])
 
     if diagnostics is not None:
         skipped = diagnostics.get("empty_prompt_sections_removed")
@@ -761,6 +749,9 @@ async def build_system_prompt(
             len(skipped) if isinstance(skipped, list) else 0
         )
         diagnostics["system_prompt_section_count"] = len(sections)
+        diagnostics["section_order_source"] = (
+            "custom" if order != DEFAULT_CHAT_SECTION_ORDER else "default"
+        )
 
     system_prompt = "\n\n".join(sections)
     record_prompt_render(
