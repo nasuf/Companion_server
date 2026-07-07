@@ -516,6 +516,22 @@ def _resolve_usage_model_key(model: BaseChatModel) -> str:
     return name
 
 
+def _extract_cached_input_tokens(meta: dict) -> int:
+    """从 usage_metadata 提取 prefix cache 命中的 input tokens.
+
+    LangChain 把各 provider 的缓存字段归一到 input_token_details.cache_read
+    (DeepSeek prompt_cache_hit_tokens / OpenAI+qwen prompt_tokens_details.
+    cached_tokens); 兼容旧版 langchain 直接透传 cached_tokens 的情况.
+    """
+    details = meta.get("input_token_details")
+    if isinstance(details, dict):
+        for key in ("cache_read", "cached_tokens"):
+            value = details.get(key)
+            if value:
+                return int(value)
+    return 0
+
+
 def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
     """提取 response.usage_metadata 并 record 到当前 chat session, 返回 usage dict."""
     from app.services.llm import usage_tracker
@@ -525,7 +541,11 @@ def _record_usage_from_response(model: BaseChatModel, response: Any) -> dict:
         return {}
     input_tok = int(meta.get("input_tokens", 0) or 0)
     output_tok = int(meta.get("output_tokens", 0) or 0)
-    usage_tracker.record(_resolve_usage_model_key(model), input_tok, output_tok)
+    cached_tok = _extract_cached_input_tokens(meta)
+    usage_tracker.record(
+        _resolve_usage_model_key(model), input_tok, output_tok,
+        cached_input_tokens=cached_tok,
+    )
     return {"input_tokens": input_tok, "output_tokens": output_tok}
 
 

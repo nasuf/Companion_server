@@ -28,12 +28,17 @@ logger = logging.getLogger(__name__)
 
 _EXPR_KEY = "expression:{agent_id}:{user_id}"
 _COUNTER_KEY = "expression:msgcount:{agent_id}:{user_id}"
+_SAMPLE_KEY = "expression:sampled:{agent_id}:{user_id}"
 
 LEARN_EVERY_N = 20          # 每 N 条用户消息学习一批
 MAX_EXPRESSIONS = 50        # 每 (agent, user) 表达上限
 INJECT_COUNT = 3            # 每轮注入条数
 _MAX_FIELD_LEN = 30         # situation/style 单字段长度上限 (防 LLM 跑偏)
 _KEY_TTL_S = 90 * 86400     # 90 天无互动自然过期
+# 抽样结果按会话粒度缓存 1 小时: 每轮重新加权抽样会让「表达习惯参考」段
+# 每轮字节级不同, 击穿 system prompt 从该段起的 prefix cache. 表达习惯本来
+# 就是慢变信号, 同一小时内注入同一批不损失拟人度; 学到新表达时主动失效.
+_SAMPLE_TTL_S = 3600
 
 
 async def bump_message_counter(agent_id: str, user_id: str) -> bool:
@@ -155,6 +160,13 @@ async def learn_expressions(
     except Exception as e:
         logger.warning(f"expression save failed: {e}")
         return 0
+    # 学到新表达 → 失效抽样缓存, 下一轮即可注入新学的 (不必等 TTL); 失效
+    # 失败不影响入库结果, 顶多旧抽样多活一会儿.
+    try:
+        redis = await get_redis()
+        await redis.delete(_SAMPLE_KEY.format(agent_id=agent_id, user_id=user_id))
+    except Exception as e:
+        logger.debug(f"expression sample cache invalidate failed: {e}")
     logger.info(
         f"[EXPR-LEARN] learned {len(new_items)} expressions (total {len(merged)})",
         extra={
@@ -184,13 +196,34 @@ def weighted_sample(
 async def sample_expression_habits(
     agent_id: str | None, user_id: str, k: int = INJECT_COUNT,
 ) -> list[str]:
-    """热路径入口：抽 k 条已学表达，渲染成「当 X 时，可以 Y」行。"""
+    """热路径入口：抽 k 条已学表达，渲染成「当 X 时，可以 Y」行。
+
+    抽样结果缓存 _SAMPLE_TTL_S (缓存友好, 见常量注释); Redis 不可用时
+    退化为每轮抽样 (功能不受损, 只是缓存收益消失)。
+    """
     if not agent_id:
         return []
+    sample_key = _SAMPLE_KEY.format(agent_id=agent_id, user_id=user_id)
+    try:
+        redis = await get_redis()
+        cached = await redis.get(sample_key)
+        if cached:
+            data = json.loads(cached)
+            if isinstance(data, list) and all(isinstance(s, str) for s in data):
+                return data
+    except Exception as e:
+        logger.debug(f"expression sample cache read failed: {e}")
+
     expressions = await load_expressions(agent_id, user_id)
     if not expressions:
         return []
-    return [
+    habits = [
         f"当「{e['situation']}」时，可以「{e['style']}」"
         for e in weighted_sample(expressions, k)
     ]
+    try:
+        redis = await get_redis()
+        await redis.set(sample_key, json.dumps(habits, ensure_ascii=False), ex=_SAMPLE_TTL_S)
+    except Exception as e:
+        logger.debug(f"expression sample cache write failed: {e}")
+    return habits

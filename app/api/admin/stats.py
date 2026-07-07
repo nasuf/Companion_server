@@ -229,7 +229,9 @@ async def token_usage(
             SELECT
                 kv.key AS model,
                 SUM((kv.value->>'input')::int)::int AS input_tokens,
-                SUM((kv.value->>'output')::int)::int AS output_tokens
+                SUM((kv.value->>'output')::int)::int AS output_tokens,
+                -- cached_input 是 2026-07 之后的新字段, 历史行没有 → COALESCE 0
+                SUM(COALESCE((kv.value->>'cached_input')::int, 0))::int AS cached_input_tokens
             FROM llm_usage, jsonb_each(tokens_by_model) AS kv
             WHERE {where_sql}
             GROUP BY kv.key
@@ -295,12 +297,22 @@ async def token_usage(
             "model": r["model"],
             "input_tokens": r["input_tokens"],
             "output_tokens": r["output_tokens"],
+            "cached_input_tokens": r.get("cached_input_tokens", 0) or 0,
             "cost_cny": round(estimate_cost_cny(
                 r["model"], r["input_tokens"], r["output_tokens"],
             ), 6),
         }
         for r in by_model_rows
     ]
+    # 总缓存命中 = by_model 聚合之和 (同一 WHERE 窗口, 数学上等价; 避免 totals
+    # 查询再做一次 jsonb_each 展开). 命中率 = cached / input.
+    total_cached = sum(int(r["cached_input_tokens"]) for r in by_model)
+    total_input = int(totals.get("input_tokens", 0) or 0)
+    totals = {
+        **totals,
+        "cached_input_tokens": total_cached,
+        "cache_hit_rate": round(total_cached / total_input, 4) if total_input else 0.0,
+    }
     by_scope = [
         {
             "scope": r["scope"],

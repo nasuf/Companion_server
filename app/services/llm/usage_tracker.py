@@ -30,12 +30,16 @@ logger = logging.getLogger(__name__)
 class _ModelUsage(TypedDict):
     input: int
     output: int
+    # 命中 provider prefix cache 的 input tokens (计费 ~0.1x-0.4x 原价).
+    # input 字段是总量, cached_input 是其中命中的部分 (cached_input <= input).
+    cached_input: int
 
 
 class UsageSummary(TypedDict):
     tokens_by_model: dict[str, _ModelUsage]
     input_tokens: int
     output_tokens: int
+    cached_input_tokens: int
     call_count: int
     latency_ms_total: int
     latency_count: int
@@ -53,6 +57,7 @@ def start_session() -> Token:
         "tokens_by_model": {},
         "input_tokens": 0,
         "output_tokens": 0,
+        "cached_input_tokens": 0,
         "call_count": 0,
         "latency_ms_total": 0,
         "latency_count": 0,
@@ -67,19 +72,34 @@ def has_session() -> bool:
     return _current.get() is not None
 
 
-def record(model: str, input_tokens: int, output_tokens: int) -> None:
+def record(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int = 0,
+) -> None:
     """LLM wrapper 调用此函数累加. 没活跃 session 时 silently drop (单元测试 /
-    后台异步任务 不在 chat session 里, 不该计入)."""
+    后台异步任务 不在 chat session 里, 不该计入).
+
+    cached_input_tokens: input 中命中 provider prefix cache 的部分 (DeepSeek
+    prompt_cache_hit_tokens / qwen cached_tokens, LangChain 归一为
+    input_token_details.cache_read). 驱动后台缓存命中率监控.
+    """
     summary = _current.get()
     if summary is None:
         return
     if not model:
         model = "unknown"
-    bucket = summary["tokens_by_model"].setdefault(model, {"input": 0, "output": 0})
+    bucket = summary["tokens_by_model"].setdefault(
+        model, {"input": 0, "output": 0, "cached_input": 0},
+    )
     bucket["input"] += int(input_tokens or 0)
     bucket["output"] += int(output_tokens or 0)
+    # 旧 session dict 兼容 (理论上不存在, setdefault 兜底)
+    bucket["cached_input"] = bucket.get("cached_input", 0) + int(cached_input_tokens or 0)
     summary["input_tokens"] += int(input_tokens or 0)
     summary["output_tokens"] += int(output_tokens or 0)
+    summary["cached_input_tokens"] += int(cached_input_tokens or 0)
     summary["call_count"] += 1
 
 

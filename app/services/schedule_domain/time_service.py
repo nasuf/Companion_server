@@ -243,9 +243,14 @@ def build_time_context() -> str:
     """构建时间上下文文本，供prompt注入。
 
     包含：当前时间、今日节假日、即将到来的节假日。
+
+    时间精度刻意只到小时: 该文本注入 system prompt, provider prefix cache
+    按字节前缀匹配 — 分钟精度让这段每轮必变, 击穿它之后所有段落的缓存;
+    小时精度下同一小时内字节稳定. 语义上足够: 节日寒暄/时段感知不需要
+    分钟; 对话间隔感知由历史消息的 [MM-DD HH:MM] 前缀 + 重逢感知段承担.
     """
     ti = get_current_time()
-    parts = [f"当前时间：{ti.now.strftime('%Y年%m月%d日 %H:%M')} {ti.weekday}"]
+    parts = [f"当前时间：{ti.now.strftime('%Y年%m月%d日')} {ti.now.hour}时 {ti.weekday}"]
 
     today_holiday = is_holiday(ti.date)
     if today_holiday:

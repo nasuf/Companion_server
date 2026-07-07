@@ -561,7 +561,19 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "对话一致性")
 
-    # ═══ VARIABLE SUFFIX (每请求变化, cache miss 起点) ═══════════════════
+    # ═══ VARIABLE SUFFIX (每请求可能变化, cache miss 起点) ═══════════════
+    # 区内按**变化频率升序**排列 (慢变在前, 每轮必变在后): prefix cache 从
+    # 第一个变化字节起全部失效, 慢变段排前面能把"平均可命中前缀"再拉长
+    # 几百 token. 分组语义仍保持: 时间轴三件套 (回复时机/重逢/上次聊到)
+    # 相邻, 记忆三段 (记得的事情/相关时间记忆/L3) 相邻.
+    #
+    # 慢变组 (小时级~周级):
+    #   当前情绪(亲密度阶段周级+relation_meta 6h 缓存) → 用户画像(天级) →
+    #   情绪状态提醒(耐心异常时才出现) → 表达习惯(抽样缓存 1h) →
+    #   一起听音乐(会话级) → 隐性状态约束(作息 slot 小时级) → 时间(小时级)
+    # 快变组 (轮级):
+    #   你的心情 → 回复时机 → 重逢感知 → 上次聊到 → 记忆 → 话题 →
+    #   相关时间记忆 → L3 → 回复要求(静态, 语义收尾)
 
     emo = await _build_emotion_section(user_emotion, intimacy_stage, relation_meta_line)
     if emo:
@@ -572,6 +584,84 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "当前情绪")
 
+    port = await _build_portrait_section(portrait)
+    if port:
+        _append_section(
+            sections, components, "用户画像", port.body,
+            prompt_key=port.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "用户画像")
+
+    # 5B.4: 耐心区间语气描述 (boundary.patience_instruction_* 渲染结果,
+    # ManagedPromptText 自带 prompt_key → trace 内可编辑)
+    if patience_instruction:
+        _append_section(
+            sections, components, "情绪状态提醒", str(patience_instruction),
+            prompt_key=getattr(patience_instruction, "prompt_key", None),
+        )
+    else:
+        _record_skipped_section(diagnostics, "情绪状态提醒")
+
+    # E3 表达学习: 已学表达加权抽样注入 (抽样结果缓存 1h, 见 expression_learner)
+    expr = await _build_expression_habits_section(expression_habits)
+    if expr:
+        _append_section(
+            sections, components, "表达习惯参考", expr.body,
+            prompt_key=expr.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "表达习惯参考")
+
+    music = await _build_music_context_section(music_context)
+    if music:
+        _append_section(
+            sections, components, "一起听音乐", music.body,
+            prompt_key=music.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "一起听音乐")
+
+    # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 禁止主动展开,
+    # 防止 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动. 详见
+    # CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).
+    ai_state_appended = False
+    if ai_status:
+        activity = str(ai_status.get("activity", "")).strip()
+        status_label = str(ai_status.get("status", "idle")).strip()
+        if activity:
+            tpl = await _get_optional_prompt("chat.ai_state_constraint")
+            if tpl is not None:
+                _append_section(
+                    sections, components, "你的隐性状态约束",
+                    _render_section(tpl, {"activity": activity, "status": status_label}),
+                    prompt_key="chat.ai_state_constraint",
+                )
+                ai_state_appended = True
+    if not ai_state_appended:
+        _record_skipped_section(diagnostics, "你的隐性状态约束")
+
+    # 时间上下文: 仅注入日期/星期/节假日, 不注入 AI 当前活动 (schedule_context).
+    # spec §4 日常交流 步骤 4.3 / 5B.3 的"汇总参考信息"明确不包含 AI 当前作息;
+    # 只有 §3.4.3 询问当前状态 才需要, 那是另一条 short-circuit 路径
+    # (intent_handlers.handle_current_state → current_state_reply prompt).
+    # 这里若注入 schedule_context 会让 §4 主回复跟 §3.4.3 的输出主题撞车
+    # (例: 用户问"有意思。你现在在干嘛", 主意图 §3.4.3 回"我在沙发看剧",
+    # 子意图"日常交流" §4 也回"我在沙发看老剧" — 重复). 实测 langsmith trace
+    # 已确认这个失效, 见 commit 3d0417d 上下文.
+    # NOTE: 回复时机说明已通过 reply_context.delay_seconds / received_at 路径
+    # 单独注入 (delay_context_section), 不依赖 schedule_context.
+    time_section = await _build_time_context_section(time_context)
+    if time_section:
+        _append_section(
+            sections, components, "时间", time_section.body,
+            prompt_key=time_section.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "时间")
+
+    # ── 以下为轮级快变段 ──────────────────────────────────────────────
+
     # W4 AI 情绪连续性: 上一轮情绪衰减后的"当下心情", 驱动语气/话量
     mood_section = await _build_ai_mood_section(ai_mood_text)
     if mood_section:
@@ -581,15 +671,6 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "你的心情")
-
-    port = await _build_portrait_section(portrait)
-    if port:
-        _append_section(
-            sections, components, "用户画像", port.body,
-            prompt_key=port.prompt_key,
-        )
-    else:
-        _record_skipped_section(diagnostics, "用户画像")
 
     delay = await _build_delay_context_section(delay_context)
     if delay:
@@ -648,44 +729,6 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "话题上下文")
 
-    # E3 表达学习: 已学表达按 count 加权抽样注入 (随轮次变化, 归变化段)
-    expr = await _build_expression_habits_section(expression_habits)
-    if expr:
-        _append_section(
-            sections, components, "表达习惯参考", expr.body,
-            prompt_key=expr.prompt_key,
-        )
-    else:
-        _record_skipped_section(diagnostics, "表达习惯参考")
-
-    music = await _build_music_context_section(music_context)
-    if music:
-        _append_section(
-            sections, components, "一起听音乐", music.body,
-            prompt_key=music.prompt_key,
-        )
-    else:
-        _record_skipped_section(diagnostics, "一起听音乐")
-
-    # 时间上下文: 仅注入日期/星期/节假日, 不注入 AI 当前活动 (schedule_context).
-    # spec §4 日常交流 步骤 4.3 / 5B.3 的"汇总参考信息"明确不包含 AI 当前作息;
-    # 只有 §3.4.3 询问当前状态 才需要, 那是另一条 short-circuit 路径
-    # (intent_handlers.handle_current_state → current_state_reply prompt).
-    # 这里若注入 schedule_context 会让 §4 主回复跟 §3.4.3 的输出主题撞车
-    # (例: 用户问"有意思。你现在在干嘛", 主意图 §3.4.3 回"我在沙发看剧",
-    # 子意图"日常交流" §4 也回"我在沙发看老剧" — 重复). 实测 langsmith trace
-    # 已确认这个失效, 见 commit 3d0417d 上下文.
-    # NOTE: 回复时机说明已通过 reply_context.delay_seconds / received_at 路径
-    # 单独注入 (delay_context_section), 不依赖 schedule_context.
-    time_section = await _build_time_context_section(time_context)
-    if time_section:
-        _append_section(
-            sections, components, "时间", time_section.body,
-            prompt_key=time_section.prompt_key,
-        )
-    else:
-        _record_skipped_section(diagnostics, "时间")
-
     # 时间相关记忆
     time_mem_tpl = (
         await _get_optional_prompt("chat.time_memories_section") if time_memories else None
@@ -712,36 +755,7 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")
 
-    # 5B.4: 耐心区间语气描述 (boundary.patience_instruction_* 渲染结果,
-    # ManagedPromptText 自带 prompt_key → trace 内可编辑)
-    if patience_instruction:
-        _append_section(
-            sections, components, "情绪状态提醒", str(patience_instruction),
-            prompt_key=getattr(patience_instruction, "prompt_key", None),
-        )
-    else:
-        _record_skipped_section(diagnostics, "情绪状态提醒")
-
-    # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 禁止主动展开,
-    # 防止 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动. 详见
-    # CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).
-    ai_state_appended = False
-    if ai_status:
-        activity = str(ai_status.get("activity", "")).strip()
-        status_label = str(ai_status.get("status", "idle")).strip()
-        if activity:
-            tpl = await _get_optional_prompt("chat.ai_state_constraint")
-            if tpl is not None:
-                _append_section(
-                    sections, components, "你的隐性状态约束",
-                    _render_section(tpl, {"activity": activity, "status": status_label}),
-                    prompt_key="chat.ai_state_constraint",
-                )
-                ai_state_appended = True
-    if not ai_state_appended:
-        _record_skipped_section(diagnostics, "你的隐性状态约束")
-
-    # 回复要求 (n=random 1-3 每轮变, 不可 cache, 排末尾)
+    # 回复要求 (静态文案, 语义收尾排末尾)
     if response_instruction is not None:
         _append_section(
             sections, components, "回复要求",

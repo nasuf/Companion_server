@@ -513,6 +513,10 @@ def _capture_chunk_usage(chunk: Any, last_usage: dict) -> None:
     if isinstance(meta, dict) and (meta.get("input_tokens") or meta.get("output_tokens")):
         last_usage["input_tokens"] = int(meta.get("input_tokens", 0) or 0)
         last_usage["output_tokens"] = int(meta.get("output_tokens", 0) or 0)
+        details = meta.get("input_token_details")
+        if isinstance(details, dict):
+            cached = details.get("cache_read") or details.get("cached_tokens") or 0
+            last_usage["cached_input_tokens"] = int(cached or 0)
 
 
 def _flush_stream_usage(last_usage: dict, model_name: str) -> None:
@@ -524,6 +528,7 @@ def _flush_stream_usage(last_usage: dict, model_name: str) -> None:
         model_name,
         last_usage.get("input_tokens", 0),
         last_usage.get("output_tokens", 0),
+        cached_input_tokens=last_usage.get("cached_input_tokens", 0),
     )
 
 
