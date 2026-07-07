@@ -12,12 +12,28 @@ PUT model_registry 后 invalidate_caches 触发重 load — 改完立即生效).
 from __future__ import annotations
 
 
-def estimate_cost_cny(model: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_cost_cny(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int = 0,
+) -> float:
+    """按 (未命中 input + 命中 input + output) 三段计价.
+
+    cached_input_tokens 是 input_tokens 中命中 prefix cache 的部分 (DeepSeek
+    命中价 ≈ 未命中 1/40-1/120). registry 未配缓存价时 get_pricing 已回退为
+    未命中价 — 计费保守不低估. 传 0 时与旧两段计价完全等价.
+    """
     from app.services.runtime_config import get_pricing
     p = get_pricing(model)
     if not p:
         return 0.0
-    return (input_tokens * p["input"] + output_tokens * p["output"]) / 1_000_000
+    cached = min(max(int(cached_input_tokens or 0), 0), int(input_tokens or 0))
+    miss = int(input_tokens or 0) - cached
+    cached_price = p.get("cached_input", p["input"])
+    return (
+        miss * p["input"] + cached * cached_price + output_tokens * p["output"]
+    ) / 1_000_000
 
 
 def is_known_model(model: str) -> bool:

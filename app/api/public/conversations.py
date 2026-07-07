@@ -213,7 +213,9 @@ async def list_messages(
     offset: int = 0,
     include_metadata: bool = Query(default=True),
     include_achievements: bool = Query(default=False),
+    include_usage: bool = Query(default=False),
     conv=Depends(require_conversation_owner),
+    user: dict = Depends(require_user),
 ):
     messages = await db.message.find_many(
         where={"conversationId": conversation_id},
@@ -232,6 +234,11 @@ async def list_messages(
         )
         for m in messages
     ]
+    # admin 显式请求时给带 trace_id 的回复消息附本轮 LLM 用量 (tokens/缓存/
+    # 费用), 展示在 Trace 按钮旁. 仅 admin: 成本数据属运营信息, 普通用户
+    # 的消息列表保持原 payload.
+    if include_usage and include_metadata and user.get("role") == "admin":
+        await _attach_llm_usage(items)
     if include_achievements:
         items.extend(
             await _achievement_timeline_items(
@@ -248,6 +255,32 @@ async def list_messages(
             reverse=True,
         )
     return items
+
+
+async def _attach_llm_usage(items: list[MessageResponse]) -> None:
+    """给带 trace_id 的消息 metadata 注入 llm_usage (本轮 tokens/缓存/费用).
+
+    同一轮多条气泡只有首条挂 trace_id (save_replies i==0), 天然每轮一次.
+    聚合失败静默 — 用量是装饰性展示, 不影响消息读取.
+    """
+    from app.services.llm.usage_repo import aggregate_usage_by_trace_ids
+
+    trace_ids = [
+        str(item.metadata.get("trace_id"))
+        for item in items
+        if isinstance(item.metadata, dict) and item.metadata.get("trace_id")
+    ]
+    if not trace_ids:
+        return
+    usage_by_trace = await aggregate_usage_by_trace_ids(trace_ids)
+    if not usage_by_trace:
+        return
+    for item in items:
+        if not isinstance(item.metadata, dict):
+            continue
+        usage = usage_by_trace.get(str(item.metadata.get("trace_id") or ""))
+        if usage:
+            item.metadata["llm_usage"] = usage
 
 
 async def _achievement_timeline_items(

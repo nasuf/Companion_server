@@ -26,6 +26,31 @@ async def get_public_trace_detail(
     return await load_public_trace(payload.trace_url)
 
 
+async def _attach_trace_usage(result: dict, message_id: str) -> None:
+    """把该轮的 llm_usage 汇总 (tokens/缓存命中/费用) 挂到 detail.usage.
+
+    trace_id 从消息 metadata 取; 任何一步失败静默 — 用量是展示性信息,
+    不该影响 trace 详情打开.
+    """
+    try:
+        detail = result.get("detail") if isinstance(result, dict) else None
+        if not isinstance(detail, dict):
+            return
+        from app.db import db
+        from app.services.llm.usage_repo import aggregate_usage_by_trace_ids
+
+        message = await db.message.find_unique(where={"id": message_id})
+        metadata = message.metadata if message and isinstance(message.metadata, dict) else {}
+        trace_id = str(metadata.get("trace_id") or "")
+        if not trace_id:
+            return
+        usage = (await aggregate_usage_by_trace_ids([trace_id])).get(trace_id)
+        if usage:
+            detail["usage"] = usage
+    except Exception as e:
+        logger.debug(f"[TRACE] usage attach failed for msg {message_id[:8]}: {e}")
+
+
 @router.post("/resolve/{message_id}")
 async def resolve_trace(
     message_id: str,
@@ -47,10 +72,12 @@ async def resolve_trace(
         raise HTTPException(status_code=401, detail="auth_required")
 
     try:
-        return await resolve_trace_for_message(
+        result = await resolve_trace_for_message(
             message_id, user_id=user_id,
             is_admin=user.get("role") == "admin",
         )
+        await _attach_trace_usage(result, message_id)
+        return result
     except HTTPException:
         # load_public_trace 抛 HTTPException (e.g. 404/502) — 直接透传, 别裹成 503
         raise

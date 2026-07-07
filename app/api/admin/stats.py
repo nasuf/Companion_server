@@ -300,6 +300,7 @@ async def token_usage(
             "cached_input_tokens": r.get("cached_input_tokens", 0) or 0,
             "cost_cny": round(estimate_cost_cny(
                 r["model"], r["input_tokens"], r["output_tokens"],
+                cached_input_tokens=r.get("cached_input_tokens", 0) or 0,
             ), 6),
         }
         for r in by_model_rows
@@ -345,6 +346,7 @@ async def token_usage(
             f"{r.provider}/{r.identifier}": {
                 "input": r.inputCostPerMillion or 0.0,
                 "output": r.outputCostPerMillion or 0.0,
+                "cached_input": getattr(r, "cachedInputCostPerMillion", None),
                 "unit": "CNY per 1M tokens",
             }
             for r in pricing_rows

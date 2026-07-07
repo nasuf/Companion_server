@@ -124,6 +124,12 @@ async def load_caches() -> None:
             pricing = {
                 "input": r.inputCostPerMillion or 0.0,
                 "output": r.outputCostPerMillion or 0.0,
+                # 缓存命中价未配置 → 按未命中价保守估算 (不低估成本)
+                "cached_input": (
+                    r.cachedInputCostPerMillion
+                    if getattr(r, "cachedInputCostPerMillion", None) is not None
+                    else (r.inputCostPerMillion or 0.0)
+                ),
             }
             new_pricing[f"{r.provider}/{r.identifier}"] = pricing
             if identifier_counts.get(r.identifier, 0) == 1:

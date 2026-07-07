@@ -45,6 +45,8 @@ class ModelCreatePayload(BaseModel):
     context_window: int | None = Field(default=None, ge=1)
     input_cost_per_million: float | None = Field(default=None, ge=0)
     output_cost_per_million: float | None = Field(default=None, ge=0)
+    # prefix cache 命中部分的 input 单价; 不填 → 计费按未命中价保守估算
+    cached_input_cost_per_million: float | None = Field(default=None, ge=0)
     notes: str | None = None
 
 
@@ -56,6 +58,7 @@ class ModelUpdatePayload(BaseModel):
     context_window: int | None = Field(default=None, ge=1)
     input_cost_per_million: float | None = Field(default=None, ge=0)
     output_cost_per_million: float | None = Field(default=None, ge=0)
+    cached_input_cost_per_million: float | None = Field(default=None, ge=0)
     notes: str | None = None
 
 
@@ -69,6 +72,7 @@ def _row_to_dict(row) -> dict[str, Any]:
         "context_window": row.contextWindow,
         "input_cost_per_million": row.inputCostPerMillion,
         "output_cost_per_million": row.outputCostPerMillion,
+        "cached_input_cost_per_million": getattr(row, "cachedInputCostPerMillion", None),
         "notes": row.notes,
         "created_at": row.createdAt.isoformat() if row.createdAt else None,
         "updated_at": row.updatedAt.isoformat() if row.updatedAt else None,
@@ -104,6 +108,7 @@ async def create_model(payload: ModelCreatePayload) -> dict[str, Any]:
             "contextWindow": payload.context_window,
             "inputCostPerMillion": payload.input_cost_per_million,
             "outputCostPerMillion": payload.output_cost_per_million,
+            "cachedInputCostPerMillion": payload.cached_input_cost_per_million,
             "notes": payload.notes,
         })
     except UniqueViolationError:
@@ -138,6 +143,8 @@ async def update_model(model_id: str, payload: ModelUpdatePayload) -> dict[str, 
         data["inputCostPerMillion"] = payload.input_cost_per_million
     if "output_cost_per_million" in explicit:
         data["outputCostPerMillion"] = payload.output_cost_per_million
+    if "cached_input_cost_per_million" in explicit:
+        data["cachedInputCostPerMillion"] = payload.cached_input_cost_per_million
     if "notes" in explicit:
         data["notes"] = payload.notes
 

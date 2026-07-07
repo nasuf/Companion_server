@@ -1326,6 +1326,8 @@ model LlmUsage {
 
   @@index([agentId, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
+  // 消息列表按 trace_id 关联本轮用量 (tokens/缓存/费用挂在气泡 Trace 按钮旁)
+  @@index([traceId])
   @@map("llm_usage")
 }
 
@@ -1587,6 +1589,9 @@ model ModelRegistry {
   // float 单次乘法误差远小于 1 分钱, 不影响计费统计.
   inputCostPerMillion  Float?   @map("input_cost_per_million")
   outputCostPerMillion Float?   @map("output_cost_per_million")
+  // prefix cache 命中部分的 input 单价 (DeepSeek 命中 ≈ 未命中 1/40-1/120).
+  // NULL = 未配置 → 计费按未命中价保守估算.
+  cachedInputCostPerMillion Float? @map("cached_input_cost_per_million")
   notes                String?
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
