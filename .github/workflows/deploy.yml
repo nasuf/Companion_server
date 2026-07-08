@@ -39,6 +39,9 @@ jobs:
           username: ${{ vars.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ vars.VPS_PORT }}
+          # 默认 10m 不够: docker build 拉 Prisma CLI 二进制偶发缓慢,
+          # 成功案例也要 8m+, 超时会把部署杀在半路 (2026-07-08 生产复现).
+          command_timeout: 30m
           script: |
             set -euo pipefail
 
