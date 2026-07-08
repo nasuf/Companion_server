@@ -74,6 +74,8 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.ai_state_constraint",
     "chat.anti_hallucination_hard_rule",
     "chat.consistency_rules",
+    # W1b 情绪标记指令 — 仅作为主回复 system prompt 的收尾 section 出现
+    "chat.reply_emotion_marker",
     "chat.delay_context_section",
     "chat.l3_memory_section",
     "chat.memory_empty_anchor",

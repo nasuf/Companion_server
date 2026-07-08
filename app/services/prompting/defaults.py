@@ -31,9 +31,16 @@ RESPONSE_INSTRUCTION_PROMPT = (
     "聊天是文字交流，不是小说也不是角色扮演——"
     "禁止在回复里写任何描述自己动作 / 神态 / 表情 / 心理活动的旁白片段，"
     "无论用全角括号（）、半角括号()、星号*…*、还是直接陈述句。"
-    "情绪和态度通过用词、语气词、emoji 自然体现，不要旁白说出来。\n"
-    # W1b: 情绪标记尾 — 解析成功省掉串行的 ai_reply_emotion 小模型调用
-    # (reply_generate.extract_emotion_marker), 失败自动回退, 标记始终被剥除.
+    "情绪和态度通过用词、语气词、emoji 自然体现，不要旁白说出来。"
+)
+
+# W1b: 情绪标记尾 — 解析成功省掉串行的 ai_reply_emotion 小模型调用
+# (reply_generate.extract_emotion_marker), 失败自动回退, 标记始终被剥除.
+# 独立成模板 (原在 RESPONSE_INSTRUCTION 尾部): response_instruction 现在作为
+# 所有回复类指令的固定前置注入 (reply_prefix), 而 [EMO:] 标记只有主回复管线
+# 会剥除 — 混在一起会让短路/主动路径把标记原样漏给用户. 只有
+# build_system_prompt (主回复) 拼装这段.
+CHAT_REPLY_EMOTION_MARKER_PROMPT = (
     "回复的最后另起一行，输出 [EMO:标签/强度] 标记这条回复的情绪——"
     "标签从 高兴/悲伤/愤怒/惊讶/恐惧/厌恶/中性/焦虑/失望/欣慰/感激/戏谑 中选一个，"
     "强度是 0-100 的数字。这一行是给系统看的，用户看不到，正文里不要提到它。"

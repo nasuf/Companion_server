@@ -21,6 +21,7 @@ from app.services.prompting.defaults import (
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    CHAT_REPLY_EMOTION_MARKER_PROMPT,
     CHAT_DELAY_CONTEXT_SECTION_PROMPT,
     CHAT_L3_MEMORY_SECTION_PROMPT,
     CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
@@ -180,8 +181,15 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "chat.response_instruction", "聊天回复规则", "聊天热路径", "聊天",
-        "《终稿·第三部分 交互系统》§5.5: 拆分 1-3 条 (均匀随机) + 每条 ≤ 60 字 + 总 ≤ 150 字. 占位符 {n}/{max_per}/{total}.",
+        "《终稿·第三部分 交互系统》§5.5: 拆分 1-3 条 (均匀随机) + 每条 ≤ 60 字 + 总 ≤ 150 字. 占位符 {n}/{max_per}/{total}. "
+        "同时作为所有回复类指令 (含主动消息) 的固定前置 (reply_prefix).",
         RESPONSE_INSTRUCTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.reply_emotion_marker", "情绪标记指令", "聊天热路径", "聊天",
+        "【工程】W1b: 指令主回复 LLM 末尾输出 [EMO:标签/强度], 解析成功省一次小模型情绪调用. "
+        "仅主回复管线拼装 (会剥除标记); 不进 reply_prefix — 其他路径不剥除会漏给用户.",
+        CHAT_REPLY_EMOTION_MARKER_PROMPT,
     ),
     PromptDefinition(
         "chat.personality_rules", "人格一致性规则", "聊天热路径", "聊天",

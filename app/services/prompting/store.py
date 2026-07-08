@@ -473,6 +473,10 @@ async def get_prompt_text_for_context(
 
     Raises PromptDisabledError when the template is disabled by admin —
     callers must treat that as "本段/本功能提示词彻底不存在".
+
+    回复类模板 (reply_prefix.REPLY_PROMPT_KEYS) 在此统一注入固定前置
+    (通用回复规则 + 反幻觉) — 所有 AI 用户可见消息共享同一套核心规则,
+    包括主动消息. 前置来源模板自身不在集合内 (防递归).
     """
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
@@ -481,20 +485,36 @@ async def get_prompt_text_for_context(
     if not await is_prompt_enabled(key):
         raise PromptDisabledError(key)
 
+    variant = "active"
+    content: str | None = None
     if agent_id or user_id:
         config = await _load_canary_config(key)
         if config and _canary_matches(config, agent_id=agent_id, user_id=user_id):
-            return ManagedPromptText(str(config["content"]), key, prompt_variant="canary")
+            content = str(config["content"])
+            variant = "canary"
 
-    redis = await get_redis()
-    cached = await redis.get(_redis_key(key))
-    if cached:
-        return ManagedPromptText(cached, key)
+    if content is None:
+        redis = await get_redis()
+        cached = await redis.get(_redis_key(key))
+        if cached:
+            content = cached
+        else:
+            record = await db.prompttemplate.find_unique(where={"key": key})
+            content = record.content if record and record.content else definition.default_text
+            await redis.set(_redis_key(key), content)
 
-    record = await db.prompttemplate.find_unique(where={"key": key})
-    content = record.content if record and record.content else definition.default_text
-    await redis.set(_redis_key(key), content)
-    return ManagedPromptText(content, key)
+    from app.services.prompting.reply_prefix import REPLY_PROMPT_KEYS, build_reply_prefix
+
+    if key in REPLY_PROMPT_KEYS:
+        try:
+            prefix = await build_reply_prefix(agent_id=agent_id, user_id=user_id)
+        except Exception as e:  # noqa: BLE001 — 前置故障不能放大成全回复链路故障
+            logger.warning(f"[REPLY-PREFIX] build failed for {key}, using bare template: {e}")
+            prefix = ""
+        if prefix:
+            content = f"{prefix}\n\n{content}"
+
+    return ManagedPromptText(content, key, prompt_variant=variant)
 
 
 async def get_prompt_text_or_default(key: str) -> str:

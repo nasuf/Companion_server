@@ -256,14 +256,17 @@ def test_variable_sections_ordered_slow_to_fast():
     src = inspect.getsource(build_system_prompt)
     titles = re.findall(r'_append_section\(\s*\n?\s*sections, components, "([^"]+)"', src)
     expected = [
-        # 稳定头部 (per-agent 恒定)
-        "核心规则", "反幻觉硬约束", "你的身份", "对话一致性",
+        # 稳定头部 (per-agent 恒定). 2026-07-08 产品决策: 回复要求最前、
+        # 反幻觉第二 — 与 reply_prefix 给全部回复类指令的固定前置一致.
+        "回复要求", "反幻觉硬约束", "核心规则", "你的身份", "对话一致性",
         # 慢变组 (小时级~周级)
         "当前情绪", "用户画像", "情绪状态提醒", "表达习惯参考", "一起听音乐",
         "你的隐性状态约束", "时间",
         # 快变组 (轮级)
         "你的心情", "回复时机说明", "重逢感知", "上次聊到", "你记得的事情",
-        "话题上下文", "相关时间记忆", "久远记忆（L3）", "回复要求",
+        "话题上下文", "相关时间记忆", "久远记忆（L3）",
+        # 静态收尾 (仅主回复管线会剥 [EMO:] 标记)
+        "情绪标记",
     ]
     assert titles == expected, (
         f"section 顺序偏离 cache 友好设计:\n实际: {titles}\n期望: {expected}"

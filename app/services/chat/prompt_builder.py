@@ -509,10 +509,13 @@ async def build_system_prompt(
     变化字段 (情绪/画像/记忆/时间/L3/状态/回复要求 n=随机) 全部排到稳定段之后.
     cache miss 从这里开始, 但稳定段 ~1500 tokens 已经命中, 收益占比 80%+.
     """
-    # Parallel — 4 independent prompt reads (each turn, hot path).
+    # Parallel — 5 independent prompt reads (each turn, hot path).
     # admin 停用任一模板 → 返回 None → 对应 section 从最终输入中彻底移除.
     agent_id = str(getattr(agent, "id", "") or "") or None
-    system_base, consistency_rules, response_instruction, anti_hallucination = await asyncio.gather(
+    (
+        system_base, consistency_rules, response_instruction,
+        anti_hallucination, emotion_marker,
+    ) = await asyncio.gather(
         _get_optional_prompt("chat.system_base", agent_id=agent_id, user_id=canary_user_id),
         _get_optional_prompt("chat.consistency_rules", agent_id=agent_id, user_id=canary_user_id),
         _get_optional_prompt("chat.response_instruction", agent_id=agent_id, user_id=canary_user_id),
@@ -521,19 +524,27 @@ async def build_system_prompt(
             agent_id=agent_id,
             user_id=canary_user_id,
         ),
+        _get_optional_prompt("chat.reply_emotion_marker", agent_id=agent_id, user_id=canary_user_id),
     )
 
     # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════
-    # 同 agent 跨请求字节级一致, dashscope prefix cache 应命中.
+    # 同 agent 跨请求字节级一致, provider prefix cache 应命中.
+    # 顺序 (2026-07-08 产品决策): 回复要求最前、反幻觉第二 — 与 reply_prefix
+    # 给所有回复类指令的固定前置一致, 全部 AI 输出共享同一开头.
     sections: list[str] = []
     components: list[dict[str, Any]] = []
-    if system_base is not None:
+    if response_instruction is not None:
         _append_section(
-            sections, components, "核心规则", str(system_base),
-            prompt_key="chat.system_base",
+            sections, components, "回复要求",
+            # "n" 已不在默认模板中 (C1 删除强制条数), 但 admin 后台可能存有
+            # 含 {n} 的旧版覆盖模板 — 继续传参保证旧模板渲染不出 "(无)".
+            _render_section(response_instruction, {
+                "n": reply_count, "total": reply_total, "max_per": _MAX_PER_REPLY,
+            }),
+            prompt_key="chat.response_instruction",
         )
     else:
-        _record_skipped_section(diagnostics, "核心规则")
+        _record_skipped_section(diagnostics, "回复要求")
     anti_hallucination_body = str(anti_hallucination).strip() if anti_hallucination is not None else ""
     anti_hallucination_section = anti_hallucination_body if _has_prompt_body(anti_hallucination_body) else None
     if anti_hallucination_section:
@@ -543,6 +554,13 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "反幻觉硬约束")
+    if system_base is not None:
+        _append_section(
+            sections, components, "核心规则", str(system_base),
+            prompt_key="chat.system_base",
+        )
+    else:
+        _record_skipped_section(diagnostics, "核心规则")
     personality = await _build_personality_section(agent)   # per-agent 稳定
     if personality:
         _append_section(
@@ -755,19 +773,15 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")
 
-    # 回复要求 (静态文案, 语义收尾排末尾)
-    if response_instruction is not None:
+    # 情绪标记指令 (W1b, 静态): 只有主回复管线会剥 [EMO:] 标记, 所以只在
+    # 这里拼装, 不进 reply_prefix. 放末尾贴近生成, 遵从度最好.
+    if emotion_marker is not None:
         _append_section(
-            sections, components, "回复要求",
-            # "n" 已不在默认模板中 (C1 删除强制条数), 但 admin 后台可能存有
-            # 含 {n} 的旧版覆盖模板 — 继续传参保证旧模板渲染不出 "(无)".
-            _render_section(response_instruction, {
-                "n": reply_count, "total": reply_total, "max_per": _MAX_PER_REPLY,
-            }),
-            prompt_key="chat.response_instruction",
+            sections, components, "情绪标记", str(emotion_marker),
+            prompt_key="chat.reply_emotion_marker",
         )
     else:
-        _record_skipped_section(diagnostics, "回复要求")
+        _record_skipped_section(diagnostics, "情绪标记")
 
     if diagnostics is not None:
         skipped = diagnostics.get("empty_prompt_sections_removed")

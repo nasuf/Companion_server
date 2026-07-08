@@ -42,6 +42,18 @@ async def emit_proactive_message(
 
     trace_id 挂到 metadata, 让前端 Trace 按钮可点 (跟主聊天回复路径对齐).
     """
+    # 防御: reply_prefix 给主动消息 prompt 注入的通用回复规则允许 "||" 分条,
+    # 但主动消息是单条投递 (无 split 管线) — LLM 若照做, 取第一段, 与
+    # render_prompt.strip_split 语义一致, 不把字面 "||" 漏给用户.
+    if "||" in message:
+        segments = [seg.strip() for seg in message.split("||") if seg.strip()]
+        if segments:
+            logger.debug(
+                "[PROACTIVE-EMIT] multi-segment output collapsed to first segment "
+                f"({len(segments)} segments)",
+            )
+            message = segments[0]
+
     metadata: dict[str, Any] = {
         "proactive": True,
         "trigger_type": trigger_type,
