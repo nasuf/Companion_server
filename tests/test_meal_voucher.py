@@ -314,6 +314,110 @@ async def test_concurrent_redeem_two_stores_single_winner(monkeypatch):
     assert exc.value.reason == "already_redeemed"
 
 
+# ── admin clear (清除校验/核销) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_clear_redemption_conditional_transition(monkeypatch):
+    db = _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(update_many=AsyncMock(return_value=1)),
+    )
+
+    await mv.clear_redemption("v-1")
+
+    kwargs = db.mealvoucher.update_many.await_args.kwargs
+    assert kwargs["where"] == {"id": "v-1", "status": mv.VOUCHER_REDEEMED}
+    assert kwargs["data"] == {
+        "status": mv.VOUCHER_ACTIVATED,
+        "redeemedAt": None,
+        "merchantId": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_clear_redemption_rejects_wrong_state(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(update_many=AsyncMock(return_value=0)),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.clear_redemption("v-1")
+    assert exc.value.reason == "not_redeemed"
+
+
+@pytest.mark.asyncio
+async def test_clear_activation_resets_everything(monkeypatch):
+    db = _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(update_many=AsyncMock(return_value=1)),
+    )
+
+    await mv.clear_activation("v-1")
+
+    kwargs = db.mealvoucher.update_many.await_args.kwargs
+    assert kwargs["where"]["status"] == {
+        "in": [mv.VOUCHER_ACTIVATED, mv.VOUCHER_REDEEMED]
+    }
+    assert kwargs["data"] == {
+        "status": mv.VOUCHER_INACTIVE,
+        "activatedAt": None,
+        "redeemedAt": None,
+        "merchantId": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_clear_activation_rejects_inactive(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(update_many=AsyncMock(return_value=0)),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.clear_activation("v-1")
+    assert exc.value.reason == "not_activated"
+
+
+@pytest.mark.asyncio
+async def test_admin_clear_endpoints_map_errors(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.admin import meal as admin_meal
+
+    # 404: voucher missing
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(
+            mealvoucher=SimpleNamespace(find_unique=AsyncMock(return_value=None))
+        ),
+    )
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.clear_redemption("nope", payload={"sub": "admin-1"})
+    assert exc.value.status_code == 404
+
+    # 400: wrong state
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(
+            mealvoucher=SimpleNamespace(
+                find_unique=AsyncMock(return_value=SimpleNamespace(id="v-1"))
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        admin_meal.mv,
+        "clear_activation",
+        AsyncMock(side_effect=mv.MealVoucherError("not_activated", "该券当前未激活")),
+    )
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.clear_activation("v-1", payload={"sub": "admin-1"})
+    assert exc.value.status_code == 400
+
+
 # ── merchant contact matching ─────────────────────────────────────
 
 
@@ -535,6 +639,7 @@ async def test_admin_redemptions_detail(monkeypatch):
 
     merchant = SimpleNamespace(id="m-1", name="伴生宴")
     row = SimpleNamespace(
+        id="v-1",
         userId="user-1",
         redeemedAt=datetime(2026, 7, 8, 5, 0, tzinfo=UTC),
     )

@@ -10,6 +10,8 @@ Endpoints (all admin-only):
   PUT    /admin-api/meal/merchants/{id}  — 修改商家 (含核销码修改/停用/开启)
   DELETE /admin-api/meal/merchants/{id}  — 删除商家 (已核销记录保留, merchant 置空)
   GET    /admin-api/meal/merchants/{id}/redemptions — 该商家核销用户明细
+  DELETE /admin-api/meal/vouchers/{id}/redemption   — 清除核销 (回到已激活)
+  DELETE /admin-api/meal/vouchers/{id}/activation   — 清除校验 (整券归零)
 """
 
 from __future__ import annotations
@@ -264,12 +266,55 @@ async def merchant_redemptions(merchant_id: str, limit: int = 100):
         "total": total,
         "items": [
             {
+                "voucher_id": row.id,
                 "user_display": displays.get(row.userId, row.userId),
                 "redeemed_at": row.redeemedAt.isoformat() if row.redeemedAt else None,
             }
             for row in rows
         ],
     }
+
+
+@router.delete("/vouchers/{voucher_id}/redemption")
+async def clear_redemption(voucher_id: str, payload: dict = Depends(require_admin_jwt)):
+    """清除核销记录: 券回到「已激活」, 可在其他商家重新核销."""
+    voucher = await db.mealvoucher.find_unique(where={"id": voucher_id})
+    if not voucher:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    try:
+        await mv.clear_redemption(voucher_id)
+    except mv.MealVoucherError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    logger.info(
+        "admin cleared redemption",
+        extra={
+            "event": "meal_admin_clear_redemption",
+            "voucher_id": voucher_id,
+            "admin_id": payload.get("sub"),
+        },
+    )
+    return {"ok": True}
+
+
+@router.delete("/vouchers/{voucher_id}/activation")
+async def clear_activation(voucher_id: str, payload: dict = Depends(require_admin_jwt)):
+    """清除校验记录: 整券归零到「未激活」(如已核销一并清除), 用户可重新激活."""
+    voucher = await db.mealvoucher.find_unique(where={"id": voucher_id})
+    if not voucher:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    try:
+        await mv.clear_activation(voucher_id)
+    except mv.MealVoucherError as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+    logger.info(
+        "admin cleared activation",
+        extra={
+            "event": "meal_admin_clear_activation",
+            "voucher_id": voucher_id,
+            "admin_id": payload.get("sub"),
+        },
+    )
+    return {"ok": True}
 
 
 @router.delete("/merchants/{merchant_id}")

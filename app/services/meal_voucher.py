@@ -226,6 +226,48 @@ async def redeem_voucher(user_id: str, redeem_code: str):
     return await db.mealvoucher.find_unique(where={"id": voucher.id})
 
 
+# ── admin corrections (后台清除记录) ─────────────────────────────────
+
+
+async def clear_redemption(voucher_id: str) -> None:
+    """清除核销记录: redeemed → activated (核销时间/商家一并清空).
+
+    条件转移: 只允许从已核销状态回退, 状态不符抛 not_redeemed.
+    """
+    count = await db.mealvoucher.update_many(
+        where={"id": voucher_id, "status": VOUCHER_REDEEMED},
+        data={"status": VOUCHER_ACTIVATED, "redeemedAt": None, "merchantId": None},
+    )
+    if not count:
+        raise MealVoucherError("not_redeemed", "该券当前不是已核销状态")
+    logger.info(
+        "meal redemption cleared",
+        extra={"event": "meal_redemption_cleared", "voucher_id": voucher_id},
+    )
+
+
+async def clear_activation(voucher_id: str) -> None:
+    """清除校验记录: activated/redeemed → inactive (整券归零, 用户可重新激活)."""
+    count = await db.mealvoucher.update_many(
+        where={
+            "id": voucher_id,
+            "status": {"in": [VOUCHER_ACTIVATED, VOUCHER_REDEEMED]},
+        },
+        data={
+            "status": VOUCHER_INACTIVE,
+            "activatedAt": None,
+            "redeemedAt": None,
+            "merchantId": None,
+        },
+    )
+    if not count:
+        raise MealVoucherError("not_activated", "该券当前未激活")
+    logger.info(
+        "meal activation cleared",
+        extra={"event": "meal_activation_cleared", "voucher_id": voucher_id},
+    )
+
+
 # ── merchants ────────────────────────────────────────────────────────
 
 
@@ -316,6 +358,7 @@ async def activation_feed(limit: int = 50) -> list[dict]:
     displays = await resolve_user_displays([row.userId for row in rows])
     return [
         {
+            "voucher_id": row.id,
             "user_display": displays.get(row.userId, row.userId),
             "status": row.status,
             "activated_at": row.activatedAt.isoformat() if row.activatedAt else None,
