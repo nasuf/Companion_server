@@ -66,6 +66,10 @@ async def short_circuit_reply(
     - trace_id: 挂到首条 reply.metadata, 让前端 Trace 按钮可点. sub_intent_mode
       或非父调用可不传.
     """
+    # 硬保证: 一条消息最多 1 个 emoji (短路回复不走 emit_replies 的出口兜底,
+    # 在此单独收口; 持久化与 SSE 推送用同一份清理后的文本).
+    from app.services.emoji import limit_emojis
+    reply = limit_emojis(reply)
     reply_payload: str | dict = reply
     metadata = dict(extra_metadata or {})
     if not sub_intent_mode:

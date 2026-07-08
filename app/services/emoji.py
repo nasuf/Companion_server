@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import random
+import re
 
 # 情绪→表情映射
 EMOJI_MAP: dict[str, list[str]] = {
@@ -39,10 +40,16 @@ def recommend_emoji(
 
 
 def should_add_emoji(intensity: int = 0) -> bool:
-    """Emotion intensity based emoji probability."""
+    """Spec §5.3 步骤 2 (2026-07-08 修订版): P_base = random(0, 0.2),
+    P_final = min(0.6, P_base + A × 0.3).
+
+    A 在 spec 里是 AI PAD 唤醒度; PAD 管线已移除 (01ee8d2), 用本条回复
+    情绪强度/100 作为 A 的代理信号 — 语义同向 (情绪越强越可能带表情).
+    旧版 0.4/0.8/0.5 是滥用来源之一, 按新 spec 整体下调约一半.
+    """
     signal = max(0.0, min(1.0, intensity / 100))
-    p_base = random.uniform(0, 0.4)
-    p_final = min(0.8, max(0, p_base + signal * 0.5))
+    p_base = random.uniform(0, 0.2)
+    p_final = min(0.6, max(0, p_base + signal * 0.3))
     return random.random() < p_final
 
 
@@ -66,4 +73,44 @@ def should_add_sticker(intensity: int = 0) -> bool:
     p_base = random.uniform(0, 0.4)
     p_final = min(0.7, max(0, p_base + signal * 0.4))
     return random.random() < p_final
+
+
+# ── 每条消息 emoji 硬上限 ────────────────────────────────────────────
+# 一个"emoji 单元": 旗帜对 | 基础emoji + 可选肤色/VS16 + 任意 (ZWJ+emoji) 续接.
+# 覆盖 U+1F000-1FAFF (绝大多数 emoji) / 2600-27BF (杂项符号) / 2B00-2BFF (⭐等).
+# 肤色修饰符单独出现时会被算作独立单元并剥除 — 结果仍是"一个可见表情", 可接受.
+_EMOJI_UNIT_RE = re.compile(
+    "(?:[\U0001F1E6-\U0001F1FF]{2}"
+    "|(?:[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]\uFE0F?"
+    "(?:\u200D[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]\uFE0F?)*))"
+)
+
+
+def contains_emoji(text: str) -> bool:
+    return bool(_EMOJI_UNIT_RE.search(text or ""))
+
+
+def limit_emojis(text: str, max_keep: int = 1) -> str:
+    """硬保证: 一条消息最多 max_keep 个 emoji, 超出的按出现顺序剥除.
+
+    针对 LLM 在正文里自行生成多个表情的失效模式 (prompt 只能引导不能保证);
+    保留第一个是因为它通常贴着最相关的情绪点. 所有用户可见出口
+    (主回复 emit / 短路回复 / 主动消息 / 延迟解释) 统一调用.
+    """
+    if not text:
+        return text
+    matches = list(_EMOJI_UNIT_RE.finditer(text))
+    if len(matches) <= max_keep:
+        return text
+    out: list[str] = []
+    last = 0
+    kept = 0
+    for m in matches:
+        out.append(text[last:m.start()])
+        if kept < max_keep:
+            out.append(m.group())
+            kept += 1
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
 

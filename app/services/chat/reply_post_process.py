@@ -21,7 +21,13 @@ from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.relationship.ai_mood import save_ai_mood
 from app.services.runtime.recent_items import load_recent_items, remember_item
 from app.services.chat.typo import maybe_typo
-from app.services.emoji import pick_one_emoji, should_add_emoji, should_add_sticker
+from app.services.emoji import (
+    contains_emoji,
+    limit_emojis,
+    pick_one_emoji,
+    should_add_emoji,
+    should_add_sticker,
+)
 from app.services.prompting.store import get_prompt_text_or_default
 from app.services.prompting.utils import safe_format
 from app.services.sticker import recommend_sticker
@@ -206,7 +212,7 @@ async def emit_replies(
         )
         if explain_text:
             data: dict = {
-                "text": explain_text,
+                "text": limit_emojis(explain_text),
                 "index": reply_index_offset,
                 "delay_explanation": True,
             }
@@ -229,9 +235,21 @@ async def emit_replies(
                 reply_text, rate=settings.typo_rate,
             )
 
+        # 硬保证 (spec §5.3 + 2026-07-08 产品要求): 一条消息最多 1 个 emoji.
+        # LLM 正文里自行写的多余表情在此剥除 — prompt 只能引导, 出口必须兜底.
+        reply_text = limit_emojis(reply_text)
+        text_has_emoji = contains_emoji(reply_text)
+        if text_has_emoji:
+            # 正文自带的表情计入回合上限, 后续 reply 不再追加装饰
+            emoji_used_this_turn = True
+
         added_emoji = False
         emoji_used: str | None = None
-        if not emoji_used_this_turn and should_add_emoji(emotion_intensity):
+        if (
+            not emoji_used_this_turn
+            and not text_has_emoji
+            and should_add_emoji(emotion_intensity)
+        ):
             emoji = pick_one_emoji(ai_primary_emotion, exclude=recent_emojis)
             if emoji:
                 reply_text += emoji
@@ -241,7 +259,13 @@ async def emit_replies(
                 await _remember_emoji(conversation_id, emoji)
 
         sticker_url: str | None = None
-        if not added_emoji and not sticker_used and should_add_sticker(emotion_intensity):
+        # emoji 与 sticker 互斥按**回合**算 (spec §5): 本回合任何一条已出现
+        # emoji (追加的或 LLM 正文自带的) → 整回合不再贴表情包.
+        if (
+            not emoji_used_this_turn
+            and not sticker_used
+            and should_add_sticker(emotion_intensity)
+        ):
             try:
                 result = await recommend_sticker(
                     primary_emotion=ai_primary_emotion,

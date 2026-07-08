@@ -54,6 +54,11 @@ async def emit_proactive_message(
             )
             message = segments[0]
 
+    # 硬保证: 一条消息最多 1 个 emoji (spec §5.3 + 2026-07-08 产品要求).
+    # 主动消息不走 emit_replies, 在此单独收口.
+    from app.services.emoji import limit_emojis
+    message = limit_emojis(message)
+
     metadata: dict[str, Any] = {
         "proactive": True,
         "trigger_type": trigger_type,
