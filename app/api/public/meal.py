@@ -110,7 +110,7 @@ async def staff_code(key: str = ""):
         )
     if not await mv.is_code_enabled():
         return {"enabled": False, "code": None, "expires_in": None}
-    code, expires_in = mv.current_activation_code()
+    code, expires_in = await mv.activation_code_now()
     return {
         "enabled": True,
         "code": code,

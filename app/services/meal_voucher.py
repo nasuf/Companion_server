@@ -50,38 +50,64 @@ class MealVoucherError(Exception):
 
 
 # ── rotating activation code ─────────────────────────────────────────
+# Codes derive from HMAC(secret, f"{anchor}:{window}"). The anchor is a unix
+# timestamp refreshed every time the admin *enables* the feature, so toggling
+# off/on regenerates immediately (old codes die, new one gets a full window);
+# window indexes and the countdown are computed relative to the anchor.
 
 
-def _window_index(ts: float) -> int:
-    return int(ts) // CODE_WINDOW_SECONDS
+def _window_and_expiry(ts: float, anchor: int) -> tuple[int, int]:
+    rel = int(ts) - anchor
+    return rel // CODE_WINDOW_SECONDS, CODE_WINDOW_SECONDS - (rel % CODE_WINDOW_SECONDS)
 
 
-def code_for_window(window: int) -> str:
-    """Deterministic 6-digit code for a 5-minute window index."""
+def code_for_window(window: int, anchor: int = 0) -> str:
+    """Deterministic 6-digit code for a window index under a given anchor."""
     key = f"meal-voucher:{settings.jwt_secret}".encode("utf-8")
-    digest = hmac.new(key, str(window).encode("utf-8"), hashlib.sha256).digest()
+    digest = hmac.new(
+        key, f"{anchor}:{window}".encode("utf-8"), hashlib.sha256
+    ).digest()
     return f"{int.from_bytes(digest[:4], 'big') % 1_000_000:06d}"
 
 
-def current_activation_code(now: float | None = None) -> tuple[str, int]:
+def current_activation_code(
+    now: float | None = None, anchor: int = 0
+) -> tuple[str, int]:
     """Return (code, seconds_until_rotation) for the current window."""
     ts = time.time() if now is None else now
-    window = _window_index(ts)
-    expires_in = CODE_WINDOW_SECONDS - (int(ts) % CODE_WINDOW_SECONDS)
-    return code_for_window(window), expires_in
+    window, expires_in = _window_and_expiry(ts, anchor)
+    return code_for_window(window, anchor), expires_in
 
 
-def verify_activation_code(candidate: str, now: float | None = None) -> bool:
+def verify_activation_code(
+    candidate: str, now: float | None = None, anchor: int = 0
+) -> bool:
     """Match against the current window, or the previous one within grace."""
     text = (candidate or "").strip()
     if not _SIX_DIGITS.fullmatch(text):
         return False
     ts = time.time() if now is None else now
-    window = _window_index(ts)
-    if hmac.compare_digest(code_for_window(window), text):
+    window, _ = _window_and_expiry(ts, anchor)
+    if hmac.compare_digest(code_for_window(window, anchor), text):
         return True
-    in_grace = (int(ts) % CODE_WINDOW_SECONDS) < CODE_GRACE_SECONDS
-    return in_grace and hmac.compare_digest(code_for_window(window - 1), text)
+    in_grace = ((int(ts) - anchor) % CODE_WINDOW_SECONDS) < CODE_GRACE_SECONDS
+    return in_grace and hmac.compare_digest(code_for_window(window - 1, anchor), text)
+
+
+async def get_code_anchor() -> int:
+    """Current anchor from the singleton config row (0 = absolute windows)."""
+    config = await db.systemconfig.find_unique(where={"id": 1})
+    value = getattr(config, "mealCodeAnchor", None) if config else None
+    return int(value) if value else 0
+
+
+async def activation_code_now() -> tuple[str, int]:
+    """(code, expires_in) under the currently stored anchor."""
+    return current_activation_code(anchor=await get_code_anchor())
+
+
+async def verify_activation_code_now(candidate: str) -> bool:
+    return verify_activation_code(candidate, anchor=await get_code_anchor())
 
 
 # ── feature toggle (singleton system_config row) ─────────────────────
@@ -93,12 +119,16 @@ async def is_code_enabled() -> bool:
 
 
 async def set_code_enabled(enabled: bool) -> None:
+    create: dict = {"id": 1, "mealCodeEnabled": enabled}
+    update: dict = {"mealCodeEnabled": enabled}
+    if enabled:
+        # 重新开启 = 重新生成: 刷新锚点让关闭前的码全部失效, 新码满窗口倒计时.
+        anchor = int(time.time())
+        create["mealCodeAnchor"] = anchor
+        update["mealCodeAnchor"] = anchor
     await db.systemconfig.upsert(
         where={"id": 1},
-        data={
-            "create": {"id": 1, "mealCodeEnabled": enabled},
-            "update": {"mealCodeEnabled": enabled},
-        },
+        data={"create": create, "update": update},
     )
     logger.info(
         "meal activation code toggled",
@@ -137,7 +167,7 @@ async def activate_voucher(user_id: str, code: str):
     if voucher.status == VOUCHER_ACTIVATED:
         raise MealVoucherError("already_activated", "该券已激活，无需重复激活")
 
-    if not verify_activation_code(code):
+    if not await verify_activation_code_now(code):
         raise MealVoucherError("bad_code", "校验码错误或已过期")
 
     # Conditional transition: only flips an *inactive* voucher, so a concurrent

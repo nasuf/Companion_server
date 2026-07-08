@@ -1544,6 +1544,9 @@ model SystemConfig {
   defaultTemplateAgentId String? @map("default_template_agent_id")
   // 霸王餐激活校验码功能开关: 关闭后所有校验码立即失效且不再生成 (admin 可切换).
   mealCodeEnabled  Boolean  @default(true) @map("meal_code_enabled")
+  // 校验码生成锚点 (unix 秒): 每次「开启」时刷新 — 码与窗口计时都相对锚点推导,
+  // 锚点一变旧码全部立即失效, 新码从满 5 分钟倒计时开始. null = 0 (绝对时间窗).
+  mealCodeAnchor   BigInt?  @map("meal_code_anchor")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("system_config")

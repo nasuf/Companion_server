@@ -56,6 +56,54 @@ def test_verify_rejects_malformed():
     assert mv.verify_activation_code("") is False
 
 
+# ── anchor (关闭→重新开启 重新生成) ────────────────────────────────
+
+
+def test_different_anchor_regenerates_code_same_wall_clock():
+    now = 1_760_000_123
+    code_a, _ = mv.current_activation_code(now=now, anchor=0)
+    code_b, _ = mv.current_activation_code(now=now, anchor=1_760_000_100)
+    assert code_a != code_b  # deterministic seeds chosen to differ
+
+
+def test_fresh_anchor_gives_full_countdown():
+    now = 1_760_000_123
+    _, expires = mv.current_activation_code(now=now, anchor=now)
+    assert expires == mv.CODE_WINDOW_SECONDS
+
+
+def test_old_anchor_code_rejected_after_reanchor():
+    now = 1_760_000_123
+    old_code, _ = mv.current_activation_code(now=now, anchor=0)
+    # after re-enable the anchor moves to `now` — the old code must die
+    assert mv.verify_activation_code(old_code, now=now + 1, anchor=now) is False
+    new_code, _ = mv.current_activation_code(now=now + 1, anchor=now)
+    assert mv.verify_activation_code(new_code, now=now + 1, anchor=now) is True
+
+
+def test_grace_is_anchor_relative():
+    anchor = 1_760_000_000
+    boundary = anchor + mv.CODE_WINDOW_SECONDS  # first rotation under anchor
+    prev_code, _ = mv.current_activation_code(now=boundary - 5, anchor=anchor)
+    assert mv.verify_activation_code(prev_code, now=boundary + 15, anchor=anchor)
+    assert not mv.verify_activation_code(prev_code, now=boundary + 45, anchor=anchor)
+
+
+@pytest.mark.asyncio
+async def test_enable_refreshes_anchor_disable_keeps_it(monkeypatch):
+    upsert = AsyncMock()
+    _mock_db(monkeypatch, systemconfig=SimpleNamespace(upsert=upsert))
+
+    await mv.set_code_enabled(True)
+    data = upsert.await_args.kwargs["data"]
+    assert data["update"]["mealCodeEnabled"] is True
+    assert data["update"]["mealCodeAnchor"] > 0  # regenerated
+
+    await mv.set_code_enabled(False)
+    data = upsert.await_args.kwargs["data"]
+    assert data["update"] == {"mealCodeEnabled": False}  # anchor untouched
+
+
 # ── voucher state machine (db mocked) ─────────────────────────────
 
 
@@ -88,7 +136,7 @@ async def test_activate_requires_enabled(monkeypatch):
 @pytest.mark.asyncio
 async def test_activate_happy_path(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(mv, "verify_activation_code", lambda code: True)
+    monkeypatch.setattr(mv, "verify_activation_code_now", AsyncMock(return_value=True))
     updated = _voucher(mv.VOUCHER_ACTIVATED)
     db = _mock_db(
         monkeypatch,
@@ -113,7 +161,7 @@ async def test_activate_happy_path(monkeypatch):
 @pytest.mark.asyncio
 async def test_activate_concurrent_race_maps_to_already_activated(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(mv, "verify_activation_code", lambda code: True)
+    monkeypatch.setattr(mv, "verify_activation_code_now", AsyncMock(return_value=True))
     _mock_db(
         monkeypatch,
         mealvoucher=SimpleNamespace(
@@ -130,7 +178,7 @@ async def test_activate_concurrent_race_maps_to_already_activated(monkeypatch):
 @pytest.mark.asyncio
 async def test_activate_rejects_wrong_code(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(mv, "verify_activation_code", lambda code: False)
+    monkeypatch.setattr(mv, "verify_activation_code_now", AsyncMock(return_value=False))
     _mock_db(
         monkeypatch,
         mealvoucher=SimpleNamespace(
@@ -229,6 +277,43 @@ async def test_redeem_rejects_double_redeem(monkeypatch):
     assert exc.value.reason == "already_redeemed"
 
 
+@pytest.mark.asyncio
+async def test_redeem_at_second_store_rejected(monkeypatch):
+    """在 A 店核销后, 拿 B 店的码再核销必须被拒 — 一人只能核销一家店."""
+    db = _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_REDEEMED, "m-a")),
+        ),
+        mealmerchant=SimpleNamespace(find_first=AsyncMock()),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "111111")  # B 店的码
+    assert exc.value.reason == "already_redeemed"
+    # 状态守卫在商家查询之前 — B 店的码根本不会被查
+    db.mealmerchant.find_first.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_redeem_two_stores_single_winner(monkeypatch):
+    """并发拿两家店的码核销: 条件转移只让一个成功, 输家收到已核销."""
+    merchant_b = SimpleNamespace(id="m-b", name="B店", codeActive=True)
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            # 读的时候还是 activated (竞态窗口), 但条件 update 匹配 0 行
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_ACTIVATED)),
+            update_many=AsyncMock(return_value=0),
+        ),
+        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant_b)),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "222222")
+    assert exc.value.reason == "already_redeemed"
+
+
 # ── merchant contact matching ─────────────────────────────────────
 
 
@@ -291,6 +376,7 @@ async def test_staff_code_returns_current_code(monkeypatch):
 
     monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
     monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(meal_api.mv, "get_code_anchor", AsyncMock(return_value=0))
 
     body = await meal_api.staff_code(key="sekret")
     assert body["enabled"] is True
@@ -439,6 +525,61 @@ async def test_admin_update_rejects_duplicate_redeem_code(monkeypatch):
             "m-1", admin_meal.MerchantUpdateRequest(redeem_code="123456")
         )
     assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_admin_redemptions_detail(monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.api.admin import meal as admin_meal
+
+    merchant = SimpleNamespace(id="m-1", name="伴生宴")
+    row = SimpleNamespace(
+        userId="user-1",
+        redeemedAt=datetime(2026, 7, 8, 5, 0, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
+            mealvoucher=SimpleNamespace(
+                find_many=AsyncMock(return_value=[row]),
+                count=AsyncMock(return_value=1),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        admin_meal.mv,
+        "resolve_user_displays",
+        AsyncMock(return_value={"user-1": "小明"}),
+    )
+
+    body = await admin_meal.merchant_redemptions("m-1")
+
+    assert body["merchant_name"] == "伴生宴"
+    assert body["total"] == 1
+    assert body["items"][0]["user_display"] == "小明"
+    assert body["items"][0]["redeemed_at"].startswith("2026-07-08")
+
+
+@pytest.mark.asyncio
+async def test_admin_redemptions_404_unknown_merchant(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.admin import meal as admin_meal
+
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=None))
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.merchant_redemptions("nope")
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio

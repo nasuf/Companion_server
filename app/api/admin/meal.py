@@ -8,6 +8,7 @@ Endpoints (all admin-only):
   POST   /admin-api/meal/merchants       — 新增商家 (自动生成唯一核销码)
   PUT    /admin-api/meal/merchants/{id}  — 修改商家 (含核销码修改/停用/开启)
   DELETE /admin-api/meal/merchants/{id}  — 删除商家 (已核销记录保留, merchant 置空)
+  GET    /admin-api/meal/merchants/{id}/redemptions — 该商家核销用户明细
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ async def overview():
     stats = await mv.voucher_stats()
     body: dict = {"enabled": enabled, **stats}
     if enabled:
-        code, expires_in = mv.current_activation_code()
+        code, expires_in = await mv.activation_code_now()
         body.update(
             code=code, expires_in=expires_in, window_seconds=mv.CODE_WINDOW_SECONDS
         )
@@ -173,6 +174,34 @@ async def update_merchant(merchant_id: str, data: MerchantUpdateRequest):
         extra={"event": "meal_merchant_updated", "merchant_id": merchant_id},
     )
     return _merchant_payload(updated, counts.get(merchant_id, 0))
+
+
+@router.get("/merchants/{merchant_id}/redemptions")
+async def merchant_redemptions(merchant_id: str, limit: int = 100):
+    """该商家的核销用户明细 (微信昵称/脱敏手机号 + 核销时间, 新→旧)."""
+    merchant = await db.mealmerchant.find_unique(where={"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="商家不存在")
+    rows = await db.mealvoucher.find_many(
+        where={"merchantId": merchant_id, "status": mv.VOUCHER_REDEEMED},
+        order={"redeemedAt": "desc"},
+        take=min(max(limit, 1), 500),
+    )
+    displays = await mv.resolve_user_displays([row.userId for row in rows])
+    total = await db.mealvoucher.count(
+        where={"merchantId": merchant_id, "status": mv.VOUCHER_REDEEMED}
+    )
+    return {
+        "merchant_name": merchant.name,
+        "total": total,
+        "items": [
+            {
+                "user_display": displays.get(row.userId, row.userId),
+                "redeemed_at": row.redeemedAt.isoformat() if row.redeemedAt else None,
+            }
+            for row in rows
+        ],
+    }
 
 
 @router.delete("/merchants/{merchant_id}")
