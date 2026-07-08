@@ -3,6 +3,7 @@
 Endpoints (all admin-only):
   GET    /admin-api/meal/overview        — 开关状态 + 当前码 + 倒计时 + 累计数据
   GET    /admin-api/meal/activations     — 实时校验动态 (轮询)
+  GET    /admin-api/meal/stats           — 日期范围统计 (UTC+8 按天聚合激活/核销)
   PUT    /admin-api/meal/code-enabled    — 开启/关闭校验码功能
   GET    /admin-api/meal/merchants       — 商家列表 + 各自核销数
   POST   /admin-api/meal/merchants       — 新增商家 (自动生成唯一核销码)
@@ -15,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date as date_cls
+from datetime import datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from prisma.errors import UniqueViolationError
@@ -90,6 +93,71 @@ async def activations(limit: int = 50):
 async def set_code_enabled(data: CodeEnabledRequest):
     await mv.set_code_enabled(data.enabled)
     return {"enabled": data.enabled}
+
+
+# 业务口径固定 UTC+8 自然日 (与项目时间系统一致).
+_CN_OFFSET = timedelta(hours=8)
+_MAX_RANGE_DAYS = 366
+
+_DAY_COUNT_SQL = """
+    SELECT to_char({column} + INTERVAL '8 hours', 'YYYY-MM-DD') AS day,
+           COUNT(*)::int AS cnt
+    FROM meal_vouchers
+    WHERE {column} >= $1::timestamp AND {column} < $2::timestamp
+    GROUP BY 1
+"""
+
+
+async def _daily_counts(column: str, utc_start: str, utc_end: str) -> dict[str, int]:
+    # column comes from a fixed internal whitelist — never user input.
+    rows = await db.query_raw(
+        _DAY_COUNT_SQL.format(column=column), utc_start, utc_end
+    )
+    return {row["day"]: int(row["cnt"]) for row in rows or []}
+
+
+@router.get("/stats")
+async def range_stats(start: str, end: str):
+    """按天统计激活/核销数 (UTC+8 自然日, 两端含). 缺数据的日期补零."""
+    try:
+        start_d = date_cls.fromisoformat(start)
+        end_d = date_cls.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="日期格式不正确 (YYYY-MM-DD)")
+    if start_d > end_d:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    if (end_d - start_d).days >= _MAX_RANGE_DAYS:
+        raise HTTPException(status_code=400, detail="时间跨度不能超过一年")
+
+    # CN 自然日边界换算成存储侧的 UTC naive timestamp.
+    utc_start = (datetime.combine(start_d, time()) - _CN_OFFSET).isoformat(sep=" ")
+    utc_end = (
+        datetime.combine(end_d + timedelta(days=1), time()) - _CN_OFFSET
+    ).isoformat(sep=" ")
+
+    activated = await _daily_counts("activated_at", utc_start, utc_end)
+    redeemed = await _daily_counts("redeemed_at", utc_start, utc_end)
+
+    days = []
+    cursor = start_d
+    while cursor <= end_d:
+        key = cursor.isoformat()
+        days.append(
+            {
+                "date": key,
+                "activated": activated.get(key, 0),
+                "redeemed": redeemed.get(key, 0),
+            }
+        )
+        cursor += timedelta(days=1)
+
+    return {
+        "start": start_d.isoformat(),
+        "end": end_d.isoformat(),
+        "activated_total": sum(activated.values()),
+        "redeemed_total": sum(redeemed.values()),
+        "days": days,
+    }
 
 
 async def _redeemed_counts() -> dict[str, int]:

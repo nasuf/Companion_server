@@ -583,6 +583,57 @@ async def test_admin_redemptions_404_unknown_merchant(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_admin_range_stats_fills_missing_days(monkeypatch):
+    from app.api.admin import meal as admin_meal
+
+    query = AsyncMock(
+        side_effect=[
+            [{"day": "2026-07-06", "cnt": 3}, {"day": "2026-07-08", "cnt": 1}],
+            [{"day": "2026-07-07", "cnt": 2}],
+        ]
+    )
+    monkeypatch.setattr(admin_meal, "db", SimpleNamespace(query_raw=query))
+
+    body = await admin_meal.range_stats("2026-07-06", "2026-07-08")
+
+    assert body["activated_total"] == 4
+    assert body["redeemed_total"] == 2
+    assert [d["date"] for d in body["days"]] == [
+        "2026-07-06",
+        "2026-07-07",
+        "2026-07-08",
+    ]
+    assert body["days"][1] == {"date": "2026-07-07", "activated": 0, "redeemed": 2}
+    # CN 自然日 → UTC 边界: 07-06 00:00 CN = 07-05 16:00 UTC
+    first_call_args = query.await_args_list[0].args
+    assert first_call_args[1] == "2026-07-05 16:00:00"
+    assert first_call_args[2] == "2026-07-08 16:00:00"
+
+
+@pytest.mark.asyncio
+async def test_admin_range_stats_validation(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.admin import meal as admin_meal
+
+    monkeypatch.setattr(
+        admin_meal, "db", SimpleNamespace(query_raw=AsyncMock(return_value=[]))
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.range_stats("2026/07/06", "2026-07-08")
+    assert exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.range_stats("2026-07-08", "2026-07-06")
+    assert exc.value.status_code == 400
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.range_stats("2024-01-01", "2026-07-08")
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_generate_unique_redeem_code_retries_on_collision(monkeypatch):
     taken = SimpleNamespace(id="m-x")
     finder = AsyncMock(side_effect=[taken, taken, None])
