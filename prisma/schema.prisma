@@ -52,6 +52,7 @@ model User {
   musicFavorites    MusicFavorite[]
   musicPlaybacks    MusicPlayback[]
   musicCoListeningSessions MusicCoListeningSession[]
+  mealVoucher       MealVoucher?
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
   pushDevices     PushDevice[]
@@ -1541,9 +1542,49 @@ model SystemConfig {
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String? @map("default_template_agent_id")
+  // 霸王餐激活校验码功能开关: 关闭后所有校验码立即失效且不再生成 (admin 可切换).
+  mealCodeEnabled  Boolean  @default(true) @map("meal_code_enabled")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("system_config")
+}
+
+// ── 霸王餐 (free-meal voucher campaign) ──────────────────────────────
+// 商家: 每家一个固定 6 位核销码 (可停用/换码). 联系人姓名/手机号用于商家 H5
+// 页自助身份确认 (二选一, 都可空 — 空则该商家无法自助登录, 仅 admin 可管理).
+model MealMerchant {
+  id           String        @id @default(uuid())
+  name         String
+  contactName  String?       @map("contact_name")
+  contactPhone String?       @map("contact_phone")
+  redeemCode   String        @unique @map("redeem_code")
+  codeActive   Boolean       @default(true) @map("code_active")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  vouchers     MealVoucher[]
+
+  @@map("meal_merchants")
+}
+
+// 霸王餐券: 每用户一张 (userId unique), 状态机 inactive → activated → redeemed.
+// 激活 = 输入服务员页的 5 分钟轮换校验码; 核销 = 输入商家的固定核销码.
+// merchant onDelete SetNull: 商家删除后已核销记录保留 (统计口径不塌).
+model MealVoucher {
+  id          String        @id @default(uuid())
+  userId      String        @unique @map("user_id")
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status      String        @default("inactive")
+  activatedAt DateTime?     @map("activated_at")
+  redeemedAt  DateTime?     @map("redeemed_at")
+  merchantId  String?       @map("merchant_id")
+  merchant    MealMerchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  @@index([status], map: "meal_vouchers_status_idx")
+  @@index([merchantId], map: "meal_vouchers_merchant_idx")
+  @@index([activatedAt], map: "meal_vouchers_activated_at_idx")
+  @@map("meal_vouchers")
 }
 
 // 单 agent 模型 override. 改了只影响该 agent, 其余仍走 SystemConfig/env.

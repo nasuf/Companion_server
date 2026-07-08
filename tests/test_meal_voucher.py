@@ -1,0 +1,457 @@
+"""霸王餐: 轮换码确定性/宽限期, 券状态机, 商家匹配, 端点映射."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.services import meal_voucher as mv
+
+
+# ── rotating code ─────────────────────────────────────────────────
+
+
+def test_code_is_deterministic_within_window():
+    base = 1_760_000_000 - (1_760_000_000 % 300)  # window start
+    code_a, _ = mv.current_activation_code(now=base + 10)
+    code_b, _ = mv.current_activation_code(now=base + 290)
+    assert code_a == code_b
+    assert len(code_a) == 6 and code_a.isdigit()
+
+
+def test_code_rotates_across_windows():
+    base = 1_760_000_000 - (1_760_000_000 % 300)
+    code_a, _ = mv.current_activation_code(now=base + 10)
+    code_next, _ = mv.current_activation_code(now=base + 310)
+    assert code_a != code_next  # 2^-? collision chance ~1e-6; deterministic seed here
+
+
+def test_expires_in_counts_down():
+    base = 1_760_000_000 - (1_760_000_000 % 300)
+    _, expires = mv.current_activation_code(now=base + 100)
+    assert expires == 200
+
+
+def test_verify_accepts_current_window():
+    now = 1_760_000_123
+    code, _ = mv.current_activation_code(now=now)
+    assert mv.verify_activation_code(code, now=now) is True
+
+
+def test_verify_accepts_previous_window_within_grace():
+    base = 1_760_000_000 - (1_760_000_000 % 300)
+    prev_code, _ = mv.current_activation_code(now=base - 10)  # previous window
+    # 15s into the new window -> grace (30s) still accepts the previous code
+    assert mv.verify_activation_code(prev_code, now=base + 15) is True
+    # 45s in -> grace over
+    assert mv.verify_activation_code(prev_code, now=base + 45) is False
+
+
+def test_verify_rejects_malformed():
+    assert mv.verify_activation_code("12345") is False
+    assert mv.verify_activation_code("abcdef") is False
+    assert mv.verify_activation_code("") is False
+
+
+# ── voucher state machine (db mocked) ─────────────────────────────
+
+
+def _voucher(status: str, merchant_id: str | None = None):
+    return SimpleNamespace(
+        id="v-1",
+        userId="user-1",
+        status=status,
+        activatedAt=None,
+        redeemedAt=None,
+        merchantId=merchant_id,
+    )
+
+
+def _mock_db(monkeypatch, **tables):
+    db = SimpleNamespace(**tables)
+    monkeypatch.setattr(mv, "db", db)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_activate_requires_enabled(monkeypatch):
+    monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=False))
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.activate_voucher("user-1", "123456")
+    assert exc.value.reason == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_activate_happy_path(monkeypatch):
+    monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(mv, "verify_activation_code", lambda code: True)
+    updated = _voucher(mv.VOUCHER_ACTIVATED)
+    db = _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(
+                side_effect=[_voucher(mv.VOUCHER_INACTIVE), updated]
+            ),
+            update_many=AsyncMock(return_value=1),
+        ),
+    )
+
+    result = await mv.activate_voucher("user-1", "123456")
+
+    assert result.status == mv.VOUCHER_ACTIVATED
+    kwargs = db.mealvoucher.update_many.await_args.kwargs
+    # conditional transition: only flips inactive vouchers
+    assert kwargs["where"]["status"] == mv.VOUCHER_INACTIVE
+    assert kwargs["data"]["status"] == mv.VOUCHER_ACTIVATED
+    assert kwargs["data"]["activatedAt"] is not None
+
+
+@pytest.mark.asyncio
+async def test_activate_concurrent_race_maps_to_already_activated(monkeypatch):
+    monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(mv, "verify_activation_code", lambda code: True)
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_INACTIVE)),
+            update_many=AsyncMock(return_value=0),  # lost the race
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.activate_voucher("user-1", "123456")
+    assert exc.value.reason == "already_activated"
+
+
+@pytest.mark.asyncio
+async def test_activate_rejects_wrong_code(monkeypatch):
+    monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(mv, "verify_activation_code", lambda code: False)
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_INACTIVE)),
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.activate_voucher("user-1", "000000")
+    assert exc.value.reason == "bad_code"
+
+
+@pytest.mark.asyncio
+async def test_activate_idempotency_guards(monkeypatch):
+    monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
+    for status, reason in [
+        (mv.VOUCHER_ACTIVATED, "already_activated"),
+        (mv.VOUCHER_REDEEMED, "already_redeemed"),
+    ]:
+        _mock_db(
+            monkeypatch,
+            mealvoucher=SimpleNamespace(
+                find_unique=AsyncMock(return_value=_voucher(status)),
+            ),
+        )
+        with pytest.raises(mv.MealVoucherError) as exc:
+            await mv.activate_voucher("user-1", "123456")
+        assert exc.value.reason == reason
+
+
+@pytest.mark.asyncio
+async def test_redeem_requires_activated(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_INACTIVE)),
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "654321")
+    assert exc.value.reason == "not_activated"
+
+
+@pytest.mark.asyncio
+async def test_redeem_happy_path(monkeypatch):
+    merchant = SimpleNamespace(id="m-1", name="张记食堂", codeActive=True)
+    updated = _voucher(mv.VOUCHER_REDEEMED, merchant_id="m-1")
+    db = _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(
+                side_effect=[_voucher(mv.VOUCHER_ACTIVATED), updated]
+            ),
+            update_many=AsyncMock(return_value=1),
+        ),
+        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant)),
+    )
+
+    result = await mv.redeem_voucher("user-1", "654321")
+
+    assert result.status == mv.VOUCHER_REDEEMED
+    where = db.mealmerchant.find_first.await_args.kwargs["where"]
+    assert where == {"redeemCode": "654321", "codeActive": True}
+    kwargs = db.mealvoucher.update_many.await_args.kwargs
+    assert kwargs["where"]["status"] == mv.VOUCHER_ACTIVATED
+    assert kwargs["data"]["merchantId"] == "m-1"
+
+
+@pytest.mark.asyncio
+async def test_redeem_rejects_unknown_or_inactive_code(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_ACTIVATED)),
+        ),
+        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=None)),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "654321")
+    assert exc.value.reason == "bad_code"
+
+
+@pytest.mark.asyncio
+async def test_redeem_rejects_double_redeem(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_REDEEMED)),
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "654321")
+    assert exc.value.reason == "already_redeemed"
+
+
+# ── merchant contact matching ─────────────────────────────────────
+
+
+def _merchant(contact_name=None, contact_phone=None):
+    return SimpleNamespace(contactName=contact_name, contactPhone=contact_phone)
+
+
+def test_contact_match_by_name():
+    assert mv.merchant_contact_matches(_merchant(contact_name="王老板"), "王老板")
+    assert not mv.merchant_contact_matches(_merchant(contact_name="王老板"), "李老板")
+
+
+def test_contact_match_by_phone_ignores_separators():
+    m = _merchant(contact_phone="13812345678")
+    assert mv.merchant_contact_matches(m, "138 1234 5678")
+    assert mv.merchant_contact_matches(m, "13812345678")
+    assert not mv.merchant_contact_matches(m, "13800000000")
+
+
+def test_contact_match_rejects_empty_both_sides():
+    # merchant without any contact info can never self-serve login
+    assert not mv.merchant_contact_matches(_merchant(), "")
+    assert not mv.merchant_contact_matches(_merchant(), "任意")
+
+
+# ── endpoint wiring (direct call, deps monkeypatched) ─────────────
+
+
+class FakeRequest:
+    headers = {}
+    client = SimpleNamespace(host="1.2.3.4")
+
+
+@pytest.mark.asyncio
+async def test_staff_code_requires_key_when_configured(monkeypatch):
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
+
+    with pytest.raises(HTTPException) as exc:
+        await meal_api.staff_code(key="wrong")
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_staff_code_disabled_returns_no_code(monkeypatch):
+    from app.api.public import meal as meal_api
+
+    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "")
+    monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=False))
+
+    body = await meal_api.staff_code(key="")
+    assert body == {"enabled": False, "code": None, "expires_in": None}
+
+
+@pytest.mark.asyncio
+async def test_staff_code_returns_current_code(monkeypatch):
+    from app.api.public import meal as meal_api
+
+    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
+    monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=True))
+
+    body = await meal_api.staff_code(key="sekret")
+    assert body["enabled"] is True
+    assert len(body["code"]) == 6
+    assert 0 < body["expires_in"] <= 300
+
+
+@pytest.mark.asyncio
+async def test_activate_endpoint_maps_domain_error_to_400(monkeypatch):
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(meal_api, "record_login_failure", AsyncMock())
+    monkeypatch.setattr(
+        meal_api.mv,
+        "activate_voucher",
+        AsyncMock(side_effect=mv.MealVoucherError("bad_code", "校验码错误或已过期")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await meal_api.activate_voucher(
+            meal_api.VoucherCodeRequest(code="000000"),
+            FakeRequest(),
+            payload={"sub": "user-1"},
+        )
+    assert exc.value.status_code == 400
+    meal_api.record_login_failure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_merchant_login_issues_scoped_token(monkeypatch):
+    from app.api.public import meal as meal_api
+    from app.services.auth import decode_jwt
+
+    merchant = SimpleNamespace(
+        id="m-1", name="张记食堂", contactName="王老板", contactPhone=None
+    )
+    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        meal_api,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant))
+        ),
+    )
+
+    body = await meal_api.merchant_login(
+        meal_api.MerchantLoginRequest(merchant_id="m-1", contact="王老板"),
+        FakeRequest(),
+    )
+
+    payload = decode_jwt(body["token"])
+    assert payload["sub"] == "m-1"
+    assert payload["role"] == "meal_merchant"
+    assert body["merchant"]["name"] == "张记食堂"
+
+
+@pytest.mark.asyncio
+async def test_merchant_login_rejects_mismatch(monkeypatch):
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    merchant = SimpleNamespace(
+        id="m-1", name="张记食堂", contactName="王老板", contactPhone=None
+    )
+    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(meal_api, "record_login_failure", AsyncMock())
+    monkeypatch.setattr(
+        meal_api,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant))
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await meal_api.merchant_login(
+            meal_api.MerchantLoginRequest(merchant_id="m-1", contact="李老板"),
+            FakeRequest(),
+        )
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_merchant_token_rejected_for_user_endpoints(monkeypatch):
+    """A meal_merchant token must not pass require_user-based... (role check)."""
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    # user JWT used against merchant endpoint -> 403
+    from app.services.auth import create_jwt
+
+    user_token = create_jwt("user-1", "user")
+    request = SimpleNamespace(headers={"authorization": f"Bearer {user_token}"})
+    with pytest.raises(HTTPException) as exc:
+        meal_api._require_merchant(request)
+    assert exc.value.status_code == 403
+
+
+# ── admin merchants validation ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_admin_update_rejects_bad_redeem_code(monkeypatch):
+    from app.api.admin import meal as admin_meal
+    from fastapi import HTTPException
+
+    merchant = SimpleNamespace(id="m-1")
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant))
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.update_merchant(
+            "m-1", admin_meal.MerchantUpdateRequest(redeem_code="12a456")
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_admin_update_rejects_duplicate_redeem_code(monkeypatch):
+    from app.api.admin import meal as admin_meal
+    from fastapi import HTTPException
+
+    mine = SimpleNamespace(id="m-1")
+    other = SimpleNamespace(id="m-2")
+
+    async def find_unique(where):
+        if "id" in where:
+            return mine
+        return other  # redeemCode lookup hits another merchant
+
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(mealmerchant=SimpleNamespace(find_unique=find_unique)),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await admin_meal.update_merchant(
+            "m-1", admin_meal.MerchantUpdateRequest(redeem_code="123456")
+        )
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_generate_unique_redeem_code_retries_on_collision(monkeypatch):
+    taken = SimpleNamespace(id="m-x")
+    finder = AsyncMock(side_effect=[taken, taken, None])
+    monkeypatch.setattr(
+        mv,
+        "db",
+        SimpleNamespace(mealmerchant=SimpleNamespace(find_unique=finder)),
+    )
+
+    code = await mv.generate_unique_redeem_code()
+
+    assert len(code) == 6 and code.isdigit()
+    assert finder.await_count == 3

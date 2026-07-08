@@ -1,0 +1,188 @@
+"""Admin API: 霸王餐管理 (校验码管理 + 商家管理).
+
+Endpoints (all admin-only):
+  GET    /admin-api/meal/overview        — 开关状态 + 当前码 + 倒计时 + 累计数据
+  GET    /admin-api/meal/activations     — 实时校验动态 (轮询)
+  PUT    /admin-api/meal/code-enabled    — 开启/关闭校验码功能
+  GET    /admin-api/meal/merchants       — 商家列表 + 各自核销数
+  POST   /admin-api/meal/merchants       — 新增商家 (自动生成唯一核销码)
+  PUT    /admin-api/meal/merchants/{id}  — 修改商家 (含核销码修改/停用/开启)
+  DELETE /admin-api/meal/merchants/{id}  — 删除商家 (已核销记录保留, merchant 置空)
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+
+from fastapi import APIRouter, Depends, HTTPException
+from prisma.errors import UniqueViolationError
+from pydantic import BaseModel, Field
+
+from app.api.jwt_auth import require_admin_jwt
+from app.db import db
+from app.services import meal_voucher as mv
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/admin-api/meal",
+    tags=["admin", "meal"],
+    dependencies=[Depends(require_admin_jwt)],
+)
+
+_SIX_DIGITS = re.compile(r"^\d{6}$")
+
+
+class CodeEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class MerchantCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    contact_name: str | None = Field(default=None, max_length=64)
+    contact_phone: str | None = Field(default=None, max_length=32)
+
+
+class MerchantUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    contact_name: str | None = Field(default=None, max_length=64)
+    contact_phone: str | None = Field(default=None, max_length=32)
+    redeem_code: str | None = Field(default=None, min_length=6, max_length=6)
+    code_active: bool | None = None
+
+
+def _merchant_payload(merchant, redeemed_count: int) -> dict:
+    return {
+        "id": merchant.id,
+        "name": merchant.name,
+        "contact_name": merchant.contactName,
+        "contact_phone": merchant.contactPhone,
+        "redeem_code": merchant.redeemCode,
+        "code_active": merchant.codeActive,
+        "redeemed_count": redeemed_count,
+        "created_at": merchant.createdAt.isoformat() if merchant.createdAt else None,
+    }
+
+
+@router.get("/overview")
+async def overview():
+    enabled = await mv.is_code_enabled()
+    stats = await mv.voucher_stats()
+    body: dict = {"enabled": enabled, **stats}
+    if enabled:
+        code, expires_in = mv.current_activation_code()
+        body.update(
+            code=code, expires_in=expires_in, window_seconds=mv.CODE_WINDOW_SECONDS
+        )
+    else:
+        body.update(code=None, expires_in=None, window_seconds=mv.CODE_WINDOW_SECONDS)
+    return body
+
+
+@router.get("/activations")
+async def activations(limit: int = 50):
+    return await mv.activation_feed(limit=min(max(limit, 1), 200))
+
+
+@router.put("/code-enabled")
+async def set_code_enabled(data: CodeEnabledRequest):
+    await mv.set_code_enabled(data.enabled)
+    return {"enabled": data.enabled}
+
+
+async def _redeemed_counts() -> dict[str, int]:
+    rows = await db.query_raw(
+        """
+        SELECT merchant_id, COUNT(*)::int AS cnt
+        FROM meal_vouchers
+        WHERE status = 'redeemed' AND merchant_id IS NOT NULL
+        GROUP BY merchant_id
+        """
+    )
+    return {row["merchant_id"]: int(row["cnt"]) for row in rows or []}
+
+
+@router.get("/merchants")
+async def list_merchants():
+    merchants = await db.mealmerchant.find_many(order={"createdAt": "asc"})
+    counts = await _redeemed_counts()
+    return [_merchant_payload(m, counts.get(m.id, 0)) for m in merchants]
+
+
+@router.post("/merchants")
+async def create_merchant(data: MerchantCreateRequest):
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="商家名称不能为空")
+    code = await mv.generate_unique_redeem_code()
+    merchant = await db.mealmerchant.create(
+        data={
+            "name": name,
+            "contactName": (data.contact_name or "").strip() or None,
+            "contactPhone": (data.contact_phone or "").strip() or None,
+            "redeemCode": code,
+        }
+    )
+    logger.info(
+        "meal merchant created",
+        extra={"event": "meal_merchant_created", "merchant_id": merchant.id},
+    )
+    return _merchant_payload(merchant, 0)
+
+
+@router.put("/merchants/{merchant_id}")
+async def update_merchant(merchant_id: str, data: MerchantUpdateRequest):
+    merchant = await db.mealmerchant.find_unique(where={"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="商家不存在")
+
+    updates: dict = {}
+    if data.name is not None:
+        name = data.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="商家名称不能为空")
+        updates["name"] = name
+    if data.contact_name is not None:
+        updates["contactName"] = data.contact_name.strip() or None
+    if data.contact_phone is not None:
+        updates["contactPhone"] = data.contact_phone.strip() or None
+    if data.redeem_code is not None:
+        code = data.redeem_code.strip()
+        if not _SIX_DIGITS.fullmatch(code):
+            raise HTTPException(status_code=400, detail="核销码必须是 6 位数字")
+        existing = await db.mealmerchant.find_unique(where={"redeemCode": code})
+        if existing and existing.id != merchant_id:
+            raise HTTPException(status_code=409, detail="该核销码已被其他商家使用")
+        updates["redeemCode"] = code
+    if data.code_active is not None:
+        updates["codeActive"] = data.code_active
+
+    if not updates:
+        counts = await _redeemed_counts()
+        return _merchant_payload(merchant, counts.get(merchant_id, 0))
+
+    try:
+        updated = await db.mealmerchant.update(where={"id": merchant_id}, data=updates)
+    except UniqueViolationError:
+        # Lost a race against another admin assigning the same redeem code.
+        raise HTTPException(status_code=409, detail="该核销码已被其他商家使用")
+    counts = await _redeemed_counts()
+    logger.info(
+        "meal merchant updated",
+        extra={"event": "meal_merchant_updated", "merchant_id": merchant_id},
+    )
+    return _merchant_payload(updated, counts.get(merchant_id, 0))
+
+
+@router.delete("/merchants/{merchant_id}")
+async def delete_merchant(merchant_id: str):
+    merchant = await db.mealmerchant.find_unique(where={"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="商家不存在")
+    await db.mealmerchant.delete(where={"id": merchant_id})
+    logger.info(
+        "meal merchant deleted",
+        extra={"event": "meal_merchant_deleted", "merchant_id": merchant_id},
+    )
+    return {"ok": True}

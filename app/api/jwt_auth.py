@@ -24,6 +24,13 @@ async def require_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
         )
+    # Scoped non-user tokens (e.g. 霸王餐商家 console) must never pass as a
+    # regular user: their sub is not a user id.
+    if payload.get("role") == "meal_merchant":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无访问权限",
+        )
     return payload
 
 

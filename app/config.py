@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     # to the same WeChat Open Platform account.
     wechat_h5_app_id: str = ""
     wechat_h5_app_secret: str = ""
+
+    # 霸王餐服务员页访问口令: 服务员打开 staff.html 后在页面内输入此口令才能
+    # 看到轮换校验码. 请配全大写英文字母 (前端把输入统一转大写再校验).
+    # 空 = 不校验 (仅限本地开发); 生产必配, 否则任何用户可自助激活.
+    meal_staff_key: str = ""
+
     # Optional: a fully-provisioned "template" agent id. When set, a brand-new
     # user (e.g. first WeChat Mini Program login) is given an instant clone of
     # this agent (persona + L1 memory + embeddings copied, no LLM), so they can
