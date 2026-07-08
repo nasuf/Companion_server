@@ -70,6 +70,10 @@ async def _wechat_profile_for_user(user_id: str) -> tuple[str | None, str | None
     avatar_url = profile.get("headimgurl")
     display_name = nickname.strip() if isinstance(nickname, str) else None
     avatar = avatar_url.strip() if isinstance(avatar_url, str) else None
+    if avatar and avatar.startswith("http://"):
+        # 微信头像 CDN (qlogo.cn) 常回 http://, 在 https 页面里会被浏览器按
+        # mixed-content 拦截导致头像不显示; CDN 本身支持 https, 读取侧统一升级.
+        avatar = "https://" + avatar[len("http://"):]
     return display_name or None, avatar or None
 
 

@@ -67,6 +67,26 @@ class FakeTransaction:
         return SimpleNamespace(id="identity-new")
 
 
+@pytest.mark.asyncio
+async def test_wechat_profile_avatar_upgraded_to_https(monkeypatch):
+    """qlogo.cn 常回 http:// — 读取侧必须升级, 否则 https 页面 mixed-content 拦截."""
+    identity = SimpleNamespace(
+        rawProfile={"nickname": "小明", "headimgurl": "http://thirdwx.qlogo.cn/mmopen/x/132"}
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "db",
+        SimpleNamespace(
+            authidentity=SimpleNamespace(find_first=AsyncMock(return_value=identity))
+        ),
+    )
+
+    name, avatar = await auth_api._wechat_profile_for_user("user-1")
+
+    assert name == "小明"
+    assert avatar == "https://thirdwx.qlogo.cn/mmopen/x/132"
+
+
 def test_wechat_login_request_strips_code():
     payload = auth_api.WeChatMobileLoginRequest(code="  abc  ", platform="ios")
 
