@@ -34,6 +34,31 @@ class WeChatTokenPayload:
         return self.unionid or self.openid
 
 
+@dataclass(frozen=True)
+class SignupInfo:
+    """Registration-origin metadata persisted once when the user row is created.
+
+    Only applied on the create branch of ``find_or_create_wechat_user``;
+    existing users keep their original signup fields untouched. The columns
+    answer "where did this account originate", not "last login channel".
+    """
+
+    source: str  # wechat_app / wechat_miniprogram / wechat_h5
+    platform: str | None = None  # ios / android / harmony / devtools / ...
+    os_version: str | None = None
+    app_version: str | None = None
+
+    def user_create_fields(self) -> dict[str, str]:
+        fields: dict[str, str] = {"signupSource": self.source}
+        if self.platform:
+            fields["signupPlatform"] = self.platform
+        if self.os_version:
+            fields["signupOsVersion"] = self.os_version
+        if self.app_version:
+            fields["signupAppVersion"] = self.app_version
+        return fields
+
+
 class WeChatLoginError(Exception):
     """Raised for expected WeChat OAuth failures that are safe to show generically."""
 
@@ -382,7 +407,11 @@ def _merged_raw_profile(existing: object, token: WeChatTokenPayload) -> dict[str
     return profile
 
 
-async def find_or_create_wechat_user(token: WeChatTokenPayload):
+async def find_or_create_wechat_user(
+    token: WeChatTokenPayload,
+    *,
+    signup: SignupInfo | None = None,
+):
     identity = await _find_identity_preferring_union(token)
     if identity:
         try:
@@ -419,15 +448,16 @@ async def find_or_create_wechat_user(token: WeChatTokenPayload):
         return await db.user.find_unique(where={"id": identity.userId})
 
     username = _provider_username(token.provider_account_id)
+    user_data: dict[str, Any] = {
+        "username": username,
+        "hashedPassword": None,
+        "role": "user",
+    }
+    if signup is not None:
+        user_data.update(signup.user_create_fields())
     try:
         async with db.tx() as tx:
-            user = await tx.user.create(
-                data={
-                    "username": username,
-                    "hashedPassword": None,
-                    "role": "user",
-                }
-            )
+            user = await tx.user.create(data=user_data)
             await tx.authidentity.create(
                 data={
                     "user": {"connect": {"id": user.id}},

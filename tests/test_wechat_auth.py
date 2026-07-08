@@ -9,7 +9,7 @@ from prisma import Json
 
 from app.api.public import auth as auth_api
 from app.services import wechat_auth
-from app.services.wechat_auth import WeChatTokenPayload
+from app.services.wechat_auth import SignupInfo, WeChatTokenPayload
 
 
 class FakeRequest:
@@ -91,6 +91,50 @@ def test_wechat_login_request_strips_code():
     payload = auth_api.WeChatMobileLoginRequest(code="  abc  ", platform="ios")
 
     assert payload.code == "abc"
+
+
+class TestClientInfoSanitization:
+    """Signup-analytics fields are best-effort: junk degrades to None, never 422."""
+
+    def test_platform_lowercased_and_versions_trimmed(self):
+        payload = auth_api.WeChatMiniLoginRequest(
+            code="abc",
+            platform="  iOS  ",
+            os_version="  iOS 17.5.1  ",
+            app_version="1.2.3",
+        )
+        assert payload.platform == "ios"
+        assert payload.os_version == "iOS 17.5.1"
+        assert payload.app_version == "1.2.3"
+
+    def test_blank_and_non_string_values_become_none(self):
+        payload = auth_api.WeChatMiniLoginRequest(
+            code="abc", platform="   ", os_version=123, app_version=None
+        )
+        assert payload.platform is None
+        assert payload.os_version is None
+        assert payload.app_version is None
+
+    def test_overlong_values_truncated(self):
+        payload = auth_api.WeChatMiniLoginRequest(
+            code="abc", platform="p" * 100, os_version="v" * 100
+        )
+        assert payload.platform == "p" * 32
+        assert payload.os_version == "v" * 64
+
+    def test_register_request_accepts_channel(self):
+        payload = auth_api.RegisterRequest(
+            username="user1", password="secret123", channel="h5", platform="Android"
+        )
+        assert payload.channel == "h5"
+        assert payload.platform == "android"
+
+    def test_register_request_defaults_without_client_info(self):
+        payload = auth_api.RegisterRequest(username="user1", password="secret123")
+        assert payload.channel is None
+        assert payload.platform is None
+        assert payload.os_version is None
+        assert payload.app_version is None
 
 
 @pytest.mark.asyncio
@@ -236,6 +280,86 @@ async def test_find_or_create_wechat_user_creates_identity_with_relation_connect
 
 
 @pytest.mark.asyncio
+async def test_find_or_create_wechat_user_persists_signup_info_on_create(monkeypatch):
+    tx = FakeTransaction()
+    fake_db = SimpleNamespace(
+        authidentity=SimpleNamespace(find_first=AsyncMock(return_value=None)),
+        tx=lambda: tx,
+    )
+    monkeypatch.setattr(wechat_auth, "db", fake_db)
+
+    await wechat_auth.find_or_create_wechat_user(
+        WeChatTokenPayload(
+            openid="open-1", unionid=None, scope="miniprogram", raw={"openid": "open-1"}
+        ),
+        signup=SignupInfo(
+            source="wechat_miniprogram",
+            platform="ios",
+            os_version="iOS 17.5",
+            app_version="1.4.0",
+        ),
+    )
+
+    user_data = tx.user.create.await_args.kwargs["data"]
+    assert user_data["signupSource"] == "wechat_miniprogram"
+    assert user_data["signupPlatform"] == "ios"
+    assert user_data["signupOsVersion"] == "iOS 17.5"
+    assert user_data["signupAppVersion"] == "1.4.0"
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_wechat_user_signup_info_omits_blank_fields(monkeypatch):
+    tx = FakeTransaction()
+    fake_db = SimpleNamespace(
+        authidentity=SimpleNamespace(find_first=AsyncMock(return_value=None)),
+        tx=lambda: tx,
+    )
+    monkeypatch.setattr(wechat_auth, "db", fake_db)
+
+    await wechat_auth.find_or_create_wechat_user(
+        WeChatTokenPayload(openid="open-1", unionid=None, scope=None, raw={"openid": "open-1"}),
+        signup=SignupInfo(source="wechat_h5"),
+    )
+
+    user_data = tx.user.create.await_args.kwargs["data"]
+    assert user_data["signupSource"] == "wechat_h5"
+    assert "signupPlatform" not in user_data
+    assert "signupOsVersion" not in user_data
+    assert "signupAppVersion" not in user_data
+
+
+@pytest.mark.asyncio
+async def test_existing_wechat_user_keeps_original_signup_fields(monkeypatch):
+    """Signup columns mean "where the account originated": a later login from
+    another channel must not rewrite them (the fake db exposes no user.update,
+    so any attempt would raise)."""
+    existing_identity = SimpleNamespace(id="identity-1", userId="user-1")
+    existing_user = SimpleNamespace(id="user-1", username="wx_old", role="user")
+    fake_db = SimpleNamespace(
+        authidentity=SimpleNamespace(
+            find_first=AsyncMock(return_value=existing_identity),
+            update=AsyncMock(),
+        ),
+        user=SimpleNamespace(find_unique=AsyncMock(return_value=existing_user)),
+    )
+    monkeypatch.setattr(wechat_auth, "db", fake_db)
+
+    user = await wechat_auth.find_or_create_wechat_user(
+        WeChatTokenPayload(
+            openid="open-1",
+            unionid="union-1",
+            scope="miniprogram",
+            raw={"openid": "open-1", "unionid": "union-1"},
+        ),
+        signup=SignupInfo(source="wechat_miniprogram", platform="android"),
+    )
+
+    assert user is existing_user
+    identity_update = fake_db.authidentity.update.await_args.kwargs["data"]
+    assert "signupSource" not in identity_update
+
+
+@pytest.mark.asyncio
 async def test_wechat_mobile_login_returns_existing_auth_response(monkeypatch):
     request = auth_api.WeChatMobileLoginRequest(code="code", platform="ios")
     user = SimpleNamespace(id="user-1", username="wx_user", role="user")
@@ -261,6 +385,126 @@ async def test_wechat_mobile_login_returns_existing_auth_response(monkeypatch):
     auth_api.enforce_login_rate_limit.assert_awaited_once()
     auth_api.clear_login_failures.assert_awaited_once()
     auth_api._record_auth_activity.assert_awaited_once_with("user-1", source="wechat_login")
+    signup = auth_api.find_or_create_wechat_user.await_args.kwargs["signup"]
+    assert signup.source == "wechat_app"
+    assert signup.platform == "ios"
+
+
+@pytest.mark.asyncio
+async def test_wechat_miniprogram_login_passes_signup_info(monkeypatch):
+    request = auth_api.WeChatMiniLoginRequest(
+        code="code", platform="ios", os_version="iOS 16.6", app_version="1.4.0"
+    )
+    user = SimpleNamespace(id="user-1", username="wx_user", role="user")
+    expected = auth_api.AuthResponse(
+        token="jwt", user_id="user-1", username="wx_user", role="user", has_agent=False
+    )
+
+    monkeypatch.setattr(auth_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "clear_login_failures", AsyncMock())
+    monkeypatch.setattr(
+        auth_api, "exchange_wechat_miniprogram_code", AsyncMock(return_value="payload")
+    )
+    monkeypatch.setattr(auth_api, "find_or_create_wechat_user", AsyncMock(return_value=user))
+    monkeypatch.setattr(auth_api, "ensure_default_agent_for_user", AsyncMock())
+    monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=expected))
+
+    response = await auth_api.wechat_miniprogram_login(request, FakeRequest())
+
+    assert response == expected
+    signup = auth_api.find_or_create_wechat_user.await_args.kwargs["signup"]
+    assert signup.source == "wechat_miniprogram"
+    assert signup.platform == "ios"
+    assert signup.os_version == "iOS 16.6"
+    assert signup.app_version == "1.4.0"
+
+
+@pytest.mark.asyncio
+async def test_wechat_h5_login_passes_signup_info(monkeypatch):
+    request = auth_api.WeChatH5LoginRequest(code="code", platform="android")
+    user = SimpleNamespace(id="user-1", username="wx_user", role="user")
+    expected = auth_api.AuthResponse(
+        token="jwt", user_id="user-1", username="wx_user", role="user", has_agent=False
+    )
+
+    monkeypatch.setattr(auth_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "clear_login_failures", AsyncMock())
+    monkeypatch.setattr(auth_api, "exchange_wechat_h5_code", AsyncMock(return_value="payload"))
+    monkeypatch.setattr(auth_api, "find_or_create_wechat_user", AsyncMock(return_value=user))
+    monkeypatch.setattr(auth_api, "ensure_default_agent_for_user", AsyncMock())
+    monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=expected))
+
+    await auth_api.wechat_h5_login(request, FakeRequest())
+
+    signup = auth_api.find_or_create_wechat_user.await_args.kwargs["signup"]
+    assert signup.source == "wechat_h5"
+    assert signup.platform == "android"
+
+
+@pytest.mark.asyncio
+async def test_register_persists_signup_source_and_client_info(monkeypatch):
+    created_user = SimpleNamespace(id="user-1", username="user1", role="user")
+    fake_user_table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        create=AsyncMock(return_value=created_user),
+    )
+    expected = auth_api.AuthResponse(
+        token="jwt", user_id="user-1", username="user1", role="user", has_agent=False
+    )
+    monkeypatch.setattr(auth_api.db, "user", fake_user_table)
+    monkeypatch.setattr(auth_api, "enforce_register_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "ensure_default_agent_for_user", AsyncMock())
+    monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=expected))
+
+    data = auth_api.RegisterRequest(
+        username="user1",
+        password="secret123",
+        channel="miniprogram",
+        platform="ios",
+        os_version="iOS 16.6",
+        app_version="1.4.0",
+    )
+    response = await auth_api.register(data, FakeRequest())
+
+    assert response == expected
+    create_data = fake_user_table.create.await_args.kwargs["data"]
+    assert create_data["signupSource"] == "password_miniprogram"
+    assert create_data["signupPlatform"] == "ios"
+    assert create_data["signupOsVersion"] == "iOS 16.6"
+    assert create_data["signupAppVersion"] == "1.4.0"
+
+
+@pytest.mark.asyncio
+async def test_register_without_channel_uses_plain_password_source(monkeypatch):
+    created_user = SimpleNamespace(id="user-1", username="user1", role="user")
+    fake_user_table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        create=AsyncMock(return_value=created_user),
+    )
+    expected = auth_api.AuthResponse(
+        token="jwt", user_id="user-1", username="user1", role="user", has_agent=False
+    )
+    monkeypatch.setattr(auth_api.db, "user", fake_user_table)
+    monkeypatch.setattr(auth_api, "enforce_register_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "ensure_default_agent_for_user", AsyncMock())
+    monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=expected))
+
+    data = auth_api.RegisterRequest(username="user1", password="secret123")
+    await auth_api.register(data, FakeRequest())
+
+    create_data = fake_user_table.create.await_args.kwargs["data"]
+    assert create_data["signupSource"] == "password"
+    assert "signupPlatform" not in create_data
+    assert "signupOsVersion" not in create_data
+    assert "signupAppVersion" not in create_data
 
 
 @pytest.mark.asyncio

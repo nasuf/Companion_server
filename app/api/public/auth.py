@@ -25,6 +25,7 @@ from app.services.auth_security import (
 from app.api.jwt_auth import require_user
 from app.services.workspace.workspaces import get_active_workspace
 from app.services.wechat_auth import (
+    SignupInfo,
     WeChatLoginError,
     _wechat_h5_configured,
     exchange_wechat_code,
@@ -130,13 +131,22 @@ async def register(data: RegisterRequest, request: Request):
         )
 
     hashed = hash_password(data.password)
-    user = await db.user.create(
-        data={
-            "username": data.username,
-            "hashedPassword": hashed,
-            "role": "user",
-        }
-    )
+    # channel comes from the client (app / miniprogram / h5 / web); legacy
+    # clients omit it and land on the plain "password" source.
+    signup_source = f"password_{data.channel}" if data.channel else "password"
+    user_create_data = {
+        "username": data.username,
+        "hashedPassword": hashed,
+        "role": "user",
+        "signupSource": signup_source,
+    }
+    if data.platform:
+        user_create_data["signupPlatform"] = data.platform
+    if data.os_version:
+        user_create_data["signupOsVersion"] = data.os_version
+    if data.app_version:
+        user_create_data["signupAppVersion"] = data.app_version
+    user = await db.user.create(data=user_create_data)
 
     token = create_jwt(user.id, user.role)
     audit_auth_request_event(
@@ -146,7 +156,15 @@ async def register(data: RegisterRequest, request: Request):
         user_id=user.id,
         outcome="success",
     )
-    logger.info("User registered", extra={"event": "auth_register", "user_id": user.id})
+    logger.info(
+        "User registered",
+        extra={
+            "event": "auth_register",
+            "user_id": user.id,
+            "signup_source": signup_source,
+            "signup_platform": data.platform,
+        },
+    )
     await ensure_default_agent_for_user(user.id)
     await _record_auth_activity(user.id, source="register")
     return await _build_auth_response(user, token)
@@ -191,7 +209,15 @@ async def wechat_mobile_login(data: WeChatMobileLoginRequest, request: Request):
     await enforce_login_rate_limit(request, rate_limit_key)
     try:
         token_payload = await exchange_wechat_code(data.code)
-        user = await find_or_create_wechat_user(token_payload)
+        user = await find_or_create_wechat_user(
+            token_payload,
+            signup=SignupInfo(
+                source="wechat_app",
+                platform=data.platform,
+                os_version=data.os_version,
+                app_version=data.app_version,
+            ),
+        )
     except WeChatLoginError:
         await record_login_failure(request, rate_limit_key)
         raise HTTPException(
@@ -233,7 +259,15 @@ async def wechat_miniprogram_login(data: WeChatMiniLoginRequest, request: Reques
     await enforce_login_rate_limit(request, rate_limit_key)
     try:
         token_payload = await exchange_wechat_miniprogram_code(data.code)
-        user = await find_or_create_wechat_user(token_payload)
+        user = await find_or_create_wechat_user(
+            token_payload,
+            signup=SignupInfo(
+                source="wechat_miniprogram",
+                platform=data.platform,
+                os_version=data.os_version,
+                app_version=data.app_version,
+            ),
+        )
     except WeChatLoginError:
         await record_login_failure(request, rate_limit_key)
         raise HTTPException(
@@ -290,7 +324,15 @@ async def wechat_h5_login(data: WeChatH5LoginRequest, request: Request):
     await enforce_login_rate_limit(request, rate_limit_key)
     try:
         token_payload = await exchange_wechat_h5_code(data.code)
-        user = await find_or_create_wechat_user(token_payload)
+        user = await find_or_create_wechat_user(
+            token_payload,
+            signup=SignupInfo(
+                source="wechat_h5",
+                platform=data.platform,
+                os_version=data.os_version,
+                app_version=data.app_version,
+            ),
+        )
     except WeChatLoginError:
         await record_login_failure(request, rate_limit_key)
         raise HTTPException(

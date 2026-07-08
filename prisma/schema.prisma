@@ -28,6 +28,12 @@ model User {
   locationSource   String?             @map("location_source")
   locationPermissionStatus String?      @map("location_permission_status")
   locationUpdatedAt DateTime?          @map("location_updated_at")
+  // Registration-origin analytics, written once at account creation and never
+  // updated by later logins. NULL for accounts created before this feature.
+  signupSource     String?             @map("signup_source")
+  signupPlatform   String?             @map("signup_platform")
+  signupOsVersion  String?             @map("signup_os_version")
+  signupAppVersion String?             @map("signup_app_version")
   createdAt        DateTime            @default(now()) @map("created_at")
   updatedAt        DateTime            @updatedAt @map("updated_at")
   agents           AiAgent[]
