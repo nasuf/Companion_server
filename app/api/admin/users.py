@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 
 from app.db import db
 from app.api.jwt_auth import require_admin_jwt
+from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
 
 _ALLOWED_ROLES = {"user", "admin"}
 _WECHAT_PROVIDER = "wechat"
@@ -143,9 +144,15 @@ async def list_users(
     offset: int = Query(default=0, ge=0),
     _: dict = Depends(require_admin_jwt),
 ):
-    where = {}
+    # The reserved template system user owns all agent templates; hide it from
+    # the admin user list so list-driven operations (e.g. batch delete) can
+    # never touch it.
+    conditions: list[dict] = [{"username": {"not": TEMPLATE_SYSTEM_USERNAME}}]
     if search.strip():
-        where["username"] = {"contains": search.strip(), "mode": "insensitive"}
+        conditions.append(
+            {"username": {"contains": search.strip(), "mode": "insensitive"}}
+        )
+    where = {"AND": conditions}
 
     total = await db.user.count(where=where)
     users = await db.user.find_many(
@@ -418,6 +425,14 @@ async def delete_user(
     user = await db.user.find_unique(where={"id": user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # Deleting the template system user would cascade-delete every agent
+    # template it owns (2026-07 production incident via batch delete).
+    if user.username == TEMPLATE_SYSTEM_USERNAME:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the template system user (owns agent templates)",
+        )
 
     if user.role == "admin":
         admin_count = await db.user.count(where={"role": "admin"})
