@@ -4,7 +4,10 @@
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from app.db import db
 from app.redis_client import get_redis
@@ -53,6 +56,74 @@ def _delete_offline_media_files(storage_keys: list[str]) -> int:
                 storage_key,
                 exc,
             )
+    return deleted
+
+
+def _delete_prefixed_files(media_dir: Path, user_id: str) -> int:
+    if not media_dir.exists() or not media_dir.is_dir():
+        return 0
+    deleted = 0
+    for path in media_dir.iterdir():
+        if path.is_file() and path.name.startswith(f"{user_id}_"):
+            try:
+                path.unlink()
+                deleted += 1
+            except Exception as exc:
+                logger.warning("Failed to delete media file %s: %s", path, exc)
+    return deleted
+
+
+def _offline_storage_keys_from_urls(image_urls: Any) -> list[str]:
+    if not isinstance(image_urls, list):
+        return []
+    keys: list[str] = []
+    public_prefix = (
+        getattr(activity_media_storage, "_MEDIA_PUBLIC_PREFIX", "/offline/media")
+        .strip()
+        .rstrip("/")
+    )
+    for value in image_urls:
+        if not isinstance(value, str):
+            continue
+        parsed = urlparse(value)
+        path = parsed.path if parsed.scheme else value
+        prefix = f"{public_prefix}/"
+        if path.startswith(prefix):
+            storage_key = path.removeprefix(prefix).strip()
+            if storage_key and "/" not in storage_key and "\\" not in storage_key:
+                keys.append(storage_key)
+    return keys
+
+
+def _capsule_media_storage_keys(media: Any) -> list[str]:
+    if not isinstance(media, dict):
+        return []
+    keys: list[str] = []
+    images = media.get("images")
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict) and image.get("storage_key"):
+                keys.append(str(image["storage_key"]))
+    audio = media.get("audio")
+    if isinstance(audio, dict) and audio.get("storage_key"):
+        keys.append(str(audio["storage_key"]))
+    return keys
+
+
+def _delete_capsule_media_files(storage_keys: list[str]) -> int:
+    media_dir = Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media"))
+    deleted = 0
+    for storage_key in sorted({key for key in storage_keys if key}):
+        if "/" in storage_key or "\\" in storage_key or ".." in storage_key:
+            continue
+        path = media_dir / storage_key
+        try:
+            existed = path.exists() and path.is_file()
+            if existed:
+                path.unlink()
+                deleted += 1
+        except Exception as exc:
+            logger.warning("[capsule-media] failed to delete storage_key=%s: %s", storage_key, exc)
     return deleted
 
 
@@ -130,6 +201,21 @@ async def _delete_offline_activities_for_agent(
     *, user_id: str, agent_id: str,
 ) -> dict[str, int]:
     stats: dict[str, int] = {}
+    activity_rows = await db.query_raw(
+        """
+        SELECT image_urls
+        FROM offline_activity_recommendations
+        WHERE user_id = $1 AND agent_id = $2
+        """,
+        user_id,
+        agent_id,
+    )
+    image_url_storage_keys: list[str] = []
+    for row in activity_rows or []:
+        image_url_storage_keys.extend(
+            _offline_storage_keys_from_urls(_row_value(row, "image_urls")),
+        )
+
     media_rows = await db.query_raw(
         """
         DELETE FROM offline_activity_media
@@ -150,7 +236,9 @@ async def _delete_offline_activities_for_agent(
         if (key := _row_value(row, "storage_key"))
     ]
     stats["offline_activity_media"] = len(media_rows or [])
-    stats["offline_activity_media_files"] = _delete_offline_media_files(storage_keys)
+    stats["offline_activity_media_files"] = _delete_offline_media_files(
+        [*storage_keys, *image_url_storage_keys],
+    )
 
     await _execute_counted(
         stats,
@@ -384,6 +472,14 @@ async def _delete_remaining_user_chat_data(user_id: str) -> dict[str, int]:
         "chat_media_files",
         _delete_chat_media_files([*orphan_storage_keys, *remaining_cover_keys]),
     )
+    _add_count(
+        stats,
+        "chat_user_media_files",
+        _delete_prefixed_files(
+            Path(getattr(chat_media_storage, "_MEDIA_DIR", "var/chat_media")),
+            user_id,
+        ),
+    )
 
     if conv_ids:
         await _execute_counted(
@@ -458,6 +554,23 @@ async def _delete_remaining_user_memory_data(user_id: str) -> dict[str, int]:
 
 async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
     stats: dict[str, int] = {}
+
+    capsule_rows = await db.query_raw(
+        """
+        SELECT media
+        FROM time_capsules
+        WHERE user_id = $1 AND media IS NOT NULL
+        """,
+        user_id,
+    )
+    capsule_storage_keys: list[str] = []
+    for row in capsule_rows or []:
+        capsule_storage_keys.extend(_capsule_media_storage_keys(_row_value(row, "media")))
+    stats["capsule_media_files"] = _delete_capsule_media_files(capsule_storage_keys)
+    stats["capsule_user_media_files"] = _delete_prefixed_files(
+        Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media")),
+        user_id,
+    )
 
     media_rows = await db.query_raw(
         """
