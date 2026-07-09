@@ -251,6 +251,41 @@ def test_full_profile_covers_all_required_subs():
     )
 
 
+def test_career_income_becomes_memory():
+    """career_template.income 必须转成 身份/职业/与经济 记忆 (曾整段静默丢失)."""
+    memories = convert_profile_to_memories(_full_profile(), _career())
+    income = [m for m in memories if m["summary"].startswith("我的经济状况")]
+    assert income, "career.income 未转换为记忆"
+    assert "年薪 5 到 10 万" in income[0]["summary"]
+    assert (income[0]["main_category"], income[0]["sub_category"]) == ("身份", "职业/与经济")
+
+
+def test_career_income_falls_back_to_profile_career():
+    """职业池行无 income 列时, 回退读 profile.career.income (postprocess 兜底值).
+
+    模拟 Flutter 路径: pick_random_active_career() 的 dict 不含 income,
+    _apply_postprocess_overrides 在 profile.career 里写了默认经济状况。
+    """
+    profile = _full_profile()
+    profile["career"] = {"title": "手作摊主", "income": "年薪 5-10 万"}
+    pool_career = {k: v for k, v in _career().items() if k != "income"}
+    memories = convert_profile_to_memories(profile, pool_career)
+    income = [m for m in memories if m["summary"].startswith("我的经济状况")]
+    assert income and "年薪 5-10 万" in income[0]["summary"]
+
+
+def test_placeholder_relation_items_dropped():
+    """family/social/pet 中 "无"/"没有" 占位符不产出无意义记忆."""
+    profile = _full_profile()
+    profile["identity"]["family"] = ["父亲是图书管理员", "无。"]
+    profile["identity"]["social_relations"] = ["没有"]
+    profile["identity"]["pet_profile"] = ["无"]
+    memories = convert_profile_to_memories(profile, _career())
+    summaries = [m["summary"] for m in memories]
+    assert "无。" not in summaries and "无" not in summaries and "没有" not in summaries
+    assert any("父亲是图书管理员" == s for s in summaries)
+
+
 def test_singleton_subs_each_have_one_memory():
     """身份 11 个 SINGLETON 子类应当每个都恰好 1 条记忆 (LLM 不会输出 list)."""
     from app.services.memory.taxonomy import L1_SINGLETON_SUBS

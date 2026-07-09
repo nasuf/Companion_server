@@ -4,6 +4,18 @@ The product document used for template creation is already written as a
 "five-dimension memory profile". This module keeps the conversion deterministic:
 decode uploaded text, split known sections, then map them into the same profile
 shape consumed by life_story.convert_profile_to_memories.
+
+Parsing quality rules (2026-07 rework, driven by the 小伴.txt production audit):
+- Third-person narration ("林昕/她...") is normalized to first person outside
+  quoted speech, so stored AI self-memories read naturally as "我...".
+- Enumeration splitting is sentence-first, bracket/quote aware, and refuses to
+  split clauses — no more mid-parenthesis fragments like "我喜欢吃大芫荽）".
+- Sentences carrying negation ("不喜欢高强度、对抗性的运动") are never fed into
+  a "likes" list, which previously inverted their meaning after prefixing.
+- Labeled-event splitting no longer treats speech verbs ("王老师说：") or
+  clause text as item labels, so one event stays one memory.
+- 人生观/价值观 no longer truncate trailing sentences; goal/relationship/social
+  view items keep their labels ("短期目标（1-3年）：...").
 """
 
 from __future__ import annotations
@@ -82,6 +94,22 @@ def parse_agent_profile_document(data: bytes, filename: str | None = None) -> Im
     sections = _parse_sections(text)
     if len(sections) < 5:
         raise ValueError("文档结构无法识别：请上传包含五维记忆档案标题的 txt 文件")
+
+    # Normalize third-person narration to first person before field parsing.
+    # The 姓名 section is excluded so the real name survives into name_detail.
+    name_hint = _extract_primary_name(sections.get("AI自我姓名", ""))
+    gender_hint = _first_line(sections.get("AI自我性别", ""))
+    sections = {
+        key: (
+            value
+            if key == "AI自我姓名"
+            else _normalize_third_person(
+                value, name_hint, gender_hint,
+                aggressive=key not in _NARRATIVE_SECTIONS,
+            )
+        )
+        for key, value in sections.items()
+    }
 
     profile, career_template = _build_profile(sections)
     identity = profile.setdefault("identity", {})
@@ -182,6 +210,83 @@ def _heading_remainder(line: str, heading: str) -> str:
     return re.sub(rf"^\d+[.、]\s*{prefix}(?:（.*?）)?\s*", "", line).strip()
 
 
+# ── Third-person → first-person normalization ─────────────────────────────
+
+_QUOTE_SPAN_RE = re.compile(r"[“「『][^”」』]*[”」』]")
+# Vocative/honorific uses must keep the original name ("林昕同学" in a quote
+# would already be protected, this guards unquoted occurrences too).
+_NAME_SUFFIX_GUARD = r"(?!同学|老师|小姐|女士|先生|哥|姐)"
+
+# Event/narrative sections describe interactions with *other* people, so a
+# gender-matched pronoun mid-sentence is often the object (e.g. "背她去医务室"
+# = a friend). There we only rewrite the sentence subject. Self-descriptive
+# sections (identity/appearance/preferences/values/…) are exclusively about the
+# persona, so every gender-matched pronoun can be converted.
+_NARRATIVE_SECTIONS = frozenset(_LIFE_SECTION_MAP) | frozenset(_EMOTION_SECTION_MAP)
+
+
+def _extract_primary_name(name_text: str) -> str | None:
+    """The persona's formal name (大名) from the 姓名 section."""
+    return _first_match(name_text, r"大名[:：]\s*([^\s（(]+)") or _first_line(name_text)
+
+
+def _normalize_third_person(
+    text: str, name: str | None, gender: str | None, *, aggressive: bool = False,
+) -> str:
+    """Rewrite third-person self-references to first person outside quotes.
+
+    - Persona name → 我 (skipping honorific compounds like 林昕同学). Always safe:
+      the name is unique to the persona and honorifics/quotes are guarded.
+    - Gender pronoun → 我. The pronoun is gender-matched so references to other
+      people of the opposite sex (e.g. "他60多岁" about a male user in a female
+      persona's document) are always left untouched. Coverage depends on mode:
+      * aggressive (self-descriptive sections): every gender-matched pronoun,
+        since the subject is exclusively the persona.
+      * default (narrative/event sections): only the sentence subject
+        (initial position), so object-position references to other same-sex
+        people ("背她去医务室") are preserved.
+    Quoted speech is preserved verbatim — quotes are other people's words.
+    """
+    if not text:
+        return text
+    pronoun = None
+    g = (gender or "").strip().lower()
+    if g in ("女", "female"):
+        pronoun = "她"
+    elif g in ("男", "male"):
+        pronoun = "他"
+
+    name_re = (
+        re.compile(re.escape(name) + _NAME_SUFFIX_GUARD) if name and len(name) >= 2 else None
+    )
+
+    def _fix(chunk: str) -> str:
+        if name_re is not None:
+            chunk = name_re.sub("我", chunk)
+        if pronoun:
+            if aggressive:
+                chunk = re.sub(rf"{pronoun}(?!们)", "我", chunk)
+            else:
+                chunk = re.sub(
+                    rf"(^|(?<=[。！？!?；;\n])){pronoun}(?!们)", "我", chunk,
+                )
+            chunk = chunk.replace(f"对{pronoun}而言", "对我而言")
+            chunk = chunk.replace(f"在{pronoun}看来", "在我看来")
+        return chunk
+
+    if name_re is None and pronoun is None:
+        return text
+
+    parts: list[str] = []
+    last = 0
+    for span in _QUOTE_SPAN_RE.finditer(text):
+        parts.append(_fix(text[last:span.start()]))
+        parts.append(span.group(0))
+        last = span.end()
+    parts.append(_fix(text[last:]))
+    return "".join(parts)
+
+
 def _build_profile(sections: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
     identity = _parse_identity(sections)
     appearance = _parse_appearance(sections.get("AI自我外貌特征", ""))
@@ -214,7 +319,11 @@ def _build_profile(sections: dict[str, str]) -> tuple[dict[str, Any], dict[str, 
 
 def _parse_identity(sections: dict[str, str]) -> dict[str, Any]:
     name_text = sections.get("AI自我姓名", "")
-    name = _first_match(name_text, r"大名[:：]\s*([^\s（(]+)") or _first_line(name_text)
+    name_line = _first_line(name_text)
+    name = _first_match(name_text, r"大名[:：]\s*([^\s（(]+)") or name_line
+    # Keep the full naming line (大名/小名/称呼) so the 姓名 memory can carry
+    # aliases even when the admin form overrides identity.name later.
+    name_detail = name_line if name_line and name_line != name else None
     gender = _first_line(sections.get("AI自我性别", ""))
     family = _labeled_values(
         sections.get("AI自我亲属关系", ""),
@@ -225,8 +334,12 @@ def _parse_identity(sections: dict[str, str]) -> dict[str, Any]:
         ("朋友数量质量", "同事关系", "社交圈层特点"),
     )
     pet = _labeled_values(sections.get("AI自我宠物", ""), ("种类与名字", "由来"))
+    raw_location = _first_line(sections.get("AI自我现居地", ""))
+    location = _strip_parenthetical(raw_location)
+    location_note = _parenthetical_note(raw_location)
     return {
         "name": name,
+        "name_detail": name_detail,
         "age": _first_int(sections.get("AI自我年龄", "")),
         "gender": gender,
         "birthday": _first_line(sections.get("AI自我生日", "")),
@@ -236,7 +349,8 @@ def _parse_identity(sections: dict[str, str]) -> dict[str, Any]:
         "ethnicity": _first_line(sections.get("AI自我民族", "")),
         "birthplace": _first_line(sections.get("AI自我出生地", "")),
         "growing_up_location": _first_line(sections.get("AI自我成长地", "")),
-        "location": _strip_parenthetical(_first_line(sections.get("AI自我现居地", ""))),
+        "location": location,
+        "location_note": location_note,
         "family": [v for v in family.values() if v],
         "social_relations": [v for v in social.values() if v],
         "pet_profile": [v for v in pet.values() if v],
@@ -315,9 +429,21 @@ def _parse_preferences(sections: dict[str, str]) -> tuple[dict[str, Any], dict[s
     return likes, dislikes
 
 
+_LIKE_VERB_STRIP_RE = re.compile(
+    r"^(?:我)?(?:也|还|最|尤其|特别|非常|比较|更|很)?"
+    r"(?:喜欢|喜爱|偏爱|钟爱|热爱|欣赏|珍视|享受|爱)(?:吃|喝|听|看|玩|穿)?(?!的)"
+)
+
+
 def _parse_interpersonal(sections: dict[str, str]) -> dict[str, Any]:
+    # Strip leading like-verbs so the conversion prefix ("我欣赏") never doubles
+    # up ("我欣赏她欣赏真诚..." in the old pipeline).
+    liked = [
+        _LIKE_VERB_STRIP_RE.sub("", s) or s
+        for s in _split_sentences(sections.get("人际喜好", ""))
+    ]
     return {
-        "liked_traits": _split_sentences(sections.get("人际喜好", "")),
+        "liked_traits": [v for v in (_clean_scalar(s) for s in liked) if v],
         "disliked_traits": _split_labeled_items(sections.get("人际厌恶", "")),
     }
 
@@ -350,21 +476,42 @@ def _parse_emotion_events(sections: dict[str, str]) -> dict[str, list[str]]:
     return events
 
 
+_BELIEF_VERB_STRIP_RE = re.compile(r"^(?:我|她|他)?(?:一直|始终|都)?(?:相信|坚信|认为|觉得)[，,]?\s*")
+_OPPOSE_VERB_STRIP_RE = re.compile(r"^(?:我|她|他)?(?:一贯|一直)?反对[，,]?\s*")
+
+
 def _parse_thoughts(sections: dict[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
     goals = _labeled_values(sections.get("理想与目标", ""), ("短期目标（1-3年）", "长期目标（5-10年）"))
     relationships = _labeled_values(sections.get("人际关系观", ""), ("亲情", "友情", "爱情"))
     social = _labeled_values(sections.get("社会观点", ""), ("关于“数字陪伴”", "关于“内卷与躺平”"))
     self_view = _labeled_values(sections.get("自我认知", ""), ("擅长的事情", "绝对不会做的事情", "能力上限"))
 
+    # 价值观: route 反对-sentences into opposes and the rest into believes so
+    # nothing is truncated and nothing lands in both lists. The conversion
+    # layer re-adds 我相信/我反对 prefixes, so strip the document's own verbs.
+    value_sentences = _split_sentences(sections.get("价值观", ""), max_items=12)
+    believes = [
+        _clean_scalar(_BELIEF_VERB_STRIP_RE.sub("", s)) or s
+        for s in value_sentences
+        if "反对" not in s
+    ]
+    opposes = [
+        _clean_scalar(_OPPOSE_VERB_STRIP_RE.sub("", s)) or s
+        for s in value_sentences
+        if "反对" in s
+    ]
+
     values = {
-        "motto": _split_sentences(sections.get("人生观", ""), max_items=3),
-        "believes": _split_sentences(sections.get("价值观", ""), max_items=4),
-        "opposes": [s for s in _split_sentences(sections.get("价值观", ""), max_items=5) if "反对" in s],
-        "worldview": _split_sentences(sections.get("世界观", ""), max_items=5),
-        "goal": [v for v in goals.values() if v],
-        "interpersonal_view": [v for v in relationships.values() if v],
-        "social_view": [v for v in social.values() if v],
-        "faith": _split_sentences(sections.get("信仰/精神寄托", ""), max_items=5),
+        "motto": _split_sentences(sections.get("人生观", ""), max_items=8),
+        "believes": [v for v in believes if v],
+        "opposes": [v for v in opposes if v],
+        "worldview": _split_sentences(sections.get("世界观", ""), max_items=8),
+        # Keep labels: "短期目标（1-3年）：..." — without them the stored memory
+        # loses its temporal/topical framing.
+        "goal": [f"{label}：{v}" for label, v in goals.items() if v],
+        "interpersonal_view": [f"{label}：{v}" for label, v in relationships.items() if v],
+        "social_view": [f"{label}：{v}" for label, v in social.items() if v],
+        "faith": _split_sentences(sections.get("信仰/精神寄托", ""), max_items=8),
     }
     abilities = {
         "good_at": _split_numbered_items(self_view.get("擅长的事情", "")),
@@ -400,14 +547,49 @@ def _split_numbered_items(text: str) -> list[str]:
     return [_clean_scalar(piece) for piece in pieces if _clean_scalar(piece)]
 
 
+# Item labels are short event/topic titles. Excluding sentence punctuation
+# (。！？) prevents a label from swallowing preceding narrative text (the
+# "直到现在，她连…。害怕的氛围——…" bug), and the boundary tolerates a
+# closing quote between the period and the next title.
+_LABELED_ITEM_RE = re.compile(
+    r"(?:^|[。！？\n；;][”」』]?\s*)(?P<label>[^：:\n。！？；;]{2,42})[:：]"
+)
+# Colon intros that end with a speech/quote verb ("王老师说：", "上面写着：")
+# open quoted dialogue inside an event, not a new item.
+_LABEL_REJECT_END_RE = re.compile(
+    r"(?:说|道|着|问|答|喊|念|回复|附言|留言|备注|配文|评语|写的是|说的是|她|他|我|你)$"
+)
+
+
+def _is_valid_item_label(label: str) -> bool:
+    """Distinguish real item titles from narrative clauses ending in a colon.
+
+    Titles are compact noun phrases: at most one comma, no perfective 了
+    (aspect markers signal narration like "结果AI回复了她一句诗："), and they
+    never end with a speech verb or a bare pronoun.
+    """
+    if label.count("，") + label.count(",") > 1:
+        return False
+    if "了" in label:
+        return False
+    return not _LABEL_REJECT_END_RE.search(label)
+
+
 def _split_labeled_items(text: str) -> list[str]:
     text = _clean_scalar(text) or ""
     if not text:
         return []
-    matches = list(re.finditer(r"(?:^|[。\n；;]\s*)(?P<label>[^：:\n]{2,42})[:：]", text))
+    matches = [
+        m for m in _LABELED_ITEM_RE.finditer(text)
+        if _is_valid_item_label(m.group("label"))
+    ]
     if not matches:
         return _split_paragraph_items(text)
     items: list[str] = []
+    lead = _clean_scalar(text[: matches[0].start()])
+    if lead:
+        # Untitled text before the first label would otherwise be dropped.
+        items.extend(_split_paragraph_items(lead))
     for idx, match in enumerate(matches):
         label = _clean_scalar(match.group("label"))
         start = match.end()
@@ -420,17 +602,110 @@ def _split_labeled_items(text: str) -> list[str]:
     return items
 
 
+# Sentences that state what the persona does NOT like must never enter a
+# "likes" list — prefixing them with 我喜欢 inverts their meaning.
+_NEGATION_RE = re.compile(r"不喜欢|不太喜欢|不爱|讨厌|反感|受不了|无法接受|不能接受|不能容忍|害怕")
+# Anaphoric commentary about the preceding items ("这些颜色让我感到平静") is
+# meaningless as a standalone list item.
+_COMMENTARY_START_RE = re.compile(r"^(?:这些|这种|这|那些|那种|它们|它)")
+_LEADING_CONNECTOR_RE = re.compile(r"^(?:此外|另外|除此之外|同时|还有|以及|毫无疑问是|毫无疑问|当然)[，,、]?\s*")
+# "喜爱的歌手包括陈绮贞…" → keep only the enumeration part.
+_LIKE_NOUN_INTRO_RE = re.compile(r"^我?喜[欢爱]的[^，。：:]{0,8}?(?:包括|有|是)")
+
+_BRACKET_OPEN = "（(《【“「『"
+_BRACKET_CLOSE = "）)》】”」』"
+
+
+def _split_enum_segments(sentence: str) -> list[str]:
+    """Split an enumeration sentence on 、 outside brackets/quotes.
+
+    Refuses to split (returns the whole sentence) when the result does not
+    look like a clean enumeration: any segment carrying a clause comma or any
+    segment shorter than 4 chars means 、 was joining clauses or tight
+    modifiers, not list items.
+    """
+    segments: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    for ch in sentence:
+        if ch in _BRACKET_OPEN:
+            depth += 1
+        elif ch in _BRACKET_CLOSE and depth > 0:
+            depth -= 1
+        if ch == "、" and depth == 0:
+            segments.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    segments.append("".join(buf))
+    segments = [s.strip() for s in segments if s.strip()]
+    if len(segments) < 2:
+        return [sentence]
+
+    def _outside_bracket_text(seg: str) -> str:
+        out: list[str] = []
+        d = 0
+        for ch in seg:
+            if ch in _BRACKET_OPEN:
+                d += 1
+                continue
+            if ch in _BRACKET_CLOSE and d > 0:
+                d -= 1
+                continue
+            if d == 0:
+                out.append(ch)
+        return "".join(out)
+
+    for seg in segments:
+        if len(seg) < 5:
+            return [sentence]
+        if re.search(r"[，,]", _outside_bracket_text(seg)):
+            return [sentence]
+        # A segment ending with a modifier particle means 、 was chaining
+        # adjectives ("洗过的、透明的灰蓝色"), not enumerating items.
+        if seg.endswith(("的", "地", "得")):
+            return [sentence]
+    return segments
+
+
 def _split_inline_list(text: str) -> list[str]:
     text = _clean_scalar(text) or ""
     if not text:
         return []
     if "：" in text or ":" in text:
         return _split_labeled_items(text)
-    if len(text) <= 80:
-        parts = re.split(r"[、，,；;]", text)
-        cleaned = [_clean_scalar(part) for part in parts]
-        return [part for part in cleaned if part]
-    return _split_sentences(text, max_items=5)
+
+    items: list[str] = []
+    for sentence in re.split(r"(?<=[。！？!?])(?![”」』’])\s*", text):
+        sentence = _clean_scalar(sentence.strip("。！？!? ")) or ""
+        if not sentence:
+            continue
+        if _NEGATION_RE.search(sentence):
+            continue
+        sentence = _LEADING_CONNECTOR_RE.sub("", sentence)
+        if _COMMENTARY_START_RE.match(sentence):
+            continue
+        sentence = _LIKE_NOUN_INTRO_RE.sub("", sentence)
+        stripped = _LIKE_VERB_STRIP_RE.sub("", sentence)
+        if stripped != sentence:
+            stripped = stripped.strip("，, ")
+            # After removing the like-verb the remainder must be a noun-ish
+            # phrase; grammar particles or anaphora mean the sentence was
+            # self-narration that cannot take a "我喜欢X" prefix.
+            if not stripped or re.match(r"^(?:把|被|让|对|给|在)", stripped):
+                continue
+            if _COMMENTARY_START_RE.match(stripped):
+                continue
+            sentence = stripped
+        elif re.match(r"^我", sentence):
+            # Self-narration without a like-verb ("我很少...") cannot be
+            # safely prefixed either.
+            continue
+        for segment in _split_enum_segments(sentence):
+            segment = _clean_scalar(segment)
+            if segment:
+                items.append(segment)
+    return items
 
 
 def _split_paragraph_items(text: str) -> list[str]:
@@ -441,14 +716,16 @@ def _split_paragraph_items(text: str) -> list[str]:
     lines = [line for line in lines if line]
     if len(lines) > 1:
         return lines
-    return _split_sentences(text, max_items=5) or [text]
+    return _split_sentences(text, max_items=8) or [text]
 
 
-def _split_sentences(text: str, max_items: int = 6) -> list[str]:
+def _split_sentences(text: str, max_items: int = 8) -> list[str]:
     text = _clean_scalar(text) or ""
     if not text:
         return []
-    parts = re.split(r"(?<=[。！？!?])\s*", text)
+    # Do not split between a period and its closing quote — "……。”她相信"
+    # belongs to one motto/claim, not two.
+    parts = re.split(r"(?<=[。！？!?])(?![”」』’])\s*", text)
     items = [_clean_scalar(part) for part in parts if _clean_scalar(part)]
     return items[:max_items] if items else [text]
 
@@ -490,6 +767,15 @@ def _strip_parenthetical(value: str | None) -> str | None:
     if not value:
         return None
     return re.sub(r"[（(].*$", "", value).strip() or value
+
+
+def _parenthetical_note(value: str | None) -> str | None:
+    """The trailing （...） explanation dropped by _strip_parenthetical."""
+    value = _clean_scalar(value)
+    if not value:
+        return None
+    match = re.search(r"[（(](.+?)[）)]?\s*$", value)
+    return _clean_scalar(match.group(1)) if match else None
 
 
 def _build_background(profile: dict[str, Any], career: dict[str, Any]) -> str:

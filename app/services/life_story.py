@@ -164,6 +164,20 @@ def _as_list(value: object) -> list[str]:
     return [s] if s else []
 
 
+# Placeholder answers ("兄弟姐妹：无") carry zero semantic value as standalone
+# memories and pollute retrieval; drop them for relational/pet list fields.
+_PLACEHOLDER_ITEMS = frozenset({"无", "没有", "暂无", "无养", "不养"})
+
+
+def _substantive_items(value: object) -> list[str]:
+    items = []
+    for item in _as_list(value):
+        if item.strip("。.！!？?，, ") in _PLACEHOLDER_ITEMS:
+            continue
+        items.append(item)
+    return items
+
+
 def _add(
     memories: list, summary: str, main: str, sub: str, mem_type: str, importance: float,
     *, occur_time: datetime | None = None,
@@ -263,7 +277,14 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 
     # ── 身份: singleton 事实 ──
     if (v := _clean_text(identity.get("name"))):
-        _add(memories, f"我叫{v}", "身份", "姓名", "identity", 0.95)
+        summary = f"我叫{v}"
+        # Document imports keep the full naming line (大名/小名/称呼) in
+        # name_detail; fold it into the singleton 姓名 memory so aliases
+        # survive the admin-form name override.
+        detail = _clean_text(identity.get("name_detail"))
+        if detail and detail != v:
+            summary = f"我叫{v}。{detail}"
+        _add(memories, summary, "身份", "姓名", "identity", 0.95)
     gender = identity.get("gender")
     if isinstance(gender, str):
         gender = _GENDER_EN_TO_ZH.get(gender, gender)
@@ -278,7 +299,13 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     if (v := _clean_text(identity.get("constellation"))):
         _add(memories, f"我是{v}", "身份", "星座", "identity", 0.85)
     if (v := _clean_text(identity.get("location"))):
-        _add(memories, f"我现在住在{v}", "身份", "现居地", "identity", 0.90)
+        summary = f"我现在住在{v}"
+        # location_note is the parenthetical context stripped off the address
+        # (e.g. why the persona rents there); keep it inside the singleton.
+        note = _clean_text(identity.get("location_note"))
+        if note:
+            summary = f"{summary}。{note}"
+        _add(memories, summary, "身份", "现居地", "identity", 0.90)
     if (v := _clean_text(identity.get("birthplace"))):
         _add(memories, f"我出生在{v}", "身份", "出生地", "identity", 0.90)
     if (v := _clean_text(identity.get("growing_up_location"))):
@@ -290,13 +317,11 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     # 亲属关系 / 社会关系 / 宠物：LLM schema 要求每条都是"事实/描述"完整句,
     # 不再加 "家人:" / "我的社会关系:" 等冗余前缀 (前缀已在 sub_category 里,
     # 嵌入和检索都不需要重复, 还会让 AI 复述时带颗粒).
-    for item in _as_list(identity.get("family")):
+    for item in _substantive_items(identity.get("family")):
         _add(memories, item, "身份", "亲属关系", "identity", 0.90)
-    for item in _as_list(identity.get("social_relations")):
+    for item in _substantive_items(identity.get("social_relations")):
         _add(memories, item, "身份", "社会关系", "identity", 0.85)
-    pet_items = _as_list(identity.get("pet_profile"))
-    pet_items = [it for it in pet_items if it not in ("无", "无养", "不养")]
-    for item in pet_items:
+    for item in _substantive_items(identity.get("pet_profile")):
         _add(memories, item, "身份", "宠物", "identity", 0.85)
 
     # ── 身份: 外貌特征 —— height/weight 是单值 (e.g. "168cm" / "匀称"), 用 "是"
@@ -315,7 +340,12 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 
     # ── 生活: 技能 —— 知识擅长 + 自学 每项一条 ──
     for item in _as_list(edu.get("strengths")):
-        _add(memories, f"我擅长{item}相关的知识", "生活", "技能", "life", 0.87)
+        # Short topic nouns ("心理学") read well as "我擅长X相关的知识"; full
+        # descriptions imported from a document ("沟通与倾听技巧：这是...") already
+        # stand alone, so the trailing suffix would dangle — keep them verbatim.
+        is_topic = len(item) <= 12 and not any(c in item for c in "：:。！？!?")
+        summary = f"我擅长{item}相关的知识" if is_topic else f"我擅长{item}"
+        _add(memories, summary, "生活", "技能", "life", 0.87)
     for item in _as_list(edu.get("self_taught")):
         _add(memories, f"我自学过{item}", "生活", "技能", "life", 0.86)
     for item in _as_list(abilities.get("good_at")):
@@ -337,6 +367,17 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
             _add(memories, f"我的服务对象包括{client}", "生活", "工作", "life", 0.86)
         if (v := _clean_text(ct.get("social_value") or ct.get("socialValue"))):
             _add(memories, f"我做这份工作的意义在于{v}", "生活", "工作", "life", 0.86)
+        # 经济状况 was parsed/pooled all along but never converted — the whole
+        # income section silently vanished for every creation path. The career
+        # pool rows carry no income column, so fall back to profile.career
+        # where _apply_postprocess_overrides always writes one.
+        income = _clean_text(ct.get("income"))
+        if not income:
+            pc = profile_data.get("career")
+            if isinstance(pc, dict):
+                income = _clean_text(pc.get("income"))
+        if income:
+            _add(memories, f"我的经济状况：{income}", "身份", "职业/与经济", "identity", 0.88)
 
     for key, sub, prefix in _LIKES_TO_SUB:
         for item in _as_list(likes.get(key)):
@@ -349,9 +390,13 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for item in _as_list(dislikes.get("foods")):
         _add(memories, f"我讨厌吃{item}", "偏好", "饮食厌恶", "preference", 0.86)
     for item in _as_list(dislikes.get("sounds")):
-        _add(memories, f"我讨厌{item}这种声音", "偏好", "审美厌恶", "preference", 0.86)
+        # Skip the categorizing suffix when the item already names a sound
+        # ("广场舞的高音喇叭声这种声音" reads broken).
+        suffix = "" if item.endswith(("声", "声音", "音", "响")) else "这种声音"
+        _add(memories, f"我讨厌{item}{suffix}", "偏好", "审美厌恶", "preference", 0.86)
     for item in _as_list(dislikes.get("smells")):
-        _add(memories, f"我讨厌{item}的气味", "偏好", "审美厌恶", "preference", 0.86)
+        suffix = "" if item.endswith(("味", "气味", "味道", "香气", "臭")) else "的气味"
+        _add(memories, f"我讨厌{item}{suffix}", "偏好", "审美厌恶", "preference", 0.86)
     for item in _as_list(dislikes.get("habits")):
         _add(memories, f"我讨厌别人{item}", "偏好", "审美厌恶", "preference", 0.86)
 
@@ -399,7 +444,10 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for item in _as_list(values.get("faith")):
         _add(memories, item, "思维", "信仰/寄托", "thought", 0.90)
     for item in _as_list(abilities.get("limits")):
-        _add(memories, item, "思维", "自我认知", "thought", 0.88)
+        # limits are bare capability phrases ("宏观战略思维"); frame them in
+        # first person so the stored memory states a self-view, not a topic.
+        summary = item if item.startswith(("我", "不")) else f"我不太擅长{item}"
+        _add(memories, summary, "思维", "自我认知", "thought", 0.88)
 
     # ── 生活: life_events 11 字段, 每条 50-100 字"深远的事/关键节点" + occur_time ──
     # spec §1.4: agent 创建期生成的记忆全部入 L1, 故 importance ≥ 0.85. 比纯偏好
