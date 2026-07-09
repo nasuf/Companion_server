@@ -47,6 +47,10 @@ def test_activity_place_categories_cover_small_city_options():
     }.issubset(category_names)
 
 
+def test_offline_activity_image_upload_limit_is_10mb():
+    assert offline.activity_media_storage._MAX_IMAGE_BYTES == 10 * 1024 * 1024
+
+
 def test_search_queries_push_recently_used_place_category_back():
     recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
     queries = _search_queries("Zhenjiang", ["音乐爱好者"], recent)

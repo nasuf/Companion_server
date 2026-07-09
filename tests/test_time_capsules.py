@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import base64
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -282,6 +283,30 @@ def test_normalize_media_rejects_foreign_storage_key(monkeypatch, tmp_path):
         )
 
     assert exc_info.value.status_code == 403
+
+
+def test_capsule_image_limit_is_10mb():
+    assert time_capsules._MAX_IMAGE_BYTES == 10 * 1024 * 1024
+
+
+def test_normalize_media_checks_decoded_image_size(monkeypatch):
+    monkeypatch.setattr(time_capsules, "_MAX_IMAGE_BYTES", 3)
+
+    with pytest.raises(HTTPException) as exc_info:
+        time_capsules._normalize_media(
+            {
+                "images": [
+                    {
+                        "base64": base64.b64encode(b"image").decode("ascii"),
+                        "size": 1,
+                    }
+                ]
+            },
+            user_id="user-id",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Image must be under 10MB"
 
 
 @pytest.mark.asyncio

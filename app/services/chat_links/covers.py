@@ -12,7 +12,7 @@ from app.services.chat_media import storage
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(8.0, connect=4.0, read=6.0, write=4.0, pool=4.0)
-_MAX_COVER_BYTES = 2 * 1024 * 1024
+_MAX_COVER_BYTES = 10 * 1024 * 1024
 _USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Companion/0.1"

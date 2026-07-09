@@ -35,7 +35,7 @@ _VALID_SKINS = {
     "sky",
     "linen",
 }
-_MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_AUDIO_SECONDS = 20
 _MAX_AUDIO_BYTES = 512 * 1024
 _MEDIA_DIR = Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media"))
@@ -328,9 +328,9 @@ def _normalize_media(media: dict | None, *, user_id: str | None = None) -> dict 
         storage_key = str(image.get("storage_key") or "")
         if not data and not storage_key:
             raise HTTPException(status_code=400, detail="Image media reference is required")
-        size = int(image.get("size") or (_decoded_size(data) if data else 0))
+        size = _decoded_size(data) if data else int(image.get("size") or 0)
         if size > _MAX_IMAGE_BYTES:
-            raise HTTPException(status_code=400, detail="Image must be under 2MB")
+            raise HTTPException(status_code=400, detail="Image must be under 10MB")
         clean_image = {
             "name": str(image.get("name") or "capsule-image")[:120],
             "mime": str(image.get("mime") or "image/jpeg")[:80],
@@ -661,7 +661,7 @@ async def upload_capsule_media(
         size = len(blob)
     mime = (data.mime or ("image/jpeg" if kind == "image" else "audio/mp4")).strip()
     if kind == "image" and size > _MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="Image must be under 2MB")
+        raise HTTPException(status_code=400, detail="Image must be under 10MB")
     if kind == "audio":
         duration = float(data.duration_seconds or 0)
         if duration <= 0 or duration > _MAX_AUDIO_SECONDS:

@@ -8,7 +8,7 @@ import uuid
 
 from fastapi import HTTPException, Response
 
-_MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_AUDIO_BYTES = 5 * 1024 * 1024
 _MEDIA_DIR = Path(os.getenv("OFFLINE_MEDIA_DIR", "var/offline_media"))
 _MEDIA_PUBLIC_PREFIX = (
@@ -71,7 +71,7 @@ def validate_image_size(blob: bytes) -> None:
     if not blob:
         raise HTTPException(status_code=400, detail="Image is empty")
     if len(blob) > _MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="Image must be under 2MB")
+        raise HTTPException(status_code=400, detail="Image must be under 10MB")
 
 
 def validate_audio_size(blob: bytes) -> None:

@@ -44,6 +44,10 @@ def test_chat_image_upload_accepts_flutter_base64_data_alias():
     assert upload.base64 == base64.b64encode(b"image").decode("ascii")
 
 
+def test_chat_image_upload_limit_is_10mb():
+    assert storage._MAX_IMAGE_BYTES == 10 * 1024 * 1024
+
+
 def test_chat_media_route_precedes_chat_conversation_fallback():
     from app.main import app
 

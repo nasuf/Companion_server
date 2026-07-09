@@ -66,6 +66,10 @@ def test_maps_required_platforms():
         assert platform_for_url(url) == expected
 
 
+def test_link_cover_cache_limit_is_10mb():
+    assert cover_mod._MAX_COVER_BYTES == 10 * 1024 * 1024
+
+
 @pytest.mark.parametrize(
     ("url", "platform", "title", "accent"),
     [
