@@ -16,6 +16,7 @@ from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, Regenerate
 from app.services.interaction.boundary import init_patience
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.career import pick_random_active_career
+from app.services.character import _apply_postprocess_overrides
 from app.services.character_generation import generate_full_profile
 from app.services.agent_avatars import (
     build_cached_avatar_url,
@@ -103,6 +104,8 @@ async def _run_agent_initialization_job(payload: dict) -> None:
     user_id = str(payload["user_id"])
     workspace_id = payload.get("workspace_id")
     personality_dict = dict(payload.get("personality") or {})
+    profile_override = payload.get("profile_override")
+    career_template_override = payload.get("career_template_override")
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent or getattr(agent, "status", None) == "archived":
         logger.info(f"Skipping agent initialization job for missing/archived agent {agent_id}")
@@ -118,7 +121,16 @@ async def _run_agent_initialization_job(payload: dict) -> None:
         agent_id=agent.id,
         user_id=user_id,
     ):
-        await _run_agent_initialization_inner(agent, user_id, workspace_id, personality_dict)
+        await _run_agent_initialization_inner(
+            agent,
+            user_id,
+            workspace_id,
+            personality_dict,
+            profile_override=profile_override if isinstance(profile_override, dict) else None,
+            career_template_override=(
+                career_template_override if isinstance(career_template_override, dict) else None
+            ),
+        )
 
 
 async def _run_agent_initialization_inner(
@@ -126,6 +138,9 @@ async def _run_agent_initialization_inner(
     user_id: str,
     workspace_id: str | None,
     personality_dict: dict,
+    *,
+    profile_override: dict | None = None,
+    career_template_override: dict | None = None,
 ) -> None:
     """Plan B 主管线（9 段进度）."""
     await set_progress(agent.id, "initializing", message="正在创建空间...")
@@ -147,26 +162,48 @@ async def _run_agent_initialization_inner(
     await set_progress(agent.id, "mbti_done", message="MBTI 推导完成")
 
     await set_progress(agent.id, "prompt_building", message="正在构建生成提示...")
-    try:
-        career = await pick_random_active_career()
-    except Exception as e:
-        logger.warning(f"Career pool query failed for {agent.id}: {e}")
-        career = None
-
-    await set_progress(agent.id, "llm_generating", message="正在生成 AI 背景...")
-    try:
-        profile = await generate_full_profile(
-            name=agent.name,
-            gender=agent.gender,
-            mbti=mbti,
-            personality=personality_dict,
-            career_template=career,
+    profile: dict
+    career = career_template_override
+    if profile_override is not None:
+        await set_progress(agent.id, "llm_generating", message="正在读取文档背景...")
+        profile = dict(profile_override)
+        profile.setdefault("identity", {})
+        if getattr(agent, "gender", None) in {"male", "female"}:
+            profile["identity"]["gender"] = "男" if agent.gender == "male" else "女"
+        if not career:
+            profile_career = profile.get("career")
+            career = profile_career if isinstance(profile_career, dict) else None
+        profile = _apply_postprocess_overrides(
+            profile,
+            agent_name=agent.name,
+            career=career,
         )
-    except Exception as e:
-        logger.error(f"Background generation failed for {agent.id}: {e}", exc_info=True)
-        await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
-        return
-    await set_progress(agent.id, "llm_done", message="背景生成完成, 正在解析...")
+    else:
+        try:
+            career = await pick_random_active_career()
+        except Exception as e:
+            logger.warning(f"Career pool query failed for {agent.id}: {e}")
+            career = None
+
+        await set_progress(agent.id, "llm_generating", message="正在生成 AI 背景...")
+        try:
+            profile = await generate_full_profile(
+                name=agent.name,
+                gender=agent.gender,
+                mbti=mbti,
+                personality=personality_dict,
+                career_template=career,
+            )
+        except Exception as e:
+            logger.error(f"Background generation failed for {agent.id}: {e}", exc_info=True)
+            await set_progress(agent.id, "failed", message=f"生成失败: {str(e)[:200]}")
+            return
+    done_message = (
+        "文档背景解析完成, 正在转换..."
+        if profile_override is not None
+        else "背景生成完成, 正在解析..."
+    )
+    await set_progress(agent.id, "llm_done", message=done_message)
 
     identity = profile.get("identity", {}) if isinstance(profile, dict) else {}
     update_payload: dict = {}
@@ -243,6 +280,8 @@ async def _enqueue_agent_initialization(
     user_id: str,
     workspace_id: str | None,
     personality: dict,
+    profile_override: dict | None = None,
+    career_template_override: dict | None = None,
 ) -> None:
     payload = {
         "agent_id": agent_id,
@@ -250,6 +289,10 @@ async def _enqueue_agent_initialization(
         "workspace_id": workspace_id,
         "personality": personality,
     }
+    if profile_override is not None:
+        payload["profile_override"] = profile_override
+    if career_template_override is not None:
+        payload["career_template_override"] = career_template_override
     try:
         job_id = await enqueue_runtime_job(
             "agent_initialization",
@@ -277,6 +320,8 @@ async def create_agent_with_provisioning(
     background: str | None = None,
     values: dict | None = None,
     gender: str | None = None,
+    profile_override: dict | None = None,
+    career_template_override: dict | None = None,
 ):
     """Create an agent + workspace and enqueue the full provisioning job.
 
@@ -353,6 +398,8 @@ async def create_agent_with_provisioning(
         user_id=user_id,
         workspace_id=workspace.id if workspace else None,
         personality=personality,
+        profile_override=profile_override,
+        career_template_override=career_template_override,
     )
     return agent, workspace
 

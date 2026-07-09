@@ -119,6 +119,78 @@ def test_create_agent(mock_deps):
         assert response.json()["name"] == "TestBot"
 
 
+def test_admin_create_agent_template_from_txt_document(mock_deps):
+    """POST /admin-api/agent-templates/from-document imports txt into provisioning."""
+    client = mock_deps
+    from app.main import app
+    from app.api.jwt_auth import require_admin_jwt
+
+    doc = """
+林昕的五维人格记忆档案
+【第一维：身份记忆】
+1. AI自我姓名
+大名：林昕
+2. AI自我年龄
+22岁
+3. AI自我性别
+女
+11. AI自我现居地
+云南省普洱市思茅区南屏镇凤凰路社区
+14. AI自我职业与经济
+职业：伴生公司客服员
+工作内容：1. 在线咨询解答。2. 用户情绪安抚。
+社会价值：为用户提供温暖支持。
+服务对象：“伴生”App的全体注册用户。
+【第二维：偏好边界】
+1. 饮食喜好
+食物：云南小锅米线
+【第三维：生活记忆】
+3. 重要工作事件
+入职第一天：她完成了第一通客服电话。
+【第四维：情绪记忆】
+1. 重要高兴的记忆
+工作认可：主管认可她适合这份工作。
+【第五维：思维记忆】
+1. 人生观
+她相信认真过好每一天。
+"""
+    agent = SimpleNamespace(id="agent-doc", name="小伴", status="provisioning")
+    workspace = SimpleNamespace(id="ws-doc")
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    try:
+        with (
+            patch(
+                "app.api.admin.agent_templates.get_or_create_template_user",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(id="template-owner"),
+            ),
+            patch(
+                "app.api.public.agents.create_agent_with_provisioning",
+                new_callable=AsyncMock,
+                return_value=(agent, workspace),
+            ) as create_agent,
+        ):
+            response = client.post(
+                "/admin-api/agent-templates/from-document",
+                data={"name": "小伴"},
+                files={"file": ("linxin.txt", doc.encode("utf-8"), "text/plain")},
+            )
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "agent-doc"
+    assert body["source"] == "document"
+    kwargs = create_agent.await_args.kwargs
+    assert kwargs["user_id"] == "template-owner"
+    assert kwargs["name"] == "小伴"
+    assert kwargs["gender"] == "female"
+    assert kwargs["profile_override"]["identity"]["name"] == "林昕"
+    assert kwargs["career_template_override"]["title"] == "伴生公司客服员"
+
+
 def test_list_memories(mock_deps):
     """GET /memories returns memory list."""
     client = mock_deps

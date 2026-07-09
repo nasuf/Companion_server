@@ -16,10 +16,11 @@ Endpoints (all admin-only):
 
 from __future__ import annotations
 
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, ValidationError
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
@@ -31,6 +32,7 @@ from app.services.agent_template import (
     list_template_agents,
     set_default_template_agent_id,
 )
+from app.services.agent_template.document_import import parse_agent_profile_document
 from app.services.life_story import get_progress
 from app.services.runtime.data_reset import hard_delete_agent_data
 
@@ -53,6 +55,44 @@ class TemplateCreateRequest(BaseModel):
 class DefaultTemplateRequest(BaseModel):
     # None / empty clears the default (new users then stay agent-less).
     agent_id: str | None = None
+
+
+_DEFAULT_DOCUMENT_PERSONALITY = {
+    "lively": 36,
+    "rational": 62,
+    "emotional": 78,
+    "planned": 70,
+    "spontaneous": 34,
+    "creative": 58,
+    "humor": 42,
+}
+_MAX_TEMPLATE_DOCUMENT_BYTES = 2 * 1024 * 1024
+
+
+def _parse_personality_form(raw: str | None) -> PersonalityInput:
+    if not raw or not raw.strip():
+        return PersonalityInput(**_DEFAULT_DOCUMENT_PERSONALITY)
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="personality 必须是 JSON") from exc
+    try:
+        return PersonalityInput.model_validate(value)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="personality 字段不合法") from exc
+
+
+def _normalize_gender(value: str | None) -> str | None:
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"female", "male"}:
+        return text
+    if "女" in text:
+        return "female"
+    if "男" in text:
+        return "male"
+    raise HTTPException(status_code=400, detail="gender 只能是 male/female/男/女")
 
 
 async def _l1_memory_count(agent_id: str) -> int:
@@ -126,6 +166,61 @@ async def create_template(data: TemplateCreateRequest) -> dict:
         "name": agent.name,
         "status": agent.status,
         "workspace_id": workspace.id if workspace else None,
+    }
+
+
+@router.post("/from-document")
+async def create_template_from_document(
+    file: UploadFile = File(...),
+    name: str | None = Form(None),
+    gender: str | None = Form(None),
+    personality: str | None = Form(None),
+) -> dict:
+    """Create a template agent from an uploaded five-dimension profile document.
+
+    The document is converted into the same CharacterProfile JSON shape used by
+    the normal provisioning path, then existing L1 memory conversion / embedding
+    / schedule generation still run unchanged.
+    """
+    raw = await file.read()
+    await file.close()
+    if not raw:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(raw) > _MAX_TEMPLATE_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="文档过大，请控制在 2MB 以内")
+
+    try:
+        imported = parse_agent_profile_document(raw, filename=file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    personality_input = _parse_personality_form(personality)
+    template_name = (name or imported.name or "").strip() or "文档模板伙伴"
+    template_gender = _normalize_gender(gender) or _normalize_gender(imported.gender)
+
+    from app.api.public.agents import create_agent_with_provisioning
+
+    owner = await get_or_create_template_user()
+    agent, workspace = await create_agent_with_provisioning(
+        user_id=owner.id,
+        name=template_name,
+        personality=personality_input.model_dump(),
+        background=imported.background,
+        gender=template_gender,
+        profile_override=imported.profile,
+        career_template_override=imported.career_template,
+    )
+    logger.info(
+        "[TEMPLATE] created document template agent %s from %s",
+        agent.id[:8],
+        file.filename or "<upload>",
+    )
+    return {
+        "id": agent.id,
+        "name": agent.name,
+        "status": agent.status,
+        "workspace_id": workspace.id if workspace else None,
+        "source": "document",
     }
 
 
