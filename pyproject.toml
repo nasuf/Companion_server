@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "prisma>=0.15.0",
+    "nodejs-bin==18.4.0a4",
     "redis[hiredis]>=5.2.0",
     "langchain-core>=0.3.0",
     "langchain-ollama>=0.3.0",
