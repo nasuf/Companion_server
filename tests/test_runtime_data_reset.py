@@ -113,3 +113,74 @@ async def test_hard_delete_agent_data_removes_chat_media_files(monkeypatch, tmp_
     fake_db.message.delete_many.assert_awaited_once_with(
         where={"conversationId": {"in": ["conv-1"]}},
     )
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_user_data_reuses_agent_delete_and_removes_user(monkeypatch):
+    fake_db = SimpleNamespace(
+        aiagent=_Delegate(find_many_result=[SimpleNamespace(id="agent-1")], delete_result=0),
+        user=_Delegate(),
+    )
+
+    agent_delete = AsyncMock(return_value={"agent": 1, "redis": 2})
+    monkeypatch.setattr(data_reset, "db", fake_db)
+    monkeypatch.setattr(data_reset, "hard_delete_agent_data", agent_delete)
+    monkeypatch.setattr(
+        data_reset,
+        "_delete_remaining_user_chat_data",
+        AsyncMock(return_value={"conversations": 1}),
+    )
+    monkeypatch.setattr(
+        data_reset,
+        "_delete_remaining_user_memory_data",
+        AsyncMock(return_value={"user_memories": 2}),
+    )
+    monkeypatch.setattr(
+        data_reset,
+        "_delete_remaining_user_side_tables",
+        AsyncMock(return_value={"time_capsules": 1, "last_wills": 1}),
+    )
+    monkeypatch.setattr(data_reset, "_clear_user_redis", AsyncMock(return_value=3))
+
+    stats = await data_reset.hard_delete_user_data("user-1")
+
+    agent_delete.assert_awaited_once_with("agent-1", "user-1")
+    fake_db.aiagent.delete_many.assert_awaited_once_with(where={"userId": "user-1"})
+    fake_db.user.delete.assert_awaited_once_with(where={"id": "user-1"})
+    assert stats["agents_found"] == 1
+    assert stats["agent"] == 1
+    assert stats["time_capsules"] == 1
+    assert stats["last_wills"] == 1
+    assert stats["redis"] == 5
+    assert stats["user"] == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_remaining_user_side_tables_clears_user_owned_capsules_and_wills(monkeypatch):
+    executed_sql: list[str] = []
+
+    async def execute_raw(sql, *args):
+        executed_sql.append(sql)
+        assert args == ("user-1",)
+        return 1
+
+    fake_db = SimpleNamespace(
+        query_raw=AsyncMock(return_value=[]),
+        execute_raw=AsyncMock(side_effect=execute_raw),
+    )
+
+    monkeypatch.setattr(data_reset, "db", fake_db)
+    monkeypatch.setattr(
+        data_reset.activity_media_storage,
+        "delete_user_media_files",
+        lambda user_id: 0,
+    )
+
+    stats = await data_reset._delete_remaining_user_side_tables("user-1")
+
+    sql_text = "\n".join(executed_sql)
+    assert "DELETE FROM time_capsules WHERE user_id = $1" in sql_text
+    assert "DELETE FROM last_wills WHERE user_id = $1" in sql_text
+    assert "DELETE FROM last_will_deliveries" in sql_text
+    assert stats["time_capsules"] == 1
+    assert stats["last_wills"] == 1

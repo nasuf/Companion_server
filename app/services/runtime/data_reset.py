@@ -9,6 +9,7 @@ from typing import Any
 from app.db import db
 from app.redis_client import get_redis
 from app.services.chat_media import storage as chat_media_storage
+from app.services.offline import activity_media_storage
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,46 @@ def _delete_chat_media_files(storage_keys: list[str]) -> int:
                 exc,
             )
     return deleted
+
+
+def _delete_offline_media_files(storage_keys: list[str]) -> int:
+    deleted = 0
+    for storage_key in sorted({key for key in storage_keys if key}):
+        try:
+            path = activity_media_storage.storage_path(storage_key)
+            existed = path.exists() and path.is_file()
+            activity_media_storage.delete_media_file(storage_key)
+            if existed and not path.exists():
+                deleted += 1
+        except Exception as exc:
+            logger.warning(
+                "[offline-media] failed to delete storage_key=%s during data reset: %s",
+                storage_key,
+                exc,
+            )
+    return deleted
+
+
+def _add_count(stats: dict[str, int], key: str, count: int | None) -> None:
+    stats[key] = stats.get(key, 0) + int(count or 0)
+
+
+def _merge_stats(stats: dict[str, int], extra: dict[str, int]) -> None:
+    for key, count in extra.items():
+        _add_count(stats, key, count)
+
+
+async def _execute_counted(
+    stats: dict[str, int],
+    key: str,
+    sql: str,
+    *args: Any,
+) -> None:
+    try:
+        cnt = await db.execute_raw(sql, *args)
+        _add_count(stats, key, cnt or 0)
+    except Exception as exc:
+        logger.warning("Data reset SQL failed for %s: %s", key, exc)
 
 
 async def _delete_chat_media_for_conversations(
@@ -83,6 +124,421 @@ async def _delete_chat_media_for_conversations(
 
     stats["chat_media_files"] = _delete_chat_media_files(storage_keys)
     return stats
+
+
+async def _delete_offline_activities_for_agent(
+    *, user_id: str, agent_id: str,
+) -> dict[str, int]:
+    stats: dict[str, int] = {}
+    media_rows = await db.query_raw(
+        """
+        DELETE FROM offline_activity_media
+        WHERE user_id = $1
+          AND recommendation_id IN (
+            SELECT id
+            FROM offline_activity_recommendations
+            WHERE user_id = $1 AND agent_id = $2
+          )
+        RETURNING storage_key
+        """,
+        user_id,
+        agent_id,
+    )
+    storage_keys = [
+        str(key)
+        for row in (media_rows or [])
+        if (key := _row_value(row, "storage_key"))
+    ]
+    stats["offline_activity_media"] = len(media_rows or [])
+    stats["offline_activity_media_files"] = _delete_offline_media_files(storage_keys)
+
+    await _execute_counted(
+        stats,
+        "offline_activity_feedback",
+        """
+        DELETE FROM offline_activity_feedback
+        WHERE user_id = $1
+          AND recommendation_id IN (
+            SELECT id
+            FROM offline_activity_recommendations
+            WHERE user_id = $1 AND agent_id = $2
+          )
+        """,
+        user_id,
+        agent_id,
+    )
+    await _execute_counted(
+        stats,
+        "offline_activity_recommendations",
+        """
+        DELETE FROM offline_activity_recommendations
+        WHERE user_id = $1 AND agent_id = $2
+        """,
+        user_id,
+        agent_id,
+    )
+    return stats
+
+
+async def _delete_agent_auxiliary_rows(
+    *,
+    user_id: str,
+    agent_id: str,
+    workspace_ids: list[str],
+    conversation_ids: list[str],
+) -> dict[str, int]:
+    """Delete side tables that do not have complete FK cascade coverage."""
+    stats: dict[str, int] = {}
+
+    if conversation_ids:
+        await _execute_counted(
+            stats,
+            "message_traces",
+            """
+            DELETE FROM message_traces
+            WHERE conversation_id = ANY($1::text[])
+            """,
+            conversation_ids,
+        )
+
+    await _execute_counted(
+        stats,
+        "llm_usage",
+        """
+        DELETE FROM llm_usage
+        WHERE agent_id = $1
+           OR (
+                user_id = $2
+                AND (
+                    ($3::text[] IS NOT NULL AND conversation_id = ANY($3::text[]))
+                    OR agent_id = $1
+                )
+           )
+        """,
+        agent_id,
+        user_id,
+        conversation_ids,
+    )
+    await _execute_counted(
+        stats,
+        "memory_visible_use_events",
+        """
+        DELETE FROM memory_visible_use_events
+        WHERE agent_id = $1
+           OR (
+                user_id = $2
+                AND (
+                    ($3::text[] IS NOT NULL AND workspace_id = ANY($3::text[]))
+                    OR ($4::text[] IS NOT NULL AND conversation_id = ANY($4::text[]))
+                )
+           )
+        """,
+        agent_id,
+        user_id,
+        workspace_ids,
+        conversation_ids,
+    )
+    await _execute_counted(
+        stats,
+        "crisis_events",
+        """
+        DELETE FROM crisis_events
+        WHERE agent_id = $1
+           OR (
+                user_id = $2
+                AND (
+                    ($3::text[] IS NOT NULL AND workspace_id = ANY($3::text[]))
+                    OR ($4::text[] IS NOT NULL AND conversation_id = ANY($4::text[]))
+                )
+           )
+        """,
+        agent_id,
+        user_id,
+        workspace_ids,
+        conversation_ids,
+    )
+    await _execute_counted(
+        stats,
+        "memory_repair_items",
+        """
+        DELETE FROM memory_repair_items
+        WHERE agent_id = $1
+           OR (
+                user_id = $2
+                AND (
+                    ($3::text[] IS NOT NULL AND workspace_id = ANY($3::text[]))
+                    OR ($4::text[] IS NOT NULL AND conversation_id = ANY($4::text[]))
+                )
+           )
+        """,
+        agent_id,
+        user_id,
+        workspace_ids,
+        conversation_ids,
+    )
+    if workspace_ids:
+        await _execute_counted(
+            stats,
+            "memory_quality_states",
+            """
+            DELETE FROM memory_quality_states
+            WHERE user_id = $1 AND workspace_id = ANY($2::text[])
+            """,
+            user_id,
+            workspace_ids,
+        )
+        await _execute_counted(
+            stats,
+            "memory_consolidation_runs",
+            """
+            DELETE FROM memory_consolidation_runs
+            WHERE user_id = $1 AND workspace_id = ANY($2::text[])
+            """,
+            user_id,
+            workspace_ids,
+        )
+        await _execute_counted(
+            stats,
+            "memory_entities",
+            """
+            DELETE FROM memory_entities
+            WHERE user_id = $1 AND workspace_id = ANY($2::text[])
+            """,
+            user_id,
+            workspace_ids,
+        )
+
+    await _execute_counted(
+        stats,
+        "notification_events",
+        """
+        DELETE FROM notification_events
+        WHERE user_id = $1 AND agent_id = $2
+        """,
+        user_id,
+        agent_id,
+    )
+    return stats
+
+
+async def _delete_remaining_user_chat_data(user_id: str) -> dict[str, int]:
+    stats: dict[str, int] = {}
+    conversations = await db.conversation.find_many(where={"userId": user_id})
+    conv_ids = [c.id for c in conversations]
+    workspaces = await db.chatworkspace.find_many(where={"userId": user_id})
+    workspace_ids = [w.id for w in workspaces]
+
+    _merge_stats(
+        stats,
+        await _delete_chat_media_for_conversations(
+            user_id=user_id,
+            conversation_ids=conv_ids,
+        ),
+    )
+
+    orphan_attachment_rows = await db.query_raw(
+        """
+        DELETE FROM chat_message_attachments
+        WHERE user_id = $1
+        RETURNING storage_key
+        """,
+        user_id,
+    )
+    orphan_storage_keys = [
+        str(key)
+        for row in (orphan_attachment_rows or [])
+        if (key := _row_value(row, "storage_key"))
+    ]
+    _add_count(stats, "chat_attachments", len(orphan_attachment_rows or []))
+
+    if conv_ids:
+        remaining_cover_rows = await db.query_raw(
+            """
+            SELECT metadata ->> 'cover_storage_key' AS storage_key
+            FROM chat_link_cards
+            WHERE user_id = $1
+              AND NOT (conversation_id = ANY($2::text[]))
+              AND metadata ? 'cover_storage_key'
+            """,
+            user_id,
+            conv_ids,
+        )
+    else:
+        remaining_cover_rows = await db.query_raw(
+            """
+            SELECT metadata ->> 'cover_storage_key' AS storage_key
+            FROM chat_link_cards
+            WHERE user_id = $1
+              AND metadata ? 'cover_storage_key'
+            """,
+            user_id,
+        )
+    remaining_cover_keys = [
+        str(key)
+        for row in (remaining_cover_rows or [])
+        if (key := _row_value(row, "storage_key"))
+    ]
+    _add_count(stats, "chat_link_cover_media", len(remaining_cover_rows or []))
+    _add_count(
+        stats,
+        "chat_media_files",
+        _delete_chat_media_files([*orphan_storage_keys, *remaining_cover_keys]),
+    )
+
+    if conv_ids:
+        await _execute_counted(
+            stats,
+            "message_traces",
+            "DELETE FROM message_traces WHERE conversation_id = ANY($1::text[])",
+            conv_ids,
+        )
+        await _execute_counted(
+            stats,
+            "bug_reports",
+            """
+            DELETE FROM bug_reports
+            WHERE message_id IN (
+                SELECT id FROM messages WHERE conversation_id = ANY($1::text[])
+            )
+            """,
+            conv_ids,
+        )
+        cnt = await db.message.delete_many(
+            where={"conversationId": {"in": conv_ids}},
+        )
+        stats["messages"] = cnt
+        cnt = await db.conversation.delete_many(where={"id": {"in": conv_ids}})
+        stats["conversations"] = cnt
+
+    if workspace_ids:
+        cnt = await db.chatworkspace.delete_many(where={"id": {"in": workspace_ids}})
+        stats["workspaces"] = cnt
+    return stats
+
+
+async def _delete_remaining_user_memory_data(user_id: str) -> dict[str, int]:
+    stats: dict[str, int] = {}
+    user_mems = await db.usermemory.find_many(where={"userId": user_id})
+    ai_mems = await db.aimemory.find_many(where={"userId": user_id})
+    mem_ids = [m.id for m in user_mems] + [m.id for m in ai_mems]
+
+    if mem_ids:
+        await _execute_counted(
+            stats,
+            "embeddings",
+            "DELETE FROM memory_embeddings WHERE memory_id = ANY($1::text[])",
+            mem_ids,
+        )
+        await _execute_counted(
+            stats,
+            "memory_mentions",
+            "DELETE FROM memory_mentions WHERE memory_id = ANY($1::text[])",
+            mem_ids,
+        )
+
+    cnt = await db.usermemory.delete_many(where={"userId": user_id})
+    stats["user_memories"] = cnt
+    cnt = await db.aimemory.delete_many(where={"userId": user_id})
+    stats["ai_memories"] = cnt
+
+    for key, sql in [
+        ("profiles", "DELETE FROM user_profiles WHERE user_id = $1"),
+        ("portraits", "DELETE FROM user_portraits WHERE user_id = $1"),
+        ("profile_tags", "DELETE FROM user_profile_tags WHERE user_id = $1"),
+        ("changelogs", "DELETE FROM memory_changelogs WHERE user_id = $1"),
+        ("memory_entities", "DELETE FROM memory_entities WHERE user_id = $1"),
+        ("memory_mentions", "DELETE FROM memory_mentions WHERE user_id = $1"),
+        ("memory_quality_states", "DELETE FROM memory_quality_states WHERE user_id = $1"),
+        ("memory_repair_items", "DELETE FROM memory_repair_items WHERE user_id = $1"),
+        ("memory_consolidation_runs", "DELETE FROM memory_consolidation_runs WHERE user_id = $1"),
+    ]:
+        await _execute_counted(stats, key, sql, user_id)
+    return stats
+
+
+async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
+    stats: dict[str, int] = {}
+
+    media_rows = await db.query_raw(
+        """
+        DELETE FROM offline_activity_media
+        WHERE user_id = $1
+        RETURNING storage_key
+        """,
+        user_id,
+    )
+    storage_keys = [
+        str(key)
+        for row in (media_rows or [])
+        if (key := _row_value(row, "storage_key"))
+    ]
+    stats["offline_activity_media"] = len(media_rows or [])
+    stats["offline_activity_media_files"] = _delete_offline_media_files(storage_keys)
+    stats["offline_user_media_files"] = activity_media_storage.delete_user_media_files(user_id)
+
+    for key, sql in [
+        ("bug_reports_resolved", "UPDATE bug_reports SET resolved_by_id = NULL WHERE resolved_by_id = $1"),
+        ("bug_reports_filed", "DELETE FROM bug_reports WHERE reporter_id = $1"),
+        ("last_will_deliveries", "DELETE FROM last_will_deliveries WHERE last_will_id IN (SELECT id FROM last_wills WHERE user_id = $1)"),
+        ("last_wills", "DELETE FROM last_wills WHERE user_id = $1"),
+        ("time_capsules", "DELETE FROM time_capsules WHERE user_id = $1"),
+        ("offline_activity_feedback", "DELETE FROM offline_activity_feedback WHERE user_id = $1"),
+        ("offline_activity_recommendations", "DELETE FROM offline_activity_recommendations WHERE user_id = $1"),
+        ("gift_tracking_events", "DELETE FROM gift_tracking_events WHERE gift_id IN (SELECT id FROM real_world_gifts WHERE user_id = $1)"),
+        ("real_world_gifts", "DELETE FROM real_world_gifts WHERE user_id = $1"),
+        ("real_world_trigger_states", "DELETE FROM real_world_trigger_states WHERE user_id = $1"),
+        ("real_world_recharge_ledger", "DELETE FROM real_world_recharge_ledger WHERE user_id = $1"),
+        ("gift_addresses", "DELETE FROM gift_addresses WHERE user_id = $1"),
+        ("wallet_ledger", "DELETE FROM wallet_ledger WHERE user_id = $1"),
+        ("user_wallets", "DELETE FROM user_wallets WHERE user_id = $1"),
+        ("notification_events", "DELETE FROM notification_events WHERE user_id = $1"),
+        ("push_devices", "DELETE FROM push_devices WHERE user_id = $1"),
+        ("achievement_events", "DELETE FROM achievement_events WHERE user_id = $1"),
+        ("achievement_unlocks", "DELETE FROM achievement_unlocks WHERE user_id = $1"),
+        ("user_daily_activity", "DELETE FROM user_daily_activity WHERE user_id = $1"),
+        ("game_sessions", "DELETE FROM game_sessions WHERE user_id = $1"),
+        ("music_co_listening_sessions", "DELETE FROM music_co_listening_sessions WHERE user_id = $1"),
+        ("music_playbacks", "DELETE FROM music_playbacks WHERE user_id = $1"),
+        ("music_favorites", "DELETE FROM music_favorites WHERE user_id = $1"),
+        ("time_triggers", "DELETE FROM time_triggers WHERE user_id = $1"),
+        ("patience_states", "DELETE FROM patience_states WHERE user_id = $1"),
+        ("intimacies", "DELETE FROM intimacies WHERE user_id = $1"),
+        ("proactive_event_logs", "DELETE FROM proactive_event_logs WHERE user_id = $1"),
+        ("proactive_states", "DELETE FROM proactive_states WHERE user_id = $1"),
+        ("proactive_chat_logs", "DELETE FROM proactive_chat_logs WHERE user_id = $1"),
+        ("proactive_counters", "DELETE FROM proactive_counters WHERE user_id = $1"),
+        ("memory_visible_use_events", "DELETE FROM memory_visible_use_events WHERE user_id = $1"),
+        ("crisis_events", "DELETE FROM crisis_events WHERE user_id = $1"),
+        ("llm_usage", "DELETE FROM llm_usage WHERE user_id = $1"),
+        ("auth_identities", "DELETE FROM auth_identities WHERE user_id = $1"),
+        ("meal_vouchers", "DELETE FROM meal_vouchers WHERE user_id = $1"),
+    ]:
+        await _execute_counted(stats, key, sql, user_id)
+    return stats
+
+
+async def _clear_user_redis(user_id: str) -> int:
+    redis = await get_redis()
+    deleted = 0
+    patterns = [
+        f"*:{user_id}",
+        f"*:{user_id}:*",
+        f"*:{user_id}_*",
+        f"login_fail:*:{user_id}",
+        f"register_rate:*:{user_id}",
+    ]
+    for pattern in patterns:
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await redis.scan(cursor, match=pattern, count=100)
+                if keys:
+                    deleted += await redis.delete(*keys)
+                if cursor == 0:
+                    break
+        except Exception as exc:
+            logger.warning("Redis user cleanup failed for %s: %s", pattern, exc)
+    return deleted
 
 
 async def clear_agent_runtime_state(
@@ -237,12 +693,26 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     )
     conv_ids = [c.id for c in conversations]
 
-    # 3. 先清理聊天媒体。message/conversation 外键会删除 DB 行，但不会删除磁盘文件。
-    stats.update(
+    # 3. 先清理文件和旁路表。DB 外键不会覆盖磁盘文件 / 无 FK 诊断表。
+    _merge_stats(
+        stats,
         await _delete_chat_media_for_conversations(
             user_id=user_id,
             conversation_ids=conv_ids,
         ),
+    )
+    _merge_stats(
+        stats,
+        await _delete_agent_auxiliary_rows(
+            user_id=user_id,
+            agent_id=agent_id,
+            workspace_ids=workspace_ids,
+            conversation_ids=conv_ids,
+        ),
+    )
+    _merge_stats(
+        stats,
+        await _delete_offline_activities_for_agent(user_id=user_id, agent_id=agent_id),
     )
 
     # 4. 删除 messages
@@ -424,4 +894,33 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
             logger.warning(f"Entity cleanup failed: {e}")
 
     logger.info(f"Hard deleted agent={agent_id} user={user_id}: {stats}")
+    return stats
+
+
+async def hard_delete_user_data(user_id: str) -> dict[str, int]:
+    """彻底物理删除某个用户及其所有 Agent、运行时、媒体和旁路数据。"""
+    stats: dict[str, int] = {}
+
+    agents = await db.aiagent.find_many(where={"userId": user_id})
+    agent_ids = [agent.id for agent in agents]
+    stats["agents_found"] = len(agent_ids)
+    for agent_id in agent_ids:
+        _merge_stats(stats, await hard_delete_agent_data(agent_id, user_id))
+
+    _merge_stats(stats, await _delete_remaining_user_chat_data(user_id))
+    _merge_stats(stats, await _delete_remaining_user_memory_data(user_id))
+    _merge_stats(stats, await _delete_remaining_user_side_tables(user_id))
+
+    # Any agent row left here would be an orphaned edge case after partial legacy data.
+    try:
+        cnt = await db.aiagent.delete_many(where={"userId": user_id})
+        stats["remaining_agents"] = cnt
+    except Exception as exc:
+        logger.warning("Remaining agent delete failed for user=%s: %s", user_id, exc)
+
+    await db.user.delete(where={"id": user_id})
+    stats["user"] = 1
+    stats["redis"] = stats.get("redis", 0) + await _clear_user_redis(user_id)
+
+    logger.info("Hard deleted user=%s: %s", user_id, stats)
     return stats

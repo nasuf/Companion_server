@@ -404,3 +404,27 @@ async def delete_user_agent(
 
     stats = await hard_delete_agent_data(agent_id, user_id)
     return {"ok": True, "stats": stats}
+
+
+@router.delete("/{user_id}")
+async def delete_user(
+    user_id: str,
+    claims: dict = Depends(require_admin_jwt),
+):
+    """彻底删除用户及该用户关联的全部 Agent 和用户级数据。"""
+    if claims.get("user_id") == user_id or claims.get("sub") == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+
+    user = await db.user.find_unique(where={"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.role == "admin":
+        admin_count = await db.user.count(where={"role": "admin"})
+        if admin_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot delete the last admin")
+
+    from app.services.runtime.data_reset import hard_delete_user_data
+
+    stats = await hard_delete_user_data(user_id)
+    return {"ok": True, "stats": stats}
