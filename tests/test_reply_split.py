@@ -39,9 +39,22 @@ class TestCleanReplyPart:
     def test_strips_repeated_timestamp_prefix(self):
         assert _clean_reply_part("[07-04 16:56] [07-04 16:56] 内容") == "内容"
 
+    def test_strips_malformed_timestamp_prefix(self):
+        # 生产复现: 模型模仿历史前缀但写畸形 (日期乱编 + 分钟缺冒号),
+        # 旧正则 (要求 \\d:\\d) 漏掉 → 泄漏到用户 + 落库 → 雪球化.
+        assert _clean_reply_part("[07-17 45]这我真不知道 咱就一打工的") == (
+            "这我真不知道 咱就一打工的"
+        )
+        assert _clean_reply_part("[07-17 45]你程序是不是有bug") == "你程序是不是有bug"
+
     def test_keeps_non_timestamp_bracket(self):
         # 只剥时间戳格式, 不误删普通方括号内容
         assert _clean_reply_part("[重要] 记得喝水") == "[重要] 记得喝水"
+
+    def test_keeps_short_numeric_range_bracket(self):
+        # [3-5] 这类短数字区间不是时间戳 (长度<4), 不应被剥掉
+        assert _clean_reply_part("[3-5]个人就够了") == "[3-5]个人就够了"
+        assert _clean_reply_part("[1] 第一点") == "[1] 第一点"
 
 
 class TestSplitAndValidateReplies:
