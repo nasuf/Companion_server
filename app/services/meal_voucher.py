@@ -21,7 +21,11 @@ import logging
 import re
 import secrets
 import time
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC
+from datetime import date as date_cls
+from datetime import datetime, timedelta
+from datetime import time as time_cls
+from datetime import timezone
 
 from app.config import settings
 from app.db import db
@@ -47,6 +51,46 @@ class MealVoucherError(Exception):
         super().__init__(message)
         self.reason = reason
         self.message = message
+
+
+_CN_TZ = timezone(timedelta(hours=8))
+
+# 失败留痕 reason: 当日核销量达上限 (先到先得, 超出被拒).
+FAILURE_DAILY_CAP = "daily_cap"
+
+
+# ── 有效期 / 当日边界 (业务口径固定 UTC+8 自然日) ────────────────────
+
+
+def _cn_day_start(now: datetime | None = None) -> datetime:
+    """给定时刻所在 UTC+8 自然日的 00:00 (tz-aware). 用于当日计数/去重."""
+    ref = now.astimezone(_CN_TZ) if now else datetime.now(_CN_TZ)
+    return ref.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def voucher_expires_at(voucher) -> datetime | None:
+    """券的有效期截止时刻: activatedAt + N 天. 未激活 → None.
+
+    Prisma 返回的 activatedAt 为 tz-aware UTC; 结果同样 tz-aware, 可直接跟
+    ``datetime.now(UTC)`` 比较.
+    """
+    activated = getattr(voucher, "activatedAt", None)
+    if not activated:
+        return None
+    if activated.tzinfo is None:
+        activated = activated.replace(tzinfo=UTC)
+    return activated + timedelta(days=settings.meal_validity_days)
+
+
+def is_voucher_expired(voucher, now: datetime | None = None) -> bool:
+    """仅「已激活未核销」的券会过期: 已过截止时刻即视为过期."""
+    if getattr(voucher, "status", None) != VOUCHER_ACTIVATED:
+        return False
+    expires_at = voucher_expires_at(voucher)
+    if not expires_at:
+        return False
+    ref = now or datetime.now(UTC)
+    return ref >= expires_at
 
 
 # ── rotating activation code ─────────────────────────────────────────
@@ -197,11 +241,30 @@ async def redeem_voucher(user_id: str, redeem_code: str):
     if voucher.status != VOUCHER_ACTIVATED:
         raise MealVoucherError("not_activated", "请先激活霸王餐券")
 
+    # 有效期: 激活满 N 天未核销即过期, 不再允许核销 (spec 需求 1).
+    if is_voucher_expired(voucher):
+        raise MealVoucherError(
+            "expired",
+            f"霸王餐券已过有效期（激活后 {settings.meal_validity_days} 天内有效），"
+            "无法核销",
+        )
+
     merchant = await db.mealmerchant.find_first(
         where={"redeemCode": text, "codeActive": True}
     )
     if not merchant:
         raise MealVoucherError("bad_code", "核销码无效，请与商家确认")
+
+    # 每日核销上限 (先到先得, spec 需求 2): 商家码校验通过后, 若当日核销量已达
+    # 上限则拒绝并留痕. 放在商家校验之后, 避免把「乱输码」也算成上限失败.
+    # 竞态说明: 计数与状态转移之间存在窗口, 极端并发可能轻微超出上限 — 活动为
+    # 人工念码, ~1000/日的量级下可接受 (与既有条件转移一致的实用取舍).
+    if await today_redeemed_count() >= settings.meal_daily_redeem_cap:
+        await record_redemption_failure(user_id, merchant.id, FAILURE_DAILY_CAP)
+        raise MealVoucherError(
+            "daily_cap",
+            "今日霸王餐已被抢完啦，明天再来试试吧（记得在券的有效期内哦）",
+        )
 
     # Conditional transition (activated -> redeemed): concurrent double-redeem
     # loses the race and errors instead of silently re-attributing the voucher.
@@ -224,6 +287,54 @@ async def redeem_voucher(user_id: str, redeem_code: str):
         },
     )
     return await db.mealvoucher.find_unique(where={"id": voucher.id})
+
+
+# ── 每日核销上限 / 失败留痕 ──────────────────────────────────────────
+
+
+async def today_redeemed_count(now: datetime | None = None) -> int:
+    """当日 (UTC+8 自然日) 已核销总数, 用于先到先得上限判定."""
+    day_start = _cn_day_start(now)
+    return await db.mealvoucher.count(
+        where={"status": VOUCHER_REDEEMED, "redeemedAt": {"gte": day_start}}
+    )
+
+
+async def record_redemption_failure(
+    user_id: str, merchant_id: str | None, reason: str
+) -> None:
+    """留痕一条核销失败. 每用户每自然日每 reason 只记 1 条 (写前去重),
+    这样后台统计的口径就是「今天有多少人/张券没抢到」而非「点了多少次」.
+    留痕失败不应影响主流程 (用户已收到明确提示), 故吞异常仅日志.
+    """
+    try:
+        day_start = _cn_day_start()
+        existing = await db.mealredemptionfailure.find_first(
+            where={
+                "userId": user_id,
+                "reason": reason,
+                "createdAt": {"gte": day_start},
+            }
+        )
+        if existing:
+            return
+        await db.mealredemptionfailure.create(
+            data={
+                "user": {"connect": {"id": user_id}},
+                "merchantId": merchant_id,
+                "reason": reason,
+            }
+        )
+        logger.info(
+            "meal redemption failure recorded",
+            extra={
+                "event": "meal_redemption_failure",
+                "user_id": user_id,
+                "reason": reason,
+            },
+        )
+    except Exception:
+        logger.exception("failed to record meal redemption failure")
 
 
 # ── admin corrections (后台清除记录) ─────────────────────────────────
@@ -371,8 +482,10 @@ async def activation_feed(limit: int = 50) -> list[dict]:
 
 async def voucher_stats() -> dict:
     """Cumulative + today counters for the admin overview (UTC+8 天)."""
-    tz_cn = timezone(timedelta(hours=8))
-    day_start = datetime.now(tz_cn).replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.now(UTC)
+    day_start = _cn_day_start(now)
+    # 过期券: 已激活未核销, 且激活时间早于 (now - 有效期) → 已过 7 天窗口.
+    expired_cutoff = now - timedelta(days=settings.meal_validity_days)
     total_activated = await db.mealvoucher.count(
         where={"activatedAt": {"not": None}}
     )
@@ -380,8 +493,93 @@ async def voucher_stats() -> dict:
     today_activated = await db.mealvoucher.count(
         where={"activatedAt": {"gte": day_start}}
     )
+    today_redeemed = await db.mealvoucher.count(
+        where={"status": VOUCHER_REDEEMED, "redeemedAt": {"gte": day_start}}
+    )
+    total_expired = await db.mealvoucher.count(
+        where={
+            "status": VOUCHER_ACTIVATED,
+            "activatedAt": {"lte": expired_cutoff},
+        }
+    )
+    # 去重后每用户每日仅 1 条, 计数即「今日多少人/张券没抢到」.
+    today_failed = await db.mealredemptionfailure.count(
+        where={"reason": FAILURE_DAILY_CAP, "createdAt": {"gte": day_start}}
+    )
     return {
         "total_activated": total_activated,
         "total_redeemed": total_redeemed,
         "today_activated": today_activated,
+        "today_redeemed": today_redeemed,
+        "daily_redeem_cap": settings.meal_daily_redeem_cap,
+        "total_expired": total_expired,
+        "today_failed": today_failed,
     }
+
+
+async def expired_vouchers_feed(limit: int = 100) -> list[dict]:
+    """已过期券明细 (已激活未核销且超 N 天), 最近激活的在前 + 显示名/截止时刻.
+
+    活动开始不足 N 天时自然为空 (没有券会满 7 天) — 符合「7 天后才有数据」.
+    """
+    now = datetime.now(UTC)
+    expired_cutoff = now - timedelta(days=settings.meal_validity_days)
+    rows = await db.mealvoucher.find_many(
+        where={"status": VOUCHER_ACTIVATED, "activatedAt": {"lte": expired_cutoff}},
+        order={"activatedAt": "desc"},
+        take=limit,
+    )
+    displays = await resolve_user_displays([row.userId for row in rows])
+    return [
+        {
+            "voucher_id": row.id,
+            "user_display": displays.get(row.userId, row.userId),
+            "activated_at": row.activatedAt.isoformat() if row.activatedAt else None,
+            "expired_at": (
+                exp.isoformat() if (exp := voucher_expires_at(row)) else None
+            ),
+        }
+        for row in rows
+    ]
+
+
+async def redemption_failures_feed(
+    day: date_cls | None = None, limit: int = 200
+) -> list[dict]:
+    """指定自然日 (默认今天, UTC+8) 因当日上限被拒的核销失败明细.
+
+    每用户每日仅 1 条 (去重), 故行数 = 当日没抢到的人数.
+    """
+    ref = (
+        datetime.combine(day, time_cls(), tzinfo=_CN_TZ)
+        if day
+        else datetime.now(_CN_TZ)
+    )
+    day_start = ref.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    rows = await db.mealredemptionfailure.find_many(
+        where={
+            "reason": FAILURE_DAILY_CAP,
+            "createdAt": {"gte": day_start, "lt": day_end},
+        },
+        order={"createdAt": "desc"},
+        take=limit,
+    )
+    displays = await resolve_user_displays([row.userId for row in rows])
+    merchant_ids = [row.merchantId for row in rows if row.merchantId]
+    merchant_names: dict[str, str] = {}
+    if merchant_ids:
+        merchants = await db.mealmerchant.find_many(
+            where={"id": {"in": list(dict.fromkeys(merchant_ids))}}
+        )
+        merchant_names = {m.id: m.name for m in merchants}
+    return [
+        {
+            "user_display": displays.get(row.userId, row.userId),
+            "merchant_name": (
+                merchant_names.get(row.merchantId) if row.merchantId else None
+            ),
+            "failed_at": row.createdAt.isoformat() if row.createdAt else None,
+        }
+        for row in rows
+    ]

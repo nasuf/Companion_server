@@ -39,11 +39,16 @@ class MerchantLoginRequest(BaseModel):
 
 
 def _voucher_payload(voucher, merchant_name: str | None = None) -> dict:
+    expires_at = mv.voucher_expires_at(voucher)
     return {
         "status": voucher.status,
         "activated_at": voucher.activatedAt.isoformat() if voucher.activatedAt else None,
         "redeemed_at": voucher.redeemedAt.isoformat() if voucher.redeemedAt else None,
         "merchant_name": merchant_name,
+        # 有效期: 激活后 N 天. 前端据此在个人页展示「有效期至…」并标出过期态.
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "expired": mv.is_voucher_expired(voucher),
+        "validity_days": settings.meal_validity_days,
     }
 
 
@@ -93,6 +98,13 @@ async def redeem_voucher(
     except mv.MealVoucherError as exc:
         if exc.reason == "bad_code":
             await record_login_failure(request, f"mealredeem:{user_id}")
+        # daily_cap / expired 需要前端弹框区分处理, 用结构化 detail 带上 reason;
+        # 其余沿用纯字符串 message (前端已兼容两种形态).
+        if exc.reason in ("daily_cap", "expired"):
+            raise HTTPException(
+                status_code=400,
+                detail={"message": exc.message, "reason": exc.reason},
+            )
         raise HTTPException(status_code=400, detail=exc.message)
     return _voucher_payload(voucher, await _merchant_name_of(voucher))
 

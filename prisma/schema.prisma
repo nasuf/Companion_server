@@ -59,6 +59,7 @@ model User {
   musicPlaybacks    MusicPlayback[]
   musicCoListeningSessions MusicCoListeningSession[]
   mealVoucher       MealVoucher?
+  mealRedeemFailures MealRedemptionFailure[]
   achievementUnlocks AchievementUnlock[]
   achievementEvents  AchievementEvent[]
   pushDevices     PushDevice[]
@@ -1594,6 +1595,23 @@ model MealVoucher {
   @@index([merchantId], map: "meal_vouchers_merchant_idx")
   @@index([activatedAt], map: "meal_vouchers_activated_at_idx")
   @@map("meal_vouchers")
+}
+
+// 霸王餐核销失败记录: 当日核销总量已达上限 (先到先得, 超出 1000 份) 时, 用户
+// 核销请求被拒绝, 在此留痕供后台「数据统计」查看谁没抢到. 每用户每自然日
+// 每种 reason 只记 1 条 (服务层写入前去重), 便于按「人/券」口径统计.
+// merchantId 保留为松引用 (无外键): 只作展示线索, 商家删除不影响历史失败记录.
+model MealRedemptionFailure {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  merchantId String?  @map("merchant_id")
+  reason     String   @default("daily_cap")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt], map: "meal_redeem_failures_created_at_idx")
+  @@index([userId], map: "meal_redeem_failures_user_idx")
+  @@map("meal_redemption_failures")
 }
 
 // 单 agent 模型 override. 改了只影响该 agent, 其余仍走 SystemConfig/env.

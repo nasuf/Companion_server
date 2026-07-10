@@ -4,6 +4,8 @@ Endpoints (all admin-only):
   GET    /admin-api/meal/overview        — 开关状态 + 当前码 + 倒计时 + 累计数据
   GET    /admin-api/meal/activations     — 实时校验动态 (轮询)
   GET    /admin-api/meal/stats           — 日期范围统计 (UTC+8 按天聚合激活/核销)
+  GET    /admin-api/meal/expired         — 已过期券明细 (激活超 N 天未核销 + 用户)
+  GET    /admin-api/meal/redemption-failures — 指定日核销失败明细 (超上限 + 用户)
   PUT    /admin-api/meal/code-enabled    — 开启/关闭校验码功能
   GET    /admin-api/meal/merchants       — 商家列表 + 各自核销数
   POST   /admin-api/meal/merchants       — 新增商家 (自动生成唯一核销码)
@@ -160,6 +162,32 @@ async def range_stats(start: str, end: str):
         "redeemed_total": sum(redeemed.values()),
         "days": days,
     }
+
+
+@router.get("/expired")
+async def expired_vouchers(limit: int = 100):
+    """已过期券明细: 激活后超过有效期 (默认 7 天) 仍未核销的券 + 用户.
+
+    活动开始不足有效期天数时返回空 — 数据要满 N 天才会出现 (spec 需求 3).
+    """
+    return await mv.expired_vouchers_feed(limit=min(max(limit, 1), 500))
+
+
+@router.get("/redemption-failures")
+async def redemption_failures(date: str | None = None, limit: int = 200):
+    """指定自然日 (默认今天, UTC+8) 因当日核销上限被拒的失败明细 + 用户.
+
+    每用户每日去重 → 返回行数即当日「没抢到」的人数.
+    """
+    day: date_cls | None = None
+    if date:
+        try:
+            day = date_cls.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式不正确 (YYYY-MM-DD)")
+    items = await mv.redemption_failures_feed(day=day, limit=min(max(limit, 1), 500))
+    resolved = day or datetime.now(mv._CN_TZ).date()
+    return {"date": resolved.isoformat(), "total": len(items), "items": items}
 
 
 async def _redeemed_counts() -> dict[str, int]:

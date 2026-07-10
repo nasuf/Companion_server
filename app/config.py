@@ -125,6 +125,13 @@ class Settings(BaseSettings):
     # 空 = 不校验 (仅限本地开发); 生产必配, 否则任何用户可自助激活.
     meal_staff_key: str = ""
 
+    # 霸王餐券激活后的有效期 (天): 校验成功 (激活) 起算, 超过该天数未核销即过期,
+    # 无法再找商家兑换. 有效期口径按 UTC+8 自然时间 (activatedAt + N 天).
+    meal_validity_days: int = 7
+    # 每日霸王餐核销总量上限 (先到先得): 单个 UTC+8 自然日内核销总数达到该值后,
+    # 后续核销请求被拒并留痕, 提示用户次日 (仍需在有效期内) 再来.
+    meal_daily_redeem_cap: int = 1000
+
     # Optional: a fully-provisioned "template" agent id. When set, a brand-new
     # user (e.g. first WeChat Mini Program login) is given an instant clone of
     # this agent (persona + L1 memory + embeddings copied, no LLM), so they can

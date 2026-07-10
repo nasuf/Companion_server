@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import settings
 from app.services import meal_voucher as mv
 
 
@@ -234,6 +235,7 @@ async def test_redeem_happy_path(monkeypatch):
                 side_effect=[_voucher(mv.VOUCHER_ACTIVATED), updated]
             ),
             update_many=AsyncMock(return_value=1),
+            count=AsyncMock(return_value=0),  # 当日核销数远低于上限
         ),
         mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant)),
     )
@@ -305,6 +307,7 @@ async def test_concurrent_redeem_two_stores_single_winner(monkeypatch):
             # 读的时候还是 activated (竞态窗口), 但条件 update 匹配 0 行
             find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_ACTIVATED)),
             update_many=AsyncMock(return_value=0),
+            count=AsyncMock(return_value=0),
         ),
         mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant_b)),
     )
@@ -736,6 +739,184 @@ async def test_admin_range_stats_validation(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await admin_meal.range_stats("2024-01-01", "2026-07-08")
     assert exc.value.status_code == 400
+
+
+# ── validity / daily cap ──────────────────────────────────────────
+
+
+def _activated_voucher(*, days_ago: float = 0):
+    return SimpleNamespace(
+        id="v-1",
+        userId="user-1",
+        status=mv.VOUCHER_ACTIVATED,
+        activatedAt=datetime.now(UTC) - timedelta(days=days_ago),
+        redeemedAt=None,
+        merchantId=None,
+    )
+
+
+def test_voucher_expires_at_and_expired_flag():
+    voucher = _activated_voucher(days_ago=2)
+    expires = mv.voucher_expires_at(voucher)
+    assert expires is not None
+    assert expires == voucher.activatedAt + timedelta(days=settings.meal_validity_days)
+    assert mv.is_voucher_expired(voucher) is False
+
+    old = _activated_voucher(days_ago=settings.meal_validity_days + 0.01)
+    assert mv.is_voucher_expired(old) is True
+    assert mv.is_voucher_expired(_voucher(mv.VOUCHER_INACTIVE)) is False
+
+
+@pytest.mark.asyncio
+async def test_redeem_rejects_expired_voucher(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_activated_voucher(days_ago=8)),
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "654321")
+    assert exc.value.reason == "expired"
+
+
+@pytest.mark.asyncio
+async def test_redeem_rejects_daily_cap_and_records_failure(monkeypatch):
+    merchant = SimpleNamespace(id="m-1", name="张记食堂", codeActive=True)
+    db = _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_activated_voucher()),
+            count=AsyncMock(return_value=settings.meal_daily_redeem_cap),
+        ),
+        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant)),
+        mealredemptionfailure=SimpleNamespace(
+            find_first=AsyncMock(return_value=None),
+            create=AsyncMock(),
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher("user-1", "654321")
+    assert exc.value.reason == "daily_cap"
+    db.mealredemptionfailure.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_record_redemption_failure_dedupes_per_user_day(monkeypatch):
+    existing = SimpleNamespace(id="f-1")
+    db = _mock_db(
+        monkeypatch,
+        mealredemptionfailure=SimpleNamespace(
+            find_first=AsyncMock(return_value=existing),
+            create=AsyncMock(),
+        ),
+    )
+
+    await mv.record_redemption_failure("user-1", "m-1", mv.FAILURE_DAILY_CAP)
+
+    db.mealredemptionfailure.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expired_vouchers_feed(monkeypatch):
+    row = _activated_voucher(days_ago=10)
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(find_many=AsyncMock(return_value=[row])),
+    )
+    monkeypatch.setattr(
+        mv, "resolve_user_displays", AsyncMock(return_value={"user-1": "小明"})
+    )
+
+    items = await mv.expired_vouchers_feed(limit=10)
+
+    assert len(items) == 1
+    assert items[0]["user_display"] == "小明"
+    assert items[0]["expired_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_redemption_failures_feed(monkeypatch):
+    row = SimpleNamespace(
+        userId="user-1",
+        merchantId="m-1",
+        createdAt=datetime(2026, 7, 10, 12, 0, tzinfo=UTC),
+    )
+    merchant = SimpleNamespace(id="m-1", name="伴生宴")
+    _mock_db(
+        monkeypatch,
+        mealredemptionfailure=SimpleNamespace(find_many=AsyncMock(return_value=[row])),
+        mealmerchant=SimpleNamespace(find_many=AsyncMock(return_value=[merchant])),
+    )
+    monkeypatch.setattr(
+        mv, "resolve_user_displays", AsyncMock(return_value={"user-1": "小明"})
+    )
+
+    items = await mv.redemption_failures_feed()
+
+    assert len(items) == 1
+    assert items[0]["user_display"] == "小明"
+    assert items[0]["merchant_name"] == "伴生宴"
+
+
+@pytest.mark.asyncio
+async def test_redeem_endpoint_structured_errors(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.public import meal as meal_api
+
+    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
+    for reason, message in [
+        ("daily_cap", "今日霸王餐已被抢完啦，明天再来试试吧（记得在券的有效期内哦）"),
+        ("expired", "霸王餐券已过有效期"),
+    ]:
+        monkeypatch.setattr(
+            meal_api.mv,
+            "redeem_voucher",
+            AsyncMock(side_effect=mv.MealVoucherError(reason, message)),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await meal_api.redeem_voucher(
+                meal_api.VoucherCodeRequest(code="123456"),
+                FakeRequest(),
+                payload={"sub": "user-1"},
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.detail == {"message": message, "reason": reason}
+
+
+@pytest.mark.asyncio
+async def test_admin_expired_and_failures_endpoints(monkeypatch):
+    from app.api.admin import meal as admin_meal
+
+    monkeypatch.setattr(
+        admin_meal.mv,
+        "expired_vouchers_feed",
+        AsyncMock(return_value=[{"voucher_id": "v-1", "user_display": "小明"}]),
+    )
+    monkeypatch.setattr(
+        admin_meal.mv,
+        "redemption_failures_feed",
+        AsyncMock(
+            return_value=[
+                {
+                    "user_display": "小红",
+                    "merchant_name": "伴生宴",
+                    "failed_at": "2026-07-10T12:00:00+00:00",
+                }
+            ]
+        ),
+    )
+
+    expired = await admin_meal.expired_vouchers()
+    assert expired[0]["user_display"] == "小明"
+
+    failures = await admin_meal.redemption_failures(date="2026-07-10")
+    assert failures["date"] == "2026-07-10"
+    assert failures["total"] == 1
+    assert failures["items"][0]["user_display"] == "小红"
 
 
 @pytest.mark.asyncio
