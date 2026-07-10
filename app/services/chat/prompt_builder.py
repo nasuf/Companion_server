@@ -192,10 +192,28 @@ async def _build_personality_section(agent: Any) -> _PromptBody | None:
     # tokens 静态段, 减少噪声.
     age_text = f"你的年龄是{age}岁。" if isinstance(age, int) and age > 0 else ""
 
+    # 身份硬锚: 职业/现居地是最常被问、最易穿帮的身份事实. core_memory 永驻注入
+    # 被删 (spec §3 纯检索) 后, 闲聊时这些事实不再进 prompt, AI 被问职业会凭空
+    # 编造 (生产复现"便利店/待业"). 从 agent 行已加载字段拼装 (无额外查库),
+    # per-agent 稳定 → 落在 STABLE PREFIX 不破坏 provider prefix cache.
+    occupation = (getattr(agent, "occupation", None) or "").strip()
+    city = (getattr(agent, "city", None) or "").strip()
+    facts_bits: list[str] = []
+    if occupation:
+        facts_bits.append(f"你的职业是{occupation}")
+    if city:
+        facts_bits.append(f"现居{city}")
+    identity_facts = (
+        "，".join(facts_bits)
+        + "。这是你真实的身份设定，别人问起你的工作或身份时要如实回答，"
+        "绝不能凭空编造成与此不符的其他职业或身份。\n"
+    ) if facts_bits else ""
+
     body = _render_section(tpl, {
         "name": name,
         "gender_text": gender_text,
         "age_text": age_text,
+        "identity_facts": identity_facts,
         "mbti_line": mbti_line or "中性",
         "mbti_detail": detail,
         "style_rules": style,

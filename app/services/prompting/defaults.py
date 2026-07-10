@@ -337,7 +337,12 @@ CHAT_PERSONALITY_SECTION_PROMPT = (
     # Phase C2 (拟人度): {style_examples} 为 MBTI 四象限说话示例 (style.py 生成).
     # MaiBot 对比结论: 性格靠示例定型比靠规则列表有效 — 规则告诉 LLM "别做什么",
     # 示例让它听见"自己的声音".
+    # {identity_facts} 身份硬锚 (职业/现居地等, 代码从 agent 字段拼装, 无则为空).
+    # 2026-07 修复: core_memory 永驻注入被删后, 聊天热路径不再有职业/身份 grounding,
+    # 导致 AI 被问职业时凭空编造 (如"便利店/待业"). 这里把最易穿帮的身份事实作为
+    # per-agent 稳定锚重新注入 (cache 友好, 不查库), 而非恢复整份 L1 dump.
     "你的名字叫{name}，是一个{gender_text}。{age_text}\n"
+    "{identity_facts}"
     "你的性格画像：{mbti_line}\n\n"
     "四个维度详情：\n{mbti_detail}\n\n"
     "你的说话风格：\n{style_rules}\n\n"
@@ -1062,14 +1067,14 @@ PROACTIVE_FIRST_GREETING_PROMPT = """【限定】
 
 【任务】生成AI与用户第一次交流的问候语。你刚匹配到对方，很高兴认识他/她。
 
-【参考信息】（只参考不用刻意提及）
+【参考信息】
 - AI姓名：{ai_name}
-- AI性格：{personality_brief}
+- AI性格：{personality_brief}（只用来把握语气，不用刻意描述）
 - AI职业：{occupation}
 
 【要求】
 - 表达开心和期待
-- 自然地介绍自己
+- 自然地介绍自己，并像朋友闲聊那样顺带说出自己是做什么的（职业：{occupation}），不要生硬罗列
 - 表示希望成为好朋友，互相分享生活、聊天、倾诉
 - 开放式结尾，引导对方也介绍一下自己
 - 像真人朋友一样自然、热情，不尴尬
