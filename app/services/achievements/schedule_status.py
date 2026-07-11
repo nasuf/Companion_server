@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.db import db
@@ -15,12 +16,42 @@ logger = logging.getLogger(__name__)
 _STATUS_BUCKETS = {"idle", "busy", "sleep"}
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleStatusObservation:
+    bucket: str
+    period_key: str
+
+
 def _status_bucket(status: str | None) -> str | None:
     if status == "very_busy":
         return "busy"
     if status in _STATUS_BUCKETS:
         return status
     return None
+
+
+def _matching_schedule_slot(schedule: list[dict], local_at: datetime) -> dict | None:
+    current_time = local_at.strftime("%H:%M")
+    for slot in schedule:
+        start = str(slot.get("start") or "00:00")
+        end = str(slot.get("end") or "23:59")
+        if start > end:
+            if current_time >= start or current_time < end:
+                return slot
+        elif start <= current_time < end:
+            return slot
+    return None
+
+
+def _schedule_period_key(slot: dict | None, local_at: datetime, bucket: str) -> str:
+    if not slot:
+        return f"{local_at.date().isoformat()}:default:{bucket}"
+    start = str(slot.get("start") or "00:00")
+    end = str(slot.get("end") or "23:59")
+    period_date = local_at.date()
+    if start > end and local_at.strftime("%H:%M") < end:
+        period_date -= timedelta(days=1)
+    return f"{period_date.isoformat()}:{start}-{end}:{bucket}"
 
 
 async def record_schedule_status_chat(
@@ -31,7 +62,7 @@ async def record_schedule_status_chat(
     conversation_id: str,
     message_id: str,
     occurred_at: datetime,
-) -> str | None:
+) -> ScheduleStatusObservation | None:
     """Record which AI schedule state the user chatted in, scoped by local day."""
     local_at = _local(occurred_at)
     try:
@@ -43,6 +74,7 @@ async def record_schedule_status_chat(
         bucket = _status_bucket(str(status.get("status") or ""))
         if not bucket:
             return None
+        slot = _matching_schedule_slot(schedule, local_at)
     except Exception as e:
         logger.debug(f"[ACH] schedule status skipped agent_id={agent_id}: {e}")
         return None
@@ -63,7 +95,10 @@ async def record_schedule_status_chat(
         },
         occurred_at=occurred_at,
     )
-    return bucket
+    return ScheduleStatusObservation(
+        bucket=bucket,
+        period_key=_schedule_period_key(slot, local_at, bucket),
+    )
 
 
 async def has_schedule_status_streak(
@@ -78,13 +113,15 @@ async def has_schedule_status_streak(
         local_date = (local_day.date() - timedelta(days=offset)).isoformat()
         rows = await db.query_raw(
             """
-            SELECT COUNT(DISTINCT value_text) AS count
-            FROM achievement_events
-            WHERE user_id = $1
-              AND agent_id = $2
-              AND event_type = 'schedule_status_chat_day'
-              AND source_id LIKE $3
-              AND value_text IN ('idle', 'busy', 'sleep')
+            SELECT COUNT(DISTINCT e.value_text) AS count
+            FROM achievement_events e
+            LEFT JOIN conversations c ON c.id = e.conversation_id
+            WHERE e.user_id = $1
+              AND e.agent_id = $2
+              AND e.event_type = 'schedule_status_chat_day'
+              AND e.source_id LIKE $3
+              AND e.value_text IN ('idle', 'busy', 'sleep')
+              AND (e.conversation_id IS NULL OR c.is_deleted = FALSE)
             """,
             user_id,
             agent_id,

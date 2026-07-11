@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.services.achievements.engine import (
     handle_achievement_event,
+    handle_aggregation_event,
     handle_assistant_message_event,
     handle_assistant_turn_event,
     handle_intent_event,
@@ -11,6 +12,7 @@ from app.services.achievements.engine import (
     handle_user_message_event,
 )
 from app.services.achievements.events import (
+    AggregationAchievementEvent,
     AssistantMessageAchievementEvent,
     AssistantTurnAchievementEvent,
     IntentAchievementEvent,
@@ -22,6 +24,7 @@ from app.services.achievements.rules.daily_rollup_rules import run_daily_rollup
 from app.services.achievements.utils import count_chars
 
 __all__ = [
+    "AggregationAchievementEvent",
     "AssistantMessageAchievementEvent",
     "AssistantTurnAchievementEvent",
     "IntentAchievementEvent",
@@ -29,6 +32,7 @@ __all__ = [
     "UserMessageAchievementEvent",
     "count_chars",
     "handle_achievement_event",
+    "handle_aggregation_event",
     "handle_assistant_message_event",
     "handle_assistant_turn_event",
     "handle_intent_event",

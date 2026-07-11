@@ -66,3 +66,26 @@ async def test_empty_older_message_page_does_not_return_achievements():
 
     assert items == []
     fake_db.query_raw.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disabled_historical_unlock_is_hidden_from_timeline():
+    message = SimpleNamespace(createdAt=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc))
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(return_value=[{
+        "id": "unlock-disabled",
+        "achievement_id": 3,
+        "unlocked_at": datetime(2026, 6, 1, 12, 5, tzinfo=timezone.utc),
+    }])
+
+    with patch.object(conversations, "db", fake_db):
+        items = await conversations._achievement_timeline_items(
+            conversation_id="c1",
+            user_id="u1",
+            agent_id="a1",
+            messages=[message],
+            is_latest_page=True,
+            include_metadata=True,
+        )
+
+    assert items == []

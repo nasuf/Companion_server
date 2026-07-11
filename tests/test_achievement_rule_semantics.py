@@ -23,8 +23,8 @@ def test_public_service_exports_event_entrypoints_not_rule_helpers():
     assert not hasattr(service, "unlock_achievement")
 
 
-def test_achievement_count_chars_includes_punctuation_and_emoji():
-    assert count_chars("哈！😊 ~") == 4
+def test_achievement_count_chars_excludes_punctuation_symbols_and_emoji():
+    assert count_chars("哈！😊 ~") == 1
 
 
 @pytest.mark.asyncio
@@ -218,7 +218,12 @@ async def test_question_achievement_31_unlocks_on_fifth_natural_day_question():
             text="你觉得呢?",
         )
 
-    day_messages.assert_awaited_once_with("u1", "a1", occurred_at)
+    day_messages.assert_awaited_once_with(
+        "u1",
+        "a1",
+        occurred_at,
+        through=occurred_at,
+    )
     assert any(call.kwargs["achievement_id"] == 31 for call in unlock.await_args_list)
 
 
@@ -498,6 +503,7 @@ async def test_daily_rollup_achievement_60_ignores_assistant_chars():
         patch.object(daily_rollup_rules, "db", fake_db),
         patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
         patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(9999, 99999))),
+            patch.object(daily_rollup_rules, "_day_role_message_counts", AsyncMock(return_value=(1, 1))),
         patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "record_event", AsyncMock()),
@@ -595,6 +601,7 @@ async def test_daily_rollup_unlocks_odd_length_user_messages_only():
         patch.object(daily_rollup_rules, "db", fake_db),
         patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
         patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(50, 999))),
+            patch.object(daily_rollup_rules, "_day_role_message_counts", AsyncMock(return_value=(10, 1))),
         patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "record_event", AsyncMock()),
@@ -619,6 +626,7 @@ async def test_daily_rollup_odd_length_rejects_any_even_user_message():
         patch.object(daily_rollup_rules, "db", fake_db),
         patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
         patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(49, 999))),
+            patch.object(daily_rollup_rules, "_day_role_message_counts", AsyncMock(return_value=(10, 1))),
         patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "record_event", AsyncMock()),
@@ -642,6 +650,7 @@ async def test_daily_rollup_odd_length_ignores_assistant_message_lengths():
         patch.object(daily_rollup_rules, "db", fake_db),
         patch.object(daily_rollup_rules, "_day_user_messages", AsyncMock(return_value=rows)),
         patch.object(daily_rollup_rules, "_day_role_char_counts", AsyncMock(return_value=(50, 998))),
+            patch.object(daily_rollup_rules, "_day_role_message_counts", AsyncMock(return_value=(10, 1))),
         patch.object(daily_rollup_rules, "has_schedule_status_streak", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "_has_complete_unique_48h_window", AsyncMock(return_value=False)),
         patch.object(daily_rollup_rules, "record_event", AsyncMock()),
@@ -845,7 +854,7 @@ async def test_memory_changelog_does_not_unlock_for_mismatched_user():
 
 
 @pytest.mark.asyncio
-async def test_assistant_emoji_counts_for_achievement_59():
+async def test_assistant_emoji_does_not_count_for_sticker_achievement_59():
     fake_db = MagicMock()
     fake_db.conversation.find_unique = AsyncMock(
         return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
@@ -865,8 +874,8 @@ async def test_assistant_emoji_counts_for_achievement_59():
         )
 
     event_types = [call.kwargs["event_type"] for call in record.await_args_list]
-    assert "assistant_emoji" in event_types
-    assert any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
+    assert "assistant_sticker" not in event_types
+    assert not any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -1085,7 +1094,7 @@ async def test_user_message_achievements_use_persisted_message_time_for_reply_pa
 
 
 @pytest.mark.asyncio
-async def test_assistant_sticker_metadata_does_not_count_for_achievement_59():
+async def test_assistant_sticker_metadata_counts_for_achievement_59():
     fake_db = MagicMock()
     fake_db.conversation.find_unique = AsyncMock(
         return_value=MagicMock(userId="u1", agentId="a1", workspaceId="w1")
@@ -1105,5 +1114,5 @@ async def test_assistant_sticker_metadata_does_not_count_for_achievement_59():
         )
 
     event_types = [call.kwargs["event_type"] for call in record.await_args_list]
-    assert "assistant_emoji" not in event_types
-    assert not any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)
+    assert "assistant_sticker" in event_types
+    assert any(call.kwargs["achievement_id"] == 59 for call in unlock.await_args_list)

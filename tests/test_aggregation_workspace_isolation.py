@@ -6,7 +6,7 @@ Fake Redis fixture 来自 tests/conftest.py::FakeAggregationRedis。
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -83,6 +83,68 @@ async def test_scan_expired_returns_agent_id(fake_aggregation_redis):
     assert text == "ok"
     assert conv_id == "conv-A"
     assert msg_id == "m"
+
+
+@pytest.mark.asyncio
+async def test_completed_multi_fragment_window_emits_one_achievement_event(
+    fake_aggregation_redis,
+):
+    from app.services.achievements.rules import aggregation_rules
+
+    redis = fake_aggregation_redis
+    background_tasks = []
+
+    def _capture_background(coro):
+        background_tasks.append(coro)
+
+    with (
+        patch("app.services.interaction.aggregation.get_redis", return_value=redis),
+        patch.object(aggregation_rules, "record_event", AsyncMock()) as record,
+        patch.object(
+            aggregation_rules,
+            "_event_count",
+            AsyncMock(return_value=50),
+        ),
+        patch.object(
+            aggregation_rules,
+            "unlock_achievement",
+            AsyncMock(),
+        ) as unlock,
+        patch(
+            "app.services.runtime.tasks.fire_background",
+            side_effect=_capture_background,
+        ),
+    ):
+        await push_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="你",
+            message_id="m1",
+        )
+        await push_pending(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="好",
+            message_id="m2",
+        )
+        text, _, _, _ = await flush_pending(agent_id="agent-A", user_id="u1")
+        assert len(background_tasks) == 1
+        await background_tasks[0]
+
+    assert text == "你好"
+    record.assert_awaited_once_with(
+        user_id="u1",
+        agent_id="agent-A",
+        workspace_id=None,
+        conversation_id="conv-A",
+        event_type="aggregation_window_completed",
+        source_id="m2",
+        value_int=2,
+        occurred_at=None,
+    )
+    assert unlock.await_args.kwargs["achievement_id"] == 86
 
 
 @pytest.mark.asyncio

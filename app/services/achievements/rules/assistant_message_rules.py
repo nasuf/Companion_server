@@ -7,9 +7,9 @@ from datetime import datetime
 from app.db import db
 from app.services.achievements.events import AssistantMessageAchievementEvent, AssistantTurnAchievementEvent
 from app.services.achievements.repository import _birthday_mmdd, _event_count, record_event, unlock_achievement
-from app.services.achievements.utils import _aware, _field, _has_emoji, _local, _now, count_chars
+from app.services.achievements.utils import _aware, _field, _local, _now, count_chars
 
-_ASSISTANT_EMOJI_EVENT = "assistant_emoji"
+_ASSISTANT_STICKER_EVENT = "assistant_sticker"
 
 
 async def evaluate_assistant_message(event: AssistantMessageAchievementEvent) -> None:
@@ -51,9 +51,9 @@ async def _evaluate_assistant_message(
     occurred_at = _aware(occurred_at or _now())
     char_count = count_chars(text)
     await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="assistant_message", source_id=message_id, value_int=char_count, metadata=metadata, occurred_at=occurred_at)
-    if _has_emoji(text):
-        await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type=_ASSISTANT_EMOJI_EVENT, source_id=message_id)
-        if await _event_count(user_id, agent_id, _ASSISTANT_EMOJI_EVENT) >= 100:
+    if metadata and metadata.get("sticker_url"):
+        await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type=_ASSISTANT_STICKER_EVENT, source_id=message_id)
+        if await _event_count(user_id, agent_id, _ASSISTANT_STICKER_EVENT) >= 100:
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=59)
     if char_count <= 3:
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="assistant_short_reply", source_id=message_id)
@@ -121,13 +121,15 @@ async def _check_slow_assistant_reply(
         WHERE c.user_id = $1
           AND c.agent_id = $2
           AND c.is_deleted = FALSE
+          AND m.conversation_id = $3
           AND m.role = 'user'
-          AND m.created_at <= $3::timestamp
+          AND m.created_at <= $4::timestamp
         ORDER BY m.created_at DESC
         LIMIT 1
         """,
         user_id,
         agent_id,
+        conversation_id,
         at,
     )
     if rows and _field(rows[0], "created_at"):

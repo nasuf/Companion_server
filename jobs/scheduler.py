@@ -8,12 +8,14 @@ Uses APScheduler for:
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import settings
 from app.observability.events import EVT_SCHEDULER_JOB
+from app.redis_client import get_redis
 from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.lifecycle.l2_dynamics import run_l2_adjustment
 from app.services.reflection import run_weekly_reflection
@@ -49,6 +51,7 @@ from app.services.runtime.job_queue import process_runtime_jobs
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
+_ACHIEVEMENT_ROLLUP_CHECKPOINT_KEY = "achievement:daily_rollup:last_success"
 
 
 async def _run_distributed_job(
@@ -167,9 +170,20 @@ def setup_scheduler():
         "cron",
         hour=0,
         minute=5,
+        timezone=settings.schedule_timezone,
         id="achievement_daily_rollup",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
+        misfire_grace_time=6 * 3600,
+    )
+    scheduler.add_job(
+        _run_achievement_daily_rollup,
+        "date",
+        run_date=datetime.now(ZoneInfo(settings.schedule_timezone))
+        + timedelta(seconds=30),
+        id="achievement_daily_rollup_startup_catchup",
+        replace_existing=True,
     )
 
     # Weekly topic intimacy on Sunday at 2 AM
@@ -418,12 +432,51 @@ async def _run_weekly_portraits():
 
 async def _run_achievement_daily_rollup():
     async def _body():
-        try:
-            from app.services.achievements.service import run_daily_rollup
+        from app.services.achievements.service import run_daily_rollup
 
-            await run_daily_rollup()
+        target_day = (
+            datetime.now(ZoneInfo(settings.schedule_timezone)).date()
+            - timedelta(days=1)
+        )
+        redis = None
+        try:
+            redis = await get_redis()
+            raw_checkpoint = await redis.get(_ACHIEVEMENT_ROLLUP_CHECKPOINT_KEY)
         except Exception as e:
-            logger.warning(f"Achievement daily rollup failed: {e}")
+            logger.warning(f"Achievement rollup checkpoint unavailable: {e}")
+            raw_checkpoint = None
+
+        checkpoint_text = (
+            raw_checkpoint.decode()
+            if isinstance(raw_checkpoint, bytes)
+            else str(raw_checkpoint or "")
+        )
+        try:
+            last_success = date.fromisoformat(checkpoint_text)
+        except ValueError:
+            last_success = None
+
+        if last_success and last_success >= target_day:
+            return
+        first_day = target_day if last_success is None else last_success + timedelta(days=1)
+        if (target_day - first_day).days > 365:
+            first_day = target_day - timedelta(days=365)
+            logger.warning("Achievement rollup catch-up capped at 366 days")
+
+        current_day = first_day
+        while current_day <= target_day:
+            local_day = datetime.combine(
+                current_day,
+                time.min,
+                tzinfo=ZoneInfo(settings.schedule_timezone),
+            )
+            await run_daily_rollup(local_day)
+            if redis is not None:
+                await redis.set(
+                    _ACHIEVEMENT_ROLLUP_CHECKPOINT_KEY,
+                    current_day.isoformat(),
+                )
+            current_day += timedelta(days=1)
 
     await _run_distributed_job("achievement_daily_rollup", 1800, _body)
 

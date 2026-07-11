@@ -721,6 +721,7 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
         f"trigger_last:{agent_id}:{user_id}",
         f"intimacy:{agent_id}:{user_id}",
         f"topic_intimacy:{agent_id}:{user_id}",
+        f"achievements:unlocked:{user_id}:{agent_id}",
         f"pending:msgs:{agent_id}:{user_id}",
         f"pending:conv:{agent_id}:{user_id}",
         f"pending:ctx:{agent_id}:{user_id}",

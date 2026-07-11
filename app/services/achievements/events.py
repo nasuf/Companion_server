@@ -59,3 +59,14 @@ class IntentAchievementEvent:
     message_id: str | None
     metadata: dict | None = None
     occurred_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AggregationAchievementEvent:
+    user_id: str
+    agent_id: str
+    conversation_id: str
+    source_id: str
+    part_count: int
+    workspace_id: str | None = None
+    occurred_at: datetime | None = None

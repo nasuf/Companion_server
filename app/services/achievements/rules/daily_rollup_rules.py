@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from app.db import db
 from app.services.achievements.repository import (
     _day_role_char_counts,
+    _day_role_message_counts,
     _day_user_messages,
     _event_count,
     record_event,
@@ -14,6 +16,7 @@ from app.services.achievements.repository import (
 )
 from app.services.achievements.schedule_status import has_schedule_status_streak
 from app.services.achievements.utils import (
+    _aware,
     _day_bounds,
     _field,
     _has_symbol_or_punctuation,
@@ -21,6 +24,8 @@ from app.services.achievements.utils import (
     _normalized_message,
     count_chars,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def run_daily_rollup(target_local_day: datetime | None = None) -> None:
@@ -45,76 +50,175 @@ async def run_daily_rollup(target_local_day: datetime | None = None) -> None:
         start,
         end,
     )
+    failures: list[tuple[str, str]] = []
     for pair in pairs:
-        conversation_id = str(_field(pair, "conversation_id"))
-        user_id = str(_field(pair, "user_id"))
-        agent_id = str(_field(pair, "agent_id"))
-        workspace_id = _field(pair, "workspace_id")
-        rows = await _day_user_messages(user_id, agent_id, start)
-        if not rows:
-            continue
-        counts = [count_chars(str(row["content"])) for row in rows]
-        times = [_field(row, "created_at") for row in rows]
-        local_times = [_local(ts) for ts in times if ts]
-        user_chars, ai_chars = await _day_role_char_counts(user_id, agent_id, start)
-        chat_total = user_chars + ai_chars
-        if len(rows) == 1:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=2)
-        if all(12 <= _local(ts).hour < 14 for ts in times if ts):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=7)
-        if len(rows) % 3 == 0:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=28)
-        if len(counts) >= 2 and counts[0] == counts[-1]:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=43)
-        if chat_total == 100:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=80)
-        if len(rows) >= 20 and all(count <= 10 for count in counts):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=33)
-        if len(rows) >= 10 and all(count % 2 == 0 for count in counts):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=45)
-        if len(rows) >= 10 and all(count % 2 == 1 for count in counts):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=46)
-        if user_chars and ai_chars > user_chars * 3:
+        try:
+            await _run_daily_rollup_for_pair(pair, local_day, start)
+        except Exception as e:
+            failures.append((
+                str(_field(pair, "user_id") or ""),
+                str(_field(pair, "agent_id") or ""),
+            ))
+            logger.warning(
+                "[ACH] daily rollup pair failed user_id=%s agent_id=%s: %s",
+                _field(pair, "user_id"),
+                _field(pair, "agent_id"),
+                e,
+            )
+    if failures:
+        raise RuntimeError(
+            f"Achievement daily rollup failed for {len(failures)} pair(s)"
+        )
+
+
+async def _run_daily_rollup_for_pair(
+    pair,
+    local_day: datetime,
+    start: datetime,
+) -> None:
+    conversation_id = str(_field(pair, "conversation_id"))
+    user_id = str(_field(pair, "user_id"))
+    agent_id = str(_field(pair, "agent_id"))
+    workspace_id = _field(pair, "workspace_id")
+    rows = await _day_user_messages(user_id, agent_id, start)
+    if not rows:
+        return
+    counts = [count_chars(str(row["content"])) for row in rows]
+    times = [_field(row, "created_at") for row in rows]
+    local_times = [_local(ts) for ts in times if ts]
+    user_chars, ai_chars = await _day_role_char_counts(user_id, agent_id, start)
+    chat_total = user_chars + ai_chars
+    if len(rows) == 1:
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=2)
+    if all(12 <= _local(ts).hour < 14 for ts in times if ts):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=7)
+    if len(rows) % 3 == 0:
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=28)
+    if len(counts) >= 2 and counts[0] == counts[-1]:
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=43)
+    if chat_total == 100:
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=80)
+    if len(rows) >= 20 and all(count <= 10 for count in counts):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=33)
+    if len(rows) >= 10 and all(count % 2 == 0 for count in counts):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=45)
+    if len(rows) >= 10 and all(count % 2 == 1 for count in counts):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=46)
+    if user_chars and ai_chars > user_chars * 3:
+        user_message_count, ai_message_count = await _day_role_message_counts(
+            user_id,
+            agent_id,
+            start,
+        )
+        if (
+            user_message_count > 0
+            and ai_message_count > 0
+            and user_message_count + ai_message_count >= 20
+        ):
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=44)
-        if user_chars >= 10000:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=60)
-        if len(rows) >= 2 and times and _is_time_mirror(_local(times[0]), _local(times[-1])):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=90)
-        if local_times and (local_times[-1] - local_times[0]).total_seconds() >= 12 * 3600:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=18)
-            await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "span_12h_day", local_day)
-            if await _has_consecutive_day_flags(user_id, agent_id, "span_12h_day", local_day, 3):
-                await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=50)
-        if sum(1 for ts in local_times if 18 <= ts.hour < 21) >= 3:
-            await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "evening_3_day", local_day)
-            if await _has_consecutive_day_flags(user_id, agent_id, "evening_3_day", local_day, 3):
-                await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=6)
-        if len(rows) >= 20 and all(not _has_symbol_or_punctuation(str(row["content"])) for row in rows):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=36)
-            await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "clean_chat_day", local_day)
-            if await _has_consecutive_day_flags(user_id, agent_id, "clean_chat_day", local_day, 2):
-                await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=51)
-        first_norm = _normalized_message(str(rows[0]["content"]))
-        if first_norm:
-            await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "first_message_norm", local_day, value_text=first_norm)
-            if await _previous_day_first_message_matches(user_id, agent_id, local_day, first_norm):
-                await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=26)
-        if await _has_complete_unique_48h_window(user_id, agent_id, local_day):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=5)
-        if any(ts.hour >= 23 or ts.hour < 7 for ts in local_times):
-            await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "sleep_disturb_day", local_day)
-        elif len(local_times) >= 3:
-            await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "sleep_respect_day", local_day)
-            if await _has_consecutive_day_flags(user_id, agent_id, "sleep_respect_day", local_day, 7):
-                await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=56)
-        if await has_schedule_status_streak(user_id=user_id, agent_id=agent_id, local_day=local_day, days=7):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=74)
-        if await has_schedule_status_streak(user_id=user_id, agent_id=agent_id, local_day=local_day, days=30):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=93)
+    if user_chars >= 10000:
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=60)
+    if await _day_has_all_quick_replies(
+        user_id,
+        agent_id,
+        local_day,
+        required=20,
+    ):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=62)
+    if len(rows) >= 2 and times and _is_time_mirror(_local(times[0]), _local(times[-1])):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=90)
+    if local_times and (local_times[-1] - local_times[0]).total_seconds() >= 12 * 3600:
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=18)
+        await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "span_12h_day", local_day)
+        if await _has_consecutive_day_flags(user_id, agent_id, "span_12h_day", local_day, 3):
+            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=50)
+    if sum(1 for ts in local_times if 18 <= ts.hour < 21) >= 3:
+        await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "evening_3_day", local_day)
+        if await _has_consecutive_day_flags(user_id, agent_id, "evening_3_day", local_day, 3):
+            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=6)
+    if len(rows) >= 20 and all(not _has_symbol_or_punctuation(str(row["content"])) for row in rows):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=36)
+        await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "clean_chat_day", local_day)
+        if await _has_consecutive_day_flags(user_id, agent_id, "clean_chat_day", local_day, 2):
+            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=51)
+    first_norm = _normalized_message(str(rows[0]["content"]))
+    if first_norm:
+        await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "first_message_norm", local_day, value_text=first_norm)
+        if await _previous_day_first_message_matches(user_id, agent_id, local_day, first_norm):
+            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=26)
+    if await _has_complete_unique_48h_window(user_id, agent_id, local_day):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=5)
+    if any(ts.hour >= 23 or ts.hour < 7 for ts in local_times):
+        await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "sleep_disturb_day", local_day)
+    elif len(local_times) >= 3:
+        await _record_day_flag(user_id, agent_id, workspace_id, conversation_id, "sleep_respect_day", local_day)
+        if await _has_consecutive_day_flags(user_id, agent_id, "sleep_respect_day", local_day, 7):
+            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=56)
+    if await has_schedule_status_streak(user_id=user_id, agent_id=agent_id, local_day=local_day, days=7):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=74)
+    if await has_schedule_status_streak(user_id=user_id, agent_id=agent_id, local_day=local_day, days=30):
+        await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=93)
 
 
 def _is_time_mirror(first: datetime, last: datetime) -> bool:
     return f"{first.hour:02d}{first.minute:02d}" == f"{last.hour:02d}{last.minute:02d}"[::-1]
+
+
+async def _day_has_all_quick_replies(
+    user_id: str,
+    agent_id: str,
+    local_day: datetime,
+    *,
+    required: int,
+) -> bool:
+    start, end = _day_bounds(local_day)
+    rows = await db.query_raw(
+        """
+        SELECT m.conversation_id, m.role, m.created_at
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.user_id = $1
+          AND c.agent_id = $2
+          AND c.is_deleted = FALSE
+          AND m.role IN ('user', 'assistant')
+          AND m.created_at >= $3::timestamp
+          AND m.created_at < $4::timestamp + INTERVAL '10 seconds'
+        ORDER BY m.conversation_id ASC, m.created_at ASC
+        """,
+        user_id,
+        agent_id,
+        start,
+        end,
+    )
+    by_conversation: dict[str, list] = {}
+    for row in rows:
+        conversation_id = str(_field(row, "conversation_id") or "")
+        if conversation_id:
+            by_conversation.setdefault(conversation_id, []).append(row)
+
+    assistant_count = 0
+    for conversation_rows in by_conversation.values():
+        for index, row in enumerate(conversation_rows):
+            if _field(row, "role") != "assistant":
+                continue
+            assistant_at_raw = _field(row, "created_at")
+            if not assistant_at_raw:
+                return False
+            assistant_at = _aware(assistant_at_raw)
+            if not (start <= assistant_at < end):
+                continue
+            assistant_count += 1
+            next_user_at = None
+            for following in conversation_rows[index + 1:]:
+                if _field(following, "role") == "user":
+                    next_user_at = _field(following, "created_at")
+                    break
+            if not next_user_at:
+                return False
+            delay = (_aware(next_user_at) - assistant_at).total_seconds()
+            if delay < 0 or delay > 10:
+                return False
+    return assistant_count >= required
 
 
 async def _record_day_flag(
@@ -152,8 +256,13 @@ async def _has_consecutive_day_flags(
         rows = await db.query_raw(
             """
             SELECT 1
-            FROM achievement_events
-            WHERE user_id = $1 AND agent_id = $2 AND event_type = $3 AND source_id = $4
+            FROM achievement_events e
+            LEFT JOIN conversations c ON c.id = e.conversation_id
+            WHERE e.user_id = $1
+              AND e.agent_id = $2
+              AND e.event_type = $3
+              AND e.source_id = $4
+              AND (e.conversation_id IS NULL OR c.is_deleted = FALSE)
             LIMIT 1
             """,
             user_id,
@@ -175,9 +284,14 @@ async def _previous_day_first_message_matches(
     source_id = f"first_message_norm:{(local_day.date() - timedelta(days=1)).isoformat()}"
     rows = await db.query_raw(
         """
-        SELECT value_text
-        FROM achievement_events
-        WHERE user_id = $1 AND agent_id = $2 AND event_type = 'first_message_norm' AND source_id = $3
+        SELECT e.value_text
+        FROM achievement_events e
+        LEFT JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.user_id = $1
+          AND e.agent_id = $2
+          AND e.event_type = 'first_message_norm'
+          AND e.source_id = $3
+          AND (e.conversation_id IS NULL OR c.is_deleted = FALSE)
         LIMIT 1
         """,
         user_id,
@@ -214,14 +328,15 @@ async def _has_complete_unique_48h_window(
         start,
         end,
     )
-    normalized = []
+    messages = []
     active_days = set()
     for row in rows:
-        value = _normalized_message(str(_field(row, "content") or ""))
-        if not value:
-            continue
-        normalized.append(value)
+        messages.append(str(_field(row, "content") or ""))
         created_at = _field(row, "created_at")
         if created_at:
             active_days.add(_local(created_at).date())
-    return len(active_days) >= 2 and len(normalized) >= 2 and len(normalized) == len(set(normalized))
+    return (
+        len(active_days) >= 2
+        and len(messages) >= 2
+        and len(messages) == len(set(messages))
+    )

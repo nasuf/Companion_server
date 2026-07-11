@@ -10,6 +10,10 @@ from typing import Any
 from app.db import db
 from app.redis_client import get_redis
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID, ACHIEVEMENTS
+from app.services.achievements.rule_registry import (
+    ACHIEVEMENT_RULES,
+    DISABLED_ACHIEVEMENT_IDS,
+)
 from app.services.achievements.utils import _day_bounds, _field, _json, _local, _now, count_chars
 from app.services.runtime.ws_manager import manager
 
@@ -101,6 +105,9 @@ async def unlock_achievement(
     definition = ACHIEVEMENT_BY_ID.get(achievement_id)
     if not definition:
         return False
+    rule = ACHIEVEMENT_RULES.get(achievement_id)
+    if not rule or not rule.enabled:
+        return False
     if await _is_unlock_cached(user_id, agent_id, achievement_id):
         return False
     try:
@@ -131,6 +138,7 @@ async def unlock_achievement(
     payload = {
         **definition.to_dict(),
         "achievement_id": definition.id,
+        "enabled": True,
         "unlocked": True,
         "unlocked_at": unlocked_at.isoformat() if hasattr(unlocked_at, "isoformat") else str(unlocked_at),
     }
@@ -174,22 +182,34 @@ async def list_achievements(user_id: str, agent_id: str) -> dict:
         user_id,
         agent_id,
     )
-    unlocked = {int(_field(row, "achievement_id")): _field(row, "unlocked_at") for row in rows}
+    unlocked = {
+        achievement_id: _field(row, "unlocked_at")
+        for row in rows
+        if (
+            (achievement_id := int(_field(row, "achievement_id")))
+            in ACHIEVEMENT_RULES
+            and ACHIEVEMENT_RULES[achievement_id].enabled
+        )
+    }
     await _cache_unlocked_achievements(user_id, agent_id, set(unlocked.keys()))
     items = []
     score = 0
     for definition in ACHIEVEMENTS:
         unlocked_at = unlocked.get(definition.id)
+        rule = ACHIEVEMENT_RULES[definition.id]
         if unlocked_at:
             score += definition.score
         items.append({
             **definition.to_dict(),
             "achievement_id": definition.id,
+            "enabled": rule.enabled,
             "unlocked": bool(unlocked_at),
             "unlocked_at": unlocked_at.isoformat() if hasattr(unlocked_at, "isoformat") else unlocked_at,
         })
     return {
         "total": len(items),
+        "active_total": sum(1 for rule in ACHIEVEMENT_RULES.values() if rule.enabled),
+        "disabled_total": len(DISABLED_ACHIEVEMENT_IDS),
         "unlocked": len(unlocked),
         "score": score,
         "items": items,
@@ -225,8 +245,15 @@ async def _recent_user_messages(
     return [dict(row) if isinstance(row, dict) else row.__dict__ for row in rows]
 
 
-async def _day_user_messages(user_id: str, agent_id: str, at: datetime | None = None) -> list[dict]:
+async def _day_user_messages(
+    user_id: str,
+    agent_id: str,
+    at: datetime | None = None,
+    *,
+    through: datetime | None = None,
+) -> list[dict]:
     start, end = _day_bounds(_local(at))
+    through_at = through or end
     rows = await db.query_raw(
         """
         SELECT m.id, m.content, m.created_at
@@ -238,12 +265,14 @@ async def _day_user_messages(user_id: str, agent_id: str, at: datetime | None = 
           AND m.role = 'user'
           AND m.created_at >= $3::timestamp
           AND m.created_at < $4::timestamp
+          AND m.created_at <= $5::timestamp
         ORDER BY m.created_at ASC
         """,
         user_id,
         agent_id,
         start,
         end,
+        through_at,
     )
     return [dict(row) if isinstance(row, dict) else row.__dict__ for row in rows]
 
@@ -277,12 +306,47 @@ async def _day_role_char_counts(user_id: str, agent_id: str, at: datetime | None
     return user_chars, ai_chars
 
 
+async def _day_role_message_counts(
+    user_id: str,
+    agent_id: str,
+    at: datetime | None = None,
+) -> tuple[int, int]:
+    start, end = _day_bounds(_local(at))
+    rows = await db.query_raw(
+        """
+        SELECT m.role, COUNT(*) AS count
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE c.user_id = $1
+          AND c.agent_id = $2
+          AND c.is_deleted = FALSE
+          AND m.role IN ('user', 'assistant')
+          AND m.created_at >= $3::timestamp
+          AND m.created_at < $4::timestamp
+        GROUP BY m.role
+        """,
+        user_id,
+        agent_id,
+        start,
+        end,
+    )
+    counts = {
+        str(_field(row, "role") or ""): int(_field(row, "count", 0) or 0)
+        for row in rows
+    }
+    return counts.get("user", 0), counts.get("assistant", 0)
+
+
 async def _event_count(user_id: str, agent_id: str, event_type: str) -> int:
     rows = await db.query_raw(
         """
         SELECT COUNT(*) AS count
-        FROM achievement_events
-        WHERE user_id = $1 AND agent_id = $2 AND event_type = $3
+        FROM achievement_events e
+        LEFT JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.user_id = $1
+          AND e.agent_id = $2
+          AND e.event_type = $3
+          AND (e.conversation_id IS NULL OR c.is_deleted = FALSE)
         """,
         user_id,
         agent_id,

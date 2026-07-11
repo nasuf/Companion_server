@@ -205,6 +205,20 @@ async def flush_pending(
                 "combined_len": len(combined),
             },
         )
+        if len(texts) >= 2 and latest_message_id and conv_id:
+            try:
+                from app.services.achievements.service import handle_aggregation_event
+                from app.services.runtime.tasks import fire_background
+
+                fire_background(handle_aggregation_event(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    conversation_id=conv_id,
+                    source_id=latest_message_id,
+                    part_count=len(texts),
+                ))
+            except Exception as e:
+                logger.debug(f"[ACH] aggregation hook skipped: {e}")
     return combined, conv_id, ctx, latest_message_id
 
 

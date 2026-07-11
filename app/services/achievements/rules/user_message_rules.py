@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time, timezone
 
 from app.db import db
@@ -29,8 +30,18 @@ from app.services.achievements.utils import (
     _now,
     count_chars,
 )
+from app.services.relationship.intimacy import get_intimacy_data
 
-FUTURE_PLAN_CUES = ("之后有什么安排", "接下来有什么安排", "明天干嘛", "今晚干嘛", "计划")
+FUTURE_PLAN_CUES = (
+    "之后有什么安排",
+    "接下来有什么安排",
+    "未来有什么安排",
+    "有什么计划",
+    "明天干嘛",
+    "今晚干嘛",
+    "待会干嘛",
+)
+logger = logging.getLogger(__name__)
 
 
 async def evaluate_user_message(event: UserMessageAchievementEvent) -> None:
@@ -83,7 +94,12 @@ async def _evaluate_user_message(
     if component_card:
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="component_card_sent", source_id=message_id)
 
-    today = await _day_user_messages(user_id, agent_id, occurred_at)
+    today = await _day_user_messages(
+        user_id,
+        agent_id,
+        occurred_at,
+        through=occurred_at,
+    )
 
     if text == "哈哈":
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=9)
@@ -91,13 +107,8 @@ async def _evaluate_user_message(
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=27)
     if any(cue in text for cue in FUTURE_PLAN_CUES):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=21)
-    if aggregation_route == "fragment_window":
-        await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="aggregation_fragment", source_id=message_id)
-        if await _event_count(user_id, agent_id, "aggregation_fragment") >= 50:
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=86)
-
     local = _local(occurred_at)
-    schedule_bucket = await record_schedule_status_chat(
+    schedule_observation = await record_schedule_status_chat(
         user_id=user_id,
         agent_id=agent_id,
         workspace_id=workspace_id,
@@ -105,17 +116,23 @@ async def _evaluate_user_message(
         message_id=message_id,
         occurred_at=occurred_at,
     )
+    schedule_bucket = getattr(schedule_observation, "bucket", schedule_observation)
     if schedule_bucket:
         if schedule_bucket == "sleep":
+            period_key = getattr(
+                schedule_observation,
+                "period_key",
+                local.date().isoformat(),
+            )
             await record_event(
                 user_id=user_id,
                 agent_id=agent_id,
                 workspace_id=workspace_id,
                 conversation_id=conversation_id,
-                event_type="sleep_status_message",
-                source_id=message_id,
+                event_type="sleep_wakeup_period",
+                source_id=f"sleep_wakeup_period:{period_key}",
             )
-            if await _event_count(user_id, agent_id, "sleep_status_message") >= 10:
+            if await _event_count(user_id, agent_id, "sleep_wakeup_period") >= 10:
                 await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=48)
         if await has_schedule_status_streak(user_id=user_id, agent_id=agent_id, local_day=local, days=7):
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=74)
@@ -242,7 +259,10 @@ async def _check_sequences(user_id: str, agent_id: str, workspace_id: str | None
             common &= set(_normalized_message(text))
         if common:
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=47)
-    if len(texts) >= 10 and all(t.rstrip().endswith(QUESTION_END) for t in texts[-10:]):
+    if len(texts) >= 10 and all(
+        any(mark in text for mark in QUESTION_END)
+        for text in texts[-10:]
+    ):
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=70)
 
 
@@ -266,22 +286,23 @@ async def _check_reply_timing_and_echo(
 ) -> None:
     rows = await db.query_raw(
         """
-        SELECT m.id, m.content, m.created_at
+        SELECT m.id, m.role, m.content, m.created_at
         FROM messages m
         JOIN conversations c ON c.id = m.conversation_id
         WHERE c.user_id = $1
           AND c.agent_id = $2
           AND c.is_deleted = FALSE
-          AND m.role = 'assistant'
-          AND m.created_at < $3::timestamp
+          AND m.conversation_id = $3
+          AND m.created_at < $4::timestamp
         ORDER BY m.created_at DESC
         LIMIT 1
         """,
         user_id,
         agent_id,
+        conversation_id,
         at,
     )
-    if not rows:
+    if not rows or _field(rows[0], "role") != "assistant":
         return
     assistant = rows[0]
     assistant_at = _field(assistant, "created_at")
@@ -296,22 +317,6 @@ async def _check_reply_timing_and_echo(
             event_type="quick_reply_10s",
             source_id=message_id,
         )
-        start, end = _day_bounds(_local(at))
-        day_rows = await db.query_raw(
-            """
-            SELECT COUNT(*) AS count
-            FROM achievement_events
-            WHERE user_id = $1 AND agent_id = $2
-              AND event_type = 'quick_reply_10s'
-              AND occurred_at >= $3::timestamp AND occurred_at < $4::timestamp
-            """,
-            user_id,
-            agent_id,
-            start,
-            end,
-        )
-        if int(_field(day_rows[0], "count", 0)) >= 20 and await _has_quick_reply_streak(user_id, agent_id, at, required=20):
-            await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=62)
     if count_chars(str(_field(assistant, "content") or "")) == char_count:
         await record_event(
             user_id=user_id,
@@ -321,11 +326,24 @@ async def _check_reply_timing_and_echo(
             event_type="echo_same_len",
             source_id=message_id,
         )
-        if await _has_echo_same_len_streak(user_id, agent_id, at, required=3):
+        if await _has_echo_same_len_streak(
+            user_id,
+            agent_id,
+            conversation_id,
+            at,
+            required=3,
+        ):
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=85)
 
 
-async def _day_messages_until(user_id: str, agent_id: str, at: datetime, *, limit: int = 260) -> list[dict]:
+async def _day_messages_until(
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    at: datetime,
+    *,
+    limit: int = 260,
+) -> list[dict]:
     start, _ = _day_bounds(_local(at))
     bounded_limit = max(1, min(int(limit), 1000))
     rows = await db.query_raw(
@@ -336,64 +354,42 @@ async def _day_messages_until(user_id: str, agent_id: str, at: datetime, *, limi
         WHERE c.user_id = $1
           AND c.agent_id = $2
           AND c.is_deleted = FALSE
+          AND m.conversation_id = $3
           AND m.role IN ('user', 'assistant')
-          AND m.created_at >= $3::timestamp
-          AND m.created_at <= $4::timestamp
+          AND m.created_at >= $4::timestamp
+          AND m.created_at <= $5::timestamp
         ORDER BY m.created_at DESC
         LIMIT {bounded_limit}
         """,
         user_id,
         agent_id,
+        conversation_id,
         start,
         at,
     )
     return list(reversed(rows))
 
 
-async def _has_quick_reply_streak(user_id: str, agent_id: str, at: datetime, *, required: int) -> bool:
-    rows = await _day_messages_until(user_id, agent_id, at)
-    pairs = []
-    for index, row in enumerate(rows):
-        if _field(row, "role") != "assistant":
-            continue
-        assistant_at = _field(row, "created_at")
-        next_user_at = None
-        for following in rows[index + 1:]:
-            if _field(following, "role") == "user":
-                next_user_at = _field(following, "created_at")
-                break
-        if not assistant_at or not next_user_at:
-            pairs.append(False)
-            continue
-        pairs.append((_aware(next_user_at) - _aware(assistant_at)).total_seconds() <= 10)
-
-    streak = 0
-    for ok in reversed(pairs):
-        if not ok:
-            break
-        streak += 1
-        if streak >= required:
-            return True
-    return False
-
-
-async def _has_echo_same_len_streak(user_id: str, agent_id: str, at: datetime, *, required: int) -> bool:
-    rows = await _day_messages_until(user_id, agent_id, at)
+async def _has_echo_same_len_streak(
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    at: datetime,
+    *,
+    required: int,
+) -> bool:
+    rows = await _day_messages_until(user_id, agent_id, conversation_id, at)
     pairs = []
     for index, row in enumerate(rows):
         if _field(row, "role") != "user":
             continue
-        previous_assistant = None
-        for previous in reversed(rows[:index]):
-            if _field(previous, "role") == "assistant":
-                previous_assistant = previous
-                break
-        if not previous_assistant:
+        previous = rows[index - 1] if index else None
+        if not previous or _field(previous, "role") != "assistant":
             pairs.append(False)
             continue
         pairs.append(
             count_chars(str(_field(row, "content") or ""))
-            == count_chars(str(_field(previous_assistant, "content") or ""))
+            == count_chars(str(_field(previous, "content") or ""))
         )
 
     streak = 0
@@ -415,15 +411,17 @@ async def _check_proactive_response(user_id: str, agent_id: str, workspace_id: s
         WHERE c.user_id = $1
           AND c.agent_id = $2
           AND c.is_deleted = FALSE
+          AND m.conversation_id = $3
           AND m.role = 'assistant'
-          AND m.created_at < $3::timestamp
-          AND m.created_at >= $3::timestamp - INTERVAL '24 hours'
+          AND m.created_at < $4::timestamp
+          AND m.created_at >= $4::timestamp - INTERVAL '24 hours'
           AND (m.metadata->>'proactive')::boolean = TRUE
         ORDER BY m.created_at DESC
         LIMIT 1
         """,
         user_id,
         agent_id,
+        conversation_id,
         at,
     )
     if not rows:
@@ -438,12 +436,14 @@ async def _check_proactive_response(user_id: str, agent_id: str, workspace_id: s
         WHERE c.user_id = $1
           AND c.agent_id = $2
           AND c.is_deleted = FALSE
+          AND m.conversation_id = $3
           AND m.role = 'user'
-          AND m.created_at > $3::timestamp
-          AND m.created_at < $4::timestamp
+          AND m.created_at > $4::timestamp
+          AND m.created_at < $5::timestamp
         """,
         user_id,
         agent_id,
+        conversation_id,
         proactive_at,
         at,
     )
@@ -451,6 +451,18 @@ async def _check_proactive_response(user_id: str, agent_id: str, workspace_id: s
         return
     metadata = _field(proactive, "metadata") or {}
     trigger = metadata.get("trigger_type") if isinstance(metadata, dict) else None
+    occasions = metadata.get("occasions") if isinstance(metadata, dict) else None
+    occasion_rows = occasions if isinstance(occasions, list) else []
+    has_holiday = any(
+        isinstance(item, dict) and item.get("type") == "holiday"
+        for item in occasion_rows
+    )
+    has_user_birthday = any(
+        isinstance(item, dict)
+        and item.get("type") == "birthday"
+        and item.get("owner") == "user"
+        for item in occasion_rows
+    )
     await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="proactive_replied", source_id=str(_field(proactive, "id")), metadata={"reply_message_id": message_id, "trigger_type": trigger})
     await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=25)
     count = await _event_count(user_id, agent_id, "proactive_replied")
@@ -462,11 +474,11 @@ async def _check_proactive_response(user_id: str, agent_id: str, workspace_id: s
         await record_event(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, event_type="proactive_replied_3min", source_id=str(_field(proactive, "id")))
         if await _all_proactive_messages_replied_quickly(user_id, agent_id, at, required=100):
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=92)
-    if trigger == "special_holiday":
+    if has_holiday:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=61)
-    elif trigger == "special_birthday":
+    if has_user_birthday:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=68)
-    elif trigger == "special_combined":
+    if has_holiday and has_user_birthday:
         await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=78)
 
 
@@ -496,11 +508,13 @@ async def _all_proactive_messages_replied_quickly(
     quick_rows = await db.query_raw(
         """
         SELECT COUNT(*) AS count
-        FROM achievement_events
-        WHERE user_id = $1
-          AND agent_id = $2
-          AND event_type = 'proactive_replied_3min'
-          AND occurred_at <= $3::timestamp
+        FROM achievement_events e
+        LEFT JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.user_id = $1
+          AND e.agent_id = $2
+          AND e.event_type = 'proactive_replied_3min'
+          AND e.occurred_at <= $3::timestamp
+          AND (e.conversation_id IS NULL OR c.is_deleted = FALSE)
         """,
         user_id,
         agent_id,
@@ -537,14 +551,12 @@ async def _check_daily_chat_day_milestones(user_id: str, agent_id: str, workspac
 
 
 async def _check_intimacy(user_id: str, agent_id: str, workspace_id: str | None, conversation_id: str | None) -> None:
-    rows = await db.query_raw(
-        "SELECT growth_intimacy FROM intimacies WHERE user_id = $1 AND agent_id = $2 LIMIT 1",
-        user_id,
-        agent_id,
-    )
-    if not rows:
+    try:
+        intimacy = await get_intimacy_data(agent_id, user_id)
+    except Exception as e:
+        logger.debug(f"[ACH] intimacy lookup skipped: {e}")
         return
-    value = int(_field(rows[0], "growth_intimacy", 0) or 0)
+    value = int(intimacy.get("growth_intimacy", 0) or 0)
     for threshold, achievement_id in ((401, 39), (601, 67), (801, 75), (1000, 88)):
         if value >= threshold:
             await unlock_achievement(user_id=user_id, agent_id=agent_id, workspace_id=workspace_id, conversation_id=conversation_id, achievement_id=achievement_id)

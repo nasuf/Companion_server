@@ -10,6 +10,7 @@ from app.db import db
 from app.models.conversation import ConversationCreate, ConversationResponse
 from app.models.message import MessageResponse
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID
+from app.services.achievements.rule_registry import ACHIEVEMENT_RULES
 from app.services.chat.crisis_state import get_crisis_care_status
 from app.services.schedule_domain.schedule import (
     get_cached_schedule,
@@ -325,13 +326,15 @@ async def _achievement_timeline_items(
     for row in rows:
         achievement_id = int(_row_value(row, "achievement_id"))
         definition = ACHIEVEMENT_BY_ID.get(achievement_id)
-        if not definition:
+        rule = ACHIEVEMENT_RULES.get(achievement_id)
+        if not definition or not rule or not rule.enabled:
             continue
         unlock_id = _row_value(row, "id")
         unlocked_at = _row_value(row, "unlocked_at")
         payload = {
             **definition.to_dict(),
             "achievement_id": definition.id,
+            "enabled": True,
             "unlocked": True,
             "unlocked_at": unlocked_at.isoformat()
             if hasattr(unlocked_at, "isoformat")

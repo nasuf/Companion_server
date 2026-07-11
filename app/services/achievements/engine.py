@@ -6,12 +6,14 @@ from datetime import datetime
 from typing import overload
 
 from app.services.achievements.events import (
+    AggregationAchievementEvent,
     AssistantMessageAchievementEvent,
     AssistantTurnAchievementEvent,
     IntentAchievementEvent,
     MemoryChangelogAchievementEvent,
     UserMessageAchievementEvent,
 )
+from app.services.achievements.rules.aggregation_rules import evaluate_aggregation
 from app.services.achievements.rules.assistant_message_rules import (
     evaluate_assistant_message,
     evaluate_assistant_turn,
@@ -21,12 +23,17 @@ from app.services.achievements.rules.memory_rules import evaluate_memory_changel
 from app.services.achievements.rules.user_message_rules import evaluate_user_message
 
 AchievementEvent = (
-    UserMessageAchievementEvent
+    AggregationAchievementEvent
+    | UserMessageAchievementEvent
     | AssistantMessageAchievementEvent
     | AssistantTurnAchievementEvent
     | MemoryChangelogAchievementEvent
     | IntentAchievementEvent
 )
+
+
+@overload
+async def handle_achievement_event(event: AggregationAchievementEvent) -> None: ...
 
 
 @overload
@@ -51,6 +58,9 @@ async def handle_achievement_event(event: IntentAchievementEvent) -> None: ...
 
 async def handle_achievement_event(event: AchievementEvent) -> None:
     """Dispatch an application event to internal achievement rules."""
+    if isinstance(event, AggregationAchievementEvent):
+        await evaluate_aggregation(event)
+        return
     if isinstance(event, UserMessageAchievementEvent):
         await evaluate_user_message(event)
         return
@@ -67,6 +77,29 @@ async def handle_achievement_event(event: AchievementEvent) -> None:
         await evaluate_intent(event)
         return
     raise TypeError(f"Unsupported achievement event: {type(event)!r}")
+
+
+async def handle_aggregation_event(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    source_id: str,
+    part_count: int,
+    workspace_id: str | None = None,
+    occurred_at: datetime | None = None,
+) -> None:
+    await handle_achievement_event(
+        AggregationAchievementEvent(
+            user_id=user_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            source_id=source_id,
+            part_count=part_count,
+            workspace_id=workspace_id,
+            occurred_at=occurred_at,
+        )
+    )
 
 
 async def handle_user_message_event(
