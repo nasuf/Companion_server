@@ -385,6 +385,19 @@ async def update_music_now_playing(
         and current_co_listening.status == "active"
         and current_co_listening.initiated_by != "user_pending"
     ):
+        if current_co_listening.initiated_by == "agent":
+            joined = await music.mark_user_joined_agent_co_listening(
+                user_id=user["sub"],
+                agent_id=data.agent_id,
+                conversation_id=data.conversation_id,
+            )
+            if joined is not None:
+                await music_status.persist_and_emit_music_status(
+                    conversation_id=data.conversation_id,
+                    status="started",
+                    track=track,
+                    actor="user",
+                )
         await music_status.maybe_emit_track_change_reply(
             conversation_id=data.conversation_id,
             current_session=current_co_listening,
@@ -431,7 +444,7 @@ async def end_music_co_listening(
                     conversation_id=data.conversation_id,
                     reason=end_reason,
                 )
-                if ended is not None and ended.initiated_by != "agent_auto":
+                if ended is not None and ended.initiated_by not in {"agent", "agent_auto"}:
                     await music_status.persist_and_emit_music_status(
                         conversation_id=data.conversation_id,
                         status="ended",
@@ -454,7 +467,7 @@ async def end_music_co_listening(
                 conversation_id=data.conversation_id,
                 reason=end_reason,
             )
-            if ended is not None and ended.initiated_by != "agent_auto":
+            if ended is not None and ended.initiated_by not in {"agent", "agent_auto"}:
                 await music_status.persist_and_emit_music_status(
                     conversation_id=data.conversation_id,
                     status="ended",

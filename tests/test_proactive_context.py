@@ -144,6 +144,133 @@ async def test_prepare_music_recommendation_skips_when_agent_not_idle():
 
 
 @pytest.mark.asyncio
+async def test_proactive_music_waits_for_user_before_marking_playback_active():
+    from app.models.music import MusicTrack
+    from app.services.proactive import sender
+
+    class _Trace:
+        safe_trace_id = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    def _discard_background_task(coro):
+        coro.close()
+        return None
+
+    state = SimpleNamespace(
+        id="state-1",
+        workspace_id="ws-1",
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        stage="warming",
+        followup_plan_type="normal",
+        current_window_index=1,
+    )
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    context = {
+        "agent": SimpleNamespace(name="A"),
+        "music_track": track,
+        "schedule_status": {"status": "idle"},
+    }
+    start_co_listening = AsyncMock()
+    emit_status = AsyncMock(return_value="status-1")
+
+    with (
+        patch(
+            "app.services.runtime_config.bind_agent_context",
+            new_callable=AsyncMock,
+        ),
+        patch.object(
+            sender,
+            "_check_send_eligibility",
+            new_callable=AsyncMock,
+            return_value=sender._SendPrep(
+                conversation_id="conv-1",
+                cooldown={},
+                exclude_memory_ids=set(),
+            ),
+        ),
+        patch.object(
+            sender,
+            "determine_proactive_stage",
+            new_callable=AsyncMock,
+            return_value="warming",
+        ),
+        patch.object(sender, "select_topic_theme", return_value="音乐"),
+        patch.object(sender, "select_topic_source", return_value="greeting"),
+        patch.object(sender, "_should_use_music_source", return_value=True),
+        patch.object(
+            sender,
+            "build_proactive_context",
+            new_callable=AsyncMock,
+            return_value=context,
+        ),
+        patch.object(
+            sender,
+            "_prepare_music_recommendation_source",
+            new_callable=AsyncMock,
+            return_value="music",
+        ),
+        patch(
+            "app.services.llm.usage_tracker.traced_usage_session",
+            return_value=_Trace(),
+        ),
+        patch.object(
+            sender,
+            "_generate_message",
+            new_callable=AsyncMock,
+            return_value="一起听这首歌吧。",
+        ),
+        patch.object(
+            sender,
+            "emit_proactive_message",
+            new_callable=AsyncMock,
+            return_value="assistant-1",
+        ),
+        patch(
+            "app.services.music.start_co_listening",
+            new=start_co_listening,
+        ),
+        patch(
+            "app.services.music_status.persist_and_emit_music_status",
+            new=emit_status,
+        ),
+        patch.object(
+            sender,
+            "increment_proactive_count",
+            new_callable=AsyncMock,
+        ),
+        patch.object(
+            sender,
+            "_persist_proactive_state",
+            new_callable=AsyncMock,
+        ),
+        patch.object(
+            sender.asyncio,
+            "create_task",
+            side_effect=_discard_background_task,
+        ),
+    ):
+        sent = await sender.generate_and_send_proactive(
+            state,
+            trigger_type="silence_wakeup",
+        )
+
+    assert sent is True
+    start_co_listening.assert_awaited_once()
+    assert start_co_listening.await_args.kwargs["initiated_by"] == "agent"
+    assert start_co_listening.await_args.kwargs["status"] == "active"
+    assert start_co_listening.await_args.kwargs["is_playing"] is False
+    emit_status.assert_awaited_once()
+    assert emit_status.await_args.kwargs["actor"] == "agent"
+
+
+@pytest.mark.asyncio
 async def test_load_proactive_memories_skips_rerank_when_no_topic():
     """topic_theme 为空 → 不调 rerank, 直接走 importance 倒排."""
     from app.services.proactive.context import _load_proactive_memories

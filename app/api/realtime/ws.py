@@ -391,20 +391,34 @@ async def _handle_music_component_card(
     session_status = "active" if accepted else "pending_agent"
     initiated_by = "user_joined" if accepted else "user_pending"
     current_session = await music.get_open_co_listening(conversation_id=conversation_id)
-    agent_was_waiting = (
+    user_was_joined = (
         current_session is not None
-        and current_session.status == "agent_waiting_user"
+        and current_session.status in {"active", "pending_agent"}
+        and current_session.initiated_by not in {"agent", "agent_auto"}
+    )
+    agent_was_present = (
+        current_session is not None
+        and current_session.status in {"active", "agent_waiting_user"}
+        and current_session.initiated_by != "user_pending"
+    )
+    agent_join_was_announced = (
+        current_session is not None
+        and agent_was_present
+        and current_session.initiated_by != "agent_auto"
     )
     already_co_listening = (
         current_session is not None
         and current_session.status == "active"
-        and current_session.initiated_by != "user_pending"
+        and user_was_joined
+        and agent_was_present
         and accepted
     )
     previously_joined = (
         current_session is not None
         and current_session.status in {"active", "agent_waiting_user"}
-        and current_session.initiated_by != "user_pending"
+        and current_session.initiated_by
+        not in {"agent", "agent_auto", "user_pending"}
+        and agent_was_present
     )
     if previously_joined and not accepted:
         await reconcile_co_listening_for_status(
@@ -513,14 +527,14 @@ async def _handle_music_component_card(
             "music_co_listening": accepted,
         },
     })
-    if not already_co_listening:
+    if not user_was_joined:
         await persist_and_emit_music_status(
             conversation_id=conversation_id,
             status="started",
             track=track,
             actor="user",
         )
-    if accepted and not agent_was_waiting and not already_co_listening:
+    if accepted and not agent_join_was_announced:
         await persist_and_emit_music_status(
             conversation_id=conversation_id,
             status="started",

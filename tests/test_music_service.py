@@ -670,6 +670,70 @@ async def test_update_active_co_listening_updates_current_track(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mark_user_joined_agent_co_listening_is_atomic(monkeypatch):
+    joined_row = {
+        "status": "active",
+        "track_external_id": "track-1",
+        "title": "Quiet Realm",
+        "position_seconds": 12,
+        "is_playing": True,
+        "initiated_by": "user_joined",
+    }
+    fake_db = _FakeDb(
+        [
+            [{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1"}],
+            [joined_row],
+        ]
+    )
+    monkeypatch.setattr(music, "db", fake_db)
+
+    joined = await music.mark_user_joined_agent_co_listening(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+    )
+
+    assert joined is not None
+    assert joined.initiated_by == "user_joined"
+    query = fake_db.queries[1][0]
+    assert "initiated_by = 'agent'" in query
+    assert "RETURNING *" in query
+
+
+@pytest.mark.asyncio
+async def test_user_exit_transitions_exclude_agent_only_sessions(monkeypatch):
+    fake_db = _FakeDb(
+        [
+            [{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1"}],
+            [],
+            [{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1"}],
+            [],
+        ]
+    )
+    monkeypatch.setattr(music, "db", fake_db)
+
+    await music.move_active_co_listening_to_agent_waiting(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        reason="connection_lost",
+    )
+    await music.move_paused_active_co_listening_to_agent_waiting_if_stale(
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conv-1",
+        paused_seconds=60,
+        reason="user_pause_timeout",
+    )
+
+    transition_queries = [fake_db.queries[1][0], fake_db.queries[3][0]]
+    assert all(
+        "initiated_by NOT IN ('agent', 'agent_auto')" in query
+        for query in transition_queries
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_active_co_listening_does_not_promote_pending_agent(monkeypatch):
     fake_db = _FakeDb(
         [[{"id": "conv-1", "user_id": "user-1", "agent_id": "agent-1", "workspace_id": None}]]
@@ -1237,6 +1301,90 @@ async def test_resume_music_while_agent_waiting_busy_exits_agent_without_user_jo
 
 
 @pytest.mark.asyncio
+async def test_agent_recommendation_first_play_emits_user_join(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=False,
+        initiated_by="agent",
+    )
+    joined = active.model_copy(update={"is_playing": True, "initiated_by": "user_joined"})
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(
+        music,
+        "upsert_now_playing",
+        AsyncMock(return_value=(track, 12, True, "2026-06-11T12:00:00Z")),
+    )
+    mark_joined = AsyncMock(return_value=joined)
+    emit_status = AsyncMock(return_value="status-msg")
+    maybe_track_change = AsyncMock(return_value=False)
+    monkeypatch.setattr(music, "mark_user_joined_agent_co_listening", mark_joined)
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", emit_status)
+    monkeypatch.setattr(music_status, "maybe_emit_track_change_reply", maybe_track_change)
+
+    response = await music_api.update_music_now_playing(
+        MusicPlaybackRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            track=MusicTrackPayload(id="track-1", title="Quiet Realm"),
+            position_seconds=12,
+            is_playing=True,
+        ),
+        user={"sub": "user-1"},
+    )
+
+    assert response.is_playing
+    mark_joined.assert_awaited_once()
+    emit_status.assert_awaited_once()
+    assert emit_status.await_args.kwargs["status"] == "started"
+    assert emit_status.await_args.kwargs["actor"] == "user"
+    maybe_track_change.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_recommendation_join_transition_prevents_duplicate_status(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=False,
+        initiated_by="agent",
+    )
+    track = MusicTrack(id="track-1", title="Quiet Realm")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(
+        music,
+        "upsert_now_playing",
+        AsyncMock(return_value=(track, 12, True, "2026-06-11T12:00:00Z")),
+    )
+    monkeypatch.setattr(
+        music,
+        "mark_user_joined_agent_co_listening",
+        AsyncMock(return_value=None),
+    )
+    emit_status = AsyncMock(return_value="status-msg")
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", emit_status)
+    monkeypatch.setattr(
+        music_status,
+        "maybe_emit_track_change_reply",
+        AsyncMock(return_value=False),
+    )
+
+    await music_api.update_music_now_playing(
+        MusicPlaybackRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            track=MusicTrackPayload(id="track-1", title="Quiet Realm"),
+            position_seconds=12,
+            is_playing=True,
+        ),
+        user={"sub": "user-1"},
+    )
+
+    emit_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_manual_track_change_in_active_co_listening_emits_reply(monkeypatch):
     active = MusicCoListeningResponse(
         status="active",
@@ -1645,6 +1793,33 @@ async def test_end_music_co_listening_pause_is_idempotent_while_agent_waiting(mo
     )
 
     end_session.assert_not_awaited()
+    persist_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_end_agent_only_session_does_not_emit_user_exit(monkeypatch):
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=False,
+        initiated_by="agent",
+    )
+    ended = active.model_copy(update={"status": "ended"})
+    persist_status = AsyncMock(return_value="status-msg")
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(music, "end_co_listening", AsyncMock(return_value=ended))
+    monkeypatch.setattr(music_status, "persist_and_emit_music_status", persist_status)
+
+    await music_api.end_music_co_listening(
+        MusicCoListeningEndRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            reason="user_logout",
+        ),
+        user={"sub": "user-1"},
+    )
+
+    music.end_co_listening.assert_awaited_once()
     persist_status.assert_not_awaited()
 
 

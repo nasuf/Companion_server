@@ -919,6 +919,42 @@ async def update_active_co_listening(
     return bool(count)
 
 
+async def mark_user_joined_agent_co_listening(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+) -> MusicCoListeningResponse | None:
+    """Atomically accept an agent-started co-listening session for the user."""
+    await ensure_conversation_owner(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+    )
+    rows = await db.query_raw(
+        """
+        UPDATE music_co_listening_sessions
+        SET initiated_by = 'user_joined',
+            is_playing = true,
+            ended_reason = NULL,
+            ended_at = NULL,
+            updated_at = now()
+        WHERE conversation_id = $1
+          AND user_id = $2
+          AND agent_id = $3
+          AND status = 'active'
+          AND initiated_by = 'agent'
+        RETURNING *
+        """,
+        conversation_id,
+        user_id,
+        agent_id,
+    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
+
+
 async def end_co_listening(
     *,
     user_id: str,
@@ -981,6 +1017,7 @@ async def move_active_co_listening_to_agent_waiting(
           AND user_id = $2
           AND agent_id = $3
           AND status = 'active'
+          AND initiated_by NOT IN ('agent', 'agent_auto')
         RETURNING *
         """,
         conversation_id,
@@ -1018,6 +1055,7 @@ async def move_paused_active_co_listening_to_agent_waiting_if_stale(
           AND user_id = $2
           AND agent_id = $3
           AND status = 'active'
+          AND initiated_by NOT IN ('agent', 'agent_auto')
           AND is_playing = false
           AND updated_at <= now() - make_interval(secs => $4::int)
         RETURNING *

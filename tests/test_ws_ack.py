@@ -534,6 +534,93 @@ async def test_handle_message_music_card_while_agent_waiting_only_rejoins_user(f
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initiated_by", "expected_actors"),
+    [
+        ("agent", ["user"]),
+        ("agent_auto", ["user", "agent"]),
+    ],
+)
+async def test_user_invite_joins_agent_only_music_session(
+    fake_ws,
+    initiated_by,
+    expected_actors,
+):
+    agent = SimpleNamespace(id="a1", name="A")
+    current = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="old-track", title="Old Track"),
+        is_playing=initiated_by == "agent_auto",
+        initiated_by=initiated_by,
+    )
+    card = {
+        "type": "music_track",
+        "payload": {
+            "intent": "invite",
+            "source": "music_page",
+            "track": {"id": "track-1", "title": "Quiet Realm"},
+        },
+    }
+    start_co = AsyncMock(return_value=None)
+    music_status = AsyncMock(return_value="music-status-1")
+
+    with (
+        patch.object(
+            ws_mod,
+            "_persist_assistant_message",
+            new_callable=AsyncMock,
+            return_value="assistant-music-1",
+        ),
+        patch(
+            "app.services.music.get_open_co_listening",
+            new_callable=AsyncMock,
+            return_value=current,
+        ),
+        patch(
+            "app.services.music.start_co_listening",
+            new=start_co,
+        ),
+        patch(
+            "app.services.music_chat.render_music_reply",
+            new_callable=AsyncMock,
+            return_value="好呀，一起听。",
+        ),
+        patch(
+            "app.services.music_status.persist_and_emit_music_status",
+            new=music_status,
+        ),
+        patch(
+            "app.services.chat.post_process._bg_memory_pipeline",
+            new=lambda *_args, **_kwargs: None,
+        ),
+        patch(
+            "app.services.notifications.service.notify_agent_message_created",
+            new=lambda *_args, **_kwargs: None,
+        ),
+        patch(
+            "app.services.runtime.tasks.fire_background",
+            new=lambda *_args, **_kwargs: None,
+        ),
+    ):
+        handled = await ws_mod._handle_music_component_card(
+            fake_ws,
+            conversation_id="conv-1",
+            user_id="user-1",
+            agent=agent,
+            workspace_id="ws-1",
+            user_name="Song",
+            user_message_id="user-message-1",
+            component_card=card,
+            received_status={"status": "idle", "activity": "自由时间"},
+        )
+
+    assert handled is True
+    start_co.assert_awaited_once()
+    assert start_co.await_args.kwargs["initiated_by"] == "user_joined"
+    assert [call.kwargs["actor"] for call in music_status.await_args_list] == expected_actors
+
+
+@pytest.mark.asyncio
 async def test_handle_message_music_card_while_active_switches_track_without_status(fake_ws):
     agent = SimpleNamespace(id="a1", name="A")
 

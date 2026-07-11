@@ -573,7 +573,7 @@ async def generate_and_send_proactive(
                 initiated_by="agent",
                 status="active",
                 position_seconds=0,
-                is_playing=True,
+                is_playing=False,
             )
             await persist_and_emit_music_status(
                 conversation_id=prep.conversation_id,
