@@ -119,6 +119,9 @@ class Settings(BaseSettings):
     # to the same WeChat Open Platform account.
     wechat_h5_app_id: str = ""
     wechat_h5_app_secret: str = ""
+    # 微信 H5 JS-SDK 页面签名只允许这些 origin。逗号分隔，必须写协议，
+    # 例如 https://banshengcomp.com。与「网页授权域名」/CORS 是独立配置。
+    wechat_jssdk_allowed_origins: str = ""
 
     # 霸王餐服务员页访问口令: 服务员打开 staff.html 后在页面内输入此口令才能
     # 看到轮换校验码. 请配全大写英文字母 (前端把输入统一转大写再校验).
@@ -131,6 +134,10 @@ class Settings(BaseSettings):
     # 每日霸王餐核销总量上限 (先到先得): 单个 UTC+8 自然日内核销总数达到该值后,
     # 后续核销请求被拒并留痕, 提示用户次日 (仍需在有效期内) 再来.
     meal_daily_redeem_cap: int = 1000
+    # 用户券动态二维码：Redis 一次性凭证有效期。页面会在过期前自动刷新。
+    meal_qr_ttl_seconds: int = 60
+    # 商家自助登录 JWT 使用独立短有效期，不复用普通用户默认 7 天。
+    meal_merchant_jwt_expiry_hours: int = 12
 
     # Optional: a fully-provisioned "template" agent id. When set, a brand-new
     # user (e.g. first WeChat Mini Program login) is given an instant clone of
@@ -272,6 +279,12 @@ class Settings(BaseSettings):
             return [] if self.is_production() else ["*"]
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
+    def wechat_jssdk_origins(self) -> list[str]:
+        raw = self.wechat_jssdk_allowed_origins.strip()
+        if not raw:
+            return []
+        return [origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()]
+
     def validate_security_config(self) -> None:
         """Fail fast on unsafe production security settings.
 
@@ -303,6 +316,15 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Unsafe production config: WECHAT_LOGIN_ENABLED=true requires "
                 "WECHAT_MOBILE_APP_ID and WECHAT_MOBILE_APP_SECRET."
+            )
+
+        if self.wechat_jssdk_origins() and (
+            not self.wechat_h5_app_id.strip()
+            or not self.wechat_h5_app_secret.strip()
+        ):
+            raise RuntimeError(
+                "Unsafe production config: WECHAT_JSSDK_ALLOWED_ORIGINS requires "
+                "WECHAT_H5_APP_ID and WECHAT_H5_APP_SECRET."
             )
 
 

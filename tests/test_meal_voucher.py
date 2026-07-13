@@ -211,110 +211,77 @@ async def test_activate_idempotency_guards(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_redeem_requires_activated(monkeypatch):
+async def test_merchant_qr_redeem_requires_activated(monkeypatch):
+    merchant = SimpleNamespace(id="m-1", name="伴生宴", codeActive=True)
     _mock_db(
         monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
         mealvoucher=SimpleNamespace(
             find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_INACTIVE)),
         ),
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "654321")
+        await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
     assert exc.value.reason == "not_activated"
 
 
 @pytest.mark.asyncio
-async def test_redeem_happy_path(monkeypatch):
-    merchant = SimpleNamespace(id="m-1", name="张记食堂", codeActive=True)
-    updated = _voucher(mv.VOUCHER_REDEEMED, merchant_id="m-1")
-    db = _mock_db(
-        monkeypatch,
-        mealvoucher=SimpleNamespace(
-            find_unique=AsyncMock(
-                side_effect=[_voucher(mv.VOUCHER_ACTIVATED), updated]
-            ),
-            update_many=AsyncMock(return_value=1),
-            count=AsyncMock(return_value=0),  # 当日核销数远低于上限
-        ),
-        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant)),
-    )
-
-    result = await mv.redeem_voucher("user-1", "654321")
-
-    assert result.status == mv.VOUCHER_REDEEMED
-    where = db.mealmerchant.find_first.await_args.kwargs["where"]
-    assert where == {"redeemCode": "654321", "codeActive": True}
-    kwargs = db.mealvoucher.update_many.await_args.kwargs
-    assert kwargs["where"]["status"] == mv.VOUCHER_ACTIVATED
-    assert kwargs["data"]["merchantId"] == "m-1"
-
-
-@pytest.mark.asyncio
-async def test_redeem_rejects_unknown_or_inactive_code(monkeypatch):
+async def test_merchant_qr_redeem_rejects_double_redeem(monkeypatch):
+    merchant = SimpleNamespace(id="m-1", name="伴生宴", codeActive=True)
     _mock_db(
         monkeypatch,
-        mealvoucher=SimpleNamespace(
-            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_ACTIVATED)),
-        ),
-        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=None)),
-    )
-
-    with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "654321")
-    assert exc.value.reason == "bad_code"
-
-
-@pytest.mark.asyncio
-async def test_redeem_rejects_double_redeem(monkeypatch):
-    _mock_db(
-        monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
         mealvoucher=SimpleNamespace(
             find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_REDEEMED)),
         ),
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "654321")
+        await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
     assert exc.value.reason == "already_redeemed"
 
 
 @pytest.mark.asyncio
-async def test_redeem_at_second_store_rejected(monkeypatch):
-    """在 A 店核销后, 拿 B 店的码再核销必须被拒 — 一人只能核销一家店."""
-    db = _mock_db(
-        monkeypatch,
-        mealvoucher=SimpleNamespace(
-            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_REDEEMED, "m-a")),
-        ),
-        mealmerchant=SimpleNamespace(find_first=AsyncMock()),
-    )
-
-    with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "111111")  # B 店的码
-    assert exc.value.reason == "already_redeemed"
-    # 状态守卫在商家查询之前 — B 店的码根本不会被查
-    db.mealmerchant.find_first.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_concurrent_redeem_two_stores_single_winner(monkeypatch):
-    """并发拿两家店的码核销: 条件转移只让一个成功, 输家收到已核销."""
-    merchant_b = SimpleNamespace(id="m-b", name="B店", codeActive=True)
+async def test_concurrent_merchant_qr_redeem_has_single_winner(monkeypatch):
+    merchant = SimpleNamespace(id="m-1", name="伴生宴", codeActive=True)
     _mock_db(
         monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
         mealvoucher=SimpleNamespace(
-            # 读的时候还是 activated (竞态窗口), 但条件 update 匹配 0 行
-            find_unique=AsyncMock(return_value=_voucher(mv.VOUCHER_ACTIVATED)),
+            find_unique=AsyncMock(return_value=_activated_voucher()),
             update_many=AsyncMock(return_value=0),
             count=AsyncMock(return_value=0),
         ),
-        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant_b)),
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "222222")
+        await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
     assert exc.value.reason == "already_redeemed"
+
+
+@pytest.mark.asyncio
+async def test_merchant_qr_redeem_binds_authenticated_merchant(monkeypatch):
+    merchant = SimpleNamespace(id="m-auth", name="伴生宴", codeActive=True)
+    updated = _voucher(mv.VOUCHER_REDEEMED, merchant_id="m-auth")
+    updated.redeemedAt = datetime.now(UTC)
+    db = _mock_db(
+        monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(
+                side_effect=[_activated_voucher(), updated]
+            ),
+            update_many=AsyncMock(return_value=1),
+            count=AsyncMock(return_value=0),
+        ),
+    )
+
+    result = await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-auth")
+
+    assert result.merchantId == "m-auth"
+    update = db.mealvoucher.update_many.await_args.kwargs["data"]
+    assert update["merchantId"] == "m-auth"
 
 
 # ── admin clear (清除校验/核销) ────────────────────────────────────
@@ -588,53 +555,6 @@ async def test_merchant_token_rejected_for_user_endpoints(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_admin_update_rejects_bad_redeem_code(monkeypatch):
-    from app.api.admin import meal as admin_meal
-    from fastapi import HTTPException
-
-    merchant = SimpleNamespace(id="m-1")
-    monkeypatch.setattr(
-        admin_meal,
-        "db",
-        SimpleNamespace(
-            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant))
-        ),
-    )
-
-    with pytest.raises(HTTPException) as exc:
-        await admin_meal.update_merchant(
-            "m-1", admin_meal.MerchantUpdateRequest(redeem_code="12a456")
-        )
-    assert exc.value.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_admin_update_rejects_duplicate_redeem_code(monkeypatch):
-    from app.api.admin import meal as admin_meal
-    from fastapi import HTTPException
-
-    mine = SimpleNamespace(id="m-1")
-    other = SimpleNamespace(id="m-2")
-
-    async def find_unique(where):
-        if "id" in where:
-            return mine
-        return other  # redeemCode lookup hits another merchant
-
-    monkeypatch.setattr(
-        admin_meal,
-        "db",
-        SimpleNamespace(mealmerchant=SimpleNamespace(find_unique=find_unique)),
-    )
-
-    with pytest.raises(HTTPException) as exc:
-        await admin_meal.update_merchant(
-            "m-1", admin_meal.MerchantUpdateRequest(redeem_code="123456")
-        )
-    assert exc.value.status_code == 409
-
-
-@pytest.mark.asyncio
 async def test_admin_redemptions_detail(monkeypatch):
     from datetime import UTC, datetime
 
@@ -644,6 +564,7 @@ async def test_admin_redemptions_detail(monkeypatch):
     row = SimpleNamespace(
         id="v-1",
         userId="user-1",
+        activatedAt=datetime(2026, 7, 7, 5, 0, tzinfo=UTC),
         redeemedAt=datetime(2026, 7, 8, 5, 0, tzinfo=UTC),
     )
     monkeypatch.setattr(
@@ -659,8 +580,21 @@ async def test_admin_redemptions_detail(monkeypatch):
     )
     monkeypatch.setattr(
         admin_meal.mv,
-        "resolve_user_displays",
-        AsyncMock(return_value={"user-1": "小明"}),
+        "resolve_user_redemption_profiles",
+        AsyncMock(
+            return_value={
+                "user-1": {
+                    "user_id": "user-1",
+                    "username": "wx_user",
+                    "user_display": "小明",
+                    "phone_masked": "138****5678",
+                    "wechat_nickname": "小明",
+                    "wechat_avatar_url": "https://example.com/avatar.jpg",
+                    "wechat_openid": "openid-1",
+                    "wechat_unionid": "unionid-1",
+                }
+            }
+        ),
     )
 
     body = await admin_meal.merchant_redemptions("m-1")
@@ -668,6 +602,8 @@ async def test_admin_redemptions_detail(monkeypatch):
     assert body["merchant_name"] == "伴生宴"
     assert body["total"] == 1
     assert body["items"][0]["user_display"] == "小明"
+    assert body["items"][0]["user_id"] == "user-1"
+    assert body["items"][0]["activated_at"].startswith("2026-07-07")
     assert body["items"][0]["redeemed_at"].startswith("2026-07-08")
 
 
@@ -769,15 +705,17 @@ def test_voucher_expires_at_and_expired_flag():
 
 @pytest.mark.asyncio
 async def test_redeem_rejects_expired_voucher(monkeypatch):
+    merchant = SimpleNamespace(id="m-1", name="张记食堂", codeActive=True)
     _mock_db(
         monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
         mealvoucher=SimpleNamespace(
             find_unique=AsyncMock(return_value=_activated_voucher(days_ago=8)),
         ),
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "654321")
+        await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
     assert exc.value.reason == "expired"
 
 
@@ -790,7 +728,7 @@ async def test_redeem_rejects_daily_cap_and_records_failure(monkeypatch):
             find_unique=AsyncMock(return_value=_activated_voucher()),
             count=AsyncMock(return_value=settings.meal_daily_redeem_cap),
         ),
-        mealmerchant=SimpleNamespace(find_first=AsyncMock(return_value=merchant)),
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
         mealredemptionfailure=SimpleNamespace(
             find_first=AsyncMock(return_value=None),
             create=AsyncMock(),
@@ -798,7 +736,7 @@ async def test_redeem_rejects_daily_cap_and_records_failure(monkeypatch):
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.redeem_voucher("user-1", "654321")
+        await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
     assert exc.value.reason == "daily_cap"
     db.mealredemptionfailure.create.assert_awaited_once()
 
@@ -862,32 +800,6 @@ async def test_redemption_failures_feed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_redeem_endpoint_structured_errors(monkeypatch):
-    from fastapi import HTTPException
-
-    from app.api.public import meal as meal_api
-
-    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
-    for reason, message in [
-        ("daily_cap", "今日霸王餐已被抢完啦，明天再来试试吧（记得在券的有效期内哦）"),
-        ("expired", "霸王餐券已过有效期"),
-    ]:
-        monkeypatch.setattr(
-            meal_api.mv,
-            "redeem_voucher",
-            AsyncMock(side_effect=mv.MealVoucherError(reason, message)),
-        )
-        with pytest.raises(HTTPException) as exc:
-            await meal_api.redeem_voucher(
-                meal_api.VoucherCodeRequest(code="123456"),
-                FakeRequest(),
-                payload={"sub": "user-1"},
-            )
-        assert exc.value.status_code == 400
-        assert exc.value.detail == {"message": message, "reason": reason}
-
-
-@pytest.mark.asyncio
 async def test_admin_expired_and_failures_endpoints(monkeypatch):
     from app.api.admin import meal as admin_meal
 
@@ -917,19 +829,3 @@ async def test_admin_expired_and_failures_endpoints(monkeypatch):
     assert failures["date"] == "2026-07-10"
     assert failures["total"] == 1
     assert failures["items"][0]["user_display"] == "小红"
-
-
-@pytest.mark.asyncio
-async def test_generate_unique_redeem_code_retries_on_collision(monkeypatch):
-    taken = SimpleNamespace(id="m-x")
-    finder = AsyncMock(side_effect=[taken, taken, None])
-    monkeypatch.setattr(
-        mv,
-        "db",
-        SimpleNamespace(mealmerchant=SimpleNamespace(find_unique=finder)),
-    )
-
-    code = await mv.generate_unique_redeem_code()
-
-    assert len(code) == 6 and code.isdigit()
-    assert finder.await_count == 3

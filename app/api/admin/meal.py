@@ -8,8 +8,8 @@ Endpoints (all admin-only):
   GET    /admin-api/meal/redemption-failures — 指定日核销失败明细 (超上限 + 用户)
   PUT    /admin-api/meal/code-enabled    — 开启/关闭校验码功能
   GET    /admin-api/meal/merchants       — 商家列表 + 各自核销数
-  POST   /admin-api/meal/merchants       — 新增商家 (自动生成唯一核销码)
-  PUT    /admin-api/meal/merchants/{id}  — 修改商家 (含核销码修改/停用/开启)
+  POST   /admin-api/meal/merchants       — 新增商家
+  PUT    /admin-api/meal/merchants/{id}  — 修改商家资料/停用/开启扫码核销
   DELETE /admin-api/meal/merchants/{id}  — 删除商家 (已核销记录保留, merchant 置空)
   GET    /admin-api/meal/merchants/{id}/redemptions — 该商家核销用户明细
   DELETE /admin-api/meal/vouchers/{id}/redemption   — 清除核销 (回到已激活)
@@ -19,12 +19,10 @@ Endpoints (all admin-only):
 from __future__ import annotations
 
 import logging
-import re
 from datetime import date as date_cls
 from datetime import datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from prisma.errors import UniqueViolationError
 from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
@@ -38,9 +36,6 @@ router = APIRouter(
     tags=["admin", "meal"],
     dependencies=[Depends(require_admin_jwt)],
 )
-
-_SIX_DIGITS = re.compile(r"^\d{6}$")
-
 
 class CodeEnabledRequest(BaseModel):
     enabled: bool
@@ -56,7 +51,6 @@ class MerchantUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     contact_name: str | None = Field(default=None, max_length=64)
     contact_phone: str | None = Field(default=None, max_length=32)
-    redeem_code: str | None = Field(default=None, min_length=6, max_length=6)
     code_active: bool | None = None
 
 
@@ -66,7 +60,6 @@ def _merchant_payload(merchant, redeemed_count: int) -> dict:
         "name": merchant.name,
         "contact_name": merchant.contactName,
         "contact_phone": merchant.contactPhone,
-        "redeem_code": merchant.redeemCode,
         "code_active": merchant.codeActive,
         "redeemed_count": redeemed_count,
         "created_at": merchant.createdAt.isoformat() if merchant.createdAt else None,
@@ -214,13 +207,11 @@ async def create_merchant(data: MerchantCreateRequest):
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="商家名称不能为空")
-    code = await mv.generate_unique_redeem_code()
     merchant = await db.mealmerchant.create(
         data={
             "name": name,
             "contactName": (data.contact_name or "").strip() or None,
             "contactPhone": (data.contact_phone or "").strip() or None,
-            "redeemCode": code,
         }
     )
     logger.info(
@@ -246,14 +237,6 @@ async def update_merchant(merchant_id: str, data: MerchantUpdateRequest):
         updates["contactName"] = data.contact_name.strip() or None
     if data.contact_phone is not None:
         updates["contactPhone"] = data.contact_phone.strip() or None
-    if data.redeem_code is not None:
-        code = data.redeem_code.strip()
-        if not _SIX_DIGITS.fullmatch(code):
-            raise HTTPException(status_code=400, detail="核销码必须是 6 位数字")
-        existing = await db.mealmerchant.find_unique(where={"redeemCode": code})
-        if existing and existing.id != merchant_id:
-            raise HTTPException(status_code=409, detail="该核销码已被其他商家使用")
-        updates["redeemCode"] = code
     if data.code_active is not None:
         updates["codeActive"] = data.code_active
 
@@ -261,11 +244,7 @@ async def update_merchant(merchant_id: str, data: MerchantUpdateRequest):
         counts = await _redeemed_counts()
         return _merchant_payload(merchant, counts.get(merchant_id, 0))
 
-    try:
-        updated = await db.mealmerchant.update(where={"id": merchant_id}, data=updates)
-    except UniqueViolationError:
-        # Lost a race against another admin assigning the same redeem code.
-        raise HTTPException(status_code=409, detail="该核销码已被其他商家使用")
+    updated = await db.mealmerchant.update(where={"id": merchant_id}, data=updates)
     counts = await _redeemed_counts()
     logger.info(
         "meal merchant updated",
@@ -285,7 +264,7 @@ async def merchant_redemptions(merchant_id: str, limit: int = 100):
         order={"redeemedAt": "desc"},
         take=min(max(limit, 1), 500),
     )
-    displays = await mv.resolve_user_displays([row.userId for row in rows])
+    profiles = await mv.resolve_user_redemption_profiles([row.userId for row in rows])
     total = await db.mealvoucher.count(
         where={"merchantId": merchant_id, "status": mv.VOUCHER_REDEEMED}
     )
@@ -295,7 +274,27 @@ async def merchant_redemptions(merchant_id: str, limit: int = 100):
         "items": [
             {
                 "voucher_id": row.id,
-                "user_display": displays.get(row.userId, row.userId),
+                **profiles.get(
+                    row.userId,
+                    {
+                        "user_id": row.userId,
+                        "username": row.userId,
+                        "user_display": row.userId,
+                        "phone_masked": None,
+                        "wechat_nickname": None,
+                        "wechat_avatar_url": None,
+                        "wechat_openid": None,
+                        "wechat_unionid": None,
+                    },
+                ),
+                "activated_at": (
+                    row.activatedAt.isoformat() if row.activatedAt else None
+                ),
+                "expires_at": (
+                    expires.isoformat()
+                    if (expires := mv.voucher_expires_at(row))
+                    else None
+                ),
                 "redeemed_at": row.redeemedAt.isoformat() if row.redeemedAt else None,
             }
             for row in rows

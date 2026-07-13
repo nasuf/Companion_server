@@ -51,3 +51,14 @@ def test_production_accepts_explicit_security_config(monkeypatch):
         "https://app.example.com",
         "https://admin.example.com",
     ]
+
+
+def test_production_jssdk_allowlist_requires_h5_credentials(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://banshengcomp.com")
+    monkeypatch.setenv("WECHAT_JSSDK_ALLOWED_ORIGINS", "https://banshengcomp.com")
+    settings = Settings(_env_file=None)
+
+    with pytest.raises(RuntimeError, match="WECHAT_H5_APP_ID"):
+        settings.validate_security_config()

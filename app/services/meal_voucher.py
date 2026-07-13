@@ -2,9 +2,9 @@
 
 Three actors:
 * 用户 — one voucher each; activates it with the staff page's rotating code,
-  then redeems it with a merchant's fixed code.
+  then presents a short-lived QR code to the merchant.
 * 服务员 — reads a TOTP-style 6-digit code that rotates every 5 minutes.
-* 商家 — owns a fixed 6-digit redeem code; sees redemption stats.
+* 商家 — authenticates in H5, scans the user's QR, and sees redemption stats.
 
 The rotating code is derived (HMAC over the time-window index keyed off
 ``jwt_secret``), so nothing is stored and "rotation" is just the clock moving
@@ -19,7 +19,6 @@ import hashlib
 import hmac
 import logging
 import re
-import secrets
 import time
 from datetime import UTC
 from datetime import date as date_cls
@@ -229,13 +228,8 @@ async def activate_voucher(user_id: str, code: str):
     return await db.mealvoucher.find_unique(where={"id": voucher.id})
 
 
-async def redeem_voucher(user_id: str, redeem_code: str):
-    """已激活 → 已核销: matched against a merchant's fixed code."""
-    text = (redeem_code or "").strip()
-    if not _SIX_DIGITS.fullmatch(text):
-        raise MealVoucherError("bad_code", "核销码格式不正确")
-
-    voucher = await get_or_create_voucher(user_id)
+async def _redeem_loaded_voucher(voucher, merchant):
+    """Apply the only supported redemption transition: merchant QR scan."""
     if voucher.status == VOUCHER_REDEEMED:
         raise MealVoucherError("already_redeemed", "该券已核销，无法重复核销")
     if voucher.status != VOUCHER_ACTIVATED:
@@ -249,18 +243,12 @@ async def redeem_voucher(user_id: str, redeem_code: str):
             "无法核销",
         )
 
-    merchant = await db.mealmerchant.find_first(
-        where={"redeemCode": text, "codeActive": True}
-    )
-    if not merchant:
-        raise MealVoucherError("bad_code", "核销码无效，请与商家确认")
-
     # 每日核销上限 (先到先得, spec 需求 2): 商家码校验通过后, 若当日核销量已达
     # 上限则拒绝并留痕. 放在商家校验之后, 避免把「乱输码」也算成上限失败.
     # 竞态说明: 计数与状态转移之间存在窗口, 极端并发可能轻微超出上限 — 活动为
     # 人工念码, ~1000/日的量级下可接受 (与既有条件转移一致的实用取舍).
     if await today_redeemed_count() >= settings.meal_daily_redeem_cap:
-        await record_redemption_failure(user_id, merchant.id, FAILURE_DAILY_CAP)
+        await record_redemption_failure(voucher.userId, merchant.id, FAILURE_DAILY_CAP)
         raise MealVoucherError(
             "daily_cap",
             "今日霸王餐已被抢完啦，明天再来试试吧（记得在券的有效期内哦）",
@@ -282,11 +270,24 @@ async def redeem_voucher(user_id: str, redeem_code: str):
         "meal voucher redeemed",
         extra={
             "event": "meal_voucher_redeemed",
-            "user_id": user_id,
+            "user_id": voucher.userId,
             "merchant_id": merchant.id,
         },
     )
     return await db.mealvoucher.find_unique(where={"id": voucher.id})
+
+
+async def redeem_voucher_by_merchant(
+    voucher_id: str, user_id: str, merchant_id: str
+):
+    """Merchant-authenticated QR redemption; merchant identity never comes from QR."""
+    merchant = await db.mealmerchant.find_unique(where={"id": merchant_id})
+    if not merchant or not merchant.codeActive:
+        raise MealVoucherError("merchant_disabled", "商家核销功能已停用")
+    voucher = await db.mealvoucher.find_unique(where={"id": voucher_id})
+    if not voucher or voucher.userId != user_id:
+        raise MealVoucherError("invalid_qr", "二维码对应的霸王餐券不存在")
+    return await _redeem_loaded_voucher(voucher, merchant)
 
 
 # ── 每日核销上限 / 失败留痕 ──────────────────────────────────────────
@@ -347,7 +348,11 @@ async def clear_redemption(voucher_id: str) -> None:
     """
     count = await db.mealvoucher.update_many(
         where={"id": voucher_id, "status": VOUCHER_REDEEMED},
-        data={"status": VOUCHER_ACTIVATED, "redeemedAt": None, "merchantId": None},
+        data={
+            "status": VOUCHER_ACTIVATED,
+            "redeemedAt": None,
+            "merchantId": None,
+        },
     )
     if not count:
         raise MealVoucherError("not_redeemed", "该券当前不是已核销状态")
@@ -380,15 +385,6 @@ async def clear_activation(voucher_id: str) -> None:
 
 
 # ── merchants ────────────────────────────────────────────────────────
-
-
-async def generate_unique_redeem_code() -> str:
-    for _ in range(20):
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        existing = await db.mealmerchant.find_unique(where={"redeemCode": code})
-        if not existing:
-            return code
-    raise MealVoucherError("code_space", "核销码生成失败，请重试")
 
 
 def merchant_contact_matches(merchant, contact: str) -> bool:
@@ -456,6 +452,70 @@ async def resolve_user_display(user_id: str) -> str:
     """Single-user convenience wrapper over the batch resolver."""
     displays = await resolve_user_displays([user_id])
     return displays.get(user_id, user_id)
+
+
+async def resolve_user_redemption_profiles(user_ids: list[str]) -> dict[str, dict]:
+    """Dense admin-facing identity data for voucher redemption operations."""
+    unique_ids = list(dict.fromkeys(user_ids))
+    if not unique_ids:
+        return {}
+    users = await db.user.find_many(where={"id": {"in": unique_ids}})
+    identities = await db.authidentity.find_many(
+        where={"userId": {"in": unique_ids}}, order={"updatedAt": "desc"}
+    )
+    result: dict[str, dict] = {
+        user.id: {
+            "user_id": user.id,
+            "username": user.username,
+            "user_display": user.username,
+            "phone_masked": (
+                mask_phone(user.username)
+                if re.fullmatch(r"\d{11}", user.username or "")
+                else None
+            ),
+            "wechat_nickname": None,
+            "wechat_avatar_url": None,
+            "wechat_openid": None,
+            "wechat_unionid": None,
+        }
+        for user in users
+    }
+    for user_id in unique_ids:
+        result.setdefault(
+            user_id,
+            {
+                "user_id": user_id,
+                "username": user_id,
+                "user_display": user_id,
+                "phone_masked": None,
+                "wechat_nickname": None,
+                "wechat_avatar_url": None,
+                "wechat_openid": None,
+                "wechat_unionid": None,
+            },
+        )
+
+    seen_wechat: set[str] = set()
+    for identity in identities:
+        profile = result.get(identity.userId)
+        if not profile:
+            continue
+        if identity.provider == "phone" and not profile["phone_masked"]:
+            profile["phone_masked"] = mask_phone(identity.providerAccountId)
+        if identity.provider != "wechat" or identity.userId in seen_wechat:
+            continue
+        seen_wechat.add(identity.userId)
+        raw = identity.rawProfile if isinstance(identity.rawProfile, dict) else {}
+        nickname = raw.get("nickname")
+        avatar = raw.get("headimgurl")
+        if isinstance(nickname, str) and nickname.strip():
+            profile["wechat_nickname"] = nickname.strip()
+            profile["user_display"] = nickname.strip()
+        if isinstance(avatar, str) and avatar.strip():
+            profile["wechat_avatar_url"] = avatar.strip()
+        profile["wechat_openid"] = identity.openid or raw.get("openid")
+        profile["wechat_unionid"] = identity.unionid or raw.get("unionid")
+    return result
 
 
 async def activation_feed(limit: int = 50) -> list[dict]:

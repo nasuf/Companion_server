@@ -1560,14 +1560,13 @@ model SystemConfig {
 }
 
 // ── 霸王餐 (free-meal voucher campaign) ──────────────────────────────
-// 商家: 每家一个固定 6 位核销码 (可停用/换码). 联系人姓名/手机号用于商家 H5
+// 商家: 联系人姓名/手机号用于商家 H5
 // 页自助身份确认 (二选一, 都可空 — 空则该商家无法自助登录, 仅 admin 可管理).
 model MealMerchant {
   id           String        @id @default(uuid())
   name         String
   contactName  String?       @map("contact_name")
   contactPhone String?       @map("contact_phone")
-  redeemCode   String        @unique @map("redeem_code")
   codeActive   Boolean       @default(true) @map("code_active")
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
@@ -1577,7 +1576,7 @@ model MealMerchant {
 }
 
 // 霸王餐券: 每用户一张 (userId unique), 状态机 inactive → activated → redeemed.
-// 激活 = 输入服务员页的 5 分钟轮换校验码; 核销 = 输入商家的固定核销码.
+// 激活 = 输入服务员页的 5 分钟轮换校验码; 核销仅支持商家扫码.
 // merchant onDelete SetNull: 商家删除后已核销记录保留 (统计口径不塌).
 model MealVoucher {
   id          String        @id @default(uuid())

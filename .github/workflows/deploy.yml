@@ -130,7 +130,10 @@ jobs:
             WECHAT_MINI_APP_SECRET=${{ secrets.WECHAT_MINI_APP_SECRET }}
             WECHAT_H5_APP_ID=${{ vars.WECHAT_H5_APP_ID }}
             WECHAT_H5_APP_SECRET=${{ secrets.WECHAT_H5_APP_SECRET }}
+            WECHAT_JSSDK_ALLOWED_ORIGINS=${{ vars.WECHAT_JSSDK_ALLOWED_ORIGINS || 'https://banshengcomp.com' }}
             MEAL_STAFF_KEY=${{ secrets.MEAL_STAFF_KEY }}
+            MEAL_QR_TTL_SECONDS=${{ vars.MEAL_QR_TTL_SECONDS || '60' }}
+            MEAL_MERCHANT_JWT_EXPIRY_HOURS=${{ vars.MEAL_MERCHANT_JWT_EXPIRY_HOURS || '12' }}
             JAMENDO_CLIENT_ID=${{ secrets.JAMENDO_CLIENT_ID }}
             JAMENDO_BASE_URL=${{ vars.JAMENDO_BASE_URL || 'https://api.jamendo.com/v3.0' }}
             JAMENDO_DEFAULT_LIBRARIES=${{ vars.JAMENDO_DEFAULT_LIBRARIES || 'focus,ambient,sleep' }}
@@ -158,6 +161,16 @@ jobs:
                 exit 1
               fi
             done
+
+            if [ -n "$(grep -E '^WECHAT_JSSDK_ALLOWED_ORIGINS=' .env | cut -d= -f2-)" ]; then
+              for key in WECHAT_H5_APP_ID WECHAT_H5_APP_SECRET; do
+                value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
+                if [ -z "$value" ]; then
+                  echo "$key is required when WECHAT_JSSDK_ALLOWED_ORIGINS is configured"
+                  exit 1
+                fi
+              done
+            fi
 
             CHAT_LINK_SEARCH_PROVIDER_VALUE="$(grep -E '^CHAT_LINK_SEARCH_PROVIDER=' .env | cut -d= -f2-)"
             if [ "$CHAT_LINK_SEARCH_PROVIDER_VALUE" = "tavily" ]; then

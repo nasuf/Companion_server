@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from app.api.deps import require_redis
 from app.api.jwt_auth import require_user
 from app.config import settings
 from app.db import db
+from app.services import meal_qr
 from app.services import meal_voucher as mv
+from app.services import wechat_jssdk
 from app.services.auth import create_jwt, decode_jwt
 from app.services.auth_security import (
     enforce_login_rate_limit,
@@ -36,6 +39,10 @@ class VoucherCodeRequest(BaseModel):
 class MerchantLoginRequest(BaseModel):
     merchant_id: str = Field(min_length=1, max_length=64)
     contact: str = Field(min_length=1, max_length=64)
+
+
+class MerchantScanRequest(BaseModel):
+    value: str = Field(min_length=16, max_length=256)
 
 
 def _voucher_payload(voucher, merchant_name: str | None = None) -> dict:
@@ -87,26 +94,20 @@ async def activate_voucher(
     return _voucher_payload(voucher)
 
 
-@router.post("/voucher/redeem")
-async def redeem_voucher(
-    data: VoucherCodeRequest, request: Request, payload: dict = Depends(require_user)
-):
-    user_id = payload["sub"]
-    await enforce_login_rate_limit(request, f"mealredeem:{user_id}")
-    try:
-        voucher = await mv.redeem_voucher(user_id, data.code)
-    except mv.MealVoucherError as exc:
-        if exc.reason == "bad_code":
-            await record_login_failure(request, f"mealredeem:{user_id}")
-        # daily_cap / expired 需要前端弹框区分处理, 用结构化 detail 带上 reason;
-        # 其余沿用纯字符串 message (前端已兼容两种形态).
-        if exc.reason in ("daily_cap", "expired"):
-            raise HTTPException(
-                status_code=400,
-                detail={"message": exc.message, "reason": exc.reason},
-            )
-        raise HTTPException(status_code=400, detail=exc.message)
-    return _voucher_payload(voucher, await _merchant_name_of(voucher))
+@router.post("/voucher/qr-token", dependencies=[Depends(require_redis)])
+async def voucher_qr_token(payload: dict = Depends(require_user)):
+    """Issue the user's only active, short-lived QR redemption grant."""
+    voucher = await mv.get_or_create_voucher(payload["sub"])
+    if voucher.status == mv.VOUCHER_REDEEMED:
+        raise HTTPException(status_code=400, detail="该券已核销")
+    if voucher.status != mv.VOUCHER_ACTIVATED:
+        raise HTTPException(status_code=400, detail="请先激活霸王餐券")
+    if mv.is_voucher_expired(voucher):
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "霸王餐券已过有效期，无法生成核销码", "reason": "expired"},
+        )
+    return await meal_qr.issue(voucher.id, voucher.userId)
 
 
 # ── 服务员: 轮换校验码展示页 ──────────────────────────────────────────
@@ -164,7 +165,11 @@ async def merchant_login(data: MerchantLoginRequest, request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="商家信息不匹配，请核对联系人姓名或手机号",
         )
-    token = create_jwt(merchant.id, _MERCHANT_ROLE)
+    token = create_jwt(
+        merchant.id,
+        _MERCHANT_ROLE,
+        expiry_hours=settings.meal_merchant_jwt_expiry_hours,
+    )
     logger.info(
         "meal merchant logged in",
         extra={"event": "meal_merchant_login", "merchant_id": merchant.id},
@@ -172,15 +177,68 @@ async def merchant_login(data: MerchantLoginRequest, request: Request):
     return {"token": token, "merchant": {"id": merchant.id, "name": merchant.name}}
 
 
-@router.get("/merchant/code")
-async def merchant_code(request: Request):
+@router.get(
+    "/merchant/jssdk-config",
+    dependencies=[Depends(require_redis)],
+)
+async def merchant_jssdk_config(
+    request: Request,
+    url: str = Query(min_length=8, max_length=2048),
+):
+    """Sign the exact merchant H5 URL for wx.scanQRCode."""
+    _require_merchant(request)
+    try:
+        return await wechat_jssdk.build_config(url)
+    except wechat_jssdk.WeChatJSSDKError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("failed to build WeChat JS-SDK config")
+        raise HTTPException(status_code=503, detail="微信扫一扫初始化失败，请稍后重试")
+
+
+@router.post(
+    "/merchant/redeem-scan",
+    dependencies=[Depends(require_redis)],
+)
+async def merchant_redeem_scan(data: MerchantScanRequest, request: Request):
+    """Consume a customer QR grant and redeem it as the authenticated merchant."""
     merchant_id = _require_merchant(request)
+    # Validate merchant availability before consuming the customer's one-time QR.
     merchant = await db.mealmerchant.find_unique(where={"id": merchant_id})
-    if not merchant:
-        raise HTTPException(status_code=404, detail="商家不存在")
+    if not merchant or not merchant.codeActive:
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "商家核销功能已停用", "reason": "merchant_disabled"},
+        )
+    try:
+        grant = await meal_qr.consume(data.value)
+        voucher = await mv.redeem_voucher_by_merchant(
+            grant["voucher_id"], grant["user_id"], merchant_id
+        )
+    except meal_qr.MealQRError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": exc.message, "reason": exc.reason},
+        )
+    except mv.MealVoucherError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": exc.message, "reason": exc.reason},
+        )
+    logger.info(
+        "meal voucher redeemed by merchant QR scan",
+        extra={
+            "event": "meal_voucher_qr_redeemed",
+            "voucher_id": voucher.id,
+            "user_id": voucher.userId,
+            "merchant_id": merchant_id,
+        },
+    )
     return {
-        "redeem_code": merchant.redeemCode,
-        "code_active": merchant.codeActive,
+        "voucher_id": voucher.id,
+        "user_display": await mv.resolve_user_display(voucher.userId),
+        "merchant_name": merchant.name,
+        "redeemed_at": voucher.redeemedAt.isoformat() if voucher.redeemedAt else None,
     }
 
 
