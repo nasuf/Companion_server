@@ -311,6 +311,7 @@ model ChatLinkCard {
 model GameSession {
   id                String        @id @default(uuid())
   provider          String        @default("sud")
+  gameKey           String?       @map("game_key")
   status            String        @default("created")
   userId            String        @map("user_id")
   user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -326,8 +327,8 @@ model GameSession {
   difficulty        String        @default("newbie")
   aiLevel           Int           @default(1) @map("ai_level")
   sdkEnabled        Boolean       @default(false) @map("sdk_enabled")
-  sudCode           String        @map("sud_code")
-  sudCodeExpiresAt  DateTime      @map("sud_code_expires_at")
+  sudCode           String?       @map("sud_code")
+  sudCodeExpiresAt  DateTime?     @map("sud_code_expires_at")
   userPlayer        Json          @map("user_player")
   aiPlayer          Json          @map("ai_player")
   companionReply    String?       @map("companion_reply")
@@ -342,6 +343,7 @@ model GameSession {
   @@index([userId, createdAt(sort: Desc)], map: "game_sessions_user_created_idx")
   @@index([agentId, createdAt(sort: Desc)], map: "game_sessions_agent_created_idx")
   @@index([conversationId, createdAt(sort: Desc)], map: "game_sessions_conversation_created_idx")
+  @@index([provider, gameKey, createdAt(sort: Desc)], map: "game_sessions_provider_game_created_idx")
   @@index([roomId], map: "game_sessions_room_idx")
   @@map("game_sessions")
 }
@@ -350,6 +352,7 @@ model GameEvent {
   id             String      @id @default(uuid())
   sessionId      String      @map("session_id")
   session        GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  clientEventId  String?     @map("client_event_id")
   eventType      String      @map("event_type")
   state          String?
   source         String      @default("client")
@@ -358,6 +361,9 @@ model GameEvent {
   createdAt      DateTime    @default(now()) @map("created_at")
 
   @@index([sessionId, createdAt(sort: Desc)], map: "game_events_session_created_idx")
+  // The migration creates a partial unique index for non-null client_event_id;
+  // Prisma schema syntax cannot represent partial indexes.
+  @@index([sessionId, clientEventId], map: "game_events_session_client_event_idx")
   @@index([eventType, createdAt(sort: Desc)], map: "game_events_type_created_idx")
   @@map("game_events")
 }

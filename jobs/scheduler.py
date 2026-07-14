@@ -308,6 +308,15 @@ def setup_scheduler():
     )
 
     scheduler.add_job(
+        _run_game_memory_sync_retry,
+        "interval",
+        minutes=2,
+        id="game_memory_sync_retry",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
         _run_notification_dispatch,
         "interval",
         seconds=15,
@@ -744,6 +753,23 @@ async def _run_ali1688_token_refresh():
             logger.error(f"ali1688 token refresh FAILED, gift ordering will break if this persists: {e}")
 
     await _run_distributed_job("ali1688_token_refresh", 300, _body)
+
+
+async def _run_game_memory_sync_retry():
+    async def _body():
+        from app.services.games.native import (
+            abort_stale_sessions,
+            retry_pending_memory_sync,
+        )
+
+        closed = await abort_stale_sessions()
+        retried = await retry_pending_memory_sync(limit=10)
+        if closed:
+            logger.info("[CRON] closed %s stale native game session(s)", closed)
+        if retried:
+            logger.info("[CRON] retried %s native game memory sync(s)", retried)
+
+    await _run_distributed_job("game_memory_sync_retry", 180, _body)
 
 
 async def _run_aggregation_scan():

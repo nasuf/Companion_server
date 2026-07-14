@@ -16,6 +16,168 @@ class _FakeDb:
         return self.rows_by_query.pop(0)
 
 
+class _FakeTxContext:
+    def __init__(self, tx):
+        self.tx = tx
+
+    async def __aenter__(self):
+        return self.tx
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeTransactionalDb:
+    def __init__(self, rows_by_query: list[list[dict]]):
+        self.tx_executor = _FakeDb(rows_by_query)
+
+    def tx(self):
+        return _FakeTxContext(self.tx_executor)
+
+
+@pytest.mark.asyncio
+async def test_idempotent_event_insert_returns_new_row(monkeypatch):
+    fake_db = _FakeDb([[{"id": "event-1", "companion_reply": "落子"}]])
+    monkeypatch.setattr(sud, "db", fake_db)
+
+    event_id, inserted, reply = await sud._append_event_idempotent(
+        session_id="session-1",
+        event_type="move_placed",
+        state="playing",
+        payload={"actor": "user", "row": 7, "col": 7},
+        source="client",
+        companion_reply="落子",
+        client_event_id="move-1",
+    )
+
+    assert event_id == "event-1"
+    assert inserted is True
+    assert reply == "落子"
+    assert "ON CONFLICT" in fake_db.calls[0][0]
+    assert fake_db.calls[0][1][2] == "move-1"
+
+
+@pytest.mark.asyncio
+async def test_idempotent_event_insert_returns_existing_row(monkeypatch):
+    fake_db = _FakeDb(
+        [
+            [],
+            [{"id": "event-1", "companion_reply": "只回复一次"}],
+        ]
+    )
+    monkeypatch.setattr(sud, "db", fake_db)
+
+    event_id, inserted, reply = await sud._append_event_idempotent(
+        session_id="session-1",
+        event_type="game_aborted",
+        state="aborted",
+        payload={"reason": "left_game"},
+        source="client",
+        companion_reply="只回复一次",
+        client_event_id="abort-1",
+    )
+
+    assert event_id == "event-1"
+    assert inserted is False
+    assert reply == "只回复一次"
+    assert len(fake_db.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_game_message_insert_is_cross_worker_idempotent(monkeypatch):
+    fake_db = _FakeTransactionalDb(
+        [
+            [],
+            [],
+            [{"id": "message-1"}],
+        ]
+    )
+    monkeypatch.setattr(sud, "db", fake_db)
+
+    message_id, inserted = await sud._write_game_message(
+        conversation_id="conversation-1",
+        role="assistant",
+        content="进入游戏",
+        metadata={
+            "kind": "game_status",
+            "session_id": "session-1",
+            "game_status": "started",
+        },
+    )
+
+    assert (message_id, inserted) == ("message-1", True)
+    calls = fake_db.tx_executor.calls
+    assert "pg_advisory_xact_lock" in calls[0][0]
+    assert "metadata @>" in calls[1][0]
+    assert "INSERT INTO messages" in calls[2][0]
+
+
+@pytest.mark.asyncio
+async def test_game_message_insert_reuses_existing_logical_message(monkeypatch):
+    fake_db = _FakeTransactionalDb(
+        [
+            [],
+            [{"id": "message-existing"}],
+        ]
+    )
+    monkeypatch.setattr(sud, "db", fake_db)
+
+    message_id, inserted = await sud._write_game_message(
+        conversation_id="conversation-1",
+        role="assistant",
+        content="重复的结束回复",
+        metadata={
+            "kind": "game",
+            "session_id": "session-1",
+            "event_type": "game_finished",
+        },
+    )
+
+    assert (message_id, inserted) == ("message-existing", False)
+    assert len(fake_db.tx_executor.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_persist_game_reply_skips_an_existing_session_event(monkeypatch):
+    session = sud.SudSessionResponse(
+        id="session-1",
+        status="settled",
+        sdk_enabled=False,
+        user_id="user-1",
+        agent_id="agent-1",
+        app_id="",
+        app_key="",
+        bundle_id="",
+        is_test_env=False,
+        mg_id="",
+        room_id="room-1",
+        code="",
+        code_expires_at="",
+        play_mode="versus",
+        difficulty="normal",
+        ai_level=2,
+        user_player=sud.SudPlayerInfo(uid="user-1", nick_name="玩家"),
+        ai_player=sud.SudPlayerInfo(uid="agent-1", nick_name="小芜"),
+        conversation_id="conversation-1",
+    )
+    writes = []
+
+    async def write(**kwargs):
+        writes.append(kwargs)
+        return "message-1", False
+
+    monkeypatch.setattr(sud, "_write_game_message", write)
+
+    await sud._persist_reply_to_chat_if_needed(
+        session,
+        "game_finished",
+        "settled",
+        "结束啦。",
+    )
+
+    assert len(writes) == 1
+
+
 @pytest.mark.asyncio
 async def test_resolve_owned_context_rejects_foreign_conversation(monkeypatch):
     fake_db = _FakeDb(
@@ -145,7 +307,9 @@ def test_sud_noise_events_do_not_generate_chat_reply():
 def test_only_game_end_replies_are_persisted_to_chat():
     assert not sud._should_persist_reply_to_chat("session_created", None)
     assert not sud._should_persist_reply_to_chat("sdk_ready", None)
-    assert not sud._should_persist_reply_to_chat("sud_player_state", "mg_common_self_ready")
+    assert not sud._should_persist_reply_to_chat(
+        "sud_player_state", "mg_common_self_ready"
+    )
     assert not sud._should_persist_reply_to_chat("game_settle", "mg_common_game_settle")
     assert sud._should_persist_reply_to_chat("game_exited", None)
     assert sud._should_persist_reply_to_chat("sud_game_settle", None)
@@ -291,11 +455,16 @@ def test_abort_reply_is_suppressed_after_terminal_state():
         ai_player=SudPlayerInfo(uid="agent:a1", nick_name="AI", is_ai=1),
     )
 
-    assert sud._reply_for_event(session, "game_exited", None, {"reason": "page_disposed"}) is None
+    assert (
+        sud._reply_for_event(session, "game_exited", None, {"reason": "page_disposed"})
+        is None
+    )
 
 
 def test_notify_event_type_mapping():
-    assert sud._event_type_for_notify("sud.mg.merchant.game.process") == "sud_game_process"
+    assert (
+        sud._event_type_for_notify("sud.mg.merchant.game.process") == "sud_game_process"
+    )
     assert sud._event_type_for_notify("custom.settle") == "sud_game_settle"
 
 
@@ -457,6 +626,7 @@ async def test_sud_report_settlement_reply_is_persisted_to_chat(monkeypatch):
 
     async def fake_write_game_message(**kwargs):
         writes.append(kwargs)
+        return "message-1", True
 
     monkeypatch.setattr(sud, "_write_game_message", fake_write_game_message)
 
@@ -508,16 +678,10 @@ async def test_game_status_message_is_deduplicated(monkeypatch):
     updated = previous.model_copy(update={"status": "playing"})
     writes = []
 
-    async def fake_status_exists(conversation_id, session_id, status):
-        assert conversation_id == "c1"
-        assert session_id == "s1"
-        assert status == "started"
-        return True
-
     async def fake_write_game_message(**kwargs):
         writes.append(kwargs)
+        return "message-1", False
 
-    monkeypatch.setattr(sud, "_game_status_message_exists", fake_status_exists)
     monkeypatch.setattr(sud, "_write_game_message", fake_write_game_message)
 
     await sud._persist_game_status_to_chat_if_needed(
@@ -528,7 +692,7 @@ async def test_game_status_message_is_deduplicated(monkeypatch):
         {"game_title": "怪物消消乐"},
     )
 
-    assert writes == []
+    assert len(writes) == 1
 
 
 @pytest.mark.asyncio
@@ -557,14 +721,10 @@ async def test_game_status_message_wraps_game_title_in_brackets(monkeypatch):
     updated = previous.model_copy(update={"status": "playing"})
     writes = []
 
-    async def fake_status_exists(*_args):
-        return False
-
     async def fake_write_game_message(**kwargs):
         writes.append(kwargs)
-        return "m1"
+        return "m1", True
 
-    monkeypatch.setattr(sud, "_game_status_message_exists", fake_status_exists)
     monkeypatch.setattr(sud, "_write_game_message", fake_write_game_message)
 
     await sud._persist_game_status_to_chat_if_needed(
@@ -596,7 +756,9 @@ async def test_refresh_ss_token_accepts_existing_ss_token(monkeypatch):
         room_id="room-1",
     )
 
-    new_token, expires_at, user_info, old_payload = await sud.refresh_ss_token(old_token)
+    new_token, expires_at, user_info, old_payload = await sud.refresh_ss_token(
+        old_token
+    )
 
     new_payload = sud.decode_token(new_token)
     assert expires_at.timestamp() > new_payload["exp"] - 1

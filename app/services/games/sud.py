@@ -6,13 +6,13 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from weakref import WeakValueDictionary
 
 import jwt
-from prisma import Json
 
 from app.config import settings
 from app.db import db
-from app.models.game import SudPlayerInfo, SudSessionResponse
+from app.models.game import NativeSessionResponse, SudPlayerInfo, SudSessionResponse
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,14 @@ DEFAULT_DEMO_MG_ID = "1461227817776713818"
 GOMOKU_MG_ID = "1676069429630722049"
 MONSTER_CRUSH_MG_ID = "1664525565526667266"
 _TERMINAL_STATUSES = {"settled", "aborted"}
-_GAME_STATUS_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+_GAME_STATUS_LOCKS: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
+    WeakValueDictionary()
+)
+_GAME_REPLY_LOCKS: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
+    WeakValueDictionary()
+)
+
+GameSessionResponse = SudSessionResponse | NativeSessionResponse
 
 
 def _now() -> datetime:
@@ -324,7 +331,7 @@ async def list_sessions(user_id: str, limit: int = 50) -> list[SudSessionRespons
         """
         SELECT *
         FROM game_sessions
-        WHERE user_id = $1
+        WHERE user_id = $1 AND provider = 'sud'
         ORDER BY created_at DESC
         LIMIT $2
         """,
@@ -334,7 +341,9 @@ async def list_sessions(user_id: str, limit: int = 50) -> list[SudSessionRespons
     return [_row_to_session(row) for row in rows]
 
 
-async def get_session(session_id: str, *, user_id: str | None = None) -> SudSessionResponse:
+async def get_session(
+    session_id: str, *, user_id: str | None = None
+) -> SudSessionResponse:
     if user_id:
         rows = await db.query_raw(
             "SELECT * FROM game_sessions WHERE id = $1 AND user_id = $2 LIMIT 1",
@@ -372,7 +381,9 @@ async def handle_client_event(
         companion_reply=reply,
     )
     updated = await get_session(session_id, user_id=user_id)
-    await _persist_game_status_to_chat_if_needed(session, updated, event_type, state, payload)
+    await _persist_game_status_to_chat_if_needed(
+        session, updated, event_type, state, payload
+    )
     await _persist_reply_to_chat_if_needed(updated, event_type, state, reply)
     return updated, reply, event_id
 
@@ -404,7 +415,9 @@ async def handle_sud_report(
         companion_reply=reply,
     )
     updated = await get_session(session.id)
-    await _persist_game_status_to_chat_if_needed(session, updated, event_type, None, report_msg)
+    await _persist_game_status_to_chat_if_needed(
+        session, updated, event_type, None, report_msg
+    )
     await _persist_reply_to_chat_if_needed(updated, event_type, None, reply)
     return updated
 
@@ -437,7 +450,9 @@ async def handle_sud_notify(
         companion_reply=reply,
     )
     updated = await get_session(session.id)
-    await _persist_game_status_to_chat_if_needed(session, updated, event_type, state, data)
+    await _persist_game_status_to_chat_if_needed(
+        session, updated, event_type, state, data
+    )
     await _persist_reply_to_chat_if_needed(updated, event_type, state, reply)
     return updated
 
@@ -462,21 +477,29 @@ async def user_info_from_token(token: str) -> SudPlayerInfo:
     return await build_user_player(uid)
 
 
-async def user_info_from_code(code: str) -> tuple[str, datetime, SudPlayerInfo, dict[str, Any]]:
+async def user_info_from_code(
+    code: str,
+) -> tuple[str, datetime, SudPlayerInfo, dict[str, Any]]:
     payload = decode_token(code)
     uid = str(payload["uid"])
     session_id = payload.get("session_id")
     room_id = payload.get("room_id")
-    ss_token, expires_at = make_ss_token(uid=uid, session_id=session_id, room_id=room_id)
+    ss_token, expires_at = make_ss_token(
+        uid=uid, session_id=session_id, room_id=room_id
+    )
     return ss_token, expires_at, await build_user_player(uid), payload
 
 
-async def refresh_ss_token(token: str) -> tuple[str, datetime, SudPlayerInfo, dict[str, Any]]:
+async def refresh_ss_token(
+    token: str,
+) -> tuple[str, datetime, SudPlayerInfo, dict[str, Any]]:
     payload = decode_token(token)
     uid = str(payload["uid"])
     session_id = payload.get("session_id")
     room_id = payload.get("room_id")
-    ss_token, expires_at = make_ss_token(uid=uid, session_id=session_id, room_id=room_id)
+    ss_token, expires_at = make_ss_token(
+        uid=uid, session_id=session_id, room_id=room_id
+    )
     return ss_token, expires_at, await user_info_from_token(ss_token), payload
 
 
@@ -489,23 +512,71 @@ async def _append_event(
     source: str,
     companion_reply: str | None,
 ) -> str:
+    event_id, _, _ = await _append_event_idempotent(
+        session_id=session_id,
+        event_type=event_type,
+        state=state,
+        payload=payload,
+        source=source,
+        companion_reply=companion_reply,
+        client_event_id=None,
+    )
+    return event_id
+
+
+async def _append_event_idempotent(
+    *,
+    session_id: str,
+    event_type: str,
+    state: str | None,
+    payload: dict[str, Any],
+    source: str,
+    companion_reply: str | None,
+    client_event_id: str | None,
+    database: Any | None = None,
+) -> tuple[str, bool, str | None]:
+    executor = database or db
     event_id = str(uuid.uuid4())
-    await db.execute_raw(
+    rows = await executor.query_raw(
         """
         INSERT INTO game_events (
-            id, session_id, event_type, state, source, payload, companion_reply
+            id, session_id, client_event_id, event_type, state, source,
+            payload, companion_reply
         )
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+        ON CONFLICT (session_id, client_event_id)
+            WHERE client_event_id IS NOT NULL
+            DO NOTHING
+        RETURNING id, companion_reply
         """,
         event_id,
         session_id,
+        client_event_id,
         event_type,
         state,
         source,
         _json(payload),
         companion_reply,
     )
-    return event_id
+    if rows:
+        return str(rows[0]["id"]), True, rows[0].get("companion_reply")
+    existing = await executor.query_raw(
+        """
+        SELECT id, companion_reply
+        FROM game_events
+        WHERE session_id = $1 AND client_event_id = $2
+        LIMIT 1
+        """,
+        session_id,
+        client_event_id,
+    )
+    if not existing:
+        raise RuntimeError("idempotent game event insert returned no row")
+    return (
+        str(existing[0]["id"]),
+        False,
+        existing[0].get("companion_reply"),
+    )
 
 
 async def _write_game_message(
@@ -514,25 +585,55 @@ async def _write_game_message(
     role: str,
     content: str,
     metadata: dict[str, Any],
-) -> str | None:
-    try:
-        created = await db.message.create(
-            data={
-                "conversation": {"connect": {"id": conversation_id}},
-                "role": role,
-                "content": content,
-                "metadata": Json(metadata),
-            }
+) -> tuple[str, bool]:
+    """Insert one logical game message across all API workers."""
+
+    message_id = str(uuid.uuid4())
+    dedupe_keys = (
+        ("kind", "session_id", "game_status")
+        if metadata.get("kind") == "game_status"
+        else ("kind", "session_id", "event_type")
+    )
+    dedupe = {key: metadata[key] for key in dedupe_keys if key in metadata}
+    lock_key = f"game-message:{conversation_id}:{_json(dedupe)}"
+    async with db.tx() as tx:
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            lock_key,
         )
-        return str(getattr(created, "id", "") or "")
-    except Exception as exc:
-        logger.warning("failed to persist game chat message: %r", exc)
-        return None
+        existing = await tx.query_raw(
+            """
+            SELECT id
+            FROM messages
+            WHERE conversation_id = $1
+              AND metadata @> $2::jsonb
+            LIMIT 1
+            """,
+            conversation_id,
+            _json(dedupe),
+        )
+        if existing:
+            return str(existing[0]["id"]), False
+        rows = await tx.query_raw(
+            """
+            INSERT INTO messages (id, conversation_id, role, content, metadata)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            RETURNING id
+            """,
+            message_id,
+            conversation_id,
+            role,
+            content,
+            _json(metadata),
+        )
+    if not rows:
+        raise RuntimeError("game chat message insert returned no row")
+    return str(rows[0]["id"]), True
 
 
 async def _persist_game_status_to_chat_if_needed(
-    previous: SudSessionResponse,
-    updated: SudSessionResponse,
+    previous: GameSessionResponse,
+    updated: GameSessionResponse,
     event_type: str,
     state: str | None,
     payload: dict[str, Any],
@@ -545,102 +646,102 @@ async def _persist_game_status_to_chat_if_needed(
     lock_key = (updated.conversation_id, updated.id, status)
     lock = _GAME_STATUS_LOCKS.setdefault(lock_key, asyncio.Lock())
     async with lock:
-        if await _game_status_message_exists(updated.conversation_id, updated.id, status):
-            return
         game_title = _game_title(updated, payload)
         actor_name = updated.ai_player.nick_name or "AI"
         text = f"{actor_name} 和你已{'退出' if status == 'ended' else '进入'}游戏《{game_title}》"
-        metadata = {
+        metadata: dict[str, Any] = {
             "kind": "game_status",
             "game_status": status,
             "game_title": game_title,
             "game_status_actor": "both",
             "game_status_actor_name": actor_name,
             "session_id": updated.id,
-            "mg_id": updated.mg_id,
             "event_type": event_type,
             "state": state,
         }
+        mg_id = getattr(updated, "mg_id", "")
+        if mg_id:
+            metadata["mg_id"] = mg_id
         if status == "ended":
-            metadata["game_ended_reason"] = _ended_reason(updated, event_type, state, payload)
-        message_id = await _write_game_message(
+            metadata["game_ended_reason"] = _ended_reason(
+                updated, event_type, state, payload
+            )
+        message_id, inserted = await _write_game_message(
             conversation_id=updated.conversation_id,
             role="assistant",
             content=text,
             metadata=metadata,
         )
+        if not inserted:
+            return
         try:
             from app.services.runtime.ws_manager import manager
 
+            event_payload: dict[str, Any] = {
+                "text": text,
+                "status": status,
+                "game_title": game_title,
+                "session_id": updated.id,
+                "message_id": message_id or "",
+                "actor": "both",
+                "actor_name": actor_name,
+                "reason": metadata.get("game_ended_reason", ""),
+            }
+            if mg_id:
+                event_payload["mg_id"] = mg_id
             await manager.send_event(
                 updated.conversation_id,
                 "game_status",
-                {
-                    "text": text,
-                    "status": status,
-                    "game_title": game_title,
-                    "session_id": updated.id,
-                    "mg_id": updated.mg_id,
-                    "message_id": message_id or "",
-                    "actor": "both",
-                    "actor_name": actor_name,
-                    "reason": metadata.get("game_ended_reason", ""),
-                },
+                event_payload,
             )
         except Exception as exc:
             logger.debug("failed to emit game status websocket event: %r", exc)
 
 
-async def _game_status_message_exists(
-    conversation_id: str,
-    session_id: str,
-    status: str,
-) -> bool:
-    rows = await db.query_raw(
-        """
-        SELECT id
-        FROM messages
-        WHERE conversation_id = $1
-          AND metadata->>'kind' = 'game_status'
-          AND metadata->>'session_id' = $2
-          AND metadata->>'game_status' = $3
-        LIMIT 1
-        """,
-        conversation_id,
-        session_id,
-        status,
-    )
-    return bool(rows)
-
-
 def _status_transition(
-    previous: SudSessionResponse,
-    updated: SudSessionResponse,
+    previous: GameSessionResponse,
+    updated: GameSessionResponse,
     event_type: str,
     state: str | None,
 ) -> str | None:
     if updated.status == "playing" and previous.status != "playing":
         return "started"
-    if updated.status in _TERMINAL_STATUSES and previous.status not in _TERMINAL_STATUSES:
+    if (
+        updated.status in _TERMINAL_STATUSES
+        and previous.status not in _TERMINAL_STATUSES
+    ):
         return "ended"
     return None
 
 
-def _game_title(session: SudSessionResponse, payload: dict[str, Any]) -> str:
+def _game_title(session: GameSessionResponse, payload: dict[str, Any]) -> str:
     title = str(payload.get("game_title") or payload.get("gameName") or "").strip()
     if title:
         return title
-    if session.mg_id == MONSTER_CRUSH_MG_ID:
+    mg_id = getattr(session, "mg_id", "")
+    if mg_id == MONSTER_CRUSH_MG_ID:
         return "怪物消消乐"
-    if _is_gomoku_session(session):
+    if isinstance(session, SudSessionResponse) and _is_gomoku_session(session):
         return "五子棋"
-    if session.mg_id == settings.sud_default_mg_id.strip():
+    if mg_id == settings.sud_default_mg_id.strip():
         return "五子棋"
-    return session.mg_id
+    native_titles = {
+        "go": "围棋",
+        "reversi": "黑白棋",
+        "gomoku": "五子棋",
+        "xiangqi": "中国象棋",
+        "chess": "国际象棋",
+        "chinese_checkers": "跳棋",
+        "ludo": "飞行棋",
+        "match3": "消消乐",
+        "minesweeper": "协作扫雷",
+        "number_merge": "数字合并",
+    }
+    return native_titles.get(getattr(session, "game_key", None), mg_id or "游戏")
 
 
 def _ended_reason(
-    session: SudSessionResponse,
+    session: GameSessionResponse,
     event_type: str,
     state: str | None,
     payload: dict[str, Any],
@@ -657,7 +758,7 @@ def _ended_reason(
 
 
 async def _persist_reply_to_chat_if_needed(
-    session: SudSessionResponse,
+    session: GameSessionResponse,
     event_type: str,
     state: str | None,
     reply: str | None,
@@ -666,17 +767,22 @@ async def _persist_reply_to_chat_if_needed(
         return
     if not _should_persist_reply_to_chat(event_type, state):
         return
-    message_id = await _write_game_message(
-        conversation_id=session.conversation_id,
-        role="assistant",
-        content=reply,
-        metadata={
-            "kind": "game",
-            "session_id": session.id,
-            "event_type": event_type,
-            "state": state,
-        },
-    )
+    lock_key = (session.conversation_id, session.id, event_type)
+    lock = _GAME_REPLY_LOCKS.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        message_id, inserted = await _write_game_message(
+            conversation_id=session.conversation_id,
+            role="assistant",
+            content=reply,
+            metadata={
+                "kind": "game",
+                "session_id": session.id,
+                "event_type": event_type,
+                "state": state,
+            },
+        )
+        if not inserted:
+            return
     try:
         from app.services.runtime.ws_manager import manager
 
@@ -709,7 +815,10 @@ async def _update_session_from_event(
     result = session.result
     duration_seconds = None
 
-    if event_type in {"game_started", "sud_game_start"} or state == "mg_common_game_state":
+    if (
+        event_type in {"game_started", "sud_game_start"}
+        or state == "mg_common_game_state"
+    ):
         game_state = str(payload.get("gameState") or payload.get("game_state") or "")
         if event_type == "game_started" or game_state == "playing":
             status = "playing"
@@ -721,7 +830,10 @@ async def _update_session_from_event(
     if event_type in {"move", "sud_game_process", "sud_game_info", "game_process_info"}:
         result = _merge_process_result(session, result, event_type, state, payload)
 
-    if event_type in {"game_settle", "sud_game_settle"} or state == "mg_common_game_settle":
+    if (
+        event_type in {"game_settle", "sud_game_settle"}
+        or state == "mg_common_game_settle"
+    ):
         status = "settled"
         ended_at = _now().isoformat()
         result = _merge_process_result(
@@ -747,7 +859,9 @@ async def _update_session_from_event(
             "game_round_id": payload.get("gameRoundId") or payload.get("game_round_id"),
             "room_id": payload.get("room_id") or session.room_id,
             "mg_id": payload.get("mg_id") or session.mg_id,
-            "ended_reason": payload.get("reason") or payload.get("exit_reason") or "aborted",
+            "ended_reason": payload.get("reason")
+            or payload.get("exit_reason")
+            or "aborted",
             "user_outcome": "aborted",
         }
 
@@ -779,6 +893,8 @@ def _row_to_session(row: dict[str, Any]) -> SudSessionResponse:
     ai_player = SudPlayerInfo.model_validate(_loads(row.get("ai_player"), {}))
     return SudSessionResponse(
         id=str(row["id"]),
+        provider=str(row.get("provider") or "sud"),
+        game_key=row.get("game_key"),
         status=str(row.get("status") or "created"),
         sdk_enabled=bool(row.get("sdk_enabled")),
         user_id=str(row.get("user_id") or ""),
@@ -840,7 +956,10 @@ def _reply_for_event(
         return "过了！这一步配合很顺，我把这局记录下来。"
     if event_type == "level_failed":
         return "没关系，我们换个思路再来。我会帮你盯住刚才卡住的位置。"
-    if event_type in {"game_settle", "sud_game_settle"} or state == "mg_common_game_settle":
+    if (
+        event_type in {"game_settle", "sud_game_settle"}
+        or state == "mg_common_game_settle"
+    ):
         result = _merge_process_result(
             session,
             _extract_result(session, payload),
@@ -868,17 +987,15 @@ def _reply_for_event(
 def _should_persist_reply_to_chat(event_type: str, state: str | None) -> bool:
     if event_type == "game_settle":
         return False
-    return (
-        event_type
-        in {
-            "sud_game_settle",
-            "level_success",
-            "level_failed",
-            "game_exited",
-            "game_destroyed",
-        }
-        or state in {"mg_common_game_settle", "mg_common_destroy_game_scene"}
-    )
+    return event_type in {
+        "sud_game_settle",
+        "game_finished",
+        "game_aborted",
+        "level_success",
+        "level_failed",
+        "game_exited",
+        "game_destroyed",
+    } or state in {"mg_common_game_settle", "mg_common_destroy_game_scene"}
 
 
 def _is_abort_event(
@@ -890,12 +1007,22 @@ def _is_abort_event(
         return True
     if state == "mg_common_destroy_game_scene":
         return True
-    game_state = str(payload.get("gameState") or payload.get("game_state") or "").lower()
-    return event_type == "sud_game_state" and game_state in {"destroyed", "closed", "aborted"}
+    game_state = str(
+        payload.get("gameState") or payload.get("game_state") or ""
+    ).lower()
+    return event_type == "sud_game_state" and game_state in {
+        "destroyed",
+        "closed",
+        "aborted",
+    }
 
 
-def _extract_result(session: SudSessionResponse, payload: dict[str, Any]) -> dict[str, Any]:
-    raw_results = payload.get("results") or payload.get("report_msg", {}).get("results") or []
+def _extract_result(
+    session: SudSessionResponse, payload: dict[str, Any]
+) -> dict[str, Any]:
+    raw_results = (
+        payload.get("results") or payload.get("report_msg", {}).get("results") or []
+    )
     if not isinstance(raw_results, list):
         raw_results = []
 
@@ -933,7 +1060,9 @@ def _extract_result(session: SudSessionResponse, payload: dict[str, Any]) -> dic
         "user_extras": _extract_extras(user_row),
         "ai_extras": _extract_extras(ai_row),
         "game_over_reason": _extract_game_over_reason(payload),
-        "user_outcome": normalize_outcome((user_row or {}).get("isWin", (user_row or {}).get("is_win"))),
+        "user_outcome": normalize_outcome(
+            (user_row or {}).get("isWin", (user_row or {}).get("is_win"))
+        ),
     }
     if _is_gomoku_session(session):
         gomoku = _extract_gomoku_settlement(session, result, payload)
@@ -991,13 +1120,26 @@ def _extract_gomoku_settlement(
     gomoku: dict[str, Any] = {}
     move_count = _first_number(
         payload,
-        ("moveCount", "move_count", "stepCount", "step_count", "roundCount", "round_count"),
+        (
+            "moveCount",
+            "move_count",
+            "stepCount",
+            "step_count",
+            "roundCount",
+            "round_count",
+        ),
     )
     if move_count is None:
-        move_count = _first_number(user_extras, ("moveCount", "move_count", "stepCount", "step_count"))
+        move_count = _first_number(
+            user_extras, ("moveCount", "move_count", "stepCount", "step_count")
+        )
     if move_count is not None:
         gomoku["move_count"] = int(move_count)
-    winning_line = _extract_gomoku_line(payload) or _extract_gomoku_line(user_extras) or _extract_gomoku_line(ai_extras)
+    winning_line = (
+        _extract_gomoku_line(payload)
+        or _extract_gomoku_line(user_extras)
+        or _extract_gomoku_line(ai_extras)
+    )
     if winning_line:
         gomoku["winning_line"] = winning_line
         gomoku["win_direction"] = _gomoku_line_direction(winning_line)
@@ -1016,7 +1158,10 @@ def _winner_uid_from_result(
     user: Any,
     ai: Any,
 ) -> str | None:
-    if isinstance(user, dict) and _int_or_zero(user.get("isWin") or user.get("is_win")) == 2:
+    if (
+        isinstance(user, dict)
+        and _int_or_zero(user.get("isWin") or user.get("is_win")) == 2
+    ):
         return session.user_player.uid
     if isinstance(ai, dict) and _int_or_zero(ai.get("isWin") or ai.get("is_win")) == 2:
         return session.ai_player.uid
@@ -1100,10 +1245,17 @@ def _merge_gomoku_process(
         actor = move.get("actor")
         if added and actor in {"user", "ai"}:
             gomoku[f"{actor}_moves"] = int(gomoku.get(f"{actor}_moves") or 0) + 1
-    raw_moves = payload.get("moves") or payload.get("steps") or payload.get("chessList") or payload.get("chess_list")
+    raw_moves = (
+        payload.get("moves")
+        or payload.get("steps")
+        or payload.get("chessList")
+        or payload.get("chess_list")
+    )
     if isinstance(raw_moves, list):
         for item in raw_moves:
-            item_move = _extract_gomoku_move(session, item if isinstance(item, dict) else {"index": item})
+            item_move = _extract_gomoku_move(
+                session, item if isinstance(item, dict) else {"index": item}
+            )
             if item_move:
                 moves = list(gomoku.get("moves") or [])
                 if not _gomoku_move_exists(moves, item_move):
@@ -1116,7 +1268,12 @@ def _merge_gomoku_process(
     if winning_line:
         gomoku["winning_line"] = winning_line
         gomoku["win_direction"] = _gomoku_line_direction(winning_line)
-    winner_uid = str(payload.get("winnerUid") or payload.get("winner_uid") or payload.get("winner") or "")
+    winner_uid = str(
+        payload.get("winnerUid")
+        or payload.get("winner_uid")
+        or payload.get("winner")
+        or ""
+    )
     if winner_uid:
         gomoku["winner_uid"] = winner_uid
         if winner_uid == session.user_player.uid:
@@ -1132,7 +1289,9 @@ def _extract_gomoku_move(
     session: SudSessionResponse,
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
-    move_source = payload.get("move") if isinstance(payload.get("move"), dict) else payload
+    move_source = (
+        payload.get("move") if isinstance(payload.get("move"), dict) else payload
+    )
     point = _normalize_gomoku_point(move_source)
     if point is None:
         point = _normalize_gomoku_point(
@@ -1153,7 +1312,9 @@ def _extract_gomoku_move(
         or payload.get("player_id")
         or ""
     )
-    piece = str(payload.get("piece") or payload.get("chess") or payload.get("color") or "").strip()
+    piece = str(
+        payload.get("piece") or payload.get("chess") or payload.get("color") or ""
+    ).strip()
     actor = None
     if uid == session.user_player.uid:
         actor = "user"
@@ -1259,7 +1420,12 @@ def _merge_score_process(
             leader = "tie"
     previous_leader = process.get("last_leader")
     lead_changes = int(process.get("lead_changes") or 0)
-    if leader and previous_leader and leader != previous_leader and "tie" not in {leader, previous_leader}:
+    if (
+        leader
+        and previous_leader
+        and leader != previous_leader
+        and "tie" not in {leader, previous_leader}
+    ):
         lead_changes += 1
     return {
         **process,
@@ -1271,7 +1437,9 @@ def _merge_score_process(
         "lead_changes": lead_changes,
         "max_user_lead": max(int(process.get("max_user_lead") or 0), lead),
         "max_ai_lead": max(int(process.get("max_ai_lead") or 0), -lead),
-        "peak_user_score": max(int(process.get("peak_user_score") or 0), user_score or 0),
+        "peak_user_score": max(
+            int(process.get("peak_user_score") or 0), user_score or 0
+        ),
         "peak_ai_score": max(int(process.get("peak_ai_score") or 0), ai_score or 0),
         "last_score_at": _now().isoformat(),
     }
