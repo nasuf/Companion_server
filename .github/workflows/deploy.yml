@@ -132,6 +132,7 @@ jobs:
             WECHAT_H5_APP_SECRET=${{ secrets.WECHAT_H5_APP_SECRET }}
             WECHAT_JSSDK_ALLOWED_ORIGINS=${{ vars.WECHAT_JSSDK_ALLOWED_ORIGINS || 'https://banshengcomp.com' }}
             MEAL_STAFF_KEY=${{ secrets.MEAL_STAFF_KEY }}
+            MEAL_STAFF_JWT_EXPIRY_HOURS=${{ vars.MEAL_STAFF_JWT_EXPIRY_HOURS || '12' }}
             MEAL_QR_TTL_SECONDS=${{ vars.MEAL_QR_TTL_SECONDS || '60' }}
             MEAL_MERCHANT_JWT_EXPIRY_HOURS=${{ vars.MEAL_MERCHANT_JWT_EXPIRY_HOURS || '12' }}
             JAMENDO_CLIENT_ID=${{ secrets.JAMENDO_CLIENT_ID }}

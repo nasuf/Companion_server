@@ -123,12 +123,12 @@ class Settings(BaseSettings):
     # 例如 https://banshengcomp.com。与「网页授权域名」/CORS 是独立配置。
     wechat_jssdk_allowed_origins: str = ""
 
-    # 霸王餐服务员页访问口令: 服务员打开 staff.html 后在页面内输入此口令才能
-    # 看到轮换校验码. 请配全大写英文字母 (前端把输入统一转大写再校验).
-    # 空 = 不校验 (仅限本地开发); 生产必配, 否则任何用户可自助激活.
+    # 霸王餐服务员页访问口令: 登录 staff.html 后获得短时 JWT，再调用微信扫一扫。
+    # 请配全大写英文字母；空值仅允许本地开发，生产会拒绝服务员登录。
     meal_staff_key: str = ""
+    meal_staff_jwt_expiry_hours: int = 12
 
-    # 霸王餐券激活后的有效期 (天): 校验成功 (激活) 起算, 超过该天数未核销即过期,
+    # 霸王餐券服务员校验后的有效期 (天): activatedAt 起算，超时未核销即过期，
     # 无法再找商家兑换. 有效期口径按 UTC+8 自然时间 (activatedAt + N 天).
     meal_validity_days: int = 7
     # 每日霸王餐核销总量上限 (先到先得): 单个 UTC+8 自然日内核销总数达到该值后,

@@ -1,4 +1,4 @@
-"""霸王餐: 轮换码确定性/宽限期, 券状态机, 商家匹配, 端点映射."""
+"""霸王餐: 两阶段扫码券状态机, 商家匹配, 端点映射."""
 
 from __future__ import annotations
 
@@ -12,97 +12,18 @@ from app.config import settings
 from app.services import meal_voucher as mv
 
 
-# ── rotating code ─────────────────────────────────────────────────
-
-
-def test_code_is_deterministic_within_window():
-    base = 1_760_000_000 - (1_760_000_000 % 300)  # window start
-    code_a, _ = mv.current_activation_code(now=base + 10)
-    code_b, _ = mv.current_activation_code(now=base + 290)
-    assert code_a == code_b
-    assert len(code_a) == 6 and code_a.isdigit()
-
-
-def test_code_rotates_across_windows():
-    base = 1_760_000_000 - (1_760_000_000 % 300)
-    code_a, _ = mv.current_activation_code(now=base + 10)
-    code_next, _ = mv.current_activation_code(now=base + 310)
-    assert code_a != code_next  # 2^-? collision chance ~1e-6; deterministic seed here
-
-
-def test_expires_in_counts_down():
-    base = 1_760_000_000 - (1_760_000_000 % 300)
-    _, expires = mv.current_activation_code(now=base + 100)
-    assert expires == 200
-
-
-def test_verify_accepts_current_window():
-    now = 1_760_000_123
-    code, _ = mv.current_activation_code(now=now)
-    assert mv.verify_activation_code(code, now=now) is True
-
-
-def test_verify_accepts_previous_window_within_grace():
-    base = 1_760_000_000 - (1_760_000_000 % 300)
-    prev_code, _ = mv.current_activation_code(now=base - 10)  # previous window
-    # 15s into the new window -> grace (30s) still accepts the previous code
-    assert mv.verify_activation_code(prev_code, now=base + 15) is True
-    # 45s in -> grace over
-    assert mv.verify_activation_code(prev_code, now=base + 45) is False
-
-
-def test_verify_rejects_malformed():
-    assert mv.verify_activation_code("12345") is False
-    assert mv.verify_activation_code("abcdef") is False
-    assert mv.verify_activation_code("") is False
-
-
-# ── anchor (关闭→重新开启 重新生成) ────────────────────────────────
-
-
-def test_different_anchor_regenerates_code_same_wall_clock():
-    now = 1_760_000_123
-    code_a, _ = mv.current_activation_code(now=now, anchor=0)
-    code_b, _ = mv.current_activation_code(now=now, anchor=1_760_000_100)
-    assert code_a != code_b  # deterministic seeds chosen to differ
-
-
-def test_fresh_anchor_gives_full_countdown():
-    now = 1_760_000_123
-    _, expires = mv.current_activation_code(now=now, anchor=now)
-    assert expires == mv.CODE_WINDOW_SECONDS
-
-
-def test_old_anchor_code_rejected_after_reanchor():
-    now = 1_760_000_123
-    old_code, _ = mv.current_activation_code(now=now, anchor=0)
-    # after re-enable the anchor moves to `now` — the old code must die
-    assert mv.verify_activation_code(old_code, now=now + 1, anchor=now) is False
-    new_code, _ = mv.current_activation_code(now=now + 1, anchor=now)
-    assert mv.verify_activation_code(new_code, now=now + 1, anchor=now) is True
-
-
-def test_grace_is_anchor_relative():
-    anchor = 1_760_000_000
-    boundary = anchor + mv.CODE_WINDOW_SECONDS  # first rotation under anchor
-    prev_code, _ = mv.current_activation_code(now=boundary - 5, anchor=anchor)
-    assert mv.verify_activation_code(prev_code, now=boundary + 15, anchor=anchor)
-    assert not mv.verify_activation_code(prev_code, now=boundary + 45, anchor=anchor)
-
-
 @pytest.mark.asyncio
-async def test_enable_refreshes_anchor_disable_keeps_it(monkeypatch):
+async def test_validation_toggle_updates_only_enabled_flag(monkeypatch):
     upsert = AsyncMock()
     _mock_db(monkeypatch, systemconfig=SimpleNamespace(upsert=upsert))
 
     await mv.set_code_enabled(True)
     data = upsert.await_args.kwargs["data"]
-    assert data["update"]["mealCodeEnabled"] is True
-    assert data["update"]["mealCodeAnchor"] > 0  # regenerated
+    assert data["update"] == {"mealCodeEnabled": True}
 
     await mv.set_code_enabled(False)
     data = upsert.await_args.kwargs["data"]
-    assert data["update"] == {"mealCodeEnabled": False}  # anchor untouched
+    assert data["update"] == {"mealCodeEnabled": False}
 
 
 # ── voucher state machine (db mocked) ─────────────────────────────
@@ -130,14 +51,13 @@ async def test_activate_requires_enabled(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=False))
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.activate_voucher("user-1", "123456")
+        await mv.activate_voucher_by_staff("v-1", "user-1")
     assert exc.value.reason == "disabled"
 
 
 @pytest.mark.asyncio
 async def test_activate_happy_path(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(mv, "verify_activation_code_now", AsyncMock(return_value=True))
     updated = _voucher(mv.VOUCHER_ACTIVATED)
     db = _mock_db(
         monkeypatch,
@@ -149,7 +69,7 @@ async def test_activate_happy_path(monkeypatch):
         ),
     )
 
-    result = await mv.activate_voucher("user-1", "123456")
+    result = await mv.activate_voucher_by_staff("v-1", "user-1")
 
     assert result.status == mv.VOUCHER_ACTIVATED
     kwargs = db.mealvoucher.update_many.await_args.kwargs
@@ -162,7 +82,6 @@ async def test_activate_happy_path(monkeypatch):
 @pytest.mark.asyncio
 async def test_activate_concurrent_race_maps_to_already_activated(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(mv, "verify_activation_code_now", AsyncMock(return_value=True))
     _mock_db(
         monkeypatch,
         mealvoucher=SimpleNamespace(
@@ -172,14 +91,13 @@ async def test_activate_concurrent_race_maps_to_already_activated(monkeypatch):
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.activate_voucher("user-1", "123456")
+        await mv.activate_voucher_by_staff("v-1", "user-1")
     assert exc.value.reason == "already_activated"
 
 
 @pytest.mark.asyncio
-async def test_activate_rejects_wrong_code(monkeypatch):
+async def test_activate_rejects_mismatched_qr_identity(monkeypatch):
     monkeypatch.setattr(mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(mv, "verify_activation_code_now", AsyncMock(return_value=False))
     _mock_db(
         monkeypatch,
         mealvoucher=SimpleNamespace(
@@ -188,8 +106,8 @@ async def test_activate_rejects_wrong_code(monkeypatch):
     )
 
     with pytest.raises(mv.MealVoucherError) as exc:
-        await mv.activate_voucher("user-1", "000000")
-    assert exc.value.reason == "bad_code"
+        await mv.activate_voucher_by_staff("v-1", "other-user")
+    assert exc.value.reason == "invalid_qr"
 
 
 @pytest.mark.asyncio
@@ -206,7 +124,7 @@ async def test_activate_idempotency_guards(monkeypatch):
             ),
         )
         with pytest.raises(mv.MealVoucherError) as exc:
-            await mv.activate_voucher("user-1", "123456")
+            await mv.activate_voucher_by_staff("v-1", "user-1")
         assert exc.value.reason == reason
 
 
@@ -422,63 +340,87 @@ class FakeRequest:
 
 
 @pytest.mark.asyncio
-async def test_staff_code_requires_key_when_configured(monkeypatch):
+async def test_staff_login_rejects_wrong_key(monkeypatch):
     from app.api.public import meal as meal_api
     from fastapi import HTTPException
 
     monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
-
-    with pytest.raises(HTTPException) as exc:
-        await meal_api.staff_code(key="wrong")
-    assert exc.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_staff_code_disabled_returns_no_code(monkeypatch):
-    from app.api.public import meal as meal_api
-
-    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "")
-    monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=False))
-
-    body = await meal_api.staff_code(key="")
-    assert body == {"enabled": False, "code": None, "expires_in": None}
-
-
-@pytest.mark.asyncio
-async def test_staff_code_returns_current_code(monkeypatch):
-    from app.api.public import meal as meal_api
-
-    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
-    monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(meal_api.mv, "get_code_anchor", AsyncMock(return_value=0))
-
-    body = await meal_api.staff_code(key="sekret")
-    assert body["enabled"] is True
-    assert len(body["code"]) == 6
-    assert 0 < body["expires_in"] <= 300
-
-
-@pytest.mark.asyncio
-async def test_activate_endpoint_maps_domain_error_to_400(monkeypatch):
-    from app.api.public import meal as meal_api
-    from fastapi import HTTPException
-
     monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
     monkeypatch.setattr(meal_api, "record_login_failure", AsyncMock())
-    monkeypatch.setattr(
-        meal_api.mv,
-        "activate_voucher",
-        AsyncMock(side_effect=mv.MealVoucherError("bad_code", "校验码错误或已过期")),
-    )
 
     with pytest.raises(HTTPException) as exc:
-        await meal_api.activate_voucher(
-            meal_api.VoucherCodeRequest(code="000000"),
-            FakeRequest(),
-            payload={"sub": "user-1"},
+        await meal_api.staff_login(
+            meal_api.StaffLoginRequest(key="wrong"), FakeRequest()
         )
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 401
     meal_api.record_login_failure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_staff_login_issues_scoped_token(monkeypatch):
+    from app.api.public import meal as meal_api
+    from app.services.auth import decode_jwt
+
+    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
+    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
+
+    body = await meal_api.staff_login(
+        meal_api.StaffLoginRequest(key="SEKRET"), FakeRequest()
+    )
+    payload = decode_jwt(body["token"])
+    assert payload["sub"] == "meal_staff"
+    assert payload["role"] == "meal_staff"
+
+
+@pytest.mark.asyncio
+async def test_staff_scan_endpoint_activates_bound_voucher(monkeypatch):
+    from app.api.public import meal as meal_api
+    activated_at = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    voucher = SimpleNamespace(
+        id="v-1", userId="user-1", activatedAt=activated_at
+    )
+
+    monkeypatch.setattr(meal_api, "_require_staff", lambda _: "meal_staff")
+    monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        meal_api.meal_qr,
+        "consume",
+        AsyncMock(return_value={"voucher_id": "v-1", "user_id": "user-1"}),
+    )
+    activate = AsyncMock(return_value=voucher)
+    monkeypatch.setattr(meal_api.mv, "activate_voucher_by_staff", activate)
+    monkeypatch.setattr(
+        meal_api.mv, "resolve_user_display", AsyncMock(return_value="小明")
+    )
+
+    body = await meal_api.staff_activate_scan(
+        meal_api.MealScanRequest(value="CPMEAL:1:" + "a" * 43),
+        FakeRequest(),
+    )
+    meal_api.meal_qr.consume.assert_awaited_once_with(
+        "CPMEAL:1:" + "a" * 43, "activate"
+    )
+    activate.assert_awaited_once_with("v-1", "user-1")
+    assert body["user_display"] == "小明"
+
+
+@pytest.mark.asyncio
+async def test_staff_scan_disabled_does_not_consume_qr(monkeypatch):
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(meal_api, "_require_staff", lambda _: "meal_staff")
+    monkeypatch.setattr(meal_api.mv, "is_code_enabled", AsyncMock(return_value=False))
+    consume = AsyncMock()
+    monkeypatch.setattr(meal_api.meal_qr, "consume", consume)
+
+    with pytest.raises(HTTPException) as exc:
+        await meal_api.staff_activate_scan(
+            meal_api.MealScanRequest(value="CPMEAL:1:" + "a" * 43),
+            FakeRequest(),
+        )
+    assert exc.value.status_code == 403
+    consume.assert_not_awaited()
 
 
 @pytest.mark.asyncio

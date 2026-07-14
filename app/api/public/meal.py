@@ -1,4 +1,4 @@
-"""霸王餐 public endpoints: 用户券操作 / 服务员轮换码 / 商家自助核销台.
+"""霸王餐 public endpoints: 用户动态二维码 / 服务员校验 / 商家核销.
 
 Merchant self-service auth: identity = merchant dropdown choice + contact
 name/phone exact match, exchanged for a short-lived JWT with
@@ -7,6 +7,7 @@ name/phone exact match, exchanged for a short-lived JWT with
 
 from __future__ import annotations
 
+import hmac
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -30,10 +31,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/meal", tags=["meal"])
 
 _MERCHANT_ROLE = "meal_merchant"
+_STAFF_ROLE = "meal_staff"
+_STAFF_SUBJECT = "meal_staff"
 
 
-class VoucherCodeRequest(BaseModel):
-    code: str = Field(min_length=4, max_length=8)
+class StaffLoginRequest(BaseModel):
+    key: str = Field(min_length=1, max_length=64)
 
 
 class MerchantLoginRequest(BaseModel):
@@ -41,7 +44,7 @@ class MerchantLoginRequest(BaseModel):
     contact: str = Field(min_length=1, max_length=64)
 
 
-class MerchantScanRequest(BaseModel):
+class MealScanRequest(BaseModel):
     value: str = Field(min_length=16, max_length=256)
 
 
@@ -52,7 +55,7 @@ def _voucher_payload(voucher, merchant_name: str | None = None) -> dict:
         "activated_at": voucher.activatedAt.isoformat() if voucher.activatedAt else None,
         "redeemed_at": voucher.redeemedAt.isoformat() if voucher.redeemedAt else None,
         "merchant_name": merchant_name,
-        # 有效期: 激活后 N 天. 前端据此在个人页展示「有效期至…」并标出过期态.
+        # 有效期: 服务员校验后 N 天. 前端据此展示截止时间并标出过期态.
         "expires_at": expires_at.isoformat() if expires_at else None,
         "expired": mv.is_voucher_expired(voucher),
         "validity_days": settings.meal_validity_days,
@@ -66,7 +69,7 @@ async def _merchant_name_of(voucher) -> str | None:
     return merchant.name if merchant else None
 
 
-# ── 用户: 券状态 / 激活 / 核销 ────────────────────────────────────────
+# ── 用户: 券状态 / 两阶段动态二维码 ───────────────────────────────────
 
 
 @router.get("/voucher")
@@ -78,57 +81,115 @@ async def get_voucher(payload: dict = Depends(require_user)):
     }
 
 
-@router.post("/voucher/activate")
-async def activate_voucher(
-    data: VoucherCodeRequest, request: Request, payload: dict = Depends(require_user)
-):
-    user_id = payload["sub"]
-    # 6 位码空间只有 1e6, 必须限暴力尝试 (IP+user 5 次/15min).
-    await enforce_login_rate_limit(request, f"mealact:{user_id}")
-    try:
-        voucher = await mv.activate_voucher(user_id, data.code)
-    except mv.MealVoucherError as exc:
-        if exc.reason == "bad_code":
-            await record_login_failure(request, f"mealact:{user_id}")
-        raise HTTPException(status_code=400, detail=exc.message)
-    return _voucher_payload(voucher)
-
-
 @router.post("/voucher/qr-token", dependencies=[Depends(require_redis)])
 async def voucher_qr_token(payload: dict = Depends(require_user)):
-    """Issue the user's only active, short-lived QR redemption grant."""
+    """Issue the QR for the voucher's current staff/merchant stage."""
     voucher = await mv.get_or_create_voucher(payload["sub"])
     if voucher.status == mv.VOUCHER_REDEEMED:
         raise HTTPException(status_code=400, detail="该券已核销")
-    if voucher.status != mv.VOUCHER_ACTIVATED:
-        raise HTTPException(status_code=400, detail="请先激活霸王餐券")
+    if voucher.status == mv.VOUCHER_INACTIVE:
+        if not await mv.is_code_enabled():
+            raise HTTPException(status_code=400, detail="服务员扫码校验功能暂未开放")
+        action = "activate"
+    elif voucher.status == mv.VOUCHER_ACTIVATED:
+        action = "redeem"
+    else:
+        raise HTTPException(status_code=400, detail="霸王餐券状态异常")
     if mv.is_voucher_expired(voucher):
         raise HTTPException(
             status_code=400,
             detail={"message": "霸王餐券已过有效期，无法生成核销码", "reason": "expired"},
         )
-    return await meal_qr.issue(voucher.id, voucher.userId)
+    return await meal_qr.issue(voucher.id, voucher.userId, action)
 
 
-# ── 服务员: 轮换校验码展示页 ──────────────────────────────────────────
+# ── 服务员: 登录 / 扫码校验 ──────────────────────────────────────────
 
 
-@router.get("/staff/code")
-async def staff_code(key: str = ""):
-    """5 分钟轮换校验码. MEAL_STAFF_KEY 配置后必须携带匹配的 ?key=."""
+def _require_scoped_role(request: Request, role: str, login_message: str) -> str:
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail=login_message)
+    try:
+        payload = decode_jwt(auth[7:].strip())
+    except Exception:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
+    if payload.get("role") != role:
+        raise HTTPException(status_code=403, detail="无访问权限")
+    return str(payload["sub"])
+
+
+def _require_staff(request: Request) -> str:
+    return _require_scoped_role(request, _STAFF_ROLE, "请先登录服务员入口")
+
+
+@router.post("/staff/login")
+async def staff_login(data: StaffLoginRequest, request: Request):
+    """Exchange the configured staff key for a short-lived scoped JWT."""
+    await enforce_login_rate_limit(request, "mealstaff")
     expected = settings.meal_staff_key.strip()
-    if expected and key.strip() != expected:
+    candidate = data.key.strip().upper()
+    if not expected and settings.is_production():
+        logger.error("MEAL_STAFF_KEY is missing in production")
+        raise HTTPException(status_code=503, detail="服务员入口尚未配置")
+    if expected and not hmac.compare_digest(candidate, expected.upper()):
+        await record_login_failure(request, "mealstaff")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="无访问权限"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="服务员口令错误"
         )
+    token = create_jwt(
+        _STAFF_SUBJECT,
+        _STAFF_ROLE,
+        expiry_hours=settings.meal_staff_jwt_expiry_hours,
+    )
+    logger.info("meal staff logged in", extra={"event": "meal_staff_login"})
+    return {"token": token}
+
+
+@router.get("/staff/jssdk-config", dependencies=[Depends(require_redis)])
+async def staff_jssdk_config(
+    request: Request,
+    url: str = Query(min_length=8, max_length=2048),
+):
+    """Sign the exact staff H5 URL for wx.scanQRCode."""
+    _require_staff(request)
+    try:
+        return await wechat_jssdk.build_config(url)
+    except wechat_jssdk.WeChatJSSDKError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("failed to build staff WeChat JS-SDK config")
+        raise HTTPException(status_code=503, detail="微信扫一扫初始化失败，请稍后重试")
+
+
+@router.post("/staff/activate-scan", dependencies=[Depends(require_redis)])
+async def staff_activate_scan(data: MealScanRequest, request: Request):
+    """Consume a customer's validation QR and mark the voucher as validated."""
+    _require_staff(request)
     if not await mv.is_code_enabled():
-        return {"enabled": False, "code": None, "expires_in": None}
-    code, expires_in = await mv.activation_code_now()
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "服务员扫码校验功能已关闭", "reason": "disabled"},
+        )
+    try:
+        grant = await meal_qr.consume(data.value, "activate")
+        voucher = await mv.activate_voucher_by_staff(
+            grant["voucher_id"], grant["user_id"]
+        )
+    except meal_qr.MealQRError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": exc.message, "reason": exc.reason},
+        )
+    except mv.MealVoucherError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": exc.message, "reason": exc.reason},
+        )
     return {
-        "enabled": True,
-        "code": code,
-        "expires_in": expires_in,
-        "window_seconds": mv.CODE_WINDOW_SECONDS,
+        "voucher_id": voucher.id,
+        "user_display": await mv.resolve_user_display(voucher.userId),
+        "activated_at": voucher.activatedAt.isoformat() if voucher.activatedAt else None,
     }
 
 
@@ -136,16 +197,7 @@ async def staff_code(key: str = ""):
 
 
 def _require_merchant(request: Request) -> str:
-    auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="请先确认商家身份")
-    try:
-        payload = decode_jwt(auth[7:].strip())
-    except Exception:
-        raise HTTPException(status_code=401, detail="登录已过期，请重新确认身份")
-    if payload.get("role") != _MERCHANT_ROLE:
-        raise HTTPException(status_code=403, detail="无访问权限")
-    return str(payload["sub"])
+    return _require_scoped_role(request, _MERCHANT_ROLE, "请先确认商家身份")
 
 
 @router.get("/merchants")
@@ -200,7 +252,7 @@ async def merchant_jssdk_config(
     "/merchant/redeem-scan",
     dependencies=[Depends(require_redis)],
 )
-async def merchant_redeem_scan(data: MerchantScanRequest, request: Request):
+async def merchant_redeem_scan(data: MealScanRequest, request: Request):
     """Consume a customer QR grant and redeem it as the authenticated merchant."""
     merchant_id = _require_merchant(request)
     # Validate merchant availability before consuming the customer's one-time QR.
@@ -211,7 +263,7 @@ async def merchant_redeem_scan(data: MerchantScanRequest, request: Request):
             detail={"message": "商家核销功能已停用", "reason": "merchant_disabled"},
         )
     try:
-        grant = await meal_qr.consume(data.value)
+        grant = await meal_qr.consume(data.value, "redeem")
         voucher = await mv.redeem_voucher_by_merchant(
             grant["voucher_id"], grant["user_id"], merchant_id
         )

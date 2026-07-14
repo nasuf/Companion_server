@@ -1,4 +1,4 @@
-"""Short-lived, single-use QR redemption grants backed by Redis."""
+"""Short-lived, single-use meal-voucher QR grants backed by Redis."""
 
 from __future__ import annotations
 
@@ -54,8 +54,10 @@ def _active_key(voucher_id: str) -> str:
     return f"{_ACTIVE_KEY_PREFIX}{voucher_id}"
 
 
-async def issue(voucher_id: str, user_id: str) -> dict:
-    """Create the only currently valid QR grant for a voucher."""
+async def issue(voucher_id: str, user_id: str, action: str) -> dict:
+    """Create the only currently valid QR grant for a voucher and stage."""
+    if action not in {"activate", "redeem"}:
+        raise ValueError(f"unsupported meal QR action: {action}")
     token = secrets.token_urlsafe(32)
     ttl = max(20, min(int(settings.meal_qr_ttl_seconds), 300))
     now = datetime.now(UTC)
@@ -63,6 +65,7 @@ async def issue(voucher_id: str, user_id: str) -> dict:
         {
             "voucher_id": voucher_id,
             "user_id": user_id,
+            "action": action,
             "issued_at": now.isoformat(),
         },
         separators=(",", ":"),
@@ -80,19 +83,20 @@ async def issue(voucher_id: str, user_id: str) -> dict:
     )
     return {
         "value": f"{QR_PREFIX}{token}",
+        "action": action,
         "expires_in": ttl,
         "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
     }
 
 
-async def consume(value: str) -> dict:
-    """Atomically consume a QR grant. A scan result can succeed at most once."""
+async def consume(value: str, expected_action: str) -> dict:
+    """Atomically consume a grant only from the intended staff/merchant stage."""
     text = (value or "").strip()
     if not text.startswith(QR_PREFIX):
-        raise MealQRError("invalid_qr", "不是有效的霸王餐核销二维码")
+        raise MealQRError("invalid_qr", "不是有效的霸王餐二维码")
     token = text[len(QR_PREFIX) :]
     if not _TOKEN_RE.fullmatch(token):
-        raise MealQRError("invalid_qr", "不是有效的霸王餐核销二维码")
+        raise MealQRError("invalid_qr", "不是有效的霸王餐二维码")
 
     redis = await get_redis()
     raw = await redis.get(_token_key(token))
@@ -101,8 +105,16 @@ async def consume(value: str) -> dict:
     try:
         preview = json.loads(raw)
         voucher_id = str(preview["voucher_id"])
+        action = str(preview["action"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise MealQRError("invalid_qr", "二维码数据无效") from exc
+    if action != expected_action:
+        message = (
+            "该二维码需要由服务员扫码校验"
+            if action == "activate"
+            else "该二维码需要由商家扫码核销"
+        )
+        raise MealQRError("wrong_qr_stage", message)
 
     consumed = await redis.eval(
         _CONSUME_LUA,
@@ -115,9 +127,13 @@ async def consume(value: str) -> dict:
         raise MealQRError("expired_qr", "二维码已过期或已被使用")
     try:
         data = json.loads(consumed)
+        data_action = str(data["action"])
+        if data_action != expected_action:
+            raise MealQRError("wrong_qr_stage", "二维码用途不匹配")
         return {
             "voucher_id": str(data["voucher_id"]),
             "user_id": str(data["user_id"]),
+            "action": data_action,
         }
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise MealQRError("invalid_qr", "二维码数据无效") from exc

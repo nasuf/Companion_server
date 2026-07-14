@@ -1,25 +1,20 @@
 """霸王餐 (free-meal voucher) domain service.
 
 Three actors:
-* 用户 — one voucher each; activates it with the staff page's rotating code,
-  then presents a short-lived QR code to the merchant.
-* 服务员 — reads a TOTP-style 6-digit code that rotates every 5 minutes.
-* 商家 — authenticates in H5, scans the user's QR, and sees redemption stats.
+* 用户 — presents a short-lived QR first to staff for validation, then to the
+  merchant for redemption.
+* 服务员 — authenticates in H5 and scans an inactive voucher into ``activated``.
+* 商家 — authenticates in H5 and scans an activated voucher into ``redeemed``.
 
-The rotating code is derived (HMAC over the time-window index keyed off
-``jwt_secret``), so nothing is stored and "rotation" is just the clock moving
-to the next window. The admin kill switch lives in the singleton
-``system_config`` row; flipping it off makes verification reject everything
-and the staff endpoint stop returning codes.
+The admin kill switch lives in the singleton ``system_config`` row and controls
+whether staff validation is available. Existing validated/redeemed vouchers are
+not changed when it is switched off.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import re
-import time
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime, timedelta
@@ -31,17 +26,9 @@ from app.db import db
 
 logger = logging.getLogger(__name__)
 
-CODE_WINDOW_SECONDS = 300
-# Accept the previous window's code for a short grace period after rotation so
-# a code read out loud at 4:59 still validates when submitted at 5:05.
-CODE_GRACE_SECONDS = 30
-
 VOUCHER_INACTIVE = "inactive"
 VOUCHER_ACTIVATED = "activated"
 VOUCHER_REDEEMED = "redeemed"
-
-_SIX_DIGITS = re.compile(r"^\d{6}$")
-
 
 class MealVoucherError(Exception):
     """Domain error with a machine reason + user-facing message."""
@@ -92,67 +79,6 @@ def is_voucher_expired(voucher, now: datetime | None = None) -> bool:
     return ref >= expires_at
 
 
-# ── rotating activation code ─────────────────────────────────────────
-# Codes derive from HMAC(secret, f"{anchor}:{window}"). The anchor is a unix
-# timestamp refreshed every time the admin *enables* the feature, so toggling
-# off/on regenerates immediately (old codes die, new one gets a full window);
-# window indexes and the countdown are computed relative to the anchor.
-
-
-def _window_and_expiry(ts: float, anchor: int) -> tuple[int, int]:
-    rel = int(ts) - anchor
-    return rel // CODE_WINDOW_SECONDS, CODE_WINDOW_SECONDS - (rel % CODE_WINDOW_SECONDS)
-
-
-def code_for_window(window: int, anchor: int = 0) -> str:
-    """Deterministic 6-digit code for a window index under a given anchor."""
-    key = f"meal-voucher:{settings.jwt_secret}".encode("utf-8")
-    digest = hmac.new(
-        key, f"{anchor}:{window}".encode("utf-8"), hashlib.sha256
-    ).digest()
-    return f"{int.from_bytes(digest[:4], 'big') % 1_000_000:06d}"
-
-
-def current_activation_code(
-    now: float | None = None, anchor: int = 0
-) -> tuple[str, int]:
-    """Return (code, seconds_until_rotation) for the current window."""
-    ts = time.time() if now is None else now
-    window, expires_in = _window_and_expiry(ts, anchor)
-    return code_for_window(window, anchor), expires_in
-
-
-def verify_activation_code(
-    candidate: str, now: float | None = None, anchor: int = 0
-) -> bool:
-    """Match against the current window, or the previous one within grace."""
-    text = (candidate or "").strip()
-    if not _SIX_DIGITS.fullmatch(text):
-        return False
-    ts = time.time() if now is None else now
-    window, _ = _window_and_expiry(ts, anchor)
-    if hmac.compare_digest(code_for_window(window, anchor), text):
-        return True
-    in_grace = ((int(ts) - anchor) % CODE_WINDOW_SECONDS) < CODE_GRACE_SECONDS
-    return in_grace and hmac.compare_digest(code_for_window(window - 1, anchor), text)
-
-
-async def get_code_anchor() -> int:
-    """Current anchor from the singleton config row (0 = absolute windows)."""
-    config = await db.systemconfig.find_unique(where={"id": 1})
-    value = getattr(config, "mealCodeAnchor", None) if config else None
-    return int(value) if value else 0
-
-
-async def activation_code_now() -> tuple[str, int]:
-    """(code, expires_in) under the currently stored anchor."""
-    return current_activation_code(anchor=await get_code_anchor())
-
-
-async def verify_activation_code_now(candidate: str) -> bool:
-    return verify_activation_code(candidate, anchor=await get_code_anchor())
-
-
 # ── feature toggle (singleton system_config row) ─────────────────────
 
 
@@ -162,20 +88,16 @@ async def is_code_enabled() -> bool:
 
 
 async def set_code_enabled(enabled: bool) -> None:
-    create: dict = {"id": 1, "mealCodeEnabled": enabled}
-    update: dict = {"mealCodeEnabled": enabled}
-    if enabled:
-        # 重新开启 = 重新生成: 刷新锚点让关闭前的码全部失效, 新码满窗口倒计时.
-        anchor = int(time.time())
-        create["mealCodeAnchor"] = anchor
-        update["mealCodeAnchor"] = anchor
     await db.systemconfig.upsert(
         where={"id": 1},
-        data={"create": create, "update": update},
+        data={
+            "create": {"id": 1, "mealCodeEnabled": enabled},
+            "update": {"mealCodeEnabled": enabled},
+        },
     )
     logger.info(
-        "meal activation code toggled",
-        extra={"event": "meal_code_toggled", "enabled": enabled},
+        "meal staff validation toggled",
+        extra={"event": "meal_staff_validation_toggled", "enabled": enabled},
     )
 
 
@@ -199,19 +121,18 @@ async def get_or_create_voucher(user_id: str):
         raise
 
 
-async def activate_voucher(user_id: str, code: str):
-    """未激活 → 已激活: validated against the rotating staff code."""
+async def activate_voucher_by_staff(voucher_id: str, user_id: str):
+    """Staff-authenticated QR validation: inactive -> activated."""
     if not await is_code_enabled():
-        raise MealVoucherError("disabled", "校验码功能暂未开放")
+        raise MealVoucherError("disabled", "服务员扫码校验功能暂未开放")
 
-    voucher = await get_or_create_voucher(user_id)
+    voucher = await db.mealvoucher.find_unique(where={"id": voucher_id})
+    if not voucher or voucher.userId != user_id:
+        raise MealVoucherError("invalid_qr", "二维码对应的霸王餐券不存在")
     if voucher.status == VOUCHER_REDEEMED:
         raise MealVoucherError("already_redeemed", "该券已核销，无法重复操作")
     if voucher.status == VOUCHER_ACTIVATED:
-        raise MealVoucherError("already_activated", "该券已激活，无需重复激活")
-
-    if not await verify_activation_code_now(code):
-        raise MealVoucherError("bad_code", "校验码错误或已过期")
+        raise MealVoucherError("already_activated", "该券已校验，无需重复校验")
 
     # Conditional transition: only flips an *inactive* voucher, so a concurrent
     # double-submit can't re-activate (count==0 -> someone else got there first).
@@ -220,10 +141,14 @@ async def activate_voucher(user_id: str, code: str):
         data={"status": VOUCHER_ACTIVATED, "activatedAt": datetime.now(UTC)},
     )
     if not count:
-        raise MealVoucherError("already_activated", "该券已激活，无需重复激活")
+        raise MealVoucherError("already_activated", "该券已校验，无需重复校验")
     logger.info(
-        "meal voucher activated",
-        extra={"event": "meal_voucher_activated", "user_id": user_id},
+        "meal voucher validated by staff QR scan",
+        extra={
+            "event": "meal_voucher_staff_validated",
+            "voucher_id": voucher_id,
+            "user_id": user_id,
+        },
     )
     return await db.mealvoucher.find_unique(where={"id": voucher.id})
 
@@ -233,13 +158,13 @@ async def _redeem_loaded_voucher(voucher, merchant):
     if voucher.status == VOUCHER_REDEEMED:
         raise MealVoucherError("already_redeemed", "该券已核销，无法重复核销")
     if voucher.status != VOUCHER_ACTIVATED:
-        raise MealVoucherError("not_activated", "请先激活霸王餐券")
+        raise MealVoucherError("not_activated", "请先由服务员扫码校验霸王餐券")
 
-    # 有效期: 激活满 N 天未核销即过期, 不再允许核销 (spec 需求 1).
+    # 有效期: 服务员校验满 N 天未核销即过期, 不再允许核销 (spec 需求 1).
     if is_voucher_expired(voucher):
         raise MealVoucherError(
             "expired",
-            f"霸王餐券已过有效期（激活后 {settings.meal_validity_days} 天内有效），"
+            f"霸王餐券已过有效期（校验后 {settings.meal_validity_days} 天内有效），"
             "无法核销",
         )
 
@@ -363,7 +288,7 @@ async def clear_redemption(voucher_id: str) -> None:
 
 
 async def clear_activation(voucher_id: str) -> None:
-    """清除校验记录: activated/redeemed → inactive (整券归零, 用户可重新激活)."""
+    """清除校验记录: activated/redeemed -> inactive (整券归零后可重新校验)."""
     count = await db.mealvoucher.update_many(
         where={
             "id": voucher_id,
@@ -377,7 +302,7 @@ async def clear_activation(voucher_id: str) -> None:
         },
     )
     if not count:
-        raise MealVoucherError("not_activated", "该券当前未激活")
+        raise MealVoucherError("not_activated", "该券当前尚未校验")
     logger.info(
         "meal activation cleared",
         extra={"event": "meal_activation_cleared", "voucher_id": voucher_id},

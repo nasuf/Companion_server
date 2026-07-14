@@ -1,18 +1,18 @@
-"""Admin API: 霸王餐管理 (校验码管理 + 商家管理).
+"""Admin API: 霸王餐管理 (服务员扫码校验 + 商家管理).
 
 Endpoints (all admin-only):
-  GET    /admin-api/meal/overview        — 开关状态 + 当前码 + 倒计时 + 累计数据
+  GET    /admin-api/meal/overview        — 扫码校验开关 + 累计数据
   GET    /admin-api/meal/activations     — 实时校验动态 (轮询)
   GET    /admin-api/meal/stats           — 日期范围统计 (UTC+8 按天聚合激活/核销)
   GET    /admin-api/meal/expired         — 已过期券明细 (激活超 N 天未核销 + 用户)
   GET    /admin-api/meal/redemption-failures — 指定日核销失败明细 (超上限 + 用户)
-  PUT    /admin-api/meal/code-enabled    — 开启/关闭校验码功能
+  PUT    /admin-api/meal/code-enabled    — 开启/关闭服务员扫码校验
   GET    /admin-api/meal/merchants       — 商家列表 + 各自核销数
   POST   /admin-api/meal/merchants       — 新增商家
   PUT    /admin-api/meal/merchants/{id}  — 修改商家资料/停用/开启扫码核销
   DELETE /admin-api/meal/merchants/{id}  — 删除商家 (已核销记录保留, merchant 置空)
   GET    /admin-api/meal/merchants/{id}/redemptions — 该商家核销用户明细
-  DELETE /admin-api/meal/vouchers/{id}/redemption   — 清除核销 (回到已激活)
+  DELETE /admin-api/meal/vouchers/{id}/redemption   — 清除核销 (回到已校验)
   DELETE /admin-api/meal/vouchers/{id}/activation   — 清除校验 (整券归零)
 """
 
@@ -70,15 +70,7 @@ def _merchant_payload(merchant, redeemed_count: int) -> dict:
 async def overview():
     enabled = await mv.is_code_enabled()
     stats = await mv.voucher_stats()
-    body: dict = {"enabled": enabled, **stats}
-    if enabled:
-        code, expires_in = await mv.activation_code_now()
-        body.update(
-            code=code, expires_in=expires_in, window_seconds=mv.CODE_WINDOW_SECONDS
-        )
-    else:
-        body.update(code=None, expires_in=None, window_seconds=mv.CODE_WINDOW_SECONDS)
-    return body
+    return {"enabled": enabled, **stats}
 
 
 @router.get("/activations")
@@ -159,7 +151,7 @@ async def range_stats(start: str, end: str):
 
 @router.get("/expired")
 async def expired_vouchers(limit: int = 100):
-    """已过期券明细: 激活后超过有效期 (默认 7 天) 仍未核销的券 + 用户.
+    """已过期券明细: 校验后超过有效期 (默认 7 天) 仍未核销的券 + 用户.
 
     活动开始不足有效期天数时返回空 — 数据要满 N 天才会出现 (spec 需求 3).
     """
@@ -304,7 +296,7 @@ async def merchant_redemptions(merchant_id: str, limit: int = 100):
 
 @router.delete("/vouchers/{voucher_id}/redemption")
 async def clear_redemption(voucher_id: str, payload: dict = Depends(require_admin_jwt)):
-    """清除核销记录: 券回到「已激活」, 可在其他商家重新核销."""
+    """清除核销记录: 券回到「已校验」, 可在其他商家重新核销."""
     voucher = await db.mealvoucher.find_unique(where={"id": voucher_id})
     if not voucher:
         raise HTTPException(status_code=404, detail="记录不存在")
@@ -325,7 +317,7 @@ async def clear_redemption(voucher_id: str, payload: dict = Depends(require_admi
 
 @router.delete("/vouchers/{voucher_id}/activation")
 async def clear_activation(voucher_id: str, payload: dict = Depends(require_admin_jwt)):
-    """清除校验记录: 整券归零到「未激活」(如已核销一并清除), 用户可重新激活."""
+    """清除校验记录: 整券归零到「待校验」(如已核销一并清除)."""
     voucher = await db.mealvoucher.find_unique(where={"id": voucher_id})
     if not voucher:
         raise HTTPException(status_code=404, detail="记录不存在")
