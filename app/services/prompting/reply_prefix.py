@@ -2,7 +2,7 @@
 
 产品诉求: AI 发出的**每一条**用户可见消息 (含主动消息/短路回复/边界回复/
 音乐/礼物文案) 都应遵守同一套核心回复规则与反幻觉底线, 而不是只有主回复
-大 prompt 有. 实现上在 store.get_prompt_text_for_context 的单一出口对
+大 prompt 有. 实现上在 store.get_prompt_text 的单一出口对
 REPLY_PROMPT_KEYS 内的模板注入前置:
 
     【通用回复规则】chat.response_instruction (渲染 {max_per}/{total} 常量)
@@ -11,7 +11,6 @@ REPLY_PROMPT_KEYS 内的模板注入前置:
 
 设计要点:
 - 两个前置模板各自尊重 admin 启用开关: 停用哪个哪个消失, 全停用 = 无前置.
-  canary (per-agent/percent) 同样生效 — 走同一 get_prompt_text_for_context.
 - [EMO:标签/强度] 标记指令**不在**前置里 (已拆去 chat.reply_emotion_marker,
   仅主回复管线拼装) — 只有主回复路径会剥标记, 混入前置会漏给用户.
 - 前置文本所有回复类调用字节级相同 → provider prefix cache 可跨调用命中,
@@ -110,22 +109,18 @@ REPLY_PROMPT_KEYS: frozenset[str] = frozenset({
 })
 
 
-async def build_reply_prefix(
-    *, agent_id: str | None = None, user_id: str | None = None,
-) -> str:
-    """构建固定前置文本. 两个来源模板各自尊重启用开关与 canary;
+async def build_reply_prefix() -> str:
+    """构建固定前置文本. 两个来源模板各自尊重启用开关;
     全部不可用时返回空串 (调用方直接用原模板)."""
     from app.services.prompting.store import (
         PromptDisabledError,
-        get_prompt_text_for_context,
+        get_prompt_text,
     )
 
     parts: list[str] = []
     for key in PREFIX_SOURCE_KEYS:
         try:
-            text = await get_prompt_text_for_context(
-                key, agent_id=agent_id, user_id=user_id,
-            )
+            text = await get_prompt_text(key)
         except PromptDisabledError:
             continue
         except Exception as e:  # noqa: BLE001 — 前置失败不能挡住原模板

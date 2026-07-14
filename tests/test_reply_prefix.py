@@ -78,7 +78,7 @@ async def test_build_reply_prefix_renders_constants():
         }[key]
 
     with patch(
-        "app.services.prompting.store.get_prompt_text_for_context",
+        "app.services.prompting.store.get_prompt_text",
         AsyncMock(side_effect=fake_get),
     ):
         prefix = await build_reply_prefix()
@@ -102,7 +102,7 @@ async def test_build_reply_prefix_respects_disabled():
         return "【回答前的硬约束】…"
 
     with patch(
-        "app.services.prompting.store.get_prompt_text_for_context",
+        "app.services.prompting.store.get_prompt_text",
         AsyncMock(side_effect=fake_get),
     ):
         prefix = await build_reply_prefix()
@@ -113,7 +113,7 @@ async def test_build_reply_prefix_respects_disabled():
         raise PromptDisabledError(key)
 
     with patch(
-        "app.services.prompting.store.get_prompt_text_for_context",
+        "app.services.prompting.store.get_prompt_text",
         AsyncMock(side_effect=all_disabled),
     ):
         assert await build_reply_prefix() == ""
@@ -148,14 +148,14 @@ async def test_get_prompt_text_injects_prefix_for_reply_keys(monkeypatch):
     monkeypatch.setattr(store, "get_redis", AsyncMock(return_value=_FakeRedis(redis_store)))
     monkeypatch.setattr(store, "is_prompt_enabled", AsyncMock(return_value=True))
 
-    reply_text = await store.get_prompt_text_for_context("intent.end_reply")
+    reply_text = await store.get_prompt_text("intent.end_reply")
     assert str(reply_text).startswith("【通用回复规则】")
     assert "不许编造" in str(reply_text)
     assert str(reply_text).endswith("【任务】生成道别语 {message}")
     # ManagedPromptText 语义保留: prompt_key 仍是原模板 (trace 归属不变)
     assert reply_text.prompt_key == "intent.end_reply"
 
-    classifier_text = await store.get_prompt_text_for_context("intent.unified")
+    classifier_text = await store.get_prompt_text("intent.unified")
     assert "通用回复规则" not in str(classifier_text)
     assert str(classifier_text) == "【任务】意图分类 {message}"
 
@@ -172,7 +172,7 @@ async def test_prefix_failure_falls_back_to_bare_template(monkeypatch):
         "app.services.prompting.reply_prefix.build_reply_prefix",
         AsyncMock(side_effect=RuntimeError("redis down")),
     )
-    text = await store.get_prompt_text_for_context("intent.end_reply")
+    text = await store.get_prompt_text("intent.end_reply")
     assert str(text) == "【任务】道别"
 
 

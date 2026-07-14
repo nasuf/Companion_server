@@ -738,7 +738,6 @@ model PromptTemplate {
   description    String?
   content        String
   defaultContent String   @map("default_content")
-  canaryConfig   Json?    @map("canary_config")
   isEnabled      Boolean  @default(true) @map("is_enabled")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")

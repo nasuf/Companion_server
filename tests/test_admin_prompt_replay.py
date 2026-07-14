@@ -169,44 +169,6 @@ def test_admin_prompt_replay_output_is_raw_llm_text(api_client, monkeypatch):
     assert response.json()["output"] == raw
 
 
-def test_admin_prompt_canary_update_exposes_eval_result(api_client, monkeypatch):
-    from app.api.jwt_auth import require_admin_jwt
-    from app.main import app
-
-    async def fake_update(*_args, **_kwargs):
-        return {
-            "prompt_key": "chat.system_base",
-            "is_enabled": True,
-            "mode": "agents",
-            "content": "canary",
-            "agent_ids": ["agent-1"],
-            "rollout_percent": 0,
-            "eval_result": {"ok": True},
-            "updated_at": "2026-05-19T00:00:00+00:00",
-        }
-
-    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
-    monkeypatch.setattr("app.api.admin.prompts.update_prompt_canary_config", fake_update)
-    try:
-        response = api_client.put(
-            "/admin-api/prompts/chat.system_base/canary",
-            json={
-                "is_enabled": True,
-                "mode": "agents",
-                "content": "canary",
-                "agent_ids": ["agent-1"],
-                "rollout_percent": 0,
-            },
-        )
-    finally:
-        app.dependency_overrides.pop(require_admin_jwt, None)
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["is_enabled"] is True
-    assert data["eval_result"]["ok"] is True
-
-
 def test_admin_prompt_enabled_endpoint(api_client, monkeypatch):
     from app.api.jwt_auth import require_admin_jwt
     from app.main import app
@@ -224,7 +186,6 @@ def test_admin_prompt_enabled_endpoint(api_client, monkeypatch):
             "default_text": "t",
             "content": "t",
             "is_enabled": enabled,
-            "canary_config": None,
             "updated_at": None,
             "source": "redis",
         }

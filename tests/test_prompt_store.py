@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,7 +51,6 @@ def _make_existing(
         title=title,
         description=description,
         isEnabled=True,
-        canaryConfig=None,
         updatedAt=SimpleNamespace(isoformat=lambda: "2026-05-19T00:00:00+00:00"),
     )
 
@@ -252,133 +250,28 @@ async def test_prompt_update_version_attaches_eval_result(prompt_store_mocks):
 
 
 @pytest.mark.asyncio
-async def test_prompt_update_rejects_missing_required_placeholders(prompt_store_mocks):
+async def test_prompt_update_allows_removing_all_placeholders(prompt_store_mocks):
     from app.services.prompting.store import update_prompt_text
 
-    _mock_db, _fake_redis, _set_defs = prompt_store_mocks
-    definition = _make_definition(
+    mock_db, fake_redis, _set_defs = prompt_store_mocks
+    definition = _make_dc_definition(
         key="test.key",
         default_text="请根据 {message} 和 {context} 输出",
     )
-
-    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}):
-        with pytest.raises(ValueError, match=r"\{context\}"):
-            await update_prompt_text("test.key", "请根据 {message} 输出")
-
-
-def test_missing_required_placeholders_allows_cosmetic_removal():
-    """装饰性占位符 ({max_per}/{total}/{n}/…) 可被管理员合法删除, 不算缺失;
-    数据类占位符 ({message}/{context}/…) 删除仍算缺失。"""
-    from app.services.prompting.store import _missing_required_placeholders
-
-    default = "每条不超过{max_per}字，总共{total}字，分{n}条；根据{message}和{context}回复"
-    # 只去掉装饰性占位符 → 不算缺失
-    assert _missing_required_placeholders(
-        default, "根据{message}和{context}回复，最多3条每条15字",
-    ) == []
-    # 去掉数据类 {context} → 仍算缺失
-    assert _missing_required_placeholders(
-        default, "根据{message}回复",
-    ) == ["context"]
-
-
-@pytest.mark.asyncio
-async def test_prompt_canary_agent_rollout_overrides_runtime_text(prompt_store_mocks):
-    from app.services.prompting.store import (
-        get_prompt_text_for_context,
-        update_prompt_canary_config,
-    )
-
-    mock_db, fake_redis, _set_defs = prompt_store_mocks
-    definition = _make_definition(key="test.key", default_text="default")
-    existing = _make_existing(key="test.key", content="active", defaultContent="default")
-    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
-    mock_db.prompttemplate.update = AsyncMock(return_value=existing)
-    fake_redis.strings["prompt_template:test.key"] = "active"
-
-    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}), \
-         patch("app.services.prompting.store._prompt_eval_result", return_value={"ok": True}):
-        config = await update_prompt_canary_config(
-            "test.key",
-            is_enabled=True,
-            mode="agents",
-            content="canary text",
-            agent_ids=["agent-2", "agent-1", "agent-1"],
-            rollout_percent=0,
-        )
-        matched = await get_prompt_text_for_context("test.key", agent_id="agent-1", user_id="u1")
-        unmatched = await get_prompt_text_for_context("test.key", agent_id="agent-9", user_id="u1")
-
-    assert config["agent_ids"] == ["agent-1", "agent-2"]
-    assert json.loads(fake_redis.strings["prompt_canary:test.key"])["content"] == "canary text"
-    assert str(matched) == "canary text"
-    assert getattr(matched, "prompt_variant") == "canary"
-    assert str(unmatched) == "active"
-
-
-@pytest.mark.asyncio
-async def test_prompt_runtime_context_applies_canary_to_plain_get(prompt_store_mocks):
-    from app.services.prompting.store import (
-        get_prompt_text,
-        reset_prompt_runtime_context,
-        set_prompt_runtime_context,
-        update_prompt_canary_config,
-    )
-
-    mock_db, fake_redis, _set_defs = prompt_store_mocks
-    definition = _make_definition(key="test.key", default_text="default")
-    existing = _make_existing(key="test.key", content="active", defaultContent="default")
-    mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
-    mock_db.prompttemplate.update = AsyncMock(return_value=existing)
-    fake_redis.strings["prompt_template:test.key"] = "active"
-
-    with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}), \
-         patch("app.services.prompting.store._prompt_eval_result", return_value={"ok": True}):
-        await update_prompt_canary_config(
-            "test.key",
-            is_enabled=True,
-            mode="agents",
-            content="canary text",
-            agent_ids=["agent-1"],
-            rollout_percent=0,
-        )
-        token = set_prompt_runtime_context(agent_id="agent-1", user_id="u1")
-        try:
-            selected = await get_prompt_text("test.key")
-        finally:
-            reset_prompt_runtime_context(token)
-        active = await get_prompt_text("test.key")
-
-    assert str(selected) == "canary text"
-    assert getattr(selected, "prompt_variant") == "canary"
-    assert str(active) == "active"
-
-
-@pytest.mark.asyncio
-async def test_prompt_canary_rejects_missing_required_placeholders(prompt_store_mocks):
-    from app.services.prompting.store import update_prompt_canary_config
-
-    mock_db, _fake_redis, _set_defs = prompt_store_mocks
-    definition = _make_definition(
+    existing = _make_existing(
         key="test.key",
-        default_text="请根据 {message} 输出 {name}",
+        content=definition.default_text,
+        defaultContent=definition.default_text,
     )
-    existing = _make_existing(key="test.key", content="active", defaultContent=definition.default_text)
     mock_db.prompttemplate.find_unique = AsyncMock(return_value=existing)
+    fake_redis.strings["prompt_template:test.key"] = definition.default_text
 
     with patch("app.services.prompting.store.PROMPT_DEFINITION_MAP", {"test.key": definition}), \
-         patch("app.services.prompting.store._prompt_eval_result", return_value={"ok": True}):
-        with pytest.raises(ValueError, match=r"\{name\}"):
-            await update_prompt_canary_config(
-                "test.key",
-                is_enabled=True,
-                mode="agents",
-                content="请根据 {message} 输出",
-                agent_ids=["agent-1"],
-                rollout_percent=0,
-            )
+         patch("app.services.prompting.store._persist_prompt_update", AsyncMock(return_value=existing)):
+        result = await update_prompt_text("test.key", "这是一条不需要动态输入的新提示词")
 
-    mock_db.prompttemplate.update.assert_not_called()
+    assert result["content"] == "这是一条不需要动态输入的新提示词"
+    assert fake_redis.strings["prompt_template:test.key"] == "这是一条不需要动态输入的新提示词"
 
 
 def _make_dc_definition(key: str = "test.key", default_text: str = "default"):

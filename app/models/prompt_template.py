@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class PromptTemplateResponse(BaseModel):
@@ -12,7 +12,6 @@ class PromptTemplateResponse(BaseModel):
     default_text: str
     content: str
     is_enabled: bool = True
-    canary_config: dict[str, Any] | None = None
     updated_at: str | None = None
     source: str
 
@@ -54,22 +53,3 @@ class PromptTemplateReplayResponse(BaseModel):
     prompt_key: str
     output: str
     rendered_prompt: str
-
-
-class PromptCanaryConfigRequest(BaseModel):
-    is_enabled: bool = False
-    mode: Literal["off", "agents", "percent"] = "off"
-    content: str | None = None
-    agent_ids: list[str] = Field(default_factory=list)
-    rollout_percent: int = Field(default=0, ge=0, le=100)
-
-
-class PromptCanaryConfigResponse(BaseModel):
-    prompt_key: str
-    is_enabled: bool
-    mode: Literal["off", "agents", "percent"]
-    content: str | None = None
-    agent_ids: list[str] = Field(default_factory=list)
-    rollout_percent: int
-    eval_result: dict[str, Any] | None = None
-    updated_at: str | None = None

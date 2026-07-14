@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import string
 import time
-from contextvars import ContextVar, Token
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,12 +21,10 @@ from app.services.prompting.trace_components import ManagedPromptText
 logger = logging.getLogger(__name__)
 
 PROMPT_KEY_PREFIX = "prompt_template:"
-PROMPT_CANARY_KEY_PREFIX = "prompt_canary:"
 PROMPT_ENABLED_KEY_PREFIX = "prompt_enabled:"
 
 # enabled 状态的进程内缓存 TTL. 热路径每次 get_prompt_text 都要判断 enabled,
-# 不能每次打 Redis; 10s 内以本进程缓存为准 (多 worker 下停用最多 10s 后全量生效,
-# 跟 canary 配置的 5min Redis TTL 相比已经严格得多).
+# 不能每次打 Redis; 10s 内以本进程缓存为准，多 worker 最迟 10s 后全量生效.
 _ENABLED_LOCAL_TTL_SECONDS = 10.0
 _enabled_local_cache: dict[str, tuple[bool, float]] = {}
 
@@ -50,18 +45,8 @@ class PromptUpdateConflictError(Exception):
     """Raised when an optimistic-lock save detects a concurrent modification."""
 _ROOT = Path(__file__).resolve().parents[3]
 _EVAL_CASES = _ROOT / "evals" / "cases.jsonl"
-_prompt_runtime_context: ContextVar[dict[str, str | None] | None] = ContextVar(
-    "prompt_runtime_context",
-    default=None,
-)
-
-
 def _redis_key(key: str) -> str:
     return f"{PROMPT_KEY_PREFIX}{key}"
-
-
-def _canary_redis_key(key: str) -> str:
-    return f"{PROMPT_CANARY_KEY_PREFIX}{key}"
 
 
 def _enabled_redis_key(key: str) -> str:
@@ -139,22 +124,9 @@ async def set_prompt_enabled(key: str, enabled: bool) -> dict:
         **asdict(definition),
         "content": cached or row.content,
         "is_enabled": enabled,
-        "canary_config": _json_or_none(getattr(row, "canaryConfig", None)),
         "updated_at": row.updatedAt.isoformat() if getattr(row, "updatedAt", None) else None,
         "source": "redis" if cached else "db",
     }
-
-
-def set_prompt_runtime_context(
-    *,
-    agent_id: str | None = None,
-    user_id: str | None = None,
-) -> Token[dict[str, str | None] | None]:
-    return _prompt_runtime_context.set({"agent_id": agent_id, "user_id": user_id})
-
-
-def reset_prompt_runtime_context(token: Token[dict[str, str | None] | None]) -> None:
-    _prompt_runtime_context.reset(token)
 
 
 def _json_or_none(value: Any) -> dict[str, Any] | None:
@@ -209,118 +181,6 @@ def _prompt_eval_result(*, prompt_key: str, change_type: str) -> dict[str, Any]:
             "error": type(exc).__name__,
             "message": str(exc),
         }
-
-
-def _stable_bucket(*values: str | None) -> int:
-    raw = "|".join(str(v or "") for v in values)
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) % 100
-
-
-# Cosmetic reply-formatting placeholders that the runtime *supplies* but the
-# admin may legitimately drop (e.g. hardcoding "最多3条/每条15字" instead of
-# {n}/{max_per}/{total}). Rendering tolerates unused params, so removing these
-# is safe. Data-input placeholders ({message}/{context}/{new_conversation}/…)
-# are NOT in this set and stay required — dropping them would silently break
-# the prompt (LLM never sees the user input).
-_OPTIONAL_TEMPLATE_PLACEHOLDERS = {"n", "max_per", "total", "max_total", "max_reply"}
-
-
-def _template_fields(text: str) -> set[str]:
-    fields: set[str] = set()
-    for _, field_name, _, _ in string.Formatter().parse(text):
-        if field_name:
-            fields.add(field_name.split(".", 1)[0].split("[", 1)[0])
-    return fields
-
-
-def _missing_required_placeholders(reference: str, candidate: str) -> list[str]:
-    """Placeholders the default has but the new content dropped, excluding the
-    cosmetic reply-formatting ones an admin may intentionally remove.
-
-    The admin already verifies output via the trace replay before saving, and
-    rendering is crash-safe for missing params, so only *data-input*
-    placeholders are treated as required.
-    """
-    required = _template_fields(reference) - _OPTIONAL_TEMPLATE_PLACEHOLDERS
-    return sorted(required - _template_fields(candidate))
-
-
-def _normalize_canary_config(
-    *,
-    prompt_key: str,
-    is_enabled: bool,
-    mode: str,
-    content: str | None,
-    agent_ids: list[str] | None = None,
-    rollout_percent: int = 0,
-    eval_result: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    normalized_mode = mode if mode in {"off", "agents", "percent"} else "off"
-    normalized_content = (content or "").strip()
-    ids = sorted({str(item).strip() for item in (agent_ids or []) if str(item).strip()})
-    percent = max(0, min(100, int(rollout_percent or 0)))
-    enabled = bool(is_enabled) and normalized_mode != "off"
-    if enabled and not normalized_content:
-        raise ValueError("Canary content cannot be empty when enabled")
-    if normalized_mode == "agents" and enabled and not ids:
-        raise ValueError("agent_ids required for agents canary")
-    if normalized_mode == "percent" and enabled and percent <= 0:
-        raise ValueError("rollout_percent must be greater than 0 for percent canary")
-    if normalized_mode == "off":
-        enabled = False
-        percent = 0
-    return {
-        "prompt_key": prompt_key,
-        "is_enabled": enabled,
-        "mode": normalized_mode,
-        "content": normalized_content or None,
-        "agent_ids": ids,
-        "rollout_percent": percent,
-        "eval_result": eval_result,
-    }
-
-
-def _canary_matches(config: dict[str, Any], *, agent_id: str | None, user_id: str | None) -> bool:
-    if not config.get("is_enabled") or not config.get("content"):
-        return False
-    mode = str(config.get("mode") or "off")
-    if mode == "agents":
-        return bool(agent_id and agent_id in set(config.get("agent_ids") or []))
-    if mode == "percent":
-        percent = int(config.get("rollout_percent") or 0)
-        if percent <= 0:
-            return False
-        return _stable_bucket(config.get("prompt_key"), agent_id, user_id) < percent
-    return False
-
-
-async def _load_canary_config(key: str) -> dict[str, Any] | None:
-    redis = await get_redis()
-    cached = await redis.get(_canary_redis_key(key))
-    cached_config = _json_or_none(cached)
-    if cached_config is not None:
-        return cached_config
-
-    rows = await db.query_raw(
-        """
-        SELECT canary_config
-        FROM prompt_templates
-        WHERE key = $1
-        LIMIT 1
-        """,
-        key,
-    )
-    config = _json_or_none(rows[0].get("canary_config")) if rows else None
-    if config is None:
-        config = _normalize_canary_config(
-            prompt_key=key,
-            is_enabled=False,
-            mode="off",
-            content=None,
-        )
-    await redis.set(_canary_redis_key(key), json.dumps(config, ensure_ascii=False), ex=300)
-    return config
 
 
 async def ensure_prompt_templates() -> None:
@@ -455,20 +315,6 @@ async def ensure_prompt_templates() -> None:
 
 
 async def get_prompt_text(key: str) -> str:
-    ctx = _prompt_runtime_context.get() or {}
-    return await get_prompt_text_for_context(
-        key,
-        agent_id=ctx.get("agent_id"),
-        user_id=ctx.get("user_id"),
-    )
-
-
-async def get_prompt_text_for_context(
-    key: str,
-    *,
-    agent_id: str | None = None,
-    user_id: str | None = None,
-) -> str:
     """Fetch latest prompt text from Redis, falling back to DB/default.
 
     Raises PromptDisabledError when the template is disabled by admin —
@@ -485,36 +331,27 @@ async def get_prompt_text_for_context(
     if not await is_prompt_enabled(key):
         raise PromptDisabledError(key)
 
-    variant = "active"
-    content: str | None = None
-    if agent_id or user_id:
-        config = await _load_canary_config(key)
-        if config and _canary_matches(config, agent_id=agent_id, user_id=user_id):
-            content = str(config["content"])
-            variant = "canary"
-
-    if content is None:
-        redis = await get_redis()
-        cached = await redis.get(_redis_key(key))
-        if cached:
-            content = cached
-        else:
-            record = await db.prompttemplate.find_unique(where={"key": key})
-            content = record.content if record and record.content else definition.default_text
-            await redis.set(_redis_key(key), content)
+    redis = await get_redis()
+    cached = await redis.get(_redis_key(key))
+    if cached:
+        content = cached
+    else:
+        record = await db.prompttemplate.find_unique(where={"key": key})
+        content = record.content if record and record.content else definition.default_text
+        await redis.set(_redis_key(key), content)
 
     from app.services.prompting.reply_prefix import REPLY_PROMPT_KEYS, build_reply_prefix
 
     if key in REPLY_PROMPT_KEYS:
         try:
-            prefix = await build_reply_prefix(agent_id=agent_id, user_id=user_id)
+            prefix = await build_reply_prefix()
         except Exception as e:  # noqa: BLE001 — 前置故障不能放大成全回复链路故障
             logger.warning(f"[REPLY-PREFIX] build failed for {key}, using bare template: {e}")
             prefix = ""
         if prefix:
             content = f"{prefix}\n\n{content}"
 
-    return ManagedPromptText(content, key, prompt_variant=variant)
+    return ManagedPromptText(content, key, prompt_variant="active")
 
 
 async def get_prompt_text_or_default(key: str) -> str:
@@ -548,7 +385,6 @@ async def list_prompts() -> list[dict]:
                 **asdict(definition),
                 "content": content,
                 "is_enabled": bool(row.isEnabled) if row else True,
-                "canary_config": _json_or_none(getattr(row, "canaryConfig", None)) if row else None,
                 "updated_at": row.updatedAt.isoformat() if row else None,
                 "source": "redis" if cached else ("db" if row else "default"),
             }
@@ -720,12 +556,6 @@ async def update_prompt_text(
     normalized = content.strip()
     if not normalized:
         raise ValueError("Prompt content cannot be empty")
-    missing = _missing_required_placeholders(definition.default_text, normalized)
-    if missing:
-        raise ValueError(
-            "Prompt content is missing required placeholders: "
-            + ", ".join(f"{{{name}}}" for name in missing)
-        )
 
     existing = await db.prompttemplate.find_unique(where={"key": key})
     if (
@@ -743,8 +573,6 @@ async def update_prompt_text(
     current_effective = previous_cached or (
         existing.content if existing and existing.content else definition.default_text
     )
-    canary_config = await _load_canary_config(key)
-
     if (
         normalized == current_effective
         and existing is not None
@@ -758,7 +586,6 @@ async def update_prompt_text(
             **asdict(definition),
             "content": normalized,
             "is_enabled": bool(existing.isEnabled),
-            "canary_config": canary_config,
             "updated_at": existing.updatedAt.isoformat() if existing.updatedAt else None,
             "source": "redis" if previous_cached else "db",
         }
@@ -788,7 +615,6 @@ async def update_prompt_text(
         **asdict(definition),
         "content": normalized,
         "is_enabled": bool(getattr(row, "isEnabled", True)),
-        "canary_config": canary_config,
         "updated_at": row.updatedAt.isoformat() if getattr(row, "updatedAt", None) else None,
         "source": "redis",
     }
@@ -814,7 +640,6 @@ async def reset_prompt_text(key: str) -> dict:
         # is_enabled 必须回传真实 DB 值: PromptTemplateResponse 默认 True,
         # 漏传会让前端把已停用模板显示成已启用 (UI 与运行时状态分叉).
         "is_enabled": bool(getattr(row, "isEnabled", True)),
-        "canary_config": _json_or_none(getattr(row, "canaryConfig", None)),
         "source": "default",
         "updated_at": row.updatedAt.isoformat() if row else None,
     }
@@ -841,89 +666,6 @@ async def restore_prompt_version(key: str, version_id: str) -> dict:
         **asdict(definition),
         "content": version.content,
         "is_enabled": bool(getattr(row, "isEnabled", True)),
-        "canary_config": _json_or_none(getattr(row, "canaryConfig", None)),
         "source": "redis",
         "updated_at": row.updatedAt.isoformat() if row else None,
     }
-
-
-async def get_prompt_canary_config(key: str) -> dict[str, Any]:
-    if key not in PROMPT_DEFINITION_MAP:
-        raise KeyError(f"Unknown prompt key: {key}")
-    config = await _load_canary_config(key)
-    return config or _normalize_canary_config(
-        prompt_key=key,
-        is_enabled=False,
-        mode="off",
-        content=None,
-    )
-
-
-async def update_prompt_canary_config(
-    key: str,
-    *,
-    is_enabled: bool,
-    mode: str,
-    content: str | None,
-    agent_ids: list[str] | None = None,
-    rollout_percent: int = 0,
-) -> dict[str, Any]:
-    definition = PROMPT_DEFINITION_MAP.get(key)
-    if not definition:
-        raise KeyError(f"Unknown prompt key: {key}")
-
-    eval_result = _prompt_eval_result(prompt_key=key, change_type="canary_update")
-    if is_enabled:
-        missing = _missing_required_placeholders(definition.default_text, content or "")
-        if missing:
-            raise ValueError(
-                "Canary content is missing required placeholders: "
-                + ", ".join(f"{{{name}}}" for name in missing)
-            )
-    config = _normalize_canary_config(
-        prompt_key=key,
-        is_enabled=is_enabled,
-        mode=mode,
-        content=content,
-        agent_ids=agent_ids,
-        rollout_percent=rollout_percent,
-        eval_result=eval_result,
-    )
-
-    row = await db.prompttemplate.find_unique(where={"key": key})
-    if row:
-        await db.prompttemplate.update(
-            where={"key": key},
-            data={"canaryConfig": Json(config)},
-        )
-        updated_at = datetime.now(timezone.utc).isoformat()
-    else:
-        created = await db.prompttemplate.create(
-            data={
-                "key": key,
-                "stage": definition.stage,
-                "category": definition.category,
-                "title": definition.title,
-                "description": definition.description,
-                "content": definition.default_text,
-                "defaultContent": definition.default_text,
-                "canaryConfig": Json(config),
-                "isEnabled": True,
-            }
-        )
-        updated_at = created.updatedAt.isoformat() if getattr(created, "updatedAt", None) else None
-
-    redis = await get_redis()
-    await redis.set(_canary_redis_key(key), json.dumps(config, ensure_ascii=False), ex=300)
-    return {**config, "updated_at": updated_at}
-
-
-async def disable_prompt_canary(key: str) -> dict[str, Any]:
-    return await update_prompt_canary_config(
-        key,
-        is_enabled=False,
-        mode="off",
-        content=None,
-        agent_ids=[],
-        rollout_percent=0,
-    )

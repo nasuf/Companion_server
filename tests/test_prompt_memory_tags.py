@@ -34,7 +34,7 @@ async def test_memory_section_adds_lightweight_importance_tags():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)), \
          patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
@@ -69,7 +69,7 @@ async def test_memory_section_groups_task_and_safety_memories():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)), \
          patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
@@ -133,7 +133,7 @@ async def test_memory_section_separates_user_profile_context_from_answer_facts()
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)), \
          patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
@@ -166,7 +166,7 @@ async def test_memory_section_declares_fact_precedence_over_history_and_l3():
     from app.services.chat.prompt_builder import _build_memory_section
     from app.services.memory.retrieval.context_selector import ClassifiedMemory
 
-    with patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)), \
+    with patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)), \
          patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)):
         section = await _build_memory_section([
             ClassifiedMemory(
@@ -209,7 +209,7 @@ async def test_system_prompt_skips_empty_placeholder_sections_on_weak_memory():
         return definition.default_text if definition else ""
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         diagnostics = {}
@@ -254,7 +254,7 @@ async def test_system_prompt_includes_agent_age_from_identity():
         return definition.default_text if definition else ""
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
@@ -283,7 +283,7 @@ async def test_system_prompt_keeps_empty_memory_anchor_when_hard_rule_active():
         }.get(key, "")
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
@@ -324,7 +324,7 @@ async def test_l3_section_cannot_override_current_memory_facts():
         return definition.default_text if definition else ""
 
     with (
-        patch("app.services.chat.prompt_builder.get_prompt_text_for_context", AsyncMock(side_effect=_prompt_text)),
+        patch("app.services.chat.prompt_builder.get_prompt_text", AsyncMock(side_effect=_prompt_text)),
         patch("app.services.chat.prompt_builder.get_prompt_text_or_default", AsyncMock(side_effect=_prompt_text)),
     ):
         prompt = await build_system_prompt(
@@ -364,7 +364,7 @@ async def test_disabled_prompt_section_completely_removed_from_system_prompt():
         return await _prompt_text(key)
 
     with patch(
-        "app.services.chat.prompt_builder.get_prompt_text_for_context",
+        "app.services.chat.prompt_builder.get_prompt_text",
         AsyncMock(side_effect=_prompt_text_with_disabled),
     ):
         diagnostics = {}

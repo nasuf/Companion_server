@@ -109,7 +109,7 @@ def test_emotion_section_no_raw_vector():
 
     user_emotion = {"emotion": "高兴", "intensity": 60}
     with patch(
-        "app.services.chat.prompt_builder.get_prompt_text_for_context",
+        "app.services.chat.prompt_builder.get_prompt_text",
         AsyncMock(return_value="你们目前的关系是{intimacy_stage}。"),
     ):
         section = asyncio.run(_build_emotion_section(
@@ -127,7 +127,7 @@ def test_emotion_section_only_intimacy():
     from app.services.chat.prompt_builder import _build_emotion_section
 
     with patch(
-        "app.services.chat.prompt_builder.get_prompt_text_for_context",
+        "app.services.chat.prompt_builder.get_prompt_text",
         AsyncMock(return_value="你们目前的关系是{intimacy_stage}。"),
     ):
         section = asyncio.run(_build_emotion_section(

@@ -250,7 +250,7 @@
 
 ## P2. Prompt 运营闭环 `[完成-第一版]`
 
-**执行状态**：已完成第一版 Prompt 运营闭环。`/admin-api/stats/operations` 现在除基础 bug report 状态外，还返回 `by_error_type`、`by_eval_category`，并固定给出最近 24 小时 `high_risk_traces` 列表；风险条件覆盖 trace 总耗时 ≥20s、LLM step ≥8、trace share 失败和未解决人工标注。Web 端运营健康面板同步展示“问题分类”和“高风险 Trace”。Prompt 保存、重置、回退、代码同步会在 `prompt_template_versions.eval_result` 绑定离线 eval 校验快照；`prompt_templates.canary_config` 支持按 agent allowlist 或稳定百分比流量启用 canary prompt，Web 提示词编辑器可查看/保存 canary 配置与 eval 结果。
+**执行状态**：已完成第一版 Prompt 运营闭环。`/admin-api/stats/operations` 现在除基础 bug report 状态外，还返回 `by_error_type`、`by_eval_category`，并固定给出最近 24 小时 `high_risk_traces` 列表；风险条件覆盖 trace 总耗时 ≥20s、LLM step ≥8、trace share 失败和未解决人工标注。Web 端运营健康面板同步展示“问题分类”和“高风险 Trace”。Prompt 保存、重置、回退、代码同步会在 `prompt_template_versions.eval_result` 绑定离线 eval 校验快照。2026-07-14 因缺少真实分组质量归因与自动回滚闭环，移除了第一版 Canary 配置和运行时分流。
 
 ### 源码依据
 
@@ -258,12 +258,12 @@
 - `app/api/admin/prompts.py` 支持管理 prompt。
 - trace enrich 能映射 prompt 组件。
 - `/admin-api/stats/operations` 已聚合人工 bug 分类与最近 24h 高风险 trace。
-- `prompt_template_versions.eval_result` 与 `prompt_templates.canary_config` 已承载变更校验与 canary 配置。
+- `prompt_template_versions.eval_result` 承载变更校验快照。
 
 ### 要做
 
 1. 每次 prompt 改动绑定 eval run 结果。（第一版：离线 validate-only 快照）
-2. 支持 prompt canary：按 agent 或小流量启用。（第一版：agent allowlist / 稳定百分比）
+2. 如未来重新引入 prompt canary，必须先完成分组指标、效果归因与一键回滚。
 3. admin bug report 分类聚合。（第一版已接入 operations stats）
 4. 后台提供最近 24h 高风险 trace 列表。（第一版已接入 operations stats + Web 面板）
 
@@ -282,7 +282,7 @@
 | P1 CI/CD 质量流水线 | `[完成-第一版 / P3继续]` | 已有 CI gate 与 deploy workflow_run；lint/type check、部署后 smoke chat、真实 server eval 未完成。 |
 | P1 观测与运营指标产品化 | `[完成-第一版 / P3继续]` | 已有 operations stats、LLM runtime metrics、bug report eval draft、visible use rate 和 crisis count 结构化落库；告警闭环仍未完成。 |
 | P2 长期陪伴体验策略 | `[完成-第一版]` | 已有 fatigue score、节奏学习、长期陪伴 eval、30 天模拟 harness；后续可继续扩大真实长周期样本。 |
-| P2 Prompt 运营闭环 | `[完成-第一版]` | 已有 eval snapshot、canary config、Web prompt 管理和高风险 trace 面板；before/after 真实质量报告仍可增强。 |
+| P2 Prompt 运营闭环 | `[完成-第一版]` | 已有 eval snapshot、Web prompt 管理和高风险 trace 面板；before/after 真实质量报告仍可增强。 |
 
 ## P3. 生产化闭环与长期记忆可信度 `[下一阶段 / 未完成]`
 
@@ -398,23 +398,22 @@ P3 的目标是把 P0-P2 的“第一版能力”推进成可长期运营的闭�
 
 - 不是“部署成功”就算成功，而是最小对话链路真的可用。
 
-### P3-5. Prompt before/after 质量报告 + canary 效果归因 `[未完成]`
+### P3-5. Prompt before/after 质量报告 `[未完成]`
 
 **要做**：
 
 1. prompt 保存时运行 before/after 对比 eval，而不只是 validate-only。
-2. canary 分组记录实际命中情况与质量指标：
+2. 展示 prompt 变更前后的质量指标：
    - bug report rate。
    - high-risk trace rate。
    - latency / fallback。
    - visible use rate。
-3. Web 端展示 canary 当前效果。
-4. 支持一键回滚 canary。
+3. Web 端展示变更前后对比结果。
 
 **验收标准**：
 
 - prompt 变更能看到质量变化，不靠感觉上线。
-- canary 变差时能快速定位和回滚。
+- prompt 变更导致质量下降时能快速定位并回退历史版本。
 
 ### P3-6. 国内生产部署 playbook `[未完成]`
 

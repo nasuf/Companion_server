@@ -18,7 +18,7 @@ from app.config import settings
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import (
     PromptDisabledError,
-    get_prompt_text_for_context,
+    get_prompt_text,
     get_prompt_text_or_default,
 )
 from app.services.prompting.trace_components import record_prompt_render
@@ -133,15 +133,10 @@ def _record_skipped_section(diagnostics: dict[str, Any] | None, title: str) -> N
         skipped.append(title)
 
 
-async def _get_optional_prompt(
-    key: str,
-    *,
-    agent_id: str | None = None,
-    user_id: str | None = None,
-) -> str | None:
+async def _get_optional_prompt(key: str) -> str | None:
     """Fetch a section template; admin 停用 → None (该段从最终输入中彻底移除)."""
     try:
-        return await get_prompt_text_for_context(key, agent_id=agent_id, user_id=user_id)
+        return await get_prompt_text(key)
     except PromptDisabledError:
         return None
 
@@ -151,7 +146,7 @@ def _render_section(template: str, params: dict[str, Any]) -> str:
 
     admin 可在线编辑这些模板; 裸 str.format 遇到编辑时新加的未知占位符
     (如 {备注}) 会 KeyError 打崩整条聊天热路径. SafeDict 把未知占位符渲染
-    为 "(无)", 保存侧的括号配对校验 (_template_fields) 拦截语法错误.
+    为 "(无)"，并允许管理员按新提示词结构增删占位符.
     """
     return render_template(template, params)
 
@@ -511,7 +506,6 @@ async def build_system_prompt(
     ai_mood_text: str = "",
     expression_habits: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
-    canary_user_id: str | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
     # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
     **_deprecated_kwargs,
@@ -529,20 +523,15 @@ async def build_system_prompt(
     """
     # Parallel — 5 independent prompt reads (each turn, hot path).
     # admin 停用任一模板 → 返回 None → 对应 section 从最终输入中彻底移除.
-    agent_id = str(getattr(agent, "id", "") or "") or None
     (
         system_base, consistency_rules, response_instruction,
         anti_hallucination, emotion_marker,
     ) = await asyncio.gather(
-        _get_optional_prompt("chat.system_base", agent_id=agent_id, user_id=canary_user_id),
-        _get_optional_prompt("chat.consistency_rules", agent_id=agent_id, user_id=canary_user_id),
-        _get_optional_prompt("chat.response_instruction", agent_id=agent_id, user_id=canary_user_id),
-        _get_optional_prompt(
-            "chat.anti_hallucination_hard_rule",
-            agent_id=agent_id,
-            user_id=canary_user_id,
-        ),
-        _get_optional_prompt("chat.reply_emotion_marker", agent_id=agent_id, user_id=canary_user_id),
+        _get_optional_prompt("chat.system_base"),
+        _get_optional_prompt("chat.consistency_rules"),
+        _get_optional_prompt("chat.response_instruction"),
+        _get_optional_prompt("chat.anti_hallucination_hard_rule"),
+        _get_optional_prompt("chat.reply_emotion_marker"),
     )
 
     # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════
