@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.jwt_auth import require_user
 from app.models.game import (
@@ -68,6 +68,18 @@ async def create_native_game_session(
         )
     except ValueError as exc:
         raise _http_error(exc) from exc
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_native_game_session(
+    session_id: str,
+    user: dict = Depends(require_user),
+):
+    try:
+        await native.delete_session(session_id, user_id=user["sub"])
+    except ValueError as exc:
+        raise _http_error(exc) from exc
+    return Response(status_code=204)
 
 
 @router.get(

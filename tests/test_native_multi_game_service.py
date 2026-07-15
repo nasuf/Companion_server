@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, call
+
 import pytest
 
 from app.models.game import SudPlayerInfo, SudSessionResponse
@@ -93,6 +95,69 @@ async def test_get_session_binds_only_the_declared_owned_query_parameters():
         )
 
     assert database.args == ("session-1", "user-1")
+
+
+@pytest.mark.asyncio
+async def test_delete_session_is_scoped_to_native_session_owner(monkeypatch):
+    class CaptureDb:
+        call = None
+
+        async def execute_raw(self, query, *args):
+            self.call = (query, args)
+            return 1
+
+    database = CaptureDb()
+    monkeypatch.setattr(native, "db", database)
+    get_session = AsyncMock(return_value=_session("go"))
+    monkeypatch.setattr(native, "get_session", get_session)
+
+    await native.delete_session("session-1", user_id="user-1")
+
+    get_session.assert_awaited_once_with("session-1", user_id="user-1")
+    assert "provider = 'native'" in database.call[0]
+    assert "user_id = $2" in database.call[0]
+    assert database.call[1] == ("session-1", "user-1")
+
+
+@pytest.mark.asyncio
+async def test_delete_session_rejects_missing_or_unowned_session(monkeypatch):
+    get_session = AsyncMock(side_effect=ValueError("session_not_found"))
+    monkeypatch.setattr(native, "get_session", get_session)
+
+    with pytest.raises(ValueError, match="session_not_found"):
+        await native.delete_session("session-1", user_id="other-user")
+
+    get_session.assert_awaited_once_with("session-1", user_id="other-user")
+
+
+@pytest.mark.asyncio
+async def test_delete_session_removes_linked_shared_memories_first(monkeypatch):
+    class CaptureDb:
+        async def execute_raw(self, query, *args):
+            return 1
+
+    session = _session("match3").model_copy(
+        update={
+            "result": {
+                "memory_sync": {
+                    "status": "stored",
+                    "user_memory_id": "memory-user",
+                    "ai_memory_id": "memory-ai",
+                }
+            }
+        }
+    )
+    delete_memory = AsyncMock()
+    monkeypatch.setattr(native, "db", CaptureDb())
+    monkeypatch.setattr(native, "get_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(native.memory_repo, "delete", delete_memory)
+
+    await native.delete_session("session-1", user_id="user-1")
+
+    assert delete_memory.await_args_list == [
+        call("memory-user", source="user"),
+        call("memory-ai", source="ai"),
+    ]
 
 
 @pytest.mark.asyncio

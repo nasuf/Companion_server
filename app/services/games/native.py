@@ -16,6 +16,7 @@ from app.models.game import (
     SudSessionResponse,
 )
 from app.services.games import sud
+from app.services.memory.storage import repo as memory_repo
 from app.services.offline.memory_hooks import remember_shared_game_experience
 from app.services.runtime.tasks import fire_background
 
@@ -271,6 +272,33 @@ async def get_session(
     if not rows:
         raise ValueError("session_not_found")
     return _as_native_session(sud._row_to_session(rows[0]))
+
+
+async def delete_session(session_id: str, *, user_id: str) -> None:
+    # Share the memory-delivery lock so a terminal session cannot create a
+    # fresh shared memory while its game record is being removed.
+    lock = _MEMORY_SYNC_LOCKS.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        session = await get_session(session_id, user_id=user_id)
+        memory_sync = _loads(_loads(session.result, {}).get("memory_sync"), {})
+        for source, id_key in (
+            ("user", "user_memory_id"),
+            ("ai", "ai_memory_id"),
+        ):
+            memory_id = str(memory_sync.get(id_key) or "").strip()
+            if memory_id:
+                await memory_repo.delete(memory_id, source=source)
+
+        deleted = await db.execute_raw(
+            """
+            DELETE FROM game_sessions
+            WHERE id = $1 AND user_id = $2 AND provider = 'native'
+            """,
+            session_id,
+            user_id,
+        )
+        if deleted == 0:
+            raise ValueError("session_not_found")
 
 
 async def list_events(
