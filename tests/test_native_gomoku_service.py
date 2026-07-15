@@ -415,7 +415,7 @@ async def test_abort_stale_sessions_uses_deterministic_server_event(monkeypatch)
     class StaleDb:
         async def query_raw(self, query, *args):
             assert "status = 'playing'" in query
-            assert args == (120, 20)
+            assert args == (7 * 24 * 60, 20)
             return [{"id": "session-1", "user_id": "user-1", "result": {}}]
 
     calls = []

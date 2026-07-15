@@ -612,6 +612,26 @@ async def test_stale_cleanup_settles_a_generic_terminal_snapshot(monkeypatch):
     assert calls[0]["client_event_id"] == "server-timeout-finish:session-1"
 
 
+def test_game_start_persists_an_initial_resumable_state():
+    definition = native._definition("number_merge")
+    result = native._empty_result("normal", definition)
+    initial_state = {
+        "state_hash": "initial-hash",
+        "turn": "user",
+        "board": [0, 0, 2, 0] * 4,
+    }
+
+    stored = native._store_initial_state(
+        result,
+        definition,
+        {"initial_state": initial_state},
+    )
+
+    game = native._generic_process(stored, definition)
+    assert game["final_state"] == initial_state
+    assert game["final_state_hash"] == "initial-hash"
+
+
 def test_terminal_reconciliation_preserves_saved_detailed_actions():
     definition = native._definition("chinese_checkers")
     result = native._empty_result("normal", definition)

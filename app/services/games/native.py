@@ -372,6 +372,7 @@ async def handle_event(
                     raise ValueError("invalid_state")
                 status = "playing"
                 started_at = _now().isoformat()
+                result = _store_initial_state(result, definition, event_payload)
                 reply = _start_reply(session.ai_player.nick_name, definition)
             elif event_type == "dice_rolled":
                 if definition.key != "ludo":
@@ -759,9 +760,9 @@ async def retry_pending_memory_sync(*, limit: int = 10) -> int:
 
 
 async def abort_stale_sessions(
-    *, stale_after_minutes: int = 120, limit: int = 20
+    *, stale_after_minutes: int = 7 * 24 * 60, limit: int = 20
 ) -> int:
-    """Close games whose client disappeared before reporting an abort."""
+    """Close games that have not been resumed within the seven-day window."""
 
     rows = await db.query_raw(
         """
@@ -938,6 +939,30 @@ def _with_event_count(result: dict[str, Any], event_type: str) -> dict[str, Any]
     counts = dict(_loads(result.get("event_counts"), {}))
     counts[event_type] = int(counts.get(event_type) or 0) + 1
     return {**result, "event_counts": counts}
+
+
+def _store_initial_state(
+    result: dict[str, Any],
+    definition: NativeGameDefinition,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    initial_state = _loads(payload.get("initial_state"), {})
+    if (
+        not isinstance(initial_state, dict)
+        or not initial_state
+        or definition.key == GOMOKU_GAME_KEY
+    ):
+        return result
+    process = dict(_loads(result.get("process"), {}))
+    game = dict(_loads(process.get(definition.key), {}))
+    game.update(
+        {
+            "final_state": initial_state,
+            "final_state_hash": initial_state.get("state_hash"),
+        }
+    )
+    process[definition.key] = game
+    return {**result, "process": process}
 
 
 def _gomoku(result: dict[str, Any]) -> dict[str, Any]:
