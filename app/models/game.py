@@ -120,7 +120,6 @@ NativeGameKey = Literal[
     "xiangqi",
     "chess",
     "chinese_checkers",
-    "ludo",
     "match3",
     "minesweeper",
     "number_merge",

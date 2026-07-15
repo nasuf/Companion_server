@@ -65,7 +65,6 @@ def test_native_registry_contains_every_supported_game():
         "xiangqi",
         "chess",
         "chinese_checkers",
-        "ludo",
         "match3",
         "minesweeper",
         "number_merge",
@@ -96,6 +95,29 @@ async def test_get_session_binds_only_the_declared_owned_query_parameters():
     assert database.args == ("session-1", "user-1")
 
 
+@pytest.mark.asyncio
+async def test_list_sessions_filters_out_games_removed_from_the_registry(monkeypatch):
+    class CaptureDb:
+        call = None
+
+        async def query_raw(self, query, *args):
+            self.call = (query, args)
+            return []
+
+    database = CaptureDb()
+    monkeypatch.setattr(native, "db", database)
+
+    sessions = await native.list_sessions("user-1")
+
+    assert sessions == []
+    assert "game_key IN" in database.call[0]
+    assert database.call[1] == ("user-1", 50)
+    assert all(
+        f"'{game_key}'" in database.call[0]
+        for game_key in native._GAME_DEFINITIONS
+    )
+
+
 @pytest.mark.parametrize(
     "game_key",
     [
@@ -104,7 +126,6 @@ async def test_get_session_binds_only_the_declared_owned_query_parameters():
         "xiangqi",
         "chess",
         "chinese_checkers",
-        "ludo",
         "match3",
         "minesweeper",
         "number_merge",
@@ -185,82 +206,27 @@ def test_generic_action_requires_the_previous_hash_after_first_action():
         )
 
 
-def test_ludo_roll_is_a_canonical_state_transition_for_the_next_move():
-    definition = native._definition("ludo")
-    result = native._empty_result("normal", definition)
-    result = native._merge_auxiliary_event(
-        result,
-        "dice_rolled",
-        {
-            "roll_number": 1,
-            "actor": "user",
-            "value": 6,
-            "legal_pieces": [0, 1, 2, 3],
-            "state_before_hash": "initial-hash",
-            "state_after_hash": "pending-roll-hash",
-            "state_after": {"state_hash": "pending-roll-hash", "pending_roll": 6},
-            "analysis": {"roll_count": 1},
-        },
-    )
-    game = native._generic_process(result, definition)
-    assert game["final_state_hash"] == "pending-roll-hash"
-    assert game["last_roll"]["value"] == 6
-
-    action = native._validate_generic_action(
-        result,
-        definition,
-        _action(
-            "user",
-            1,
-            before_hash="pending-roll-hash",
-            after_hash="moved-hash",
-        ),
-    )
-    assert action["recovered_roll_transition"] is False
-
-
-def test_ludo_move_can_recover_a_roll_event_that_failed_to_sync():
-    definition = native._definition("ludo")
-    result = native._empty_result("normal", definition)
-    game = native._generic_process(result, definition)
-    game["final_state_hash"] = "before-roll-hash"
-    process = dict(result["process"])
-    process["ludo"] = game
-    result = {**result, "process": process}
-    payload = _action(
-        "user",
-        1,
-        before_hash="pending-roll-hash",
-        after_hash="moved-hash",
-    )
-    payload["roll_state_before_hash"] = "before-roll-hash"
-
-    action = native._validate_generic_action(result, definition, payload)
-
-    assert action["recovered_roll_transition"] is True
-
-
 def test_key_moment_auxiliary_event_does_not_duplicate_action_moment():
-    definition = native._definition("ludo")
+    definition = native._definition("chinese_checkers")
     result = native._empty_result("normal", definition)
     action = native._validate_generic_action(
         result,
         definition,
         {
             **_action("user", 1, after_hash="hash-1"),
-            "moment": {"type": "flight_shortcut"},
+            "moment": {"type": "long_jump"},
         },
     )
     result = native._append_generic_action(result, definition, action)
     result = native._merge_auxiliary_event(
         result,
         "key_moment",
-        {"type": "flight_shortcut", "move_number": 1},
+        {"type": "long_jump", "move_number": 1},
     )
 
     game = native._generic_process(result, definition)
     assert game["key_moments"] == [
-        {"type": "flight_shortcut", "action_number": 1, "actor": "user"}
+        {"type": "long_jump", "action_number": 1, "actor": "user"}
     ]
 
 
@@ -527,7 +493,6 @@ def test_go_terminal_status_matches_reported_outcome():
         ("xiangqi", "draw", "draw"),
         ("chess", "userWon", "win"),
         ("chinese_checkers", "agentWon", "lose"),
-        ("ludo", "userWon", "win"),
         ("match3", "completed", "win"),
         ("minesweeper", "failed", "lose"),
         ("number_merge", "completed", "win"),
@@ -702,30 +667,33 @@ async def test_generic_shared_experience_enters_both_memory_sides(monkeypatch):
         }
 
     monkeypatch.setattr(native, "remember_shared_game_experience", remember)
-    definition = native._definition("ludo")
+    definition = native._definition("chinese_checkers")
     result = native._empty_result("normal", definition)
-    process = result["process"]["ludo"]
+    process = result["process"]["chinese_checkers"]
     process.update(
         {
             "action_count": 21,
-            "key_moments": [{"type": "capture", "action_number": 12}],
+            "key_moments": [{"type": "long_jump", "action_number": 12}],
         }
     )
     result.update(
         {
             "user_outcome": "lose",
             "duration_seconds": 245,
-            "ludo": process,
+            "chinese_checkers": process,
         }
     )
 
-    sync = await native._remember_shared_experience(_session("ludo"), result)
+    sync = await native._remember_shared_experience(
+        _session("chinese_checkers"),
+        result,
+    )
 
     assert sync["status"] == "stored"
     assert len(calls) == 1
-    assert "《飞行棋》" in calls[0]["user_text"]
+    assert "《跳棋》" in calls[0]["user_text"]
     assert "共同经历" in calls[0]["ai_text"]
-    assert "送回了停机坪" in calls[0]["ai_text"]
+    assert "连续长跳" in calls[0]["ai_text"]
 
 
 @pytest.mark.parametrize(
@@ -760,11 +728,6 @@ async def test_generic_shared_experience_enters_both_memory_sides(monkeypatch):
             "chinese_checkers",
             [{"type": "long_jump"}, {"type": "near_finish"}],
             ("连续长跳", "进营"),
-        ),
-        (
-            "ludo",
-            [{"type": "flight_shortcut"}, {"type": "color_jump"}],
-            ("跨盘捷径", "同色航点"),
         ),
         (
             "match3",
@@ -813,7 +776,7 @@ async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
         "_persist_reply_to_chat_if_needed",
         persist_reply,
     )
-    session = _session("ludo").model_copy(
+    session = _session("chinese_checkers").model_copy(
         update={
             "status": "settled",
             "result": {"memory_sync": {"status": "stored"}},
@@ -829,7 +792,7 @@ async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
     )
 
     assert calls == [
-        ("status", "playing", "settled", "飞行棋"),
+        ("status", "playing", "settled", "跳棋"),
         ("reply", "game_finished", "这局我先赢一下。"),
     ]
 

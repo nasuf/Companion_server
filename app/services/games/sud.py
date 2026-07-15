@@ -732,7 +732,6 @@ def _game_title(session: GameSessionResponse, payload: dict[str, Any]) -> str:
         "xiangqi": "中国象棋",
         "chess": "国际象棋",
         "chinese_checkers": "跳棋",
-        "ludo": "飞行棋",
         "match3": "消消乐",
         "minesweeper": "协作扫雷",
         "number_merge": "数字合并",

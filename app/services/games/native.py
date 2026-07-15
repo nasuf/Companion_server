@@ -40,7 +40,6 @@ _GAME_DEFINITIONS = {
     "xiangqi": NativeGameDefinition("xiangqi", "中国象棋", "piece_moved"),
     "chess": NativeGameDefinition("chess", "国际象棋", "piece_moved"),
     "chinese_checkers": NativeGameDefinition("chinese_checkers", "跳棋", "piece_moved"),
-    "ludo": NativeGameDefinition("ludo", "飞行棋", "piece_moved"),
     "match3": NativeGameDefinition(
         "match3", "消消乐", "tiles_swapped", play_mode="cooperate"
     ),
@@ -51,13 +50,13 @@ _GAME_DEFINITIONS = {
         "number_merge", "数字合并", "board_slid", play_mode="cooperate"
     ),
 }
+_SUPPORTED_GAME_KEYS_SQL = ", ".join(f"'{key}'" for key in _GAME_DEFINITIONS)
 _TERMINAL_OUTCOMES = {
     "go": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
     "reversi": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
     "xiangqi": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
     "chess": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
     "chinese_checkers": {"userWon": "win", "agentWon": "lose"},
-    "ludo": {"userWon": "win", "agentWon": "lose"},
     "match3": {"completed": "win", "failed": "lose"},
     "minesweeper": {"completed": "win", "failed": "lose"},
     "number_merge": {"completed": "win", "failed": "lose"},
@@ -73,7 +72,6 @@ _ALLOWED_EVENTS = {
     "stone_placed",
     "disc_placed",
     "piece_moved",
-    "dice_rolled",
     "tiles_swapped",
     "cell_action",
     "cells_revealed",
@@ -105,6 +103,10 @@ def _now() -> datetime:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _with_supported_games(query: str) -> str:
+    return query.replace("{supported_game_keys}", _SUPPORTED_GAME_KEYS_SQL)
 
 
 def _loads(value: Any, fallback: Any = None) -> Any:
@@ -204,6 +206,8 @@ async def list_sessions(
     game_key: str | None = None,
     limit: int = 50,
 ) -> list[NativeSessionResponse]:
+    if game_key and game_key not in _GAME_DEFINITIONS:
+        return []
     if game_key:
         rows = await db.query_raw(
             """
@@ -218,12 +222,16 @@ async def list_sessions(
         )
     else:
         rows = await db.query_raw(
-            """
+            _with_supported_games(
+                """
             SELECT * FROM game_sessions
-            WHERE user_id = $1 AND provider = 'native'
+            WHERE user_id = $1
+              AND provider = 'native'
+              AND game_key IN ({supported_game_keys})
             ORDER BY created_at DESC
             LIMIT $2
-            """,
+            """
+            ),
             user_id,
             limit,
         )
@@ -374,12 +382,6 @@ async def handle_event(
                 started_at = _now().isoformat()
                 result = _store_initial_state(result, definition, event_payload)
                 reply = _start_reply(session.ai_player.nick_name, definition)
-            elif event_type == "dice_rolled":
-                if definition.key != "ludo":
-                    raise ValueError("unsupported_event")
-                if session.status != "playing":
-                    raise ValueError("invalid_state")
-                result = _merge_auxiliary_event(result, event_type, event_payload)
             elif event_type == definition.action_event:
                 if session.status != "playing":
                     raise ValueError("invalid_state")
@@ -548,6 +550,8 @@ async def _ensure_idempotent_side_effects(
 
 
 def _as_native_session(session: SudSessionResponse) -> NativeSessionResponse:
+    if session.game_key not in _GAME_DEFINITIONS:
+        raise ValueError("session_not_found")
     return NativeSessionResponse(
         id=session.id,
         game_key=session.game_key,
@@ -671,7 +675,8 @@ async def _claim_memory_sync(session_id: str) -> NativeSessionResponse | None:
     lease_until = (_now() + _MEMORY_SYNC_LEASE).isoformat()
     claimed_at = _now().isoformat()
     rows = await db.query_raw(
-        """
+        _with_supported_games(
+            """
         UPDATE game_sessions
         SET result = jsonb_set(
                 COALESCE(result, '{}'::jsonb),
@@ -687,6 +692,7 @@ async def _claim_memory_sync(session_id: str) -> NativeSessionResponse | None:
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
           AND provider = 'native'
+          AND game_key IN ({supported_game_keys})
           AND status IN ('settled', 'aborted')
           AND (
                 COALESCE(result->'memory_sync'->>'status', 'pending')
@@ -704,7 +710,8 @@ async def _claim_memory_sync(session_id: str) -> NativeSessionResponse | None:
                 TO_TIMESTAMP(0)
               ) <= CURRENT_TIMESTAMP
         RETURNING *
-        """,
+        """
+        ),
         session_id,
         lease_until,
         claimed_at,
@@ -718,10 +725,12 @@ async def retry_pending_memory_sync(*, limit: int = 10) -> int:
     """Retry durable native-game memory deliveries due at this moment."""
 
     rows = await db.query_raw(
-        """
+        _with_supported_games(
+            """
         SELECT id
         FROM game_sessions
         WHERE provider = 'native'
+          AND game_key IN ({supported_game_keys})
           AND status IN ('settled', 'aborted')
           AND COALESCE(result->'memory_sync'->>'status', 'pending')
               IN ('pending', 'failed', 'partial', 'syncing')
@@ -738,7 +747,8 @@ async def retry_pending_memory_sync(*, limit: int = 10) -> int:
               ) <= CURRENT_TIMESTAMP
         ORDER BY updated_at ASC
         LIMIT $1
-        """,
+        """
+        ),
         limit,
     )
     if not rows:
@@ -765,15 +775,18 @@ async def abort_stale_sessions(
     """Close games that have not been resumed within the seven-day window."""
 
     rows = await db.query_raw(
-        """
+        _with_supported_games(
+            """
         SELECT id, user_id, result
         FROM game_sessions
         WHERE provider = 'native'
           AND status = 'playing'
+          AND game_key IN ({supported_game_keys})
           AND updated_at <= CURRENT_TIMESTAMP - ($1 * INTERVAL '1 minute')
         ORDER BY updated_at ASC
         LIMIT $2
-        """,
+        """
+        ),
         stale_after_minutes,
         limit,
     )
@@ -992,12 +1005,8 @@ def _validate_generic_action(
     reported_before_hash = str(
         payload.get("state_before_hash") or state_before.get("state_hash") or ""
     )
-    recovered_roll_transition = False
     if previous_hash and previous_hash != reported_before_hash:
-        roll_state_before_hash = str(payload.get("roll_state_before_hash") or "")
-        if definition.key != "ludo" or previous_hash != roll_state_before_hash:
-            raise ValueError("invalid_state_hash")
-        recovered_roll_transition = True
+        raise ValueError("invalid_state_hash")
     state_after = _loads(payload.get("state_after"), {})
     state_after_hash = str(
         payload.get("state_after_hash") or state_after.get("state_hash") or ""
@@ -1012,7 +1021,6 @@ def _validate_generic_action(
         "state_after": state_after,
         "state_before_hash": reported_before_hash or None,
         "state_after_hash": state_after_hash or None,
-        "recovered_roll_transition": recovered_roll_transition,
     }
     if not any(
         key in action
@@ -1233,7 +1241,6 @@ def _merge_auxiliary_event(
         "threat_detected",
         "analysis_snapshot",
         "ai_move_decided",
-        "dice_rolled",
         "cascade_resolved",
         "special_created",
         "board_shuffled",
@@ -1251,10 +1258,6 @@ def _merge_auxiliary_event(
         game_key = str(result.get("game_key") or "")
         if game_key in _GAME_DEFINITIONS and game_key != GOMOKU_GAME_KEY:
             game = dict(_loads(process.get(game_key), {}))
-            if event_type == "dice_rolled":
-                if game_key != "ludo":
-                    raise ValueError("unsupported_event")
-                game = _apply_auxiliary_state_transition(game, payload)
             game_snapshots = list(_loads(game.get("snapshots"), []))
             game_snapshots.append({"event_type": event_type, **payload})
             game["snapshots"] = game_snapshots[-80:]
@@ -1265,39 +1268,6 @@ def _merge_auxiliary_event(
                 game["key_moments"] = moments[-20:]
             process[game_key] = game
     return {**result, "process": process}
-
-
-def _apply_auxiliary_state_transition(
-    game: dict[str, Any],
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    previous_hash = str(game.get("final_state_hash") or "")
-    reported_before_hash = str(payload.get("state_before_hash") or "")
-    state_after = _loads(payload.get("state_after"), {})
-    state_after_hash = str(
-        payload.get("state_after_hash") or state_after.get("state_hash") or ""
-    )
-    if not reported_before_hash or not state_after_hash:
-        raise ValueError("invalid_state_hash")
-    if previous_hash and previous_hash != reported_before_hash:
-        raise ValueError("invalid_state_hash")
-    return {
-        **game,
-        "final_state": state_after,
-        "final_state_hash": state_after_hash,
-        "latest_analysis": _loads(payload.get("analysis"), {}),
-        "last_roll": {
-            key: payload.get(key)
-            for key in (
-                "roll_number",
-                "actor",
-                "value",
-                "legal_pieces",
-                "consecutive_sixes",
-                "forfeited",
-            )
-        },
-    }
 
 
 def _same_key_moment(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -1578,8 +1548,6 @@ def _start_reply(name: str, definition: NativeGameDefinition) -> str:
         return "第一格你来点。我只看我们已经翻出来的数字，和你一起把雷慢慢推出来。"
     if definition.key == "number_merge":
         return "你先滑。我会接着你的盘面往下合，咱们看看今天能一起养出多大的数字。"
-    if definition.key == "ludo":
-        return "骰子给你，先看看今天是谁的运气比较会拐弯。"
     return f"开始吧。这局《{definition.title}》你先走，我会认真跟上。"
 
 
@@ -1843,11 +1811,6 @@ def _memory_moment(
         add({"long_jump"}, "走出过一次跨过多枚棋子的连续长跳。")
         add({"near_finish", "piece_finished"}, "有一段连续进营，把终点一下拉近了。")
         add({"breakthrough"}, "中路曾找到一个突破口，后面的路线因此打开。")
-    elif game_key == "ludo":
-        add({"flight_shortcut"}, "有一架飞机穿过跨盘捷径，一下拉开了位置。")
-        add({"color_jump"}, "有一架飞机踩中同色航点，顺势多飞了一段。")
-        add({"capture"}, "有一次吃子把原本领先的飞机送回了停机坪。")
-        add({"home_stretch", "piece_finished"}, "有一架飞机顺利进入终点航道。")
     elif game_key == "match3":
         add({"special_combo"}, "我们接出过一次特殊方块组合，整片棋盘一起亮了。")
         add({"big_cascade"}, "有一轮连续消除自己接了好几层。")
