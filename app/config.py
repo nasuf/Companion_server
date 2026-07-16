@@ -123,6 +123,19 @@ class Settings(BaseSettings):
     # 例如 https://banshengcomp.com。与「网页授权域名」/CORS 是独立配置。
     wechat_jssdk_allowed_origins: str = ""
 
+    # Tencent Cloud SMS (verification-code login/binding). Secrets belong to a
+    # CAM sub-account scoped to SMS only. sms_mock_enabled short-circuits the
+    # Tencent call and logs the code instead — for local/dev environments; it is
+    # ignored (treated as False) when app_env is production.
+    sms_enabled: bool = False
+    sms_mock_enabled: bool = False
+    tencent_sms_secret_id: str = ""
+    tencent_sms_secret_key: str = ""
+    tencent_sms_sdk_app_id: str = ""
+    tencent_sms_sign_name: str = ""
+    tencent_sms_template_id: str = ""
+    tencent_sms_region: str = "ap-guangzhou"
+
     # 霸王餐服务员页访问口令: 登录 staff.html 后获得短时 JWT，再调用微信扫一扫。
     # 请配全大写英文字母；空值仅允许本地开发，生产会拒绝服务员登录。
     meal_staff_key: str = ""

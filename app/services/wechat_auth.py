@@ -407,6 +407,69 @@ def _merged_raw_profile(existing: object, token: WeChatTokenPayload) -> dict[str
     return profile
 
 
+async def bind_wechat_to_user(user_id: str, token: WeChatTokenPayload) -> None:
+    """Attach a WeChat identity to an existing account (e.g. a phone-login user).
+
+    * WeChat already bound to this account   -> refresh fields (idempotent)
+    * WeChat owned by another account        -> IdentityConflict("wechat_taken")
+      (account merging is a deliberate non-goal here — surfaced to the user)
+    * otherwise                              -> create the identity row
+    """
+    from app.services.phone_auth import IdentityConflict
+
+    identity = await _find_identity_preferring_union(token)
+    if identity and identity.userId != user_id:
+        raise IdentityConflict("wechat_taken")
+
+    if identity:
+        try:
+            await db.authidentity.update(
+                where={"id": identity.id},
+                data={
+                    "providerAccountId": token.provider_account_id,
+                    "openid": token.openid,
+                    "unionid": token.unionid,
+                    "scope": token.scope,
+                    "rawProfile": Json(
+                        _merged_raw_profile(getattr(identity, "rawProfile", None), token)
+                    ),
+                    "lastLoginAt": datetime.now(UTC),
+                },
+            )
+        except UniqueViolationError as exc:
+            # Duplicate pre-binding row owns this providerAccountId. If that
+            # canonical row belongs to someone else, binding must not steal it.
+            canonical = await db.authidentity.find_first(
+                where={
+                    "provider": _WECHAT_PROVIDER,
+                    "providerAccountId": token.provider_account_id,
+                }
+            )
+            if not canonical or canonical.userId != user_id:
+                raise IdentityConflict("wechat_taken") from exc
+        return
+
+    try:
+        await db.authidentity.create(
+            data={
+                "user": {"connect": {"id": user_id}},
+                "provider": _WECHAT_PROVIDER,
+                "providerAccountId": token.provider_account_id,
+                "openid": token.openid,
+                "unionid": token.unionid,
+                "scope": token.scope,
+                "rawProfile": Json(_merged_raw_profile(None, token)),
+                "lastLoginAt": datetime.now(UTC),
+            }
+        )
+    except UniqueViolationError as exc:
+        raise IdentityConflict("wechat_taken") from exc
+    logger.info(
+        "wechat bound to user",
+        extra={"event": "wechat_bound", "user_id": user_id},
+    )
+
+
 async def find_or_create_wechat_user(
     token: WeChatTokenPayload,
     *,

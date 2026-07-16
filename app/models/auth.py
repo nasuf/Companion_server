@@ -96,6 +96,43 @@ class WeChatH5LoginRequest(ClientInfoMixin):
         return code
 
 
+class SmsSendRequest(BaseModel):
+    phone: str = Field(min_length=11, max_length=20)
+
+
+class SmsLoginRequest(ClientInfoMixin):
+    """手机号验证码登录; client info 仅在首次建号时落 signup 字段.
+
+    channel 标注登录发起端 (signup_source = "sms_app" / "sms_h5" ...);
+    未上报时落中性的 "sms" (与 register 的 legacy "password" 同规).
+    """
+
+    phone: str = Field(min_length=11, max_length=20)
+    code: str = Field(min_length=4, max_length=8)
+    channel: Literal["app", "miniprogram", "h5", "web"] | None = None
+
+
+class PhoneBindRequest(BaseModel):
+    """已登录用户绑定/换绑手机号 (需短信验证码)."""
+
+    phone: str = Field(min_length=11, max_length=20)
+    code: str = Field(min_length=4, max_length=8)
+
+
+class WeChatH5BindRequest(BaseModel):
+    """已登录用户 (如手机号账号) 绑定微信: 携带 OAuth 回调 code."""
+
+    code: str = Field(min_length=1, max_length=512)
+
+    @field_validator("code")
+    @classmethod
+    def strip_code(cls, value: str) -> str:
+        code = value.strip()
+        if not code:
+            raise ValueError("code must not be blank")
+        return code
+
+
 class WeChatProfileUpdate(BaseModel):
     nickname: str | None = Field(default=None, max_length=64)
     # Optional base64 avatar image (from the Mini Program chooseAvatar button).
@@ -118,3 +155,6 @@ class AuthResponse(BaseModel):
     agent_city: str | None = None
     workspace_id: str | None = None
     conversation_id: str | None = None
+    # Binding state for the account-settings UI (phone masked at the API layer).
+    phone: str | None = None
+    wechat_bound: bool = False

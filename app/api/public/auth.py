@@ -8,7 +8,11 @@ from app.db import db
 from app.models.auth import (
     AuthResponse,
     LoginRequest,
+    PhoneBindRequest,
     RegisterRequest,
+    SmsLoginRequest,
+    SmsSendRequest,
+    WeChatH5BindRequest,
     WeChatH5LoginRequest,
     WeChatMiniLoginRequest,
     WeChatMobileLoginRequest,
@@ -78,7 +82,16 @@ async def _wechat_profile_for_user(user_id: str) -> tuple[str | None, str | None
     return display_name or None, avatar or None
 
 
+def _mask_phone(phone: str | None) -> str | None:
+    if not phone or len(phone) != 11:
+        return phone
+    return f"{phone[:3]}****{phone[-4:]}"
+
+
 async def _build_auth_response(user, token: str) -> AuthResponse:
+    from app.services.phone_auth import get_identity_summary
+
+    phone, wechat_bound = await get_identity_summary(user.id)
     workspace = await get_active_workspace(user_id=user.id)
     agent = None
     conversation = None
@@ -92,6 +105,10 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
             order={"updatedAt": "desc"},
         )
     user_display_name, user_avatar_url = await _wechat_profile_for_user(user.id)
+    if not user_display_name and phone:
+        # Phone-only accounts have no WeChat nickname; fall back to a friendly
+        # "用户+尾号" instead of surfacing the opaque ph_xxxx username hash.
+        user_display_name = f"用户{phone[-4:]}"
     agent_avatar_key = getattr(agent, "avatarKey", None) if agent else None
     return AuthResponse(
         token=token,
@@ -111,6 +128,8 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         agent_city=getattr(agent, "city", None) if agent else None,
         workspace_id=workspace.id if workspace else None,
         conversation_id=conversation.id if conversation else None,
+        phone=_mask_phone(phone),
+        wechat_bound=wechat_bound,
     )
 
 
@@ -302,6 +321,167 @@ async def wechat_miniprogram_login(data: WeChatMiniLoginRequest, request: Reques
     return await _build_auth_response(user, token)
 
 
+@router.post("/sms/send")
+async def sms_send(data: SmsSendRequest, request: Request):
+    """发送登录/绑定验证码. 响应不区分号码是否已注册 (防枚举)."""
+    from app.services import sms
+
+    if not sms.service.sms_login_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="短信服务暂未开放",
+        )
+    phone = sms.normalize_cn_phone(data.phone)
+    if phone is None:
+        raise HTTPException(status_code=400, detail="手机号格式不正确")
+
+    # 发送侧限流全部在 sms.service 层: 60s 冷却 + 手机号日限 + IP 时/日限.
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
+        request.client.host if request.client else ""
+    )
+    try:
+        await sms.send_login_code(phone, client_ip=client_ip or None)
+    except sms.SmsRateLimited as exc:
+        detail = {
+            "cooldown": "发送太频繁，请稍后再试",
+            "daily_limit": "该手机号今日发送次数已达上限",
+            "ip_limit": "发送次数过多，请稍后再试",
+        }.get(exc.reason, "发送太频繁，请稍后再试")
+        raise HTTPException(status_code=429, detail=detail)
+    except sms.SmsSendError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="短信发送失败，请稍后重试",
+        )
+    return {"ok": True, "ttl_minutes": sms.service.CODE_TTL_MINUTES}
+
+
+@router.post("/sms/login", response_model=AuthResponse)
+async def sms_login(data: SmsLoginRequest, request: Request):
+    """手机号验证码登录: 无账号自动注册 (与微信登录同一身份表)."""
+    from app.services import sms
+    from app.services.phone_auth import find_or_create_phone_user
+
+    phone = sms.normalize_cn_phone(data.phone)
+    if phone is None:
+        raise HTTPException(status_code=400, detail="手机号格式不正确")
+
+    await enforce_login_rate_limit(request, f"smslogin:{phone}")
+    if not await sms.verify_code(phone, data.code):
+        await record_login_failure(request, f"smslogin:{phone}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="验证码错误或已过期",
+        )
+
+    await clear_login_failures(request, f"smslogin:{phone}")
+    # channel comes from the client (app / h5 / ...); legacy or unknown clients
+    # land on the plain "sms" source — mirrors the register endpoint's rule.
+    signup_source = f"sms_{data.channel}" if data.channel else "sms"
+    user = await find_or_create_phone_user(
+        phone,
+        signup_fields=SignupInfo(
+            source=signup_source,
+            platform=data.platform,
+            os_version=data.os_version,
+            app_version=data.app_version,
+        ).user_create_fields(),
+    )
+    await ensure_default_agent_for_user(user.id)
+    token = create_jwt(user.id, user.role)
+    audit_auth_request_event(
+        "sms_login_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    logger.info(
+        "User logged in with SMS",
+        extra={"event": "auth_sms_login", "user_id": user.id},
+    )
+    await _record_auth_activity(user.id, source="sms_login")
+    return await _build_auth_response(user, token)
+
+
+@router.post("/phone/bind", response_model=AuthResponse)
+async def phone_bind(data: PhoneBindRequest, request: Request, payload: dict = Depends(require_user)):
+    """已登录用户绑定/换绑手机号 (短信验证码确认)."""
+    from app.services import sms
+    from app.services.phone_auth import IdentityConflict, bind_phone_to_user
+
+    user = await db.user.find_unique(where={"id": payload["sub"]})
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
+
+    phone = sms.normalize_cn_phone(data.phone)
+    if phone is None:
+        raise HTTPException(status_code=400, detail="手机号格式不正确")
+
+    await enforce_login_rate_limit(request, f"smsbind:{phone}")
+    if not await sms.verify_code(phone, data.code):
+        await record_login_failure(request, f"smsbind:{phone}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="验证码错误或已过期",
+        )
+
+    try:
+        await bind_phone_to_user(user.id, phone)
+    except IdentityConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该手机号已绑定其他账号",
+        )
+    audit_auth_request_event(
+        "phone_bind_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    token = create_jwt(user.id, user.role)
+    return await _build_auth_response(user, token)
+
+
+@router.post("/wechat/h5/bind", response_model=AuthResponse)
+async def wechat_h5_bind(data: WeChatH5BindRequest, request: Request, payload: dict = Depends(require_user)):
+    """已登录用户 (如手机号账号) 绑定微信身份."""
+    from app.services.phone_auth import IdentityConflict
+    from app.services.wechat_auth import bind_wechat_to_user
+
+    user = await db.user.find_unique(where={"id": payload["sub"]})
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
+
+    rate_limit_key = "wechat:h5bind"
+    await enforce_login_rate_limit(request, rate_limit_key)
+    try:
+        token_payload = await exchange_wechat_h5_code(data.code)
+        await bind_wechat_to_user(user.id, token_payload)
+    except WeChatLoginError:
+        await record_login_failure(request, rate_limit_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="微信授权失败，请稍后重试",
+        )
+    except IdentityConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该微信已绑定其他账号",
+        )
+    await clear_login_failures(request, rate_limit_key)
+    audit_auth_request_event(
+        "wechat_bind_success",
+        request,
+        username=user.username,
+        user_id=user.id,
+        outcome="success",
+    )
+    token = create_jwt(user.id, user.role)
+    return await _build_auth_response(user, token)
+
+
 @router.get("/wechat/h5/config")
 async def wechat_h5_config():
     """H5 页面启动时探测: 是否展示微信一键登录 + OAuth 跳转所需的公众号 appid.
@@ -309,11 +489,13 @@ async def wechat_h5_config():
     appid 本身是公开信息 (会出现在 OAuth 跳转 URL 里), 无需鉴权.
     """
     from app.config import settings
+    from app.services.sms.service import sms_login_available
 
     enabled = _wechat_h5_configured()
     return {
         "enabled": enabled,
         "app_id": settings.wechat_h5_app_id.strip() or None if enabled else None,
+        "sms_enabled": sms_login_available(),
     }
 
 
