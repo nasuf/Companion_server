@@ -149,7 +149,6 @@ async def create_session(
     room_id = f"{game_key}-{session_id[:8]}"
     user_player = await sud.build_user_player(user_id)
     ai_player = await sud.build_ai_player(agent_id, difficulty, agent=agent)
-    intro = _intro_reply(ai_player.nick_name, definition)
     result = _empty_result(difficulty, definition)
 
     await db.execute_raw(
@@ -179,7 +178,7 @@ async def create_session(
         ai_player.ai_level,
         user_player.model_dump_json(),
         ai_player.model_dump_json(),
-        intro,
+        None,
         _json(result),
     )
     await sud._append_event(
@@ -196,7 +195,7 @@ async def create_session(
             ),
         },
         source="server",
-        companion_reply=intro,
+        companion_reply=None,
     )
     return await get_session(session_id, user_id=user_id)
 
@@ -409,18 +408,15 @@ async def handle_event(
                 status = "playing"
                 started_at = _now().isoformat()
                 result = _store_initial_state(result, definition, event_payload)
-                reply = _start_reply(session.ai_player.nick_name, definition)
             elif event_type == definition.action_event:
                 if session.status != "playing":
                     raise ValueError("invalid_state")
                 if definition.key == GOMOKU_GAME_KEY:
                     action = _validate_and_normalize_move(result, event_payload)
                     result = _append_move(result, action)
-                    reply = _move_reply(action, result)
                 else:
                     action = _validate_generic_action(result, definition, event_payload)
                     result = _append_generic_action(result, definition, action)
-                    reply = _generic_action_reply(action)
             elif event_type == "game_finished":
                 if session.status != "playing":
                     raise ValueError("invalid_state")
@@ -798,9 +794,9 @@ async def retry_pending_memory_sync(*, limit: int = 10) -> int:
 
 
 async def abort_stale_sessions(
-    *, stale_after_minutes: int = 7 * 24 * 60, limit: int = 20
+    *, stale_after_minutes: int = 10, limit: int = 20
 ) -> int:
-    """Close games that have not been resumed within the seven-day window."""
+    """Close inactive games after the client has had time to flush an exit."""
 
     rows = await db.query_raw(
         _with_supported_games(
@@ -808,7 +804,7 @@ async def abort_stale_sessions(
         SELECT id, user_id, result
         FROM game_sessions
         WHERE provider = 'native'
-          AND status = 'playing'
+          AND status IN ('created', 'playing')
           AND game_key IN ({supported_game_keys})
           AND updated_at <= CURRENT_TIMESTAMP - ($1 * INTERVAL '1 minute')
         ORDER BY updated_at ASC
@@ -1557,108 +1553,6 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def _intro_reply(name: str, definition: NativeGameDefinition) -> str:
-    if definition.play_mode == "cooperate":
-        return f"{name}已经把《{definition.title}》打开了。我们一起看局面，慢慢把这一关解开。"
-    return f"{name}已经把《{definition.title}》摆好了。就按平时的感觉来，谁也不用故意让谁。"
-
-
-def _start_reply(name: str, definition: NativeGameDefinition) -> str:
-    if definition.key == GOMOKU_GAME_KEY:
-        return "开局。你执黑先走，我看看你今天想从哪边铺。"
-    if definition.key == "go":
-        return "你执黑先走。九路棋盘不大，但每一块气都得慢慢照顾。"
-    if definition.key == "reversi":
-        return "你执黑先走。边角看着安静，翻到后半盘可一点都不客气。"
-    if definition.key == "match3":
-        return "开始啦。你先挑一组，我接着你的思路往下消。"
-    if definition.key == "minesweeper":
-        return "第一格你来点。我只看我们已经翻出来的数字，和你一起把雷慢慢推出来。"
-    if definition.key == "number_merge":
-        return "你先滑。我会接着你的盘面往下合，咱们看看今天能一起养出多大的数字。"
-    return f"开始吧。这局《{definition.title}》你先走，我会认真跟上。"
-
-
-def _move_reply(move: dict[str, Any], result: dict[str, Any]) -> str | None:
-    analysis = _loads(move.get("analysis"), {})
-    moment = _loads(move.get("moment"), {})
-    moment_type = str(moment.get("type") or "")
-    if move["actor"] == "user":
-        if moment_type in {"open_four", "double_threat"}:
-            return "等一下，你这手有点凶。我已经能看见两边一起冒头了。"
-        if int(analysis.get("user_longest_chain") or 0) >= 3:
-            return "这条线开始成形了，我得认真看着你这边。"
-    else:
-        reason = str(_loads(move.get("decision"), {}).get("reason") or "")
-        if reason == "block_win":
-            return "这手我得挡，不然下一步你就直接收掉了。"
-        if reason == "create_fork":
-            return "我先在这里拐一下。你猜我下一手更想走哪边？"
-    if int(move.get("move_number") or 0) in {6, 12, 20}:
-        return "这盘已经有自己的样子了，慢慢来。"
-    return None
-
-
-def _generic_action_reply(action: dict[str, Any]) -> str | None:
-    moment_types = {
-        str(item.get("type") or "")
-        for item in list(_loads(action.get("moments"), []))
-        if isinstance(item, dict)
-    }
-    moment = _loads(action.get("moment"), {})
-    if moment.get("type"):
-        moment_types.add(str(moment["type"]))
-    actor = str(action.get("actor") or "")
-    action_number = int(action.get("action_number") or 0)
-    if "corner_captured" in moment_types:
-        return "角被你拿到了。这颗现在看着小，后面可翻不回去。"
-    if "forced_pass" in moment_types:
-        return "这一手把路都封住了，居然连落子的地方都没留下。"
-    if "big_flip" in moment_types:
-        return "这一排翻过去的声音太爽了，局面一下换了颜色。"
-    if "mobility_squeeze" in moment_types:
-        return "能落的位置突然变少了。这一步比表面上更狠。"
-    if "mine_triggered" in moment_types:
-        return "啊，踩到了。没事，这一格我们一起记住，下次会更谨慎一点。"
-    if "zero_expansion" in moment_types:
-        return "这一片一下全亮了，线索终于连起来了。"
-    if "forced_deduction" in moment_types:
-        return "这格不是猜的，旁边的数字已经把答案说出来了。"
-    if "near_clear" in moment_types:
-        return "只剩最后一点了。慢一点，我们别在收尾的时候着急。"
-    if "target_reached" in moment_types:
-        return "合到了！刚才一路压着角落养大的那块终于成了。"
-    if "milestone_tile" in moment_types:
-        return "这个数字长出来了。我们刚才那几步没有白给它腾位置。"
-    if "board_recovered" in moment_types:
-        return "盘面刚才都快塞满了，这一步又把呼吸空间救回来了。"
-    if "multi_merge" in moment_types:
-        return "一滑两边一起合上，听着就很舒服。"
-    if moment_types & {
-        "check",
-        "forced_block",
-        "near_finish",
-        "big_cascade",
-        "large_capture",
-        "atari",
-    }:
-        return "这一下局面真的变了。我得停半秒重新看一遍。"
-    if moment_types & {
-        "capture",
-        "fork",
-        "special_combo",
-        "long_jump",
-        "color_jump",
-        "flight_shortcut",
-    }:
-        return "这手挺漂亮，刚才那一下不是随便碰出来的。"
-    if actor == "user" and action_number == 1:
-        return "好，从这里开始。我记住你这局的第一步了。"
-    if action_number in {8, 16, 28}:
-        return "已经玩出一点我们自己的节奏了，继续。"
-    return None
-
-
 def _finish_reply(session: SudSessionResponse, result: dict[str, Any]) -> str:
     gomoku = _loads(result.get("gomoku"), {})
     moments = list(_loads(gomoku.get("key_moments"), []))
@@ -1682,7 +1576,7 @@ def _abort_reply(session: SudSessionResponse, result: dict[str, Any]) -> str:
     moves = int(_gomoku(result).get("move_count") or 0)
     if moves < 4:
         return "这盘还没真正展开，我们先放在这里。想玩的时候再重新摆一盘。"
-    return "先停在这里也行。我记得这盘已经走到哪里了，下次我们再把没下完的劲续上。"
+    return "这盘就先到这里。刚才走过的那些手我会记得，想玩时我们再重新摆一盘。"
 
 
 def _generic_finish_reply(

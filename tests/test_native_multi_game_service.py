@@ -410,7 +410,7 @@ def test_minesweeper_terminal_status_matches_shared_outcome(
     )
 
 
-def test_minesweeper_replies_are_cooperative_not_competitive():
+def test_minesweeper_terminal_reply_is_cooperative_not_competitive():
     definition = native._definition("minesweeper")
     session = _session("minesweeper")
     result = {
@@ -418,7 +418,6 @@ def test_minesweeper_replies_are_cooperative_not_competitive():
         "user_outcome": "lose",
     }
 
-    assert "翻出来的数字" in native._start_reply("小芜", definition)
     assert "下次" in native._generic_finish_reply(session, definition, result)
     assert "我先赢" not in native._generic_finish_reply(session, definition, result)
 
@@ -642,7 +641,7 @@ async def test_stale_cleanup_settles_a_generic_terminal_snapshot(monkeypatch):
     assert calls[0]["client_event_id"] == "server-timeout-finish:session-1"
 
 
-def test_game_start_persists_an_initial_resumable_state():
+def test_game_start_persists_the_initial_state_for_event_analysis():
     definition = native._definition("number_merge")
     result = native._empty_result("normal", definition)
     initial_state = {

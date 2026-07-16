@@ -414,9 +414,9 @@ async def test_memory_sync_claim_is_an_atomic_database_lease(monkeypatch):
 async def test_abort_stale_sessions_uses_deterministic_server_event(monkeypatch):
     class StaleDb:
         async def query_raw(self, query, *args):
-            assert "status = 'playing'" in query
+            assert "status IN ('created', 'playing')" in query
             assert "game_key IN" in query
-            assert args == (7 * 24 * 60, 20)
+            assert args == (10, 20)
             return [{"id": "session-1", "user_id": "user-1", "result": {}}]
 
     calls = []
