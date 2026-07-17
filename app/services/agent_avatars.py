@@ -15,8 +15,15 @@ class AgentAvatar:
     url: str
 
 
-MALE_AVATAR_KEYS = tuple(f"companion-male-{index:02d}" for index in range(1, 28))
-FEMALE_AVATAR_KEYS = tuple(f"companion-female-{index:02d}" for index in range(1, 23))
+_MALE_AVATAR_NUMBERS = (*range(1, 14), 15, 16, *range(18, 24), 25, 26, 27)
+_FEMALE_AVATAR_NUMBERS = (*range(1, 21), 22)
+
+MALE_AVATAR_KEYS = tuple(
+    f"companion-male-{index:02d}" for index in _MALE_AVATAR_NUMBERS
+)
+FEMALE_AVATAR_KEYS = tuple(
+    f"companion-female-{index:02d}" for index in _FEMALE_AVATAR_NUMBERS
+)
 
 _ALL_AVATAR_KEYS = frozenset(MALE_AVATAR_KEYS + FEMALE_AVATAR_KEYS)
 _AVATAR_DIR = Path(__file__).resolve().parents[1] / "assets" / "agent_avatars"

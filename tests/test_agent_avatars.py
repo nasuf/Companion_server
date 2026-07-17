@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -35,20 +36,30 @@ def test_avatar_keys_for_gender_cover_bundled_pool():
     male_keys = agent_avatars.avatar_keys_for_gender("male")
     female_keys = agent_avatars.avatar_keys_for_gender("female")
 
-    assert len(male_keys) == 27
-    assert len(female_keys) == 22
+    assert len(male_keys) == 24
+    assert len(female_keys) == 21
+    assert male_keys[-1] == "companion-male-27"
+    assert "companion-male-14" not in male_keys
+    assert "companion-male-17" not in male_keys
+    assert "companion-male-24" not in male_keys
+    assert "companion-female-21" not in female_keys
     assert all("-male-" in key for key in male_keys)
     assert all("-female-" in key for key in female_keys)
-    assert len(agent_avatars.avatar_keys_for_gender(None)) == 49
+    assert len(agent_avatars.avatar_keys_for_gender(None)) == 45
 
 
 def test_every_avatar_key_resolves_to_a_bundled_png():
     agent_avatars.validate_avatar_assets()
 
-    for key in agent_avatars.avatar_keys_for_gender():
-        path = agent_avatars.get_avatar_path(key)
+    keys = agent_avatars.avatar_keys_for_gender()
+    paths = [agent_avatars.get_avatar_path(key) for key in keys]
+    for key, path in zip(keys, paths, strict=True):
         assert path.name == f"{key}.png"
         assert path.stat().st_size > 0
+
+    assert {path.stem for path in paths[0].parent.glob("*.png")} == set(keys)
+    digests = {hashlib.sha256(path.read_bytes()).digest() for path in paths}
+    assert len(digests) == len(paths)
 
 
 @pytest.mark.asyncio
@@ -60,7 +71,16 @@ async def test_avatar_endpoint_serves_bundled_png_with_immutable_cache():
     assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
 
 
-@pytest.mark.parametrize("key", ["../secret", "companion-male-99", "bansheng-male-01"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "../secret",
+        "companion-male-14",
+        "companion-female-21",
+        "companion-male-99",
+        "bansheng-male-01",
+    ],
+)
 def test_avatar_path_rejects_unknown_keys(key):
     with pytest.raises(HTTPException) as exc_info:
         agent_avatars.get_avatar_path(key)
