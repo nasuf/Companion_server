@@ -41,6 +41,7 @@ DASHSCOPE_API_KEY=sk-替换为北京地域的百炼APIKey
 DASHSCOPE_ASR_MODEL=fun-asr-flash-2026-06-15
 DASHSCOPE_ASR_ENDPOINT=https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
 DASHSCOPE_ASR_TIMEOUT_S=30
+CHAT_VOICE_MIN_SECONDS=0.5
 CHAT_VOICE_MAX_SECONDS=60
 CHAT_VOICE_MAX_REQUESTS_PER_MINUTE=20
 CHAT_VOICE_MAX_BYTES=2097152
@@ -52,7 +53,7 @@ CHAT_VOICE_MAX_BYTES=2097152
 DASHSCOPE_ASR_ENDPOINT=https://你的WorkspaceId.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
 ```
 
-`CHAT_VOICE_MAX_SECONDS` 和 `CHAT_VOICE_MAX_BYTES` 是服务端最终安全上限，服务端还从 M4A 容器核验真实时长；`CHAT_VOICE_MAX_REQUESTS_PER_MINUTE` 是每用户的 ASR 防刷上限。Flutter 当前也分别限制为 60 秒和 2 MiB；若要放宽，应同步修改客户端常量，但不能超过 Fun-ASR-Flash 的 5 分钟限制，且 Base64 编码后的数据应小于 10 MB。
+`CHAT_VOICE_MIN_SECONDS`、`CHAT_VOICE_MAX_SECONDS` 和 `CHAT_VOICE_MAX_BYTES` 是服务端最终安全上限，服务端会从 M4A 容器核验真实时长，低于 0.5 秒的无效录音不会请求 ASR；`CHAT_VOICE_MAX_REQUESTS_PER_MINUTE` 是每用户的 ASR 防刷上限。Flutter 当前也分别限制为 60 秒和 2 MiB；若要放宽，应同步修改客户端常量，但不能超过 Fun-ASR-Flash 的 5 分钟限制，且 Base64 编码后的数据应小于 10 MB。
 
 ## 识别质量
 

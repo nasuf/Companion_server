@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     )
     dashscope_asr_model: str = "fun-asr-flash-2026-06-15"
     dashscope_asr_timeout_s: float = 30.0
+    chat_voice_min_seconds: float = 0.5
     chat_voice_max_seconds: int = 60
     chat_voice_max_requests_per_minute: int = 20
     # Base64 adds roughly 33%; 2 MiB of source audio stays well below the

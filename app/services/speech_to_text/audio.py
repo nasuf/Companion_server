@@ -103,6 +103,8 @@ def validate_chat_m4a_duration(
     actual = _m4a_duration_seconds(blob)
     if actual is None or actual <= 0:
         raise HTTPException(status_code=422, detail="语音文件无法解析，请重新录制")
+    if actual < settings.chat_voice_min_seconds:
+        raise HTTPException(status_code=422, detail="语音时间太短，请重新录制")
     # Encoders and the UI timer can differ around a one-second boundary. A two
     # second tolerance catches forged metadata without rejecting normal clips.
     if abs(actual - declared_duration_seconds) > 2:

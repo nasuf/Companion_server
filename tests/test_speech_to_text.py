@@ -19,11 +19,11 @@ from app.services.speech_to_text.audio import (
 )
 
 
-def _test_m4a(duration_seconds: int = 3) -> bytes:
+def _test_m4a(duration_seconds: float = 3) -> bytes:
     mvhd_payload = (
         b"\x00\x00\x00\x00"
         + b"\x00" * 8
-        + struct.pack(">II", 1000, duration_seconds * 1000)
+        + struct.pack(">II", 1000, int(duration_seconds * 1000))
     )
     mvhd = struct.pack(">I4s", 8 + len(mvhd_payload), b"mvhd") + mvhd_payload
     moov = struct.pack(">I4s", 8 + len(mvhd), b"moov") + mvhd
@@ -70,6 +70,7 @@ def test_audio_validation_rejects_invalid_base64_and_unsupported_mime():
 
 
 def test_chat_m4a_validation_uses_container_duration(monkeypatch):
+    monkeypatch.setattr(fun_asr.settings, "chat_voice_min_seconds", 0.5)
     monkeypatch.setattr(fun_asr.settings, "chat_voice_max_seconds", 60)
 
     assert (
@@ -88,6 +89,15 @@ def test_chat_m4a_validation_uses_container_duration(monkeypatch):
             declared_duration_seconds=3,
         )
     assert forged_duration.value.status_code == 422
+
+    with pytest.raises(HTTPException) as too_short:
+        validate_chat_m4a_duration(
+            _test_m4a(0.192),
+            mime="audio/mp4",
+            declared_duration_seconds=1,
+        )
+    assert too_short.value.status_code == 422
+    assert too_short.value.detail == "语音时间太短，请重新录制"
 
 
 def test_build_request_payload_includes_context_before_audio():
