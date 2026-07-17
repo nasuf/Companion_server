@@ -1550,13 +1550,16 @@ model RealWorldRechargeLedger {
 // 改动通过 services/runtime_config.invalidate_caches() 触发 lru_cache 清理,
 // 下条 LLM 调用按新值重建实例; 当前流式中的 chain 仍用旧模型完成 (无中断).
 model SystemConfig {
-  id               Int      @id @default(1)
-  onlineModel      Boolean? @map("online_model")
-  remoteProvider   String?  @map("remote_provider")
-  localChatModel   String?  @map("local_chat_model")
-  localSmallModel  String?  @map("local_small_model")
-  remoteChatModel  String?  @map("remote_chat_model")
-  remoteSmallModel String?  @map("remote_small_model")
+  id                  Int      @id @default(1)
+  onlineModel         Boolean? @map("online_model")
+  // Legacy shared provider. New config resolves chat/small provider separately.
+  remoteProvider      String?  @map("remote_provider")
+  remoteChatProvider  String?  @map("remote_chat_provider")
+  remoteSmallProvider String?  @map("remote_small_provider")
+  localChatModel      String?  @map("local_chat_model")
+  localSmallModel     String?  @map("local_small_model")
+  remoteChatModel     String?  @map("remote_chat_model")
+  remoteSmallModel    String?  @map("remote_small_model")
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String? @map("default_template_agent_id")
@@ -1628,14 +1631,16 @@ model MealRedemptionFailure {
 // 字段 nullable: null = 不 override, fallback 上层. embedding 不在此表 — embedding
 // 跨 agent 共享 vector store, 不允许 per-agent 模型 (embedding 改了已有向量失真).
 model AgentConfigOverride {
-  agentId          String   @id @map("agent_id")
-  onlineModel      Boolean? @map("online_model")
-  remoteProvider   String?  @map("remote_provider")
-  localChatModel   String?  @map("local_chat_model")
-  localSmallModel  String?  @map("local_small_model")
-  remoteChatModel  String?  @map("remote_chat_model")
-  remoteSmallModel String?  @map("remote_small_model")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  agentId             String   @id @map("agent_id")
+  onlineModel         Boolean? @map("online_model")
+  remoteProvider      String?  @map("remote_provider")
+  remoteChatProvider  String?  @map("remote_chat_provider")
+  remoteSmallProvider String?  @map("remote_small_provider")
+  localChatModel      String?  @map("local_chat_model")
+  localSmallModel     String?  @map("local_small_model")
+  remoteChatModel     String?  @map("remote_chat_model")
+  remoteSmallModel    String?  @map("remote_small_model")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   agent AiAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
@@ -1644,12 +1649,12 @@ model AgentConfigOverride {
 
 
 // 模型库 — admin "系统设置 → 模型库" 维护. system_config / agent_config_overrides
-// 的 chat/small 字段从这里选 identifier, remote_provider/local provider 用于消歧;
+// 的 chat/small 字段从这里选 identifier, role-specific remote provider 用于消歧;
 // pricing.estimate_cost_cny 也从这里取价格.
 //
 // 设计:
 //   - identifier 是 SDK 用的 model id; 同一 provider 内唯一, 跨 provider 可重名
-//   - provider 派生 local (ollama) / remote (dashscope/deepseek) 分组
+//   - provider 派生 local (ollama) / remote (dashscope/deepseek/qianfan/ark/minimax) 分组
 //   - enabled=false 软隐藏, 不影响已配置 (现有 system_config/agent override 仍指向它)
 //   - 价格 nullable + Decimal(10,4) 元/1M tokens; 本地默认 0
 //   - contextWindow / notes 留 hook 给未来 prompt budget / admin 备注
@@ -1659,7 +1664,7 @@ model ModelRegistry {
   id                   String   @id @default(uuid())
   identifier           String
   displayName          String?  @map("display_name")
-  provider             String   // ollama | dashscope | deepseek
+  provider             String   // ollama | dashscope | deepseek | qianfan | ark | minimax
   enabled              Boolean  @default(true)
   contextWindow        Int?     @map("context_window")
   // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是

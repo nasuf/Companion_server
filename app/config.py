@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # DashScope / Alibaba Cloud Bailian (OpenAI-compatible)
     dashscope_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # Qwen-Character uses a workspace-specific Model Studio endpoint. Leave
+    # blank to reuse DASHSCOPE_BASE_URL for accounts where that endpoint works.
+    dashscope_character_base_url: str = ""
     dashscope_enable_thinking: bool = False
     # Short voice messages in chat use the native DashScope multimodal HTTP
     # endpoint.  Keep this separate from the OpenAI-compatible LLM base URL.
@@ -43,14 +46,26 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
 
+    # Baidu Qianfan ModelBuilder (OpenAI-compatible)
+    qianfan_api_key: str = ""
+    qianfan_base_url: str = "https://qianfan.baidubce.com/v2"
+
     # Volcengine Ark / Doubao vision (OpenAI-compatible chat completions)
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_vision_model: str = "doubao-1-5-vision-pro-32k-250115"
 
+    # MiniMax Open Platform (OpenAI-compatible)
+    minimax_api_key: str = ""
+    minimax_base_url: str = "https://api.minimaxi.com/v1"
+
     # Simple model switch
     online_model: bool = False
+    # Legacy shared remote provider. New deployments can split the main reply
+    # and utility models; blank role fields fall back to this value.
     remote_provider: str = "dashscope"
+    remote_chat_provider: str = ""
+    remote_small_provider: str = ""
     local_chat_model: str = "qwen2.5:14b"
     local_small_model: str = "qwen2.5:7b"
     remote_chat_model: str = "qwen3.5-plus"

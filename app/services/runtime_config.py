@@ -2,8 +2,9 @@
 
 设计:
   解析顺序: AgentConfigOverride.field → SystemConfig.field → settings.field (env)
-  字段范围: ONLINE_MODEL / REMOTE_PROVIDER / LOCAL_CHAT / LOCAL_SMALL /
-          REMOTE_CHAT / REMOTE_SMALL
+  字段范围: ONLINE_MODEL / REMOTE_CHAT_PROVIDER / REMOTE_SMALL_PROVIDER /
+          LOCAL_CHAT / LOCAL_SMALL / REMOTE_CHAT / REMOTE_SMALL
+  REMOTE_PROVIDER 保留为兼容 fallback, 新配置允许主回复与辅助任务走不同平台.
   embedding 不在此 — 跨 agent 共享 vector store, 改了已有向量失真.
 
 热路径 (get_chat_model 等) 必须 sync 拿配置, 不能 await DB. 启动时把 system 行
@@ -33,6 +34,8 @@ class ResolvedConfig:
     """resolve_config 的返回. 每个字段都已穿透 override → system → env 链路."""
     online_model: bool
     remote_provider: str
+    remote_chat_provider: str
+    remote_small_provider: str
     local_chat_model: str
     local_small_model: str
     remote_chat_model: str
@@ -156,6 +159,8 @@ async def _seed_system_config_with_env_defaults():
         "id": 1,
         "onlineModel": settings.online_model,
         "remoteProvider": settings.remote_provider,
+        "remoteChatProvider": settings.remote_chat_provider or settings.remote_provider,
+        "remoteSmallProvider": settings.remote_small_provider or settings.remote_provider,
         "localChatModel": settings.local_chat_model,
         "localSmallModel": settings.local_small_model,
         "remoteChatModel": settings.remote_chat_model,
@@ -166,8 +171,10 @@ async def _seed_system_config_with_env_defaults():
 def _row_to_dict(row) -> dict:
     """SystemConfig / AgentConfigOverride row → 仅含非 None 字段的 dict."""
     out: dict = {}
-    for key in ("onlineModel", "remoteProvider", "localChatModel", "localSmallModel",
-                "remoteChatModel", "remoteSmallModel"):
+    for key in (
+        "onlineModel", "remoteProvider", "remoteChatProvider", "remoteSmallProvider",
+        "localChatModel", "localSmallModel", "remoteChatModel", "remoteSmallModel",
+    ):
         val = getattr(row, key, None)
         if val is not None:
             out[key] = val
@@ -226,7 +233,17 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
 
     return ResolvedConfig(
         online_model=_pick("onlineModel", settings.online_model),
-        remote_provider=str(_pick("remoteProvider", settings.remote_provider) or "dashscope").strip().lower(),
+        remote_provider=str(
+            _pick("remoteProvider", settings.remote_provider) or "dashscope"
+        ).strip().lower(),
+        remote_chat_provider=str(_pick(
+            "remoteChatProvider",
+            settings.remote_chat_provider or settings.remote_provider,
+        ) or "dashscope").strip().lower(),
+        remote_small_provider=str(_pick(
+            "remoteSmallProvider",
+            settings.remote_small_provider or settings.remote_provider,
+        ) or "dashscope").strip().lower(),
         local_chat_model=_pick("localChatModel", settings.local_chat_model),
         local_small_model=_pick("localSmallModel", settings.local_small_model),
         remote_chat_model=_pick("remoteChatModel", settings.remote_chat_model),

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
+from app.services.llm.providers import provider_ids, public_provider_options
 from app.services.runtime_config import invalidate_caches, load_caches
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ router = APIRouter(
 )
 
 
-_PROVIDERS = {"ollama", "dashscope", "deepseek"}
+_PROVIDERS = provider_ids(admin_only=True)
 
 
 class ModelCreatePayload(BaseModel):
@@ -88,12 +89,15 @@ def _validate_provider(provider: str) -> None:
 
 
 @router.get("")
-async def list_models() -> dict[str, list[dict[str, Any]]]:
+async def list_models() -> dict[str, Any]:
     """admin 视图: 含 disabled 全部模型, 按 provider + identifier 排序."""
     rows = await db.modelregistry.find_many(
         order=[{"provider": "asc"}, {"identifier": "asc"}],
     )
-    return {"models": [_row_to_dict(r) for r in rows]}
+    return {
+        "models": [_row_to_dict(r) for r in rows],
+        "providers": public_provider_options(),
+    }
 
 
 @router.post("")

@@ -4,31 +4,23 @@ import json
 import logging
 import re
 from functools import lru_cache
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from app.services.llm.resilience import CallProfile  # type: ignore[import-not-found]
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 
 from app.config import settings
+from app.services.llm.providers import build_chat_model, get_provider
 
 logger = logging.getLogger(__name__)
 
 Provider = str
-
-# Ollama httpx 客户端超时
-# 默认 5s 太短 — 大模型(qwen2.5:14b)首次加载 + 长 prompt 推理可能耗时几十秒
-# 注意：不设 trust_env=False，让生产环境可以通过 HTTP_PROXY 环境变量配置代理。
-# 本地开发时通过 start.sh 设置 NO_PROXY=localhost 来绕过代理（见 start.sh）。
-_OLLAMA_CLIENT_KWARGS = {
-    "timeout": 300.0,
-}
 
 
 def _default_provider(online: bool) -> Provider:
@@ -72,14 +64,21 @@ def _provider_for(role: str) -> Provider:
         provider = (override or settings.llm_provider or "ollama").strip().lower()
     else:
         cfg = _resolved()
+        remote_provider = (
+            cfg.remote_chat_provider if role == "chat" else cfg.remote_small_provider
+        )
         provider = (
             override
             or settings.llm_provider
-            or (cfg.remote_provider if cfg.online_model else _default_provider(False))
+            or (remote_provider if cfg.online_model else _default_provider(False))
         ).strip().lower()
-    if provider not in {"ollama", "dashscope", "deepseek", "claude"}:
-        raise ValueError(f"Unsupported provider for {role}: {provider}")
-    return provider
+    spec = get_provider(provider)
+    if role == "embedding" and not spec.supports_embeddings:
+        raise ValueError(
+            f"Provider {provider} does not provide supported embeddings; "
+            "use ollama or dashscope"
+        )
+    return spec.id
 
 
 def _current_agent_key() -> str | None:
@@ -88,92 +87,20 @@ def _current_agent_key() -> str | None:
     return get_current_agent()
 
 
-def _dashscope_chat_model(model_name: str) -> ChatOpenAI:
-    if not settings.dashscope_api_key:
-        raise ValueError("DASHSCOPE_API_KEY is required when provider is dashscope")
-    model = ChatOpenAI(
-        model=model_name,
-        api_key=settings.dashscope_api_key,
-        base_url=settings.dashscope_base_url,
-        temperature=0.7,
-        # 8192 是 qwen-plus 输出硬上限. character schema v2 (26 项过去事件 ×
-        # 3-5 场景 + 偏好/价值观/能力等) 满输出约 6-7K tokens, 4K 会截断丢失
-        # 末尾字段 (life_events.special / emotion_events.relieved 等).
-        # 普通聊天回复 <500 tokens, 不受影响.
-        max_tokens=8192,
-        # OpenAI-compatible 流式默认不带 usage; 显式开 include_usage 让末
-        # chunk 带 token_usage. 必须开, 否则统计概览看不到 stream 模型
-        # (qwen3.5-plus 主回复) 的输入/输出 token.
-        stream_usage=True,
-        extra_body={"enable_thinking": settings.dashscope_enable_thinking},
-    )
-    object.__setattr__(model, "_companion_provider", "dashscope")
-    return model
-
-
-def _deepseek_chat_model(model_name: str) -> ChatOpenAI:
-    if not settings.deepseek_api_key:
-        raise ValueError("DEEPSEEK_API_KEY is required when provider is deepseek")
-    model = ChatOpenAI(
-        model=model_name,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-        temperature=0.7,
-        max_tokens=8192,
-        stream_usage=True,
-    )
-    object.__setattr__(model, "_companion_provider", "deepseek")
-    return model
-
-
-def _claude_model() -> ChatAnthropic:
-    if not settings.anthropic_api_key:
-        raise ValueError("ANTHROPIC_API_KEY is required when provider is claude")
-    return ChatAnthropic(
-        model="claude-sonnet-4-20250514",
-        api_key=settings.anthropic_api_key,
-        max_tokens=8192,
-    )
-
-
-def _ollama_chat_model(model_name: str) -> ChatOllama:
-    """统一构造 ChatOllama, 复用 base_url + httpx 超时等 kwargs."""
-    return ChatOllama(
-        model=model_name,
-        base_url=settings.ollama_base_url,
-        client_kwargs=_OLLAMA_CLIENT_KWARGS,
-        async_client_kwargs=_OLLAMA_CLIENT_KWARGS,
-    )
-
-
 @lru_cache(maxsize=256)
 def _build_chat_model(_agent_key: str | None) -> BaseChatModel:
-    provider = _provider_for("chat")
-    if provider == "claude":
-        return _claude_model()
-    if provider == "deepseek":
-        return _deepseek_chat_model(_chat_model_name())
-    if provider == "dashscope":
-        return _dashscope_chat_model(_chat_model_name())
-    return _ollama_chat_model(_chat_model_name())
+    return build_chat_model(_provider_for("chat"), _chat_model_name())
 
 
 @lru_cache(maxsize=256)
 def _build_utility_model(_agent_key: str | None) -> BaseChatModel:
-    provider = _provider_for("utility")
-    if provider == "claude":
-        return _claude_model()
-    if provider == "deepseek":
-        return _deepseek_chat_model(_utility_model_name())
-    if provider == "dashscope":
-        return _dashscope_chat_model(_utility_model_name())
-    return _ollama_chat_model(_utility_model_name())
+    return build_chat_model(_provider_for("utility"), _utility_model_name())
 
 
 @lru_cache(maxsize=256)
 def _build_fallback_chat_model(_agent_key: str | None) -> ChatOllama:
     cfg = _resolved()
-    return _ollama_chat_model(cfg.local_chat_model)
+    return cast(ChatOllama, build_chat_model("ollama", cfg.local_chat_model))
 
 
 def get_chat_model() -> BaseChatModel:
@@ -212,10 +139,8 @@ def get_embedding_model() -> Embeddings:
             dimensions=settings.embedding_dimensions,
             check_embedding_ctx_length=False,
         )
-    if provider == "claude":
-        raise ValueError("Claude does not provide embeddings; use ollama or dashscope")
-    if provider == "deepseek":
-        raise ValueError("DeepSeek does not provide embeddings; use ollama or dashscope")
+    if provider != "ollama":
+        raise ValueError(f"{provider} does not provide supported embeddings; use ollama or dashscope")
     return OllamaEmbeddings(
         model=_embedding_model_name(),
         base_url=settings.ollama_base_url,

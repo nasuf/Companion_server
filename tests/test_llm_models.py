@@ -1,8 +1,10 @@
 import pytest
+from types import SimpleNamespace
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 from app.services.llm import models, resilience
+from app.services.llm.providers import build_chat_model, public_provider_options
 
 
 def _reset_caches() -> None:
@@ -69,6 +71,76 @@ def test_deepseek_chat_provider_uses_direct_openai_compatible_endpoint(monkeypat
     assert isinstance(chat_model, ChatOpenAI)
     assert resilience.provider_name(chat_model) == "deepseek"
     assert models._resolve_usage_model_key(chat_model) == "deepseek/deepseek-v4-pro"
+
+
+@pytest.mark.parametrize(
+    ("provider", "key_setting", "base_setting", "base_url", "model_name"),
+    [
+        ("qianfan", "qianfan_api_key", "qianfan_base_url", "https://qianfan.test/v2", "custom-character"),
+        ("ark", "ark_api_key", "ark_base_url", "https://ark.test/api/v3", "ep-character"),
+        ("minimax", "minimax_api_key", "minimax_base_url", "https://minimax.test/v1", "M2-her"),
+    ],
+)
+def test_openai_compatible_character_providers(
+    monkeypatch, provider, key_setting, base_setting, base_url, model_name,
+):
+    monkeypatch.setattr(models.settings, key_setting, "test-key")
+    monkeypatch.setattr(models.settings, base_setting, base_url)
+
+    chat_model = build_chat_model(provider, model_name)
+
+    assert isinstance(chat_model, ChatOpenAI)
+    assert resilience.provider_name(chat_model) == provider
+    assert str(chat_model.openai_api_base) == base_url
+    if provider == "minimax":
+        assert chat_model.temperature == 1.0
+        assert chat_model.top_p == 0.95
+        assert chat_model.max_tokens == 2048
+
+
+def test_qwen_character_uses_workspace_endpoint_without_thinking_extension(monkeypatch):
+    monkeypatch.setattr(models.settings, "dashscope_api_key", "test-key")
+    monkeypatch.setattr(
+        models.settings,
+        "dashscope_character_base_url",
+        "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setattr(models.settings, "dashscope_enable_thinking", True)
+
+    chat_model = build_chat_model("dashscope", "qwen-plus-character")
+
+    assert isinstance(chat_model, ChatOpenAI)
+    assert str(chat_model.openai_api_base).startswith("https://workspace.")
+    assert chat_model.model_kwargs == {}
+    assert chat_model.max_tokens == 4096
+
+
+def test_provider_options_are_dynamic_and_secret_safe(monkeypatch):
+    monkeypatch.setattr(models.settings, "minimax_api_key", "super-secret")
+
+    options = public_provider_options()
+    minimax = next(item for item in options if item["id"] == "minimax")
+
+    assert {item["id"] for item in options} >= {
+        "ollama", "dashscope", "deepseek", "qianfan", "ark", "minimax",
+    }
+    assert minimax["configured"] is True
+    assert minimax["credential_env"] == "MINIMAX_API_KEY"
+    assert "super-secret" not in repr(options)
+
+
+def test_runtime_config_can_split_chat_and_utility_providers(monkeypatch):
+    monkeypatch.setattr(models.settings, "chat_provider", "")
+    monkeypatch.setattr(models.settings, "utility_provider", "")
+    monkeypatch.setattr(models.settings, "llm_provider", "")
+    monkeypatch.setattr(models, "_resolved", lambda: SimpleNamespace(
+        online_model=True,
+        remote_chat_provider="minimax",
+        remote_small_provider="dashscope",
+    ))
+
+    assert models._provider_for("chat") == "minimax"
+    assert models._provider_for("utility") == "dashscope"
 
 
 # ── _extract_json + 截断救援 ──

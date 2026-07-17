@@ -8,8 +8,9 @@ Endpoints:
   PUT    /admin-api/runtime-config/agents/{agent_id}     — 更新该 agent override + invalidate
   DELETE /admin-api/runtime-config/agents/{agent_id}     — 删除 override (回归全局)
 
-字段范围: online_model / remote_provider / local_chat_model / local_small_model /
-remote_chat_model / remote_small_model. 全部 nullable (null = 不设, fallback 上层).
+字段范围: online_model / remote_chat_provider / remote_small_provider /
+local_chat_model / local_small_model / remote_chat_model / remote_small_model.
+remote_provider 是旧客户端兼容字段. 全部 nullable (null = 不设, fallback 上层).
 embedding 不在此 — 跨 agent 共享 vector store 不能动态切.
 """
 
@@ -25,6 +26,7 @@ from pydantic import BaseModel
 from app.api.jwt_auth import require_admin_jwt
 from app.config import settings
 from app.db import db
+from app.services.llm.providers import provider_ids, public_provider_options
 from app.services.runtime_config import (
     ResolvedConfig, ensure_loaded, invalidate_caches, load_caches,
     resolve_config_sync,
@@ -39,14 +41,20 @@ router = APIRouter(
 )
 
 
-_LOCAL_PROVIDERS = {"ollama"}
-_REMOTE_PROVIDERS = {"dashscope", "deepseek"}
+_LOCAL_PROVIDERS = provider_ids(admin_only=True) - provider_ids(
+    admin_only=True, remote_only=True,
+)
+_REMOTE_PROVIDERS = provider_ids(admin_only=True, remote_only=True)
 
 
 class ConfigPayload(BaseModel):
     """所有字段 None = 不设/清除. PUT 接受这个用作 set/unset 单字段."""
     online_model: bool | None = None
+    # Deprecated shared field. If a legacy client only sends this field, the
+    # server mirrors it to both role-specific provider columns.
     remote_provider: str | None = None
+    remote_chat_provider: str | None = None
+    remote_small_provider: str | None = None
     local_chat_model: str | None = None
     local_small_model: str | None = None
     remote_chat_model: str | None = None
@@ -56,12 +64,15 @@ class ConfigPayload(BaseModel):
 def _row_to_payload(row) -> dict[str, Any]:
     if row is None:
         return {k: None for k in (
-            "online_model", "remote_provider", "local_chat_model", "local_small_model",
+            "online_model", "remote_provider", "remote_chat_provider",
+            "remote_small_provider", "local_chat_model", "local_small_model",
             "remote_chat_model", "remote_small_model",
         )}
     return {
         "online_model": row.onlineModel,
         "remote_provider": row.remoteProvider,
+        "remote_chat_provider": row.remoteChatProvider,
+        "remote_small_provider": row.remoteSmallProvider,
         "local_chat_model": row.localChatModel,
         "local_small_model": row.localSmallModel,
         "remote_chat_model": row.remoteChatModel,
@@ -74,6 +85,8 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
     return {
         "online_model": r.online_model,
         "remote_provider": r.remote_provider,
+        "remote_chat_provider": r.remote_chat_provider,
+        "remote_small_provider": r.remote_small_provider,
         "local_chat_model": r.local_chat_model,
         "local_small_model": r.local_small_model,
         "remote_chat_model": r.remote_chat_model,
@@ -83,9 +96,26 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
 
 def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
     """payload → prisma 字段 dict. None 值保留 (清除该字段 override)."""
+    explicit = payload.model_fields_set
+    legacy = payload.remote_provider.strip().lower() if payload.remote_provider else None
+    chat_provider = (
+        payload.remote_chat_provider.strip().lower()
+        if payload.remote_chat_provider else None
+    )
+    small_provider = (
+        payload.remote_small_provider.strip().lower()
+        if payload.remote_small_provider else None
+    )
+    # Backward compatibility for clients that predate role-specific providers.
+    if "remote_chat_provider" not in explicit and legacy:
+        chat_provider = legacy
+    if "remote_small_provider" not in explicit and legacy:
+        small_provider = legacy
     return {
         "onlineModel": payload.online_model,
-        "remoteProvider": payload.remote_provider.strip().lower() if payload.remote_provider else None,
+        "remoteProvider": legacy,
+        "remoteChatProvider": chat_provider,
+        "remoteSmallProvider": small_provider,
         "localChatModel": payload.local_chat_model,
         "localSmallModel": payload.local_small_model,
         "remoteChatModel": payload.remote_chat_model,
@@ -110,14 +140,48 @@ def _normalize_remote_provider(value: str | None, fallback: str) -> str:
     return provider
 
 
-async def _validate_payload_models(payload: ConfigPayload, *, fallback_remote_provider: str) -> None:
-    provider = _normalize_remote_provider(payload.remote_provider, fallback_remote_provider)
+async def _validate_payload_models(
+    payload: ConfigPayload,
+    *,
+    fallback_remote_chat_provider: str,
+    fallback_remote_small_provider: str,
+    fallback_remote_chat_model: str,
+    fallback_remote_small_model: str,
+) -> None:
+    legacy = payload.remote_provider
+    explicit = payload.model_fields_set
+    chat_value = (
+        payload.remote_chat_provider
+        if "remote_chat_provider" in explicit
+        else legacy
+    )
+    small_value = (
+        payload.remote_small_provider
+        if "remote_small_provider" in explicit
+        else legacy
+    )
+    chat_provider = _normalize_remote_provider(
+        chat_value,
+        fallback_remote_chat_provider,
+    )
+    small_provider = _normalize_remote_provider(
+        small_value,
+        fallback_remote_small_provider,
+    )
 
     checks = [
         (payload.local_chat_model, "ollama", "local_chat_model"),
         (payload.local_small_model, "ollama", "local_small_model"),
-        (payload.remote_chat_model, provider, "remote_chat_model"),
-        (payload.remote_small_model, provider, "remote_small_model"),
+        (
+            payload.remote_chat_model or fallback_remote_chat_model,
+            chat_provider,
+            "remote_chat_model",
+        ),
+        (
+            payload.remote_small_model or fallback_remote_small_model,
+            small_provider,
+            "remote_small_model",
+        ),
     ]
     for identifier, expected_provider, field in checks:
         if not identifier:
@@ -133,7 +197,7 @@ async def _validate_payload_models(payload: ConfigPayload, *, fallback_remote_pr
 async def list_options() -> dict[str, Any]:
     """前端 dropdown 用. 来源 model_registry (admin "系统设置 → 模型库" 维护).
 
-    按 provider 分桶: ollama → local_*, dashscope/deepseek → remote_*.
+    按 provider 元数据动态分桶为 local_* / remote_*.
     chat/small 不分角色, 同 provider 模型在两个 dropdown 都出现 (admin 自由选).
     禁用模型 (enabled=false) 不出现.
     """
@@ -151,6 +215,7 @@ async def list_options() -> dict[str, Any]:
         "remote_chat": remote,
         "remote_small": remote,
         "by_provider": by_provider,
+        "providers": public_provider_options(),
     }
 
 
@@ -168,7 +233,17 @@ async def get_system_config() -> dict[str, Any]:
 @router.put("")
 async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
     """更新全局 SystemConfig + 重 load 缓存 + 清模型 lru_cache. 立即生效 (in-flight chain 仍旧)."""
-    await _validate_payload_models(payload, fallback_remote_provider=settings.remote_provider)
+    await _validate_payload_models(
+        payload,
+        fallback_remote_chat_provider=(
+            settings.remote_chat_provider or settings.remote_provider
+        ),
+        fallback_remote_small_provider=(
+            settings.remote_small_provider or settings.remote_provider
+        ),
+        fallback_remote_chat_model=settings.remote_chat_model,
+        fallback_remote_small_model=settings.remote_small_model,
+    )
     data = _payload_to_data(payload)
     row = await db.systemconfig.upsert(
         where={"id": 1},
@@ -209,7 +284,14 @@ async def put_agent_config(agent_id: str, payload: ConfigPayload) -> dict[str, A
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     await ensure_loaded()
-    await _validate_payload_models(payload, fallback_remote_provider=resolve_config_sync(agent_id=None).remote_provider)
+    system_config = resolve_config_sync(agent_id=None)
+    await _validate_payload_models(
+        payload,
+        fallback_remote_chat_provider=system_config.remote_chat_provider,
+        fallback_remote_small_provider=system_config.remote_small_provider,
+        fallback_remote_chat_model=system_config.remote_chat_model,
+        fallback_remote_small_model=system_config.remote_small_model,
+    )
     data = _payload_to_data(payload)
     row = await db.agentconfigoverride.upsert(
         where={"agentId": agent_id},
