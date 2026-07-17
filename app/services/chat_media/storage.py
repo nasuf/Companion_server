@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 import uuid
 
-from fastapi import HTTPException, Response
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MEDIA_DIR = Path(os.getenv("CHAT_MEDIA_DIR", "var/chat_media"))
@@ -19,6 +20,21 @@ _ALLOWED_IMAGE_MIMES = {
     "image/jpg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+}
+_AUDIO_EXTENSIONS = {
+    "audio/aac": ".aac",
+    "audio/amr": ".amr",
+    "audio/flac": ".flac",
+    "audio/mp4": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/webm": ".webm",
 }
 
 
@@ -52,7 +68,9 @@ def validate_image_size(blob: bytes) -> None:
 
 
 def storage_key_for(user_id: str, mime: str) -> str:
-    ext = _ALLOWED_IMAGE_MIMES.get(mime, ".jpg")
+    ext = _ALLOWED_IMAGE_MIMES.get(mime) or _AUDIO_EXTENSIONS.get(mime)
+    if ext is None:
+        raise HTTPException(status_code=415, detail="Unsupported media type")
     return f"{user_id}_{uuid.uuid4().hex}{ext}"
 
 
@@ -68,6 +86,17 @@ def media_url(storage_key: str) -> str:
 
 def save_image_blob(*, user_id: str, blob: bytes, mime: str) -> str:
     validate_image_size(blob)
+    _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    key = storage_key_for(user_id, mime)
+    storage_path(key).write_bytes(blob)
+    return key
+
+
+def save_audio_blob(*, user_id: str, blob: bytes, mime: str) -> str:
+    if not blob:
+        raise HTTPException(status_code=400, detail="语音内容为空")
+    if mime not in _AUDIO_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="不支持该语音格式")
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     key = storage_key_for(user_id, mime)
     storage_path(key).write_bytes(blob)
@@ -90,14 +119,20 @@ def delete_media_file(storage_key: str | None) -> None:
         path.unlink()
 
 
-def serve_media(storage_key: str, *, user_id: str, is_admin: bool = False) -> Response:
+def serve_media(
+    storage_key: str,
+    *,
+    user_id: str,
+    is_admin: bool = False,
+) -> FileResponse:
     path = storage_path(storage_key)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Media not found")
     if not is_admin and not storage_key.startswith(f"{user_id}_"):
         raise HTTPException(status_code=403, detail="Not your media")
+    explicit_type = "audio/mp4" if path.suffix.lower() == ".m4a" else None
     media_type, _ = mimetypes.guess_type(path.name)
-    return Response(
-        content=path.read_bytes(),
-        media_type=media_type or "application/octet-stream",
+    return FileResponse(
+        path,
+        media_type=explicit_type or media_type or "application/octet-stream",
     )

@@ -111,6 +111,30 @@ def test_render_message_content_for_prompt_includes_image_summary():
     assert "图片1：画面里是一张日程截图" in rendered
 
 
+def test_audio_attachment_metadata_keeps_transcript():
+    from app.services.chat_media.prompt import attachment_to_metadata
+
+    metadata = attachment_to_metadata(
+        _attachment(
+            kind="audio",
+            mime="audio/mp4",
+            storage_key="user-id_voice.m4a",
+            url="/chat/media/user-id_voice.m4a",
+            duration_seconds=8,
+            transcription_status="ready",
+            transcription_text="明天下午三点提醒我开会",
+            transcription_model="fun-asr-test",
+            transcription_request_id="req-audio",
+            vision_status="skipped",
+        )
+    )
+
+    assert metadata["kind"] == "audio"
+    assert metadata["duration_seconds"] == 8
+    assert metadata["transcription_text"] == "明天下午三点提醒我开会"
+    assert metadata["transcription_request_id"] == "req-audio"
+
+
 @pytest.mark.asyncio
 async def test_doubao_vision_uses_openai_compatible_image_url_payload(monkeypatch):
     captured = {}

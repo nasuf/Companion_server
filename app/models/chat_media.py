@@ -26,4 +26,8 @@ class ChatAttachmentResponse(BaseModel):
     url: str
     vision_status: str = "pending"
     vision_summary: str | None = None
+    transcription_status: str | None = None
+    transcription_text: str | None = None
+    transcription_model: str | None = None
+    transcription_request_id: str | None = None
     created_at: str | None = None

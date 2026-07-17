@@ -260,11 +260,17 @@ model ChatMessageAttachment {
   size           Int
   width          Int?
   height         Int?
+  durationSeconds        Int?    @map("duration_seconds")
   storageKey     String       @unique @map("storage_key")
   url            String
   visionStatus   String       @default("pending") @map("vision_status")
   visionSummary  String?      @map("vision_summary")
   visionError    String?      @map("vision_error")
+  transcriptionStatus    String? @map("transcription_status")
+  transcriptionText      String? @map("transcription_text")
+  transcriptionModel     String? @map("transcription_model")
+  transcriptionRequestId String? @map("transcription_request_id")
+  transcriptionError     String? @map("transcription_error")
   createdAt      DateTime     @default(now()) @map("created_at")
   updatedAt      DateTime     @updatedAt @map("updated_at")
 

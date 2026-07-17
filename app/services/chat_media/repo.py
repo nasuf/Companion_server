@@ -24,6 +24,12 @@ class ChatAttachment:
     vision_status: str
     vision_summary: str | None
     vision_error: str | None
+    duration_seconds: int | None = None
+    transcription_status: str | None = None
+    transcription_text: str | None = None
+    transcription_model: str | None = None
+    transcription_request_id: str | None = None
+    transcription_error: str | None = None
     created_at: Any = None
 
 
@@ -58,6 +64,18 @@ def _attachment_from_row(row: Any) -> ChatAttachment:
         vision_status=str(_value(row, "vision_status", "visionStatus") or "pending"),
         vision_summary=_value(row, "vision_summary", "visionSummary"),
         vision_error=_value(row, "vision_error", "visionError"),
+        duration_seconds=_int_or_none(
+            _value(row, "duration_seconds", "durationSeconds")
+        ),
+        transcription_status=_value(
+            row, "transcription_status", "transcriptionStatus"
+        ),
+        transcription_text=_value(row, "transcription_text", "transcriptionText"),
+        transcription_model=_value(row, "transcription_model", "transcriptionModel"),
+        transcription_request_id=_value(
+            row, "transcription_request_id", "transcriptionRequestId"
+        ),
+        transcription_error=_value(row, "transcription_error", "transcriptionError"),
         created_at=_value(row, "created_at", "createdAt"),
     )
 
@@ -104,6 +122,50 @@ async def create_attachment(
         height,
         storage_key,
         url,
+    )
+    return _attachment_from_row(rows[0])
+
+
+async def create_audio_attachment(
+    *,
+    user_id: str,
+    conversation_id: str,
+    storage_key: str,
+    url: str,
+    mime: str,
+    size: int,
+    duration_seconds: int,
+    transcription_text: str,
+    transcription_model: str,
+    transcription_request_id: str | None,
+    name: str | None = None,
+) -> ChatAttachment:
+    rows = await db.query_raw(
+        """
+        INSERT INTO chat_message_attachments (
+            user_id, conversation_id, kind, name, mime, size,
+            duration_seconds, storage_key, url, vision_status,
+            transcription_status, transcription_text, transcription_model,
+            transcription_request_id
+        )
+        VALUES (
+            $1, $2, 'audio', $3, $4, $5,
+            $6, $7, $8, 'skipped',
+            'ready', $9, $10, $11
+        )
+        RETURNING *
+        """,
+        user_id,
+        conversation_id,
+        name,
+        mime,
+        size,
+        duration_seconds,
+        storage_key,
+        url,
+        transcription_text,
+        transcription_model,
+        transcription_request_id,
     )
     return _attachment_from_row(rows[0])
 

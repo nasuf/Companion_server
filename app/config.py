@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     dashscope_enable_thinking: bool = False
+    # Short voice messages in chat use the native DashScope multimodal HTTP
+    # endpoint.  Keep this separate from the OpenAI-compatible LLM base URL.
+    dashscope_asr_endpoint: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+    dashscope_asr_model: str = "fun-asr-flash-2026-06-15"
+    dashscope_asr_timeout_s: float = 30.0
+    chat_voice_max_seconds: int = 60
+    chat_voice_max_requests_per_minute: int = 20
+    # Base64 adds roughly 33%; 2 MiB of source audio stays well below the
+    # provider's 10 MB encoded-payload limit.
+    chat_voice_max_bytes: int = 2 * 1024 * 1024
 
     # DeepSeek direct API (OpenAI-compatible)
     deepseek_api_key: str = ""

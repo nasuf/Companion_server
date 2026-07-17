@@ -910,7 +910,7 @@ async def _handle_message(
         conversation_id=conversation_id,
     )
     if attachment_ids and len(attachments) != len(set(attachment_ids)):
-        await ws.send_json({"type": "error", "data": {"message": "图片附件无效或已发送"}})
+        await ws.send_json({"type": "error", "data": {"message": "附件无效或已发送"}})
         return
     attachment_metadata = await ensure_vision_summaries(
         attachments,

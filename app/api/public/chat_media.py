@@ -74,8 +74,13 @@ def _response(attachment: repo.ChatAttachment) -> ChatAttachmentResponse:
         size=attachment.size,
         width=attachment.width,
         height=attachment.height,
+        duration_seconds=attachment.duration_seconds,
         url=attachment.url,
         vision_status=attachment.vision_status,
         vision_summary=attachment.vision_summary,
+        transcription_status=attachment.transcription_status,
+        transcription_text=attachment.transcription_text,
+        transcription_model=attachment.transcription_model,
+        transcription_request_id=attachment.transcription_request_id,
         created_at=str(attachment.created_at) if attachment.created_at else None,
     )

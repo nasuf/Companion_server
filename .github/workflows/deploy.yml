@@ -60,8 +60,8 @@ jobs:
               DOCKER="sudo docker"
             fi
 
-            sudo mkdir -p /app/companion-server /app/companion-secrets/apns /mnt/datadisk0/companion/{postgres,redis,ollama,logs,docker,capsule_media}
-            sudo chown -R "$USER:$USER" /app/companion-server /mnt/datadisk0/companion/{logs,capsule_media}
+            sudo mkdir -p /app/companion-server /app/companion-secrets/apns /mnt/datadisk0/companion/{postgres,redis,ollama,logs,docker,chat_media,offline_media,capsule_media}
+            sudo chown -R "$USER:$USER" /app/companion-server /mnt/datadisk0/companion/{logs,chat_media,offline_media,capsule_media}
             cd /app/companion-server
 
             POSTGRES_USER="${{ vars.POSTGRES_USER || 'companion' }}"
@@ -90,6 +90,12 @@ jobs:
             DASHSCOPE_API_KEY=${{ secrets.DASHSCOPE_API_KEY }}
             DASHSCOPE_BASE_URL=${{ vars.DASHSCOPE_BASE_URL }}
             DASHSCOPE_ENABLE_THINKING=${{ vars.DASHSCOPE_ENABLE_THINKING }}
+            DASHSCOPE_ASR_ENDPOINT=${{ vars.DASHSCOPE_ASR_ENDPOINT || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation' }}
+            DASHSCOPE_ASR_MODEL=${{ vars.DASHSCOPE_ASR_MODEL || 'fun-asr-flash-2026-06-15' }}
+            DASHSCOPE_ASR_TIMEOUT_S=${{ vars.DASHSCOPE_ASR_TIMEOUT_S || '30' }}
+            CHAT_VOICE_MAX_SECONDS=${{ vars.CHAT_VOICE_MAX_SECONDS || '60' }}
+            CHAT_VOICE_MAX_REQUESTS_PER_MINUTE=${{ vars.CHAT_VOICE_MAX_REQUESTS_PER_MINUTE || '20' }}
+            CHAT_VOICE_MAX_BYTES=${{ vars.CHAT_VOICE_MAX_BYTES || '2097152' }}
             ONLINE_MODEL=${{ vars.ONLINE_MODEL }}
             REMOTE_PROVIDER=${{ vars.REMOTE_PROVIDER }}
             LOCAL_CHAT_MODEL=${{ vars.LOCAL_CHAT_MODEL }}
@@ -162,7 +168,7 @@ jobs:
             NOTIFICATION_DISPATCH_BATCH_SIZE=${{ vars.NOTIFICATION_DISPATCH_BATCH_SIZE || '50' }}
             EOF
 
-            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES ARK_API_KEY ARK_BASE_URL DOUBAO_VISION_MODEL SUD_APP_ID SUD_APP_KEY SUD_APP_SECRET SUD_DEFAULT_MG_ID SUD_BUNDLE_ID SUD_IS_TEST_ENV SUD_CALLBACK_PUBLIC_BASE_URL; do
+            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER DASHSCOPE_API_KEY DASHSCOPE_ASR_ENDPOINT DASHSCOPE_ASR_MODEL JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES ARK_API_KEY ARK_BASE_URL DOUBAO_VISION_MODEL SUD_APP_ID SUD_APP_KEY SUD_APP_SECRET SUD_DEFAULT_MG_ID SUD_BUNDLE_ID SUD_IS_TEST_ENV SUD_CALLBACK_PUBLIC_BASE_URL; do
               value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
               if [ -z "$value" ]; then
                 echo "$key is required for production deploy"

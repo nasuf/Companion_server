@@ -141,6 +141,7 @@ from app.api.public.conversations import router as conversations_router
 from app.api.public.chat import router as chat_router
 from app.api.public.chat_media import router as chat_media_router
 from app.api.public.chat_links import router as chat_links_router
+from app.api.public.speech import router as speech_router
 from app.api.public.daily_share import router as daily_share_router
 from app.api.public.memories import router as memories_router
 from app.api.public.reminders import router as reminders_router
@@ -182,6 +183,7 @@ app.include_router(agents_router)
 app.include_router(conversations_router)
 app.include_router(chat_media_router)
 app.include_router(chat_links_router)
+app.include_router(speech_router)
 app.include_router(chat_router)
 app.include_router(daily_share_router)
 app.include_router(memories_router)

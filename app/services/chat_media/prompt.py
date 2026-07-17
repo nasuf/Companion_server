@@ -14,11 +14,19 @@ def attachment_to_metadata(attachment: Any) -> dict[str, Any]:
         "size": attachment.size,
         "width": attachment.width,
         "height": attachment.height,
+        "duration_seconds": attachment.duration_seconds,
         "url": attachment.url,
         "vision_status": attachment.vision_status,
+        "transcription_status": attachment.transcription_status,
     }
     if attachment.vision_summary:
         data["vision_summary"] = attachment.vision_summary
+    if attachment.transcription_text:
+        data["transcription_text"] = attachment.transcription_text
+    if attachment.transcription_model:
+        data["transcription_model"] = attachment.transcription_model
+    if attachment.transcription_request_id:
+        data["transcription_request_id"] = attachment.transcription_request_id
     return data
 
 
