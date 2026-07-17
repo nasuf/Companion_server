@@ -49,7 +49,11 @@ async def create_or_update_link_card(
     message_id: str | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> ChatLinkCard:
-    cover = await cache_link_cover(user_id=user_id, metadata=metadata)
+    cover = await cache_link_cover(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        metadata=metadata,
+    )
     metadata = cover.metadata
     merged_extra_metadata = {
         **cover.extra_metadata,

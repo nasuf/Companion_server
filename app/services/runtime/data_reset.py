@@ -24,20 +24,38 @@ def _row_value(row: Any, key: str) -> Any:
 
 
 def _delete_chat_media_files(storage_keys: list[str]) -> int:
+    """Delete chat-media files or fail the hard-delete operation.
+
+    The database row is the durable retry handle for a media file.  Callers
+    must invoke this before deleting the corresponding attachment/link rows;
+    swallowing an unlink error would otherwise leave an untracked file on the
+    data disk forever.
+    """
+    unique_keys = sorted({key for key in storage_keys if key})
+    if unique_keys:
+        media_dir = Path(getattr(chat_media_storage, "_MEDIA_DIR", "var/chat_media"))
+        if not media_dir.exists() or not media_dir.is_dir():
+            raise RuntimeError(f"Chat media directory is unavailable: {media_dir}")
     deleted = 0
-    for storage_key in sorted({key for key in storage_keys if key}):
+    for storage_key in unique_keys:
         try:
             path = chat_media_storage.storage_path(storage_key)
-            existed = path.exists() and path.is_file()
+            if path.exists() and not path.is_file():
+                raise OSError(f"chat media path is not a file: {path}")
+            existed = path.exists()
             chat_media_storage.delete_media_file(storage_key)
-            if existed and not path.exists():
+            if existed and path.exists():
+                raise OSError(f"media file still exists after deletion: {path}")
+            if existed:
                 deleted += 1
         except Exception as exc:
-            logger.warning(
-                "[chat-media] failed to delete storage_key=%s during agent reset: %s",
+            logger.exception(
+                "[chat-media] failed to delete storage_key=%s during hard delete",
                 storage_key,
-                exc,
             )
+            raise RuntimeError(
+                f"Failed to delete chat media file: {storage_key}",
+            ) from exc
     return deleted
 
 
@@ -59,17 +77,69 @@ def _delete_offline_media_files(storage_keys: list[str]) -> int:
     return deleted
 
 
-def _delete_prefixed_files(media_dir: Path, user_id: str) -> int:
-    if not media_dir.exists() or not media_dir.is_dir():
+def _delete_prefixed_files(
+    media_dir: Path,
+    user_id: str,
+    *,
+    strict: bool = False,
+) -> int:
+    if not media_dir.exists():
+        if strict:
+            raise RuntimeError(f"Media directory is unavailable: {media_dir}")
+        return 0
+    if not media_dir.is_dir():
+        if strict:
+            raise RuntimeError(f"Media path is not a directory: {media_dir}")
         return 0
     deleted = 0
     for path in media_dir.iterdir():
-        if path.is_file() and path.name.startswith(f"{user_id}_"):
-            try:
-                path.unlink()
-                deleted += 1
-            except Exception as exc:
-                logger.warning("Failed to delete media file %s: %s", path, exc)
+        if not path.name.startswith(f"{user_id}_"):
+            continue
+        try:
+            if not path.is_file():
+                if strict:
+                    raise OSError(f"user media path is not a file: {path}")
+                continue
+            path.unlink()
+            deleted += 1
+        except Exception as exc:
+            logger.warning("Failed to delete media file %s: %s", path, exc)
+            if strict:
+                raise RuntimeError(
+                    f"Failed to delete user media file: {path.name}",
+                ) from exc
+    return deleted
+
+
+def _delete_conversation_scoped_chat_media_files(
+    media_dir: Path,
+    user_id: str,
+    conversation_ids: list[str],
+) -> int:
+    """Remove disk orphans whose DB attachment row is already missing."""
+    if not media_dir.exists() or not media_dir.is_dir():
+        raise RuntimeError(f"Chat media directory is unavailable: {media_dir}")
+    prefixes = tuple(
+        chat_media_storage.conversation_storage_prefix(user_id, conversation_id)
+        for conversation_id in conversation_ids
+    )
+    deleted = 0
+    for path in media_dir.iterdir():
+        if not path.name.startswith(prefixes):
+            continue
+        try:
+            if not path.is_file():
+                raise OSError(f"conversation media path is not a file: {path}")
+            path.unlink()
+            deleted += 1
+        except Exception as exc:
+            logger.exception(
+                "[chat-media] failed to delete conversation-scoped orphan path=%s",
+                path,
+            )
+            raise RuntimeError(
+                f"Failed to delete conversation chat media file: {path.name}",
+            ) from exc
     return deleted
 
 
@@ -112,18 +182,31 @@ def _capsule_media_storage_keys(media: Any) -> list[str]:
 
 def _delete_capsule_media_files(storage_keys: list[str]) -> int:
     media_dir = Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media"))
+    unique_keys = sorted({key for key in storage_keys if key})
+    if unique_keys and (not media_dir.exists() or not media_dir.is_dir()):
+        raise RuntimeError(f"Capsule media directory is unavailable: {media_dir}")
     deleted = 0
-    for storage_key in sorted({key for key in storage_keys if key}):
+    for storage_key in unique_keys:
         if "/" in storage_key or "\\" in storage_key or ".." in storage_key:
-            continue
+            raise RuntimeError(f"Invalid capsule media storage key: {storage_key}")
         path = media_dir / storage_key
         try:
-            existed = path.exists() and path.is_file()
+            if path.exists() and not path.is_file():
+                raise OSError(f"capsule media path is not a file: {path}")
+            existed = path.exists()
             if existed:
                 path.unlink()
+                if path.exists():
+                    raise OSError(f"capsule media file still exists after deletion: {path}")
                 deleted += 1
         except Exception as exc:
-            logger.warning("[capsule-media] failed to delete storage_key=%s: %s", storage_key, exc)
+            logger.exception(
+                "[capsule-media] failed to delete storage_key=%s during hard delete",
+                storage_key,
+            )
+            raise RuntimeError(
+                f"Failed to delete capsule media file: {storage_key}",
+            ) from exc
     return deleted
 
 
@@ -158,17 +241,19 @@ async def _delete_chat_media_for_conversations(
     stats: dict[str, int] = {}
     storage_keys: list[str] = []
 
+    # Fetch first and keep the DB rows until every referenced file is gone.
+    # This makes a failed disk operation retryable instead of turning the file
+    # into an untracked orphan.
     attachment_rows = await db.query_raw(
         """
-        DELETE FROM chat_message_attachments
+        SELECT id, storage_key
+        FROM chat_message_attachments
         WHERE user_id = $1
           AND conversation_id = ANY($2::text[])
-        RETURNING storage_key
         """,
         user_id,
         conversation_ids,
     )
-    stats["chat_attachments"] = len(attachment_rows or [])
     storage_keys.extend(
         str(key)
         for row in (attachment_rows or [])
@@ -194,6 +279,24 @@ async def _delete_chat_media_for_conversations(
     )
 
     stats["chat_media_files"] = _delete_chat_media_files(storage_keys)
+    stats["chat_conversation_orphan_media_files"] = (
+        _delete_conversation_scoped_chat_media_files(
+            Path(getattr(chat_media_storage, "_MEDIA_DIR", "var/chat_media")),
+            user_id,
+            conversation_ids,
+        )
+    )
+    deleted_attachment_rows = await db.query_raw(
+        """
+        DELETE FROM chat_message_attachments
+        WHERE user_id = $1
+          AND conversation_id = ANY($2::text[])
+        RETURNING id
+        """,
+        user_id,
+        conversation_ids,
+    )
+    stats["chat_attachments"] = len(deleted_attachment_rows or [])
     return stats
 
 
@@ -426,9 +529,9 @@ async def _delete_remaining_user_chat_data(user_id: str) -> dict[str, int]:
 
     orphan_attachment_rows = await db.query_raw(
         """
-        DELETE FROM chat_message_attachments
+        SELECT id, storage_key
+        FROM chat_message_attachments
         WHERE user_id = $1
-        RETURNING storage_key
         """,
         user_id,
     )
@@ -437,8 +540,6 @@ async def _delete_remaining_user_chat_data(user_id: str) -> dict[str, int]:
         for row in (orphan_attachment_rows or [])
         if (key := _row_value(row, "storage_key"))
     ]
-    _add_count(stats, "chat_attachments", len(orphan_attachment_rows or []))
-
     if conv_ids:
         remaining_cover_rows = await db.query_raw(
             """
@@ -478,8 +579,18 @@ async def _delete_remaining_user_chat_data(user_id: str) -> dict[str, int]:
         _delete_prefixed_files(
             Path(getattr(chat_media_storage, "_MEDIA_DIR", "var/chat_media")),
             user_id,
+            strict=True,
         ),
     )
+    deleted_orphan_attachment_rows = await db.query_raw(
+        """
+        DELETE FROM chat_message_attachments
+        WHERE user_id = $1
+        RETURNING id
+        """,
+        user_id,
+    )
+    _add_count(stats, "chat_attachments", len(deleted_orphan_attachment_rows or []))
 
     if conv_ids:
         await _execute_counted(
@@ -570,6 +681,7 @@ async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
     stats["capsule_user_media_files"] = _delete_prefixed_files(
         Path(os.getenv("CAPSULE_MEDIA_DIR", "var/capsule_media")),
         user_id,
+        strict=True,
     )
 
     media_rows = await db.query_raw(

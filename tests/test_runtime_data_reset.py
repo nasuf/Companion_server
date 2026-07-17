@@ -53,21 +53,30 @@ async def test_hard_delete_agent_data_does_not_require_removed_emotion_delegate(
 
 @pytest.mark.asyncio
 async def test_hard_delete_agent_data_removes_chat_media_files(monkeypatch, tmp_path):
+    scoped_prefix = data_reset.chat_media_storage.conversation_storage_prefix(
+        "user-1",
+        "conv-1",
+    )
+    scoped_orphan_keys = [f"{scoped_prefix}orphan.m4a", f"{scoped_prefix}orphan.jpg"]
     media_keys = [
         "user-1_photo.jpg",
-        "user-1_second.jpg",
+        "user-1_voice.m4a",
         "user-1_cover.jpg",
+        *scoped_orphan_keys,
     ]
     for key in media_keys:
-        (tmp_path / key).write_bytes(b"image")
+        (tmp_path / key).write_bytes(b"media")
 
     async def query_raw(sql, *args):
-        if "DELETE FROM chat_message_attachments" in sql:
+        if "SELECT id, storage_key" in sql and "FROM chat_message_attachments" in sql:
             assert args == ("user-1", ["conv-1"])
             return [
-                {"storage_key": "user-1_photo.jpg"},
-                {"storage_key": "user-1_second.jpg"},
+                {"id": "attachment-image", "storage_key": "user-1_photo.jpg"},
+                {"id": "attachment-audio", "storage_key": "user-1_voice.m4a"},
             ]
+        if "DELETE FROM chat_message_attachments" in sql:
+            assert args == ("user-1", ["conv-1"])
+            return [{"id": "attachment-image"}, {"id": "attachment-audio"}]
         if "FROM chat_link_cards" in sql:
             assert args == ("user-1", ["conv-1"])
             return [{"storage_key": "user-1_cover.jpg"}]
@@ -107,12 +116,116 @@ async def test_hard_delete_agent_data_removes_chat_media_files(monkeypatch, tmp_
     assert stats["chat_attachments"] == 2
     assert stats["chat_link_cover_media"] == 1
     assert stats["chat_media_files"] == 3
+    assert stats["chat_conversation_orphan_media_files"] == 2
     for key in media_keys:
         assert not (tmp_path / key).exists()
 
     fake_db.message.delete_many.assert_awaited_once_with(
         where={"conversationId": {"in": ["conv-1"]}},
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_media_disk_failure_keeps_attachment_rows_for_retry(
+    monkeypatch,
+    tmp_path,
+):
+    statements: list[str] = []
+    (tmp_path / "user-1_voice.m4a").write_bytes(b"audio")
+
+    def fail_disk_delete(_storage_key):
+        raise PermissionError("read-only disk")
+
+    async def query_raw(sql, *args):
+        statements.append(sql)
+        assert args == ("user-1", ["conv-1"])
+        if "FROM chat_message_attachments" in sql:
+            return [{"id": "attachment-audio", "storage_key": "user-1_voice.m4a"}]
+        if "FROM chat_link_cards" in sql:
+            return []
+        raise AssertionError("attachment DELETE must not run after a disk failure")
+
+    fake_db = SimpleNamespace(query_raw=AsyncMock(side_effect=query_raw))
+    monkeypatch.setattr(data_reset, "db", fake_db)
+    monkeypatch.setattr(data_reset.chat_media_storage, "_MEDIA_DIR", tmp_path)
+    monkeypatch.setattr(
+        data_reset.chat_media_storage,
+        "delete_media_file",
+        fail_disk_delete,
+    )
+
+    with pytest.raises(RuntimeError, match="user-1_voice.m4a"):
+        await data_reset._delete_chat_media_for_conversations(
+            user_id="user-1",
+            conversation_ids=["conv-1"],
+        )
+
+    assert not any("DELETE FROM chat_message_attachments" in sql for sql in statements)
+
+
+def test_chat_media_missing_mount_is_not_treated_as_deleted(monkeypatch, tmp_path):
+    missing_media_dir = tmp_path / "missing-chat-mount"
+    monkeypatch.setattr(data_reset.chat_media_storage, "_MEDIA_DIR", missing_media_dir)
+
+    with pytest.raises(RuntimeError, match="directory is unavailable"):
+        data_reset._delete_chat_media_files(["user-1_photo.jpg"])
+
+
+@pytest.mark.asyncio
+async def test_delete_remaining_user_chat_data_removes_tracked_and_orphan_audio(
+    monkeypatch,
+    tmp_path,
+):
+    tracked_key = "user-1_tracked.m4a"
+    orphan_key = "user-1_orphan.m4a"
+    (tmp_path / tracked_key).write_bytes(b"tracked")
+    (tmp_path / orphan_key).write_bytes(b"orphan")
+
+    async def query_raw(sql, *args):
+        assert args == ("user-1",)
+        if "SELECT id, storage_key" in sql and "FROM chat_message_attachments" in sql:
+            return [{"id": "attachment-audio", "storage_key": tracked_key}]
+        if "FROM chat_link_cards" in sql:
+            return []
+        if "DELETE FROM chat_message_attachments" in sql:
+            return [{"id": "attachment-audio"}]
+        return []
+
+    fake_db = SimpleNamespace(
+        conversation=_Delegate(),
+        chatworkspace=_Delegate(),
+        query_raw=AsyncMock(side_effect=query_raw),
+    )
+    monkeypatch.setattr(data_reset, "db", fake_db)
+    monkeypatch.setattr(data_reset.chat_media_storage, "_MEDIA_DIR", tmp_path)
+
+    stats = await data_reset._delete_remaining_user_chat_data("user-1")
+
+    assert stats["chat_attachments"] == 1
+    assert stats["chat_media_files"] == 1
+    assert stats["chat_user_media_files"] == 1
+    assert not (tmp_path / tracked_key).exists()
+    assert not (tmp_path / orphan_key).exists()
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_user_keeps_user_row_when_chat_media_cleanup_fails(monkeypatch):
+    fake_db = SimpleNamespace(
+        aiagent=_Delegate(),
+        user=_Delegate(),
+    )
+    cleanup_error = RuntimeError("chat media disk unavailable")
+    monkeypatch.setattr(data_reset, "db", fake_db)
+    monkeypatch.setattr(
+        data_reset,
+        "_delete_remaining_user_chat_data",
+        AsyncMock(side_effect=cleanup_error),
+    )
+
+    with pytest.raises(RuntimeError, match="chat media disk unavailable"):
+        await data_reset.hard_delete_user_data("user-1")
+
+    fake_db.user.delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -226,6 +339,33 @@ async def test_delete_remaining_user_side_tables_removes_capsule_media_files(mon
     assert stats["capsule_user_media_files"] == 1
     for key in media_keys:
         assert not (tmp_path / key).exists()
+
+
+def test_capsule_media_disk_failure_is_not_silently_ignored(monkeypatch, tmp_path):
+    media_path = tmp_path / "user-1_capsule.m4a"
+    media_path.write_bytes(b"audio")
+    original_unlink = data_reset.Path.unlink
+
+    def fail_capsule_unlink(path, *args, **kwargs):
+        if path == media_path:
+            raise PermissionError("read-only disk")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setenv("CAPSULE_MEDIA_DIR", str(tmp_path))
+    monkeypatch.setattr(data_reset.Path, "unlink", fail_capsule_unlink)
+
+    with pytest.raises(RuntimeError, match="user-1_capsule.m4a"):
+        data_reset._delete_capsule_media_files([media_path.name])
+
+    assert media_path.exists()
+
+
+def test_capsule_media_missing_mount_is_not_treated_as_deleted(monkeypatch, tmp_path):
+    missing_media_dir = tmp_path / "missing-capsule-mount"
+    monkeypatch.setenv("CAPSULE_MEDIA_DIR", str(missing_media_dir))
+
+    with pytest.raises(RuntimeError, match="directory is unavailable"):
+        data_reset._delete_capsule_media_files(["user-1_capsule.jpg"])
 
 
 @pytest.mark.asyncio

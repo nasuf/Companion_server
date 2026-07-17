@@ -24,7 +24,12 @@ async def upload_chat_image(
     mime = storage.normalize_image_mime(data.mime)
     blob = storage.decode_image_base64(data.base64)
     storage.validate_image_size(blob)
-    storage_key = storage.save_image_blob(user_id=user_id, blob=blob, mime=mime)
+    storage_key = storage.save_image_blob(
+        user_id=user_id,
+        conversation_id=data.conversation_id,
+        blob=blob,
+        mime=mime,
+    )
     try:
         attachment = await repo.create_attachment(
             user_id=user_id,

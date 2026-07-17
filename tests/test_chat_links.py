@@ -852,10 +852,17 @@ async def test_cache_link_cover_rewrites_remote_image_to_local_media(monkeypatch
         image_url="https://sns-webpic-qc.xhscdn.com/cover.jpg",
     )
 
-    result = await cache_link_cover(user_id="user-id", metadata=metadata)
+    result = await cache_link_cover(
+        user_id="user-id",
+        conversation_id="conv-id",
+        metadata=metadata,
+    )
 
     assert result.metadata.image_url is not None
-    assert result.metadata.image_url.startswith("/chat/media/user-id_")
+    assert result.metadata.image_url.startswith(
+        "/chat/media/"
+        + cover_mod.storage.conversation_storage_prefix("user-id", "conv-id")
+    )
     assert result.extra_metadata["remote_image_url"] == "https://sns-webpic-qc.xhscdn.com/cover.jpg"
     assert result.extra_metadata["cover_cached_url"] == result.metadata.image_url
     assert (tmp_path / result.extra_metadata["cover_storage_key"]).read_bytes() == b"image-bytes"
@@ -892,7 +899,8 @@ async def test_create_link_card_removes_cached_cover_when_db_write_fails(monkeyp
         image_url="/chat/media/user-id_cached.jpg",
     )
 
-    async def fake_cache_link_cover(*, user_id, metadata):
+    async def fake_cache_link_cover(*, user_id, conversation_id, metadata):
+        assert conversation_id == "conv-id"
         return cover_mod.CachedCoverResult(
             metadata=metadata,
             extra_metadata={"cover_storage_key": storage_key},

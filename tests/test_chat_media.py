@@ -48,6 +48,20 @@ def test_chat_image_upload_limit_is_10mb():
     assert storage._MAX_IMAGE_BYTES == 10 * 1024 * 1024
 
 
+def test_audio_storage_key_has_deterministic_conversation_scope():
+    prefix = storage.conversation_storage_prefix("user-id", "conv-id")
+
+    key = storage.storage_key_for(
+        "user-id",
+        "audio/mp4",
+        conversation_id="conv-id",
+    )
+
+    assert key.startswith(prefix)
+    assert key.endswith(".m4a")
+    assert prefix != storage.conversation_storage_prefix("user-id", "other-conv")
+
+
 def test_chat_media_route_precedes_chat_conversation_fallback():
     from app.main import app
 
@@ -73,7 +87,16 @@ async def test_upload_chat_image_saves_file_and_returns_attachment(monkeypatch, 
     created = _attachment(size=5, storage_key="user-id_saved.jpg", url="/chat/media/user-id_saved.jpg")
     create_attachment = AsyncMock(return_value=created)
     monkeypatch.setattr(chat_media.repo, "create_attachment", create_attachment)
-    monkeypatch.setattr(storage, "storage_key_for", lambda _user_id, _mime: "user-id_saved.jpg")
+
+    def scoped_storage_key(_user_id, _mime, **kwargs):
+        assert kwargs["conversation_id"] == "conv-id"
+        return "user-id_saved.jpg"
+
+    monkeypatch.setattr(
+        storage,
+        "storage_key_for",
+        scoped_storage_key,
+    )
 
     response = await chat_media.upload_chat_image(
         chat_media.ChatImageUpload(

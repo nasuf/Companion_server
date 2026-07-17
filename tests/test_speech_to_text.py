@@ -264,7 +264,7 @@ async def test_voice_send_persists_audio_and_returns_attachment(
     monkeypatch.setattr(
         speech.chat_media_storage,
         "storage_key_for",
-        lambda _user_id, _mime: "user-1_voice.m4a",
+        lambda _user_id, _mime, **_kwargs: "user-1_voice.m4a",
     )
     audio = _test_m4a(3)
     attachment = speech.chat_media_repo.ChatAttachment(
@@ -356,7 +356,7 @@ async def test_transcribe_chat_audio_deletes_saved_file_when_db_insert_fails(
     monkeypatch.setattr(
         speech.chat_media_storage,
         "storage_key_for",
-        lambda _user_id, _mime: "user-1_failed.m4a",
+        lambda _user_id, _mime, **_kwargs: "user-1_failed.m4a",
     )
     monkeypatch.setattr(
         speech.chat_media_repo,

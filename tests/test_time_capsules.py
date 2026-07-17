@@ -271,6 +271,38 @@ async def test_delete_capsule_removes_storage_files(monkeypatch, tmp_path):
     assert not audio.exists()
 
 
+@pytest.mark.asyncio
+async def test_delete_capsule_keeps_row_when_media_delete_fails(monkeypatch):
+    def fail_media_delete(*_args, **_kwargs):
+        raise RuntimeError("capsule disk unavailable")
+
+    existing = _capsule_row(
+        content="旧内容",
+        media={"audio": {"storage_key": "user-id_audio.m4a"}},
+    )
+    delete_row = AsyncMock(return_value=existing)
+    db = SimpleNamespace(
+        timecapsule=SimpleNamespace(
+            find_unique=AsyncMock(return_value=existing),
+            delete=delete_row,
+        ),
+    )
+    monkeypatch.setattr(time_capsules, "db", db)
+    monkeypatch.setattr(
+        time_capsules,
+        "_delete_media_files",
+        fail_media_delete,
+    )
+
+    with pytest.raises(RuntimeError, match="capsule disk unavailable"):
+        await time_capsules.delete_capsule(
+            "capsule-id",
+            user={"sub": "user-id", "role": "user"},
+        )
+
+    delete_row.assert_not_awaited()
+
+
 def test_normalize_media_rejects_foreign_storage_key(monkeypatch, tmp_path):
     monkeypatch.setattr(time_capsules, "_MEDIA_DIR", tmp_path)
     foreign = tmp_path / "other-user_image.jpg"

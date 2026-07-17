@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import mimetypes
 import os
 from pathlib import Path
@@ -67,11 +68,27 @@ def validate_image_size(blob: bytes) -> None:
         raise HTTPException(status_code=400, detail="Image must be under 10MB")
 
 
-def storage_key_for(user_id: str, mime: str) -> str:
+def conversation_storage_prefix(user_id: str, conversation_id: str) -> str:
+    """Return a deterministic, non-overlapping prefix for chat-owned media."""
+    conversation_scope = hashlib.sha256(conversation_id.encode("utf-8")).hexdigest()[:24]
+    return f"{user_id}_c{conversation_scope}_"
+
+
+def storage_key_for(
+    user_id: str,
+    mime: str,
+    *,
+    conversation_id: str | None = None,
+) -> str:
     ext = _ALLOWED_IMAGE_MIMES.get(mime) or _AUDIO_EXTENSIONS.get(mime)
     if ext is None:
         raise HTTPException(status_code=415, detail="Unsupported media type")
-    return f"{user_id}_{uuid.uuid4().hex}{ext}"
+    prefix = (
+        conversation_storage_prefix(user_id, conversation_id)
+        if conversation_id
+        else f"{user_id}_"
+    )
+    return f"{prefix}{uuid.uuid4().hex}{ext}"
 
 
 def storage_path(storage_key: str) -> Path:
@@ -84,21 +101,33 @@ def media_url(storage_key: str) -> str:
     return f"{_MEDIA_PUBLIC_PREFIX}/{storage_key}"
 
 
-def save_image_blob(*, user_id: str, blob: bytes, mime: str) -> str:
+def save_image_blob(
+    *,
+    user_id: str,
+    blob: bytes,
+    mime: str,
+    conversation_id: str | None = None,
+) -> str:
     validate_image_size(blob)
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    key = storage_key_for(user_id, mime)
+    key = storage_key_for(user_id, mime, conversation_id=conversation_id)
     storage_path(key).write_bytes(blob)
     return key
 
 
-def save_audio_blob(*, user_id: str, blob: bytes, mime: str) -> str:
+def save_audio_blob(
+    *,
+    user_id: str,
+    conversation_id: str,
+    blob: bytes,
+    mime: str,
+) -> str:
     if not blob:
         raise HTTPException(status_code=400, detail="语音内容为空")
     if mime not in _AUDIO_EXTENSIONS:
         raise HTTPException(status_code=415, detail="不支持该语音格式")
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    key = storage_key_for(user_id, mime)
+    key = storage_key_for(user_id, mime, conversation_id=conversation_id)
     storage_path(key).write_bytes(blob)
     return key
 

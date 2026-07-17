@@ -101,6 +101,7 @@ async def transcribe_chat_audio(
 
     storage_key = chat_media_storage.save_audio_blob(
         user_id=user_id,
+        conversation_id=data.conversation_id,
         blob=audio,
         mime=mime,
     )

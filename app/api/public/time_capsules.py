@@ -172,19 +172,35 @@ def _media_storage_keys(media: dict | None) -> set[str]:
     return keys
 
 
-def _delete_media_files(media: dict | None, *, keep_keys: set[str] | None = None) -> None:
+def _delete_media_files(
+    media: dict | None,
+    *,
+    keep_keys: set[str] | None = None,
+    strict: bool = False,
+) -> None:
     keep = keep_keys or set()
-    for storage_key in _media_storage_keys(media) - keep:
+    storage_keys = _media_storage_keys(media) - keep
+    if strict and storage_keys and (not _MEDIA_DIR.exists() or not _MEDIA_DIR.is_dir()):
+        raise RuntimeError(f"Capsule media directory is unavailable: {_MEDIA_DIR}")
+    for storage_key in storage_keys:
         try:
             path = _storage_path(storage_key)
-            if path.exists() and path.is_file():
+            if path.exists() and not path.is_file():
+                raise OSError(f"capsule media path is not a file: {path}")
+            if path.exists():
                 path.unlink()
-        except Exception:
+                if path.exists():
+                    raise OSError(f"capsule media file still exists after deletion: {path}")
+        except Exception as exc:
             logger.warning(
                 "[capsule:media] failed to delete storage_key=%s",
                 storage_key,
                 exc_info=True,
             )
+            if strict:
+                raise RuntimeError(
+                    f"Failed to delete capsule media file: {storage_key}",
+                ) from exc
 
 
 async def _cleanup_unreferenced_media(user_id: str, *, max_age_seconds: int = 86400) -> None:
@@ -906,6 +922,6 @@ async def delete_capsule(
     if user.get("role") != "admin" and row.userId != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your capsule")
     media = _json_dict(row.media)
+    _delete_media_files(media, strict=True)
     await db.timecapsule.delete(where={"id": capsule_id})
-    _delete_media_files(media)
     return Response(status_code=204)
