@@ -735,6 +735,7 @@ def _game_title(session: GameSessionResponse, payload: dict[str, Any]) -> str:
         "match3": "消消乐",
         "minesweeper": "协作扫雷",
         "number_merge": "数字合并",
+        "tetris_duel": "双人方块竞速",
     }
     return native_titles.get(getattr(session, "game_key", None), mg_id or "游戏")
 

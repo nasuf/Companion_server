@@ -70,6 +70,7 @@ def test_native_registry_contains_every_supported_game():
         "match3",
         "minesweeper",
         "number_merge",
+        "tetris_duel",
     }
     assert native._definition("match3").play_mode == "cooperate"
     assert native._definition("minesweeper").play_mode == "cooperate"
@@ -560,6 +561,7 @@ def test_go_terminal_status_matches_reported_outcome():
         ("match3", "completed", "win"),
         ("minesweeper", "failed", "lose"),
         ("number_merge", "completed", "win"),
+        ("tetris_duel", "userWon", "win"),
     ],
 )
 def test_generic_terminal_recovery_uses_persisted_final_state(
@@ -807,6 +809,11 @@ async def test_generic_shared_experience_enters_both_memory_sides(monkeypatch):
             "number_merge",
             [{"type": "target_reached"}, {"type": "board_recovered"}],
             ("目标数字", "救出了空间"),
+        ),
+        (
+            "tetris_duel",
+            [{"type": "tetris"}, {"type": "combo"}],
+            ("四行同时消除", "连续消行"),
         ),
     ],
 )

@@ -50,6 +50,9 @@ _GAME_DEFINITIONS = {
     "number_merge": NativeGameDefinition(
         "number_merge", "数字合并", "board_slid", play_mode="cooperate"
     ),
+    "tetris_duel": NativeGameDefinition(
+        "tetris_duel", "双人方块竞速", "tetromino_locked"
+    ),
 }
 _SUPPORTED_GAME_KEYS_SQL = ", ".join(f"'{key}'" for key in _GAME_DEFINITIONS)
 _TERMINAL_OUTCOMES = {
@@ -61,6 +64,7 @@ _TERMINAL_OUTCOMES = {
     "match3": {"completed": "win", "failed": "lose"},
     "minesweeper": {"completed": "win", "failed": "lose"},
     "number_merge": {"completed": "win", "failed": "lose"},
+    "tetris_duel": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
 }
 _TERMINAL_STATUSES = {"settled", "aborted"}
 _SESSION_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -84,6 +88,10 @@ _ALLOWED_EVENTS = {
     "cascade_resolved",
     "special_created",
     "board_shuffled",
+    "tetromino_locked",
+    "garbage_sent",
+    "turn_timed_out",
+    "turn_timeout_continued",
     "turn_changed",
     "key_moment",
     "game_state_snapshot",
@@ -414,6 +422,9 @@ async def handle_event(
                 if definition.key == GOMOKU_GAME_KEY:
                     action = _validate_and_normalize_move(result, event_payload)
                     result = _append_move(result, action)
+                elif definition.key == "tetris_duel":
+                    action = _validate_tetris_lock(result, definition, event_payload)
+                    result = _append_tetris_lock(result, definition, action)
                 else:
                     action = _validate_generic_action(result, definition, event_payload)
                     result = _append_generic_action(result, definition, action)
@@ -429,7 +440,11 @@ async def handle_event(
                         definition,
                         event_payload,
                     )
-                    outcome = _validated_generic_outcome(event_payload, definition)
+                    outcome = (
+                        _validated_tetris_outcome(result, event_payload)
+                        if definition.key == "tetris_duel"
+                        else _validated_generic_outcome(event_payload, definition)
+                    )
                     winning_line = []
                 status = "settled"
                 ended_at = _now().isoformat()
@@ -1054,6 +1069,234 @@ def _validate_generic_action(
     return action
 
 
+def _validate_tetris_lock(
+    result: dict[str, Any],
+    definition: NativeGameDefinition,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    game = _generic_process(result, definition)
+    actions = list(_loads(game.get("actions"), []))
+    actor = str(payload.get("actor") or "").strip()
+    if actor not in {"user", "agent"}:
+        raise ValueError("invalid_actor")
+    piece = str(payload.get("piece") or "").strip().lower()
+    if piece not in {"i", "j", "l", "o", "s", "t", "z"}:
+        raise ValueError("invalid_piece")
+    piece_number = payload.get("piece_number")
+    if isinstance(piece_number, bool) or not isinstance(piece_number, int):
+        raise ValueError("invalid_piece_number")
+    expected_piece_number = (
+        sum(1 for item in actions if item.get("actor") == actor) + 1
+    )
+    if piece_number != expected_piece_number:
+        raise ValueError("invalid_piece_number")
+    board_after = _loads(payload.get("board_after"), None)
+    if (
+        not isinstance(board_after, list)
+        or len(board_after) != 200
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value not in range(9)
+            for value in board_after
+        )
+    ):
+        raise ValueError("invalid_board")
+    board_hash = str(payload.get("board_hash") or "").strip()
+    if not board_hash:
+        raise ValueError("invalid_state_hash")
+    top_out = payload.get("top_out")
+    back_to_back = payload.get("back_to_back")
+    if not isinstance(top_out, bool):
+        raise ValueError("invalid_top_out")
+    if not isinstance(back_to_back, bool):
+        raise ValueError("invalid_back_to_back")
+
+    def bounded_int(key: str, lower: int, upper: int) -> int:
+        value = payload.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not lower <= value <= upper
+        ):
+            raise ValueError(f"invalid_{key}")
+        return value
+
+    lines_cleared = bounded_int("lines_cleared", 0, 4)
+    score_gained = bounded_int("score_gained", 0, 100_000)
+    score_after = bounded_int("score_after", 0, 100_000_000)
+    lines_after = bounded_int("lines_after", 0, 100_000)
+    level_after = bounded_int("level_after", 1, 10_000)
+    actor_stats = dict(_loads(game.get(actor), {}))
+    previous_score = int(actor_stats.get("score") or 0)
+    previous_lines = int(actor_stats.get("lines") or 0)
+    if score_after - previous_score != score_gained:
+        raise ValueError("invalid_score_progression")
+    if lines_after - previous_lines != lines_cleared:
+        raise ValueError("invalid_lines_progression")
+    if level_after != 1 + lines_after // 10:
+        raise ValueError("invalid_level_progression")
+
+    return {
+        **payload,
+        "action_number": len(actions) + 1,
+        "actor": actor,
+        "piece": piece,
+        "piece_number": piece_number,
+        "lines_cleared": lines_cleared,
+        "score_gained": score_gained,
+        "score_after": score_after,
+        "lines_after": lines_after,
+        "level_after": level_after,
+        "combo": bounded_int("combo", 0, 100_000),
+        "attack_sent": bounded_int("attack_sent", 0, 8),
+        "drop_distance": bounded_int("drop_distance", 0, 40),
+        "remaining_seconds": bounded_int("remaining_seconds", 0, 90),
+        "board_hash": board_hash,
+        "board_after": list(board_after),
+        "top_out": top_out,
+        "back_to_back": back_to_back,
+    }
+
+
+def _validated_tetris_outcome(
+    result: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    terminal_state = _loads(payload.get("terminal_state"), {})
+    status = str(terminal_state.get("status") or "")
+    score = _loads(payload.get("score"), {})
+    user = _loads(payload.get("user"), {})
+    agent = _loads(payload.get("agent"), {})
+    if not all(
+        isinstance(value, dict)
+        for value in (terminal_state, score, user, agent)
+    ):
+        raise ValueError("invalid_terminal_summary")
+    if not isinstance(user.get("top_out"), bool) or not isinstance(
+        agent.get("top_out"), bool
+    ):
+        raise ValueError("invalid_top_out")
+
+    def non_negative_int(container: dict[str, Any], key: str) -> int:
+        value = container.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"invalid_{key}")
+        return value
+
+    user_score = non_negative_int(score, "user")
+    agent_score = non_negative_int(score, "agent")
+    if (
+        non_negative_int(user, "score") != user_score
+        or non_negative_int(agent, "score") != agent_score
+    ):
+        raise ValueError("invalid_score_summary")
+    user_top_out = user["top_out"]
+    agent_top_out = agent["top_out"]
+    expected_status = (
+        "draw"
+        if user_top_out and agent_top_out
+        else "agentWon"
+        if user_top_out
+        else "userWon"
+        if agent_top_out
+        else "draw"
+        if user_score == agent_score
+        else "userWon"
+        if user_score > agent_score
+        else "agentWon"
+    )
+    if status != expected_status:
+        raise ValueError("invalid_outcome")
+    outcome = _normalize_outcome(payload.get("user_outcome"))
+    expected_outcome = _TERMINAL_OUTCOMES["tetris_duel"][expected_status]
+    if outcome != expected_outcome:
+        raise ValueError("invalid_outcome")
+
+    process = _generic_process(result, _definition("tetris_duel"))
+    for actor, final_score in (("user", user_score), ("agent", agent_score)):
+        recorded = dict(_loads(process.get(actor), {}))
+        if int(recorded.get("score") or 0) > final_score:
+            raise ValueError("invalid_score_summary")
+        if int(recorded.get("lines") or 0) > non_negative_int(
+            user if actor == "user" else agent,
+            "lines",
+        ):
+            raise ValueError("invalid_lines_summary")
+    return expected_outcome
+
+
+def _append_tetris_lock(
+    result: dict[str, Any],
+    definition: NativeGameDefinition,
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    process = dict(_loads(result.get("process"), {}))
+    game = _generic_process(result, definition)
+    compact_action = {
+        key: value for key, value in action.items() if key != "board_after"
+    }
+    actions = [*list(_loads(game.get("actions"), [])), compact_action]
+    actor = str(action["actor"])
+    actor_stats = dict(_loads(game.get(actor), {}))
+    actor_stats.update(
+        {
+            "score": action["score_after"],
+            "lines": action["lines_after"],
+            "level": action["level_after"],
+            "pieces_placed": action["piece_number"],
+            "max_combo": max(
+                int(actor_stats.get("max_combo") or 0), int(action["combo"])
+            ),
+            "tetrises": int(actor_stats.get("tetrises") or 0)
+            + (1 if action["lines_cleared"] == 4 else 0),
+            "attack_sent": int(actor_stats.get("attack_sent") or 0)
+            + int(action["attack_sent"]),
+            "top_out": bool(action["top_out"]),
+            "final_board": action["board_after"],
+            "final_board_hash": action["board_hash"],
+        }
+    )
+    moments = list(_loads(game.get("key_moments"), []))
+    moment_type = (
+        "top_out"
+        if action["top_out"]
+        else "tetris"
+        if action["lines_cleared"] == 4
+        else "combo"
+        if action["combo"] >= 3
+        else "multi_line_clear"
+        if action["lines_cleared"] >= 2
+        else None
+    )
+    if moment_type:
+        moment = {
+            "type": moment_type,
+            "actor": actor,
+            "action_number": action["action_number"],
+            "piece_number": action["piece_number"],
+            "lines_cleared": action["lines_cleared"],
+            "combo": action["combo"],
+            "remaining_seconds": action["remaining_seconds"],
+        }
+        if not any(_same_key_moment(item, moment) for item in moments):
+            moments.append(moment)
+    game.update(
+        {
+            "actions": actions,
+            "action_count": len(actions),
+            "user_actions": sum(1 for item in actions if item.get("actor") == "user"),
+            "ai_actions": sum(1 for item in actions if item.get("actor") == "agent"),
+            "last_action": compact_action,
+            "key_moments": moments[-30:],
+            "remaining_seconds": action["remaining_seconds"],
+            actor: actor_stats,
+        }
+    )
+    process[definition.key] = game
+    return {**result, "process": process}
+
+
 def _append_generic_action(
     result: dict[str, Any],
     definition: NativeGameDefinition,
@@ -1268,6 +1511,9 @@ def _merge_auxiliary_event(
         "cascade_resolved",
         "special_created",
         "board_shuffled",
+        "garbage_sent",
+        "turn_timed_out",
+        "turn_timeout_continued",
         "cells_revealed",
         "flag_toggled",
         "inference_made",
@@ -1601,6 +1847,18 @@ def _generic_finish_reply(
         if outcome == "win":
             return f"真的合到{max_tile}了。前面几次盘面快满的时候，我们居然都一起救回来了。"
         return f"这次停在{max_tile}。有几步其实已经把空间重新救出来了，下局我们把大数字守在角落久一点。"
+    if definition.key == "tetris_duel":
+        final_payload = _loads(result.get("final_payload"), {})
+        score = _loads(final_payload.get("score"), {})
+        user_score = int(score.get("user") or 0)
+        agent_score = int(score.get("agent") or 0)
+        if outcome == "win":
+            return "最后那段你越堆越稳，我这边反而先乱了。行，这局算你压着我赢的，再来我得少留几个洞。"
+        if outcome == "lose":
+            return "刚才比分咬得还挺紧，我只是最后几块接得顺一点。别急着服气，再来一轮你很可能就追过去了。"
+        if user_score == agent_score:
+            return "居然一分不差。我们刚才各忙各的，最后却正好停在同一个数上，这也太巧了。"
+        return "最后几秒谁也没松手，结果就差那么一点。再来一轮感觉还是会很接近。"
     if definition.play_mode == "cooperate":
         if outcome == "win":
             return (
@@ -1627,6 +1885,8 @@ def _generic_abort_reply(
         return "雷区先留在这里。刚才我们一起推出来的那些安全格，我会记得。"
     if definition.key == "number_merge" and count > 2:
         return "这盘数字先收到这里。刚才我们一起养大的那块不会算没发生。"
+    if definition.key == "tetris_duel" and count > 4:
+        return "方块还在往下落，我们先按停。刚才那段追分和互相送过去的垃圾行，我会记得。"
     if count <= 2:
         return f"《{definition.title}》才刚开头，我们先收起来。下次想玩再重新来。"
     return "先停在这里吧。刚才走过的过程我会留着，它也算我们一起玩过的一小段。"
@@ -1646,7 +1906,7 @@ async def _remember_shared_experience(
     else:
         game = _loads(result.get(definition.key), _generic_process(result, definition))
         action_count = int(game.get("action_count") or 0)
-        count_unit = "步"
+        count_unit = "个方块" if definition.key == "tetris_duel" else "步"
     if action_count == 0:
         return {
             "status": "skipped",
@@ -1749,6 +2009,11 @@ def _memory_moment(
         add({"board_recovered"}, "盘面快塞满时，一次连续合并又救出了空间。")
         add({"multi_merge"}, "有一手同时完成了多组合并。")
         add({"near_stuck"}, "盘面一度只剩很少的活动空间。")
+    elif game_key == "tetris_duel":
+        add({"tetris"}, "其中一边打出过一次四行同时消除，比分一下被拉动了。")
+        add({"combo"}, "局中接出过一段连续消行，落块节奏一直没有断。")
+        add({"top_out"}, "最后有一边的方块堆到顶，胜负在那一刻定了下来。")
+        add({"multi_line_clear"}, "我们都打出过一次两行以上的连续清理。")
 
     if descriptions:
         return "".join(descriptions)

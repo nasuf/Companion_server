@@ -123,6 +123,7 @@ NativeGameKey = Literal[
     "match3",
     "minesweeper",
     "number_merge",
+    "tetris_duel",
 ]
 NativeGameSource = Literal["client", "replay"]
 
