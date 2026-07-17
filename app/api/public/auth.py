@@ -38,7 +38,7 @@ from app.services.wechat_auth import (
     find_or_create_wechat_user,
     update_wechat_profile,
 )
-from app.services.agent_avatars import build_cached_avatar_url
+from app.services.agent_avatars import build_avatar_url
 from app.services.agent_template import ensure_default_agent_for_user
 from app.services.user_activity import UserActivityWriteError, record_user_activity
 
@@ -122,7 +122,7 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
         agent_name=agent.name if agent else None,
         agent_avatar_key=agent_avatar_key,
         agent_avatar_url=(
-            build_cached_avatar_url(agent_avatar_key)
+            build_avatar_url(agent_avatar_key)
             or (getattr(agent, "avatarUrl", None) if agent else None)
         ),
         agent_city=getattr(agent, "city", None) if agent else None,

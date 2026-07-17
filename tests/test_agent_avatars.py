@@ -1,61 +1,14 @@
 from types import SimpleNamespace
-import base64
 
 import pytest
 from fastapi import HTTPException
 
 from app.api.public import agents as agents_api
 from app.services import agent_avatars
+from app.services.agent_template import clone as agent_clone
 
 
-class _FakeResponse:
-    def __init__(self, content: bytes = b"png-bytes", content_type: str = "image/png"):
-        self.content = content
-        self.headers = {"content-type": content_type}
-
-    def raise_for_status(self) -> None:
-        return None
-
-
-class _FakeAsyncClient:
-    calls: list[str] = []
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return None
-
-    async def get(self, url: str):
-        self.calls.append(url)
-        return _FakeResponse()
-
-
-class _FakeAvatarCacheDelegate:
-    def __init__(self):
-        self.rows: dict[str, SimpleNamespace] = {}
-
-    async def find_unique(self, *, where):
-        return self.rows.get(where["key"])
-
-    async def upsert(self, *, where, data):
-        key = where["key"]
-        payload = data["update"] if key in self.rows else data["create"]
-        row = SimpleNamespace(
-            key=key,
-            gender=payload["gender"],
-            contentType=payload["contentType"],
-            imageBytes=payload["imageBytes"],
-            sourceUrl=payload["sourceUrl"],
-        )
-        self.rows[key] = row
-        return row
-
-
-def test_agent_response_uses_cached_avatar_url():
+def test_agent_response_uses_bundled_avatar_url():
     agent = SimpleNamespace(
         id="agent-id",
         name="TestBot",
@@ -67,73 +20,80 @@ def test_agent_response_uses_cached_avatar_url():
         gender="female",
         city=None,
         lifeOverview=None,
-        avatarKey="bansheng-female-01",
+        avatarKey="companion-female-01",
         avatarUrl="https://api.dicebear.com/old.png",
         createdAt="2026-01-01T00:00:00",
     )
 
     response = agents_api._agent_response(agent)
 
-    assert response.avatar_key == "bansheng-female-01"
-    assert response.avatar_url == "/agents/avatar/bansheng-female-01.png"
+    assert response.avatar_key == "companion-female-01"
+    assert response.avatar_url == "/agents/avatar/companion-female-01.png"
+
+
+def test_avatar_keys_for_gender_cover_bundled_pool():
+    male_keys = agent_avatars.avatar_keys_for_gender("male")
+    female_keys = agent_avatars.avatar_keys_for_gender("female")
+
+    assert len(male_keys) == 27
+    assert len(female_keys) == 22
+    assert all("-male-" in key for key in male_keys)
+    assert all("-female-" in key for key in female_keys)
+    assert len(agent_avatars.avatar_keys_for_gender(None)) == 49
+
+
+def test_every_avatar_key_resolves_to_a_bundled_png():
+    agent_avatars.validate_avatar_assets()
+
+    for key in agent_avatars.avatar_keys_for_gender():
+        path = agent_avatars.get_avatar_path(key)
+        assert path.name == f"{key}.png"
+        assert path.stat().st_size > 0
 
 
 @pytest.mark.asyncio
-async def test_ensure_cached_avatar_downloads_and_reuses_db_cache(monkeypatch):
-    cache = _FakeAvatarCacheDelegate()
-    monkeypatch.setattr(agent_avatars.db, "agentavatarcache", cache, raising=False)
-    monkeypatch.setattr(agent_avatars.httpx, "AsyncClient", _FakeAsyncClient)
-    _FakeAsyncClient.calls = []
+async def test_avatar_endpoint_serves_bundled_png_with_immutable_cache():
+    response = await agents_api.get_agent_avatar("companion-male-01")
 
-    first = await agent_avatars.ensure_cached_avatar("bansheng-female-01")
-    second = await agent_avatars.ensure_cached_avatar("bansheng-female-01")
-
-    assert first == second
-    assert first.image_bytes == b"png-bytes"
-    assert first.content_type == "image/png"
-    assert cache.rows["bansheng-female-01"].gender == "female"
-    assert cache.rows["bansheng-female-01"].imageBytes == base64.b64encode(b"png-bytes").decode(
-        "ascii"
-    )
-    assert len(_FakeAsyncClient.calls) == 1
+    assert response.path == agent_avatars.get_avatar_path("companion-male-01")
+    assert response.media_type == "image/png"
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
 
 
-def test_avatar_keys_for_gender():
-    assert all("-male-" in key for key in agent_avatars.avatar_keys_for_gender("male"))
-    assert all("-female-" in key for key in agent_avatars.avatar_keys_for_gender("female"))
-    assert len(agent_avatars.avatar_keys_for_gender(None)) == 12
+@pytest.mark.parametrize("key", ["../secret", "companion-male-99", "bansheng-male-01"])
+def test_avatar_path_rejects_unknown_keys(key):
+    with pytest.raises(HTTPException) as exc_info:
+        agent_avatars.get_avatar_path(key)
+
+    assert exc_info.value.status_code == 404
 
 
-def test_avatar_from_row_accepts_base64_image_bytes():
-    row = SimpleNamespace(
-        key="bansheng-female-01",
-        contentType="image/png",
-        imageBytes=base64.b64encode(b"png-bytes").decode("ascii"),
-    )
+def test_template_clone_selects_a_fresh_gender_matched_avatar(monkeypatch):
+    observed: list[str | None] = []
 
-    avatar = agent_avatars._avatar_from_row(row)
+    def fake_pick(gender: str | None):
+        observed.append(gender)
+        return agent_avatars.AgentAvatar(
+            key="companion-female-07",
+            url="/agents/avatar/companion-female-07.png",
+        )
 
-    assert avatar is not None
-    assert avatar.image_bytes == b"png-bytes"
-
-
-def test_avatar_from_row_accepts_prisma_base64_like_image_bytes():
-    class _Base64Like:
-        def decode(self):
-            return b"png-bytes"
-
-    row = SimpleNamespace(
-        key="bansheng-female-01",
-        contentType="image/png",
-        imageBytes=_Base64Like(),
+    monkeypatch.setattr(agent_clone, "pick_agent_avatar", fake_pick)
+    template = SimpleNamespace(
+        name="小伴",
+        background=None,
+        lifeOverview=None,
+        age=None,
+        occupation=None,
+        city=None,
+        gender="female",
+        mbti=None,
+        currentMbti=None,
+        values=None,
     )
 
-    avatar = agent_avatars._avatar_from_row(row)
+    payload = agent_clone._clone_persona_data(template, "user-id")
 
-    assert avatar is not None
-    assert avatar.image_bytes == b"png-bytes"
-
-
-def test_build_cached_avatar_url_rejects_path_like_keys():
-    with pytest.raises(HTTPException):
-        agent_avatars.build_cached_avatar_url("../secret")
+    assert observed == ["female"]
+    assert payload["avatarKey"] == "companion-female-07"
+    assert payload["avatarUrl"] == "/agents/avatar/companion-female-07.png"

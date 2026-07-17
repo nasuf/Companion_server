@@ -2,7 +2,8 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from prisma import Json
 
 from app.api.jwt_auth import require_user
@@ -19,10 +20,9 @@ from app.services.career import pick_random_active_career
 from app.services.character import _apply_postprocess_overrides
 from app.services.character_generation import generate_full_profile
 from app.services.agent_avatars import (
-    build_cached_avatar_url,
-    ensure_cached_avatar,
+    build_avatar_url,
+    get_avatar_path,
     pick_agent_avatar,
-    warm_avatar_pool,
 )
 from app.services.life_story import (
     activate_agent,
@@ -71,24 +71,9 @@ def _agent_response(agent, *, workspace_id: str | None = None) -> AgentResponse:
         city=getattr(agent, "city", None),
         life_overview=agent.lifeOverview,
         avatar_key=avatar_key,
-        avatar_url=build_cached_avatar_url(avatar_key) or getattr(agent, "avatarUrl", None),
+        avatar_url=build_avatar_url(avatar_key) or getattr(agent, "avatarUrl", None),
         created_at=str(agent.createdAt),
     )
-
-
-async def _warm_agent_avatar_cache(avatar_key: str | None) -> None:
-    if not avatar_key:
-        return
-    try:
-        await ensure_cached_avatar(avatar_key)
-    except Exception as exc:
-        logger.warning("[agent-avatar] warm cache failed key=%s error=%s", avatar_key, exc)
-
-
-async def warm_default_agent_avatars() -> None:
-    results = await warm_avatar_pool()
-    ok = sum(1 for value in results.values() if value)
-    logger.info("[agent-avatar] warmed %s/%s default avatars", ok, len(results))
 
 
 async def _safe_life_overview(agent) -> str | None:
@@ -391,8 +376,6 @@ async def create_agent_with_provisioning(
     # Spec §1.3：7 维 → MBTI 4 轴用大模型推导，再 §1.4 单步 LLM 生 background。
     # P0: 长生命周期初始化进入 runtime job queue, 避免进程重启后静默丢任务。
     await set_progress(agent.id, "queued", message="已进入生成队列...")
-    await _warm_agent_avatar_cache(getattr(agent, "avatarKey", None))
-
     await _enqueue_agent_initialization(
         agent_id=agent.id,
         user_id=user_id,
@@ -424,10 +407,9 @@ async def create_agent(
 
 @router.get("/avatar/{avatar_key}.png")
 async def get_agent_avatar(avatar_key: str):
-    avatar = await ensure_cached_avatar(avatar_key)
-    return Response(
-        content=avatar.image_bytes,
-        media_type=avatar.content_type,
+    return FileResponse(
+        path=get_avatar_path(avatar_key),
+        media_type="image/png",
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 

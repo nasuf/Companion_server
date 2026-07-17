@@ -152,19 +152,6 @@ model AiAgent {
   @@map("ai_agents")
 }
 
-model AgentAvatarCache {
-  key         String   @id
-  gender      String?
-  contentType String   @map("content_type")
-  imageBytes  Bytes    @map("image_bytes")
-  sourceUrl   String   @map("source_url")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  @@index([gender])
-  @@map("agent_avatar_cache")
-}
-
 model ChatWorkspace {
   id              String              @id @default(uuid())
   userId          String              @map("user_id")
