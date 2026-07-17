@@ -12,16 +12,12 @@
 ```bash
 # 私密凭据
 gh secret set DASHSCOPE_API_KEY --repo nasuf/Companion_server
-gh secret set QIANFAN_API_KEY --repo nasuf/Companion_server
 gh secret set ARK_API_KEY --repo nasuf/Companion_server
 gh secret set MINIMAX_API_KEY --repo nasuf/Companion_server
 
 # 公共 API 地址
 gh variable set DASHSCOPE_CHARACTER_BASE_URL \
   --body 'https://WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' \
-  --repo nasuf/Companion_server
-gh variable set QIANFAN_BASE_URL \
-  --body 'https://qianfan.baidubce.com/v2' \
   --repo nasuf/Companion_server
 gh variable set ARK_BASE_URL \
   --body 'https://ark.cn-beijing.volces.com/api/v3' \
@@ -51,26 +47,7 @@ gh variable set MINIMAX_BASE_URL \
 
 官方文档：<https://help.aliyun.com/zh/model-studio/role-play>
 
-## 3. ERNIE Character（百度千帆）
-
-百度已经退役预置的 `ERNIE-Character-8K`（2026-06-09）以及更早的 Fiction
-版本，所以新账号无法按截图名称重新开通。迁移会把该模型作为“已禁用”历史行
-显示，防止管理员误选。
-
-如果千帆账号内仍有可用的自定义角色模型/服务接入点：
-
-1. 在千帆 ModelBuilder 创建 API Key，并保存为 GitHub Secret
-   `QIANFAN_API_KEY`。
-2. 保持 `QIANFAN_BASE_URL=https://qianfan.baidubce.com/v2`，或者填账号文档指定
-   的 OpenAI-compatible 地址。
-3. 在「模型库」新增一行：Provider 选“百度千帆”，Identifier 填 API 实际接受
-   的模型或接入点 ID，启用后保存。
-4. 在「模型配置」选择该平台与模型。
-
-官方文档：<https://cloud.baidu.com/doc/qianfan-docs/s/qm8qxemze>、
-<https://cloud.baidu.com/doc/qianfan/s/zmh4stou3>
-
-## 4. 豆包 Character / 猫箱（火山方舟）
+## 3. 豆包 Character / 猫箱（火山方舟）
 
 “猫箱”是产品，不是稳定的公共 API model id；服务器接入的是火山方舟中账号
 实际可用的豆包角色模型或推理接入点。
@@ -86,7 +63,7 @@ gh variable set MINIMAX_BASE_URL \
 官方产品与 API 文档：<https://www.volcengine.com/product/doubao>、
 <https://api.volcengine.com/api-docs/view/overview?serviceCode=ark>
 
-## 5. MiniMax M2-her（星野技术路线）
+## 4. MiniMax M2-her（星野技术路线）
 
 “星野”是产品；MiniMax 当前公开的角色扮演 API 模型是 `M2-her`。
 
@@ -99,7 +76,7 @@ gh variable set MINIMAX_BASE_URL \
 官方文档：<https://platform.minimaxi.com/docs/guides/text-chat>、
 <https://platform.minimaxi.com/docs/api-reference/api-overview>
 
-## 6. 上线与验收顺序
+## 5. 上线与验收顺序
 
 1. 先配置所需 Secret/Variable，再触发或等待 Server workflow 部署。
 2. 打开 Web 后台模型配置，确认对应供应商显示“凭据已配置”。

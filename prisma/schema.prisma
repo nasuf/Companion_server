@@ -1654,7 +1654,7 @@ model AgentConfigOverride {
 //
 // 设计:
 //   - identifier 是 SDK 用的 model id; 同一 provider 内唯一, 跨 provider 可重名
-//   - provider 派生 local (ollama) / remote (dashscope/deepseek/qianfan/ark/minimax) 分组
+//   - provider 派生 local (ollama) / remote (dashscope/deepseek/ark/minimax) 分组
 //   - enabled=false 软隐藏, 不影响已配置 (现有 system_config/agent override 仍指向它)
 //   - 价格 nullable + Decimal(10,4) 元/1M tokens; 本地默认 0
 //   - contextWindow / notes 留 hook 给未来 prompt budget / admin 备注
@@ -1664,7 +1664,7 @@ model ModelRegistry {
   id                   String   @id @default(uuid())
   identifier           String
   displayName          String?  @map("display_name")
-  provider             String   // ollama | dashscope | deepseek | qianfan | ark | minimax
+  provider             String   // ollama | dashscope | deepseek | ark | minimax
   enabled              Boolean  @default(true)
   contextWindow        Int?     @map("context_window")
   // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是

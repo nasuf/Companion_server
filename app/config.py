@@ -46,10 +46,6 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
 
-    # Baidu Qianfan ModelBuilder (OpenAI-compatible)
-    qianfan_api_key: str = ""
-    qianfan_base_url: str = "https://qianfan.baidubce.com/v2"
-
     # Volcengine Ark / Doubao vision (OpenAI-compatible chat completions)
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"

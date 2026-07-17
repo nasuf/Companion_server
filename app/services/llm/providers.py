@@ -80,18 +80,6 @@ _PROVIDERS: dict[str, ProviderDefinition] = {
         preferred_chat_models=("deepseek-v4-pro", "deepseek-v4-flash"),
         preferred_small_models=("deepseek-v4-flash", "deepseek-v4-pro"),
     ),
-    "qianfan": ProviderDefinition(
-        id="qianfan",
-        display_name="百度千帆",
-        description="百度千帆 ModelBuilder OpenAI-compatible API",
-        driver="openai",
-        local=False,
-        api_key_setting="qianfan_api_key",
-        api_key_env="QIANFAN_API_KEY",
-        base_url_setting="qianfan_base_url",
-        base_url_env="QIANFAN_BASE_URL",
-        # ERNIE Character 预置服务已退役；账号自定义接入点由模型库动态注册。
-    ),
     "ark": ProviderDefinition(
         id="ark",
         display_name="火山方舟 / 豆包",
