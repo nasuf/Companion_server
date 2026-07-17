@@ -4,7 +4,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.api.admin.users import _serialize_wechat_identity
+from app.api.admin.users import (
+    _serialize_admin_user,
+    _serialize_phone_identity,
+    _serialize_wechat_identity,
+)
 from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
 
 
@@ -56,6 +60,78 @@ def test_serialize_wechat_identity_exposes_admin_profile_fields():
         "created_at": "2026-05-20 10:00:00+00:00",
         "updated_at": "2026-06-01 08:31:00+00:00",
     }
+
+
+def test_serialize_phone_identity_exposes_admin_phone_fields():
+    identity = SimpleNamespace(
+        provider="phone",
+        providerAccountId="13812345678",
+        rawProfile={"phone": "13812345678"},
+        lastLoginAt=datetime(2026, 6, 2, 8, 30, tzinfo=UTC),
+        createdAt=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
+        updatedAt=datetime(2026, 6, 2, 8, 31, tzinfo=UTC),
+    )
+
+    payload = _serialize_phone_identity(identity)
+
+    assert payload == {
+        "provider": "phone",
+        "provider_account_id": "13812345678",
+        "phone": "13812345678",
+        "phone_masked": "138****5678",
+        "last_login_at": "2026-06-02 08:30:00+00:00",
+        "created_at": "2026-05-21 10:00:00+00:00",
+        "updated_at": "2026-06-02 08:31:00+00:00",
+    }
+
+
+def test_serialize_admin_user_includes_login_methods_and_contact_fields():
+    user = SimpleNamespace(
+        id="user-1",
+        username="alice",
+        email="alice@example.com",
+        hashedPassword="hashed",
+        role="user",
+        createdAt=datetime(2026, 6, 1, tzinfo=UTC),
+        status="active",
+        archivedAt=None,
+        signupSource="password_web",
+        agents=[SimpleNamespace(id="agent-1")],
+    )
+    identities = [
+        SimpleNamespace(
+            provider="phone",
+            providerAccountId="13812345678",
+            rawProfile={"phone": "13812345678"},
+            lastLoginAt=datetime(2026, 6, 2, 8, 30, tzinfo=UTC),
+            createdAt=datetime(2026, 5, 21, 10, 0, tzinfo=UTC),
+            updatedAt=datetime(2026, 6, 2, 8, 31, tzinfo=UTC),
+        )
+    ]
+
+    payload = _serialize_admin_user(user, identities)
+
+    assert payload["email"] == "alice@example.com"
+    assert payload["phone"]["phone"] == "13812345678"
+    assert payload["phone"]["phone_masked"] == "138****5678"
+    assert payload["auth_methods"] == [
+        {
+            "type": "password",
+            "label": "邮箱密码",
+            "identifier": "alice@example.com",
+            "email": "alice@example.com",
+            "username": "alice",
+            "signup_source": "password_web",
+        },
+        {
+            "type": "phone",
+            "label": "手机号",
+            "identifier": "138****5678",
+            "phone": "13812345678",
+            "phone_masked": "138****5678",
+            "last_login_at": "2026-06-02 08:30:00+00:00",
+        },
+    ]
 
 
 def _fake_user_row(user_id: str = "user-1", username: str = "alice"):

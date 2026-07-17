@@ -11,6 +11,7 @@ from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
 
 _ALLOWED_ROLES = {"user", "admin"}
 _WECHAT_PROVIDER = "wechat"
+_PHONE_PROVIDER = "phone"
 
 
 class UpdateUserRoleRequest(BaseModel):
@@ -43,10 +44,15 @@ def _serialize_wechat_identity(identity) -> dict | None:
     privilege = profile.get("privilege")
     return {
         "provider": getattr(identity, "provider", _WECHAT_PROVIDER),
-        "provider_account_id": _text_or_none(getattr(identity, "providerAccountId", None)),
-        "openid": _text_or_none(getattr(identity, "openid", None)) or _text_or_none(profile.get("openid")),
-        "unionid": _text_or_none(getattr(identity, "unionid", None)) or _text_or_none(profile.get("unionid")),
-        "scope": _text_or_none(getattr(identity, "scope", None)) or _text_or_none(profile.get("scope")),
+        "provider_account_id": _text_or_none(
+            getattr(identity, "providerAccountId", None)
+        ),
+        "openid": _text_or_none(getattr(identity, "openid", None))
+        or _text_or_none(profile.get("openid")),
+        "unionid": _text_or_none(getattr(identity, "unionid", None))
+        or _text_or_none(profile.get("unionid")),
+        "scope": _text_or_none(getattr(identity, "scope", None))
+        or _text_or_none(profile.get("scope")),
         "nickname": _text_or_none(profile.get("nickname")),
         "avatar_url": _text_or_none(profile.get("headimgurl")),
         "sex": profile.get("sex"),
@@ -54,25 +60,169 @@ def _serialize_wechat_identity(identity) -> dict | None:
         "city": _text_or_none(profile.get("city")),
         "country": _text_or_none(profile.get("country")),
         "privilege": privilege if isinstance(privilege, list) else [],
-        "last_login_at": str(identity.lastLoginAt) if getattr(identity, "lastLoginAt", None) else None,
-        "created_at": str(identity.createdAt) if getattr(identity, "createdAt", None) else None,
-        "updated_at": str(identity.updatedAt) if getattr(identity, "updatedAt", None) else None,
+        "last_login_at": str(identity.lastLoginAt)
+        if getattr(identity, "lastLoginAt", None)
+        else None,
+        "created_at": str(identity.createdAt)
+        if getattr(identity, "createdAt", None)
+        else None,
+        "updated_at": str(identity.updatedAt)
+        if getattr(identity, "updatedAt", None)
+        else None,
     }
 
 
-async def _wechat_identities_by_user(user_ids: list[str]) -> dict[str, object]:
+def _serialize_phone_identity(identity) -> dict | None:
+    if not identity:
+        return None
+    profile = getattr(identity, "rawProfile", None)
+    if not isinstance(profile, dict):
+        profile = {}
+    phone = (
+        _text_or_none(getattr(identity, "providerAccountId", None))
+        or _text_or_none(profile.get("phone"))
+    )
+    if not phone:
+        return None
+    return {
+        "provider": getattr(identity, "provider", _PHONE_PROVIDER),
+        "provider_account_id": _text_or_none(
+            getattr(identity, "providerAccountId", None)
+        ),
+        "phone": phone,
+        "phone_masked": _mask_phone(phone),
+        "last_login_at": str(identity.lastLoginAt)
+        if getattr(identity, "lastLoginAt", None)
+        else None,
+        "created_at": str(identity.createdAt)
+        if getattr(identity, "createdAt", None)
+        else None,
+        "updated_at": str(identity.updatedAt)
+        if getattr(identity, "updatedAt", None)
+        else None,
+    }
+
+
+def _mask_phone(phone: str | None) -> str | None:
+    if not phone or len(phone) != 11:
+        return phone
+    return f"{phone[:3]}****{phone[-4:]}"
+
+
+def _serialize_password_method(user) -> dict | None:
+    if not getattr(user, "hashedPassword", None):
+        return None
+    email = _text_or_none(getattr(user, "email", None))
+    username = _text_or_none(getattr(user, "username", None))
+    return {
+        "type": "password",
+        "label": "邮箱密码" if email else "账号密码",
+        "identifier": email or username,
+        "email": email,
+        "username": username,
+        "signup_source": _text_or_none(getattr(user, "signupSource", None)),
+    }
+
+
+def _serialize_auth_methods(user, identities: list[object]) -> list[dict]:
+    methods: list[dict] = []
+    password = _serialize_password_method(user)
+    if password:
+        methods.append(password)
+
+    wechat_identity = _first_identity(identities, _WECHAT_PROVIDER)
+    wechat = _serialize_wechat_identity(wechat_identity)
+    if wechat:
+        methods.append(
+            {
+                "type": "wechat",
+                "label": "微信",
+                "identifier": wechat.get("nickname")
+                or wechat.get("openid")
+                or wechat.get("provider_account_id"),
+                "provider_account_id": wechat.get("provider_account_id"),
+                "openid": wechat.get("openid"),
+                "unionid": wechat.get("unionid"),
+                "nickname": wechat.get("nickname"),
+                "avatar_url": wechat.get("avatar_url"),
+                "last_login_at": wechat.get("last_login_at"),
+            }
+        )
+
+    phone_identity = _first_identity(identities, _PHONE_PROVIDER)
+    phone = _serialize_phone_identity(phone_identity)
+    if phone:
+        methods.append(
+            {
+                "type": "phone",
+                "label": "手机号",
+                "identifier": phone.get("phone_masked") or phone.get("phone"),
+                "phone": phone.get("phone"),
+                "phone_masked": phone.get("phone_masked"),
+                "last_login_at": phone.get("last_login_at"),
+            }
+        )
+    return methods
+
+
+def _first_identity(identities: list[object], provider: str):
+    for identity in identities:
+        if getattr(identity, "provider", None) == provider:
+            return identity
+    return None
+
+
+async def _identities_by_user(user_ids: list[str]) -> dict[str, list[object]]:
     if not user_ids:
         return {}
     identities = await db.authidentity.find_many(
-        where={"userId": {"in": user_ids}, "provider": _WECHAT_PROVIDER},
+        where={
+            "userId": {"in": user_ids},
+            "provider": {"in": [_WECHAT_PROVIDER, _PHONE_PROVIDER]},
+        },
         order={"updatedAt": "desc"},
     )
-    by_user: dict[str, object] = {}
+    by_user: dict[str, list[object]] = {}
     for identity in identities:
         user_id = getattr(identity, "userId", None)
-        if user_id and user_id not in by_user:
-            by_user[user_id] = identity
+        if user_id:
+            by_user.setdefault(user_id, []).append(identity)
     return by_user
+
+
+def _serialize_admin_user(
+    user,
+    identities: list[object],
+    *,
+    agent_count: int | None = None,
+) -> dict:
+    resolved_agent_count = (
+        agent_count
+        if agent_count is not None
+        else len(user.agents)
+        if getattr(user, "agents", None)
+        else 0
+    )
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": getattr(user, "email", None),
+        "role": user.role,
+        "created_at": str(user.createdAt),
+        "status": getattr(user, "status", "active"),
+        "archived_at": str(user.archivedAt)
+        if getattr(user, "archivedAt", None)
+        else None,
+        "signup_source": getattr(user, "signupSource", None),
+        "agent_count": resolved_agent_count,
+        "wechat": _serialize_wechat_identity(
+            _first_identity(identities, _WECHAT_PROVIDER)
+        ),
+        "phone": _serialize_phone_identity(
+            _first_identity(identities, _PHONE_PROVIDER)
+        ),
+        "auth_methods": _serialize_auth_methods(user, identities),
+    }
 
 
 @router.get("/memory-overview")
@@ -162,20 +312,15 @@ async def list_users(
         skip=offset,
         include={"agents": True},
     )
-    wechat_by_user = await _wechat_identities_by_user([u.id for u in users])
+    identities_by_user = await _identities_by_user([u.id for u in users])
 
     return {
         "users": [
-            {
-                "id": u.id,
-                "username": u.username,
-                "role": u.role,
-                "created_at": str(u.createdAt),
-                "status": getattr(u, "status", "active"),
-                "archived_at": str(u.archivedAt) if getattr(u, "archivedAt", None) else None,
-                "agent_count": len(u.agents) if u.agents else 0,
-                "wechat": _serialize_wechat_identity(wechat_by_user.get(u.id)),
-            }
+            _serialize_admin_user(
+                u,
+                identities_by_user.get(u.id, []),
+                agent_count=len(u.agents) if u.agents else 0,
+            )
             for u in users
         ],
         "total": total,
@@ -190,8 +335,11 @@ async def get_user_detail(
     user = await db.user.find_unique(where={"id": user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    wechat_identity = await db.authidentity.find_first(
-        where={"userId": user_id, "provider": _WECHAT_PROVIDER},
+    identities = await db.authidentity.find_many(
+        where={
+            "userId": user_id,
+            "provider": {"in": [_WECHAT_PROVIDER, _PHONE_PROVIDER]},
+        },
         order={"updatedAt": "desc"},
     )
 
@@ -252,15 +400,7 @@ async def get_user_detail(
         })
 
     return {
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "role": user.role,
-            "created_at": str(user.createdAt),
-            "status": getattr(user, "status", "active"),
-            "archived_at": str(user.archivedAt) if getattr(user, "archivedAt", None) else None,
-            "wechat": _serialize_wechat_identity(wechat_identity),
-        },
+        "user": _serialize_admin_user(user, identities, agent_count=len(agents)),
         "workspaces": [
             {
                 "id": w.id,
