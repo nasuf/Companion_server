@@ -75,6 +75,10 @@ services:
       args:
         DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://mirrors.tencentyun.com/debian}"
         DEBIAN_SECURITY_MIRROR: "${DEBIAN_SECURITY_MIRROR:-https://mirrors.tencentyun.com/debian-security}"
+        # 内网镜像偶发坏文件 (2026-07-18 libfontconfig1/libasyncns0 持续 SSL EOF);
+        # 降级镜像必须选国内其他厂商 — deb.debian.org 跨境太慢会撞 ssh 超时.
+        DEBIAN_FALLBACK_MIRROR: "${DEBIAN_FALLBACK_MIRROR:-https://mirrors.aliyun.com/debian}"
+        DEBIAN_SECURITY_FALLBACK_MIRROR: "${DEBIAN_SECURITY_FALLBACK_MIRROR:-https://mirrors.aliyun.com/debian-security}"
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://mirrors.cloud.tencent.com/pypi/simple}"
     container_name: companion-server
     restart: unless-stopped

@@ -2,6 +2,8 @@ FROM python:3.13-slim
 
 ARG DEBIAN_MIRROR=""
 ARG DEBIAN_SECURITY_MIRROR=""
+ARG DEBIAN_FALLBACK_MIRROR=""
+ARG DEBIAN_SECURITY_FALLBACK_MIRROR=""
 ARG PIP_INDEX_URL=""
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,9 +14,8 @@ WORKDIR /app
 
 # The configured mirror sometimes serves broken files (persistent SSL
 # "unexpected eof" on specific .debs), so retry per file, and if the install
-# still fails, fall back to the official deb.debian.org sources. Already
-# fetched packages stay cached, so the fallback only re-downloads the
-# missing ones.
+# still fails, switch to the fallback mirror (deb.debian.org when unset —
+# too slow from a China VPS, so deploys pass a domestic fallback).
 RUN set -eu; \
     cp /etc/apt/sources.list.d/debian.sources /tmp/debian.sources.orig; \
     if [ -n "$DEBIAN_MIRROR" ]; then \
@@ -33,8 +34,14 @@ RUN set -eu; \
             ffmpeg; \
     }; \
     if ! install_deps; then \
-        echo "mirror install failed; falling back to deb.debian.org" >&2; \
+        echo "primary mirror failed; switching to fallback sources" >&2; \
         cp /tmp/debian.sources.orig /etc/apt/sources.list.d/debian.sources; \
+        if [ -n "$DEBIAN_FALLBACK_MIRROR" ]; then \
+            sed -i "s|http://deb.debian.org/debian|$DEBIAN_FALLBACK_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
+        fi; \
+        if [ -n "$DEBIAN_SECURITY_FALLBACK_MIRROR" ]; then \
+            sed -i "s|http://deb.debian.org/debian-security|$DEBIAN_SECURITY_FALLBACK_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
+        fi; \
         install_deps; \
     fi; \
     rm -rf /var/lib/apt/lists/* /tmp/debian.sources.orig

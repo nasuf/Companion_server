@@ -41,7 +41,9 @@ jobs:
           port: ${{ vars.VPS_PORT }}
           # 默认 10m 不够: docker build 拉 Prisma CLI 二进制偶发缓慢,
           # 成功案例也要 8m+, 超时会把部署杀在半路 (2026-07-08 生产复现).
-          command_timeout: 30m
+          # 45m: apt 镜像降级重装 217MB 系统依赖需要额外余量 (2026-07-18 复现
+          # 30m 把降级安装杀在半路).
+          command_timeout: 45m
           script: |
             set -euo pipefail
 
