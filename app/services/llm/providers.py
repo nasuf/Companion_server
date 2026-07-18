@@ -90,7 +90,8 @@ _PROVIDERS: dict[str, ProviderDefinition] = {
         api_key_env="ARK_API_KEY",
         base_url_setting="ark_base_url",
         base_url_env="ARK_BASE_URL",
-        # Character 的 model/endpoint id 以账号控制台实际值为准。
+        preferred_chat_models=("doubao-seed-character-260628",),
+        # 自定义推理接入点仍可在模型库按账号控制台实际值注册。
     ),
     "minimax": ProviderDefinition(
         id="minimax",

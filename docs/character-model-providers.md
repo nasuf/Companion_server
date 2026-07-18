@@ -12,12 +12,20 @@
 ```bash
 # 私密凭据
 gh secret set DASHSCOPE_API_KEY --repo nasuf/Companion_server
+gh secret set DEEPSEEK_API_KEY --repo nasuf/Companion_server
 gh secret set ARK_API_KEY --repo nasuf/Companion_server
 gh secret set MINIMAX_API_KEY --repo nasuf/Companion_server
 
 # 公共 API 地址
+gh variable set DASHSCOPE_BASE_URL \
+  --body 'https://dashscope.aliyuncs.com/compatible-mode/v1' \
+  --repo nasuf/Companion_server
+# 可选：仅当百炼 workspace 控制台提供独立兼容地址时设置
 gh variable set DASHSCOPE_CHARACTER_BASE_URL \
   --body 'https://WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1' \
+  --repo nasuf/Companion_server
+gh variable set DEEPSEEK_BASE_URL \
+  --body 'https://api.deepseek.com' \
   --repo nasuf/Companion_server
 gh variable set ARK_BASE_URL \
   --body 'https://ark.cn-beijing.volces.com/api/v3' \
@@ -36,8 +44,9 @@ gh variable set MINIMAX_BASE_URL \
 1. 在阿里云百炼开通 Model Studio，创建或选择 workspace，并创建 API Key。
 2. 在角色扮演模型页面确认账号可以调用目标模型。
 3. 将 API Key 保存为 GitHub Secret `DASHSCOPE_API_KEY`。
-4. 将 workspace 专属 OpenAI-compatible 地址保存为 GitHub Variable
-   `DASHSCOPE_CHARACTER_BASE_URL`。普通千问仍使用 `DASHSCOPE_BASE_URL`。
+4. 当前账号可直接复用 `DASHSCOPE_BASE_URL`。只有 workspace 控制台明确提供独立
+   OpenAI-compatible 地址时，才保存可选变量 `DASHSCOPE_CHARACTER_BASE_URL`；
+   普通千问始终使用 `DASHSCOPE_BASE_URL`。
 5. 部署后，模型库会自动出现：
    - `qwen-plus-character`
    - `qwen-flash-character`
@@ -49,16 +58,18 @@ gh variable set MINIMAX_BASE_URL \
 
 ## 3. 豆包 Character / 猫箱（火山方舟）
 
-“猫箱”是产品，不是稳定的公共 API model id；服务器接入的是火山方舟中账号
-实际可用的豆包角色模型或推理接入点。
+“猫箱”是产品；服务器接入火山方舟公开的豆包角色模型或账号自建推理接入点。
 
 1. 在火山方舟控制台开通模型服务并创建 API Key。
-2. 开通 `Doubao-Seed-Character`，按控制台创建推理接入点；复制控制台展示的
-   model id 或 endpoint id。不同账号/区域的 ID 可能不同，代码不预置猜测值。
+2. 开通 `Doubao-Seed-Character`。模型库会自动预置当前版本
+   `doubao-seed-character-260628`；如果账号使用自建推理接入点，也可另外注册
+   控制台展示的 `ep-...` ID。
 3. 将 API Key 保存为 GitHub Secret `ARK_API_KEY`。
-4. 在「模型库」新增一行：Provider 选“火山方舟 / 豆包”，Identifier 原样粘贴
-   上一步 ID，填写控制台对应上下文长度和价格，启用后保存。
-5. 在「模型配置」把主回复平台和模型切到该行。
+4. 部署后在「模型库」确认模型已出现。预置元数据为 131072 上下文，输入
+   ¥0.8/百万 tokens、输出 ¥2/百万 tokens、缓存输入 ¥0.16/百万 tokens；缓存
+   存储 ¥0.017/百万 tokens/小时会写在备注中，不进入 token 调用成本估算。
+5. 在「模型配置」把主回复平台和模型切到该行。若调用返回 `ModelNotOpen`，需先
+   回到火山方舟“开通管理”完成模型服务开通。
 
 官方产品与 API 文档：<https://www.volcengine.com/product/doubao>、
 <https://api.volcengine.com/api-docs/view/overview?serviceCode=ark>
@@ -71,10 +82,12 @@ gh variable set MINIMAX_BASE_URL \
 2. 将 API Key 保存为 GitHub Secret `MINIMAX_API_KEY`。
 3. 保持 `MINIMAX_BASE_URL=https://api.minimaxi.com/v1`。
 4. 部署后模型库会自动出现并启用 `M2-her`；在「模型配置」选择 MiniMax 与
-   `M2-her`。该模型按官方建议使用 temperature `1.0`。
+   `M2-her`。模型库预置 65536 上下文，输入 ¥2.1/百万 tokens、输出
+   ¥8.4/百万 tokens；官方未提供提示缓存价格。该模型按官方建议使用
+   temperature `1.0`，最大输出 2048 tokens。
 
 官方文档：<https://platform.minimaxi.com/docs/guides/text-chat>、
-<https://platform.minimaxi.com/docs/api-reference/api-overview>
+<https://platform.minimaxi.com/docs/guides/pricing-paygo>
 
 ## 5. 上线与验收顺序
 

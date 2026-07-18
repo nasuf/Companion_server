@@ -76,7 +76,10 @@ def test_deepseek_chat_provider_uses_direct_openai_compatible_endpoint(monkeypat
 @pytest.mark.parametrize(
     ("provider", "key_setting", "base_setting", "base_url", "model_name"),
     [
-        ("ark", "ark_api_key", "ark_base_url", "https://ark.test/api/v3", "ep-character"),
+        (
+            "ark", "ark_api_key", "ark_base_url", "https://ark.test/api/v3",
+            "doubao-seed-character-260628",
+        ),
         ("minimax", "minimax_api_key", "minimax_base_url", "https://minimax.test/v1", "M2-her"),
     ],
 )
@@ -119,12 +122,14 @@ def test_provider_options_are_dynamic_and_secret_safe(monkeypatch):
 
     options = public_provider_options()
     minimax = next(item for item in options if item["id"] == "minimax")
+    ark = next(item for item in options if item["id"] == "ark")
 
     assert {item["id"] for item in options} == {
         "ollama", "dashscope", "deepseek", "ark", "minimax",
     }
     assert minimax["configured"] is True
     assert minimax["credential_env"] == "MINIMAX_API_KEY"
+    assert ark["preferred_chat_models"] == ["doubao-seed-character-260628"]
     assert "super-secret" not in repr(options)
 
 
