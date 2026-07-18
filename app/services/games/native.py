@@ -143,36 +143,66 @@ async def create_session(
     if definition is None:
         raise ValueError("unsupported_game")
     difficulty = "normal"
-    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    agent, user_player, owned_context = await asyncio.gather(
+        db.aiagent.find_unique(where={"id": agent_id}),
+        sud.build_user_player(user_id),
+        sud._resolve_owned_context(
+            user_id=user_id,
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+        ),
+    )
     if not agent or getattr(agent, "userId", None) != user_id:
         raise ValueError("agent_not_found")
-    workspace_id, conversation_id = await sud._resolve_owned_context(
-        user_id=user_id,
-        agent_id=agent_id,
-        workspace_id=workspace_id,
-        conversation_id=conversation_id,
-    )
+    workspace_id, conversation_id = owned_context
 
     session_id = str(uuid.uuid4())
+    event_id = str(uuid.uuid4())
     room_id = f"{game_key}-{session_id[:8]}"
-    user_player = await sud.build_user_player(user_id)
     ai_player = await sud.build_ai_player(agent_id, difficulty, agent=agent)
     result = _empty_result(difficulty, definition)
+    session_created_payload = {
+        "game_key": game_key,
+        "game_title": definition.title,
+        "difficulty": difficulty,
+        "play_style": "natural_companion",
+        **(
+            {"board_size": GOMOKU_BOARD_SIZE}
+            if game_key == GOMOKU_GAME_KEY
+            else {}
+        ),
+    }
 
-    await db.execute_raw(
+    rows = await db.query_raw(
         """
-        INSERT INTO game_sessions (
-            id, provider, game_key, status, user_id, agent_id, workspace_id,
-            conversation_id, mg_id, room_id, play_mode, difficulty, ai_level,
-            sdk_enabled, sud_code, sud_code_expires_at, user_player, ai_player,
-            companion_reply, result
+        WITH created_session AS (
+            INSERT INTO game_sessions (
+                id, provider, game_key, status, user_id, agent_id, workspace_id,
+                conversation_id, mg_id, room_id, play_mode, difficulty, ai_level,
+                sdk_enabled, sud_code, sud_code_expires_at, user_player, ai_player,
+                companion_reply, result
+            )
+            VALUES (
+                $1, 'native', $2, 'created', $3, $4, $5,
+                $6, '', $7, $8, $9, $10,
+                FALSE, NULL, NULL, $11::jsonb, $12::jsonb,
+                $13, $14::jsonb
+            )
+            RETURNING *
+        ), created_event AS (
+            INSERT INTO game_events (
+                id, session_id, client_event_id, event_type, state, source,
+                payload, companion_reply
+            )
+            SELECT $15, id, NULL, 'session_created', 'created', 'server',
+                   $16::jsonb, NULL
+            FROM created_session
+            RETURNING id
         )
-        VALUES (
-            $1, 'native', $2, 'created', $3, $4, $5,
-            $6, '', $7, $8, $9, $10,
-            FALSE, NULL, NULL, $11::jsonb, $12::jsonb,
-            $13, $14::jsonb
-        )
+        SELECT created_session.*
+        FROM created_session
+        CROSS JOIN created_event
         """,
         session_id,
         game_key,
@@ -188,24 +218,12 @@ async def create_session(
         ai_player.model_dump_json(),
         None,
         _json(result),
+        event_id,
+        _json(session_created_payload),
     )
-    await sud._append_event(
-        session_id=session_id,
-        event_type="session_created",
-        state="created",
-        payload={
-            "game_key": game_key,
-            "game_title": definition.title,
-            "difficulty": difficulty,
-            "play_style": "natural_companion",
-            **(
-                {"board_size": GOMOKU_BOARD_SIZE} if game_key == GOMOKU_GAME_KEY else {}
-            ),
-        },
-        source="server",
-        companion_reply=None,
-    )
-    return await get_session(session_id, user_id=user_id)
+    if not rows:
+        raise RuntimeError("native game session insert returned no row")
+    return _as_native_session(sud._row_to_session(rows[0]))
 
 
 async def list_sessions(
@@ -496,7 +514,7 @@ async def handle_event(
             if event_type in {"game_finished", "game_aborted"}:
                 result = _with_pending_memory_sync(result)
 
-            await _update_session(
+            updated = await _update_session(
                 session_id=session.id,
                 status=status,
                 started_at=started_at,
@@ -516,27 +534,20 @@ async def handle_event(
                 client_event_id=client_event_id,
                 database=tx,
             )
-            updated = await get_session(
-                session.id,
-                user_id=user_id,
-                database=tx,
-            )
         if not inserted:
             return updated, stored_reply, event_id, True
-        await sud._persist_game_status_to_chat_if_needed(
-            previous,
-            updated,
-            event_type,
-            state,
-            event_payload,
-        )
-        if event_type in {"game_finished", "game_aborted"}:
-            await sud._persist_reply_to_chat_if_needed(
-                updated,
-                event_type,
-                state,
-                reply,
+        if event_type in {"game_started", "game_finished", "game_aborted"}:
+            fire_background(
+                _persist_chat_side_effects(
+                    previous,
+                    updated,
+                    event_type,
+                    state,
+                    event_payload,
+                    reply,
+                )
             )
+        if event_type in {"game_finished", "game_aborted"}:
             # Memory embedding availability must not hold the game result UI
             # hostage. The pending marker lives in game_sessions, so the
             # scheduler can recover the shared memory even after a restart.
@@ -559,33 +570,84 @@ async def _ensure_idempotent_side_effects(
     }
     if event_type == "game_started" and session.status == "playing":
         previous = session.model_copy(update={"status": "created"})
-        await sud._persist_game_status_to_chat_if_needed(
-            previous,
-            session,
-            event_type,
-            state,
-            event_payload,
+        fire_background(
+            _persist_chat_side_effects(
+                previous,
+                session,
+                event_type,
+                state,
+                event_payload,
+                reply,
+            )
         )
     elif event_type in {"game_finished", "game_aborted"} and (
         session.status in _TERMINAL_STATUSES
     ):
         previous = session.model_copy(update={"status": "playing"})
-        await sud._persist_game_status_to_chat_if_needed(
-            previous,
-            session,
-            event_type,
-            state,
-            event_payload,
-        )
-        await sud._persist_reply_to_chat_if_needed(
-            session,
-            event_type,
-            state,
-            reply,
+        fire_background(
+            _persist_chat_side_effects(
+                previous,
+                session,
+                event_type,
+                state,
+                event_payload,
+                reply,
+            )
         )
         memory_sync = _loads(_loads(session.result, {}).get("memory_sync"), {})
         if memory_sync.get("status") not in {"stored", "deduplicated", "skipped"}:
             fire_background(sync_session_memory(session.id))
+
+
+async def _persist_chat_side_effects(
+    previous: NativeSessionResponse,
+    updated: NativeSessionResponse,
+    event_type: str,
+    state: str | None,
+    payload: dict[str, Any],
+    reply: str | None,
+) -> None:
+    """Persist chat projections without extending the game API response path."""
+
+    for attempt in range(3):
+        try:
+            await sud._persist_game_status_to_chat_if_needed(
+                previous,
+                updated,
+                event_type,
+                state,
+                payload,
+            )
+            break
+        except Exception:
+            if attempt == 2:
+                logger.exception(
+                    "Failed to persist native game status session=%s event=%s",
+                    updated.id,
+                    event_type,
+                )
+            else:
+                await asyncio.sleep(0.25 * (attempt + 1))
+    if event_type not in {"game_finished", "game_aborted"}:
+        return
+    for attempt in range(3):
+        try:
+            await sud._persist_reply_to_chat_if_needed(
+                updated,
+                event_type,
+                state,
+                reply,
+            )
+            break
+        except Exception:
+            if attempt == 2:
+                logger.exception(
+                    "Failed to persist native game reply session=%s event=%s",
+                    updated.id,
+                    event_type,
+                )
+            else:
+                await asyncio.sleep(0.25 * (attempt + 1))
 
 
 def _as_native_session(session: SudSessionResponse) -> NativeSessionResponse:
@@ -808,6 +870,94 @@ async def retry_pending_memory_sync(*, limit: int = 10) -> int:
     return len(rows)
 
 
+async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
+    """Rebuild missing native-game chat projections from durable sessions."""
+
+    rows = await db.query_raw(
+        _with_supported_games(
+            """
+        SELECT gs.*
+        FROM game_sessions gs
+        WHERE gs.provider = 'native'
+          AND gs.game_key IN ({supported_game_keys})
+          AND gs.conversation_id IS NOT NULL
+          AND gs.status IN ('playing', 'settled', 'aborted')
+          AND gs.created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+          AND (
+                NOT EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.conversation_id = gs.conversation_id
+                      AND m.metadata @> jsonb_build_object(
+                          'kind', 'game_status',
+                          'session_id', gs.id,
+                          'game_status', 'started'
+                      )
+                )
+                OR (
+                    gs.status IN ('settled', 'aborted')
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1 FROM messages m
+                            WHERE m.conversation_id = gs.conversation_id
+                              AND m.metadata @> jsonb_build_object(
+                                  'kind', 'game_status',
+                                  'session_id', gs.id,
+                                  'game_status', 'ended'
+                              )
+                        )
+                        OR (
+                            gs.companion_reply IS NOT NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM messages m
+                                WHERE m.conversation_id = gs.conversation_id
+                                  AND m.metadata @> jsonb_build_object(
+                                      'kind', 'game',
+                                      'session_id', gs.id
+                                  )
+                            )
+                        )
+                    )
+                )
+              )
+        ORDER BY gs.updated_at ASC
+        LIMIT $1
+        """
+        ),
+        limit,
+    )
+    attempted = 0
+    for row in rows:
+        session = _as_native_session(sud._row_to_session(row))
+        payload = {
+            "schema_version": 1,
+            "game_key": session.game_key,
+            "game_title": _definition(session.game_key).title,
+        }
+        playing = session.model_copy(update={"status": "playing"})
+        await _persist_chat_side_effects(
+            playing.model_copy(update={"status": "created"}),
+            playing,
+            "game_started",
+            "playing",
+            payload,
+            None,
+        )
+        if session.status in _TERMINAL_STATUSES:
+            event_type = (
+                "game_finished" if session.status == "settled" else "game_aborted"
+            )
+            await _persist_chat_side_effects(
+                playing,
+                session,
+                event_type,
+                session.status,
+                payload,
+                session.companion_reply,
+            )
+        attempted += 1
+    return attempted
+
+
 async def abort_stale_sessions(
     *, stale_after_minutes: int = 10, limit: int = 20
 ) -> int:
@@ -918,9 +1068,9 @@ async def _update_session(
     result: dict[str, Any],
     companion_reply: str | None,
     database: Any | None = None,
-) -> None:
+) -> NativeSessionResponse:
     executor = database or db
-    await executor.execute_raw(
+    rows = await executor.query_raw(
         """
         UPDATE game_sessions
         SET status = $2,
@@ -931,6 +1081,7 @@ async def _update_session(
             companion_reply = COALESCE($7, companion_reply),
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND provider = 'native'
+        RETURNING *
         """,
         session_id,
         status,
@@ -940,6 +1091,9 @@ async def _update_session(
         _json(result),
         companion_reply,
     )
+    if not rows:
+        raise ValueError("session_not_found")
+    return _as_native_session(sud._row_to_session(rows[0]))
 
 
 def _definition(game_key: str | None) -> NativeGameDefinition:

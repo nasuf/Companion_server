@@ -184,10 +184,13 @@ async def test_resolve_owned_context_rejects_foreign_conversation(monkeypatch):
         [
             [
                 {
-                    "id": "c1",
-                    "user_id": "other-user",
-                    "agent_id": "agent-1",
+                    "conversation_id": "c1",
+                    "conversation_user_id": "other-user",
+                    "conversation_agent_id": "agent-1",
+                    "conversation_workspace_id": "w1",
                     "workspace_id": "w1",
+                    "workspace_user_id": "other-user",
+                    "workspace_agent_id": "agent-1",
                 }
             ]
         ]
@@ -209,13 +212,15 @@ async def test_resolve_owned_context_uses_conversation_workspace(monkeypatch):
         [
             [
                 {
-                    "id": "c1",
-                    "user_id": "user-1",
-                    "agent_id": "agent-1",
+                    "conversation_id": "c1",
+                    "conversation_user_id": "user-1",
+                    "conversation_agent_id": "agent-1",
+                    "conversation_workspace_id": "w1",
                     "workspace_id": "w1",
+                    "workspace_user_id": "user-1",
+                    "workspace_agent_id": "agent-1",
                 }
-            ],
-            [{"id": "w1", "user_id": "user-1", "agent_id": "agent-1"}],
+            ]
         ]
     )
     monkeypatch.setattr(sud, "db", fake_db)
@@ -229,6 +234,39 @@ async def test_resolve_owned_context_uses_conversation_workspace(monkeypatch):
 
     assert workspace_id == "w1"
     assert conversation_id == "c1"
+    assert len(fake_db.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_owned_context_rejects_workspace_missing_from_conversation(
+    monkeypatch,
+):
+    fake_db = _FakeDb(
+        [
+            [
+                {
+                    "conversation_id": "c1",
+                    "conversation_user_id": "user-1",
+                    "conversation_agent_id": "agent-1",
+                    "conversation_workspace_id": None,
+                    "workspace_id": "w1",
+                    "workspace_user_id": "user-1",
+                    "workspace_agent_id": "agent-1",
+                }
+            ]
+        ]
+    )
+    monkeypatch.setattr(sud, "db", fake_db)
+
+    with pytest.raises(ValueError, match="context_not_found"):
+        await sud._resolve_owned_context(
+            user_id="user-1",
+            agent_id="agent-1",
+            workspace_id="w1",
+            conversation_id="c1",
+        )
+
+    assert fake_db.calls[0][1] == ("c1", "w1")
 
 
 def test_extract_result_maps_user_outcome():

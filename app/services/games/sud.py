@@ -284,27 +284,44 @@ async def _resolve_owned_context(
     if conversation_id:
         rows = await db.query_raw(
             """
-            SELECT id, user_id, agent_id, workspace_id
-            FROM conversations
-            WHERE id = $1 AND is_deleted = FALSE
+            SELECT
+                c.id AS conversation_id,
+                c.user_id AS conversation_user_id,
+                c.agent_id AS conversation_agent_id,
+                c.workspace_id AS conversation_workspace_id,
+                w.id AS workspace_id,
+                w.user_id AS workspace_user_id,
+                w.agent_id AS workspace_agent_id
+            FROM conversations c
+            LEFT JOIN chat_workspaces w
+              ON w.id = COALESCE(c.workspace_id, $2)
+            WHERE c.id = $1 AND c.is_deleted = FALSE
             LIMIT 1
             """,
             conversation_id,
+            resolved_workspace_id,
         )
         if not rows:
             raise ValueError("context_not_found")
         conversation = rows[0]
         if (
-            conversation.get("user_id") != user_id
-            or conversation.get("agent_id") != agent_id
+            conversation.get("conversation_user_id") != user_id
+            or conversation.get("conversation_agent_id") != agent_id
         ):
             raise ValueError("context_not_found")
-        conversation_workspace_id = conversation.get("workspace_id")
+        conversation_workspace_id = conversation.get("conversation_workspace_id")
         if resolved_workspace_id and conversation_workspace_id != resolved_workspace_id:
             raise ValueError("context_not_found")
         resolved_workspace_id = conversation_workspace_id or resolved_workspace_id
-
-    if resolved_workspace_id:
+        if resolved_workspace_id:
+            if conversation.get("workspace_id") != resolved_workspace_id:
+                raise ValueError("context_not_found")
+            workspace_agent_id = conversation.get("workspace_agent_id")
+            if conversation.get("workspace_user_id") != user_id:
+                raise ValueError("context_not_found")
+            if workspace_agent_id and workspace_agent_id != agent_id:
+                raise ValueError("context_not_found")
+    elif resolved_workspace_id:
         rows = await db.query_raw(
             """
             SELECT id, user_id, agent_id

@@ -759,15 +759,22 @@ async def _run_game_memory_sync_retry():
     async def _body():
         from app.services.games.native import (
             abort_stale_sessions,
+            retry_missing_chat_side_effects,
             retry_pending_memory_sync,
         )
 
         closed = await abort_stale_sessions()
         retried = await retry_pending_memory_sync(limit=10)
+        attempted_chat_repairs = await retry_missing_chat_side_effects(limit=20)
         if closed:
             logger.info("[CRON] closed %s stale native game session(s)", closed)
         if retried:
             logger.info("[CRON] retried %s native game memory sync(s)", retried)
+        if attempted_chat_repairs:
+            logger.info(
+                "[CRON] attempted %s native game chat projection repair(s)",
+                attempted_chat_repairs,
+            )
 
     await _run_distributed_job("game_memory_sync_retry", 180, _body)
 

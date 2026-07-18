@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
@@ -75,6 +76,59 @@ def test_native_registry_contains_every_supported_game():
     assert native._definition("match3").play_mode == "cooperate"
     assert native._definition("minesweeper").play_mode == "cooperate"
     assert native._definition("number_merge").play_mode == "cooperate"
+
+
+@pytest.mark.asyncio
+async def test_create_session_writes_session_and_first_event_atomically(monkeypatch):
+    class AgentRepo:
+        async def find_unique(self, *, where):
+            return SimpleNamespace(
+                id=where["id"],
+                userId="user-1",
+                name="小芜",
+                avatarUrl=None,
+                gender=None,
+            )
+
+    class CaptureDb:
+        def __init__(self):
+            self.aiagent = AgentRepo()
+            self.calls = []
+
+        async def query_raw(self, query, *args):
+            self.calls.append((query, args))
+            return [{}]
+
+    database = CaptureDb()
+    expected = _session("gomoku").model_copy(
+        update={"id": "created-session", "status": "created"}
+    )
+    monkeypatch.setattr(native, "db", database)
+    monkeypatch.setattr(
+        native.sud,
+        "build_user_player",
+        AsyncMock(return_value=expected.user_player),
+    )
+    context = AsyncMock(return_value=("workspace-1", "conversation-1"))
+    monkeypatch.setattr(native.sud, "_resolve_owned_context", context)
+    monkeypatch.setattr(native.sud, "_row_to_session", lambda _row: expected)
+
+    created = await native.create_session(
+        user_id="user-1",
+        agent_id="agent-1",
+        workspace_id="workspace-1",
+        conversation_id="conversation-1",
+        game_key="gomoku",
+    )
+
+    assert created.id == "created-session"
+    assert len(database.calls) == 1
+    query, args = database.calls[0]
+    assert "WITH created_session AS" in query
+    assert "INSERT INTO game_events" in query
+    assert "CROSS JOIN created_event" in query
+    assert args[1] == "gomoku"
+    context.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -830,6 +884,7 @@ def test_every_game_extracts_distinctive_shared_memory_moments(
 @pytest.mark.asyncio
 async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
     calls = []
+    background = []
 
     async def persist_status(previous, updated, event_type, state, payload):
         calls.append(("status", previous.status, updated.status, payload["game_title"]))
@@ -847,6 +902,7 @@ async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
         "_persist_reply_to_chat_if_needed",
         persist_reply,
     )
+    monkeypatch.setattr(native, "fire_background", background.append)
     session = _session("chinese_checkers").model_copy(
         update={
             "status": "settled",
@@ -862,10 +918,47 @@ async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
         "这局我先赢一下。",
     )
 
+    assert calls == []
+    assert len(background) == 1
+    await background[0]
+
     assert calls == [
         ("status", "playing", "settled", "跳棋"),
         ("reply", "game_finished", "这局我先赢一下。"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_chat_projection_retry_rebuilds_started_and_terminal_messages(
+    monkeypatch,
+):
+    class CaptureDb:
+        query = ""
+
+        async def query_raw(self, query, *args):
+            self.query = query
+            return [{}]
+
+    database = CaptureDb()
+    stored = _session("match3").model_copy(
+        update={
+            "status": "settled",
+            "companion_reply": "刚才那一下消得很漂亮。",
+        }
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(native, "db", database)
+    monkeypatch.setattr(native.sud, "_row_to_session", lambda _row: stored)
+    monkeypatch.setattr(native, "_persist_chat_side_effects", persist)
+
+    attempted = await native.retry_missing_chat_side_effects(limit=5)
+
+    assert attempted == 1
+    assert "provider = 'native'" in database.query
+    assert "game_status', 'started'" in database.query
+    assert persist.await_count == 2
+    assert persist.await_args_list[0].args[2] == "game_started"
+    assert persist.await_args_list[1].args[2] == "game_finished"
 
 
 def test_generic_finish_reply_sounds_like_a_companion_not_a_score_report():
