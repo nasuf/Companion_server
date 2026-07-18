@@ -10,29 +10,34 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Mirror fetches occasionally drop mid-download (SSL "unexpected eof"), so
-# let apt retry each file and give the whole install one --fix-missing pass
-# before failing the build.
-RUN if [ -n "$DEBIAN_MIRROR" ]; then \
+# The configured mirror sometimes serves broken files (persistent SSL
+# "unexpected eof" on specific .debs), so retry per file, and if the install
+# still fails, fall back to the official deb.debian.org sources. Already
+# fetched packages stay cached, so the fallback only re-downloads the
+# missing ones.
+RUN set -eu; \
+    cp /etc/apt/sources.list.d/debian.sources /tmp/debian.sources.orig; \
+    if [ -n "$DEBIAN_MIRROR" ]; then \
         sed -i "s|http://deb.debian.org/debian|$DEBIAN_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
-    fi \
-    && if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
+    fi; \
+    if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
         sed -i "s|http://deb.debian.org/debian-security|$DEBIAN_SECURITY_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
-    fi \
-    && printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
-        > /etc/apt/apt.conf.d/80-retries \
-    && apt-get update \
-    && { apt-get install -y --no-install-recommends \
+    fi; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+        > /etc/apt/apt.conf.d/80-retries; \
+    install_deps() { \
+        apt-get update && apt-get install -y --no-install-recommends \
             build-essential \
             ca-certificates \
             curl \
-            ffmpeg \
-        || { sleep 5 && apt-get update && apt-get install -y --no-install-recommends --fix-missing \
-            build-essential \
-            ca-certificates \
-            curl \
-            ffmpeg; }; } \
-    && rm -rf /var/lib/apt/lists/*
+            ffmpeg; \
+    }; \
+    if ! install_deps; then \
+        echo "mirror install failed; falling back to deb.debian.org" >&2; \
+        cp /tmp/debian.sources.orig /etc/apt/sources.list.d/debian.sources; \
+        install_deps; \
+    fi; \
+    rm -rf /var/lib/apt/lists/* /tmp/debian.sources.orig
 
 COPY pyproject.toml ./
 COPY app ./app
