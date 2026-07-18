@@ -20,6 +20,7 @@ RUN if [ -n "$DEBIAN_MIRROR" ]; then \
     build-essential \
     ca-certificates \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./

@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+from array import array
 import base64
 import binascii
+from dataclasses import dataclass
+import logging
 import math
 from pathlib import Path
 import struct
+import sys
 
 from fastapi import HTTPException
 
 from app.config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 _MIME_FORMATS = {
@@ -38,6 +46,115 @@ _EXTENSION_MIMES = {
     ".wav": "audio/wav",
     ".webm": "audio/webm",
 }
+
+
+@dataclass(frozen=True)
+class AudioActivity:
+    active_milliseconds: int
+    total_milliseconds: int
+    peak_dbfs: float
+
+    def has_meaningful_speech(self, minimum_active_milliseconds: int) -> bool:
+        return self.active_milliseconds >= minimum_active_milliseconds
+
+
+def analyze_pcm16_activity(
+    pcm: bytes,
+    *,
+    sample_rate: int = 16_000,
+    frame_milliseconds: int = 20,
+    threshold_dbfs: float = -45.0,
+) -> AudioActivity:
+    usable_length = len(pcm) - (len(pcm) % 2)
+    if usable_length <= 0 or sample_rate <= 0:
+        return AudioActivity(0, 0, float("-inf"))
+
+    samples = array("h")
+    samples.frombytes(pcm[:usable_length])
+    if sys.byteorder != "little":
+        samples.byteswap()
+
+    frame_samples = max(1, sample_rate * frame_milliseconds // 1000)
+    active_samples = 0
+    peak = 0
+    threshold = 32_768 * (10 ** (threshold_dbfs / 20))
+    for start in range(0, len(samples), frame_samples):
+        frame = samples[start : start + frame_samples]
+        if not frame:
+            continue
+        frame_peak = max(abs(value) for value in frame)
+        peak = max(peak, frame_peak)
+        rms = math.sqrt(sum(value * value for value in frame) / len(frame))
+        if rms >= threshold:
+            active_samples += len(frame)
+
+    return AudioActivity(
+        active_milliseconds=round(active_samples * 1000 / sample_rate),
+        total_milliseconds=round(len(samples) * 1000 / sample_rate),
+        peak_dbfs=(20 * math.log10(peak / 32_768)) if peak else float("-inf"),
+    )
+
+
+async def analyze_audio_activity(blob: bytes) -> AudioActivity | None:
+    """Decode short chat audio to PCM; return None when validation cannot run."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "s16le",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError):
+        logger.warning("[speech-to-text] ffmpeg unavailable; audio validation failed")
+        return None
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(blob),
+            timeout=settings.chat_voice_analysis_timeout_s,
+        )
+    except TimeoutError:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.communicate()
+        logger.warning("[speech-to-text] audio silence analysis timed out")
+        return None
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.communicate()
+        raise
+
+    if process.returncode != 0 or not stdout:
+        logger.warning(
+            "[speech-to-text] audio silence analysis failed returncode=%s error=%s",
+            process.returncode,
+            stderr.decode("utf-8", errors="replace")[-300:],
+        )
+        return None
+    return analyze_pcm16_activity(
+        stdout,
+        threshold_dbfs=settings.chat_voice_silence_threshold_dbfs,
+    )
 
 
 def normalize_audio_mime(mime: str | None, name: str | None = None) -> str:

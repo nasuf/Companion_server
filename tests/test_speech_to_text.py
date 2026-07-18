@@ -1,4 +1,5 @@
 import base64
+import math
 import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,12 +12,22 @@ from app.api.public import speech
 from app.models.speech import ChatAudioTranscriptionRequest
 from app.services.speech_to_text import fun_asr
 from app.services.speech_to_text.audio import (
+    AudioActivity,
+    analyze_pcm16_activity,
     audio_format_for_mime,
     decode_audio_base64,
     normalize_audio_mime,
     validate_audio,
     validate_chat_m4a_duration,
 )
+
+
+def _active_audio() -> AudioActivity:
+    return AudioActivity(
+        active_milliseconds=1_000,
+        total_milliseconds=3_000,
+        peak_dbfs=-12.0,
+    )
 
 
 def _test_m4a(duration_seconds: float = 3) -> bytes:
@@ -100,44 +111,47 @@ def test_chat_m4a_validation_uses_container_duration(monkeypatch):
     assert too_short.value.detail == "语音时间太短，请重新录制"
 
 
-def test_build_request_payload_includes_context_before_audio():
+def test_build_request_payload_contains_only_current_audio():
     payload = fun_asr.build_request_payload(
         audio=b"audio",
         mime="audio/mp4",
         audio_format="m4a",
-        context=[("user", "我叫小明"), ("assistant", "你好，小明")],
         model="fun-asr-test",
     )
 
     messages = payload["input"]["messages"]
     assert payload["model"] == "fun-asr-test"
-    assert messages[0]["content"][0] == {
-        "type": "input_text",
-        "text": "我叫小明",
-    }
-    assert messages[1]["content"][0] == {
-        "type": "text",
-        "text": "你好，小明",
-    }
-    audio_data = messages[-1]["content"][0]["input_audio"]["data"]
+    assert len(messages) == 1
+    audio_data = messages[0]["content"][0]["input_audio"]["data"]
     assert audio_data == (
         "data:audio/mp4;base64," + base64.b64encode(b"audio").decode("ascii")
     )
-    assert payload["parameters"] == {"format": "m4a", "sample_rate": "16000"}
+    assert payload["parameters"] == {
+        "format": "m4a",
+        "sample_rate": "16000",
+        "vad_enabled": True,
+    }
 
 
-def test_build_request_payload_caps_total_context_to_400_characters():
-    payload = fun_asr.build_request_payload(
-        audio=b"audio",
-        mime="audio/mp4",
-        audio_format="m4a",
-        context=[("user", str(index) * 200) for index in range(10)],
+def test_pcm_activity_rejects_silence_and_accepts_speech_level_audio():
+    sample_rate = 16_000
+    duration_seconds = 1
+    silence = b"\x00\x00" * sample_rate * duration_seconds
+    tone = b"".join(
+        struct.pack(
+            "<h",
+            round(8_000 * math.sin(2 * math.pi * 220 * index / sample_rate)),
+        )
+        for index in range(sample_rate * duration_seconds)
     )
 
-    context_messages = payload["input"]["messages"][:-1]
-    total_chars = sum(len(item["content"][0]["text"]) for item in context_messages)
-    assert total_chars == 400
-    assert len(context_messages) == 2
+    silent_activity = analyze_pcm16_activity(silence)
+    speech_activity = analyze_pcm16_activity(tone)
+
+    assert silent_activity.active_milliseconds == 0
+    assert silent_activity.peak_dbfs == float("-inf")
+    assert speech_activity.active_milliseconds == 1_000
+    assert speech_activity.peak_dbfs > -20
 
 
 @pytest.mark.asyncio
@@ -239,18 +253,7 @@ async def test_voice_send_persists_audio_and_returns_attachment(
         AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
-        speech,
-        "db",
-        SimpleNamespace(
-            message=SimpleNamespace(
-                find_many=AsyncMock(
-                    return_value=[
-                        SimpleNamespace(role="assistant", content="你好，小明"),
-                        SimpleNamespace(role="user", content="我叫小明"),
-                    ]
-                )
-            )
-        ),
+        speech, "analyze_audio_activity", AsyncMock(return_value=_active_audio())
     )
     transcribe = AsyncMock(
         return_value=fun_asr.TranscriptionResult(
@@ -317,10 +320,83 @@ async def test_voice_send_persists_audio_and_returns_attachment(
     assert response.attachment.transcription_text == "今天天气怎么样？"
     assert (tmp_path / "user-1_voice.m4a").read_bytes() == audio
     create_audio_attachment.assert_awaited_once()
-    assert transcribe.await_args.kwargs["context"] == [
-        ("user", "我叫小明"),
-        ("assistant", "你好，小明"),
-    ]
+    assert "context" not in transcribe.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_silent_chat_audio_is_rejected_before_transcription(monkeypatch):
+    monkeypatch.setattr(speech, "_enforce_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        speech.chat_media_repo,
+        "conversation_belongs_to_user",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        speech,
+        "analyze_audio_activity",
+        AsyncMock(
+            return_value=AudioActivity(
+                active_milliseconds=0,
+                total_milliseconds=3_000,
+                peak_dbfs=float("-inf"),
+            )
+        ),
+    )
+    transcribe = AsyncMock()
+    monkeypatch.setattr(speech, "transcribe_audio", transcribe)
+    audio = _test_m4a(3)
+
+    with pytest.raises(HTTPException) as error:
+        await speech.transcribe_chat_audio(
+            ChatAudioTranscriptionRequest(
+                conversation_id="conv-1",
+                name="voice.m4a",
+                mime="audio/mp4",
+                size=len(audio),
+                duration_seconds=3,
+                base64=base64.b64encode(audio).decode("ascii"),
+            ),
+            user={"sub": "user-1"},
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail == "没有检测到清晰的语音，请重新录制"
+    transcribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_chat_audio_does_not_fall_through_to_provider(monkeypatch):
+    monkeypatch.setattr(speech, "_enforce_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        speech.chat_media_repo,
+        "conversation_belongs_to_user",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        speech,
+        "analyze_audio_activity",
+        AsyncMock(return_value=None),
+    )
+    transcribe = AsyncMock()
+    monkeypatch.setattr(speech, "transcribe_audio", transcribe)
+    audio = _test_m4a(3)
+
+    with pytest.raises(HTTPException) as error:
+        await speech.transcribe_chat_audio(
+            ChatAudioTranscriptionRequest(
+                conversation_id="conv-1",
+                name="voice.m4a",
+                mime="audio/mp4",
+                size=len(audio),
+                duration_seconds=3,
+                base64=base64.b64encode(audio).decode("ascii"),
+            ),
+            user={"sub": "user-1"},
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail == "语音文件无法解析，请重新录制"
+    transcribe.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -336,10 +412,8 @@ async def test_transcribe_chat_audio_deletes_saved_file_when_db_insert_fails(
     )
     monkeypatch.setattr(
         speech,
-        "db",
-        SimpleNamespace(
-            message=SimpleNamespace(find_many=AsyncMock(return_value=[]))
-        ),
+        "analyze_audio_activity",
+        AsyncMock(return_value=_active_audio()),
     )
     monkeypatch.setattr(
         speech,
@@ -395,10 +469,8 @@ async def test_text_send_transcribes_without_persisting_audio(
     )
     monkeypatch.setattr(
         speech,
-        "db",
-        SimpleNamespace(
-            message=SimpleNamespace(find_many=AsyncMock(return_value=[]))
-        ),
+        "analyze_audio_activity",
+        AsyncMock(return_value=_active_audio()),
     )
     monkeypatch.setattr(
         speech,

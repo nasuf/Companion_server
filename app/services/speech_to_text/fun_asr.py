@@ -3,18 +3,13 @@ from __future__ import annotations
 import base64
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-_CONTEXT_MESSAGE_LIMIT = 10
-_CONTEXT_MESSAGE_MAX_CHARS = 200
-_CONTEXT_TOTAL_MAX_CHARS = 400
-
 
 class SpeechTranscriptionNotConfigured(Exception):
     pass
@@ -43,66 +38,36 @@ class TranscriptionResult:
     model: str
 
 
-def _context_messages(
-    context: Iterable[tuple[str, str]],
-) -> list[dict[str, Any]]:
-    candidates: list[tuple[str, str]] = []
-    for role, raw_text in context:
-        if role not in {"user", "assistant"}:
-            continue
-        text = raw_text.strip()
-        if not text:
-            continue
-        candidates.append((role, text[-_CONTEXT_MESSAGE_MAX_CHARS:]))
-
-    remaining = _CONTEXT_TOTAL_MAX_CHARS
-    messages: list[dict[str, Any]] = []
-    for role, text in reversed(candidates[-_CONTEXT_MESSAGE_LIMIT:]):
-        if remaining <= 0:
-            break
-        clipped = text[-remaining:]
-        remaining -= len(clipped)
-        content_type = "input_text" if role == "user" else "text"
-        messages.append(
-            {
-                "role": role,
-                "content": [
-                    {
-                        "type": content_type,
-                        "text": clipped,
-                    }
-                ],
-            }
-        )
-    messages.reverse()
-    return messages
-
-
 def build_request_payload(
     *,
     audio: bytes,
     mime: str,
     audio_format: str,
-    context: Iterable[tuple[str, str]] = (),
     model: str | None = None,
 ) -> dict[str, Any]:
     encoded = base64.b64encode(audio).decode("ascii")
-    messages = _context_messages(context)
-    messages.append(
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_audio",
-                    "input_audio": {"data": f"data:{mime};base64,{encoded}"},
-                }
-            ],
-        }
-    )
     return {
         "model": model or settings.dashscope_asr_model,
-        "input": {"messages": messages},
-        "parameters": {"format": audio_format, "sample_rate": "16000"},
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": f"data:{mime};base64,{encoded}"
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+        "parameters": {
+            "format": audio_format,
+            "sample_rate": "16000",
+            "vad_enabled": True,
+        },
     }
 
 
@@ -126,7 +91,6 @@ async def transcribe_audio(
     audio: bytes,
     mime: str,
     audio_format: str,
-    context: Iterable[tuple[str, str]] = (),
     client: httpx.AsyncClient | None = None,
 ) -> TranscriptionResult:
     api_key = settings.dashscope_api_key.strip()
@@ -139,7 +103,6 @@ async def transcribe_audio(
         audio=audio,
         mime=mime,
         audio_format=audio_format,
-        context=context,
         model=model,
     )
     headers = {

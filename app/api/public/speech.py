@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.jwt_auth import require_user
 from app.config import settings
-from app.db import db
 from app.models.speech import (
     ChatAudioTranscriptionRequest,
     ChatAudioTranscriptionResponse,
@@ -25,6 +24,7 @@ from app.services.speech_to_text import (
     transcribe_audio,
 )
 from app.services.speech_to_text.audio import (
+    analyze_audio_activity,
     audio_format_for_mime,
     decode_audio_base64,
     normalize_audio_mime,
@@ -62,13 +62,27 @@ async def transcribe_chat_audio(
         declared_duration_seconds=data.duration_seconds,
     )
     await _enforce_rate_limit(user_id)
-    context = await _recent_conversation_context(data.conversation_id)
+    activity = await analyze_audio_activity(audio)
+    if activity is None:
+        raise HTTPException(status_code=422, detail="语音文件无法解析，请重新录制")
+    if not activity.has_meaningful_speech(
+        settings.chat_voice_min_active_milliseconds
+    ):
+        logger.info(
+            "[speech-to-text] silent chat audio rejected user_id=%s "
+            "conversation_id=%s active_ms=%s total_ms=%s peak_dbfs=%.1f",
+            user_id,
+            data.conversation_id,
+            activity.active_milliseconds,
+            activity.total_milliseconds,
+            activity.peak_dbfs,
+        )
+        raise HTTPException(status_code=422, detail="没有检测到清晰的语音，请重新录制")
     try:
         result = await transcribe_audio(
             audio=audio,
             mime=mime,
             audio_format=audio_format,
-            context=context,
         )
     except SpeechTranscriptionNotConfigured as exc:
         logger.error("[speech-to-text] DashScope ASR is not configured")
@@ -189,20 +203,3 @@ def _attachment_response(
         transcription_request_id=attachment.transcription_request_id,
         created_at=str(attachment.created_at) if attachment.created_at else None,
     )
-
-
-async def _recent_conversation_context(
-    conversation_id: str,
-) -> list[tuple[str, str]]:
-    rows = await db.message.find_many(
-        where={"conversationId": conversation_id},
-        order={"createdAt": "desc"},
-        take=10,
-    )
-    context: list[tuple[str, str]] = []
-    for row in reversed(rows):
-        role = str(getattr(row, "role", ""))
-        content = str(getattr(row, "content", "") or "").strip()
-        if role in {"user", "assistant"} and content:
-            context.append((role, content))
-    return context

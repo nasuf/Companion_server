@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     chat_voice_min_seconds: float = 0.5
     chat_voice_max_seconds: int = 60
     chat_voice_max_requests_per_minute: int = 20
+    chat_voice_silence_threshold_dbfs: float = -45.0
+    chat_voice_min_active_milliseconds: int = 240
+    chat_voice_analysis_timeout_s: float = 5.0
     # Base64 adds roughly 33%; 2 MiB of source audio stays well below the
     # provider's 10 MB encoded-payload limit.
     chat_voice_max_bytes: int = 2 * 1024 * 1024
