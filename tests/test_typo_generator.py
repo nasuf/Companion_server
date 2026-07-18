@@ -87,7 +87,7 @@ async def test_emit_replies_typo_flag_off_never_mutates():
 
 
 @pytest.mark.asyncio
-async def test_emit_replies_typo_enabled_appends_correction_bubble():
+async def test_emit_replies_typo_enabled_keeps_typo_without_correction_bubble():
     from app.services.chat.reply_post_process import emit_replies
 
     P = "app.services.chat.reply_post_process"
@@ -113,6 +113,5 @@ async def test_emit_replies_typo_enabled_appends_correction_bubble():
             pass
 
     assert emitted[0]["text"] == "我再做的事"
-    assert emitted[1]["text"] == "*在"
-    assert emitted[1]["typo_correction"] is True
-    assert emitted[1]["index"] == 1  # 纠正气泡占独立 index
+    assert len(emitted) == 1
+    assert "typo_correction" not in emitted[0]

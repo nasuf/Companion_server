@@ -228,10 +228,9 @@ async def emit_replies(
             if not reply_text:
                 continue
 
-        # E1 拟人度: 错别字注入 (默认关). 在 emoji 装饰前做, 只动正文汉字.
-        typo_correction: str | None = None
+        # E1 拟人度: 错别字注入. 在 emoji 装饰前做, 只动正文汉字.
         if settings.typo_enabled and not reply_is_fallback:
-            reply_text, typo_correction = maybe_typo(
+            reply_text, _ = maybe_typo(
                 reply_text, rate=settings.typo_rate,
             )
 
@@ -315,16 +314,3 @@ async def emit_replies(
         emitted_replies.append(data)
         normal_reply_count += 1
         yield {"event": "reply", "data": json.dumps(data)}
-
-        # E1: 自我纠正气泡 ("*正确字", 微信惯例). 短暂停顿后追加, 像真人
-        # 发出去才发现打错. 只对 maybe_typo 决定需要纠正的错字触发.
-        if typo_correction:
-            await asyncio.sleep(random.uniform(0.5, 1.2))
-            correction_data: dict = {
-                "text": f"*{typo_correction}",
-                "index": reply_index_offset + normal_reply_count + delay_explain_offset,
-                "typo_correction": True,
-            }
-            emitted_replies.append(correction_data)
-            normal_reply_count += 1
-            yield {"event": "reply", "data": json.dumps(correction_data)}
