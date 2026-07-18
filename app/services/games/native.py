@@ -16,6 +16,7 @@ from app.models.game import (
     SudSessionResponse,
 )
 from app.services.games import sud
+from app.services.games import balance
 from app.services.memory.storage import repo as memory_repo
 from app.services.offline.memory_hooks import remember_shared_game_experience
 from app.services.runtime.tasks import fire_background
@@ -157,16 +158,34 @@ async def create_session(
         raise ValueError("agent_not_found")
     workspace_id, conversation_id = owned_context
 
+    balance_snapshot, ai_player = await asyncio.gather(
+        balance.resolve_for_session(
+            user_id=user_id,
+            agent_id=agent_id,
+            game_key=game_key,
+        ),
+        sud.build_ai_player(agent_id, difficulty, agent=agent),
+    )
+
     session_id = str(uuid.uuid4())
     event_id = str(uuid.uuid4())
     room_id = f"{game_key}-{session_id[:8]}"
-    ai_player = await sud.build_ai_player(agent_id, difficulty, agent=agent)
+    ai_player = ai_player.model_copy(
+        update={
+            "ai_level": balance.ai_level_for_strength(
+                int(balance_snapshot["effective_strength"])
+            )
+        }
+    )
     result = _empty_result(difficulty, definition)
+    result["balance"] = balance_snapshot
     session_created_payload = {
         "game_key": game_key,
         "game_title": definition.title,
         "difficulty": difficulty,
         "play_style": "natural_companion",
+        "config_version": balance_snapshot["config_version"],
+        "effective_strength": balance_snapshot["effective_strength"],
         **(
             {"board_size": GOMOKU_BOARD_SIZE}
             if game_key == GOMOKU_GAME_KEY
@@ -534,6 +553,10 @@ async def handle_event(
                 client_event_id=client_event_id,
                 database=tx,
             )
+            if inserted and event_type == "game_finished":
+                # The result, terminal event and adaptive skill update share one
+                # transaction, so event retries cannot double-count a match.
+                await balance.record_completed_session(updated, database=tx)
         if not inserted:
             return updated, stored_reply, event_id, True
         if event_type in {"game_started", "game_finished", "game_aborted"}:
@@ -653,6 +676,8 @@ async def _persist_chat_side_effects(
 def _as_native_session(session: SudSessionResponse) -> NativeSessionResponse:
     if session.game_key not in _GAME_DEFINITIONS:
         raise ValueError("session_not_found")
+    result = _loads(session.result, {})
+    balance_snapshot = _loads(result.get("balance"), {})
     return NativeSessionResponse(
         id=session.id,
         game_key=session.game_key,
@@ -665,10 +690,13 @@ def _as_native_session(session: SudSessionResponse) -> NativeSessionResponse:
         play_mode=session.play_mode,
         difficulty="normal",
         ai_level=session.ai_level,
+        config_version=int(balance_snapshot.get("config_version") or 1),
+        effective_strength=int(balance_snapshot.get("effective_strength") or 50),
+        engine_config=_loads(balance_snapshot.get("engine_config"), {}),
         user_player=session.user_player,
         ai_player=session.ai_player,
         companion_reply=session.companion_reply,
-        result=session.result,
+        result=result,
         duration_seconds=session.duration_seconds,
         started_at=session.started_at,
         ended_at=session.ended_at,

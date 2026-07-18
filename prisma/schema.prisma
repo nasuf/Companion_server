@@ -12,69 +12,70 @@ generator client {
 }
 
 model User {
-  id               String              @id @default(uuid())
-  username         String              @unique
-  hashedPassword   String?             @map("hashed_password")
-  role             String              @default("user") @map("role")
-  email            String?             @unique
-  status           String              @default("active")
-  archivedAt       DateTime?           @map("archived_at")
-  lastSeenAt       DateTime?           @map("last_seen_at")
-  locationLatitude Float?              @map("location_latitude")
-  locationLongitude Float?             @map("location_longitude")
-  locationCity     String?             @map("location_city")
-  locationRegion   String?             @map("location_region")
-  locationCountry  String?             @map("location_country")
-  locationSource   String?             @map("location_source")
-  locationPermissionStatus String?      @map("location_permission_status")
-  locationUpdatedAt DateTime?          @map("location_updated_at")
+  id                       String                          @id @default(uuid())
+  username                 String                          @unique
+  hashedPassword           String?                         @map("hashed_password")
+  role                     String                          @default("user") @map("role")
+  email                    String?                         @unique
+  status                   String                          @default("active")
+  archivedAt               DateTime?                       @map("archived_at")
+  lastSeenAt               DateTime?                       @map("last_seen_at")
+  locationLatitude         Float?                          @map("location_latitude")
+  locationLongitude        Float?                          @map("location_longitude")
+  locationCity             String?                         @map("location_city")
+  locationRegion           String?                         @map("location_region")
+  locationCountry          String?                         @map("location_country")
+  locationSource           String?                         @map("location_source")
+  locationPermissionStatus String?                         @map("location_permission_status")
+  locationUpdatedAt        DateTime?                       @map("location_updated_at")
   // Registration-origin analytics, written once at account creation and never
   // updated by later logins. NULL for accounts created before this feature.
-  signupSource     String?             @map("signup_source")
-  signupPlatform   String?             @map("signup_platform")
-  signupOsVersion  String?             @map("signup_os_version")
-  signupAppVersion String?             @map("signup_app_version")
-  createdAt        DateTime            @default(now()) @map("created_at")
-  updatedAt        DateTime            @updatedAt @map("updated_at")
-  agents           AiAgent[]
-  workspaces       ChatWorkspace[]
-  conversations    Conversation[]
-  chatAttachments  ChatMessageAttachment[]
-  chatLinkCards    ChatLinkCard[]
-  profiles         UserProfile[]
-  portraits        UserPortrait[]
-  profileTags      UserProfileTag[]
-  memoryChangelogs MemoryChangelog[]
-  intimacies       Intimacy[]
-  timeTriggers     TimeTrigger[]
-  proactiveStates  ProactiveState[]
-  proactiveEvents  ProactiveEventLog[]
-  patienceStates   PatienceState[]
-  authIdentities    AuthIdentity[]
-  timeCapsules      TimeCapsule[]
-  lastWills         LastWill[]
-  dailyActivities   UserDailyActivity[]
-  gameSessions      GameSession[]
-  musicFavorites    MusicFavorite[]
-  musicPlaybacks    MusicPlayback[]
+  signupSource             String?                         @map("signup_source")
+  signupPlatform           String?                         @map("signup_platform")
+  signupOsVersion          String?                         @map("signup_os_version")
+  signupAppVersion         String?                         @map("signup_app_version")
+  createdAt                DateTime                        @default(now()) @map("created_at")
+  updatedAt                DateTime                        @updatedAt @map("updated_at")
+  agents                   AiAgent[]
+  workspaces               ChatWorkspace[]
+  conversations            Conversation[]
+  chatAttachments          ChatMessageAttachment[]
+  chatLinkCards            ChatLinkCard[]
+  profiles                 UserProfile[]
+  portraits                UserPortrait[]
+  profileTags              UserProfileTag[]
+  memoryChangelogs         MemoryChangelog[]
+  intimacies               Intimacy[]
+  timeTriggers             TimeTrigger[]
+  proactiveStates          ProactiveState[]
+  proactiveEvents          ProactiveEventLog[]
+  patienceStates           PatienceState[]
+  authIdentities           AuthIdentity[]
+  timeCapsules             TimeCapsule[]
+  lastWills                LastWill[]
+  dailyActivities          UserDailyActivity[]
+  gameSessions             GameSession[]
+  nativeGameSkillStates    NativeGameSkillState[]
+  musicFavorites           MusicFavorite[]
+  musicPlaybacks           MusicPlayback[]
   musicCoListeningSessions MusicCoListeningSession[]
-  mealVoucher       MealVoucher?
-  mealRedeemFailures MealRedemptionFailure[]
-  achievementUnlocks AchievementUnlock[]
-  achievementEvents  AchievementEvent[]
-  pushDevices     PushDevice[]
-  notificationEvents NotificationEvent[]
-  wallet          UserWallet?
-  walletLedger    WalletLedger[]
-  offlineActivities OfflineActivityRecommendation[]
-  offlineActivityFeedback OfflineActivityFeedback[]
-  offlineActivityMedia OfflineActivityMedia[]
-  giftAddresses   GiftAddress[]
-  realWorldGifts  RealWorldGift[]
-  realWorldTriggerStates RealWorldTriggerState[]
-  realWorldRechargeLedger RealWorldRechargeLedger[]
-  bugReportsFiled    BugReport[] @relation("BugReportsFiled")
-  bugReportsResolved BugReport[] @relation("BugReportsResolved")
+  mealVoucher              MealVoucher?
+  mealRedeemFailures       MealRedemptionFailure[]
+  achievementUnlocks       AchievementUnlock[]
+  achievementEvents        AchievementEvent[]
+  pushDevices              PushDevice[]
+  notificationEvents       NotificationEvent[]
+  wallet                   UserWallet?
+  walletLedger             WalletLedger[]
+  offlineActivities        OfflineActivityRecommendation[]
+  offlineActivityFeedback  OfflineActivityFeedback[]
+  offlineActivityMedia     OfflineActivityMedia[]
+  giftAddresses            GiftAddress[]
+  realWorldGifts           RealWorldGift[]
+  realWorldTriggerStates   RealWorldTriggerState[]
+  realWorldRechargeLedger  RealWorldRechargeLedger[]
+  bugReportsFiled          BugReport[]                     @relation("BugReportsFiled")
+  bugReportsResolved       BugReport[]                     @relation("BugReportsResolved")
 
   @@map("users")
 }
@@ -101,87 +102,88 @@ model AuthIdentity {
 }
 
 model AiAgent {
-  id                 String              @id @default(uuid())
-  name               String
-  userId             String              @map("user_id")
-  user               User                @relation(fields: [userId], references: [id])
-  status             String              @default("active")
-  archivedAt         DateTime?           @map("archived_at")
+  id                       String                          @id @default(uuid())
+  name                     String
+  userId                   String                          @map("user_id")
+  user                     User                            @relation(fields: [userId], references: [id])
+  status                   String                          @default("active")
+  archivedAt               DateTime?                       @map("archived_at")
   // Per spec §1.2: MBTI 是 canonical personality 表达，user 输入的 7 维仅作
   // 创建时的 transient 输入，转 MBTI 后即丢弃。
-  mbti               Json? // 初始 MBTI: {EI, NS, TF, JP, type, summary}
-  currentMbti        Json?               @map("current_mbti") // 调整后的 MBTI（同形）
-  background         String?
-  values             Json?
-  lifeOverview       String?             @map("life_overview")
-  age                Int?
-  occupation         String?
-  city               String?
-  gender             String?             @map("gender")
-  avatarKey          String?             @map("avatar_key")
-  avatarUrl          String?             @map("avatar_url")
+  mbti                     Json? // 初始 MBTI: {EI, NS, TF, JP, type, summary}
+  currentMbti              Json?                           @map("current_mbti") // 调整后的 MBTI（同形）
+  background               String?
+  values                   Json?
+  lifeOverview             String?                         @map("life_overview")
+  age                      Int?
+  occupation               String?
+  city                     String?
+  gender                   String?                         @map("gender")
+  avatarKey                String?                         @map("avatar_key")
+  avatarUrl                String?                         @map("avatar_url")
   // 若该 agent 是从某个模板克隆而来, 记录源模板 agent id (用于「模板被使用次数」统计).
-  sourceTemplateId   String?             @map("source_template_id")
-  createdAt          DateTime            @default(now()) @map("created_at")
-  updatedAt          DateTime            @updatedAt @map("updated_at")
-  workspaces         ChatWorkspace[]
-  conversations      Conversation[]
-  schedules          AiDailySchedule[]
-  intimacies         Intimacy[]
-  proactiveLogs      ProactiveChatLog[]
-  traitFeedbackLogs  TraitFeedbackLog[]
-  timeTriggers       TimeTrigger[]
-  proactiveStates    ProactiveState[]
-  proactiveEvents    ProactiveEventLog[]
-  patienceStates     PatienceState[]
-  configOverride     AgentConfigOverride?
-  timeCapsules        TimeCapsule[]
-  lastWills           LastWill[]
-  gameSessions        GameSession[]
-  musicFavorites      MusicFavorite[]
-  musicPlaybacks      MusicPlayback[]
+  sourceTemplateId         String?                         @map("source_template_id")
+  createdAt                DateTime                        @default(now()) @map("created_at")
+  updatedAt                DateTime                        @updatedAt @map("updated_at")
+  workspaces               ChatWorkspace[]
+  conversations            Conversation[]
+  schedules                AiDailySchedule[]
+  intimacies               Intimacy[]
+  proactiveLogs            ProactiveChatLog[]
+  traitFeedbackLogs        TraitFeedbackLog[]
+  timeTriggers             TimeTrigger[]
+  proactiveStates          ProactiveState[]
+  proactiveEvents          ProactiveEventLog[]
+  patienceStates           PatienceState[]
+  configOverride           AgentConfigOverride?
+  timeCapsules             TimeCapsule[]
+  lastWills                LastWill[]
+  gameSessions             GameSession[]
+  nativeGameSkillStates    NativeGameSkillState[]
+  musicFavorites           MusicFavorite[]
+  musicPlaybacks           MusicPlayback[]
   musicCoListeningSessions MusicCoListeningSession[]
-  achievementUnlocks AchievementUnlock[]
-  achievementEvents  AchievementEvent[]
-  profileTags      UserProfileTag[]
-  offlineActivities OfflineActivityRecommendation[]
-  realWorldGifts  RealWorldGift[]
-  realWorldTriggerStates RealWorldTriggerState[]
+  achievementUnlocks       AchievementUnlock[]
+  achievementEvents        AchievementEvent[]
+  profileTags              UserProfileTag[]
+  offlineActivities        OfflineActivityRecommendation[]
+  realWorldGifts           RealWorldGift[]
+  realWorldTriggerStates   RealWorldTriggerState[]
 
   @@index([sourceTemplateId], map: "ai_agents_source_template_idx")
   @@map("ai_agents")
 }
 
 model ChatWorkspace {
-  id              String              @id @default(uuid())
-  userId          String              @map("user_id")
-  user            User                @relation(fields: [userId], references: [id])
-  agentId         String?             @map("agent_id")
-  agent           AiAgent?            @relation(fields: [agentId], references: [id])
-  status          String              @default("active")
-  archivedAt      DateTime?           @map("archived_at")
-  createdAt       DateTime            @default(now()) @map("created_at")
-  updatedAt       DateTime            @updatedAt @map("updated_at")
-  conversations   Conversation[]
-  userMemories    UserMemory[]
-  aiMemories      AiMemory[]
-  profiles        UserProfile[]
-  changelogs      MemoryChangelog[]
-  proactiveLogs   ProactiveChatLog[]
-  proactiveState  ProactiveState?
-  proactiveEvents ProactiveEventLog[]
-  timeCapsules    TimeCapsule[]
-  lastWills       LastWill[]
-  gameSessions    GameSession[]
-  musicFavorites  MusicFavorite[]
-  musicPlaybacks  MusicPlayback[]
+  id                       String                          @id @default(uuid())
+  userId                   String                          @map("user_id")
+  user                     User                            @relation(fields: [userId], references: [id])
+  agentId                  String?                         @map("agent_id")
+  agent                    AiAgent?                        @relation(fields: [agentId], references: [id])
+  status                   String                          @default("active")
+  archivedAt               DateTime?                       @map("archived_at")
+  createdAt                DateTime                        @default(now()) @map("created_at")
+  updatedAt                DateTime                        @updatedAt @map("updated_at")
+  conversations            Conversation[]
+  userMemories             UserMemory[]
+  aiMemories               AiMemory[]
+  profiles                 UserProfile[]
+  changelogs               MemoryChangelog[]
+  proactiveLogs            ProactiveChatLog[]
+  proactiveState           ProactiveState?
+  proactiveEvents          ProactiveEventLog[]
+  timeCapsules             TimeCapsule[]
+  lastWills                LastWill[]
+  gameSessions             GameSession[]
+  musicFavorites           MusicFavorite[]
+  musicPlaybacks           MusicPlayback[]
   musicCoListeningSessions MusicCoListeningSession[]
-  achievementUnlocks AchievementUnlock[]
-  achievementEvents  AchievementEvent[]
-  profileTags     UserProfileTag[]
-  offlineActivities OfflineActivityRecommendation[]
-  realWorldGifts  RealWorldGift[]
-  realWorldTriggerState RealWorldTriggerState?
+  achievementUnlocks       AchievementUnlock[]
+  achievementEvents        AchievementEvent[]
+  profileTags              UserProfileTag[]
+  offlineActivities        OfflineActivityRecommendation[]
+  realWorldGifts           RealWorldGift[]
+  realWorldTriggerState    RealWorldTriggerState?
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -189,77 +191,77 @@ model ChatWorkspace {
 }
 
 model Conversation {
-  id              String              @id @default(uuid())
-  userId          String              @map("user_id")
-  user            User                @relation(fields: [userId], references: [id])
-  agentId         String              @map("agent_id")
-  agent           AiAgent             @relation(fields: [agentId], references: [id])
-  workspaceId     String?             @map("workspace_id")
-  workspace       ChatWorkspace?      @relation(fields: [workspaceId], references: [id])
-  title           String?
-  isDeleted       Boolean             @default(false) @map("is_deleted")
-  archivedAt      DateTime?           @map("archived_at")
-  createdAt       DateTime            @default(now()) @map("created_at")
-  updatedAt       DateTime            @updatedAt @map("updated_at")
-  messages        Message[]
-  chatAttachments ChatMessageAttachment[]
-  chatLinkCards   ChatLinkCard[]
-  proactiveLogs   ProactiveChatLog[]
-  proactiveStates ProactiveState[]
-  proactiveEvents ProactiveEventLog[]
-  gameSessions    GameSession[]
+  id                      String                          @id @default(uuid())
+  userId                  String                          @map("user_id")
+  user                    User                            @relation(fields: [userId], references: [id])
+  agentId                 String                          @map("agent_id")
+  agent                   AiAgent                         @relation(fields: [agentId], references: [id])
+  workspaceId             String?                         @map("workspace_id")
+  workspace               ChatWorkspace?                  @relation(fields: [workspaceId], references: [id])
+  title                   String?
+  isDeleted               Boolean                         @default(false) @map("is_deleted")
+  archivedAt              DateTime?                       @map("archived_at")
+  createdAt               DateTime                        @default(now()) @map("created_at")
+  updatedAt               DateTime                        @updatedAt @map("updated_at")
+  messages                Message[]
+  chatAttachments         ChatMessageAttachment[]
+  chatLinkCards           ChatLinkCard[]
+  proactiveLogs           ProactiveChatLog[]
+  proactiveStates         ProactiveState[]
+  proactiveEvents         ProactiveEventLog[]
+  gameSessions            GameSession[]
   musicCoListeningSession MusicCoListeningSession?
-  achievementUnlocks AchievementUnlock[]
-  achievementEvents  AchievementEvent[]
-  offlineActivities OfflineActivityRecommendation[]
-  realWorldGifts  RealWorldGift[]
+  achievementUnlocks      AchievementUnlock[]
+  achievementEvents       AchievementEvent[]
+  offlineActivities       OfflineActivityRecommendation[]
+  realWorldGifts          RealWorldGift[]
 
   @@map("conversations")
 }
 
 model Message {
-  id             String       @id @default(uuid())
-  conversationId String       @map("conversation_id")
-  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  id             String                  @id @default(uuid())
+  conversationId String                  @map("conversation_id")
+  conversation   Conversation            @relation(fields: [conversationId], references: [id])
   role           String // "user" or "assistant"
   content        String
   metadata       Json?
-  createdAt      DateTime     @default(now()) @map("created_at")
+  createdAt      DateTime                @default(now()) @map("created_at")
   bugReports     BugReport[]
   attachments    ChatMessageAttachment[]
-  linkCards       ChatLinkCard[]
+  linkCards      ChatLinkCard[]
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@map("messages")
 }
 
 model ChatMessageAttachment {
-  id             String       @id @default(uuid())
-  userId         String       @map("user_id")
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  conversationId String       @map("conversation_id")
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  messageId      String?      @map("message_id")
-  message        Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  kind           String       @default("image")
-  name           String?
-  mime           String
-  size           Int
-  width          Int?
-  height         Int?
-  durationSeconds        Int?    @map("duration_seconds")
-  storageKey     String       @unique @map("storage_key")
-  url            String
-  visionStatus   String       @default("pending") @map("vision_status")
-  visionSummary  String?      @map("vision_summary")
-  visionError    String?      @map("vision_error")
-  transcriptionStatus    String? @map("transcription_status")
-  transcriptionText      String? @map("transcription_text")
-  transcriptionModel     String? @map("transcription_model")
-  transcriptionRequestId String? @map("transcription_request_id")
-  transcriptionError     String? @map("transcription_error")
-  createdAt      DateTime     @default(now()) @map("created_at")
-  updatedAt      DateTime     @updatedAt @map("updated_at")
+  id                     String       @id @default(uuid())
+  userId                 String       @map("user_id")
+  user                   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId         String       @map("conversation_id")
+  conversation           Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId              String?      @map("message_id")
+  message                Message?     @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  kind                   String       @default("image")
+  name                   String?
+  mime                   String
+  size                   Int
+  width                  Int?
+  height                 Int?
+  durationSeconds        Int?         @map("duration_seconds")
+  storageKey             String       @unique @map("storage_key")
+  url                    String
+  visionStatus           String       @default("pending") @map("vision_status")
+  visionSummary          String?      @map("vision_summary")
+  visionError            String?      @map("vision_error")
+  transcriptionStatus    String?      @map("transcription_status")
+  transcriptionText      String?      @map("transcription_text")
+  transcriptionModel     String?      @map("transcription_model")
+  transcriptionRequestId String?      @map("transcription_request_id")
+  transcriptionError     String?      @map("transcription_error")
+  createdAt              DateTime     @default(now()) @map("created_at")
+  updatedAt              DateTime     @updatedAt @map("updated_at")
 
   @@index([conversationId, createdAt(sort: Desc)])
   @@index([messageId])
@@ -281,57 +283,57 @@ model ChatLinkCard {
   finalUrl       String       @map("final_url")
   platform       String
   title          String
-  description    String      @default("")
+  description    String       @default("")
   author         String?
-  imageUrl       String?     @map("image_url")
-  contentText    String      @default("") @map("content_text")
-  originalText   String      @default("") @map("original_text")
-  summary        String      @default("")
-  status         String      @default("ready")
+  imageUrl       String?      @map("image_url")
+  contentText    String       @default("") @map("content_text")
+  originalText   String       @default("") @map("original_text")
+  summary        String       @default("")
+  status         String       @default("ready")
   error          String?
   metadata       Json?
-  createdAt      DateTime    @default(now()) @map("created_at")
-  updatedAt      DateTime    @updatedAt @map("updated_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
 
+  @@unique([userId, conversationId, finalUrl, role], map: "chat_link_cards_user_conv_final_role_unique")
   @@index([conversationId, createdAt(sort: Desc)], map: "chat_link_cards_conversation_created_idx")
   @@index([userId, createdAt(sort: Desc)], map: "chat_link_cards_user_created_idx")
   @@index([messageId], map: "chat_link_cards_message_idx")
   @@index([platform, createdAt(sort: Desc)], map: "chat_link_cards_platform_created_idx")
-  @@unique([userId, conversationId, finalUrl, role], map: "chat_link_cards_user_conv_final_role_unique")
   @@map("chat_link_cards")
 }
 
 model GameSession {
-  id                String        @id @default(uuid())
-  provider          String        @default("sud")
-  gameKey           String?       @map("game_key")
-  status            String        @default("created")
-  userId            String        @map("user_id")
-  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId           String        @map("agent_id")
-  agent             AiAgent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  workspaceId       String?       @map("workspace_id")
-  workspace         ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  conversationId    String?       @map("conversation_id")
-  conversation      Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  mgId              String        @map("mg_id")
-  roomId            String        @map("room_id")
-  playMode          String        @default("versus") @map("play_mode")
-  difficulty        String        @default("newbie")
-  aiLevel           Int           @default(1) @map("ai_level")
-  sdkEnabled        Boolean       @default(false) @map("sdk_enabled")
-  sudCode           String?       @map("sud_code")
-  sudCodeExpiresAt  DateTime?     @map("sud_code_expires_at")
-  userPlayer        Json          @map("user_player")
-  aiPlayer          Json          @map("ai_player")
-  companionReply    String?       @map("companion_reply")
-  result            Json?
-  durationSeconds   Int?          @map("duration_seconds")
-  startedAt         DateTime?     @map("started_at")
-  endedAt           DateTime?     @map("ended_at")
-  createdAt         DateTime      @default(now()) @map("created_at")
-  updatedAt         DateTime      @updatedAt @map("updated_at")
-  events            GameEvent[]
+  id               String         @id @default(uuid())
+  provider         String         @default("sud")
+  gameKey          String?        @map("game_key")
+  status           String         @default("created")
+  userId           String         @map("user_id")
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId          String         @map("agent_id")
+  agent            AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId      String?        @map("workspace_id")
+  workspace        ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId   String?        @map("conversation_id")
+  conversation     Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  mgId             String         @map("mg_id")
+  roomId           String         @map("room_id")
+  playMode         String         @default("versus") @map("play_mode")
+  difficulty       String         @default("newbie")
+  aiLevel          Int            @default(1) @map("ai_level")
+  sdkEnabled       Boolean        @default(false) @map("sdk_enabled")
+  sudCode          String?        @map("sud_code")
+  sudCodeExpiresAt DateTime?      @map("sud_code_expires_at")
+  userPlayer       Json           @map("user_player")
+  aiPlayer         Json           @map("ai_player")
+  companionReply   String?        @map("companion_reply")
+  result           Json?
+  durationSeconds  Int?           @map("duration_seconds")
+  startedAt        DateTime?      @map("started_at")
+  endedAt          DateTime?      @map("ended_at")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+  events           GameEvent[]
 
   @@index([userId, createdAt(sort: Desc)], map: "game_sessions_user_created_idx")
   @@index([agentId, createdAt(sort: Desc)], map: "game_sessions_agent_created_idx")
@@ -359,6 +361,59 @@ model GameEvent {
   @@index([sessionId, clientEventId], map: "game_events_session_client_event_idx")
   @@index([eventType, createdAt(sort: Desc)], map: "game_events_type_created_idx")
   @@map("game_events")
+}
+
+model NativeGameConfig {
+  gameKey            String                    @id @map("game_key")
+  mode               String                    @default("adaptive")
+  baseStrength       Int                       @default(50) @map("base_strength")
+  minStrength        Int                       @default(20) @map("min_strength")
+  maxStrength        Int                       @default(85) @map("max_strength")
+  targetUserRate     Float                     @default(0.55) @map("target_user_rate")
+  adjustmentWindow   Int                       @default(10) @map("adjustment_window")
+  minimumGames       Int                       @default(3) @map("minimum_games")
+  maximumStep        Int                       @default(5) @map("maximum_step")
+  algorithmOverrides Json                      @default("{}") @map("algorithm_overrides")
+  version            Int                       @default(1)
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  versions           NativeGameConfigVersion[]
+
+  @@map("native_game_configs")
+}
+
+model NativeGameConfigVersion {
+  id          String           @id @default(uuid())
+  gameKey     String           @map("game_key")
+  game        NativeGameConfig @relation(fields: [gameKey], references: [gameKey], onDelete: Cascade)
+  version     Int
+  config      Json
+  publishedAt DateTime         @default(now()) @map("published_at")
+
+  @@unique([gameKey, version], map: "native_game_config_versions_game_version_key")
+  @@index([gameKey, publishedAt(sort: Desc)], map: "native_game_config_versions_game_published_idx")
+  @@map("native_game_config_versions")
+}
+
+model NativeGameSkillState {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId           String   @map("agent_id")
+  agent             AiAgent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  gameKey           String   @map("game_key")
+  effectiveStrength Int      @default(50) @map("effective_strength")
+  completedGames    Int      @default(0) @map("completed_games")
+  ewmaUserRate      Float?   @map("ewma_user_rate")
+  wins              Int      @default(0)
+  losses            Int      @default(0)
+  draws             Int      @default(0)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, agentId, gameKey], map: "native_game_skill_states_pair_game_key")
+  @@index([gameKey, updatedAt(sort: Desc)], map: "native_game_skill_states_game_updated_idx")
+  @@map("native_game_skill_states")
 }
 
 model MusicFavorite {
@@ -543,21 +598,21 @@ model UserDailyActivity {
 }
 
 model AchievementUnlock {
-  id            String         @id @default(uuid())
-  userId        String         @map("user_id")
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId       String         @map("agent_id")
-  agent         AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  workspaceId   String?        @map("workspace_id")
-  workspace     ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  conversationId String?       @map("conversation_id")
-  conversation  Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  achievementId Int            @map("achievement_id")
-  metadata      Json           @default("{}")
-  notifiedAt    DateTime?      @map("notified_at")
-  unlockedAt    DateTime       @default(now()) @map("unlocked_at")
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
+  id             String         @id @default(uuid())
+  userId         String         @map("user_id")
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String         @map("agent_id")
+  agent          AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId    String?        @map("workspace_id")
+  workspace      ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId String?        @map("conversation_id")
+  conversation   Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  achievementId  Int            @map("achievement_id")
+  metadata       Json           @default("{}")
+  notifiedAt     DateTime?      @map("notified_at")
+  unlockedAt     DateTime       @default(now()) @map("unlocked_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
 
   @@unique([userId, agentId, achievementId], map: "achievement_unlocks_user_agent_achievement_key")
   @@index([userId, agentId, unlockedAt(sort: Desc)], map: "achievement_unlocks_user_agent_idx")
@@ -588,21 +643,21 @@ model AchievementEvent {
 }
 
 model PushDevice {
-  id            String    @id @default(uuid())
-  userId        String    @map("user_id")
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  platform      String
-  provider      String    @default("apns")
-  token         String
-  environment   String    @default("sandbox")
-  bundleId      String?   @map("bundle_id")
-  deviceId      String?   @map("device_id")
-  appVersion    String?   @map("app_version")
-  enabled       Boolean   @default(true)
-  lastSeenAt    DateTime  @default(now()) @map("last_seen_at")
-  disabledAt    DateTime? @map("disabled_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform    String
+  provider    String    @default("apns")
+  token       String
+  environment String    @default("sandbox")
+  bundleId    String?   @map("bundle_id")
+  deviceId    String?   @map("device_id")
+  appVersion  String?   @map("app_version")
+  enabled     Boolean   @default(true)
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at")
+  disabledAt  DateTime? @map("disabled_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
   @@unique([provider, token], map: "push_devices_provider_token_key")
   @@index([userId, enabled, lastSeenAt(sort: Desc)], map: "push_devices_user_enabled_idx")
@@ -611,27 +666,27 @@ model PushDevice {
 }
 
 model NotificationEvent {
-  id                 String    @id @default(uuid())
-  userId             String    @map("user_id")
-  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId            String?   @map("agent_id")
-  workspaceId        String?   @map("workspace_id")
-  conversationId     String?   @map("conversation_id")
-  messageId          String?   @map("message_id")
-  type               String
-  title              String
-  body               String
-  payload            Json      @default("{}")
-  dedupeKey          String    @map("dedupe_key")
-  status             String    @default("pending")
-  provider           String    @default("apns")
-  providerMessageId  String?   @map("provider_message_id")
-  attempts           Int       @default(0)
-  error              String?
-  scheduledFor       DateTime  @default(now()) @map("scheduled_for")
-  sentAt             DateTime? @map("sent_at")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  id                String    @id @default(uuid())
+  userId            String    @map("user_id")
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId           String?   @map("agent_id")
+  workspaceId       String?   @map("workspace_id")
+  conversationId    String?   @map("conversation_id")
+  messageId         String?   @map("message_id")
+  type              String
+  title             String
+  body              String
+  payload           Json      @default("{}")
+  dedupeKey         String    @map("dedupe_key")
+  status            String    @default("pending")
+  provider          String    @default("apns")
+  providerMessageId String?   @map("provider_message_id")
+  attempts          Int       @default(0)
+  error             String?
+  scheduledFor      DateTime  @default(now()) @map("scheduled_for")
+  sentAt            DateTime? @map("sent_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
   @@unique([userId, type, dedupeKey], map: "notification_events_user_type_dedupe_key")
   @@index([status, scheduledFor], map: "notification_events_status_scheduled_idx")
@@ -640,14 +695,14 @@ model NotificationEvent {
 }
 
 model UserWallet {
-  id                       String   @id @default(uuid())
-  userId                   String   @unique @map("user_id")
-  user                     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  ticketBalance            Int      @default(0) @map("ticket_balance")
-  pointBalance             Int      @default(0) @map("point_balance")
-  achievementPointsSynced  Int      @default(0) @map("achievement_points_synced")
-  createdAt                DateTime @default(now()) @map("created_at")
-  updatedAt                DateTime @updatedAt @map("updated_at")
+  id                      String   @id @default(uuid())
+  userId                  String   @unique @map("user_id")
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ticketBalance           Int      @default(0) @map("ticket_balance")
+  pointBalance            Int      @default(0) @map("point_balance")
+  achievementPointsSynced Int      @default(0) @map("achievement_points_synced")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
 
   @@map("user_wallets")
 }
@@ -999,23 +1054,23 @@ model MemoryVisibleUseEvent {
 }
 
 model CrisisEvent {
-  id                  String   @id @default(uuid())
-  messageId           String?  @map("message_id")
-  conversationId      String   @map("conversation_id")
-  agentId             String?  @map("agent_id")
-  userId              String?  @map("user_id")
-  workspaceId         String?  @map("workspace_id")
-  traceId             String?  @map("trace_id")
-  status              String
-  category            String?
-  severity            String?
-  handlerPath         String?  @map("handler_path")
-  aftercareTriggered  Boolean  @default(false) @map("aftercare_triggered")
-  safetyCheckMode     String?  @map("safety_check_mode")
-  semanticChecked     Boolean  @default(false) @map("semantic_checked")
-  semanticDetected    Boolean  @default(false) @map("semantic_detected")
-  payload             Json     @default("{}")
-  createdAt           DateTime @default(now()) @map("created_at")
+  id                 String   @id @default(uuid())
+  messageId          String?  @map("message_id")
+  conversationId     String   @map("conversation_id")
+  agentId            String?  @map("agent_id")
+  userId             String?  @map("user_id")
+  workspaceId        String?  @map("workspace_id")
+  traceId            String?  @map("trace_id")
+  status             String
+  category           String?
+  severity           String?
+  handlerPath        String?  @map("handler_path")
+  aftercareTriggered Boolean  @default(false) @map("aftercare_triggered")
+  safetyCheckMode    String?  @map("safety_check_mode")
+  semanticChecked    Boolean  @default(false) @map("semantic_checked")
+  semanticDetected   Boolean  @default(false) @map("semantic_detected")
+  payload            Json     @default("{}")
+  createdAt          DateTime @default(now()) @map("created_at")
 
   @@index([createdAt(sort: Desc)])
   @@index([agentId, userId, createdAt(sort: Desc)])
@@ -1229,7 +1284,6 @@ model TimeTrigger {
   // scheduling.upsert_reminder_trigger 幂等查 (按 agent + memory_id 找 existing):
   // 跟 cancel 不同, 这边按 agent_id 维度 (multi-agent 用户只查当前 agent 的).
   @@index([aiAgentId, actionType, isActive])
-
   @@map("time_triggers")
 }
 
@@ -1306,29 +1360,29 @@ model Holiday {
 // 每条 chat 请求结束时写一行的 token 用量明细. 跟 message_traces 解耦 —
 // 后者是 lazy 写 (用户点 Trace 才落库), 这张表是热路径强写, 用于后台统计概览.
 model LlmUsage {
-  id             String   @id @default(uuid())
+  id               String   @id @default(uuid())
   // conversation_id 可空: 非会话场景 (admin 建 agent / 每日作息 cron) 也写一行,
   // 这两类没有 conversation 归属, 用 scope 区分.
-  conversationId String?  @map("conversation_id")
+  conversationId   String?  @map("conversation_id")
   // 'chat' | 'post_process' | 'proactive' | 'agent_creation' | 'schedule_cron'
-  scope          String   @default("chat") @map("scope")
-  agentId        String?  @map("agent_id")
-  userId         String?  @map("user_id")
+  scope            String   @default("chat") @map("scope")
+  agentId          String?  @map("agent_id")
+  userId           String?  @map("user_id")
   // 关联到 message_traces (nullable, 不外键, 避免删 trace 级联到 usage 历史)
-  traceId        String?  @map("trace_id")
-  inputTokens    Int      @map("input_tokens")
-  outputTokens   Int      @map("output_tokens")
+  traceId          String?  @map("trace_id")
+  inputTokens      Int      @map("input_tokens")
+  outputTokens     Int      @map("output_tokens")
   // {"qwen3.5-flash": {"input": 1200, "output": 80}, "qwen3.5-plus": {...}}
-  tokensByModel  Json     @map("tokens_by_model")
-  costCny        Float    @map("cost_cny")
-  callCount      Int      @map("call_count")
+  tokensByModel    Json     @map("tokens_by_model")
+  costCny          Float    @map("cost_cny")
+  callCount        Int      @map("call_count")
   // Session-level runtime health metrics, accumulated by resilience.py.
-  latencyMsTotal  Int     @default(0) @map("latency_ms_total")
-  latencyCount    Int     @default(0) @map("latency_count")
-  failureCount    Int     @default(0) @map("failure_count")
-  fallbackCount   Int     @default(0) @map("fallback_count")
-  circuitOpenCount Int    @default(0) @map("circuit_open_count")
-  createdAt      DateTime @default(now()) @map("created_at")
+  latencyMsTotal   Int      @default(0) @map("latency_ms_total")
+  latencyCount     Int      @default(0) @map("latency_count")
+  failureCount     Int      @default(0) @map("failure_count")
+  fallbackCount    Int      @default(0) @map("fallback_count")
+  circuitOpenCount Int      @default(0) @map("circuit_open_count")
+  createdAt        DateTime @default(now()) @map("created_at")
 
   @@index([agentId, createdAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
@@ -1338,39 +1392,39 @@ model LlmUsage {
 }
 
 model OfflineActivityRecommendation {
-  id             String       @id @default(uuid())
-  userId         String       @map("user_id")
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId        String       @map("agent_id")
-  agent          AiAgent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  workspaceId    String?      @map("workspace_id")
-  workspace      ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  conversationId String?      @map("conversation_id")
-  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  status         String       @default("pending")
-  source         String       @default("scheduled")
+  id             String                    @id @default(uuid())
+  userId         String                    @map("user_id")
+  user           User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String                    @map("agent_id")
+  agent          AiAgent                   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId    String?                   @map("workspace_id")
+  workspace      ChatWorkspace?            @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId String?                   @map("conversation_id")
+  conversation   Conversation?             @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  status         String                    @default("pending")
+  source         String                    @default("scheduled")
   title          String
-  summary        String       @default("")
-  description    String       @default("")
+  summary        String                    @default("")
+  description    String                    @default("")
   category       String?
   city           String?
-  locationName   String?      @map("location_name")
+  locationName   String?                   @map("location_name")
   address        String?
-  startsAt       DateTime?    @map("starts_at")
-  endsAt         DateTime?    @map("ends_at")
-  officialUrl    String?      @map("official_url")
-  imageUrls      Json         @default("[]") @map("image_urls")
-  searchSources  Json         @default("[]") @map("search_sources")
-  easterEggTask  Json?        @map("easter_egg_task")
-  taskHint       String?      @map("task_hint")
+  startsAt       DateTime?                 @map("starts_at")
+  endsAt         DateTime?                 @map("ends_at")
+  officialUrl    String?                   @map("official_url")
+  imageUrls      Json                      @default("[]") @map("image_urls")
+  searchSources  Json                      @default("[]") @map("search_sources")
+  easterEggTask  Json?                     @map("easter_egg_task")
+  taskHint       String?                   @map("task_hint")
   feedback       OfflineActivityFeedback[]
   media          OfflineActivityMedia[]
-  acceptedAt     DateTime?    @map("accepted_at")
-  ignoredAt      DateTime?    @map("ignored_at")
-  completedAt    DateTime?    @map("completed_at")
-  expiresAt      DateTime?    @map("expires_at")
-  createdAt      DateTime     @default(now()) @map("created_at")
-  updatedAt      DateTime     @updatedAt @map("updated_at")
+  acceptedAt     DateTime?                 @map("accepted_at")
+  ignoredAt      DateTime?                 @map("ignored_at")
+  completedAt    DateTime?                 @map("completed_at")
+  expiresAt      DateTime?                 @map("expires_at")
+  createdAt      DateTime                  @default(now()) @map("created_at")
+  updatedAt      DateTime                  @updatedAt @map("updated_at")
 
   @@index([userId, status, createdAt(sort: Desc)], map: "offline_activity_user_status_idx")
   @@index([workspaceId, createdAt(sort: Desc)], map: "offline_activity_workspace_idx")
@@ -1378,22 +1432,22 @@ model OfflineActivityRecommendation {
 }
 
 model OfflineActivityMedia {
-  id               String       @id @default(uuid())
-  recommendationId String       @map("recommendation_id")
+  id               String                        @id @default(uuid())
+  recommendationId String                        @map("recommendation_id")
   recommendation   OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  userId           String       @map("user_id")
-  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  kind             String       @default("image")
+  userId           String                        @map("user_id")
+  user             User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind             String                        @default("image")
   name             String?
   mime             String
   size             Int
   width            Int?
   height           Int?
-  durationSeconds  Int?         @map("duration_seconds")
-  storageKey       String       @unique @map("storage_key")
+  durationSeconds  Int?                          @map("duration_seconds")
+  storageKey       String                        @unique @map("storage_key")
   url              String
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
+  createdAt        DateTime                      @default(now()) @map("created_at")
+  updatedAt        DateTime                      @updatedAt @map("updated_at")
 
   @@index([recommendationId, createdAt(sort: Desc)], map: "offline_activity_media_recommendation_idx")
   @@index([userId, createdAt(sort: Desc)], map: "offline_activity_media_user_idx")
@@ -1401,17 +1455,17 @@ model OfflineActivityMedia {
 }
 
 model OfflineActivityFeedback {
-  id                 String       @id @default(uuid())
-  recommendationId   String       @map("recommendation_id")
+  id                 String                        @id @default(uuid())
+  recommendationId   String                        @map("recommendation_id")
   recommendation     OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  userId             String       @map("user_id")
-  user               User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId             String                        @map("user_id")
+  user               User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
   kind               String
-  text               String       @default("")
-  photoAttachmentIds Json         @default("[]") @map("photo_attachment_ids")
-  audioAttachmentId  String?      @map("audio_attachment_id")
-  metadata           Json         @default("{}")
-  createdAt          DateTime     @default(now()) @map("created_at")
+  text               String                        @default("")
+  photoAttachmentIds Json                          @default("[]") @map("photo_attachment_ids")
+  audioAttachmentId  String?                       @map("audio_attachment_id")
+  metadata           Json                          @default("{}")
+  createdAt          DateTime                      @default(now()) @map("created_at")
 
   @@index([recommendationId])
   @@map("offline_activity_feedback")
@@ -1436,77 +1490,77 @@ model GiftAddress {
 }
 
 model RealWorldGift {
-  id               String       @id @default(uuid())
-  userId           String       @map("user_id")
-  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId          String       @map("agent_id")
-  agent            AiAgent      @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  workspaceId      String?      @map("workspace_id")
-  workspace        ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  conversationId   String?      @map("conversation_id")
-  conversation     Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  status           String       @default("pending_address")
-  triggerType      String       @default("daily_probability") @map("trigger_type")
-  giftName         String       @default("") @map("gift_name")
-  giftReason       String?      @map("gift_reason")
-  giftNote         String?      @map("gift_note")
-  productImageUrl  String?      @map("product_image_url")
-  providerProductId String?     @map("provider_product_id")
-  productUrl       String?      @map("product_url")
-  productSnapshot  Json         @default("{}") @map("product_snapshot")
-  targetAmountCents Int         @default(0) @map("target_amount_cents")
-  paidAmountCents   Int         @default(0) @map("paid_amount_cents")
-  provider         String       @default("mock")
-  providerOrderId  String?      @map("provider_order_id")
-  trackingNumber   String?      @map("tracking_number")
-  logisticsProvider String?     @map("logistics_provider")
-  providerPayload  Json         @default("{}") @map("provider_payload")
-  logisticsPayload Json         @default("{}") @map("logistics_payload")
-  lastTrackingSyncedAt DateTime? @map("last_tracking_synced_at")
-  addressSnapshot  Json         @default("{}") @map("address_snapshot")
-  failureReason    String?      @map("failure_reason")
-  thanksMessage    String?      @map("thanks_message")
-  thanksSentAt     DateTime?    @map("thanks_sent_at")
-  orderedAt        DateTime?    @map("ordered_at")
-  shippedAt        DateTime?    @map("shipped_at")
-  deliveredAt      DateTime?    @map("delivered_at")
-  trackingEvents   GiftTrackingEvent[]
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
+  id                   String              @id @default(uuid())
+  userId               String              @map("user_id")
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId              String              @map("agent_id")
+  agent                AiAgent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId          String?             @map("workspace_id")
+  workspace            ChatWorkspace?      @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  conversationId       String?             @map("conversation_id")
+  conversation         Conversation?       @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  status               String              @default("pending_address")
+  triggerType          String              @default("daily_probability") @map("trigger_type")
+  giftName             String              @default("") @map("gift_name")
+  giftReason           String?             @map("gift_reason")
+  giftNote             String?             @map("gift_note")
+  productImageUrl      String?             @map("product_image_url")
+  providerProductId    String?             @map("provider_product_id")
+  productUrl           String?             @map("product_url")
+  productSnapshot      Json                @default("{}") @map("product_snapshot")
+  targetAmountCents    Int                 @default(0) @map("target_amount_cents")
+  paidAmountCents      Int                 @default(0) @map("paid_amount_cents")
+  provider             String              @default("mock")
+  providerOrderId      String?             @map("provider_order_id")
+  trackingNumber       String?             @map("tracking_number")
+  logisticsProvider    String?             @map("logistics_provider")
+  providerPayload      Json                @default("{}") @map("provider_payload")
+  logisticsPayload     Json                @default("{}") @map("logistics_payload")
+  lastTrackingSyncedAt DateTime?           @map("last_tracking_synced_at")
+  addressSnapshot      Json                @default("{}") @map("address_snapshot")
+  failureReason        String?             @map("failure_reason")
+  thanksMessage        String?             @map("thanks_message")
+  thanksSentAt         DateTime?           @map("thanks_sent_at")
+  orderedAt            DateTime?           @map("ordered_at")
+  shippedAt            DateTime?           @map("shipped_at")
+  deliveredAt          DateTime?           @map("delivered_at")
+  trackingEvents       GiftTrackingEvent[]
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
 
   @@index([userId, status, createdAt(sort: Desc)], map: "real_world_gifts_user_status_idx")
   @@map("real_world_gifts")
 }
 
 model GiftTrackingEvent {
-  id          String   @id @default(uuid())
-  giftId      String   @map("gift_id")
+  id          String        @id @default(uuid())
+  giftId      String        @map("gift_id")
   gift        RealWorldGift @relation(fields: [giftId], references: [id], onDelete: Cascade)
   status      String
   title       String
   description String?
   location    String?
-  occurredAt  DateTime @map("occurred_at")
-  createdAt   DateTime @default(now()) @map("created_at")
+  occurredAt  DateTime      @map("occurred_at")
+  createdAt   DateTime      @default(now()) @map("created_at")
 
   @@index([giftId, occurredAt], map: "gift_tracking_events_gift_time_idx")
   @@map("gift_tracking_events")
 }
 
 model RealWorldTriggerState {
-  id                             String   @id @default(uuid())
-  userId                         String   @map("user_id")
-  user                           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentId                        String   @map("agent_id")
-  agent                          AiAgent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  workspaceId                    String?  @unique @map("workspace_id")
-  workspace                      ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  nextActivityRecommendationAt   DateTime? @map("next_activity_recommendation_at")
-  lastActivityRecommendationAt   DateTime? @map("last_activity_recommendation_at")
-  lastGiftPaidAt                 DateTime? @map("last_gift_paid_at")
-  metadata                       Json      @default("{}")
-  createdAt                      DateTime  @default(now()) @map("created_at")
-  updatedAt                      DateTime  @updatedAt @map("updated_at")
+  id                           String         @id @default(uuid())
+  userId                       String         @map("user_id")
+  user                         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId                      String         @map("agent_id")
+  agent                        AiAgent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspaceId                  String?        @unique @map("workspace_id")
+  workspace                    ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  nextActivityRecommendationAt DateTime?      @map("next_activity_recommendation_at")
+  lastActivityRecommendationAt DateTime?      @map("last_activity_recommendation_at")
+  lastGiftPaidAt               DateTime?      @map("last_gift_paid_at")
+  metadata                     Json           @default("{}")
+  createdAt                    DateTime       @default(now()) @map("created_at")
+  updatedAt                    DateTime       @updatedAt @map("updated_at")
 
   @@unique([userId, agentId])
   @@index([nextActivityRecommendationAt], map: "real_world_trigger_states_due_idx")
@@ -1527,7 +1581,6 @@ model RealWorldRechargeLedger {
   @@map("real_world_recharge_ledger")
 }
 
-
 // 全局运行时配置 (admin "系统设置" 改, prod 起后可热更换模型而无需重启).
 // 单行 (id 永远=1) 设计避免 0/N 行歧义. 字段 nullable 表示 "未设, 走 env 默认".
 //
@@ -1537,25 +1590,25 @@ model RealWorldRechargeLedger {
 // 改动通过 services/runtime_config.invalidate_caches() 触发 lru_cache 清理,
 // 下条 LLM 调用按新值重建实例; 当前流式中的 chain 仍用旧模型完成 (无中断).
 model SystemConfig {
-  id                  Int      @id @default(1)
-  onlineModel         Boolean? @map("online_model")
+  id                     Int      @id @default(1)
+  onlineModel            Boolean? @map("online_model")
   // Legacy shared provider. New config resolves chat/small provider separately.
-  remoteProvider      String?  @map("remote_provider")
-  remoteChatProvider  String?  @map("remote_chat_provider")
-  remoteSmallProvider String?  @map("remote_small_provider")
-  localChatModel      String?  @map("local_chat_model")
-  localSmallModel     String?  @map("local_small_model")
-  remoteChatModel     String?  @map("remote_chat_model")
-  remoteSmallModel    String?  @map("remote_small_model")
+  remoteProvider         String?  @map("remote_provider")
+  remoteChatProvider     String?  @map("remote_chat_provider")
+  remoteSmallProvider    String?  @map("remote_small_provider")
+  localChatModel         String?  @map("local_chat_model")
+  localSmallModel        String?  @map("local_small_model")
+  remoteChatModel        String?  @map("remote_chat_model")
+  remoteSmallModel       String?  @map("remote_small_model")
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
-  defaultTemplateAgentId String? @map("default_template_agent_id")
+  defaultTemplateAgentId String?  @map("default_template_agent_id")
   // 霸王餐激活校验码功能开关: 关闭后所有校验码立即失效且不再生成 (admin 可切换).
-  mealCodeEnabled  Boolean  @default(true) @map("meal_code_enabled")
+  mealCodeEnabled        Boolean  @default(true) @map("meal_code_enabled")
   // 校验码生成锚点 (unix 秒): 每次「开启」时刷新 — 码与窗口计时都相对锚点推导,
   // 锚点一变旧码全部立即失效, 新码从满 5 分钟倒计时开始. null = 0 (绝对时间窗).
-  mealCodeAnchor   BigInt?  @map("meal_code_anchor")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  mealCodeAnchor         BigInt?  @map("meal_code_anchor")
+  updatedAt              DateTime @updatedAt @map("updated_at")
 
   @@map("system_config")
 }
@@ -1634,7 +1687,6 @@ model AgentConfigOverride {
   @@map("agent_config_overrides")
 }
 
-
 // 模型库 — admin "系统设置 → 模型库" 维护. system_config / agent_config_overrides
 // 的 chat/small 字段从这里选 identifier, role-specific remote provider 用于消歧;
 // pricing.estimate_cost_cny 也从这里取价格.
@@ -1648,25 +1700,25 @@ model AgentConfigOverride {
 //
 // 暂不支持删除 — 改 enabled=false 即可. 删了被引用会让 system_config 指 "幽灵 ID".
 model ModelRegistry {
-  id                   String   @id @default(uuid())
-  identifier           String
-  displayName          String?  @map("display_name")
-  provider             String   // ollama | dashscope | deepseek | ark | minimax
-  enabled              Boolean  @default(true)
-  contextWindow        Int?     @map("context_window")
+  id                        String   @id @default(uuid())
+  identifier                String
+  displayName               String?  @map("display_name")
+  provider                  String // ollama | dashscope | deepseek | ark | minimax
+  enabled                   Boolean  @default(true)
+  contextWindow             Int?     @map("context_window")
   // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是
   // experimental, 启用要全局 flag. 本场景精度需求低 (元/1M tokens 4-5 位小数足够),
   // float 单次乘法误差远小于 1 分钱, 不影响计费统计.
-  inputCostPerMillion  Float?   @map("input_cost_per_million")
-  outputCostPerMillion Float?   @map("output_cost_per_million")
+  inputCostPerMillion       Float?   @map("input_cost_per_million")
+  outputCostPerMillion      Float?   @map("output_cost_per_million")
   // prefix cache 命中部分的 input 单价 (DeepSeek 命中 ≈ 未命中 1/40-1/120).
   // NULL = 未配置 → 计费按未命中价保守估算.
-  cachedInputCostPerMillion Float? @map("cached_input_cost_per_million")
-  notes                String?
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  cachedInputCostPerMillion Float?   @map("cached_input_cost_per_million")
+  notes                     String?
+  createdAt                 DateTime @default(now()) @map("created_at")
+  updatedAt                 DateTime @updatedAt @map("updated_at")
 
-  @@index([provider, enabled])
   @@unique([provider, identifier])
+  @@index([provider, enabled])
   @@map("model_registry")
 }

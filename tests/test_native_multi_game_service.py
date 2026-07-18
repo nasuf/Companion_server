@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, call
 import pytest
 
 from app.models.game import SudPlayerInfo, SudSessionResponse
-from app.services.games import native
+from app.services.games import balance, native
 
 
 def _session(game_key: str) -> SudSessionResponse:
@@ -112,6 +112,9 @@ async def test_create_session_writes_session_and_first_event_atomically(monkeypa
     context = AsyncMock(return_value=("workspace-1", "conversation-1"))
     monkeypatch.setattr(native.sud, "_resolve_owned_context", context)
     monkeypatch.setattr(native.sud, "_row_to_session", lambda _row: expected)
+    balance_snapshot = balance._default_config("gomoku").snapshot(58)
+    resolve_balance = AsyncMock(return_value=balance_snapshot)
+    monkeypatch.setattr(native.balance, "resolve_for_session", resolve_balance)
 
     created = await native.create_session(
         user_id="user-1",
@@ -128,7 +131,14 @@ async def test_create_session_writes_session_and_first_event_atomically(monkeypa
     assert "INSERT INTO game_events" in query
     assert "CROSS JOIN created_event" in query
     assert args[1] == "gomoku"
+    assert '"effective_strength":58' in args[13]
+    assert '"config_version":1' in args[15]
     context.assert_awaited_once()
+    resolve_balance.assert_awaited_once_with(
+        user_id="user-1",
+        agent_id="agent-1",
+        game_key="gomoku",
+    )
 
 
 @pytest.mark.asyncio

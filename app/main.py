@@ -175,6 +175,7 @@ from app.api.admin.model_registry import router as admin_model_registry_router
 from app.api.admin.memory_repairs import router as admin_memory_repairs_router
 from app.api.admin.runtime_jobs import router as admin_runtime_jobs_router
 from app.api.admin.meal import router as admin_meal_router
+from app.api.admin.game_configs import router as admin_game_configs_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -218,3 +219,4 @@ app.include_router(admin_model_registry_router)
 app.include_router(admin_memory_repairs_router)
 app.include_router(admin_runtime_jobs_router)
 app.include_router(admin_meal_router)
+app.include_router(admin_game_configs_router)

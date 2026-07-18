@@ -160,6 +160,9 @@ class NativeSessionResponse(BaseModel):
     play_mode: GamePlayMode
     difficulty: Literal["normal"] = "normal"
     ai_level: int
+    config_version: int = 1
+    effective_strength: int = 50
+    engine_config: dict[str, Any] = Field(default_factory=dict)
     user_player: SudPlayerInfo
     ai_player: SudPlayerInfo
     companion_reply: str | None = None
