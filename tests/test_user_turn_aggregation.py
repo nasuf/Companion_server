@@ -144,6 +144,66 @@ async def test_plan_appends_readonly_message_to_existing_delayed_reply(fake_aggr
 
 
 @pytest.mark.asyncio
+async def test_plan_coalesces_message_arriving_during_inflight_reply(
+    fake_aggregation_redis,
+):
+    """A normal message that lands while a reply is mid-generation must append
+    to the delayed queue (coalesce), not spawn an independent parallel turn."""
+    redis = fake_aggregation_redis
+    with (
+        patch("app.services.interaction.aggregation.get_redis", return_value=redis),
+        patch(
+            "app.services.interaction.user_turn_aggregation.has_pending_delayed_messages",
+            return_value=False,
+        ),
+        patch(
+            "app.services.interaction.user_turn_aggregation.is_reply_inflight",
+            return_value=True,
+        ),
+    ):
+        plan = await plan_user_message_aggregation(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="我准备去周游全国",
+            reply_context={"delay_seconds": 0},
+        )
+
+    assert plan.route == "immediate"
+    assert plan.metadata == {"queued": True, "append_delayed": True}
+
+
+@pytest.mark.asyncio
+async def test_plan_normal_message_uses_turn_window_when_not_inflight(
+    fake_aggregation_redis,
+):
+    """Sanity guard: with no queued reply and nothing in flight, a normal
+    message still opens a fresh turn window (no false coalescing)."""
+    redis = fake_aggregation_redis
+    with (
+        patch("app.services.interaction.aggregation.get_redis", return_value=redis),
+        patch(
+            "app.services.interaction.user_turn_aggregation.has_pending_delayed_messages",
+            return_value=False,
+        ),
+        patch(
+            "app.services.interaction.user_turn_aggregation.is_reply_inflight",
+            return_value=False,
+        ),
+    ):
+        plan = await plan_user_message_aggregation(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="我准备去周游全国",
+            reply_context={"delay_seconds": 0},
+        )
+
+    assert plan.route == "turn_window"
+    assert plan.metadata == {"queued": True}
+
+
+@pytest.mark.asyncio
 async def test_plan_record_request_bypasses_turn_window(fake_aggregation_redis):
     redis = fake_aggregation_redis
     with patch("app.services.interaction.aggregation.get_redis", return_value=redis):

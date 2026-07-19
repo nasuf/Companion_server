@@ -266,6 +266,51 @@ end
 """
 
 
+_INFLIGHT_KEY = "reply:inflight:{cid}"
+_INFLIGHT_TTL = 120
+
+
+async def mark_reply_inflight(conversation_id: str, ttl: int = _INFLIGHT_TTL) -> None:
+    """Flag that a reply is currently being generated for a conversation.
+
+    Consumed by ``plan_user_message_aggregation`` so a message that arrives
+    while a reply is mid-generation coalesces into the delayed queue instead of
+    spawning a second, near-identical parallel generation. TTL is a safety net
+    against a crash that skips the ``clear`` call — a stuck flag only delays
+    routing (messages still flush via the scan), it never starves replies.
+    """
+    if not conversation_id:
+        return
+    try:
+        redis = await get_redis()
+        await redis.set(_INFLIGHT_KEY.format(cid=conversation_id), "1", ex=ttl)
+    except Exception as e:
+        logger.warning(f"[INFLIGHT] mark failed conv={conversation_id}: {e}")
+
+
+async def clear_reply_inflight(conversation_id: str) -> None:
+    """Clear the in-flight reply flag once generation finishes (or fails)."""
+    if not conversation_id:
+        return
+    try:
+        redis = await get_redis()
+        await redis.delete(_INFLIGHT_KEY.format(cid=conversation_id))
+    except Exception as e:
+        logger.warning(f"[INFLIGHT] clear failed conv={conversation_id}: {e}")
+
+
+async def is_reply_inflight(conversation_id: str) -> bool:
+    """Return whether a reply is currently being generated for a conversation."""
+    if not conversation_id:
+        return False
+    try:
+        redis = await get_redis()
+        return await redis.exists(_INFLIGHT_KEY.format(cid=conversation_id)) > 0
+    except Exception as e:
+        logger.warning(f"[INFLIGHT] check failed conv={conversation_id}: {e}")
+        return False
+
+
 async def try_lock_conversation(conversation_id: str, ttl: int = 60) -> str | None:
     """Try to acquire a per-conversation lock.
 

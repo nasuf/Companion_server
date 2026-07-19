@@ -194,6 +194,11 @@ class FakeAggregationRedis:
     async def get(self, key):
         return self.strings.get(key)
 
+    async def exists(self, *keys):
+        return sum(
+            1 for k in keys if k in self.strings or k in self.lists or k in self.zsets
+        )
+
     async def delete(self, *keys):
         n = 0
         for k in keys:

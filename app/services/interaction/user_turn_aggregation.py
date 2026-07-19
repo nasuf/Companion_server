@@ -20,7 +20,10 @@ from app.services.chat.intent_dispatcher import (
     is_explicit_current_state_query,
     is_explicit_l3_recall_query,
 )
-from app.services.interaction.delayed_queue import has_pending_delayed_messages
+from app.services.interaction.delayed_queue import (
+    has_pending_delayed_messages,
+    is_reply_inflight,
+)
 from app.services.interaction.aggregation import (
     flush_pending,
     has_turn_pending,
@@ -180,7 +183,15 @@ async def plan_user_message_aggregation(
             fallback_context=reply_context,
         )
 
-    if await has_pending_delayed_messages(conversation_id):
+    # A message that lands while a reply is either already queued OR still being
+    # generated must coalesce into the delayed queue — otherwise it spawns an
+    # independent parallel turn that produces a second, near-identical reply
+    # (the "duplicate bubbles seconds apart" bug). The in-flight check closes
+    # the window where msg1 was already drained from the queue for generation
+    # but its reply is not yet persisted.
+    if await has_pending_delayed_messages(conversation_id) or await is_reply_inflight(
+        conversation_id
+    ):
         return UserMessageAggregationPlan(
             route="immediate",
             agent_id=agent_id,

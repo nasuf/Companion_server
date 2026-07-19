@@ -14,7 +14,11 @@ from app.db import db
 from app.observability import bind_context
 from app.observability.events import EVT_WS_CONNECT, EVT_WS_DISCONNECT, EVT_WS_MESSAGE_RECV
 from app.redis_client import is_redis_healthy
-from app.services.interaction.delayed_queue import enqueue_or_append_delayed
+from app.services.interaction.delayed_queue import (
+    clear_reply_inflight,
+    enqueue_or_append_delayed,
+    mark_reply_inflight,
+)
 from app.services.interaction.reply_context import build_reply_timing_context
 from app.services.interaction.user_turn_aggregation import (
     enqueue_planned_user_message,
@@ -575,7 +579,13 @@ async def _queue_reply(
             delivered_from_queue=True,
             forced_intent=forced_intent,
         )
-        await stream_to_ws(gen, conversation_id)
+        # Mark generation in-flight so a message arriving mid-reply coalesces
+        # into the delayed queue instead of racing a duplicate parallel reply.
+        await mark_reply_inflight(conversation_id)
+        try:
+            await stream_to_ws(gen, conversation_id)
+        finally:
+            await clear_reply_inflight(conversation_id)
         return
 
     # 用户连发非碎片：若已有 pending payload，append 到同一 due_at（沿用 spec §6.3

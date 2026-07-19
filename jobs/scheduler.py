@@ -30,7 +30,8 @@ from app.services.relationship.intimacy import compute_growth_intimacy, compute_
 from app.services.proactive.orchestrator import scan_proactive_states
 from app.services.interaction.delayed_queue import (
     enqueue_delayed_message, scan_due_delayed_messages, merge_delayed_payloads,
-    try_lock_conversation, unlock_conversation
+    try_lock_conversation, unlock_conversation,
+    mark_reply_inflight, clear_reply_inflight,
 )
 from app.services.interaction.user_turn_aggregation import scan_due_user_turns
 from app.services.proactive.triggers import scan_triggers
@@ -844,6 +845,9 @@ async def _run_aggregation_scan_body():
                     # fast path 本地命中或 slow path publish 跨 worker, 无需手工查 WS.
                     # 离线用户 (无 WS / 跨进程 publish 也无人订阅): 仍 await 消费完
                     # generator 触发 LLM + 持久化, 避免漏存回复.
+                    # 标记回复生成中: 生成期间到达的新消息在 plan_user_message_aggregation
+                    # 里会被路由到 delayed queue 合并, 而非另起一轮近似重复的回复.
+                    await mark_reply_inflight(conv_id)
                     await stream_to_ws(gen, conv_id)
                     logger.debug(f"Delayed reply pushed for conv={conv_id[:8]}")
                 except Exception as conv_err:
@@ -861,6 +865,7 @@ async def _run_aggregation_scan_body():
                             f"Failed to notify conv {conv_id[:8]} of error: {notify_err}"
                         )
             finally:
+                await clear_reply_inflight(conv_id)
                 await unlock_conversation(conv_id, lock_token)
     except Exception as e:
         logger.warning(f"Aggregation scan failed: {e}")
