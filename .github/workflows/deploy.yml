@@ -116,6 +116,8 @@ jobs:
             MINIMAX_API_KEY=${{ secrets.MINIMAX_API_KEY }}
             MINIMAX_BASE_URL=${{ vars.MINIMAX_BASE_URL || 'https://api.minimaxi.com/v1' }}
             ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
+            TRACE_BACKEND=${{ vars.TRACE_BACKEND || 'local' }}
+            TRACE_RETENTION_DAYS=${{ vars.TRACE_RETENTION_DAYS || '30' }}
             LANGSMITH_TRACING=${{ vars.LANGSMITH_TRACING }}
             REPLY_DELAY_ENABLED=${{ vars.REPLY_DELAY_ENABLED }}
             LANGSMITH_API_KEY=${{ secrets.LANGSMITH_API_KEY }}

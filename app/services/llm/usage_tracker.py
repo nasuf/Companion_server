@@ -188,13 +188,13 @@ async def traced_usage_session(
     agent_id: str | None,
     user_id: str | None,
 ):
-    """LangSmith trace + usage_session 组合, 给 yield 出来的 tracer 让调用方读 safe_trace_id."""
-    from app.services.chat.tracing import LangSmithTracer
+    """Trace + usage_session 组合, 给 yield 出来的 tracer 让调用方读 safe_trace_id."""
+    from app.services.chat.tracing import create_tracer
     from app.services.prompting.trace_components import (
         reset_prompt_render_trace,
         start_prompt_render_trace,
     )
-    tracer = LangSmithTracer(name, conversation_id or "").enter()
+    tracer = create_tracer(name, conversation_id or "").enter()
     prompt_trace_token = start_prompt_render_trace()
     try:
         async with usage_session(

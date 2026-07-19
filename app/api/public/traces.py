@@ -56,15 +56,15 @@ async def resolve_trace(
     message_id: str,
     user: dict = Depends(require_user),
 ):
-    """懒触发: 用户首次点 Trace 按钮调用. share_run + load_public_trace +
-    写 mirror + 返回 detail 一气呵成. 命中本地 mirror 直接返回, 走完一次
-    share 后续打开都是 ~50ms.
+    """懒触发: 用户首次点 Trace 按钮调用. 本地 trace_runs (或 legacy LangSmith)
+    → enrich → 写 mirror → 返回 detail 一气呵成. 命中本地 mirror 直接返回.
 
     返回:
-      200 {"trace_url": "...", "detail": {...}} — 成功 (含完整 trace + steps)
-      400 {"detail": "no_trace_id"}             — 老消息没有底层 LangSmith run
+      200 {"trace_url": "..."|null, "detail": {...}} — 成功 (本地 trace 无外链)
+      400 {"detail": "no_trace_id"}             — 老消息没有底层 run
       403 {"detail": "not_your_message"}        — 跨用户访问 (admin 跳过校验)
       404 {"detail": "message_not_found"}
+      404 {"detail": "trace_expired"}           — trace_runs 已过保留期清理
       503 {"detail": "share_failed: ..."}       — LangSmith API 三次重试都失败
     """
     user_id = user.get("sub")
@@ -85,7 +85,7 @@ async def resolve_trace(
         raise HTTPException(status_code=403, detail="not_your_message")
     except ValueError as e:
         msg = str(e)
-        status = 404 if msg == "message_not_found" else 400
+        status = 404 if msg in ("message_not_found", "trace_expired") else 400
         raise HTTPException(status_code=status, detail=msg)
     except Exception as e:
         logger.exception(f"[TRACE] resolve failed for msg {message_id[:8]}")

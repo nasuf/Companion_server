@@ -1054,7 +1054,7 @@ async def test_orchestrator_intent_short_circuit_fires_post_process():
         patch("app.services.runtime_config.bind_agent_context",
               new_callable=AsyncMock, return_value=None),
         patch("app.services.runtime_config.reset_current_agent"),
-        patch.object(orch_mod, "LangSmithTracer") as mock_tracer_cls,
+        patch.object(orch_mod, "create_tracer") as mock_tracer_cls,
         patch.object(orch_mod, "run_boundary") as mock_boundary,
         patch.object(orch_mod, "resolve_pending_contradiction") as mock_pc,
         patch.object(orch_mod, "resolve_pending_deletion") as mock_pd,

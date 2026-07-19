@@ -783,6 +783,45 @@ model MessageTrace {
   @@map("message_traces")
 }
 
+// 本地 trace 采集表 (自研替代 LangSmith 的 run 树存储).
+// LocalTraceHandler 在每个 langchain run 结束时逐条写入; root run 由
+// LocalTracer.enter()/close() 维护. /traces/resolve 读取本表构建与
+// load_public_trace 同形的 detail (归一化 + enrich 后写 message_traces 镜像).
+//
+// 设计取舍:
+// - 一行一个 run (而非整树一行 JSON): 后台 post_process 的 LLM run 在请求
+//   结束后才完成, 逐条 insert 天然支持晚到 run, 无并发覆盖问题.
+// - inputsJson/outputsJson 存 langchain dumpd 序列化结果, 与 LangSmith run
+//   的 inputs/outputs 同形 — trace_enrich 指纹提取和前端渲染零改动.
+// - 保留期由 scheduler 每日清理 (trace_retention_days); 被查看过的 trace
+//   已物化进 message_traces 镜像, 不受清理影响.
+model TraceRun {
+  id                 String    @id @map("run_id") // langchain run_id (uuid)
+  traceId            String    @map("trace_id")
+  parentId           String?   @map("parent_id")
+  name               String
+  runType            String    @map("run_type") // chain / llm
+  status             String    @default("running") // running / success / error
+  error              String?
+  startedAt          DateTime  @map("started_at")
+  endedAt            DateTime? @map("ended_at")
+  firstTokenAt       DateTime? @map("first_token_at")
+  modelName          String?   @map("model_name")
+  promptTokens       Int?      @map("prompt_tokens")
+  completionTokens   Int?      @map("completion_tokens")
+  totalTokens        Int?      @map("total_tokens")
+  promptTokenDetails Json?     @map("prompt_token_details")
+  inputsJson         Json?     @map("inputs_json")
+  outputsJson        Json?     @map("outputs_json")
+  extraJson          Json?     @map("extra_json")
+  eventsJson         Json?     @map("events_json")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  @@index([traceId])
+  @@index([createdAt])
+  @@map("trace_runs")
+}
+
 model PromptTemplate {
   id             String   @id @default(uuid())
   key            String   @unique

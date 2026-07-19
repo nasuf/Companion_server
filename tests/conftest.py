@@ -16,6 +16,15 @@ def _deterministic_typo_off(monkeypatch):
     monkeypatch.setattr(settings, "typo_enabled", False)
 
 
+@pytest.fixture(autouse=True)
+def _trace_backend_off(monkeypatch):
+    """trace_backend 生产默认 local, 但单测环境没有真实 DB — LocalTracer 的
+    fire-and-forget 写库任务会产生噪音日志 + 跨测试 ContextVar 状态.
+    统一关闭; local 采集行为由 test_local_tracer.py 显式 patch 覆盖测试."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "trace_backend", "off")
+
+
 # ── 共享 JWT / TestClient helpers ────────────────────────────────────────
 
 def make_auth_header(user_id: str = "user-id", role: str = "user") -> dict:

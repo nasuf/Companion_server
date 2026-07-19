@@ -45,7 +45,8 @@ async def write_trace_mirror(
         "llmStepCount": trace.get("llm_step_count"),
         "stepsJson": Json(steps),
         "summaryJson": Json(trace),
-        "shareStatus": "shared",
+        # "local" = 自研 trace_runs 采集 (无 share 概念); "shared" = legacy LangSmith
+        "shareStatus": "local" if trace.get("source") == "local" else "shared",
         "shareUrl": trace.get("external_url"),
     }
     try:

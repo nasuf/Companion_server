@@ -123,7 +123,7 @@ async def process_sub_intents(
     每个片段作为独立子调用进入 stream_chat_response(sub_intent_mode=True)，
     共享 reply_context 沿用首条消息的 due_at（spec §6）。
 
-    parent_trace_id 透传给 sub: sub 的 LangSmithTracer 用 attach_to_parent 复用
+    parent_trace_id 透传给 sub: sub 的 tracer 用 attach_to_parent 复用
     parent run_id, 让 sub 产生的消息 metadata.trace_id 跟 parent 一致 — 用户点
     任意 reply 的 trace 按钮跳到 parent 视图, 看到完整 root + nested 树.
     """
@@ -194,7 +194,7 @@ async def finalize_short_circuit(
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
     sub_intent_mode=True 时跳过 done/trace（由父调用完成）。
-    tracer 是 `LangSmithTracer` 实例；本函数仅调 `tracer.close()`。
+    tracer 是 `ChatTracer` 实例（LocalTracer / LangSmithTracer）；本函数仅调 `tracer.close()`。
     """
     # sub_intent_mode 父调用已经保存过 trace_id 到首条 reply.metadata, 不重复挂.
     trace_id = (

@@ -29,7 +29,7 @@ from app.services.chat.intent_replies import (
 )
 
 if TYPE_CHECKING:
-    from app.services.chat.tracing import LangSmithTracer
+    from app.services.chat.tracing import ChatTracer
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.interaction.boundary import (
     APOLOGY_SINCERITY_MIN,
@@ -59,7 +59,7 @@ class BoundaryPhaseCtx:
     user_message: str
     sub_intent_mode: bool
     parent_patience: int | None
-    tracer: "LangSmithTracer"
+    tracer: "ChatTracer"
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     fire_background_fn: Callable[[Any], None]
     bg_memory_pipeline_fn: Callable[..., Any]

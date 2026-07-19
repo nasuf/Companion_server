@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from app.services.chat.tracing import LangSmithTracer
+    from app.services.chat.tracing import ChatTracer
 
 from app.observability.events import EVT_PREFLIGHT_FAILED, EVT_PREFLIGHT_RESOLVED
 from app.services.chat.intent_replies import deletion_done_reply, record_confirm_reply
@@ -60,7 +60,7 @@ class PreflightCtx:
     agent_id: str | None
     user_id: str
     agent: Any
-    tracer: "LangSmithTracer"
+    tracer: "ChatTracer"
     short_circuit_fn: Callable[..., Awaitable[list[dict]]]
     stopped: bool = False
     # 短路 reply 文本回写: orchestrator finally 兜底 fire post_process 用

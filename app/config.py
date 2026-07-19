@@ -110,7 +110,16 @@ class Settings(BaseSettings):
     typo_enabled: bool = True
     typo_rate: float = 0.05
 
-    # LangSmith tracing
+    # Trace backend: "local" (self-hosted trace_runs collection, default) /
+    # "langsmith" (legacy cloud path, needs langsmith_* below) / "off".
+    # Local mode requires LANGSMITH_TRACING=false, otherwise langchain's env
+    # auto-tracer would still upload runs to LangSmith and burn quota.
+    trace_backend: str = "local"
+    # Days to keep trace_runs rows; viewed traces persist in message_traces.
+    # <= 0 disables the daily purge.
+    trace_retention_days: int = 30
+
+    # LangSmith tracing (legacy backend, kept for old traces / opt-in)
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
     langsmith_org_id: str = ""

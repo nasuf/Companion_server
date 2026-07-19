@@ -58,14 +58,27 @@ def configure_logging():
 
 
 def configure_langsmith():
-    """Configure LangSmith tracing if enabled."""
-    if settings.langsmith_tracing and settings.langsmith_api_key:
+    """Configure LangSmith env tracing according to the trace backend.
+
+    langchain reads LANGSMITH_TRACING / LANGCHAIN_TRACING_V2 straight from the
+    process env on every call. Only the "langsmith" backend may leave them on;
+    local/off must force them off, otherwise every LLM call still uploads runs
+    to LangSmith and burns the monthly quota the local backend exists to avoid.
+    """
+    if (
+        settings.trace_backend == "langsmith"
+        and settings.langsmith_tracing
+        and settings.langsmith_api_key
+    ):
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
         os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
         os.environ["LANGCHAIN_PROJECT"] = "ai-companion"
         logger.info("LangSmith tracing enabled (project: ai-companion)")
-    else:
-        os.environ["LANGCHAIN_TRACING_V2"] = "false"
+        return
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
+    if settings.trace_backend == "local":
+        logger.info("Trace backend: local (trace_runs collection); LangSmith env tracing off")
 
 
 class RequestTimingMiddleware(BaseHTTPMiddleware):

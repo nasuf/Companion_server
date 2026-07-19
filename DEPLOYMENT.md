@@ -59,7 +59,9 @@ Optional:
 - `LOCAL_SMALL_MODEL`
 - `REMOTE_CHAT_MODEL`
 - `REMOTE_SMALL_MODEL`
-- `LANGSMITH_TRACING`
+- `TRACE_BACKEND` (default `local`; self-hosted trace collection, no LangSmith quota)
+- `TRACE_RETENTION_DAYS` (default `30`)
+- `LANGSMITH_TRACING` (keep `false` unless `TRACE_BACKEND=langsmith`)
 - `CORS_ALLOWED_ORIGINS`
 - `WECHAT_LOGIN_ENABLED`
 - `WECHAT_MOBILE_APP_ID`
@@ -119,7 +121,8 @@ LOCAL_CHAT_MODEL=qwen2.5:14b
 LOCAL_SMALL_MODEL=qwen2.5:7b
 REMOTE_CHAT_MODEL=qwen3.5-plus
 REMOTE_SMALL_MODEL=qwen3.5-flash
-LANGSMITH_TRACING=true
+TRACE_BACKEND=local
+LANGSMITH_TRACING=false
 CORS_ALLOWED_ORIGINS=https://your-web-domain.example.com
 WECHAT_LOGIN_ENABLED=false
 WECHAT_MOBILE_APP_ID=

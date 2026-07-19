@@ -161,7 +161,7 @@ from app.services.chat.post_process import (
     run_post_process as _background_post_process,
     _bg_memory_pipeline,
 )
-from app.services.chat.tracing import LangSmithTracer
+from app.services.chat.tracing import create_tracer
 from app.services.mbti import get_mbti
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
@@ -411,16 +411,16 @@ async def stream_chat_response(
     from app.services.llm import usage_tracker
     usage_token = usage_tracker.start_session() if not sub_intent_mode else None
 
-    # --- LangSmith trace ---
-    # 主调用 (sub_intent_mode=False): 开新 chat_request span 作为 root.
-    # sub_intent 调用: attach 到 parent trace_id, 不开新 span — sub 内的 LLM
-    # 调用通过 LangSmith contextvars 自动 attach 到 parent ctx 形成嵌套树,
+    # --- Trace (本地采集为主, LangSmith legacy) ---
+    # 主调用 (sub_intent_mode=False): 开新 chat_request root run.
+    # sub_intent 调用: attach 到 parent trace_id, 不开新 root — sub 内的 LLM
+    # 调用通过 contextvars 里仍活跃的 parent handler 自动 attach 形成嵌套树,
     # sub 产生的消息 metadata.trace_id 跟 parent 一致, 用户点 trace 跳到 root
     # 视图能看到完整树 (而非只看 sub 子树).
     if sub_intent_mode and parent_trace_id:
-        tracer = LangSmithTracer(user_message, conversation_id).attach_to_parent(parent_trace_id)
+        tracer = create_tracer(user_message, conversation_id).attach_to_parent(parent_trace_id)
     else:
-        tracer = LangSmithTracer(user_message, conversation_id).enter()
+        tracer = create_tracer(user_message, conversation_id).enter()
     retrieval_trace_token = None
     prompt_trace_token = None
     if not sub_intent_mode:
@@ -1603,3 +1603,8 @@ async def stream_chat_response(
                 ),
                 workspace_id=workspace_id,
             ))
+
+        # 兜底关闭 trace (幂等): 正常/短路路径都已 close, 这里只兜异常中断.
+        # LocalTracer 依赖 close 还原 ContextVar handler; 不还原会让同一
+        # task 处理的下一条消息的 LLM 调用错挂到本次 trace 树.
+        tracer.close()

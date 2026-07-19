@@ -425,6 +425,19 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # 本地 trace 采集保留期清理: 删除超过 trace_retention_days 的 trace_runs 行.
+    # 被查看过的 trace 已物化进 message_traces 镜像, 不受影响. 凌晨 5:10 错开
+    # 其他日任务 (schedule 3:30 / review 4:00 / hygiene 4:20).
+    scheduler.add_job(
+        _run_trace_retention,
+        "cron",
+        hour=5,
+        minute=10,
+        id="trace_retention",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -714,6 +727,20 @@ async def _run_redis_health_recheck():
         await recheck_redis_health()
     except Exception as e:
         logger.warning(f"Redis health recheck failed: {e}")
+
+
+async def _run_trace_retention():
+    """本地 trace 采集保留期清理 (trace_backend=local 的 trace_runs 表)."""
+    async def _body():
+        from app.services.chat.local_tracer import purge_expired_trace_runs
+        try:
+            deleted = await purge_expired_trace_runs()
+            if deleted:
+                logger.info(f"Trace retention purge: {deleted} rows deleted")
+        except Exception as e:
+            logger.warning(f"Trace retention purge failed: {e}")
+
+    await _run_distributed_job("trace_retention", 3600, _body)
 
 
 async def _run_ntp_calibration():

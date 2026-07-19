@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from app.services.chat.tracing import LangSmithTracer
+    from app.services.chat.tracing import ChatTracer
 
 from app.db import db
 from app.observability.events import EVT_INTENT_SHORT_CIRCUIT
@@ -103,7 +103,7 @@ class ShortCircuitCtx:
     user_id: str
     agent: Any
     reply_context: dict | None
-    tracer: "LangSmithTracer"
+    tracer: "ChatTracer"
     save_replies_fn: Callable[..., Any]
     pending_sub_fragments: dict[str, str]
     sub_intent_mode: bool

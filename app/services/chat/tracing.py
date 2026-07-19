@@ -1,15 +1,16 @@
-"""LangSmith trace 全生命周期管理.
+"""Trace 全生命周期管理 (本地采集为主, LangSmith 为 legacy 后端).
 
 用法:
-    tracer = LangSmithTracer(user_message, conversation_id).enter()
+    tracer = create_tracer(user_message, conversation_id).enter()
     try:
         ...                # 主流程 — LLM 调用自动 attach 到此 trace
     finally:
-        tracer.close()     # exit ctx; share + mirror 由用户点击时懒触发
+        tracer.close()     # 结束 root run; detail 由用户点击时懒加载
 
-`tracer.is_active`: 是否启用 LangSmith. 关闭时 enter/close 都是 no-op.
+`tracer.is_active`: 当前 trace 后端是否启用. 关闭时 enter/close 都是 no-op.
 `tracer.trace_id`: 本次 trace 的 ID, 写到首条 reply 的 metadata.trace_id, 用户
-点 Trace 按钮时通过 /traces/resolve/{message_id} 懒 share + 加载 mirror.
+点 Trace 按钮时通过 /traces/resolve/{message_id} 从 trace_runs (本地) 或
+LangSmith 公开 API (legacy) 加载 detail 并写 mirror.
 """
 
 from __future__ import annotations
@@ -23,6 +24,11 @@ from prisma import Json
 
 from app.config import settings
 from app.db import db
+from app.services.chat.local_tracer import (
+    LocalTracer,
+    count_local_trace_runs,
+    load_local_trace,
+)
 from app.services.chat.trace_mirror import (
     get_trace_mirror_by_message,
     write_trace_mirror,
@@ -36,6 +42,17 @@ from app.services.runtime.ws_manager import manager
 from app.services.chat.trace_enrich import apply_prompt_render_traces
 
 logger = logging.getLogger(__name__)
+
+
+def create_tracer(user_message: str, conversation_id: str) -> "LocalTracer | LangSmithTracer":
+    """Trace backend switch (settings.trace_backend).
+
+    "langsmith" → legacy cloud tracer; anything else → LocalTracer, whose
+    is_active only fires for "local" ("off" turns tracing into a no-op).
+    """
+    if settings.trace_backend == "langsmith":
+        return LangSmithTracer(user_message, conversation_id)
+    return LocalTracer(user_message, conversation_id)
 
 
 def get_langsmith_client():
@@ -134,6 +151,11 @@ class LangSmithTracer:
             return
         self._closed = True
         self._ctx.__exit__(None, None, None)
+
+
+# 类型别名: phase ctx dataclass 等注解用. 两个实现共享同一鸭子接口
+# (enter / attach_to_parent / close / trace_id / safe_trace_id / is_active).
+ChatTracer = LocalTracer | LangSmithTracer
 
 
 _SHARE_RETRY_DELAYS = (1.0, 2.0, 4.0)
@@ -347,17 +369,57 @@ async def _enrich_memory_quality_for_trace(metadata: dict) -> dict:
     return enriched
 
 
+def _mirror_is_fresh(cached: dict[str, Any] | None, local_count: int) -> bool:
+    """镜像是否已覆盖本地 trace_runs 的全部 run.
+
+    用户点得太早时后台 run (记忆抽取等) 还没落库, 之后行数会超过镜像步数 —
+    此时重建镜像补齐后台步骤 (修复 LangSmith 时代"早点开就永远缺后台步骤")。
+    """
+    if not cached:
+        return False
+    steps = cached.get("steps")
+    step_count = len(steps) if isinstance(steps, list) else 0
+    return step_count >= local_count
+
+
+async def _resolve_from_local(
+    *,
+    trace_id: str,
+    message_id: str,
+    meta: dict,
+    existing_url: str | None,
+    local_count: int,
+) -> dict[str, Any] | None:
+    """本地 trace_runs 分支. 返回 None 表示行读取失败 (调用方抛 503 让用户重试)."""
+    cached = await get_trace_mirror_by_message(message_id)
+    if _mirror_is_fresh(cached, local_count):
+        enriched_meta = await _enrich_memory_quality_for_trace(meta)
+        _attach_message_trace_metadata(cached, enriched_meta)
+        return {"trace_url": str(existing_url) if existing_url else None, "detail": cached}
+
+    detail = await load_local_trace(trace_id)
+    if detail is None:
+        return None
+    enriched_meta = await _enrich_memory_quality_for_trace(meta)
+    _attach_message_trace_metadata(detail, enriched_meta)
+    # 有 run 仍在跑 (settled=False) 时先不物化镜像, 下次打开重读最新行;
+    # 卡死 run 在 10 分钟后被标 cancelled, settled 随之变 True.
+    if (detail.get("trace") or {}).get("settled", True):
+        await write_trace_mirror(detail=detail, message_id=message_id)
+    return {"trace_url": str(existing_url) if existing_url else None, "detail": detail}
+
+
 async def resolve_trace_for_message(
     message_id: str, *, user_id: str, is_admin: bool = False,
 ) -> dict[str, Any]:
     """懒触发: 用户首次点 Trace 按钮时调用, 返回完整 trace detail.
 
     流程: 校验消息归属 (admin 跳过, 用于后台管理跨用户调试) → 取 metadata.trace_id →
-    本地 mirror 命中直接返回 → 否则 share_run + load_public_trace + 写 mirror →
-    返回 {trace_url, detail}. 失败抛 ValueError / RuntimeError, endpoint 转 4xx/5xx.
+    本地 trace_runs 有行 → mirror 新鲜直接返回 / 否则 rows→steps→enrich 重建并写
+    mirror → 返回 {trace_url: None, detail}. 本地无行时走 legacy LangSmith 路径
+    (mirror → 公开 API → share), 服务老 trace. 都取不到 → ValueError("trace_expired").
 
-    一次调用搞定 share + mirror + 读取, 避免前端"mirror→retry→public-detail"
-    三次串行 RTT 的等待 + 重复 load_public_trace.
+    失败抛 ValueError / RuntimeError, endpoint 转 4xx/5xx.
     """
     msg = await db.message.find_unique(
         where={"id": message_id},
@@ -378,8 +440,25 @@ async def resolve_trace_for_message(
     if not trace_id:
         raise ValueError("no_trace_id")
 
-    # 已 share 过 — 优先 mirror 命中, 落空再走 LangSmith 公开 API
     existing_url = meta.get("trace_url")
+
+    # ── 本地采集分支: trace_runs 有该 trace 的行就以本地为准 ──
+    local_count = await count_local_trace_runs(str(trace_id))
+    if local_count > 0:
+        result = await _resolve_from_local(
+            trace_id=str(trace_id),
+            message_id=msg.id,
+            meta=meta,
+            existing_url=existing_url,
+            local_count=local_count,
+        )
+        if result is not None:
+            return result
+        # count>0 但行读取失败 = DB 瞬时故障, 不是 trace 过期 — 抛 503 让用户重试
+        raise RuntimeError("local_trace_read_failed")
+
+    # ── Legacy LangSmith 路径 (老 trace / langsmith 后端) ──
+    # 已 share 过 — 优先 mirror 命中, 落空再走 LangSmith 公开 API
     if existing_url:
         cached = await get_trace_mirror_by_message(message_id)
         if cached:
@@ -391,6 +470,17 @@ async def resolve_trace_for_message(
         _attach_message_trace_metadata(detail, enriched_meta)
         await write_trace_mirror(detail=detail, message_id=msg.id)
         return {"trace_url": str(existing_url), "detail": detail}
+
+    # 本地无行 + 未 share 过: 只有 langsmith 后端才可能通过 share 恢复.
+    # 本地后端走到这里说明 trace_runs 已被保留期清理 (或消息产生于 trace 关闭时).
+    if not settings.langsmith_tracing:
+        # 兜底: 镜像可能存在 (e.g. 行已清理但曾被查看过, 且 metadata 没有 url).
+        cached = await get_trace_mirror_by_message(message_id)
+        if cached:
+            enriched_meta = await _enrich_memory_quality_for_trace(meta)
+            _attach_message_trace_metadata(cached, enriched_meta)
+            return {"trace_url": None, "detail": cached}
+        raise ValueError("trace_expired")
 
     # 首次 share — share_run + load + mirror 一气呵成
     public_url = await share_run_with_retry(
