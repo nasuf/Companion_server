@@ -345,15 +345,12 @@ async def test_staff_login_rejects_wrong_key(monkeypatch):
     from fastapi import HTTPException
 
     monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
-    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
-    monkeypatch.setattr(meal_api, "record_login_failure", AsyncMock())
 
     with pytest.raises(HTTPException) as exc:
         await meal_api.staff_login(
             meal_api.StaffLoginRequest(key="wrong"), FakeRequest()
         )
     assert exc.value.status_code == 401
-    meal_api.record_login_failure.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -362,7 +359,6 @@ async def test_staff_login_issues_scoped_token(monkeypatch):
     from app.services.auth import decode_jwt
 
     monkeypatch.setattr(meal_api.settings, "meal_staff_key", "sekret")
-    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
 
     body = await meal_api.staff_login(
         meal_api.StaffLoginRequest(key="SEKRET"), FakeRequest()

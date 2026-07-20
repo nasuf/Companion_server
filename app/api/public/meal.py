@@ -125,15 +125,18 @@ def _require_staff(request: Request) -> str:
 
 @router.post("/staff/login")
 async def staff_login(data: StaffLoginRequest, request: Request):
-    """Exchange the configured staff key for a short-lived scoped JWT."""
-    await enforce_login_rate_limit(request, "mealstaff")
+    """Exchange the configured staff key for a short-lived scoped JWT.
+
+    刻意不做登录次数限制: 全体服务员共用同一固定口令, 门店同一 WiFi 下多名
+    服务员从同一出口 IP 登录会共享失败计数, 按 IP 限流会误伤正常登录。口令
+    本身 (MEAL_STAFF_KEY) 即访问控制。
+    """
     expected = settings.meal_staff_key.strip()
     candidate = data.key.strip().upper()
     if not expected and settings.is_production():
         logger.error("MEAL_STAFF_KEY is missing in production")
         raise HTTPException(status_code=503, detail="服务员入口尚未配置")
     if expected and not hmac.compare_digest(candidate, expected.upper()):
-        await record_login_failure(request, "mealstaff")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="服务员口令错误"
         )
