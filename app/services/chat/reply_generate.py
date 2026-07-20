@@ -24,6 +24,7 @@ from app.services.llm.resilience import (
     get_profile,
     provider_name,
 )
+from app.services.chat.reply_formatting import enforce_count_variation
 from app.services.chat.session_recap import RECAP_GAP_SECONDS
 from app.services.memory.retrieval.context_selector import split_by_source
 from app.services.prompts.system_prompts import MAX_PER_REPLY
@@ -203,6 +204,8 @@ async def generate_reply(
     reply_count: int,
     max_reply_count: int,
     max_total: int,
+    last_reply_count: int | None = None,
+    allow_count_variation: bool = True,
     tier_fns: dict[str, Callable[..., Awaitable[str | None]]],
     truncate_fn: Callable[[str, int], str],
     pipe_fallback_fn: Callable[[str, int, int, int], list[str]],
@@ -317,6 +320,11 @@ async def generate_reply(
                 "n_actual": len(tier_replies),
             },
         )
+        if allow_count_variation:
+            tier_replies, _ = enforce_count_variation(
+                tier_replies, last_reply_count,
+                max_count=max_reply_count, max_per=MAX_PER_REPLY,
+            )
         return tier_replies, tier_reply_text, False, None
 
     if diagnostics is not None:
@@ -372,4 +380,12 @@ async def generate_reply(
             "is_fallback": is_fallback,
         },
     )
+    # 图灵测试硬兜底: 主 LLM 常不遵从"≠上一轮"指令, 切分后强制打破精确重复.
+    # is_fallback (静态兜底文案) 也放行——它是单条固定文本, enforce 对单条无从调整,
+    # 自然 no-op, 不会破坏兜底语义.
+    if allow_count_variation:
+        replies, _ = enforce_count_variation(
+            replies, last_reply_count,
+            max_count=max_reply_count, max_per=MAX_PER_REPLY,
+        )
     return replies, raw_response, is_fallback, reply_emotion

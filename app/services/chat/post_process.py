@@ -25,6 +25,7 @@ from app.config import settings
 from app.db import db
 from app.observability.events import EVT_BG_DONE
 from app.services.chat.intent_replies import positive_interaction_check
+from app.services.chat.reply_formatting import strip_system_markers
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
     check_positive_recovery,
@@ -131,6 +132,13 @@ async def save_replies(
             else:
                 text = reply
                 metadata = {"reply_index": i}
+            # 防泄漏最后一道闸: 5 个直发出口已各自剥系统标记, 这里在**落库**处再兜
+            # 一次. 关键不在气泡显示, 而在防污染——带 [EMO]/[X] 的 content 落库后会
+            # 被下一轮历史前缀注入, 被 LLM 二次模仿, 自我强化. 剥空 (整条即标记) 则
+            # 保留原文避免空 content 破坏历史 (此情形上游已换 "..."，几乎不达此处).
+            _cleaned = strip_system_markers(text)
+            if _cleaned:
+                text = _cleaned
 
             # 懒触发 trace: 首条只挂 trace_id, 用户点 Trace 按钮时通过
             # /traces/resolve endpoint 触发 share + mirror 写入.

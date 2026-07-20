@@ -10,7 +10,6 @@ Background (fire-and-forget, after response):
 import asyncio
 import json
 import logging
-import random
 from time import perf_counter
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -112,6 +111,7 @@ from app.services.chat.expression_learner import sample_expression_habits
 from app.services.chat.session_recap import get_or_build_session_recap
 from app.services.chat.reply_count_state import (
     load_last_reply_count,
+    pick_reply_count_target,
     save_last_reply_count,
 )
 from app.services.relationship.ai_mood import format_ai_mood_text, load_ai_mood
@@ -1202,13 +1202,22 @@ async def stream_chat_response(
             except Exception as e:
                 logger.warning(f"Contradiction detection failed: {e}")
 
-        # --- spec §5.5: n = random.randint(1, 3) 均匀分布 ---
+        # 图灵测试条数变化: 上一轮实际气泡数 (代码权威计数). 一次加载, 供
+        # ①目标条数选取 (变化感知) ②prompt 变化段 {y} ③切分后硬兜底 三处共用.
+        last_reply_count = (
+            await load_last_reply_count(conversation_id) if conversation_id else None
+        )
+        # --- 目标条数: 排除上一轮 + 抬高 1/4 条, 打破 LLM 锁定 2-3 条 (spec §5.5) ---
+        # 关系/矛盾追问是刻意的单条 (先接情绪 / 聚焦提问), 不参与条数变化.
         if relational_context:
             reply_count = 1
+            allow_count_variation = False
         elif contradiction_inquiry:
             reply_count = 1  # contradiction inquiry is a single focused question
+            allow_count_variation = False
         else:
-            reply_count = random.randint(1, MAX_REPLY_COUNT)
+            reply_count = pick_reply_count_target(last_reply_count, MAX_REPLY_COUNT)
+            allow_count_variation = True
         max_reply_count = MAX_REPLY_COUNT
         max_total = MAX_TOTAL_CHARS
 
@@ -1275,8 +1284,7 @@ async def stream_chat_response(
                 relation_meta_line = ""
             # W4 AI 情绪连续性: 上一轮回复情绪衰减后作为本轮"当下心情"
             ai_mood_text = format_ai_mood_text(await load_ai_mood(conversation_id))
-            # 图灵测试条数变化: 上一轮实际气泡数 → 注入"本轮条数≠上一轮"约束段
-            last_reply_count = await load_last_reply_count(conversation_id)
+            # 图灵测试条数变化: last_reply_count 已在外层一次性加载, 注入"≠上一轮"约束段
             system_prompt = await build_system_prompt(
                 agent=agent,
                 memories=classified_memories,
@@ -1367,6 +1375,8 @@ async def stream_chat_response(
             reply_count=reply_count,
             max_reply_count=max_reply_count,
             max_total=max_total,
+            last_reply_count=last_reply_count,
+            allow_count_variation=allow_count_variation,
             tier_fns={
                 "weak": _memory_weak_reply,
                 "medium": _memory_medium_reply,
@@ -1500,9 +1510,14 @@ async def stream_chat_response(
         # 图灵测试条数变化: 记录本轮累计可见气泡数 (代码权威计数, 不信 LLM 自报).
         # 主调用 offset=0 写主回复数; 每个 sub-intent 递归写 offset+本段数 —
         # 最后一次写入即本轮总数 (SET 语义). key 按 conversation 隔离.
-        if emitted_replies:
+        # 延迟解释是系统前缀 (非 AI 主动写的句子), 不计入"句数节奏"——否则下一轮
+        # 会拿一个含系统前缀的膨胀值去比对.
+        sentence_bubble_count = sum(
+            1 for r in emitted_replies if not r.get("delay_explanation")
+        )
+        if sentence_bubble_count > 0:
             _fire_background(save_last_reply_count(
-                conversation_id, reply_index_offset + len(emitted_replies),
+                conversation_id, reply_index_offset + sentence_bubble_count,
             ))
 
         if sub_intent_mode:

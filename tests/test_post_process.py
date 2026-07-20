@@ -46,6 +46,32 @@ async def test_save_replies_persists_dict_metadata():
 
 
 @pytest.mark.asyncio
+async def test_save_replies_strips_system_markers_before_persist():
+    """落库最后一道闸: content 绝不带 [EMO]/[X] 标记 (防历史注入自我强化)."""
+    from app.services.chat import post_process
+
+    created_calls: list[dict] = []
+
+    async def _fake_create(data):
+        created_calls.append(data)
+        return MagicMock(id=f"msg-{len(created_calls)}")
+
+    fake_db = MagicMock()
+    fake_db.message.create = AsyncMock(side_effect=_fake_create)
+    with patch.object(post_process, "db", fake_db):
+        await post_process.save_replies(
+            "conv1",
+            [
+                {"text": "今天真不错 [EMO:高兴/70]"},
+                {"text": "嗯嗯【2】"},
+            ],
+        )
+
+    assert created_calls[0]["content"] == "今天真不错"
+    assert created_calls[1]["content"] == "嗯嗯"
+
+
+@pytest.mark.asyncio
 async def test_save_replies_first_carries_trace_id():
     """trace_id 给定时第一条 reply 的 metadata 只带 trace_id (懒触发模式,
     不再写 trace_pending; share + mirror 由用户点 Trace 按钮时通过 retry endpoint 调)."""

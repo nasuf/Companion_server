@@ -20,6 +20,7 @@ chat.response_instruction 引入"本轮条数 ≠ 上一轮"约束, 但 LLM 自�
 from __future__ import annotations
 
 import logging
+import random
 
 from app.redis_client import get_redis
 
@@ -28,6 +29,25 @@ logger = logging.getLogger(__name__)
 _KEY_TMPL = "reply:last_count:{conversation_id}"
 _TTL_S = 6 * 3600
 _MAX_REASONABLE = 12  # 防御: 异常大的值不可信, 丢弃
+
+# 目标条数权重: 抵消 LLM 长期偏向 2-3 条的问题, 抬高 1 条和满额 (4 条) 的出现率.
+_COUNT_WEIGHTS: dict[int, float] = {1: 1.3, 2: 1.0, 3: 0.9, 4: 1.3}
+
+
+def pick_reply_count_target(last_count: int | None, max_count: int) -> int:
+    """选一个 [1, max_count] 的目标条数, 已知上一轮时排除它 (变化感知, 非纯随机).
+
+    这个值喂给 prompt 的 {n} 占位符 (tier 路径 + 若 web response_instruction 用到),
+    让"提示层建议的目标"本身就避开上一轮, 而不是随机可能撞上. 真正的硬保证由
+    reply_formatting.enforce_count_variation 在切分后兜底 (LLM 不遵从时也 ≠ 上一轮).
+    权重抬高 1/4 条以打破 2-3 节奏同质化.
+    """
+    max_count = max(1, max_count)
+    choices = [c for c in range(1, max_count + 1) if c != last_count]
+    if not choices:  # last_count==唯一可选值 (max_count==1) 或异常
+        choices = list(range(1, max_count + 1))
+    weights = [_COUNT_WEIGHTS.get(c, 1.0) for c in choices]
+    return random.choices(choices, weights=weights, k=1)[0]
 
 
 def _key(conversation_id: str) -> str:

@@ -255,3 +255,96 @@ def split_and_validate_replies(
     return result or [parts[0][:max_per_reply]]
 
 
+def _merge_adjacent_shortest(parts: list[str], max_per: int) -> list[str] | None:
+    """Merge the adjacent pair with the smallest combined length → count-1.
+
+    空格连接 (与人设"空格代替逗号"一致); 合并后仍受单条上限约束.
+    """
+    if len(parts) < 2:
+        return None
+    best_i = min(
+        range(len(parts) - 1),
+        key=lambda i: len(parts[i]) + len(parts[i + 1]),
+    )
+    merged = f"{parts[best_i].rstrip()} {parts[best_i + 1].lstrip()}".strip()
+    merged = truncate_at_sentence(merged, max_per)
+    out = parts[:best_i] + [merged] + parts[best_i + 2:]
+    out = [p for p in out if p]
+    return out or None
+
+
+def _split_longest_at_sentence(parts: list[str], max_count: int) -> list[str] | None:
+    """Split the longest bubble at an internal sentence boundary → count+1.
+
+    只在存在句末标点的内部边界处拆 (不制造断句); 找不到可拆条则返回 None.
+    """
+    if len(parts) >= max_count:
+        return None
+    for i in sorted(range(len(parts)), key=lambda k: len(parts[k]), reverse=True):
+        text = parts[i]
+        internal = [m.end() for m in _SENTENCE_END.finditer(text) if 0 < m.end() < len(text)]
+        if not internal:
+            continue
+        mid = len(text) / 2
+        cut = min(internal, key=lambda c: abs(c - mid))
+        left, right = text[:cut].strip(), text[cut:].strip()
+        if left and right:
+            return parts[:i] + [left, right] + parts[i + 1:]
+    return None
+
+
+def enforce_count_variation(
+    parts: list[str],
+    last_count: int | None,
+    *,
+    max_count: int = MAX_REPLY_COUNT,
+    max_per: int = MAX_PER_REPLY,
+) -> tuple[list[str], str | None]:
+    """图灵测试硬约束: 相邻两轮的可见气泡数不能相同.
+
+    prompt (chat.reply_count_variation) 已请求 LLM "本轮条数 ≠ 上一轮", 但 LLM
+    数句子不可靠, 常继续锁在 2-3 条. 这里做**代码级兜底**: 切分后的实际条数若恰
+    好等于上一轮, 用 ±1 打破——合并最短相邻对 (少一条) 或在句末边界拆最长条
+    (多一条), 全程保持在 [1, max_count] 与单条字数上限内.
+
+    方向: 低条数优先"加"(让 1/4 条也出现, 抵消 2-3 偏好), 高条数优先"减", 边界
+    强制单向; 首选方向不可行时退另一方向. 都不可行 (如唯一一条且无内部句末边界)
+    原样返回, action='unresolved' 便于观测 prompt 遵从度.
+    """
+    if last_count is None or not parts:
+        return parts, None
+    n = len(parts)
+    if n != last_count:
+        return parts, None
+
+    grow_first = n < max_count and n <= max_count // 2
+    order = ("grow", "shrink") if grow_first else ("shrink", "grow")
+    for direction in order:
+        candidate = (
+            _split_longest_at_sentence(parts, max_count) if direction == "grow"
+            else _merge_adjacent_shortest(parts, max_per)
+        )
+        if candidate and 1 <= len(candidate) <= max_count and len(candidate) != last_count:
+            logger.info(
+                f"[REPLY-COUNT-VARY] {direction} {n}->{len(candidate)} (last={last_count})",
+                extra={
+                    "event": EVT_REPLY_GUARDRAIL,
+                    "action": f"count_vary_{direction}",
+                    "from_count": n,
+                    "to_count": len(candidate),
+                    "last_count": last_count,
+                },
+            )
+            return candidate, direction
+    logger.info(
+        f"[REPLY-COUNT-VARY] unresolved n={n} last={last_count} (no safe adjustment)",
+        extra={
+            "event": EVT_REPLY_GUARDRAIL,
+            "action": "count_vary_unresolved",
+            "from_count": n,
+            "last_count": last_count,
+        },
+    )
+    return parts, "unresolved"
+
+

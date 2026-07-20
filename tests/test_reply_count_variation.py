@@ -206,3 +206,74 @@ class TestVariationSection:
 
         assert "chat.reply_count_variation" not in PREFIX_SOURCE_KEYS
         assert "chat.reply_count_variation" not in REPLY_PROMPT_KEYS
+
+
+class TestPickReplyCountTarget:
+    """变化感知目标条数: 排除上一轮, 抬高 1/4 条 (2026-07-20 硬化)."""
+
+    def test_excludes_last_count(self):
+        from app.services.chat.reply_count_state import pick_reply_count_target
+        for _ in range(200):
+            assert pick_reply_count_target(3, 4) != 3
+            assert pick_reply_count_target(2, 4) != 2
+
+    def test_none_last_spans_full_range(self):
+        from app.services.chat.reply_count_state import pick_reply_count_target
+        seen = {pick_reply_count_target(None, 4) for _ in range(500)}
+        assert seen == {1, 2, 3, 4}
+
+    def test_surfaces_one_and_max(self):
+        from app.services.chat.reply_count_state import pick_reply_count_target
+        seen = {pick_reply_count_target(2, 4) for _ in range(500)}
+        assert 1 in seen and 4 in seen  # 不再锁 2-3
+
+    def test_degenerate_max_one(self):
+        from app.services.chat.reply_count_state import pick_reply_count_target
+        assert pick_reply_count_target(1, 1) == 1  # 无其它可选, 退化返回
+
+
+class TestEnforceCountVariation:
+    """硬兜底: 相邻两轮气泡数不能相同 (LLM 不遵从时代码强制打破)."""
+
+    def test_no_history_is_noop(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["一句", "两句", "三句"]
+        out, action = enforce_count_variation(parts, None, max_count=4, max_per=60)
+        assert out == parts and action is None
+
+    def test_already_different_is_noop(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["一句", "两句", "三句"]
+        out, action = enforce_count_variation(parts, 2, max_count=4, max_per=60)
+        assert out == parts and action is None
+
+    def test_repeat_three_is_broken(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["今天好累啊。", "下班就想躺着。", "你呢？"]
+        out, action = enforce_count_variation(parts, 3, max_count=4, max_per=60)
+        assert len(out) != 3
+        assert action in ("grow", "shrink")
+
+    def test_repeat_max_shrinks(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["一。", "二。", "三。", "四。"]
+        out, action = enforce_count_variation(parts, 4, max_count=4, max_per=60)
+        assert len(out) == 3 and action == "shrink"
+
+    def test_single_splittable_grows(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["你好呀。最近怎么样？"]
+        out, action = enforce_count_variation(parts, 1, max_count=4, max_per=60)
+        assert len(out) == 2 and action == "grow"
+
+    def test_single_unsplittable_unresolved(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["在吗"]  # 唯一一条且无内部句末边界 — 无法安全调整
+        out, action = enforce_count_variation(parts, 1, max_count=4, max_per=60)
+        assert out == parts and action == "unresolved"
+
+    def test_merge_respects_per_bubble_cap(self):
+        from app.services.chat.reply_formatting import enforce_count_variation
+        parts = ["啊" * 40 + "。", "哦" * 40 + "。"]  # 合并会超 60
+        out, action = enforce_count_variation(parts, 2, max_count=4, max_per=60)
+        assert action == "grow" or (action == "shrink" and all(len(p) <= 60 for p in out))
