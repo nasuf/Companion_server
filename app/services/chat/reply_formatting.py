@@ -1,19 +1,29 @@
 """回复切分与文本规范化 — 纯函数层（orchestrator 拆分 R2）。
 
 Multi-reply split & validate (PRD §3.2.1/§3.2.2)：按 || / 空行切分主 LLM
-输出，校验条数/单条长度/总长度，句末边界截断。全部为无副作用的纯文本
-函数，从 orchestrator.py 提取；orchestrator re-export 保持导入路径兼容。
+输出，校验条数/单条长度/总长度，句末边界截断。除护栏触发的观测日志外
+无副作用，从 orchestrator.py 提取；orchestrator re-export 保持导入路径兼容。
+
+护栏失败语义 (2026-07-20 修订): 条数溢出**合并进最后一条**而非丢弃 —
+提示词本身教 LLM"遇到句号、空格也拆短句", 超过上限的片段很可能是收尾的
+追问/情绪落点, 静默丢弃会让回复说一半. 所有护栏触发打 EVT_REPLY_GUARDRAIL
+事件 (conversation_id 由 observability ContextVar 自动附着), 触发率高说明
+prompt 失守, 应修 prompt 而不是靠护栏硬扛.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
+from app.observability.events import EVT_REPLY_GUARDRAIL
 from app.services.prompts.system_prompts import (
     MAX_PER_REPLY,
     MAX_REPLY_COUNT,
     MAX_TOTAL_CHARS,
 )
+
+logger = logging.getLogger(__name__)
 
 _SENTENCE_END = re.compile(r'[。！？…～~!?]+')
 
@@ -127,18 +137,38 @@ def _split_long_reply_part(text: str, max_len: int, max_count: int) -> list[str]
     """Split an overlong no-delimiter reply at punctuation instead of mid-clause."""
     remaining = text.strip()
     parts: list[str] = []
+    consumed = 0
     while remaining and len(parts) < max_count:
         if len(remaining) <= max_len:
             parts.append(remaining)
+            consumed += len(remaining)
+            remaining = ""
             break
         cut = _find_soft_reply_cut(remaining, max_len)
         if cut <= 0:
-            parts.append(truncate_at_sentence(remaining, max_len))
+            kept = truncate_at_sentence(remaining, max_len)
+            parts.append(kept)
+            consumed += len(kept)
+            remaining = remaining[len(kept):].strip()
             break
         part = remaining[:cut].strip()
         if part:
             parts.append(part)
+            consumed += len(part)
         remaining = remaining[cut:].strip()
+    if remaining:
+        # 无分隔符长独白填满条数预算后仍有剩余 — 这正是"文字墙"护栏该拦的
+        # 形态, 不合并 (总量上限也会拦), 只记录损失量供观测.
+        logger.info(
+            f"[REPLY-GUARDRAIL] long monologue tail dropped: "
+            f"kept={consumed} lost={len(remaining)} chars",
+            extra={
+                "event": EVT_REPLY_GUARDRAIL,
+                "action": "drop_long_tail",
+                "chars_kept": consumed,
+                "chars_lost": len(remaining),
+            },
+        )
     return parts
 
 
@@ -162,15 +192,62 @@ def split_and_validate_replies(
     if not has_explicit_split and len(parts) == 1 and len(parts[0]) > max_per_reply:
         parts = _split_long_reply_part(parts[0], max_per_reply, max_count)
     else:
-        parts = parts[:max_count]
-        parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
+        if len(parts) > max_count:
+            # 条数溢出 → 合并进最后一条而非丢弃 (空格连接, 与人设"空格代替
+            # 逗号"的口语风格一致). 合并后仍受单条/总量上限约束.
+            overflow = len(parts) - max_count
+            parts = parts[:max_count - 1] + [" ".join(parts[max_count - 1:])]
+            logger.info(
+                f"[REPLY-GUARDRAIL] merged {overflow} overflow bubbles into last "
+                f"(max_count={max_count})",
+                extra={
+                    "event": EVT_REPLY_GUARDRAIL,
+                    "action": "merge_overflow",
+                    "overflow_bubbles": overflow,
+                    "max_count": max_count,
+                },
+            )
+        truncated_parts = [truncate_at_sentence(p, max_per_reply) for p in parts]
+        per_reply_lost = sum(
+            len(orig) - len(cut) for orig, cut in zip(parts, truncated_parts)
+        )
+        if per_reply_lost:
+            n_truncated = sum(
+                1 for orig, cut in zip(parts, truncated_parts) if len(cut) < len(orig)
+            )
+            logger.info(
+                f"[REPLY-GUARDRAIL] {n_truncated} bubble(s) truncated at "
+                f"{max_per_reply} chars, lost={per_reply_lost}",
+                extra={
+                    "event": EVT_REPLY_GUARDRAIL,
+                    "action": "truncate_bubble",
+                    "bubbles_truncated": n_truncated,
+                    "chars_lost": per_reply_lost,
+                },
+            )
+        parts = truncated_parts
     result: list[str] = []
     total = 0
-    for p in parts:
+    for idx, p in enumerate(parts):
         if total + len(p) > max_total:
             remaining = max_total - total
+            chars_lost = sum(len(x) for x in parts[idx:])
             if remaining > 5:
-                result.append(truncate_at_sentence(p, remaining))
+                kept = truncate_at_sentence(p, remaining)
+                result.append(kept)
+                chars_lost -= len(kept)
+            logger.info(
+                f"[REPLY-GUARDRAIL] total cap {max_total} hit at bubble "
+                f"{idx + 1}/{len(parts)}, lost={chars_lost} chars",
+                extra={
+                    "event": EVT_REPLY_GUARDRAIL,
+                    "action": "truncate_total",
+                    "max_total": max_total,
+                    "bubbles_planned": len(parts),
+                    "bubbles_kept": len(result),
+                    "chars_lost": chars_lost,
+                },
+            )
             break
         result.append(p)
         total += len(p)

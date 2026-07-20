@@ -112,7 +112,7 @@ class TestStripSystemMarkers:
         assert "[2]" not in joined
 
 
-# ── 3. 条数上限 1-4 ────────────────────────────────────────────────────
+# ── 3. 条数上限 1-4 (溢出合并, 不丢内容) ────────────────────────────────
 
 
 class TestFourBubbleCap:
@@ -120,9 +120,38 @@ class TestFourBubbleCap:
         parts = split_and_validate_replies("一||二||三||四")
         assert parts == ["一", "二", "三", "四"]
 
-    def test_fifth_bubble_dropped(self):
-        parts = split_and_validate_replies("一||二||三||四||五")
+    def test_overflow_merges_into_last_bubble(self):
+        """第 5+ 条不丢弃 — 合并进第 4 条 (空格连接, 匹配人设口语风格)."""
+        parts = split_and_validate_replies("好||咋了||太惨了||别往心里去||又不是你的问题")
         assert len(parts) == 4
+        assert parts[:3] == ["好", "咋了", "太惨了"]
+        assert parts[3] == "别往心里去 又不是你的问题"
+
+    def test_merged_overflow_still_respects_per_bubble_cap(self):
+        """合并后的尾条超单条上限 → 句边界截断 (有损但有界), 不影响前三条."""
+        long_tail = "这是一段很长的话。" * 10  # 90 chars
+        parts = split_and_validate_replies(f"一||二||三||四||{long_tail}")
+        assert len(parts) == 4
+        assert parts[:3] == ["一", "二", "三"]
+        assert parts[3].startswith("四")
+        assert len(parts[3]) <= 60
+
+    def test_guardrail_logs_merge_and_total_cap(self, caplog):
+        """护栏触发必须可观测: merge_overflow / truncate_total 事件."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO, logger="app.services.chat.reply_formatting"):
+            split_and_validate_replies("一||二||三||四||五")
+            long = "这句话很长很长真的很长呀。" * 5  # 65 chars per bubble
+            split_and_validate_replies(f"{long}||{long}||{long}")
+
+        actions = [
+            r.__dict__.get("action") for r in caplog.records
+            if r.__dict__.get("event") == "reply.guardrail"
+        ]
+        assert "merge_overflow" in actions
+        assert "truncate_total" in actions
+        assert "truncate_bubble" in actions
 
 
 # ── 4. prompt 段注入 ────────────────────────────────────────────────────
