@@ -159,6 +159,9 @@ async def create_template(data: TemplateCreateRequest) -> dict:
         personality=data.personality.model_dump(),
         background=data.background,
         gender=data.gender,
+        # Templates coexist (one is the default); creating a new one must NOT
+        # archive the template system user's other templates.
+        stage_existing_workspaces=False,
     )
     logger.info("[TEMPLATE] created template agent %s", agent.id[:8])
     return {
@@ -209,6 +212,9 @@ async def create_template_from_document(
         gender=template_gender,
         profile_override=imported.profile,
         career_template_override=imported.career_template,
+        # Templates coexist (one is the default); creating a new one must NOT
+        # archive the template system user's other templates.
+        stage_existing_workspaces=False,
     )
     logger.info(
         "[TEMPLATE] created document template agent %s from %s",

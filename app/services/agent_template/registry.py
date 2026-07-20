@@ -65,10 +65,17 @@ async def get_template_owner_id() -> str | None:
 
 
 async def list_template_agents() -> list[Any]:
-    """All non-archived template agents, newest first."""
+    """All template agents, newest first — including archived ones.
+
+    Archived templates are still listed so an admin can see and delete legacy
+    rows. Historically a new template archived the template system user's other
+    templates (single-active-agent staging), leaving old templates invisible and
+    thus undeletable from the admin UI. That staging is now disabled on the
+    template path, but pre-existing archived templates must remain manageable.
+    """
     owner = await get_or_create_template_user()
     return await db.aiagent.find_many(
-        where={"userId": owner.id, "status": {"not": "archived"}},
+        where={"userId": owner.id},
         order={"createdAt": "desc"},
     )
 

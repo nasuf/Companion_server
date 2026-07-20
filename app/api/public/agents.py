@@ -307,6 +307,7 @@ async def create_agent_with_provisioning(
     gender: str | None = None,
     profile_override: dict | None = None,
     career_template_override: dict | None = None,
+    stage_existing_workspaces: bool = True,
 ):
     """Create an agent + workspace and enqueue the full provisioning job.
 
@@ -317,14 +318,17 @@ async def create_agent_with_provisioning(
     # 防双击 / 重试竞态: 用户已有 provisioning agent 时拒绝新建. 否则两次并发
     # 会 (a) 重复扣 LLM 配额, (b) 后入的 stage_active_workspaces_for_user 把
     # 前一份的 workspace 归档, 造成前一份在已 archived 的 workspace 写记忆.
-    pending = await db.aiagent.find_first(
-        where={"userId": user_id, "status": "provisioning"},
-    )
-    if pending is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="已有 AI 伙伴正在生成中, 请等候完成或删除后重试",
+    # 模板路径 (stage_existing_workspaces=False) 不适用: 模板系统用户名下多个
+    # 模板本就并存、互不归档, 一个模板在生成中不应阻塞创建下一个模板.
+    if stage_existing_workspaces:
+        pending = await db.aiagent.find_first(
+            where={"userId": user_id, "status": "provisioning"},
         )
+        if pending is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="已有 AI 伙伴正在生成中, 请等候完成或删除后重试",
+            )
     # Per spec §1.2: 7-dim / Big Five 用户输入仅作为 MBTI 计算的临时输入,
     # 不再常驻 DB. MBTI 在 _init_mbti() 里生成并写入.
     create_data: dict = {
@@ -357,10 +361,17 @@ async def create_agent_with_provisioning(
         raise
     staged_workspaces: list = []
     try:
-        staged_workspaces = await stage_active_workspaces_for_user(user_id)
+        # A normal user owns a single active companion, so a new agent archives
+        # the user's other active workspaces. Template agents are the exception:
+        # the template system user owns MANY coexisting templates (one is the
+        # default), so staging would archive every previously-created template.
+        # Callers on the template path pass stage_existing_workspaces=False.
+        if stage_existing_workspaces:
+            staged_workspaces = await stage_active_workspaces_for_user(user_id)
         # status 保持 "provisioning" — 等人生经历生成完成后再设为 "active"
         workspace = await activate_workspace(workspace.id)
-        await finalize_archived_workspaces(staged_workspaces)
+        if staged_workspaces:
+            await finalize_archived_workspaces(staged_workspaces)
     except Exception:
         if workspace is not None:
             await archive_provisioning_workspace(workspace.id)
