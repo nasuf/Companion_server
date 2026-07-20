@@ -106,4 +106,7 @@ async def test_adjust_side_counts_access_with_snake_case_columns():
     assert '"memoryId"' not in sql
     assert '"createdAt"' not in sql
     update_data = update_mock.await_args.kwargs["data"]
-    assert update_data["importance"] == pytest.approx(0.66)
+    # importance is the immutable initial score; the dynamic score goes to
+    # its own column (writing it back to importance compounded nightly).
+    assert "importance" not in update_data
+    assert update_data["currentScore"] == pytest.approx(0.66)

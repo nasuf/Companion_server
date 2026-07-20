@@ -303,6 +303,109 @@ class TestMemoryReconciliation:
 
         assert decision.action == "insert_new"
 
+    async def test_singleton_l1_never_updated_by_containment_rule(self):
+        """Spec §1.5.1: singleton L1 (姓名/年龄/生日…) 不可被写入期 reconciliation
+        改写 — 即使新文本严格包含旧文本 (enrichment containment 命中)."""
+        existing = _record(
+            id="old-name",
+            content="我叫小伴",
+            source="ai",
+            main="身份",
+            sub="姓名",
+            level=1,
+            importance=0.95,
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="ai",
+                workspace_id="ws1",
+                content="我叫小伴，大家也叫我昕昕",
+                summary="我叫小伴，大家也叫我昕昕",
+                embedding=[0.1],
+                main_category="身份",
+                sub_category="姓名",
+                entities=["小伴"],
+                topics=["姓名"],
+                allow_llm=False,
+            )
+
+        assert decision.action != "update_existing"
+        assert decision.action != "merge_existing"
+
+    async def test_singleton_l1_never_mutated_by_llm_adjudication(self):
+        """LLM 裁决想 update/merge singleton L1 也必须被拒 (keep separate)."""
+        existing = _record(
+            id="old-bday",
+            content="我生日是2004年3月8日",
+            source="ai",
+            main="身份",
+            sub="生日",
+            level=1,
+            importance=0.9,
+        )
+        llm_decision = ReconciliationDecision(
+            action="update_existing",
+            merged_summary="我生日是2004年3月8日，是双鱼座",
+            merged_content="我生日是2004年3月8日，是双鱼座",
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+            patch("app.services.memory.storage.reconciliation._relation", return_value="keep_separate"),
+            patch("app.services.memory.storage.reconciliation._related_enough_for_llm", return_value=True),
+            patch("app.services.memory.storage.reconciliation._llm_adjudicate", new_callable=AsyncMock, return_value=llm_decision),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="ai",
+                workspace_id="ws1",
+                content="我生日是2004年3月8日，是双鱼座",
+                summary="我生日是2004年3月8日，是双鱼座",
+                embedding=[0.1],
+                main_category="身份",
+                sub_category="生日",
+                entities=[],
+                topics=["生日"],
+            )
+
+        assert decision.action == "insert_new"
+
+    async def test_non_singleton_l1_enrichment_still_updates(self):
+        """非 singleton L1 (如 宠物) 的 containment enrichment 政策保留."""
+        existing = _record(
+            id="old-pet",
+            content="我养了一只叫芝麻的黑猫",
+            source="ai",
+            main="身份",
+            sub="宠物",
+            level=1,
+            importance=0.85,
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="ai",
+                workspace_id="ws1",
+                content="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
+                summary="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
+                embedding=[0.1],
+                main_category="身份",
+                sub_category="宠物",
+                entities=["芝麻"],
+                topics=["宠物"],
+                allow_llm=False,
+            )
+
+        assert decision.action == "update_existing"
+        assert decision.existing_id == "old-pet"
+
     async def test_ambiguous_related_pair_can_use_llm_merge_decision(self):
         existing = _record(
             id="old-life",

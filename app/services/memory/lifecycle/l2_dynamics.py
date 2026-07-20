@@ -7,6 +7,13 @@ recalculate current scores and promote/demote as needed:
   current_score = initial_importance × time_factor × frequency_factor
   P1 adds a bounded quality factor derived from changelog signals.
 
+`importance` is the IMMUTABLE initial score (the formula's base); the computed
+dynamic score is persisted to the separate `current_score` column, which the
+retrieval ranker reads via COALESCE(current_score, importance). Never write the
+computed score back into `importance` — doing so compounds the factors on every
+cron run (upward inflation for frequently-accessed rows, downward spiral for
+idle ones) because the next run would treat last night's product as the base.
+
 Time factor (days since last accessed/mentioned):
   <30d → 1.0 | 30-90d → 0.9 | 90-180d → 0.8 | 180-365d → 0.7
   365-730d → 0.6 | >730d → 0.5
@@ -102,31 +109,30 @@ async def _check_promotion_conditions(mem, side: str) -> bool:
     # belongs to. A user-side L2 should only check user L1 conflicts; same for ai.
     # workspaceId 过滤确保同一 user 的不同 agent (workspace) L1 不会被误判冲突,
     # 每个 workspace 的 L1 是独立空间.
-    model = db.usermemory if side == "user" else db.aimemory
-    existing_l1 = await model.find_many(
-        where={
-            "userId": mem.userId,
-            "workspaceId": mem.workspaceId,
-            "level": 1,
-            "isArchived": False,
-            "mainCategory": mem.mainCategory,
-            "subCategory": mem.subCategory,
-        },
-        take=5,
-    )
-    mem_content = (mem.summary or mem.content or "").lower()
-    for l1 in existing_l1:
-        l1_content = (l1.summary or l1.content or "").lower()
-        if l1_content and mem_content and l1.id != mem.id:
-            overlap = sum(1 for c in mem_content if c in l1_content)
-            if overlap > len(mem_content) * 0.5:
-                continue
-            if is_singleton(mem.mainCategory, mem.subCategory):
-                logger.info(
-                    f"L2→L1 blocked: {side}/{mem.id} conflicts with L1 "
-                    f"{l1.id} in singleton {mem.mainCategory}/{mem.subCategory}"
-                )
-                return False
+    #
+    # SINGLETON 闸门: 该子类已有任何 L1 (姓名/年龄/生日 等硬唯一字段) → 一律
+    # 拒绝晋升. 旧实现用字符 overlap>0.5 "相似即放行" — 相似恰恰意味着同一
+    # 事实, 晋升近重复会造成第二条 singleton L1 (双"姓名"), 且 model.update
+    # 直写不经过 store_memory 的 singleton 闸门, 无人兜底.
+    if is_singleton(mem.mainCategory, mem.subCategory):
+        model = db.usermemory if side == "user" else db.aimemory
+        existing_l1 = await model.find_many(
+            where={
+                "userId": mem.userId,
+                "workspaceId": mem.workspaceId,
+                "level": 1,
+                "isArchived": False,
+                "mainCategory": mem.mainCategory,
+                "subCategory": mem.subCategory,
+            },
+            take=1,
+        )
+        if any(l1.id != mem.id for l1 in existing_l1):
+            logger.info(
+                f"L2→L1 blocked: {side}/{mem.id} singleton "
+                f"{mem.mainCategory}/{mem.subCategory} already has an L1"
+            )
+            return False
 
     return True
 
@@ -182,14 +188,21 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
 
     mem_ids = [m.id for m in l2_memories]
     mention_counts: dict[str, int] = {}
+    last_access_at: dict[str, datetime] = {}
     quality_counts: dict[str, dict[str, int]] = {}
     if mem_ids:
+        # Spec time_factor is "days since last access". Read the real last access
+        # from the changelog instead of `updatedAt` — the row's updatedAt is
+        # @updatedAt-refreshed by this cron's own writes (and any admin edit),
+        # which would freeze the time factor at 1.0 forever. The 1-year window
+        # only applies to the frequency count; last access is all-time MAX.
         rows = await db.query_raw(
             """
-            SELECT memory_id, COUNT(*)::int AS cnt
+            SELECT memory_id,
+                   COUNT(*) FILTER (WHERE created_at >= $2)::int AS cnt,
+                   MAX(created_at) AS last_access
             FROM memory_changelogs
             WHERE memory_id = ANY($1::text[])
-              AND created_at >= $2
               AND operation = 'access'
             GROUP BY memory_id
             """,
@@ -197,7 +210,18 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
             one_year_ago,
         )
         for r in rows:
-            mention_counts[r.get("memory_id", "")] = r.get("cnt", 0)
+            mid = r.get("memory_id", "")
+            mention_counts[mid] = r.get("cnt", 0)
+            raw_last = r.get("last_access")
+            if isinstance(raw_last, str):
+                try:
+                    raw_last = datetime.fromisoformat(raw_last.replace("Z", "+00:00"))
+                except ValueError:
+                    raw_last = None
+            if isinstance(raw_last, datetime):
+                if raw_last.tzinfo is None:
+                    raw_last = raw_last.replace(tzinfo=UTC)
+                last_access_at[mid] = raw_last
         quality_rows = await db.query_raw(
             """
             SELECT
@@ -227,13 +251,17 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
     promoted = 0
     demoted = 0
     adjusted = 0
-    updates: list[tuple[str, dict]] = []
+    # (memory_id, update_data, changelog_op_or_None, mem_ref)
+    updates: list[tuple[str, dict, str | None, object]] = []
 
     for mem in l2_memories:
+        # IMMUTABLE base — never overwritten by this cron (see module docstring).
         initial_importance = float(mem.importance or 0.5)
 
-        last_access = mem.updatedAt or mem.createdAt
-        if last_access and last_access.tzinfo:
+        last_access = last_access_at.get(mem.id) or mem.createdAt
+        if isinstance(last_access, datetime):
+            if last_access.tzinfo is None:
+                last_access = last_access.replace(tzinfo=UTC)
             days = (now - last_access).days
         else:
             days = 90
@@ -246,34 +274,70 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
             q_counts.get("corrections", 0),
             q_counts.get("evidence_links", 0),
         )
-        current_score = initial_importance * tf * ff * qf
+        current_score = max(0.0, min(1.0, initial_importance * tf * ff * qf))
 
         # Track the continuous-below-threshold streak regardless of outcome
         sustained_low = await _track_low_score_streak(
             side, mem.id, below_threshold=current_score < 0.50,
         )
 
+        prev_score = getattr(mem, "currentScore", None)
+        score_changed = (
+            prev_score is None or abs(current_score - float(prev_score)) > 0.01
+        )
+
         if current_score >= 0.85 and mc >= 10:
             if not await _check_promotion_conditions(mem, side):
-                if abs(current_score - initial_importance) > 0.01:
-                    updates.append((mem.id, {"importance": current_score}))
+                if score_changed:
+                    updates.append((mem.id, {"currentScore": current_score}, None, mem))
                     adjusted += 1
             else:
-                updates.append((mem.id, {"level": 1, "importance": current_score}))
+                # One-time level transition: promoted rows must land in the L1
+                # importance band (≥0.85); this is the only place importance is
+                # written, and it's a transition, not a recompute.
+                updates.append((
+                    mem.id,
+                    {
+                        "level": 1,
+                        "importance": min(1.0, max(initial_importance, 0.85)),
+                        "currentScore": current_score,
+                    },
+                    "promote",
+                    mem,
+                ))
                 promoted += 1
         elif sustained_low:
-            # Spec §1.5.2: demote only after continuously below 0.50 for 30+ days
-            updates.append((mem.id, {"level": 3, "importance": current_score}))
+            # Spec §1.5.2: demote only after continuously below 0.50 for 30+ days.
+            # importance (initial score) stays untouched — the demotion itself is
+            # recorded by the level change + changelog.
+            updates.append((
+                mem.id, {"level": 3, "currentScore": current_score}, "demote", mem,
+            ))
             demoted += 1
-        elif abs(current_score - initial_importance) > 0.01:
-            updates.append((mem.id, {"importance": current_score}))
+        elif score_changed:
+            updates.append((mem.id, {"currentScore": current_score}, None, mem))
             adjusted += 1
 
-    for mid, data in updates:
+    for mid, data, changelog_op, mem_ref in updates:
         try:
             await model.update(where={"id": mid}, data=data)
         except Exception as e:
             logger.warning(f"L2 update failed ({side}/{mid}): {e}")
+            continue
+        if changelog_op:
+            try:
+                from app.services.memory.storage.persistence import log_memory_changelog
+
+                await log_memory_changelog(
+                    getattr(mem_ref, "userId", user_id or ""),
+                    mid,
+                    changelog_op,
+                    old_value="level=2",
+                    new_value=f"level={data.get('level')} current_score={data.get('currentScore'):.3f}",
+                    workspace_id=getattr(mem_ref, "workspaceId", None),
+                )
+            except Exception as e:
+                logger.debug(f"L2 {changelog_op} changelog write failed ({mid}): {e}")
 
     stats = {
         "side": side,

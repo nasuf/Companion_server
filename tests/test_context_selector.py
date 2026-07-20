@@ -56,6 +56,38 @@ def test_select_context_skips_abnormally_long_single_memory():
     assert result == []
 
 
+def test_select_context_respects_aggregate_token_budget():
+    """Dual 10+10 quotas alone allow 20 items; the aggregate budget must cap
+    the memory section's total size (protected slots fill first)."""
+    from app.services.memory.retrieval.context_selector import (
+        TOTAL_MEMORY_TOKEN_BUDGET,
+        estimate_tokens,
+    )
+
+    # ~150 tokens each (under the 180 per-item cap), 10 user + 10 ai candidates.
+    text = "记" * 100  # 100 CJK chars ≈ 150 tokens
+    candidates = [
+        {
+            "id": f"u{i}", "summary": text, "importance": 0.7,
+            "rank_score": 0.9 - i * 0.01,
+            "created_at": "2025-01-01T00:00:00", "source": "user",
+        }
+        for i in range(10)
+    ] + [
+        {
+            "id": f"a{i}", "summary": text, "importance": 0.7,
+            "rank_score": 0.8 - i * 0.01,
+            "created_at": "2025-01-01T00:00:00", "source": "ai",
+        }
+        for i in range(10)
+    ]
+    result = select_context(candidates, token_budget=800)
+
+    total_tokens = sum(estimate_tokens(m.text) for m in result)
+    assert total_tokens <= TOTAL_MEMORY_TOKEN_BUDGET
+    assert 0 < len(result) < 20  # budget bites before both quotas fill
+
+
 def test_select_context_uses_independent_source_quotas_not_global_top10():
     """User and AI memories each get their own quota, so one side cannot crowd out the other."""
     candidates = [

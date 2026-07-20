@@ -373,6 +373,13 @@ async def hybrid_retrieve(
 
     # Cache the result. Phase 2.4: cache write key 必须跟 GET 用同一个 cache_key
     # (effective_query), 否则 enhanced_query 路径 GET 永远 miss → caching 失效.
+    #
+    # 缓存污染防护: vector arm 失败 (embedding 503 / pgvector 故障) 时本次结果
+    # 是"因故障而空", 不是"真的没有相关记忆". 写入缓存会让接下来 5 分钟内同
+    # query 全部命中空结果 — 一次 embedding 抖动放大成持续失忆 (生产实测复现).
+    # 合法空结果 (检索成功但无候选) 仍然缓存, 避免重复无效搜索.
+    if isinstance(vector_results, Exception):
+        return result
     try:
         await cache_set_retrieval(
             cache_key,

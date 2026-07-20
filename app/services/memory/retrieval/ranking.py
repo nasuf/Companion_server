@@ -253,8 +253,18 @@ def rank_memory_candidate(
     )
     raw_importance = memory.get("importance")
     importance = 0.0 if raw_importance is None else float(raw_importance)
+    # Spec §3.2: ranking uses the L2 *dynamic* score when the nightly cron has
+    # computed one (current_score column); importance stays the immutable
+    # initial score. Rows without a dynamic score (L1/L3/new L2) fall back.
+    raw_current = memory.get("current_score")
+    try:
+        effective_importance = (
+            float(raw_current) if raw_current is not None else importance
+        )
+    except (TypeError, ValueError):
+        effective_importance = importance
     score = compute_display_score(
-        importance=importance,
+        importance=effective_importance,
         last_accessed_at=(
             memory.get("last_accessed_at")
             or memory.get("updated_at")

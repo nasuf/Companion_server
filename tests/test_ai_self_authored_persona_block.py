@@ -120,3 +120,17 @@ async def test_user_side_preference_not_blocked():
     )
     assert len(calls) == 1
     assert calls[0]["main_category"] == "偏好"
+
+
+def test_ai_extraction_taxonomy_excludes_persona_categories():
+    """The AI-side extraction prompt must not offer 偏好/身份 categories at all —
+    the pipeline drops them anyway, so listing them just wastes LLM output."""
+    from app.services.memory.recording.extraction import _taxonomy_list_text
+
+    ai_text = _taxonomy_list_text("ai")
+    assert "偏好" not in ai_text
+    assert "身份" not in ai_text
+    assert "生活" in ai_text and "情绪" in ai_text and "思维" in ai_text
+
+    user_text = _taxonomy_list_text("user")
+    assert "偏好" in user_text and "身份" in user_text

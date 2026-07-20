@@ -376,6 +376,51 @@ async def _do_memory_pipeline(
         )
 
 
+_WATERMARK_BACKLOG_LIMIT = 30
+
+
+async def _fetch_new_side_messages(
+    conversation_id: str,
+    wm: datetime,
+    target_role: str,
+) -> list[dict] | None:
+    """Fetch the side's un-extracted backlog straight from the DB.
+
+    The caller-provided window is only the last 6 messages. When a batch is
+    skipped (distributed lock contention / Redis outage) while the user keeps
+    chatting, more than 6 new messages can accumulate — the older ones slide
+    out of the window and, once a later batch advances the watermark past
+    them, are silently never extracted. Fetching `createdAt > watermark` from
+    the DB makes the pipeline self-healing regardless of window size.
+
+    Returns None on DB failure so the caller falls back to the window split
+    (legacy behavior, still correct for the common no-skip case).
+    """
+    try:
+        rows = await db.message.find_many(
+            where={
+                "conversationId": conversation_id,
+                "role": target_role,
+                "createdAt": {"gt": wm},
+            },
+            order={"createdAt": "asc"},
+            take=_WATERMARK_BACKLOG_LIMIT,
+        )
+    except Exception as e:
+        logger.warning(f"[MEM-WM] backlog fetch failed conv={conversation_id[:8]}: {e}")
+        return None
+    return [
+        {
+            "id": r.id,
+            "role": r.role,
+            "content": r.content,
+            "createdAt": getattr(r, "createdAt", None),
+        }
+        for r in rows
+        if (r.content or "").strip()
+    ]
+
+
 async def _pipeline_with_watermark(
     user_id: str,
     recent: list[dict],
@@ -384,8 +429,14 @@ async def _pipeline_with_watermark(
     side: Literal["user", "ai"],
     workspace_id: str | None = None,
 ) -> int:
-    """按 (conversation_id, side) 水位线切分 recent, 调用 extraction pipeline.
-    返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件)."""
+    """按 (conversation_id, side) 水位线切分, 调用 extraction pipeline.
+    返回该侧实际入库的记忆条数 (供 _bg_memory_pipeline 汇总后推 WS 事件).
+
+    新消息来源优先 DB 增量 (createdAt > watermark, 上限 30 条), 防止跳批期间
+    积压 >6 条时旧消息滑出调用方窗口被静默丢弃; DB 失败 / 首次无水位线时退回
+    旧的窗口切分行为. 调用方窗口里无时间戳的合成消息 (刚生成还未持久化的回复)
+    仅在 DB 增量为空时作为抽取目标, 避免与已持久化的拆分回复重复抽取.
+    """
     wm = _ensure_aware(
         await get_watermark(conversation_id, side) if conversation_id else None
     )
@@ -396,19 +447,46 @@ async def _pipeline_with_watermark(
     # so the watermark still advances; otherwise next round would re-extract them.
     target_role = "user" if side == "user" else "assistant"
     fallback_now = datetime.now(UTC)
+
+    db_backlog: list[dict] | None = None
+    if conversation_id and wm is not None:
+        # wm None (first run / expired) keeps the window-only path: fetching the
+        # whole history would re-extract an entire old conversation.
+        db_backlog = await _fetch_new_side_messages(conversation_id, wm, target_role)
+
     context_msgs: list[dict] = []
     new_target_msgs: list[dict] = []
     max_side_ts: datetime | None = None
-    for m in recent:
+
+    def _add_target(m: dict) -> None:
+        nonlocal max_side_ts
+        new_target_msgs.append(m)
         ts = _parse_ts(m)
-        is_new = wm is None or ts is None or ts > wm
-        if is_new and m.get("role") == target_role:
-            new_target_msgs.append(m)
-            effective = ts if ts is not None else fallback_now
-            if max_side_ts is None or effective > max_side_ts:
-                max_side_ts = effective
-        else:
-            context_msgs.append(m)
+        effective = ts if ts is not None else fallback_now
+        if max_side_ts is None or effective > max_side_ts:
+            max_side_ts = effective
+
+    if db_backlog is not None:
+        for m in db_backlog:
+            _add_target(m)
+        # The window contributes context plus synthetic (un-persisted) targets.
+        for m in recent:
+            ts = _parse_ts(m)
+            is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
+            if not is_new_target:
+                context_msgs.append(m)
+            elif ts is None and not db_backlog:
+                # Synthetic fresh reply, nothing persisted yet — extract it now;
+                # when the persisted rows exist they are authoritative instead.
+                _add_target(m)
+    else:
+        for m in recent:
+            ts = _parse_ts(m)
+            is_new = wm is None or ts is None or ts > wm
+            if is_new and m.get("role") == target_role:
+                _add_target(m)
+            else:
+                context_msgs.append(m)
 
     if max_side_ts is None:
         return 0  # 该 side 无新消息, 跳过 LLM

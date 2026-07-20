@@ -65,6 +65,12 @@ def estimate_tokens(text: str) -> int:
 MAX_MEMORIES_PER_SOURCE = 10
 MAX_MEMORIES_INJECTED = MAX_MEMORIES_PER_SOURCE  # backward-compatible alias
 MAX_MEMORY_TOKENS_PER_ITEM = 180
+# Aggregate token cap across ALL selected memories (both sources). The dual
+# per-source quotas alone allow up to 20 items — without an aggregate budget
+# the memory section can balloon to 2-3K tokens. Protected slots fill first
+# (they run earlier in select_context), so the budget trims generic fill,
+# not safety/literal/relation-critical memories.
+TOTAL_MEMORY_TOKEN_BUDGET = 900
 _SAFETY_MEMORY_QUOTA = 3
 _HIGH_SIMILARITY_MEMORY_QUOTA = 2
 _KEYWORD_USER_MEMORY_QUOTA = 2
@@ -249,8 +255,11 @@ def select_context(
 
     `max_items` is retained for compatibility and now means "default per-source
     item quota". Use `user_max_items` / `ai_max_items` to override either side.
-    `token_budget` is no longer an aggregate truncation budget; it only caps
-    abnormal single memories. We either include a memory intact or skip it.
+    `token_budget` caps abnormal single memories (include intact or skip);
+    TOTAL_MEMORY_TOKEN_BUDGET additionally caps the aggregate across all
+    selected items — dual 10+10 quotas alone would let the memory section
+    balloon to 2-3K tokens. Protected slots run first, so the aggregate budget
+    trims generic fill, never safety/literal/relation-critical picks.
 
     Classification:
     - strong: rank_score ≥ 0.7 → "你清楚记得的事"
@@ -271,6 +280,7 @@ def select_context(
     selected_rows: list[dict] = []
     seen_ids: set[str] = set()
     selected_counts: dict[MemorySource, int] = {"user": 0, "ai": 0}
+    used_tokens = 0
 
     def source_limit(source: MemorySource) -> int:
         return ai_limit if source == "ai" else user_limit
@@ -279,6 +289,7 @@ def select_context(
         return max(0, user_limit) + max(0, ai_limit)
 
     def try_add(mem: dict, protected_reason: str | None = None) -> bool:
+        nonlocal used_tokens
         if len(selected_rows) >= selected_total_limit():
             return False
         source = _memory_source(mem)
@@ -299,11 +310,14 @@ def select_context(
         tokens = estimate_tokens(text)
         if tokens > per_item_token_limit:
             return False
+        if used_tokens + tokens > TOTAL_MEMORY_TOKEN_BUDGET:
+            return False
         if protected_reason:
             _append_rank_reason(mem, protected_reason)
         seen_ids.add(key)
         selected_rows.append(mem)
         selected_counts[source] += 1
+        used_tokens += tokens
         return True
 
     safety_added = 0

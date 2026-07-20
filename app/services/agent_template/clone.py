@@ -227,6 +227,8 @@ async def clone_template_agent_for_user(user_id: str, template_agent_id: str):
             pass
         raise
 
+    _dispatch_day_one_schedule(agent, user_id)
+
     logger.info(
         "[AGENT-CLONE] provisioned agent %s for user %s from template %s",
         agent.id[:8],
@@ -234,6 +236,51 @@ async def clone_template_agent_for_user(user_id: str, template_agent_id: str):
         template_agent_id[:8],
     )
     return agent, workspace, conversation
+
+
+def _dispatch_day_one_schedule(agent, user_id: str) -> None:
+    """Generate the clone's first daily schedule in the background.
+
+    The daily-schedule cron runs pre-dawn, so an afternoon signup would leave
+    the clone with ai_status=None (no delay profile / 隐性状态约束 / 忙闲语义)
+    until the next cron run. lifeOverview + MBTI were copied from the template,
+    so one background LLM call fills the gap. Best-effort: a failure only means
+    the degraded no-schedule day-one behavior we had before.
+    """
+    try:
+        from app.services.mbti import get_mbti
+        from app.services.runtime.tasks import fire_background
+        from app.services.schedule_domain.schedule import (
+            generate_daily_schedule,
+            get_life_overview,
+        )
+    except Exception as exc:
+        logger.warning("[AGENT-CLONE] day-one schedule imports failed: %s", exc)
+        return
+
+    async def _gen() -> None:
+        try:
+            overview = await get_life_overview(agent.id)
+            await generate_daily_schedule(
+                agent.id,
+                agent.name,
+                get_mbti(agent),
+                life_overview=overview,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[AGENT-CLONE] day-one schedule generation failed for %s: %s",
+                agent.id[:8],
+                exc,
+            )
+
+    coro = _gen()
+    try:
+        fire_background(coro)
+    except Exception as exc:
+        coro.close()
+        logger.warning("[AGENT-CLONE] day-one schedule dispatch failed: %s", exc)
 
 
 async def _has_agent_or_pending(user_id: str) -> bool:

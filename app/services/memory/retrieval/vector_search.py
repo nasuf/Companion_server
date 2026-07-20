@@ -27,7 +27,8 @@ def _embedding_search_arm(table: str, source: str) -> str:
     """
     return f"""
         (SELECT
-            m.id, m.content, m.summary, m.level, m.importance, m.mention_count,
+            m.id, m.content, m.summary, m.level, m.importance, m.current_score,
+            m.mention_count,
             m.type, m.main_category, m.sub_category,
             m.created_at, m.updated_at,
             COALESCE(m.updated_at, m.created_at) AS last_accessed_at,

@@ -18,8 +18,19 @@ from app.services.memory.polarity import semantic_conflict_reasons
 from app.services.memory.retrieval.vector_search import search_by_embedding
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.repo import MemoryRecord, Source
+from app.services.memory.taxonomy import is_singleton
 
 logger = logging.getLogger(__name__)
+
+
+def _is_protected_singleton_l1(record: MemoryRecord) -> bool:
+    """Spec §1.5.1: singleton L1 facts (姓名/年龄/生日 …) must never be mutated
+    by write-time reconciliation. Containment-gated enrichment is acceptable
+    for non-singleton L1 (richer restatements), but a singleton's core value
+    changing is by definition a contradiction — that goes through the spec §4
+    user-confirmation flow, not a silent overwrite.
+    """
+    return record.level == 1 and is_singleton(record.mainCategory, record.subCategory)
 
 ReconciliationAction = Literal[
     "insert_new",
@@ -366,6 +377,13 @@ async def resolve_memory_write(
                 reason="existing_covers_new",
             )
         if action == "update_existing":
+            if _is_protected_singleton_l1(record):
+                logger.info(
+                    f"Memory reconciliation refused to update singleton L1 "
+                    f"({record.mainCategory}/{record.subCategory}); keeping separate: "
+                    f"new='{text[:40]}'"
+                )
+                continue
             best_update = ReconciliationDecision(
                 action="update_existing",
                 existing_id=record.id,
@@ -404,6 +422,16 @@ async def resolve_memory_write(
         if decision is None:
             continue
         if decision.action in {"drop_duplicate", "update_existing", "merge_existing"}:
+            if (
+                decision.action in {"update_existing", "merge_existing"}
+                and _is_protected_singleton_l1(record)
+            ):
+                logger.info(
+                    f"Memory reconciliation LLM wanted to mutate singleton L1 "
+                    f"({record.mainCategory}/{record.subCategory}); keeping separate: "
+                    f"new='{text[:40]}'"
+                )
+                continue
             decision.existing_id = record.id
             decision.existing_record = record
             if decision.action == "drop_duplicate":

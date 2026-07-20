@@ -28,6 +28,14 @@ _PROMPT_KEY_BY_SIDE: dict[Side, str] = {
 }
 
 
+# Chat-time AI-side extraction must not mint new stable persona facts. The
+# pipeline drops AI-authored 偏好/身份 memories anyway (anti persona-drift:
+# hallucinated "我喜欢浅紫色" must never fossilize); excluding the categories
+# from the prompt's taxonomy stops the LLM from wasting output on them.
+# The provisioning path seeds persona L1 directly and does not use this prompt.
+_AI_CHAT_EXTRACT_EXCLUDED_MAINS = frozenset({"偏好", "身份"})
+
+
 def _taxonomy_list_text(side: Side) -> str:
     """Render the L1 taxonomy bullets for the given side's extraction prompt.
 
@@ -35,9 +43,15 @@ def _taxonomy_list_text(side: Side) -> str:
     the downstream pipeline will demote/reject if the (source, level, main)
     slice turns out to forbid the sub-category.
     """
+    items = TAXONOMY_MATRIX[side][1].items()
+    if side == "ai":
+        items = [
+            (main, subs) for main, subs in items
+            if main not in _AI_CHAT_EXTRACT_EXCLUDED_MAINS
+        ]
     return "\n".join(
         f"- {main}：{'、'.join(subs)}"
-        for main, subs in TAXONOMY_MATRIX[side][1].items()
+        for main, subs in items
     )
 
 
