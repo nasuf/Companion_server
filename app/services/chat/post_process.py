@@ -467,6 +467,7 @@ async def _pipeline_with_watermark(
             max_side_ts = effective
 
     if db_backlog is not None:
+        backlog_contents = {(m.get("content") or "").strip() for m in db_backlog}
         for m in db_backlog:
             _add_target(m)
         # The window contributes context plus synthetic (un-persisted) targets.
@@ -475,9 +476,12 @@ async def _pipeline_with_watermark(
             is_new_target = m.get("role") == target_role and (ts is None or ts > wm)
             if not is_new_target:
                 context_msgs.append(m)
-            elif ts is None and not db_backlog:
-                # Synthetic fresh reply, nothing persisted yet — extract it now;
-                # when the persisted rows exist they are authoritative instead.
+            elif ts is None and (m.get("content") or "").strip() not in backlog_contents:
+                # Synthetic fresh reply (just-generated, no persisted ts) that the
+                # DB backlog snapshot does NOT already contain — extract it now
+                # instead of deferring a whole turn. Content-dedupe against the
+                # backlog prevents double-extracting a reply that WAS persisted
+                # before this snapshot (then it's authoritative via db_backlog).
                 _add_target(m)
     else:
         for m in recent:

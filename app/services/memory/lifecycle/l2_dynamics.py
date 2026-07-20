@@ -195,7 +195,11 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
         # from the changelog instead of `updatedAt` — the row's updatedAt is
         # @updatedAt-refreshed by this cron's own writes (and any admin edit),
         # which would freeze the time factor at 1.0 forever. The 1-year window
-        # only applies to the frequency count; last access is all-time MAX.
+        # only applies to the frequency count; last access is MAX(created_at)
+        # over retained access rows. NB: changelog_retention purges `access`
+        # rows older than 13 months, so a row whose newest access predates that
+        # falls back to createdAt (a strictly older or equal timestamp → equal
+        # or MORE decay, never inflated). Bounded, acknowledged tradeoff.
         rows = await db.query_raw(
             """
             SELECT memory_id,

@@ -13,8 +13,10 @@ rows (5+ per cluster) into a digest.
 Safety posture:
 - Gated behind settings.memory_consolidation_enabled (default OFF).
 - Originals are archived with a `consolidated_into:<id>` changelog trail.
-- Only L3, only rows older than _MIN_AGE_DAYS, and only prioritized
-  provenances (daily_summary / NULL-legacy) plus never-accessed rows.
+- Only L3, only rows older than _MIN_AGE_DAYS. Candidate set = daily_summary
+  rows (regardless of access history — trivia that has been injected before is
+  still trivia) OR NULL-legacy rows that were never accessed. user_stated /
+  ai_authored / consolidated rows are excluded (real grounding, stay separate).
 - Per-workspace cluster cap bounds LLM cost per run.
 """
 
@@ -174,14 +176,17 @@ async def _compress_cluster(
         occur_time=occur_mid,
         workspace_id=workspace_id,
         provenance=CONSOLIDATED,
+        # 强制插入独立行: 不走 reconciliation. 否则 digest 可能被 update_existing
+        # 并进一条**非簇**同类记忆 (含 L2), 连带覆盖那条行内容并把它当作归档目标 —
+        # 一次整合意外改写了不该动的记忆. digest 内容本就是新摘要, 无需去重.
+        skip_reconciliation=True,
     )
     if not new_id:
         return None
 
     for c in cluster:
-        # store_memory may have reconciliation-merged the digest INTO one of the
-        # cluster rows (returning its id) — archiving that row would destroy the
-        # digest we just wrote. Keep it.
+        # skip_reconciliation 保证 new_id 是全新行, 不会等于任何簇内既有 id;
+        # 这条防御仍保留以防未来 store_memory 语义变化.
         if c["id"] == new_id:
             continue
         try:

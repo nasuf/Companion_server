@@ -816,11 +816,26 @@ _ENTITY_SUBS: dict[str, tuple[str, str]] = {
 }
 
 # Conservative name patterns; a missed name is fine, a wrong name is not.
-_NAME_AFTER_CALLED_RE = re.compile(r"名叫[“\"']?([\u4e00-\u9fa5A-Za-z]{1,6})[”\"']?")
-_FAMILY_NAME_RE = re.compile(
-    r"(父亲|母亲|爸爸|妈妈)([\u4e00-\u9fa5]{2,3})(?=[，,。]|是|在|年轻|退休|今年|$)"
+#
+# 教训 (2026-07-20 review): 旧正则把描述性续写误吞成名字 —
+#   "我父亲今年退休了" → "今年"     (lookahead 含 退休/今年, {2,3} 回溯捕获时间词)
+#   "我妈妈是护士"     → "是护士"   ({2,3} 把系动词"是"吞进名字, $ 命中)
+#   "名叫大橘的橘猫很可爱" → "大橘的橘猫很"  ({1,6} 无右边界过度捕获)
+# 收紧三处, 仍保留"档案里名字常直接跟谓语"的裸名抽取能力 (父亲林国安是…/母亲陈秀芬年轻时…):
+#   ① 名字首字排除代词/助词/系动词/副词 (_NAME_HEAD) → 挡住 "是护士" 被当名字;
+#   ② 右边界 (_NAME_TAIL) 只允许 标点/引号/"的"/连接词/句末 + 两个真实续接词
+#      "是"/"年轻"; 刻意剔除 "退休/今年/在" → "今年退休"因无合法边界而不匹配;
+#   ③ 宠物名限定显式命名词 (名叫/叫做/…) + 可选引号, 右边界收口 → 不再过度捕获.
+_NAME_HEAD = r"(?![我你他她它了着过的地得是在有很也都就还没却便更])"
+_NAME_TAIL = r"""(?=[”"'‘’，,。、！!？?\s的和跟与]|是|年轻|$)"""
+_NAME_BODY = _NAME_HEAD + r"([一-龥A-Za-z]{2,4})" + _NAME_TAIL
+_PET_NAME_BODY = _NAME_HEAD + r"([一-龥A-Za-z]{1,4})" + _NAME_TAIL
+_PET_INTRO = r"""(?:名叫|叫做|叫作|唤作)[“"'‘’]?"""
+_NAME_AFTER_CALLED_RE = re.compile(_PET_INTRO + _PET_NAME_BODY)
+_FAMILY_NAME_RE = re.compile(r"(父亲|母亲|爸爸|妈妈)(?:叫|名叫|叫做)?" + _NAME_BODY)
+_FRIEND_NAME_RE = re.compile(
+    r"(?:闺蜜|好友|好朋友|兄弟|发小)(?:是|叫|名叫)?(?:[一-龥]{0,6}同学)?" + _NAME_BODY
 )
-_FRIEND_NAME_RE = re.compile(r"闺蜜是?(?:[\u4e00-\u9fa5]{0,6}同学)?([\u4e00-\u9fa5]{2,3})(?=[，,。]|$)")
 
 _FAMILY_ROLE_MAP = {"父亲": "father", "爸爸": "father", "母亲": "mother", "妈妈": "mother"}
 

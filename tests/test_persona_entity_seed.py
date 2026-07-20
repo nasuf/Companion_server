@@ -34,6 +34,25 @@ class TestPersonaEntityExtraction:
     def test_no_false_positives_on_plain_text(self):
         assert _extract_persona_entities("家庭氛围总体和睦，父母关系稳定。", "亲属关系") == []
 
+    @pytest.mark.parametrize("text,sub", [
+        # 2026-07-20 review: 旧正则会把描述性续写误吞成名字, 必须全部返回空.
+        ("我父亲今年退休了", "亲属关系"),          # 时间词"今年"曾被当名字
+        ("我妈妈是护士", "亲属关系"),             # 系动词"是护士"曾被当名字
+        ("妈妈叫我起床了", "亲属关系"),            # "叫我起床"不是名字
+        ("我的宠物很爱叫唤", "宠物"),             # 无命名词, 不该抽
+    ])
+    def test_no_garbage_names(self, text, sub):
+        assert _extract_persona_entities(text, sub) == []
+
+    def test_pet_name_not_over_captured(self):
+        # "名叫大橘的橘猫很可爱" 曾抽成 "大橘的橘猫很"; 应在 "的" 处收口.
+        ents = _extract_persona_entities("它名叫大橘的橘猫很可爱", "宠物")
+        assert ents == [{"name": "大橘", "type": "pet", "role": "pet"}]
+
+    def test_family_name_with_naming_verb(self):
+        ents = _extract_persona_entities("我妈妈叫王秀兰，是家庭主妇", "亲属关系")
+        assert {e["name"]: e["role"] for e in ents} == {"王秀兰": "mother"}
+
 
 @pytest.mark.asyncio
 async def test_seed_persona_entities_links_only_relation_rows():

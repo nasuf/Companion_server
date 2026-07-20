@@ -803,3 +803,39 @@ class TestSingletonWriteLock:
         assert result == "new-id"
         mock_lock.assert_not_called()
         mocks["create"].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_store_memory_skip_reconciliation_bypasses_adjudication():
+    """skip_reconciliation=True 必须绕过 resolve_memory_write, 强制插入新行 —
+    整合摘要靠它避免被 update_existing 并进无关记忆 (2026-07-20 review)."""
+    from types import SimpleNamespace
+    from app.services.memory.storage import persistence as pers
+    from app.services.memory.taxonomy import resolve_taxonomy
+
+    tax = resolve_taxonomy(
+        main_category="生活", sub_category="其他",
+        legacy_type=None, source="ai", level=3,
+    )
+    resolve_spy = AsyncMock()
+    with (
+        patch.object(pers, "resolve_taxonomy", return_value=tax),
+        patch.object(pers, "resolve_workspace_id", AsyncMock(return_value="ws1")),
+        patch.object(pers, "generate_embedding", AsyncMock(return_value=[0.1] * 4)),
+        patch.object(pers, "store_embedding", AsyncMock()),
+        patch.object(pers, "resolve_memory_write", resolve_spy),
+        patch.object(pers, "log_memory_changelog", AsyncMock()),
+        patch.object(
+            pers.memory_repo, "create",
+            AsyncMock(return_value=SimpleNamespace(id="new-row-1")),
+        ),
+    ):
+        new_id = await pers.store_memory(
+            user_id="u1", content="十月里我常在早晨散步、买咖啡",
+            level=3, importance=0.4, main_category="生活", sub_category="其他",
+            source="ai", workspace_id="ws1",
+            provenance="consolidated", skip_reconciliation=True,
+        )
+
+    assert new_id == "new-row-1"
+    resolve_spy.assert_not_awaited()  # reconciliation entirely bypassed

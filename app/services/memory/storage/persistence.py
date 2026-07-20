@@ -202,6 +202,7 @@ async def store_memory(
     entities: list[str] | None = None,
     topics: list[str] | None = None,
     provenance: str | None = None,
+    skip_reconciliation: bool = False,
     _singleton_locked: bool = False,
 ) -> str | None:
     """Store a memory with deduplication.
@@ -213,6 +214,10 @@ async def store_memory(
             仅 sub_category="提醒" 时有效, 其他子类传 None.
         provenance: 记忆出处 (memory/provenance.py 常量); 非法值落 NULL.
             reconciliation 走 update/merge 时保留既有行的 provenance.
+        skip_reconciliation: 跳过写入期矛盾/合并判定, 强制作为新行插入. 仅用于
+            调用方已自证写入内容独立、且**不能**被 reconciliation 合并进无关既有
+            行的场景 (如 L3 整合摘要 — 否则 digest 可能被 update_existing 并进一条
+            非簇同类记忆, 连带把那条行内容覆盖). 常规写入切勿开启.
         _singleton_locked: 内部标志 — singleton 写锁已持有的重入调用, 勿外部使用.
     """
     # Source narrows to the literal Source type expected by the taxonomy
@@ -346,18 +351,25 @@ async def store_memory(
     # suppression all happen here. This supersedes the old boolean dedup gate
     # for the main write path; is_duplicate/find_duplicate_id remain for legacy
     # callers that only need a yes/no answer.
-    decision = await resolve_memory_write(
-        user_id=user_id,
-        source=repo_source,
-        workspace_id=workspace_id,
-        content=content,
-        summary=summary,
-        embedding=embedding,
-        main_category=taxonomy.main_category,
-        sub_category=taxonomy.sub_category,
-        entities=entities,
-        topics=topics,
-    )
+    if skip_reconciliation:
+        # Caller guarantees this row must be inserted standalone (never merged
+        # into an unrelated existing row). Bypass update/merge/drop adjudication.
+        from app.services.memory.storage.reconciliation import ReconciliationDecision
+
+        decision = ReconciliationDecision(action="insert_new")
+    else:
+        decision = await resolve_memory_write(
+            user_id=user_id,
+            source=repo_source,
+            workspace_id=workspace_id,
+            content=content,
+            summary=summary,
+            embedding=embedding,
+            main_category=taxonomy.main_category,
+            sub_category=taxonomy.sub_category,
+            entities=entities,
+            topics=topics,
+        )
     if decision.action == "drop_duplicate":
         try:
             from app.services.memory.lifecycle.decay import increment_mention_count

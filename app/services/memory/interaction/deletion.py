@@ -700,6 +700,9 @@ def _snapshot_memory(record) -> dict:
         "occurTime": _iso(getattr(record, "occurTime", None)),
         "statementTime": _iso(getattr(record, "statementTime", None)),
         "recurrence": getattr(record, "recurrence", None),
+        # provenance 必须随快照保留 — 否则 undo 还原会丢掉 profile_seed 等写保护
+        # 标记, 让被误删又恢复的核心种子记忆失去 reconciliation 保护.
+        "provenance": getattr(record, "provenance", None),
     }
 
 
@@ -737,6 +740,7 @@ async def restore_deleted_memories(snapshots: list[dict]) -> int:
                 occur_time=_parse_dt(snap.get("occurTime")),
                 statement_time=_parse_dt(snap.get("statementTime")),
                 recurrence=snap.get("recurrence"),
+                provenance=snap.get("provenance"),
             )
             if new_id:
                 restored += 1

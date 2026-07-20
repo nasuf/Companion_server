@@ -28,6 +28,10 @@ def _patch_data_fetch(**overrides) -> ExitStack:
         "get_latest_portrait": AsyncMock(return_value=None),
         "get_cached_schedule": AsyncMock(return_value=None),
         "get_topic_intimacy": AsyncMock(return_value=50.0),
+        # DB 隔离: 稀疏补召 (recall query + <3 L1/L2) 路径会真调 search_l3_memories
+        # → 打到真实 DB. 不 mock 时该测试在 Prisma 未连接的用例顺序下 flaky
+        # (pytest-randomly). 默认返回空, 需要断言 L3 的用例可 override.
+        "search_l3_memories": AsyncMock(return_value=[]),
     }
     defaults.update(overrides)
 

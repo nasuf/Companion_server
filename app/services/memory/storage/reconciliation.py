@@ -392,8 +392,9 @@ async def resolve_memory_write(
         if action == "update_existing":
             if _is_write_protected(record):
                 logger.info(
-                    f"Memory reconciliation refused to update singleton L1 "
-                    f"({record.mainCategory}/{record.subCategory}); keeping separate: "
+                    f"Memory reconciliation refused to update write-protected row "
+                    f"(prov={getattr(record, 'provenance', None)}, L{record.level}, "
+                    f"{record.mainCategory}/{record.subCategory}); keeping separate: "
                     f"new='{text[:40]}'"
                 )
                 continue
@@ -440,8 +441,9 @@ async def resolve_memory_write(
                 and _is_write_protected(record)
             ):
                 logger.info(
-                    f"Memory reconciliation LLM wanted to mutate singleton L1 "
-                    f"({record.mainCategory}/{record.subCategory}); keeping separate: "
+                    f"Memory reconciliation LLM wanted to mutate write-protected row "
+                    f"(prov={getattr(record, 'provenance', None)}, L{record.level}, "
+                    f"{record.mainCategory}/{record.subCategory}); keeping separate: "
                     f"new='{text[:40]}'"
                 )
                 continue

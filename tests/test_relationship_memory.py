@@ -25,9 +25,20 @@ class TestSharedHistoryDetection:
         "你去过哪些城市",         # no shared subject
         "第一次去北京是什么体验",   # history hint but no shared subject
         "今天天气怎么样",
+        # 2026-07-20: 剔除 "一起"/"多久" 弱线索后, 当下时提议/日常问句不再误判.
+        "我们一起点外卖吧",
+        "咱们一起去看电影吧",
+        "咱们多久能到",
     ])
     def test_negative(self, q):
         assert asks_shared_history(q) is False
+
+    @pytest.mark.parametrize("q", [
+        "我俩第一次见面是什么时候",   # 2026-07-20: 补 "我俩" 主语
+        "还记得我们最初怎么认识的吗",
+    ])
+    def test_positive_extra(self, q):
+        assert asks_shared_history(q) is True
 
 
 class TestRelationshipSlot:
@@ -151,3 +162,58 @@ def test_extraction_ai_prompt_teaches_milestones_and_bans_persona():
     # Old persona examples must be gone (they contradict the pipeline block).
     assert "我喜欢喝红茶" not in p
     assert "我是个程序员" not in p
+
+
+class TestRelationshipRecallGate:
+    """交互 (共同经历) 记忆相似度天然偏低; 用户明确问"我们之间"时, hybrid 对这
+    一小类放宽相似度门, 让 ranking boost / 保护槽有机会发挥 (2026-07-20 review)."""
+
+    def _interaction_row(self, sim: float):
+        return {
+            "id": "hx1",
+            "content": "我们第一次聊天你说你叫小伴",
+            "summary": "我们第一次聊天的情形",
+            "level": 2,
+            "importance": 0.7,
+            "similarity": sim,
+            "source": "ai",
+            "main_category": "生活",
+            "sub_category": "交互",
+        }
+
+    def _patch_common(self, monkeypatch, hybrid_mod):
+        monkeypatch.setattr(hybrid_mod, "cache_retrieval", AsyncMock(return_value=None))
+        monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", AsyncMock())
+        monkeypatch.setattr(hybrid_mod, "has_explicit_time", lambda _: False)
+        monkeypatch.setattr(hybrid_mod, "search_by_time_range", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            hybrid_mod, "search_related_memories_for_query", AsyncMock(return_value=[]),
+        )
+
+    @pytest.mark.asyncio
+    async def test_low_sim_interaction_survives_shared_history_query(self, monkeypatch):
+        from app.services.memory.retrieval import hybrid as hybrid_mod
+        self._patch_common(monkeypatch, hybrid_mod)
+        # sim 0.42 is below the normal 0.50 gate but above the relationship gate.
+        monkeypatch.setattr(
+            hybrid_mod, "search_similar",
+            AsyncMock(return_value=[self._interaction_row(0.42)]),
+        )
+        result = await hybrid_mod.hybrid_retrieve(
+            "还记得我们第一次聊天吗", "u1", workspace_id="ws1",
+        )
+        assert result["memories"] and result["memories"][0].id == "hx1"
+
+    @pytest.mark.asyncio
+    async def test_low_sim_interaction_dropped_for_ordinary_query(self, monkeypatch):
+        from app.services.memory.retrieval import hybrid as hybrid_mod
+        self._patch_common(monkeypatch, hybrid_mod)
+        monkeypatch.setattr(
+            hybrid_mod, "search_similar",
+            AsyncMock(return_value=[self._interaction_row(0.42)]),
+        )
+        # Not a shared-history query → normal 0.50 gate applies → dropped.
+        result = await hybrid_mod.hybrid_retrieve(
+            "今天晚饭吃什么好", "u1", workspace_id="ws1",
+        )
+        assert not result["memories"]

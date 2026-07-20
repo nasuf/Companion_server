@@ -16,6 +16,7 @@ from datetime import datetime
 
 from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
 from app.services.memory.retrieval.context_selector import ClassifiedMemory, select_context
+from app.services.memory.retrieval.query_patterns import asks_shared_history
 from app.services.memory.retrieval.ranking import rank_memory_candidate
 from app.services.memory.retrieval.trace import record_retrieval_session
 from app.services.memory.storage.entity_repo import search_related_memories_for_query
@@ -48,6 +49,8 @@ _EMPTY_RESULT = {
 # Spec §3.2 前级过滤相似度阈值。Spec 原值 0.7; bge-m3 对中文短文本召回
 # 能力不足, 降到 0.5 以保证召回率 (见 docs/spec-audit-2026-04-23.md)。
 _SIMILARITY_THRESHOLD = 0.50
+# 共同经历 (AI 侧 生活/交互) 专用的更低门 — 仅当用户明确问"我们之间"时启用.
+_RELATIONSHIP_RECALL_THRESHOLD = 0.35
 _ENTITY_RECALL_SIMILARITY = 0.78
 
 
@@ -193,6 +196,8 @@ async def hybrid_retrieve(
     # Phase 2.4: cache key 用 effective_query (含 enhanced) 避免不同指代复用同 cache
     effective_query = enhanced_query or message
     cache_key = effective_query if enhanced_query else message
+    # "我们之间"类提问用原话判定 (共同经历线索通常在原话, 不在指代改写里).
+    wants_shared_history = asks_shared_history(message)
     cached = await cache_retrieval(cache_key, user_id, workspace_id=workspace_id)
     if cached:
         logger.debug("Hybrid retrieval cache hit (key=%s)", cache_key[:30])
@@ -315,7 +320,18 @@ async def hybrid_retrieve(
                 continue
 
             sim = float(mem.get("similarity", 0))
-            if sim >= _SIMILARITY_THRESHOLD:
+            # 关系记忆抢救: 共同经历 (AI 侧 生活/交互) 是叙事长句, 向量相似度天然
+            # 偏低, 常卡在 0.50 门下被丢. 而 ranking 的 +0.60 boost 与 context
+            # 保护槽都在门之后, 救不回被门拦掉的候选. 用户明确问"我们之间"时, 对
+            # 这一小类放宽到更低门, 让 boost/保护槽有机会发挥 (其余记忆门不变).
+            threshold = _SIMILARITY_THRESHOLD
+            if (
+                wants_shared_history
+                and mem.get("source") == "ai"
+                and mem.get("sub_category") == "交互"
+            ):
+                threshold = _RELATIONSHIP_RECALL_THRESHOLD
+            if sim >= threshold:
                 mem["_retrieval_source"] = "vector"
                 _merge_candidate(mem, label)
 

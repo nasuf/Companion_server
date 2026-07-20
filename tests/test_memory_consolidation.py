@@ -74,6 +74,9 @@ class TestCompression:
         assert store_kwargs["level"] == 3
         assert store_kwargs["provenance"] == "consolidated"
         assert store_kwargs["importance"] <= 0.49
+        # 2026-07-20: digest 必须跳过 reconciliation, 否则可能被 update_existing
+        # 并进一条非簇同类记忆并连带覆盖它.
+        assert store_kwargs["skip_reconciliation"] is True
         # All originals archived + audit trail written.
         assert update_mock.await_count == 6
         assert all(c.kwargs.get("isArchived") is True for c in update_mock.await_args_list)
