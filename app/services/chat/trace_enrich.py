@@ -76,6 +76,8 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.consistency_rules",
     # W1b 情绪标记指令 — 仅作为主回复 system prompt 的收尾 section 出现
     "chat.reply_emotion_marker",
+    # 图灵测试条数变化 — 仅作为主回复 system prompt 的变量 section 出现
+    "chat.reply_count_variation",
     "chat.delay_context_section",
     "chat.l3_memory_section",
     "chat.memory_empty_anchor",

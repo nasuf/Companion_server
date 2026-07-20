@@ -505,6 +505,7 @@ async def build_system_prompt(
     relation_meta_line: str = "",
     ai_mood_text: str = "",
     expression_habits: list[str] | None = None,
+    last_reply_count: int | None = None,
     diagnostics: dict[str, Any] | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
     # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
@@ -521,17 +522,18 @@ async def build_system_prompt(
     变化字段 (情绪/画像/记忆/时间/L3/状态/回复要求 n=随机) 全部排到稳定段之后.
     cache miss 从这里开始, 但稳定段 ~1500 tokens 已经命中, 收益占比 80%+.
     """
-    # Parallel — 5 independent prompt reads (each turn, hot path).
+    # Parallel — 6 independent prompt reads (each turn, hot path).
     # admin 停用任一模板 → 返回 None → 对应 section 从最终输入中彻底移除.
     (
         system_base, consistency_rules, response_instruction,
-        anti_hallucination, emotion_marker,
+        anti_hallucination, emotion_marker, count_variation,
     ) = await asyncio.gather(
         _get_optional_prompt("chat.system_base"),
         _get_optional_prompt("chat.consistency_rules"),
         _get_optional_prompt("chat.response_instruction"),
         _get_optional_prompt("chat.anti_hallucination_hard_rule"),
         _get_optional_prompt("chat.reply_emotion_marker"),
+        _get_optional_prompt("chat.reply_count_variation"),
     )
 
     # ═══ STABLE PREFIX (cache 命中区) ════════════════════════════════════
@@ -779,6 +781,18 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "久远记忆（L3）")
+
+    # 图灵测试条数变化: 上一轮实际气泡数 y (代码权威计数) → "本轮 ≠ y" 约束.
+    # 变量段 (y 每轮变), 放变量区末尾不打穿前面的 prefix cache; 无上一轮记录
+    # (首轮/超 TTL/Redis 不可用) 或模板停用 → 整段跳过.
+    if count_variation is not None and last_reply_count is not None:
+        _append_section(
+            sections, components, "条数变化",
+            _render_section(count_variation, {"y": last_reply_count}),
+            prompt_key="chat.reply_count_variation",
+        )
+    else:
+        _record_skipped_section(diagnostics, "条数变化")
 
     # 情绪标记指令 (W1b, 静态): 只有主回复管线会剥 [EMO:] 标记, 所以只在
     # 这里拼装, 不进 reply_prefix. 放末尾贴近生成, 遵从度最好.

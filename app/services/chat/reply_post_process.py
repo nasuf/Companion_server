@@ -20,6 +20,7 @@ from app.services.schedule_domain.time_service import _now_corrected, _TZ
 from app.services.interaction.reply_context import actual_delay_seconds
 from app.services.relationship.ai_mood import save_ai_mood
 from app.services.runtime.recent_items import load_recent_items, remember_item
+from app.services.chat.reply_formatting import strip_system_markers
 from app.services.chat.typo import maybe_typo
 from app.services.emoji import (
     contains_emoji,
@@ -210,6 +211,10 @@ async def emit_replies(
             delay_reply_fn=delay_reply_fn, fallback_fn=fallback_fn,
             agent=agent, user_message=user_message,
         )
+        # 延迟解释不走 split 管线, 单独收口系统标记 (EMO/条数);
+        # 剥完为空 (整条都是标记) 就跳过, 绝不回退未清理原文.
+        if explain_text:
+            explain_text = strip_system_markers(explain_text)
         if explain_text:
             data: dict = {
                 "text": limit_emojis(explain_text),

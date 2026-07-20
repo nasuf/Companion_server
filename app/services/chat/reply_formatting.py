@@ -47,10 +47,40 @@ def _strip_leading_timestamp(text: str) -> str:
     return _LEADING_TIMESTAMP_RE.sub("", text)
 
 
+# ── 系统标记剥除 (给系统看的行, 任何出口都绝不能漏给用户) ──
+#
+# 图灵测试版 chat.response_instruction 要求 LLM 输出 [EMO:标签/强度] 情绪标记
+# 和 [X]/【1】条数标记. response_instruction 同时是 reply_prefix (前置注入全部
+# 回复类 prompt), 生产 2026-07-19 起复现泄漏: "[2]" 单独成消息 / 回复尾部带
+# "[EMO:中性/50]\n【1】". 主回复路径的 extract_emotion_marker 只剥 EMO 且只覆盖
+# 主路径 — 这里提供全出口通用的剥除函数, 在 split(_clean_reply_part)/短路/
+# 主动/音乐/线下消息出口统一收口.
+#
+# 条数标记只剥"整条就是标记"或"尾部标记"两种形态 (泄漏的实际形态), 不动
+# 文中内嵌的方括号数字 — 与 _LEADING_TIMESTAMP_RE 的保守原则一致.
+_EMO_MARKER_ANYWHERE_RE = re.compile(r"[\[【]\s*EMO\s*[:：][^\]】]{0,24}[\]】]")
+_COUNT_MARKER_TOKEN = r"[\[【]\s*(?:\d{1,2}|[xXyY])\s*[\]】]"
+_ONLY_COUNT_MARKER_RE = re.compile(rf"^\s*(?:{_COUNT_MARKER_TOKEN}\s*)+$")
+_TRAILING_COUNT_MARKER_RE = re.compile(rf"(?:\s*{_COUNT_MARKER_TOKEN})+\s*$")
+
+
+def strip_system_markers(text: str) -> str:
+    """剥除 LLM 输出中"给系统看"的标记: [EMO:...] 任意位置 + 条数标记
+    ([2]/【1】/[X]) 整条或尾部形态. 返回清理后的文本 (可能为空串)."""
+    if not text:
+        return text
+    cleaned = _EMO_MARKER_ANYWHERE_RE.sub("", text)
+    if _ONLY_COUNT_MARKER_RE.match(cleaned):
+        return ""
+    return _TRAILING_COUNT_MARKER_RE.sub("", cleaned).strip()
+
+
 def _clean_reply_part(text: str) -> str:
-    """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格 + 剥行首时间戳前缀."""
+    """单条回复内部规范化: 去首尾空白 + 单个换行折叠成空格 + 剥行首时间戳前缀
+    + 剥系统标记 (EMO/条数)."""
     cleaned = _INTRA_REPLY_WS_RE.sub(" ", text).strip()
-    return _strip_leading_timestamp(cleaned).strip()
+    cleaned = _strip_leading_timestamp(cleaned).strip()
+    return strip_system_markers(cleaned)
 
 
 def _strip_non_terminal_reply_end(text: str) -> str:

@@ -110,6 +110,10 @@ from app.services.chat.reply_post_process import emit_replies as _emit_replies
 from app.services.chat.reply_generate import generate_reply as _generate_reply
 from app.services.chat.expression_learner import sample_expression_habits
 from app.services.chat.session_recap import get_or_build_session_recap
+from app.services.chat.reply_count_state import (
+    load_last_reply_count,
+    save_last_reply_count,
+)
 from app.services.relationship.ai_mood import format_ai_mood_text, load_ai_mood
 from app.services.relationship.relation_meta import (
     format_relation_meta_line,
@@ -1271,6 +1275,8 @@ async def stream_chat_response(
                 relation_meta_line = ""
             # W4 AI 情绪连续性: 上一轮回复情绪衰减后作为本轮"当下心情"
             ai_mood_text = format_ai_mood_text(await load_ai_mood(conversation_id))
+            # 图灵测试条数变化: 上一轮实际气泡数 → 注入"本轮条数≠上一轮"约束段
+            last_reply_count = await load_last_reply_count(conversation_id)
             system_prompt = await build_system_prompt(
                 agent=agent,
                 memories=classified_memories,
@@ -1298,6 +1304,7 @@ async def stream_chat_response(
                 relation_meta_line=relation_meta_line,
                 ai_mood_text=ai_mood_text,
                 expression_habits=expression_habits or None,
+                last_reply_count=last_reply_count,
                 diagnostics=prompt_diagnostics,
             )
             response_diagnostics["main_prompt_built"] = True
@@ -1490,6 +1497,13 @@ async def stream_chat_response(
                 "is_fallback": reply_is_fallback,
             },
         )
+        # 图灵测试条数变化: 记录本轮累计可见气泡数 (代码权威计数, 不信 LLM 自报).
+        # 主调用 offset=0 写主回复数; 每个 sub-intent 递归写 offset+本段数 —
+        # 最后一次写入即本轮总数 (SET 语义). key 按 conversation 隔离.
+        if emitted_replies:
+            _fire_background(save_last_reply_count(
+                conversation_id, reply_index_offset + len(emitted_replies),
+            ))
 
         if sub_intent_mode:
             # 父调用负责后台任务、save_last_reply_timestamp、done、trace 关闭

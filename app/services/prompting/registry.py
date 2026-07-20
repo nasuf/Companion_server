@@ -22,6 +22,7 @@ from app.services.prompting.defaults import (
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
     CHAT_REPLY_EMOTION_MARKER_PROMPT,
+    REPLY_COUNT_VARIATION_PROMPT,
     CHAT_DELAY_CONTEXT_SECTION_PROMPT,
     CHAT_L3_MEMORY_SECTION_PROMPT,
     CHAT_MEMORY_EMPTY_ANCHOR_PROMPT,
@@ -191,6 +192,13 @@ PROMPT_DEFINITIONS = [
         "【工程】W1b: 指令主回复 LLM 末尾输出 [EMO:标签/强度], 解析成功省一次小模型情绪调用. "
         "仅主回复管线拼装 (会剥除标记); 不进 reply_prefix — 其他路径不剥除会漏给用户.",
         CHAT_REPLY_EMOTION_MARKER_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.reply_count_variation", "条数变化约束", "聊天热路径", "聊天",
+        "【工程】图灵测试拟人度: 注入上一轮实际气泡数 {y}, 指令本轮条数 1-4 且 ≠ 上一轮, "
+        "打破 LLM 长期偏向 2-3 条的节奏同质化. y 由代码权威计数 (Redis 按会话隔离), "
+        "仅主回复管线拼装; 不进 reply_prefix (前置需字节级稳定吃 cache).",
+        REPLY_COUNT_VARIATION_PROMPT,
     ),
     PromptDefinition(
         "chat.personality_rules", "人格一致性规则", "聊天热路径", "聊天",

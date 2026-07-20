@@ -57,7 +57,12 @@ async def emit_proactive_message(
     # 硬保证: 一条消息最多 1 个 emoji (spec §5.3 + 2026-07-08 产品要求).
     # 主动消息不走 emit_replies, 在此单独收口.
     from app.services.emoji import limit_emojis
-    message = limit_emojis(message)
+    # 系统标记收口: 主动消息 prompt 带 reply_prefix (response_instruction),
+    # LLM 可能跟着输出 [EMO:]/条数标记 — 此路径不走 chat split 管线, 单独剥.
+    # 剥完为空 (整条都是标记) 用占位省略号, 绝不回退未清理原文.
+    from app.services.chat.reply_formatting import strip_system_markers
+
+    message = limit_emojis(strip_system_markers(message) or "...")
 
     metadata: dict[str, Any] = {
         "proactive": True,

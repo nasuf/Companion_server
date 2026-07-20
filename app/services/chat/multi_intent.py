@@ -68,8 +68,13 @@ async def short_circuit_reply(
     """
     # 硬保证: 一条消息最多 1 个 emoji (短路回复不走 emit_replies 的出口兜底,
     # 在此单独收口; 持久化与 SSE 推送用同一份清理后的文本).
+    # 系统标记 (EMO/条数) 同点收口 — 短路 prompt 也带 reply_prefix, LLM 可能
+    # 跟着输出标记, 不剥会直接漏给用户 (生产 2026-07-19 复现).
+    from app.services.chat.reply_formatting import strip_system_markers
     from app.services.emoji import limit_emojis
-    reply = limit_emojis(reply)
+    # 整条都是标记时给占位省略号 (与 split_and_validate_replies 兜底一致),
+    # 绝不回退到未清理的原文.
+    reply = limit_emojis(strip_system_markers(reply) or "...")
     reply_payload: str | dict = reply
     metadata = dict(extra_metadata or {})
     if not sub_intent_mode:
@@ -97,6 +102,10 @@ async def short_circuit_reply(
         achievement_turn_id=_achievement_turn_id(turn_user_message_ids or []),
         achievement_turn_final=achievement_turn_final,
     ))
+    # 图灵测试条数变化: 短路回复也计入"上一轮条数" (用户感知的是气泡数,
+    # 不区分回复来自哪条管线). 累计 offset+1, 最后一次写入即本轮总数.
+    from app.services.chat.reply_count_state import save_last_reply_count
+    _fire_background(save_last_reply_count(conversation_id, reply_index_offset + 1))
     if not sub_intent_mode and agent_id:
         await save_last_reply_timestamp(agent_id, user_id)
     events: list[dict] = [{

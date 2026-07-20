@@ -908,6 +908,11 @@ async def _persist_assistant_message(
     *,
     metadata: dict[str, Any] | None = None,
 ) -> str:
+    # 系统标记收口: 音乐消息 prompt 带 reply_prefix, 单独剥 [EMO:]/条数标记.
+    # 剥完为空 (整条都是标记) 用占位省略号, 绝不回退未清理原文.
+    from app.services.chat.reply_formatting import strip_system_markers
+
+    text = strip_system_markers(text) or "..."
     created = await db.message.create(
         data={
             "conversation": {"connect": {"id": conversation_id}},

@@ -46,6 +46,16 @@ CHAT_REPLY_EMOTION_MARKER_PROMPT = (
     "强度是 0-100 的数字。这一行是给系统看的，用户看不到，正文里不要提到它。"
 )
 
+# 图灵测试条数变化 (2026-07-20): 主回复 LLM 长期偏向每轮 2-3 条, 节奏同质化.
+# 注入"上一轮实际条数"让本轮避开 — y 由代码权威计数 (Redis 按 conversation
+# 隔离), 不信 LLM 自报. 只进主回复管线 (prompt_builder), 绝不进 reply_prefix:
+# 前置必须字节级稳定才能吃 prefix cache, 且其他回复路径没有 conversation 上下文.
+REPLY_COUNT_VARIATION_PROMPT = (
+    "上一轮你回复了 {y} 条。本轮条数必须在 1-4 条之间且不能等于 {y}——"
+    "从其余条数里任选，让节奏有变化；1 条和 4 条也要经常出现，"
+    "不要总落在 2-3 条。生成后自查条数，若与上一轮相同，增删一条再输出。"
+)
+
 PERSONALITY_RULES_PROMPT = (
     "始终保持上面描述的说话风格和性格特点。\n"
     "不要突然变得正式、客套或像客服。\n"
