@@ -148,6 +148,55 @@ async def test_token_usage_endpoint_exposes_cache_hit_rate(api_client, monkeypat
     assert data["by_model"][0]["cached_input_tokens"] == 2400
 
 
+@pytest.mark.asyncio
+async def test_token_usage_by_model_cost_reconciles_to_stored_total(api_client, monkeypatch):
+    """模型分布成本按落库总额对账: sum(by_model.cost) == totals.cost, 即使当前
+    价格表与历史落库价格不同 (估算值会被等比缩放到实际计费总额)."""
+    from app.api.jwt_auth import require_admin_jwt
+    from app.main import app
+
+    totals_rows = [{
+        "request_count": 2, "input_tokens": 4000, "output_tokens": 400,
+        "cost_cny": 0.02, "call_count": 10,  # 实际计费 0.02 元
+    }]
+    by_model_rows = [
+        {"model": "model-a", "input_tokens": 3000, "output_tokens": 300,
+         "cached_input_tokens": 0},
+        {"model": "model-b", "input_tokens": 1000, "output_tokens": 100,
+         "cached_input_tokens": 0},
+    ]
+    call_results = [totals_rows, by_model_rows, [], [], []]
+
+    async def fake_query_raw(_sql, *_params):
+        return call_results.pop(0)
+
+    fake_db = SimpleNamespace(
+        query_raw=fake_query_raw,
+        modelregistry=SimpleNamespace(find_many=AsyncMock(return_value=[])),
+    )
+    monkeypatch.setattr("app.api.admin.stats.db", fake_db)
+    # 模拟当前价格表: model-a 估算 0.30, model-b 估算 0.10 (总 0.40, 远高于实际 0.02)
+    est_map = {"model-a": 0.30, "model-b": 0.10}
+    monkeypatch.setattr(
+        "app.api.admin.stats.estimate_cost_cny",
+        lambda model, *a, **k: est_map.get(model, 0.0),
+    )
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+    try:
+        response = api_client.get("/admin-api/stats/token-usage?days=30")
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+    assert response.status_code == 200
+    data = response.json()
+    model_sum = round(sum(m["cost_cny"] for m in data["by_model"]), 6)
+    assert model_sum == data["totals"]["cost_cny"] == 0.02
+    # 分布形状保持 3:1
+    a = next(m for m in data["by_model"] if m["model"] == "model-a")
+    b = next(m for m in data["by_model"] if m["model"] == "model-b")
+    assert round(a["cost_cny"] / b["cost_cny"], 4) == 3.0
+
+
 # ═══════════════════════════════════════════════════════════════════
 # P2a: 时间段落小时精度
 # ═══════════════════════════════════════════════════════════════════

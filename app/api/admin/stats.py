@@ -11,6 +11,7 @@ from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.pricing import estimate_cost_cny
+from app.services.notifications.presence import count_online_users
 from app.services.operations.metrics import summarize_crisis_events, summarize_visible_use
 from app.services.proactive import triggers as proactive_triggers
 from app.services.runtime import job_queue as runtime_job_queue
@@ -18,6 +19,21 @@ from app.services.runtime import job_queue as runtime_job_queue
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin-api/stats", tags=["admin-stats"])
+
+# 业务时区固定 UTC+8 (与 settings.schedule_timezone 一致). created_at 列以 naive
+# UTC 落库, 统计按"本地自然日/小时"分桶时必须先转成 UTC+8 墙钟, 否则每日走势会
+# 按 UTC 午夜切分 (整体偏 8 小时), 例如凌晨 0-8 点的用量会被算进"前一天".
+_LOCAL_TZ_SQL = "Asia/Shanghai"
+
+
+def _local_day(col: str) -> str:
+    """SQL: naive-UTC timestamp 列 → 本地(UTC+8)自然日 date."""
+    return f"DATE_TRUNC('day', {col} AT TIME ZONE 'UTC' AT TIME ZONE '{_LOCAL_TZ_SQL}')::date"
+
+
+def _local_hour(col: str) -> str:
+    """SQL: naive-UTC timestamp 列 → 本地(UTC+8)小时 0-23."""
+    return f"EXTRACT(HOUR FROM ({col} AT TIME ZONE 'UTC' AT TIME ZONE '{_LOCAL_TZ_SQL}'))::int"
 
 
 def _window_start(days: int | None) -> datetime | None:
@@ -275,7 +291,7 @@ async def token_usage(
         db.query_raw(
             f"""
             SELECT
-                DATE_TRUNC('day', created_at)::date AS bucket,
+                {_local_day("created_at")} AS bucket,
                 COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
                 COALESCE(SUM(cost_cny), 0)::float AS cost_cny,
@@ -292,19 +308,31 @@ async def token_usage(
         "request_count": 0, "input_tokens": 0, "output_tokens": 0,
         "cost_cny": 0.0, "call_count": 0,
     }
+    # 每个模型的成本用当前价格表 (estimate_cost_cny) 从 tokens_by_model 重算 —
+    # 这是"分布形状"的最佳可用信号 (历史行未按模型落成本). 但 totals/daily/by_agent
+    # 用的是落库时按当时价格算好的 cost_cny (= 实际计费). 若期间调过价, 两者会背离,
+    # 导致模型分布饼图之和 ≠ 总费用. 因此按 stored 总额对 estimate 做等比缩放 (对账),
+    # 保证 sum(by_model.cost) == totals.cost, 分布形状不变.
     by_model = [
         {
             "model": r["model"],
             "input_tokens": r["input_tokens"],
             "output_tokens": r["output_tokens"],
             "cached_input_tokens": r.get("cached_input_tokens", 0) or 0,
-            "cost_cny": round(estimate_cost_cny(
+            "cost_cny_est": estimate_cost_cny(
                 r["model"], r["input_tokens"], r["output_tokens"],
                 cached_input_tokens=r.get("cached_input_tokens", 0) or 0,
-            ), 6),
+            ),
         }
         for r in by_model_rows
     ]
+    stored_total_cost = float(totals.get("cost_cny", 0.0) or 0.0)
+    est_total_cost = sum(m["cost_cny_est"] for m in by_model)
+    reconcile_factor = (
+        stored_total_cost / est_total_cost if est_total_cost > 0 else 1.0
+    )
+    for m in by_model:
+        m["cost_cny"] = round(m.pop("cost_cny_est") * reconcile_factor, 6)
     # 总缓存命中 = by_model 聚合之和 (同一 WHERE 窗口, 数学上等价; 避免 totals
     # 查询再做一次 jsonb_each 展开). 命中率 = cached / input.
     total_cached = sum(int(r["cached_input_tokens"]) for r in by_model)
@@ -784,4 +812,267 @@ async def operations(
                 "High-risk traces always use the latest 24h window, independent of the dashboard days filter.",
             ],
         },
+    }
+
+
+# 聊天句子(用户发送)数量区间 — 与产品需求对齐: 0 / 1-10 / 11-20 / 21-30 /
+# 31-40 / 41-50 / 50+. "0 条" 桶单独由 total_users - active_users 推导.
+_MESSAGE_BUCKETS: list[tuple[str, int, int | None]] = [
+    ("1-10 条", 1, 10),
+    ("11-20 条", 11, 20),
+    ("21-30 条", 21, 30),
+    ("31-40 条", 31, 40),
+    ("41-50 条", 41, 50),
+    ("50 条以上", 51, None),
+]
+
+
+@router.get("/monitoring")
+async def monitoring(
+    days: int = Query(30, ge=0, le=3650),
+    _: dict = Depends(require_admin_jwt),
+):
+    """上线前运维监控 — 用户 + 聊天多维度实时数据.
+
+    days=0 表示"全部历史". DAU/WAU/MAU 与"实时在线"是固定口径, 不随 days 变化.
+    所有按自然日/小时分桶的统计都以 UTC+8 墙钟为准 (见 _local_day/_local_hour).
+    """
+    start = _window_start(days)
+    end = datetime.now(timezone.utc)
+    start_iso = start.replace(tzinfo=None).isoformat() if start else None
+
+    def _clause(col: str) -> tuple[str, list]:
+        """窗口过滤: 有 start 时 `col >= $1::timestamp`, 否则全量."""
+        if start_iso is None:
+            return "1=1", []
+        return f"{col} >= $1::timestamp", [start_iso]
+
+    user_where, user_params = _clause("created_at")
+    msg_where, msg_params = _clause("m.created_at")
+    usage_where, usage_params = _clause("l.created_at")
+
+    # DAU/WAU/MAU/近5分钟活跃 — 固定滚动窗口, 与 days 无关.
+    now_naive = end.replace(tzinfo=None)
+    activity_params = [
+        (now_naive - timedelta(days=1)).isoformat(),
+        (now_naive - timedelta(days=7)).isoformat(),
+        (now_naive - timedelta(days=30)).isoformat(),
+        (now_naive - timedelta(minutes=5)).isoformat(),
+    ]
+
+    (
+        reg_rows,
+        daily_active_rows,
+        hourly_rows,
+        bucket_rows,
+        cost_rows,
+        totals_rows,
+        activity_rows,
+        online_result,
+    ) = await asyncio.gather(
+        db.query_raw(
+            f"""
+            SELECT {_local_day("created_at")} AS bucket, COUNT(*)::int AS count
+            FROM users
+            WHERE {user_where}
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """,
+            *user_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                {_local_day("m.created_at")} AS bucket,
+                COUNT(DISTINCT c.user_id)::int AS active_users,
+                COUNT(*)::int AS user_messages
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.role = 'user' AND {msg_where}
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            """,
+            *msg_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                {_local_hour("m.created_at")} AS hour,
+                COUNT(DISTINCT c.user_id)::int AS users,
+                COUNT(*)::int AS user_messages
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.role = 'user' AND {msg_where}
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            *msg_params,
+        ),
+        db.query_raw(
+            f"""
+            WITH per_user AS (
+                SELECT c.user_id, COUNT(*)::int AS cnt
+                FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE m.role = 'user' AND {msg_where}
+                GROUP BY c.user_id
+            )
+            SELECT
+                COUNT(*) FILTER (WHERE cnt BETWEEN 1 AND 10)::int AS b1,
+                COUNT(*) FILTER (WHERE cnt BETWEEN 11 AND 20)::int AS b2,
+                COUNT(*) FILTER (WHERE cnt BETWEEN 21 AND 30)::int AS b3,
+                COUNT(*) FILTER (WHERE cnt BETWEEN 31 AND 40)::int AS b4,
+                COUNT(*) FILTER (WHERE cnt BETWEEN 41 AND 50)::int AS b5,
+                COUNT(*) FILTER (WHERE cnt > 50)::int AS b6,
+                COUNT(*)::int AS active_users
+            FROM per_user
+            """,
+            *msg_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                l.user_id,
+                COALESCE(u.username, '(已删除)') AS username,
+                COALESCE(SUM(l.cost_cny), 0)::float AS cost_cny,
+                COUNT(*)::int AS request_count,
+                COALESCE(SUM(l.input_tokens + l.output_tokens), 0)::int AS total_tokens
+            FROM llm_usage l
+            LEFT JOIN users u ON u.id = l.user_id
+            WHERE l.user_id IS NOT NULL AND {usage_where}
+            GROUP BY l.user_id, u.username
+            ORDER BY cost_cny DESC
+            LIMIT 10
+            """,
+            *usage_params,
+        ),
+        db.query_raw(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM users)::int AS total_users,
+                (SELECT COUNT(*) FROM conversations)::int AS total_conversations,
+                (SELECT COUNT(*) FROM ai_agents)::int AS total_agents
+            """,
+        ),
+        db.query_raw(
+            """
+            SELECT
+                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $1::timestamp)::int AS dau,
+                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $2::timestamp)::int AS wau,
+                COUNT(DISTINCT c.user_id)::int AS mau,
+                COUNT(DISTINCT c.user_id) FILTER (WHERE m.created_at >= $4::timestamp)::int AS active_5min
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.role = 'user' AND m.created_at >= $3::timestamp
+            """,
+            *activity_params,
+        ),
+        count_online_users(),
+    )
+
+    online_count, online_ok = online_result
+
+    registrations_daily = [
+        {"date": str(r["bucket"]), "count": int(r["count"] or 0)}
+        for r in reg_rows
+    ]
+    registrations_total = sum(r["count"] for r in registrations_daily)
+
+    daily_active = [
+        {
+            "date": str(r["bucket"]),
+            "active_users": int(r["active_users"] or 0),
+            "user_messages": int(r["user_messages"] or 0),
+        }
+        for r in daily_active_rows
+    ]
+
+    # 补齐 0-23 全部小时 (无活动的小时填 0), 让前端图 x 轴稳定.
+    hourly_map = {
+        int(r["hour"]): (int(r["users"] or 0), int(r["user_messages"] or 0))
+        for r in hourly_rows
+    }
+    hourly_active = [
+        {
+            "hour": h,
+            "users": hourly_map.get(h, (0, 0))[0],
+            "user_messages": hourly_map.get(h, (0, 0))[1],
+        }
+        for h in range(24)
+    ]
+
+    totals_row = totals_rows[0] if totals_rows else {
+        "total_users": 0, "total_conversations": 0, "total_agents": 0,
+    }
+    total_users = int(totals_row["total_users"] or 0)
+
+    bucket_row = bucket_rows[0] if bucket_rows else {}
+    active_users_window = int(bucket_row.get("active_users", 0) or 0)
+    bucket_values = [
+        int(bucket_row.get(f"b{i}", 0) or 0) for i in range(1, 7)
+    ]
+    zero_bucket_users = max(total_users - active_users_window, 0)
+    message_buckets = [
+        {"label": "0 条(未活跃)", "min": 0, "max": 0, "users": zero_bucket_users},
+    ] + [
+        {
+            "label": label,
+            "min": lo,
+            "max": hi,
+            "users": bucket_values[idx],
+        }
+        for idx, (label, lo, hi) in enumerate(_MESSAGE_BUCKETS)
+    ]
+
+    cost_top_users = [
+        {
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "cost_cny": round(float(r["cost_cny"] or 0.0), 6),
+            "request_count": int(r["request_count"] or 0),
+            "total_tokens": int(r["total_tokens"] or 0),
+        }
+        for r in cost_rows
+    ]
+
+    activity_row = activity_rows[0] if activity_rows else {
+        "dau": 0, "wau": 0, "mau": 0, "active_5min": 0,
+    }
+
+    return {
+        "window": {
+            "start": start.isoformat() if start else None,
+            "end": end.isoformat(),
+            "days": days,
+        },
+        "online_now": {
+            "count": online_count,
+            "active_5min": int(activity_row["active_5min"] or 0),
+            "threshold_seconds": 90,
+            "redis_available": online_ok,
+            "as_of": end.isoformat(),
+        },
+        "overview": {
+            "total_users": total_users,
+            "total_conversations": int(totals_row["total_conversations"] or 0),
+            "total_agents": int(totals_row["total_agents"] or 0),
+            "new_users_window": registrations_total,
+            "active_users_window": active_users_window,
+            "user_messages_window": sum(d["user_messages"] for d in daily_active),
+            "dau": int(activity_row["dau"] or 0),
+            "wau": int(activity_row["wau"] or 0),
+            "mau": int(activity_row["mau"] or 0),
+        },
+        "registrations": {
+            "total": registrations_total,
+            "daily": registrations_daily,
+        },
+        "hourly_active": hourly_active,
+        "daily_active": daily_active,
+        "message_buckets": {
+            "total_users": total_users,
+            "active_users": active_users_window,
+            "buckets": message_buckets,
+        },
+        "cost_top_users": cost_top_users,
     }
