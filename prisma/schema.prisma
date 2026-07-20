@@ -77,6 +77,8 @@ model User {
   bugReportsFiled          BugReport[]                     @relation("BugReportsFiled")
   bugReportsResolved       BugReport[]                     @relation("BugReportsResolved")
 
+  // admin 监控"新增注册走势"按 created_at 分桶.
+  @@index([createdAt])
   @@map("users")
 }
 
@@ -232,6 +234,9 @@ model Message {
   linkCards      ChatLinkCard[]
 
   @@index([conversationId, createdAt(sort: Desc)])
+  // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
+  // created_at 范围扫全表, 加此索引避免顺序扫.
+  @@index([role, createdAt])
   @@map("messages")
 }
 

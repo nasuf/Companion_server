@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -827,15 +828,70 @@ _MESSAGE_BUCKETS: list[tuple[str, int, int | None]] = [
 ]
 
 
+# 重聚合结果的服务端缓存 TTL: 注册/活跃/区间/费用榜等数据不会秒级变化, 短缓存
+# 让多个管理员并发查看 / 前端轮询变快时 DB 只算一次. 在线人数走独立 /online 端点
+# (纯 Redis) 做秒级实时, 不受此缓存影响.
+_MONITORING_CACHE_TTL = 25
+
+
+def _monitoring_cache_key(days: int) -> str:
+    return f"admin:stats:monitoring:{days}"
+
+
+@router.get("/online")
+async def online(_: dict = Depends(require_admin_jwt)):
+    """实时在线人数 — 纯 Redis (前台 presence, 90s TTL), 供前端秒级轮询.
+
+    不碰数据库, 开销可忽略; 与 /monitoring 的重聚合缓存解耦.
+    """
+    count, ok = await count_online_users()
+    return {
+        "count": count,
+        "threshold_seconds": 90,
+        "redis_available": ok,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.get("/monitoring")
 async def monitoring(
     days: int = Query(30, ge=0, le=3650),
+    refresh: bool = Query(False),
     _: dict = Depends(require_admin_jwt),
 ):
-    """上线前运维监控 — 用户 + 聊天多维度实时数据.
+    """上线前运维监控 — 用户 + 聊天多维度数据 (服务端短缓存).
 
-    days=0 表示"全部历史". DAU/WAU/MAU 与"实时在线"是固定口径, 不随 days 变化.
-    所有按自然日/小时分桶的统计都以 UTC+8 墙钟为准 (见 _local_day/_local_hour).
+    refresh=true 绕过缓存强制重算 (前端"刷新"按钮用). days=0 表示"全部历史".
+    """
+    cache_key = _monitoring_cache_key(days)
+    if not refresh:
+        try:
+            redis = await get_redis()
+            cached = await redis.get(cache_key)
+            if cached:
+                payload = json.loads(cached)
+                payload["cached"] = True
+                return payload
+        except Exception as e:
+            logger.debug("monitoring cache read skipped: %s", e)
+
+    payload = await _compute_monitoring(days)
+
+    try:
+        redis = await get_redis()
+        await redis.set(cache_key, json.dumps(payload), ex=_MONITORING_CACHE_TTL)
+    except Exception as e:
+        logger.debug("monitoring cache write skipped: %s", e)
+
+    payload["cached"] = False
+    return payload
+
+
+async def _compute_monitoring(days: int) -> dict:
+    """执行 /monitoring 的全部聚合查询 (无缓存). 见 /monitoring 文档.
+
+    DAU/WAU/MAU 与"实时在线"是固定口径, 不随 days 变化. 所有按自然日/小时分桶的
+    统计都以 UTC+8 墙钟为准 (见 _local_day/_local_hour).
     """
     start = _window_start(days)
     end = datetime.now(timezone.utc)

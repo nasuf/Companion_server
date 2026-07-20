@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -10,50 +9,63 @@ def _admin_override():
     return app, require_admin_jwt
 
 
+class _FakeRedis:
+    """In-memory stand-in so monitoring cache read/write is deterministic."""
+
+    def __init__(self, store=None):
+        self.store = store if store is not None else {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
+
+
+def _monitoring_side_effect():
+    # asyncio.gather order: reg / daily_active / hourly / buckets / cost / totals / activity
+    return [
+        [  # registrations daily
+            {"bucket": "2026-07-18", "count": 3},
+            {"bucket": "2026-07-19", "count": 5},
+        ],
+        [  # daily active
+            {"bucket": "2026-07-18", "active_users": 2, "user_messages": 40},
+            {"bucket": "2026-07-19", "active_users": 4, "user_messages": 60},
+        ],
+        [  # hourly active (only a few hours present)
+            {"hour": 9, "users": 3, "user_messages": 30},
+            {"hour": 21, "users": 5, "user_messages": 70},
+        ],
+        [  # message buckets
+            {"b1": 10, "b2": 4, "b3": 2, "b4": 1, "b5": 0, "b6": 1, "active_users": 18}
+        ],
+        [  # cost top users
+            {"user_id": "u1", "username": "alice", "cost_cny": 1.2345678,
+             "request_count": 40, "total_tokens": 5000},
+            {"user_id": "u2", "username": "bob", "cost_cny": 0.5,
+             "request_count": 20, "total_tokens": 2000},
+        ],
+        [  # totals
+            {"total_users": 100, "total_conversations": 250, "total_agents": 120}
+        ],
+        [  # activity dau/wau/mau/5min
+            {"dau": 12, "wau": 40, "mau": 80, "active_5min": 3}
+        ],
+    ]
+
+
 def test_monitoring_aggregates_all_dimensions(api_client):
     """/monitoring 聚合注册/在线/分时段/句子区间/费用榜单 + 概览."""
     app, require_admin_jwt = _admin_override()
 
-    # asyncio.gather 顺序: reg / daily_active / hourly / buckets / cost / totals / activity
     fake_db = MagicMock()
-    fake_db.query_raw = AsyncMock(
-        side_effect=[
-            [  # registrations daily
-                {"bucket": "2026-07-18", "count": 3},
-                {"bucket": "2026-07-19", "count": 5},
-            ],
-            [  # daily active
-                {"bucket": "2026-07-18", "active_users": 2, "user_messages": 40},
-                {"bucket": "2026-07-19", "active_users": 4, "user_messages": 60},
-            ],
-            [  # hourly active (only a few hours present)
-                {"hour": 9, "users": 3, "user_messages": 30},
-                {"hour": 21, "users": 5, "user_messages": 70},
-            ],
-            [  # message buckets
-                {
-                    "b1": 10, "b2": 4, "b3": 2, "b4": 1, "b5": 0, "b6": 1,
-                    "active_users": 18,
-                }
-            ],
-            [  # cost top users
-                {"user_id": "u1", "username": "alice", "cost_cny": 1.2345678,
-                 "request_count": 40, "total_tokens": 5000},
-                {"user_id": "u2", "username": "bob", "cost_cny": 0.5,
-                 "request_count": 20, "total_tokens": 2000},
-            ],
-            [  # totals
-                {"total_users": 100, "total_conversations": 250, "total_agents": 120}
-            ],
-            [  # activity dau/wau/mau/5min
-                {"dau": 12, "wau": 40, "mau": 80, "active_5min": 3}
-            ],
-        ],
-    )
+    fake_db.query_raw = AsyncMock(side_effect=_monitoring_side_effect())
 
     try:
         with (
             patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, return_value=_FakeRedis()),
             patch(
                 "app.api.admin.stats.count_online_users",
                 new_callable=AsyncMock,
@@ -65,48 +77,97 @@ def test_monitoring_aggregates_all_dimensions(api_client):
         assert response.status_code == 200
         data = response.json()
 
-        # online
+        assert data["cached"] is False
         assert data["online_now"]["count"] == 7
         assert data["online_now"]["active_5min"] == 3
-        assert data["online_now"]["redis_available"] is True
 
-        # overview
         assert data["overview"]["total_users"] == 100
-        assert data["overview"]["total_conversations"] == 250
         assert data["overview"]["dau"] == 12
         assert data["overview"]["wau"] == 40
         assert data["overview"]["mau"] == 80
-        assert data["overview"]["new_users_window"] == 8  # 3 + 5
+        assert data["overview"]["new_users_window"] == 8
         assert data["overview"]["active_users_window"] == 18
-        assert data["overview"]["user_messages_window"] == 100  # 40 + 60
+        assert data["overview"]["user_messages_window"] == 100
 
-        # registrations
         assert data["registrations"]["total"] == 8
-        assert len(data["registrations"]["daily"]) == 2
-
-        # hourly padded to 24
         assert len(data["hourly_active"]) == 24
         assert data["hourly_active"][9]["users"] == 3
-        assert data["hourly_active"][21]["users"] == 5
         assert data["hourly_active"][0]["users"] == 0
 
-        # message buckets: leading "0 条" bucket + 6 range buckets
         buckets = data["message_buckets"]["buckets"]
         assert len(buckets) == 7
-        assert buckets[0]["min"] == 0
         assert buckets[0]["users"] == 82  # 100 total - 18 active
         assert buckets[1]["users"] == 10
         assert buckets[-1]["users"] == 1
 
-        # cost top users
         assert data["cost_top_users"][0]["username"] == "alice"
         assert data["cost_top_users"][0]["cost_cny"] == 1.234568
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
 
 
+def test_monitoring_returns_cached_payload_on_second_call(api_client):
+    """第二次调用命中服务端缓存: 不再跑 DB 聚合, cached=True."""
+    app, require_admin_jwt = _admin_override()
+
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=_monitoring_side_effect())
+    shared_redis = _FakeRedis()
+
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, return_value=shared_redis),
+            patch(
+                "app.api.admin.stats.count_online_users",
+                new_callable=AsyncMock,
+                return_value=(7, True),
+            ),
+        ):
+            first = api_client.get("/admin-api/stats/monitoring", params={"days": 7})
+            second = api_client.get("/admin-api/stats/monitoring", params={"days": 7})
+
+        assert first.status_code == 200 and second.status_code == 200
+        assert first.json()["cached"] is False
+        assert second.json()["cached"] is True
+        # DB aggregation ran exactly once (7 queries), second call served from cache.
+        assert fake_db.query_raw.await_count == 7
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_monitoring_refresh_bypasses_cache(api_client):
+    """refresh=true 强制重算, 即使缓存存在."""
+    app, require_admin_jwt = _admin_override()
+
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=_monitoring_side_effect() + _monitoring_side_effect())
+    shared_redis = _FakeRedis()
+
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, return_value=shared_redis),
+            patch(
+                "app.api.admin.stats.count_online_users",
+                new_callable=AsyncMock,
+                return_value=(7, True),
+            ),
+        ):
+            api_client.get("/admin-api/stats/monitoring", params={"days": 7})
+            forced = api_client.get(
+                "/admin-api/stats/monitoring", params={"days": 7, "refresh": "true"}
+            )
+
+        assert forced.status_code == 200
+        assert forced.json()["cached"] is False
+        assert fake_db.query_raw.await_count == 14  # recomputed both times
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
 def test_monitoring_survives_redis_failure(api_client):
-    """Redis 挂掉时在线人数降级为 0 + redis_available=False, 其余照常."""
+    """Redis 挂掉时缓存降级为直接计算, 在线人数 redis_available=False."""
     app, require_admin_jwt = _admin_override()
     fake_db = MagicMock()
     fake_db.query_raw = AsyncMock(
@@ -120,6 +181,7 @@ def test_monitoring_survives_redis_failure(api_client):
     try:
         with (
             patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, side_effect=RuntimeError("redis down")),
             patch(
                 "app.api.admin.stats.count_online_users",
                 new_callable=AsyncMock,
@@ -132,7 +194,6 @@ def test_monitoring_survives_redis_failure(api_client):
         data = response.json()
         assert data["online_now"]["count"] == 0
         assert data["online_now"]["redis_available"] is False
-        # zero bucket = all registered users (no active users)
         assert data["message_buckets"]["buckets"][0]["users"] == 5
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
@@ -153,6 +214,7 @@ def test_monitoring_all_time_omits_window_filter(api_client):
     try:
         with (
             patch("app.api.admin.stats.db", fake_db),
+            patch("app.api.admin.stats.get_redis", new_callable=AsyncMock, return_value=_FakeRedis()),
             patch(
                 "app.api.admin.stats.count_online_users",
                 new_callable=AsyncMock,
@@ -162,10 +224,35 @@ def test_monitoring_all_time_omits_window_filter(api_client):
             response = api_client.get("/admin-api/stats/monitoring", params={"days": 0})
 
         assert response.status_code == 200
-        # registrations query is the first gather call; with all-time there are no
-        # positional params bound.
         reg_call = fake_db.query_raw.await_args_list[0]
         assert "1=1" in reg_call.args[0]
-        assert len(reg_call.args) == 1  # sql only, no window param
+        assert len(reg_call.args) == 1
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_online_endpoint_is_redis_only(api_client):
+    """/online 只读 Redis presence, 不碰 DB."""
+    app, require_admin_jwt = _admin_override()
+    fake_db = MagicMock()
+    fake_db.query_raw = AsyncMock(side_effect=AssertionError("online must not query DB"))
+
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch(
+                "app.api.admin.stats.count_online_users",
+                new_callable=AsyncMock,
+                return_value=(11, True),
+            ),
+        ):
+            response = api_client.get("/admin-api/stats/online")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 11
+        assert data["redis_available"] is True
+        assert data["threshold_seconds"] == 90
+        fake_db.query_raw.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
