@@ -25,6 +25,7 @@ from app.services.offline import (
     activity_service,
     gift_service,
 )
+from app.services.offline.module_settings import is_activity_enabled, is_gift_enabled
 
 router = APIRouter(prefix="/offline", tags=["offline"])
 
@@ -50,6 +51,8 @@ async def create_offline_activity_recommendation(
     workspace_id: str | None = Query(default=None),
     user: dict = Depends(require_user),
 ):
+    if not await is_activity_enabled():
+        return None
     activity = await activity_service.create_recommendation_for_user(
         user_id=str(user["sub"]),
         workspace_id=workspace_id,
@@ -72,6 +75,8 @@ async def create_mock_gift(
     delivered: bool = Query(default=False),
     user: dict = Depends(require_admin_jwt),
 ):
+    if not await is_gift_enabled():
+        raise HTTPException(status_code=403, detail="Offline gift module is disabled")
     gift = await gift_service.create_mock_gift_for_user(
         user_id=str(user["sub"]),
         workspace_id=workspace_id,

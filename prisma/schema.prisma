@@ -1668,6 +1668,11 @@ model SystemConfig {
   // 校验码生成锚点 (unix 秒): 每次「开启」时刷新 — 码与窗口计时都相对锚点推导,
   // 锚点一变旧码全部立即失效, 新码从满 5 分钟倒计时开始. null = 0 (绝对时间窗).
   mealCodeAnchor         BigInt?  @map("meal_code_anchor")
+  // 线下真实世界模块主动推送开关 (admin 后台动态切换, 实时生效, 默认关闭).
+  // 关闭后 offline trigger scan 跳过对应分支 + 手动/mock 接口拒绝创建;
+  // 已有条目的读取/操作接口不受影响. 默认 false: 客户端 (H5) 无卡片 UI 前先暂停.
+  offlineActivityEnabled Boolean  @default(false) @map("offline_activity_enabled")
+  offlineGiftEnabled     Boolean  @default(false) @map("offline_gift_enabled")
   updatedAt              DateTime @updatedAt @map("updated_at")
 
   @@map("system_config")

@@ -8,6 +8,7 @@ from app.services.offline import repository as repo
 from app.services.offline.activity_service import create_recommendation_for_user
 from app.services.offline.gift_service import create_gift_for_user, refresh_due_gift_deliveries
 from app.services.offline.gift_trigger_policy import GiftTriggerDecision, decide_gift_trigger
+from app.services.offline.module_settings import get_offline_module_flags
 
 logger = logging.getLogger(__name__)
 
@@ -21,21 +22,32 @@ async def scan_offline_triggers() -> dict[str, int]:
 
     now = datetime.now(UTC)
     stats = {"activities": 0, "gifts": 0, "gift_deliveries": 0, "skipped": 0, "failed": 0}
+    # Master switches (admin-toggleable, DB-backed) read once so the whole scan
+    # is internally consistent for this run.
+    flags = await get_offline_module_flags()
+    activity_enabled = flags["activity_enabled"]
+    gift_enabled = flags["gift_enabled"]
+    if not activity_enabled and not gift_enabled:
+        return stats
     for ctx in await repo.list_real_world_contexts(limit=500):
         try:
             user_id = ctx["user_id"]
             workspace_id = ctx["workspace_id"]
             agent_id = ctx["agent_id"]
             await repo.ensure_trigger_state(user_id, agent_id, workspace_id)
-            stats["gift_deliveries"] += await refresh_due_gift_deliveries(
-                user_id,
-                workspace_id,
-                ctx,
-            )
             created_at = _aware(ctx.get("user_created_at")) or now
             day = max(1, (now.date() - created_at.date()).days + 1)
 
-            if await _should_create_activity(user_id, workspace_id, ctx, day, now):
+            if gift_enabled:
+                stats["gift_deliveries"] += await refresh_due_gift_deliveries(
+                    user_id,
+                    workspace_id,
+                    ctx,
+                )
+
+            if activity_enabled and await _should_create_activity(
+                user_id, workspace_id, ctx, day, now
+            ):
                 if await create_recommendation_for_user(
                     user_id=user_id,
                     workspace_id=workspace_id,
@@ -43,21 +55,22 @@ async def scan_offline_triggers() -> dict[str, int]:
                 ):
                     stats["activities"] += 1
 
-            gift_decision = await _should_create_gift(
-                user_id,
-                agent_id,
-                workspace_id,
-                ctx,
-                day,
-                now,
-            )
-            if gift_decision.should_trigger:
-                if await create_gift_for_user(
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    trigger_type=gift_decision.trigger_type,
-                ):
-                    stats["gifts"] += 1
+            if gift_enabled:
+                gift_decision = await _should_create_gift(
+                    user_id,
+                    agent_id,
+                    workspace_id,
+                    ctx,
+                    day,
+                    now,
+                )
+                if gift_decision.should_trigger:
+                    if await create_gift_for_user(
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        trigger_type=gift_decision.trigger_type,
+                    ):
+                        stats["gifts"] += 1
         except Exception as exc:
             stats["failed"] += 1
             logger.warning("[offline] trigger scan failed for ctx=%s: %s", ctx, exc)

@@ -429,6 +429,11 @@ async def test_scheduler_refreshes_due_gift_deliveries_before_new_trigger(monkey
         "user_created_at": datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
         "last_gift_paid_at": datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
     }
+    monkeypatch.setattr(
+        scheduler,
+        "get_offline_module_flags",
+        AsyncMock(return_value={"activity_enabled": True, "gift_enabled": True}),
+    )
     monkeypatch.setattr(scheduler.repo, "list_real_world_contexts", AsyncMock(return_value=[ctx]))
     monkeypatch.setattr(scheduler.repo, "ensure_trigger_state", AsyncMock(return_value={}))
     refresh = AsyncMock(return_value=1)
@@ -444,3 +449,113 @@ async def test_scheduler_refreshes_due_gift_deliveries_before_new_trigger(monkey
 
     assert stats["gift_deliveries"] == 1
     refresh.assert_awaited_once_with("user-1", "workspace-1", ctx)
+
+
+def _offline_scan_ctx() -> dict:
+    return {
+        "workspace_id": "workspace-1",
+        "user_id": "user-1",
+        "agent_id": "agent-1",
+        "conversation_id": "conversation-1",
+        "user_created_at": datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+    }
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_gift_branch_when_gift_flag_disabled(monkeypatch):
+    ctx = _offline_scan_ctx()
+    monkeypatch.setattr(
+        scheduler,
+        "get_offline_module_flags",
+        AsyncMock(return_value={"activity_enabled": True, "gift_enabled": False}),
+    )
+    monkeypatch.setattr(
+        scheduler.repo, "list_real_world_contexts", AsyncMock(return_value=[ctx])
+    )
+    monkeypatch.setattr(scheduler.repo, "ensure_trigger_state", AsyncMock(return_value={}))
+    refresh = AsyncMock(return_value=1)
+    monkeypatch.setattr(scheduler, "refresh_due_gift_deliveries", refresh)
+    should_gift = AsyncMock(
+        return_value=SimpleNamespace(should_trigger=True, trigger_type="daily_probability")
+    )
+    monkeypatch.setattr(scheduler, "_should_create_gift", should_gift)
+    create_gift = AsyncMock(return_value={"id": "gift-1"})
+    monkeypatch.setattr(scheduler, "create_gift_for_user", create_gift)
+    monkeypatch.setattr(scheduler, "_should_create_activity", AsyncMock(return_value=True))
+    create_activity = AsyncMock(return_value={"id": "activity-1"})
+    monkeypatch.setattr(scheduler, "create_recommendation_for_user", create_activity)
+
+    stats = await scheduler.scan_offline_triggers()
+
+    # Gift branch (delivery refresh + creation) is fully skipped.
+    refresh.assert_not_awaited()
+    should_gift.assert_not_awaited()
+    create_gift.assert_not_awaited()
+    # Activity branch keeps working independently.
+    create_activity.assert_awaited_once()
+    assert stats["gifts"] == 0
+    assert stats["gift_deliveries"] == 0
+    assert stats["activities"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_activity_branch_when_activity_flag_disabled(monkeypatch):
+    ctx = _offline_scan_ctx()
+    monkeypatch.setattr(
+        scheduler,
+        "get_offline_module_flags",
+        AsyncMock(return_value={"activity_enabled": False, "gift_enabled": True}),
+    )
+    monkeypatch.setattr(
+        scheduler.repo, "list_real_world_contexts", AsyncMock(return_value=[ctx])
+    )
+    monkeypatch.setattr(scheduler.repo, "ensure_trigger_state", AsyncMock(return_value={}))
+    monkeypatch.setattr(scheduler, "refresh_due_gift_deliveries", AsyncMock(return_value=0))
+    monkeypatch.setattr(
+        scheduler,
+        "_should_create_gift",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                should_trigger=True, trigger_type="daily_probability"
+            )
+        ),
+    )
+    create_gift = AsyncMock(return_value={"id": "gift-1"})
+    monkeypatch.setattr(scheduler, "create_gift_for_user", create_gift)
+    should_activity = AsyncMock(return_value=True)
+    monkeypatch.setattr(scheduler, "_should_create_activity", should_activity)
+    create_activity = AsyncMock(return_value={"id": "activity-1"})
+    monkeypatch.setattr(scheduler, "create_recommendation_for_user", create_activity)
+
+    stats = await scheduler.scan_offline_triggers()
+
+    # Activity branch is fully skipped (eligibility not even evaluated).
+    should_activity.assert_not_awaited()
+    create_activity.assert_not_awaited()
+    # Gift branch keeps working independently.
+    create_gift.assert_awaited_once()
+    assert stats["activities"] == 0
+    assert stats["gifts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_is_noop_when_both_flags_disabled(monkeypatch):
+    monkeypatch.setattr(
+        scheduler,
+        "get_offline_module_flags",
+        AsyncMock(return_value={"activity_enabled": False, "gift_enabled": False}),
+    )
+    list_ctx = AsyncMock(return_value=[_offline_scan_ctx()])
+    monkeypatch.setattr(scheduler.repo, "list_real_world_contexts", list_ctx)
+
+    stats = await scheduler.scan_offline_triggers()
+
+    # Early return before touching the DB when everything is off.
+    list_ctx.assert_not_awaited()
+    assert stats == {
+        "activities": 0,
+        "gifts": 0,
+        "gift_deliveries": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
