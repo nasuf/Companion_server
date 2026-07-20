@@ -574,6 +574,11 @@ async def mark_user_replied_for_conversation(
 
 async def list_due_proactive_states(now: datetime | None = None) -> list[ProactiveStateRecord]:
     now_ts = _now(now)
+    # Exclude the template agent's own proactive state — it is a frozen clone
+    # source and must never proactively message itself. Lazy import avoids an
+    # import cycle (agent_template pkg __init__ pulls clone → workspaces).
+    from app.services.agent_template.registry import get_template_owner_id
+    owner_id = await get_template_owner_id()
     try:
         rows = await db.query_raw(
             """
@@ -582,10 +587,12 @@ async def list_due_proactive_states(now: datetime | None = None) -> list[Proacti
             WHERE status = 'running'
               AND window_due_at IS NOT NULL
               AND window_due_at <= $1::timestamp
+              AND ($2::text IS NULL OR user_id <> $2::text)
             ORDER BY window_due_at ASC
             LIMIT 100
             """,
             _ts(now_ts),
+            owner_id,
         )
     except Exception as e:
         _log_if_unavailable("list due", e)
@@ -595,6 +602,8 @@ async def list_due_proactive_states(now: datetime | None = None) -> list[Proacti
 
 async def list_waiting_timeout_states(now: datetime | None = None) -> list[ProactiveStateRecord]:
     now_ts = _now(now)
+    from app.services.agent_template.registry import get_template_owner_id
+    owner_id = await get_template_owner_id()
     try:
         rows = await db.query_raw(
             """
@@ -603,10 +612,12 @@ async def list_waiting_timeout_states(now: datetime | None = None) -> list[Proac
             WHERE status = 'waiting_user'
               AND response_deadline_at IS NOT NULL
               AND response_deadline_at <= $1::timestamp
+              AND ($2::text IS NULL OR user_id <> $2::text)
             ORDER BY response_deadline_at ASC
             LIMIT 100
             """,
             _ts(now_ts),
+            owner_id,
         )
     except Exception as e:
         _log_if_unavailable("list waiting timeouts", e)

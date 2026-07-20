@@ -445,7 +445,14 @@ async def scan_special_dates_today(now: datetime | None = None, concurrency: int
     day_start = datetime(today.year, today.month, today.day, 0, 0, tzinfo=_TZ)
     day_end = day_start + timedelta(days=1)
 
-    agents = await db.aiagent.find_many(where={"status": "active"})
+    # Exclude the template agent (frozen clone source) — it must not get its own
+    # special-date triggers / proactive sends.
+    from app.services.agent_template.registry import get_template_owner_id
+    owner_id = await get_template_owner_id()
+    where: dict = {"status": "active"}
+    if owner_id:
+        where["userId"] = {"not": owner_id}
+    agents = await db.aiagent.find_many(where=where)
     if not agents:
         return
 

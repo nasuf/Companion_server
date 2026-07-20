@@ -103,8 +103,18 @@ async def _run_for_all_agents(
     """
     from app.db import db
     from app.observability import bind_context
+    from app.services.agent_template.registry import get_template_owner_id
     from app.services.llm.usage_tracker import usage_session
-    agents = await db.aiagent.find_many()
+    # Only run per-agent crons for real, active agents. Exclude:
+    #  - archived/provisioning agents (no live schedule/memory should grow), and
+    #  - the template agent (owned by the template system user) — it is a frozen
+    #    clone source and must never accumulate its own daily schedule / self-
+    #    memory summaries (those would otherwise be copied into every new clone).
+    owner_id = await get_template_owner_id()
+    where: dict = {"status": "active"}
+    if owner_id:
+        where["userId"] = {"not": owner_id}
+    agents = await db.aiagent.find_many(where=where)
     sem = asyncio.Semaphore(concurrency)
     n_total = len(agents)
     n_failed = 0

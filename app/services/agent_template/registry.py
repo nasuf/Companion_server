@@ -40,6 +40,30 @@ async def get_or_create_template_user():
     )
 
 
+# Cached template owner id — the system user's row never changes, so per-agent
+# crons (which call this every tick) reuse it instead of hitting the DB.
+_template_owner_id_cache: str | None = None
+
+
+async def get_template_owner_id() -> str | None:
+    """Return the template system user's id **read-only** (no create), or None.
+
+    Cron enumerations (daily schedule/summary, proactive scan, special dates)
+    use this to exclude template agents: the template must stay a frozen clone
+    source and never accumulate its own runtime state (schedules, self-memory,
+    proactive sends). Returns None when no template user exists yet — callers
+    then apply no exclusion, which is correct because there are no templates.
+    """
+    global _template_owner_id_cache
+    if _template_owner_id_cache is not None:
+        return _template_owner_id_cache
+    user = await db.user.find_unique(where={"username": TEMPLATE_SYSTEM_USERNAME})
+    if user:
+        _template_owner_id_cache = user.id
+        return user.id
+    return None
+
+
 async def list_template_agents() -> list[Any]:
     """All non-archived template agents, newest first."""
     owner = await get_or_create_template_user()
