@@ -157,7 +157,10 @@ async def test_memory_section_separates_user_profile_context_from_answer_facts()
     section_text = _body(section)
     assert "【对方自己的资料（不是你的）】" in section_text
     assert "不要拿来当你自己的答案" in section_text
-    assert "【你自己的相关经历 / 人设】" in section_text
+    # Label keeps the "你自己的相关经历 / 人设" name (cross-referenced elsewhere)
+    # plus a command-style suffix enforcing memory adherence.
+    assert "你自己的相关经历 / 人设" in section_text
+    assert "绝不另编" in section_text
     assert section_text.index("用户28岁") < section_text.index("我今年24岁")
 
 

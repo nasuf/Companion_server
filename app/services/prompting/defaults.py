@@ -60,6 +60,10 @@ CONSISTENCY_RULES_PROMPT = (
     "如果当前用户消息里包含多行连续短句，把它们当作同一个用户回合理解；"
     "其中语义相近的追问、改写、补问只回答一次，不要逐行重复作答。\n"
     "如果对方只说了很短的一句情绪话，不要立刻给一整套大道理。\n"
+    "当用户问你的个人喜好（喜欢的颜色 / 电影 / 音乐 / 食物 / 书 / 运动 等）时，"
+    "只能用下方「你自己的相关经历 / 人设」里**明确列出**的内容作答；"
+    "若那里没有对应条目，就自然地说「我想想」「一时还真说不好」这类，"
+    "**绝不临时编一个没列出的喜好**。\n"
 )
 
 # 反幻觉硬约束 — 必须在 prompt 顶部, 早于其他指令.
@@ -395,7 +399,13 @@ CHAT_MEMORY_LABEL_LITERAL_TASK_PROMPT = "【对方问到的事】"
 CHAT_MEMORY_LABEL_SAFETY_PROMPT = "【安全 / 情绪背景】"
 CHAT_MEMORY_LABEL_PROFILE_CONTEXT_PROMPT = "【对方自己的资料（不是你的）】"
 CHAT_MEMORY_LABEL_OTHER_PROMPT = "【关于对方的其他事】"
-CHAT_MEMORY_LABEL_AI_SELF_PROMPT = "【你自己的相关经历 / 人设】"
+# Keep the "你自己的相关经历 / 人设" substring intact: other prompts
+# (chat.anti_hallucination_hard_rule) reference this section by that exact
+# name, and renaming it would break that cross-reference.
+CHAT_MEMORY_LABEL_AI_SELF_PROMPT = (
+    "【你自己的相关经历 / 人设 — 回答关于你自己的问题（喜好/经历/身份）必须严格据此，"
+    "缺失就说不确定，绝不另编】"
+)
 
 # 「情绪状态提醒」段 (spec §2.3 耐心区间语气, 5B.4). 按耐心 zone 三选一.
 BOUNDARY_PATIENCE_MEDIUM_INSTRUCTION_PROMPT = (

@@ -136,6 +136,14 @@ _AI_EPISTEMIC_UNCERTAINTY_MARKERS = (
     "印象里", "猜", "估计",
 )
 
+# Anti-drift: the AI's stable persona (preferences + identity) is seeded once
+# from the creation profile. Chat-time extraction must NEVER mint a NEW 偏好/身份
+# self-memory from the AI's own generated replies — that is exactly how a
+# hallucinated "我喜欢浅紫色" / "我今年30岁" gets fossilized into a fake persona
+# fact that then contradicts the real profile and compounds drift. Episodic
+# self-memory (生活/情绪 experiences, e.g. the daily life summary) is unaffected.
+_AI_SELF_AUTHORED_BLOCKED_CATEGORIES = frozenset({"偏好", "身份"})
+
 
 def _compact_text(text: str | None) -> str:
     return "".join((text or "").split())
@@ -272,6 +280,16 @@ async def process_memory_pipeline(
         memory_type = mem.get("type")
         main_category = mem.get("main_category")
         sub_category = mem.get("sub_category")
+        # ③ Block self-authored persona claims: the AI must not "learn" new
+        # preferences/identity about itself from its own chat output (that is the
+        # fabrication→fossilization drift vector). The profile is the sole source
+        # of stable persona facts; episodic 生活/情绪 self-memory still flows.
+        if side == "ai" and main_category in _AI_SELF_AUTHORED_BLOCKED_CATEGORIES:
+            logger.info(
+                f"[MEM-{side}] skipped self-authored persona claim "
+                f"({main_category}/{sub_category}): {summary[:40]}"
+            )
+            continue
         # 提前解 alias: 否则 LLM 输出"备忘"/"提醒我"等别名时, 下游 sub_category=="提醒"
         # 比对会漏判 → recurrence 检测被跳过 → store_memory 把已 alias 解析的"提醒"
         # 行写入但 recurrence=NULL, 一次性提醒过去时间不被降级.
