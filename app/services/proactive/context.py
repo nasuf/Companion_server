@@ -165,6 +165,7 @@ async def _load_proactive_memories(
     spec §4.1/§4.2: 来源 (source) 决定从 A 库(ai)还是 B 库(user), 以及 L1 / L2 层级.
     - ai_l1 / ai_l2  → memories_ai, level=1 or 2
     - user_l1 / user_l2 → memories_user, level=1 or 2
+    - relationship → memories_ai (生活, 交互) 共同经历 (Phase 2 关系记忆)
     - ai_schedule / greeting → 无记忆 (返回空)
 
     spec §3.2 + §4.2: 抽中 source 后, **先按 topic_theme 做 LLM rerank**, 再
@@ -177,6 +178,8 @@ async def _load_proactive_memories(
         return [], []
 
     # Resolve (owner, level) from source
+    level: int | None
+    sub_category: str | None = None
     if source == "ai_l1":
         owner, level = "ai", 1
     elif source == "ai_l2":
@@ -185,17 +188,25 @@ async def _load_proactive_memories(
         owner, level = "user", 1
     elif source == "user_l2":
         owner, level = "user", 2
+    elif source == "relationship":
+        # 我们之间的共同经历 — 不按层级筛 (交互 milestones 落 L1, 但历史数据
+        # 可能散在其他层), 按子类筛.
+        owner, level, sub_category = "ai", None, "交互"
     else:
         return [], []
 
+    where: dict = {
+        "userId": user_id,
+        "workspaceId": workspace_id,
+        "isArchived": False,
+    }
+    if level is not None:
+        where["level"] = level
+    if sub_category is not None:
+        where["subCategory"] = sub_category
     rows = await memory_repo.find_many(
         source=owner,  # type: ignore[arg-type]
-        where={
-            "userId": user_id,
-            "workspaceId": workspace_id,
-            "isArchived": False,
-            "level": level,
-        },
+        where=where,
         order={"importance": "desc"},
         take=30,
     )

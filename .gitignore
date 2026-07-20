@@ -30,3 +30,6 @@ var/
 
 # Package manager lock
 uv.lock
+
+# memory recall eval local embedding cache
+evals/memory_recall/.emb_cache.json

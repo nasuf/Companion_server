@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 UTC = timezone.utc
 SENDABLE_PROACTIVE_STATUSES = {"idle"}
 
-_MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2"})
+_MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship"})
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -208,6 +208,9 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     ("memory_proactive", "ai_l2"): "proactive.memory_ai",
     ("memory_proactive", "user_l1"): "proactive.memory_user",
     ("memory_proactive", "user_l2"): "proactive.memory_user",
+    # Phase 2 关系记忆: 共同经历 (memories_ai 生活/交互) 走 AI 记忆模板 —
+    # 素材本来就是 AI 第一人称叙述的"我和用户…", memory_ai 模板语气吻合.
+    ("memory_proactive", "relationship"): "proactive.memory_ai",
     ("scheduled_scene", "ai_schedule"): "proactive.scheduled_scene",
 }
 

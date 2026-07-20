@@ -968,6 +968,8 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
             level=level,
             importance=importance,
             source="ai",
+            # Daily-life summary trivia — first in line for consolidation.
+            provenance="daily_summary",
         )
         if mem_id:
             stored.append(mem_id)

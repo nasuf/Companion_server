@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     typo_enabled: bool = True
     typo_rate: float = 0.05
 
+    # Phase 2 记忆整合: 每周把同主题 L3 记忆簇 (优先 daily_summary 琐事) 压缩成
+    # 1 条摘要记忆, 原始行归档可溯源. 涉及归档原始数据 — 默认关闭, 预发用真实
+    # 数据验证 + 评测集回归后再 .env MEMORY_CONSOLIDATION_ENABLED=true 上生产.
+    memory_consolidation_enabled: bool = False
+
     # Trace backend: "local" (self-hosted trace_runs collection, default) /
     # "langsmith" (legacy cloud path, needs langsmith_* below) / "off".
     # Local mode requires LANGSMITH_TRACING=false, otherwise langchain's env

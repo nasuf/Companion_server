@@ -214,3 +214,29 @@ def asks_ai_stable_relation(user_message: str) -> bool:
             return True
 
     return False
+
+
+# ── Phase 2 关系记忆 (共同经历) ──
+
+# "我们之间"的提问: 主语代词 + 历史线索都命中才算 (保守, 防止把
+# "我们点外卖吧" 这类当下提议误判成共同回忆查询).
+_SHARED_HISTORY_TERMS: tuple[str, ...] = ("我们", "咱们", "咱俩", "跟你", "和你")
+_SHARED_HISTORY_HINTS: tuple[str, ...] = (
+    "第一次", "认识", "上次", "那天", "那次", "纪念", "一起", "聊过",
+    "约定", "承诺", "多久", "刚开始", "最初",
+)
+
+
+def asks_shared_history(user_message: str) -> bool:
+    """Whether the user asks about the shared history between them and the AI.
+
+    Examples: "还记得我们第一次聊天吗", "咱们认识多久了", "上次跟你聊的那件事".
+    Counterexamples: "我们点外卖吧" (no history hint), "你去过哪些城市" (no
+    shared subject).
+    """
+    text = _normalize(user_message)
+    if not text:
+        return False
+    if not any(term in text for term in _SHARED_HISTORY_TERMS):
+        return False
+    return any(hint in text for hint in _SHARED_HISTORY_HINTS)

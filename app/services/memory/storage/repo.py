@@ -39,6 +39,7 @@ class MemoryRecord:
     mainCategory: str | None = None
     subCategory: str | None = None
     workspaceId: str | None = None
+    provenance: str | None = None
 
 
 def _to_record(row, source: Source) -> MemoryRecord:
@@ -60,6 +61,7 @@ def _to_record(row, source: Source) -> MemoryRecord:
         createdAt=row.createdAt,
         updatedAt=row.updatedAt,
         workspaceId=getattr(row, "workspaceId", None),
+        provenance=getattr(row, "provenance", None),
     )
 
 

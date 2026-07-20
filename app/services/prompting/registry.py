@@ -104,6 +104,7 @@ from app.services.prompting.defaults import (
     MEMORY_CONTRADICTION_REPLY_PROMPT,
     MEMORY_EXTRACTION_AI_PROMPT,
     MEMORY_EXTRACTION_USER_PROMPT,
+    MEMORY_CONSOLIDATION_PROMPT,
     MEMORY_PAIRWISE_CONTRADICTION_PROMPT,
     MEMORY_RECONCILIATION_PROMPT,
     MEMORY_RELEVANCE_PROMPT,
@@ -553,6 +554,11 @@ PROMPT_DEFINITIONS = [
         "memory.reconciliation", "记忆事实演化裁决", "异步记忆", "记忆",
         "写入前对相似旧记忆做事实关系判定: 重复丢弃、更新旧记忆、合并互补事实、保留或确认冲突.",
         MEMORY_RECONCILIATION_PROMPT,
+    ),
+    PromptDefinition(
+        "memory.consolidation", "L3 记忆整合压缩", "异步记忆", "记忆",
+        "Phase 2 每周整合: 把同主题的多条 L3 琐事记忆 (优先日总结产物) 压缩成一条摘要记忆, 原始行归档可溯源.",
+        MEMORY_CONSOLIDATION_PROMPT,
     ),
 
     # ── 记忆: 删除 (Memory §5) ──

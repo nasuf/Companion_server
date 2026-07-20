@@ -23,14 +23,26 @@ from app.services.memory.taxonomy import is_singleton
 logger = logging.getLogger(__name__)
 
 
-def _is_protected_singleton_l1(record: MemoryRecord) -> bool:
-    """Spec §1.5.1: singleton L1 facts (姓名/年龄/生日 …) must never be mutated
-    by write-time reconciliation. Containment-gated enrichment is acceptable
-    for non-singleton L1 (richer restatements), but a singleton's core value
-    changing is by definition a contradiction — that goes through the spec §4
-    user-confirmation flow, not a silent overwrite.
+def _is_write_protected(record: MemoryRecord) -> bool:
+    """Rows that write-time reconciliation must never update/merge-mutate.
+
+    - Singleton L1 facts (姓名/年龄/生日 …): a singleton's core value changing
+      is by definition a contradiction — that goes through the spec §4
+      user-confirmation flow, not a silent overwrite.
+    - profile_seed rows (any category): persona ground truth seeded at agent
+      provisioning. Chat-time enrichments are stored separately instead of
+      rewriting the seed, so the persona can never drift via reconciliation.
+
+    Containment-gated enrichment stays allowed for non-seed, non-singleton L1
+    (richer restatements of learned facts).
     """
+    if getattr(record, "provenance", None) == "profile_seed":
+        return True
     return record.level == 1 and is_singleton(record.mainCategory, record.subCategory)
+
+
+# Backward-compatible alias (tests/callers may reference the older name).
+_is_protected_singleton_l1 = _is_write_protected
 
 ReconciliationAction = Literal[
     "insert_new",
@@ -119,6 +131,7 @@ def _record_from_vector(row: dict, source: Source) -> MemoryRecord:
         mainCategory=row.get("main_category") or row.get("mainCategory"),
         subCategory=row.get("sub_category") or row.get("subCategory"),
         workspaceId=row.get("workspace_id") or row.get("workspaceId"),
+        provenance=row.get("provenance"),
     )
 
 
@@ -377,7 +390,7 @@ async def resolve_memory_write(
                 reason="existing_covers_new",
             )
         if action == "update_existing":
-            if _is_protected_singleton_l1(record):
+            if _is_write_protected(record):
                 logger.info(
                     f"Memory reconciliation refused to update singleton L1 "
                     f"({record.mainCategory}/{record.subCategory}); keeping separate: "
@@ -424,7 +437,7 @@ async def resolve_memory_write(
         if decision.action in {"drop_duplicate", "update_existing", "merge_existing"}:
             if (
                 decision.action in {"update_existing", "merge_existing"}
-                and _is_protected_singleton_l1(record)
+                and _is_write_protected(record)
             ):
                 logger.info(
                     f"Memory reconciliation LLM wanted to mutate singleton L1 "

@@ -26,6 +26,7 @@ from app.services.memory.recording.pre_filter import (
     is_user_fact_acknowledgement,
     should_memorize,
 )
+from app.services.memory import provenance as provenance_mod
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
 from app.services.memory.lifecycle.quality import log_memory_evidence
 from app.services.memory.config import RECURRENCE_PERIODIC
@@ -374,6 +375,12 @@ async def process_memory_pipeline(
             recurrence=recurrence,
             entities=[str(e) for e in mem.get("entities", []) if e],
             topics=[str(t) for t in mem.get("topics", []) if t],
+            # Provenance is decided by the pipeline side, not the LLM: user
+            # utterances → user_stated, the AI's own replies → ai_authored.
+            provenance=(
+                provenance_mod.USER_STATED if side == "user"
+                else provenance_mod.AI_AUTHORED
+            ),
         )
 
         if memory_id:

@@ -67,6 +67,7 @@ _MEMORY_COPY_FIELDS = (
     "occurTime",
     "statementTime",
     "recurrence",
+    "provenance",
 )
 
 
@@ -154,7 +155,74 @@ async def _clone_ai_memories(
         copied,
         new_workspace_id[:8],
     )
+
+    # Phase 2-6: carry the entity graph over. Entities are scoped per
+    # (user, workspace), so re-upsert them in the clone's scope and link the
+    # mapped memory ids. Persona entity volume is small (pet/family/friends),
+    # so per-row upserts are fine; failures never abort the clone.
+    try:
+        await _clone_memory_entities(
+            template_workspace_id=template_workspace_id,
+            id_pairs=id_pairs,
+            user_id=user_id,
+            new_workspace_id=new_workspace_id,
+        )
+    except Exception as exc:
+        logger.warning("[AGENT-CLONE] entity graph copy failed: %s", exc)
+
     return len(new_rows)
+
+
+async def _clone_memory_entities(
+    *,
+    template_workspace_id: str,
+    id_pairs: list[tuple[str, str]],
+    user_id: str,
+    new_workspace_id: str,
+) -> int:
+    """Re-create the template's memory↔entity links in the clone's scope."""
+    from app.services.memory.storage.entity_repo import record_entities_for_memory
+
+    rows = await db.query_raw(
+        """
+        SELECT mm.memory_id, me.canonical_name, me.entity_type, me.role, me.aliases
+        FROM memory_mentions mm
+        JOIN memory_entities me ON me.id = mm.entity_id
+        WHERE mm.workspace_id = $1 AND me.is_archived = false
+        """,
+        template_workspace_id,
+    )
+    if not rows:
+        return 0
+
+    entities_by_template_mid: dict[str, list[dict]] = {}
+    for row in rows:
+        mid = str(row.get("memory_id") or "")
+        name = (row.get("canonical_name") or "").strip()
+        if not mid or not name:
+            continue
+        entities_by_template_mid.setdefault(mid, []).append({
+            "name": name,
+            "type": row.get("entity_type") or "other",
+            "role": row.get("role"),
+            "aliases": row.get("aliases") or None,
+        })
+
+    linked = 0
+    for template_id, new_id in id_pairs:
+        entities = entities_by_template_mid.get(template_id)
+        if not entities:
+            continue
+        linked += await record_entities_for_memory(
+            memory_id=new_id,
+            memory_source="ai",
+            user_id=user_id,
+            workspace_id=new_workspace_id,
+            entities=entities,
+        )
+    if linked:
+        logger.info("[AGENT-CLONE] linked %d entity edges in clone workspace", linked)
+    return linked
 
 
 async def clone_template_agent_for_user(user_id: str, template_agent_id: str):

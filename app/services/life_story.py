@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -718,6 +719,9 @@ async def store_memories_batch(
             "mainCategory": taxonomy.main_category,
             "subCategory": taxonomy.sub_category,
             "workspaceId": workspace_id,
+            # Persona ground truth — write-time reconciliation never mutates
+            # profile_seed rows (contradictions go through spec §4 instead).
+            "provenance": "profile_seed",
         }
         # Part 5 §3.1: life_events / emotion_events 等过去事件带 occur_time,
         # 让 retrieval 能按时间过滤、L3 awakening 能找到久远记忆.
@@ -776,6 +780,14 @@ async def store_memories_batch(
     except Exception as e:
         logger.warning(f"Bulk changelog insert failed for agent {agent_id}: {e}")
 
+    # Phase 2-6: seed the entity graph for relation-type persona memories
+    # (pet/family/friend names) so entity recall works for the persona, not
+    # just chat-time memories. Best-effort — failures never abort provisioning.
+    try:
+        await _seed_persona_entities(memory_rows, user_id, workspace_id)
+    except Exception as e:
+        logger.debug(f"persona entity seeding skipped: {e}")
+
     # Invalidate any stale per-user retrieval/graph caches so the first
     # message after provisioning actually sees these memories.
     try:
@@ -787,6 +799,84 @@ async def store_memories_batch(
                        current=total, total=total,
                        message=f"已写入 {total} 条记忆")
     return ids
+
+
+# ── Phase 2-6: persona entity seeding (no LLM) ──
+#
+# Chat-time extraction records entities per memory, but provisioning bulk-insert
+# never did — so entity recall was dead for the persona memories that mention
+# the most-asked-about names (pet / family / best friend). Derive those names
+# deterministically from the relation-type memory texts.
+
+_ENTITY_SUBS: dict[str, tuple[str, str]] = {
+    # sub_category → (entity_type, default_role)
+    "宠物": ("pet", "pet"),
+    "亲属关系": ("person", "family"),
+    "社会关系": ("person", "friend"),
+}
+
+# Conservative name patterns; a missed name is fine, a wrong name is not.
+_NAME_AFTER_CALLED_RE = re.compile(r"名叫[“\"']?([\u4e00-\u9fa5A-Za-z]{1,6})[”\"']?")
+_FAMILY_NAME_RE = re.compile(
+    r"(父亲|母亲|爸爸|妈妈)([\u4e00-\u9fa5]{2,3})(?=[，,。]|是|在|年轻|退休|今年|$)"
+)
+_FRIEND_NAME_RE = re.compile(r"闺蜜是?(?:[\u4e00-\u9fa5]{0,6}同学)?([\u4e00-\u9fa5]{2,3})(?=[，,。]|$)")
+
+_FAMILY_ROLE_MAP = {"父亲": "father", "爸爸": "father", "母亲": "mother", "妈妈": "mother"}
+
+
+def _extract_persona_entities(summary: str, sub_category: str | None) -> list[dict]:
+    """Deterministic entity extraction for relation-type persona memories."""
+    if sub_category not in _ENTITY_SUBS:
+        return []
+    entity_type, default_role = _ENTITY_SUBS[sub_category]
+    found: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(name: str, role: str) -> None:
+        name = name.strip()
+        if name and name not in seen:
+            seen.add(name)
+            found.append({"name": name, "type": entity_type, "role": role})
+
+    if sub_category == "宠物":
+        for m in _NAME_AFTER_CALLED_RE.finditer(summary):
+            _add(m.group(1), default_role)
+    elif sub_category == "亲属关系":
+        for m in _FAMILY_NAME_RE.finditer(summary):
+            _add(m.group(2), _FAMILY_ROLE_MAP.get(m.group(1), default_role))
+    elif sub_category == "社会关系":
+        for m in _FRIEND_NAME_RE.finditer(summary):
+            _add(m.group(1), default_role)
+    return found[:3]
+
+
+async def _seed_persona_entities(
+    memory_rows: list[dict], user_id: str, workspace_id: str | None,
+) -> int:
+    """Best-effort entity seeding after the provisioning bulk insert."""
+    from app.services.memory.storage.entity_repo import record_entities_for_memory
+
+    linked = 0
+    for row in memory_rows:
+        entities = _extract_persona_entities(
+            row.get("summary") or "", row.get("subCategory"),
+        )
+        if not entities:
+            continue
+        try:
+            linked += await record_entities_for_memory(
+                memory_id=row["id"],
+                memory_source="ai",
+                user_id=user_id,
+                workspace_id=workspace_id,
+                entities=entities,
+            )
+        except Exception as e:
+            logger.debug(f"persona entity seed failed for {row['id'][:8]}: {e}")
+    if linked:
+        logger.info(f"persona entity seeding created {linked} edges")
+    return linked
 
 
 # ── Main Entry Point ──

@@ -13,6 +13,7 @@ from typing import Literal
 from app.services.memory.retrieval.query_patterns import (
     asks_ai_profile_relation,
     asks_ai_stable_relation,
+    asks_shared_history,
     profile_query_subcategories,
 )
 
@@ -76,6 +77,10 @@ _HIGH_SIMILARITY_MEMORY_QUOTA = 2
 _KEYWORD_USER_MEMORY_QUOTA = 2
 _NAMED_RELATION_MEMORY_QUOTA = 1
 _AI_SELF_MEMORY_QUOTA = 2
+# Phase 2 关系记忆: "我们之间"的共同经历 (memories_ai 生活/交互) 在共同回忆类
+# 提问时保底注入 — 这是伴侣产品最核心的记忆资产, 不能任由向量分数淹没.
+_RELATIONSHIP_MEMORY_QUOTA = 2
+_RELATIONSHIP_MIN_IMPORTANCE = 0.5
 _MIN_USER_MEMORY_QUOTA = 3
 _MIN_PROTECTED_SCORE = 0.35
 _HIGH_SIMILARITY_THRESHOLD = 0.86
@@ -89,6 +94,7 @@ _PROTECTED_CURRENT_FACT_REASON = "保护槽:当前问题事实"
 _PROTECTED_NAMED_RELATION_REASON = "保护槽:关系命名"
 _PROTECTED_USER_REASON = "保护槽:用户记忆"
 _PROTECTED_AI_SELF_REASON = "保护槽:AI自我记忆"
+_PROTECTED_RELATIONSHIP_REASON = "保护槽:关系记忆"
 _AI_PROFILE_USER_CONTEXT_REASON = "AI资料查询:用户同类资料"
 _EMOTIONAL_SUBCATEGORIES = {"悲伤", "恐惧", "焦虑", "失望", "孤独"}
 _NAME_QUERY_TERMS = ("叫什么", "名字", "姓名", "叫啥", "叫作")
@@ -217,6 +223,17 @@ def _is_ai_profile_user_context_memory(mem: dict) -> bool:
     )
 
 
+def _is_relationship_memory(mem: dict) -> bool:
+    """Shared-experience memory: AI-side (生活, 交互) rows accumulate the
+    actual chat history between this AI and this user (spec: 交互 is
+    coverage-exempt and grows at runtime)."""
+    return (
+        _memory_source(mem) == "ai"
+        and mem.get("sub_category") == "交互"
+        and float(mem.get("importance", 0.0) or 0.0) >= _RELATIONSHIP_MIN_IMPORTANCE
+    )
+
+
 def _to_classified_memory(mem: dict) -> ClassifiedMemory:
     text = _memory_text(mem)
     score = _memory_score(mem)
@@ -326,6 +343,21 @@ def select_context(
             break
         if _is_safety_memory(mem) and try_add(mem, _PROTECTED_SAFETY_REASON):
             safety_added += 1
+
+    # Phase 2: shared-history questions guarantee 交互 memories a slot right
+    # after safety — they are the product's core relationship asset.
+    relationship_added = 0
+    if asks_shared_history(query or ""):
+        for mem in ranked_memories:
+            if relationship_added >= min(
+                _RELATIONSHIP_MEMORY_QUOTA,
+                ai_limit - selected_counts["ai"],
+            ):
+                break
+            if _is_relationship_memory(mem) and try_add(
+                mem, _PROTECTED_RELATIONSHIP_REASON,
+            ):
+                relationship_added += 1
 
     named_relation_added = 0
     if _is_named_relation_query(query):

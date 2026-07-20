@@ -244,6 +244,20 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # Phase 2 weekly L3 consolidation (Sunday 05:10, after hygiene). Gated by
+    # MEMORY_CONSOLIDATION_ENABLED (default off) — it archives original rows,
+    # so it must be validated on staging data before production enablement.
+    scheduler.add_job(
+        _run_memory_consolidation,
+        "cron",
+        day_of_week="sun",
+        hour=5,
+        minute=10,
+        id="memory_consolidation",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Weekly portrait update on Sunday at 3:45 AM (staggered from daily reflection)
     scheduler.add_job(
         _run_weekly_portraits,
@@ -659,7 +673,7 @@ async def _run_l2_adjustment():
 
 
 async def _run_memory_hygiene():
-    """Run weekly memory duplicate cleanup and fact evolution."""
+    """Run weekly memory duplicate cleanup, fact evolution, and log retention."""
     async def _body():
         try:
             stats = await run_memory_hygiene()
@@ -667,8 +681,46 @@ async def _run_memory_hygiene():
                 logger.info(f"Memory hygiene: {stats}")
         except Exception as e:
             logger.warning(f"Memory hygiene failed: {e}")
+        # Retention rides the same weekly slot: purge stale `access` changelog
+        # rows (13 months+). Non-access operations are kept forever (audit).
+        try:
+            from app.services.memory.lifecycle.changelog_retention import (
+                purge_stale_access_changelog,
+            )
+            await purge_stale_access_changelog()
+        except Exception as e:
+            logger.warning(f"Access changelog purge failed: {e}")
 
     await _run_distributed_job("memory_hygiene", 7200, _body)
+
+
+async def _run_memory_consolidation():
+    """Phase 2: weekly L3 cluster compression (flag-gated, template-excluded)."""
+    from app.config import settings
+
+    if not settings.memory_consolidation_enabled:
+        logger.debug("memory consolidation disabled (MEMORY_CONSOLIDATION_ENABLED=false)")
+        return
+
+    async def _body():
+        from app.services.memory.lifecycle.consolidation import (
+            compress_l3_clusters_for_workspace,
+        )
+        from app.services.workspace.workspaces import resolve_workspace_id
+
+        async def _one(agent):
+            workspace_id = await resolve_workspace_id(
+                user_id=agent.userId, agent_id=agent.id,
+            )
+            if workspace_id:
+                await compress_l3_clusters_for_workspace(
+                    user_id=agent.userId, workspace_id=workspace_id,
+                )
+
+        # _run_for_all_agents already excludes the template agent + non-active.
+        await _run_for_all_agents(_one, concurrency=2, task_name="Memory consolidation")
+
+    await _run_distributed_job("memory_consolidation", 7200, _body)
 
 
 async def _run_daily_intimacy():

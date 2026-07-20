@@ -14,6 +14,7 @@ from app.services.memory.polarity import query_semantic_conflict_reasons
 from app.services.memory.retrieval.query_patterns import (
     asks_ai_profile_relation,
     asks_ai_stable_relation,
+    asks_shared_history,
     profile_query_subcategories,
 )
 from app.services.memory.retrieval.relevance import compute_display_score
@@ -338,6 +339,14 @@ def rank_memory_candidate(
         elif _is_ai_identity_memory(memory):
             boost *= 0.50
             reasons.append("用户身份查询降权:AI身份记忆")
+
+    # Phase 2 关系记忆: 共同回忆类提问 ("还记得我们第一次聊天吗") 提升
+    # AI 侧 (生活, 交互) 共同经历记忆 — 它们相似度往往一般 (叙事长句),
+    # 没有 boost 会被高 importance 人设事实淹没.
+    if asks_shared_history(query) and not exact_text_match:
+        if memory.get("source") == "ai" and memory.get("sub_category") == "交互":
+            boost += 0.60
+            reasons.append("关系记忆相关")
 
     ai_profile_query = asks_ai_profile_relation(query)
     if asks_ai_stable_relation(query) and not exact_text_match:

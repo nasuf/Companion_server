@@ -133,6 +133,8 @@ SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
 }
 
 # 记忆主动独立 100% 不参与抽签
+# Phase 2 关系记忆: warming/intimate 阶段给 "relationship" 来源 (memories_ai
+# 生活/交互 — 我们之间的共同经历) 分一份权重. 冷启动阶段没有共同历史, 不分.
 _MEMORY_COLD = {
     "ai_l1": 1.00, "ai_l2": 0.00,
     "user_l1": 0.00, "user_l2": 0.00,
@@ -142,12 +144,14 @@ MEMORY_SOURCE_DIST: dict[str, dict[str, float]] = {
     "p2_cold": _MEMORY_COLD,
     "cold_start": _MEMORY_COLD,
     "warming": {
-        "ai_l1": 0.75, "ai_l2": 0.05,
+        "ai_l1": 0.65, "ai_l2": 0.05,
         "user_l1": 0.10, "user_l2": 0.10,
+        "relationship": 0.10,
     },
     "intimate": {
-        "ai_l1": 0.50, "ai_l2": 0.10,
-        "user_l1": 0.15, "user_l2": 0.25,
+        "ai_l1": 0.45, "ai_l2": 0.10,
+        "user_l1": 0.15, "user_l2": 0.15,
+        "relationship": 0.15,
     },
 }
 
@@ -172,7 +176,7 @@ def select_topic_source(stage: str, trigger_type: str) -> str:
 
     Returns one of:
       - silence_wakeup:  ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting
-      - memory_proactive: ai_l1 / ai_l2 / user_l1 / user_l2
+      - memory_proactive: ai_l1 / ai_l2 / user_l1 / user_l2 / relationship (Phase 2 共同经历)
       - scheduled_scene:  ai_schedule (固定)
     """
     if trigger_type == "scheduled_scene":

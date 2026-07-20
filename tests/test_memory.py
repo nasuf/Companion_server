@@ -171,6 +171,7 @@ def _record(
     sub: str = "宠物",
     level: int = 1,
     importance: float = 0.85,
+    provenance: str | None = None,
 ) -> MemoryRecord:
     return MemoryRecord(
         id=id,
@@ -189,6 +190,7 @@ def _record(
         mainCategory=main,
         subCategory=sub,
         workspaceId="ws1",
+        provenance=provenance,
     )
 
 
@@ -373,6 +375,40 @@ class TestMemoryReconciliation:
             )
 
         assert decision.action == "insert_new"
+
+    async def test_profile_seed_row_never_updated_even_non_singleton(self):
+        """Phase 2 provenance: profile_seed 行是人设 ground truth, 任何类别都
+        不可被写入期 reconciliation 改写 — enrichment 分开存."""
+        existing = _record(
+            id="seed-pet",
+            content="我养了一只叫芝麻的黑猫",
+            source="ai",
+            main="身份",
+            sub="宠物",  # 非 singleton 子类
+            level=1,
+            importance=0.85,
+            provenance="profile_seed",
+        )
+        with (
+            patch("app.services.memory.storage.reconciliation.memory_repo.find_many", new_callable=AsyncMock, return_value=[existing]),
+            patch("app.services.memory.storage.reconciliation.search_by_embedding", new_callable=AsyncMock, return_value=[]),
+        ):
+            decision = await resolve_memory_write(
+                user_id="u1",
+                source="ai",
+                workspace_id="ws1",
+                content="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
+                summary="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
+                embedding=[0.1],
+                main_category="身份",
+                sub_category="宠物",
+                entities=["芝麻"],
+                topics=["宠物"],
+                allow_llm=False,
+            )
+
+        assert decision.action != "update_existing"
+        assert decision.action != "merge_existing"
 
     async def test_non_singleton_l1_enrichment_still_updates(self):
         """非 singleton L1 (如 宠物) 的 containment enrichment 政策保留."""
@@ -601,6 +637,32 @@ class TestL1SingletonGate:
             )
         assert result == "new-id"
         mocks["create"].assert_called_once()
+
+
+@pytest.mark.asyncio
+class TestProvenancePassthrough:
+    """Phase 2: store_memory 把合法 provenance 写入行, 非法值落 NULL."""
+
+    async def test_valid_provenance_written(self):
+        with _patch_storage_chain() as mocks:
+            result = await store_memory(
+                user_id="u1", content="用户喜欢咖啡", level=2, importance=0.7,
+                main_category="偏好", sub_category="饮食喜好", source="user",
+                provenance="user_stated",
+            )
+        assert result == "new-id"
+        create_kwargs = mocks["create"].call_args.kwargs
+        assert create_kwargs["provenance"] == "user_stated"
+
+    async def test_invalid_provenance_dropped(self):
+        with _patch_storage_chain() as mocks:
+            await store_memory(
+                user_id="u1", content="用户喜欢咖啡", level=2, importance=0.7,
+                main_category="偏好", sub_category="饮食喜好", source="user",
+                provenance="made_up_source",
+            )
+        create_kwargs = mocks["create"].call_args.kwargs
+        assert "provenance" not in create_kwargs
 
     async def test_no_block_for_non_singleton_sub(self):
         """非 SINGLETON 子类 (偏好/饮食喜好) 不走闸门, 多条共存合规."""

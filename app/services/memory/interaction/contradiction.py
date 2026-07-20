@@ -477,6 +477,8 @@ async def apply_contradiction_resolution(
             sub_category=sub_category,
             source=getattr(old_mem, "source", "user"),
             workspace_id=getattr(old_mem, "workspaceId", None),
+            # The user explicitly confirmed this fact in the contradiction flow.
+            provenance="user_stated",
         )
         if new_id:
             # audit log: 记录 contradiction-derived 新条目 (跟普通 insert 区分)

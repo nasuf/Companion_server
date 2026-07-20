@@ -201,6 +201,7 @@ async def store_memory(
     recurrence: str | None = None,
     entities: list[str] | None = None,
     topics: list[str] | None = None,
+    provenance: str | None = None,
     _singleton_locked: bool = False,
 ) -> str | None:
     """Store a memory with deduplication.
@@ -210,6 +211,8 @@ async def store_memory(
         source: "user" for memories about the user, "ai" for AI self-memories.
         recurrence: Part 5 §4.2 提醒重复规则 (once|yearly|monthly|weekly|daily).
             仅 sub_category="提醒" 时有效, 其他子类传 None.
+        provenance: 记忆出处 (memory/provenance.py 常量); 非法值落 NULL.
+            reconciliation 走 update/merge 时保留既有行的 provenance.
         _singleton_locked: 内部标志 — singleton 写锁已持有的重入调用, 勿外部使用.
     """
     # Source narrows to the literal Source type expected by the taxonomy
@@ -262,6 +265,7 @@ async def store_memory(
                     source=source, occur_time=occur_time,
                     statement_time=statement_time, workspace_id=workspace_id,
                     recurrence=recurrence, entities=entities, topics=topics,
+                    provenance=provenance,
                     _singleton_locked=True,
                 )
         except DistributedLockNotAcquired:
@@ -427,6 +431,8 @@ async def store_memory(
         return decision.existing_id
 
     # Store in PostgreSQL (routed to memories_user or memories_ai)
+    from app.services.memory.provenance import normalize_provenance
+
     create_data = dict(
         userId=user_id,
         content=content,
@@ -438,6 +444,9 @@ async def store_memory(
         subCategory=taxonomy.sub_category,
         workspaceId=workspace_id,
     )
+    normalized_provenance = normalize_provenance(provenance)
+    if normalized_provenance:
+        create_data["provenance"] = normalized_provenance
     if occur_time is not None:
         create_data["occurTime"] = occur_time
     # Part 5 §3.1: statement_time = 用户说出这句话的时间 (消息接收时刻)
