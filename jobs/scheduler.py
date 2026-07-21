@@ -479,7 +479,17 @@ async def _run_weekly_portraits():
 
 async def _run_achievement_daily_rollup():
     async def _body():
+        from app.services.achievements.mode import achievement_evaluation_enabled
         from app.services.achievements.service import run_daily_rollup
+
+        if not await achievement_evaluation_enabled():
+            # "off" freezes the checkpoint so a later re-enable replays the
+            # missed days via the existing catch-up loop below.
+            logger.info(
+                "Achievement daily rollup skipped: achievement_mode=off "
+                "(checkpoint frozen for catch-up)"
+            )
+            return
 
         target_day = (
             datetime.now(ZoneInfo(settings.schedule_timezone)).date()

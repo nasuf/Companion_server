@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from app.db import db
+from app.services.achievements.mode import achievement_user_facing_enabled
 from app.services.achievements.service import list_achievements
 
 TICKET_TO_POINTS_RATE = 10
@@ -49,6 +50,11 @@ async def ensure_wallet(user_id: str) -> dict[str, int]:
 
 
 async def sync_achievement_points(user_id: str, agent_id: str) -> dict[str, int]:
+    # Silent/off modes never credit achievement points. The ledger-delta logic
+    # below is cumulative, so the first sync after switching back to "on"
+    # credits everything earned during the silent window in one pass.
+    if not await achievement_user_facing_enabled():
+        return await ensure_wallet(user_id)
     await ensure_wallet(user_id)
     achievements = await list_achievements(user_id=user_id, agent_id=agent_id)
     total = int(achievements.get("score") or 0)

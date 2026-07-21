@@ -115,6 +115,22 @@ class Settings(BaseSettings):
     # 数据验证 + 评测集回归后再 .env MEMORY_CONSOLIDATION_ENABLED=true 上生产.
     memory_consolidation_enabled: bool = False
 
+    # Achievement system runtime mode (H5 chat-only launch, 2026-07-20):
+    # - "on" (default): full evaluation + all user-facing surfaces.
+    # - "silent": evaluation and unlock persistence keep running (accurate
+    #   unlocked_at + conversation_id are captured in real time), but every
+    #   user-facing surface is suppressed — WS/APNs unlock notifications,
+    #   GET /achievements payload, conversation-timeline achievement rows,
+    #   and wallet point sync. Switching back to "on" surfaces everything
+    #   accumulated during H5 with no backfill required.
+    # - "off": emergency kill switch — no evaluation, daily rollup skipped
+    #   with its checkpoint frozen so a later re-enable replays missed days.
+    # This env value is only the fallback default. The effective mode can be
+    # overridden at runtime from the admin console (系统设置) via the
+    # SystemConfig.achievement_mode column — see
+    # app/services/achievements/mode.py for the resolution order.
+    achievement_mode: str = "on"
+
     # Trace backend: "local" (self-hosted trace_runs collection, default) /
     # "langsmith" (legacy cloud path, needs langsmith_* below) / "off".
     # Local mode requires LANGSMITH_TRACING=false, otherwise langchain's env

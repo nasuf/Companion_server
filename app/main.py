@@ -177,6 +177,7 @@ from app.api.admin.runtime_jobs import router as admin_runtime_jobs_router
 from app.api.admin.meal import router as admin_meal_router
 from app.api.admin.game_configs import router as admin_game_configs_router
 from app.api.admin.offline_settings import router as admin_offline_settings_router
+from app.api.admin.achievement_settings import router as admin_achievement_settings_router
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -222,3 +223,4 @@ app.include_router(admin_runtime_jobs_router)
 app.include_router(admin_meal_router)
 app.include_router(admin_game_configs_router)
 app.include_router(admin_offline_settings_router)
+app.include_router(admin_achievement_settings_router)

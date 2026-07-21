@@ -10,6 +10,10 @@ from typing import Any
 from app.db import db
 from app.redis_client import get_redis
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID, ACHIEVEMENTS
+from app.services.achievements.mode import (
+    achievement_evaluation_enabled,
+    achievement_user_facing_enabled,
+)
 from app.services.achievements.rule_registry import (
     ACHIEVEMENT_RULES,
     DISABLED_ACHIEVEMENT_IDS,
@@ -102,6 +106,8 @@ async def unlock_achievement(
     metadata: dict | None = None,
     notify: bool = True,
 ) -> bool:
+    if not await achievement_evaluation_enabled():
+        return False
     definition = ACHIEVEMENT_BY_ID.get(achievement_id)
     if not definition:
         return False
@@ -142,7 +148,9 @@ async def unlock_achievement(
         "unlocked": True,
         "unlocked_at": unlocked_at.isoformat() if hasattr(unlocked_at, "isoformat") else str(unlocked_at),
     }
-    if notify:
+    # Silent mode ("H5 静默计算") persists the unlock above but suppresses every
+    # user-facing side effect; switching back to "on" must NOT retro-notify.
+    if notify and await achievement_user_facing_enabled():
         try:
             from app.services.notifications.service import notify_achievement_unlocked
             from app.services.runtime.tasks import fire_background

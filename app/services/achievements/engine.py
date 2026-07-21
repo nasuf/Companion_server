@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import overload
 
+from app.services.achievements.mode import achievement_evaluation_enabled
 from app.services.achievements.events import (
     AggregationAchievementEvent,
     AssistantMessageAchievementEvent,
@@ -58,6 +59,8 @@ async def handle_achievement_event(event: IntentAchievementEvent) -> None: ...
 
 async def handle_achievement_event(event: AchievementEvent) -> None:
     """Dispatch an application event to internal achievement rules."""
+    if not await achievement_evaluation_enabled():
+        return
     if isinstance(event, AggregationAchievementEvent):
         await evaluate_aggregation(event)
         return

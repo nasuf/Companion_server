@@ -14,6 +14,38 @@
 - 解锁由数据库唯一键 `(user_id, agent_id, achievement_id)` 保证并发幂等。
 - 事件由 `(user_id, agent_id, event_type, source_id)` 部分唯一索引防止重复累计。
 
+## 运行模式（2026-07-20，H5 上线支持）
+
+全局模式解析顺序：`SystemConfig.achievement_mode`（web 后台「系统设置」可
+动态切换，写库后 ~10s 内全部实例生效，见 `app/services/achievements/mode.py`
+的进程内 TTL 缓存）→ `.env ACHIEVEMENT_MODE` 默认值（`on`）：
+
+| 模式 | 规则评估/解锁写库 | 日终任务 | WS/APNs 通知 | GET /achievements | 时间线成就行 | 钱包积分同步 |
+|------|-------------------|----------|--------------|-------------------|--------------|--------------|
+| `on` | 运行 | 运行 | 发送 | 完整数据 | 合成 | 同步 |
+| `silent` | 运行（H5 静默计算） | 运行 | 抑制 | 隐藏（items 为空） | 跳过 | 跳过 |
+| `off` | 停止 | 跳过且 checkpoint 冻结 | 抑制 | 隐藏 | 跳过 | 跳过 |
+
+- `silent` 是 H5 纯聊天上线的推荐模式：解锁行实时落库，`unlocked_at` 与
+  `conversation_id` 即为真实达成时刻/会话，切回 `on` 后 App 端成就页、
+  聊天时间线历史位置、成就积分（钱包 delta 机制一次性补发）全部自动呈现，
+  无需任何回填任务。
+- 切回 `on` 不会补发历史通知：通知只在解锁当下发送，静默期解锁的
+  `notified_at` 保持 NULL 且无补扫逻辑。
+- `off` 为应急开关；恢复后日终 catch-up 依据冻结的 checkpoint 重放
+  （上限 366 天），但实时/累计类在停用窗口内的达成时刻无法恢复。
+- 代码闸门：`engine.handle_achievement_event`（评估）、
+  `repository.unlock_achievement`（写库防御 + 通知侧）、
+  `jobs/scheduler._run_achievement_daily_rollup`（日终）、
+  `wallet.sync_achievement_points`（积分）、
+  `api/public/achievements.get_achievements` 与
+  `api/public/conversations.list_messages`（用户可见面）。
+- 后台切换入口：`GET/PUT /admin-api/achievement-settings`
+  （`app/api/admin/achievement_settings.py`），web 端在
+  `Companion_web/src/OfflineSettingsWorkspace.tsx` 的「系统设置」面板与
+  线下活动/礼物开关同列，三态即选即存。
+- 行为测试：`tests/test_achievement_mode.py`（25 项）。
+
 ## 当前执行链路
 
 1. 用户消息持久化后触发 `UserMessageAchievementEvent`。
