@@ -465,6 +465,188 @@ async def test_merchant_login_issues_scoped_token(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_merchant_login_returns_qwyc_group_flag(monkeypatch):
+    from app.api.public import meal as meal_api
+
+    merchant = SimpleNamespace(
+        id="g-1",
+        name="千味央厨",
+        contactName="王老板",
+        contactPhone=None,
+        qwycGroup=True,
+    )
+    monkeypatch.setattr(meal_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(
+        meal_api,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant))
+        ),
+    )
+
+    body = await meal_api.merchant_login(
+        meal_api.MerchantLoginRequest(merchant_id="g-1", contact="王老板"),
+        FakeRequest(),
+    )
+    assert body["merchant"]["qwyc_group"] is True
+
+
+@pytest.mark.asyncio
+async def test_qwyc_summary_aggregates_members(monkeypatch):
+    members = [
+        SimpleNamespace(id="m-1", name="A店"),
+        SimpleNamespace(id="m-2", name="B店"),
+    ]
+    # (merchant_id, is_today) -> count
+    counts = {
+        ("m-1", False): 5,
+        ("m-1", True): 2,
+        ("m-2", False): 3,
+        ("m-2", True): 1,
+    }
+
+    async def count(where):
+        return counts[(where["merchantId"], "redeemedAt" in where)]
+
+    _mock_db(
+        monkeypatch,
+        mealmerchant=SimpleNamespace(find_many=AsyncMock(return_value=members)),
+        mealvoucher=SimpleNamespace(count=count),
+    )
+
+    result = await mv.qwyc_summary()
+
+    assert result["cumulative_total"] == 8
+    assert result["today_total"] == 3
+    assert result["members"][0] == {
+        "merchant_id": "m-1",
+        "name": "A店",
+        "today_redeemed": 2,
+        "total_redeemed": 5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_qwyc_summary_endpoint_rejects_non_group(monkeypatch):
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(meal_api, "_require_merchant", lambda _: "m-1")
+    monkeypatch.setattr(
+        meal_api,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(
+                find_unique=AsyncMock(
+                    return_value=SimpleNamespace(id="m-1", name="张记", qwycGroup=False)
+                )
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await meal_api.qwyc_summary(FakeRequest())
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_qwyc_summary_endpoint_returns_for_group(monkeypatch):
+    from app.api.public import meal as meal_api
+
+    monkeypatch.setattr(meal_api, "_require_merchant", lambda _: "g-1")
+    monkeypatch.setattr(
+        meal_api,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(
+                find_unique=AsyncMock(
+                    return_value=SimpleNamespace(
+                        id="g-1", name="千味央厨", qwycGroup=True
+                    )
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        meal_api.mv,
+        "qwyc_summary",
+        AsyncMock(
+            return_value={"members": [], "today_total": 0, "cumulative_total": 0}
+        ),
+    )
+
+    body = await meal_api.qwyc_summary(FakeRequest())
+    assert body["merchant_name"] == "千味央厨"
+    assert body["today_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_admin_create_merchant_sets_qwyc_flags(monkeypatch):
+    from app.api.admin import meal as admin_meal
+
+    created = SimpleNamespace(
+        id="m-1",
+        name="A店",
+        contactName=None,
+        contactPhone=None,
+        codeActive=True,
+        qwycMember=True,
+        qwycGroup=False,
+        createdAt=None,
+    )
+    create = AsyncMock(return_value=created)
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(mealmerchant=SimpleNamespace(create=create)),
+    )
+
+    body = await admin_meal.create_merchant(
+        admin_meal.MerchantCreateRequest(name="A店", qwyc_member=True)
+    )
+    data = create.await_args.kwargs["data"]
+    assert data["qwycMember"] is True
+    assert data["qwycGroup"] is False
+    assert body["qwyc_member"] is True
+    assert body["qwyc_group"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_update_merchant_sets_qwyc_flags(monkeypatch):
+    from app.api.admin import meal as admin_meal
+
+    updated = SimpleNamespace(
+        id="m-1",
+        name="A店",
+        contactName=None,
+        contactPhone=None,
+        codeActive=True,
+        qwycMember=False,
+        qwycGroup=True,
+        createdAt=None,
+    )
+    update = AsyncMock(return_value=updated)
+    monkeypatch.setattr(
+        admin_meal,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(
+                find_unique=AsyncMock(return_value=SimpleNamespace(id="m-1")),
+                update=update,
+            ),
+            query_raw=AsyncMock(return_value=[]),
+        ),
+    )
+
+    body = await admin_meal.update_merchant(
+        "m-1", admin_meal.MerchantUpdateRequest(qwyc_group=True)
+    )
+    data = update.await_args.kwargs["data"]
+    assert data["qwycGroup"] is True
+    assert body["qwyc_group"] is True
+
+
+@pytest.mark.asyncio
 async def test_merchant_login_rejects_mismatch(monkeypatch):
     from app.api.public import meal as meal_api
     from fastapi import HTTPException

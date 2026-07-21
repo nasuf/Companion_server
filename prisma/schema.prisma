@@ -1692,6 +1692,10 @@ model MealMerchant {
   contactName  String?       @map("contact_name")
   contactPhone String?       @map("contact_phone")
   codeActive   Boolean       @default(true) @map("code_active")
+  // 千味央厨归属: qwycMember = 该商家属于「千味央厨」品牌下的成员门店;
+  // qwycGroup = 该商家是「千味央厨」总账号 (登录后看汇总, 不扫码核销).
+  qwycMember   Boolean       @default(false) @map("qwyc_member")
+  qwycGroup    Boolean       @default(false) @map("qwyc_group")
   createdAt    DateTime      @default(now()) @map("created_at")
   updatedAt    DateTime      @updatedAt @map("updated_at")
   vouchers     MealVoucher[]

@@ -45,6 +45,8 @@ class MerchantCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     contact_name: str | None = Field(default=None, max_length=64)
     contact_phone: str | None = Field(default=None, max_length=32)
+    qwyc_member: bool = False
+    qwyc_group: bool = False
 
 
 class MerchantUpdateRequest(BaseModel):
@@ -52,6 +54,8 @@ class MerchantUpdateRequest(BaseModel):
     contact_name: str | None = Field(default=None, max_length=64)
     contact_phone: str | None = Field(default=None, max_length=32)
     code_active: bool | None = None
+    qwyc_member: bool | None = None
+    qwyc_group: bool | None = None
 
 
 def _merchant_payload(merchant, redeemed_count: int) -> dict:
@@ -61,6 +65,8 @@ def _merchant_payload(merchant, redeemed_count: int) -> dict:
         "contact_name": merchant.contactName,
         "contact_phone": merchant.contactPhone,
         "code_active": merchant.codeActive,
+        "qwyc_member": bool(getattr(merchant, "qwycMember", False)),
+        "qwyc_group": bool(getattr(merchant, "qwycGroup", False)),
         "redeemed_count": redeemed_count,
         "created_at": merchant.createdAt.isoformat() if merchant.createdAt else None,
     }
@@ -204,6 +210,8 @@ async def create_merchant(data: MerchantCreateRequest):
             "name": name,
             "contactName": (data.contact_name or "").strip() or None,
             "contactPhone": (data.contact_phone or "").strip() or None,
+            "qwycMember": data.qwyc_member,
+            "qwycGroup": data.qwyc_group,
         }
     )
     logger.info(
@@ -231,6 +239,10 @@ async def update_merchant(merchant_id: str, data: MerchantUpdateRequest):
         updates["contactPhone"] = data.contact_phone.strip() or None
     if data.code_active is not None:
         updates["codeActive"] = data.code_active
+    if data.qwyc_member is not None:
+        updates["qwycMember"] = data.qwyc_member
+    if data.qwyc_group is not None:
+        updates["qwycGroup"] = data.qwyc_group
 
     if not updates:
         counts = await _redeemed_counts()

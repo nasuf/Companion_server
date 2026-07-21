@@ -235,7 +235,15 @@ async def merchant_login(data: MerchantLoginRequest, request: Request):
         "meal merchant logged in",
         extra={"event": "meal_merchant_login", "merchant_id": merchant.id},
     )
-    return {"token": token, "merchant": {"id": merchant.id, "name": merchant.name}}
+    return {
+        "token": token,
+        "merchant": {
+            "id": merchant.id,
+            "name": merchant.name,
+            # 千味央厨总账号: 前端据此进入「汇总」模式而非扫码核销。
+            "qwyc_group": bool(getattr(merchant, "qwycGroup", False)),
+        },
+    }
 
 
 @router.get(
@@ -335,3 +343,16 @@ async def merchant_stats(request: Request):
         "daily_used": quota["daily_used"],
         "daily_remaining": quota["daily_remaining"],
     }
+
+
+@router.get("/qwyc/summary")
+async def qwyc_summary(request: Request):
+    """千味央厨总账号专用: 各成员门店今日/累计核销汇总 (非扫码)。"""
+    merchant_id = _require_merchant(request)
+    merchant = await db.mealmerchant.find_unique(where={"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="商家不存在")
+    if not getattr(merchant, "qwycGroup", False):
+        raise HTTPException(status_code=403, detail="无权限查看千味央厨汇总")
+    summary = await mv.qwyc_summary()
+    return {"merchant_name": merchant.name, **summary}

@@ -343,6 +343,47 @@ async def clear_activation(voucher_id: str) -> None:
 # ── merchants ────────────────────────────────────────────────────────
 
 
+async def qwyc_summary() -> dict:
+    """「千味央厨」汇总: 各成员门店今日/累计核销数 + 合计。
+
+    量级为一个品牌旗下门店数 (通常 <100), 每店 2 次 count, 顺序执行即可。
+    今日口径与核销上限一致: UTC+8 自然日 (redeemedAt >= 当日 00:00)。
+    """
+    members = await db.mealmerchant.find_many(
+        where={"qwycMember": True}, order={"createdAt": "asc"}
+    )
+    day_start = _cn_day_start()
+    items: list[dict] = []
+    today_total = 0
+    cumulative_total = 0
+    for m in members:
+        total = await db.mealvoucher.count(
+            where={"merchantId": m.id, "status": VOUCHER_REDEEMED}
+        )
+        today = await db.mealvoucher.count(
+            where={
+                "merchantId": m.id,
+                "status": VOUCHER_REDEEMED,
+                "redeemedAt": {"gte": day_start},
+            }
+        )
+        items.append(
+            {
+                "merchant_id": m.id,
+                "name": m.name,
+                "today_redeemed": today,
+                "total_redeemed": total,
+            }
+        )
+        today_total += today
+        cumulative_total += total
+    return {
+        "members": items,
+        "today_total": today_total,
+        "cumulative_total": cumulative_total,
+    }
+
+
 def merchant_contact_matches(merchant, contact: str) -> bool:
     """商家 H5 自助身份确认: 联系人姓名或手机号任一精确匹配 (去空格)."""
     text = (contact or "").strip()
