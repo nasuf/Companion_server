@@ -40,6 +40,7 @@ from app.services.wechat_auth import (
 )
 from app.services.agent_avatars import build_avatar_url
 from app.services.agent_template import ensure_default_agent_for_user
+from app.services.notifications.presence import record_online
 from app.services.user_activity import UserActivityWriteError, record_user_activity
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ _WECHAT_PROVIDER = "wechat"
 
 
 async def _record_auth_activity(user_id: str, *, source: str) -> None:
+    # 登录 / auth_me 即视为在线, 让刚登录 (含 H5) 立即计入实时在线; 后续 WS
+    # ping / auth_me 刷新会持续续期. Best-effort, 失败不影响登录主流程.
+    await record_online(user_id)
     try:
         await record_user_activity(
             user_id,
