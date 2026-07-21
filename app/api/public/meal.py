@@ -325,4 +325,13 @@ async def merchant_stats(request: Request):
     total = await db.mealvoucher.count(
         where={"merchantId": merchant_id, "status": mv.VOUCHER_REDEEMED}
     )
-    return {"merchant_name": merchant.name, "redeemed_total": total, "recent": recent}
+    # 当日全局配额 (先到先得): 商家页据此实时展示今日剩余可核销数。
+    quota = await mv.daily_redeem_quota()
+    return {
+        "merchant_name": merchant.name,
+        "redeemed_total": total,
+        "recent": recent,
+        "daily_cap": quota["daily_cap"],
+        "daily_used": quota["daily_used"],
+        "daily_remaining": quota["daily_remaining"],
+    }

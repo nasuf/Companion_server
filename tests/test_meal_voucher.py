@@ -783,6 +783,42 @@ async def test_quota_endpoint_returns_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_merchant_stats_includes_daily_quota(monkeypatch):
+    from app.api.public import meal as meal_api
+
+    merchant = SimpleNamespace(id="m-1", name="伴生宴")
+    monkeypatch.setattr(meal_api, "_require_merchant", lambda _: "m-1")
+    monkeypatch.setattr(
+        meal_api,
+        "db",
+        SimpleNamespace(
+            mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
+            mealvoucher=SimpleNamespace(
+                find_many=AsyncMock(return_value=[]),
+                count=AsyncMock(return_value=7),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        meal_api.mv, "resolve_user_displays", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        meal_api.mv,
+        "daily_redeem_quota",
+        AsyncMock(
+            return_value={"daily_cap": 500, "daily_used": 120, "daily_remaining": 380}
+        ),
+    )
+
+    body = await meal_api.merchant_stats(FakeRequest())
+
+    assert body["merchant_name"] == "伴生宴"
+    assert body["redeemed_total"] == 7
+    assert body["daily_cap"] == 500
+    assert body["daily_remaining"] == 380
+
+
+@pytest.mark.asyncio
 async def test_record_redemption_failure_dedupes_per_user_day(monkeypatch):
     existing = SimpleNamespace(id="f-1")
     db = _mock_db(
