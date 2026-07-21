@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prisma import Json
@@ -26,7 +27,7 @@ from app.services.interaction.user_turn_aggregation import (
 )
 from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
 from app.services.mbti import get_mbti
-from app.services.notifications.presence import record_online
+from app.services.notifications.presence import record_ws_online, remove_ws_online
 from app.services.proactive.state import mark_user_replied_for_conversation
 from app.services.proactive.sender import send_first_greeting
 from app.services.relationship.emotion import quick_emotion_estimate
@@ -675,8 +676,10 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         await manager.connect(
             conversation_id, user_id, websocket, workspace_id=workspace_id,
         )
-        # 统一在线计数: WS 连接即视为在线 (App / H5 同一路径), 后续 ping/消息续期.
-        await record_online(user_id)
+        # 实时在线 (连接数语义): 每条 WS 用唯一 conn_id 入 WS 池, 断开时摘除 →
+        # 离开聊天页瞬时下线. App / H5 同一路径, 一视同仁.
+        ws_conn_id = uuid.uuid4().hex
+        await record_ws_online(user_id, ws_conn_id)
         logger.info("ws connected", extra={"event": EVT_WS_CONNECT})
 
         # spec §12 开场主动第一句话: 只在首次进入 (0 消息) 时触发
@@ -705,8 +708,8 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
 
                 msg_type = raw.get("type", "")
 
-                # 任意帧 (ping/消息) 都续期在线状态 (前端每 25s ping, TTL 90s).
-                await record_online(user_id)
+                # 任意帧 (ping/消息) 都续期在线状态 (前端每 25s ping, TTL 90s 兜底).
+                await record_ws_online(user_id, ws_conn_id)
 
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
@@ -765,6 +768,8 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         finally:
             logger.info("ws disconnected", extra={"event": EVT_WS_DISCONNECT})
             await manager.disconnect(conversation_id)
+            # 立即摘除该连接 → 实时在线瞬时反映离开.
+            await remove_ws_online(user_id, ws_conn_id)
             try:
                 from app.services.music_status import end_if_disconnected_after_timeout
 

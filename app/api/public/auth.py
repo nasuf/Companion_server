@@ -40,7 +40,7 @@ from app.services.wechat_auth import (
 )
 from app.services.agent_avatars import build_avatar_url
 from app.services.agent_template import ensure_default_agent_for_user
-from app.services.notifications.presence import record_online
+from app.services.notifications.presence import record_online, remove_online
 from app.services.user_activity import UserActivityWriteError, record_user_activity
 
 logger = logging.getLogger(__name__)
@@ -601,10 +601,19 @@ async def get_me(payload: dict = Depends(require_user)):
 
 @router.post("/heartbeat")
 async def heartbeat(payload: dict = Depends(require_user)):
-    """轻量在线心跳 — 只刷新统一在线计数, 不查库.
+    """轻量在线心跳 — 只刷新心跳池, 不查库.
 
     让 H5/web 前台 (即使不在聊天页) 与原生 App 的前台 presence 心跳同等被计入
     实时在线. 前端在会话有效且页面可见时每 ~40s 调一次 (TTL 90s).
     """
     await record_online(payload["sub"])
+    return {"ok": True}
+
+
+@router.post("/offline")
+async def offline(payload: dict = Depends(require_user)):
+    """显式下线 — H5/web 页面隐藏或关闭时调用 (fetch keepalive), 从心跳池移除,
+    让实时在线及时下降, 无需等 TTL 过期. WS 断开另有 remove_ws_online 处理.
+    """
+    await remove_online(payload["sub"])
     return {"ok": True}
