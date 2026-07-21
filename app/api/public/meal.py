@@ -355,4 +355,6 @@ async def qwyc_summary(request: Request):
     if not getattr(merchant, "qwycGroup", False):
         raise HTTPException(status_code=403, detail="无权限查看千味央厨汇总")
     summary = await mv.qwyc_summary()
-    return {"merchant_name": merchant.name, **summary}
+    # 附带当日全局核销配额 (先到先得, 上限 500): 汇总页展示「今日已核销 / 上限」。
+    quota = await mv.daily_redeem_quota()
+    return {"merchant_name": merchant.name, **summary, **quota}

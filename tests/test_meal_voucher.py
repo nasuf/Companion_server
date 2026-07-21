@@ -574,10 +574,20 @@ async def test_qwyc_summary_endpoint_returns_for_group(monkeypatch):
             return_value={"members": [], "today_total": 0, "cumulative_total": 0}
         ),
     )
+    monkeypatch.setattr(
+        meal_api.mv,
+        "daily_redeem_quota",
+        AsyncMock(
+            return_value={"daily_cap": 500, "daily_used": 12, "daily_remaining": 488}
+        ),
+    )
 
     body = await meal_api.qwyc_summary(FakeRequest())
     assert body["merchant_name"] == "千味央厨"
     assert body["today_total"] == 0
+    assert body["daily_cap"] == 500
+    assert body["daily_used"] == 12
+    assert body["daily_remaining"] == 488
 
 
 @pytest.mark.asyncio
