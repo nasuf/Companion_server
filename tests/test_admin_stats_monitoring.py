@@ -231,6 +231,107 @@ def test_monitoring_all_time_omits_window_filter(api_client):
         app.dependency_overrides.pop(require_admin_jwt, None)
 
 
+def test_online_users_endpoint_paginates_with_login_methods(api_client):
+    """/online/users 分页返回在线用户 + 登录方式 + 标识 (微信/手机/邮箱密码)."""
+    from types import SimpleNamespace
+
+    from app.api.jwt_auth import require_admin_jwt
+    from app.main import app
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+
+    # 3 个在线用户, page_size=2 → 第一页 2 条, total_pages=2.
+    online_ids = ["u-wechat", "u-phone", "u-pw"]
+
+    users = [
+        SimpleNamespace(id="u-wechat", username="wx_abc", email=None, hashedPassword=None),
+        SimpleNamespace(id="u-phone", username="ph_abc", email=None, hashedPassword=None),
+    ]
+    identities = [
+        SimpleNamespace(
+            userId="u-wechat", provider="wechat", openid="op-1",
+            providerAccountId="op-1", rawProfile={"nickname": "小明"},
+        ),
+        SimpleNamespace(
+            userId="u-phone", provider="phone",
+            providerAccountId="13812345678", openid=None, rawProfile={"phone": "13812345678"},
+        ),
+    ]
+
+    fake_db = MagicMock()
+    fake_db.user = MagicMock()
+    fake_db.user.find_many = AsyncMock(return_value=users)
+    fake_db.authidentity = MagicMock()
+    fake_db.authidentity.find_many = AsyncMock(return_value=identities)
+
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch(
+                "app.api.admin.stats.list_online_user_ids",
+                new_callable=AsyncMock,
+                return_value=(online_ids, True),
+            ),
+        ):
+            resp = api_client.get(
+                "/admin-api/stats/online/users", params={"page": 1, "page_size": 2}
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 3
+        assert data["total_pages"] == 2
+        assert data["page"] == 1
+        assert len(data["items"]) == 2
+
+        wx = data["items"][0]
+        assert wx["username"] == "wx_abc"
+        assert wx["methods"][0]["type"] == "wechat"
+        assert wx["methods"][0]["identifier"] == "小明"
+
+        ph = data["items"][1]
+        assert ph["methods"][0]["type"] == "phone"
+        assert ph["methods"][0]["identifier"] == "138****5678"  # masked
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
+def test_online_users_password_method_from_hashed_password(api_client):
+    """有 hashedPassword 的账号显示 邮箱/密码 登录方式, 标识用 email."""
+    from types import SimpleNamespace
+
+    from app.api.jwt_auth import require_admin_jwt
+    from app.main import app
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"role": "admin"}
+
+    users = [SimpleNamespace(id="u-pw", username="alice", email="a@b.com", hashedPassword="x")]
+
+    fake_db = MagicMock()
+    fake_db.user = MagicMock()
+    fake_db.user.find_many = AsyncMock(return_value=users)
+    fake_db.authidentity = MagicMock()
+    fake_db.authidentity.find_many = AsyncMock(return_value=[])
+
+    try:
+        with (
+            patch("app.api.admin.stats.db", fake_db),
+            patch(
+                "app.api.admin.stats.list_online_user_ids",
+                new_callable=AsyncMock,
+                return_value=(["u-pw"], True),
+            ),
+        ):
+            resp = api_client.get("/admin-api/stats/online/users")
+
+        assert resp.status_code == 200
+        item = resp.json()["items"][0]
+        assert item["methods"][0]["type"] == "password"
+        assert item["methods"][0]["identifier"] == "a@b.com"
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+
+
 def test_online_endpoint_is_redis_only(api_client):
     """/online 只读 Redis presence, 不碰 DB."""
     app, require_admin_jwt = _admin_override()

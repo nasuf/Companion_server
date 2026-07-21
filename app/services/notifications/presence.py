@@ -154,6 +154,36 @@ async def count_online_users() -> tuple[int, bool]:
         return 0, False
 
 
+async def list_online_user_ids() -> tuple[list[str], bool]:
+    """Return online user_ids ordered by most-recent activity (WS ∪ heartbeat).
+
+    Same membership as count_online_users, but returns the ids (deduped, newest
+    first) so the admin can drill into who is online. (ids, redis_ok).
+    """
+    try:
+        redis = await get_redis()
+        cutoff = time.time() - _ONLINE_TTL_SECONDS
+        await redis.zremrangebyscore(_ONLINE_WS_ZKEY, "-inf", cutoff)
+        await redis.zremrangebyscore(_ONLINE_HB_ZKEY, "-inf", cutoff)
+        ws_members, hb_members = await asyncio.gather(
+            redis.zrange(_ONLINE_WS_ZKEY, 0, -1, withscores=True),
+            redis.zrange(_ONLINE_HB_ZKEY, 0, -1, withscores=True),
+        )
+        latest: dict[str, float] = {}
+        for member, score in ws_members:
+            m = member if isinstance(member, str) else member.decode()
+            uid = m.split("|", 1)[0]
+            latest[uid] = max(latest.get(uid, 0.0), float(score))
+        for member, score in hb_members:
+            uid = member if isinstance(member, str) else member.decode()
+            latest[uid] = max(latest.get(uid, 0.0), float(score))
+        ordered = [uid for uid, _ in sorted(latest.items(), key=lambda kv: kv[1], reverse=True)]
+        return ordered, True
+    except Exception as e:
+        logger.debug(f"[PRESENCE] list online skipped: {e}")
+        return [], False
+
+
 async def is_user_foreground(
     *,
     user_id: str,

@@ -12,7 +12,7 @@ from app.api.jwt_auth import require_admin_jwt
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.pricing import estimate_cost_cny
-from app.services.notifications.presence import count_online_users
+from app.services.notifications.presence import count_online_users, list_online_user_ids
 from app.services.operations.metrics import summarize_crisis_events, summarize_visible_use
 from app.services.proactive import triggers as proactive_triggers
 from app.services.runtime import job_queue as runtime_job_queue
@@ -850,6 +850,100 @@ async def online(_: dict = Depends(require_admin_jwt)):
         "threshold_seconds": 90,
         "redis_available": ok,
         "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _mask_phone(phone: str | None) -> str | None:
+    if not phone or len(phone) != 11:
+        return phone
+    return f"{phone[:3]}****{phone[-4:]}"
+
+
+def _login_methods(user, identities: list) -> list[dict]:
+    """Derive login methods + human-readable identifier from a user's identities.
+
+    - wechat: auth_identities(provider=wechat), identifier = 昵称 (rawProfile) → openid
+    - phone:  auth_identities(provider=phone), identifier = 掩码手机号
+    - password/email: user.hashedPassword 存在, identifier = email → username
+    一个账号可能同时有多种绑定, 全部列出.
+    """
+    methods: list[dict] = []
+    for ident in identities:
+        provider = getattr(ident, "provider", None)
+        if provider == "wechat":
+            profile = getattr(ident, "rawProfile", None)
+            nickname = profile.get("nickname") if isinstance(profile, dict) else None
+            methods.append({
+                "type": "wechat",
+                "label": "微信",
+                "identifier": nickname or getattr(ident, "openid", None)
+                or getattr(ident, "providerAccountId", None) or "—",
+            })
+        elif provider == "phone":
+            methods.append({
+                "type": "phone",
+                "label": "手机号",
+                "identifier": _mask_phone(getattr(ident, "providerAccountId", None)) or "—",
+            })
+    if getattr(user, "hashedPassword", None):
+        methods.append({
+            "type": "password",
+            "label": "邮箱/密码",
+            "identifier": getattr(user, "email", None) or getattr(user, "username", None) or "—",
+        })
+    return methods
+
+
+@router.get("/online/users")
+async def online_users(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _: dict = Depends(require_admin_jwt),
+):
+    """当前在线用户明细 (分页) — 用户名 / 登录方式 / 标识 (微信昵称·手机号·邮箱).
+
+    在线口径与 /online 一致 (WS ∪ 心跳池). 按最近活跃排序.
+    """
+    ids, ok = await list_online_user_ids()
+    total = len(ids)
+    start = (page - 1) * page_size
+    page_ids = ids[start:start + page_size]
+
+    items: list[dict] = []
+    if page_ids:
+        users, identities = await asyncio.gather(
+            db.user.find_many(where={"id": {"in": page_ids}}),
+            db.authidentity.find_many(where={"userId": {"in": page_ids}}),
+        )
+        user_by_id = {u.id: u for u in users}
+        idents_by_user: dict[str, list] = {}
+        for ident in identities:
+            idents_by_user.setdefault(ident.userId, []).append(ident)
+        # 保持在线排序 (最近活跃优先).
+        for uid in page_ids:
+            user = user_by_id.get(uid)
+            if user is None:
+                items.append({
+                    "user_id": uid,
+                    "username": "(已删除)",
+                    "email": None,
+                    "methods": [],
+                })
+                continue
+            items.append({
+                "user_id": uid,
+                "username": user.username,
+                "email": getattr(user, "email", None),
+                "methods": _login_methods(user, idents_by_user.get(uid, [])),
+            })
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size if page_size else 0,
+        "redis_available": ok,
+        "items": items,
     }
 
 
