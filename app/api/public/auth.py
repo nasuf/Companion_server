@@ -597,3 +597,14 @@ async def get_me(payload: dict = Depends(require_user)):
     token = create_jwt(user.id, user.role)
     await _record_auth_activity(user.id, source="auth_me")
     return await _build_auth_response(user, token)
+
+
+@router.post("/heartbeat")
+async def heartbeat(payload: dict = Depends(require_user)):
+    """轻量在线心跳 — 只刷新统一在线计数, 不查库.
+
+    让 H5/web 前台 (即使不在聊天页) 与原生 App 的前台 presence 心跳同等被计入
+    实时在线. 前端在会话有效且页面可见时每 ~40s 调一次 (TTL 90s).
+    """
+    await record_online(payload["sub"])
+    return {"ok": True}

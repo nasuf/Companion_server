@@ -75,6 +75,23 @@ async def test_count_online_redis_failure_degrades():
     assert (count, ok) == (0, False)
 
 
+def test_heartbeat_endpoint_marks_online(api_client):
+    """POST /auth/heartbeat 只刷新在线计数, 供 H5/web 与 App 同等被检测."""
+    from app.api.jwt_auth import require_user
+    from app.main import app
+
+    app.dependency_overrides[require_user] = lambda: {"sub": "h5-user", "role": "user"}
+    recorder = AsyncMock()
+    try:
+        with patch("app.api.public.auth.record_online", recorder):
+            resp = api_client.post("/auth/heartbeat")
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        recorder.assert_awaited_once_with("h5-user")
+    finally:
+        app.dependency_overrides.pop(require_user, None)
+
+
 @pytest.mark.asyncio
 async def test_record_online_ignores_empty_user():
     from app.services.notifications import presence
