@@ -204,7 +204,7 @@ class Settings(BaseSettings):
     meal_validity_days: int = 7
     # 每日霸王餐核销总量上限 (先到先得): 单个 UTC+8 自然日内核销总数达到该值后,
     # 后续核销请求被拒并留痕, 提示用户次日 (仍需在有效期内) 再来.
-    meal_daily_redeem_cap: int = 1000
+    meal_daily_redeem_cap: int = 500
     # 用户券动态二维码：Redis 一次性凭证有效期。页面会在过期前自动刷新。
     meal_qr_ttl_seconds: int = 60
     # 商家自助登录 JWT 使用独立短有效期，不复用普通用户默认 7 天。

@@ -81,6 +81,12 @@ async def get_voucher(payload: dict = Depends(require_user)):
     }
 
 
+@router.get("/quota")
+async def voucher_quota(payload: dict = Depends(require_user)):
+    """当日核销配额 (上限 / 已用 / 剩余), 供 H5 券卡片实时展示剩余可核销数。"""
+    return await mv.daily_redeem_quota()
+
+
 @router.post("/voucher/qr-token", dependencies=[Depends(require_redis)])
 async def voucher_qr_token(payload: dict = Depends(require_user)):
     """Issue the QR for the voucher's current staff/merchant stage."""

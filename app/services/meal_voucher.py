@@ -44,6 +44,10 @@ _CN_TZ = timezone(timedelta(hours=8))
 # 失败留痕 reason: 当日核销量达上限 (先到先得, 超出被拒).
 FAILURE_DAILY_CAP = "daily_cap"
 
+# 每日核销上限的全局串行化锁 key (Postgres advisory xact lock). 所有核销共用
+# 同一把锁, 让「当日计数 → 条件转移」在事务内串行执行, 高并发下不会超额核销.
+_REDEEM_CAP_LOCK_KEY = "meal-redeem-daily-cap"
+
 
 # ── 有效期 / 当日边界 (业务口径固定 UTC+8 自然日) ────────────────────
 
@@ -168,29 +172,45 @@ async def _redeem_loaded_voucher(voucher, merchant):
             "无法核销",
         )
 
-    # 每日核销上限 (先到先得, spec 需求 2): 商家码校验通过后, 若当日核销量已达
-    # 上限则拒绝并留痕. 放在商家校验之后, 避免把「乱输码」也算成上限失败.
-    # 竞态说明: 计数与状态转移之间存在窗口, 极端并发可能轻微超出上限 — 活动为
-    # 人工念码, ~1000/日的量级下可接受 (与既有条件转移一致的实用取舍).
-    if await today_redeemed_count() >= settings.meal_daily_redeem_cap:
+    # 每日核销上限 (先到先得, spec 需求 2). 高并发安全: 用 Postgres advisory
+    # xact lock 把「当日计数 → 条件转移」整段在事务内串行化, 同一时刻只有一个
+    # 核销事务持锁计数并写入; 前一个事务提交 (释放锁) 后, 后一个才计数, 因此
+    # 计数永远包含已提交的核销 → 不会超额核销. 达上限时留痕在事务外补记.
+    day_start = _cn_day_start()
+    capped = False
+    async with db.tx() as tx:
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            _REDEEM_CAP_LOCK_KEY,
+        )
+        used = await tx.mealvoucher.count(
+            where={"status": VOUCHER_REDEEMED, "redeemedAt": {"gte": day_start}}
+        )
+        if used >= settings.meal_daily_redeem_cap:
+            capped = True
+        else:
+            # Conditional transition (activated -> redeemed): concurrent
+            # double-redeem loses the race and errors instead of silently
+            # re-attributing the voucher.
+            count = await tx.mealvoucher.update_many(
+                where={"id": voucher.id, "status": VOUCHER_ACTIVATED},
+                data={
+                    "status": VOUCHER_REDEEMED,
+                    "redeemedAt": datetime.now(UTC),
+                    "merchantId": merchant.id,
+                },
+            )
+            if not count:
+                raise MealVoucherError("already_redeemed", "该券已核销，无法重复核销")
+
+    # 留痕放在事务外 (每用户每日去重), 避免占用核销锁 + 让主事务保持最短临界区.
+    if capped:
         await record_redemption_failure(voucher.userId, merchant.id, FAILURE_DAILY_CAP)
         raise MealVoucherError(
             "daily_cap",
             "今日霸王餐已被抢完啦，明天再来试试吧（记得在券的有效期内哦）",
         )
 
-    # Conditional transition (activated -> redeemed): concurrent double-redeem
-    # loses the race and errors instead of silently re-attributing the voucher.
-    count = await db.mealvoucher.update_many(
-        where={"id": voucher.id, "status": VOUCHER_ACTIVATED},
-        data={
-            "status": VOUCHER_REDEEMED,
-            "redeemedAt": datetime.now(UTC),
-            "merchantId": merchant.id,
-        },
-    )
-    if not count:
-        raise MealVoucherError("already_redeemed", "该券已核销，无法重复核销")
     logger.info(
         "meal voucher redeemed",
         extra={
@@ -224,6 +244,17 @@ async def today_redeemed_count(now: datetime | None = None) -> int:
     return await db.mealvoucher.count(
         where={"status": VOUCHER_REDEEMED, "redeemedAt": {"gte": day_start}}
     )
+
+
+async def daily_redeem_quota(now: datetime | None = None) -> dict:
+    """当日核销配额快照: 上限 / 已用 / 剩余 (剩余不为负). 供 H5 实时展示."""
+    cap = settings.meal_daily_redeem_cap
+    used = await today_redeemed_count(now)
+    return {
+        "daily_cap": cap,
+        "daily_used": used,
+        "daily_remaining": max(0, cap - used),
+    }
 
 
 async def record_redemption_failure(

@@ -40,8 +40,25 @@ def _voucher(status: str, merchant_id: str | None = None):
     )
 
 
+class _FakeTx:
+    """Async CM standing in for prisma ``db.tx()``; yields the same mocked db so
+    ``tx.query_raw`` / ``tx.mealvoucher.*`` map onto the test's mocks."""
+
+    def __init__(self, db):
+        self._db = db
+
+    async def __aenter__(self):
+        return self._db
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 def _mock_db(monkeypatch, **tables):
     db = SimpleNamespace(**tables)
+    if not hasattr(db, "query_raw"):
+        db.query_raw = AsyncMock(return_value=[])
+    db.tx = lambda: _FakeTx(db)
     monkeypatch.setattr(mv, "db", db)
     return db
 
@@ -677,6 +694,92 @@ async def test_redeem_rejects_daily_cap_and_records_failure(monkeypatch):
         await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
     assert exc.value.reason == "daily_cap"
     db.mealredemptionfailure.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_redeem_serializes_cap_check_with_advisory_lock(monkeypatch):
+    """核销的「计数 → 条件转移」必须在事务内加 advisory 锁串行化 (防超额)。"""
+    merchant = SimpleNamespace(id="m-1", name="张记食堂", codeActive=True)
+    updated = _voucher(mv.VOUCHER_REDEEMED, merchant_id="m-1")
+    updated.redeemedAt = datetime.now(UTC)
+    db = _mock_db(
+        monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(side_effect=[_activated_voucher(), updated]),
+            update_many=AsyncMock(return_value=1),
+            count=AsyncMock(return_value=0),
+        ),
+    )
+
+    await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
+
+    # 计数与条件更新都发生在同一事务里 (tx == db), 且先取了 advisory 锁。
+    lock_sql = db.query_raw.await_args_list[0].args[0]
+    assert "pg_advisory_xact_lock" in lock_sql
+    db.mealvoucher.count.assert_awaited_once()
+    db.mealvoucher.update_many.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_redeem_over_cap_does_not_transition(monkeypatch):
+    """当日已达上限时, 不得写入核销状态 (只留痕 + 抛 daily_cap)。"""
+    merchant = SimpleNamespace(id="m-1", name="张记食堂", codeActive=True)
+    db = _mock_db(
+        monkeypatch,
+        mealmerchant=SimpleNamespace(find_unique=AsyncMock(return_value=merchant)),
+        mealvoucher=SimpleNamespace(
+            find_unique=AsyncMock(return_value=_activated_voucher()),
+            update_many=AsyncMock(return_value=1),
+            count=AsyncMock(return_value=settings.meal_daily_redeem_cap),
+        ),
+        mealredemptionfailure=SimpleNamespace(
+            find_first=AsyncMock(return_value=None),
+            create=AsyncMock(),
+        ),
+    )
+
+    with pytest.raises(mv.MealVoucherError) as exc:
+        await mv.redeem_voucher_by_merchant("v-1", "user-1", "m-1")
+    assert exc.value.reason == "daily_cap"
+    db.mealvoucher.update_many.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_daily_redeem_quota(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(count=AsyncMock(return_value=3)),
+    )
+    quota = await mv.daily_redeem_quota()
+    assert quota["daily_cap"] == settings.meal_daily_redeem_cap
+    assert quota["daily_used"] == 3
+    assert quota["daily_remaining"] == settings.meal_daily_redeem_cap - 3
+
+
+@pytest.mark.asyncio
+async def test_daily_redeem_quota_clamps_remaining_at_zero(monkeypatch):
+    _mock_db(
+        monkeypatch,
+        mealvoucher=SimpleNamespace(
+            count=AsyncMock(return_value=settings.meal_daily_redeem_cap + 5)
+        ),
+    )
+    quota = await mv.daily_redeem_quota()
+    assert quota["daily_remaining"] == 0
+
+
+@pytest.mark.asyncio
+async def test_quota_endpoint_returns_snapshot(monkeypatch):
+    from app.api.public import meal as meal_api
+
+    monkeypatch.setattr(
+        meal_api.mv,
+        "daily_redeem_quota",
+        AsyncMock(return_value={"daily_cap": 500, "daily_used": 10, "daily_remaining": 490}),
+    )
+    body = await meal_api.voucher_quota(payload={"sub": "user-1"})
+    assert body == {"daily_cap": 500, "daily_used": 10, "daily_remaining": 490}
 
 
 @pytest.mark.asyncio
