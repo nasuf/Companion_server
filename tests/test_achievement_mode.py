@@ -3,10 +3,12 @@
 Mode resolution order (app/services/achievements/mode.py):
 SystemConfig.achievement_mode override (admin console) -> .env default.
 
-Silent mode is the H5 chat-only launch mode: evaluation and unlock rows keep
-persisting in real time (accurate unlocked_at + conversation_id), while every
-user-facing surface stays suppressed. Switching back to "on" must surface the
-accumulated results without any backfill and without retroactive notifications.
+Silent mode is the H5 chat-only launch mode (2026-07-22 semantics): evaluation
+and unlock rows keep persisting in real time, and the achievement page +
+wallet points stay fully usable; only the unlock moments are muted — chat WS
+popups, conversation-timeline achievement rows, and APNs/system push.
+Switching back to "on" restores chat-timeline history without backfill and
+without retroactive notifications.
 """
 
 from __future__ import annotations
@@ -49,9 +51,14 @@ def test_mode_capability_matrix():
     assert mode_module.evaluation_enabled_for("on") is True
     assert mode_module.evaluation_enabled_for("silent") is True
     assert mode_module.evaluation_enabled_for("off") is False
-    assert mode_module.user_facing_enabled_for("on") is True
-    assert mode_module.user_facing_enabled_for("silent") is False
-    assert mode_module.user_facing_enabled_for("off") is False
+    # Achievement page + wallet points stay available while silent.
+    assert mode_module.display_enabled_for("on") is True
+    assert mode_module.display_enabled_for("silent") is True
+    assert mode_module.display_enabled_for("off") is False
+    # Chat popups / timeline rows / system push only fire when fully on.
+    assert mode_module.alerts_enabled_for("on") is True
+    assert mode_module.alerts_enabled_for("silent") is False
+    assert mode_module.alerts_enabled_for("off") is False
 
 
 def test_default_env_mode_is_on():
@@ -67,7 +74,8 @@ async def test_db_override_wins_over_env_default(monkeypatch):
     with patch.object(mode_module, "db", _db_with_override("silent")):
         assert await mode_module.get_achievement_mode() == "silent"
         assert await mode_module.achievement_evaluation_enabled() is True
-        assert await mode_module.achievement_user_facing_enabled() is False
+        assert await mode_module.achievement_display_enabled() is True
+        assert await mode_module.achievement_alerts_enabled() is False
 
 
 @pytest.mark.asyncio
@@ -171,7 +179,7 @@ async def test_silent_mode_persists_unlock_without_notification_side_effects():
             repository, "achievement_evaluation_enabled", AsyncMock(return_value=True)
         ),
         patch.object(
-            repository, "achievement_user_facing_enabled", AsyncMock(return_value=False)
+            repository, "achievement_alerts_enabled", AsyncMock(return_value=False)
         ),
         patch.object(repository, "_is_unlock_cached", AsyncMock(return_value=False)),
         patch.object(repository, "_cache_unlocked_achievements", AsyncMock()),
@@ -215,7 +223,7 @@ async def test_on_mode_unlock_still_sends_ws_notification():
             repository, "achievement_evaluation_enabled", AsyncMock(return_value=True)
         ),
         patch.object(
-            repository, "achievement_user_facing_enabled", AsyncMock(return_value=True)
+            repository, "achievement_alerts_enabled", AsyncMock(return_value=True)
         ),
         patch.object(repository, "_is_unlock_cached", AsyncMock(return_value=False)),
         patch.object(repository, "_cache_unlocked_achievements", AsyncMock()),
@@ -324,7 +332,7 @@ async def test_off_mode_engine_gate_resolves_from_db_override(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_silent_mode_wallet_sync_credits_nothing():
+async def test_off_mode_wallet_sync_credits_nothing():
     ensure = AsyncMock(
         return_value={
             "ticket_balance": 0,
@@ -336,7 +344,7 @@ async def test_silent_mode_wallet_sync_credits_nothing():
     with (
         patch.object(
             wallet_service,
-            "achievement_user_facing_enabled",
+            "achievement_display_enabled",
             AsyncMock(return_value=False),
         ),
         patch.object(wallet_service, "ensure_wallet", ensure),
@@ -350,8 +358,8 @@ async def test_silent_mode_wallet_sync_credits_nothing():
 
 
 @pytest.mark.asyncio
-async def test_switching_back_to_on_credits_full_silent_window_delta():
-    """First sync after silent -> on credits the whole accumulated score."""
+async def test_silent_mode_wallet_sync_still_credits_points():
+    """Silent keeps the achievement page usable, so its points sync too."""
 
     class _Tx:
         def __init__(self):
@@ -393,7 +401,7 @@ async def test_switching_back_to_on_credits_full_silent_window_delta():
     with (
         patch.object(
             wallet_service,
-            "achievement_user_facing_enabled",
+            "achievement_display_enabled",
             AsyncMock(return_value=True),
         ),
         patch.object(wallet_service, "db", fake_db),
@@ -422,7 +430,7 @@ async def test_switching_back_to_on_credits_full_silent_window_delta():
 
 
 @pytest.mark.asyncio
-async def test_silent_mode_achievements_api_returns_hidden_payload():
+async def test_off_mode_achievements_api_returns_hidden_payload():
     fake_db = MagicMock()
     fake_db.aiagent.find_unique = AsyncMock(
         return_value=SimpleNamespace(userId="u1")
@@ -431,7 +439,7 @@ async def test_silent_mode_achievements_api_returns_hidden_payload():
     with (
         patch.object(
             achievements_api,
-            "achievement_user_facing_enabled",
+            "achievement_display_enabled",
             AsyncMock(return_value=False),
         ),
         patch.object(achievements_api, "db", fake_db),
@@ -455,6 +463,34 @@ async def test_silent_mode_achievements_api_returns_hidden_payload():
 
 
 @pytest.mark.asyncio
+async def test_silent_mode_achievements_api_returns_real_listing(monkeypatch):
+    """成就页在静默模式下保持完整显示 (2026-07-22 产品口径)."""
+    monkeypatch.setattr(settings, "achievement_mode", "on")
+    fake_db = MagicMock()
+    fake_db.aiagent.find_unique = AsyncMock(
+        return_value=SimpleNamespace(userId="u1")
+    )
+    payload = {"total": 97, "unlocked": 3, "score": 60, "items": []}
+
+    with (
+        patch.object(mode_module, "db", _db_with_override("silent")),
+        patch.object(achievements_api, "db", fake_db),
+        patch.object(
+            achievements_api,
+            "list_achievements",
+            AsyncMock(return_value=payload),
+        ) as listing,
+    ):
+        result = await achievements_api.get_achievements(
+            agent_id="a1",
+            payload={"sub": "u1"},
+        )
+
+    listing.assert_awaited_once_with(user_id="u1", agent_id="a1")
+    assert result == payload
+
+
+@pytest.mark.asyncio
 async def test_on_mode_achievements_api_returns_real_listing():
     fake_db = MagicMock()
     fake_db.aiagent.find_unique = AsyncMock(
@@ -465,7 +501,7 @@ async def test_on_mode_achievements_api_returns_real_listing():
     with (
         patch.object(
             achievements_api,
-            "achievement_user_facing_enabled",
+            "achievement_display_enabled",
             AsyncMock(return_value=True),
         ),
         patch.object(achievements_api, "db", fake_db),
@@ -492,7 +528,7 @@ async def test_silent_mode_timeline_skips_achievement_synthesis():
     with (
         patch.object(
             conversations,
-            "achievement_user_facing_enabled",
+            "achievement_alerts_enabled",
             AsyncMock(return_value=False),
         ),
         patch.object(conversations, "db", fake_db),
@@ -525,7 +561,7 @@ async def test_on_mode_timeline_still_synthesizes_achievements():
     with (
         patch.object(
             conversations,
-            "achievement_user_facing_enabled",
+            "achievement_alerts_enabled",
             AsyncMock(return_value=True),
         ),
         patch.object(conversations, "db", fake_db),

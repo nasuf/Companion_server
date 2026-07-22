@@ -23,13 +23,15 @@
 | 模式 | 规则评估/解锁写库 | 日终任务 | WS/APNs 通知 | GET /achievements | 时间线成就行 | 钱包积分同步 |
 |------|-------------------|----------|--------------|-------------------|--------------|--------------|
 | `on` | 运行 | 运行 | 发送 | 完整数据 | 合成 | 同步 |
-| `silent` | 运行（H5 静默计算） | 运行 | 抑制 | 隐藏（items 为空） | 跳过 | 跳过 |
+| `silent` | 运行（H5 静默计算） | 运行 | 抑制 | 完整数据 | 跳过 | 同步 |
 | `off` | 停止 | 跳过且 checkpoint 冻结 | 抑制 | 隐藏 | 跳过 | 跳过 |
 
-- `silent` 是 H5 纯聊天上线的推荐模式：解锁行实时落库，`unlocked_at` 与
-  `conversation_id` 即为真实达成时刻/会话，切回 `on` 后 App 端成就页、
-  聊天时间线历史位置、成就积分（钱包 delta 机制一次性补发）全部自动呈现，
-  无需任何回填任务。
+- `silent` 是 H5 纯聊天上线的推荐模式（2026-07-22 口径调整）：解锁行实时落库，
+  `unlocked_at` 与 `conversation_id` 即为真实达成时刻/会话；成就页与钱包积分
+  照常可见可用，仅静默「达成时刻」——聊天 WS 弹窗、聊天时间线成就行、APNs
+  系统推送。切回 `on` 后聊天时间线历史位置自动出现，无需任何回填任务。
+- 闸门分两类（`mode.py`）：`display`（成就页 API + 钱包积分，on/silent 开）
+  与 `alerts`（聊天弹窗 + 时间线成就行 + 系统推送，仅 on 开）。
 - 切回 `on` 不会补发历史通知：通知只在解锁当下发送，静默期解锁的
   `notified_at` 保持 NULL 且无补扫逻辑。
 - `off` 为应急开关；恢复后日终 catch-up 依据冻结的 checkpoint 重放
@@ -44,7 +46,7 @@
   （`app/api/admin/achievement_settings.py`），web 端在
   `Companion_web/src/OfflineSettingsWorkspace.tsx` 的「系统设置」面板与
   线下活动/礼物开关同列，三态即选即存。
-- 行为测试：`tests/test_achievement_mode.py`（25 项）。
+- 行为测试：`tests/test_achievement_mode.py`（26 项）。
 
 ## 当前执行链路
 

@@ -11,8 +11,8 @@ from app.db import db
 from app.redis_client import get_redis
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID, ACHIEVEMENTS
 from app.services.achievements.mode import (
+    achievement_alerts_enabled,
     achievement_evaluation_enabled,
-    achievement_user_facing_enabled,
 )
 from app.services.achievements.rule_registry import (
     ACHIEVEMENT_RULES,
@@ -148,9 +148,10 @@ async def unlock_achievement(
         "unlocked": True,
         "unlocked_at": unlocked_at.isoformat() if hasattr(unlocked_at, "isoformat") else str(unlocked_at),
     }
-    # Silent mode ("H5 静默计算") persists the unlock above but suppresses every
-    # user-facing side effect; switching back to "on" must NOT retro-notify.
-    if notify and await achievement_user_facing_enabled():
+    # Silent mode ("H5 静默计算") persists the unlock above but mutes the
+    # unlock moments (chat WS popup + APNs push); switching back to "on"
+    # must NOT retro-notify.
+    if notify and await achievement_alerts_enabled():
         try:
             from app.services.notifications.service import notify_achievement_unlocked
             from app.services.runtime.tasks import fire_background

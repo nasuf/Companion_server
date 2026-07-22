@@ -1674,9 +1674,10 @@ model SystemConfig {
   offlineActivityEnabled Boolean  @default(false) @map("offline_activity_enabled")
   offlineGiftEnabled     Boolean  @default(false) @map("offline_gift_enabled")
   // 成就系统全局模式 (admin 后台动态切换): on / silent / off; NULL = 跟随
-  // .env ACHIEVEMENT_MODE. silent = H5 静默计算 (解锁照常落库但不通知/不展示/
-  // 不发积分, 切回 on 后全量呈现); off = 应急停算 (日终 checkpoint 冻结).
-  // 热路径读取经 ~10s 进程内 TTL 缓存 (app/services/achievements/mode.py).
+  // .env ACHIEVEMENT_MODE. silent = H5 静默计算 (解锁照常落库, 成就页/积分
+  // 正常可用, 仅静默聊天成就提示与系统推送); off = 应急停算 (页面隐藏,
+  // 日终 checkpoint 冻结). 热路径读取经 ~10s 进程内 TTL 缓存
+  // (app/services/achievements/mode.py).
   achievementMode        String?  @map("achievement_mode")
   updatedAt              DateTime @updatedAt @map("updated_at")
 

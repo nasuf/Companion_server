@@ -1,5 +1,12 @@
 """Runtime resolution for the global achievement mode (on / silent / off).
 
+Mode semantics (2026-07-22 产品口径):
+- on:     everything enabled.
+- silent: evaluation + unlock persistence + achievement page + wallet points
+          keep working; only the unlock *moments* are muted — chat WS popups,
+          conversation-timeline achievement rows, and APNs/system push.
+- off:    emergency stop — no evaluation, daily rollup frozen, page hidden.
+
 Source of truth is the ``SystemConfig`` singleton (id=1) column
 ``achievement_mode`` so admins can switch it from the web console (系统设置)
 with near-immediate effect. ``NULL`` means "inherit the .env ACHIEVEMENT_MODE
@@ -42,8 +49,18 @@ def evaluation_enabled_for(mode: str) -> bool:
     return _normalize(mode) != "off"
 
 
-def user_facing_enabled_for(mode: str) -> bool:
-    """Notifications, APIs, timeline rows, and wallet sync ("on" only)."""
+def display_enabled_for(mode: str) -> bool:
+    """Achievement page API + wallet point sync ("on"/"silent").
+
+    Silent mode only mutes the unlock *moments*; the achievement page and its
+    accumulated points stay fully visible and usable (2026-07-22 产品调整).
+    """
+    return _normalize(mode) != "off"
+
+
+def alerts_enabled_for(mode: str) -> bool:
+    """Unlock alerts ("on" only): chat WS popups, conversation-timeline
+    achievement rows, and APNs/system push notifications."""
     return _normalize(mode) == "on"
 
 
@@ -84,8 +101,12 @@ async def achievement_evaluation_enabled() -> bool:
     return evaluation_enabled_for(await get_achievement_mode())
 
 
-async def achievement_user_facing_enabled() -> bool:
-    return user_facing_enabled_for(await get_achievement_mode())
+async def achievement_display_enabled() -> bool:
+    return display_enabled_for(await get_achievement_mode())
+
+
+async def achievement_alerts_enabled() -> bool:
+    return alerts_enabled_for(await get_achievement_mode())
 
 
 async def get_achievement_settings_snapshot(*, use_cache: bool = False) -> dict:

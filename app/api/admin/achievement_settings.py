@@ -5,10 +5,11 @@ Endpoints (all admin-only):
   PUT /admin-api/achievement-settings  — 更新模式 (写 SystemConfig, ~10s 内全部 worker 生效)
 
 模式语义 (详见 app/services/achievements/mode.py 与 docs/achievement_rule_audit.md):
-  on     — 完整评估 + 全部用户可见面 (通知/API/时间线/钱包积分).
-  silent — H5 静默计算: 解锁照常实时落库 (unlocked_at/conversation_id 即真实
-           达成点), 但抑制全部用户可见面; 切回 on 后全量自动呈现, 无需回填.
-  off    — 应急停算: 评估与日终任务全停, 日终 checkpoint 冻结待恢复后补算.
+  on     — 完整评估 + 全部用户可见面 (聊天提示/推送/成就页/时间线/钱包积分).
+  silent — H5 静默计算: 解锁照常实时落库, 成就页与钱包积分正常可用;
+           仅静默「达成时刻」— 聊天 WS 弹窗、聊天时间线成就行、APNs 系统推送.
+           切回 on 后聊天时间线历史行自动出现, 无需回填.
+  off    — 应急停算: 评估与日终任务全停 (checkpoint 冻结), 成就页隐藏.
 """
 
 from __future__ import annotations

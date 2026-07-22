@@ -10,7 +10,7 @@ from app.db import db
 from app.models.conversation import ConversationCreate, ConversationResponse
 from app.models.message import MessageResponse
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID
-from app.services.achievements.mode import achievement_user_facing_enabled
+from app.services.achievements.mode import achievement_alerts_enabled
 from app.services.achievements.rule_registry import ACHIEVEMENT_RULES
 from app.services.chat.crisis_state import get_crisis_care_status
 from app.services.schedule_domain.schedule import (
@@ -241,7 +241,9 @@ async def list_messages(
     # 的消息列表保持原 payload.
     if include_usage and include_metadata and user.get("role") == "admin":
         await _attach_llm_usage(items)
-    if include_achievements and await achievement_user_facing_enabled():
+    # 聊天时间线成就行属于「聊天界面成就提示」: silent 模式下与 WS 弹窗/推送
+    # 一并静默, 切回 on 后历史行自动出现 (unlocked_at/conversation_id 已落库).
+    if include_achievements and await achievement_alerts_enabled():
         items.extend(
             await _achievement_timeline_items(
                 conversation_id=conversation_id,
