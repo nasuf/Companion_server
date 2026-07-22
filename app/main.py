@@ -153,6 +153,7 @@ from app.api.public.time_capsules import router as time_capsules_router
 from app.api.public.last_wills import router as last_wills_router
 from app.api.public.games import router as games_router
 from app.api.public.native_games import router as native_games_router
+from app.api.public.game_points import router as game_points_router
 from app.api.public.music import router as music_router
 from app.api.public.achievements import router as achievements_router
 from app.api.public.wallet import router as wallet_router
@@ -176,6 +177,7 @@ from app.api.admin.memory_repairs import router as admin_memory_repairs_router
 from app.api.admin.runtime_jobs import router as admin_runtime_jobs_router
 from app.api.admin.meal import router as admin_meal_router
 from app.api.admin.game_configs import router as admin_game_configs_router
+from app.api.admin.game_points import router as admin_game_points_router
 from app.api.admin.offline_settings import router as admin_offline_settings_router
 from app.api.admin.achievement_settings import router as admin_achievement_settings_router
 
@@ -198,6 +200,7 @@ app.include_router(time_capsules_router)
 app.include_router(last_wills_router)
 app.include_router(games_router)
 app.include_router(native_games_router)
+app.include_router(game_points_router)
 app.include_router(music_router)
 app.include_router(achievements_router)
 app.include_router(wallet_router)
@@ -222,5 +225,6 @@ app.include_router(admin_memory_repairs_router)
 app.include_router(admin_runtime_jobs_router)
 app.include_router(admin_meal_router)
 app.include_router(admin_game_configs_router)
+app.include_router(admin_game_points_router)
 app.include_router(admin_offline_settings_router)
 app.include_router(admin_achievement_settings_router)

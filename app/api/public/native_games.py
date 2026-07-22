@@ -19,6 +19,9 @@ def _http_error(exc: ValueError) -> HTTPException:
     code = str(exc)
     if code in {"agent_not_found", "context_not_found", "session_not_found"}:
         return HTTPException(status_code=404, detail=code)
+    if code == "daily_points_exhausted":
+        # No game points left today; the client shows a "come back tomorrow" hint.
+        return HTTPException(status_code=403, detail=code)
     if code in {
         "unsupported_game",
         "unsupported_event",

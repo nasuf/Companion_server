@@ -115,6 +115,13 @@ async def test_create_session_writes_session_and_first_event_atomically(monkeypa
     balance_snapshot = balance._default_config("gomoku").snapshot(58)
     resolve_balance = AsyncMock(return_value=balance_snapshot)
     monkeypatch.setattr(native.balance, "resolve_for_session", resolve_balance)
+    # The daily game-point grant / play gate runs before the insert; stub it so
+    # this test stays focused on the atomic session+event write.
+    monkeypatch.setattr(
+        native.game_points,
+        "ensure_daily_grant",
+        AsyncMock(return_value=20),
+    )
 
     created = await native.create_session(
         user_id="user-1",

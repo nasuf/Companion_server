@@ -17,6 +17,7 @@ from app.models.game import (
 )
 from app.services.games import sud
 from app.services.games import balance
+from app.services import game_points
 from app.services.memory.storage import repo as memory_repo
 from app.services.offline.memory_hooks import remember_shared_game_experience
 from app.services.runtime.tasks import fire_background
@@ -143,6 +144,11 @@ async def create_session(
     definition = _GAME_DEFINITIONS.get(game_key)
     if definition is None:
         raise ValueError("unsupported_game")
+    # Apply the daily game-point grant, then gate play: a user with 0 game
+    # points cannot start a new game until the next day's grant.
+    game_balance = await game_points.ensure_daily_grant(user_id)
+    if game_balance <= 0:
+        raise ValueError("daily_points_exhausted")
     difficulty = "normal"
     agent, user_player, owned_context = await asyncio.gather(
         db.aiagent.find_unique(where={"id": agent_id}),
@@ -557,6 +563,14 @@ async def handle_event(
                 # The result, terminal event and adaptive skill update share one
                 # transaction, so event retries cannot double-count a match.
                 await balance.record_completed_session(updated, database=tx)
+            if inserted and event_type in {"game_finished", "game_aborted"}:
+                # Settle game points in the same transaction as the terminal
+                # event so a retry (which sets inserted=False) never double
+                # awards or double deducts — exactly-once, mirroring the skill
+                # update above. (A settle failure rolls back the whole finish,
+                # which is the intended trade-off for correctness over a lost
+                # or duplicated balance change.)
+                await game_points.settle_session(updated, database=tx)
         if not inserted:
             return updated, stored_reply, event_id, True
         if event_type in {"game_started", "game_finished", "game_aborted"}:
