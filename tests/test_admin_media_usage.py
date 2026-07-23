@@ -41,7 +41,7 @@ async def test_media_usage_aggregates_totals_and_users(monkeypatch):
     fake_db = _fake_db([totals_rows, user_rows, user_total_rows])
     monkeypatch.setattr(stats_mod, "db", fake_db)
 
-    resp = await stats_mod.media_usage(days=7, limit=200)
+    resp = await stats_mod.media_usage(days=7, limit=200, offset=0)
 
     assert resp["voice"] == {"count": 4, "total_seconds": 62, "total_bytes": 145_408}
     assert resp["image"] == {"count": 6, "total_bytes": 25_165_824}
@@ -72,7 +72,7 @@ async def test_media_usage_days_zero_means_all_history(monkeypatch):
         stats_mod, "db", SimpleNamespace(query_raw=fake_query_raw),
     )
 
-    resp = await stats_mod.media_usage(days=0, limit=50)
+    resp = await stats_mod.media_usage(days=0, limit=50, offset=0)
 
     # days=0 → no created_at clause and no bind params anywhere.
     assert all("created_at >=" not in sql for sql in captured_sql)
@@ -99,7 +99,7 @@ async def test_media_usage_window_filter_binds_start_param(monkeypatch):
         stats_mod, "db", SimpleNamespace(query_raw=fake_query_raw),
     )
 
-    await stats_mod.media_usage(days=3, limit=10)
+    await stats_mod.media_usage(days=3, limit=10, offset=0)
 
     # All three queries share the same single timestamp bind param.
     assert len(captured_params) == 3
@@ -107,7 +107,7 @@ async def test_media_usage_window_filter_binds_start_param(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_media_usage_limit_is_inlined_as_integer(monkeypatch):
+async def test_media_usage_limit_and_offset_are_inlined_as_integers(monkeypatch):
     captured_sql: list[str] = []
 
     async def fake_query_raw(sql, *params):
@@ -120,7 +120,27 @@ async def test_media_usage_limit_is_inlined_as_integer(monkeypatch):
         stats_mod, "db", SimpleNamespace(query_raw=fake_query_raw),
     )
 
-    await stats_mod.media_usage(days=0, limit=25)
+    await stats_mod.media_usage(days=0, limit=25, offset=50)
 
     user_sql = next(sql for sql in captured_sql if "GROUP BY a.user_id" in sql)
-    assert "LIMIT 25" in user_sql
+    assert "LIMIT 25 OFFSET 50" in user_sql
+
+
+@pytest.mark.asyncio
+async def test_media_usage_first_page_offset_zero(monkeypatch):
+    captured_sql: list[str] = []
+
+    async def fake_query_raw(sql, *params):
+        captured_sql.append(sql)
+        if "user_total" in sql:
+            return [{"user_total": 0}]
+        return []
+
+    monkeypatch.setattr(
+        stats_mod, "db", SimpleNamespace(query_raw=fake_query_raw),
+    )
+
+    await stats_mod.media_usage(days=0, limit=10, offset=0)
+
+    user_sql = next(sql for sql in captured_sql if "GROUP BY a.user_id" in sql)
+    assert "LIMIT 10 OFFSET 0" in user_sql

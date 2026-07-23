@@ -402,13 +402,14 @@ async def token_usage(
 async def media_usage(
     days: int = Query(7, ge=0, le=365),
     limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     _: dict = Depends(require_admin_jwt),
 ):
     """语音/图片消息用量: 全局汇总 + 按用户明细 (仅列出有过使用的用户).
 
     数据源 chat_message_attachments: kind='audio' (语音, duration_seconds 有时长)
-    / kind='image' (图片). days=0 = 全部历史. limit 上限用户明细行数,
-    按 (语音条数+图片张数) 降序截断; user_total 给出真实用户数供 UI 提示.
+    / kind='image' (图片). days=0 = 全部历史. limit/offset 服务端分页用户明细
+    (按使用条数降序, user_id 兜底排序保证翻页稳定); user_total 是真实用户总数.
     """
     start = _window_start(days)
     end = datetime.now(timezone.utc)
@@ -449,7 +450,7 @@ async def media_usage(
             WHERE {where_sql}
             GROUP BY a.user_id, u.username
             ORDER BY COUNT(*) DESC, a.user_id
-            LIMIT {int(limit)}
+            LIMIT {int(limit)} OFFSET {int(offset)}
             """,
             *params,
         ),
