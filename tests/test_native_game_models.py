@@ -8,10 +8,10 @@ from pydantic import ValidationError
 from app.models.game import (
     NativeCreateSessionRequest,
     NativeSessionResponse,
-    SudPlayerInfo,
-    SudSessionResponse,
+    GamePlayerInfo,
+    GameSessionRow,
 )
-from app.services.games import native, sud
+from app.services.games import native, session_support
 from app.services.runtime.ws_manager import manager
 
 
@@ -36,8 +36,8 @@ def test_native_session_contract_contains_no_sud_credentials():
         room_id="gomoku-room",
         play_mode="versus",
         ai_level=2,
-        user_player=SudPlayerInfo(uid="user-1", nick_name="玩家"),
-        ai_player=SudPlayerInfo(uid="agent:agent-1", nick_name="小芜", is_ai=1),
+        user_player=GamePlayerInfo(uid="user-1", nick_name="玩家"),
+        ai_player=GamePlayerInfo(uid="agent:agent-1", nick_name="小芜", is_ai=1),
     ).model_dump()
 
     assert session["difficulty"] == "normal"
@@ -48,35 +48,27 @@ def test_native_session_contract_contains_no_sud_credentials():
     assert "code" not in session
 
 
-def test_native_session_conversion_normalizes_legacy_sud_fields():
-    legacy = SudSessionResponse(
+def test_native_session_conversion_normalizes_session_row():
+    row = GameSessionRow(
         id="legacy-native",
         provider="native",
         game_key="go",
         status="playing",
-        sdk_enabled=False,
         user_id="user-1",
         agent_id="agent-1",
-        app_id="",
-        app_key="",
-        bundle_id="",
-        is_test_env=False,
-        mg_id="",
         room_id="go-legacy",
-        code="",
-        code_expires_at="",
         play_mode="versus",
         difficulty="newbie",
         ai_level=1,
-        user_player=SudPlayerInfo(uid="user-1", nick_name="You"),
-        ai_player=SudPlayerInfo(
+        user_player=GamePlayerInfo(uid="user-1", nick_name="You"),
+        ai_player=GamePlayerInfo(
             uid="agent-1",
             nick_name="Companion",
             is_ai=1,
         ),
     )
 
-    converted = native._as_native_session(legacy)
+    converted = native._as_native_session(row)
 
     assert converted.provider == "native"
     assert converted.game_key == "go"
@@ -97,8 +89,8 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
         room_id="go-room",
         play_mode="versus",
         ai_level=1,
-        user_player=SudPlayerInfo(uid="user-1", nick_name="You"),
-        ai_player=SudPlayerInfo(
+        user_player=GamePlayerInfo(uid="user-1", nick_name="You"),
+        ai_player=GamePlayerInfo(
             uid="agent-1",
             nick_name="Companion",
             is_ai=1,
@@ -107,10 +99,10 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
     updated = previous.model_copy(update={"status": "playing"})
     write_message = AsyncMock(return_value=("message-1", True))
     send_event = AsyncMock()
-    monkeypatch.setattr(sud, "_write_game_message", write_message)
+    monkeypatch.setattr(session_support, "_write_game_message", write_message)
     monkeypatch.setattr(manager, "send_event", send_event)
 
-    await sud._persist_game_status_to_chat_if_needed(
+    await session_support._persist_game_status_to_chat_if_needed(
         previous,
         updated,
         "game_started",

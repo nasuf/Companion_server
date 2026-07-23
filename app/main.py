@@ -151,7 +151,6 @@ from app.api.public.stickers import router as stickers_router
 from app.api.public.store import router as store_router
 from app.api.public.time_capsules import router as time_capsules_router
 from app.api.public.last_wills import router as last_wills_router
-from app.api.public.games import router as games_router
 from app.api.public.native_games import router as native_games_router
 from app.api.public.game_points import router as game_points_router
 from app.api.public.music import router as music_router
@@ -198,7 +197,6 @@ app.include_router(boundary_router)
 app.include_router(stickers_router)
 app.include_router(time_capsules_router)
 app.include_router(last_wills_router)
-app.include_router(games_router)
 app.include_router(native_games_router)
 app.include_router(game_points_router)
 app.include_router(music_router)

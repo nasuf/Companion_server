@@ -2,34 +2,26 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.game import SudPlayerInfo, SudSessionResponse
+from app.models.game import GamePlayerInfo, GameSessionRow
 from app.services.games import native
 
 
-def _session(**updates) -> SudSessionResponse:
-    base = SudSessionResponse(
+def _session(**updates) -> GameSessionRow:
+    base = GameSessionRow(
         id="native-1",
         provider="native",
         game_key="gomoku",
         status="playing",
-        sdk_enabled=False,
         user_id="user-1",
         agent_id="agent-1",
         workspace_id="workspace-1",
         conversation_id="conversation-1",
-        app_id="",
-        app_key="",
-        bundle_id="",
-        is_test_env=False,
-        mg_id="",
         room_id="gomoku-native",
-        code="",
-        code_expires_at="",
         play_mode="versus",
         difficulty="normal",
         ai_level=2,
-        user_player=SudPlayerInfo(uid="user-1", nick_name="玩家"),
-        ai_player=SudPlayerInfo(
+        user_player=GamePlayerInfo(uid="user-1", nick_name="玩家"),
+        ai_player=GamePlayerInfo(
             uid="agent:agent-1",
             nick_name="小芜",
             is_ai=1,

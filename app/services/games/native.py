@@ -11,11 +11,11 @@ from weakref import WeakValueDictionary
 
 from app.db import db
 from app.models.game import (
+    GameSessionRow,
     NativeGameEventRecord,
     NativeSessionResponse,
-    SudSessionResponse,
 )
-from app.services.games import sud
+from app.services.games import session_support
 from app.services.games import balance
 from app.services import game_points
 from app.services.memory.storage import repo as memory_repo
@@ -156,8 +156,8 @@ async def create_session(
     difficulty = "normal"
     agent, user_player, owned_context = await asyncio.gather(
         db.aiagent.find_unique(where={"id": agent_id}),
-        sud.build_user_player(user_id),
-        sud._resolve_owned_context(
+        session_support.build_user_player(user_id),
+        session_support._resolve_owned_context(
             user_id=user_id,
             agent_id=agent_id,
             workspace_id=workspace_id,
@@ -174,7 +174,7 @@ async def create_session(
             agent_id=agent_id,
             game_key=game_key,
         ),
-        sud.build_ai_player(agent_id, difficulty, agent=agent),
+        session_support.build_ai_player(agent_id, difficulty, agent=agent),
     )
 
     session_id = str(uuid.uuid4())
@@ -252,7 +252,7 @@ async def create_session(
     )
     if not rows:
         raise RuntimeError("native game session insert returned no row")
-    return _as_native_session(sud._row_to_session(rows[0]))
+    return _as_native_session(session_support._row_to_session(rows[0]))
 
 
 async def list_sessions(
@@ -290,7 +290,7 @@ async def list_sessions(
             user_id,
             limit,
         )
-    return [_as_native_session(sud._row_to_session(row)) for row in rows]
+    return [_as_native_session(session_support._row_to_session(row)) for row in rows]
 
 
 async def get_session(
@@ -325,7 +325,7 @@ async def get_session(
         )
     if not rows:
         raise ValueError("session_not_found")
-    return _as_native_session(sud._row_to_session(rows[0]))
+    return _as_native_session(session_support._row_to_session(rows[0]))
 
 
 async def delete_session(session_id: str, *, user_id: str) -> None:
@@ -381,7 +381,7 @@ async def list_events(
             source=str(row.get("source") or "client"),
             payload=_loads(row.get("payload"), {}),
             companion_reply=row.get("companion_reply"),
-            created_at=sud._iso(row.get("created_at")) or "",
+            created_at=session_support._iso(row.get("created_at")) or "",
         )
         for row in rows
     ]
@@ -553,7 +553,7 @@ async def handle_event(
                 companion_reply=reply,
                 database=tx,
             )
-            event_id, inserted, stored_reply = await sud._append_event_idempotent(
+            event_id, inserted, stored_reply = await session_support._append_event_idempotent(
                 session_id=session.id,
                 event_type=event_type,
                 state=state,
@@ -652,7 +652,7 @@ async def _persist_chat_side_effects(
 
     for attempt in range(3):
         try:
-            await sud._persist_game_status_to_chat_if_needed(
+            await session_support._persist_game_status_to_chat_if_needed(
                 previous,
                 updated,
                 event_type,
@@ -673,7 +673,7 @@ async def _persist_chat_side_effects(
         return
     for attempt in range(3):
         try:
-            await sud._persist_reply_to_chat_if_needed(
+            await session_support._persist_reply_to_chat_if_needed(
                 updated,
                 event_type,
                 state,
@@ -691,7 +691,7 @@ async def _persist_chat_side_effects(
                 await asyncio.sleep(0.25 * (attempt + 1))
 
 
-def _as_native_session(session: SudSessionResponse) -> NativeSessionResponse:
+def _as_native_session(session: GameSessionRow) -> NativeSessionResponse:
     if session.game_key not in _GAME_DEFINITIONS:
         raise ValueError("session_not_found")
     result = _loads(session.result, {})
@@ -865,7 +865,7 @@ async def _claim_memory_sync(session_id: str) -> NativeSessionResponse | None:
     )
     if not rows:
         return None
-    return _as_native_session(sud._row_to_session(rows[0]))
+    return _as_native_session(session_support._row_to_session(rows[0]))
 
 
 async def retry_pending_memory_sync(*, limit: int = 10) -> int:
@@ -973,7 +973,7 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
     )
     attempted = 0
     for row in rows:
-        session = _as_native_session(sud._row_to_session(row))
+        session = _as_native_session(session_support._row_to_session(row))
         payload = {
             "schema_version": 1,
             "game_key": session.game_key,
@@ -1153,7 +1153,7 @@ async def _update_session(
     )
     if not rows:
         raise ValueError("session_not_found")
-    return _as_native_session(sud._row_to_session(rows[0]))
+    return _as_native_session(session_support._row_to_session(rows[0]))
 
 
 def _definition(game_key: str | None) -> NativeGameDefinition:
@@ -1965,7 +1965,7 @@ def _line_direction(line: list[dict[str, int]]) -> str | None:
     return "diagonal"
 
 
-def _duration(payload: dict[str, Any], session: SudSessionResponse) -> int:
+def _duration(payload: dict[str, Any], session: GameSessionRow) -> int:
     raw = _as_int(payload.get("duration_seconds", payload.get("duration")))
     if raw is not None:
         return max(0, min(raw, 24 * 60 * 60))
@@ -2013,7 +2013,7 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def _finish_reply(session: SudSessionResponse, result: dict[str, Any]) -> str:
+def _finish_reply(session: GameSessionRow, result: dict[str, Any]) -> str:
     gomoku = _loads(result.get("gomoku"), {})
     moments = list(_loads(gomoku.get("key_moments"), []))
     outcome = result.get("user_outcome")
@@ -2032,7 +2032,7 @@ def _finish_reply(session: SudSessionResponse, result: dict[str, Any]) -> str:
     return "居然下成了平局。棋盘都快被我们填满了，谁也没肯先松手。"
 
 
-def _abort_reply(session: SudSessionResponse, result: dict[str, Any]) -> str:
+def _abort_reply(session: GameSessionRow, result: dict[str, Any]) -> str:
     moves = int(_gomoku(result).get("move_count") or 0)
     if moves < 4:
         return "这盘还没真正展开，我们先放在这里。想玩的时候再重新摆一盘。"
@@ -2040,7 +2040,7 @@ def _abort_reply(session: SudSessionResponse, result: dict[str, Any]) -> str:
 
 
 def _generic_finish_reply(
-    session: SudSessionResponse,
+    session: GameSessionRow,
     definition: NativeGameDefinition,
     result: dict[str, Any],
 ) -> str:
@@ -2107,7 +2107,7 @@ def _generic_abort_reply(
 
 
 async def _remember_shared_experience(
-    session: SudSessionResponse,
+    session: GameSessionRow,
     result: dict[str, Any],
     *,
     sides: tuple[str, ...] = ("user", "ai"),

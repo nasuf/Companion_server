@@ -5,35 +5,27 @@ from unittest.mock import AsyncMock, call
 
 import pytest
 
-from app.models.game import SudPlayerInfo, SudSessionResponse
+from app.models.game import GamePlayerInfo, GameSessionRow
 from app.services.games import balance, native
 
 
-def _session(game_key: str) -> SudSessionResponse:
+def _session(game_key: str) -> GameSessionRow:
     definition = native._definition(game_key)
-    return SudSessionResponse(
+    return GameSessionRow(
         id=f"native-{game_key}",
         provider="native",
         game_key=game_key,
         status="playing",
-        sdk_enabled=False,
         user_id="user-1",
         agent_id="agent-1",
         workspace_id="workspace-1",
         conversation_id="conversation-1",
-        app_id="",
-        app_key="",
-        bundle_id="",
-        is_test_env=False,
-        mg_id="",
         room_id=f"{game_key}-room",
-        code="",
-        code_expires_at="",
         play_mode=definition.play_mode,
         difficulty="normal",
         ai_level=2,
-        user_player=SudPlayerInfo(uid="user-1", nick_name="玩家"),
-        ai_player=SudPlayerInfo(
+        user_player=GamePlayerInfo(uid="user-1", nick_name="玩家"),
+        ai_player=GamePlayerInfo(
             uid="agent:agent-1",
             nick_name="小芜",
             is_ai=1,
@@ -105,13 +97,13 @@ async def test_create_session_writes_session_and_first_event_atomically(monkeypa
     )
     monkeypatch.setattr(native, "db", database)
     monkeypatch.setattr(
-        native.sud,
+        native.session_support,
         "build_user_player",
         AsyncMock(return_value=expected.user_player),
     )
     context = AsyncMock(return_value=("workspace-1", "conversation-1"))
-    monkeypatch.setattr(native.sud, "_resolve_owned_context", context)
-    monkeypatch.setattr(native.sud, "_row_to_session", lambda _row: expected)
+    monkeypatch.setattr(native.session_support, "_resolve_owned_context", context)
+    monkeypatch.setattr(native.session_support, "_row_to_session", lambda _row: expected)
     balance_snapshot = balance._default_config("gomoku").snapshot(58)
     resolve_balance = AsyncMock(return_value=balance_snapshot)
     monkeypatch.setattr(native.balance, "resolve_for_session", resolve_balance)
@@ -910,12 +902,12 @@ async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
         calls.append(("reply", event_type, reply))
 
     monkeypatch.setattr(
-        native.sud,
+        native.session_support,
         "_persist_game_status_to_chat_if_needed",
         persist_status,
     )
     monkeypatch.setattr(
-        native.sud,
+        native.session_support,
         "_persist_reply_to_chat_if_needed",
         persist_reply,
     )
@@ -965,7 +957,7 @@ async def test_chat_projection_retry_rebuilds_started_and_terminal_messages(
     )
     persist = AsyncMock()
     monkeypatch.setattr(native, "db", database)
-    monkeypatch.setattr(native.sud, "_row_to_session", lambda _row: stored)
+    monkeypatch.setattr(native.session_support, "_row_to_session", lambda _row: stored)
     monkeypatch.setattr(native, "_persist_chat_side_effects", persist)
 
     attempted = await native.retry_missing_chat_side_effects(limit=5)

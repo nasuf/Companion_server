@@ -218,17 +218,6 @@ class Settings(BaseSettings):
     # (new users stay agent-less until they build one via the normal flow).
     default_template_agent_id: str = ""
 
-    # SUD / SudGIP mini-game integration. The Flutter client uses app_id/app_key
-    # to initialize SudGIP, while app_secret stays server-side for short-lived
-    # code / ss_token signing and callback validation.
-    sud_app_id: str = ""
-    sud_app_key: str = ""
-    sud_app_secret: str = ""
-    sud_default_mg_id: str = ""
-    sud_bundle_id: str = ""
-    sud_is_test_env: bool = True
-    sud_callback_public_base_url: str = ""
-
     # iOS remote notifications via APNs. Disabled unless APNS_ENABLED=true and
     # token-auth credentials are configured.
     apns_enabled: bool = False
