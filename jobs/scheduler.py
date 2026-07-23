@@ -335,7 +335,7 @@ def setup_scheduler():
     scheduler.add_job(
         _run_game_memory_sync_retry,
         "interval",
-        minutes=2,
+        minutes=1,
         id="game_memory_sync_retry",
         replace_existing=True,
         max_instances=1,

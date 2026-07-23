@@ -57,6 +57,10 @@ _GAME_DEFINITIONS = {
     ),
 }
 _SUPPORTED_GAME_KEYS_SQL = ", ".join(f"'{key}'" for key in _GAME_DEFINITIONS)
+# Real-time / casual games (no long "thinking" turns) — used by the stale-session
+# sweep to settle abandoned games faster than turn-based board games.
+_REALTIME_GAME_KEYS = ("match3", "minesweeper", "number_merge", "tetris_duel")
+_REALTIME_GAME_KEYS_SQL = ", ".join(f"'{key}'" for key in _REALTIME_GAME_KEYS)
 _TERMINAL_OUTCOMES = {
     "go": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
     "reversi": {"userWon": "win", "agentWon": "lose", "draw": "draw"},
@@ -1001,9 +1005,17 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
 
 
 async def abort_stale_sessions(
-    *, stale_after_minutes: int = 10, limit: int = 20
+    *,
+    realtime_stale_minutes: int = 2,
+    turn_based_stale_minutes: int = 5,
+    limit: int = 20,
 ) -> int:
-    """Close inactive games after the client has had time to flush an exit."""
+    """Close inactive games so game-point settlement is not delayed when the
+    client's exit event never reaches the server (app killed / backgrounded on
+    quit). Real-time / casual games have no long "thinking" turns, so an idle
+    board almost always means the player left and is settled quickly; turn-based
+    board games keep a longer grace so a slow human turn is never force-settled
+    mid-think."""
 
     rows = await db.query_raw(
         _with_supported_games(
@@ -1013,12 +1025,18 @@ async def abort_stale_sessions(
         WHERE provider = 'native'
           AND status IN ('created', 'playing')
           AND game_key IN ({supported_game_keys})
-          AND updated_at <= CURRENT_TIMESTAMP - ($1 * INTERVAL '1 minute')
+          AND updated_at <= CURRENT_TIMESTAMP - (
+                CASE
+                    WHEN game_key IN ({realtime_game_keys}) THEN $1
+                    ELSE $2
+                END * INTERVAL '1 minute'
+              )
         ORDER BY updated_at ASC
-        LIMIT $2
+        LIMIT $3
         """
-        ),
-        stale_after_minutes,
+        ).replace("{realtime_game_keys}", _REALTIME_GAME_KEYS_SQL),
+        realtime_stale_minutes,
+        turn_based_stale_minutes,
         limit,
     )
     closed = 0
