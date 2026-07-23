@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from app.api.jwt_auth import require_user
 from app.models.chat_media import ChatAttachmentResponse, ChatImageUpload
@@ -13,34 +13,41 @@ router = APIRouter(prefix="/chat/media", tags=["chat-media"])
 logger = logging.getLogger(__name__)
 
 
-@router.post("", response_model=ChatAttachmentResponse)
-async def upload_chat_image(
-    data: ChatImageUpload,
-    user: dict = Depends(require_user),
+async def _store_chat_image(
+    *,
+    user_id: str,
+    conversation_id: str,
+    blob: bytes,
+    mime: str,
+    name: str | None,
+    fallback_width: int | None = None,
+    fallback_height: int | None = None,
 ) -> ChatAttachmentResponse:
-    user_id = user["sub"]
-    if not await repo.conversation_belongs_to_user(data.conversation_id, user_id):
+    """Shared ingest for the base64 and multipart upload routes: normalizes the
+    image, stores original + thumbnail, and records server-measured metadata."""
+    if not await repo.conversation_belongs_to_user(conversation_id, user_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    mime = storage.normalize_image_mime(data.mime)
-    blob = storage.decode_image_base64(data.base64)
+    normalized_mime = storage.normalize_image_mime(mime)
     storage.validate_image_size(blob)
-    storage_key = storage.save_image_blob(
+    storage_key, processed = storage.save_image_with_thumbnail(
         user_id=user_id,
-        conversation_id=data.conversation_id,
+        conversation_id=conversation_id,
         blob=blob,
-        mime=mime,
+        mime=normalized_mime,
     )
     try:
         attachment = await repo.create_attachment(
             user_id=user_id,
-            conversation_id=data.conversation_id,
+            conversation_id=conversation_id,
             storage_key=storage_key,
             url=storage.media_url(storage_key),
-            mime=mime,
-            size=len(blob),
-            name=data.name,
-            width=data.width,
-            height=data.height,
+            mime=processed.mime,
+            size=len(processed.blob),
+            name=name,
+            # Server-measured dimensions win: H5 historically sent 0x0, which
+            # broke bubble aspect ratios on every client.
+            width=processed.width or fallback_width,
+            height=processed.height or fallback_height,
         )
     except Exception:
         storage.delete_media_file(storage_key)
@@ -49,15 +56,53 @@ async def upload_chat_image(
     return _response(attachment)
 
 
+@router.post("", response_model=ChatAttachmentResponse)
+async def upload_chat_image(
+    data: ChatImageUpload,
+    user: dict = Depends(require_user),
+) -> ChatAttachmentResponse:
+    return await _store_chat_image(
+        user_id=user["sub"],
+        conversation_id=data.conversation_id,
+        blob=storage.decode_image_base64(data.base64),
+        mime=data.mime,
+        name=data.name,
+        fallback_width=data.width or None,
+        fallback_height=data.height or None,
+    )
+
+
+@router.post("/upload", response_model=ChatAttachmentResponse)
+async def upload_chat_image_multipart(
+    file: UploadFile = File(...),
+    conversation_id: str = Form(...),
+    name: str | None = Form(None),
+    user: dict = Depends(require_user),
+) -> ChatAttachmentResponse:
+    """Multipart variant of the image upload: no base64 inflation (-25% wire
+    size), used by newer app builds. The base64 JSON route stays for H5 and
+    the mini-program."""
+    blob = await file.read()
+    return await _store_chat_image(
+        user_id=user["sub"],
+        conversation_id=conversation_id,
+        blob=blob,
+        mime=file.content_type or "image/jpeg",
+        name=name or file.filename,
+    )
+
+
 @router.get("/{storage_key}")
 async def get_chat_media(
     storage_key: str,
+    v: str | None = Query(default=None, description="thumb = bubble thumbnail"),
     user: dict = Depends(require_user),
 ):
     return storage.serve_media(
         storage_key,
         user_id=user["sub"],
         is_admin=user.get("role") == "admin",
+        variant=v,
     )
 
 

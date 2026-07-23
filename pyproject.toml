@@ -30,6 +30,8 @@ dependencies = [
     # 结构化日志 → Axiom (https://app.axiom.co), env 未配置时 setup_axiom() 自动跳过
     "axiom-py>=0.9.0",
     "cryptography>=42.0.0",
+    # 聊天图片缩略图生成 + 上传原图归一化 (EXIF 转正 / 超大图重编码)
+    "pillow>=11.0.0",
 ]
 
 [project.optional-dependencies]
