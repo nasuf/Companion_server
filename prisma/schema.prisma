@@ -310,7 +310,7 @@ model ChatLinkCard {
 
 model GameSession {
   id               String         @id @default(uuid())
-  provider         String         @default("sud")
+  provider         String         @default("native")
   gameKey          String?        @map("game_key")
   status           String         @default("created")
   userId           String         @map("user_id")
@@ -321,14 +321,10 @@ model GameSession {
   workspace        ChatWorkspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   conversationId   String?        @map("conversation_id")
   conversation     Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  mgId             String         @map("mg_id")
   roomId           String         @map("room_id")
   playMode         String         @default("versus") @map("play_mode")
   difficulty       String         @default("newbie")
   aiLevel          Int            @default(1) @map("ai_level")
-  sdkEnabled       Boolean        @default(false) @map("sdk_enabled")
-  sudCode          String?        @map("sud_code")
-  sudCodeExpiresAt DateTime?      @map("sud_code_expires_at")
   userPlayer       Json           @map("user_player")
   aiPlayer         Json           @map("ai_player")
   companionReply   String?        @map("companion_reply")

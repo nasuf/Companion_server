@@ -208,15 +208,13 @@ async def create_session(
         WITH created_session AS (
             INSERT INTO game_sessions (
                 id, provider, game_key, status, user_id, agent_id, workspace_id,
-                conversation_id, mg_id, room_id, play_mode, difficulty, ai_level,
-                sdk_enabled, sud_code, sud_code_expires_at, user_player, ai_player,
-                companion_reply, result
+                conversation_id, room_id, play_mode, difficulty, ai_level,
+                user_player, ai_player, companion_reply, result
             )
             VALUES (
                 $1, 'native', $2, 'created', $3, $4, $5,
-                $6, '', $7, $8, $9, $10,
-                FALSE, NULL, NULL, $11::jsonb, $12::jsonb,
-                $13, $14::jsonb
+                $6, $7, $8, $9, $10,
+                $11::jsonb, $12::jsonb, $13, $14::jsonb
             )
             RETURNING *
         ), created_event AS (
