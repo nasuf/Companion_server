@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.services.runtime_config import get_effective_asr_model
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,8 @@ async def transcribe_audio(
 ) -> TranscriptionResult:
     api_key = settings.dashscope_api_key.strip()
     endpoint = settings.dashscope_asr_endpoint.strip()
-    model = settings.dashscope_asr_model.strip()
+    # Admin runtime config override → env DASHSCOPE_ASR_MODEL fallback.
+    model = (await get_effective_asr_model()).strip()
     if not api_key or not endpoint or not model:
         raise SpeechTranscriptionNotConfigured
 

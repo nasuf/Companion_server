@@ -1656,6 +1656,10 @@ model SystemConfig {
   localSmallModel        String?  @map("local_small_model")
   remoteChatModel        String?  @map("remote_chat_model")
   remoteSmallModel       String?  @map("remote_small_model")
+  // Multimodal models (global only, no per-agent override).
+  // null = fall back to env DOUBAO_VISION_MODEL / DASHSCOPE_ASR_MODEL.
+  visionModel            String?  @map("vision_model")
+  asrModel               String?  @map("asr_model")
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")

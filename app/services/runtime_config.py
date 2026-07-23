@@ -40,6 +40,10 @@ class ResolvedConfig:
     local_small_model: str
     remote_chat_model: str
     remote_small_model: str
+    # Multimodal models (global only — AgentConfigOverride has no such columns,
+    # so the agent branch of the resolve chain never contributes these).
+    vision_model: str
+    asr_model: str
 
 
 # Module-level caches, 启动时填充, 配置变更时 invalidate 重 load.
@@ -174,6 +178,8 @@ def _row_to_dict(row) -> dict:
     for key in (
         "onlineModel", "remoteProvider", "remoteChatProvider", "remoteSmallProvider",
         "localChatModel", "localSmallModel", "remoteChatModel", "remoteSmallModel",
+        # SystemConfig only; AgentConfigOverride rows lack these attrs → skipped.
+        "visionModel", "asrModel",
     ):
         val = getattr(row, key, None)
         if val is not None:
@@ -248,7 +254,21 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
         local_small_model=_pick("localSmallModel", settings.local_small_model),
         remote_chat_model=_pick("remoteChatModel", settings.remote_chat_model),
         remote_small_model=_pick("remoteSmallModel", settings.remote_small_model),
+        vision_model=_pick("visionModel", settings.doubao_vision_model),
+        asr_model=_pick("asrModel", settings.dashscope_asr_model),
     )
+
+
+async def get_effective_vision_model() -> str:
+    """Image-understanding model id (admin override → env DOUBAO_VISION_MODEL)."""
+    await ensure_loaded()
+    return resolve_config_sync(agent_id=None).vision_model
+
+
+async def get_effective_asr_model() -> str:
+    """Speech-to-text model id (admin override → env DASHSCOPE_ASR_MODEL)."""
+    await ensure_loaded()
+    return resolve_config_sync(agent_id=None).asr_model
 
 
 def resolve_for_current() -> ResolvedConfig:

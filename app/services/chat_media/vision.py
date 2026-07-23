@@ -8,6 +8,7 @@ import httpx
 from app.config import settings
 from app.services.chat_media import repo, storage
 from app.services.chat_media.prompt import attachment_to_metadata
+from app.services.runtime_config import get_effective_vision_model
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,10 @@ async def _analyze_attachment(
 async def _call_doubao_vision(*, data_url: str, user_text: str) -> str:
     endpoint = settings.ark_base_url.rstrip("/") + "/chat/completions"
     user_hint = user_text.strip() or "用户没有附加文字，只发送了图片。"
+    # Admin runtime config override → env DOUBAO_VISION_MODEL fallback.
+    vision_model = await get_effective_vision_model()
     payload = {
-        "model": settings.doubao_vision_model,
+        "model": vision_model,
         "messages": [
             {
                 "role": "user",
@@ -106,7 +109,8 @@ async def _call_doubao_vision(*, data_url: str, user_text: str) -> str:
                 raise RuntimeError(
                     "Doubao vision endpoint/model not found. "
                     f"Check ARK_BASE_URL={settings.ark_base_url!r} and "
-                    f"DOUBAO_VISION_MODEL={settings.doubao_vision_model!r}. "
+                    f"vision model {vision_model!r} (admin runtime config "
+                    "or env DOUBAO_VISION_MODEL). "
                     f"response={detail}"
                 ) from exc
             raise RuntimeError(

@@ -9,7 +9,8 @@ Endpoints:
   DELETE /admin-api/runtime-config/agents/{agent_id}     — 删除 override (回归全局)
 
 字段范围: online_model / remote_chat_provider / remote_small_provider /
-local_chat_model / local_small_model / remote_chat_model / remote_small_model.
+local_chat_model / local_small_model / remote_chat_model / remote_small_model
++ 多模态 vision_model / asr_model (仅全局, per-agent endpoints 忽略).
 remote_provider 是旧客户端兼容字段. 全部 nullable (null = 不设, fallback 上层).
 embedding 不在此 — 跨 agent 共享 vector store 不能动态切.
 """
@@ -59,6 +60,11 @@ class ConfigPayload(BaseModel):
     local_small_model: str | None = None
     remote_chat_model: str | None = None
     remote_small_model: str | None = None
+    # Multimodal models — global only. Ignored on the per-agent endpoints
+    # (AgentConfigOverride has no such columns). Free-text identifiers:
+    # vision/ASR models are not part of model_registry, so no registry check.
+    vision_model: str | None = None
+    asr_model: str | None = None
 
 
 def _row_to_payload(row) -> dict[str, Any]:
@@ -67,6 +73,7 @@ def _row_to_payload(row) -> dict[str, Any]:
             "online_model", "remote_provider", "remote_chat_provider",
             "remote_small_provider", "local_chat_model", "local_small_model",
             "remote_chat_model", "remote_small_model",
+            "vision_model", "asr_model",
         )}
     return {
         "online_model": row.onlineModel,
@@ -77,6 +84,10 @@ def _row_to_payload(row) -> dict[str, Any]:
         "local_small_model": row.localSmallModel,
         "remote_chat_model": row.remoteChatModel,
         "remote_small_model": row.remoteSmallModel,
+        # getattr: AgentConfigOverride rows share this helper but lack these
+        # global-only columns → always null on the agent endpoints.
+        "vision_model": getattr(row, "visionModel", None),
+        "asr_model": getattr(row, "asrModel", None),
     }
 
 
@@ -91,11 +102,19 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
         "local_small_model": r.local_small_model,
         "remote_chat_model": r.remote_chat_model,
         "remote_small_model": r.remote_small_model,
+        "vision_model": r.vision_model,
+        "asr_model": r.asr_model,
     }
 
 
-def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
-    """payload → prisma 字段 dict. None 值保留 (清除该字段 override)."""
+def _payload_to_data(
+    payload: ConfigPayload, *, include_media_models: bool = False,
+) -> dict[str, Any]:
+    """payload → prisma 字段 dict. None 值保留 (清除该字段 override).
+
+    include_media_models 仅全局 SystemConfig 为 True — AgentConfigOverride
+    表没有 vision/asr 列, 写入会直接报 prisma unknown column.
+    """
     explicit = payload.model_fields_set
     legacy = payload.remote_provider.strip().lower() if payload.remote_provider else None
     chat_provider = (
@@ -111,7 +130,7 @@ def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
         chat_provider = legacy
     if "remote_small_provider" not in explicit and legacy:
         small_provider = legacy
-    return {
+    data: dict[str, Any] = {
         "onlineModel": payload.online_model,
         "remoteProvider": legacy,
         "remoteChatProvider": chat_provider,
@@ -121,6 +140,11 @@ def _payload_to_data(payload: ConfigPayload) -> dict[str, Any]:
         "remoteChatModel": payload.remote_chat_model,
         "remoteSmallModel": payload.remote_small_model,
     }
+    if include_media_models:
+        # Empty string means "clear override" (fall back to env), same as null.
+        data["visionModel"] = (payload.vision_model or "").strip() or None
+        data["asrModel"] = (payload.asr_model or "").strip() or None
+    return data
 
 
 async def _model_exists_for_provider(identifier: str, provider: str) -> bool:
@@ -244,7 +268,7 @@ async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
         fallback_remote_chat_model=settings.remote_chat_model,
         fallback_remote_small_model=settings.remote_small_model,
     )
-    data = _payload_to_data(payload)
+    data = _payload_to_data(payload, include_media_models=True)
     row = await db.systemconfig.upsert(
         where={"id": 1},
         data={"create": {"id": 1, **data}, "update": data},
