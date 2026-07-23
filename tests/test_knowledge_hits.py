@@ -43,6 +43,13 @@ def test_grams_include_alnum_tokens_casefolded():
     assert "伴生" in grams
 
 
+def test_grams_drop_two_char_alnum_tokens():
+    # "ai" from a junk enhanced_query ("AI知道的那个东西") used to false-hit
+    # persona copy like 打造「有生命的AI」— 2-char alnum tokens are banned.
+    grams = kh.extract_topic_grams("AI知道的那个东西")
+    assert "ai" not in grams
+
+
 def test_grams_empty_for_noise():
     assert kh.extract_topic_grams("") == set()
     assert kh.extract_topic_grams(None) == set()
@@ -174,15 +181,17 @@ async def test_context_fallback_recovers_elliptical_question():
 
 
 @pytest.mark.asyncio
-async def test_primary_hits_suppress_context_fallback():
+async def test_union_keeps_primary_reason_on_directly_hit_rows():
+    # Continuation questions UNION primary + context grams (no suppression);
+    # rows the message itself names keep the literal reason.
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
         memories = await kh.probe_knowledge_memories(
             user_message="那门票贵不贵？",
             context_texts=XIJIA_CONTEXT,
             workspace_id="ws-1",
         )
-    assert memories
-    assert all(m.rank_reasons == ["knowledge_literal_hit"] for m in memories)
+    ticket = next(m for m in memories if "票务信息" in m.text)
+    assert ticket.rank_reasons == ["knowledge_literal_hit"]
 
 
 @pytest.mark.asyncio
@@ -193,6 +202,54 @@ async def test_non_question_short_message_never_borrows_context():
             context_texts=XIJIA_CONTEXT,
             workspace_id="ws-1",
         ) == []
+
+
+# ── 2026-07-24 regression: junk enhanced_query must not blind the probe ──
+
+# Persona-voice rows as stored in production after the parser rework. The
+# 核心理念 row contains "有生命的AI" — the old 2-char "ai" gram false-hit it.
+PERSONA_ROWS = [
+    {"id": "p1", "content": "我所在的公司名称：伴生"},
+    {"id": "p2", "content": "我所在的公司「伴生」核心理念：打造“有生命的AI”，追求有独立人格、真实情绪的陪伴体验。"},
+    {"id": "p3", "content": "我们公司的产品「伴生App」上线时间：预计2026年9月"},
+    {"id": "p4", "content": "我们公司合作的项目名称：2026年恒洁杯第二十届佛山“西甲”足球联赛"},
+    {"id": "p5", "content": "我们公司合作的项目「2026年恒洁杯第二十届佛山“西甲”足球联赛」赛事时间：2026年7月10日至8月23日"},
+    {"id": "p6", "content": "我们公司合作的项目「2026年恒洁杯第二十届佛山“西甲”足球联赛」赛事地点：佛山三水云秀山体育场"},
+]
+
+# The real conversation (bubble-split): the 西甲 anchor sits 6-7 rows back,
+# which is why data_fetch passes a 10-row window.
+NASHISHA_CONTEXT = [
+    "刚醒没多久 正摸手机呢 你起好早呀",
+    "西甲你知道不",
+    "你说的是我公司合作的那个足球联赛吗？",
+    "还是别的什么呀？",
+    "对",
+    "哦 那我知道的 你问这个干嘛呀",
+    "那是啥",
+]
+
+
+@pytest.mark.asyncio
+async def test_junk_enhanced_query_no_longer_blinds_context():
+    """Trace cedba0cc pinned: '那是啥' + enhanced 'AI知道的那个东西' answered
+    西班牙足球甲级联赛 because one 'ai' false hit suppressed the context
+    fallback. Union + 3-char alnum tokens must surface the 西甲 block."""
+    with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=PERSONA_ROWS)):
+        memories = await kh.probe_knowledge_memories(
+            user_message="那是啥",
+            enhanced_query="AI知道的那个东西",
+            context_texts=NASHISHA_CONTEXT,
+            workspace_id="ws-1",
+        )
+    texts = [m.text for m in memories]
+    # The 西甲 project block must be present and ranked first (足球联赛 is the
+    # longest matched gram) — this is what grounds "那是啥".
+    assert any("项目名称" in t for t in texts)
+    assert "足球联赛" in texts[0]
+    # Rows reachable only via prior turns carry the context reason.
+    name_row = next(m for m in memories if "项目名称" in m.text)
+    assert name_row.rank_reasons == ["knowledge_context_hit"]
 
 
 # ── data_fetch_phase._merge_knowledge_hits ─────────────────────────────

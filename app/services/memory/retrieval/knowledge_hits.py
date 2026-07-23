@@ -77,7 +77,12 @@ _KNOWLEDGE_IMPORTANCE = 0.86
 _HIT_SCORE = 0.55
 
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
-_ALNUM_RUN_RE = re.compile(r"[a-z0-9]{2,}")
+# ≥3 chars: 2-char alnum tokens are systematic false-hit sources — "ai" shows
+# up both in enhanced queries ("AI知道的那个东西") and in persona/knowledge
+# copy ("打造「有生命的AI」"), and a single junk hit used to suppress the
+# context fallback entirely (2026-07-24 trace: 那是啥 → 西班牙足球甲级联赛).
+# Real topic tokens (app / 2026 / vip) are ≥3.
+_ALNUM_RUN_RE = re.compile(r"[a-z0-9]{3,}")
 
 # Structural / conversational grams that appear in questions about anything
 # and therefore carry no topical signal. Topic nouns (公司/活动/门票/比赛…)
@@ -196,38 +201,6 @@ def is_continuation_question(message: str | None) -> bool:
     return bool(_QUESTION_MARKER_RE.search(text))
 
 
-def _build_memories(
-    hit_rows: list[dict[str, Any]],
-    *,
-    exclude_texts: set[str] | frozenset[str],
-    max_hits: int,
-    rank_reason: str,
-) -> list[ClassifiedMemory]:
-    memories: list[ClassifiedMemory] = []
-    for row in hit_rows:
-        content = row.get("content") or ""
-        if not content or content in exclude_texts:
-            continue
-        memories.append(
-            ClassifiedMemory(
-                text=content,
-                relevance="medium",
-                score=_HIT_SCORE,
-                id=str(row.get("id") or ""),
-                importance=_KNOWLEDGE_IMPORTANCE,
-                similarity=_HIT_SCORE,
-                main_category="生活",
-                sub_category="工作",
-                display_score=_HIT_SCORE,
-                rank_reasons=[rank_reason],
-                source="ai",
-            )
-        )
-        if len(memories) >= max_hits:
-            break
-    return memories
-
-
 async def probe_knowledge_memories(
     *,
     user_message: str | None,
@@ -239,51 +212,65 @@ async def probe_knowledge_memories(
 ) -> list[ClassifiedMemory]:
     """Literal-hit knowledge rows as ready-to-inject AI-slot memories.
 
-    Primary path: grams from the current message + enhanced_query (the
-    relevance LLM's ellipsis restoration, when it worked: "那门票贵不贵" →
-    "西甲联赛的门票价格").
+    Gram sources (2026-07-24 rework — UNION, no suppression):
+    - primary: current message + enhanced_query (the relevance LLM's ellipsis
+      restoration when it worked: "那门票贵不贵" → "西甲联赛的门票价格")
+    - context: for short follow-up questions, the last few turns' raw text is
+      ALWAYS added. Suppressing context whenever the primary path had any hit
+      proved fragile — a junk restoration ("AI知道的那个东西") once produced a
+      single false hit that blocked the 西甲 topic block, and the reply fell
+      back to world knowledge (西班牙足球甲级联赛). With a union the two
+      sources rank together: a good restoration dominates naturally, a junk
+      one is out-voted by longer topical grams (足球联赛) from the context.
 
-    Context fallback: no primary hits + the message is a short follow-up
-    question → grams from the last few turns' raw text (``context_texts``),
-    injecting the whole topic block (cap ``_CONTEXT_MAX_HITS``) since the
-    current message names the attribute only conversationally.
+    Rows matched by a primary gram carry rank_reason "knowledge_literal_hit";
+    context-only matches carry "knowledge_context_hit" (diagnostics).
     """
     if not workspace_id:
         return []
     primary_grams = extract_topic_grams(user_message) | extract_topic_grams(enhanced_query)
-    may_fall_back = bool(context_texts) and is_continuation_question(user_message)
-    if not primary_grams and not may_fall_back:
+    context_grams: set[str] = set()
+    if context_texts and is_continuation_question(user_message):
+        for text in context_texts:
+            context_grams |= extract_topic_grams(text)
+        context_grams -= primary_grams
+    all_grams = primary_grams | context_grams
+    if not all_grams:
         return []
     rows = await load_knowledge_rows(workspace_id)
     if not rows:
         return []
 
-    if primary_grams:
-        hits = find_literal_hits(
-            primary_grams, rows, max_hits=max_hits + len(exclude_texts)
+    # Context involvement means the question names its topic only in prior
+    # turns — inject the whole topic block so the reply LLM can pick the
+    # attribute (time/venue/tickets) being asked about.
+    cap = _CONTEXT_MAX_HITS if context_grams else max_hits
+    memories: list[ClassifiedMemory] = []
+    for row in find_literal_hits(all_grams, rows, max_hits=cap + len(exclude_texts)):
+        content = row.get("content") or ""
+        if not content or content in exclude_texts:
+            continue
+        folded = content.casefold()
+        reason = (
+            "knowledge_literal_hit"
+            if any(gram in folded for gram in primary_grams)
+            else "knowledge_context_hit"
         )
-        memories = _build_memories(
-            hits,
-            exclude_texts=exclude_texts,
-            max_hits=max_hits,
-            rank_reason="knowledge_literal_hit",
+        memories.append(
+            ClassifiedMemory(
+                text=content,
+                relevance="medium",
+                score=_HIT_SCORE,
+                id=str(row.get("id") or ""),
+                importance=_KNOWLEDGE_IMPORTANCE,
+                similarity=_HIT_SCORE,
+                main_category="生活",
+                sub_category="工作",
+                display_score=_HIT_SCORE,
+                rank_reasons=[reason],
+                source="ai",
+            )
         )
-        if memories:
-            return memories
-
-    if not may_fall_back:
-        return []
-    context_grams: set[str] = set()
-    for text in context_texts:
-        context_grams |= extract_topic_grams(text)
-    if not context_grams:
-        return []
-    hits = find_literal_hits(
-        context_grams, rows, max_hits=_CONTEXT_MAX_HITS + len(exclude_texts)
-    )
-    return _build_memories(
-        hits,
-        exclude_texts=exclude_texts,
-        max_hits=_CONTEXT_MAX_HITS,
-        rank_reason="knowledge_context_hit",
-    )
+        if len(memories) >= cap:
+            break
+    return memories
