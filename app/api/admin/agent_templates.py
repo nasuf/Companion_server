@@ -12,6 +12,12 @@ Endpoints (all admin-only):
   GET    /admin-api/agent-templates/{id}/status  — provisioning progress
   PUT    /admin-api/agent-templates/default      — set / clear the default template
   DELETE /admin-api/agent-templates/{id}         — delete a template (+ clear default)
+
+Knowledge supplement (append facts to an EXISTING template, then publish):
+  POST   /admin-api/agent-templates/{id}/knowledge/from-document — append memories
+  GET    /admin-api/agent-templates/{id}/knowledge               — overview + agents
+  POST   /admin-api/agent-templates/{id}/knowledge/sync          — publish (canary/all)
+  GET    /admin-api/agent-templates/{id}/knowledge/sync-status   — job progress
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.api.jwt_auth import require_admin_jwt
 from app.db import db
@@ -33,6 +39,16 @@ from app.services.agent_template import (
     set_default_template_agent_id,
 )
 from app.services.agent_template.document_import import parse_agent_profile_document
+from app.services.agent_template.knowledge import (
+    KnowledgeSyncBusy,
+    append_knowledge_to_template,
+    get_knowledge_status,
+    get_related_agents_with_pending,
+    get_sync_progress,
+    list_knowledge_items,
+    start_knowledge_sync,
+)
+from app.services.agent_template.knowledge_import import parse_knowledge_document
 from app.services.life_story import get_progress
 from app.services.runtime.data_reset import hard_delete_agent_data
 
@@ -55,6 +71,14 @@ class TemplateCreateRequest(BaseModel):
 class DefaultTemplateRequest(BaseModel):
     # None / empty clears the default (new users then stay agent-less).
     agent_id: str | None = None
+
+
+class KnowledgeSyncRequest(BaseModel):
+    # None / empty = full sync to ALL related agents; a non-empty list is a
+    # canary sync to hand-picked agents (never advances the pending badge).
+    # Capped: selected mode validates ids one-by-one; huge lists should use
+    # full mode instead.
+    agent_ids: list[str] | None = Field(default=None, max_length=200)
 
 
 _DEFAULT_DOCUMENT_PERSONALITY = {
@@ -95,6 +119,15 @@ def _normalize_gender(value: str | None) -> str | None:
     raise HTTPException(status_code=400, detail="gender 只能是 male/female/男/女")
 
 
+async def _require_template(agent_id: str):
+    """Load a template agent or 404 (must belong to the template system user)."""
+    owner = await get_or_create_template_user()
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if not agent or agent.userId != owner.id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return agent
+
+
 async def _l1_memory_count(agent_id: str) -> int:
     rows = await db.query_raw(
         """
@@ -111,6 +144,7 @@ async def _l1_memory_count(agent_id: str) -> int:
 
 async def _template_summary(agent, *, default_id: str | None) -> dict:
     progress = await get_progress(agent.id)
+    knowledge = await get_knowledge_status(agent.id)
     return {
         "id": agent.id,
         "name": agent.name,
@@ -125,6 +159,9 @@ async def _template_summary(agent, *, default_id: str | None) -> dict:
         "l1_memory_count": await _l1_memory_count(agent.id),
         "clone_count": await count_active_clones(agent.id),
         "progress": progress,
+        # 记忆补充徽标: 有知识记忆晚于上次全量同步水位 → 提示"未同步"
+        "knowledge_count": knowledge["knowledge_count"],
+        "knowledge_pending": knowledge["pending_update"],
     }
 
 
@@ -261,6 +298,106 @@ async def set_default_template(data: DefaultTemplateRequest) -> dict:
             )
     await set_default_template_agent_id(agent_id)
     return {"default_template_agent_id": agent_id}
+
+
+# ── Knowledge supplement (记忆补充 + 同步) ────────────────────────────
+
+
+@router.post("/{agent_id}/knowledge/from-document")
+async def append_template_knowledge(
+    agent_id: str,
+    file: UploadFile = File(...),
+) -> dict:
+    """Append a knowledge document (公司/产品/活动 facts) to an EXISTING template.
+
+    New rows land in the template's memory bank immediately (future clones get
+    them automatically); publishing to EXISTING clones goes through
+    ``POST /{id}/knowledge/sync``.
+    """
+    agent = await _require_template(agent_id)
+    if agent.status != "active":
+        raise HTTPException(status_code=400, detail="模板尚未生成完成，无法补充记忆")
+
+    raw = await file.read()
+    await file.close()
+    if not raw:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(raw) > _MAX_TEMPLATE_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="文档过大，请控制在 2MB 以内")
+
+    try:
+        items = parse_knowledge_document(raw, filename=file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        result = await append_knowledge_to_template(
+            template_agent_id=agent_id,
+            template_user_id=agent.userId,
+            items=items,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    logger.info(
+        "[TEMPLATE] knowledge document %s appended to template %s (+%d/-%d)",
+        file.filename or "<upload>",
+        agent_id[:8],
+        result["stored"],
+        result["skipped_duplicates"],
+    )
+    status = await get_knowledge_status(agent_id)
+    return {
+        **result,
+        **status,
+        "items": [
+            {"section": item.section, "label": item.label, "summary": item.summary}
+            for item in items[:50]
+        ],
+    }
+
+
+@router.get("/{agent_id}/knowledge")
+async def template_knowledge_overview(agent_id: str) -> dict:
+    """Knowledge rows + related agents (with per-agent pending diff) + job state."""
+    await _require_template(agent_id)
+    status = await get_knowledge_status(agent_id)
+    return {
+        "template_id": agent_id,
+        **status,
+        "items": await list_knowledge_items(agent_id),
+        "agents": await get_related_agents_with_pending(agent_id),
+        "sync": await get_sync_progress(agent_id),
+    }
+
+
+@router.post("/{agent_id}/knowledge/sync")
+async def sync_template_knowledge(agent_id: str, data: KnowledgeSyncRequest) -> dict:
+    """Publish template knowledge to cloned agents (background job).
+
+    ``agent_ids`` empty/None → all related agents (full sync; clears the
+    pending badge on success). A non-empty list → canary sync for testing a
+    single agent's memory quality before the full rollout.
+    """
+    agent = await _require_template(agent_id)
+    if agent.status != "active":
+        raise HTTPException(status_code=400, detail="模板尚未生成完成，无法同步记忆")
+    try:
+        return await start_knowledge_sync(
+            template_agent_id=agent_id, agent_ids=data.agent_ids
+        )
+    except KnowledgeSyncBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{agent_id}/knowledge/sync-status")
+async def template_knowledge_sync_status(agent_id: str) -> dict:
+    """Poll the background sync job progress."""
+    await _require_template(agent_id)
+    progress = await get_sync_progress(agent_id)
+    return {"sync": progress or {"status": "idle"}}
 
 
 @router.delete("/{agent_id}")

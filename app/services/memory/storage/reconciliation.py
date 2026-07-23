@@ -32,11 +32,14 @@ def _is_write_protected(record: MemoryRecord) -> bool:
     - profile_seed rows (any category): persona ground truth seeded at agent
       provisioning. Chat-time enrichments are stored separately instead of
       rewriting the seed, so the persona can never drift via reconciliation.
+    - knowledge_seed rows: admin-published template knowledge (公司/产品/活动
+      facts). Only the admin append/sync pipeline may manage them; chat-time
+      writes must never merge into or rewrite them.
 
     Containment-gated enrichment stays allowed for non-seed, non-singleton L1
     (richer restatements of learned facts).
     """
-    if getattr(record, "provenance", None) == "profile_seed":
+    if getattr(record, "provenance", None) in ("profile_seed", "knowledge_seed"):
         return True
     return record.level == 1 and is_singleton(record.mainCategory, record.subCategory)
 

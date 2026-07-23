@@ -1,0 +1,11 @@
+-- Template knowledge publish watermark (only meaningful for template agents,
+-- i.e. rows owned by the template system user).
+--
+-- Semantics: the max(created_at) of the template's provenance='knowledge_seed'
+-- memories_ai rows at the moment a FULL knowledge sync (all cloned agents,
+-- zero failures) completed. Knowledge rows created after this watermark drive
+-- the admin "有更新的记忆未同步" badge. Canary (single-agent) syncs never
+-- advance it. NULL = never fully synced.
+--
+-- Metadata-only ALTER: no table rewrite, instant on ai_agents.
+ALTER TABLE "ai_agents" ADD COLUMN IF NOT EXISTS "knowledge_synced_at" TIMESTAMPTZ;

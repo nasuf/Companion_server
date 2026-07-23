@@ -6,6 +6,11 @@ replacing category-based guessing in defense rules:
 - PROFILE_SEED  : seeded at agent provisioning from the character profile.
                   Persona ground truth — write-time reconciliation must never
                   mutate these rows (contradictions go through spec §4).
+- KNOWLEDGE_SEED: appended by an admin knowledge document to a TEMPLATE agent
+                  (公司/产品/活动 facts) and published verbatim to its clones.
+                  Admin-controlled ground truth — like profile_seed, chat-time
+                  reconciliation must never mutate these rows, and the sync
+                  pipeline identifies its own subset by this value.
 - USER_STATED   : extracted from what the user actually said (chat pipeline
                   user side, contradiction resolutions).
 - AI_AUTHORED   : extracted from the AI's own generated replies (chat pipeline
@@ -22,13 +27,15 @@ scripts/backfill_memory_provenance.py).
 from __future__ import annotations
 
 PROFILE_SEED = "profile_seed"
+KNOWLEDGE_SEED = "knowledge_seed"
 USER_STATED = "user_stated"
 AI_AUTHORED = "ai_authored"
 DAILY_SUMMARY = "daily_summary"
 CONSOLIDATED = "consolidated"
 
 VALID_PROVENANCES = frozenset({
-    PROFILE_SEED, USER_STATED, AI_AUTHORED, DAILY_SUMMARY, CONSOLIDATED,
+    PROFILE_SEED, KNOWLEDGE_SEED, USER_STATED, AI_AUTHORED, DAILY_SUMMARY,
+    CONSOLIDATED,
 })
 
 

@@ -125,6 +125,10 @@ model AiAgent {
   avatarUrl                String?                         @map("avatar_url")
   // 若该 agent 是从某个模板克隆而来, 记录源模板 agent id (用于「模板被使用次数」统计).
   sourceTemplateId         String?                         @map("source_template_id")
+  // 仅模板 agent 使用: 上次「全量」知识记忆同步完成的水位 (knowledge_seed 行
+  // created_at > 此值 ⇒ 后台显示"有更新的记忆未同步"). 代码侧走 raw SQL 读写,
+  // 单个 agent 的灰度(canary)同步不推进水位.
+  knowledgeSyncedAt        DateTime?                       @map("knowledge_synced_at")
   createdAt                DateTime                        @default(now()) @map("created_at")
   updatedAt                DateTime                        @updatedAt @map("updated_at")
   workspaces               ChatWorkspace[]
