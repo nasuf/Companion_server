@@ -179,8 +179,10 @@ async def _redeem_loaded_voucher(voucher, merchant):
     day_start = _cn_day_start()
     capped = False
     async with db.tx() as tx:
+        # pg_advisory_xact_lock returns void; select it from FROM so query_raw
+        # gets a real (int) column instead of failing to deserialize `void`.
         await tx.query_raw(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended($1, 0))",
             _REDEEM_CAP_LOCK_KEY,
         )
         used = await tx.mealvoucher.count(
