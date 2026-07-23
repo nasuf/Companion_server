@@ -90,7 +90,7 @@ def test_hits_cap_and_no_match():
 async def test_probe_builds_ai_slot_memories():
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
         memories = await kh.probe_knowledge_memories(
-            query_texts=["西甲联赛什么时候开始？", ""],
+            user_message="西甲联赛什么时候开始？",
             workspace_id="ws-1",
         )
     assert memories
@@ -105,7 +105,7 @@ async def test_probe_builds_ai_slot_memories():
 async def test_probe_excludes_already_selected_texts():
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
         memories = await kh.probe_knowledge_memories(
-            query_texts=["西甲联赛的赛事时间和地点"],
+            user_message="西甲联赛的赛事时间和地点",
             workspace_id="ws-1",
             exclude_texts={ROWS[2]["content"]},
         )
@@ -120,7 +120,7 @@ async def test_probe_skips_loader_when_no_topic_grams():
     loader = AsyncMock(return_value=ROWS)
     with patch.object(kh, "load_knowledge_rows", loader):
         assert await kh.probe_knowledge_memories(
-            query_texts=["嗯", None, "??!!"], workspace_id="ws-1",
+            user_message="嗯", workspace_id="ws-1",
         ) == []
     loader.assert_not_awaited()
 
@@ -128,8 +128,71 @@ async def test_probe_skips_loader_when_no_topic_grams():
 @pytest.mark.asyncio
 async def test_probe_without_workspace_is_noop():
     assert await kh.probe_knowledge_memories(
-        query_texts=["西甲联赛"], workspace_id=None,
+        user_message="西甲联赛", workspace_id=None,
     ) == []
+
+
+# ── context fallback (elliptical follow-up questions) ──────────────────
+
+# The second-canary regression: after the AI described 西甲 for a few turns,
+# the user asked "啥时候开始？" — no topic tokens, enhanced_query came back
+# empty, and vector search grounded the WRONG time row (App 上线时间).
+XIJIA_CONTEXT = [
+    "西甲你知道吗",
+    "有四十八支球队参赛哦",
+    "覆盖了粤港澳好多城市",
+    "那你想了解哪方面的细节呀？",
+]
+
+
+def test_is_continuation_question():
+    assert kh.is_continuation_question("啥时候开始？")
+    assert kh.is_continuation_question("在哪里办呀?")
+    assert kh.is_continuation_question("门票多少钱")
+    assert not kh.is_continuation_question("好饿呀")  # not interrogative
+    assert not kh.is_continuation_question("")  # empty
+    assert not kh.is_continuation_question(
+        "你觉得我今天应该穿什么颜色的衣服出门比较好看呢我很纠结"
+    )  # over the short-follow-up length cap
+
+
+@pytest.mark.asyncio
+async def test_context_fallback_recovers_elliptical_question():
+    with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
+        memories = await kh.probe_knowledge_memories(
+            user_message="啥时候开始？",
+            enhanced_query="",
+            context_texts=XIJIA_CONTEXT,
+            workspace_id="ws-1",
+        )
+    texts = [m.text for m in memories]
+    # The whole 西甲 topic block rides along — crucially the 赛事时间 row.
+    assert any("赛事时间" in t for t in texts)
+    assert all(m.rank_reasons == ["knowledge_context_hit"] for m in memories)
+    # The product row must NOT hit (context never mentions 伴生/App).
+    assert not any("伴生App" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_primary_hits_suppress_context_fallback():
+    with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
+        memories = await kh.probe_knowledge_memories(
+            user_message="那门票贵不贵？",
+            context_texts=XIJIA_CONTEXT,
+            workspace_id="ws-1",
+        )
+    assert memories
+    assert all(m.rank_reasons == ["knowledge_literal_hit"] for m in memories)
+
+
+@pytest.mark.asyncio
+async def test_non_question_short_message_never_borrows_context():
+    with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
+        assert await kh.probe_knowledge_memories(
+            user_message="好饿呀",
+            context_texts=XIJIA_CONTEXT,
+            workspace_id="ws-1",
+        ) == []
 
 
 # ── data_fetch_phase._merge_knowledge_hits ─────────────────────────────

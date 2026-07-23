@@ -21,9 +21,20 @@ Consumption (data_fetch_phase):
 - medium/strong → union the hits into the already-selected set, so literal
   topic matches can never be dropped by vector ranking.
 
+Context fallback (2026-07-23, second canary): elliptical follow-ups ("啥时候
+开始？" right after the AI described 西甲) carry no topic tokens themselves,
+and enhanced_query restoration by the relevance LLM is not reliable — that
+turn retrieved the WRONG time row (伴生App 上线时间) and the reply conflated
+the product launch with the event date. When the current message + enhanced
+query produce no hits AND the message looks like a short follow-up question,
+the probe re-runs on the last few conversation turns' raw text: the context
+names the topic (西甲/球队/比赛), the injection cap is raised so the whole
+topic block (名称/时间/地点/票务…) rides along, and the reply LLM picks the
+attribute the user asked about.
+
 False positives (e.g. the user mentions 公司 about THEIR OWN company) cost a
 few extra AI-slot lines rendered under 【你自己的相关经历 / 人设】 — bounded
-by ``_MAX_HITS`` and harmless to grounding. False negatives fall back to the
+by the hit caps and harmless to grounding. False negatives fall back to the
 pre-existing behavior.
 """
 
@@ -45,8 +56,17 @@ _CACHE_TTL_S = 180
 _CACHE_KEY_PREFIX = "knowledge_rows"
 _MAX_ROWS = 200
 _MAX_HITS = 4
+# Context-fallback hits are topic-block injections (the current message names
+# no attribute we can rank by), so the cap is wider to fit a whole section.
+_CONTEXT_MAX_HITS = 8
 _MIN_GRAM_LEN = 2
 _MAX_GRAM_LEN = 4
+
+# A message qualifies for the context fallback only when it reads like a
+# short follow-up question — long or non-interrogative messages must carry
+# their own topic tokens (primary path) or stay out.
+_CONTINUATION_MAX_LEN = 24
+_QUESTION_MARKER_RE = re.compile(r"[?？]|啥|什么|哪|几|多少|多久|谁|怎|吗$|呢$")
 
 # Keep in sync with agent_template.knowledge.KNOWLEDGE_IMPORTANCE (not
 # imported: pulling the template service into the chat hot path would drag
@@ -167,34 +187,26 @@ async def load_knowledge_rows(workspace_id: str) -> list[dict[str, Any]]:
     return rows
 
 
-async def probe_knowledge_memories(
+def is_continuation_question(message: str | None) -> bool:
+    """Short interrogative follow-up ("啥时候开始？" / "在哪办呀") — the only
+    shape allowed to borrow topic grams from prior turns."""
+    text = (message or "").strip()
+    if not text or len(text) > _CONTINUATION_MAX_LEN:
+        return False
+    return bool(_QUESTION_MARKER_RE.search(text))
+
+
+def _build_memories(
+    hit_rows: list[dict[str, Any]],
     *,
-    query_texts: list[str | None],
-    workspace_id: str | None,
-    exclude_texts: set[str] | frozenset[str] = frozenset(),
-    max_hits: int = _MAX_HITS,
+    exclude_texts: set[str] | frozenset[str],
+    max_hits: int,
+    rank_reason: str,
 ) -> list[ClassifiedMemory]:
-    """Literal-hit knowledge rows as ready-to-inject AI-slot memories.
-
-    ``query_texts`` typically is ``[user_message, enhanced_query]`` — the
-    enhanced query restores elided topics ("那门票贵不贵" → "西甲联赛的门票
-    价格"), which makes follow-up questions hit too.
-    """
-    if not workspace_id:
-        return []
-    grams: set[str] = set()
-    for text in query_texts:
-        grams |= extract_topic_grams(text)
-    if not grams:
-        return []
-    rows = await load_knowledge_rows(workspace_id)
-    if not rows:
-        return []
-
     memories: list[ClassifiedMemory] = []
-    for row in find_literal_hits(grams, rows, max_hits=max_hits + len(exclude_texts)):
+    for row in hit_rows:
         content = row.get("content") or ""
-        if content in exclude_texts:
+        if not content or content in exclude_texts:
             continue
         memories.append(
             ClassifiedMemory(
@@ -207,10 +219,71 @@ async def probe_knowledge_memories(
                 main_category="生活",
                 sub_category="工作",
                 display_score=_HIT_SCORE,
-                rank_reasons=["knowledge_literal_hit"],
+                rank_reasons=[rank_reason],
                 source="ai",
             )
         )
         if len(memories) >= max_hits:
             break
     return memories
+
+
+async def probe_knowledge_memories(
+    *,
+    user_message: str | None,
+    enhanced_query: str | None = "",
+    context_texts: tuple[str, ...] | list[str] = (),
+    workspace_id: str | None,
+    exclude_texts: set[str] | frozenset[str] = frozenset(),
+    max_hits: int = _MAX_HITS,
+) -> list[ClassifiedMemory]:
+    """Literal-hit knowledge rows as ready-to-inject AI-slot memories.
+
+    Primary path: grams from the current message + enhanced_query (the
+    relevance LLM's ellipsis restoration, when it worked: "那门票贵不贵" →
+    "西甲联赛的门票价格").
+
+    Context fallback: no primary hits + the message is a short follow-up
+    question → grams from the last few turns' raw text (``context_texts``),
+    injecting the whole topic block (cap ``_CONTEXT_MAX_HITS``) since the
+    current message names the attribute only conversationally.
+    """
+    if not workspace_id:
+        return []
+    primary_grams = extract_topic_grams(user_message) | extract_topic_grams(enhanced_query)
+    may_fall_back = bool(context_texts) and is_continuation_question(user_message)
+    if not primary_grams and not may_fall_back:
+        return []
+    rows = await load_knowledge_rows(workspace_id)
+    if not rows:
+        return []
+
+    if primary_grams:
+        hits = find_literal_hits(
+            primary_grams, rows, max_hits=max_hits + len(exclude_texts)
+        )
+        memories = _build_memories(
+            hits,
+            exclude_texts=exclude_texts,
+            max_hits=max_hits,
+            rank_reason="knowledge_literal_hit",
+        )
+        if memories:
+            return memories
+
+    if not may_fall_back:
+        return []
+    context_grams: set[str] = set()
+    for text in context_texts:
+        context_grams |= extract_topic_grams(text)
+    if not context_grams:
+        return []
+    hits = find_literal_hits(
+        context_grams, rows, max_hits=_CONTEXT_MAX_HITS + len(exclude_texts)
+    )
+    return _build_memories(
+        hits,
+        exclude_texts=exclude_texts,
+        max_hits=_CONTEXT_MAX_HITS,
+        rank_reason="knowledge_context_hit",
+    )

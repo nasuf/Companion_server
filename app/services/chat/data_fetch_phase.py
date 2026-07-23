@@ -635,13 +635,20 @@ async def fetch_parallel_context(
 
     # Knowledge literal-hit floor: admin-published knowledge rows must stay
     # reachable even when the relevance gate says weak (the classifier cannot
-    # know the memory bank contains these topics) or when vector ranking
-    # drops them. Deterministic and cheap; failures never break the chat.
+    # know the memory bank contains these topics), when vector ranking drops
+    # them, or when an elliptical follow-up ("啥时候开始？") names its topic
+    # only in prior turns. Deterministic and cheap; failures never break chat.
     # See knowledge_hits module docstring for the full rationale.
     knowledge_hits: list = []
     try:
         knowledge_hits = await probe_knowledge_memories(
-            query_texts=[user_message, enhanced_query],
+            user_message=user_message,
+            enhanced_query=enhanced_query,
+            # Raw message texts (not the formatted "用户:/AI:" transcript) so
+            # role prefixes never gram-match row contents like "有生命的AI".
+            context_texts=[
+                str(m.get("content") or "") for m in (messages_dicts or [])[-4:]
+            ],
             workspace_id=workspace_id,
             exclude_texts=(
                 {m.text for m in classified_memories} if classified_memories else frozenset()
