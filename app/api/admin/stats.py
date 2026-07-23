@@ -398,6 +398,105 @@ async def token_usage(
     }
 
 
+@router.get("/media-usage")
+async def media_usage(
+    days: int = Query(7, ge=0, le=365),
+    limit: int = Query(200, ge=1, le=1000),
+    _: dict = Depends(require_admin_jwt),
+):
+    """语音/图片消息用量: 全局汇总 + 按用户明细 (仅列出有过使用的用户).
+
+    数据源 chat_message_attachments: kind='audio' (语音, duration_seconds 有时长)
+    / kind='image' (图片). days=0 = 全部历史. limit 上限用户明细行数,
+    按 (语音条数+图片张数) 降序截断; user_total 给出真实用户数供 UI 提示.
+    """
+    start = _window_start(days)
+    end = datetime.now(timezone.utc)
+    clauses = ["a.kind IN ('audio', 'image')"]
+    params: list = []
+    if start is not None:
+        params.append(start.replace(tzinfo=None).isoformat())
+        clauses.append(f"a.created_at >= ${len(params)}::timestamp")
+    where_sql = " AND ".join(clauses)
+
+    totals_rows, user_rows, user_total_rows = await asyncio.gather(
+        db.query_raw(
+            f"""
+            SELECT
+                a.kind,
+                COUNT(*)::int AS count,
+                COALESCE(SUM(a.size), 0)::bigint AS total_bytes,
+                COALESCE(SUM(COALESCE(a.duration_seconds, 0)), 0)::bigint AS total_seconds
+            FROM chat_message_attachments a
+            WHERE {where_sql}
+            GROUP BY a.kind
+            """,
+            *params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                a.user_id,
+                COALESCE(u.username, '(已删除)') AS username,
+                COUNT(*) FILTER (WHERE a.kind = 'audio')::int AS voice_count,
+                COALESCE(SUM(COALESCE(a.duration_seconds, 0))
+                    FILTER (WHERE a.kind = 'audio'), 0)::bigint AS voice_seconds,
+                COALESCE(SUM(a.size) FILTER (WHERE a.kind = 'audio'), 0)::bigint AS voice_bytes,
+                COUNT(*) FILTER (WHERE a.kind = 'image')::int AS image_count,
+                COALESCE(SUM(a.size) FILTER (WHERE a.kind = 'image'), 0)::bigint AS image_bytes
+            FROM chat_message_attachments a
+            LEFT JOIN users u ON u.id = a.user_id
+            WHERE {where_sql}
+            GROUP BY a.user_id, u.username
+            ORDER BY COUNT(*) DESC, a.user_id
+            LIMIT {int(limit)}
+            """,
+            *params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT COUNT(DISTINCT a.user_id)::int AS user_total
+            FROM chat_message_attachments a
+            WHERE {where_sql}
+            """,
+            *params,
+        ),
+    )
+
+    by_kind = {str(r["kind"]): r for r in totals_rows}
+    audio = by_kind.get("audio") or {}
+    image = by_kind.get("image") or {}
+    return {
+        "window": {
+            "start": start.isoformat() if start else None,
+            "end": end.isoformat(),
+            "days": days,
+        },
+        "voice": {
+            "count": int(audio.get("count", 0) or 0),
+            "total_seconds": int(audio.get("total_seconds", 0) or 0),
+            "total_bytes": int(audio.get("total_bytes", 0) or 0),
+        },
+        "image": {
+            "count": int(image.get("count", 0) or 0),
+            "total_bytes": int(image.get("total_bytes", 0) or 0),
+        },
+        "user_total": int((user_total_rows[0] if user_total_rows else {}).get("user_total", 0) or 0),
+        "users": [
+            {
+                "user_id": r["user_id"],
+                "username": r["username"],
+                "voice_count": int(r["voice_count"] or 0),
+                "voice_seconds": int(r["voice_seconds"] or 0),
+                "voice_bytes": int(r["voice_bytes"] or 0),
+                "image_count": int(r["image_count"] or 0),
+                "image_bytes": int(r["image_bytes"] or 0),
+            }
+            for r in user_rows
+        ],
+    }
+
+
 @router.get("/operations")
 async def operations(
     days: int = Query(7, ge=0, le=365),
