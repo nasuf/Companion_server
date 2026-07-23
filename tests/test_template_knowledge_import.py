@@ -31,21 +31,21 @@ def _summaries(text: str) -> list[str]:
     return [item.summary for item in parse_knowledge_document(text.encode("utf-8"))]
 
 
-def test_parse_sections_subjects_and_summaries():
+def test_parse_sections_persona_voice_summaries():
     items = parse_knowledge_document(XIJIA_DOC.encode("utf-8"))
     summaries = [i.summary for i in items]
 
-    # 名称 lines already contain the subject — kept verbatim.
-    assert "公司名称：伴生" in summaries
-    assert "产品名称：伴生App" in summaries
-
-    # Other lines get the section subject prefix so they retrieve standalone.
-    assert "伴生的公司定位：陪伴科技公司" in summaries
-    assert "伴生App的产品上线时间：预计2026年9月" in summaries
+    # Recognized sections (公司/产品/合作) render as FIRST-PERSON work
+    # memories — the relationship the section heading carries must survive
+    # into the stored text, or the AI can never say "我们公司合作的比赛".
+    assert "我所在的公司名称：伴生" in summaries
+    assert "我所在的公司「伴生」定位：陪伴科技公司" in summaries
+    assert "我们公司的产品名称：伴生App" in summaries
+    assert "我们公司的产品「伴生App」上线时间：预计2026年9月" in summaries
     assert (
-        "2026年恒洁杯第二十届佛山“西甲”足球联赛的赛事时间：2026年7月10日至8月23日"
-        in summaries
-    )
+        "我们公司合作的项目「2026年恒洁杯第二十届佛山“西甲”足球联赛」"
+        "赛事时间：2026年7月10日至8月23日"
+    ) in summaries
 
     # Section / label metadata preserved for the admin preview.
     time_item = next(i for i in items if i.label == "赛事时间")
@@ -53,9 +53,16 @@ def test_parse_sections_subjects_and_summaries():
     assert time_item.content == "2026年7月10日至8月23日"
 
 
-def test_subject_falls_back_to_section_title_without_name_line():
+def test_relational_stem_without_name_line_has_no_subject_brackets():
+    # 活动 keyword → stem, but no 名称 line → no 「subject」 duplication.
     summaries = _summaries("周边活动介绍\n优惠范围：三水超1000家商户\n")
-    assert summaries == ["周边活动的优惠范围：三水超1000家商户"]
+    assert summaries == ["我们公司的活动优惠范围：三水超1000家商户"]
+
+
+def test_neutral_section_falls_back_to_subject_prefix():
+    # No 公司/产品/合作/活动 keyword → pre-existing neutral subject form.
+    summaries = _summaries("家乡风物介绍\n特产：小锅米线\n")
+    assert summaries == ["家乡风物的特产：小锅米线"]
 
 
 def test_reject_five_dimension_profile():
@@ -87,13 +94,13 @@ def test_no_items_raises():
 
 def test_duplicate_lines_are_deduped():
     doc = "公司介绍\n公司名称：伴生\n公司名称：伴生\n"
-    assert _summaries(doc) == ["公司名称：伴生"]
+    assert _summaries(doc) == ["我所在的公司名称：伴生"]
 
 
 def test_heading_variants_hash_enum_and_trailing_colon():
     doc = "#其他\n1. 公司介绍：\n公司名称：伴生\n"
     items = parse_knowledge_document(doc.encode("utf-8"))
-    assert [i.summary for i in items] == ["公司名称：伴生"]
+    assert [i.summary for i in items] == ["我所在的公司名称：伴生"]
     assert items[0].section == "公司介绍"
 
 
@@ -101,7 +108,7 @@ def test_long_colonless_line_joins_current_section_as_content():
     long_line = "这个项目覆盖粤港澳大湾区十一个城市并且包含一百零四场比赛非常盛大"
     doc = f"合作项目介绍\n项目名称：西甲联赛\n{long_line}\n"
     summaries = _summaries(doc)
-    assert f"西甲联赛：{long_line}" in summaries
+    assert f"我们公司合作的项目「西甲联赛」：{long_line}" in summaries
 
 
 def test_colon_inside_sentence_is_not_a_label():
@@ -111,11 +118,11 @@ def test_colon_inside_sentence_is_not_a_label():
         "他们的口号是这样说的所以大家每一个人都一定要记住这句话：只为陪伴而生\n"
     )
     summaries = _summaries(doc)
-    assert any(s.startswith("伴生：他们的口号") for s in summaries)
+    assert any(s.startswith("我所在的公司「伴生」：他们的口号") for s in summaries)
 
 
 def test_gb18030_documents_decode():
-    assert "伴生的公司定位：陪伴科技公司" in [
+    assert "我所在的公司「伴生」定位：陪伴科技公司" in [
         i.summary
         for i in parse_knowledge_document(XIJIA_DOC.encode("gb18030"))
     ]

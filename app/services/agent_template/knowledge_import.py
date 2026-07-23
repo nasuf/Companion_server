@@ -17,6 +17,17 @@ the stored summary is made self-contained by prefixing the section subject
 (the section's 「XX名称」 value when present, else the section title) so vector
 retrieval hits standalone questions ("西甲什么时候开始") whose tokens only
 appear in the section subject, not in the line itself.
+
+Persona voice (2026-07-23 rework, after the first production canary): these
+rows live in the AGENT's own memory bank, so a bare factsheet line ("项目名称：
+西甲足球联赛") loses the relationship the section heading carried — nothing
+told the AI this is ITS OWN company's cooperation project, so replies could
+only recite facts, never say "我们公司合作的比赛". Section-keyword stems now
+rewrite each line into first-person work memory ("我们公司合作的项目「…西甲…」
+赛事时间：…"). Assumption (by product design): a knowledge document uploaded
+to a template describes the persona's OWN company/products/projects; documents
+about unrelated topics should use section titles without 公司/产品/合作/活动
+keywords, which fall back to the neutral subject-prefix form.
 """
 
 from __future__ import annotations
@@ -44,6 +55,16 @@ _NAME_LABEL_SUFFIX = "名称"
 # Suffixes stripped from a section title used as fallback subject
 # ("合作项目介绍" → "合作项目").
 _TITLE_NOISE_SUFFIXES = ("介绍", "简介", "信息", "说明")
+
+# Section-keyword → first-person relational stem. Order matters: 合作项目介绍
+# contains both 合作 and 公司-adjacent words, the FIRST match wins, so the
+# more specific relations sit on top.
+_RELATION_STEMS: tuple[tuple[str, str], ...] = (
+    ("合作", "我们公司合作的项目"),
+    ("产品", "我们公司的产品"),
+    ("活动", "我们公司的活动"),
+    ("公司", "我所在的公司"),
+)
 
 # "1. 公司介绍" / "2、赛事时间：…" enumeration prefixes.
 _ENUM_PREFIX_RE = re.compile(r"^\d+[.、]\s*")
@@ -153,15 +174,23 @@ def _split_sections(text: str) -> list[tuple[str, list[tuple[str, str]]]]:
     return sections
 
 
+def _name_subject(entries: list[tuple[str, str]]) -> str:
+    """The section's 「XX名称」 value ("伴生App"), or "" when absent."""
+    for label, content in entries:
+        if label.endswith(_NAME_LABEL_SUFFIX) and content:
+            return content
+    return ""
+
+
 def _section_subject(title: str, entries: list[tuple[str, str]]) -> str:
     """The subject used to make each line self-contained.
 
     Prefer the section's 「XX名称」 value ("伴生App"); fall back to the section
     title with descriptive suffixes stripped ("合作项目介绍" → "合作项目").
     """
-    for label, content in entries:
-        if label.endswith(_NAME_LABEL_SUFFIX) and content:
-            return content
+    named = _name_subject(entries)
+    if named:
+        return named
     subject = title.strip()
     for suffix in _TITLE_NOISE_SUFFIXES:
         if subject.endswith(suffix) and len(subject) > len(suffix):
@@ -170,21 +199,69 @@ def _section_subject(title: str, entries: list[tuple[str, str]]) -> str:
     return subject.strip()
 
 
+def _section_relation_stem(title: str) -> str | None:
+    """First-person stem for a recognized section title, else None."""
+    for keyword, stem in _RELATION_STEMS:
+        if keyword in title:
+            return stem
+    return None
+
+
+def _strip_stem_overlap(stem: str, label: str) -> str:
+    """Drop the label's leading noun when the stem already ends with it, so
+    "我所在的公司" + "公司名称" reads "我所在的公司名称" (not 公司公司)."""
+    for k in range(min(len(label), len(stem)), 1, -1):
+        if stem.endswith(label[:k]):
+            return label[k:]
+    return label
+
+
+def _relational_summary(*, stem: str, subject: str, label: str, content: str) -> str:
+    """First-person work-memory phrasing for a recognized section line.
+
+    - 名称 lines carry the subject themselves: "我们公司合作的项目名称：…"
+    - other lines embed the subject:
+      "我们公司合作的项目「…西甲…联赛」赛事时间：2026年7月10日至8月23日"
+    """
+    label_clean = _strip_stem_overlap(stem, label)
+    if label.endswith(_NAME_LABEL_SUFFIX):
+        return f"{stem}{label_clean}：{content}"
+    subject_part = f"「{subject}」" if subject and subject not in content else ""
+    if label_clean:
+        return f"{stem}{subject_part}{label_clean}：{content}"
+    return f"{stem}{subject_part}：{content}"
+
+
 def _build_items(sections: list[tuple[str, list[tuple[str, str]]]]) -> list[KnowledgeItem]:
     items: list[KnowledgeItem] = []
     seen: set[str] = set()
     for title, entries in sections:
         subject = _section_subject(title, entries)
+        stem = _section_relation_stem(title)
         for label, content in entries:
             if not content:
                 continue
-            base = f"{label}：{content}" if label else content
-            if subject and subject not in base:
-                # Prefix the subject so the line survives standalone retrieval
-                # ("赛事时间：7月10日" alone would never match a 西甲 query).
-                summary = f"{subject}的{label}：{content}" if label else f"{subject}：{content}"
+            if stem is not None:
+                # Stem path only embeds a 名称-derived subject: the stem
+                # already carries the section semantics, so a title-derived
+                # fallback subject would just duplicate it ("我们公司的活动
+                # 「周边活动」…").
+                summary = _relational_summary(
+                    stem=stem,
+                    subject=_name_subject(entries),
+                    label=label,
+                    content=content,
+                )
             else:
-                summary = base
+                base = f"{label}：{content}" if label else content
+                if subject and subject not in base:
+                    # Prefix the subject so the line survives standalone
+                    # retrieval ("赛事时间：7月10日" alone never matches 西甲).
+                    summary = (
+                        f"{subject}的{label}：{content}" if label else f"{subject}：{content}"
+                    )
+                else:
+                    summary = base
             if summary in seen:
                 continue
             seen.add(summary)
