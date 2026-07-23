@@ -194,8 +194,13 @@ async def ensure_daily_grant(user_id: str) -> int:
         return balance
 
 
-async def get_state(user_id: str) -> dict[str, Any]:
-    """Return the full wallet state (applies the daily grant first)."""
+async def get_state(user_id: str, *, game_key: str | None = None) -> dict[str, Any]:
+    """Return the full wallet state (applies the daily grant first).
+
+    When ``game_key`` is provided, also include ``game_points_for_game`` — the
+    net points this specific game has settled for the user (win/milestone credits
+    minus lose/quit debits), for the per-game display on each game screen.
+    """
 
     await ensure_daily_grant(user_id)
     wallet = await ensure_wallet(user_id)
@@ -206,6 +211,9 @@ async def get_state(user_id: str) -> dict[str, Any]:
     # not the spendable balance, so it never drops when the user loses or
     # converts points to the shop.
     level, next_tier = _resolve_level(lifetime_earned, tiers)
+    game_points_for_game: int | None = None
+    if game_key:
+        game_points_for_game = await _points_for_game(user_id, game_key)
     return {
         "balance": balance,
         "lifetime_earned": lifetime_earned,
@@ -216,7 +224,25 @@ async def get_state(user_id: str) -> dict[str, Any]:
         "convertible": max(0, balance - CONVERT_FLOOR),
         "level": level,
         "next_tier": next_tier,
+        "game_points_for_game": game_points_for_game,
     }
+
+
+async def _points_for_game(user_id: str, game_key: str) -> int:
+    """Net game points settled for one game (from the settlement ledger)."""
+    rows = await db.query_raw(
+        """
+        SELECT COALESCE(SUM(delta), 0) AS total
+        FROM game_point_ledger
+        WHERE user_id = $1
+          AND source = $2
+          AND metadata->>'game_key' = $3
+        """,
+        user_id,
+        _SOURCE_GAME_SETTLE,
+        game_key,
+    )
+    return int(_field(rows[0], "total", 0) or 0) if rows else 0
 
 
 def _resolve_level(

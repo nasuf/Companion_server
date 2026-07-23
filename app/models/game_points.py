@@ -23,6 +23,9 @@ class GameWalletResponse(BaseModel):
     convertible: int
     level: GameLevelInfo | None = None
     next_tier: GameLevelInfo | None = None
+    # Net points settled for a specific game; only populated when the request
+    # scopes to a game_key (per-game display on each game screen).
+    game_points_for_game: int | None = None
 
 
 class GamePointConvertRequest(BaseModel):

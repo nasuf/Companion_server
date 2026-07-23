@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_user
 from app.models.game_points import (
@@ -14,8 +14,11 @@ router = APIRouter(prefix="/game-wallet", tags=["game-points"])
 
 
 @router.get("", response_model=GameWalletResponse)
-async def get_game_wallet(payload: dict = Depends(require_user)):
-    return await game_points.get_state(str(payload["sub"]))
+async def get_game_wallet(
+    game_key: str | None = Query(default=None, max_length=40),
+    payload: dict = Depends(require_user),
+):
+    return await game_points.get_state(str(payload["sub"]), game_key=game_key)
 
 
 @router.post("/convert", response_model=GamePointConvertResponse)
