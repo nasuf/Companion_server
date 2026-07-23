@@ -56,6 +56,18 @@ async def list_native_game_sessions(
     )
 
 
+@router.get("/sessions/latest")
+async def latest_native_game_session(
+    agent_id: str | None = Query(default=None),
+    user: dict = Depends(require_user),
+):
+    """Latest terminal session summary (status/game_key) for the game hub."""
+    return await native.get_latest_session_summary(
+        user["sub"],
+        agent_id=agent_id,
+    )
+
+
 @router.post("/sessions", response_model=NativeSessionResponse)
 async def create_native_game_session(
     data: NativeCreateSessionRequest,

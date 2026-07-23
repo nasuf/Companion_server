@@ -291,6 +291,42 @@ async def list_sessions(
     return [_as_native_session(session_support._row_to_session(row)) for row in rows]
 
 
+async def get_latest_session_summary(
+    user_id: str,
+    *,
+    agent_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Lightweight latest terminal session for the game hub header.
+
+    Selects only the status/game_key (no heavy ``result`` JSONB) so the hub's
+    "最近一局" card loads fast instead of deserializing many full sessions.
+    """
+    rows = await db.query_raw(
+        _with_supported_games(
+            """
+        SELECT status, game_key
+        FROM game_sessions
+        WHERE user_id = $1
+          AND provider = 'native'
+          AND game_key IN ({supported_game_keys})
+          AND status IN ('settled', 'aborted')
+          AND result IS NOT NULL
+          AND ($2::text IS NULL OR agent_id = $2)
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        ),
+        user_id,
+        agent_id,
+    )
+    if not rows:
+        return None
+    return {
+        "status": str(rows[0].get("status") or ""),
+        "game_key": rows[0].get("game_key"),
+    }
+
+
 async def get_session(
     session_id: str,
     *,
