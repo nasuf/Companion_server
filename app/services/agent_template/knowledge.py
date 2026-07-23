@@ -41,6 +41,7 @@ from app.services.agent_template.clone import _MEMORY_COPY_FIELDS
 from app.services.agent_template.knowledge_import import KnowledgeItem
 from app.services.agent_template.registry import count_active_clones
 from app.services.memory.provenance import KNOWLEDGE_SEED
+from app.services.memory.retrieval.knowledge_hits import knowledge_rows_cache_key
 from app.services.memory.storage.persistence import store_memory
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
@@ -132,6 +133,7 @@ async def append_knowledge_to_template(
                 existing.add(item.summary)
             else:
                 skipped += 1
+    await _bust_knowledge_rows_cache(workspace.id)
     logger.info(
         "[TEMPLATE-KNOWLEDGE] appended %d rows (%d skipped) to template %s",
         stored,
@@ -139,6 +141,17 @@ async def append_knowledge_to_template(
         template_agent_id[:8],
     )
     return {"parsed": len(items), "stored": stored, "skipped_duplicates": skipped}
+
+
+async def _bust_knowledge_rows_cache(workspace_id: str) -> None:
+    """Invalidate the literal-hit probe's per-workspace row cache after
+    writes, so a canary chat test right after a sync sees fresh rows
+    (TTL alone would delay visibility by up to 3 minutes)."""
+    try:
+        redis = await get_redis()
+        await redis.delete(knowledge_rows_cache_key(workspace_id))
+    except Exception:
+        pass
 
 
 async def _knowledge_contents(workspace_id: str) -> set[str]:
@@ -633,6 +646,7 @@ async def _sync_agent(*, template_rows: list[Any], agent_id: str, user_id: str) 
     except Exception as exc:
         logger.warning("[TEMPLATE-KSYNC] changelog write failed: %s", exc)
 
+    await _bust_knowledge_rows_cache(workspace.id)
     return len(new_rows)
 
 

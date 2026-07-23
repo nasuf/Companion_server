@@ -22,6 +22,7 @@ from app.observability.events import (
 )
 from app.services.chat.intent_dispatcher import IntentResult, IntentType
 from app.services.memory.retrieval.hybrid import hybrid_retrieve
+from app.services.memory.retrieval.knowledge_hits import probe_knowledge_memories
 from app.services.memory.retrieval.l3_awakening import search_l3_memories
 from app.services.memory.retrieval.query_patterns import (
     ai_profile_search_query,
@@ -387,6 +388,27 @@ def _post_process_retrieval(
     return classified_memories, memory_strings, graph_context
 
 
+def _merge_knowledge_hits(
+    memory_relevance: str,
+    classified_memories: list | None,
+    memory_strings: list[str] | None,
+    hits: list,
+) -> tuple[str, list | None, list[str] | None]:
+    """Union literal-hit knowledge rows into the injected memory set.
+
+    On weak relevance the label is escalated to "medium": the weak tier
+    prompt carries no memory placeholder at all, so without escalation the
+    injected knowledge would never reach the reply LLM. Medium keeps the
+    lightweight tier path while feeding user/ai memory slots.
+    """
+    if not hits:
+        return memory_relevance, classified_memories, memory_strings
+    merged = (classified_memories or []) + hits
+    strings = (memory_strings or []) + [m.text for m in hits]
+    relevance = "medium" if memory_relevance == "weak" else memory_relevance
+    return relevance, merged, strings
+
+
 async def maybe_awaken_l3(
     user_message: str,
     user_id: str,
@@ -610,6 +632,38 @@ async def fetch_parallel_context(
     classified_memories, memory_strings, graph_context = _post_process_retrieval(
         memory_relevance, retrieval_result,
     )
+
+    # Knowledge literal-hit floor: admin-published knowledge rows must stay
+    # reachable even when the relevance gate says weak (the classifier cannot
+    # know the memory bank contains these topics) or when vector ranking
+    # drops them. Deterministic and cheap; failures never break the chat.
+    # See knowledge_hits module docstring for the full rationale.
+    knowledge_hits: list = []
+    try:
+        knowledge_hits = await probe_knowledge_memories(
+            query_texts=[user_message, enhanced_query],
+            workspace_id=workspace_id,
+            exclude_texts=(
+                {m.text for m in classified_memories} if classified_memories else frozenset()
+            ),
+        )
+    except Exception as e:
+        logger.warning(f"[DEBUG-MEM] knowledge literal-hit probe failed: {e}")
+    if knowledge_hits:
+        memory_relevance, classified_memories, memory_strings = _merge_knowledge_hits(
+            memory_relevance, classified_memories, memory_strings, knowledge_hits,
+        )
+        logger.info(
+            f"[DEBUG-MEM] +{len(knowledge_hits)} knowledge literal hits "
+            f"(relevance→{memory_relevance}): "
+            + "; ".join(m.text[:40] for m in knowledge_hits),
+            extra={
+                "event": EVT_MEMORY_RETRIEVED,
+                "memory_relevance": memory_relevance,
+                "n_knowledge_hits": len(knowledge_hits),
+            },
+        )
+
     replace_latest_retrieval_selection(
         strategy="hybrid_l1_l2",
         selected=classified_memories or [],
