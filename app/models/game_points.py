@@ -69,3 +69,32 @@ class GamePointRuleResponse(BaseModel):
     game_key: str
     title: str
     rules: dict[str, Any]
+
+
+class GamePointGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1)
+    # Positive adds balance (official grant); the level is never changed.
+    amount: int = Field(gt=0)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class GamePointGrantResponse(BaseModel):
+    user_id: str
+    balance: int
+    delta: int
+
+
+class AdminGamePointLedgerItem(BaseModel):
+    id: str
+    user_id: str
+    username: str | None = None
+    delta: int
+    balance_after: int
+    source: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    lifetime_after: int
+    level_name: str | None = None
+    level_up: bool = False

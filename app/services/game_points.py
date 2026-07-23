@@ -41,6 +41,9 @@ CONVERT_RATE = 1
 _SOURCE_DAILY_GRANT = "daily_grant"
 _SOURCE_GAME_SETTLE = "game_settle"
 _SOURCE_CONVERT = "convert_to_shop"
+# Official (admin) balance grant/adjustment; never touches lifetime_earned so
+# the level is unaffected.
+_SOURCE_ADMIN_GRANT = "admin_grant"
 # Shop-side ledger source for the credited shop points.
 _SHOP_SOURCE_CONVERT = "game_point_conversion"
 
@@ -481,6 +484,131 @@ async def _record_shop_ledger(
         _SHOP_SOURCE_CONVERT,
         json.dumps(metadata or {}, ensure_ascii=False),
     )
+
+
+# ─────────────────────────── admin grant + ledger ───────────────────────────
+
+
+async def admin_grant(
+    user_id: str,
+    amount: int,
+    *,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Official balance grant/adjustment (adds ``amount`` to the balance).
+
+    Only the spendable balance changes — ``lifetime_earned`` is untouched, so the
+    game level never moves. The balance is floored at 0 (a negative adjustment
+    cannot push it below zero).
+    """
+    if amount == 0:
+        raise ValueError("invalid_amount")
+    await ensure_wallet(user_id)
+    async with db.tx() as tx:
+        locked = await tx.query_raw(
+            "SELECT balance FROM user_game_wallets WHERE user_id = $1 FOR UPDATE",
+            user_id,
+        )
+        current = int(_field(locked[0], "balance", 0) or 0)
+        new_balance = max(0, current + amount)
+        applied = new_balance - current
+        if applied == 0:
+            return {"user_id": user_id, "balance": current, "delta": 0}
+        await tx.execute_raw(
+            """
+            UPDATE user_game_wallets
+            SET balance = $2, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+            """,
+            user_id,
+            new_balance,
+        )
+        await _record_ledger(
+            user_id=user_id,
+            delta=applied,
+            balance_after=new_balance,
+            source=_SOURCE_ADMIN_GRANT,
+            metadata={"requested": amount, "note": (note or "").strip()},
+            client=tx,
+        )
+    return {"user_id": user_id, "balance": new_balance, "delta": applied}
+
+
+async def list_admin_ledger(
+    *,
+    user_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """All users' game-point change records for the admin console.
+
+    Each row carries the running ``lifetime_earned`` at that point and the level
+    it maps to, so level changes are visible inline (``level_up``). Only positive
+    game settlements (win / milestone) advance the level.
+    """
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    where = "WHERE l.user_id = $3" if user_id else ""
+    # Window running-sum of earned points (drives the level) per user, computed
+    # over the full history (before pagination) so each row's level is accurate.
+    query = f"""
+        SELECT l.id, l.user_id, u.username, l.delta, l.balance_after,
+               l.source, l.metadata, l.created_at,
+               SUM(
+                   CASE WHEN l.source = 'game_settle'
+                        THEN COALESCE((l.metadata->>'earned')::int, 0)
+                        ELSE 0 END
+               ) OVER (
+                   PARTITION BY l.user_id
+                   ORDER BY l.created_at ASC, l.id ASC
+               ) AS lifetime_after
+        FROM game_point_ledger l
+        LEFT JOIN users u ON u.id = l.user_id
+        {where}
+        ORDER BY l.created_at DESC, l.id DESC
+        LIMIT $1 OFFSET $2
+    """
+    params: list[Any] = [limit, offset]
+    if user_id:
+        params.append(user_id)
+    rows = await db.query_raw(query, *params)
+    tiers = await list_level_tiers()
+
+    def _level_name(points: int) -> str | None:
+        level, _ = _resolve_level(points, tiers)
+        return level.get("tier_name") if level else None
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        metadata = _load_json(_field(row, "metadata"))
+        lifetime_after = int(_field(row, "lifetime_after", 0) or 0)
+        source = str(_field(row, "source", ""))
+        earned = 0
+        if source == _SOURCE_GAME_SETTLE:
+            earned = int(metadata.get("earned") or 0)
+        level_after = _level_name(lifetime_after)
+        level_up = bool(
+            earned > 0 and level_after != _level_name(lifetime_after - earned)
+        )
+        created_at = _field(row, "created_at")
+        items.append(
+            {
+                "id": str(_field(row, "id", "")),
+                "user_id": str(_field(row, "user_id", "")),
+                "username": _field(row, "username"),
+                "delta": int(_field(row, "delta", 0) or 0),
+                "balance_after": int(_field(row, "balance_after", 0) or 0),
+                "source": source,
+                "metadata": metadata,
+                "created_at": created_at.isoformat()
+                if hasattr(created_at, "isoformat")
+                else str(created_at or ""),
+                "lifetime_after": lifetime_after,
+                "level_name": level_after,
+                "level_up": level_up,
+            }
+        )
+    return items
 
 
 # ─────────────────────────── admin config ───────────────────────────

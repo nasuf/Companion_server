@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.game_points import (
+    AdminGamePointLedgerItem,
     GameLevelInfo,
     GameLevelTiersPayload,
+    GamePointGrantRequest,
+    GamePointGrantResponse,
     GamePointRulePayload,
     GamePointRuleResponse,
 )
@@ -49,5 +52,30 @@ async def list_game_point_rules():
 async def update_game_point_rule(game_key: str, payload: GamePointRulePayload):
     try:
         return await game_points.update_point_rule(game_key, payload.rules)
+    except ValueError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/ledger", response_model=list[AdminGamePointLedgerItem])
+async def list_game_point_ledger(
+    user_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    return await game_points.list_admin_ledger(
+        user_id=user_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/grant", response_model=GamePointGrantResponse)
+async def grant_game_points(payload: GamePointGrantRequest):
+    try:
+        return await game_points.admin_grant(
+            payload.user_id,
+            payload.amount,
+            note=payload.note,
+        )
     except ValueError as exc:
         raise _http_error(exc) from exc
