@@ -67,6 +67,20 @@ def _today() -> date:
     return datetime.now(_TZ).date()
 
 
+def _normalize_date(value: Any) -> date | None:
+    """Coerce a raw-query date column (date / datetime / ISO string) to a date."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
 async def ensure_wallet(user_id: str) -> dict[str, Any]:
     rows = await db.query_raw(
         """
@@ -122,6 +136,9 @@ async def ensure_daily_grant(user_id: str) -> int:
 
     await ensure_wallet(user_id)
     today = _today()
+    # Prisma's raw-query builder cannot serialize a bare ``datetime.date``, so
+    # dates are passed as ISO strings and cast to ``date`` in SQL ($n::date).
+    today_iso = today.isoformat()
     async with db.tx() as tx:
         locked = await tx.query_raw(
             """
@@ -134,9 +151,7 @@ async def ensure_daily_grant(user_id: str) -> int:
         )
         row = locked[0]
         balance = int(_field(row, "balance", 0) or 0)
-        last_grant = _field(row, "last_grant_date")
-        if isinstance(last_grant, datetime):
-            last_grant = last_grant.date()
+        last_grant = _normalize_date(_field(row, "last_grant_date"))
 
         if last_grant == today:
             return balance
@@ -148,20 +163,21 @@ async def ensure_daily_grant(user_id: str) -> int:
             await tx.execute_raw(
                 """
                 UPDATE user_game_wallets
-                SET balance = $2, last_grant_date = $3, updated_at = CURRENT_TIMESTAMP
+                SET balance = $2, last_grant_date = $3::date,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = $1
                 """,
                 user_id,
                 new_balance,
-                today,
+                today_iso,
             )
             await _record_ledger(
                 user_id=user_id,
                 delta=DAILY_GRANT,
                 balance_after=new_balance,
                 source=_SOURCE_DAILY_GRANT,
-                source_id=today.isoformat(),
-                metadata={"granted_on": today.isoformat()},
+                source_id=today_iso,
+                metadata={"granted_on": today_iso},
                 client=tx,
             )
             return new_balance
@@ -169,11 +185,11 @@ async def ensure_daily_grant(user_id: str) -> int:
         await tx.execute_raw(
             """
             UPDATE user_game_wallets
-            SET last_grant_date = $2, updated_at = CURRENT_TIMESTAMP
+            SET last_grant_date = $2::date, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = $1
             """,
             user_id,
-            today,
+            today_iso,
         )
         return balance
 
