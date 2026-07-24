@@ -16,6 +16,7 @@ from app.services.notifications.presence import count_online_users, list_online_
 from app.services.operations.metrics import summarize_crisis_events, summarize_visible_use
 from app.services.proactive import triggers as proactive_triggers
 from app.services.runtime import job_queue as runtime_job_queue
+from app.services.system_metrics import collect_host_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -1380,4 +1381,118 @@ async def _compute_monitoring(days: int) -> dict:
             "buckets": message_buckets,
         },
         "cost_top_users": cost_top_users,
+    }
+
+
+async def _collect_db_metrics() -> dict:
+    """Postgres size, largest tables, and connection-pool usage."""
+    try:
+        size_rows, table_rows, conn_rows, setting_rows = await asyncio.gather(
+            db.query_raw(
+                """
+                SELECT pg_database_size(current_database())::bigint AS size_bytes,
+                       pg_size_pretty(pg_database_size(current_database())) AS size_pretty
+                """
+            ),
+            db.query_raw(
+                """
+                SELECT relname AS name,
+                       pg_total_relation_size(relid)::bigint AS total_bytes,
+                       pg_size_pretty(pg_total_relation_size(relid)) AS total_pretty,
+                       COALESCE(n_live_tup, 0)::bigint AS rows
+                FROM pg_stat_user_tables
+                ORDER BY pg_total_relation_size(relid) DESC
+                LIMIT 8
+                """
+            ),
+            db.query_raw(
+                """
+                SELECT count(*)::int AS active
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                """
+            ),
+            db.query_raw(
+                "SELECT current_setting('max_connections')::int AS max_connections"
+            ),
+        )
+    except Exception as e:  # DB blip must degrade, not 500 the dashboard.
+        logger.warning("resource db metrics failed: %s", e)
+        return {"available": False}
+
+    size = size_rows[0] if size_rows else {}
+    active = conn_rows[0]["active"] if conn_rows else None
+    max_conn = setting_rows[0]["max_connections"] if setting_rows else None
+    return {
+        "available": True,
+        "size_bytes": size.get("size_bytes"),
+        "size_pretty": size.get("size_pretty"),
+        "largest_tables": [
+            {
+                "name": r["name"],
+                "total_bytes": r["total_bytes"],
+                "total_pretty": r["total_pretty"],
+                "rows": r["rows"],
+            }
+            for r in (table_rows or [])
+        ],
+        "connections": {
+            "active": active,
+            "max": max_conn,
+            "percent": (
+                round(active / max_conn * 100, 1)
+                if active is not None and max_conn
+                else None
+            ),
+        },
+    }
+
+
+async def _collect_redis_metrics() -> dict:
+    """Redis memory / keys / hit-rate from INFO (best-effort)."""
+    try:
+        redis = await get_redis()
+        info = await redis.info()
+        dbsize = await redis.dbsize()
+    except Exception as e:
+        logger.warning("resource redis metrics failed: %s", e)
+        return {"available": False}
+
+    used = info.get("used_memory")
+    maxmem = info.get("maxmemory") or 0
+    hits = info.get("keyspace_hits", 0) or 0
+    misses = info.get("keyspace_misses", 0) or 0
+    total_ops = hits + misses
+    return {
+        "available": True,
+        "used_memory": used,
+        "maxmemory": maxmem or None,
+        "mem_percent": round(used / maxmem * 100, 1) if used and maxmem else None,
+        "keys": dbsize,
+        "connected_clients": info.get("connected_clients"),
+        "hits": hits,
+        "misses": misses,
+        "hit_rate": round(hits / total_ops * 100, 1) if total_ops else None,
+        "evicted_keys": info.get("evicted_keys"),
+        "uptime_seconds": info.get("uptime_in_seconds"),
+    }
+
+
+@router.get("/resources")
+async def resources(_: dict = Depends(require_admin_jwt)):
+    """服务器资源监控 — 主机 CPU/内存/磁盘/网络 + Postgres + Redis 健康.
+
+    实时采集, 刻意不缓存 (资源指标需即时反映)。任一维度采集失败都降级为
+    null / available=false, 不影响其他维度返回。
+    """
+    host, database, redis_metrics = await asyncio.gather(
+        collect_host_metrics(),
+        _collect_db_metrics(),
+        _collect_redis_metrics(),
+    )
+    return {
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        **host,
+        "database": database,
+        "redis": redis_metrics,
     }
