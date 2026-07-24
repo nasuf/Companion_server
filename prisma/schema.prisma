@@ -278,6 +278,27 @@ model ChatMessageAttachment {
   @@map("chat_message_attachments")
 }
 
+// Speech-to-text usage meter. One row per successful /chat/transcribe call,
+// covering BOTH display modes so voice-message ("voice") and voice-to-text
+// ("text") durations can be reported separately. Deliberately FK-free: it is a
+// standalone ledger and must survive user/conversation deletion (and accept
+// historical backfill for rows whose owners no longer exist).
+model SpeechUsage {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  conversationId  String   @map("conversation_id")
+  displayMode     String   @map("display_mode") // "voice" | "text"
+  durationSeconds Int      @map("duration_seconds")
+  model           String?
+  requestId       String?  @map("request_id")
+  source          String   @default("live") // "live" | "backfill"
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([displayMode, createdAt])
+  @@index([userId, createdAt])
+  @@map("speech_usage")
+}
+
 model ChatLinkCard {
   id             String       @id @default(uuid())
   userId         String       @map("user_id")

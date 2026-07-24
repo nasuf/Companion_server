@@ -407,9 +407,16 @@ async def media_usage(
 ):
     """语音/图片消息用量: 全局汇总 + 按用户明细 (仅列出有过使用的用户).
 
-    数据源 chat_message_attachments: kind='audio' (语音, duration_seconds 有时长)
-    / kind='image' (图片). days=0 = 全部历史. limit/offset 服务端分页用户明细
-    (按使用条数降序, user_id 兜底排序保证翻页稳定); user_total 是真实用户总数.
+    数据源:
+    - chat_message_attachments: kind='audio' = 纯语音 (发出去的语音气泡, voice) /
+      kind='image' = 图片. duration_seconds 有时长.
+    - speech_usage: display_mode='text' = 语音转文字 (转写后当文字发, 不落附件表),
+      单独计量其时长 (voice_text).
+
+    days=0 = 全部历史. limit/offset 服务端分页用户明细 (按使用条数降序, user_id
+    兜底排序保证翻页稳定); user_total 是真实用户总数. 注意: 用户明细锚定附件表,
+    只用过「语音转文字」而从未发过语音气泡/图片的用户不会出现在明细行 (全局
+    voice_text 汇总仍准确).
     """
     start = _window_start(days)
     end = datetime.now(timezone.utc)
@@ -420,7 +427,21 @@ async def media_usage(
         clauses.append(f"a.created_at >= ${len(params)}::timestamp")
     where_sql = " AND ".join(clauses)
 
-    totals_rows, user_rows, user_total_rows = await asyncio.gather(
+    # Voice-to-text lives in speech_usage (display_mode='text'), not attachments.
+    su_clauses = ["display_mode = 'text'"]
+    su_params: list = []
+    if start is not None:
+        su_params.append(start.replace(tzinfo=None).isoformat())
+        su_clauses.append(f"created_at >= ${len(su_params)}::timestamp")
+    su_where = " AND ".join(su_clauses)
+
+    (
+        totals_rows,
+        user_rows,
+        user_total_rows,
+        text_totals_rows,
+        text_user_rows,
+    ) = await asyncio.gather(
         db.query_raw(
             f"""
             SELECT
@@ -462,11 +483,35 @@ async def media_usage(
             """,
             *params,
         ),
+        db.query_raw(
+            f"""
+            SELECT
+                COUNT(*)::int AS count,
+                COALESCE(SUM(duration_seconds), 0)::bigint AS total_seconds
+            FROM speech_usage
+            WHERE {su_where}
+            """,
+            *su_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                user_id,
+                COUNT(*)::int AS voice_text_count,
+                COALESCE(SUM(duration_seconds), 0)::bigint AS voice_text_seconds
+            FROM speech_usage
+            WHERE {su_where}
+            GROUP BY user_id
+            """,
+            *su_params,
+        ),
     )
 
     by_kind = {str(r["kind"]): r for r in totals_rows}
     audio = by_kind.get("audio") or {}
     image = by_kind.get("image") or {}
+    text_total = text_totals_rows[0] if text_totals_rows else {}
+    text_by_user = {str(r["user_id"]): r for r in text_user_rows}
     return {
         "window": {
             "start": start.isoformat() if start else None,
@@ -477,6 +522,10 @@ async def media_usage(
             "count": int(audio.get("count", 0) or 0),
             "total_seconds": int(audio.get("total_seconds", 0) or 0),
             "total_bytes": int(audio.get("total_bytes", 0) or 0),
+        },
+        "voice_text": {
+            "count": int(text_total.get("count", 0) or 0),
+            "total_seconds": int(text_total.get("total_seconds", 0) or 0),
         },
         "image": {
             "count": int(image.get("count", 0) or 0),
@@ -490,6 +539,12 @@ async def media_usage(
                 "voice_count": int(r["voice_count"] or 0),
                 "voice_seconds": int(r["voice_seconds"] or 0),
                 "voice_bytes": int(r["voice_bytes"] or 0),
+                "voice_text_count": int(
+                    (text_by_user.get(str(r["user_id"])) or {}).get("voice_text_count", 0) or 0
+                ),
+                "voice_text_seconds": int(
+                    (text_by_user.get(str(r["user_id"])) or {}).get("voice_text_seconds", 0) or 0
+                ),
                 "image_count": int(r["image_count"] or 0),
                 "image_bytes": int(r["image_bytes"] or 0),
             }

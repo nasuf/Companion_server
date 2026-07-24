@@ -31,6 +31,7 @@ from app.services.speech_to_text.audio import (
     validate_audio,
     validate_chat_m4a_duration,
 )
+from app.services.speech_to_text.usage import record_speech_usage
 
 router = APIRouter(prefix="/chat", tags=["speech-to-text"])
 logger = logging.getLogger(__name__)
@@ -95,6 +96,17 @@ async def transcribe_chat_audio(
         raise HTTPException(status_code=422, detail="没有识别到清晰的语音") from exc
     except SpeechTranscriptionProviderError as exc:
         raise HTTPException(status_code=502, detail="语音识别暂时不可用，请重试") from exc
+
+    fire_background(
+        record_speech_usage(
+            user_id=user_id,
+            conversation_id=data.conversation_id,
+            display_mode=data.display_mode,
+            duration_seconds=duration_seconds,
+            model=result.model,
+            request_id=result.request_id,
+        )
+    )
 
     if data.display_mode == "text":
         logger.info(

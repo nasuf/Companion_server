@@ -1,7 +1,8 @@
 """Tests for GET /admin-api/stats/media-usage (voice/image usage stats).
 
-The endpoint issues three raw SQL aggregations over chat_message_attachments
-(totals by kind / per-user rollup / distinct-user count) via asyncio.gather —
+The endpoint issues five raw SQL aggregations via asyncio.gather — three over
+chat_message_attachments (totals by kind / per-user rollup / distinct-user
+count) plus two over speech_usage (voice-to-text totals / per-user rollup) —
 the AsyncMock side_effect list maps to that call order.
 """
 
@@ -38,20 +39,32 @@ async def test_media_usage_aggregates_totals_and_users(monkeypatch):
         },
     ]
     user_total_rows = [{"user_total": 2}]
-    fake_db = _fake_db([totals_rows, user_rows, user_total_rows])
+    # speech_usage voice-to-text aggregations (global + per-user).
+    text_totals_rows = [{"count": 5, "total_seconds": 40}]
+    text_user_rows = [
+        {"user_id": "u1", "voice_text_count": 5, "voice_text_seconds": 40},
+    ]
+    fake_db = _fake_db(
+        [totals_rows, user_rows, user_total_rows, text_totals_rows, text_user_rows]
+    )
     monkeypatch.setattr(stats_mod, "db", fake_db)
 
     resp = await stats_mod.media_usage(days=7, limit=200, offset=0)
 
     assert resp["voice"] == {"count": 4, "total_seconds": 62, "total_bytes": 145_408}
+    assert resp["voice_text"] == {"count": 5, "total_seconds": 40}
     assert resp["image"] == {"count": 6, "total_bytes": 25_165_824}
     assert resp["user_total"] == 2
     assert len(resp["users"]) == 2
+    # u1 has voice-to-text usage merged in; u2 has none → zeros.
     assert resp["users"][0] == {
         "user_id": "u1", "username": "alice",
         "voice_count": 3, "voice_seconds": 50, "voice_bytes": 100_000,
+        "voice_text_count": 5, "voice_text_seconds": 40,
         "image_count": 2, "image_bytes": 20_000_000,
     }
+    assert resp["users"][1]["voice_text_count"] == 0
+    assert resp["users"][1]["voice_text_seconds"] == 0
     assert resp["window"]["days"] == 7
     assert resp["window"]["start"] is not None
 
@@ -101,8 +114,9 @@ async def test_media_usage_window_filter_binds_start_param(monkeypatch):
 
     await stats_mod.media_usage(days=3, limit=10, offset=0)
 
-    # All three queries share the same single timestamp bind param.
-    assert len(captured_params) == 3
+    # All five queries (3 attachment + 2 speech_usage) share the same single
+    # timestamp bind param.
+    assert len(captured_params) == 5
     assert all(len(params) == 1 for params in captured_params)
 
 
