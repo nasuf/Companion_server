@@ -212,16 +212,22 @@ async def probe_knowledge_memories(
 ) -> list[ClassifiedMemory]:
     """Literal-hit knowledge rows as ready-to-inject AI-slot memories.
 
-    Gram sources (2026-07-24 rework — UNION, no suppression):
+    Gram sources (2026-07-24 rework — two-phase union):
     - primary: current message + enhanced_query (the relevance LLM's ellipsis
       restoration when it worked: "那门票贵不贵" → "西甲联赛的门票价格")
     - context: for short follow-up questions, the last few turns' raw text is
-      ALWAYS added. Suppressing context whenever the primary path had any hit
-      proved fragile — a junk restoration ("AI知道的那个东西") once produced a
-      single false hit that blocked the 西甲 topic block, and the reply fell
-      back to world knowledge (西班牙足球甲级联赛). With a union the two
-      sources rank together: a good restoration dominates naturally, a junk
-      one is out-voted by longer topical grams (足球联赛) from the context.
+      also probed. Suppressing context whenever the primary path had any hit
+      proved fragile (a junk "AI知道的那个东西" restoration once blocked the
+      西甲 topic block), but ranking both sources in ONE pool proved just as
+      fragile the other way: asking 「听说有霸王餐？」 right after a 西甲
+      chat let the context's longer grams (佛山西甲, 4 chars) out-rank the
+      message's own 霸王餐 (3 chars) and fill the whole cap with event rows —
+      the reply then denied the meal activity existed.
+
+    Selection is therefore two-phase: rows named by the CURRENT message
+    (primary grams) take slots first — what the user asks now beats what was
+    chatted before — and context-matched rows fill the remainder. A junk
+    primary hit costs one slot but can no longer evict the context block.
 
     Rows matched by a primary gram carry rank_reason "knowledge_literal_hit";
     context-only matches carry "knowledge_context_hit" (diagnostics).
@@ -234,43 +240,51 @@ async def probe_knowledge_memories(
         for text in context_texts:
             context_grams |= extract_topic_grams(text)
         context_grams -= primary_grams
-    all_grams = primary_grams | context_grams
-    if not all_grams:
+    if not primary_grams and not context_grams:
         return []
     rows = await load_knowledge_rows(workspace_id)
     if not rows:
         return []
 
-    # Context involvement means the question names its topic only in prior
-    # turns — inject the whole topic block so the reply LLM can pick the
-    # attribute (time/venue/tickets) being asked about.
+    # Context involvement means the question leans on prior turns — widen the
+    # cap so a whole topic block fits alongside directly-named rows.
     cap = _CONTEXT_MAX_HITS if context_grams else max_hits
     memories: list[ClassifiedMemory] = []
-    for row in find_literal_hits(all_grams, rows, max_hits=cap + len(exclude_texts)):
-        content = row.get("content") or ""
-        if not content or content in exclude_texts:
-            continue
-        folded = content.casefold()
-        reason = (
-            "knowledge_literal_hit"
-            if any(gram in folded for gram in primary_grams)
-            else "knowledge_context_hit"
-        )
-        memories.append(
-            ClassifiedMemory(
-                text=content,
-                relevance="medium",
-                score=_HIT_SCORE,
-                id=str(row.get("id") or ""),
-                importance=_KNOWLEDGE_IMPORTANCE,
-                similarity=_HIT_SCORE,
-                main_category="生活",
-                sub_category="工作",
-                display_score=_HIT_SCORE,
-                rank_reasons=[reason],
-                source="ai",
+    taken_ids: set[str] = set()
+
+    def _take(hit_rows: list[dict[str, Any]], reason: str) -> None:
+        for row in hit_rows:
+            if len(memories) >= cap:
+                return
+            content = row.get("content") or ""
+            row_id = str(row.get("id") or "")
+            if not content or content in exclude_texts or row_id in taken_ids:
+                continue
+            taken_ids.add(row_id)
+            memories.append(
+                ClassifiedMemory(
+                    text=content,
+                    relevance="medium",
+                    score=_HIT_SCORE,
+                    id=row_id,
+                    importance=_KNOWLEDGE_IMPORTANCE,
+                    similarity=_HIT_SCORE,
+                    main_category="生活",
+                    sub_category="工作",
+                    display_score=_HIT_SCORE,
+                    rank_reasons=[reason],
+                    source="ai",
+                )
             )
+
+    if primary_grams:
+        _take(
+            find_literal_hits(primary_grams, rows, max_hits=cap + len(exclude_texts)),
+            "knowledge_literal_hit",
         )
-        if len(memories) >= cap:
-            break
+    if context_grams and len(memories) < cap:
+        _take(
+            find_literal_hits(context_grams, rows, max_hits=cap + len(exclude_texts) + len(taken_ids)),
+            "knowledge_context_hit",
+        )
     return memories

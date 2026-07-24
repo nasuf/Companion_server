@@ -230,6 +230,40 @@ NASHISHA_CONTEXT = [
 ]
 
 
+MEAL_ROWS = [
+    {"id": "m1", "content": "我们公司的活动名称：霸王餐"},
+    {"id": "m2", "content": "我们公司的活动领取方式：在现场完成线下游戏或活动项目、达成目标后，由工作人员扫码激活你的霸王餐券二维码"},
+    {"id": "m3", "content": "我们公司的活动次数限制：每个账户只能激活一次、核销一次霸王餐券；每天全场可核销的霸王餐券数量上限是500个"},
+]
+
+
+@pytest.mark.asyncio
+async def test_current_message_topic_beats_context_topic():
+    """Trace pinned (2026-07-24 17:44): 「听说有霸王餐？」 asked right after a
+    西甲 chat injected 8 event rows and ZERO meal rows — the context's longer
+    grams (佛山西甲) out-ranked the message's own 霸王餐 and the reply denied
+    the activity existed. Message-named rows must take slots first."""
+    rows = ROWS + MEAL_ROWS
+    context = [
+        "球队名单我记不太全哦",
+        "你可以去微信小程序「佛山西甲」查 上面信息都很全的",
+    ]
+    with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=rows)):
+        memories = await kh.probe_knowledge_memories(
+            user_message="听说有霸王餐？",
+            context_texts=context,
+            workspace_id="ws-1",
+        )
+    texts = [m.text for m in memories]
+    meal_idx = [i for i, t in enumerate(texts) if "霸王餐" in t]
+    event_idx = [i for i, t in enumerate(texts) if "霸王餐" not in t]
+    # Every meal row is present, carries the literal reason, and ranks before
+    # any context-only event row.
+    assert len(meal_idx) == len(MEAL_ROWS)
+    assert all(memories[i].rank_reasons == ["knowledge_literal_hit"] for i in meal_idx)
+    assert not event_idx or max(meal_idx) < min(event_idx)
+
+
 @pytest.mark.asyncio
 async def test_junk_enhanced_query_no_longer_blinds_context():
     """Trace cedba0cc pinned: '那是啥' + enhanced 'AI知道的那个东西' answered
