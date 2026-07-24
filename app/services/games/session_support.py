@@ -278,6 +278,20 @@ async def _write_game_message(
             "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended($1, 0))",
             lock_key,
         )
+        # The chat projection is a best-effort UI mirror. If the conversation was
+        # deleted (dev cleanup / user removed the chat) the INSERT would violate
+        # messages_conversation_id_fkey — a non-transient error that would retry
+        # and flood the logs on every replayed game event. Skip gracefully.
+        conversation_exists = await tx.query_raw(
+            "SELECT 1 AS ok FROM conversations WHERE id = $1 LIMIT 1",
+            conversation_id,
+        )
+        if not conversation_exists:
+            logger.debug(
+                "skip game chat projection; conversation gone conversation_id=%s",
+                conversation_id,
+            )
+            return "", False
         existing = await tx.query_raw(
             """
             SELECT id

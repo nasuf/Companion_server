@@ -116,3 +116,44 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
     ws_payload = send_event.await_args.args[2]
     assert ws_payload["game_title"] == "围棋"
     assert "mg_id" not in ws_payload
+
+
+@pytest.mark.asyncio
+async def test_write_game_message_skips_when_conversation_deleted(monkeypatch):
+    """A deleted conversation must not trigger the messages FK violation +
+    3x retry + logger.exception flood; the projection is best-effort."""
+
+    queries: list[str] = []
+
+    class _FakeTx:
+        async def query_raw(self, query, *args):
+            queries.append(query)
+            if "pg_advisory_xact_lock" in query:
+                return [{"locked": 1}]
+            if "FROM conversations WHERE id" in query:
+                return []  # conversation was deleted
+            raise AssertionError(f"unexpected query after conversation check: {query}")
+
+    class _FakeTxCtx:
+        async def __aenter__(self):
+            return _FakeTx()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeDb:
+        def tx(self):
+            return _FakeTxCtx()
+
+    monkeypatch.setattr(session_support, "db", _FakeDb())
+
+    message_id, inserted = await session_support._write_game_message(
+        conversation_id="conversation-gone",
+        role="assistant",
+        content="hi",
+        metadata={"kind": "game_status", "session_id": "s1", "game_status": "ended"},
+    )
+
+    assert (message_id, inserted) == ("", False)
+    assert not any("INSERT INTO messages" in q for q in queries)
+    assert not any("FROM messages" in q for q in queries)
