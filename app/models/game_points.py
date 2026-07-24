@@ -86,10 +86,17 @@ class GamePointGrantResponse(BaseModel):
     delta: int
 
 
+class AdminUserSearchItem(BaseModel):
+    user_id: str
+    username: str
+    nickname: str | None = None
+
+
 class AdminGamePointLedgerItem(BaseModel):
     id: str
     user_id: str
     username: str | None = None
+    nickname: str | None = None
     delta: int
     balance_after: int
     source: str

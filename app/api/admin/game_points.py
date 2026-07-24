@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.jwt_auth import require_admin_jwt
 from app.models.game_points import (
     AdminGamePointLedgerItem,
+    AdminUserSearchItem,
     GameLevelInfo,
     GameLevelTiersPayload,
     GamePointGrantRequest,
@@ -67,6 +68,14 @@ async def list_game_point_ledger(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/users", response_model=list[AdminUserSearchItem])
+async def search_grant_users(
+    q: str = Query(default=""),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    return await game_points.search_users(q, limit=limit)
 
 
 @router.post("/grant", response_model=GamePointGrantResponse)

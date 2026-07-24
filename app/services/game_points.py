@@ -489,6 +489,60 @@ async def _record_shop_ledger(
 # ─────────────────────────── admin grant + ledger ───────────────────────────
 
 
+async def search_users(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    """Fuzzy-search users for the grant modal by username / id / 微信昵称 / 手机号."""
+    from app.services.agent_template.registry import TEMPLATE_SYSTEM_USERNAME
+
+    q = query.strip()
+    if not q:
+        return []
+    limit = min(max(limit, 1), 50)
+    pattern = f"%{q}%"
+    rows = await db.query_raw(
+        """
+        SELECT u.id, u.username,
+               (
+                   SELECT ai.raw_profile->>'nickname'
+                   FROM auth_identities ai
+                   WHERE ai.user_id = u.id AND ai.provider = 'wechat'
+                   ORDER BY ai.updated_at DESC
+                   LIMIT 1
+               ) AS nickname
+        FROM users u
+        WHERE u.username <> $2
+          AND (
+                u.username ILIKE $1
+                OR u.id ILIKE $1
+                OR EXISTS (
+                    SELECT 1 FROM auth_identities ai
+                    WHERE ai.user_id = u.id
+                      AND ai.provider = 'wechat'
+                      AND ai.raw_profile->>'nickname' ILIKE $1
+                )
+                OR EXISTS (
+                    SELECT 1 FROM auth_identities ai
+                    WHERE ai.user_id = u.id
+                      AND ai.provider = 'phone'
+                      AND ai.provider_account_id ILIKE $1
+                )
+          )
+        ORDER BY u.created_at DESC
+        LIMIT $3
+        """,
+        pattern,
+        TEMPLATE_SYSTEM_USERNAME,
+        limit,
+    )
+    return [
+        {
+            "user_id": str(_field(row, "id", "")),
+            "username": str(_field(row, "username", "") or ""),
+            "nickname": _field(row, "nickname"),
+        }
+        for row in rows
+    ]
+
+
 async def admin_grant(
     user_id: str,
     amount: int,
@@ -554,6 +608,13 @@ async def list_admin_ledger(
     query = f"""
         SELECT l.id, l.user_id, u.username, l.delta, l.balance_after,
                l.source, l.metadata, l.created_at,
+               (
+                   SELECT ai.raw_profile->>'nickname'
+                   FROM auth_identities ai
+                   WHERE ai.user_id = l.user_id AND ai.provider = 'wechat'
+                   ORDER BY ai.updated_at DESC
+                   LIMIT 1
+               ) AS nickname,
                SUM(
                    CASE WHEN l.source = 'game_settle'
                         THEN COALESCE((l.metadata->>'earned')::int, 0)
@@ -596,6 +657,7 @@ async def list_admin_ledger(
                 "id": str(_field(row, "id", "")),
                 "user_id": str(_field(row, "user_id", "")),
                 "username": _field(row, "username"),
+                "nickname": _field(row, "nickname"),
                 "delta": int(_field(row, "delta", 0) or 0),
                 "balance_after": int(_field(row, "balance_after", 0) or 0),
                 "source": source,
