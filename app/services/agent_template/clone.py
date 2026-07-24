@@ -127,28 +127,38 @@ async def _clone_ai_memories(
 
     await db.aimemory.create_many(data=new_rows)
 
-    # Copy embeddings row-by-row (dozens of L1 rows; no LLM involved).
+    # Copy embeddings in a single batched INSERT ... SELECT. A per-row loop here
+    # is an N+1 round-trip storm (one query per memory) that holds a DB
+    # connection for the whole clone and starves the small pool under signup
+    # bursts. The VALUES join maps each new id to its template embedding in one
+    # statement; a template row without an embedding is simply skipped by the
+    # JOIN, and ON CONFLICT keeps the copy idempotent.
     copied = 0
-    for template_id, new_id in id_pairs:
-        try:
-            await db.execute_raw(
-                """
-                INSERT INTO memory_embeddings (memory_id, embedding)
-                SELECT $1, embedding FROM memory_embeddings WHERE memory_id = $2
-                ON CONFLICT (memory_id) DO NOTHING
-                """,
-                new_id,
-                template_id,
-            )
-            copied += 1
-        except Exception as exc:
-            # A missing embedding must not fail the whole clone; the row still
-            # exists and can be re-embedded lazily later.
-            logger.warning(
-                "[AGENT-CLONE] embedding copy failed for memory %s: %s",
-                new_id[:8],
-                exc,
-            )
+    try:
+        values_clause = ",".join(
+            f"(${i * 2 + 1},${i * 2 + 2})" for i in range(len(id_pairs))
+        )
+        flat_args: list[str] = []
+        for template_id, new_id in id_pairs:
+            flat_args.extend((new_id, template_id))
+        copied = await db.execute_raw(
+            f"""
+            INSERT INTO memory_embeddings (memory_id, embedding)
+            SELECT v.new_id::text, e.embedding
+            FROM (VALUES {values_clause}) AS v(new_id, template_id)
+            JOIN memory_embeddings e ON e.memory_id = v.template_id::text
+            ON CONFLICT (memory_id) DO NOTHING
+            """,
+            *flat_args,
+        )
+    except Exception as exc:
+        # A batch embedding-copy failure must not fail the whole clone; the rows
+        # still exist and can be re-embedded lazily later.
+        logger.warning(
+            "[AGENT-CLONE] batch embedding copy failed for workspace %s: %s",
+            new_workspace_id[:8],
+            exc,
+        )
     logger.info(
         "[AGENT-CLONE] copied %d memories (%d embeddings) into workspace %s",
         len(new_rows),

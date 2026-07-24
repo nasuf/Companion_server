@@ -90,12 +90,12 @@ Optional:
 POSTGRES_USER=companion
 POSTGRES_DB=companion
 POSTGRES_PASSWORD=<strong-url-safe-password>
-DATABASE_URL=postgresql://companion:<password>@postgres:5432/companion?connection_limit=3&pool_timeout=30&connect_timeout=30
+DATABASE_URL=postgresql://companion:<password>@postgres:5432/companion?connection_limit=12&pool_timeout=30&connect_timeout=30
 DIRECT_DATABASE_URL=postgresql://companion:<password>@postgres:5432/companion?connection_limit=1&pool_timeout=60&connect_timeout=30
 MIGRATION_DATABASE_URL=postgresql://companion:<password>@postgres:5432/companion?connection_limit=1&pool_timeout=60&connect_timeout=30
-DB_CONNECTION_LIMIT=3
-DB_CONNECTION_LIMIT_MAX=5
-DB_MAX_CONCURRENT_QUERIES=3
+DB_CONNECTION_LIMIT=12
+DB_CONNECTION_LIMIT_MAX=15
+DB_MAX_CONCURRENT_QUERIES=10
 DB_QUERY_MAX_RETRIES=4
 ```
 
