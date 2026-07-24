@@ -170,6 +170,10 @@ from app.services.mbti import get_mbti
 from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
 from app.services.proactive.state import start_or_restart_proactive_session
 from app.services.runtime.tasks import fire_background as _fire_background
+from app.services.meal_voucher_chat import (
+    finalize_meal_voucher_card,
+    prepare_meal_voucher_card,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1179,6 +1183,13 @@ async def stream_chat_response(
                 await _cancel_l3_task()
                 return
 
+        meal_card_decision = await prepare_meal_voucher_card(
+            conversation_id=conversation_id,
+            user_message=user_message,
+            classified_memories=classified_memories,
+        )
+        response_diagnostics["meal_voucher_card_state"] = meal_card_decision.state
+
         # 5B.4: Get patience prompt instruction (reuse value from check_boundary)
         patience_instruction = await get_patience_prompt_instruction(cached_patience)
 
@@ -1312,6 +1323,7 @@ async def stream_chat_response(
                 relation_meta_line=relation_meta_line,
                 ai_mood_text=ai_mood_text,
                 expression_habits=expression_habits or None,
+                meal_voucher_card_state=meal_card_decision.state,
                 last_reply_count=last_reply_count,
                 diagnostics=prompt_diagnostics,
             )
@@ -1397,6 +1409,7 @@ async def stream_chat_response(
             reply_emotion_fn=_ai_reply_emotion,
             # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
             reengagement_gap_seconds=reengagement_gap_seconds,
+            force_main_prompt=meal_card_decision.state != "none",
             diagnostics=response_diagnostics,
         )
 
@@ -1436,8 +1449,18 @@ async def stream_chat_response(
             reply_emotion=reply_emotion,
             reply_is_fallback=reply_is_fallback,
             conversation_id=conversation_id,
+            component_card=meal_card_decision.component_card,
         ):
             yield evt
+
+        await finalize_meal_voucher_card(
+            conversation_id=conversation_id,
+            decision=meal_card_decision,
+            emitted=any(
+                isinstance(reply, dict) and reply.get("component_card")
+                for reply in emitted_replies
+            ),
+        )
 
         # Persist replies immediately; trace links become clickable only after public share completes.
         # 把 covered_until_user_ts 注入首条 reply, save_replies 会写入 metadata.

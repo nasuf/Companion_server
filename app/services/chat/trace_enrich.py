@@ -88,6 +88,8 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.memory_label_profile_context",
     "chat.memory_label_safety",
     "chat.memory_section_body",
+    "chat.meal_voucher_card_first",
+    "chat.meal_voucher_card_repeat",
     "chat.music_context_section",
     "chat.personality_section",
     "chat.portrait_section",

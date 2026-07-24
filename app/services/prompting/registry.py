@@ -32,6 +32,8 @@ from app.services.prompting.defaults import (
     CHAT_MEMORY_LABEL_OTHER_PROMPT,
     CHAT_MEMORY_LABEL_PROFILE_CONTEXT_PROMPT,
     CHAT_MEMORY_LABEL_SAFETY_PROMPT,
+    CHAT_MEAL_VOUCHER_CARD_FIRST_PROMPT,
+    CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT,
     CHAT_AI_MOOD_SECTION_PROMPT,
     CHAT_EXPRESSION_HABITS_SECTION_PROMPT,
     CHAT_MEMORY_SECTION_BODY_PROMPT,
@@ -330,6 +332,18 @@ PROMPT_DEFINITIONS = [
         "chat.memory_section_body", "记忆段落说明", "聊天热路径", "记忆",
         "主回复 system prompt 的「你记得的事情」段固定说明。运行时注入 {memory_groups}。",
         CHAT_MEMORY_SECTION_BODY_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.meal_voucher_card_first", "霸王餐券卡片·首次发送", "聊天热路径", "霸王餐",
+        "用户首次询问霸王餐且系统将在本轮附带入口卡片时注入。"
+        "指引自然回答后提示点击卡片进入「我的」查看二维码。",
+        CHAT_MEAL_VOUCHER_CARD_FIRST_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.meal_voucher_card_repeat", "霸王餐券卡片·已发送", "聊天热路径", "霸王餐",
+        "同一对话已发过霸王餐入口卡片时注入。禁止重复发卡，"
+        "需要入口时引导点击之前的卡片或底部「我的」。",
+        CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT,
     ),
     PromptDefinition(
         "chat.time_memories_section", "时间相关记忆段落", "聊天热路径", "记忆",

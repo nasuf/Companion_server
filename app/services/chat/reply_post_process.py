@@ -185,6 +185,7 @@ async def emit_replies(
     reply_emotion: dict | None = None,
     reply_is_fallback: bool = False,
     conversation_id: str | None = None,
+    component_card: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """spec §5/§6.4-§6.5：延迟解释 + emoji/sticker + reply SSE 事件流。
 
@@ -316,6 +317,8 @@ async def emit_replies(
             # spec-audit: 主 LLM + Ollama 全挂, 走了静态兜底文本;
             # 前端可据此显示"重新回答"按钮或隐藏 emoji 等非必要装饰.
             data["reply_failed"] = True
+        if component_card is not None and normal_reply_count == 0:
+            data["component_card"] = component_card
         emitted_replies.append(data)
         normal_reply_count += 1
         yield {"event": "reply", "data": json.dumps(data)}

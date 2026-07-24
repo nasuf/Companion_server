@@ -79,6 +79,37 @@ async def test_emit_replies_caps_one_emoji_per_turn():
 
 
 @pytest.mark.asyncio
+async def test_emit_replies_attaches_component_card_to_first_normal_reply_only():
+    emitted: list[dict] = []
+    card = {"version": 1, "type": "meal_voucher"}
+    target = "app.services.chat.reply_post_process"
+    with (
+        patch(f"{target}.should_add_emoji", return_value=False),
+        patch(f"{target}.should_add_sticker", return_value=False),
+        patch(f"{target}._load_recent_emojis", AsyncMock(return_value=set())),
+        patch(f"{target}.actual_delay_seconds", return_value=None),
+        patch(f"{target}.asyncio.sleep", AsyncMock()),
+    ):
+        async for _ in emit_replies(
+            ["第一条", "第二条"],
+            reply_context=None,
+            reply_index_offset=0,
+            sub_intent_mode=False,
+            agent=None,
+            user_message="霸王餐怎么参加",
+            delay_reply_fn=AsyncMock(),
+            fallback_fn=AsyncMock(),
+            emitted_replies=emitted,
+            conversation_id="conv-1",
+            component_card=card,
+        ):
+            pass
+
+    assert emitted[0]["component_card"] == card
+    assert "component_card" not in emitted[1]
+
+
+@pytest.mark.asyncio
 async def test_load_recent_emojis_redis_failure_returns_empty():
     with patch(
         "app.redis_client.get_redis",

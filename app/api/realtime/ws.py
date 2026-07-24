@@ -103,6 +103,7 @@ def _sanitize_component_card(raw: object) -> dict | None:
         "external_link",
         "offline_activity",
         "offline_gift",
+        "meal_voucher",
     }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
@@ -227,6 +228,20 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         if not payload.get(required_key):
             return None
         return payload
+    if card_type == "meal_voucher":
+        payload = {}
+        for key, limit in (
+            ("target_tab", 40),
+            ("target_section", 80),
+            ("fallback_text", 240),
+            ("native_status", 40),
+            ("campaign_ends_at", 80),
+            ("native_message", 300),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        return payload or None
     return None
 
 

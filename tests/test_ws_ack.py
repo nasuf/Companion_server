@@ -152,6 +152,37 @@ def test_sanitize_component_card_allows_offline_gift_payload():
     }
 
 
+def test_sanitize_component_card_allows_meal_voucher_payload():
+    card = ws_mod._sanitize_component_card({
+        "type": "meal_voucher",
+        "title": "霸王餐券",
+        "subtitle": "现场通关后 · 工作人员扫码激活",
+        "body": "点击进入「我的」，出示你的霸王餐券二维码",
+        "footer": "去「我的」查看",
+        "accent": "#FF7A1A",
+        "payload": {
+            "target_tab": "profile",
+            "target_section": "meal_voucher",
+            "fallback_text": "前往「我的」查看二维码",
+            "native_status": "ended",
+            "campaign_ends_at": "2026-08-24T00:00:00+08:00",
+            "native_message": "活动已结束",
+            "ignored": "x",
+        },
+    })
+
+    assert card is not None
+    assert card["type"] == "meal_voucher"
+    assert card["payload"] == {
+        "target_tab": "profile",
+        "target_section": "meal_voucher",
+        "fallback_text": "前往「我的」查看二维码",
+        "native_status": "ended",
+        "campaign_ends_at": "2026-08-24T00:00:00+08:00",
+        "native_message": "活动已结束",
+    }
+
+
 def test_weibo_visitor_link_card_needs_refresh():
     link = SimpleNamespace(
         platform="微博",

@@ -213,6 +213,7 @@ async def generate_reply(
     chat_messages_factory: Callable[[], Awaitable[list[dict]]] | None = None,
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
     reengagement_gap_seconds: float | None = None,
+    force_main_prompt: bool = False,
     diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
@@ -242,14 +243,19 @@ async def generate_reply(
         return [contradiction_inquiry], contradiction_inquiry, False, None
 
     tier_reply_text: str | None = None
-    tier_eligible = can_use_tier_reply(
-        intent=detected_intent.intent,
-        memory_relevance=memory_relevance,
-        relational_context=relational_context,
-        schedule_context=schedule_context,
-        delay_context=delay_context,
-        reengagement_gap_seconds=reengagement_gap_seconds,
+    tier_eligible = (
+        not force_main_prompt
+        and can_use_tier_reply(
+            intent=detected_intent.intent,
+            memory_relevance=memory_relevance,
+            relational_context=relational_context,
+            schedule_context=schedule_context,
+            delay_context=delay_context,
+            reengagement_gap_seconds=reengagement_gap_seconds,
+        )
     )
+    if diagnostics is not None and force_main_prompt:
+        diagnostics["tier_blocked_by_special_context"] = True
     if diagnostics is not None and (
         reengagement_gap_seconds is not None
         and reengagement_gap_seconds >= RECAP_GAP_SECONDS

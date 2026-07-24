@@ -212,6 +212,19 @@ CHAT_MEMORY_SECTION_BODY_PROMPT = (
     "{memory_groups}"
 )
 
+CHAT_MEAL_VOUCHER_CARD_FIRST_PROMPT = (
+    "本轮系统会在回复后附上一张「霸王餐券」入口卡片。"
+    "先自然回答对方当前的问题，再用一句短话告诉对方可以点下面的卡片进入「我的」"
+    "查看二维码。卡片由系统当下发送，不要说稍后再发；点到为止，不要像广告，"
+    "也不要重复念卡片上的文案。"
+)
+
+CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT = (
+    "这个对话里之前已经发过「霸王餐券」入口卡片，本轮不要再承诺或要求系统重复发卡。"
+    "如果对方在找二维码入口，自然提醒他点之前那张卡片，或者直接点底部「我的」查看；"
+    "如果只是问活动规则，先直接回答问题，不必每次都重复提醒入口。"
+)
+
 CHAT_TIME_MEMORIES_SECTION_PROMPT = "用户提到的时间对应的记忆：\n{time_memories}"
 
 CHAT_L3_MEMORY_SECTION_PROMPT = (

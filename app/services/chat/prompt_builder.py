@@ -378,6 +378,22 @@ async def _build_memory_section(
     return _PromptBody(body, "chat.memory_section_body")
 
 
+async def _build_meal_voucher_card_section(
+    state: str | None,
+) -> _PromptBody | None:
+    """Build dynamic first-send/repeat guidance from managed prompt keys."""
+    key = {
+        "first": "chat.meal_voucher_card_first",
+        "repeat": "chat.meal_voucher_card_repeat",
+    }.get(state or "")
+    if key is None:
+        return None
+    prompt = await _get_optional_prompt(key)
+    if prompt is None:
+        return None
+    return _PromptBody(str(prompt), key)
+
+
 async def _build_delay_context_section(
     delay_context: dict[str, Any] | None,
 ) -> _PromptBody | None:
@@ -505,6 +521,7 @@ async def build_system_prompt(
     relation_meta_line: str = "",
     ai_mood_text: str = "",
     expression_habits: list[str] | None = None,
+    meal_voucher_card_state: str | None = None,
     last_reply_count: int | None = None,
     diagnostics: dict[str, Any] | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
@@ -744,6 +761,18 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "你记得的事情")
+
+    meal_card = await _build_meal_voucher_card_section(meal_voucher_card_state)
+    if meal_card:
+        _append_section(
+            sections,
+            components,
+            "霸王餐券入口",
+            meal_card.body,
+            prompt_key=meal_card.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "霸王餐券入口")
 
     # Phase 6: 删 graph_context 注入 (信息冗余 memory section, 抽象列表诱导编造)
 
