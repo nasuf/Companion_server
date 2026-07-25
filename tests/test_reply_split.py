@@ -62,6 +62,30 @@ class TestSplitAndValidateReplies:
         result = split_and_validate_replies("第一句||第二句")
         assert result == ["第一句", "第二句"]
 
+    def test_inline_timestamp_becomes_a_bubble_boundary(self):
+        """句中时间戳是模型写的分隔符, 不是噪声.
+
+        生产泄漏 (2026-07, 4/1525 条 assistant 消息): 模型照着注入历史的
+        「[戳]内容」逐行格式写多条回复, 时间戳就落在两句中间, 而剥除逻辑只认
+        行首, 于是原样发给了用户. 还原成气泡边界而不是直接删 —— 删掉会把两句
+        粘成一句读不通的长句.
+        """
+        assert split_and_validate_replies(
+            "在车里听歌感觉超棒的 [07-23 00:25] 你平时爱听什么类型的歌呀？"
+        ) == ["在车里听歌感觉超棒的", "你平时爱听什么类型的歌呀？"]
+        assert split_and_validate_replies(
+            "加个班还被骂？？ [07-15 22:10] 这谁顶得住啊"
+        ) == ["加个班还被骂？？", "这谁顶得住啊"]
+
+    def test_inline_bracket_time_glued_to_text_is_not_a_boundary(self):
+        """紧贴文字的方括号时间是用户在说时间, 不是模型在分句.
+
+        分隔符形态永远带前导空白 (模型是照行首格式写的), 用这一点区分.
+        """
+        assert split_and_validate_replies("我约在[12:30]那家店") == ["我约在[12:30]那家店"]
+        assert split_and_validate_replies("这个 [3-5] 天就好") == ["这个 [3-5] 天就好"]
+        assert split_and_validate_replies("发个 [捂脸] 表情") == ["发个 [捂脸] 表情"]
+
     def test_strips_timestamp_prefix_on_each_split_part(self):
         # 复现生产 bug: LLM 两条回复都带 [MM-DD HH:MM] 前缀
         result = split_and_validate_replies(

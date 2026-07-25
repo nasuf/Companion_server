@@ -57,6 +57,19 @@ def _strip_leading_timestamp(text: str) -> str:
     return _LEADING_TIMESTAMP_RE.sub("", text)
 
 
+# 同一个 token 出现在句中时不是噪声, 而是模型**把它当成了气泡分隔符** — 注入的
+# 历史是「[时间戳]内容」逐行排列的, 模仿这个格式写多条回复, 时间戳自然落在两句
+# 中间. 生产实例: 「在车里听歌感觉超棒的 [07-23 00:25] 你平时爱听什么类型的歌呀？」
+# 所以按分隔符还原成两条, 而不是删掉它 —— 直接删会把两句粘成一句读不通的长句.
+# 行首形态仍由 _LEADING_TIMESTAMP_RE 负责剥除, 两者互补.
+# 要求前面有空白: 模型是照着行首格式写的, 三例生产泄漏都是「上一句 [戳] 下一句」.
+# 没有这个约束时「我约在[12:30]那家店」会被误切成两条 —— 括号紧贴文字的写法是
+# 用户在说时间, 不是模型在分句.
+_INLINE_TIMESTAMP_RE = re.compile(
+    r'(?<=\S)\s+\[(?=[\d\s/:：\-]*[/:：\-])[\d\s/:：\-]{4,}\]\s*'
+)
+
+
 # ── 系统标记剥除 (给系统看的行, 任何出口都绝不能漏给用户) ──
 #
 # 图灵测试版 chat.response_instruction 要求 LLM 输出 [EMO:标签/强度] 情绪标记
@@ -184,6 +197,8 @@ def split_and_validate_replies(
     \\n\\n 渲染成单气泡里的空行, 视觉跟正常多条回复混淆. 这里把空行也当
     分隔符. 单条内的孤立 \\n 由 _clean_reply_part 折叠成空格.
     """
+    # 句中时间戳先还原成显式分隔符, 再走正常切分 (见 _INLINE_TIMESTAMP_RE).
+    raw = _INLINE_TIMESTAMP_RE.sub("||", raw or "")
     has_explicit_split = bool(_REPLY_SPLIT_RE.search(raw))
     parts = [_clean_reply_part(p) for p in _REPLY_SPLIT_RE.split(raw)]
     parts = [p for p in parts if p]
