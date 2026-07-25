@@ -286,18 +286,19 @@ async def test_try_web_search_reply_uses_resolved_model(monkeypatch):
     assert calls == ["doubao-seed-character-260628"]
 
 
-# ─── gate: prefilter + classifier + route check ───────────────────────────
+# ─── gate: length floor + classifier + route check ────────────────────────
 
 
-def test_prefilter_keeps_realtime_questions_and_drops_chitchat():
-    from app.services.llm.web_search_gate import looks_like_realtime_question
+def test_length_floor_only_skips_chitchat_acks():
+    """Keyword prefiltering was removed: proper nouns ("八仙看过没") match no
+    topic keyword yet are exactly what needs looking up."""
+    from app.services.llm.web_search_gate import is_worth_classifying
 
-    for hit in ("最近有什么新电影吗？", "明天北京天气怎么样", "现在金价多少钱一克",
-                "《八仙》评分怎么样", "最近有什么大新闻吗"):
-        assert looks_like_realtime_question(hit), hit
-    for miss in ("你今天过得怎么样呀", "我好累啊", "嗯", "在吗",
-                 "你还记得我说过的事吗", "想你了"):
-        assert not looks_like_realtime_question(miss), miss
+    for kept in ("八仙看过没", "最近看新电影了没", "听过告五人的歌没",
+                 "你今天过得怎么样呀", "明天北京天气怎么样"):
+        assert is_worth_classifying(kept), kept
+    for skipped in ("嗯", "好的", "在吗", "  ", ""):
+        assert not is_worth_classifying(skipped), skipped
 
 
 @pytest.mark.asyncio
@@ -329,7 +330,7 @@ async def test_gate_classifier_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decide_web_search_skips_llm_when_prefilter_misses(monkeypatch):
+async def test_decide_web_search_skips_llm_for_short_acks(monkeypatch):
     from app.services.chat import data_fetch_phase
 
     called = False
@@ -345,8 +346,29 @@ async def test_decide_web_search_skips_llm_when_prefilter_misses(monkeypatch):
     monkeypatch.setattr(
         "app.services.runtime_config.resolve_for_current", lambda: _resolved(),
     )
-    assert await data_fetch_phase._decide_web_search("你今天怎么样", "") is False
+    assert await data_fetch_phase._decide_web_search("嗯", "") is False
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_decide_web_search_classifies_proper_nouns(monkeypatch):
+    """Regression: "八仙看过没" used to be dropped by the keyword prefilter."""
+    from app.services.chat import data_fetch_phase
+
+    seen: list[str] = []
+
+    async def fake_needs(message, context=""):
+        seen.append(message)
+        return True
+
+    monkeypatch.setattr(
+        "app.services.llm.web_search_gate.needs_web_search", fake_needs,
+    )
+    monkeypatch.setattr(
+        "app.services.runtime_config.resolve_for_current", lambda: _resolved(),
+    )
+    assert await data_fetch_phase._decide_web_search("八仙看过没", "") is True
+    assert seen == ["八仙看过没"]
 
 
 @pytest.mark.asyncio
@@ -389,8 +411,8 @@ async def test_decide_web_search_confirms_with_classifier(monkeypatch):
         "app.services.runtime_config.resolve_for_current", lambda: _resolved(),
     )
     assert await data_fetch_phase._decide_web_search("最近有什么新电影", "") is True
-    # prefilter hit but classifier says no (false positive killed)
-    assert await data_fetch_phase._decide_web_search("最近天气挺好的", "") is False
+    # classifier is the only semantic gate now — its "no" is final
+    assert await data_fetch_phase._decide_web_search("今天心情不错呀", "") is False
 
 
 @pytest.mark.asyncio

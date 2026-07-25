@@ -103,18 +103,17 @@ def _web_search_route_available() -> bool:
 
 
 async def _decide_web_search(user_message: str, context: str) -> bool:
-    """两段判定: 关键词粗筛挡掉绝大多数消息, 命中的才花一次小模型确认.
+    """小模型判定本轮是否需要实时外部信息.
 
-    与其他 fetch 任务同批 gather, 所以候选消息也不增加串行延迟.
+    路由不可用 (开关关 / 非方舟) 时零开销返回; 否则除极短应答外每条都判定 —
+    关键词粗筛覆盖不了专有名词 (见 web_search_gate 模块注释). 与其他 fetch
+    任务同批 gather, 不增加串行延迟.
     """
-    from app.services.llm.web_search_gate import (
-        looks_like_realtime_question,
-        needs_web_search,
-    )
+    from app.services.llm.web_search_gate import is_worth_classifying, needs_web_search
 
-    if not looks_like_realtime_question(user_message):
-        return False
     if not _web_search_route_available():
+        return False
+    if not is_worth_classifying(user_message):
         return False
     return await needs_web_search(user_message, context=context)
 

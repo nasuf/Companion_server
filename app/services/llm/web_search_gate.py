@@ -8,13 +8,15 @@ the tool. The same prompt with `tool_choice: "required"` searches reliably and
 answers correctly. So the decision has to happen on our side, and the search
 call must force the tool.
 
-Two stages, cheapest first:
-1. `looks_like_realtime_question` — keyword prefilter, no LLM. Ordinary chat
-   stops here, so the classifier cost applies only to candidate messages.
-2. `needs_web_search` — small-model confirm on candidates, killing the
-   prefilter's false positives ("最近怎么样" / "你新剪的头发好看" ...).
+Why no keyword prefilter (removed 2026-07-25 after production traces):
+the thing most worth searching is a proper noun the AI cannot know — "八仙看
+过没" matches no topic keyword, so the prefilter skipped the classifier
+entirely and the reply degraded to "没看过诶，讲什么的呀？". A keyword list
+can never cover proper nouns, so every message above the chit-chat length
+floor now goes to the classifier. It costs ~¥0.00035 per message and runs
+inside the existing parallel fetch, so it adds no latency.
 
-Both stages fail closed (no search) so this can never break a normal reply.
+The classifier fails closed (no search) so this can never break a reply.
 """
 
 from __future__ import annotations
@@ -26,37 +28,23 @@ from app.services.prompting.utils import render_prompt
 
 logger = logging.getLogger(__name__)
 
-# Topic markers for information that changes over time and cannot come from
-# memory. Recall-oriented on purpose: stage 2 removes the false positives.
-_REALTIME_HINTS: tuple[str, ...] = (
-    # 天气 / 环境
-    "天气", "气温", "下雨", "下雪", "台风", "空气质量", "限号",
-    # 新闻 / 热点
-    "新闻", "热搜", "热点", "最新", "刚刚发生", "出什么事",
-    # 影视 / 娱乐 / 作品
-    "上映", "新片", "新电影", "新剧", "票房", "评分", "豆瓣", "演唱会", "新歌", "新专辑",
-    # 行情 / 价格
-    "股价", "股票", "金价", "汇率", "油价", "币价", "多少钱", "价格", "涨了", "跌了",
-    # 赛事
-    "比分", "比赛结果", "夺冠", "赛程",
-    # 榜单 / 推荐类时效问题
-    "排行", "榜单", "推荐几个", "有什么好看的", "有什么好玩的",
-)
-
-# Message shorter than this is chit-chat ("嗯"/"在吗") — never worth a search.
+# "嗯" / "在吗" / "好的" — no external entity can hide in this few characters,
+# and these dominate message volume, so skipping them is free accuracy.
 _MIN_LENGTH = 4
 
 
-def looks_like_realtime_question(message: str) -> bool:
-    """Cheap prefilter: could this message need information we cannot know?"""
-    text = (message or "").strip()
-    if len(text) < _MIN_LENGTH:
-        return False
-    return any(hint in text for hint in _REALTIME_HINTS)
+def is_worth_classifying(message: str) -> bool:
+    """Length floor — the only prefilter left (see module docstring)."""
+    return len((message or "").strip()) >= _MIN_LENGTH
 
 
 async def needs_web_search(message: str, context: str = "") -> bool:
-    """Small-model confirm for messages the prefilter flagged.
+    """Small-model verdict: does answering this need external world info?
+
+    The criterion is deliberately not "can the AI answer without it" — for
+    "你看过 X 吗" the answer is trivially yes ("没看过"), which is a
+    conversational dead end. It is "is there an external entity the AI cannot
+    know, where looking it up turns a deflection into a real reply".
 
     Returns False on any failure — a missed search degrades to today's
     behaviour, while a wrong search costs a plugin call and ~2s of latency.
