@@ -113,14 +113,12 @@ _EMOTION_RUBRIC = _SHARED_HEAD + """
 - affirmation_and_reassurance：肯定、安慰、鼓励（"太不容易了""你已经做得很好了"）
 - self_disclosure：讲自己类似的经历或感受来共情（"我上次也这样"）
 - restatement：把对方的话复述一遍表示听见了
-- question_with_acknowledgment：问之前先应了一声，用叹词/共情词接住了情绪再问（"啊？怎么了？""唉 咋啦""啊？还要开啊？怎么回事"）
-- question：直接盘问，上来就是问句，没有任何接应（"怎么了呀？""为什么""是有心事吗"）
+- question：提问、追问细节（"怎么了""为什么"）
 - providing_suggestions：给建议、教方法（"你可以试试…"）
 - information：给信息、讲道理、分析原因
 - other：寒暄、语气词、其他
 
-注意：只看第一句（第一个气泡）。第二句才安慰不算。
-question 与 question_with_acknowledgment 的区别只在于问句前面有没有一个接住情绪的叹词或共情短语——"怎么了呀？"是 question，"啊？怎么了？"是 question_with_acknowledgment。
+注意：只看第一句。第一句是"咋啦"就是 question，哪怕第二句才安慰。
 
 【只输出 JSON】{{"verdict": "上面某个标签", "reason": "12字以内"}}"""
 
@@ -161,11 +159,35 @@ def parse_verdict(group: str, raw: str) -> str | None:
     return None
 
 
-def classify_emotion_opening(verdict: str) -> str:
-    if verdict in ACKNOWLEDGE_STRATEGIES:
-        return "acknowledge_first"
+# 「问之前有没有先应一声」是**词法**问题, 不是语义问题 —— 交给 LLM 评审测不出来:
+# 加了 question_with_acknowledgment 这个类目之后, 评审器在「咋了」这个样本上
+# 跨轮翻供 (校准一次 9/9 一次 9/10), 边界探针 6/8 且两处错判全部偏向通过侧,
+# 而结果恰好卡在 70.9% vs 70% 的线上. 一个系统性偏向及格、又在阈值附近摇摆的
+# 判定不能用来下结论, 所以这条指标改成确定性规则.
+#
+# 代价是漏判: 词表覆盖不到的新说法会被算成"没接住"(实测可识别的漏判约 10%),
+# 所以这个数字是**下界**. 宁可低估也不要一个测不准的数.
+_ACK_OPENER_RE = re.compile(
+    r"^\s*(?:"
+    r"啊+|唉+|哎+|呀+|哇+|噢+|哦+|嗯+|天[啊呐]|我去|真的假的|不是吧|"          # 叹词
+    r"辛苦|太惨|太难受|难受|心疼|抱抱|太不容易|受苦|遭罪|可怜|别这么说|"        # 共情
+    r"太好了?|太棒|恭喜|厉害|真好|那也太好|哈哈+|哟+"                          # 正向共情
+    r")"
+)
+
+
+def opens_with_acknowledgment(reply: str) -> bool:
+    """首句是否以一个真实存在的接应词开头 (词法判定, 与评审器无关)."""
+    bubbles = split_bubbles(reply)
+    return bool(bubbles) and bool(_ACK_OPENER_RE.match(bubbles[0]))
+
+
+def classify_emotion_opening(verdict: str, reply: str = "") -> str:
+    """建议/信息类由评审器判 (语义, 它在这上面稳定); 是否接住情绪走词法规则."""
     if verdict in ACTION_STRATEGIES:
         return "advice_first"
+    if verdict in ACKNOWLEDGE_STRATEGIES or opens_with_acknowledgment(reply):
+        return "acknowledge_first"
     if verdict == "question":
         return "question_first"
     return "other_first"
@@ -228,11 +250,6 @@ CALIBRATION: tuple[tuple[str, str, str, str], ...] = (
         "你可以试试深呼吸||或者出去走走",
         "providing_suggestions",
     ),
-    (
-        # 与上面的裸问句成对: 唯一差别是问之前应了一声, 评审器必须分得开,
-        # 否则「先接住再问」这个产品规则根本无法测量.
-        "emotion", "我好烦",
-        "啊？怎么了？",
-        "question_with_acknowledgment",
-    ),
+    # 「啊？怎么了？」这类"应一声再问"不进校准集: 它跟裸问句的区别是词法的,
+    # 由 opens_with_acknowledgment 判定, 不经过评审器 (见上面的注释).
 )

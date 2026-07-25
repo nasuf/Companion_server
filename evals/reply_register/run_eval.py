@@ -287,7 +287,9 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
                  len_ok >= CHITCHAT_MIN_LENGTH_OK),
             ]
         elif group == "emotion":
-            openings = Counter(J.classify_emotion_opening(r["verdict"]) for r in judged)
+            openings = Counter(
+                J.classify_emotion_opening(r["verdict"], r["reply"]) for r in judged
+            )
             stats["openings"] = dict(openings)
             ack = _rate(openings, "acknowledge_first", n)
             adv = _rate(openings, "advice_first", n)

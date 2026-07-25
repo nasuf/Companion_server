@@ -97,21 +97,16 @@ CHITCHAT_MIN_LENGTH_OK = 0.80
 # ── emotion: 客服腔 (ESConv 策略标注 + 一处 IM 适配) ──────────────────────
 # 首句策略落在安抚/复述类 = 接住了情绪; 落在建议/信息类 = 越过情绪直接办事.
 #
-# `question_with_acknowledgment` 不是 ESConv 的类目, 是 2026-07-25 首轮基线
-# 之后补的: ESConv 的 8 类标注的是整句的咨询式发言, 而 IM 里的接应只有一两个
-# 字 —— 「啊？怎么了？」被判成纯 question, 但它跟「怎么了呀？」在产品语义上
-# 完全是两件事 (一个应了声再问, 一个上来就盘问). 用原分类法测不出这个差别,
-# 所以拆出这一类并计入"接住了情绪".
-#
-# ⚠️ 这是**看过结果之后**改的指标定义, 必须诚实标注. 改它的理由是原定义测错了
-# 东西 (漏掉 IM 形态的接应), 不是为了让数字好看 —— 判据是「啊？怎么了？」该不该
-# 算接住情绪, 这个问题跟它当前得几分无关.
+# 「问之前有没有先应一声」不走评审器, 走 judge.opens_with_acknowledgment 的
+# 词法判定 —— ESConv 的 8 类标注的是整句咨询式发言, 而 IM 里的接应只有一两个
+# 字 (「啊？怎么了？」vs「怎么了呀？」在产品语义上完全是两件事). 试过给评审器
+# 加一个类目, 但它在这条边界上跨轮翻供, 且错判全部偏向通过侧 —— 详见
+# judge.classify_emotion_opening 的注释. 词法规则会低估, 但不会骗人.
 ACKNOWLEDGE_STRATEGIES = frozenset({
     "reflection_of_feelings",
     "affirmation_and_reassurance",
     "self_disclosure",
     "restatement",
-    "question_with_acknowledgment",
 })
 ACTION_STRATEGIES = frozenset({"providing_suggestions", "information"})
 QUESTION_STRATEGY = "question"
