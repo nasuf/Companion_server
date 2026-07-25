@@ -1457,6 +1457,10 @@ model LlmUsage {
   tokensByModel    Json     @map("tokens_by_model")
   costCny          Float    @map("cost_cny")
   callCount        Int      @map("call_count")
+  // Ark 联网内容插件调用次数. Billed per call (not per token) with a monthly
+  // free quota, so cost cannot be folded into costCny per row — the admin
+  // stats aggregate month-to-date counts against the quota instead.
+  webSearchCalls   Int      @default(0) @map("web_search_calls")
   // Session-level runtime health metrics, accumulated by resilience.py.
   latencyMsTotal   Int      @default(0) @map("latency_ms_total")
   latencyCount     Int      @default(0) @map("latency_count")

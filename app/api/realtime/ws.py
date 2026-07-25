@@ -948,10 +948,21 @@ async def _handle_message(
     if attachment_ids and len(attachments) != len(set(attachment_ids)):
         await ws.send_json({"type": "error", "data": {"message": "附件无效或已发送"}})
         return
-    attachment_metadata = await ensure_vision_summaries(
-        attachments,
-        user_text=text,
-    )
+    # Attachments are analysed before the chat turn opens its usage session,
+    # so wrap them in their own one — otherwise the vision tokens are billed
+    # by Ark but invisible in the admin cost dashboard.
+    from app.services.llm.usage_tracker import usage_session
+
+    async with usage_session(
+        scope="chat_media",
+        conversation_id=conversation_id,
+        agent_id=agent.id,
+        user_id=user_id,
+    ):
+        attachment_metadata = await ensure_vision_summaries(
+            attachments,
+            user_text=text,
+        )
     prompt_text = render_user_message_with_attachments(text, attachment_metadata)
     component_card, link_card_metadata = await _ensure_link_card_for_turn(
         user_id=user_id,

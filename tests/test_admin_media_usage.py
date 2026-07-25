@@ -1,9 +1,10 @@
 """Tests for GET /admin-api/stats/media-usage (voice/image usage stats).
 
-The endpoint issues five raw SQL aggregations via asyncio.gather — three over
+The endpoint issues six raw SQL aggregations via asyncio.gather — three over
 chat_message_attachments (totals by kind / per-user rollup / distinct-user
-count) plus two over speech_usage (voice-to-text totals / per-user rollup) —
-the AsyncMock side_effect list maps to that call order.
+count), two over speech_usage filtered to display_mode='text' (voice-to-text
+totals / per-user rollup), and one unfiltered speech_usage rollup that is the
+ASR billing basis — the AsyncMock side_effect list maps to that call order.
 """
 
 from __future__ import annotations
@@ -44,15 +45,25 @@ async def test_media_usage_aggregates_totals_and_users(monkeypatch):
     text_user_rows = [
         {"user_id": "u1", "voice_text_count": 5, "voice_text_seconds": 40},
     ]
+    # Billing basis: every transcription, regardless of display mode.
+    asr_rows = [{"count": 9, "total_seconds": 102}]
     fake_db = _fake_db(
-        [totals_rows, user_rows, user_total_rows, text_totals_rows, text_user_rows]
+        [
+            totals_rows, user_rows, user_total_rows,
+            text_totals_rows, text_user_rows, asr_rows,
+        ]
     )
     monkeypatch.setattr(stats_mod, "db", fake_db)
+    monkeypatch.setattr(stats_mod.settings, "asr_price_cny_per_second", 0.001)
 
     resp = await stats_mod.media_usage(days=7, limit=200, offset=0)
 
     assert resp["voice"] == {"count": 4, "total_seconds": 62, "total_bytes": 145_408}
     assert resp["voice_text"] == {"count": 5, "total_seconds": 40}
+    assert resp["asr"] == {
+        "count": 9, "total_seconds": 102,
+        "price_cny_per_second": 0.001, "cost_cny": pytest.approx(0.102),
+    }
     assert resp["image"] == {"count": 6, "total_bytes": 25_165_824}
     assert resp["user_total"] == 2
     assert len(resp["users"]) == 2
@@ -114,9 +125,9 @@ async def test_media_usage_window_filter_binds_start_param(monkeypatch):
 
     await stats_mod.media_usage(days=3, limit=10, offset=0)
 
-    # All five queries (3 attachment + 2 speech_usage) share the same single
-    # timestamp bind param.
-    assert len(captured_params) == 5
+    # All six queries (3 attachment + 2 speech_usage display-mode rollups +
+    # 1 ASR billing rollup) share the same single timestamp bind param.
+    assert len(captured_params) == 6
     assert all(len(params) == 1 for params in captured_params)
 
 

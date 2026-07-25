@@ -8,6 +8,7 @@ import httpx
 from app.config import settings
 from app.services.chat_media import repo, storage
 from app.services.chat_media.prompt import attachment_to_metadata
+from app.services.llm import usage_tracker
 from app.services.runtime_config import get_effective_vision_model
 
 logger = logging.getLogger(__name__)
@@ -118,12 +119,36 @@ async def _call_doubao_vision(*, data_url: str, user_text: str) -> str:
                 f"response={detail}"
             ) from exc
         data = response.json()
+    _record_vision_usage(vision_model, data)
     choices = data.get("choices") if isinstance(data, dict) else None
     if not choices:
         return ""
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     return str(content or "")
+
+
+def _record_vision_usage(model: str, data: Any) -> None:
+    """Bill image understanding to the same usage ledger as chat.
+
+    Without this the Ark vision call is invisible to the admin cost dashboard
+    (it goes out over raw httpx, never touching the langchain wrapper that
+    normally records usage). Needs an open usage session — ws.py opens one
+    around attachment handling.
+    """
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return
+    details = usage.get("prompt_tokens_details")
+    cached = 0
+    if isinstance(details, dict):
+        cached = int(details.get("cached_tokens", 0) or 0)
+    usage_tracker.record(
+        f"ark/{model}",
+        int(usage.get("prompt_tokens", 0) or 0),
+        int(usage.get("completion_tokens", 0) or 0),
+        cached_input_tokens=cached,
+    )
 
 
 def _clean_summary(value: str) -> str:

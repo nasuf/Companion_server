@@ -87,6 +87,7 @@ async def write_usage_row(
                 "tokensByModel": Json(summary["tokens_by_model"]),
                 "costCny": cost,
                 "callCount": summary["call_count"],
+                "webSearchCalls": summary.get("web_search_calls", 0),
                 "latencyMsTotal": summary["latency_ms_total"],
                 "latencyCount": summary["latency_count"],
                 "failureCount": summary["failure_count"],

@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     # Env default only; admins toggle it at runtime (SystemConfig.webSearchEnabled).
     # Requires the 联网内容插件 activated on the Ark account (per-call billing).
     web_search_enabled: bool = False
+    # Plugin billing is per call, not per token, so it cannot ride the
+    # model-registry pricing path. Ark 联网资源: 20k free calls per calendar
+    # month, then ¥4 per 1000. Verify against the console before trusting the
+    # dashboard number — these are list prices, not a contract.
+    web_search_price_cny_per_k: float = 4.0
+    web_search_free_calls_monthly: int = 20000
+    # Fun-ASR bills by audio duration, so it cannot ride the token price table
+    # either. Default is the 百炼 list price for fun-asr-flash-2026-06-15 in
+    # 华北2. 0 disables the estimate (the dashboard then shows "未配置单价"
+    # instead of a misleading ¥0.00). The 36,000s onboarding quota is one-off,
+    # not monthly, so it is deliberately not modelled here.
+    asr_price_cny_per_second: float = 0.00022
 
     # MiniMax Open Platform (OpenAI-compatible)
     minimax_api_key: str = ""

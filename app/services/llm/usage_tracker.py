@@ -22,6 +22,9 @@ from typing import Callable, Literal, TypedDict
 UsageScope = Literal[
     "chat", "post_process", "proactive", "agent_creation", "schedule_cron",
     "offline", "music",
+    # Image understanding / speech, which run before the chat turn opens its
+    # own session (ws.py handles attachments first), so they get their own row.
+    "chat_media",
 ]
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,8 @@ class UsageSummary(TypedDict):
     output_tokens: int
     cached_input_tokens: int
     call_count: int
+    # Ark 联网插件调用次数 — per-call billing, tracked separately from tokens.
+    web_search_calls: int
     latency_ms_total: int
     latency_count: int
     failure_count: int
@@ -59,6 +64,7 @@ def start_session() -> Token:
         "output_tokens": 0,
         "cached_input_tokens": 0,
         "call_count": 0,
+        "web_search_calls": 0,
         "latency_ms_total": 0,
         "latency_count": 0,
         "failure_count": 0,
@@ -103,6 +109,19 @@ def record(
     summary["call_count"] += 1
 
 
+def record_web_search(calls: int) -> None:
+    """Count Ark 联网插件 calls for this turn (per-call billing, not tokens).
+
+    A single Responses API request can fan out to several keyword searches and
+    the plugin bills each one, so callers pass the count the API reported
+    rather than assuming 1.
+    """
+    summary = _current.get()
+    if summary is None or calls <= 0:
+        return
+    summary["web_search_calls"] = summary.get("web_search_calls", 0) + int(calls)
+
+
 def record_runtime_event(
     *,
     result: str,
@@ -140,7 +159,10 @@ def flush_session(token: Token) -> UsageSummary | None:
         return None
     has_runtime_signal = any(
         summary[key] > 0
-        for key in ("latency_count", "failure_count", "fallback_count", "circuit_open_count")
+        for key in (
+            "latency_count", "failure_count", "fallback_count",
+            "circuit_open_count", "web_search_calls",
+        )
     )
     if summary["call_count"] == 0 and not has_runtime_signal:
         return None

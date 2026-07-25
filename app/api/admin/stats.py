@@ -5,10 +5,13 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 
 from app.api.jwt_auth import require_admin_jwt
+from app.config import settings
 from app.db import db
 from app.redis_client import get_redis
 from app.services.llm.pricing import estimate_cost_cny
@@ -236,7 +239,8 @@ async def token_usage(
                 COALESCE(SUM(input_tokens), 0)::int AS input_tokens,
                 COALESCE(SUM(output_tokens), 0)::int AS output_tokens,
                 COALESCE(SUM(cost_cny), 0)::float AS cost_cny,
-                COALESCE(SUM(call_count), 0)::int AS call_count
+                COALESCE(SUM(call_count), 0)::int AS call_count,
+                COALESCE(SUM(web_search_calls), 0)::int AS web_search_calls
             FROM llm_usage
             WHERE {where_sql}
             """,
@@ -308,7 +312,7 @@ async def token_usage(
     )
     totals = totals_rows[0] if totals_rows else {
         "request_count": 0, "input_tokens": 0, "output_tokens": 0,
-        "cost_cny": 0.0, "call_count": 0,
+        "cost_cny": 0.0, "call_count": 0, "web_search_calls": 0,
     }
     # 每个模型的成本用当前价格表 (estimate_cost_cny) 从 tokens_by_model 重算 —
     # 这是"分布形状"的最佳可用信号 (历史行未按模型落成本). 但 totals/daily/by_agent
@@ -396,6 +400,55 @@ async def token_usage(
         ],
         "by_scope": by_scope,
         "daily": daily,
+        "web_search": await _web_search_billing(
+            int(totals.get("web_search_calls", 0) or 0),
+        ),
+    }
+
+
+async def _web_search_billing(window_calls: int) -> dict[str, Any]:
+    """Ark 联网插件按次计费 — token 计价链路覆盖不到, 单独算.
+
+    免费额度按自然月重置, 所以「这一轮花了多少」无法单独归属 (同样一次搜索,
+    在额度内是 0 元, 用完之后才是 4 厘). 因此费用给的是**本月累计**口径:
+    月内总次数 / 免费额度 / 超额次数 / 超额费用; window_calls 才是调用方
+    时间窗内的次数.
+    """
+    # 账单月是北京时间的自然月, 而 created_at 存 UTC — 直接取 UTC 月初会把每月
+    # 1 号 00:00-08:00 (北京) 的调用算进上个月的额度里. 先在本地时区取月初再换回 UTC.
+    local_now = datetime.now(timezone.utc).astimezone(
+        ZoneInfo(settings.schedule_timezone)
+    )
+    month_start = (
+        local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+    try:
+        # `web_search_calls > 0` 是恒等改写 (0 对 SUM 没贡献), 但它让 planner
+        # 能命中部分索引 llm_usage_web_search_idx — 否则要全扫一个月的 usage 行.
+        month_rows = await db.query_raw(
+            "SELECT COALESCE(SUM(web_search_calls), 0)::int AS calls "
+            "FROM llm_usage WHERE web_search_calls > 0 AND created_at >= $1::timestamp",
+            month_start.isoformat(),
+        )
+    except Exception as e:  # noqa: BLE001 — 计费附加信息不该拖垮整个看板
+        logger.warning(f"[stats] web search billing failed: {e}")
+        return {}
+
+    month_calls = int((month_rows[0] if month_rows else {}).get("calls", 0) or 0)
+    free_quota = max(0, int(settings.web_search_free_calls_monthly))
+    billable = max(0, month_calls - free_quota)
+    unit_price = float(settings.web_search_price_cny_per_k)
+    return {
+        "window_calls": window_calls,
+        "month_calls": month_calls,
+        "free_quota_monthly": free_quota,
+        "free_remaining": max(0, free_quota - month_calls),
+        "billable_calls": billable,
+        "cost_cny": round(billable * unit_price / 1000, 6),
+        "price_cny_per_k": unit_price,
+        "month_start": local_now.date().replace(day=1).isoformat(),
     }
 
 
@@ -436,12 +489,22 @@ async def media_usage(
         su_clauses.append(f"created_at >= ${len(su_params)}::timestamp")
     su_where = " AND ".join(su_clauses)
 
+    # ASR 计费口径跟展示口径不同: 按秒计费的是**所有**转写, 不分用户最后选择
+    # 发语音气泡还是发文字, 所以这里不带 display_mode 过滤.
+    asr_clauses = ["1=1"]
+    asr_params: list = []
+    if start is not None:
+        asr_params.append(start.replace(tzinfo=None).isoformat())
+        asr_clauses.append(f"created_at >= ${len(asr_params)}::timestamp")
+    asr_where = " AND ".join(asr_clauses)
+
     (
         totals_rows,
         user_rows,
         user_total_rows,
         text_totals_rows,
         text_user_rows,
+        asr_rows,
     ) = await asyncio.gather(
         db.query_raw(
             f"""
@@ -506,6 +569,16 @@ async def media_usage(
             """,
             *su_params,
         ),
+        db.query_raw(
+            f"""
+            SELECT
+                COUNT(*)::int AS count,
+                COALESCE(SUM(duration_seconds), 0)::bigint AS total_seconds
+            FROM speech_usage
+            WHERE {asr_where}
+            """,
+            *asr_params,
+        ),
     )
 
     by_kind = {str(r["kind"]): r for r in totals_rows}
@@ -528,6 +601,7 @@ async def media_usage(
             "count": int(text_total.get("count", 0) or 0),
             "total_seconds": int(text_total.get("total_seconds", 0) or 0),
         },
+        "asr": _asr_billing(asr_rows[0] if asr_rows else {}),
         "image": {
             "count": int(image.get("count", 0) or 0),
             "total_bytes": int(image.get("total_bytes", 0) or 0),
@@ -551,6 +625,22 @@ async def media_usage(
             }
             for r in user_rows
         ],
+    }
+
+
+def _asr_billing(row: dict) -> dict[str, Any]:
+    """语音识别按音频时长计费 — 不走 model_registry 的 token 价目表.
+
+    单价为 0 时不给费用数字, 前端显示「未配置单价」——比一个看起来精确的
+    ¥0.00 诚实, 那会让人以为语音是免费的.
+    """
+    seconds = int(row.get("total_seconds", 0) or 0)
+    price = float(settings.asr_price_cny_per_second)
+    return {
+        "count": int(row.get("count", 0) or 0),
+        "total_seconds": seconds,
+        "price_cny_per_second": price,
+        "cost_cny": round(seconds * price, 6) if price > 0 else None,
     }
 
 

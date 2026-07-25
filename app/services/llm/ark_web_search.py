@@ -199,6 +199,9 @@ async def generate_with_web_search(
         usage_tracker.record(
             f"ark/{model}", tokens[0], tokens[1], cached_input_tokens=tokens[2],
         )
+    # Plugin billing is per search, and one request can fan out to several —
+    # record what the API reported, not an assumed 1.
+    usage_tracker.record_web_search(result.search_calls)
     # This call never touches langchain, so nothing would appear in the trace
     # tree without an explicit record — the main reply would look missing.
     record_manual_llm_run(
