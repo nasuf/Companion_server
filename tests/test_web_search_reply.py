@@ -155,6 +155,9 @@ async def test_generate_with_web_search_success(monkeypatch):
     body = client.captured["json"]
     assert body["model"] == "doubao-seed-character-260628"
     assert body["tools"] == [{"type": "web_search"}]
+    # Forced: with "auto" the character model never calls the tool under the
+    # production prompt (0/16 measured), it just says "我帮你查下".
+    assert body["tool_choice"] == "required"
     assert body["stream"] is False
     assert client.captured["endpoint"].endswith("/responses")
     assert recorded == {
@@ -262,7 +265,8 @@ def _resolved(web_search=True, online=True, provider="ark"):
 
 
 @pytest.mark.asyncio
-async def test_try_web_search_reply_gates(monkeypatch):
+async def test_try_web_search_reply_uses_resolved_model(monkeypatch):
+    """Gating moved to web_search_gate; this helper only issues the request."""
     calls: list = []
 
     async def fake_generate(messages, *, model):
@@ -272,35 +276,121 @@ async def test_try_web_search_reply_gates(monkeypatch):
     monkeypatch.setattr(
         "app.services.llm.ark_web_search.generate_with_web_search", fake_generate,
     )
-
-    # Enabled + online + ark → generate called
     monkeypatch.setattr(
         "app.services.runtime_config.resolve_for_current", lambda: _resolved(),
     )
-    assert await reply_generate._try_web_search_reply([{"role": "user", "content": "x"}]) == "搜到了"
+    result = await reply_generate._try_web_search_reply(
+        [{"role": "user", "content": "x"}],
+    )
+    assert result == "搜到了"
     assert calls == ["doubao-seed-character-260628"]
 
-    # Disabled → skipped
-    monkeypatch.setattr(
-        "app.services.runtime_config.resolve_for_current",
-        lambda: _resolved(web_search=False),
-    )
-    assert await reply_generate._try_web_search_reply([]) is None
 
-    # Non-ark chat provider → skipped
-    monkeypatch.setattr(
-        "app.services.runtime_config.resolve_for_current",
-        lambda: _resolved(provider="deepseek"),
-    )
-    assert await reply_generate._try_web_search_reply([]) is None
+# ─── gate: prefilter + classifier + route check ───────────────────────────
 
-    # Offline (ollama) mode → skipped
+
+def test_prefilter_keeps_realtime_questions_and_drops_chitchat():
+    from app.services.llm.web_search_gate import looks_like_realtime_question
+
+    for hit in ("最近有什么新电影吗？", "明天北京天气怎么样", "现在金价多少钱一克",
+                "《八仙》评分怎么样", "最近有什么大新闻吗"):
+        assert looks_like_realtime_question(hit), hit
+    for miss in ("你今天过得怎么样呀", "我好累啊", "嗯", "在吗",
+                 "你还记得我说过的事吗", "想你了"):
+        assert not looks_like_realtime_question(miss), miss
+
+
+@pytest.mark.asyncio
+async def test_gate_classifier_parses_verdicts(monkeypatch):
+    from app.services.llm import web_search_gate
+
+    async def reply(verdict):
+        async def fake_render(key, params, invoke):
+            assert key == "chat.web_search_decision"
+            return verdict
+        monkeypatch.setattr(web_search_gate, "render_prompt", fake_render)
+        return await web_search_gate.needs_web_search("最近有什么新电影", context="c")
+
+    assert await reply("需要联网") is True
+    assert await reply("  需要联网。 ") is True
+    assert await reply("不需要联网") is False
+    assert await reply("") is False
+
+
+@pytest.mark.asyncio
+async def test_gate_classifier_fails_closed(monkeypatch):
+    from app.services.llm import web_search_gate
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(web_search_gate, "render_prompt", boom)
+    assert await web_search_gate.needs_web_search("金价多少") is False
+
+
+@pytest.mark.asyncio
+async def test_decide_web_search_skips_llm_when_prefilter_misses(monkeypatch):
+    from app.services.chat import data_fetch_phase
+
+    called = False
+
+    async def fake_needs(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True
+
     monkeypatch.setattr(
-        "app.services.runtime_config.resolve_for_current",
-        lambda: _resolved(online=False),
+        "app.services.llm.web_search_gate.needs_web_search", fake_needs,
     )
-    assert await reply_generate._try_web_search_reply([]) is None
-    assert calls == ["doubao-seed-character-260628"]  # only the first case called
+    monkeypatch.setattr(
+        "app.services.runtime_config.resolve_for_current", lambda: _resolved(),
+    )
+    assert await data_fetch_phase._decide_web_search("你今天怎么样", "") is False
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_decide_web_search_skips_llm_when_route_unavailable(monkeypatch):
+    from app.services.chat import data_fetch_phase
+
+    called = False
+
+    async def fake_needs(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(
+        "app.services.llm.web_search_gate.needs_web_search", fake_needs,
+    )
+    for resolved in (
+        _resolved(web_search=False),          # switch off
+        _resolved(provider="deepseek"),       # non-ark chat route
+        _resolved(online=False),              # local ollama mode
+    ):
+        monkeypatch.setattr(
+            "app.services.runtime_config.resolve_for_current", lambda r=resolved: r,
+        )
+        assert await data_fetch_phase._decide_web_search("明天天气", "") is False
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_decide_web_search_confirms_with_classifier(monkeypatch):
+    from app.services.chat import data_fetch_phase
+
+    async def fake_needs(message, context=""):
+        return "电影" in message
+
+    monkeypatch.setattr(
+        "app.services.llm.web_search_gate.needs_web_search", fake_needs,
+    )
+    monkeypatch.setattr(
+        "app.services.runtime_config.resolve_for_current", lambda: _resolved(),
+    )
+    assert await data_fetch_phase._decide_web_search("最近有什么新电影", "") is True
+    # prefilter hit but classifier says no (false positive killed)
+    assert await data_fetch_phase._decide_web_search("最近天气挺好的", "") is False
 
 
 @pytest.mark.asyncio
@@ -316,10 +406,39 @@ async def test_run_main_llm_short_circuits_on_web_search(monkeypatch):
     monkeypatch.setattr(reply_generate, "get_chat_model", _boom)
 
     text, is_fallback = await reply_generate._run_main_llm(
-        [{"role": "user", "content": "明天天气"}],
+        [{"role": "user", "content": "明天天气"}], needs_web_search=True,
     )
     assert text == "联网回复[EMO:高兴/60]"
     assert is_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_run_main_llm_skips_web_search_when_gate_says_no(monkeypatch):
+    """Gate off → no Responses API call at all (no tool tokens, keeps stream)."""
+    called = False
+
+    async def should_not_run(_messages):
+        nonlocal called
+        called = True
+        return "不该走这里"
+
+    monkeypatch.setattr(reply_generate, "_try_web_search_reply", should_not_run)
+    fake_model = SimpleNamespace(astream=lambda msgs: None)
+    monkeypatch.setattr(reply_generate, "get_chat_model", lambda: fake_model)
+    monkeypatch.setattr(reply_generate, "get_fallback_chat_model", lambda: fake_model)
+    monkeypatch.setattr(reply_generate, "provider_name", lambda m: "ark")
+    monkeypatch.setattr(
+        "app.services.llm.models._resolve_usage_model_key", lambda m: "ark/x",
+    )
+
+    async def fake_collect(*args, **kwargs):
+        return "流式回复"
+
+    monkeypatch.setattr(reply_generate, "collect_stream", fake_collect)
+
+    text, _ = await reply_generate._run_main_llm([{"role": "user", "content": "hi"}])
+    assert text == "流式回复"
+    assert called is False
 
 
 @pytest.mark.asyncio

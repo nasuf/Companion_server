@@ -1061,6 +1061,7 @@ async def stream_chat_response(
         l3_memories = fetched.l3_memories
         ai_status = fetched.ai_status
         schedule_context = fetched.schedule_context
+        needs_web_search = fetched.needs_web_search
         response_diagnostics.update({
             "memory_relevance": memory_relevance,
             "memory_retrieval_skipped_reason": (
@@ -1384,6 +1385,7 @@ async def stream_chat_response(
             user_message=user_message,
             agent=agent,
             chat_messages_factory=_build_main_chat_messages,
+            needs_web_search=needs_web_search,
             reply_count=reply_count,
             max_reply_count=max_reply_count,
             max_total=max_total,

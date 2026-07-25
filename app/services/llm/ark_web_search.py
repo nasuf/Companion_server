@@ -102,7 +102,12 @@ def _usage_tokens(payload: dict) -> tuple[int, int, int] | None:
 async def generate_with_web_search(
     chat_messages: list[dict], *, model: str,
 ) -> str | None:
-    """One-shot main reply through Ark Responses API with the web_search tool.
+    """One-shot main reply through Ark Responses API, forcing a web search.
+
+    `tool_choice="required"` is not optional: with the production system
+    prompt the model answers "我帮你查下" and skips the tool under the default
+    "auto" (0/16 in measurement). Callers gate on web_search_gate, so by the
+    time we get here a search is known to be wanted.
 
     Returns reply text, or None when the call cannot produce one (missing
     key, HTTP error, timeout, empty output). Callers must treat None as
@@ -114,6 +119,7 @@ async def generate_with_web_search(
         "model": model,
         "input": _to_responses_input(chat_messages),
         "tools": [{"type": "web_search"}],
+        "tool_choice": "required",
         "stream": False,
     }
     if not body["input"]:

@@ -464,6 +464,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("intent.unified", "统一意图识别", "decision", _label_intent_unified),
     ("intent.split", "多意图拆分", "decision", _label_passthrough),
     ("memory.l3_trigger", "L3 唤醒判定", "decision", _label_passthrough),
+    ("chat.web_search_decision", "联网搜索判定", "decision", _label_passthrough),
     ("memory.contradiction_detection", "L1 矛盾检测", "decision", _label_contradiction),
     ("memory.contradiction_analysis", "矛盾分析", "decision", _label_passthrough),
     ("boundary.apology", "道歉检测", "decision", _label_apology),

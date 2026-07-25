@@ -78,11 +78,45 @@ class FetchedContext:
     enhanced_query: str = ""
     ai_status: dict | None = None
     schedule_context: str | None = None
+    # True → 主回复走方舟 Responses API 并强制 web_search (见 llm/web_search_gate).
+    needs_web_search: bool = False
 
 
 async def _classify_relevance(user_message: str, context: str = ""):
     """Phase 2.4: 返回 RelevanceResult(level, enhanced_query). 调用方拆字段."""
     return await classify_memory_relevance(user_message, context=context)
+
+
+def _web_search_route_available() -> bool:
+    """联网搜索开关开启 + 当前生效大模型路由是方舟 (工具只在方舟可用)."""
+    try:
+        from app.services.runtime_config import resolve_for_current
+
+        resolved = resolve_for_current()
+    except Exception:  # noqa: BLE001 — 配置读取失败按不可用处理
+        return False
+    return bool(
+        resolved.web_search_enabled
+        and resolved.online_model
+        and resolved.remote_chat_provider == "ark"
+    )
+
+
+async def _decide_web_search(user_message: str, context: str) -> bool:
+    """两段判定: 关键词粗筛挡掉绝大多数消息, 命中的才花一次小模型确认.
+
+    与其他 fetch 任务同批 gather, 所以候选消息也不增加串行延迟.
+    """
+    from app.services.llm.web_search_gate import (
+        looks_like_realtime_question,
+        needs_web_search,
+    )
+
+    if not looks_like_realtime_question(user_message):
+        return False
+    if not _web_search_route_available():
+        return False
+    return await needs_web_search(user_message, context=context)
 
 
 async def _do_retrieval(
@@ -545,6 +579,7 @@ async def fetch_parallel_context(
         relevance_result, retrieval_result,
         portrait, topic_intimacy,
         time_memories_result, user_emotion_result,
+        web_search_result,
     ) = await asyncio.gather(
         relevance_awaitable,
         retrieval_awaitable,
@@ -552,8 +587,10 @@ async def fetch_parallel_context(
         _load_topic_intimacy(agent_id, user_id),
         _load_time_memories(user_id, parsed_times, workspace_id),
         analyze_user_emotion(user_message),
+        _decide_web_search(user_message, recent_context),
         return_exceptions=True,
     )
+    needs_web_search = _unwrap(web_search_result, False, "web search gate") is True
 
     # Phase 2.4: relevance 返 RelevanceResult(level, enhanced_query). 历史返 str.
     memory_relevance = "medium"
@@ -714,4 +751,5 @@ async def fetch_parallel_context(
         enhanced_query=enhanced_query,
         ai_status=ai_status,
         schedule_context=schedule_context,
+        needs_web_search=needs_web_search,
     )

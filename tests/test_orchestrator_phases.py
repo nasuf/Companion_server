@@ -568,7 +568,7 @@ async def test_reply_generate_main_llm_awaits_chat_messages_factory():
         replies, raw, _, _ = await generate_reply(**kwargs)
 
     chat_messages_factory.assert_awaited_once()
-    run_main.assert_awaited_once_with(chat_messages)
+    run_main.assert_awaited_once_with(chat_messages, needs_web_search=False)
     kwargs["tier_fns"]["weak"].assert_not_called()
     assert diagnostics["reply_path"] == "main_llm"
     assert diagnostics["tier_eligible"] is False
@@ -597,7 +597,7 @@ async def test_reply_generate_tier_failure_falls_back_to_chat_messages_factory()
 
     kwargs["tier_fns"]["weak"].assert_awaited_once()
     chat_messages_factory.assert_awaited_once()
-    run_main.assert_awaited_once_with(chat_messages)
+    run_main.assert_awaited_once_with(chat_messages, needs_web_search=False)
     assert diagnostics["reply_path"] == "main_llm"
     assert diagnostics["tier_empty_or_failed"] is True
     assert replies == ["主 LLM 回复"]

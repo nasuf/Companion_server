@@ -120,11 +120,11 @@ def _build_tier_call(
 
 
 async def _try_web_search_reply(chat_messages: list[dict]) -> str | None:
-    """联网搜索增强主回复 (admin 运行时开关, 仅 ark/豆包 chat 路由).
+    """联网搜索增强主回复 — 仅在 data_fetch 判定需要实时信息时调用.
 
-    开关在后台「系统设置 → 模型配置」动态读取; 命中时走 Ark Responses API
-    带 web_search 工具 (模型自行判断该轮是否真的搜索). 任何失败返回 None,
-    调用方继续原流式路径 — 该功能永远不能把主回复打挂 (fail-open).
+    判定 (关键词粗筛 + 小模型) 在 llm/web_search_gate, 开关/路由校验也在那里,
+    所以到这里只剩发请求. 任何失败返回 None, 调用方继续原流式路径 —
+    该功能永远不能把主回复打挂 (fail-open).
     """
     from app.services.llm.ark_web_search import generate_with_web_search
     from app.services.runtime_config import resolve_for_current
@@ -133,18 +133,14 @@ async def _try_web_search_reply(chat_messages: list[dict]) -> str | None:
         resolved = resolve_for_current()
     except Exception:  # noqa: BLE001 — 配置读取失败不阻塞主回复
         return None
-    if not (
-        resolved.web_search_enabled
-        and resolved.online_model
-        and resolved.remote_chat_provider == "ark"
-    ):
-        return None
     return await generate_with_web_search(
         chat_messages, model=resolved.remote_chat_model,
     )
 
 
-async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
+async def _run_main_llm(
+    chat_messages: list[dict], *, needs_web_search: bool = False,
+) -> tuple[str, bool]:
     """主 LLM 流式调用，收集完整响应。
 
     三级降级策略 (resilience.astream_with_resilience):
@@ -156,14 +152,16 @@ async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
     返回 (text, is_fallback). is_fallback=True 表示走了静态兜底 (两级 LLM 全挂),
     调用方可据此给 reply metadata 打 `{reply_failed: true}` 让前端显示重试按钮等.
 
-    联网搜索开启且 chat 路由为 ark 时, 先试 Responses API + web_search
-    (下游 EMO 标记解析 / 拆分 / 计数变化逻辑完全复用); 失败自动落回流式路径.
+    needs_web_search=True (data_fetch 判定本轮需要实时信息) 时先走 Responses API
+    强制联网 (下游 EMO 标记解析 / 拆分 / 计数变化逻辑完全复用); 失败自动落回
+    流式路径. False 时完全不带工具声明, 不产生额外 token.
     """
     from app.services.llm.models import _resolve_usage_model_key
 
-    web_search_text = await _try_web_search_reply(chat_messages)
-    if web_search_text:
-        return web_search_text, False
+    if needs_web_search:
+        web_search_text = await _try_web_search_reply(chat_messages)
+        if web_search_text:
+            return web_search_text, False
 
     primary = get_chat_model()
     primary_prov = provider_name(primary)
@@ -246,6 +244,7 @@ async def generate_reply(
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
     reengagement_gap_seconds: float | None = None,
     force_main_prompt: bool = False,
+    needs_web_search: bool = False,
     diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
     """返回 (replies, raw_response, is_fallback, reply_emotion).
@@ -275,8 +274,11 @@ async def generate_reply(
         return [contradiction_inquiry], contradiction_inquiry, False, None
 
     tier_reply_text: str | None = None
+    # 需要实时信息时必须走主 prompt: tier 是轻量记忆 prompt, 走普通 LLM,
+    # 拿不到联网结果, 只会答"我帮你查下"然后没有下文.
     tier_eligible = (
         not force_main_prompt
+        and not needs_web_search
         and can_use_tier_reply(
             intent=detected_intent.intent,
             memory_relevance=memory_relevance,
@@ -296,6 +298,7 @@ async def generate_reply(
     if diagnostics is not None:
         diagnostics["tier_eligible"] = tier_eligible
         diagnostics["memory_relevance"] = memory_relevance
+        diagnostics["needs_web_search"] = needs_web_search
     if tier_eligible:
         personality_brief = getattr(agent, "name", "") or ""
         # 与主路径 build_chat_messages 一致: 带时间前缀让 tier 回复也感知对话时间轴
@@ -369,7 +372,9 @@ async def generate_reply(
         diagnostics["reply_path"] = "main_llm"
         if tier_eligible:
             diagnostics["tier_empty_or_failed"] = True
-    raw_response, is_fallback = await _run_main_llm(await _get_chat_messages())
+    raw_response, is_fallback = await _run_main_llm(
+        await _get_chat_messages(), needs_web_search=needs_web_search,
+    )
     logger.info(
         f"[REPLY-LLM] main reply len={len(raw_response)} fallback={is_fallback}",
         extra={

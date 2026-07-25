@@ -72,6 +72,7 @@ from app.services.prompting.defaults import (
     INTENT_UNIFIED_PROMPT,
     L3_MEMORY_REPLY_PROMPT,
     L3_TRIGGER_PROMPT,
+    WEB_SEARCH_DECISION_PROMPT,
     LIFE_OVERVIEW_PROMPT,
     LIGHT_ATTACK_REPLY_PROMPT,
     LOW_PATIENCE_REPLY_PROMPT,
@@ -990,6 +991,14 @@ PROMPT_DEFINITIONS = [
         "《记忆部分产品手册》§3.2 step 2-3: 是否需要调用 L3 久远记忆 "
         "(输出: 不满纠正 / 请求更久 / 无).",
         L3_TRIGGER_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.web_search_decision", "联网搜索判定", "日常交流", "意图",
+        "【工程扩展】判断本条消息是否需要实时公开信息 (输出: 需要联网 / 不需要联网). "
+        "仅在后台「联网搜索」开关开启 + 关键词粗筛命中时调用; 命中后主回复走方舟 "
+        "Responses API 并强制调用 web_search 工具 — 实测角色模型在完整人设 prompt 下 "
+        "自主触发率为 0, 必须由我方判定后强制. 占位符 {message} + {context}.",
+        WEB_SEARCH_DECISION_PROMPT,
     ),
     PromptDefinition(
         "memory.weak_reply", "弱记忆回复", "日常交流", "记忆",
