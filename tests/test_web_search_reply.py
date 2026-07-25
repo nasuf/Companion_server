@@ -77,21 +77,59 @@ def test_to_responses_input_filters_bad_roles():
     assert [m["role"] for m in out] == ["system", "assistant", "user"]
 
 
-def test_extract_output_text_counts_search_calls():
+def test_extract_output_captures_queries_and_sources():
+    """Queries/citations are what make a search turn debuggable in the panel."""
     payload = {
         "output": [
-            {"type": "web_search_call", "status": "completed"},
+            {
+                "type": "web_search_call", "status": "completed",
+                "action": {"type": "search", "query": "2026年7月新上映电影"},
+            },
             {
                 "type": "message",
                 "content": [
-                    {"type": "output_text", "text": "北京今天31℃"},
+                    {
+                        "type": "output_text",
+                        "text": "北京今天31℃",
+                        "annotations": [
+                            {
+                                "type": "url_citation", "title": "猫眼电影",
+                                "url": "https://maoyan.example/x",
+                                "summary": "观众评分 9.7  八仙！\n评分 9.6 群星闪耀时",
+                            },
+                        ],
+                    },
                 ],
             },
         ],
     }
-    text, calls = ark_web_search._extract_output_text(payload)
-    assert text == "北京今天31℃"
-    assert calls == 1
+    result = ark_web_search._extract_output(payload)
+    assert result.text == "北京今天31℃"
+    assert result.search_calls == 1
+    assert result.queries == ["2026年7月新上映电影"]
+    assert result.sources == [{
+        "title": "猫眼电影",
+        "url": "https://maoyan.example/x",
+        "summary": "观众评分 9.7 八仙！ 评分 9.6 群星闪耀时",
+    }]
+
+
+def test_extract_output_caps_sources():
+    payload = {
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text", "text": "x",
+                "annotations": [
+                    {"title": f"t{i}", "url": f"u{i}", "summary": "s" * 400}
+                    for i in range(20)
+                ],
+            }],
+        }],
+    }
+    result = ark_web_search._extract_output(payload)
+    assert len(result.sources) == ark_web_search._MAX_TRACED_SOURCES
+    assert all(len(s["summary"]) <= 120 for s in result.sources)
 
 
 class _FakeResponse:
@@ -172,8 +210,14 @@ async def test_generate_with_web_search_records_trace_step(monkeypatch):
     or the main reply disappears from the trace tree."""
     payload = {
         "output": [
-            {"type": "web_search_call"},
-            {"type": "message", "content": [{"type": "output_text", "text": "北京31℃"}]},
+            {"type": "web_search_call", "action": {"query": "北京天气"}},
+            {
+                "type": "message",
+                "content": [{
+                    "type": "output_text", "text": "北京31℃",
+                    "annotations": [{"title": "中国气象局", "url": "https://cma.example"}],
+                }],
+            },
         ],
         "usage": {
             "input_tokens": 4830, "output_tokens": 29,
@@ -203,7 +247,15 @@ async def test_generate_with_web_search_records_trace_step(monkeypatch):
     assert recorded["input_tokens"] == 4830
     assert recorded["output_tokens"] == 29
     assert recorded["cached_input_tokens"] == 0
-    assert recorded["metadata"] == {"web_search_calls": 1}
+    assert recorded["metadata"] == {
+        "web_search_calls": 1, "web_search_queries": ["北京天气"],
+    }
+    # Queries + citations land in the trace outputs so the panel can show what
+    # the search actually returned (previously only the reply text was kept).
+    search_block = recorded["extra_outputs"]["web_search"]
+    assert search_block["calls"] == 1
+    assert search_block["queries"] == ["北京天气"]
+    assert search_block["sources"][0]["title"] == "中国气象局"
     assert recorded["ended_at"] >= recorded["started_at"]
 
 
@@ -243,6 +295,128 @@ async def test_generate_with_web_search_requires_key_and_model(monkeypatch):
     assert await ark_web_search.generate_with_web_search(
         [{"role": "user", "content": "hi"}], model="",
     ) is None
+
+
+# ─── 「联网结果使用」prompt section ─────────────────────────────────────────
+
+
+def test_web_search_usage_prompt_covers_observed_failures():
+    """2026-07-25 生产 trace: 搜索结果压过历史与记忆, 复现三个毛病."""
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    text = PROMPT_DEFINITION_MAP["chat.web_search_usage"].default_text
+    assert "已经聊过的内容不要当成新发现再讲一遍" in text  # 重复端出刚聊过的片子
+    assert "我刚搜了下" in text                            # 每轮宣告的播报腔
+    assert "先用你自己的人设和记忆回答" in text            # 问偏好答成榜单播报
+    # 联网结果的合法性授权必须留在**受开关控制**的这一段里 — 放进每轮都注入的
+    # 反幻觉规则会让开关关闭时 AI 仍答应"我帮你查下"却查不了 (空头承诺).
+    assert "反幻觉硬约束" in text
+    assert "私人过往" in text
+    # 无占位符 — 整段静态注入, 渲染时不需要任何变量
+    assert "{" not in text
+
+
+def test_web_search_authorisation_is_not_in_always_on_prompt():
+    """守卫: 联网授权不得回流到无条件注入的反幻觉硬约束里."""
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    always_on = PROMPT_DEFINITION_MAP["chat.anti_hallucination_hard_rule"].default_text
+    assert "联网" not in always_on
+
+
+def test_extract_discussed_titles_from_recent_turns():
+    from app.services.llm.web_search_gate import extract_discussed_titles
+
+    messages = [
+        {"role": "user", "content": "八仙看过没"},
+        {"role": "assistant", "content": "最近上映的《八仙》票房还挺高的"},
+        {"role": "assistant", "content": "我还挺期待《长安三万里》的"},
+        {"role": "user", "content": "这个近期上映吗"},
+    ]
+    # newest first, deduped
+    assert extract_discussed_titles(messages) == ["长安三万里", "八仙"]
+    # a title the user names right now is what they want to hear about
+    assert extract_discussed_titles(
+        messages, current_message="《八仙》好看吗",
+    ) == ["长安三万里"]
+    assert extract_discussed_titles([]) == []
+
+
+def test_extract_discussed_titles_caps_and_ignores_non_text():
+    from app.services.llm import web_search_gate
+
+    messages = [{"role": "user", "content": f"《片{i}》"} for i in range(20)]
+    messages.append({"role": "user", "content": None})
+    titles = web_search_gate.extract_discussed_titles(messages)
+    assert len(titles) == web_search_gate._MAX_TITLES
+
+
+@pytest.mark.asyncio
+async def test_recent_titles_section_lists_discussed_works():
+    from unittest.mock import patch
+
+    from app.services.chat.prompt_builder import build_system_prompt
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    async def _prompt_text(key: str, **_kwargs) -> str:
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
+
+    with (
+        patch(
+            "app.services.chat.prompt_builder.get_prompt_text",
+            AsyncMock(side_effect=_prompt_text),
+        ),
+        patch(
+            "app.services.chat.prompt_builder.get_prompt_text_or_default",
+            AsyncMock(side_effect=_prompt_text),
+        ),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="小伴", values={"gender": "female"}),
+            needs_web_search=True,
+            discussed_titles=["八仙", "长安三万里"],
+        )
+    assert "## 刚聊过的作品" in prompt
+    assert "《八仙》、《长安三万里》" in prompt
+
+
+@pytest.mark.asyncio
+async def test_usage_section_injected_only_on_search_turns():
+    from unittest.mock import patch
+
+    from app.services.chat.prompt_builder import build_system_prompt
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    async def _prompt_text(key: str, **_kwargs) -> str:
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
+
+    async def build(needs_web_search: bool) -> tuple[str, dict]:
+        diagnostics: dict = {}
+        with (
+            patch(
+                "app.services.chat.prompt_builder.get_prompt_text",
+                AsyncMock(side_effect=_prompt_text),
+            ),
+            patch(
+                "app.services.chat.prompt_builder.get_prompt_text_or_default",
+                AsyncMock(side_effect=_prompt_text),
+            ),
+        ):
+            prompt = await build_system_prompt(
+                agent=SimpleNamespace(name="小伴", values={"gender": "female"}),
+                needs_web_search=needs_web_search,
+                diagnostics=diagnostics,
+            )
+        return prompt, diagnostics
+
+    with_search, _ = await build(True)
+    without_search, skipped_diag = await build(False)
+    assert "## 联网结果使用" in with_search
+    assert "已经聊过的内容不要当成新发现再讲一遍" in with_search
+    assert "## 联网结果使用" not in without_search
+    assert "联网结果使用" in skipped_diag["empty_prompt_sections_removed"]
 
 
 # ─── reply_generate branch ────────────────────────────────────────────────

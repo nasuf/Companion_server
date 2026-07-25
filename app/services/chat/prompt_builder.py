@@ -523,6 +523,10 @@ async def build_system_prompt(
     expression_habits: list[str] | None = None,
     meal_voucher_card_state: str | None = None,
     last_reply_count: int | None = None,
+    # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
+    needs_web_search: bool = False,
+    # 最近几轮出现过的作品名, 仅联网轮使用 (见 llm/web_search_gate).
+    discussed_titles: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
     # Phase 6: relational_context / graph_context 已删除 (实证冗余/幻觉源).
     # 保留 **kwargs 兜底以防 caller 还在传 — 调用方代码同步清理后可删 kwargs.
@@ -822,6 +826,39 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "条数变化")
+
+    # 联网结果使用规则: 只在本轮真的会联网时注入. 搜索结果由 provider 作为工具
+    # 输出追加在上下文最末尾, 显著性压过对话历史和记忆 — 实测模型会照榜单念、
+    # 重复端出刚聊过的片子、每轮宣告"刚搜了下". 本段同样放末尾争显著性.
+    if needs_web_search:
+        usage_tpl = await _get_optional_prompt("chat.web_search_usage")
+        if usage_tpl is not None:
+            _append_section(
+                sections, components, "联网结果使用", str(usage_tpl),
+                prompt_key="chat.web_search_usage",
+            )
+        else:
+            _record_skipped_section(diagnostics, "联网结果使用")
+        # 具体清单比抽象规则有效得多: 让模型自己扫历史只把重复率 3/5 降到 2/5,
+        # 直接列出刚聊过的作品名后降到 0/6 (2026-07-25 生产 prompt 实测).
+        titles_tpl = (
+            await _get_optional_prompt("chat.web_search_recent_titles")
+            if discussed_titles else None
+        )
+        if discussed_titles and titles_tpl is not None:
+            _append_section(
+                sections, components, "刚聊过的作品",
+                _render_section(
+                    titles_tpl,
+                    {"titles": "、".join(f"《{t}》" for t in discussed_titles)},
+                ),
+                prompt_key="chat.web_search_recent_titles",
+            )
+        else:
+            _record_skipped_section(diagnostics, "刚聊过的作品")
+    else:
+        _record_skipped_section(diagnostics, "联网结果使用")
+        _record_skipped_section(diagnostics, "刚聊过的作品")
 
     # 情绪标记指令 (W1b, 静态): 只有主回复管线会剥 [EMO:] 标记, 所以只在
     # 这里拼装, 不进 reply_prefix. 放末尾贴近生成, 遵从度最好.

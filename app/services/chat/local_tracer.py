@@ -417,8 +417,13 @@ def record_manual_llm_run(
     cached_input_tokens: int | None = None,
     provider: str | None = None,
     metadata: dict[str, Any] | None = None,
+    extra_outputs: dict[str, Any] | None = None,
 ) -> None:
     """Record an LLM call made outside langchain as a step of the current trace.
+
+    extra_outputs is merged into the recorded outputs alongside `generations`
+    (provider-specific detail such as web search queries/citations) so the
+    panel can show why the reply looks the way it does.
 
     Providers reached over raw HTTP (Ark Responses API) never hit the callback
     handler, so their step would be missing from the trace panel entirely —
@@ -447,6 +452,7 @@ def record_manual_llm_run(
         cached_input_tokens=cached_input_tokens,
         provider=provider,
         metadata=metadata,
+        extra_outputs=extra_outputs,
     ))
 
 
@@ -466,6 +472,7 @@ async def _write_manual_run(
     cached_input_tokens: int | None,
     provider: str | None,
     metadata: dict[str, Any] | None,
+    extra_outputs: dict[str, Any] | None,
 ) -> None:
     try:
         from app.db import db
@@ -493,6 +500,9 @@ async def _write_manual_run(
             "totalTokens": total_tokens,
             "inputsJson": Json({"messages": [_as_lc_messages(messages)]}),
             "outputsJson": Json({
+                # generations last: trace_enrich reads the reply from it, so a
+                # provider block must never be able to shadow it.
+                **(_json_safe(extra_outputs) or {}),
                 "generations": [[{"text": output_text, "type": "ChatGeneration"}]],
             }),
             "extraJson": Json(_json_safe(extra) or {}),

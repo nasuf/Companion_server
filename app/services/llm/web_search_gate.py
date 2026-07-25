@@ -22,11 +22,21 @@ The classifier fails closed (no search) so this can never break a reply.
 from __future__ import annotations
 
 import logging
+import re
 
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.prompting.utils import render_prompt
 
 logger = logging.getLogger(__name__)
+
+# Works are written 《…》 in Chinese chat, which makes "what did we just talk
+# about" extractable without an LLM. Needed because search results re-surface
+# the same top-ranked title the pair discussed two turns ago, and telling the
+# model to "check the history" is too weak (3/5 → 2/5 duplicates measured;
+# handing it the concrete list dropped it to 0/6).
+_TITLE_RE = re.compile(r"《([^》]{1,30})》")
+_TITLE_HISTORY_TURNS = 12
+_MAX_TITLES = 6
 
 # "嗯" / "在吗" / "好的" — no external entity can hide in this few characters,
 # and these dominate message volume, so skipping them is free accuracy.
@@ -36,6 +46,30 @@ _MIN_LENGTH = 4
 def is_worth_classifying(message: str) -> bool:
     """Length floor — the only prefilter left (see module docstring)."""
     return len((message or "").strip()) >= _MIN_LENGTH
+
+
+def extract_discussed_titles(
+    messages: list[dict], *, current_message: str = "",
+) -> list[str]:
+    """Works already named in the recent conversation, newest first.
+
+    Titles the user names in the message being answered are excluded: if they
+    just asked about it, talking about it is the point.
+    """
+    asked_now = set(_TITLE_RE.findall(current_message or ""))
+    titles: list[str] = []
+    for msg in reversed(messages[-_TITLE_HISTORY_TURNS:] if messages else []):
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, str):
+            continue
+        for title in _TITLE_RE.findall(content):
+            cleaned = title.strip()
+            if not cleaned or cleaned in asked_now or cleaned in titles:
+                continue
+            titles.append(cleaned)
+            if len(titles) >= _MAX_TITLES:
+                return titles
+    return titles
 
 
 async def needs_web_search(message: str, context: str = "") -> bool:

@@ -25,6 +25,7 @@ search fires vs ~1.2s when not.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,27 +61,66 @@ def _to_responses_input(chat_messages: list[dict]) -> list[dict[str, Any]]:
     return out
 
 
-def _extract_output_text(payload: dict) -> tuple[str, int]:
-    """Return (reply_text, web_search_call_count) from a Responses API body."""
+@dataclass(frozen=True)
+class _SearchOutput:
+    """Parsed Responses API body.
+
+    queries/sources exist purely for the trace panel: without them a search
+    turn shows only the final reply, and diagnosing "why did it answer that"
+    means replaying the call by hand (which is what the 2026-07-25 duplicate-
+    recommendation investigation had to do).
+    """
+
+    text: str
+    search_calls: int
+    queries: list[str]
+    sources: list[dict[str, str]]
+
+
+# Citations are long (each carries a page summary); keep enough to explain the
+# reply without bloating every trace row.
+_MAX_TRACED_SOURCES = 8
+_SOURCE_SUMMARY_CHARS = 120
+
+
+def _extract_output(payload: dict) -> _SearchOutput:
     outputs = payload.get("output")
     if not isinstance(outputs, list):
-        return "", 0
+        return _SearchOutput("", 0, [], [])
     search_calls = 0
     texts: list[str] = []
+    queries: list[str] = []
+    sources: list[dict[str, str]] = []
     for item in outputs:
         if not isinstance(item, dict):
             continue
         if item.get("type") == "web_search_call":
             search_calls += 1
+            action = item.get("action")
+            if isinstance(action, dict):
+                query = action.get("query")
+                if isinstance(query, str) and query:
+                    queries.append(query)
             continue
         if item.get("type") != "message":
             continue
         for part in item.get("content") or []:
-            if isinstance(part, dict) and part.get("type") == "output_text":
-                text = part.get("text")
-                if isinstance(text, str) and text:
-                    texts.append(text)
-    return "".join(texts).strip(), search_calls
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                texts.append(text)
+            for ann in part.get("annotations") or []:
+                if not isinstance(ann, dict) or len(sources) >= _MAX_TRACED_SOURCES:
+                    continue
+                sources.append({
+                    "title": str(ann.get("title") or "")[:80],
+                    "url": str(ann.get("url") or "")[:200],
+                    "summary": " ".join(
+                        str(ann.get("summary") or "").split()
+                    )[:_SOURCE_SUMMARY_CHARS],
+                })
+    return _SearchOutput("".join(texts).strip(), search_calls, queries, sources)
 
 
 def _usage_tokens(payload: dict) -> tuple[int, int, int] | None:
@@ -149,8 +189,8 @@ async def generate_with_web_search(
         logger.warning(f"[WEB-SEARCH] responses API call failed: {e}")
         return None
 
-    text, search_calls = _extract_output_text(payload)
-    if not text:
+    result = _extract_output(payload)
+    if not result.text:
         logger.warning("[WEB-SEARCH] empty output, falling back to normal path")
         return None
 
@@ -166,20 +206,32 @@ async def generate_with_web_search(
         model_name=model,
         provider="ark",
         messages=chat_messages,
-        output_text=text,
+        output_text=result.text,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
         input_tokens=tokens[0] if tokens else None,
         output_tokens=tokens[1] if tokens else None,
         cached_input_tokens=tokens[2] if tokens else None,
-        metadata={"web_search_calls": search_calls},
-    )
-    logger.info(
-        f"[WEB-SEARCH] reply len={len(text)} search_calls={search_calls}",
-        extra={
-            "event": EVT_REPLY_WEB_SEARCH,
-            "web_search_calls": search_calls,
-            "raw_response_len": len(text),
+        metadata={
+            "web_search_calls": result.search_calls,
+            "web_search_queries": result.queries,
+        },
+        extra_outputs={
+            "web_search": {
+                "calls": result.search_calls,
+                "queries": result.queries,
+                "sources": result.sources,
+            },
         },
     )
-    return text
+    logger.info(
+        f"[WEB-SEARCH] reply len={len(result.text)} calls={result.search_calls} "
+        f"queries={result.queries} sources={len(result.sources)}",
+        extra={
+            "event": EVT_REPLY_WEB_SEARCH,
+            "web_search_calls": result.search_calls,
+            "web_search_source_count": len(result.sources),
+            "raw_response_len": len(result.text),
+        },
+    )
+    return result.text

@@ -25,6 +25,7 @@ from app.observability.events import (
     EVT_REPLY_EMOTION,
 )
 from app.services.llm.models import get_chat_model, convert_messages, invoke_text
+from app.services.llm.web_search_gate import extract_discussed_titles
 from app.services.chat.prompt_builder import (
     build_system_prompt,
     build_chat_messages,
@@ -1326,6 +1327,13 @@ async def stream_chat_response(
                 expression_habits=expression_habits or None,
                 meal_voucher_card_state=meal_card_decision.state,
                 last_reply_count=last_reply_count,
+                needs_web_search=needs_web_search,
+                discussed_titles=(
+                    extract_discussed_titles(
+                        messages_dicts, current_message=user_message,
+                    )
+                    if needs_web_search else None
+                ),
                 diagnostics=prompt_diagnostics,
             )
             response_diagnostics["main_prompt_built"] = True

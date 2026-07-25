@@ -73,6 +73,8 @@ from app.services.prompting.defaults import (
     L3_MEMORY_REPLY_PROMPT,
     L3_TRIGGER_PROMPT,
     WEB_SEARCH_DECISION_PROMPT,
+    WEB_SEARCH_RECENT_TITLES_PROMPT,
+    WEB_SEARCH_USAGE_PROMPT,
     LIFE_OVERVIEW_PROMPT,
     LIGHT_ATTACK_REPLY_PROMPT,
     LOW_PATIENCE_REPLY_PROMPT,
@@ -991,6 +993,22 @@ PROMPT_DEFINITIONS = [
         "《记忆部分产品手册》§3.2 step 2-3: 是否需要调用 L3 久远记忆 "
         "(输出: 不满纠正 / 请求更久 / 无).",
         L3_TRIGGER_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.web_search_usage", "联网结果使用规则", "聊天热路径", "聊天",
+        "【工程扩展】仅在本轮联网搜索命中时注入主回复 system prompt 末尾. "
+        "搜索结果作为工具输出落在上下文最末尾, 显著性压过对话历史与记忆, 实测导致: "
+        "重复端出刚聊过的内容 / 每轮宣告「刚搜了下」/ 问 AI 偏好却答成榜单播报. "
+        "本段贴近生成位置纠正这三点. 无占位符.",
+        WEB_SEARCH_USAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.web_search_recent_titles", "刚聊过的作品", "聊天热路径", "聊天",
+        "【工程扩展】联网轮附加: 列出最近几轮对话里出现过的作品名 (《》标记), "
+        "让模型不要把它们当新信息重复端出. 实测抽象规则「别重复刚聊过的」只把重复率 "
+        "3/5 降到 2/5 (模型要自己扫几十条历史), 给出具体清单后降到 0/6. "
+        "占位符 {titles}. 用户当前消息里自己提到的标题不列入 (那是他主动问的).",
+        WEB_SEARCH_RECENT_TITLES_PROMPT,
     ),
     PromptDefinition(
         "chat.web_search_decision", "联网搜索判定", "日常交流", "意图",

@@ -52,6 +52,8 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
     ("## 一起听音乐", "chat.music_context_section"),
     ("## 时间\n", "chat.time_context_section"),
     ("## 你的隐性状态约束", "chat.ai_state_constraint"),
+    ("## 联网结果使用", "chat.web_search_usage"),
+    ("## 刚聊过的作品", "chat.web_search_recent_titles"),
     ("## 回复要求", "chat.response_instruction"),
 ]
 
@@ -78,6 +80,9 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.reply_emotion_marker",
     # 图灵测试条数变化 — 仅作为主回复 system prompt 的变量 section 出现
     "chat.reply_count_variation",
+    # 联网结果使用规则 / 刚聊过的作品 — 仅在联网轮作为主回复 section 出现
+    "chat.web_search_usage",
+    "chat.web_search_recent_titles",
     "chat.delay_context_section",
     "chat.l3_memory_section",
     "chat.memory_empty_anchor",
