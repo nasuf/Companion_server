@@ -376,6 +376,134 @@ async def _write_run_end(handler: LocalTraceHandler, run: Any) -> None:
         logger.debug(f"[local-trace] run end write failed {run.id}: {type(e).__name__}: {e}")
 
 
+# ─────────────────────────────────────────────────────────────────
+# Manual runs: LLM calls that bypass langchain (raw HTTP providers)
+# ─────────────────────────────────────────────────────────────────
+
+# role → langchain message class, so manually recorded runs serialize exactly
+# like handler-written ones and trace_enrich's fingerprint matching (which
+# reads inputs.messages[0][0].kwargs.content) labels them unchanged.
+_LC_MESSAGE_BY_ROLE = {
+    "system": ("SystemMessage", "system"),
+    "user": ("HumanMessage", "human"),
+    "assistant": ("AIMessage", "ai"),
+}
+
+
+def _as_lc_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        class_name, lc_type = _LC_MESSAGE_BY_ROLE.get(role, ("HumanMessage", "human"))
+        serialized.append({
+            "lc": 1,
+            "type": "constructor",
+            "id": ["langchain", "schema", "messages", class_name],
+            "kwargs": {"type": lc_type, "content": str(message.get("content") or "")},
+        })
+    return serialized
+
+
+def record_manual_llm_run(
+    *,
+    name: str,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    output_text: str,
+    started_at: datetime,
+    ended_at: datetime,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cached_input_tokens: int | None = None,
+    provider: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Record an LLM call made outside langchain as a step of the current trace.
+
+    Providers reached over raw HTTP (Ark Responses API) never hit the callback
+    handler, so their step would be missing from the trace panel entirely —
+    the main reply would silently vanish from the tree. Call this right after
+    such a request completes; it is a no-op when no trace is open (tracing
+    disabled, background job, unit test) and never raises.
+    """
+    handler = _local_trace_handler.get()
+    if handler is None:
+        return
+    total = None
+    if input_tokens is not None or output_tokens is not None:
+        total = (input_tokens or 0) + (output_tokens or 0)
+    _fire(_write_manual_run(
+        trace_id=handler.local_trace_id,
+        parent_id=handler.local_root_run_id,
+        name=name,
+        model_name=model_name,
+        messages=messages,
+        output_text=output_text,
+        started_at=started_at,
+        ended_at=ended_at,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total,
+        cached_input_tokens=cached_input_tokens,
+        provider=provider,
+        metadata=metadata,
+    ))
+
+
+async def _write_manual_run(
+    *,
+    trace_id: str,
+    parent_id: str,
+    name: str,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    output_text: str,
+    started_at: datetime,
+    ended_at: datetime,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    cached_input_tokens: int | None,
+    provider: str | None,
+    metadata: dict[str, Any] | None,
+) -> None:
+    try:
+        from app.db import db
+
+        extra: dict[str, Any] = {
+            "metadata": {
+                "ls_provider": provider or "unknown",
+                "ls_model_name": model_name,
+                "ls_model_type": "chat",
+                **(metadata or {}),
+            },
+        }
+        data: dict[str, Any] = {
+            "id": str(uuid.uuid4()),
+            "traceId": trace_id,
+            "parentId": parent_id,
+            "name": name,
+            "runType": "llm",
+            "status": "success",
+            "startedAt": started_at,
+            "endedAt": ended_at,
+            "modelName": model_name,
+            "promptTokens": input_tokens,
+            "completionTokens": output_tokens,
+            "totalTokens": total_tokens,
+            "inputsJson": Json({"messages": [_as_lc_messages(messages)]}),
+            "outputsJson": Json({
+                "generations": [[{"text": output_text, "type": "ChatGeneration"}]],
+            }),
+            "extraJson": Json(_json_safe(extra) or {}),
+        }
+        if cached_input_tokens is not None:
+            data["promptTokenDetails"] = Json({"cache_read": cached_input_tokens})
+        await db.tracerun.create(data=data)
+    except Exception as e:
+        logger.debug(f"[local-trace] manual run write failed: {type(e).__name__}: {e}")
+
+
 async def _write_root_start(
     trace_id: str, user_message: str, conversation_id: str, started_at: datetime,
 ) -> None:

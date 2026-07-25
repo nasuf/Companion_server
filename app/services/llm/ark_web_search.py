@@ -13,6 +13,9 @@ Integration contract (see reply_generate._run_main_llm):
   path, so this feature can never take the main reply down (fail-open).
 - Usage is recorded to usage_tracker under the same "ark/<model>" key the
   streaming path uses, keeping admin cost stats accurate.
+- The call is also recorded as a manual trace step: it bypasses langchain's
+  callback handler, so without that the main reply would be missing from the
+  trace tree entirely (only the small-model steps would show).
 
 Verified against production 2026-07-25: multi-turn system/assistant/user
 input, on-demand triggering, [EMO:] marker instruction honored, ~3s when a
@@ -22,12 +25,14 @@ search fires vs ~1.2s when not.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 from app.config import settings
 from app.observability.events import EVT_REPLY_WEB_SEARCH
+from app.services.chat.local_tracer import record_manual_llm_run
 from app.services.llm import usage_tracker
 
 logger = logging.getLogger(__name__)
@@ -78,19 +83,19 @@ def _extract_output_text(payload: dict) -> tuple[str, int]:
     return "".join(texts).strip(), search_calls
 
 
-def _record_usage(model: str, payload: dict) -> None:
+def _usage_tokens(payload: dict) -> tuple[int, int, int] | None:
+    """(input, output, cached_input) from a Responses API body; None if absent."""
     usage = payload.get("usage")
     if not isinstance(usage, dict):
-        return
+        return None
     input_details = usage.get("input_tokens_details")
     cached = 0
     if isinstance(input_details, dict):
         cached = int(input_details.get("cached_tokens", 0) or 0)
-    usage_tracker.record(
-        f"ark/{model}",
+    return (
         int(usage.get("input_tokens", 0) or 0),
         int(usage.get("output_tokens", 0) or 0),
-        cached_input_tokens=cached,
+        cached,
     )
 
 
@@ -114,6 +119,7 @@ async def generate_with_web_search(
     if not body["input"]:
         return None
     endpoint = settings.ark_base_url.rstrip("/") + "/responses"
+    started_at = datetime.now(timezone.utc)
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
             response = await client.post(
@@ -141,7 +147,27 @@ async def generate_with_web_search(
     if not text:
         logger.warning("[WEB-SEARCH] empty output, falling back to normal path")
         return None
-    _record_usage(model, payload)
+
+    tokens = _usage_tokens(payload)
+    if tokens is not None:
+        usage_tracker.record(
+            f"ark/{model}", tokens[0], tokens[1], cached_input_tokens=tokens[2],
+        )
+    # This call never touches langchain, so nothing would appear in the trace
+    # tree without an explicit record — the main reply would look missing.
+    record_manual_llm_run(
+        name="ArkResponsesAPI",
+        model_name=model,
+        provider="ark",
+        messages=chat_messages,
+        output_text=text,
+        started_at=started_at,
+        ended_at=datetime.now(timezone.utc),
+        input_tokens=tokens[0] if tokens else None,
+        output_tokens=tokens[1] if tokens else None,
+        cached_input_tokens=tokens[2] if tokens else None,
+        metadata={"web_search_calls": search_calls},
+    )
     logger.info(
         f"[WEB-SEARCH] reply len={len(text)} search_calls={search_calls}",
         extra={

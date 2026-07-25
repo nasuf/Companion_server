@@ -164,6 +164,47 @@ async def test_generate_with_web_search_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_with_web_search_records_trace_step(monkeypatch):
+    """Raw HTTP calls bypass langchain, so the step must be recorded manually
+    or the main reply disappears from the trace tree."""
+    payload = {
+        "output": [
+            {"type": "web_search_call"},
+            {"type": "message", "content": [{"type": "output_text", "text": "北京31℃"}]},
+        ],
+        "usage": {
+            "input_tokens": 4830, "output_tokens": 29,
+            "input_tokens_details": {"cached_tokens": 0},
+        },
+    }
+    client = _FakeClient(response=_FakeResponse(200, payload))
+    monkeypatch.setattr(ark_web_search.httpx, "AsyncClient", lambda **kw: client)
+    monkeypatch.setattr(ark_web_search.settings, "ark_api_key", "test-key")
+    monkeypatch.setattr(ark_web_search.usage_tracker, "record", lambda *a, **k: None)
+    recorded: dict = {}
+    monkeypatch.setattr(
+        ark_web_search, "record_manual_llm_run",
+        lambda **kwargs: recorded.update(kwargs),
+    )
+
+    messages = [
+        {"role": "system", "content": "人设 prompt"},
+        {"role": "user", "content": "北京天气"},
+    ]
+    await ark_web_search.generate_with_web_search(messages, model="doubao-x")
+
+    assert recorded["model_name"] == "doubao-x"
+    assert recorded["provider"] == "ark"
+    assert recorded["messages"] == messages
+    assert recorded["output_text"] == "北京31℃"
+    assert recorded["input_tokens"] == 4830
+    assert recorded["output_tokens"] == 29
+    assert recorded["cached_input_tokens"] == 0
+    assert recorded["metadata"] == {"web_search_calls": 1}
+    assert recorded["ended_at"] >= recorded["started_at"]
+
+
+@pytest.mark.asyncio
 async def test_generate_with_web_search_fail_open(monkeypatch):
     monkeypatch.setattr(ark_web_search.settings, "ark_api_key", "test-key")
 

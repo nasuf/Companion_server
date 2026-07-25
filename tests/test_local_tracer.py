@@ -150,6 +150,102 @@ class TestLocalTracerLifecycle:
         tracer.close()
 
 
+class TestManualRunRecording:
+    """Raw-HTTP providers (Ark Responses API) bypass the langchain handler."""
+
+    async def test_manual_run_row_shape_matches_handler_rows(self, monkeypatch):
+        from app.services.chat import local_tracer
+
+        monkeypatch.setattr(settings, "trace_backend", "local")
+        fake = _fake_db()
+        import app.db
+        started = datetime(2026, 7, 25, 8, 0, 0, tzinfo=timezone.utc)
+        ended = datetime(2026, 7, 25, 8, 0, 3, tzinfo=timezone.utc)
+        with patch.object(app.db, "db", fake):
+            tracer = local_tracer.LocalTracer("明天天气", "conv-1").enter()
+            local_tracer.record_manual_llm_run(
+                name="ArkResponsesAPI",
+                model_name="doubao-seed-character-260628",
+                provider="ark",
+                messages=[
+                    {"role": "system", "content": "人设 prompt"},
+                    {"role": "user", "content": "明天天气"},
+                ],
+                output_text="明天晴，31℃",
+                started_at=started,
+                ended_at=ended,
+                input_tokens=4830,
+                output_tokens=29,
+                cached_input_tokens=0,
+                metadata={"web_search_calls": 1},
+            )
+            await asyncio.sleep(0.05)
+            tracer.close()
+            await asyncio.sleep(0.05)
+
+        manual = next(
+            call.kwargs["data"] for call in fake.tracerun.create.await_args_list
+            if call.kwargs["data"].get("name") == "ArkResponsesAPI"
+        )
+        assert manual["traceId"] == tracer.trace_id
+        assert manual["parentId"] == tracer.trace_id  # attached to synthetic root
+        assert manual["runType"] == "llm"
+        assert manual["status"] == "success"
+        assert manual["promptTokens"] == 4830
+        assert manual["completionTokens"] == 29
+        assert manual["totalTokens"] == 4859
+        assert _unjson(manual["promptTokenDetails"]) == {"cache_read": 0}
+
+        # trace_enrich fingerprints on inputs.messages[0][0].kwargs.content —
+        # the serialized shape must match what the langchain handler writes.
+        inputs = _unjson(manual["inputsJson"])
+        assert inputs["messages"][0][0]["kwargs"]["content"] == "人设 prompt"
+        assert inputs["messages"][0][0]["kwargs"]["type"] == "system"
+        assert inputs["messages"][0][1]["kwargs"]["type"] == "human"
+        outputs = _unjson(manual["outputsJson"])
+        assert outputs["generations"][0][0]["text"] == "明天晴，31℃"
+        extra = _unjson(manual["extraJson"])
+        assert extra["metadata"]["ls_provider"] == "ark"
+        assert extra["metadata"]["web_search_calls"] == 1
+
+    async def test_manual_run_is_noop_without_open_trace(self, monkeypatch):
+        from app.services.chat import local_tracer
+
+        monkeypatch.setattr(settings, "trace_backend", "local")
+        fake = _fake_db()
+        import app.db
+        now = datetime(2026, 7, 25, 8, 0, 0, tzinfo=timezone.utc)
+        with patch.object(app.db, "db", fake):
+            # No tracer.enter() → handler ContextVar is unset (background job).
+            local_tracer.record_manual_llm_run(
+                name="ArkResponsesAPI", model_name="m", messages=[],
+                output_text="x", started_at=now, ended_at=now,
+            )
+            await asyncio.sleep(0.05)
+        assert fake.tracerun.create.await_count == 0
+
+    async def test_manual_run_enriches_as_main_reply(self, monkeypatch):
+        """End-to-end: a manual row read back must label as the main prompt."""
+        from app.services.chat.local_tracer import _row_to_step
+        from app.services.chat.trace_enrich import enrich_step
+        from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+        system_text = PROMPT_DEFINITION_MAP["chat.system_base"].default_text
+        row = _row(
+            run_id="manual-1",
+            name="ArkResponsesAPI",
+            model_name="doubao-seed-character-260628",
+            inputs={"messages": [[
+                {"kwargs": {"type": "system", "content": system_text}},
+                {"kwargs": {"type": "human", "content": "明天天气"}},
+            ]]},
+            outputs={"generations": [[{"text": "明天晴，31℃"}]]},
+        )
+        step = enrich_step(_row_to_step(row))
+        assert step["prompt_key"] == "chat.system_base"
+        assert step["decision_label"]
+
+
 class TestCreateTracerFactory:
     def test_local_backend_returns_local_tracer(self, monkeypatch):
         from app.services.chat.local_tracer import LocalTracer
