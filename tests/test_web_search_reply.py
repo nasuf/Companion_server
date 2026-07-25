@@ -316,6 +316,39 @@ def test_web_search_usage_prompt_covers_observed_failures():
     assert "{" not in text
 
 
+def test_web_search_usage_prompt_forbids_bare_facts():
+    """2026-07-25 生产 trace: 「永乐宫建于哪一年」→「它是元代1247年动工的哦👌」.
+
+    人设、字数上限、反播报规则全都没拦住 —— 它们管的是语气和长度, 没有一条要求
+    事实必须挂在她自己的反应上. 一个只报数字的回复在这些约束下完全合法, 但读起来
+    就是查询工具. 同一条 trace 里她还漏答了「有怎样的历史故事」, 只捡了好查的那半.
+    """
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    text = PROMPT_DEFINITION_MAP["chat.web_search_usage"].default_text
+    assert "事实不能光秃秃地丢出来" in text
+    assert "你的反应、看法、好奇" in text
+    assert "都接住" in text  # 多问一次答一半 = 在交检索结果
+
+
+def test_web_search_decision_prompt_excludes_static_lookups():
+    """静态百科考问不该走联网.
+
+    「建于哪一年」查得到, 但查到之后她只会报一个数字 —— 联网把一次闲聊变成一次
+    检索. 朋友答不上来说不知道反而更自然, 所以这类问题宁可不查.
+    原【要点】的兜底「拿不准就查」会把它们全兜进来, 必须给出反向边界.
+    """
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    text = PROMPT_DEFINITION_MAP["chat.web_search_decision"].default_text
+    assert "建于哪一年" in text
+    assert "静态数字或名词答案" in text
+    # 反向边界必须在兜底规则**之后**出现, 否则读起来仍是"拿不准就查"收尾.
+    assert text.index("静态数字或名词答案") > text.index("拿不准时")
+    # 近期动态不能被误伤 —— 它跟静态考问是这段 prompt 要分开的两件事.
+    assert "最近上了什么片" in text
+
+
 def test_web_search_authorisation_is_not_in_always_on_prompt():
     """守卫: 联网授权不得回流到无条件注入的反幻觉硬约束里."""
     from app.services.prompting.registry import PROMPT_DEFINITION_MAP
