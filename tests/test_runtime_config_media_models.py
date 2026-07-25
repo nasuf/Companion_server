@@ -82,7 +82,7 @@ def test_row_to_dict_reads_media_columns_from_system_row():
 
 def test_payload_to_data_includes_media_only_for_global_path():
     payload = ConfigPayload(vision_model=" doubao-v ", asr_model="fun-a")
-    global_data = _payload_to_data(payload, include_media_models=True)
+    global_data = _payload_to_data(payload, include_global_only=True)
     assert global_data["visionModel"] == "doubao-v"  # stripped
     assert global_data["asrModel"] == "fun-a"
     # Agent path must not carry the columns at all (prisma unknown column).
@@ -93,7 +93,7 @@ def test_payload_to_data_includes_media_only_for_global_path():
 
 def test_payload_to_data_empty_string_clears_override():
     payload = ConfigPayload(vision_model="  ", asr_model="")
-    data = _payload_to_data(payload, include_media_models=True)
+    data = _payload_to_data(payload, include_global_only=True)
     assert data["visionModel"] is None
     assert data["asrModel"] is None
 

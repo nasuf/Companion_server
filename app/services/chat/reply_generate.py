@@ -119,6 +119,31 @@ def _build_tier_call(
     return tier_fns["weak"], {}
 
 
+async def _try_web_search_reply(chat_messages: list[dict]) -> str | None:
+    """联网搜索增强主回复 (admin 运行时开关, 仅 ark/豆包 chat 路由).
+
+    开关在后台「系统设置 → 模型配置」动态读取; 命中时走 Ark Responses API
+    带 web_search 工具 (模型自行判断该轮是否真的搜索). 任何失败返回 None,
+    调用方继续原流式路径 — 该功能永远不能把主回复打挂 (fail-open).
+    """
+    from app.services.llm.ark_web_search import generate_with_web_search
+    from app.services.runtime_config import resolve_for_current
+
+    try:
+        resolved = resolve_for_current()
+    except Exception:  # noqa: BLE001 — 配置读取失败不阻塞主回复
+        return None
+    if not (
+        resolved.web_search_enabled
+        and resolved.online_model
+        and resolved.remote_chat_provider == "ark"
+    ):
+        return None
+    return await generate_with_web_search(
+        chat_messages, model=resolved.remote_chat_model,
+    )
+
+
 async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
     """主 LLM 流式调用，收集完整响应。
 
@@ -130,8 +155,15 @@ async def _run_main_llm(chat_messages: list[dict]) -> tuple[str, bool]:
 
     返回 (text, is_fallback). is_fallback=True 表示走了静态兜底 (两级 LLM 全挂),
     调用方可据此给 reply metadata 打 `{reply_failed: true}` 让前端显示重试按钮等.
+
+    联网搜索开启且 chat 路由为 ark 时, 先试 Responses API + web_search
+    (下游 EMO 标记解析 / 拆分 / 计数变化逻辑完全复用); 失败自动落回流式路径.
     """
     from app.services.llm.models import _resolve_usage_model_key
+
+    web_search_text = await _try_web_search_reply(chat_messages)
+    if web_search_text:
+        return web_search_text, False
 
     primary = get_chat_model()
     primary_prov = provider_name(primary)

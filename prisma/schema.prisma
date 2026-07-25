@@ -1685,6 +1685,9 @@ model SystemConfig {
   // null = fall back to env DOUBAO_VISION_MODEL / DASHSCOPE_ASR_MODEL.
   visionModel            String?  @map("vision_model")
   asrModel               String?  @map("asr_model")
+  // Web search for main replies (Ark Responses API web_search tool).
+  // Global only; null = fall back to env WEB_SEARCH_ENABLED (default false).
+  webSearchEnabled       Boolean? @map("web_search_enabled")
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")

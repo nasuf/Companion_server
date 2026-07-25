@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_vision_model: str = "doubao-1-5-vision-pro-32k-250115"
+    # Web search for main replies via Ark Responses API web_search tool.
+    # Env default only; admins toggle it at runtime (SystemConfig.webSearchEnabled).
+    # Requires the 联网内容插件 activated on the Ark account (per-call billing).
+    web_search_enabled: bool = False
 
     # MiniMax Open Platform (OpenAI-compatible)
     minimax_api_key: str = ""

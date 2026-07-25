@@ -30,6 +30,8 @@ EVT_CHAT_CRISIS_DETECTED = "chat.crisis_detected"  # 自伤/极端念头关键�
 # Reply
 EVT_REPLY_TIER = "reply.tier_path"
 EVT_REPLY_LLM = "reply.llm_main"
+# Main reply produced via Ark Responses API with the web_search tool.
+EVT_REPLY_WEB_SEARCH = "reply.web_search"
 EVT_REPLY_SPLIT = "reply.split"
 # 出口护栏触发 (条数溢出合并 / 单条截断 / 总量截断 / 长独白截尾).
 # 触发率高 = prompt 失守, 该修 prompt 而不是靠护栏硬扛.
