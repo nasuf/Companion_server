@@ -469,7 +469,10 @@ def test_length_floor_only_skips_chitchat_acks():
     from app.services.llm.web_search_gate import is_worth_classifying
 
     for kept in ("八仙看过没", "最近看新电影了没", "听过告五人的歌没",
-                 "你今天过得怎么样呀", "明天北京天气怎么样"):
+                 "你今天过得怎么样呀", "明天北京天气怎么样",
+                 # 省略式追问: 短, 但话题继承自上文 — 多轮测试里「还有吗」被
+                 # 4 字下限挡掉后, 模型凭参数记忆编了一部电影出来.
+                 "还有吗", "然后呢", "真的吗"):
         assert is_worth_classifying(kept), kept
     for skipped in ("嗯", "好的", "在吗", "  ", ""):
         assert not is_worth_classifying(skipped), skipped

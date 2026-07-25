@@ -38,9 +38,14 @@ _TITLE_RE = re.compile(r"《([^》]{1,30})》")
 _TITLE_HISTORY_TURNS = 12
 _MAX_TITLES = 6
 
-# "嗯" / "在吗" / "好的" — no external entity can hide in this few characters,
-# and these dominate message volume, so skipping them is free accuracy.
-_MIN_LENGTH = 4
+# "嗯" / "好的" / "在吗" — pure acks, and they dominate message volume, so
+# skipping them is free accuracy. The floor stops at 2 on purpose: elliptical
+# follow-ups are 3 characters ("还有吗" / "然后呢" / "真的吗") and inherit the
+# topic from context, so a 4-char floor silently dropped them mid-thread and
+# the model answered a "what else is showing" question from parametric memory
+# (observed inventing a film title). Matches the ≤2 "fragment" rule the
+# aggregation layer already uses.
+_MIN_LENGTH = 3
 
 
 def is_worth_classifying(message: str) -> bool:
