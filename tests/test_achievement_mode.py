@@ -25,6 +25,7 @@ from app.api.public import conversations
 from app.config import settings
 from app.services import wallet as wallet_service
 from app.services.achievements import engine, mode as mode_module, repository
+from app.services.notifications import service as notifications_service
 from jobs import scheduler as scheduler_module
 
 
@@ -93,7 +94,7 @@ async def test_invalid_db_value_falls_back_to_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_db_error_falls_back_to_env_without_caching(monkeypatch):
+async def test_db_error_falls_back_to_env_when_never_read(monkeypatch):
     monkeypatch.setattr(settings, "achievement_mode", "silent")
     fake_db = MagicMock()
     fake_db.systemconfig.find_unique = AsyncMock(side_effect=RuntimeError("db down"))
@@ -101,6 +102,43 @@ async def test_db_error_falls_back_to_env_without_caching(monkeypatch):
         assert await mode_module.get_achievement_mode() == "silent"
     # Error path must not populate the cache (recovery picked up immediately).
     assert mode_module._override_cache is None
+
+
+@pytest.mark.asyncio
+async def test_db_error_reuses_last_known_override_instead_of_env(monkeypatch):
+    """Regression (2026-07-26): a transient DB error re-enabled unlock pushes.
+
+    Production leaves ACHIEVEMENT_MODE unset (= "on"), so falling back to env
+    on failure resurrected APNs pushes an admin had switched to silent.
+    """
+    monkeypatch.setattr(settings, "achievement_mode", "on")
+    fake_db = MagicMock()
+    fake_db.systemconfig.find_unique = AsyncMock(
+        side_effect=[
+            SimpleNamespace(achievementMode="silent"),
+            RuntimeError("connection pool exhausted"),
+        ]
+    )
+
+    with patch.object(mode_module, "db", fake_db):
+        assert await mode_module.get_achievement_mode() == "silent"
+        mode_module._override_cache = None  # expire the TTL window
+        # DB now fails; must stay silent rather than snapping back to env "on".
+        assert await mode_module.get_achievement_mode() == "silent"
+        assert await mode_module.achievement_alerts_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_reset_cache_clears_last_known_override(monkeypatch):
+    monkeypatch.setattr(settings, "achievement_mode", "on")
+    with patch.object(mode_module, "db", _db_with_override("silent")):
+        assert await mode_module.get_achievement_mode() == "silent"
+
+    mode_module.reset_achievement_mode_cache()
+    fake_db = MagicMock()
+    fake_db.systemconfig.find_unique = AsyncMock(side_effect=RuntimeError("db down"))
+    with patch.object(mode_module, "db", fake_db):
+        assert await mode_module.get_achievement_mode() == "on"
 
 
 @pytest.mark.asyncio
@@ -326,6 +364,53 @@ async def test_off_mode_engine_gate_resolves_from_db_override(monkeypatch):
         )
 
     evaluate.assert_not_awaited()
+
+
+# ── Notification service (defence in depth) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_notify_helper_refuses_to_enqueue_while_alerts_disabled():
+    """Last hop before a user-visible push re-checks the mode itself."""
+    with (
+        patch(
+            "app.services.achievements.mode.achievement_alerts_enabled",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(
+            notifications_service, "enqueue_notification", AsyncMock()
+        ) as enqueue,
+    ):
+        await notifications_service.notify_achievement_unlocked(
+            user_id="u1",
+            agent_id="a1",
+            achievement_id=55,
+            title="记忆的温度",
+        )
+
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notify_helper_enqueues_when_alerts_enabled():
+    with (
+        patch(
+            "app.services.achievements.mode.achievement_alerts_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch.object(
+            notifications_service, "enqueue_notification", AsyncMock()
+        ) as enqueue,
+    ):
+        await notifications_service.notify_achievement_unlocked(
+            user_id="u1",
+            agent_id="a1",
+            achievement_id=55,
+            title="记忆的温度",
+        )
+
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args.kwargs["type"] == "achievement_unlocked"
 
 
 # ── Wallet point sync ──────────────────────────────────────────────────

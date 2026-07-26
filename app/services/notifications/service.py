@@ -166,6 +166,17 @@ async def notify_achievement_unlocked(
     workspace_id: str | None = None,
     conversation_id: str | None = None,
 ) -> None:
+    # Defence in depth: callers already gate on the achievement mode, but this
+    # is the last hop before a user-visible push, so re-check here too. Any
+    # future caller (or a caller whose gate read degraded) stays silent.
+    from app.services.achievements.mode import achievement_alerts_enabled
+
+    if not await achievement_alerts_enabled():
+        logger.info(
+            f"[PUSH] achievement notification suppressed id={achievement_id} "
+            f"reason=achievement_alerts_disabled"
+        )
+        return
     await enqueue_notification(
         user_id=user_id,
         agent_id=agent_id,
