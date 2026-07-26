@@ -25,6 +25,17 @@ class TestTaskBank:
             covered = {c.expected for c in task.cases}
             assert len(covered) >= 2, f"{task.name} 只覆盖了 {covered}"
 
+    def test_no_duplicate_messages_within_a_task(self):
+        """重复用例会在按调用平均时被算两遍, 悄悄给某几条加权.
+
+        (按用例聚合的统计不受影响, 所以这类问题只在总准确率上现形 —— 很难
+        肉眼发现, 必须靠测试守住.)
+        """
+        for task in ALL_TASKS:
+            messages = [c.message for c in task.cases]
+            dupes = {m for m in messages if messages.count(m) > 1}
+            assert not dupes, f"{task.name} 有重复用例: {dupes}"
+
     def test_params_fill_every_placeholder_the_prompt_needs(self):
         keys_by_task = {
             "记忆预筛": {"message"},

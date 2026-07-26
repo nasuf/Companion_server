@@ -177,6 +177,46 @@ async def evaluate(spec: str, tasks: tuple[Task, ...], repeats: int,
     }
 
 
+def _print_statistics(results: list[dict[str, Any]]) -> None:
+    """点估计之外: 配对比较 + 区间 + 稳定性 + 可疑标注."""
+    from evals.utility_model.analyze import (
+        paired_compare, score_by_case, stability, suspect_labels,
+    )
+
+    by_model = {r["model"]: score_by_case(r["rows"]) for r in results}
+    suspects = suspect_labels(by_model)
+
+    print("\n════════ 答案稳定性 (同一输入重复调用是否给同一答案) ════════")
+    for name, scores in sorted(by_model.items(), key=lambda kv: -stability(kv[1])):
+        print(f"  {name:<32} {stability(scores):>6.1%} 的用例答案稳定")
+
+    if suspects:
+        print("\n════════ 可疑标注 (所有模型全错 → 先怀疑标注) ════════")
+        for task, message in suspects:
+            print(f"  [{task}] «{message[:34]}»")
+        print("  ↑ 这些用例已从下面的配对统计中剔除")
+
+    ranked = sorted(results, key=lambda x: -x["accuracy"])
+    if len(ranked) < 2:
+        return
+    best = ranked[0]["model"]
+    print(f"\n════════ 配对比较: {best} vs 其他 (按用例聚类 bootstrap) ════════")
+    for other in ranked[1:]:
+        cmp = paired_compare(
+            by_model[best], by_model[other["model"]], exclude=set(suspects),
+        )
+        lo, hi = cmp["ci95"]
+        verdict = "显著更好" if lo > 0 else ("显著更差" if hi < 0 else "无法判定")
+        print(f"\n  vs {other['model']}  (n={cmp['n_cases']} 条用例)")
+        print(f"    准确率差值 {cmp['mean_diff']:+.1%}   95%CI [{lo:+.1%}, {hi:+.1%}]   {verdict}")
+        print(f"    赢 {cmp['wins']} 条 / 平 {cmp['ties']} 条 / 输 {cmp['losses']} 条"
+              f"   p(不优于)={cmp['p_not_better']:.3f}")
+        if cmp["loss_cases"]:
+            print("    输在:")
+            for task, msg in cmp["loss_cases"][:5]:
+                print(f"      [{task}] «{msg[:30]}»")
+
+
 def print_report(results: list[dict[str, Any]], tasks: tuple[Task, ...]) -> None:
     print("\n════════ 汇总 ════════")
     head = f"{'模型':<32}{'总准确率':>9}{'p50':>7}{'p95':>7}{'元/千次':>10}{'失败':>6}"
@@ -192,6 +232,8 @@ def print_report(results: list[dict[str, Any]], tasks: tuple[Task, ...]) -> None
     for r in sorted(results, key=lambda x: -x["accuracy"]):
         cells = "".join(f"{r['by_task'][n]['accuracy']:>11.0%} " for n in names)
         print(f"{r['model']:<32}{cells}")
+
+    _print_statistics(results)
 
     print("\n════════ 错判明细 ════════")
     for r in results:
