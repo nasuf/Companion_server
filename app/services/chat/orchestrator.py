@@ -298,6 +298,18 @@ async def _record_memory_retrieval_feedback(
 # AI 问话的 context 依赖; 再大会挤占 intent prompt 的 token 预算.
 _INTENT_CONTEXT_WINDOW = 6
 
+# 历史消息的取数上限. 真正决定注入多少的是 build_chat_messages 的 token 预算
+# (CHAT_HISTORY_TOKEN_BUDGET=4000); 这里只是给 DB 查询一个安全上界.
+#
+# 曾经是 30, 于是预算从未生效过: 生产实测 30 行 ≈ 679 token, 只用掉预算的 17%.
+# 而 30 是**消息行数**不是对话轮数 —— AI 一次回复拆成多个气泡各占一行, 全库
+# user:assistant = 1:2.56, 所以 30 行只剩约 10 轮上下文. 生产事故 2026-07-22:
+# 用户和 AI 聊了十几分钟 MBTI, 52 条消息之后再问, AI 答"我之前没研究过MBTI",
+# 继而反问用户"会不会是你记错啦" —— 那段讨论正好落在 30 行窗口之外.
+#
+# 200 行按实测均值 ≈ 4400 token, 略高于预算, 保证是预算而不是行数在收口.
+_HISTORY_FETCH_LIMIT = 200
+
 
 async def _fetch_intent_context(
     conversation_id: str,
@@ -456,7 +468,7 @@ async def stream_chat_response(
         recent_messages = await db.message.find_many(
             where={"conversationId": conversation_id},
             order={"createdAt": "desc"},
-            take=30,
+            take=_HISTORY_FETCH_LIMIT,
         )
         recent_messages.reverse()
         messages_dicts = [

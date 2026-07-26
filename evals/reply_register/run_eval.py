@@ -48,6 +48,13 @@ from evals.reply_register.standard import (
     FACT_MIN_COMPANION,
     FORMAT_PASS_RATE,
     HUMAN_IM_CHARS_PER_LINE,
+    OUTOFWINDOW_MAX_BLAMES_USER,
+    OUTOFWINDOW_MAX_FLAT_DENIAL,
+    OUTOFWINDOW_MAX_PLAYS_ALONG,
+    OUTOFWINDOW_MIN_HONEST,
+    FALSEPREMISE_MAX_EVASIVE,
+    FALSEPREMISE_MAX_PLAYS_ALONG,
+    FALSEPREMISE_MIN_PUSHBACK,
     HUMAN_IM_LINES_PER_TURN,
     SAMPLES_PER_CASE,
     SHORT_INPUT_CHARS,
@@ -285,6 +292,33 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 ("chitchat.off_topic(≤)", off, CHITCHAT_MAX_OFF_TOPIC, off <= CHITCHAT_MAX_OFF_TOPIC),
                 ("chitchat.short_len_ok(≥)", len_ok, CHITCHAT_MIN_LENGTH_OK,
                  len_ok >= CHITCHAT_MIN_LENGTH_OK),
+            ]
+        elif group == "outofwindow":
+            honest = _rate(verdicts, "honest_uncertainty", n)
+            denial = _rate(verdicts, "flat_denial", n)
+            blames = _rate(verdicts, "blames_user", n)
+            plays = _rate(verdicts, "plays_along", n)
+            checks += [
+                ("oow.honest(≥)", honest, OUTOFWINDOW_MIN_HONEST,
+                 honest >= OUTOFWINDOW_MIN_HONEST),
+                ("oow.flat_denial(≤)", denial, OUTOFWINDOW_MAX_FLAT_DENIAL,
+                 denial <= OUTOFWINDOW_MAX_FLAT_DENIAL),
+                ("oow.blames_user(≤)", blames, OUTOFWINDOW_MAX_BLAMES_USER,
+                 blames <= OUTOFWINDOW_MAX_BLAMES_USER),
+                ("oow.plays_along(≤)", plays, OUTOFWINDOW_MAX_PLAYS_ALONG,
+                 plays <= OUTOFWINDOW_MAX_PLAYS_ALONG),
+            ]
+        elif group == "falsepremise":
+            push = _rate(verdicts, "correct_pushback", n)
+            plays = _rate(verdicts, "plays_along", n)
+            evasive = _rate(verdicts, "evasive", n)
+            checks += [
+                ("fp.pushback(≥)", push, FALSEPREMISE_MIN_PUSHBACK,
+                 push >= FALSEPREMISE_MIN_PUSHBACK),
+                ("fp.plays_along(≤)", plays, FALSEPREMISE_MAX_PLAYS_ALONG,
+                 plays <= FALSEPREMISE_MAX_PLAYS_ALONG),
+                ("fp.evasive(≤)", evasive, FALSEPREMISE_MAX_EVASIVE,
+                 evasive <= FALSEPREMISE_MAX_EVASIVE),
             ]
         elif group == "emotion":
             openings = Counter(

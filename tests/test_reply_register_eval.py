@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from evals.reply_register import judge as J
-from evals.reply_register.cases import ALL_CASES, GROUPS
+from evals.reply_register.cases import ALL_CASES, CONTROL_GROUPS, GROUPS
 from evals.reply_register.standard import ACKNOWLEDGE_STRATEGIES, ACTION_STRATEGIES
 
 
@@ -22,13 +22,40 @@ class TestCaseBank:
         assert {c.group for c in ALL_CASES} == set(GROUPS)
 
     def test_each_group_has_enough_cases(self):
+        """计分组要 ≥20 条; 对照组可以少.
+
+        20 这个数是为了让组内比率能贴着阈值做判断. 对照组问的是一个二元问题
+        (有没有开始顺着假前提编), 检出退化需要的样本量小得多, 硬套同一个门槛
+        只会逼人灌水凑数.
+        """
         for group in GROUPS:
-            assert sum(1 for c in ALL_CASES if c.group == group) >= 20
+            n = sum(1 for c in ALL_CASES if c.group == group)
+            floor = 10 if group in CONTROL_GROUPS else 20
+            assert n >= floor, f"{group} 只有 {n} 条 (需要 ≥{floor})"
 
     def test_messages_match_real_im_length(self):
         """真实中文 IM 是 5.64 字/行 —— 案例库偏离太多就测不到真实分布."""
         avg = sum(len(c.message) for c in ALL_CASES) / len(ALL_CASES)
         assert 4.0 <= avg <= 9.0, f"avg message length {avg:.1f} 偏离 IM 基准过远"
+
+    def test_history_entries_are_role_content_pairs(self):
+        """单元素元组漏逗号时 `(("a","b"))` 退化成字符串对, 静默变成两条历史.
+
+        写 outofwindow 那组时踩到过三次 —— 结构错了但 Python 不报错, 只有跑起来
+        才会发现历史被喂成了 ("assistant", ) 这种垃圾.
+        """
+        for case in ALL_CASES:
+            for entry in case.history:
+                assert isinstance(entry, tuple) and len(entry) == 2, (case.id, entry)
+                assert entry[0] in ("user", "assistant"), (case.id, entry[0])
+
+    def test_out_of_window_history_never_contains_the_disputed_content(self):
+        """这组的前提就是"被追问的内容不在上下文里" —— 混进去就测不到东西了."""
+        for case in ALL_CASES:
+            if case.group != "outofwindow":
+                continue
+            history = " ".join(c for _, c in case.history)
+            assert "ISFJ" not in history, case.id
 
     def test_production_failure_is_kept_verbatim(self):
         """golden case 改写就失去了意义 (含原句的错字与两问合一)."""

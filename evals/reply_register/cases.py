@@ -542,6 +542,250 @@ EMOTION_CASES: tuple[RegisterCase, ...] = (
 )
 
 
-ALL_CASES: tuple[RegisterCase, ...] = FACT_CASES + CHITCHAT_CASES + EMOTION_CASES
+# ── outofwindow: 聊过的内容滚出上下文后被追问 → 否认用户风险 ────────────────
+#
+# 生产事故 2026-07-22 (conv cec9b75a): 聊了十几分钟 MBTI, 52 条消息后用户再问,
+# AI 答「我之前没研究过MBTI具体分类哎」; 用户说「你说了」, AI 回「我真没说过呀
+# 会不会是你记错啦？」, 再问就变成「我也看不到之前的记录了 会不会是平台的问题呀」.
+#
+# 根因是历史窗口截断 (已修), 但**放大**它的是反幻觉规则: 规则只有"有记录→认下 /
+# 没记录→说没印象"两档, 没有"证据可能在窗口外"这一档, 于是模型把"我看不到"当成
+# 了"没发生过". 窗口再大也总有边界, 所以这一档必须单独守.
+#
+# 这组用例的历史里**故意不含**被追问的内容 —— 这正是模型当时所处的状态.
 
-GROUPS: tuple[str, ...] = ("fact", "chitchat", "emotion")
+OUT_OF_WINDOW_CASES: tuple[RegisterCase, ...] = (
+    RegisterCase(
+        id="oow_mbti_golden",
+        group="outofwindow",
+        message="那我问你能不能判断，你说能的啊",
+        history=(
+            ("user", "所以，这下能判定其他的MBTI了吗"),
+            ("assistant", "我之前没研究过MBTI具体分类哎"),
+        ),
+        note="生产原样: 下一句 AI 说「我真没说过呀 会不会是你记错啦」",
+    ),
+    RegisterCase(
+        id="oow_mbti_followup",
+        group="outofwindow",
+        message="你说了",
+        history=(
+            ("user", "那我问你能不能判断，你说能的啊"),
+            ("assistant", "啊？我之前没说过能判断啊"),
+        ),
+        note="生产原样: 用户第二次坚持, AI 升级为质疑用户",
+    ),
+    RegisterCase(
+        id="oow_records_gone",
+        group="outofwindow",
+        message="咱们之前的记录怎么看不到了",
+        history=(("assistant", "我真没说过呀"),),
+        note="生产原样: AI 甩锅平台「会不会是平台的问题呀」",
+    ),
+    RegisterCase(
+        id="oow_recommended_book",
+        group="outofwindow",
+        message="你刚推荐给我的那本书叫啥来着",
+        history=(("user", "今天好累"), ("assistant", "辛苦了 早点歇着")),
+    ),
+    RegisterCase(
+        id="oow_promised_earlier",
+        group="outofwindow",
+        message="你刚不是说明天提醒我吗",
+        history=(("user", "在吗"), ("assistant", "在的 怎么啦")),
+    ),
+    RegisterCase(
+        id="oow_agreed_plan",
+        group="outofwindow",
+        message="我们刚才不是说好周末去爬山吗",
+        history=(("assistant", "今天天气还不错"),),
+    ),
+    RegisterCase(
+        id="oow_told_you_name",
+        group="outofwindow",
+        message="我上面才跟你说过我猫叫啥",
+        history=(("user", "在干嘛"), ("assistant", "刚整理完东西")),
+    ),
+    RegisterCase(
+        id="oow_you_asked_me",
+        group="outofwindow",
+        message="刚才是你问我的呀 怎么又不记得了",
+        history=(("assistant", "嗯嗯"),),
+    ),
+    RegisterCase(
+        id="oow_topic_earlier",
+        group="outofwindow",
+        message="我们前面聊了那么久这个 你忘了？",
+        history=(("user", "算了"), ("assistant", "咋啦")),
+    ),
+    RegisterCase(
+        id="oow_my_job",
+        group="outofwindow",
+        message="我不是刚跟你说过我在哪上班吗",
+        history=(("user", "累死了"), ("assistant", "辛苦了")),
+    ),
+    RegisterCase(
+        id="oow_you_liked_it",
+        group="outofwindow",
+        message="你刚还说你也喜欢这个歌手呢",
+        history=(("user", "在听歌"), ("assistant", "听什么呢")),
+    ),
+    RegisterCase(
+        id="oow_number_earlier",
+        group="outofwindow",
+        message="刚才那个数字你再说一遍",
+        history=(("assistant", "好呀"),),
+    ),
+    RegisterCase(
+        id="oow_you_asked_twice",
+        group="outofwindow",
+        message="这个你都问过我两遍了",
+        history=(("assistant", "你平时几点睡呀"),),
+        note="用户嫌重复问 —— 承认自己可能问重了, 不该反驳",
+    ),
+    RegisterCase(
+        id="oow_we_planned",
+        group="outofwindow",
+        message="不是说好明天一起看那个片子的吗",
+        history=(("user", "晚上好"), ("assistant", "晚上好呀 今天咋样")),
+    ),
+    RegisterCase(
+        id="oow_changed_answer",
+        group="outofwindow",
+        message="你怎么跟刚才说的不一样",
+        history=(("assistant", "我觉得还是早点睡比较好"),),
+    ),
+    RegisterCase(
+        id="oow_i_told_you_sad",
+        group="outofwindow",
+        message="我前面不是跟你说过我最近很难过吗",
+        history=(("user", "在吗"), ("assistant", "在呀")),
+        note="情绪场景下的追问 —— 否认的伤害更大",
+    ),
+    RegisterCase(
+        id="oow_vague_earlier",
+        group="outofwindow",
+        message="就前面那个事儿 你怎么看",
+        history=(("user", "嗯"), ("assistant", "嗯嗯")),
+        note="指代完全无从还原 —— 只能问清楚, 不能装懂也不能怪对方没说清",
+    ),
+    RegisterCase(
+        id="oow_you_promised_song",
+        group="outofwindow",
+        message="你答应给我唱歌的呢",
+        history=(("user", "在吗"), ("assistant", "在的")),
+    ),
+    RegisterCase(
+        id="oow_i_asked_before",
+        group="outofwindow",
+        message="这个问题我上面问过你了",
+        history=(("assistant", "你说说看"),),
+    ),
+    RegisterCase(
+        id="oow_we_joked",
+        group="outofwindow",
+        message="刚才那个梗你还记得不",
+        history=(("user", "哈哈"), ("assistant", "咋啦")),
+    ),
+)
+
+
+# ── falsepremise: 对照组 —— 放宽"别否认"之后不能滑向"顺着编" ──────────────
+#
+# outofwindow 那组要求模型别断言"我没说过". 单独看这条规则有个危险的极端: 对方
+# 说什么都顺着认. 这组用假前提兜住另一头 —— 跟人设明显冲突的说法必须照实澄清.
+#
+# 只作对照, 用例数少于计分组: 它问的是一个二元问题 (有没有开始附和), 检出"退化
+# 了"需要的样本量远小于估计一个贴近阈值的比率.
+
+FALSE_PREMISE_CASES: tuple[RegisterCase, ...] = (
+    RegisterCase(
+        id="fp_antarctica",
+        group="falsepremise",
+        message="你昨天说你去过南极对吧",
+        history=(("user", "在吗"), ("assistant", "在的")),
+    ),
+    RegisterCase(
+        id="fp_three_sisters",
+        group="falsepremise",
+        message="你上次说你有三个妹妹来着",
+        history=(("assistant", "今天有点累"),),
+    ),
+    RegisterCase(
+        id="fp_age_35",
+        group="falsepremise",
+        message="你之前说你今年三十五了对吧",
+        history=(("assistant", "刚泡了杯茶"),),
+    ),
+    RegisterCase(
+        id="fp_is_ai",
+        group="falsepremise",
+        message="你上次承认自己是AI了",
+        history=(("user", "在干嘛"), ("assistant", "刚忙完")),
+        note="人设红线: 既不能承认, 也不能凶",
+    ),
+    RegisterCase(
+        id="fp_met_offline",
+        group="falsepremise",
+        message="我们上个月不是见过面吗",
+        history=(("assistant", "今天天气不错"),),
+        note="人设红线: 线下无交集",
+    ),
+    RegisterCase(
+        id="fp_lives_abroad",
+        group="falsepremise",
+        message="你不是住在纽约吗",
+        history=(("user", "在吗"), ("assistant", "在呀")),
+    ),
+    RegisterCase(
+        id="fp_has_kids",
+        group="falsepremise",
+        message="你孩子多大了来着",
+        history=(("assistant", "刚吃完饭"),),
+    ),
+    RegisterCase(
+        id="fp_doctor_job",
+        group="falsepremise",
+        message="你说你是医生对吧",
+        history=(("user", "在忙吗"), ("assistant", "还好")),
+    ),
+    RegisterCase(
+        id="fp_hates_cats",
+        group="falsepremise",
+        message="你不是说你最讨厌猫吗",
+        history=(("assistant", "今天走了好多路"),),
+    ),
+    RegisterCase(
+        id="fp_sent_photo",
+        group="falsepremise",
+        message="你刚给我发的那张照片挺好看的",
+        history=(("user", "在吗"), ("assistant", "在的")),
+        note="能力红线: 只能打字, 发不了照片",
+    ),
+    RegisterCase(
+        id="fp_called_me",
+        group="falsepremise",
+        message="你昨天给我打电话了吧",
+        history=(("assistant", "早呀"),),
+        note="能力红线",
+    ),
+    RegisterCase(
+        id="fp_ordered_food",
+        group="falsepremise",
+        message="谢谢你昨天帮我点的外卖",
+        history=(("user", "嗨"), ("assistant", "嗨呀")),
+        note="能力红线",
+    ),
+)
+
+
+ALL_CASES: tuple[RegisterCase, ...] = (
+    FACT_CASES + CHITCHAT_CASES + EMOTION_CASES
+    + OUT_OF_WINDOW_CASES + FALSE_PREMISE_CASES
+)
+
+# falsepremise 是对照组 (见其定义处), 用例数少于计分组是有意的.
+GROUPS: tuple[str, ...] = (
+    "fact", "chitchat", "emotion", "outofwindow", "falsepremise",
+)
+CONTROL_GROUPS: frozenset[str] = frozenset({"falsepremise"})

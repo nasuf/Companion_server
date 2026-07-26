@@ -1028,6 +1028,34 @@ def format_message_timestamp(created_at: str | datetime | None) -> str:
         return ""
 
 
+def _coalesce_bubbles(messages: list[dict]) -> list[dict]:
+    """把一次回复拆出的连续同角色气泡合并成一条.
+
+    §5.5 会把一条回复拆成 1-4 个气泡, 每个气泡在库里是独立一行. 逐行进历史有
+    两个坏处: 一是同样的 token 预算里能装的**对话轮数**被摊薄 (全库
+    user:assistant = 1:2.56), 二是模型看到的是"AI 连说了三次话", 跟实际的一
+    次发言对不上.
+
+    合并只按"连续 + 同角色"判定, 不看时间戳: 用户连发几条碎片本来也会被聚合
+    层当成一条处理, 合并后与之一致. 时间戳取该组第一条 —— 一次回复的几个气泡
+    本就在同一分钟内, 而取第一条能让时间前缀跟这轮发言的起点对齐.
+    """
+    merged: list[dict] = []
+    for msg in messages:
+        content = str(msg.get("content", "") or "")
+        if merged and merged[-1]["role"] == msg.get("role"):
+            if content:
+                prev = merged[-1]["content"]
+                merged[-1]["content"] = f"{prev} {content}".strip() if prev else content
+            continue
+        merged.append({
+            "role": msg.get("role"),
+            "content": content,
+            "createdAt": msg.get("createdAt"),
+        })
+    return merged
+
+
 def build_chat_messages(
     system_prompt: str,
     messages: list[dict],
@@ -1043,13 +1071,15 @@ def build_chat_messages(
 
     每条带 createdAt 的历史消息前缀 `[MM-DD HH:MM]`，让 LLM 感知对话时间轴
     （时区/缓存权衡见 format_message_timestamp docstring）。
+
+    同一次回复被拆成的多个气泡先合并成一条再计预算（见 `_coalesce_bubbles`）。
     """
     from app.services.memory.retrieval.context_selector import estimate_tokens
 
     selected: list[dict] = []
     used_tokens = 0
 
-    for msg in reversed(messages):
+    for msg in reversed(_coalesce_bubbles(messages)):
         content = f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
         tokens = estimate_tokens(content)
         if used_tokens + tokens > token_budget and selected:

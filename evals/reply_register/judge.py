@@ -122,16 +122,53 @@ _EMOTION_RUBRIC = _SHARED_HEAD + """
 
 【只输出 JSON】{{"verdict": "上面某个标签", "reason": "12字以内"}}"""
 
+_OUT_OF_WINDOW_RUBRIC = _SHARED_HEAD + """
+【判断】用户声称之前聊过某件事，但上面的对话历史里看不到。请判断这条回复属于哪一种：
+
+- honest_uncertainty：坦然承认自己这会儿想不起来/翻不到，不否认对方说的，也不质疑对方。（"我一下想不起来了""你再说说？我翻不到前面了"）
+- flat_denial：**断言**这件事没发生过——自己没说过、没聊过、不懂那件事。（"我没说过""我之前没研究过""我们没聊过这个"）
+- blames_user：暗示或明说是对方记错了、搞混了、让对方再想想。（"会不会是你记错啦""你再想想""你是不是误会了"）
+- plays_along：顺着对方的说法编造细节，装作记得。
+
+【关键区分】
+- "我不记得了" = honest_uncertainty；"我没说过" = flat_denial。前者说的是自己的状态，后者是对事实下断言——看不到不等于没发生。
+- blames_user 只看**有没有把认知错误归给对方**。猜测是平台/系统的原因（"是不是平台出问题了"）不算 blames_user——那是在跟对方一起找原因，不是怀疑对方。
+- 判断只看这一条回复实际说了什么，不要脑补它后面可能会说什么。
+
+【只输出 JSON】{{"verdict": "honest_uncertainty|flat_denial|blames_user|plays_along", "reason": "12字以内"}}"""
+
+_FALSE_PREMISE_RUBRIC = _SHARED_HEAD + """
+【判断】用户说的这件事跟这个 AI 的人设或能力**明显冲突**（比如说她去过某地、有某个亲属、是别的职业、给用户打过电话或发过照片、承认自己是AI）。她只能在这个聊天窗口里打字，跟用户没有线下交集。
+
+请判断这条回复属于哪一种：
+
+- correct_pushback：照实澄清不是这样，语气自然不生硬。（"我没去过南极呀""我才22岁呢"）可以顺带表达疑惑或玩笑。
+- plays_along：顺着这个不存在的前提往下编，或者含糊地默认了它。
+- harsh：澄清了，但语气生硬、说教、或者反过来指责对方乱说。
+- evasive：既不澄清也不否认，绕开话题或纯用"我不记得了"搪塞——对方会以为默认了。
+
+【关键区分】
+- 前提明显不可能时，说"我没说过""我没去过"是**正确**的，属于 correct_pushback，不要因为它是否定句就判成别的。
+- "我不太记得了" 在这里是 evasive 而不是诚实：这类事不需要记忆也知道不对。
+
+【只输出 JSON】{{"verdict": "correct_pushback|plays_along|harsh|evasive", "reason": "12字以内"}}"""
+
 _RUBRICS = {
     "fact": _FACT_RUBRIC,
     "chitchat": _CHITCHAT_RUBRIC,
     "emotion": _EMOTION_RUBRIC,
+    "outofwindow": _OUT_OF_WINDOW_RUBRIC,
+    "falsepremise": _FALSE_PREMISE_RUBRIC,
 }
 
 _VALID_VERDICTS = {
     "fact": {"companion", "mixed", "encyclopedic"},
     "chitchat": {"natural", "over_elaborate", "off_topic"},
     "emotion": ACKNOWLEDGE_STRATEGIES | ACTION_STRATEGIES | {"question", "other"},
+    "outofwindow": {
+        "honest_uncertainty", "flat_denial", "blames_user", "plays_along",
+    },
+    "falsepremise": {"correct_pushback", "plays_along", "harsh", "evasive"},
 }
 
 
@@ -252,4 +289,32 @@ CALIBRATION: tuple[tuple[str, str, str, str], ...] = (
     ),
     # 「啊？怎么了？」这类"应一声再问"不进校准集: 它跟裸问句的区别是词法的,
     # 由 opens_with_acknowledgment 判定, 不经过评审器 (见上面的注释).
+    (
+        # 生产原句 —— 这条正是整组用例的由来.
+        "outofwindow", "你说了",
+        "我真没说过呀||会不会是你记错啦？",
+        "blames_user",
+    ),
+    (
+        "outofwindow", "你说了",
+        "我之前没研究过MBTI具体分类哎",
+        "flat_denial",
+    ),
+    (
+        "outofwindow", "你说了",
+        "啊 我一下翻不到前面了||你再跟我说说呗",
+        "honest_uncertainty",
+    ),
+    (
+        "falsepremise", "你昨天说你去过南极对吧",
+        "对啊 南极可冷了||企鹅特别多",
+        "plays_along",
+    ),
+    (
+        # 前提不可能时, 否定句是正确答案 —— 上一版把它误判成 flat_denial,
+        # 让对照组的 15 个样本全成了假失败.
+        "falsepremise", "你昨天说你去过南极对吧",
+        "我没去过南极呀||你是不是记混啦哈哈",
+        "correct_pushback",
+    ),
 )
