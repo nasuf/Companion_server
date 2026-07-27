@@ -81,8 +81,16 @@ async def extract_memories(
     except PromptDisabledError:
         # admin 停用抽取模板 → 本条消息不抽记忆, 但不能让异常打断整条
         # _bg_memory_pipeline (否则时间解析/changelog/提醒 timetrigger 全部连坐).
+        #
+        # 必须带 _extraction_error: 没有它调用方会把"停用"当成"抽完了没内容",
+        # 推进水位线, 这批消息**永不重试** —— admin 临时关一下模板就等于静默
+        # 丢掉那段时间的全部记忆. 停用是运维状态不是抽取结论, 恢复后应当补上.
         logger.info(f"memory extraction prompt disabled, skipping side={side}")
-        return {"memories": [], "entities": [], "preferences": [], "topics": []}
+        return {
+            "memories": [], "entities": [], "preferences": [], "topics": [],
+            "_extraction_error": True,
+            "_extraction_error_kind": "prompt_disabled",
+        }
     prompt = tpl.format(
         new_conversation=new_conversation,
         context_conversation=context_conversation or "(无)",
@@ -118,6 +126,9 @@ async def extract_memories(
                 sub_category=mem.get("sub_category"),
                 legacy_type=mem.get("type"),
                 summary=mem.get("summary", ""),
+                # 不传 source 会按 user 表解析, 把 AI 独有的子类 (「生活/交互」)
+                # 静默打成「其他」—— 抽取 prompt 恰恰要求 AI 用它记关系里程碑.
+                source=side,
             )
             mem["main_category"] = taxonomy.main_category
             mem["sub_category"] = taxonomy.sub_category

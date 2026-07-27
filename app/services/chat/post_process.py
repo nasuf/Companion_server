@@ -518,11 +518,14 @@ async def _pipeline_with_watermark(
             workspace_id=workspace_id,
             evidence_message_ids=evidence_message_ids,
         )
-    except MemoryExtractionError:
-        # Transient extraction LLM failure: leave the watermark untouched so a
-        # later batch re-covers these messages instead of silently dropping them.
+    except MemoryExtractionError as e:
+        # 抽取没有真正跑完 (LLM 失败, 或 admin 停用了抽取模板): 水位线原地不动,
+        # 让后续批次重新覆盖这些消息, 而不是静默丢掉.
+        #
+        # 两种成因的运维含义完全不同 —— LLM 失败会自愈, 模板停用要人去开回来,
+        # 所以异常里带 kind 并原样打进日志, 不要笼统说"失败".
         logger.warning(
-            f"[BG] extraction failed for side={side}; watermark held for retry",
+            f"[BG] {e}; watermark held for retry",
             extra={"event": EVT_BG_DONE, "kind": "memory_pipeline",
                    "outcome": "extraction_error_watermark_held", "side": side},
         )

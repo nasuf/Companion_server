@@ -45,6 +45,9 @@ EVT_MEMORY_RETRIEVED = "memory.retrieved"
 EVT_MEMORY_L3_AWAKEN = "memory.l3_awaken"
 EVT_MEMORY_STORED = "memory.stored"
 EVT_MEMORY_DEDUP_HIT = "memory.dedup_hit"
+# 身份事实被规则兜底纠正 (LLM 分类不稳定, 见 recording/identity_repair.py).
+# 这个 event 的频率就是 LLM 身份分类的错误率, 值得盯.
+EVT_MEMORY_IDENTITY_REPAIR = "memory.identity_repair"
 EVT_MEMORY_CONTRADICTION = "memory.contradiction_detected"
 EVT_MEMORY_CONTRADICTION_STEP = "memory.contradiction_step"  # 5 步状态机每步
 EVT_MEMORY_DELETED = "memory.deleted"

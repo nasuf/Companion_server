@@ -1,7 +1,11 @@
 import logging
 import math
 from typing import Any
-from app.services.memory.taxonomy import TAXONOMY, resolve_taxonomy
+from app.services.memory.taxonomy import (
+    Source,
+    allowed_sub_categories,
+    resolve_taxonomy,
+)
 from app.services.memory.storage.embedding import generate_embedding
 
 logger = logging.getLogger(__name__)
@@ -100,13 +104,22 @@ async def normalize_memory_category(
     sub_category: str | None,
     legacy_type: str | None = None,
     summary: str | None = None,
+    source: Source = "user",
 ) -> Any:
-    """Normalize category using taxonomy first, then keyword hint, then semantic similarity fallback."""
+    """Normalize category using taxonomy first, then keyword hint, then semantic similarity fallback.
+
+    `source` 决定用哪一套类目表. 不传时按 user —— 那是最宽的超集, 与历史行为一致.
+
+    传错 source 的后果不是报错而是**静默降级**: AI 侧独有的子类 (如「生活/交互」,
+    抽取 prompt 专门要求用它记录关系里程碑) 在 user 表里不存在, 于是被归到
+    「其他」写库. 生产 2026-07 全部 AI 交互类记忆都是这么丢掉子类的.
+    """
     # 1. Standard resolution (Direct match + Alias map + Contains match)
     res = resolve_taxonomy(
         main_category=main_category,
         sub_category=sub_category,
-        legacy_type=legacy_type
+        legacy_type=legacy_type,
+        source=source,
     )
 
     # 2. Keyword hint from summary (deterministic, no LLM/embedding)
@@ -116,26 +129,31 @@ async def normalize_memory_category(
             hint_main, hint_sub = hint
             # Use the hint's sub_category. Prefer the LLM's main_category if the
             # hinted sub exists there; otherwise use the hint's main_category.
-            if hint_sub in TAXONOMY.get(res.main_category, ()):
+            if hint_sub in allowed_sub_categories(res.main_category, source):
                 logger.info(f"Keyword hint: '{summary[:30]}' -> {res.main_category}/{hint_sub}")
                 return resolve_taxonomy(
                     main_category=res.main_category,
                     sub_category=hint_sub,
                     legacy_type=legacy_type,
+                    source=source,
                 )
-            elif hint_sub in TAXONOMY.get(hint_main, ()):
+            elif hint_sub in allowed_sub_categories(hint_main, source):
                 logger.info(f"Keyword hint (cross-category): '{summary[:30]}' -> {hint_main}/{hint_sub}")
                 return resolve_taxonomy(
                     main_category=hint_main,
                     sub_category=hint_sub,
                     legacy_type=legacy_type,
+                    source=source,
                 )
 
     # 3. If it's still '其他' but we have an input sub_category, try semantic fallback
     input_sub = (sub_category or "").strip()
     if res.sub_category == "其他" and input_sub and input_sub != "其他":
         try:
-            allowed_subs = [s for s in TAXONOMY.get(res.main_category, ()) if s != "其他"]
+            allowed_subs = [
+                s for s in allowed_sub_categories(res.main_category, source)
+                if s != "其他"
+            ]
             if not allowed_subs:
                 return res
 
@@ -147,6 +165,8 @@ async def normalize_memory_category(
             
             for allowed in allowed_subs:
                 # Get or compute embedding for the allowed category name
+                # 缓存的是子类**名字**的向量, 与 source 无关 —— 候选集由上面的
+                # allowed_sub_categories 决定, 两侧共用同一份向量是对的.
                 cache_key = (res.main_category, allowed)
                 if cache_key not in _SUB_EMBEDDING_CACHE:
                     _SUB_EMBEDDING_CACHE[cache_key] = await generate_embedding(allowed)
@@ -163,7 +183,8 @@ async def normalize_memory_category(
                 return resolve_taxonomy(
                     main_category=res.main_category,
                     sub_category=best_sub,
-                    legacy_type=legacy_type
+                    legacy_type=legacy_type,
+                    source=source,
                 )
                 
         except Exception as e:

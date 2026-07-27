@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, time
 from typing import Literal
 
-from app.observability.events import EVT_MEMORY_STORED
+from app.observability.events import EVT_MEMORY_IDENTITY_REPAIR, EVT_MEMORY_STORED
 from app.services.memory.storage.entity_repo import (
     record_entities_for_memory,
     record_preferences_for_memory,
@@ -30,6 +30,9 @@ from app.services.memory import provenance as provenance_mod
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
 from app.services.memory.lifecycle.quality import log_memory_evidence
 from app.services.memory.config import RECURRENCE_PERIODIC
+from app.services.memory.recording.identity_repair import (
+    repair_identity_classification,
+)
 from app.services.memory.taxonomy import SUBCATEGORY_ALIASES
 from app.services.schedule_domain.time_parser import (
     has_explicit_time,
@@ -169,6 +172,24 @@ def _is_uncertain_ai_self_memory(
     return any(marker in text for marker in _AI_EPISTEMIC_UNCERTAINTY_MARKERS)
 
 
+_DEFAULT_IMPORTANCE = 0.5
+
+
+def _coerce_importance(raw: object) -> float:
+    """LLM 给的 importance → 可比较的 float, 坏值退回默认.
+
+    退回 0.5 而不是丢弃: 0.5 落 L2, 是"存下来但不当核心"的保守选择 —— 抽取
+    已经判定这条值得记, 不该因为一个字段格式问题整条丢掉.
+    """
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DEFAULT_IMPORTANCE
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / inf
+        return _DEFAULT_IMPORTANCE
+    return min(1.0, max(0.0, value))
+
+
 async def process_memory_pipeline(
     user_id: str,
     new_conversation: str,
@@ -222,8 +243,10 @@ async def process_memory_pipeline(
     # later batch retries. An empty-but-successful extraction (no error flag)
     # falls through and legitimately advances the watermark.
     if extraction.get("_extraction_error"):
+        kind = extraction.get("_extraction_error_kind", "llm_failure")
         raise MemoryExtractionError(
-            f"extraction LLM failed for side={side}; watermark must not advance"
+            f"extraction did not run for side={side} ({kind}); "
+            "watermark must not advance"
         )
     memories = extraction.get("memories", [])
 
@@ -277,7 +300,10 @@ async def process_memory_pipeline(
                 f"[MEM-{side}] skipped uncertain self-memory: {summary[:40]}"
             )
             continue
-        importance = mem.get("importance", 0.5)
+        # LLM 偶尔把 importance 输出成字符串 ("0.8") 或 null. 下面的分层比较和
+        # clamp 都按数字走, 类型不对会抛 TypeError —— 而这个异常会被上层当成抽取
+        # 失败, 水位线卡住不动, 整批消息反复重试同一条坏数据. 在边界收口一次.
+        importance = _coerce_importance(mem.get("importance"))
         memory_type = mem.get("type")
         main_category = mem.get("main_category")
         sub_category = mem.get("sub_category")
@@ -296,6 +322,23 @@ async def process_memory_pipeline(
         # 行写入但 recurrence=NULL, 一次性提醒过去时间不被降级.
         if sub_category and sub_category in SUBCATEGORY_ALIASES:
             sub_category = SUBCATEGORY_ALIASES[sub_category]
+
+        # 身份事实兜底: LLM 对「用户叫X」这类句式的分类不稳定, 分错时姓名会落进
+        # 身份/其他 并被压到 L2, 同时绕过 L1 singleton 保护 (详见 identity_repair).
+        if side == "user":
+            main_category, sub_category, importance, repair = (
+                repair_identity_classification(
+                    summary=summary,
+                    main_category=main_category,
+                    sub_category=sub_category,
+                    importance=importance,
+                )
+            )
+            if repair:
+                logger.info(
+                    f"[MEM-{side}] identity repair ({repair}): {summary[:40]}",
+                    extra={"event": EVT_MEMORY_IDENTITY_REPAIR, "repair": repair},
+                )
 
         # Reminder importance clamp: extraction prompt asks 0.4-0.6, but LLM
         # drifts upward; without the clamp 1 reminder/week could ride the L2
