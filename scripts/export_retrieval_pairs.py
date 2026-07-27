@@ -52,11 +52,20 @@ async def main() -> None:
             print(f"skip {message[:20]}: {exc}"[:120])
             continue
         for h in hits:
+            # importance / 时间戳一并带出来: 生产按 display_score 重排, 不是按
+            # 原始相似度. 只导相似度就只能评价一个生产没在用的排序.
+            updated = h.get("last_accessed_at") or h.get("updated_at") or h.get("created_at")
             out.append({
                 "message": message,
                 "memory": str(h.get("content") or ""),
                 "sim": round(float(h.get("similarity") or 0.0), 4),
                 "source": h.get("source"),
+                "importance": float(h.get("importance") or 0.0),
+                "level": h.get("level"),
+                "current_score": (
+                    float(h["current_score"]) if h.get("current_score") is not None else None
+                ),
+                "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else updated,
             })
     open(sys.argv[2], "w").write(json.dumps(out, ensure_ascii=False))
     print(f"exported {len(out)} pairs from {len(messages)} messages")
