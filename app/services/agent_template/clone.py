@@ -60,7 +60,6 @@ _MEMORY_COPY_FIELDS = (
     "subCategory",
     "level",
     "content",
-    "summary",
     "importance",
     "mentionCount",
     "isArchived",

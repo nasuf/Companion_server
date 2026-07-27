@@ -180,11 +180,11 @@ def _substantive_items(value: object) -> list[str]:
 
 
 def _add(
-    memories: list, summary: str, main: str, sub: str, mem_type: str, importance: float,
+    memories: list, content: str, main: str, sub: str, mem_type: str, importance: float,
     *, occur_time: datetime | None = None,
 ) -> None:
     entry = {
-        "summary": summary,
+        "content": content,
         "main_category": main,
         "sub_category": sub,
         "type": mem_type,
@@ -278,14 +278,14 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
 
     # ── 身份: singleton 事实 ──
     if (v := _clean_text(identity.get("name"))):
-        summary = f"我叫{v}"
+        content = f"我叫{v}"
         # Document imports keep the full naming line (大名/小名/称呼) in
         # name_detail; fold it into the singleton 姓名 memory so aliases
         # survive the admin-form name override.
         detail = _clean_text(identity.get("name_detail"))
         if detail and detail != v:
-            summary = f"我叫{v}。{detail}"
-        _add(memories, summary, "身份", "姓名", "identity", 0.95)
+            content = f"我叫{v}。{detail}"
+        _add(memories, content, "身份", "姓名", "identity", 0.95)
     gender = identity.get("gender")
     if isinstance(gender, str):
         gender = _GENDER_EN_TO_ZH.get(gender, gender)
@@ -300,13 +300,13 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     if (v := _clean_text(identity.get("constellation"))):
         _add(memories, f"我是{v}", "身份", "星座", "identity", 0.85)
     if (v := _clean_text(identity.get("location"))):
-        summary = f"我现在住在{v}"
+        content = f"我现在住在{v}"
         # location_note is the parenthetical context stripped off the address
         # (e.g. why the persona rents there); keep it inside the singleton.
         note = _clean_text(identity.get("location_note"))
         if note:
-            summary = f"{summary}。{note}"
-        _add(memories, summary, "身份", "现居地", "identity", 0.90)
+            content = f"{content}。{note}"
+        _add(memories, content, "身份", "现居地", "identity", 0.90)
     if (v := _clean_text(identity.get("birthplace"))):
         _add(memories, f"我出生在{v}", "身份", "出生地", "identity", 0.90)
     if (v := _clean_text(identity.get("growing_up_location"))):
@@ -345,8 +345,8 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
         # descriptions imported from a document ("沟通与倾听技巧：这是...") already
         # stand alone, so the trailing suffix would dangle — keep them verbatim.
         is_topic = len(item) <= 12 and not any(c in item for c in "：:。！？!?")
-        summary = f"我擅长{item}相关的知识" if is_topic else f"我擅长{item}"
-        _add(memories, summary, "生活", "技能", "life", 0.87)
+        content = f"我擅长{item}相关的知识" if is_topic else f"我擅长{item}"
+        _add(memories, content, "生活", "技能", "life", 0.87)
     for item in _as_list(edu.get("self_taught")):
         _add(memories, f"我自学过{item}", "生活", "技能", "life", 0.86)
     for item in _as_list(abilities.get("good_at")):
@@ -447,8 +447,8 @@ def convert_profile_to_memories(profile_data: dict, career_template: dict | None
     for item in _as_list(abilities.get("limits")):
         # limits are bare capability phrases ("宏观战略思维"); frame them in
         # first person so the stored memory states a self-view, not a topic.
-        summary = item if item.startswith(("我", "不")) else f"我不太擅长{item}"
-        _add(memories, summary, "思维", "自我认知", "thought", 0.88)
+        content = item if item.startswith(("我", "不")) else f"我不太擅长{item}"
+        _add(memories, content, "思维", "自我认知", "thought", 0.88)
 
     # ── 生活: life_events 11 字段, 每条 50-100 字"深远的事/关键节点" + occur_time ──
     # spec §1.4: agent 创建期生成的记忆全部入 L1, 故 importance ≥ 0.85. 比纯偏好
@@ -501,7 +501,7 @@ async def _detect_and_resolve_contradictions(memories: list[dict]) -> list[dict]
     if len(memories) < 2:
         return memories
 
-    items = [{"id": i, "text": m["summary"]} for i, m in enumerate(memories)]
+    items = [{"id": i, "text": m["content"]} for i, m in enumerate(memories)]
     memory_list_json = json.dumps(items, ensure_ascii=False, indent=2)
 
     try:
@@ -533,7 +533,7 @@ async def _detect_and_resolve_contradictions(memories: list[dict]) -> list[dict]
         loser = b if memories[a]["importance"] >= memories[b]["importance"] else a
         drop_ids.add(loser)
         logger.info(
-            f"[CONTRA-SCAN] drop #{loser} ({memories[loser]['summary'][:40]!r}) "
+            f"[CONTRA-SCAN] drop #{loser} ({memories[loser]['content'][:40]!r}) "
             f"vs #{a if loser == b else b} — {pair.get('reason', '')}"
         )
 
@@ -555,7 +555,7 @@ async def _embed_and_dedupe(memories: list[dict], intra_threshold: float = _DEDU
         return memories
 
     model = get_embedding_model()
-    vectors = await model.aembed_documents([m["summary"] for m in memories])
+    vectors = await model.aembed_documents([m["content"] for m in memories])
     for m, v in zip(memories, vectors):
         m["_embedding"] = v
 
@@ -634,8 +634,8 @@ async def store_memories_batch(
     - Best-effort rollback: if the embedding insert fails we delete the
       freshly-inserted memory rows so retrieval never sees a half-state
     """
-    # Filter empty summaries
-    valid = [m for m in all_memories if m.get("summary")]
+    # Filter empty contents
+    valid = [m for m in all_memories if m.get("content")]
     if not valid:
         return []
 
@@ -667,7 +667,7 @@ async def store_memories_batch(
         await set_progress(agent_id, "storing_memories", current=0, total=total,
                           message=f"正在生成向量 ({len(pending_idx)} 条)...")
         embed_model = get_embedding_model()
-        new_vecs = await embed_model.aembed_documents([valid[i]["summary"] for i in pending_idx])
+        new_vecs = await embed_model.aembed_documents([valid[i]["content"] for i in pending_idx])
         for i, v in zip(pending_idx, new_vecs):
             valid[i]["_embedding"] = v
     embeddings = [m["_embedding"] for m in valid]
@@ -694,7 +694,7 @@ async def store_memories_batch(
     memory_rows: list[dict] = []
     changelog_rows: list[dict] = []
     for mid, mem in zip(ids, valid):
-        summary = mem["summary"]
+        content = mem["content"]
         mem_type = normalize_memory_type(mem.get("type", "life"))
         # Provisioning always writes AI-source L1 memories.
         taxonomy = resolve_taxonomy(
@@ -711,8 +711,7 @@ async def store_memories_batch(
         row = {
             "id": mid,
             "userId": user_id,
-            "content": summary,
-            "summary": summary,
+            "content": content,
             "level": 1,
             "importance": importance,
             "type": mem_type,
@@ -732,7 +731,7 @@ async def store_memories_batch(
             "userId": user_id,
             "memoryId": mid,
             "operation": "insert",
-            "newValue": summary,
+            "newValue": content,
             "workspaceId": workspace_id,
         })
 
@@ -840,7 +839,7 @@ _FRIEND_NAME_RE = re.compile(
 _FAMILY_ROLE_MAP = {"父亲": "father", "爸爸": "father", "母亲": "mother", "妈妈": "mother"}
 
 
-def _extract_persona_entities(summary: str, sub_category: str | None) -> list[dict]:
+def _extract_persona_entities(content: str, sub_category: str | None) -> list[dict]:
     """Deterministic entity extraction for relation-type persona memories."""
     if sub_category not in _ENTITY_SUBS:
         return []
@@ -855,13 +854,13 @@ def _extract_persona_entities(summary: str, sub_category: str | None) -> list[di
             found.append({"name": name, "type": entity_type, "role": role})
 
     if sub_category == "宠物":
-        for m in _NAME_AFTER_CALLED_RE.finditer(summary):
+        for m in _NAME_AFTER_CALLED_RE.finditer(content):
             _add(m.group(1), default_role)
     elif sub_category == "亲属关系":
-        for m in _FAMILY_NAME_RE.finditer(summary):
+        for m in _FAMILY_NAME_RE.finditer(content):
             _add(m.group(2), _FAMILY_ROLE_MAP.get(m.group(1), default_role))
     elif sub_category == "社会关系":
-        for m in _FRIEND_NAME_RE.finditer(summary):
+        for m in _FRIEND_NAME_RE.finditer(content):
             _add(m.group(1), default_role)
     return found[:3]
 
@@ -875,7 +874,7 @@ async def _seed_persona_entities(
     linked = 0
     for row in memory_rows:
         entities = _extract_persona_entities(
-            row.get("summary") or "", row.get("subCategory"),
+            row.get("content") or "", row.get("subCategory"),
         )
         if not entities:
             continue
@@ -954,15 +953,15 @@ async def _run_l1_coverage(
         if ("身份", "星座") not in existing_subs:
             v = derive_constellation(birthday)
             if v:
-                memories.append({"summary": f"我是{v}", "main_category": "身份",
+                memories.append({"content": f"我是{v}", "main_category": "身份",
                                 "sub_category": "星座", "type": "identity", "importance": 0.85})
         if ("身份", "生肖") not in existing_subs:
             v = derive_zodiac(birthday)
             if v:
-                memories.append({"summary": f"我属{v}", "main_category": "身份",
+                memories.append({"content": f"我属{v}", "main_category": "身份",
                                 "sub_category": "生肖", "type": "identity", "importance": 0.85})
         if ("身份", "民族") not in existing_subs:
-            memories.append({"summary": f"我是{sample_ethnicity(agent_id)}",
+            memories.append({"content": f"我是{sample_ethnicity(agent_id)}",
                             "main_category": "身份", "sub_category": "民族",
                             "type": "identity", "importance": 0.85})
 

@@ -117,7 +117,6 @@ async def append_knowledge_to_template(
             memory_id = await store_memory(
                 template_user_id,
                 item.summary,
-                summary=item.summary,
                 level=1,
                 importance=KNOWLEDGE_IMPORTANCE,
                 memory_type="life",
@@ -266,7 +265,7 @@ async def list_knowledge_items(template_agent_id: str, take: int = 200) -> list[
         take=take,
     )
     return [
-        {"id": row.id, "summary": row.summary or row.content, "created_at": str(row.createdAt)}
+        {"id": row.id, "summary": row.content, "created_at": str(row.createdAt)}
         for row in rows
     ]
 

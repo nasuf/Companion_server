@@ -463,7 +463,7 @@ async def historical_gift_spend_cents(user_id: str) -> int:
 async def user_birthday_mmdd(user_id: str, workspace_id: str | None) -> tuple[int, int] | None:
     rows = await db.query_raw(
         """
-        SELECT content, summary
+        SELECT content
         FROM memories_user
         WHERE user_id = $1
           AND ($2::text IS NULL OR workspace_id = $2)
@@ -478,7 +478,7 @@ async def user_birthday_mmdd(user_id: str, workspace_id: str | None) -> tuple[in
     )
     if not rows:
         return None
-    text = f"{_field(rows[0], 'summary') or ''} {_field(rows[0], 'content') or ''}"
+    text = str(_field(rows[0], "content") or "")
     match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})", text)
     if not match:
         match = re.search(r"(\d{1,2})[/-](\d{1,2})", text)

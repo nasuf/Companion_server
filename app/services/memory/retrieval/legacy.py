@@ -21,7 +21,6 @@ def _memory_to_dict(m, similarity: float = 0.0) -> dict:
     return {
         "id": m.id,
         "content": m.content,
-        "summary": m.summary,
         "level": m.level,
         "importance": m.importance,
         "type": m.type,
@@ -170,7 +169,7 @@ async def _find_awakening_candidates(
             continue
 
         # Mark as fuzzy recall
-        content = r.get("summary") or r.get("content", "")
+        content = r.get("content", "")
         r["content"] = f"（模糊记忆）好像听你提过：{content}"
         r["awakened"] = True
         awakened.append(r)
@@ -181,7 +180,7 @@ async def _find_awakening_candidates(
 def format_memories_for_prompt(memories: list[dict]) -> list[str]:
     """Format memory dicts into strings suitable for prompt injection."""
     return [
-        m.get("summary") or m.get("content", "")
+        m.get("content", "")
         for m in memories
-        if m.get("summary") or m.get("content")
+        if m.get("content")
     ]

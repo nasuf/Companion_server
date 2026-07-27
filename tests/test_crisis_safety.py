@@ -1505,7 +1505,6 @@ async def test_retrieve_crisis_memories_keeps_safety_memory_outside_generic_vect
     generic = [
         {
             "id": f"generic-{i}",
-            "summary": f"用户核心身份事实 {i}",
             "content": f"用户核心身份事实 {i}",
             "level": 1,
             "importance": 0.95,
@@ -1518,7 +1517,6 @@ async def test_retrieve_crisis_memories_keeps_safety_memory_outside_generic_vect
     ]
     safety_row = {
         "id": "safety-memory",
-        "summary": "用户表达过强烈负面情绪, 有轻生念头",
         "content": "用户表达过强烈负面情绪, 有轻生念头",
         "level": 1,
         "importance": 0.95,
@@ -1549,7 +1547,6 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
     rows = [
         {
             "id": f"safety-{i}",
-            "summary": f"用户表达过强烈负面情绪 {i}",
             "content": f"用户表达过强烈负面情绪 {i}",
             "level": 1,
             "importance": 0.9,
@@ -1563,7 +1560,6 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
     rows.extend([
         {
             "id": "self-name",
-            "summary": "用户叫林小满",
             "content": "用户叫林小满",
             "level": 1,
             "importance": 0.95,
@@ -1574,7 +1570,6 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
         },
         {
             "id": "boss-project",
-            "summary": "用户被老板要求两天内完成一个项目，觉得很难",
             "content": "用户被老板要求两天内完成一个项目，觉得很难",
             "level": 2,
             "importance": 0.7,
@@ -1585,7 +1580,6 @@ async def test_retrieve_crisis_memories_keeps_relevant_fact_for_followup_name_qu
         },
         {
             "id": "direct-leader",
-            "summary": "用户的直属领导叫陈姐，人挺好但要求特别细",
             "content": "用户的直属领导叫陈姐，人挺好但要求特别细",
             "level": 2,
             "importance": 0.8,
@@ -1620,7 +1614,6 @@ async def test_retrieve_crisis_followup_memories_uses_safety_and_current_topic(m
     crisis_candidates = [
         {
             "id": "safety",
-            "summary": "用户表达了想跳楼的自杀念头",
             "content": "用户表达了想跳楼的自杀念头",
             "level": 2,
             "importance": 0.9,
@@ -1720,7 +1713,6 @@ async def test_retrieve_crisis_followup_memories_falls_back_to_crisis_candidates
     crisis_candidates = [
         {
             "id": "safety",
-            "summary": "用户表达了想跳楼的自杀念头",
             "content": "用户表达了想跳楼的自杀念头",
             "level": 2,
             "importance": 0.9,
@@ -1734,7 +1726,6 @@ async def test_retrieve_crisis_followup_memories_falls_back_to_crisis_candidates
         *[
             {
                 "id": f"ai-topic-{idx}",
-                "summary": f"AI 自我记忆 {idx}",
                 "content": f"AI 自我记忆 {idx}",
                 "level": 2,
                 "importance": 0.9,
@@ -1749,7 +1740,6 @@ async def test_retrieve_crisis_followup_memories_falls_back_to_crisis_candidates
         ],
         {
             "id": "braids",
-            "summary": "用户喜欢那个一头脏辫的酷女孩",
             "content": "用户喜欢那个一头脏辫的酷女孩",
             "level": 2,
             "importance": 0.7,
@@ -1762,7 +1752,6 @@ async def test_retrieve_crisis_followup_memories_falls_back_to_crisis_candidates
         },
         {
             "id": "married",
-            "summary": "用户不知道脏辫女孩有对象且已结婚",
             "content": "用户不知道脏辫女孩有对象且已结婚",
             "level": 2,
             "importance": 0.6,

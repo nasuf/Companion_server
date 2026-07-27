@@ -10,7 +10,6 @@ class MemoryResponse(BaseModel):
     source: str = "user"
     level: int
     content: str
-    summary: str | None = None
     importance: float
     created_at: str | None = None
     quality: "MemoryQualityResponse | None" = None
@@ -37,7 +36,6 @@ class MemoryUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str | None = Field(default=None, min_length=1, max_length=4000)
-    summary: str | None = Field(default=None, max_length=1000)
 
 
 class MemoryBulkDeleteRequest(BaseModel):
@@ -89,7 +87,6 @@ class MemoryHygieneMemory(BaseModel):
     main_category: str | None = None
     sub_category: str | None = None
     content: str
-    summary: str | None = None
     importance: float
 
 

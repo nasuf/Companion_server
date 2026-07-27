@@ -17,7 +17,7 @@ async def load_core_memory_strings(
     workspace_id: str | None,
     source: str = "user",
 ) -> list[tuple[str, str]]:
-    """Load L1 memories as ``(main_category, summary_text)`` pairs.
+    """Load L1 memories as ``(main_category, content)`` pairs.
 
     Iterates categories in quota order (身份 first), so identity facts are
     always at the front of the returned list.  Falls back to a flat top-20
@@ -41,7 +41,7 @@ async def load_core_memory_strings(
             take=limit,
         )
         for row in rows:
-            text = row.summary or row.content
+            text = row.content
             if not text or row.id in seen:
                 continue
             seen.add(row.id)
@@ -63,7 +63,7 @@ async def load_core_memory_strings(
         take=20,
     )
     return [
-        (getattr(row, "mainCategory", "") or "生活", row.summary or row.content)
+        (getattr(row, "mainCategory", "") or "生活", row.content)
         for row in rows
-        if (row.summary or row.content)
+        if row.content
     ]

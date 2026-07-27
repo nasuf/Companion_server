@@ -18,7 +18,6 @@ def _mem(**kwargs):
         workspaceId="ws-A",
         mainCategory="身份",
         subCategory="姓名",
-        summary="我叫张三",
         content="我叫张三",
     )
     defaults.update(kwargs)

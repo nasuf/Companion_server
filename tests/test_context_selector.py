@@ -10,8 +10,8 @@ from app.services.memory.retrieval.context_selector import (
 def test_select_context_includes_complete_short_memories():
     """Short memories are included as complete items."""
     candidates = [
-        {"id": "1", "summary": "Short memory one", "importance": 0.9, "created_at": "2025-01-01T00:00:00"},
-        {"id": "2", "summary": "Short memory two", "importance": 0.8, "created_at": "2025-01-01T00:00:00", "source": "ai"},
+        {"id": "1", "content": "Short memory one", "importance": 0.9, "created_at": "2025-01-01T00:00:00"},
+        {"id": "2", "content": "Short memory two", "importance": 0.8, "created_at": "2025-01-01T00:00:00", "source": "ai"},
     ]
     result = select_context(candidates, token_budget=800)
     assert len(result) == 2
@@ -49,7 +49,7 @@ def test_select_context_skips_abnormally_long_single_memory():
     # Each long item is skipped as a whole instead of being truncated.
     long_text = "word " * 200  # ~260 tokens each
     candidates = [
-        {"id": str(i), "summary": long_text, "importance": 0.5, "created_at": "2025-01-01T00:00:00"}
+        {"id": str(i), "content": long_text, "importance": 0.5, "created_at": "2025-01-01T00:00:00"}
         for i in range(10)
     ]
     result = select_context(candidates, token_budget=400)
@@ -68,14 +68,14 @@ def test_select_context_respects_aggregate_token_budget():
     text = "记" * 100  # 100 CJK chars ≈ 150 tokens
     candidates = [
         {
-            "id": f"u{i}", "summary": text, "importance": 0.7,
+            "id": f"u{i}", "content": text, "importance": 0.7,
             "rank_score": 0.9 - i * 0.01,
             "created_at": "2025-01-01T00:00:00", "source": "user",
         }
         for i in range(10)
     ] + [
         {
-            "id": f"a{i}", "summary": text, "importance": 0.7,
+            "id": f"a{i}", "content": text, "importance": 0.7,
             "rank_score": 0.8 - i * 0.01,
             "created_at": "2025-01-01T00:00:00", "source": "ai",
         }
@@ -93,7 +93,7 @@ def test_select_context_uses_independent_source_quotas_not_global_top10():
     candidates = [
         {
             "id": f"user-{i}",
-            "summary": f"用户记忆 {i}",
+            "content": f"用户记忆 {i}",
             "source": "user",
             "rank_score": 0.8 - i * 0.01,
         }
@@ -101,7 +101,7 @@ def test_select_context_uses_independent_source_quotas_not_global_top10():
     ] + [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 记忆 {i}",
+            "content": f"AI 记忆 {i}",
             "source": "ai",
             "rank_score": 0.78 - i * 0.01,
         }
@@ -120,7 +120,7 @@ def test_select_context_protects_safety_memory_from_top10_truncation():
     candidates = [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 人设记忆 {i}",
+            "content": f"AI 人设记忆 {i}",
             "source": "ai",
             "importance": 1.0,
             "similarity": 0.9,
@@ -130,7 +130,7 @@ def test_select_context_protects_safety_memory_from_top10_truncation():
     ]
     candidates.append({
         "id": "safety",
-        "summary": "用户表达过强烈负面情绪，有轻生念头",
+        "content": "用户表达过强烈负面情绪，有轻生念头",
         "source": "user",
         "main_category": "情绪",
         "sub_category": "悲伤",
@@ -154,7 +154,7 @@ def test_select_context_keeps_user_memory_floor_when_ai_scores_dominate():
     candidates = [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 高分记忆 {i}",
+            "content": f"AI 高分记忆 {i}",
             "source": "ai",
             "rank_score": 0.98 - i * 0.01,
         }
@@ -162,7 +162,7 @@ def test_select_context_keeps_user_memory_floor_when_ai_scores_dominate():
     ] + [
         {
             "id": f"user-{i}",
-            "summary": f"用户相关事实 {i}",
+            "content": f"用户相关事实 {i}",
             "source": "user",
             "rank_score": 0.52 - i * 0.01,
         }
@@ -182,7 +182,7 @@ def test_select_context_protects_ai_self_memory_for_agent_preference_query():
     candidates = [
         {
             "id": f"user-{i}",
-            "summary": f"用户普通记忆 {i}",
+            "content": f"用户普通记忆 {i}",
             "source": "user",
             "rank_score": 0.82 - i * 0.01,
         }
@@ -190,7 +190,7 @@ def test_select_context_protects_ai_self_memory_for_agent_preference_query():
     ]
     candidates.append({
         "id": "ai-movie",
-        "summary": "我喜欢烧脑科幻电影，也喜欢轻松喜剧",
+        "content": "我喜欢烧脑科幻电影，也喜欢轻松喜剧",
         "source": "ai",
         "rank_score": 0.41,
     })
@@ -213,7 +213,7 @@ def test_select_context_keeps_user_floor_for_user_preference_recall_query():
     candidates = [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 记忆 {i}",
+            "content": f"AI 记忆 {i}",
             "source": "ai",
             "rank_score": 0.9 - i * 0.01,
         }
@@ -221,7 +221,7 @@ def test_select_context_keeps_user_floor_for_user_preference_recall_query():
     ] + [
         {
             "id": f"user-{i}",
-            "summary": f"用户偏好记忆 {i}",
+            "content": f"用户偏好记忆 {i}",
             "source": "user",
             "rank_score": 0.45 - i * 0.01,
         }
@@ -244,7 +244,7 @@ def test_select_context_marks_matching_user_profile_fact_as_current_answer():
     candidates = [
         {
             "id": "user-age",
-            "summary": "用户28岁",
+            "content": "用户28岁",
             "source": "user",
             "main_category": "身份",
             "sub_category": "年龄",
@@ -253,7 +253,7 @@ def test_select_context_marks_matching_user_profile_fact_as_current_answer():
         },
         {
             "id": "user-school",
-            "summary": "用户毕业于清华大学",
+            "content": "用户毕业于清华大学",
             "source": "user",
             "main_category": "身份",
             "sub_category": "教育背景",
@@ -262,7 +262,7 @@ def test_select_context_marks_matching_user_profile_fact_as_current_answer():
         },
         {
             "id": "user-job",
-            "summary": "用户是一名咖啡师",
+            "content": "用户是一名咖啡师",
             "source": "user",
             "main_category": "身份",
             "sub_category": "职业/与经济",
@@ -283,7 +283,7 @@ def test_select_context_does_not_mark_user_age_as_answer_for_ai_age_query():
     candidates = [
         {
             "id": "user-age",
-            "summary": "用户28岁",
+            "content": "用户28岁",
             "source": "user",
             "main_category": "身份",
             "sub_category": "年龄",
@@ -308,7 +308,7 @@ def test_select_context_protects_literal_user_keyword_match():
     candidates = [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 高分记忆 {i}",
+            "content": f"AI 高分记忆 {i}",
             "source": "ai",
             "rank_score": 0.9 - i * 0.01,
         }
@@ -316,7 +316,7 @@ def test_select_context_protects_literal_user_keyword_match():
     ]
     candidates.append({
         "id": "wife-surgery",
-        "summary": "用户的妻子之前做过手术",
+        "content": "用户的妻子之前做过手术",
         "source": "user",
         "rank_score": 0.4,
         "rank_reasons": ["关键词命中"],
@@ -333,7 +333,7 @@ def test_select_context_protects_high_similarity_vector_hit():
     candidates = [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 高分记忆 {i}",
+            "content": f"AI 高分记忆 {i}",
             "source": "ai",
             "similarity": 0.62,
             "rank_score": 0.95 - i * 0.01,
@@ -342,7 +342,7 @@ def test_select_context_protects_high_similarity_vector_hit():
     ]
     candidates.append({
         "id": "exact-vector-hit",
-        "summary": "自由时间无特别安排",
+        "content": "自由时间无特别安排",
         "source": "user",
         "similarity": 0.99,
         "rank_score": 0.32,
@@ -360,7 +360,7 @@ def test_select_context_does_not_treat_positive_emotion_as_safety_slot():
     candidates = [
         {
             "id": f"ai-{i}",
-            "summary": f"AI 高分记忆 {i}",
+            "content": f"AI 高分记忆 {i}",
             "source": "ai",
             "rank_score": 0.9 - i * 0.01,
         }
@@ -369,7 +369,7 @@ def test_select_context_does_not_treat_positive_emotion_as_safety_slot():
     candidates.extend([
         {
             "id": "love-ai",
-            "summary": "用户表达了对 AI 的喜爱之情",
+            "content": "用户表达了对 AI 的喜爱之情",
             "source": "user",
             "main_category": "情绪",
             "sub_category": "感激",
@@ -378,7 +378,7 @@ def test_select_context_does_not_treat_positive_emotion_as_safety_slot():
         },
         {
             "id": "apology",
-            "summary": "用户向AI道歉并承诺以后不再犯类似错误",
+            "content": "用户向AI道歉并承诺以后不再犯类似错误",
             "source": "user",
             "main_category": "情绪",
             "sub_category": "遗憾",
@@ -387,7 +387,7 @@ def test_select_context_does_not_treat_positive_emotion_as_safety_slot():
         },
         {
             "id": "sadness",
-            "summary": "用户最近感到很难过",
+            "content": "用户最近感到很难过",
             "source": "user",
             "main_category": "情绪",
             "sub_category": "悲伤",
@@ -415,7 +415,7 @@ def test_select_context_protects_named_relation_memory_before_self_name():
     candidates = [
         {
             "id": f"safety-{i}",
-            "summary": f"用户表达过强烈负面情绪 {i}",
+            "content": f"用户表达过强烈负面情绪 {i}",
             "source": "user",
             "main_category": "情绪",
             "sub_category": "悲伤",
@@ -428,7 +428,7 @@ def test_select_context_protects_named_relation_memory_before_self_name():
     candidates.extend([
         {
             "id": "self-name",
-            "summary": "用户叫林小满",
+            "content": "用户叫林小满",
             "source": "user",
             "main_category": "身份",
             "sub_category": "姓名",
@@ -437,7 +437,7 @@ def test_select_context_protects_named_relation_memory_before_self_name():
         },
         {
             "id": "direct-leader",
-            "summary": "用户的直属领导叫陈姐，人挺好但要求特别细",
+            "content": "用户的直属领导叫陈姐，人挺好但要求特别细",
             "source": "user",
             "main_category": "身份",
             "sub_category": "社会关系",
@@ -446,7 +446,7 @@ def test_select_context_protects_named_relation_memory_before_self_name():
         },
         {
             "id": "empty-feeling",
-            "summary": "用户感到心里空落落的",
+            "content": "用户感到心里空落落的",
             "source": "user",
             "main_category": "情绪",
             "sub_category": "孤独",
@@ -475,7 +475,7 @@ def test_ranker_prioritizes_relation_name_over_self_and_ai_names():
     query = "她叫什么"
     leader = {
         "id": "leader",
-        "summary": "用户的直属领导叫陈姐，人挺好但要求特别细",
+        "content": "用户的直属领导叫陈姐，人挺好但要求特别细",
         "source": "user",
         "main_category": "身份",
         "sub_category": "社会关系",
@@ -484,7 +484,7 @@ def test_ranker_prioritizes_relation_name_over_self_and_ai_names():
     }
     user_name = {
         "id": "user-name",
-        "summary": "用户叫林小满",
+        "content": "用户叫林小满",
         "source": "user",
         "main_category": "身份",
         "sub_category": "姓名",
@@ -493,7 +493,7 @@ def test_ranker_prioritizes_relation_name_over_self_and_ai_names():
     }
     ai_name = {
         "id": "ai-name",
-        "summary": "我叫Hillow",
+        "content": "我叫Hillow",
         "source": "ai",
         "main_category": "身份",
         "sub_category": "姓名",
@@ -517,14 +517,14 @@ def test_ranker_protects_exact_text_even_with_low_importance():
 
     exact = {
         "id": "exact",
-        "summary": "早上被流浪猫吵醒",
+        "content": "早上被流浪猫吵醒",
         "source": "user",
         "importance": 0.2,
         "similarity": 1.0,
     }
     generic = {
         "id": "generic",
-        "summary": "去公园观察流浪猫狗的行为模式，顺便投喂食物",
+        "content": "去公园观察流浪猫狗的行为模式，顺便投喂食物",
         "source": "ai",
         "importance": 0.95,
         "similarity": 0.67,
@@ -542,7 +542,7 @@ def test_ranker_prioritizes_user_safety_over_ai_emotion_story():
 
     user_safety = {
         "id": "user-safety",
-        "summary": "用户表达了强烈的负面情绪，有轻生念头",
+        "content": "用户表达了强烈的负面情绪，有轻生念头",
         "source": "user",
         "main_category": "情绪",
         "sub_category": "悲伤",
@@ -551,7 +551,7 @@ def test_ranker_prioritizes_user_safety_over_ai_emotion_story():
     }
     ai_story = {
         "id": "ai-story",
-        "summary": "生病发烧躺在出租屋床上，那一刻觉得世界好空旷。",
+        "content": "生病发烧躺在出租屋床上，那一刻觉得世界好空旷。",
         "source": "ai",
         "main_category": "情绪",
         "sub_category": "孤独",
@@ -578,7 +578,7 @@ def test_ranker_prioritizes_user_preference_over_ai_preference():
 
     user_pref = {
         "id": "user-pref",
-        "summary": "用户对芒果过敏",
+        "content": "用户对芒果过敏",
         "source": "user",
         "main_category": "偏好",
         "sub_category": "饮食禁忌",
@@ -587,7 +587,7 @@ def test_ranker_prioritizes_user_preference_over_ai_preference():
     }
     ai_pref = {
         "id": "ai-pref",
-        "summary": "我讨厌吃动物内脏",
+        "content": "我讨厌吃动物内脏",
         "source": "ai",
         "main_category": "偏好",
         "sub_category": "饮食禁忌",
@@ -608,7 +608,7 @@ def test_ranker_prioritizes_ai_preference_for_agent_self_query():
 
     ai_pref = {
         "id": "ai-pref",
-        "summary": "我喜欢烧脑科幻电影",
+        "content": "我喜欢烧脑科幻电影",
         "source": "ai",
         "main_category": "偏好",
         "sub_category": "审美爱好",
@@ -617,7 +617,7 @@ def test_ranker_prioritizes_ai_preference_for_agent_self_query():
     }
     user_pref = {
         "id": "user-pref",
-        "summary": "用户喜欢爱情片",
+        "content": "用户喜欢爱情片",
         "source": "user",
         "main_category": "偏好",
         "sub_category": "审美爱好",
@@ -638,7 +638,7 @@ def test_ranker_prioritizes_ai_identity_over_user_identity_for_ai_profile_query(
 
     ai_age = {
         "id": "ai-age",
-        "summary": "我今年26岁",
+        "content": "我今年26岁",
         "source": "ai",
         "main_category": "身份",
         "sub_category": "年龄",
@@ -647,7 +647,7 @@ def test_ranker_prioritizes_ai_identity_over_user_identity_for_ai_profile_query(
     }
     user_age = {
         "id": "user-age",
-        "summary": "用户28岁",
+        "content": "用户28岁",
         "source": "user",
         "main_category": "身份",
         "sub_category": "年龄",
@@ -671,7 +671,7 @@ def test_ranker_preserves_profile_stage_anchors_for_ai_education_query():
     query = ai_profile_search_query("你还记得自己是哪个学校读的高中？")
     ai_education = {
         "id": "ai-education",
-        "summary": "我初中毕业后主动提出不再就读普通高中。",
+        "content": "我初中毕业后主动提出不再就读普通高中。",
         "source": "ai",
         "main_category": "身份",
         "sub_category": "教育背景",
@@ -680,7 +680,7 @@ def test_ranker_preserves_profile_stage_anchors_for_ai_education_query():
     }
     unrelated_ai = {
         "id": "ai-other",
-        "summary": "我昨天答应了要提醒用户某件事。",
+        "content": "我昨天答应了要提醒用户某件事。",
         "source": "ai",
         "main_category": "生活",
         "sub_category": "提醒",
@@ -701,7 +701,7 @@ def test_select_context_keeps_same_user_identity_as_profile_context_only():
     candidates = [
         {
             "id": "ai-age",
-            "summary": "我今年26岁",
+            "content": "我今年26岁",
             "source": "ai",
             "main_category": "身份",
             "sub_category": "年龄",
@@ -710,7 +710,7 @@ def test_select_context_keeps_same_user_identity_as_profile_context_only():
         },
         {
             "id": "user-age",
-            "summary": "用户28岁",
+            "content": "用户28岁",
             "source": "user",
             "main_category": "身份",
             "sub_category": "年龄",
@@ -720,7 +720,7 @@ def test_select_context_keeps_same_user_identity_as_profile_context_only():
         },
         {
             "id": "user-school",
-            "summary": "用户毕业于清华大学",
+            "content": "用户毕业于清华大学",
             "source": "user",
             "main_category": "身份",
             "sub_category": "教育背景",
@@ -730,7 +730,7 @@ def test_select_context_keeps_same_user_identity_as_profile_context_only():
     ] + [
         {
             "id": f"ai-other-{i}",
-            "summary": f"AI 其他资料 {i}",
+            "content": f"AI 其他资料 {i}",
             "source": "ai",
             "rank_score": 0.69 - i * 0.01,
             "similarity": 0.4,
@@ -750,7 +750,7 @@ def test_select_context_drops_unscoped_user_identity_for_ai_profile_query():
     candidates = [
         {
             "id": "user-age",
-            "summary": "用户28岁",
+            "content": "用户28岁",
             "source": "user",
             "main_category": "身份",
             "sub_category": "年龄",
@@ -759,7 +759,7 @@ def test_select_context_drops_unscoped_user_identity_for_ai_profile_query():
         },
         {
             "id": "user-job",
-            "summary": "用户是一名咖啡师",
+            "content": "用户是一名咖啡师",
             "source": "user",
             "main_category": "身份",
             "sub_category": "职业/与经济",
@@ -778,7 +778,7 @@ def test_ranker_prioritizes_user_reminders_over_generic_identity():
 
     reminder = {
         "id": "reminder",
-        "summary": "用户周三晚上 8 点要跟陈姐开 review",
+        "content": "用户周三晚上 8 点要跟陈姐开 review",
         "source": "user",
         "main_category": "生活",
         "sub_category": "提醒",
@@ -787,7 +787,7 @@ def test_ranker_prioritizes_user_reminders_over_generic_identity():
     }
     identity = {
         "id": "identity",
-        "summary": "用户今年27岁",
+        "content": "用户今年27岁",
         "source": "user",
         "main_category": "身份",
         "sub_category": "年龄",
@@ -810,7 +810,7 @@ def test_ranker_prioritizes_user_identity_over_ai_identity():
 
     user_identity = {
         "id": "user-age",
-        "summary": "用户今年27岁",
+        "content": "用户今年27岁",
         "source": "user",
         "main_category": "身份",
         "sub_category": "年龄",
@@ -819,7 +819,7 @@ def test_ranker_prioritizes_user_identity_over_ai_identity():
     }
     ai_identity = {
         "id": "ai-age",
-        "summary": "我今年21岁",
+        "content": "我今年21岁",
         "source": "ai",
         "main_category": "身份",
         "sub_category": "年龄",
@@ -828,7 +828,7 @@ def test_ranker_prioritizes_user_identity_over_ai_identity():
     }
     relation_memory = {
         "id": "leader",
-        "summary": "用户的直属领导叫陈姐",
+        "content": "用户的直属领导叫陈姐",
         "source": "user",
         "main_category": "身份",
         "sub_category": "社会关系",

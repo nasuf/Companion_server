@@ -22,10 +22,10 @@ def _now():
 async def test_entities_topics_linked_per_memory():
     extraction = {
         "memories": [
-            {"summary": "用户养了一只猫叫芝麻", "importance": 0.6,
+            {"content": "用户养了一只猫叫芝麻", "importance": 0.6,
              "main_category": "身份", "sub_category": "宠物",
              "entities": ["芝麻"], "topics": ["宠物"]},
-            {"summary": "用户在做后端开发工作", "importance": 0.6,
+            {"content": "用户在做后端开发工作", "importance": 0.6,
              "main_category": "生活", "sub_category": "工作",
              "entities": ["后端开发"], "topics": ["工作"]},
         ],
@@ -81,10 +81,10 @@ async def test_entities_topics_linked_per_memory():
 async def test_preferences_attributed_only_to_mentioning_memory():
     extraction = {
         "memories": [
-            {"summary": "用户喜欢吃辣", "importance": 0.6,
+            {"content": "用户喜欢吃辣", "importance": 0.6,
              "main_category": "偏好", "sub_category": "饮食喜好",
              "entities": [], "topics": []},
-            {"summary": "用户养了一只猫", "importance": 0.6,
+            {"content": "用户养了一只猫", "importance": 0.6,
              "main_category": "身份", "sub_category": "宠物",
              "entities": [], "topics": []},
         ],

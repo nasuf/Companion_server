@@ -291,7 +291,7 @@ async def handle_deletion(
         intent = (deletion_result or {}).get("intent") or "delete"
         new_time_raw = (deletion_result or {}).get("new_time")
         candidate_preview = "\n".join(
-            f"{i + 1}. {c.get('content', c.get('summary', ''))[:60]}"
+            f"{i + 1}. {c.get('content', '')[:60]}"
             for i, c in enumerate(candidates[:5])
         )
 
@@ -676,7 +676,7 @@ def _format_user_memory_for_crisis(
 
     def _text(memory: Any) -> str:
         if isinstance(memory, dict):
-            return str(memory.get("text") or memory.get("summary") or memory.get("content") or "")
+            return str(memory.get("text") or memory.get("content") or "")
         return str(getattr(memory, "text", "") or "")
 
     def _rank_reasons(memory: Any) -> list[str]:
@@ -1030,7 +1030,6 @@ async def _persist_one_reminder(
         memory_id = await store_memory(
             user_id=user_id,
             content=summary,
-            summary=summary,
             level=3,
             importance=0.45,  # 落 L3 (pipeline clamp 也是 [0.4, 0.49])
             memory_type="life",
@@ -1556,7 +1555,7 @@ async def _update_reminder_content(
             try:
                 await memory_repo.update(
                     memory_id, source=item.get("memory_side") or "user",
-                    content=summary, summary=summary,
+                    content=summary,
                 )
             except Exception as e:
                 logger.warning(f"[REMINDER-CONTENT] memory update failed: {e}")

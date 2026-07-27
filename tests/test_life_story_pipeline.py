@@ -104,7 +104,7 @@ class TestConvertProfileToMemories:
         mems = convert_profile_to_memories(rich_profile, None)
         # Every memory has required keys.
         for m in mems:
-            assert set(m.keys()) >= {"summary", "main_category", "sub_category",
+            assert set(m.keys()) >= {"content", "main_category", "sub_category",
                                      "type", "importance"}
         # identity singletons present.
         subs = {(m["main_category"], m["sub_category"]) for m in mems}
@@ -116,7 +116,7 @@ class TestConvertProfileToMemories:
         mems = convert_profile_to_memories(rich_profile, None)
         foods = [m for m in mems
                 if m["main_category"] == "偏好" and m["sub_category"] == "饮食喜好"
-                and "喜欢吃" in m["summary"]]
+                and "喜欢吃" in m["content"]]
         # ["火锅","日料"] → 2 separate memories (one per tag).
         assert len(foods) >= 2
 
@@ -124,7 +124,7 @@ class TestConvertProfileToMemories:
         p = {"identity": {"gender": "female"}}
         mems = convert_profile_to_memories(p, None)
         gender_mem = next(m for m in mems if m["sub_category"] == "性别")
-        assert "女" in gender_mem["summary"]
+        assert "女" in gender_mem["content"]
 
     def test_career_template_applied(self):
         career = {"title": "程序员", "duties": "写代码",
@@ -197,7 +197,7 @@ class TestComputeL1Gaps:
 class TestEmbedAndDedupe:
     @pytest.mark.asyncio
     async def test_short_list_passthrough(self):
-        mems = [{"summary": "只一条", "main_category": "身份",
+        mems = [{"content": "只一条", "main_category": "身份",
                 "sub_category": "姓名", "importance": 1.0}]
         result = await _embed_and_dedupe(mems)
         assert len(result) == 1
@@ -241,7 +241,7 @@ class TestIntegration:
             if key in L1_SINGLETON_SUBS:
                 min_imp = l1_min_importance(*key)
                 assert m["importance"] >= min_imp, \
-                    f"{m['summary']} importance {m['importance']} < required {min_imp}"
+                    f"{m['content']} importance {m['importance']} < required {min_imp}"
 
 
 class TestContradictionDetection:
@@ -252,11 +252,11 @@ class TestContradictionDetection:
         from app.services import life_story
 
         memories = [
-            {"summary": "我养了一只名为糯米的博美犬",
+            {"content": "我养了一只名为糯米的博美犬",
              "main_category": "身份", "sub_category": "宠物", "importance": 0.85},
-            {"summary": "我没有养宠物，家里常备急救包帮助小动物",
+            {"content": "我没有养宠物，家里常备急救包帮助小动物",
              "main_category": "生活", "sub_category": "宠物", "importance": 0.85},
-            {"summary": "我叫Hia",
+            {"content": "我叫Hia",
              "main_category": "身份", "sub_category": "姓名", "importance": 0.95},
         ]
 
@@ -272,15 +272,15 @@ class TestContradictionDetection:
         result = await life_story._detect_and_resolve_contradictions(memories)
         # Tied importance → drop b (the second one, "没有养宠物").
         assert len(result) == 2
-        assert all("没有养宠物" not in m["summary"] for m in result)
+        assert all("没有养宠物" not in m["content"] for m in result)
 
     @pytest.mark.asyncio
     async def test_no_contradiction_returns_unchanged(self, monkeypatch):
         from app.services import life_story
         memories = [
-            {"summary": "我叫Hia", "main_category": "身份",
+            {"content": "我叫Hia", "main_category": "身份",
              "sub_category": "姓名", "importance": 0.95},
-            {"summary": "我喜欢咖啡", "main_category": "偏好",
+            {"content": "我喜欢咖啡", "main_category": "偏好",
              "sub_category": "饮食喜好", "importance": 0.86},
         ]
 
@@ -300,8 +300,8 @@ class TestContradictionDetection:
         """LLM 调用炸了 → 跳过, 不阻塞 agent 创建."""
         from app.services import life_story
         memories = [
-            {"summary": "a", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
-            {"summary": "b", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
+            {"content": "a", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
+            {"content": "b", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
         ]
 
         async def fake_invoke_json(_model, _prompt):
@@ -326,7 +326,7 @@ class TestContradictionDetection:
         monkeypatch.setattr(life_story, "invoke_json", fake_invoke_json)
 
         assert await life_story._detect_and_resolve_contradictions([]) == []
-        single = [{"summary": "x", "main_category": "身份",
+        single = [{"content": "x", "main_category": "身份",
                    "sub_category": "姓名", "importance": 0.9}]
         assert await life_story._detect_and_resolve_contradictions(single) == single
         assert called is False  # 短路, 不调 LLM
@@ -336,9 +336,9 @@ class TestContradictionDetection:
         """importance 不等时, drop 低分那条 (而非简单按 a/b 顺序)."""
         from app.services import life_story
         memories = [
-            {"summary": "我没养宠物", "main_category": "生活",
+            {"content": "我没养宠物", "main_category": "生活",
              "sub_category": "宠物", "importance": 0.86},
-            {"summary": "我有一只博美犬", "main_category": "身份",
+            {"content": "我有一只博美犬", "main_category": "身份",
              "sub_category": "宠物", "importance": 0.92},
         ]
         async def fake_invoke_json(_m, _p):
@@ -350,15 +350,15 @@ class TestContradictionDetection:
 
         result = await life_story._detect_and_resolve_contradictions(memories)
         assert len(result) == 1
-        assert result[0]["summary"] == "我有一只博美犬"
+        assert result[0]["content"] == "我有一只博美犬"
 
     @pytest.mark.asyncio
     async def test_ignores_invalid_pairs(self, monkeypatch):
         """LLM 输出包含无效 idx / 自反对 / 重叠 drop, 应安全跳过."""
         from app.services import life_story
         memories = [
-            {"summary": "a", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
-            {"summary": "b", "main_category": "身份", "sub_category": "姓名", "importance": 0.85},
+            {"content": "a", "main_category": "身份", "sub_category": "姓名", "importance": 0.9},
+            {"content": "b", "main_category": "身份", "sub_category": "姓名", "importance": 0.85},
         ]
         async def fake_invoke_json(_m, _p):
             return {"contradictions": [
@@ -376,4 +376,4 @@ class TestContradictionDetection:
         result = await life_story._detect_and_resolve_contradictions(memories)
         # Only the valid pair (0, 1) → drop b (importance 0.85).
         assert len(result) == 1
-        assert result[0]["summary"] == "a"
+        assert result[0]["content"] == "a"

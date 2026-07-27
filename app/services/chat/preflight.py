@@ -278,7 +278,7 @@ async def resolve_pending_deletion(
             # 模糊 confirm ("嗯/好") 不接受 → 二次反问要求编号
             if chosen_indices is None and is_deletion_confirmed(user_message):
                 preview_list = "\n".join(
-                    f"{i + 1}) {c.get('content', c.get('summary', ''))[:60]}"
+                    f"{i + 1}) {c.get('content', '')[:60]}"
                     for i, c in enumerate(candidates[:5])
                 )
                 reply = (
@@ -315,7 +315,7 @@ async def resolve_pending_deletion(
                 else candidates
             )
             preview = "\n".join(
-                f"- {c.get('content', c.get('summary', ''))[:60]}"
+                f"- {c.get('content', '')[:60]}"
                 for c in target_candidates[:5]
             ) or "(无)"
 
@@ -639,7 +639,6 @@ async def _handle_pending_update_reminder_content(
                 memory_id,
                 source=selected.get("memory_side") or "user",
                 content=summary,
-                summary=summary,
             )
         except Exception as e:
             logger.warning(f"[REMINDER-CONTENT-PENDING] memory update failed: {e}")

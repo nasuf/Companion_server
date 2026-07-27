@@ -48,7 +48,7 @@ class TestRelationshipSlot:
         # Low rank_score interaction memory buried under high-score persona rows.
         candidates = [
             {
-                "id": f"p{i}", "summary": f"我喜欢人设事实{i}", "importance": 0.9,
+                "id": f"p{i}", "content": f"我喜欢人设事实{i}", "importance": 0.9,
                 "rank_score": 0.9, "source": "ai",
                 "main_category": "偏好", "sub_category": "审美爱好",
                 "created_at": "2026-01-01T00:00:00",
@@ -57,7 +57,7 @@ class TestRelationshipSlot:
         ] + [
             {
                 "id": "rel-1",
-                "summary": "我和用户第一次深聊了他的家乡，聊到了凌晨",
+                "content": "我和用户第一次深聊了他的家乡，聊到了凌晨",
                 "importance": 0.88, "rank_score": 0.2, "source": "ai",
                 "main_category": "生活", "sub_category": "交互",
                 "created_at": "2026-01-01T00:00:00",
@@ -74,7 +74,7 @@ class TestRelationshipSlot:
 
         candidates = [
             {
-                "id": "rel-1", "summary": "我和用户第一次深聊",
+                "id": "rel-1", "content": "我和用户第一次深聊",
                 "importance": 0.88, "rank_score": 0.05, "source": "ai",
                 "main_category": "生活", "sub_category": "交互",
                 "created_at": "2026-01-01T00:00:00",
@@ -106,7 +106,6 @@ class TestRelationshipRankingBoost:
 
         mem = {
             "id": "rel-1",
-            "summary": "我和用户第一次深聊了他的家乡",
             "content": "我和用户第一次深聊了他的家乡",
             "importance": 0.85, "similarity": 0.6, "source": "ai",
             "main_category": "生活", "sub_category": "交互",
@@ -172,7 +171,6 @@ class TestRelationshipRecallGate:
         return {
             "id": "hx1",
             "content": "我们第一次聊天你说你叫小伴",
-            "summary": "我们第一次聊天的情形",
             "level": 2,
             "importance": 0.7,
             "similarity": sim,

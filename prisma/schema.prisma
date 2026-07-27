@@ -889,7 +889,6 @@ model UserMemory {
   subCategory   String?        @map("sub_category")
   level         Int            @default(3)
   content       String
-  summary       String?
   importance    Float          @default(0.5)
   // Spec §1.5.2 L2 动态分 (importance × time × frequency × quality), 每日 cron
   // 现算写入. importance 保持"初始重要度"不可变 — 旧实现把动态分回写 importance
@@ -926,7 +925,6 @@ model AiMemory {
   subCategory   String?        @map("sub_category")
   level         Int            @default(3)
   content       String
-  summary       String?
   importance    Float          @default(0.5)
   // Spec §1.5.2 L2 动态分 (同 UserMemory.currentScore, 注释见上).
   currentScore  Float?         @map("current_score")

@@ -313,12 +313,12 @@ async def list_user_tags(
             logger.warning("Falling back to rule profile tags: %s", exc)
     rows = await db.query_raw(
         """
-        SELECT content, summary, main_category, sub_category, importance, updated_at
+        SELECT content, main_category, sub_category, importance, updated_at
         FROM memories_user
         WHERE user_id = $1
           AND ($2::text IS NULL OR workspace_id = $2)
           AND is_archived = FALSE
-          AND COALESCE(summary, content, '') <> ''
+          AND COALESCE(content, '') <> ''
           AND COALESCE(sub_category, '') <> '提醒'
         ORDER BY importance DESC, updated_at DESC
         LIMIT $3 * 4
@@ -333,15 +333,15 @@ async def list_user_tags(
 async def memory_brief(user_id: str, workspace_id: str | None, *, limit: int = 60) -> str:
     rows = await db.query_raw(
         """
-        SELECT content, summary, main_category, sub_category
+        SELECT content, main_category, sub_category
         FROM (
-            SELECT content, summary, main_category, sub_category, importance, updated_at
+            SELECT content, main_category, sub_category, importance, updated_at
             FROM memories_user
             WHERE user_id = $1
               AND ($2::text IS NULL OR workspace_id = $2)
               AND is_archived = FALSE
             UNION ALL
-            SELECT content, summary, main_category, sub_category, importance, updated_at
+            SELECT content, main_category, sub_category, importance, updated_at
             FROM memories_ai
             WHERE user_id = $1
               AND ($2::text IS NULL OR workspace_id = $2)
@@ -362,7 +362,7 @@ async def memory_brief(user_id: str, workspace_id: str | None, *, limit: int = 6
                 str(_field(row, "sub_category", "subCategory") or ""),
             ] if part
         )
-        text = str(_field(row, "summary") or _field(row, "content") or "").strip()
+        text = str(_field(row, "content") or "").strip()
         if text:
             parts.append(f"- {label}: {text}" if label else f"- {text}")
     return "\n".join(parts)[:3000]

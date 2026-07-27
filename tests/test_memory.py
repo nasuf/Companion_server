@@ -32,7 +32,6 @@ class TestMemoryToDict:
         m = MagicMock()
         m.id = "mem1"
         m.content = "test content"
-        m.summary = "test summary"
         m.level = 2
         m.importance = 0.8
         m.type = "事实"
@@ -40,7 +39,7 @@ class TestMemoryToDict:
 
         result = _memory_to_dict(m, similarity=0.95)
         assert result["id"] == "mem1"
-        assert result["summary"] == "test summary"
+        assert result["content"] == "test content"
         assert result["similarity"] == 0.95
         assert result["level"] == 2
 
@@ -48,7 +47,6 @@ class TestMemoryToDict:
         m = MagicMock()
         m.id = "mem1"
         m.content = "c"
-        m.summary = "s"
         m.level = 3
         m.importance = 0.5
         m.type = None
@@ -61,25 +59,27 @@ class TestMemoryToDict:
 # --- format_memories_for_prompt ---
 
 class TestFormatMemories:
-    def test_uses_summary_first(self):
+    def test_ignores_legacy_summary_key(self):
+        """`content` is the single source of truth; a stray legacy `summary`
+        key must never win over it."""
         memories = [
             {"summary": "summary text", "content": "full content"},
         ]
         result = format_memories_for_prompt(memories)
-        assert result == ["summary text"]
+        assert result == ["full content"]
 
-    def test_falls_back_to_content(self):
+    def test_uses_content(self):
         memories = [
-            {"summary": None, "content": "full content"},
+            {"content": "full content"},
         ]
         result = format_memories_for_prompt(memories)
         assert result == ["full content"]
 
     def test_skips_empty(self):
         memories = [
-            {"summary": None, "content": None},
-            {"summary": "", "content": ""},
-            {"summary": "valid", "content": "c"},
+            {"content": None},
+            {"content": ""},
+            {"content": "valid"},
         ]
         result = format_memories_for_prompt(memories)
         assert result == ["valid"]
@@ -101,7 +101,6 @@ class TestRetrieveMemories:
             source="user",
             level=2,
             content="shared content",
-            summary="shared",
             importance=0.9,
             mentionCount=0,
             isArchived=False,
@@ -110,7 +109,7 @@ class TestRetrieveMemories:
             updatedAt="2025-01-01",
         )
 
-        semantic_results = [{"id": "shared_id", "content": "shared content", "summary": "shared", "similarity": 0.95}]
+        semantic_results = [{"id": "shared_id", "content": "shared content", "similarity": 0.95}]
 
         with (
             patch("app.services.memory.retrieval.legacy.search_similar", return_value=semantic_results),
@@ -180,7 +179,6 @@ def _record(
         source=source,
         level=level,
         content=content,
-        summary=content,
         importance=importance,
         mentionCount=0,
         isArchived=False,
@@ -210,7 +208,6 @@ class TestMemoryReconciliation:
                 source="ai",
                 workspace_id="ws1",
                 content="我养了一只叫“芝麻”的黑猫",
-                summary="我养了一只叫“芝麻”的黑猫",
                 embedding=[0.1],
                 main_category="身份",
                 sub_category="宠物",
@@ -240,7 +237,6 @@ class TestMemoryReconciliation:
                 source="user",
                 workspace_id="ws1",
                 content="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
-                summary="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
                 embedding=[0.1],
                 main_category="偏好",
                 sub_category="饮食喜好",
@@ -268,7 +264,6 @@ class TestMemoryReconciliation:
                 source="user",
                 workspace_id="ws1",
                 content="用户喜欢咖啡",
-                summary="用户喜欢咖啡",
                 embedding=[0.1],
                 main_category="偏好",
                 sub_category="饮食喜好",
@@ -295,7 +290,6 @@ class TestMemoryReconciliation:
                 source="user",
                 workspace_id="ws1",
                 content="用户是一名咖啡师，也很喜欢咖啡",
-                summary="用户是一名咖啡师，也很喜欢咖啡",
                 embedding=[0.1],
                 main_category="偏好",
                 sub_category="饮食喜好",
@@ -326,7 +320,6 @@ class TestMemoryReconciliation:
                 source="ai",
                 workspace_id="ws1",
                 content="我叫小伴，大家也叫我昕昕",
-                summary="我叫小伴，大家也叫我昕昕",
                 embedding=[0.1],
                 main_category="身份",
                 sub_category="姓名",
@@ -351,7 +344,6 @@ class TestMemoryReconciliation:
         )
         llm_decision = ReconciliationDecision(
             action="update_existing",
-            merged_summary="我生日是2004年3月8日，是双鱼座",
             merged_content="我生日是2004年3月8日，是双鱼座",
         )
         with (
@@ -366,7 +358,6 @@ class TestMemoryReconciliation:
                 source="ai",
                 workspace_id="ws1",
                 content="我生日是2004年3月8日，是双鱼座",
-                summary="我生日是2004年3月8日，是双鱼座",
                 embedding=[0.1],
                 main_category="身份",
                 sub_category="生日",
@@ -398,7 +389,6 @@ class TestMemoryReconciliation:
                 source="ai",
                 workspace_id="ws1",
                 content="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
-                summary="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
                 embedding=[0.1],
                 main_category="身份",
                 sub_category="宠物",
@@ -430,7 +420,6 @@ class TestMemoryReconciliation:
                 source="ai",
                 workspace_id="ws1",
                 content="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
-                summary="我养了一只叫芝麻的黑猫，是三年前在小区捡的",
                 embedding=[0.1],
                 main_category="身份",
                 sub_category="宠物",
@@ -454,7 +443,6 @@ class TestMemoryReconciliation:
         )
         llm_decision = ReconciliationDecision(
             action="merge_existing",
-            merged_summary="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
             merged_content="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
         )
         with (
@@ -469,7 +457,6 @@ class TestMemoryReconciliation:
                 source="user",
                 workspace_id="ws1",
                 content="用户在花鸟市场买过多肉植物",
-                summary="用户在花鸟市场买过多肉植物",
                 embedding=[0.1],
                 main_category="生活",
                 sub_category="生活",
@@ -479,7 +466,7 @@ class TestMemoryReconciliation:
 
         assert decision.action == "merge_existing"
         assert decision.existing_id == "old-life"
-        assert decision.merged_summary == "用户周末会去花鸟市场逛干花摊，也买过多肉植物"
+        assert decision.merged_content == "用户周末会去花鸟市场逛干花摊，也买过多肉植物"
         mock_llm.assert_awaited_once()
 
     async def test_store_memory_updates_existing_when_reconciliation_says_update(self):
@@ -497,7 +484,6 @@ class TestMemoryReconciliation:
             existing_id="old-pref",
             existing_record=existing,
             merged_content="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
-            merged_summary="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
         )
         P = "app.services.memory.storage.persistence"
         with (
@@ -512,7 +498,6 @@ class TestMemoryReconciliation:
             result = await store_memory(
                 user_id="u1",
                 content="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
-                summary="用户喜欢研究咖啡豆，尤其关注浅烘埃塞豆",
                 level=2,
                 importance=0.8,
                 main_category="偏好",
@@ -540,7 +525,6 @@ class TestMemoryReconciliation:
             existing_id="old-life",
             existing_record=existing,
             merged_content="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
-            merged_summary="用户周末会去花鸟市场逛干花摊，也买过多肉植物",
         )
         P = "app.services.memory.storage.persistence"
         with (
@@ -555,7 +539,6 @@ class TestMemoryReconciliation:
             result = await store_memory(
                 user_id="u1",
                 content="用户在花鸟市场买过多肉植物",
-                summary="用户在花鸟市场买过多肉植物",
                 level=2,
                 importance=0.8,
                 main_category="生活",
@@ -679,7 +662,6 @@ class TestProvenancePassthrough:
         """用户侧 L1 singleton 新事实应替换旧当前值，而不是被旧 L1 永久挡住."""
         existing = MagicMock(id="old-name-id")
         existing.content = "用户叫花卷"
-        existing.summary = "用户叫花卷"
         with _patch_storage_chain(existing_l1=[existing]) as mocks:
             result = await store_memory(
                 user_id="u1", content="用户叫馒头", level=1, importance=0.9,
@@ -694,7 +676,6 @@ class TestProvenancePassthrough:
         """同一条 singleton 文本重复写入仍应短路，避免无意义 churn."""
         existing = MagicMock(id="old-name-id")
         existing.content = "用户叫花卷"
-        existing.summary = "用户叫花卷"
         with _patch_storage_chain(existing_l1=[existing]) as mocks:
             result = await store_memory(
                 user_id="u1", content="用户叫花卷", level=1, importance=0.9,

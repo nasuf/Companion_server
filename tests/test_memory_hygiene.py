@@ -28,7 +28,6 @@ def _record(
         source=source,  # type: ignore[arg-type]
         level=level,
         content=content,
-        summary=content,
         importance=importance,
         mentionCount=0,
         isArchived=False,
@@ -104,7 +103,6 @@ async def test_memory_hygiene_merges_then_archives_absorbed_record():
         action="merge_existing",
         existing_id="old-generic",
         existing_record=existing,
-        merged_summary="用户喜欢咖啡，也喜欢研究浅烘埃塞咖啡豆",
         merged_content="用户喜欢咖啡，也喜欢研究浅烘埃塞咖啡豆",
     )
     P = "app.services.memory.lifecycle.hygiene"

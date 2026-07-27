@@ -67,7 +67,6 @@ async def test_successful_retrieval_cached(monkeypatch):
         {
             "id": "m1",
             "content": "我喜欢雾霾蓝",
-            "summary": "我喜欢雾霾蓝",
             "level": 1,
             "importance": 0.86,
             "similarity": 0.75,

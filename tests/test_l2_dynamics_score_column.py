@@ -24,7 +24,6 @@ def _mem(**kwargs):
         workspaceId="ws-A",
         mainCategory="生活",
         subCategory="工作",
-        summary="用户在做一个副业项目",
         content="用户在做一个副业项目",
         importance=0.6,
         createdAt=now,

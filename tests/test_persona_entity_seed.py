@@ -57,8 +57,8 @@ class TestPersonaEntityExtraction:
 @pytest.mark.asyncio
 async def test_seed_persona_entities_links_only_relation_rows():
     rows = [
-        {"id": "m1", "summary": "一只田园猫，名叫大橘。", "subCategory": "宠物"},
-        {"id": "m2", "summary": "我喜欢雾霾蓝", "subCategory": "审美爱好"},
+        {"id": "m1", "content": "一只田园猫，名叫大橘。", "subCategory": "宠物"},
+        {"id": "m2", "content": "我喜欢雾霾蓝", "subCategory": "审美爱好"},
     ]
     record = AsyncMock(return_value=1)
     with patch(

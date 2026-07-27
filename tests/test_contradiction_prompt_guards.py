@@ -141,8 +141,8 @@ async def test_contradiction_detector_discards_l1_to_l1_conflict_not_in_current_
     from app.services.memory.interaction.contradiction import detect_l1_contradiction
 
     memories = [
-        SimpleNamespace(id="m-old", summary="用户是独生女，无兄弟姐妹", content=None),
-        SimpleNamespace(id="m-new", summary="用户有个妹妹叫辽能", content=None),
+        SimpleNamespace(id="m-old", content="用户是独生女，无兄弟姐妹"),
+        SimpleNamespace(id="m-new", content="用户有个妹妹叫辽能"),
     ]
     llm_result = {
         "has_conflict": True,
@@ -181,7 +181,7 @@ async def test_contradiction_detector_keeps_conflict_grounded_in_current_message
     from app.services.memory.interaction.contradiction import detect_l1_contradiction
 
     memories = [
-        SimpleNamespace(id="m-city", summary="用户现在住北京", content=None),
+        SimpleNamespace(id="m-city", content="用户现在住北京"),
     ]
     llm_result = {
         "has_conflict": True,

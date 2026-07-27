@@ -114,7 +114,7 @@ async def detect_l1_contradiction(
         )
         return None
 
-    l1_text = "\n".join(f"[{m.id}] {m.summary or m.content}" for m in l1_user)
+    l1_text = "\n".join(f"[{m.id}] {m.content}" for m in l1_user)
 
     try:
         template = await get_prompt_text("memory.contradiction_detection")
@@ -470,7 +470,6 @@ async def apply_contradiction_resolution(
         new_id = await store_memory(
             user_id=old_mem.userId,
             content=new_memory_text,
-            summary=new_memory_text,
             level=new_level,
             importance=new_imp,
             main_category=main_category,

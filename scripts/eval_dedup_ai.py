@@ -33,7 +33,7 @@ async def find_workspace() -> str:
 async def fetch_l1_ai(workspace_id: str) -> list[dict[str, Any]]:
     return await db.query_raw(
         """
-        SELECT m.id, m.summary, m.content, m.main_category, m.sub_category,
+        SELECT m.id, m.content, m.main_category, m.sub_category,
                m.created_at, me.embedding::text AS emb
         FROM memories_ai m
         JOIN memory_embeddings me ON me.memory_id = m.id
@@ -47,7 +47,7 @@ async def fetch_l1_ai(workspace_id: str) -> list[dict[str, Any]]:
 async def fetch_l2_ai(workspace_id: str) -> list[dict[str, Any]]:
     return await db.query_raw(
         """
-        SELECT m.id, m.summary, m.content, m.main_category, m.sub_category,
+        SELECT m.id, m.content, m.main_category, m.sub_category,
                m.created_at
         FROM memories_ai m
         WHERE m.workspace_id = $1 AND m.level = 2 AND m.is_archived = false
@@ -67,7 +67,7 @@ async def top1_match(memory_id: str, workspace_id: str) -> dict[str, Any] | None
         WITH target AS (
             SELECT embedding FROM memory_embeddings WHERE memory_id = $1
         )
-        SELECT m.id, m.summary, m.level, m.main_category, m.sub_category,
+        SELECT m.id, m.content, m.level, m.main_category, m.sub_category,
                1 - (me.embedding <=> (SELECT embedding FROM target)) AS sim
         FROM memories_ai m
         JOIN memory_embeddings me ON me.memory_id = m.id
@@ -103,7 +103,7 @@ async def main() -> None:
         print("L1 ai 全部")
         print("=" * 120)
         for m in l1:
-            print(f"  [{m['main_category']}/{m['sub_category']}] {short(m['summary'], 90)}")
+            print(f"  [{m['main_category']}/{m['sub_category']}] {short(m['content'], 90)}")
 
         print("\n" + "=" * 120)
         print("L2 ai → top-1 cosine match (any level, any source=ai)")
@@ -117,10 +117,10 @@ async def main() -> None:
             if not match:
                 continue
             sim = float(match["sim"])
-            l2_text = f"{short(m['summary'], 60)}"
+            l2_text = f"{short(m['content'], 60)}"
             match_text = (
                 f"L{match['level']} {match['main_category']}/{match['sub_category']}: "
-                f"{short(match['summary'], 60)}"
+                f"{short(match['content'], 60)}"
             )
             results.append((sim, l2_text, match_text, m["id"]))
 

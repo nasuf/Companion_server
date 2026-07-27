@@ -29,7 +29,6 @@ class MemoryRecord:
     source: Source
     level: int
     content: str
-    summary: str | None
     importance: float
     mentionCount: int
     isArchived: bool
@@ -53,7 +52,6 @@ def _to_record(row, source: Source) -> MemoryRecord:
         source=source,
         level=row.level,
         content=row.content,
-        summary=row.summary,
         importance=row.importance,
         mentionCount=row.mentionCount,
         isArchived=row.isArchived,
@@ -98,7 +96,7 @@ def _build_kwargs(
 async def create(source: Source = "user", **data) -> MemoryRecord:
     """Create a memory in the appropriate table.
 
-    Pass fields as keyword args: userId, content, summary, level, importance, type, etc.
+    Pass fields as keyword args: userId, content, level, importance, type, etc.
     Do NOT pass 'source' in data — it's determined by the `source` parameter.
     """
     if data.get("userId") and not data.get("workspaceId"):

@@ -52,7 +52,7 @@ async def _search_crisis_keyword_memories(
     emotion_subcategories = list(EMOTIONAL_SAFETY_SUBCATEGORIES)
     return await db.query_raw(
         """
-        SELECT id, content, summary, level, importance, mention_count,
+        SELECT id, content, level, importance, mention_count,
                type, main_category, sub_category,
                created_at, updated_at,
                COALESCE(updated_at, created_at) AS last_accessed_at,
@@ -65,7 +65,6 @@ async def _search_crisis_keyword_memories(
           AND level = ANY($3::int[])
           AND (
               sub_category = ANY($4::text[])
-              OR summary ILIKE ANY($5::text[])
               OR content ILIKE ANY($5::text[])
           )
         ORDER BY importance DESC, updated_at DESC NULLS LAST, created_at DESC
@@ -179,7 +178,7 @@ def _append_memory_reason(memory: ClassifiedMemory, reason: str) -> ClassifiedMe
 
 
 def _memory_text(row: dict[str, Any]) -> str:
-    return str(row.get("summary") or row.get("content") or "")
+    return str(row.get("content") or "")
 
 
 def _is_safety_memory_row(row: dict[str, Any]) -> bool:

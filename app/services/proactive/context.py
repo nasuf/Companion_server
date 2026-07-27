@@ -124,12 +124,12 @@ async def _rerank_memories_by_topic(
     """Spec §3.2 + §4.2: utility model 从候选中挑出最贴 topic 的 ≤3 个 id.
 
     失败 / 空结果 → 返回 [], 调用方回退到 importance 倒排兜底.
-    Caller (`_load_proactive_memories`) 已过滤空 summary/content 行,
+    Caller (`_load_proactive_memories`) 已过滤空 content 行,
     rows 进来都有内容.
     """
     if not topic_theme or not rows:
         return []
-    candidates = [{"id": r.id, "text": (r.summary or r.content)[:80]} for r in rows]
+    candidates = [{"id": r.id, "text": r.content[:80]} for r in rows]
     result = await render_prompt(
         "proactive.memory_topic_rerank",
         {
@@ -212,7 +212,7 @@ async def _load_proactive_memories(
     )
 
     exclude = exclude_memory_ids or set()
-    eligible = [r for r in rows if r.id not in exclude and (r.summary or r.content)]
+    eligible = [r for r in rows if r.id not in exclude and r.content]
 
     # spec §3.2 + §4.2: topic-aware rerank, 失败回退原 importance 顺序
     rerank_ids = await _rerank_memories_by_topic(eligible, topic_theme or "")
@@ -229,7 +229,7 @@ async def _load_proactive_memories(
     ids: list[str] = []
     seen: set[str] = set()
     for row in ordered:
-        text = row.summary or row.content
+        text = row.content
         if not text or text in seen:
             continue
         seen.add(text)

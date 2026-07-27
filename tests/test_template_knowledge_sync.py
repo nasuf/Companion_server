@@ -37,7 +37,6 @@ def _template_row(memory_id: str, content: str, created_at: datetime | None = No
     return SimpleNamespace(
         id=memory_id,
         content=content,
-        summary=content,
         createdAt=created_at or datetime(2026, 7, 23, 8, 0, tzinfo=UTC),
         type="life",
         mainCategory="生活",

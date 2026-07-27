@@ -49,13 +49,13 @@ class Change:
     row_id: str
     user_id: str
     workspace_id: str | None
-    summary: str
+    preview: str
     created_at: object
     old: tuple[str, str, float, int]
     new: tuple[str, str, float, int]
     reason: str
     blocked_by: str | None = None
-    # singleton 冲突时占着位子的那些行 (id, summary, created_at)
+    # singleton 冲突时占着位子的那些行 (id, content 预览, created_at)
     incumbents: tuple[tuple[str, str, object], ...] = ()
 
 
@@ -67,7 +67,7 @@ async def _collect(table: str, workspace: str | None) -> list[Change]:
         where.append(f"workspace_id = ${len(params)}")
     rows = await db.query_raw(
         f"""
-        SELECT id, user_id, workspace_id, summary, content,
+        SELECT id, user_id, workspace_id, content,
                main_category, sub_category, importance, level, created_at
         FROM {table}
         WHERE {' AND '.join(where)}
@@ -76,19 +76,19 @@ async def _collect(table: str, workspace: str | None) -> list[Change]:
         *params,
     )
 
-    # 已有的 singleton 占位: (user, workspace, sub) → [(id, summary, created_at)]
+    # 已有的 singleton 占位: (user, workspace, sub) → [(id, content 预览, created_at)]
     taken: dict[tuple[str, str, str], list[tuple[str, str, object]]] = {}
     for r in rows:
         if r["main_category"] == "身份":
             key = (r["user_id"], r["workspace_id"], r["sub_category"])
             taken.setdefault(key, []).append(
-                (r["id"], r["summary"] or "", r["created_at"])
+                (r["id"], r["content"] or "", r["created_at"])
             )
 
     changes: list[Change] = []
     for r in rows:
         main, sub, imp, reason = repair_identity_classification(
-            summary=r["summary"] or r["content"] or "",
+            summary=r["content"] or "",
             main_category=r["main_category"],
             sub_category=r["sub_category"],
             importance=float(r["importance"]),
@@ -110,11 +110,11 @@ async def _collect(table: str, workspace: str | None) -> list[Change]:
                 incumbents = tuple(existing)
                 blocked = f"该用户已有 {len(existing)} 条 身份/{sub}"
             else:
-                taken[key] = [(r["id"], r["summary"] or "", r["created_at"])]
+                taken[key] = [(r["id"], r["content"] or "", r["created_at"])]
 
         changes.append(Change(
             table=table, row_id=r["id"], user_id=r["user_id"],
-            workspace_id=r["workspace_id"], summary=(r["summary"] or "")[:46],
+            workspace_id=r["workspace_id"], preview=(r["content"] or "")[:46],
             created_at=r["created_at"],
             old=(r["main_category"], r["sub_category"], float(r["importance"]), r["level"]),
             new=(main, sub, imp, level),
@@ -158,7 +158,7 @@ async def _log(change: Change, *, old: str, new: str, memory_id: str | None = No
     )
 
 
-async def _demote_incumbent(change: Change, memory_id: str, summary: str) -> None:
+async def _demote_incumbent(change: Change, memory_id: str, preview: str) -> None:
     """把被顶下来的旧 singleton 降到 L2, 不删 —— 它仍是真实说过的话,
     只是不再是"当前答案"。跟矛盾处理里老 L1 降级的做法一致。"""
     await db.execute_raw(
@@ -168,7 +168,7 @@ async def _demote_incumbent(change: Change, memory_id: str, summary: str) -> Non
     await _log(
         change, memory_id=memory_id,
         old="身份 singleton L1 (在位)",
-        new=f"降为 L2, 让位给更晚的明确表述「{change.summary}」",
+        new=f"降为 L2, 让位给更晚的明确表述「{change.preview}」",
     )
 
 
@@ -195,7 +195,7 @@ async def main() -> None:
         for c in doable:
             om, os_, oi, ol = c.old
             nm, ns, ni, nl = c.new
-            print(f"  {c.table} {c.row_id[:8]} | {c.summary}")
+            print(f"  {c.table} {c.row_id[:8]} | {c.preview}")
             print(f"    {om}/{os_} imp={oi:.2f} L{ol}  →  {nm}/{ns} imp={ni:.2f} L{nl}")
         resolvable = [
             c for c in blocked
@@ -204,7 +204,7 @@ async def main() -> None:
         if blocked:
             print("\n singleton 冲突:")
             for c in blocked:
-                print(f"  {c.table} {c.row_id[:8]} | {c.summary}")
+                print(f"  {c.table} {c.row_id[:8]} | {c.preview}")
                 print(f"    {c.blocked_by}")
                 for _mid, msum, mts in c.incumbents:
                     print(f"      在位: {str(mts)[5:16]} 「{msum[:40]}」")

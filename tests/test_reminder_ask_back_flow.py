@@ -670,7 +670,6 @@ async def test_find_matching_memories_literal_age_fallback():
     record = SimpleNamespace(
         id="age-1",
         content="用户28岁",
-        summary="用户28岁",
         level=1,
         importance=0.9,
         type="identity",
@@ -702,7 +701,6 @@ async def test_find_matching_memories_literal_fallback_user_scoped():
     record = SimpleNamespace(
         id="user-1",
         content="我喜欢安静的咖啡馆",
-        summary="我喜欢安静的咖啡馆",
         level=2,
         importance=0.8,
         type="preference",

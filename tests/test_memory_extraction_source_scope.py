@@ -78,6 +78,32 @@ class TestSourceScopedTaxonomy:
 
         assert captured.get("source") == "ai"
 
+    @pytest.mark.asyncio
+    async def test_prompt_summary_field_is_translated_to_content(self):
+        """The extraction prompt still emits a `summary` field because its rules
+        are written around that name; the stored column is `content`.
+        extract_memories is the single translation point — downstream code that
+        keeps reading `summary` would silently get empty memory text."""
+        from app.services.memory.recording import extraction as ex
+
+        async def fake_normalize(**kwargs):
+            class _R:
+                main_category, sub_category, legacy_type = "偏好", "饮食喜好", "preference"
+            return _R()
+
+        payload = {"memories": [{"summary": "用户喜欢手冲咖啡",
+                                 "main_category": "偏好", "sub_category": "饮食喜好"}]}
+        with patch.object(ex, "get_prompt_text", AsyncMock(return_value="{new_conversation}")), \
+             patch.object(ex, "get_chat_model", lambda: object()), \
+             patch.object(ex, "invoke_json", AsyncMock(return_value=payload)), \
+             patch("app.services.memory.normalization.normalize_memory_category",
+                   fake_normalize):
+            result = await ex.extract_memories("user: 我爱手冲咖啡", side="user")
+
+        mem = result["memories"][0]
+        assert mem["content"] == "用户喜欢手冲咖啡"
+        assert "summary" not in mem
+
 
 class TestImportanceCoercion:
     """LLM 的 importance 字段类型不可靠, 而它现在参与更早的判断 (身份兜底).

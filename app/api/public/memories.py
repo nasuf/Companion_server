@@ -54,7 +54,6 @@ def _serialize_memory(m, quality=None) -> MemoryResponse:
         source=m.source,
         level=m.level,
         content=m.content,
-        summary=m.summary,
         importance=m.importance,
         created_at=str(m.createdAt),
         quality=serialize_quality(quality),
@@ -133,14 +132,10 @@ async def list_memories(
     if sub_category:
         where["subCategory"] = sub_category
     if search and search.strip():
-        # Substring match on content + summary; case-insensitive.
+        # Substring match on content; case-insensitive.
         # Same UX as admin's adminGetMemories `search` param so the chat
         # Inspector and Agent Overview behave identically.
-        q = search.strip()
-        where["OR"] = [
-            {"content": {"contains": q, "mode": "insensitive"}},
-            {"summary": {"contains": q, "mode": "insensitive"}},
-        ]
+        where["content"] = {"contains": search.strip(), "mode": "insensitive"}
 
     memories = await memory_repo.find_many(
         source=source,
@@ -238,10 +233,6 @@ async def update_memory(
     if data.content is not None:
         update_data["content"] = data.content
         await store_embedding(m.id, await generate_embedding(data.content))
-    if data.summary is not None:
-        update_data["summary"] = data.summary
-    elif data.content is not None:
-        update_data["summary"] = data.content[:200]
     if not update_data:
         return _serialize_memory(m)
 

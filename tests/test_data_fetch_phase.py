@@ -305,7 +305,6 @@ async def test_fetch_parallel_context_time_memories_use_workspace_scope():
     )
     search_mock = AsyncMock(return_value=[{
         "id": "m1",
-        "summary": "当前 workspace 的时间记忆",
         "content": "当前 workspace 的时间记忆",
     }])
 

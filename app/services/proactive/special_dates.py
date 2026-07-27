@@ -110,8 +110,8 @@ async def _extract_birthday_from_memories(user_id: str, owner: str) -> tuple[int
 
     三层优先级 (spec §4.1 + Part 5 §6.1: parser event_time → occur_time):
     1. row.occurTime (parser 抽取出的权威源)
-    2. content/summary 中文格式 "3月20日/号"
-    3. content/summary ISO 格式 "1995-03-20" / "2026/3/20"
+    2. content 中文格式 "3月20日/号"
+    3. content ISO 格式 "1995-03-20" / "2026/3/20"
     """
     try:
         rows = await memory_repo.find_many(
@@ -132,7 +132,7 @@ async def _extract_birthday_from_memories(user_id: str, owner: str) -> tuple[int
                     return occur.month, occur.day
                 except Exception:
                     pass
-            text = (row.content or "") + " " + (row.summary or "")
+            text = row.content or ""
             m = _BIRTHDAY_RE.search(text)
             if m:
                 return int(m.group(1)), int(m.group(2))
@@ -184,7 +184,7 @@ async def _extract_important_dates_for_date(
             if occur is None:
                 continue
             if occur.date() == the_date:
-                text = (row.summary or row.content or "").strip()
+                text = (row.content or "").strip()
                 if text:
                     contents.append(text[:60])
         return contents

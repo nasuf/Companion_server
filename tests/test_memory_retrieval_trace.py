@@ -27,14 +27,14 @@ def test_record_retrieval_session_serializes_and_resets():
                     "id": "m1",
                     "source": "user",
                     "level": 1,
-                    "summary": "用户长期失眠，夜里容易焦虑",
+                    "content": "用户长期失眠，夜里容易焦虑",
                     "importance": 0.92,
                     "similarity": 0.83,
                     "rank_score": 0.88,
                     "rank_reasons": ["keyword:失眠"],
                     "updated_at": "2026-05-08T10:00:00",
                 },
-                {"id": "m2", "summary": "用户喜欢咖啡"},
+                {"id": "m2", "content": "用户喜欢咖啡"},
             ],
             selected=[
                 ClassifiedMemory(
@@ -102,18 +102,18 @@ def test_replace_latest_retrieval_selection_supersedes_old_sessions():
         record_retrieval_session(
             strategy="hybrid_l1_l2",
             query="那他呢",
-            candidates=[{"id": "old", "summary": "旧 query 命中的记忆"}],
-            selected=[{"id": "old", "summary": "旧 query 命中的记忆"}],
+            candidates=[{"id": "old", "content": "旧 query 命中的记忆"}],
+            selected=[{"id": "old", "content": "旧 query 命中的记忆"}],
         )
         record_retrieval_session(
             strategy="hybrid_l1_l2",
             query="那他呢",
             enhanced_query="妈妈最近情况",
             candidates=[
-                {"id": "m1", "summary": "用户妈妈最近住院", "rank_score": 0.8},
-                {"id": "m2", "summary": "用户喜欢咖啡", "rank_score": 0.6},
+                {"id": "m1", "content": "用户妈妈最近住院", "rank_score": 0.8},
+                {"id": "m2", "content": "用户喜欢咖啡", "rank_score": 0.6},
             ],
-            selected=[{"id": "m2", "summary": "用户喜欢咖啡"}],
+            selected=[{"id": "m2", "content": "用户喜欢咖啡"}],
         )
         replace_latest_retrieval_selection(
             strategy="hybrid_l1_l2",
@@ -155,8 +155,8 @@ def test_replace_latest_retrieval_selection_can_mark_weak_gate_not_injected():
         record_retrieval_session(
             strategy="hybrid_l1_l2",
             query="哈哈",
-            candidates=[{"id": "m1", "summary": "候选记忆"}],
-            selected=[{"id": "m1", "summary": "候选记忆"}],
+            candidates=[{"id": "m1", "content": "候选记忆"}],
+            selected=[{"id": "m1", "content": "候选记忆"}],
         )
         replace_latest_retrieval_selection(
             strategy="hybrid_l1_l2",

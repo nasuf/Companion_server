@@ -437,7 +437,7 @@ async def get_related_memories(
               AND ($3 = canonical_name OR $3 = ANY(aliases))
         )
         SELECT * FROM (
-            SELECT mm.memory_id AS id, mu.summary, mu.content, mu.importance,
+            SELECT mm.memory_id AS id, mu.content, mu.importance,
                    mu.created_at, 'user' AS source
             FROM memory_mentions mm
             JOIN matched_entities me ON me.id = mm.entity_id
@@ -446,7 +446,7 @@ async def get_related_memories(
 
             UNION ALL
 
-            SELECT mm.memory_id AS id, ma.summary, ma.content, ma.importance,
+            SELECT mm.memory_id AS id, ma.content, ma.importance,
                    ma.created_at, 'ai' AS source
             FROM memory_mentions mm
             JOIN matched_entities me ON me.id = mm.entity_id
@@ -513,7 +513,7 @@ async def search_related_memories_for_query(
         ),
         related AS (
             SELECT
-                mm.memory_id AS id, mu.content, mu.summary, mu.level,
+                mm.memory_id AS id, mu.content, mu.level,
                 mu.importance, mu.mention_count, mu.type,
                 mu.main_category, mu.sub_category,
                 mu.occur_time, mu.created_at, mu.updated_at,
@@ -534,7 +534,7 @@ async def search_related_memories_for_query(
             UNION ALL
 
             SELECT
-                mm.memory_id AS id, ma.content, ma.summary, ma.level,
+                mm.memory_id AS id, ma.content, ma.level,
                 ma.importance, ma.mention_count, ma.type,
                 ma.main_category, ma.sub_category,
                 ma.occur_time, ma.created_at, ma.updated_at,

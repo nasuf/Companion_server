@@ -27,7 +27,7 @@ def _embedding_search_arm(table: str, source: str) -> str:
     """
     return f"""
         (SELECT
-            m.id, m.content, m.summary, m.level, m.importance, m.current_score,
+            m.id, m.content, m.level, m.importance, m.current_score,
             m.provenance, m.mention_count,
             m.type, m.main_category, m.sub_category,
             m.created_at, m.updated_at,
@@ -131,7 +131,7 @@ async def search_by_time_range(
     if source == "user":
         return await db.query_raw(
             """
-            SELECT id, content, summary, level, importance, mention_count,
+            SELECT id, content, level, importance, mention_count,
                    type, main_category, sub_category,
                    occur_time, created_at, updated_at,
                    COALESCE(updated_at, created_at) AS last_accessed_at,
@@ -147,7 +147,7 @@ async def search_by_time_range(
     elif source == "ai":
         return await db.query_raw(
             """
-            SELECT id, content, summary, level, importance, mention_count,
+            SELECT id, content, level, importance, mention_count,
                    type, main_category, sub_category,
                    occur_time, created_at, updated_at,
                    COALESCE(updated_at, created_at) AS last_accessed_at,
@@ -164,7 +164,7 @@ async def search_by_time_range(
     return await db.query_raw(
         """
         SELECT * FROM (
-            (SELECT id, content, summary, level, importance, mention_count,
+            (SELECT id, content, level, importance, mention_count,
                     type, main_category, sub_category,
                     occur_time, created_at, updated_at,
                     COALESCE(updated_at, created_at) AS last_accessed_at,
@@ -175,7 +175,7 @@ async def search_by_time_range(
              ORDER BY importance DESC
              LIMIT $5)
             UNION ALL
-            (SELECT id, content, summary, level, importance, mention_count,
+            (SELECT id, content, level, importance, mention_count,
                     type, main_category, sub_category,
                     occur_time, created_at, updated_at,
                     COALESCE(updated_at, created_at) AS last_accessed_at,

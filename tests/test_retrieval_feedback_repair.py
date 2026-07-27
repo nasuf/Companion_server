@@ -108,7 +108,6 @@ async def test_build_retrieval_feedback_conflict_rejects_ai_memory(monkeypatch):
         AsyncMock(return_value=_Memory(
             source="ai",
             content="29岁生日前夜突然失眠",
-            summary="29岁生日前夜突然失眠",
         )),
     )
     monkeypatch.setattr(retrieval_feedback, "best_effort_create_memory_repair_item", created)

@@ -55,7 +55,7 @@ async def _load_candidates(
     cutoff = datetime.now(UTC) - timedelta(days=_MIN_AGE_DAYS)
     rows = await db.query_raw(
         f"""
-        SELECT m.id, m.content, m.summary, m.importance, m.main_category,
+        SELECT m.id, m.content, m.importance, m.main_category,
                m.sub_category, m.occur_time, m.created_at, m.provenance,
                e.embedding::text AS embedding_text
         FROM {table} m
@@ -127,7 +127,7 @@ async def _compress_cluster(
 ) -> str | None:
     """LLM-compress one cluster into a digest memory; archive the originals."""
     items = "\n".join(
-        f"- {(c.get('summary') or c.get('content') or '').strip()}"
+        f"- {(c.get('content') or '').strip()}"
         for c in cluster
     )
     try:
@@ -167,7 +167,6 @@ async def _compress_cluster(
     new_id = await store_memory(
         user_id=user_id,
         content=digest,
-        summary=digest,
         level=3,
         importance=min(0.49, importance),  # digests stay L3
         main_category=cluster[0].get("main_category"),
@@ -197,7 +196,7 @@ async def _compress_cluster(
             )
             await log_memory_changelog(
                 user_id, c["id"], "consolidated_into",
-                old_value=(c.get("summary") or c.get("content") or "")[:200],
+                old_value=(c.get("content") or "")[:200],
                 new_value=new_id,
                 workspace_id=workspace_id,
             )

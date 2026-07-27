@@ -22,10 +22,10 @@ def _now() -> datetime:
     return datetime(2026, 7, 20, 14, 30, tzinfo=_TZ)
 
 
-def _extraction(main_category: str, sub_category: str, summary: str):
+def _extraction(main_category: str, sub_category: str, content: str):
     return {
         "memories": [{
-            "summary": summary,
+            "content": content,
             "importance": 0.6,
             "type": "preference",
             "main_category": main_category,

@@ -41,7 +41,6 @@ class MemoryRepairActionPayload:
     user_id: str | None = None
     workspace_id: str | None = None
     content: str | None = None
-    summary: str | None = None
     level: int | None = None
     importance: float | None = None
     memory_type: str | None = None
@@ -138,17 +137,11 @@ async def _edit_memory(
 ) -> dict[str, Any]:
     record = await _load_target_memory(repair_item, payload.memory_id)
     content = _clean_text(payload.content)
-    summary = _clean_text(payload.summary)
-    if content is None and summary is None:
-        raise MemoryRepairActionError(400, "edit_memory_requires_content_or_summary")
+    if content is None:
+        raise MemoryRepairActionError(400, "edit_memory_requires_content")
 
-    update_data: dict[str, Any] = {}
-    if content is not None:
-        update_data["content"] = content
-        update_data["summary"] = summary or content[:200]
-        await store_embedding(record.id, await generate_embedding(content))
-    elif summary is not None:
-        update_data["summary"] = summary
+    update_data: dict[str, Any] = {"content": content}
+    await store_embedding(record.id, await generate_embedding(content))
 
     if payload.importance is not None:
         update_data["importance"] = _clamp_importance(payload.importance)
@@ -165,7 +158,7 @@ async def _edit_memory(
         repair_item=repair_item,
         payload=payload,
         old_value=json.dumps(
-            {"content": record.content, "summary": record.summary, "level": record.level, "importance": record.importance},
+            {"content": record.content, "level": record.level, "importance": record.importance},
             ensure_ascii=False,
         ),
         new_value=json.dumps(update_data, ensure_ascii=False),
@@ -203,7 +196,6 @@ async def _insert_replacement_memory(
     new_id = await store_memory(
         user_id=user_id,
         content=content,
-        summary=_clean_text(payload.summary) or content[:200],
         level=level,
         importance=_clamp_importance(payload.importance if payload.importance is not None else (old_record.importance if old_record else 0.7)),
         memory_type=payload.memory_type or (old_record.type if old_record else None),
@@ -275,14 +267,12 @@ async def _merge_memories(
         _assert_same_scope(target, record)
         absorbed.append(record.id)
 
-    summary = _clean_text(payload.summary) or content[:200]
     await store_embedding(target.id, await generate_embedding(content))
     await memory_repo.update(
         target.id,
         source=target.source,
         record=target,
         content=content,
-        summary=summary,
         importance=_clamp_importance(payload.importance if payload.importance is not None else target.importance),
     )
     await _log_repair_changelog(
@@ -292,7 +282,7 @@ async def _merge_memories(
         repair_item=repair_item,
         payload=payload,
         old_value=json.dumps({"content": target.content, "absorbed": absorbed}, ensure_ascii=False),
-        new_value=json.dumps({"content": content, "summary": summary}, ensure_ascii=False),
+        new_value=json.dumps({"content": content}, ensure_ascii=False),
     )
 
     for memory_id in absorbed:

@@ -41,7 +41,6 @@ class MemoryRepairActionRequest(BaseModel):
     user_id: str | None = None
     workspace_id: str | None = None
     content: str | None = Field(default=None, min_length=1, max_length=4000)
-    summary: str | None = Field(default=None, max_length=1000)
     level: int | None = Field(default=None, ge=1, le=3)
     importance: float | None = Field(default=None, ge=0.1, le=0.99)
     memory_type: str | None = None

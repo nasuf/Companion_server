@@ -18,10 +18,10 @@ def _now() -> datetime:
     return datetime(2026, 4, 22, 14, 30, tzinfo=_TZ)
 
 
-def _mem_extraction(occur_time_iso: str | None, summary="提醒事项", recurrence=None):
+def _mem_extraction(occur_time_iso: str | None, content="提醒事项", recurrence=None):
     """构造 extract_memories 的返回 (mock 用)."""
     mem = {
-        "summary": summary,
+        "content": content,
         "importance": 0.6,
         "type": "reminder",
         "main_category": "生活",
@@ -39,7 +39,7 @@ async def test_ai_side_skips_user_fact_acknowledgement_after_extraction():
 
     extraction = {
         "memories": [{
-            "summary": "我记住了用户的名字叫馒头，并觉得这个名字很可爱。",
+            "content": "我记住了用户的名字叫馒头，并觉得这个名字很可爱。",
             "importance": 0.8,
             "type": "life",
             "main_category": "生活",
@@ -82,7 +82,7 @@ async def test_ai_side_skips_uncertain_self_memory_after_extraction():
 
     extraction = {
         "memories": [{
-            "summary": "我高中是在本地一所普通学校读的，具体名字记不清了。",
+            "content": "我高中是在本地一所普通学校读的，具体名字记不清了。",
             "importance": 0.9,
             "type": "identity",
             "main_category": "身份",
@@ -474,7 +474,7 @@ async def test_reminder_subcategory_alias_resolved_before_recurrence():
 
     extraction = {
         "memories": [{
-            "summary": "每月 1 号交房租",
+            "content": "每月 1 号交房租",
             "importance": 0.6,
             "type": "life",
             "main_category": "生活",
@@ -534,7 +534,7 @@ async def test_reminder_non_reminder_subcategory_no_recurrence():
     # 模拟 LLM 错把生日 (身份/生日) 标了 recurrence=yearly
     extraction = {
         "memories": [{
-            "summary": "用户生日 3-20",
+            "content": "用户生日 3-20",
             "importance": 0.9,
             "type": "identity",
             "main_category": "身份",

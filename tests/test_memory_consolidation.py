@@ -13,7 +13,6 @@ def _cand(mid: str, vec: list[float], main="生活", sub="其他", imp=0.3, summ
     return {
         "id": mid,
         "content": summary or f"记忆{mid}",
-        "summary": summary or f"记忆{mid}",
         "importance": imp,
         "main_category": main,
         "sub_category": sub,

@@ -40,8 +40,8 @@ async def main():
 
         # Migrate user memories
         user_count = await db.execute_raw("""
-            INSERT INTO memories_user (id, user_id, type, level, content, summary, importance, mention_count, is_archived, created_at, updated_at)
-            SELECT id, user_id, type, level, content, summary, importance, mention_count, is_archived, created_at, updated_at
+            INSERT INTO memories_user (id, user_id, type, level, content, importance, mention_count, is_archived, created_at, updated_at)
+            SELECT id, user_id, type, level, content, importance, mention_count, is_archived, created_at, updated_at
             FROM memories
             WHERE source = 'user'
             ON CONFLICT (id) DO NOTHING
@@ -50,8 +50,8 @@ async def main():
 
         # Migrate AI memories
         ai_count = await db.execute_raw("""
-            INSERT INTO memories_ai (id, user_id, type, level, content, summary, importance, mention_count, is_archived, created_at, updated_at)
-            SELECT id, user_id, type, level, content, summary, importance, mention_count, is_archived, created_at, updated_at
+            INSERT INTO memories_ai (id, user_id, type, level, content, importance, mention_count, is_archived, created_at, updated_at)
+            SELECT id, user_id, type, level, content, importance, mention_count, is_archived, created_at, updated_at
             FROM memories
             WHERE source = 'ai'
             ON CONFLICT (id) DO NOTHING

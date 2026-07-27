@@ -49,7 +49,7 @@ async def main(agent_id: str) -> None:
     # 1. 拉所有 AI 颜色记忆
     rows = await db.query_raw(
         """
-        SELECT m.id, m.summary, m.importance, m.sub_category,
+        SELECT m.id, m.content, m.importance, m.sub_category,
                me.embedding::text AS emb_text
         FROM memories_ai m
         JOIN memory_embeddings me ON me.memory_id = m.id
@@ -79,15 +79,15 @@ async def main(agent_id: str) -> None:
         # pgvector text format: '[0.1,0.2,...]'
         vec = [float(x) for x in emb_text.strip("[]").split(",")]
         sim = cosine_similarity(query_vec, vec)
-        scored.append((sim, str(r["sub_category"]), str(r["summary"])))
+        scored.append((sim, str(r["sub_category"]), str(r["content"])))
 
     scored.sort(reverse=True)
 
-    print(f"\n{'sim':<8} {'sub':<10} summary")
+    print(f"\n{'sim':<8} {'sub':<10} content")
     print("-" * 100)
-    for sim, sub, summary in scored[:20]:
+    for sim, sub, content in scored[:20]:
         marker = "✓" if sim >= 0.50 else "✗"
-        print(f"{sim:<8.3f} {marker} {sub:<10} {summary[:80]}")
+        print(f"{sim:<8.3f} {marker} {sub:<10} {content[:80]}")
 
     above = sum(1 for s, _, _ in scored if s >= 0.50)
     print(f"\n>= 0.50 (检索阈值) 的记忆: {above} 条")

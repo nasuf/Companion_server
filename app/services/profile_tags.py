@@ -134,7 +134,7 @@ async def refresh_profile_tags(
         return []
 
     memory_lines = "\n".join(
-        f"- id={m.id} [L{m.level}] [{m.mainCategory or '未分类'}/{m.subCategory or '其他'}] {m.summary or m.content}"
+        f"- id={m.id} [L{m.level}] [{m.mainCategory or '未分类'}/{m.subCategory or '其他'}] {m.content}"
         for m in memories
     )
     tags: list[ProfileTag] = []
@@ -151,7 +151,6 @@ async def refresh_profile_tags(
     if not tags:
         fallback_rows = [
             {
-                "summary": m.summary,
                 "content": m.content,
                 "main_category": m.mainCategory,
                 "sub_category": m.subCategory,

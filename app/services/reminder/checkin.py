@@ -260,7 +260,6 @@ async def _patch_reminder_memory(
     data = {}
     if summary is not None:
         data["content"] = summary
-        data["summary"] = summary
     if trigger_time is not None:
         data["occurTime"] = trigger_time
     if recurrence is not None:

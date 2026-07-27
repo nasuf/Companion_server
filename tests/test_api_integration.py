@@ -324,7 +324,6 @@ def test_admin_agent_memories_scope_by_workspace_and_user(mock_deps):
                     [{
                         "id": "mem-1",
                         "content": "用户的直属领导叫陈姐",
-                        "summary": "用户的直属领导叫陈姐",
                         "level": 2,
                         "importance": 0.8,
                         "main_category": "身份",
@@ -364,7 +363,6 @@ def test_admin_agent_memories_include_quality(mock_deps):
                     [{
                         "id": "mem-1",
                         "content": "用户喜欢爵士乐",
-                        "summary": "用户喜欢爵士乐",
                         "level": 2,
                         "importance": 0.7,
                         "main_category": "偏好边界",

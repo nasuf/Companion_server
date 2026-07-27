@@ -84,7 +84,6 @@ async def remember_shared_game_experience(
         return await store_memory(
             user_id=user_id,
             content=text,
-            summary=text,
             # Individual rounds stay retrievable but do not permanently crowd
             # the AI's L1 core profile. Exact move history remains in the game
             # session and meaningful rounds can rise through normal L2 dynamics.

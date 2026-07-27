@@ -10,7 +10,6 @@ from app.services.memory.retrieval.ranking import rank_memory_candidate
 def _mem(**kwargs):
     base = {
         "id": "m1",
-        "summary": "用户在做一个副业项目",
         "content": "用户在做一个副业项目",
         "importance": 0.8,
         "similarity": 0.7,

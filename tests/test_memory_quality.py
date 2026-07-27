@@ -18,7 +18,6 @@ def _record(memory_id="m1") -> MemoryRecord:
         source="user",
         level=2,
         content="用户喜欢手冲咖啡",
-        summary="用户喜欢手冲咖啡",
         importance=0.7,
         mentionCount=0,
         isArchived=False,

@@ -64,7 +64,6 @@ class ReconciliationDecision:
     existing_record: MemoryRecord | None = None
     reason: str = ""
     merged_content: str | None = None
-    merged_summary: str | None = None
 
 
 _PUNCT_RE = re.compile(r"[\s，。！？?~～,.、:：；;“”\"'‘’（）()【】\[\]《》<>·\-—_]+")
@@ -76,7 +75,7 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
 
 
 def _text_of(record: MemoryRecord) -> str:
-    return record.summary or record.content or ""
+    return record.content or ""
 
 
 def _normalize(text: str | None) -> str:
@@ -124,7 +123,6 @@ def _record_from_vector(row: dict, source: Source) -> MemoryRecord:
         source=source,
         level=int(row.get("level") or 3),
         content=str(row.get("content") or ""),
-        summary=row.get("summary"),
         importance=float(row.get("importance") or 0),
         mentionCount=int(row.get("mention_count") or row.get("mentionCount") or 0),
         isArchived=False,
@@ -270,14 +268,15 @@ async def _llm_adjudicate(
     action = _safe_action(str(result.get("action") or ""))
     if action in {"insert_new", "keep_separate", "needs_confirmation"}:
         return ReconciliationDecision(action=action, reason=str(result.get("reason") or "llm"))
-    merged_summary = result.get("merged_summary")
-    if not isinstance(merged_summary, str) or not merged_summary.strip():
-        merged_summary = new_text if action == "update_existing" else None
+    # The `memory.reconciliation` prompt names its merged-text field
+    # `merged_summary`; the stored column is `content`.
+    merged_text = result.get("merged_summary")
+    if not isinstance(merged_text, str) or not merged_text.strip():
+        merged_text = new_text if action == "update_existing" else None
     return ReconciliationDecision(
         action=action,
         reason=str(result.get("reason") or "llm"),
-        merged_content=merged_summary,
-        merged_summary=merged_summary,
+        merged_content=merged_text,
     )
 
 
@@ -309,7 +308,6 @@ async def resolve_memory_write(
     source: Source,
     workspace_id: str | None,
     content: str,
-    summary: str | None,
     embedding: list[float],
     main_category: str | None,
     sub_category: str | None,
@@ -324,7 +322,7 @@ async def resolve_memory_write(
     kept separate so the system loses less information; later offline hygiene
     can merge low-confidence cases.
     """
-    text = summary or content
+    text = content
     candidates: dict[str, tuple[MemoryRecord, float | None]] = {}
 
     try:
@@ -407,7 +405,6 @@ async def resolve_memory_write(
                 existing_record=record,
                 reason="new_covers_existing",
                 merged_content=content,
-                merged_summary=summary or content[:200],
             )
             continue
         if allow_llm and _related_enough_for_llm(
@@ -456,8 +453,6 @@ async def resolve_memory_write(
                 return decision
             if not decision.merged_content:
                 decision.merged_content = content
-            if not decision.merged_summary:
-                decision.merged_summary = summary or content[:200]
             return decision
         if decision.action == "needs_confirmation":
             logger.info(

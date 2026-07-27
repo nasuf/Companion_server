@@ -112,7 +112,7 @@ _USER_IDENTITY_SUBCATEGORIES = {
 }
 
 def _memory_text(mem: dict) -> str:
-    return mem.get("summary") or mem.get("content") or ""
+    return mem.get("content") or ""
 
 
 def _memory_key(mem: dict) -> str:

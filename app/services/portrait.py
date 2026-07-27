@@ -102,7 +102,7 @@ async def generate_portrait(user_id: str, agent_id: str) -> str | None:
         return None
 
     memories_text = "\n".join(
-        f"- [L{m.level}] [{m.mainCategory or '未分类'}/{m.subCategory or '其他'}] {m.summary or m.content}"
+        f"- [L{m.level}] [{m.mainCategory or '未分类'}/{m.subCategory or '其他'}] {m.content}"
         for m in memories
     )
 

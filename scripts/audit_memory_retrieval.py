@@ -41,7 +41,7 @@ class QueryCase:
 
 
 def _text(memory: dict[str, Any]) -> str:
-    return str(memory.get("summary") or memory.get("content") or "").strip()
+    return str(memory.get("content") or "").strip()
 
 
 def _norm(text: str) -> str:
@@ -63,7 +63,6 @@ def _as_rank_row(memory: dict[str, Any], similarity: float) -> dict[str, Any]:
     return {
         "id": memory["id"],
         "content": memory.get("content") or "",
-        "summary": memory.get("summary") or "",
         "level": memory.get("level"),
         "importance": memory.get("importance"),
         "mention_count": memory.get("mention_count", 0),
@@ -213,12 +212,9 @@ def build_query_cases(memories: list[dict[str, Any]]) -> list[QueryCase]:
 
     for m in memories:
         mid = str(m["id"])
-        summary = str(m.get("summary") or "").strip()
         content = str(m.get("content") or "").strip()
-        if summary:
-            add(f"exact_summary:{mid}", summary, {mid}, "exact_summary")
-        if content and content != summary:
-            add(f"content:{mid}", content[:120], {mid}, "content")
+        if content:
+            add(f"exact_content:{mid}", content, {mid}, "exact_content")
 
         text = _text(m)
         main = str(m.get("main_category") or "")
@@ -327,7 +323,7 @@ def evaluate_case(
                 "source": r["source"],
                 "similarity": round(float(r["similarity"]), 4),
                 "score": round(float(r["rank_score"]), 4),
-                "text": _safe_preview(r.get("summary") or r.get("content") or ""),
+                "text": _safe_preview(r.get("content") or ""),
             }
             for r in vector_ranked[:5]
         ],
@@ -338,7 +334,7 @@ def evaluate_case(
                 "similarity": round(float(r["similarity"]), 4),
                 "score": round(float(r["rank_score"]), 4),
                 "reasons": r.get("rank_reasons") or [],
-                "text": _safe_preview(r.get("summary") or r.get("content") or ""),
+                "text": _safe_preview(r.get("content") or ""),
             }
             for r in hybrid_ranked[:5]
         ],

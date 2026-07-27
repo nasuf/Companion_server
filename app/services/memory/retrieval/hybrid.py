@@ -74,7 +74,7 @@ def _memory_to_cache_dict(memory: ClassifiedMemory) -> dict:
 
 
 def _memory_from_cache_dict(item: dict) -> ClassifiedMemory | None:
-    text = str(item.get("text") or item.get("summary") or item.get("content") or "").strip()
+    text = str(item.get("text") or item.get("content") or "").strip()
     if not text:
         return None
     try:
@@ -264,7 +264,7 @@ async def hybrid_retrieve(
         logger.info(f"[DEBUG-VEC] vector search returned {total} raw results for '{message[:50]}'")
         if vector_results:
             for r in sorted(vector_results, key=lambda x: float(x.get("similarity", 0)), reverse=True)[:5]:
-                logger.info(f"[DEBUG-VEC]   sim={float(r.get('similarity',0)):.3f} '{(r.get('summary') or r.get('content',''))[:60]}'")
+                logger.info(f"[DEBUG-VEC]   sim={float(r.get('similarity',0)):.3f} '{r.get('content','')[:60]}'")
 
     # Merge vector + entity + time results (union by id), applying semantic
     # threshold only to vector results. Entity/time matches are explicit user

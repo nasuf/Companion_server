@@ -388,7 +388,7 @@ async def _birthday_mmdd(user_id: str, workspace_id: str | None, *, source: str)
     table = "memories_ai" if source == "ai" else "memories_user"
     rows = await db.query_raw(
         f"""
-        SELECT content, summary
+        SELECT content
         FROM {table}
         WHERE user_id = $1
           AND ($2 IS NULL OR workspace_id = $2)
@@ -403,7 +403,7 @@ async def _birthday_mmdd(user_id: str, workspace_id: str | None, *, source: str)
     )
     if not rows:
         return None
-    text = f"{_field(rows[0], 'summary') or ''} {_field(rows[0], 'content') or ''}"
+    text = str(_field(rows[0], "content") or "")
     match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})", text)
     if not match:
         match = re.search(r"(\d{1,2})[/-](\d{1,2})", text)

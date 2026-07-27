@@ -157,7 +157,7 @@ def _is_uncertain_ai_self_memory(
     *,
     side: Side,
     new_conversation: str,
-    summary: str,
+    content: str,
 ) -> bool:
     """Guard against persisting epistemically weak AI self claims.
 
@@ -168,7 +168,7 @@ def _is_uncertain_ai_self_memory(
     """
     if side != "ai":
         return False
-    text = _compact_text(f"{new_conversation}\n{summary}")
+    text = _compact_text(f"{new_conversation}\n{content}")
     return any(marker in text for marker in _AI_EPISTEMIC_UNCERTAINTY_MARKERS)
 
 
@@ -285,19 +285,19 @@ async def process_memory_pipeline(
 
     # Step 3: Store each memory with dedup and conflict check
     for mem in memories:
-        summary = mem.get("summary", "")
-        if side == "ai" and is_user_fact_acknowledgement(summary):
+        content = mem.get("content", "")
+        if side == "ai" and is_user_fact_acknowledgement(content):
             logger.info(
-                f"[MEM-{side}] skipped user-fact acknowledgement: {summary[:40]}"
+                f"[MEM-{side}] skipped user-fact acknowledgement: {content[:40]}"
             )
             continue
         if _is_uncertain_ai_self_memory(
             side=side,
             new_conversation=new_conversation,
-            summary=summary,
+            content=content,
         ):
             logger.info(
-                f"[MEM-{side}] skipped uncertain self-memory: {summary[:40]}"
+                f"[MEM-{side}] skipped uncertain self-memory: {content[:40]}"
             )
             continue
         # LLM 偶尔把 importance 输出成字符串 ("0.8") 或 null. 下面的分层比较和
@@ -314,7 +314,7 @@ async def process_memory_pipeline(
         if side == "ai" and main_category in _AI_SELF_AUTHORED_BLOCKED_CATEGORIES:
             logger.info(
                 f"[MEM-{side}] skipped self-authored persona claim "
-                f"({main_category}/{sub_category}): {summary[:40]}"
+                f"({main_category}/{sub_category}): {content[:40]}"
             )
             continue
         # 提前解 alias: 否则 LLM 输出"备忘"/"提醒我"等别名时, 下游 sub_category=="提醒"
@@ -328,7 +328,7 @@ async def process_memory_pipeline(
         if side == "user":
             main_category, sub_category, importance, repair = (
                 repair_identity_classification(
-                    summary=summary,
+                    summary=content,
                     main_category=main_category,
                     sub_category=sub_category,
                     importance=importance,
@@ -336,7 +336,7 @@ async def process_memory_pipeline(
             )
             if repair:
                 logger.info(
-                    f"[MEM-{side}] identity repair ({repair}): {summary[:40]}",
+                    f"[MEM-{side}] identity repair ({repair}): {content[:40]}",
                     extra={"event": EVT_MEMORY_IDENTITY_REPAIR, "repair": repair},
                 )
 
@@ -353,7 +353,7 @@ async def process_memory_pipeline(
         # score (0-100), not whatever level the LLM may have guessed:
         #   ≥ 0.85 → L1   |   0.50-0.84 → L2   |   0.10-0.49 → L3   |   < 0.10 → drop
         if importance < 0.10:
-            logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {summary[:40]}")
+            logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {content[:40]}")
             continue
         elif importance >= 0.85:
             level = 1
@@ -397,15 +397,14 @@ async def process_memory_pipeline(
                 )
                 logger.warning(
                     f"[MEM-{side}] 提醒记忆 occur_time 缺失或非未来 "
-                    f"({occur_time}); 改归生活/其他: {summary[:40]}"
+                    f"({occur_time}); 改归生活/其他: {content[:40]}"
                 )
                 sub_category = "其他"
                 # recurrence 不重置: store_memory 的 sub_category!="提醒" 闸门会丢弃
 
         memory_id = await store_memory(
             user_id=user_id,
-            content=summary,
-            summary=summary,
+            content=content,
             level=level,
             importance=importance,
             memory_type=memory_type,
@@ -456,7 +455,7 @@ async def process_memory_pipeline(
                 await _create_reminder_timetrigger(
                     user_id=user_id,
                     memory_id=memory_id,
-                    summary=summary,
+                    summary=content,
                     occur_time=occur_time,
                     recurrence=recurrence,
                     side=side,
@@ -517,7 +516,7 @@ async def process_memory_pipeline(
                 mem_prefs = [
                     pref for pref in batch_preferences
                     if str(pref.get("value") or "").strip()
-                    and str(pref.get("value")).strip() in summary
+                    and str(pref.get("value")).strip() in content
                 ]
                 if mem_prefs:
                     await record_preferences_for_memory(

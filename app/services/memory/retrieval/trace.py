@@ -438,7 +438,7 @@ def _has_semantic_conflict_reason(item: dict[str, Any]) -> bool:
 
 
 def _memory_signal_key(item: dict[str, Any]) -> str:
-    return str(item.get("id") or item.get("text") or item.get("summary") or item.get("content") or "")
+    return str(item.get("id") or item.get("text") or item.get("content") or "")
 
 
 def _notice(code: str, message: str, severity: str = "info") -> dict[str, str]:
@@ -500,7 +500,7 @@ def memory_trace_item(memory: Any, *, selected: bool = False) -> dict[str, Any]:
         }
 
     if isinstance(memory, dict):
-        text = memory.get("summary") or memory.get("content") or memory.get("text") or ""
+        text = memory.get("content") or memory.get("text") or ""
         return {
             "id": memory.get("id") or "",
             "source": memory.get("source") or "",
@@ -525,7 +525,7 @@ def memory_trace_item(memory: Any, *, selected: bool = False) -> dict[str, Any]:
             "selected": selected,
         }
 
-    text = getattr(memory, "text", "") or getattr(memory, "summary", "") or ""
+    text = getattr(memory, "text", "") or getattr(memory, "content", "") or ""
     return {
         "id": getattr(memory, "id", "") or "",
         "source": getattr(memory, "source", "") or "",

@@ -76,7 +76,7 @@ async def build_retrieval_feedback_conflict(
         )
         return None
 
-    old_text = memory.summary or memory.content
+    old_text = memory.content
     conflict = {
         "has_conflict": True,
         "conflicting_memory_id": memory.id,

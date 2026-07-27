@@ -24,7 +24,6 @@ def _memory(memory_id="m1", *, user_id="u1", source="user", workspace_id="ws1", 
         source=source,
         level=2,
         content="旧内容",
-        summary="旧摘要",
         importance=0.7,
         mentionCount=0,
         isArchived=archived,
@@ -80,7 +79,6 @@ def test_update_memory_edits_row_embedding_and_changelog(client):
     old = _memory("m1")
     updated = _memory("m1")
     updated.content = "新内容"
-    updated.summary = "新摘要"
 
     with (
         patch("app.services.memory.storage.repo.find_unique", AsyncMock(return_value=old)),
@@ -93,7 +91,7 @@ def test_update_memory_edits_row_embedding_and_changelog(client):
         response = client.patch(
             "/memories/m1",
             headers=_hdr("u1"),
-            json={"content": "新内容", "summary": "新摘要"},
+            json={"content": "新内容"},
         )
 
     assert response.status_code == 200
@@ -110,6 +108,18 @@ def test_update_memory_rejects_taxonomy_and_level_edits(client):
             "/memories/m1",
             headers=_hdr("u1"),
             json={"importance": 0.9},
+        )
+
+    assert response.status_code == 422
+
+
+def test_update_memory_rejects_legacy_summary_field(client):
+    """`summary` was dropped from the schema; MemoryUpdateRequest forbids extras."""
+    with patch("app.services.memory.storage.repo.find_unique", AsyncMock(return_value=_memory("m1"))):
+        response = client.patch(
+            "/memories/m1",
+            headers=_hdr("u1"),
+            json={"content": "新内容", "summary": "新摘要"},
         )
 
     assert response.status_code == 422

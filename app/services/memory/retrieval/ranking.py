@@ -100,7 +100,7 @@ def is_safety_memory(memory: dict[str, Any]) -> bool:
 
 
 def _memory_text(memory: dict[str, Any]) -> str:
-    return f"{memory.get('summary') or ''} {memory.get('content') or ''}".strip()
+    return str(memory.get("content") or "").strip()
 
 
 def _compact(text: str) -> str:

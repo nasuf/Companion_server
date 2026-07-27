@@ -140,7 +140,7 @@ def test_parse_txt_agent_profile_maps_to_character_profile():
     pairs = {(m["main_category"], m["sub_category"]) for m in memories}
     assert ("生活", "交互") not in pairs
     assert ("生活", "工作") in pairs
-    assert any(m["summary"] == "我的职业是伴生公司客服员" for m in memories)
+    assert any(m["content"] == "我的职业是伴生公司客服员" for m in memories)
 
 
 def _import_and_convert(text: str):
@@ -154,8 +154,8 @@ def test_income_section_becomes_memory():
     imported = parse_agent_profile_document(_DOC.encode("utf-8"), filename="doc.txt")
     assert "年收入约6-7万元" in imported.career_template["income"]
     memories = convert_profile_to_memories(imported.profile, imported.career_template)
-    income = [m for m in memories if m["summary"].startswith("我的经济状况")]
-    assert income and "6-7万" in income[0]["summary"]
+    income = [m for m in memories if m["content"].startswith("我的经济状况")]
+    assert income and "6-7万" in income[0]["content"]
     assert (income[0]["main_category"], income[0]["sub_category"]) == ("身份", "职业/与经济")
 
 
@@ -168,30 +168,30 @@ def test_name_aliases_kept_in_singleton_memory():
     memories = convert_profile_to_memories(imported.profile, imported.career_template)
     name_rows = [m for m in memories if m["sub_category"] == "姓名"]
     assert len(name_rows) == 1
-    assert "我叫小伴" in name_rows[0]["summary"]
-    assert "林昕" in name_rows[0]["summary"] and "昕昕" in name_rows[0]["summary"]
+    assert "我叫小伴" in name_rows[0]["content"]
+    assert "林昕" in name_rows[0]["content"] and "昕昕" in name_rows[0]["content"]
 
 
 def test_negated_sports_never_become_likes():
     """"不喜欢高强度、对抗性的运动" must not be inverted into a like."""
     _, memories = _import_and_convert(_DOC)
     for m in memories:
-        if m["summary"].startswith("我喜欢"):
-            assert "对抗性的运动" not in m["summary"], m["summary"]
+        if m["content"].startswith("我喜欢"):
+            assert "对抗性的运动" not in m["content"], m["content"]
     # The positive part is kept intact (paren-aware, no mid-bracket split).
-    assert any("散步（尤其是在河边或茶山步道）、瑜伽" in m["summary"] for m in memories)
+    assert any("散步（尤其是在河边或茶山步道）、瑜伽" in m["content"] for m in memories)
 
 
 def test_enumeration_not_fragmented():
     """Clause commas / adjective 、-chains must not be chopped into fragments."""
     _, memories = _import_and_convert(_DOC)
-    summaries = [m["summary"] for m in memories]
+    texts = [m["content"] for m in memories]
     # Whole color statement survives as one item, commentary dropped.
-    assert any("莫兰迪色系，如雾霾蓝、燕麦色、豆沙绿" in s for s in summaries)
-    assert not any("这些颜色让" in s and s.startswith("我喜欢") for s in summaries)
+    assert any("莫兰迪色系，如雾霾蓝、燕麦色、豆沙绿" in s for s in texts)
+    assert not any("这些颜色让" in s and s.startswith("我喜欢") for s in texts)
     # Real enumerations still split.
-    assert any(s == "我喜欢雨滴打在青石板上的声音" for s in summaries)
-    assert any(s == "我喜欢猫打呼噜时的咕噜声" for s in summaries)
+    assert any(s == "我喜欢雨滴打在青石板上的声音" for s in texts)
+    assert any(s == "我喜欢猫打呼噜时的咕噜声" for s in texts)
 
 
 def test_labeled_events_not_split_on_speech_verbs():
@@ -222,15 +222,15 @@ def test_emotion_events_split_on_titles_across_quotes():
 def test_thoughts_keep_tail_sentences_and_labels():
     """人生观/价值观 no longer truncated; goal/relationship labels re-attached."""
     _, memories = _import_and_convert(_DOC)
-    all_text = "\n".join(m["summary"] for m in memories)
+    all_text = "\n".join(m["content"] for m in memories)
     assert "热爱身边具体的微小" in all_text
     assert "温柔而坚定" in all_text
     assert "短期目标（1-3年）：" in all_text
     assert "亲情：" in all_text and "友情：" in all_text
     # 反对-sentence routed to opposes exactly once, verb not doubled.
-    opposes = [m for m in memories if m["summary"].startswith("我反对")]
-    assert any("虚伪" in m["summary"] for m in opposes)
-    assert not any("我反对她反对" in m["summary"] or "我反对反对" in m["summary"] for m in opposes)
+    opposes = [m for m in memories if m["content"].startswith("我反对")]
+    assert any("虚伪" in m["content"] for m in opposes)
+    assert not any("我反对她反对" in m["content"] or "我反对反对" in m["content"] for m in opposes)
 
 
 def test_third_person_normalized_outside_quotes():
@@ -249,7 +249,7 @@ def test_third_person_normalized_outside_quotes():
 def test_placeholder_family_row_dropped():
     """"兄弟姐妹：无" must not become a standalone "无。" memory."""
     _, memories = _import_and_convert(_DOC)
-    assert all(m["summary"].strip("。.！!？? ") != "无" for m in memories)
+    assert all(m["content"].strip("。.！!？? ") != "无" for m in memories)
 
 
 def test_location_note_kept_in_memory():
@@ -257,4 +257,4 @@ def test_location_note_kept_in_memory():
     assert imported.profile["identity"]["location_note"] == "在公司附近租住"
     memories = convert_profile_to_memories(imported.profile, imported.career_template)
     loc = [m for m in memories if m["sub_category"] == "现居地"]
-    assert len(loc) == 1 and "在公司附近租住" in loc[0]["summary"]
+    assert len(loc) == 1 and "在公司附近租住" in loc[0]["content"]

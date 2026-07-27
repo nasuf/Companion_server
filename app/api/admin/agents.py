@@ -51,7 +51,6 @@ def _memory_row(r: dict, source: str = "") -> dict:
     d = {
         "id": str(r.get("id", "")),
         "content": str(r.get("content", "")),
-        "summary": str(r.get("summary", "")),
         "level": int(r.get("level", 3)),
         "importance": round(float(r.get("importance", 0)), 2),
         "main_category": str(r.get("main_category", "")),
@@ -158,7 +157,7 @@ async def get_life_story(
 
     rows = await db.query_raw(
         """
-        SELECT id, content, summary, level, importance,
+        SELECT id, content, level, importance,
                main_category, sub_category, type, created_at
         FROM memories_ai
         WHERE workspace_id = $1 AND level = 1 AND is_archived = FALSE
@@ -258,7 +257,7 @@ async def get_memories(
         params.append(level)
         idx += 1
     if search:
-        conditions.append(f"(content ILIKE ${idx} OR summary ILIKE ${idx})")
+        conditions.append(f"content ILIKE ${idx}")
         params.append(f"%{search}%")
         idx += 1
 
@@ -276,7 +275,7 @@ async def get_memories(
     for table, src_label in tables:
         rows = await db.query_raw(
             f"""
-            SELECT id, content, summary, level, importance,
+            SELECT id, content, level, importance,
                    main_category, sub_category, type, mention_count, created_at
             FROM {table}
             WHERE {where_clause}

@@ -213,7 +213,6 @@ def _memory_to_candidate(record, *, similarity: float = 1.0) -> dict:
     return {
         "id": record.id,
         "content": record.content,
-        "summary": record.summary,
         "level": record.level,
         "importance": record.importance,
         "type": record.type,
@@ -267,10 +266,7 @@ async def _find_literal_matching_memories(
     )
     candidates: list[dict] = []
     for record in records:
-        score = max(
-            _literal_candidate_score(description, record.content or ""),
-            _literal_candidate_score(description, record.summary or ""),
-        )
+        score = _literal_candidate_score(description, record.content or "")
         if score <= 0:
             continue
         candidates.append(_memory_to_candidate(record, similarity=score))
@@ -607,7 +603,7 @@ async def generate_deletion_confirmation_prompt(
     """
     del agent_name  # 仅保留签名兼容
     previews = "\n".join(
-        f"  {i + 1}. {c.get('content', c.get('summary', ''))[:60]}"
+        f"  {i + 1}. {c.get('content', '')[:60]}"
         for i, c in enumerate(candidates[:5])
     )
     return f"我找到了这些可能相关的记忆：\n{previews}\n\n你确定要我把这些都忘掉吗？"
@@ -638,7 +634,7 @@ async def save_delete_undo(
 ) -> None:
     """存被删 memory 的快照到 Redis, 1h 内可 undo.
 
-    snapshots 每项: {id, userId, workspaceId, source, content, summary,
+    snapshots 每项: {id, userId, workspaceId, source, content,
                      mainCategory, subCategory, level, importance, type,
                      occurTime, statementTime, recurrence}
     """
@@ -690,7 +686,6 @@ def _snapshot_memory(record) -> dict:
         "workspaceId": getattr(record, "workspaceId", None),
         "source": record.source,
         "content": record.content,
-        "summary": record.summary,
         "type": record.type,
         "mainCategory": getattr(record, "mainCategory", None),
         "subCategory": getattr(record, "subCategory", None),
@@ -729,7 +724,6 @@ async def restore_deleted_memories(snapshots: list[dict]) -> int:
             new_id = await store_memory(
                 user_id=snap["userId"],
                 content=snap["content"],
-                summary=snap.get("summary") or snap["content"],
                 level=snap.get("level", 3),
                 importance=snap.get("importance", 0.5),
                 memory_type=snap.get("type", "life"),

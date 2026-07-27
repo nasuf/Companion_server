@@ -19,7 +19,6 @@ async def test_entity_recall_bypasses_vector_miss(monkeypatch):
         "search_related_memories_for_query",
         AsyncMock(return_value=[{
             "id": "mom-hospital",
-            "summary": "用户妈妈最近住院，用户很担心她",
             "content": "用户妈妈最近住院，用户很担心她",
             "level": 2,
             "importance": 0.82,
@@ -100,7 +99,6 @@ async def test_hybrid_cache_write_serializes_classified_memories(monkeypatch):
         "search_similar",
         AsyncMock(return_value=[{
             "id": "m1",
-            "summary": "用户妈妈最近住院",
             "content": "用户妈妈最近住院",
             "level": 2,
             "importance": 0.9,
@@ -147,7 +145,6 @@ async def test_hybrid_retrieve_passes_effective_query_to_selector(monkeypatch):
         "search_similar",
         AsyncMock(return_value=[{
             "id": "m1",
-            "summary": "用户的直属领导叫陈姐",
             "content": "用户的直属领导叫陈姐",
             "level": 2,
             "importance": 0.8,
@@ -202,7 +199,6 @@ async def test_entity_recall_marks_existing_vector_candidate(monkeypatch):
         "search_similar",
         AsyncMock(return_value=[{
             "id": "mom-hospital",
-            "summary": "用户妈妈最近住院",
             "content": "用户妈妈最近住院",
             "level": 2,
             "importance": 0.8,
@@ -215,7 +211,6 @@ async def test_entity_recall_marks_existing_vector_candidate(monkeypatch):
         "search_related_memories_for_query",
         AsyncMock(return_value=[{
             "id": "mom-hospital",
-            "summary": "用户妈妈最近住院",
             "content": "用户妈妈最近住院",
             "level": 2,
             "importance": 0.8,

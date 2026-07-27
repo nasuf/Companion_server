@@ -120,12 +120,19 @@ async def extract_memories(
         for mem in result["memories"]:
             if not isinstance(mem, dict):
                 continue
+            # The extraction prompt keeps its output field named `summary` on
+            # purpose — its rules are written around that name. The stored
+            # column is `content`, so this is the single translation point:
+            # everything downstream of extraction sees only `content`.
+            raw_summary = str(mem.pop("summary", "") or "").strip()
+            text = raw_summary or str(mem.get("content") or "").strip()
+            mem["content"] = text
             from app.services.memory.normalization import normalize_memory_category
             taxonomy = await normalize_memory_category(
                 main_category=mem.get("main_category"),
                 sub_category=mem.get("sub_category"),
                 legacy_type=mem.get("type"),
-                summary=mem.get("summary", ""),
+                summary=text,
                 # 不传 source 会按 user 表解析, 把 AI 独有的子类 (「生活/交互」)
                 # 静默打成「其他」—— 抽取 prompt 恰恰要求 AI 用它记关系里程碑.
                 source=side,

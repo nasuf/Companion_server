@@ -41,7 +41,6 @@ class HygieneMemory(TypedDict):
     main_category: str | None
     sub_category: str | None
     content: str
-    summary: str | None
     importance: float
 
 
@@ -117,7 +116,7 @@ async def _scope_memories(
 
 
 def _text_of(record: MemoryRecord) -> str:
-    return record.summary or record.content or ""
+    return record.content or ""
 
 
 def _snapshot(record: MemoryRecord | None) -> HygieneMemory | None:
@@ -130,7 +129,6 @@ def _snapshot(record: MemoryRecord | None) -> HygieneMemory | None:
         "main_category": record.mainCategory,
         "sub_category": record.subCategory,
         "content": record.content,
-        "summary": record.summary,
         "importance": float(record.importance or 0),
     }
 
@@ -234,7 +232,6 @@ async def _hygiene_one(
         source=source,
         workspace_id=workspace_id or record.workspaceId,
         content=record.content,
-        summary=record.summary,
         embedding=embedding,
         main_category=record.mainCategory,
         sub_category=record.subCategory,
@@ -274,7 +271,7 @@ async def _hygiene_one(
         return
 
     existing = decision.existing_record
-    merged_text = decision.merged_summary or decision.merged_content or text
+    merged_text = decision.merged_content or text
     merged_embedding = await generate_embedding(merged_text)
     await store_embedding(existing.id, merged_embedding)
     await memory_repo.update(
@@ -282,7 +279,6 @@ async def _hygiene_one(
         source=source,
         record=existing,
         content=merged_text,
-        summary=merged_text,
         level=min(existing.level, record.level),
         importance=max(float(existing.importance or 0), float(record.importance or 0)),
         type=existing.type or record.type,

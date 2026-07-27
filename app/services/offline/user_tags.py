@@ -129,11 +129,7 @@ def _category_bonus(main_category: str) -> int:
 
 
 def _memory_text(row: Any) -> str:
-    summary = str(_field(row, "summary") or "").strip()
-    content = str(_field(row, "content") or "").strip()
-    if summary and not _is_category_label(summary):
-        return summary
-    return content
+    return str(_field(row, "content") or "").strip()
 
 
 def _is_category_label(value: str) -> bool:

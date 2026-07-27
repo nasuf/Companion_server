@@ -131,7 +131,6 @@ def derive_memory_quality_from_changelog_rows(
         source="ai" if source == "ai" else "user",
         level=3,
         content="",
-        summary=None,
         importance=importance,
         mentionCount=0,
         isArchived=is_archived,

@@ -454,7 +454,6 @@ async def create_user_reminder(
         memory_id = await store_memory(
             user_id=user_id,
             content=summary,
-            summary=summary,
             level=3,
             importance=0.45,  # 落 L3 (pipeline clamp 也是 [0.4, 0.49])
             memory_type="life",

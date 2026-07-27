@@ -32,7 +32,6 @@ async def test_time_range_results_bypass_vector_similarity_threshold(monkeypatch
         AsyncMock(return_value=[{
             "id": "m-time",
             "content": "用户去年生日去了海边",
-            "summary": "用户去年生日去了海边",
             "level": 2,
             "importance": 0.7,
             "source": "user",
@@ -64,7 +63,6 @@ async def test_hybrid_rerank_uses_last_accessed_at(monkeypatch):
         {
             "id": "old-but-touched",
             "content": "用户很久前说喜欢爵士乐",
-            "summary": "用户很久前说喜欢爵士乐",
             "level": 2,
             "importance": 0.7,
             "similarity": 0.8,
@@ -75,7 +73,6 @@ async def test_hybrid_rerank_uses_last_accessed_at(monkeypatch):
         {
             "id": "old-only",
             "content": "用户很久前说喜欢摇滚",
-            "summary": "用户很久前说喜欢摇滚",
             "level": 2,
             "importance": 0.7,
             "similarity": 0.8,
@@ -106,7 +103,6 @@ async def test_hybrid_rerank_keeps_safety_memory_in_top_ten(monkeypatch):
         {
             "id": f"generic-{i}",
             "content": f"用户核心身份事实 {i}",
-            "summary": f"用户核心身份事实 {i}",
             "level": 1,
             "importance": 0.95,
             "similarity": 0.82,
@@ -119,7 +115,6 @@ async def test_hybrid_rerank_keeps_safety_memory_in_top_ten(monkeypatch):
     safety_memory = {
         "id": "safety-memory",
         "content": "用户表达过强烈负面情绪, 有轻生念头",
-        "summary": "用户表达过强烈负面情绪, 有轻生念头",
         "level": 1,
         "importance": 0.80,
         "similarity": 0.55,
@@ -149,7 +144,6 @@ def test_safety_boost_does_not_treat_positive_emotion_as_crisis_memory():
 
     positive_emotion = {
         "id": "happy-memory",
-        "summary": "用户之前收到礼物时特别开心",
         "content": "用户之前收到礼物时特别开心",
         "importance": 0.8,
         "similarity": 0.8,
@@ -159,7 +153,6 @@ def test_safety_boost_does_not_treat_positive_emotion_as_crisis_memory():
     }
     negative_emotion = {
         "id": "sad-memory",
-        "summary": "用户之前说自己很低落, 有些撑不住",
         "content": "用户之前说自己很低落, 有些撑不住",
         "importance": 0.8,
         "similarity": 0.8,

@@ -153,7 +153,7 @@ async def find_duplicate_id(
             if not mid:
                 continue
             # Phase 3.1/3.B: 极性/语义对立校验 — 反义对不算重复
-            cand_text = r.get("summary") or r.get("content") or ""
+            cand_text = r.get("content") or ""
             conflict_reasons = semantic_conflict_reasons(content, cand_text)
             if conflict_reasons:
                 logger.info(
@@ -188,7 +188,6 @@ async def is_duplicate(
 async def store_memory(
     user_id: str,
     content: str,
-    summary: str | None = None,
     level: int = 3,
     importance: float = 0.5,
     memory_type: str | None = None,
@@ -264,7 +263,7 @@ async def store_memory(
                 retry_interval_s=0.2, fail_open=True,
             ):
                 return await store_memory(
-                    user_id, content, summary=summary, level=level,
+                    user_id, content, level=level,
                     importance=importance, memory_type=memory_type,
                     main_category=main_category, sub_category=sub_category,
                     source=source, occur_time=occur_time,
@@ -305,8 +304,8 @@ async def store_memory(
             # 而不是被旧 L1 永久挡住；完全相同文本仍短路，避免重复写入。
             if repo_source == "user" and taxonomy.main_category == "身份" and taxonomy.sub_category == "姓名":
                 old_record = existing[0]
-                old_text = getattr(old_record, "summary", None) or getattr(old_record, "content", None)
-                if _normalize_singleton_text(old_text) != _normalize_singleton_text(summary or content):
+                old_text = getattr(old_record, "content", None)
+                if _normalize_singleton_text(old_text) != _normalize_singleton_text(content):
                     await memory_repo.update(
                         old_record.id,
                         source=repo_source,
@@ -363,7 +362,6 @@ async def store_memory(
             source=repo_source,
             workspace_id=workspace_id,
             content=content,
-            summary=summary,
             embedding=embedding,
             main_category=taxonomy.main_category,
             sub_category=taxonomy.sub_category,
@@ -398,10 +396,8 @@ async def store_memory(
 
     if decision.action in {"update_existing", "merge_existing"} and decision.existing_id and decision.existing_record:
         updated_content = decision.merged_content or content
-        updated_summary = decision.merged_summary or summary or updated_content[:200]
         update_data = dict(
             content=updated_content,
-            summary=updated_summary,
             level=min(decision.existing_record.level, level),
             importance=max(float(decision.existing_record.importance or 0), float(importance)),
             type=memory_type,
@@ -448,7 +444,6 @@ async def store_memory(
     create_data = dict(
         userId=user_id,
         content=content,
-        summary=summary or content[:200],
         level=level,
         importance=importance,
         type=memory_type,
