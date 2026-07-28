@@ -32,6 +32,8 @@ import httpx
 from app.config import settings
 
 DASHSCOPE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+# 云端 API 候选. 本地 Ollama 模型的向量由 scripts/embed_with_ollama.py 在服务器
+# 上产出后并入同一份缓存, 通过 --local 声明参与比较 —— 本机连不到那个 Ollama.
 CANDIDATES = ("text-embedding-v3", "text-embedding-v4", "qwen3.7-text-embedding")
 # dashscope 单批上限: v3/v4 是 10, qwen3.7 是 20 —— 取小的通用值.
 _BATCH = 10
@@ -95,6 +97,8 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--judged", required=True)
     ap.add_argument("--cache", default="/tmp/embed_cache.json")
+    ap.add_argument("--local", nargs="*", default=[],
+                    help="缓存里已有向量的本地模型名, 不重新调 API")
     args = ap.parse_args()
 
     pairs = [p for p in json.loads(Path(args.judged).read_text()) if p.get("verdict")]
@@ -110,7 +114,7 @@ async def main() -> None:
             cache.setdefault(model, {}).update(await _embed_all(model, missing))
             cache_path.write_text(json.dumps(cache))
 
-    for model in CANDIDATES:
+    for model in list(CANDIDATES) + args.local:
         vectors = cache[model]
         for pair in pairs:
             pair[model] = _cosine(vectors[pair["message"]], vectors[pair["memory"]])
@@ -132,7 +136,9 @@ async def main() -> None:
     print(f"\n排序能力 (有用记忆进 top-k 的比例, {len(by_message)} 条消息 / "
           f"{total_useful} 条有用)")
     print(f"  {'模型':<22}" + "".join(f"top{k:<6}" for k in (1, 2, 3, 5)))
-    rows = [("bge-m3 (现网)", "sim")] + [(m, m) for m in CANDIDATES]
+    rows = ([("bge-m3 (现网/本地)", "sim")]
+            + [(f"{m} (本地)", m) for m in args.local]
+            + [(f"{m} (API)", m) for m in CANDIDATES])
     for label, key in rows:
         profile = _capture_profile(by_message, key, total_useful)
         print(f"  {label:<22}" + "".join(f"{profile[k-1]:>6.0%}    " for k in (1, 2, 3, 5)))
