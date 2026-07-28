@@ -75,6 +75,9 @@ async def _run_distributed_job(
             result = fn()
             if asyncio.iscoroutine(result):
                 await result
+            # 跑完即记成功. 任务体自己吞掉的异常会另外经 _job_failed 记失败,
+            # 所以 fail_at 比 ok_at 新就说明这一轮实际没干成事.
+            await _record_job_outcome(job_name, ok=True)
     except DistributedLockNotAcquired:
         logger.debug(
             f"[CRON] {job_name} skipped: another instance holds the lock",
@@ -90,6 +93,50 @@ async def _run_distributed_job(
                 "error_type": type(e).__name__,
             },
         )
+
+
+_JOB_HEALTH_KEY = "scheduler:health"
+_JOB_HEALTH_TTL_S = 90 * 24 * 3600
+
+
+async def _record_job_outcome(job_name: str, ok: bool, detail: str = "") -> None:
+    """记下每个定时任务最近一次成功/失败的时刻.
+
+    存在的理由: L2 动态分级 cron 因为一个 SQL 类型错每晚崩了几个月没人发现. 失败
+    走 logger.warning, 成功则默认不出声 —— 于是"从来没成功过"和"这次没事可做"在
+    日志里长得一模一样. 只看日志判断不了一个任务是不是活的.
+
+    这里把两种结局都写进 Redis 哈希, 让"上次成功是什么时候"成为可查的事实. 记录
+    失败本身不能再抛 —— 掩盖掉原始故障比丢一条健康数据更糟.
+    """
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    field = "ok_at" if ok else "fail_at"
+    try:
+        redis = await get_redis()
+        await redis.hset(_JOB_HEALTH_KEY, f"{job_name}:{field}", stamp)
+        if not ok and detail:
+            await redis.hset(_JOB_HEALTH_KEY, f"{job_name}:fail_reason", detail[:200])
+        await redis.expire(_JOB_HEALTH_KEY, _JOB_HEALTH_TTL_S)
+    except Exception:
+        pass
+
+
+def _job_failed(job_name: str, exc: BaseException) -> None:
+    """定时任务失败的统一上报口.
+
+    级别定在 error 而不是 warning: 一个定时任务失败意味着某个功能整块没运行, 而
+    warning 在这个项目里量大到没人逐条看 —— L2 那次就是这么漏掉的.
+    """
+    logger.error(
+        f"[CRON] {job_name} failed: {exc}",
+        extra={
+            "event": EVT_SCHEDULER_JOB, "task_name": job_name,
+            "phase": "failed", "error_type": type(exc).__name__,
+        },
+    )
+    asyncio.create_task(_record_job_outcome(job_name, ok=False, detail=str(exc)))
 
 
 async def _run_for_all_agents(
@@ -560,7 +607,7 @@ async def _run_daily_schedules():
         try:
             await scan_special_dates_today()
         except Exception as e:
-            logger.warning(f"Special dates scan (chained) failed: {e}")
+            _job_failed("Special dates scan (chained)", e)
 
     await _run_distributed_job("daily_schedule", 7200, _body)
 
@@ -593,7 +640,7 @@ async def _run_proactive_orchestrator_scan():
         try:
             await scan_proactive_states()
         except Exception as e:
-            logger.warning(f"Proactive orchestrator scan failed: {e}")
+            _job_failed("Proactive orchestrator scan", e)
 
     await _run_distributed_job("proactive_orchestrator_scan", 55, _body)
 
@@ -603,7 +650,7 @@ async def _run_music_schedule_transition_scan():
         try:
             await scan_music_schedule_transitions()
         except Exception as e:
-            logger.warning(f"Music schedule transition scan failed: {e}")
+            _job_failed("Music schedule transition scan", e)
 
     await _run_distributed_job("music_schedule_transition_scan", 55, _body)
 
@@ -640,7 +687,7 @@ async def _run_notification_dispatch():
             if processed:
                 logger.info(f"[CRON] notification dispatch processed {processed} events")
         except Exception as e:
-            logger.warning(f"Notification dispatch failed: {e}")
+            _job_failed("Notification dispatch", e)
 
     await _run_distributed_job("notification_dispatch", 120, _body)
 
@@ -652,7 +699,7 @@ async def _run_capsule_ready_notifications():
             if processed:
                 logger.info(f"[CRON] capsule ready notifications queued for {processed} scopes")
         except Exception as e:
-            logger.warning(f"Capsule ready notification scan failed: {e}")
+            _job_failed("Capsule ready notification scan", e)
 
     await _run_distributed_job("capsule_ready_notifications", 1800, _body)
 
@@ -664,7 +711,7 @@ async def _run_offline_trigger_scan():
             if stats.get("activities") or stats.get("gifts") or stats.get("failed"):
                 logger.info(f"[CRON] offline trigger scan: {stats}")
         except Exception as e:
-            logger.warning(f"Offline trigger scan failed: {e}")
+            _job_failed("Offline trigger scan", e)
 
     await _run_distributed_job("offline_trigger_scan", 3600, _body)
 
@@ -707,7 +754,7 @@ async def _run_memory_hygiene():
             if stats.get("archived") or stats.get("merged") or stats.get("updated"):
                 logger.info(f"Memory hygiene: {stats}")
         except Exception as e:
-            logger.warning(f"Memory hygiene failed: {e}")
+            _job_failed("Memory hygiene", e)
         # Retention rides the same weekly slot: purge stale `access` changelog
         # rows (13 months+). Non-access operations are kept forever (audit).
         try:
@@ -716,7 +763,7 @@ async def _run_memory_hygiene():
             )
             await purge_stale_access_changelog()
         except Exception as e:
-            logger.warning(f"Access changelog purge failed: {e}")
+            _job_failed("Access changelog purge", e)
 
     await _run_distributed_job("memory_hygiene", 7200, _body)
 
@@ -789,7 +836,7 @@ async def _run_trigger_scan():
         try:
             await scan_triggers()
         except Exception as e:
-            logger.warning(f"Trigger scan failed: {e}")
+            _job_failed("Trigger scan", e)
 
     await _run_distributed_job("trigger_scan", 120, _body)
 
@@ -802,7 +849,7 @@ async def _run_last_will_scan():
             if stats.get("triggered") or stats.get("deliveries"):
                 logger.info(f"Last will scan: {stats}")
         except Exception as e:
-            logger.warning(f"Last will scan failed: {e}")
+            _job_failed("Last will scan", e)
 
     await _run_distributed_job("last_will_scan", 3600, _body)
 
@@ -815,7 +862,7 @@ async def _run_redis_health_recheck():
         from app.redis_client import recheck_redis_health
         await recheck_redis_health()
     except Exception as e:
-        logger.warning(f"Redis health recheck failed: {e}")
+        _job_failed("Redis health recheck", e)
 
 
 async def _run_trace_retention():
@@ -827,7 +874,7 @@ async def _run_trace_retention():
             if deleted:
                 logger.info(f"Trace retention purge: {deleted} rows deleted")
         except Exception as e:
-            logger.warning(f"Trace retention purge failed: {e}")
+            _job_failed("Trace retention purge", e)
 
     await _run_distributed_job("trace_retention", 3600, _body)
 
@@ -848,7 +895,7 @@ async def _run_ntp_calibration():
             else:
                 logger.info(f"NTP drift {drift:+.3f}s (within threshold)")
         except Exception as e:
-            logger.warning(f"NTP calibration job failed: {e}")
+            _job_failed("NTP calibration job", e)
 
     await _run_distributed_job("ntp_calibration", 900, _body)
 
@@ -984,7 +1031,7 @@ async def _run_aggregation_scan_body():
                 await clear_reply_inflight(conv_id)
                 await unlock_conversation(conv_id, lock_token)
     except Exception as e:
-        logger.warning(f"Aggregation scan failed: {e}")
+        _job_failed("Aggregation scan", e)
 
 
 async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
