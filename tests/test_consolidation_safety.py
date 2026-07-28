@@ -206,6 +206,24 @@ class TestDigestsStayInTheColdTier:
         assert "min(0.49" in source
 
 
+class TestEnabledByDefault:
+    def test_consolidation_is_on(self):
+        """2026-07-28 起默认开启。这条不是为了锁死状态, 是为了让关掉它成为一个
+        需要解释的动作 —— 它曾经默认关了很久, 期间因为聚类阈值没跟着换模型一起
+        重标而完全空转, 没人发现。"""
+        from app.config import Settings
+
+        assert Settings.model_fields["memory_consolidation_enabled"].default is True
+
+    def test_canary_allowlist_exists_for_rollback(self):
+        """全量开之后仍要留缩回单 workspace 的手段 —— 它是唯一会归档原始数据的
+        维护任务, 出问题时"先缩小范围"比"直接关掉"更有价值。"""
+        from app.config import Settings
+
+        assert "memory_consolidation_workspaces" in Settings.model_fields
+        assert Settings.model_fields["memory_consolidation_workspaces"].default == ""
+
+
 class TestRunAudit:
     @pytest.mark.asyncio
     async def test_dry_run_touches_nothing(self):

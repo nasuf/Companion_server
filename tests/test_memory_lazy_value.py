@@ -30,6 +30,24 @@ from app.services.memory.lifecycle.value import (
 )
 
 
+def test_persona_fade_time_matches_what_life_story_documents():
+    """人设分层那段注释写了具体的淡出天数, 它依赖半衰期 —— 两边不能各说各的。
+
+    历史教训: 那段注释原先按旧的分段档位公式写"约一年", Phase 1 换成指数衰减后
+    实际只有 140 天, 而注释一直没改。判断"人设会不会消失得太快"的人会照着注释
+    做决定。
+    """
+    import math
+
+    from app.services.memory.lifecycle.value import DECAY_LAMBDA, WARM_DEMOTE_AT
+
+    days = math.log(0.72 / WARM_DEMOTE_AT) / DECAY_LAMBDA
+    assert 150 <= days <= 260, (
+        f"最低档人设 (0.72) 现在 {days:.0f} 天跌到 L3；"
+        "life_story.py 里写的区间要跟着改"
+    )
+
+
 class TestDecay:
     def test_half_life_is_what_the_constant_says(self):
         assert decayed_value(1.0, HALF_LIFE_DAYS) == pytest.approx(0.5, abs=1e-9)
@@ -53,8 +71,14 @@ class TestRewards:
         assert CONTRIBUTION_REWARD > ACCESS_REWARD
 
     def test_reward_applies_after_decay_not_before(self):
-        """顺序反了会把刚拿到的回报也打折, 让高频使用的记忆分数系统性偏低。"""
-        result = apply_usage(value=0.5, level=2, days_idle=180, contributed=True)
+        """顺序反了会把刚拿到的回报也打折, 让高频使用的记忆分数系统性偏低。
+
+        用半衰期本身作为经过时间, 这样断言不依赖具体常数 —— 衰减恰好折半, 回报
+        原样加上去。
+        """
+        result = apply_usage(
+            value=0.5, level=2, days_idle=HALF_LIFE_DAYS, contributed=True,
+        )
         assert result.value == pytest.approx(0.25 + CONTRIBUTION_REWARD, abs=1e-6)
 
     def test_access_alone_can_never_reach_the_hot_band(self):
@@ -351,6 +375,10 @@ class TestSweepIsOnlyABackstop:
 
 
 def test_half_life_change_requires_rerunning_the_simulation():
-    """常数漂了而没重跑推演, 等于闸门结论作废。这里钉住当前值。"""
-    assert HALF_LIFE_DAYS == 180.0
-    assert DECAY_LAMBDA == pytest.approx(math.log(2) / 180.0)
+    """常数漂了而没重跑推演, 等于闸门结论作废。这里钉住当前值。
+
+    240 是推演选出来的: 180 天在存量人设重排后的最坏场景第 180 天有 -4.2% 退化
+    (人设落在 0.72-0.82, 约 140 天就跌破 warm 下行阈值), 240 是消除它的最小值。
+    """
+    assert HALF_LIFE_DAYS == 240.0
+    assert DECAY_LAMBDA == pytest.approx(math.log(2) / 240.0)

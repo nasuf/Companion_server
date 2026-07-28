@@ -128,10 +128,17 @@ class Settings(BaseSettings):
     typo_enabled: bool = True
     typo_rate: float = 0.05
 
-    # Phase 2 记忆整合: 每周把同主题 L3 记忆簇 (优先 daily_summary 琐事) 压缩成
-    # 1 条摘要记忆, 原始行归档可溯源. 涉及归档原始数据 — 默认关闭, 预发用真实
-    # 数据验证 + 评测集回归后再 .env MEMORY_CONSOLIDATION_ENABLED=true 上生产.
-    memory_consolidation_enabled: bool = False
+    # 记忆整合: 每周把同主题 L3 记忆簇 (优先 daily_summary 琐事) 压缩成 1 条摘要,
+    # 原始行归档可溯源。
+    #
+    # 2026-07-28 起默认开启。它是唯一会归档原始数据的维护任务, 所以开之前补齐了四
+    # 件事: 归档改批量语句 (消除"摘要已建、原行还在"的半失败态)、hygiene 排除摘要
+    # (防有损产物被吸进更高层)、run 级审计 + 按 changelog 反归档的撤销脚本、以及
+    # workspace 灰度白名单。生产单 workspace 实跑并撤销验证过一轮。
+    #
+    # 实际影响面很小: 25 个 workspace 里只有 1 个能聚出簇 (共 5 条原行), 因为
+    # 候选要求龄 ≥30 天且同题 ≥5 条。规模会随日常琐事积累慢慢长起来。
+    memory_consolidation_enabled: bool = True
 
     # 灰度白名单: 逗号分隔的 workspace id。非空时整合**只**对这些 workspace 生效,
     # 其余照常跳过。因为整合是全部记忆维护任务里唯一会归档原始数据的一个, 直接
