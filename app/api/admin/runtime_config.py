@@ -28,6 +28,7 @@ from app.api.jwt_auth import require_admin_jwt
 from app.config import settings
 from app.db import db
 from app.services.llm.providers import provider_ids, public_provider_options
+from app.services.memory.config import CALIBRATED_EMBEDDING_MODEL
 from app.services.runtime_config import (
     ResolvedConfig, ensure_loaded, invalidate_caches, load_caches,
     resolve_config_sync,
@@ -108,6 +109,16 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
         "vision_model": r.vision_model,
         "asr_model": r.asr_model,
         "web_search_enabled": r.web_search_enabled,
+        # 只读. Embedding 模型不是运行时开关: 库里 8000+ 条向量就是当前模型的
+        # 输出, 换掉而不重算等于让查询在陌生坐标系里检索 (同一段文本跨模型的
+        # 余弦实测 -0.001, 比同模型内两段无关文本的 0.43 还低), 而且十一个相似
+        # 度阈值是按该模型的分布标定的。改它是一次数据迁移, 不是改配置, 所以
+        # 后台只展示不提供输入框 —— 流程见 scripts/reembed_memories.py。
+        "embedding_model": settings.embedding_model,
+        "embedding_model_editable": False,
+        "embedding_model_calibrated": (
+            settings.embedding_model == CALIBRATED_EMBEDDING_MODEL
+        ),
     }
 
 
