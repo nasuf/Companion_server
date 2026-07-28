@@ -35,14 +35,22 @@ async def _refresh_tags_best_effort(
         logger.warning("Profile tag refresh failed for user=%s agent=%s: %s", user_id, agent_id, exc)
 
 
-async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
-    """检查首次画像生成前置条件。
+# 首次画像的前置条件。
+#
+# 旧条件是 `L2 ≥ 20 AND L1 ≥ 5`, 生产上从未被满足过一次 —— 15 个有记忆的用户
+# 里 0 个达标, user_portraits 表一直是空的。原因是这两个数在真实数据里**此消彼长**:
+# 层级由 importance 推导, 说身份事实的用户攒 L1 (实测有人 L1=23/L2=5), 聊日常的
+# 用户攒 L2 (L1=0/L2=23), 两者做 AND 就成了不可达的门。
+#
+# 画像真正需要的是"有没有足够素材写 200 字", 跟素材落在哪一层无关。所以改看总量,
+# 并补一个对话量下限 —— 只有记忆没有对话时, 画像会写得像档案摘要而不是人的印象。
+MIN_MEMORIES_FOR_PORTRAIT = 15   # L1 + L2 合计
+MIN_USER_MESSAGES_FOR_PORTRAIT = 30
+MIN_AGENT_AGE_HOURS = 24
 
-    条件:
-    - 注册≥24h
-    - L2记忆≥20条
-    - L1记忆≥5条
-    """
+
+async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
+    """检查首次画像生成前置条件 (见上方常量的说明)。"""
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     if not agent:
         return False
@@ -50,25 +58,47 @@ async def check_portrait_preconditions(user_id: str, agent_id: str) -> bool:
     hours_since_creation = (datetime.now(UTC) - agent.createdAt.replace(
         tzinfo=UTC if agent.createdAt.tzinfo is None else agent.createdAt.tzinfo
     )).total_seconds() / 3600
-    if hours_since_creation < 24:
+    if hours_since_creation < MIN_AGENT_AGE_HOURS:
         logger.info(f"Portrait precondition: agent {agent_id} created <24h ago")
         return False
 
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
-    l2_count = await memory_repo.count(
+    recallable = await memory_repo.count(
         source="user",
-        where={"userId": user_id, "workspaceId": workspace_id, "level": 2, "isArchived": False},
+        where={
+            "userId": user_id,
+            "workspaceId": workspace_id,
+            "level": {"in": [1, 2]},
+            "isArchived": False,
+        },
     )
-    if l2_count < 20:
-        logger.info(f"Portrait precondition: only {l2_count} L2 memories (need 20)")
+    if recallable < MIN_MEMORIES_FOR_PORTRAIT:
+        logger.info(
+            f"Portrait precondition: only {recallable} L1+L2 memories "
+            f"(need {MIN_MEMORIES_FOR_PORTRAIT})"
+        )
         return False
 
-    l1_count = await memory_repo.count(
-        source="user",
-        where={"userId": user_id, "workspaceId": workspace_id, "level": 1, "isArchived": False},
+    # 与上面的记忆统计保持同一个作用域: 都按 workspace 收口, 且排除用户已删除的
+    # 会话 —— 删掉的对话不该继续把人推过画像门槛。
+    user_messages = await db.message.count(
+        where={
+            "role": "user",
+            "conversation": {
+                "is": {
+                    "userId": user_id,
+                    "agentId": agent_id,
+                    "workspaceId": workspace_id,
+                    "isDeleted": False,
+                },
+            },
+        },
     )
-    if l1_count < 5:
-        logger.info(f"Portrait precondition: only {l1_count} L1 memories (need 5)")
+    if user_messages < MIN_USER_MESSAGES_FOR_PORTRAIT:
+        logger.info(
+            f"Portrait precondition: only {user_messages} user messages "
+            f"(need {MIN_USER_MESSAGES_FOR_PORTRAIT})"
+        )
         return False
 
     return True

@@ -308,6 +308,20 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # 每周互动反思 (周日 06:00, 排在整合之后)。默认关闭 —— 它是唯一会往记忆库写
+    # **推断**的路径, 产出质量取决于积累了多少互动数据。开之前先跑
+    # scripts/preview_reflection.py 看它会写出什么。
+    scheduler.add_job(
+        _run_memory_reflection,
+        "cron",
+        day_of_week="sun",
+        hour=6,
+        minute=0,
+        id="memory_reflection",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Weekly portrait update on Sunday at 3:45 AM (staggered from daily reflection)
     scheduler.add_job(
         _run_weekly_portraits,
@@ -514,6 +528,50 @@ def setup_scheduler():
 
     scheduler.start()
     logger.info("Job scheduler started")
+
+
+async def _run_memory_reflection():
+    """每周从已验证的行为事实归纳出对相处有帮助的判断。
+
+    默认关闭。它跟其他维护任务的性质不同: 写入的是**推断**而不是某人说过的话,
+    一条错误推断不报错, 只会让 AI 带着它跟用户相处几个月。所以 flag 之外还有
+    workspace 白名单, 出问题时可以先缩小范围而不是整个关掉。
+    """
+    from app.config import settings
+
+    if not settings.memory_reflection_enabled:
+        logger.debug("memory reflection disabled (MEMORY_REFLECTION_ENABLED=false)")
+        return
+
+    async def _body():
+        from app.services.memory.reflection.reflect import (
+            reflect_for_user, reflection_enabled_for,
+        )
+        from app.services.workspace.workspaces import resolve_workspace_id
+
+        totals = {"scopes": 0, "insights": 0, "stored": 0}
+
+        async def _one(agent):
+            workspace_id = await resolve_workspace_id(
+                user_id=agent.userId, agent_id=agent.id,
+            )
+            if not reflection_enabled_for(workspace_id):
+                return
+            stats = await reflect_for_user(
+                user_id=agent.userId, agent_id=agent.id, workspace_id=workspace_id,
+            )
+            totals["scopes"] += 1
+            totals["insights"] += stats.get("insights", 0)
+            totals["stored"] += stats.get("stored", 0)
+
+        await _run_for_all_agents(_one, concurrency=2, task_name="Memory reflection")
+        logger.info(
+            f"[CRON] memory_reflection ok: {totals}",
+            extra={"event": EVT_SCHEDULER_JOB, "task_name": "memory_reflection",
+                   "phase": "ok", **totals},
+        )
+
+    await _run_distributed_job("memory_reflection", 7200, _body)
 
 
 async def _run_weekly_portraits():

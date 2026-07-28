@@ -486,6 +486,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("memory.pairwise_contradiction", "L1 一致性扫描", "decision", _label_passthrough),
     ("memory.reconciliation", "记忆事实演化裁决", "decision", _label_passthrough),
     ("memory.consolidation", "L3 记忆整合压缩", "decision", _label_passthrough),
+    ("memory.reflection", "互动行为反思", "decision", _label_passthrough),
     ("intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message),
     ("proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids),
     ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),

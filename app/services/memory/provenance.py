@@ -19,6 +19,12 @@ replacing category-based guessing in defense rules:
                   episodic trivia — first in line for consolidation.
 - CONSOLIDATED  : produced by the L3 cluster compression job from archived
                   originals.
+- REFLECTED     : derived by the weekly reflection job from verified behavioural
+                  facts (活跃时段 / 情绪构成 / 互动节奏). Unlike every other
+                  provenance these are **inferences, not statements** — nobody
+                  ever said them. That is why they land at L2 rather than L1
+                  (a wrong inference in the never-decay tier is permanent) and
+                  why they are excluded from lossy compression.
 
 NULL = legacy rows written before the column existed (backfill script:
 scripts/backfill_memory_provenance.py).
@@ -32,11 +38,16 @@ USER_STATED = "user_stated"
 AI_AUTHORED = "ai_authored"
 DAILY_SUMMARY = "daily_summary"
 CONSOLIDATED = "consolidated"
+REFLECTED = "reflected"
 
 VALID_PROVENANCES = frozenset({
     PROFILE_SEED, KNOWLEDGE_SEED, USER_STATED, AI_AUTHORED, DAILY_SUMMARY,
-    CONSOLIDATED,
+    CONSOLIDATED, REFLECTED,
 })
+
+# 有损压缩不该套在这些上面。CONSOLIDATED 本身就是压缩产物 (再压一次是复合损失),
+# REFLECTED 是推断 (压缩会把它的证据边界抹掉, 而没有证据的推断无法复核)。
+COMPRESSION_EXEMPT = frozenset({CONSOLIDATED, REFLECTED})
 
 
 def normalize_provenance(value: str | None) -> str | None:

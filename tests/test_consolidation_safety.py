@@ -15,7 +15,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.memory.lifecycle import consolidation
-from app.services.memory.provenance import CONSOLIDATED
+from app.services.memory.provenance import (
+    COMPRESSION_EXEMPT,
+    CONSOLIDATED,
+    REFLECTED,
+)
 
 
 def _row(mid: str, content: str = "早上七点起床") -> dict:
@@ -167,15 +171,25 @@ class TestArchivalIsAllOrNothing:
 
 
 class TestDigestsStayInTheColdTier:
-    def test_hygiene_excludes_consolidated_provenance(self):
+    def test_consolidation_candidates_exclude_the_exempt_provenances(self):
+        """候选白名单目前本就把它们挡在外面, 显式排除是为了以后放宽白名单时
+        不会顺手把它们放进来。"""
+        import inspect
+
+        source = inspect.getsource(consolidation._load_candidates)
+        assert "COALESCE(m.provenance, '') <> ALL($4::text[])" in source
+        assert "sorted(COMPRESSION_EXEMPT)" in source
+
+    def test_hygiene_excludes_the_compression_exempt_provenances(self):
         """摘要是有损产物, 被 hygiene 合并进 L2 就等于让它占据比原始记忆更强的
-        位置 —— 而原始行已经归档、找不回来了。"""
+        位置 —— 而原始行已经归档、找不回来了。反思判断同理: 合并会抹掉它的证据
+        边界, 而没有证据的推断无法复核。"""
         import inspect
 
         from app.services.memory.lifecycle import hygiene
 
         source = inspect.getsource(hygiene._scope_memories)
-        assert "CONSOLIDATED" in source
+        assert "COMPRESSION_EXEMPT" in source
         assert '"OR"' in source, "必须用显式 OR"
 
     @pytest.mark.asyncio
@@ -196,7 +210,14 @@ class TestDigestsStayInTheColdTier:
 
         where = find_many.await_args.kwargs["where"]
         assert {"provenance": None} in where["OR"], "NULL 行会被静默排除"
-        assert {"provenance": {"not": CONSOLIDATED}} in where["OR"]
+        exempt = next(
+            clause["provenance"]["notIn"] for clause in where["OR"]
+            # 另一个分支的 provenance 是 None (匹配 NULL 行), 不能直接下标
+            if isinstance(clause.get("provenance"), dict)
+            and "notIn" in clause["provenance"]
+        )
+        assert set(exempt) == set(COMPRESSION_EXEMPT)
+        assert CONSOLIDATED in exempt and REFLECTED in exempt
 
     def test_digests_are_clamped_to_the_cold_tier(self):
         import inspect

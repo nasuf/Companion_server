@@ -15,7 +15,7 @@ from collections import defaultdict
 from typing import TypedDict, cast
 
 from app.db import db
-from app.services.memory.provenance import CONSOLIDATED
+from app.services.memory.provenance import COMPRESSION_EXEMPT
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.storage.persistence import log_memory_changelog
@@ -110,17 +110,20 @@ async def _scope_memories(
             "userId": user_id,
             "workspaceId": workspace_id,
             "isArchived": False,
-            # 排除整合产出的摘要。它们是**有损**压缩的产物, 前提是"留在 L3", 而
-            # hygiene 会把记忆合并进别的条目并按 min(level) 改层 —— 一条摘要被吸
-            # 进 L2 就等于让有损产物占据了比它替代的原始记忆更强的位置, 而原始行
-            # 已经归档、找不回来了。
+            # 排除有损压缩豁免类 (整合摘要 + 反思判断)。
             #
-            # 必须写成显式 OR: {"not": ...} 生成的是 SQL 的 != , 而 != 不匹配
+            # 摘要是**有损**压缩的产物, 前提是"留在 L3", 而 hygiene 会把记忆合并
+            # 进别的条目并按 min(level) 改层 —— 一条摘要被吸进 L2 就等于让有损产
+            # 物占据了比它替代的原始记忆更强的位置, 而原始行已经归档找不回来了。
+            # 反思判断是推断而非陈述, 合并会抹掉它的证据边界, 而没有证据的推断
+            # 无法复核。
+            #
+            # 必须写成显式 OR: {"notIn": ...} 生成的是 SQL 的 NOT IN, 而它不匹配
             # NULL。历史记忆的 provenance 大多是 NULL (生产实测 82 条里 25 条),
-            # 直接用 not 会把它们一并排除在 hygiene 之外 —— 静默少处理三成数据。
+            # 直接用它会把这些行一并排除在 hygiene 之外 —— 静默少处理三成数据。
             "OR": [
                 {"provenance": None},
-                {"provenance": {"not": CONSOLIDATED}},
+                {"provenance": {"notIn": sorted(COMPRESSION_EXEMPT)}},
             ],
         },
         order={"updatedAt": "desc"},

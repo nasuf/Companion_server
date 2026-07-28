@@ -30,7 +30,11 @@ from datetime import UTC, datetime, timedelta
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.memory.normalization import cosine_similarity
-from app.services.memory.provenance import CONSOLIDATED, DAILY_SUMMARY
+from app.services.memory.provenance import (
+    COMPRESSION_EXEMPT,
+    CONSOLIDATED,
+    DAILY_SUMMARY,
+)
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.persistence import store_memory
 from app.services.prompting.store import PromptDisabledError, get_prompt_text
@@ -87,6 +91,10 @@ async def _load_candidates(
               )
             )
           )
+          -- 反思判断与既有摘要都豁免有损压缩 (见 provenance.COMPRESSION_EXEMPT)。
+          -- 现在的候选白名单 (daily_summary / NULL) 本就把它们挡在外面, 显式写出来
+          -- 是为了以后放宽白名单时不会顺手把它们放进来。
+          AND COALESCE(m.provenance, '') <> ALL($4::text[])
           -- 已经被压缩过的行不再参与。批量归档虽然原子, 但"摘要已建、还没走到
           -- 归档"之间进程崩掉的话, 原行仍是未归档状态, 下一轮会把同一簇再压一
           -- 次、产出重复摘要。changelog 先于归档写入, 所以它能覆盖这个窗口。
@@ -100,6 +108,7 @@ async def _load_candidates(
         user_id,
         workspace_id,
         cutoff,
+        sorted(COMPRESSION_EXEMPT),
     )
     out: list[dict] = []
     for r in rows:
