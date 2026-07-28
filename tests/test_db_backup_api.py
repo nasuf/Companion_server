@@ -82,12 +82,20 @@ class TestDelete:
 
 class TestListing:
     def test_newest_first(self, backup_dir):
-        for name in ("companion-20260726-0300.dump",
-                     "companion-20260728-0300.dump",
-                     "companion-20260727-0300.dump"):
-            _make(backup_dir, name)
-        assert [b.name[:22] for b in db_backup.list_backups()] == [
-            "companion-20260728-030", "companion-20260727-030", "companion-20260726-030",
+        import os
+        import time
+
+        now = time.time()
+        # mtime 决定顺序, 不是文件名 —— 见 TestOrderingDoesNotTrustFilenames
+        for offset, name in enumerate(("companion-20260728-0300.dump",
+                                       "companion-20260727-0300.dump",
+                                       "companion-20260726-0300.dump")):
+            path = _make(backup_dir, name)
+            os.utime(path, (now - offset * 86400, now - offset * 86400))
+        assert [b.name for b in db_backup.list_backups()] == [
+            "companion-20260728-0300.dump",
+            "companion-20260727-0300.dump",
+            "companion-20260726-0300.dump",
         ]
 
     def test_ignores_files_that_are_not_backups(self, backup_dir):
@@ -137,3 +145,41 @@ async def test_create_refuses_when_environment_is_incomplete(tmp_path, monkeypat
     monkeypatch.setattr(db_backup, "BACKUP_DIR", tmp_path / "missing")
     with pytest.raises(RuntimeError):
         await db_backup.create_backup()
+
+
+class TestOrderingDoesNotTrustFilenames:
+    """列表顺序按真实修改时间, 不按文件名.
+
+    生产上真踩到: 宿主机 cron 用 `date` (本地时区 CST) 命名, 而容器默认 UTC,
+    同一天两份备份出现 1508 和 0749 两个名字 —— 后者其实更新。按名字倒序排会把
+    刚生成的备份放到下面, 而"最新一份是什么时候"正是这个界面要回答的问题。
+    """
+
+    def test_sorted_by_mtime_not_name(self, backup_dir):
+        import os
+        import time
+
+        old = _make(backup_dir, "companion-20260728-1508.dump")
+        new = _make(backup_dir, "companion-20260728-0749.dump")
+        # 名字更小但更新 —— 就是时区不一致造成的那种情形
+        now = time.time()
+        os.utime(old, (now - 3600, now - 3600))
+        os.utime(new, (now, now))
+
+        assert [b.name for b in db_backup.list_backups()][0] == (
+            "companion-20260728-0749.dump"
+        ), "列表顺序依赖了文件名, 混时区时会把新备份排到后面"
+
+
+def test_manual_backup_names_align_with_the_cron_script():
+    """手动触发与 cron 的命名必须同一时区, 否则两边产出的文件排序会交错。
+
+    cron 脚本用宿主机 `date`, 业务时区是 Asia/Shanghai; 容器默认 UTC, 直接
+    astimezone() 会差 8 小时。
+    """
+    import inspect
+
+    source = inspect.getsource(db_backup.create_backup)
+    assert "ZoneInfo" in source and "schedule_timezone" in source, (
+        "手动备份的时间戳没有对齐业务时区 —— 会和 cron 产出的名字差 8 小时"
+    )

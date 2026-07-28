@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 
@@ -106,7 +107,10 @@ def list_backups() -> list[BackupFile]:
                 stat.st_mtime, tz=timezone.utc
             ).isoformat(timespec="seconds"),
         ))
-    return sorted(out, key=lambda b: b.name, reverse=True)
+    # 按真实修改时间排, 不按文件名。文件名里的时刻由生成方决定时区, 宿主机 cron
+    # 用本地时间而容器默认 UTC —— 混在一起时名字的字典序不等于时间序, 刚生成的
+    # 备份会排到下面去。mtime 没有这个歧义。
+    return sorted(out, key=lambda b: b.created_at, reverse=True)
 
 
 def _resolved_path(name: str) -> Path:
@@ -159,7 +163,11 @@ async def create_backup() -> BackupFile:
 
     async with _trigger_lock:
         parts = _dsn_parts()
-        stamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M")
+        # 与宿主机 cron 脚本的 `date +%Y%m%d-%H%M` 对齐: 都用业务时区。容器默认
+        # UTC, 直接 astimezone() 会产出跟 cron 差 8 小时的名字。
+        stamp = datetime.now(ZoneInfo(settings.schedule_timezone)).strftime(
+            "%Y%m%d-%H%M"
+        )
         target = BACKUP_DIR / f"companion-{stamp}.dump"
         partial = target.with_suffix(".dump.partial")
         env = {**os.environ, "PGPASSWORD": parts["password"]}
