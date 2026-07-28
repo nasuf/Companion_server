@@ -1097,6 +1097,10 @@ model MemoryQualityState {
 
 model MemoryConsolidationRun {
   id          String   @id @default(uuid())
+  // 哪个任务写的: "hygiene" (近重复合并) 还是 "l3_compression" (簇压缩)。
+  // 两者都叫"整合"但做的事不同, 混在一张表里会让审计读不出发生了什么 ——
+  // 尤其是排查"这条记忆去哪了"的时候。
+  job         String   @default("hygiene")
   status      String   @default("succeeded")
   userId      String?  @map("user_id")
   workspaceId String?  @map("workspace_id")

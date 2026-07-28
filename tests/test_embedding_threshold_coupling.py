@@ -10,6 +10,9 @@
 
 这些都不会抛异常, 只会让 AI 悄悄变笨, 而且从日志里看不出来.
 
+被关掉的功能同样要列进来: 簇压缩的聚类阈值就是因为"当时功能没开、不在校准范围"
+而被漏掉的, 结果它一直挂着旧模型的尺度, 等哪天真开启时会发现完全不工作.
+
 所以这里把"当前模型 + 当前阈值"这一组合钉死. 改动其中任何一项都会让测试失败,
 失败信息会指向重新标定的脚本. 断言的不是"这些数字是对的" —— 而是"这些数字是
 一起标出来的, 别只动一半".
@@ -25,6 +28,7 @@ import pytest
 
 from app.config import Settings, settings
 from app.services.memory import config as memory_config
+from app.services.memory.lifecycle import consolidation
 from app.services.memory.normalization import SIMILARITY_THRESHOLD as NORMALIZATION_CUT
 from app.services.memory.retrieval import context_selector, hybrid, legacy, ranking
 
@@ -41,6 +45,11 @@ CALIBRATED = {
     "config.DELETION_SIMILARITY_THRESHOLD": (
         memory_config.DELETION_SIMILARITY_THRESHOLD, 0.85),
     "normalization.SIMILARITY_THRESHOLD": (NORMALIZATION_CUT, 0.68),
+    # 上一轮换模型时漏掉了这个 —— 当时整合是关闭的, 不在校准范围内, 于是它一直
+    # 挂着 bge-m3 的 0.75, 换模型后一簇都聚不出来 (生产实测同桶最高相似度 0.567),
+    # 整个整合任务空转。关掉的功能同样会因为阈值漂移而坏, 只是坏得更安静。
+    "consolidation._CLUSTER_SIMILARITY": (consolidation._CLUSTER_SIMILARITY, 0.55),
+    "hybrid.WARM_SAMPLE_THRESHOLD": (hybrid.WARM_SAMPLE_THRESHOLD, 0.52),
 }
 
 _RECALIBRATE = (
@@ -104,6 +113,18 @@ def test_deletion_matches_dedup():
     现在刻意保持一致 (见 memory/config.py 注释)."""
     assert (memory_config.DELETION_SIMILARITY_THRESHOLD
             == memory_config.DEDUP_THRESHOLD)
+
+
+def test_warm_sample_shares_the_l3_floor():
+    """L3 有两条通路 (常备有界采样 / 语义唤醒), 共用一把尺子 —— 否则同一条记忆
+    在一条路上够格、另一条不够, 行为就说不清了."""
+    assert hybrid.WARM_SAMPLE_THRESHOLD == legacy._L3_SIMILARITY_FLOOR
+
+
+def test_cluster_threshold_sits_below_the_dedup_gate():
+    """聚簇是把"相关但不同"的记忆归到一起, 去重是认定"就是同一条". 前者必须明显
+    更松, 否则聚簇只能抓到重复项, 压缩就没有意义了."""
+    assert consolidation._CLUSTER_SIMILARITY < memory_config.DEDUP_THRESHOLD - 0.2
 
 
 def test_l3_floor_sits_above_the_main_gate():

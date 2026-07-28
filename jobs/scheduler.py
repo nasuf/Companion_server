@@ -789,14 +789,24 @@ async def _run_memory_consolidation():
         )
         from app.services.workspace.workspaces import resolve_workspace_id
 
+        # 灰度白名单 —— 整合是唯一会归档原始数据的维护任务, 直接全量开等于拿所有
+        # 用户的记忆做第一次真实验证。
+        canary = {
+            w.strip() for w in settings.memory_consolidation_workspaces.split(",")
+            if w.strip()
+        }
+        if canary:
+            logger.info(f"[CRON] memory consolidation limited to {len(canary)} workspace(s)")
+
         async def _one(agent):
             workspace_id = await resolve_workspace_id(
                 user_id=agent.userId, agent_id=agent.id,
             )
-            if workspace_id:
-                await compress_l3_clusters_for_workspace(
-                    user_id=agent.userId, workspace_id=workspace_id,
-                )
+            if not workspace_id or (canary and workspace_id not in canary):
+                return
+            await compress_l3_clusters_for_workspace(
+                user_id=agent.userId, workspace_id=workspace_id,
+            )
 
         # _run_for_all_agents already excludes the template agent + non-active.
         await _run_for_all_agents(_one, concurrency=2, task_name="Memory consolidation")

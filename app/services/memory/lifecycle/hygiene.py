@@ -15,6 +15,7 @@ from collections import defaultdict
 from typing import TypedDict, cast
 
 from app.db import db
+from app.services.memory.provenance import CONSOLIDATED
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.storage.embedding import generate_embedding, store_embedding
 from app.services.memory.storage.persistence import log_memory_changelog
@@ -109,6 +110,18 @@ async def _scope_memories(
             "userId": user_id,
             "workspaceId": workspace_id,
             "isArchived": False,
+            # 排除整合产出的摘要。它们是**有损**压缩的产物, 前提是"留在 L3", 而
+            # hygiene 会把记忆合并进别的条目并按 min(level) 改层 —— 一条摘要被吸
+            # 进 L2 就等于让有损产物占据了比它替代的原始记忆更强的位置, 而原始行
+            # 已经归档、找不回来了。
+            #
+            # 必须写成显式 OR: {"not": ...} 生成的是 SQL 的 != , 而 != 不匹配
+            # NULL。历史记忆的 provenance 大多是 NULL (生产实测 82 条里 25 条),
+            # 直接用 not 会把它们一并排除在 hygiene 之外 —— 静默少处理三成数据。
+            "OR": [
+                {"provenance": None},
+                {"provenance": {"not": CONSOLIDATED}},
+            ],
         },
         order={"updatedAt": "desc"},
         take=limit,
@@ -355,11 +368,11 @@ async def _best_effort_record_consolidation_run(
         rows = await db.query_raw(
             """
             INSERT INTO memory_consolidation_runs (
-                id, status, user_id, workspace_id, scopes, checked,
+                id, job, status, user_id, workspace_id, scopes, checked,
                 archived, merged, updated, errors, changes
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
+                $1, 'hygiene', $2, $3, $4, $5, $6,
                 $7, $8, $9, $10, $11::jsonb
             )
             RETURNING id

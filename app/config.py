@@ -133,6 +133,12 @@ class Settings(BaseSettings):
     # 数据验证 + 评测集回归后再 .env MEMORY_CONSOLIDATION_ENABLED=true 上生产.
     memory_consolidation_enabled: bool = False
 
+    # 灰度白名单: 逗号分隔的 workspace id。非空时整合**只**对这些 workspace 生效,
+    # 其余照常跳过。因为整合是全部记忆维护任务里唯一会归档原始数据的一个, 直接
+    # 全量开等于拿所有用户的记忆做第一次真实验证。留个白名单才谈得上"灰度"。
+    # 空 = 对所有 workspace 生效 (需 memory_consolidation_enabled 同时为 true)。
+    memory_consolidation_workspaces: str = ""
+
     # Achievement system runtime mode (H5 chat-only launch, 2026-07-20;
     # silent semantics adjusted 2026-07-22):
     # - "on" (default): full evaluation + all user-facing surfaces.
