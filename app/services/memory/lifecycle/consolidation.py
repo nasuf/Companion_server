@@ -65,7 +65,7 @@ async def _load_candidates(
           AND m.is_archived = false
           AND m.level = 3
           AND m.sub_category IS DISTINCT FROM '提醒'
-          AND m.created_at < $3
+          AND m.created_at < $3::timestamp
           AND (
             m.provenance = '{DAILY_SUMMARY}'
             OR (

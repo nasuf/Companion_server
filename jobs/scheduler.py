@@ -670,14 +670,31 @@ async def _run_offline_trigger_scan():
 
 
 async def _run_l2_adjustment():
-    """Spec §1.5.2: recalculate L2 scores, promote/demote."""
+    """Spec §1.5.2: recalculate L2 scores, promote/demote.
+
+    Both outcomes are logged on purpose. This job crashed on a SQL type error
+    every night for months and nobody noticed, because failure went out at
+    warning level and success only spoke up when something was promoted or
+    demoted — so a job that had never once worked looked exactly like a job
+    with nothing to do. Now silence in the logs means the job did not run at
+    all, which is a signal rather than the normal case.
+    """
     async def _body():
         try:
             stats = await run_l2_adjustment()
-            if stats.get("promoted") or stats.get("demoted"):
-                logger.info(f"L2 adjustment: {stats}")
+            logger.info(
+                f"[CRON] l2_adjustment ok: {stats}",
+                extra={"event": EVT_SCHEDULER_JOB, "task_name": "l2_adjustment",
+                       "phase": "ok", "adjusted": stats.get("adjusted", 0),
+                       "promoted": stats.get("promoted", 0),
+                       "demoted": stats.get("demoted", 0)},
+            )
         except Exception as e:
-            logger.warning(f"L2 adjustment failed: {e}")
+            logger.error(
+                f"[CRON] l2_adjustment failed: {e}",
+                extra={"event": EVT_SCHEDULER_JOB, "task_name": "l2_adjustment",
+                       "phase": "failed", "error_type": type(e).__name__},
+            )
 
     await _run_distributed_job("l2_adjustment", 3600, _body)
 

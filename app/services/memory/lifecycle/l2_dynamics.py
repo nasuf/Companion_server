@@ -203,7 +203,7 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
         rows = await db.query_raw(
             """
             SELECT memory_id,
-                   COUNT(*) FILTER (WHERE created_at >= $2)::int AS cnt,
+                   COUNT(*) FILTER (WHERE created_at >= $2::timestamp)::int AS cnt,
                    MAX(created_at) AS last_access
             FROM memory_changelogs
             WHERE memory_id = ANY($1::text[])
@@ -239,7 +239,7 @@ async def _adjust_side(side: str, user_id: str | None) -> dict:
               SUM(CASE WHEN operation = 'evidence_linked' THEN 1 ELSE 0 END)::int AS evidence_links
             FROM memory_changelogs
             WHERE memory_id = ANY($1::text[])
-              AND created_at >= $2
+              AND created_at >= $2::timestamp
             GROUP BY memory_id
             """,
             mem_ids,

@@ -181,7 +181,7 @@ async def _compute_self_disclosure(
             FROM memories_user
             WHERE user_id = $1 AND workspace_id = $2
               AND level IN (1, 2) AND is_archived = false
-              AND created_at <= $3
+              AND created_at <= $3::timestamp
             """,
             user_id,
             workspace_id,
