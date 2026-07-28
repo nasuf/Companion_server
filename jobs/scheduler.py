@@ -291,9 +291,12 @@ def setup_scheduler():
         max_instances=1,
     )
 
-    # Phase 2 weekly L3 consolidation (Sunday 05:10, after hygiene). Gated by
-    # MEMORY_CONSOLIDATION_ENABLED (default off) — it archives original rows,
-    # so it must be validated on staging data before production enablement.
+    # 每周 L3 簇压缩 (周日 05:10, 排在 hygiene 之后)。两者都叫"整合"但做的事不同:
+    # hygiene 合并近重复条目、跨全部层级; 这个只压缩 L3 的同题簇并归档原行。
+    #
+    # 2026-07-28 起默认开启 (settings.memory_consolidation_enabled)。它是唯一会
+    # 归档原始数据的维护任务, 所以还有 MEMORY_CONSOLIDATION_WORKSPACES 白名单可以
+    # 随时把范围缩回单个 workspace, 而不必整个关掉。
     scheduler.add_job(
         _run_memory_consolidation,
         "cron",

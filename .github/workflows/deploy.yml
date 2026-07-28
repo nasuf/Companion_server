@@ -154,6 +154,14 @@ jobs:
             JAMENDO_CLIENT_ID=${{ secrets.JAMENDO_CLIENT_ID }}
             JAMENDO_BASE_URL=${{ vars.JAMENDO_BASE_URL || 'https://api.jamendo.com/v3.0' }}
             JAMENDO_DEFAULT_LIBRARIES=${{ vars.JAMENDO_DEFAULT_LIBRARIES || 'focus,ambient,sleep' }}
+            # 记忆整合 (周日 05:10 的 L3 簇压缩)。它是唯一会归档原始数据的维护
+            # 任务, 所以两个开关都要能不改代码就调整:
+            #   ENABLED     出事时的总闸
+            #   WORKSPACES  逗号分隔的白名单, 非空时只对这些 workspace 生效。
+            #               比直接关掉更有用 —— 先缩到一个 workspace 观察。
+            # 默认值必须与 app/config.py 里的代码默认一致, 有守卫测试盯着。
+            MEMORY_CONSOLIDATION_ENABLED=${{ vars.MEMORY_CONSOLIDATION_ENABLED || 'true' }}
+            MEMORY_CONSOLIDATION_WORKSPACES=${{ vars.MEMORY_CONSOLIDATION_WORKSPACES }}
             PROACTIVE_LINK_RECOMMENDATION_ENABLED=${{ vars.PROACTIVE_LINK_RECOMMENDATION_ENABLED || 'true' }}
             PROACTIVE_LINK_RECOMMENDATION_PROBABILITY=${{ vars.PROACTIVE_LINK_RECOMMENDATION_PROBABILITY || '0.03' }}
             CHAT_LINK_SEARCH_PROVIDER=${{ vars.CHAT_LINK_SEARCH_PROVIDER || 'custom' }}
