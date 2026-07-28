@@ -243,8 +243,8 @@ async def test_retrieval_downweights_pos_when_user_negates():
         return original_select(candidates, budget, **kwargs)
 
     with (
-        patch.object(hybrid, "search_similar",
-                     new_callable=AsyncMock, return_value=[pos_cand, neg_cand]),
+        patch.object(hybrid, "search_similar_tiers", new_callable=AsyncMock,
+                     return_value=[pos_cand, neg_cand]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "cache_retrieval",
@@ -290,8 +290,8 @@ async def test_retrieval_no_downweight_when_user_positive():
         return original_select(candidates, budget, **kwargs)
 
     with (
-        patch.object(hybrid, "search_similar",
-                     new_callable=AsyncMock, return_value=[pos_cand, neg_cand]),
+        patch.object(hybrid, "search_similar_tiers", new_callable=AsyncMock,
+                     return_value=[pos_cand, neg_cand]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "cache_retrieval",
@@ -337,8 +337,8 @@ async def test_retrieval_downweights_dislike_when_query_likes():
         return original_select(candidates, budget, **kwargs)
 
     with (
-        patch.object(hybrid, "search_similar",
-                     new_callable=AsyncMock, return_value=[pos_cand, neg_cand]),
+        patch.object(hybrid, "search_similar_tiers", new_callable=AsyncMock,
+                     return_value=[pos_cand, neg_cand]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_related_memories_for_query",
@@ -380,8 +380,8 @@ async def test_retrieval_downweights_wrong_partner_role():
         return original_select(candidates, budget, **kwargs)
 
     with (
-        patch.object(hybrid, "search_similar",
-                     new_callable=AsyncMock, return_value=[female_ex, male_ex]),
+        patch.object(hybrid, "search_similar_tiers", new_callable=AsyncMock,
+                     return_value=[female_ex, male_ex]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_related_memories_for_query",
@@ -422,8 +422,8 @@ async def test_retrieval_downweights_medical_status_mismatch():
         return original_select(candidates, budget, **kwargs)
 
     with (
-        patch.object(hybrid, "search_similar",
-                     new_callable=AsyncMock, return_value=[admitted, discharged]),
+        patch.object(hybrid, "search_similar_tiers", new_callable=AsyncMock,
+                     return_value=[admitted, discharged]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_related_memories_for_query",

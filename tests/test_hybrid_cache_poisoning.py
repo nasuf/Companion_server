@@ -30,7 +30,7 @@ async def test_vector_failure_skips_cache_write(monkeypatch):
     _patch_common(monkeypatch, hybrid_mod)
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", cache_set)
     monkeypatch.setattr(
-        hybrid_mod, "search_similar",
+        hybrid_mod, "search_similar_tiers",
         AsyncMock(side_effect=RuntimeError("embedding 503")),
     )
 
@@ -48,7 +48,7 @@ async def test_legit_empty_result_still_cached(monkeypatch):
     cache_set = AsyncMock()
     _patch_common(monkeypatch, hybrid_mod)
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", cache_set)
-    monkeypatch.setattr(hybrid_mod, "search_similar", AsyncMock(return_value=[]))
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", AsyncMock(return_value=[]))
 
     result = await hybrid_mod.hybrid_retrieve("随便聊聊天气", "u1", workspace_id="ws1")
 
@@ -63,7 +63,7 @@ async def test_successful_retrieval_cached(monkeypatch):
     cache_set = AsyncMock()
     _patch_common(monkeypatch, hybrid_mod)
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", cache_set)
-    monkeypatch.setattr(hybrid_mod, "search_similar", AsyncMock(return_value=[
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", AsyncMock(return_value=[
         {
             "id": "m1",
             "content": "我喜欢雾霾蓝",

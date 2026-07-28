@@ -20,6 +20,12 @@ from app.services.memory.storage.embedding import generate_embedding
 
 TOP_K = 10
 
+# 默认只导热层 —— 这是原始用途 (标定 L1/L2 的相似度门)。
+# Phase 2 的冷层有界采样需要 L3 的配对才评得动: 老的判定集是从只搜 L1+L2 的检索
+# 里导出来的, 冷层 0 对, 结构上测不了"给 L3 留 κ 个名额值不值"。
+# 用法: python export_retrieval_pairs.py msgs.json out.json 3
+DEFAULT_LEVELS = [1, 2]
+
 
 async def _scope(message: str) -> tuple[str, str] | None:
     rows = await db.query_raw(
@@ -37,6 +43,11 @@ async def _scope(message: str) -> tuple[str, str] | None:
 async def main() -> None:
     await db.connect()
     messages = json.loads(open(sys.argv[1]).read())
+    levels = (
+        [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3
+        else DEFAULT_LEVELS
+    )
+    print(f"导出层级 {levels} 的配对")
     out = []
     for message in messages:
         scope = await _scope(message)
@@ -46,7 +57,7 @@ async def main() -> None:
         try:
             emb = await generate_embedding(message)
             hits = await search_by_embedding(
-                emb, user_id, top_k=TOP_K, workspace_id=workspace_id, levels=[1, 2]
+                emb, user_id, top_k=TOP_K, workspace_id=workspace_id, levels=levels,
             )
         except Exception as exc:
             print(f"skip {message[:20]}: {exc}"[:120])

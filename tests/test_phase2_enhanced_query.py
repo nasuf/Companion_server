@@ -24,12 +24,12 @@ async def test_hybrid_retrieve_uses_enhanced_query_for_embedding():
     from app.services.memory.retrieval import hybrid
 
     captured_query = []
-    async def _capture_search(query, *args, **kwargs):
+    async def _capture_search(query, user_id, tiers, **kwargs):
         captured_query.append(query)
         return []
 
     with (
-        patch.object(hybrid, "search_similar", side_effect=_capture_search),
+        patch.object(hybrid, "search_similar_tiers", side_effect=_capture_search),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "cache_retrieval",
@@ -44,7 +44,7 @@ async def test_hybrid_retrieve_uses_enhanced_query_for_embedding():
             enhanced_query="用户的妈妈最近住院的情况",
         )
 
-    # search_similar 用了 enhanced_query, 不是原 message
+    # 热层与 L3 采样共用这一次调用 (共享嵌入), 用的必须是改写后的 query。
     assert captured_query == ["用户的妈妈最近住院的情况"]
 
 
@@ -54,12 +54,12 @@ async def test_hybrid_retrieve_falls_back_to_message_when_no_enhanced():
     from app.services.memory.retrieval import hybrid
 
     captured_query = []
-    async def _capture_search(query, *args, **kwargs):
+    async def _capture_search(query, user_id, tiers, **kwargs):
         captured_query.append(query)
         return []
 
     with (
-        patch.object(hybrid, "search_similar", side_effect=_capture_search),
+        patch.object(hybrid, "search_similar_tiers", side_effect=_capture_search),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "cache_retrieval",
@@ -93,7 +93,7 @@ async def test_hybrid_cache_key_uses_enhanced_query():
         return None
 
     with (
-        patch.object(hybrid, "search_similar",
+        patch.object(hybrid, "search_similar_tiers",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
@@ -488,7 +488,7 @@ async def test_cache_write_uses_same_key_as_read_with_enhanced_query():
         set_calls.append(key)
 
     with (
-        patch.object(hybrid, "search_similar",
+        patch.object(hybrid, "search_similar_tiers",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),
@@ -517,7 +517,7 @@ async def test_cache_write_uses_message_when_no_enhanced_query():
         set_calls.append(key)
 
     with (
-        patch.object(hybrid, "search_similar",
+        patch.object(hybrid, "search_similar_tiers",
                      new_callable=AsyncMock, return_value=[]),
         patch.object(hybrid, "search_by_time_range",
                      new_callable=AsyncMock, return_value=[]),

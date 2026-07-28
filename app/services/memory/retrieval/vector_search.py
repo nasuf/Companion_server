@@ -3,6 +3,7 @@
 Performs cosine similarity search on memory_embeddings table.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -113,6 +114,35 @@ async def search_similar(
         sub_categories=sub_categories,
         levels=levels,
     )
+
+
+async def search_similar_tiers(
+    query: str,
+    user_id: str,
+    tiers: list[tuple[list[int], int]],
+    workspace_id: str | None = None,
+) -> list[dict]:
+    """一次嵌入, 分别搜多个层级组, 合并成一个扁平列表返回。
+
+    存在的理由是 `search_similar` 每次调用都自己嵌一遍: 检索热层 (L1/L2) 和冷层
+    (L3) 用的是同一个 query, 分别调两次就会对同一段文本嵌两次。两次是并行发起的,
+    Redis 缓存挡不住同时 miss —— 结果是每轮对话给 Ollama 多压一次嵌入调用, 而
+    嵌入是 CPU 密集的已知瓶颈。
+
+    tiers 形如 [([1, 2], 50), ([3], 3)]: 前者热层取 50 条, 后者冷层取 3 条。
+    每层的数量上限由各自的 top_k 保证。
+
+    返回扁平列表而不是按层分组: 每行本来就带 level 字段, 调用方要区分冷热直接看
+    它即可。分组返回会让所有调用方 (和它们的测试) 多套一层嵌套, 没有换来信息。
+    """
+    embedding = await generate_embedding(query)
+    per_tier = await asyncio.gather(*[
+        search_by_embedding(
+            embedding, user_id, top_k, workspace_id=workspace_id, levels=levels,
+        )
+        for levels, top_k in tiers
+    ])
+    return [row for rows in per_tier for row in rows]
 
 
 async def search_by_time_range(

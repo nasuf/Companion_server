@@ -208,7 +208,7 @@ class TestRelationshipRecallGate:
         from app.services.memory.retrieval import hybrid as hybrid_mod
         self._patch_common(monkeypatch, hybrid_mod)
         monkeypatch.setattr(
-            hybrid_mod, "search_similar",
+            hybrid_mod, "search_similar_tiers",
             AsyncMock(return_value=[self._interaction_row(self._sim_between_gates())]),
         )
         result = await hybrid_mod.hybrid_retrieve(
@@ -221,7 +221,7 @@ class TestRelationshipRecallGate:
         from app.services.memory.retrieval import hybrid as hybrid_mod
         self._patch_common(monkeypatch, hybrid_mod)
         monkeypatch.setattr(
-            hybrid_mod, "search_similar",
+            hybrid_mod, "search_similar_tiers",
             AsyncMock(return_value=[self._interaction_row(self._sim_between_gates())]),
         )
         # Not a shared-history query → the ordinary gate applies → dropped.

@@ -12,7 +12,7 @@ async def test_entity_recall_bypasses_vector_miss(monkeypatch):
     monkeypatch.setattr(hybrid_mod, "cache_retrieval", AsyncMock(return_value=None))
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", AsyncMock())
     monkeypatch.setattr(hybrid_mod, "has_explicit_time", lambda _: False)
-    monkeypatch.setattr(hybrid_mod, "search_similar", AsyncMock(return_value=[]))
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", AsyncMock(return_value=[]))
     monkeypatch.setattr(hybrid_mod, "search_by_time_range", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         hybrid_mod,
@@ -68,7 +68,7 @@ async def test_hybrid_cache_hit_rehydrates_structured_memories(monkeypatch):
         }),
     )
     search_mock = AsyncMock(return_value=[])
-    monkeypatch.setattr(hybrid_mod, "search_similar", search_mock)
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", search_mock)
 
     result = await hybrid_mod.hybrid_retrieve(
         "妈妈呢", "u1", workspace_id="ws1",
@@ -96,7 +96,7 @@ async def test_hybrid_cache_write_serializes_classified_memories(monkeypatch):
     monkeypatch.setattr(hybrid_mod, "search_related_memories_for_query", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         hybrid_mod,
-        "search_similar",
+        "search_similar_tiers",
         AsyncMock(return_value=[{
             "id": "m1",
             "content": "用户妈妈最近住院",
@@ -142,7 +142,7 @@ async def test_hybrid_retrieve_passes_effective_query_to_selector(monkeypatch):
     monkeypatch.setattr(hybrid_mod, "select_context", _select_context)
     monkeypatch.setattr(
         hybrid_mod,
-        "search_similar",
+        "search_similar_tiers",
         AsyncMock(return_value=[{
             "id": "m1",
             "content": "用户的直属领导叫陈姐",
@@ -176,7 +176,7 @@ async def test_entity_recall_keeps_l1_l2_scope(monkeypatch):
     monkeypatch.setattr(hybrid_mod, "cache_retrieval", AsyncMock(return_value=None))
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", AsyncMock())
     monkeypatch.setattr(hybrid_mod, "has_explicit_time", lambda _: False)
-    monkeypatch.setattr(hybrid_mod, "search_similar", AsyncMock(return_value=[]))
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", AsyncMock(return_value=[]))
     monkeypatch.setattr(hybrid_mod, "search_by_time_range", AsyncMock(return_value=[]))
     monkeypatch.setattr(hybrid_mod, "search_related_memories_for_query", _capture_entity_recall)
 
@@ -196,7 +196,7 @@ async def test_entity_recall_marks_existing_vector_candidate(monkeypatch):
     monkeypatch.setattr(hybrid_mod, "search_by_time_range", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         hybrid_mod,
-        "search_similar",
+        "search_similar_tiers",
         AsyncMock(return_value=[{
             "id": "mom-hospital",
             "content": "用户妈妈最近住院",

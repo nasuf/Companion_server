@@ -14,8 +14,12 @@ import logging
 import re
 from datetime import datetime
 
-from app.services.memory.retrieval.vector_search import search_similar, search_by_time_range
+from app.services.memory.retrieval.vector_search import (
+    search_by_time_range,
+    search_similar_tiers,
+)
 from app.services.memory.retrieval.context_selector import ClassifiedMemory, select_context
+from app.services.memory.retrieval.legacy import _L3_SIMILARITY_FLOOR
 from app.services.memory.retrieval.query_patterns import asks_shared_history
 from app.services.memory.retrieval.ranking import rank_memory_candidate
 from app.services.memory.retrieval.trace import record_retrieval_session
@@ -62,6 +66,17 @@ _EMPTY_RESULT = {
 # 按分布配对映射算出来是 0.46, 但那保持的是"随机文本对的放行比例", 不是"有用
 # 记忆的留存率" —— 在这个位置上后者才是要守的东西。
 _SIMILARITY_THRESHOLD = 0.35
+
+# L3 有界采样的两个旋钮 (Phase 2)。κ=0 完全退回"L3 不可检索"的旧行为, 是这一步的
+# 回滚开关。
+#
+# κ=3: 注入上限本就是 user/ai 各 10 条, 给冷层 3 个候选名额意味着它们最多占掉不到
+# 六分之一, 且还要在 rank 里跟热候选竞争才进得去 —— 上界可控。
+#
+# 门槛直接取 L3 唤醒路径校准过的那个值, 不另抄一份 —— 两条冷层通路用同一个门,
+# 免得同一条记忆在一条路上够格、另一条路上不够格。
+WARM_SAMPLE_BUDGET = 3
+WARM_SAMPLE_THRESHOLD = _L3_SIMILARITY_FLOOR
 # 共同经历 (AI 侧 生活/交互) 专用的更低门 — 仅当用户明确问"我们之间"时启用.
 # 0.35 → 0.24: 同上换模型重标 (旧分布 10% 分位).
 _RELATIONSHIP_RECALL_THRESHOLD = 0.24
@@ -247,9 +262,24 @@ async def hybrid_retrieve(
             f"[DEBUG-VEC] using enhanced_query='{enhanced_query[:40]}' "
             f"(original message='{message[:40]}')"
         )
-    vector_task = search_similar(
-        effective_query, user_id, top_k=50, workspace_id=workspace_id, levels=levels,
+    # 热层和冷层共用一次嵌入 —— 分别调 search_similar 会对同一段 query 嵌两遍,
+    # 而两路并行时 Redis 缓存挡不住同时 miss, 等于每轮给 Ollama 多压一次调用。
+    tiers = [(levels, 50)]
+    if WARM_SAMPLE_BUDGET > 0:
+        tiers.append(([3], WARM_SAMPLE_BUDGET))
+    vector_task = search_similar_tiers(
+        effective_query, user_id, tiers, workspace_id=workspace_id,
     )
+    # L3 有界采样 (AMV-L 的 Sample(T_W)): 冷层不再是完全排除。
+    #
+    # 之前 L3 被彻底挡在检索之外, 于是降级成了单向悬崖 —— 一条记忆掉下去就再也
+    # 回不来, 结果我们不敢降级, 分层名存实亡。给冷层留 κ 个名额后, 降级变成
+    # "降低权重"而不是"删除", 惰性衰减才敢真的把东西降下去。
+    #
+    # 三重约束让它不至于把噪声灌进 prompt:
+    #   数量  最多 κ 条 (WARM_SAMPLE_BUDGET), κ=0 即完全退回旧行为
+    #   门槛  用比 L1/L2 更高的相似度门 —— 冷记忆要够像才值得翻出来
+    #   排序  仍与其他候选一起过 rank + select_context 的 token 预算
     time_task = (
         search_by_time_range(
             user_id, time_range[0], time_range[1],
@@ -333,6 +363,14 @@ async def hybrid_retrieve(
                 _merge_candidate(mem, label)
                 continue
 
+            if int(mem.get("level") or 0) == 3:
+                # 冷层用更高的门 —— 只有足够像才值得从冷层翻出来。数量上限已由
+                # 检索时的 top_k=WARM_SAMPLE_BUDGET 保证, 这里只管质量。
+                if float(mem.get("similarity", 0)) >= WARM_SAMPLE_THRESHOLD:
+                    mem["_retrieval_source"] = "warm"
+                    _merge_candidate(mem, "warm")
+                continue
+
             sim = float(mem.get("similarity", 0))
             # 关系记忆抢救: 共同经历 (AI 侧 生活/交互) 是叙事长句, 向量相似度天然
             # 偏低, 常卡在 0.50 门下被丢. 而 ranking 的 +0.60 boost 与 context
@@ -349,7 +387,14 @@ async def hybrid_retrieve(
                 mem["_retrieval_source"] = "vector"
                 _merge_candidate(mem, label)
 
-    logger.info(f"[DEBUG-VEC] after threshold={_SIMILARITY_THRESHOLD}: {len(all_candidates)} candidates")
+    n_warm = sum(
+        1 for m in all_candidates
+        if "warm" in str(m.get("_retrieval_source") or "")
+    )
+    logger.info(
+        f"[DEBUG-VEC] after threshold={_SIMILARITY_THRESHOLD}: "
+        f"{len(all_candidates)} candidates ({n_warm} from L3 warm sample)"
+    )
 
     # Spec §3.2 step 4 + retrieval v2: rerank by display_score plus lightweight
     # keyword/category/safety boosts. The vector model recalls broadly; these

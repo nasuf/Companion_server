@@ -14,7 +14,7 @@ async def test_time_range_results_bypass_vector_similarity_threshold(monkeypatch
     now = datetime.now(timezone.utc)
     monkeypatch.setattr(hybrid_mod, "cache_retrieval", AsyncMock(return_value=None))
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", AsyncMock())
-    monkeypatch.setattr(hybrid_mod, "search_similar", AsyncMock(return_value=[]))
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", AsyncMock(return_value=[]))
     monkeypatch.setattr(hybrid_mod, "has_explicit_time", lambda _: True)
     monkeypatch.setattr(
         hybrid_mod,
@@ -59,7 +59,7 @@ async def test_hybrid_rerank_uses_last_accessed_at(monkeypatch):
     monkeypatch.setattr(hybrid_mod, "cache_set_retrieval", AsyncMock())
     monkeypatch.setattr(hybrid_mod, "search_by_time_range", AsyncMock(return_value=[]))
     monkeypatch.setattr(hybrid_mod, "has_explicit_time", lambda _: False)
-    monkeypatch.setattr(hybrid_mod, "search_similar", AsyncMock(return_value=[
+    monkeypatch.setattr(hybrid_mod, "search_similar_tiers", AsyncMock(return_value=[
         {
             "id": "old-but-touched",
             "content": "用户很久前说喜欢爵士乐",
@@ -124,7 +124,7 @@ async def test_hybrid_rerank_keeps_safety_memory_in_top_ten(monkeypatch):
     }
     monkeypatch.setattr(
         hybrid_mod,
-        "search_similar",
+        "search_similar_tiers",
         AsyncMock(return_value=generic + [safety_memory]),
     )
 
