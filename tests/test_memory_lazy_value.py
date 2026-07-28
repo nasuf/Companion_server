@@ -230,6 +230,19 @@ class TestSqlMatchesPython:
         assert all(isinstance(x, str) for x in mains + subs), "元组漏进了数组"
         assert set(zip(mains, subs)) == set(L1_SINGLETON_SUBS)
 
+    def test_sql_breaks_ties_within_a_singleton_group(self):
+        """同一条语句里两条同类目记忆可能同时越过 hot 阈值。
+
+        l1_taken 的 EXISTS 看的是语句开始时的表状态, 两条都会读到"还没有 L1",
+        于是双双晋升 —— 正好造出要防的第二条 L1。必须再按组内排名去重。
+        """
+        from app.services.memory.lifecycle import lazy_update
+
+        sql = lazy_update._render_sql("memories_user")
+        assert "ROW_NUMBER() OVER" in sql
+        assert "PARTITION BY m.user_id, m.workspace_id" in sql
+        assert "s.group_rank > 1" in sql
+
     def test_sql_blocks_a_second_l1_for_singleton_subs(self):
         """惰性更新把层级迁移搬到了热路径, 旧 cron 的 singleton 闸门必须一起搬。
 
@@ -239,7 +252,7 @@ class TestSqlMatchesPython:
 
         sql = lazy_update_sql = lazy_update._render_sql("memories_user")
         assert "l1_taken" in sql
-        assert "NOT (s.is_singleton AND s.l1_taken)" in sql
+        assert "s.l1_taken OR s.group_rank > 1" in sql
         # 冲突范围必须按 user + workspace 隔离, 否则不同 agent 会互相阻塞晋升
         assert "o.workspace_id IS NOT DISTINCT FROM m.workspace_id" in sql
         assert "o.user_id = m.user_id" in lazy_update_sql

@@ -45,6 +45,16 @@ class TestClustering:
         assert cons._cluster(rows) == []
 
 
+def test_candidate_query_skips_already_consolidated_rows():
+    """批量归档是原子的, 但"摘要已建、还没走到归档"之间进程崩掉的话, 原行仍未
+    归档 —— 下一轮会把同一簇再压一次产出重复摘要。changelog 先于归档写入, 用它
+    覆盖这个崩溃窗口。"""
+    import inspect
+
+    source = inspect.getsource(cons._load_candidates)
+    assert "operation = 'consolidated_into'" in source
+
+
 @pytest.mark.asyncio
 class TestCompression:
     async def test_cluster_compressed_and_originals_archived(self):

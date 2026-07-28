@@ -91,7 +91,14 @@ WITH scored AS (
         AND o.workspace_id IS NOT DISTINCT FROM m.workspace_id
         AND o.main_category = m.main_category
         AND o.sub_category = m.sub_category
-    ) AS l1_taken
+    ) AS l1_taken,
+    -- 同一条语句里可能有两条同类目的记忆同时越过 hot 阈值。上面的 EXISTS 看的是
+    -- 语句开始时的表状态, 两条都会看到"还没有 L1" 于是双双晋升 —— 正好造出我们
+    -- 要防的第二条 L1。按分值取组内第一名, 其余这轮不升 (下轮再看)。
+    ROW_NUMBER() OVER (
+      PARTITION BY m.user_id, m.workspace_id, m.main_category, m.sub_category
+      ORDER BY COALESCE(m.current_score, m.importance) DESC, m.id
+    ) AS group_rank
   FROM {table} AS m
   JOIN (SELECT unnest($1::text[]) AS id, unnest($2::bool[]) AS is_contribution) AS u
     ON m.id = u.id
@@ -108,7 +115,8 @@ UPDATE {table} AS t SET
     WHEN s.is_singleton AND s.old_level = 1 THEN 1
     WHEN s.old_level = 1 THEN CASE WHEN s.val < {hot_down} THEN 2 ELSE 1 END
     WHEN s.old_level = 2 THEN CASE
-      WHEN s.val >= {hot_up} AND NOT (s.is_singleton AND s.l1_taken) THEN 1
+      WHEN s.val >= {hot_up}
+        AND NOT (s.is_singleton AND (s.l1_taken OR s.group_rank > 1)) THEN 1
       WHEN s.val < {warm_down} THEN 3
       ELSE 2 END
     ELSE CASE WHEN s.val >= {warm_up} THEN 2 ELSE 3 END

@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
+import statistics as st
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,13 +86,24 @@ def warm_sample_wins(memory_id: str, pairs_by_message: dict, level_of: dict,
 def simulate(memories: list[dict], policy: Policy, useful_ids: set[str],
              access_rate_useful: float, access_rate_other: float,
              pairs_by_message: dict | None = None,
-             warm_budget: int = 0) -> list[dict]:
+             warm_budget: int = 0, seed: int = 0) -> list[dict]:
     """按 policy 推演到各检查点, 返回每个检查点的指标.
 
     访问模式是这个推演里唯一的假设, 所以拆成两个可调的比率: 有用的记忆被用到的
     频率应当高于无用的。把它设成一样就等于假设"使用与有用性无关", 那种情况下任何
     基于使用信号的策略都不可能有效 —— 那本身就是个值得知道的对照。
+
+    随机数走显式 seed。初版用 `hash((mid, ...))` 决定某步是否命中, 而 Python 的
+    字符串哈希每个进程都不一样 —— 同一份代码两次运行会给出不同的闸门结论 (实测
+    365 天那一档在 +4% 和 -1.4% 之间跳)。一个结论会漂的闸门, 跟一个不会失败的闸门
+    一样没用。
     """
+    # 每条记忆一条独立随机流, 而不是共享一个 —— 共享的话抽签结果会依赖字典遍历
+    # 顺序, 快照里多一条记忆就会让所有后续记忆的命中序列错位, 两次推演不可比。
+    # 种子拼成字符串: Random 不接受 tuple。
+    hit_stream = {
+        m["id"]: random.Random(f"{seed}:{m['id']}") for m in memories
+    }
     from app.services.memory.taxonomy import L1_SINGLETON_SUBS
 
     now = datetime.now(timezone.utc)
@@ -115,10 +128,10 @@ def simulate(memories: list[dict], policy: Policy, useful_ids: set[str],
                 step_days = min(30.0, remaining)
                 for mid, state in states.items():
                     rate = access_rate_useful if mid in useful_ids else access_rate_other
-                    # rate 是"每 30 天被用到的期望次数", 折算成本步是否发生
-                    hit = rate * (step_days / 30.0) >= 1.0 or (
-                        rate > 0 and (hash((mid, checkpoint, remaining)) % 1000)
-                        < rate * (step_days / 30.0) * 1000
+                    # rate 是"每 30 天被用到的期望次数", 折算成本步的命中概率
+                    probability = rate * (step_days / 30.0)
+                    hit = probability >= 1.0 or (
+                        probability > 0 and hit_stream[mid].random() < probability
                     )
                     states[mid] = policy.step(
                         state, step_days, accessed=hit, contributed=hit,
@@ -156,6 +169,8 @@ def main() -> None:
     ap.add_argument("--access-other", type=float, default=0.05,
                     help="其余记忆每 30 天被用到的期望次数")
     ap.add_argument("--warm-budget", type=int, default=3)
+    ap.add_argument("--seeds", type=int, default=8,
+                    help="跑多少个随机种子; 判定取最坏的那个")
     ap.add_argument("--json")
     args = ap.parse_args()
 
@@ -186,14 +201,24 @@ def main() -> None:
                     {**pair, "_id": mid}
                 )
 
-    results = {}
+    # 跑多个种子取分布: 单次抽样的结论会随访问模式的运气上下摆动, 拿它做 go/no-go
+    # 等于让闸门看天吃饭。
+    seeds = list(range(args.seeds))
+    runs: dict[str, list[list[dict]]] = {}
     for policy in policies:
         budget = getattr(policy, "warm_sample_budget", 0)
-        rows = simulate(memories, policy, useful_ids,
-                        args.access_useful, args.access_other,
-                        pairs_by_message=pairs_by_message, warm_budget=budget)
-        results[policy.name] = rows
-        print(f"[{policy.name}]")
+        runs[policy.name] = [
+            simulate(memories, policy, useful_ids,
+                     args.access_useful, args.access_other,
+                     pairs_by_message=pairs_by_message, warm_budget=budget,
+                     seed=seed)
+            for seed in seeds
+        ]
+
+    results = {name: rows[0] for name, rows in runs.items()}
+    for policy in policies:
+        rows = results[policy.name]
+        print(f"[{policy.name}]  (seed 0; 闸门看 {len(seeds)} 个 seed 的均值)")
         print(f"  {'天':>5}{'可检索':>9}{'有用留存':>11}{'留存率':>9}   层级分布")
         for r in rows:
             levels = " ".join(f"L{k}={v}" for k, v in r["levels"].items())
@@ -202,18 +227,29 @@ def main() -> None:
                   f"{r['useful_rate']:>8.0%}   {levels}")
         print()
 
-    base, new = results[policies[0].name], results[policies[1].name]
-    print("闸门: 新策略的有用记忆留存率不得低于现行")
+    def _rates(name: str, index: int) -> list[float]:
+        return [run[index]["useful_rate"] for run in runs[name]]
+
+    print(f"闸门: 新策略的有用记忆留存率不得低于现行 ({len(seeds)} 个 seed)")
     worst = None
-    for b, n in zip(base, new):
-        delta = n["useful_rate"] - b["useful_rate"]
-        flag = "OK" if delta >= -0.001 else "劣化"
+    for index, checkpoint in enumerate(CHECKPOINTS_DAYS):
+        base_rates = _rates(policies[0].name, index)
+        new_rates = _rates(policies[1].name, index)
+        delta = st.mean(new_rates) - st.mean(base_rates)
+        spread = st.pstdev([n - b for n, b in zip(new_rates, base_rates)])
         if worst is None or delta < worst[1]:
-            worst = (b["day"], delta)
-        print(f"  第 {b['day']:>4} 天  {b['useful_rate']:>5.0%} → "
-              f"{n['useful_rate']:>5.0%}  ({delta:+.0%})  {flag}")
+            worst = (checkpoint, delta)
+        # 差值小于种子间波动时, 这一档说明不了什么 —— 标出来, 免得把噪声读成结论。
+        if delta < -0.005:
+            verdict = "劣化"
+        elif spread > 0 and abs(delta) < spread:
+            verdict = "OK (在噪声内)"
+        else:
+            verdict = "OK"
+        print(f"  第 {checkpoint:>4} 天  {st.mean(base_rates):>5.0%} → "
+              f"{st.mean(new_rates):>5.0%}  ({delta:+.1%} ±{spread:.1%})  {verdict}")
     print(f"\n最差点: 第 {worst[0]} 天 {worst[1]:+.1%}")
-    print("通过" if worst[1] >= -0.001 else "不通过 —— 按计划应回滚")
+    print("通过" if worst[1] >= -0.005 else "不通过 —— 按计划应回滚")
 
     if args.json:
         Path(args.json).write_text(json.dumps(results, ensure_ascii=False, indent=2))

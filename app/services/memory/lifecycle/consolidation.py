@@ -87,6 +87,13 @@ async def _load_candidates(
               )
             )
           )
+          -- 已经被压缩过的行不再参与。批量归档虽然原子, 但"摘要已建、还没走到
+          -- 归档"之间进程崩掉的话, 原行仍是未归档状态, 下一轮会把同一簇再压一
+          -- 次、产出重复摘要。changelog 先于归档写入, 所以它能覆盖这个窗口。
+          AND NOT EXISTS (
+            SELECT 1 FROM memory_changelogs cl
+            WHERE cl.memory_id = m.id AND cl.operation = 'consolidated_into'
+          )
         ORDER BY m.created_at ASC
         LIMIT {_CANDIDATE_LIMIT}
         """,
