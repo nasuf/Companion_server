@@ -25,10 +25,10 @@ def test_l1_importance_skips_freshness_decay():
     l1_score = compute_display_score(
         importance=0.95, last_accessed_at=one_year_ago, similarity=0.9,
     )
-    # freshness 被钳到 1.0, 而不是原 0.4 (>365 天)
-    # 实际算: 0.95 × 1.0 × 0.9 = 0.855
-    assert l1_score == 0.95 * 1.0 * 0.9, (
-        f"L1 expected 0.855 (freshness floor 1.0), got {l1_score:.3f}"
+    # freshness 被钳到 1.0, 而不是原 0.4 (>365 天). importance 只决定这个下限,
+    # 不再参与相乘 (见 compute_display_score docstring), 所以是 1.0 × 0.9.
+    assert l1_score == 1.0 * 0.9, (
+        f"L1 expected 0.9 (freshness floor 1.0), got {l1_score:.3f}"
     )
 
 
@@ -42,9 +42,9 @@ def test_l2_importance_still_subject_to_decay():
     l2_score = compute_display_score(
         importance=0.6, last_accessed_at=one_year_ago, similarity=0.8,
     )
-    # freshness 0.4 (>365 天), 不豁免: 0.6 × 0.4 × 0.8 = 0.192
-    assert abs(l2_score - 0.6 * 0.4 * 0.8) < 1e-6, (
-        f"L2 expected 0.192 (no floor), got {l2_score:.3f}"
+    # freshness 0.4 (>365 天), 不豁免: 0.4 × 0.8 = 0.32
+    assert abs(l2_score - 0.4 * 0.8) < 1e-6, (
+        f"L2 expected 0.32 (no floor), got {l2_score:.3f}"
     )
 
 
@@ -57,8 +57,8 @@ def test_l1_recent_unchanged():
     score = compute_display_score(
         importance=0.95, last_accessed_at=yesterday, similarity=0.9,
     )
-    # 0.95 × 1.2 × 0.9 = 1.026 (max(1.2, 1.0) = 1.2)
-    assert abs(score - 0.95 * 1.2 * 0.9) < 1e-6
+    # 1.2 × 0.9 = 1.08 (max(1.2, 1.0) = 1.2)
+    assert abs(score - 1.2 * 0.9) < 1e-6
 
 
 def test_l1_beats_recent_unrelated_l2():

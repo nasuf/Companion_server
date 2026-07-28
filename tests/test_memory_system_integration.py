@@ -43,13 +43,20 @@ class TestRelevanceGating:
         score = compute_display_score(0.8, recent, 0.85)
         assert score > 0.8  # high importance × 1.2 freshness × 0.85 similarity
 
-    def test_display_score_old_low_importance(self):
-        score = compute_display_score(0.3, "2024-01-01T00:00:00Z", 0.5)
-        assert score < 0.1  # low importance × 0.4 freshness × 0.5 similarity
+    def test_display_score_decays_with_age(self):
+        old = compute_display_score(0.3, "2024-01-01T00:00:00Z", 0.5)
+        assert abs(old - 0.4 * 0.5) < 1e-6  # 0.4 freshness (>1y) × 0.5 similarity
+
+    def test_display_score_ignores_importance(self):
+        """importance 只决定 L1 的新鲜度下限, 不参与相乘 —— 实测按它加权会让
+        排序差于随机洗牌, 详见 compute_display_score docstring."""
+        low = compute_display_score(0.3, None, 0.7)
+        high = compute_display_score(0.8, None, 0.7)
+        assert low == high
 
     def test_display_score_null_date_defaults_moderate(self):
         score = compute_display_score(0.5, None, 1.0)
-        assert 0.4 < score < 0.6  # 0.5 × 1.0 (30-day default) × 1.0
+        assert abs(score - 1.0) < 1e-6  # 1.0 (30-day default) × 1.0
 
 
 class TestL2Dynamics:

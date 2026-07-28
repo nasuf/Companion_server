@@ -19,6 +19,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+from app.services.memory.retrieval.ranking import rank_memory_candidate
 from app.services.memory.retrieval.relevance import compute_display_score
 
 
@@ -54,6 +55,20 @@ def main() -> None:
             last_accessed_at=pair.get("updated_at"),
             similarity=pair["sim"],
         )
+        # display_score 只是基分. 生产最终排序还叠了关键词命中加权和精确匹配
+        # 保底 (ranking.rank_memory_candidate), 拿基分下结论会冤枉这些加成.
+        pair["production_score"], _ = rank_memory_candidate(
+            {
+                "content": pair["memory"],
+                "similarity": pair["sim"],
+                "importance": pair.get("importance"),
+                "current_score": pair.get("current_score"),
+                "level": pair.get("level"),
+                "source": pair.get("source"),
+                "last_accessed_at": pair.get("updated_at"),
+            },
+            pair["message"],
+        )
 
     by_message: dict[str, list[dict]] = defaultdict(list)
     for pair in pairs:
@@ -66,10 +81,31 @@ def main() -> None:
     print(f"{len(by_message)} 条消息, {sum(len(v) for v in by_message.values())} 条已判定候选, "
           f"其中有用 {total_useful} 条\n")
 
+    # 拆开两个乘数分别看, 才能知道是谁在拖后腿 —— 只比"生产 vs 纯相似度"
+    # 只能得出"公式不好", 说不出该动哪一项.
+    def _freshness(pair: dict) -> float:
+        # similarity=1 时 compute_display_score 返回的就是纯新鲜度因子; 从
+        # display_score 反推容易在公式变动后失效, 直接调更稳.
+        return compute_display_score(
+            importance=pair.get("importance") or 0.0,
+            last_accessed_at=pair.get("updated_at"),
+            similarity=1.0,
+        )
+
+    def _imp(pair: dict) -> float:
+        return max(pair.get("importance") or 0.0, 1e-6)
+
     orderings = {
-        "原始相似度": lambda p: -p["sim"],
-        "display_score (生产)": lambda p: -p["display_score"],
-        "importance 单独": lambda p: -(p.get("importance") or 0.0),
+        "纯相似度": lambda p: -p["sim"],
+        "相似度 × 新鲜度": lambda p: -(p["sim"] * _freshness(p)),
+        "相似度 × importance": lambda p: -(p["sim"] * _imp(p)),
+        "相似度 × importance^0.5": lambda p: -(p["sim"] * _imp(p) ** 0.5),
+        # importance 高的多是「我是汉族」这类对谁都沾边的身份事实, 所以反向加权
+        # 未必荒谬 —— 但 45 条消息撑不起这个结论, 列出来只为看趋势.
+        "相似度 ÷ importance": lambda p: -(p["sim"] / _imp(p)),
+        "display_score 基分": lambda p: -p["display_score"],
+        "生产最终排序 (含加成)": lambda p: -p["production_score"],
+        "importance 单独": lambda p: -_imp(p),
     }
     print(f"{'排序方式':<24}" + "".join(f"top{k:<6}" for k in (1, 2, 3, 5, 10)))
     for name, key in orderings.items():

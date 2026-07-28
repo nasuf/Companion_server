@@ -120,17 +120,32 @@ def compute_display_score(
     last_accessed_at: datetime | str | None,
     similarity: float = 1.0,
 ) -> float:
-    """Product spec §3.2 reranking formula:
-    display_score = current_score × time_freshness × topic_match
+    """Rerank score for retrieved memories: time_freshness × topic_match.
 
-    - current_score: importance (0-1)
-    - time_freshness: based on how recently the memory was accessed/created
-    - topic_match: vector similarity (0-1)
+    Spec §3.2 writes this as current_score × time_freshness × topic_match, but
+    the importance factor is deliberately left out of the product — measured on
+    real traffic it makes the ordering worse than shuffling the candidates.
 
-    Phase 2.1: L1 (importance ≥ 0.85) 不衰减 — 身份记忆 (姓名/年龄/家人 等核心
-    事实) 即便很久没访问也是事实, time_freshness 衰减没意义. 历史 bug: 用户半年
-    没说自己名字 → freshness=0.4 → display_score 被新琐事压低 → AI 答非所问.
-    L1 freshness floor 取 1.0, 让 importance × similarity 主导排序.
+    Over 423 production candidates judged for whether they were actually usable
+    in the reply, the share of usable memories landing in the top three was:
+
+        similarity alone            44%
+        similarity × freshness      42%
+        similarity × importance     29%      ← the damage
+        production (both factors)   29%
+        a random shuffle            31%
+
+    Damping it (importance^0.5) lands at 39%, so the harm scales with the
+    weight rather than being an artefact of one sample. The mechanism is that
+    importance promotes high-scoring identity rows — 我是汉族, 我属猴, 我性别是
+    女 — which match almost any message weakly and therefore crowd out the row
+    that was actually on topic.
+
+    Importance still decides the freshness floor. L1 facts (≥ 0.85) do not
+    decay: a name is still the user's name six months after they last said it.
+    That was a real bug once — freshness dropped to 0.4 and fresh trivia buried
+    the identity row. The targeted identity-query boosts in ranking.py cover
+    that case directly, which is also why the blanket multiplier is redundant.
     """
     # Time freshness factor (spec §3.2):
     # <1 month: 1.2  |  1-3 months: 1.0  |  3-6 months: 0.8
@@ -162,4 +177,4 @@ def compute_display_score(
     if importance >= 0.85:
         freshness = max(freshness, 1.0)
 
-    return importance * freshness * similarity
+    return freshness * similarity
