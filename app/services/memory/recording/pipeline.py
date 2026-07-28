@@ -29,7 +29,7 @@ from app.services.memory.recording.pre_filter import (
 from app.services.memory import provenance as provenance_mod
 from app.services.memory.storage.persistence import store_memory, log_memory_changelog
 from app.services.memory.lifecycle.quality import log_memory_evidence
-from app.services.memory.config import RECURRENCE_PERIODIC
+from app.services.memory.config import level_for_importance, RECURRENCE_PERIODIC
 from app.services.memory.recording.identity_repair import (
     repair_identity_classification,
 )
@@ -384,12 +384,8 @@ async def process_memory_pipeline(
         if importance < 0.10:
             logger.debug(f"Memory dropped (importance={importance:.2f} < 0.10): {content[:40]}")
             continue
-        elif importance >= 0.85:
-            level = 1
-        elif importance >= 0.50:
-            level = 2
         else:
-            level = 3
+            level = level_for_importance(importance)
 
         # Rule engine wins when it's unambiguous; LLM occur_time is fallback.
         # 必须 ensure_aware: LLM 输出 ISO 经常没 tz, fromisoformat 解出来是

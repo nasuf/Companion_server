@@ -22,6 +22,7 @@ from app.db import db, ensure_connected
 from app.redis_client import get_redis
 from app.services.llm.models import get_embedding_model, get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
+from app.services.memory.config import level_for_importance
 from app.services.memory.demographics import (
     derive_constellation,
     derive_zodiac,
@@ -179,6 +180,39 @@ def _substantive_items(value: object) -> list[str]:
     return items
 
 
+# 建号人设从"整份进 L1"改为按事实种类分层 (2026-07).
+#
+# 原来每个字段都被硬编码成 ≥0.85, 于是整份角色档案都是 L1 —— 永不衰减、永不被
+# 淘汰。拿 423 条真实检索配对逐条判"这条记忆对回复有没有用"实测 (仅 AI 侧, 已排
+# 除来源混淆):
+#
+#     L1 · 建号人设   n=279   有用率 11% / 20%
+#     L2 · 聊天学到   n= 87   有用率 29% / 28%
+#     差 18 个百分点, 置换检验 p=0.0001
+#
+# 也就是说唯一永不衰减的那一类, 恰好是最派不上用场的一类。而且 importance ≥0.85
+# 的有用率 (12%) 反而低于 0.70-0.85 档 (37%) —— 分数在高端与有用性反相关。
+#
+# 哪些留 L1 不由我另立标准, 直接用代码库已有的"核心身份"定义 L1_SINGLETON_SUBS
+# (每个子类只能有一条的那 11 项: 姓名/性别/年龄/生日/现居地…)。它们是会被直接
+# 问到、且必须永远答得上的事实。
+#
+# 其余人设 (偏好 / 思维 / 生活 / 非单值身份) 一律降到 L2: 原值减 0.13, 落在
+# 0.72-0.82。**保持原有相对高低** —— 那些 literal 里编着人工判断, 不该被抹平。
+# 这个区间的衰减很温和: 从未被访问也要约一年才跌破 0.50, 而任何一次检索都会
+# 重置计时。人设不是错的, 只是可能用不上, 慢慢淡出比永久占位合理。
+_NON_CORE_IMPORTANCE_DROP = 0.13
+
+
+def _tiered_importance(main: str, sub: str, importance: float) -> float:
+    """核心身份保持原值 (L1); 其余人设降一档到 L2。"""
+    from app.services.memory.taxonomy import L1_SINGLETON_SUBS
+
+    if (main, sub) in L1_SINGLETON_SUBS:
+        return importance
+    return round(max(0.55, importance - _NON_CORE_IMPORTANCE_DROP), 2)
+
+
 def _add(
     memories: list, content: str, main: str, sub: str, mem_type: str, importance: float,
     *, occur_time: datetime | None = None,
@@ -188,7 +222,7 @@ def _add(
         "main_category": main,
         "sub_category": sub,
         "type": mem_type,
-        "importance": importance,
+        "importance": _tiered_importance(main, sub, importance),
     }
     if occur_time is not None:
         entry["occur_time"] = occur_time
@@ -702,17 +736,19 @@ async def store_memories_batch(
             sub_category=mem.get("sub_category", "其他"),
             legacy_type=mem_type,
             source="ai",
-            level=1,
+            level=level_for_importance(float(mem.get("importance", 0.85))),
         )
-        # spec §1.4: agent 创建期所有记忆都入 L1, importance ∈ [0.85, 1.0].
-        # convert_profile_to_memories 内已按 spec 给出 ≥0.85 的分数, 这里 clamp
-        # 仅作防御 (新加字段忘记调权重时仍守住 spec invariant).
-        importance = max(0.85, float(mem.get("importance", 0.85)))
+        # 曾经这里 clamp 到 ≥0.85 并硬写 level=1, 依据是"spec §1.4: 创建期所有
+        # 记忆都入 L1"。两件事都改了 (见 _tiered_importance 的实测数据):
+        # clamp 会把 LLM 补齐缺口时给出的低分抬上去 —— 模型判断这条只值 0.4 也
+        # 照样变成永不衰减的核心记忆, 那份判断被白白丢掉。层级现在由分数推导,
+        # 跟录入管线共用同一个换算, 不再各写各的。
+        importance = float(mem.get("importance", 0.85))
         row = {
             "id": mid,
             "userId": user_id,
             "content": content,
-            "level": 1,
+            "level": level_for_importance(importance),
             "importance": importance,
             "type": mem_type,
             "mainCategory": taxonomy.main_category,

@@ -13,6 +13,23 @@ redefining literals.
 # 死就整轮失忆. 启动时会拿它跟实际生效的模型比对并告警.
 CALIBRATED_EMBEDDING_MODEL = "qwen3-embedding:0.6b"
 
+# ── Importance → level (spec §1.4) ────────────────────────────────────────
+# 这条换算原本散在三处 (录入管线 / 矛盾解决 / 建号人设), 各写各的字面量。分层规则
+# 一旦要调整, 漏掉任何一处都会让同一条记忆在不同路径下落到不同层。
+L1_MIN_IMPORTANCE = 0.85
+L2_MIN_IMPORTANCE = 0.50
+STORE_MIN_IMPORTANCE = 0.10
+
+
+def level_for_importance(importance: float) -> int:
+    """spec §1.4: 85+ → L1, 50-84 → L2, 其余 → L3."""
+    if importance >= L1_MIN_IMPORTANCE:
+        return 1
+    if importance >= L2_MIN_IMPORTANCE:
+        return 2
+    return 3
+
+
 # ── Similarity thresholds ──
 # 写入去重: cosine > 阈值 判为重复, 跳过写入. spec 没规定写入去重 (part2 §2 录
 # 入管线只到 prefilter+extraction 两步), 这是工程兜底.

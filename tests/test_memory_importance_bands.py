@@ -77,12 +77,24 @@ def test_level_boundaries_are_contiguous_and_ordered(key):
 
 
 def test_pipeline_thresholds_are_what_this_file_assumes():
-    """守卫: 若有人改了 pipeline 的分层阈值, 这里立刻失败, 提醒同步 prompt."""
-    import inspect
+    """守卫: 若有人改了分层阈值, 这里立刻失败, 提醒同步 prompt。
 
-    from app.services.memory.recording import pipeline
+    以前按字面量在 pipeline 源码里找 —— 阈值后来收敛成 memory/config 的共享常量
+    (原本三处各写各的), 字面量就不在那儿了。改成直接断言常量与实际换算, 比找字符
+    串结实: 换算逻辑本身写错也会被抓到, 而不只是数字被改。
+    """
+    from app.services.memory.config import (
+        L1_MIN_IMPORTANCE,
+        L2_MIN_IMPORTANCE,
+        STORE_MIN_IMPORTANCE,
+        level_for_importance,
+    )
 
-    src = inspect.getsource(pipeline.process_memory_pipeline)
-    assert f"importance >= {L1_THRESHOLD}" in src
-    assert f"importance >= {L2_THRESHOLD}" in src
-    assert f"importance < {DROP_THRESHOLD}" in src
+    assert L1_MIN_IMPORTANCE == L1_THRESHOLD
+    assert L2_MIN_IMPORTANCE == L2_THRESHOLD
+    assert STORE_MIN_IMPORTANCE == DROP_THRESHOLD
+
+    assert level_for_importance(L1_THRESHOLD) == 1
+    assert level_for_importance(L1_THRESHOLD - 0.01) == 2
+    assert level_for_importance(L2_THRESHOLD) == 2
+    assert level_for_importance(L2_THRESHOLD - 0.01) == 3
