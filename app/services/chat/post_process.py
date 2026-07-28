@@ -517,6 +517,9 @@ async def _pipeline_with_watermark(
             side=side,
             workspace_id=workspace_id,
             evidence_message_ids=evidence_message_ids,
+            prev_ai_line=_ai_line_before(
+                recent, new_target_msgs[0] if new_target_msgs else None
+            ),
         )
     except MemoryExtractionError as e:
         # 抽取没有真正跑完 (LLM 失败, 或 admin 停用了抽取模板): 水位线原地不动,
@@ -586,6 +589,27 @@ def _parse_ts(m: dict) -> datetime | None:
 def _ensure_aware(dt: datetime | None) -> datetime | None:
     from app.services.schedule_domain.time_service import ensure_aware
     return ensure_aware(dt)
+
+
+def _ai_line_before(messages: list[dict], first_new_target: dict | None) -> str:
+    """取引出目标消息的那一句 AI 发言.
+
+    不能直接拿 context 的最后一句: 记忆管线跑在 AI 回复之后, 那个位置上的是 AI
+    对本轮的**回复**, 不是引出本轮的**提问**. 判断 "不好" 该不该记, 需要的是它
+    前面的 "你今天还好吗"。
+    """
+    if not first_new_target:
+        return ""
+    target_id = first_new_target.get("id")
+    seen: str = ""
+    for m in messages:
+        if target_id is not None and m.get("id") == target_id:
+            break
+        if m is first_new_target:
+            break
+        if m.get("role") == "assistant" and (m.get("content") or "").strip():
+            seen = str(m["content"]).strip()
+    return seen
 
 
 def _fmt_conversation(msgs: list[dict]) -> str:

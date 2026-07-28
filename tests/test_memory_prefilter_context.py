@@ -73,3 +73,47 @@ def test_last_ai_line_never_returns_a_user_turn():
 def test_missing_context_degrades_instead_of_failing():
     """取不到上文时返回空串 —— 预筛退回只看单条消息, 召回会掉但不会报错."""
     assert _last_ai_line(None) == ""  # type: ignore[arg-type]
+
+
+class TestPrecedingLineNotTheReply:
+    """取的必须是引出这句话的 AI 提问, 不是 AI 对它的回复.
+
+    记忆管线跑在 AI 回复之后, 所以从上下文末尾取 AI 发言会取到回复:
+
+        assistant: 你今天还好吗      ← 判断 "不好" 要的是这句
+        user: 不好
+        assistant: 怎么了跟我说说    ← 上下文末尾是这句
+
+    72% 的召回是按前一句测的; 取后一句是未经验证的行为。
+    """
+
+    @staticmethod
+    def _turn():
+        from app.services.chat.post_process import _ai_line_before
+        return _ai_line_before, [
+            {"id": "1", "role": "user", "content": "在吗"},
+            {"id": "2", "role": "assistant", "content": "你今天还好吗"},
+            {"id": "3", "role": "user", "content": "不好"},
+            {"id": "4", "role": "assistant", "content": "怎么了跟我说说"},
+        ]
+
+    def test_picks_the_prompt_not_the_reply(self):
+        fn, msgs = self._turn()
+        assert fn(msgs, msgs[2]) == "你今天还好吗"
+
+    def test_no_target_yields_empty(self):
+        fn, msgs = self._turn()
+        assert fn(msgs, None) == ""
+
+    def test_target_at_the_start_has_no_preceding_ai(self):
+        fn, msgs = self._turn()
+        assert fn(msgs, msgs[0]) == ""
+
+    def test_falls_back_to_identity_when_ids_are_missing(self):
+        """合成消息可能没有 id, 这时靠对象身份定位, 不能整个失效."""
+        from app.services.chat.post_process import _ai_line_before
+        msgs = [
+            {"role": "assistant", "content": "你今天还好吗"},
+            {"role": "user", "content": "不好"},
+        ]
+        assert _ai_line_before(msgs, msgs[1]) == "你今天还好吗"

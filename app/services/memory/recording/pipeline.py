@@ -191,10 +191,18 @@ def _coerce_importance(raw: object) -> float:
 
 
 def _last_ai_line(context_conversation: str) -> str:
-    """从 `role: content` 格式的上下文里取最后一句 AI 的话.
+    """从 `role: content` 格式的上下文里取最后一句 AI 的话 —— 仅作兜底.
 
-    预筛判短消息时全靠它: "不好" 单看是语气词, 接在 "你今天还好吗" 后面是情绪
-    记录. 取不到就传空, 预筛会退回只看单条消息 (召回会掉, 但不会出错).
+    ⚠️ 记忆管线跑在 AI 回复**之后**, 所以用户侧的 context 末尾往往是 AI 对这句话
+    的**回复**, 而不是引出这句话的**提问**:
+
+        assistant: 你今天还好吗      ← 判断 "不好" 需要的是这句
+        user: 不好                   (进 new_conversation)
+        assistant: 怎么了跟我说说    ← 这一行才是 context 的末尾
+
+    所以调用方应当显式传入正确的那一句 (post_process 知道真实顺序). 这个函数只在
+    调用方没传时兜底 —— 后一句同样透露了上文语气, 比完全没有上下文强, 但召回不是
+    按它测的.
     """
     for line in reversed((context_conversation or "").splitlines()):
         prefix, sep, content = line.partition(": ")
@@ -212,6 +220,7 @@ async def process_memory_pipeline(
     side: Side = "user",
     workspace_id: str | None = None,
     evidence_message_ids: list[str] | None = None,
+    prev_ai_line: str | None = None,
 ) -> list[str]:
     """Run the full memory extraction and storage pipeline for one side.
 
@@ -242,7 +251,11 @@ async def process_memory_pipeline(
         try:
             if not await should_memorize(
                 new_conversation, side=side,
-                prev_ai=_last_ai_line(context_conversation),
+                prev_ai=(
+                    prev_ai_line
+                    if prev_ai_line is not None
+                    else _last_ai_line(context_conversation)
+                ),
             ):
                 logger.debug(f"[MEM-{side}] pre-filter: 不记")
                 return []
