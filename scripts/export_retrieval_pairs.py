@@ -62,6 +62,10 @@ async def main() -> None:
                 "source": h.get("source"),
                 "importance": float(h.get("importance") or 0.0),
                 "level": h.get("level"),
+                # provenance 区分"建号时生成的人设"和"聊天里学到的事实" —— 这两类
+                # 的有用率差一倍多, 不带上就没法回答分层策略对不对
+                # (见 evals/memory_tiering).
+                "provenance": h.get("provenance") or "init",
                 "current_score": (
                     float(h["current_score"]) if h.get("current_score") is not None else None
                 ),
