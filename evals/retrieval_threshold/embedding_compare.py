@@ -14,6 +14,22 @@ top3 44% (完美排序是 76%). 阈值也一样: spec 的 0.7 对 bge-m3 太严,
 dashscope 的 v3/v4 都是 1024 维, 跟 bge-m3 一致, 所以换模型不动 pgvector 的列
 定义, 只要重算存量向量.
 
+已测过并落选的本地模型 (2026-07, 免得重复劳动):
+
+    模型                       评审1 top3/5   评审2 top3/5   维度
+    qwen3-embedding:0.6b       50% / 73%     50% / 69%     1024   ← 本地最佳
+    bge-m3 (现网)               44% / 64%     42% / 61%     1024
+    embeddinggemma             40% / 59%     44% / 61%      768   落选
+    snowflake-arctic-embed2    37% / 57%     42% / 63%     1024   落选
+    granite-embedding          Ollama 拒绝提供 embedding 接口 (HTTP 500)
+
+后两个在两套标签下都不如 bge-m3. embeddinggemma 还是 768 维, 换它除了重算向量
+还要改 pgvector 列定义.
+
+尚未测的一个: ritrieve_zh_v1 (0.3B, 中文专用) C-MTEB 检索 76.97, 高于
+qwen3-embedding-0.6B 的 71.03 且体积减半, 但 Ollama 无 manifest, 要自己转 GGUF.
+换完之后若检索质量仍不够, 这是下一个值得试的.
+
 用法:
     python -m evals.retrieval_threshold.embedding_compare --judged /tmp/budget.json
 """
