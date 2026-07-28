@@ -66,6 +66,9 @@ class FetchedContext:
 
     memory_relevance: str = "medium"        # "weak" | "medium" | "strong"
     classified_memories: list | None = None
+    # 进了检索候选但没能注入 prompt 的记忆 ID。惰性衰减把它当弱使用信号
+    # (lifecycle/value.py 的 α): 沾过边的记忆比彻底没人问津的多留一会儿。
+    candidate_ids: list[str] = field(default_factory=list)
     memory_strings: list[str] | None = None
     graph_context: dict | None = None
     user_emotion: dict | None = None        # 用户情绪标签: emotion/intensity/confidence
@@ -738,6 +741,10 @@ async def fetch_parallel_context(
     return FetchedContext(
         memory_relevance=memory_relevance,
         classified_memories=classified_memories,
+        candidate_ids=(
+            list(retrieval_result.get("candidate_ids") or [])
+            if isinstance(retrieval_result, dict) else []
+        ),
         memory_strings=memory_strings,
         graph_context=graph_context,
         user_emotion=user_emotion,

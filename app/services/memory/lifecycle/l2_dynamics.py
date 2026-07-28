@@ -1,4 +1,21 @@
-"""L2 dynamic scoring and level adjustment.
+"""L2 动态分与层级调整 —— **已退为兜底路径**.
+
+主路径现在是 `lifecycle/lazy_update.py`: 记忆被检索到的那一刻就地更新效用值。
+改动的原因是这个 cron 的两个结构性问题都在生产上兑现了:
+
+  1. 它因为一处 SQL 类型错死了几个月, 期间所有 L2 零衰减、零升降级, 无任何告警。
+     整个记忆生命周期押在一个夜间任务上, 它一停就是彻底静止。
+  2. 每晚从不可变的初始 importance 重算, 分数不累积 —— "用过一百次"和"用过十次"
+     落在同一个频率档里, 使用信号被档位抹平。
+
+这个模块保留下来是因为惰性更新有个盲区: 彻底没人问津的记忆永远不会被检索到,
+也就永远不会被更新 —— 而那恰恰是最该衰减的一批。`sweep_stale_values` 补这个洞。
+下面的旧公式仍在跑, 但它现在只是第二道保险: 即使完全不跑, 活跃记忆的值依然正确。
+
+新增记忆或需要改公式时, 改 `lifecycle/value.py` —— 那里是效用值的唯一定义处,
+SQL 与离线推演都从它取常数。
+
+--- 以下为旧实现的说明 ---
 
 Product spec §1.5.2: L2 memories have a "current score" that decays with
 time and grows with mention frequency. Periodically (daily cron) we
@@ -87,24 +104,18 @@ def _quality_factor(corrections_1y: int, evidence_links: int) -> float:
 
 
 async def _check_promotion_conditions(mem, side: str) -> bool:
-    """Spec §1.5.2 extra conditions for L2→L1 promotion:
-    - User expressed importance (changelog contains 'user_emphasized')
-    - No conflict with existing L1 memories on same side (user vs ai)
-    """
-    # memoryId 是全局唯一 UUID, defensive scope 防止未来跨 workspace 串:
-    # 加 userId + workspaceId 过滤, workspaceId=None 时 Prisma 会生成 IS NULL,
-    # 与 mem 自身 workspaceId=None 的情况一致.
-    emphasis_count = await db.memorychangelog.count(
-        where={
-            "memoryId": mem.id,
-            "operation": "user_emphasized",
-            "userId": mem.userId,
-            "workspaceId": mem.workspaceId,
-        },
-    )
-    if emphasis_count == 0:
-        return False
+    """L2→L1 晋升的**结构性**闸门 (值本身够不够由调用方判定)。
 
+    spec §1.5.2 字面还要求"用户曾表达过重要" (changelog 里有 user_emphasized)。
+    那一条已删除: 它和分数、频率是 AND 关系, 而 user_emphasized 只有在用户说出
+    "一定要记住"这类话时才写入 —— 生产上历史晋升次数为 0, 等于根本没有晋升路径。
+    一条被反复调用、始终有用的记忆升不上 L1, 分层就只剩下降通道。
+
+    改为纯值驱动后, "用户强调过"仍然有用, 只是改在录入期抬高 importance, 而不是
+    在晋升期当一票否决。
+
+    这里保留的是真正的结构性约束: 同一 singleton 子类不能出现第二条 L1。
+    """
     # Side-aware L1 conflict check (B5 fix): query the same table the memory
     # belongs to. A user-side L2 should only check user L1 conflicts; same for ai.
     # workspaceId 过滤确保同一 user 的不同 agent (workspace) L1 不会被误判冲突,

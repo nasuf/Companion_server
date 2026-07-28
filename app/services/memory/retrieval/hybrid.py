@@ -395,10 +395,16 @@ async def hybrid_retrieve(
     # Plain text list for consumers that don't need ClassifiedMemory metadata
     memory_strings = [m.text for m in classified_memories] if classified_memories else None
 
+    # 候选集 ID 供惰性衰减用作弱使用信号 (lifecycle/value.py 的 α): 进了候选说明
+    # 这条记忆至少跟本轮话题沾边, 值得比"完全没人问津"多留一会儿。注入集 (强信号)
+    # 调用方从 memories 自取。只带 ID 不带正文, 避免把整个候选集塞进缓存。
     result = {
         "memories": classified_memories if classified_memories else None,
         "memory_strings": memory_strings,
         "graph_context": None,
+        "candidate_ids": [
+            mid for mid in (m.get("id") for m in all_candidates) if mid
+        ],
     }
 
     # Cache the result. Phase 2.4: cache write key 必须跟 GET 用同一个 cache_key

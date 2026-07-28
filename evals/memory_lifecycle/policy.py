@@ -132,21 +132,24 @@ class CurrentPolicy(Policy):
 
 
 # ── AMV-L 式策略 ──────────────────────────────────────────────────────────
+#
+# 常数与转移规则**直接从生产模块取**, 不在这里重新定义一份。推演的全部价值在于
+# 它预测的是即将上线的那套规则; 两边各写一份常数, 只要有一处改了没同步, 闸门就
+# 在为一个不存在的系统背书。
 
-# 半衰期 180 天 → λ = ln2/180。选它是为了跟现行策略的衰减速度大致对齐
-# (现行: 0.86 的记忆约 730 天跌破 0.50), 这样对比测的是**机制差异**而不是
-# "新策略调得更激进所以看起来不同"。
-AMVL_HALF_LIFE_DAYS = 180.0
-AMVL_LAMBDA = math.log(2) / AMVL_HALF_LIFE_DAYS
-AMVL_ACCESS_REWARD = 0.05      # α: 进入候选集
-AMVL_CONTRIB_REWARD = 0.12     # β: 真正被注入 prompt (论文要求 β ≥ α)
-AMVL_VALUE_MAX = 1.0
-
-# 滞回: 上行阈值高于下行阈值, 防止在边界反复横跳
-AMVL_HOT_UP = 0.85
-AMVL_HOT_DOWN = 0.78
-AMVL_WARM_UP = 0.50
-AMVL_WARM_DOWN = 0.42
+from app.services.memory.lifecycle.value import (  # noqa: E402
+    ACCESS_CEILING as AMVL_ACCESS_CEILING,
+    ACCESS_REWARD as AMVL_ACCESS_REWARD,
+    CONTRIBUTION_REWARD as AMVL_CONTRIB_REWARD,
+    DECAY_LAMBDA as AMVL_LAMBDA,
+    HALF_LIFE_DAYS as AMVL_HALF_LIFE_DAYS,
+    HOT_DEMOTE_AT as AMVL_HOT_DOWN,
+    HOT_PROMOTE_AT as AMVL_HOT_UP,
+    VALUE_MAX as AMVL_VALUE_MAX,
+    WARM_DEMOTE_AT as AMVL_WARM_DOWN,
+    WARM_PROMOTE_AT as AMVL_WARM_UP,
+    apply_usage as _production_apply_usage,
+)
 
 
 @dataclass(frozen=True)
@@ -167,33 +170,13 @@ class AmvlPolicy(Policy):
 
     def step(self, state: MemoryState, days: float, accessed: bool,
              contributed: bool) -> MemoryState:
-        value = state.value * math.exp(-AMVL_LAMBDA * days)
-        if accessed:
-            value += AMVL_ACCESS_REWARD
-        if contributed:
-            value += AMVL_CONTRIB_REWARD
-        value = min(value, AMVL_VALUE_MAX)
-
-        # 滞回: 只有越过"上行阈值"才升, 跌破"下行阈值"才降
-        level = state.level
-        if state.protected:
-            # 身份事实永不降级 —— 见 MemoryState.protected 的说明
-            return replace(state, value=value, level=1, days_since_access=0.0
-                           if accessed else state.days_since_access + days,
-                           mentions=state.mentions + (1 if accessed else 0))
-        if level == 1 and value < AMVL_HOT_DOWN:
-            level = 2
-        elif level == 2:
-            if value >= AMVL_HOT_UP:
-                level = 1
-            elif value < AMVL_WARM_DOWN:
-                level = 3
-        elif level == 3 and value >= AMVL_WARM_UP:
-            # 现行策略没有的路径: 冷记忆被重新用到可以回到 warm
-            level = 2
-
+        # 直接调生产的纯函数 —— 推演必须演的是真的要上线的那套规则。
+        result = _production_apply_usage(
+            value=state.value, level=state.level, days_idle=days,
+            accessed=accessed, contributed=contributed, protected=state.protected,
+        )
         return replace(
-            state, value=value, level=level,
+            state, value=result.value, level=result.level,
             days_since_access=0.0 if accessed else state.days_since_access + days,
             mentions=state.mentions + (1 if accessed else 0),
         )

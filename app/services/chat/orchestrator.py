@@ -58,6 +58,7 @@ from app.services.memory.interaction.contradiction import (
 from app.services.memory.interaction.retrieval_feedback import (
     resolve_retrieval_feedback_correction,
 )
+from app.services.memory.lifecycle.lazy_update import record_memory_usage
 from app.services.memory.retrieval.access_log import log_memory_access
 from app.services.topic import push_topic
 from app.services.schedule_domain.time_service import build_time_context
@@ -979,6 +980,10 @@ async def stream_chat_response(
                 _fire_background(
                     log_memory_access(user_id, crisis_accessed_ids, workspace_id=workspace_id)
                 )
+                # 危机回合同样要喂效用值 —— 这条路径拿到的记忆恰恰是最该保住的。
+                _fire_background(
+                    record_memory_usage(contributed_ids=crisis_accessed_ids)
+                )
             if detected_intent.metadata.get("followup"):
                 async for evt in handle_crisis_followup(
                     user_message, sc_ctx,
@@ -1366,12 +1371,26 @@ async def stream_chat_response(
             )
             return build_chat_messages(system_prompt, reply_messages)
 
-        # Log memory access for L2 frequency tracking (background, non-blocking)
-        accessed_ids: list[str] = []
+        # 记忆使用打点 (后台, 不阻塞回复)。两条线并行:
+        #   changelog  审计与 admin 展示, 只记真正注入的
+        #   效用值     惰性衰减的输入, 注入是强信号、仅进候选是弱信号
+        # 后者取代了原先靠夜间 cron 数 changelog 的做法 —— 那个 cron 死了几个月,
+        # 期间所有记忆零衰减且无人察觉。
+        injected_ids: list[str] = []
         if classified_memories:
-            accessed_ids.extend(getattr(m, "id", "") for m in classified_memories if getattr(m, "id", ""))
-        if accessed_ids:
-            _fire_background(log_memory_access(user_id, accessed_ids, workspace_id=workspace_id))
+            injected_ids.extend(
+                getattr(m, "id", "") for m in classified_memories if getattr(m, "id", "")
+            )
+        candidate_only = [
+            mid for mid in getattr(fetched, "candidate_ids", []) or []
+            if mid and mid not in set(injected_ids)
+        ]
+        if injected_ids:
+            _fire_background(log_memory_access(user_id, injected_ids, workspace_id=workspace_id))
+        if injected_ids or candidate_only:
+            _fire_background(record_memory_usage(
+                contributed_ids=injected_ids, accessed_ids=candidate_only,
+            ))
 
         # spec §6 异步回复机制只规定延迟分布, 没"对方正在输入"占位事件; 早期作为
         # UX 装饰加的, 关闭后前端直接看到流式 token 即可, 无视觉退化.

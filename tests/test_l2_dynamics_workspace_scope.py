@@ -25,20 +25,24 @@ def _mem(**kwargs):
 
 
 @pytest.mark.asyncio
-async def test_emphasis_count_query_scoped_by_user_and_workspace():
+async def test_promotion_no_longer_requires_user_emphasis():
+    """晋升改为纯值驱动 —— "用户曾说过一定要记住" 不再是一票否决项。
+
+    旧规则把它和分数、频率做 AND, 而 user_emphasized 只在用户说出"一定要记住"
+    这类话时才写入, 生产上历史晋升次数为 0 —— 等于根本没有晋升路径, 分层只剩
+    下降通道。用户强调仍然有用, 只是改在录入期抬高 importance。
+    """
     from app.services.memory.lifecycle.l2_dynamics import _check_promotion_conditions
 
     mem = _mem()
-    count_mock = AsyncMock(return_value=0)
+    count_mock = AsyncMock(return_value=0)  # 从未被强调过
     with patch("app.services.memory.lifecycle.l2_dynamics.db") as mock_db:
         mock_db.memorychangelog = MagicMock(count=count_mock)
-        await _check_promotion_conditions(mem, side="user")
+        mock_db.usermemory = MagicMock(find_many=AsyncMock(return_value=[]))
+        allowed = await _check_promotion_conditions(mem, side="user")
 
-    where = count_mock.call_args.kwargs["where"]
-    assert where["memoryId"] == "mem-1"
-    assert where["operation"] == "user_emphasized"
-    assert where["userId"] == "user-1"
-    assert where["workspaceId"] == "ws-A"
+    assert allowed is True, "从未被强调的记忆仍被拒绝晋升"
+    count_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

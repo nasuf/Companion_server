@@ -894,6 +894,11 @@ model UserMemory {
   // 现算写入. importance 保持"初始重要度"不可变 — 旧实现把动态分回写 importance
   // 造成逐日复利 (向上通胀/向下螺旋). 检索排序读 COALESCE(current_score, importance).
   currentScore  Float?         @map("current_score")
+  // 惰性衰减 (AMV-L §3.2) 的时间基准: 上次重算 currentScore 的时刻。
+  // 衰减量取决于经过的时间, 所以必须知道"上次算是什么时候"。不能复用 updatedAt
+  // —— 那个字段被 admin 编辑/矛盾处理/访问打点等一堆写入刷新, 每刷一次 Δt 归零,
+  // 记忆就永远衰减不下去。NULL 视为从未算过, 退回 createdAt。
+  valueUpdatedAt DateTime?     @map("value_updated_at")
   // 记忆出处 (Phase 2): profile_seed / user_stated / ai_authored / daily_summary /
   // consolidated. 防御规则从"按类别猜出处"变"按列查": seed 行禁止写入期改写,
   // ai_authored 永不进人设类, daily_summary 供整合任务优先淘汰. NULL = 旧数据.
@@ -928,6 +933,11 @@ model AiMemory {
   importance    Float          @default(0.5)
   // Spec §1.5.2 L2 动态分 (同 UserMemory.currentScore, 注释见上).
   currentScore  Float?         @map("current_score")
+  // 惰性衰减 (AMV-L §3.2) 的时间基准: 上次重算 currentScore 的时刻。
+  // 衰减量取决于经过的时间, 所以必须知道"上次算是什么时候"。不能复用 updatedAt
+  // —— 那个字段被 admin 编辑/矛盾处理/访问打点等一堆写入刷新, 每刷一次 Δt 归零,
+  // 记忆就永远衰减不下去。NULL 视为从未算过, 退回 createdAt。
+  valueUpdatedAt DateTime?     @map("value_updated_at")
   // 记忆出处 (同 UserMemory.provenance, 注释见上).
   provenance    String?        @map("provenance")
   mentionCount  Int            @default(0) @map("mention_count")
