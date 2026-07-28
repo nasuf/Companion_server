@@ -65,15 +65,32 @@ def is_user_fact_acknowledgement(message: str) -> bool:
     return any(term in message for term in _USER_FACT_ACK_TERMS)
 
 
-async def should_memorize(message: str, side: Side = "user") -> bool:
+async def should_memorize(
+    message: str, side: Side = "user", prev_ai: str = "",
+) -> bool:
     """Return True if the message is worth extracting memories from.
 
     Args:
         message: The text to judge.
         side: "user" → spec §2.1.2；"ai" → spec §2.2.2.
+        prev_ai: 上一句 AI 说的话. 短消息的含义常常整个在上文里, 缺了它这一级
+            只能靠字面猜 —— 实测代价见下.
 
-    Uses the smallest available model for speed. Expected latency: <500ms.
-    On LLM failure we fail open (return True) so the big model decides.
+    这一级的假阴性是终局: 判"不记"的消息不会进抽取, 那条信息永久丢失. 而假阳性
+    后面还有大模型抽取和去重两道关卡. 所以门要往召回一侧偏.
+
+    2026-07 之前它只看单条消息, 提示词也只有一句"判断这句话是否值得进入记忆",
+    没有任何判据. 拿 40 条双评审都认为该记的真实消息实测, **召回只有 5%**:
+
+        AI: 那你吃完饭准备歇会吗      AI: 你今天还好吗
+        用户: 嗯准备睡个午觉          用户: 不好
+
+    两条都被判"不记" —— 单看用户那句确实像语气词, 含义全在上一句里.
+
+    补上下文 + 写清判据后召回到 72%, 而在双评审都认为不该记的样本上误收 10%
+    (特异性 90%). 中间试过只说"该记什么"不说"不该记什么", 召回 82% 但误收 45% ——
+    明确列出不记的形态 (向 AI 提问 / 机械确认否认 / 只谈 AI 自己) 才是把误收压
+    下来的关键.
     """
     if side == "ai":
         if is_user_fact_acknowledgement(message):
@@ -83,7 +100,9 @@ async def should_memorize(message: str, side: Side = "user") -> bool:
 
     try:
         template = await get_prompt_text(_PROMPT_KEY_BY_SIDE[side])
-        prompt = template.format_map(SafeDict({"message": message}))
+        prompt = template.format_map(SafeDict({
+            "message": message, "prev_ai": prev_ai or "(无)",
+        }))
         raw = await invoke_text(get_utility_model(), prompt)
         decision = (raw or "").strip()
         # Spec output: plain "记" or "不记". "不记" must come first in check

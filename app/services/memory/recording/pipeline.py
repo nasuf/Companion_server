@@ -190,6 +190,19 @@ def _coerce_importance(raw: object) -> float:
     return min(1.0, max(0.0, value))
 
 
+def _last_ai_line(context_conversation: str) -> str:
+    """从 `role: content` 格式的上下文里取最后一句 AI 的话.
+
+    预筛判短消息时全靠它: "不好" 单看是语气词, 接在 "你今天还好吗" 后面是情绪
+    记录. 取不到就传空, 预筛会退回只看单条消息 (召回会掉, 但不会出错).
+    """
+    for line in reversed((context_conversation or "").splitlines()):
+        prefix, sep, content = line.partition(": ")
+        if sep and prefix.strip() == "assistant" and content.strip():
+            return content.strip()
+    return ""
+
+
 async def process_memory_pipeline(
     user_id: str,
     new_conversation: str,
@@ -227,7 +240,10 @@ async def process_memory_pipeline(
     from app.config import settings
     if settings.enable_memory_prefilter:
         try:
-            if not await should_memorize(new_conversation, side=side):
+            if not await should_memorize(
+                new_conversation, side=side,
+                prev_ai=_last_ai_line(context_conversation),
+            ):
                 logger.debug(f"[MEM-{side}] pre-filter: 不记")
                 return []
         except Exception as e:
