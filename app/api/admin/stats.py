@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.config import settings
@@ -1586,3 +1586,46 @@ async def resources(_: dict = Depends(require_admin_jwt)):
         "database": database,
         "redis": redis_metrics,
     }
+
+
+# ── 数据库备份 (资源监控 → 数据库) ──────────────────────────────────────────
+# 定时备份跑在宿主机 cron 上, 不在应用进程里 —— 备份最需要生效的时刻正是应用出
+# 问题的时候。这几个接口只做后台界面要的查看 / 手动触发 / 删除。
+
+
+@router.get("/db-backups")
+async def list_db_backups(_: dict = Depends(require_admin_jwt)):
+    from app.services.ops import db_backup
+
+    state = db_backup.availability()
+    return {
+        **state,
+        "backups": [b.as_dict() for b in db_backup.list_backups()],
+    }
+
+
+@router.post("/db-backups")
+async def create_db_backup(_: dict = Depends(require_admin_jwt)):
+    from app.services.ops import db_backup
+
+    try:
+        created = await db_backup.create_backup()
+    except RuntimeError as exc:
+        # 环境不满足 / 正在跑 / dump 校验没过 —— 都是可预期的拒绝, 不是 500
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="备份超时") from exc
+    return {"backup": created.as_dict()}
+
+
+@router.delete("/db-backups/{name}")
+async def delete_db_backup(name: str, _: dict = Depends(require_admin_jwt)):
+    from app.services.ops import db_backup
+
+    try:
+        db_backup.delete_backup(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="备份不存在") from exc
+    return {"ok": True}

@@ -31,7 +31,8 @@ RUN set -eu; \
             build-essential \
             ca-certificates \
             curl \
-            ffmpeg; \
+            ffmpeg \
+            postgresql-client; \
     }; \
     if ! install_deps; then \
         echo "primary mirror failed; switching to fallback sources" >&2; \
