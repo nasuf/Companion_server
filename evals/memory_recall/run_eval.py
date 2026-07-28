@@ -29,7 +29,7 @@ from app.services.memory.retrieval.ranking import rank_memory_candidate
 from evals.memory_recall.cases import CASES, SEED_BANK, RecallCase, SeedMemory
 
 # Mirrors hybrid.py's vector-arm gate — keep in sync (guard test exists).
-SIMILARITY_THRESHOLD = 0.50
+SIMILARITY_THRESHOLD = 0.35
 
 _CACHE_PATH = Path(__file__).parent / ".emb_cache.json"
 
@@ -181,7 +181,13 @@ async def _embed_via_raw_endpoint(texts: list[str]) -> list[list[float]]:
 
 
 def _cached_ollama_embedder() -> Callable[[list[str]], Awaitable[list[list[float]]]]:
-    """Real bge-m3 embeddings with an on-disk cache keyed by text hash."""
+    """Real embeddings with an on-disk cache keyed by model **and** text.
+
+    The model belongs in the key. Keyed by text alone, switching embedding
+    models would silently serve the old model's vectors and the eval would
+    report numbers for a model it is not running.
+    """
+    from app.config import settings
     from app.services.llm.models import get_embedding_model
 
     cache: dict[str, list[float]] = {}
@@ -192,7 +198,10 @@ def _cached_ollama_embedder() -> Callable[[list[str]], Awaitable[list[list[float
             cache = {}
 
     async def embed(texts: list[str]) -> list[list[float]]:
-        keys = [hashlib.md5(t.encode()).hexdigest() for t in texts]
+        model_name = settings.embedding_model
+        keys = [
+            hashlib.md5(f"{model_name}\x00{t}".encode()).hexdigest() for t in texts
+        ]
         pending = [t for t, k in zip(texts, keys) if k not in cache]
         if pending:
             try:

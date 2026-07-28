@@ -127,7 +127,6 @@ jobs:
             AXIOM_DATASET=${{ vars.AXIOM_DATASET }}
             AXIOM_ORG_ID=${{ vars.AXIOM_ORG_ID }}
             AXIOM_LOG_LEVEL=${{ vars.AXIOM_LOG_LEVEL }}
-            EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL }}
             EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             PROACTIVE_PROCESSING_TIMEOUT_S=${{ vars.PROACTIVE_PROCESSING_TIMEOUT_S || '300' }}
@@ -172,7 +171,7 @@ jobs:
             NOTIFICATION_DISPATCH_BATCH_SIZE=${{ vars.NOTIFICATION_DISPATCH_BATCH_SIZE || '50' }}
             EOF
 
-            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_MODEL EMBEDDING_PROVIDER DASHSCOPE_API_KEY DASHSCOPE_ASR_ENDPOINT DASHSCOPE_ASR_MODEL JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES ARK_API_KEY ARK_BASE_URL DOUBAO_VISION_MODEL; do
+            for key in POSTGRES_PASSWORD DATABASE_URL MIGRATION_DATABASE_URL REDIS_URL JWT_SECRET CORS_ALLOWED_ORIGINS OLLAMA_BASE_URL EMBEDDING_PROVIDER DASHSCOPE_API_KEY DASHSCOPE_ASR_ENDPOINT DASHSCOPE_ASR_MODEL JAMENDO_CLIENT_ID JAMENDO_BASE_URL JAMENDO_DEFAULT_LIBRARIES ARK_API_KEY ARK_BASE_URL DOUBAO_VISION_MODEL; do
               value="$(grep -E "^${key}=" .env | cut -d= -f2-)"
               if [ -z "$value" ]; then
                 echo "$key is required for production deploy"
@@ -230,7 +229,16 @@ jobs:
             echo "==> Starting data services"
             $DOCKER compose -f docker-compose.deploy.yml up -d postgres redis ollama
 
-            EMBEDDING_MODEL_VALUE="$(grep -E '^EMBEDDING_MODEL=' .env | cut -d= -f2-)"
+            # embedding 模型由代码决定, 不再走 CI 变量: 它跟十个写死在代码里的
+            # 相似度阈值是一整套, 能被单独改动正是要防的事故形态 (改了模型没重标
+            # 阈值 → 检索静默失准, 日志上看不出来). 单一真相源在
+            # app/services/memory/config.py:CALIBRATED_EMBEDDING_MODEL.
+            EMBEDDING_MODEL_VALUE="$(sed -n 's/^CALIBRATED_EMBEDDING_MODEL = "\(.*\)"$/\1/p' app/services/memory/config.py)"
+            if [ -z "$EMBEDDING_MODEL_VALUE" ]; then
+              echo "Could not read CALIBRATED_EMBEDDING_MODEL from app/services/memory/config.py"
+              exit 1
+            fi
+            echo "==> Embedding model (from code): ${EMBEDDING_MODEL_VALUE}"
             if ! $DOCKER compose -f docker-compose.deploy.yml exec -T ollama ollama list | awk 'NR > 1 {print $1}' | grep -Eq "^${EMBEDDING_MODEL_VALUE}(:|$)"; then
               echo "==> Pulling embedding model: ${EMBEDDING_MODEL_VALUE}"
               $DOCKER compose -f docker-compose.deploy.yml exec -T ollama ollama pull "$EMBEDDING_MODEL_VALUE"

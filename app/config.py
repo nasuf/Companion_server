@@ -86,8 +86,10 @@ class Settings(BaseSettings):
     remote_chat_model: str = "qwen3.5-plus"
     remote_small_model: str = "qwen3.5-flash"
 
-    # Embedding (always via Ollama, set EMBEDDING_MODEL in .env)
-    embedding_model: str = "bge-m3"
+    # Embedding (always via Ollama, set EMBEDDING_MODEL in .env).
+    # 换模型必须同时重算存量向量并重标相似度阈值 —— 两个模型的向量不在同一
+    # 空间, 混用等于拿噪声排序. 步骤见 scripts/reembed_memories.py.
+    embedding_model: str = "qwen3-embedding:0.6b"
     embedding_dimensions: int = 1024
 
     # Advanced / legacy overrides

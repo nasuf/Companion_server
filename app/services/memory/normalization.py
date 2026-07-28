@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 # Cache for subcategory embeddings to avoid repeated API calls
 _SUB_EMBEDDING_CACHE: dict[tuple[str, str], list[float]] = {}
 
-SIMILARITY_THRESHOLD = 0.55
+# 子类名之间的语义匹配门. 0.55 → 0.68: 2026-07 换 embedding 时重标. 注意方向
+# 跟检索侧相反 —— 短类目名之间 qwen3-embedding 给的分普遍比 bge-m3 **高**
+# (均值 0.474 → 0.506), 所以这个阈值要往上抬而不是往下降.
+SIMILARITY_THRESHOLD = 0.68
 
 # ── Keyword-based category hints ──
 # High-confidence keywords in memory summaries that indicate a specific category.

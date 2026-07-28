@@ -31,6 +31,27 @@ async def _timed(name: str, coro):
 
 
 @asynccontextmanager
+def _warn_if_embedding_model_uncalibrated() -> None:
+    """EMBEDDING_MODEL 与代码里标定阈值所针对的模型不一致时大声告警.
+
+    这两处会分开漂移: 模型来自环境变量 (部署时由 CI 变量写进 .env), 而十个相似度
+    阈值写死在代码里. 对不上不会报错, 只会让检索悄悄失准 —— 阈值配错一端就是
+    噪声灌进 prompt, 配错另一端就是整轮失忆, 两种都不会出现在日志里.
+    """
+    from app.services.memory.config import CALIBRATED_EMBEDDING_MODEL
+
+    actual = settings.embedding_model
+    if actual != CALIBRATED_EMBEDDING_MODEL:
+        logger.error(
+            "EMBEDDING MODEL MISMATCH: running %r but similarity thresholds are "
+            "calibrated for %r. Retrieval quality is silently degraded until the "
+            "two agree — either set EMBEDDING_MODEL to the calibrated model or "
+            "re-derive the thresholds (scripts/calibrate_embedding_thresholds.py) "
+            "and re-embed the corpus.",
+            actual, CALIBRATED_EMBEDDING_MODEL,
+        )
+
+
 async def lifespan(app: FastAPI):
     t_start = time.monotonic()
     logger.info("Starting up...")
@@ -39,6 +60,7 @@ async def lifespan(app: FastAPI):
 
     try:
         settings.validate_security_config()
+        _warn_if_embedding_model_uncalibrated()
 
         # Phase 1: Connect to all services in parallel
         # DB 是硬依赖, 启动失败直接 crash; Redis 软依赖, 失败降级到 readonly mode

@@ -188,14 +188,28 @@ class TestRelationshipRecallGate:
             hybrid_mod, "search_related_memories_for_query", AsyncMock(return_value=[]),
         )
 
+    @staticmethod
+    def _sim_between_gates() -> float:
+        """A similarity that clears the relationship gate but not the ordinary one.
+
+        Derived rather than hardcoded: both gates get re-derived whenever the
+        embedding model changes, and a literal picked for the old scale silently
+        lands on the wrong side afterwards.
+        """
+        from app.services.memory.retrieval import hybrid as hybrid_mod
+
+        return round(
+            (hybrid_mod._RELATIONSHIP_RECALL_THRESHOLD
+             + hybrid_mod._SIMILARITY_THRESHOLD) / 2, 3
+        )
+
     @pytest.mark.asyncio
     async def test_low_sim_interaction_survives_shared_history_query(self, monkeypatch):
         from app.services.memory.retrieval import hybrid as hybrid_mod
         self._patch_common(monkeypatch, hybrid_mod)
-        # sim 0.42 is below the normal 0.50 gate but above the relationship gate.
         monkeypatch.setattr(
             hybrid_mod, "search_similar",
-            AsyncMock(return_value=[self._interaction_row(0.42)]),
+            AsyncMock(return_value=[self._interaction_row(self._sim_between_gates())]),
         )
         result = await hybrid_mod.hybrid_retrieve(
             "还记得我们第一次聊天吗", "u1", workspace_id="ws1",
@@ -208,9 +222,9 @@ class TestRelationshipRecallGate:
         self._patch_common(monkeypatch, hybrid_mod)
         monkeypatch.setattr(
             hybrid_mod, "search_similar",
-            AsyncMock(return_value=[self._interaction_row(0.42)]),
+            AsyncMock(return_value=[self._interaction_row(self._sim_between_gates())]),
         )
-        # Not a shared-history query → normal 0.50 gate applies → dropped.
+        # Not a shared-history query → the ordinary gate applies → dropped.
         result = await hybrid_mod.hybrid_retrieve(
             "今天晚饭吃什么好", "u1", workspace_id="ws1",
         )

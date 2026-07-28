@@ -16,6 +16,9 @@ from app.services.memory.retrieval.vector_search import search_similar
 logger = logging.getLogger(__name__)
 
 
+_L3_SIMILARITY_FLOOR = 0.52
+
+
 def _memory_to_dict(m, similarity: float = 0.0) -> dict:
     """Convert a MemoryRecord or Prisma object to a dict."""
     return {
@@ -165,7 +168,9 @@ async def _find_awakening_candidates(
 
         if mid in exclude_ids or level != 3:
             continue
-        if similarity < 0.6:
+        # L3 唤醒门. 0.6 → 0.52: 2026-07 换 embedding 时按旧分布 98.7% 分位重标
+        # (qwen3-embedding 把不相关文本对压得比 bge-m3 更低).
+        if similarity < _L3_SIMILARITY_FLOOR:
             continue
 
         # Mark as fuzzy recall
