@@ -26,9 +26,23 @@ dashscope 的 v3/v4 都是 1024 维, 跟 bge-m3 一致, 所以换模型不动 pg
 后两个在两套标签下都不如 bge-m3. embeddinggemma 还是 768 维, 换它除了重算向量
 还要改 pgvector 列定义.
 
-尚未测的一个: ritrieve_zh_v1 (0.3B, 中文专用) C-MTEB 检索 76.97, 高于
-qwen3-embedding-0.6B 的 71.03 且体积减半, 但 Ollama 无 manifest, 要自己转 GGUF.
-换完之后若检索质量仍不够, 这是下一个值得试的.
+**ritrieve_zh_v1 也测了, 结果是公开榜单会把人带偏的活证据.** 它在 C-MTEB 检索
+上是 76.97, 高于 qwen3-embedding-0.6B 的 71.03, 但在我们的任务上比现网的 bge-m3
+还差 (评审1 top3 38% vs 44%):
+
+    模型                     全体均值   标准差   信噪比 (间距/标准差)
+    text-embedding-v4        0.401   0.100   1.00
+    qwen3-embedding:0.6b     0.457   0.086   0.90
+    bge-m3                   0.573   0.058   0.71
+    ritrieve_zh_v1           0.710   0.061   0.13   ← 几乎无信号
+
+原因看均值就明白: 它把所有文本挤进 0.5-0.97 的高相似度带, 什么跟什么都很像.
+这个模型是为"查询 → 文档"这类长短不对称检索蒸馏的, 碰上我们这种短对话句 ↔
+短记忆事实的对称短文本就饱和了. 用法没错 —— 官方 README 的三句示例被逐位复现
+到小数点后 5 位, 且 README 明说该模型不需要指令前缀.
+
+结论: C-MTEB 分数不能直接迁移到这个任务上, 榜单只配用来圈候选, 选型必须回到
+自有标注. 顺带一提, 它输出 1792 维, 换它还要改 pgvector 列定义.
 
 用法:
     python -m evals.retrieval_threshold.embedding_compare --judged /tmp/budget.json
