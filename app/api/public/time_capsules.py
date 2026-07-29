@@ -10,6 +10,7 @@ import time as time_module
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from app.api.idempotency import claim_submission
 from app.api.jwt_auth import require_user
 from app.db import db
 from app.models.time_capsule import (
@@ -767,11 +768,15 @@ async def open_capsule(
     if state == "pending":
         raise HTTPException(status_code=400, detail="Capsule is not ready to open")
     if state != "opened":
+        # opened_at IS NULL 写进 WHERE 而不是只靠上面的 state 判断: 两个并发的开启
+        # 请求都会通过那个判断, 然后各写一次 NOW() —— 后写的会把开启时刻往后挪。
+        # 这里没有一次性副作用, 所以后果只是时间戳漂移; 但把"只开一次"表达在 SQL
+        # 里, 以后加通知/奖励时就不会踩坑。
         await db.execute_raw(
             """
             UPDATE time_capsules
             SET opened_at = NOW(), updated_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND opened_at IS NULL
             """,
             capsule_id,
         )
@@ -805,20 +810,44 @@ async def create_capsule(
     content = data.content.strip()
     media = _normalize_media(data.media, user_id=user["sub"])
     logger.info("[capsule:create] normalized elapsed_ms=%s", _elapsed_ms(started))
-    capsule_id = str(uuid.uuid4())
-    await _insert_capsule_raw(
-        capsule_id=capsule_id,
-        user_id=user["sub"],
-        agent_id=data.agent_id,
-        workspace_id=data.workspace_id,
-        title=(data.title or _title_from_content(content)).strip()[:80],
-        content=content,
-        media=media,
-        skin=_normalize_skin(data.skin),
-        status=status,
-        open_date=open_date,
-        sealed_at=sealed_at,
+
+    # 防双击/重试建出两条一模一样的胶囊。指纹按归一化之后的内容算 —— 归一化前的
+    # 原始 payload 可能因为字段顺序或空白差异而算出不同指纹, 去重就失效了。
+    guard = await claim_submission(
+        "capsule.create", user["sub"],
+        {"agent": data.agent_id, "content": content, "status": status,
+         "open_date": str(open_date), "media": media},
     )
+    if guard.is_duplicate:
+        prior = await _fetch_capsule_light(guard.duplicate_of or "")
+        if prior:
+            logger.info("[capsule:create] duplicate submit, returning existing id=%s",
+                        guard.duplicate_of)
+            return _response(prior, include_media=False)
+        # 上一次还在创建中 (占位值还没换成真实 id)。这时候既不能建新的, 也拿不到
+        # 那一条, 让客户端稍后重试比返回半成品诚实。
+        raise HTTPException(status_code=409, detail="重复提交，请稍后再试")
+
+    capsule_id = str(uuid.uuid4())
+    try:
+        await _insert_capsule_raw(
+            capsule_id=capsule_id,
+            user_id=user["sub"],
+            agent_id=data.agent_id,
+            workspace_id=data.workspace_id,
+            title=(data.title or _title_from_content(content)).strip()[:80],
+            content=content,
+            media=media,
+            skin=_normalize_skin(data.skin),
+            status=status,
+            open_date=open_date,
+            sealed_at=sealed_at,
+        )
+    except Exception:
+        # 建失败要撤占位, 否则用户在窗口内重试会被判成重复而卡死。
+        await guard.release()
+        raise
+    await guard.record(capsule_id)
     logger.info("[capsule:create] insert_done elapsed_ms=%s", _elapsed_ms(started))
     row = await _fetch_capsule_light(capsule_id)
     if not row:

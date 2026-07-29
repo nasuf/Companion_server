@@ -120,17 +120,36 @@ async def set_patience(agent_id: str, user_id: str, value: int) -> int:
     return value
 
 
+# Lua: 只在键不存在时写入初值。SET NX 语义, 但要把结果读回来。
+#
+# 用它而不是 get→set 的原因: 后者读到值之后再原样写回, 中间若有并发扣分, 那次扣分
+# 会被这次"回填"覆盖掉。初始化的语义本来就是"没有才建", 天然适合 NX。
+_INIT_PATIENCE_LUA = """
+local cur = redis.call('GET', KEYS[1])
+if cur then return tonumber(cur) end
+redis.call('SET', KEYS[1], ARGV[1])
+return tonumber(ARGV[1])
+"""
+
+
 async def init_patience(agent_id: str, user_id: str) -> int:
     """创建时显式初始化耐心值为100（Redis + DB）。
 
     如果状态已存在, 只回填 Redis, 不覆盖已有低耐心/拉黑状态。
     """
+    # 暖 Redis: miss 时把 DB 里的历史值回填, 免得 Lua 当成"从未初始化"而写回 100,
+    # 把持久化的低耐心状态抹掉。
     current = await get_patience(agent_id, user_id)
-    if current != PATIENCE_MAX:
-        redis = await get_redis()
-        await redis.set(_patience_key(agent_id, user_id), str(current))
-        return current
-    return await set_patience(agent_id, user_id, PATIENCE_MAX)
+
+    redis = await get_redis()
+    value = int(await redis.eval(
+        _INIT_PATIENCE_LUA, 1,
+        _patience_key(agent_id, user_id), str(PATIENCE_MAX),
+    ))
+    if current == PATIENCE_MAX and value == PATIENCE_MAX:
+        # 首次初始化才落 DB; 已有状态时不写, 避免覆盖 DB 里的低耐心。
+        await set_patience(agent_id, user_id, PATIENCE_MAX)
+    return value
 
 
 # Lua: 原子 read-modify-write + clamp [0, PATIENCE_MAX]. 老 get→set 两步组合
@@ -189,11 +208,19 @@ async def adjust_patience(agent_id: str, user_id: str, delta: int) -> int:
 
 
 async def recover_patience_hourly(agent_id: str, user_id: str) -> int:
-    """每小时自然恢复耐心值。满值或拉黑时跳过。"""
+    """每小时自然恢复耐心值。满值或拉黑时跳过。
+
+    必须走 adjust_patience 而不是 get→set。这个任务跑在 cron 的分布式锁里, 但那把
+    锁只防"两次 cron 重叠", 挡不住**聊天路径同时在扣分**: cron 读到 50, 用户此刻
+    触发攻击扣了 15 (原子, 变 35), cron 再写 50+10=60 —— 那次扣分凭空消失。
+
+    上下界由 Lua 内部 clamp, 这里的前置判断只是为了跳过无谓的 Redis 往返; 判断与
+    实际调整之间即使状态变了, Lua 也会把结果夹在 [0, PATIENCE_MAX] 内。
+    """
     current = await get_patience(agent_id, user_id)
     if current <= 0 or current >= PATIENCE_MAX:
         return current
-    return await set_patience(agent_id, user_id, current + PATIENCE_HOURLY_RECOVERY)
+    return await adjust_patience(agent_id, user_id, +PATIENCE_HOURLY_RECOVERY)
 
 
 # --- 5B.1 违禁词库（从JSON加载，500+词） ---

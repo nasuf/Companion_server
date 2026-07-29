@@ -219,6 +219,38 @@ class TestPatienceRedis:
             val = await recover_patience_hourly("agent1", "user1")
         assert val == PATIENCE_MAX
 
+    async def test_hourly_recovery_goes_through_the_atomic_path(self):
+        """每小时恢复必须走 adjust_patience, 不能 get→set.
+
+        它跑在 cron 的分布式锁里, 但那把锁只防"两次 cron 重叠" —— 挡不住聊天路径
+        同时在扣分: cron 读到 50, 用户此刻触发攻击扣 15 (原子, 变 35), cron 再写
+        50+10=60, 那次扣分凭空消失。
+        """
+        import ast
+        import inspect
+
+        from app.services.interaction import boundary
+
+        src = inspect.getsource(boundary.recover_patience_hourly)
+        calls = {
+            getattr(n.func, "id", None)
+            for n in ast.walk(ast.parse(src.strip()))
+            if isinstance(n, ast.Call)
+        }
+        assert "adjust_patience" in calls
+        assert "set_patience" not in calls, (
+            "recover_patience_hourly 又用回 set_patience 了 —— 并发扣分会被它覆盖"
+        )
+
+    async def test_init_is_write_once(self, patch_boundary_redis):
+        """初始化用 NX 语义: 已有值就原样返回, 不回写.
+
+        原来是"读出来再写回去", 中间若有并发扣分, 那次扣分会被这次回填抹掉。
+        """
+        patch_boundary_redis.get.return_value = "42"
+        val = await init_patience("agent1", "user1")
+        assert val == 42
+
     async def test_init_patience_does_not_overwrite_existing_blocked(
         self, patch_boundary_redis,
     ):

@@ -104,6 +104,41 @@ def mock_redis():
     mock.ping = AsyncMock(return_value=True)
     mock.incr = AsyncMock(return_value=1)
     mock.delete = AsyncMock(return_value=1)
+
+    # Lua 脚本要能读到本次测试里写过的值。真实 Redis 中 get_patience 会把 DB 的
+    # 历史值回填进 Redis, 紧接着的 Lua GET 就能读到 —— mock 若不记写入, 就会把
+    # "已有低耐心状态"演成"从未初始化", 测出来的行为跟线上相反。
+    _written: dict[str, str] = {}
+    _real_set = mock.set
+
+    async def _set(key, value, **kwargs):
+        _written[key] = str(value)
+        return await _real_set(key, value, **kwargs)
+
+    mock.set = AsyncMock(side_effect=_set)
+
+    async def _eval(script: str, numkeys: int, *args):
+        """按脚本语义模拟 Lua, 而不是返回 MagicMock.
+
+        原子操作在这个项目里只会越来越多 (耐心值调整、初始化、延迟队列…)。让 mock
+        真的实现语义, 好过每个用例各自打补丁 —— 后者的结果是新增一个 Lua 就有一批
+        测试莫名其妙地红, 而红的原因跟被测行为无关。
+        """
+        key = args[0] if numkeys else None
+        current = _written.get(key) if key in _written else (
+            await mock.get(key) if key else None
+        )
+        cur = int(current) if current is not None else None
+
+        if "cur + tonumber(ARGV[1])" in script:          # adjust_patience
+            delta, ceiling = int(args[1]), int(args[2])
+            base = cur if cur is not None else ceiling
+            return max(0, min(ceiling, base + delta))
+        if "if cur then return tonumber(cur) end" in script:   # init_patience
+            return cur if cur is not None else int(args[1])
+        return 0
+
+    mock.eval = AsyncMock(side_effect=_eval)
     return mock
 
 
