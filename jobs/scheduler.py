@@ -51,7 +51,16 @@ from app.services.runtime.job_queue import process_runtime_jobs
 
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+# 全局时区必须显式给。APScheduler 缺省用**进程所在时区**, 而容器跑在 UTC ——
+# 于是所有 cron 的 hour= 都被当成 UTC, 相当于比本意晚 8 小时执行。
+#
+# 生产实测的后果: 每日作息本该 03:30 生成, 实际 11:30 才跑; 也就是每天 00:00-11:30
+# 之间当天没有作息表, 这段时间的聊天走缓存 miss 现场生成, 而那条路径不传
+# lifeOverview, 必然退化成通用模板 —— agent 上午的作息不是它自己的。
+#
+# 15 个 cron 里此前只有 achievement_daily_rollup 一个显式传了 timezone=, 其余 14 个
+# 全在漂。设在 scheduler 上而不是逐个 job 传, 是因为逐个传下次新增 job 还会漏。
+scheduler = AsyncIOScheduler(timezone=settings.schedule_timezone)
 _ACHIEVEMENT_ROLLUP_CHECKPOINT_KEY = "achievement:daily_rollup:last_success"
 
 
