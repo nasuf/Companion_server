@@ -382,24 +382,30 @@ def get_current_status(schedule: list[dict], now: datetime | None = None) -> dic
     Spec Part 1 §2.1：LLM 直接输出 4 个状态之一（空闲/忙碌/很忙碌/睡眠）。
     为了兼容旧缓存数据（字段 activity/type 的 6 值枚举），读取时统一规范化。
 
-    返回 {"event": str, "status": "idle"|"busy"|"very_busy"|"sleep"}
+    返回 {"event": str, "status": "idle"|"busy"|"very_busy"|"sleep",
+          "upcoming": str}
+
+    `upcoming` 是接下来一两段安排的可读串 (可能为空)。放在这里而不是让调用方各自
+    去算, 是因为聊天路径有两处构建 ai_status, 分开算下次新增调用点会漏 —— 而漏掉
+    的表现是 AI 谈起未来时又开始现编, 不报错。
     """
     now = now or _local_now()
     current_time = now.strftime("%H:%M")
+    upcoming = format_upcoming(get_upcoming_slots(schedule, now))
 
     for slot in schedule:
         start = slot.get("start", "00:00")
         end = slot.get("end", "23:59")
 
         # 处理跨午夜的时段（如23:00-07:00）
-        if start > end:
-            if current_time >= start or current_time < end:
-                return _slot_to_status(slot)
-        else:
-            if start <= current_time < end:
-                return _slot_to_status(slot)
+        matched = (
+            (current_time >= start or current_time < end) if start > end
+            else (start <= current_time < end)
+        )
+        if matched:
+            return {**_slot_to_status(slot), "upcoming": upcoming}
 
-    return {"event": "自由时间", "status": "idle"}
+    return {"event": "自由时间", "status": "idle", "upcoming": upcoming}
 
 
 # spec 的 4 个中文状态 → 代码内部 ASCII 枚举
@@ -653,6 +659,49 @@ def detect_schedule_query(message: str) -> str | None:
     """检测作息查询意图。返回 'current'/'routine'/'date' 或 None。"""
     scope = resolve_schedule_query_scope(message, require_query_cue=True)
     return scope.query_type if scope else None
+
+
+def get_upcoming_slots(
+    schedule: list[dict], now: datetime | None = None, limit: int = 2,
+) -> list[dict]:
+    """当前时段之后接下来的几段安排。
+
+    `get_current_status` 只回答"此刻在干什么"。但对话里更常出现的是未来时态 ——
+    「等下一起看个电影吧」「明天有空吗」。只知道当下的话, AI 只能现编一个安排,
+    而且编完不留痕: 到了那个时间点没人对照, 用户下次问起就前后矛盾了。
+
+    Generative Agents (arXiv 2304.03442 §4.3) 把这个问题讲得很直白 —— 只给当下
+    状态而不给计划, agent 会 "eat lunch at 12 pm, but then again at 12:30 pm
+    and 1 pm": 瞬间合理, 长期崩坏。
+
+    只取接下来 limit 段。给全天会让这段太长, 而且远端的安排对当前这轮对话没用。
+    """
+    now = now or _local_now()
+    current_time = now.strftime("%H:%M")
+
+    upcoming: list[dict] = []
+    for slot in schedule:
+        start = str(slot.get("start", ""))
+        # 跨午夜的段 (23:00-07:00) 起点在今天但延伸到明天, 不算"接下来"
+        if not start or start <= current_time:
+            continue
+        upcoming.append(slot)
+        if len(upcoming) >= limit:
+            break
+    return upcoming
+
+
+def format_upcoming(slots: list[dict]) -> str:
+    """把接下来的安排渲染成一行。没有安排时返回空串, 由调用方决定是否略过整段。"""
+    if not slots:
+        return ""
+    parts = []
+    for slot in slots:
+        event = slot.get("event") or slot.get("activity") or ""
+        if not event:
+            continue
+        parts.append(f"{slot.get('start', '')} {event}")
+    return "；".join(parts)
 
 
 def format_schedule_context(status: dict) -> str:

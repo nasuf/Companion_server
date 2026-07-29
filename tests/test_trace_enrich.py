@@ -225,7 +225,7 @@ def test_structured_prompt_render_trace_overrides_legacy_section_guessing():
 def test_main_reply_exposes_ai_state_component_only_when_rendered():
     prompt = "\n\n".join([
         f"## 核心规则\n{defaults.SYSTEM_BASE_PROMPT}",
-        f"## 你的隐性状态约束\n{defaults.CHAT_AI_STATE_CONSTRAINT_PROMPT.format(activity='看书', status='busy')}",
+        f"## 你的隐性状态约束\n{defaults.CHAT_AI_STATE_CONSTRAINT_PROMPT.format(activity='看书', status='busy', upcoming_line='')}",
         f"## 回复要求\n{defaults.RESPONSE_INSTRUCTION_PROMPT.format(n=1, total=220, max_per=80)}",
     ])
     enriched = trace_enrich.enrich_step(_fake_llm_step(prompt))

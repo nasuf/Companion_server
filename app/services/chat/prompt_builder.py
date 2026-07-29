@@ -670,9 +670,19 @@ async def build_system_prompt(
     else:
         _record_skipped_section(diagnostics, "一起听音乐")
 
-    # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 禁止主动展开,
-    # 防止 ≥1min 延迟主回复路径下 LLM 编造跟实际状态矛盾的活动. 详见
-    # CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).
+    # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 接下来的安排 + 禁止主动
+    # 展开。详见 CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).
+    #
+    # 带上「接下来」是因为只给当下状态挡不住未来时态的编造:「等下一起看电影吧」
+    # 这类消息在日常对话里很常见, 而 AI 无从对照就只能现编, 编完也不留痕 —— 到了
+    # 那个时间点没人核对, 用户下次问起就前后矛盾。Generative Agents §4.3 把这个
+    # 失效讲得很直白: 只给当下不给计划, agent 会在 12:00、12:30、13:00 各吃一次
+    # 午饭 —— 瞬间合理, 长期崩坏。
+    #
+    # 仍然是**约束**不是素材: 那句"除非用户明确询问, 不要主动展开"是关键。历史上
+    # 把作息当参考信息注入过一次, 结果 §4 主回复开始满嘴讲自己在干嘛, 跟 §3.4.3
+    # 状态查询分支撞车 (commit 631188f 因此移除)。区别不在注不注入, 在于框成
+    # "不得与之矛盾" 还是 "这些可以聊"。
     ai_state_appended = False
     if ai_status:
         activity = str(ai_status.get("activity", "")).strip()
@@ -680,9 +690,16 @@ async def build_system_prompt(
         if activity:
             tpl = await _get_optional_prompt("chat.ai_state_constraint")
             if tpl is not None:
+                upcoming = str(ai_status.get("upcoming") or "").strip()
                 _append_section(
                     sections, components, "你的隐性状态约束",
-                    _render_section(tpl, {"activity": activity, "status": status_label}),
+                    _render_section(tpl, {
+                        "activity": activity,
+                        "status": status_label,
+                        "upcoming_line": (
+                            f"接下来：{upcoming}。" if upcoming else ""
+                        ),
+                    }),
                     prompt_key="chat.ai_state_constraint",
                 )
                 ai_state_appended = True

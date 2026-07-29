@@ -14,10 +14,15 @@ Usage (inside the server container, from /app):
     python -m evals.reply_register.run_eval --group fact --samples 3
     python -m evals.reply_register.run_eval --json out.json --baseline old.json
 
-What is deliberately held constant: no memories, no portrait, no emotion or
-schedule context. Those are content, not register instructions, and letting
-them vary per run would make results irreproducible. The eval therefore scores
-the always-on prompt stack, which is exactly the layer under test.
+What is deliberately held constant: no memories, no portrait, no emotion.
+Those are content, not register instructions, and letting them vary per run
+would make results irreproducible. The eval therefore scores the always-on
+prompt stack, which is exactly the layer under test.
+
+`--with-schedule` 例外: 作息约束段本身就是 always-on 的一部分, 而它有过一次真实
+失效 —— 早期把作息当「参考信息」注入, 主回复开始满嘴讲自己在干嘛, 跟状态查询分支
+撞车。用**固定**的作息表 (不是当前真实时刻的) 保持可复现, 跑 A/B 就能量出框架是
+约束还是素材: chitchat 组的 off-topic 率是最直接的判据。
 """
 
 from __future__ import annotations
@@ -99,7 +104,19 @@ def _history_text(case: RegisterCase) -> str:
     return "\n".join(f"{speaker[r]}: {c}" for r, c in case.history)
 
 
-async def _generate(agent, case: RegisterCase) -> tuple[str, str]:
+# 固定作息, 不随运行时刻变化 —— 真实作息会让两次运行不可比。
+# 选「很忙碌 + 有后续安排」是最容易诱发状态汇报的组合。
+_FIXED_AI_STATUS = {
+    "event": "在工作室打磨皮具边缘",
+    "activity": "在工作室打磨皮具边缘",
+    "status": "very_busy",
+    "upcoming": "18:30 收工吃晚饭；20:00 看会儿书",
+}
+
+
+async def _generate(
+    agent, case: RegisterCase, *, ai_status: dict | None = None,
+) -> tuple[str, str]:
     """Return (raw model output, what the user would actually see).
 
     Grading the raw output would measure a string no user ever receives: the
@@ -108,7 +125,7 @@ async def _generate(agent, case: RegisterCase) -> tuple[str, str]:
     first baseline run graded raw text and its format numbers were partly an
     artifact of that gap.
     """
-    system_prompt = await build_system_prompt(agent)
+    system_prompt = await build_system_prompt(agent, ai_status=ai_status)
     chat_messages = build_chat_messages(system_prompt, _history_rows(case))
     raw = await invoke_text(get_chat_model(), convert_messages(chat_messages))
     return raw, "||".join(split_and_validate_replies(raw))
@@ -190,7 +207,7 @@ async def run_calibration(judge_model, concurrency: int) -> bool:
 
 async def run_cases(
     agent, judge_model, cases: tuple[RegisterCase, ...], samples: int,
-    concurrency: int,
+    concurrency: int, ai_status: dict | None = None,
 ) -> list[dict[str, Any]]:
     sem = asyncio.Semaphore(concurrency)
     rows: list[dict[str, Any]] = []
@@ -198,7 +215,7 @@ async def run_cases(
     async def one(case: RegisterCase, index: int):
         async with sem:
             try:
-                raw, reply = await _generate(agent, case)
+                raw, reply = await _generate(agent, case, ai_status=ai_status)
             except Exception as e:  # noqa: BLE001 — 单点失败不该终止整轮
                 rows.append({"case": case.id, "group": case.group, "sample": index,
                              "error": f"generate: {e}"})
@@ -404,6 +421,10 @@ async def main() -> None:
     parser.add_argument("--group", choices=GROUPS)
     parser.add_argument("--samples", type=int, default=SAMPLES_PER_CASE)
     parser.add_argument("--concurrency", type=int, default=6)
+    parser.add_argument(
+        "--with-schedule", action="store_true",
+        help="注入固定的作息状态约束段, 用于 A/B 量它是约束还是素材",
+    )
     parser.add_argument("--json", dest="json_out")
     parser.add_argument("--baseline")
     parser.add_argument("--skip-calibration", action="store_true")
@@ -438,7 +459,10 @@ async def main() -> None:
                 "先修 rubric 或换评审模型, 或 --skip-calibration 强跑 (结果仅供参考)."
             )
 
-        rows = await run_cases(agent, judge_model, cases, args.samples, args.concurrency)
+        rows = await run_cases(
+            agent, judge_model, cases, args.samples, args.concurrency,
+            ai_status=_FIXED_AI_STATUS if args.with_schedule else None,
+        )
         summary = summarise(rows)
         print_report(summary, rows)
 
