@@ -247,6 +247,20 @@ async def ensure_prompt_templates() -> None:
             }
 
             if default_changed:
+                # 覆盖的是后台编辑过的内容时要吼一声。这个分支无条件用代码默认值
+                # 盖掉 content —— 历史上 chat.response_instruction 就这样被抹过一次,
+                # 事后只能从版本表把内容捞回来重新提交。判据是 content 与
+                # defaultContent 不同: 说明有人在后台改过而代码默认值没跟着变。
+                # 原文进了版本表 (下面那条 code_sync 记录的前一条), 可以捞回。
+                if existing.content != existing.defaultContent:
+                    logger.error(
+                        "[PROMPT-SYNC] key=%s 的后台编辑被代码默认值覆盖 "
+                        "(原 %d 字 → 新 %d 字)。若这不是本意, 从 "
+                        "prompt_template_versions 取回原文并走 update_prompt_text 重新提交。",
+                        definition.key,
+                        len(existing.content or ""),
+                        len(definition.default_text),
+                    )
                 content = definition.default_text
                 await db.prompttemplate.update(
                     where={"key": definition.key},
