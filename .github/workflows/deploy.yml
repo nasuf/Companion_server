@@ -22,6 +22,26 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      # scp 只覆盖不删除, 所以从 git 删掉的文件会永远留在 VPS 上, 并被烘进之后
+      # 每一个镜像。实测残留过 9 个文件, 其中包括一个刚被重命名的模块 —— 新旧两个
+      # 路径同时存在, 任何还引用旧路径的地方拿到的都是修复前的版本, 而且不会报错。
+      #
+      # 先清空再复制。这中间若 scp 失败, VPS 上没有源码, 但**运行中的容器不受影响**
+      # (它跑的是已构建的镜像), 下一次部署会补回来。相比"删掉的代码永远在生产里",
+      # 这个窗口是可接受的。
+      #
+      # 只清代码目录, 不碰 .env / companion-secrets / 备份这些不在 scp 范围里的东西。
+      - name: Clear stale sources on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ vars.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ vars.VPS_PORT }}
+          script: |
+            cd /app/companion-server || exit 0
+            rm -rf app jobs prisma scripts
+
       - name: Copy project to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
