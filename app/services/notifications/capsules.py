@@ -19,6 +19,9 @@ def _field(row: Any, name: str, default=None):
 
 async def scan_ready_capsule_notifications(now: datetime | None = None) -> int:
     local_date = (now or datetime.now(_LOCAL_TZ)).astimezone(_LOCAL_TZ).date()
+    # 参数按 ISO 字符串传, 由 SQL 里的 ::date 转回来。query_raw 会把参数序列化成
+    # JSON, 而 datetime.date 不在可序列化类型里 —— 直接传会抛
+    # "Type <class 'datetime.date'> not serializable", 这个任务因此每天崩一次.
     rows = await db.query_raw(
         """
         SELECT
@@ -32,7 +35,7 @@ async def scan_ready_capsule_notifications(now: datetime | None = None) -> int:
           AND open_date::date <= $1::date
         GROUP BY user_id, workspace_id
         """,
-        local_date,
+        local_date.isoformat(),
     )
     count = 0
     for row in rows:

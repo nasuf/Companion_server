@@ -296,7 +296,18 @@ async def _cache_schedule(agent_id: str, date: datetime, schedule: list[dict]) -
     await redis.set(_schedule_key(agent_id, date), json.dumps(schedule, ensure_ascii=False), ex=86400 * 2)
 
     # 持久化到 DB（用于历史查询）
-    date_only = date.replace(hour=0, minute=0, second=0, microsecond=0)
+    #
+    # 必须去掉时区。列是 @db.Date, 而驱动会先把带时区的 datetime 归一到 UTC:
+    # 2026-07-29 00:00+08:00 → 2026-07-28 16:00 UTC → 截断成 07-28。于是每天的
+    # 作息都被写到前一天那行上, 撞唯一键 (agentId, date) 把它覆盖掉 —— 整个历史
+    # 错位一天, 而且当天永远查不到自己的表。
+    #
+    # 热路径读 Redis (键按本地日期字符串拼), 所以聊天一直是对的, 这个错位才藏了
+    # 这么久。但 Redis miss 时 conversations.py 会回落查 DB, 那时拿到的是昨天的
+    # 安排。
+    date_only = date.replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None,
+    )
     try:
         await db.aidailyschedule.upsert(
             where={"agentId_date": {"agentId": agent_id, "date": date_only}},

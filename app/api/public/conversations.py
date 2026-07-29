@@ -63,7 +63,12 @@ async def _current_ai_status(agent_id: str | None) -> dict | None:
     if not schedule:
         try:
             local_now = datetime.now(ZoneInfo(settings.schedule_timezone))
-            date_only = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # tzinfo=None 是必须的, 理由见 schedule.py 落库处的注释: 列是
+            # @db.Date, 带时区的午夜会被归一到 UTC 后截断到前一天。读写两侧必须
+            # 用同一种写法, 否则这里查的行和那边写的行不是同一行。
+            date_only = local_now.replace(
+                hour=0, minute=0, second=0, microsecond=0, tzinfo=None,
+            )
             row = await db.aidailyschedule.find_unique(
                 where={"agentId_date": {"agentId": agent_id, "date": date_only}}
             )
