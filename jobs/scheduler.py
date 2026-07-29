@@ -8,6 +8,8 @@ Uses APScheduler for:
 import asyncio
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -64,6 +66,27 @@ scheduler = AsyncIOScheduler(timezone=settings.schedule_timezone)
 _ACHIEVEMENT_ROLLUP_CHECKPOINT_KEY = "achievement:daily_rollup:last_success"
 
 
+@dataclass
+class _JobRun:
+    """当前这一轮定时任务的运行态, 供 _job_failed 找到自己属于哪个任务."""
+
+    name: str
+    failed: bool = False
+
+
+# 由 _run_distributed_job 设置, _job_failed 读取。
+#
+# 存在的理由: 成功和失败原本记在两个名字下 —— 外层用 job_name ('capsule_ready_
+# notifications'), 任务体里的 _job_failed 用人类可读标签 ('Capsule ready
+# notification scan')。于是"fail_at 比 ok_at 新说明这轮没干成"这条判读对全部 11
+# 个任务都永远不成立, 生产上胶囊通知连着崩了一天也看不出来。
+#
+# 用 ContextVar 而不是把 11 处调用挨个改成蛇形名: 后者靠的是下次加任务的人记得
+# 对齐, 这次就是这么错的。asyncio.create_task 会复制当前 context, 所以异步上报
+# 也拿得到。
+_current_job: ContextVar[_JobRun | None] = ContextVar("_current_job", default=None)
+
+
 async def _run_distributed_job(
     job_name: str,
     ttl_s: int,
@@ -75,6 +98,8 @@ async def _run_distributed_job(
     painful. Production fails closed: if Redis cannot provide the lock, the job
     skips instead of risking duplicate reminder/proactive sends.
     """
+    run = _JobRun(name=job_name)
+    token = _current_job.set(run)
     try:
         async with distributed_lock(
             f"scheduler:{job_name}",
@@ -84,9 +109,11 @@ async def _run_distributed_job(
             result = fn()
             if asyncio.iscoroutine(result):
                 await result
-            # 跑完即记成功. 任务体自己吞掉的异常会另外经 _job_failed 记失败,
-            # 所以 fail_at 比 ok_at 新就说明这一轮实际没干成事.
-            await _record_job_outcome(job_name, ok=True)
+            # 只有这一轮没有任何失败上报才算成功。任务体普遍自己 try/except 吞掉
+            # 异常再调 _job_failed, 外层是看不到异常的 —— 若无条件记 ok, 失败和
+            # 成功会写在同一秒, 判读永远读成健康。
+            if not run.failed:
+                await _record_job_outcome(job_name, ok=True)
     except DistributedLockNotAcquired:
         logger.debug(
             f"[CRON] {job_name} skipped: another instance holds the lock",
@@ -102,6 +129,13 @@ async def _run_distributed_job(
                 "error_type": type(e).__name__,
             },
         )
+    except Exception as e:
+        # 任务体没自己兜住的异常。之前直接抛给 APScheduler, 健康记录里既没有 ok
+        # 也没有 fail —— 表现成"很久没成功"却查不到原因。记完再抛, 不吞掉。
+        _job_failed(job_name, e)
+        raise
+    finally:
+        _current_job.reset(token)
 
 
 _JOB_HEALTH_KEY = "scheduler:health"
@@ -132,20 +166,30 @@ async def _record_job_outcome(job_name: str, ok: bool, detail: str = "") -> None
         pass
 
 
-def _job_failed(job_name: str, exc: BaseException) -> None:
+def _job_failed(label: str, exc: BaseException) -> None:
     """定时任务失败的统一上报口.
 
     级别定在 error 而不是 warning: 一个定时任务失败意味着某个功能整块没运行, 而
     warning 在这个项目里量大到没人逐条看 —— L2 那次就是这么漏掉的.
+
+    `label` 只用于日志可读性。健康记录一律落在 _run_distributed_job 声明的规范
+    任务名下, 否则成功/失败会分记两处 (见 _current_job 的注释)。一个任务里可以有
+    多个子步骤各带各的 label, 都归到同一个任务名, 具体是哪一步看 fail_reason。
     """
+    run = _current_job.get()
+    job_name = run.name if run is not None else label
+    if run is not None:
+        run.failed = True
+
     logger.error(
-        f"[CRON] {job_name} failed: {exc}",
+        f"[CRON] {label} failed: {exc}",
         extra={
             "event": EVT_SCHEDULER_JOB, "task_name": job_name,
             "phase": "failed", "error_type": type(exc).__name__,
         },
     )
-    asyncio.create_task(_record_job_outcome(job_name, ok=False, detail=str(exc)))
+    detail = str(exc) if label == job_name else f"{label}: {exc}"
+    asyncio.create_task(_record_job_outcome(job_name, ok=False, detail=detail))
 
 
 async def _run_for_all_agents(
@@ -521,6 +565,18 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # 数据不变量巡检: 抓"任务报成功但没干成事"。放在 06:00, 夜里的日任务全部跑完
+    # 之后, 这时候查到的缺失才是真缺失。
+    scheduler.add_job(
+        _run_invariant_checks,
+        "cron",
+        hour=6,
+        minute=0,
+        id="invariant_checks",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -892,6 +948,26 @@ async def _run_redis_health_recheck():
         await recheck_redis_health()
     except Exception as e:
         _job_failed("Redis health recheck", e)
+
+
+async def _run_invariant_checks():
+    """数据不变量巡检.
+
+    定时任务的健康记录只能看出任务崩没崩, 看不出"报了成功其实什么都没干成" ——
+    作息落库日期错位一天时, daily_schedule 每天报的都是 ok。这个任务从数据侧反过
+    来验证: 今天真的有作息行吗? L2 分数真的在动吗? 详见 ops/invariants.py。
+
+    排在 06:00: 夜里的日任务 (作息 3:30 / 整合 4:00 / hygiene 4:20) 都跑完了,
+    这时候查到的缺失才是真缺失。
+    """
+    async def _body():
+        from app.services.ops.invariants import run_and_store
+        try:
+            await run_and_store()
+        except Exception as e:
+            _job_failed("Data invariant checks", e)
+
+    await _run_distributed_job("invariant_checks", 1800, _body)
 
 
 async def _run_trace_retention():

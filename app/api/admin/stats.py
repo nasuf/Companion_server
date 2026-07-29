@@ -1629,3 +1629,32 @@ async def delete_db_backup(name: str, _: dict = Depends(require_admin_jwt)):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="备份不存在") from exc
     return {"ok": True}
+
+
+@router.get("/cron-health")
+async def cron_health(_: dict = Depends(require_admin_jwt)):
+    """定时任务健康 + 数据不变量.
+
+    合成一个端点是因为两者回答的是同一个问题的两面: 任务有没有跑 (cron), 跑了有
+    没有产生该有的数据 (invariants)。分两个端点会让页面上出现"任务全绿但数据缺"
+    这种需要人工拼接的状态。
+    """
+    from app.services.ops.cron_health import collect_cron_health
+    from app.services.ops.invariants import load_last_report
+
+    report = await collect_cron_health()
+    invariants = await load_last_report()
+    return {"cron": report.as_dict(), "invariants": invariants}
+
+
+@router.post("/cron-health/invariants")
+async def rerun_invariants(_: dict = Depends(require_admin_jwt)):
+    """手动重跑不变量巡检.
+
+    有这个按钮是因为巡检每天只跑一次: 修完一个问题想立刻确认是否真的修好, 不该
+    等到明天早上六点。
+    """
+    from app.services.ops.invariants import load_last_report, run_and_store
+
+    await run_and_store()
+    return {"invariants": await load_last_report()}

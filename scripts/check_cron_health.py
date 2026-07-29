@@ -1,82 +1,101 @@
-"""列出每个定时任务最近一次成功/失败的时刻, 找出已经死掉的那些.
+"""命令行版的定时任务健康 + 数据不变量巡检.
 
-写这个脚本的直接原因: L2 动态分级 cron 因为一个 SQL 类型错每晚崩了几个月, 而
-从任何一个界面上都看不出来 —— 失败走 warning, 成功默认不出声, 于是"从来没成功
-过"和"这次没事可做"完全无法区分. 巡检一遍 26 个任务发现同样的 swallow-and-warn
-写法有 14 处, 每一处都可能藏着同样的故障.
+判读逻辑不在这里, 在 app/services/ops/cron_health.py 和 invariants.py —— 后台
+页面读的是同一份。命令行和页面各写一套判读, 迟早会给出不一样的结论, 而排查故障
+时最不需要的就是"两个地方说法不一致"。
 
-判读方式:
-    从未成功        该任务大概率一直是坏的 (或者从没到过触发时刻)
-    fail_at 比 ok_at 新   上一轮跑失败了
-    ok_at 远早于它的周期  排程没触发, 或者实例一直在它的时刻前重启
+写这个的直接原因: L2 动态分级 cron 因为一个 SQL 类型错每晚崩了几个月, 从任何界
+面都看不出来 —— 失败走 warning, 成功默认不出声, "从来没成功过"和"这次没事可做"
+在日志里长得一模一样。
 
-注意"从未成功"对低频任务会误报: 周任务如果服务近期才部署, 可能确实还没到点.
-对照 add_job 里的周期看, 不要只看这一列.
+用法 (在生产容器内)。PYTHONPATH 不能省 —— python 把脚本自己的目录加进 sys.path,
+不是工作目录, 少了它 import app.services 会失败:
 
-用法 (在生产容器内):
-    python check_cron_health.py
+    PYTHONPATH=/app python scripts/check_cron_health.py            # 读上次结果
+    PYTHONPATH=/app python scripts/check_cron_health.py --recheck  # 当场重跑
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from datetime import datetime, timezone
 
-from app.redis_client import get_redis
+_MARK = {
+    "healthy": "✓", "ok": "✓",
+    "warn": "!", "drifted": "!", "stale": "!",
+    "failing": "✗", "violated": "✗", "error": "✗",
+    "unknown": "·", "retired": "·",
+}
 
-HEALTH_KEY = "scheduler:health"
+
+def _age(stamp: str | None, now: datetime) -> str:
+    if not stamp:
+        return "从未"
+    try:
+        delta = now - datetime.fromisoformat(stamp)
+    except ValueError:
+        return stamp
+    hours = delta.total_seconds() / 3600
+    if hours < 1:
+        return f"{int(delta.total_seconds() / 60)} 分钟前"
+    if hours < 48:
+        return f"{hours:.1f} 小时前"
+    return f"{hours / 24:.1f} 天前"
 
 
-async def main() -> None:
-    redis = await get_redis()
-    raw = await redis.hgetall(HEALTH_KEY)
-    if not raw:
-        print("没有任何记录 —— 要么调度器还没跑过一轮, 要么这个版本早于健康记录。")
-        return
-
-    def _text(v) -> str:
-        return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
-
-    jobs: dict[str, dict[str, str]] = {}
-    for key, value in raw.items():
-        name, _, field = _text(key).rpartition(":")
-        jobs.setdefault(name, {})[field] = _text(value)
+async def main(recheck: bool) -> None:
+    from app.services.ops.cron_health import collect_cron_health
+    from app.services.ops.invariants import load_last_report, run_and_store
 
     now = datetime.now(timezone.utc)
 
-    def _age(stamp: str | None) -> str:
-        if not stamp:
-            return "从未"
+    report = await collect_cron_health(now=now)
+    if not report.definitions_available:
+        # 命令行进程不启动调度器, 拿不到 trigger, 也就量不出周期。把这点说明白,
+        # 否则"没有 stale 项"会被读成"任务都健康", 而实际是根本没判。
+        print(
+            "注意: 本进程未启动调度器, 拿不到任务周期 —— 只能判「上一轮有没有失败」,\n"
+            "     判不出「停跑」和「时刻偏移」。完整判读见后台的资源监控页。\n"
+        )
+    print(f"{'任务':<34}{'判读':<10}{'上次成功':<14}说明")
+    for job in report.jobs:
+        mark = _MARK.get(job.verdict, "?")
+        print(
+            f"{mark} {job.job_id:<32}{job.verdict:<10}"
+            f"{_age(job.last_ok.isoformat() if job.last_ok else None, now):<14}"
+            f"{job.detail}"
+        )
+    for job in report.retired:
+        print(f"· {job.job_id:<32}{'retired':<10}{'':<14}{job.detail}")
+
+    print()
+    if recheck:
+        from app.db import db
+
+        await db.connect()
         try:
-            delta = now - datetime.fromisoformat(stamp)
-        except ValueError:
-            return stamp
-        hours = delta.total_seconds() / 3600
-        if hours < 1:
-            return f"{int(delta.total_seconds() / 60)} 分钟前"
-        if hours < 48:
-            return f"{hours:.1f} 小时前"
-        return f"{hours / 24:.1f} 天前"
+            await run_and_store()
+        finally:
+            await db.disconnect()
+    payload = await load_last_report()
 
-    print(f"{'任务':<32}{'上次成功':<16}{'上次失败':<16}")
-    suspects: list[tuple[str, str]] = []
-    for name in sorted(jobs):
-        ok_at = jobs[name].get("ok_at")
-        fail_at = jobs[name].get("fail_at")
-        print(f"{name:<32}{_age(ok_at):<16}{_age(fail_at):<16}")
-        if not ok_at:
-            suspects.append((name, "从未成功过"))
-        elif fail_at and fail_at > ok_at:
-            reason = jobs[name].get("fail_reason", "")
-            suspects.append((name, f"最近一轮失败: {reason[:80]}"))
-
-    if suspects:
-        print("\n需要排查:")
-        for name, why in suspects:
-            print(f"  {name}: {why}")
+    checked_at = payload.get("checked_at")
+    if not checked_at:
+        print("数据不变量: 尚未巡检过 (每日 06:00 跑, 或加 --recheck 当场跑一次)")
     else:
-        print("\n所有有记录的任务最近一轮都成功了。")
+        print(f"数据不变量 (巡检于 {_age(checked_at, now)}):")
+        for item in payload.get("results", []):
+            mark = _MARK.get(item.get("status", ""), "?")
+            print(f"  {mark} {item.get('title', ''):<16}{item.get('detail', '')}")
+
+    bad = report.unhealthy_count + int(payload.get("violated_count") or 0)
+    print(f"\n需要排查的项: {bad}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--recheck", action="store_true", help="当场重跑数据不变量, 而不是读上次结果"
+    )
+    asyncio.run(main(parser.parse_args().recheck))
