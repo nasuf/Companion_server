@@ -659,6 +659,23 @@ async def _queue_reply_or_error(
 
 
 @router.websocket("/ws/{conversation_id}")
+async def _warm_daily_schedule(agent, user_id: str) -> None:
+    """连接后台把当日作息生成好, 让消息路径大概率直接命中缓存.
+
+    整条链路全程吞异常: 预热失败只是回到「消息路径现场生成」这个原有行为, 不该
+    影响连接本身。
+    """
+    try:
+        if await get_cached_schedule(agent.id):
+            return
+        await generate_daily_schedule(
+            agent.id, agent.name, get_mbti(agent), user_id=user_id,
+            life_overview=await get_life_overview(agent.id),
+        )
+    except Exception as e:
+        logger.warning(f"schedule warmup failed agent={str(agent.id)[:8]}: {e}")
+
+
 async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     """WebSocket 聊天连接。"""
     if not is_redis_healthy():
@@ -714,6 +731,12 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
             )
         except Exception as e:
             logger.warning(f"first_greeting dispatch failed conv={conversation_id[:8]}: {e}")
+
+        # 预热当日作息。带 LLM 的夜间任务只覆盖近 7 天活跃的 agent (见
+        # scheduler.LLM_CRON_ACTIVE_WINDOW_DAYS), 休眠用户回来时缓存必然是空的,
+        # 而消息处理路径上的生成是 await 的 —— 会让"久违的第一句话"多等约 6 秒。
+        # 放在连接后台跑, 用户打字的时间足够覆盖掉它; 消息路径的 await 保留作兜底。
+        fire_background(_warm_daily_schedule(agent, user_id))
 
         try:
             while True:

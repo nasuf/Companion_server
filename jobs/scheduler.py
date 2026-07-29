@@ -65,6 +65,11 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone=settings.schedule_timezone)
 _ACHIEVEMENT_ROLLUP_CHECKPOINT_KEY = "achievement:daily_rollup:last_success"
 
+# 带 LLM 的夜间任务只覆盖最近这些天说过话的 agent。取 7 天是因为"周活跃"是产品
+# 侧的常用口径, 而回归用户按需生成一份作息只多花约 6 秒 (且已在 WS 连接时后台
+# 预热)。详见 _run_for_all_agents 的 active_within_days 说明。
+LLM_CRON_ACTIVE_WINDOW_DAYS = 7
+
 
 @dataclass
 class _JobRun:
@@ -225,14 +230,50 @@ def _job_failed(label: str, exc: BaseException) -> None:
     asyncio.create_task(_record_job_outcome(job_name, ok=False, detail=detail))
 
 
+async def _recently_active_agent_ids(days: int) -> list[str]:
+    """最近 `days` 天内有用户发过消息的 agent.
+
+    走 messages 上的 (role, created_at) 索引, 扫描量由这几天的流量决定, 不随历史
+    总量增长 —— 这是它能一直用下去的前提。
+    """
+    from app.db import db
+
+    rows = await db.query_raw(
+        """
+        SELECT DISTINCT c.agent_id AS id
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.role = 'user'
+          AND m.created_at > CURRENT_TIMESTAMP - ($1 || ' days')::interval
+        """,
+        str(int(days)),
+    )
+    return [r["id"] for r in rows if r.get("id")]
+
+
 async def _run_for_all_agents(
-    fn: Callable, concurrency: int = 3, task_name: str = "task",
+    fn: Callable,
+    concurrency: int = 3,
+    task_name: str = "task",
+    *,
+    active_within_days: int | None = None,
 ) -> None:
     """Run an async function for all agents with concurrency control.
 
     每个 agent 起一个独立 usage session, cron 的 LLM 调用 (作息生成 / 画像更新 /
     月度 overview 等) 按 agent 维度落到 llm_usage 表 (scope=schedule_cron).
     无 LLM 调用的 cron (l2_adjustment 等) flush 返回 None, 不写空行.
+
+    `active_within_days` 把范围收敛到最近还在说话的 agent。带 LLM 的夜间任务必须
+    传它, 否则成本随**累计注册数**增长而不是随实际使用量:
+
+        每 agent 每天约 6.5 次 cron LLM、100 秒串行延迟 (2026-07 实测)。并发 3 时,
+        全部夜间任务在 648 个 agent 就超过 6 小时窗口, 2592 个就塞不进一天 ——
+        按每周 2000 新用户是发布后第 1.3 周。而那时溢出的任务会全天候占用 LLM
+        配额, 真正被拖慢的是白天在聊天的真实用户。
+
+    休眠 agent 不预生成, 等用户回来时按需生成 (WS 连接即后台预热, 见 ws.py)。
+    纯计算的任务 (亲密度/耐心恢复) 不传: 它们不烧 LLM, 而且漏算会让数值断档。
     """
     from app.db import db
     from app.observability import bind_context
@@ -247,6 +288,22 @@ async def _run_for_all_agents(
     where: dict = {"status": "active"}
     if owner_id:
         where["userId"] = {"not": owner_id}
+
+    n_skipped = 0
+    if active_within_days is not None:
+        active_ids = await _recently_active_agent_ids(active_within_days)
+        if not active_ids:
+            logger.info(
+                f"[CRON] {task_name} skipped: no agent active in the last "
+                f"{active_within_days} days",
+                extra={"event": EVT_SCHEDULER_JOB, "task_name": task_name,
+                       "phase": "completed", "n_agents": 0, "n_failed": 0},
+            )
+            return
+        n_all = await db.aiagent.count(where=where)
+        where["id"] = {"in": active_ids}
+        n_skipped = max(0, n_all - len(active_ids))
+
     agents = await db.aiagent.find_many(where=where)
     sem = asyncio.Semaphore(concurrency)
     n_total = len(agents)
@@ -254,9 +311,10 @@ async def _run_for_all_agents(
     started_at = asyncio.get_event_loop().time()
 
     logger.info(
-        f"[CRON] {task_name} started for {n_total} agents",
+        f"[CRON] {task_name} started for {n_total} agents"
+        + (f" (跳过 {n_skipped} 个休眠)" if n_skipped else ""),
         extra={"event": EVT_SCHEDULER_JOB, "task_name": task_name,
-               "phase": "started", "n_agents": n_total},
+               "phase": "started", "n_agents": n_total, "n_skipped": n_skipped},
     )
 
     async def _process(agent):
@@ -624,6 +682,7 @@ async def _run_weekly_portraits():
         lambda: _run_for_all_agents(
             lambda a: update_portrait_weekly(a.userId, a.id),
             concurrency=3, task_name="Portrait update",
+            active_within_days=LLM_CRON_ACTIVE_WINDOW_DAYS,
         ),
     )
 
@@ -710,7 +769,10 @@ async def _run_daily_schedules():
                 life_overview=overview, user_id=agent.userId,
             )
 
-        await _run_for_all_agents(_gen, concurrency=3, task_name="Daily schedule")
+        await _run_for_all_agents(
+            _gen, concurrency=3, task_name="Daily schedule",
+            active_within_days=LLM_CRON_ACTIVE_WINDOW_DAYS,
+        )
 
         # spec Part 5 §4.3: "每日凌晨**生成 AI 作息表时**" 触发特殊日期扫描.
         # 链式 await 保证 scan 一定读到当天新作息 (不是昨天 cache).
@@ -730,7 +792,10 @@ async def _run_monthly_overview_refresh():
     await _run_distributed_job(
         "monthly_overview",
         7200,
-        lambda: _run_for_all_agents(_refresh, concurrency=2, task_name="Monthly overview"),
+        lambda: _run_for_all_agents(
+            _refresh, concurrency=2, task_name="Monthly overview",
+            active_within_days=LLM_CRON_ACTIVE_WINDOW_DAYS,
+        ),
     )
 
 
@@ -741,6 +806,7 @@ async def _run_schedule_review():
         lambda: _run_for_all_agents(
             lambda a: review_daily_schedule(a.id, a.userId, a.name),
             concurrency=3, task_name="Schedule review",
+            active_within_days=LLM_CRON_ACTIVE_WINDOW_DAYS,
         ),
     )
 
@@ -922,7 +988,10 @@ async def _run_memory_consolidation():
             )
 
         # _run_for_all_agents already excludes the template agent + non-active.
-        await _run_for_all_agents(_one, concurrency=2, task_name="Memory consolidation")
+        await _run_for_all_agents(
+            _one, concurrency=2, task_name="Memory consolidation",
+            active_within_days=LLM_CRON_ACTIVE_WINDOW_DAYS,
+        )
 
     await _run_distributed_job("memory_consolidation", 7200, _body)
 
