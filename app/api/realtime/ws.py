@@ -658,7 +658,6 @@ async def _queue_reply_or_error(
         await ws.send_json({"type": "error", "data": {"message": "消息入队失败"}})
 
 
-@router.websocket("/ws/{conversation_id}")
 async def _warm_daily_schedule(agent, user_id: str) -> None:
     """连接后台把当日作息生成好, 让消息路径大概率直接命中缓存.
 
@@ -676,6 +675,7 @@ async def _warm_daily_schedule(agent, user_id: str) -> None:
         logger.warning(f"schedule warmup failed agent={str(agent.id)[:8]}: {e}")
 
 
+@router.websocket("/ws/{conversation_id}")
 async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     """WebSocket 聊天连接。"""
     if not is_redis_healthy():
