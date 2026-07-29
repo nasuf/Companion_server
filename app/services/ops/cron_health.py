@@ -268,7 +268,10 @@ def build_report(
                     last_ok=_parse_stamp(entry.get("ok_at")),
                     last_fail=_parse_stamp(entry.get("fail_at")),
                     fail_reason=entry.get("fail_reason", ""),
-                    detail="scheduler 里已无此任务, 是历史遗留记录",
+                    # 措辞要同时覆盖两种情况: cron 被删掉了, 或者一次性任务
+                    # (启动补跑这类) 跑完就注销。只说"历史遗留"会让后者看起来
+                    # 像残渣, 监控里的误导性措辞会慢慢磨掉人对这张表的信任。
+                    detail="scheduler 当前未注册 —— 可能是已删除的 cron, 也可能是一次性任务跑完注销",
                 )
             )
 

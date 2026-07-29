@@ -91,14 +91,21 @@ async def _run_distributed_job(
     job_name: str,
     ttl_s: int,
     fn: Callable[[], object],
+    *,
+    health_name: str | None = None,
 ) -> None:
     """Run one scheduler job once across all server instances.
 
     Development fails open so local Redis outages do not make cron debugging
     painful. Production fails closed: if Redis cannot provide the lock, the job
     skips instead of risking duplicate reminder/proactive sends.
+
+    `health_name` 让同一个任务函数在不同触发方式下分开记健康, 而**共用同一把锁**。
+    启动补跑就是这种情况: 它跟定时任务是同一件事 (必须互斥), 但发生在部署时刻而
+    不是排程时刻 —— 记到同一个名下会把"上次成功"覆盖成部署时间, 于是每次部署都
+    在健康表上留一条持续到次日的假"时刻偏移"。
     """
-    run = _JobRun(name=job_name)
+    run = _JobRun(name=health_name or job_name)
     token = _current_job.set(run)
     try:
         async with distributed_lock(
@@ -113,7 +120,7 @@ async def _run_distributed_job(
             # 异常再调 _job_failed, 外层是看不到异常的 —— 若无条件记 ok, 失败和
             # 成功会写在同一秒, 判读永远读成健康。
             if not run.failed:
-                await _record_job_outcome(job_name, ok=True)
+                await _record_job_outcome(run.name, ok=True)
     except DistributedLockNotAcquired:
         logger.debug(
             f"[CRON] {job_name} skipped: another instance holds the lock",
@@ -294,6 +301,9 @@ def setup_scheduler():
         run_date=datetime.now(ZoneInfo(settings.schedule_timezone))
         + timedelta(seconds=30),
         id="achievement_daily_rollup_startup_catchup",
+        # 健康记录单独记名: 补跑发生在部署时刻, 记进定时任务名下会把"上次成功"
+        # 覆盖掉, 每次部署都在健康表上留一条持续到次日的假"时刻偏移"。
+        args=["achievement_daily_rollup_startup_catchup"],
         replace_existing=True,
     )
 
@@ -592,7 +602,12 @@ async def _run_weekly_portraits():
     )
 
 
-async def _run_achievement_daily_rollup():
+async def _run_achievement_daily_rollup(health_name: str = "achievement_daily_rollup"):
+    """成就每日汇总。
+
+    定时触发和启动补跑共用这个函数, 靠 health_name 区分健康记录 —— 锁名保持一致
+    以确保两者互斥。详见 _run_distributed_job 的 health_name 说明。
+    """
     async def _body():
         from app.services.achievements.mode import achievement_evaluation_enabled
         from app.services.achievements.service import run_daily_rollup
@@ -650,7 +665,9 @@ async def _run_achievement_daily_rollup():
                 )
             current_day += timedelta(days=1)
 
-    await _run_distributed_job("achievement_daily_rollup", 1800, _body)
+    await _run_distributed_job(
+        "achievement_daily_rollup", 1800, _body, health_name=health_name,
+    )
 
 
 async def _run_weekly_reflection():

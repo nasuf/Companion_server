@@ -337,6 +337,48 @@ class TestJobNameConsistency:
         assert any(not ok for _, ok, _ in recorded)
 
     @pytest.mark.asyncio
+    async def test_health_name_can_differ_from_the_lock_name(self, monkeypatch):
+        """启动补跑要单独记健康, 但必须跟定时任务共用同一把锁.
+
+        补跑发生在部署时刻。记到定时任务名下会把"上次成功"覆盖成部署时间, 于是
+        每次部署都在健康表上留一条持续到次日的假"时刻偏移" —— 一张老挂着假警告的
+        表, 会训练人忽略它。
+        """
+        import jobs.scheduler as sched
+
+        recorded: list[tuple[str, bool, str]] = []
+        locks: list[str] = []
+
+        async def _fake_record(job_name, ok, detail=""):
+            recorded.append((job_name, ok, detail))
+
+        monkeypatch.setattr(sched, "_record_job_outcome", _fake_record)
+
+        real_lock = sched.distributed_lock
+
+        def _spy_lock(name, **kwargs):
+            locks.append(name)
+            return real_lock(name, **kwargs)
+
+        monkeypatch.setattr(sched, "distributed_lock", _spy_lock)
+
+        async def _body():
+            return None
+
+        await sched._run_distributed_job(
+            "achievement_daily_rollup", 60, _body,
+            health_name="achievement_daily_rollup_startup_catchup",
+        )
+        await _drain()
+
+        assert recorded == [
+            ("achievement_daily_rollup_startup_catchup", True, "")
+        ], "健康记录应落在补跑自己的名下"
+        assert locks == ["scheduler:achievement_daily_rollup"], (
+            "锁名必须保持定时任务的名字, 否则补跑可能与定时任务并发"
+        )
+
+    @pytest.mark.asyncio
     async def test_clean_run_still_records_success(self, monkeypatch):
         import jobs.scheduler as sched
 

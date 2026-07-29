@@ -679,7 +679,9 @@ async def test_off_mode_rollup_skips_and_freezes_checkpoint():
     fake_redis.get = AsyncMock(return_value=None)
     fake_redis.set = AsyncMock()
 
-    async def _run_distributed(_name, _ttl, callback):
+    async def _run_distributed(_name, _ttl, callback, **_kwargs):
+        # **_kwargs 吸收 health_name: 启动补跑与定时任务共用锁名但分开记
+        # 健康, 这里只关心回调有没有被执行。
         await callback()
 
     with (
@@ -714,7 +716,9 @@ async def test_silent_mode_rollup_still_runs_and_advances_checkpoint():
     fake_redis.get = AsyncMock(return_value=None)
     fake_redis.set = AsyncMock()
 
-    async def _run_distributed(_name, _ttl, callback):
+    async def _run_distributed(_name, _ttl, callback, **_kwargs):
+        # **_kwargs 吸收 health_name: 启动补跑与定时任务共用锁名但分开记
+        # 健康, 这里只关心回调有没有被执行。
         await callback()
 
     with (

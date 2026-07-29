@@ -62,9 +62,17 @@ def test_reporter_logs_at_error_not_warning(source):
 
 
 def test_success_is_recorded_too(source):
-    """只记失败不够 —— 一个从没被触发过的任务不会产生失败记录, 却同样是死的."""
+    """只记失败不够 —— 一个从没被触发过的任务不会产生失败记录, 却同样是死的.
+
+    只匹配 ok=True 而不锁死参数名: 记什么名字是会变的 (启动补跑要跟定时任务分开
+    记), 变量名一变就误报的守卫会被人直接删掉。成功记录的**行为**由
+    test_cron_health.py::test_clean_run_still_records_success 覆盖。
+    """
     wrapper = _function_body(source, "_run_distributed_job")
-    assert "_record_job_outcome(job_name, ok=True)" in wrapper
+    assert re.search(r"_record_job_outcome\([^)]*ok=True", wrapper), (
+        "_run_distributed_job 不再记录成功了 —— 健康表将只剩失败, "
+        "无法区分「一直没跑」和「跑了没事做」"
+    )
 
 
 def test_health_write_cannot_raise(source):
