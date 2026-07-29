@@ -162,10 +162,6 @@ jobs:
             # 默认值必须与 app/config.py 里的代码默认一致, 有守卫测试盯着。
             MEMORY_CONSOLIDATION_ENABLED=${{ vars.MEMORY_CONSOLIDATION_ENABLED || 'true' }}
             MEMORY_CONSOLIDATION_WORKSPACES=${{ vars.MEMORY_CONSOLIDATION_WORKSPACES }}
-            # 互动反思 (周日 06:00)。默认关闭 —— 它是唯一往记忆库写**推断**的路径,
-            # 产出质量取决于积累了多少互动数据。开启步骤见 docs 或 config.py 注释。
-            MEMORY_REFLECTION_ENABLED=${{ vars.MEMORY_REFLECTION_ENABLED || 'false' }}
-            MEMORY_REFLECTION_WORKSPACES=${{ vars.MEMORY_REFLECTION_WORKSPACES }}
             PROACTIVE_LINK_RECOMMENDATION_ENABLED=${{ vars.PROACTIVE_LINK_RECOMMENDATION_ENABLED || 'true' }}
             PROACTIVE_LINK_RECOMMENDATION_PROBABILITY=${{ vars.PROACTIVE_LINK_RECOMMENDATION_PROBABILITY || '0.03' }}
             CHAT_LINK_SEARCH_PROVIDER=${{ vars.CHAT_LINK_SEARCH_PROVIDER || 'custom' }}

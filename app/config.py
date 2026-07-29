@@ -140,17 +140,6 @@ class Settings(BaseSettings):
     # 候选要求龄 ≥30 天且同题 ≥5 条。规模会随日常琐事积累慢慢长起来。
     memory_consolidation_enabled: bool = True
 
-    # 互动反思: 每周从已验证的行为事实归纳出对相处有帮助的判断, 写入 L2
-    # (provenance=reflected)。
-    #
-    # 默认关闭, 且与整合不同 —— 它是唯一会往记忆库写**推断**的路径 (其他记忆都源自
-    # 某人真的说过的话)。产出质量取决于积累了多少互动数据: 目前单个会话最多 124 条
-    # 消息、9 个活跃日, 勉强够算周报级事实, 但看不出"焦虑在上升"这类趋势。
-    # 开启前先跑 scripts/preview_reflection.py 看它会产出什么, 再按
-    # evals/reflection 的有用率闸门验一轮。
-    memory_reflection_enabled: bool = False
-    memory_reflection_workspaces: str = ""
-
     # 灰度白名单: 逗号分隔的 workspace id。非空时整合**只**对这些 workspace 生效,
     # 其余照常跳过。因为整合是全部记忆维护任务里唯一会归档原始数据的一个, 直接
     # 全量开等于拿所有用户的记忆做第一次真实验证。留个白名单才谈得上"灰度"。

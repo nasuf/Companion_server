@@ -111,7 +111,6 @@ from app.services.prompting.defaults import (
     MEMORY_EXTRACTION_AI_PROMPT,
     MEMORY_EXTRACTION_USER_PROMPT,
     MEMORY_CONSOLIDATION_PROMPT,
-    MEMORY_REFLECTION_PROMPT,
     MEMORY_PAIRWISE_CONTRADICTION_PROMPT,
     MEMORY_RECONCILIATION_PROMPT,
     MEMORY_RELEVANCE_PROMPT,
@@ -585,13 +584,6 @@ PROMPT_DEFINITIONS = [
         "memory.consolidation", "L3 记忆整合压缩", "异步记忆", "记忆",
         "Phase 2 每周整合: 把同主题的多条 L3 琐事记忆 (优先日总结产物) 压缩成一条摘要记忆, 原始行归档可溯源.",
         MEMORY_CONSOLIDATION_PROMPT,
-    ),
-    PromptDefinition(
-        "memory.reflection", "互动行为反思", "异步记忆", "记忆",
-        "每周从**已验证的**行为事实 (活跃时段/情绪构成/互动节奏) 归纳对相处有帮助的判断, "
-        "写入 L2 (provenance=reflected). 只看事实不看原始消息, 每条判断必须能引用到具体事实; "
-        "产出只用于调整语气与话题选择, 严禁直接说给用户听.",
-        MEMORY_REFLECTION_PROMPT,
     ),
 
     # ── 记忆: 删除 (Memory §5) ──

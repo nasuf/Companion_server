@@ -1,9 +1,11 @@
 """行为事实层的守卫.
 
-这一层存在的全部理由是"喂给 LLM 的数字必须是对的" —— 模型会忠实地总结错误的数据,
-产出一条听起来合理的假洞见, 写进记忆永久生效, 而整条链路不报任何错。
+这一层存在的全部理由是"喂给画像的数字必须是对的" —— 模型会忠实地总结错误的数据,
+产出一句听起来合理的假判断, 而整条链路不报任何错。
 
-所以这里既测算得对不对, 也钉住开发时踩过的两个真实错误。
+所以这里既测算得对不对, 也钉住开发时踩过的三个真实错误: 时区方向反了、把每条用户
+消息都会写的衰减重置事件当成"回应了主动消息"、以及 date 列取回来是字符串导致相减
+抛异常被吞掉。
 """
 
 from __future__ import annotations
@@ -17,8 +19,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.memory.reflection import signals
-from app.services.memory.reflection.signals import (
+from app.services.memory import behaviour_signals as signals
+from app.services.memory.behaviour_signals import (
     LOCAL_UTC_OFFSET_HOURS,
     MIN_MESSAGES_FOR_TIMING,
     BehaviouralFact,

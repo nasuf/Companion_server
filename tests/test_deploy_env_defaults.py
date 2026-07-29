@@ -25,8 +25,6 @@ _DEPLOY_YML = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "d
 _COUPLED_FLAGS = [
     ("MEMORY_CONSOLIDATION_ENABLED", "memory_consolidation_enabled"),
     ("MEMORY_CONSOLIDATION_WORKSPACES", "memory_consolidation_workspaces"),
-    ("MEMORY_REFLECTION_ENABLED", "memory_reflection_enabled"),
-    ("MEMORY_REFLECTION_WORKSPACES", "memory_reflection_workspaces"),
 ]
 
 
@@ -59,10 +57,7 @@ def test_deploy_default_matches_code_default(env_name, field):
     )
 
 
-@pytest.mark.parametrize("env_name", [
-    "MEMORY_CONSOLIDATION_WORKSPACES",
-    "MEMORY_REFLECTION_WORKSPACES",
-])
+@pytest.mark.parametrize("env_name", ["MEMORY_CONSOLIDATION_WORKSPACES"])
 def test_canary_allowlist_is_actually_settable(env_name):
     """白名单存在的意义是"出事时先缩小范围"。要是只能靠改代码 + 重新部署才能设,
     那它就不是应急手段。"""

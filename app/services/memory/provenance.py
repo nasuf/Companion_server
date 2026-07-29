@@ -19,12 +19,13 @@ replacing category-based guessing in defense rules:
                   episodic trivia — first in line for consolidation.
 - CONSOLIDATED  : produced by the L3 cluster compression job from archived
                   originals.
-- REFLECTED     : derived by the weekly reflection job from verified behavioural
-                  facts (活跃时段 / 情绪构成 / 互动节奏). Unlike every other
-                  provenance these are **inferences, not statements** — nobody
-                  ever said them. That is why they land at L2 rather than L1
-                  (a wrong inference in the never-decay tier is permanent) and
-                  why they are excluded from lossy compression.
+- REFLECTED     : 历史值, 不再产生新行。2026-07 试过把互动行为观察 (活跃时段 /
+                  情绪构成 / 互动节奏) 写成独立记忆条目, 实测行不通: 72 条真实
+                  消息里只有 7% 能召回它们, 且召回时多是误配 —— 这类内容是**特质**
+                  不是事实, 而向量检索按话题相似度建索引, "他习惯用短句"不关于任何
+                  话题。现在这些观察改为直接喂给用户画像 (每轮必然注入, 不需要被
+                  检索到), 见 portrait._behaviour_section。
+                  常量保留是因为生产上还有当时写入、随后归档的行引用这个值。
 
 NULL = legacy rows written before the column existed (backfill script:
 scripts/backfill_memory_provenance.py).
@@ -45,8 +46,8 @@ VALID_PROVENANCES = frozenset({
     CONSOLIDATED, REFLECTED,
 })
 
-# 有损压缩不该套在这些上面。CONSOLIDATED 本身就是压缩产物 (再压一次是复合损失),
-# REFLECTED 是推断 (压缩会把它的证据边界抹掉, 而没有证据的推断无法复核)。
+# 有损压缩不该套在这些上面。CONSOLIDATED 本身就是压缩产物 (再压一次是复合损失);
+# REFLECTED 已不再产生新行, 留在这里是让存量的归档行即使被恢复也不会被压。
 COMPRESSION_EXEMPT = frozenset({CONSOLIDATED, REFLECTED})
 
 
