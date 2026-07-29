@@ -32,6 +32,15 @@ def calibrate_against_ntp(server: str = "pool.ntp.org", timeout: float = 3.0) ->
     """同步与 NTP 服务器对比, 返回偏差秒数 (正=本地慢于 NTP).
 
     spec Part 5 §2.1: NTP 校准. 失败返回 None.
+
+    ⚠️ 这是全项目唯一一处**在工作线程里写模块全局**的地方 (scheduler 用
+    asyncio.to_thread 调它, 因为 ntplib 是阻塞的), 而读方 `_now_corrected` 跑在事件
+    循环上。不加锁是安全的: CPython 里给模块全局赋一个 float 是单条 STORE_GLOBAL,
+    GIL 保证读方拿到的要么是旧值要么是新值, 不会撕裂。
+
+    两个全局之间可能短暂不一致 (drift 已更新而 last_sync 还没), 但 last_sync 只用于
+    诊断展示, 不参与任何计算。若将来有人要在这里加第三个参与计算的全局, 就得改成
+    一次性替换一个不可变元组, 否则这个"短暂不一致"会变成真的 bug。
     """
     global _NTP_DRIFT_SECONDS, _NTP_LAST_SYNC
     try:

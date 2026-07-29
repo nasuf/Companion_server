@@ -189,6 +189,64 @@ class TestDeployWiring:
         )
 
 
+class TestLimitSemantics:
+    """判别原则: 保护**共享外部资源**的上限必须按 worker 摊分, 保护**本进程资源**的
+    不该摊分。搞反了两个方向都出问题 —— 前者会把 provider 的配额打爆, 后者会让每个
+    进程只剩几分之一的可用额度。
+    """
+
+    def test_llm_cap_is_divided_because_it_guards_a_shared_quota(self):
+        """provider 的 rate limit 是全局的, N 个进程各持 64 就是 N×64 打过去."""
+        import inspect
+
+        from app.services.llm import resilience
+
+        assert "_per_worker_share" in inspect.getsource(resilience._llm_slot)
+
+    def test_background_task_cap_is_not_divided_because_it_guards_a_local_loop(self):
+        """后台任务上限护的是本进程的事件循环, 每进程一份正是对的.
+
+        摊分它反而有害: 2 worker 各只剩 128, 而每个进程的事件循环本来都能承载 256。
+        """
+        import inspect
+
+        from app.services.runtime import tasks
+
+        src = inspect.getsource(tasks)
+        assert "_per_worker_share" not in src, (
+            "后台任务上限被摊分了 —— 它护的是本进程事件循环, 不是共享资源"
+        )
+
+    def test_user_facing_rate_limits_live_in_redis(self):
+        """按用户计的限流必须落在 Redis, 放进程内就等于被 worker 数放宽."""
+        import inspect
+
+        from app.api.public import speech
+
+        src = inspect.getsource(speech._enforce_rate_limit)
+        assert "redis" in src and "incr" in src, (
+            "语音限流不在 Redis 上, 多 worker 下每个进程各算一份, 实际额度翻倍"
+        )
+
+
+class TestCheckThenCreate:
+    def test_first_greeting_conversation_creation_is_serialised(self):
+        """查空到创建之间要串行化.
+
+        这个函数由 WS 连接触发。用户双设备登录或重连风暴会让两次调用并行, 双双查到
+        "没有会话"再各建一个 —— 同一个 agent 下两个默认会话, 消息还会被分到两边。
+        """
+        import inspect
+
+        from app.services.proactive import sender
+
+        src = inspect.getsource(sender._ensure_first_greeting_conversations)
+        assert "distributed_lock" in src, "查空到创建之间没有串行化"
+        assert src.count("find_many") >= 2, (
+            "拿到锁之后必须重查一次 —— 等锁期间别人可能已经建好了"
+        )
+
+
 class TestWebSocketCrossProcess:
     def test_conversation_send_falls_back_to_pubsub(self):
         """用户的 WS 连接只存在于某一个 worker 的内存里.

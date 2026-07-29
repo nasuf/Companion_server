@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
+from app.services.runtime.distributed_lock import distributed_lock
 from app.observability import bind_context
 from app.observability.events import EVT_PROACTIVE_SENT, EVT_PROACTIVE_SKIPPED
 from app.redis_client import get_redis
@@ -842,6 +843,32 @@ async def _ensure_first_greeting_conversations(
     if convs:
         return convs
 
+    # 查空到创建之间要串行化。这个函数由 WS 连接触发, 用户双设备登录或重连风暴会让
+    # 两次调用并行 (多 worker 下是真并行), 双双查到"没有会话"再各建一个 —— 同一个
+    # agent 下出现两个默认会话, 消息还会被分到两边。
+    #
+    # 拿不到锁就当"另一边正在建", 重查一次即可: 这里不需要抢, 只需要不重复建。
+    async with distributed_lock(
+        f"first_greeting_conv:{agent_id}",
+        ttl_s=30,
+        wait_timeout_s=5.0,
+        fail_open=True,
+    ) as locked:
+        if locked:
+            convs = await db.conversation.find_many(
+                where={"agentId": agent_id, "isDeleted": False},
+            )
+            if convs:
+                return convs
+        return await _create_default_conversation(
+            agent_id=agent_id, user_id=user_id,
+        )
+
+
+async def _create_default_conversation(
+    *, agent_id: str, user_id: str
+) -> list[Any]:
+    """建默认会话。调用方负责先确认确实没有 (并持有锁)."""
     workspace = await get_active_workspace(user_id=user_id, agent_id=agent_id)
     if not workspace:
         logger.info(
