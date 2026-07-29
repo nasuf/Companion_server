@@ -40,12 +40,62 @@ def _function_body(source: str, name: str) -> str:
 
 
 def test_no_job_swallows_a_failure_into_a_bare_warning(source):
-    """就是这个写法让 L2 那次故障隐身了几个月."""
-    offenders = re.findall(r'logger\.warning\(f"[^"]*failed: \{e\}"\)', source)
+    """就是这个写法让 L2 那次故障隐身了几个月.
+
+    只匹配单行 `logger.warning(f"...failed: {e}")` 是不够的 —— runtime_job_queue
+    写成多行且带 extra=, 就这么从守卫底下溜过去了, 直到巡检上线才发现它的失败从来
+    没进过健康记录。所以这里改成: 只要 warning 的消息里出现 "failed: {e}", 不管
+    后面还跟着什么参数, 一律算数。
+    """
+    offenders = re.findall(r'logger\.warning\(\s*f"[^"]*failed: \{e\}"', source)
     assert not offenders, (
         "定时任务的失败又被写成裸 logger.warning 了。改走 _job_failed(name, e) —— "
         "它按 error 级别上报并把失败时刻写进健康记录，否则一个任务可以坏上几个月"
         "而任何界面都看不出来：\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_every_registered_job_can_record_a_success(source):
+    """每个注册的 job 都要经过某个会记录成功的包装.
+
+    只记失败的任务在健康表上永远是"未观测" —— 跟"真的死了"完全无法区分, 等于没有
+    监控。redis_health_recheck 和 runtime_job_queue 就是这么漏的: 它们刻意不走分布
+    式锁 (每实例各自执行), 于是连带着也跳过了健康记录。
+    """
+    import ast
+
+    tree = ast.parse(source)
+    registered: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "add_job":
+            if not node.args:
+                continue
+            job_id = next(
+                (ast.literal_eval(k.value) for k in node.keywords
+                 if k.arg == "id" and isinstance(k.value, ast.Constant)),
+                None,
+            )
+            if job_id:
+                registered[job_id] = ast.unparse(node.args[0])
+
+    recording_wrappers = {"_run_distributed_job", "_run_local_job"}
+    instrumented = {
+        fn.name
+        for fn in tree.body
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(n, ast.Call) and getattr(n.func, "id", None) in recording_wrappers
+            for n in ast.walk(fn)
+        )
+    }
+
+    missing = sorted(
+        job_id for job_id, handler in registered.items() if handler not in instrumented
+    )
+    assert not missing, (
+        "这些 job 的处理函数没经过 _run_distributed_job 或 _run_local_job，成功永远"
+        "不会被记录，健康表上会一直显示「未观测」——真死了也是同一个显示：\n  "
+        + "\n  ".join(missing)
     )
 
 

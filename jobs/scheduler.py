@@ -145,6 +145,32 @@ async def _run_distributed_job(
         _current_job.reset(token)
 
 
+async def _run_local_job(job_name: str, fn: Callable[[], object]) -> None:
+    """跑一个不需要跨实例互斥的任务, 但同样留下健康记录.
+
+    有两个任务刻意不走分布式锁, 而且不能走: redis_health_recheck 要每个实例各自
+    ping 自己的连接 (加锁会让其余实例永远不翻转健康标志), runtime_job_queue 是多
+    实例并行消费同一个队列。
+
+    但"不需要锁"不等于"不需要被观测"。这两个任务原本只在失败时留痕, 成功从不记录
+    —— 于是健康表上永远是"未观测", 真死了也是同一个显示, 等于完全没有信号。而它们
+    恰恰是频率最高的两个, 一停就该立刻看得出来。
+    """
+    run = _JobRun(name=job_name)
+    token = _current_job.set(run)
+    try:
+        result = fn()
+        if asyncio.iscoroutine(result):
+            await result
+        if not run.failed:
+            await _record_job_outcome(job_name, ok=True)
+    except Exception as e:
+        _job_failed(job_name, e)
+        raise
+    finally:
+        _current_job.reset(token)
+
+
 _JOB_HEALTH_KEY = "scheduler:health"
 _JOB_HEALTH_TTL_S = 90 * 24 * 3600
 
@@ -741,28 +767,30 @@ async def _run_music_schedule_transition_scan():
 
 
 async def _run_runtime_job_queue():
-    try:
-        processed = await process_runtime_jobs(max_jobs=20)
-        if processed:
-            logger.info(
-                f"[CRON] runtime job queue processed {processed} jobs",
-                extra={
-                    "event": EVT_SCHEDULER_JOB,
-                    "task_name": "runtime_job_queue",
-                    "phase": "completed",
-                    "processed": processed,
-                },
-            )
-    except Exception as e:
-        logger.warning(
-            f"Runtime job queue scan failed: {e}",
-            extra={
-                "event": EVT_SCHEDULER_JOB,
-                "task_name": "runtime_job_queue",
-                "phase": "failed",
-                "error_type": type(e).__name__,
-            },
-        )
+    """消费运行时任务队列.
+
+    走 _run_local_job 而非 _run_distributed_job: 多个实例并行消费同一个队列是设计
+    如此, 加锁反而会把吞吐压到单实例。
+    """
+    async def _body():
+        try:
+            processed = await process_runtime_jobs(max_jobs=20)
+            if processed:
+                logger.info(
+                    f"[CRON] runtime job queue processed {processed} jobs",
+                    extra={
+                        "event": EVT_SCHEDULER_JOB,
+                        "task_name": "runtime_job_queue",
+                        "phase": "completed",
+                        "processed": processed,
+                    },
+                )
+        except Exception as e:
+            # 这里原本是裸 logger.warning: 失败不上报健康记录, 也不按 error 级别
+            # 出现 —— 跟当年 L2 动态分级崩几个月没人发现是同一个写法。
+            _job_failed("Runtime job queue scan", e)
+
+    await _run_local_job("runtime_job_queue", _body)
 
 
 async def _run_notification_dispatch():
@@ -959,12 +987,18 @@ async def _run_last_will_scan():
 async def _run_redis_health_recheck():
     """30s 周期 ping Redis 并更新 _redis_healthy flag. 允许 Redis 故障后自愈
     (修好后下次 tick flip 回 healthy, 写 endpoints 自动重开).
+
+    走 _run_local_job 而非 _run_distributed_job: 每个实例都必须 ping 自己的连接,
+    加锁会让抢不到锁的实例永远停在旧的健康标志上。
     """
-    try:
+    async def _body():
         from app.redis_client import recheck_redis_health
-        await recheck_redis_health()
-    except Exception as e:
-        _job_failed("Redis health recheck", e)
+        try:
+            await recheck_redis_health()
+        except Exception as e:
+            _job_failed("Redis health recheck", e)
+
+    await _run_local_job("redis_health_recheck", _body)
 
 
 async def _run_invariant_checks():
