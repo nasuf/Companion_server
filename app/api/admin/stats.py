@@ -1647,6 +1647,31 @@ async def cron_health(_: dict = Depends(require_admin_jwt)):
     return {"cron": report.as_dict(), "invariants": invariants}
 
 
+@router.get("/reply-effect")
+async def reply_effect(
+    days: int = 14,
+    _: dict = Depends(require_admin_jwt),
+):
+    """回复效果: 用真实用户行为衡量回复质量.
+
+    在线信号回答离线评测集答不了的问题 —— 评测集认可的"好"是我们定义的好, 这里看
+    的是用户有没有接着聊。切片按整段累计而非逐日, 单日样本切完每格只有个位数。
+    """
+    from app.services.effect.signals import CONTINUATION_WINDOW, MIN_SLICE_TURNS
+    from app.services.effect.store import get_range, merge_slices
+
+    window = max(1, min(90, int(days or 14)))
+    result = await get_range(window)
+    return {
+        **result.as_dict(),
+        "slices": merge_slices(result.days),
+        "config": {
+            "continuation_window_s": int(CONTINUATION_WINDOW.total_seconds()),
+            "min_slice_turns": MIN_SLICE_TURNS,
+        },
+    }
+
+
 @router.post("/cron-health/invariants")
 async def rerun_invariants(_: dict = Depends(require_admin_jwt)):
     """手动重跑不变量巡检.

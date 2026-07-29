@@ -671,6 +671,17 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # 回复效果指标预热: 紧跟不变量巡检, 同属"昨天到底发生了什么"的日终结算。
+    scheduler.add_job(
+        _run_effect_refresh,
+        "cron",
+        hour=6,
+        minute=20,
+        id="effect_refresh",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     scheduler.start()
     logger.info("Job scheduler started")
 
@@ -1088,6 +1099,24 @@ async def _run_invariant_checks():
             _job_failed("Data invariant checks", e)
 
     await _run_distributed_job("invariant_checks", 1800, _body)
+
+
+async def _run_effect_refresh():
+    """回复效果指标预热.
+
+    指标本身是只读聚合 (services/effect/), 页面随时可以现算; 这个任务只是把最近
+    几天算好放进缓存, 让后台打开即见, 顺带让"没人看时也在记录"成立。
+
+    排在 06:20, 紧跟数据不变量巡检 —— 两者都是"昨天到底发生了什么"的日终结算。
+    """
+    async def _body():
+        from app.services.effect.store import refresh_recent
+        try:
+            await refresh_recent()
+        except Exception as e:
+            _job_failed("Effect metrics refresh", e)
+
+    await _run_distributed_job("effect_refresh", 1800, _body)
 
 
 async def _run_trace_retention():
