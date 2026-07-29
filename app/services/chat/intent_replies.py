@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 class L3TriggerResult:
     label: str
     retrieval_query: str = ""
+    # 这次输出到底读懂了没有。"无" 有两种来源: 模型明确判定不需要唤醒, 或者输出
+    # 压根没解析出来而兜底成 "无" —— 两者混在一起, 调用方只能每次都重试一遍旧格式,
+    # 于是绝大多数对话 (判定为"无"是常态) 都白付一次 LLM。
+    recognised: bool = True
 
 
 _OPTIONAL_REFERENCE_KEYS = frozenset({
@@ -815,13 +819,16 @@ def _parse_l3_trigger_result(raw: Any) -> L3TriggerResult:
             if candidate in text:
                 label = candidate
                 break
-    if label not in labels:
+    recognised = label in labels
+    if not recognised:
         label = "无"
     if label == "无":
         retrieval_query = ""
     if len(retrieval_query) > 50:
         retrieval_query = retrieval_query[:50]
-    return L3TriggerResult(label=label, retrieval_query=retrieval_query)
+    return L3TriggerResult(
+        label=label, retrieval_query=retrieval_query, recognised=recognised,
+    )
 
 
 async def l3_trigger_analyze(
@@ -839,10 +846,12 @@ async def l3_trigger_analyze(
         lambda p: invoke_json(get_utility_model(), p),
     )
     result = _parse_l3_trigger_result(raw)
-    if result.label != "无":
+    if result.recognised:
         return result
 
-    # Backward compatibility for deployed/custom prompts that still emit a bare label.
+    # 只有输出没读懂时才重来一次 —— 兼容 web 端可能仍是旧「裸标签」格式的自定义
+    # 提示词。以前是「结果为无就重试」, 而"无"正是绝大多数对话的正常答案, 于是
+    # 实测 10 轮里 9 轮都多付一次 LLM (约 0.37s 在关键路径上)。
     label = await _classify_label(
         "memory.l3_trigger",
         params,
