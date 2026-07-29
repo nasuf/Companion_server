@@ -55,6 +55,16 @@ class UsageSummary(TypedDict):
 
 _current: ContextVar[UsageSummary | None] = ContextVar("llm_usage_session", default=None)
 
+# 当前这段代码属于哪个 scope。跟用量累加分开存, 是因为读它的是并发限流 (resilience
+# 层要按前台/后台分配槽位), 那跟"这次调用花了多少 token"是两回事 —— 塞进
+# UsageSummary 会让一个纯统计结构承担调度职责。
+_current_scope: ContextVar[str] = ContextVar("llm_usage_scope", default="")
+
+
+def current_scope() -> str:
+    """当前 usage session 的 scope; 不在任何 session 里时返回空串."""
+    return _current_scope.get()
+
 
 def start_session() -> Token:
     """开新累加 session. 返回的 token 用于 flush_session 还原 ContextVar."""
@@ -186,9 +196,11 @@ async def usage_session(
     """
     from app.services.llm.usage_repo import write_usage_row
     token = start_session()
+    scope_token = _current_scope.set(scope)
     try:
         yield
     finally:
+        _current_scope.reset(scope_token)
         summary = flush_session(token)
         if summary:
             await write_usage_row(

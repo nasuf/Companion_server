@@ -25,6 +25,10 @@ _DEPLOY_YML = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "d
 _COUPLED_FLAGS = [
     ("MEMORY_CONSOLIDATION_ENABLED", "memory_consolidation_enabled"),
     ("MEMORY_CONSOLIDATION_WORKSPACES", "memory_consolidation_workspaces"),
+    # 并发上限两侧必须一致: 代码默认是「没设 GH 变量时」的实际值, deploy 里的
+    # fallback 是「运维看到的默认」。两者漂开的话, 调优时按看到的数推理会算错。
+    ("LLM_MAX_CONCURRENCY", "llm_max_concurrency"),
+    ("LLM_BACKGROUND_MAX_CONCURRENCY", "llm_background_max_concurrency"),
 ]
 
 

@@ -13,6 +13,8 @@ astream + 情绪分析 + 记忆抽取 …), 一旦 Dashscope 抽风 5 分钟, �
    event loop 不被拖慢
 4. Ollama fallback: primary provider (Dashscope 等) 彻底失败后, 自动切到本地
    LOCAL_CHAT_MODEL 再试一次, 保证"最坏情况下还有 AI 能回话"
+5. 并发上限: 每个 provider 的在途请求数封顶, 且后台任务只能占其中一小部分,
+   保证突发时前台聊天仍有槽位 (见 _llm_slot)
 
 入口通过 `call_with_resilience` (unary) 和 `astream_with_resilience` (stream);
 models.py 里的 invoke_text / invoke_json / 主回复 _run_main_llm 用这两个入口,
@@ -25,6 +27,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -322,6 +325,80 @@ def _record_runtime_event(*, result: str, latency_ms: int | None = None) -> None
         return
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 并发上限: 按 provider 分, 后台任务受更紧的配额
+# ═══════════════════════════════════════════════════════════════════
+
+# 后台 scope。这些调用不在用户等待的链路上, 突发时应该给前台让路。
+# post_process 虽然由用户消息触发, 但发生在回复推送之后, 慢一点用户感知不到。
+_BACKGROUND_SCOPES = frozenset({
+    "schedule_cron", "post_process", "proactive", "agent_creation",
+    "offline", "music",
+})
+
+_slots: dict[str, asyncio.Semaphore] = {}
+_bg_slots: dict[str, asyncio.Semaphore] = {}
+
+
+def _get_semaphore(pool: dict[str, asyncio.Semaphore], key: str, size: int) -> asyncio.Semaphore:
+    """Lazy init 让 Semaphore 绑到当前 event loop.
+
+    模块级初始化会在测试里出 "attached to a different loop" —— 每个 test 有自己
+    的 loop。跟 proactive/triggers.py 里那个 trigger semaphore 同样的处理。
+
+    首次创建后大小就固定了。上限来自环境变量, 运行时本就不变; 要改必须重启, 这跟
+    改这个值的方式 (调 GH 变量后重新部署) 是一致的。
+    """
+    sem = pool.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(size)
+        pool[key] = sem
+    return sem
+
+
+def reset_slots_for_testing() -> None:
+    _slots.clear()
+    _bg_slots.clear()
+
+
+@asynccontextmanager
+async def _llm_slot(provider: str):
+    """占一个 provider 的在途槽位.
+
+    为什么需要: retry 会放大故障。provider 抖一下 → 所有在途调用重试 → 瞬时请求
+    量翻几倍 → 真的触发 rate limit → 熔断器打开 → 全员降级。熔断器是事后止损,
+    并发上限是事前不让它发生。提醒触发那条线早就用 Semaphore(8) 解决过同一个问题,
+    聊天路径一直没有。
+
+    后台调用要**先**拿后台配额再拿总配额, 于是: 总量 ≤ llm_max_concurrency,
+    后台 ≤ llm_background_max_concurrency, 前台任何时候至少有两者之差个槽位。
+    单一全局信号量做不到这点 —— 夜间任务可以把槽位占满, 白天聊天的人排在后面。
+
+    槽位只在真正发请求时持有: retry 的 backoff sleep 不占槽, 否则一次重试链会把
+    槽位按住十几秒, 限流反而成了瓶颈。
+    """
+    total = int(getattr(settings, "llm_max_concurrency", 0) or 0)
+    if total <= 0:                       # 配 0 或负数 = 关闭限流
+        yield
+        return
+
+    from app.services.llm.usage_tracker import current_scope
+
+    is_background = current_scope() in _BACKGROUND_SCOPES
+    if not is_background:
+        async with _get_semaphore(_slots, provider, total):
+            yield
+        return
+
+    # 下限 1: 配成 0 会让后台任务永远拿不到槽位, 夜间 cron 直接卡死 —— 那是比不
+    # 限流更严重的故障, 不该由一个配错的数值造成。上限收到 total, 配得比总量还大
+    # 等于没有前台保底。
+    bg = max(1, min(total, int(getattr(settings, "llm_background_max_concurrency", 0) or 0)))
+    async with _get_semaphore(_bg_slots, provider, bg):
+        async with _get_semaphore(_slots, provider, total):
+            yield
+
+
 async def _run_with_retry(
     factory: Callable[[], Awaitable[Any]],
     *,
@@ -330,8 +407,11 @@ async def _run_with_retry(
     op: str,
 ) -> Any:
     if not settings.llm_resilience_enabled:
-        # Kill switch: 只保留 timeout, 跳过 CB + retry
-        return await asyncio.wait_for(factory(), timeout=profile.timeout_s)
+        # Kill switch: 只保留 timeout, 跳过 CB + retry。并发上限仍然生效 ——
+        # 这个开关是为了排查时少一层重试/熔断的干扰, 而故障期恰恰最需要防止请求
+        # 洪峰, 把限流一起关掉会让情况更糟。
+        async with _llm_slot(provider):
+            return await asyncio.wait_for(factory(), timeout=profile.timeout_s)
 
     breaker = _get_breaker(provider)
     if not breaker.try_acquire():
@@ -342,7 +422,9 @@ async def _run_with_retry(
     for attempt in range(profile.max_retries + 1):
         started = time.monotonic()
         try:
-            result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
+            # 槽位只包住这一次请求, 不包外层的 backoff sleep。
+            async with _llm_slot(provider):
+                result = await asyncio.wait_for(factory(), timeout=profile.timeout_s)
             breaker.record_success()
             _log_attempt(provider=provider, op=op, result="ok",
                          started=started, attempt=attempt)
@@ -579,9 +661,19 @@ async def _stream_provider(
             pass
 
     try:
-        first = await asyncio.wait_for(
-            aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
-        )
+        # 槽位只覆盖建连到首 chunk 这一段, 不覆盖整个流。两个理由:
+        #
+        # 其一, 要防的是"请求发起"的洪峰 (重试风暴、突发到达), 那正好发生在这一
+        # 段 —— factory() 只是造生成器, 真正发请求是第一次 __anext__。
+        #
+        # 其二, 按住整个流会让上限失去意义: 流可以跑 30-90 秒, 64 个槽位就只剩每
+        # 秒两条流的吞吐。而且异步生成器被消费方中途丢弃时, finally 要等 GC 才跑,
+        # 槽位泄漏是永久的容量损失 —— 比没有限流更糟。这一段的持有时长有
+        # first_chunk_timeout_s 兜底, 泄漏窗口是有界的。
+        async with _llm_slot(provider):
+            first = await asyncio.wait_for(
+                aiter.__anext__(), timeout=profile.first_chunk_timeout_s,
+            )
     except Exception as e:
         breaker.record_failure()
         _log_attempt(provider=provider, op=op, result="first_chunk_fail",

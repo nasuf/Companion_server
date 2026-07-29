@@ -313,6 +313,19 @@ class Settings(BaseSettings):
     # 紧急 kill switch: 设为 False 时, 所有 LLM 调用只保留 per-profile timeout,
     # 跳过 circuit breaker + retry + Ollama fallback (回到原始行为)
     llm_resilience_enabled: bool = True
+    # 每个 provider 的在途请求上限 (0 = 关闭限流)。
+    #
+    # 熔断器是事后止损, 这个是事前不让洪峰发生: provider 抖一下 → 在途调用集体
+    # 重试 → 请求量翻几倍 → 真的撞上 rate limit → 熔断器打开 → 全员降级。
+    #
+    # 64 的来历: dashscope 默认 QPS≈60, 单次调用平均约 5s, 64 并发 ≈ 13 QPS, 离
+    # 限额有充足余量; 而按目标规模 (日 2100 条消息 × 每条 7.2 次 LLM) 估算的峰值
+    # 并发在 30-50, 所以正常流量不会排队, 只在异常放大时才夹住。
+    llm_max_concurrency: int = 64
+    # 上面这些槽位里, 后台任务 (夜间 cron / post_process / 主动消息) 最多占几个。
+    # 剩下的 64-16=48 个是前台聊天的保底 —— 没有这条, 一次夜间任务就能把槽位占满,
+    # 白天聊天的人排在后面, 那是拿真实用户的延迟去换后台吞吐。
+    llm_background_max_concurrency: int = 16
     # Circuit breaker: 滑动窗口内连续失败次数达到 threshold 则 open
     # threshold=10 容许一次 chat (data_fetch_phase 7 并发 utility 调用) 的 burst
     # 失败而不立刻开 CB — provider 真挂时 10 次失败仍能短时间内累计.
