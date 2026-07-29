@@ -37,6 +37,7 @@ from app.services.schedule_domain.schedule import (
     generate_daily_schedule,
     get_cached_schedule,
     get_current_status,
+    get_life_overview,
     status_label,
     type_label,
 )
@@ -518,12 +519,12 @@ async def _resolve_schedule(agent_id: str):
         raise HTTPException(status_code=404, detail="Agent not found")
     schedule = await get_cached_schedule(agent_id)
     if not schedule:
-        life_overview = None
-        if isinstance(agent.lifeOverview, dict):
-            life_overview = agent.lifeOverview.get("description")
+        # 统一走 get_life_overview: 它带 Redis 缓存和 DB 兜底, 而且是全项目唯一
+        # 一处知道这个字段该怎么读的地方。原来这里自己判 dict 取 .description,
+        # 跟 save_life_overview 写入的纯字符串对不上, 实际永远取到 None。
         schedule = await generate_daily_schedule(
             agent_id, agent.name, get_mbti(agent),
-            life_overview=life_overview,
+            life_overview=await get_life_overview(agent_id),
         )
     return agent, schedule
 

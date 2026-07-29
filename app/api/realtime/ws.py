@@ -25,7 +25,12 @@ from app.services.interaction.user_turn_aggregation import (
     enqueue_planned_user_message,
     plan_user_message_aggregation,
 )
-from app.services.schedule_domain.schedule import generate_daily_schedule, get_cached_schedule, get_current_status
+from app.services.schedule_domain.schedule import (
+    generate_daily_schedule,
+    get_cached_schedule,
+    get_current_status,
+    get_life_overview,
+)
 from app.services.mbti import get_mbti
 from app.services.notifications.presence import record_ws_online, remove_ws_online
 from app.services.proactive.state import mark_user_replied_for_conversation
@@ -974,8 +979,12 @@ async def _handle_message(
 
     schedule = await get_cached_schedule(agent.id)
     if not schedule:
+        # 必须带上生活画像。不带的话 generate_daily_schedule 走的是通用模板分支,
+        # 生成一份跟这个 agent 的职业/性格无关的作息 —— 而缓存未命中恰恰发生在
+        # 「久未上线的用户回来说第一句话」这种时刻, 那天的 AI 会显得完全换了个人。
         schedule = await generate_daily_schedule(
             agent.id, agent.name, get_mbti(agent), user_id=user_id,
+            life_overview=await get_life_overview(agent.id),
         )
     received_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "type": "leisure", "status": "idle"}
     current_context = await build_reply_timing_context(
