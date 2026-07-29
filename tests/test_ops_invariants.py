@@ -154,6 +154,96 @@ class TestConsolidation:
         assert (await inv._check_consolidation_active()).status == "ok"
 
 
+class TestCapacityHeadroom:
+    """这条不回答"有没有坏", 回答"还能撑多久" —— 到线时提醒该上 nginx least_conn。"""
+
+    @pytest.mark.asyncio
+    async def test_idle_system_reports_headroom(self, monkeypatch):
+        monkeypatch.setattr(inv, "_capacity_probe", None, raising=False)
+        result = await _capacity_with(monkeypatch, cpu=0.3, ws=2)
+        assert result.status == "ok"
+        assert result.observed == {"cpu_percent": 0.3, "ws_connections": 2}
+
+    @pytest.mark.asyncio
+    async def test_high_cpu_warns(self, monkeypatch):
+        result = await _capacity_with(monkeypatch, cpu=55.0, ws=2)
+        assert result.status == "warn" and "CPU" in result.detail
+
+    @pytest.mark.asyncio
+    async def test_many_connections_warn(self, monkeypatch):
+        result = await _capacity_with(monkeypatch, cpu=1.0, ws=80)
+        assert result.status == "warn" and "WS" in result.detail
+
+    @pytest.mark.asyncio
+    async def test_connection_count_comes_from_redis_not_process_memory(self):
+        """ConnectionManager 的内存表每个 worker 只看得到自己那一半.
+
+        用它统计会在多 worker 下systematically 低估, 于是水位线永远够不到 —— 提醒
+        变成永远不响的哑铃。
+        """
+        import inspect
+
+        src = inspect.getsource(inv._check_capacity_headroom)
+        assert "presence:online:ws" in src, "在线连接数没走 Redis 全局 ZSET"
+
+    @pytest.mark.asyncio
+    async def test_cpu_sampling_does_not_block_the_event_loop(self):
+        """不能用 psutil.cpu_percent(interval=...) —— 它是同步阻塞的.
+
+        在 async 函数里调它会把事件循环卡满采样时长, 单 worker 下所有在线用户一起
+        卡。复用 collect_host_metrics: 它用 await asyncio.sleep 取两次 /proc/stat
+        快照, 采样期间事件循环照常转。
+        """
+        import inspect
+
+        import ast
+
+        src = inspect.getsource(inv._check_capacity_headroom)
+        assert "collect_host_metrics" in src
+
+        # 只看代码不看注释 —— 注释里正解释着"为什么不用 psutil", 按纯文本匹配会
+        # 把这段解释本身判成违规。
+        tree = ast.parse(src.strip())
+        names = {
+            n.id for n in ast.walk(tree) if isinstance(n, ast.Name)
+        } | {
+            a.name.split(".")[0]
+            for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
+        } | {
+            (n.module or "").split(".")[0]
+            for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+        }
+        assert "psutil" not in names, (
+            "psutil.cpu_percent 是同步阻塞调用, 会把事件循环卡满采样时长; "
+            "而且 psutil 不是本项目的声明依赖"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_cpu_reading_does_not_crash(self, monkeypatch):
+        """/proc/stat 读不到时 cpu_percent 是 None, 不能拿去做比较或格式化."""
+        result = await _capacity_with(monkeypatch, cpu=None, ws=3)
+        assert result.status == "ok" and "未知" in result.detail
+
+
+async def _capacity_with(monkeypatch, *, cpu: float | None, ws: int):
+    """跑一次容量检查, CPU 与连接数由参数注入."""
+    from unittest.mock import AsyncMock
+
+    import app.services.system_metrics as sm
+
+    monkeypatch.setattr(
+        sm, "collect_host_metrics",
+        AsyncMock(return_value={"system": {"cpu_percent": cpu}}),
+    )
+
+    fake_redis = AsyncMock()
+    fake_redis.zcard = AsyncMock(return_value=ws)
+    import app.redis_client as rc
+
+    monkeypatch.setattr(rc, "get_redis", AsyncMock(return_value=fake_redis))
+    return await inv._check_capacity_headroom()
+
+
 class TestRunner:
     @pytest.mark.asyncio
     async def test_one_broken_check_does_not_sink_the_report(self, monkeypatch):

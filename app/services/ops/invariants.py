@@ -211,6 +211,66 @@ async def _check_embeddings_complete() -> InvariantResult:
     )
 
 
+# 容量水位: 到这两条线时该动手做 nginx least_conn + 多实例了。
+#
+# 现在刻意不做, 因为倾斜要成为问题的前提是单 worker 接近饱和 —— 实测峰值同时进行
+# 的对话约 2.7 轮、CPU 占用 0.21%, 就算连接 10:0 全压在一个 worker 上也毫无压力。
+# 提前优化等于解决一个测量不到的问题, 却引入真实的运维复杂度。
+#
+# 但"到时候再说"如果没人盯就等于永远不做, 所以把触发条件写成巡检项。
+CAPACITY_CPU_PERCENT = 40.0
+CAPACITY_WS_CONNECTIONS = 50
+
+
+async def _check_capacity_headroom() -> InvariantResult:
+    """离"该上多实例负载均衡"还有多远.
+
+    这条跟其他不变量性质不同: 别的在回答"有没有坏", 它在回答"还能撑多久"。放在同一
+    张表里是因为它们共享同一个失效模式 —— 没人主动看就永远发现不了。
+    """
+    from app.redis_client import get_redis
+    from app.services.system_metrics import collect_host_metrics
+
+    observed: dict[str, Any] = {}
+    reasons: list[str] = []
+
+    # 复用资源监控那套采集, 不用 psutil.cpu_percent(interval=1.0) —— 后者是同步
+    # 阻塞调用, 在 async 函数里会把事件循环卡满一秒, 单 worker 下所有在线用户一起
+    # 卡。collect_host_metrics 用 await asyncio.sleep 取两次 /proc/stat 快照,
+    # 采样期间事件循环照常转; 顺带也不引入 psutil 这个非声明依赖。
+    metrics = await collect_host_metrics()
+    cpu = (metrics.get("system") or {}).get("cpu_percent")
+    observed["cpu_percent"] = cpu
+    if cpu is not None and cpu >= CAPACITY_CPU_PERCENT:
+        reasons.append(f"CPU {cpu:.0f}% ≥ {CAPACITY_CPU_PERCENT:.0f}%")
+
+    # WS 连接数从 Redis ZSET 取 —— ConnectionManager 的内存表每个 worker 只看得到
+    # 自己那一半, 多 worker 下会systematically 低估一倍。
+    try:
+        redis = await get_redis()
+        ws_count = int(await redis.zcard("presence:online:ws") or 0)
+    except Exception:
+        ws_count = -1
+    observed["ws_connections"] = ws_count
+    if ws_count >= CAPACITY_WS_CONNECTIONS:
+        reasons.append(f"在线 WS {ws_count} ≥ {CAPACITY_WS_CONNECTIONS}")
+
+    if reasons:
+        return InvariantResult(
+            "capacity_headroom", "容量水位", "warn",
+            "、".join(reasons)
+            + " —— 该考虑 nginx least_conn + 多实例了 (单端口多 worker 的连接分配"
+              "由内核决定, 不均匀且不再平衡)",
+            observed,
+        )
+    cpu_text = f"{cpu:.0f}%" if cpu is not None else "未知"
+    return InvariantResult(
+        "capacity_headroom", "容量水位", "ok",
+        f"CPU {cpu_text} / 在线 WS {ws_count} —— 距离需要负载均衡还有余量",
+        observed,
+    )
+
+
 async def _check_consolidation_active() -> InvariantResult:
     """整合开着就该有产出, 否则说明它在空转."""
     from app.config import settings
@@ -262,6 +322,7 @@ _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] =
     ("memory_access_logged", "记忆访问打点", _check_memory_access_logged),
     ("embeddings_complete", "向量覆盖率", _check_embeddings_complete),
     ("consolidation_active", "记忆整合", _check_consolidation_active),
+    ("capacity_headroom", "容量水位", _check_capacity_headroom),
 )
 
 
