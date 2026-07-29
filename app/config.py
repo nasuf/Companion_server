@@ -313,6 +313,15 @@ class Settings(BaseSettings):
     # 紧急 kill switch: 设为 False 时, 所有 LLM 调用只保留 per-profile timeout,
     # 跳过 circuit breaker + retry + Ollama fallback (回到原始行为)
     llm_resilience_enabled: bool = True
+    # uvicorn worker 进程数。同时也是若干"进程内上限"的分母 —— 见
+    # resilience._per_worker_share: 配置项的语义要始终是整个服务的量, 不能因为
+    # 多起了一个进程就翻倍。
+    #
+    # 2 的取舍: 主要买的是"一个 worker 崩了另一个还在", 而不是吞吐 (实测目标规模
+    # 下峰值并发约 2.7 轮对话, 单进程绰绰有余)。往上加受两处约束 —— 每 worker 占
+    # 约 1.2G 内存而机器只剩 4G, 且每 worker 占 12 个 DB 连接而 postgres 上限 50
+    # (4 worker 即超限)。
+    web_concurrency: int = 2
     # 每个 provider 的在途请求上限 (0 = 关闭限流)。
     #
     # 熔断器是事后止损, 这个是事前不让洪峰发生: provider 抖一下 → 在途调用集体

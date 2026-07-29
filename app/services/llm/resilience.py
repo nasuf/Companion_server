@@ -361,6 +361,23 @@ def reset_slots_for_testing() -> None:
     _bg_slots.clear()
 
 
+def _per_worker_share(total: int | None) -> int:
+    """把全局上限摊到本 worker.
+
+    信号量是进程内对象, 多 worker 下每个进程各持一份 —— 直接用配置值的话, 2 个
+    worker 就变成全局 128 而不是 64, 而 provider 的 rate limit 是按全局算的。配置
+    项的语义应当始终是"整个服务的在途上限", 不随部署形态漂移。
+
+    向上取整并保底 1: 宁可略微超出也不要出现某个 worker 拿不到任何槽位 —— 那等于
+    这个 worker 上的聊天全部卡死, 比稍微宽松的限流严重得多。
+    """
+    configured = int(total or 0)
+    if configured <= 0:
+        return 0
+    workers = max(1, int(getattr(settings, "web_concurrency", 1) or 1))
+    return max(1, -(-configured // workers))     # ceil division
+
+
 @asynccontextmanager
 async def _llm_slot(provider: str):
     """占一个 provider 的在途槽位.
@@ -377,7 +394,7 @@ async def _llm_slot(provider: str):
     槽位只在真正发请求时持有: retry 的 backoff sleep 不占槽, 否则一次重试链会把
     槽位按住十几秒, 限流反而成了瓶颈。
     """
-    total = int(getattr(settings, "llm_max_concurrency", 0) or 0)
+    total = _per_worker_share(getattr(settings, "llm_max_concurrency", 0))
     if total <= 0:                       # 配 0 或负数 = 关闭限流
         yield
         return
@@ -393,7 +410,9 @@ async def _llm_slot(provider: str):
     # 下限 1: 配成 0 会让后台任务永远拿不到槽位, 夜间 cron 直接卡死 —— 那是比不
     # 限流更严重的故障, 不该由一个配错的数值造成。上限收到 total, 配得比总量还大
     # 等于没有前台保底。
-    bg = max(1, min(total, int(getattr(settings, "llm_background_max_concurrency", 0) or 0)))
+    bg = max(1, min(total, _per_worker_share(
+        getattr(settings, "llm_background_max_concurrency", 0),
+    )))
     async with _get_semaphore(_bg_slots, provider, bg):
         async with _get_semaphore(_slots, provider, total):
             yield

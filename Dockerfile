@@ -64,4 +64,11 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --workers 取自 WEB_CONCURRENCY (uvicorn 原生识别该环境变量, 默认由 compose 传
+# 入并与 settings.web_concurrency 保持同值)。用 shell 形式而非 exec 形式,
+# 是为了让环境变量在启动时展开; init:true 已在 compose 里配好, 信号转发不受影响。
+#
+# 多 worker 的前提在部署前逐项扫过 (2026-07-29): 29 个 cron 全部带分布式锁、
+# WS 走 Redis pub/sub 跨进程投递、记忆管线 fail-closed 锁、启动 seeding 加锁串行
+# 化。详见 CLAUDE.md §11。
+CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"]

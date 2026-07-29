@@ -12,6 +12,11 @@ from app.redis_client import get_redis, close_redis, mark_redis_healthy
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
 from app.services.prompting.store import ensure_prompt_templates
 from app.services.career import ensure_default_careers
+from app.services.runtime.distributed_lock import (
+    DistributedLockNotAcquired,
+    DistributedLockUnavailable,
+    distributed_lock,
+)
 from app.services.schedule_domain.holiday_cache import reload as reload_holiday_cache
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
 
@@ -79,10 +84,27 @@ async def lifespan(app: FastAPI):
 
         # Phase 2: Seeding
         # Database schema changes are managed exclusively by Prisma migrations.
-        await asyncio.gather(
-            _timed("Prompt templates", ensure_prompt_templates()),
-            _timed("Career templates", ensure_default_careers()),
-        )
+        #
+        # 必须串行化: 两个 seeder 都是"先查缺失再创建", 多 worker 同时启动会一起
+        # 读到"缺", 一起创建。career_templates.title 没有唯一约束, 结果是每个
+        # worker 各建一份重复职业; prompt_templates.key 有唯一约束, 结果是输的
+        # worker 直接抛异常起不来。
+        #
+        # 拿不到锁就跳过 (fail-closed): 说明别的 worker 正在做同一件事, 重复做既
+        # 无必要也不安全。Redis 不可用时 (fail_open=非生产) 本地仍会执行 —— 开发
+        # 环境只有一个进程, 不存在竞争。
+        try:
+            async with distributed_lock(
+                "startup:seed", ttl_s=180, fail_open=not settings.is_production(),
+            ):
+                await asyncio.gather(
+                    _timed("Prompt templates", ensure_prompt_templates()),
+                    _timed("Career templates", ensure_default_careers()),
+                )
+        except DistributedLockNotAcquired:
+            logger.info("  ↷ Seeding skipped: another worker holds the seed lock")
+        except DistributedLockUnavailable as e:
+            logger.warning(f"  ↷ Seeding skipped: seed lock unavailable ({e})")
 
         # Phase 2b: Holiday cache preload. Runs sequentially (not in the gather
         # above) to avoid exhausting the Prisma pool when the other seed tasks

@@ -20,7 +20,11 @@ from app.services.llm.resilience import CallProfile, _run_with_retry, reset_slot
 
 
 @pytest.fixture(autouse=True)
-def _clean_slots():
+def _clean_slots(monkeypatch):
+    # 上限会按 worker 数摊分 (见 _per_worker_share)。这些用例验证的是限流机制本身,
+    # 固定成单 worker 让"配置多少就是多少", 摊分逻辑另有 test_multi_worker_safety
+    # 专门覆盖。
+    monkeypatch.setattr(settings, "web_concurrency", 1)
     reset_slots_for_testing()
     yield
     reset_slots_for_testing()

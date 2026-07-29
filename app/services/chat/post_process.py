@@ -69,6 +69,10 @@ logger = logging.getLogger(__name__)
 # 内存模型: grow-only (~100B/Lock). 1000 活跃 conv ≈ 100KB 可接受. Lock 不
 # weakref 化 (WeakValueDictionary 在无人持锁时会丢对象, 下次新建的 lock 跟
 # 在飞的 lock 不是同一个 → race 复现). 长期运行需 cleanup 时再加 LRU.
+# 多 worker 下这是**每进程一份**: 它只负责本进程内同一 conversation 的串行化。
+# 跨进程的互斥由下面的 memory_pipeline:{conv} 分布式锁负责, 两层缺一不可 ——
+# 只有本地锁会在多实例下重现 L1 SINGLETON 重复, 只有分布式锁则每个 batch 都要多
+# 一次 Redis 往返。
 _pipeline_locks: dict[str, asyncio.Lock] = {}
 _PIPELINE_DISTRIBUTED_LOCK_TTL = 600
 
