@@ -205,6 +205,28 @@ class TestQueryShape:
     def test_turn_cte_drops_turns_without_a_reply(self):
         assert "WHERE t.replied_at IS NOT NULL" in signals._TURNS_CTE
 
+    def test_lead_looks_past_the_day_boundary(self):
+        """每天最后一个回合不能因为"下一条在次日"就被判成没接住.
+
+        LEAD 只在当日窗口内取值时, 那个回合的 next_ask 必为 NULL —— 用户过两分钟
+        就回了、只是跨过了午夜, 也会被算成流失。偏差方向是系统性向下的, 而且不会
+        报任何错。
+        """
+        sql = signals._TURNS_CTE
+        assert "$2::timestamp + $4::interval" in sql, "LEAD 的取数窗口没有越过日界"
+        assert "in_window" in sql, "越界多取的行必须再过滤掉, 否则次日回合会被计入"
+
+    def test_lookahead_covers_reply_time_plus_window(self):
+        """往后看的时长要能容下「回复耗时 + 延续窗口」, 否则边界修了个寂寞."""
+        assert signals._BOUNDARY_LOOKAHEAD > CONTINUATION_WINDOW
+
+    def test_slice_query_drops_null_values(self):
+        """键存在但值为 null 时会切出一个叫 "None" 的格子, 它不携带分组信息."""
+        import inspect
+
+        src = inspect.getsource(signals._fetch_slices)
+        assert "IS NOT NULL" in src, "空值切片会在界面上变成一个名叫 None 的分组"
+
     @pytest.mark.parametrize("dim", signals.SLICE_DIMENSIONS)
     def test_slice_dimensions_are_low_cardinality(self, dim):
         """高基数字段切出来每格样本太少, 比率剧烈抖动反而误导."""

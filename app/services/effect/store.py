@@ -102,6 +102,9 @@ def summarise(days: list[dict[str, Any]]) -> dict[str, Any]:
     ret_active = sum(int(d.get("active_users") or 0) for d in ret_days)
     ret_back = sum(int(d.get("returned_next_day") or 0) for d in ret_days)
 
+    # 各日中位数的中位数, 不是整段的真中位数 —— 各日样本量悬殊时两者会有出入。
+    # 保留这个近似是因为真中位数需要原始逐回合数据 (或存直方图), 而这个指标的用途
+    # 是看趋势, 口径一致比绝对精确更重要。若哪天要拿它做绝对判断, 得改成真中位数。
     gaps = [d["median_gap_s"] for d in days if d.get("median_gap_s") is not None]
     gaps.sort()
 

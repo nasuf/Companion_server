@@ -52,6 +52,10 @@ SLICE_DIMENSIONS = (
 # 是 67%, 跟 300 个回合里 200 个延续的 67% 完全不是一回事。
 MIN_SLICE_TURNS = 20
 
+# 跨日界往后多看一段, 供 LEAD 取"下一条用户消息"。要覆盖「回复耗时 + 延续窗口」,
+# 1 小时留足余量 (回复 p90 约 9 秒, 窗口 5 分钟)。
+_BOUNDARY_LOOKAHEAD = timedelta(hours=1)
+
 
 @dataclass
 class SliceMetric:
@@ -155,11 +159,16 @@ WITH asked AS (
         m.created_at AS asked_at,
         LEAD(m.created_at) OVER (
             PARTITION BY m.conversation_id ORDER BY m.created_at
-        ) AS next_ask_at
+        ) AS next_ask_at,
+        (m.created_at < $2::timestamp) AS in_window
     FROM messages m
     WHERE m.role = 'user'
       AND m.created_at >= $1::timestamp
-      AND m.created_at <  $2::timestamp
+      -- 多看一段到次日: LEAD 只在窗口内取值的话, 每天最后一个回合的 next_ask
+      -- 必为 NULL, 于是被系统性判成"没接住" —— 哪怕用户过了两分钟就回了, 只是
+      -- 那两分钟跨过了午夜。这些多出来的行只用于提供 LEAD 值, 下面按 in_window
+      -- 过滤掉。
+      AND m.created_at <  $2::timestamp + $4::interval
 ),
 turns AS (
     SELECT
@@ -178,6 +187,7 @@ turns AS (
         ORDER BY x.created_at
         LIMIT 1
     ) r ON TRUE
+    WHERE a.in_window
 ),
 scored AS (
     SELECT
@@ -210,7 +220,9 @@ async def _fetch_core(start: datetime, end: datetime) -> dict[str, Any]:
             percentile_disc(0.5) WITHIN GROUP (ORDER BY gap_s)::int AS median_gap_s
         FROM scored
         """,
-        start.isoformat(), end.isoformat(), f"{int(CONTINUATION_WINDOW.total_seconds())} seconds",
+        start.isoformat(), end.isoformat(),
+        f"{int(CONTINUATION_WINDOW.total_seconds())} seconds",
+        f"{int(_BOUNDARY_LOOKAHEAD.total_seconds())} seconds",
     )
     return rows[0] if rows else {}
 
@@ -228,12 +240,15 @@ async def _fetch_slices(start: datetime, end: datetime) -> list[SliceMetric]:
                 COUNT(*) FILTER (WHERE continued)::int AS continued,
                 percentile_disc(0.5) WITHIN GROUP (ORDER BY gap_s)::int AS median_gap_s
             FROM scored
-            WHERE diag ? '{dim}'
+            -- 键存在但值是 JSON null 时 ->> 给出 SQL NULL, 切出来会是一个叫
+            -- "None" 的格子。它不携带任何分组信息, 只会占位误导。
+            WHERE diag ->> '{dim}' IS NOT NULL
             GROUP BY 1
             ORDER BY turns DESC
             """,
             start.isoformat(), end.isoformat(),
             f"{int(CONTINUATION_WINDOW.total_seconds())} seconds",
+            f"{int(_BOUNDARY_LOOKAHEAD.total_seconds())} seconds",
         )
         for r in rows:
             out.append(SliceMetric(
