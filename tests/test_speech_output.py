@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.speech_output import client as tts_client
+from app.services.speech_output import voices
 from app.services.speech_output.policy import VoiceContext, should_generate_voice
 from app.services.speech_output.style import build_style_instruction
 from app.services.speech_output.voices import select_voice_id
@@ -65,18 +66,44 @@ def test_voice_assignment_is_stable_by_gender_and_mbti():
         gender="female",
         mbti={"type": "ENFP"},
         stable_key="agent-1",
-    ) == "Momo"
+    ) == "Cherry"
     assert select_voice_id(
         gender="male",
         mbti={"type": "INTJ"},
         stable_key="agent-2",
-    ) == "Mochi"
+    ) == "Kai"
 
 
-def test_style_instruction_caps_expression():
+@pytest.mark.asyncio
+async def test_stylized_legacy_voice_is_migrated(monkeypatch):
+    fake_db = SimpleNamespace(
+        query_raw=AsyncMock(return_value=[{"tts_voice_id": "Cherry"}]),
+        aiagent=SimpleNamespace(find_unique=AsyncMock()),
+    )
+    monkeypatch.setattr(voices, "db", fake_db)
+    agent = SimpleNamespace(
+        id="agent-1",
+        gender="female",
+        currentMbti={"type": "ENFP"},
+        ttsVoiceId="Momo",
+    )
+
+    assert await voices.ensure_agent_voice(agent) == "Cherry"
+    assert agent.ttsVoiceId == "Cherry"
+    assert fake_db.query_raw.await_args.args[-3:] == (
+        "Cherry",
+        "agent-1",
+        "Momo",
+    )
+
+
+def test_style_instruction_prioritizes_natural_conversation():
     instruction = build_style_instruction("愤怒", 100)
-    assert "不要吼叫" in instruction
-    assert "保持原本音色" in instruction
+    assert "而不是喊叫" in instruction
+    assert "避免每个字等长等重" in instruction
+    assert "客服" in instruction
+    assert "完整保留原文" in instruction
+    assert "仍然克制" not in instruction
 
 
 @pytest.mark.asyncio
@@ -139,6 +166,7 @@ async def test_synthesize_uses_dedicated_key_and_returns_metering(monkeypatch):
 
     assert captured["authorization"] == "Bearer tts-key"
     assert captured["payload"]["model"] == "qwen-tts-test"
+    assert captured["payload"]["input"]["optimize_instructions"] is True
     assert captured["audio_url"].startswith("https://dashscope-test.")
     assert result.duration_milliseconds == 500
     assert result.request_id == "tts-request-1"

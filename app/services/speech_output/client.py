@@ -111,7 +111,7 @@ async def synthesize_speech(
             "voice": voice_id,
             "language_type": "Chinese",
             "instructions": instruction,
-            "optimize_instructions": False,
+            "optimize_instructions": True,
         },
     }
     headers = {
