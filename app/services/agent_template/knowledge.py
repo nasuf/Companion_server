@@ -107,9 +107,16 @@ async def append_knowledge_to_template(
         existing = await _knowledge_contents(workspace.id)
         stored = 0
         skipped = 0
+        oversized: list[str] = []
         for item in items:
             if item.summary in existing:
                 skipped += 1
+                continue
+            # 超长的不存。存进去也会在检索时被整条跳过 —— 那样管理员看到"导入成功",
+            # 实际得到一条永远不会被用到的记忆, 比明确拒绝更糟。把原文回给他,
+            # 由他拆成几条再传 (系统擅自截断会让"我上传的"和"库里存的"对不上)。
+            if item.is_oversized:
+                oversized.append(item.summary)
                 continue
             # skip_reconciliation: knowledge rows are admin-controlled
             # standalone facts — they must never be merged into (or mutate)
@@ -134,12 +141,20 @@ async def append_knowledge_to_template(
                 skipped += 1
     await _bust_knowledge_rows_cache(workspace.id)
     logger.info(
-        "[TEMPLATE-KNOWLEDGE] appended %d rows (%d skipped) to template %s",
+        "[TEMPLATE-KNOWLEDGE] appended %d rows (%d dup, %d oversized) to template %s",
         stored,
         skipped,
+        len(oversized),
         template_agent_id[:8],
     )
-    return {"parsed": len(items), "stored": stored, "skipped_duplicates": skipped}
+    return {
+        "parsed": len(items),
+        "stored": stored,
+        "skipped_duplicates": skipped,
+        # 回原文而不只是计数: 管理员要能直接看到是哪几条太长, 否则拿着一个数字
+        # 无从下手。截断到 120 字够他认出是哪一条。
+        "skipped_oversized": [s[:120] for s in oversized],
+    }
 
 
 async def _bust_knowledge_rows_cache(workspace_id: str) -> None:

@@ -113,7 +113,11 @@ async def test_append_stores_new_and_skips_existing():
             items=[_item("已有知识"), _item("新知识")],
         )
 
-    assert result == {"parsed": 2, "stored": 1, "skipped_duplicates": 1}
+    # 只断言这个用例关心的计数, 不做全字典比对 —— 返回值加字段 (如
+    # skipped_oversized) 不该让这个测重复度重叠的用例失败。
+    assert result["parsed"] == 2
+    assert result["stored"] == 1
+    assert result["skipped_duplicates"] == 1
     store.assert_awaited_once()
     args, kwargs = store.call_args
     assert args == ("sys-owner", "新知识")

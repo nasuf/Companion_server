@@ -326,6 +326,19 @@ def select_context(
             return False
         tokens = estimate_tokens(text)
         if tokens > per_item_token_limit:
+            # 超限即跳过, 刻意不截断。
+            #
+            # 2026-07 曾短暂加过"截断后注入", 因为发现 8% 的 AI 记忆超限、从没被注入
+            # 过。但那是在下游给上游的问题打补丁: 一条 279 字的完整叙事之所以存在,
+            # 是因为 profile 生成侧输出了段落而不是原子事实。截断能让它勉强可用, 代价
+            # 是每次注入都丢掉后半段, 而且会掩盖真正的问题 —— 一旦"能用了", 就没人会
+            # 回去修生成侧。
+            #
+            # 正确的修法在写入侧: 生成时就产出原子事实 (character.generation 的字数
+            # 约束), 写入前按句子/分号拆开 (recording/splitting.py), 合并时不许产出
+            # 超限结果 (storage/reconciliation.py)。存量已于 2026-07-30 清零, 后续由
+            # ops/invariants.py 的 no_oversized_memories 巡检盯着。
+            # 这里保持严格: 超限说明那条记忆本身有问题, 应该被修掉而不是被将就。
             return False
         if used_tokens + tokens > TOTAL_MEMORY_TOKEN_BUDGET:
             return False

@@ -44,6 +44,16 @@ from app.services.agent_template.document_import import (
 # sync fan-out to every cloned agent) from an accidentally huge document.
 MAX_KNOWLEDGE_ITEMS = 200
 
+# 单条知识的长度上限, 与检索注入的 MAX_MEMORY_TOKENS_PER_ITEM 对齐。
+#
+# 存在的理由: 超过这个长度的记忆会在检索时被整条跳过 —— 存进去了, 但**任何对话都
+# 不会用到它**。而管理员上传 txt 时完全看不到这件事, 只会看到"导入成功 N 条"。
+# 2026-07 实测库里有 5% 的知识条目处于这个状态。
+#
+# 这里不自动截断也不自动拆分: txt 是管理员给的既成内容, 系统擅自改写会让"我上传的"
+# 和"库里存的"对不上。正确做法是导入时就把超长条目挑出来告诉他, 由他决定怎么拆。
+MAX_KNOWLEDGE_ITEM_TOKENS = 180
+
 # Lines without a colon are treated as section headings only when short;
 # longer colon-less lines are free-form content that joins the current section.
 _MAX_HEADING_LEN = 24
@@ -85,6 +95,17 @@ class KnowledgeItem:
     label: str
     content: str
     summary: str
+
+    @property
+    def is_oversized(self) -> bool:
+        """超过这个长度的条目存进去也检索不到 —— 见 MAX_KNOWLEDGE_ITEM_TOKENS."""
+        from app.services.memory.retrieval.context_selector import estimate_tokens
+
+        return estimate_tokens(self.summary) > MAX_KNOWLEDGE_ITEM_TOKENS
+
+
+def oversized_items(items: list[KnowledgeItem]) -> list[KnowledgeItem]:
+    return [i for i in items if i.is_oversized]
 
 
 def parse_knowledge_document(data: bytes, filename: str | None = None) -> list[KnowledgeItem]:

@@ -316,8 +316,52 @@ async def _check_consolidation_active() -> InvariantResult:
 
 # (key, 标题, 检查函数)。key/标题放在注册表而不是另建一张按函数名索引的映射 ——
 # 后者在函数改名时会静默失配, 而失配只在检查抛异常时才暴露, 正是最需要它准的时候。
+async def _check_no_oversized_memories() -> InvariantResult:
+    """没有超过检索单条上限的记忆.
+
+    超限的条目会被 context_selector **整条跳过** —— 它躺在库里、算在统计里, 但任何
+    对话都不会用到它。这种失效完全没有外部症状: 不报错、不告警, 只是 agent 想不起
+    某件事。2026-07-30 一次性修掉了 606 条 (占 AI 记忆 7.6%), 这里守住不再长出来。
+
+    产生途径不止一条 (profile 生成、txt 导入、hygiene 合并), 与其在每个入口各自防,
+    不如在结果侧盯住这个不变量。
+    """
+    from app.db import db
+    from app.services.memory.retrieval.context_selector import (
+        MAX_MEMORY_TOKENS_PER_ITEM,
+        estimate_tokens,
+    )
+
+    observed: dict[str, object] = {}
+    worst: list[str] = []
+    total_over = 0
+    for table in ("memories_ai", "memories_user"):
+        rows = await db.query_raw(
+            f"SELECT id, content FROM {table} WHERE is_archived = false"
+        )
+        over = [r for r in rows if estimate_tokens(r["content"] or "") > MAX_MEMORY_TOKENS_PER_ITEM]
+        observed[table] = {"total": len(rows), "oversized": len(over)}
+        total_over += len(over)
+        worst.extend(r["id"] for r in over[:3])
+
+    if total_over == 0:
+        return InvariantResult(
+            "no_oversized_memories", "记忆长度上限", "ok",
+            f"全部在 {MAX_MEMORY_TOKENS_PER_ITEM} token 以内", observed,
+        )
+    # 不用 violated: 少量超限只影响那几条自己, 不会让别的功能出错。
+    status = "violated" if total_over > 50 else "warn"
+    return InvariantResult(
+        "no_oversized_memories", "记忆长度上限", status,
+        f"{total_over} 条超过 {MAX_MEMORY_TOKENS_PER_ITEM} token, 检索时会被整条跳过 "
+        f"(scripts/split_oversized_memories.py 可拆)",
+        {**observed, "sample_ids": worst[:5]},
+    )
+
+
 _CHECKS: tuple[tuple[str, str, Callable[[], Awaitable[InvariantResult]]], ...] = (
     ("schedule_today", "今日作息覆盖", _check_schedule_today),
+    ("no_oversized_memories", "记忆长度上限", _check_no_oversized_memories),
     ("l2_scores_fresh", "L2 动态分新鲜度", _check_l2_scores_fresh),
     ("memory_access_logged", "记忆访问打点", _check_memory_access_logged),
     ("embeddings_complete", "向量覆盖率", _check_embeddings_complete),

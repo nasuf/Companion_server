@@ -275,3 +275,50 @@ class TestRunner:
 
 async def _ok_check():
     return inv.InvariantResult("fine", "正常检查", "ok")
+
+
+class TestNoOversizedMemories:
+    """超限记忆的巡检.
+
+    这类失效没有任何外部症状 —— 不报错、不告警, 只是 agent 想不起某件事。产生途径
+    有好几条 (profile 生成 / txt 导入 / hygiene 合并), 与其在每个入口各自防, 不如
+    在结果侧盯住。
+    """
+
+    _LONG = "很长的记忆内容需要越过单条上限。" * 20
+
+    def _rows(self, n: int, content: str):
+        # 两张表各查一次, 所以要准备两批返回值。
+        return [[{"id": f"m{i}", "content": content} for i in range(n)] for _ in range(2)]
+
+    @pytest.mark.asyncio
+    async def test_clean_database_is_ok(self, monkeypatch):
+        _patch_db(monkeypatch, _FakeDb(*self._rows(3, "短记忆")))
+        r = await inv._check_no_oversized_memories()
+        assert r.status == "ok"
+
+    @pytest.mark.asyncio
+    async def test_a_few_oversized_rows_warn_rather_than_violate(self, monkeypatch):
+        """少量超限只影响那几条自己, 不该把整块巡检标成红色."""
+        _patch_db(monkeypatch, _FakeDb(*self._rows(3, self._LONG)))
+        r = await inv._check_no_oversized_memories()
+        assert r.status == "warn"
+        assert "检索时会被整条跳过" in r.detail
+
+    @pytest.mark.asyncio
+    async def test_large_scale_regression_is_a_violation(self, monkeypatch):
+        _patch_db(monkeypatch, _FakeDb(*self._rows(40, self._LONG)))
+        r = await inv._check_no_oversized_memories()
+        assert r.status == "violated"
+
+    @pytest.mark.asyncio
+    async def test_reports_sample_ids_for_triage(self, monkeypatch):
+        """只给个数字没法排查, 要能直接拿 id 去查."""
+        _patch_db(monkeypatch, _FakeDb(*self._rows(1, self._LONG)))
+        r = await inv._check_no_oversized_memories()
+        assert "m0" in r.observed["sample_ids"]
+
+    def test_is_registered_in_the_check_list(self):
+
+
+        assert any(key == "no_oversized_memories" for key, _, _ in inv._CHECKS)

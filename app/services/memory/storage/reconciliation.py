@@ -273,11 +273,29 @@ async def _llm_adjudicate(
     merged_text = result.get("merged_summary")
     if not isinstance(merged_text, str) or not merged_text.strip():
         merged_text = new_text if action == "update_existing" else None
+    if merged_text and _exceeds_injection_limit(merged_text):
+        # 合并结果超过检索单条上限 = 检索时被整条跳过。把两条能用的记忆合成一条用不了
+        # 的, 是净损失 —— 宁可让它们分开存着。
+        # (LLM 没有长度约束, 拼接式的 merged_summary 很容易越线; 2026-07 修复了 606
+        #  条这种"存了也检索不到"的记忆, 这里堵住重新产生它们的入口。)
+        logger.info(
+            "[RECONCILE-SKIP] merged text would exceed the injection limit; keeping separate"
+        )
+        return ReconciliationDecision(action="keep_separate", reason="merged_too_long")
     return ReconciliationDecision(
         action=action,
         reason=str(result.get("reason") or "llm"),
         merged_content=merged_text,
     )
+
+
+def _exceeds_injection_limit(text: str) -> bool:
+    from app.services.memory.retrieval.context_selector import (
+        MAX_MEMORY_TOKENS_PER_ITEM,
+        estimate_tokens,
+    )
+
+    return estimate_tokens(text) > MAX_MEMORY_TOKENS_PER_ITEM
 
 
 async def _category_candidates(

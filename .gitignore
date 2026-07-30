@@ -31,5 +31,5 @@ var/
 # Package manager lock
 uv.lock
 
-# memory recall eval local embedding cache
-evals/memory_recall/.emb_cache.json
+# 评测脚本的本地向量缓存 (每个 evals 子目录一份, 几百 KB, 换 embedding 模型即失效)
+evals/*/.emb_cache.json

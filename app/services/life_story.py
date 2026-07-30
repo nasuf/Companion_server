@@ -23,6 +23,7 @@ from app.redis_client import get_redis
 from app.services.llm.models import get_embedding_model, get_utility_model, invoke_json
 from app.services.prompting.store import get_prompt_text
 from app.services.memory.config import level_for_importance
+from app.services.memory.recording.splitting import split_multi_fact
 from app.services.memory.demographics import (
     derive_constellation,
     derive_zodiac,
@@ -225,16 +226,24 @@ def _add(
     memories: list, content: str, main: str, sub: str, mem_type: str, importance: float,
     *, occur_time: datetime | None = None,
 ) -> None:
-    entry = {
-        "content": content,
-        "main_category": main,
-        "sub_category": sub,
-        "type": mem_type,
-        "importance": _tiered_importance(main, sub, importance),
-    }
-    if occur_time is not None:
-        entry["occur_time"] = occur_time
-    memories.append(entry)
+    # profile 的某些字段 (最典型的是职业 duties) 本身就是"事实一：…；事实二：…"的
+    # 拼接, 整段转成一条记忆会超过检索的单条 token 上限, 于是**任何检索都注入不了
+    # 它** —— 2026-07 实测 8% 的 AI 记忆就这样躺在库里从没被用过。在这里拆是因为
+    # 它是所有 profile 字段转记忆的唯一入口, 改一处覆盖全部字段。
+    #
+    # 两阶段: 先按「；」拆多事实, 仍超限的按句子边界拆并补回「标题：」前缀。未超限的
+    # 原样返回 —— 拆分只为救"存了也检索不到"的条目, 不做无差别切碎。
+    for piece in split_multi_fact(content):
+        entry = {
+            "content": piece,
+            "main_category": main,
+            "sub_category": sub,
+            "type": mem_type,
+            "importance": _tiered_importance(main, sub, importance),
+        }
+        if occur_time is not None:
+            entry["occur_time"] = occur_time
+        memories.append(entry)
 
 
 # life_events 10 字段 → taxonomy.生活 子类映射. Plan B 下 prompt 不再生 interaction

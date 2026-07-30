@@ -20,7 +20,7 @@ Parsing quality rules (2026-07 rework, driven by the 小伴.txt production audit
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import Any
 
@@ -33,6 +33,10 @@ class ImportedAgentProfile:
     gender: str | None
     background: str
     text: str
+    #: 转换成记忆后仍会超过检索单条上限的字段, [(字段路径, 片段原文), ...]。
+    #: 这条路径用 profile_override 绕过 LLM, 生成侧收紧字数对它无效 —— 只能在
+    #: 导入时报给管理员。见 oversized_profile_fields。
+    oversized_fields: list[tuple[str, str]] = field(default_factory=list)
 
 
 _IDENTITY_SECTIONS = (
@@ -126,7 +130,34 @@ def parse_agent_profile_document(data: bytes, filename: str | None = None) -> Im
         gender=gender,
         background=background,
         text=text,
+        oversized_fields=oversized_profile_fields(profile),
     )
+
+
+def oversized_profile_fields(profile: dict[str, Any]) -> list[tuple[str, str]]:
+    """找出转成记忆后仍会超限的 profile 字段.
+
+    走 profile_override 的导入路径不经过 LLM, 所以生成侧的字数约束管不到它。这里
+    按转换时的同一套规则 (先 split_multi_fact 再量长度) 预演一遍, 只报真正会出问题
+    的 —— 能拆好的多事实字段不该打扰管理员。
+    """
+    from app.services.memory.recording.splitting import unsplittable_oversized
+
+    found: list[tuple[str, str]] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, str):
+            for piece in unsplittable_oversized(node):
+                found.append((path, piece))
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+
+    walk(profile, "")
+    return found
 
 
 def extract_document_text(data: bytes, filename: str | None = None) -> str:

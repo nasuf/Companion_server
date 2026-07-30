@@ -258,12 +258,26 @@ async def create_template_from_document(
         agent.id[:8],
         file.filename or "<upload>",
     )
+    if imported.oversized_fields:
+        logger.warning(
+            "[TEMPLATE] document template %s has %d oversized fields: %s",
+            agent.id[:8],
+            len(imported.oversized_fields),
+            ", ".join(p for p, _ in imported.oversized_fields[:5]),
+        )
     return {
         "id": agent.id,
         "name": agent.name,
         "status": agent.status,
         "workspace_id": workspace.id if workspace else None,
         "source": "document",
+        # 这条路径绕过 LLM, 收紧字数的 prompt 约束对它无效。超长字段转成记忆后检索
+        # 时会被整条跳过 —— 不拦创建 (整份档案不该因为一个字段太长就作废), 但必须
+        # 让管理员看见, 否则他得到一个"部分记忆是死的"模板还不知道。
+        "oversized_fields": [
+            {"field": path, "preview": piece[:120]}
+            for path, piece in imported.oversized_fields
+        ],
     }
 
 
