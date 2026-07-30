@@ -14,6 +14,11 @@ import logging
 import re
 from datetime import datetime
 
+from app.services.memory.retrieval.timeline import (
+    build_timeline,
+    format_timeline,
+    is_aggregate_time_question,
+)
 from app.services.memory.retrieval.vector_search import (
     search_by_time_range,
     search_similar_tiers,
@@ -48,6 +53,7 @@ _EMPTY_RESULT = {
     "memories": None,
     "memory_strings": None,
     "graph_context": None,
+    "timeline": None,
 }
 
 # Spec §3.2 前级过滤相似度阈值。Spec 原值 0.7; 中文短文本上过严会漏召
@@ -443,10 +449,19 @@ async def hybrid_retrieve(
     # 候选集 ID 供惰性衰减用作弱使用信号 (lifecycle/value.py 的 α): 进了候选说明
     # 这条记忆至少跟本轮话题沾边, 值得比"完全没人问津"多留一会儿。注入集 (强信号)
     # 调用方从 memories 自取。只带 ID 不带正文, 避免把整个候选集塞进缓存。
+    # 聚合类时间问题 ("上次…是几个月前" / "参加过几次…") 需要**穷举**某主题下的所有
+    # 事件才能作答, 而注入集只有 10 条。LongMemEval 实测这类题要 k=26~42 才拿得全,
+    # 但它们不需要记忆全文 —— 压成"日期 + 短标签"后 400 token 就装得下。
+    # 只在命中聚合特征时才建, 其余消息完全不受影响。
+    timeline_text = None
+    if is_aggregate_time_question(message):
+        timeline_text = format_timeline(build_timeline(all_candidates)) or None
+
     result = {
         "memories": classified_memories if classified_memories else None,
         "memory_strings": memory_strings,
         "graph_context": None,
+        "timeline": timeline_text,
         "candidate_ids": [
             mid for mid in (m.get("id") for m in all_candidates) if mid
         ],

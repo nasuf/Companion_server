@@ -49,17 +49,22 @@ _WEEKEND_PAT = re.compile(r"(上上|下下|上|下|这|本)?(?:个)?周末")
 _DATE_PAT = re.compile(r"(\d{1,2})月(\d{1,2})[日号]")
 _YEAR_PAT = re.compile(r"(去年|前年|今年)(?:(\d{1,2})月)?")
 _HOUR_PAT = re.compile(r"(?:(早上|上午|中午|下午|晚上|凌晨))?(\d{1,2})[点时](?:(\d{1,2})分?)?")
-# spec §3.1 相对偏移: "3天后 / 2小时前 / 15分钟之后 / 两周后 / 十五天前"
-# 支持阿拉伯数字 + 中文数字一~九十九，单位: 分钟 / 小时 / 天 / 周 / 月
+# 相对偏移: "3天后 / 2小时前 / 15分钟之后 / 两个月前 / 半年前 / 十五天前"
+#
+# 「个」必须可选: 原来的模式是 数字+单位+前后, 于是"两月前"能解析而**"两个月前"
+# 不能** —— 恰好把没人这么说的写法支持了, 把日常说法漏了。同理"半个月前"。
+# 「年」原本整个缺失, 而"一年前"和"去年"是两回事 (前者是相对今天, 后者是自然年)。
 _REL_OFFSET_PAT = re.compile(
-    r"([一二三四五六七八九十百两\d]{1,4})\s*(分钟|小时|天|周|月)(?:之)?(前|后)"
+    r"([一二三四五六七八九十百两半\d]{1,4})\s*个?\s*(分钟|小时|天|周|月|年)(?:之)?(前|后)"
 )
 _QUICK_TIME_PAT = re.compile(
     r"[今昨明前后]天|[上下这本]周|周末|[上下这]个月"
     r"|\d{1,2}月\d{1,2}[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
     r"|早上|上午|中午|下午|晚上|凌晨"
-    r"|[一二三四五六七八九十百两\d]{1,4}\s*(?:分钟|小时|天|周|月)(?:之)?[前后]"
+    # 必须与 _REL_OFFSET_PAT 保持同步 —— 这是 has_explicit_time 的快速闸门,
+    # 它漏了的表达连解析都不会被调用。
+    r"|[一二三四五六七八九十百两半\d]{1,4}\s*个?\s*(?:分钟|小时|天|周|月|年)(?:之)?[前后]"
 )
 
 _CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
@@ -178,7 +183,16 @@ def parse_time_expressions(
     # --- 1b. N 天后 / N 小时前 / 十五分钟后 等相对偏移 ---
     for m in _REL_OFFSET_PAT.finditer(message):
         num_str, unit, direction = m.group(1), m.group(2), m.group(3)
-        amount = _parse_cn_number(num_str)
+        if num_str == "半":
+            # 换成更小单位的整数而不是让 _parse_cn_number 返回小数 —— 改它的返回
+            # 类型会波及所有调用方, 而"半年=6个月"本身就比"0.5 年"更准确。
+            half = {"年": (6, "月"), "月": (15, "天"), "天": (12, "小时"),
+                    "小时": (30, "分钟")}.get(unit)
+            if half is None:
+                continue
+            amount, unit = half
+        else:
+            amount = _parse_cn_number(num_str)
         if amount is None:
             continue
         if direction == "前":
@@ -196,9 +210,21 @@ def parse_time_expressions(
         elif unit == "周":
             d = today + timedelta(weeks=amount)
             s, e = _day_range(d)
-        else:  # 月（按 30 天近似）
-            d = today + timedelta(days=30 * amount)
-            s, e = _day_range(d)
+        else:
+            # 月/年按近似天数折算。这两个单位天生是模糊的 —— 说"两个月前"的人不是
+            # 指那一天, 所以 end 往后放宽一个单位, 检索时才圈得住。
+            #
+            # 只放宽 end 不动 start 是刻意的: 记忆录入侧 (pipeline) 只取 .start 存
+            # occur_time, 检索侧 (hybrid) 才用整个区间。这样加宽只影响检索, 不会让
+            # 提醒提前触发, 也不会把 occur_time 记偏。
+            #
+            # 放宽幅度固定 30 天而不是"一个单位": 按单位放宽的话"一年前"会得到
+            # 整整 365 天的窗口 (一年前一直到今天), 那不是容错是把整段时间全捞。
+            # 说"一年前"的人指的是那个时间点前后, 一个月的容差足够。
+            step = 30 if unit == "月" else 365
+            d = today + timedelta(days=step * amount)
+            s, _ = _day_range(d)
+            _, e = _day_range(d + timedelta(days=30))
         _add(m.group(), s, e, "relative", 0.88, m.span())
 
     # --- 2. 相对周 ---

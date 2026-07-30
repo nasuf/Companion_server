@@ -50,6 +50,7 @@ from app.services.prompting.defaults import (
     CHAT_STYLE_BASE_RULE_PROMPT,
     CHAT_STYLE_CLOSING_RULE_PROMPT,
     CHAT_TIME_CONTEXT_SECTION_PROMPT,
+    CHAT_TIMELINE_SECTION_PROMPT,
     CHAT_TIME_MEMORIES_SECTION_PROMPT,
     CHAT_TOPIC_CONTEXT_SECTION_PROMPT,
     CONSISTENCY_RULES_PROMPT,
@@ -400,6 +401,13 @@ PROMPT_DEFINITIONS = [
         "【工程补丁】主回复 system prompt 的「话题上下文」段模板（防话题跳跃）。"
         "运行时注入 {topic_category}/{topic_turns}。",
         CHAT_TOPIC_CONTEXT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.timeline_section", "事件时间线段落", "聊天热路径", "聊天",
+        "聚合类时间问题 (\"上次…是几个月前\" / \"参加过几次…\") 专用段。运行时注入 "
+        "{timeline}（按时间排序的「日期 + 事件短标签」列表, 400 token 封顶）。"
+        "只在命中聚合特征时出现, 普通消息不注入。",
+        CHAT_TIMELINE_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.time_context_section", "时间段落", "聊天热路径", "聊天",

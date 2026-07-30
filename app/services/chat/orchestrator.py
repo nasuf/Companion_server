@@ -1335,6 +1335,7 @@ async def stream_chat_response(
                 intimacy_stage=intimacy_stage,
                 time_context=time_context,
                 time_memories=time_memories or None,
+                timeline=getattr(fetched, "timeline", None),
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
                 reengagement_gap_seconds=reengagement_gap_seconds,

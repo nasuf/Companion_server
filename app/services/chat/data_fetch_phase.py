@@ -76,6 +76,8 @@ class FetchedContext:
     schedule: Any = None
     topic_intimacy: float = 50.0
     time_memories: list[str] = field(default_factory=list)
+    # 聚合类时间问题的事件时间线; 非聚合问题为 None, 该段不注入
+    timeline: str | None = None
     l3_memories: list[str] = field(default_factory=list)
     l3_trigger_label: str = "无"            # "无" | "不满纠正" | "请求更久" | "稀疏补召"
     enhanced_query: str = ""
@@ -752,6 +754,10 @@ async def fetch_parallel_context(
         schedule=schedule,
         topic_intimacy=float(topic_intimacy) if topic_intimacy is not None else 50.0,
         time_memories=time_memories,
+        timeline=(
+            retrieval_result.get("timeline")
+            if isinstance(retrieval_result, dict) else None
+        ),
         l3_memories=l3_memories,
         l3_trigger_label=l3_trigger_label,
         enhanced_query=enhanced_query,

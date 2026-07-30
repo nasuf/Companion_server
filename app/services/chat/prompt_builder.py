@@ -474,6 +474,21 @@ async def _build_time_context_section(time_context: str | None) -> _PromptBody |
     return _PromptBody(_render_section(tpl, {"time_context": time_context}), "chat.time_context_section")
 
 
+async def _build_timeline_section(timeline: str | None) -> _PromptBody | None:
+    """事件时间线 —— 只在聚合类时间问题上出现.
+
+    普通检索给的是"最相关的几条", 而"上次…是几个月前""参加过几次…"这类要先把某个
+    主题下的事件**穷举**出来才能作答 (LongMemEval 实测这类题需要 k=26~42, 而注入集
+    只有 10 条)。时间线用"日期 + 短标签"的紧凑形式补上这个缺口, 400 token 封顶。
+    """
+    if not timeline:
+        return None
+    tpl = await _get_optional_prompt("chat.timeline_section")
+    if tpl is None:
+        return None
+    return _PromptBody(_render_section(tpl, {"timeline": timeline}), "chat.timeline_section")
+
+
 async def _build_music_context_section(music_context: str | None) -> _PromptBody | None:
     """Build the co-listening section (music.co_listening_context 渲染结果 + 包装模板)."""
     if not music_context:
@@ -513,6 +528,8 @@ async def build_system_prompt(
     intimacy_stage: str | None = None,
     time_context: str | None = None,
     time_memories: list[str] | None = None,
+    # 聚合类时间问题的事件时间线 (hybrid_retrieve 命中聚合特征时才产出)
+    timeline: str | None = None,
     l3_memories: list[str] | None = None,
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
@@ -819,6 +836,18 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "相关时间记忆")
+
+    # 放在这里而不是紧跟「时间」段: 时间线随每次提问变化 (只在聚合问题出现), 属于
+    # 快变段。cache 友好要求变化慢的段在前 —— 插到稳定前缀里会让每一轮都 cache miss。
+    # 与同为检索产物、同样跟时间有关的「相关时间记忆」相邻, 语义上也更连贯。
+    timeline_section = await _build_timeline_section(timeline)
+    if timeline_section:
+        _append_section(
+            sections, components, "事件时间线", timeline_section.body,
+            prompt_key=timeline_section.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "事件时间线")
 
     # Spec §3.2 step 3: L3 distant memories (awakened only when relevant)
     l3_tpl = await _get_optional_prompt("chat.l3_memory_section") if l3_memories else None

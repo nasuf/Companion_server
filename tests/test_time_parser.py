@@ -80,6 +80,83 @@ def test_relative_offset_cn_digit():
             assert abs(diff_seconds / 86400 - expected_amount * 7) < 1.5
 
 
+def test_measure_word_does_not_block_parsing():
+    """「两个月前」必须能解析.
+
+    原来的模式是 数字+单位+前后, 中间不许有量词 —— 于是"两月前"能解析而**日常
+    说法"两个月前"不能**。支持了没人用的写法, 漏了所有人用的写法。
+    """
+    now = _now()
+    for text in ("两个月前", "2个月前", "半个月前", "三个星期前".replace("星期", "周")):
+        assert parse_time_expressions(text, now=now), f"无解析: {text}"
+
+    # 带不带量词应当落在同一天 (量词不改变语义)
+    a = parse_time_expressions("两月前", now=now)[0]
+    b = parse_time_expressions("两个月前", now=now)[0]
+    assert a.start.date() == b.start.date()
+
+
+def test_year_unit_is_supported():
+    """「一年前」原本整个不解析 —— 年不在单位表里.
+
+    它和"去年"不是一回事: 前者相对今天, 后者是自然年 (1/1-12/31)。
+    """
+    now = _now()
+    for text in ("一年前", "1年前", "两年前", "半年前"):
+        assert parse_time_expressions(text, now=now), f"无解析: {text}"
+
+    one = parse_time_expressions("一年前", now=now)[0]
+    assert 360 <= (now - one.start).days <= 370
+
+
+def test_half_maps_to_a_smaller_whole_unit():
+    """半年 = 6 个月, 半个月 = 15 天 —— 比 0.5 年更准, 也不用把数字解析改成浮点."""
+    now = _now()
+    half_year = parse_time_expressions("半年前", now=now)[0]
+    assert 170 <= (now - half_year.start).days <= 195
+
+    half_month = parse_time_expressions("半个月前", now=now)[0]
+    assert 12 <= (now - half_month.start).days <= 18
+
+
+def test_coarse_units_get_a_tolerance_window():
+    """月/年天生模糊, 说"两个月前"的人不是指那一天.
+
+    窗口固定 30 天而不是"一个单位" —— 后者会让"一年前"得到整整 365 天的区间,
+    等于把过去一年全捞出来, 那不是容错。
+    """
+    now = _now()
+    for text in ("两个月前", "一年前", "半年前"):
+        r = parse_time_expressions(text, now=now)[0]
+        span = (r.end - r.start).days
+        assert 25 <= span <= 35, f"{text} 窗口 {span} 天, 应在 30 天左右"
+
+    # 天/周是精确表达, 不放宽
+    for text in ("三天前", "两周前"):
+        r = parse_time_expressions(text, now=now)[0]
+        assert (r.end - r.start).days == 0, f"{text} 不该被放宽"
+
+
+def test_widening_does_not_move_the_start():
+    """放宽只动 end.
+
+    记忆录入侧 (pipeline) 只取 .start 存 occur_time, 提醒也按 start 调度; 检索侧
+    才用整个区间。动了 start 就会让 occur_time 记偏、提醒提前响。
+    """
+    now = _now()
+    r = parse_time_expressions("两个月前", now=now)[0]
+    assert 55 <= (now - r.start).days <= 65, "start 应当仍是那个时间点本身"
+
+
+def test_quick_gate_matches_the_parser():
+    """has_explicit_time 的快速闸门漏了的表达, 解析器根本不会被调用."""
+    from app.services.schedule_domain.time_parser import has_explicit_time
+
+    for text in ("两个月前", "半年前", "一年前", "半个月前"):
+        assert has_explicit_time(text), f"闸门漏了: {text}"
+        assert parse_time_expressions(text), f"闸门放行但解析不出: {text}"
+
+
 def test_relative_weekday_combinations():
     """下下周三 / 上上周一 / 这周五."""
     now = _now()  # 周三

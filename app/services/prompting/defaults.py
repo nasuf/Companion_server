@@ -414,6 +414,19 @@ CHAT_TOPIC_CONTEXT_SECTION_PROMPT = "当前话题：{topic_category}（已持续
 # (当前时间/星期/节假日, 见 time_service.build_time_context).
 CHAT_TIME_CONTEXT_SECTION_PROMPT = "{time_context}"
 
+# 「事件时间线」段. 只在聚合类时间问题 ("上次…是几个月前" / "参加过几次…") 上注入。
+#
+# 为什么需要单独一段: 这类问题要先把某主题下的事件**穷举**出来才能作答, 而注入集
+# 只有 10 条 (LongMemEval 实测这类题需要 k=26~42)。时间线用"日期 + 短标签"的紧凑
+# 形式补这个缺口, 400 token 封顶。
+#
+# 「约」前缀表示日期是从说话时间推断的, 不是用户明说的 —— 让模型在算间隔时知道
+# 这个数有误差, 别把"约2026-03-01"当成确证事实去做精确天数计算。
+CHAT_TIMELINE_SECTION_PROMPT = """【相关事件的时间线】(按时间先后, 「约」表示日期是推断的)
+{timeline}
+
+用它来回答"上次是什么时候""过了多久""哪个在先"这类问题。时间线之外的事不要臆测。"""
+
 # 「一起听音乐」段包装. {music_context} 由 music.co_listening_context 渲染.
 CHAT_MUSIC_CONTEXT_SECTION_PROMPT = "{music_context}"
 

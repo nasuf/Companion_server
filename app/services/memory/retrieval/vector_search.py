@@ -32,6 +32,9 @@ def _embedding_search_arm(table: str, source: str) -> str:
             m.provenance, m.mention_count,
             m.type, m.main_category, m.sub_category,
             m.created_at, m.updated_at,
+            -- 事件时间: 聚合类时间问题 ("上次…是几个月前") 要按事件先后排时间线,
+            -- 而排序用的 last_accessed_at 是"这行多久没被碰过", 不是事件何时发生。
+            m.occur_time, m.statement_time,
             COALESCE(m.updated_at, m.created_at) AS last_accessed_at,
             '{source}' AS source,
             1 - (me.embedding OPERATOR(extensions.<=>) $1::extensions.vector) AS similarity
