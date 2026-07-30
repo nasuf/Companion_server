@@ -44,6 +44,8 @@ class ResolvedConfig:
     # agent branch of the resolve chain never contributes these).
     vision_model: str
     asr_model: str
+    tts_model: str
+    tts_output_probability: int
     # Main-reply web search via Ark Responses API (ark chat provider only).
     web_search_enabled: bool
 
@@ -57,6 +59,7 @@ _AGENT_CACHE: dict[str, dict] = {}
 # 单 provider 模型额外保留 bare identifier 兼容历史 usage 行; 跨 provider 重名时
 # bare identifier 不写入, 避免价格串账.
 _PRICING_CACHE: dict[str, dict[str, float]] = {}
+_TTS_PRICING_CACHE: dict[str, dict[str, float | str]] = {}
 _CACHE_LOADED = False
 # 防并发 ensure_loaded 触发 N 次 load_caches (每次都打 DB)
 _LOAD_LOCK = asyncio.Lock()
@@ -114,8 +117,9 @@ async def load_caches() -> None:
     DB 是模型配置真源, env 仅在 DB 整体不可用时兜底. 首次启动 / 现有 deploy
     没跑 seed migration 时 system_config 行可能缺 → 用当前 env 默认 auto-seed.
     """
-    global _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _CACHE_LOADED
+    global _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _TTS_PRICING_CACHE, _CACHE_LOADED
     new_pricing: dict[str, dict[str, float]] = {}
+    new_tts_pricing: dict[str, dict[str, float | str]] = {}
     try:
         sys_row = await db.systemconfig.find_unique(where={"id": 1})
         if sys_row is None:
@@ -130,6 +134,15 @@ async def load_caches() -> None:
         for r in registry:
             identifier_counts[r.identifier] = identifier_counts.get(r.identifier, 0) + 1
         for r in registry:
+            if getattr(r, "modelKind", "llm") == "tts":
+                new_tts_pricing[r.identifier] = {
+                    "unit_price_cny": float(getattr(r, "unitPriceCny", 0.0) or 0.0),
+                    "billing_unit": str(
+                        getattr(r, "billingUnit", "per_10k_characters")
+                        or "per_10k_characters"
+                    ),
+                }
+                continue
             pricing = {
                 "input": r.inputCostPerMillion or 0.0,
                 "output": r.outputCostPerMillion or 0.0,
@@ -151,6 +164,7 @@ async def load_caches() -> None:
     _GLOBAL_CACHE = new_global
     _AGENT_CACHE = new_agent
     _PRICING_CACHE = new_pricing
+    _TTS_PRICING_CACHE = new_tts_pricing
     _CACHE_LOADED = True
     logger.info(
         f"[RUNTIME-CONFIG] loaded: global={bool(_GLOBAL_CACHE)} "
@@ -171,6 +185,8 @@ async def _seed_system_config_with_env_defaults():
         "localSmallModel": settings.local_small_model,
         "remoteChatModel": settings.remote_chat_model,
         "remoteSmallModel": settings.remote_small_model,
+        "ttsModel": settings.dashscope_tts_model,
+        "ttsOutputProbability": settings.tts_output_probability,
     })
 
 
@@ -181,7 +197,8 @@ def _row_to_dict(row) -> dict:
         "onlineModel", "remoteProvider", "remoteChatProvider", "remoteSmallProvider",
         "localChatModel", "localSmallModel", "remoteChatModel", "remoteSmallModel",
         # SystemConfig only; AgentConfigOverride rows lack these attrs → skipped.
-        "visionModel", "asrModel", "webSearchEnabled",
+        "visionModel", "asrModel", "ttsModel", "ttsOutputProbability",
+        "webSearchEnabled",
     ):
         val = getattr(row, key, None)
         if val is not None:
@@ -258,6 +275,14 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
         remote_small_model=_pick("remoteSmallModel", settings.remote_small_model),
         vision_model=_pick("visionModel", settings.doubao_vision_model),
         asr_model=_pick("asrModel", settings.dashscope_asr_model),
+        tts_model=_pick("ttsModel", settings.dashscope_tts_model),
+        tts_output_probability=max(
+            0,
+            min(
+                100,
+                int(_pick("ttsOutputProbability", settings.tts_output_probability) or 0),
+            ),
+        ),
         web_search_enabled=bool(
             _pick("webSearchEnabled", settings.web_search_enabled),
         ),
@@ -276,6 +301,17 @@ async def get_effective_asr_model() -> str:
     return resolve_config_sync(agent_id=None).asr_model
 
 
+async def get_effective_tts_model() -> str:
+    """Assistant TTS model id (admin override → env DASHSCOPE_TTS_MODEL)."""
+    await ensure_loaded()
+    return resolve_config_sync(agent_id=None).tts_model
+
+
+def get_effective_tts_probability() -> int:
+    """Hot-path synchronous assistant voice probability in integer percent."""
+    return resolve_config_sync(agent_id=None).tts_output_probability
+
+
 def resolve_for_current() -> ResolvedConfig:
     """convenience: 用 ContextVar 当前 agent 解析."""
     return resolve_config_sync(get_current_agent())
@@ -288,3 +324,8 @@ def get_pricing(model: str) -> dict[str, float] | None:
     admin PUT model_registry 后 invalidate_caches → 下次 ensure_loaded 重 load.
     """
     return _PRICING_CACHE.get(model)
+
+
+def get_tts_pricing(model: str) -> dict[str, float | str] | None:
+    """Return TTS unit pricing metadata for a registered speech model."""
+    return _TTS_PRICING_CACHE.get(model)

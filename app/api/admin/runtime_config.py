@@ -22,11 +22,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from prisma.errors import RecordNotFoundError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.jwt_auth import require_admin_jwt
 from app.config import settings
 from app.db import db
+from app.redis_client import get_redis
 from app.services.llm.providers import provider_ids, public_provider_options
 from app.services.memory.config import CALIBRATED_EMBEDDING_MODEL
 from app.services.runtime_config import (
@@ -49,6 +50,15 @@ _LOCAL_PROVIDERS = provider_ids(admin_only=True) - provider_ids(
 _REMOTE_PROVIDERS = provider_ids(admin_only=True, remote_only=True)
 
 
+async def _sync_tts_probability(probability: int) -> None:
+    """Publish the global percentage for all uvicorn workers immediately."""
+    try:
+        redis = await get_redis()
+        await redis.set("runtime:tts_output_probability", int(probability))
+    except Exception as exc:
+        logger.warning("TTS probability Redis sync failed: %s", exc)
+
+
 class ConfigPayload(BaseModel):
     """所有字段 None = 不设/清除. PUT 接受这个用作 set/unset 单字段."""
     online_model: bool | None = None
@@ -66,6 +76,8 @@ class ConfigPayload(BaseModel):
     # identifiers (not part of model_registry, so no registry check).
     vision_model: str | None = None
     asr_model: str | None = None
+    tts_model: str | None = None
+    tts_output_probability: int | None = Field(default=None, ge=0, le=100)
     # Main-reply web search (Ark Responses API web_search tool, ark provider only).
     web_search_enabled: bool | None = None
 
@@ -76,7 +88,8 @@ def _row_to_payload(row) -> dict[str, Any]:
             "online_model", "remote_provider", "remote_chat_provider",
             "remote_small_provider", "local_chat_model", "local_small_model",
             "remote_chat_model", "remote_small_model",
-            "vision_model", "asr_model", "web_search_enabled",
+            "vision_model", "asr_model", "tts_model",
+            "tts_output_probability", "web_search_enabled",
         )}
     return {
         "online_model": row.onlineModel,
@@ -91,6 +104,8 @@ def _row_to_payload(row) -> dict[str, Any]:
         # global-only columns → always null on the agent endpoints.
         "vision_model": getattr(row, "visionModel", None),
         "asr_model": getattr(row, "asrModel", None),
+        "tts_model": getattr(row, "ttsModel", None),
+        "tts_output_probability": getattr(row, "ttsOutputProbability", None),
         "web_search_enabled": getattr(row, "webSearchEnabled", None),
     }
 
@@ -108,6 +123,8 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
         "remote_small_model": r.remote_small_model,
         "vision_model": r.vision_model,
         "asr_model": r.asr_model,
+        "tts_model": r.tts_model,
+        "tts_output_probability": r.tts_output_probability,
         "web_search_enabled": r.web_search_enabled,
         # 只读. Embedding 模型不是运行时开关: 库里 8000+ 条向量就是当前模型的
         # 输出, 换掉而不重算等于让查询在陌生坐标系里检索 (同一段文本跨模型的
@@ -159,6 +176,8 @@ def _payload_to_data(
         # Empty string means "clear override" (fall back to env), same as null.
         data["visionModel"] = (payload.vision_model or "").strip() or None
         data["asrModel"] = (payload.asr_model or "").strip() or None
+        data["ttsModel"] = (payload.tts_model or "").strip() or None
+        data["ttsOutputProbability"] = payload.tts_output_probability
         data["webSearchEnabled"] = payload.web_search_enabled
     return data
 
@@ -166,6 +185,18 @@ def _payload_to_data(
 async def _model_exists_for_provider(identifier: str, provider: str) -> bool:
     row = await db.modelregistry.find_first(
         where={"identifier": identifier, "provider": provider},
+    )
+    return row is not None
+
+
+async def _tts_model_exists(identifier: str) -> bool:
+    row = await db.modelregistry.find_first(
+        where={
+            "identifier": identifier,
+            "provider": "dashscope",
+            "modelKind": "tts",
+            "enabled": True,
+        },
     )
     return row is not None
 
@@ -231,6 +262,12 @@ async def _validate_payload_models(
                 status_code=400,
                 detail=f"{field}={identifier!r} 在 provider {expected_provider!r} 下不存在",
             )
+    if "tts_model" in explicit and payload.tts_model:
+        if not await _tts_model_exists(payload.tts_model):
+            raise HTTPException(
+                status_code=400,
+                detail=f"tts_model={payload.tts_model!r} 不是已启用的 DashScope TTS 模型",
+            )
 
 
 @router.get("/options")
@@ -245,7 +282,11 @@ async def list_options() -> dict[str, Any]:
         where={"enabled": True}, order=[{"identifier": "asc"}],
     )
     by_provider: dict[str, list[str]] = {p: [] for p in sorted(_LOCAL_PROVIDERS | _REMOTE_PROVIDERS)}
+    tts: list[str] = []
     for r in rows:
+        if getattr(r, "modelKind", "llm") == "tts":
+            tts.append(r.identifier)
+            continue
         by_provider.setdefault(r.provider, []).append(r.identifier)
     local = [identifier for p in _LOCAL_PROVIDERS for identifier in by_provider.get(p, [])]
     remote = [identifier for p in _REMOTE_PROVIDERS for identifier in by_provider.get(p, [])]
@@ -254,6 +295,7 @@ async def list_options() -> dict[str, Any]:
         "local_small": local,
         "remote_chat": remote,
         "remote_small": remote,
+        "tts": tts,
         "by_provider": by_provider,
         "providers": public_provider_options(),
     }
@@ -295,8 +337,45 @@ async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
     # 不会出现 "新 lru 实例用旧 cache 重 build 立刻又 evict" 抖动.
     await load_caches()
     invalidate_caches()
+    if "tts_output_probability" in payload.model_fields_set:
+        await _sync_tts_probability(
+            resolve_config_sync(agent_id=None).tts_output_probability,
+        )
     logger.info(f"[RUNTIME-CONFIG] system updated: {data}")
     return {
+        "config": _row_to_payload(row),
+        "resolved": _resolved_to_dict(resolve_config_sync(agent_id=None)),
+    }
+
+
+class TtsProbabilityPayload(BaseModel):
+    probability: int = Field(ge=0, le=100)
+
+
+@router.put("/tts-output-probability")
+async def put_tts_output_probability(
+    payload: TtsProbabilityPayload,
+) -> dict[str, Any]:
+    """Atomically update only the global voice-output probability."""
+    row = await db.systemconfig.upsert(
+        where={"id": 1},
+        data={
+            "create": {
+                "id": 1,
+                "ttsOutputProbability": payload.probability,
+            },
+            "update": {"ttsOutputProbability": payload.probability},
+        },
+    )
+    await load_caches()
+    invalidate_caches()
+    await _sync_tts_probability(payload.probability)
+    logger.info(
+        "[RUNTIME-CONFIG] TTS output probability updated: %s",
+        payload.probability,
+    )
+    return {
+        "probability": payload.probability,
         "config": _row_to_payload(row),
         "resolved": _resolved_to_dict(resolve_config_sync(agent_id=None)),
     }

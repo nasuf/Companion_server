@@ -172,6 +172,20 @@ class ShortCircuitCtx:
                 "main_prompt_built": False,
             })
             extra_metadata["response_diagnostics"] = self.response_diagnostics
+        from app.services.speech_output.policy import VoiceContext
+
+        text_only_prefixes = (
+            "crisis",
+            "deletion",
+            "record_request",
+            "schedule",
+            "current_state",
+        )
+        voice_context = (
+            VoiceContext.SYSTEM
+            if kind.startswith(text_only_prefixes)
+            else VoiceContext.NORMAL_CHAT
+        )
         async for evt in finalize_short_circuit(
             reply,
             conversation_id=self.conversation_id,
@@ -187,6 +201,7 @@ class ShortCircuitCtx:
             cached_patience=self.cached_patience,
             extra_metadata=extra_metadata,
             achievement_turn_final=self.achievement_turn_final,
+            voice_context=voice_context,
         ):
             yield evt
 

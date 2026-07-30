@@ -1475,24 +1475,83 @@ async def stream_chat_response(
                 },
             )
 
-        # spec §5/§6.4-§6.5: emoji/sticker + 延迟解释 + 推送
+        # Voice output is decided once per generated reply set. A voice turn is
+        # collapsed to one bubble so 1-4 text fragments do not trigger multiple
+        # provider calls or audible timbre jumps.
         emitted_replies: list[dict] = []
-        async for evt in _emit_replies(
-            replies,
-            reply_context=reply_context,
-            reply_index_offset=reply_index_offset,
-            sub_intent_mode=sub_intent_mode,
-            agent=agent,
-            user_message=user_message,
-            delay_reply_fn=_delay_explanation_reply,
-            fallback_fn=_intent_llm_reply,
-            emitted_replies=emitted_replies,
-            reply_emotion=reply_emotion,
-            reply_is_fallback=reply_is_fallback,
-            conversation_id=conversation_id,
-            component_card=meal_card_decision.component_card,
+        prepared_voice = None
+        from app.services.speech_output.policy import (
+            VoiceContext,
+            should_generate_voice,
+        )
+
+        client_supports_voice = bool(
+            (reply_context or {}).get("client_supports_voice")
+        )
+        elapsed_for_voice = actual_delay_seconds(reply_context)
+        if meal_card_decision.component_card is not None:
+            voice_context = VoiceContext.COMPONENT_CARD
+        elif elapsed_for_voice is not None and elapsed_for_voice >= 60:
+            # Preserve the existing delayed-reply explanation path.
+            voice_context = VoiceContext.SYSTEM
+        else:
+            voice_context = VoiceContext.NORMAL_CHAT
+        if (
+            not reply_is_fallback
+            and await should_generate_voice(
+                context=voice_context,
+                client_supports_voice=client_supports_voice,
+            )
         ):
-            yield evt
+            try:
+                from app.services.speech_output.delivery import prepare_voice_output
+
+                prepared_voice = await prepare_voice_output(
+                    text=full_response,
+                    user_id=user_id,
+                    agent=agent,
+                    conversation_id=conversation_id,
+                    source="chat",
+                    emotion=reply_emotion.get("emotion"),
+                    intensity=reply_emotion.get("intensity"),
+                )
+            except Exception as voice_error:
+                logger.warning(
+                    "[TTS] chat synthesis failed; falling back to text: %s",
+                    type(voice_error).__name__,
+                )
+
+        if prepared_voice is not None:
+            voice_data: dict = {
+                "text": prepared_voice.transcript,
+                "index": reply_index_offset,
+                "display_mode": "voice",
+                "attachments": [prepared_voice.metadata],
+            }
+            if reply_emotion.get("emotion"):
+                voice_data["ai_emotion"] = reply_emotion["emotion"]
+                voice_data["emotion_intensity"] = int(
+                    reply_emotion.get("intensity", 0) or 0
+                )
+            emitted_replies.append(voice_data)
+        else:
+            # spec §5/§6.4-§6.5: emoji/sticker + delay explanation + push
+            async for evt in _emit_replies(
+                replies,
+                reply_context=reply_context,
+                reply_index_offset=reply_index_offset,
+                sub_intent_mode=sub_intent_mode,
+                agent=agent,
+                user_message=user_message,
+                delay_reply_fn=_delay_explanation_reply,
+                fallback_fn=_intent_llm_reply,
+                emitted_replies=emitted_replies,
+                reply_emotion=reply_emotion,
+                reply_is_fallback=reply_is_fallback,
+                conversation_id=conversation_id,
+                component_card=meal_card_decision.component_card,
+            ):
+                yield evt
 
         await finalize_meal_voucher_card(
             conversation_id=conversation_id,
@@ -1559,6 +1618,76 @@ async def stream_chat_response(
             achievement_turn_id=current_achievement_turn_id,
             achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
         )
+        if prepared_voice is not None:
+            if first_assistant_message_id:
+                try:
+                    from app.services.speech_output.delivery import (
+                        bind_prepared_voice_output,
+                    )
+
+                    await bind_prepared_voice_output(
+                        prepared_voice,
+                        message_id=first_assistant_message_id,
+                    )
+                    voice_data = emitted_replies[0]
+                    voice_data["assistant_message_id"] = first_assistant_message_id
+                    public_voice_data = {
+                        key: voice_data[key]
+                        for key in (
+                            "text",
+                            "index",
+                            "display_mode",
+                            "attachments",
+                            "assistant_message_id",
+                            "ai_emotion",
+                            "emotion_intensity",
+                        )
+                        if key in voice_data
+                    }
+                    yield {
+                        "event": "reply",
+                        "data": json.dumps(public_voice_data),
+                    }
+                except Exception as voice_bind_error:
+                    logger.warning(
+                        "[TTS] chat attachment bind failed; falling back to text: %s",
+                        type(voice_bind_error).__name__,
+                    )
+                    from app.services.speech_output.delivery import (
+                        discard_prepared_voice_output,
+                    )
+
+                    await discard_prepared_voice_output(prepared_voice)
+                    await db.execute_raw(
+                        """
+                        UPDATE messages
+                        SET metadata = COALESCE(metadata, '{}'::jsonb)
+                            - 'attachments' - 'display_mode'
+                        WHERE id = $1
+                        """,
+                        first_assistant_message_id,
+                    )
+                    yield {
+                        "event": "reply",
+                        "data": json.dumps({
+                            "text": prepared_voice.transcript,
+                            "index": reply_index_offset,
+                            "assistant_message_id": first_assistant_message_id,
+                        }),
+                    }
+            else:
+                from app.services.speech_output.delivery import (
+                    discard_prepared_voice_output,
+                )
+
+                await discard_prepared_voice_output(prepared_voice)
+                yield {
+                    "event": "reply",
+                    "data": json.dumps({
+                        "text": prepared_voice.transcript,
+                        "index": reply_index_offset,
+                    }),
+                }
         # spec §6.4-§6.5 已经 emit; 这里记 final 信号 — Axiom 用 event=reply.emitted
         # 切分一次"完成回复"维度 (跟 reply.llm_main / reply.split 区别: 那两条是
         # 中间步骤, 这条是用户实际收到的最终结果, 包含 emoji/sticker/拆分后)

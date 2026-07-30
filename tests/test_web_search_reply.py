@@ -467,6 +467,8 @@ def _resolved(web_search=True, online=True, provider="ark"):
         remote_small_model="doubao-seed-character-260628",
         vision_model="v",
         asr_model="a",
+        tts_model="qwen3-tts-instruct-flash-2026-01-26",
+        tts_output_probability=0,
         web_search_enabled=web_search,
     )
 

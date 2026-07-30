@@ -674,6 +674,7 @@ async def send_first_greeting(
     user_id: str,
     agent_id: str,
     workspace_id: str | None = None,
+    voice_eligible: bool = True,
 ) -> bool:
     """spec §12: 用户首次进入聊天 (对话消息数=0) 时 AI 主动发送第一句.
 
@@ -748,6 +749,7 @@ async def send_first_greeting(
                 trigger_type="first_greeting",
                 skip_post_process=True,
                 trace_id=tracer.safe_trace_id,
+                voice_eligible=voice_eligible,
             )
 
             # 接入 spec §8 衰减链路：首句仍需计入 n=1，用户不回复才会

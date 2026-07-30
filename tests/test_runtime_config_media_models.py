@@ -39,16 +39,22 @@ def test_resolve_falls_back_to_env_when_unset(loaded_caches):
     resolved = runtime_config.resolve_config_sync(agent_id=None)
     assert resolved.vision_model == settings.doubao_vision_model
     assert resolved.asr_model == settings.dashscope_asr_model
+    assert resolved.tts_model == settings.dashscope_tts_model
+    assert resolved.tts_output_probability == settings.tts_output_probability
 
 
 def test_resolve_prefers_system_config_override(monkeypatch, loaded_caches):
     monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {
         "visionModel": "doubao-vision-next",
         "asrModel": "fun-asr-next",
+        "ttsModel": "qwen-tts-next",
+        "ttsOutputProbability": 73,
     })
     resolved = runtime_config.resolve_config_sync(agent_id=None)
     assert resolved.vision_model == "doubao-vision-next"
     assert resolved.asr_model == "fun-asr-next"
+    assert resolved.tts_model == "qwen-tts-next"
+    assert resolved.tts_output_probability == 73
 
 
 @pytest.mark.asyncio
@@ -66,10 +72,13 @@ def test_row_to_dict_reads_media_columns_from_system_row():
         remoteSmallProvider=None, localChatModel=None, localSmallModel=None,
         remoteChatModel=None, remoteSmallModel=None,
         visionModel="v-1", asrModel="a-1",
+        ttsModel="t-1", ttsOutputProbability=42,
     )
     out = runtime_config._row_to_dict(sys_row)
     assert out["visionModel"] == "v-1"
     assert out["asrModel"] == "a-1"
+    assert out["ttsModel"] == "t-1"
+    assert out["ttsOutputProbability"] == 42
     # Agent override rows lack the attrs entirely → keys absent, not None.
     agent_row = SimpleNamespace(onlineModel=None, remoteChatModel="m")
     agent_out = runtime_config._row_to_dict(agent_row)
@@ -81,14 +90,23 @@ def test_row_to_dict_reads_media_columns_from_system_row():
 
 
 def test_payload_to_data_includes_media_only_for_global_path():
-    payload = ConfigPayload(vision_model=" doubao-v ", asr_model="fun-a")
+    payload = ConfigPayload(
+        vision_model=" doubao-v ",
+        asr_model="fun-a",
+        tts_model="qwen-tts",
+        tts_output_probability=65,
+    )
     global_data = _payload_to_data(payload, include_global_only=True)
     assert global_data["visionModel"] == "doubao-v"  # stripped
     assert global_data["asrModel"] == "fun-a"
+    assert global_data["ttsModel"] == "qwen-tts"
+    assert global_data["ttsOutputProbability"] == 65
     # Agent path must not carry the columns at all (prisma unknown column).
     agent_data = _payload_to_data(payload)
     assert "visionModel" not in agent_data
     assert "asrModel" not in agent_data
+    assert "ttsModel" not in agent_data
+    assert "ttsOutputProbability" not in agent_data
 
 
 def test_payload_to_data_empty_string_clears_override():

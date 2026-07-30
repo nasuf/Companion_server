@@ -695,6 +695,9 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     user_id = conv.userId
     agent = conv.agent
     workspace_id = getattr(conv, "workspaceId", None)
+    client_supports_voice = (
+        websocket.query_params.get("client", "").strip().lower() == "flutter"
+    )
     # username 一次性查询缓存 — 整个 WS 生命周期复用, 避免每条 message 查 DB
     user_record = await db.user.find_unique(where={"id": user_id})
     cached_username = user_record.username if user_record else None
@@ -727,6 +730,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     user_id=user_id,
                     agent_id=agent.id,
                     workspace_id=workspace_id,
+                    voice_eligible=client_supports_voice,
                 )
             )
         except Exception as e:
@@ -796,6 +800,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                         component_card=component_card,
                         attachment_ids=attachment_ids,
                         user_name=cached_username,
+                        client_supports_voice=client_supports_voice,
                     )
 
         except WebSocketDisconnect:
@@ -966,6 +971,7 @@ async def _handle_message(
     component_card: dict | None = None,
     attachment_ids: list[str] | None = None,
     user_name: str | None = None,
+    client_supports_voice: bool = False,
 ) -> None:
     """处理用户消息：聚合检查 → 生成回复 → 推送。"""
     attachments = await chat_media_repo.get_message_attachments(
@@ -1016,6 +1022,7 @@ async def _handle_message(
         received_status=received_status,
         user_emotion=quick_emotion_estimate(prompt_text),
     )
+    current_context["client_supports_voice"] = client_supports_voice
 
     plan = await plan_user_message_aggregation(
         agent_id=agent.id,

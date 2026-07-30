@@ -36,6 +36,8 @@ router = APIRouter(
 
 
 _PROVIDERS = provider_ids(admin_only=True)
+_MODEL_KINDS = {"llm", "tts"}
+_BILLING_UNITS = {"per_million_tokens", "per_10k_characters"}
 
 
 class ModelCreatePayload(BaseModel):
@@ -43,6 +45,9 @@ class ModelCreatePayload(BaseModel):
     display_name: str | None = None
     provider: str
     enabled: bool = True
+    model_kind: str = "llm"
+    billing_unit: str = "per_million_tokens"
+    unit_price_cny: float | None = Field(default=None, ge=0)
     context_window: int | None = Field(default=None, ge=1)
     input_cost_per_million: float | None = Field(default=None, ge=0)
     output_cost_per_million: float | None = Field(default=None, ge=0)
@@ -56,6 +61,9 @@ class ModelUpdatePayload(BaseModel):
     display_name: str | None = None
     provider: str | None = None
     enabled: bool | None = None
+    model_kind: str | None = None
+    billing_unit: str | None = None
+    unit_price_cny: float | None = Field(default=None, ge=0)
     context_window: int | None = Field(default=None, ge=1)
     input_cost_per_million: float | None = Field(default=None, ge=0)
     output_cost_per_million: float | None = Field(default=None, ge=0)
@@ -70,6 +78,9 @@ def _row_to_dict(row) -> dict[str, Any]:
         "display_name": row.displayName,
         "provider": row.provider,
         "enabled": row.enabled,
+        "model_kind": getattr(row, "modelKind", "llm"),
+        "billing_unit": getattr(row, "billingUnit", "per_million_tokens"),
+        "unit_price_cny": getattr(row, "unitPriceCny", None),
         "context_window": row.contextWindow,
         "input_cost_per_million": row.inputCostPerMillion,
         "output_cost_per_million": row.outputCostPerMillion,
@@ -88,6 +99,24 @@ def _validate_provider(provider: str) -> None:
         )
 
 
+def _validate_model_metadata(model_kind: str, billing_unit: str) -> None:
+    if model_kind not in _MODEL_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_kind 必须是 {sorted(_MODEL_KINDS)} 之一",
+        )
+    if billing_unit not in _BILLING_UNITS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"billing_unit 必须是 {sorted(_BILLING_UNITS)} 之一",
+        )
+    if model_kind == "tts" and billing_unit != "per_10k_characters":
+        raise HTTPException(
+            status_code=400,
+            detail="TTS 模型 billing_unit 必须是 per_10k_characters",
+        )
+
+
 @router.get("")
 async def list_models() -> dict[str, Any]:
     """admin 视图: 含 disabled 全部模型, 按 provider + identifier 排序."""
@@ -103,12 +132,16 @@ async def list_models() -> dict[str, Any]:
 @router.post("")
 async def create_model(payload: ModelCreatePayload) -> dict[str, Any]:
     _validate_provider(payload.provider)
+    _validate_model_metadata(payload.model_kind, payload.billing_unit)
     try:
         row = await db.modelregistry.create(data={
             "identifier": payload.identifier,
             "displayName": payload.display_name,
             "provider": payload.provider,
             "enabled": payload.enabled,
+            "modelKind": payload.model_kind,
+            "billingUnit": payload.billing_unit,
+            "unitPriceCny": payload.unit_price_cny,
             "contextWindow": payload.context_window,
             "inputCostPerMillion": payload.input_cost_per_million,
             "outputCostPerMillion": payload.output_cost_per_million,
@@ -141,6 +174,12 @@ async def update_model(model_id: str, payload: ModelUpdatePayload) -> dict[str, 
         data["provider"] = payload.provider
     if "enabled" in explicit:
         data["enabled"] = payload.enabled
+    if "model_kind" in explicit:
+        data["modelKind"] = payload.model_kind
+    if "billing_unit" in explicit:
+        data["billingUnit"] = payload.billing_unit
+    if "unit_price_cny" in explicit:
+        data["unitPriceCny"] = payload.unit_price_cny
     if "context_window" in explicit:
         data["contextWindow"] = payload.context_window
     if "input_cost_per_million" in explicit:
@@ -158,6 +197,12 @@ async def update_model(model_id: str, payload: ModelUpdatePayload) -> dict[str, 
     row = await db.modelregistry.find_unique(where={"id": model_id})
     if not row:
         raise HTTPException(status_code=404, detail="model not found")
+    next_kind = data.get("modelKind", getattr(row, "modelKind", "llm"))
+    next_unit = data.get(
+        "billingUnit",
+        getattr(row, "billingUnit", "per_million_tokens"),
+    )
+    _validate_model_metadata(next_kind, next_unit)
 
     try:
         updated = await db.modelregistry.update(where={"id": model_id}, data=data)

@@ -1,10 +1,11 @@
 """Tests for GET /admin-api/stats/media-usage (voice/image usage stats).
 
-The endpoint issues six raw SQL aggregations via asyncio.gather — three over
+The endpoint issues nine raw SQL aggregations via asyncio.gather — three over
 chat_message_attachments (totals by kind / per-user rollup / distinct-user
 count), two over speech_usage filtered to display_mode='text' (voice-to-text
 totals / per-user rollup), and one unfiltered speech_usage rollup that is the
-ASR billing basis — the AsyncMock side_effect list maps to that call order.
+ASR billing basis, plus three TTS output rollups — the AsyncMock side_effect
+list maps to that call order.
 """
 
 from __future__ import annotations
@@ -47,10 +48,27 @@ async def test_media_usage_aggregates_totals_and_users(monkeypatch):
     ]
     # Billing basis: every transcription, regardless of display mode.
     asr_rows = [{"count": 9, "total_seconds": 102}]
+    tts_totals_rows = [{
+        "count": 3,
+        "total_milliseconds": 12_500,
+        "total_bytes": 180_000,
+        "billable_characters": 420,
+        "cost_cny": 0.0336,
+    }]
+    tts_user_rows = [{
+        "user_id": "u1",
+        "username": "alice",
+        "tts_count": 3,
+        "tts_milliseconds": 12_500,
+        "tts_billable_characters": 420,
+        "tts_cost_cny": 0.0336,
+    }]
+    tts_user_total_rows = [{"user_total": 1}]
     fake_db = _fake_db(
         [
             totals_rows, user_rows, user_total_rows,
             text_totals_rows, text_user_rows, asr_rows,
+            tts_totals_rows, tts_user_rows, tts_user_total_rows,
         ]
     )
     monkeypatch.setattr(stats_mod, "db", fake_db)
@@ -65,6 +83,16 @@ async def test_media_usage_aggregates_totals_and_users(monkeypatch):
         "price_cny_per_second": 0.001, "cost_cny": pytest.approx(0.102),
     }
     assert resp["image"] == {"count": 6, "total_bytes": 25_165_824}
+    assert resp["tts_output"] == {
+        "count": 3,
+        "total_milliseconds": 12_500,
+        "total_seconds": 12.5,
+        "total_bytes": 180_000,
+        "billable_characters": 420,
+        "cost_cny": pytest.approx(0.0336),
+    }
+    assert resp["tts_user_total"] == 1
+    assert resp["tts_users"][0]["tts_count"] == 3
     assert resp["user_total"] == 2
     assert len(resp["users"]) == 2
     # u1 has voice-to-text usage merged in; u2 has none → zeros.
@@ -125,9 +153,9 @@ async def test_media_usage_window_filter_binds_start_param(monkeypatch):
 
     await stats_mod.media_usage(days=3, limit=10, offset=0)
 
-    # All six queries (3 attachment + 2 speech_usage display-mode rollups +
-    # 1 ASR billing rollup) share the same single timestamp bind param.
-    assert len(captured_params) == 6
+    # All nine queries (attachment + ASR + TTS rollups) share the same single
+    # timestamp bind param.
+    assert len(captured_params) == 9
     assert all(len(params) == 1 for params in captured_params)
 
 

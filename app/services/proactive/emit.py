@@ -34,6 +34,7 @@ async def emit_proactive_message(
     skip_post_process: bool = False,
     ws_payload_extra: dict[str, Any] | None = None,
     trace_id: str | None = None,
+    voice_eligible: bool = True,
 ) -> str:
     """持久化主动消息 + 推 WS, 返回 assistant message id.
 
@@ -78,14 +79,83 @@ async def emit_proactive_message(
     if extra_metadata:
         metadata.update(extra_metadata)
 
-    created = await db.message.create(
-        data={
-            "conversation": {"connect": {"id": conversation_id}},
-            "role": "assistant",
-            "content": message,
-            "metadata": Json(metadata),
-        }
-    )
+    prepared_voice = None
+    if voice_eligible and not (ws_payload_extra or {}).get("component_card"):
+        from app.services.speech_output.policy import (
+            VoiceContext,
+            should_generate_voice,
+        )
+
+        if await should_generate_voice(
+            context=VoiceContext.PROACTIVE_CHAT,
+            client_supports_voice=True,
+        ):
+            try:
+                agent = await db.aiagent.find_unique(where={"id": agent_id})
+                if agent is not None:
+                    from app.services.speech_output.delivery import (
+                        prepare_voice_output,
+                    )
+
+                    prepared_voice = await prepare_voice_output(
+                        text=message,
+                        user_id=user_id,
+                        agent=agent,
+                        conversation_id=conversation_id,
+                        source="proactive",
+                    )
+                    metadata["display_mode"] = "voice"
+                    metadata["attachments"] = [prepared_voice.metadata]
+            except Exception as voice_error:
+                logger.warning(
+                    "[TTS] proactive synthesis failed; falling back to text: %s",
+                    type(voice_error).__name__,
+                )
+
+    try:
+        created = await db.message.create(
+            data={
+                "conversation": {"connect": {"id": conversation_id}},
+                "role": "assistant",
+                "content": message,
+                "metadata": Json(metadata),
+            }
+        )
+    except Exception:
+        if prepared_voice is not None:
+            from app.services.speech_output.delivery import (
+                discard_prepared_voice_output,
+            )
+
+            await discard_prepared_voice_output(prepared_voice)
+        raise
+    if prepared_voice is not None:
+        try:
+            from app.services.speech_output.delivery import (
+                bind_prepared_voice_output,
+            )
+
+            await bind_prepared_voice_output(
+                prepared_voice,
+                message_id=created.id,
+            )
+        except Exception as bind_error:
+            logger.warning(
+                "[TTS] proactive attachment bind failed; falling back to text: %s",
+                type(bind_error).__name__,
+            )
+            from app.services.speech_output.delivery import (
+                discard_prepared_voice_output,
+            )
+
+            await discard_prepared_voice_output(prepared_voice)
+            prepared_voice = None
+            metadata.pop("display_mode", None)
+            metadata.pop("attachments", None)
+            await db.message.update(
+                where={"id": created.id},
+                data={"metadata": Json(metadata)},
+            )
     try:
         from app.services.achievements.service import handle_assistant_message_event
         from app.services.notifications.service import notify_agent_message_created
@@ -137,6 +207,9 @@ async def emit_proactive_message(
         "assistant_message_id": created.id,
         "trigger_type": trigger_type,
     }
+    if prepared_voice is not None:
+        ws_payload["display_mode"] = "voice"
+        ws_payload["attachments"] = [prepared_voice.metadata]
     if ws_payload_extra:
         ws_payload.update(ws_payload_extra)
     # workspace 维度路由: 同一 user 多 agent 时不会跨 agent 广播 proactive.

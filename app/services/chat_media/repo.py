@@ -170,6 +170,35 @@ async def create_audio_attachment(
     return _attachment_from_row(rows[0])
 
 
+async def create_generated_audio_attachment(
+    *,
+    user_id: str,
+    conversation_id: str,
+    storage_key: str,
+    url: str,
+    mime: str,
+    size: int,
+    duration_seconds: int,
+    transcript: str,
+    request_id: str | None,
+    name: str | None = None,
+) -> ChatAttachment:
+    """Create an unbound assistant TTS attachment with an exact transcript."""
+    return await create_audio_attachment(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        storage_key=storage_key,
+        url=url,
+        mime=mime,
+        size=size,
+        duration_seconds=duration_seconds,
+        transcription_text=transcript,
+        transcription_model="source_text",
+        transcription_request_id=request_id,
+        name=name,
+    )
+
+
 async def find_attachments_for_message(message_id: str) -> list[ChatAttachment]:
     rows = await db.query_raw(
         """
@@ -233,6 +262,28 @@ async def bind_attachments_to_message(
         user_id,
         conversation_id,
     )
+
+
+async def delete_unbound_attachment(
+    *,
+    attachment_id: str,
+    user_id: str,
+    conversation_id: str,
+) -> ChatAttachment | None:
+    rows = await db.query_raw(
+        """
+        DELETE FROM chat_message_attachments
+        WHERE id = $1
+          AND user_id = $2
+          AND conversation_id = $3
+          AND message_id IS NULL
+        RETURNING *
+        """,
+        attachment_id,
+        user_id,
+        conversation_id,
+    )
+    return _attachment_from_row(rows[0]) if rows else None
 
 
 async def update_vision_result(

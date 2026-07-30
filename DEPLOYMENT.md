@@ -29,6 +29,7 @@ Use both repository `Secrets` and repository `Variables`.
 - `JWT_SECRET`
 - `WECHAT_MOBILE_APP_SECRET`
 - `DASHSCOPE_API_KEY`
+- `DASHSCOPE_TTS_API_KEY`
 - `DEEPSEEK_API_KEY`
 - `LANGSMITH_API_KEY`
 - `LANGSMITH_ORG_ID`
@@ -250,6 +251,7 @@ ONLINE_MODEL=false
 REMOTE_PROVIDER=dashscope
 OLLAMA_BASE_URL=http://ollama:11434
 DASHSCOPE_API_KEY=
+DASHSCOPE_TTS_API_KEY=
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 DASHSCOPE_ENABLE_THINKING=false
 DEEPSEEK_BASE_URL=https://api.deepseek.com

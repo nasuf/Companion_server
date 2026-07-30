@@ -35,6 +35,22 @@ class Settings(BaseSettings):
     )
     dashscope_asr_model: str = "fun-asr-flash-2026-06-15"
     dashscope_asr_timeout_s: float = 30.0
+    # Assistant text-to-speech uses a dedicated credential so billing and
+    # rotation stay isolated from chat/ASR traffic. The native multimodal
+    # endpoint returns a short-lived WAV URL that we persist into chat media.
+    dashscope_tts_api_key: str = ""
+    dashscope_tts_endpoint: str = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
+    dashscope_tts_model: str = "qwen3-tts-instruct-flash-2026-01-26"
+    dashscope_tts_timeout_s: float = 45.0
+    dashscope_tts_max_bytes: int = 8 * 1024 * 1024
+    dashscope_tts_max_concurrency: int = 16
+    # Safe rollout default. The admin SystemConfig value overrides this at
+    # runtime and is constrained to 0..100.
+    tts_output_probability: int = 0
+    tts_price_cny_per_10k_chars: float = 0.8
     chat_voice_min_seconds: float = 0.5
     chat_voice_max_seconds: int = 60
     chat_voice_max_requests_per_minute: int = 20

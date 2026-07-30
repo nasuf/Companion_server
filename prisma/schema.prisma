@@ -123,6 +123,9 @@ model AiAgent {
   gender                   String?                         @map("gender")
   avatarKey                String?                         @map("avatar_key")
   avatarUrl                String?                         @map("avatar_url")
+  // Stable shared TTS voice profile. Assigned once from gender + MBTI and
+  // never changed by per-turn emotion/style instructions.
+  ttsVoiceId               String?                         @map("tts_voice_id")
   // 若该 agent 是从某个模板克隆而来, 记录源模板 agent id (用于「模板被使用次数」统计).
   sourceTemplateId         String?                         @map("source_template_id")
   // 仅模板 agent 使用: 上次「全量」知识记忆同步完成的水位 (knowledge_seed 行
@@ -297,6 +300,35 @@ model SpeechUsage {
   @@index([displayMode, createdAt])
   @@index([userId, createdAt])
   @@map("speech_usage")
+}
+
+// Assistant text-to-speech billing ledger. Values are stored at generation
+// time so later price edits do not rewrite historical cost.
+model TtsUsage {
+  id                   String   @id @default(uuid())
+  userId               String   @map("user_id")
+  agentId              String   @map("agent_id")
+  conversationId       String   @map("conversation_id")
+  messageId            String?  @map("message_id")
+  source               String   // "chat" | "proactive"
+  provider             String   @default("dashscope")
+  model                String
+  voiceId              String   @map("voice_id")
+  requestId            String?  @unique @map("request_id")
+  rawCharacters        Int      @map("raw_characters")
+  billableCharacters   Int      @map("billable_characters")
+  durationMilliseconds Int      @map("duration_milliseconds")
+  audioBytes           Int      @map("audio_bytes")
+  unitPriceCny         Float    @map("unit_price_cny")
+  costCny              Float    @map("cost_cny")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([messageId])
+  @@map("tts_usage")
 }
 
 model ChatLinkCard {
@@ -1701,6 +1733,10 @@ model SystemConfig {
   // null = fall back to env DOUBAO_VISION_MODEL / DASHSCOPE_ASR_MODEL.
   visionModel            String?  @map("vision_model")
   asrModel               String?  @map("asr_model")
+  // Assistant speech output (global-only). Probability is an integer percent
+  // in [0, 100]; null falls back to TTS_OUTPUT_PROBABILITY.
+  ttsModel               String?  @map("tts_model")
+  ttsOutputProbability   Int?     @map("tts_output_probability")
   // Web search for main replies (Ark Responses API web_search tool).
   // Global only; null = fall back to env WEB_SEARCH_ENABLED (default false).
   webSearchEnabled       Boolean? @map("web_search_enabled")
@@ -1824,6 +1860,12 @@ model ModelRegistry {
   displayName               String?  @map("display_name")
   provider                  String // ollama | dashscope | deepseek | ark | minimax
   enabled                   Boolean  @default(true)
+  // llm models participate in chat/small routing; tts models are exposed only
+  // through the speech-output route.
+  modelKind                 String   @default("llm") @map("model_kind")
+  // per_million_tokens | per_10k_characters
+  billingUnit              String   @default("per_million_tokens") @map("billing_unit")
+  unitPriceCny             Float?   @map("unit_price_cny")
   contextWindow             Int?     @map("context_window")
   // Float (≈double precision) 而非 Decimal — prisma-client-py 的 Decimal 支持是
   // experimental, 启用要全局 flag. 本场景精度需求低 (元/1M tokens 4-5 位小数足够),
@@ -1839,5 +1881,6 @@ model ModelRegistry {
 
   @@unique([provider, identifier])
   @@index([provider, enabled])
+  @@index([modelKind, enabled])
   @@map("model_registry")
 }

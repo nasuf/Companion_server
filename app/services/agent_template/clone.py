@@ -87,6 +87,8 @@ def _clone_persona_data(template, user_id: str) -> dict[str, Any]:
         "avatarKey": avatar.key,
         "avatarUrl": avatar.url,
     }
+    if getattr(template, "ttsVoiceId", None):
+        data["ttsVoiceId"] = template.ttsVoiceId
     if template.mbti is not None:
         data["mbti"] = Json(template.mbti)
     if template.currentMbti is not None:

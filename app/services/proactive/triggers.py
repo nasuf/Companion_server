@@ -724,6 +724,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
                     "reminder_summary": summary[:120],
                 },
                 trace_id=tracer.safe_trace_id,
+                voice_eligible=False,
             )
 
         await redis.incr(daily_key)

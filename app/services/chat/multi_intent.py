@@ -17,6 +17,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from app.db import db
 from app.services.chat.message_utils import _achievement_turn_id
 from app.observability.events import EVT_INTENT_SUB_RECURSED
 from app.services.chat.intent_dispatcher import (
@@ -55,6 +56,9 @@ async def short_circuit_reply(
     trace_id: str | None = None,
     turn_user_message_ids: list[str] | None = None,
     achievement_turn_final: bool = True,
+    agent: Any = None,
+    reply_context: dict | None = None,
+    voice_context: Any = None,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
@@ -75,7 +79,6 @@ async def short_circuit_reply(
     # 整条都是标记时给占位省略号 (与 split_and_validate_replies 兜底一致),
     # 绝不回退到未清理的原文.
     reply = limit_emojis(strip_system_markers(reply) or "...")
-    reply_payload: str | dict = reply
     metadata = dict(extra_metadata or {})
     if not sub_intent_mode:
         try:
@@ -92,25 +95,111 @@ async def short_circuit_reply(
                 metadata.setdefault("prompt_render_traces", prompt_traces)
         except Exception:
             pass
-    if metadata:
-        reply_payload = {"text": reply, **metadata}
-    _fire_background(save_replies_fn(
+    prepared_voice = None
+    if agent is not None and voice_context is not None:
+        from app.services.speech_output.policy import should_generate_voice
+
+        if await should_generate_voice(
+            context=voice_context,
+            client_supports_voice=bool(
+                (reply_context or {}).get("client_supports_voice")
+            ),
+        ):
+            try:
+                from app.services.speech_output.delivery import prepare_voice_output
+
+                prepared_voice = await prepare_voice_output(
+                    text=reply,
+                    user_id=user_id,
+                    agent=agent,
+                    conversation_id=conversation_id,
+                    source="chat",
+                )
+            except Exception as voice_error:
+                logger.warning(
+                    "[TTS] short-circuit synthesis failed; falling back to text: %s",
+                    type(voice_error).__name__,
+                )
+
+    if prepared_voice is not None:
+        metadata.update({
+            "display_mode": "voice",
+            "attachments": [prepared_voice.metadata],
+        })
+    reply_payload: str | dict = (
+        {"text": reply, **metadata} if metadata else reply
+    )
+    save_args = (
         conversation_id,
         [reply_payload],
-        trace_id=trace_id,
-        turn_user_message_ids=turn_user_message_ids or [],
-        achievement_turn_id=_achievement_turn_id(turn_user_message_ids or []),
-        achievement_turn_final=achievement_turn_final,
-    ))
+    )
+    save_kwargs = {
+        "trace_id": trace_id,
+        "turn_user_message_ids": turn_user_message_ids or [],
+        "achievement_turn_id": _achievement_turn_id(turn_user_message_ids or []),
+        "achievement_turn_final": achievement_turn_final,
+    }
+    assistant_message_id = None
+    if prepared_voice is not None:
+        assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
+        if assistant_message_id:
+            try:
+                from app.services.speech_output.delivery import (
+                    bind_prepared_voice_output,
+                )
+
+                await bind_prepared_voice_output(
+                    prepared_voice,
+                    message_id=assistant_message_id,
+                )
+            except Exception as bind_error:
+                logger.warning(
+                    "[TTS] short-circuit bind failed; falling back to text: %s",
+                    type(bind_error).__name__,
+                )
+                from app.services.speech_output.delivery import (
+                    discard_prepared_voice_output,
+                )
+
+                await discard_prepared_voice_output(prepared_voice)
+                await db.execute_raw(
+                    """
+                    UPDATE messages
+                    SET metadata = COALESCE(metadata, '{}'::jsonb)
+                        - 'attachments' - 'display_mode'
+                    WHERE id = $1
+                    """,
+                    assistant_message_id,
+                )
+                prepared_voice = None
+        else:
+            from app.services.speech_output.delivery import (
+                discard_prepared_voice_output,
+            )
+
+            await discard_prepared_voice_output(prepared_voice)
+            prepared_voice = None
+    else:
+        _fire_background(save_replies_fn(*save_args, **save_kwargs))
     # 图灵测试条数变化: 短路回复也计入"上一轮条数" (用户感知的是气泡数,
     # 不区分回复来自哪条管线). 累计 offset+1, 最后一次写入即本轮总数.
     from app.services.chat.reply_count_state import save_last_reply_count
     _fire_background(save_last_reply_count(conversation_id, reply_index_offset + 1))
     if not sub_intent_mode and agent_id:
         await save_last_reply_timestamp(agent_id, user_id)
+    event_data: dict[str, Any] = {
+        "text": reply,
+        "index": reply_index_offset,
+    }
+    if prepared_voice is not None:
+        event_data.update({
+            "display_mode": "voice",
+            "attachments": [prepared_voice.metadata],
+            "assistant_message_id": assistant_message_id,
+        })
     events: list[dict] = [{
         "event": "reply",
-        "data": json.dumps({"text": reply, "index": reply_index_offset}),
+        "data": json.dumps(event_data),
     }]
     if include_done and not sub_intent_mode:
         events.append(_DONE_EVENT)
@@ -199,6 +288,7 @@ async def finalize_short_circuit(
     cached_patience: int,
     extra_metadata: dict | None = None,
     achievement_turn_final: bool = True,
+    voice_context: Any = None,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -218,6 +308,9 @@ async def finalize_short_circuit(
         trace_id=trace_id,
         turn_user_message_ids=_turn_user_message_ids(reply_context),
         achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
+        agent=agent,
+        reply_context=reply_context,
+        voice_context=voice_context,
     )
     for evt in events:
         yield evt

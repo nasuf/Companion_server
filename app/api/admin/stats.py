@@ -474,7 +474,10 @@ async def media_usage(
     """
     start = _window_start(days)
     end = datetime.now(timezone.utc)
-    clauses = ["a.kind IN ('audio', 'image')"]
+    clauses = [
+        "a.kind IN ('audio', 'image')",
+        "m.role = 'user'",
+    ]
     params: list = []
     if start is not None:
         params.append(start.replace(tzinfo=None).isoformat())
@@ -498,6 +501,13 @@ async def media_usage(
         asr_clauses.append(f"created_at >= ${len(asr_params)}::timestamp")
     asr_where = " AND ".join(asr_clauses)
 
+    tts_clauses = ["1=1"]
+    tts_params: list = []
+    if start is not None:
+        tts_params.append(start.replace(tzinfo=None).isoformat())
+        tts_clauses.append(f"created_at >= ${len(tts_params)}::timestamp")
+    tts_where = " AND ".join(tts_clauses)
+
     (
         totals_rows,
         user_rows,
@@ -505,6 +515,9 @@ async def media_usage(
         text_totals_rows,
         text_user_rows,
         asr_rows,
+        tts_totals_rows,
+        tts_user_rows,
+        tts_user_total_rows,
     ) = await asyncio.gather(
         db.query_raw(
             f"""
@@ -514,6 +527,7 @@ async def media_usage(
                 COALESCE(SUM(a.size), 0)::bigint AS total_bytes,
                 COALESCE(SUM(COALESCE(a.duration_seconds, 0)), 0)::bigint AS total_seconds
             FROM chat_message_attachments a
+            JOIN messages m ON m.id = a.message_id
             WHERE {where_sql}
             GROUP BY a.kind
             """,
@@ -531,6 +545,7 @@ async def media_usage(
                 COUNT(*) FILTER (WHERE a.kind = 'image')::int AS image_count,
                 COALESCE(SUM(a.size) FILTER (WHERE a.kind = 'image'), 0)::bigint AS image_bytes
             FROM chat_message_attachments a
+            JOIN messages m ON m.id = a.message_id
             LEFT JOIN users u ON u.id = a.user_id
             WHERE {where_sql}
             GROUP BY a.user_id, u.username
@@ -543,6 +558,7 @@ async def media_usage(
             f"""
             SELECT COUNT(DISTINCT a.user_id)::int AS user_total
             FROM chat_message_attachments a
+            JOIN messages m ON m.id = a.message_id
             WHERE {where_sql}
             """,
             *params,
@@ -579,6 +595,49 @@ async def media_usage(
             """,
             *asr_params,
         ),
+        db.query_raw(
+            f"""
+            SELECT
+                COUNT(*)::int AS count,
+                COALESCE(SUM(duration_milliseconds), 0)::bigint
+                    AS total_milliseconds,
+                COALESCE(SUM(audio_bytes), 0)::bigint AS total_bytes,
+                COALESCE(SUM(billable_characters), 0)::bigint
+                    AS billable_characters,
+                COALESCE(SUM(cost_cny), 0)::float AS cost_cny
+            FROM tts_usage
+            WHERE {tts_where}
+            """,
+            *tts_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT
+                t.user_id,
+                COALESCE(u.username, '(已删除)') AS username,
+                COUNT(*)::int AS tts_count,
+                COALESCE(SUM(t.duration_milliseconds), 0)::bigint
+                    AS tts_milliseconds,
+                COALESCE(SUM(t.billable_characters), 0)::bigint
+                    AS tts_billable_characters,
+                COALESCE(SUM(t.cost_cny), 0)::float AS tts_cost_cny
+            FROM tts_usage t
+            LEFT JOIN users u ON u.id = t.user_id
+            WHERE {tts_where.replace("created_at", "t.created_at")}
+            GROUP BY t.user_id, u.username
+            ORDER BY tts_cost_cny DESC, t.user_id
+            LIMIT {int(limit)} OFFSET {int(offset)}
+            """,
+            *tts_params,
+        ),
+        db.query_raw(
+            f"""
+            SELECT COUNT(DISTINCT user_id)::int AS user_total
+            FROM tts_usage
+            WHERE {tts_where}
+            """,
+            *tts_params,
+        ),
     )
 
     by_kind = {str(r["kind"]): r for r in totals_rows}
@@ -586,6 +645,8 @@ async def media_usage(
     image = by_kind.get("image") or {}
     text_total = text_totals_rows[0] if text_totals_rows else {}
     text_by_user = {str(r["user_id"]): r for r in text_user_rows}
+    tts_total = tts_totals_rows[0] if tts_totals_rows else {}
+    tts_milliseconds = int(tts_total.get("total_milliseconds", 0) or 0)
     return {
         "window": {
             "start": start.isoformat() if start else None,
@@ -602,6 +663,40 @@ async def media_usage(
             "total_seconds": int(text_total.get("total_seconds", 0) or 0),
         },
         "asr": _asr_billing(asr_rows[0] if asr_rows else {}),
+        "tts_output": {
+            "count": int(tts_total.get("count", 0) or 0),
+            "total_milliseconds": tts_milliseconds,
+            "total_seconds": round(tts_milliseconds / 1000, 3),
+            "total_bytes": int(tts_total.get("total_bytes", 0) or 0),
+            "billable_characters": int(
+                tts_total.get("billable_characters", 0) or 0
+            ),
+            "cost_cny": round(float(tts_total.get("cost_cny", 0) or 0), 6),
+        },
+        "tts_user_total": int(
+            (tts_user_total_rows[0] if tts_user_total_rows else {}).get(
+                "user_total", 0,
+            )
+            or 0
+        ),
+        "tts_users": [
+            {
+                "user_id": row["user_id"],
+                "username": row["username"],
+                "tts_count": int(row.get("tts_count", 0) or 0),
+                "tts_milliseconds": int(
+                    row.get("tts_milliseconds", 0) or 0
+                ),
+                "tts_billable_characters": int(
+                    row.get("tts_billable_characters", 0) or 0
+                ),
+                "tts_cost_cny": round(
+                    float(row.get("tts_cost_cny", 0) or 0),
+                    6,
+                ),
+            }
+            for row in tts_user_rows
+        ],
         "image": {
             "count": int(image.get("count", 0) or 0),
             "total_bytes": int(image.get("total_bytes", 0) or 0),

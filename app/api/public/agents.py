@@ -143,6 +143,9 @@ async def _run_agent_initialization_inner(
         )
         agent.mbti = mbti
         agent.currentMbti = mbti
+        from app.services.speech_output.voices import ensure_agent_voice
+
+        await ensure_agent_voice(agent)
     except Exception as e:
         logger.error(f"MBTI init failed for agent {agent.id}: {e}")
     await set_progress(agent.id, "mbti_done", message="MBTI 推导完成")
