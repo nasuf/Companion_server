@@ -42,6 +42,7 @@ class GameBalanceConfig:
     minimum_games: int
     maximum_step: int
     algorithm_overrides: dict[str, Any]
+    enabled: bool
     version: int
 
     def snapshot(self, effective_strength: int) -> dict[str, Any]:
@@ -77,6 +78,7 @@ def _default_config(game_key: str) -> GameBalanceConfig:
         minimum_games=3,
         maximum_step=5,
         algorithm_overrides={},
+        enabled=True,
         version=1,
     )
 
@@ -87,6 +89,10 @@ def _int_field(value: Any, default: int) -> int:
 
 def _float_field(value: Any, default: float) -> float:
     return default if value is None else float(value)
+
+
+def _bool_field(value: Any, default: bool) -> bool:
+    return default if value is None else bool(value)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -115,6 +121,7 @@ def _row_config(row: Any, game_key: str) -> GameBalanceConfig:
         minimum_games=_int_field(row.get("minimum_games"), 3),
         maximum_step=_int_field(row.get("maximum_step"), 5),
         algorithm_overrides=_load_json(row.get("algorithm_overrides")),
+        enabled=_bool_field(row.get("enabled"), True),
         version=_int_field(row.get("version"), 1),
     )
 
@@ -127,7 +134,7 @@ async def get_config(game_key: str, *, database: Any | None = None) -> GameBalan
         """
         SELECT game_key, mode, base_strength, min_strength, max_strength,
                target_user_rate, adjustment_window, minimum_games,
-               maximum_step, algorithm_overrides, version
+               maximum_step, algorithm_overrides, enabled, version
         FROM native_game_configs
         WHERE game_key = $1
         LIMIT 1
@@ -501,6 +508,7 @@ def config_payload(config: GameBalanceConfig) -> dict[str, Any]:
         "minimum_games": config.minimum_games,
         "maximum_step": config.maximum_step,
         "algorithm_overrides": config.algorithm_overrides,
+        "enabled": config.enabled,
         "version": config.version,
         "preview_engine_config": build_engine_config(
             config.game_key,
@@ -555,7 +563,7 @@ async def list_admin_configs() -> list[dict[str, Any]]:
             """
             SELECT game_key, mode, base_strength, min_strength, max_strength,
                    target_user_rate, adjustment_window, minimum_games,
-                   maximum_step, algorithm_overrides, version
+                   maximum_step, algorithm_overrides, enabled, version
             FROM native_game_configs
             """
         ),
@@ -579,6 +587,51 @@ async def get_admin_config(game_key: str) -> dict[str, Any]:
     payload = config_payload(config)
     payload["metrics"] = _metrics_payload(metrics_by_game.get(game_key, {}))
     return payload
+
+
+async def set_enabled(game_key: str, enabled: bool) -> dict[str, Any]:
+    """Toggle a game's client visibility without bumping the balance version.
+
+    Visibility is an operational on/off switch, not a difficulty change, so it
+    deliberately does NOT write a config version snapshot. Other config columns
+    fall back to their table defaults when the row is created for the first time.
+    """
+    if game_key not in GAME_TITLES:
+        raise ValueError("unsupported_game")
+    await db.execute_raw(
+        """
+        INSERT INTO native_game_configs (game_key, enabled)
+        VALUES ($1, $2)
+        ON CONFLICT (game_key) DO UPDATE SET
+            enabled = EXCLUDED.enabled,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        game_key,
+        enabled,
+    )
+    return await get_admin_config(game_key)
+
+
+async def list_public_catalog() -> list[dict[str, Any]]:
+    """Game visibility for the client hub: every game with its enabled flag.
+
+    Games without a config row default to enabled so a fresh install shows the
+    full catalog before any admin edits.
+    """
+    rows = await db.query_raw(
+        "SELECT game_key, enabled FROM native_game_configs"
+    )
+    enabled_by_game = {
+        str(row.get("game_key")): _bool_field(row.get("enabled"), True) for row in rows
+    }
+    return [
+        {
+            "game_key": game_key,
+            "title": GAME_TITLES[game_key],
+            "enabled": enabled_by_game.get(game_key, True),
+        }
+        for game_key in GAME_TITLES
+    ]
 
 
 async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, Any]:

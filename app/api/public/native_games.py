@@ -10,7 +10,7 @@ from app.models.game import (
     NativeGameEventResponse,
     NativeSessionResponse,
 )
-from app.services.games import native
+from app.services.games import balance, native
 
 router = APIRouter(prefix="/games/native", tags=["games"])
 
@@ -41,6 +41,16 @@ def _http_error(exc: ValueError) -> HTTPException:
     }:
         return HTTPException(status_code=409, detail=code)
     return HTTPException(status_code=400, detail=code)
+
+
+@router.get("/catalog")
+async def native_game_catalog(user: dict = Depends(require_user)):
+    """Per-game visibility for the client hub (game_key + enabled flag).
+
+    The client keeps its own tile catalog (titles/art/grouping) and only uses
+    this to hide games an admin has taken offline.
+    """
+    return await balance.list_public_catalog()
 
 
 @router.get("/sessions", response_model=list[NativeSessionResponse])

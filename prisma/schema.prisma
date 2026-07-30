@@ -432,6 +432,7 @@ model NativeGameConfig {
   minimumGames       Int                       @default(3) @map("minimum_games")
   maximumStep        Int                       @default(5) @map("maximum_step")
   algorithmOverrides Json                      @default("{}") @map("algorithm_overrides")
+  enabled            Boolean                   @default(true)
   version            Int                       @default(1)
   createdAt          DateTime                  @default(now()) @map("created_at")
   updatedAt          DateTime                  @updatedAt @map("updated_at")

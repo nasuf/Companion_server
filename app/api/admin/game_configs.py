@@ -50,10 +50,25 @@ async def list_game_configs():
     return await balance.list_admin_configs()
 
 
+class GameVisibilityPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
 @router.put("/{game_key}")
 async def update_game_config(game_key: str, payload: GameConfigPayload):
     try:
         return await balance.publish_config(game_key, payload.model_dump())
+    except ValueError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put("/{game_key}/visibility")
+async def set_game_visibility(game_key: str, payload: GameVisibilityPayload):
+    """Show/hide a game in the client hub; does not create a config version."""
+    try:
+        return await balance.set_enabled(game_key, payload.enabled)
     except ValueError as exc:
         raise _http_error(exc) from exc
 
