@@ -73,13 +73,18 @@ jobs:
           # 会认为 611 个文件全都变了。按内容哈希比对才能真正跳过没动过的头像。
           # 两侧各多读一遍 17MB, 相对省下的跨境传输可以忽略。
           #
-          # -v 逐个打印真正传输的文件。不加的话 rsync 在整段传输期间一字不出, 静默
-          # 和挂死在 CI 日志上长得一模一样 (2026-07-30 冷启动那 11 分钟就是这样看着
-          # 像卡死的)。输出量有上界 —— 最多就是文件总数, 常规部署只有一两行。
+          # -v 逐条打印真正传输的文件和删除项。不加的话 rsync 在整段传输期间一字
+          # 不出, 静默和挂死在 CI 日志上长得一模一样 (2026-07-30 冷启动那 11 分钟
+          # 就是这么看着像卡死的)。
+          #
+          # -O 是让 -v 有用的前提, 不是可选项: git checkout 连目录 mtime 一起刷新,
+          # 不加 -O 每次都要"更新"那 166 个目录, -v 就把日志刷满目录名, 真正变了的
+          # 一两个文件反而被埋掉。目录时间戳对这套部署没有意义 (Docker COPY 不看)。
+          # 实测 —— 无内容变化: 166 行 → 0 行; 改 1 个文件带 1 个删除: 168 行 → 2 行。
           #
           # --stats 收尾给出实际字节数与速率。增量哪天失效了 (例如有人往 source 里
           # 加了每次都变的生成物), 这里一眼能看出来, 而不是等又慢回十分钟才有人察觉。
-          rsync -azcv --delete --stats \
+          rsync -azvcO --delete --stats \
             -e "ssh -i ~/.ssh/deploy_key -p $VPS_PORT -o BatchMode=yes" \
             app jobs prisma scripts \
             pyproject.toml Dockerfile docker-compose.deploy.yml .dockerignore .env.example \
