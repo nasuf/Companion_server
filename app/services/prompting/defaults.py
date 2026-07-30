@@ -422,10 +422,13 @@ CHAT_TIME_CONTEXT_SECTION_PROMPT = "{time_context}"
 #
 # 「约」前缀表示日期是从说话时间推断的, 不是用户明说的 —— 让模型在算间隔时知道
 # 这个数有误差, 别把"约2026-03-01"当成确证事实去做精确天数计算。
-CHAT_TIMELINE_SECTION_PROMPT = """【相关事件的时间线】(按时间先后, 「约」表示日期是推断的)
+CHAT_TIMELINE_SECTION_PROMPT = """【相关事件的时间线】(按时间先后)
+- [用户] 是用户的经历, [我] 是你自己的经历 —— 不要拿自己的经历回答关于用户的问题
+- 「约」表示日期是推断的, 算间隔时说个大概就好, 别报精确天数
+
 {timeline}
 
-用它来回答"上次是什么时候""过了多久""哪个在先"这类问题。时间线之外的事不要臆测。"""
+用它回答"上次是什么时候""过了多久""哪个在先"这类问题。时间线里没有的不要臆测。"""
 
 # 「一起听音乐」段包装. {music_context} 由 music.co_listening_context 渲染.
 CHAT_MUSIC_CONTEXT_SECTION_PROMPT = "{music_context}"

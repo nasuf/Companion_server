@@ -67,6 +67,10 @@ _QUICK_TIME_PAT = re.compile(
     r"|[一二三四五六七八九十百两半\d]{1,4}\s*个?\s*(?:分钟|小时|天|周|月|年)(?:之)?[前后]"
 )
 
+# "N年前" 里 N 的上限。超过它的数字是年份字面量而不是时间跨度 ——
+# 中文的"2024年前"是"2024 年之前", 不是"2024 年那么久以前"。
+_MAX_YEARS_AGO = 200
+
 _CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
              "六": 6, "七": 7, "八": 8, "九": 9}
 
@@ -194,6 +198,11 @@ def parse_time_expressions(
         else:
             amount = _parse_cn_number(num_str)
         if amount is None:
+            continue
+        if unit == "年" and abs(amount) > _MAX_YEARS_AGO:
+            # "2024年前" 在中文里是"2024 年之前"(年份字面量), 不是"2024 年那么久
+            # 以前"。不拦的话会算出公元 3 年写进 occur_time。
+            # 人能说的相对年数不会超过百年级, 超了一定是年份。
             continue
         if direction == "前":
             amount = -amount

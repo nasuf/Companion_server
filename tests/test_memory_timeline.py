@@ -19,8 +19,9 @@ from app.services.memory.retrieval.timeline import (
 _NOW = datetime(2026, 7, 30, 12, 0)
 
 
-def _row(content: str, *, occur=None, statement=None) -> dict:
-    return {"content": content, "occur_time": occur, "statement_time": statement}
+def _row(content: str, *, occur=None, statement=None, source="user") -> dict:
+    return {"content": content, "occur_time": occur,
+            "statement_time": statement, "source": source}
 
 
 class TestDetection:
@@ -146,15 +147,57 @@ class TestFormat:
 
     def test_inferred_dates_are_marked(self):
         """statement_time 推出来的日期要标"约" —— 让 LLM 知道它不是确证的."""
-        rows = [_row("去了博物馆", statement=_NOW)]
-        assert format_timeline(build_timeline(rows)).startswith("约")
+        # 归属前缀在最前, 「约」跟在日期前
+        inferred = format_timeline(build_timeline([_row("去了博物馆", statement=_NOW)]))
+        assert "] 约2026-" in inferred
 
-        rows = [_row("去了博物馆", occur=_NOW)]
-        assert not format_timeline(build_timeline(rows)).startswith("约")
+        exact = format_timeline(build_timeline([_row("去了博物馆", occur=_NOW)]))
+        assert "] 2026-" in exact and "约" not in exact
 
     def test_empty_timeline_renders_empty(self):
         """空串让调用方能直接判空跳过整段注入."""
         assert format_timeline([]) == ""
+
+
+class TestOwnership:
+    """时间线同时含用户经历和 AI 自己的经历, 不标归属会串味.
+
+    这是这个模块最容易出的错: 用户问"我上次去博物馆是几个月前", 而时间线里混着
+    AI 自己的经历, 模型完全可能拿 AI 的那条来答。
+    """
+
+    def test_owner_is_captured_from_the_source_field(self):
+        u = build_timeline([_row("去了博物馆", statement=_NOW, source="user")])[0]
+        a = build_timeline([_row("去了博物馆", statement=_NOW, source="ai")])[0]
+        assert u.owner == "user"
+        assert a.owner == "ai"
+
+    def test_unknown_source_defaults_to_user(self):
+        """来源缺失时按用户算 —— 把用户的事错标成 AI 的, 比反过来更容易被察觉纠正."""
+        assert build_timeline([_row("去了博物馆", statement=_NOW, source=None)])[0].owner == "user"
+
+    def test_rendered_lines_carry_the_owner(self):
+        rows = [
+            _row("用户去了博物馆", statement=_NOW, source="user"),
+            _row("我在整理落叶", statement=_NOW, source="ai"),
+        ]
+        text = format_timeline(build_timeline(rows))
+        assert "[用户]" in text
+        assert "[我]" in text
+
+    def test_every_line_has_an_owner_prefix(self):
+        """漏标一行就够模型串味一次."""
+        rows = [_row(f"事件{i}", statement=_NOW - timedelta(days=i),
+                     source="ai" if i % 2 else "user") for i in range(8)]
+        for line in format_timeline(build_timeline(rows)).splitlines():
+            assert line.startswith("[用户] ") or line.startswith("[我] "), line
+
+    def test_prompt_template_explains_the_markers(self):
+        """模板不解释 [我]/[用户] 的话, 标了模型也不知道什么意思."""
+        from app.services.prompting.defaults import CHAT_TIMELINE_SECTION_PROMPT
+
+        assert "[用户]" in CHAT_TIMELINE_SECTION_PROMPT
+        assert "[我]" in CHAT_TIMELINE_SECTION_PROMPT
 
 
 class TestWiring:

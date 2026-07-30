@@ -109,6 +109,21 @@ def test_year_unit_is_supported():
     assert 360 <= (now - one.start).days <= 370
 
 
+def test_year_literal_is_not_read_as_an_offset():
+    """「2024年前」是"2024 年之前", 不是"2024 年那么久以前".
+
+    加「年」单位时踩过的坑: 不拦的话"2024年前我住在北京"会算出公元 3 年写进
+    occur_time —— 一条彻底错误的日期, 而且静默。
+    """
+    now = _now()
+    for text in ("2024年前", "2020年前的事", "1998年前"):
+        assert not parse_time_expressions(text, now=now), f"误判成时间跨度: {text}"
+
+    # 合理范围内的仍要能解析
+    for text in ("十年前", "100年前", "3年前"):
+        assert parse_time_expressions(text, now=now), f"误伤: {text}"
+
+
 def test_half_maps_to_a_smaller_whole_unit():
     """半年 = 6 个月, 半个月 = 15 天 —— 比 0.5 年更准, 也不用把数字解析改成浮点."""
     now = _now()

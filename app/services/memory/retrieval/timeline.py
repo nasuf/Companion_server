@@ -75,6 +75,7 @@ class TimelineEntry:
     at: datetime
     text: str
     dated_by: str  # occur_time | statement_time
+    owner: str  # user | ai —— 这是谁的经历
 
 
 def _event_time(row: dict) -> tuple[datetime, str] | None:
@@ -104,7 +105,12 @@ def build_timeline(rows: list[dict], *, limit: int = 40) -> list[TimelineEntry]:
         if stamped is None:
             continue
         at, source = stamped
-        entries.append(TimelineEntry(at=at, text=content, dated_by=source))
+        entries.append(
+            TimelineEntry(
+                at=at, text=content, dated_by=source,
+                owner="ai" if row.get("source") == "ai" else "user",
+            )
+        )
 
     entries.sort(key=lambda e: e.at)
     # 超限时保留**最近的** limit 条: 聚合题问的多是"上次""最近几次", 久远条目
@@ -144,7 +150,10 @@ def format_timeline(
         text = e.text if len(e.text) <= max_chars else e.text[: max_chars - 1] + "…"
         # statement_time 定的日期加个"约", 让 LLM 知道这个日期是推断的不是确证的
         mark = "" if e.dated_by == "occur_time" else "约"
-        line = f"{mark}{e.at:%Y-%m-%d} {text}"
+        # 归属前缀是必须的, 不是装饰: 时间线同时含用户经历和 AI 自己的经历, 不标
+        # 归属的话"我上次去博物馆是几个月前"可能被 AI 自己的经历答掉。
+        who = "我" if e.owner == "ai" else "用户"
+        line = f"[{who}] {mark}{e.at:%Y-%m-%d} {text}"
         cost = estimate_tokens(line) + 1  # +1 为换行
         if used + cost > token_budget:
             break
