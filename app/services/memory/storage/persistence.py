@@ -57,6 +57,25 @@ def normalize_memory_type(memory_type: str | None) -> str | None:
     return _TYPE_NORMALIZE_MAP.get(memory_type, memory_type)
 
 
+def _split_for_storage(content: str, taxonomy) -> list[str]:
+    """写入前把超限内容拆成多条; 不需要拆或不能拆时返回单元素列表.
+
+    单例类目 (姓名/性别/年龄…) 不拆 —— 那些子类每个 agent 只允许一行, 拆成两条会
+    被 singleton 闸门拦下第二条, 反而丢内容。它们天然很短, 实际不会走到这。
+    """
+    from app.services.memory.recording.splitting import split_multi_fact
+    from app.services.memory.retrieval.context_selector import (
+        MAX_MEMORY_TOKENS_PER_ITEM,
+        estimate_tokens,
+    )
+
+    if not content or estimate_tokens(content) <= MAX_MEMORY_TOKENS_PER_ITEM:
+        return [content]
+    if is_singleton(taxonomy.main_category, taxonomy.sub_category):
+        return [content]
+    return split_multi_fact(content)
+
+
 def _normalize_singleton_text(text: str | None) -> str:
     """Normalize a singleton fact for cheap same-fact blocking.
 
@@ -203,6 +222,7 @@ async def store_memory(
     provenance: str | None = None,
     skip_reconciliation: bool = False,
     _singleton_locked: bool = False,
+    _split_done: bool = False,
 ) -> str | None:
     """Store a memory with deduplication.
 
@@ -239,6 +259,31 @@ async def store_memory(
         )
         return None
     memory_type = normalize_memory_type(taxonomy.legacy_type)
+
+    if not _split_done:
+        pieces = _split_for_storage(content, taxonomy)
+        if len(pieces) > 1:
+            # 超过检索单条上限的记忆会被 context_selector 整条跳过 —— 存进去了, 但
+            # 任何对话都不会用到它, 而且没有任何外部症状。这里是全部 11 个写入方的
+            # 唯一收口, 在这拆一次就覆盖聊天抽取 / 每日总结 / L3 整合 / 矛盾纠正等
+            # 全部路径 (2026-07 生产实测: 每日总结最长已到 171, 距上限只剩 9)。
+            logger.info(
+                "[STORE-SPLIT] content exceeds the per-item limit; storing as %d rows",
+                len(pieces),
+            )
+            first_id: str | None = None
+            for piece in pieces:
+                mid = await store_memory(
+                    user_id, piece, level=level, importance=importance,
+                    memory_type=memory_type, main_category=taxonomy.main_category,
+                    sub_category=taxonomy.sub_category, source=source,
+                    occur_time=occur_time, statement_time=statement_time,
+                    workspace_id=workspace_id, recurrence=recurrence,
+                    entities=entities, topics=topics, provenance=provenance,
+                    skip_reconciliation=skip_reconciliation, _split_done=True,
+                )
+                first_id = first_id or mid
+            return first_id
 
     workspace_id = workspace_id or await resolve_workspace_id(user_id=user_id)
 
