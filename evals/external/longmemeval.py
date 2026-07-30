@@ -77,6 +77,55 @@ class TemporalCase:
         return {r.id for r in self.rounds if r.is_evidence}
 
 
+def _chunks_of_turn(content: str, size: int = 240) -> list[str]:
+    """把一条长发言按句子切成小块.
+
+    为什么需要: 数据里一轮对话经常是"顺带提一句 A + 大段讲 B"。实测某条证据 1310
+    字符, 绝大部分在讲电视挂架, 而答案 (Nordstrom 特卖会) 只是第 242 字符处的一句
+    —— 整轮的 embedding 被电视挂架主导, 问 Nordstrom 根本匹配不上 (相似度 0.307,
+    排 13 名)。
+
+    这不是模型不行, 是**检索单位太粗**。我们的生产管线会把那句话抽成一条独立的短
+    记忆, 所以用整轮做单位测出来的分数不代表我们的架构。切块是不调 LLM 的近似。
+    """
+    import re
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?。！？])\s+", content) if s.strip()]
+    chunks: list[str] = []
+    buf = ""
+    for s in sentences:
+        if buf and len(buf) + len(s) > size:
+            chunks.append(buf)
+            buf = s
+        else:
+            buf = f"{buf} {s}".strip()
+    if buf:
+        chunks.append(buf)
+    return chunks or [content]
+
+
+def _chunk_units_of_session(
+    session: list[dict], session_index: int, at: datetime | None, qid: str
+) -> list[Round]:
+    """按"句子块"建索引单位, 近似我们抽取后的记忆粒度."""
+    units: list[Round] = []
+    for ti, turn in enumerate(session):
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        for ci, chunk in enumerate(_chunks_of_turn(turn.get("content") or "")):
+            units.append(
+                Round(
+                    id=f"{qid}:s{session_index}:t{ti}:c{ci}",
+                    text=f"{role}: {chunk}",
+                    at=at,
+                    session_index=session_index,
+                    # 证据标在轮次上, 该轮切出的每一块都算候选证据 —— 只要任一块
+                    # 被召回, 那句事实就进了 prompt。
+                    is_evidence=bool(turn.get("has_answer")),
+                )
+            )
+    return units
+
+
 def _rounds_of_session(
     session: list[dict], session_index: int, at: datetime | None, qid: str
 ) -> list[Round]:
@@ -116,8 +165,20 @@ def _rounds_of_session(
     return rounds
 
 
-def load_temporal_cases(path: Path, limit: int | None = None) -> list[TemporalCase]:
-    """读 longmemeval_{oracle,s_cleaned}.json, 只取 temporal-reasoning 题."""
+def load_temporal_cases(
+    path: Path, limit: int | None = None, granularity: str = "round"
+) -> list[TemporalCase]:
+    """读 longmemeval_{oracle,s_cleaned}.json, 只取 temporal-reasoning 题.
+
+    granularity 决定检索单位:
+        round  一问一答整轮 —— 论文 Table 4 的 "Value = Round" 基线
+        chunk  句子块 —— 近似我们生产管线抽取后的记忆粒度
+
+    这个选项不是调参, 是**测的对象不一样**。实测同一条证据在 round 粒度相似度
+    0.307 排 13 名, 切成 chunk 后 0.727 排第 1 —— 整轮的向量被同轮里占比更大的
+    另一个话题稀释了。我们的系统存的是抽取后的原子事实, 用 round 测等于测了一个
+    我们并不采用的设计。
+    """
     data = json.loads(Path(path).read_text())
     cases: list[TemporalCase] = []
     for item in data:
@@ -126,9 +187,10 @@ def load_temporal_cases(path: Path, limit: int | None = None) -> list[TemporalCa
         qid = item["question_id"]
         dates = item.get("haystack_dates") or []
         rounds: list[Round] = []
+        split = _chunk_units_of_session if granularity == "chunk" else _rounds_of_session
         for i, session in enumerate(item.get("haystack_sessions") or []):
             at = parse_lme_date(dates[i]) if i < len(dates) else None
-            rounds.extend(_rounds_of_session(session, i, at, qid))
+            rounds.extend(split(session, i, at, qid))
         if not any(r.is_evidence for r in rounds):
             # 没有证据标注的题测不了召回 —— 跳过而不是当成失败, 否则分数被
             # 数据缺陷拉低, 看不出系统真实水平。
@@ -147,6 +209,32 @@ def load_temporal_cases(path: Path, limit: int | None = None) -> list[TemporalCa
     return cases
 
 
+def parent_turn(unit_id: str) -> str:
+    """把 chunk id 收敛到它所属的轮次.
+
+    chunk 粒度下一轮会切出好几块, 全标成证据的话"证据条数"就跟 round 粒度不是一个
+    口径, 两个模式的分数不能比。按所属轮次去重后再计分, 衡量的都是"该注入的那一轮
+    内容有没有被召回", 口径一致。
+
+    已知宽松之处: 召回同一轮里**不含答案**的那一块也会被记成命中。要精确到块需要
+    知道答案落在哪一块, 而数据只标到轮 —— 这个偏差对两种粒度不对称 (只影响 chunk),
+    所以 chunk 的分数要当成上界看。
+    """
+    return unit_id.rsplit(":c", 1)[0] if ":c" in unit_id else unit_id
+
+
+def _to_turns(ids: list[str]) -> list[str]:
+    """保序去重到轮次级."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for i in ids:
+        t = parent_turn(i)
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def recall_at_k(ranked_ids: list[str], evidence: set[str], k: int) -> float:
     """top-k 里覆盖了多少比例的证据轮次.
 
@@ -155,9 +243,13 @@ def recall_at_k(ranked_ids: list[str], evidence: set[str], k: int) -> float:
     """
     if not evidence:
         return 0.0
-    return len(set(ranked_ids[:k]) & evidence) / len(evidence)
+    ev = {parent_turn(e) for e in evidence}
+    return len(set(_to_turns(ranked_ids)[:k]) & ev) / len(ev)
 
 
 def all_evidence_at_k(ranked_ids: list[str], evidence: set[str], k: int) -> bool:
     """证据是否**全部**进了 top-k —— 多跳题的真实达标线."""
-    return bool(evidence) and evidence <= set(ranked_ids[:k])
+    if not evidence:
+        return False
+    ev = {parent_turn(e) for e in evidence}
+    return ev <= set(_to_turns(ranked_ids)[:k])

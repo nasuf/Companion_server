@@ -98,6 +98,30 @@ class TestMetrics:
         assert all_evidence_at_k(["a"], set(), 5) is False
 
 
+class TestGranularityComparability:
+    """两种粒度的分数必须同口径, 否则拿来对比就是自欺.
+
+    chunk 模式下一轮会切出好几块全标成证据, 直接算的话"证据条数"跟 round 模式不是
+    一回事 —— 分数低不代表更差, 只代表分母变了。收敛到轮次级再计分才能比。
+    """
+
+    def test_chunk_ids_collapse_to_their_turn(self):
+        from evals.external.longmemeval import parent_turn
+
+        assert parent_turn("q:s1:t2:c3") == "q:s1:t2"
+        assert parent_turn("q:s1:r0") == "q:s1:r0"  # round id 不带 :c, 原样返回
+
+    def test_multiple_chunks_of_one_turn_count_once(self):
+        ranked = ["q:s0:t0:c0", "q:s0:t0:c1", "q:s0:t0:c2", "q:s9:t1:c0"]
+        # 前三个同属一轮; top2(轮次级) = {s0:t0, s9:t1}, 证据全中
+        assert all_evidence_at_k(ranked, {"q:s9:t1:c0"}, 2) is True
+
+    def test_round_mode_behaviour_is_unchanged(self):
+        """round id 里没有 :c, 收敛是恒等变换 —— 老基线数字不受影响."""
+        assert recall_at_k(["a:r0", "b:r1"], {"a:r0"}, 1) == 1.0
+        assert recall_at_k(["b:r1", "a:r0"], {"a:r0"}, 1) == 0.0
+
+
 class TestLoading:
     def test_date_parsing(self):
         d = parse_lme_date("2023/04/10 (Mon) 17:50")

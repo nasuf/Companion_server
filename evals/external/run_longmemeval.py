@@ -129,11 +129,30 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def _oracle_time_window(case: TemporalCase, pad_days: int) -> tuple | None:
+    """用标注证据的日期反推一个时间窗 —— 这是**上界实验**, 不是可上线的东西.
+
+    任何时间过滤技术 (规则解析 / LLM 抽时间范围 / 事件日历索引) 能做到的最好情况,
+    就是准确圈出证据所在的时间区间。先量这个上界: 如果连它都提升有限, 说明失败的
+    根因是语义匹配而不是时间, 那整条"补时间感知"的路线就不该投入。
+
+    pad_days 是给窗口两边留的余量 —— 现实中不可能圈得严丝合缝。
+    """
+    from datetime import timedelta
+
+    dates = [r.at for r in case.rounds if r.is_evidence and r.at]
+    if not dates:
+        return None
+    return (min(dates) - timedelta(days=pad_days), max(dates) + timedelta(days=pad_days))
+
+
 async def rank_case(
     case: TemporalCase,
     cache: EmbedCache,
     use_time_filter: bool,
     time_boost: float = _DEFAULT_TIME_BOOST,
+    oracle_window_pad: int | None = None,
+    hard_filter: bool = False,
 ) -> list[str]:
     """返回按我们生产排序打分排好的 round id.
 
@@ -149,7 +168,9 @@ async def rank_case(
 
     qv = await cache.get(case.question)
     time_range = None
-    if use_time_filter:
+    if oracle_window_pad is not None:
+        time_range = _oracle_time_window(case, oracle_window_pad)
+    elif use_time_filter:
         from app.services.memory.retrieval.hybrid import has_explicit_time
         from app.services.schedule_domain.time_parser import parse_time_expressions
 
@@ -160,6 +181,10 @@ async def rank_case(
 
     scored: list[tuple[float, str]] = []
     for r in case.rounds:
+        if hard_filter and time_range and not (r.at and time_range[0] <= r.at <= time_range[1]):
+            # 硬过滤模式: 窗外的候选直接不进池。加权只是"上浮", 窗内其他候选同样
+            # 上浮, 相对次序不变 —— 要量时间过滤的真实天花板必须整个剔除。
+            continue
         sim = _cosine(qv, await cache.get(r.text))
         mem = {
             "content": r.text,
@@ -188,11 +213,20 @@ async def main() -> int:
     ap.add_argument("--no-time-filter", action="store_true", help="关掉时间窗过滤做消融")
     ap.add_argument("--time-boost", type=float, default=_DEFAULT_TIME_BOOST,
                     help="命中时间窗的候选加多少分 (消融用)")
+    ap.add_argument("--oracle-window", type=int, metavar="PAD_DAYS",
+                    help="上界实验: 用标注证据日期反推时间窗, 量时间过滤的天花板")
+    ap.add_argument("--granularity", choices=("round", "chunk"), default="round",
+                    help="检索单位: round=论文基线, chunk=近似我们的抽取粒度")
+    ap.add_argument("--hard-filter", action="store_true",
+                    help="窗外候选直接剔除而非降权 (真正的过滤上界)")
     ap.add_argument("--show-failures", type=int, default=5)
     args = ap.parse_args()
 
-    cases = load_temporal_cases(Path(args.data), limit=args.limit)
-    print(f"时间推理题 {len(cases)} 道 (数据: {Path(args.data).name})")
+    cases = load_temporal_cases(Path(args.data), limit=args.limit,
+                                granularity=args.granularity)
+    mode = ("上界(oracle 时间窗 ±%dd)" % args.oracle_window) if args.oracle_window is not None \
+        else ("无时间过滤" if args.no_time_filter else "生产时间过滤")
+    print(f"时间推理题 {len(cases)} 道 (数据: {Path(args.data).name}, 模式: {mode}, 粒度: {args.granularity})")
     if not cases:
         return 1
     pool = sum(len(c.rounds) for c in cases) / len(cases)
@@ -206,6 +240,8 @@ async def main() -> int:
             case, cache,
             use_time_filter=not args.no_time_filter,
             time_boost=args.time_boost,
+            oracle_window_pad=args.oracle_window,
+            hard_filter=args.hard_filter,
         )
         rows.append((case, ranked))
         if i % 10 == 0:
