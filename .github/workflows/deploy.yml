@@ -22,16 +22,9 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      # scp 只覆盖不删除, 所以从 git 删掉的文件会永远留在 VPS 上, 并被烘进之后
-      # 每一个镜像。实测残留过 9 个文件, 其中包括一个刚被重命名的模块 —— 新旧两个
-      # 路径同时存在, 任何还引用旧路径的地方拿到的都是修复前的版本, 而且不会报错。
-      #
-      # 先清空再复制。这中间若 scp 失败, VPS 上没有源码, 但**运行中的容器不受影响**
-      # (它跑的是已构建的镜像), 下一次部署会补回来。相比"删掉的代码永远在生产里",
-      # 这个窗口是可接受的。
-      #
-      # 只清代码目录, 不碰 .env / companion-secrets / 备份这些不在 scp 范围里的东西。
-      - name: Clear stale sources on VPS
+      # rsync 要以普通用户身份写入, 所以目标目录得先存在且属主正确。冷启动时
+      # /app 本身不可写, 这一步不能省成 rsync --rsync-path='mkdir -p ...'。
+      - name: Ensure target dir on VPS
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -39,18 +32,53 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ vars.VPS_PORT }}
           script: |
-            cd /app/companion-server || exit 0
-            rm -rf app jobs prisma scripts
+            set -euo pipefail
+            sudo mkdir -p /app/companion-server
+            sudo chown -R "$USER:$USER" /app/companion-server
 
-      - name: Copy project to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ vars.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ vars.VPS_PORT }}
-          source: "app,jobs,prisma,scripts,pyproject.toml,Dockerfile,docker-compose.deploy.yml,.dockerignore,.env.example"
-          target: "/app/companion-server"
+      # 用 rsync 而不是 scp, 两个理由:
+      #
+      # 1) 增量。整包 17MB 里有 16MB 是 45 个头像 PNG, 而它们在 60 天 282 个 commit
+      #    里只变过 2 次 —— 也就是 99% 的部署都在重传完全没变的东西。这条跨境链路
+      #    实测在 28KB/s 到 520KB/s 之间剧烈抖动, 全量重传这一步花过 10-25 分钟。
+      #    rsync 只传差异, 常规部署落到几十 KB, 抖动也就不再有放大器。
+      #
+      # 2) 删除语义。scp 只覆盖不删除, 从 git 删掉的文件会永远留在 VPS 上, 并被烘进
+      #    之后每一个镜像。实测残留过 9 个文件, 含一个刚被重命名的模块 —— 新旧两个
+      #    路径同时存在, 引用旧路径的地方拿到的是修复前的版本, 且不会报错。原先靠
+      #    "先 rm -rf 再整包重传"绕过, 代价是两步之间 VPS 上没有源码。--delete 把
+      #    这件事变成传输本身的属性, 那个窗口随之消失。
+      #
+      # --delete 的删除范围只在传过去的那几个目录内部, 不会碰 /app/companion-server
+      # 根下的 .env / secrets/ 等不在 source 列表里的东西 (已实测确认)。
+      - name: Sync project to VPS
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ vars.VPS_USERNAME }}
+          VPS_PORT: ${{ vars.VPS_PORT }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # 主机不可达时 ssh-keyscan 退出 1, set -e 会在这里就停 —— 比让 rsync
+          # 抛一句 host key 相关的错好读。stderr 不吞: 失败原因要留在日志里。
+          ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          # --checksum 是增量能不能成立的关键, 不是可选优化: git 不存 mtime, 每次
+          # checkout 出来的文件时间戳都是全新的, rsync 默认的 size+mtime 快速判定
+          # 会认为 611 个文件全都变了。按内容哈希比对才能真正跳过没动过的头像。
+          # 两侧各多读一遍 17MB, 相对省下的跨境传输可以忽略。
+          #
+          # --stats 把实际传输字节打进日志。增量哪天失效了 (例如有人往 source 里加
+          # 了每次都变的生成物), 这里一眼能看出来, 而不是等又慢回十分钟才有人察觉。
+          rsync -azc --delete --stats \
+            -e "ssh -i ~/.ssh/deploy_key -p $VPS_PORT -o BatchMode=yes" \
+            app jobs prisma scripts \
+            pyproject.toml Dockerfile docker-compose.deploy.yml .dockerignore .env.example \
+            "$VPS_USER@$VPS_HOST:/app/companion-server/"
 
       - name: Deploy server stack on VPS
         uses: appleboy/ssh-action@v1.2.0
