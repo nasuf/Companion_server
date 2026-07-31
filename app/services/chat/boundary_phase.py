@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from app.services.chat.tracing import ChatTracer
 from app.services.prompting.utils import EMPTY_RECENT_CONTEXT
 from app.services.interaction.boundary import (
+    APOLOGY_KEYWORDS,
     APOLOGY_SINCERITY_MIN,
     FINAL_WARNING_PATIENCE_THRESHOLD,
     PATIENCE_MAX,
@@ -273,6 +274,48 @@ async def _handle_residual_patience(
     ctx: BoundaryPhaseCtx, patience_zone: str,
 ) -> AsyncGenerator[dict, None]:
     """spec §2.6 步骤 6：不含违禁词但耐心仍在中/低区间，按 zone 回复。"""
+    # 道歉要先看。原来只在 blocked 态检测道歉, 于是用户在中/低耐心时说"对不起"
+    # 会被当成普通消息, 再走一遍余波模板 —— 生产实录里就是这样:
+    #   用户「对不起」→ AI「没事啦 其实我还有点不开心 希望以后别再那样」
+    # 既说没事又说不开心, 而且对话永远出不来。
+    #
+    # 道歉是用户主动修复关系的动作, 不接住它比机械回复更伤 —— 也让"道歉能解封"
+    # 这个产品设定在拉黑之前就成立, 而不是非得先被拉黑。
+    # 先用关键词过一道再调模型。这条路径本来就要调一次 LLM 生成回复, 无条件再加
+    # 一次道歉检测会让余波轮的延迟翻倍 —— 而绝大多数余波消息根本不是道歉。
+    #
+    # 跟 blocked 态刻意不同: 那里无条件调模型, 因为漏判一次道歉意味着用户被永久
+    # 困在拉黑态 (自然恢复对 ≤0 不生效), 代价不对称。这里漏判只是多一句略钝的
+    # 回复, 值不上翻倍的延迟。
+    apology: dict = {}
+    if any(kw in ctx.user_message for kw in APOLOGY_KEYWORDS):
+        try:
+            apology = await detect_apology(ctx.user_message)
+        except Exception as e:  # 检测失败就当没道歉, 走原路径
+            logger.warning(f"Apology detection in residual patience failed: {e}")
+    if apology.get("is_apology") and apology.get("sincerity", 0) >= APOLOGY_SINCERITY_MIN:
+        new_patience = await handle_apology(ctx.agent_id, ctx.user_id)
+        reply = await apology_reply(
+            message=ctx.user_message,
+            personality_brief=_personality_brief(ctx.agent),
+            new_patience=new_patience,
+        )
+        if reply:
+            logger.info(
+                "[BOUNDARY] apology accepted in %s zone, patience → %s",
+                patience_zone, new_patience,
+            )
+            async for evt in _emit_short_circuit(
+                ctx, reply,
+                {"boundary": True, "zone": patience_zone, "apology_accepted": True},
+            ):
+                yield evt
+            ctx.tracer.close()
+            ctx.stopped = True
+            # 道歉是有价值的关系事件, 该进记忆 (与 blocked 态的处理一致)
+            _fire_memory_pipeline(ctx, reply)
+            return
+
     try:
         response = await generate_boundary_reply_llm(
             zone=patience_zone,
