@@ -13,7 +13,7 @@ async def record_tts_usage(
     speech: SynthesizedSpeech,
     user_id: str,
     agent_id: str,
-    conversation_id: str,
+    conversation_id: str | None,
     message_id: str | None,
     source: str,
 ) -> None:

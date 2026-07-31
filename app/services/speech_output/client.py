@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import struct
 import wave
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
@@ -66,11 +67,43 @@ def wav_duration_milliseconds(audio: bytes) -> int:
         with wave.open(io.BytesIO(audio), "rb") as wav:
             frames = wav.getnframes()
             rate = wav.getframerate()
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
     except (wave.Error, EOFError) as exc:
         raise SpeechSynthesisError("DashScope TTS returned invalid WAV audio") from exc
+    data_bytes = _wav_data_bytes(audio)
+    frame_width = channels * sample_width
+    actual_frames = data_bytes // frame_width if frame_width > 0 else 0
+    # Streaming WAV writers commonly leave the RIFF/data length at 0xFFFFFFFF.
+    # Python's wave module interprets that sentinel as billions of frames, so
+    # prefer the bytes physically present whenever the header is implausible.
+    if actual_frames > 0 and (
+        frames <= 0 or frames > actual_frames + max(1, rate // 10)
+    ):
+        frames = actual_frames
     if rate <= 0 or frames <= 0:
         raise SpeechSynthesisError("DashScope TTS returned empty WAV audio")
     return max(1, round(frames * 1000 / rate))
+
+
+def _wav_data_bytes(audio: bytes) -> int:
+    if len(audio) < 20 or audio[8:12] != b"WAVE":
+        return 0
+    offset = 12
+    while offset + 8 <= len(audio):
+        chunk_id = audio[offset : offset + 4]
+        chunk_size = struct.unpack_from("<I", audio, offset + 4)[0]
+        payload_start = offset + 8
+        if chunk_id == b"data":
+            available = max(0, len(audio) - payload_start)
+            return available if chunk_size == 0xFFFFFFFF else min(
+                chunk_size,
+                available,
+            )
+        if chunk_size == 0xFFFFFFFF:
+            return 0
+        offset = payload_start + chunk_size + (chunk_size % 2)
+    return 0
 
 
 def _response_error(response: httpx.Response) -> SpeechSynthesisError:
@@ -87,11 +120,50 @@ def _response_error(response: httpx.Response) -> SpeechSynthesisError:
     return SpeechSynthesisError(f"DashScope TTS {code}: {safe_message}")
 
 
+def _parse_synthesis_response(response: httpx.Response) -> dict:
+    content_type = response.headers.get("content-type", "").lower()
+    if "text/event-stream" not in content_type:
+        try:
+            body = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise SpeechSynthesisError(
+                "DashScope TTS returned invalid JSON"
+            ) from exc
+        if not isinstance(body, dict):
+            raise SpeechSynthesisError("DashScope TTS returned invalid payload")
+        return body
+
+    final_payload: dict | None = None
+    for line in response.text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        final_payload = event
+        output = event.get("output")
+        if isinstance(output, dict) and output.get("finish_reason") == "stop":
+            return event
+    if final_payload is None:
+        raise SpeechSynthesisError("DashScope TTS stream returned no events")
+    return final_payload
+
+
 async def synthesize_speech(
     *,
     text: str,
     voice_id: str,
     instruction: str,
+    rate: float = 1.0,
+    pitch: float = 1.0,
+    volume: int = 50,
+    seed: int = 0,
     model: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SynthesizedSpeech:
@@ -109,15 +181,22 @@ async def synthesize_speech(
         "input": {
             "text": clean_text,
             "voice": voice_id,
-            "language_type": "Chinese",
-            "instructions": instruction,
-            "optimize_instructions": True,
+            "format": "wav",
+            "sample_rate": 24_000,
+            "volume": max(0, min(100, int(volume))),
+            "rate": max(0.5, min(2.0, float(rate))),
+            "pitch": max(0.5, min(2.0, float(pitch))),
+            "seed": max(0, min(65_535, int(seed))),
+            "language_hints": ["zh"],
+            "instruction": instruction,
+            "enable_aigc_tag": True,
+            "enable_ssml": False,
         },
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "X-DashScope-SSE": "disable",
+        "X-DashScope-SSE": "enable",
     }
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=settings.dashscope_tts_timeout_s)
@@ -127,10 +206,7 @@ async def synthesize_speech(
         response = await http.post(endpoint, headers=headers, json=payload)
         if response.status_code != 200:
             raise _response_error(response)
-        try:
-            body = response.json()
-        except (ValueError, json.JSONDecodeError) as exc:
-            raise SpeechSynthesisError("DashScope TTS returned invalid JSON") from exc
+        body = _parse_synthesis_response(response)
         output = body.get("output") if isinstance(body, dict) else None
         audio_meta = output.get("audio") if isinstance(output, dict) else None
         audio_url = audio_meta.get("url") if isinstance(audio_meta, dict) else None
@@ -162,7 +238,15 @@ async def synthesize_speech(
             or (body.get("request_id") if isinstance(body, dict) else None)
         )
         raw_characters = len(clean_text)
-        billable = count_billable_characters(clean_text)
+        usage = body.get("usage") if isinstance(body, dict) else None
+        provider_billable = (
+            usage.get("characters") if isinstance(usage, dict) else None
+        )
+        billable = (
+            int(provider_billable)
+            if provider_billable is not None
+            else count_billable_characters(clean_text)
+        )
         pricing = get_tts_pricing(effective_model) or {}
         unit_price = float(
             pricing.get("unit_price_cny")

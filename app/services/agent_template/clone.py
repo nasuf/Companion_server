@@ -43,6 +43,7 @@ from prisma import Json
 from app.db import db
 from app.services.agent_avatars import pick_agent_avatar
 from app.services.agent_template.registry import get_default_template_agent_id
+from app.services.speech_output.voices import assign_random_voice
 from app.services.workspace.workspaces import (
     create_workspace,
     finalize_archived_workspaces,
@@ -87,8 +88,6 @@ def _clone_persona_data(template, user_id: str) -> dict[str, Any]:
         "avatarKey": avatar.key,
         "avatarUrl": avatar.url,
     }
-    if getattr(template, "ttsVoiceId", None):
-        data["ttsVoiceId"] = template.ttsVoiceId
     if template.mbti is not None:
         data["mbti"] = Json(template.mbti)
     if template.currentMbti is not None:
@@ -253,6 +252,14 @@ async def clone_template_agent_for_user(user_id: str, template_agent_id: str):
         raise ValueError("template agent has no active workspace")
 
     agent = await db.aiagent.create(data=_clone_persona_data(template, user_id))
+    try:
+        await assign_random_voice(
+            agent_id=agent.id,
+            gender=agent.gender,
+            agent=agent,
+        )
+    except Exception as exc:
+        logger.warning("[AGENT-CLONE] TTS voice assignment failed: %s", exc)
     # Record provenance via raw SQL so this works even before a Prisma client
     # regen picks up the new column. Failure here must not break the clone.
     try:

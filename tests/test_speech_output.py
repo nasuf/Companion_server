@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import struct
 import wave
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,8 +12,12 @@ import pytest
 from app.services.speech_output import client as tts_client
 from app.services.speech_output import voices
 from app.services.speech_output.policy import VoiceContext, should_generate_voice
-from app.services.speech_output.style import build_style_instruction
-from app.services.speech_output.voices import select_voice_id
+from app.services.speech_output.style import (
+    decorate_text_with_emotion,
+    instruction_billable_characters,
+    resolve_style_instruction,
+)
+from app.services.speech_output.voices import SYSTEM_VOICE_BY_GENDER
 
 
 def _wav_bytes(*, seconds: float = 0.25, rate: int = 24000) -> bytes:
@@ -31,6 +36,15 @@ def test_billable_characters_follow_dashscope_rules():
 
 def test_wav_duration_uses_actual_frames():
     assert tts_client.wav_duration_milliseconds(_wav_bytes(seconds=0.25)) == 250
+
+
+def test_wav_duration_handles_streaming_length_sentinel():
+    audio = bytearray(_wav_bytes(seconds=0.5))
+    struct.pack_into("<I", audio, 4, 0xFFFFFFFF)
+    data_offset = audio.index(b"data")
+    struct.pack_into("<I", audio, data_offset + 4, 0xFFFFFFFF)
+
+    assert tts_client.wav_duration_milliseconds(bytes(audio)) == 500
 
 
 @pytest.mark.parametrize(
@@ -61,24 +75,22 @@ async def test_ineligible_or_unsupported_client_is_always_text():
     )
 
 
-def test_voice_assignment_is_stable_by_gender_and_mbti():
-    assert select_voice_id(
-        gender="female",
-        mbti={"type": "ENFP"},
-        stable_key="agent-1",
-    ) == "Cherry"
-    assert select_voice_id(
-        gender="male",
-        mbti={"type": "INTJ"},
-        stable_key="agent-2",
-    ) == "Kai"
+def test_voice_assignment_uses_plus_gender_fallbacks():
+    assert SYSTEM_VOICE_BY_GENDER["female"] == "longanlingxin"
+    assert SYSTEM_VOICE_BY_GENDER["male"] == "longanlufeng"
 
 
 @pytest.mark.asyncio
 async def test_stylized_legacy_voice_is_migrated(monkeypatch):
     fake_db = SimpleNamespace(
-        query_raw=AsyncMock(return_value=[{"tts_voice_id": "Cherry"}]),
-        aiagent=SimpleNamespace(find_unique=AsyncMock()),
+        query_raw=AsyncMock(
+            side_effect=[
+                [{"tts_voice_id": "Momo", "gender": "female"}],
+                [],
+                [{"voice_id": "longanlingxin"}],
+            ],
+        ),
+        execute_raw=AsyncMock(return_value=1),
     )
     monkeypatch.setattr(voices, "db", fake_db)
     agent = SimpleNamespace(
@@ -88,22 +100,64 @@ async def test_stylized_legacy_voice_is_migrated(monkeypatch):
         ttsVoiceId="Momo",
     )
 
-    assert await voices.ensure_agent_voice(agent) == "Cherry"
-    assert agent.ttsVoiceId == "Cherry"
-    assert fake_db.query_raw.await_args.args[-3:] == (
-        "Cherry",
+    assert await voices.ensure_agent_voice(agent) == "longanlingxin"
+    assert agent.ttsVoiceId == "longanlingxin"
+    assert fake_db.execute_raw.await_args.args[-2:] == (
+        "longanlingxin",
         "agent-1",
-        "Momo",
     )
 
 
+@pytest.mark.asyncio
+async def test_agent_tts_settings_are_loaded_from_latest_db_row(monkeypatch):
+    fake_db = SimpleNamespace(
+        query_raw=AsyncMock(
+            side_effect=[
+                [
+                    {
+                        "tts_voice_id": "longanlingxin",
+                        "gender": "female",
+                        "tts_rate": 1.25,
+                        "tts_pitch": 0.9,
+                        "tts_volume": 63,
+                        "tts_seed": 12,
+                        "tts_instruction": "轻松自然",
+                        "tts_auto_emotion": False,
+                        "tts_emotion_scale": 0.7,
+                    }
+                ],
+                [{"exists": 1}],
+            ],
+        ),
+    )
+    monkeypatch.setattr(voices, "db", fake_db)
+
+    settings = await voices.get_agent_tts_settings("agent-1")
+
+    assert settings.voice_id == "longanlingxin"
+    assert settings.rate == 1.25
+    assert settings.pitch == 0.9
+    assert settings.volume == 63
+    assert settings.seed == 12
+    assert settings.instruction == "轻松自然"
+    assert settings.auto_emotion is False
+    assert settings.emotion_scale == 0.7
+
+
 def test_style_instruction_prioritizes_natural_conversation():
-    instruction = build_style_instruction("愤怒", 100)
-    assert "而不是喊叫" in instruction
-    assert "避免每个字等长等重" in instruction
-    assert "客服" in instruction
-    assert "完整保留原文" in instruction
-    assert "仍然克制" not in instruction
+    instruction = resolve_style_instruction(None)
+    assert "熟人聊天" in instruction
+    assert instruction_billable_characters(instruction) <= 100
+    assert (
+        decorate_text_with_emotion(
+            "别这样。",
+            "愤怒",
+            80,
+            enabled=True,
+            scale=1.0,
+        )
+        == "[angry]别这样。"
+    )
 
 
 @pytest.mark.asyncio
@@ -113,17 +167,23 @@ async def test_synthesize_uses_dedicated_key_and_returns_metering(monkeypatch):
 
     class FakeResponse:
         status_code = 200
-        headers = {"x-request-id": "tts-request-1"}
+        headers = {
+            "x-request-id": "tts-request-1",
+            "content-type": "text/event-stream",
+        }
         content = b""
-
-        def json(self):
-            return {
+        text = "data: " + json.dumps(
+            {
+                "request_id": "tts-request-1",
                 "output": {
+                    "finish_reason": "stop",
                     "audio": {
                         "url": "http://dashscope-test.oss-cn-beijing.aliyuncs.com/out.wav",
                     },
                 },
-            }
+                "usage": {"characters": 7},
+            },
+        )
 
     class FakeAudioResponse:
         status_code = 200
@@ -159,19 +219,29 @@ async def test_synthesize_uses_dedicated_key_and_returns_metering(monkeypatch):
     )
     result = await tts_client.synthesize_speech(
         text="你好",
-        voice_id="Serena",
+        voice_id="longanlingxin",
         instruction="自然表达",
+        rate=1.2,
+        pitch=0.9,
+        volume=60,
+        seed=42,
         client=FakeClient(),
     )
 
     assert captured["authorization"] == "Bearer tts-key"
     assert captured["payload"]["model"] == "qwen-tts-test"
-    assert captured["payload"]["input"]["optimize_instructions"] is True
+    assert captured["payload"]["input"]["voice"] == "longanlingxin"
+    assert captured["payload"]["input"]["rate"] == 1.2
+    assert captured["payload"]["input"]["pitch"] == 0.9
+    assert captured["payload"]["input"]["volume"] == 60
+    assert captured["payload"]["input"]["seed"] == 42
+    assert captured["payload"]["input"]["enable_aigc_tag"] is True
+    assert "optimize_instructions" not in captured["payload"]["input"]
     assert captured["audio_url"].startswith("https://dashscope-test.")
     assert result.duration_milliseconds == 500
     assert result.request_id == "tts-request-1"
-    assert result.billable_characters == 4
-    assert result.cost_cny == pytest.approx(4 * 0.8 / 10_000)
+    assert result.billable_characters == 7
+    assert result.cost_cny == pytest.approx(7 * 0.8 / 10_000)
 
 
 @pytest.mark.asyncio

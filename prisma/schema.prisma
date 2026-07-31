@@ -123,9 +123,16 @@ model AiAgent {
   gender                   String?                         @map("gender")
   avatarKey                String?                         @map("avatar_key")
   avatarUrl                String?                         @map("avatar_url")
-  // Stable shared TTS voice profile. Assigned once from gender + MBTI and
-  // never changed by per-turn emotion/style instructions.
+  // Stable TTS voice and per-agent synthesis controls. The admin editor writes
+  // these fields directly; the speech hot path reloads them before each call.
   ttsVoiceId               String?                         @map("tts_voice_id")
+  ttsRate                  Float                           @default(1.0) @map("tts_rate")
+  ttsPitch                 Float                           @default(1.0) @map("tts_pitch")
+  ttsVolume                Int                             @default(50) @map("tts_volume")
+  ttsSeed                  Int                             @default(0) @map("tts_seed")
+  ttsInstruction           String?                         @map("tts_instruction")
+  ttsAutoEmotion           Boolean                         @default(true) @map("tts_auto_emotion")
+  ttsEmotionScale          Float                           @default(1.0) @map("tts_emotion_scale")
   // 若该 agent 是从某个模板克隆而来, 记录源模板 agent id (用于「模板被使用次数」统计).
   sourceTemplateId         String?                         @map("source_template_id")
   // 仅模板 agent 使用: 上次「全量」知识记忆同步完成的水位 (knowledge_seed 行
@@ -308,9 +315,9 @@ model TtsUsage {
   id                   String   @id @default(uuid())
   userId               String   @map("user_id")
   agentId              String   @map("agent_id")
-  conversationId       String   @map("conversation_id")
+  conversationId       String?  @map("conversation_id")
   messageId            String?  @map("message_id")
-  source               String   // "chat" | "proactive"
+  source               String   // "chat" | "proactive" | "admin_preview"
   provider             String   @default("dashscope")
   model                String
   voiceId              String   @map("voice_id")
@@ -329,6 +336,26 @@ model TtsUsage {
   @@index([conversationId, createdAt])
   @@index([messageId])
   @@map("tts_usage")
+}
+
+model TtsVoiceProfile {
+  id                 String   @id @default(uuid())
+  displayName        String   @map("display_name")
+  provider           String   @default("dashscope")
+  model              String
+  voiceId            String   @map("voice_id")
+  gender             String
+  source             String   // "system" | "cloned"
+  enabled            Boolean  @default(true)
+  providerRequestId  String?  @map("provider_request_id")
+  consentConfirmedAt DateTime? @map("consent_confirmed_at")
+  consentConfirmedBy String?   @map("consent_confirmed_by")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@unique([provider, model, voiceId])
+  @@index([model, gender, enabled])
+  @@map("tts_voice_profiles")
 }
 
 model ChatLinkCard {

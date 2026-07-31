@@ -9,12 +9,15 @@ from app.services.chat_media import repo as media_repo
 from app.services.chat_media import storage as media_storage
 from app.services.chat_media.prompt import attachment_to_metadata
 from app.services.speech_output.client import SynthesizedSpeech, synthesize_speech
-from app.services.speech_output.style import build_style_instruction
+from app.services.speech_output.style import (
+    decorate_text_with_emotion,
+    resolve_style_instruction,
+)
 from app.services.speech_output.usage import (
     link_tts_usage_to_message,
     record_tts_usage,
 )
-from app.services.speech_output.voices import ensure_agent_voice
+from app.services.speech_output.voices import get_agent_tts_settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +50,24 @@ async def prepare_voice_output(
     spoken_text = " ".join(limit_emojis(transcript, max_keep=0).split())
     if not spoken_text:
         spoken_text = transcript
-    voice_id = await ensure_agent_voice(agent)
+    agent_id = str(getattr(agent, "id"))
+    tts_settings = await get_agent_tts_settings(agent_id)
+    spoken_text = decorate_text_with_emotion(
+        spoken_text,
+        emotion,
+        intensity,
+        enabled=tts_settings.auto_emotion,
+        scale=tts_settings.emotion_scale,
+    )
     speech = await synthesize_speech(
         text=spoken_text,
-        voice_id=voice_id,
-        instruction=build_style_instruction(emotion, intensity),
+        voice_id=tts_settings.voice_id,
+        instruction=resolve_style_instruction(tts_settings.instruction),
+        rate=tts_settings.rate,
+        pitch=tts_settings.pitch,
+        volume=tts_settings.volume,
+        seed=tts_settings.seed,
     )
-    agent_id = str(getattr(agent, "id"))
     # Meter the successful provider call before local persistence. DashScope has
     # already billed it even if disk/message delivery later fails.
     await record_tts_usage(

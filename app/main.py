@@ -174,6 +174,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-TTS-Duration-Milliseconds",
+        "X-TTS-Billable-Characters",
+        "X-TTS-Cost-CNY",
+    ],
 )
 
 # Register routers
@@ -223,6 +228,10 @@ from app.api.admin.game_configs import router as admin_game_configs_router
 from app.api.admin.game_points import router as admin_game_points_router
 from app.api.admin.offline_settings import router as admin_offline_settings_router
 from app.api.admin.achievement_settings import router as admin_achievement_settings_router
+from app.api.admin.tts import (
+    public_router as tts_enrollment_public_router,
+    router as admin_tts_router,
+)
 
 app.include_router(health_router)
 app.include_router(users_router)
@@ -270,3 +279,5 @@ app.include_router(admin_game_configs_router)
 app.include_router(admin_game_points_router)
 app.include_router(admin_offline_settings_router)
 app.include_router(admin_achievement_settings_router)
+app.include_router(admin_tts_router)
+app.include_router(tts_enrollment_public_router)
