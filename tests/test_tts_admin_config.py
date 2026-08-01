@@ -121,7 +121,7 @@ def test_signed_enrollment_url_expires_and_rejects_tampering(monkeypatch):
     monkeypatch.setattr(
         voice_enrollment.settings,
         "tts_voice_enrollment_public_base_url",
-        "https://api.example.com",
+        "https://banshengcomp.com/api",
     )
     url = voice_enrollment.signed_enrollment_url(
         storage_key="tts_enroll_sample.wav",
@@ -132,6 +132,9 @@ def test_signed_enrollment_url_expires_and_rejects_tampering(monkeypatch):
     expires = int(values["expires"])
     signature = values["signature"]
 
+    assert url.startswith(
+        "https://banshengcomp.com/api/admin-api/tts/enrollment-audio/",
+    )
     assert voice_enrollment.verify_signed_enrollment_url(
         "tts_enroll_sample.wav",
         expires,
@@ -141,6 +144,25 @@ def test_signed_enrollment_url_expires_and_rejects_tampering(monkeypatch):
         "tts_enroll_other.wav",
         expires,
         signature,
+    )
+
+
+def test_signed_enrollment_url_restores_public_https_behind_proxy(monkeypatch):
+    monkeypatch.setattr(voice_enrollment.settings, "jwt_secret", "x" * 40)
+    monkeypatch.setattr(voice_enrollment.settings, "app_env", "production")
+    monkeypatch.setattr(
+        voice_enrollment.settings,
+        "tts_voice_enrollment_public_base_url",
+        "",
+    )
+
+    url = voice_enrollment.signed_enrollment_url(
+        storage_key="tts_enroll_sample.wav",
+        request_base_url="http://api.example.com/",
+    )
+
+    assert url.startswith(
+        "https://api.example.com/admin-api/tts/enrollment-audio/",
     )
 
 

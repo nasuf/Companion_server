@@ -281,10 +281,13 @@ async def clone_voice_profile(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
-        audio_url = signed_enrollment_url(
-            storage_key=storage_key,
-            request_base_url=str(request.base_url),
-        )
+        try:
+            audio_url = signed_enrollment_url(
+                storage_key=storage_key,
+                request_base_url=str(request.base_url),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         try:
             result = await create_cloned_voice(
                 prefix=prefix,

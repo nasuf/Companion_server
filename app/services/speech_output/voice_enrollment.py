@@ -134,8 +134,10 @@ def signed_enrollment_url(
     ).rstrip("/")
     if not base.startswith(("https://", "http://")):
         raise ValueError("A public API base URL is required for voice enrollment")
-    if settings.is_production and not base.startswith("https://"):
-        raise ValueError("Voice enrollment requires an HTTPS public API base URL")
+    if settings.is_production and base.startswith("http://"):
+        # TLS commonly terminates at the reverse proxy, so FastAPI may observe
+        # the internal HTTP hop even though the public origin is HTTPS.
+        base = f"https://{base.removeprefix('http://')}"
     expires_at = int(time.time()) + _SIGNED_URL_TTL_SECONDS
     signature = _signature(storage_key, expires_at)
     return (
