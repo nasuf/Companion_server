@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import struct
+import wave
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -185,6 +187,38 @@ async def test_enrollment_audio_deletion_is_delayed_for_provider_refetch(
 
     sleep.assert_awaited_once()
     assert deleted == ["tts_enroll_sample.m4a"]
+
+
+@pytest.mark.asyncio
+async def test_enrollment_audio_is_normalized_to_canonical_wav(
+    monkeypatch,
+    tmp_path,
+):
+    pcm = struct.pack("<h", 5000) * (24_000 * 4)
+    monkeypatch.setattr(
+        voice_enrollment,
+        "_decode_enrollment_pcm",
+        AsyncMock(return_value=pcm),
+    )
+    monkeypatch.setattr(
+        voice_enrollment.media_storage,
+        "storage_path",
+        lambda key: tmp_path / key,
+    )
+
+    storage_key, mime = await voice_enrollment.save_enrollment_audio(
+        blob=b"source-m4a",
+        mime="audio/mp4",
+        filename="voice.m4a",
+    )
+
+    assert storage_key.endswith(".wav")
+    assert mime == "audio/wav"
+    with wave.open(str(tmp_path / storage_key), "rb") as audio:
+        assert audio.getframerate() == 24_000
+        assert audio.getnchannels() == 1
+        assert audio.getsampwidth() == 2
+        assert audio.getnframes() == 24_000 * 4
 
 
 @pytest.mark.asyncio

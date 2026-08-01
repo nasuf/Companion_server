@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import logging
 import mimetypes
 import uuid
 
@@ -46,6 +47,7 @@ router = APIRouter(
     dependencies=[Depends(require_admin_jwt)],
 )
 public_router = APIRouter(tags=["tts-enrollment"])
+logger = logging.getLogger(__name__)
 
 
 class AgentTtsPayload(BaseModel):
@@ -281,6 +283,11 @@ async def clone_voice_profile(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    logger.info(
+        "[TTS-VOICE] enrollment started gender=%s source_bytes=%s",
+        gender,
+        len(blob),
+    )
     try:
         try:
             audio_url = signed_enrollment_url(
@@ -297,6 +304,7 @@ async def clone_voice_profile(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except SpeechSynthesisError as exc:
+            logger.warning("[TTS-VOICE] provider enrollment failed: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         try:
             rows = await db.query_raw(
@@ -321,8 +329,13 @@ async def clone_voice_profile(
                 datetime.now(UTC),
                 str(admin.get("sub") or ""),
             )
+            logger.info(
+                "[TTS-VOICE] enrollment created voice_id=%s",
+                result.voice_id,
+            )
             return dict(rows[0])
         except Exception:
+            logger.exception("[TTS-VOICE] enrollment persistence failed")
             try:
                 await delete_cloned_voice(result.voice_id)
             except Exception:

@@ -3,19 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import io
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 import uuid
+import wave
 
 import httpx
 
 from app.config import settings
 from app.services.chat_media import storage as media_storage
 from app.services.speech_to_text.audio import (
-    analyze_audio_activity,
+    analyze_pcm16_activity,
     normalize_audio_mime,
 )
 from app.services.speech_output.client import SpeechSynthesisError
@@ -26,21 +28,7 @@ _PREFIX_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 _SIGNED_URL_TTL_SECONDS = 10 * 60
 _ORPHAN_RETENTION_SECONDS = 20 * 60
 _DELAYED_DELETE_SECONDS = 12 * 60
-_EXTENSION_BY_MIME = {
-    "audio/aac": ".aac",
-    "audio/amr": ".amr",
-    "audio/flac": ".flac",
-    "audio/mp4": ".m4a",
-    "audio/m4a": ".m4a",
-    "audio/x-m4a": ".m4a",
-    "audio/mpeg": ".mp3",
-    "audio/mp3": ".mp3",
-    "audio/ogg": ".ogg",
-    "audio/opus": ".opus",
-    "audio/wav": ".wav",
-    "audio/x-wav": ".wav",
-    "audio/webm": ".webm",
-}
+_ENROLLMENT_SAMPLE_RATE = 24_000
 
 
 @dataclass(frozen=True)
@@ -92,9 +80,13 @@ async def save_enrollment_audio(
         raise ValueError("Enrollment audio is empty")
     if len(blob) > settings.tts_voice_enrollment_max_bytes:
         raise ValueError("Enrollment audio is too large")
-    normalized_mime = normalize_audio_mime(mime, filename)
-    activity = await analyze_audio_activity(blob)
-    if activity is None or activity.total_milliseconds <= 0:
+    normalize_audio_mime(mime, filename)
+    pcm = await _decode_enrollment_pcm(blob)
+    activity = analyze_pcm16_activity(
+        pcm,
+        sample_rate=_ENROLLMENT_SAMPLE_RATE,
+    )
+    if activity.total_milliseconds <= 0:
         raise ValueError("Enrollment audio could not be decoded")
     duration_seconds = activity.total_milliseconds / 1000
     if duration_seconds < 3 or duration_seconds > 30.5:
@@ -102,14 +94,59 @@ async def save_enrollment_audio(
     if activity.active_milliseconds < 1_500:
         raise ValueError("Enrollment audio does not contain enough speech")
 
-    ext = _EXTENSION_BY_MIME.get(normalized_mime)
-    if ext is None:
-        raise ValueError("Unsupported enrollment audio type")
-    storage_key = f"tts_enroll_{uuid.uuid4().hex}{ext}"
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(_ENROLLMENT_SAMPLE_RATE)
+        output.writeframes(pcm)
+    normalized_blob = wav.getvalue()
+    storage_key = f"tts_enroll_{uuid.uuid4().hex}.wav"
     path = enrollment_storage_path(storage_key)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(blob)
-    return storage_key, normalized_mime
+    path.write_bytes(normalized_blob)
+    return storage_key, "audio/wav"
+
+
+async def _decode_enrollment_pcm(blob: bytes) -> bytes:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(_ENROLLMENT_SAMPLE_RATE),
+            "-f",
+            "s16le",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError("Voice enrollment requires ffmpeg") from exc
+    try:
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(blob),
+            timeout=max(15.0, settings.chat_voice_analysis_timeout_s),
+        )
+    except TimeoutError as exc:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.communicate()
+        raise ValueError("Enrollment audio decoding timed out") from exc
+    if process.returncode != 0 or not stdout:
+        raise ValueError("Enrollment audio could not be decoded")
+    return stdout
 
 
 def cleanup_expired_enrollment_audio() -> None:
@@ -204,8 +241,17 @@ async def create_cloned_voice(
             json=payload,
         )
         if response.status_code != 200:
+            code = f"http_{response.status_code}"
+            message = "request failed"
+            try:
+                error_body = response.json()
+                if isinstance(error_body, dict):
+                    code = str(error_body.get("code") or code)
+                    message = str(error_body.get("message") or message)
+            except ValueError:
+                pass
             raise SpeechSynthesisError(
-                f"DashScope voice enrollment failed: http_{response.status_code}"
+                f"DashScope voice enrollment {code}: {message[:200]}"
             )
         try:
             body = response.json()
@@ -220,8 +266,10 @@ async def create_cloned_voice(
             else None
         ) or (body.get("voice_id") if isinstance(body, dict) else None)
         if not voice_id:
+            code = str(body.get("code") or "missing_voice_id")
+            message = str(body.get("message") or "response did not include voice id")
             raise SpeechSynthesisError(
-                "DashScope voice enrollment returned no voice id"
+                f"DashScope voice enrollment {code}: {message[:200]}"
             )
         request_id = (
             response.headers.get("x-request-id")
