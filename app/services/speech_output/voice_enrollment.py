@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import re
@@ -23,7 +24,8 @@ from app.services.speech_output.voices import QWEN_AUDIO_TTS_MODEL
 
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 _SIGNED_URL_TTL_SECONDS = 10 * 60
-_ORPHAN_RETENTION_SECONDS = 60 * 60
+_ORPHAN_RETENTION_SECONDS = 20 * 60
+_DELAYED_DELETE_SECONDS = 12 * 60
 _EXTENSION_BY_MIME = {
     "audio/aac": ".aac",
     "audio/amr": ".amr",
@@ -151,6 +153,12 @@ def delete_enrollment_audio(storage_key: str) -> None:
         enrollment_storage_path(storage_key).unlink(missing_ok=True)
     except (OSError, ValueError):
         pass
+
+
+async def delete_enrollment_audio_later(storage_key: str) -> None:
+    """Keep the signed sample available for provider-side asynchronous fetches."""
+    await asyncio.sleep(_DELAYED_DELETE_SECONDS)
+    delete_enrollment_audio(storage_key)
 
 
 def normalize_voice_prefix(value: str) -> str:

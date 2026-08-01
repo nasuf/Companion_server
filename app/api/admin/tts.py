@@ -30,13 +30,14 @@ from app.services.speech_output.usage import record_tts_usage
 from app.services.speech_output.voice_enrollment import (
     create_cloned_voice,
     delete_cloned_voice,
-    delete_enrollment_audio,
+    delete_enrollment_audio_later,
     enrollment_storage_path,
     save_enrollment_audio,
     signed_enrollment_url,
     verify_signed_enrollment_url,
 )
 from app.services.speech_output.voices import QWEN_AUDIO_TTS_MODEL
+from app.services.runtime.tasks import fire_background
 
 
 router = APIRouter(
@@ -328,7 +329,7 @@ async def clone_voice_profile(
                 pass
             raise
     finally:
-        delete_enrollment_audio(storage_key)
+        fire_background(delete_enrollment_audio_later(storage_key))
 
 
 @router.get("/agents/{agent_id}")

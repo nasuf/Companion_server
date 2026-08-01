@@ -167,6 +167,27 @@ def test_signed_enrollment_url_restores_public_https_behind_proxy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_enrollment_audio_deletion_is_delayed_for_provider_refetch(
+    monkeypatch,
+):
+    deleted: list[str] = []
+    sleep = AsyncMock()
+    monkeypatch.setattr(voice_enrollment.asyncio, "sleep", sleep)
+    monkeypatch.setattr(
+        voice_enrollment,
+        "delete_enrollment_audio",
+        deleted.append,
+    )
+
+    await voice_enrollment.delete_enrollment_audio_later(
+        "tts_enroll_sample.m4a",
+    )
+
+    sleep.assert_awaited_once()
+    assert deleted == ["tts_enroll_sample.m4a"]
+
+
+@pytest.mark.asyncio
 async def test_agent_tts_update_persists_every_runtime_parameter(monkeypatch):
     fake_db = SimpleNamespace(
         query_raw=AsyncMock(
