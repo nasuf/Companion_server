@@ -300,7 +300,9 @@ async def get_play_stats(user_id: str) -> dict[str, int]:
     Play time prefers the client-reported ``duration_seconds`` and falls back to
     the started/ended span; a session that never started contributes nothing.
     "Today" is the local (UTC+8) calendar day, converted to the naive UTC values
-    the timestamp columns store.
+    the timestamp columns store. The bounds are bound as ISO strings and cast in
+    SQL: Prisma serialises parameters to JSON, so a ``datetime`` arrives as text
+    and ``timestamp >= text`` has no operator.
     """
     now_local = time_service.get_current_time().now
     start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -313,7 +315,8 @@ async def get_play_stats(user_id: str) -> dict[str, int]:
                 COUNT(*)::int AS total_rounds,
                 COALESCE(SUM(seconds), 0)::int AS total_seconds,
                 COALESCE(
-                    SUM(CASE WHEN played_at >= $2 AND played_at < $3
+                    SUM(CASE WHEN played_at >= $2::timestamp
+                              AND played_at <  $3::timestamp
                              THEN seconds ELSE 0 END),
                     0
                 )::int AS today_seconds
@@ -337,8 +340,8 @@ async def get_play_stats(user_id: str) -> dict[str, int]:
             """
         ),
         user_id,
-        day_start,
-        day_end,
+        day_start.isoformat(),
+        day_end.isoformat(),
     )
     row: dict[str, Any] = rows[0] if rows else {}
     return {

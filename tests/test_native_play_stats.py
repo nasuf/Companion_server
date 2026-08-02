@@ -87,6 +87,22 @@ async def test_play_stats_asks_for_the_local_day_window(monkeypatch):
 
     user_id, day_start, day_end = fake.args
     assert user_id == "user-1"
-    assert day_start == datetime(2026, 8, 1, 16, 0)
-    assert day_end == datetime(2026, 8, 2, 16, 0)
-    assert day_start.tzinfo is None and day_end.tzinfo is None
+    assert day_start == "2026-08-01T16:00:00"
+    assert day_end == "2026-08-02T16:00:00"
+
+
+@pytest.mark.asyncio
+async def test_play_stats_casts_the_day_bounds_in_sql(monkeypatch):
+    """Prisma serialises parameters to JSON, so the bounds reach Postgres as
+    text. Without an explicit cast the comparison raises
+    "operator does not exist: timestamp without time zone >= text".
+    """
+    fake = _CapturingDb({"total_rounds": 0, "total_seconds": 0, "today_seconds": 0})
+    monkeypatch.setattr(native, "db", fake)
+
+    await native.get_play_stats("user-1")
+
+    _, day_start, day_end = fake.args
+    assert isinstance(day_start, str) and isinstance(day_end, str)
+    assert "$2::timestamp" in fake.query
+    assert "$3::timestamp" in fake.query
