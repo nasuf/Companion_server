@@ -11,8 +11,11 @@ This is a separate spendable currency from the shop wallet (``user_wallets``):
   configured per game (:data:`game_point_rules`); settlement runs inside the
   same DB transaction that records the terminal game event, so retries can never
   double-count a match (guarded further by the ledger's partial unique index).
-* The level (皮革手套 / 尼龙手套 …) is derived purely from the current balance
-  against the admin-editable ``game_level_tiers`` ladder.
+* The level (皮革手套 / 尼龙手套 …) is derived from ``lifetime_earned`` — points
+  actually won from matches and milestones — against the admin-editable
+  ``game_level_tiers`` ladder. Daily grants, admin grants, losses, quits and
+  shop conversions all move the spendable balance only, so the level never
+  drops and can never be topped up.
 * Game points can be converted 1:1 into shop points (``user_wallets.point_balance``),
   but only the portion above 20 and never in reverse.
 """
