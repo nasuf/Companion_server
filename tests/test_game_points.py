@@ -7,13 +7,23 @@ import pytest
 from app.services import game_points
 
 
-def _tiers() -> list[dict[str, int]]:
+def _tier(order: int, stage: str, caption: str, colour: str, points: int) -> dict:
+    return {
+        "sort_order": order,
+        "stage_name": stage,
+        "stage_caption": caption,
+        "tier_name": colour,
+        "cumulative_points": points,
+    }
+
+
+def _tiers() -> list[dict]:
     # A trimmed ladder mirroring the seed shape.
     return [
-        {"sort_order": 1, "stage_name": "白手套", "tier_name": "1 阶", "cumulative_points": 0},
-        {"sort_order": 2, "stage_name": "白手套", "tier_name": "2 阶", "cumulative_points": 50},
-        {"sort_order": 3, "stage_name": "白手套", "tier_name": "3 阶", "cumulative_points": 150},
-        {"sort_order": 6, "stage_name": "蓝手套", "tier_name": "1 阶", "cumulative_points": 750},
+        _tier(1, "皮革手套", "初学起步", "白", 0),
+        _tier(2, "皮革手套", "初学起步", "绿", 50),
+        _tier(3, "皮革手套", "初学起步", "黄", 150),
+        _tier(6, "尼龙手套", "进阶提升", "白", 750),
     ]
 
 
@@ -105,8 +115,9 @@ def test_levels_endpoint_returns_the_ladder(api_client, auth_header):
     ladder = [
         {
             "sort_order": 1,
-            "stage_name": "白手套（新手）",
-            "tier_name": "白手套・1 阶",
+            "stage_name": "皮革手套",
+            "stage_caption": "初学起步",
+            "tier_name": "白",
             "upgrade_points": 0,
             "cumulative_points": 0,
         }

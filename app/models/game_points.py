@@ -7,7 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class GameLevelInfo(BaseModel):
     sort_order: int
+    # `皮革手套` — the glove itself.
     stage_name: str
+    # `初学起步` — the descriptive line clients show under the name.
+    stage_caption: str = ""
+    # `白` — the colour that ranks this step inside the stage.
     tier_name: str
     upgrade_points: int
     cumulative_points: int
@@ -48,6 +52,7 @@ class GameLevelTierPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     stage_name: str = Field(min_length=1, max_length=40)
+    stage_caption: str = Field(default="", max_length=40)
     tier_name: str = Field(min_length=1, max_length=60)
     upgrade_points: int = Field(ge=0)
     cumulative_points: int = Field(ge=0)

@@ -11,7 +11,7 @@ This is a separate spendable currency from the shop wallet (``user_wallets``):
   configured per game (:data:`game_point_rules`); settlement runs inside the
   same DB transaction that records the terminal game event, so retries can never
   double-count a match (guarded further by the ledger's partial unique index).
-* The level (白手套 / 蓝手套 …) is derived purely from the current balance
+* The level (皮革手套 / 尼龙手套 …) is derived purely from the current balance
   against the admin-editable ``game_level_tiers`` ladder.
 * Game points can be converted 1:1 into shop points (``user_wallets.point_balance``),
   but only the portion above 20 and never in reverse.
@@ -679,7 +679,8 @@ async def list_admin_ledger(
 async def list_level_tiers() -> list[dict[str, Any]]:
     rows = await db.query_raw(
         """
-        SELECT sort_order, stage_name, tier_name, upgrade_points, cumulative_points
+        SELECT sort_order, stage_name, stage_caption, tier_name,
+               upgrade_points, cumulative_points
         FROM game_level_tiers
         ORDER BY sort_order ASC
         """
@@ -688,6 +689,7 @@ async def list_level_tiers() -> list[dict[str, Any]]:
         {
             "sort_order": int(_field(row, "sort_order", 0) or 0),
             "stage_name": str(_field(row, "stage_name", "") or ""),
+            "stage_caption": str(_field(row, "stage_caption", "") or ""),
             "tier_name": str(_field(row, "tier_name", "") or ""),
             "upgrade_points": int(_field(row, "upgrade_points", 0) or 0),
             "cumulative_points": int(_field(row, "cumulative_points", 0) or 0),
@@ -702,6 +704,7 @@ async def replace_level_tiers(tiers: list[dict[str, Any]]) -> list[dict[str, Any
     normalized: list[dict[str, Any]] = []
     for index, tier in enumerate(tiers, start=1):
         stage_name = str(tier.get("stage_name") or "").strip()
+        stage_caption = str(tier.get("stage_caption") or "").strip()
         tier_name = str(tier.get("tier_name") or "").strip()
         if not stage_name or not tier_name:
             raise ValueError("invalid_tier")
@@ -713,6 +716,7 @@ async def replace_level_tiers(tiers: list[dict[str, Any]]) -> list[dict[str, Any
             {
                 "sort_order": index,
                 "stage_name": stage_name,
+                "stage_caption": stage_caption,
                 "tier_name": tier_name,
                 "upgrade_points": upgrade_points,
                 "cumulative_points": cumulative_points,
@@ -730,11 +734,13 @@ async def replace_level_tiers(tiers: list[dict[str, Any]]) -> list[dict[str, Any
             await tx.execute_raw(
                 """
                 INSERT INTO game_level_tiers
-                    (sort_order, stage_name, tier_name, upgrade_points, cumulative_points)
-                VALUES ($1, $2, $3, $4, $5)
+                    (sort_order, stage_name, stage_caption, tier_name,
+                     upgrade_points, cumulative_points)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 """,
                 tier["sort_order"],
                 tier["stage_name"],
+                tier["stage_caption"],
                 tier["tier_name"],
                 tier["upgrade_points"],
                 tier["cumulative_points"],
