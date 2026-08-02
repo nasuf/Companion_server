@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from app.services import game_points
@@ -97,3 +99,27 @@ def test_validate_rules_milestone_requires_ascending_tiles():
 def test_validate_rules_rejects_unknown_type():
     with pytest.raises(ValueError):
         game_points._validate_rules({"type": "mystery"})
+
+
+def test_levels_endpoint_returns_the_ladder(api_client, auth_header):
+    ladder = [
+        {
+            "sort_order": 1,
+            "stage_name": "白手套（新手）",
+            "tier_name": "白手套・1 阶",
+            "upgrade_points": 0,
+            "cumulative_points": 0,
+        }
+    ]
+    with patch(
+        "app.api.public.game_points.game_points.list_level_tiers",
+        new_callable=AsyncMock,
+        return_value=ladder,
+    ):
+        response = api_client.get("/game-wallet/levels", headers=auth_header("u1"))
+    assert response.status_code == 200
+    assert response.json() == ladder
+
+
+def test_levels_endpoint_requires_a_signed_in_user(api_client):
+    assert api_client.get("/game-wallet/levels").status_code in (401, 403)
