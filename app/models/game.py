@@ -78,6 +78,15 @@ class NativeGameEventRequest(BaseModel):
     client_event_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
+class NativePlayStatsResponse(BaseModel):
+    """Lifetime counters for the game hub header."""
+
+    # Every native session the user started, finished or not.
+    total_rounds: int
+    total_seconds: int
+    today_seconds: int
+
+
 class NativeSessionResponse(BaseModel):
     id: str
     provider: Literal["native"] = "native"

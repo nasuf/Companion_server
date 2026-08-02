@@ -17,6 +17,7 @@ from app.models.game import (
 )
 from app.services.games import session_support
 from app.services.games import balance
+from app.services.schedule_domain import time_service
 from app.services import game_points
 from app.services.memory.storage import repo as memory_repo
 from app.services.offline.memory_hooks import remember_shared_game_experience
@@ -289,6 +290,62 @@ async def list_sessions(
             limit,
         )
     return [_as_native_session(session_support._row_to_session(row)) for row in rows]
+
+
+async def get_play_stats(user_id: str) -> dict[str, int]:
+    """Lifetime counters for the game hub header.
+
+    Counts every native session the user started, finished or not — the hub
+    frames it as "rounds we spent together", so an abandoned match still counts.
+    Play time prefers the client-reported ``duration_seconds`` and falls back to
+    the started/ended span; a session that never started contributes nothing.
+    "Today" is the local (UTC+8) calendar day, converted to the naive UTC values
+    the timestamp columns store.
+    """
+    now_local = time_service.get_current_time().now
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = start_local.astimezone(UTC).replace(tzinfo=None)
+    day_end = (start_local + timedelta(days=1)).astimezone(UTC).replace(tzinfo=None)
+    rows = await db.query_raw(
+        _with_supported_games(
+            """
+            SELECT
+                COUNT(*)::int AS total_rounds,
+                COALESCE(SUM(seconds), 0)::int AS total_seconds,
+                COALESCE(
+                    SUM(CASE WHEN played_at >= $2 AND played_at < $3
+                             THEN seconds ELSE 0 END),
+                    0
+                )::int AS today_seconds
+            FROM (
+                SELECT
+                    CASE
+                        WHEN duration_seconds IS NOT NULL
+                            THEN GREATEST(duration_seconds, 0)
+                        WHEN started_at IS NOT NULL AND ended_at IS NOT NULL
+                            THEN GREATEST(
+                                EXTRACT(EPOCH FROM (ended_at - started_at))::int, 0
+                            )
+                        ELSE 0
+                    END AS seconds,
+                    COALESCE(started_at, created_at) AS played_at
+                FROM game_sessions
+                WHERE user_id = $1
+                  AND provider = 'native'
+                  AND game_key IN ({supported_game_keys})
+            ) played
+            """
+        ),
+        user_id,
+        day_start,
+        day_end,
+    )
+    row: dict[str, Any] = rows[0] if rows else {}
+    return {
+        "total_rounds": int(row.get("total_rounds") or 0),
+        "total_seconds": int(row.get("total_seconds") or 0),
+        "today_seconds": int(row.get("today_seconds") or 0),
+    }
 
 
 async def get_latest_session_summary(

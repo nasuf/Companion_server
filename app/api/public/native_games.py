@@ -8,6 +8,7 @@ from app.models.game import (
     NativeGameEventRecord,
     NativeGameEventRequest,
     NativeGameEventResponse,
+    NativePlayStatsResponse,
     NativeSessionResponse,
 )
 from app.services.games import balance, native
@@ -64,6 +65,16 @@ async def list_native_game_sessions(
         game_key=game_key,
         limit=limit,
     )
+
+
+@router.get("/stats", response_model=NativePlayStatsResponse)
+async def native_game_play_stats(user: dict = Depends(require_user)):
+    """Aggregate counters for the hub header.
+
+    Computed in SQL rather than by counting a page of sessions, which capped
+    the totals at the page size.
+    """
+    return await native.get_play_stats(user["sub"])
 
 
 @router.get("/sessions/latest")
