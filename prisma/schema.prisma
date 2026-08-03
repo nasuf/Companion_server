@@ -460,6 +460,7 @@ model NativeGameConfig {
   maximumStep        Int                       @default(5) @map("maximum_step")
   algorithmOverrides Json                      @default("{}") @map("algorithm_overrides")
   minResponseMs      Int                       @default(900) @map("min_response_ms")
+  maxResponseMs      Int                       @default(1600) @map("max_response_ms")
   enabled            Boolean                   @default(true)
   version            Int                       @default(1)
   createdAt          DateTime                  @default(now()) @map("created_at")
