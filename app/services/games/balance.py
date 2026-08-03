@@ -29,6 +29,13 @@ GAME_TITLES: dict[str, str] = {
 
 COOPERATIVE_GAMES = {"match3", "minesweeper", "number_merge"}
 
+# Minimum wall-clock time (ms) an AI move should take so the opponent reads as
+# human rather than instant. Delivered inside engine_config; the client pads
+# the remainder if the engine already thought for less. tetris_duel is exempt
+# (it paces via agent_move_ms), but the field is still emitted harmlessly.
+DEFAULT_MIN_RESPONSE_MS = 900
+MIN_RESPONSE_MS_RANGE = (0, 8000)
+
 
 @dataclass(frozen=True)
 class GameBalanceConfig:
@@ -42,6 +49,7 @@ class GameBalanceConfig:
     minimum_games: int
     maximum_step: int
     algorithm_overrides: dict[str, Any]
+    min_response_ms: int
     enabled: bool
     version: int
 
@@ -56,11 +64,12 @@ class GameBalanceConfig:
             "target_user_rate": self.target_user_rate,
             "adjustment_window": self.adjustment_window,
             "minimum_games": self.minimum_games,
-            "maximum_step": self.maximum_step,
+            "min_response_ms": self.min_response_ms,
             "engine_config": build_engine_config(
                 self.game_key,
                 effective_strength,
                 self.algorithm_overrides,
+                self.min_response_ms,
             ),
         }
 
@@ -78,6 +87,7 @@ def _default_config(game_key: str) -> GameBalanceConfig:
         minimum_games=3,
         maximum_step=5,
         algorithm_overrides={},
+        min_response_ms=DEFAULT_MIN_RESPONSE_MS,
         enabled=True,
         version=1,
     )
@@ -121,6 +131,9 @@ def _row_config(row: Any, game_key: str) -> GameBalanceConfig:
         minimum_games=_int_field(row.get("minimum_games"), 3),
         maximum_step=_int_field(row.get("maximum_step"), 5),
         algorithm_overrides=_load_json(row.get("algorithm_overrides")),
+        min_response_ms=_int_field(
+            row.get("min_response_ms"), DEFAULT_MIN_RESPONSE_MS
+        ),
         enabled=_bool_field(row.get("enabled"), True),
         version=_int_field(row.get("version"), 1),
     )
@@ -134,7 +147,8 @@ async def get_config(game_key: str, *, database: Any | None = None) -> GameBalan
         """
         SELECT game_key, mode, base_strength, min_strength, max_strength,
                target_user_rate, adjustment_window, minimum_games,
-               maximum_step, algorithm_overrides, enabled, version
+               maximum_step, algorithm_overrides, min_response_ms,
+               enabled, version
         FROM native_game_configs
         WHERE game_key = $1
         LIMIT 1
@@ -188,7 +202,8 @@ async def _resolve_for_session(
         """
         SELECT c.mode, c.base_strength, c.min_strength, c.max_strength,
                c.target_user_rate, c.adjustment_window, c.minimum_games,
-               c.maximum_step, c.algorithm_overrides, c.version,
+               c.maximum_step, c.algorithm_overrides, c.min_response_ms,
+               c.version,
                s.effective_strength AS pair_strength,
                s.completed_games AS pair_completed
         FROM native_game_configs c
@@ -400,6 +415,7 @@ def build_engine_config(
     game_key: str,
     strength: int,
     overrides: dict[str, Any] | None = None,
+    min_response_ms: int = DEFAULT_MIN_RESPONSE_MS,
 ) -> dict[str, Any]:
     s = max(0, min(100, int(strength)))
     if game_key == "gomoku":
@@ -488,6 +504,9 @@ def build_engine_config(
         ):
             value = int(value)
         config[key] = value
+    # First-class pacing knob (not an algorithm override): set last so nothing
+    # in `overrides` can touch it. The client reads this from engine_config.
+    config["min_response_ms"] = max(0, int(min_response_ms))
     config["strength"] = s
     return config
 
@@ -508,12 +527,14 @@ def config_payload(config: GameBalanceConfig) -> dict[str, Any]:
         "minimum_games": config.minimum_games,
         "maximum_step": config.maximum_step,
         "algorithm_overrides": config.algorithm_overrides,
+        "min_response_ms": config.min_response_ms,
         "enabled": config.enabled,
         "version": config.version,
         "preview_engine_config": build_engine_config(
             config.game_key,
             config.base_strength,
             config.algorithm_overrides,
+            config.min_response_ms,
         ),
     }
 
@@ -563,7 +584,8 @@ async def list_admin_configs() -> list[dict[str, Any]]:
             """
             SELECT game_key, mode, base_strength, min_strength, max_strength,
                    target_user_rate, adjustment_window, minimum_games,
-                   maximum_step, algorithm_overrides, enabled, version
+                   maximum_step, algorithm_overrides, min_response_ms,
+                   enabled, version
             FROM native_game_configs
             """
         ),
@@ -663,9 +685,10 @@ async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, An
             INSERT INTO native_game_configs (
                 game_key, mode, base_strength, min_strength, max_strength,
                 target_user_rate, adjustment_window, minimum_games,
-                maximum_step, algorithm_overrides, version, created_at, updated_at
+                maximum_step, algorithm_overrides, min_response_ms, version,
+                created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11,
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12,
                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
             ON CONFLICT (game_key) DO UPDATE SET
@@ -678,6 +701,7 @@ async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, An
                 minimum_games = EXCLUDED.minimum_games,
                 maximum_step = EXCLUDED.maximum_step,
                 algorithm_overrides = EXCLUDED.algorithm_overrides,
+                min_response_ms = EXCLUDED.min_response_ms,
                 version = EXCLUDED.version,
                 updated_at = CURRENT_TIMESTAMP
             """,
@@ -691,6 +715,7 @@ async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, An
             payload["minimum_games"],
             payload["maximum_step"],
             json.dumps(payload.get("algorithm_overrides") or {}, ensure_ascii=False),
+            _int_field(payload.get("min_response_ms"), DEFAULT_MIN_RESPONSE_MS),
             version,
         )
     return await get_admin_config(game_key)

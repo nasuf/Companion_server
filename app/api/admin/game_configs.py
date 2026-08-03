@@ -28,6 +28,9 @@ class GameConfigPayload(BaseModel):
     minimum_games: int = Field(ge=1, le=20)
     maximum_step: int = Field(ge=1, le=15)
     algorithm_overrides: dict[str, Any] = Field(default_factory=dict)
+    # Minimum wall-clock time (ms) an AI move must take so the opponent feels
+    # human rather than instant. Default keeps older restored versions valid.
+    min_response_ms: int = Field(default=900, ge=0, le=8000)
 
     @model_validator(mode="after")
     def validate_strength_range(self) -> GameConfigPayload:
