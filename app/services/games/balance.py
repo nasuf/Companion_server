@@ -37,6 +37,17 @@ DEFAULT_MIN_RESPONSE_MS = 900
 DEFAULT_MAX_RESPONSE_MS = 1600
 MIN_RESPONSE_MS_RANGE = (0, 8000)
 
+# "你的回合" turn banner timing (ms), per-game and admin-tunable. Delivered in
+# engine_config; the client derives the in/hold/out phases from these. Defaults
+# match the previously hard-coded 200/600/200 cadence so untouched games are
+# visually identical.
+DEFAULT_BANNER_IN_MS = 200
+DEFAULT_BANNER_HOLD_MS = 600
+DEFAULT_BANNER_OUT_MS = 200
+BANNER_IN_MS_RANGE = (0, 3000)
+BANNER_HOLD_MS_RANGE = (0, 10000)
+BANNER_OUT_MS_RANGE = (0, 3000)
+
 
 @dataclass(frozen=True)
 class GameBalanceConfig:
@@ -52,6 +63,9 @@ class GameBalanceConfig:
     algorithm_overrides: dict[str, Any]
     min_response_ms: int
     max_response_ms: int
+    banner_in_ms: int
+    banner_hold_ms: int
+    banner_out_ms: int
     enabled: bool
     version: int
 
@@ -68,12 +82,18 @@ class GameBalanceConfig:
             "minimum_games": self.minimum_games,
             "min_response_ms": self.min_response_ms,
             "max_response_ms": self.max_response_ms,
+            "banner_in_ms": self.banner_in_ms,
+            "banner_hold_ms": self.banner_hold_ms,
+            "banner_out_ms": self.banner_out_ms,
             "engine_config": build_engine_config(
                 self.game_key,
                 effective_strength,
                 self.algorithm_overrides,
                 self.min_response_ms,
                 self.max_response_ms,
+                self.banner_in_ms,
+                self.banner_hold_ms,
+                self.banner_out_ms,
             ),
         }
 
@@ -93,6 +113,9 @@ def _default_config(game_key: str) -> GameBalanceConfig:
         algorithm_overrides={},
         min_response_ms=DEFAULT_MIN_RESPONSE_MS,
         max_response_ms=DEFAULT_MAX_RESPONSE_MS,
+        banner_in_ms=DEFAULT_BANNER_IN_MS,
+        banner_hold_ms=DEFAULT_BANNER_HOLD_MS,
+        banner_out_ms=DEFAULT_BANNER_OUT_MS,
         enabled=True,
         version=1,
     )
@@ -142,6 +165,13 @@ def _row_config(row: Any, game_key: str) -> GameBalanceConfig:
         max_response_ms=_int_field(
             row.get("max_response_ms"), DEFAULT_MAX_RESPONSE_MS
         ),
+        banner_in_ms=_int_field(row.get("banner_in_ms"), DEFAULT_BANNER_IN_MS),
+        banner_hold_ms=_int_field(
+            row.get("banner_hold_ms"), DEFAULT_BANNER_HOLD_MS
+        ),
+        banner_out_ms=_int_field(
+            row.get("banner_out_ms"), DEFAULT_BANNER_OUT_MS
+        ),
         enabled=_bool_field(row.get("enabled"), True),
         version=_int_field(row.get("version"), 1),
     )
@@ -156,7 +186,8 @@ async def get_config(game_key: str, *, database: Any | None = None) -> GameBalan
         SELECT game_key, mode, base_strength, min_strength, max_strength,
                target_user_rate, adjustment_window, minimum_games,
                maximum_step, algorithm_overrides, min_response_ms,
-               max_response_ms, enabled, version
+               max_response_ms, banner_in_ms, banner_hold_ms, banner_out_ms,
+               enabled, version
         FROM native_game_configs
         WHERE game_key = $1
         LIMIT 1
@@ -425,6 +456,9 @@ def build_engine_config(
     overrides: dict[str, Any] | None = None,
     min_response_ms: int = DEFAULT_MIN_RESPONSE_MS,
     max_response_ms: int = DEFAULT_MAX_RESPONSE_MS,
+    banner_in_ms: int = DEFAULT_BANNER_IN_MS,
+    banner_hold_ms: int = DEFAULT_BANNER_HOLD_MS,
+    banner_out_ms: int = DEFAULT_BANNER_OUT_MS,
 ) -> dict[str, Any]:
     s = max(0, min(100, int(strength)))
     if game_key == "gomoku":
@@ -520,6 +554,12 @@ def build_engine_config(
     hi = max(lo, int(max_response_ms))
     config["min_response_ms"] = lo
     config["max_response_ms"] = hi
+    # "你的回合" banner timing: same first-class treatment as the pacing range,
+    # set last so overrides can't touch it. The client reads all three and
+    # derives the in/hold/out phases per turn.
+    config["banner_in_ms"] = max(0, int(banner_in_ms))
+    config["banner_hold_ms"] = max(0, int(banner_hold_ms))
+    config["banner_out_ms"] = max(0, int(banner_out_ms))
     config["strength"] = s
     return config
 
@@ -542,6 +582,9 @@ def config_payload(config: GameBalanceConfig) -> dict[str, Any]:
         "algorithm_overrides": config.algorithm_overrides,
         "min_response_ms": config.min_response_ms,
         "max_response_ms": config.max_response_ms,
+        "banner_in_ms": config.banner_in_ms,
+        "banner_hold_ms": config.banner_hold_ms,
+        "banner_out_ms": config.banner_out_ms,
         "enabled": config.enabled,
         "version": config.version,
         "preview_engine_config": build_engine_config(
@@ -550,6 +593,9 @@ def config_payload(config: GameBalanceConfig) -> dict[str, Any]:
             config.algorithm_overrides,
             config.min_response_ms,
             config.max_response_ms,
+            config.banner_in_ms,
+            config.banner_hold_ms,
+            config.banner_out_ms,
         ),
     }
 
@@ -600,7 +646,8 @@ async def list_admin_configs() -> list[dict[str, Any]]:
             SELECT game_key, mode, base_strength, min_strength, max_strength,
                    target_user_rate, adjustment_window, minimum_games,
                    maximum_step, algorithm_overrides, min_response_ms,
-                   max_response_ms, enabled, version
+                   max_response_ms, banner_in_ms, banner_hold_ms,
+                   banner_out_ms, enabled, version
             FROM native_game_configs
             """
         ),
@@ -701,9 +748,11 @@ async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, An
                 game_key, mode, base_strength, min_strength, max_strength,
                 target_user_rate, adjustment_window, minimum_games,
                 maximum_step, algorithm_overrides, min_response_ms,
-                max_response_ms, version, created_at, updated_at
+                max_response_ms, banner_in_ms, banner_hold_ms, banner_out_ms,
+                version, created_at, updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13,
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12,
+                $13, $14, $15, $16,
                 CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
             ON CONFLICT (game_key) DO UPDATE SET
@@ -718,6 +767,9 @@ async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, An
                 algorithm_overrides = EXCLUDED.algorithm_overrides,
                 min_response_ms = EXCLUDED.min_response_ms,
                 max_response_ms = EXCLUDED.max_response_ms,
+                banner_in_ms = EXCLUDED.banner_in_ms,
+                banner_hold_ms = EXCLUDED.banner_hold_ms,
+                banner_out_ms = EXCLUDED.banner_out_ms,
                 version = EXCLUDED.version,
                 updated_at = CURRENT_TIMESTAMP
             """,
@@ -733,6 +785,9 @@ async def publish_config(game_key: str, payload: dict[str, Any]) -> dict[str, An
             json.dumps(payload.get("algorithm_overrides") or {}, ensure_ascii=False),
             _int_field(payload.get("min_response_ms"), DEFAULT_MIN_RESPONSE_MS),
             _int_field(payload.get("max_response_ms"), DEFAULT_MAX_RESPONSE_MS),
+            _int_field(payload.get("banner_in_ms"), DEFAULT_BANNER_IN_MS),
+            _int_field(payload.get("banner_hold_ms"), DEFAULT_BANNER_HOLD_MS),
+            _int_field(payload.get("banner_out_ms"), DEFAULT_BANNER_OUT_MS),
             version,
         )
     return await get_admin_config(game_key)

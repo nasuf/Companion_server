@@ -33,6 +33,11 @@ class GameConfigPayload(BaseModel):
     # Defaults keep older restored versions valid.
     min_response_ms: int = Field(default=900, ge=0, le=8000)
     max_response_ms: int = Field(default=1600, ge=0, le=8000)
+    # "你的回合" turn banner timing (ms): pop-in / hold / fade-out phases.
+    # Defaults match the previously hard-coded cadence.
+    banner_in_ms: int = Field(default=200, ge=0, le=3000)
+    banner_hold_ms: int = Field(default=600, ge=0, le=10000)
+    banner_out_ms: int = Field(default=200, ge=0, le=3000)
 
     @model_validator(mode="after")
     def validate_strength_range(self) -> GameConfigPayload:
