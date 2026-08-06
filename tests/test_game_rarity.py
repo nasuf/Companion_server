@@ -102,6 +102,42 @@ class TestRecords:
 
 
 @pytest.mark.asyncio
+class TestQueryShape:
+    """这个查询跑在每局结束的热路径上, 而 game_sessions 没有 workspace_id 索引."""
+
+    async def test_scan_is_bounded(self, monkeypatch):
+        captured: list = []
+
+        async def fake(sql, *args):
+            captured.append(sql)
+            return []
+
+        monkeypatch.setattr(R.db, "query_raw", fake)
+        await R.compute_rarity(
+            workspace_id="ws1", game_key="go", game_title="围棋", session_id="s",
+            user_outcome="win", action_count=10, duration_seconds=60,
+        )
+        assert "LIMIT" in captured[0], "无上限的扫表会随游戏量线性变慢"
+
+    async def test_excludes_the_current_session(self, monkeypatch):
+        """把本局算进历史会让"首次"永远为假、连胜多算一局."""
+        captured: list = []
+
+        async def fake(sql, *args):
+            captured.append((sql, args))
+            return []
+
+        monkeypatch.setattr(R.db, "query_raw", fake)
+        await R.compute_rarity(
+            workspace_id="ws1", game_key="go", game_title="围棋", session_id="s-now",
+            user_outcome="win", action_count=10, duration_seconds=60,
+        )
+        sql, args = captured[0]
+        assert "id <> $3" in sql
+        assert args[2] == "s-now"
+
+
+@pytest.mark.asyncio
 class TestRobustness:
     async def test_ordinary_game_has_no_notes(self, monkeypatch):
         """绝大多数局就该是"没什么特别的" —— 否则又变成模板量产."""

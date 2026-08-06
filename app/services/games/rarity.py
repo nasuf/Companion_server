@@ -102,6 +102,16 @@ async def compute_rarity(
                   AND game_key = $2
                   AND id <> $3
                   AND status = 'settled'
+                -- 只看最近这些局。这个查询跑在**每局结束的热路径**上, 而
+                -- game_sessions 上没有 workspace_id 索引 (现有索引是 user_id /
+                -- agent_id / conversation_id), 走的是扫表。当前数据量下 60ms 左右,
+                -- 瓶颈还在网络往返, 但表会随游戏量线性增长。
+                --
+                -- 限行不影响判定: 连胜最多看几局、首次/首胜只要有一条就能否定,
+                -- "步数最少/时长最长"取近 200 局的极值与全历史极值实际差别极小 ——
+                -- 而且"这半年最快的一局"本来就比"有史以来"更接近人的感受。
+                ORDER BY COALESCE(ended_at, created_at) DESC
+                LIMIT 200
             ) prior
             ORDER BY ended_at DESC
             """,
