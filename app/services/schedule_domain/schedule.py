@@ -10,7 +10,7 @@ import json
 import logging
 import random
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -946,6 +946,35 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
     # cache:sum:{agent_id}:{user_id}:{...} 精确 key 格式.
     chat_summary_text = "（无聊天回顾）"
 
+    # 今天一起玩了什么。并进这段而不是单开一个 job: 这里本来就要调 LLM 写自我回顾,
+    # 加一段素材是零成本; 而且"今天陪他下了三盘棋"和"今天下午在做皮具"出现在同一段
+    # 回顾里, 才是一个人回想一天的方式, 不是游戏单独一份台账。
+    #
+    # 跟逐局记忆是两个维度: 单局不值得记 (games/native.py 已收紧到只留稀有的),
+    # 但"今天陪他玩了三盘"值得 —— 那是陪伴的密度。
+    games_text = ""
+    try:
+        from app.services.games.daily_digest import collect_today_games, render_digest
+        from app.services.workspace import get_active_workspace
+
+        workspace = await get_active_workspace(agent_id=agent_id)
+        if workspace is not None:
+            # 这个 job 在凌晨 4:00 跑, 回顾的是**前一天**。取"今天 00:00 起"只会
+            # 覆盖 0-4 点那四个小时, 几乎必然是空的。
+            #
+            # 注意上面的 adjustments / proactive 用的正是 today_start 口径 —— 那是
+            # 既有的不一致 (prompt 写「昨日」, 数据取「今日凌晨至今」), 不在本次
+            # 改动范围内, 但游戏这段不跟着错。
+            day_start = _local_now().replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) - timedelta(days=1)
+            digest = await collect_today_games(
+                workspace_id=workspace.id, local_day_start=day_start,
+            )
+            games_text = render_digest(digest)
+    except Exception as e:
+        logger.warning(f"Failed to collect today's games for review: {e}")
+
     # Spec Part 1 §2.2: Step 1 — 先生成 200 字自然语言总结。
     from app.services.llm.models import invoke_text
     summary_prompt = (await get_prompt_text("schedule.daily_summary")).format(
@@ -954,6 +983,7 @@ async def review_daily_schedule(agent_id: str, user_id: str, agent_name: str = "
         adjustments_text=adjustments_text or "（无调整）",
         proactive_text=proactive_text or "（无主动消息）",
         chat_summary_text=chat_summary_text,
+        games_text=games_text or "（今天没一起玩游戏）",
     )
     try:
         summary_text = (await invoke_text(get_utility_model(), summary_prompt)).strip()
