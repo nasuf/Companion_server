@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.db import db
+from app.services.games.substance import action_floor
 
 
 @dataclass
@@ -102,6 +103,14 @@ async def compute_rarity(
                   AND game_key = $2
                   AND id <> $3
                   AND status = 'settled'
+                  -- 只跟"真的玩起来过"的局比。中途退出也判负 → 也是 settled,
+                  -- 实测象棋的 settled 步数中位数是 0。不筛的话比较池全是 2 秒的
+                  -- 退出局, 于是一局 18 秒会被评成"这是玩得最久的一局"(生产实例)。
+                  AND COALESCE(
+                        (result->'process'->game_key->>'action_count')::int,
+                        (result->'gomoku'->>'move_count')::int,
+                        0
+                      ) >= $4
                 -- 只看最近这些局。这个查询跑在**每局结束的热路径**上, 而
                 -- game_sessions 上没有 workspace_id 索引 (现有索引是 user_id /
                 -- agent_id / conversation_id), 走的是扫表。当前数据量下 60ms 左右,
@@ -115,7 +124,7 @@ async def compute_rarity(
             ) prior
             ORDER BY ended_at DESC
             """,
-            workspace_id, game_key, session_id,
+            workspace_id, game_key, session_id, action_floor(game_key),
         )
     except Exception:
         return rarity

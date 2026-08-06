@@ -481,6 +481,9 @@ def test_minesweeper_terminal_reply_is_cooperative_not_competitive():
         **native._empty_result("normal", definition),
         "user_outcome": "lose",
     }
+    # 这条测的是"真扫过一局"的措辞。_empty_result 的 action_count 是 0, 而 0 步的局
+    # 现在走"还没真正展开"分支 —— 中途退出也判负, 那些局同样落 settled。
+    result["process"]["minesweeper"]["action_count"] = 6
 
     assert "下次" in native._generic_finish_reply(session, definition, result)
     assert "我先赢" not in native._generic_finish_reply(session, definition, result)
@@ -570,6 +573,8 @@ def test_number_merge_finish_reply_uses_shared_progress():
         "user_outcome": "win",
         "final_payload": {"max_tile": 2048},
     }
+    # 合到 2048 必然滑过很多步; _empty_result 的 0 步会走"还没真正展开"分支。
+    result["process"]["number_merge"]["action_count"] = 40
 
     reply = native._generic_finish_reply(session, definition, result)
 
@@ -918,7 +923,13 @@ async def test_duplicate_terminal_replay_repairs_chat_side_effects(monkeypatch):
     session = _session("chinese_checkers").model_copy(
         update={
             "status": "settled",
-            "result": {"memory_sync": {"status": "stored"}},
+            "result": {
+                "memory_sync": {"status": "stored"},
+                # 这条测的是"重投时把漏掉的聊天副作用补上", 跟步数无关。但没玩起来
+                # 的局 (中途退出也判负 → 也落 settled) 走的是另一条分支, 回复由
+                # quick-exit 决定, 所以这里得是一局真下过的棋。
+                "process": {"chinese_checkers": {"action_count": 40}},
+            },
         }
     )
 
@@ -980,6 +991,9 @@ def test_generic_finish_reply_sounds_like_a_companion_not_a_score_report():
     result["process"]["match3"]["key_moments"] = [
         {"type": "big_cascade", "action_number": 9}
     ]
+    # key_moment 落在第 9 步, 说明这局真玩过 —— action_count 要跟着对上,
+    # 否则会走"还没真正展开"分支。
+    result["process"]["match3"]["action_count"] = 9
 
     reply = native._generic_finish_reply(_session("match3"), definition, result)
 

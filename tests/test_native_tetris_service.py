@@ -122,6 +122,10 @@ def test_tetris_terminal_outcome_and_companion_reply_are_game_specific():
         outcome="win",
         duration_seconds=90,
     )
+    # 打到 6400 分 / 8 行必然锁了很多块。上面只 append 了 1 块 (够测校验逻辑),
+    # 但 0-1 步的局现在走"还没真正展开"分支 —— 中途退出也判负, 那些局同样落
+    # settled, 给它们回"你越堆越稳"是编造。这里补齐到与分数相称的步数。
+    result["process"]["tetris_duel"]["action_count"] = 24
     reply = native._generic_finish_reply(
         SimpleNamespace(ai_player=SimpleNamespace(nick_name="小芜")),
         definition,

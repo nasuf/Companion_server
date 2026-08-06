@@ -20,6 +20,8 @@ from app.services.games import balance
 from app.services.games.rarity import compute_rarity
 from app.services.games.finish_reply import generate_finish_reply
 from app.services.games.narrative import build_narrative
+from app.services.games.quick_exit import check_reaction, quick_exit_line
+from app.services.games.substance import played_enough
 from app.services.schedule_domain import time_service
 from app.services import game_points
 from app.services.memory.storage import repo as memory_repo
@@ -685,15 +687,6 @@ async def handle_event(
                     reply,
                 )
             )
-        if event_type == "game_aborted":
-            # Memory embedding availability must not hold the game result UI
-            # hostage. The pending marker lives in game_sessions, so the
-            # scheduler can recover the shared memory even after a restart.
-            #
-            # 完局路径**不在这里** fire: 那条路要先跑 LLM 拿到 worth_remembering
-            # 再写记忆, 两个任务并发的话记忆几乎必然在笔记落库前就写完了 (LLM 要
-            # 几秒)。所以完局的 memory sync 由 _persist_chat_side_effects 串行触发。
-            fire_background(sync_session_memory(updated.id))
         return updated, reply, event_id, False
 
 
@@ -736,13 +729,12 @@ async def _ensure_idempotent_side_effects(
                 reply,
             )
         )
-        # 只有中断局在这里补 sync。完局由上面那个副作用任务串行触发 (它要先跑
-        # LLM 拿 worth_remembering) —— 两边都 fire 的话会并发跑两次, 而且并发的
-        # 那次读不到笔记, 正是串行化想避免的事。
-        if event_type == "game_aborted":
-            memory_sync = _loads(_loads(session.result, {}).get("memory_sync"), {})
-            if memory_sync.get("status") not in {"stored", "deduplicated", "skipped"}:
-                fire_background(sync_session_memory(session.id))
+        # 这里**不再**补 fire sync_session_memory。
+        #
+        # 原来中断局在这里补一次 (那时中断局不调 LLM, 没有笔记可读, 所以并发无害)。
+        # 现在玩起来了的中断局也上 LLM 也可能产出 worth_remembering, 并发那次会读
+        # 不到笔记 —— 正是串行化想避免的事。上面 fire 的副作用任务末尾会串行跑
+        # sync, 两条终局路径都覆盖到了。
 
 
 async def _persist_chat_side_effects(
@@ -777,20 +769,30 @@ async def _persist_chat_side_effects(
     if event_type not in {"game_finished", "game_aborted"}:
         return
 
-    # 完局才上 LLM。这里已经在 fire_background 里, 不在 HTTP 响应路径上, 所以慢
-    # 一点不影响游戏结束界面, 也不影响积分结算。
+    # 这里已经在 fire_background 里, 不在 HTTP 响应路径上, 所以 LLM 慢一点不影响
+    # 游戏结束界面, 也不影响积分结算。
     #
-    # 中断局保持硬编码轻量文案: 745 局里只有 233 局完局, 中位时长 11-85 秒 ——
-    # 给"点进去看一眼就走"的局生成走心复盘本身就是错的, 真朋友不会为你点开又
-    # 关掉说一段话。
+    # 分叉的依据是"有没有玩起来", 不是"有没有下完" —— 中途退出也判负, settled 里
+    # 混着大量开局就走的局, 而 aborted 里躺着 420 步玩了 34 分钟的局。
     remembered: str | None = None
     already_written = str(
         _loads(_loads(updated.result, {}).get("remembered_note"), "") or ""
     ).strip()
-    if event_type == "game_finished" and reply and not already_written:
-        # 带 not already_written: 客户端重投同一个 game_finished 时这段会再跑一遍,
-        # 无门控的话每次重投都白调一次 LLM, 而且两次产出不同 —— 用户会看到同一局
-        # 出现措辞不一样的两条伴聊。
+    if _is_quick_exit(updated) and not already_written:
+        # 点开又关 —— 不管落 settled 还是 aborted 都是同一件事 (中途退出也判负)。
+        # 这里连"要不要出声"都可能是否, 见 quick_exit 模块。
+        reply = await _quick_exit_reply(updated)
+    elif reply and not already_written:
+        # 玩起来了就上 LLM, **不分下完没下完**。
+        #
+        # 原来只对 game_finished 生效, 于是"玩了很久但中途停"的局全落在硬编码上:
+        # 实测这类局 88 个, 89% 有高光、85% 有 AI 决策快照, 而一局 420 步 34 分钟
+        # 的数字合并收到的话跟一局 204 步的**一字不差**。素材充足, 是我按
+        # settled/aborted 划线划错了 —— 该看的是有没有玩起来。
+        #
+        # 带 not already_written: 客户端重投同一个终局事件时这段会再跑一遍, 无门控
+        # 的话每次重投都白调一次 LLM, 而且两次产出不同 —— 用户会看到同一局出现
+        # 措辞不一样的两条伴聊。
         reply, remembered = await _llm_finish_reply(updated, reply)
         if remembered:
             # LLM 判定"值得日后想起"—— 比引擎标签更可信, 它看得到整局的上下文。
@@ -817,14 +819,18 @@ async def _persist_chat_side_effects(
             else:
                 await asyncio.sleep(0.25 * (attempt + 1))
 
-    if event_type == "game_finished":
-        # 串在 LLM 之后而不是与之并发 —— 见 handle_event 里的说明。
-        # 即使上面的 reply 持久化失败也要跑: 记忆和聊天消息是两件独立的事,
-        # 一个挂了不该连累另一个 (pending 标记 + cron 重试仍是最后一道保险)。
-        try:
-            await sync_session_memory(updated.id)
-        except Exception:
-            logger.exception("Memory sync failed for session=%s", updated.id)
+    # 记忆写入串在 LLM 之后而不是与之并发。
+    #
+    # 中断局原来是在 handle_event 里并发 fire 的, 那时它拿不到 worth_remembering
+    # (LLM 要几秒, 记忆几乎必然先写完)。现在中断局也可能产出笔记 —— 一局 420 步
+    # 玩了 34 分钟的棋值得记, 跟它有没有下完无关 —— 所以两条路统一走串行。
+    #
+    # 即使上面的 reply 持久化失败也要跑: 记忆和聊天消息是两件独立的事, 一个挂了
+    # 不该连累另一个 (pending 标记 + cron 重试仍是最后一道保险)。
+    try:
+        await sync_session_memory(updated.id)
+    except Exception:
+        logger.exception("Memory sync failed for session=%s", updated.id)
 
 
 async def _attach_remembered_note(session_id: str, note: str) -> None:
@@ -888,6 +894,45 @@ async def _agent_state_text(agent_id: str | None) -> str:
         return "，".join(p for p in (event, mood) if p)
     except Exception:
         logger.exception("Failed to read agent state agent=%s", agent_id)
+        return ""
+
+
+def _session_action_count(session: NativeSessionResponse) -> int:
+    """这局做了多少步。五子棋的字段名跟其他游戏不同。"""
+    definition = _definition(session.game_key)
+    result = _loads(session.result, {})
+    if definition.key == GOMOKU_GAME_KEY:
+        game = _loads(result.get("gomoku"), _gomoku(result))
+        return int(game.get("move_count") or 0)
+    game = _loads(result.get(definition.key), _generic_process(result, definition))
+    return int(game.get("action_count") or 0)
+
+
+def _is_quick_exit(session: NativeSessionResponse) -> bool:
+    """点开又关, 没真正玩起来."""
+    definition = _definition(session.game_key)
+    return not played_enough(definition.key, _session_action_count(session))
+
+
+async def _quick_exit_reply(session: NativeSessionResponse) -> str:
+    """开局就走时说的那一句 —— 空串表示这次不出声.
+
+    实测这类局占终局的 52%, 且 42% 成串出现在 2 分钟内。连着点开关掉时保持安静
+    才像朋友; 每次都回一句 (更别说每次回同一句) 才是机械感的来源。
+    """
+    try:
+        speak, repeat = await check_reaction(session.conversation_id)
+        if not speak:
+            logger.info(
+                "[GAME-REPLY] session=%s quick-exit silent (cooldown, repeat=%d)",
+                session.id[:8], repeat,
+            )
+            return ""
+        return quick_exit_line(
+            action_count=_session_action_count(session), repeat=repeat,
+        )
+    except Exception:
+        logger.exception("Quick-exit reply failed session=%s", session.id)
         return ""
 
 
@@ -2267,10 +2312,23 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
+# 开局就走的局在同步路径上不出文案 —— 真正说什么由 _quick_exit_reply 决定, 它先
+# 判断这次要不要出声 (连击时保持安静), 要说才按处境挑句子。
+#
+# 这里之所以不能顺手写一句 (之前是"这局还没真正展开…"): 这类局占终局的 52%,
+# 同一句话会连着出现很多遍 —— 单是国际象棋这个用户就点开关掉过 9 次。
+#
+# 空串是安全的: companion_reply 只在 Flutter 里被解析成字段而从未渲染, web 完全
+# 不用, 所以回复只通过聊天消息到达用户。
+_NOT_REALLY_PLAYED_REPLY = ""
+
+
 def _finish_reply(session: GameSessionRow, result: dict[str, Any]) -> str:
     gomoku = _loads(result.get("gomoku"), {})
     moments = list(_loads(gomoku.get("key_moments"), []))
     outcome = result.get("user_outcome")
+    if not played_enough(GOMOKU_GAME_KEY, int(gomoku.get("move_count") or 0)):
+        return _NOT_REALLY_PLAYED_REPLY
     direction = _line_direction(list(_loads(gomoku.get("winning_line"), [])))
     line_text = "斜着那条线" if direction == "diagonal" else "中间那条线"
     if outcome == "win":
@@ -2301,6 +2359,11 @@ def _generic_finish_reply(
     outcome = str(result.get("user_outcome") or "draw")
     game = _generic_process(result, definition)
     moments = list(_loads(game.get("key_moments"), []))
+    if not played_enough(definition.key, int(game.get("action_count") or 0)):
+        # 中途退出也判负 → 也落 settled, 于是这些"没玩起来"的局会走到下面那些
+        # 假定真下过一局的文案: 一局 0 步的棋回"你后面已经追得很近了"是纯编造。
+        # 这里跟 _abort_reply 的 `moves < 4` 分支是同一个语义。
+        return _NOT_REALLY_PLAYED_REPLY
     if definition.key == "minesweeper":
         if outcome == "win":
             final_payload = _loads(result.get("final_payload"), {})
@@ -2375,7 +2438,10 @@ async def _remember_shared_experience(
         game = _loads(result.get(definition.key), _generic_process(result, definition))
         action_count = int(game.get("action_count") or 0)
         count_unit = "个方块" if definition.key == "tetris_duel" else "步"
-    if action_count == 0:
+    if not played_enough(definition.key, action_count):
+        # 原来只挡 action_count == 0, 但中途退出也判负 → 也落 settled, 于是
+        # "4 步 18 秒"这类局照样进记忆判定 (实测象棋 settled 步数中位数是 0)。
+        # 跟完局伴聊用同一个地板 —— 没玩起来的局既不值得叙事也不值得记。
         return {
             "status": "skipped",
             "user_memory_id": None,
@@ -2469,6 +2535,27 @@ async def _remember_shared_experience(
     )
 
 
+# 兵/卒。象棋类 131 个 capture 里 59 个是吃兵 (45%) —— 吃兵是家常事, 说成
+# "关键交换改变了棋子的力量对比"是明显夸大, 而模型会在这句话上继续加戏
+# (生产实例: 一个第 4 手吃兵被讲成"那步关键的交换把局势彻底搅活了")。
+_PAWN_PIECES = {"P", "p"}
+
+
+def _has_heavy_capture(moments: list[dict[str, Any]]) -> bool:
+    """有没有吃掉比兵更重要的子.
+
+    缺 captured_piece 的旧数据算重子 —— 无法判断时宁可保留素材, 让模型自己拿捏,
+    也比因为字段缺失而丢掉真正的关键交换好。
+    """
+    for item in moments:
+        if not isinstance(item, dict) or item.get("type") != "capture":
+            continue
+        piece = item.get("captured_piece")
+        if piece is None or str(piece) not in _PAWN_PIECES:
+            return True
+    return False
+
+
 def _memory_moment(
     moments: list[dict[str, Any]],
     game_key: str = GOMOKU_GAME_KEY,
@@ -2496,7 +2583,8 @@ def _memory_moment(
         add({"mobility_squeeze"}, "中盘可落位置突然收紧，双方都被迫换了计划。")
     elif game_key in {"xiangqi", "chess"}:
         add({"check"}, "局中有一次直接将军，攻守节奏从那里加快了。")
-        add({"capture"}, "有一次关键交换改变了棋子的力量对比。")
+        if _has_heavy_capture(moments):
+            add({"capture"}, "有一次关键交换改变了棋子的力量对比。")
         add({"castling"}, "这盘完成过一次王车易位，王翼很快安定下来。")
         add({"promotion"}, "有一枚兵一路走到底完成了升变。")
         add({"decisive_finish", "winning_move"}, "最后的制胜手是前面几步一起铺出来的。")

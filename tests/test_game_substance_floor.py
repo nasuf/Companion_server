@@ -1,0 +1,384 @@
+""""这局有没有真的玩起来"的地板.
+
+守的是一条生产事故: 一局 **4 步 18 秒**的国际象棋产出了
+
+    刚忙完一摊子客诉，这盘国际象棋倒成了个意外的小插曲。本来以为几步就能定局，
+    结果那步关键的交换把局势彻底搅活了，直到最后才敢松口气。
+
+—— 一场不存在的对局。三个原因叠加:
+
+1. 中途退出也给用户判负, 所以那局在库里是 `status='settled'`, 跟真下完一局无法
+   区分。实测象棋/围棋的 settled 步数**中位数是 0**, 一局真棋都没下完过。
+2. 稀有性的比较池同样全是这些 2 秒退出局, 于是 18 秒被评成"这是玩得最久的一局"。
+3. 第 4 手吃掉一个兵被渲染成"关键交换改变了棋子的力量对比"(象棋类 131 个 capture
+   里 59 个是吃兵), 模型就在这句话上继续加戏。
+"""
+
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+from app.services.games.native import (
+    _NOT_REALLY_PLAYED_REPLY as _NOT_REALLY_PLAYED,
+)
+from app.services.games.native import _has_heavy_capture, _memory_moment
+from app.services.games.quick_exit import _LINES, quick_exit_line
+from app.services.games.substance import (
+    _ACTION_FLOOR,
+    action_floor,
+    played_enough,
+)
+
+
+class TestFloor:
+    def test_the_production_case_is_rejected(self):
+        """4 步的国际象棋不算玩过一局."""
+        assert played_enough("chess", 4) is False
+
+    def test_zero_action_settled_games_are_rejected(self):
+        """实测象棋/围棋 settled 的步数中位数是 0 —— 全是开局就走."""
+        for key in ("chess", "xiangqi", "go"):
+            assert played_enough(key, 0) is False, key
+
+    def test_real_games_pass(self):
+        """实测真局: 五子棋 20-77 步, 黑白棋 58-60 步, 象棋 33-104 步."""
+        for key, acts in (("gomoku", 20), ("reversi", 58), ("xiangqi", 33)):
+            assert played_enough(key, acts) is True, key
+
+    def test_gomoku_floor_is_the_theoretical_minimum(self):
+        """先手第 5 子成五 = 用户 5 手 + AI 4 手 = 9, 恰好等于实测最小值.
+
+        再高一点就会误伤真正的快胜局。
+        """
+        assert action_floor("gomoku") == 9
+        assert played_enough("gomoku", 9) is True
+        assert played_enough("gomoku", 8) is False
+
+    def test_puzzle_games_keep_low_floors(self):
+        """扫雷 3 步扫完小盘是真的赢 —— 不能套用棋类的门槛."""
+        assert played_enough("minesweeper", 3) is True
+        assert played_enough("match3", 4) is True
+
+    def test_none_counts_as_nothing_played(self):
+        assert played_enough("chess", None) is False
+
+    def test_unknown_games_get_a_default(self):
+        """新游戏上线时忘了配阈值也不能放过 0 步的局."""
+        assert played_enough("some_new_game", 0) is False
+        assert action_floor("some_new_game") > 0
+
+    def test_every_shipped_game_has_a_floor(self):
+        """漏配的游戏会退到默认值 —— 那对棋类太松, 对解谜类太严."""
+        from app.services.games.native import _GAME_DEFINITIONS
+
+        missing = sorted(set(_GAME_DEFINITIONS) - set(_ACTION_FLOOR))
+        assert not missing, f"这些游戏没配地板: {missing}"
+
+
+class TestWiring:
+    def test_quick_exit_branch_comes_before_the_recap_branch(self):
+        """没玩起来的局根本不该走到复盘那条路 —— 否则白花一次 LLM 调用."""
+        from app.services.games.native import _persist_chat_side_effects
+
+        src = inspect.getsource(_persist_chat_side_effects)
+        assert src.index("_is_quick_exit") < src.index("_llm_finish_reply")
+
+    def test_quick_exit_covers_aborts_too(self):
+        """中途退出也判负, 所以 settled 和 aborted 是同一件事, 不能只挡一边."""
+        from app.services.games.native import _persist_chat_side_effects
+
+        src = inspect.getsource(_persist_chat_side_effects)
+        condition = src[src.index("if _is_quick_exit") : src.index("_quick_exit_reply")]
+        assert "game_finished" not in condition, "quick-exit 分支不该只对完局生效"
+
+    def test_rarity_pool_excludes_trivial_games(self):
+        """不筛的话比较池全是 2 秒的退出局, 18 秒就成了"玩得最久"."""
+        from app.services.games.rarity import compute_rarity
+
+        src = inspect.getsource(compute_rarity)
+        assert "action_floor(game_key)" in src
+        assert "action_count')::int," in src
+
+
+class TestOverstatedCapture:
+    """吃一个兵不是"关键交换改变了棋子的力量对比"."""
+
+    @staticmethod
+    def _capture(piece):
+        return [{"type": "capture", "actor": "agent", "captured_piece": piece}]
+
+    def test_pawn_capture_is_not_a_key_exchange(self):
+        for pawn in ("P", "p"):
+            text = _memory_moment(self._capture(pawn), "chess")
+            assert "关键交换" not in text, pawn
+
+    def test_capturing_a_real_piece_still_counts(self):
+        """车马炮士象后被吃是真的改变力量对比."""
+        for piece in ("R", "N", "C", "B", "A", "q"):
+            text = _memory_moment(self._capture(piece), "xiangqi")
+            assert "关键交换" in text, piece
+
+    def test_a_pawn_plus_a_rook_still_counts(self):
+        """一局里既吃兵又吃车, 该讲的是车."""
+        moments = [
+            {"type": "capture", "captured_piece": "P"},
+            {"type": "capture", "captured_piece": "R"},
+        ]
+        assert "关键交换" in _memory_moment(moments, "chess")
+
+    def test_missing_piece_field_is_kept(self):
+        """旧数据可能没有 captured_piece —— 无法判断时宁可保留, 让模型自己拿捏."""
+        assert _has_heavy_capture([{"type": "capture"}]) is True
+
+    def test_other_moment_types_are_untouched(self):
+        """只收紧 capture, 将军/制胜手的措辞不动."""
+        text = _memory_moment([{"type": "check"}], "chess")
+        assert "将军" in text
+
+    def test_pawn_capture_alone_leaves_no_moment(self):
+        """只吃了个兵的局没有可讲的高光 —— 空串会让上游跳过记忆写入."""
+        assert _memory_moment(self._capture("P"), "chess") == ""
+
+
+@pytest.mark.parametrize("game_key,acts,expected", [
+    # 生产实测的边界样本
+    ("chess", 4, False),      # 事故那一局
+    ("chess", 0, False),
+    ("xiangqi", 33, True),
+    ("xiangqi", 2, False),
+    ("gomoku", 9, True),
+    ("reversi", 60, True),
+    ("reversi", 12, False),
+    ("minesweeper", 5, True),
+])
+def test_production_samples(game_key, acts, expected):
+    assert played_enough(game_key, acts) is expected
+
+
+class TestFallbackWording:
+    """兜底文案也不能编.
+
+    地板拦下 LLM 之后, 那些局落到硬编码文案上, 而那些文案假定真下过一局 ——
+    实测一局 **0 步**的棋回的是「你后面已经追得很近了，再开一局？」和
+    「不是碰巧，是你后面几步真的走得比我稳」, 同样是编造。
+    """
+
+    @staticmethod
+    def _generic(game_key, acts, outcome):
+        from app.services.games.native import _definition, _generic_finish_reply
+
+        return _generic_finish_reply(
+            None,  # session 只在个别游戏分支里用到, 这里走不到
+            _definition(game_key),
+            {
+                "user_outcome": outcome,
+                "process": {game_key: {"action_count": acts, "key_moments": []}},
+            },
+        )
+
+    def test_zero_action_loss_does_not_praise_the_user(self):
+        text = self._generic("chess", 0, "lose")
+        for fabricated in ("追得很近", "走得比我稳", "差点", "转折"):
+            assert fabricated not in text, fabricated
+
+    def test_zero_action_win_does_not_describe_play(self):
+        text = self._generic("chess", 0, "win")
+        assert "后面几步" not in text
+
+    def test_it_does_not_announce_a_result(self):
+        """系统判了用户负, 但用户的体感是"我没玩" —— 宣布输赢只会让人莫名其妙."""
+        text = self._generic("chess", 0, "lose")
+        for verdict in ("我赢", "你输", "我先收下", "你拿下"):
+            assert verdict not in text, verdict
+
+    def test_real_games_keep_their_wording(self):
+        """只拦没玩起来的局, 真局的文案一个字不动."""
+        text = self._generic("xiangqi", 40, "lose")
+        assert text != _NOT_REALLY_PLAYED
+
+    def test_gomoku_path_is_covered_too(self):
+        """五子棋走独立的 _finish_reply, 漏了它等于半个修复."""
+        from app.services.games.native import _finish_reply
+
+        text = _finish_reply(None, {"user_outcome": "lose", "gomoku": {"move_count": 2}})
+        assert text == _NOT_REALLY_PLAYED
+
+    def test_gomoku_real_game_still_describes_the_line(self):
+        from app.services.games.native import _finish_reply
+
+        text = _finish_reply(
+            None,
+            {"user_outcome": "win", "gomoku": {"move_count": 30, "winning_line": []}},
+        )
+        assert text != _NOT_REALLY_PLAYED
+
+
+class TestQuickExitLine:
+    """开局就走说的那一句.
+
+    这里守两件事: 不能是同一句话反复出现 (那是机械感的来源), 也不能提输赢
+    (系统判了用户负, 但用户的体感是根本没玩)。
+
+    刻意**不调 LLM**: 同一组 7 个场景上, 小模型 qwen3.5-flash 和主模型豆包
+    character 都只产出 2 种不同的话, 5 条一字不差是「咦，不玩了？」。换了四版
+    prompt (给例句/给反例/硬要求用上数字/改成第一人称视角) 都没救回来 —— 0 步
+    2 秒的空局可说的太少, 任何模型都会收敛到中文里最自然的那句。
+    """
+
+    def test_consecutive_reactions_never_repeat(self):
+        """连着几次都说同一句正是要修的毛病."""
+        lines = [quick_exit_line(action_count=0, repeat=i) for i in range(1, 7)]
+        assert len(set(lines)) == len(lines), lines
+
+    def test_never_announces_a_result(self):
+        for acts in (0, 1, 2):
+            for rep in range(1, 13):
+                line = quick_exit_line(action_count=acts, repeat=rep)
+                for verdict in ("赢", "输", "胜", "负"):
+                    assert verdict not in line, line
+
+    def test_never_nags_the_user_back(self):
+        """不催他回来玩, 也不追问为什么走 —— 那会变成压力."""
+        for rep in range(1, 13):
+            line = quick_exit_line(action_count=0, repeat=rep)
+            for nag in ("再来一局", "为什么", "怎么不玩", "继续玩"):
+                assert nag not in line, line
+
+    def test_untouched_and_barely_played_read_differently(self):
+        """一子没落跟走了两步是两种体感, 混用会露馅."""
+        assert quick_exit_line(action_count=0, repeat=1) != quick_exit_line(
+            action_count=2, repeat=1,
+        )
+
+    def test_repeated_fiddling_gets_its_own_register(self):
+        """今天第 5 次点开又关, 熟人之间该有点调侃."""
+        line = quick_exit_line(action_count=0, repeat=5)
+        assert line not in _LINES["untouched"]
+        assert line in _LINES["repeated"]
+
+    def test_lines_stay_short(self):
+        """一句随口的话。长了就不像抬头看了一眼."""
+        for bucket in _LINES.values():
+            for line in bucket:
+                assert len(line) <= 20, line
+
+
+class TestReactionCooldown:
+    """连着点开关掉时保持安静.
+
+    实测相邻两次开局就走有 42% 发生在 2 分钟内 (158/380), 同一天最多 56 次。
+    每次都回一句就是噪音 —— 真朋友看你翻界面不会说六次话。
+    """
+
+    @pytest.mark.asyncio
+    async def test_first_exit_speaks_and_the_next_one_stays_quiet(self, monkeypatch):
+        from app.services.games import quick_exit as qe
+
+        store: dict = {}
+
+        class _Pipe:
+            """够真实地模拟 SET NX / INCR —— 假得太宽松的话测试证明不了任何事."""
+
+            def __init__(self):
+                self.ops = []
+
+            def set(self, key, val, ex=None, nx=False):
+                exists = key in store
+                if nx and exists:
+                    self.ops.append(None)  # SET NX 命中已有键返回 nil
+                    return
+                store[key] = val
+                self.ops.append(True)
+
+            def incr(self, key):
+                store[key] = int(store.get(key, 0)) + 1
+                self.ops.append(store[key])
+
+            def expire(self, key, ttl):
+                self.ops.append(True)
+
+            async def execute(self):
+                return self.ops
+
+        class _Redis:
+            def pipeline(self):
+                return _Pipe()
+
+        async def _get():
+            return _Redis()
+
+        monkeypatch.setattr("app.redis_client.get_redis", _get)
+
+        speak1, n1 = await qe.check_reaction("c1")
+        speak2, n2 = await qe.check_reaction("c1")
+        assert (speak1, n1) == (True, 1)
+        assert speak2 is False, "窗口内第二次不该出声"
+        assert n2 == 2, "次数仍要累加 —— 它是素材, 不只是门控"
+
+    @pytest.mark.asyncio
+    async def test_redis_failure_errs_on_the_side_of_speaking(self, monkeypatch):
+        """静默失效的表现是"AI 对游戏毫无反应", 排查比多一条消息麻烦得多."""
+        from app.services.games import quick_exit as qe
+
+        async def _boom():
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr("app.redis_client.get_redis", _boom)
+        assert await qe.check_reaction("c1") == (True, 1)
+
+    @pytest.mark.asyncio
+    async def test_missing_conversation_stays_quiet(self):
+        """没有会话就没地方发消息, 更不该去占冷却名额."""
+        from app.services.games import quick_exit as qe
+
+        assert await qe.check_reaction(None) == (False, 0)
+
+    @pytest.mark.asyncio
+    async def test_the_daily_count_window_starts_at_the_first_exit(self, monkeypatch):
+        """计数窗口是"距第一次 24 小时", 不是"距上次 24 小时".
+
+        用 INCR 之后 EXPIRE 的话每次调用都刷新 TTL —— 每天点开一次的用户计数会跨天
+        无限累积, 说出"今天已经第 30 次"而那是几周攒的。正确做法是先 SET NX 建种
+        (带 TTL) 再 INCR, INCR 不会清掉已有 TTL。
+        """
+        from app.services.games import quick_exit as qe
+
+        ttl_writes: list[tuple[str, int | None, bool]] = []
+
+        class _Pipe:
+            def __init__(self):
+                self.ops = []
+
+            def set(self, key, val, ex=None, nx=False):
+                ttl_writes.append((key, ex, nx))
+                self.ops.append(True)
+
+            def incr(self, key):
+                self.ops.append(1)
+
+            def expire(self, key, ttl):
+                ttl_writes.append((key, ttl, False))
+                self.ops.append(True)
+
+            async def execute(self):
+                return self.ops
+
+        async def _get():
+            return type("R", (), {"pipeline": lambda self: _Pipe()})()
+
+        monkeypatch.setattr("app.redis_client.get_redis", _get)
+        await qe.check_reaction("c1")
+
+        count_writes = [w for w in ttl_writes if "count" in w[0]]
+        assert count_writes, "计数键必须带过期时间, 否则会永久累积"
+        for _key, ttl, nx in count_writes:
+            assert nx is True, "刷新 TTL 会让窗口变成'距上次 24 小时'"
+            assert ttl == qe._COUNT_TTL_SECONDS
+
+    def test_cooldown_window_is_wide_enough_to_cover_a_burst(self):
+        """2 分钟内的连击占 42%, 10 分钟内占 60% —— 窗口太窄就挡不住成串的那批."""
+        from app.services.games.quick_exit import REACTION_COOLDOWN_SECONDS
+
+        assert REACTION_COOLDOWN_SECONDS >= 300
