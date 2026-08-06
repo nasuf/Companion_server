@@ -232,7 +232,9 @@ async def test_shared_experience_enters_both_memory_sides(monkeypatch):
     memory_sync = await native._remember_shared_experience(_session(), result)
 
     assert len(calls) == 1
-    assert "共同经历" in calls[0]["ai_text"]
+    # 固定尾巴「这是我们共同经历的一局游戏。」已删除 —— 每条记忆都挂同一句是
+    # 模板化的来源, 实测 21 条游戏记忆两两相似度中位 0.710 (普通记忆 0.361)。
+    assert "共同经历" not in calls[0]["ai_text"]
     assert "差一点" not in calls[0]["user_text"]
     assert calls[0]["workspace_id"] == "workspace-1"
     assert memory_sync["status"] == "stored"

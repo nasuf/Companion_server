@@ -17,6 +17,7 @@ from app.models.game import (
 )
 from app.services.games import session_support
 from app.services.games import balance
+from app.services.games.rarity import compute_rarity
 from app.services.schedule_domain import time_service
 from app.services import game_points
 from app.services.memory.storage import repo as memory_repo
@@ -2247,13 +2248,46 @@ async def _remember_shared_experience(
     moment_text = _memory_moment(moments, definition.key)
     duration = int(result.get("duration_seconds") or 0)
     duration_text = f"，大约玩了{max(1, duration // 60)}分钟" if duration >= 60 else ""
+
+    # 只有"这局在用户历史里确实特别"才写记忆。
+    #
+    # 之前是每局都写双侧 L2 (importance 0.74/0.80) —— 那个分数已经逼近 L1 阈值,
+    # 而记的内容是"走了97步，4分钟"。近 30 天有 745 局, 照这个写法光游戏就能产出
+    # 上千条 L2, 把真正重要的事挤出检索; 而且实测这批记忆两两相似度中位 0.710
+    # (普通记忆 0.361), 它们在向量空间里本来就挤成一坨、互相抢位。
+    #
+    # 真朋友一起下二十盘棋, 记得住的就一两盘 —— 记住的还是"那次你连跳七格反超",
+    # 不是步数和时长。所以: 单局流水不进记忆库 (它在 game_sessions 表里, 那才是
+    # 它该待的地方), 只有客观稀有的局才留一条, 且落 L3 让它自然淡出。
+    #
+    # "赢/输了几局"这类关系模式由 cron 从 game_sessions 聚合成 L2, 不在这里逐局写。
+    rarity = await compute_rarity(
+        workspace_id=session.workspace_id,
+        game_key=definition.key,
+        game_title=definition.title,
+        session_id=session.id,
+        user_outcome=outcome,
+        action_count=action_count,
+        duration_seconds=duration or None,
+    )
+    if not rarity.is_notable and not moment_text:
+        return {
+            "status": "skipped",
+            "reason": "not_notable",
+            "user_memory_id": None,
+            "ai_memory_id": None,
+            "failed_sides": [],
+        }
+
+    rarity_text = ("" if not rarity.notes else "，".join(rarity.notes) + "。")
     user_text = (
         f"我和{session.ai_player.nick_name}一起玩了一局《{definition.title}》，"
-        f"一共走了{action_count}{count_unit}{duration_text}，{outcome_user}。{moment_text}"
+        f"一共走了{action_count}{count_unit}{duration_text}，{outcome_user}。"
+        f"{rarity_text}{moment_text}"
     )
     ai_text = (
         f"我和用户一起玩了一局《{definition.title}》，一共走了{action_count}{count_unit}"
-        f"{duration_text}，{outcome_ai}。{moment_text}这是我们共同经历的一局游戏。"
+        f"{duration_text}，{outcome_ai}。{rarity_text}{moment_text}"
     )
     return await remember_shared_game_experience(
         user_id=session.user_id,
@@ -2325,4 +2359,10 @@ def _memory_moment(
 
     if descriptions:
         return "".join(descriptions)
-    return "这局的完整过程、AI判断和关键局面已经保存。"
+    # 没有高光就返回空, 不要凑一句。
+    #
+    # 原来这里回的是「这局的完整过程、AI判断和关键局面已经保存。」—— 一句系统腔的
+    # 废话, 而且**每条没有高光的记忆都挂着它**, 是这批记忆在向量空间挤成一坨的原因
+    # 之一 (实测两两相似度中位 0.710, 普通记忆只有 0.361)。它还让"这局值不值得记"
+    # 的门控永远为真, 因为 moment_text 从来不为空。
+    return ""

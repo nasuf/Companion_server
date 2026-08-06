@@ -31,11 +31,16 @@ async def test_shared_game_experience_stores_both_sides_without_prefilter(monkey
         "failed_sides": [],
     }
     assert [call["source"] for call in calls] == ["user", "ai"]
-    assert calls[0]["level"] == 2
+    # L3 而不是 L2: 游戏记忆该像真人一样快速淡出。原来 level=2 / importance 0.80
+    # 已经逼近 L1 阈值 (0.85), 而记的是"走了97步，4分钟"这类流水 —— 近 30 天有
+    # 745 局, 照那个写法光游戏就能产出上千条 L2 把重要的事挤出检索。
+    assert calls[0]["level"] == 3
     assert calls[0]["sub_category"] == "其他特殊事件"
-    assert calls[1]["level"] == 2
-    assert calls[1]["importance"] == 0.80
+    assert calls[1]["level"] == 3
+    assert calls[1]["importance"] == 0.45
     assert calls[1]["sub_category"] == "交互"
+    # importance 落在 L3 区间 (0.10-0.50), 不会被 level_for_importance 拉回 L2
+    assert all(0.10 <= c["importance"] < 0.50 for c in calls)
 
 
 @pytest.mark.asyncio

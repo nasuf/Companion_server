@@ -84,11 +84,18 @@ async def remember_shared_game_experience(
         return await store_memory(
             user_id=user_id,
             content=text,
-            # Individual rounds stay retrievable but do not permanently crowd
-            # the AI's L1 core profile. Exact move history remains in the game
-            # session and meaningful rounds can rise through normal L2 dynamics.
-            level=2,
-            importance=0.80 if is_ai else 0.74,
+            # L3 而不是 L2 —— 游戏记忆该像真人一样快速淡出。
+            #
+            # 之前是 level=2 / importance 0.74-0.80, 那个分数已经逼近 L1 阈值
+            # (0.85), 而记的是"走了97步，4分钟"这类流水。真朋友一起下二十盘棋,
+            # 隔天能想起的可能就一两盘 —— 而且想起的是"那次你连跳七格反超",
+            # 不是统计量。
+            #
+            # 调用方 (games/native.py) 现在只在这一局客观稀有时才写, 所以进来的
+            # 都是值得留一下的; 但"值得留一下"≠"该和用户父亲生病同等重要"。
+            # 落 L3 让惰性衰减自然处理它, 真被反复提起的会通过 L2 动态升上去。
+            level=3,
+            importance=0.45 if is_ai else 0.42,
             memory_type="life",
             main_category="生活",
             sub_category="交互" if is_ai else "其他特殊事件",

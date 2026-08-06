@@ -821,8 +821,11 @@ async def test_generic_shared_experience_enters_both_memory_sides(monkeypatch):
     assert sync["status"] == "stored"
     assert len(calls) == 1
     assert "《跳棋》" in calls[0]["user_text"]
-    assert "共同经历" in calls[0]["ai_text"]
     assert "连续长跳" in calls[0]["ai_text"]
+    # 「这是我们共同经历的一局游戏。」这条固定尾巴已删除 —— 每条记忆都挂同一句
+    # 是模板化的直接来源, 实测 21 条游戏记忆两两相似度中位 0.710 (普通记忆
+    # 0.361), 固定尾巴是把它们拉到一起的原因之一。
+    assert "共同经历" not in calls[0]["ai_text"]
 
 
 @pytest.mark.parametrize(
