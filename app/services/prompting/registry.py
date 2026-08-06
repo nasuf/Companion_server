@@ -51,6 +51,7 @@ from app.services.prompting.defaults import (
     CHAT_STYLE_CLOSING_RULE_PROMPT,
     CHAT_TIME_CONTEXT_SECTION_PROMPT,
     CHAT_TIMELINE_SECTION_PROMPT,
+    GAME_FINISH_REPLY_PROMPT,
     CHAT_TIME_MEMORIES_SECTION_PROMPT,
     CHAT_TOPIC_CONTEXT_SECTION_PROMPT,
     CONSISTENCY_RULES_PROMPT,
@@ -401,6 +402,14 @@ PROMPT_DEFINITIONS = [
         "【工程补丁】主回复 system prompt 的「话题上下文」段模板（防话题跳跃）。"
         "运行时注入 {topic_category}/{topic_turns}。",
         CHAT_TOPIC_CONTEXT_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "game.finish_reply", "游戏结束伴聊", "游戏", "游戏",
+        "一局游戏正常打完后的伴聊。运行时注入 {material}（这局的事实清单：结果/"
+        "高光/AI 自己的决策理由/客观稀有性）与 {agent_state}（当前作息与心情）。"
+        "同时输出 worth_remembering（可为空, 且大多数局应为空）决定要不要留记忆。"
+        "只对完局调用, 中断局走轻量硬编码文案。",
+        GAME_FINISH_REPLY_PROMPT,
     ),
     PromptDefinition(
         "chat.timeline_section", "事件时间线段落", "聊天热路径", "聊天",

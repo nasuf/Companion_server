@@ -61,6 +61,7 @@ _MAIN_PROMPT_SECTION_COMPONENTS = [
 _BOUNDARY_BODY_PROMPT_KEYS = {
     "boundary.final_warning",
     "boundary.light_attack_reply",
+    "game.finish_reply",
     "boundary.medium_attack_reply",
     "boundary.severe_attack_reply",
     "boundary.medium_patience_reply",
@@ -524,6 +525,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("memory.contradiction_inquiry", "矛盾询问", "reply", _label_reply_text),
     ("memory.contradiction_reply", "矛盾化解回复", "reply", _label_reply_text),
     ("boundary.final_warning", "最终警告", "reply", _label_reply_text),
+    ("game.finish_reply", "游戏结束伴聊", "reply", _label_reply_text),
     ("boundary.light_attack_reply", "轻度攻击回复 (K1)", "reply", _label_reply_text),
     ("boundary.medium_attack_reply", "中度攻击回复 (K2)", "reply", _label_reply_text),
     ("boundary.severe_attack_reply", "重度攻击回复 (K3)", "reply", _label_reply_text),

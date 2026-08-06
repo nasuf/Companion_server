@@ -18,6 +18,8 @@ from app.models.game import (
 from app.services.games import session_support
 from app.services.games import balance
 from app.services.games.rarity import compute_rarity
+from app.services.games.finish_reply import generate_finish_reply
+from app.services.games.narrative import build_narrative
 from app.services.schedule_domain import time_service
 from app.services import game_points
 from app.services.memory.storage import repo as memory_repo
@@ -683,10 +685,14 @@ async def handle_event(
                     reply,
                 )
             )
-        if event_type in {"game_finished", "game_aborted"}:
+        if event_type == "game_aborted":
             # Memory embedding availability must not hold the game result UI
             # hostage. The pending marker lives in game_sessions, so the
             # scheduler can recover the shared memory even after a restart.
+            #
+            # 完局路径**不在这里** fire: 那条路要先跑 LLM 拿到 worth_remembering
+            # 再写记忆, 两个任务并发的话记忆几乎必然在笔记落库前就写完了 (LLM 要
+            # 几秒)。所以完局的 memory sync 由 _persist_chat_side_effects 串行触发。
             fire_background(sync_session_memory(updated.id))
         return updated, reply, event_id, False
 
@@ -730,9 +736,13 @@ async def _ensure_idempotent_side_effects(
                 reply,
             )
         )
-        memory_sync = _loads(_loads(session.result, {}).get("memory_sync"), {})
-        if memory_sync.get("status") not in {"stored", "deduplicated", "skipped"}:
-            fire_background(sync_session_memory(session.id))
+        # 只有中断局在这里补 sync。完局由上面那个副作用任务串行触发 (它要先跑
+        # LLM 拿 worth_remembering) —— 两边都 fire 的话会并发跑两次, 而且并发的
+        # 那次读不到笔记, 正是串行化想避免的事。
+        if event_type == "game_aborted":
+            memory_sync = _loads(_loads(session.result, {}).get("memory_sync"), {})
+            if memory_sync.get("status") not in {"stored", "deduplicated", "skipped"}:
+                fire_background(sync_session_memory(session.id))
 
 
 async def _persist_chat_side_effects(
@@ -766,6 +776,28 @@ async def _persist_chat_side_effects(
                 await asyncio.sleep(0.25 * (attempt + 1))
     if event_type not in {"game_finished", "game_aborted"}:
         return
+
+    # 完局才上 LLM。这里已经在 fire_background 里, 不在 HTTP 响应路径上, 所以慢
+    # 一点不影响游戏结束界面, 也不影响积分结算。
+    #
+    # 中断局保持硬编码轻量文案: 745 局里只有 233 局完局, 中位时长 11-85 秒 ——
+    # 给"点进去看一眼就走"的局生成走心复盘本身就是错的, 真朋友不会为你点开又
+    # 关掉说一段话。
+    remembered: str | None = None
+    already_written = str(
+        _loads(_loads(updated.result, {}).get("remembered_note"), "") or ""
+    ).strip()
+    if event_type == "game_finished" and reply and not already_written:
+        # 带 not already_written: 客户端重投同一个 game_finished 时这段会再跑一遍,
+        # 无门控的话每次重投都白调一次 LLM, 而且两次产出不同 —— 用户会看到同一局
+        # 出现措辞不一样的两条伴聊。
+        reply, remembered = await _llm_finish_reply(updated, reply)
+        if remembered:
+            # LLM 判定"值得日后想起"—— 比引擎标签更可信, 它看得到整局的上下文。
+            # 存进 result 供 sync_session_memory 取用: 记忆写入是另一条 background
+            # 任务, 两者之间只能通过 session.result 传话。
+            await _attach_remembered_note(updated.id, remembered)
+
     for attempt in range(3):
         try:
             await session_support._persist_reply_to_chat_if_needed(
@@ -784,6 +816,112 @@ async def _persist_chat_side_effects(
                 )
             else:
                 await asyncio.sleep(0.25 * (attempt + 1))
+
+    if event_type == "game_finished":
+        # 串在 LLM 之后而不是与之并发 —— 见 handle_event 里的说明。
+        # 即使上面的 reply 持久化失败也要跑: 记忆和聊天消息是两件独立的事,
+        # 一个挂了不该连累另一个 (pending 标记 + cron 重试仍是最后一道保险)。
+        try:
+            await sync_session_memory(updated.id)
+        except Exception:
+            logger.exception("Memory sync failed for session=%s", updated.id)
+
+
+async def _attach_remembered_note(session_id: str, note: str) -> None:
+    """把 LLM 判定的"值得记住"写进 session.result, 供记忆写入取用.
+
+    走 result 而不是直接传参: 记忆写入是另一段流程 (sync_session_memory 可能由
+    cron 重试触发), 只能通过 session 落库的状态传话。
+    """
+    # 只改 result 里的一个键, 用 jsonb 合并而不是读-改-写整行:
+    # 记忆写入是并发的另一段流程, 整行覆盖会把它同时写的 memory_sync 状态冲掉。
+    try:
+        await db.execute_raw(
+            """
+            UPDATE game_sessions
+            SET result = COALESCE(result, '{}'::jsonb) || jsonb_build_object('remembered_note', $2::text),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND provider = 'native'
+            """,
+            session_id, note[:200],
+        )
+    except Exception:
+        logger.exception("Failed to attach remembered note session=%s", session_id)
+
+
+async def _agent_state_text(agent_id: str | None) -> str:
+    """agent 此刻在干嘛 —— 让伴聊带上"我在上班摸鱼陪你下一盘"这种质感.
+
+    作息只用来**染色**, 不设卡: 用户点开游戏就是现在想玩, 以"我在睡觉"为由让他等,
+    体感是"我想找你玩你不理我", 对陪伴产品这是最糟的失败。真朋友在上班时你叫他
+    下棋, 不会说"四小时后再来", 他会说"摸鱼陪你下一盘"。
+    """
+    if not agent_id:
+        return ""
+    try:
+        from app.services.schedule_domain.schedule import get_current_status
+
+        status = await get_current_status(agent_id)
+        if not isinstance(status, dict):
+            return ""
+        parts = [str(status.get(k) or "") for k in ("activity", "state")]
+        return "，".join(p for p in parts if p)
+    except Exception:
+        return ""
+
+
+async def _llm_finish_reply(
+    session: NativeSessionResponse, fallback: str,
+) -> tuple[str, str | None]:
+    """用 LLM 重写完局伴聊, 顺带判断这局值不值得记.
+
+    返回 (reply, worth_remembering)。任何一步失败都返回原来的硬编码文案 ——
+    宁可机械也不能没有回复。
+    """
+    try:
+        definition = _definition(session.game_key)
+        result = _loads(session.result, {})
+        if definition.key == GOMOKU_GAME_KEY:
+            game = _loads(result.get("gomoku"), _gomoku(result))
+            action_count = int(game.get("move_count") or 0)
+        else:
+            game = _loads(result.get(definition.key), _generic_process(result, definition))
+            action_count = int(game.get("action_count") or 0)
+        outcome = str(result.get("user_outcome") or "aborted")
+        moment_text = _memory_moment(list(_loads(game.get("key_moments"), [])), definition.key)
+
+        rarity = await compute_rarity(
+            workspace_id=session.workspace_id,
+            game_key=definition.key,
+            game_title=definition.title,
+            session_id=session.id,
+            user_outcome=outcome,
+            action_count=action_count,
+            duration_seconds=result.get("duration_seconds"),
+        )
+        narrative = build_narrative(
+            title=definition.title,
+            outcome=outcome,
+            is_cooperative=definition.play_mode == "cooperate",
+            action_count=action_count,
+            duration_seconds=result.get("duration_seconds"),
+            moment_texts=[moment_text] if moment_text else [],
+            snapshots=list(_loads(game.get("snapshots"), [])),
+            rarity_notes=rarity.notes,
+        )
+        out = await generate_finish_reply(
+            narrative,
+            agent_state=await _agent_state_text(session.agent_id),
+            fallback=fallback,
+        )
+        logger.info(
+            "[GAME-REPLY] session=%s source=%s remembered=%s",
+            session.id[:8], out.source, bool(out.worth_remembering),
+        )
+        return out.text, out.worth_remembering
+    except Exception:
+        logger.exception("LLM finish reply failed for session=%s", session.id)
+        return fallback, None
 
 
 def _as_native_session(session: GameSessionRow) -> NativeSessionResponse:
@@ -2261,6 +2399,10 @@ async def _remember_shared_experience(
     # 它该待的地方), 只有客观稀有的局才留一条, 且落 L3 让它自然淡出。
     #
     # "赢/输了几局"这类关系模式由 cron 从 game_sessions 聚合成 L2, 不在这里逐局写。
+    # LLM 在生成伴聊时顺带判过"这局值不值得日后想起"。它看得到整局上下文, 比引擎
+    # 标签可信 —— 有它就直接用, 不再另算稀有性。
+    remembered_note = str(_loads(result.get("remembered_note"), "") or "").strip()
+
     rarity = await compute_rarity(
         workspace_id=session.workspace_id,
         game_key=definition.key,
@@ -2270,7 +2412,7 @@ async def _remember_shared_experience(
         action_count=action_count,
         duration_seconds=duration or None,
     )
-    if not rarity.is_notable and not moment_text:
+    if not remembered_note and not rarity.is_notable and not moment_text:
         return {
             "status": "skipped",
             "reason": "not_notable",
@@ -2279,16 +2421,22 @@ async def _remember_shared_experience(
             "failed_sides": [],
         }
 
-    rarity_text = ("" if not rarity.notes else "，".join(rarity.notes) + "。")
-    user_text = (
-        f"我和{session.ai_player.nick_name}一起玩了一局《{definition.title}》，"
-        f"一共走了{action_count}{count_unit}{duration_text}，{outcome_user}。"
-        f"{rarity_text}{moment_text}"
-    )
-    ai_text = (
-        f"我和用户一起玩了一局《{definition.title}》，一共走了{action_count}{count_unit}"
-        f"{duration_text}，{outcome_ai}。{rarity_text}{moment_text}"
-    )
+    # LLM 写的那句优先。它是"回忆"的口吻 (「他第一次在围棋上赢我」), 而下面的模板
+    # 是"台账"口吻 (「走了97步，4分钟」) —— 模板化正是记忆挤成一坨的来源。
+    if remembered_note:
+        user_text = f"我和{session.ai_player.nick_name}玩《{definition.title}》时，{remembered_note}"
+        ai_text = remembered_note
+    else:
+        rarity_text = ("" if not rarity.notes else "，".join(rarity.notes) + "。")
+        user_text = (
+            f"我和{session.ai_player.nick_name}一起玩了一局《{definition.title}》，"
+            f"一共走了{action_count}{count_unit}{duration_text}，{outcome_user}。"
+            f"{rarity_text}{moment_text}"
+        )
+        ai_text = (
+            f"我和用户一起玩了一局《{definition.title}》，一共走了{action_count}{count_unit}"
+            f"{duration_text}，{outcome_ai}。{rarity_text}{moment_text}"
+        )
     return await remember_shared_game_experience(
         user_id=session.user_id,
         workspace_id=session.workspace_id,
