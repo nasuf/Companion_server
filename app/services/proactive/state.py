@@ -626,6 +626,17 @@ async def list_waiting_timeout_states(now: datetime | None = None) -> list[Proac
 
 
 async def has_recent_user_activity(workspace_id: str, *, now: datetime | None = None, window_minutes: int = 30) -> bool:
+    """用户最近在不在。
+
+    「在」不等于「发过消息」—— 一起玩游戏也是在。游戏全程只写 assistant 消息
+    (状态播报 + 完局伴聊), 用户落子不产生 user 消息, 所以只看 messages 的话,
+    一局 20 分钟的棋在主动交流眼里是"沉默了 20 分钟"。实测有 161 局超过 5 分钟
+    且期间用户零消息 —— 主动窗口一旦落在里面, AI 会在陪用户下棋的同时发
+    「好久没聊了」。
+
+    所以这里把进行中/刚结束的对局也算作在场。用的是 game_sessions 的时间而不是
+    给游戏消息伪造 user 角色 —— 伪造会污染聊天历史、记忆抽取和 L2 频率统计。
+    """
     now_ts = _now(now)
     since = now_ts - timedelta(minutes=window_minutes)
     try:
@@ -638,6 +649,26 @@ async def has_recent_user_activity(workspace_id: str, *, now: datetime | None = 
               AND c.is_deleted = FALSE
               AND m.role = 'user'
               AND m.created_at >= $2::timestamp
+            LIMIT 1
+            """,
+            workspace_id,
+            _ts(since),
+        )
+        if rows:
+            return True
+        # 刻意**不按 status 过滤**。实测 status 只有 created / settled / aborted,
+        # 而 created 就是"正在下" (12 局全部 ended_at IS NULL) —— 把它排掉等于漏掉
+        # 最该保护的场景: 棋下到一半被 AI 插一句"好久没聊了"。
+        #
+        # 取最后活动时刻 = ended_at ?? updated_at ?? started_at。落子会推进
+        # updated_at, 所以长对局不会中途被判成沉默; 而弃局很久的 created 局
+        # 时间早就落在窗口外, 不会永久压住主动交流。
+        rows = await db.query_raw(
+            """
+            SELECT 1
+            FROM game_sessions g
+            WHERE g.workspace_id = $1
+              AND COALESCE(g.ended_at, g.updated_at, g.started_at) >= $2::timestamp
             LIMIT 1
             """,
             workspace_id,

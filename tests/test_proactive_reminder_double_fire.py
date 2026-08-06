@@ -130,11 +130,14 @@ async def test_has_recent_user_activity_query_casts_since_as_timestamp():
         mock_db.query_raw = AsyncMock(side_effect=_fake_query)
         await state_mod.has_recent_user_activity("ws-1", now=now)
 
-    assert len(captured_sql) == 1
-    sql = captured_sql[0]
-    assert "role = 'user'" in sql
-    assert "created_at >= $2::timestamp" in sql
-    assert isinstance(captured_args[0][1], str)
+    # 两条查询: 先看用户消息, 没有再看对局 —— 一起玩游戏也算在场, 而游戏全程
+    # 只写 assistant 消息, 只查 messages 会把一局 20 分钟的棋当成"沉默了 20 分钟"。
+    assert len(captured_sql) == 2
+    assert "role = 'user'" in captured_sql[0]
+    assert "FROM game_sessions" in captured_sql[1]
+    for sql, args in zip(captured_sql, captured_args, strict=True):
+        assert ">= $2::timestamp" in sql, f"缺 cast: {sql}"
+        assert isinstance(args[1], str)
 
 
 @pytest.mark.asyncio

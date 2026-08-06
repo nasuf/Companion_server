@@ -849,6 +849,17 @@ async def _attach_remembered_note(session_id: str, note: str) -> None:
         logger.exception("Failed to attach remembered note session=%s", session_id)
 
 
+# 作息状态 → 一句人话。给的是**处境**不是措辞: prompt 拿到"手头正忙"会自己说成
+# "刚忙完这阵" / "偷空陪你下一盘", 比在代码里写死自然。
+#
+# idle 刻意留空 —— 空闲是默认状态, 说"我很闲"反而奇怪。
+_STATE_MOOD = {
+    "busy": "手头还有事没忙完",
+    "very_busy": "正忙得脚不沾地",
+    "sleep": "本来已经准备睡了",
+}
+
+
 async def _agent_state_text(agent_id: str | None) -> str:
     """agent 此刻在干嘛 —— 让伴聊带上"我在上班摸鱼陪你下一盘"这种质感.
 
@@ -859,14 +870,24 @@ async def _agent_state_text(agent_id: str | None) -> str:
     if not agent_id:
         return ""
     try:
-        from app.services.schedule_domain.schedule import get_current_status
+        from app.services.schedule_domain.schedule import (
+            get_cached_schedule,
+            get_current_status,
+        )
 
-        status = await get_current_status(agent_id)
+        schedule = await get_cached_schedule(agent_id)
+        if not schedule:
+            return ""
+        status = get_current_status(schedule)
         if not isinstance(status, dict):
             return ""
-        parts = [str(status.get(k) or "") for k in ("activity", "state")]
-        return "，".join(p for p in parts if p)
+        # 字段名是 event / status —— 不是 activity / state。前者是作息表的槽位描述,
+        # 后者是别的模块的叫法, 传错会静默拿到空串 (dict.get 不报错)。
+        event = str(status.get("event") or "")
+        mood = _STATE_MOOD.get(str(status.get("status") or ""), "")
+        return "，".join(p for p in (event, mood) if p)
     except Exception:
+        logger.exception("Failed to read agent state agent=%s", agent_id)
         return ""
 
 

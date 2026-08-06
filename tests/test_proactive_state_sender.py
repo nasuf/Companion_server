@@ -10,6 +10,7 @@ from app.services.proactive.state import (
     advance_to_next_window,
     claim_due_proactive_state,
     claim_waiting_timeout_state,
+    has_recent_user_activity,
 )
 
 
@@ -155,3 +156,69 @@ async def test_advance_window_normal_increments_next_index():
     mock_escalate.assert_not_awaited()
     args = mock_db.execute_raw.await_args.args
     assert args[2] == 3
+
+
+class TestPresenceIncludesGames:
+    """一起玩游戏也算"用户在场".
+
+    游戏全程只写 assistant 消息 (状态播报 + 完局伴聊), 用户落子不产生 user 消息。
+    只看 messages 的话, 一局 20 分钟的棋在主动交流眼里是"沉默了 20 分钟" ——
+    实测 161 局超过 5 分钟且期间用户零消息。主动窗口落在里面, AI 就会一边陪用户
+    下棋一边发「好久没聊了」。
+    """
+
+    @staticmethod
+    def _rows_for(*, message_hit: bool, game_hit: bool):
+        """按调用顺序返回: 第一次查 messages, 第二次查 game_sessions."""
+        calls = {"n": 0}
+
+        async def _q(sql, *args):
+            calls["n"] += 1
+            if "FROM messages" in sql:
+                return [{"?column?": 1}] if message_hit else []
+            return [{"?column?": 1}] if game_hit else []
+
+        return _q, calls
+
+    @pytest.mark.asyncio
+    async def test_an_active_game_counts_as_presence(self, monkeypatch):
+        q, _ = self._rows_for(message_hit=False, game_hit=True)
+        monkeypatch.setattr("app.services.proactive.state.db.query_raw", q)
+        assert await has_recent_user_activity("ws") is True
+
+    @pytest.mark.asyncio
+    async def test_silence_with_no_game_is_still_silence(self, monkeypatch):
+        q, _ = self._rows_for(message_hit=False, game_hit=False)
+        monkeypatch.setattr("app.services.proactive.state.db.query_raw", q)
+        assert await has_recent_user_activity("ws") is False
+
+    @pytest.mark.asyncio
+    async def test_a_recent_message_short_circuits_the_game_lookup(self, monkeypatch):
+        """消息命中就不必再查一遍对局 —— 这是每分钟跑的热路径."""
+        q, calls = self._rows_for(message_hit=True, game_hit=True)
+        monkeypatch.setattr("app.services.proactive.state.db.query_raw", q)
+        assert await has_recent_user_activity("ws") is True
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_games_in_progress_are_not_filtered_out_by_status(self):
+        """实测 status 只有 created/settled/aborted, 而 created 就是"正在下".
+
+        按 status 过滤会漏掉最该保护的场景, 所以查询里刻意不带 status 条件。
+        """
+        import inspect
+
+        from app.services.proactive import state as mod
+
+        src = inspect.getsource(mod.has_recent_user_activity)
+        game_query = src[src.index("FROM game_sessions"):]
+        assert "status" not in game_query, "按 status 过滤会漏掉进行中的对局"
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_does_not_block_proactive(self, monkeypatch):
+        """查不到就当没在场 —— 宁可多发一条也不能让主动交流永久停摆."""
+        async def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr("app.services.proactive.state.db.query_raw", _boom)
+        assert await has_recent_user_activity("ws") is False

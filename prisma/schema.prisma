@@ -425,6 +425,7 @@ model GameSession {
   @@index([conversationId, createdAt(sort: Desc)], map: "game_sessions_conversation_created_idx")
   @@index([provider, gameKey, createdAt(sort: Desc)], map: "game_sessions_provider_game_created_idx")
   @@index([roomId], map: "game_sessions_room_idx")
+  @@index([workspaceId, startedAt(sort: Desc)], map: "game_sessions_workspace_started_idx")
   @@map("game_sessions")
 }
 
