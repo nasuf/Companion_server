@@ -37,20 +37,23 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# 认得的决策理由代码。**只做白名单, 不在这里翻译成人话** —— 那些措辞放在
-# game.finish_reply 的词表里, 后台可编辑。
+# AI 决策快照里真正有的字段 (2026-08 生产实测 761 条 ai_move_decided):
 #
-# 理由: 这十条是"AI 决策理由变成人话"的唯一出口, 也是这个功能最有价值的部分
-# (别家的游戏 AI 是黑箱, 说不出"我本来想走 M3 抢右边")。文案写死在代码里, 后台
-# 调不了; 而且预写短语会让模型照抄, 反倒失去结合上下文措辞的机会。
+#     algorithm / score / depth|search_depth / nodes_searched /
+#     principal_variation / candidates_considered / move|swap|algebraic
 #
-# 白名单仍留在代码里: 引擎随时会加新 reason, 没在名单里的直接丢比塞给模型一个
-# 它看不懂的 raw code 好。
-_KNOWN_REASONS = frozenset({
-    "territory_and_influence", "capture_threat", "block_win", "double_threat",
-    "extend_line", "center_control", "defend", "safe_merge", "open_space",
-    "clear_lines",
-})
+# **没有 reason 字段** —— 第一版按一条围棋样本假设有 reason 代号 (如
+# territory_and_influence), 实测 740/761 条为 None, 剩下的是扫雷的整句中文。
+# 按代号做白名单等于只覆盖 2/60 局。
+#
+# 现在改用 score + depth: 这两个才是 AI "当时怎么想"的通用表达 —— 局面评分说明
+# 它觉得自己占优还是吃紧, 搜索深度说明它算了多远。所有对弈类引擎都产出这两个,
+# 而且它们是**数值**, 措辞完全交给 prompt, 代码里一个面向用户的字都没有。
+
+# score 的量纲各游戏不同 (黑白棋是子差, 象棋是兵值), 所以只取符号不取绝对值 ——
+# 跨游戏比较数值毫无意义, 但"它当时觉得自己占优/吃紧"是通用的。
+_SCORE_ADVANTAGE = 30
+_SCORE_TROUBLE = -30
 
 # 一局最多给几条素材。给太多 LLM 会平铺直叙念清单, 反而更像报告。
 _MAX_MOMENTS = 3
@@ -80,28 +83,41 @@ class GameNarrative:
 
 
 def _decision_texts(snapshots: list[Any]) -> list[str]:
-    """从 AI 决策快照里挑出"它当时在想什么".
+    """从 AI 决策快照里挑出"它当时怎么想的".
 
-    输出的是 `reason 代码（坐标）`, 由 prompt 里的词表翻译成人话 —— 见
-    `_KNOWN_REASONS` 的说明。同一个 reason 不重复 (下十步都是"想围地"讲一次就够)。
+    输出的是**信号**不是措辞 (`占优 / 吃紧 / 算了 6 步`), 措辞交给 prompt。
+
+    只取局面**转折**的那两步: 每步都报评分会变成流水账, 而"从吃紧翻到占优"那一刻
+    才是有故事的地方。
     """
+    decided = [
+        s for s in snapshots
+        if isinstance(s, dict) and s.get("event_type") == "ai_move_decided"
+    ]
+    if not decided:
+        return []
+
     out: list[str] = []
-    seen: set[str] = set()
-    for snap in snapshots:
-        if not isinstance(snap, dict) or snap.get("event_type") != "ai_move_decided":
+    prev_sign: int | None = None
+    for snap in decided:
+        raw = snap.get("score")
+        if not isinstance(raw, (int, float)):
             continue
-        reason = str(snap.get("reason") or "")
-        if reason not in _KNOWN_REASONS or reason in seen:
-            continue
-        seen.add(reason)
-        # 有坐标就带上 —— "我本来想走 M3" 比"我本来想走别处"具体得多
-        move = snap.get("move")
-        coord = ""
-        if isinstance(move, dict) and move.get("coordinate"):
-            coord = f"（{move['coordinate']}）"
-        out.append(f"{reason}{coord}")
-        if len(out) >= _MAX_DECISIONS:
-            break
+        sign = 1 if raw >= _SCORE_ADVANTAGE else (-1 if raw <= _SCORE_TROUBLE else 0)
+        if prev_sign is not None and sign != prev_sign and sign != 0:
+            # 刻意**不给坐标**。原本想让"我本来想走 M3"更具体, 实测适得其反:
+            #   1. 模型会把 AI 自己的落子说成用户的 ("你 c8b6 那步")
+            #   2. 棋谱坐标对用户没有意义 —— 没人聊天时说"你 c8b6 那步"
+            # 转折发生在第几步、往后算了多远, 这两个才是能讲成人话的。
+            depth = snap.get("depth") or snap.get("search_depth")
+            parts = ["中局开始感觉稳了" if sign > 0 else "中途一度感觉吃紧"]
+            if isinstance(depth, int) and depth >= 3:
+                parts.append(f"当时往后算了 {depth} 步")
+            out.append("，".join(parts))
+            if len(out) >= _MAX_DECISIONS:
+                break
+        if sign != 0:
+            prev_sign = sign
     return out
 
 

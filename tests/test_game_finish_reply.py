@@ -24,10 +24,12 @@ def _rich(**kw) -> GameNarrative:
     base = dict(
         title="围棋", outcome="lose", is_cooperative=False, action_count=40,
         duration_seconds=300, moment_texts=["有一次直接将军"],
-        snapshots=[{
-            "event_type": "ai_move_decided", "reason": "territory_and_influence",
-            "move": {"coordinate": "C17"},
-        }],
+        snapshots=[
+            {"event_type": "ai_move_decided", "score": -80, "depth": 5,
+             "move": {"coordinate": "C17"}},
+            {"event_type": "ai_move_decided", "score": 90, "depth": 6,
+             "move": {"coordinate": "F6"}},
+        ],
         rarity_notes=[],
     )
     base.update(kw)
@@ -35,28 +37,36 @@ def _rich(**kw) -> GameNarrative:
 
 
 class TestNarrative:
-    def test_ai_reasons_are_passed_as_codes_not_prewritten_phrases(self):
-        """代码只传信号, 措辞在 prompt 的词表里 —— 后台才改得动.
+    def test_score_swing_becomes_material(self):
+        """局面从吃紧翻到占优, 那一刻才有故事 —— 每步都报评分会变成流水账.
 
-        预写短语还会让模型照抄, 反倒失去结合上下文措辞的机会。
+        第一版按一条围棋样本假设快照里有 reason 代号, 实测 761 条里 740 条为 None,
+        按代号做白名单只能覆盖 2/60 局。score + depth 才是所有对弈引擎的通用输出。
         """
         n = _rich()
         assert n.decisions
-        assert n.decisions[0].startswith("territory_and_influence")
-        assert "C17" in n.decisions[0]
+        assert "稳了" in n.decisions[0]
+        # 刻意不给坐标: 实测模型会把 AI 自己的落子说成用户的 ("你 c8b6 那步"),
+        # 而且棋谱坐标对用户没有意义 —— 没人聊天时这么说话。
+        assert "F6" not in n.decisions[0]
 
-    def test_repeated_reasons_are_collapsed(self):
-        """下十步都是"想围地"讲一次就够, 重复只会让模型平铺直叙."""
-        snaps = [{"event_type": "ai_move_decided", "reason": "territory_and_influence"}] * 5
-        assert len(_rich(snapshots=snaps).decisions) == 1
+    def test_steady_game_yields_no_decisions(self):
+        """一路顺风没有转折就没什么可讲 —— 硬凑"我一直占优"是废话."""
+        snaps = [{"event_type": "ai_move_decided", "score": 90, "depth": 5}] * 6
+        assert _rich(snapshots=snaps).decisions == []
 
-    def test_unknown_reason_codes_are_dropped(self):
-        """引擎会加新 reason, 没映射的直接丢 —— 把 raw code 塞进 prompt 模型看不懂."""
-        snaps = [{"event_type": "ai_move_decided", "reason": "some_new_heuristic"}]
+    def test_scores_without_sign_change_are_ignored(self):
+        """小幅波动 (在阈值带内) 不算转折."""
+        snaps = [{"event_type": "ai_move_decided", "score": s} for s in (5, -8, 12, -3)]
+        assert _rich(snapshots=snaps).decisions == []
+
+    def test_snapshots_without_score_are_skipped(self):
+        """实测 761 条决策快照里字段差异很大, 缺 score 的直接跳过而不是猜."""
+        snaps = [{"event_type": "ai_move_decided", "algorithm": "mcts"}]
         assert _rich(snapshots=snaps).decisions == []
 
     def test_non_decision_snapshots_are_ignored(self):
-        snaps = [{"event_type": "analysis_snapshot", "reason": "defend"}]
+        snaps = [{"event_type": "analysis_snapshot", "score": 99}]
         assert _rich(snapshots=snaps).decisions == []
 
     def test_empty_game_has_no_substance(self):
@@ -74,28 +84,18 @@ class TestNarrative:
         for canned in ("真棒", "下次再来", "好可惜", "我们一起"):
             assert canned not in text
 
-    def test_reason_wording_lives_in_the_prompt_not_the_code(self):
-        """守住这条: 面向用户的措辞进 registry, 代码只留信号白名单.
-
-        写死在代码里的话后台调不了, 而这些词恰恰是这个功能最该打磨的部分。
-        """
-        import inspect
-
-        from app.services.games import narrative as mod
+    def test_prompt_explains_how_to_use_the_judgement_line(self):
+        """代码只出信号 (占优/吃紧/算了几步), 怎么说完全由 prompt 决定 —— 后台才改得动."""
         from app.services.prompting.defaults import GAME_FINISH_REPLY_PROMPT
 
-        src = inspect.getsource(mod)
-        for phrase in ("想先把那块地围起来", "看到能吃子", "想抢中间的位置"):
-            assert phrase not in src, f"{phrase!r} 应该在 prompt 里, 不在代码里"
-            assert phrase in GAME_FINISH_REPLY_PROMPT, f"prompt 词表缺 {phrase!r}"
+        assert "我当时的判断" in GAME_FINISH_REPLY_PROMPT
+        assert "别报数字" in GAME_FINISH_REPLY_PROMPT
 
-    def test_every_known_reason_has_a_glossary_entry(self):
-        """白名单里放行的代号, prompt 词表里必须解释 —— 否则模型收到看不懂的串."""
-        from app.services.games.narrative import _KNOWN_REASONS
+    def test_prompt_guards_against_swapping_who_won(self):
+        """实测模型会把"用户第一次赢"安到自己头上, 说反胜负比少说一句严重得多."""
         from app.services.prompting.defaults import GAME_FINISH_REPLY_PROMPT
 
-        missing = [r for r in _KNOWN_REASONS if r not in GAME_FINISH_REPLY_PROMPT]
-        assert not missing, f"这些代号会被传给模型但词表没解释: {missing}"
+        assert "不是你的" in GAME_FINISH_REPLY_PROMPT
 
     def test_cooperative_outcome_wording_differs(self):
         """合作游戏没有"我赢了" —— 说错会让 agent 显得没在同一条船上."""
@@ -185,3 +185,81 @@ class TestGeneration:
         })
         assert out.text == "打得不错"
         assert out.worth_remembering is None
+
+
+class TestOutcomeContradictionGuard:
+    """模型会把胜负说反, 而说反的记忆会长期污染人设.
+
+    prompt 里已经写了"「结果」说的是用户的输赢, 不是你的", 实测仍会写出
+    「这是我第一次在象棋里赢下用户」—— 而那局是用户赢的。所以做代码侧兜底。
+    """
+
+    async def _run(self, monkeypatch, memory: str, outcome: str):
+        monkeypatch.setattr(
+            "app.services.prompting.store.get_prompt_text",
+            AsyncMock(return_value="{material}|{agent_state}"),
+        )
+        monkeypatch.setattr(
+            "app.services.llm.models.invoke_json",
+            AsyncMock(return_value={
+                "reply": "这局挺有意思", "worth_remembering": memory,
+            }),
+        )
+        monkeypatch.setattr(
+            "app.services.llm.models.get_utility_model", lambda *a, **k: object(),
+        )
+        return await generate_finish_reply(
+            _rich(outcome=outcome), agent_state="", fallback="兜底",
+        )
+
+    async def test_ai_claiming_a_win_the_user_actually_won_is_dropped(self, monkeypatch):
+        out = await self._run(monkeypatch, "这是我第一次在象棋里赢下用户", "win")
+        assert out.worth_remembering is None
+        # 回复保留: 回复往往是对的, 一起丢损失更大
+        assert out.text == "这局挺有意思"
+
+    async def test_user_claiming_a_win_they_actually_lost_is_dropped(self, monkeypatch):
+        out = await self._run(monkeypatch, "用户第一次赢了我", "lose")
+        assert out.worth_remembering is None
+
+    async def test_correct_attribution_survives(self, monkeypatch):
+        out = await self._run(monkeypatch, "用户第一次在象棋里赢了我", "win")
+        assert out.worth_remembering == "用户第一次在象棋里赢了我"
+
+    @pytest.mark.parametrize("memory", [
+        "我没赢，但这局很激烈",
+        "我差一点就赢了",
+        "这次我没能赢下来",
+        "我输给了他",
+    ])
+    async def test_ai_admitting_it_lost_is_not_a_contradiction(
+        self, monkeypatch, memory,
+    ):
+        """用户赢的局里, AI 说"我没赢"/"我差点赢"是**正确**表述.
+
+        只看"主语 + 赢"会把这些当成说反了而丢掉 —— 跟守卫的初衷正相反。
+        """
+        out = await self._run(monkeypatch, memory, "win")
+        assert out.worth_remembering == memory
+
+    async def test_cooperative_we_won_is_not_an_ai_claim(self, monkeypatch):
+        """合作局的「我们赢了」主语是双方, 不是 AI 自称独赢."""
+        out = await self._run(monkeypatch, "我们一起赢下了这局", "win")
+        assert out.worth_remembering == "我们一起赢下了这局"
+
+    async def test_negation_elsewhere_does_not_excuse_a_real_swap(self, monkeypatch):
+        """否定判定只看匹配到的那一段 —— 后半句的"不"不该给前半句开脱."""
+        out = await self._run(
+            monkeypatch, "这是我第一次赢下用户，他下次不会再输了", "win",
+        )
+        assert out.worth_remembering is None
+
+    async def test_memory_without_any_win_claim_survives(self, monkeypatch):
+        """大多数记忆不提胜负, 不该被误伤."""
+        out = await self._run(monkeypatch, "那次关键交换改变了整个节奏", "win")
+        assert out.worth_remembering == "那次关键交换改变了整个节奏"
+
+    async def test_draw_and_abort_are_not_checked(self, monkeypatch):
+        """平局/中断没有明确胜负, 无从判断矛盾, 不做拦截."""
+        out = await self._run(monkeypatch, "我赢得挺险", "draw")
+        assert out.worth_remembering == "我赢得挺险"
