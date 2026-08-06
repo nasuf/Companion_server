@@ -53,6 +53,10 @@ MIN_MESSAGES_FOR_TIMING = 20
 MIN_MESSAGES_FOR_EMOTION = 15
 MIN_DAYS_FOR_RHYTHM = 5
 MIN_PROACTIVE_FOR_RESPONSE_RATE = 4
+# 少于这个局数说不出"模式"—— 玩过两局跟"喜欢玩游戏"是两回事。
+MIN_GAMES_FOR_PATTERN = 5
+# 胜负比例的最小样本。3 局 2 胜说明不了任何事, 写进画像反而误导。
+MIN_DECIDED_FOR_WINRATE = 6
 
 # 主动消息发出后多久之内的用户消息算"回应了"。取 6 小时而不是几分钟: 用户可能在
 # 忙, 隔几小时回来接上话仍然是回应; 但隔一天再来就是新的一次对话了。
@@ -251,6 +255,102 @@ async def _rhythm_fact(
     )
 
 
+async def _game_fact(
+    user_id: str, agent_id: str, since: datetime, workspace_id: str | None,
+) -> BehaviouralFact | None:
+    """一起玩游戏玩成了什么样 —— 玩什么、玩得多勤、谁赢得多、玩不玩得完。
+
+    这条事实的存在是为了取代**每局一条**的游戏记忆。单局记忆试过, 不成立:
+    21 条里绝大多数是"我们下了一盘五子棋, 他赢了"这种同构句, 向量上高度相似,
+    互相挤占检索位, 而任何一条单独看都不值得想起。
+
+    真正有价值的是模式 ——「他最近迷上了五子棋」「他现在能赢我一半了」。模式属于
+    **特质**不是事实: 它不关于任何话题, 而是关于这段关系怎么运转的, 所以跟作息、
+    情绪基调一样该进画像, 不该进检索池 (见 portrait._behaviour_section)。
+
+    胜负只算完局。中断局占 69% 且中位时长 11-85 秒, 多数是"点进去看一眼就走",
+    算进胜负会让统计失真。但**局数**统计全部, 中断率本身也是个信号 —— 老是开局
+    不下完是个真实的相处特点。
+    """
+    rows = await db.query_raw(
+        """
+        SELECT g.game_key,
+               COUNT(*)::int AS total,
+               COUNT(*) FILTER (WHERE g.status = 'settled')::int AS finished,
+               -- 显式带上 status: 现在中断局的 user_outcome 恒为 'aborted', 所以
+               -- 只按 outcome 过滤也等价。但那是个没写在任何地方的不变量 ——
+               -- 哪天有代码在结算前就写下 outcome, 胜率会静默偏掉。
+               COUNT(*) FILTER (
+                   WHERE g.status = 'settled' AND g.result->>'user_outcome' = 'win'
+               )::int AS won,
+               COUNT(*) FILTER (
+                   WHERE g.status = 'settled' AND g.result->>'user_outcome' = 'lose'
+               )::int AS lost,
+               MAX(g.result->>'game_title') AS title
+        FROM game_sessions g
+        LEFT JOIN conversations c ON c.id = g.conversation_id
+        WHERE g.user_id = $1 AND g.agent_id = $2
+          AND g.workspace_id IS NOT DISTINCT FROM $4
+          AND g.started_at >= $3::timestamp
+          -- 用户删掉的对话不该继续影响 AI 对他的判断。LEFT JOIN + IS NOT TRUE:
+          -- 对局的 conversation_id 可空 (从游戏入口直接开的局没有会话), 那种不算
+          -- 被删, 用 INNER JOIN 会把它们整体丢掉。
+          AND c.is_deleted IS NOT TRUE
+        GROUP BY g.game_key
+        ORDER BY total DESC
+        """,
+        user_id, agent_id, since, workspace_id,
+    )
+    if not rows:
+        return None
+
+    total = sum(r["total"] for r in rows)
+    finished = sum(r["finished"] for r in rows)
+    won = sum(r["won"] for r in rows)
+    lost = sum(r["lost"] for r in rows)
+    decided = won + lost
+    if total < MIN_GAMES_FOR_PATTERN:
+        return None
+
+    top = rows[0]
+    top_name = top["title"] or top["game_key"]
+    parts = [f"{_window_days_of(since)} 天里一起玩了 {total} 局游戏"]
+    if len(rows) == 1:
+        parts.append(f"只玩《{top_name}》")
+    elif top["total"] * 2 >= total:
+        parts.append(f"大半是《{top_name}》")
+    else:
+        parts.append(f"玩得最多的是《{top_name}》，另外还玩了 {len(rows) - 1} 种")
+
+    # 胜负只在分出结果的局足够多时才说 —— 3 局 2 胜说明不了任何事。
+    if decided >= MIN_DECIDED_FOR_WINRATE:
+        rate = won / decided
+        if rate >= 0.65:
+            parts.append(f"他赢得多（{won}/{decided}）")
+        elif rate <= 0.35:
+            parts.append(f"他输得多（赢 {won}/{decided}）")
+        else:
+            parts.append(f"胜负差不多（他赢 {won}/{decided}）")
+
+    if total - finished >= total * 0.5:
+        parts.append("多数局没下完就走了")
+
+    return BehaviouralFact(
+        key="games",
+        statement="，".join(parts),
+        sample_size=total,
+        evidence={
+            "total": total, "finished": finished,
+            "won": won, "lost": lost,
+            "top_game": top["game_key"], "distinct_games": len(rows),
+        },
+    )
+
+
+def _window_days_of(since: datetime) -> int:
+    return max(1, (datetime.now(UTC) - since).days)
+
+
 async def _proactive_response_fact(
     user_id: str, agent_id: str, since: datetime, workspace_id: str | None,
 ) -> BehaviouralFact | None:
@@ -377,7 +477,7 @@ async def collect_behavioural_facts(
     since = datetime.now(UTC) - timedelta(days=window_days)
     producers = (
         _timing_fact, _emotion_fact, _rhythm_fact,
-        _proactive_response_fact, _length_fact,
+        _proactive_response_fact, _length_fact, _game_fact,
     )
 
     facts: list[BehaviouralFact] = []

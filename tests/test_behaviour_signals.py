@@ -13,7 +13,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -210,15 +210,22 @@ class TestScoping:
             )
 
     def test_every_query_excludes_deleted_conversations(self):
-        """用户删掉的对话不该继续影响 AI 对他的判断。"""
+        """用户删掉的对话不该继续影响 AI 对他的判断。
+
+        接受两种写法: 消息类事实走 `is_deleted = false` (INNER JOIN, 消息必然属于
+        某个会话); 游戏类走 `is_deleted IS NOT TRUE` (LEFT JOIN, 对局的
+        conversation_id 可空 —— 从游戏入口直接开的局没有会话, 那种不算被删,
+        用 INNER JOIN 会把它们整体丢掉)。
+        """
         producers = [
             getattr(signals, name) for name in dir(signals)
             if name.endswith("_fact") and name.startswith("_")
         ]
         for produce in producers:
-            assert "is_deleted = false" in _body_without_docstring(produce), (
-                f"{produce.__name__} 统计了已删除会话"
-            )
+            body = _body_without_docstring(produce)
+            assert (
+                "is_deleted = false" in body or "is_deleted IS NOT TRUE" in body
+            ), f"{produce.__name__} 统计了已删除会话"
 
     @pytest.mark.asyncio
     async def test_workspace_is_threaded_through_collection(self):
@@ -274,3 +281,120 @@ def test_facts_carry_evidence_for_review():
             continue
         source = inspect.getsource(getattr(signals, producer_name))
         assert "evidence=" in source, f"{producer_name} 没带 evidence"
+
+
+def _game_rows(*specs):
+    """specs: (game_key, total, finished, won, lost, title)"""
+    return [
+        {"game_key": k, "total": t, "finished": f, "won": w, "lost": l, "title": ti}
+        for k, t, f, w, l, ti in specs
+    ]
+
+
+async def _game_fact(rows):
+    with patch.object(signals.db, "query_raw", AsyncMock(return_value=rows)):
+        return await signals._game_fact(
+            "u", "a", datetime(2026, 7, 23, tzinfo=UTC), "ws",
+        )
+
+
+class TestGamePattern:
+    """一起玩游戏的模式.
+
+    这条事实取代**每局一条**的游戏记忆: 单局记忆试过不成立 —— 21 条里绝大多数是
+    "我们下了一盘五子棋, 他赢了"这种同构句, 向量上高度相似互相挤占检索位, 而任何
+    一条单独看都不值得想起。模式属于特质不是事实, 该进画像不进检索池。
+    """
+
+    @pytest.mark.asyncio
+    async def test_reports_volume_and_favourite(self):
+        f = await _game_fact(_game_rows(("gomoku", 40, 20, 12, 8, "五子棋")))
+        assert f is not None
+        assert "40 局" in f.statement
+        assert "五子棋" in f.statement
+
+    @pytest.mark.asyncio
+    async def test_a_couple_of_games_is_not_a_pattern(self):
+        """玩过两局跟"喜欢玩游戏"是两回事 —— 样本不足就缺席, 不编."""
+        assert await _game_fact(_game_rows(("gomoku", 2, 2, 1, 1, "五子棋"))) is None
+
+    @pytest.mark.asyncio
+    async def test_no_games_at_all_yields_nothing(self):
+        assert await _game_fact([]) is None
+
+    @pytest.mark.asyncio
+    async def test_win_rate_needs_enough_decided_games(self):
+        """3 局 2 胜说明不了任何事, 写进画像反而误导."""
+        f = await _game_fact(_game_rows(("gomoku", 9, 3, 2, 1, "五子棋")))
+        assert f is not None
+        for word in ("赢得多", "输得多", "胜负"):
+            assert word not in f.statement
+
+    @pytest.mark.asyncio
+    async def test_lopsided_results_are_called_out(self):
+        f = await _game_fact(_game_rows(("gomoku", 40, 30, 25, 5, "五子棋")))
+        assert "赢得多" in f.statement
+        f2 = await _game_fact(_game_rows(("gomoku", 40, 30, 5, 25, "五子棋")))
+        assert "输得多" in f2.statement
+
+    @pytest.mark.asyncio
+    async def test_even_results_are_described_as_even(self):
+        f = await _game_fact(_game_rows(("gomoku", 40, 20, 10, 10, "五子棋")))
+        assert "胜负差不多" in f.statement
+
+    @pytest.mark.asyncio
+    async def test_single_game_says_only(self):
+        f = await _game_fact(_game_rows(("gomoku", 20, 10, 5, 5, "五子棋")))
+        assert "只玩" in f.statement
+
+    @pytest.mark.asyncio
+    async def test_variety_is_summarised_not_enumerated(self):
+        """玩了十种不该把十个名字都念出来 —— 画像段落是有预算的."""
+        f = await _game_fact(_game_rows(
+            ("gomoku", 10, 6, 3, 3, "五子棋"), ("xiangqi", 8, 4, 2, 2, "中国象棋"),
+            ("reversi", 6, 3, 1, 2, "黑白棋"), ("match3", 5, 2, 1, 1, "消消乐"),
+        ))
+        assert "另外还玩了 3 种" in f.statement
+        assert "消消乐" not in f.statement
+
+    @pytest.mark.asyncio
+    async def test_heavy_abandonment_is_itself_a_signal(self):
+        """中断局占 69%, 老是开局不下完是个真实的相处特点."""
+        f = await _game_fact(_game_rows(("gomoku", 40, 8, 4, 4, "五子棋")))
+        assert "没下完" in f.statement
+
+    @pytest.mark.asyncio
+    async def test_finishing_most_games_is_not_flagged(self):
+        f = await _game_fact(_game_rows(("gomoku", 40, 36, 18, 18, "五子棋")))
+        assert "没下完" not in f.statement
+
+    @pytest.mark.asyncio
+    async def test_evidence_is_traceable(self):
+        """statement 是给模型看的, evidence 是给人复核的 —— 两者都不能少."""
+        f = await _game_fact(_game_rows(("gomoku", 40, 30, 25, 5, "五子棋")))
+        assert f.evidence["total"] == 40
+        assert f.evidence["top_game"] == "gomoku"
+        assert f.sample_size == 40
+
+    @pytest.mark.asyncio
+    async def test_missing_title_falls_back_to_the_key(self):
+        """老数据可能没有 game_title, 不该渲染出"《None》"."""
+        f = await _game_fact(_game_rows(("gomoku", 20, 10, 5, 5, None)))
+        assert "None" not in f.statement
+
+    @pytest.mark.asyncio
+    async def test_is_registered_in_the_producer_list(self):
+        """写了不挂上等于没写 —— 而且不会报错, 只是这条事实永远缺席."""
+        src = inspect.getsource(collect_behavioural_facts)
+        assert "_game_fact" in src
+
+    @pytest.mark.asyncio
+    async def test_a_broken_game_query_does_not_sink_the_other_facts(self):
+        """单项失败不影响其余 —— 少一条事实只是让归纳少一点依据."""
+        with patch.object(
+            signals, "_game_fact", AsyncMock(side_effect=RuntimeError("boom")),
+        ), patch.object(signals.db, "query_raw", AsyncMock(return_value=[])):
+            facts = await collect_behavioural_facts(
+                user_id="u", agent_id="a", workspace_id="ws",
+            )
+        assert facts == []
