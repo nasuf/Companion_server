@@ -205,7 +205,9 @@ async def get_state(user_id: str, *, game_key: str | None = None) -> dict[str, A
 
     When ``game_key`` is provided, also include ``game_points_for_game`` — the
     net points this specific game has settled for the user (win/milestone credits
-    minus lose/quit debits), for the per-game display on each game screen.
+    minus lose/quit debits), for the per-game display on each game screen — and
+    ``rules``, so the result screen can show what the round is actually worth
+    instead of a hard-coded number.
     """
 
     await ensure_daily_grant(user_id)
@@ -218,8 +220,10 @@ async def get_state(user_id: str, *, game_key: str | None = None) -> dict[str, A
     # converts points to the shop.
     level, next_tier = _resolve_level(lifetime_earned, tiers)
     game_points_for_game: int | None = None
+    rules: dict[str, Any] | None = None
     if game_key:
         game_points_for_game = await _points_for_game(user_id, game_key)
+        rules = await get_rules_for_game(game_key)
     return {
         "balance": balance,
         "lifetime_earned": lifetime_earned,
@@ -231,7 +235,19 @@ async def get_state(user_id: str, *, game_key: str | None = None) -> dict[str, A
         "level": level,
         "next_tier": next_tier,
         "game_points_for_game": game_points_for_game,
+        "rules": rules,
     }
+
+
+async def get_rules_for_game(game_key: str) -> dict[str, Any] | None:
+    """Scoring rules for one game, or None when the game has no row."""
+    rows = await db.query_raw(
+        "SELECT rules FROM game_point_rules WHERE game_key = $1 LIMIT 1",
+        game_key,
+    )
+    if not rows:
+        return None
+    return _load_json(_field(rows[0], "rules"))
 
 
 async def _points_for_game(user_id: str, game_key: str) -> int:
@@ -327,6 +343,8 @@ async def settle_session(session: Any, *, database: Any) -> None:
     )
     if not rows:
         return
+    # Same shape the wallet hands to the client, so the result screen's number
+    # and the ledger entry can never disagree.
     rules = _load_json(_field(rows[0], "rules"))
     rule_type = str(rules.get("type") or "outcome")
 
