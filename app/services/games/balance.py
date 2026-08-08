@@ -527,11 +527,22 @@ def build_engine_config(
             "near_best_tolerance_ratio": round(_lerp(0.01, 0.12, s), 3),
         }
     elif game_key == "tetris_duel":
+        # agent_move_ms is the whole cadence for one piece, because the client
+        # drops the agent's piece straight into place instead of letting it
+        # fall. A person needs to read the board and then bring the piece down,
+        # so the floor here is a couple of seconds: 3200ms..1700ms works out at
+        # roughly 19..35 pieces per minute across the strength range, which is
+        # casual-to-decent human territory. The previous 1600..850 was 38..71
+        # per minute — faster than most people can play, and it showed up as the
+        # agent burying the player before they had landed a handful of pieces.
+        # near_best_* keep it from playing a perfect board on top of that.
+        # Admins can still fine-tune per-game via strength or
+        # algorithm_overrides in 游戏管理.
         config = {
             "duration_seconds": 90,
-            "agent_move_ms": _lerp_int(1050, 400, s),
-            "near_best_probability": round(_lerp(0.30, 0.02, s), 3),
-            "near_best_tolerance": round(_lerp(2.8, 0.2, s), 2),
+            "agent_move_ms": _lerp_int(3200, 1700, s),
+            "near_best_probability": round(_lerp(0.42, 0.12, s), 3),
+            "near_best_tolerance": round(_lerp(3.4, 1.0, s), 2),
         }
     else:
         raise ValueError("unsupported_game")
