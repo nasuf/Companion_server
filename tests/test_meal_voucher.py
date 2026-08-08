@@ -371,6 +371,35 @@ async def test_staff_login_rejects_wrong_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_staff_login_accepts_chinese_key(monkeypatch):
+    # hmac.compare_digest 不支持非 ASCII str; 中文口令须按 UTF-8 bytes 比对。
+    from app.api.public import meal as meal_api
+    from app.services.auth import decode_jwt
+
+    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "千味央厨")
+
+    body = await meal_api.staff_login(
+        meal_api.StaffLoginRequest(key="千味央厨"), FakeRequest()
+    )
+    payload = decode_jwt(body["token"])
+    assert payload["role"] == "meal_staff"
+
+
+@pytest.mark.asyncio
+async def test_staff_login_rejects_wrong_chinese_key(monkeypatch):
+    from app.api.public import meal as meal_api
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(meal_api.settings, "meal_staff_key", "千味央厨")
+
+    with pytest.raises(HTTPException) as exc:
+        await meal_api.staff_login(
+            meal_api.StaffLoginRequest(key="霸王餐"), FakeRequest()
+        )
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_staff_login_issues_scoped_token(monkeypatch):
     from app.api.public import meal as meal_api
     from app.services.auth import decode_jwt

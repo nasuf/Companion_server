@@ -138,11 +138,16 @@ async def staff_login(data: StaffLoginRequest, request: Request):
     本身 (MEAL_STAFF_KEY) 即访问控制。
     """
     expected = settings.meal_staff_key.strip()
-    candidate = data.key.strip().upper()
+    candidate = data.key.strip()
     if not expected and settings.is_production():
         logger.error("MEAL_STAFF_KEY is missing in production")
         raise HTTPException(status_code=503, detail="服务员入口尚未配置")
-    if expected and not hmac.compare_digest(candidate, expected.upper()):
+    # hmac.compare_digest 不支持非 ASCII str (中文口令如「千味央厨」会抛
+    # TypeError), 必须比对 UTF-8 bytes。.upper() 保留对拉丁口令大小写不敏感,
+    # 对中文为空操作。
+    if expected and not hmac.compare_digest(
+        candidate.upper().encode("utf-8"), expected.upper().encode("utf-8")
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="服务员口令错误"
         )
