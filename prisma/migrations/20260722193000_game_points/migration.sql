@@ -107,8 +107,9 @@ INSERT INTO game_level_tiers (sort_order, stage_name, tier_name, upgrade_points,
 ON CONFLICT (sort_order) DO NOTHING;
 
 -- Seed per-game scoring rules (PM spec 2026-07). `quit` = 中途退出.
--- match3 (怪物消消乐) and tetris_duel (双人方块竞速) have no PM spec yet, so they
--- carry placeholder values flagged with "pending_pm" for the admin UI to surface.
+-- tetris_duel (双人方块竞速) was settled at +3 / -3 by the 2026-08-09 art drop.
+-- match3 (怪物消消乐) still has no PM spec, so it keeps placeholder values
+-- flagged with "pending_pm" for the admin UI to surface.
 INSERT INTO game_point_rules (game_key, rules) VALUES
     ('reversi',          '{"type":"outcome","win":4,"lose":-3,"draw":0,"quit":-3}'::jsonb),
     ('gomoku',           '{"type":"outcome","win":3,"lose":-2,"draw":0,"quit":-2}'::jsonb),
@@ -118,6 +119,6 @@ INSERT INTO game_point_rules (game_key, rules) VALUES
     ('chess',            '{"type":"outcome","win":4,"lose":-3,"draw":0,"quit":-3}'::jsonb),
     ('minesweeper',      '{"type":"outcome","win":3,"lose":-2,"draw":0,"quit":-2}'::jsonb),
     ('match3',           '{"type":"outcome","win":3,"lose":-2,"draw":0,"quit":-2,"pending_pm":true}'::jsonb),
-    ('tetris_duel',      '{"type":"outcome","win":4,"lose":-3,"draw":0,"quit":-3,"pending_pm":true}'::jsonb),
+    ('tetris_duel',      '{"type":"outcome","win":3,"lose":-3,"draw":0,"quit":-3}'::jsonb),
     ('number_merge',     '{"type":"milestone","milestones":[{"tile":128,"points":2},{"tile":256,"points":5},{"tile":512,"points":6},{"tile":1024,"points":15},{"tile":2048,"points":25}],"quit_below_threshold":{"threshold":128,"below":-2,"at_or_above":0}}'::jsonb)
 ON CONFLICT (game_key) DO NOTHING;

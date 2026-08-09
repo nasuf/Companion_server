@@ -30,9 +30,6 @@ class GameWalletResponse(BaseModel):
     # Net points settled for a specific game; only populated when the request
     # scopes to a game_key (per-game display on each game screen).
     game_points_for_game: int | None = None
-    # This game's scoring rules, so the client can show the real value of a
-    # round on the result screen. Only populated alongside a game_key.
-    rules: dict[str, Any] | None = None
 
 
 class GamePointConvertRequest(BaseModel):

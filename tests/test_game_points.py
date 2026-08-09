@@ -68,9 +68,10 @@ def test_milestone_delta_awards_highest_reached_tile():
     assert game_points._milestone_delta(rules, "win", 2048) == 25
     assert game_points._milestone_delta(rules, "lose", 1024) == 15
     assert game_points._milestone_delta(rules, "lose", 200) == 2
-    assert game_points._milestone_delta(rules, "lose", 64) == 0
-    # Quit uses the threshold rule, not the milestone ladder.
+    # Short of the first milestone the round is a loss however it ended.
+    assert game_points._milestone_delta(rules, "lose", 64) == -2
     assert game_points._milestone_delta(rules, "aborted", 64) == -2
+    # At or past it, quitting forfeits the payout but is not penalised.
     assert game_points._milestone_delta(rules, "aborted", 256) == 0
 
 
