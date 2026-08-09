@@ -29,8 +29,11 @@ def _trigger(
     *, tid="t-1", active=True, last_fired=None,
     summary="喝水", recurrence="once", retry_count=0, habit_weekdays=None,
     completed_at=None, deleted_at=None, completed_dates=None, sent_to_ai=False,
+    note=None,
 ):
     data = {"summary": summary, "memory_id": "mem-1", "recurrence": recurrence}
+    if note is not None:
+        data["note"] = note
     if retry_count:
         data["retry_count"] = retry_count
     if habit_weekdays is not None:
@@ -422,6 +425,29 @@ def test_item_shape_includes_habit_weekdays(client):
     assert item["habit_weekdays"] == [1, 5]
 
 
+def test_item_shape_includes_note(client):
+    """note 存在 actionData; 缺省与空白都塌成 null."""
+    triggers = [
+        _trigger(tid="t-note", note="  记得带水杯  "),
+        _trigger(tid="t-blank", note="   "),
+        _trigger(tid="t-none"),
+    ]
+    fake_redis = MagicMock(zcard=AsyncMock(return_value=0))
+
+    with (
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.get_redis",
+              new_callable=AsyncMock, return_value=fake_redis),
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.count = AsyncMock(return_value=len(triggers))
+        mock_db.timetrigger.find_many = AsyncMock(return_value=triggers)
+        r = client.get("/reminders?user_id=u1", headers=_hdr("u1"))
+
+    notes = {item["id"]: item["note"] for item in r.json()["items"]}
+    assert notes == {"t-note": "记得带水杯", "t-blank": None, "t-none": None}
+
+
 def test_item_classify_status_cancelled_when_inactive_no_lastfired(client):
     """isActive=False + lastFired=None → cancelled (用户主动取消, 没真响过)."""
     trigger = _trigger(tid="t-cancel", active=False, last_fired=None)
@@ -513,6 +539,98 @@ def test_update_reminder_sent_to_ai_round_trips(client):
     update_data = mock_db.timetrigger.update.await_args.kwargs["data"]
     assert update_data["actionData"].data["sent_to_ai"] is True
     assert update_data["actionData"].data["conversation_id"] == "conv-1"
+
+
+def test_update_reminder_note_round_trips_and_clears(client):
+    """空字符串是「清空备注」的显式信号, 要把 key 从 actionData 摘掉."""
+    with (
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.find_unique = AsyncMock(return_value=_trigger(tid="t-note"))
+        mock_db.timetrigger.update = AsyncMock(return_value=_trigger(tid="t-note", note="带水杯"))
+        saved = client.patch(
+            "/reminders/t-note",
+            json={"note": "  带水杯  "},
+            headers=_hdr("u1"),
+        )
+        saved_data = mock_db.timetrigger.update.await_args.kwargs["data"]
+
+        mock_db.timetrigger.find_unique = AsyncMock(
+            return_value=_trigger(tid="t-note", note="带水杯")
+        )
+        mock_db.timetrigger.update = AsyncMock(return_value=_trigger(tid="t-note"))
+        cleared = client.patch(
+            "/reminders/t-note",
+            json={"note": ""},
+            headers=_hdr("u1"),
+        )
+        cleared_data = mock_db.timetrigger.update.await_args.kwargs["data"]
+
+    assert saved.status_code == 200
+    assert saved.json()["note"] == "带水杯"
+    assert saved_data["actionData"].data["note"] == "带水杯"
+
+    assert cleared.status_code == 200
+    assert cleared.json()["note"] is None
+    assert "note" not in cleared_data["actionData"].data
+
+
+def test_update_completed_once_rejects_note_edit(client):
+    trigger = _trigger(
+        tid="t-completed-note",
+        active=False,
+        last_fired=datetime(2026, 5, 3, 10, 0, tzinfo=timezone.utc),
+        completed_at="2026-05-03T10:00:00+00:00",
+    )
+
+    with patch("app.services.reminder.checkin.db") as mock_db:
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.find_unique = AsyncMock(return_value=trigger)
+        mock_db.timetrigger.update = AsyncMock()
+        r = client.patch(
+            "/reminders/t-completed-note",
+            json={"note": "补一句"},
+            headers=_hdr("u1"),
+        )
+
+    assert r.status_code == 409
+    mock_db.timetrigger.update.assert_not_awaited()
+
+
+def test_create_reminder_persists_note(client):
+    seeded = _trigger(tid="t-new")
+    created = _trigger(tid="t-new", note="带水杯")
+    agent = SimpleNamespace(id="agent-A", userId="u1", workspaceId=None)
+
+    with (
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin._ensure_agent_scope",
+              new_callable=AsyncMock, return_value=agent),
+        patch("app.services.reminder.checkin.create_user_reminder",
+              new_callable=AsyncMock, return_value="mem-1"),
+        patch("app.services.reminder.checkin._fetch_trigger_for_memory",
+              new_callable=AsyncMock, return_value=seeded),
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.update = AsyncMock(return_value=created)
+        r = client.post(
+            "/reminders",
+            json={
+                "agent_id": "agent-A",
+                "summary": "喝水",
+                "note": "  带水杯  ",
+                "trigger_time": "2099-05-03T10:00:00+00:00",
+            },
+            headers=_hdr("u1"),
+        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["note"] == "带水杯"
+    action_data = mock_db.timetrigger.update.await_args.kwargs["data"]["actionData"].data
+    assert action_data["note"] == "带水杯"
 
 
 def test_update_deleted_reminder_rejected(client):

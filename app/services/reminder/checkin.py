@@ -33,11 +33,15 @@ from app.services.reminder.scheduling import (
 from app.services.proactive.triggers import _DLQ_KEY
 
 
+NOTE_MAX_LENGTH = 500
+
+
 class ReminderItem(BaseModel):
     """单条提醒条目 (active / fired / cancelled 共用 shape)."""
     id: str  # trigger.id
     memory_id: str | None
     summary: str
+    note: str | None = None
     trigger_time: str  # ISO
     last_fired: str | None  # ISO
     completed_at: str | None = None
@@ -56,6 +60,7 @@ class ReminderCreate(BaseModel):
     agent_id: str
     workspace_id: str | None = None
     summary: str
+    note: str | None = None
     trigger_time: str
     recurrence: RecurrenceKind = "once"
     habit_weekdays: list[int] | None = None
@@ -65,6 +70,7 @@ class ReminderCreate(BaseModel):
 
 class ReminderUpdate(BaseModel):
     summary: str | None = None
+    note: str | None = None
     trigger_time: str | None = None
     recurrence: RecurrenceKind | None = None
     habit_weekdays: list[int] | None = None
@@ -133,6 +139,7 @@ def _to_item(trigger) -> ReminderItem:
         id=trigger.id,
         memory_id=data.get("memory_id") or None,
         summary=str(data.get("summary") or "")[:200],
+        note=_normalize_note(data.get("note")),
         trigger_time=trigger.triggerTime.isoformat(),
         last_fired=trigger.lastFired.isoformat() if trigger.lastFired else None,
         completed_at=data.get("completed_at") or None,
@@ -183,6 +190,16 @@ def _normalize_weekdays(value, *, allow_empty: bool = False) -> list[int]:
     if not weekdays and not allow_empty:
         raise HTTPException(status_code=400, detail="habit_weekdays cannot be empty")
     return weekdays
+
+
+def _normalize_note(value) -> str | None:
+    """Trim + clamp the optional note; blank text collapses to None."""
+    if not isinstance(value, str):
+        return None
+    note = value.strip()
+    if not note:
+        return None
+    return note[:NOTE_MAX_LENGTH]
 
 
 def _normalize_date_key(value: str | None) -> str:
@@ -385,6 +402,9 @@ async def create_reminder_for_user(
     action_data = dict(trigger.actionData or {})
     if habit_weekdays:
         action_data["habit_weekdays"] = habit_weekdays
+    note = _normalize_note(data.note)
+    if note:
+        action_data["note"] = note
     action_data["sent_to_ai"] = bool(data.sent_to_ai)
     action_data["conversation_id"] = data.conversation_id
     trigger = await db.timetrigger.update(
@@ -405,6 +425,7 @@ async def update_reminder_for_user(
         raise HTTPException(status_code=409, detail="提醒已删除")
     immutable_update = (
         data.summary is not None
+        or data.note is not None
         or data.trigger_time is not None
         or data.recurrence is not None
         or data.habit_weekdays is not None
@@ -420,6 +441,12 @@ async def update_reminder_for_user(
         if not summary:
             raise HTTPException(status_code=400, detail="summary cannot be empty")
         action_data["summary"] = summary[:200]
+    if data.note is not None:
+        note = _normalize_note(data.note)
+        if note:
+            action_data["note"] = note
+        else:
+            action_data.pop("note", None)
     if data.recurrence is not None:
         action_data["recurrence"] = data.recurrence
         if data.recurrence != "weekly":
