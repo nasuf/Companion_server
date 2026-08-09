@@ -393,6 +393,8 @@ async def create_reminder_for_user(
         occur_time=trigger_time,
         statement_time=datetime.now(UTC),
         recurrence=data.recurrence,
+        # 打卡页是任务清单: 按一次保存就是一条计划, 不跟同名的旧计划归并。
+        force_new=True,
     )
     if not memory_id:
         raise HTTPException(status_code=500, detail="Reminder create failed")

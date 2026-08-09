@@ -434,6 +434,7 @@ async def create_user_reminder(
     occur_time: datetime,
     statement_time: datetime,
     recurrence: RecurrenceKind = "once",
+    force_new: bool = False,
 ) -> str | None:
     """端到端建 1 条 user-side reminder: store_memory + dedup + upsert trigger.
     返回 memory_id (失败 None).
@@ -445,13 +446,17 @@ async def create_user_reminder(
     dedup 命中时 (相同 summary 已存在): 不 silently skip, 而是 update 旧 memory
     的 occurTime + statementTime 到新值 (用户重设语义), 用 existing memory_id
     继续建/重设 trigger.
+
+    `force_new=True` 关掉这套重设语义, 每次都落一条独立记忆 + 独立 trigger.
+    聊天里说两遍"提醒我X"是同一件事要改时间, 但打卡页按两次「保存计划」是两条
+    计划 — 归并会让用户看着少了一条, 而且删掉后同名再也建不出来。
     """
     from app.services.memory.storage import repo as memory_repo
     from app.services.memory.storage.embedding import generate_embedding
     from app.services.memory.storage.persistence import find_duplicate_id, store_memory
 
-    try:
-        memory_id = await store_memory(
+    async def _store(*, standalone: bool) -> str | None:
+        return await store_memory(
             user_id=user_id,
             content=summary,
             level=3,
@@ -464,12 +469,16 @@ async def create_user_reminder(
             workspace_id=workspace_id,
             source="user",
             recurrence=recurrence,
+            skip_reconciliation=standalone,
         )
+
+    try:
+        memory_id = await _store(standalone=force_new)
     except Exception as e:
         logger.warning(f"[REMINDER] create_user_reminder: store_memory failed: {e}")
         return None
 
-    if not memory_id:
+    if not memory_id and not force_new:
         # dedup 命中 → 复用 existing memory_id, 更新 occurTime 到新时刻 (重设语义)
         try:
             embedding = await generate_embedding(summary)
@@ -490,8 +499,25 @@ async def create_user_reminder(
             logger.warning(f"[REMINDER] dedup fallback failed: {e}")
             return None
 
+    if not memory_id and not force_new:
+        # 两道判据不是同一套: reconciliation 按文本规则丢弃 (同类目下文本相同或
+        # 被包含即可, 不看向量), find_duplicate_id 只认 cosine > DEDUP_THRESHOLD。
+        # 它们不一致时旧代码直接放弃, 用户就永远建不出这条提醒 (生产 500)。
+        # 提醒是用户显式要求的, 宁可多存一行记忆也不能建不出来。
+        # force_new 已经是 standalone 写入, 再试一次只会拿到同样的结果。
+        try:
+            memory_id = await _store(standalone=True)
+        except Exception as e:
+            logger.warning(f"[REMINDER] standalone store failed: {e}")
+            return None
+        if memory_id:
+            logger.info(
+                f"[REMINDER] dedup verdicts disagreed; stored standalone "
+                f"memory={memory_id[:8]}"
+            )
+
     if not memory_id:
-        logger.warning("[REMINDER] both store_memory and dedup lookup failed; aborting")
+        logger.warning("[REMINDER] every store path failed; aborting")
         return None
 
     await upsert_reminder_trigger(

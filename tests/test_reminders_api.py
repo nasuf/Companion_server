@@ -633,6 +633,83 @@ def test_create_reminder_persists_note(client):
     assert action_data["note"] == "带水杯"
 
 
+def test_create_reminder_from_checkin_never_merges_into_an_existing_plan(client):
+    """打卡页每按一次保存都是一条新计划。
+
+    归并语义属于聊天路径 (说两遍"提醒我X"= 改时间); 打卡页沿用它会让同名计划
+    看着少一条, 删掉之后同名更是永远建不出来。
+    """
+    seeded = _trigger(tid="t-new")
+    agent = SimpleNamespace(id="agent-A", userId="u1", workspaceId=None)
+
+    with (
+        patch("app.services.reminder.checkin.db") as mock_db,
+        patch("app.services.reminder.checkin._ensure_agent_scope",
+              new_callable=AsyncMock, return_value=agent),
+        patch("app.services.reminder.checkin.create_user_reminder",
+              new_callable=AsyncMock, return_value="mem-1") as create,
+        patch("app.services.reminder.checkin._fetch_trigger_for_memory",
+              new_callable=AsyncMock, return_value=seeded),
+        patch("app.services.reminder.checkin.notify_reminder_changed", new_callable=AsyncMock),
+    ):
+        mock_db.timetrigger = MagicMock()
+        mock_db.timetrigger.update = AsyncMock(return_value=seeded)
+        r = client.post(
+            "/reminders",
+            json={
+                "agent_id": "agent-A",
+                "summary": "测试一",
+                "trigger_time": "2099-05-03T10:00:00+00:00",
+            },
+            headers=_hdr("u1"),
+        )
+
+    assert r.status_code == 200, r.text
+    assert create.await_args.kwargs["force_new"] is True
+
+
+async def test_create_user_reminder_survives_disagreeing_dedup_verdicts():
+    """两道查重判据不一致时仍然要把提醒建出来。
+
+    reconciliation 按文本规则丢弃 (同类目文本相同/被包含即可), find_duplicate_id
+    只认 cosine > DEDUP_THRESHOLD — 生产上这两条不一致直接让 POST /reminders 返
+    500, 同名计划再也建不出来。
+    """
+    from app.services.memory.storage import embedding as embedding_mod
+    from app.services.memory.storage import persistence as persistence_mod
+    from app.services.reminder import scheduling
+
+    standalone_flags: list[bool] = []
+
+    async def fake_store(**kwargs):
+        standalone = bool(kwargs.get("skip_reconciliation"))
+        standalone_flags.append(standalone)
+        return "mem-forced" if standalone else None
+
+    with (
+        patch.object(persistence_mod, "store_memory", fake_store),
+        patch.object(persistence_mod, "find_duplicate_id",
+                     new_callable=AsyncMock, return_value=None),
+        patch.object(embedding_mod, "generate_embedding",
+                     new_callable=AsyncMock, return_value=[0.1, 0.2]),
+        patch.object(scheduling, "upsert_reminder_trigger",
+                     new_callable=AsyncMock, return_value="trig-1") as upsert,
+    ):
+        memory_id = await scheduling.create_user_reminder(
+            user_id="u1",
+            agent_id="agent-A",
+            workspace_id="ws-1",
+            summary="测试一",
+            occur_time=datetime(2099, 5, 3, 10, tzinfo=timezone.utc),
+            statement_time=datetime(2099, 5, 3, 9, tzinfo=timezone.utc),
+        )
+
+    assert memory_id == "mem-forced"
+    # 先按常规写入, 被判重后才强制独立落一行。
+    assert standalone_flags == [False, True]
+    upsert.assert_awaited_once()
+
+
 def test_update_deleted_reminder_rejected(client):
     trigger = _trigger(tid="t-deleted", deleted_at="2026-05-03T10:00:00+00:00")
 
