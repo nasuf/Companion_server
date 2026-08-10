@@ -20,11 +20,8 @@ import inspect
 
 import pytest
 
-from app.services.games.native import (
-    _NOT_REALLY_PLAYED_REPLY as _NOT_REALLY_PLAYED,
-)
 from app.services.games.native import _has_heavy_capture, _memory_moment
-from app.services.games.quick_exit import _LINES, quick_exit_line
+from app.services.games.quick_exit import quick_exit_reply
 from app.services.games.substance import (
     _ACTION_FLOOR,
     action_floor,
@@ -90,7 +87,7 @@ class TestWiring:
         from app.services.games.native import _persist_chat_side_effects
 
         src = inspect.getsource(_persist_chat_side_effects)
-        condition = src[src.index("if _is_quick_exit") : src.index("_quick_exit_reply")]
+        condition = src[src.index("if _is_quick_exit") : src.index("quick_exit_reply()")]
         assert "game_finished" not in condition, "quick-exit 分支不该只对完局生效"
 
     def test_rarity_pool_excludes_trivial_games(self):
@@ -196,14 +193,14 @@ class TestFallbackWording:
     def test_real_games_keep_their_wording(self):
         """只拦没玩起来的局, 真局的文案一个字不动."""
         text = self._generic("xiangqi", 40, "lose")
-        assert text != _NOT_REALLY_PLAYED
+        assert text != quick_exit_reply()
 
     def test_gomoku_path_is_covered_too(self):
         """五子棋走独立的 _finish_reply, 漏了它等于半个修复."""
         from app.services.games.native import _finish_reply
 
         text = _finish_reply(None, {"user_outcome": "lose", "gomoku": {"move_count": 2}})
-        assert text == _NOT_REALLY_PLAYED
+        assert text == quick_exit_reply()
 
     def test_gomoku_real_game_still_describes_the_line(self):
         from app.services.games.native import _finish_reply
@@ -212,173 +209,68 @@ class TestFallbackWording:
             None,
             {"user_outcome": "win", "gomoku": {"move_count": 30, "winning_line": []}},
         )
-        assert text != _NOT_REALLY_PLAYED
+        assert text != quick_exit_reply()
 
 
-class TestQuickExitLine:
-    """开局就走说的那一句.
 
-    这里守两件事: 不能是同一句话反复出现 (那是机械感的来源), 也不能提输赢
-    (系统判了用户负, 但用户的体感是根本没玩)。
 
-    刻意**不调 LLM**: 同一组 7 个场景上, 小模型 qwen3.5-flash 和主模型豆包
-    character 都只产出 2 种不同的话, 5 条一字不差是「咦，不玩了？」。换了四版
-    prompt (给例句/给反例/硬要求用上数字/改成第一人称视角) 都没救回来 —— 0 步
-    2 秒的空局可说的太少, 任何模型都会收敛到中文里最自然的那句。
+class TestQuickExitStaysSilent:
+    """点开又关时 AI 什么都不说.
+
+    这条守的是一次真实的骚扰: 上一版做了 10 分钟冷却 + 3 档 × 4 句轮换, 生产上
+    3 天发出 **84 条**, 时间戳精确落在 11:00 / 11:10 / 11:20 / 11:30 ——
+    **限流只是限流, 它从不停止**。用户持续摆弄界面就一整天每小时收 6 条。
+
+    真朋友看你反复点开关掉, 说一次就不再提了。而"说一次"本身价值也很低: 进出游戏
+    在聊天里已经有系统卡片, AI 再评论一句是复述。
     """
 
-    def test_consecutive_reactions_never_repeat(self):
-        """连着几次都说同一句正是要修的毛病."""
-        lines = [quick_exit_line(action_count=0, repeat=i) for i in range(1, 7)]
-        assert len(set(lines)) == len(lines), lines
+    def test_no_message_is_produced(self):
+        assert quick_exit_reply() == ""
 
-    def test_never_announces_a_result(self):
-        for acts in (0, 1, 2):
-            for rep in range(1, 13):
-                line = quick_exit_line(action_count=acts, repeat=rep)
-                for verdict in ("赢", "输", "胜", "负"):
-                    assert verdict not in line, line
+    def test_takes_no_arguments_so_there_is_nothing_to_tune(self):
+        """无参数是刻意的 —— 有了"第几次"/"几步"这些入参就会有人想按它们分档,
+        而那正是上一版发出 84 条的起点。"""
+        import inspect
 
-    def test_never_nags_the_user_back(self):
-        """不催他回来玩, 也不追问为什么走 —— 那会变成压力."""
-        for rep in range(1, 13):
-            line = quick_exit_line(action_count=0, repeat=rep)
-            for nag in ("再来一局", "为什么", "怎么不玩", "继续玩"):
-                assert nag not in line, line
+        assert not inspect.signature(quick_exit_reply).parameters
 
-    def test_untouched_and_barely_played_read_differently(self):
-        """一子没落跟走了两步是两种体感, 混用会露馅."""
-        assert quick_exit_line(action_count=0, repeat=1) != quick_exit_line(
-            action_count=2, repeat=1,
-        )
+    def test_no_canned_lines_survive_in_the_module(self):
+        """模块里不该再留句子池: 留着就会被接回去用."""
+        import inspect
 
-    def test_repeated_fiddling_gets_its_own_register(self):
-        """今天第 5 次点开又关, 熟人之间该有点调侃."""
-        line = quick_exit_line(action_count=0, repeat=5)
-        assert line not in _LINES["untouched"]
-        assert line in _LINES["repeated"]
+        from app.services.games import quick_exit
 
-    def test_lines_stay_short(self):
-        """一句随口的话。长了就不像抬头看了一眼."""
-        for bucket in _LINES.values():
-            for line in bucket:
-                assert len(line) <= 20, line
+        src = inspect.getsource(quick_exit)
+        body = src[src.index('"""', src.index('"""') + 3):]  # 跳过模块 docstring
+        for canned in ("棋盘", "不玩了", "撤啦", "摆熟"):
+            assert canned not in body, f"句子池残留: {canned}"
 
+    def test_no_rate_limiting_machinery_survives(self):
+        """冷却 = 限流 = 最终还是会发。不留 Redis 计数就不会有人重新打开这条路."""
+        import inspect
 
-class TestReactionCooldown:
-    """连着点开关掉时保持安静.
+        from app.services.games import quick_exit
 
-    实测相邻两次开局就走有 42% 发生在 2 分钟内 (158/380), 同一天最多 56 次。
-    每次都回一句就是噪音 —— 真朋友看你翻界面不会说六次话。
-    """
+        src = inspect.getsource(quick_exit)
+        for machinery in ("get_redis", "COOLDOWN", "incr", "pipeline"):
+            assert machinery not in src, f"限流机制残留: {machinery}"
 
-    @pytest.mark.asyncio
-    async def test_first_exit_speaks_and_the_next_one_stays_quiet(self, monkeypatch):
-        from app.services.games import quick_exit as qe
+    def test_the_pattern_still_reaches_the_ai_elsewhere(self):
+        """沉默不等于丢信息: "老是点开又关"该沉淀成印象, 不是逐次评论."""
+        import inspect
 
-        store: dict = {}
+        from app.services.games.daily_digest import render_digest
+        from app.services.memory.behaviour_signals import _game_fact
 
-        class _Pipe:
-            """够真实地模拟 SET NX / INCR —— 假得太宽松的话测试证明不了任何事."""
+        assert "没下完就走了" in inspect.getsource(_game_fact)
+        assert inspect.getsource(render_digest)
 
-            def __init__(self):
-                self.ops = []
+    def test_both_sync_paths_use_the_same_exit(self):
+        """五子棋和其他游戏各有一条同步文案路径 —— 漏一条就又开始编造."""
+        import inspect
 
-            def set(self, key, val, ex=None, nx=False):
-                exists = key in store
-                if nx and exists:
-                    self.ops.append(None)  # SET NX 命中已有键返回 nil
-                    return
-                store[key] = val
-                self.ops.append(True)
+        from app.services.games.native import _finish_reply, _generic_finish_reply
 
-            def incr(self, key):
-                store[key] = int(store.get(key, 0)) + 1
-                self.ops.append(store[key])
-
-            def expire(self, key, ttl):
-                self.ops.append(True)
-
-            async def execute(self):
-                return self.ops
-
-        class _Redis:
-            def pipeline(self):
-                return _Pipe()
-
-        async def _get():
-            return _Redis()
-
-        monkeypatch.setattr("app.redis_client.get_redis", _get)
-
-        speak1, n1 = await qe.check_reaction("c1")
-        speak2, n2 = await qe.check_reaction("c1")
-        assert (speak1, n1) == (True, 1)
-        assert speak2 is False, "窗口内第二次不该出声"
-        assert n2 == 2, "次数仍要累加 —— 它是素材, 不只是门控"
-
-    @pytest.mark.asyncio
-    async def test_redis_failure_errs_on_the_side_of_speaking(self, monkeypatch):
-        """静默失效的表现是"AI 对游戏毫无反应", 排查比多一条消息麻烦得多."""
-        from app.services.games import quick_exit as qe
-
-        async def _boom():
-            raise RuntimeError("redis down")
-
-        monkeypatch.setattr("app.redis_client.get_redis", _boom)
-        assert await qe.check_reaction("c1") == (True, 1)
-
-    @pytest.mark.asyncio
-    async def test_missing_conversation_stays_quiet(self):
-        """没有会话就没地方发消息, 更不该去占冷却名额."""
-        from app.services.games import quick_exit as qe
-
-        assert await qe.check_reaction(None) == (False, 0)
-
-    @pytest.mark.asyncio
-    async def test_the_daily_count_window_starts_at_the_first_exit(self, monkeypatch):
-        """计数窗口是"距第一次 24 小时", 不是"距上次 24 小时".
-
-        用 INCR 之后 EXPIRE 的话每次调用都刷新 TTL —— 每天点开一次的用户计数会跨天
-        无限累积, 说出"今天已经第 30 次"而那是几周攒的。正确做法是先 SET NX 建种
-        (带 TTL) 再 INCR, INCR 不会清掉已有 TTL。
-        """
-        from app.services.games import quick_exit as qe
-
-        ttl_writes: list[tuple[str, int | None, bool]] = []
-
-        class _Pipe:
-            def __init__(self):
-                self.ops = []
-
-            def set(self, key, val, ex=None, nx=False):
-                ttl_writes.append((key, ex, nx))
-                self.ops.append(True)
-
-            def incr(self, key):
-                self.ops.append(1)
-
-            def expire(self, key, ttl):
-                ttl_writes.append((key, ttl, False))
-                self.ops.append(True)
-
-            async def execute(self):
-                return self.ops
-
-        async def _get():
-            return type("R", (), {"pipeline": lambda self: _Pipe()})()
-
-        monkeypatch.setattr("app.redis_client.get_redis", _get)
-        await qe.check_reaction("c1")
-
-        count_writes = [w for w in ttl_writes if "count" in w[0]]
-        assert count_writes, "计数键必须带过期时间, 否则会永久累积"
-        for _key, ttl, nx in count_writes:
-            assert nx is True, "刷新 TTL 会让窗口变成'距上次 24 小时'"
-            assert ttl == qe._COUNT_TTL_SECONDS
-
-    def test_cooldown_window_is_wide_enough_to_cover_a_burst(self):
-        """2 分钟内的连击占 42%, 10 分钟内占 60% —— 窗口太窄就挡不住成串的那批."""
-        from app.services.games.quick_exit import REACTION_COOLDOWN_SECONDS
-
-        assert REACTION_COOLDOWN_SECONDS >= 300
+        for fn in (_finish_reply, _generic_finish_reply):
+            assert "quick_exit_reply()" in inspect.getsource(fn), fn.__name__

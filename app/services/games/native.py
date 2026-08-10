@@ -20,7 +20,7 @@ from app.services.games import balance
 from app.services.games.rarity import compute_rarity
 from app.services.games.finish_reply import generate_finish_reply
 from app.services.games.narrative import build_narrative
-from app.services.games.quick_exit import check_reaction, quick_exit_line
+from app.services.games.quick_exit import quick_exit_reply
 from app.services.games.substance import played_enough
 from app.services.schedule_domain import time_service
 from app.services import game_points
@@ -780,8 +780,10 @@ async def _persist_chat_side_effects(
     ).strip()
     if _is_quick_exit(updated) and not already_written:
         # 点开又关 —— 不管落 settled 还是 aborted 都是同一件事 (中途退出也判负)。
-        # 这里连"要不要出声"都可能是否, 见 quick_exit 模块。
-        reply = await _quick_exit_reply(updated)
+        # AI 什么都不说: 进出游戏已经有系统卡片, 再评论一句是复述; 而这类局占终局
+        # 的一半, 任何形式的"说点什么"都会变成骚扰 (限流版实测 3 天发了 84 条)。
+        # 用户老是点开又关这个信息走画像和每日总结, 见 quick_exit 模块。
+        reply = quick_exit_reply()
     elif reply and not already_written:
         # 玩起来了就上 LLM, **不分下完没下完**。
         #
@@ -912,28 +914,6 @@ def _is_quick_exit(session: NativeSessionResponse) -> bool:
     """点开又关, 没真正玩起来."""
     definition = _definition(session.game_key)
     return not played_enough(definition.key, _session_action_count(session))
-
-
-async def _quick_exit_reply(session: NativeSessionResponse) -> str:
-    """开局就走时说的那一句 —— 空串表示这次不出声.
-
-    实测这类局占终局的 52%, 且 42% 成串出现在 2 分钟内。连着点开关掉时保持安静
-    才像朋友; 每次都回一句 (更别说每次回同一句) 才是机械感的来源。
-    """
-    try:
-        speak, repeat = await check_reaction(session.conversation_id)
-        if not speak:
-            logger.info(
-                "[GAME-REPLY] session=%s quick-exit silent (cooldown, repeat=%d)",
-                session.id[:8], repeat,
-            )
-            return ""
-        return quick_exit_line(
-            action_count=_session_action_count(session), repeat=repeat,
-        )
-    except Exception:
-        logger.exception("Quick-exit reply failed session=%s", session.id)
-        return ""
 
 
 async def _llm_finish_reply(
@@ -2312,15 +2292,7 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-# 开局就走的局在同步路径上不出文案 —— 真正说什么由 _quick_exit_reply 决定, 它先
-# 判断这次要不要出声 (连击时保持安静), 要说才按处境挑句子。
-#
-# 这里之所以不能顺手写一句 (之前是"这局还没真正展开…"): 这类局占终局的 52%,
-# 同一句话会连着出现很多遍 —— 单是国际象棋这个用户就点开关掉过 9 次。
-#
-# 空串是安全的: companion_reply 只在 Flutter 里被解析成字段而从未渲染, web 完全
-# 不用, 所以回复只通过聊天消息到达用户。
-_NOT_REALLY_PLAYED_REPLY = ""
+
 
 
 def _finish_reply(session: GameSessionRow, result: dict[str, Any]) -> str:
@@ -2328,7 +2300,7 @@ def _finish_reply(session: GameSessionRow, result: dict[str, Any]) -> str:
     moments = list(_loads(gomoku.get("key_moments"), []))
     outcome = result.get("user_outcome")
     if not played_enough(GOMOKU_GAME_KEY, int(gomoku.get("move_count") or 0)):
-        return _NOT_REALLY_PLAYED_REPLY
+        return quick_exit_reply()
     direction = _line_direction(list(_loads(gomoku.get("winning_line"), [])))
     line_text = "斜着那条线" if direction == "diagonal" else "中间那条线"
     if outcome == "win":
@@ -2363,7 +2335,7 @@ def _generic_finish_reply(
         # 中途退出也判负 → 也落 settled, 于是这些"没玩起来"的局会走到下面那些
         # 假定真下过一局的文案: 一局 0 步的棋回"你后面已经追得很近了"是纯编造。
         # 这里跟 _abort_reply 的 `moves < 4` 分支是同一个语义。
-        return _NOT_REALLY_PLAYED_REPLY
+        return quick_exit_reply()
     if definition.key == "minesweeper":
         if outcome == "win":
             final_payload = _loads(result.get("final_payload"), {})

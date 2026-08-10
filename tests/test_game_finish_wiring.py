@@ -58,10 +58,10 @@ class TestAbortedPathGetsNarratedToo:
         for line in conditions:
             assert "game_finished" not in line, f"不该再按完局与否分叉: {line}"
 
-    def test_quick_exits_still_skip_the_llm(self):
-        """0 步 2 秒的空局没有素材, 两个模型实测都只会说同一句话."""
+    def test_quick_exits_are_handled_before_the_llm_branch(self):
+        """点开又关的局连 LLM 都不该走到 —— 它现在根本不出声."""
         src = inspect.getsource(native._persist_chat_side_effects)
-        assert src.index("_quick_exit_reply") < src.index("_llm_finish_reply")
+        assert src.index("quick_exit_reply()") < src.index("_llm_finish_reply")
 
 
 class TestReplayIdempotence:
