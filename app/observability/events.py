@@ -94,6 +94,10 @@ EVT_WS_MESSAGE_RECV = "ws.message_received"
 EVT_HTTP_REQUEST = "http.request"
 EVT_SCHEDULER_JOB = "scheduler.job_executed"
 
+# Push notifications (APNs)
+EVT_PUSH_PARTIAL_FAILURE = "push.partial_failure"  # 部分设备失败, 其余成功
+EVT_PUSH_DEVICE_DISABLED = "push.device_disabled"  # APNs 判定 token 失效, 已停用
+
 # Aggregation (碎片聚合)
 EVT_AGG_PUSHED = "aggregation.fragment_pushed"
 EVT_AGG_FLUSHED = "aggregation.flushed"

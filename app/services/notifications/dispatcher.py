@@ -8,6 +8,7 @@ from typing import Any
 
 from app.config import settings
 from app.db import db
+from app.observability.events import EVT_PUSH_DEVICE_DISABLED, EVT_PUSH_PARTIAL_FAILURE
 from app.services.notifications.apns import ApnsConfigurationError, apns_client
 from app.services.notifications.devices import disable_device_token, list_enabled_apns_devices
 from app.services.notifications.presence import is_user_foreground
@@ -142,18 +143,51 @@ async def _dispatch_one(row: Any) -> None:
             successes += 1
             last_apns_id = result.apns_id
         else:
+            # bundle_id belongs in the error string: with one app record per
+            # flavor on the same device, "which app lost delivery" is the first
+            # thing you need and the token alone does not say it.
             errors.append(
-                f"{device.environment}:{result.status_code}:"
-                f"{result.reason or 'unknown'}"
+                f"{device.bundle_id or 'unknown-topic'}:{device.environment}:"
+                f"{result.status_code}:{result.reason or 'unknown'}"
             )
             if result.unregister:
                 await disable_device_token(device.token)
+                # Disabling a token silently stops delivery to that install for
+                # good, so it gets its own line rather than living inside an
+                # error list that is dropped whenever another device succeeded.
+                logger.warning(
+                    f"[PUSH] event={event_id} device_disabled "
+                    f"bundle={device.bundle_id or 'unknown'} "
+                    f"env={device.environment} status={result.status_code} "
+                    f"reason={result.reason or 'unknown'}",
+                    extra={
+                        "event": EVT_PUSH_DEVICE_DISABLED,
+                        "bundle_id": device.bundle_id,
+                        "apns_environment": device.environment,
+                        "apns_status": result.status_code,
+                        "apns_reason": result.reason,
+                    },
+                )
 
     if successes:
         logger.info(
             f"[PUSH] event={event_id} sent successes={successes} "
             f"devices={len(devices)} apns_id={last_apns_id}"
         )
+        # A partial failure used to be invisible: the errors list was discarded
+        # as soon as one device succeeded, so a user quietly losing pushes on one
+        # of their installs left no trace anywhere.
+        if errors:
+            logger.warning(
+                f"[PUSH] event={event_id} partial_failure "
+                f"failed={len(errors)} devices={len(devices)} "
+                f"errors={'; '.join(errors)[:240]}",
+                extra={
+                    "event": EVT_PUSH_PARTIAL_FAILURE,
+                    "failed_devices": len(errors),
+                    "total_devices": len(devices),
+                },
+            )
         await db.execute_raw(
             """
             UPDATE notification_events
