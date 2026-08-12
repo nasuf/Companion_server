@@ -324,14 +324,19 @@ async def test_sms_login_endpoint_happy_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_auth_response_phone_user_friendly_display_name(monkeypatch):
-    """Phone-only accounts surface 用户+尾号 instead of the ph_xxx hash."""
+async def test_build_auth_response_never_falls_back_to_the_login_hash(monkeypatch):
+    """展示名为空就是为空 —— 绝不能拿 username 兜底。
+
+    username 对真实用户是 `ph_deadbeef` / `wx_89b939bc004` 这种内部 hash。历史上
+    这里有一句 `or user.username`, 结果每个客户端都得再写一遍正则把它过滤掉。
+    优先级链本身归 resolve_display_identity 管 (见 test_user_avatars.py)。
+    """
     from app.api.public import auth as auth_api
 
     user = SimpleNamespace(id="user-1", username="ph_deadbeef", role="user")
     monkeypatch.setattr(auth_api, "get_active_workspace", AsyncMock(return_value=None))
     monkeypatch.setattr(
-        auth_api, "_wechat_profile_for_user", AsyncMock(return_value=(None, None))
+        auth_api, "resolve_display_identity", AsyncMock(return_value=(None, None))
     )
     import app.services.phone_auth as phone_auth_mod
 
@@ -343,12 +348,13 @@ async def test_build_auth_response_phone_user_friendly_display_name(monkeypatch)
 
     response = await auth_api._build_auth_response(user, "jwt")
 
-    assert response.user_display_name == "用户5678"
+    assert response.user_display_name is None
     assert response.phone == "138****5678"
     assert response.wechat_bound is False
-    # wechat nickname (when present) still wins over the phone fallback
+
+    # 解析出名字时原样透出, 不做二次加工。
     monkeypatch.setattr(
-        auth_api, "_wechat_profile_for_user", AsyncMock(return_value=("小明", None))
+        auth_api, "resolve_display_identity", AsyncMock(return_value=("小明", None))
     )
     response = await auth_api._build_auth_response(user, "jwt")
     assert response.user_display_name == "小明"

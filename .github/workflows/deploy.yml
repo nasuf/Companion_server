@@ -140,6 +140,8 @@ jobs:
             CHAT_MEDIA_PUBLIC_PREFIX=/chat/media
             CAPSULE_MEDIA_DIR=/data/capsule_media
             CAPSULE_MEDIA_PUBLIC_PREFIX=/api/capsules/media
+            USER_AVATAR_DIR=/data/user_avatar
+            USER_AVATAR_PUBLIC_PREFIX=/users/avatar
             DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=12&pool_timeout=30&connect_timeout=30
             DIRECT_DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=1&pool_timeout=60&connect_timeout=30
             MIGRATION_DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?connection_limit=1&pool_timeout=60&connect_timeout=30

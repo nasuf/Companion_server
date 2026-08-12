@@ -36,17 +36,16 @@ from app.services.wechat_auth import (
     exchange_wechat_h5_code,
     exchange_wechat_miniprogram_code,
     find_or_create_wechat_user,
-    update_wechat_profile,
 )
 from app.services.agent_avatars import build_avatar_url
 from app.services.agent_template import ensure_default_agent_for_user
 from app.services.notifications.presence import record_online, remove_online
 from app.services.user_activity import UserActivityWriteError, record_user_activity
+from app.services.user_profile import apply_profile_update, resolve_display_identity
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-_WECHAT_PROVIDER = "wechat"
 
 
 async def _record_auth_activity(user_id: str, *, source: str) -> None:
@@ -64,26 +63,6 @@ async def _record_auth_activity(user_id: str, *, source: str) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="上线记录失败，请稍后重试",
         )
-
-
-async def _wechat_profile_for_user(user_id: str) -> tuple[str | None, str | None]:
-    identity = await db.authidentity.find_first(
-        where={"userId": user_id, "provider": _WECHAT_PROVIDER},
-        order={"updatedAt": "desc"},
-    )
-    profile = getattr(identity, "rawProfile", None) if identity else None
-    if not isinstance(profile, dict):
-        return None, None
-
-    nickname = profile.get("nickname")
-    avatar_url = profile.get("headimgurl")
-    display_name = nickname.strip() if isinstance(nickname, str) else None
-    avatar = avatar_url.strip() if isinstance(avatar_url, str) else None
-    if avatar and avatar.startswith("http://"):
-        # 微信头像 CDN (qlogo.cn) 常回 http://, 在 https 页面里会被浏览器按
-        # mixed-content 拦截导致头像不显示; CDN 本身支持 https, 读取侧统一升级.
-        avatar = "https://" + avatar[len("http://"):]
-    return display_name or None, avatar or None
 
 
 def _mask_phone(phone: str | None) -> str | None:
@@ -108,17 +87,18 @@ async def _build_auth_response(user, token: str) -> AuthResponse:
             },
             order={"updatedAt": "desc"},
         )
-    user_display_name, user_avatar_url = await _wechat_profile_for_user(user.id)
-    if not user_display_name and phone:
-        # Phone-only accounts have no WeChat nickname; fall back to a friendly
-        # "用户+尾号" instead of surfacing the opaque ph_xxxx username hash.
-        user_display_name = f"用户{phone[-4:]}"
+    # 整条优先级链 (自设 → 微信昵称 → 用户{手机尾号}) 都在 resolve_display_identity
+    # 里。这里刻意**不再** `or user.username` 兜底: username 对真实用户是
+    # `wx_89b939bc004` 这样的内部 hash, 把它塞进展示名字段, 下游每个客户端都得写
+    # 一遍正则再把它过滤掉 (历史上 Flutter 就是这么干的)。为空就是为空, 兜底词
+    # 由客户端按场景选 ("我" / "小星辰")。
+    user_display_name, user_avatar_url = await resolve_display_identity(user)
     agent_avatar_key = getattr(agent, "avatarKey", None) if agent else None
     return AuthResponse(
         token=token,
         user_id=user.id,
         username=user.username,
-        user_display_name=user_display_name or user.username,
+        user_display_name=user_display_name,
         user_avatar_url=user_avatar_url,
         role=user.role,
         has_agent=workspace is not None and agent is not None,
@@ -162,6 +142,10 @@ async def register(data: RegisterRequest, request: Request):
         "hashedPassword": hashed,
         "role": "user",
         "signupSource": signup_source,
+        # 密码账号是唯一没有"活的名字来源"的类型 (微信有昵称、手机号有尾号), 所以
+        # 这里预写一份 username 作为展示名。复制不会过期, 而且这条链因此对任何真实
+        # 用户都不会返回 None —— 客户端不必自己拼来源。详见 services/user_profile。
+        "displayName": data.username,
     }
     if data.platform:
         user_create_data["signupPlatform"] = data.platform
@@ -557,7 +541,12 @@ async def update_wechat_profile_endpoint(
     data: WeChatProfileUpdate,
     payload: dict = Depends(require_user),
 ):
-    """Persist the Mini Program 头像昵称填写能力 result (nickname + avatar)."""
+    """Persist the Mini Program 头像昵称填写能力 result (nickname + avatar).
+
+    写的是 users.display_name / avatar_key —— 跟 App 的个人资料页同一个存储位。
+    以前这里写 auth_identities.raw_profile, 那是读取侧的**回落**来源, 自设值一旦
+    存在就永远盖过它, 小程序改完会看不到效果。
+    """
     user_id = payload["sub"]
     user = await db.user.find_unique(where={"id": user_id})
     if not user:
@@ -566,21 +555,12 @@ async def update_wechat_profile_endpoint(
             detail="用户不存在",
         )
 
-    avatar_url: str | None = None
+    avatar = None
     if data.avatar_base64:
         from app.services.chat_media import storage
 
-        mime = storage.normalize_image_mime(data.avatar_mime)
-        blob = storage.decode_image_base64(data.avatar_base64)
-        storage.validate_image_size(blob)
-        storage_key = storage.save_image_blob(user_id=user_id, blob=blob, mime=mime)
-        avatar_url = storage.media_url(storage_key)
-
-    await update_wechat_profile(
-        user_id,
-        nickname=data.nickname,
-        avatar_url=avatar_url,
-    )
+        avatar = (storage.decode_image_base64(data.avatar_base64), data.avatar_mime, None)
+    user = await apply_profile_update(user, display_name=data.nickname, avatar=avatar)
     token = create_jwt(user.id, user.role)
     return await _build_auth_response(user, token)
 

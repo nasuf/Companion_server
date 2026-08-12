@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from app.api.jwt_auth import require_user
 from app.db import db
@@ -9,11 +9,15 @@ from app.models.user import (
     ProfileStatsResponse,
     UserLocationRequest,
     UserLocationResponse,
+    UserProfileResponse,
+    UserProfileUpdate,
     UserResponse,
     UserUpdate,
 )
+from app.services import user_avatars
 from app.services.portrait import get_latest_portrait
 from app.services.profile_stats import get_profile_stats_for_workspace
+from app.services.user_profile import apply_profile_update, resolve_display_identity
 from app.services.workspace.workspaces import get_active_workspace, get_workspace_by_id
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -21,6 +25,75 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 # 注: POST /users 创建匿名 user 的旧端点已删除。新建用户必须走
 # /auth/register 或受控的第三方登录入口，避免绕过身份初始化。
+
+
+# 声明在 /{user_id} 之前: 段数不同本来就不会撞, 但把公开路由摆在鉴权路由前面,
+# 读代码的人不必自己推演匹配顺序。
+@router.get("/avatar/{key}")
+async def get_user_avatar(
+    key: str,
+    v: str | None = Query(default=None, description="thumb = 128px 小图"),
+):
+    """公开读取用户头像。
+
+    刻意不鉴权 —— 头像被十几处纯展示 widget 用裸 image URL 渲染, 那里没有机会
+    挂 Bearer header。详见 services/user_avatars 模块注释。
+
+    `?v=thumb` 与聊天媒体是同一个变体约定 (chat_media.get_chat_media), 两处用不同
+    的参数名只会让调用方每次都要回头查。
+    """
+    return user_avatars.serve_avatar(key, small=v == "thumb")
+
+
+async def _require_user_row(user: dict):
+    row = await db.user.find_unique(where={"id": str(user["sub"])})
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    return row
+
+
+@router.patch("/me/profile", response_model=UserProfileResponse)
+async def update_my_profile(
+    data: UserProfileUpdate,
+    user: dict = Depends(require_user),
+):
+    if not data.display_name.strip():
+        raise HTTPException(status_code=400, detail="昵称不能为空")
+    updated = await apply_profile_update(
+        await _require_user_row(user),
+        display_name=data.display_name,
+    )
+    return await _profile_response(updated)
+
+
+@router.post("/me/avatar", response_model=UserProfileResponse)
+async def upload_my_avatar(
+    file: UploadFile = File(...),
+    crop_x: int | None = Form(default=None),
+    crop_y: int | None = Form(default=None),
+    crop_size: int | None = Form(default=None),
+    user: dict = Depends(require_user),
+):
+    """上传头像。
+
+    `crop_*` 是客户端圆形裁剪框对应的源图正方形 (EXIF 校正后的像素坐标)。三个
+    都给才生效, 缺省则退化为居中裁剪 —— 旧版本客户端不带这几个字段。
+    """
+    crop = (
+        (crop_x, crop_y, crop_size)
+        if crop_x is not None and crop_y is not None and crop_size is not None
+        else None
+    )
+    updated = await apply_profile_update(
+        await _require_user_row(user),
+        avatar=(await file.read(), file.content_type, crop),
+    )
+    return await _profile_response(updated)
+
+
+async def _profile_response(user) -> UserProfileResponse:
+    display_name, avatar_url = await resolve_display_identity(user)
+    return UserProfileResponse(display_name=display_name, avatar_url=avatar_url)
 
 
 @router.get("/me/profile-stats", response_model=ProfileStatsResponse)

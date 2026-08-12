@@ -353,42 +353,9 @@ async def exchange_wechat_miniprogram_code(code: str) -> WeChatTokenPayload:
     )
 
 
-async def update_wechat_profile(
-    user_id: str,
-    *,
-    nickname: str | None = None,
-    avatar_url: str | None = None,
-) -> tuple[str | None, str | None]:
-    """Merge user-supplied nickname/avatar into the WeChat identity rawProfile.
-
-    Backs the Mini Program "头像昵称填写能力": WeChat no longer returns nickname /
-    avatar silently, so the client collects them via chooseAvatar + nickname
-    input and we persist them here (into ``nickname`` / ``headimgurl`` so
-    ``_build_auth_response`` surfaces them as display name / avatar).
-
-    Returns the resulting ``(display_name, avatar_url)``. No-op for users without
-    a WeChat identity (e.g. password accounts).
-    """
-    identity = await db.authidentity.find_first(
-        where={"userId": user_id, "provider": _WECHAT_PROVIDER},
-        order={"updatedAt": "desc"},
-    )
-    if not identity:
-        return None, None
-
-    profile = dict(getattr(identity, "rawProfile", None) or {})
-    if nickname is not None:
-        cleaned = nickname.strip()
-        if cleaned:
-            profile["nickname"] = cleaned[:64]
-    if avatar_url is not None and avatar_url.strip():
-        profile["headimgurl"] = avatar_url.strip()
-
-    await db.authidentity.update(
-        where={"id": identity.id},
-        data={"rawProfile": Json(profile), "updatedAt": datetime.now(UTC)},
-    )
-    return profile.get("nickname"), profile.get("headimgurl")
+# 用户自设的昵称 / 头像已改存 users.display_name / avatar_key (见
+# services/user_profile.py)。rawProfile 现在只作为微信登录带回的**默认值**来源,
+# 不再被用户编辑写入 —— 写它等于写一个永远被自设值遮蔽的位置。
 
 
 def _merged_raw_profile(existing: object, token: WeChatTokenPayload) -> dict[str, Any]:

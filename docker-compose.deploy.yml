@@ -95,6 +95,10 @@ services:
       DB_QUERY_MAX_RETRIES: "${DB_QUERY_MAX_RETRIES:-4}"
       OFFLINE_MEDIA_DIR: "${OFFLINE_MEDIA_DIR:-/data/offline_media}"
       OFFLINE_MEDIA_PUBLIC_PREFIX: "${OFFLINE_MEDIA_PUBLIC_PREFIX:-/offline/media}"
+      USER_AVATAR_DIR: "${USER_AVATAR_DIR:-/data/user_avatar}"
+      # 前缀不带 /api —— Flutter / 小程序 / web 三端的 BASE_URL 已经是
+      # https://banshengcomp.com/api, 都会自己把相对路径拼上去。
+      USER_AVATAR_PUBLIC_PREFIX: "${USER_AVATAR_PUBLIC_PREFIX:-/users/avatar}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,6 +112,7 @@ services:
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/chat_media:/data/chat_media"
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/offline_media:/data/offline_media"
       - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/capsule_media:/data/capsule_media"
+      - "${COMPANION_DATA_DIR:-/mnt/datadisk0/companion}/user_avatar:/data/user_avatar"
       - "/app/companion-secrets:/app/companion-secrets:ro"
       # 后台管理要能看/删/触发数据库备份, 所以给 server 读写宿主机备份目录。
       # 定时备份仍由宿主机 cron 跑 —— 备份最需要生效的时刻正是应用出问题的时候,

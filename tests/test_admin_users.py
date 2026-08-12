@@ -96,6 +96,7 @@ def test_serialize_admin_user_includes_login_methods_and_contact_fields():
         status="active",
         archivedAt=None,
         signupSource="password_web",
+        displayName="爱丽丝",
         agents=[SimpleNamespace(id="agent-1")],
     )
     identities = [
@@ -111,6 +112,9 @@ def test_serialize_admin_user_includes_login_methods_and_contact_fields():
 
     payload = _serialize_admin_user(user, identities)
 
+    # 后台的显示链要跟客户端一致 (自设 → 微信昵称), 少了这个字段就只能显示旧的
+    # 微信昵称, 客服照着念会跟用户自己看到的不一样。
+    assert payload["display_name"] == "爱丽丝"
     assert payload["email"] == "alice@example.com"
     assert payload["phone"]["phone"] == "13812345678"
     assert payload["phone"]["phone_masked"] == "138****5678"

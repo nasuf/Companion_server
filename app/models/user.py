@@ -1,5 +1,10 @@
 from pydantic import BaseModel, Field
 
+# 昵称长度上限。两个写入端点 (App 的 /users/me/profile 与小程序的
+# /auth/wechat/profile) 共用同一个值 —— 分开定义会让其中一条路径悄悄允许更长的
+# 名字, 而两边写的是同一列。
+MAX_DISPLAY_NAME_LENGTH = 32
+
 
 class UserUpdate(BaseModel):
     email: str | None = None
@@ -10,6 +15,23 @@ class UserResponse(BaseModel):
     username: str
     email: str | None = None
     created_at: str | None = None
+
+
+class UserProfileUpdate(BaseModel):
+    """昵称修改。头像走 multipart 的 POST /users/me/avatar, 不在这里。"""
+
+    display_name: str = Field(min_length=1, max_length=MAX_DISPLAY_NAME_LENGTH)
+
+
+class UserProfileResponse(BaseModel):
+    """改完之后客户端 copyWith 进本地 session 用的最小回执。
+
+    刻意不返回新 JWT: 昵称头像跟鉴权无关, 重签 token 会让所有端的 session 存储
+    跟着抖一次。
+    """
+
+    display_name: str | None = None
+    avatar_url: str | None = None
 
 
 class ProfileStatsResponse(BaseModel):

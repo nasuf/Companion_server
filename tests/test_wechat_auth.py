@@ -70,18 +70,24 @@ class FakeTransaction:
 @pytest.mark.asyncio
 async def test_wechat_profile_avatar_upgraded_to_https(monkeypatch):
     """qlogo.cn 常回 http:// — 读取侧必须升级, 否则 https 页面 mixed-content 拦截."""
+    from app.services import user_profile as user_profile_mod
+
     identity = SimpleNamespace(
-        rawProfile={"nickname": "小明", "headimgurl": "http://thirdwx.qlogo.cn/mmopen/x/132"}
+        provider="wechat",
+        updatedAt="2026-01-01T00:00:00",
+        rawProfile={"nickname": "小明", "headimgurl": "http://thirdwx.qlogo.cn/mmopen/x/132"},
     )
     monkeypatch.setattr(
-        auth_api,
+        user_profile_mod,
         "db",
         SimpleNamespace(
-            authidentity=SimpleNamespace(find_first=AsyncMock(return_value=identity))
+            authidentity=SimpleNamespace(find_many=AsyncMock(return_value=[identity]))
         ),
     )
 
-    name, avatar = await auth_api._wechat_profile_for_user("user-1")
+    name, avatar = await user_profile_mod.resolve_display_identity(
+        SimpleNamespace(id="user-1", displayName=None, avatarKey=None)
+    )
 
     assert name == "小明"
     assert avatar == "https://thirdwx.qlogo.cn/mmopen/x/132"
@@ -505,6 +511,35 @@ async def test_register_without_channel_uses_plain_password_source(monkeypatch):
     assert "signupPlatform" not in create_data
     assert "signupOsVersion" not in create_data
     assert "signupAppVersion" not in create_data
+
+
+@pytest.mark.asyncio
+async def test_register_prewrites_display_name(monkeypatch):
+    """密码账号是唯一没有"活的名字来源"的类型, 建号时就得预写一份展示名。
+
+    微信有昵称、手机号有尾号, 两者都是算出来的; 密码账号两样都没有, 而读取链末尾
+    刻意不再拿 username 兜底。不预写它就会是 None, 到处显示兜底词。
+    """
+    created_user = SimpleNamespace(id="user-1", username="user1", role="user")
+    fake_user_table = SimpleNamespace(
+        find_unique=AsyncMock(return_value=None),
+        create=AsyncMock(return_value=created_user),
+    )
+    expected = auth_api.AuthResponse(
+        token="jwt", user_id="user-1", username="user1", role="user", has_agent=False
+    )
+    monkeypatch.setattr(auth_api.db, "user", fake_user_table)
+    monkeypatch.setattr(auth_api, "enforce_register_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "ensure_default_agent_for_user", AsyncMock())
+    monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock(return_value=expected))
+
+    await auth_api.register(
+        auth_api.RegisterRequest(username="李杰", password="secret123"), FakeRequest()
+    )
+
+    assert fake_user_table.create.await_args.kwargs["data"]["displayName"] == "李杰"
 
 
 @pytest.mark.asyncio

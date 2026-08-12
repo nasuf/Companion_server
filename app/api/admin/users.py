@@ -206,6 +206,9 @@ def _serialize_admin_user(
     return {
         "id": user.id,
         "username": user.username,
+        # 用户自设的展示名。后台的显示链必须跟客户端一致 (自设 → 微信昵称), 否则
+        # 用户在 App 改完昵称, 客服照后台念的还是旧的微信昵称。
+        "display_name": getattr(user, "displayName", None),
         "email": getattr(user, "email", None),
         "role": user.role,
         "created_at": str(user.createdAt),

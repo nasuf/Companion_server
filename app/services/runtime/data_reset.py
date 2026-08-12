@@ -684,6 +684,20 @@ async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
         strict=True,
     )
 
+    # 头像文件必须跟着账号一起消失: 读取端点是公开的 (services/user_avatars),
+    # 留在盘上等于注销之后头像仍然可以被访问。key 以 `{user_id}_` 开头, 原图与
+    # `_s` 缩略图一起被前缀匹配到。
+    #
+    # 目录是首次上传时才 mkdir 的, 所以"不存在"是全新部署的正常状态, 不能像
+    # capsule 那样直接 strict 进去 —— 那会让没人传过头像的环境删不掉任何用户。
+    # 目录在的时候仍然 strict: 删不掉的文件必须让删除请求失败, 而不是记个日志。
+    avatar_dir = Path(os.getenv("USER_AVATAR_DIR", "var/user_avatar"))
+    stats["user_avatar_files"] = (
+        _delete_prefixed_files(avatar_dir, user_id, strict=True)
+        if avatar_dir.is_dir()
+        else 0
+    )
+
     media_rows = await db.query_raw(
         """
         DELETE FROM offline_activity_media

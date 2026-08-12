@@ -20,6 +20,14 @@ model User {
   status                   String                          @default("active")
   archivedAt               DateTime?                       @map("archived_at")
   lastSeenAt               DateTime?                       @map("last_seen_at")
+  // 用户自设的昵称与头像。此前两者只存在于 auth_identities.raw_profile
+  // (provider=wechat), 手机号 / 密码账号根本没有存储位 —— 生产上 47 个用户里
+  // 有 12 个改不了。这两列是所有身份类型共用的权威值, 微信 rawProfile 退化为
+  // 首登时的默认来源 (见 auth._build_auth_response)。
+  displayName              String?                         @map("display_name")
+  // 头像文件的 storage key (services/user_avatars.py), 不是 URL: URL 前缀可随
+  // 部署变化, 存 key 才能重新拼。NULL 表示没有自设头像。
+  avatarKey                String?                         @map("avatar_key")
   locationLatitude         Float?                          @map("location_latitude")
   locationLongitude        Float?                          @map("location_longitude")
   locationCity             String?                         @map("location_city")
