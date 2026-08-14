@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
@@ -26,6 +27,85 @@ def _json(row_value: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _as_aware_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def is_vip_from_row(row: Any) -> bool:
+    until = _as_aware_dt(_field(row, "vip_until"))
+    if until is None:
+        return False
+    return until > datetime.now(timezone.utc)
+
+
+def vip_trial_available_from_row(row: Any) -> bool:
+    if bool(_field(row, "vip_trial_used", False)):
+        return False
+    return not is_vip_from_row(row)
+
+
+def wallet_balances(row: Any) -> dict[str, int]:
+    return {
+        "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
+        "point_balance": int(_field(row, "point_balance", 0) or 0),
+        "achievement_points_synced": int(
+            _field(row, "achievement_points_synced", 0) or 0
+        ),
+    }
+
+
+async def debit_tickets(
+    user_id: str,
+    amount: int,
+    *,
+    source: str,
+    source_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    client: Any,
+) -> dict[str, int]:
+    """Spend shop tickets inside an existing transaction."""
+    if amount <= 0:
+        raise ValueError("invalid_amount")
+    rows = await client.query_raw(
+        """
+        UPDATE user_wallets
+        SET ticket_balance = ticket_balance - $2,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1 AND ticket_balance >= $2
+        RETURNING ticket_balance, point_balance, achievement_points_synced
+        """,
+        user_id,
+        amount,
+    )
+    if not rows:
+        raise ValueError("insufficient_ticket_balance")
+    balance = wallet_balances(rows[0])
+    await _record_ledger(
+        user_id=user_id,
+        currency="ticket",
+        delta=-amount,
+        balance_after=balance["ticket_balance"],
+        source=source,
+        source_id=source_id,
+        metadata=metadata,
+        client=client,
+    )
+    return balance
 
 
 async def ensure_wallet(user_id: str) -> dict[str, int]:

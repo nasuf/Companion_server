@@ -801,6 +801,8 @@ model UserWallet {
   ticketBalance           Int      @default(0) @map("ticket_balance")
   pointBalance            Int      @default(0) @map("point_balance")
   achievementPointsSynced Int      @default(0) @map("achievement_points_synced")
+  vipUntil                DateTime? @map("vip_until")
+  vipTrialUsed            Boolean  @default(false) @map("vip_trial_used")
   createdAt               DateTime @default(now()) @map("created_at")
   updatedAt               DateTime @updatedAt @map("updated_at")
 

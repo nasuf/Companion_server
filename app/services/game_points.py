@@ -47,6 +47,8 @@ _SOURCE_CONVERT = "convert_to_shop"
 # Official (admin) balance grant/adjustment; never touches lifetime_earned so
 # the level is unaffected.
 _SOURCE_ADMIN_GRANT = "admin_grant"
+# Shop pack "游戏积分券": purchased game points, not match earnings.
+_SOURCE_STORE_VOUCHER = "store_game_voucher"
 # Shop-side ledger source for the credited shop points.
 _SHOP_SOURCE_CONVERT = "game_point_conversion"
 
@@ -547,6 +549,53 @@ async def search_users(query: str, *, limit: int = 20) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+async def credit_from_store(
+    user_id: str,
+    amount: int,
+    *,
+    source_id: str,
+    metadata: dict[str, Any] | None = None,
+    client: Any,
+) -> dict[str, Any]:
+    """Credit purchased game points inside an existing shop transaction.
+
+    Does not touch ``lifetime_earned``, matching admin grants: buying points
+    must not buy a glove level.
+
+    ``source_id`` must be unique per purchase. The ledger has a partial unique
+    index on ``(user_id, source, source_id)`` where ``source_id`` is not null.
+    """
+    if amount <= 0:
+        raise ValueError("invalid_amount")
+    locked = await client.query_raw(
+        "SELECT balance FROM user_game_wallets WHERE user_id = $1 FOR UPDATE",
+        user_id,
+    )
+    if not locked:
+        raise ValueError("missing_game_wallet")
+    current = int(_field(locked[0], "balance", 0) or 0)
+    new_balance = current + amount
+    await client.execute_raw(
+        """
+        UPDATE user_game_wallets
+        SET balance = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        """,
+        user_id,
+        new_balance,
+    )
+    await _record_ledger(
+        user_id=user_id,
+        delta=amount,
+        balance_after=new_balance,
+        source=_SOURCE_STORE_VOUCHER,
+        source_id=source_id,
+        metadata=metadata or {},
+        client=client,
+    )
+    return {"balance": new_balance, "delta": amount}
 
 
 async def admin_grant(

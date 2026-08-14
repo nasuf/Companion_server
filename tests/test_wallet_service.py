@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.services import wallet
+
+
+def test_is_vip_from_row_treats_naive_datetime_as_utc():
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
+    past = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=1)
+    assert wallet.is_vip_from_row({"vip_until": future}) is True
+    assert wallet.is_vip_from_row({"vip_until": past}) is False
+    assert wallet.is_vip_from_row({"vip_until": None}) is False
+    assert wallet.vip_trial_available_from_row(
+        {"vip_until": None, "vip_trial_used": False}
+    )
+    assert not wallet.vip_trial_available_from_row(
+        {"vip_until": future, "vip_trial_used": False}
+    )
+    assert not wallet.vip_trial_available_from_row(
+        {"vip_until": None, "vip_trial_used": True}
+    )
 
 
 class _FakeDb:

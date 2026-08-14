@@ -1,38 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any
 
 from app.db import db
 from app.services import wallet
-
-
-@dataclass(frozen=True)
-class StoreProduct:
-    product_kind: str
-    price: int
-
-
-EXCHANGE_PRODUCTS: dict[str, StoreProduct] = {
-    "tea": StoreProduct("tea", 99),
-    "cake": StoreProduct("cake", 99),
-    "coffee": StoreProduct("coffee", 288),
-    "cola": StoreProduct("cola", 512),
-    "flower": StoreProduct("flower", 1314),
-    "plush": StoreProduct("plush", 9999),
-    "capsuleSkin": StoreProduct("capsuleSkin", 188),
-    "chatFrame": StoreProduct("chatFrame", 388),
-    "bubble": StoreProduct("bubble", 288),
-    "backdrop": StoreProduct("backdrop", 588),
-    "theme": StoreProduct("theme", 888),
-    "stationery": StoreProduct("stationery", 688),
-    "checkinSkin": StoreProduct("checkinSkin", 1888),
-    "signCard": StoreProduct("signCard", 100),
-    "musicCoupon": StoreProduct("musicCoupon", 1888),
-    "gameCoupon": StoreProduct("gameCoupon", 1888),
-    "movieCoupon": StoreProduct("movieCoupon", 1888),
-}
+from app.services.store_catalog import EXCHANGE_PRODUCTS, catalog_payload
 
 
 def _field(row: Any, name: str, default: Any = None) -> Any:
@@ -60,13 +33,33 @@ def _inventory_row(row: Any) -> dict[str, Any]:
 
 
 def _wallet_row(row: Any) -> dict[str, int]:
-    return {
-        "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
-        "point_balance": int(_field(row, "point_balance", 0) or 0),
-        "achievement_points_synced": int(
-            _field(row, "achievement_points_synced", 0) or 0
-        ),
-    }
+    return wallet.wallet_balances(row)
+
+
+async def add_inventory(
+    user_id: str,
+    product_kind: str,
+    *,
+    quantity: int = 1,
+    client: Any,
+) -> dict[str, Any]:
+    if quantity <= 0:
+        raise ValueError("invalid_amount")
+    inventory_rows = await client.query_raw(
+        """
+        INSERT INTO user_store_inventory
+            (user_id, product_kind, quantity, acquired_at, updated_at)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id, product_kind) DO UPDATE
+        SET quantity = user_store_inventory.quantity + $3,
+            updated_at = CURRENT_TIMESTAMP
+        RETURNING product_kind, quantity, acquired_at, updated_at
+        """,
+        user_id,
+        product_kind,
+        quantity,
+    )
+    return _inventory_row(inventory_rows[0])
 
 
 async def list_inventory(user_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -83,6 +76,23 @@ async def list_inventory(user_id: str) -> dict[str, list[dict[str, Any]]]:
     return {"items": [_inventory_row(row) for row in rows]}
 
 
+async def get_catalog(user_id: str) -> dict[str, Any]:
+    await wallet.ensure_wallet(user_id)
+    rows = await db.query_raw(
+        """
+        SELECT vip_until, vip_trial_used
+        FROM user_wallets
+        WHERE user_id = $1
+        """,
+        user_id,
+    )
+    row = rows[0] if rows else {}
+    return catalog_payload(
+        is_vip=wallet.is_vip_from_row(row),
+        vip_trial_available=wallet.vip_trial_available_from_row(row),
+    )
+
+
 async def exchange_product(user_id: str, product_kind: str) -> dict[str, Any]:
     product = EXCHANGE_PRODUCTS.get(product_kind)
     if product is None:
@@ -90,6 +100,17 @@ async def exchange_product(user_id: str, product_kind: str) -> dict[str, Any]:
 
     await wallet.ensure_wallet(user_id)
     async with db.tx() as tx:
+        status_rows = await tx.query_raw(
+            """
+            SELECT point_balance, vip_until, vip_trial_used
+            FROM user_wallets
+            WHERE user_id = $1
+            FOR UPDATE
+            """,
+            user_id,
+        )
+        is_vip = wallet.is_vip_from_row(status_rows[0] if status_rows else {})
+        price = product.price_for(is_vip)
         wallet_rows = await tx.query_raw(
             """
             UPDATE user_wallets
@@ -100,24 +121,13 @@ async def exchange_product(user_id: str, product_kind: str) -> dict[str, Any]:
             RETURNING ticket_balance, point_balance, achievement_points_synced
             """,
             user_id,
-            product.price,
+            price,
         )
         if not wallet_rows:
             raise ValueError("insufficient_point_balance")
         balance = _wallet_row(wallet_rows[0])
-
-        inventory_rows = await tx.query_raw(
-            """
-            INSERT INTO user_store_inventory
-                (user_id, product_kind, quantity, acquired_at, updated_at)
-            VALUES ($1, $2, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id, product_kind) DO UPDATE
-            SET quantity = user_store_inventory.quantity + 1,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING product_kind, quantity, acquired_at, updated_at
-            """,
-            user_id,
-            product_kind,
+        inventory_item = await add_inventory(
+            user_id, product_kind, quantity=1, client=tx
         )
         await tx.execute_raw(
             """
@@ -126,16 +136,22 @@ async def exchange_product(user_id: str, product_kind: str) -> dict[str, Any]:
             VALUES ($1, 'point', $2, $3, 'store_exchange', $4, $5::jsonb)
             """,
             user_id,
-            -product.price,
+            -price,
             balance["point_balance"],
             product_kind,
             json.dumps(
-                {"product_kind": product_kind, "price": product.price},
+                {
+                    "product_kind": product_kind,
+                    "price": price,
+                    "member_price": product.member_price,
+                    "list_price": product.list_price,
+                    "is_vip": is_vip,
+                },
                 ensure_ascii=False,
             ),
         )
 
     return {
         "wallet": balance,
-        "inventory_item": _inventory_row(inventory_rows[0]),
+        "inventory_item": inventory_item,
     }
