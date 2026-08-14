@@ -20,7 +20,7 @@ from app.services.achievements.rule_registry import (
 
 
 _WORKBOOK_CATALOG_SHA256 = (
-    "ffb227c05ff551fb5877e1d69e334de54a0444da1d143b83df58ebe4ee9bd187"
+    "06c815df2dac9a88956d086e571e43b794ab0f38aee51b6ef46551f93aca6284"
 )
 _BEHAVIOR_TESTED_ACTIVE_IDS = {
     1, 2, 5, 6, 7, 8, 9, 18, 19, 20, 21, 23, 25, 26, 27, 28, 29, 30,
