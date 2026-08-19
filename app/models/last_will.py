@@ -51,7 +51,7 @@ class LastWillCreate(BaseModel):
     agent_id: str | None = None
     workspace_id: str | None = None
     content: str = Field(default="", max_length=8000)
-    inactivity_days: int = Field(default=30, ge=5, le=365)
+    inactivity_days: int = Field(default=30, ge=1, le=365)
     contacts: list[LastWillContact] = Field(default_factory=list, max_length=3)
     status: str = "draft"
 
@@ -73,7 +73,7 @@ class LastWillCreate(BaseModel):
 
 class LastWillUpdate(BaseModel):
     content: str | None = Field(default=None, max_length=8000)
-    inactivity_days: int | None = Field(default=None, ge=5, le=365)
+    inactivity_days: int | None = Field(default=None, ge=1, le=365)
     contacts: list[LastWillContact] | None = Field(default=None, max_length=3)
     status: str | None = None
 

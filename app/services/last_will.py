@@ -86,7 +86,7 @@ async def scan_due_last_wills(now: datetime | None = None, *, limit: int = 500) 
         LEFT JOIN user_daily_activity uda ON uda.user_id = lw.user_id
         WHERE lw.status = 'active'
           AND lw.triggered_at IS NULL
-          AND lw.inactivity_days BETWEEN 5 AND 365
+          AND lw.inactivity_days BETWEEN 1 AND 365
           AND btrim(lw.content) <> ''
           AND jsonb_typeof(lw.contacts) = 'array'
           AND jsonb_array_length(lw.contacts) > 0
