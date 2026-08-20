@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -336,3 +337,53 @@ def test_orchestrator_red_packet_forces_main_prompt_and_skips_memory():
     src = (Path(__file__).resolve().parents[1] / "app/services/chat/orchestrator.py").read_text()
     assert "skip_memory=bool(red_packet_context)" in src
     assert "meal_card_decision.state != \"none\" or bool(red_packet_context)" in src
+
+
+@pytest.mark.asyncio
+async def test_red_packet_prompt_skips_reengagement_section():
+    """An 8-day gap must not inject 重逢感知 on a red-packet turn.
+
+    2026-08-20: empty card bubble + reengagement_day made the model greet
+    ('好久不见呀') and ignore the gift even though chat.red_packet_reply
+    was present.
+    """
+    from app.services.chat.prompt_builder import build_system_prompt
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    async def _prompt_text(key: str, **_kwargs) -> str:
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
+
+    diagnostics: dict = {}
+    with (
+        patch(
+            "app.services.chat.prompt_builder.get_prompt_text",
+            AsyncMock(side_effect=_prompt_text),
+        ),
+        patch(
+            "app.services.chat.prompt_builder.get_prompt_text_or_default",
+            AsyncMock(side_effect=_prompt_text),
+        ),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="小伴", values={"gender": "female"}),
+            reengagement_gap_seconds=8 * 86400,
+            session_recap="上次在聊西甲票务",
+            red_packet_context={
+                "offering_id": "off-1",
+                "ticket_amount": 100,
+                "agent_value_yuan": 100,
+                "offering_count": 1,
+                "previous_summary": "",
+                "blessing": "",
+            },
+            diagnostics=diagnostics,
+        )
+
+    assert "## 红包回应" in prompt
+    assert "100" in prompt
+    assert "## 重逢感知" not in prompt
+    assert "没说话了" not in prompt
+    assert "## 上次聊到" not in prompt
+    assert "重逢感知" in diagnostics["empty_prompt_sections_removed"]
+    assert "上次聊到" in diagnostics["empty_prompt_sections_removed"]

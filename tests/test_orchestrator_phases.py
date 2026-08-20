@@ -91,6 +91,40 @@ def test_ensure_current_user_message_does_not_duplicate_present_turn():
     assert len(ensured) == 1
 
 
+def test_ensure_current_user_message_overlays_empty_card_content():
+    """Red-packet / check-in cards persist an empty bubble, then pass a
+    rewritten prompt as user_message. The main LLM must see that rewrite,
+    not `[MM-DD HH:MM] ` on an empty HumanMessage.
+    """
+    from app.services.chat.orchestrator import _ensure_current_user_message
+
+    rewrite = (
+        "用户刚刚给你发了一个红包，金额 100 钞票"
+        "（对你来说相当于 100 元人民币的心意）。"
+    )
+    messages = [
+        {
+            "id": "m-card",
+            "role": "user",
+            "content": "",
+            "createdAt": "2026-08-20T14:11:33.000000+00:00",
+        }
+    ]
+
+    ensured = _ensure_current_user_message(
+        messages,
+        user_message=rewrite,
+        user_message_id="m-card",
+        reply_context=None,
+    )
+
+    assert ensured is not messages
+    assert len(ensured) == 1
+    assert ensured[0]["id"] == "m-card"
+    assert ensured[0]["content"] == rewrite
+    assert "synthetic_current" not in ensured[0]
+
+
 def test_synthetic_current_without_message_id_does_not_expand_coverage():
     """Sub-intent synthetic turns can guide the prompt but must not widen scheduler dedup."""
     from app.services.chat.orchestrator import (

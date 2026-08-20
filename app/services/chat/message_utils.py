@@ -59,8 +59,17 @@ def _ensure_current_user_message(
     regenerate the prior reply. Add a synthetic current turn as a final guard.
     """
     if user_message_id:
-        if any(m.get("id") == user_message_id for m in messages):
-            return messages
+        for idx, message in enumerate(messages):
+            if message.get("id") != user_message_id:
+                continue
+            # Card / delayed paths persist an empty (or display-only) row, then
+            # pass a rewritten prompt text as user_message. Keep the row, swap
+            # in the text the main LLM is supposed to answer.
+            if (message.get("content") or "") == (user_message or ""):
+                return messages
+            updated = dict(message)
+            updated["content"] = user_message
+            return [*messages[:idx], updated, *messages[idx + 1 :]]
     elif messages:
         last = messages[-1]
         if last.get("role") == "user" and last.get("content") == user_message:

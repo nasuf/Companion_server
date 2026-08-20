@@ -792,7 +792,20 @@ async def build_system_prompt(
 
     # 重逢感知 (拟人度): 用户离开 ≥30min 后回来, 指引 LLM 不要无缝续聊.
     # 与「回复时机说明」相邻 — 都是对话时间轴语义.
-    reengage = await _build_reengagement_section(reengagement_gap_seconds)
+    # Red packets are themselves the new topic. Injecting "问问这几天过得
+    # 怎么样" on an 8-day gap made the model greet and ignore the gift
+    # (2026-08-20 production: empty card bubble + reengagement_day).
+    reengage_gap = (
+        None
+        if red_packet_context and red_packet_context.get("offering_id")
+        else reengagement_gap_seconds
+    )
+    recap_text = (
+        None
+        if red_packet_context and red_packet_context.get("offering_id")
+        else session_recap
+    )
+    reengage = await _build_reengagement_section(reengage_gap)
     if reengage:
         _append_section(
             sections, components, "重逢感知", reengage.body,
@@ -802,7 +815,7 @@ async def build_system_prompt(
         _record_skipped_section(diagnostics, "重逢感知")
 
     # W2 中期记忆: 重逢时的「上次聊到」摘要, 与重逢感知段配对注入
-    recap_section = await _build_session_recap_section(session_recap)
+    recap_section = await _build_session_recap_section(recap_text)
     if recap_section:
         _append_section(
             sections, components, "上次聊到", recap_section.body,
