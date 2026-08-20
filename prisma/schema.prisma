@@ -647,7 +647,7 @@ model LastWill {
   workspaceId    String?            @map("workspace_id")
   workspace      ChatWorkspace?     @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
   content        String
-  inactivityDays Int                @default(30) @map("inactivity_days") // DB CHECK: 5..365
+  inactivityDays Int                @default(30) @map("inactivity_days") // DB CHECK: 1..365
   contacts       Json               @default("[]") // DB CHECK: JSON array, max 3
   status         String             @default("draft") // DB CHECK: draft | active | paused | triggered | cancelled
   startedAt      DateTime?          @map("started_at")
