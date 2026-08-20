@@ -151,6 +151,31 @@ async def test_run_post_process_skips_agent_only_tasks_when_no_agent():
 
 
 @pytest.mark.asyncio
+async def test_run_post_process_skip_memory_keeps_emotion_and_skips_extraction():
+    from app.services.chat import post_process
+
+    with patch.object(post_process, "_bg_user_emotion", AsyncMock()) as e, \
+         patch.object(post_process, "_bg_memory_pipeline", AsyncMock()) as m, \
+         patch.object(post_process, "_bg_trait_adjustment", AsyncMock()) as t, \
+         patch.object(post_process, "_bg_positive_recovery", AsyncMock()) as pr, \
+         patch.object(post_process, "_bg_expression_learning", AsyncMock()) as learn:
+        await post_process.run_post_process(
+            user_id="u1", agent_id="a1", conversation_id="c1",
+            user_message="用户刚刚给你发了一个红包",
+            user_message_id="msg-x",
+            full_response="谢谢你",
+            messages_dicts=[{"role": "user", "content": "用户刚刚给你发了一个红包"}],
+            skip_memory=True,
+        )
+
+    e.assert_awaited_once()
+    t.assert_awaited_once()
+    pr.assert_awaited_once()
+    m.assert_not_called()
+    learn.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_bg_user_emotion_preserves_existing_message_metadata():
     """用户情绪后台写入必须使用 jsonb merge, 不能覆盖组件渲染 metadata。"""
     from app.services.chat import post_process

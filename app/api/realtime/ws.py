@@ -109,9 +109,14 @@ def _sanitize_component_card(raw: object) -> dict | None:
         "offline_activity",
         "offline_gift",
         "meal_voucher",
+        "red_packet",
     }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
+    # Red packets are server-issued; a card without offering_id must not
+    # enter _handle_message as an empty bubble.
+    if card_type == "red_packet" and not payload:
+        return None
     card: dict = {
         "version": 1,
         "type": card_type,
@@ -247,6 +252,28 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
             if value:
                 payload[key] = value
         return payload or None
+    if card_type == "red_packet":
+        offering_id = _truncate_payload_value(raw.get("offering_id"), 80).strip()
+        if not offering_id:
+            return None
+        payload = {"offering_id": offering_id, "kind": "red_packet"}
+        for key, limit in (
+            ("status", 40),
+            ("status_label", 40),
+            ("created_at", 80),
+            ("received_at", 80),
+            ("agent_id", 80),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        amount = _safe_int(raw.get("ticket_amount"), min_value=0, max_value=1_000_000)
+        if amount > 0:
+            payload["ticket_amount"] = amount
+        yuan = _safe_int(raw.get("agent_value_yuan"), min_value=0, max_value=1_000_000)
+        if yuan > 0:
+            payload["agent_value_yuan"] = yuan
+        return payload
     return None
 
 
@@ -362,6 +389,14 @@ async def _persist_user_message(
     )
     await mark_user_replied_for_conversation(conversation_id)
     return saved.id
+
+
+async def _delete_unbound_user_message(message_id: str) -> None:
+    """Drop a just-persisted user row that never claimed its red packet."""
+    try:
+        await db.message.delete(where={"id": message_id})
+    except Exception:
+        logger.warning("failed to drop unbound red-packet message %s", message_id[:8])
 
 
 async def _persist_assistant_message(
@@ -982,6 +1017,22 @@ async def _handle_message(
     if attachment_ids and len(attachments) != len(set(attachment_ids)):
         await ws.send_json({"type": "error", "data": {"message": "附件无效或已发送"}})
         return
+    red_packet_offering = None
+    if component_card and component_card.get("type") == "red_packet":
+        from app.services import offerings as offerings_svc
+
+        try:
+            component_card = await offerings_svc.authorize_red_packet_card(
+                component_card,
+                user_id=user_id,
+                agent_id=agent.id,
+                conversation_id=conversation_id,
+            )
+        except ValueError:
+            await ws.send_json({"type": "error", "data": {"message": "红包无效或已发送"}})
+            return
+        if isinstance(component_card, dict):
+            red_packet_offering = component_card.pop("_offering", None)
     # Attachments are analysed before the chat turn opens its usage session,
     # so wrap them in their own one — otherwise the vision tokens are billed
     # by Ark but invisible in the admin cost dashboard.
@@ -1024,13 +1075,32 @@ async def _handle_message(
     )
     current_context["client_supports_voice"] = client_supports_voice
 
-    plan = await plan_user_message_aggregation(
-        agent_id=agent.id,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        text=prompt_text,
-        reply_context=current_context,
-    )
+    if red_packet_offering:
+        from app.services.interaction.user_turn_aggregation import (
+            UserMessageAggregationPlan,
+        )
+
+        # Empty bubble + card would otherwise look like a 0-char fragment.
+        plan = UserMessageAggregationPlan(
+            route="immediate",
+            agent_id=agent.id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            text=text,
+            metadata={"queued": True, "red_packet": True},
+            final_message=text,
+            final_context=current_context,
+            fallback_message=text,
+            fallback_context=current_context,
+        )
+    else:
+        plan = await plan_user_message_aggregation(
+            agent_id=agent.id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            text=prompt_text,
+            reply_context=current_context,
+        )
     user_message_id = await _persist_user_message(
         conversation_id,
         text,
@@ -1055,6 +1125,52 @@ async def _handle_message(
             user_id=user_id,
             conversation_id=conversation_id,
         )
+    if red_packet_offering:
+        from app.services import offerings as offerings_svc
+        from app.services.chat.intent_dispatcher import IntentType
+
+        # Bind is the exclusive claim. Ack only after it succeeds so a
+        # losing concurrent persist is not marked delivered, then deleted.
+        try:
+            bound = await offerings_svc.bind_red_packet_message(
+                offering_id=str(red_packet_offering["id"]),
+                message_id=user_message_id,
+                user_id=user_id,
+            )
+        except ValueError:
+            await _delete_unbound_user_message(user_message_id)
+            existing_id = None
+            try:
+                existing = await offerings_svc.get_red_packet(
+                    offering_id=str(red_packet_offering["id"]),
+                    user_id=user_id,
+                )
+                existing_id = (existing.get("offering") or {}).get("message_id")
+            except ValueError:
+                existing_id = None
+            if existing_id:
+                await _send_ack(ws, message_id=str(existing_id), client_id=client_id)
+                return
+            await ws.send_json({"type": "error", "data": {"message": "红包无效或已发送"}})
+            return
+        await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+        reply_message = await offerings_svc.build_red_packet_user_message(bound)
+        card_context = dict(plan.final_context or current_context)
+        card_context["delay_seconds"] = 0.0
+        card_context["component_card_reply"] = True
+        card_context["skip_time_memory_lookup"] = True
+        card_context["red_packet"] = offerings_svc.reply_context_payload(bound)
+        await _queue_reply_or_error(
+            ws,
+            conversation_id=conversation_id,
+            agent=agent,
+            user_id=user_id,
+            user_message=reply_message,
+            user_message_id=user_message_id,
+            reply_context=card_context,
+            forced_intent=IntentType.NONE,
+        )
+        return
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)
     try:
         from app.services.achievements.service import handle_user_message_event

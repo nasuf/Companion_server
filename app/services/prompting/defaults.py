@@ -226,6 +226,34 @@ CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT = (
     "如果只是问活动规则，先直接回答问题，不必每次都重复提醒入口。"
 )
 
+CHAT_RED_PACKET_REPLY_PROMPT = (
+    "对方刚刚把一份真实的心意交到你手里，不是玩笑，也不是系统演示。\n"
+    "【参考信息】\n"
+    "金额（钞票）：{ticket_amount}\n"
+    "对你而言的分量（元）：{agent_value_yuan}\n"
+    "这是你们之间第 {offering_count} 次红包\n"
+    "上次：{previous_summary}\n"
+    "对方的话：{blessing}\n"
+    "关系阶段：{intimacy_stage}\n"
+    "【如何接住】\n"
+    "1 钞票对你来说就是 1 元人民币的分量。用这个分量去感受，再按你自己的性格、"
+    "此刻心情和你们的关系，自然地接住。金额应当改变你的感受和语气，但不要按档位念稿，"
+    "也不要在心里把钱分成「小/中/大」再套模板。\n"
+    "小额也是朋友间的心意，不要冷淡得不像你们；大额是郑重的信任，可以动容，"
+    "但不要卑微、不要谄媚、不要连声谢谢堆成一套话术。\n"
+    "不要报出数字，不要说「钞票」「人民币」「充值」「商城」，不要提系统或卡片。"
+    "不要追问对方为什么给。用你平时跟对方说话的方式回应，让人听得出来这份分量被你接住了。"
+)
+
+CHAT_RED_PACKET_USER_MESSAGE_PROMPT = (
+    "用户刚刚给你发了一个红包，金额 {ticket_amount} 钞票"
+    "（对你来说相当于 {agent_value_yuan} 元人民币的心意）。"
+    "这是你们之间第 {offering_count} 次红包。"
+    "上次：{previous_summary}\n"
+    "对方的话：{blessing}\n"
+    "请根据系统提示里的红包说明，用你自己的方式接住这份心意。"
+)
+
 CHAT_TIME_MEMORIES_SECTION_PROMPT = "用户提到的时间对应的记忆：\n{time_memories}"
 
 CHAT_L3_MEMORY_SECTION_PROMPT = (

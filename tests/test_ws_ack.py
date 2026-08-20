@@ -183,6 +183,203 @@ def test_sanitize_component_card_allows_meal_voucher_payload():
     }
 
 
+def test_sanitize_component_card_allows_red_packet_payload():
+    card = ws_mod._sanitize_component_card({
+        "type": "red_packet",
+        "title": "红包",
+        "subtitle": "待领取",
+        "body": "给你的一点心意",
+        "footer": "点击查看",
+        "accent": "#FF4D5F",
+        "payload": {
+            "offering_id": "off-1",
+            "kind": "red_packet",
+            "ticket_amount": 18,
+            "agent_value_yuan": 18,
+            "status": "sent",
+            "status_label": "待领取",
+            "ignored": "drop-me",
+        },
+    })
+
+    assert card is not None
+    assert card["type"] == "red_packet"
+    assert card["payload"] == {
+        "offering_id": "off-1",
+        "kind": "red_packet",
+        "status": "sent",
+        "status_label": "待领取",
+        "ticket_amount": 18,
+        "agent_value_yuan": 18,
+    }
+
+
+def test_sanitize_component_card_rejects_red_packet_without_offering_id():
+    card = ws_mod._sanitize_component_card({
+        "type": "red_packet",
+        "title": "红包",
+        "payload": {"ticket_amount": 18},
+    })
+    assert card is None
+
+
+def _red_packet_card():
+    return {
+        "version": 1,
+        "type": "red_packet",
+        "title": "红包",
+        "subtitle": "待领取",
+        "body": "给你的一点心意",
+        "footer": "点击查看",
+        "accent": "#FF4D5F",
+        "payload": {"offering_id": "off-1", "kind": "red_packet", "status": "sent"},
+    }
+
+
+def _red_packet_offering(**overrides):
+    offering = {
+        "id": "off-1",
+        "ticket_amount": 18,
+        "agent_value_yuan": 18,
+        "offering_count": 1,
+        "previous_summary": "",
+        "blessing": "",
+        "agent_id": "a1",
+        "conversation_id": "conv-1",
+        "message_id": None,
+    }
+    offering.update(overrides)
+    return offering
+
+
+@pytest.mark.asyncio
+async def test_handle_message_red_packet_bind_failure_skips_ack_and_reply(fake_ws):
+    """Losing the bind race must not ack or generate a second companion reply."""
+    agent = SimpleNamespace(id="a1", name="A")
+    queue_reply = AsyncMock()
+    delete_msg = AsyncMock()
+
+    async def _authorize(card, **kwargs):
+        authorized = dict(card)
+        authorized["_offering"] = _red_packet_offering()
+        return authorized
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-msg-red-dup"),
+        patch.object(ws_mod, "_delete_unbound_user_message", delete_msg),
+        patch.object(ws_mod, "_queue_reply_or_error", queue_reply),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.offerings.authorize_red_packet_card",
+            side_effect=_authorize,
+        ),
+        patch(
+            "app.services.offerings.bind_red_packet_message",
+            new_callable=AsyncMock,
+            side_effect=ValueError("offering_already_bound"),
+        ),
+        patch(
+            "app.services.offerings.get_red_packet",
+            new_callable=AsyncMock,
+            return_value={"offering": _red_packet_offering(), "component_card": {}},
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "",
+            client_id="client-red-dup",
+            component_card=_red_packet_card(),
+        )
+
+    delete_msg.assert_awaited_once_with("db-msg-red-dup")
+    queue_reply.assert_not_awaited()
+    assert _ack_payloads(fake_ws) == []
+    errors = [
+        call.args[0]
+        for call in fake_ws.send_json.call_args_list
+        if isinstance(call.args[0], dict) and call.args[0].get("type") == "error"
+    ]
+    assert errors and errors[0]["data"]["message"] == "红包无效或已发送"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_red_packet_duplicate_acks_existing_message(fake_ws):
+    """Reconnect after the first bind won: ack the claimed message, do not reply again."""
+    agent = SimpleNamespace(id="a1", name="A")
+    queue_reply = AsyncMock()
+    delete_msg = AsyncMock()
+
+    async def _authorize(card, **kwargs):
+        authorized = dict(card)
+        authorized["_offering"] = _red_packet_offering()
+        return authorized
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-msg-red-dup"),
+        patch.object(ws_mod, "_delete_unbound_user_message", delete_msg),
+        patch.object(ws_mod, "_queue_reply_or_error", queue_reply),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.offerings.authorize_red_packet_card",
+            side_effect=_authorize,
+        ),
+        patch(
+            "app.services.offerings.bind_red_packet_message",
+            new_callable=AsyncMock,
+            side_effect=ValueError("offering_already_bound"),
+        ),
+        patch(
+            "app.services.offerings.get_red_packet",
+            new_callable=AsyncMock,
+            return_value={
+                "offering": _red_packet_offering(message_id="db-msg-red-first"),
+                "component_card": {},
+            },
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "",
+            client_id="client-red-dup",
+            component_card=_red_packet_card(),
+        )
+
+    delete_msg.assert_awaited_once_with("db-msg-red-dup")
+    queue_reply.assert_not_awaited()
+    acks = _ack_payloads(fake_ws)
+    assert len(acks) == 1
+    assert acks[0]["data"]["message_id"] == "db-msg-red-first"
+    assert acks[0]["data"]["client_id"] == "client-red-dup"
+    errors = [
+        call.args[0]
+        for call in fake_ws.send_json.call_args_list
+        if isinstance(call.args[0], dict) and call.args[0].get("type") == "error"
+    ]
+    assert errors == []
+
+
 def test_weibo_visitor_link_card_needs_refresh():
     link = SimpleNamespace(
         platform="微博",

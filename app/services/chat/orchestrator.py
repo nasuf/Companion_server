@@ -402,6 +402,11 @@ async def stream_chat_response(
     skip_time_memory_lookup = bool(
         (reply_context or {}).get("skip_time_memory_lookup")
     )
+    red_packet_context = None
+    if isinstance(reply_context, dict):
+        raw_red_packet = reply_context.get("red_packet")
+        if isinstance(raw_red_packet, dict) and raw_red_packet.get("offering_id"):
+            red_packet_context = raw_red_packet
 
     # 碎片聚合/延迟队列在入队时已落库；sub_intent_mode 共享父调用的原始消息
     if save_user_message and not sub_intent_mode:
@@ -1344,6 +1349,7 @@ async def stream_chat_response(
                 ai_mood_text=ai_mood_text,
                 expression_habits=expression_habits or None,
                 meal_voucher_card_state=meal_card_decision.state,
+                red_packet_context=red_packet_context,
                 last_reply_count=last_reply_count,
                 needs_web_search=needs_web_search,
                 discussed_titles=(
@@ -1451,7 +1457,9 @@ async def stream_chat_response(
             reply_emotion_fn=_ai_reply_emotion,
             # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
             reengagement_gap_seconds=reengagement_gap_seconds,
-            force_main_prompt=meal_card_decision.state != "none",
+            force_main_prompt=(
+                meal_card_decision.state != "none" or bool(red_packet_context)
+            ),
             diagnostics=response_diagnostics,
         )
 
@@ -1619,6 +1627,17 @@ async def stream_chat_response(
             achievement_turn_id=current_achievement_turn_id,
             achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
         )
+        if red_packet_context and not sub_intent_mode:
+            try:
+                from app.services import offerings as offerings_svc
+
+                await offerings_svc.mark_red_packet_received(
+                    offering_id=str(red_packet_context["offering_id"]),
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
+            except Exception:
+                logger.exception("red_packet receive mark failed")
         if prepared_voice is not None:
             if first_assistant_message_id:
                 try:
@@ -1720,7 +1739,11 @@ async def stream_chat_response(
 
         # Update conversation title if first exchange (non-blocking)
         if len(recent_messages) <= 1:
-            title = user_message[:50] + ("..." if len(user_message) > 50 else "")
+            title = (
+                "红包"
+                if red_packet_context
+                else user_message[:50] + ("..." if len(user_message) > 50 else "")
+            )
             _fire_background(db.conversation.update(
                 where={"id": conversation_id},
                 data={"title": title},
@@ -1737,6 +1760,7 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
             skip_ai_memory=False,
+            skip_memory=bool(red_packet_context),
             workspace_id=workspace_id,
         ))
         post_process_fired = True

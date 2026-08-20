@@ -34,6 +34,8 @@ from app.services.prompting.defaults import (
     CHAT_MEMORY_LABEL_SAFETY_PROMPT,
     CHAT_MEAL_VOUCHER_CARD_FIRST_PROMPT,
     CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT,
+    CHAT_RED_PACKET_REPLY_PROMPT,
+    CHAT_RED_PACKET_USER_MESSAGE_PROMPT,
     CHAT_AI_MOOD_SECTION_PROMPT,
     CHAT_EXPRESSION_HABITS_SECTION_PROMPT,
     CHAT_MEMORY_SECTION_BODY_PROMPT,
@@ -349,6 +351,21 @@ PROMPT_DEFINITIONS = [
         "同一对话已发过霸王餐入口卡片时注入。禁止重复发卡，"
         "需要入口时引导点击之前的卡片或底部「我的」。",
         CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.red_packet_reply", "红包回应", "聊天热路径", "红包",
+        "【工程扩展】用户把商城钞票作为红包发给 agent 时注入主回复。"
+        "运行时注入 {ticket_amount} {agent_value_yuan} {offering_count} "
+        "{previous_summary} {blessing} {intimacy_stage}。"
+        "金额只给模型感知分量，禁止按档位 hardcode 话术。",
+        CHAT_RED_PACKET_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.red_packet_user_message", "红包用户消息改写", "聊天热路径", "红包",
+        "【工程扩展】红包卡片进入聊天热路径时，改写本轮 LLM 可见的用户消息。"
+        "聊天气泡仍是空文本+卡片。运行时注入 {ticket_amount} {agent_value_yuan} "
+        "{offering_count} {previous_summary} {blessing}。",
+        CHAT_RED_PACKET_USER_MESSAGE_PROMPT,
     ),
     PromptDefinition(
         "chat.time_memories_section", "时间相关记忆段落", "聊天热路径", "记忆",

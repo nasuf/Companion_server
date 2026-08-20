@@ -728,6 +728,8 @@ async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
         ("real_world_trigger_states", "DELETE FROM real_world_trigger_states WHERE user_id = $1"),
         ("real_world_recharge_ledger", "DELETE FROM real_world_recharge_ledger WHERE user_id = $1"),
         ("gift_addresses", "DELETE FROM gift_addresses WHERE user_id = $1"),
+        ("user_offerings", "DELETE FROM user_offerings WHERE user_id = $1"),
+        ("agent_wallets", "DELETE FROM agent_wallets WHERE user_id = $1"),
         ("wallet_ledger", "DELETE FROM wallet_ledger WHERE user_id = $1"),
         ("user_wallets", "DELETE FROM user_wallets WHERE user_id = $1"),
         ("notification_events", "DELETE FROM notification_events WHERE user_id = $1"),
@@ -1100,6 +1102,8 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
         "ai_daily_schedules",
         "trait_feedback_logs",
         "intimacies",
+        "user_offerings",
+        "agent_wallets",
     ]
     for table in _FK_TABLES_TO_DELETE:
         try:

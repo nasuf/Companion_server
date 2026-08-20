@@ -709,6 +709,7 @@ async def run_post_process(
     messages_dicts: list[dict],
     user_emotion: dict | None = None,
     skip_ai_memory: bool = False,
+    skip_memory: bool = False,
     workspace_id: str | None = None,
 ) -> None:
     """后台任务并发：写用户情绪 / 记忆抽取 / 性格反馈 / 耐心恢复。
@@ -727,19 +728,26 @@ async def run_post_process(
         full_messages = messages_dicts + [{"role": "assistant", "content": full_response}]
         tasks: list[Any] = [
             _bg_user_emotion(user_message_id, user_emotion),
-            _bg_memory_pipeline(
-                user_id,
-                full_messages,
-                conversation_id=conversation_id,
-                workspace_id=workspace_id,
-                skip_ai_side=skip_ai_memory,
-            ),
         ]
+        # Red packets write 生活/馈赠 via offerings; running extraction on the
+        # rewritten "user just sent a red packet" line would duplicate rows
+        # and leak RMB framing into memories.
+        if not skip_memory:
+            tasks.append(
+                _bg_memory_pipeline(
+                    user_id,
+                    full_messages,
+                    conversation_id=conversation_id,
+                    workspace_id=workspace_id,
+                    skip_ai_side=skip_ai_memory,
+                )
+            )
         if agent_id:
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
             tasks.append(_bg_positive_recovery(agent_id, user_id, user_message))
-            # E3 表达学习: 计数节流, 每 LEARN_EVERY_N 条用户消息批量学一次
-            tasks.append(_bg_expression_learning(agent_id, user_id, full_messages))
+            if not skip_memory:
+                # E3 表达学习: 计数节流, 每 LEARN_EVERY_N 条用户消息批量学一次
+                tasks.append(_bg_expression_learning(agent_id, user_id, full_messages))
         await asyncio.gather(*tasks, return_exceptions=True)
 
 

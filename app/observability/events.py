@@ -9,7 +9,7 @@
 
 约定:
 - event 名 = "<domain>.<verb>" 短句, 全小写
-- domain ∈ {chat, intent, reply, memory, boundary, proactive, reminder, llm, ws, http, scheduler}
+- domain ∈ {chat, intent, reply, memory, boundary, proactive, reminder, offering, llm, ws, http, scheduler}
 - 加事件: 只改这一处. 调用方 import 常量, 不写裸字符串.
 - 字段命名:
   * `*_id` / `*_name`: ID / 显示名 (uuid 类全量记录)
@@ -82,6 +82,10 @@ EVT_REMINDER_PRECHECK = "reminder.precheck"
 EVT_REMINDER_RENEWED = "reminder.renewed"
 EVT_REMINDER_RESCHEDULED = "reminder.rescheduled"
 EVT_REMINDER_DLQ = "reminder.dead_letter"
+
+# Offerings (red packets / future gifts)
+EVT_OFFERING_SENT = "offering.sent"
+EVT_OFFERING_RECEIVED = "offering.received"
 
 # Infra
 EVT_LLM_CALL = "llm.call"

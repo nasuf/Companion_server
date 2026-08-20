@@ -75,6 +75,8 @@ model User {
   notificationEvents       NotificationEvent[]
   wallet                   UserWallet?
   walletLedger             WalletLedger[]
+  offerings                UserOffering[]
+  agentWallets             AgentWallet[]
   offlineActivities        OfflineActivityRecommendation[]
   offlineActivityFeedback  OfflineActivityFeedback[]
   offlineActivityMedia     OfflineActivityMedia[]
@@ -173,6 +175,8 @@ model AiAgent {
   offlineActivities        OfflineActivityRecommendation[]
   realWorldGifts           RealWorldGift[]
   realWorldTriggerStates   RealWorldTriggerState[]
+  offerings                UserOffering[]
+  wallet                   AgentWallet?
 
   @@index([sourceTemplateId], map: "ai_agents_source_template_idx")
   @@map("ai_agents")
@@ -239,6 +243,7 @@ model Conversation {
   achievementEvents       AchievementEvent[]
   offlineActivities       OfflineActivityRecommendation[]
   realWorldGifts          RealWorldGift[]
+  offerings               UserOffering[]
 
   @@map("conversations")
 }
@@ -824,6 +829,48 @@ model WalletLedger {
   @@index([userId, currency, createdAt(sort: Desc)], map: "wallet_ledger_user_currency_time_idx")
   @@index([source, sourceId], map: "wallet_ledger_source_idx")
   @@map("wallet_ledger")
+}
+
+// User-to-agent transfers: red packets now, virtual/physical gifts later.
+// Ticket amounts are shop 钞票; agent_value_yuan is the companion's perceived
+// RMB weight (currently 1 钞票 = 1 元). Status/amount here are source of truth;
+// memories_user/ai 生活/馈赠 rows are for conversational recall only.
+model UserOffering {
+  id             String        @id @default(uuid())
+  userId         String        @map("user_id")
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String        @map("agent_id")
+  agent          AiAgent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  conversationId String?       @map("conversation_id")
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  messageId      String?       @map("message_id")
+  kind           String
+  ticketAmount   Int           @map("ticket_amount")
+  agentValueYuan Int           @map("agent_value_yuan")
+  status         String
+  blessing       String?
+  metadata       Json          @default("{}")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  receivedAt     DateTime?     @map("received_at")
+
+  @@index([userId, agentId, createdAt(sort: Desc)], map: "user_offerings_user_agent_time_idx")
+  @@index([conversationId], map: "user_offerings_conversation_idx")
+  @@unique([messageId], map: "user_offerings_message_unique")
+  @@map("user_offerings")
+}
+
+model AgentWallet {
+  id              String   @id @default(uuid())
+  agentId         String   @unique @map("agent_id")
+  agent           AiAgent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  userId          String   @map("user_id")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  receivedTickets Int      @default(0) @map("received_tickets")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId], map: "agent_wallets_user_idx")
+  @@map("agent_wallets")
 }
 
 // Admin 测试时对单条 AI 回复打标的 bug 标签. 跟 Message 是 N:1

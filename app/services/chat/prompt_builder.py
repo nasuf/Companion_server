@@ -394,6 +394,32 @@ async def _build_meal_voucher_card_section(
     return _PromptBody(str(prompt), key)
 
 
+async def _build_red_packet_section(
+    context: dict[str, Any] | None,
+    intimacy_stage: str | None,
+) -> _PromptBody | None:
+    if not context or not context.get("offering_id"):
+        return None
+    tpl = await _get_optional_prompt("chat.red_packet_reply")
+    if tpl is None:
+        return None
+    body = render_template(
+        tpl,
+        {
+            "ticket_amount": context.get("ticket_amount", ""),
+            "agent_value_yuan": context.get("agent_value_yuan", ""),
+            "offering_count": context.get("offering_count", 1),
+            "previous_summary": context.get("previous_summary") or "",
+            "blessing": context.get("blessing") or "",
+            "intimacy_stage": intimacy_stage or "",
+        },
+        optional_keys=["previous_summary", "blessing", "intimacy_stage"],
+    )
+    if not _has_prompt_body(body):
+        return None
+    return _PromptBody(body, "chat.red_packet_reply")
+
+
 async def _build_delay_context_section(
     delay_context: dict[str, Any] | None,
 ) -> _PromptBody | None:
@@ -539,6 +565,7 @@ async def build_system_prompt(
     ai_mood_text: str = "",
     expression_habits: list[str] | None = None,
     meal_voucher_card_state: str | None = None,
+    red_packet_context: dict[str, Any] | None = None,
     last_reply_count: int | None = None,
     # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
     needs_web_search: bool = False,
@@ -811,6 +838,18 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "霸王餐券入口")
+
+    red_packet = await _build_red_packet_section(red_packet_context, intimacy_stage)
+    if red_packet:
+        _append_section(
+            sections,
+            components,
+            "红包回应",
+            red_packet.body,
+            prompt_key=red_packet.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "红包回应")
 
     # Phase 6: 删 graph_context 注入 (信息冗余 memory section, 抽象列表诱导编造)
 

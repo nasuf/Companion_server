@@ -212,3 +212,20 @@ class TestOtherSpecialEvents:
         """通用兜底 "其他" 独立存在, 不被 "其他特殊事件" 吞并."""
         r = resolve_taxonomy(main_category="生活", sub_category="其他")
         assert r.sub_category == "其他"
+
+
+def test_life_gift_subcategory_is_allowed():
+    r = resolve_taxonomy(main_category="生活", sub_category="馈赠", source="user", level=2)
+    assert r.allowed is True
+    assert r.sub_category == "馈赠"
+
+    ai = resolve_taxonomy(main_category="生活", sub_category="馈赠", source="ai", level=2)
+    assert ai.allowed is True
+    assert ai.sub_category == "馈赠"
+
+
+@pytest.mark.parametrize("alias", ["红包", "礼物", "送礼", "转账", "压岁钱", "心意", "给钱"])
+def test_gift_aliases_map_to_offering(alias):
+    r = resolve_taxonomy(main_category="生活", sub_category=alias)
+    assert r.sub_category == "馈赠"
+    assert r.allowed is True

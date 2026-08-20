@@ -205,6 +205,7 @@ from app.api.public.game_points import router as game_points_router
 from app.api.public.music import router as music_router
 from app.api.public.achievements import router as achievements_router
 from app.api.public.wallet import router as wallet_router
+from app.api.public.offerings import router as offerings_router
 from app.api.public.notifications import router as notifications_router
 from app.api.public.offline import router as offline_router
 from app.api.realtime.ws import router as ws_router
@@ -255,6 +256,7 @@ app.include_router(game_points_router)
 app.include_router(music_router)
 app.include_router(achievements_router)
 app.include_router(wallet_router)
+app.include_router(offerings_router)
 app.include_router(store_router)
 app.include_router(notifications_router)
 app.include_router(offline_router)
