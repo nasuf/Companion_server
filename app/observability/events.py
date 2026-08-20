@@ -87,6 +87,9 @@ EVT_REMINDER_DLQ = "reminder.dead_letter"
 EVT_OFFERING_SENT = "offering.sent"
 EVT_OFFERING_RECEIVED = "offering.received"
 
+# Admin wallet operations
+EVT_ADMIN_TICKET_GRANT = "admin.ticket_grant"
+
 # Infra
 EVT_LLM_CALL = "llm.call"
 EVT_LLM_FAIL = "llm.fail"
