@@ -86,6 +86,7 @@ EVT_REMINDER_DLQ = "reminder.dead_letter"
 # Offerings (red packets / future gifts)
 EVT_OFFERING_SENT = "offering.sent"
 EVT_OFFERING_RECEIVED = "offering.received"
+EVT_OFFERING_RECLAIMED = "offering.reclaimed"
 
 # Admin wallet operations
 EVT_ADMIN_TICKET_GRANT = "admin.ticket_grant"

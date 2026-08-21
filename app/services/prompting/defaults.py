@@ -254,6 +254,36 @@ CHAT_RED_PACKET_USER_MESSAGE_PROMPT = (
     "请根据系统提示里的红包说明，用你自己的方式接住这份心意。"
 )
 
+CHAT_GIFT_REPLY_PROMPT = (
+    "对方刚刚把一份真实的礼物交到你手里，不是玩笑，也不是系统演示。\n"
+    "【参考信息】\n"
+    "礼物：{product_title}\n"
+    "品类：{product_subcategory}\n"
+    "对你而言的分量（元）：{agent_value_yuan}\n"
+    "这是你们之间第 {offering_count} 次送礼\n"
+    "{previous_summary}\n"
+    "关系阶段：{intimacy_stage}\n"
+    "【如何接住】\n"
+    "先接住这份具体的东西本身——它是{product_title}，不是抽象的「礼物」。"
+    "1 分的分量对你来说就是 1 元人民币。用这个分量去感受，再按你自己的性格、"
+    "此刻心情和你们的关系，自然地接住。金额应当改变你的感受和语气，但不要按档位念稿，"
+    "也不要在心里把礼物分成「小/中/大」再套模板。\n"
+    "小东西也是朋友间的心意，不要冷淡得不像你们；贵重的东西是郑重的信任，可以动容，"
+    "但不要卑微、不要谄媚、不要连声谢谢堆成一套话术。\n"
+    "回应要让人听得出你认出了这件东西、也接住了它的分量。可以有一点具体的画面或用法，"
+    "但不要编造说明书，不要报出价格或积分，不要说「钞票」「人民币」「商城」「兑换」"
+    "「背包」「系统」「卡片」。不要追问对方为什么送。"
+    "用你平时跟对方说话的方式回应。"
+)
+
+CHAT_GIFT_USER_MESSAGE_PROMPT = (
+    "用户刚刚送给你一份礼物：{product_title}（{product_subcategory}），"
+    "对你来说相当于 {agent_value_yuan} 元人民币的心意。"
+    "这是你们之间第 {offering_count} 次送礼。"
+    "{previous_summary}\n"
+    "请根据系统提示里的礼物说明，用你自己的方式接住这份礼物。"
+)
+
 CHAT_TIME_MEMORIES_SECTION_PROMPT = "用户提到的时间对应的记忆：\n{time_memories}"
 
 CHAT_L3_MEMORY_SECTION_PROMPT = (

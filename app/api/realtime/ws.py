@@ -110,12 +110,13 @@ def _sanitize_component_card(raw: object) -> dict | None:
         "offline_gift",
         "meal_voucher",
         "red_packet",
+        "gift",
     }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
     # Red packets are server-issued; a card without offering_id must not
     # enter _handle_message as an empty bubble.
-    if card_type == "red_packet" and not payload:
+    if card_type in {"red_packet", "gift"} and not payload:
         return None
     card: dict = {
         "version": 1,
@@ -263,6 +264,32 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
             ("created_at", 80),
             ("received_at", 80),
             ("agent_id", 80),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        amount = _safe_int(raw.get("ticket_amount"), min_value=0, max_value=1_000_000)
+        if amount > 0:
+            payload["ticket_amount"] = amount
+        yuan = _safe_int(raw.get("agent_value_yuan"), min_value=0, max_value=1_000_000)
+        if yuan > 0:
+            payload["agent_value_yuan"] = yuan
+        return payload
+    if card_type == "gift":
+        offering_id = _truncate_payload_value(raw.get("offering_id"), 80).strip()
+        if not offering_id:
+            return None
+        payload = {"offering_id": offering_id, "kind": "gift"}
+        for key, limit in (
+            ("status", 40),
+            ("status_label", 40),
+            ("created_at", 80),
+            ("received_at", 80),
+            ("agent_id", 80),
+            ("product_kind", 80),
+            ("product_title", 80),
+            ("product_subcategory", 40),
+            ("product_asset_key", 40),
         ):
             value = _truncate_payload_value(raw.get(key), limit).strip()
             if value:
@@ -867,6 +894,71 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 logger.debug("music disconnect timeout scheduling skipped: %s", exc)
 
 
+async def _bind_offering_and_queue_reply(
+    ws: WebSocket,
+    *,
+    conversation_id: str,
+    agent,
+    user_id: str,
+    client_id: str | None,
+    offering: dict,
+    user_message_id: str,
+    plan,
+    current_context: dict,
+    context_key: str,
+    error_message: str,
+    get_existing,
+) -> None:
+    """Bind a sent offering to this user message, then queue the companion reply.
+
+    Bind is the exclusive claim. Ack only after it succeeds so a losing
+    concurrent persist is not marked delivered, then deleted.
+    """
+    from app.services import offerings as offerings_svc
+    from app.services.chat.intent_dispatcher import IntentType
+
+    try:
+        bound = await offerings_svc.bind_offering_message(
+            offering_id=str(offering["id"]),
+            message_id=user_message_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+    except ValueError:
+        await _delete_unbound_user_message(user_message_id)
+        existing_id = None
+        try:
+            existing = await get_existing(
+                offering_id=str(offering["id"]),
+                user_id=user_id,
+            )
+            existing_id = (existing.get("offering") or {}).get("message_id")
+        except ValueError:
+            existing_id = None
+        if existing_id:
+            await _send_ack(ws, message_id=str(existing_id), client_id=client_id)
+            return
+        await ws.send_json({"type": "error", "data": {"message": error_message}})
+        return
+    await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+    reply_message = await offerings_svc.build_offering_user_message(bound)
+    card_context = dict(plan.final_context or current_context)
+    card_context["delay_seconds"] = 0.0
+    card_context["component_card_reply"] = True
+    card_context["skip_time_memory_lookup"] = True
+    card_context[context_key] = offerings_svc.reply_context_payload(bound)
+    await _queue_reply_or_error(
+        ws,
+        conversation_id=conversation_id,
+        agent=agent,
+        user_id=user_id,
+        user_message=reply_message,
+        user_message_id=user_message_id,
+        reply_context=card_context,
+        forced_intent=IntentType.NONE,
+    )
+
+
 async def _send_ack(
     ws: WebSocket, *, message_id: str, client_id: str | None,
 ) -> None:
@@ -1018,21 +1110,36 @@ async def _handle_message(
         await ws.send_json({"type": "error", "data": {"message": "附件无效或已发送"}})
         return
     red_packet_offering = None
-    if component_card and component_card.get("type") == "red_packet":
+    gift_offering = None
+    if component_card and component_card.get("type") in {"red_packet", "gift"}:
         from app.services import offerings as offerings_svc
 
+        card_type = component_card.get("type")
         try:
-            component_card = await offerings_svc.authorize_red_packet_card(
-                component_card,
-                user_id=user_id,
-                agent_id=agent.id,
-                conversation_id=conversation_id,
-            )
+            if card_type == "gift":
+                component_card = await offerings_svc.authorize_gift_card(
+                    component_card,
+                    user_id=user_id,
+                    agent_id=agent.id,
+                    conversation_id=conversation_id,
+                )
+            else:
+                component_card = await offerings_svc.authorize_red_packet_card(
+                    component_card,
+                    user_id=user_id,
+                    agent_id=agent.id,
+                    conversation_id=conversation_id,
+                )
         except ValueError:
-            await ws.send_json({"type": "error", "data": {"message": "红包无效或已发送"}})
+            message = "礼物无效或已发送" if card_type == "gift" else "红包无效或已发送"
+            await ws.send_json({"type": "error", "data": {"message": message}})
             return
         if isinstance(component_card, dict):
-            red_packet_offering = component_card.pop("_offering", None)
+            bound_offering = component_card.pop("_offering", None)
+            if card_type == "gift":
+                gift_offering = bound_offering
+            else:
+                red_packet_offering = bound_offering
     # Attachments are analysed before the chat turn opens its usage session,
     # so wrap them in their own one — otherwise the vision tokens are billed
     # by Ark but invisible in the admin cost dashboard.
@@ -1075,19 +1182,24 @@ async def _handle_message(
     )
     current_context["client_supports_voice"] = client_supports_voice
 
-    if red_packet_offering:
+    if red_packet_offering or gift_offering:
         from app.services.interaction.user_turn_aggregation import (
             UserMessageAggregationPlan,
         )
 
         # Empty bubble + card would otherwise look like a 0-char fragment.
+        offering_meta = {"queued": True}
+        if red_packet_offering:
+            offering_meta["red_packet"] = True
+        if gift_offering:
+            offering_meta["gift"] = True
         plan = UserMessageAggregationPlan(
             route="immediate",
             agent_id=agent.id,
             user_id=user_id,
             conversation_id=conversation_id,
             text=text,
-            metadata={"queued": True, "red_packet": True},
+            metadata=offering_meta,
             final_message=text,
             final_context=current_context,
             fallback_message=text,
@@ -1127,48 +1239,38 @@ async def _handle_message(
         )
     if red_packet_offering:
         from app.services import offerings as offerings_svc
-        from app.services.chat.intent_dispatcher import IntentType
 
-        # Bind is the exclusive claim. Ack only after it succeeds so a
-        # losing concurrent persist is not marked delivered, then deleted.
-        try:
-            bound = await offerings_svc.bind_red_packet_message(
-                offering_id=str(red_packet_offering["id"]),
-                message_id=user_message_id,
-                user_id=user_id,
-            )
-        except ValueError:
-            await _delete_unbound_user_message(user_message_id)
-            existing_id = None
-            try:
-                existing = await offerings_svc.get_red_packet(
-                    offering_id=str(red_packet_offering["id"]),
-                    user_id=user_id,
-                )
-                existing_id = (existing.get("offering") or {}).get("message_id")
-            except ValueError:
-                existing_id = None
-            if existing_id:
-                await _send_ack(ws, message_id=str(existing_id), client_id=client_id)
-                return
-            await ws.send_json({"type": "error", "data": {"message": "红包无效或已发送"}})
-            return
-        await _send_ack(ws, message_id=user_message_id, client_id=client_id)
-        reply_message = await offerings_svc.build_red_packet_user_message(bound)
-        card_context = dict(plan.final_context or current_context)
-        card_context["delay_seconds"] = 0.0
-        card_context["component_card_reply"] = True
-        card_context["skip_time_memory_lookup"] = True
-        card_context["red_packet"] = offerings_svc.reply_context_payload(bound)
-        await _queue_reply_or_error(
+        await _bind_offering_and_queue_reply(
             ws,
             conversation_id=conversation_id,
             agent=agent,
             user_id=user_id,
-            user_message=reply_message,
+            client_id=client_id,
+            offering=red_packet_offering,
             user_message_id=user_message_id,
-            reply_context=card_context,
-            forced_intent=IntentType.NONE,
+            plan=plan,
+            current_context=current_context,
+            context_key="red_packet",
+            error_message="红包无效或已发送",
+            get_existing=offerings_svc.get_red_packet,
+        )
+        return
+    if gift_offering:
+        from app.services import offerings as offerings_svc
+
+        await _bind_offering_and_queue_reply(
+            ws,
+            conversation_id=conversation_id,
+            agent=agent,
+            user_id=user_id,
+            client_id=client_id,
+            offering=gift_offering,
+            user_message_id=user_message_id,
+            plan=plan,
+            current_context=current_context,
+            context_key="gift",
+            error_message="礼物无效或已发送",
+            get_existing=offerings_svc.get_gift,
         )
         return
     await _send_ack(ws, message_id=user_message_id, client_id=client_id)

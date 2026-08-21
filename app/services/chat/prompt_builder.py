@@ -420,6 +420,34 @@ async def _build_red_packet_section(
     return _PromptBody(body, "chat.red_packet_reply")
 
 
+async def _build_gift_section(
+    context: dict[str, Any] | None,
+    intimacy_stage: str | None,
+) -> _PromptBody | None:
+    if not context or not context.get("offering_id"):
+        return None
+    tpl = await _get_optional_prompt("chat.gift_reply")
+    if tpl is None:
+        return None
+    previous = str(context.get("previous_summary") or "")
+    previous_line = f"上次：{previous}" if previous else ""
+    body = render_template(
+        tpl,
+        {
+            "product_title": context.get("product_title") or "礼物",
+            "product_subcategory": context.get("product_subcategory") or "",
+            "agent_value_yuan": context.get("agent_value_yuan", ""),
+            "offering_count": context.get("offering_count", 1),
+            "previous_summary": previous_line,
+            "intimacy_stage": intimacy_stage or "",
+        },
+        optional_keys=["previous_summary", "product_subcategory", "intimacy_stage"],
+    )
+    if not _has_prompt_body(body):
+        return None
+    return _PromptBody(body, "chat.gift_reply")
+
+
 async def _build_delay_context_section(
     delay_context: dict[str, Any] | None,
 ) -> _PromptBody | None:
@@ -566,6 +594,7 @@ async def build_system_prompt(
     expression_habits: list[str] | None = None,
     meal_voucher_card_state: str | None = None,
     red_packet_context: dict[str, Any] | None = None,
+    gift_context: dict[str, Any] | None = None,
     last_reply_count: int | None = None,
     # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
     needs_web_search: bool = False,
@@ -795,16 +824,12 @@ async def build_system_prompt(
     # Red packets are themselves the new topic. Injecting "问问这几天过得
     # 怎么样" on an 8-day gap made the model greet and ignore the gift
     # (2026-08-20 production: empty card bubble + reengagement_day).
-    reengage_gap = (
-        None
-        if red_packet_context and red_packet_context.get("offering_id")
-        else reengagement_gap_seconds
+    offering_turn = bool(
+        (red_packet_context and red_packet_context.get("offering_id"))
+        or (gift_context and gift_context.get("offering_id"))
     )
-    recap_text = (
-        None
-        if red_packet_context and red_packet_context.get("offering_id")
-        else session_recap
-    )
+    reengage_gap = None if offering_turn else reengagement_gap_seconds
+    recap_text = None if offering_turn else session_recap
     reengage = await _build_reengagement_section(reengage_gap)
     if reengage:
         _append_section(
@@ -863,6 +888,18 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "红包回应")
+
+    gift = await _build_gift_section(gift_context, intimacy_stage)
+    if gift:
+        _append_section(
+            sections,
+            components,
+            "礼物回应",
+            gift.body,
+            prompt_key=gift.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "礼物回应")
 
     # Phase 6: 删 graph_context 注入 (信息冗余 memory section, 抽象列表诱导编造)
 

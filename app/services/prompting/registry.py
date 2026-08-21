@@ -36,6 +36,8 @@ from app.services.prompting.defaults import (
     CHAT_MEAL_VOUCHER_CARD_REPEAT_PROMPT,
     CHAT_RED_PACKET_REPLY_PROMPT,
     CHAT_RED_PACKET_USER_MESSAGE_PROMPT,
+    CHAT_GIFT_REPLY_PROMPT,
+    CHAT_GIFT_USER_MESSAGE_PROMPT,
     CHAT_AI_MOOD_SECTION_PROMPT,
     CHAT_EXPRESSION_HABITS_SECTION_PROMPT,
     CHAT_MEMORY_SECTION_BODY_PROMPT,
@@ -366,6 +368,21 @@ PROMPT_DEFINITIONS = [
         "聊天气泡仍是空文本+卡片。运行时注入 {ticket_amount} {agent_value_yuan} "
         "{offering_count} {previous_summary} {blessing}。",
         CHAT_RED_PACKET_USER_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.gift_reply", "礼物回应", "聊天热路径", "礼物",
+        "【工程扩展】用户把背包礼物发给 agent 时注入主回复。"
+        "运行时注入 {product_title} {product_subcategory} {agent_value_yuan} "
+        "{offering_count} {previous_summary} {intimacy_stage}。"
+        "价值只给模型感知分量，禁止按档位 hardcode 话术，禁止说出价格。",
+        CHAT_GIFT_REPLY_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.gift_user_message", "礼物用户消息改写", "聊天热路径", "礼物",
+        "【工程扩展】礼物卡片进入聊天热路径时，改写本轮 LLM 可见的用户消息。"
+        "聊天气泡仍是空文本+卡片。运行时注入 {product_title} {product_subcategory} "
+        "{agent_value_yuan} {offering_count} {previous_summary}。",
+        CHAT_GIFT_USER_MESSAGE_PROMPT,
     ),
     PromptDefinition(
         "chat.time_memories_section", "时间相关记忆段落", "聊天热路径", "记忆",

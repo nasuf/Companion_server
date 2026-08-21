@@ -20,8 +20,16 @@ def _previous_assistant_message(recent_messages: list[Any], current_user_message
                 current_index = idx
                 break
     for message in reversed(recent_messages[:current_index]):
-        if getattr(message, "role", None) == "assistant":
-            return message
+        if getattr(message, "role", None) != "assistant":
+            continue
+        meta = (
+            message.get("metadata")
+            if isinstance(message, dict)
+            else getattr(message, "metadata", None)
+        )
+        if is_offering_received_notice(meta):
+            continue
+        return message
     return None
 
 
@@ -146,6 +154,13 @@ def _parse_message_created_at(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def is_offering_received_notice(metadata: Any) -> bool:
+    """True for WeChat-style 小灰条 rows that must not enter the reply LLM."""
+    if isinstance(metadata, dict):
+        return bool(metadata.get("offering_received"))
+    return False
 
 
 def _max_user_created_at(messages: list[dict]) -> datetime | None:

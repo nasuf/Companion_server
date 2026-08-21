@@ -73,7 +73,43 @@ async def list_inventory(user_id: str) -> dict[str, list[dict[str, Any]]]:
         """,
         user_id,
     )
-    return {"items": [_inventory_row(row) for row in rows]}
+    items = [_inventory_row(row) for row in rows]
+    unbound_rows = await db.query_raw(
+        """
+        SELECT metadata->>'product_kind' AS product_kind,
+               COUNT(*)::int AS n
+        FROM user_offerings
+        WHERE user_id = $1
+          AND kind = 'gift'
+          AND message_id IS NULL
+          AND status = 'sent'
+          AND COALESCE(metadata->>'product_kind', '') <> ''
+        GROUP BY metadata->>'product_kind'
+        """,
+        user_id,
+    )
+    extra = {
+        str(_field(row, "product_kind", "") or ""): int(_field(row, "n", 0) or 0)
+        for row in unbound_rows
+        if str(_field(row, "product_kind", "") or "")
+    }
+    if extra:
+        merged: list[dict[str, Any]] = []
+        for item in items:
+            kind = str(item.get("product_kind") or "")
+            bump = extra.pop(kind, 0)
+            if bump:
+                item = {**item, "quantity": int(item.get("quantity") or 0) + bump}
+            merged.append(item)
+        for kind, bump in extra.items():
+            merged.append({
+                "product_kind": kind,
+                "quantity": bump,
+                "acquired_at": None,
+                "updated_at": None,
+            })
+        items = merged
+    return {"items": items}
 
 
 async def get_catalog(user_id: str) -> dict[str, Any]:
@@ -155,3 +191,32 @@ async def exchange_product(user_id: str, product_kind: str) -> dict[str, Any]:
         "wallet": balance,
         "inventory_item": inventory_item,
     }
+
+
+async def consume_inventory(
+    user_id: str,
+    product_kind: str,
+    *,
+    quantity: int = 1,
+    client: Any,
+) -> dict[str, Any]:
+    """Atomically decrement owned inventory. Raises if the stack is too small."""
+    if quantity <= 0:
+        raise ValueError("invalid_amount")
+    rows = await client.query_raw(
+        """
+        UPDATE user_store_inventory
+        SET quantity = quantity - $3,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+          AND product_kind = $2
+          AND quantity >= $3
+        RETURNING product_kind, quantity, acquired_at, updated_at
+        """,
+        user_id,
+        product_kind,
+        quantity,
+    )
+    if not rows:
+        raise ValueError("insufficient_inventory")
+    return _inventory_row(rows[0])

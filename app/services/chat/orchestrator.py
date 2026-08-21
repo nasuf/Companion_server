@@ -147,6 +147,7 @@ from app.services.chat.message_utils import (
     _parse_message_created_at,
     _previous_assistant_message,
     collapse_turn_fragments,
+    is_offering_received_notice,
 )
 from app.services.chat.preflight import (
     PreflightCtx,
@@ -403,10 +404,15 @@ async def stream_chat_response(
         (reply_context or {}).get("skip_time_memory_lookup")
     )
     red_packet_context = None
+    gift_context = None
     if isinstance(reply_context, dict):
         raw_red_packet = reply_context.get("red_packet")
         if isinstance(raw_red_packet, dict) and raw_red_packet.get("offering_id"):
             red_packet_context = raw_red_packet
+        raw_gift = reply_context.get("gift")
+        if isinstance(raw_gift, dict) and raw_gift.get("offering_id"):
+            gift_context = raw_gift
+    offering_context = red_packet_context or gift_context
 
     # 碎片聚合/延迟队列在入队时已落库；sub_intent_mode 共享父调用的原始消息
     if save_user_message and not sub_intent_mode:
@@ -488,6 +494,9 @@ async def stream_chat_response(
                 "createdAt": m.createdAt.isoformat() if getattr(m, "createdAt", None) else None,
             }
             for m in recent_messages
+            if not is_offering_received_notice(
+                m.metadata if isinstance(m.metadata, dict) else None
+            )
         ]
         messages_dicts = _ensure_current_user_message(
             messages_dicts,
@@ -1350,6 +1359,7 @@ async def stream_chat_response(
                 expression_habits=expression_habits or None,
                 meal_voucher_card_state=meal_card_decision.state,
                 red_packet_context=red_packet_context,
+                gift_context=gift_context,
                 last_reply_count=last_reply_count,
                 needs_web_search=needs_web_search,
                 discussed_titles=(
@@ -1458,7 +1468,7 @@ async def stream_chat_response(
             # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
             reengagement_gap_seconds=reengagement_gap_seconds,
             force_main_prompt=(
-                meal_card_decision.state != "none" or bool(red_packet_context)
+                meal_card_decision.state != "none" or bool(offering_context)
             ),
             diagnostics=response_diagnostics,
         )
@@ -1627,17 +1637,17 @@ async def stream_chat_response(
             achievement_turn_id=current_achievement_turn_id,
             achievement_turn_final=achievement_turn_final and not pending_sub_fragments,
         )
-        if red_packet_context and not sub_intent_mode:
+        if offering_context and not sub_intent_mode:
             try:
                 from app.services import offerings as offerings_svc
 
-                await offerings_svc.mark_red_packet_received(
-                    offering_id=str(red_packet_context["offering_id"]),
+                await offerings_svc.mark_offering_received(
+                    offering_id=str(offering_context["offering_id"]),
                     user_id=user_id,
                     conversation_id=conversation_id,
                 )
             except Exception:
-                logger.exception("red_packet receive mark failed")
+                logger.exception("offering receive mark failed")
         if prepared_voice is not None:
             if first_assistant_message_id:
                 try:
@@ -1742,6 +1752,8 @@ async def stream_chat_response(
             title = (
                 "红包"
                 if red_packet_context
+                else "礼物"
+                if gift_context
                 else user_message[:50] + ("..." if len(user_message) > 50 else "")
             )
             _fire_background(db.conversation.update(
@@ -1760,7 +1772,7 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
             skip_ai_memory=False,
-            skip_memory=bool(red_packet_context),
+            skip_memory=bool(offering_context),
             workspace_id=workspace_id,
         ))
         post_process_fired = True

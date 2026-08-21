@@ -539,6 +539,15 @@ def setup_scheduler():
     )
 
     scheduler.add_job(
+        _run_unbound_offering_reclaim,
+        "interval",
+        minutes=2,
+        id="unbound_offering_reclaim",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
         _run_notification_dispatch,
         "interval",
         seconds=15,
@@ -1195,6 +1204,22 @@ async def _run_game_memory_sync_retry():
             )
 
     await _run_distributed_job("game_memory_sync_retry", 180, _body)
+
+
+async def _run_unbound_offering_reclaim():
+    """Restore backpack/tickets when a gift or red packet never reached chat."""
+
+    async def _body():
+        from app.services.offerings import reclaim_stale_unbound_offerings
+
+        try:
+            reclaimed = await reclaim_stale_unbound_offerings()
+            if reclaimed:
+                logger.info("reclaimed %s unbound offerings", reclaimed)
+        except Exception as e:
+            _job_failed("Unbound offering reclaim", e)
+
+    await _run_distributed_job("unbound_offering_reclaim", 120, _body)
 
 
 async def _run_aggregation_scan():

@@ -36,13 +36,16 @@ class _TxContext:
 
 
 class _FakeDb:
-    def __init__(self, *, list_rows=None, tx_rows=None):
+    def __init__(self, *, list_rows=None, tx_rows=None, unbound_rows=None):
         self.list_rows = list_rows or []
+        self.unbound_rows = unbound_rows or []
         self.fake_tx = _FakeTx(tx_rows or [])
         self.query_calls: list[tuple[str, tuple]] = []
 
     async def query_raw(self, query: str, *args):
         self.query_calls.append((query, args))
+        if "user_offerings" in query:
+            return list(self.unbound_rows)
         return self.list_rows
 
     def tx(self):
@@ -103,6 +106,27 @@ async def test_list_inventory_returns_owned_items(monkeypatch):
         }
     ]
     assert fake_db.query_calls[0][1] == ("user-1",)
+    assert fake_db.query_calls[1][1] == ("user-1",)
+
+
+@pytest.mark.asyncio
+async def test_list_inventory_includes_unbound_gifts(monkeypatch):
+    fake_db = _FakeDb(
+        list_rows=[],
+        unbound_rows=[{"product_kind": "gift_1", "n": 1}],
+    )
+    monkeypatch.setattr(store_inventory, "db", fake_db)
+
+    result = await store_inventory.list_inventory("user-1")
+
+    assert result["items"] == [
+        {
+            "product_kind": "gift_1",
+            "quantity": 1,
+            "acquired_at": None,
+            "updated_at": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -237,3 +261,37 @@ async def test_get_catalog_marks_vip_status(monkeypatch):
     assert by_kind["gift_1"]["member_price"] == 18
     assert result["bundles"]["vip_trial"]["available"] is True
     assert result["bundles"]["music"]["tiers"][0]["ticket_price"] == 10
+
+
+@pytest.mark.asyncio
+async def test_consume_inventory_decrements_owned_stack():
+    tx = _FakeTx(
+        [
+            [
+                {
+                    "product_kind": "gift_1",
+                    "quantity": 2,
+                    "acquired_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+            ]
+        ]
+    )
+
+    result = await store_inventory.consume_inventory(
+        "user-1", "gift_1", quantity=1, client=tx
+    )
+
+    assert result["product_kind"] == "gift_1"
+    assert result["quantity"] == 2
+    assert "quantity = quantity -" in tx.query_calls[0][0]
+    assert tx.query_calls[0][1] == ("user-1", "gift_1", 1)
+
+
+@pytest.mark.asyncio
+async def test_consume_inventory_rejects_empty_stack():
+    tx = _FakeTx([[]])
+    with pytest.raises(ValueError, match="insufficient_inventory"):
+        await store_inventory.consume_inventory(
+            "user-1", "gift_1", quantity=1, client=tx
+        )

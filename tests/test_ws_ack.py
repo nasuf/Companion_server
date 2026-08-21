@@ -214,6 +214,46 @@ def test_sanitize_component_card_allows_red_packet_payload():
     }
 
 
+def test_sanitize_component_card_allows_gift_payload():
+    card = ws_mod._sanitize_component_card({
+        "type": "gift",
+        "title": "美式咖啡",
+        "subtitle": "待接收",
+        "body": "饮品",
+        "footer": "点击查看",
+        "accent": "#FF8A3D",
+        "payload": {
+            "offering_id": "off-1",
+            "kind": "gift",
+            "product_kind": "gift_1",
+            "product_title": "美式咖啡",
+            "product_subcategory": "饮品",
+            "product_asset_key": "1",
+            "ticket_amount": 25,
+            "agent_value_yuan": 25,
+            "status": "sent",
+            "status_label": "待接收",
+            "ignored": "drop-me",
+        },
+    })
+
+    assert card is not None
+    assert card["type"] == "gift"
+    assert card["payload"]["offering_id"] == "off-1"
+    assert card["payload"]["product_kind"] == "gift_1"
+    assert card["payload"]["product_title"] == "美式咖啡"
+    assert "ignored" not in card["payload"]
+
+
+def test_sanitize_component_card_rejects_gift_without_offering_id():
+    card = ws_mod._sanitize_component_card({
+        "type": "gift",
+        "title": "美式咖啡",
+        "payload": {"product_kind": "gift_1"},
+    })
+    assert card is None
+
+
 def test_sanitize_component_card_rejects_red_packet_without_offering_id():
     card = ws_mod._sanitize_component_card({
         "type": "red_packet",
@@ -286,7 +326,7 @@ async def test_handle_message_red_packet_bind_failure_skips_ack_and_reply(fake_w
             side_effect=_authorize,
         ),
         patch(
-            "app.services.offerings.bind_red_packet_message",
+            "app.services.offerings.bind_offering_message",
             new_callable=AsyncMock,
             side_effect=ValueError("offering_already_bound"),
         ),
@@ -347,7 +387,7 @@ async def test_handle_message_red_packet_duplicate_acks_existing_message(fake_ws
             side_effect=_authorize,
         ),
         patch(
-            "app.services.offerings.bind_red_packet_message",
+            "app.services.offerings.bind_offering_message",
             new_callable=AsyncMock,
             side_effect=ValueError("offering_already_bound"),
         ),
@@ -378,6 +418,229 @@ async def test_handle_message_red_packet_duplicate_acks_existing_message(fake_ws
         if isinstance(call.args[0], dict) and call.args[0].get("type") == "error"
     ]
     assert errors == []
+
+
+def _gift_card():
+    return {
+        "version": 1,
+        "type": "gift",
+        "title": "美式咖啡",
+        "subtitle": "待接收",
+        "body": "饮品",
+        "footer": "点击查看",
+        "accent": "#FF8A3D",
+        "payload": {
+            "offering_id": "off-1",
+            "kind": "gift",
+            "product_kind": "gift_1",
+            "product_title": "美式咖啡",
+            "status": "sent",
+        },
+    }
+
+
+def _gift_offering(**overrides):
+    offering = {
+        "id": "off-1",
+        "kind": "gift",
+        "ticket_amount": 25,
+        "agent_value_yuan": 25,
+        "offering_count": 1,
+        "previous_summary": "",
+        "product_title": "美式咖啡",
+        "product_subcategory": "饮品",
+        "agent_id": "a1",
+        "conversation_id": "conv-1",
+        "message_id": None,
+    }
+    offering.update(overrides)
+    return offering
+
+
+@pytest.mark.asyncio
+async def test_handle_message_gift_bind_failure_skips_ack_and_reply(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+    queue_reply = AsyncMock()
+    delete_msg = AsyncMock()
+
+    async def _authorize(card, **kwargs):
+        authorized = dict(card)
+        authorized["_offering"] = _gift_offering()
+        return authorized
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-msg-gift-dup"),
+        patch.object(ws_mod, "_delete_unbound_user_message", delete_msg),
+        patch.object(ws_mod, "_queue_reply_or_error", queue_reply),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.offerings.authorize_gift_card",
+            side_effect=_authorize,
+        ),
+        patch(
+            "app.services.offerings.bind_offering_message",
+            new_callable=AsyncMock,
+            side_effect=ValueError("offering_already_bound"),
+        ),
+        patch(
+            "app.services.offerings.get_gift",
+            new_callable=AsyncMock,
+            return_value={"offering": _gift_offering(), "component_card": {}},
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "",
+            client_id="client-gift-dup",
+            component_card=_gift_card(),
+        )
+
+    delete_msg.assert_awaited_once_with("db-msg-gift-dup")
+    queue_reply.assert_not_awaited()
+    assert _ack_payloads(fake_ws) == []
+    errors = [
+        call.args[0]
+        for call in fake_ws.send_json.call_args_list
+        if isinstance(call.args[0], dict) and call.args[0].get("type") == "error"
+    ]
+    assert errors and errors[0]["data"]["message"] == "礼物无效或已发送"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_gift_duplicate_acks_existing_message(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+    queue_reply = AsyncMock()
+    delete_msg = AsyncMock()
+
+    async def _authorize(card, **kwargs):
+        authorized = dict(card)
+        authorized["_offering"] = _gift_offering()
+        return authorized
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-msg-gift-dup"),
+        patch.object(ws_mod, "_delete_unbound_user_message", delete_msg),
+        patch.object(ws_mod, "_queue_reply_or_error", queue_reply),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.offerings.authorize_gift_card",
+            side_effect=_authorize,
+        ),
+        patch(
+            "app.services.offerings.bind_offering_message",
+            new_callable=AsyncMock,
+            side_effect=ValueError("offering_already_bound"),
+        ),
+        patch(
+            "app.services.offerings.get_gift",
+            new_callable=AsyncMock,
+            return_value={
+                "offering": _gift_offering(message_id="db-msg-gift-first"),
+                "component_card": {},
+            },
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "",
+            client_id="client-gift-dup",
+            component_card=_gift_card(),
+        )
+
+    delete_msg.assert_awaited_once_with("db-msg-gift-dup")
+    queue_reply.assert_not_awaited()
+    acks = _ack_payloads(fake_ws)
+    assert len(acks) == 1
+    assert acks[0]["data"]["message_id"] == "db-msg-gift-first"
+    assert acks[0]["data"]["client_id"] == "client-gift-dup"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_gift_queues_gift_reply_context(fake_ws):
+    agent = SimpleNamespace(id="a1", name="A")
+    queue_reply = AsyncMock()
+    bound = _gift_offering(message_id="db-msg-gift")
+
+    async def _authorize(card, **kwargs):
+        authorized = dict(card)
+        authorized["_offering"] = _gift_offering()
+        return authorized
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-msg-gift"),
+        patch.object(ws_mod, "_queue_reply_or_error", queue_reply),
+        patch.object(
+            ws_mod, "get_cached_schedule",
+            new_callable=AsyncMock,
+            return_value=[{"activity": "自由时间", "type": "leisure"}],
+        ),
+        patch.object(
+            ws_mod, "get_current_status",
+            return_value={"activity": "自由时间", "type": "leisure", "status": "idle"},
+        ),
+        patch.object(
+            ws_mod, "build_reply_timing_context",
+            new_callable=AsyncMock, return_value={},
+        ),
+        patch(
+            "app.services.offerings.authorize_gift_card",
+            side_effect=_authorize,
+        ),
+        patch(
+            "app.services.offerings.bind_offering_message",
+            new_callable=AsyncMock,
+            return_value=bound,
+        ),
+        patch(
+            "app.services.offerings.build_offering_user_message",
+            new_callable=AsyncMock,
+            return_value="用户刚刚送给你一份礼物：美式咖啡",
+        ),
+        patch(
+            "app.services.offerings.reply_context_payload",
+            return_value={
+                "offering_id": "off-1",
+                "kind": "gift",
+                "product_title": "美式咖啡",
+                "agent_value_yuan": 25,
+            },
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "",
+            client_id="client-gift",
+            component_card=_gift_card(),
+        )
+
+    queue_reply.assert_awaited_once()
+    kwargs = queue_reply.await_args.kwargs
+    assert kwargs["user_message"] == "用户刚刚送给你一份礼物：美式咖啡"
+    assert kwargs["reply_context"]["gift"]["product_title"] == "美式咖啡"
+    assert kwargs["reply_context"]["skip_time_memory_lookup"] is True
+    acks = _ack_payloads(fake_ws)
+    assert acks and acks[0]["data"]["message_id"] == "db-msg-gift"
 
 
 def test_weibo_visitor_link_card_needs_refresh():
