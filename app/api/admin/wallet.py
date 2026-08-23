@@ -6,13 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.admin_wallet import (
+    AdminPointGrantRequest,
+    AdminPointGrantResponse,
     AdminTicketGrantRequest,
     AdminTicketGrantResponse,
     AdminWalletBalancesResponse,
     AdminWalletLedgerItem,
     AdminWalletUserSearchItem,
 )
-from app.observability.events import EVT_ADMIN_TICKET_GRANT
+from app.observability.events import EVT_ADMIN_POINT_GRANT, EVT_ADMIN_TICKET_GRANT
 from app.services import game_points, wallet
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,19 @@ async def list_wallet_ledger(
     )
 
 
+@router.get("/point-ledger", response_model=list[AdminWalletLedgerItem])
+async def list_wallet_point_ledger(
+    user_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    return await wallet.list_admin_point_ledger(
+        user_id=user_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/users", response_model=list[AdminWalletUserSearchItem])
 async def search_grant_users(
     q: str = Query(default=""),
@@ -93,6 +108,36 @@ async def grant_tickets(
             "target_user_id": payload.user_id,
             "delta": result["delta"],
             "ticket_balance": result["ticket_balance"],
+        },
+    )
+    return result
+
+
+@router.post("/point-grant", response_model=AdminPointGrantResponse)
+async def grant_points(
+    payload: AdminPointGrantRequest,
+    claims: dict = Depends(require_admin_jwt),
+):
+    admin_id = str(claims.get("sub") or "")
+    try:
+        result = await wallet.admin_adjust_points(
+            payload.user_id,
+            payload.amount,
+            admin_id=admin_id,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise _http_error(exc) from exc
+    logger.info(
+        "admin point grant user=%s delta=%s",
+        payload.user_id[:8],
+        result["delta"],
+        extra={
+            "event": EVT_ADMIN_POINT_GRANT,
+            "admin_id": admin_id,
+            "target_user_id": payload.user_id,
+            "delta": result["delta"],
+            "point_balance": result["point_balance"],
         },
     )
     return result

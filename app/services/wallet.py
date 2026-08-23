@@ -11,6 +11,7 @@ from app.services.achievements.service import list_achievements
 TICKET_TO_POINTS_RATE = 10
 # Same ceiling as user-facing red-packet sends; one admin action cannot exceed it.
 MAX_TICKET_ADJUST = 1_000_000
+MAX_POINT_ADJUST = 1_000_000
 
 # Ledger source for manual admin ticket adjustments. The ledger row itself is
 # the audit record — its metadata carries the acting admin id and the note.
@@ -215,6 +216,67 @@ async def admin_adjust_tickets(
             currency="ticket",
             delta=applied,
             balance_after=balance["ticket_balance"],
+            source=SOURCE_ADMIN_GRANT,
+            metadata={
+                "requested": amount,
+                "applied": applied,
+                "admin_id": admin_id,
+                "note": (note or "").strip(),
+            },
+            client=tx,
+        )
+    return {"user_id": user_id, "delta": applied, **balance}
+
+
+async def admin_adjust_points(
+    user_id: str,
+    amount: int,
+    *,
+    admin_id: str,
+    note: str | None = None,
+) -> dict[str, int]:
+    """Manual admin shop-point grant/adjustment (positive adds, negative deducts).
+
+    Mirrors ``admin_adjust_tickets`` but writes ``currency='point'`` ledger rows.
+    """
+    if amount == 0 or abs(amount) > MAX_POINT_ADJUST:
+        raise ValueError("invalid_amount")
+    await _ensure_user_exists(user_id)
+    await ensure_wallet(user_id)
+    async with db.tx() as tx:
+        locked = await tx.query_raw(
+            """
+            SELECT ticket_balance, point_balance, achievement_points_synced
+            FROM user_wallets
+            WHERE user_id = $1
+            FOR UPDATE
+            """,
+            user_id,
+        )
+        if not locked:
+            raise ValueError("wallet_not_found")
+        current = int(_field(locked[0], "point_balance", 0) or 0)
+        new_balance = max(0, current + amount)
+        applied = new_balance - current
+        if applied == 0:
+            raise ValueError("no_change")
+        rows = await tx.query_raw(
+            """
+            UPDATE user_wallets
+            SET point_balance = $2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+            RETURNING ticket_balance, point_balance, achievement_points_synced
+            """,
+            user_id,
+            new_balance,
+        )
+        balance = wallet_balances(rows[0])
+        await _record_ledger(
+            user_id=user_id,
+            currency="point",
+            delta=applied,
+            balance_after=balance["point_balance"],
             source=SOURCE_ADMIN_GRANT,
             metadata={
                 "requested": amount,
@@ -556,6 +618,62 @@ async def list_admin_ticket_ledger(
     limit = min(max(limit, 1), 200)
     offset = max(offset, 0)
     where = "WHERE l.currency = 'ticket'"
+    params: list[Any] = [limit, offset]
+    if user_id:
+        where += " AND l.user_id = $3"
+        params.append(user_id)
+    rows = await db.query_raw(
+        f"""
+        SELECT l.id, l.user_id, u.username, u.display_name,
+               l.currency, l.delta, l.balance_after, l.source, l.source_id,
+               l.metadata, l.created_at,
+               (
+                   SELECT ai.raw_profile->>'nickname'
+                   FROM auth_identities ai
+                   WHERE ai.user_id = l.user_id AND ai.provider = 'wechat'
+                   ORDER BY ai.updated_at DESC
+                   LIMIT 1
+               ) AS nickname
+        FROM wallet_ledger l
+        LEFT JOIN users u ON u.id = l.user_id
+        {where}
+        ORDER BY l.created_at DESC, l.id DESC
+        LIMIT $1 OFFSET $2
+        """,
+        *params,
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        created_at = _field(row, "created_at")
+        items.append(
+            {
+                "id": str(_field(row, "id", "")),
+                "user_id": str(_field(row, "user_id", "")),
+                "username": _field(row, "username"),
+                "display_name": _field(row, "display_name"),
+                "nickname": _field(row, "nickname"),
+                "currency": str(_field(row, "currency", "")),
+                "delta": int(_field(row, "delta", 0) or 0),
+                "balance_after": int(_field(row, "balance_after", 0) or 0),
+                "source": str(_field(row, "source", "")),
+                "source_id": _field(row, "source_id"),
+                "metadata": _json(_field(row, "metadata")),
+                "created_at": _iso(created_at),
+            }
+        )
+    return items
+
+
+async def list_admin_point_ledger(
+    *,
+    user_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Point-currency ledger across all users for the admin audit view."""
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    where = "WHERE l.currency = 'point'"
     params: list[Any] = [limit, offset]
     if user_id:
         where += " AND l.user_id = $3"

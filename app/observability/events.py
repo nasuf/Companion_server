@@ -90,6 +90,7 @@ EVT_OFFERING_RECLAIMED = "offering.reclaimed"
 
 # Admin wallet operations
 EVT_ADMIN_TICKET_GRANT = "admin.ticket_grant"
+EVT_ADMIN_POINT_GRANT = "admin.point_grant"
 
 # Infra
 EVT_LLM_CALL = "llm.call"

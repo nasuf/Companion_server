@@ -240,3 +240,81 @@ async def test_list_admin_ticket_ledger_filters_ticket_currency(monkeypatch):
     ledger_sql = fake_db.query_calls[0][0]
     assert "l.currency = 'ticket'" in ledger_sql
     assert "l.user_id = $3" in ledger_sql
+
+
+@pytest.mark.asyncio
+async def test_admin_adjust_points_credits_and_writes_point_ledger(monkeypatch):
+    fake_db = _FakeDb(
+        query_rows=[
+            [{"1": 1}],          # _ensure_user_exists
+            [_balance_row(10, 50)],  # ensure_wallet
+        ],
+        tx_rows=[
+            [_balance_row(10, 50)],  # FOR UPDATE
+            [_balance_row(10, 68)],  # UPDATE point 50 + 18
+        ],
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.admin_adjust_points(
+        "u1", 18, admin_id="admin-9", note="补偿积分"
+    )
+
+    assert result["delta"] == 18
+    assert result["point_balance"] == 68
+    ledger_sql, ledger_args = fake_db.fake_tx.execute_calls[0]
+    assert "INSERT INTO wallet_ledger" in ledger_sql
+    assert "point" in ledger_args
+    metadata = json.loads(ledger_args[-1])
+    assert metadata["note"] == "补偿积分"
+
+
+@pytest.mark.asyncio
+async def test_admin_adjust_points_floors_at_zero(monkeypatch):
+    fake_db = _FakeDb(
+        query_rows=[
+            [{"1": 1}],
+            [_balance_row(0, 5)],
+        ],
+        tx_rows=[
+            [_balance_row(0, 5)],
+            [_balance_row(0, 0)],
+        ],
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.admin_adjust_points("u1", -20, admin_id="admin-9")
+
+    assert result["delta"] == -5
+    assert result["point_balance"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_admin_point_ledger_filters_point_currency(monkeypatch):
+    fake_db = _FakeDb(
+        query_rows=[
+            [
+                {
+                    "id": "l1",
+                    "user_id": "u1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "nickname": None,
+                    "currency": "point",
+                    "delta": 18,
+                    "balance_after": 28,
+                    "source": "admin_grant",
+                    "source_id": None,
+                    "metadata": json.dumps({"admin_id": "a1"}),
+                    "created_at": "2026-08-20T08:00:00+00:00",
+                }
+            ]
+        ]
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    rows = await wallet.list_admin_point_ledger(user_id="u1", limit=20, offset=0)
+    assert len(rows) == 1
+    assert rows[0]["currency"] == "point"
+    ledger_sql = fake_db.query_calls[0][0]
+    assert "l.currency = 'point'" in ledger_sql

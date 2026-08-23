@@ -57,3 +57,19 @@ class AdminTicketGrantResponse(BaseModel):
     point_balance: int
     achievement_points_synced: int
     delta: int
+
+
+class AdminPointGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1)
+    amount: int = Field(ge=-1_000_000, le=1_000_000)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class AdminPointGrantResponse(BaseModel):
+    user_id: str
+    ticket_balance: int
+    point_balance: int
+    achievement_points_synced: int
+    delta: int
