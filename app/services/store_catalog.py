@@ -23,6 +23,8 @@ GIFT_SUBCATEGORIES: tuple[str, ...] = (
 MUSIC_COUPON_KIND = "music_hour_coupon"
 MUSIC_COUPON_VALID_DAYS = 30
 
+MAKEUP_CARD_KIND = "makeup_card"
+
 
 @dataclass(frozen=True)
 class ExchangeProduct:
@@ -69,6 +71,11 @@ GAME_BUNDLE_TIERS: tuple[BundleTier, ...] = (
     BundleTier("100", "100点", 20, 100),
     BundleTier("200", "200点", 35, 200),
     BundleTier("500", "500点", 80, 500),
+)
+
+# 补签卡：单档，1 张 30 钞票，与 Flutter store_data.dart:_makeupBundleTiers 保持一致.
+MAKEUP_BUNDLE_TIERS: tuple[BundleTier, ...] = (
+    BundleTier("makeup_1", "1张", 30, 1),
 )
 
 VIP_TRIAL_YUAN = 1
@@ -180,6 +187,13 @@ def game_tier(tier_id: str) -> BundleTier | None:
     return None
 
 
+def makeup_tier(tier_id: str) -> BundleTier | None:
+    for tier in MAKEUP_BUNDLE_TIERS:
+        if tier.tier_id == str(tier_id):
+            return tier
+    return None
+
+
 def catalog_payload(*, is_vip: bool, vip_trial_available: bool) -> dict:
     return {
         "is_vip": is_vip,
@@ -212,6 +226,20 @@ def catalog_payload(*, is_vip: bool, vip_trial_available: bool) -> dict:
                         "grant_amount": t.grant_amount,
                     }
                     for t in GAME_BUNDLE_TIERS
+                ],
+            },
+            "makeup": {
+                "kind": "makeup_card",
+                "title": "补签卡",
+                "currency": "ticket",
+                "tiers": [
+                    {
+                        "tier_id": t.tier_id,
+                        "label": t.label,
+                        "ticket_price": t.ticket_price,
+                        "grant_amount": t.grant_amount,
+                    }
+                    for t in MAKEUP_BUNDLE_TIERS
                 ],
             },
             "vip_trial": {

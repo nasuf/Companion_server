@@ -46,7 +46,7 @@ class StoreCatalogResponse(BaseModel):
 
 
 class StoreBundlePurchaseRequest(BaseModel):
-    bundle_kind: Literal["music_coupon", "game_points", "vip_trial"]
+    bundle_kind: Literal["music_coupon", "game_points", "makeup_card", "vip_trial"]
     tier_id: str | None = None
 
 

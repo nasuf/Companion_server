@@ -90,6 +90,55 @@ async def test_buy_music_coupon_spends_tickets_and_grants_inventory(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_buy_makeup_card_spends_tickets_and_grants_inventory(monkeypatch):
+    updated_at = datetime(2026, 8, 14, tzinfo=UTC)
+    fake_db = _FakeDb(
+        tx_rows=[
+            [
+                {
+                    "ticket_balance": 70,
+                    "point_balance": 0,
+                    "achievement_points_synced": 0,
+                }
+            ],
+            [
+                {
+                    "product_kind": "makeup_card",
+                    "quantity": 1,
+                    "acquired_at": updated_at,
+                    "updated_at": updated_at,
+                }
+            ],
+        ]
+    )
+    monkeypatch.setattr(store_bundles, "db", fake_db)
+    monkeypatch.setattr(store_bundles.wallet, "ensure_wallet", _ok_wallet)
+
+    result = await store_bundles.purchase_bundle(
+        "user-1", "makeup_card", tier_id="makeup_1"
+    )
+
+    assert result["wallet"]["ticket_balance"] == 70
+    assert result["inventory_item"]["product_kind"] == "makeup_card"
+    assert result["inventory_item"]["quantity"] == 1
+    assert fake_db.fake_tx.query_calls[0][1] == ("user-1", 30)
+    assert fake_db.fake_tx.query_calls[1][1] == (
+        "user-1",
+        "makeup_card",
+        1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_buy_makeup_card_rejects_unknown_tier(monkeypatch):
+    monkeypatch.setattr(store_bundles.wallet, "ensure_wallet", _ok_wallet)
+    with pytest.raises(ValueError, match="unknown_tier"):
+        await store_bundles.purchase_bundle(
+            "user-1", "makeup_card", tier_id="bogus"
+        )
+
+
+@pytest.mark.asyncio
 async def test_buy_game_points_credits_game_wallet_not_shop_points(monkeypatch):
     fake_db = _FakeDb(
         tx_rows=[

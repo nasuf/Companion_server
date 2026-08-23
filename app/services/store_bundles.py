@@ -9,10 +9,12 @@ from uuid import uuid4
 from app.db import db
 from app.services import game_points, wallet
 from app.services.store_catalog import (
+    MAKEUP_CARD_KIND,
     MUSIC_COUPON_KIND,
     MUSIC_COUPON_VALID_DAYS,
     VIP_TRIAL_DAYS,
     game_tier,
+    makeup_tier,
     music_tier,
 )
 from app.services.store_inventory import add_inventory
@@ -28,6 +30,8 @@ async def purchase_bundle(
         return await _buy_music(user_id, tier_id)
     if bundle_kind == "game_points":
         return await _buy_game(user_id, tier_id)
+    if bundle_kind == "makeup_card":
+        return await _buy_makeup(user_id, tier_id)
     if bundle_kind == "vip_trial":
         raise ValueError("payment_required")
     raise ValueError("unknown_bundle")
@@ -98,6 +102,38 @@ async def _buy_music(user_id: str, tier_id: str | None) -> dict[str, Any]:
         inventory_item = await add_inventory(
             user_id,
             MUSIC_COUPON_KIND,
+            quantity=tier.grant_amount,
+            client=tx,
+        )
+    return {
+        "wallet": balance,
+        "inventory_item": inventory_item,
+        "game_balance": None,
+        "vip_until": None,
+    }
+
+
+async def _buy_makeup(user_id: str, tier_id: str | None) -> dict[str, Any]:
+    tier = makeup_tier(tier_id or "")
+    if tier is None:
+        raise ValueError("unknown_tier")
+    await wallet.ensure_wallet(user_id)
+    async with db.tx() as tx:
+        balance = await wallet.debit_tickets(
+            user_id,
+            tier.ticket_price,
+            source="store_bundle",
+            source_id=MAKEUP_CARD_KIND,
+            metadata={
+                "bundle_kind": "makeup_card",
+                "tier_id": tier.tier_id,
+                "grant_amount": tier.grant_amount,
+            },
+            client=tx,
+        )
+        inventory_item = await add_inventory(
+            user_id,
+            MAKEUP_CARD_KIND,
             quantity=tier.grant_amount,
             client=tx,
         )
