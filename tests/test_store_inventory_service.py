@@ -36,9 +36,10 @@ class _TxContext:
 
 
 class _FakeDb:
-    def __init__(self, *, list_rows=None, tx_rows=None, unbound_rows=None):
+    def __init__(self, *, list_rows=None, tx_rows=None, unbound_rows=None, batch_rows=None):
         self.list_rows = list_rows or []
         self.unbound_rows = unbound_rows or []
+        self.batch_rows = batch_rows or []
         self.fake_tx = _FakeTx(tx_rows or [])
         self.query_calls: list[tuple[str, tuple]] = []
 
@@ -46,6 +47,8 @@ class _FakeDb:
         self.query_calls.append((query, args))
         if "user_offerings" in query:
             return list(self.unbound_rows)
+        if "user_consumable_batch" in query:
+            return list(self.batch_rows)
         return self.list_rows
 
     def tx(self):
@@ -103,6 +106,8 @@ async def test_list_inventory_returns_owned_items(monkeypatch):
             "quantity": 2,
             "acquired_at": acquired_at.isoformat(),
             "updated_at": acquired_at.isoformat(),
+            "expires_at": None,
+            "is_gift": False,
         }
     ]
     assert fake_db.query_calls[0][1] == ("user-1",)
@@ -125,6 +130,8 @@ async def test_list_inventory_includes_unbound_gifts(monkeypatch):
             "quantity": 1,
             "acquired_at": None,
             "updated_at": None,
+            "expires_at": None,
+            "is_gift": False,
         }
     ]
 
@@ -295,3 +302,53 @@ async def test_consume_inventory_rejects_empty_stack():
         await store_inventory.consume_inventory(
             "user-1", "gift_1", quantity=1, client=tx
         )
+
+
+@pytest.mark.asyncio
+async def test_list_inventory_merges_batch_backed_coupons_and_cards(monkeypatch):
+    expires = datetime(2026, 9, 1, tzinfo=UTC)
+    fake_db = _FakeDb(
+        list_rows=[],
+        batch_rows=[
+            {"quantity": 3, "source": "purchase", "expires_at": expires},
+            {"quantity": 20, "source": "vip_grant", "expires_at": expires},
+        ],
+    )
+    monkeypatch.setattr(store_inventory, "db", fake_db)
+
+    result = await store_inventory.list_inventory("user-1")
+
+    kinds = {item["product_kind"]: item for item in result["items"]}
+    assert kinds["music_hour_coupon"]["quantity"] == 23
+    assert kinds["music_hour_coupon"]["is_gift"] is True
+    assert kinds["music_hour_coupon"]["expires_at"] == expires.isoformat()
+    assert kinds["makeup_card"]["quantity"] == 23
+
+
+@pytest.mark.asyncio
+async def test_consume_batch_units_drains_earliest_expiring_batch_first():
+    # Query already returns rows ORDER BY expires_at ASC (earliest first);
+    # the fake just supplies them in that order to test the drain logic.
+    tx = _FakeTx([[{"id": "batch-early", "quantity": 2}, {"id": "batch-late", "quantity": 5}]])
+
+    consumed = await store_inventory.consume_batch_units(
+        "user-1", "music_hour_coupon", 3, client=tx
+    )
+
+    assert consumed == 3
+    assert tx.execute_calls == [
+        ("UPDATE user_consumable_batch SET quantity = quantity - $2 WHERE id = $1", ("batch-early", 2)),
+        ("UPDATE user_consumable_batch SET quantity = quantity - $2 WHERE id = $1", ("batch-late", 1)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_consume_batch_units_raises_when_unexpired_total_is_short():
+    tx = _FakeTx([[{"id": "batch-1", "quantity": 1}]])
+
+    with pytest.raises(ValueError, match="insufficient_inventory"):
+        await store_inventory.consume_batch_units(
+            "user-1", "music_hour_coupon", 3, client=tx
+        )
+
+    assert tx.execute_calls == []

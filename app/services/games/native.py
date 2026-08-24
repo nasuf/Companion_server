@@ -23,7 +23,7 @@ from app.services.games.narrative import build_narrative
 from app.services.games.quick_exit import quick_exit_reply
 from app.services.games.substance import played_enough
 from app.services.schedule_domain import time_service
-from app.services import game_points
+from app.services import game_points, wallet
 from app.services.memory.storage import repo as memory_repo
 from app.services.offline.memory_hooks import remember_shared_game_experience
 from app.services.runtime.tasks import fire_background
@@ -673,7 +673,8 @@ async def handle_event(
                 # update above. (A settle failure rolls back the whole finish,
                 # which is the intended trade-off for correctness over a lost
                 # or duplicated balance change.)
-                await game_points.settle_session(updated, database=tx)
+                is_vip = await wallet.is_vip(str(updated.user_id), client=tx)
+                await game_points.settle_session(updated, database=tx, is_vip=is_vip)
         if not inserted:
             return updated, stored_reply, event_id, True
         if event_type in {"game_started", "game_finished", "game_aborted"}:

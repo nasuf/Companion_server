@@ -318,3 +318,104 @@ async def test_list_admin_point_ledger_filters_point_currency(monkeypatch):
     assert rows[0]["currency"] == "point"
     ledger_sql = fake_db.query_calls[0][0]
     assert "l.currency = 'point'" in ledger_sql
+
+
+@pytest.mark.asyncio
+async def test_list_admin_balances_includes_vip_and_gift_ticket_fields(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    future = datetime.now(UTC) + timedelta(days=10)
+    fake_db = _FakeDb(
+        query_rows=[
+            [{"n": 1}],
+            [
+                {
+                    "id": "u1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "ticket_balance": 100,
+                    "point_balance": 0,
+                    "gift_ticket_balance": 40,
+                    "vip_until": future,
+                    "updated_at": "2026-08-20T08:00:00+00:00",
+                    "nickname": None,
+                },
+            ],
+        ],
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.list_admin_balances(limit=20, offset=0)
+    item = result["items"][0]
+    assert item["gift_ticket_balance"] == 40
+    assert item["is_vip"] is True
+    assert item["vip_until"] is not None
+
+
+@pytest.mark.asyncio
+async def test_admin_set_vip_until_updates_and_returns_status(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    future = datetime.now(UTC) + timedelta(days=30)
+    fake_db = _FakeDb(
+        query_rows=[
+            [{"1": 1}],           # _ensure_user_exists
+            [_balance_row(0)],    # ensure_wallet
+            [{"vip_until": future}],  # UPDATE ... RETURNING
+        ]
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.admin_set_vip_until("u1", future)
+
+    assert result["user_id"] == "u1"
+    assert result["is_vip"] is True
+    assert result["vip_until"] is not None
+
+
+@pytest.mark.asyncio
+async def test_admin_set_vip_until_can_clear_vip(monkeypatch):
+    fake_db = _FakeDb(
+        query_rows=[
+            [{"1": 1}],
+            [_balance_row(0)],
+            [{"vip_until": None}],
+        ]
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.admin_set_vip_until("u1", None)
+
+    assert result["is_vip"] is False
+    assert result["vip_until"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_admin_gift_ticket_ledger_filters_gift_ticket_currency(monkeypatch):
+    fake_db = _FakeDb(
+        query_rows=[
+            [
+                {
+                    "id": "l1",
+                    "user_id": "u1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "nickname": None,
+                    "currency": "gift_ticket",
+                    "delta": 40,
+                    "balance_after": 40,
+                    "source": "vip_monthly_grant",
+                    "source_id": None,
+                    "metadata": json.dumps({"kind": "gift_ticket"}),
+                    "created_at": "2026-08-20T08:00:00+00:00",
+                }
+            ]
+        ]
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    rows = await wallet.list_admin_gift_ticket_ledger(user_id="u1", limit=20, offset=0)
+    assert len(rows) == 1
+    assert rows[0]["currency"] == "gift_ticket"
+    ledger_sql = fake_db.query_calls[0][0]
+    assert "l.currency = 'gift_ticket'" in ledger_sql

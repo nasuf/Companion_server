@@ -12,6 +12,7 @@ class WalletBalanceResponse(BaseModel):
     ticket_balance: int
     point_balance: int
     achievement_points_synced: int
+    gift_ticket_balance: int = 0
 
 
 class WalletExchangeRequest(BaseModel):

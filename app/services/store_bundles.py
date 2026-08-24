@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -17,7 +18,10 @@ from app.services.store_catalog import (
     makeup_tier,
     music_tier,
 )
-from app.services.store_inventory import add_inventory
+from app.services.store_inventory import add_batch
+from app.services.vip import grants
+
+logger = logging.getLogger(__name__)
 
 
 async def purchase_bundle(
@@ -72,6 +76,20 @@ async def activate_vip_trial(user_id: str) -> dict[str, Any]:
             until_store,
         )
         balance = wallet.wallet_balances(updated[0])
+
+    # 立即发放当月权益（限时钞票+音乐畅听券+补签卡），不必等下一次 02:45 的
+    # vip_monthly_grant cron —— 否则新 VIP 最多要等近 24h 才拿到东西，体感
+    # 是"付了钱什么都没给"。grant_monthly 是独立事务：这里失败也不影响已经
+    # 生效的 VIP 状态，下次 cron 扫到 vip_last_grant_at IS NULL 仍会补发。
+    try:
+        grant_result = await grants.grant_monthly(user_id)
+        balance = grant_result["wallet"]
+    except Exception:
+        logger.exception(
+            "vip trial immediate grant failed, nightly cron will retry user=%s",
+            user_id[:8],
+        )
+
     return {
         "wallet": balance,
         "vip_until": until.isoformat(),
@@ -86,7 +104,7 @@ async def _buy_music(user_id: str, tier_id: str | None) -> dict[str, Any]:
         raise ValueError("unknown_tier")
     await wallet.ensure_wallet(user_id)
     async with db.tx() as tx:
-        balance = await wallet.debit_tickets(
+        balance = await wallet.debit_tickets_prioritized(
             user_id,
             tier.ticket_price,
             source="store_bundle",
@@ -99,10 +117,12 @@ async def _buy_music(user_id: str, tier_id: str | None) -> dict[str, Any]:
             },
             client=tx,
         )
-        inventory_item = await add_inventory(
+        inventory_item = await add_batch(
             user_id,
             MUSIC_COUPON_KIND,
             quantity=tier.grant_amount,
+            source="purchase",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=MUSIC_COUPON_VALID_DAYS),
             client=tx,
         )
     return {
@@ -119,7 +139,7 @@ async def _buy_makeup(user_id: str, tier_id: str | None) -> dict[str, Any]:
         raise ValueError("unknown_tier")
     await wallet.ensure_wallet(user_id)
     async with db.tx() as tx:
-        balance = await wallet.debit_tickets(
+        balance = await wallet.debit_tickets_prioritized(
             user_id,
             tier.ticket_price,
             source="store_bundle",
@@ -131,10 +151,12 @@ async def _buy_makeup(user_id: str, tier_id: str | None) -> dict[str, Any]:
             },
             client=tx,
         )
-        inventory_item = await add_inventory(
+        inventory_item = await add_batch(
             user_id,
             MAKEUP_CARD_KIND,
             quantity=tier.grant_amount,
+            source="purchase",
+            expires_at=None,
             client=tx,
         )
     return {
@@ -152,7 +174,7 @@ async def _buy_game(user_id: str, tier_id: str | None) -> dict[str, Any]:
     await wallet.ensure_wallet(user_id)
     await game_points.ensure_wallet(user_id)
     async with db.tx() as tx:
-        balance = await wallet.debit_tickets(
+        balance = await wallet.debit_tickets_prioritized(
             user_id,
             tier.ticket_price,
             source="store_bundle",

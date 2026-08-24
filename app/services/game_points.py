@@ -306,13 +306,17 @@ def _milestone_delta(rules: dict[str, Any], outcome: str, max_tile: int) -> int:
     return points
 
 
-async def settle_session(session: Any, *, database: Any) -> None:
+async def settle_session(session: Any, *, database: Any, is_vip: bool = False) -> None:
     """Adjust the game-point balance for one terminal native game session.
 
     Must run inside the transaction that records the terminal game event so the
     ``inserted`` idempotency guard in ``native.handle_event`` protects it; the
     ledger's partial unique index on ``(user_id, source, source_id)`` is an
     additional safety net against double settlement.
+
+    ``is_vip`` applies the VIP reward multiplier (CLAUDE.md 权益项 5) to
+    positive settlements only — losing or quitting is never made worse by VIP
+    status, the multiplier is a reward bonus, not a penalty amplifier.
     """
 
     game_key = str(getattr(session, "game_key", "") or "")
@@ -345,6 +349,12 @@ async def settle_session(session: Any, *, database: Any) -> None:
 
     if delta == 0:
         return
+
+    from app.services.vip.config import GAME_VIP_MULTIPLIER
+
+    raw_delta = delta
+    if is_vip and delta > 0:
+        delta = round(delta * GAME_VIP_MULTIPLIER)
 
     # Ensure the wallet row exists, then lock it and apply the delta with a hard
     # floor at 0 (losing/quitting can never push the balance negative).
@@ -383,9 +393,11 @@ async def settle_session(session: Any, *, database: Any) -> None:
     metadata = {
         "game_key": game_key,
         "outcome": outcome,
-        "intended_delta": delta,
+        "intended_delta": raw_delta,
         "earned": earned,
     }
+    if is_vip and raw_delta > 0:
+        metadata["vip_multiplier"] = GAME_VIP_MULTIPLIER
     if rule_type == "milestone":
         metadata["max_tile"] = max_tile
     await _record_ledger(

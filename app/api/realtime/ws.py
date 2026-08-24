@@ -52,6 +52,8 @@ from app.services.chat_links import (
     metadata_for_link_card,
 )
 from app.services.chat_links.prompt import render_user_message_with_link
+from app.services import wallet
+from app.services.vip import chat_quota
 
 logger = logging.getLogger(__name__)
 
@@ -832,6 +834,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     raw_component_card = payload.get("component_card")
                     component_card = _sanitize_component_card(raw_component_card)
                     attachment_ids = _sanitize_attachment_ids(payload.get("attachments"))
+                    paid_confirmed = bool(payload.get("paid_confirmed", False))
                     if not text and component_card is None and not attachment_ids:
                         continue
                     client_id_present = isinstance(client_id, str) and bool(client_id)
@@ -863,6 +866,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                         attachment_ids=attachment_ids,
                         user_name=cached_username,
                         client_supports_voice=client_supports_voice,
+                        paid_confirmed=paid_confirmed,
                     )
 
         except WebSocketDisconnect:
@@ -1099,8 +1103,37 @@ async def _handle_message(
     attachment_ids: list[str] | None = None,
     user_name: str | None = None,
     client_supports_voice: bool = False,
+    paid_confirmed: bool = False,
 ) -> None:
-    """处理用户消息：聚合检查 → 生成回复 → 推送。"""
+    """处理用户消息：额度闸门 → 聚合检查 → 生成回复 → 推送。"""
+    # CLAUDE.md 权益项 1 只约束"发消息聊天"这件事。红包/礼物走的是自己的
+    # 钞票/积分支付流程 (offerings.py)，跟对话额度是两套互不相关的计费口径
+    # —— 不豁免的话，一个聊天额度用尽、没钞票的用户会连"花钞票发红包"这个
+    # 本该独立于聊天额度的动作都发不出去，等于用一个功能的限制卡死另一个。
+    is_red_packet_or_gift = (
+        isinstance(component_card, dict)
+        and component_card.get("type") in {"red_packet", "gift"}
+    )
+    if not is_red_packet_or_gift:
+        is_vip = await wallet.is_vip(user_id)
+        quota_result = await chat_quota.consume_one(
+            user_id, is_vip=is_vip, paid_confirmed=paid_confirmed
+        )
+        if not quota_result["allowed"]:
+            # 未确认付费 / 余额不足 —— 消息不入库、不计数、不扣费，前端据此
+            # 弹"是否继续扣费"或"是否订阅VIP"，取消则文本保留。
+            await ws.send_json({
+                "type": "quota_blocked",
+                "data": {
+                    "reason": quota_result["reason"],
+                    "per_msg_cost": quota_result["per_msg_cost"],
+                    "spendable_tickets": quota_result["spendable_tickets"],
+                    # 带上 client_id 让前端能精确摘掉被拒的那条草稿, 而不是
+                    # "摘最后一条待发消息" —— 用户手快连发两条时后者会摘错。
+                    "client_id": client_id,
+                },
+            })
+            return
     attachments = await chat_media_repo.get_message_attachments(
         attachment_ids=attachment_ids or [],
         user_id=user_id,

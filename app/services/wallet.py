@@ -66,6 +66,18 @@ def vip_trial_available_from_row(row: Any) -> bool:
     return not is_vip_from_row(row)
 
 
+async def is_vip(user_id: str, *, client: Any | None = None) -> bool:
+    """Read-only VIP check, usable inside an existing transaction via ``client``."""
+    executor = client or db
+    rows = await executor.query_raw(
+        "SELECT vip_until FROM user_wallets WHERE user_id = $1",
+        user_id,
+    )
+    if not rows:
+        return False
+    return is_vip_from_row(rows[0])
+
+
 def wallet_balances(row: Any) -> dict[str, int]:
     return {
         "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
@@ -157,6 +169,205 @@ async def credit_tickets(
         client=client,
     )
     return balance
+
+
+async def debit_tickets_prioritized(
+    user_id: str,
+    amount: int,
+    *,
+    source: str,
+    source_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    client: Any,
+) -> dict[str, int]:
+    """Spend tickets, draining gift (limited) balance before permanent balance.
+
+    Gift tickets expire on VIP lapse, so they must be consumed first. Runs inside
+    an existing transaction with a row lock (the split needs both balances read
+    first). Writes one ledger row per bucket actually touched so the audit trail
+    reconciles per currency.
+    """
+    if amount <= 0:
+        raise ValueError("invalid_amount")
+    locked = await client.query_raw(
+        """
+        SELECT gift_ticket_balance, ticket_balance
+        FROM user_wallets
+        WHERE user_id = $1
+        FOR UPDATE
+        """,
+        user_id,
+    )
+    if not locked:
+        raise ValueError("wallet_not_found")
+    gift = int(_field(locked[0], "gift_ticket_balance", 0) or 0)
+    perm = int(_field(locked[0], "ticket_balance", 0) or 0)
+    if gift + perm < amount:
+        raise ValueError("insufficient_ticket_balance")
+    from_gift = min(gift, amount)
+    from_perm = amount - from_gift
+    rows = await client.query_raw(
+        """
+        UPDATE user_wallets
+        SET gift_ticket_balance = gift_ticket_balance - $2,
+            ticket_balance = ticket_balance - $3,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        RETURNING gift_ticket_balance, ticket_balance, point_balance,
+                  achievement_points_synced
+        """,
+        user_id,
+        from_gift,
+        from_perm,
+    )
+    balance = _spendable_balances(rows[0])
+    if from_gift > 0:
+        await _record_ledger(
+            user_id=user_id,
+            currency="gift_ticket",
+            delta=-from_gift,
+            balance_after=balance["gift_ticket_balance"],
+            source=source,
+            source_id=source_id,
+            metadata=metadata,
+            client=client,
+        )
+    if from_perm > 0:
+        await _record_ledger(
+            user_id=user_id,
+            currency="ticket",
+            delta=-from_perm,
+            balance_after=balance["ticket_balance"],
+            source=source,
+            source_id=source_id,
+            metadata=metadata,
+            client=client,
+        )
+    return balance
+
+
+async def credit_gift_tickets(
+    user_id: str,
+    amount: int,
+    *,
+    source: str,
+    source_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    client: Any,
+) -> dict[str, int]:
+    """Add limited (gift) tickets inside an existing transaction (VIP monthly grant)."""
+    if amount <= 0:
+        raise ValueError("invalid_amount")
+    rows = await client.query_raw(
+        """
+        UPDATE user_wallets
+        SET gift_ticket_balance = gift_ticket_balance + $2,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        RETURNING gift_ticket_balance, ticket_balance, point_balance,
+                  achievement_points_synced
+        """,
+        user_id,
+        amount,
+    )
+    if not rows:
+        raise ValueError("wallet_not_found")
+    balance = _spendable_balances(rows[0])
+    await _record_ledger(
+        user_id=user_id,
+        currency="gift_ticket",
+        delta=amount,
+        balance_after=balance["gift_ticket_balance"],
+        source=source,
+        source_id=source_id,
+        metadata=metadata,
+        client=client,
+    )
+    return balance
+
+
+async def zero_gift_tickets(
+    user_id: str,
+    *,
+    source: str,
+    metadata: dict[str, Any] | None = None,
+    client: Any,
+) -> dict[str, int]:
+    """Clear all limited (gift) tickets on VIP lapse. No ledger row if already 0."""
+    locked = await client.query_raw(
+        """
+        SELECT gift_ticket_balance, ticket_balance, point_balance,
+               achievement_points_synced
+        FROM user_wallets
+        WHERE user_id = $1
+        FOR UPDATE
+        """,
+        user_id,
+    )
+    if not locked:
+        raise ValueError("wallet_not_found")
+    cleared = int(_field(locked[0], "gift_ticket_balance", 0) or 0)
+    if cleared <= 0:
+        return _spendable_balances(locked[0])
+    rows = await client.query_raw(
+        """
+        UPDATE user_wallets
+        SET gift_ticket_balance = 0,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        RETURNING gift_ticket_balance, ticket_balance, point_balance,
+                  achievement_points_synced
+        """,
+        user_id,
+    )
+    balance = _spendable_balances(rows[0])
+    await _record_ledger(
+        user_id=user_id,
+        currency="gift_ticket",
+        delta=-cleared,
+        balance_after=0,
+        source=source,
+        metadata=metadata,
+        client=client,
+    )
+    return balance
+
+
+def _spendable_balances(row: Any) -> dict[str, int]:
+    """Balance dict including the gift-ticket bucket (rows must SELECT it)."""
+    return {
+        "gift_ticket_balance": int(_field(row, "gift_ticket_balance", 0) or 0),
+        "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
+        "point_balance": int(_field(row, "point_balance", 0) or 0),
+        "achievement_points_synced": int(
+            _field(row, "achievement_points_synced", 0) or 0
+        ),
+    }
+
+
+async def full_wallet(user_id: str) -> dict[str, Any]:
+    """Complete wallet snapshot for display (balances + VIP state + accrual)."""
+    await ensure_wallet(user_id)
+    rows = await db.query_raw(
+        """
+        SELECT gift_ticket_balance, ticket_balance, point_balance,
+               achievement_points_synced, overage_accrued,
+               vip_until, vip_trial_used, vip_last_grant_at
+        FROM user_wallets
+        WHERE user_id = $1
+        """,
+        user_id,
+    )
+    row = rows[0] if rows else {}
+    balance = _spendable_balances(row)
+    return {
+        **balance,
+        "spendable_tickets": balance["gift_ticket_balance"] + balance["ticket_balance"],
+        "is_vip": is_vip_from_row(row),
+        "vip_until": _iso(_field(row, "vip_until")) or None,
+        "vip_trial_available": vip_trial_available_from_row(row),
+        "vip_last_grant_at": _iso(_field(row, "vip_last_grant_at")) or None,
+    }
 
 
 async def admin_adjust_tickets(
@@ -575,6 +786,8 @@ async def list_admin_balances(
         SELECT u.id, u.username, u.display_name,
                COALESCE(w.ticket_balance, 0) AS ticket_balance,
                COALESCE(w.point_balance, 0) AS point_balance,
+               COALESCE(w.gift_ticket_balance, 0) AS gift_ticket_balance,
+               w.vip_until,
                w.updated_at,
                (
                    SELECT ai.raw_profile->>'nickname'
@@ -601,11 +814,99 @@ async def list_admin_balances(
             "nickname": _field(row, "nickname"),
             "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
             "point_balance": int(_field(row, "point_balance", 0) or 0),
+            "gift_ticket_balance": int(_field(row, "gift_ticket_balance", 0) or 0),
+            "is_vip": is_vip_from_row(row),
+            "vip_until": _iso(_field(row, "vip_until")) or None,
             "updated_at": _iso(_field(row, "updated_at")) or None,
         }
         for row in rows
     ]
     return {"items": items, "total": total}
+
+
+async def admin_set_vip_until(
+    user_id: str,
+    vip_until: Any,
+) -> dict[str, Any]:
+    """Directly set (or clear, with ``None``) a user's VIP expiry.
+
+    No ledger row: VIP isn't a currency balance, and the wallet row itself is
+    the record. The caller (API layer) is responsible for logging admin_id/
+    note, mirroring how admin_adjust_tickets/points log via the standard
+    logger in addition to their ledger row.
+    """
+    await _ensure_user_exists(user_id)
+    await ensure_wallet(user_id)
+    rows = await db.query_raw(
+        """
+        UPDATE user_wallets
+        SET vip_until = $2,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        RETURNING vip_until
+        """,
+        user_id,
+        vip_until,
+    )
+    row = rows[0]
+    return {
+        "user_id": user_id,
+        "is_vip": is_vip_from_row(row),
+        "vip_until": _iso(_field(row, "vip_until")) or None,
+    }
+
+
+async def list_admin_gift_ticket_ledger(
+    *,
+    user_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Gift(限时)-ticket-currency ledger for the VIP admin audit view."""
+    limit = min(max(limit, 1), 200)
+    offset = max(offset, 0)
+    where = "WHERE l.currency = 'gift_ticket'"
+    params: list[Any] = [limit, offset]
+    if user_id:
+        where += " AND l.user_id = $3"
+        params.append(user_id)
+    rows = await db.query_raw(
+        f"""
+        SELECT l.id, l.user_id, u.username, u.display_name,
+               l.currency, l.delta, l.balance_after, l.source, l.source_id,
+               l.metadata, l.created_at,
+               (
+                   SELECT ai.raw_profile->>'nickname'
+                   FROM auth_identities ai
+                   WHERE ai.user_id = l.user_id AND ai.provider = 'wechat'
+                   ORDER BY ai.updated_at DESC
+                   LIMIT 1
+               ) AS nickname
+        FROM wallet_ledger l
+        LEFT JOIN users u ON u.id = l.user_id
+        {where}
+        ORDER BY l.created_at DESC, l.id DESC
+        LIMIT $1 OFFSET $2
+        """,
+        *params,
+    )
+    return [
+        {
+            "id": str(_field(row, "id", "")),
+            "user_id": str(_field(row, "user_id", "")),
+            "username": _field(row, "username"),
+            "display_name": _field(row, "display_name"),
+            "nickname": _field(row, "nickname"),
+            "currency": str(_field(row, "currency", "")),
+            "delta": int(_field(row, "delta", 0) or 0),
+            "balance_after": int(_field(row, "balance_after", 0) or 0),
+            "source": str(_field(row, "source", "")),
+            "source_id": _field(row, "source_id"),
+            "metadata": _json(_field(row, "metadata")),
+            "created_at": _iso(_field(row, "created_at")),
+        }
+        for row in rows
+    ]
 
 
 async def list_admin_ticket_ledger(

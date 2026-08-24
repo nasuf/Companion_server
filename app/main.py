@@ -198,6 +198,7 @@ from app.api.public.intimacy import router as intimacy_router
 from app.api.public.boundary import router as boundary_router
 from app.api.public.stickers import router as stickers_router
 from app.api.public.store import router as store_router
+from app.api.public.vip import router as vip_router
 from app.api.public.time_capsules import router as time_capsules_router
 from app.api.public.last_wills import router as last_wills_router
 from app.api.public.native_games import router as native_games_router
@@ -260,6 +261,7 @@ app.include_router(wallet_router)
 app.include_router(offerings_router)
 app.include_router(gift_router)
 app.include_router(store_router)
+app.include_router(vip_router)
 app.include_router(notifications_router)
 app.include_router(offline_router)
 app.include_router(ws_router)

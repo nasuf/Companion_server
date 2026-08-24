@@ -27,6 +27,98 @@ def fake_ws():
     return ws
 
 
+@pytest.fixture(autouse=True)
+def _bypass_chat_quota_gate():
+    """CLAUDE.md 权益项 1: _handle_message 现在先过对话额度闸门再处理消息.
+
+    这批测试关心的是聚合/ack/卡片行为, 不是额度计量本身 (额度逻辑有自己的
+    tests/test_vip_chat_quota.py); 让每条消息都判定为"免费额度内", 免得每个
+    测试都要单独 mock 一次数据库。
+    """
+    with (
+        patch.object(ws_mod.wallet, "is_vip", new=AsyncMock(return_value=False)),
+        patch.object(
+            ws_mod.chat_quota,
+            "consume_one",
+            new=AsyncMock(return_value={"allowed": True, "mode": "free", "used": 1, "limit": 20, "charged": 0}),
+        ),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_red_packet_and_gift_sends_bypass_the_chat_quota_gate(fake_ws, monkeypatch):
+    """CLAUDE.md 权益项 1 只约束文字聊天额度. 红包/礼物走自己的钞票支付
+    流程 (offerings.py), 绝不能被一个不相关的对话额度卡死 —— 否则聊天额度
+    用尽+没钞票的用户连"花钞票发红包"这个本该独立的动作都发不出去。
+
+    这里故意让 consume_one 返回 blocked, 用它验证红包/礼物两种 component
+    card 都完全不调用它就直接往下走到 offering 授权那一步 (用 ValueError
+    模拟授权失败, 只是为了给一个可断言的、跟 quota_blocked 不同的信号)。
+    """
+    blocked_quota = AsyncMock(
+        return_value={
+            "allowed": False,
+            "mode": "blocked",
+            "reason": "no_ticket",
+            "per_msg_cost": 0.5,
+            "spendable_tickets": 0,
+        }
+    )
+    monkeypatch.setattr(ws_mod.chat_quota, "consume_one", blocked_quota)
+    agent = SimpleNamespace(id="a1", name="A")
+
+    with (
+        patch.object(ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-1"),
+        patch(
+            "app.services.offerings.authorize_red_packet_card",
+            new_callable=AsyncMock,
+            side_effect=ValueError("offering_invalid"),
+        ),
+    ):
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "",
+            client_id="client-red-1",
+            component_card=_red_packet_card(),
+        )
+
+    blocked_quota.assert_not_called()
+    events = [call.args[0] for call in fake_ws.send_json.call_args_list if isinstance(call.args[0], dict)]
+    assert not any(e.get("type") == "quota_blocked" for e in events)
+    assert any(
+        e.get("type") == "error" and e["data"]["message"] == "红包无效或已发送" for e in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_quota_blocked_event_carries_client_id_for_precise_draft_matching(fake_ws, monkeypatch):
+    """前端靠 client_id 摘掉被拒的那条草稿 (而不是"摘最后一条待发消息",
+    用户连发多条时会摘错) —— 服务端必须把发送方原样传入的 client_id 带回去。
+    """
+    blocked_quota = AsyncMock(
+        return_value={
+            "allowed": False,
+            "mode": "paid",
+            "reason": "paid_confirm",
+            "per_msg_cost": 0.5,
+            "spendable_tickets": 3,
+        }
+    )
+    monkeypatch.setattr(ws_mod.chat_quota, "consume_one", blocked_quota)
+    agent = SimpleNamespace(id="a1", name="A")
+
+    await ws_mod._handle_message(
+        fake_ws, "conv-1", "user-1", agent, "第21句",
+        client_id="client-abc",
+    )
+
+    events = [call.args[0] for call in fake_ws.send_json.call_args_list if isinstance(call.args[0], dict)]
+    quota_events = [e for e in events if e.get("type") == "quota_blocked"]
+    assert len(quota_events) == 1
+    assert quota_events[0]["data"]["client_id"] == "client-abc"
+    assert quota_events[0]["data"]["reason"] == "paid_confirm"
+
+
 def _ack_payloads(ws_mock) -> list[dict]:
     """从 send_json 调用历史里提取所有 type='ack' 的 payload."""
     return [

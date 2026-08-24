@@ -413,6 +413,36 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # CLAUDE.md 权益项 3/4/6: VIP 每月发放 (2:45) → 到期清零 (2:50) →
+    # 消耗品批次存量清理 (2:55)。顺序错开, 都在 L2 调整 (2:30) 之后。
+    scheduler.add_job(
+        _run_vip_monthly_grant,
+        "cron",
+        hour=2,
+        minute=45,
+        id="vip_monthly_grant",
+        replace_existing=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _run_vip_expire_clear,
+        "cron",
+        hour=2,
+        minute=50,
+        id="vip_expire_clear",
+        replace_existing=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        _run_expire_consumable_batches,
+        "cron",
+        hour=2,
+        minute=55,
+        id="expire_consumable_batches",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Weekly reflection on Sunday at 4 AM
     scheduler.add_job(
         _run_weekly_reflection,
@@ -1014,6 +1044,95 @@ async def _run_memory_consolidation():
         )
 
     await _run_distributed_job("memory_consolidation", 7200, _body)
+
+
+async def _run_vip_monthly_grant():
+    """CLAUDE.md 权益项 3/4/6: VIP 每月发放限时钞票+音乐畅听券+补签卡.
+
+    发放锚点是 vip_last_grant_at + 30 天 (不是自然月) —— 本项目不含真实订阅
+    支付, VIP 主要来自 30 天体验或后台手动发放, 用自然月会让跨月的体验期在
+    月初重复发放一次。见 app/services/vip/grants.py 顶部注释。
+    """
+    from app.services.vip.grants import due_for_monthly_grant, grant_monthly
+
+    async def _body():
+        granted = 0
+        failed = 0
+        while True:
+            user_ids = await due_for_monthly_grant(limit=200)
+            if not user_ids:
+                break
+            for user_id in user_ids:
+                try:
+                    await grant_monthly(user_id)
+                    granted += 1
+                except Exception as e:
+                    failed += 1
+                    _job_failed(f"VIP monthly grant user={user_id[:8]}", e)
+            if len(user_ids) < 200:
+                break
+        logger.info(
+            f"[CRON] vip_monthly_grant ok: granted={granted} failed={failed}",
+            extra={"event": EVT_SCHEDULER_JOB, "task_name": "vip_monthly_grant",
+                   "phase": "ok", "granted": granted, "failed": failed},
+        )
+
+    await _run_distributed_job("vip_monthly_grant", 3600, _body)
+
+
+async def _run_vip_expire_clear():
+    """CLAUDE.md 权益项 3/4/6: VIP 过期清零限时钞票 + 失效 vip_grant 消耗品批次.
+
+    赠送类资源不结转 —— 过期即清零/失效, 与自购的永久钞票/无过期道具区分。
+    """
+    from app.services.vip.grants import clear_on_lapse, due_for_expire_clear
+
+    async def _body():
+        cleared = 0
+        failed = 0
+        while True:
+            user_ids = await due_for_expire_clear(limit=200)
+            if not user_ids:
+                break
+            for user_id in user_ids:
+                try:
+                    await clear_on_lapse(user_id)
+                    cleared += 1
+                except Exception as e:
+                    failed += 1
+                    _job_failed(f"VIP expire clear user={user_id[:8]}", e)
+            if len(user_ids) < 200:
+                break
+        logger.info(
+            f"[CRON] vip_expire_clear ok: cleared={cleared} failed={failed}",
+            extra={"event": EVT_SCHEDULER_JOB, "task_name": "vip_expire_clear",
+                   "phase": "ok", "cleared": cleared, "failed": failed},
+        )
+
+    await _run_distributed_job("vip_expire_clear", 3600, _body)
+
+
+async def _run_expire_consumable_batches():
+    """存量清理: 惰性过滤 (WHERE expires_at > now()) 已保证读路径正确性, 这里
+    只是把早已作废的批次行清零, 避免表无限增长。
+    """
+    from app.db import db
+
+    async def _body():
+        result = await db.execute_raw(
+            """
+            UPDATE user_consumable_batch
+            SET quantity = 0
+            WHERE quantity > 0 AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP
+            """,
+        )
+        logger.info(
+            f"[CRON] expire_consumable_batches ok: {result}",
+            extra={"event": EVT_SCHEDULER_JOB, "task_name": "expire_consumable_batches",
+                   "phase": "ok"},
+        )
+
+    await _run_distributed_job("expire_consumable_batches", 3600, _body)
 
 
 async def _run_daily_intimacy():

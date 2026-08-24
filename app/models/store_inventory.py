@@ -12,6 +12,8 @@ class StoreInventoryItem(BaseModel):
     quantity: int
     acquired_at: str | None = None
     updated_at: str | None = None
+    expires_at: str | None = None
+    is_gift: bool = False
 
 
 class StoreInventoryResponse(BaseModel):
