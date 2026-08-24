@@ -37,6 +37,12 @@ async def preview(user_id: str, *, is_vip: bool) -> dict[str, Any]:
     """Read-only quota state for the client to decide whether to confirm/block
     *before* sending — mirrors what :func:`consume_one` would decide, with no
     side effects.
+
+    Returns a superset of what the public ``/chat/quota`` response model
+    declares (``mode``/``free_remaining``/``per_msg_cost``/``spendable_tickets``)
+    — the extra fields (``used``/``limit``/``period_scope``/``period_key``) only
+    matter to the admin quota-status endpoint, which uses this same function to
+    avoid a second copy of the period/limit lookup logic.
     """
     scope, key, limit = config.message_period(is_vip)
     rows = await db.query_raw(
@@ -62,7 +68,34 @@ async def preview(user_id: str, *, is_vip: bool) -> dict[str, Any]:
         "free_remaining": free_remaining,
         "per_msg_cost": per_msg_cost,
         "spendable_tickets": spendable,
+        "used": used,
+        "limit": limit,
+        "period_scope": scope,
+        "period_key": key,
     }
+
+
+async def admin_reset(user_id: str, *, is_vip: bool) -> dict[str, Any]:
+    """Zero out the user's *current* period usage (免费/VIP用户重置对话额度).
+
+    Only resets the counter for whichever (scope, key) is active right now for
+    this user's VIP status — it does not touch ``overage_accrued`` (the
+    fractional ticket accrual is a separate, already-charged concern; reset
+    is about giving back unused free messages, not waiving money already
+    spent). A user with no usage yet this period is a harmless no-op.
+    """
+    scope, key, _ = config.message_period(is_vip)
+    await db.execute_raw(
+        """
+        UPDATE user_message_quota
+        SET used = 0, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1 AND period_scope = $2 AND period_key = $3
+        """,
+        user_id,
+        scope,
+        key,
+    )
+    return await preview(user_id, is_vip=is_vip)
 
 
 async def consume_one(

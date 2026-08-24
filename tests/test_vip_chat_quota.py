@@ -37,6 +37,9 @@ class _FakeQuotaDb:
         if "UPDATE user_message_quota" in query and "used = used + 1" in query:
             self.used += 1
             return 1
+        if "UPDATE user_message_quota" in query and "used = 0" in query:
+            self.used = 0
+            return 1
         raise AssertionError(f"unexpected execute_raw: {query}")
 
     async def query_raw(self, query: str, *args):
@@ -159,3 +162,74 @@ async def test_consume_one_vip_uses_monthly_bucket_and_cheaper_overage(monkeypat
     )
     blocked = await chat_quota.consume_one("u1", is_vip=True, paid_confirmed=False)
     assert blocked["per_msg_cost"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_preview_includes_admin_fields(monkeypatch):
+    fake_db = _FakeQuotaDb(used=7)
+    monkeypatch.setattr(chat_quota, "db", fake_db)
+    monkeypatch.setattr(
+        chat_quota.wallet, "full_wallet", AsyncMock(return_value={"spendable_tickets": 3})
+    )
+
+    result = await chat_quota.preview("u1", is_vip=False)
+
+    assert result["used"] == 7
+    assert result["limit"] == 20
+    assert result["period_scope"] == "day"
+    assert result["free_remaining"] == 13
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_zeroes_used_and_returns_fresh_preview(monkeypatch):
+    fake_db = _FakeQuotaDb(used=20)
+    monkeypatch.setattr(chat_quota, "db", fake_db)
+    monkeypatch.setattr(
+        chat_quota.wallet, "full_wallet", AsyncMock(return_value={"spendable_tickets": 5})
+    )
+
+    result = await chat_quota.admin_reset("u1", is_vip=False)
+
+    assert fake_db.used == 0
+    assert result["used"] == 0
+    assert result["free_remaining"] == 20
+    assert result["mode"] == "free"
+    # Resetting usage must not touch the fractional overage accrual — that's
+    # money already earmarked to be charged, a separate concern from "give
+    # back unused free messages".
+    assert not any(
+        "overage_accrued" in query for query, _ in fake_db.execute_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_uses_vip_monthly_period(monkeypatch):
+    fake_db = _FakeQuotaDb(used=100)
+    monkeypatch.setattr(chat_quota, "db", fake_db)
+    monkeypatch.setattr(
+        chat_quota.wallet, "full_wallet", AsyncMock(return_value={"spendable_tickets": 0})
+    )
+
+    result = await chat_quota.admin_reset("u1", is_vip=True)
+
+    assert result["period_scope"] == "month"
+    assert result["limit"] == 5200
+    assert fake_db.used == 0
+    reset_call = next(
+        args for query, args in fake_db.execute_calls if "used = 0" in query
+    )
+    assert reset_call[1] == "month"
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_is_a_no_op_when_no_usage_yet(monkeypatch):
+    fake_db = _FakeQuotaDb(used=0)
+    monkeypatch.setattr(chat_quota, "db", fake_db)
+    monkeypatch.setattr(
+        chat_quota.wallet, "full_wallet", AsyncMock(return_value={"spendable_tickets": 0})
+    )
+
+    result = await chat_quota.admin_reset("u1", is_vip=False)
+
+    assert result["used"] == 0
+    assert result["mode"] == "free"

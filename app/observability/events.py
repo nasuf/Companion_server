@@ -92,6 +92,7 @@ EVT_OFFERING_RECLAIMED = "offering.reclaimed"
 EVT_ADMIN_TICKET_GRANT = "admin.ticket_grant"
 EVT_ADMIN_POINT_GRANT = "admin.point_grant"
 EVT_ADMIN_VIP_SET = "admin.vip_set"
+EVT_ADMIN_CHAT_QUOTA_RESET = "admin.chat_quota_reset"
 
 # Infra
 EVT_LLM_CALL = "llm.call"
