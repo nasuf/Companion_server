@@ -1115,10 +1115,27 @@ async def _handle_message(
         and component_card.get("type") in {"red_packet", "gift"}
     )
     if not is_red_packet_or_gift:
-        is_vip = await wallet.is_vip(user_id)
-        quota_result = await chat_quota.consume_one(
-            user_id, is_vip=is_vip, paid_confirmed=paid_confirmed
-        )
+        # 这段裸奔的话, 一旦 is_vip/consume_one 抛异常 (比如高峰期多个用户
+        # 同时顶到当日额度上限, 小连接池下触发连接池耗尽) 会直接冒到
+        # websocket_endpoint 外层的 while 循环, 打断整条连接后续所有消息
+        # 的处理——不只这一条卡死, 是这条 WS 连接自此对什么都不再响应。
+        # fail-closed: 查不清额度就不放行这条消息, 但必须让前端能感知到
+        # (哪怕只是通用错误), 而不是让异常静默杀死整条连接。
+        try:
+            is_vip = await wallet.is_vip(user_id)
+            quota_result = await chat_quota.consume_one(
+                user_id, is_vip=is_vip, paid_confirmed=paid_confirmed
+            )
+        except Exception as e:
+            logger.warning(f"quota gate failed conv={conversation_id[:8]}: {e}")
+            try:
+                await ws.send_json({
+                    "type": "error",
+                    "data": {"message": "额度检查失败，请重新发送"},
+                })
+            except Exception:
+                pass
+            return
         if not quota_result["allowed"]:
             # 未确认付费 / 余额不足 —— 消息不入库、不计数、不扣费，前端据此
             # 弹"是否继续扣费"或"是否订阅VIP"，取消则文本保留。

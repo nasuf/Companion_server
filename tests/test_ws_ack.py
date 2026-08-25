@@ -119,6 +119,42 @@ async def test_quota_blocked_event_carries_client_id_for_precise_draft_matching(
     assert quota_events[0]["data"]["reason"] == "paid_confirm"
 
 
+@pytest.mark.asyncio
+async def test_quota_gate_exception_fails_closed_without_killing_the_connection(
+    fake_ws, monkeypatch
+):
+    """一旦 is_vip/consume_one 抛异常 (例如高峰期连接池耗尽), 闸门必须自己
+    兜住并给前端一个 error 事件, 而不能让异常冒出 _handle_message —— 否则
+    会打断 websocket_endpoint 的 while 循环, 让这条连接之后所有消息都失响。
+    """
+    monkeypatch.setattr(
+        ws_mod.chat_quota,
+        "consume_one",
+        AsyncMock(side_effect=RuntimeError("pool exhausted")),
+    )
+    agent = SimpleNamespace(id="a1", name="A")
+
+    with patch.object(
+        ws_mod, "_persist_user_message", new_callable=AsyncMock, return_value="db-1",
+    ) as persist_mock:
+        # 不能抛异常: 调用方 (websocket_endpoint 的 while 循环) 没有为单条
+        # 消息设 try/except, 这里裸抛就等于杀掉整条连接的后续处理能力。
+        await ws_mod._handle_message(
+            fake_ws, "conv-1", "user-1", agent, "第21句",
+            client_id="client-abc",
+        )
+        # fail-closed: 额度查不清就不能放行, 消息不应该被当作已通过闸门处理。
+        persist_mock.assert_not_called()
+
+    events = [
+        call.args[0]
+        for call in fake_ws.send_json.call_args_list
+        if isinstance(call.args[0], dict)
+    ]
+    assert any(e.get("type") == "error" for e in events)
+    assert not any(e.get("type") == "quota_blocked" for e in events)
+
+
 def _ack_payloads(ws_mock) -> list[dict]:
     """从 send_json 调用历史里提取所有 type='ack' 的 payload."""
     return [

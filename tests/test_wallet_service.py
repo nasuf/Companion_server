@@ -100,6 +100,80 @@ async def test_sync_achievement_points_only_adds_new_delta(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_full_wallet_reads_through_passed_client_not_global_db(monkeypatch):
+    # consume_one holds a `FOR UPDATE` row lock via db.tx() and must not
+    # borrow a second pool connection (the global `db`) to read the wallet
+    # while that lock is held — under the project's small connection pool
+    # that risks starving/hanging under concurrent callers. `full_wallet`
+    # should route entirely through the passed `client`.
+    global_db = _FakeDb([])
+    tx_client = _FakeDb(
+        [
+            [
+                {
+                    "ticket_balance": 0,
+                    "point_balance": 0,
+                    "achievement_points_synced": 0,
+                }
+            ],
+            [
+                {
+                    "gift_ticket_balance": 5,
+                    "ticket_balance": 3,
+                    "point_balance": 10,
+                    "achievement_points_synced": 0,
+                    "overage_accrued": 0.0,
+                    "vip_until": None,
+                    "vip_trial_used": False,
+                    "vip_last_grant_at": None,
+                }
+            ],
+        ]
+    )
+    monkeypatch.setattr(wallet, "db", global_db)
+
+    result = await wallet.full_wallet("u1", client=tx_client)
+
+    assert result["spendable_tickets"] == 8
+    assert global_db.query_calls == []
+    assert global_db.execute_calls == []
+    assert len(tx_client.query_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_full_wallet_without_client_reads_through_global_db(monkeypatch):
+    fake_db = _FakeDb(
+        [
+            [
+                {
+                    "ticket_balance": 0,
+                    "point_balance": 0,
+                    "achievement_points_synced": 0,
+                }
+            ],
+            [
+                {
+                    "gift_ticket_balance": 0,
+                    "ticket_balance": 1,
+                    "point_balance": 0,
+                    "achievement_points_synced": 0,
+                    "overage_accrued": 0.0,
+                    "vip_until": None,
+                    "vip_trial_used": False,
+                    "vip_last_grant_at": None,
+                }
+            ],
+        ]
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.full_wallet("u1")
+
+    assert result["spendable_tickets"] == 1
+    assert len(fake_db.query_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_exchange_ticket_to_points_updates_both_balances_and_ledgers(monkeypatch):
     fake_db = _FakeDb(
         [

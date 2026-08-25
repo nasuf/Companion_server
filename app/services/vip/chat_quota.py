@@ -147,7 +147,7 @@ async def consume_one(
             return {"allowed": True, "mode": "free", "used": used + 1, "limit": limit, "charged": 0}
 
         if not paid_confirmed:
-            snapshot = await wallet.full_wallet(user_id)
+            snapshot = await wallet.full_wallet(user_id, client=tx)
             spendable = snapshot["spendable_tickets"]
             reason: BlockReason = "paid_confirm" if spendable > 0 else "no_ticket"
             return {
@@ -158,7 +158,7 @@ async def consume_one(
                 "spendable_tickets": spendable,
             }
 
-        await wallet.ensure_wallet(user_id)
+        await wallet.ensure_wallet(user_id, client=tx)
         wallet_locked = await tx.query_raw(
             "SELECT overage_accrued FROM user_wallets WHERE user_id = $1 FOR UPDATE",
             user_id,

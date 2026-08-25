@@ -1476,24 +1476,45 @@ async def _already_covered(conversation_id: str, user_msg_id: str) -> bool:
 
 async def _enqueue_scanned_aggregation_results(results, manager) -> None:
     """Move scanned aggregation windows into the shared delayed reply queue."""
+    # scan_due_user_turns() 用 Lua 脚本原子地把每条结果从聚合窗口弹出 —— 弹出
+    # 那一刻它就已经从源头消失了。这里如果不逐条兜住异常, 第 N 条入队失败会让
+    # 异常冒到外层 _run_aggregation_scan_body 的 try/except, 直接跳过本批次
+    # 里排在它后面的所有会话: 那些会话的消息已经被弹出且再也拿不回来, 却因为
+    # 跟它们无关的另一条失败被连坐丢弃, 且没有任何事件通知对应用户。
     for agent_id, user_id, combined_text, conv_id, reply_context, latest_message_id in results:
-        delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
-        await enqueue_delayed_message(
-            conv_id,
-            {
-                "conversation_id": conv_id,
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "message": combined_text,
-                "message_id": latest_message_id,
-                "reply_context": reply_context,
-            },
-            delay_seconds,
-        )
-        # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
-        if delay_seconds > 5:
-            await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
-        await manager.send_event(conv_id, "pending", {"status": "queued", "delay": delay_seconds})
+        try:
+            delay_seconds = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
+            await enqueue_delayed_message(
+                conv_id,
+                {
+                    "conversation_id": conv_id,
+                    "agent_id": agent_id,
+                    "user_id": user_id,
+                    "message": combined_text,
+                    "message_id": latest_message_id,
+                    "reply_context": reply_context,
+                },
+                delay_seconds,
+            )
+            # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
+            if delay_seconds > 5:
+                await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
+            await manager.send_event(
+                conv_id, "pending", {"status": "queued", "delay": delay_seconds},
+            )
+        except Exception as enqueue_err:
+            logger.exception(
+                f"Aggregation scan: conv {conv_id[:8]} enqueue failed: {enqueue_err}"
+            )
+            try:
+                await manager.send_event(
+                    conv_id, "done",
+                    {"message_id": "error", "error": str(enqueue_err)},
+                )
+            except Exception as notify_err:
+                logger.warning(
+                    f"Failed to notify conv {conv_id[:8]} of enqueue error: {notify_err}"
+                )
 
 
 def shutdown_scheduler():

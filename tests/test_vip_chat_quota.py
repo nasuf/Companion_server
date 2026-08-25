@@ -64,9 +64,8 @@ async def test_consume_one_free_within_daily_quota(monkeypatch):
 async def test_consume_one_over_quota_unconfirmed_blocks_without_side_effects(monkeypatch):
     fake_db = _FakeQuotaDb(used=20)
     monkeypatch.setattr(chat_quota, "db", fake_db)
-    monkeypatch.setattr(
-        chat_quota.wallet, "full_wallet", AsyncMock(return_value={"spendable_tickets": 3})
-    )
+    full_wallet_mock = AsyncMock(return_value={"spendable_tickets": 3})
+    monkeypatch.setattr(chat_quota.wallet, "full_wallet", full_wallet_mock)
 
     result = await chat_quota.consume_one("u1", is_vip=False, paid_confirmed=False)
 
@@ -76,6 +75,10 @@ async def test_consume_one_over_quota_unconfirmed_blocks_without_side_effects(mo
     # Cancelling must be a true no-op: no message counted, no ticket charged.
     assert fake_db.used == 20
     assert fake_db.overage_accrued == 0.0
+    # Must read through the already-open tx (here `fake_db` itself, since
+    # _FakeQuotaDb.tx() returns self) rather than borrowing a second pool
+    # connection while still holding the row lock on user_message_quota.
+    full_wallet_mock.assert_awaited_once_with("u1", client=fake_db)
 
 
 @pytest.mark.asyncio
@@ -97,7 +100,8 @@ async def test_consume_one_over_quota_no_tickets_blocks(monkeypatch):
 async def test_consume_one_confirmed_accrues_fraction_without_charging_yet(monkeypatch):
     fake_db = _FakeQuotaDb(used=20, overage_accrued=0.0)
     monkeypatch.setattr(chat_quota, "db", fake_db)
-    monkeypatch.setattr(chat_quota.wallet, "ensure_wallet", AsyncMock())
+    ensure_wallet_mock = AsyncMock()
+    monkeypatch.setattr(chat_quota.wallet, "ensure_wallet", ensure_wallet_mock)
     debit_mock = AsyncMock()
     monkeypatch.setattr(chat_quota.wallet, "debit_tickets_prioritized", debit_mock)
 
@@ -108,6 +112,9 @@ async def test_consume_one_confirmed_accrues_fraction_without_charging_yet(monke
     debit_mock.assert_not_called()
     assert fake_db.overage_accrued == 0.5
     assert fake_db.used == 21
+    # Same pool-starvation concern as full_wallet above: must read through
+    # the open tx, not borrow a second connection mid-transaction.
+    ensure_wallet_mock.assert_awaited_once_with("u1", client=fake_db)
 
 
 @pytest.mark.asyncio

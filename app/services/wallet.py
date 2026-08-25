@@ -345,10 +345,18 @@ def _spendable_balances(row: Any) -> dict[str, int]:
     }
 
 
-async def full_wallet(user_id: str) -> dict[str, Any]:
-    """Complete wallet snapshot for display (balances + VIP state + accrual)."""
-    await ensure_wallet(user_id)
-    rows = await db.query_raw(
+async def full_wallet(user_id: str, *, client: Any | None = None) -> dict[str, Any]:
+    """Complete wallet snapshot for display (balances + VIP state + accrual).
+
+    Pass ``client`` (an open ``db.tx()``) when called from inside a
+    transaction that already holds a lock on this user's row — otherwise
+    this borrows a second connection from the pool while the caller's
+    transaction still holds the first, risking pool starvation under the
+    project's deliberately small connection limit (see ``app/db.py``).
+    """
+    executor = client or db
+    await ensure_wallet(user_id, client=client)
+    rows = await executor.query_raw(
         """
         SELECT gift_ticket_balance, ticket_balance, point_balance,
                achievement_points_synced, overage_accrued,
@@ -509,8 +517,11 @@ async def _ensure_user_exists(user_id: str) -> None:
         raise ValueError("user_not_found")
 
 
-async def ensure_wallet(user_id: str) -> dict[str, int]:
-    rows = await db.query_raw(
+async def ensure_wallet(
+    user_id: str, *, client: Any | None = None
+) -> dict[str, int]:
+    executor = client or db
+    rows = await executor.query_raw(
         """
         INSERT INTO user_wallets (user_id)
         VALUES ($1)
