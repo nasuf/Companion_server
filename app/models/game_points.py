@@ -80,8 +80,10 @@ class GamePointGrantRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str = Field(min_length=1)
-    # Positive adds balance (official grant); the level is never changed.
-    amount: int = Field(gt=0)
+    # Non-zero adjustment to the spendable balance: positive adds, negative
+    # deducts (floored at 0 by the service). The level is never changed. Zero is
+    # rejected by admin_grant as invalid_amount.
+    amount: int
     note: str | None = Field(default=None, max_length=200)
 
 
