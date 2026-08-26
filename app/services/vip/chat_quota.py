@@ -10,6 +10,10 @@
 免费额度耗尽后按 :mod:`vip.config` 的单价累加小数钞票成本；累计满 1 时
 整数扣费（先扣限时赠送钞票，再扣永久钞票），账本始终是整数，累加器只
 存在 `user_wallets.overage_accrued` 这一处小数状态。
+
+累加器按额度周期隔离（`user_wallets.overage_period` 记录当前累积所属的
+"{period_scope}:{period_key}"）：跨周期后没凑够 1 的历史欠账视为放弃，
+从 0 重新累积，不会在下一个周期第一次超额时被悄悄一起结算扣款。
 """
 
 from __future__ import annotations
@@ -160,10 +164,22 @@ async def consume_one(
 
         await wallet.ensure_wallet(user_id, client=tx)
         wallet_locked = await tx.query_raw(
-            "SELECT overage_accrued FROM user_wallets WHERE user_id = $1 FOR UPDATE",
+            "SELECT overage_accrued, overage_period FROM user_wallets WHERE user_id = $1 FOR UPDATE",
             user_id,
         )
-        accrued = float(_field(wallet_locked[0], "overage_accrued", 0) or 0) + per_msg_cost
+        current_period = f"{scope}:{key}"
+        # 小数账本按额度周期隔离: 存的周期跟当前不一致 (跨天/跨月, 或
+        # VIP↔非VIP 导致 scope 变了) 就当作上个周期没凑够 1 的欠账被放弃,
+        # 从 0 重新累积——否则历史残留的 0.5 会在"本次对话第一次超额"时
+        # 就跟这次的 0.5 一起结算凑成 1, 把当前钞票余额直接扣光, 跟
+        # "0.5 钞票/句"的文案承诺不符 (2026-08-26 用户反馈复现)。
+        stored_period = _field(wallet_locked[0], "overage_period")
+        prior_accrued = (
+            float(_field(wallet_locked[0], "overage_accrued", 0) or 0)
+            if stored_period == current_period
+            else 0.0
+        )
+        accrued = prior_accrued + per_msg_cost
         whole = math.floor(accrued)
         remainder = round(accrued - whole, 2)
 
@@ -188,9 +204,14 @@ async def consume_one(
                 }
 
         await tx.execute_raw(
-            "UPDATE user_wallets SET overage_accrued = $2, updated_at = CURRENT_TIMESTAMP WHERE user_id = $1",
+            """
+            UPDATE user_wallets
+            SET overage_accrued = $2, overage_period = $3, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+            """,
             user_id,
             remainder,
+            current_period,
         )
         await tx.execute_raw(
             """

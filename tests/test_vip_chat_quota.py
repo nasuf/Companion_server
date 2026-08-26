@@ -10,12 +10,19 @@ from app.services.vip import chat_quota
 class _FakeQuotaDb:
     """Minimal fake mirroring chat_quota's exact SQL shapes, tracking the two
     pieces of state it mutates: the message-quota counter and the fractional
-    ticket accrual on the wallet row.
+    ticket accrual (+ its owning period) on the wallet row.
     """
 
-    def __init__(self, *, used: int = 0, overage_accrued: float = 0.0):
+    def __init__(
+        self,
+        *,
+        used: int = 0,
+        overage_accrued: float = 0.0,
+        overage_period: str | None = None,
+    ):
         self.used = used
         self.overage_accrued = overage_accrued
+        self.overage_period = overage_period
         self.execute_calls: list[tuple[str, tuple]] = []
 
     def tx(self):
@@ -33,6 +40,7 @@ class _FakeQuotaDb:
             return 1
         if "UPDATE user_wallets" in query and "overage_accrued" in query:
             self.overage_accrued = args[1]
+            self.overage_period = args[2]
             return 1
         if "UPDATE user_message_quota" in query and "used = used + 1" in query:
             self.used += 1
@@ -45,9 +53,19 @@ class _FakeQuotaDb:
     async def query_raw(self, query: str, *args):
         if "SELECT used FROM user_message_quota" in query:
             return [{"used": self.used}]
-        if "SELECT overage_accrued FROM user_wallets" in query:
-            return [{"overage_accrued": self.overage_accrued}]
+        if "overage_accrued" in query and "user_wallets" in query:
+            return [
+                {
+                    "overage_accrued": self.overage_accrued,
+                    "overage_period": self.overage_period,
+                }
+            ]
         raise AssertionError(f"unexpected query_raw: {query}")
+
+
+def _current_period(is_vip: bool) -> str:
+    scope, key, _ = chat_quota.config.message_period(is_vip)
+    return f"{scope}:{key}"
 
 
 @pytest.mark.asyncio
@@ -119,7 +137,12 @@ async def test_consume_one_confirmed_accrues_fraction_without_charging_yet(monke
 
 @pytest.mark.asyncio
 async def test_consume_one_confirmed_charges_whole_ticket_once_accrual_crosses_one(monkeypatch):
-    fake_db = _FakeQuotaDb(used=20, overage_accrued=0.7)
+    # 0.7 累积在*当前*周期内 (overage_period 与本次算出的周期一致) —— 同一
+    # 周期内继续累积才该被结算, 见下面 test_consume_one_stale_period_accrual_
+    # is_dropped_not_charged 里"上个周期"的对照场景。
+    fake_db = _FakeQuotaDb(
+        used=20, overage_accrued=0.7, overage_period=_current_period(False)
+    )
     monkeypatch.setattr(chat_quota, "db", fake_db)
     monkeypatch.setattr(chat_quota.wallet, "ensure_wallet", AsyncMock())
     debit_mock = AsyncMock()
@@ -132,12 +155,15 @@ async def test_consume_one_confirmed_charges_whole_ticket_once_accrual_crosses_o
     debit_mock.assert_awaited_once()
     assert debit_mock.call_args.args[:2] == ("u1", 1)
     assert fake_db.overage_accrued == 0.2
+    assert fake_db.overage_period == _current_period(False)
     assert fake_db.used == 21
 
 
 @pytest.mark.asyncio
 async def test_consume_one_confirmed_insufficient_balance_blocks_without_writes(monkeypatch):
-    fake_db = _FakeQuotaDb(used=20, overage_accrued=0.7)
+    fake_db = _FakeQuotaDb(
+        used=20, overage_accrued=0.7, overage_period=_current_period(False)
+    )
     monkeypatch.setattr(chat_quota, "db", fake_db)
     monkeypatch.setattr(chat_quota.wallet, "ensure_wallet", AsyncMock())
     monkeypatch.setattr(
@@ -153,6 +179,27 @@ async def test_consume_one_confirmed_insufficient_balance_blocks_without_writes(
     # A race between preview and confirm must not silently count/charge.
     assert fake_db.used == 20
     assert fake_db.overage_accrued == 0.7
+
+
+@pytest.mark.asyncio
+async def test_consume_one_stale_period_accrual_is_dropped_not_charged(monkeypatch):
+    """跨周期的历史欠账不会在新周期第一次超额时被悄悄一起结算扣款——这正是
+    用户报告的场景: 剩 1 钞票, 确认发送第一句就直接把余额扣光, 根因是上个
+    周期残留的 0.5 和这次的 0.5 一起凑成了 1。
+    """
+    fake_db = _FakeQuotaDb(used=20, overage_accrued=0.7, overage_period="day:2020-01-01")
+    monkeypatch.setattr(chat_quota, "db", fake_db)
+    monkeypatch.setattr(chat_quota.wallet, "ensure_wallet", AsyncMock())
+    debit_mock = AsyncMock()
+    monkeypatch.setattr(chat_quota.wallet, "debit_tickets_prioritized", debit_mock)
+
+    result = await chat_quota.consume_one("u1", is_vip=False, paid_confirmed=True)
+
+    # 上个周期的 0.7 被放弃; 这次从 0 开始只累积这一句的 0.5, 不该凑够 1。
+    assert result == {"allowed": True, "mode": "paid", "used": 21, "limit": 20, "charged": 0}
+    debit_mock.assert_not_called()
+    assert fake_db.overage_accrued == 0.5
+    assert fake_db.overage_period == _current_period(False)
 
 
 @pytest.mark.asyncio
