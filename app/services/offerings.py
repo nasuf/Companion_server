@@ -25,6 +25,10 @@ from app.observability.events import (
 from app.services import wallet
 from app.services.memory.provenance import AI_AUTHORED, USER_STATED
 from app.services.memory.storage.persistence import store_memory
+from app.services.offerings_memory_text import (
+    build_offering_history_text,
+    build_offering_memory_texts,
+)
 from app.services.prompting.store import get_prompt_text_or_default
 from app.services.prompting.utils import render_template
 from app.services.runtime.tasks import fire_background
@@ -875,6 +879,7 @@ async def bind_offering_message(
         raise ValueError("offering_already_bound")
     bound = _offering_from_row(rows[0])
     fire_background(_write_offering_memories(bound))
+    await _persist_offering_message_content(bound)
     return bound
 
 
@@ -1047,6 +1052,8 @@ async def mark_offering_received(
         )
     except Exception:
         logger.warning("%s ws emit failed offering=%s", event_name, offering_id[:8])
+    fire_background(_write_offering_received_memories(offering))
+    await _persist_offering_message_content(offering)
     return {"offering": offering, "component_card": card}
 
 
@@ -1108,18 +1115,35 @@ async def _persist_received_notice(
     }
 
 
+async def _persist_offering_message_content(offering: dict[str, Any]) -> None:
+    message_id = offering.get("message_id")
+    if not message_id:
+        return
+    text = build_offering_history_text(offering)
+    if not text:
+        return
+    try:
+        await db.execute_raw(
+            """
+            UPDATE messages
+            SET content = $2
+            WHERE id = $1
+              AND COALESCE(content, '') = ''
+            """,
+            str(message_id),
+            text,
+        )
+    except Exception:
+        logger.exception(
+            "offering message content persist failed message=%s",
+            str(message_id)[:8],
+        )
+
+
 async def _write_offering_memories(offering: dict[str, Any]) -> None:
-    agent_name = str(offering.get("agent_name") or "对方")
     workspace_id = offering.get("workspace_id")
     user_id = offering["user_id"]
-    if offering.get("kind") == KIND_GIFT:
-        title = str(offering.get("product_title") or "礼物")
-        user_text = f"我给{agent_name}送了{title}"
-        ai_text = f"用户送给我一份{title}"
-    else:
-        amount = offering["ticket_amount"]
-        user_text = f"我给{agent_name}发了{amount}钞票的红包"
-        ai_text = f"用户给我发了{amount}钞票的红包"
+    user_text, ai_text = build_offering_memory_texts(offering, event="sent")
     try:
         await store_memory(
             user_id,
@@ -1131,6 +1155,7 @@ async def _write_offering_memories(offering: dict[str, Any]) -> None:
             source="user",
             workspace_id=workspace_id,
             provenance=USER_STATED,
+            skip_reconciliation=True,
         )
         await store_memory(
             user_id,
@@ -1142,9 +1167,177 @@ async def _write_offering_memories(offering: dict[str, Any]) -> None:
             source="ai",
             workspace_id=workspace_id,
             provenance=AI_AUTHORED,
+            skip_reconciliation=True,
         )
     except Exception:
         logger.exception(
             "offering memory write failed offering=%s",
             str(offering.get("id") or "")[:8],
         )
+
+
+async def _write_offering_received_memories(offering: dict[str, Any]) -> None:
+    workspace_id = offering.get("workspace_id")
+    user_id = offering["user_id"]
+    user_text, ai_text = build_offering_memory_texts(offering, event="received")
+    try:
+        await store_memory(
+            user_id,
+            user_text,
+            level=MEMORY_LEVEL,
+            importance=MEMORY_IMPORTANCE,
+            main_category="生活",
+            sub_category="馈赠",
+            source="user",
+            workspace_id=workspace_id,
+            provenance=USER_STATED,
+            skip_reconciliation=True,
+        )
+        await store_memory(
+            user_id,
+            ai_text,
+            level=MEMORY_LEVEL,
+            importance=MEMORY_IMPORTANCE,
+            main_category="生活",
+            sub_category="馈赠",
+            source="ai",
+            workspace_id=workspace_id,
+            provenance=AI_AUTHORED,
+            skip_reconciliation=True,
+        )
+    except Exception:
+        logger.exception(
+            "offering received memory write failed offering=%s",
+            str(offering.get("id") or "")[:8],
+        )
+
+
+async def backfill_offering_memories_and_content(
+    *,
+    limit: int = 500,
+    dry_run: bool = False,
+    content_only: bool = False,
+) -> dict[str, int]:
+    """Repair historical rows: searchable message content + 馈赠 memories.
+
+    content_only skips embedding/store_memory (for environments without Ollama).
+    """
+    rows = await db.query_raw(
+        f"""
+        SELECT id, user_id, agent_id, conversation_id, message_id, kind,
+               ticket_amount, agent_value_yuan, status, blessing, metadata,
+               created_at, received_at
+        FROM user_offerings
+        WHERE message_id IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT {int(limit)}
+        """
+    )
+    stats = {
+        "scanned": len(rows),
+        "content_updated": 0,
+        "sent_memories": 0,
+        "received_memories": 0,
+        "errors": 0,
+    }
+    for row in rows:
+        offering = _offering_from_row(row)
+        message_id = offering.get("message_id")
+        if not message_id:
+            continue
+        text = build_offering_history_text(offering)
+        try:
+            if not dry_run and text:
+                updated_rows = await db.query_raw(
+                    """
+                    UPDATE messages
+                    SET content = $2
+                    WHERE id = $1
+                      AND COALESCE(content, '') = ''
+                    RETURNING id
+                    """,
+                    str(message_id),
+                    text,
+                )
+                if updated_rows:
+                    stats["content_updated"] += 1
+            if dry_run or content_only:
+                continue
+            sent_user, sent_ai = build_offering_memory_texts(offering, event="sent")
+            if await _backfill_memory_if_missing(
+                offering["user_id"],
+                offering.get("workspace_id"),
+                sent_user,
+                source="user",
+            ):
+                stats["sent_memories"] += 1
+            if await _backfill_memory_if_missing(
+                offering["user_id"],
+                offering.get("workspace_id"),
+                sent_ai,
+                source="ai",
+            ):
+                stats["sent_memories"] += 1
+            if offering.get("status") == STATUS_RECEIVED:
+                recv_user, recv_ai = build_offering_memory_texts(
+                    offering, event="received",
+                )
+                if await _backfill_memory_if_missing(
+                    offering["user_id"],
+                    offering.get("workspace_id"),
+                    recv_user,
+                    source="user",
+                ):
+                    stats["received_memories"] += 1
+                if await _backfill_memory_if_missing(
+                    offering["user_id"],
+                    offering.get("workspace_id"),
+                    recv_ai,
+                    source="ai",
+                ):
+                    stats["received_memories"] += 1
+        except Exception:
+            stats["errors"] += 1
+            logger.exception(
+                "offering backfill failed offering=%s",
+                str(offering.get("id") or "")[:8],
+            )
+    return stats
+
+
+async def _backfill_memory_if_missing(
+    user_id: str,
+    workspace_id: str | None,
+    content: str,
+    *,
+    source: str,
+) -> bool:
+    table = "memories_ai" if source == "ai" else "memories_user"
+    existing = await db.query_raw(
+        f"""
+        SELECT id FROM {table}
+        WHERE user_id = $1
+          AND sub_category = '馈赠'
+          AND content = $2
+          AND ($3::text IS NULL OR workspace_id = $3)
+        LIMIT 1
+        """,
+        user_id,
+        content,
+        workspace_id,
+    )
+    if existing:
+        return False
+    await store_memory(
+        user_id,
+        content,
+        level=MEMORY_LEVEL,
+        importance=MEMORY_IMPORTANCE,
+        main_category="生活",
+        sub_category="馈赠",
+        source=source,
+        workspace_id=workspace_id,
+        provenance=USER_STATED if source == "user" else AI_AUTHORED,
+        skip_reconciliation=True,
+    )
+    return True

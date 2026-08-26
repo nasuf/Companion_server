@@ -240,6 +240,8 @@ async def test_bind_red_packet_message(monkeypatch):
     assert "WHERE id = $1 AND user_id = $3 AND message_id IS NULL" in sql
     assert "conversation_id = $4" in sql
     assert fake_db.query_calls[0][1][3] is None
+    assert any("UPDATE messages" in sql for sql, _ in fake_db.execute_calls)
+    assert any("元红包" in str(args) for _, args in fake_db.execute_calls)
 
 
 @pytest.mark.asyncio
@@ -270,6 +272,7 @@ async def test_mark_received_credits_wallet_once(monkeypatch):
     ])
     manager = _FakeManager()
     monkeypatch.setattr(offerings, "db", fake_db)
+    monkeypatch.setattr(offerings, "fire_background", _swallow_background)
     monkeypatch.setattr(
         "app.services.runtime.ws_manager.manager",
         manager,
@@ -303,6 +306,10 @@ async def test_mark_received_credits_wallet_once(monkeypatch):
     assert manager.events == []
 
 
+def _offering_from_public():
+    return offerings._offering_from_row(_offering_row())
+
+
 @pytest.mark.asyncio
 async def test_write_offering_memories_uses_gift_subcategory(monkeypatch):
     stored: list[dict] = []
@@ -319,15 +326,63 @@ async def test_write_offering_memories_uses_gift_subcategory(monkeypatch):
     assert stored[0]["source"] == "user"
     assert stored[0]["provenance"] == USER_STATED
     assert stored[0]["level"] == 2
-    assert "18钞票" in stored[0]["content"].replace(" ", "")
+    assert "18元" in stored[0]["content"]
+    assert stored[0].get("skip_reconciliation") is True
     assert stored[1]["source"] == "ai"
     assert stored[1]["provenance"] == AI_AUTHORED
-    assert "人民币" not in stored[0]["content"]
     assert "充值" not in stored[1]["content"]
 
 
-def _offering_from_public():
-    return offerings._offering_from_row(_offering_row())
+@pytest.mark.asyncio
+async def test_backfill_content_only_updates_messages(monkeypatch):
+    row = _offering_row(message_id="msg-backfill", status="received")
+    fake_db = _FakeDb(
+        query_rows=[
+            [row],
+            [{"id": "msg-backfill"}],
+        ],
+    )
+    monkeypatch.setattr(offerings, "db", fake_db)
+
+    stats = await offerings.backfill_offering_memories_and_content(
+        limit=10,
+        content_only=True,
+    )
+    assert stats["scanned"] == 1
+    assert stats["content_updated"] == 1
+    assert stats["sent_memories"] == 0
+    assert any("UPDATE messages" in sql for sql, _ in fake_db.query_calls)
+
+
+@pytest.mark.asyncio
+async def test_backfill_writes_missing_memories(monkeypatch):
+    row = _offering_row(message_id="msg-mem", status="received")
+    fake_db = _FakeDb(
+        query_rows=[
+            [row],
+            [],
+            [],
+            [],
+            [],
+        ],
+    )
+    stored: list[str] = []
+
+    async def _store(_uid, content, **kwargs):
+        stored.append(content)
+        return "mem-id"
+
+    async def _missing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(offerings, "db", fake_db)
+    monkeypatch.setattr(offerings, "store_memory", _store)
+    monkeypatch.setattr(offerings, "_backfill_memory_if_missing", _missing)
+
+    stats = await offerings.backfill_offering_memories_and_content(limit=10)
+    assert stats["scanned"] == 1
+    assert stats["content_updated"] == 0
+
 
 
 @pytest.mark.asyncio

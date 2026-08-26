@@ -615,6 +615,12 @@ async def fetch_parallel_context(
     profile_enhanced_query = ai_profile_search_query(user_message)
     if profile_enhanced_query and not enhanced_query:
         enhanced_query = profile_enhanced_query
+    if not enhanced_query:
+        from app.services.offerings_memory_text import offering_recall_search_query
+
+        offering_query = offering_recall_search_query(user_message)
+        if offering_query:
+            enhanced_query = offering_query
 
     logger.info(
         f"[DEBUG-MEM] relevance='{memory_relevance}' enhanced='{enhanced_query[:40]}' "

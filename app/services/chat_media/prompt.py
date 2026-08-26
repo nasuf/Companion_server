@@ -58,6 +58,12 @@ def render_message_content_for_prompt(
         from app.services.chat_links.prompt import render_message_content_for_prompt as render_link
 
         rendered = render_link(rendered, {"link_card": link_card})
+
+    component_card = _metadata_component_card(metadata)
+    if component_card:
+        from app.services.offerings_memory_text import render_component_card_line
+
+        rendered = render_component_card_line(rendered, component_card)
     return rendered
 
 
@@ -81,4 +87,11 @@ def _metadata_link_card(metadata: dict[str, Any] | None) -> dict[str, Any] | Non
     if not isinstance(metadata, dict):
         return None
     raw = metadata.get("link_card")
+    return dict(raw) if isinstance(raw, dict) else None
+
+
+def _metadata_component_card(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("component_card")
     return dict(raw) if isinstance(raw, dict) else None

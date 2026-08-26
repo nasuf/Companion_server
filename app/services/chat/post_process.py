@@ -746,9 +746,40 @@ async def run_post_process(
             tasks.append(_bg_trait_adjustment(agent_id, user_message))
             tasks.append(_bg_positive_recovery(agent_id, user_id, user_message))
             if not skip_memory:
+                tasks.append(
+                    _bg_offering_followup_memory(
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        conversation_id=conversation_id,
+                        workspace_id=workspace_id,
+                        user_message=user_message,
+                        ai_response=full_response,
+                    )
+                )
                 # E3 表达学习: 计数节流, 每 LEARN_EVERY_N 条用户消息批量学一次
                 tasks.append(_bg_expression_learning(agent_id, user_id, full_messages))
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _bg_offering_followup_memory(
+    *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    workspace_id: str | None,
+    user_message: str,
+    ai_response: str,
+) -> None:
+    from app.services.offerings_followup import record_offering_followup_from_chat
+
+    await record_offering_followup_from_chat(
+        user_id=user_id,
+        agent_id=agent_id,
+        conversation_id=conversation_id,
+        workspace_id=workspace_id,
+        user_message=user_message,
+        ai_response=ai_response,
+    )
 
 
 async def _bg_expression_learning(
