@@ -412,13 +412,26 @@ async def update_music_now_playing(
     )
 
 
+# 这些 reason 都是"用户还在会话里、自己主动/被动松手"——跟 pause 超时同一种
+# 体验期望: 给 agent 一个察觉+正式告别+搭话的机会(见 begin_user_exit_waiting_
+# with_notice -> fire_background(end_agent_waiting_after_timeout)), 而不是直
+# 接判死刑。断线/agent 自己变忙等场景走下面的 else 分支立即结束, 语义不同。
+_GRACEFUL_USER_EXIT_REASONS = frozenset({
+    "user_pause_timeout",
+    # 顶部音乐控件左右划走关闭 (chat_page.dart:_dismissStationDock) ——
+    # 上线时漏加进来，走了下面 else 分支的立即结束，agent 那半句"已退出共
+    # 听"状态和顺手搭一句话都没有了，是这次要修的 regression。
+    "user_dismissed_dock",
+})
+
+
 @router.post("/co-listening/end", response_model=MusicCoListeningResponse)
 async def end_music_co_listening(
     data: MusicCoListeningEndRequest,
     user: dict = Depends(require_user),
 ):
     try:
-        if data.reason == "user_pause_timeout":
+        if data.reason in _GRACEFUL_USER_EXIT_REASONS:
             current = await music.get_open_co_listening(
                 conversation_id=data.conversation_id,
             )
@@ -434,7 +447,7 @@ async def end_music_co_listening(
                 ended = None
             else:
                 end_reason = (
-                    "user_pause_timeout_before_agent_join"
+                    f"{data.reason}_before_agent_join"
                     if current is not None and current.status == "pending_agent"
                     else data.reason
                 )

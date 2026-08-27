@@ -1770,6 +1770,38 @@ async def test_end_music_co_listening_pending_pause_has_no_agent_reply(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_end_music_co_listening_dismissed_dock_gets_graceful_exit(monkeypatch):
+    # 顶部音乐控件划走关闭 (reason="user_dismissed_dock") 曾经走了跟断线/agent
+    # 变忙一样的立即结束分支——agent 侧"已退出共听"状态和搭话都没了。这条锁
+    # 住它现在跟 user_pause_timeout 走同一条"先等 agent 察觉"的路径。
+    active = MusicCoListeningResponse(
+        status="active",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        is_playing=True,
+        initiated_by="user",
+    )
+    begin_waiting = AsyncMock(return_value=True)
+    end_session = AsyncMock()
+    monkeypatch.setattr(music, "get_open_co_listening", AsyncMock(return_value=active))
+    monkeypatch.setattr(music_status, "begin_user_exit_waiting_with_notice", begin_waiting)
+    monkeypatch.setattr(music, "end_co_listening", end_session)
+
+    await music_api.end_music_co_listening(
+        MusicCoListeningEndRequest(
+            agent_id="agent-1",
+            conversation_id="conv-1",
+            reason="user_dismissed_dock",
+        ),
+        user={"sub": "user-1"},
+    )
+
+    begin_waiting.assert_awaited_once()
+    assert begin_waiting.await_args.kwargs["reason"] == "user_dismissed_dock"
+    # 没有走立即结束的兜底分支——那条分支才会直接调用 end_co_listening。
+    end_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_end_music_co_listening_pause_is_idempotent_while_agent_waiting(monkeypatch):
     waiting = MusicCoListeningResponse(
         status="agent_waiting_user",
