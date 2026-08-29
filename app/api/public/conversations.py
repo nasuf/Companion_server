@@ -275,6 +275,13 @@ async def search_conversation_messages(
     conversation_id: str,
     q: str | None = Query(default=None),
     scope: Literal["all", "text", "card", "image"] = "all",
+    # Only meaningful when scope="card" — the quick-filter landing tiles
+    # (音乐/打卡/胶囊/礼物/红包/活动) narrow the generic card scan to one
+    # type family instead of showing every card type mixed together.
+    card_category: (
+        Literal["music", "checkin", "capsule", "gift", "red_packet", "activity"]
+        | None
+    ) = Query(default=None),
     limit: int = Query(default=30, le=100),
     offset: int = 0,
     conv=Depends(require_conversation_owner),
@@ -286,6 +293,7 @@ async def search_conversation_messages(
         scope=scope,
         limit=limit,
         offset=offset,
+        card_category=card_category,
     )
 
 

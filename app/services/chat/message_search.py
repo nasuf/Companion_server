@@ -25,6 +25,23 @@ from app.models.message import MessageSearchHit, MessageSearchResponse
 _CARD_SCAN_LIMIT = 5000
 _PREVIEW_COUNT = 5
 
+# Quick-filter categories the Flutter search landing page offers instead of
+# one generic "卡片" tile. Keyed by the semantic category the client sends;
+# each maps to the underlying component_card `type` string(s) — "gift" is
+# deliberately two types (in-chat wallet gift vs. AI-initiated real-world
+# gift delivery, see offerings.py / offline/chat_emit.py) that read as one
+# feature to a user searching for "礼物".
+_CARD_CATEGORY_TYPES: dict[str, frozenset[str]] = {
+    "music": frozenset({"music_track"}),
+    "checkin": frozenset({"checkin_reminder", "checkin_habit"}),
+    "capsule": frozenset({"time_capsule"}),
+    "gift": frozenset({"gift", "offline_gift"}),
+    "red_packet": frozenset({"red_packet"}),
+    # AI-initiated (or user-requested) offline activity recommendations —
+    # same card type either way, see offline/activity_service.py.
+    "activity": frozenset({"offline_activity"}),
+}
+
 
 async def search_messages(
     *,
@@ -33,12 +50,15 @@ async def search_messages(
     scope: str,
     limit: int,
     offset: int,
+    card_category: str | None = None,
 ) -> MessageSearchResponse:
     query = (q or "").strip() or None
 
     if scope == "all":
         text_rows, text_more = await _search_text(conversation_id, query, _PREVIEW_COUNT, 0)
-        card_rows, card_more = await _search_cards(conversation_id, query, _PREVIEW_COUNT, 0)
+        card_rows, card_more = await _search_cards(
+            conversation_id, query, None, _PREVIEW_COUNT, 0
+        )
         image_rows, image_more = await _search_images(conversation_id, query, _PREVIEW_COUNT, 0)
     elif scope == "text":
         text_rows, text_more = await _search_text(conversation_id, query, limit, offset)
@@ -46,7 +66,9 @@ async def search_messages(
         image_rows, image_more = [], False
     elif scope == "card":
         text_rows, text_more = [], False
-        card_rows, card_more = await _search_cards(conversation_id, query, limit, offset)
+        card_rows, card_more = await _search_cards(
+            conversation_id, query, card_category, limit, offset
+        )
         image_rows, image_more = [], False
     elif scope == "image":
         text_rows, text_more = [], False
@@ -114,7 +136,11 @@ async def _search_text(
 
 
 async def _search_cards(
-    conversation_id: str, query: str | None, limit: int, offset: int
+    conversation_id: str,
+    query: str | None,
+    card_category: str | None,
+    limit: int,
+    offset: int,
 ) -> tuple[list[dict], bool]:
     # Red packet / in-chat gift cards render fixed boilerplate text ("红包" /
     # "给你的一点心意" for every single one — offerings.py:build_red_packet_card)
@@ -138,6 +164,9 @@ async def _search_cards(
         conversation_id,
         _CARD_SCAN_LIMIT,
     )
+    allowed_types = _CARD_CATEGORY_TYPES.get(card_category) if card_category else None
+    if allowed_types:
+        rows = [row for row in rows if _card_type(row) in allowed_types]
     if query:
         needle = query.lower()
         rows = [row for row in rows if _card_text_matches(row, needle)]
@@ -146,10 +175,21 @@ async def _search_cards(
     return list(page), has_more
 
 
-def _card_text_matches(row: dict, needle: str) -> bool:
+def _card(row: dict) -> dict | None:
     metadata = row.get("metadata")
     card = metadata.get("component_card") if isinstance(metadata, dict) else None
-    if not isinstance(card, dict):
+    return card if isinstance(card, dict) else None
+
+
+def _card_type(row: dict) -> str | None:
+    card = _card(row)
+    card_type = card.get("type") if card else None
+    return str(card_type) if card_type else None
+
+
+def _card_text_matches(row: dict, needle: str) -> bool:
+    card = _card(row)
+    if card is None:
         return False
     haystack_parts = [
         str(card.get(field) or "") for field in ("title", "subtitle", "body", "footer")

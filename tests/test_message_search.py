@@ -143,6 +143,210 @@ class TestSearchCards:
         assert len(result.cards) == 1
 
     @pytest.mark.asyncio
+    async def test_card_category_narrows_to_the_matching_types_only(self):
+        rows = [
+            {
+                "id": "m1",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "music_track",
+                        "title": "晴天",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:00+00:00",
+            },
+            {
+                "id": "m2",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "checkin_habit",
+                        "title": "喝水打卡",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:01+00:00",
+            },
+        ]
+        with patch.object(message_search, "db") as db_mock:
+            db_mock.query_raw = AsyncMock(side_effect=[rows, [{"id": "m1", "rank": 0}]])
+            result = await message_search.search_messages(
+                conversation_id="c1",
+                q=None,
+                scope="card",
+                limit=30,
+                offset=0,
+                card_category="music",
+            )
+        assert len(result.cards) == 1
+        assert result.cards[0].id == "m1"
+
+    @pytest.mark.asyncio
+    async def test_gift_category_covers_both_in_chat_and_offline_gift_types(self):
+        rows = [
+            {
+                "id": "m1",
+                "conversation_id": "c1",
+                "role": "user",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "gift",
+                        "title": "美式咖啡",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:00+00:00",
+            },
+            {
+                "id": "m2",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "offline_gift",
+                        "title": "暖手宝",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:01+00:00",
+            },
+            {
+                "id": "m3",
+                "conversation_id": "c1",
+                "role": "user",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "red_packet",
+                        "title": "红包",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:02+00:00",
+            },
+        ]
+        with patch.object(message_search, "db") as db_mock:
+            db_mock.query_raw = AsyncMock(
+                side_effect=[
+                    rows,
+                    [{"id": "m1", "rank": 0}, {"id": "m2", "rank": 1}],
+                ]
+            )
+            result = await message_search.search_messages(
+                conversation_id="c1",
+                q=None,
+                scope="card",
+                limit=30,
+                offset=0,
+                card_category="gift",
+            )
+        assert {hit.id for hit in result.cards} == {"m1", "m2"}
+
+    @pytest.mark.asyncio
+    async def test_activity_category_matches_offline_activity_type(self):
+        rows = [
+            {
+                "id": "m1",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "offline_activity",
+                        "title": "周末露营",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:00+00:00",
+            },
+            {
+                "id": "m2",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "gift",
+                        "title": "美式咖啡",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:01+00:00",
+            },
+        ]
+        with patch.object(message_search, "db") as db_mock:
+            db_mock.query_raw = AsyncMock(side_effect=[rows, [{"id": "m1", "rank": 0}]])
+            result = await message_search.search_messages(
+                conversation_id="c1",
+                q=None,
+                scope="card",
+                limit=30,
+                offset=0,
+                card_category="activity",
+            )
+        assert len(result.cards) == 1
+        assert result.cards[0].id == "m1"
+
+    @pytest.mark.asyncio
+    async def test_card_category_ignored_for_scope_all_preview(self):
+        rows = [
+            {
+                "id": "m1",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "red_packet",
+                        "title": "红包",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:00+00:00",
+            }
+        ]
+        with patch.object(message_search, "db") as db_mock:
+            db_mock.message.find_many = AsyncMock(return_value=[])
+            db_mock.query_raw = AsyncMock(
+                side_effect=[rows, [], [{"id": "m1", "rank": 0}]]
+            )
+            # card_category is only meaningful for scope="card" — passing one
+            # under scope="all" must not silently narrow the mixed preview.
+            result = await message_search.search_messages(
+                conversation_id="c1",
+                q=None,
+                scope="all",
+                limit=30,
+                offset=0,
+                card_category="music",
+            )
+        assert len(result.cards) == 1
+
+    @pytest.mark.asyncio
     async def test_matches_red_packet_blessing_even_though_card_text_is_boilerplate(
         self,
     ):
@@ -380,5 +584,117 @@ class TestSearchRouteOwnership:
             "has_more_images": False,
         }
         search_mock.assert_called_once_with(
-            conversation_id="c1", q="hi", scope="text", limit=30, offset=0
+            conversation_id="c1",
+            q="hi",
+            scope="text",
+            limit=30,
+            offset=0,
+            card_category=None,
         )
+
+    def test_card_category_query_param_reaches_search_messages(self, client):
+        # test_owner_200_returns_service_payload only exercised the *absent*
+        # card_category default (None); this covers the route actually
+        # extracting a real value out of the query string, not just passing
+        # through its own default.
+        from app.models.message import MessageSearchResponse
+
+        conv = SimpleNamespace(id="c1", userId="u1", isDeleted=False)
+        with (
+            patch("app.api.ownership.db") as db_mock,
+            patch(
+                "app.api.public.conversations.message_search.search_messages",
+                new_callable=AsyncMock,
+            ) as search_mock,
+        ):
+            db_mock.conversation.find_unique = AsyncMock(return_value=conv)
+            search_mock.return_value = MessageSearchResponse()
+            r = client.get(
+                "/conversations/c1/messages/search?scope=card&card_category=capsule",
+                headers=_hdr("u1"),
+            )
+        assert r.status_code == 200
+        search_mock.assert_called_once_with(
+            conversation_id="c1",
+            q=None,
+            scope="card",
+            limit=30,
+            offset=0,
+            card_category="capsule",
+        )
+
+    def test_card_category_end_to_end_through_the_real_route_and_service(
+        self, client
+    ):
+        # Full chain, only the DB layer mocked: HTTP query string -> FastAPI
+        # route param parsing -> message_search.search_messages ->
+        # _search_cards's category filter. Everything up through here has
+        # only been tested piecewise (route wiring mocks search_messages;
+        # _search_cards is unit-tested directly) — this is the one test that
+        # would catch a break at the seam between them.
+        rows = [
+            {
+                "id": "m1",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "time_capsule",
+                        "title": "给未来的自己",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:00+00:00",
+            },
+            {
+                "id": "m2",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "checkin_habit",
+                        "title": "喝水打卡",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:01+00:00",
+            },
+            {
+                "id": "m3",
+                "conversation_id": "c1",
+                "role": "assistant",
+                "content": "",
+                "metadata": {
+                    "component_card": {
+                        "type": "music_track",
+                        "title": "晴天",
+                        "subtitle": "",
+                        "body": "",
+                        "footer": "",
+                    }
+                },
+                "created_at": "2026-08-01T00:00:02+00:00",
+            },
+        ]
+        conv = SimpleNamespace(id="c1", userId="u1", isDeleted=False)
+        with (
+            patch("app.api.ownership.db") as ownership_db_mock,
+            patch("app.services.chat.message_search.db") as search_db_mock,
+        ):
+            ownership_db_mock.conversation.find_unique = AsyncMock(return_value=conv)
+            search_db_mock.query_raw = AsyncMock(
+                side_effect=[rows, [{"id": "m1", "rank": 0}]]
+            )
+            r = client.get(
+                "/conversations/c1/messages/search?scope=card&card_category=capsule",
+                headers=_hdr("u1"),
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert [hit["id"] for hit in body["cards"]] == ["m1"]
