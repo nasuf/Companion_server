@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,10 +9,11 @@ from app.api.jwt_auth import require_user
 from app.api.ownership import require_conversation_owner, require_user_self
 from app.db import db
 from app.models.conversation import ConversationCreate, ConversationResponse
-from app.models.message import MessageResponse
+from app.models.message import MessageResponse, MessageSearchResponse
 from app.services.achievements.definitions import ACHIEVEMENT_BY_ID
 from app.services.achievements.mode import achievement_alerts_enabled
 from app.services.achievements.rule_registry import ACHIEVEMENT_RULES
+from app.services.chat import message_search
 from app.services.chat.crisis_state import get_crisis_care_status
 from app.services.schedule_domain.schedule import (
     get_cached_schedule,
@@ -264,6 +266,27 @@ async def list_messages(
             reverse=True,
         )
     return items
+
+
+@router.get(
+    "/{conversation_id}/messages/search", response_model=MessageSearchResponse
+)
+async def search_conversation_messages(
+    conversation_id: str,
+    q: str | None = Query(default=None),
+    scope: Literal["all", "text", "card", "image"] = "all",
+    limit: int = Query(default=30, le=100),
+    offset: int = 0,
+    conv=Depends(require_conversation_owner),
+    user: dict = Depends(require_user),
+):
+    return await message_search.search_messages(
+        conversation_id=conversation_id,
+        q=q,
+        scope=scope,
+        limit=limit,
+        offset=offset,
+    )
 
 
 async def _attach_llm_usage(items: list[MessageResponse]) -> None:
