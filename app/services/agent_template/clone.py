@@ -43,6 +43,7 @@ from prisma import Json
 from app.db import db
 from app.services.agent_avatars import pick_agent_avatar
 from app.services.agent_template.registry import get_default_template_agent_id
+from app.services.memory.retrieval.context_selector import exceeds_injection_limit
 from app.services.speech_output.voices import assign_random_voice
 from app.services.workspace.workspaces import (
     create_workspace,
@@ -124,6 +125,35 @@ async def _clone_ai_memories(
         for field in _MEMORY_COPY_FIELDS:
             payload[field] = getattr(row, field, None)
         new_rows.append(payload)
+
+    # 克隆是逐字复制, 所以它同时也是个放大器: 模板里的任何一条问题记忆, 每克隆
+    # 一次就多一条。2026-08 实测这个放大倍数是 48 (两个模板 agent 各被克隆 38/10
+    # 次), 一条模板记忆的影响面因此是它自己的 49 倍。
+    #
+    # 注意这里查的是**注入上限**(>180 token, 检索时会被整条跳过), 不是"偏长"。
+    # 同一次排查发现的 2276 条 135-180 token 的记忆不在此列 —— 那些能正常注入,
+    # 只是粒度粗, 属于另一个问题, 不该用同一个阈值混在一起报。
+    #
+    # 这里刻意**不**改成"跳过超限条"或"就地拆分":
+    #   跳过  → 克隆与模板不再等价, 而且原文丢了, 以后修好模板也没法回填这些克隆;
+    #   拆分  → 拆出来的新文本跟模板的 embedding 不再对应, 得在注册热路径上重新
+    #          嵌入 (正是下面那段批量 copy 特意要避开的 N+1)。
+    # 真正的闸门在模板侧 (registry.set_default_template_agent_id), 这里只负责让
+    # "模板脏了"这件事不再无声无息。
+    oversized = [
+        row for row in template_rows
+        if exceeds_injection_limit(getattr(row, "content", "") or "")
+    ]
+    if oversized:
+        logger.warning(
+            "[AGENT-CLONE] template workspace %s has %d/%d memories over the "
+            "injection limit; cloning them verbatim into %s (they will never be "
+            "retrievable — fix the template, then backfill clones)",
+            template_workspace_id[:8],
+            len(oversized),
+            len(template_rows),
+            new_workspace_id[:8],
+        )
 
     await db.aimemory.create_many(data=new_rows)
 

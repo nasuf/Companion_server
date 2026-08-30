@@ -298,11 +298,20 @@ class TestNoOversizedMemories:
         assert r.status == "ok"
 
     @pytest.mark.asyncio
-    async def test_a_few_oversized_rows_warn_rather_than_violate(self, monkeypatch):
-        """少量超限只影响那几条自己, 不该把整块巡检标成红色."""
+    async def test_even_a_few_oversized_rows_are_a_violation(self, monkeypatch):
+        """任何一条超限都要红。
+
+        这条断言 2026-08 反转过: 原先是"少量超限 (≤50) 只记 warn, 不该把整块巡检
+        标成红色"。反转的理由是那个门槛在生产上被实测证伪 —— warn 不打 error 日志、
+        不计入后台 badge, 只有人主动打开页面才看得见, 于是模板克隆持续漏出超限记忆
+        整整一个月无人察觉, 而每次漏的量都远不到 51 条。
+
+        "少量超限只影响那几条自己" 本身没说错, 错在它是存量视角: 每条超限记忆都
+        意味着某个写入路径漏了, 而漏的路径不会自己停下来。
+        """
         _patch_db(monkeypatch, _FakeDb(*self._rows(3, self._LONG)))
         r = await inv._check_no_oversized_memories()
-        assert r.status == "warn"
+        assert r.status == "violated"
         assert "检索时会被整条跳过" in r.detail
 
     @pytest.mark.asyncio

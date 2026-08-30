@@ -118,8 +118,56 @@ async def get_default_template_agent_id() -> str | None:
     return env_value or None
 
 
+async def count_oversized_memories(agent_id: str) -> int:
+    """How many of this agent's persona memories can never be injected.
+
+    Only memories_ai: a template's user-side table is empty by construction
+    (nobody has chatted with it), and clone.py copies only the AI rows anyway,
+    so the user table cannot contribute to what a clone inherits.
+
+    "Oversized" here means over the *injection* limit — a row that
+    select_context skips whole. Merely long-but-usable rows are a separate
+    (granularity) concern and deliberately do not block promotion.
+
+    Cheap enough for admin paths: one indexed query plus a token estimate per
+    row over a single agent's few hundred rows.
+    """
+    from app.services.memory.retrieval.context_selector import exceeds_injection_limit
+
+    rows = await db.query_raw(
+        """
+        SELECT m.content
+        FROM memories_ai m
+        JOIN chat_workspaces w ON w.id = m.workspace_id
+        WHERE w.agent_id = $1 AND m.is_archived = false
+        """,
+        agent_id,
+    )
+    return sum(1 for r in rows if exceeds_injection_limit(r.get("content") or ""))
+
+
 async def set_default_template_agent_id(agent_id: str | None) -> None:
-    """Persist the default template pointer on the singleton system_config row."""
+    """Persist the default template pointer on the singleton system_config row.
+
+    Refuses to promote an agent whose persona contains memories over the
+    injection limit. This is the choke point worth guarding: cloning copies
+    memory rows verbatim, so a dirty template does not stay one bad agent —
+    it becomes one bad agent per signup, forever (2026-08: 2 such templates
+    accounted for ~2000 unusable rows across 48 clones). Failing loudly here
+    costs an admin one retry; failing to check costs every future user.
+
+    Deliberately not a warning: an admin who sees "default template set" has
+    no reason to go looking at a log line, which is exactly how the previous
+    round went unnoticed for a month.
+    """
+    if agent_id:
+        oversized = await count_oversized_memories(agent_id)
+        if oversized:
+            raise ValueError(
+                f"该 agent 有 {oversized} 条记忆超过检索单条上限, 不能设为默认模板 —— "
+                f"克隆会逐字复制, 每个新用户都会继承这些永远检索不到的记忆。"
+                f"请先用 scripts/split_oversized_memories.py 拆分后重试。"
+            )
     await db.execute_raw(
         """
         INSERT INTO system_config (id, default_template_agent_id, updated_at)

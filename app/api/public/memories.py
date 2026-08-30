@@ -23,6 +23,7 @@ from app.services.memory.storage.embedding import generate_embedding, store_embe
 from app.services.memory.storage.persistence import log_memory_changelog
 from app.services.memory.lifecycle.hygiene import run_memory_hygiene
 from app.services.memory.storage import repo as memory_repo
+from app.services.memory.retrieval.context_selector import exceeds_injection_limit
 from app.services.memory.retrieval.legacy import retrieve_memories
 from app.services.workspace.workspaces import resolve_workspace_id
 
@@ -231,6 +232,16 @@ async def update_memory(
     update_data: dict = {}
     old_content = m.content
     if data.content is not None:
+        # 超限的内容存进去也永远不会被检索到 —— 用户会看到"保存成功", 得到的却是一条
+        # AI 再也想不起来的记忆。跟 knowledge 导入 (agent_template/knowledge.py) 同样的
+        # 取舍: 明确拒绝并把原文留给用户自己拆, 好过系统擅自截断或静默收下。
+        if exceeds_injection_limit(data.content):
+            # detail 跟本文件其余错误一样用可读文案 (不是机器码): 这个接口的 detail
+            # 会直接透到用户面前, 而"内容太长"恰好是用户自己能处理的问题。
+            raise HTTPException(
+                status_code=400,
+                detail="Memory content is too long to be recalled; split it into shorter entries",
+            )
         update_data["content"] = data.content
         await store_embedding(m.id, await generate_embedding(data.content))
     if not update_data:

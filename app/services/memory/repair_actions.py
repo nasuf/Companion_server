@@ -139,6 +139,7 @@ async def _edit_memory(
     content = _clean_text(payload.content)
     if content is None:
         raise MemoryRepairActionError(400, "edit_memory_requires_content")
+    _assert_within_injection_limit(content)
 
     update_data: dict[str, Any] = {"content": content}
     await store_embedding(record.id, await generate_embedding(content))
@@ -254,6 +255,7 @@ async def _merge_memories(
     content = _clean_text(payload.content)
     if not content:
         raise MemoryRepairActionError(400, "merge_memories_requires_content")
+    _assert_within_injection_limit(content)
     target = await _load_target_memory(repair_item, payload.memory_id)
     merge_ids = list(dict.fromkeys(mid for mid in payload.memory_ids if mid and mid != target.id))
     if not merge_ids:
@@ -391,6 +393,21 @@ def _clean_text(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _assert_within_injection_limit(content: str) -> None:
+    """Reject repair edits/merges that would produce an unretrievable memory.
+
+    reconciliation._llm_adjudicate already refuses to let the *LLM* merge two
+    memories into one that exceeds the limit (it downgrades to keep_separate).
+    The same act performed by hand through the repair tool had no such check —
+    and this module exists specifically to *improve* memory quality, so it was
+    the last place that should be able to mint a memory nothing can retrieve.
+    """
+    from app.services.memory.retrieval.context_selector import exceeds_injection_limit
+
+    if exceeds_injection_limit(content):
+        raise MemoryRepairActionError(400, "memory_content_too_long")
 
 
 def _clamp_importance(value: float) -> float:

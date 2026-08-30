@@ -290,12 +290,9 @@ async def _llm_adjudicate(
 
 
 def _exceeds_injection_limit(text: str) -> bool:
-    from app.services.memory.retrieval.context_selector import (
-        MAX_MEMORY_TOKENS_PER_ITEM,
-        estimate_tokens,
-    )
+    from app.services.memory.retrieval.context_selector import exceeds_injection_limit
 
-    return estimate_tokens(text) > MAX_MEMORY_TOKENS_PER_ITEM
+    return exceeds_injection_limit(text)
 
 
 async def _category_candidates(

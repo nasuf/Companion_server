@@ -63,6 +63,23 @@ def estimate_tokens(text: str) -> int:
     return int(cjk * 1.5 + ascii_chars * 0.25)
 
 
+def exceeds_injection_limit(text: str) -> bool:
+    """Would this memory be skipped entirely by select_context?
+
+    The single source of truth for "too long to ever be injected". Every write
+    path that can produce or copy memory text should gate on *this* rather than
+    on a character count of its own: CJK punctuation counts as 0.25 token, not
+    1.5, so a raw `len(content) > 120` check both over- and under-reports
+    against the real cap by a wide margin (a 132-char sentence with 15 commas
+    is 179 tokens \u2014 under the cap, despite "looking" oversized).
+
+    Getting that wrong is expensive in both directions: over-reporting sends
+    people chasing memories that were fine, under-reporting lets rows in that
+    no conversation will ever use.
+    """
+    return estimate_tokens(text) > MAX_MEMORY_TOKENS_PER_ITEM
+
+
 MAX_MEMORIES_PER_SOURCE = 10
 MAX_MEMORIES_INJECTED = MAX_MEMORIES_PER_SOURCE  # backward-compatible alias
 MAX_MEMORY_TOKENS_PER_ITEM = 180

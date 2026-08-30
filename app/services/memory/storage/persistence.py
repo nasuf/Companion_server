@@ -65,15 +65,30 @@ def _split_for_storage(content: str, taxonomy) -> list[str]:
     """
     from app.services.memory.recording.splitting import split_multi_fact
     from app.services.memory.retrieval.context_selector import (
-        MAX_MEMORY_TOKENS_PER_ITEM,
-        estimate_tokens,
+        exceeds_injection_limit,
     )
 
-    if not content or estimate_tokens(content) <= MAX_MEMORY_TOKENS_PER_ITEM:
+    if not content or not exceeds_injection_limit(content):
         return [content]
     if is_singleton(taxonomy.main_category, taxonomy.sub_category):
         return [content]
-    return split_multi_fact(content)
+
+    pieces = split_multi_fact(content)
+    # 拆分是"尽力而为"而不是"保证": 没有全角分号、整段单句、或段数超过 MAX_SEGMENTS
+    # 时, split_multi_fact 原样返回, 于是超限内容照样落库 —— 不报错、不打日志。
+    # 那正是这层收口最容易被误信的地方 (它看起来像个闸门, 实际是个尽力器)。
+    # 这里不改成硬拒 (会让整条写入失败, 丢掉的信息比留一条难检索的更多), 但至少
+    # 让失败可观测: 巡检看到的是结果, 这行日志能指出是哪条路径漏的。
+    still_over = [p for p in pieces if exceeds_injection_limit(p)]
+    if still_over:
+        logger.warning(
+            "[SPLIT-FAILED] %d/%d piece(s) still exceed the injection limit "
+            "after splitting (%s/%s); stored anyway but unretrievable: %r",
+            len(still_over), len(pieces),
+            taxonomy.main_category, taxonomy.sub_category,
+            still_over[0][:60],
+        )
+    return pieces
 
 
 def _normalize_singleton_text(text: str | None) -> str:

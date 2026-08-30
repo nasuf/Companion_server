@@ -349,8 +349,17 @@ async def _check_no_oversized_memories() -> InvariantResult:
             "no_oversized_memories", "记忆长度上限", "ok",
             f"全部在 {MAX_MEMORY_TOKENS_PER_ITEM} token 以内", observed,
         )
-    # 不用 violated: 少量超限只影响那几条自己, 不会让别的功能出错。
-    status = "violated" if total_over > 50 else "warn"
+    # 任何一条超限都算 violated。
+    #
+    # 原先的门槛是 >50 才升 violated, 50 条以下只记 warn —— 而 warn 不打 error 日志、
+    # 不计入后台 badge, 只有人主动打开页面才看得见。2026-08 排查模板克隆问题时才发现:
+    # 这条巡检的设计意图是"守住不再长出来", 但它对最常见的泄漏形态 (一次漏几条、
+    # 慢慢积累) 完全静默, 等于把守门人放在了 51 条之后。
+    #
+    # "少量超限只影响那几条自己" 这个理由本身没错, 错在它是**存量**视角: 每条超限
+    # 记忆都意味着某个写入路径漏了, 而漏的路径不会自己停下来。数量小的时候恰恰是
+    # 最该修的时候。
+    status = "violated"
     return InvariantResult(
         "no_oversized_memories", "记忆长度上限", status,
         f"{total_over} 条超过 {MAX_MEMORY_TOKENS_PER_ITEM} token, 检索时会被整条跳过 "
