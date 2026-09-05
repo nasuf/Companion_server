@@ -831,6 +831,38 @@ model WalletLedger {
   @@map("wallet_ledger")
 }
 
+// Apple IAP 交易主账（表由 raw SQL 迁移 20260905120000_apple_iap 建，这里只给
+// admin 分页查询提供 Prisma client 类型；无 relation 字段以免动 User model）。
+// iap_subscription_state / iap_notifications 保持纯 raw SQL 无 model（沿用
+// user_message_quota 惯例）。
+model IapTransaction {
+  id                   String    @id @default(uuid())
+  provider             String    @default("apple")
+  transactionId        String    @map("transaction_id")
+  originalTransactionId String?  @map("original_transaction_id")
+  webOrderLineItemId   String?   @map("web_order_line_item_id")
+  productId            String    @map("product_id")
+  kind                 String
+  environment          String
+  userId               String    @map("user_id")
+  quantity             Int       @default(1)
+  purchaseDate         DateTime? @map("purchase_date")
+  expiresDate          DateTime? @map("expires_date")
+  status               String
+  walletLedgerSourceId String?   @map("wallet_ledger_source_id")
+  notificationUuid     String?   @map("notification_uuid")
+  rawTransactionPayload Json     @default("{}") @map("raw_transaction_payload")
+  rawJws               String?   @map("raw_jws")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @default(now()) @map("updated_at")
+
+  @@unique([provider, transactionId], map: "iap_transactions_provider_txn_unique")
+  @@index([userId, createdAt(sort: Desc)], map: "iap_transactions_user_idx")
+  @@index([originalTransactionId], map: "iap_transactions_original_txn_idx")
+  @@index([status, environment, createdAt(sort: Desc)], map: "iap_transactions_status_env_idx")
+  @@map("iap_transactions")
+}
+
 // User-to-agent transfers: red packets now, virtual/physical gifts later.
 // Ticket amounts are shop 钞票; agent_value_yuan is the companion's perceived
 // RMB weight (currently 1 钞票 = 1 元). Status/amount here are source of truth;

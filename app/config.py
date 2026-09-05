@@ -284,6 +284,20 @@ class Settings(BaseSettings):
     notification_max_attempts: int = 3
     notification_dispatch_batch_size: int = 50
 
+    # Apple IAP / App Store Server API（Direct Apple 自建：收据校验 + Server
+    # Notifications V2）。镜像 APNs 的 .p8 双通道惯例（内容优先，其次路径）。
+    apple_iap_enabled: bool = False
+    apple_iap_bundle_id: str = ""              # 商品所属 app 记录的 bundle（prod=com.bansheng.prod）
+    apple_iap_issuer_id: str = ""              # App Store Connect API issuer（UUID）
+    apple_iap_key_id: str = ""                 # In-App Purchase .p8 Key ID
+    apple_iap_private_key: str = ""            # .p8 内容（优先）
+    apple_iap_private_key_path: str = ""       # 或 .p8 文件路径
+    apple_iap_app_apple_id: int = 0            # 数字 App Apple ID（prod 校验/通知需要）
+    # Apple Root CA-G3（链校验根，公开证书，随仓库分发）。
+    apple_iap_root_ca_path: str = "app/services/payments/certs/AppleRootCA-G3.cer"
+    apple_iap_environment: str = "auto"        # auto | production | sandbox
+    apple_iap_http_timeout_s: float = 10.0
+
     # Jamendo music integration. The client id is configured on the server;
     # Flutter receives normalized metadata plus Jamendo file endpoint URLs.
     jamendo_client_id: str = ""
@@ -463,6 +477,28 @@ class Settings(BaseSettings):
                 "Unsafe production config: WECHAT_JSSDK_ALLOWED_ORIGINS requires "
                 "WECHAT_H5_APP_ID and WECHAT_H5_APP_SECRET."
             )
+
+        if self.apple_iap_enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("APPLE_IAP_BUNDLE_ID", self.apple_iap_bundle_id.strip()),
+                    ("APPLE_IAP_ISSUER_ID", self.apple_iap_issuer_id.strip()),
+                    ("APPLE_IAP_KEY_ID", self.apple_iap_key_id.strip()),
+                    (
+                        "APPLE_IAP_PRIVATE_KEY(_PATH)",
+                        self.apple_iap_private_key.strip()
+                        or self.apple_iap_private_key_path.strip(),
+                    ),
+                )
+                if not value
+            ]
+            if missing:
+                raise RuntimeError(
+                    "Unsafe production config: APPLE_IAP_ENABLED=true requires "
+                    + ", ".join(missing)
+                    + "."
+                )
 
 
 settings = Settings()

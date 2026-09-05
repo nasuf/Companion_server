@@ -209,6 +209,7 @@ from app.api.public.wallet import router as wallet_router
 from app.api.public.offerings import gift_router, router as offerings_router
 from app.api.public.notifications import router as notifications_router
 from app.api.public.offline import router as offline_router
+from app.api.public.iap import router as iap_router
 from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
@@ -229,6 +230,7 @@ from app.api.admin.meal import router as admin_meal_router
 from app.api.admin.game_configs import router as admin_game_configs_router
 from app.api.admin.game_points import router as admin_game_points_router
 from app.api.admin.wallet import router as admin_wallet_router
+from app.api.admin.payments import router as admin_payments_router
 from app.api.admin.chat_quota import router as admin_chat_quota_router
 from app.api.admin.offline_settings import router as admin_offline_settings_router
 from app.api.admin.achievement_settings import router as admin_achievement_settings_router
@@ -265,6 +267,7 @@ app.include_router(store_router)
 app.include_router(vip_router)
 app.include_router(notifications_router)
 app.include_router(offline_router)
+app.include_router(iap_router)
 app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)
@@ -285,6 +288,7 @@ app.include_router(admin_meal_router)
 app.include_router(admin_game_configs_router)
 app.include_router(admin_game_points_router)
 app.include_router(admin_wallet_router)
+app.include_router(admin_payments_router)
 app.include_router(admin_chat_quota_router)
 app.include_router(admin_offline_settings_router)
 app.include_router(admin_achievement_settings_router)

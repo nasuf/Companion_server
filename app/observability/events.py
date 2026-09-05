@@ -9,7 +9,7 @@
 
 约定:
 - event 名 = "<domain>.<verb>" 短句, 全小写
-- domain ∈ {chat, intent, reply, memory, boundary, proactive, reminder, offering, llm, ws, http, scheduler}
+- domain ∈ {chat, intent, reply, memory, boundary, proactive, reminder, offering, payment, llm, ws, http, scheduler}
 - 加事件: 只改这一处. 调用方 import 常量, 不写裸字符串.
 - 字段命名:
   * `*_id` / `*_name`: ID / 显示名 (uuid 类全量记录)
@@ -87,6 +87,19 @@ EVT_REMINDER_DLQ = "reminder.dead_letter"
 EVT_OFFERING_SENT = "offering.sent"
 EVT_OFFERING_RECEIVED = "offering.received"
 EVT_OFFERING_RECLAIMED = "offering.reclaimed"
+
+# Payments / Apple IAP（domain=payment）。红线同文件顶部：extra 只放
+# transaction_id/product_id/environment/notification_type/user_id/delta 等标量，
+# 绝不放 .p8 私钥 / 完整 JWS / signedPayload 全文（那些只进 DB 审计表）。
+EVT_PAYMENT_VERIFY_OK = "payment.verify_ok"
+EVT_PAYMENT_VERIFY_FAIL = "payment.verify_failed"
+EVT_PAYMENT_GRANT = "payment.grant"
+EVT_PAYMENT_NOTIFICATION = "payment.notification"
+EVT_PAYMENT_NOTIFICATION_FAIL = "payment.notification_failed"
+EVT_PAYMENT_SUB_RENEW = "payment.subscription_renewed"
+EVT_PAYMENT_SUB_EXPIRE = "payment.subscription_expired"
+EVT_PAYMENT_REFUND = "payment.refund"
+EVT_PAYMENT_REVOKE = "payment.revoke"
 
 # Admin wallet operations
 EVT_ADMIN_TICKET_GRANT = "admin.ticket_grant"
