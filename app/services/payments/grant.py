@@ -112,7 +112,7 @@ async def record_and_grant(
                 quantity, purchase_date, expires_date, status,
                 notification_uuid, raw_transaction_payload
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$13::jsonb)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::timestamp,$11::timestamp,'pending',$12,$13::jsonb)
             ON CONFLICT (provider, transaction_id) DO NOTHING
             RETURNING id
             """,
@@ -231,7 +231,11 @@ async def _apply_vip(
 
     if product.kind == catalog.KIND_SUBSCRIPTION:
         target = expires_dt or (now + _days(product.vip_days))
-        new_until = max(target, current) if current else target
+        # Never shorten an existing VIP window (sandbox subs expire in minutes).
+        candidates = [target, now]
+        if current is not None:
+            candidates.append(current)
+        new_until = max(candidates)
     else:
         from datetime import timedelta
 
@@ -242,7 +246,7 @@ async def _apply_vip(
     await tx.execute_raw(
         """
         UPDATE user_wallets
-        SET vip_until = $2,
+        SET vip_until = $2::timestamp,
             vip_trial_used = vip_trial_used OR $3,
             updated_at = CURRENT_TIMESTAMP
         WHERE user_id = $1
@@ -259,7 +263,7 @@ async def _apply_vip(
                 original_transaction_id, provider, user_id, product_id,
                 environment, status, expires_date, latest_transaction_id, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,'active',$6,$7,CURRENT_TIMESTAMP)
+            VALUES ($1,$2,$3,$4,$5,'active',$6::timestamp,$7,CURRENT_TIMESTAMP)
             ON CONFLICT (original_transaction_id) DO UPDATE
             SET status = 'active',
                 product_id = EXCLUDED.product_id,
@@ -289,10 +293,9 @@ def _as_utc(value: Any) -> datetime | None:
 def _naive(dt: datetime | None) -> datetime | None:
     """落库前去掉时区：目标列都是 TIMESTAMP WITHOUT TIME ZONE，存 UTC 墙钟。
 
-    prisma query_raw 会把 **带时区** 的 datetime 序列化成带偏移的字符串，PG 报
-    "column is timestamp but expression is text" 整个事务回滚（到账全失败）。
-    naive datetime 才会被正确按 timestamp 绑定（见 store_bundles.activate_vip_trial）。
-    ms_to_dt 返回的是 aware UTC，故落库前必须转 naive。比较逻辑仍用 aware 值。
+    prisma query_raw 会把 datetime 序列化成 ISO 字符串；SQL 侧必须写
+    ``$N::timestamp`` 让 PG 显式转型（见 conversations.py / last_will.py 惯例）。
+    ms_to_dt 返回 aware UTC，落库前转 naive 存 UTC 墙钟；比较逻辑仍用 aware 值。
     """
     return dt.replace(tzinfo=None) if dt is not None else None
 

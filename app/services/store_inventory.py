@@ -238,7 +238,7 @@ async def add_batch(
         """
         INSERT INTO user_consumable_batch
             (user_id, product_kind, quantity, source, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5::timestamp)
         RETURNING id, product_kind, quantity, source, expires_at, created_at
         """,
         user_id,
