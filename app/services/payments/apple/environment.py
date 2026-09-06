@@ -120,7 +120,10 @@ async def fetch_and_verify_transaction(
     杜绝客户端伪造。查不到 → TransactionNotFoundError；验签失败 → AppleVerificationError。
     """
     last_not_found: APIException | None = None
-    for env in _envs_to_try():
+    last_error: APIException | None = None
+    envs = _envs_to_try()
+    for idx, env in enumerate(envs):
+        is_last = idx == len(envs) - 1
         client = build_client(env)
         try:
             resp = await asyncio.to_thread(client.get_transaction_info, transaction_id)
@@ -128,12 +131,24 @@ async def fetch_and_verify_transaction(
             if _is_not_found(exc):
                 last_not_found = exc
                 continue
-            raise AppleVerificationError(
-                f"apple_api_error:{exc.http_status_code}:{exc.api_error}"
-            ) from exc
+            # 非 not-found 错误（典型：app 未上架时 production 对该 JWT 返回 401）。
+            # auto 模式下不能就此中止——Apple 官方要求 production 出错就回退 sandbox。
+            # 仅当已是最后一个待试环境时，才判定为真正的验签/鉴权失败。
+            last_error = exc
+            if is_last:
+                raise AppleVerificationError(
+                    f"apple_api_error:{exc.http_status_code}:{exc.api_error}"
+                ) from exc
+            continue
         signed = resp.signedTransactionInfo
         payload = await asyncio.to_thread(verify_signed_transaction, signed, env.value)
         return payload, env.value
+    # 所有环境都没返回可用交易：若从未命中 not-found、只碰到过硬错误，
+    # 按硬错误上报（避免把 401/500 误判成"交易不存在"）；否则按 not-found 上报。
+    if last_not_found is None and last_error is not None:
+        raise AppleVerificationError(
+            f"apple_api_error:{last_error.http_status_code}:{last_error.api_error}"
+        ) from last_error
     raise TransactionNotFoundError(
         f"transaction_not_found:{transaction_id}"
     ) from last_not_found
