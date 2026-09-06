@@ -210,6 +210,7 @@ from app.api.public.offerings import gift_router, router as offerings_router
 from app.api.public.notifications import router as notifications_router
 from app.api.public.offline import router as offline_router
 from app.api.public.iap import router as iap_router
+from app.api.public.iap_membership import router as iap_membership_router
 from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
@@ -268,6 +269,7 @@ app.include_router(vip_router)
 app.include_router(notifications_router)
 app.include_router(offline_router)
 app.include_router(iap_router)
+app.include_router(iap_membership_router)
 app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)

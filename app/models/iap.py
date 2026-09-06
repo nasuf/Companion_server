@@ -32,6 +32,34 @@ class IapVerifyResponse(BaseModel):
     vip: VipStatusResponse
 
 
+class IapHistoryItem(BaseModel):
+    transaction_id: str
+    product_id: str
+    product_label: str
+    kind: Literal["subscription", "consumable"]
+    status: Literal["granted", "refunded", "revoked"]
+    purchase_date: str | None = None
+    expires_date: str | None = None
+
+
+class IapSubscriptionStatus(BaseModel):
+    product_id: str
+    product_label: str
+    status: str
+    auto_renew_enabled: bool
+    auto_renew_product_id: str | None = None
+    expires_date: str | None = None
+    grace_period_expires_date: str | None = None
+    updated_at: str
+
+
+class IapMembershipResponse(BaseModel):
+    vip: VipStatusResponse
+    subscription: IapSubscriptionStatus | None = None
+    auto_renew_active: bool
+    history: list[IapHistoryItem]
+
+
 class AdminIapTransactionItem(BaseModel):
     id: str
     provider: str
