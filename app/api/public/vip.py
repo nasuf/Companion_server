@@ -10,6 +10,7 @@ from app.models.vip import (
     VipStatusResponse,
 )
 from app.services import wallet
+from app.services.payments import grant
 from app.services.vip import chat_quota, music_quota
 
 router = APIRouter(tags=["vip"])
@@ -17,7 +18,9 @@ router = APIRouter(tags=["vip"])
 
 @router.get("/me/vip", response_model=VipStatusResponse)
 async def get_vip_status(payload: dict = Depends(require_user)):
-    snapshot = await wallet.full_wallet(str(payload["sub"]))
+    user_id = str(payload["sub"])
+    await grant.reconcile_vip_entitlements(user_id)
+    snapshot = await wallet.full_wallet(user_id)
     return snapshot
 
 

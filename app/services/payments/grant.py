@@ -74,7 +74,14 @@ async def verify_and_grant(user_id: str, transaction_id: str) -> dict[str, Any]:
     existing = await _find_transaction(transaction_id)
     if existing and existing["status"] == "granted":
         # 幂等回放：已到账过，直接回当前快照（app 重启会重放未 complete 的交易）。
-        return {"status": "granted", "kind": existing["kind"], **await _snapshot(user_id)}
+        # 仍跑 reconcile：历史 bug / 并发可能导致 consumable VIP 未叠上却被标 granted。
+        await reconcile_vip_entitlements(user_id)
+        return {
+            "status": "granted",
+            "kind": existing["kind"],
+            "replay": True,
+            **await _snapshot(user_id),
+        }
 
     payload, env = await apple_env.fetch_and_verify_transaction(transaction_id)
     product = catalog.product_for(_field(payload, "productId") or "")
@@ -147,9 +154,11 @@ async def record_and_grant(
             )
             locked_status = _field(locked[0], "status") if locked else None
             if locked_status != "pending":
+                await reconcile_vip_entitlements(user_id)
                 return {
                     "status": locked_status or "granted",
                     "kind": product.kind,
+                    "replay": True,
                     **await _snapshot(user_id),
                 }
 
@@ -205,7 +214,73 @@ async def record_and_grant(
             "kind": product.kind,
         },
     )
-    return {"status": "granted", "kind": product.kind, **await _snapshot(user_id)}
+    await reconcile_vip_entitlements(user_id)
+    return {"status": "granted", "kind": product.kind, "replay": False, **await _snapshot(user_id)}
+
+
+async def reconcile_vip_entitlements(user_id: str, *, client: Any | None = None) -> bool:
+    """把 user_wallets.vip_until 抬到 consumable VIP 交易隐含的最低值。
+
+    场景：交易已 granted（幂等回放不再 _apply_vip），但 vip_until 被沙盒订阅
+    5 分钟续期盖短。读路径与 verify 回放路径都调，自愈而不改 iap_transactions。
+    """
+    floor = await _consumable_vip_floor(user_id, client=client)
+    if floor is None:
+        return False
+    executor = client or db
+    rows = await executor.query_raw(
+        "SELECT vip_until FROM user_wallets WHERE user_id = $1 FOR UPDATE",
+        user_id,
+    )
+    if not rows:
+        return False
+    current = _as_utc(_field(rows[0], "vip_until"))
+    if current is not None and current >= floor:
+        return False
+    await executor.execute_raw(
+        """
+        UPDATE user_wallets
+        SET vip_until = $2::timestamp, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1
+        """,
+        user_id,
+        _naive(floor),
+    )
+    logger.info(
+        "iap vip reconcile user=%s until=%s",
+        user_id[:8],
+        floor.isoformat(),
+    )
+    return True
+
+
+async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> datetime | None:
+    """按 granted consumable VIP 交易顺序叠天数，得到应有的 vip_until 下界。"""
+    from datetime import timedelta
+
+    executor = client or db
+    rows = await executor.query_raw(
+        """
+        SELECT product_id, quantity, purchase_date
+        FROM iap_transactions
+        WHERE user_id = $1 AND status = 'granted' AND kind = $2
+        ORDER BY purchase_date ASC NULLS LAST, created_at ASC
+        """,
+        user_id,
+        catalog.KIND_CONSUMABLE,
+    )
+    running: datetime | None = None
+    for row in rows:
+        product = catalog.product_for(_field(row, "product_id") or "")
+        if product is None or product.vip_days <= 0:
+            continue
+        qty = int(_field(row, "quantity") or 1)
+        purchased = _as_utc(_field(row, "purchase_date"))
+        if purchased is None:
+            continue
+        base = max(purchased, running) if running is not None else purchased
+        running = base + timedelta(days=product.vip_days * qty)
+    return running
 
 
 async def _apply_vip(
@@ -235,6 +310,9 @@ async def _apply_vip(
         candidates = [target, now]
         if current is not None:
             candidates.append(current)
+        consumable_floor = await _consumable_vip_floor(user_id, client=tx)
+        if consumable_floor is not None:
+            candidates.append(consumable_floor)
         new_until = max(candidates)
     else:
         from datetime import timedelta
@@ -287,6 +365,12 @@ def _as_utc(value: Any) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     return None
 
 

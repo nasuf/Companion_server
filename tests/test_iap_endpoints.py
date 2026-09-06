@@ -23,10 +23,11 @@ def _redis_ok():
     app.dependency_overrides.pop(require_redis, None)
 
 
-def _granted_result():
+def _granted_result(*, replay: bool = False):
     return {
         "status": "granted",
         "kind": "consumable",
+        "replay": replay,
         "wallet": {
             "ticket_balance": 90,
             "point_balance": 0,

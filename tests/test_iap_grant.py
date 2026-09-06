@@ -150,6 +150,7 @@ async def test_grant_is_idempotent_fast_path(monkeypatch):
     result = await grant.verify_and_grant("u1", "txn-dup")
 
     assert result["status"] == "granted"
+    assert result["replay"] is True
     grant.apple_env.fetch_and_verify_transaction.assert_not_awaited()
     credit.assert_not_awaited()
 
@@ -231,6 +232,12 @@ async def test_insert_timestamps_are_naive(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_as_utc_parses_iso_strings():
+    parsed = grant._as_utc("2026-09-06T10:07:40+00:00")
+    assert parsed == datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
 async def test_unknown_product_raises(monkeypatch):
     from app.services.payments.errors import UnknownProductError
 
@@ -239,3 +246,61 @@ async def test_unknown_product_raises(monkeypatch):
 
     with pytest.raises(UnknownProductError):
         await grant.verify_and_grant("u1", "txn-unknown")
+
+
+@pytest.mark.asyncio
+async def test_consumable_vip_floor_stacks_by_purchase_order():
+    from datetime import timedelta
+
+    month_at = datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc)
+    quarter_at = datetime(2026, 9, 6, 10, 37, 50, tzinfo=timezone.utc)
+    rows = [
+        {"product_id": "com.bansheng.vip.month", "quantity": 1, "purchase_date": month_at},
+        {"product_id": "com.bansheng.vip.quarter", "quantity": 1, "purchase_date": quarter_at},
+    ]
+
+    class _FloorDb:
+        async def query_raw(self, query: str, *args):
+            if "kind = $2" in query and args[1] == grant.catalog.KIND_CONSUMABLE:
+                return rows
+            return []
+
+    floor = await grant._consumable_vip_floor("u1", client=_FloorDb())
+    expected_end = month_at + timedelta(days=31 + 93)
+    assert floor == expected_end
+
+
+@pytest.mark.asyncio
+async def test_reconcile_raises_vip_until_to_consumable_floor(monkeypatch):
+    from datetime import timedelta
+
+    month_at = datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc)
+    short_until = datetime(2026, 9, 6, 14, 14, 56, tzinfo=timezone.utc)
+    expected = month_at + timedelta(days=31)
+
+    class _ReconcileDb:
+        def __init__(self):
+            self.vip_until = short_until
+            self.updated = False
+
+        async def query_raw(self, query: str, *args):
+            if "kind = $2" in query:
+                return [{"product_id": "com.bansheng.vip.month", "quantity": 1, "purchase_date": month_at}]
+            if "SELECT vip_until FROM user_wallets" in query:
+                return [{"vip_until": self.vip_until}]
+            return []
+
+        async def execute_raw(self, query: str, *args):
+            if "UPDATE user_wallets" in query and "vip_until" in query:
+                self.updated = True
+                self.vip_until = grant._as_utc(args[1])
+            return 1
+
+    fake = _ReconcileDb()
+    monkeypatch.setattr(grant, "db", fake)
+
+    changed = await grant.reconcile_vip_entitlements("u1")
+
+    assert changed is True
+    assert fake.updated is True
+    assert grant._naive(fake.vip_until) == grant._naive(expected)

@@ -27,6 +27,7 @@ class IapVerifyResponse(BaseModel):
 
     status: Literal["granted", "refunded", "revoked", "failed"]
     kind: Literal["subscription", "consumable"]
+    replay: bool = False
     wallet: WalletBalanceResponse
     vip: VipStatusResponse
 
