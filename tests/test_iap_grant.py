@@ -116,7 +116,7 @@ def _wire(monkeypatch, fake_db, *, fetch_payload):
 @pytest.mark.asyncio
 async def test_consumable_grant_credits_tickets(monkeypatch):
     fake = _FakeDb(existing=None)
-    payload = _payload("com.bansheng.companion.ticket.80", txn="txn-abc")
+    payload = _payload("com.bansheng.ticket.80", txn="txn-abc")
     _wire(monkeypatch, fake, fetch_payload=payload)
     credit = AsyncMock(return_value={"ticket_balance": 90, "point_balance": 0, "achievement_points_synced": 0})
     monkeypatch.setattr(grant.wallet, "credit_tickets", credit)
@@ -138,7 +138,7 @@ async def test_consumable_grant_credits_tickets(monkeypatch):
 async def test_grant_is_idempotent_fast_path(monkeypatch):
     fake = _FakeDb(existing={"status": "granted", "kind": "consumable", "product_id": "x", "user_id": "u1"})
     # fetch 不该被调用（已 granted 直接回放）
-    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.companion.ticket.10"))
+    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.ticket.10"))
     credit = AsyncMock()
     monkeypatch.setattr(grant.wallet, "credit_tickets", credit)
 
@@ -153,7 +153,7 @@ async def test_grant_is_idempotent_fast_path(monkeypatch):
 async def test_grant_conflict_replays_without_double_credit(monkeypatch):
     # INSERT 命中 ON CONFLICT（并发/重放）→ 锁行读到 granted → 回放，不重复到账
     fake = _FakeDb(existing=None, insert_returns=[], locked_status="granted")
-    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.companion.ticket.10", txn="txn-x"))
+    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.ticket.10", txn="txn-x"))
     credit = AsyncMock()
     monkeypatch.setattr(grant.wallet, "credit_tickets", credit)
 
@@ -167,7 +167,7 @@ async def test_grant_conflict_replays_without_double_credit(monkeypatch):
 async def test_refunded_transaction_is_not_regranted(monkeypatch):
     # 已退款的交易被再次 verify（INSERT 命中冲突，锁行读到 refunded）→ 绝不二次到账
     fake = _FakeDb(existing=None, insert_returns=[], locked_status="refunded")
-    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.companion.ticket.10", txn="txn-r"))
+    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.ticket.10", txn="txn-r"))
     credit = AsyncMock()
     monkeypatch.setattr(grant.wallet, "credit_tickets", credit)
 
@@ -182,7 +182,7 @@ async def test_subscription_activation_sets_vip_until_from_apple(monkeypatch):
     expires = datetime(2027, 1, 1, tzinfo=timezone.utc)
     expires_ms = int(expires.timestamp() * 1000)
     fake = _FakeDb(existing=None)
-    payload = _payload("com.bansheng.companion.vip.monthly.auto", txn="sub-1", expires_ms=expires_ms)
+    payload = _payload("com.bansheng.vip.monthly.auto", txn="sub-1", expires_ms=expires_ms)
     _wire(monkeypatch, fake, fetch_payload=payload)
     monkeypatch.setattr(grant.wallet, "credit_tickets", AsyncMock())
 
@@ -199,7 +199,7 @@ async def test_unknown_product_raises(monkeypatch):
     from app.services.payments.errors import UnknownProductError
 
     fake = _FakeDb(existing=None)
-    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.companion.NOPE"))
+    _wire(monkeypatch, fake, fetch_payload=_payload("com.bansheng.NOPE"))
 
     with pytest.raises(UnknownProductError):
         await grant.verify_and_grant("u1", "txn-unknown")

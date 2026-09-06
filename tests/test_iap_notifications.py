@@ -96,7 +96,7 @@ def _wire(monkeypatch, fake_db, decoded, txn_payload, renewal=None):
 async def test_did_renew_grants_via_record_and_grant(monkeypatch):
     fake = _FakeDb(insert_new=True, user_row={"user_id": "u1"})
     decoded = _decoded(NotificationTypeV2.DID_RENEW)
-    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.companion.vip.monthly.auto"))
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.monthly.auto"))
     rg = AsyncMock()
     monkeypatch.setattr(notifications.grant, "record_and_grant", rg)
 
@@ -110,7 +110,7 @@ async def test_did_renew_grants_via_record_and_grant(monkeypatch):
 async def test_duplicate_notification_short_circuits(monkeypatch):
     fake = _FakeDb(insert_new=False, user_row={"user_id": "u1"})
     decoded = _decoded(NotificationTypeV2.DID_RENEW)
-    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.companion.vip.monthly.auto"))
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.monthly.auto"))
     rg = AsyncMock()
     monkeypatch.setattr(notifications.grant, "record_and_grant", rg)
 
@@ -124,10 +124,10 @@ async def test_duplicate_notification_short_circuits(monkeypatch):
 async def test_refund_consumable_reverses_and_marks(monkeypatch):
     fake = _FakeDb(
         insert_new=True,
-        find_txn={"status": "granted", "kind": "consumable", "product_id": "com.bansheng.companion.ticket.80", "user_id": "u1"},
+        find_txn={"status": "granted", "kind": "consumable", "product_id": "com.bansheng.ticket.80", "user_id": "u1"},
     )
     decoded = _decoded(NotificationTypeV2.REFUND)
-    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.companion.ticket.80", txn="t-refund"))
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.ticket.80", txn="t-refund"))
     monkeypatch.setattr(notifications.wallet, "_record_ledger", AsyncMock())
     monkeypatch.setattr(
         notifications.wallet, "wallet_balances",
@@ -143,7 +143,7 @@ async def test_refund_consumable_reverses_and_marks(monkeypatch):
 async def test_expired_sets_state_without_touching_vip(monkeypatch):
     fake = _FakeDb(insert_new=True, user_row={"user_id": "u1"})
     decoded = _decoded(NotificationTypeV2.EXPIRED, txn_jws="txn")
-    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.companion.vip.monthly.auto"))
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.monthly.auto"))
 
     await notifications.apply_notification("signed")
 

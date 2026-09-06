@@ -39,7 +39,7 @@ class IapProduct:
         return self.ticket_amount > 0
 
 
-_PREFIX = "com.bansheng.companion"
+_PREFIX = "com.bansheng"
 
 APPLE_PRODUCTS: dict[str, IapProduct] = {
     # ── VIP 订阅（自动续订）──
