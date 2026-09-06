@@ -125,8 +125,8 @@ async def record_and_grant(
             environment,
             user_id,
             quantity,
-            purchase_dt,
-            expires_dt,
+            _naive(purchase_dt),
+            _naive(expires_dt),
             notification_uuid,
             payload_json,
         )
@@ -273,7 +273,7 @@ async def _apply_vip(
             user_id,
             product.product_id,
             environment,
-            expires_dt,
+            _naive(expires_dt),
             transaction_id,
         )
 
@@ -284,6 +284,17 @@ def _as_utc(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return None
+
+
+def _naive(dt: datetime | None) -> datetime | None:
+    """落库前去掉时区：目标列都是 TIMESTAMP WITHOUT TIME ZONE，存 UTC 墙钟。
+
+    prisma query_raw 会把 **带时区** 的 datetime 序列化成带偏移的字符串，PG 报
+    "column is timestamp but expression is text" 整个事务回滚（到账全失败）。
+    naive datetime 才会被正确按 timestamp 绑定（见 store_bundles.activate_vip_trial）。
+    ms_to_dt 返回的是 aware UTC，故落库前必须转 naive。比较逻辑仍用 aware 值。
+    """
+    return dt.replace(tzinfo=None) if dt is not None else None
 
 
 def _days(n: int):

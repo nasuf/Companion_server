@@ -38,6 +38,8 @@ class _FakeDb:
         self.insert_returns = [{"id": "row1"}] if insert_returns is None else insert_returns
         self.locked_status = locked_status
         self.vip_until_written = "unset"
+        self.iap_insert_args: tuple | None = None
+        self.sub_state_args: tuple | None = None
         self.calls: list[tuple[str, str]] = []
 
     def tx(self):
@@ -54,6 +56,7 @@ class _FakeDb:
         if "SELECT status, kind, product_id, user_id" in query:
             return [self.existing] if self.existing else []
         if "INSERT INTO iap_transactions" in query:
+            self.iap_insert_args = args
             return list(self.insert_returns)
         if "SELECT status FROM iap_transactions" in query and "FOR UPDATE" in query:
             return [{"status": self.locked_status}]
@@ -65,6 +68,8 @@ class _FakeDb:
         self.calls.append(("e", query))
         if "UPDATE user_wallets" in query and "vip_until" in query:
             self.vip_until_written = args[1]
+        if "INSERT INTO iap_subscription_state" in query:
+            self.sub_state_args = args
         return 1
 
 
@@ -192,6 +197,37 @@ async def test_subscription_activation_sets_vip_until_from_apple(monkeypatch):
     # vip_until 以 Apple expires_date 为准（存 naive UTC）
     assert fake.vip_until_written == expires.replace(tzinfo=None)
     grant.vip_grants.grant_monthly.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_insert_timestamps_are_naive(monkeypatch):
+    """回归：purchase_date/expires_date 落库必须是 naive datetime。
+
+    aware datetime 会被 prisma 序列化成带偏移的字符串 → PG 报 "timestamp vs
+    text" → 整个到账事务回滚（充值不到账、VIP 不生效）。
+    """
+    expires = datetime(2027, 6, 1, tzinfo=timezone.utc)
+    expires_ms = int(expires.timestamp() * 1000)
+    fake = _FakeDb(existing=None)
+    # 订阅走 _apply_vip → 同时覆盖 iap_transactions 和 iap_subscription_state 两处绑定
+    payload = _payload("com.bansheng.vip.monthly.auto", txn="sub-tz", expires_ms=expires_ms)
+    _wire(monkeypatch, fake, fetch_payload=payload)
+    monkeypatch.setattr(grant.wallet, "credit_tickets", AsyncMock())
+
+    await grant.verify_and_grant("u1", "sub-tz")
+
+    # iap_transactions: $10 purchase_date (idx 9), $11 expires_date (idx 10)
+    assert fake.iap_insert_args is not None
+    purchase_bound = fake.iap_insert_args[9]
+    expires_bound = fake.iap_insert_args[10]
+    assert isinstance(purchase_bound, datetime) and purchase_bound.tzinfo is None
+    assert isinstance(expires_bound, datetime) and expires_bound.tzinfo is None
+    assert expires_bound == expires.replace(tzinfo=None)
+
+    # iap_subscription_state: $6 expires_date (idx 5)
+    assert fake.sub_state_args is not None
+    sub_expires = fake.sub_state_args[5]
+    assert isinstance(sub_expires, datetime) and sub_expires.tzinfo is None
 
 
 @pytest.mark.asyncio
