@@ -175,3 +175,33 @@ async def test_refund_vip_recomputes_instead_of_expire_all(monkeypatch):
     assert not any(
         "vip_until = CURRENT_TIMESTAMP - INTERVAL" in q for q in fake.executed
     )
+
+
+@pytest.mark.asyncio
+async def test_refund_subscription_renewal_refreshes_state(monkeypatch):
+    fake = _FakeDb(
+        insert_new=True,
+        find_txn={
+            "status": "granted",
+            "kind": "subscription",
+            "product_id": "com.bansheng.vip.monthly.auto",
+            "user_id": "u1",
+        },
+    )
+    decoded = _decoded(NotificationTypeV2.REFUND)
+    _wire(
+        monkeypatch,
+        fake,
+        decoded,
+        _txn("com.bansheng.vip.monthly.auto", txn="t-renew-2", otxn="otxn-sub"),
+    )
+    refresh = AsyncMock()
+    recompute = AsyncMock()
+    monkeypatch.setattr(notifications.grant, "refresh_subscription_state_from_grants", refresh)
+    monkeypatch.setattr(notifications.grant, "recompute_vip_entitlements", recompute)
+
+    await notifications.apply_notification("signed")
+
+    refresh.assert_awaited_once()
+    assert refresh.call_args.args[:2] == ("otxn-sub", "u1")
+    recompute.assert_awaited_once_with("u1")

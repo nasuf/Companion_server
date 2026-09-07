@@ -35,11 +35,13 @@ async def test_get_membership_composes_subscription_and_history(monkeypatch):
     }
     history_row = {
         "transaction_id": "t-month",
+        "original_transaction_id": "t-month",
         "product_id": "com.bansheng.vip.month",
         "kind": "consumable",
         "status": "granted",
         "purchase_date": datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc),
         "expires_date": None,
+        "renewal_sequence": 1,
     }
 
     async def fake_query(query: str, *args):
@@ -50,6 +52,7 @@ async def test_get_membership_composes_subscription_and_history(monkeypatch):
         return []
 
     monkeypatch.setattr(membership.grant, "reconcile_vip_entitlements", AsyncMock(return_value=False))
+    monkeypatch.setattr(membership.grant, "heal_subscription_states_for_user", AsyncMock())
     monkeypatch.setattr(membership.wallet, "full_wallet", AsyncMock(return_value=_vip_snapshot()))
     monkeypatch.setattr(membership.db, "query_raw", fake_query)
 
@@ -59,11 +62,13 @@ async def test_get_membership_composes_subscription_and_history(monkeypatch):
     assert result["subscription"]["product_label"] == "连续包月"
     assert len(result["history"]) == 1
     assert result["history"][0]["product_label"] == "月卡"
+    assert result["history"][0]["renewal_sequence"] == 1
 
 
 @pytest.mark.asyncio
 async def test_get_membership_no_subscription(monkeypatch):
     monkeypatch.setattr(membership.grant, "reconcile_vip_entitlements", AsyncMock(return_value=False))
+    monkeypatch.setattr(membership.grant, "heal_subscription_states_for_user", AsyncMock())
     monkeypatch.setattr(membership.wallet, "full_wallet", AsyncMock(return_value=_vip_snapshot(is_vip=False)))
     monkeypatch.setattr(membership.db, "query_raw", AsyncMock(return_value=[]))
 
@@ -92,6 +97,7 @@ async def test_get_membership_null_auto_renew_defaults_enabled(monkeypatch):
         return []
 
     monkeypatch.setattr(membership.grant, "reconcile_vip_entitlements", AsyncMock(return_value=False))
+    monkeypatch.setattr(membership.grant, "heal_subscription_states_for_user", AsyncMock())
     monkeypatch.setattr(membership.wallet, "full_wallet", AsyncMock(return_value=_vip_snapshot()))
     monkeypatch.setattr(membership.db, "query_raw", fake_query)
 

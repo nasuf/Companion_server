@@ -44,6 +44,7 @@ def _is_vip_product(product_id: str) -> bool:
 async def get_membership(user_id: str, *, history_limit: int = 50) -> dict[str, Any]:
     """Membership hub for store UI: VIP snapshot + subscription + VIP purchase history."""
     await grant.reconcile_vip_entitlements(user_id)
+    await grant.heal_subscription_states_for_user(user_id)
     vip = await wallet.full_wallet(user_id)
 
     sub_rows = await db.query_raw(
@@ -89,7 +90,12 @@ async def get_membership(user_id: str, *, history_limit: int = 50) -> dict[str, 
     limit = min(max(history_limit, 1), 100)
     history_rows = await db.query_raw(
         """
-        SELECT transaction_id, product_id, kind, status, purchase_date, expires_date
+        SELECT transaction_id, original_transaction_id, product_id, kind, status,
+               purchase_date, expires_date,
+               ROW_NUMBER() OVER (
+                   PARTITION BY original_transaction_id
+                   ORDER BY purchase_date ASC NULLS LAST, created_at ASC
+               ) AS renewal_sequence
         FROM iap_transactions
         WHERE user_id = $1
           AND product_id LIKE $2
@@ -104,12 +110,14 @@ async def get_membership(user_id: str, *, history_limit: int = 50) -> dict[str, 
     history = [
         {
             "transaction_id": str(_field(r, "transaction_id", "")),
+            "original_transaction_id": str(_field(r, "original_transaction_id", "") or ""),
             "product_id": str(_field(r, "product_id", "")),
             "product_label": product_label(str(_field(r, "product_id", ""))),
             "kind": str(_field(r, "kind", "")),
             "status": str(_field(r, "status", "")),
             "purchase_date": _iso(_field(r, "purchase_date")),
             "expires_date": _iso(_field(r, "expires_date")),
+            "renewal_sequence": int(_field(r, "renewal_sequence") or 1),
         }
         for r in history_rows
         if _is_vip_product(str(_field(r, "product_id", "")))

@@ -218,7 +218,6 @@ async def record_and_grant(
             "kind": product.kind,
         },
     )
-    await recompute_vip_entitlements(user_id)
     return {"status": "granted", "kind": product.kind, "replay": False, **await _snapshot(user_id)}
 
 
@@ -294,9 +293,10 @@ async def recompute_vip_entitlements(
 
 
 async def _subscription_vip_end(user_id: str, *, client: Any | None = None) -> datetime | None:
-    """Latest ``expires_date`` among granted subscription transactions."""
+    """Future subscription entitlement end from granted txns and active state rows."""
+    now = datetime.now(timezone.utc)
     executor = client or db
-    rows = await executor.query_raw(
+    txn_rows = await executor.query_raw(
         """
         SELECT MAX(expires_date) AS max_expires
         FROM iap_transactions
@@ -306,9 +306,48 @@ async def _subscription_vip_end(user_id: str, *, client: Any | None = None) -> d
         user_id,
         catalog.KIND_SUBSCRIPTION,
     )
-    if not rows:
-        return None
-    return _as_utc(_field(rows[0], "max_expires"))
+    txn_end = _as_utc(_field(txn_rows[0], "max_expires")) if txn_rows else None
+
+    state_rows = await executor.query_raw(
+        """
+        SELECT expires_date
+        FROM iap_subscription_state
+        WHERE user_id = $1 AND status = ANY($2::text[])
+          AND expires_date IS NOT NULL
+        """,
+        user_id,
+        ["active", "in_grace"],
+    )
+    state_ends = [
+        end
+        for end in (_as_utc(_field(row, "expires_date")) for row in state_rows)
+        if end is not None
+    ]
+    state_end = max(state_ends) if state_ends else None
+
+    candidates = [end for end in (txn_end, state_end) if end is not None and end > now]
+    return max(candidates) if candidates else None
+
+
+async def heal_subscription_states_for_user(
+    user_id: str, *, client: Any | None = None
+) -> None:
+    """Realign every subscription state row with remaining granted renewal txns."""
+    executor = client or db
+    rows = await executor.query_raw(
+        """
+        SELECT original_transaction_id
+        FROM iap_subscription_state
+        WHERE user_id = $1
+        """,
+        user_id,
+    )
+    for row in rows:
+        original_txn_id = str(_field(row, "original_transaction_id", "") or "")
+        if original_txn_id:
+            await refresh_subscription_state_from_grants(
+                original_txn_id, user_id, client=client
+            )
 
 
 async def refresh_subscription_state_from_grants(
@@ -319,6 +358,17 @@ async def refresh_subscription_state_from_grants(
 ) -> None:
     """After refund/revoke, realign ``iap_subscription_state`` with remaining grants."""
     executor = client or db
+    await executor.query_raw(
+        """
+        SELECT transaction_id
+        FROM iap_transactions
+        WHERE user_id = $1 AND original_transaction_id = $2 AND kind = $3
+        FOR UPDATE
+        """,
+        user_id,
+        original_txn_id,
+        catalog.KIND_SUBSCRIPTION,
+    )
     rows = await executor.query_raw(
         """
         SELECT MAX(expires_date) AS max_expires,

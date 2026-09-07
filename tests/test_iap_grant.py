@@ -402,3 +402,75 @@ async def test_refund_consumable_month_keeps_quarter_floor(monkeypatch):
     assert changed is True
     assert grant._naive(fake.vip_until) == grant._naive(quarter_at + timedelta(days=93))
     grant.vip_grants.clear_on_lapse.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_subscription_vip_end_uses_txn_and_active_state():
+    future_txn = datetime(2026, 12, 1, tzinfo=timezone.utc)
+    future_state = datetime(2027, 1, 1, tzinfo=timezone.utc)
+
+    class _SubEndDb:
+        async def query_raw(self, query: str, *args):
+            if "MAX(expires_date)" in query:
+                return [{"max_expires": future_txn}]
+            if "iap_subscription_state" in query:
+                return [{"expires_date": future_state}]
+            return []
+
+    end = await grant._subscription_vip_end("u1", client=_SubEndDb())
+    assert end == future_state
+
+
+@pytest.mark.asyncio
+async def test_subscription_vip_end_ignores_past_expires():
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+    class _PastDb:
+        async def query_raw(self, query: str, *args):
+            if "MAX(expires_date)" in query:
+                return [{"max_expires": past}]
+            if "iap_subscription_state" in query:
+                return []
+            return []
+
+    end = await grant._subscription_vip_end("u1", client=_PastDb())
+    assert end is None
+
+
+@pytest.mark.asyncio
+async def test_heal_subscription_states_refreshes_each_row(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_refresh(original_txn_id: str, user_id: str, *, client=None):
+        calls.append(original_txn_id)
+
+    class _HealDb:
+        async def query_raw(self, query: str, *args):
+            if "FROM iap_subscription_state" in query:
+                return [
+                    {"original_transaction_id": "otxn-a"},
+                    {"original_transaction_id": "otxn-b"},
+                ]
+            return []
+
+    monkeypatch.setattr(grant, "refresh_subscription_state_from_grants", fake_refresh)
+    await grant.heal_subscription_states_for_user("u1", client=_HealDb())
+    assert calls == ["otxn-a", "otxn-b"]
+
+
+@pytest.mark.asyncio
+async def test_vip_grant_calls_recompute_once(monkeypatch):
+    expires = datetime(2027, 1, 1, tzinfo=timezone.utc)
+    expires_ms = int(expires.timestamp() * 1000)
+    fake = _FakeDb(existing=None)
+    payload = _payload("com.bansheng.vip.monthly.auto", txn="sub-once", expires_ms=expires_ms)
+    _wire(monkeypatch, fake, fetch_payload=payload)
+    monkeypatch.setattr(grant.wallet, "credit_tickets", AsyncMock())
+    recompute = AsyncMock(return_value=True)
+    monkeypatch.setattr(grant, "recompute_vip_entitlements", recompute)
+
+    await grant.verify_and_grant("u1", "sub-once")
+
+    assert recompute.await_count == 1
+    _, kwargs = recompute.call_args
+    assert kwargs.get("clear_lapse") is False
