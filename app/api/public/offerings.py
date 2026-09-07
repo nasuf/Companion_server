@@ -51,7 +51,7 @@ async def send_red_packet(
         "offering": offerings.public_offering(result["offering"]),
         "component_card": result["component_card"],
         "wallet": WalletBalanceResponse(
-            ticket_balance=int(wallet["ticket_balance"]),
+            ticket_balance=float(wallet["ticket_balance"]),
             point_balance=int(wallet["point_balance"]),
             achievement_points_synced=int(wallet["achievement_points_synced"]),
         ),
@@ -78,7 +78,7 @@ async def get_red_packet(
 
 def _wallet_response(wallet: dict) -> WalletBalanceResponse:
     return WalletBalanceResponse(
-        ticket_balance=int(wallet["ticket_balance"]),
+        ticket_balance=float(wallet["ticket_balance"]),
         point_balance=int(wallet["point_balance"]),
         achievement_points_synced=int(wallet["achievement_points_synced"]),
     )

@@ -9,6 +9,9 @@ from app.services.achievements.mode import achievement_display_enabled
 from app.services.achievements.service import list_achievements
 
 TICKET_TO_POINTS_RATE = 10
+# DB stores tickets in 0.1-ticket subunits (×10) so 0.5/0.3 per-message debits
+# are exact. API/ledger responses convert back to display tickets.
+TICKET_SUBUNIT_SCALE = 10
 # Same ceiling as user-facing red-packet sends; one admin action cannot exceed it.
 MAX_TICKET_ADJUST = 1_000_000
 MAX_POINT_ADJUST = 1_000_000
@@ -66,6 +69,21 @@ def vip_trial_available_from_row(row: Any) -> bool:
     return not is_vip_from_row(row)
 
 
+def ticket_subunits(amount: float) -> int:
+    """Convert display tickets (e.g. 0.5) to DB subunits."""
+    if amount < 0:
+        raise ValueError("invalid_amount")
+    return int(round(amount * TICKET_SUBUNIT_SCALE))
+
+
+def tickets_from_subunits(subunits: int) -> float:
+    return subunits / TICKET_SUBUNIT_SCALE
+
+
+def _row_subunits(row: Any, field: str) -> int:
+    return int(_field(row, field, 0) or 0)
+
+
 async def is_vip(user_id: str, *, client: Any | None = None) -> bool:
     """Read-only VIP check, usable inside an existing transaction via ``client``."""
     executor = client or db
@@ -78,19 +96,17 @@ async def is_vip(user_id: str, *, client: Any | None = None) -> bool:
     return is_vip_from_row(rows[0])
 
 
-def wallet_balances(row: Any) -> dict[str, int]:
+def wallet_balances(row: Any) -> dict[str, Any]:
     return {
-        "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
-        "point_balance": int(_field(row, "point_balance", 0) or 0),
-        "achievement_points_synced": int(
-            _field(row, "achievement_points_synced", 0) or 0
-        ),
+        "ticket_balance": tickets_from_subunits(_row_subunits(row, "ticket_balance")),
+        "point_balance": _row_subunits(row, "point_balance"),
+        "achievement_points_synced": _row_subunits(row, "achievement_points_synced"),
     }
 
 
 async def debit_tickets(
     user_id: str,
-    amount: int,
+    amount: float,
     *,
     source: str,
     source_id: str | None = None,
@@ -98,8 +114,7 @@ async def debit_tickets(
     client: Any,
 ) -> dict[str, int]:
     """Spend shop tickets inside an existing transaction."""
-    if amount <= 0:
-        raise ValueError("invalid_amount")
+    subunits = ticket_subunits(amount)
     rows = await client.query_raw(
         """
         UPDATE user_wallets
@@ -109,7 +124,7 @@ async def debit_tickets(
         RETURNING ticket_balance, point_balance, achievement_points_synced
         """,
         user_id,
-        amount,
+        subunits,
     )
     if not rows:
         raise ValueError("insufficient_ticket_balance")
@@ -117,8 +132,8 @@ async def debit_tickets(
     await _record_ledger(
         user_id=user_id,
         currency="ticket",
-        delta=-amount,
-        balance_after=balance["ticket_balance"],
+        delta=-subunits,
+        balance_after=_row_subunits(rows[0], "ticket_balance"),
         source=source,
         source_id=source_id,
         metadata=metadata,
@@ -129,7 +144,7 @@ async def debit_tickets(
 
 async def credit_tickets(
     user_id: str,
-    amount: int,
+    amount: float,
     *,
     source: str,
     source_id: str | None = None,
@@ -142,8 +157,7 @@ async def credit_tickets(
     balance update and the ledger row on the same client so the audit trail can
     never diverge from the balance.
     """
-    if amount <= 0:
-        raise ValueError("invalid_amount")
+    subunits = ticket_subunits(amount)
     rows = await client.query_raw(
         """
         UPDATE user_wallets
@@ -153,7 +167,7 @@ async def credit_tickets(
         RETURNING ticket_balance, point_balance, achievement_points_synced
         """,
         user_id,
-        amount,
+        subunits,
     )
     if not rows:
         raise ValueError("wallet_not_found")
@@ -161,8 +175,8 @@ async def credit_tickets(
     await _record_ledger(
         user_id=user_id,
         currency="ticket",
-        delta=amount,
-        balance_after=balance["ticket_balance"],
+        delta=subunits,
+        balance_after=_row_subunits(rows[0], "ticket_balance"),
         source=source,
         source_id=source_id,
         metadata=metadata,
@@ -173,7 +187,7 @@ async def credit_tickets(
 
 async def debit_tickets_prioritized(
     user_id: str,
-    amount: int,
+    amount: float,
     *,
     source: str,
     source_id: str | None = None,
@@ -187,8 +201,7 @@ async def debit_tickets_prioritized(
     first). Writes one ledger row per bucket actually touched so the audit trail
     reconciles per currency.
     """
-    if amount <= 0:
-        raise ValueError("invalid_amount")
+    subunits = ticket_subunits(amount)
     locked = await client.query_raw(
         """
         SELECT gift_ticket_balance, ticket_balance
@@ -200,12 +213,12 @@ async def debit_tickets_prioritized(
     )
     if not locked:
         raise ValueError("wallet_not_found")
-    gift = int(_field(locked[0], "gift_ticket_balance", 0) or 0)
-    perm = int(_field(locked[0], "ticket_balance", 0) or 0)
-    if gift + perm < amount:
+    gift = _row_subunits(locked[0], "gift_ticket_balance")
+    perm = _row_subunits(locked[0], "ticket_balance")
+    if gift + perm < subunits:
         raise ValueError("insufficient_ticket_balance")
-    from_gift = min(gift, amount)
-    from_perm = amount - from_gift
+    from_gift = min(gift, subunits)
+    from_perm = subunits - from_gift
     rows = await client.query_raw(
         """
         UPDATE user_wallets
@@ -226,7 +239,7 @@ async def debit_tickets_prioritized(
             user_id=user_id,
             currency="gift_ticket",
             delta=-from_gift,
-            balance_after=balance["gift_ticket_balance"],
+            balance_after=_row_subunits(rows[0], "gift_ticket_balance"),
             source=source,
             source_id=source_id,
             metadata=metadata,
@@ -237,7 +250,7 @@ async def debit_tickets_prioritized(
             user_id=user_id,
             currency="ticket",
             delta=-from_perm,
-            balance_after=balance["ticket_balance"],
+            balance_after=_row_subunits(rows[0], "ticket_balance"),
             source=source,
             source_id=source_id,
             metadata=metadata,
@@ -248,7 +261,7 @@ async def debit_tickets_prioritized(
 
 async def credit_gift_tickets(
     user_id: str,
-    amount: int,
+    amount: float,
     *,
     source: str,
     source_id: str | None = None,
@@ -256,8 +269,7 @@ async def credit_gift_tickets(
     client: Any,
 ) -> dict[str, int]:
     """Add limited (gift) tickets inside an existing transaction (VIP monthly grant)."""
-    if amount <= 0:
-        raise ValueError("invalid_amount")
+    subunits = ticket_subunits(amount)
     rows = await client.query_raw(
         """
         UPDATE user_wallets
@@ -268,7 +280,7 @@ async def credit_gift_tickets(
                   achievement_points_synced
         """,
         user_id,
-        amount,
+        subunits,
     )
     if not rows:
         raise ValueError("wallet_not_found")
@@ -276,8 +288,8 @@ async def credit_gift_tickets(
     await _record_ledger(
         user_id=user_id,
         currency="gift_ticket",
-        delta=amount,
-        balance_after=balance["gift_ticket_balance"],
+        delta=subunits,
+        balance_after=_row_subunits(rows[0], "gift_ticket_balance"),
         source=source,
         source_id=source_id,
         metadata=metadata,
@@ -306,7 +318,7 @@ async def zero_gift_tickets(
     )
     if not locked:
         raise ValueError("wallet_not_found")
-    cleared = int(_field(locked[0], "gift_ticket_balance", 0) or 0)
+    cleared = _row_subunits(locked[0], "gift_ticket_balance")
     if cleared <= 0:
         return _spendable_balances(locked[0])
     rows = await client.query_raw(
@@ -333,14 +345,16 @@ async def zero_gift_tickets(
     return balance
 
 
-def _spendable_balances(row: Any) -> dict[str, int]:
+def _spendable_balances(row: Any) -> dict[str, Any]:
     """Balance dict including the gift-ticket bucket (rows must SELECT it)."""
+    gift = tickets_from_subunits(_row_subunits(row, "gift_ticket_balance"))
+    perm = tickets_from_subunits(_row_subunits(row, "ticket_balance"))
     return {
-        "gift_ticket_balance": int(_field(row, "gift_ticket_balance", 0) or 0),
-        "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
-        "point_balance": int(_field(row, "point_balance", 0) or 0),
-        "achievement_points_synced": int(
-            _field(row, "achievement_points_synced", 0) or 0
+        "gift_ticket_balance": gift,
+        "ticket_balance": perm,
+        "point_balance": _row_subunits(row, "point_balance"),
+        "achievement_points_synced": _row_subunits(
+            row, "achievement_points_synced"
         ),
     }
 
@@ -411,10 +425,11 @@ async def admin_adjust_tickets(
         )
         if not locked:
             raise ValueError("wallet_not_found")
-        current = int(_field(locked[0], "ticket_balance", 0) or 0)
-        new_balance = max(0, current + amount)
-        applied = new_balance - current
-        if applied == 0:
+        current = _row_subunits(locked[0], "ticket_balance")
+        delta_sub = ticket_subunits(abs(amount)) * (1 if amount > 0 else -1)
+        new_balance = max(0, current + delta_sub)
+        applied_sub = new_balance - current
+        if applied_sub == 0:
             # Deducting from an empty wallet is a no-op; surface it so the caller
             # doesn't report a phantom success.
             raise ValueError("no_change")
@@ -433,18 +448,22 @@ async def admin_adjust_tickets(
         await _record_ledger(
             user_id=user_id,
             currency="ticket",
-            delta=applied,
-            balance_after=balance["ticket_balance"],
+            delta=applied_sub,
+            balance_after=_row_subunits(rows[0], "ticket_balance"),
             source=SOURCE_ADMIN_GRANT,
             metadata={
                 "requested": amount,
-                "applied": applied,
+                "applied": tickets_from_subunits(applied_sub),
                 "admin_id": admin_id,
                 "note": (note or "").strip(),
             },
             client=tx,
         )
-    return {"user_id": user_id, "delta": applied, **balance}
+    return {
+        "user_id": user_id,
+        "delta": tickets_from_subunits(applied_sub),
+        **balance,
+    }
 
 
 async def admin_adjust_points(
@@ -532,13 +551,7 @@ async def ensure_wallet(
         user_id,
     )
     row = rows[0]
-    return {
-        "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
-        "point_balance": int(_field(row, "point_balance", 0) or 0),
-        "achievement_points_synced": int(
-            _field(row, "achievement_points_synced", 0) or 0
-        ),
-    }
+    return wallet_balances(row)
 
 
 async def sync_achievement_points(user_id: str, agent_id: str) -> dict[str, int]:
@@ -562,10 +575,12 @@ async def sync_achievement_points(user_id: str, agent_id: str) -> dict[str, int]
         )
         locked = locked_rows[0]
         wallet = {
-            "ticket_balance": int(_field(locked, "ticket_balance", 0) or 0),
-            "point_balance": int(_field(locked, "point_balance", 0) or 0),
-            "achievement_points_synced": int(
-                _field(locked, "achievement_points_synced", 0) or 0
+            "ticket_balance": tickets_from_subunits(
+                _row_subunits(locked, "ticket_balance")
+            ),
+            "point_balance": _row_subunits(locked, "point_balance"),
+            "achievement_points_synced": _row_subunits(
+                locked, "achievement_points_synced"
             ),
         }
         synced_rows = await tx.query_raw(
@@ -615,15 +630,16 @@ async def sync_achievement_points(user_id: str, agent_id: str) -> dict[str, int]
         return wallet
 
 
-async def get_balance(user_id: str, *, agent_id: str | None = None) -> dict[str, int]:
+async def get_balance(user_id: str, *, agent_id: str | None = None) -> dict[str, Any]:
     if agent_id:
         return await sync_achievement_points(user_id, agent_id)
     return await ensure_wallet(user_id)
 
 
-async def exchange_ticket_to_points(user_id: str, ticket_amount: int) -> dict[str, int]:
+async def exchange_ticket_to_points(user_id: str, ticket_amount: int) -> dict[str, Any]:
     if ticket_amount <= 0:
         raise ValueError("invalid_amount")
+    ticket_sub = ticket_subunits(float(ticket_amount))
     point_delta = ticket_amount * TICKET_TO_POINTS_RATE
     await ensure_wallet(user_id)
     rows = await db.query_raw(
@@ -636,20 +652,20 @@ async def exchange_ticket_to_points(user_id: str, ticket_amount: int) -> dict[st
         RETURNING ticket_balance, point_balance
         """,
         user_id,
-        ticket_amount,
+        ticket_sub,
         point_delta,
     )
     if not rows:
         raise ValueError("insufficient_ticket_balance")
 
     row = rows[0]
-    ticket_balance = int(_field(row, "ticket_balance", 0) or 0)
-    point_balance = int(_field(row, "point_balance", 0) or 0)
+    ticket_balance = tickets_from_subunits(_row_subunits(row, "ticket_balance"))
+    point_balance = _row_subunits(row, "point_balance")
     await _record_ledger(
         user_id=user_id,
         currency="ticket",
-        delta=-ticket_amount,
-        balance_after=ticket_balance,
+        delta=-ticket_sub,
+        balance_after=_row_subunits(row, "ticket_balance"),
         source="ticket_to_point_exchange",
         metadata={"point_delta": point_delta},
     )
@@ -739,11 +755,17 @@ async def _record_ledger(
 
 def _ledger_row(row: Any) -> dict[str, Any]:
     created_at = _field(row, "created_at")
+    currency = str(_field(row, "currency", ""))
+    delta = int(_field(row, "delta", 0) or 0)
+    balance_after = int(_field(row, "balance_after", 0) or 0)
+    if currency in {"ticket", "gift_ticket"}:
+        delta = tickets_from_subunits(delta)
+        balance_after = tickets_from_subunits(balance_after)
     return {
         "id": str(_field(row, "id", "")),
-        "currency": str(_field(row, "currency", "")),
-        "delta": int(_field(row, "delta", 0) or 0),
-        "balance_after": int(_field(row, "balance_after", 0) or 0),
+        "currency": currency,
+        "delta": delta,
+        "balance_after": balance_after,
         "source": str(_field(row, "source", "")),
         "source_id": _field(row, "source_id"),
         "metadata": _json(_field(row, "metadata")),
@@ -823,9 +845,13 @@ async def list_admin_balances(
             "username": str(_field(row, "username", "") or ""),
             "display_name": _field(row, "display_name"),
             "nickname": _field(row, "nickname"),
-            "ticket_balance": int(_field(row, "ticket_balance", 0) or 0),
+            "ticket_balance": tickets_from_subunits(
+                int(_field(row, "ticket_balance", 0) or 0)
+            ),
             "point_balance": int(_field(row, "point_balance", 0) or 0),
-            "gift_ticket_balance": int(_field(row, "gift_ticket_balance", 0) or 0),
+            "gift_ticket_balance": tickets_from_subunits(
+                int(_field(row, "gift_ticket_balance", 0) or 0)
+            ),
             "is_vip": is_vip_from_row(row),
             "vip_until": _iso(_field(row, "vip_until")) or None,
             "updated_at": _iso(_field(row, "updated_at")) or None,

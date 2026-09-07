@@ -56,7 +56,7 @@ class _FakeDb:
 
 def _balance_row(ticket: int, point: int = 0, synced: int = 0) -> dict:
     return {
-        "ticket_balance": ticket,
+        "ticket_balance": wallet.ticket_subunits(float(ticket)),
         "point_balance": point,
         "achievement_points_synced": synced,
     }
@@ -169,7 +169,7 @@ async def test_credit_tickets_updates_balance_and_ledger():
     assert any("INSERT INTO wallet_ledger" in sql for sql, _ in tx.execute_calls)
     # Ticket delta is positive.
     _, ledger_args = tx.execute_calls[0]
-    assert 12 in ledger_args
+    assert wallet.ticket_subunits(12) in ledger_args
 
 
 @pytest.mark.asyncio
@@ -182,7 +182,7 @@ async def test_list_admin_balances_shape(monkeypatch):
                     "id": "u1",
                     "username": "alice",
                     "display_name": "Alice",
-                    "ticket_balance": 100,
+                    "ticket_balance": wallet.ticket_subunits(100),
                     "point_balance": 0,
                     "updated_at": "2026-08-20T08:00:00+00:00",
                     "nickname": None,
@@ -333,9 +333,9 @@ async def test_list_admin_balances_includes_vip_and_gift_ticket_fields(monkeypat
                     "id": "u1",
                     "username": "alice",
                     "display_name": "Alice",
-                    "ticket_balance": 100,
+                    "ticket_balance": wallet.ticket_subunits(100),
                     "point_balance": 0,
-                    "gift_ticket_balance": 40,
+                    "gift_ticket_balance": wallet.ticket_subunits(40),
                     "vip_until": future,
                     "updated_at": "2026-08-20T08:00:00+00:00",
                     "nickname": None,

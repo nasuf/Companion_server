@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services import store_bundles
+from app.services import store_bundles, wallet
+
+
+def _ts(tickets: int) -> int:
+    return wallet.ticket_subunits(float(tickets))
 
 
 class _FakeTx:
@@ -63,11 +67,11 @@ async def test_buy_music_coupon_spends_tickets_and_grants_inventory(monkeypatch)
     fake_db = _FakeDb(
         tx_rows=[
             # debit_tickets_prioritized: lock-read, then update...returning
-            [{"gift_ticket_balance": 0, "ticket_balance": 100}],
+            [{"gift_ticket_balance": 0, "ticket_balance": _ts(100)}],
             [
                 {
                     "gift_ticket_balance": 0,
-                    "ticket_balance": 90,
+                    "ticket_balance": _ts(90),
                     "point_balance": 0,
                     "achievement_points_synced": 0,
                 }
@@ -96,7 +100,7 @@ async def test_buy_music_coupon_spends_tickets_and_grants_inventory(monkeypatch)
     assert result["inventory_item"]["product_kind"] == "music_hour_coupon"
     assert result["inventory_item"]["quantity"] == 1
     _, update_args = _find_call(fake_db.fake_tx.query_calls, "UPDATE user_wallets")
-    assert update_args == ("user-1", 0, 10)  # (user_id, from_gift, from_perm)
+    assert update_args == ("user-1", 0, _ts(10))  # (user_id, from_gift, from_perm)
     _, batch_args = _find_call(fake_db.fake_tx.query_calls, "INSERT INTO user_consumable_batch")
     assert batch_args[:4] == ("user-1", "music_hour_coupon", 1, "purchase")
 
@@ -106,11 +110,11 @@ async def test_buy_makeup_card_spends_tickets_and_grants_inventory(monkeypatch):
     updated_at = datetime(2026, 8, 14, tzinfo=UTC)
     fake_db = _FakeDb(
         tx_rows=[
-            [{"gift_ticket_balance": 0, "ticket_balance": 100}],
+            [{"gift_ticket_balance": 0, "ticket_balance": _ts(100)}],
             [
                 {
                     "gift_ticket_balance": 0,
-                    "ticket_balance": 70,
+                    "ticket_balance": _ts(70),
                     "point_balance": 0,
                     "achievement_points_synced": 0,
                 }
@@ -138,7 +142,7 @@ async def test_buy_makeup_card_spends_tickets_and_grants_inventory(monkeypatch):
     assert result["inventory_item"]["product_kind"] == "makeup_card"
     assert result["inventory_item"]["quantity"] == 1
     _, update_args = _find_call(fake_db.fake_tx.query_calls, "UPDATE user_wallets")
-    assert update_args == ("user-1", 0, 30)
+    assert update_args == ("user-1", 0, _ts(30))
     _, batch_args = _find_call(fake_db.fake_tx.query_calls, "INSERT INTO user_consumable_batch")
     assert batch_args[:4] == ("user-1", "makeup_card", 1, "purchase")
 
@@ -154,11 +158,11 @@ async def test_buy_makeup_card_rejects_unknown_tier(monkeypatch):
 
 def _game_points_tx_rows() -> list[list[dict]]:
     return [
-        [{"gift_ticket_balance": 0, "ticket_balance": 100}],  # debit lock-select
+        [{"gift_ticket_balance": 0, "ticket_balance": _ts(100)}],  # debit lock-select
         [
             {
                 "gift_ticket_balance": 0,
-                "ticket_balance": 80,
+                "ticket_balance": _ts(80),
                 "point_balance": 40,
                 "achievement_points_synced": 0,
             }
@@ -183,7 +187,7 @@ async def test_buy_game_points_credits_game_wallet_not_shop_points(monkeypatch):
     assert result["game_balance"] == 112
     assert result["inventory_item"] is None
     _, update_args = _find_call(fake_db.fake_tx.query_calls, "UPDATE user_wallets")
-    assert update_args == ("user-1", 0, 20)  # (user_id, from_gift, from_perm)
+    assert update_args == ("user-1", 0, _ts(20))  # (user_id, from_gift, from_perm)
     game_update = fake_db.fake_tx.execute_calls[1][1]
     assert game_update == ("user-1", 112)
     ledger_args = fake_db.fake_tx.execute_calls[2][1]
@@ -280,13 +284,13 @@ async def test_activate_vip_trial_immediately_grants_monthly_benefits(monkeypatc
     monkeypatch.setattr(store_bundles, "db", fake_db)
     monkeypatch.setattr(store_bundles.wallet, "ensure_wallet", _ok_wallet)
     grant_mock = AsyncMock(
-        return_value={
-            "wallet": {
-                "gift_ticket_balance": 40,
-                "ticket_balance": 0,
-                "point_balance": 0,
-                "achievement_points_synced": 0,
-            },
+            return_value={
+                "wallet": {
+                    "gift_ticket_balance": 40,
+                    "ticket_balance": 0,
+                    "point_balance": 0,
+                    "achievement_points_synced": 0,
+                },
             "music_coupon_batch": {"quantity": 20},
             "makeup_card_batch": {"quantity": 2},
         }

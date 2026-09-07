@@ -7,18 +7,12 @@
 框" —— 未确认/余额不足时，本模块绝不递增 `used`、绝不扣费，调用方也不得
 持久化该消息。只有 `allowed=True` 的调用才会产生副作用。
 
-免费额度耗尽后按 :mod:`vip.config` 的单价累加小数钞票成本；累计满 1 时
-整数扣费（先扣限时赠送钞票，再扣永久钞票），账本始终是整数，累加器只
-存在 `user_wallets.overage_accrued` 这一处小数状态。
-
-累加器按额度周期隔离（`user_wallets.overage_period` 记录当前累积所属的
-"{period_scope}:{period_key}"）：跨周期后没凑够 1 的历史欠账视为放弃，
-从 0 重新累积，不会在下一个周期第一次超额时被悄悄一起结算扣款。
+免费额度耗尽后按 :mod:`vip.config` 的单价逐句扣钞票（非 VIP 0.5，VIP 0.3）；
+钱包内部以 0.1 钞票子单位存储，保证奇数句也精确结算。
 """
 
 from __future__ import annotations
 
-import math
 from typing import Any, Literal
 
 from app.db import db
@@ -35,6 +29,10 @@ def _field(row: Any, name: str, default: Any = None) -> Any:
     if isinstance(row, dict):
         return row.get(name, default)
     return getattr(row, name, default)
+
+
+def _can_afford(spendable: float, per_msg_cost: float) -> bool:
+    return spendable + 1e-9 >= per_msg_cost
 
 
 async def preview(user_id: str, *, is_vip: bool) -> dict[str, Any]:
@@ -63,9 +61,14 @@ async def preview(user_id: str, *, is_vip: bool) -> dict[str, Any]:
     per_msg_cost = config.overage_per_msg(is_vip)
 
     wallet_snapshot = await wallet.full_wallet(user_id)
-    spendable = wallet_snapshot["spendable_tickets"]
+    spendable = float(wallet_snapshot["spendable_tickets"])
 
-    mode: Mode = "free" if free_remaining > 0 else ("paid" if spendable > 0 else "blocked")
+    if free_remaining > 0:
+        mode: Mode = "free"
+    elif _can_afford(spendable, per_msg_cost):
+        mode = "paid"
+    else:
+        mode = "blocked"
 
     return {
         "mode": mode,
@@ -83,10 +86,7 @@ async def admin_reset(user_id: str, *, is_vip: bool) -> dict[str, Any]:
     """Zero out the user's *current* period usage (免费/VIP用户重置对话额度).
 
     Only resets the counter for whichever (scope, key) is active right now for
-    this user's VIP status — it does not touch ``overage_accrued`` (the
-    fractional ticket accrual is a separate, already-charged concern; reset
-    is about giving back unused free messages, not waiving money already
-    spent). A user with no usage yet this period is a harmless no-op.
+    this user's VIP status — it does not touch fractional ticket balances.
     """
     scope, key, _ = config.message_period(is_vip)
     await db.execute_raw(
@@ -150,69 +150,45 @@ async def consume_one(
             )
             return {"allowed": True, "mode": "free", "used": used + 1, "limit": limit, "charged": 0}
 
+        snapshot = await wallet.full_wallet(user_id, client=tx)
+        spendable = float(snapshot["spendable_tickets"])
+
         if not paid_confirmed:
-            snapshot = await wallet.full_wallet(user_id, client=tx)
-            spendable = snapshot["spendable_tickets"]
-            reason: BlockReason = "paid_confirm" if spendable > 0 else "no_ticket"
+            if _can_afford(spendable, per_msg_cost):
+                reason: BlockReason = "paid_confirm"
+                mode: Mode = "paid"
+            else:
+                reason = "no_ticket"
+                mode = "blocked"
             return {
                 "allowed": False,
-                "mode": "paid" if reason == "paid_confirm" else "blocked",
+                "mode": mode,
                 "reason": reason,
                 "per_msg_cost": per_msg_cost,
                 "spendable_tickets": spendable,
             }
 
         await wallet.ensure_wallet(user_id, client=tx)
-        wallet_locked = await tx.query_raw(
-            "SELECT overage_accrued, overage_period FROM user_wallets WHERE user_id = $1 FOR UPDATE",
-            user_id,
-        )
-        current_period = f"{scope}:{key}"
-        # 小数账本按额度周期隔离: 存的周期跟当前不一致 (跨天/跨月, 或
-        # VIP↔非VIP 导致 scope 变了) 就当作上个周期没凑够 1 的欠账被放弃,
-        # 从 0 重新累积——否则历史残留的 0.5 会在"本次对话第一次超额"时
-        # 就跟这次的 0.5 一起结算凑成 1, 把当前钞票余额直接扣光, 跟
-        # "0.5 钞票/句"的文案承诺不符 (2026-08-26 用户反馈复现)。
-        stored_period = _field(wallet_locked[0], "overage_period")
-        prior_accrued = (
-            float(_field(wallet_locked[0], "overage_accrued", 0) or 0)
-            if stored_period == current_period
-            else 0.0
-        )
-        accrued = prior_accrued + per_msg_cost
-        whole = math.floor(accrued)
-        remainder = round(accrued - whole, 2)
-
-        if whole > 0:
-            try:
-                await wallet.debit_tickets_prioritized(
-                    user_id,
-                    whole,
-                    source=SOURCE_CHAT_OVERAGE,
-                    metadata={"per_msg_cost": per_msg_cost, "is_vip": is_vip},
-                    client=tx,
-                )
-            except ValueError:
-                # Balance changed between preview and confirm (race/spend
-                # elsewhere) — reject without writing the accrual or the count.
-                return {
-                    "allowed": False,
-                    "mode": "blocked",
-                    "reason": "no_ticket",
+        try:
+            await wallet.debit_tickets_prioritized(
+                user_id,
+                per_msg_cost,
+                source=SOURCE_CHAT_OVERAGE,
+                metadata={
                     "per_msg_cost": per_msg_cost,
-                    "spendable_tickets": 0,
-                }
+                    "is_vip": is_vip,
+                },
+                client=tx,
+            )
+        except ValueError:
+            return {
+                "allowed": False,
+                "mode": "blocked",
+                "reason": "no_ticket",
+                "per_msg_cost": per_msg_cost,
+                "spendable_tickets": 0,
+            }
 
-        await tx.execute_raw(
-            """
-            UPDATE user_wallets
-            SET overage_accrued = $2, overage_period = $3, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = $1
-            """,
-            user_id,
-            remainder,
-            current_period,
-        )
         await tx.execute_raw(
             """
             UPDATE user_message_quota
@@ -223,4 +199,10 @@ async def consume_one(
             scope,
             key,
         )
-        return {"allowed": True, "mode": "paid", "used": used + 1, "limit": limit, "charged": whole}
+        return {
+            "allowed": True,
+            "mode": "paid",
+            "used": used + 1,
+            "limit": limit,
+            "charged": per_msg_cost,
+        }

@@ -22,8 +22,9 @@ class _FakeGiftTx:
         point_balance: int = 0,
         achievement_points_synced: int = 0,
     ):
-        self.gift_ticket_balance = gift_ticket_balance
-        self.ticket_balance = ticket_balance
+        # Args are display tickets; internal state mirrors post-migration DB subunits.
+        self.gift_ticket_balance = wallet.ticket_subunits(float(gift_ticket_balance))
+        self.ticket_balance = wallet.ticket_subunits(float(ticket_balance))
         self.point_balance = point_balance
         self.achievement_points_synced = achievement_points_synced
         self.ledger_calls: list[tuple] = []
@@ -68,8 +69,8 @@ async def test_debit_tickets_prioritized_drains_gift_before_permanent():
     assert balance["gift_ticket_balance"] == 0
     assert balance["ticket_balance"] == 7
     assert len(tx.ledger_calls) == 2
-    assert tx.ledger_calls[0][1:3] == ("gift_ticket", -5)
-    assert tx.ledger_calls[1][1:3] == ("ticket", -3)
+    assert tx.ledger_calls[0][1:3] == ("gift_ticket", -50)
+    assert tx.ledger_calls[1][1:3] == ("ticket", -30)
 
 
 @pytest.mark.asyncio
@@ -84,7 +85,7 @@ async def test_debit_tickets_prioritized_skips_ledger_row_for_untouched_bucket()
     assert balance["ticket_balance"] == 10
     # Only the gift bucket moved -> exactly one ledger row, not two.
     assert len(tx.ledger_calls) == 1
-    assert tx.ledger_calls[0][1:3] == ("gift_ticket", -4)
+    assert tx.ledger_calls[0][1:3] == ("gift_ticket", -40)
 
 
 @pytest.mark.asyncio
@@ -107,7 +108,7 @@ async def test_credit_gift_tickets_adds_to_gift_bucket_only():
 
     assert balance["gift_ticket_balance"] == 40
     assert balance["ticket_balance"] == 3
-    assert tx.ledger_calls[0][1:3] == ("gift_ticket", 40)
+    assert tx.ledger_calls[0][1:3] == ("gift_ticket", 400)
 
 
 @pytest.mark.asyncio
@@ -119,7 +120,7 @@ async def test_zero_gift_tickets_clears_balance_and_records_negative_ledger():
     )
 
     assert balance["gift_ticket_balance"] == 0
-    assert tx.ledger_calls[0][1:3] == ("gift_ticket", -25)
+    assert tx.ledger_calls[0][1:3] == ("gift_ticket", -250)
 
 
 @pytest.mark.asyncio

@@ -11,17 +11,17 @@ class VipStatusResponse(BaseModel):
     is_vip: bool
     vip_until: str | None = None
     vip_trial_available: bool
-    gift_ticket_balance: int
-    ticket_balance: int
+    gift_ticket_balance: float
+    ticket_balance: float
     point_balance: int
-    spendable_tickets: int
+    spendable_tickets: float
 
 
 class ChatQuotaResponse(BaseModel):
     mode: Literal["free", "paid", "blocked"]
     free_remaining: int
     per_msg_cost: float
-    spendable_tickets: int
+    spendable_tickets: float
 
 
 class MusicQuotaReportRequest(BaseModel):

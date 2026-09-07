@@ -9,10 +9,10 @@ WalletCurrency = Literal["ticket", "point"]
 
 
 class WalletBalanceResponse(BaseModel):
-    ticket_balance: int
+    ticket_balance: float
     point_balance: int
     achievement_points_synced: int
-    gift_ticket_balance: int = 0
+    gift_ticket_balance: float = 0
 
 
 class WalletExchangeRequest(BaseModel):
@@ -24,8 +24,8 @@ class WalletExchangeRequest(BaseModel):
 class WalletLedgerItem(BaseModel):
     id: str
     currency: WalletCurrency
-    delta: int
-    balance_after: int
+    delta: float
+    balance_after: float
     source: str
     source_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -61,14 +61,14 @@ async def test_sync_achievement_points_only_adds_new_delta(monkeypatch):
         [
             [
                 {
-                    "ticket_balance": 3,
+                    "ticket_balance": wallet.ticket_subunits(3),
                     "point_balance": 20,
                     "achievement_points_synced": 10,
                 }
             ],
             [
                 {
-                    "ticket_balance": 3,
+                    "ticket_balance": wallet.ticket_subunits(3),
                     "point_balance": 20,
                     "achievement_points_synced": 10,
                 }
@@ -118,8 +118,8 @@ async def test_full_wallet_reads_through_passed_client_not_global_db(monkeypatch
             ],
             [
                 {
-                    "gift_ticket_balance": 5,
-                    "ticket_balance": 3,
+                    "gift_ticket_balance": wallet.ticket_subunits(5),
+                    "ticket_balance": wallet.ticket_subunits(3),
                     "point_balance": 10,
                     "achievement_points_synced": 0,
                     "overage_accrued": 0.0,
@@ -154,7 +154,7 @@ async def test_full_wallet_without_client_reads_through_global_db(monkeypatch):
             [
                 {
                     "gift_ticket_balance": 0,
-                    "ticket_balance": 1,
+                    "ticket_balance": wallet.ticket_subunits(1),
                     "point_balance": 0,
                     "achievement_points_synced": 0,
                     "overage_accrued": 0.0,
@@ -179,15 +179,15 @@ async def test_exchange_ticket_to_points_updates_both_balances_and_ledgers(monke
         [
             [
                 {
-                    "ticket_balance": 12,
+                    "ticket_balance": wallet.ticket_subunits(12),
                     "point_balance": 40,
                     "achievement_points_synced": 30,
                 }
             ],
-            [{"ticket_balance": 7, "point_balance": 90}],
+            [{"ticket_balance": wallet.ticket_subunits(7), "point_balance": 90}],
             [
                 {
-                    "ticket_balance": 7,
+                    "ticket_balance": wallet.ticket_subunits(7),
                     "point_balance": 90,
                     "achievement_points_synced": 30,
                 }
@@ -206,8 +206,8 @@ async def test_exchange_ticket_to_points_updates_both_balances_and_ledgers(monke
     assert len(fake_db.execute_calls) == 2
     assert fake_db.execute_calls[0][1][1:5] == (
         "ticket",
-        -5,
-        7,
+        -wallet.ticket_subunits(5),
+        wallet.ticket_subunits(7),
         "ticket_to_point_exchange",
     )
     assert fake_db.execute_calls[1][1][1:5] == (
@@ -224,7 +224,7 @@ async def test_exchange_ticket_to_points_rejects_insufficient_balance(monkeypatc
         [
             [
                 {
-                    "ticket_balance": 2,
+                    "ticket_balance": wallet.ticket_subunits(2),
                     "point_balance": 40,
                     "achievement_points_synced": 0,
                 }
