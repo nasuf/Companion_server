@@ -74,6 +74,33 @@ async def test_get_membership_no_subscription(monkeypatch):
     assert result["history"] == []
 
 
+@pytest.mark.asyncio
+async def test_get_membership_null_auto_renew_defaults_enabled(monkeypatch):
+    sub_row = {
+        "product_id": "com.bansheng.vip.monthly.auto",
+        "status": "active",
+        "auto_renew_status": None,
+        "auto_renew_product_id": "com.bansheng.vip.monthly.auto",
+        "expires_date": datetime(2027, 2, 1, tzinfo=timezone.utc),
+        "grace_period_expires_date": None,
+        "updated_at": datetime(2026, 9, 6, tzinfo=timezone.utc),
+    }
+
+    async def fake_query(query: str, *args):
+        if "iap_subscription_state" in query:
+            return [sub_row]
+        return []
+
+    monkeypatch.setattr(membership.grant, "reconcile_vip_entitlements", AsyncMock(return_value=False))
+    monkeypatch.setattr(membership.wallet, "full_wallet", AsyncMock(return_value=_vip_snapshot()))
+    monkeypatch.setattr(membership.db, "query_raw", fake_query)
+
+    result = await membership.get_membership("u1")
+
+    assert result["subscription"]["auto_renew_enabled"] is True
+    assert result["auto_renew_active"] is True
+
+
 def test_membership_endpoint_requires_auth(api_client):
     resp = api_client.get("/me/iap/membership")
     assert resp.status_code == 401

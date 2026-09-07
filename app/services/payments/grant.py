@@ -339,15 +339,19 @@ async def _apply_vip(
             """
             INSERT INTO iap_subscription_state (
                 original_transaction_id, provider, user_id, product_id,
-                environment, status, expires_date, latest_transaction_id, updated_at
+                environment, status, auto_renew_status, expires_date,
+                latest_transaction_id, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,'active',$6::timestamp,$7,CURRENT_TIMESTAMP)
+            VALUES ($1,$2,$3,$4,$5,'active',TRUE,$6::timestamp,$7,CURRENT_TIMESTAMP)
             ON CONFLICT (original_transaction_id) DO UPDATE
             SET status = 'active',
                 product_id = EXCLUDED.product_id,
                 environment = EXCLUDED.environment,
                 expires_date = EXCLUDED.expires_date,
                 latest_transaction_id = EXCLUDED.latest_transaction_id,
+                auto_renew_status = COALESCE(
+                    iap_subscription_state.auto_renew_status, EXCLUDED.auto_renew_status
+                ),
                 updated_at = CURRENT_TIMESTAMP
             """,
             original_txn_id,

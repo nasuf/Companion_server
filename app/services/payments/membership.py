@@ -66,11 +66,20 @@ async def get_membership(user_id: str, *, history_limit: int = 50) -> dict[str, 
     subscription = None
     if sub_rows:
         row = sub_rows[0]
+        sub_status = str(_field(row, "status", ""))
+        raw_renew = _field(row, "auto_renew_status")
+        # Verify 首单未写 auto_renew_status 时 Apple 仍视为开启；仅收到
+        # DID_CHANGE_RENEWAL_STATUS 后才应显式落 false。
+        auto_renew_enabled = (
+            bool(raw_renew)
+            if raw_renew is not None
+            else sub_status in ("active", "in_grace")
+        )
         subscription = {
             "product_id": str(_field(row, "product_id", "")),
             "product_label": product_label(str(_field(row, "product_id", ""))),
-            "status": str(_field(row, "status", "")),
-            "auto_renew_enabled": bool(_field(row, "auto_renew_status")),
+            "status": sub_status,
+            "auto_renew_enabled": auto_renew_enabled,
             "auto_renew_product_id": _field(row, "auto_renew_product_id"),
             "expires_date": _iso(_field(row, "expires_date")),
             "grace_period_expires_date": _iso(_field(row, "grace_period_expires_date")),
