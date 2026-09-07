@@ -184,6 +184,7 @@ app.add_middleware(
 # Register routers
 from app.api.public.health import router as health_router
 from app.api.public.users import router as users_router
+from app.api.public.feedback import router as feedback_router
 from app.api.public.agents import router as agents_router
 from app.api.public.conversations import router as conversations_router
 from app.api.public.chat import router as chat_router
@@ -222,6 +223,7 @@ from app.api.admin.agents import router as admin_agents_router
 from app.api.admin.agent_templates import router as admin_agent_templates_router
 from app.api.public.traces import router as traces_router
 from app.api.admin.bug_reports import router as admin_bug_reports_router
+from app.api.admin.user_feedback import router as admin_user_feedback_router
 from app.api.admin.stats import router as admin_stats_router
 from app.api.admin.runtime_config import router as admin_runtime_config_router
 from app.api.admin.model_registry import router as admin_model_registry_router
@@ -242,6 +244,7 @@ from app.api.admin.tts import (
 
 app.include_router(health_router)
 app.include_router(users_router)
+app.include_router(feedback_router)
 app.include_router(agents_router)
 app.include_router(conversations_router)
 app.include_router(chat_media_router)
@@ -281,6 +284,7 @@ app.include_router(admin_agents_router)
 app.include_router(admin_agent_templates_router)
 app.include_router(traces_router)
 app.include_router(admin_bug_reports_router)
+app.include_router(admin_user_feedback_router)
 app.include_router(admin_stats_router)
 app.include_router(admin_runtime_config_router)
 app.include_router(admin_model_registry_router)

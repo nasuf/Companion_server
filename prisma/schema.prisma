@@ -86,6 +86,7 @@ model User {
   realWorldRechargeLedger  RealWorldRechargeLedger[]
   bugReportsFiled          BugReport[]                     @relation("BugReportsFiled")
   bugReportsResolved       BugReport[]                     @relation("BugReportsResolved")
+  userFeedback             UserFeedback[]
 
   // admin 监控"新增注册走势"按 created_at 分桶.
   @@index([createdAt])
@@ -926,6 +927,25 @@ model BugReport {
   @@index([messageId])
   @@index([status, createdAt(sort: Desc)])
   @@map("bug_reports")
+}
+
+model UserFeedback {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  content    String
+  contact    String
+  occurredAt String?  @map("occurred_at")
+  imageKeys  String[] @map("image_keys")
+  status     String   @default("open") // open | read | resolved
+  appVersion String?  @map("app_version")
+  platform   String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("user_feedback")
 }
 
 // 本地 trace 镜像表. /traces/resolve/{message_id} 懒触发 share 后, 把

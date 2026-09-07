@@ -698,6 +698,13 @@ async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
         else 0
     )
 
+    feedback_dir = Path(os.getenv("FEEDBACK_MEDIA_DIR", "var/feedback_media"))
+    stats["feedback_media_files"] = (
+        _delete_prefixed_files(feedback_dir, user_id, strict=True)
+        if feedback_dir.is_dir()
+        else 0
+    )
+
     media_rows = await db.query_raw(
         """
         DELETE FROM offline_activity_media
@@ -718,6 +725,7 @@ async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
     for key, sql in [
         ("bug_reports_resolved", "UPDATE bug_reports SET resolved_by_id = NULL WHERE resolved_by_id = $1"),
         ("bug_reports_filed", "DELETE FROM bug_reports WHERE reporter_id = $1"),
+        ("user_feedback", "DELETE FROM user_feedback WHERE user_id = $1"),
         ("last_will_deliveries", "DELETE FROM last_will_deliveries WHERE last_will_id IN (SELECT id FROM last_wills WHERE user_id = $1)"),
         ("last_wills", "DELETE FROM last_wills WHERE user_id = $1"),
         ("time_capsules", "DELETE FROM time_capsules WHERE user_id = $1"),
