@@ -128,9 +128,10 @@ async def _dispatch(
         NotificationTypeV2.EXPIRED.value,
         NotificationTypeV2.GRACE_PERIOD_EXPIRED.value,
     ):
-        # 不主动清 vip_until：它已是过去时，is_vip 自然为 False；限时钞票由既有
-        # vip_expire_clear cron 清，避免与既有清算路径打架。
         await _set_subscription_state(original_txn_id, "expired", ntype=ntype, subtype=subtype)
+        user_id = await _user_for_original_txn(original_txn_id)
+        if user_id:
+            await grant.recompute_vip_entitlements(user_id)
         logger.info(
             "iap subscription expired otxn=%s",
             (original_txn_id or "")[:12],
@@ -178,6 +179,7 @@ async def _handle_refund(txn: Any, env: str) -> None:
         return  # 幂等：已清算
     user_id = row["user_id"]
     product = catalog.product_for(row["product_id"])
+    original_txn_id = _field(txn, "originalTransactionId")
     async with db.tx() as tx:
         if product is not None and product.grants_tickets:
             await _reverse_tickets(tx, user_id, product.ticket_amount, transaction_id, env)
@@ -189,11 +191,13 @@ async def _handle_refund(txn: Any, env: str) -> None:
             PROVIDER_APPLE,
             transaction_id,
         )
+        if product is not None and product.grants_vip:
+            if product.kind == catalog.KIND_SUBSCRIPTION and original_txn_id:
+                await grant.refresh_subscription_state_from_grants(
+                    original_txn_id, user_id, client=tx
+                )
     if product is not None and product.grants_vip:
-        await _expire_vip_now(user_id)
-        await _set_subscription_state(
-            _field(txn, "originalTransactionId"), "refunded", ntype="REFUND"
-        )
+        await grant.recompute_vip_entitlements(user_id)
     logger.info(
         "iap refund user=%s txn=%s",
         user_id[:8],
@@ -206,17 +210,23 @@ async def _handle_revoke(txn: Any, original_txn_id: str | None, env: str) -> Non
     user_id = await _user_for_original_txn(original_txn_id)
     if not user_id:
         return
-    await _expire_vip_now(user_id)
-    await _set_subscription_state(original_txn_id, "revoked", ntype="REVOKE")
-    if txn is not None:
-        await db.execute_raw(
-            """
-            UPDATE iap_transactions SET status = 'revoked', updated_at = CURRENT_TIMESTAMP
-            WHERE provider = $1 AND transaction_id = $2
-            """,
-            PROVIDER_APPLE,
-            _field(txn, "transactionId") or "",
-        )
+    transaction_id = _field(txn, "transactionId") or "" if txn is not None else ""
+    async with db.tx() as tx:
+        await _set_subscription_state(original_txn_id, "revoked", ntype="REVOKE", client=tx)
+        if txn is not None and transaction_id:
+            await tx.execute_raw(
+                """
+                UPDATE iap_transactions SET status = 'revoked', updated_at = CURRENT_TIMESTAMP
+                WHERE provider = $1 AND transaction_id = $2
+                """,
+                PROVIDER_APPLE,
+                transaction_id,
+            )
+        if original_txn_id:
+            await grant.refresh_subscription_state_from_grants(
+                original_txn_id, user_id, client=tx
+            )
+    await grant.recompute_vip_entitlements(user_id)
     logger.info(
         "iap revoke user=%s",
         user_id[:8],
@@ -271,23 +281,35 @@ async def _reverse_tickets(
     )
 
 
-async def _expire_vip_now(user_id: str) -> None:
-    """把 vip_until 设成过去并清限时钞票/vip_grant 批次（复用 clear_on_lapse）。"""
-    from app.services.vip import grants as vip_grants
-
-    await db.execute_raw(
+async def _set_subscription_state(
+    original_txn_id: str | None,
+    status: str,
+    *,
+    renewal: Any = None,
+    ntype: str | None = None,
+    subtype: str | None = None,
+    client: Any | None = None,
+) -> None:
+    if not original_txn_id:
+        return
+    grace = apple_env.ms_to_dt(_field(renewal, "gracePeriodExpiresDate")) if renewal else None
+    executor = client or db
+    await executor.execute_raw(
         """
-        UPDATE user_wallets
-        SET vip_until = CURRENT_TIMESTAMP - INTERVAL '1 second',
+        UPDATE iap_subscription_state
+        SET status = $2,
+            grace_period_expires_date = COALESCE($3, grace_period_expires_date),
+            last_notification_type = COALESCE($4, last_notification_type),
+            last_notification_subtype = COALESCE($5, last_notification_subtype),
             updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
+        WHERE original_transaction_id = $1
         """,
-        user_id,
+        original_txn_id,
+        status,
+        grace,
+        ntype,
+        subtype,
     )
-    try:
-        await vip_grants.clear_on_lapse(user_id)
-    except Exception:
-        logger.exception("clear_on_lapse after refund/revoke failed user=%s", user_id[:8])
 
 
 async def _user_for_original_txn(original_txn_id: str | None) -> str | None:
@@ -307,35 +329,6 @@ async def _user_for_original_txn(original_txn_id: str | None) -> str | None:
         original_txn_id,
     )
     return str(_field(rows[0], "user_id")) if rows else None
-
-
-async def _set_subscription_state(
-    original_txn_id: str | None,
-    status: str,
-    *,
-    renewal: Any = None,
-    ntype: str | None = None,
-    subtype: str | None = None,
-) -> None:
-    if not original_txn_id:
-        return
-    grace = apple_env.ms_to_dt(_field(renewal, "gracePeriodExpiresDate")) if renewal else None
-    await db.execute_raw(
-        """
-        UPDATE iap_subscription_state
-        SET status = $2,
-            grace_period_expires_date = COALESCE($3, grace_period_expires_date),
-            last_notification_type = COALESCE($4, last_notification_type),
-            last_notification_subtype = COALESCE($5, last_notification_subtype),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE original_transaction_id = $1
-        """,
-        original_txn_id,
-        status,
-        grace,
-        ntype,
-        subtype,
-    )
 
 
 async def _update_renewal_status(original_txn_id: str | None, renewal: Any) -> None:

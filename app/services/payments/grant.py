@@ -176,7 +176,9 @@ async def record_and_grant(
                 client=tx,
             )
         elif product.grants_vip:
-            await _apply_vip(tx, user_id, product, expires_dt, environment, original_txn_id, transaction_id)
+            await _apply_vip_metadata(
+                tx, user_id, product, expires_dt, environment, original_txn_id, transaction_id
+            )
 
         await tx.execute_raw(
             """
@@ -188,6 +190,8 @@ async def record_and_grant(
             PROVIDER_APPLE,
             transaction_id,
         )
+        if product.grants_vip:
+            await recompute_vip_entitlements(user_id, client=tx, clear_lapse=False)
         granted_now = True
 
     # VIP 到账后立即发当月权益（限时钞票/音乐券/补签卡），不必等夜间 cron；
@@ -214,19 +218,47 @@ async def record_and_grant(
             "kind": product.kind,
         },
     )
-    await reconcile_vip_entitlements(user_id)
+    await recompute_vip_entitlements(user_id)
     return {"status": "granted", "kind": product.kind, "replay": False, **await _snapshot(user_id)}
 
 
 async def reconcile_vip_entitlements(user_id: str, *, client: Any | None = None) -> bool:
-    """把 user_wallets.vip_until 抬到 consumable VIP 交易隐含的最低值。
+    """Backward-compatible alias for ``recompute_vip_entitlements``."""
+    return await recompute_vip_entitlements(user_id, client=client)
 
-    场景：交易已 granted（幂等回放不再 _apply_vip），但 vip_until 被沙盒订阅
-    5 分钟续期盖短。读路径与 verify 回放路径都调，自愈而不改 iap_transactions。
+
+async def compute_vip_entitlement_end(
+    user_id: str, *, client: Any | None = None
+) -> datetime | None:
+    """Single source of truth: max(consumable stack end, granted subscription expires)."""
+    consumable_end = await _consumable_vip_floor(user_id, client=client)
+    sub_end = await _subscription_vip_end(user_id, client=client)
+    ends = [x for x in (consumable_end, sub_end) if x is not None]
+    return max(ends) if ends else None
+
+
+async def recompute_vip_entitlements(
+    user_id: str,
+    *,
+    client: Any | None = None,
+    clear_lapse: bool = True,
+) -> bool:
+    """Recompute ``vip_until`` from granted IAP rows (can raise or lower).
+
+    Uses ``compute_vip_entitlement_end``; when no future entitlement remains,
+    sets ``vip_until`` to one second ago and optionally clears lapse batches.
     """
-    floor = await _consumable_vip_floor(user_id, client=client)
-    if floor is None:
-        return False
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    entitlement_end = await compute_vip_entitlement_end(user_id, client=client)
+    if entitlement_end is None or entitlement_end <= now:
+        new_until = now - timedelta(seconds=1)
+        lapsed = True
+    else:
+        new_until = entitlement_end
+        lapsed = False
+
     executor = client or db
     rows = await executor.query_raw(
         "SELECT vip_until FROM user_wallets WHERE user_id = $1 FOR UPDATE",
@@ -235,8 +267,9 @@ async def reconcile_vip_entitlements(user_id: str, *, client: Any | None = None)
     if not rows:
         return False
     current = _as_utc(_field(rows[0], "vip_until"))
-    if current is not None and current >= floor:
+    if current is not None and _naive(current) == _naive(new_until):
         return False
+
     await executor.execute_raw(
         """
         UPDATE user_wallets
@@ -244,14 +277,88 @@ async def reconcile_vip_entitlements(user_id: str, *, client: Any | None = None)
         WHERE user_id = $1
         """,
         user_id,
-        _naive(floor),
+        _naive(new_until),
     )
     logger.info(
-        "iap vip reconcile user=%s until=%s",
+        "iap vip recompute user=%s until=%s lapsed=%s",
         user_id[:8],
-        floor.isoformat(),
+        new_until.isoformat(),
+        lapsed,
     )
+    if lapsed and clear_lapse and client is None:
+        try:
+            await vip_grants.clear_on_lapse(user_id)
+        except Exception:
+            logger.exception("clear_on_lapse after recompute failed user=%s", user_id[:8])
     return True
+
+
+async def _subscription_vip_end(user_id: str, *, client: Any | None = None) -> datetime | None:
+    """Latest ``expires_date`` among granted subscription transactions."""
+    executor = client or db
+    rows = await executor.query_raw(
+        """
+        SELECT MAX(expires_date) AS max_expires
+        FROM iap_transactions
+        WHERE user_id = $1 AND kind = $2 AND status = 'granted'
+          AND expires_date IS NOT NULL
+        """,
+        user_id,
+        catalog.KIND_SUBSCRIPTION,
+    )
+    if not rows:
+        return None
+    return _as_utc(_field(rows[0], "max_expires"))
+
+
+async def refresh_subscription_state_from_grants(
+    original_txn_id: str,
+    user_id: str,
+    *,
+    client: Any | None = None,
+) -> None:
+    """After refund/revoke, realign ``iap_subscription_state`` with remaining grants."""
+    executor = client or db
+    rows = await executor.query_raw(
+        """
+        SELECT MAX(expires_date) AS max_expires,
+               COUNT(*) FILTER (WHERE status = 'granted') AS granted_cnt
+        FROM iap_transactions
+        WHERE user_id = $1 AND original_transaction_id = $2 AND kind = $3
+        """,
+        user_id,
+        original_txn_id,
+        catalog.KIND_SUBSCRIPTION,
+    )
+    if not rows:
+        return
+    granted_cnt = int(_field(rows[0], "granted_cnt") or 0)
+    if granted_cnt == 0:
+        await executor.execute_raw(
+            """
+            UPDATE iap_subscription_state
+            SET status = 'refunded',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE original_transaction_id = $1
+            """,
+            original_txn_id,
+        )
+        return
+    max_exp = _as_utc(_field(rows[0], "max_expires"))
+    now = datetime.now(timezone.utc)
+    status = "active" if max_exp is not None and max_exp > now else "expired"
+    await executor.execute_raw(
+        """
+        UPDATE iap_subscription_state
+        SET status = $2,
+            expires_date = COALESCE($3::timestamp, expires_date),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE original_transaction_id = $1
+        """,
+        original_txn_id,
+        status,
+        _naive(max_exp),
+    )
 
 
 async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> datetime | None:
@@ -283,7 +390,7 @@ async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> d
     return running
 
 
-async def _apply_vip(
+async def _apply_vip_metadata(
     tx: Any,
     user_id: str,
     product: IapProduct,
@@ -292,47 +399,17 @@ async def _apply_vip(
     original_txn_id: str,
     transaction_id: str,
 ) -> None:
-    """设置/延长 vip_until（存 naive UTC，沿用 activate_vip_trial 惯例）。
-
-    - 订阅：vip_until = max(现值, Apple expires_date)，且 upsert 订阅状态表。
-    - 消耗型时长包/体验：vip_until = max(now, 现值) + vip_days（叠加）。
-    """
-    rows = await tx.query_raw(
-        "SELECT vip_until FROM user_wallets WHERE user_id = $1 FOR UPDATE",
-        user_id,
-    )
-    current = _as_utc(_field(rows[0], "vip_until")) if rows else None
-    now = datetime.now(timezone.utc)
-
-    if product.kind == catalog.KIND_SUBSCRIPTION:
-        target = expires_dt or (now + _days(product.vip_days))
-        # Never shorten an existing VIP window (sandbox subs expire in minutes).
-        candidates = [target, now]
-        if current is not None:
-            candidates.append(current)
-        consumable_floor = await _consumable_vip_floor(user_id, client=tx)
-        if consumable_floor is not None:
-            candidates.append(consumable_floor)
-        new_until = max(candidates)
-    else:
-        from datetime import timedelta
-
-        base = max(now, current) if current else now
-        new_until = base + timedelta(days=product.vip_days)
-
+    """Subscription state upsert + trial flag; ``vip_until`` is set by recompute."""
     is_trial = product.product_id.endswith(".vip.trial")
-    await tx.execute_raw(
-        """
-        UPDATE user_wallets
-        SET vip_until = $2::timestamp,
-            vip_trial_used = vip_trial_used OR $3,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
-        """,
-        user_id,
-        new_until.replace(tzinfo=None),
-        is_trial,
-    )
+    if is_trial:
+        await tx.execute_raw(
+            """
+            UPDATE user_wallets
+            SET vip_trial_used = TRUE, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
 
     if product.kind == catalog.KIND_SUBSCRIPTION:
         await tx.execute_raw(
@@ -386,9 +463,3 @@ def _naive(dt: datetime | None) -> datetime | None:
     ms_to_dt 返回 aware UTC，落库前转 naive 存 UTC 墙钟；比较逻辑仍用 aware 值。
     """
     return dt.replace(tzinfo=None) if dt is not None else None
-
-
-def _days(n: int):
-    from datetime import timedelta
-
-    return timedelta(days=n)

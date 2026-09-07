@@ -140,13 +140,38 @@ async def test_refund_consumable_reverses_and_marks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_expired_sets_state_without_touching_vip(monkeypatch):
+async def test_expired_recomputes_vip_until(monkeypatch):
     fake = _FakeDb(insert_new=True, user_row={"user_id": "u1"})
     decoded = _decoded(NotificationTypeV2.EXPIRED, txn_jws="txn")
     _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.monthly.auto"))
+    recompute = AsyncMock()
+    monkeypatch.setattr(notifications.grant, "recompute_vip_entitlements", recompute)
 
     await notifications.apply_notification("signed")
 
-    # 只更新订阅状态表，不 UPDATE user_wallets 的 vip_until
     assert any("iap_subscription_state" in q for q in fake.executed)
-    assert not any("UPDATE user_wallets" in q and "vip_until" in q for q in fake.executed)
+    recompute.assert_awaited_once_with("u1")
+
+
+@pytest.mark.asyncio
+async def test_refund_vip_recomputes_instead_of_expire_all(monkeypatch):
+    fake = _FakeDb(
+        insert_new=True,
+        find_txn={
+            "status": "granted",
+            "kind": "consumable",
+            "product_id": "com.bansheng.vip.month",
+            "user_id": "u1",
+        },
+    )
+    decoded = _decoded(NotificationTypeV2.REFUND)
+    _wire(monkeypatch, fake, decoded, _txn("com.bansheng.vip.month", txn="t-refund-vip"))
+    recompute = AsyncMock()
+    monkeypatch.setattr(notifications.grant, "recompute_vip_entitlements", recompute)
+
+    await notifications.apply_notification("signed")
+
+    recompute.assert_awaited_once_with("u1")
+    assert not any(
+        "vip_until = CURRENT_TIMESTAMP - INTERVAL" in q for q in fake.executed
+    )

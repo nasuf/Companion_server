@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -41,6 +42,8 @@ class _FakeDb:
         self.iap_insert_args: tuple | None = None
         self.sub_state_args: tuple | None = None
         self.calls: list[tuple[str, str]] = []
+        self.vip_until: datetime | None = None
+        self._iap_rows: list[dict[str, Any]] = []
 
     def tx(self):
         return _FakeTx(self)
@@ -57,17 +60,48 @@ class _FakeDb:
             return [self.existing] if self.existing else []
         if "INSERT INTO iap_transactions" in query:
             self.iap_insert_args = args
+            self._iap_rows.append(
+                {
+                    "product_id": args[4],
+                    "kind": args[5],
+                    "quantity": args[8],
+                    "purchase_date": args[9],
+                    "expires_date": args[10],
+                    "status": "pending",
+                }
+            )
             return list(self.insert_returns)
         if "SELECT status FROM iap_transactions" in query and "FOR UPDATE" in query:
             return [{"status": self.locked_status}]
+        if "kind = $2" in query and len(args) >= 2 and args[1] == grant.catalog.KIND_CONSUMABLE:
+            return [
+                {
+                    "product_id": row["product_id"],
+                    "quantity": row["quantity"],
+                    "purchase_date": row["purchase_date"],
+                }
+                for row in self._iap_rows
+                if row["status"] == "granted" and row["kind"] == grant.catalog.KIND_CONSUMABLE
+            ]
+        if "MAX(expires_date)" in query and "kind = $2" in query:
+            expires = [
+                row["expires_date"]
+                for row in self._iap_rows
+                if row["status"] == "granted" and row["kind"] == grant.catalog.KIND_SUBSCRIPTION
+            ]
+            return [{"max_expires": max(expires) if expires else None}]
         if "SELECT vip_until FROM user_wallets" in query:
-            return [{"vip_until": None}]
+            return [{"vip_until": self.vip_until}]
         return []
 
     def _execute(self, query: str, args):
         self.calls.append(("e", query))
+        if "UPDATE iap_transactions" in query and "status = 'granted'" in query:
+            for row in self._iap_rows:
+                row["status"] = "granted"
         if "UPDATE user_wallets" in query and "vip_until" in query:
             self.vip_until_written = args[1]
+            self.vip_until = grant._as_utc(args[1])
         if "INSERT INTO iap_subscription_state" in query:
             self.sub_state_args = args
         return 1
@@ -271,21 +305,23 @@ async def test_consumable_vip_floor_stacks_by_purchase_order():
 
 
 @pytest.mark.asyncio
-async def test_reconcile_raises_vip_until_to_consumable_floor(monkeypatch):
+async def test_recompute_sets_vip_until_to_entitlement_end(monkeypatch):
     from datetime import timedelta
 
     month_at = datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc)
     short_until = datetime(2026, 9, 6, 14, 14, 56, tzinfo=timezone.utc)
     expected = month_at + timedelta(days=31)
 
-    class _ReconcileDb:
+    class _RecomputeDb:
         def __init__(self):
             self.vip_until = short_until
             self.updated = False
 
         async def query_raw(self, query: str, *args):
-            if "kind = $2" in query:
+            if "kind = $2" in query and args[1] == grant.catalog.KIND_CONSUMABLE:
                 return [{"product_id": "com.bansheng.vip.month", "quantity": 1, "purchase_date": month_at}]
+            if "MAX(expires_date)" in query:
+                return [{"max_expires": None}]
             if "SELECT vip_until FROM user_wallets" in query:
                 return [{"vip_until": self.vip_until}]
             return []
@@ -296,11 +332,73 @@ async def test_reconcile_raises_vip_until_to_consumable_floor(monkeypatch):
                 self.vip_until = grant._as_utc(args[1])
             return 1
 
-    fake = _ReconcileDb()
+    fake = _RecomputeDb()
     monkeypatch.setattr(grant, "db", fake)
 
-    changed = await grant.reconcile_vip_entitlements("u1")
+    changed = await grant.recompute_vip_entitlements("u1")
 
     assert changed is True
     assert fake.updated is True
     assert grant._naive(fake.vip_until) == grant._naive(expected)
+
+
+@pytest.mark.asyncio
+async def test_refund_consumable_month_keeps_quarter_floor(monkeypatch):
+    from datetime import timedelta
+
+    month_at = datetime(2026, 9, 6, 10, 7, 40, tzinfo=timezone.utc)
+    quarter_at = datetime(2026, 9, 6, 10, 37, 50, tzinfo=timezone.utc)
+    expected = month_at + timedelta(days=31 + 93)
+    long_until = expected + timedelta(days=1)
+
+    class _RefundDb:
+        def __init__(self):
+            self.vip_until = long_until
+            self.rows = [
+                {
+                    "product_id": "com.bansheng.vip.month",
+                    "quantity": 1,
+                    "purchase_date": month_at,
+                    "status": "refunded",
+                    "kind": grant.catalog.KIND_CONSUMABLE,
+                },
+                {
+                    "product_id": "com.bansheng.vip.quarter",
+                    "quantity": 1,
+                    "purchase_date": quarter_at,
+                    "status": "granted",
+                    "kind": grant.catalog.KIND_CONSUMABLE,
+                },
+            ]
+
+        async def query_raw(self, query: str, *args):
+            if "kind = $2" in query and args[1] == grant.catalog.KIND_CONSUMABLE:
+                return [
+                    {
+                        "product_id": row["product_id"],
+                        "quantity": row["quantity"],
+                        "purchase_date": row["purchase_date"],
+                    }
+                    for row in self.rows
+                    if row["status"] == "granted" and row["kind"] == grant.catalog.KIND_CONSUMABLE
+                ]
+            if "MAX(expires_date)" in query:
+                return [{"max_expires": None}]
+            if "SELECT vip_until FROM user_wallets" in query:
+                return [{"vip_until": self.vip_until}]
+            return []
+
+        async def execute_raw(self, query: str, *args):
+            if "UPDATE user_wallets" in query and "vip_until" in query:
+                self.vip_until = grant._as_utc(args[1])
+            return 1
+
+    fake = _RefundDb()
+    monkeypatch.setattr(grant, "db", fake)
+    monkeypatch.setattr(grant.vip_grants, "clear_on_lapse", AsyncMock())
+
+    changed = await grant.recompute_vip_entitlements("u1")
+
+    assert changed is True
+    assert grant._naive(fake.vip_until) == grant._naive(quarter_at + timedelta(days=93))
+    grant.vip_grants.clear_on_lapse.assert_not_awaited()
