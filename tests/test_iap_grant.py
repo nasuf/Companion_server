@@ -128,6 +128,22 @@ def _wire(monkeypatch, fake_db, *, fetch_payload):
         "fetch_and_verify_transaction",
         AsyncMock(return_value=(fetch_payload, "Sandbox")),
     )
+    monkeypatch.setattr(
+        grant.apple_env,
+        "env_strings_to_try",
+        lambda: ["Sandbox"],
+    )
+    monkeypatch.setattr(
+        grant.apple_env,
+        "verify_signed_transaction",
+        lambda jws, env: fetch_payload,
+    )
+    grant._bg_coros_for_tests = []
+
+    def _fire(coro):
+        grant._bg_coros_for_tests.append(coro)
+
+    monkeypatch.setattr(grant, "fire_background", _fire)
     monkeypatch.setattr(grant.wallet, "ensure_wallet", AsyncMock())
     monkeypatch.setattr(
         grant.wallet,
@@ -231,7 +247,25 @@ async def test_subscription_activation_sets_vip_until_from_apple(monkeypatch):
     assert result["kind"] == "subscription"
     # vip_until 以 Apple expires_date 为准（存 naive UTC）
     assert fake.vip_until_written == expires.replace(tzinfo=None)
+    assert len(grant._bg_coros_for_tests) == 1
+    await grant._bg_coros_for_tests[0]
     grant.vip_grants.grant_monthly.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_uses_signed_transaction_without_apple_api(monkeypatch):
+    fake = _FakeDb(existing=None)
+    payload = _payload("com.bansheng.ticket.10", txn="txn-jws")
+    _wire(monkeypatch, fake, fetch_payload=payload)
+    credit = AsyncMock(return_value={"ticket_balance": 20, "point_balance": 0, "achievement_points_synced": 0})
+    monkeypatch.setattr(grant.wallet, "credit_tickets", credit)
+
+    await grant.verify_and_grant(
+        "u1", "txn-jws", signed_transaction="signed-jws-payload"
+    )
+
+    grant.apple_env.fetch_and_verify_transaction.assert_not_awaited()
+    credit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

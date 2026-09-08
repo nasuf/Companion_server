@@ -34,7 +34,11 @@ async def verify_purchase(
     user_id = str(payload["sub"])
     with bind_context(user_id=user_id):
         try:
-            result = await grant.verify_and_grant(user_id, data.transaction_id)
+            result = await grant.verify_and_grant(
+                user_id,
+                data.transaction_id,
+                signed_transaction=data.signed_transaction,
+            )
         except UnknownProductError as exc:
             logger.warning(
                 "iap verify unknown product",

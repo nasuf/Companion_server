@@ -7,6 +7,8 @@ DO NOTHING + FOR UPDATE 回放。verify 端点与 webhook 续期共用 `record_a
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 import json
 import logging
 from datetime import datetime, timezone
@@ -18,7 +20,8 @@ from app.services import wallet
 from app.services.payments import catalog
 from app.services.payments.apple import environment as apple_env
 from app.services.payments.catalog import IapProduct
-from app.services.payments.errors import UnknownProductError
+from app.services.payments.errors import AppleVerificationError, UnknownProductError
+from app.services.runtime.tasks import fire_background
 from app.services.vip import grants as vip_grants
 
 logger = logging.getLogger(__name__)
@@ -69,7 +72,56 @@ async def _find_transaction(transaction_id: str) -> dict[str, Any] | None:
     return dict(rows[0]) if rows else None
 
 
-async def verify_and_grant(user_id: str, transaction_id: str) -> dict[str, Any]:
+async def resolve_verified_payload(
+    transaction_id: str,
+    *,
+    signed_transaction: str | None = None,
+) -> tuple[Any, str]:
+    """Verify a transaction via client JWS (fast) or Apple API (fallback)."""
+    if signed_transaction:
+        last_exc: AppleVerificationError | None = None
+        for env_str in apple_env.env_strings_to_try():
+            try:
+                payload = await asyncio.to_thread(
+                    apple_env.verify_signed_transaction, signed_transaction, env_str
+                )
+                if (_field(payload, "transactionId") or "") != transaction_id:
+                    raise AppleVerificationError("transaction_id_mismatch")
+                return payload, env_str
+            except AppleVerificationError as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        raise AppleVerificationError("jws_verify_failed:no_matching_environment")
+    return await apple_env.fetch_and_verify_transaction(transaction_id)
+
+
+async def user_id_for_app_account_token(token: str | None) -> str | None:
+    """Map Apple appAccountToken (client sets to user UUID) to an active user."""
+    if not token:
+        return None
+    try:
+        user_id = str(uuid.UUID(str(token).strip()))
+    except ValueError:
+        return None
+    rows = await db.query_raw(
+        """
+        SELECT id FROM users
+        WHERE id = $1::uuid AND status = 'active'
+        LIMIT 1
+        """,
+        user_id,
+    )
+    return str(_field(rows[0], "id")) if rows else None
+
+
+async def verify_and_grant(
+    user_id: str,
+    transaction_id: str,
+    *,
+    signed_transaction: str | None = None,
+) -> dict[str, Any]:
     """客户端购买/恢复后调用：向 Apple 校验该交易并幂等到账。"""
     existing = await _find_transaction(transaction_id)
     if existing and existing["status"] == "granted":
@@ -83,7 +135,9 @@ async def verify_and_grant(user_id: str, transaction_id: str) -> dict[str, Any]:
             **await _snapshot(user_id),
         }
 
-    payload, env = await apple_env.fetch_and_verify_transaction(transaction_id)
+    payload, env = await resolve_verified_payload(
+        transaction_id, signed_transaction=signed_transaction
+    )
     product = catalog.product_for(_field(payload, "productId") or "")
     if product is None:
         raise UnknownProductError(_field(payload, "productId") or "")
@@ -195,14 +249,9 @@ async def record_and_grant(
         granted_now = True
 
     # VIP 到账后立即发当月权益（限时钞票/音乐券/补签卡），不必等夜间 cron；
-    # 独立事务，失败不影响已生效的 VIP（cron 扫到 vip_last_grant_at 到期会补发）。
+    # 后台执行以缩短 verify 热路径；失败不影响已生效 VIP（cron 会补发）。
     if granted_now and product.grants_vip:
-        try:
-            await vip_grants.grant_monthly(user_id)
-        except Exception:
-            logger.exception(
-                "iap vip monthly grant failed, cron will retry user=%s", user_id[:8]
-            )
+        fire_background(_grant_vip_monthly_safe(user_id))
 
     logger.info(
         "iap grant ok user=%s product=%s kind=%s",
@@ -219,6 +268,15 @@ async def record_and_grant(
         },
     )
     return {"status": "granted", "kind": product.kind, "replay": False, **await _snapshot(user_id)}
+
+
+async def _grant_vip_monthly_safe(user_id: str) -> None:
+    try:
+        await vip_grants.grant_monthly(user_id)
+    except Exception:
+        logger.exception(
+            "iap vip monthly grant failed, cron will retry user=%s", user_id[:8]
+        )
 
 
 async def reconcile_vip_entitlements(user_id: str, *, client: Any | None = None) -> bool:

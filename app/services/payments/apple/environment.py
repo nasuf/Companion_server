@@ -64,6 +64,11 @@ def _envs_to_try() -> list[Environment]:
     return [Environment.PRODUCTION, Environment.SANDBOX]
 
 
+def env_strings_to_try() -> list[str]:
+    """Environment slug list aligned with [_envs_to_try] (for local JWS verify)."""
+    return [env.value for env in _envs_to_try()]
+
+
 @functools.cache
 def _root_ca_bytes() -> bytes:
     with open(settings.apple_iap_root_ca_path, "rb") as fh:

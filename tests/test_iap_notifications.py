@@ -93,6 +93,45 @@ def _wire(monkeypatch, fake_db, decoded, txn_payload, renewal=None):
 
 
 @pytest.mark.asyncio
+async def test_one_time_charge_grants_consumable_via_app_account_token(monkeypatch):
+    fake = _FakeDb(insert_new=True)
+    decoded = _decoded(NotificationTypeV2.ONE_TIME_CHARGE)
+    txn = _txn("com.bansheng.vip.month", txn="t-otc", otxn="t-otc")
+    txn.appAccountToken = "u1"
+    _wire(monkeypatch, fake, decoded, txn)
+    monkeypatch.setattr(notifications.grant, "_find_transaction", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        notifications.grant, "user_id_for_app_account_token", AsyncMock(return_value="u1")
+    )
+    rg = AsyncMock()
+    monkeypatch.setattr(notifications.grant, "record_and_grant", rg)
+
+    await notifications.apply_notification("signed")
+
+    rg.assert_awaited_once()
+    assert rg.call_args.args[0] == "u1"
+    assert rg.call_args.args[3].product_id == "com.bansheng.vip.month"
+
+
+@pytest.mark.asyncio
+async def test_one_time_charge_skips_when_no_user(monkeypatch):
+    fake = _FakeDb(insert_new=True)
+    decoded = _decoded(NotificationTypeV2.ONE_TIME_CHARGE)
+    txn = _txn("com.bansheng.vip.month", txn="t-otc2", otxn="t-otc2")
+    _wire(monkeypatch, fake, decoded, txn)
+    monkeypatch.setattr(notifications.grant, "_find_transaction", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        notifications.grant, "user_id_for_app_account_token", AsyncMock(return_value=None)
+    )
+    rg = AsyncMock()
+    monkeypatch.setattr(notifications.grant, "record_and_grant", rg)
+
+    await notifications.apply_notification("signed")
+
+    rg.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_did_renew_grants_via_record_and_grant(monkeypatch):
     fake = _FakeDb(insert_new=True, user_row={"user_id": "u1"})
     decoded = _decoded(NotificationTypeV2.DID_RENEW)

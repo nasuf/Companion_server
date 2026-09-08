@@ -100,6 +100,7 @@ EVT_PAYMENT_SUB_RENEW = "payment.subscription_renewed"
 EVT_PAYMENT_SUB_EXPIRE = "payment.subscription_expired"
 EVT_PAYMENT_REFUND = "payment.refund"
 EVT_PAYMENT_REVOKE = "payment.revoke"
+EVT_PAYMENT_ONE_TIME_CHARGE = "payment.one_time_charge"
 
 # Admin wallet operations
 EVT_ADMIN_TICKET_GRANT = "admin.ticket_grant"

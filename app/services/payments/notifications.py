@@ -19,6 +19,7 @@ from app.db import db
 from app.observability.events import (
     EVT_PAYMENT_NOTIFICATION,
     EVT_PAYMENT_NOTIFICATION_FAIL,
+    EVT_PAYMENT_ONE_TIME_CHARGE,
     EVT_PAYMENT_REFUND,
     EVT_PAYMENT_REVOKE,
     EVT_PAYMENT_SUB_EXPIRE,
@@ -144,6 +145,9 @@ async def _dispatch(
     if ntype == NotificationTypeV2.REVOKE.value:
         await _handle_revoke(txn, original_txn_id, env)
         return
+    if ntype == NotificationTypeV2.ONE_TIME_CHARGE.value:
+        await _grant_one_time_charge(txn, env, uuid)
+        return
     # TEST / PRICE_INCREASE / CONSUMPTION_REQUEST / REFUND_DECLINED 等：仅落库审计。
 
 
@@ -166,6 +170,63 @@ async def _grant_from_notification(txn: Any, env: str, uuid: str) -> None:
         user_id[:8],
         extra={"event": EVT_PAYMENT_SUB_RENEW, "environment": env},
     )
+
+
+async def _grant_one_time_charge(txn: Any, env: str, uuid: str) -> None:
+    """Consumable tickets / VIP cards: grant on webhook when user can be resolved."""
+    if txn is None:
+        return
+    transaction_id = _field(txn, "transactionId") or ""
+    if not transaction_id:
+        return
+
+    existing = await grant._find_transaction(transaction_id)  # noqa: SLF001
+    if existing and existing["status"] == "granted":
+        return
+
+    product = catalog.product_for(_field(txn, "productId") or "")
+    if product is None:
+        logger.warning("iap one_time_charge unknown product %s", _field(txn, "productId"))
+        return
+    if product.kind == catalog.KIND_SUBSCRIPTION:
+        return
+
+    user_id = await _user_for_one_time_charge(txn)
+    if not user_id:
+        logger.warning(
+            "iap one_time_charge no user txn=%s product=%s",
+            transaction_id[:12],
+            product.product_id,
+        )
+        return
+
+    await grant.record_and_grant(user_id, txn, env, product, notification_uuid=uuid)
+    logger.info(
+        "iap one_time_charge granted user=%s product=%s",
+        user_id[:8],
+        product.product_id,
+        extra={
+            "event": EVT_PAYMENT_ONE_TIME_CHARGE,
+            "environment": env,
+            "transaction_id": transaction_id,
+            "product_id": product.product_id,
+        },
+    )
+
+
+async def _user_for_one_time_charge(txn: Any) -> str | None:
+    transaction_id = _field(txn, "transactionId") or ""
+    if transaction_id:
+        row = await grant._find_transaction(transaction_id)  # noqa: SLF001
+        if row and row.get("user_id"):
+            return str(row["user_id"])
+
+    user_id = await grant.user_id_for_app_account_token(_field(txn, "appAccountToken"))
+    if user_id:
+        return user_id
+
+    original_txn_id = _field(txn, "originalTransactionId") or transaction_id
+    return await _user_for_original_txn(original_txn_id)
 
 
 async def _handle_refund(txn: Any, env: str) -> None:
