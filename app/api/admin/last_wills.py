@@ -39,7 +39,7 @@ async def test_last_will_sms(payload: LastWillSmsTestRequest) -> LastWillSmsTest
     except RuntimeError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="遗言短信未配置或未启用",
+            detail="遗言短信功能已关闭或未配置",
         ) from None
     except SmsSendError as exc:
         raise HTTPException(

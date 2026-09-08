@@ -91,6 +91,8 @@ def _effective_last_active(row: Any, today: date) -> date:
 
 
 def _last_will_sms_configured() -> bool:
+    if not settings.last_will_sms_enabled:
+        return False
     if not settings.sms_enabled:
         return False
     if settings.sms_mock_enabled and not settings.is_production():
@@ -229,7 +231,14 @@ async def scan_due_last_wills(now: datetime | None = None, *, limit: int = 500) 
             logger.info("[last_will] trigger skipped after concurrent update id=%s", will_id)
             continue
 
-        created = await _create_pending_deliveries(will_id, contacts)
+        created = 0
+        if _last_will_sms_configured():
+            created = await _create_pending_deliveries(will_id, contacts)
+        else:
+            logger.info(
+                "[last_will] SMS disabled, triggered without delivery id=%s",
+                will_id,
+            )
         deliveries += created
         triggered += 1
         logger.info(

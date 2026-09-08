@@ -251,6 +251,9 @@ class Settings(BaseSettings):
     # {1} contact name, {2} inactivity days, {3} will content preview (<=20 chars).
     tencent_sms_last_will_template_id: str = ""
     tencent_sms_region: str = "ap-guangzhou"
+    # Master switch for last-will contact SMS (dispatch + admin test). Off until the
+    # dedicated Tencent template is approved.
+    last_will_sms_enabled: bool = False
 
     # 霸王餐服务员页访问口令: 登录 staff.html 后获得短时 JWT，再调用微信扫一扫。
     # 请配全大写英文字母；空值仅允许本地开发，生产会拒绝服务员登录。

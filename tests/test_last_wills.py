@@ -391,6 +391,11 @@ async def test_scan_due_last_wills_uses_consecutive_missed_login_days(monkeypatc
         ),
     )
     monkeypatch.setattr(last_will_service, "db", db)
+    monkeypatch.setattr(last_will_service.settings, "last_will_sms_enabled", True)
+    monkeypatch.setattr(last_will_service.settings, "sms_enabled", True)
+    monkeypatch.setattr(
+        last_will_service.settings, "tencent_sms_last_will_template_id", "tpl-123"
+    )
 
     stats = await last_will_service.scan_due_last_wills(
         datetime(2026, 5, 29, 3, 0, tzinfo=UTC)
@@ -404,6 +409,46 @@ async def test_scan_due_last_wills_uses_consecutive_missed_login_days(monkeypatc
     delivery_sql = db.query_raw.await_args_list[2].args[0]
     assert "last_will_deliveries" in delivery_sql
     assert "'phone'" in delivery_sql
+
+
+@pytest.mark.asyncio
+async def test_scan_due_last_wills_skips_delivery_when_sms_disabled(monkeypatch):
+    row = {
+        "id": "will-id",
+        "contacts": [{"name": "妈妈", "phone": "13800000000"}],
+        "inactivityDays": 7,
+        "startedAt": datetime(2026, 5, 15, tzinfo=UTC),
+        "lastActivityDate": date(2026, 5, 20),
+        "userLastSeenAt": None,
+        "userUpdatedAt": datetime(2026, 5, 20, tzinfo=UTC),
+        "userCreatedAt": datetime(2026, 5, 1, tzinfo=UTC),
+    }
+    db = SimpleNamespace(
+        query_raw=AsyncMock(
+            side_effect=[
+                [row],
+                [{"id": "will-id"}],
+            ]
+        ),
+    )
+    monkeypatch.setattr(last_will_service, "db", db)
+    monkeypatch.setattr(last_will_service.settings, "last_will_sms_enabled", False)
+
+    stats = await last_will_service.scan_due_last_wills(
+        datetime(2026, 5, 29, 3, 0, tzinfo=UTC)
+    )
+
+    assert stats == {"checked": 1, "triggered": 1, "deliveries": 0}
+    assert db.query_raw.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pending_last_will_deliveries_noop_when_disabled(monkeypatch):
+    monkeypatch.setattr(last_will_service.settings, "last_will_sms_enabled", False)
+
+    stats = await last_will_service.dispatch_pending_last_will_deliveries()
+
+    assert stats == {"claimed": 0, "sent": 0, "failed": 0, "skipped": 0}
 
 
 @pytest.mark.asyncio
@@ -498,6 +543,7 @@ async def test_dispatch_pending_last_will_deliveries_sends_sms(monkeypatch):
         execute_raw=AsyncMock(return_value=1),
     )
     monkeypatch.setattr(last_will_service, "db", db)
+    monkeypatch.setattr(last_will_service.settings, "last_will_sms_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "sms_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "sms_mock_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "app_env", "development")
@@ -532,6 +578,7 @@ async def test_dispatch_pending_last_will_deliveries_marks_invalid_phone_failed(
         execute_raw=AsyncMock(return_value=1),
     )
     monkeypatch.setattr(last_will_service, "db", db)
+    monkeypatch.setattr(last_will_service.settings, "last_will_sms_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "sms_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "sms_mock_enabled", True)
     monkeypatch.setattr(last_will_service.settings, "app_env", "development")
