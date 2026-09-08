@@ -7,6 +7,8 @@ from app.models.iap import (
     AdminIapNotificationItem,
     AdminIapSubscriptionItem,
     AdminIapTransactionItem,
+    AdminRechargeList,
+    AdminVipMemberList,
 )
 from app.services.payments import admin as payments_admin
 
@@ -62,4 +64,30 @@ async def list_notifications(
         unprocessed_only=unprocessed_only,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/vip-members", response_model=AdminVipMemberList)
+async def list_vip_members(
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),  # active | expired | 全部(None)
+    product_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    return await payments_admin.list_vip_members(
+        q=q, status=status, product_id=product_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/recharges", response_model=AdminRechargeList)
+async def list_recharges(
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    environment: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    return await payments_admin.list_recharges(
+        q=q, status=status, environment=environment, limit=limit, offset=offset
     )

@@ -48,6 +48,12 @@ def _payload_dict(payload: Any) -> dict[str, Any]:
         "quantity": _field(payload, "quantity"),
         "type": getattr(type_val, "value", type_val),
         "environment": _field(payload, "environment"),
+        # 实付金额审计：price 是货币最小单位的千分之一（milliunits，¥29→29000），
+        # currency=ISO4217（CNY/USD），storefront=ISO 国家码（CHN/USA）。仅新交易有，
+        # 供 admin 支付管理展示实付金额。旧行为 None。
+        "price": _field(payload, "price"),
+        "currency": _field(payload, "currency"),
+        "storefront": _field(payload, "storefront"),
     }
 
 
