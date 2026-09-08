@@ -130,6 +130,21 @@ def render_component_card_line(content: str, card: dict[str, Any]) -> str:
             line += f"（{sub}）"
         if status:
             line += f"（{status}）"
+    elif card_type == "location":
+        title = str(card.get("title") or "我的位置").strip()
+        address = str(
+            payload.get("address") or card.get("subtitle") or card.get("body") or ""
+        ).strip()
+        city = str(payload.get("city") or "").strip()
+        region = str(payload.get("region") or "").strip()
+        latitude = payload.get("latitude")
+        longitude = payload.get("longitude")
+        place_parts = [part for part in (address, city, region, title) if part]
+        place_text = "，".join(dict.fromkeys(place_parts))
+        coord_text = ""
+        if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+            coord_text = f"（约 {latitude:.5f}, {longitude:.5f}）"
+        line = f"用户分享了当前位置：{place_text}{coord_text}"
     else:
         return text
 

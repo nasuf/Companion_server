@@ -37,9 +37,8 @@ _CARD_CATEGORY_TYPES: dict[str, frozenset[str]] = {
     "capsule": frozenset({"time_capsule"}),
     "gift": frozenset({"gift", "offline_gift"}),
     "red_packet": frozenset({"red_packet"}),
-    # AI-initiated (or user-requested) offline activity recommendations —
-    # same card type either way, see offline/activity_service.py.
     "activity": frozenset({"offline_activity"}),
+    "location": frozenset({"location"}),
 }
 
 

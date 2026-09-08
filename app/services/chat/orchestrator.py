@@ -413,6 +413,9 @@ async def stream_chat_response(
         if isinstance(raw_gift, dict) and raw_gift.get("offering_id"):
             gift_context = raw_gift
     offering_context = red_packet_context or gift_context
+    location_share_context = bool(
+        isinstance(reply_context, dict) and reply_context.get("location_share")
+    )
 
     # 碎片聚合/延迟队列在入队时已落库；sub_intent_mode 共享父调用的原始消息
     if save_user_message and not sub_intent_mode:
@@ -1772,7 +1775,7 @@ async def stream_chat_response(
             messages_dicts=messages_dicts,
             user_emotion=prompt_user_emotion,
             skip_ai_memory=False,
-            skip_memory=bool(offering_context),
+            skip_memory=bool(offering_context) or location_share_context,
             workspace_id=workspace_id,
         ))
         post_process_fired = True

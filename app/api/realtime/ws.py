@@ -113,12 +113,13 @@ def _sanitize_component_card(raw: object) -> dict | None:
         "meal_voucher",
         "red_packet",
         "gift",
+        "location",
     }:
         return None
     payload = _sanitize_component_card_payload(card_type, raw.get("payload"))
     # Red packets are server-issued; a card without offering_id must not
     # enter _handle_message as an empty bubble.
-    if card_type in {"red_packet", "gift"} and not payload:
+    if card_type in {"red_packet", "gift", "location"} and not payload:
         return None
     card: dict = {
         "version": 1,
@@ -303,6 +304,33 @@ def _sanitize_component_card_payload(card_type: object, raw: object) -> dict | N
         if yuan > 0:
             payload["agent_value_yuan"] = yuan
         return payload
+    if card_type == "location":
+        latitude = _safe_float(raw.get("latitude"), min_value=-90.0, max_value=90.0)
+        longitude = _safe_float(raw.get("longitude"), min_value=-180.0, max_value=180.0)
+        if latitude is None or longitude is None:
+            return None
+        payload = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "source": _truncate_payload_value(raw.get("source"), 40).strip() or "device",
+        }
+        for key, limit in (
+            ("address", 240),
+            ("city", 80),
+            ("region", 80),
+            ("country", 80),
+        ):
+            value = _truncate_payload_value(raw.get(key), limit).strip()
+            if value:
+                payload[key] = value
+        accuracy = _safe_float(
+            raw.get("accuracy_meters"),
+            min_value=0.0,
+            max_value=100_000.0,
+        )
+        if accuracy is not None:
+            payload["accuracy_meters"] = accuracy
+        return payload
     return None
 
 
@@ -327,6 +355,21 @@ def _sanitize_music_track_payload(raw: dict) -> dict | None:
         "source": _truncate_payload_value(raw.get("source") or "jamendo", 80),
         "metadata": safe_metadata,
     }
+
+
+def _safe_float(
+    value: object,
+    *,
+    min_value: float,
+    max_value: float,
+) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < min_value or parsed > max_value:
+        return None
+    return parsed
 
 
 def _safe_int(value: object, *, min_value: int, max_value: int) -> int:
@@ -359,6 +402,32 @@ def _component_card_reply_message(text: str, component_card: dict | None) -> str
     if not component_card:
         return None
     card_type = component_card.get("type")
+    if card_type == "location":
+        payload = (
+            component_card.get("payload")
+            if isinstance(component_card.get("payload"), dict)
+            else {}
+        )
+        title = str(component_card.get("title") or "我的位置").strip()
+        address = str(
+            payload.get("address")
+            or component_card.get("subtitle")
+            or component_card.get("body")
+            or ""
+        ).strip()
+        city = str(payload.get("city") or "").strip()
+        region = str(payload.get("region") or "").strip()
+        latitude = payload.get("latitude")
+        longitude = payload.get("longitude")
+        place_parts = [part for part in (address, city, region) if part]
+        place_text = "，".join(dict.fromkeys(place_parts)) or title
+        coord_text = ""
+        if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+            coord_text = f"（约 {latitude:.5f}, {longitude:.5f}）"
+        return (
+            f"用户分享了当前位置：{place_text}{coord_text}。"
+            "请基于这个位置自然回应，不要重复索要定位权限，也不要让用户再发一遍位置。"
+        )
     if card_type not in {"checkin_reminder", "checkin_habit"}:
         return None
 
@@ -1263,9 +1332,18 @@ async def _handle_message(
             text=prompt_text,
             reply_context=current_context,
         )
+    persisted_text = text
+    if (
+        not persisted_text.strip()
+        and isinstance(component_card, dict)
+        and component_card.get("type") == "location"
+    ):
+        from app.services.offerings_memory_text import render_component_card_line
+
+        persisted_text = render_component_card_line("", component_card)
     user_message_id = await _persist_user_message(
         conversation_id,
-        text,
+        persisted_text,
         metadata=_message_metadata(
             plan.metadata,
             client_id=client_id,
@@ -1274,6 +1352,19 @@ async def _handle_message(
             link_card=link_card_metadata,
         ),
     )
+    if (
+        isinstance(component_card, dict)
+        and component_card.get("type") == "location"
+    ):
+        from app.services.location_memory import write_location_share_memories
+
+        fire_background(
+            write_location_share_memories(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                component_card=component_card,
+            )
+        )
     await chat_media_repo.bind_attachments_to_message(
         attachment_ids=[item.id for item in attachments],
         message_id=user_message_id,
@@ -1365,6 +1456,8 @@ async def _handle_message(
         card_context["delay_seconds"] = 0.0
         card_context["component_card_reply"] = True
         card_context["skip_time_memory_lookup"] = True
+        if isinstance(component_card, dict) and component_card.get("type") == "location":
+            card_context["location_share"] = True
         await _queue_reply_or_error(
             ws,
             conversation_id=conversation_id,

@@ -279,7 +279,7 @@ async def search_conversation_messages(
     # (音乐/打卡/胶囊/礼物/红包/活动) narrow the generic card scan to one
     # type family instead of showing every card type mixed together.
     card_category: (
-        Literal["music", "checkin", "capsule", "gift", "red_packet", "activity"]
+        Literal["music", "checkin", "capsule", "gift", "red_packet", "activity", "location"]
         | None
     ) = Query(default=None),
     limit: int = Query(default=30, le=100),
