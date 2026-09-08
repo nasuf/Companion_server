@@ -41,7 +41,7 @@ from app.services.proactive.special_dates import scan_special_dates_today
 from app.services.notifications.capsules import scan_ready_capsule_notifications
 from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
-from app.services.last_will import scan_due_last_wills
+from app.services.last_will import dispatch_pending_last_will_deliveries, scan_due_last_wills
 from app.services.offline.scheduler import scan_offline_triggers
 from app.services.offline.providers.ali1688_token import refresh_access_token
 from app.services.runtime.distributed_lock import (
@@ -660,6 +660,16 @@ def setup_scheduler():
         jitter=300,
     )
 
+    scheduler.add_job(
+        _run_last_will_dispatch,
+        "interval",
+        minutes=5,
+        id="last_will_dispatch",
+        replace_existing=True,
+        max_instances=1,
+        jitter=60,
+    )
+
     # Part 5 §2.1: NTP 校准每 6 小时跑一次
     scheduler.add_job(
         _run_ntp_calibration,
@@ -1190,6 +1200,19 @@ async def _run_last_will_scan():
             _job_failed("Last will scan", e)
 
     await _run_distributed_job("last_will_scan", 3600, _body)
+
+
+async def _run_last_will_dispatch():
+    """Send SMS for pending last-will contact deliveries."""
+    async def _body():
+        try:
+            stats = await dispatch_pending_last_will_deliveries()
+            if stats.get("sent") or stats.get("failed"):
+                logger.info(f"Last will dispatch: {stats}")
+        except Exception as e:
+            _job_failed("Last will dispatch", e)
+
+    await _run_distributed_job("last_will_dispatch", 300, _body)
 
 
 async def _run_redis_health_recheck():

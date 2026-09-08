@@ -247,6 +247,9 @@ class Settings(BaseSettings):
     tencent_sms_sdk_app_id: str = ""
     tencent_sms_sign_name: str = ""
     tencent_sms_template_id: str = ""
+    # Last-will contact notification template. Expected params (audit with Tencent):
+    # {1} contact name, {2} inactivity days, {3} will content preview (<=20 chars).
+    tencent_sms_last_will_template_id: str = ""
     tencent_sms_region: str = "ap-guangzhou"
 
     # 霸王餐服务员页访问口令: 登录 staff.html 后获得短时 JWT，再调用微信扫一扫。

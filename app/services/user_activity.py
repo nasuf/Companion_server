@@ -4,8 +4,11 @@ from datetime import UTC, date, datetime, timedelta, timezone
 import logging
 
 from app.db import db
+from app.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
+
+_ACTIVITY_DAY_TTL_S = 90_000  # ~25h — covers UTC+8 day boundary drift
 
 _LOCAL_TZ = timezone(timedelta(hours=8))
 
@@ -95,6 +98,45 @@ async def record_user_activity(
         raise UserActivityWriteError(
             f"failed to record activity heartbeat for user={user_id}"
         ) from ledger_error
+
+
+async def record_user_activity_throttled(
+    user_id: str,
+    *,
+    source: str,
+    now: datetime | None = None,
+) -> None:
+    """Best-effort daily activity for high-frequency heartbeats.
+
+    Uses a Redis once-per-local-day gate so /auth/heartbeat (every ~40s) does
+    not hammer users + user_daily_activity on every tick while still closing
+    the gap where H5 users never hit /auth/me after initial login.
+    """
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    day = local_activity_date(current)
+    try:
+        redis = await get_redis()
+        gate_key = f"activity:recorded:{user_id}:{day.isoformat()}"
+        if not await redis.set(gate_key, "1", nx=True, ex=_ACTIVITY_DAY_TTL_S):
+            return
+    except Exception as exc:
+        logger.debug(
+            "activity throttle gate miss user=%s source=%s: %r",
+            user_id,
+            source,
+            exc,
+        )
+    try:
+        await record_user_activity(user_id, source=source, now=current)
+    except Exception as exc:
+        logger.warning(
+            "record_user_activity_throttled failed user=%s source=%s: %r",
+            user_id,
+            source,
+            exc,
+        )
 
 
 async def get_login_streak_days(user_id: str, *, today: date | None = None) -> int:

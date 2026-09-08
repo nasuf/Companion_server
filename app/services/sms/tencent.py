@@ -73,8 +73,13 @@ def _tc3_authorization(payload: str, timestamp: int) -> str:
     )
 
 
-async def send_sms_code(phone: str, code: str, ttl_minutes: int) -> None:
-    """Send a verification code to a mainland-CN number via Tencent Cloud SMS.
+async def send_template_sms(
+    phone: str,
+    *,
+    template_id: str,
+    template_params: list[str],
+) -> None:
+    """Send a templated SMS to a mainland-CN number.
 
     ``phone`` is the bare 11-digit number; the +86 prefix is added here.
     Raises ``SmsSendError`` on transport failures or non-Ok statuses.
@@ -84,8 +89,8 @@ async def send_sms_code(phone: str, code: str, ttl_minutes: int) -> None:
             "PhoneNumberSet": [f"+86{phone}"],
             "SmsSdkAppId": settings.tencent_sms_sdk_app_id.strip(),
             "SignName": settings.tencent_sms_sign_name.strip(),
-            "TemplateId": settings.tencent_sms_template_id.strip(),
-            "TemplateParamSet": [code, str(ttl_minutes)],
+            "TemplateId": template_id.strip(),
+            "TemplateParamSet": [str(p) for p in template_params],
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -117,7 +122,6 @@ async def send_sms_code(phone: str, code: str, ttl_minutes: int) -> None:
 
     resp = body.get("Response") or {}
     if resp.get("Error"):
-        # e.g. signature errors, quota exhausted, unaudited template.
         logger.warning(
             "Tencent SMS API error",
             extra={
@@ -130,9 +134,17 @@ async def send_sms_code(phone: str, code: str, ttl_minutes: int) -> None:
     statuses = resp.get("SendStatusSet") or []
     status = statuses[0] if statuses else {}
     if str(status.get("Code")) != "Ok":
-        # Per-number failure: carrier rejection, blacklisted number, limits…
         logger.warning(
             "Tencent SMS per-number failure",
             extra={"event": "sms_send_status_error", "code": status.get("Code")},
         )
         raise SmsSendError(str(status.get("Code") or "sms_status_error"))
+
+
+async def send_sms_code(phone: str, code: str, ttl_minutes: int) -> None:
+    """Send a verification code to a mainland-CN number via Tencent Cloud SMS."""
+    await send_template_sms(
+        phone,
+        template_id=settings.tencent_sms_template_id.strip(),
+        template_params=[code, str(ttl_minutes)],
+    )

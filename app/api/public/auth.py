@@ -40,7 +40,11 @@ from app.services.wechat_auth import (
 from app.services.agent_avatars import build_avatar_url
 from app.services.agent_template import ensure_default_agent_for_user
 from app.services.notifications.presence import record_online, remove_online
-from app.services.user_activity import UserActivityWriteError, record_user_activity
+from app.services.user_activity import (
+    UserActivityWriteError,
+    record_user_activity,
+    record_user_activity_throttled,
+)
 from app.services.user_profile import apply_profile_update, resolve_display_identity
 
 logger = logging.getLogger(__name__)
@@ -586,7 +590,9 @@ async def heartbeat(payload: dict = Depends(require_user)):
     让 H5/web 前台 (即使不在聊天页) 与原生 App 的前台 presence 心跳同等被计入
     实时在线. 前端在会话有效且页面可见时每 ~40s 调一次 (TTL 90s).
     """
-    await record_online(payload["sub"])
+    user_id = payload["sub"]
+    await record_online(user_id)
+    await record_user_activity_throttled(user_id, source="heartbeat")
     return {"ok": True}
 
 

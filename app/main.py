@@ -237,6 +237,7 @@ from app.api.admin.payments import router as admin_payments_router
 from app.api.admin.chat_quota import router as admin_chat_quota_router
 from app.api.admin.offline_settings import router as admin_offline_settings_router
 from app.api.admin.achievement_settings import router as admin_achievement_settings_router
+from app.api.admin.last_wills import router as admin_last_wills_router
 from app.api.admin.tts import (
     public_router as tts_enrollment_public_router,
     router as admin_tts_router,
@@ -298,5 +299,6 @@ app.include_router(admin_payments_router)
 app.include_router(admin_chat_quota_router)
 app.include_router(admin_offline_settings_router)
 app.include_router(admin_achievement_settings_router)
+app.include_router(admin_last_wills_router)
 app.include_router(admin_tts_router)
 app.include_router(tts_enrollment_public_router)
