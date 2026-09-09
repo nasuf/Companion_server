@@ -12,10 +12,10 @@ from __future__ import annotations
 import re
 from calendar import monthrange
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, time
+from datetime import date, datetime, timedelta, time, timezone
 
 from app.services.schedule_domain import holiday_cache
-from app.services.schedule_domain.time_service import _TZ, _now_corrected
+from app.services.schedule_domain.time_service import _TZ, _now_corrected, ensure_aware
 
 _WEEKDAY_CN = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
 
@@ -46,7 +46,14 @@ _RELATIVE_DAYS: list[tuple[str, int]] = sorted(
 _WEEK_PAT = re.compile(r"(上上?|下下?|这|本)(?:个)?周([一二三四五六日天])")
 _WEEK_RANGE_PAT = re.compile(r"(上上|下下|上|下|这|本)(?:个)?周(?![一二三四五六日天末])")
 _WEEKEND_PAT = re.compile(r"(上上|下下|上|下|这|本)?(?:个)?周末")
-_DATE_PAT = re.compile(r"(\d{1,2})月(\d{1,2})[日号]")
+_DATE_PAT = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+# 带年份的显性日期: 2026-08-23 / 2026/8/23 / 2026年8月9日 / 2026 年 8 月 9 日.
+# _DATE_PAT 只认无年份的紧凑写法, 漏了这些 —— 而结构化事件记忆 (送礼/红包/时间
+# 胶囊, offerings.py) 的 content 恰恰用 ISO 前缀。2026-08 生产实测: user 侧靠
+# statement_time 兜底的候选里 14% 栽在这类 content 上 (事件日被错标成说话日)。
+# 必须在 _DATE_PAT 之前解析并注册 span, _add 的 span 去重会自动挡掉 _DATE_PAT
+# 对 "8月9日" 子串的重复匹配 (那会用错年份)。
+_ISO_DATE_PAT = re.compile(r"(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*[日号]?")
 _YEAR_PAT = re.compile(r"(去年|前年|今年)(?:(\d{1,2})月)?")
 _HOUR_PAT = re.compile(r"(?:(早上|上午|中午|下午|晚上|凌晨))?(\d{1,2})[点时](?:(\d{1,2})分?)?")
 # 相对偏移: "3天后 / 2小时前 / 15分钟之后 / 两个月前 / 半年前 / 十五天前"
@@ -59,7 +66,8 @@ _REL_OFFSET_PAT = re.compile(
 )
 _QUICK_TIME_PAT = re.compile(
     r"[今昨明前后]天|[上下这本]周|周末|[上下这]个月"
-    r"|\d{1,2}月\d{1,2}[日号]|\d{1,2}[点时]"
+    r"|\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}"  # ISO/带年份日期, 与 _ISO_DATE_PAT 同步
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*[日号]|\d{1,2}[点时]"
     r"|去年|前年|今年|大[前后]天"
     r"|早上|上午|中午|下午|晚上|凌晨"
     # 必须与 _REL_OFFSET_PAT 保持同步 —— 这是 has_explicit_time 的快速闸门,
@@ -305,6 +313,17 @@ def parse_time_expressions(
             e = datetime(year, month, last_day, 23, 59, 59, tzinfo=_TZ)
             _add(word, s, e, "relative", 0.85, span)
 
+    # --- 4a. 带年份的显性日期 (2026-08-23 / 2026年8月9日). 必须在 4. 之前, 让
+    #         _add 的 span 去重挡掉下面 _DATE_PAT 对 "8月9日" 子串的重复(错年份)匹配 ---
+    for m in _ISO_DATE_PAT.finditer(message):
+        yr, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            d = date(yr, month, day)
+        except ValueError:
+            continue
+        s, e = _day_range(d)
+        _add(m.group(), s, e, "absolute", 0.95, m.span())
+
     # --- 4. X月X日/号 ---
     for m in _DATE_PAT.finditer(message):
         month, day = int(m.group(1)), int(m.group(2))
@@ -453,3 +472,74 @@ def parse_loose_offset(
     else:
         return None
     return now + delta
+
+
+# 明确指向久远过去的词 —— 这些记忆的 statement_time 不能当事件时间用 (会把
+# "小时候在苏州长大" 标成今天)。单一真理来源: retrieval/timeline.py 从这里 import
+# (原本各存一份, 迟早漂)。改这里要同步跑 evals/temporal_recall。
+VAGUE_PAST_RE = re.compile(r"小时候|童年|少年时|以前|从前|当年|那时候|很久以前|上学时|读书时")
+
+# occur_time 可兜底的主类目 (事件类)。身份/偏好/思维是稳定事实, 没有"发生时刻"。
+_DATEABLE_MAIN = ("生活", "情绪")
+
+
+def resolve_occur_time(
+    content: str,
+    *,
+    statement_time: datetime | None,
+    main_category: str | None,
+    sub_category: str | None = None,
+    provenance: str | None = None,
+) -> datetime | None:
+    """事件类记忆的 occur_time 三层解析。上游已给出 occur_time 时不该调用本函数。
+
+    背景 (2026-08 生产诊断): 事件类记忆 (生活/情绪) 里 user 侧只有 6-7% 填了
+    occur_time, 因为抽取产出的是剥掉时间词的摘要 ("用户喜欢吃酸菜鱼"), 规则引擎
+    在 content 上几乎抓不到东西 (user 侧 1%)。真正的杠杆是 statement_time 兜底
+    (event ≈ 说到它的时刻, 见 Beyond Dialogue Time, arXiv:2601.07468), 实测能
+    覆盖 99%。三层:
+
+      Tier A  content 里有显性日期 → 相对 statement_time 解析 (含 ISO/带年份,
+              见 _ISO_DATE_PAT)。精确, 抓得住 "8月9日埋的时间胶囊" 这类事件≠说话日。
+      Tier B  无显性日期 → occur_time = statement_time (事件≈说话时刻)。
+
+    返回 None 的情形 (刻意不猜, 错的 occur_time 比空的更糟 —— 会让下游算出完全
+    错误的间隔):
+      - 非事件类主类目 (身份/偏好/思维)
+      - sub="提醒" (必须由上游给精确未来时间, 绝不能退到"现在")
+      - provenance=profile_seed (建号往事叙事, 事件≠建号时刻)
+      - content 含"远过去"词 (小时候/几年前…, VAGUE_PAST_RE)
+    """
+    if main_category not in _DATEABLE_MAIN:
+        return None
+    if sub_category == "提醒":
+        return None
+    if provenance == "profile_seed":
+        return None
+    base = statement_time or _now_corrected()
+    # Tier A: content 里的**显性日历日期** (ISO / X月X日 / 年+月), 相对说话时刻解析。
+    #
+    # 刻意只认日历日期, 不认相对词 (明天/周末/一周前) 和纯时段 (晚上/下午): 摘要里
+    # 的相对词往往是"提到的计划"而非"事件本身" —— "晚上视频聊周末约饭" 的事件是
+    # 今晚视频, 把 occur_time 标成周末就错了。日历日期 (送礼/红包/时间胶囊的 ISO
+    # 前缀) 才是无歧义的事件日。相对/时段一律落到 Tier B (说话时刻), 那对摘要类
+    # 记忆是更可辩护的默认。(聊天消息里真正的未来事件 "我明天面试" 由 pipeline 在
+    # 上游解析原始消息时就已写好 occur_time, 到不了这里。)
+    calendar = [
+        p for p in parse_time_expressions(content or "", now=base)
+        if _ISO_DATE_PAT.search(p.original_text)
+        or _DATE_PAT.search(p.original_text)
+        or (_YEAR_PAT.search(p.original_text) and "月" in p.original_text)
+    ]
+    if calendar:
+        # 只取日历「日期」, 锚定在 UTC 12:00 落库。occur_time 列是 timestamp
+        # without time zone, ORM 会把 aware datetime 转成 UTC 存 —— 若锚在 +08
+        # 午夜 (parser 的 start), 转 UTC 后退到前一天 (2026-08 实测: "8月20日的
+        # 红包" 被存成 08-19)。取当天正午 UTC 让日期在任何 ±小时偏移下都稳。
+        d = max(calendar, key=lambda p: p.confidence).start.astimezone(_TZ).date()
+        return datetime(d.year, d.month, d.day, 12, 0, tzinfo=timezone.utc)
+    # 远过去词: 说话时刻 ≠ 事件时刻, 不兜底。
+    if content and VAGUE_PAST_RE.search(content):
+        return None
+    # Tier B: statement_time 兜底。
+    return ensure_aware(base)

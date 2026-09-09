@@ -18,6 +18,7 @@ from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     distributed_lock,
 )
+from app.services.schedule_domain.time_parser import resolve_occur_time
 from app.services.workspace.workspaces import resolve_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,21 @@ async def store_memory(
         )
         return None
     memory_type = normalize_memory_type(taxonomy.legacy_type)
+
+    # occur_time 兜底 (2026-08): 事件类记忆 (生活/情绪) 若上游没给事件时间, 在这里
+    # 解析 —— content 里有显性日期就用它 (相对说话时刻), 否则退到说话时刻本身
+    # (event ≈ 说到它的时刻)。放在 store_memory 这个唯一收口, 让聊天抽取 / 每日
+    # 总结 / 送礼红包 / L3 整合等**所有**写入路径都受益, 而不是各写一遍。分层与
+    # 排除 (提醒/profile_seed/远过去词/非事件类) 见 time_parser.resolve_occur_time。
+    # 放在拆分前 → 拆出的多行共享同一 occur_time。
+    if occur_time is None:
+        occur_time = resolve_occur_time(
+            content,
+            statement_time=statement_time,
+            main_category=taxonomy.main_category,
+            sub_category=taxonomy.sub_category,
+            provenance=provenance,
+        )
 
     if not _split_done:
         pieces = _split_for_storage(content, taxonomy)

@@ -39,6 +39,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.services.schedule_domain.time_parser import VAGUE_PAST_RE as _VAGUE_PAST_RE
+
 # 聚合类提问的词面特征。刻意用规则而不是 LLM: 这是热路径上的一个开关, 判错的代价
 # 只是多注入/少注入一段时间线, 不值得为它加一次模型调用。
 _AGGREGATE_PATTERNS = (
@@ -55,9 +57,8 @@ _AGGREGATE_PATTERNS = (
 )
 _AGGREGATE_RE = re.compile("|".join(_AGGREGATE_PATTERNS))
 
-# 明确指向久远过去的词。这些记忆的 statement_time 不能当事件时间用 ——
-# 标错日期比缺一条更糟。
-_VAGUE_PAST_RE = re.compile(r"小时候|童年|少年时|以前|从前|当年|那时候|很久以前|上学时|读书时")
+# 远过去词 _VAGUE_PAST_RE 从 time_parser import (见顶部) —— occur_time 写入侧兜底
+# 与这里的时间线过滤用同一份判定, 单一真理来源, 两处各存一份迟早漂。
 
 
 def is_aggregate_time_question(text: str) -> bool:
