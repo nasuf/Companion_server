@@ -108,7 +108,34 @@ CASES: tuple[TemporalCase, ...] = (
     TemporalCase(
         "stale-newmood", "stale_topic", "今天好累啊", gap_seconds=2 * _D,
         now_hour=21, history=_MIDTRIP,
+        must_not_contain=("成都", "四五天", "景点", "行程"),
         note="隔2天用户说累: 该接'累', 不该无端追问成都行程"),
+
+    # ── stale_topic·带内容重逢: 用户带全新实质话题回来, 旧话题的词面出现即铁证
+    #    复活 (确定性红线比 LLM 判更硬)。这组是给 P4 度量做校准 —— 极简消息
+    #    ("在吗") 最易诱发复活, 带内容的真实重逢是否也这么高? ──
+    TemporalCase(
+        "stale-content-hospital", "stale_topic",
+        "我刚从医院陪我妈做完检查，有点累", gap_seconds=2 * _D, now_hour=19,
+        history=_MIDTRIP, must_not_contain=("成都", "四五天", "景点", "行程"),
+        note="隔2天带全新话题(医院/妈): 该接新事, 不该翻成都"),
+    TemporalCase(
+        "stale-content-interview", "stale_topic",
+        "刚面试完，紧张死了", gap_seconds=5 * _H, now_hour=17,
+        history=_MIDTRIP, must_not_contain=("成都", "四五天", "景点", "行程"),
+        note="隔5小时带全新话题(面试): 不该翻成都"),
+    TemporalCase(
+        "stale-content-newjob", "stale_topic",
+        "我要换工作了！下周入职新公司", gap_seconds=3 * _D, now_hour=15,
+        history=_MIDTRIP, must_not_contain=("成都", "四五天", "景点", "行程"),
+        note="隔3天带重大新消息(换工作): 该接大新闻, 绝不该翻成都"),
+    TemporalCase(
+        "stale-content-busy", "stale_topic",
+        "这周忙疯了终于歇下来", gap_seconds=8 * _D, now_hour=20,
+        history=_MIDMOOD,
+        # 旧话题"看电影"是通用活动, 豆包用"看啥片/看什么类型"改写就逃字面红线 ——
+        # 实证 stale 得靠 LLM 判, 确定性红线只对带专名的旧话题(成都/四五天)可靠。
+        note="隔8天带全新话题(忙): 该接'忙', 不该翻看电影(靠LLM判, 通用词红线抓不住)"),
 )
 
 GROUPS: tuple[str, ...] = ("reunion", "time_of_day", "no_hallucination", "stale_topic")
