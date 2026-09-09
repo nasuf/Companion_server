@@ -8,6 +8,7 @@ topic/category alignment, and safety/emotional context.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from app.services.memory.polarity import query_semantic_conflict_reasons
@@ -59,6 +60,50 @@ _USER_IDENTITY_SUBCATEGORIES: tuple[str, ...] = (
     "姓名", "年龄", "生日", "现居地", "职业/与经济", "性别", "身高",
     "体型", "居住", "其他",
 )
+# 求近查询: 明确要"最新/当前"的那一条 ("最近一次去健身" / "这个月" / "现在住哪")。
+# 刻意排除"X个月前 / 去年 / 前年"这类**指向具体过去**的查询 —— 它们要的是旧的那条
+# (temporal_recall 的 point_two_months_ago 期望最老的面试), 用求近信号会答反。
+# 不含"上周/上次"以外的窗口词: 这些交给 has_explicit_time 的时间范围搜索。
+_RECENCY_SEEKING_RE = re.compile(
+    r"最近|最新|近来|近期|这个?月|本月|这周|本周|现在|目前|眼下|如今|上次|最后一次"
+)
+
+# 求近查询里, occur_time 越新的候选 boost 越大, 用连续衰减而非新鲜度那种 30/90/180
+# 天粗桶 —— 粗桶分不开"2 天前"和"20 天前"的两次健身 (都落 <30 天桶), 而求近查询
+# 恰恰要在这种同桶、语义几乎相同的多条事件里挑最新的一条。半衰期 30 天: 事件每老
+# 30 天 boost 减半。0.5 权重是让它足以在同相似度的候选间拉开次序, 又不至于盖过
+# 相似度本身 (跟其它 boost 一个量级)。仅在求近查询上生效, 不碰其它查询 —— 避免
+# 重蹈 importance 一刀切乘进排序反而变差的覆辙 (见 relevance.compute_display_score)。
+_RECENCY_BOOST_WEIGHT = 0.5
+_RECENCY_HALFLIFE_DAYS = 30.0
+
+
+def _is_recency_seeking_query(query: str) -> bool:
+    return bool(query and _RECENCY_SEEKING_RE.search(query))
+
+
+def _occur_recency_factor(memory: dict[str, Any]) -> float | None:
+    """occur_time 越新 → 越接近 1.0, 每老一个半衰期减半。无 occur_time 返回 None。
+
+    用 occur_time (事件发生时刻) 而不是 last_accessed (多久没被碰): 求近查询问的是
+    "哪件事最近发生", 不是"哪条记忆最近被聊到"。
+    """
+    raw = memory.get("occur_time")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(raw, datetime):
+        return None
+    if raw.tzinfo is None:
+        raw = raw.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (datetime.now(timezone.utc) - raw).total_seconds() / 86400.0)
+    return 0.5 ** (age_days / _RECENCY_HALFLIFE_DAYS)
+
+
 _EXACT_TEXT_MATCH_FLOOR = 1.20
 _HIGH_SIMILARITY_THRESHOLD = 0.86
 _HIGH_SIMILARITY_FLOOR = 0.94
@@ -379,6 +424,16 @@ def rank_memory_candidate(
     if mention_count >= 3:
         boost += 0.05
         reasons.append("多次提及")
+
+    # 求近查询: 在语义几乎相同、只有 occur_time 不同的多条事件里 (三次面试/多次
+    # 健身), 让事件最新的那条排最前。基础新鲜度按 30/90 天粗桶算, 分不开同桶内的
+    # 两次事件 —— 这里用连续的 occur_time 衰减补上这个分辨率。exact/关系名等强信号
+    # 已经命中时不再叠加 (那些查询本就有确定答案, 不是在挑最新)。
+    if _is_recency_seeking_query(query) and not exact_text_match:
+        occ = _occur_recency_factor(memory)
+        if occ is not None:
+            boost += _RECENCY_BOOST_WEIGHT * occ
+            reasons.append("求近:事件新近")
 
     score *= boost
 
