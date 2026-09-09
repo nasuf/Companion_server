@@ -5,20 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from app.db import db
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import render_prompt
+from app.services.relationship.ai_mood import load_ai_mood
 from app.services.relationship.intimacy import get_relationship_stage, get_topic_intimacy
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.core_memory import load_core_memory_strings
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
 
 logger = logging.getLogger(__name__)
-UTC = timezone.utc
 
 
 async def build_proactive_context(
@@ -31,13 +30,14 @@ async def build_proactive_context(
     exclude_memory_ids: set[str] | None = None,
     source: str | None = None,
     topic_theme: str | None = None,
+    conversation_id: str | None = None,
 ) -> dict[str, Any]:
     # 9 个独立 I/O 并发 (DB / Redis / LLM rerank). _load_proactive_memories
     # 含 utility LLM 调用是最长尾, 跟其余 DB 读并行可让 LLM 时间被吸收.
     (
         agent, schedule, core_memories,
-        proactive_memories_pair, topic_intimacy, silence_hours,
-        user_portrait, recent_context,
+        proactive_memories_pair, topic_intimacy,
+        user_portrait, recent_context, ai_mood,
     ) = await asyncio.gather(
         db.aiagent.find_unique(where={"id": agent_id}),
         get_cached_schedule(agent_id),
@@ -50,9 +50,11 @@ async def build_proactive_context(
             topic_theme=topic_theme,
         ),
         get_topic_intimacy(agent_id, user_id),
-        _compute_silence_hours(workspace_id),
         get_latest_portrait(user_id, agent_id),
         _load_recent_context(workspace_id),
+        # AI 上一轮的残留情绪 (30min 半衰期衰减后). 主动消息的 current_mood 靠它 —
+        # 没有它 ctx 里永远没 "emotion" 键, emotion_to_tone(None) 恒为中性语气.
+        load_ai_mood(conversation_id),
     )
     if not agent:
         raise ValueError(f"Agent not found: {agent_id}")
@@ -72,7 +74,8 @@ async def build_proactive_context(
         "used_memory_ids": used_memory_ids,
         "relationship_stage": relationship_stage,
         "topic_intimacy": topic_intimacy,
-        "silence_hours": silence_hours,
+        # emotion_to_tone 读的就是这个形状 ({"emotion": 标签, ...}); None → 中性语气
+        "emotion": ai_mood,
         "scene_hint": scene_hint,
         "trigger_type": trigger_type,
         "stage": stage,
@@ -246,29 +249,3 @@ def _build_scene_hint(trigger_type: str, schedule_status: dict[str, Any]) -> str
     if trigger_type == "memory_proactive":
         return "优先从用户过往记忆里选一个具体点切入，不要泛泛问候。"
     return "优先用轻量、低打扰的方式重新建立联系。"
-
-
-async def _compute_silence_hours(workspace_id: str) -> float:
-    rows = await db.query_raw(
-        """
-        SELECT m.created_at
-        FROM messages m
-        JOIN conversations c ON c.id = m.conversation_id
-        WHERE c.workspace_id = $1
-          AND c.is_deleted = FALSE
-        ORDER BY m.created_at DESC
-        LIMIT 1
-        """,
-        workspace_id,
-    )
-    if not rows:
-        return 999.0
-    last_created = rows[0].get("created_at")
-    if not isinstance(last_created, datetime):
-        try:
-            last_created = datetime.fromisoformat(str(last_created))
-        except ValueError:
-            return 999.0
-    if last_created.tzinfo is None:
-        last_created = last_created.replace(tzinfo=UTC)
-    return max(0.0, (datetime.now(UTC) - last_created.astimezone(UTC)).total_seconds() / 3600.0)

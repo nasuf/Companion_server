@@ -441,6 +441,7 @@ async def generate_and_send_proactive(
         exclude_memory_ids=prep.exclude_memory_ids,
         source=source,
         topic_theme=topic_theme,
+        conversation_id=prep.conversation_id,
     )
     if source == "music":
         source = await _prepare_music_recommendation_source(

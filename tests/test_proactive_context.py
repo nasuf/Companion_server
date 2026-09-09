@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -314,6 +314,71 @@ async def test_determine_proactive_stage_4_tier():
         ):
             stage = await determine_proactive_stage("agent1", "user1")
         assert stage == expected, f"intimacy={intimacy} → expected={expected}, got={stage}"
+
+
+@pytest.mark.asyncio
+async def test_build_context_populates_emotion_from_ai_mood():
+    """回归: build_proactive_context 必须把 AI 残留情绪塞进 ctx['emotion']。
+
+    之前 ctx 从没有 'emotion' 键 → sender 的 emotion_to_tone(ctx.get('emotion'))
+    恒为 None → 每条主动消息都是中性语气 (current_mood 字段形同虚设)。
+    """
+    from app.services.proactive import context as C
+
+    mood = {"emotion": "高兴", "intensity": 70}
+    mock_db = MagicMock()
+    mock_db.aiagent.find_unique = AsyncMock(return_value=SimpleNamespace(id="a1", name="小芜"))
+    with (
+        patch.object(C, "db", mock_db),
+        patch.object(C, "get_cached_schedule", new_callable=AsyncMock, return_value=None),
+        patch.object(C, "load_core_memory_strings", new_callable=AsyncMock, return_value=[]),
+        patch.object(C, "_load_proactive_memories", new_callable=AsyncMock,
+                     return_value=([], [])),
+        patch.object(C, "get_topic_intimacy", new_callable=AsyncMock, return_value=50.0),
+        patch.object(C, "get_latest_portrait", new_callable=AsyncMock, return_value=""),
+        patch.object(C, "_load_recent_context", new_callable=AsyncMock, return_value=""),
+        patch.object(C, "load_ai_mood", new_callable=AsyncMock, return_value=mood) as load_mood,
+    ):
+        ctx = await C.build_proactive_context(
+            workspace_id="ws1", user_id="u1", agent_id="a1",
+            trigger_type="memory_proactive", stage="warming",
+            conversation_id="conv-1",
+        )
+
+    # load_ai_mood 用传入的 conversation_id 取, 结果原样进 'emotion' 键
+    load_mood.assert_awaited_once_with("conv-1")
+    assert ctx["emotion"] == mood
+    # emotion_to_tone 拿到真实情绪 → 非中性语气
+    from app.services.relationship.emotion import emotion_to_tone
+    assert emotion_to_tone(ctx["emotion"]) != emotion_to_tone(None)
+    # 已删除的死字段不该再出现
+    assert "silence_hours" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_build_context_emotion_none_when_no_mood():
+    """无残留情绪 (衰减到 None / 无 conversation_id) → ctx['emotion'] 为 None, 中性语气兜底。"""
+    from app.services.proactive import context as C
+
+    mock_db = MagicMock()
+    mock_db.aiagent.find_unique = AsyncMock(return_value=SimpleNamespace(id="a1", name="小芜"))
+    with (
+        patch.object(C, "db", mock_db),
+        patch.object(C, "get_cached_schedule", new_callable=AsyncMock, return_value=None),
+        patch.object(C, "load_core_memory_strings", new_callable=AsyncMock, return_value=[]),
+        patch.object(C, "_load_proactive_memories", new_callable=AsyncMock,
+                     return_value=([], [])),
+        patch.object(C, "get_topic_intimacy", new_callable=AsyncMock, return_value=50.0),
+        patch.object(C, "get_latest_portrait", new_callable=AsyncMock, return_value=""),
+        patch.object(C, "_load_recent_context", new_callable=AsyncMock, return_value=""),
+        patch.object(C, "load_ai_mood", new_callable=AsyncMock, return_value=None),
+    ):
+        ctx = await C.build_proactive_context(
+            workspace_id="ws1", user_id="u1", agent_id="a1",
+            trigger_type="silence_wakeup", stage="warming",
+        )
+
+    assert ctx["emotion"] is None
 
 
 def test_silence_prompts_carry_current_mood():
