@@ -152,7 +152,9 @@ async def main() -> None:
 
         # 生成用生产 get_chat_model(): invoke_text 的 resilience 层期望 app 工厂
         # 造的模型 (带 provider 元数据做 fallback), 裸 ChatOpenAI 传进去不工作。
-        # 本地 deepseek 余额耗尽会自动 fallback 到 ollama —— 走的仍是真实回复路径。
+        # 连生产 DB + ensure_loaded() 后, 它解析到线上真实配置 (2026-09: chat=
+        # ark doubao-seed-character, small=dashscope qwen3.5-flash), 评的就是
+        # 线上实际在用的模型。评审建议 --judge 换到非 ark 厂商避免自评偏好。
         chat_model = get_chat_model()
         judge_model = build_model(args.judge) or get_utility_model()
         cases = tuple(c for c in CASES if not args.group or c.group == args.group)
@@ -162,7 +164,7 @@ async def main() -> None:
 
         results: list[dict] = []
         for case in cases:
-            for s in range(args.samples):
+            for _ in range(args.samples):
                 try:
                     reply = await _generate(agent, case, chat_model)
                 except Exception as e:
