@@ -211,7 +211,10 @@ def _cached_ollama_embedder() -> Callable[[list[str]], Awaitable[list[list[float
                 print(f"batch embed failed ({e}); falling back to raw endpoint…")
                 vecs = await _embed_via_raw_endpoint(pending)
             for t, v in zip(pending, vecs):
-                cache[hashlib.md5(t.encode()).hexdigest()] = v
+                # key 必须跟上面读取用的 md5(model+text) 一致 —— 原来写 md5(text)
+                # 少了 model 段, 缓存里有 pending 项时 return 那行必 KeyError
+                # (换 embedding 模型或缓存过期后触发)。
+                cache[hashlib.md5(f"{model_name}\x00{t}".encode()).hexdigest()] = v
             _CACHE_PATH.write_text(json.dumps(cache))
         return [cache[k] for k in keys]
 
