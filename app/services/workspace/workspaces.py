@@ -54,8 +54,20 @@ async def create_workspace(user_id: str, agent_id: str) -> Any:
     )
 
 
-async def create_provisioning_workspace(user_id: str, agent_id: str) -> Any:
-    return await db.chatworkspace.create(
+async def create_provisioning_workspace(
+    user_id: str,
+    agent_id: str,
+    *,
+    allow_multiple_active: bool = False,
+) -> Any:
+    """Create a workspace in ``provisioning`` status (not yet uniquely-active).
+
+    ``allow_multiple_active=True`` opts this row out of
+    ``chat_workspaces_user_id_active_key`` so the owner can have several
+    concurrent active workspaces. Required for the template system user;
+    regular users must leave it False (one companion at a time).
+    """
+    workspace = await db.chatworkspace.create(
         data={
             "id": uuid4().hex,
             "user": {"connect": {"id": user_id}},
@@ -63,6 +75,23 @@ async def create_provisioning_workspace(user_id: str, agent_id: str) -> Any:
             "status": "provisioning",
         }
     )
+    if allow_multiple_active:
+        # Raw SQL so the write path works even before a Prisma client regen
+        # picks up allowMultipleActive (same pattern as knowledge_synced_at).
+        # Must succeed before activate_workspace: the unique index still
+        # rejects a second active row if this flag is still FALSE.
+        try:
+            await db.execute_raw(
+                "UPDATE chat_workspaces SET allow_multiple_active = TRUE WHERE id = $1",
+                workspace.id,
+            )
+        except Exception:
+            await db.chatworkspace.update(
+                where={"id": workspace.id},
+                data={"status": "archived", "archivedAt": utc_now()},
+            )
+            raise
+    return workspace
 
 
 async def _restart_proactive_for_workspace(workspace_id: str) -> None:

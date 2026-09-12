@@ -191,6 +191,12 @@ model ChatWorkspace {
   agent                    AiAgent?                        @relation(fields: [agentId], references: [id])
   status                   String                          @default("active")
   archivedAt               DateTime?                       @map("archived_at")
+  // Template system user owns MANY coexisting templates, each with its own
+  // active workspace. Regular users still have at most one: the partial unique
+  // index chat_workspaces_user_id_active_key (raw SQL — Prisma has no partial
+  // unique DSL) is UNIQUE(user_id) WHERE status='active' AND
+  // allow_multiple_active=false. Only the template provisioning path sets this.
+  allowMultipleActive      Boolean                         @default(false) @map("allow_multiple_active")
   createdAt                DateTime                        @default(now()) @map("created_at")
   updatedAt                DateTime                        @updatedAt @map("updated_at")
   conversations            Conversation[]

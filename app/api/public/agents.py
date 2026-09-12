@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from prisma import Json
+from prisma.errors import UniqueViolationError
 
 from app.api.jwt_auth import require_user
 from app.api.ownership import (
@@ -355,7 +356,13 @@ async def create_agent_with_provisioning(
     workspace = None
     try:
         agent = await db.aiagent.create(data=create_data)
-        workspace = await create_provisioning_workspace(user_id, agent.id)
+        # Template path skips sibling staging, so the workspace must also opt
+        # out of chat_workspaces_user_id_active_key (one active row per user).
+        workspace = await create_provisioning_workspace(
+            user_id,
+            agent.id,
+            allow_multiple_active=not stage_existing_workspaces,
+        )
     except Exception:
         if agent is not None:
             await db.aiagent.update(
@@ -376,7 +383,7 @@ async def create_agent_with_provisioning(
         workspace = await activate_workspace(workspace.id)
         if staged_workspaces:
             await finalize_archived_workspaces(staged_workspaces)
-    except Exception:
+    except Exception as exc:
         if workspace is not None:
             await archive_provisioning_workspace(workspace.id)
         if agent is not None:
@@ -386,6 +393,15 @@ async def create_agent_with_provisioning(
             )
         if staged_workspaces:
             await restore_staged_workspaces(staged_workspaces)
+        if isinstance(exc, UniqueViolationError):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "无法同时激活多个模板工作区"
+                    if not stage_existing_workspaces
+                    else "已有进行中的对话空间，请稍后再试"
+                ),
+            ) from exc
         raise
 
     # Spec §1.3：7 维 → MBTI 4 轴用大模型推导，再 §1.4 单步 LLM 生 background。
