@@ -1,18 +1,20 @@
-"""Template registry: the system owner + the default-template pointer.
+"""Template registry: system owner + enrollment pool for new-user cloning.
 
-Templates are ordinary, fully-provisioned agents that happen to be owned by a
-reserved *system user* (so they never appear in any real user's agent list and
-are never chatted with by end users). The "which template is the default for new
-users" pointer lives in ``system_config.default_template_agent_id`` and is
-managed from the web admin (Agent管理 → 模板管理).
+Templates are ordinary, fully-provisioned agents owned by a reserved *system
+user* (they never appear in a real user's agent list). Many templates can be
+open at once; a new signup randomly clones one from the open pool
+(``status='active' AND template_enabled=TRUE``). Stopping a template flips
+only ``template_enabled`` — already-cloned users keep their independent agent.
 
-The pointer is read/written with raw SQL so it works regardless of whether the
-Prisma client has been regenerated for the new column.
+The legacy ``system_config.default_template_agent_id`` pointer is still
+readable (env fallback / old admin clients) but is no longer the matching
+source of truth.
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Any
 
 from app.config import settings
@@ -85,6 +87,101 @@ async def is_template_agent(agent_id: str) -> bool:
     owner = await get_or_create_template_user()
     agent = await db.aiagent.find_unique(where={"id": agent_id})
     return bool(agent and agent.userId == owner.id)
+
+
+def is_enrolling(agent: Any) -> bool:
+    """True when this template is in the new-user matching pool."""
+    if getattr(agent, "status", "") != "active":
+        return False
+    flag = getattr(agent, "templateEnabled", None)
+    # Column missing from an old Prisma client → treat provisioned templates
+    # as open (matches the SQL DEFAULT TRUE).
+    if flag is None:
+        return True
+    return bool(flag)
+
+
+async def list_enrolling_template_ids() -> list[str]:
+    """Ids of fully-provisioned templates currently open for cloning."""
+    owner_id = await get_template_owner_id()
+    if not owner_id:
+        return []
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT id FROM ai_agents
+            WHERE user_id = $1
+              AND status = 'active'
+              AND template_enabled = TRUE
+            ORDER BY created_at ASC
+            """,
+            owner_id,
+        )
+    except Exception as exc:
+        logger.warning("[TEMPLATE] list_enrolling_template_ids failed: %s", exc)
+        return []
+    return [str(row["id"]) for row in rows if row.get("id")]
+
+
+def pick_enrolling_template_id(ids: list[str]) -> str | None:
+    """Uniform random choice; None when the pool is empty."""
+    if not ids:
+        return None
+    return secrets.choice(ids)
+
+
+async def _restore_template_runtime(agent_id: str) -> None:
+    """Bring a legacy-archived template back to status=active.
+
+    Only this template's agent row + its own workspace are touched. Cloned
+    user agents (source_template_id = this id) are independent and stay as-is.
+    """
+    from app.services.workspace.workspaces import reactivate_workspace
+
+    agent = await db.aiagent.find_unique(where={"id": agent_id})
+    if agent and getattr(agent, "status", "") != "active":
+        await db.aiagent.update(
+            where={"id": agent_id},
+            data={"status": "active", "archivedAt": None},
+        )
+    workspace = await db.chatworkspace.find_first(
+        where={"agentId": agent_id},
+        order={"createdAt": "desc"},
+    )
+    if workspace is None:
+        raise ValueError("模板没有工作区，无法开放给新用户")
+    if getattr(workspace, "status", "") != "active":
+        await reactivate_workspace(workspace.id)
+
+
+async def set_template_enabled(agent_id: str, enabled: bool) -> None:
+    """Open or close a template for new-user matching.
+
+    Enable restores a wrongly-archived template (workspace + agent row only)
+    *before* the oversized-memory check, so a dirty archived template becomes
+    editable instead of staying stuck. Disable only flips the flag.
+    """
+    if enabled:
+        # Restore first so a legacy-archived template becomes editable even if
+        # the oversized check then refuses to open it for new users.
+        await _restore_template_runtime(agent_id)
+        oversized = await count_oversized_memories(agent_id)
+        if oversized:
+            raise ValueError(
+                f"该 agent 有 {oversized} 条记忆超过检索单条上限, 不能开放给新用户 —— "
+                f"克隆会逐字复制, 每个新用户都会继承这些永远检索不到的记忆。"
+                f"请先用 scripts/split_oversized_memories.py 拆分后重试。"
+            )
+    await db.execute_raw(
+        "UPDATE ai_agents SET template_enabled = $1, updated_at = now() WHERE id = $2",
+        enabled,
+        agent_id,
+    )
+    logger.info(
+        "[TEMPLATE] enrollment %s for %s",
+        "open" if enabled else "closed",
+        agent_id[:8],
+    )
 
 
 async def count_active_clones(template_agent_id: str) -> int:

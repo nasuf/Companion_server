@@ -42,7 +42,10 @@ from prisma import Json
 
 from app.db import db
 from app.services.agent_avatars import pick_agent_avatar
-from app.services.agent_template.registry import get_default_template_agent_id
+from app.services.agent_template.registry import (
+    list_enrolling_template_ids,
+    pick_enrolling_template_id,
+)
 from app.services.memory.retrieval.context_selector import exceeds_injection_limit
 from app.services.speech_output.voices import assign_random_voice
 from app.services.workspace.workspaces import (
@@ -138,7 +141,7 @@ async def _clone_ai_memories(
     #   跳过  → 克隆与模板不再等价, 而且原文丢了, 以后修好模板也没法回填这些克隆;
     #   拆分  → 拆出来的新文本跟模板的 embedding 不再对应, 得在注册热路径上重新
     #          嵌入 (正是下面那段批量 copy 特意要避开的 N+1)。
-    # 真正的闸门在模板侧 (registry.set_default_template_agent_id), 这里只负责让
+    # 真正的闸门在模板侧 (registry.set_template_enabled), 这里只负责让
     # "模板脏了"这件事不再无声无息。
     oversized = [
         row for row in template_rows
@@ -410,18 +413,21 @@ async def _has_agent_or_pending(user_id: str) -> bool:
 
 
 async def ensure_default_agent_for_user(user_id: str):
-    """Idempotently give a user the default cloned agent, if configured.
+    """Idempotently give a user a cloned agent from the open template pool.
 
     * No-op (returns None) when the user already has an active workspace, or when
-      no default template is configured, or on any failure (login must not break).
-    * Otherwise clones the configured default template and returns the new agent.
+      no template is currently open for enrollment, or on any failure (login
+      must not break).
+    * Otherwise picks one open template at random, clones it, and returns the
+      new agent. Stopping / archiving a template later does not touch this clone.
 
     Concurrency: a short-lived Redis lock serializes simultaneous first-logins of
     the same user so two requests can't each create a clone (which would leave an
     orphaned archived workspace). The lock is best-effort — if Redis is down we
     fall back to the DB checks, which still prevent the common (sequential) case.
     """
-    template_id = await get_default_template_agent_id()
+    pool = await list_enrolling_template_ids()
+    template_id = pick_enrolling_template_id(pool)
     if not template_id:
         return None
 

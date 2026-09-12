@@ -150,6 +150,10 @@ model AiAgent {
   // created_at > 此值 ⇒ 后台显示"有更新的记忆未同步"). 代码侧走 raw SQL 读写,
   // 单个 agent 的灰度(canary)同步不推进水位.
   knowledgeSyncedAt        DateTime?                       @map("knowledge_synced_at")
+  // 仅模板 agent 使用: 是否对*新用户*开放克隆匹配. 停止模板只翻这面旗,
+  // 不改 status / 不归档 workspace, 已按 source_template_id 绑出去的用户
+  // 完全不受影响. 用户自己的 agent 忽略此列.
+  templateEnabled          Boolean                         @default(true) @map("template_enabled")
   createdAt                DateTime                        @default(now()) @map("created_at")
   updatedAt                DateTime                        @updatedAt @map("updated_at")
   workspaces               ChatWorkspace[]

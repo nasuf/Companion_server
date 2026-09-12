@@ -3,15 +3,16 @@
 A "template" is a fully-provisioned agent (same pipeline as a Flutter user's
 manual agent creation: MBTI + background + L1 self-memory + embeddings +
 schedule) owned by a reserved system user. New users (e.g. WeChat Mini Program
-first login) are cheaply cloned from the *default* template so they can chat
-immediately with zero LLM warm-up.
+first login) are cheaply cloned from a *random open* template so they can chat
+immediately with zero LLM warm-up. Many templates can be open at once; stopping
+one only closes it for *future* signups and never touches already-cloned users.
 
 Endpoints (all admin-only):
-  GET    /admin-api/agent-templates              — list templates + status + default
-  POST   /admin-api/agent-templates              — create a template (runs provisioning)
-  GET    /admin-api/agent-templates/{id}/status  — provisioning progress
-  PUT    /admin-api/agent-templates/default      — set / clear the default template
-  DELETE /admin-api/agent-templates/{id}         — delete a template (+ clear default)
+    GET    /admin-api/agent-templates              — list templates + enrollment
+    POST   /admin-api/agent-templates              — create a template (runs provisioning)
+    GET    /admin-api/agent-templates/{id}/status  — provisioning progress
+    PUT    /admin-api/agent-templates/{id}/enrollment — open / stop a template
+    DELETE /admin-api/agent-templates/{id}         — delete a template
 
 Knowledge supplement (append facts to an EXISTING template, then publish):
   POST   /admin-api/agent-templates/{id}/knowledge/from-document — append memories
@@ -35,8 +36,10 @@ from app.services.agent_template import (
     count_active_clones,
     get_default_template_agent_id,
     get_or_create_template_user,
+    is_enrolling,
     list_template_agents,
     set_default_template_agent_id,
+    set_template_enabled,
 )
 from app.services.agent_template.document_import import parse_agent_profile_document
 from app.services.agent_template.knowledge import (
@@ -69,8 +72,13 @@ class TemplateCreateRequest(BaseModel):
 
 
 class DefaultTemplateRequest(BaseModel):
-    # None / empty clears the default (new users then stay agent-less).
+    # Legacy: None / empty clears the default pointer. Matching no longer
+    # uses this pointer — enrollment is per-template via PUT .../enrollment.
     agent_id: str | None = None
+
+
+class TemplateEnrollmentRequest(BaseModel):
+    enabled: bool
 
 
 class KnowledgeSyncRequest(BaseModel):
@@ -142,9 +150,10 @@ async def _l1_memory_count(agent_id: str) -> int:
     return int(rows[0]["n"]) if rows else 0
 
 
-async def _template_summary(agent, *, default_id: str | None) -> dict:
+async def _template_summary(agent) -> dict:
     progress = await get_progress(agent.id)
     knowledge = await get_knowledge_status(agent.id)
+    enabled = is_enrolling(agent)
     return {
         "id": agent.id,
         "name": agent.name,
@@ -155,7 +164,9 @@ async def _template_summary(agent, *, default_id: str | None) -> dict:
         "city": agent.city,
         "avatar_url": agent.avatarUrl,
         "created_at": str(agent.createdAt),
-        "is_default": agent.id == default_id,
+        "enabled": enabled,
+        # Kept for old admin clients; equals enrollment, not a singleton default.
+        "is_default": enabled,
         "l1_memory_count": await _l1_memory_count(agent.id),
         "clone_count": await count_active_clones(agent.id),
         "progress": progress,
@@ -167,14 +178,14 @@ async def _template_summary(agent, *, default_id: str | None) -> dict:
 
 @router.get("")
 async def list_templates() -> dict:
-    """List all template agents with provisioning status + the current default."""
+    """List all template agents with provisioning status + enrollment pool."""
     default_id = await get_default_template_agent_id()
     agents = await list_template_agents()
+    summaries = [await _template_summary(a) for a in agents]
     return {
         "default_template_agent_id": default_id,
-        "templates": [
-            await _template_summary(a, default_id=default_id) for a in agents
-        ],
+        "enrolling_count": sum(1 for s in summaries if s["enabled"]),
+        "templates": summaries,
     }
 
 
@@ -196,8 +207,8 @@ async def create_template(data: TemplateCreateRequest) -> dict:
         personality=data.personality.model_dump(),
         background=data.background,
         gender=data.gender,
-        # Templates coexist (one is the default); creating a new one must NOT
-        # archive the template system user's other templates.
+        # Templates coexist and many can be open at once; creating a new one
+        # must NOT archive (or stop) the template system user's other templates.
         stage_existing_workspaces=False,
     )
     logger.info("[TEMPLATE] created template agent %s", agent.id[:8])
@@ -249,8 +260,8 @@ async def create_template_from_document(
         gender=template_gender,
         profile_override=imported.profile,
         career_template_override=imported.career_template,
-        # Templates coexist (one is the default); creating a new one must NOT
-        # archive the template system user's other templates.
+        # Templates coexist and many can be open at once; creating a new one
+        # must NOT archive (or stop) the template system user's other templates.
         stage_existing_workspaces=False,
     )
     logger.info(
@@ -293,23 +304,60 @@ async def template_status(agent_id: str) -> dict:
         "status": agent.status,
         "progress": await get_progress(agent_id),
         "l1_memory_count": await _l1_memory_count(agent_id),
+        "enabled": is_enrolling(agent),
+    }
+
+
+@router.put("/{agent_id}/enrollment")
+async def set_template_enrollment(
+    agent_id: str, data: TemplateEnrollmentRequest,
+) -> dict:
+    """Open or stop a template for *new* user matching.
+
+    Stop only flips ``template_enabled``; already-cloned users keep their
+    independent agent. Opening a legacy-archived template restores that
+    template's own workspace + agent row, never its clones.
+    """
+    agent = await _require_template(agent_id)
+    if agent.status == "provisioning":
+        raise HTTPException(
+            status_code=400,
+            detail="模板尚未生成完成，无法开放或停止",
+        )
+    try:
+        await set_template_enabled(agent_id, data.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    refreshed = await db.aiagent.find_unique(where={"id": agent_id})
+    return {
+        "id": agent_id,
+        "status": getattr(refreshed, "status", agent.status) if refreshed else agent.status,
+        "enabled": data.enabled,
     }
 
 
 @router.put("/default")
 async def set_default_template(data: DefaultTemplateRequest) -> dict:
-    """Set (or clear) the default template used to clone new users."""
+    """Legacy pointer write. Matching uses the enrollment pool, not this row.
+
+    Setting a pointer also *opens* that template without stopping any other
+    open template. Clearing the pointer does not stop the pool.
+    """
     agent_id = (data.agent_id or "").strip() or None
     if agent_id is not None:
         owner = await get_or_create_template_user()
         agent = await db.aiagent.find_unique(where={"id": agent_id})
         if not agent or agent.userId != owner.id:
             raise HTTPException(status_code=404, detail="Template not found")
-        if agent.status != "active":
+        if agent.status == "provisioning":
             raise HTTPException(
                 status_code=400,
-                detail="模板尚未生成完成，无法设为默认",
+                detail="模板尚未生成完成，无法开放",
             )
+        try:
+            await set_template_enabled(agent_id, True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     await set_default_template_agent_id(agent_id)
     return {"default_template_agent_id": agent_id}
 

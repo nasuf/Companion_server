@@ -23,19 +23,29 @@ import asyncio
 import sys
 
 from app.db import db
-from app.services.agent_template.registry import get_default_template_agent_id
+from app.services.agent_template.registry import list_enrolling_template_ids
 from app.services.memory.provenance import KNOWLEDGE_SEED
 from app.services.memory.taxonomy import L1_SINGLETON_SUBS
 
 
 async def main() -> None:
     await db.connect()
-    template_id = await get_default_template_agent_id()
-    if not template_id:
-        print("没有配置默认模板 —— 新用户走直接创建路径, 无需巡检")
+    template_ids = await list_enrolling_template_ids()
+    if not template_ids:
+        print("没有开放中的模板 —— 新用户不会自动获得伙伴, 无需巡检")
         await db.disconnect()
         return
 
+    any_problems = False
+    for template_id in template_ids:
+        if await _inspect_template(template_id):
+            any_problems = True
+
+    await db.disconnect()
+    sys.exit(1 if any_problems else 0)
+
+
+async def _inspect_template(template_id: str) -> bool:
     rows = await db.query_raw(
         """
         SELECT m.id, m.level, m.main_category, m.sub_category, m.content,
@@ -80,11 +90,10 @@ async def main() -> None:
             print(f"  … 另外 {len(problems) - 15} 处")
         print("\n修复: python retier_existing_persona.py --apply")
         print("影响: 修之前每个新注册用户都会克隆到这份错误分层")
-    else:
-        print("分层符合现行规则 —— 新用户克隆到的是正确的分层")
+        return True
 
-    await db.disconnect()
-    sys.exit(1 if problems else 0)
+    print("分层符合现行规则 —— 新用户克隆到的是正确的分层")
+    return False
 
 
 if __name__ == "__main__":

@@ -90,6 +90,22 @@ class TestTemplatePromotionGuard:
     not stay one bad agent — it becomes one per signup, forever."""
 
     @pytest.mark.asyncio
+    async def test_refuses_to_open_an_agent_with_oversized_memories(self, monkeypatch):
+        from app.services.agent_template import registry
+
+        monkeypatch.setattr(
+            registry.db, "query_raw",
+            AsyncMock(return_value=[{"content": "测" * 200}, {"content": "短记忆"}]),
+        )
+        execute = AsyncMock()
+        monkeypatch.setattr(registry.db, "execute_raw", execute)
+        monkeypatch.setattr(registry, "_restore_template_runtime", AsyncMock())
+
+        with pytest.raises(ValueError, match="不能开放给新用户"):
+            await registry.set_template_enabled("agent-1", True)
+        execute.assert_not_awaited()  # flag must stay closed
+
+    @pytest.mark.asyncio
     async def test_refuses_to_promote_an_agent_with_oversized_memories(self, monkeypatch):
         from app.services.agent_template import registry
 
