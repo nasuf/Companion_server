@@ -379,7 +379,11 @@ async def sms_login(data: SmsLoginRequest, request: Request):
             app_version=data.app_version,
         ).user_create_fields(),
     )
-    await ensure_default_agent_for_user(user.id)
+    # Flutter SMS login (channel=app) must stay agent-less so the app can open
+    # AgentCreatePage and provision from scratch — same as /auth/wechat/mobile.
+    # H5 / Mini Program have no create flow; they still clone from the open pool.
+    if data.channel != "app":
+        await ensure_default_agent_for_user(user.id)
     token = create_jwt(user.id, user.role)
     audit_auth_request_event(
         "sms_login_success",

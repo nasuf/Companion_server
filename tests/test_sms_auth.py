@@ -387,6 +387,40 @@ async def test_sms_login_endpoint_channel_defaults_to_plain_sms(monkeypatch):
 
     fields = focp_mock.await_args.kwargs["signup_fields"]
     assert fields["signupSource"] == "sms"
+    auth_api.ensure_default_agent_for_user.assert_awaited_once_with("user-1")
+
+
+@pytest.mark.asyncio
+async def test_sms_login_app_channel_skips_template_clone(monkeypatch):
+    """Flutter SMS login must not auto-clone; the app creates the agent itself."""
+    from app.api.public import auth as auth_api
+    from app.models.auth import SmsLoginRequest
+
+    user = SimpleNamespace(id="user-1", username="ph_user", role="user")
+    monkeypatch.setattr(auth_api, "enforce_login_rate_limit", AsyncMock())
+    monkeypatch.setattr(auth_api, "clear_login_failures", AsyncMock())
+    import app.services.sms as sms_pkg
+
+    monkeypatch.setattr(sms_pkg, "verify_code", AsyncMock(return_value=True))
+    import app.services.phone_auth as phone_auth_mod
+
+    monkeypatch.setattr(
+        phone_auth_mod, "find_or_create_phone_user", AsyncMock(return_value=user)
+    )
+    clone = AsyncMock()
+    monkeypatch.setattr(auth_api, "ensure_default_agent_for_user", clone)
+    monkeypatch.setattr(auth_api, "create_jwt", lambda user_id, role: "jwt")
+    monkeypatch.setattr(auth_api, "_record_auth_activity", AsyncMock())
+    monkeypatch.setattr(auth_api, "_build_auth_response", AsyncMock())
+
+    await auth_api.sms_login(
+        SmsLoginRequest(
+            phone="13812345678", code="123456", channel="app", platform="ios"
+        ),
+        FakeRequest(),
+    )
+
+    clone.assert_not_awaited()
 
 
 @pytest.mark.asyncio
