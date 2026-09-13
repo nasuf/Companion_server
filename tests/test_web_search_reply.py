@@ -470,6 +470,13 @@ def _resolved(web_search=True, online=True, provider="ark"):
         tts_model="qwen3-tts-instruct-flash-2026-01-26",
         tts_output_probability=0,
         web_search_enabled=web_search,
+        proactive_trending_enabled=False,
+        proactive_trending_probability=0.30,
+        proactive_trending_link_probability=0.30,
+        proactive_trending_cache_ttl_s=3600,
+        reply_delay_enabled=False,
+        reply_delay_max_seconds=300,
+        user_message_aggregation_enabled=True,
     )
 
 

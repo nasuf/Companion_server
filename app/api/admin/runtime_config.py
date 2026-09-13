@@ -80,6 +80,17 @@ class ConfigPayload(BaseModel):
     tts_output_probability: int | None = Field(default=None, ge=0, le=100)
     # Main-reply web search (Ark Responses API web_search tool, ark provider only).
     web_search_enabled: bool | None = None
+    # Proactive trending / hot-news (global-only).
+    proactive_trending_enabled: bool | None = None
+    proactive_trending_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+    proactive_trending_link_probability: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+    )
+    proactive_trending_cache_ttl_s: int | None = Field(default=None, ge=60, le=86400)
+    # Chat management (global-only).
+    reply_delay_enabled: bool | None = None
+    reply_delay_max_seconds: int | None = Field(default=None, ge=1, le=3600)
+    user_message_aggregation_enabled: bool | None = None
 
 
 def _row_to_payload(row) -> dict[str, Any]:
@@ -90,6 +101,10 @@ def _row_to_payload(row) -> dict[str, Any]:
             "remote_chat_model", "remote_small_model",
             "vision_model", "asr_model", "tts_model",
             "tts_output_probability", "web_search_enabled",
+            "proactive_trending_enabled", "proactive_trending_probability",
+            "proactive_trending_link_probability", "proactive_trending_cache_ttl_s",
+            "reply_delay_enabled", "reply_delay_max_seconds",
+            "user_message_aggregation_enabled",
         )}
     return {
         "online_model": row.onlineModel,
@@ -107,6 +122,19 @@ def _row_to_payload(row) -> dict[str, Any]:
         "tts_model": getattr(row, "ttsModel", None),
         "tts_output_probability": getattr(row, "ttsOutputProbability", None),
         "web_search_enabled": getattr(row, "webSearchEnabled", None),
+        "proactive_trending_enabled": getattr(row, "proactiveTrendingEnabled", None),
+        "proactive_trending_probability": getattr(row, "proactiveTrendingProbability", None),
+        "proactive_trending_link_probability": getattr(
+            row, "proactiveTrendingLinkProbability", None,
+        ),
+        "proactive_trending_cache_ttl_s": getattr(
+            row, "proactiveTrendingCacheTtlS", None,
+        ),
+        "reply_delay_enabled": getattr(row, "replyDelayEnabled", None),
+        "reply_delay_max_seconds": getattr(row, "replyDelayMaxSeconds", None),
+        "user_message_aggregation_enabled": getattr(
+            row, "userMessageAggregationEnabled", None,
+        ),
     }
 
 
@@ -126,6 +154,13 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
         "tts_model": r.tts_model,
         "tts_output_probability": r.tts_output_probability,
         "web_search_enabled": r.web_search_enabled,
+        "proactive_trending_enabled": r.proactive_trending_enabled,
+        "proactive_trending_probability": r.proactive_trending_probability,
+        "proactive_trending_link_probability": r.proactive_trending_link_probability,
+        "proactive_trending_cache_ttl_s": r.proactive_trending_cache_ttl_s,
+        "reply_delay_enabled": r.reply_delay_enabled,
+        "reply_delay_max_seconds": r.reply_delay_max_seconds,
+        "user_message_aggregation_enabled": r.user_message_aggregation_enabled,
         # 只读. Embedding 模型不是运行时开关: 库里 8000+ 条向量就是当前模型的
         # 输出, 换掉而不重算等于让查询在陌生坐标系里检索 (同一段文本跨模型的
         # 余弦实测 -0.001, 比同模型内两段无关文本的 0.43 还低), 而且十一个相似
@@ -139,47 +174,92 @@ def _resolved_to_dict(r: ResolvedConfig) -> dict[str, Any]:
     }
 
 
+def _payload_to_update_data(
+    payload: ConfigPayload, *, include_global_only: bool = False,
+) -> dict[str, Any]:
+    """Map only client-sent fields to prisma columns (partial PUT semantics).
+
+    Unset fields are omitted so chat-management patches cannot wipe model config
+    that another admin tab saved concurrently. Explicit null still clears override.
+    """
+    explicit = payload.model_fields_set
+    data: dict[str, Any] = {}
+
+    if "online_model" in explicit:
+        data["onlineModel"] = payload.online_model
+
+    legacy: str | None = None
+    if "remote_provider" in explicit:
+        legacy = (
+            payload.remote_provider.strip().lower()
+            if payload.remote_provider else None
+        )
+        data["remoteProvider"] = legacy
+
+    chat_provider: str | None = None
+    if "remote_chat_provider" in explicit:
+        chat_provider = (
+            payload.remote_chat_provider.strip().lower()
+            if payload.remote_chat_provider else None
+        )
+        data["remoteChatProvider"] = chat_provider
+    elif legacy:
+        data["remoteChatProvider"] = legacy
+
+    if "remote_small_provider" in explicit:
+        data["remoteSmallProvider"] = (
+            payload.remote_small_provider.strip().lower()
+            if payload.remote_small_provider else None
+        )
+    elif legacy:
+        data["remoteSmallProvider"] = legacy
+
+    if "local_chat_model" in explicit:
+        data["localChatModel"] = payload.local_chat_model
+    if "local_small_model" in explicit:
+        data["localSmallModel"] = payload.local_small_model
+    if "remote_chat_model" in explicit:
+        data["remoteChatModel"] = payload.remote_chat_model
+    if "remote_small_model" in explicit:
+        data["remoteSmallModel"] = payload.remote_small_model
+
+    if include_global_only:
+        if "vision_model" in explicit:
+            data["visionModel"] = (payload.vision_model or "").strip() or None
+        if "asr_model" in explicit:
+            data["asrModel"] = (payload.asr_model or "").strip() or None
+        if "tts_model" in explicit:
+            data["ttsModel"] = (payload.tts_model or "").strip() or None
+        if "tts_output_probability" in explicit:
+            data["ttsOutputProbability"] = payload.tts_output_probability
+        if "web_search_enabled" in explicit:
+            data["webSearchEnabled"] = payload.web_search_enabled
+        if "proactive_trending_enabled" in explicit:
+            data["proactiveTrendingEnabled"] = payload.proactive_trending_enabled
+        if "proactive_trending_probability" in explicit:
+            data["proactiveTrendingProbability"] = payload.proactive_trending_probability
+        if "proactive_trending_link_probability" in explicit:
+            data["proactiveTrendingLinkProbability"] = (
+                payload.proactive_trending_link_probability
+            )
+        if "proactive_trending_cache_ttl_s" in explicit:
+            data["proactiveTrendingCacheTtlS"] = payload.proactive_trending_cache_ttl_s
+        if "reply_delay_enabled" in explicit:
+            data["replyDelayEnabled"] = payload.reply_delay_enabled
+        if "reply_delay_max_seconds" in explicit:
+            data["replyDelayMaxSeconds"] = payload.reply_delay_max_seconds
+        if "user_message_aggregation_enabled" in explicit:
+            data["userMessageAggregationEnabled"] = (
+                payload.user_message_aggregation_enabled
+            )
+    return data
+
+
 def _payload_to_data(
     payload: ConfigPayload, *, include_global_only: bool = False,
 ) -> dict[str, Any]:
-    """payload → prisma 字段 dict. None 值保留 (清除该字段 override).
-
-    include_global_only 仅全局 SystemConfig 为 True — AgentConfigOverride
-    表没有 vision/asr/webSearch 列, 写入会直接报 prisma unknown column.
-    """
-    explicit = payload.model_fields_set
-    legacy = payload.remote_provider.strip().lower() if payload.remote_provider else None
-    chat_provider = (
-        payload.remote_chat_provider.strip().lower()
-        if payload.remote_chat_provider else None
-    )
-    small_provider = (
-        payload.remote_small_provider.strip().lower()
-        if payload.remote_small_provider else None
-    )
-    # Backward compatibility for clients that predate role-specific providers.
-    if "remote_chat_provider" not in explicit and legacy:
-        chat_provider = legacy
-    if "remote_small_provider" not in explicit and legacy:
-        small_provider = legacy
-    data: dict[str, Any] = {
-        "onlineModel": payload.online_model,
-        "remoteProvider": legacy,
-        "remoteChatProvider": chat_provider,
-        "remoteSmallProvider": small_provider,
-        "localChatModel": payload.local_chat_model,
-        "localSmallModel": payload.local_small_model,
-        "remoteChatModel": payload.remote_chat_model,
-        "remoteSmallModel": payload.remote_small_model,
-    }
-    if include_global_only:
-        # Empty string means "clear override" (fall back to env), same as null.
-        data["visionModel"] = (payload.vision_model or "").strip() or None
-        data["asrModel"] = (payload.asr_model or "").strip() or None
-        data["ttsModel"] = (payload.tts_model or "").strip() or None
-        data["ttsOutputProbability"] = payload.tts_output_probability
-        data["webSearchEnabled"] = payload.web_search_enabled
-    return data
+    """Full-document mapping (tests / legacy callers). Prefer _payload_to_update_data."""
+    return _payload_to_update_data(payload, include_global_only=include_global_only)
 
 
 async def _model_exists_for_provider(identifier: str, provider: str) -> bool:
@@ -309,6 +389,11 @@ async def get_system_config() -> dict[str, Any]:
     return {
         "config": _row_to_payload(row),
         "resolved": _resolved_to_dict(resolve_config_sync(agent_id=None)),
+        "env_gates": {
+            "proactive_link_recommendation_enabled": (
+                settings.proactive_link_recommendation_enabled
+            ),
+        },
     }
 
 
@@ -326,7 +411,9 @@ async def put_system_config(payload: ConfigPayload) -> dict[str, Any]:
         fallback_remote_chat_model=settings.remote_chat_model,
         fallback_remote_small_model=settings.remote_small_model,
     )
-    data = _payload_to_data(payload, include_global_only=True)
+    data = _payload_to_update_data(payload, include_global_only=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="至少需要提供一个配置字段")
     row = await db.systemconfig.upsert(
         where={"id": 1},
         data={"create": {"id": 1, **data}, "update": data},
@@ -411,7 +498,9 @@ async def put_agent_config(agent_id: str, payload: ConfigPayload) -> dict[str, A
         fallback_remote_chat_model=system_config.remote_chat_model,
         fallback_remote_small_model=system_config.remote_small_model,
     )
-    data = _payload_to_data(payload)
+    data = _payload_to_update_data(payload)
+    if not data:
+        raise HTTPException(status_code=400, detail="至少需要提供一个配置字段")
     row = await db.agentconfigoverride.upsert(
         where={"agentId": agent_id},
         data={"create": {"agentId": agent_id, **data}, "update": data},

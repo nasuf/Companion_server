@@ -105,19 +105,22 @@ class _SendPrep:
 async def _check_send_eligibility(
     state: ProactiveStateRecord,
     trigger_type: str,
+    *,
+    skip_limits: bool = False,
 ) -> _SendPrep | None:
     """spec §9 互斥: 检查日限/workspace/conversation. 失败返回 None."""
-    if not await can_send_proactive(state.agent_id, state.user_id):
-        await _log_skip(state, trigger_type, "daily_limit")
-        return None
-    fatigue = await get_proactive_fatigue_score(
-        state.agent_id,
-        state.user_id,
-        workspace_id=state.workspace_id,
-    )
-    if fatigue.get("block"):
-        await _log_skip(state, trigger_type, "fatigue_score", extra=fatigue)
-        return None
+    if not skip_limits:
+        if not await can_send_proactive(state.agent_id, state.user_id):
+            await _log_skip(state, trigger_type, "daily_limit")
+            return None
+        fatigue = await get_proactive_fatigue_score(
+            state.agent_id,
+            state.user_id,
+            workspace_id=state.workspace_id,
+        )
+        if fatigue.get("block"):
+            await _log_skip(state, trigger_type, "fatigue_score", extra=fatigue)
+            return None
 
     workspace_context = await get_active_workspace_context(state.workspace_id)
     if not workspace_context:
@@ -337,6 +340,12 @@ async def _generate_message(ctx: dict) -> str | None:
         logger.info(f"Proactive prompt disabled, skipping: {e}")
         return None
 
+    trending_context = (ctx.get("trending_context") or "").strip()
+    if trending_context:
+        from app.services.proactive.trending_context import append_trending_section
+
+        prompt = await append_trending_section(prompt, trending_context)
+
     response = (await invoke_text(get_chat_model(), prompt)).strip()
     if response == "SKIP" or len(response) < 4:
         return None
@@ -409,7 +418,12 @@ async def generate_and_send_proactive(
     *,
     trigger_type: str,
     now: datetime | None = None,
+    skip_limits: bool = False,
+    admin_test_options: "AdminProactiveTestOptions | None" = None,
+    send_outcome: "AdminProactiveSendOutcome | None" = None,
 ) -> bool:
+    from app.services.proactive.trending_context import resolve_trending_context
+    from app.services.proactive.trending_gate import should_attach_trending_link_card
     # 绑 ContextVar 让本调用栈的 LLM 工厂应用该 agent 的模型 override.
     # 不绑的话主动消息生成 / AI 自我记忆抽取都会用 system 全局, 跟 chat 路径
     # 的 per-agent 行为不一致, 同时 token stats 会把这些 LLM 调用归到全局模型名.
@@ -418,7 +432,9 @@ async def generate_and_send_proactive(
 
     now_ts = now or datetime.now(UTC)
 
-    prep = await _check_send_eligibility(state, trigger_type)
+    prep = await _check_send_eligibility(
+        state, trigger_type, skip_limits=skip_limits,
+    )
     if prep is None:
         return False
 
@@ -475,6 +491,13 @@ async def generate_and_send_proactive(
     # spec §8.5 衰减最后一次
     ctx["is_decay_final"] = state.followup_plan_type == "thirty_day_final"
 
+    trending_text, trending_attached, _trending_meta = await resolve_trending_context(
+        trigger_type,
+        topic=topic_theme,
+        admin_test_options=admin_test_options,
+    )
+    ctx["trending_context"] = trending_text
+
     # 主动消息也开 LangSmith trace + usage_session, 名字 [proactive:trigger_type]
     # 方便 LangSmith 看板与统计 dashboard 区分被动回复.
     from app.services.llm.usage_tracker import traced_usage_session
@@ -511,6 +534,16 @@ async def generate_and_send_proactive(
         if ws_payload_extra is None:
             from app.services.chat_links import maybe_prepare_proactive_link_recommendation
 
+            force_link = False
+            skip_link = False
+            if admin_test_options is not None:
+                force_link = admin_test_options.use_link_card
+                skip_link = not admin_test_options.use_link_card
+            elif trending_attached:
+                force_link = should_attach_trending_link_card(
+                    trending_attached=True,
+                )
+
             proactive_link = await maybe_prepare_proactive_link_recommendation(
                 user_id=state.user_id,
                 conversation_id=prep.conversation_id,
@@ -519,6 +552,8 @@ async def generate_and_send_proactive(
                 topic=ctx.get("topic_theme"),
                 stage=stage,
                 message=message,
+                force=force_link,
+                skip=skip_link,
             )
             if proactive_link is not None:
                 extra_metadata.update({
@@ -528,6 +563,14 @@ async def generate_and_send_proactive(
                     "topic_source": "link",
                 })
                 ws_payload_extra = {"component_card": proactive_link.component_card}
+
+        if send_outcome is not None:
+            send_outcome.web_search_used = trending_attached
+            send_outcome.link_card_used = proactive_link is not None
+            send_outcome.extra.update({
+                "trigger_type": trigger_type,
+                "source": source,
+            })
 
         assistant_message_id = await emit_proactive_message(
             conversation_id=prep.conversation_id,
@@ -623,33 +666,85 @@ async def generate_and_send_proactive(
 # Manual / triggered entry
 # ────────────────────────────────────────────────────────────────────
 
+async def _unlock_state_for_admin_test(state: ProactiveStateRecord) -> ProactiveStateRecord:
+    """Admin manual trigger: unblock waiting_user without resetting decay counters."""
+    from dataclasses import replace
+
+    try:
+        await db.execute_raw(
+            """
+            UPDATE proactive_states
+            SET status = 'idle', response_deadline_at = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            """,
+            state.id,
+        )
+    except Exception as e:
+        logger.warning(f"admin proactive unlock failed state={state.id[:8]}: {e}")
+        return state
+    return replace(state, status="idle", response_deadline_at=None)
+
+
 async def send_manual_or_triggered_proactive(
     *,
     workspace_id: str,
     trigger_type: str,
     now: datetime | None = None,
+    skip_limits: bool = False,
+    admin_test_options: "AdminProactiveTestOptions | None" = None,
 ) -> dict[str, str | bool | None]:
+    from app.services.proactive.admin_test import AdminProactiveSendOutcome
+
     state = await ensure_proactive_state_for_workspace(
         workspace_id, now=now, reason="manual_or_triggered",
     )
     if not state:
-        return {"ok": False, "reason": "workspace_or_state_missing", "message": None}
+        return {
+            "ok": False,
+            "reason": "workspace_or_state_missing",
+            "message": None,
+            "web_search_used": False,
+            "link_card_used": False,
+        }
     if state.status not in SENDABLE_PROACTIVE_STATUSES:
-        await log_proactive_event(
-            state_id=state.id,
-            workspace_id=state.workspace_id,
-            user_id=state.user_id,
-            agent_id=state.agent_id,
-            conversation_id=state.conversation_id,
-            event_type="send_skipped",
-            trigger_type=trigger_type,
-            payload={"reason": "state_not_sendable", "status": state.status},
-        )
-        return {"ok": False, "reason": f"state_not_sendable:{state.status}", "message": None}
+        if skip_limits and state.status == "waiting_user":
+            state = await _unlock_state_for_admin_test(state)
+        else:
+            await log_proactive_event(
+                state_id=state.id,
+                workspace_id=state.workspace_id,
+                user_id=state.user_id,
+                agent_id=state.agent_id,
+                conversation_id=state.conversation_id,
+                event_type="send_skipped",
+                trigger_type=trigger_type,
+                payload={"reason": "state_not_sendable", "status": state.status},
+            )
+            return {
+                "ok": False,
+                "reason": f"state_not_sendable:{state.status}",
+                "message": None,
+                "web_search_used": False,
+                "link_card_used": False,
+            }
 
-    sent = await generate_and_send_proactive(state, trigger_type=trigger_type, now=now)
+    outcome = AdminProactiveSendOutcome()
+    sent = await generate_and_send_proactive(
+        state,
+        trigger_type=trigger_type,
+        now=now,
+        skip_limits=skip_limits,
+        admin_test_options=admin_test_options,
+        send_outcome=outcome,
+    )
     if not sent:
-        return {"ok": False, "reason": "generation_or_limit_blocked", "message": None}
+        return {
+            "ok": False,
+            "reason": "generation_or_limit_blocked",
+            "message": None,
+            "web_search_used": outcome.web_search_used,
+            "link_card_used": outcome.link_card_used,
+        }
 
     rows = await db.query_raw(
         """
@@ -662,7 +757,13 @@ async def send_manual_or_triggered_proactive(
         state.workspace_id,
     )
     latest_message = str(rows[0]["message"]) if rows else None
-    return {"ok": True, "reason": None, "message": latest_message}
+    return {
+        "ok": True,
+        "reason": None,
+        "message": latest_message,
+        "web_search_used": outcome.web_search_used,
+        "link_card_used": outcome.link_card_used,
+    }
 
 
 # ────────────────────────────────────────────────────────────────────

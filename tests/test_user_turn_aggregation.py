@@ -7,7 +7,26 @@ from unittest.mock import patch
 import pytest
 
 from app.services.interaction.aggregation import push_pending, push_turn_pending
+from app.services import runtime_config
 from app.services.interaction.user_turn_aggregation import plan_user_message_aggregation
+
+
+@pytest.mark.asyncio
+async def test_plan_aggregation_disabled_routes_immediate(monkeypatch):
+    monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
+    monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {
+        "userMessageAggregationEnabled": False,
+    })
+    plan = await plan_user_message_aggregation(
+        agent_id="agent-A",
+        user_id="u1",
+        conversation_id="conv-A",
+        text="吗",
+        reply_context={"delay_seconds": 0},
+    )
+    assert plan.route == "immediate"
+    assert plan.metadata == {"aggregation_disabled": True}
 
 
 @pytest.mark.asyncio

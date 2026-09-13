@@ -1414,12 +1414,17 @@ async def stream_chat_response(
 
         # spec §6 异步回复机制只规定延迟分布, 没"对方正在输入"占位事件; 早期作为
         # UX 装饰加的, 关闭后前端直接看到流式 token 即可, 无视觉退化.
-        # settings.reply_delay_enabled=False (默认) → 跳过 sleep 即时回复.
-        from app.config import settings as _settings
-        if _settings.reply_delay_enabled:
+        # reply_delay_enabled=False (默认) → 跳过 sleep 即时回复.
+        from app.services.interaction.chat_management import (
+            clamp_reply_delay_seconds,
+            reply_delay_enabled as _reply_delay_enabled,
+        )
+        if _reply_delay_enabled():
             reply_delay = calculate_reply_delay(len(user_message), mbti=mbti)
-            queued_delay = float((reply_context or {}).get("delay_seconds", 0.0) or 0.0)
-            conceptual_delay = max(reply_delay, queued_delay)
+            queued_delay = clamp_reply_delay_seconds(
+                float((reply_context or {}).get("delay_seconds", 0.0) or 0.0),
+            )
+            conceptual_delay = clamp_reply_delay_seconds(max(reply_delay, queued_delay))
             if delivered_from_queue:
                 actual_sleep = min(reply_delay, 1.5)
             else:

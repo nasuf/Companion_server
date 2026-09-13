@@ -71,6 +71,7 @@ EVT_BOUNDARY_VIOLATION_FAIL = "boundary.violation_process_failed"
 # Proactive
 EVT_PROACTIVE_WINDOW = "proactive.window_evaluated"
 EVT_PROACTIVE_SENT = "proactive.sent"
+EVT_PROACTIVE_TRENDING = "proactive.trending_attached"
 EVT_PROACTIVE_SKIPPED = "proactive.skipped"
 EVT_PROACTIVE_DECAY = "proactive.decay_advanced"
 EVT_PROACTIVE_FIRST_GREETING = "proactive.first_greeting"

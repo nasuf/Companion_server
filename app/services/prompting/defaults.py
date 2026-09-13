@@ -1218,6 +1218,12 @@ PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT = """【任务】从候选记忆中挑选�
 【输出】"""
 
 
+PROACTIVE_TRENDING_SECTION_PROMPT = """
+
+【今日热点参考（联网检索）】
+{trending}
+如合适可自然带一句公共话题，不要像新闻播报，也不要说「我刚搜了下」。"""
+
 PROACTIVE_DECAY_FINAL_PROMPT = """【任务】作为用户的好朋友，这是你最后一次主动发消息。如果用户仍未回复，你将不再打扰。请温和体面地表达这个意思，并期待下次交流。
 
 【参考信息】

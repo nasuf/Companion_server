@@ -48,6 +48,15 @@ class ResolvedConfig:
     tts_output_probability: int
     # Main-reply web search via Ark Responses API (ark chat provider only).
     web_search_enabled: bool
+    # Proactive trending / hot-news (global-only; silence_wakeup / scheduled_scene / special_date).
+    proactive_trending_enabled: bool
+    proactive_trending_probability: float
+    proactive_trending_link_probability: float
+    proactive_trending_cache_ttl_s: int
+    # Chat management (global-only): random reply delay + message aggregation.
+    reply_delay_enabled: bool
+    reply_delay_max_seconds: int
+    user_message_aggregation_enabled: bool
 
 
 # Module-level caches, 启动时填充, 配置变更时 invalidate 重 load.
@@ -199,6 +208,10 @@ def _row_to_dict(row) -> dict:
         # SystemConfig only; AgentConfigOverride rows lack these attrs → skipped.
         "visionModel", "asrModel", "ttsModel", "ttsOutputProbability",
         "webSearchEnabled",
+        "proactiveTrendingEnabled", "proactiveTrendingProbability",
+        "proactiveTrendingLinkProbability", "proactiveTrendingCacheTtlS",
+        "replyDelayEnabled", "replyDelayMaxSeconds",
+        "userMessageAggregationEnabled",
     ):
         val = getattr(row, key, None)
         if val is not None:
@@ -285,6 +298,67 @@ def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
         ),
         web_search_enabled=bool(
             _pick("webSearchEnabled", settings.web_search_enabled),
+        ),
+        proactive_trending_enabled=bool(
+            _pick("proactiveTrendingEnabled", settings.proactive_trending_enabled),
+        ),
+        proactive_trending_probability=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    _pick(
+                        "proactiveTrendingProbability",
+                        settings.proactive_trending_probability,
+                    )
+                    or 0.0,
+                ),
+            ),
+        ),
+        proactive_trending_link_probability=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    _pick(
+                        "proactiveTrendingLinkProbability",
+                        settings.proactive_trending_link_probability,
+                    )
+                    or 0.0,
+                ),
+            ),
+        ),
+        proactive_trending_cache_ttl_s=max(
+            60,
+            int(
+                _pick(
+                    "proactiveTrendingCacheTtlS",
+                    settings.proactive_trending_cache_ttl_s,
+                )
+                or 3600,
+            ),
+        ),
+        reply_delay_enabled=bool(
+            _pick("replyDelayEnabled", settings.reply_delay_enabled),
+        ),
+        reply_delay_max_seconds=max(
+            1,
+            min(
+                3600,
+                int(
+                    _pick(
+                        "replyDelayMaxSeconds",
+                        settings.reply_delay_max_seconds,
+                    )
+                    or settings.reply_delay_max_seconds,
+                ),
+            ),
+        ),
+        user_message_aggregation_enabled=bool(
+            _pick(
+                "userMessageAggregationEnabled",
+                settings.user_message_aggregation_enabled,
+            ),
         ),
     )
 

@@ -75,12 +75,16 @@ def compute_delay_profile(
 ) -> dict[str, Any]:
     """Compute PRD-aligned delay mode and duration.
 
-    settings.reply_delay_enabled=False (默认): 短路返 0, 配合 ws 同步快路径
+    reply_delay_enabled=False (默认): 短路返 0, 配合 ws 同步快路径
     跳过 delayed queue 调度延迟. 测试反馈即时.
-    True 时按 spec §6.2 走 conversation_mode / high_emotion / schedule_state 三档随机.
+    True 时按 spec §6.2 走 conversation_mode / high_emotion / schedule_state 三档随机,
+    再按 admin 配置的 reply_delay_max_seconds 钳制上限.
     """
-    from app.config import settings
-    if not settings.reply_delay_enabled:
+    from app.services.interaction.chat_management import (
+        clamp_reply_delay_seconds,
+        reply_delay_enabled,
+    )
+    if not reply_delay_enabled():
         profile = {
             "interaction_mode": "disabled",
             "delay_reason": "delay_disabled",
@@ -115,6 +119,7 @@ def compute_delay_profile(
             "delay_reason": f"schedule_{status}",
             "delay_seconds": _schedule_delay_for_status(status),
         }
+    profile["delay_seconds"] = clamp_reply_delay_seconds(profile["delay_seconds"])
     logger.info(
         f"[DELAY-CALC] reason={profile['delay_reason']} "
         f"seconds={profile['delay_seconds']:.2f}"

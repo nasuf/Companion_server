@@ -289,7 +289,11 @@ async def send_special_date_proactive(
     agent_id: str,
     user_id: str,
     occasions: list[Occasion],
+    workspace_id: str | None = None,
     now: datetime | None = None,
+    skip_limits: bool = False,
+    admin_test_options: "AdminProactiveTestOptions | None" = None,
+    send_outcome: "AdminProactiveSendOutcome | None" = None,
 ) -> bool:
     """spec §10 特殊日期主动消息.
 
@@ -304,11 +308,12 @@ async def send_special_date_proactive(
     now_ts = now or datetime.now(UTC)
 
     # 每日上限: 特殊日期也计入 (spec §10.2)
-    if not await can_send_proactive(agent_id, user_id):
+    if not skip_limits and not await can_send_proactive(agent_id, user_id):
         logger.debug(f"Special date skipped: daily limit agent={agent_id[:8]}")
         return False
 
-    workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    if not workspace_id:
+        workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     if not workspace_id:
         return False
 
@@ -352,6 +357,23 @@ async def send_special_date_proactive(
         logger.warning(f"Special date prompt format failed key={prompt_key}: {e}")
         return False
 
+    from app.services.proactive.trending_context import (
+        append_trending_section,
+        resolve_trending_context,
+    )
+    from app.services.proactive.trending_gate import should_attach_trending_link_card
+    from app.services.runtime_config import ensure_loaded
+
+    await ensure_loaded()
+    topic_hint = occasions[0].name if occasions else None
+    trending_text, trending_attached, _trending_meta = await resolve_trending_context(
+        "special_date",
+        topic=topic_hint,
+        admin_test_options=admin_test_options,
+    )
+    if trending_text:
+        prompt = await append_trending_section(prompt, trending_text)
+
     from app.services.llm.usage_tracker import traced_usage_session
     async with traced_usage_session(
         name="[proactive:special_date]",
@@ -363,7 +385,48 @@ async def send_special_date_proactive(
         if not message or len(message) < 4:
             return False
 
-        await emit_proactive_message(
+        extra_metadata: dict[str, Any] = {
+            "occasions": [
+                {"type": o.type, "name": o.name, "owner": o.owner}
+                for o in occasions
+            ],
+        }
+        ws_payload_extra: dict[str, Any] = {"occasions": [o.type for o in occasions]}
+        proactive_link = None
+        force_link = False
+        skip_link = False
+        if admin_test_options is not None:
+            force_link = admin_test_options.use_link_card
+            skip_link = not admin_test_options.use_link_card
+        elif trending_attached:
+            force_link = should_attach_trending_link_card(trending_attached=True)
+
+        from app.services.chat_links import (
+            bind_link_card_to_message,
+            maybe_prepare_proactive_link_recommendation,
+        )
+
+        proactive_link = await maybe_prepare_proactive_link_recommendation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            trigger_type="special_date",
+            source="greeting",
+            topic=topic_hint,
+            stage=None,
+            message=message,
+            force=force_link,
+            skip=skip_link,
+        )
+        if proactive_link is not None:
+            extra_metadata.update({
+                "component_card": proactive_link.component_card,
+                "link_card": proactive_link.link_card_metadata,
+                "link_proactive": True,
+                "topic_source": "link",
+            })
+            ws_payload_extra = {"component_card": proactive_link.component_card}
+
+        assistant_message_id = await emit_proactive_message(
             conversation_id=conversation_id,
             user_id=user_id,
             agent_id=agent_id,
@@ -371,15 +434,20 @@ async def send_special_date_proactive(
             message=message,
             trigger_type="special_date",
             skip_post_process=True,  # spec §10.4 不经过回复加工
-            extra_metadata={
-                "occasions": [
-                    {"type": o.type, "name": o.name, "owner": o.owner}
-                    for o in occasions
-                ],
-            },
-            ws_payload_extra={"occasions": [o.type for o in occasions]},
+            extra_metadata=extra_metadata,
+            ws_payload_extra=ws_payload_extra,
             trace_id=tracer.safe_trace_id,
         )
+        if proactive_link is not None:
+            await bind_link_card_to_message(
+                link_id=proactive_link.link.id,
+                message_id=assistant_message_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        if send_outcome is not None:
+            send_outcome.web_search_used = trending_attached
+            send_outcome.link_card_used = proactive_link is not None
         await increment_proactive_count(agent_id, user_id)
         return True
 

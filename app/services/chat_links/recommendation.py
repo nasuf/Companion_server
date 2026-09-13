@@ -87,10 +87,18 @@ def should_attempt_proactive_link(
     trigger_type: str,
     source: str,
     random_value: float | None = None,
+    force: bool = False,
 ) -> bool:
+    if force:
+        return source != "music"
     if not settings.proactive_link_recommendation_enabled:
         return False
-    if trigger_type not in {"silence_wakeup", "memory_proactive"}:
+    if trigger_type not in {
+        "silence_wakeup",
+        "memory_proactive",
+        "scheduled_scene",
+        "special_date",
+    }:
         return False
     if source == "music":
         return False
@@ -110,13 +118,19 @@ async def maybe_prepare_proactive_link_recommendation(
     topic: str | None,
     stage: str | None,
     message: str,
+    force: bool = False,
+    skip: bool = False,
 ) -> ProactiveLinkRecommendation | None:
     """Return a real assistant link card when a configured provider yields one.
 
     The agent must never hallucinate a card URL. This helper only emits a card
     after a candidate URL has been found, parsed, and stored as role=assistant.
     """
-    if not should_attempt_proactive_link(trigger_type=trigger_type, source=source):
+    if skip:
+        return None
+    if not should_attempt_proactive_link(
+        trigger_type=trigger_type, source=source, force=force,
+    ):
         return None
     candidate = await _select_candidate_url(query=_query(topic=topic, message=message))
     if not candidate:

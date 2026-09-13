@@ -134,6 +134,7 @@ from app.services.prompting.defaults import (
     PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT,
     PROACTIVE_SCHEDULED_SCENE_PROMPT,
     PROACTIVE_DECAY_FINAL_PROMPT,
+    PROACTIVE_TRENDING_SECTION_PROMPT,
     PROACTIVE_FIRST_GREETING_PROMPT,
     PROACTIVE_SPECIAL_HOLIDAY_PROMPT,
     PROACTIVE_SPECIAL_BIRTHDAY_PROMPT,
@@ -749,6 +750,13 @@ PROMPT_DEFINITIONS = [
         "《终稿·第四部分 主动交流》§8 三级阶梯衰减: "
         "第三阶段 (n=6, 30 天内 1 次) 唯一一次温和告别, n≥7 后永久停止.",
         PROACTIVE_DECAY_FINAL_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.trending_section", "热点参考段", "主动交流", "主动消息",
+        "【工程扩展】主动消息命中 trending 概率或管理员强制联网时, "
+        "追加在 silence_wakeup / scheduled_scene / special_date prompt 末尾. "
+        "占位符 {trending}.",
+        PROACTIVE_TRENDING_SECTION_PROMPT,
     ),
     PromptDefinition(
         "proactive.first_greeting", "AI首次打招呼", "主动交流", "主动消息",

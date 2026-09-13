@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.config import settings
+from app.services import runtime_config
 from app.services.interaction.reply_context import (
     actual_delay_seconds,
     compute_delay_profile,
@@ -14,9 +14,14 @@ from app.services.interaction.reply_context import (
 
 @pytest.fixture
 def reply_delay_enabled(monkeypatch):
-    """compute_delay_profile 在 settings.reply_delay_enabled=False 时短路返 0,
-    spec §6.2 三档延迟测试需要先把 flag 打开."""
-    monkeypatch.setattr(settings, "reply_delay_enabled", True)
+    """compute_delay_profile 在 reply_delay_enabled=False 时短路返 0,
+    spec §6.2 三档延迟测试需要先把 runtime flag 打开."""
+    monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
+    monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {
+        "replyDelayEnabled": True,
+        "replyDelayMaxSeconds": 3600,
+    })
 
 
 def test_compute_delay_profile_conversation_mode(reply_delay_enabled):
@@ -42,8 +47,11 @@ def test_compute_delay_profile_high_emotion(reply_delay_enabled):
     assert profile["interaction_mode"] == "high_emotion"
 
 
-def test_compute_delay_profile_disabled_by_default():
-    """默认 settings.reply_delay_enabled=False → 短路返 disabled / 0s."""
+def test_compute_delay_profile_disabled_by_default(monkeypatch):
+    """默认 reply_delay_enabled=False → 短路返 disabled / 0s."""
+    monkeypatch.setattr(runtime_config, "_CACHE_LOADED", True)
+    monkeypatch.setattr(runtime_config, "_AGENT_CACHE", {})
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {})
     now = datetime.now(timezone.utc)
     profile = compute_delay_profile(
         last_reply_at=now - timedelta(minutes=5),
@@ -53,6 +61,25 @@ def test_compute_delay_profile_disabled_by_default():
     )
     assert profile["interaction_mode"] == "disabled"
     assert profile["delay_seconds"] == 0.0
+
+
+def test_compute_delay_profile_respects_max_cap(reply_delay_enabled, monkeypatch):
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(runtime_config, "_GLOBAL_CACHE", {
+        "replyDelayEnabled": True,
+        "replyDelayMaxSeconds": 30,
+    })
+    monkeypatch.setattr(
+        "app.services.schedule_domain.timing.calculate_status_delay",
+        lambda _status: 600.0,
+    )
+    profile = compute_delay_profile(
+        last_reply_at=now - timedelta(hours=2),
+        received_at=now,
+        received_status={"status": "sleeping"},
+        user_emotion=None,
+    )
+    assert profile["delay_seconds"] == 30.0
 
 
 def test_merge_reply_contexts_keeps_first_receipt():

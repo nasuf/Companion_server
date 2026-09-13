@@ -143,6 +143,10 @@ class Settings(BaseSettings):
     # True (生产): 走 spec §6 完整流程 — 按用户情绪标签/作息计算 delay_seconds,
     #   入 delayed queue, scheduler 每秒扫到期推送, 模拟真人间隔回复.
     reply_delay_enabled: bool = False
+    # Upper bound for compute_delay_profile / delayed-queue seconds when delay is on.
+    reply_delay_max_seconds: int = 300
+    # Short-message aggregation (fragment + turn windows). False = every message immediate.
+    user_message_aggregation_enabled: bool = True
 
     # Phase E1 (拟人度): 错别字生成器 — 以 typo_rate 概率给回复注入一个高频
     # 同音错字. 不再追加 "*正确字" 纠正气泡, 避免用户误解为脏话打码.
@@ -315,6 +319,12 @@ class Settings(BaseSettings):
     # query/platform payload. Candidate URLs are a deterministic fallback pool.
     proactive_link_recommendation_enabled: bool = True
     proactive_link_recommendation_probability: float = 0.03
+    # Proactive trending defaults (env only). Admins override via SystemConfig
+    # (runtime-config API); hot path reads runtime_config, not these directly.
+    proactive_trending_enabled: bool = False
+    proactive_trending_probability: float = 0.30
+    proactive_trending_cache_ttl_s: int = 3600
+    proactive_trending_link_probability: float = 0.30
     proactive_link_candidate_urls: str = ""
     chat_link_search_provider: str = "custom"
     chat_link_search_endpoint: str = ""

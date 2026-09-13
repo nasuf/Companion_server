@@ -1893,6 +1893,17 @@ model SystemConfig {
   // Web search for main replies (Ark Responses API web_search tool).
   // Global only; null = fall back to env WEB_SEARCH_ENABLED (default false).
   webSearchEnabled       Boolean? @map("web_search_enabled")
+  // Proactive trending / hot-news enrichment (silence_wakeup, scheduled_scene,
+  // special_date). Global only; null = fall back to env defaults.
+  proactiveTrendingEnabled       Boolean? @map("proactive_trending_enabled")
+  proactiveTrendingProbability   Float?   @map("proactive_trending_probability")
+  proactiveTrendingLinkProbability Float? @map("proactive_trending_link_probability")
+  proactiveTrendingCacheTtlS     Int?     @map("proactive_trending_cache_ttl_s")
+  // Random reply delay (spec §6 async reply). null = env REPLY_DELAY_* defaults.
+  replyDelayEnabled              Boolean? @map("reply_delay_enabled")
+  replyDelayMaxSeconds           Int?     @map("reply_delay_max_seconds")
+  // Short-message / turn-window aggregation before replying. null = env default.
+  userMessageAggregationEnabled  Boolean? @map("user_message_aggregation_enabled")
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")

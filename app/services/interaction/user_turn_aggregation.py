@@ -124,6 +124,22 @@ async def plan_user_message_aggregation(
     reply_context: dict | None,
 ) -> UserMessageAggregationPlan:
     """Build the aggregation plan for one persisted-or-about-to-persist user message."""
+    from app.services.interaction.chat_management import user_message_aggregation_enabled
+
+    if not user_message_aggregation_enabled():
+        return UserMessageAggregationPlan(
+            route="immediate",
+            agent_id=agent_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            text=text,
+            metadata={"aggregation_disabled": True},
+            final_message=text,
+            final_context=reply_context,
+            fallback_message=text,
+            fallback_context=reply_context,
+        )
+
     if is_short_message(text):
         if await has_turn_pending(agent_id=agent_id, user_id=user_id):
             return UserMessageAggregationPlan(
