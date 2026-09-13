@@ -458,21 +458,32 @@ def test_proactive_link_probability_gate(monkeypatch):
     monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
     monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 0.05)
 
+    # 允许的四类 (silence_wakeup / memory_proactive / scheduled_scene / special_date)
+    # 都在概率窗内应放行. 早期只放 silence_wakeup/memory_proactive, 314db2a 扩到四类;
+    # 保留 scheduled_scene 作为一条"扩容后仍放行"的回归锚, 防哪天又缩回去无人察觉。
     assert should_attempt_proactive_link(
         trigger_type="silence_wakeup",
         source="greeting",
         random_value=0.01,
     )
-    assert not should_attempt_proactive_link(
+    assert should_attempt_proactive_link(
         trigger_type="scheduled_scene",
         source="ai_schedule",
         random_value=0.01,
     )
+    # music 源永远拦 (无论 trigger_type)
     assert not should_attempt_proactive_link(
         trigger_type="silence_wakeup",
         source="music",
         random_value=0.01,
     )
+    # 未知 trigger_type 应被白名单拒: 防日后加新触发类型时静默 opt-in 到链接卡
+    assert not should_attempt_proactive_link(
+        trigger_type="unknown_trigger",
+        source="greeting",
+        random_value=0.01,
+    )
+    # 概率窗外应拦
     assert not should_attempt_proactive_link(
         trigger_type="silence_wakeup",
         source="greeting",

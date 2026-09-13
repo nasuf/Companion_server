@@ -54,10 +54,14 @@ async def test_probability_endpoint_only_updates_tts_field(monkeypatch):
     monkeypatch.setattr(runtime_config, "load_caches", AsyncMock())
     monkeypatch.setattr(runtime_config, "invalidate_caches", lambda: None)
     monkeypatch.setattr(runtime_config, "_sync_tts_probability", AsyncMock())
+    # 用真的 ResolvedConfig dataclass, 不是 SimpleNamespace: dataclass 缺字段会在
+    # 构造时炸出清晰的 missing kwarg, 而 SimpleNamespace 只会在下游 attribute access
+    # 时炸, 每次 ResolvedConfig 新加字段这里都会静默漂 (本文件的原始失败就是这样
+    # 来的 —— ba6dd42 加了 7 个新字段, 测试直到运行时 AttributeError 才发现).
     monkeypatch.setattr(
         runtime_config,
         "resolve_config_sync",
-        lambda agent_id=None: SimpleNamespace(
+        lambda agent_id=None: runtime_config.ResolvedConfig(
             online_model=True,
             remote_provider="dashscope",
             remote_chat_provider="dashscope",
@@ -71,6 +75,13 @@ async def test_probability_endpoint_only_updates_tts_field(monkeypatch):
             tts_model="qwen-tts",
             tts_output_probability=37,
             web_search_enabled=False,
+            proactive_trending_enabled=False,
+            proactive_trending_probability=0.30,
+            proactive_trending_link_probability=0.30,
+            proactive_trending_cache_ttl_s=3600,
+            reply_delay_enabled=False,
+            reply_delay_max_seconds=300,
+            user_message_aggregation_enabled=True,
         ),
     )
 

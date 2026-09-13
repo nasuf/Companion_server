@@ -130,6 +130,9 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "reply.delay_reason_high_emotion",
     "reply.delay_reason_sleep",
     "reply.delay_reason_very_busy",
+    # ba6dd42 起: 联网热点段, 作为 section 追加到 proactive prompt (append_trending_section);
+    # 不是独立 LLM step, 归 component-only.
+    "proactive.trending_section",
 }
 
 # 当前运行时不参与任何 LLM prompt, 但保留在后台管理里用于历史兼容/未来恢复.
