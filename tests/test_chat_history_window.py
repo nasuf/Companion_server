@@ -114,3 +114,77 @@ def test_mbti_incident_would_now_be_in_window():
     got = build_chat_messages("sys", rows, token_budget=4000)
     joined = "".join(m["content"] for m in got)
     assert "ISFJ" in joined
+
+
+class TestDropPreGapHistory:
+    """drop_older_than_seconds: 大间隔时把 pre-gap 逐字历史砍掉, 让模型看不见
+    旧话题原文 (evals/temporal_awareness 证据: 红线 16%→0%, stale-topic 51%→
+    ~30%). 当前 turn 永不砍掉."""
+
+    def _dtmsg(self, role: str, content: str, dt):
+        return {"role": role, "content": content, "createdAt": dt}
+
+    def test_drops_history_older_than_threshold(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 13, 15, 0, tzinfo=timezone.utc)
+        rows = [
+            self._dtmsg("user", "国庆想去成都", now - timedelta(days=2)),
+            self._dtmsg("assistant", "成都好呀", now - timedelta(days=2, minutes=-3)),
+            self._dtmsg("user", "今天好累", now),  # current turn
+        ]
+        got = build_chat_messages("sys", rows, drop_older_than_seconds=3 * 3600)
+        # system + only the current turn (2 天前的两条被砍)
+        assert len(got) == 2
+        assert got[0]["role"] == "system"
+        assert "今天好累" in got[1]["content"]
+        assert "成都" not in "".join(m["content"] for m in got)
+
+    def test_keeps_history_within_threshold(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 13, 15, 0, tzinfo=timezone.utc)
+        rows = [
+            self._dtmsg("user", "刚才那事", now - timedelta(minutes=30)),
+            self._dtmsg("assistant", "嗯我记得", now - timedelta(minutes=27)),
+            self._dtmsg("user", "接着说吧", now),
+        ]
+        got = build_chat_messages("sys", rows, drop_older_than_seconds=3 * 3600)
+        # 全部保留 (最老的一条才 30 分钟前 < 3h)
+        assert len(got) == 4  # system + 3 msg
+        assert "刚才那事" in got[1]["content"]
+
+    def test_current_turn_never_dropped_even_if_older_than_threshold(self):
+        # 兜底: 如果 messages 里所有 createdAt 都 > threshold (退化 case: 只有单条),
+        # 也必须保留 —— 否则回复 LLM 拿到空历史无法生成.
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 13, 15, 0, tzinfo=timezone.utc)
+        rows = [
+            self._dtmsg("user", "唯一一条", now - timedelta(days=5)),
+        ]
+        got = build_chat_messages("sys", rows, drop_older_than_seconds=3 * 3600)
+        assert len(got) == 2  # system + the single message (as "current turn")
+        assert "唯一一条" in got[1]["content"]
+
+    def test_none_threshold_is_no_op(self):
+        # 默认 None: 老代码路径, 与老实现完全一致
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 13, 15, 0, tzinfo=timezone.utc)
+        rows = [
+            self._dtmsg("user", "很久以前的话", now - timedelta(days=30)),
+            self._dtmsg("user", "现在", now),
+        ]
+        got_default = build_chat_messages("sys", rows)
+        got_explicit_none = build_chat_messages("sys", rows, drop_older_than_seconds=None)
+        assert got_default == got_explicit_none
+        assert "很久以前的话" in "".join(m["content"] for m in got_default)
+
+    def test_no_created_at_messages_are_kept(self):
+        # createdAt=None (旧数据 / 测试 fixture) 永远保留 —— 无法判断新旧就不该乱砍.
+        # 用不同 role 避开 _coalesce_bubbles 合并.
+        rows = [
+            {"role": "user", "content": "无时间戳的老消息", "createdAt": None},
+            {"role": "assistant", "content": "也无时间戳的回复", "createdAt": None},
+        ]
+        got = build_chat_messages("sys", rows, drop_older_than_seconds=3600)
+        assert len(got) == 3  # system + 2 msg
+        joined = "".join(m["content"] for m in got)
+        assert "无时间戳的老消息" in joined and "也无时间戳的回复" in joined

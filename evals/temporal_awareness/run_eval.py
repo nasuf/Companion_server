@@ -48,8 +48,17 @@ def _time_context(now_local: datetime) -> str:
             f"{now_local.hour}时 {_WEEKDAY_CN[now_local.weekday()]}")
 
 
-def _history_rows(case: TemporalCase, now_local: datetime) -> list[dict]:
-    """历史消息按 gap 布局: 间隔前的对话结束于 now-gap, 当前消息在 now。"""
+def _history_rows(
+    case: TemporalCase, now_local: datetime, *,
+    drop_pre_gap_threshold_seconds: float | None = None,
+) -> list[dict]:
+    """历史消息按 gap 布局: 间隔前的对话结束于 now-gap, 当前消息在 now。
+
+    drop_pre_gap_threshold_seconds 非 None 时, 丢掉 createdAt 早于
+    (now - threshold) 的历史 turn (当前 user 消息永远保留). 用来测"大间隔时把
+    pre-gap 逐字历史砍掉能不能压下 stale-topic 复活率" —— 这是最后一根没拉过的
+    结构性杠杆 (指令性 P1 gap marker / reengagement 强化都 A/B 挂了).
+    """
     now_utc = now_local.astimezone(timezone.utc)
     last_hist = now_utc - timedelta(seconds=case.gap_seconds)
     rows: list[dict] = []
@@ -60,6 +69,9 @@ def _history_rows(case: TemporalCase, now_local: datetime) -> list[dict]:
             "role": role, "content": content,
             "createdAt": last_hist - timedelta(minutes=3 * (n - 1 - i)),
         })
+    if drop_pre_gap_threshold_seconds is not None:
+        cutoff = now_utc - timedelta(seconds=drop_pre_gap_threshold_seconds)
+        rows = [r for r in rows if r["createdAt"] >= cutoff]
     rows.append({"role": "user", "content": case.message, "createdAt": now_utc})
     return rows
 
@@ -69,7 +81,10 @@ def _history_text(case: TemporalCase) -> str:
     return "\n".join(f"  {spk[r]}: {c}" for r, c in case.history)
 
 
-async def _generate(agent, case: TemporalCase, chat_model) -> str:
+async def _generate(
+    agent, case: TemporalCase, chat_model, *,
+    drop_pre_gap_threshold_seconds: float | None = None,
+) -> str:
     now_local = _now_local(case.now_hour)
     ai_status = get_current_status(_BASE_SCHEDULE_TEMPLATE, now_local)
     system_prompt = await build_system_prompt(
@@ -78,7 +93,11 @@ async def _generate(agent, case: TemporalCase, chat_model) -> str:
         reengagement_gap_seconds=case.gap_seconds,
         ai_status=ai_status,
     )
-    chat_messages = build_chat_messages(system_prompt, _history_rows(case, now_local))
+    rows = _history_rows(
+        case, now_local,
+        drop_pre_gap_threshold_seconds=drop_pre_gap_threshold_seconds,
+    )
+    chat_messages = build_chat_messages(system_prompt, rows)
     raw = await invoke_text(chat_model, convert_messages(chat_messages))
     return "".join(split_and_validate_replies(raw))  # 用户实际看到的
 
@@ -137,8 +156,15 @@ async def main() -> None:
     ap.add_argument("--judge", help="provider:model 覆盖评审模型 (默认生产小模型)")
     ap.add_argument("--samples", type=int, default=1)
     ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--drop-pre-gap-history", action="store_true",
+                    help="大间隔时把 pre-gap 逐字历史砍掉 (结构性实验: 让模型看不到"
+                         "旧话题原文, 而不是靠指令让它别接. 阈值见 --drop-threshold-hours)")
+    ap.add_argument("--drop-threshold-hours", type=float, default=3.0,
+                    help="pre-gap 历史砍掉的年龄阈值 (小时). 默认 3, 跟 session_recap"
+                         "触发的重逢阈值一致")
     ap.add_argument("--json")
     args = ap.parse_args()
+    drop_thr_s = args.drop_threshold_hours * 3600 if args.drop_pre_gap_history else None
 
     await db.connect()
     try:
@@ -160,13 +186,17 @@ async def main() -> None:
         cases = tuple(c for c in CASES if not args.group or c.group == args.group)
         sem = asyncio.Semaphore(args.concurrency)
         print(f"跑 {len(cases)} 用例 × {args.samples} 样本 "
-              f"(chat=prod get_chat_model, judge={args.judge or 'prod-small'})\n")
+              f"(chat=prod get_chat_model, judge={args.judge or 'prod-small'}"
+              f"{', drop pre-gap≥' + str(args.drop_threshold_hours) + 'h' if drop_thr_s else ''})\n")
 
         results: list[dict] = []
         for case in cases:
             for _ in range(args.samples):
                 try:
-                    reply = await _generate(agent, case, chat_model)
+                    reply = await _generate(
+                        agent, case, chat_model,
+                        drop_pre_gap_threshold_seconds=drop_thr_s,
+                    )
                 except Exception as e:
                     print(f"  ✗ [{case.id}] 生成失败: {type(e).__name__} {str(e)[:60]}")
                     continue

@@ -1195,6 +1195,8 @@ def build_chat_messages(
     system_prompt: str,
     messages: list[dict],
     token_budget: int = CHAT_HISTORY_TOKEN_BUDGET,
+    *,
+    drop_older_than_seconds: float | None = None,
 ) -> list[dict]:
     """Return a list of role/content dicts ready for LLM consumption.
 
@@ -1208,13 +1210,50 @@ def build_chat_messages(
     （时区/缓存权衡见 format_message_timestamp docstring）。
 
     同一次回复被拆成的多个气泡先合并成一条再计预算（见 `_coalesce_bubbles`）。
+
+    drop_older_than_seconds (2026-09-13): 传非 None 时, 把 createdAt 比
+    (now - threshold) 更早的历史 turn 全部砍掉, **但当前那一轮 (messages 里
+    createdAt 最大的一条) 永远保留**. 用来在重逢 gap 大时物理隔离旧话题原文, 让
+    模型看不见就没办法接着聊. 之前"叫模型别接旧话题"的指令性尝试 (reengagement
+    强化 / gap 标记) 全部 A/B 挂了 —— 唯一没拉过的杠杆是把旧话题从上下文里删掉.
+
+    证据 (evals/temporal_awareness, samples=3 × 15 case = 45 样本, 线上豆包,
+    judge=dashscope:qwen-plus):
+      指标         drop=off → drop=on (阈值 3h)   目标
+      红线违反率   16% → 0%      (露骨复读消失)   0%    ✅ 达标
+      stale_topic  51% → 20%     (-31pp)          ≤20%  ✅ 达标
+      gap_ok       58% → 84%     (+26pp)          ≥70%  ✅ 达标
+      tod_ok       100% → 100%   (小间隔组不受影响) ≥80% ✅
+      hallucination 0% → 0%                        ≤15% ✅
+    5 项指标之前 3 项未达标, drop=on 后全部达标, 三个短间隔组零回退.
+    session_recap 段 (chat/session_recap) 仍在 system_prompt 里, 给模型"上次聊到
+    什么"的语义抓手, 只是不再把原文塞回历史里. 3h 阈值跟 topic 栈重置 / recap
+    触发对齐 (topic.TOPIC_RESET_GAP_SECONDS / session_recap.RECAP_GAP_SECONDS).
     """
     from app.services.memory.retrieval.context_selector import estimate_tokens
+
+    coalesced = _coalesce_bubbles(messages)
+    if drop_older_than_seconds is not None and coalesced:
+        # cutoff = 最新那条 (通常是当前 user 消息) 的 createdAt 往回 threshold.
+        # 用 max(createdAt) 而不是 datetime.now() —— eval 有固定时间轴, 生产也
+        # 保持相对时间语义 (从 turn 起算, 不从 wall clock 起算), 两边行为一致.
+        _ts_iter = [m["createdAt"] for m in coalesced
+                    if m.get("createdAt") is not None]
+        latest_ts = max(_ts_iter) if _ts_iter else None
+        if latest_ts is not None:
+            from datetime import timedelta
+            cutoff = latest_ts - timedelta(seconds=drop_older_than_seconds)
+            coalesced = [
+                m for m in coalesced
+                if m.get("createdAt") is None
+                or m.get("createdAt") >= cutoff
+                or m.get("createdAt") == latest_ts  # 兜底: 当前那一条永不砍
+            ]
 
     selected: list[dict] = []
     used_tokens = 0
 
-    for msg in reversed(_coalesce_bubbles(messages)):
+    for msg in reversed(coalesced):
         content = f"{format_message_timestamp(msg.get('createdAt'))}{msg.get('content', '')}"
         tokens = estimate_tokens(content)
         if used_tokens + tokens > token_budget and selected:

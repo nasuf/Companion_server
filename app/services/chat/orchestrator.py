@@ -110,7 +110,7 @@ from app.services.chat.intent_replies import (
 from app.services.chat.reply_post_process import emit_replies as _emit_replies
 from app.services.chat.reply_generate import generate_reply as _generate_reply
 from app.services.chat.expression_learner import sample_expression_habits
-from app.services.chat.session_recap import get_or_build_session_recap
+from app.services.chat.session_recap import RECAP_GAP_SECONDS, get_or_build_session_recap
 from app.services.chat.reply_count_state import (
     load_last_reply_count,
     pick_reply_count_target,
@@ -1389,7 +1389,20 @@ async def stream_chat_response(
                 combined_text=aggregated_turn_text,
                 combined_id=user_message_id,
             )
-            return build_chat_messages(system_prompt, reply_messages)
+            # 大间隔时 (≥3h) 把 pre-gap 逐字历史砍掉, 让模型看不见旧话题原文.
+            # 阈值跟 topic 栈重置 / session_recap 触发对齐 (RECAP_GAP_SECONDS),
+            # 语义抓手保留在 system prompt 里的 session_recap 段. 详见
+            # build_chat_messages 的 docstring 与 evals/temporal_awareness 证据.
+            drop_older = (
+                RECAP_GAP_SECONDS
+                if (reengagement_gap_seconds is not None
+                    and reengagement_gap_seconds >= RECAP_GAP_SECONDS)
+                else None
+            )
+            return build_chat_messages(
+                system_prompt, reply_messages,
+                drop_older_than_seconds=drop_older,
+            )
 
         # 记忆使用打点 (后台, 不阻塞回复)。两条线并行:
         #   changelog  审计与 admin 展示, 只记真正注入的
