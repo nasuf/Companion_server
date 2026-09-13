@@ -95,3 +95,47 @@ class TestCaseBankShape:
         # 每个 kind 至少一个用例, 否则分 kind 报告的行永远为空
         kinds = {c.kind for c in CASES}
         assert kinds >= {"point", "range", "update", "relative"}
+
+    def test_adversarial_group_has_enough_coverage(self):
+        """v3 起要求求近对抗组 ≥ 8 道 —— 少于这个数, "sweet spot 存在"结论就是
+        under-coverage 的假象 (v2 血泪教训: 3 道对抗时看似 +1 净胜, 扩到 10 道
+        后立刻翻成净负)."""
+        adversarial = [c for c in CASES if c.id.startswith("recency_")]
+        assert len(adversarial) >= 8, (
+            f"only {len(adversarial)} adversarial recency cases — 权重扫描"
+            f"的'甜蜜点未见回退'结论可能只是缺覆盖")
+
+
+class TestProdPoolShape:
+    """prod_pool 模块的形状不变量 —— 具体查询依赖 DB, 只在这里锁 dataclass 与
+    _to_dt 的边缘 case (那次 sampler 静默返 0 就是 _to_dt 漏了 str → datetime)."""
+
+    def test_prod_seed_fields_match_candidate_shape(self):
+        from evals.temporal_recall.prod_pool import ProdSeed
+        # ProdSeed 字段必须能被 run_eval._prod_candidate 消费. 每次改 _prod_candidate
+        # 都要同步这里, 否则 pool 加载 200 条 sampler 沉默返 0 那种 bug 会复发.
+        required = {
+            "id", "text", "main", "sub", "occur_time", "statement_time",
+            "source", "importance", "level",
+        }
+        assert set(ProdSeed.__dataclass_fields__.keys()) == required
+
+    def test_to_dt_handles_iso_string(self):
+        # 关键: db.query_raw 把 timestamp 返成 ISO 字符串, 不是 datetime.
+        # 之前 sampler 直接 isinstance(x, datetime), 静默丢光整个 pool.
+        from datetime import datetime as _dt
+        from evals.temporal_recall.prod_pool import _to_dt
+        parsed = _to_dt("2026-07-22T20:02:14.336+00:00")
+        assert isinstance(parsed, _dt)
+
+    def test_to_dt_passthrough_datetime(self):
+        from datetime import datetime as _dt, timezone
+        from evals.temporal_recall.prod_pool import _to_dt
+        original = _dt.now(timezone.utc)
+        assert _to_dt(original) is original
+
+    def test_to_dt_none_on_invalid(self):
+        from evals.temporal_recall.prod_pool import _to_dt
+        assert _to_dt(None) is None
+        assert _to_dt("not a date") is None
+        assert _to_dt(12345) is None

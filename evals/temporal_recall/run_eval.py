@@ -194,14 +194,39 @@ def _candidate(seed: TemporalSeed, similarity: float) -> dict:
     }
 
 
-async def run(*, isolate_ranking: bool = False) -> list[CaseResult]:
+def _prod_candidate(seed, similarity: float) -> dict:
+    """跟 _candidate 同形, 用 ProdSeed 造 candidate dict (ID / 时间戳都直接用)."""
+    return {
+        "id": seed.id,
+        "content": seed.text,
+        "level": seed.level,
+        "importance": seed.importance,
+        "similarity": similarity,
+        "source": seed.source,
+        "main_category": seed.main,
+        "sub_category": seed.sub,
+        "occur_time": seed.occur_time,
+        "statement_time": seed.statement_time,
+        "created_at": seed.statement_time,
+        "updated_at": seed.statement_time,
+    }
+
+
+async def run(
+    *, isolate_ranking: bool = False, prod_pool: list | None = None,
+) -> list[CaseResult]:
     """跑一遍所有用例.
 
     isolate_ranking=True 跳过 select_context 的保护槽 (安全/关系/AI 自我/当前事实),
     直接用 rank_memory_candidate 的排序名次判命中 —— 这才是排序层的成绩。默认走
     完整生产流水线 (含保护槽), 对齐用户体感。
+
+    prod_pool: 一份 ProdSeed 列表 (来自 evals.temporal_recall.prod_pool), 会作为
+    额外分散注意力候选加进每题的候选池 —— 让 P3 权重扫描面对真实候选压力.
     """
     texts = [s.text for s in SEED_BANK] + [c.query for c in CASES]
+    if prod_pool:
+        texts += [p.text for p in prod_pool]
     vectors = await _embed_all(texts)
 
     results: list[CaseResult] = []
@@ -218,6 +243,19 @@ async def run(*, isolate_ranking: bool = False) -> list[CaseResult]:
             if sim < SIMILARITY_THRESHOLD:
                 continue
             cand = _candidate(seed, sim)
+            with _freeze_time_for_ranking():
+                score, _reasons = rank_memory_candidate(cand, case.query)
+            cand["display_score"] = score
+            candidates.append(cand)
+        # 追加 prod 池候选 (走同样的 similarity gate + ranking pipeline)
+        for pseed in (prod_pool or []):
+            pv = vectors.get(pseed.text)
+            if not pv:
+                continue
+            sim = cosine_similarity(qv, pv)
+            if sim < SIMILARITY_THRESHOLD:
+                continue
+            cand = _prod_candidate(pseed, sim)
             with _freeze_time_for_ranking():
                 score, _reasons = rank_memory_candidate(cand, case.query)
             cand["display_score"] = score
@@ -299,7 +337,7 @@ def _diff_hits(a: list[CaseResult], b: list[CaseResult]) -> list[tuple[str, bool
 _DEFAULT_RECENCY_WEIGHT = _ranking_mod._RECENCY_BOOST_WEIGHT
 
 
-async def _run_ab(*, isolate_ranking: bool) -> None:
+async def _run_ab(*, isolate_ranking: bool, prod_pool: list | None = None) -> None:
     """A/B: P3 求近排序 off vs on. 只在命中求近路径的用例上算 delta.
 
     默认建议配 --isolate-ranking, 否则保护槽会同时压住 off/on 两组, 让 delta 稀释成
@@ -309,9 +347,9 @@ async def _run_ab(*, isolate_ranking: bool) -> None:
     label_on = f"P3 on (w={_DEFAULT_RECENCY_WEIGHT}){' (裸排序)' if isolate_ranking else ''}"
 
     with _recency_boost(0.0):
-        off = await run(isolate_ranking=isolate_ranking)
+        off = await run(isolate_ranking=isolate_ranking, prod_pool=prod_pool)
     with _recency_boost(_DEFAULT_RECENCY_WEIGHT):
-        on = await run(isolate_ranking=isolate_ranking)
+        on = await run(isolate_ranking=isolate_ranking, prod_pool=prod_pool)
 
     report(off, mode_label=label_off)
     print()
@@ -341,7 +379,9 @@ async def _run_ab(*, isolate_ranking: bool) -> None:
               " off/on 都会被安全/关系槽先占. 建议再跑一次带 --isolate-ranking.")
 
 
-async def _run_sweep(*, isolate_ranking: bool, weights: list[float]) -> None:
+async def _run_sweep(
+    *, isolate_ranking: bool, weights: list[float], prod_pool: list | None = None,
+) -> None:
     """扫 P3 权重: 求近题目命中率 + 副作用 (非求近题目 / 对照组) 命中率.
 
     找 P3 的甜蜜点: 权重要足以让"求近题目的正确答案排到 top-1", 又不能挤到不该
@@ -356,7 +396,7 @@ async def _run_sweep(*, isolate_ranking: bool, weights: list[float]) -> None:
     off_results: dict[str, bool] = {}
     for w in weights:
         with _recency_boost(w):
-            results = await run(isolate_ranking=isolate_ranking)
+            results = await run(isolate_ranking=isolate_ranking, prod_pool=prod_pool)
         time_cases = [r for r in results if r.needs_time]
         recency = [r for r in time_cases if r.recency_triggered]
         non_recency = [r for r in time_cases if not r.recency_triggered]
@@ -387,16 +427,34 @@ async def main() -> None:
                     help="P3 求近排序 on/off A/B, 只在命中求近路径的用例上算 delta")
     ap.add_argument("--sweep-recency", action="store_true",
                     help="扫 P3 权重 (0/0.5/1.0/1.5/2.0), 看甜蜜点与副作用")
+    ap.add_argument("--prod-pool-size", type=int, default=0,
+                    help="从 prod DB 加载 N 条真实记忆作为分散注意力候选")
+    ap.add_argument("--prod-pool-agent-id", default=None,
+                    help="只从这个 agent 的记忆里抽样 (缺省: 跨用户随机)")
     args = ap.parse_args()
+
+    prod_pool = None
+    if args.prod_pool_size > 0:
+        from evals.temporal_recall.prod_pool import load_prod_pool
+        print(f"[prod-pool] 加载 {args.prod_pool_size} 条 prod 记忆..."
+              f"{' (agent=' + args.prod_pool_agent_id[:8] + ')' if args.prod_pool_agent_id else ''}")
+        prod_pool = await load_prod_pool(
+            args.prod_pool_size, agent_id=args.prod_pool_agent_id,
+        )
+        print(f"[prod-pool] 实际拿到 {len(prod_pool)} 条 "
+              f"({sum(1 for s in prod_pool if s.occur_time)} 带 occur_time)\n")
 
     if args.sweep_recency:
         await _run_sweep(isolate_ranking=args.isolate_ranking,
-                         weights=[0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0])
+                         weights=[0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0],
+                         prod_pool=prod_pool)
     elif args.ab_recency:
-        await _run_ab(isolate_ranking=args.isolate_ranking)
+        await _run_ab(isolate_ranking=args.isolate_ranking, prod_pool=prod_pool)
     else:
-        results = await run(isolate_ranking=args.isolate_ranking)
+        results = await run(isolate_ranking=args.isolate_ranking, prod_pool=prod_pool)
         label = "裸排序" if args.isolate_ranking else "生产管线"
+        if prod_pool:
+            label += f" + prod pool ({len(prod_pool)})"
         report(results, mode_label=label)
 
 
