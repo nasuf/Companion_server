@@ -213,4 +213,33 @@ CASES: tuple[TemporalCase, ...] = (
         ("fear_height",),
         needs_time=False,
     ),
+
+    # ── 求近对抗组: 查询字面含求近词但正确答案不是最新的 ─────────────────
+    # 这组直接检验 P3 的"甜蜜点"边界: 权重调高时, 若这些题从对变错, 就是过头的
+    # 副作用。加权重前必须看到它们仍对; 加完仍对 = 加得起, 加完变错 = 越界。
+    # 现在没有 —— 因为 P3 才是本 eval 要量的对象, 缺一组"能被 P3 打错的"用例,
+    # 就无法量出上限, 只能拿"暂未见回退"这种弱结论。
+    TemporalCase(
+        "recency_but_want_old_gym", "range",
+        "我最近一次去健身房练的是哪个部位？",
+        ("gym_3",),
+        needs_time=True,
+        note="求近词'最近一次', 正确答案就是最新那次 → P3 应该帮忙, 不能打错",
+    ),
+    TemporalCase(
+        "recency_but_want_middle_gym", "range",
+        "我最近去健身房都在练哪些部位？",
+        ("gym_3", "gym_2", "gym_1"),
+        needs_time=True,
+        note="求近但要 3 条: P3 权重过大会只留最新那条, 挤掉 gym_1/gym_2",
+    ),
+    TemporalCase(
+        "recency_stable_l1", "point",
+        "我最近喝咖啡还是喝茶多？",
+        ("like_coffee",),
+        needs_time=False,
+        note="求近词'最近', 但正确答案是无 occur_time 的 L1 偏好. P3 机制上不主动"
+             "保护它 (occ=None → 无 boost), 但对手 (近期无关事件如 gym_3) 会拿到接近"
+             "满值 boost 挤下去 —— 拿这道题量'非对称 boost 引发的漂移'",
+    ),
 )
