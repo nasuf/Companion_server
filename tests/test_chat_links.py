@@ -769,6 +769,114 @@ async def test_prepare_proactive_link_recommendation_builds_assistant_card(monke
     assert result.link_card_metadata["role"] == "assistant"
 
 
+async def test_prepare_proactive_link_recommendation_ignores_chat_line_for_search(
+    monkeypatch,
+):
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.settings, "chat_link_search_provider", "custom")
+    monkeypatch.setattr(rec_mod.settings, "chat_link_search_endpoint", "https://search.example/links")
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+    monkeypatch.setattr(rec_mod.random, "choice", lambda urls: urls[0])
+    captured_query: dict[str, str] = {}
+
+    async def fake_search_endpoint_urls(*, query):
+        captured_query["value"] = query
+        return ["https://www.zhihu.com/question/1"]
+
+    async def fake_extract_link_metadata(*, url, shared_text, timeout=12.0):
+        assert shared_text is None
+        return LinkMetadata(
+            source_url=url,
+            final_url=url,
+            platform="知乎",
+            title="时间胶囊怎么埋",
+            summary="分享几种适合情侣/朋友的时间胶囊做法。",
+            content_text="分享几种适合情侣/朋友的时间胶囊做法。",
+        )
+
+    async def fake_create_or_update_link_card(**kwargs):
+        return ChatLinkCard(
+            id="link-ai-topic",
+            user_id=kwargs["user_id"],
+            conversation_id=kwargs["conversation_id"],
+            message_id=None,
+            role=kwargs["role"],
+            source_app=kwargs["source_app"],
+            source_url=kwargs["metadata"].source_url,
+            final_url=kwargs["metadata"].final_url,
+            platform=kwargs["metadata"].platform,
+            title=kwargs["metadata"].title,
+            description="",
+            author=None,
+            image_url=None,
+            content_text=kwargs["metadata"].content_text,
+            original_text=kwargs["metadata"].content_text,
+            summary=kwargs["metadata"].summary,
+            status="ready",
+            error=None,
+            metadata=kwargs["extra_metadata"],
+        )
+
+    monkeypatch.setattr(rec_mod, "_search_endpoint_urls", fake_search_endpoint_urls)
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
+    monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
+
+    result = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1",
+        conversation_id="c1",
+        trigger_type="silence_wakeup",
+        source="greeting",
+        topic="时间胶囊",
+        stage="warming",
+        message="最近咋样呀，我下班路上刚想起之前埋的时间胶囊",
+    )
+
+    assert result is not None
+    assert captured_query["value"] == "时间胶囊"
+    assert (
+        result.component_card["body"]
+        == "分享几种适合情侣/朋友的时间胶囊做法。"
+    )
+    assert result.component_card["body"] != "最近咋样呀，我下班路上刚想起之前埋的时间胶囊"
+
+
+async def test_prepare_proactive_link_recommendation_skips_partial_metadata(monkeypatch):
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(
+        rec_mod.settings,
+        "proactive_link_candidate_urls",
+        "https://www.zhihu.com/question/1",
+    )
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+    monkeypatch.setattr(rec_mod.random, "choice", lambda urls: urls[0])
+
+    async def fake_extract_link_metadata(*, url, shared_text, timeout=12.0):
+        return LinkMetadata(
+            source_url=url,
+            final_url=url,
+            platform="知乎",
+            title="未命名链接",
+            status="partial",
+            error="页面返回 HTTP 403",
+        )
+
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
+
+    result = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1",
+        conversation_id="c1",
+        trigger_type="silence_wakeup",
+        source="greeting",
+        topic="时间胶囊",
+        stage="warming",
+        message="最近咋样呀，我下班路上刚想起之前埋的时间胶囊",
+    )
+
+    assert result is None
+
+
 async def test_prepare_proactive_link_recommendation_records_search_source(monkeypatch):
     monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
     monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)

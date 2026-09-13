@@ -132,11 +132,21 @@ async def maybe_prepare_proactive_link_recommendation(
         trigger_type=trigger_type, source=source, force=force,
     ):
         return None
-    candidate = await _select_candidate_url(query=_query(topic=topic, message=message))
+    search_query = _proactive_search_query(topic=topic)
+    candidate = await _select_candidate_url(query=search_query)
     if not candidate:
         return None
     try:
-        metadata = await extract_link_metadata(url=candidate.url, shared_text=message)
+        metadata = await extract_link_metadata(url=candidate.url, shared_text=None)
+        if not _metadata_usable_for_proactive_card(metadata):
+            logger.info(
+                "[chat-links] proactive recommendation skipped unusable metadata "
+                "platform=%s status=%s query=%s",
+                metadata.platform,
+                metadata.status,
+                search_query,
+            )
+            return None
         link = await create_or_update_link_card(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -153,9 +163,10 @@ async def maybe_prepare_proactive_link_recommendation(
     except Exception as exc:
         logger.warning("[chat-links] proactive recommendation failed: %s", exc)
         return None
+    component_card = component_card_for_link(link, recommendation=True)
     return ProactiveLinkRecommendation(
         link=link,
-        component_card=component_card_for_link(link),
+        component_card=component_card,
         link_card_metadata=metadata_for_link_card(link),
     )
 
@@ -284,8 +295,27 @@ def _clean_search_query(query: str) -> str:
     return " ".join((query or "").split()).strip()[:160] or "日常分享"
 
 
-def _query(*, topic: str | None, message: str) -> str:
+def _proactive_search_query(*, topic: str | None) -> str:
+    """Build a search query from proactive topic only — never the generated chat line."""
     topic_text = (topic or "").strip()
     if topic_text:
         return topic_text[:80]
-    return (message or "日常分享").strip()[:80] or "日常分享"
+    return "日常分享"
+
+
+def _metadata_usable_for_proactive_card(metadata: Any) -> bool:
+    if str(getattr(metadata, "status", "") or "").strip() != "ready":
+        return False
+    title = str(getattr(metadata, "title", "") or "").strip()
+    if not title or title == "未命名链接":
+        return False
+    for value in (
+        getattr(metadata, "summary", ""),
+        getattr(metadata, "description", ""),
+        getattr(metadata, "title", ""),
+        getattr(metadata, "content_text", ""),
+    ):
+        text = str(value or "").strip()
+        if text and text != "未命名链接":
+            return True
+    return False

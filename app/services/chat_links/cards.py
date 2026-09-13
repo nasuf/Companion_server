@@ -5,7 +5,7 @@ from typing import Any
 from app.services.chat_links.extraction import accent_for_platform, app_url_for_link
 
 
-def component_card_for_link(link: Any) -> dict[str, Any]:
+def component_card_for_link(link: Any, *, recommendation: bool = False) -> dict[str, Any]:
     payload = {
         "link_id": link.id,
         "source_url": link.source_url,
@@ -23,6 +23,8 @@ def component_card_for_link(link: Any) -> dict[str, Any]:
         payload["content_text"] = link.content_text
     if link.summary:
         payload["summary"] = link.summary
+    if getattr(link, "title", None):
+        payload["page_title"] = link.title
     app_url = app_url_for_link(
         platform=link.platform,
         source_url=link.source_url,
@@ -38,7 +40,7 @@ def component_card_for_link(link: Any) -> dict[str, Any]:
         "type": "external_link",
         "title": platform,
         "subtitle": "",
-        "body": _body(link),
+        "body": _body_for_recommendation(link) if recommendation else _body(link),
         "footer": _footer(platform),
         "accent": accent_for_platform(link.platform),
         "payload": payload,
@@ -80,6 +82,21 @@ def _body(link: Any) -> str:
     ):
         text = str(value or "").strip()
         if text:
+            return text
+    return ""
+
+
+def _body_for_recommendation(link: Any) -> str:
+    """Proactive cards should preview the destination page, not chat text."""
+    for value in (
+        getattr(link, "summary", ""),
+        getattr(link, "description", ""),
+        getattr(link, "title", ""),
+        getattr(link, "content_text", ""),
+        getattr(link, "original_text", ""),
+    ):
+        text = str(value or "").strip()
+        if text and text != "未命名链接":
             return text
     return ""
 
