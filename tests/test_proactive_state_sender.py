@@ -111,6 +111,68 @@ async def test_send_manual_or_triggered_proactive_blocks_waiting_state():
 
 
 @pytest.mark.asyncio
+async def test_send_manual_or_triggered_proactive_unlocks_running_for_admin():
+    state = _state(status="running")
+    unlocked = _state(status="idle")
+    with (
+        patch(
+            "app.services.proactive.sender.ensure_proactive_state_for_workspace",
+            new_callable=AsyncMock,
+            return_value=state,
+        ),
+        patch(
+            "app.services.proactive.sender._unlock_state_for_admin_test",
+            new_callable=AsyncMock,
+            return_value=unlocked,
+        ) as mock_unlock,
+        patch(
+            "app.services.proactive.sender.generate_and_send_proactive",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_send,
+        patch(
+            "app.services.proactive.sender.db.query_raw",
+            new_callable=AsyncMock,
+            return_value=[{"message": "测试主动消息"}],
+        ),
+    ):
+        result = await send_manual_or_triggered_proactive(
+            workspace_id="ws-1",
+            trigger_type="silence_wakeup",
+            skip_limits=True,
+        )
+
+    assert result["ok"] is True
+    assert result["message"] == "测试主动消息"
+    mock_unlock.assert_awaited_once_with(state)
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.args[0].status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_send_manual_or_triggered_proactive_blocks_running_without_skip_limits():
+    state = _state(status="running")
+    with (
+        patch(
+            "app.services.proactive.sender.ensure_proactive_state_for_workspace",
+            new_callable=AsyncMock,
+            return_value=state,
+        ),
+        patch("app.services.proactive.sender.log_proactive_event", new_callable=AsyncMock),
+        patch("app.services.proactive.sender.generate_and_send_proactive", new_callable=AsyncMock) as mock_send,
+    ):
+        result = await send_manual_or_triggered_proactive(
+            workspace_id="ws-1",
+            trigger_type="silence_wakeup",
+            skip_limits=False,
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "state_not_sendable:running"
+    mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_advance_window_loops_back_to_1_at_cycle_end():
     """spec §1.2 step 4: 走完 4-6h 区间未命中 → 重启 0-6h 循环 (回到 window 1).
 

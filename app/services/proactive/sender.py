@@ -54,6 +54,14 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 SENDABLE_PROACTIVE_STATUSES = {"idle"}
+# Admin QA (skip_limits): force-send by resetting transient blockers to idle
+# without touching decay counters (silence_level_n / followup_plan_type).
+_ADMIN_UNLOCKABLE_STATUSES = frozenset({
+    "waiting_user",
+    "running",
+    "processing",
+    "processing_timeout",
+})
 
 _MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship"})
 
@@ -667,7 +675,7 @@ async def generate_and_send_proactive(
 # ────────────────────────────────────────────────────────────────────
 
 async def _unlock_state_for_admin_test(state: ProactiveStateRecord) -> ProactiveStateRecord:
-    """Admin manual trigger: unblock waiting_user without resetting decay counters."""
+    """Admin manual trigger: reset transient blockers to idle without decay reset."""
     from dataclasses import replace
 
     try:
@@ -707,7 +715,7 @@ async def send_manual_or_triggered_proactive(
             "link_card_used": False,
         }
     if state.status not in SENDABLE_PROACTIVE_STATUSES:
-        if skip_limits and state.status == "waiting_user":
+        if skip_limits and state.status in _ADMIN_UNLOCKABLE_STATUSES:
             state = await _unlock_state_for_admin_test(state)
         else:
             await log_proactive_event(
