@@ -53,8 +53,15 @@ class TestRecencyQueryDetection:
 
 
 class TestRecencyRanking:
-    def test_most_recent_event_ranks_highest_among_siblings(self):
-        # 同相似度、同类目, 只有 occur_time 不同 —— 最新那条必须 rank_score 最高
+    def test_most_recent_event_ranks_highest_among_siblings(self, monkeypatch):
+        # 同相似度、同类目, 只有 occur_time 不同 —— 最新那条必须 rank_score 最高.
+        # 显式把权重打开 (0.5), 因为 2026-09-13 起模块默认 = 0.0 (feature soft-disable):
+        # temporal_recall v3 显示 P3 在真实候选压力下净负. 但**机制本身**仍是可用的,
+        # 未来加了"L1 保护槽 / 查询意图分类"能修上述失败机制后可以重新激活权重, 这条
+        # 测试守住的就是"权重开启时排序确实按 occur_time 拉开次序"这个基本机制.
+        import app.services.memory.retrieval.ranking as ranking_mod
+        monkeypatch.setattr(ranking_mod, "_RECENCY_BOOST_WEIGHT", 0.5)
+
         q = "我最近一次去健身是什么时候"
         cands = [
             _event("gym_1", "今天去健身房练了腿", 45),
@@ -66,6 +73,16 @@ class TestRecencyRanking:
             key=lambda x: -x[1],
         )
         assert [cid for cid, _ in scored] == ["gym_3", "gym_2", "gym_1"]
+
+    def test_default_weight_is_disabled(self):
+        # 模块默认权重是 0 (feature soft-disable). 若哪天有人不加解释地改回非零,
+        # 这条会挂 —— 提醒对方: 重启 P3 前必须先看 evals/temporal_recall/standard.py
+        # 的证据链, 修好 A/B/C 三类失败机制, 或者提供新的正 delta 证据.
+        from app.services.memory.retrieval.ranking import _RECENCY_BOOST_WEIGHT
+        assert _RECENCY_BOOST_WEIGHT == 0.0, (
+            "P3 求近排序权重非零 —— 见 evals/temporal_recall/standard.py 的证据链, "
+            "重启前必须先修好 3 类失败机制或提供新的正 delta 证据"
+        )
 
     def test_no_boost_on_non_recency_query(self):
         # 非求近查询: occur_time 不参与排序, 三条按基础分 (同相似度→约等), 不因

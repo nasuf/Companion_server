@@ -71,10 +71,21 @@ _RECENCY_SEEKING_RE = re.compile(
 # 求近查询里, occur_time 越新的候选 boost 越大, 用连续衰减而非新鲜度那种 30/90/180
 # 天粗桶 —— 粗桶分不开"2 天前"和"20 天前"的两次健身 (都落 <30 天桶), 而求近查询
 # 恰恰要在这种同桶、语义几乎相同的多条事件里挑最新的一条。半衰期 30 天: 事件每老
-# 30 天 boost 减半。0.5 权重是让它足以在同相似度的候选间拉开次序, 又不至于盖过
-# 相似度本身 (跟其它 boost 一个量级)。仅在求近查询上生效, 不碰其它查询 —— 避免
-# 重蹈 importance 一刀切乘进排序反而变差的覆辙 (见 relevance.compute_display_score)。
-_RECENCY_BOOST_WEIGHT = 0.5
+# 30 天 boost 减半。仅在求近查询上生效, 不碰其它查询 —— 避免重蹈 importance 一刀
+# 切乘进排序反而变差的覆辙 (见 relevance.compute_display_score)。
+#
+# 2026-09-13: 权重从 0.5 降到 0.0 (软禁用). 完整代码路径保留, 未来若加"L1
+# 保护槽" / "查询意图分类" 能修下面的失败机制后, 改回非零权重即可重启。
+#
+# 依据 (evals/temporal_recall v3, standard.py 详见):
+#   5 轮独立采样 × 3 种 pool 大小 × 4 种权重 = 60 组数据. 每种 pool 大小下 P3
+#   在任何测试权重上都是净负 (pool=0/60/150 → delta 1-2 case 净负, 显著大于跨
+#   trial 的 sd 0.0-1.3). 失败机制主要有 3 类:
+#   A) L1 identity/preference 被新鲜无关事件挤下去 —— L1 无 occur_time → 无 boost,
+#      对手拿到近满 boost 直接顶掉. P3 单向 boost, 无对称保护.
+#   B) 多目标召回时新鲜噪音挤掉靠后的正确答案.
+#   C) 结构性红线: 无法处理"指定序号"求近 (如"倒数第二次").
+_RECENCY_BOOST_WEIGHT = 0.0
 _RECENCY_HALFLIFE_DAYS = 30.0
 
 
