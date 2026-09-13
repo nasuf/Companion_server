@@ -323,8 +323,14 @@ async def send_special_date_proactive(
     state = await ensure_proactive_state_for_workspace(
         workspace_id, now=now_ts, reason="special_date",
     )
-    if state and state.stop_reason == "silence_exhausted":
+    if (
+        not skip_limits
+        and state
+        and state.stop_reason == "silence_exhausted"
+    ):
         logger.debug(f"Special date skipped: decay final stop workspace={workspace_id[:8]}")
+        if send_outcome is not None:
+            send_outcome.skip_reason = "silence_exhausted"
         return False
 
     workspace_context = await get_active_workspace_context(workspace_id)

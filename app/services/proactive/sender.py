@@ -37,7 +37,11 @@ from app.services.proactive.context import build_proactive_context
 from app.services.schedule_domain.time_service import _now_corrected
 from app.services.proactive.policy import select_topic_source, select_topic_theme
 from app.services.relationship.emotion import emotion_to_tone
-from app.services.workspace.workspaces import get_active_workspace, resolve_workspace_id
+from app.services.workspace.workspaces import (
+    get_active_workspace,
+    get_workspace_by_id,
+    resolve_workspace_id,
+)
 from app.services.proactive.state import (
     ProactiveStateRecord,
     determine_proactive_stage,
@@ -70,6 +74,14 @@ _MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationsh
 # Eligibility checks
 # ────────────────────────────────────────────────────────────────────
 
+def _mark_proactive_skip(
+    send_outcome: "AdminProactiveSendOutcome | None",
+    reason: str,
+) -> None:
+    if send_outcome is not None:
+        send_outcome.skip_reason = reason
+
+
 async def _log_skip(
     state: ProactiveStateRecord,
     trigger_type: str,
@@ -77,7 +89,9 @@ async def _log_skip(
     *,
     conversation_id: str | None = None,
     extra: dict[str, Any] | None = None,
+    send_outcome: "AdminProactiveSendOutcome | None" = None,
 ) -> None:
+    _mark_proactive_skip(send_outcome, reason)
     payload: dict[str, Any] = {"reason": reason}
     if extra:
         payload.update(extra)
@@ -110,16 +124,79 @@ class _SendPrep:
     exclude_memory_ids: set[str]
 
 
+async def _ensure_conversation_for_admin_test(
+    *,
+    workspace_id: str,
+    user_id: str,
+    agent_id: str,
+) -> str | None:
+    """Admin QA: create a conversation on the target workspace when missing."""
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT id
+            FROM conversations
+            WHERE workspace_id = $1
+              AND is_deleted = FALSE
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+            LIMIT 1
+            """,
+            workspace_id,
+        )
+    except Exception as e:
+        logger.warning(
+            f"admin proactive list conversations failed ws={workspace_id[:8]}: {e}"
+        )
+        return None
+    if rows:
+        return str(rows[0]["id"])
+
+    workspace = await get_workspace_by_id(workspace_id)
+    if workspace is None or getattr(workspace, "status", None) != "active":
+        return None
+
+    try:
+        conv = await db.conversation.create(
+            data={
+                "user": {"connect": {"id": user_id}},
+                "agent": {"connect": {"id": agent_id}},
+                "workspace": {"connect": {"id": workspace_id}},
+                "title": None,
+            }
+        )
+        return conv.id
+    except Exception as e:
+        logger.warning(
+            f"admin proactive create conversation failed ws={workspace_id[:8]}: {e}"
+        )
+        try:
+            existing = await db.conversation.find_first(
+                where={
+                    "workspaceId": workspace_id,
+                    "agentId": agent_id,
+                    "userId": user_id,
+                    "isDeleted": False,
+                },
+                order={"updatedAt": "desc"},
+            )
+        except Exception:
+            existing = None
+        return existing.id if existing else None
+
+
 async def _check_send_eligibility(
     state: ProactiveStateRecord,
     trigger_type: str,
     *,
     skip_limits: bool = False,
+    send_outcome: "AdminProactiveSendOutcome | None" = None,
 ) -> _SendPrep | None:
     """spec §9 互斥: 检查日限/workspace/conversation. 失败返回 None."""
     if not skip_limits:
         if not await can_send_proactive(state.agent_id, state.user_id):
-            await _log_skip(state, trigger_type, "daily_limit")
+            await _log_skip(
+                state, trigger_type, "daily_limit", send_outcome=send_outcome,
+            )
             return None
         fatigue = await get_proactive_fatigue_score(
             state.agent_id,
@@ -127,19 +204,50 @@ async def _check_send_eligibility(
             workspace_id=state.workspace_id,
         )
         if fatigue.get("block"):
-            await _log_skip(state, trigger_type, "fatigue_score", extra=fatigue)
+            await _log_skip(
+                state,
+                trigger_type,
+                "fatigue_score",
+                extra=fatigue,
+                send_outcome=send_outcome,
+            )
             return None
 
     workspace_context = await get_active_workspace_context(state.workspace_id)
     if not workspace_context:
-        await _log_skip(state, trigger_type, "workspace_missing")
+        await _log_skip(
+            state, trigger_type, "workspace_missing", send_outcome=send_outcome,
+        )
         return None
 
     conversation_id = str(
         workspace_context.get("conversation_id") or state.conversation_id or ""
     )
+    if not conversation_id and skip_limits:
+        conversation_id = await _ensure_conversation_for_admin_test(
+            workspace_id=state.workspace_id,
+            user_id=state.user_id,
+            agent_id=state.agent_id,
+        ) or ""
+        if conversation_id and conversation_id != (state.conversation_id or ""):
+            try:
+                await db.execute_raw(
+                    """
+                    UPDATE proactive_states
+                    SET conversation_id = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    """,
+                    state.id,
+                    conversation_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"admin proactive bind conversation failed state={state.id[:8]}: {e}"
+                )
     if not conversation_id:
-        await _log_skip(state, trigger_type, "conversation_missing")
+        await _log_skip(
+            state, trigger_type, "conversation_missing", send_outcome=send_outcome,
+        )
         return None
 
     cooldown, exclude = _apply_memory_cooldown(state, trigger_type)
@@ -441,7 +549,10 @@ async def generate_and_send_proactive(
     now_ts = now or datetime.now(UTC)
 
     prep = await _check_send_eligibility(
-        state, trigger_type, skip_limits=skip_limits,
+        state,
+        trigger_type,
+        skip_limits=skip_limits,
+        send_outcome=send_outcome,
     )
     if prep is None:
         return False
@@ -478,6 +589,7 @@ async def generate_and_send_proactive(
                 trigger_type,
                 "music_source_not_idle",
                 conversation_id=prep.conversation_id,
+                send_outcome=send_outcome,
             )
             return False
         ctx["source"] = source
@@ -490,9 +602,12 @@ async def generate_and_send_proactive(
             ctx["scene_hint"] = "优先用轻量、低打扰的方式重新建立联系。"
         else:
             await _log_skip(
-                state, trigger_type, "memory_source_empty",
+                state,
+                trigger_type,
+                "memory_source_empty",
                 conversation_id=prep.conversation_id,
                 extra={"source": source},
+                send_outcome=send_outcome,
             )
             return False
 
@@ -517,8 +632,11 @@ async def generate_and_send_proactive(
         message = await _generate_message(ctx)
         if not message:
             await _log_skip(
-                state, trigger_type, "empty_or_skip",
+                state,
+                trigger_type,
+                "empty_or_skip",
                 conversation_id=prep.conversation_id,
+                send_outcome=send_outcome,
             )
             return False
 
@@ -682,7 +800,11 @@ async def _unlock_state_for_admin_test(state: ProactiveStateRecord) -> Proactive
         await db.execute_raw(
             """
             UPDATE proactive_states
-            SET status = 'idle', response_deadline_at = NULL, updated_at = CURRENT_TIMESTAMP
+            SET
+                status = 'idle',
+                response_deadline_at = NULL,
+                stop_reason = NULL,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
             """,
             state.id,
@@ -690,7 +812,7 @@ async def _unlock_state_for_admin_test(state: ProactiveStateRecord) -> Proactive
     except Exception as e:
         logger.warning(f"admin proactive unlock failed state={state.id[:8]}: {e}")
         return state
-    return replace(state, status="idle", response_deadline_at=None)
+    return replace(state, status="idle", response_deadline_at=None, stop_reason=None)
 
 
 async def send_manual_or_triggered_proactive(
@@ -714,6 +836,8 @@ async def send_manual_or_triggered_proactive(
             "web_search_used": False,
             "link_card_used": False,
         }
+    if skip_limits and state.stop_reason == "silence_exhausted":
+        state = await _unlock_state_for_admin_test(state)
     if state.status not in SENDABLE_PROACTIVE_STATUSES:
         if skip_limits and state.status in _ADMIN_UNLOCKABLE_STATUSES:
             state = await _unlock_state_for_admin_test(state)
@@ -748,7 +872,7 @@ async def send_manual_or_triggered_proactive(
     if not sent:
         return {
             "ok": False,
-            "reason": "generation_or_limit_blocked",
+            "reason": outcome.skip_reason or "generation_or_limit_blocked",
             "message": None,
             "web_search_used": outcome.web_search_used,
             "link_card_used": outcome.link_card_used,

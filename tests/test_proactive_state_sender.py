@@ -150,6 +150,83 @@ async def test_send_manual_or_triggered_proactive_unlocks_running_for_admin():
 
 
 @pytest.mark.asyncio
+async def test_check_send_eligibility_creates_conversation_for_admin():
+    state = _state(conversation_id=None)
+    with (
+        patch(
+            "app.services.proactive.sender.can_send_proactive",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.proactive.sender.get_proactive_fatigue_score",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.services.proactive.sender.get_active_workspace_context",
+            new_callable=AsyncMock,
+            return_value={
+                "workspace_id": "ws-1",
+                "user_id": "user-1",
+                "agent_id": "agent-1",
+                "conversation_id": None,
+            },
+        ),
+        patch(
+            "app.services.proactive.sender._ensure_conversation_for_admin_test",
+            new_callable=AsyncMock,
+            return_value="conv-new",
+        ) as mock_ensure,
+        patch("app.services.proactive.sender.db.execute_raw", new_callable=AsyncMock),
+    ):
+        from app.services.proactive.sender import _check_send_eligibility
+
+        prep = await _check_send_eligibility(
+            state,
+            "silence_wakeup",
+            skip_limits=True,
+        )
+
+    assert prep is not None
+    assert prep.conversation_id == "conv-new"
+    mock_ensure.assert_awaited_once_with(
+        workspace_id="ws-1",
+        user_id="user-1",
+        agent_id="agent-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_manual_or_triggered_proactive_surfaces_skip_reason():
+    state = _state(status="idle")
+
+    async def _fail_with_reason(*_args, **kwargs):
+        outcome = kwargs.get("send_outcome")
+        if outcome is not None:
+            outcome.skip_reason = "empty_or_skip"
+        return False
+
+    with (
+        patch(
+            "app.services.proactive.sender.ensure_proactive_state_for_workspace",
+            new_callable=AsyncMock,
+            return_value=state,
+        ),
+        patch(
+            "app.services.proactive.sender.generate_and_send_proactive",
+            side_effect=_fail_with_reason,
+        ),
+    ):
+        result = await send_manual_or_triggered_proactive(
+            workspace_id="ws-1",
+            trigger_type="silence_wakeup",
+            skip_limits=True,
+        )
+
+    assert result["ok"] is False
+    assert result["reason"] == "empty_or_skip"
+
+
+@pytest.mark.asyncio
 async def test_send_manual_or_triggered_proactive_blocks_running_without_skip_limits():
     state = _state(status="running")
     with (

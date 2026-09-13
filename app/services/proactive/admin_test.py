@@ -15,4 +15,5 @@ class AdminProactiveTestOptions:
 class AdminProactiveSendOutcome:
     web_search_used: bool = False
     link_card_used: bool = False
+    skip_reason: str | None = None
     extra: dict = field(default_factory=dict)
