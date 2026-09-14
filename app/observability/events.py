@@ -151,3 +151,6 @@ EVT_PROACTIVE_FALLBACK = "proactive.trigger_fallback"  # scene→greeting / sour
 
 # State machine transitions
 EVT_PROACTIVE_STATE_TRANSITION = "proactive.state_transition"  # session start, escalate n→n+1, cycle restart, user_replied reset
+
+# Runtime config / ops
+EVT_RUNTIME_CONFIG_STALE_CLIENT = "runtime_config.stale_client"  # prisma client 缺 SystemConfig 列, 静默走 env 兜底 (多 worker 一致性风险)

@@ -133,6 +133,7 @@ async def load_caches() -> None:
         sys_row = await db.systemconfig.find_unique(where={"id": 1})
         if sys_row is None:
             sys_row = await _seed_system_config_with_env_defaults()
+        _verify_prisma_client_fields(sys_row)
         new_global = _row_to_dict(sys_row)
         overrides = await db.agentconfigoverride.find_many()
         new_agent = {row.agentId: _row_to_dict(row) for row in overrides}
@@ -199,20 +200,67 @@ async def _seed_system_config_with_env_defaults():
     })
 
 
+# SystemConfig 里生产依赖的字段 (schema.prisma 里的驼峰名). 加新列到 SystemConfig
+# 时必须同步这里, 否则守卫认不到新列 → 静默走 env 兜底就成新 bug.
+_SYSTEM_CONFIG_REQUIRED_FIELDS: tuple[str, ...] = (
+    "onlineModel", "remoteProvider", "remoteChatProvider", "remoteSmallProvider",
+    "localChatModel", "localSmallModel", "remoteChatModel", "remoteSmallModel",
+    "visionModel", "asrModel", "ttsModel", "ttsOutputProbability",
+    "webSearchEnabled",
+    "proactiveTrendingEnabled", "proactiveTrendingProbability",
+    "proactiveTrendingLinkProbability", "proactiveTrendingCacheTtlS",
+    "replyDelayEnabled", "replyDelayMaxSeconds",
+    "userMessageAggregationEnabled",
+)
+
+_STALE_CLIENT_VERIFIED = False  # 一进程只发一条告警, 别刷屏
+
+
+def _verify_prisma_client_fields(sys_row) -> None:
+    """启动时验证 prisma-client 认识所有 SystemConfig 关键列.
+
+    背景 (2026-09-14): schema.prisma 加新列后必须 prisma generate 重新生成
+    client, 否则生成的 Python model class 不知道新属性 —— _row_to_dict 里
+    getattr(row, key, None) 静默返 None, dict 跳过, _pick 走 env 兜底.
+
+    结果: admin UI 把开关打开 (DB 有值), 但 prisma client 老的进程读到的
+    resolve_config 却还是 env 默认. **多 worker 部署下, 部分进程按 admin 值
+    生效, 部分按 env 兜底, 排查噩梦**. 我 (Claude) 本机复现过一次 —
+    proactive_trending_enabled=True in DB, 但 resolve_config_sync 返 False.
+
+    修法: 加载 sys_row 后, hasattr 检查所有 required 字段. 缺则:
+      - log ERROR + 打 EVT_RUNTIME_CONFIG_STALE_CLIENT (dashboard 可聚合)
+      - 不 raise (避免拖崩整个 startup — 老列漏了也许比 crash 好)
+      - 一进程只告警一次
+    修复姿势: 在部署脚本里保证 `prisma generate` 在 schema.prisma 变化时跑.
+    """
+    global _STALE_CLIENT_VERIFIED
+    if _STALE_CLIENT_VERIFIED or sys_row is None:
+        return
+    _STALE_CLIENT_VERIFIED = True
+    missing = [k for k in _SYSTEM_CONFIG_REQUIRED_FIELDS if not hasattr(sys_row, k)]
+    if not missing:
+        return
+    from app.observability.events import EVT_RUNTIME_CONFIG_STALE_CLIENT
+    logger.error(
+        "[RUNTIME-CONFIG] prisma client stale: SystemConfig missing %d fields — "
+        "admin UI toggles for these WILL BE SILENTLY IGNORED by this process, "
+        "falling back to env defaults. Run `prisma generate` and redeploy. "
+        "Missing fields: %s",
+        len(missing), missing,
+        extra={
+            "event": EVT_RUNTIME_CONFIG_STALE_CLIENT,
+            "missing_count": len(missing),
+            "missing_fields": ",".join(missing),
+        },
+    )
+
+
 def _row_to_dict(row) -> dict:
     """SystemConfig / AgentConfigOverride row → 仅含非 None 字段的 dict."""
     out: dict = {}
-    for key in (
-        "onlineModel", "remoteProvider", "remoteChatProvider", "remoteSmallProvider",
-        "localChatModel", "localSmallModel", "remoteChatModel", "remoteSmallModel",
-        # SystemConfig only; AgentConfigOverride rows lack these attrs → skipped.
-        "visionModel", "asrModel", "ttsModel", "ttsOutputProbability",
-        "webSearchEnabled",
-        "proactiveTrendingEnabled", "proactiveTrendingProbability",
-        "proactiveTrendingLinkProbability", "proactiveTrendingCacheTtlS",
-        "replyDelayEnabled", "replyDelayMaxSeconds",
-        "userMessageAggregationEnabled",
-    ):
+    # SystemConfig only; AgentConfigOverride rows lack many of these attrs → skipped.
+    for key in _SYSTEM_CONFIG_REQUIRED_FIELDS:
         val = getattr(row, key, None)
         if val is not None:
             out[key] = val
