@@ -325,6 +325,10 @@ class Settings(BaseSettings):
     proactive_trending_probability: float = 0.30
     proactive_trending_cache_ttl_s: int = 3600
     proactive_trending_link_probability: float = 0.30
+    # V3 三档 dispatch (topic_source 分类器 + 三档独立 prompt). env-only 开关, 不加
+    # DB 列避免 migration; 生产 flip via env → redeploy. 关闭时走原 V0 append_trending_section
+    # 路径 (兼容原行为). eval 证据: evals/proactive_naturalness/standard.py BASELINE_V0.
+    proactive_trending_v3_dispatch_enabled: bool = False
     proactive_link_candidate_urls: str = ""
     chat_link_search_provider: str = "custom"
     chat_link_search_endpoint: str = ""

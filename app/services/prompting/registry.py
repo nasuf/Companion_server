@@ -135,6 +135,9 @@ from app.services.prompting.defaults import (
     PROACTIVE_SCHEDULED_SCENE_PROMPT,
     PROACTIVE_DECAY_FINAL_PROMPT,
     PROACTIVE_TRENDING_SECTION_PROMPT,
+    PROACTIVE_TRENDING_USER_INTEREST_PROMPT,
+    PROACTIVE_TRENDING_AI_PERSONA_PROMPT,
+    PROACTIVE_TRENDING_SOCIALLY_HOT_PROMPT,
     PROACTIVE_FIRST_GREETING_PROMPT,
     PROACTIVE_SPECIAL_HOLIDAY_PROMPT,
     PROACTIVE_SPECIAL_BIRTHDAY_PROMPT,
@@ -753,10 +756,29 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "proactive.trending_section", "热点参考段", "主动交流", "主动消息",
-        "【工程扩展】主动消息命中 trending 概率或管理员强制联网时, "
+        "【工程扩展·V0】主动消息命中 trending 概率或管理员强制联网时, "
         "追加在 silence_wakeup / scheduled_scene / special_date prompt 末尾. "
-        "占位符 {trending}.",
+        "占位符 {trending}. V3 dispatch 启用后由下面三个独立 prompt 取代.",
         PROACTIVE_TRENDING_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.trending_user_interest", "主动·用户兴趣分享", "主动交流", "主动消息",
+        "【工程扩展·V3】trending 分类命中用户兴趣时用. 表达模式勾用户 "
+        "(你不是说过X吗). 占位符 {personality_brief} {current_mood} "
+        "{user_portrait} {trending_item}.",
+        PROACTIVE_TRENDING_USER_INTEREST_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.trending_ai_persona", "主动·AI自身兴趣分享", "主动交流", "主动消息",
+        "【工程扩展·V3】trending 分类命中 AI 人设兴趣时用. 表达模式第一人称 "
+        "(我最近在...). 占位符 {personality_brief} {current_mood} {trending_item}.",
+        PROACTIVE_TRENDING_AI_PERSONA_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.trending_socially_hot", "主动·社交谈资分享", "主动交流", "主动消息",
+        "【工程扩展·V3】trending 分类为通用社交谈资时用. 表达模式转发闲聊 "
+        "(刷到个X). 占位符 {personality_brief} {current_mood} {trending_item}.",
+        PROACTIVE_TRENDING_SOCIALLY_HOT_PROMPT,
     ),
     PromptDefinition(
         "proactive.first_greeting", "AI首次打招呼", "主动交流", "主动消息",

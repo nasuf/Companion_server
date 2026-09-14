@@ -37,6 +37,10 @@ class TrendingLoadResult:
     text: str
     cache_hit: bool = False
     provider: str | None = None
+    # V3 (2026-09-14): 保留结构化 candidates 给 topic_source 分类器 + prompt.
+    # V0 只需要 text (append_trending_section 尾追), V3 需要按候选粒度打分/挑选.
+    # 缓存路径拿到的 text 无法反解回结构化, 这时候 candidates=() (V3 分类器会走 none).
+    candidates: tuple[dict, ...] = ()
 
 
 def _format_search_results(results: list[SearchResult], *, limit: int = 4) -> str:
@@ -80,23 +84,55 @@ def _results_from_brave_payload(data: Any) -> list[SearchResult]:
     return parsed
 
 
-async def _tavily_snippets(query: str) -> str:
+def _search_results_to_candidates(results: list[SearchResult]) -> tuple[dict, ...]:
+    """SearchResult 列表 → V3 分类器认识的 dict 形状 (title/snippet/url/platform)."""
+    out: list[dict] = []
+    for r in results:
+        title = (r.title or "").strip()
+        snippet = (r.content or "").strip()
+        if not title and not snippet:
+            continue
+        # url 里推 platform: weibo/xiaohongshu/bilibili/zhihu 等
+        platform = ""
+        url = (r.url or "").strip()
+        if "weibo.com" in url or "s.weibo" in url:
+            platform = "微博"
+        elif "xiaohongshu" in url or "xhslink" in url:
+            platform = "小红书"
+        elif "bilibili" in url:
+            platform = "B站"
+        elif "zhihu.com" in url:
+            platform = "知乎"
+        elif "douyin" in url:
+            platform = "抖音"
+        elif "toutiao" in url:
+            platform = "头条"
+        out.append({
+            "title": title[:120], "snippet": snippet[:400],
+            "url": url, "platform": platform,
+        })
+    return tuple(out)
+
+
+async def _tavily_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
+    """→ (formatted_text, structured_candidates). 空则 ("", ())."""
     if not settings.tavily_api_key.strip():
-        return ""
+        return "", ()
     timeout = float(getattr(settings, "chat_link_search_timeout_s", 8.0))
     try:
         results = await tavily_search(query, max_results=5, timeout_s=timeout)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[proactive-trending] tavily failed query=%s: %s", query, exc)
-        return ""
-    return _format_search_results(results)
+        return "", ()
+    return _format_search_results(results), _search_results_to_candidates(results)
 
 
-async def _brave_snippets(query: str) -> str:
+async def _brave_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
+    """→ (formatted_text, structured_candidates). 空则 ("", ())."""
     api_key = settings.brave_search_api_key.strip()
     endpoint = settings.brave_search_endpoint.strip()
     if not api_key or not endpoint:
-        return ""
+        return "", ()
     headers = {
         "accept": "application/json",
         "accept-encoding": "gzip",
@@ -115,8 +151,9 @@ async def _brave_snippets(query: str) -> str:
             data = response.json()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[proactive-trending] brave failed query=%s: %s", query, exc)
-        return ""
-    return _format_search_results(_results_from_brave_payload(data))
+        return "", ()
+    results = _results_from_brave_payload(data)
+    return _format_search_results(results), _search_results_to_candidates(results)
 
 
 async def _fetch_live_trending_snippets(*, topic: str | None = None) -> TrendingLoadResult:
@@ -127,12 +164,16 @@ async def _fetch_live_trending_snippets(*, topic: str | None = None) -> Trending
         queries.append(f"今日热点新闻 {seed}")
 
     for query in queries:
-        text = await _tavily_snippets(query)
+        text, cands = await _tavily_snippets(query)
         if text:
-            return TrendingLoadResult(text=text, cache_hit=False, provider="tavily")
-        text = await _brave_snippets(query)
+            return TrendingLoadResult(
+                text=text, cache_hit=False, provider="tavily", candidates=cands,
+            )
+        text, cands = await _brave_snippets(query)
         if text:
-            return TrendingLoadResult(text=text, cache_hit=False, provider="brave")
+            return TrendingLoadResult(
+                text=text, cache_hit=False, provider="brave", candidates=cands,
+            )
     return TrendingLoadResult(text="", cache_hit=False, provider=None)
 
 

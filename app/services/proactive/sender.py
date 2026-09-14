@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import settings
 from app.db import db
 from app.services.runtime.distributed_lock import distributed_lock
 from app.observability import bind_context
@@ -428,6 +429,21 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
         return None
 
 
+def _format_v3_trending_item(item: dict) -> str:
+    """V3 三档 prompt 里 {trending_item} 占位的渲染 —— 单条内容, 而非 V0 的多条汇总.
+    保留 title/snippet/platform 供 LLM 理解, 但压紧一行避免 prompt 过长.
+    """
+    if not isinstance(item, dict):
+        return str(item or "")
+    title = str(item.get("title") or "").strip()
+    snippet = str(item.get("snippet") or "").strip()[:160]
+    plat = str(item.get("platform") or "").strip()
+    plat_prefix = f"[{plat}] " if plat else ""
+    if title and snippet:
+        return f"{plat_prefix}{title} —— {snippet}"
+    return f"{plat_prefix}{title or snippet}"
+
+
 async def _generate_message(ctx: dict) -> str | None:
     """spec §4 按 (trigger_type, source) 分发到 7 个专属 prompt;
     spec §8.5 衰减最后一次优先 decay_final.
@@ -437,10 +453,38 @@ async def _generate_message(ctx: dict) -> str | None:
     source = ctx.get("source") or "greeting"
     personality_brief = _build_personality_brief(agent)
 
+    # V3 dispatch (2026-09-14): 若上游分类器 (topic_source.classify_topic_source)
+    # 已经把话题源判出来并塞进 ctx["topic_source_kind"] + 选好条 ctx["topic_source_item"],
+    # 走对应的三档独立 prompt (proactive.trending_user_interest / _ai_persona /
+    # _socially_hot) 而非 V0 的 append_trending_section 尾追. 详见
+    # app/services/proactive/topic_source.py 与 evals/proactive_naturalness.
+    #
+    # topic_source_kind='none' 或未设 → 落回 V0 逻辑, 保持向后兼容.
+    v3_source_kind = ctx.get("topic_source_kind")
+    v3_source_item = ctx.get("topic_source_item")
+    v3_prompt_keys = {
+        "user_interest_match": "proactive.trending_user_interest",
+        "ai_persona_match":    "proactive.trending_ai_persona",
+        "socially_hot":        "proactive.trending_socially_hot",
+    }
+
     try:
         if ctx.get("is_decay_final"):
             tpl = await get_prompt_text("proactive.decay_final")
             prompt = tpl.format(personality_brief=personality_brief)
+        elif v3_source_kind in v3_prompt_keys and v3_source_item:
+            # V3 路径
+            key = v3_prompt_keys[v3_source_kind]
+            tpl = await get_prompt_text(key)
+            # 三档 prompt 都有的公共占位符
+            fields = {
+                "personality_brief": personality_brief,
+                "current_mood": emotion_to_tone(ctx.get("emotion")),
+                "trending_item": _format_v3_trending_item(v3_source_item),
+            }
+            if v3_source_kind == "user_interest_match":
+                fields["user_portrait"] = str(ctx.get("user_portrait") or "(未知)")
+            prompt = tpl.format(**fields)
         else:
             key = _PROMPT_KEY_BY_SOURCE.get(
                 (trigger_type, source), "proactive.silence_plain"
@@ -456,11 +500,13 @@ async def _generate_message(ctx: dict) -> str | None:
         logger.info(f"Proactive prompt disabled, skipping: {e}")
         return None
 
-    trending_context = (ctx.get("trending_context") or "").strip()
-    if trending_context:
-        from app.services.proactive.trending_context import append_trending_section
+    # V0 尾追: 只在 V3 未走时 append (v3 已经把 item 塞进 prompt 里, 别重复注入)
+    if not (v3_source_kind in v3_prompt_keys and v3_source_item):
+        trending_context = (ctx.get("trending_context") or "").strip()
+        if trending_context:
+            from app.services.proactive.trending_context import append_trending_section
 
-        prompt = await append_trending_section(prompt, trending_context)
+            prompt = await append_trending_section(prompt, trending_context)
 
     response = (await invoke_text(get_chat_model(), prompt)).strip()
     if response == "SKIP" or len(response) < 4:
@@ -620,6 +666,31 @@ async def generate_and_send_proactive(
         admin_test_options=admin_test_options,
     )
     ctx["trending_context"] = trending_text
+
+    # V3 dispatch (2026-09-14): env flag on + trending 命中 → 走三档分类器 +
+    # 独立 prompt (proactive.trending_user_interest/_ai_persona/_socially_hot).
+    # 决策证据: evals/proactive_naturalness (V0 baseline source_fit 17% /
+    # mentions_card 67%, V3 达 50% / 100%). 关闭时保持原 V0 append_trending_section
+    # 路径, 完全兼容.
+    if (
+        trending_attached
+        and _trending_meta is not None
+        and _trending_meta.candidates
+        and getattr(settings, "proactive_trending_v3_dispatch_enabled", False)
+    ):
+        from app.services.proactive.topic_source import classify_topic_source
+
+        cls = classify_topic_source(
+            trending_candidates=list(_trending_meta.candidates),
+            user_portrait=str(ctx.get("user_portrait") or ""),
+            agent=ctx.get("agent"),
+        )
+        if cls.kind != "none":
+            ctx["topic_source_kind"] = cls.kind
+            ctx["topic_source_item"] = cls.selected_candidate
+            logger.info(
+                f"[V3-DISPATCH] source={cls.kind} reason={cls.reason}"
+            )
 
     # 主动消息也开 LangSmith trace + usage_session, 名字 [proactive:trigger_type]
     # 方便 LangSmith 看板与统计 dashboard 区分被动回复.

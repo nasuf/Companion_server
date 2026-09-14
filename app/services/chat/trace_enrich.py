@@ -557,6 +557,10 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.memory_ai", "记忆主动(AI记忆)", "reply", _label_reply_text),
     ("proactive.memory_user", "记忆主动(用户记忆)", "reply", _label_reply_text),
     ("proactive.scheduled_scene", "定时情景(AI作息)", "reply", _label_reply_text),
+    # V3 三档主动分享 (2026-09-14): trending 分类命中后走三档独立 prompt.
+    ("proactive.trending_user_interest", "主动分享(用户兴趣)", "reply", _label_reply_text),
+    ("proactive.trending_ai_persona", "主动分享(AI人设兴趣)", "reply", _label_reply_text),
+    ("proactive.trending_socially_hot", "主动分享(社交谈资)", "reply", _label_reply_text),
     ("proactive.decay_final", "衰减最后一次回复", "reply", _label_reply_text),
     ("proactive.first_greeting", "AI首次打招呼", "reply", _label_reply_text),
     ("proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text),
