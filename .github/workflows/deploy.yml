@@ -241,6 +241,14 @@ jobs:
             TAVILY_SEARCH_ENDPOINT=${{ vars.TAVILY_SEARCH_ENDPOINT || 'https://api.tavily.com/search' }}
             CHAT_LINK_SEARCH_TIMEOUT_S=${{ vars.CHAT_LINK_SEARCH_TIMEOUT_S || '8' }}
             TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+            # 主动交流 · 结构化热榜源 (2026-09-14 task#13). 默认走 DailyHot 免费公共实例
+            # (MIT 开源, github.com/imsyy/DailyHot). 想自建换成自己 endpoint 即可.
+            # 设为空串 → 关闭 hot_api, fallback tavily 通用搜.
+            # max_age_days: URL 里带早年份 / published_at 超此天数 → 丢, 修 tavily
+            # 返 2021 老 SEO 列表. 0 = 关闭 freshness filter.
+            PROACTIVE_HOT_API_URL=${{ vars.PROACTIVE_HOT_API_URL || 'https://api-hot.imsyy.top' }}
+            PROACTIVE_HOT_API_KEY=${{ secrets.PROACTIVE_HOT_API_KEY }}
+            PROACTIVE_HOT_MAX_AGE_DAYS=${{ vars.PROACTIVE_HOT_MAX_AGE_DAYS || '7' }}
             APNS_ENABLED=$APNS_ENABLED
             APNS_TEAM_ID=${{ vars.APNS_TEAM_ID }}
             APNS_KEY_ID=${{ secrets.APNS_KEY_ID }}
