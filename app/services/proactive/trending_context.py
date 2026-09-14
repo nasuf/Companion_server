@@ -84,29 +84,68 @@ def _results_from_brave_payload(data: Any) -> list[SearchResult]:
     return parsed
 
 
+def _url_platform(url: str) -> str:
+    """URL → 支持的社交平台名; 不在白名单则返回空串 (2026-09-14 平台白名单单一真源).
+
+    白名单必须跟 chat_links.SUPPORTED_PLATFORMS 对齐 — 那才是**卡片渲染真的能画**
+    的平台集合. 聚合站 (tophub.today / 今日热榜 / 36kr 热榜等) 不在这里因为 URL
+    是聚合首页, 点进去用户看不到具体那条新闻; tavily 抓"微博热搜"经常返 tophub 类
+    聚合站, 若不过滤会一路穿进 socially_hot 档, 卡片挂个"链接" (无平台兜底名)
+    上去 —— 就是用户截图那种"什么都没说清楚"的坏体验.
+    """
+    u = (url or "").strip().lower()
+    if not u:
+        return ""
+    # 顺序: 单一子串匹配, 优先度按域名唯一性排 (b23.tv / xhslink 是短链要单独列)
+    if "weibo.com" in u or "s.weibo.cn" in u or "m.weibo" in u:
+        return "微博"
+    if "xiaohongshu.com" in u or "xhslink.com" in u:
+        return "小红书"
+    if "bilibili.com" in u or "b23.tv" in u:
+        return "B站"
+    if "zhihu.com" in u:  # 含 zhuanlan.zhihu.com
+        return "知乎"
+    if "douyin.com" in u or "iesdouyin.com" in u:
+        return "抖音"
+    if "toutiao.com" in u or "toutiaoimg.com" in u:
+        return "头条"
+    return ""
+
+
+def _filter_to_supported_platforms(
+    results: list[SearchResult],
+) -> list[SearchResult]:
+    """丢掉 URL 不在白名单里的结果 (tophub 类聚合站等). 见 _url_platform 说明."""
+    out: list[SearchResult] = []
+    for r in results:
+        if _url_platform(r.url):
+            out.append(r)
+    if not out and results:
+        # 全部被过滤: 观测点, 让运维知道 tavily 这次抓的全是杂鱼
+        logger.info(
+            "[proactive-trending] all %d results dropped by platform whitelist "
+            "(likely tophub/aggregator noise) → proactive falls back to plain",
+            len(results),
+        )
+    return out
+
+
 def _search_results_to_candidates(results: list[SearchResult]) -> tuple[dict, ...]:
-    """SearchResult 列表 → V3 分类器认识的 dict 形状 (title/snippet/url/platform)."""
+    """SearchResult 列表 → V3 分类器认识的 dict 形状 (title/snippet/url/platform).
+
+    调用方应先过 _filter_to_supported_platforms; 但这里再保底判一次 platform 非空,
+    确保 candidates 里没有 platform="" 的杂鱼 (卡片渲染兜底才不会显示"链接").
+    """
     out: list[dict] = []
     for r in results:
         title = (r.title or "").strip()
         snippet = (r.content or "").strip()
         if not title and not snippet:
             continue
-        # url 里推 platform: weibo/xiaohongshu/bilibili/zhihu 等
-        platform = ""
         url = (r.url or "").strip()
-        if "weibo.com" in url or "s.weibo" in url:
-            platform = "微博"
-        elif "xiaohongshu" in url or "xhslink" in url:
-            platform = "小红书"
-        elif "bilibili" in url:
-            platform = "B站"
-        elif "zhihu.com" in url:
-            platform = "知乎"
-        elif "douyin" in url:
-            platform = "抖音"
-        elif "toutiao" in url:
-            platform = "头条"
+        platform = _url_platform(url)
+        if not platform:
+            continue  # 双保险: 白名单外一律不进 candidates
         out.append({
             "title": title[:120], "snippet": snippet[:400],
             "url": url, "platform": platform,
@@ -115,15 +154,23 @@ def _search_results_to_candidates(results: list[SearchResult]) -> tuple[dict, ..
 
 
 async def _tavily_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
-    """→ (formatted_text, structured_candidates). 空则 ("", ())."""
+    """→ (formatted_text, structured_candidates). 空则 ("", ()).
+
+    text 与 candidates 都基于**过滤后**的 results: 若白名单外的杂鱼被过滤光, text
+    也一起空 —— 上游 trending_attached=False → 主动消息干净落回 silence_plain,
+    比给 LLM 塞聚合站 UI 残余强.
+    """
     if not settings.tavily_api_key.strip():
         return "", ()
     timeout = float(getattr(settings, "chat_link_search_timeout_s", 8.0))
     try:
-        results = await tavily_search(query, max_results=5, timeout_s=timeout)
+        # max_results 从 5 提到 8: 平台过滤会砍掉一部分 (tavily 首页常返 tophub),
+        # 多抓几条保证白名单内候选够
+        results = await tavily_search(query, max_results=8, timeout_s=timeout)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[proactive-trending] tavily failed query=%s: %s", query, exc)
         return "", ()
+    results = _filter_to_supported_platforms(results)
     return _format_search_results(results), _search_results_to_candidates(results)
 
 
@@ -139,8 +186,9 @@ async def _brave_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
         "x-subscription-token": api_key,
     }
     params = {
+        # count 提到 10 让平台过滤后仍有候选 (brave 首页也常返聚合站)
         "q": " ".join(query.split())[:160],
-        "count": 6,
+        "count": 10,
         "safesearch": "moderate",
     }
     timeout = float(getattr(settings, "chat_link_search_timeout_s", 8.0))
@@ -152,7 +200,7 @@ async def _brave_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[proactive-trending] brave failed query=%s: %s", query, exc)
         return "", ()
-    results = _results_from_brave_payload(data)
+    results = _filter_to_supported_platforms(_results_from_brave_payload(data))
     return _format_search_results(results), _search_results_to_candidates(results)
 
 
