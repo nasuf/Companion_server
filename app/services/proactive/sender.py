@@ -494,9 +494,8 @@ async def _generate_message(ctx: dict) -> str | None:
             if not prompt:
                 return None
     except PromptDisabledError as e:
-        # admin 停用该主动消息模板 → 按"本次未生成"处理 (return None),
-        # 让上游正常推进窗口, 不能让异常卡死 proactive 状态机.
-        logger.info(f"Proactive prompt disabled, skipping: {e}")
+        logger.info(f"[proactive-gen] prompt disabled key={e}")
+        ctx["_skip_reason_detail"] = f"prompt_disabled:{e}"
         return None
 
     # V0 尾追: 只在 V3 未走时 append (v3 已经把 item 塞进 prompt 里, 别重复注入)
@@ -507,36 +506,48 @@ async def _generate_message(ctx: dict) -> str | None:
 
             prompt = await append_trending_section(prompt, trending_context)
 
-    response = (await invoke_text(get_chat_model(), prompt)).strip()
-    if response == "SKIP" or len(response) < 4:
+    try:
+        response = (await invoke_text(get_chat_model(), prompt)).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[proactive-gen] LLM invoke failed: {exc!r}")
+        ctx["_skip_reason_detail"] = f"llm_error:{type(exc).__name__}"
+        return None
+    if response == "SKIP":
+        logger.info("[proactive-gen] LLM returned literal SKIP")
+        ctx["_skip_reason_detail"] = "llm_skip_literal"
+        return None
+    if len(response) < 4:
+        logger.info(f"[proactive-gen] LLM response too short len={len(response)} raw={response!r}")
+        ctx["_skip_reason_detail"] = f"llm_response_too_short:len={len(response)}"
         return None
 
-    # 2026-09-14 task#12: anti-repetition. workspace 最近 24h 内出现过一模一样 (or
-    # 高度相似 shingling Jaccard ≥ 0.6) 的主动消息 → 加一段"换个说法"提示重生成一次,
-    # 再命中就放弃 (return None, log skip 让 caller 走 empty_or_skip 兜底).
+    # anti-repetition (2026-09-14 task#12): 生产路径 retry 一次 diversity hint;
+    # 若 retry 仍相似, **仍然发送** —— 一条重复的消息比 empty_or_skip 静默失败好.
     #
-    # 修用户实测: 连续两次沉默唤醒拿到一字不差的 "最近好像大家都在聊赵雷当爸爸了" —
-    # trending 缓存 + V3 分类器确定性 + LLM temp=0.7 相同 prompt 复读概率 ~15%.
+    # admin_test 完全绕过: admin 反复触发同 topic 会兜死, 用户看到 "LLM 未生成"
+    # 假象 (其实是守卫). 测试路径优先"每次都可见输出", anti-repeat 是生产路径的
+    # 弱守卫, 不该在 QA 面里阻断.
     workspace_id = ctx.get("workspace_id")
-    if workspace_id:
+    admin_test = bool(ctx.get("_admin_test"))
+    if workspace_id and not admin_test:
         from app.services.proactive.recent_messages import is_repeat_of_recent
         if await is_repeat_of_recent(str(workspace_id), response):
-            logger.info(
-                "[proactive-repeat] first attempt matched recent, retrying with diversity hint"
-            )
+            logger.info("[proactive-repeat] first attempt matched recent, retrying with diversity hint")
             diversity_prompt = (
                 prompt
                 + "\n\n【重要】最近你说过类似的话了, 换个开头、换个说法, "
                 "不要跟上次一样. 保持同样自然, 但表达不同."
             )
-            response = (await invoke_text(get_chat_model(), diversity_prompt)).strip()
-            if response == "SKIP" or len(response) < 4:
-                return None
-            if await is_repeat_of_recent(str(workspace_id), response):
-                logger.info(
-                    "[proactive-repeat] retry still repeated → giving up"
-                )
-                return None
+            try:
+                retry = (await invoke_text(get_chat_model(), diversity_prompt)).strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[proactive-repeat] retry LLM failed: {exc!r}; shipping first attempt")
+                return response
+            if retry and retry != "SKIP" and len(retry) >= 4:
+                response = retry
+                if await is_repeat_of_recent(str(workspace_id), response):
+                    # 重复即重复, 发出去 —— 不再 return None. 详见函数上方注释.
+                    logger.info("[proactive-repeat] retry still similar, shipping anyway")
     return response
 
 
@@ -650,6 +661,9 @@ async def generate_and_send_proactive(
         topic_theme=topic_theme,
         conversation_id=prep.conversation_id,
     )
+    # admin QA 反复触发时, anti-repetition 会兜死同 topic 的连测 → empty_or_skip 假象.
+    # 标记后 _generate_message 会绕过 recent 相似度守卫, 保证每次测试都出可见结果.
+    ctx["_admin_test"] = admin_test_options is not None
     if source == "music":
         source = await _prepare_music_recommendation_source(
             ctx,
@@ -729,10 +743,15 @@ async def generate_and_send_proactive(
     ) as tracer:
         message = await _generate_message(ctx)
         if not message:
+            # 细分 reason: prompt_disabled:X / llm_error:X / llm_skip_literal /
+            # llm_response_too_short:len=N. admin QA 直接看到 "为什么没消息",
+            # 不用翻后端日志. 若 _generate_message 忘了 set → 兜底 empty_or_skip
+            # 保持向后兼容 (旧 Flutter 版本仍能识别).
+            detail = str(ctx.get("_skip_reason_detail") or "empty_or_skip")
             await _log_skip(
                 state,
                 trigger_type,
-                "empty_or_skip",
+                detail,
                 conversation_id=prep.conversation_id,
                 send_outcome=send_outcome,
             )
