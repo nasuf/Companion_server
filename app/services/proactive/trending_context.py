@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -30,6 +32,28 @@ _LIVE_QUERIES = (
     "今日热点新闻",
 )
 _FETCH_BUDGET_S = 8.0
+
+# URL 里出现的年份启发式过滤: tavily 常返 /2020/... /p/2021... 类老 SEO 文章.
+# 例: "yg-hgt-p-2022" / "/article/6800000000/" 里的 4 位数字若是往年年份 → 老内容.
+# 目前只匹配"完整 4 位年份出现在 path 里"这个强信号, 不搞太复杂避免误杀.
+_URL_YEAR_PAT = re.compile(r"/(?:19|20)(\d{2})/|-(?:19|20)(\d{2})-|_(?:19|20)(\d{2})_")
+
+
+def _url_looks_stale(url: str, max_age_days: int) -> bool:
+    """URL path 里出现明确早于 max_age_days 天的年份 → 视为老内容.
+
+    只是启发式 (URL 里的年份未必等于内容发布年份), 但对 tavily 拿到的"2021 SEO
+    列表" 这类命名规范的旧文命中率高. 未匹配 (无年份 or 是当年) → 保留判断给上游.
+    """
+    if max_age_days <= 0:
+        return False  # 关闭 filter
+    m = _URL_YEAR_PAT.search(url or "")
+    if not m:
+        return False  # 无年份线索 → 不判定
+    year_2digit = int(m.group(1) or m.group(2) or m.group(3))
+    url_year = 2000 + year_2digit if year_2digit <= 99 else year_2digit
+    cutoff_year = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).year
+    return url_year < cutoff_year
 
 
 @dataclass(frozen=True)
@@ -115,17 +139,35 @@ def _url_platform(url: str) -> str:
 def _filter_to_supported_platforms(
     results: list[SearchResult],
 ) -> list[SearchResult]:
-    """丢掉 URL 不在白名单里的结果 (tophub 类聚合站等). 见 _url_platform 说明."""
+    """丢掉 URL 不在白名单里的结果 + 明显是老 SEO 的 URL.
+
+    两层过滤:
+      A) _url_platform(url) 空 → 不是支持平台, 丢 (聚合站/杂鱼)
+      B) _url_looks_stale(url, max_age_days) → URL path 里带明显的往年年份, 丢
+         (tavily 常返 "50个热门话题 2021" 这类 SEO 老列表)
+    """
+    max_age = int(getattr(settings, "proactive_hot_max_age_days", 7))
     out: list[SearchResult] = []
+    stale_dropped = 0
     for r in results:
-        if _url_platform(r.url):
-            out.append(r)
+        if not _url_platform(r.url):
+            continue
+        if _url_looks_stale(r.url, max_age):
+            stale_dropped += 1
+            continue
+        out.append(r)
     if not out and results:
-        # 全部被过滤: 观测点, 让运维知道 tavily 这次抓的全是杂鱼
         logger.info(
-            "[proactive-trending] all %d results dropped by platform whitelist "
-            "(likely tophub/aggregator noise) → proactive falls back to plain",
-            len(results),
+            "[proactive-trending] all %d results dropped by filters "
+            "(likely tophub/aggregator noise or stale SEO; %d stale) "
+            "→ proactive falls back to plain",
+            len(results), stale_dropped,
+        )
+    elif stale_dropped:
+        logger.info(
+            "[proactive-trending] dropped %d stale-URL results "
+            "(URL path 带往年年份, 超 %d 天)",
+            stale_dropped, max_age,
         )
     return out
 
@@ -151,6 +193,135 @@ def _search_results_to_candidates(results: list[SearchResult]) -> tuple[dict, ..
             "url": url, "platform": platform,
         })
     return tuple(out)
+
+
+async def _hot_api_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
+    """从 proactive_hot_api_url 拉结构化热榜, 转成 (text, candidates).
+
+    ## API 契约
+
+    endpoint = settings.proactive_hot_api_url (未设则返 ("", ()))
+    可选 bearer: settings.proactive_hot_api_key
+
+    请求: `GET {endpoint}` (query 不带过去 —— 热榜按热度返 top-N, V3 分类器自己
+    根据 user/AI 兴趣从池子里挑, API 不该按 query 收窄).
+
+    响应 (任一形状都认):
+      A) {"items": [{"title", "url", "platform", "hot"?, "published_at"?}, ...]}
+      B) [{...}, {...}]                    ← 直接列表
+      C) {"data": [{...}]} / {"list": [...]}  ← 常见变体, 尽量兼容
+
+    字段:
+      title (必需):      热搜条目标题
+      url (必需):        指向**具体内容**的 URL (不是聚合站首页)
+      platform (可选):   如 "微博"/"知乎"; 空/缺则从 URL 推 (_url_platform)
+      hot (可选):        热度数字, 目前不用作排序 (V3 分类器按兴趣挑, 不按热度)
+      published_at (可选): ISO 时间, 用于 freshness 过滤 (超 max_age_days 丢)
+
+    与 tavily 的关系: hot_api 优先; 未配置或返空则 tavily 顶上. 两者都空 →
+    trending_attached=False → 主动消息落 silence_plain (老路径).
+    """
+    endpoint = getattr(settings, "proactive_hot_api_url", "").strip()
+    if not endpoint:
+        return "", ()
+    headers = {"accept": "application/json"}
+    api_key = getattr(settings, "proactive_hot_api_key", "").strip()
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    timeout = float(getattr(settings, "chat_link_search_timeout_s", 8.0))
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers, trust_env=False) as client:
+            resp = await client.get(endpoint)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — 契约松, 任何异常都视为空 (让 tavily fallback)
+        logger.warning("[proactive-trending] hot_api failed endpoint=%s: %s",
+                       endpoint[:80], exc)
+        return "", ()
+
+    raw_items = _extract_hot_items(data)
+    if not raw_items:
+        logger.info("[proactive-trending] hot_api returned no items")
+        return "", ()
+
+    max_age = int(getattr(settings, "proactive_hot_max_age_days", 7))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age) if max_age > 0 else None
+
+    candidates: list[dict] = []
+    lines: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or item.get("link") or "").strip()
+        if not title or not url:
+            continue
+        platform = str(item.get("platform") or "").strip() or _url_platform(url)
+        if not platform:
+            continue  # 平台白名单外的一律丢
+        if _url_looks_stale(url, max_age):
+            continue
+        # published_at 明确超期的丢 (API 明说的日期更权威, 覆盖 URL 启发)
+        if cutoff is not None:
+            pub = _parse_iso(item.get("published_at"))
+            if pub is not None and pub < cutoff:
+                continue
+        snippet = str(item.get("snippet") or item.get("desc") or "").strip()
+        candidates.append({
+            "title": title[:120], "snippet": snippet[:400],
+            "url": url, "platform": platform,
+        })
+        lines.append(f"- [{platform}] {title[:80]}"
+                     + (f": {snippet[:140]}" if snippet else ""))
+
+    if not candidates:
+        logger.info(
+            "[proactive-trending] hot_api items all filtered (stale/off-platform); "
+            "hot_api yielded 0 usable candidates",
+        )
+        return "", ()
+
+    logger.info(
+        "[proactive-trending] hot_api yielded %d candidates (from %d raw items)",
+        len(candidates), len(raw_items),
+    )
+    return "\n".join(lines), tuple(candidates)
+
+
+def _extract_hot_items(data: Any) -> list:
+    """兼容 3 种常见 JSON 形状 (见 _hot_api_snippets docstring)."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("items", "data", "list", "results"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return v
+    return []
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        # 时间戳 (秒或毫秒, 简单启发)
+        v = float(value)
+        if v > 1e12:  # ms
+            v /= 1000
+        try:
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except (OSError, ValueError, OverflowError):
+            return None
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 
 async def _tavily_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
@@ -205,6 +376,16 @@ async def _brave_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
 
 
 async def _fetch_live_trending_snippets(*, topic: str | None = None) -> TrendingLoadResult:
+    # 优先: 结构化热榜 API (若配了 proactive_hot_api_url). 拿到就用, 不需要按 query.
+    # 理由: 热榜数据源本身就是"今日 top-N", V3 分类器再按 user/AI 兴趣挑, 比 tavily
+    # 按 query 猜好得多. 未配置时 (env 空) 静默跳过, tavily 顶上.
+    text, cands = await _hot_api_snippets(topic or "")
+    if text:
+        return TrendingLoadResult(
+            text=text, cache_hit=False, provider="hot_api", candidates=cands,
+        )
+
+    # Fallback: tavily / brave 通用搜索
     seed = (topic or "").strip()
     queries: list[str] = list(_LIVE_QUERIES)
     if seed and seed not in {"公共话题", "问候", "日常"}:

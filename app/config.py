@@ -328,6 +328,16 @@ class Settings(BaseSettings):
     # 注: V3 三档 dispatch 之前用 proactive_trending_v3_dispatch_enabled 灰度,
     # 2026-09-14 完整版上线后 (卡片同源硬耦合 fix 后) 转为默认路径, 不再需要 flag.
     # 关闭整个 trending 用 proactive_trending_enabled=False (DB SystemConfig) 即可.
+    #
+    # 2026-09-14 (task#6) 内容源升级: tavily 通用搜索返老 SEO 内容 ("50个热门讨论
+    # 话题" 2021 文章) 是硬伤. 加两层修:
+    #   1) freshness filter: 太老的候选丢掉 (默认 7 天, 靠 URL 里的年份启发)
+    #   2) 可选结构化热榜 API: 若设了 proactive_hot_api_url, 用它拿结构化 hot items
+    #      (title/url/platform/published_at), tavily 作 fallback. API 契约见
+    #      trending_context._hot_api_snippets docstring.
+    proactive_hot_api_url: str = ""
+    proactive_hot_api_key: str = ""  # 可选 bearer token, 有些自建 API 要
+    proactive_hot_max_age_days: int = 7  # 超过这个天数的候选被过滤 (0=关闭)
     proactive_link_candidate_urls: str = ""
     chat_link_search_provider: str = "custom"
     chat_link_search_endpoint: str = ""

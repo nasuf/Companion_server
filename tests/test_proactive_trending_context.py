@@ -192,3 +192,211 @@ class TestPlatformWhitelist:
         assert len(got) == 1
         assert got[0]["platform"] == "微博"
         assert "tophub" not in got[0]["url"]
+
+
+# ─── freshness filter + hot API 数据源 (2026-09-14 task#6) ───────────────────
+
+
+class TestStaleUrlFilter:
+    """URL path 里带明显早年份 → 视为老 SEO 内容, 丢. 修 tavily 常返 2021 老列表.
+
+    只是 URL 启发, 但对 "50个热门话题-2021.html" / "/article/6800000/2020/x" 这类
+    命名规范的旧文命中率高. 未匹配到年份则不判定, 交上游.
+    """
+
+    def test_drops_url_with_old_year_in_path(self):
+        from app.services.proactive.trending_context import _url_looks_stale
+        assert _url_looks_stale("https://www.zhihu.com/p/2020/xxx", max_age_days=7)
+        assert _url_looks_stale("https://article.example/2018/03/story", max_age_days=7)
+        assert _url_looks_stale("https://sohu.com/a/list-2021-hot", max_age_days=7)
+
+    def test_keeps_url_with_recent_year(self):
+        from app.services.proactive.trending_context import _url_looks_stale
+        # 当前年份视为 fresh (不管月份)
+        this_year = "2026"
+        assert not _url_looks_stale(
+            f"https://weibo.com/{this_year}/story/abc", max_age_days=7,
+        )
+
+    def test_keeps_url_without_year_marker(self):
+        # 常规 URL (weibo/xhs/bilibili) 通常 path 里没年份 → 不判定, 保留
+        from app.services.proactive.trending_context import _url_looks_stale
+        assert not _url_looks_stale(
+            "https://www.bilibili.com/video/BV1abc", max_age_days=7,
+        )
+        assert not _url_looks_stale(
+            "https://xhslink.com/a/xyz", max_age_days=7,
+        )
+        assert not _url_looks_stale("", max_age_days=7)
+
+    def test_zero_max_age_disables_filter(self):
+        # max_age_days=0 → 关掉 filter, 任何 URL 都返 False
+        from app.services.proactive.trending_context import _url_looks_stale
+        assert not _url_looks_stale(
+            "https://sohu.com/2015/old", max_age_days=0,
+        )
+
+
+class TestHotApiSnippets:
+    """结构化热榜 API 抽象 (proactive_hot_api_url env). 未配置→静默返空.
+    配了则 fetch → 解析多种 JSON 形状 → freshness 过滤 → 转 candidates.
+    """
+
+    def _setup_env(self, monkeypatch, url="https://hot.example/today"):
+        from app.services.proactive import trending_context as tc
+        monkeypatch.setattr(tc.settings, "proactive_hot_api_url", url)
+        monkeypatch.setattr(tc.settings, "proactive_hot_api_key", "")
+        monkeypatch.setattr(tc.settings, "proactive_hot_max_age_days", 7)
+        monkeypatch.setattr(tc.settings, "chat_link_search_timeout_s", 8.0)
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_endpoint_unset(self, monkeypatch):
+        from app.services.proactive import trending_context as tc
+        monkeypatch.setattr(tc.settings, "proactive_hot_api_url", "")
+        text, cands = await tc._hot_api_snippets("任意 topic")
+        assert text == "" and cands == ()
+
+    @pytest.mark.asyncio
+    async def test_parses_items_shape(self, monkeypatch):
+        # 契约形状 A: {"items": [{...}]}
+        from app.services.proactive import trending_context as tc
+        self._setup_env(monkeypatch)
+
+        class _FakeResp:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return {"items": [
+                    {"title": "中国足球小将Brava杯", "url": "https://weibo.com/1/2",
+                     "platform": "微博"},
+                    {"title": "腰乐队新专辑", "url": "https://music.163.com/album/1"},  # 平台外
+                    {"title": "iPhone 17 首销", "url": "https://www.bilibili.com/video/BV1a",
+                     "platform": "B站"},
+                ]}
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url): return _FakeResp()
+
+        monkeypatch.setattr(tc.httpx, "AsyncClient", _FakeClient)
+        text, cands = await tc._hot_api_snippets("")
+        # 只留支持平台的 2 条 (music.163 被平台白名单挡住)
+        assert len(cands) == 2
+        platforms = {c["platform"] for c in cands}
+        assert platforms == {"微博", "B站"}
+
+    @pytest.mark.asyncio
+    async def test_parses_bare_list_shape(self, monkeypatch):
+        # 契约形状 B: 直接列表
+        from app.services.proactive import trending_context as tc
+        self._setup_env(monkeypatch)
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return [{"title": "热点", "url": "https://weibo.com/1/2"}]
+        class _C:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url): return _R()
+        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        text, cands = await tc._hot_api_snippets("")
+        assert len(cands) == 1
+        assert "热点" in text
+
+    @pytest.mark.asyncio
+    async def test_freshness_filter_by_published_at(self, monkeypatch):
+        # published_at 早于 max_age_days → 丢
+        from app.services.proactive import trending_context as tc
+        from datetime import datetime, timedelta, timezone
+        self._setup_env(monkeypatch)
+        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        fresh = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        class _R:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"items": [
+                    {"title": "老热搜", "url": "https://weibo.com/1/old",
+                     "published_at": old},
+                    {"title": "新热搜", "url": "https://weibo.com/1/new",
+                     "published_at": fresh},
+                ]}
+        class _C:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url): return _R()
+        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        text, cands = await tc._hot_api_snippets("")
+        assert len(cands) == 1
+        assert cands[0]["title"] == "新热搜"
+
+    @pytest.mark.asyncio
+    async def test_url_stale_filter_still_applies(self, monkeypatch):
+        # URL 带早年份也丢 (即使 published_at 缺失 / 或说是新的但 URL 里的年份不对)
+        from app.services.proactive import trending_context as tc
+        self._setup_env(monkeypatch)
+        class _R:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"items": [
+                    {"title": "老 SEO", "url": "https://weibo.com/1/2020/xxx"},  # 老年份
+                    {"title": "新", "url": "https://weibo.com/1/2"},
+                ]}
+        class _C:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url): return _R()
+        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        text, cands = await tc._hot_api_snippets("")
+        assert len(cands) == 1
+        assert cands[0]["title"] == "新"
+
+    @pytest.mark.asyncio
+    async def test_network_failure_returns_empty_not_raises(self, monkeypatch):
+        # 契约: 任何异常都视为空 (让 tavily 顶上), 不 raise
+        from app.services.proactive import trending_context as tc
+        self._setup_env(monkeypatch)
+        class _C:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url): raise RuntimeError("network down")
+        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        text, cands = await tc._hot_api_snippets("")
+        assert text == "" and cands == ()
+
+    def test_extract_hot_items_handles_all_shapes(self):
+        from app.services.proactive.trending_context import _extract_hot_items
+        # 契约里说的 3 种 + 变体
+        assert _extract_hot_items({"items": [1, 2]}) == [1, 2]
+        assert _extract_hot_items({"data": [1, 2]}) == [1, 2]
+        assert _extract_hot_items({"list": [1, 2]}) == [1, 2]
+        assert _extract_hot_items({"results": [1, 2]}) == [1, 2]
+        assert _extract_hot_items([1, 2]) == [1, 2]
+        assert _extract_hot_items({"other": "x"}) == []
+        assert _extract_hot_items(None) == []
+        assert _extract_hot_items("string") == []
+
+    def test_parse_iso_variants(self):
+        from app.services.proactive.trending_context import _parse_iso
+        from datetime import datetime, timezone
+        # ISO 字符串
+        assert _parse_iso("2026-09-14T13:00:00Z") == datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc)
+        # 秒级 timestamp
+        got = _parse_iso(1700000000)
+        assert got is not None and got.tzinfo is not None
+        # 毫秒级
+        got_ms = _parse_iso(1700000000000)
+        assert got_ms is not None and got_ms.year >= 2023
+        # 已 datetime
+        d = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        assert _parse_iso(d) == d
+        # 空 / 垃圾
+        assert _parse_iso(None) is None
+        assert _parse_iso("") is None
+        assert _parse_iso("not a date") is None
