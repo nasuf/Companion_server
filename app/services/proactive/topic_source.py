@@ -123,6 +123,7 @@ def classify_topic_source(
     trending_candidates: list[dict],
     user_portrait: str = "",
     agent: Any = None,
+    exclude_titles: set[str] | frozenset[str] = frozenset(),
 ) -> SourceClassification:
     """V3 分类主入口. 决定用哪档 + 挑哪条候选内容.
 
@@ -135,12 +136,44 @@ def classify_topic_source(
     优先级 (而非按概率抽) 的理由: 分类是"给现有内容找最合适的表达"; 概率抽签让"内容
     明明能勾用户 A 却硬套 socially_hot 表达"的错配自动发生. 概率控制留给上游"要不要
     trending" (proactive_trending_probability), 下游选源用确定性优先级更 clean.
+
+    ## exclude_titles (2026-09-14): 排除该 user × agent 最近已 featured 的候选
+
+    根因: 分类器纯确定性 (相同输入总选第 0 条), 加上 DailyHot 上游 top-N 短时间
+    内不动, 用户短时间内连测多次会得到"同一件事情反复推". featured_topics.py
+    追踪 workspace 最近 N 条 featured title (6h TTL), 传进来的集合会**在打分前**
+    从 candidates 里 pop 掉 —— 于是自动选下一条最热的.
+
+    过滤在打分前做, 不是在打分后 penalty, 因为:
+      - 一旦排除, 优先级判定该走 next-tier (user_interest 全排除 → 该走 ai_persona
+        或 socially_hot) —— penalty 会让"命中用户兴趣但已 featured"的候选仍然
+        排在 socially_hot 未 featured 之前, 语义错.
+      - 排除只对 title 完全匹配, 不做子串/相似度. 保守: 换个说法的相邻热点仍算
+        新话题 (e.g. "赵雷当爸爸" vs "赵雷官宣二胎" 视为不同, 都可推).
     """
     if not trending_candidates:
         return SourceClassification(
             kind="none", selected_candidate=None,
             reason="no trending candidates → 走 none",
         )
+
+    # 过滤已 featured. 空集合 = 无过滤 (向后兼容 caller 未传参).
+    if exclude_titles:
+        pre_count = len(trending_candidates)
+        trending_candidates = [
+            c for c in trending_candidates
+            if str(c.get("title") or "").strip() not in exclude_titles
+        ]
+        dropped = pre_count - len(trending_candidates)
+        if not trending_candidates:
+            return SourceClassification(
+                kind="none", selected_candidate=None,
+                reason=f"全部 {pre_count} 条候选都在 exclude_titles 里 → 走 none "
+                       f"(user × agent 短时间内已看过, 等 featured_topics TTL 过期)",
+            )
+        filter_note = f" [排除 {dropped} 条已 featured]" if dropped else ""
+    else:
+        filter_note = ""
 
     user_terms = _extract_interests(user_portrait or "")
 
@@ -172,7 +205,7 @@ def classify_topic_source(
         _, _, _, cand = user_wins[0]
         return SourceClassification(
             kind="user_interest_match", selected_candidate=cand,
-            reason=f"命中用户兴趣: {user_terms}",
+            reason=f"命中用户兴趣: {user_terms}{filter_note}",
         )
 
     # 2. ai_persona_match: 命中 AI 兴趣
@@ -184,7 +217,7 @@ def classify_topic_source(
         _, _, _, cand = ai_wins[0]
         return SourceClassification(
             kind="ai_persona_match", selected_candidate=cand,
-            reason=f"命中 AI 人设兴趣: {ai_terms}",
+            reason=f"命中 AI 人设兴趣: {ai_terms}{filter_note}",
         )
 
     # 3. socially_hot: 有质量过关的候选
@@ -193,11 +226,11 @@ def classify_topic_source(
         _, _, _, cand = hot_ok[0]  # 已经按 trending_candidates 顺序 (通常热度已排)
         return SourceClassification(
             kind="socially_hot", selected_candidate=cand,
-            reason="有质量过关的社交谈资候选",
+            reason=f"有质量过关的社交谈资候选{filter_note}",
         )
 
     # 4. 都拒绝 → none
     return SourceClassification(
         kind="none", selected_candidate=None,
-        reason=f"{len(trending_candidates)} 条候选全部被质量门拒绝",
+        reason=f"{len(trending_candidates)} 条候选全部被质量门拒绝{filter_note}",
     )

@@ -720,11 +720,19 @@ async def generate_and_send_proactive(
         and _trending_meta.candidates
     ):
         from app.services.proactive.topic_source import classify_topic_source
+        from app.services.proactive.featured_topics import get_recent_featured
+
+        # 加载该 user × agent 最近 featured 的话题 (6h TTL). 传给分类器排除,
+        # 让第 2/3/4... 次连续测试自动挑下一条最热的, 而不是永远是同一件事.
+        # workspace_id 由 (user_id, agent_id) 唯一确定 -> 天然按 user 隔离,
+        # 不影响其他用户对同一热点的首次曝光. 详见 featured_topics.py.
+        exclude = await get_recent_featured(str(state.workspace_id) if state.workspace_id else None)
 
         cls = classify_topic_source(
             trending_candidates=list(_trending_meta.candidates),
             user_portrait=str(ctx.get("user_portrait") or ""),
             agent=ctx.get("agent"),
+            exclude_titles=exclude,
         )
         if cls.kind != "none":
             ctx["topic_source_kind"] = cls.kind
@@ -842,6 +850,16 @@ async def generate_and_send_proactive(
         # 只在真发出去后记, 免得 empty_or_skip / 各种 skip 路径污染.
         from app.services.proactive.recent_messages import remember_recent
         await remember_recent(state.workspace_id, message)
+
+        # 2026-09-14: 记账已 featured 的话题 title (下次分类器排除, 避免"同一件事情
+        # 反复推给同一 user × agent". 6h TTL, 按 workspace 隔离, 不影响其他用户).
+        v3_item = ctx.get("topic_source_item")
+        if isinstance(v3_item, dict):
+            featured_title = str(v3_item.get("title") or "").strip()
+            if featured_title:
+                from app.services.proactive.featured_topics import remember_featured
+                await remember_featured(str(state.workspace_id) if state.workspace_id else None,
+                                         featured_title)
         if proactive_link is not None:
             from app.services.chat_links import bind_link_card_to_message
 
