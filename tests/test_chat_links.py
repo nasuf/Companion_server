@@ -1039,3 +1039,141 @@ async def test_create_link_card_removes_cached_cover_when_db_write_fails(monkeyp
         )
 
     assert not (tmp_path / storage_key).exists()
+
+
+# ─── V3 消息-卡片硬耦合守卫 (preselected_item, 2026-09-14) ───────────────────
+
+
+async def test_preselected_item_bypasses_independent_search(monkeypatch):
+    """V3 消息-卡片硬耦合: 传 preselected_item 时禁止调 _select_candidate_url.
+
+    修根本问题: 截图里"文本说银锁骨链 + 卡说机场"这种同一主动消息里语义脱钩的
+    现象. V3 分类器已挑了那条 (消息 prompt 也用它做 {trending_item}), 卡片必须挂
+    那一条, 不许再独立 tavily 拿随机 URL.
+    """
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+
+    # 关键守卫: 独立搜路径**不能**被调用, 调了就说明破坏了硬耦合
+    async def fail_select_candidate(*args, **kwargs):
+        raise AssertionError(
+            "preselected_item 传了但仍走独立搜 _select_candidate_url — "
+            "V3 消息-卡片硬耦合破了"
+        )
+    monkeypatch.setattr(rec_mod, "_select_candidate_url", fail_select_candidate)
+
+    async def fake_extract_link_metadata(*, url, shared_text, timeout=12.0):
+        assert url == "https://www.bilibili.com/video/BV1abc"  # 就是 preselected
+        return LinkMetadata(
+            source_url=url, final_url=url, platform="B站",
+            title="手机拍夜景技巧", summary="ISO/白平衡/反射面",
+            content_text="ISO/白平衡/反射面",
+        )
+
+    captured = {}
+    async def fake_create_or_update_link_card(**kwargs):
+        captured.update(kwargs)
+        return ChatLinkCard(
+            id="link-preselected-1",
+            user_id=kwargs["user_id"], conversation_id=kwargs["conversation_id"],
+            message_id=None, role=kwargs["role"], source_app=kwargs["source_app"],
+            source_url=kwargs["metadata"].source_url, final_url=kwargs["metadata"].final_url,
+            platform=kwargs["metadata"].platform, title=kwargs["metadata"].title,
+            description="", author=None, image_url=None,
+            content_text=kwargs["metadata"].content_text,
+            original_text=kwargs["metadata"].content_text,
+            summary=kwargs["metadata"].summary,
+            status="ready", error=None, metadata=kwargs["extra_metadata"],
+        )
+
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
+    monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
+
+    result = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="随便什么 topic", stage="warming",
+        message="你不是说想学摄影吗刚看到这个",
+        preselected_item={
+            "title": "手机拍夜景技巧",
+            "platform": "B站",
+            "url": "https://www.bilibili.com/video/BV1abc",
+        },
+    )
+    assert result is not None
+    # 卡片挂的就是消息引用的那条 URL
+    assert captured["metadata"].final_url == "https://www.bilibili.com/video/BV1abc"
+    assert captured["extra_metadata"]["candidate_source"] == "topic_source_preselected"
+
+
+async def test_preselected_item_no_url_falls_through_returns_none(monkeypatch):
+    """preselected_item 没带 url → 直接 return None (**不 fallback** 到独立搜).
+
+    宁可这次不出卡, 也不能破坏"卡=消息同源"的保证. 独立搜是脱钩的根源.
+    """
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+
+    async def fail_select(*args, **kwargs):
+        raise AssertionError("无 URL 时也不该走独立搜, 应该直接不出卡")
+    monkeypatch.setattr(rec_mod, "_select_candidate_url", fail_select)
+
+    result = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="x", stage="warming", message="msg",
+        preselected_item={"title": "只有标题没 URL", "platform": "微博"},
+    )
+    assert result is None
+
+
+async def test_preselected_none_still_uses_independent_search(monkeypatch):
+    """向后兼容: preselected_item=None (V0 老路径) 仍走独立搜."""
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.settings, "chat_link_search_provider", "custom")
+    monkeypatch.setattr(rec_mod.settings, "chat_link_search_endpoint", "")
+    monkeypatch.setattr(
+        rec_mod.settings, "proactive_link_candidate_urls",
+        "https://www.zhihu.com/question/1",
+    )
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+    monkeypatch.setattr(rec_mod.random, "choice", lambda urls: urls[0])
+
+    called = {"selected": False}
+    orig_select = rec_mod._select_candidate_url
+    async def wrapped(*args, **kwargs):
+        called["selected"] = True
+        return await orig_select(*args, **kwargs)
+    monkeypatch.setattr(rec_mod, "_select_candidate_url", wrapped)
+
+    async def fake_extract_link_metadata(*, url, shared_text, timeout=12.0):
+        return LinkMetadata(
+            source_url=url, final_url=url, platform="知乎",
+            title="fallback path", summary="s", content_text="s",
+        )
+    async def fake_create_or_update_link_card(**kwargs):
+        return ChatLinkCard(
+            id="l1", user_id=kwargs["user_id"], conversation_id=kwargs["conversation_id"],
+            message_id=None, role=kwargs["role"], source_app=kwargs["source_app"],
+            source_url=kwargs["metadata"].source_url, final_url=kwargs["metadata"].final_url,
+            platform=kwargs["metadata"].platform, title=kwargs["metadata"].title,
+            description="", author=None, image_url=None,
+            content_text=kwargs["metadata"].content_text,
+            original_text=kwargs["metadata"].content_text,
+            summary=kwargs["metadata"].summary,
+            status="ready", error=None, metadata=kwargs["extra_metadata"],
+        )
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
+    monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
+
+    result = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="x", stage="warming", message="msg",
+        # preselected_item 显式不传, 走 V0 老路
+    )
+    assert result is not None
+    assert called["selected"], "无 preselected 时必须走独立搜路径 (向后兼容)"

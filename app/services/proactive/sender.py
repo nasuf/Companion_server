@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import settings
 from app.db import db
 from app.services.runtime.distributed_lock import distributed_lock
 from app.observability import bind_context
@@ -667,16 +666,17 @@ async def generate_and_send_proactive(
     )
     ctx["trending_context"] = trending_text
 
-    # V3 dispatch (2026-09-14): env flag on + trending 命中 → 走三档分类器 +
-    # 独立 prompt (proactive.trending_user_interest/_ai_persona/_socially_hot).
-    # 决策证据: evals/proactive_naturalness (V0 baseline source_fit 17% /
-    # mentions_card 67%, V3 达 50% / 100%). 关闭时保持原 V0 append_trending_section
-    # 路径, 完全兼容.
+    # V3 三档分发 (2026-09-14): trending 命中 → 分类器决定档位 + 挑候选内容.
+    # 已从 env flag 灰度转为**默认路径** —— 卡片同源硬耦合 (下面 preselected_item)
+    # 与消息 prompt 分档一起构成完整闭环, 不再需要 flag.
+    # 决策证据: evals/proactive_naturalness (V0 source_fit 17%/mentions_card 67%
+    # → V3 50%/100%). 关闭整个 trending 用 admin UI SystemConfig.proactive_trending_enabled=False.
+    # 分类器返 "none" (所有候选都被黑名单/无匹配拒了) 时 ctx 不 set,
+    # _generate_message 落回 V0 append_trending_section 兜底路径.
     if (
         trending_attached
         and _trending_meta is not None
         and _trending_meta.candidates
-        and getattr(settings, "proactive_trending_v3_dispatch_enabled", False)
     ):
         from app.services.proactive.topic_source import classify_topic_source
 
@@ -741,6 +741,11 @@ async def generate_and_send_proactive(
                     trending_attached=True,
                 )
 
+            # V3 消息-卡片硬耦合 (2026-09-14): 若 V3 分类器已挑好那条内容
+            # (ctx["topic_source_item"]), 卡片必须挂那一条, 不许再独立搜 tavily
+            # 拿随机 URL. 修根本问题: 截图里"文本说银锁骨链 + 卡说机场"这种同一
+            # 主动消息里语义脱钩的现象.
+            preselected = ctx.get("topic_source_item") if ctx.get("topic_source_kind") else None
             proactive_link = await maybe_prepare_proactive_link_recommendation(
                 user_id=state.user_id,
                 conversation_id=prep.conversation_id,
@@ -751,6 +756,7 @@ async def generate_and_send_proactive(
                 message=message,
                 force=force_link,
                 skip=skip_link,
+                preselected_item=preselected,
             )
             if proactive_link is not None:
                 extra_metadata.update({

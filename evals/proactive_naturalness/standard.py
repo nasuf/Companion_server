@@ -67,7 +67,10 @@ BASELINE_V0 = {
 # ── V3 首跑 (2026-09-14, 同批 12 case × 2 samples = 24, judge=dashscope:qwen-plus) ──
 #
 # V3 = 三档分类 (topic_source.py) + 独立 prompt 分发 + 分类器选中那条作为卡片素材.
-# 生产集成: 通过 env flag PROACTIVE_TRENDING_V3_DISPATCH_ENABLED=true 打开.
+# 生产集成 (2026-09-14 完整版): 已从 env flag 转为默认路径 —— trending 命中即
+# 走 V3, 分类器返 "none" 时兜底 V0 append_trending_section. 卡片同源硬耦合
+# (preselected_item) 与消息 prompt 分档一起构成完整闭环. 关闭整个 trending 用
+# admin UI SystemConfig.proactive_trending_enabled=False.
 #
 # V0 vs V3 对比 (∆ = V3 - V0):
 #   metric              V0     V3     ∆       目标      判定

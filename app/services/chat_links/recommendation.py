@@ -120,11 +120,19 @@ async def maybe_prepare_proactive_link_recommendation(
     message: str,
     force: bool = False,
     skip: bool = False,
+    preselected_item: dict | None = None,
 ) -> ProactiveLinkRecommendation | None:
     """Return a real assistant link card when a configured provider yields one.
 
     The agent must never hallucinate a card URL. This helper only emits a card
     after a candidate URL has been found, parsed, and stored as role=assistant.
+
+    preselected_item (2026-09-14, V3 消息-卡片硬耦合):
+      非 None 时**跳过**独立 tavily/brave 搜索, 直接用 preselected_item["url"] 建卡.
+      这是 V3 三档 dispatch 里, sender 已经通过 classify_topic_source 挑好了消息
+      引用的那一条内容, 卡片必须挂那一条 (不然截图里"文本说银锁骨链 + 卡说机场"
+      的语义脱钩会持续发生).
+      需要 dict 里带非空 "url", 缺则 return None (不挂卡, 消息独立发).
     """
     if skip:
         return None
@@ -132,19 +140,35 @@ async def maybe_prepare_proactive_link_recommendation(
         trigger_type=trigger_type, source=source, force=force,
     ):
         return None
-    search_query = _proactive_search_query(topic=topic)
-    candidate = await _select_candidate_url(query=search_query)
-    if not candidate:
-        return None
+
+    # V3 消息-卡片硬耦合路径 (preselected_item): 跳过独立搜, 直接用消息引用的那条
+    # 内容建卡. 这里明确不调 _select_candidate_url —— 单元测试锁死这个行为.
+    if preselected_item is not None:
+        preselected_url = str(preselected_item.get("url") or "").strip()
+        if not preselected_url:
+            # V3 分类选中的 candidate 没带 URL (可能来源 API 只给了 title/snippet).
+            # 不 fallback 到独立搜 (那就破坏了同源保证) —— 就不出卡, 消息裸发.
+            logger.info(
+                "[chat-links] preselected_item has no url, skipping card "
+                "(message stays uncoupled — better than mismatched)"
+            )
+            return None
+        candidate = _CandidateUrl(url=preselected_url, source="topic_source_preselected")
+    else:
+        search_query = _proactive_search_query(topic=topic)
+        candidate = await _select_candidate_url(query=search_query)
+        if not candidate:
+            return None
+
     try:
         metadata = await extract_link_metadata(url=candidate.url, shared_text=None)
         if not _metadata_usable_for_proactive_card(metadata):
             logger.info(
                 "[chat-links] proactive recommendation skipped unusable metadata "
-                "platform=%s status=%s query=%s",
+                "platform=%s status=%s source=%s",
                 metadata.platform,
                 metadata.status,
-                search_query,
+                candidate.source,
             )
             return None
         link = await create_or_update_link_card(

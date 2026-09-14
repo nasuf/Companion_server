@@ -325,10 +325,9 @@ class Settings(BaseSettings):
     proactive_trending_probability: float = 0.30
     proactive_trending_cache_ttl_s: int = 3600
     proactive_trending_link_probability: float = 0.30
-    # V3 三档 dispatch (topic_source 分类器 + 三档独立 prompt). env-only 开关, 不加
-    # DB 列避免 migration; 生产 flip via env → redeploy. 关闭时走原 V0 append_trending_section
-    # 路径 (兼容原行为). eval 证据: evals/proactive_naturalness/standard.py BASELINE_V0.
-    proactive_trending_v3_dispatch_enabled: bool = False
+    # 注: V3 三档 dispatch 之前用 proactive_trending_v3_dispatch_enabled 灰度,
+    # 2026-09-14 完整版上线后 (卡片同源硬耦合 fix 后) 转为默认路径, 不再需要 flag.
+    # 关闭整个 trending 用 proactive_trending_enabled=False (DB SystemConfig) 即可.
     proactive_link_candidate_urls: str = ""
     chat_link_search_provider: str = "custom"
     chat_link_search_endpoint: str = ""
