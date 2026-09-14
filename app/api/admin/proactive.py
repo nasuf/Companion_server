@@ -58,6 +58,11 @@ class AdminProactiveTriggerResponse(BaseModel):
     reason: str | None = None
     web_search_used: bool = False
     link_card_used: bool = False
+    # 2026-09-14 task#12: link_card_used=False 时说明具体原因, 例:
+    # metadata_unusable_partial (微博/知乎需登录, 抓不到内容) / preselected_no_url /
+    # gate_rejected / no_preselected_no_force / exception_XXX
+    # link_card_used=True 时保持 null. Flutter admin QA 显示这个避免翻日志.
+    link_card_skip_reason: str | None = None
 
 
 async def _resolve_workspace_and_agent(
@@ -150,6 +155,7 @@ async def admin_trigger_proactive(
                 reason="special_date_generation_blocked",
                 web_search_used=outcome.web_search_used,
                 link_card_used=outcome.link_card_used,
+                link_card_skip_reason=outcome.link_card_skip_reason,
             )
         rows = await db.query_raw(
             """
@@ -169,6 +175,7 @@ async def admin_trigger_proactive(
             reason=None,
             web_search_used=outcome.web_search_used,
             link_card_used=outcome.link_card_used,
+            link_card_skip_reason=outcome.link_card_skip_reason,
         )
 
     result = await send_manual_or_triggered_proactive(
@@ -184,4 +191,5 @@ async def admin_trigger_proactive(
         reason=result.get("reason"),  # type: ignore[arg-type]
         web_search_used=bool(result.get("web_search_used")),
         link_card_used=bool(result.get("link_card_used")),
+        link_card_skip_reason=result.get("link_card_skip_reason"),  # type: ignore[arg-type]
     )

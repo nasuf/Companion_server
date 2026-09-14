@@ -83,6 +83,9 @@ async def build_proactive_context(
         "topic_theme": topic_theme or "",
         "user_portrait": user_portrait or "",
         "recent_context": recent_context,
+        # 2026-09-14 task#12: _generate_message 用它做 anti-repetition (查 Redis
+        # 里 workspace 最近 24h 的主动消息, 一模一样 or 高度相似的就重生成一次)
+        "workspace_id": workspace_id,
     }
 
 

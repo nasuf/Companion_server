@@ -121,78 +121,67 @@ async def maybe_prepare_proactive_link_recommendation(
     force: bool = False,
     skip: bool = False,
     preselected_item: dict | None = None,
-) -> ProactiveLinkRecommendation | None:
-    """Return a real assistant link card when a configured provider yields one.
+) -> tuple[ProactiveLinkRecommendation | None, str | None]:
+    """Return (recommendation, skip_reason). 只有一侧非空: 出卡 or 说不出卡的原因.
 
-    The agent must never hallucinate a card URL. This helper only emits a card
-    after a candidate URL has been found, parsed, and stored as role=assistant.
+    ## 2026-09-14 (task#12) 返回值改动
 
-    preselected_item (2026-09-14, V3 消息-卡片硬耦合):
-      非 None 时**跳过**独立 tavily/brave 搜索, 直接用 preselected_item["url"] 建卡.
-      这是 V3 三档 dispatch 里, sender 已经通过 classify_topic_source 挑好了消息
-      引用的那一条内容, 卡片必须挂那一条 (不然截图里"文本说银锁骨链 + 卡说机场"
-      的语义脱钩会持续发生).
-      需要 dict 里带非空 "url", 缺则 return None (不挂卡, 消息独立发).
+    之前返 `ProactiveLinkRecommendation | None` —— 卡片被 drop 时静默 None, 上游
+    只知道"没卡" 不知道为何 (登录墙? URL 空? 异常?). admin QA 界面因此只能显示
+    "链接卡片: 未附带", 排查全靠翻后端日志.
 
-    ## 2026-09-14 收窄: 只两条路径能出卡
+    改成 tuple 返回: 卡片没出时同时返 skip_reason 字符串, sender 塞给
+    send_outcome.link_card_skip_reason → admin API 响应带这个字段 → flutter 直接
+    显示"链接卡片: 未附带 (原因: metadata_unusable_partial)". 排查零日志翻页.
 
-    - **preselected_item 非 None** (V3 分类器选中): 卡挂那一条, 跟消息同源
-    - **force=True** (admin 显式测试): 允许走独立搜路径, 供 QA 验证
+    ## 收窄规则 (跟之前一样, 只描述新语义)
 
-    其余路径 (memory_proactive / silence_wakeup 但 V3 classifier 返 "none" / 概率
-    roll 命中但无 preselected 等) 一律**不出卡**. 之前的漏洞是:
-      · memory_proactive 不在 trending-eligible 里 → 没 preselected → 但走
-        proactive_link_recommendation_probability 概率 roll → 独立搜 → 拿到
-        跟消息完全无关的老 SEO 文章 (用户截图 "50个热门讨论话题" 就是这样).
-      · silence_wakeup + classifier="none" (全部候选被过滤): 类似, 卡走独立搜.
-
-    卡片的语义是"我 (AI) 刷到了这条, 想跟你分享" —— 你不可能分享一个自己都没
-    真的看过的东西. 独立搜出来的 URL, AI 根本不"知道"里面是什么, 硬挂就是**假
-    的社交货币**. 关掉这条路是设计层面的正解.
+    只两条路能出卡:
+    - preselected_item 非 None (V3 分类器选中)
+    - force=True (admin 显式测试)
+    其余场景返 (None, reason).
     """
     if skip:
-        return None
+        return None, "skip_explicit"
 
     # 2026-09-14: 无 preselected_item 且非 admin force → 不出卡 (关"独立随机卡"漏洞)
     if preselected_item is None and not force:
-        return None
+        return None, "no_preselected_no_force"
 
     if not should_attempt_proactive_link(
         trigger_type=trigger_type, source=source, force=force,
     ):
-        return None
+        return None, "gate_rejected"
 
     # V3 消息-卡片硬耦合路径 (preselected_item): 跳过独立搜, 直接用消息引用的那条
-    # 内容建卡. 这里明确不调 _select_candidate_url —— 单元测试锁死这个行为.
     if preselected_item is not None:
         preselected_url = str(preselected_item.get("url") or "").strip()
         if not preselected_url:
-            # V3 分类选中的 candidate 没带 URL (可能来源 API 只给了 title/snippet).
-            # 不 fallback 到独立搜 (那就破坏了同源保证) —— 就不出卡, 消息裸发.
             logger.info(
                 "[chat-links] preselected_item has no url, skipping card "
                 "(message stays uncoupled — better than mismatched)"
             )
-            return None
+            return None, "preselected_no_url"
         candidate = _CandidateUrl(url=preselected_url, source="topic_source_preselected")
     else:
-        # 只有 admin QA (force=True) 能走到这里 —— 让 admin 测独立搜路径
+        # admin QA (force=True) 独立搜路径
         search_query = _proactive_search_query(topic=topic)
         candidate = await _select_candidate_url(query=search_query)
         if not candidate:
-            return None
+            return None, "candidate_search_empty"
 
     try:
         metadata = await extract_link_metadata(url=candidate.url, shared_text=None)
         if not _metadata_usable_for_proactive_card(metadata):
+            status = str(getattr(metadata, "status", "") or "unknown")
             logger.info(
                 "[chat-links] proactive recommendation skipped unusable metadata "
-                "platform=%s status=%s source=%s",
-                metadata.platform,
-                metadata.status,
-                candidate.source,
+                "platform=%s status=%s source=%s url=%s",
+                metadata.platform, status, candidate.source, candidate.url[:80],
             )
-            return None
+            # 常见: 微博/知乎需登录 → status="partial" → 拒. 精确 reason 让 admin
+            # 一眼看出是内容源问题 (需换 URL) 还是别的问题.
+            return None, f"metadata_unusable_{status}"
         link = await create_or_update_link_card(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -208,13 +197,13 @@ async def maybe_prepare_proactive_link_recommendation(
         )
     except Exception as exc:
         logger.warning("[chat-links] proactive recommendation failed: %s", exc)
-        return None
+        return None, f"exception_{type(exc).__name__}"
     component_card = component_card_for_link(link, recommendation=True)
     return ProactiveLinkRecommendation(
         link=link,
         component_card=component_card,
         link_card_metadata=metadata_for_link_card(link),
-    )
+    ), None
 
 
 async def _select_candidate_url(*, query: str) -> _CandidateUrl | None:

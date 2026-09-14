@@ -763,7 +763,7 @@ async def test_prepare_proactive_link_recommendation_builds_assistant_card(monke
 
     # 2026-09-14 起, 无 preselected + 无 force → 直接返 None (关随机卡漏洞).
     # 这里加 force=True 表示走 admin QA 路径 (仍允许独立搜) 来测老的建卡逻辑.
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
         trigger_type="silence_wakeup",
@@ -837,7 +837,7 @@ async def test_prepare_proactive_link_recommendation_ignores_chat_line_for_searc
     monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
 
     # 2026-09-14: 无 preselected → 必须显式 force=True 才走独立搜路径.
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
         trigger_type="silence_wakeup",
@@ -880,7 +880,7 @@ async def test_prepare_proactive_link_recommendation_skips_partial_metadata(monk
 
     monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
 
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
         trigger_type="silence_wakeup",
@@ -946,7 +946,7 @@ async def test_prepare_proactive_link_recommendation_records_search_source(monke
 
     # 2026-09-14: memory_proactive 走的是内在路径, 平时不该出卡. 这里加 force=True
     # 表明测的是 admin QA 手动触发时的独立搜路径 (memory_proactive 自然触发不出卡了)
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
         trigger_type="memory_proactive",
@@ -1098,7 +1098,7 @@ async def test_preselected_item_bypasses_independent_search(monkeypatch):
     monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
     monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
 
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1", conversation_id="c1",
         trigger_type="silence_wakeup", source="greeting",
         topic="随便什么 topic", stage="warming",
@@ -1128,7 +1128,7 @@ async def test_preselected_item_no_url_falls_through_returns_none(monkeypatch):
         raise AssertionError("无 URL 时也不该走独立搜, 应该直接不出卡")
     monkeypatch.setattr(rec_mod, "_select_candidate_url", fail_select)
 
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1", conversation_id="c1",
         trigger_type="silence_wakeup", source="greeting",
         topic="x", stage="warming", message="msg",
@@ -1178,7 +1178,7 @@ async def test_preselected_none_with_admin_force_still_uses_independent_search(m
     monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
     monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
 
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1", conversation_id="c1",
         trigger_type="silence_wakeup", source="greeting",
         topic="x", stage="warming", message="msg",
@@ -1202,7 +1202,7 @@ async def test_no_preselected_no_force_returns_none(monkeypatch):
         raise AssertionError("无 preselected + 无 force 不该走独立搜, 应该直接 None")
     monkeypatch.setattr(rec_mod, "_select_candidate_url", fail_select)
 
-    result = await maybe_prepare_proactive_link_recommendation(
+    result, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1", conversation_id="c1",
         trigger_type="silence_wakeup", source="greeting",
         topic="x", stage="warming", message="msg",
@@ -1211,7 +1211,7 @@ async def test_no_preselected_no_force_returns_none(monkeypatch):
     assert result is None
 
     # memory_proactive 也是 (之前的漏洞入口)
-    result2 = await maybe_prepare_proactive_link_recommendation(
+    result2, _ = await maybe_prepare_proactive_link_recommendation(
         user_id="u1", conversation_id="c1",
         trigger_type="memory_proactive", source="ai_l1",
         topic="x", stage="warming", message="msg",
