@@ -761,6 +761,8 @@ async def test_prepare_proactive_link_recommendation_builds_assistant_card(monke
     monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
     monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
 
+    # 2026-09-14 起, 无 preselected + 无 force → 直接返 None (关随机卡漏洞).
+    # 这里加 force=True 表示走 admin QA 路径 (仍允许独立搜) 来测老的建卡逻辑.
     result = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
@@ -769,6 +771,7 @@ async def test_prepare_proactive_link_recommendation_builds_assistant_card(monke
         topic="长期记忆",
         stage="warming",
         message="看到一个东西想到你。",
+        force=True,
     )
 
     assert result is not None
@@ -833,6 +836,7 @@ async def test_prepare_proactive_link_recommendation_ignores_chat_line_for_searc
     monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
     monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
 
+    # 2026-09-14: 无 preselected → 必须显式 force=True 才走独立搜路径.
     result = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
@@ -841,6 +845,7 @@ async def test_prepare_proactive_link_recommendation_ignores_chat_line_for_searc
         topic="时间胶囊",
         stage="warming",
         message="最近咋样呀，我下班路上刚想起之前埋的时间胶囊",
+        force=True,
     )
 
     assert result is not None
@@ -939,6 +944,8 @@ async def test_prepare_proactive_link_recommendation_records_search_source(monke
     monkeypatch.setattr(rec_mod, "extract_link_metadata", fake_extract_link_metadata)
     monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
 
+    # 2026-09-14: memory_proactive 走的是内在路径, 平时不该出卡. 这里加 force=True
+    # 表明测的是 admin QA 手动触发时的独立搜路径 (memory_proactive 自然触发不出卡了)
     result = await maybe_prepare_proactive_link_recommendation(
         user_id="u1",
         conversation_id="c1",
@@ -947,6 +954,7 @@ async def test_prepare_proactive_link_recommendation_records_search_source(monke
         topic="咖啡",
         stage="intimate",
         message="我看到一条微博，感觉你会感兴趣。",
+        force=True,
     )
 
     assert result is not None
@@ -1129,8 +1137,9 @@ async def test_preselected_item_no_url_falls_through_returns_none(monkeypatch):
     assert result is None
 
 
-async def test_preselected_none_still_uses_independent_search(monkeypatch):
-    """向后兼容: preselected_item=None (V0 老路径) 仍走独立搜."""
+async def test_preselected_none_with_admin_force_still_uses_independent_search(monkeypatch):
+    """admin QA 通道 (force=True) 仍能触发独立搜, 用于测独立路径本身没坏.
+    自然主动消息路径 (无 preselected + 无 force) 会走另一个测试: 直接 return None."""
     monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
     monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
     monkeypatch.setattr(rec_mod.settings, "chat_link_search_provider", "custom")
@@ -1173,7 +1182,38 @@ async def test_preselected_none_still_uses_independent_search(monkeypatch):
         user_id="u1", conversation_id="c1",
         trigger_type="silence_wakeup", source="greeting",
         topic="x", stage="warming", message="msg",
-        # preselected_item 显式不传, 走 V0 老路
+        force=True,  # admin QA 通道: 仍允许独立搜
     )
     assert result is not None
-    assert called["selected"], "无 preselected 时必须走独立搜路径 (向后兼容)"
+    assert called["selected"], "admin force 时应走独立搜路径"
+
+
+async def test_no_preselected_no_force_returns_none(monkeypatch):
+    """新规则守卫 (2026-09-14): 无 preselected + 无 force → 直接 None, 不出卡.
+
+    修根本 bug (用户截图): memory_proactive / silence_wakeup+classifier=none 场景
+    以前走概率-random 独立搜, 挂个跟消息完全无关的老 SEO 文章上去. 现在这条路死了.
+    """
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)  # 概率 roll 必命中
+
+    async def fail_select(*args, **kwargs):
+        raise AssertionError("无 preselected + 无 force 不该走独立搜, 应该直接 None")
+    monkeypatch.setattr(rec_mod, "_select_candidate_url", fail_select)
+
+    result = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="x", stage="warming", message="msg",
+        # 无 preselected, 无 force —— 关掉的漏洞
+    )
+    assert result is None
+
+    # memory_proactive 也是 (之前的漏洞入口)
+    result2 = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="memory_proactive", source="ai_l1",
+        topic="x", stage="warming", message="msg",
+    )
+    assert result2 is None

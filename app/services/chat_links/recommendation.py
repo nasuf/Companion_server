@@ -133,9 +133,30 @@ async def maybe_prepare_proactive_link_recommendation(
       引用的那一条内容, 卡片必须挂那一条 (不然截图里"文本说银锁骨链 + 卡说机场"
       的语义脱钩会持续发生).
       需要 dict 里带非空 "url", 缺则 return None (不挂卡, 消息独立发).
+
+    ## 2026-09-14 收窄: 只两条路径能出卡
+
+    - **preselected_item 非 None** (V3 分类器选中): 卡挂那一条, 跟消息同源
+    - **force=True** (admin 显式测试): 允许走独立搜路径, 供 QA 验证
+
+    其余路径 (memory_proactive / silence_wakeup 但 V3 classifier 返 "none" / 概率
+    roll 命中但无 preselected 等) 一律**不出卡**. 之前的漏洞是:
+      · memory_proactive 不在 trending-eligible 里 → 没 preselected → 但走
+        proactive_link_recommendation_probability 概率 roll → 独立搜 → 拿到
+        跟消息完全无关的老 SEO 文章 (用户截图 "50个热门讨论话题" 就是这样).
+      · silence_wakeup + classifier="none" (全部候选被过滤): 类似, 卡走独立搜.
+
+    卡片的语义是"我 (AI) 刷到了这条, 想跟你分享" —— 你不可能分享一个自己都没
+    真的看过的东西. 独立搜出来的 URL, AI 根本不"知道"里面是什么, 硬挂就是**假
+    的社交货币**. 关掉这条路是设计层面的正解.
     """
     if skip:
         return None
+
+    # 2026-09-14: 无 preselected_item 且非 admin force → 不出卡 (关"独立随机卡"漏洞)
+    if preselected_item is None and not force:
+        return None
+
     if not should_attempt_proactive_link(
         trigger_type=trigger_type, source=source, force=force,
     ):
@@ -155,6 +176,7 @@ async def maybe_prepare_proactive_link_recommendation(
             return None
         candidate = _CandidateUrl(url=preselected_url, source="topic_source_preselected")
     else:
+        # 只有 admin QA (force=True) 能走到这里 —— 让 admin 测独立搜路径
         search_query = _proactive_search_query(topic=topic)
         candidate = await _select_candidate_url(query=search_query)
         if not candidate:
