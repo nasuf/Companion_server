@@ -238,16 +238,47 @@ class TestStaleUrlFilter:
 
 
 class TestHotApiSnippets:
-    """结构化热榜 API 抽象 (proactive_hot_api_url env). 未配置→静默返空.
-    配了则 fetch → 解析多种 JSON 形状 → freshness 过滤 → 转 candidates.
+    """DailyHot 6 平台 fanout (proactive_hot_api_url = base URL, 未设→静默返空).
+
+    每平台一个 endpoint 并发拉, 各平台 top-N 汇总, 按 slug 映射打 platform 标签.
+    单平台失败不阻塞其它平台 (return_exceptions=False 但内部 try/catch).
     """
 
-    def _setup_env(self, monkeypatch, url="https://hot.example/today"):
+    def _setup_env(self, monkeypatch, base_url="https://hot.example"):
         from app.services.proactive import trending_context as tc
-        monkeypatch.setattr(tc.settings, "proactive_hot_api_url", url)
+        monkeypatch.setattr(tc.settings, "proactive_hot_api_url", base_url)
         monkeypatch.setattr(tc.settings, "proactive_hot_api_key", "")
         monkeypatch.setattr(tc.settings, "proactive_hot_max_age_days", 7)
         monkeypatch.setattr(tc.settings, "chat_link_search_timeout_s", 8.0)
+
+    def _install_router_client(self, monkeypatch, per_platform_responses: dict):
+        """安装一个 httpx.AsyncClient mock, 按 URL path 里的 slug 返对应响应.
+
+        per_platform_responses: {slug: dict_or_exception}
+        - dict → 作为 .json() 返回
+        - Exception 实例 → get() 会 raise 它 (模拟单平台挂)
+        - slug 不在 map 里 → 返 {"data": []}
+        """
+        from app.services.proactive import trending_context as tc
+
+        class _R:
+            def __init__(self, payload): self._p = payload
+            def raise_for_status(self): pass
+            def json(self): return self._p
+
+        class _C:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url):
+                # URL 是 "{base}/{slug}"; 取最后一段做 slug
+                slug = str(url).rstrip("/").rsplit("/", 1)[-1]
+                resp_or_exc = per_platform_responses.get(slug, {"data": []})
+                if isinstance(resp_or_exc, Exception):
+                    raise resp_or_exc
+                return _R(resp_or_exc)
+
+        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_endpoint_unset(self, monkeypatch):
@@ -257,55 +288,52 @@ class TestHotApiSnippets:
         assert text == "" and cands == ()
 
     @pytest.mark.asyncio
-    async def test_parses_items_shape(self, monkeypatch):
-        # 契约形状 A: {"items": [{...}]}
+    async def test_dailyhot_fanout_tags_platform_per_slug(self, monkeypatch):
+        """DailyHot 里各平台响应不带 platform 字段, 我们按 slug 映射打标 —
+        这样即使 URL 是 s.weibo.com/... (原本 _url_platform 兜底可能识别) 也不依赖."""
         from app.services.proactive import trending_context as tc
         self._setup_env(monkeypatch)
-
-        class _FakeResp:
-            status_code = 200
-            def raise_for_status(self): pass
-            def json(self):
-                return {"items": [
-                    {"title": "中国足球小将Brava杯", "url": "https://weibo.com/1/2",
-                     "platform": "微博"},
-                    {"title": "腰乐队新专辑", "url": "https://music.163.com/album/1"},  # 平台外
-                    {"title": "iPhone 17 首销", "url": "https://www.bilibili.com/video/BV1a",
-                     "platform": "B站"},
-                ]}
-
-        class _FakeClient:
-            def __init__(self, *a, **kw): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): return None
-            async def get(self, url): return _FakeResp()
-
-        monkeypatch.setattr(tc.httpx, "AsyncClient", _FakeClient)
+        self._install_router_client(monkeypatch, {
+            "weibo": {"data": [
+                {"title": "中国足球小将Brava杯", "url": "https://s.weibo.com/weibo?q=x"},
+            ]},
+            "bilibili": {"data": [
+                {"title": "手机拍夜景技巧", "url": "https://www.bilibili.com/video/BV1a"},
+            ]},
+            "zhihu": {"data": [{"title": "长期记忆边界", "url": "https://www.zhihu.com/q/1"}]},
+            # xhs/toutiao/douyin 走默认空
+        })
         text, cands = await tc._hot_api_snippets("")
-        # 只留支持平台的 2 条 (music.163 被平台白名单挡住)
-        assert len(cands) == 2
-        platforms = {c["platform"] for c in cands}
-        assert platforms == {"微博", "B站"}
+        assert len(cands) == 3
+        platforms = sorted(c["platform"] for c in cands)
+        assert platforms == ["B站", "微博", "知乎"]  # sort 后中文按 unicode
 
     @pytest.mark.asyncio
-    async def test_parses_bare_list_shape(self, monkeypatch):
-        # 契约形状 B: 直接列表
+    async def test_single_platform_failure_does_not_block_others(self, monkeypatch):
+        """DailyHot 6 平台并发, 单个失败/超时不阻塞其它 → 至少 1 个成功即算成功."""
         from app.services.proactive import trending_context as tc
         self._setup_env(monkeypatch)
-        class _R:
-            status_code = 200
-            def raise_for_status(self): pass
-            def json(self):
-                return [{"title": "热点", "url": "https://weibo.com/1/2"}]
-        class _C:
-            def __init__(self, *a, **kw): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): return None
-            async def get(self, url): return _R()
-        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        self._install_router_client(monkeypatch, {
+            "weibo": RuntimeError("weibo endpoint down"),   # 挂
+            "zhihu": {"data": [{"title": "知乎热榜", "url": "https://www.zhihu.com/q/1"}]},
+            "bilibili": Exception("timeout"),               # 挂
+            # 其它默认空
+        })
         text, cands = await tc._hot_api_snippets("")
         assert len(cands) == 1
-        assert "热点" in text
+        assert cands[0]["platform"] == "知乎"
+
+    @pytest.mark.asyncio
+    async def test_all_platforms_fail_returns_empty(self, monkeypatch):
+        """全部 6 个平台挂 → 返 ("", ()), tavily 顶上."""
+        from app.services.proactive import trending_context as tc
+        self._setup_env(monkeypatch)
+        self._install_router_client(monkeypatch, {
+            slug: RuntimeError("all down") for slug in
+            ("weibo", "zhihu", "bilibili", "xhs", "toutiao", "douyin")
+        })
+        text, cands = await tc._hot_api_snippets("")
+        assert text == "" and cands == ()
 
     @pytest.mark.asyncio
     async def test_freshness_filter_by_published_at(self, monkeypatch):
@@ -315,60 +343,69 @@ class TestHotApiSnippets:
         self._setup_env(monkeypatch)
         old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         fresh = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-        class _R:
-            def raise_for_status(self): pass
-            def json(self):
-                return {"items": [
-                    {"title": "老热搜", "url": "https://weibo.com/1/old",
-                     "published_at": old},
-                    {"title": "新热搜", "url": "https://weibo.com/1/new",
-                     "published_at": fresh},
-                ]}
-        class _C:
-            def __init__(self, *a, **kw): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): return None
-            async def get(self, url): return _R()
-        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        self._install_router_client(monkeypatch, {
+            "weibo": {"data": [
+                {"title": "老热搜", "url": "https://weibo.com/1/old", "published_at": old},
+                {"title": "新热搜", "url": "https://weibo.com/1/new", "published_at": fresh},
+            ]},
+        })
         text, cands = await tc._hot_api_snippets("")
         assert len(cands) == 1
         assert cands[0]["title"] == "新热搜"
 
     @pytest.mark.asyncio
     async def test_url_stale_filter_still_applies(self, monkeypatch):
-        # URL 带早年份也丢 (即使 published_at 缺失 / 或说是新的但 URL 里的年份不对)
+        # URL 里带早年份也丢
         from app.services.proactive import trending_context as tc
         self._setup_env(monkeypatch)
-        class _R:
-            def raise_for_status(self): pass
-            def json(self):
-                return {"items": [
-                    {"title": "老 SEO", "url": "https://weibo.com/1/2020/xxx"},  # 老年份
-                    {"title": "新", "url": "https://weibo.com/1/2"},
-                ]}
-        class _C:
-            def __init__(self, *a, **kw): pass
-            async def __aenter__(self): return self
-            async def __aexit__(self, *a): return None
-            async def get(self, url): return _R()
-        monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
+        self._install_router_client(monkeypatch, {
+            "weibo": {"data": [
+                {"title": "老 SEO", "url": "https://weibo.com/1/2020/xxx"},
+                {"title": "新", "url": "https://weibo.com/1/2"},
+            ]},
+        })
         text, cands = await tc._hot_api_snippets("")
         assert len(cands) == 1
         assert cands[0]["title"] == "新"
 
     @pytest.mark.asyncio
-    async def test_network_failure_returns_empty_not_raises(self, monkeypatch):
-        # 契约: 任何异常都视为空 (让 tavily 顶上), 不 raise
+    async def test_uses_mobile_url_when_url_missing(self, monkeypatch):
+        # DailyHot 部分平台只带 mobileUrl (weibo 详情页有时是), url 缺就用它
         from app.services.proactive import trending_context as tc
         self._setup_env(monkeypatch)
+        self._install_router_client(monkeypatch, {
+            "weibo": {"data": [
+                {"title": "热搜", "mobileUrl": "https://m.weibo.cn/status/1"},
+            ]},
+        })
+        text, cands = await tc._hot_api_snippets("")
+        assert len(cands) == 1
+        assert "m.weibo" in cands[0]["url"]
+
+    @pytest.mark.asyncio
+    async def test_trailing_slash_in_base_url_stripped(self, monkeypatch):
+        """admin 设 base URL 带 / 结尾也不该出 // 双斜杠."""
+        from app.services.proactive import trending_context as tc
+        self._setup_env(monkeypatch, base_url="https://hot.example/")
+        seen_urls: list[str] = []
+
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"data": []}
         class _C:
             def __init__(self, *a, **kw): pass
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return None
-            async def get(self, url): raise RuntimeError("network down")
+            async def get(self, url):
+                seen_urls.append(str(url))
+                return _R()
         monkeypatch.setattr(tc.httpx, "AsyncClient", _C)
-        text, cands = await tc._hot_api_snippets("")
-        assert text == "" and cands == ()
+
+        await tc._hot_api_snippets("")
+        # 每个 URL 都不该有 "//" (除了 https://)
+        for u in seen_urls:
+            after_protocol = u.split("://", 1)[-1]
+            assert "//" not in after_protocol, f"double slash in {u}"
 
     def test_extract_hot_items_handles_all_shapes(self):
         from app.services.proactive.trending_context import _extract_hot_items

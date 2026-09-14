@@ -12,6 +12,7 @@ from app.config import settings
 from app.services.offline.providers.search import tavily_search
 from app.services.chat_links.cards import component_card_for_link, metadata_for_link_card
 from app.services.chat_links.extraction import (
+    LinkMetadata,
     extract_first_url,
     extract_link_metadata,
     platform_for_url,
@@ -153,7 +154,11 @@ async def maybe_prepare_proactive_link_recommendation(
     ):
         return None, "gate_rejected"
 
-    # V3 消息-卡片硬耦合路径 (preselected_item): 跳过独立搜, 直接用消息引用的那条
+    # V3 preselected 路径 —— **跳过 extract_link_metadata 网络抓取**, 直接用 DailyHot
+    # 提供的 title/platform 建卡. 修根本问题: 微博/知乎需登录, extract 常返 partial →
+    # _metadata_usable_for_proactive_card 拒 → 用户截图那种"卡完全没出"就是这样. 但我
+    # 们**已经**从 curated 源 (DailyHot / V3 分类器) 拿到了 title 和 url, 不需要再去
+    # scrape 页面确认 — 那本来就是防止 LLM 幻觉 URL 的守卫, 对 curated 源不适用.
     if preselected_item is not None:
         preselected_url = str(preselected_item.get("url") or "").strip()
         if not preselected_url:
@@ -162,13 +167,56 @@ async def maybe_prepare_proactive_link_recommendation(
                 "(message stays uncoupled — better than mismatched)"
             )
             return None, "preselected_no_url"
-        candidate = _CandidateUrl(url=preselected_url, source="topic_source_preselected")
-    else:
-        # admin QA (force=True) 独立搜路径
-        search_query = _proactive_search_query(topic=topic)
-        candidate = await _select_candidate_url(query=search_query)
-        if not candidate:
-            return None, "candidate_search_empty"
+        preselected_title = str(preselected_item.get("title") or "").strip()
+        preselected_platform = str(preselected_item.get("platform") or "").strip()
+        preselected_snippet = str(
+            preselected_item.get("snippet") or preselected_item.get("desc") or ""
+        ).strip()
+        if not preselected_title:
+            return None, "preselected_no_title"
+
+        # 直接组 LinkMetadata (status="ready" 显式声明 —— 我们不 scrape, 也不假装)
+        metadata = LinkMetadata(
+            source_url=preselected_url,
+            final_url=preselected_url,
+            platform=preselected_platform or "链接",
+            title=preselected_title[:160],
+            description=preselected_snippet[:400],
+            content_text=preselected_snippet[:800],
+            original_text=preselected_title[:160],
+            summary=preselected_snippet[:400] or preselected_title[:160],
+            status="ready",
+        )
+        try:
+            link = await create_or_update_link_card(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                metadata=metadata,
+                role="assistant",
+                source_app="proactive_link_recommendation",
+                extra_metadata={
+                    "trigger_type": trigger_type,
+                    "topic": topic,
+                    "stage": stage,
+                    "candidate_source": "topic_source_preselected",
+                },
+            )
+        except Exception as exc:
+            logger.warning("[chat-links] proactive card (preselected) create failed: %s", exc)
+            return None, f"exception_{type(exc).__name__}"
+        component_card = component_card_for_link(link, recommendation=True)
+        return ProactiveLinkRecommendation(
+            link=link,
+            component_card=component_card,
+            link_card_metadata=metadata_for_link_card(link),
+        ), None
+
+    # admin QA (force=True) 独立搜路径 —— 仍走 extract_link_metadata scrape 确认
+    # (admin 在测这条路径本身, 想看 extract 表现)
+    search_query = _proactive_search_query(topic=topic)
+    candidate = await _select_candidate_url(query=search_query)
+    if not candidate:
+        return None, "candidate_search_empty"
 
     try:
         metadata = await extract_link_metadata(url=candidate.url, shared_text=None)
@@ -179,8 +227,6 @@ async def maybe_prepare_proactive_link_recommendation(
                 "platform=%s status=%s source=%s url=%s",
                 metadata.platform, status, candidate.source, candidate.url[:80],
             )
-            # 常见: 微博/知乎需登录 → status="partial" → 拒. 精确 reason 让 admin
-            # 一眼看出是内容源问题 (需换 URL) 还是别的问题.
             return None, f"metadata_unusable_{status}"
         link = await create_or_update_link_card(
             user_id=user_id,

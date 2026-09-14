@@ -121,7 +121,8 @@ def _url_platform(url: str) -> str:
     if not u:
         return ""
     # 顺序: 单一子串匹配, 优先度按域名唯一性排 (b23.tv / xhslink 是短链要单独列)
-    if "weibo.com" in u or "s.weibo.cn" in u or "m.weibo" in u:
+    # 微博加 "s.weibo" 无 .cn 后缀匹配 (DailyHot 返的热搜 URL 是 s.weibo.com/weibo?q=..)
+    if "weibo.com" in u or "s.weibo" in u or "m.weibo" in u:
         return "微博"
     if "xiaohongshu.com" in u or "xhslink.com" in u:
         return "小红书"
@@ -195,58 +196,95 @@ def _search_results_to_candidates(results: list[SearchResult]) -> tuple[dict, ..
     return tuple(out)
 
 
+# DailyHot 每个平台一个 endpoint, 我们并发拉 6 个平台的 top-N 汇总.
+# slug 是 DailyHot 的路径名, platform 是我们内部展示名 (跟 _url_platform 一致).
+# 顺序保持稳定 (V3 classifier 内部按优先级挑, 不依赖顺序; 但日志读着舒服).
+_DAILYHOT_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("weibo",    "微博"),
+    ("zhihu",    "知乎"),
+    ("bilibili", "B站"),
+    ("xhs",      "小红书"),
+    ("toutiao",  "头条"),
+    ("douyin",   "抖音"),
+)
+_DAILYHOT_PER_PLATFORM_TAKE = 5  # 每个平台拉多少 top → 6*5=30 候选池给 V3 挑
+
+
 async def _hot_api_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
-    """从 proactive_hot_api_url 拉结构化热榜, 转成 (text, candidates).
+    """从 proactive_hot_api_url (DailyHot base URL) 并发拉 6 个平台的 top-N.
 
-    ## API 契约
+    ## 上游: DailyHot 开源热榜聚合 (github.com/imsyy/DailyHot)
 
-    endpoint = settings.proactive_hot_api_url (未设则返 ("", ()))
-    可选 bearer: settings.proactive_hot_api_key
+    - 免费, MIT, 有官方托管实例 (e.g. api-hot.imsyy.top), 也可自建
+    - 每个平台一个 endpoint: GET {base_url}/weibo, /zhihu, /bilibili, /xhs, /toutiao, /douyin
+    - 响应: {"code":200, "data":[{"title","url","hot","mobileUrl","desc"?}, ...]}
 
-    请求: `GET {endpoint}` (query 不带过去 —— 热榜按热度返 top-N, V3 分类器自己
-    根据 user/AI 兴趣从池子里挑, API 不该按 query 收窄).
+    ## 使用
 
-    响应 (任一形状都认):
-      A) {"items": [{"title", "url", "platform", "hot"?, "published_at"?}, ...]}
-      B) [{...}, {...}]                    ← 直接列表
-      C) {"data": [{...}]} / {"list": [...]}  ← 常见变体, 尽量兼容
+    admin 后台 env 设 proactive_hot_api_url = "https://api-hot.imsyy.top"
+    (base URL, 不带 path, **不带斜杠结尾**). 未设则静默返空, tavily 顶上老路.
 
-    字段:
-      title (必需):      热搜条目标题
-      url (必需):        指向**具体内容**的 URL (不是聚合站首页)
-      platform (可选):   如 "微博"/"知乎"; 空/缺则从 URL 推 (_url_platform)
-      hot (可选):        热度数字, 目前不用作排序 (V3 分类器按兴趣挑, 不按热度)
-      published_at (可选): ISO 时间, 用于 freshness 过滤 (超 max_age_days 丢)
+    query 参数保留为签名兼容, 不使用 —— 热榜按热度返 top-N, V3 分类器再从池子里
+    按 user/AI 兴趣挑, 不按 query 收窄.
 
-    与 tavily 的关系: hot_api 优先; 未配置或返空则 tavily 顶上. 两者都空 →
-    trending_attached=False → 主动消息落 silence_plain (老路径).
+    ## 与 tavily 的关系
+
+    - hot_api 优先: 拿到 candidates 直接返, 不调 tavily
+    - hot_api 返空 (endpoint 未配 / 全部平台失败): 静默 fallback tavily
+    - 两者都空: trending_attached=False → 主动消息落 silence_plain
+
+    ## 失败容忍
+
+    - 任一平台 endpoint 失败/超时不影响其它平台 (asyncio.gather return_exceptions)
+    - 至少 1 个平台成功即算成功
+    - 全部失败: 返 ("", ()), fallback 到 tavily
     """
-    endpoint = getattr(settings, "proactive_hot_api_url", "").strip()
-    if not endpoint:
+    base_url = getattr(settings, "proactive_hot_api_url", "").strip().rstrip("/")
+    if not base_url:
         return "", ()
-    headers = {"accept": "application/json"}
+
+    headers = {"accept": "application/json", "user-agent": "Mozilla/5.0 CompanionBot"}
     api_key = getattr(settings, "proactive_hot_api_key", "").strip()
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     timeout = float(getattr(settings, "chat_link_search_timeout_s", 8.0))
-    try:
-        async with httpx.AsyncClient(timeout=timeout, headers=headers, trust_env=False) as client:
-            resp = await client.get(endpoint)
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:  # noqa: BLE001 — 契约松, 任何异常都视为空 (让 tavily fallback)
-        logger.warning("[proactive-trending] hot_api failed endpoint=%s: %s",
-                       endpoint[:80], exc)
-        return "", ()
 
-    raw_items = _extract_hot_items(data)
+    async def _fetch_one(slug: str, platform: str) -> list[dict]:
+        endpoint = f"{base_url}/{slug}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout, headers=headers,
+                                          trust_env=False, follow_redirects=True) as client:
+                resp = await client.get(endpoint)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:  # noqa: BLE001 - 单平台失败不阻塞其它
+            # SSL / ConnectError 类异常 str() 会返空; 用 repr() 保证有信号
+            msg = str(exc) or repr(exc)
+            logger.info("[proactive-trending] dailyhot fetch failed platform=%s: %s",
+                        platform, msg[:120])
+            return []
+        items = _extract_hot_items(data)[: _DAILYHOT_PER_PLATFORM_TAKE]
+        # 给每条标 platform (来自 slug 映射, 100% 可信, 不依赖 URL 推断)
+        for item in items:
+            if isinstance(item, dict):
+                item["__platform__"] = platform
+        return items
+
+    fetches = await asyncio.gather(
+        *[_fetch_one(slug, platform) for slug, platform in _DAILYHOT_ENDPOINTS],
+        return_exceptions=False,  # 内部已 catch, 不会真 raise
+    )
+    raw_items: list[dict] = []
+    for platform_items in fetches:
+        raw_items.extend(platform_items or [])
+
     if not raw_items:
-        logger.info("[proactive-trending] hot_api returned no items")
+        logger.info("[proactive-trending] dailyhot base=%s: all 6 platforms empty",
+                    base_url[:60])
         return "", ()
 
     max_age = int(getattr(settings, "proactive_hot_max_age_days", 7))
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=max_age) if max_age > 0 else None
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age) if max_age > 0 else None
 
     candidates: list[dict] = []
     lines: list[str] = []
@@ -254,15 +292,16 @@ async def _hot_api_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
-        url = str(item.get("url") or item.get("link") or "").strip()
+        url = str(item.get("url") or item.get("mobileUrl") or item.get("link") or "").strip()
         if not title or not url:
             continue
-        platform = str(item.get("platform") or "").strip() or _url_platform(url)
+        # platform 优先用 slug 映射来的 (可信); 兜底回 URL 推 (处理泛用 API)
+        platform = str(item.get("__platform__")
+                       or item.get("platform") or "").strip() or _url_platform(url)
         if not platform:
-            continue  # 平台白名单外的一律丢
+            continue
         if _url_looks_stale(url, max_age):
             continue
-        # published_at 明确超期的丢 (API 明说的日期更权威, 覆盖 URL 启发)
         if cutoff is not None:
             pub = _parse_iso(item.get("published_at"))
             if pub is not None and pub < cutoff:
@@ -277,14 +316,15 @@ async def _hot_api_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
 
     if not candidates:
         logger.info(
-            "[proactive-trending] hot_api items all filtered (stale/off-platform); "
-            "hot_api yielded 0 usable candidates",
+            "[proactive-trending] dailyhot yielded 0 usable candidates "
+            "(all filtered by freshness/quality)",
         )
         return "", ()
 
     logger.info(
-        "[proactive-trending] hot_api yielded %d candidates (from %d raw items)",
+        "[proactive-trending] dailyhot yielded %d candidates (from %d raw items across %d platforms)",
         len(candidates), len(raw_items),
+        len([f for f in fetches if f]),
     )
     return "\n".join(lines), tuple(candidates)
 

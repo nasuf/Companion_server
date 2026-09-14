@@ -1217,3 +1217,74 @@ async def test_no_preselected_no_force_returns_none(monkeypatch):
         topic="x", stage="warming", message="msg",
     )
     assert result2 is None
+
+
+async def test_preselected_item_skips_extract_link_metadata(monkeypatch):
+    """2026-09-14 preselected 路径**不再**调 extract_link_metadata → 修微博/知乎登录墙.
+
+    根本问题: 微博/知乎 URL 需登录 → extract 返 status='partial' → 老代码判
+    metadata_unusable_partial → 卡片被静默 drop. 但 preselected_item 已经带了 title
+    (DailyHot curated 源), 我们不需要 scrape 页面二次确认 —— 直接用它建 card.
+    """
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+
+    # 关键守卫: extract_link_metadata **不能被调用** (直接用 preselected 数据)
+    async def fail_extract(**kwargs):
+        raise AssertionError("preselected 时不该调 extract_link_metadata")
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fail_extract)
+
+    captured = {}
+    async def fake_create_or_update_link_card(**kwargs):
+        captured.update(kwargs)
+        return ChatLinkCard(
+            id="link-preselected-skip-extract",
+            user_id=kwargs["user_id"], conversation_id=kwargs["conversation_id"],
+            message_id=None, role=kwargs["role"], source_app=kwargs["source_app"],
+            source_url=kwargs["metadata"].source_url, final_url=kwargs["metadata"].final_url,
+            platform=kwargs["metadata"].platform, title=kwargs["metadata"].title,
+            description=kwargs["metadata"].description, author=None, image_url=None,
+            content_text=kwargs["metadata"].content_text,
+            original_text=kwargs["metadata"].original_text,
+            summary=kwargs["metadata"].summary,
+            status="ready", error=None, metadata=kwargs["extra_metadata"],
+        )
+    monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create_or_update_link_card)
+
+    # DailyHot 返的 weibo 热搜 URL (search page, 之前 extract 会失败)
+    result, skip_reason = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="社交谈资", stage="warming",
+        message="你刷到赵雷鸟巢演唱会官宣了吗",
+        preselected_item={
+            "title": "赵雷鸟巢演唱会官宣",
+            "platform": "微博",
+            "url": "https://s.weibo.com/weibo?q=%23赵雷鸟巢%23",
+            "snippet": "民谣歌手赵雷 2027 年鸟巢演唱会定档",
+        },
+    )
+    assert skip_reason is None
+    assert result is not None
+    # 卡片就是 preselected 的那条 (URL / title / platform 都是我们传的)
+    assert captured["metadata"].source_url == "https://s.weibo.com/weibo?q=%23赵雷鸟巢%23"
+    assert captured["metadata"].title == "赵雷鸟巢演唱会官宣"
+    assert captured["metadata"].platform == "微博"
+    # snippet 也进 description
+    assert "民谣歌手赵雷" in captured["metadata"].description
+
+
+async def test_preselected_item_without_title_returns_none(monkeypatch):
+    """preselected 有 URL 没 title → 建不了卡, 返 preselected_no_title, 不出卡."""
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)  # 概率 gate 必过
+    result, skip_reason = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="x", stage="warming", message="msg",
+        preselected_item={"url": "https://weibo.com/1/2", "title": ""},
+    )
+    assert result is None
+    assert skip_reason == "preselected_no_title"
