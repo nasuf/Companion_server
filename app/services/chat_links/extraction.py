@@ -281,6 +281,11 @@ def app_url_for_link(*, platform: str, source_url: str, final_url: str) -> str |
         status_id = _weibo_status_id(raw_url) or _weibo_status_id(source_url)
         if status_id:
             return f"sinaweibo://detail?mblogid={status_id}"
+        # DailyHot 微博 endpoint 返 s.weibo.com/weibo?q=<话题> 搜索页 URL, 提不出
+        # status_id. 至少映射到微博 app 内搜索页, 比 fallback 到 Safari 好.
+        search_q = _weibo_search_query(raw_url) or _weibo_search_query(source_url)
+        if search_q:
+            return f"sinaweibo://searchall?q={search_q}"
     if platform == "抖音":
         video_id = _first_regex_group(raw_url, r"/video/(\d+)")
         if video_id:
@@ -482,6 +487,28 @@ def _weibo_status_id(raw_url: str) -> str | None:
             return raw
     matches = re.findall(r"\b\d{10,}\b", raw_url)
     return matches[-1] if matches else None
+
+
+def _weibo_search_query(raw_url: str) -> str | None:
+    """从 s.weibo.com/weibo?q=<话题> 类搜索页 URL 里抽 q 参数, quote 后可拼 deeplink.
+
+    DailyHot 微博 endpoint 返的就是话题级搜索 URL (不是具体帖子), 提不出 status_id
+    但能提出话题名 → 映射到 sinaweibo://searchall?q=... 至少跳去 app 内搜索页.
+    """
+    try:
+        parsed = urlparse(raw_url or "")
+    except ValueError:
+        return None
+    netloc = (parsed.netloc or "").lower()
+    if "weibo" not in netloc:
+        return None
+    values = parse_qs(parsed.query or "").get("q") or parse_qs(parsed.query or "").get("keyword")
+    if not values:
+        return None
+    q = (values[0] or "").strip()
+    if not q:
+        return None
+    return quote(q, safe="")
 
 
 async def _fetch_weibo_status_metadata(

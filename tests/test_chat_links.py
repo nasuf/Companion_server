@@ -300,6 +300,26 @@ def test_app_url_for_bilibili_prefers_native_video_scheme():
     )
 
 
+def test_app_url_for_weibo_search_page_falls_back_to_searchall_deeplink():
+    """DailyHot 微博 endpoint 返 s.weibo.com/weibo?q=<话题> 搜索页 URL.
+
+    没 status_id 但有 q → 至少跳去微博 app 内搜索页, 不该 fallback Safari.
+    """
+    url = "https://s.weibo.com/weibo?q=%23%E8%B5%B5%E9%9B%B7%E5%BD%93%E7%88%B8%E7%88%B8%23"
+    result = app_url_for_link(platform="微博", source_url=url, final_url=url)
+    assert result is not None
+    assert result.startswith("sinaweibo://searchall?q=")
+    # q 参数保留 URL-encoded (客户端能直接拼)
+    assert "%23%E8%B5%B5%E9%9B%B7%E5%BD%93%E7%88%B8%E7%88%B8%23" in result
+
+
+def test_app_url_for_weibo_specific_post_still_uses_detail_scheme():
+    """回归守卫: 具体帖子 URL 仍走 detail, 不能被 searchall 抢走."""
+    url = "https://weibo.com/1234567890/5001234567890123"
+    result = app_url_for_link(platform="微博", source_url=url, final_url=url)
+    assert result == "sinaweibo://detail?mblogid=5001234567890123"
+
+
 def test_clean_link_author_drops_title_duplicate():
     assert (
         _clean_link_author(
@@ -1288,3 +1308,102 @@ async def test_preselected_item_without_title_returns_none(monkeypatch):
     )
     assert result is None
     assert skip_reason == "preselected_no_title"
+
+
+async def test_preselected_generic_snippet_falls_back_to_title(monkeypatch):
+    """DailyHot 每条 desc 都是"微博搜索"这种类目通用标签, 不能塞进 summary.
+
+    根本 bug: 卡片 body 优先级是 summary → description → title, 老实现把 snippet
+    直接塞进 summary/description → 卡片显示 "微博搜索" 而不是话题 title
+    "赵雷当爸爸". 用户看不到话题名, 判定"卡片跟消息无关". 修复: 剥掉通用标签,
+    summary 用 title 顶上.
+    """
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+
+    async def fail_extract(**kwargs):
+        raise AssertionError("preselected 时不该调 extract_link_metadata")
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fail_extract)
+
+    captured = {}
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        m = kwargs["metadata"]
+        return ChatLinkCard(
+            id="lk", user_id=kwargs["user_id"], conversation_id=kwargs["conversation_id"],
+            message_id=None, role=kwargs["role"], source_app=kwargs["source_app"],
+            source_url=m.source_url, final_url=m.final_url, platform=m.platform,
+            title=m.title, description=m.description, author=None, image_url=None,
+            content_text=m.content_text, original_text=m.original_text,
+            summary=m.summary, status="ready", error=None,
+            metadata=kwargs["extra_metadata"],
+        )
+    monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create)
+
+    result, skip_reason = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="社交谈资", stage="warming",
+        message="最近好像大家都在聊赵雷当爸爸了",
+        preselected_item={
+            "title": "赵雷当爸爸",
+            "platform": "微博",
+            "url": "https://s.weibo.com/weibo?q=%23赵雷当爸爸%23",
+            "snippet": "微博搜索",  # ← DailyHot 每条 desc 都长这样
+        },
+    )
+    assert skip_reason is None
+    assert result is not None
+    m = captured["metadata"]
+    # 关键: summary 必须是话题名, 不能是 "微博搜索"
+    assert m.summary == "赵雷当爸爸"
+    # description/content_text 也不能残留通用标签 (否则未来 body 排序调整会再暴露)
+    assert m.description == ""
+    assert m.content_text == ""
+    # title 不受影响
+    assert m.title == "赵雷当爸爸"
+
+
+async def test_preselected_meaningful_snippet_preserved(monkeypatch):
+    """snippet 不是通用标签时 (真描述), 保留原样进 description/summary."""
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_enabled", True)
+    monkeypatch.setattr(rec_mod.settings, "proactive_link_recommendation_probability", 1.0)
+    monkeypatch.setattr(rec_mod.random, "random", lambda: 0.0)
+
+    async def fail_extract(**kwargs):
+        raise AssertionError("preselected 时不该调 extract_link_metadata")
+    monkeypatch.setattr(rec_mod, "extract_link_metadata", fail_extract)
+
+    captured = {}
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        m = kwargs["metadata"]
+        return ChatLinkCard(
+            id="lk", user_id=kwargs["user_id"], conversation_id=kwargs["conversation_id"],
+            message_id=None, role=kwargs["role"], source_app=kwargs["source_app"],
+            source_url=m.source_url, final_url=m.final_url, platform=m.platform,
+            title=m.title, description=m.description, author=None, image_url=None,
+            content_text=m.content_text, original_text=m.original_text,
+            summary=m.summary, status="ready", error=None,
+            metadata=kwargs["extra_metadata"],
+        )
+    monkeypatch.setattr(rec_mod, "create_or_update_link_card", fake_create)
+
+    result, _ = await maybe_prepare_proactive_link_recommendation(
+        user_id="u1", conversation_id="c1",
+        trigger_type="silence_wakeup", source="greeting",
+        topic="音乐", stage="warming",
+        message="刷到赵雷鸟巢演唱会官宣了吗",
+        preselected_item={
+            "title": "赵雷鸟巢演唱会官宣",
+            "platform": "微博",
+            "url": "https://s.weibo.com/weibo?q=%23赵雷鸟巢%23",
+            "snippet": "民谣歌手赵雷 2027 年鸟巢演唱会定档 12 月",
+        },
+    )
+    assert result is not None
+    m = captured["metadata"]
+    # 真描述保留
+    assert "民谣歌手赵雷" in m.description
+    assert m.summary.startswith("民谣歌手赵雷")

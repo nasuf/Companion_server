@@ -34,6 +34,31 @@ _SEARCH_DOMAINS = (
     "b23.tv",
 )
 
+# DailyHot 每条 `desc` 字段普遍是"这是哪个榜单"的通用类目标签, 不是这条热点的描述.
+# e.g. 微博 endpoint 每条都是 "微博搜索", 知乎每条都是 "知乎热榜". 塞进 summary/
+# description 会被 `_body_for_recommendation` 优先展示, 把真正的 title (话题名)
+# 挤到看不见 —— 用户截图那种"卡片跟消息没关系"就是这样. 全部按 noise 剥掉.
+_GENERIC_HOT_LABELS = frozenset({
+    "微博搜索", "微博热搜", "微博热榜", "微博话题",
+    "知乎热榜", "知乎热搜", "知乎搜索",
+    "抖音热点", "抖音热搜", "抖音热榜",
+    "头条热榜", "今日头条热榜", "头条热搜",
+    "小红书热点", "小红书热搜",
+    "B站热榜", "bilibili热榜", "b站热榜",
+    "热搜", "热榜", "热点",
+})
+
+
+def _clean_hot_snippet(snippet: str, *, title: str) -> str:
+    s = (snippet or "").strip()
+    if not s:
+        return ""
+    if s.lower() in {label.lower() for label in _GENERIC_HOT_LABELS}:
+        return ""
+    if s == (title or "").strip():
+        return ""
+    return s
+
 
 @dataclass(frozen=True)
 class ProactiveLinkRecommendation:
@@ -175,16 +200,21 @@ async def maybe_prepare_proactive_link_recommendation(
         if not preselected_title:
             return None, "preselected_no_title"
 
-        # 直接组 LinkMetadata (status="ready" 显式声明 —— 我们不 scrape, 也不假装)
+        # 剥离 DailyHot 通用榜单标签 (见 _GENERIC_HOT_LABELS docstring). 剥完为空时,
+        # summary 用 title 顶上 —— 卡片 body 排序是 summary → description → title,
+        # 有 summary 时 title 永远看不到, 所以 summary 必须是"我们真正想让用户看到的".
+        cleaned_snippet = _clean_hot_snippet(preselected_snippet, title=preselected_title)
+        primary_body = cleaned_snippet or preselected_title  # 卡片 body 的实际内容
+
         metadata = LinkMetadata(
             source_url=preselected_url,
             final_url=preselected_url,
             platform=preselected_platform or "链接",
             title=preselected_title[:160],
-            description=preselected_snippet[:400],
-            content_text=preselected_snippet[:800],
+            description=cleaned_snippet[:400],
+            content_text=cleaned_snippet[:800],
             original_text=preselected_title[:160],
-            summary=preselected_snippet[:400] or preselected_title[:160],
+            summary=primary_body[:400],
             status="ready",
         )
         try:
