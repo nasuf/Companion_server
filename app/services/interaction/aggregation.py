@@ -21,6 +21,7 @@ from typing import Any
 
 from app.observability.events import EVT_AGG_FLUSHED, EVT_AGG_PUSHED, EVT_AGG_SCAN
 from app.redis_client import get_redis
+from app.services.emoji import is_emoji_only_message
 from app.services.interaction.reply_context import merge_reply_contexts
 from app.services.interaction.turn_coalescing import coalesce_turn_messages
 
@@ -82,9 +83,16 @@ def _parse_scope_token(token: str) -> tuple[str, str] | None:
 
 
 def is_short_message(text: str) -> bool:
-    """PRD §3.4: len≤2 且不在常用应答词集合。"""
+    """PRD §3.4: len≤2 且不在常用应答词集合。
+
+    Emoji-only messages are complete reactions, not unfinished CJK fragments.
+    They skip the 5s fragment window and use the same 1.2s turn quiet window
+    as a normal sentence.
+    """
     text = text.strip()
     if text in COMMON_RESPONSES:
+        return False
+    if is_emoji_only_message(text):
         return False
     return len(text) <= 2
 

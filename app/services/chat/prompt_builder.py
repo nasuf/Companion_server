@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
 
+from app.services.chat.message_utils import _parse_message_created_at
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import (
     PromptDisabledError,
@@ -1237,17 +1238,21 @@ def build_chat_messages(
         # cutoff = 最新那条 (通常是当前 user 消息) 的 createdAt 往回 threshold.
         # 用 max(createdAt) 而不是 datetime.now() —— eval 有固定时间轴, 生产也
         # 保持相对时间语义 (从 turn 起算, 不从 wall clock 起算), 两边行为一致.
-        _ts_iter = [m["createdAt"] for m in coalesced
-                    if m.get("createdAt") is not None]
-        latest_ts = max(_ts_iter) if _ts_iter else None
+        #
+        # Production history always stores createdAt as ISO strings (orchestrator
+        # calls .isoformat()). Subtracting timedelta from a str TypeError'd and
+        # killed the reply, which showed up first on aggregated short turns
+        # (single emoji) after a ≥3h gap. Parse before comparing.
+        timed = [
+            (m, _parse_message_created_at(m.get("createdAt")))
+            for m in coalesced
+        ]
+        latest_ts = max((ts for _, ts in timed if ts is not None), default=None)
         if latest_ts is not None:
-            from datetime import timedelta
             cutoff = latest_ts - timedelta(seconds=drop_older_than_seconds)
             coalesced = [
-                m for m in coalesced
-                if m.get("createdAt") is None
-                or m.get("createdAt") >= cutoff
-                or m.get("createdAt") == latest_ts  # 兜底: 当前那一条永不砍
+                m for m, ts in timed
+                if ts is None or ts >= cutoff or ts == latest_ts
             ]
 
     selected: list[dict] = []

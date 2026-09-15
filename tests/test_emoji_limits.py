@@ -97,6 +97,17 @@ class TestLimitEmojis:
         assert not contains_emoji("哈哈")
         assert not contains_emoji("")
 
+    def test_emoji_only_message(self):
+        from app.services.emoji import is_emoji_only_message
+        assert is_emoji_only_message("😂")
+        assert is_emoji_only_message("😂😅")
+        assert is_emoji_only_message("❤️")
+        assert is_emoji_only_message("☀️")
+        assert is_emoji_only_message("  👍  ")
+        assert not is_emoji_only_message("吗")
+        assert not is_emoji_only_message("好呀😂")
+        assert not is_emoji_only_message("")
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 出口收口: emit_replies

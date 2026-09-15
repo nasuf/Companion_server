@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.services.interaction.aggregation import push_pending, push_turn_pending
+from app.services.interaction.aggregation import is_short_message, push_pending, push_turn_pending
 from app.services import runtime_config
 from app.services.interaction.user_turn_aggregation import plan_user_message_aggregation
 
@@ -235,3 +235,35 @@ async def test_plan_record_request_bypasses_turn_window(fake_aggregation_redis):
         )
 
     assert plan.route == "immediate"
+
+
+def test_cjk_fragment_is_short_message():
+    assert is_short_message("吗") is True
+    assert is_short_message("我") is True
+    assert is_short_message("好") is False  # COMMON_RESPONSES
+
+
+def test_emoji_only_is_not_a_fragment():
+    assert is_short_message("😂") is False
+    assert is_short_message("😂😅") is False
+    assert is_short_message("❤️") is False
+    assert is_short_message("☀️") is False
+
+
+@pytest.mark.asyncio
+async def test_plan_single_emoji_uses_turn_window_not_fragment(fake_aggregation_redis):
+    """A lone emoji is a complete reaction. It must not sit in the 5s fragment
+    window (that is how 😂 vanished behind aggregation_scan + the drop-older
+    TypeError). Same quiet window as a normal sentence is correct.
+    """
+    redis = fake_aggregation_redis
+    with patch("app.services.interaction.aggregation.get_redis", return_value=redis):
+        plan = await plan_user_message_aggregation(
+            agent_id="agent-A",
+            user_id="u1",
+            conversation_id="conv-A",
+            text="😂",
+            reply_context={"delay_seconds": 0},
+        )
+
+    assert plan.route == "turn_window"

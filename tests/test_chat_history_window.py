@@ -188,3 +188,42 @@ class TestDropPreGapHistory:
         assert len(got) == 3  # system + 2 msg
         joined = "".join(m["content"] for m in got)
         assert "无时间戳的老消息" in joined and "也无时间戳的回复" in joined
+
+    def test_iso_string_created_at_matches_production_history(self):
+        """Production messages_dicts use createdAt.isoformat() strings.
+
+        The original drop path did `latest_ts - timedelta` on that str and
+        TypeError'd, so aggregated short turns (a single emoji after a 3h gap)
+        never got a reply.
+        """
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 15, 13, 54, tzinfo=timezone.utc)
+        rows = [
+            self._dtmsg(
+                "user", "国庆想去成都",
+                (now - timedelta(days=2)).isoformat(),
+            ),
+            self._dtmsg(
+                "assistant", "成都好呀",
+                (now - timedelta(days=2, minutes=-3)).isoformat(),
+            ),
+            self._dtmsg("user", "😂", now.isoformat()),
+        ]
+        got = build_chat_messages("sys", rows, drop_older_than_seconds=3 * 3600)
+        assert len(got) == 2
+        assert "😂" in got[1]["content"]
+        assert "成都" not in "".join(m["content"] for m in got)
+
+    def test_iso_z_suffix_and_datetime_mix(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 9, 15, 13, 54, tzinfo=timezone.utc)
+        rows = [
+            self._dtmsg("user", "很久以前", (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")),
+            self._dtmsg("assistant", "记得", now - timedelta(minutes=10)),
+            self._dtmsg("user", "😊", now.isoformat()),
+        ]
+        got = build_chat_messages("sys", rows, drop_older_than_seconds=3 * 3600)
+        joined = "".join(m["content"] for m in got)
+        assert "😊" in joined
+        assert "记得" in joined
+        assert "很久以前" not in joined

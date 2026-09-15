@@ -90,6 +90,18 @@ def contains_emoji(text: str) -> bool:
     return bool(_EMOJI_UNIT_RE.search(text or ""))
 
 
+def is_emoji_only_message(text: str) -> bool:
+    """True when the whole message is emoji (plus optional whitespace).
+
+    A lone 😂 is a complete reaction, not an unfinished 1-2 character fragment.
+    """
+    stripped = (text or "").strip()
+    if not stripped or not contains_emoji(stripped):
+        return False
+    leftover = _EMOJI_UNIT_RE.sub("", stripped)
+    return not leftover.strip()
+
+
 def limit_emojis(text: str, max_keep: int = 1) -> str:
     """硬保证: 一条消息最多 max_keep 个 emoji, 超出的按出现顺序剥除.
 
