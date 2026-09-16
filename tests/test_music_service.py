@@ -990,12 +990,48 @@ async def test_reconcile_legacy_active_user_without_agent_status_joins_when_idle
 
 
 @pytest.mark.asyncio
-async def test_music_status_text_uses_join_and_exit_labels(monkeypatch):
+async def test_music_status_projects_digest_and_keeps_ui_ws_labels(monkeypatch):
     persisted = AsyncMock(return_value="status-msg")
     send_event = AsyncMock()
+    append_burst = AsyncMock(side_effect=[("status-msg", True, False), ("status-msg", False, True)])
     monkeypatch.setattr(music_status, "_persist_assistant_message", persisted)
     monkeypatch.setattr(music_status.manager, "send_event", send_event)
+    monkeypatch.setattr(
+        music_status,
+        "_append_music_activity_burst_segment",
+        append_burst,
+    )
+    monkeypatch.setattr(
+        music_status,
+        "_agent_join_status_exists",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        music_status.db,
+        "query_raw",
+        AsyncMock(
+            return_value=[
+                {
+                    "content": "一起听了《Quiet Realm》",
+                    "metadata": {
+                        "kind": "music_activity_burst",
+                        "music_track_title": "Quiet Realm",
+                        "segments": [
+                            {"action": "joined", "actor": "agent"},
+                            {"action": "listened", "actor": "user"},
+                        ],
+                    },
+                }
+            ]
+        ),
+    )
 
+    await music_status.persist_and_emit_music_status(
+        conversation_id="conv-1",
+        status="started",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        actor="user",
+    )
     await music_status.persist_and_emit_music_status(
         conversation_id="conv-1",
         status="started",
@@ -1010,10 +1046,47 @@ async def test_music_status_text_uses_join_and_exit_labels(monkeypatch):
         actor="user",
     )
 
-    assert persisted.await_args_list[0].args[1] == "小芜已加入共听"
-    assert persisted.await_args_list[1].args[1] == "你已退出共听"
-    assert send_event.await_args_list[0].args[2]["text"] == "小芜已加入共听"
-    assert send_event.await_args_list[1].args[2]["text"] == "你已退出共听"
+    assert append_burst.await_count == 2
+    status_events = [
+        call for call in send_event.await_args_list if call.args[1] == "music_status"
+    ]
+    assert status_events[0].args[2]["text"] == "你已加入共听"
+    assert status_events[1].args[2]["text"] == "小芜已加入共听"
+    assert status_events[2].args[2]["text"] == "你已退出共听"
+    burst_events = [
+        call for call in send_event.await_args_list if call.args[1] == "music_activity_burst"
+    ]
+    assert len(burst_events) == 2
+    assert burst_events[-1].args[2]["text"] == "一起听了《Quiet Realm》"
+
+
+@pytest.mark.asyncio
+async def test_music_status_skips_chat_projection_without_agent_join(monkeypatch):
+    persisted = AsyncMock(return_value="status-msg")
+    send_event = AsyncMock()
+    monkeypatch.setattr(music_status, "_persist_assistant_message", persisted)
+    monkeypatch.setattr(music_status.manager, "send_event", send_event)
+    monkeypatch.setattr(
+        music_status,
+        "_agent_join_status_exists",
+        AsyncMock(return_value=False),
+    )
+
+    await music_status.persist_and_emit_music_status(
+        conversation_id="conv-1",
+        status="started",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        actor="user",
+    )
+    await music_status.persist_and_emit_music_status(
+        conversation_id="conv-1",
+        status="ended",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+        actor="user",
+    )
+
+    persisted.assert_not_awaited()
+    assert all(call.args[1] == "music_status" for call in send_event.await_args_list)
 
 
 @pytest.mark.asyncio

@@ -590,8 +590,23 @@ async def get_active_co_listening(
                   FROM messages msg
                   WHERE msg.conversation_id = music_co_listening_sessions.conversation_id
                     AND msg.role = 'assistant'
-                    AND msg.metadata ->> 'music_status' = 'started'
-                    AND msg.metadata ->> 'music_status_actor' = 'agent'
+                    AND (
+                        (
+                            msg.metadata ->> 'music_status' = 'started'
+                            AND msg.metadata ->> 'music_status_actor' = 'agent'
+                        )
+                        OR (
+                            msg.metadata ->> 'kind' = 'music_activity_burst'
+                            AND EXISTS (
+                                SELECT 1
+                                FROM jsonb_array_elements(
+                                    COALESCE(msg.metadata -> 'segments', '[]'::jsonb)
+                                ) seg
+                                WHERE seg ->> 'action' = 'joined'
+                                  AND seg ->> 'actor' = 'agent'
+                            )
+                        )
+                    )
               )
           )
         LIMIT 1

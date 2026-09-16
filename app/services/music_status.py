@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from weakref import WeakValueDictionary
 
 from prisma import Json
 
@@ -31,6 +33,24 @@ _TRACK_CHANGE_PROMPT_KEYS = {
     "music.track_changed_manual",
     "music.track_changed_auto",
 }
+_MUSIC_ACTIVITY_BURST_KIND = "music_activity_burst"
+_MUSIC_ACTIVITY_BURST_WINDOW = timedelta(minutes=5)
+_MUSIC_BURST_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+_AGENT_JOIN_STATUS_SQL = """
+    (
+        metadata ->> 'music_status' = 'started'
+        AND metadata ->> 'music_status_actor' = 'agent'
+    )
+    OR (
+        metadata ->> 'kind' = $2
+        AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(metadata -> 'segments', '[]'::jsonb)) seg
+            WHERE seg ->> 'action' = 'joined'
+              AND seg ->> 'actor' = 'agent'
+        )
+    )
+"""
 _PAUSE_FOLLOWUP_SKIP_KEYWORDS = (
     "睡觉",
     "睡了",
@@ -54,6 +74,253 @@ _PAUSE_FOLLOWUP_SKIP_KEYWORDS = (
 )
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _loads(value: Any, fallback: Any = None) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return fallback
+
+
+def _parse_segment_time(value: Any) -> datetime | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _burst_track_titles(segments: list[dict[str, Any]], fallback: str) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        if str(segment.get("action") or "") not in {"joined", "listened"}:
+            continue
+        title = str(segment.get("track_title") or fallback or "").strip() or "共听"
+        if title in seen:
+            continue
+        seen.add(title)
+        titles.append(title)
+    return titles or ([fallback or "共听"] if fallback else [])
+
+
+def _format_music_burst_content(
+    track_title: str,
+    segments: list[dict[str, Any]],
+) -> str:
+    listened = [seg for seg in segments if str(seg.get("action") or "") == "listened"]
+    titles = _burst_track_titles(listened or segments, track_title)
+    if not titles:
+        return "刚才打开了共听"
+    if len(titles) == 1:
+        return f"一起听了《{titles[0]}》"
+    return f"一起听了 {len(titles)} 首歌"
+
+
+async def _find_open_music_burst_message(
+    conversation_id: str,
+) -> dict[str, Any] | None:
+    rows = await db.query_raw(
+        """
+        SELECT id, metadata, content, created_at
+        FROM messages
+        WHERE conversation_id = $1
+          AND metadata->>'kind' = $2
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        conversation_id,
+        _MUSIC_ACTIVITY_BURST_KIND,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    metadata = _loads(row.get("metadata"), {})
+    segments = list(metadata.get("segments") or [])
+    if not segments:
+        return None
+    last_at = _parse_segment_time(segments[-1].get("at"))
+    if last_at is None:
+        return row
+    if _now() - last_at > _MUSIC_ACTIVITY_BURST_WINDOW:
+        return None
+    return row
+
+
+async def _update_music_burst_message(
+    message_id: str,
+    content: str,
+    metadata: dict[str, Any],
+) -> None:
+    await db.execute_raw(
+        """
+        UPDATE messages
+        SET content = $2,
+            metadata = $3::jsonb
+        WHERE id = $1
+        """,
+        message_id,
+        content,
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
+async def _emit_music_activity_burst_event(
+    conversation_id: str,
+    *,
+    message_id: str,
+    text: str,
+    track_title: str,
+    track_id: str,
+    actor_name: str,
+    segments: list[dict[str, Any]],
+    updated: bool,
+) -> None:
+    try:
+        await manager.send_event(
+            conversation_id,
+            "music_activity_burst",
+            {
+                "message_id": message_id,
+                "text": text,
+                "track_title": track_title,
+                "track_id": track_id,
+                "actor_name": actor_name,
+                "segments": segments,
+                "updated": updated,
+            },
+        )
+    except Exception as exc:
+        logger.debug("failed to emit music activity burst websocket event: %r", exc)
+
+
+async def _append_music_activity_burst_segment(
+    *,
+    conversation_id: str,
+    track_id: str,
+    track_title: str,
+    actor: str,
+    actor_name: str,
+    action: str,
+    session_id: str,
+) -> tuple[str, bool, bool]:
+    """Append one co-listening segment to the open burst or start a new one."""
+
+    segment: dict[str, Any] = {
+        "at": _iso(_now()),
+        "action": action,
+        "actor": actor,
+        "session_id": session_id,
+        "track_id": track_id,
+        "track_title": track_title,
+    }
+    if actor_name:
+        segment["actor_name"] = actor_name
+
+    lock = _MUSIC_BURST_LOCKS.setdefault(conversation_id, asyncio.Lock())
+    async with lock:
+        open_burst = await _find_open_music_burst_message(conversation_id)
+        if open_burst:
+            metadata = _loads(open_burst.get("metadata"), {})
+            segments = list(metadata.get("segments") or [])
+            if (
+                segments
+                and segments[-1].get("session_id") == session_id
+                and segments[-1].get("action") == action
+                and segments[-1].get("actor") == actor
+            ):
+                return str(open_burst["id"]), False, False
+            segments.append(segment)
+            metadata["kind"] = _MUSIC_ACTIVITY_BURST_KIND
+            metadata["segments"] = segments
+            metadata["music_track_id"] = track_id or metadata.get("music_track_id") or ""
+            metadata["music_track_title"] = track_title or metadata.get("music_track_title") or ""
+            metadata["music_status_actor_name"] = actor_name or metadata.get(
+                "music_status_actor_name", ""
+            )
+            if action == "joined" and actor == "agent":
+                metadata["music_status"] = "started"
+                metadata["music_status_actor"] = "agent"
+            listened = [seg for seg in segments if str(seg.get("action") or "") == "listened"]
+            titles = _burst_track_titles(listened, track_title)
+            if len(titles) == 1:
+                metadata["music_track_title"] = titles[0]
+            elif len(titles) > 1:
+                metadata["music_track_title"] = "、".join(titles)
+            content = _format_music_burst_content(track_title, segments)
+            message_id = str(open_burst["id"])
+            await _update_music_burst_message(message_id, content, metadata)
+            return message_id, False, True
+
+        metadata = {
+            "kind": _MUSIC_ACTIVITY_BURST_KIND,
+            "music_track_id": track_id,
+            "music_track_title": track_title,
+            "music_status_actor_name": actor_name,
+            "segments": [segment],
+        }
+        if action == "joined" and actor == "agent":
+            metadata["music_status"] = "started"
+            metadata["music_status_actor"] = "agent"
+        content = _format_music_burst_content(track_title, [segment])
+        message_id = await _persist_assistant_message(
+            conversation_id,
+            content,
+            metadata=metadata,
+        )
+        return message_id, True, False
+
+
+def _should_project_music_status_to_chat(
+    *,
+    status: str,
+    actor: str | None,
+    reason: str | None,
+    had_agent_join: bool,
+) -> tuple[bool, str | None]:
+    normalized = "ended" if status == "ended" else "started"
+    actor_key = (actor or "").strip()
+    if normalized == "started":
+        if actor_key == "user":
+            return False, None
+        if actor_key == "agent":
+            return True, "joined"
+        return False, None
+    if normalized == "ended":
+        if not had_agent_join:
+            return False, None
+        if reason in {
+            "user_stopped_before_agent_join",
+            "connection_lost_before_agent_join",
+            "user_pause_timeout_before_agent_join",
+        }:
+            return False, None
+        return True, "listened"
+    return False, None
+
+
 async def persist_and_emit_music_status(
     *,
     conversation_id: str,
@@ -63,30 +330,58 @@ async def persist_and_emit_music_status(
     actor: str | None = None,
     actor_name: str | None = None,
 ) -> str:
-    """Persist a co-listening timeline status and push it to active clients."""
+    """Push co-listening UI state and project meaningful sessions to chat digest."""
     normalized = "ended" if status == "ended" else "started"
     actor_label = _actor_label(actor=actor, actor_name=actor_name)
-    text = f"{actor_label}{'已退出共听' if normalized == 'ended' else '已加入共听'}"
+    legacy_text = f"{actor_label}{'已退出共听' if normalized == 'ended' else '已加入共听'}"
     track_title = (track.title if track else "") or ""
     track_id = (track.id if track else "") or ""
-    message_id = await _persist_assistant_message(
-        conversation_id,
-        text,
-        metadata={
-            "music_status": normalized,
-            "music_track_title": track_title,
-            "music_track_id": track_id,
-            "music_co_listening": normalized == "started",
-            "music_status_actor": actor or "",
-            "music_status_actor_name": actor_name or "",
-            **({"music_ended_reason": reason} if reason else {}),
-        },
+    had_agent_join = normalized == "started" and actor == "agent"
+    if normalized == "ended":
+        had_agent_join = await _agent_join_status_exists(conversation_id=conversation_id)
+    should_project, burst_action = _should_project_music_status_to_chat(
+        status=normalized,
+        actor=actor,
+        reason=reason,
+        had_agent_join=had_agent_join,
     )
+
+    message_id = ""
+    if should_project and burst_action:
+        message_id, inserted, updated_burst = await _append_music_activity_burst_segment(
+            conversation_id=conversation_id,
+            track_id=track_id,
+            track_title=track_title,
+            actor=actor or "",
+            actor_name=actor_name or "",
+            action=burst_action,
+            session_id=conversation_id,
+        )
+        if message_id and (inserted or updated_burst):
+            rows = await db.query_raw(
+                "SELECT content, metadata FROM messages WHERE id = $1 LIMIT 1",
+                message_id,
+            )
+            if rows:
+                metadata = _loads(rows[0].get("metadata"), {})
+                segments = list(metadata.get("segments") or [])
+                text = str(rows[0].get("content") or "")
+                await _emit_music_activity_burst_event(
+                    conversation_id,
+                    message_id=message_id,
+                    text=text,
+                    track_title=str(metadata.get("music_track_title") or track_title),
+                    track_id=str(metadata.get("music_track_id") or track_id),
+                    actor_name=actor_name or "",
+                    segments=segments,
+                    updated=updated_burst,
+                )
+
     await manager.send_event(
         conversation_id,
         "music_status",
         {
-            "text": text,
+            "text": legacy_text,
             "status": normalized,
             "track_title": track_title,
             "track_id": track_id,
@@ -683,16 +978,16 @@ async def _is_waiting_for_agent_join(session: Any, *, conversation_id: str) -> b
 
 async def _agent_join_status_exists(*, conversation_id: str) -> bool:
     rows = await db.query_raw(
-        """
+        f"""
         SELECT id
         FROM messages
         WHERE conversation_id = $1
           AND role = 'assistant'
-          AND metadata ->> 'music_status' = 'started'
-          AND metadata ->> 'music_status_actor' = 'agent'
+          AND {_AGENT_JOIN_STATUS_SQL}
         LIMIT 1
         """,
         conversation_id,
+        _MUSIC_ACTIVITY_BURST_KIND,
     )
     return bool(rows)
 
@@ -744,7 +1039,10 @@ async def _recent_non_status_chat_context(
           AND content <> ''
           AND (
               metadata IS NULL
-              OR metadata ->> 'music_status' IS NULL
+              OR (
+                  metadata ->> 'music_status' IS NULL
+                  AND metadata ->> 'kind' IS DISTINCT FROM 'music_activity_burst'
+              )
           )
         ORDER BY created_at DESC
         LIMIT $2
