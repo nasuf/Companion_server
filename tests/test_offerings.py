@@ -142,9 +142,54 @@ async def test_send_red_packet_debits_and_builds_card(monkeypatch):
     assert card["payload"]["offering_id"] == "off-1"
     assert card["payload"]["ticket_amount"] == 18
     assert card["payload"]["status"] == "sent"
-    assert card["subtitle"] == ""
+    assert card["subtitle"] == "18 钞票"
+    assert card["body"] == "给你的一点心意"
+    assert card["payload"].get("blessing") in (None, "")
     assert "¥" not in card["title"]
     assert result["wallet"]["ticket_balance"] == 82
+
+
+@pytest.mark.asyncio
+async def test_send_red_packet_puts_blessing_on_card(monkeypatch):
+    fake_db = _FakeDb(
+        query_rows=[[{
+            "id": "c1",
+            "user_id": "u1",
+            "agent_id": "a1",
+            "workspace_id": "ws-1",
+            "agent_name": "小芜",
+        }]],
+        tx_rows=[
+            [],
+            [],
+            [{"n": 0}],
+            [_offering_row(blessing="早点休息呀")],
+        ],
+    )
+    debit = AsyncMock(return_value={
+        "ticket_balance": 82,
+        "point_balance": 0,
+        "achievement_points_synced": 0,
+    })
+    monkeypatch.setattr(offerings, "db", fake_db)
+    monkeypatch.setattr(offerings.wallet, "ensure_wallet", AsyncMock())
+    monkeypatch.setattr(offerings.wallet, "debit_tickets", debit)
+    monkeypatch.setattr(offerings, "fire_background", _swallow_background)
+
+    result = await offerings.send_red_packet(
+        user_id="u1",
+        conversation_id="c1",
+        ticket_amount=18,
+        blessing="  早点休息呀  ",
+    )
+
+    insert_args = fake_db.fake_tx.query_calls[-1][1]
+    assert insert_args[8] == "早点休息呀"
+    card = result["component_card"]
+    assert card["body"] == "早点休息呀"
+    assert card["subtitle"] == "18 钞票"
+    assert card["payload"]["blessing"] == "早点休息呀"
+    assert card["payload"]["ticket_amount"] == 18
 
 
 @pytest.mark.asyncio
@@ -284,7 +329,7 @@ async def test_mark_received_credits_wallet_once(monkeypatch):
         conversation_id="c1",
     )
     assert first["offering"]["status"] == "received"
-    assert first["component_card"]["subtitle"] == ""
+    assert first["component_card"]["subtitle"] == "18 钞票"
     assert first["component_card"]["payload"]["status_label"] == "已领取"
     assert any("SET status" in sql for sql, _ in fake_db.fake_tx.query_calls)
     assert any("INSERT INTO agent_wallets" in sql for sql, _ in fake_db.fake_tx.execute_calls)
@@ -410,6 +455,9 @@ def test_red_packet_prompts_are_registered_without_hardcoded_tiers():
         assert "{offering_count}" in text
     assert "不要按档位念稿" in reply
     assert "不要报出数字" in reply
+    assert "如果对方写了一句话" in reply
+    assert "{blessing}" in reply
+    assert "必须接住那句话" in rewrite
     assert "1-10" not in reply
     assert "小于10" not in reply
     assert "大于100" not in reply
@@ -471,6 +519,41 @@ async def test_red_packet_prompt_skips_reengagement_section():
     assert "## 上次聊到" not in prompt
     assert "重逢感知" in diagnostics["empty_prompt_sections_removed"]
     assert "上次聊到" in diagnostics["empty_prompt_sections_removed"]
+
+
+@pytest.mark.asyncio
+async def test_red_packet_prompt_includes_blessing():
+    from app.services.chat.prompt_builder import build_system_prompt
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+
+    async def _prompt_text(key: str, **_kwargs) -> str:
+        definition = PROMPT_DEFINITION_MAP.get(key)
+        return definition.default_text if definition else ""
+
+    with (
+        patch(
+            "app.services.chat.prompt_builder.get_prompt_text",
+            AsyncMock(side_effect=_prompt_text),
+        ),
+        patch(
+            "app.services.chat.prompt_builder.get_prompt_text_or_default",
+            AsyncMock(side_effect=_prompt_text),
+        ),
+    ):
+        prompt = await build_system_prompt(
+            agent=SimpleNamespace(name="小伴", values={"gender": "female"}),
+            red_packet_context={
+                "offering_id": "off-1",
+                "ticket_amount": 18,
+                "agent_value_yuan": 18,
+                "offering_count": 1,
+                "previous_summary": "",
+                "blessing": "早点休息呀",
+            },
+        )
+
+    assert "早点休息呀" in prompt
+    assert "先接住那句话" in prompt
 
 
 def _gift_offering_row(**overrides):
@@ -778,6 +861,39 @@ async def test_send_red_packet_reuses_fresh_unbound_without_debiting(monkeypatch
     debit.assert_not_awaited()
     assert result["offering"]["id"] == "off-1"
     assert result["wallet"]["ticket_balance"] == 0
+
+
+@pytest.mark.asyncio
+async def test_send_red_packet_reuse_updates_blessing(monkeypatch):
+    unbound = _offering_row(created_at=_now_iso(), blessing="旧的一句")
+    updated = dict(unbound)
+    updated["blessing"] = "新的一句"
+    fake_db = _FakeDb(
+        query_rows=[[_conv_row()]],
+        tx_rows=[[unbound], [updated]],
+    )
+    debit = AsyncMock()
+    monkeypatch.setattr(offerings, "db", fake_db)
+    monkeypatch.setattr(offerings.wallet, "ensure_wallet", AsyncMock(return_value={
+        "ticket_balance": 0,
+        "point_balance": 0,
+        "achievement_points_synced": 0,
+    }))
+    monkeypatch.setattr(offerings.wallet, "debit_tickets", debit)
+
+    result = await offerings.send_red_packet(
+        user_id="u1",
+        conversation_id="c1",
+        ticket_amount=18,
+        blessing="新的一句",
+    )
+
+    debit.assert_not_awaited()
+    assert result["offering"]["blessing"] == "新的一句"
+    assert result["component_card"]["body"] == "新的一句"
+    assert result["component_card"]["payload"]["blessing"] == "新的一句"
+    update_sql = fake_db.fake_tx.query_calls[1][0]
+    assert "blessing = $6" in update_sql
 
 
 @pytest.mark.asyncio

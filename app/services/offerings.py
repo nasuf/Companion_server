@@ -44,6 +44,8 @@ STATUS_RECEIVED = "received"
 RED_PACKET_ACCENT = "#FF4D5F"
 GIFT_ACCENT = "#FF8A3D"
 MAX_TICKET_AMOUNT = 1_000_000
+MAX_BLESSING_LENGTH = 40
+DEFAULT_RED_PACKET_BODY = "给你的一点心意"
 MEMORY_IMPORTANCE = 0.72
 MEMORY_LEVEL = 2
 # HTTP send consumes inventory/tickets before the chat card is bound. If WS
@@ -148,14 +150,21 @@ def public_offering(offering: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _cleaned_blessing(value: Any) -> str | None:
+    text = str(value or "").strip()[:MAX_BLESSING_LENGTH]
+    return text or None
+
+
 def build_red_packet_card(offering: dict[str, Any]) -> dict[str, Any]:
     received = offering.get("status") == STATUS_RECEIVED
+    amount = int(offering.get("ticket_amount") or 0)
+    blessing = _cleaned_blessing(offering.get("blessing"))
     return {
         "version": 1,
         "type": "red_packet",
         "title": "红包",
-        "subtitle": "",
-        "body": "给你的一点心意",
+        "subtitle": f"{amount} 钞票" if amount > 0 else "",
+        "body": blessing or DEFAULT_RED_PACKET_BODY,
         "footer": "点击查看",
         "accent": RED_PACKET_ACCENT,
         "payload": {
@@ -165,6 +174,7 @@ def build_red_packet_card(offering: dict[str, Any]) -> dict[str, Any]:
             "agent_value_yuan": offering["agent_value_yuan"],
             "status": offering["status"],
             "status_label": "已领取" if received else "待领取",
+            "blessing": blessing,
             "created_at": offering.get("created_at") or "",
             "received_at": offering.get("received_at") or "",
             "agent_id": offering["agent_id"],
@@ -414,12 +424,17 @@ async def _retarget_unbound_offering(
     client: Any,
     offering: dict[str, Any],
     conv: dict[str, Any],
+    *,
+    blessing: str | None = None,
 ) -> dict[str, Any] | None:
-    """Point a reused unbound row at the conversation the user is sending in."""
-    if (
+    """Point a reused unbound row at this send (conversation + blessing)."""
+    next_blessing = _cleaned_blessing(blessing)
+    same_target = (
         offering.get("conversation_id") == conv["id"]
         and offering.get("agent_id") == conv["agent_id"]
-    ):
+    )
+    same_blessing = _cleaned_blessing(offering.get("blessing")) == next_blessing
+    if same_target and same_blessing:
         return offering
     meta: dict[str, Any] = {
         "offering_count": int(offering.get("offering_count") or 1),
@@ -439,7 +454,8 @@ async def _retarget_unbound_offering(
         UPDATE user_offerings
         SET conversation_id = $2,
             agent_id = $3,
-            metadata = $4::jsonb
+            metadata = $4::jsonb,
+            blessing = $6
         WHERE id = $1 AND message_id IS NULL AND status = $5
         RETURNING {_OFFERING_RETURNING}
         """,
@@ -448,6 +464,7 @@ async def _retarget_unbound_offering(
         conv["agent_id"],
         json.dumps(meta, ensure_ascii=False),
         STATUS_SENT,
+        next_blessing,
     )
     if not rows:
         return None
@@ -462,6 +479,7 @@ async def _prepare_unbound_for_send(
     kind: str,
     product_kind: str | None = None,
     ticket_amount: int | None = None,
+    blessing: str | None = None,
 ) -> dict[str, Any] | None:
     """Reclaim stale unbound rows, then reuse a fresh match for this send."""
     now = datetime.now(timezone.utc)
@@ -483,7 +501,12 @@ async def _prepare_unbound_for_send(
                 and int(item.get("ticket_amount") or 0) == int(ticket_amount or 0)
             )
         if is_match and matching is None:
-            retargeted = await _retarget_unbound_offering(client, item, conv)
+            next_blessing = (
+                blessing if kind == KIND_RED_PACKET else item.get("blessing")
+            )
+            retargeted = await _retarget_unbound_offering(
+                client, item, conv, blessing=next_blessing,
+            )
             if retargeted is not None:
                 matching = retargeted
             continue
@@ -532,7 +555,7 @@ async def send_red_packet(
     conv = await _load_conversation(conversation_id, user_id)
     balance = await wallet.ensure_wallet(user_id)
     offering_id = str(uuid.uuid4())
-    cleaned_blessing = (blessing or "").strip()[:40] or None
+    cleaned_blessing = _cleaned_blessing(blessing)
     agent_value = ticket_amount
     reused: dict[str, Any] | None = None
 
@@ -543,6 +566,7 @@ async def send_red_packet(
             conv=conv,
             kind=KIND_RED_PACKET,
             ticket_amount=ticket_amount,
+            blessing=cleaned_blessing,
         )
         if reused is None:
             balance = await wallet.debit_tickets(
