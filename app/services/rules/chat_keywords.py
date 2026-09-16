@@ -90,7 +90,7 @@ CURRENT_STATE_EXPLICIT_PHRASES = frozenset({
 CURRENT_STATE_SUBJECT_TERMS = ("你", "你现在", "你最近", "你今天", "你那边")
 CURRENT_STATE_PREDICATE_TERMS = (
     "干嘛", "做什么", "做啥", "忙", "有空", "怎么样", "还好吗",
-    "心情", "感觉", "开心", "难过", "状态",
+    "心情", "感觉", "开心", "难过", "状态", "睡", "困",
 )
 
 L3_EXPLICIT_OLD_RE = re.compile(

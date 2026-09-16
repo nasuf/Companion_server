@@ -18,6 +18,7 @@ from app.services.chat.intent_dispatcher import (
     IntentType,
     infer_schedule_query_type,
     is_explicit_current_state_query,
+    is_explicit_schedule_adjust_request,
 )
 
 
@@ -78,6 +79,37 @@ def _route_current_schedule_query_to_current_state(
     )
 
 
+def _downgrade_non_explicit_schedule_adjust(
+    detected_intent: IntentResult,
+    user_message: str,
+    response_diagnostics: dict[str, Any],
+) -> IntentResult:
+    """Keep schedule-adjust only for explicit adjustment requests.
+
+    The unified classifier can mislabel sleep/state questions ("你准备睡了吗")
+    as schedule adjustment, which triggers feasibility rejection replies and
+    unlocks schedule-adjust achievements incorrectly.
+    """
+    if detected_intent.intent != IntentType.SCHEDULE_ADJUST:
+        return detected_intent
+    if is_explicit_schedule_adjust_request(user_message):
+        return detected_intent
+    if is_explicit_current_state_query(user_message):
+        metadata = dict(detected_intent.metadata or {})
+        metadata["rerouted_from"] = IntentType.SCHEDULE_ADJUST.value
+        metadata["reroute_reason"] = "state_query_not_schedule_adjust"
+        response_diagnostics["intent_reroute_reason"] = "state_query_not_schedule_adjust"
+        return IntentResult(
+            intent=IntentType.CURRENT_STATE,
+            confidence=detected_intent.confidence,
+            metadata=metadata,
+        )
+
+    # Keep LLM classification for contextual affirmatives ("好"/"行") that follow
+    # an AI invitation to stay up — those have no adjust keywords but are valid.
+    return detected_intent
+
+
 def _downgrade_non_explicit_current_schedule_query(
     detected_intent: IntentResult,
     user_message: str,
@@ -129,6 +161,9 @@ def _filter_non_explicit_sub_fragments(
             and not infer_schedule_query_type(fragment, require_query_cue=True)
             and not is_explicit_current_state_query(fragment)
         ):
+            dropped.append(label)
+            continue
+        if label == "作息调整" and not is_explicit_schedule_adjust_request(fragment):
             dropped.append(label)
             continue
         filtered[label] = fragment

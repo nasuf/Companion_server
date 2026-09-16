@@ -721,6 +721,81 @@ def test_orchestrator_keeps_explicit_current_schedule_query():
     assert diagnostics == {}
 
 
+def test_orchestrator_reroutes_sleep_state_query_mislabeled_as_schedule_adjust():
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+
+    diagnostics = {}
+    result = _downgrade_non_explicit_schedule_adjust(
+        IntentResult(
+            intent=IntentType.SCHEDULE_ADJUST,
+            confidence=0.82,
+            metadata={"llm_labels": ["作息调整"]},
+        ),
+        "你准备睡了吗",
+        diagnostics,
+    )
+
+    assert result.intent == IntentType.CURRENT_STATE
+    assert result.metadata["rerouted_from"] == IntentType.SCHEDULE_ADJUST.value
+    assert diagnostics["intent_reroute_reason"] == "state_query_not_schedule_adjust"
+
+
+def test_orchestrator_keeps_explicit_schedule_adjust_request():
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+
+    diagnostics = {}
+    original = IntentResult(
+        intent=IntentType.SCHEDULE_ADJUST,
+        confidence=0.9,
+    )
+    result = _downgrade_non_explicit_schedule_adjust(
+        original,
+        "你能不能晚点睡，陪我聊会儿",
+        diagnostics,
+    )
+
+    assert result is original
+    assert diagnostics == {}
+
+
+def test_orchestrator_keeps_contextual_schedule_adjust_without_keywords():
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+
+    diagnostics = {}
+    original = IntentResult(
+        intent=IntentType.SCHEDULE_ADJUST,
+        confidence=0.88,
+    )
+    result = _downgrade_non_explicit_schedule_adjust(
+        original,
+        "好",
+        diagnostics,
+    )
+
+    assert result is original
+    assert diagnostics == {}
+
+
+def test_orchestrator_filters_non_explicit_schedule_adjust_sub_fragments():
+    from app.services.chat.orchestrator import _filter_non_explicit_sub_fragments
+
+    diagnostics = {}
+    result = _filter_non_explicit_sub_fragments(
+        {
+            "作息调整": "你准备睡了吗",
+            "日常交流": "就是很闷",
+        },
+        diagnostics,
+    )
+
+    assert "作息调整" not in result
+    assert result["日常交流"] == "就是很闷"
+    assert diagnostics["intent_sub_fragments_dropped"] == ["作息调整"]
+
+
 def test_orchestrator_filters_non_explicit_current_sub_fragments():
     from app.services.chat.orchestrator import _filter_non_explicit_sub_fragments
 

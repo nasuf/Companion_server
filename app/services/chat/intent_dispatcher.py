@@ -146,6 +146,19 @@ def is_explicit_current_state_query(message: str) -> bool:
     return any(term in normalized for term in CURRENT_STATE_PREDICATE_TERMS)
 
 
+def is_explicit_schedule_adjust_request(message: str) -> bool:
+    """Return true only when the user is asking AI to change its schedule.
+
+    Questions about whether AI is sleeping ("你准备睡了吗") are current-state
+    queries, not adjustment requests. Those rely on keyword cues or prior
+    invitation context resolved by the unified intent LLM.
+    """
+    normalized = compact_chat_text(message)
+    if not normalized:
+        return False
+    return any(keyword in normalized for keyword in SCHEDULE_ADJUST_KEYWORDS)
+
+
 def infer_schedule_query_type(message: str, *, require_query_cue: bool = True) -> str | None:
     """Infer schedule query subtype through the schedule-domain scope parser."""
     scope = resolve_schedule_query_scope(message, require_query_cue=require_query_cue)

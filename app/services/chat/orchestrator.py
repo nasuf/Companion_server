@@ -128,6 +128,7 @@ from app.services.chat.filler_reply import build_filler_emoji_reply
 from app.services.chat.intent_routes import (
     _downgrade_non_explicit_current_schedule_query,
     _downgrade_non_explicit_current_state,
+    _downgrade_non_explicit_schedule_adjust,
     _filter_non_explicit_sub_fragments,
     _route_current_schedule_query_to_current_state,
 )
@@ -806,6 +807,13 @@ async def stream_chat_response(
                     f"(labels={detected_intent.metadata.get('llm_labels')})"
                 )
             detected_intent = _downgrade_non_explicit_current_schedule_query(
+                detected_intent,
+                user_message,
+                response_diagnostics,
+            )
+
+        if detected_intent.intent != IntentType.CRISIS:
+            detected_intent = _downgrade_non_explicit_schedule_adjust(
                 detected_intent,
                 user_message,
                 response_diagnostics,
