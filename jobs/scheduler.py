@@ -1431,7 +1431,18 @@ async def _run_aggregation_scan_body():
                     # generator 触发 LLM + 持久化, 避免漏存回复.
                     # 标记回复生成中: 生成期间到达的新消息在 plan_user_message_aggregation
                     # 里会被路由到 delayed queue 合并, 而非另起一轮近似重复的回复.
+                    from app.api.realtime.ui_delay import send_processing_event
+
                     await mark_reply_inflight(conv_id)
+                    await send_processing_event(
+                        lambda payload: manager.send_event(
+                            conv_id, payload["type"], payload["data"],
+                        ),
+                        conversation_id=conv_id,
+                        message_id=merged.get("user_message_id"),
+                        reply_context=merged.get("reply_context"),
+                        ui_delay_seconds=0.0,
+                    )
                     await stream_to_ws(gen, conv_id)
                     logger.debug(f"Delayed reply pushed for conv={conv_id[:8]}")
                 except Exception as conv_err:
@@ -1519,7 +1530,16 @@ async def _enqueue_scanned_aggregation_results(results, manager) -> None:
                 },
                 delay_seconds,
             )
-            # send_event 跨进程 routing: scheduler 与 WS holder 不同 worker 时 publish.
+            from app.api.realtime.ui_delay import send_processing_event
+
+            await send_processing_event(
+                lambda payload: manager.send_event(
+                    conv_id, payload["type"], payload["data"],
+                ),
+                conversation_id=conv_id,
+                message_id=latest_message_id,
+                reply_context=reply_context,
+            )
             if delay_seconds > 5:
                 await manager.send_event(conv_id, "delay", {"duration": delay_seconds})
             await manager.send_event(

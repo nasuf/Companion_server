@@ -22,9 +22,11 @@ from app.services.interaction.delayed_queue import (
 )
 from app.services.interaction.reply_context import build_reply_timing_context
 from app.services.interaction.user_turn_aggregation import (
+    UserMessageAggregationPlan,
     enqueue_planned_user_message,
     plan_user_message_aggregation,
 )
+from app.api.realtime.ui_delay import compute_ack_ui_timing, send_processing_event
 from app.services.schedule_domain.schedule import (
     generate_daily_schedule,
     get_cached_schedule,
@@ -1018,11 +1020,25 @@ async def _bind_offering_and_queue_reply(
         except ValueError:
             existing_id = None
         if existing_id:
-            await _send_ack(ws, message_id=str(existing_id), client_id=client_id)
+            immediate_context = dict(current_context or {})
+            immediate_context["delay_seconds"] = 0.0
+            await _send_ack(
+                ws,
+                message_id=str(existing_id),
+                client_id=client_id,
+                reply_context=immediate_context,
+            )
             return
         await ws.send_json({"type": "error", "data": {"message": error_message}})
         return
-    await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+    immediate_context = dict(current_context or {})
+    immediate_context["delay_seconds"] = 0.0
+    await _send_ack(
+        ws,
+        message_id=user_message_id,
+        client_id=client_id,
+        reply_context=immediate_context,
+    )
     reply_message = await offerings_svc.build_offering_user_message(bound)
     card_context = dict(plan.final_context or current_context)
     card_context["delay_seconds"] = 0.0
@@ -1042,18 +1058,23 @@ async def _bind_offering_and_queue_reply(
 
 
 async def _send_ack(
-    ws: WebSocket, *, message_id: str, client_id: str | None,
+    ws: WebSocket,
+    *,
+    message_id: str,
+    client_id: str | None,
+    plan: UserMessageAggregationPlan | None = None,
+    reply_context: dict | None = None,
 ) -> None:
-    """spec 之外的工程扩展: persist 落库后立刻发"已读" ack 给前端.
+    """spec 之外的工程扩展: persist 落库后立刻发 ack 给前端.
 
-    用户体感"我说出去的话 AI 看到了" — 之前从用户发到 AI 实际开始回复中间
-    这段无任何反馈 (1-5s 在延迟队列), 气泡像石沉大海. ack 让前端能在气泡
-    旁加 ✓✓ 标记.
+    ack 只表示服务端已持久化; 已读/输入中由 `ui_delay_seconds` 与 `defer_ui`
+    控制 — 随机延迟回复开启时, 前端应等到 delay 到期后再展示 ✓✓ 与 typing.
 
     `client_id`: 前端发消息时塞的 UUID, 后端原样回. 让前端在快速连发多条时
     精确对应 ack 跟具体气泡, 不用按时间猜. 没传时仅返 message_id (DB id).
     """
     from app.services.schedule_domain.time_service import _now_corrected
+    ui_timing = compute_ack_ui_timing(plan=plan, reply_context=reply_context)
     try:
         await ws.send_json({
             "type": "ack",
@@ -1061,6 +1082,7 @@ async def _send_ack(
                 "message_id": message_id,
                 "client_id": client_id,
                 "received_at": _now_corrected().isoformat(),
+                **ui_timing,
             },
         })
     except Exception as e:
@@ -1425,7 +1447,13 @@ async def _handle_message(
             get_existing=offerings_svc.get_gift,
         )
         return
-    await _send_ack(ws, message_id=user_message_id, client_id=client_id)
+    await _send_ack(
+        ws,
+        message_id=user_message_id,
+        client_id=client_id,
+        plan=plan,
+        reply_context=current_context,
+    )
     try:
         from app.services.achievements.service import handle_user_message_event
 

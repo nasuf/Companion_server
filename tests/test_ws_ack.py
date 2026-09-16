@@ -1618,6 +1618,7 @@ async def test_handle_message_fragment_sends_ack_with_client_id(fake_ws):
     assert len(acks) == 1, f"碎片分支必须发 1 个 ack; got {acks}"
     assert acks[0]["data"]["client_id"] == "client-frag-uuid"
     assert acks[0]["data"]["message_id"] == "db-msg-fragment-1"
+    assert acks[0]["data"].get("defer_ui") is True
 
     # ack 必须在 pending:aggregating 之前发 — 用户体感"已读 → 处理中"
     all_payloads = [
