@@ -84,6 +84,10 @@ EVT_REMINDER_RENEWED = "reminder.renewed"
 EVT_REMINDER_RESCHEDULED = "reminder.rescheduled"
 EVT_REMINDER_DLQ = "reminder.dead_letter"
 
+# Consecutive interaction / makeup
+EVT_INTERACTION_RECORDED = "interaction.recorded"
+EVT_INTERACTION_MAKEUP = "interaction.makeup"
+
 # Offerings (red packets / future gifts)
 EVT_OFFERING_SENT = "offering.sent"
 EVT_OFFERING_RECEIVED = "offering.received"

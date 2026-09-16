@@ -431,6 +431,16 @@ async def stream_chat_response(
     agent_id = getattr(agent, "id", None)
     conversation = await db.conversation.find_unique(where={"id": conversation_id})
     workspace_id = getattr(conversation, "workspaceId", None)
+    if save_user_message and not sub_intent_mode:
+        from app.services.interaction_streak import record_user_message_day_for_conversation
+
+        _fire_background(
+            record_user_message_day_for_conversation(
+                conversation_id,
+                workspace_id=workspace_id,
+                user_id=getattr(conversation, "userId", None),
+            )
+        )
 
     # 把当前 agent 绑到 ContextVar, 后续 get_chat_model() 等据此应用 per-agent
     # override (无 override 时回落 system / env). 整条流式期间 ContextVar 有效,

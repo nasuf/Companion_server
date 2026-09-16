@@ -20,6 +20,7 @@ from app.services.mbti import get_mbti
 from app.services.proactive import get_proactive_history
 from app.services.proactive.sender import send_manual_or_triggered_proactive
 from app.services.proactive.state import mark_user_replied_for_conversation
+from app.services.runtime.tasks import fire_background
 from app.services.workspace.workspaces import resolve_workspace_id
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -44,6 +45,8 @@ async def _persist_user_message(
     text: str,
     *,
     metadata: dict | None = None,
+    workspace_id: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     saved = await db.message.create(
         data={
@@ -54,6 +57,13 @@ async def _persist_user_message(
         }
     )
     await mark_user_replied_for_conversation(conversation_id)
+    from app.services.interaction_streak import record_user_message_day_for_conversation
+
+    fire_background(
+        record_user_message_day_for_conversation(
+            conversation_id, workspace_id=workspace_id, user_id=user_id,
+        )
+    )
     return saved.id
 
 
@@ -102,6 +112,8 @@ async def chat(conversation_id: str, data: ChatRequest):
         conversation_id,
         data.message,
         metadata=plan.metadata,
+        workspace_id=getattr(conv, "workspaceId", None),
+        user_id=user_id,
     )
     if plan.should_wait:
         pushed = await enqueue_planned_user_message(plan, message_id=message_id)

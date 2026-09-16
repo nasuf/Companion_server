@@ -87,6 +87,7 @@ model User {
   bugReportsFiled          BugReport[]                     @relation("BugReportsFiled")
   bugReportsResolved       BugReport[]                     @relation("BugReportsResolved")
   userFeedback             UserFeedback[]
+  workspaceInteractionDays WorkspaceInteractionDay[]
 
   // admin 监控"新增注册走势"按 created_at 分桶.
   @@index([createdAt])
@@ -223,10 +224,26 @@ model ChatWorkspace {
   offlineActivities        OfflineActivityRecommendation[]
   realWorldGifts           RealWorldGift[]
   realWorldTriggerState    RealWorldTriggerState?
+  interactionDays          WorkspaceInteractionDay[]
 
   @@index([userId, status])
   @@index([agentId, status])
   @@map("chat_workspaces")
+}
+
+model WorkspaceInteractionDay {
+  id          String        @id @default(uuid())
+  workspaceId String        @map("workspace_id")
+  workspace   ChatWorkspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String        @map("user_id")
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  localDate   DateTime      @map("local_date") @db.Date
+  source      String // "user_message" | "makeup"
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  @@unique([workspaceId, localDate], map: "workspace_interaction_days_ws_date_key")
+  @@index([workspaceId, localDate(sort: Desc)], map: "workspace_interaction_days_ws_date_idx")
+  @@map("workspace_interaction_days")
 }
 
 model Conversation {

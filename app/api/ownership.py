@@ -85,6 +85,19 @@ async def require_conversation_owner(
     return conv
 
 
+async def require_workspace_owner(
+    workspace_id: str,
+    user: dict = Depends(require_user),
+):
+    """JWT 用户必须是 workspace 的 owner (admin 跳过)."""
+    workspace = await db.chatworkspace.find_unique(where={"id": workspace_id})
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    if not _is_admin(user) and workspace.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your workspace")
+    return workspace
+
+
 async def require_memory_owner(
     memory_id: str,
     user: dict = Depends(require_user),

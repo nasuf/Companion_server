@@ -1021,6 +1021,15 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
         )
         stats["changelogs"] = cnt
 
+        try:
+            cnt = await db.execute_raw(
+                "DELETE FROM workspace_interaction_days WHERE workspace_id = ANY($1::text[])",
+                workspace_ids,
+            )
+            stats["interaction_days"] = cnt or 0
+        except Exception as e:
+            logger.warning(f"Interaction day delete failed: {e}")
+
     # 删除 workspaces (按 agentId 确保全部清除)
     cnt = await db.chatworkspace.delete_many(
         where={"agentId": agent_id, "userId": user_id},

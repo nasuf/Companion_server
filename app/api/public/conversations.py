@@ -15,6 +15,7 @@ from app.services.achievements.mode import achievement_alerts_enabled
 from app.services.achievements.rule_registry import ACHIEVEMENT_RULES
 from app.services.chat import message_search
 from app.services.chat.crisis_state import get_crisis_care_status
+from app.services.interaction_streak import get_current_streak
 from app.services.schedule_domain.schedule import (
     get_cached_schedule,
     get_current_status,
@@ -25,23 +26,8 @@ from app.services.workspace.workspaces import ensure_workspace, get_workspace_by
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
-def _parse_created_at(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=UTC)
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _interaction_days(created_at) -> int | None:
-    created = _parse_created_at(created_at)
-    if created is None:
-        return None
-    return max(1, (datetime.now(UTC).date() - created.astimezone(UTC).date()).days + 1)
+async def _interaction_days(workspace_id: str | None) -> int:
+    return await get_current_streak(workspace_id)
 
 
 async def _agent_name(agent_id: str | None) -> str:
@@ -125,7 +111,7 @@ async def _conversation_response(conv, *, ensure_idle_music: bool = False) -> Co
         title=conv.title,
         created_at=str(conv.createdAt),
         updated_at=str(conv.updatedAt),
-        interaction_days=_interaction_days(conv.createdAt),
+        interaction_days=await _interaction_days(getattr(conv, "workspaceId", None)),
         music_co_listening=music_co_listening,
         **(status or {}),
     )

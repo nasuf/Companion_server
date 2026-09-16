@@ -463,6 +463,8 @@ async def _persist_user_message(
     text: str,
     *,
     metadata: dict | None = None,
+    workspace_id: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     saved = await db.message.create(
         data={
@@ -486,6 +488,13 @@ async def _persist_user_message(
         },
     )
     await mark_user_replied_for_conversation(conversation_id)
+    from app.services.interaction_streak import record_user_message_day_for_conversation
+
+    fire_background(
+        record_user_message_day_for_conversation(
+            conversation_id, workspace_id=workspace_id, user_id=user_id,
+        )
+    )
     return saved.id
 
 
@@ -1351,6 +1360,8 @@ async def _handle_message(
             attachments=attachment_metadata,
             link_card=link_card_metadata,
         ),
+        workspace_id=workspace_id,
+        user_id=user_id,
     )
     if (
         isinstance(component_card, dict)

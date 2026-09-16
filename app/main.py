@@ -196,6 +196,7 @@ from app.api.public.memories import router as memories_router
 from app.api.public.reminders import router as reminders_router
 from app.api.public.emotions import router as emotions_router
 from app.api.public.intimacy import router as intimacy_router
+from app.api.public.interaction import router as interaction_router
 from app.api.public.boundary import router as boundary_router
 from app.api.public.stickers import router as stickers_router
 from app.api.public.store import router as store_router
@@ -258,6 +259,7 @@ app.include_router(memories_router)
 app.include_router(reminders_router)
 app.include_router(emotions_router)
 app.include_router(intimacy_router)
+app.include_router(interaction_router)
 app.include_router(boundary_router)
 app.include_router(stickers_router)
 app.include_router(time_capsules_router)
