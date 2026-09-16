@@ -97,9 +97,36 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
         ),
     )
     updated = previous.model_copy(update={"status": "playing"})
-    write_message = AsyncMock(return_value=("message-1", True))
+    append_burst = AsyncMock(return_value=("message-1", True, False))
     send_event = AsyncMock()
-    monkeypatch.setattr(session_support, "_write_game_message", write_message)
+    monkeypatch.setattr(
+        session_support,
+        "_append_game_activity_burst_segment",
+        append_burst,
+    )
+    monkeypatch.setattr(
+        session_support.db,
+        "query_raw",
+        AsyncMock(
+            return_value=[
+                {
+                    "content": "Companion 和你已进入游戏《围棋》",
+                    "metadata": {
+                        "kind": "game_activity_burst",
+                        "game_key": "go",
+                        "game_title": "围棋",
+                        "segments": [
+                            {
+                                "at": session_support._iso(session_support._now()),
+                                "action": "enter",
+                                "session_id": "native-status-session",
+                            }
+                        ],
+                    },
+                }
+            ]
+        ),
+    )
     monkeypatch.setattr(manager, "send_event", send_event)
 
     await session_support._persist_game_status_to_chat_if_needed(
@@ -110,12 +137,57 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
         {"game_title": "围棋"},
     )
 
-    metadata = write_message.await_args.kwargs["metadata"]
-    assert metadata["game_title"] == "围棋"
-    assert "mg_id" not in metadata
-    ws_payload = send_event.await_args.args[2]
-    assert ws_payload["game_title"] == "围棋"
-    assert "mg_id" not in ws_payload
+    append_burst.assert_awaited_once()
+    kwargs = append_burst.await_args.kwargs
+    assert kwargs["game_key"] == "go"
+    assert kwargs["game_title"] == "围棋"
+    assert kwargs["action"] == "enter"
+    assert kwargs["session_id"] == "native-status-session"
+    assert send_event.await_args.args[1] == "game_activity_burst"
+
+
+@pytest.mark.asyncio
+async def test_burst_segment_appends_into_open_window(monkeypatch):
+    monkeypatch.setattr(
+        session_support,
+        "_find_open_burst_message",
+        AsyncMock(
+            return_value={
+                "id": "burst-1",
+                "metadata": {
+                    "kind": "game_activity_burst",
+                    "game_key": "reversi",
+                    "game_title": "黑白棋",
+                    "game_status_actor_name": "小伴",
+                    "segments": [
+                        {
+                            "at": session_support._iso(session_support._now()),
+                            "action": "enter",
+                            "session_id": "s1",
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+    update_message = AsyncMock()
+    monkeypatch.setattr(session_support, "_update_game_message", update_message)
+
+    message_id, inserted, updated = await session_support._append_game_activity_burst_segment(
+        conversation_id="conversation-1",
+        game_key="reversi",
+        game_title="黑白棋",
+        actor_name="小伴",
+        session_id="s2",
+        action="exit",
+        quick_exit=True,
+    )
+
+    assert (message_id, inserted, updated) == ("burst-1", False, True)
+    metadata = update_message.await_args.args[2]
+    assert len(metadata["segments"]) == 2
+    assert metadata["segments"][-1]["session_id"] == "s2"
+    assert metadata["segments"][-1]["quick_exit"] is True
 
 
 @pytest.mark.asyncio

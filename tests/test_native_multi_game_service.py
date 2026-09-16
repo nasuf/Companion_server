@@ -978,7 +978,8 @@ async def test_chat_projection_retry_rebuilds_started_and_terminal_messages(
 
     assert attempted == 1
     assert "provider = 'native'" in database.query
-    assert "game_status', 'started'" in database.query
+    assert "game_activity_burst" in database.query
+    assert "seg->>'action' = 'enter'" in database.query
     assert persist.await_count == 2
     assert persist.await_args_list[0].args[2] == "game_started"
     assert persist.await_args_list[1].args[2] == "game_finished"

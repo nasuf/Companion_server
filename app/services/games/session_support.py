@@ -12,12 +12,13 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from weakref import WeakValueDictionary
 
 from app.db import db
 from app.models.game import GamePlayerInfo, GameSessionRow, NativeSessionResponse
+from app.services.games.substance import played_enough
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,11 @@ _GAME_STATUS_LOCKS: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
 _GAME_REPLY_LOCKS: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
     WeakValueDictionary()
 )
+_GAME_BURST_LOCKS: WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
+    WeakValueDictionary()
+)
+_GAME_ACTIVITY_BURST_KIND = "game_activity_burst"
+_GAME_ACTIVITY_BURST_WINDOW = timedelta(minutes=5)
 
 GameSessionResponse = GameSessionRow | NativeSessionResponse
 
@@ -366,6 +372,225 @@ def _should_persist_reply_to_chat(event_type: str, state: str | None) -> bool:
     return event_type in {"game_finished", "game_aborted"}
 
 
+def _parse_segment_time(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _session_action_count(session: GameSessionResponse) -> int:
+    result = session.result or {}
+    game_key = session.game_key or ""
+    if game_key == "gomoku":
+        gomoku = _loads(result.get("gomoku"), {})
+        if isinstance(gomoku, dict):
+            return int(gomoku.get("move_count") or 0)
+    game = _loads(result.get(game_key), {})
+    if isinstance(game, dict):
+        return int(game.get("action_count") or 0)
+    return 0
+
+
+def _is_quick_exit_session(session: GameSessionResponse) -> bool:
+    game_key = session.game_key or ""
+    return not played_enough(game_key, _session_action_count(session))
+
+
+def _burst_action_for_status(status: str) -> str:
+    return "exit" if status == "ended" else "enter"
+
+
+def _format_burst_content(
+    game_title: str,
+    segments: list[dict[str, Any]],
+    actor_name: str,
+) -> str:
+    if len(segments) == 1:
+        action = str(segments[0].get("action") or "enter")
+        verb = "退出" if action == "exit" else "进入"
+        return f"{actor_name} 和你已{verb}游戏《{game_title}》"
+    first_at = _parse_segment_time(segments[0].get("at"))
+    last_at = _parse_segment_time(segments[-1].get("at"))
+    if first_at and last_at:
+        if first_at.date() == last_at.date():
+            time_part = (
+                f"{first_at.astimezone().strftime('%H:%M')}"
+                f"–{last_at.astimezone().strftime('%H:%M')} "
+            )
+        else:
+            time_part = ""
+    else:
+        time_part = ""
+    return f"{time_part}《{game_title}》进出 {len(segments)} 次"
+
+
+async def _find_open_burst_message(
+    conversation_id: str,
+    game_key: str,
+    *,
+    client: Any,
+) -> dict[str, Any] | None:
+    rows = await client.query_raw(
+        """
+        SELECT id, metadata, content, created_at
+        FROM messages
+        WHERE conversation_id = $1
+          AND metadata->>'kind' = $2
+          AND metadata->>'game_key' = $3
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        conversation_id,
+        _GAME_ACTIVITY_BURST_KIND,
+        game_key,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    metadata = _loads(row.get("metadata"), {})
+    segments = list(metadata.get("segments") or [])
+    if not segments:
+        return None
+    last_at = _parse_segment_time(segments[-1].get("at"))
+    if last_at is None:
+        return row
+    if _now() - last_at > _GAME_ACTIVITY_BURST_WINDOW:
+        return None
+    return row
+
+
+async def _update_game_message(
+    message_id: str,
+    content: str,
+    metadata: dict[str, Any],
+    *,
+    client: Any,
+) -> None:
+    await client.execute_raw(
+        """
+        UPDATE messages
+        SET content = $2,
+            metadata = $3::jsonb
+        WHERE id = $1
+        """,
+        message_id,
+        content,
+        _json(metadata),
+    )
+
+
+async def _emit_game_activity_burst_event(
+    conversation_id: str,
+    *,
+    message_id: str,
+    text: str,
+    game_key: str,
+    game_title: str,
+    actor_name: str,
+    segments: list[dict[str, Any]],
+    updated: bool,
+) -> None:
+    try:
+        from app.services.runtime.ws_manager import manager
+
+        await manager.send_event(
+            conversation_id,
+            "game_activity_burst",
+            {
+                "message_id": message_id,
+                "text": text,
+                "game_key": game_key,
+                "game_title": game_title,
+                "actor_name": actor_name,
+                "segments": segments,
+                "updated": updated,
+            },
+        )
+    except Exception as exc:
+        logger.debug("failed to emit game activity burst websocket event: %r", exc)
+
+
+async def _append_game_activity_burst_segment(
+    *,
+    conversation_id: str,
+    game_key: str,
+    game_title: str,
+    actor_name: str,
+    session_id: str,
+    action: str,
+    quick_exit: bool = False,
+) -> tuple[str, bool, bool]:
+    """Append one enter/exit segment to the open burst or start a new one.
+
+    Returns (message_id, inserted, updated).
+    """
+
+    segment: dict[str, Any] = {
+        "at": _iso(_now()),
+        "action": action,
+        "session_id": session_id,
+    }
+    if action == "exit":
+        segment["quick_exit"] = quick_exit
+
+    lock_key = (conversation_id, game_key)
+    lock = _GAME_BURST_LOCKS.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        open_burst = await _find_open_burst_message(
+            conversation_id,
+            game_key,
+            client=db,
+        )
+        if open_burst:
+            metadata = _loads(open_burst.get("metadata"), {})
+            segments = list(metadata.get("segments") or [])
+            if (
+                segments
+                and segments[-1].get("session_id") == session_id
+                and segments[-1].get("action") == action
+            ):
+                return str(open_burst["id"]), False, False
+            segments.append(segment)
+            metadata["segments"] = segments
+            metadata["game_status_actor_name"] = actor_name
+            content = _format_burst_content(game_title, segments, actor_name)
+            message_id = str(open_burst["id"])
+            await _update_game_message(
+                message_id,
+                content,
+                metadata,
+                client=db,
+            )
+            return message_id, False, True
+
+        metadata = {
+            "kind": _GAME_ACTIVITY_BURST_KIND,
+            "game_key": game_key,
+            "game_title": game_title,
+            "game_status_actor_name": actor_name,
+            "segments": [segment],
+        }
+        content = _format_burst_content(game_title, [segment], actor_name)
+        message_id, inserted = await _write_game_message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content=content,
+            metadata=metadata,
+        )
+        return message_id, inserted, False
+
+
 async def _persist_game_status_to_chat_if_needed(
     previous: GameSessionResponse,
     updated: GameSessionResponse,
@@ -381,51 +606,45 @@ async def _persist_game_status_to_chat_if_needed(
     lock_key = (updated.conversation_id, updated.id, status)
     lock = _GAME_STATUS_LOCKS.setdefault(lock_key, asyncio.Lock())
     async with lock:
+        game_key = str(updated.game_key or payload.get("game_key") or "").strip()
+        if not game_key:
+            return
         game_title = _game_title(updated, payload)
         actor_name = updated.ai_player.nick_name or "AI"
-        text = f"{actor_name} 和你已{'退出' if status == 'ended' else '进入'}游戏《{game_title}》"
-        metadata: dict[str, Any] = {
-            "kind": "game_status",
-            "game_status": status,
-            "game_title": game_title,
-            "game_status_actor": "both",
-            "game_status_actor_name": actor_name,
-            "session_id": updated.id,
-            "event_type": event_type,
-            "state": state,
-        }
-        if status == "ended":
-            metadata["game_ended_reason"] = _ended_reason(
-                updated, event_type, state, payload
-            )
-        message_id, inserted = await _write_game_message(
+        action = _burst_action_for_status(status)
+        quick_exit = action == "exit" and _is_quick_exit_session(updated)
+        message_id, inserted, updated_burst = await _append_game_activity_burst_segment(
             conversation_id=updated.conversation_id,
-            role="assistant",
-            content=text,
-            metadata=metadata,
+            game_key=game_key,
+            game_title=game_title,
+            actor_name=actor_name,
+            session_id=updated.id,
+            action=action,
+            quick_exit=quick_exit,
         )
-        if not inserted:
+        if not message_id:
             return
-        try:
-            from app.services.runtime.ws_manager import manager
-
-            event_payload: dict[str, Any] = {
-                "text": text,
-                "status": status,
-                "game_title": game_title,
-                "session_id": updated.id,
-                "message_id": message_id or "",
-                "actor": "both",
-                "actor_name": actor_name,
-                "reason": metadata.get("game_ended_reason", ""),
-            }
-            await manager.send_event(
-                updated.conversation_id,
-                "game_status",
-                event_payload,
-            )
-        except Exception as exc:
-            logger.debug("failed to emit game status websocket event: %r", exc)
+        if not inserted and not updated_burst:
+            return
+        rows = await db.query_raw(
+            "SELECT content, metadata FROM messages WHERE id = $1 LIMIT 1",
+            message_id,
+        )
+        if not rows:
+            return
+        metadata = _loads(rows[0].get("metadata"), {})
+        segments = list(metadata.get("segments") or [])
+        text = str(rows[0].get("content") or "")
+        await _emit_game_activity_burst_event(
+            updated.conversation_id,
+            message_id=message_id,
+            text=text,
+            game_key=game_key,
+            game_title=game_title,
+            actor_name=actor_name,
+            segments=segments,
+            updated=updated_burst,
+        )
 
 
 async def _persist_reply_to_chat_if_needed(

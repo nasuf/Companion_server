@@ -1213,11 +1213,24 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
                 NOT EXISTS (
                     SELECT 1 FROM messages m
                     WHERE m.conversation_id = gs.conversation_id
-                      AND m.metadata @> jsonb_build_object(
-                          'kind', 'game_status',
-                          'session_id', gs.id,
-                          'game_status', 'started'
-                      )
+                      AND (
+                            m.metadata @> jsonb_build_object(
+                                'kind', 'game_status',
+                                'session_id', gs.id,
+                                'game_status', 'started'
+                            )
+                            OR (
+                                m.metadata->>'kind' = 'game_activity_burst'
+                                AND EXISTS (
+                                    SELECT 1
+                                    FROM jsonb_array_elements(
+                                        COALESCE(m.metadata->'segments', '[]'::jsonb)
+                                    ) seg
+                                    WHERE seg->>'session_id' = gs.id::text
+                                      AND seg->>'action' = 'enter'
+                                )
+                            )
+                          )
                 )
                 OR (
                     gs.status IN ('settled', 'aborted')
@@ -1225,11 +1238,24 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
                         NOT EXISTS (
                             SELECT 1 FROM messages m
                             WHERE m.conversation_id = gs.conversation_id
-                              AND m.metadata @> jsonb_build_object(
-                                  'kind', 'game_status',
-                                  'session_id', gs.id,
-                                  'game_status', 'ended'
-                              )
+                              AND (
+                                    m.metadata @> jsonb_build_object(
+                                        'kind', 'game_status',
+                                        'session_id', gs.id,
+                                        'game_status', 'ended'
+                                    )
+                                    OR (
+                                        m.metadata->>'kind' = 'game_activity_burst'
+                                        AND EXISTS (
+                                            SELECT 1
+                                            FROM jsonb_array_elements(
+                                                COALESCE(m.metadata->'segments', '[]'::jsonb)
+                                            ) seg
+                                            WHERE seg->>'session_id' = gs.id::text
+                                              AND seg->>'action' = 'exit'
+                                        )
+                                    )
+                                  )
                         )
                         OR (
                             gs.companion_reply IS NOT NULL
