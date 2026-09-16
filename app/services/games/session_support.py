@@ -29,9 +29,7 @@ _GAME_STATUS_LOCKS: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
 _GAME_REPLY_LOCKS: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = (
     WeakValueDictionary()
 )
-_GAME_BURST_LOCKS: WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
-    WeakValueDictionary()
-)
+_GAME_BURST_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _GAME_ACTIVITY_BURST_KIND = "game_activity_burst"
 _GAME_ACTIVITY_BURST_WINDOW = timedelta(minutes=5)
 
@@ -270,11 +268,13 @@ async def _write_game_message(
     """Insert one logical game message across all API workers."""
 
     message_id = str(uuid.uuid4())
-    dedupe_keys = (
-        ("kind", "session_id", "game_status")
-        if metadata.get("kind") == "game_status"
-        else ("kind", "session_id", "event_type")
-    )
+    if metadata.get("kind") == _GAME_ACTIVITY_BURST_KIND:
+        metadata.setdefault("burst_id", str(uuid.uuid4()))
+        dedupe_keys = ("kind", "burst_id")
+    elif metadata.get("kind") == "game_status":
+        dedupe_keys = ("kind", "session_id", "game_status")
+    else:
+        dedupe_keys = ("kind", "session_id", "event_type")
     dedupe = {key: metadata[key] for key in dedupe_keys if key in metadata}
     lock_key = f"game-message:{conversation_id}:{_json(dedupe)}"
     async with db.tx() as tx:
@@ -407,8 +407,16 @@ def _is_quick_exit_session(session: GameSessionResponse) -> bool:
     return not played_enough(game_key, _session_action_count(session))
 
 
-def _burst_action_for_status(status: str) -> str:
-    return "exit" if status == "ended" else "enter"
+def _burst_game_titles(segments: list[dict[str, Any]], fallback: str) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for segment in segments:
+        title = str(segment.get("game_title") or fallback or "").strip() or "游戏"
+        if title in seen:
+            continue
+        seen.add(title)
+        titles.append(title)
+    return titles or [fallback or "游戏"]
 
 
 def _format_burst_content(
@@ -416,28 +424,20 @@ def _format_burst_content(
     segments: list[dict[str, Any]],
     actor_name: str,
 ) -> str:
-    if len(segments) == 1:
-        action = str(segments[0].get("action") or "enter")
-        verb = "退出" if action == "exit" else "进入"
-        return f"{actor_name} 和你已{verb}游戏《{game_title}》"
-    first_at = _parse_segment_time(segments[0].get("at"))
-    last_at = _parse_segment_time(segments[-1].get("at"))
-    if first_at and last_at:
-        if first_at.date() == last_at.date():
-            time_part = (
-                f"{first_at.astimezone().strftime('%H:%M')}"
-                f"–{last_at.astimezone().strftime('%H:%M')} "
-            )
-        else:
-            time_part = ""
-    else:
-        time_part = ""
-    return f"{time_part}《{game_title}》进出 {len(segments)} 次"
+    del actor_name
+    titles = _burst_game_titles(segments, game_title)
+    played = any(str(item.get("action") or "") == "played" for item in segments)
+    if len(titles) == 1:
+        return f"一起玩了《{titles[0]}》" if played else f"刚才点开了《{titles[0]}》"
+    return (
+        f"一起玩了 {len(titles)} 款游戏"
+        if played
+        else f"刚才点开了 {len(titles)} 款游戏"
+    )
 
 
 async def _find_open_burst_message(
     conversation_id: str,
-    game_key: str,
     *,
     client: Any,
 ) -> dict[str, Any] | None:
@@ -447,13 +447,11 @@ async def _find_open_burst_message(
         FROM messages
         WHERE conversation_id = $1
           AND metadata->>'kind' = $2
-          AND metadata->>'game_key' = $3
         ORDER BY created_at DESC
         LIMIT 1
         """,
         conversation_id,
         _GAME_ACTIVITY_BURST_KIND,
-        game_key,
     )
     if not rows:
         return None
@@ -540,16 +538,16 @@ async def _append_game_activity_burst_segment(
         "at": _iso(_now()),
         "action": action,
         "session_id": session_id,
+        "game_key": game_key,
+        "game_title": game_title,
     }
     if action == "exit":
         segment["quick_exit"] = quick_exit
 
-    lock_key = (conversation_id, game_key)
-    lock = _GAME_BURST_LOCKS.setdefault(lock_key, asyncio.Lock())
+    lock = _GAME_BURST_LOCKS.setdefault(conversation_id, asyncio.Lock())
     async with lock:
         open_burst = await _find_open_burst_message(
             conversation_id,
-            game_key,
             client=db,
         )
         if open_burst:
@@ -564,6 +562,13 @@ async def _append_game_activity_burst_segment(
             segments.append(segment)
             metadata["segments"] = segments
             metadata["game_status_actor_name"] = actor_name
+            titles = _burst_game_titles(segments, game_title)
+            if len(titles) == 1:
+                metadata["game_key"] = game_key
+                metadata["game_title"] = titles[0]
+            else:
+                metadata.pop("game_key", None)
+                metadata["game_title"] = "、".join(titles)
             content = _format_burst_content(game_title, segments, actor_name)
             message_id = str(open_burst["id"])
             await _update_game_message(
@@ -611,8 +616,14 @@ async def _persist_game_status_to_chat_if_needed(
             return
         game_title = _game_title(updated, payload)
         actor_name = updated.ai_player.nick_name or "AI"
-        action = _burst_action_for_status(status)
-        quick_exit = action == "exit" and _is_quick_exit_session(updated)
+        if status == "started":
+            # Entering a game is not a chat event; the board itself is the signal.
+            return
+        quick_exit = _is_quick_exit_session(updated)
+        if quick_exit:
+            # Browsing / tap-open-tap-close stays silent in chat.
+            return
+        action = "played"
         message_id, inserted, updated_burst = await _append_game_activity_burst_segment(
             conversation_id=updated.conversation_id,
             game_key=game_key,

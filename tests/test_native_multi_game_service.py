@@ -979,10 +979,9 @@ async def test_chat_projection_retry_rebuilds_started_and_terminal_messages(
     assert attempted == 1
     assert "provider = 'native'" in database.query
     assert "game_activity_burst" in database.query
-    assert "seg->>'action' = 'enter'" in database.query
-    assert persist.await_count == 2
-    assert persist.await_args_list[0].args[2] == "game_started"
-    assert persist.await_args_list[1].args[2] == "game_finished"
+    assert persist.await_count == 1
+    assert persist.await_args_list[0].args[2] == "game_finished"
+    assert "seg->>'action' IN ('exit', 'played')" in database.query
 
 
 def test_generic_finish_reply_sounds_like_a_companion_not_a_score_report():

@@ -104,13 +104,93 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
         "_append_game_activity_burst_segment",
         append_burst,
     )
+    monkeypatch.setattr(manager, "send_event", send_event)
+
+    await session_support._persist_game_status_to_chat_if_needed(
+        previous,
+        updated,
+        "game_started",
+        "playing",
+        {"game_title": "围棋"},
+    )
+
+    append_burst.assert_not_awaited()
+    send_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_quick_exit_does_not_write_chat_projection(monkeypatch):
+    previous = NativeSessionResponse(
+        id="native-status-session",
+        game_key="go",
+        status="playing",
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conversation-1",
+        room_id="go-room",
+        play_mode="versus",
+        ai_level=1,
+        user_player=GamePlayerInfo(uid="user-1", nick_name="You"),
+        ai_player=GamePlayerInfo(
+            uid="agent-1",
+            nick_name="Companion",
+            is_ai=1,
+        ),
+    )
+    updated = previous.model_copy(update={"status": "settled", "result": {"go": {"action_count": 0}}})
+    append_burst = AsyncMock()
+    monkeypatch.setattr(
+        session_support,
+        "_append_game_activity_burst_segment",
+        append_burst,
+    )
+
+    await session_support._persist_game_status_to_chat_if_needed(
+        previous,
+        updated,
+        "game_finished",
+        "settled",
+        {"game_title": "围棋"},
+    )
+
+    append_burst.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_played_session_writes_digest_burst(monkeypatch):
+    previous = NativeSessionResponse(
+        id="native-status-session",
+        game_key="go",
+        status="playing",
+        user_id="user-1",
+        agent_id="agent-1",
+        conversation_id="conversation-1",
+        room_id="go-room",
+        play_mode="versus",
+        ai_level=1,
+        user_player=GamePlayerInfo(uid="user-1", nick_name="You"),
+        ai_player=GamePlayerInfo(
+            uid="agent-1",
+            nick_name="Companion",
+            is_ai=1,
+        ),
+        result={"go": {"action_count": 40}},
+    )
+    updated = previous.model_copy(update={"status": "settled"})
+    append_burst = AsyncMock(return_value=("message-1", True, False))
+    send_event = AsyncMock()
+    monkeypatch.setattr(
+        session_support,
+        "_append_game_activity_burst_segment",
+        append_burst,
+    )
     monkeypatch.setattr(
         session_support.db,
         "query_raw",
         AsyncMock(
             return_value=[
                 {
-                    "content": "Companion 和你已进入游戏《围棋》",
+                    "content": "一起玩了《围棋》",
                     "metadata": {
                         "kind": "game_activity_burst",
                         "game_key": "go",
@@ -118,8 +198,9 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
                         "segments": [
                             {
                                 "at": session_support._iso(session_support._now()),
-                                "action": "enter",
+                                "action": "played",
                                 "session_id": "native-status-session",
+                                "game_title": "围棋",
                             }
                         ],
                     },
@@ -132,17 +213,14 @@ async def test_shared_status_helper_accepts_native_session_without_sud_fields(
     await session_support._persist_game_status_to_chat_if_needed(
         previous,
         updated,
-        "game_started",
-        "playing",
+        "game_finished",
+        "settled",
         {"game_title": "围棋"},
     )
 
-    append_burst.assert_awaited_once()
     kwargs = append_burst.await_args.kwargs
-    assert kwargs["game_key"] == "go"
+    assert kwargs["action"] == "played"
     assert kwargs["game_title"] == "围棋"
-    assert kwargs["action"] == "enter"
-    assert kwargs["session_id"] == "native-status-session"
     assert send_event.await_args.args[1] == "game_activity_burst"
 
 

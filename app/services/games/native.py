@@ -781,8 +781,8 @@ async def _persist_chat_side_effects(
     ).strip()
     if _is_quick_exit(updated) and not already_written:
         # 点开又关 —— 不管落 settled 还是 aborted 都是同一件事 (中途退出也判负)。
-        # AI 什么都不说: 进出游戏已经有系统卡片, 再评论一句是复述; 而这类局占终局
-        # 的一半, 任何形式的"说点什么"都会变成骚扰 (限流版实测 3 天发了 84 条)。
+        # AI 什么都不说: 点开又关不再往聊天写系统卡片, 再评论一句更是骚扰;
+        # 这类局占终局的一半, 任何形式的"说点什么"都会变成刷屏 (限流版实测 3 天发了 84 条)。
         # 用户老是点开又关这个信息走画像和每日总结, 见 quick_exit 模块。
         reply = quick_exit_reply()
     elif reply and not already_written:
@@ -1207,8 +1207,10 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
         WHERE gs.provider = 'native'
           AND gs.game_key IN ({supported_game_keys})
           AND gs.conversation_id IS NOT NULL
-          AND gs.status IN ('playing', 'settled', 'aborted')
+          AND gs.status IN ('settled', 'aborted')
           AND gs.created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+          AND gs.companion_reply IS NOT NULL
+          AND btrim(gs.companion_reply) <> ''
           AND (
                 NOT EXISTS (
                     SELECT 1 FROM messages m
@@ -1217,7 +1219,7 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
                             m.metadata @> jsonb_build_object(
                                 'kind', 'game_status',
                                 'session_id', gs.id,
-                                'game_status', 'started'
+                                'game_status', 'ended'
                             )
                             OR (
                                 m.metadata->>'kind' = 'game_activity_burst'
@@ -1227,48 +1229,18 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
                                         COALESCE(m.metadata->'segments', '[]'::jsonb)
                                     ) seg
                                     WHERE seg->>'session_id' = gs.id::text
-                                      AND seg->>'action' = 'enter'
+                                      AND seg->>'action' IN ('exit', 'played')
                                 )
                             )
                           )
                 )
-                OR (
-                    gs.status IN ('settled', 'aborted')
-                    AND (
-                        NOT EXISTS (
-                            SELECT 1 FROM messages m
-                            WHERE m.conversation_id = gs.conversation_id
-                              AND (
-                                    m.metadata @> jsonb_build_object(
-                                        'kind', 'game_status',
-                                        'session_id', gs.id,
-                                        'game_status', 'ended'
-                                    )
-                                    OR (
-                                        m.metadata->>'kind' = 'game_activity_burst'
-                                        AND EXISTS (
-                                            SELECT 1
-                                            FROM jsonb_array_elements(
-                                                COALESCE(m.metadata->'segments', '[]'::jsonb)
-                                            ) seg
-                                            WHERE seg->>'session_id' = gs.id::text
-                                              AND seg->>'action' = 'exit'
-                                        )
-                                    )
-                                  )
-                        )
-                        OR (
-                            gs.companion_reply IS NOT NULL
-                            AND NOT EXISTS (
-                                SELECT 1 FROM messages m
-                                WHERE m.conversation_id = gs.conversation_id
-                                  AND m.metadata @> jsonb_build_object(
-                                      'kind', 'game',
-                                      'session_id', gs.id
-                                  )
-                            )
-                        )
-                    )
+                OR NOT EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.conversation_id = gs.conversation_id
+                      AND m.metadata @> jsonb_build_object(
+                          'kind', 'game',
+                          'session_id', gs.id
+                      )
                 )
               )
         ORDER BY gs.updated_at ASC
@@ -1286,14 +1258,6 @@ async def retry_missing_chat_side_effects(*, limit: int = 20) -> int:
             "game_title": _definition(session.game_key).title,
         }
         playing = session.model_copy(update={"status": "playing"})
-        await _persist_chat_side_effects(
-            playing.model_copy(update={"status": "created"}),
-            playing,
-            "game_started",
-            "playing",
-            payload,
-            None,
-        )
         if session.status in _TERMINAL_STATUSES:
             event_type = (
                 "game_finished" if session.status == "settled" else "game_aborted"
