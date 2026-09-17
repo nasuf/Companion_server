@@ -9,6 +9,7 @@ from app.observability.events import EVT_VIP_CODE_REVOKE
 from app.services.vip.activation_codes.errors import VipActivationError
 from app.services.vip.activation_codes.generator import generate_code_string
 from app.services.vip.activation_codes import repo
+from app.services.vip.activation_codes.normalize import format_code_display, strip_code_separators
 from app.services.vip.entitlements import recompute_vip_entitlements
 
 logger = logging.getLogger(__name__)
@@ -27,9 +28,17 @@ def _iso(value: Any) -> str | None:
 
 
 def _mask_code(code: str) -> str:
-    if len(code) <= 6:
-        return code[:2] + "**"
-    return code[:4] + "**" + code[-2:]
+    normalized = strip_code_separators(code)
+    if not normalized:
+        return "**"
+    display = format_code_display(normalized)
+    if len(normalized) <= 6:
+        return display[:2] + "**"
+    if "-" in display:
+        left, _, right = display.partition("-")
+        if len(left) >= 2 and len(right) >= 2:
+            return f"{left[:2]}**-**{right[-2:]}"
+    return display[:4] + "**" + display[-2:]
 
 
 async def create_codes(
@@ -78,7 +87,7 @@ async def create_codes(
 def _serialize_code(row: dict) -> dict[str, Any]:
     return {
         "id": row["id"],
-        "code": row["code"],
+        "code": format_code_display(str(row["code"])),
         "duration_days": row["duration_days"],
         "max_redemptions": row["max_redemptions"],
         "redemption_count": row["redemption_count"],
@@ -107,7 +116,7 @@ async def list_codes(
 
     if q:
         clauses.append(f"code ILIKE ${idx}")
-        args.append(f"%{q.strip().upper()}%")
+        args.append(f"%{strip_code_separators(q)}%")
         idx += 1
     if enabled is not None:
         clauses.append(f"enabled = ${idx}")
@@ -179,7 +188,7 @@ async def list_redemptions(
         idx += 1
     if code_q:
         clauses.append(f"c.code ILIKE ${idx}")
-        args.append(f"%{code_q.strip().upper()}%")
+        args.append(f"%{strip_code_separators(code_q)}%")
         idx += 1
     if status:
         clauses.append(f"r.status = ${idx}")
@@ -219,7 +228,7 @@ async def list_redemptions(
         {
             "id": str(_field(r, "id")),
             "code_id": str(_field(r, "code_id")),
-            "code": str(_field(r, "code")),
+            "code": format_code_display(str(_field(r, "code"))),
             "code_preview": _mask_code(str(_field(r, "code"))),
             "user_id": str(_field(r, "user_id")),
             "user_display_name": _field(r, "user_display_name"),

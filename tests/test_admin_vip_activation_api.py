@@ -24,7 +24,7 @@ def test_admin_create_and_list_codes(api_client):
     sample = [
         {
             "id": "c1",
-            "code": "VIP-ABCD-1234",
+            "code": "ABCD-1234",
             "duration_days": 30,
             "max_redemptions": 1,
             "redemption_count": 0,
@@ -57,7 +57,7 @@ def test_admin_create_and_list_codes(api_client):
             list_resp = api_client.get("/admin-api/vip-activation/codes")
 
         assert create_resp.status_code == 200
-        assert create_resp.json()[0]["code"] == "VIP-ABCD-1234"
+        assert create_resp.json()[0]["code"] == "ABCD-1234"
         create_codes.assert_awaited_once()
         assert list_resp.status_code == 200
         assert list_resp.json()["total"] == 1
@@ -104,11 +104,11 @@ def test_user_redeem_code(api_client):
         ) as redeem:
             response = api_client.post(
                 "/me/vip/redeem-code",
-                json={"code": "VIP-ABCD-1234"},
+                json={"code": "ABCD-1234"},
             )
         assert response.status_code == 200
         body = response.json()
         assert body["vip"]["is_vip"] is True
-        redeem.assert_awaited_once_with("user-1", "VIP-ABCD-1234")
+        redeem.assert_awaited_once_with("user-1", "ABCD-1234")
     finally:
         app.dependency_overrides.pop(require_user, None)

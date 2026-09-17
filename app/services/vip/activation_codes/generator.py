@@ -8,9 +8,15 @@ _ALPHABET = string.ascii_uppercase + string.digits
 _ALPHABET = "".join(c for c in _ALPHABET if c not in "IO")
 
 
-def generate_code_string(*, segments: int = 2, segment_len: int = 4) -> str:
-    parts = [
-        "".join(secrets.choice(_ALPHABET) for _ in range(segment_len))
-        for _ in range(segments)
-    ]
-    return f"VIP-{'-'.join(parts)}"
+def _mixed_segment(length: int) -> str:
+    """Segment with at least one letter and one digit."""
+    while True:
+        seg = "".join(secrets.choice(_ALPHABET) for _ in range(length))
+        if any(c.isalpha() for c in seg) and any(c.isdigit() for c in seg):
+            return seg
+
+
+def generate_code_string(*, segment_len: int = 4) -> str:
+    left = _mixed_segment(segment_len)
+    right = _mixed_segment(segment_len)
+    return f"{left}-{right}"
