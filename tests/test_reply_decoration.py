@@ -81,7 +81,7 @@ async def test_emit_replies_caps_one_emoji_per_turn():
 @pytest.mark.asyncio
 async def test_emit_replies_attaches_component_card_to_first_normal_reply_only():
     emitted: list[dict] = []
-    card = {"version": 1, "type": "meal_voucher"}
+    card = {"version": 1, "type": "red_packet", "payload": {"offering_id": "off-1"}}
     target = "app.services.chat.reply_post_process"
     with (
         patch(f"{target}.should_add_emoji", return_value=False),
@@ -96,7 +96,7 @@ async def test_emit_replies_attaches_component_card_to_first_normal_reply_only()
             reply_index_offset=0,
             sub_intent_mode=False,
             agent=None,
-            user_message="霸王餐怎么参加",
+            user_message="谢谢你的红包",
             delay_reply_fn=AsyncMock(),
             fallback_fn=AsyncMock(),
             emitted_replies=emitted,

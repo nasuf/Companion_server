@@ -39,7 +39,7 @@ class TestThresholdAlignment:
 
 class TestDetection:
     def test_normal_item_is_not_flagged(self):
-        item = _item("西甲联赛的赛事时间：每年 8 月到次年 5 月")
+        item = _item("城市马拉松的赛事时间：每年 8 月到次年 5 月")
         assert item.is_oversized is False
 
     def test_long_item_is_flagged(self):

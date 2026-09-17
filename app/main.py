@@ -217,7 +217,6 @@ from app.api.realtime.ws import router as ws_router
 from app.api.admin.prompts import router as admin_prompts_router
 from app.api.admin.holidays import router as admin_holidays_router
 from app.api.public.auth import router as auth_router
-from app.api.public.meal import router as meal_router
 from app.api.admin.users import router as admin_users_router
 from app.api.admin.career import router as admin_career_router
 from app.api.admin.agents import router as admin_agents_router
@@ -230,7 +229,6 @@ from app.api.admin.runtime_config import router as admin_runtime_config_router
 from app.api.admin.model_registry import router as admin_model_registry_router
 from app.api.admin.memory_repairs import router as admin_memory_repairs_router
 from app.api.admin.runtime_jobs import router as admin_runtime_jobs_router
-from app.api.admin.meal import router as admin_meal_router
 from app.api.admin.game_configs import router as admin_game_configs_router
 from app.api.admin.game_points import router as admin_game_points_router
 from app.api.admin.wallet import router as admin_wallet_router
@@ -284,7 +282,6 @@ app.include_router(ws_router)
 app.include_router(admin_prompts_router)
 app.include_router(admin_holidays_router)
 app.include_router(auth_router)
-app.include_router(meal_router)
 app.include_router(admin_users_router)
 app.include_router(admin_career_router)
 app.include_router(admin_agents_router)
@@ -297,7 +294,6 @@ app.include_router(admin_runtime_config_router)
 app.include_router(admin_model_registry_router)
 app.include_router(admin_memory_repairs_router)
 app.include_router(admin_runtime_jobs_router)
-app.include_router(admin_meal_router)
 app.include_router(admin_game_configs_router)
 app.include_router(admin_game_points_router)
 app.include_router(admin_wallet_router)

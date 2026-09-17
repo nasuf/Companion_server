@@ -760,7 +760,6 @@ async def _delete_remaining_user_side_tables(user_id: str) -> dict[str, int]:
         ("crisis_events", "DELETE FROM crisis_events WHERE user_id = $1"),
         ("llm_usage", "DELETE FROM llm_usage WHERE user_id = $1"),
         ("auth_identities", "DELETE FROM auth_identities WHERE user_id = $1"),
-        ("meal_vouchers", "DELETE FROM meal_vouchers WHERE user_id = $1"),
     ]:
         await _execute_counted(stats, key, sql, user_id)
     return stats

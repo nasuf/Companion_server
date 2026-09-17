@@ -694,7 +694,7 @@ async def fetch_parallel_context(
             # Raw message texts (not the formatted "用户:/AI:" transcript) so
             # role prefixes never gram-match row contents like "有生命的AI".
             # 10 rows ≈ 3-4 turns with multi-bubble replies (each AI turn is
-            # 2-4 rows); a 4-row window missed topic anchors like "西甲你知道
+            # 2-4 rows); a 4-row window missed topic anchors like "马拉松你知道
             # 不" sitting 6-7 rows back (2026-07-24 trace).
             context_texts=[
                 str(m.get("content") or "") for m in (messages_dicts or [])[-10:]

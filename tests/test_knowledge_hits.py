@@ -1,9 +1,9 @@
 """Literal-hit probe for admin-published knowledge memories (knowledge_hits.py)
 and its merge/escalation semantics in data_fetch_phase.
 
-Pinned against the production canary failure (2026-07-23): "西甲联赛什么时候
-开始？" was classified weak → retrieval skipped → AI answered 不知道 despite
-the knowledge rows being present and embedded.
+Pinned against the production canary failure (2026-07-23): a topical follow-up
+was classified weak → retrieval skipped → AI answered 不知道 despite the
+knowledge rows being present and embedded.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ from app.services.memory.retrieval.context_selector import ClassifiedMemory
 ROWS = [
     {"id": "k1", "content": "公司名称：伴生"},
     {"id": "k2", "content": "伴生App的产品上线时间：预计2026年9月"},
-    {"id": "k3", "content": "2026年恒洁杯第二十届佛山“西甲”足球联赛的赛事时间：2026年7月10日至8月23日"},
-    {"id": "k4", "content": "2026年恒洁杯第二十届佛山“西甲”足球联赛的赛事地点：佛山三水云秀山体育场"},
-    {"id": "k5", "content": "2026年恒洁杯第二十届佛山“西甲”足球联赛的票务信息：首次推行收费，开闭幕式门票18.8元；小组赛普通区免费"},
-    {"id": "k6", "content": "2026年恒洁杯第二十届佛山“西甲”足球联赛的活动亮点：开幕式含全息投影、无人机表演及艺人助阵"},
+    {"id": "k3", "content": "2026城市马拉松的赛事时间：2026年7月10日至8月23日"},
+    {"id": "k4", "content": "2026城市马拉松的赛事地点：市中心体育公园"},
+    {"id": "k5", "content": "2026城市马拉松的票务信息：半程马拉松88元；欢乐跑免费；普通区门票18.8元"},
+    {"id": "k6", "content": "2026城市马拉松的活动亮点：开幕式含灯光秀及乐队助阵"},
 ]
 
 
@@ -30,9 +30,9 @@ ROWS = [
 
 
 def test_grams_extract_topic_words_and_drop_stop_grams():
-    grams = kh.extract_topic_grams("西甲联赛什么时候开始？")
-    assert "西甲" in grams
-    assert "西甲联赛" in grams
+    grams = kh.extract_topic_grams("城市马拉松什么时候开始？")
+    assert "马拉松" in grams
+    assert "市马拉松" in grams
     assert "什么" not in grams  # stop gram
     assert "时候" not in grams  # stop gram
 
@@ -60,17 +60,17 @@ def test_grams_empty_for_noise():
 
 
 def test_hits_rank_longer_gram_matches_first():
-    grams = kh.extract_topic_grams("西甲联赛什么时候开始？在哪里比赛呀？")
+    grams = kh.extract_topic_grams("城市马拉松什么时候开始？在哪里比赛呀？")
     hits = kh.find_literal_hits(grams, ROWS)
     contents = [r["content"] for r in hits]
-    # All hits are 西甲 event rows; the company/product rows don't match.
-    assert contents and all("西甲" in c for c in contents)
+    # All hits are 马拉松 event rows; the company/product rows don't match.
+    assert contents and all("马拉松" in c for c in contents)
     assert not any("公司名称" in c for c in contents)
 
 
 def test_hits_for_ticket_question_via_enhanced_query_grams():
     grams = kh.extract_topic_grams("那门票贵不贵？我想去看") | kh.extract_topic_grams(
-        "西甲联赛的门票价格"
+        "城市马拉松的门票价格"
     )
     hits = kh.find_literal_hits(grams, ROWS)
     assert any("票务信息" in r["content"] for r in hits)
@@ -85,7 +85,7 @@ def test_hits_for_generic_activity_question():
 
 
 def test_hits_cap_and_no_match():
-    grams = kh.extract_topic_grams("西甲")
+    grams = kh.extract_topic_grams("马拉松")
     assert len(kh.find_literal_hits(grams, ROWS, max_hits=2)) == 2
     assert kh.find_literal_hits(kh.extract_topic_grams("晚饭吃了炸酱面"), ROWS) == []
 
@@ -97,7 +97,7 @@ def test_hits_cap_and_no_match():
 async def test_probe_builds_ai_slot_memories():
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
         memories = await kh.probe_knowledge_memories(
-            user_message="西甲联赛什么时候开始？",
+            user_message="城市马拉松什么时候开始？",
             workspace_id="ws-1",
         )
     assert memories
@@ -105,14 +105,14 @@ async def test_probe_builds_ai_slot_memories():
     assert isinstance(first, ClassifiedMemory)
     assert first.source == "ai"
     assert first.rank_reasons == ["knowledge_literal_hit"]
-    assert "西甲" in first.text
+    assert "马拉松" in first.text
 
 
 @pytest.mark.asyncio
 async def test_probe_excludes_already_selected_texts():
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=ROWS)):
         memories = await kh.probe_knowledge_memories(
-            user_message="西甲联赛的赛事时间和地点",
+            user_message="城市马拉松的赛事时间和地点",
             workspace_id="ws-1",
             exclude_texts={ROWS[2]["content"]},
         )
@@ -135,17 +135,17 @@ async def test_probe_skips_loader_when_no_topic_grams():
 @pytest.mark.asyncio
 async def test_probe_without_workspace_is_noop():
     assert await kh.probe_knowledge_memories(
-        user_message="西甲联赛", workspace_id=None,
+        user_message="城市马拉松", workspace_id=None,
     ) == []
 
 
 # ── context fallback (elliptical follow-up questions) ──────────────────
 
-# The second-canary regression: after the AI described 西甲 for a few turns,
+# The second-canary regression: after the AI described 马拉松 for a few turns,
 # the user asked "啥时候开始？" — no topic tokens, enhanced_query came back
 # empty, and vector search grounded the WRONG time row (App 上线时间).
 XIJIA_CONTEXT = [
-    "西甲你知道吗",
+    "马拉松你知道吗",
     "有四十八支球队参赛哦",
     "覆盖了粤港澳好多城市",
     "那你想了解哪方面的细节呀？",
@@ -173,7 +173,7 @@ async def test_context_fallback_recovers_elliptical_question():
             workspace_id="ws-1",
         )
     texts = [m.text for m in memories]
-    # The whole 西甲 topic block rides along — crucially the 赛事时间 row.
+    # The whole 马拉松 topic block rides along — crucially the 赛事时间 row.
     assert any("赛事时间" in t for t in texts)
     assert all(m.rank_reasons == ["knowledge_context_hit"] for m in memories)
     # The product row must NOT hit (context never mentions 伴生/App).
@@ -212,17 +212,17 @@ PERSONA_ROWS = [
     {"id": "p1", "content": "我所在的公司名称：伴生"},
     {"id": "p2", "content": "我所在的公司「伴生」核心理念：打造“有生命的AI”，追求有独立人格、真实情绪的陪伴体验。"},
     {"id": "p3", "content": "我们公司的产品「伴生App」上线时间：预计2026年9月"},
-    {"id": "p4", "content": "我们公司合作的项目名称：2026年恒洁杯第二十届佛山“西甲”足球联赛"},
-    {"id": "p5", "content": "我们公司合作的项目「2026年恒洁杯第二十届佛山“西甲”足球联赛」赛事时间：2026年7月10日至8月23日"},
-    {"id": "p6", "content": "我们公司合作的项目「2026年恒洁杯第二十届佛山“西甲”足球联赛」赛事地点：佛山三水云秀山体育场"},
+    {"id": "p4", "content": "我们公司合作的项目名称：2026城市马拉松"},
+    {"id": "p5", "content": "我们公司合作的项目「2026城市马拉松」赛事时间：2026年7月10日至8月23日"},
+    {"id": "p6", "content": "我们公司合作的项目「2026城市马拉松」赛事地点：市中心体育公园"},
 ]
 
-# The real conversation (bubble-split): the 西甲 anchor sits 6-7 rows back,
+# The real conversation (bubble-split): the 马拉松 anchor sits 6-7 rows back,
 # which is why data_fetch passes a 10-row window.
 NASHISHA_CONTEXT = [
     "刚醒没多久 正摸手机呢 你起好早呀",
-    "西甲你知道不",
-    "你说的是我公司合作的那个足球联赛吗？",
+    "马拉松你知道不",
+    "你说的是我公司合作的那个马拉松吗？",
     "还是别的什么呀？",
     "对",
     "哦 那我知道的 你问这个干嘛呀",
@@ -230,45 +230,38 @@ NASHISHA_CONTEXT = [
 ]
 
 
-MEAL_ROWS = [
-    {"id": "m1", "content": "我们公司的活动名称：霸王餐"},
-    {"id": "m2", "content": "我们公司的活动领取方式：在现场完成线下游戏或活动项目、达成目标后，由工作人员扫码激活你的霸王餐券二维码"},
-    {"id": "m3", "content": "我们公司的活动次数限制：每个账户只能激活一次、核销一次霸王餐券；每天全场可核销的霸王餐券数量上限是500个"},
+PROMO_ROWS = [
+    {"id": "m1", "content": "我们公司的活动名称：打卡有礼"},
+    {"id": "m2", "content": "我们公司的活动打卡有礼领取方式：在现场完成线下游戏或活动项目、达成目标后，由工作人员扫码激活你的打卡有礼券二维码"},
+    {"id": "m3", "content": "我们公司的活动打卡有礼次数限制：每个账户只能激活一次、核销一次打卡有礼券；每天全场可核销的打卡有礼券数量上限是500个"},
 ]
 
 
 @pytest.mark.asyncio
 async def test_current_message_topic_beats_context_topic():
-    """Trace pinned (2026-07-24 17:44): 「听说有霸王餐？」 asked right after a
-    西甲 chat injected 8 event rows and ZERO meal rows — the context's longer
-    grams (佛山西甲) out-ranked the message's own 霸王餐 and the reply denied
-    the activity existed. Message-named rows must take slots first."""
-    rows = ROWS + MEAL_ROWS
+    """Promo follow-ups after a marathon chat must keep message-named rows first."""
+    rows = ROWS + PROMO_ROWS
     context = [
-        "球队名单我记不太全哦",
-        "你可以去微信小程序「佛山西甲」查 上面信息都很全的",
+        "参赛名单我记不太全哦",
+        "你可以去微信小程序「城市赛事」查 上面信息都很全的",
     ]
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=rows)):
         memories = await kh.probe_knowledge_memories(
-            user_message="听说有霸王餐？",
+            user_message="听说有打卡有礼？",
             context_texts=context,
             workspace_id="ws-1",
         )
     texts = [m.text for m in memories]
-    meal_idx = [i for i, t in enumerate(texts) if "霸王餐" in t]
-    event_idx = [i for i, t in enumerate(texts) if "霸王餐" not in t]
-    # Every meal row is present, carries the literal reason, and ranks before
-    # any context-only event row.
-    assert len(meal_idx) == len(MEAL_ROWS)
-    assert all(memories[i].rank_reasons == ["knowledge_literal_hit"] for i in meal_idx)
-    assert not event_idx or max(meal_idx) < min(event_idx)
+    promo_idx = [i for i, t in enumerate(texts) if "打卡有礼" in t]
+    event_idx = [i for i, t in enumerate(texts) if "打卡有礼" not in t]
+    assert len(promo_idx) == len(PROMO_ROWS)
+    assert all(memories[i].rank_reasons == ["knowledge_literal_hit"] for i in promo_idx)
+    assert not event_idx or max(promo_idx) < min(event_idx)
 
 
 @pytest.mark.asyncio
 async def test_junk_enhanced_query_no_longer_blinds_context():
-    """Trace cedba0cc pinned: '那是啥' + enhanced 'AI知道的那个东西' answered
-    西班牙足球甲级联赛 because one 'ai' false hit suppressed the context
-    fallback. Union + 3-char alnum tokens must surface the 西甲 block."""
+    """Trace cedba0cc pinned: junk enhanced_query must not suppress context fallback."""
     with patch.object(kh, "load_knowledge_rows", AsyncMock(return_value=PERSONA_ROWS)):
         memories = await kh.probe_knowledge_memories(
             user_message="那是啥",
@@ -277,10 +270,9 @@ async def test_junk_enhanced_query_no_longer_blinds_context():
             workspace_id="ws-1",
         )
     texts = [m.text for m in memories]
-    # The 西甲 project block must be present and ranked first (足球联赛 is the
-    # longest matched gram) — this is what grounds "那是啥".
+    # The marathon project block must be present and ranked first.
     assert any("项目名称" in t for t in texts)
-    assert "足球联赛" in texts[0]
+    assert "城市马拉松" in texts[0]
     # Rows reachable only via prior turns carry the context reason.
     name_row = next(m for m in memories if "项目名称" in m.text)
     assert name_row.rank_reasons == ["knowledge_context_hit"]

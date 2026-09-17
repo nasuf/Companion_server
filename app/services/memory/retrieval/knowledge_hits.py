@@ -2,7 +2,7 @@
 
 Why this exists (2026-07-23, production canary of the template-knowledge
 feature): the relevance gate (spec §3.4) classifies world-knowledge questions
-("西甲联赛什么时候开始？") as weak — the small model cannot know the memory
+("城市马拉松什么时候开始？") as weak — the small model cannot know the memory
 bank happens to contain admin-published facts about that exact topic — so
 retrieval is skipped and the AI answers "不知道" despite having the memory.
 And even when the gate passes ("公司最近有活动吗"), generic wording can rank
@@ -11,7 +11,7 @@ the knowledge rows below the 0.50 vector threshold, crowding them out.
 The probe is deterministic and cheap: knowledge rows (provenance =
 'knowledge_seed') are few (≤200 per workspace, Redis-cached, and the vast
 majority of workspaces have none → one cached-empty GET), and a CJK n-gram
-containment check ("西甲" / "门票" / "活动" appearing inside a row's content)
+containment check ("马拉松" / "门票" / "活动" appearing inside a row's content)
 is a reliable signal that the row IS what the user is asking about.
 
 Consumption (data_fetch_phase):
@@ -22,13 +22,13 @@ Consumption (data_fetch_phase):
   topic matches can never be dropped by vector ranking.
 
 Context fallback (2026-07-23, second canary): elliptical follow-ups ("啥时候
-开始？" right after the AI described 西甲) carry no topic tokens themselves,
+开始？" right after the AI described an event) carry no topic tokens themselves,
 and enhanced_query restoration by the relevance LLM is not reliable — that
 turn retrieved the WRONG time row (伴生App 上线时间) and the reply conflated
 the product launch with the event date. When the current message + enhanced
 query produce no hits AND the message looks like a short follow-up question,
 the probe re-runs on the last few conversation turns' raw text: the context
-names the topic (西甲/球队/比赛), the injection cap is raised so the whole
+names the topic (马拉松/参赛/比赛), the injection cap is raised so the whole
 topic block (名称/时间/地点/票务…) rides along, and the reply LLM picks the
 attribute the user asked about.
 
@@ -123,7 +123,7 @@ def find_literal_hits(
 ) -> list[dict[str, Any]]:
     """Rows whose content contains any topic gram, best matches first.
 
-    Ranking: longest matched gram first (a 4-gram like "西甲联赛" is a much
+    Ranking: longest matched gram first (a 4-gram like "城市马拉松" is a much
     stronger topical signal than a lone 2-gram), then number of distinct
     matched grams.
     """
@@ -214,15 +214,13 @@ async def probe_knowledge_memories(
 
     Gram sources (2026-07-24 rework — two-phase union):
     - primary: current message + enhanced_query (the relevance LLM's ellipsis
-      restoration when it worked: "那门票贵不贵" → "西甲联赛的门票价格")
+      restoration when it worked: "那门票贵不贵" → "城市马拉松的门票价格")
     - context: for short follow-up questions, the last few turns' raw text is
       also probed. Suppressing context whenever the primary path had any hit
       proved fragile (a junk "AI知道的那个东西" restoration once blocked the
-      西甲 topic block), but ranking both sources in ONE pool proved just as
-      fragile the other way: asking 「听说有霸王餐？」 right after a 西甲
-      chat let the context's longer grams (佛山西甲, 4 chars) out-rank the
-      message's own 霸王餐 (3 chars) and fill the whole cap with event rows —
-      the reply then denied the meal activity existed.
+      topic block), but ranking both sources in ONE pool proved just as
+      fragile the other way: a short promo follow-up after a long event chat
+      could let context-only grams out-rank the message's own topic tokens.
 
     Selection is therefore two-phase: rows named by the CURRENT message
     (primary grams) take slots first — what the user asks now beats what was

@@ -468,7 +468,7 @@ def test_orchestrator_red_packet_forces_main_prompt_and_skips_memory():
 
     src = (Path(__file__).resolve().parents[1] / "app/services/chat/orchestrator.py").read_text()
     assert "skip_memory=bool(offering_context)" in src
-    assert "meal_card_decision.state != \"none\" or bool(offering_context)" in src
+    assert "force_main_prompt=bool(offering_context)" in src
 
 
 @pytest.mark.asyncio
@@ -500,7 +500,7 @@ async def test_red_packet_prompt_skips_reengagement_section():
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="小伴", values={"gender": "female"}),
             reengagement_gap_seconds=8 * 86400,
-            session_recap="上次在聊西甲票务",
+            session_recap="上次在聊活动票务",
             red_packet_context={
                 "offering_id": "off-1",
                 "ticket_amount": 100,
@@ -769,7 +769,7 @@ async def test_gift_prompt_skips_reengagement_section():
         prompt = await build_system_prompt(
             agent=SimpleNamespace(name="小伴", values={"gender": "female"}),
             reengagement_gap_seconds=8 * 86400,
-            session_recap="上次在聊西甲票务",
+            session_recap="上次在聊活动票务",
             gift_context={
                 "offering_id": "off-1",
                 "product_title": "美式咖啡",

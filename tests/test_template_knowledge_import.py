@@ -13,7 +13,7 @@ from app.services.agent_template.knowledge_import import (
     parse_knowledge_document,
 )
 
-XIJIA_DOC = """公司介绍
+MARATHON_DOC = """公司介绍
 公司名称：伴生
 公司定位：陪伴科技公司
 公司核心理念：打造“有生命的AI”，追求有独立人格、真实情绪、日常作息与个人边界的陪伴体验。
@@ -21,9 +21,9 @@ XIJIA_DOC = """公司介绍
 产品名称：伴生App
 产品上线时间：预计2026年9月
 合作项目介绍
-项目名称：2026年恒洁杯第二十届佛山“西甲”足球联赛
+项目名称：2026城市马拉松
 赛事时间：2026年7月10日至8月23日
-赛事地点：佛山三水云秀山体育场
+赛事地点：市中心体育公园
 """
 
 
@@ -32,7 +32,7 @@ def _summaries(text: str) -> list[str]:
 
 
 def test_parse_sections_persona_voice_summaries():
-    items = parse_knowledge_document(XIJIA_DOC.encode("utf-8"))
+    items = parse_knowledge_document(MARATHON_DOC.encode("utf-8"))
     summaries = [i.summary for i in items]
 
     # Recognized sections (公司/产品/合作) render as FIRST-PERSON work
@@ -43,7 +43,7 @@ def test_parse_sections_persona_voice_summaries():
     assert "我们公司的产品名称：伴生App" in summaries
     assert "我们公司的产品「伴生App」上线时间：预计2026年9月" in summaries
     assert (
-        "我们公司合作的项目「2026年恒洁杯第二十届佛山“西甲”足球联赛」"
+        "我们公司合作的项目「2026城市马拉松」"
         "赛事时间：2026年7月10日至8月23日"
     ) in summaries
 
@@ -106,9 +106,9 @@ def test_heading_variants_hash_enum_and_trailing_colon():
 
 def test_long_colonless_line_joins_current_section_as_content():
     long_line = "这个项目覆盖粤港澳大湾区十一个城市并且包含一百零四场比赛非常盛大"
-    doc = f"合作项目介绍\n项目名称：西甲联赛\n{long_line}\n"
+    doc = f"合作项目介绍\n项目名称：城市马拉松\n{long_line}\n"
     summaries = _summaries(doc)
-    assert f"我们公司合作的项目「西甲联赛」：{long_line}" in summaries
+    assert f"我们公司合作的项目「城市马拉松」：{long_line}" in summaries
 
 
 def test_colon_inside_sentence_is_not_a_label():

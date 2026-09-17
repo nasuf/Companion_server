@@ -259,22 +259,6 @@ class Settings(BaseSettings):
     # dedicated Tencent template is approved.
     last_will_sms_enabled: bool = False
 
-    # 霸王餐服务员页访问口令: 登录 staff.html 后获得短时 JWT，再调用微信扫一扫。
-    # 请配全大写英文字母；空值仅允许本地开发，生产会拒绝服务员登录。
-    meal_staff_key: str = ""
-    meal_staff_jwt_expiry_hours: int = 12
-
-    # 霸王餐券服务员校验后的有效期 (天): activatedAt 起算，超时未核销即过期，
-    # 无法再找商家兑换. 有效期口径按 UTC+8 自然时间 (activatedAt + N 天).
-    meal_validity_days: int = 7
-    # 每日霸王餐核销总量上限 (先到先得): 单个 UTC+8 自然日内核销总数达到该值后,
-    # 后续核销请求被拒并留痕, 提示用户次日 (仍需在有效期内) 再来.
-    meal_daily_redeem_cap: int = 500
-    # 用户券动态二维码：Redis 一次性凭证有效期。页面会在过期前自动刷新。
-    meal_qr_ttl_seconds: int = 60
-    # 商家自助登录 JWT 使用独立短有效期，不复用普通用户默认 7 天。
-    meal_merchant_jwt_expiry_hours: int = 12
-
     # Optional: a fully-provisioned "template" agent id. When set, a brand-new
     # user (e.g. first WeChat Mini Program login) is given an instant clone of
     # this agent (persona + L1 memory + embeddings copied, no LLM), so they can

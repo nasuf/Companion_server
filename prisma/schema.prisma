@@ -67,8 +67,6 @@ model User {
   musicFavorites           MusicFavorite[]
   musicPlaybacks           MusicPlayback[]
   musicCoListeningSessions MusicCoListeningSession[]
-  mealVoucher              MealVoucher?
-  mealRedeemFailures       MealRedemptionFailure[]
   achievementUnlocks       AchievementUnlock[]
   achievementEvents        AchievementEvent[]
   pushDevices              PushDevice[]
@@ -1924,11 +1922,6 @@ model SystemConfig {
   // Default template agent that new users (e.g. WeChat Mini Program) are cloned
   // from at first login. null = fall back to env DEFAULT_TEMPLATE_AGENT_ID.
   defaultTemplateAgentId String?  @map("default_template_agent_id")
-  // 霸王餐激活校验码功能开关: 关闭后所有校验码立即失效且不再生成 (admin 可切换).
-  mealCodeEnabled        Boolean  @default(true) @map("meal_code_enabled")
-  // 校验码生成锚点 (unix 秒): 每次「开启」时刷新 — 码与窗口计时都相对锚点推导,
-  // 锚点一变旧码全部立即失效, 新码从满 5 分钟倒计时开始. null = 0 (绝对时间窗).
-  mealCodeAnchor         BigInt?  @map("meal_code_anchor")
   // 线下真实世界模块主动推送开关 (admin 后台动态切换, 实时生效, 默认关闭).
   // 关闭后 offline trigger scan 跳过对应分支 + 手动/mock 接口拒绝创建;
   // 已有条目的读取/操作接口不受影响. 默认 false: 客户端 (H5) 无卡片 UI 前先暂停.
@@ -1943,64 +1936,6 @@ model SystemConfig {
   updatedAt              DateTime @updatedAt @map("updated_at")
 
   @@map("system_config")
-}
-
-// ── 霸王餐 (free-meal voucher campaign) ──────────────────────────────
-// 商家: 联系人姓名/手机号用于商家 H5
-// 页自助身份确认 (二选一, 都可空 — 空则该商家无法自助登录, 仅 admin 可管理).
-model MealMerchant {
-  id           String        @id @default(uuid())
-  name         String
-  contactName  String?       @map("contact_name")
-  contactPhone String?       @map("contact_phone")
-  codeActive   Boolean       @default(true) @map("code_active")
-  // 千味央厨归属: qwycMember = 该商家属于「千味央厨」品牌下的成员门店;
-  // qwycGroup = 该商家是「千味央厨」总账号 (登录后看汇总, 不扫码核销).
-  qwycMember   Boolean       @default(false) @map("qwyc_member")
-  qwycGroup    Boolean       @default(false) @map("qwyc_group")
-  createdAt    DateTime      @default(now()) @map("created_at")
-  updatedAt    DateTime      @updatedAt @map("updated_at")
-  vouchers     MealVoucher[]
-
-  @@map("meal_merchants")
-}
-
-// 霸王餐券: 每用户一张 (userId unique), 状态机 inactive → activated → redeemed.
-// 激活 = 输入服务员页的 5 分钟轮换校验码; 核销仅支持商家扫码.
-// merchant onDelete SetNull: 商家删除后已核销记录保留 (统计口径不塌).
-model MealVoucher {
-  id          String        @id @default(uuid())
-  userId      String        @unique @map("user_id")
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  status      String        @default("inactive")
-  activatedAt DateTime?     @map("activated_at")
-  redeemedAt  DateTime?     @map("redeemed_at")
-  merchantId  String?       @map("merchant_id")
-  merchant    MealMerchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
-
-  @@index([status], map: "meal_vouchers_status_idx")
-  @@index([merchantId], map: "meal_vouchers_merchant_idx")
-  @@index([activatedAt], map: "meal_vouchers_activated_at_idx")
-  @@map("meal_vouchers")
-}
-
-// 霸王餐核销失败记录: 当日核销总量已达上限 (先到先得, 超出 1000 份) 时, 用户
-// 核销请求被拒绝, 在此留痕供后台「数据统计」查看谁没抢到. 每用户每自然日
-// 每种 reason 只记 1 条 (服务层写入前去重), 便于按「人/券」口径统计.
-// merchantId 保留为松引用 (无外键): 只作展示线索, 商家删除不影响历史失败记录.
-model MealRedemptionFailure {
-  id         String   @id @default(uuid())
-  userId     String   @map("user_id")
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  merchantId String?  @map("merchant_id")
-  reason     String   @default("daily_cap")
-  createdAt  DateTime @default(now()) @map("created_at")
-
-  @@index([createdAt], map: "meal_redeem_failures_created_at_idx")
-  @@index([userId], map: "meal_redeem_failures_user_idx")
-  @@map("meal_redemption_failures")
 }
 
 // 单 agent 模型 override. 改了只影响该 agent, 其余仍走 SystemConfig/env.

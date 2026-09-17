@@ -9,21 +9,21 @@ Expected format — short section headings + "标签：内容" lines:
     公司名称：伴生
     公司定位：陪伴科技公司
     合作项目介绍
-    项目名称：2026年恒洁杯第二十届佛山“西甲”足球联赛
+    项目名称：2026城市马拉松
     赛事时间：2026年7月10日至8月23日
 
 Parsing is deterministic (no LLM). Every labeled line becomes ONE memory item;
 the stored summary is made self-contained by prefixing the section subject
 (the section's 「XX名称」 value when present, else the section title) so vector
-retrieval hits standalone questions ("西甲什么时候开始") whose tokens only
+retrieval hits standalone questions ("马拉松什么时候开始") whose tokens only
 appear in the section subject, not in the line itself.
 
 Persona voice (2026-07-23 rework, after the first production canary): these
 rows live in the AGENT's own memory bank, so a bare factsheet line ("项目名称：
-西甲足球联赛") loses the relationship the section heading carried — nothing
+城市马拉松") loses the relationship the section heading carried — nothing
 told the AI this is ITS OWN company's cooperation project, so replies could
 only recite facts, never say "我们公司合作的比赛". Section-keyword stems now
-rewrite each line into first-person work memory ("我们公司合作的项目「…西甲…」
+rewrite each line into first-person work memory ("我们公司合作的项目「…马拉松…」
 赛事时间：…"). Assumption (by product design): a knowledge document uploaded
 to a template describes the persona's OWN company/products/projects; documents
 about unrelated topics should use section titles without 公司/产品/合作/活动
@@ -242,7 +242,7 @@ def _relational_summary(*, stem: str, subject: str, label: str, content: str) ->
 
     - 名称 lines carry the subject themselves: "我们公司合作的项目名称：…"
     - other lines embed the subject:
-      "我们公司合作的项目「…西甲…联赛」赛事时间：2026年7月10日至8月23日"
+      "我们公司合作的项目「…城市马拉松…」赛事时间：2026年7月10日至8月23日"
     """
     label_clean = _strip_stem_overlap(stem, label)
     if label.endswith(_NAME_LABEL_SUFFIX):
@@ -277,7 +277,7 @@ def _build_items(sections: list[tuple[str, list[tuple[str, str]]]]) -> list[Know
                 base = f"{label}：{content}" if label else content
                 if subject and subject not in base:
                     # Prefix the subject so the line survives standalone
-                    # retrieval ("赛事时间：7月10日" alone never matches 西甲).
+                    # retrieval ("赛事时间：7月10日" alone never matches 马拉松).
                     summary = (
                         f"{subject}的{label}：{content}" if label else f"{subject}：{content}"
                     )
