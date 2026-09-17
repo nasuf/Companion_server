@@ -34,12 +34,15 @@ class IapVerifyResponse(BaseModel):
 
 class IapHistoryItem(BaseModel):
     transaction_id: str
+    original_transaction_id: str | None = None
     product_id: str
     product_label: str
-    kind: Literal["subscription", "consumable"]
+    kind: Literal["subscription", "consumable", "activation_code"]
+    source: Literal["iap", "activation_code"] | None = None
     status: Literal["granted", "refunded", "revoked"]
     purchase_date: str | None = None
     expires_date: str | None = None
+    renewal_sequence: int | None = None
 
 
 class IapSubscriptionStatus(BaseModel):
