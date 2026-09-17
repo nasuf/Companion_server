@@ -71,7 +71,7 @@ async def user_has_granted_redemption(
     rows = await executor.query_raw(
         """
         SELECT 1 FROM vip_code_redemptions
-        WHERE code_id = $1::uuid AND user_id = $2::uuid AND status = $3
+        WHERE code_id = $1::uuid AND user_id = $2 AND status = $3
         LIMIT 1
         """,
         code_id,
@@ -96,7 +96,7 @@ async def insert_redemption(
             code_id, user_id, duration_days, status,
             redeemed_at, effective_start, effective_end
         )
-        VALUES ($1::uuid, $2::uuid, $3, $4, CURRENT_TIMESTAMP, $5::timestamp, $6::timestamp)
+        VALUES ($1::uuid, $2, $3, $4, CURRENT_TIMESTAMP, $5::timestamp, $6::timestamp)
         RETURNING id
         """,
         code_id,
@@ -140,7 +140,7 @@ async def insert_code(
             code, duration_days, max_redemptions, enabled,
             valid_from, valid_until, note, created_by
         )
-        VALUES ($1, $2, $3, TRUE, $4::timestamp, $5::timestamp, $6, $7::uuid)
+        VALUES ($1, $2, $3, TRUE, $4::timestamp, $5::timestamp, $6, $7)
         RETURNING id, code, duration_days, max_redemptions, redemption_count,
                   enabled, valid_from, valid_until, note, created_by, created_at, updated_at
         """,

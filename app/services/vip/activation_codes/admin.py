@@ -170,7 +170,7 @@ async def list_redemptions(
     idx = 1
 
     if user_id:
-        clauses.append(f"r.user_id = ${idx}::uuid")
+        clauses.append(f"r.user_id = ${idx}")
         args.append(user_id)
         idx += 1
     if code_id:
@@ -260,7 +260,7 @@ async def revoke_redemption(redemption_id: str, *, admin_user_id: str) -> dict[s
             UPDATE vip_code_redemptions
             SET status = $2,
                 revoked_at = CURRENT_TIMESTAMP,
-                revoked_by = $3::uuid
+                revoked_by = $3
             WHERE id = $1::uuid
             """,
             redemption_id,

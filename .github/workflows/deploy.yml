@@ -378,6 +378,13 @@ jobs:
               echo "MIGRATION_DATABASE_URL secret is required for Prisma migrations"
               exit 1
             fi
+            # If a migration failed (P3018) and was fixed in git, mark it rolled back
+            # so migrate deploy can re-apply the corrected SQL. No-op when not needed.
+            $DOCKER compose -f docker-compose.deploy.yml run --rm --no-deps \
+              -e DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
+              -e DIRECT_DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
+              server prisma migrate resolve --rolled-back 20260917120000_vip_activation_codes \
+              || true
             $DOCKER compose -f docker-compose.deploy.yml run --rm --no-deps \
               -e DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
               -e DIRECT_DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \

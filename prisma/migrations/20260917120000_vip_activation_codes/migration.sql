@@ -10,7 +10,7 @@ CREATE TABLE vip_activation_codes (
     valid_from TIMESTAMP NULL,
     valid_until TIMESTAMP NULL,
     note TEXT NULL,
-    created_by UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    created_by TEXT NULL REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -22,7 +22,7 @@ CREATE INDEX vip_activation_codes_enabled_created_idx
 CREATE TABLE vip_code_redemptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     code_id UUID NOT NULL REFERENCES vip_activation_codes(id) ON DELETE RESTRICT,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     duration_days INT NOT NULL CHECK (duration_days > 0),
     status TEXT NOT NULL DEFAULT 'granted'
         CHECK (status IN ('granted', 'revoked')),
@@ -30,7 +30,7 @@ CREATE TABLE vip_code_redemptions (
     effective_start TIMESTAMP NULL,
     effective_end TIMESTAMP NULL,
     revoked_at TIMESTAMP NULL,
-    revoked_by UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    revoked_by TEXT NULL REFERENCES users(id) ON DELETE SET NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
