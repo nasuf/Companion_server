@@ -95,33 +95,61 @@ async def get_membership(user_id: str, *, history_limit: int = 50) -> dict[str, 
                ROW_NUMBER() OVER (
                    PARTITION BY original_transaction_id
                    ORDER BY purchase_date ASC NULLS LAST, created_at ASC
-               ) AS renewal_sequence
+               ) AS renewal_sequence,
+               'iap'::text AS source
         FROM iap_transactions
         WHERE user_id = $1
           AND product_id LIKE $2
           AND status IN ('granted', 'refunded', 'revoked')
-        ORDER BY purchase_date DESC NULLS LAST, created_at DESC
+        UNION ALL
+        SELECT r.id::text AS transaction_id,
+               r.code_id::text AS original_transaction_id,
+               ('activation:' || r.duration_days::text) AS product_id,
+               'activation_code' AS kind,
+               r.status,
+               r.redeemed_at AS purchase_date,
+               r.effective_end AS expires_date,
+               1 AS renewal_sequence,
+               'activation_code'::text AS source
+        FROM vip_code_redemptions r
+        WHERE r.user_id = $1
+          AND r.status IN ('granted', 'revoked')
+        ORDER BY purchase_date DESC NULLS LAST
         LIMIT $3
         """,
         user_id,
         f"{_VIP_PRODUCT_PREFIX}%",
         limit,
     )
-    history = [
-        {
-            "transaction_id": str(_field(r, "transaction_id", "")),
-            "original_transaction_id": str(_field(r, "original_transaction_id", "") or ""),
-            "product_id": str(_field(r, "product_id", "")),
-            "product_label": product_label(str(_field(r, "product_id", ""))),
-            "kind": str(_field(r, "kind", "")),
-            "status": str(_field(r, "status", "")),
-            "purchase_date": _iso(_field(r, "purchase_date")),
-            "expires_date": _iso(_field(r, "expires_date")),
-            "renewal_sequence": int(_field(r, "renewal_sequence") or 1),
-        }
-        for r in history_rows
-        if _is_vip_product(str(_field(r, "product_id", "")))
-    ]
+    history = []
+    for r in history_rows:
+        source = str(_field(r, "source", "iap"))
+        product_id = str(_field(r, "product_id", ""))
+        if source == "activation_code":
+            days = int(product_id.split(":", 1)[1]) if ":" in product_id else 0
+            label = f"激活码 {days} 天"
+            kind = "activation_code"
+        else:
+            if not _is_vip_product(product_id):
+                continue
+            label = product_label(product_id)
+            kind = str(_field(r, "kind", ""))
+        history.append(
+            {
+                "transaction_id": str(_field(r, "transaction_id", "")),
+                "original_transaction_id": str(
+                    _field(r, "original_transaction_id", "") or ""
+                ),
+                "product_id": product_id,
+                "product_label": label,
+                "kind": kind,
+                "source": source,
+                "status": str(_field(r, "status", "")),
+                "purchase_date": _iso(_field(r, "purchase_date")),
+                "expires_date": _iso(_field(r, "expires_date")),
+                "renewal_sequence": int(_field(r, "renewal_sequence") or 1),
+            }
+        )
 
     auto_renew_active = (
         subscription is not None

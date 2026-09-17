@@ -144,6 +144,9 @@ def _wire(monkeypatch, fake_db, *, fetch_payload):
         grant._bg_coros_for_tests.append(coro)
 
     monkeypatch.setattr(grant, "fire_background", _fire)
+    import app.services.vip.entitlements as entitlements
+
+    monkeypatch.setattr(entitlements, "db", fake_db)
     monkeypatch.setattr(grant.wallet, "ensure_wallet", AsyncMock())
     monkeypatch.setattr(
         grant.wallet,
@@ -358,6 +361,8 @@ async def test_recompute_sets_vip_until_to_entitlement_end(monkeypatch):
                 return [{"max_expires": None}]
             if "SELECT vip_until FROM user_wallets" in query:
                 return [{"vip_until": self.vip_until}]
+            if "FROM vip_code_redemptions" in query:
+                return []
             return []
 
         async def execute_raw(self, query: str, *args):
@@ -368,6 +373,9 @@ async def test_recompute_sets_vip_until_to_entitlement_end(monkeypatch):
 
     fake = _RecomputeDb()
     monkeypatch.setattr(grant, "db", fake)
+    import app.services.vip.entitlements as entitlements
+
+    monkeypatch.setattr(entitlements, "db", fake)
 
     changed = await grant.recompute_vip_entitlements("u1")
 
@@ -420,6 +428,8 @@ async def test_refund_consumable_month_keeps_quarter_floor(monkeypatch):
                 return [{"max_expires": None}]
             if "SELECT vip_until FROM user_wallets" in query:
                 return [{"vip_until": self.vip_until}]
+            if "FROM vip_code_redemptions" in query:
+                return []
             return []
 
         async def execute_raw(self, query: str, *args):
@@ -429,6 +439,9 @@ async def test_refund_consumable_month_keeps_quarter_floor(monkeypatch):
 
     fake = _RefundDb()
     monkeypatch.setattr(grant, "db", fake)
+    import app.services.vip.entitlements as entitlements
+
+    monkeypatch.setattr(entitlements, "db", fake)
     monkeypatch.setattr(grant.vip_grants, "clear_on_lapse", AsyncMock())
 
     changed = await grant.recompute_vip_entitlements("u1")

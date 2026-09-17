@@ -23,6 +23,15 @@ from app.services.payments.catalog import IapProduct
 from app.services.payments.errors import AppleVerificationError, UnknownProductError
 from app.services.runtime.tasks import fire_background
 from app.services.vip import grants as vip_grants
+from app.services.vip.entitlements import (
+    as_utc as _as_utc,
+    compute_vip_entitlement_end,
+    naive_dt as _naive,
+    recompute_vip_entitlements,
+    reconcile_vip_entitlements,
+    _consumable_vip_floor,
+    _subscription_vip_end,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -285,114 +294,6 @@ async def _grant_vip_monthly_safe(user_id: str) -> None:
         )
 
 
-async def reconcile_vip_entitlements(user_id: str, *, client: Any | None = None) -> bool:
-    """Backward-compatible alias for ``recompute_vip_entitlements``."""
-    return await recompute_vip_entitlements(user_id, client=client)
-
-
-async def compute_vip_entitlement_end(
-    user_id: str, *, client: Any | None = None
-) -> datetime | None:
-    """Single source of truth: max(consumable stack end, granted subscription expires)."""
-    consumable_end = await _consumable_vip_floor(user_id, client=client)
-    sub_end = await _subscription_vip_end(user_id, client=client)
-    ends = [x for x in (consumable_end, sub_end) if x is not None]
-    return max(ends) if ends else None
-
-
-async def recompute_vip_entitlements(
-    user_id: str,
-    *,
-    client: Any | None = None,
-    clear_lapse: bool = True,
-) -> bool:
-    """Recompute ``vip_until`` from granted IAP rows (can raise or lower).
-
-    Uses ``compute_vip_entitlement_end``; when no future entitlement remains,
-    sets ``vip_until`` to one second ago and optionally clears lapse batches.
-    """
-    from datetime import timedelta
-
-    now = datetime.now(timezone.utc)
-    entitlement_end = await compute_vip_entitlement_end(user_id, client=client)
-    if entitlement_end is None or entitlement_end <= now:
-        new_until = now - timedelta(seconds=1)
-        lapsed = True
-    else:
-        new_until = entitlement_end
-        lapsed = False
-
-    executor = client or db
-    rows = await executor.query_raw(
-        "SELECT vip_until FROM user_wallets WHERE user_id = $1 FOR UPDATE",
-        user_id,
-    )
-    if not rows:
-        return False
-    current = _as_utc(_field(rows[0], "vip_until"))
-    if current is not None and _naive(current) == _naive(new_until):
-        return False
-
-    await executor.execute_raw(
-        """
-        UPDATE user_wallets
-        SET vip_until = $2::timestamp, updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1
-        """,
-        user_id,
-        _naive(new_until),
-    )
-    logger.info(
-        "iap vip recompute user=%s until=%s lapsed=%s",
-        user_id[:8],
-        new_until.isoformat(),
-        lapsed,
-    )
-    if lapsed and clear_lapse and client is None:
-        try:
-            await vip_grants.clear_on_lapse(user_id)
-        except Exception:
-            logger.exception("clear_on_lapse after recompute failed user=%s", user_id[:8])
-    return True
-
-
-async def _subscription_vip_end(user_id: str, *, client: Any | None = None) -> datetime | None:
-    """Future subscription entitlement end from granted txns and active state rows."""
-    now = datetime.now(timezone.utc)
-    executor = client or db
-    txn_rows = await executor.query_raw(
-        """
-        SELECT MAX(expires_date) AS max_expires
-        FROM iap_transactions
-        WHERE user_id = $1 AND kind = $2 AND status = 'granted'
-          AND expires_date IS NOT NULL
-        """,
-        user_id,
-        catalog.KIND_SUBSCRIPTION,
-    )
-    txn_end = _as_utc(_field(txn_rows[0], "max_expires")) if txn_rows else None
-
-    state_rows = await executor.query_raw(
-        """
-        SELECT expires_date
-        FROM iap_subscription_state
-        WHERE user_id = $1 AND status = ANY($2::text[])
-          AND expires_date IS NOT NULL
-        """,
-        user_id,
-        ["active", "in_grace"],
-    )
-    state_ends = [
-        end
-        for end in (_as_utc(_field(row, "expires_date")) for row in state_rows)
-        if end is not None
-    ]
-    state_end = max(state_ends) if state_ends else None
-
-    candidates = [end for end in (txn_end, state_end) if end is not None and end > now]
-    return max(candidates) if candidates else None
-
-
 async def heal_subscription_states_for_user(
     user_id: str, *, client: Any | None = None
 ) -> None:
@@ -475,35 +376,6 @@ async def refresh_subscription_state_from_grants(
     )
 
 
-async def _consumable_vip_floor(user_id: str, *, client: Any | None = None) -> datetime | None:
-    """按 granted consumable VIP 交易顺序叠天数，得到应有的 vip_until 下界。"""
-    from datetime import timedelta
-
-    executor = client or db
-    rows = await executor.query_raw(
-        """
-        SELECT product_id, quantity, purchase_date
-        FROM iap_transactions
-        WHERE user_id = $1 AND status = 'granted' AND kind = $2
-        ORDER BY purchase_date ASC NULLS LAST, created_at ASC
-        """,
-        user_id,
-        catalog.KIND_CONSUMABLE,
-    )
-    running: datetime | None = None
-    for row in rows:
-        product = catalog.product_for(_field(row, "product_id") or "")
-        if product is None or product.vip_days <= 0:
-            continue
-        qty = int(_field(row, "quantity") or 1)
-        purchased = _as_utc(_field(row, "purchase_date"))
-        if purchased is None:
-            continue
-        base = max(purchased, running) if running is not None else purchased
-        running = base + timedelta(days=product.vip_days * qty)
-    return running
-
-
 async def _apply_vip_metadata(
     tx: Any,
     user_id: str,
@@ -553,27 +425,3 @@ async def _apply_vip_metadata(
             _naive(expires_dt),
             transaction_id,
         )
-
-
-def _as_utc(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, str) and value:
-        try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    return None
-
-
-def _naive(dt: datetime | None) -> datetime | None:
-    """落库前去掉时区：目标列都是 TIMESTAMP WITHOUT TIME ZONE，存 UTC 墙钟。
-
-    prisma query_raw 会把 datetime 序列化成 ISO 字符串；SQL 侧必须写
-    ``$N::timestamp`` 让 PG 显式转型（见 conversations.py / last_will.py 惯例）。
-    ms_to_dt 返回 aware UTC，落库前转 naive 存 UTC 墙钟；比较逻辑仍用 aware 值。
-    """
-    return dt.replace(tzinfo=None) if dt is not None else None
