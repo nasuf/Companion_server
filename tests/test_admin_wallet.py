@@ -419,3 +419,71 @@ async def test_list_admin_gift_ticket_ledger_filters_gift_ticket_currency(monkey
     assert rows[0]["currency"] == "gift_ticket"
     ledger_sql = fake_db.query_calls[0][0]
     assert "l.currency = 'gift_ticket'" in ledger_sql
+
+
+@pytest.mark.asyncio
+async def test_list_admin_balances_fractional_display_tickets(monkeypatch):
+    """Subunit storage can produce .1 ticket steps (e.g. 990775.5 display)."""
+    subunits = 9_907_755  # 990775.5 display tickets at scale 10
+    fake_db = _FakeDb(
+        query_rows=[
+            [{"n": 1}],
+            [
+                {
+                    "id": "u1",
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "ticket_balance": subunits,
+                    "point_balance": 0,
+                    "gift_ticket_balance": 0,
+                    "vip_until": None,
+                    "updated_at": None,
+                    "nickname": None,
+                },
+            ],
+        ],
+    )
+    monkeypatch.setattr(wallet, "db", fake_db)
+
+    result = await wallet.list_admin_balances(limit=20, offset=0)
+    assert result["items"][0]["ticket_balance"] == 990775.5
+
+
+def test_list_wallet_balances_api_accepts_fractional_tickets(api_client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.api.jwt_auth import require_admin_jwt
+    from app.main import app
+
+    app.dependency_overrides[require_admin_jwt] = lambda: {"sub": "admin-1", "role": "admin"}
+    try:
+        monkeypatch.setattr(
+            wallet,
+            "list_admin_balances",
+            AsyncMock(
+                return_value={
+                    "items": [
+                        {
+                            "user_id": "u1",
+                            "username": "alice",
+                            "display_name": "Alice",
+                            "nickname": None,
+                            "ticket_balance": 990775.5,
+                            "point_balance": 0,
+                            "gift_ticket_balance": 12.3,
+                            "is_vip": False,
+                            "vip_until": None,
+                            "updated_at": None,
+                        }
+                    ],
+                    "total": 1,
+                }
+            ),
+        )
+        response = api_client.get("/admin-api/wallet/balances?limit=20")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["items"][0]["ticket_balance"] == 990775.5
+        assert body["items"][0]["gift_ticket_balance"] == 12.3
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)

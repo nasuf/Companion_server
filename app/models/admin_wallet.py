@@ -10,12 +10,13 @@ class AdminWalletBalanceItem(BaseModel):
     username: str
     display_name: str | None = None
     nickname: str | None = None
-    ticket_balance: int
+    # Display tickets (0.1 granularity via TICKET_SUBUNIT_SCALE); not DB subunits.
+    ticket_balance: float
     point_balance: int
     updated_at: str | None = None
     # CLAUDE.md 权益项 3: VIP 每月赠送的限时钞票, 与永久 ticket_balance 分列
     # 展示（会随 VIP 过期清零）。
-    gift_ticket_balance: int = 0
+    gift_ticket_balance: float = 0
     is_vip: bool = False
     vip_until: str | None = None
 
@@ -32,8 +33,9 @@ class AdminWalletLedgerItem(BaseModel):
     display_name: str | None = None
     nickname: str | None = None
     currency: str
-    delta: int
-    balance_after: int
+    # ticket/gift_ticket ledger rows use display tickets (float); point rows stay int.
+    delta: float
+    balance_after: float
     source: str
     source_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -58,10 +60,10 @@ class AdminTicketGrantRequest(BaseModel):
 
 class AdminTicketGrantResponse(BaseModel):
     user_id: str
-    ticket_balance: int
+    ticket_balance: float
     point_balance: int
     achievement_points_synced: int
-    delta: int
+    delta: float
 
 
 class AdminPointGrantRequest(BaseModel):
@@ -74,7 +76,7 @@ class AdminPointGrantRequest(BaseModel):
 
 class AdminPointGrantResponse(BaseModel):
     user_id: str
-    ticket_balance: int
+    ticket_balance: float
     point_balance: int
     achievement_points_synced: int
     delta: int
