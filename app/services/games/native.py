@@ -21,7 +21,7 @@ from app.services.games.rarity import compute_rarity
 from app.services.games.finish_reply import generate_finish_reply
 from app.services.games.narrative import build_narrative
 from app.services.games.quick_exit import quick_exit_reply
-from app.services.games.substance import played_enough
+from app.services.games.substance import action_floor, played_enough
 from app.services.schedule_domain import time_service
 from app.services import game_points, wallet
 from app.services.memory.storage import repo as memory_repo
@@ -354,6 +354,111 @@ async def get_play_stats(user_id: str) -> dict[str, int]:
         "total_seconds": int(row.get("total_seconds") or 0),
         "today_seconds": int(row.get("today_seconds") or 0),
     }
+
+
+def _record_stats_from_row(row: dict[str, Any] | None) -> dict[str, Any]:
+    """Map a SQL aggregate row onto the home-screen record payload.
+
+    胜率 = 胜 ÷ 总对局. Mid-game quits stay in the denominator: they deduct
+    points, so they are a recorded result, not a free pass on the rate.
+    """
+    data = row or {}
+    total = int(data.get("total_rounds") or 0)
+    wins = int(data.get("wins") or 0)
+    return {
+        "total_rounds": total,
+        "wins": wins,
+        "losses": int(data.get("losses") or 0),
+        "draws": int(data.get("draws") or 0),
+        "aborted": int(data.get("aborted") or 0),
+        "win_rate": (wins / total * 100) if total else 0.0,
+        "total_seconds": int(data.get("total_seconds") or 0),
+    }
+
+
+async def get_record_stats(user_id: str, game_key: str) -> dict[str, Any]:
+    """Lifetime record for one native game's home screen.
+
+    Counts terminal sessions that either finished with a scored outcome
+    (win/lose/draw, including a forfeit that deducted points) or were aborted
+    after crossing ``action_floor``. Opening a board and leaving before any
+    real play — leftover session cleanup — is not a 对局. Duration prefers
+    the stored ``duration_seconds`` and falls back to the started/ended span.
+    """
+    if game_key not in _GAME_DEFINITIONS:
+        return _record_stats_from_row(None)
+    rows = await db.query_raw(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE played)::int AS total_rounds,
+            COUNT(*) FILTER (
+                WHERE played AND outcome = 'win'
+            )::int AS wins,
+            COUNT(*) FILTER (
+                WHERE played AND outcome = 'lose' AND NOT escaped
+            )::int AS losses,
+            COUNT(*) FILTER (
+                WHERE played AND outcome = 'draw' AND NOT escaped
+            )::int AS draws,
+            COUNT(*) FILTER (WHERE played AND escaped)::int AS aborted,
+            COALESCE(SUM(seconds) FILTER (WHERE played), 0)::int AS total_seconds
+        FROM (
+            SELECT
+                (
+                    status = 'aborted'
+                    OR COALESCE(result->>'user_outcome', '') = 'aborted'
+                ) AS escaped,
+                LOWER(COALESCE(result->>'user_outcome', status, '')) AS outcome,
+                (
+                    (
+                        status = 'settled'
+                        AND LOWER(COALESCE(result->>'user_outcome', ''))
+                            IN ('win', 'lose', 'draw')
+                    )
+                    OR GREATEST(
+                    COALESCE(
+                        (result->'process'->game_key->>'action_count')::int,
+                        0
+                    ),
+                    COALESCE(
+                        (result->'process'->game_key->>'move_count')::int,
+                        0
+                    ),
+                    COALESCE((result->game_key->>'action_count')::int, 0),
+                    COALESCE((result->game_key->>'move_count')::int, 0),
+                    COALESCE((result->'gomoku'->>'move_count')::int, 0),
+                    COALESCE(
+                        (result->'final_payload'->>'action_count')::int,
+                        0
+                    ),
+                    COALESCE(
+                        (result->'final_payload'->>'move_count')::int,
+                        0
+                    )
+                    ) >= $3
+                ) AS played,
+                CASE
+                    WHEN duration_seconds IS NOT NULL
+                        THEN GREATEST(duration_seconds, 0)
+                    WHEN started_at IS NOT NULL AND ended_at IS NOT NULL
+                        THEN GREATEST(
+                            EXTRACT(EPOCH FROM (ended_at - started_at))::int,
+                            0
+                        )
+                    ELSE 0
+                END AS seconds
+            FROM game_sessions
+            WHERE user_id = $1
+              AND provider = 'native'
+              AND game_key = $2
+              AND status IN ('settled', 'aborted')
+        ) counted
+        """,
+        user_id,
+        game_key,
+        action_floor(game_key),
+    )
+    return _record_stats_from_row(rows[0] if rows else None)
 
 
 async def get_latest_session_summary(

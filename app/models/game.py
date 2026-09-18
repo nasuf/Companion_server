@@ -87,6 +87,18 @@ class NativePlayStatsResponse(BaseModel):
     today_seconds: int
 
 
+class NativeGameRecordStatsResponse(BaseModel):
+    """Per-game home-screen record: 总对局 / 胜利局 / 胜率 / 时长."""
+
+    total_rounds: int
+    wins: int
+    losses: int
+    draws: int
+    aborted: int
+    win_rate: float
+    total_seconds: int
+
+
 class NativeSessionResponse(BaseModel):
     id: str
     provider: Literal["native"] = "native"

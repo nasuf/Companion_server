@@ -8,6 +8,8 @@ from app.models.game import (
     NativeGameEventRecord,
     NativeGameEventRequest,
     NativeGameEventResponse,
+    NativeGameKey,
+    NativeGameRecordStatsResponse,
     NativePlayStatsResponse,
     NativeSessionResponse,
 )
@@ -75,6 +77,19 @@ async def native_game_play_stats(user: dict = Depends(require_user)):
     the totals at the page size.
     """
     return await native.get_play_stats(user["sub"])
+
+
+@router.get("/record-stats", response_model=NativeGameRecordStatsResponse)
+async def native_game_record_stats(
+    game_key: NativeGameKey = Query(...),
+    user: dict = Depends(require_user),
+):
+    """Per-game home-screen record (总对局 / 胜利局 / 胜率 / 时长).
+
+    Same reason as /stats: the client only keeps a short session page, so
+    counting that list under-reports every lifetime counter.
+    """
+    return await native.get_record_stats(user["sub"], game_key)
 
 
 @router.get("/sessions/latest")
