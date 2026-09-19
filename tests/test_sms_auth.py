@@ -315,7 +315,7 @@ async def test_sms_login_endpoint_happy_path(monkeypatch):
     assert response == expected
     # normalized phone reaches the service layer
     verify_mock.assert_awaited_once_with("13812345678", "123456")
-    auth_api.ensure_default_agent_for_user.assert_awaited_once_with("user-1")
+    auth_api.ensure_default_agent_for_user.assert_not_awaited()
     # signup-origin analytics recorded on the create path
     kwargs = focp_mock.await_args.kwargs
     assert focp_mock.await_args.args == ("13812345678",)

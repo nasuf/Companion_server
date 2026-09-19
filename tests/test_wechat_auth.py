@@ -449,6 +449,7 @@ async def test_wechat_h5_login_passes_signup_info(monkeypatch):
     signup = auth_api.find_or_create_wechat_user.await_args.kwargs["signup"]
     assert signup.source == "wechat_h5"
     assert signup.platform == "android"
+    auth_api.ensure_default_agent_for_user.assert_not_awaited()
 
 
 @pytest.mark.asyncio

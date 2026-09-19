@@ -412,21 +412,22 @@ async def _has_agent_or_pending(user_id: str) -> bool:
     return pending is not None
 
 
-async def ensure_default_agent_for_user(user_id: str):
+async def ensure_default_agent_for_user(user_id: str, gender: str | None = None):
     """Idempotently give a user a cloned agent from the open template pool.
 
     * No-op (returns None) when the user already has an active workspace, or when
       no template is currently open for enrollment, or on any failure (login
       must not break).
-    * Otherwise picks one open template at random, clones it, and returns the
-      new agent. Stopping / archiving a template later does not touch this clone.
+    * Otherwise picks one open template at random (optionally filtered by
+      ``gender``), clones it, and returns the new agent. Stopping / archiving a
+      template later does not touch this clone.
 
     Concurrency: a short-lived Redis lock serializes simultaneous first-logins of
     the same user so two requests can't each create a clone (which would leave an
     orphaned archived workspace). The lock is best-effort — if Redis is down we
     fall back to the DB checks, which still prevent the common (sequential) case.
     """
-    pool = await list_enrolling_template_ids()
+    pool = await list_enrolling_template_ids(gender=gender)
     template_id = pick_enrolling_template_id(pool)
     if not template_id:
         return None

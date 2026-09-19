@@ -101,18 +101,34 @@ def is_enrolling(agent: Any) -> bool:
     return bool(flag)
 
 
-async def list_enrolling_template_ids() -> list[str]:
-    """Ids of fully-provisioned templates currently open for cloning."""
+# Whitelist fragments only — never interpolate caller-supplied gender text.
+_GENDER_SQL = {
+    "female": " AND gender IN ('female', '女')",
+    "女": " AND gender IN ('female', '女')",
+    "male": " AND gender IN ('male', '男')",
+    "男": " AND gender IN ('male', '男')",
+}
+
+
+async def list_enrolling_template_ids(*, gender: str | None = None) -> list[str]:
+    """Ids of fully-provisioned templates currently open for cloning.
+
+    ``gender`` (male/female) narrows the pool so H5 onboarding can match the
+    user's pick. Chinese aliases 男/女 are accepted on stored rows.
+    Unknown values keep the unfiltered pool (Mini Program / password login).
+    """
     owner_id = await get_template_owner_id()
     if not owner_id:
         return []
+    gender_filter = _GENDER_SQL.get((gender or "").strip().lower(), "")
     try:
         rows = await db.query_raw(
-            """
+            f"""
             SELECT id FROM ai_agents
             WHERE user_id = $1
               AND status = 'active'
               AND template_enabled = TRUE
+              {gender_filter}
             ORDER BY created_at ASC
             """,
             owner_id,

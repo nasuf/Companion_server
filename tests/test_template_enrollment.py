@@ -117,6 +117,58 @@ async def test_ensure_clones_the_picked_open_template(monkeypatch):
     result = await clone_mod.ensure_default_agent_for_user("user-1")
     assert result is cloned
     clone_fn.assert_awaited_once_with("user-1", "open-2")
+    clone_mod.list_enrolling_template_ids.assert_awaited_once_with(gender=None)
+
+
+@pytest.mark.asyncio
+async def test_ensure_filters_pool_by_gender(monkeypatch):
+    listed = AsyncMock(return_value=["female-1"])
+    monkeypatch.setattr(clone_mod, "list_enrolling_template_ids", listed)
+    monkeypatch.setattr(clone_mod, "pick_enrolling_template_id", lambda ids: ids[0])
+    monkeypatch.setattr(clone_mod, "_has_agent_or_pending", AsyncMock(return_value=False))
+    clone_fn = AsyncMock(return_value=(object(), object(), object()))
+    monkeypatch.setattr(clone_mod, "clone_template_agent_for_user", clone_fn)
+
+    async def _no_redis():
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("app.redis_client.get_redis", _no_redis)
+
+    await clone_mod.ensure_default_agent_for_user("user-1", gender="female")
+    listed.assert_awaited_once_with(gender="female")
+    clone_fn.assert_awaited_once_with("user-1", "female-1")
+
+
+@pytest.mark.asyncio
+async def test_list_enrolling_template_ids_filters_gender(monkeypatch):
+    monkeypatch.setattr(
+        registry, "get_template_owner_id", AsyncMock(return_value="owner-1"),
+    )
+    query = AsyncMock(return_value=[{"id": "tpl-f"}])
+    monkeypatch.setattr(registry.db, "query_raw", query)
+
+    ids = await registry.list_enrolling_template_ids(gender="female")
+    assert ids == ["tpl-f"]
+    sql = query.await_args.args[0]
+    assert "female" in sql
+    assert "女" in sql
+    assert "male" not in sql.replace("female", "")
+
+
+@pytest.mark.asyncio
+async def test_list_enrolling_template_ids_filters_male(monkeypatch):
+    monkeypatch.setattr(
+        registry, "get_template_owner_id", AsyncMock(return_value="owner-1"),
+    )
+    query = AsyncMock(return_value=[{"id": "tpl-m"}])
+    monkeypatch.setattr(registry.db, "query_raw", query)
+
+    ids = await registry.list_enrolling_template_ids(gender="male")
+    assert ids == ["tpl-m"]
+    sql = query.await_args.args[0]
+    assert "male" in sql
+    assert "男" in sql
+    assert "female" not in sql
 
 
 @pytest.mark.asyncio

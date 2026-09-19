@@ -140,6 +140,12 @@ class WeChatProfileUpdate(BaseModel):
     avatar_mime: str | None = None
 
 
+class ClaimH5AgentRequest(BaseModel):
+    """H5 onboarding: clone one open template matching the chosen gender."""
+
+    gender: Literal["male", "female"]
+
+
 class AuthResponse(BaseModel):
     token: str
     user_id: str

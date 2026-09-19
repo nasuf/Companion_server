@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.db import db
 from app.models.auth import (
     AuthResponse,
+    ClaimH5AgentRequest,
     LoginRequest,
     PhoneBindRequest,
     RegisterRequest,
@@ -38,7 +39,10 @@ from app.services.wechat_auth import (
     find_or_create_wechat_user,
 )
 from app.services.agent_avatars import build_avatar_url
-from app.services.agent_template import ensure_default_agent_for_user
+from app.services.agent_template import (
+    ensure_default_agent_for_user,
+    list_enrolling_template_ids,
+)
 from app.services.notifications.presence import record_online, remove_online
 from app.services.user_activity import (
     UserActivityWriteError,
@@ -379,10 +383,10 @@ async def sms_login(data: SmsLoginRequest, request: Request):
             app_version=data.app_version,
         ).user_create_fields(),
     )
-    # Flutter SMS login (channel=app) must stay agent-less so the app can open
-    # AgentCreatePage and provision from scratch — same as /auth/wechat/mobile.
-    # H5 / Mini Program have no create flow; they still clone from the open pool.
-    if data.channel != "app":
+    # Flutter SMS (channel=app) and 服务号 H5 (channel=h5) must not auto-clone:
+    # the app opens AgentCreatePage; H5 shows a gender pick then claims a
+    # gender-matched template. Mini Program still clones from the open pool.
+    if data.channel not in {"app", "h5"}:
         await ensure_default_agent_for_user(user.id)
     token = create_jwt(user.id, user.role)
     audit_auth_request_event(
@@ -526,8 +530,8 @@ async def wechat_h5_login(data: WeChatH5LoginRequest, request: Request):
         )
 
     await clear_login_failures(request, rate_limit_key)
-    # New users get the default cloned agent so H5 can go straight to chat.
-    await ensure_default_agent_for_user(user.id)
+    # H5 onboarding picks gender first, then POST /auth/h5/claim-agent clones a
+    # matching open template. Auto-cloning here would skip that page.
     token = create_jwt(user.id, user.role)
     audit_auth_request_event(
         "wechat_h5_login_success",
@@ -541,6 +545,47 @@ async def wechat_h5_login(data: WeChatH5LoginRequest, request: Request):
         extra={"event": "auth_wechat_h5_login", "user_id": user.id},
     )
     await _record_auth_activity(user.id, source="wechat_h5_login")
+    return await _build_auth_response(user, token)
+
+
+@router.post("/h5/claim-agent", response_model=AuthResponse)
+async def claim_h5_agent(
+    data: ClaimH5AgentRequest,
+    payload: dict = Depends(require_user),
+):
+    """Clone one open template matching ``gender`` for an H5 user without an agent.
+
+    Idempotent: if the user already has a workspace, return the current session
+    and ignore the gender pick. An empty gender pool is a 400 so the page can
+    ask them to switch.
+    """
+    user = await db.user.find_unique(where={"id": payload["sub"]})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在",
+        )
+    token = create_jwt(user.id, user.role)
+    existing = await get_active_workspace(user_id=user.id)
+    if existing:
+        return await _build_auth_response(user, token)
+
+    pool = await list_enrolling_template_ids(gender=data.gender)
+    if not pool:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="暂时没有该性别的开放模板，请换一个性别或稍后再试",
+        )
+    agent = await ensure_default_agent_for_user(user.id, data.gender)
+    if agent is None:
+        # Another request may have finished the clone while we waited on the lock.
+        existing = await get_active_workspace(user_id=user.id)
+        if existing:
+            return await _build_auth_response(user, token)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="创建伙伴失败，请稍后重试",
+        )
     return await _build_auth_response(user, token)
 
 
