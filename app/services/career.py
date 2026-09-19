@@ -234,16 +234,45 @@ def career_row_to_dict(c) -> dict:
     }
 
 
+async def get_active_career_by_id(career_id: str) -> dict | None:
+    """Load one active career template by id, or None if missing/archived."""
+    career_id = (career_id or "").strip()
+    if not career_id:
+        return None
+    row = await db.careertemplate.find_unique(where={"id": career_id})
+    if not row or getattr(row, "status", "active") != "active":
+        return None
+    return career_row_to_dict(row)
+
+
 async def pick_random_active_career() -> dict | None:
     """Plan B: agent 创建时从 active career_templates 池随机抽一条.
 
     Returns None 时 generate_full_profile 内会回退到"自由职业者"默认值, 不阻塞。
     """
+    picked = await pick_random_active_careers(1)
+    return picked[0] if picked else None
+
+
+async def pick_random_active_careers(count: int) -> list[dict | None]:
+    """Sample ``count`` active careers, unique until the pool is exhausted.
+
+    Returns a list of the same length as ``count``. If the pool is empty every
+    slot is None (caller falls back to the default 自由职业者). When ``count``
+    exceeds the pool we cycle so a batch of templates still gets coverage.
+    """
     import random as _r
+
+    if count < 1:
+        return []
     rows = await db.careertemplate.find_many(where={"status": "active"})
     if not rows:
-        return None
-    return career_row_to_dict(_r.choice(rows))
+        return [None] * count
+    dicts = [career_row_to_dict(row) for row in rows]
+    if count <= len(dicts):
+        return _r.sample(dicts, count)
+    _r.shuffle(dicts)
+    return [dicts[i % len(dicts)] for i in range(count)]
 
 
 async def ensure_default_careers() -> None:

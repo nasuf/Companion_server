@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, ValidationError
 
@@ -64,11 +66,20 @@ router = APIRouter(
 )
 
 
+MAX_TEMPLATE_BATCH = 20
+
+
 class TemplateCreateRequest(BaseModel):
-    name: str
+    # Optional when name_mode=random — old clients still send a name and keep
+    # the previous single-create path (manual name, random career).
+    name: str | None = None
     personality: PersonalityInput
     gender: str | None = None
     background: str | None = None
+    name_mode: Literal["manual", "random"] = "manual"
+    career_mode: Literal["manual", "random"] = "random"
+    career_id: str | None = None
+    batch_count: int = Field(default=1, ge=1, le=MAX_TEMPLATE_BATCH)
 
 
 class DefaultTemplateRequest(BaseModel):
@@ -191,33 +202,103 @@ async def list_templates() -> dict:
 
 @router.post("")
 async def create_template(data: TemplateCreateRequest) -> dict:
-    """Create a template agent via the full provisioning pipeline.
+    """Create one or more template agents via the full provisioning pipeline.
 
-    Runs the identical flow used when a Flutter user manually creates an agent,
-    so the template ends up with all the same data. Provisioning is async
-    (~90s); poll ``GET /{id}/status`` until stage == "complete".
+    Name and career can each be picked manually or randomly. Batch creation is
+    only allowed when *both* are random, so the operator is generating a pool
+    rather than repeating the same specified identity.
     """
     # Import here to avoid a public<-admin import cycle at module load.
     from app.api.public.agents import create_agent_with_provisioning
+    from app.services.career import get_active_career_by_id, pick_random_active_careers
+    from app.services.name_templates import pick_random_names
+
+    batch_count = data.batch_count
+    if batch_count > 1 and not (
+        data.name_mode == "random" and data.career_mode == "random"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="只有姓名和职业都选择随机时才能批量生成",
+        )
+
+    gender = _normalize_gender(data.gender)
+
+    if data.name_mode == "manual":
+        template_name = (data.name or "").strip()
+        if not template_name:
+            raise HTTPException(status_code=400, detail="请填写模板名称")
+        names = [template_name]
+    else:
+        if gender not in {"male", "female"}:
+            raise HTTPException(status_code=400, detail="随机姓名需要先选择性别")
+        used = {agent.name for agent in await list_template_agents() if agent.name}
+        try:
+            picked = await pick_random_names(gender, batch_count, exclude=used)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        names = [row["name"] for row in picked]
+
+    if data.career_mode == "manual":
+        career = await get_active_career_by_id(data.career_id or "")
+        if not career:
+            raise HTTPException(status_code=400, detail="请选择有效的职业模板")
+        careers: list[dict | None] = [career] * len(names)
+    else:
+        careers = await pick_random_active_careers(len(names))
 
     owner = await get_or_create_template_user()
-    agent, workspace = await create_agent_with_provisioning(
-        user_id=owner.id,
-        name=data.name.strip() or "模板伙伴",
-        personality=data.personality.model_dump(),
-        background=data.background,
-        gender=data.gender,
-        # Templates coexist and many can be open at once; creating a new one
-        # must NOT archive (or stop) the template system user's other templates.
-        stage_existing_workspaces=False,
-    )
-    logger.info("[TEMPLATE] created template agent %s", agent.id[:8])
-    return {
-        "id": agent.id,
-        "name": agent.name,
-        "status": agent.status,
-        "workspace_id": workspace.id if workspace else None,
-    }
+    created: list[dict] = []
+    errors: list[dict] = []
+    for name, career in zip(names, careers, strict=True):
+        try:
+            agent, workspace = await create_agent_with_provisioning(
+                user_id=owner.id,
+                name=name,
+                personality=data.personality.model_dump(),
+                background=data.background,
+                gender=gender,
+                career_template_override=career,
+                # Templates coexist and many can be open at once; creating a
+                # new one must NOT archive (or stop) sibling templates.
+                stage_existing_workspaces=False,
+            )
+        except Exception as exc:
+            detail = (
+                exc.detail if isinstance(exc, HTTPException) else str(exc)
+            )
+            if not isinstance(detail, str):
+                detail = str(detail)
+            if isinstance(exc, HTTPException):
+                logger.warning("[TEMPLATE] create %s rejected: %s", name, detail)
+            else:
+                logger.exception("[TEMPLATE] failed to create template named %s", name)
+            errors.append({"name": name, "error": detail[:200]})
+            if not created and len(names) == 1:
+                if isinstance(exc, HTTPException):
+                    raise
+                raise HTTPException(
+                    status_code=500, detail=f"创建模板失败: {detail}",
+                ) from exc
+            continue
+        created.append(
+            {
+                "id": agent.id,
+                "name": agent.name,
+                "status": agent.status,
+                "workspace_id": workspace.id if workspace else None,
+            }
+        )
+        logger.info("[TEMPLATE] created template agent %s", agent.id[:8])
+
+    if not created:
+        raise HTTPException(
+            status_code=500,
+            detail=(errors[0]["error"] if errors else "创建模板失败"),
+        )
+    if batch_count == 1 and len(created) == 1:
+        return created[0]
+    return {"count": len(created), "templates": created, "errors": errors}
 
 
 @router.post("/from-document")

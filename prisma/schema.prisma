@@ -1550,6 +1550,22 @@ model CareerTemplate {
   @@map("career_templates")
 }
 
+// Agent 姓名库: admin「姓名管理」维护, 模板创建时可按性别随机抽取.
+model NameTemplate {
+  id        String   @id @default(uuid())
+  name      String
+  nickname  String   @default("")
+  gender    String // male / female
+  status    String   @default("active") // active / archived
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([gender, name], map: "name_templates_gender_name_key")
+  @@index([gender, status], map: "name_templates_gender_status_idx")
+  @@map("name_templates")
+}
+
 // Plan B 后已删除 CharacterTemplate / CharacterProfile (admin 不再批量预生
 // 背景, agent 创建时即时单步 LLM 生成 — services/character_generation.py).
 

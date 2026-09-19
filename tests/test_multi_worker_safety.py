@@ -97,6 +97,7 @@ class TestStartupSeeding:
             if isinstance(n, ast.Call)
             and getattr(n.func, "id", None) in {
                 "ensure_default_careers", "ensure_prompt_templates",
+                "ensure_default_names",
             }
         ]
         assert seed_calls, "找不到 seeding 调用"

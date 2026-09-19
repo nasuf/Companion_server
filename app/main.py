@@ -12,6 +12,7 @@ from app.redis_client import get_redis, close_redis, mark_redis_healthy
 from app.middleware import configure_logging, configure_langsmith, RequestTimingMiddleware
 from app.services.prompting.store import ensure_prompt_templates
 from app.services.career import ensure_default_careers
+from app.services.name_templates import ensure_default_names
 from app.services.runtime.distributed_lock import (
     DistributedLockNotAcquired,
     DistributedLockUnavailable,
@@ -85,10 +86,11 @@ async def lifespan(app: FastAPI):
         # Phase 2: Seeding
         # Database schema changes are managed exclusively by Prisma migrations.
         #
-        # 必须串行化: 两个 seeder 都是"先查缺失再创建", 多 worker 同时启动会一起
+        # 必须串行化: seeder 都是"先查缺失再创建", 多 worker 同时启动会一起
         # 读到"缺", 一起创建。career_templates.title 没有唯一约束, 结果是每个
         # worker 各建一份重复职业; prompt_templates.key 有唯一约束, 结果是输的
-        # worker 直接抛异常起不来。
+        # worker 直接抛异常起不来。name_templates 有 (gender, name) 唯一约束,
+        # 撞键同样会让 worker 起不来。
         #
         # 拿不到锁就跳过 (fail-closed): 说明别的 worker 正在做同一件事, 重复做既
         # 无必要也不安全。Redis 不可用时 (fail_open=非生产) 本地仍会执行 —— 开发
@@ -100,6 +102,7 @@ async def lifespan(app: FastAPI):
                 await asyncio.gather(
                     _timed("Prompt templates", ensure_prompt_templates()),
                     _timed("Career templates", ensure_default_careers()),
+                    _timed("Name templates", ensure_default_names()),
                 )
         except DistributedLockNotAcquired:
             logger.info("  ↷ Seeding skipped: another worker holds the seed lock")
@@ -219,6 +222,7 @@ from app.api.admin.holidays import router as admin_holidays_router
 from app.api.public.auth import router as auth_router
 from app.api.admin.users import router as admin_users_router
 from app.api.admin.career import router as admin_career_router
+from app.api.admin.names import router as admin_names_router
 from app.api.admin.agents import router as admin_agents_router
 from app.api.admin.agent_templates import router as admin_agent_templates_router
 from app.api.public.traces import router as traces_router
@@ -284,6 +288,7 @@ app.include_router(admin_holidays_router)
 app.include_router(auth_router)
 app.include_router(admin_users_router)
 app.include_router(admin_career_router)
+app.include_router(admin_names_router)
 app.include_router(admin_agents_router)
 app.include_router(admin_agent_templates_router)
 app.include_router(traces_router)
