@@ -1,10 +1,14 @@
-"""Admin template create: manual/random name & career, plus dual-random batch."""
+"""Admin template create: manual/random name, career, personality, plus batch."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from app.api.admin.agent_templates import (
+    assign_template_personalities,
+    combo_identity,
+)
 from app.api.jwt_auth import require_admin_jwt
 
 _PERSONALITY = {
@@ -131,7 +135,7 @@ def test_random_name_manual_career(api_client):
     assert pick_names.await_args.kwargs["exclude"] == {"已有模板"}
 
 
-def test_batch_requires_both_random(api_client):
+def test_batch_requires_all_three_random(api_client):
     app = _admin_override()
     try:
         response = api_client.post(
@@ -140,6 +144,7 @@ def test_batch_requires_both_random(api_client):
                 "name": "柳如烟",
                 "name_mode": "manual",
                 "career_mode": "random",
+                "personality_mode": "random",
                 "batch_count": 3,
                 "gender": "female",
                 "personality": _PERSONALITY,
@@ -148,7 +153,27 @@ def test_batch_requires_both_random(api_client):
     finally:
         app.dependency_overrides.pop(require_admin_jwt, None)
     assert response.status_code == 400
-    assert "批量" in response.json()["detail"]
+    assert "性格" in response.json()["detail"] or "批量" in response.json()["detail"]
+
+
+def test_batch_rejected_when_personality_is_manual(api_client):
+    app = _admin_override()
+    try:
+        response = api_client.post(
+            "/admin-api/agent-templates",
+            json={
+                "name_mode": "random",
+                "career_mode": "random",
+                "personality_mode": "manual",
+                "batch_count": 3,
+                "gender": "female",
+                "personality": _PERSONALITY,
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+    assert response.status_code == 400
+    assert "性格" in response.json()["detail"]
 
 
 def test_dual_random_batch_creates_unique_names(api_client):
@@ -194,12 +219,17 @@ def test_dual_random_batch_creates_unique_names(api_client):
                 new_callable=AsyncMock,
                 side_effect=_create,
             ),
+            patch(
+                "app.api.admin.agent_templates.random.randint",
+                side_effect=lambda _lo, _hi, n=iter(range(1, 1000)): next(n),
+            ),
         ):
             response = api_client.post(
                 "/admin-api/agent-templates",
                 json={
                     "name_mode": "random",
                     "career_mode": "random",
+                    "personality_mode": "random",
                     "batch_count": 3,
                     "gender": "male",
                     "personality": _PERSONALITY,
@@ -217,6 +247,17 @@ def test_dual_random_batch_creates_unique_names(api_client):
         "花艺师",
         "烘焙师",
     ]
+    combos = [
+        combo_identity(
+            item["name"],
+            item["career_template_override"],
+            item["personality"],
+        )
+        for item in created
+    ]
+    assert len(set(combos)) == 3
+    # Submitted slider values must not be reused in random mode.
+    assert all(item["personality"] != _PERSONALITY for item in created)
 
 
 def test_dual_random_batch_keeps_partial_success(api_client):
@@ -264,6 +305,7 @@ def test_dual_random_batch_keeps_partial_success(api_client):
                 json={
                     "name_mode": "random",
                     "career_mode": "random",
+                    "personality_mode": "random",
                     "batch_count": 2,
                     "gender": "male",
                     "personality": _PERSONALITY,
@@ -277,6 +319,9 @@ def test_dual_random_batch_keeps_partial_success(api_client):
     assert body["count"] == 1
     assert body["templates"][0]["name"] == "吴时远"
     assert body["errors"][0]["name"] == "陈砚"
+
+
+def test_random_name_requires_gender(api_client):
     app = _admin_override()
     try:
         response = api_client.post(
@@ -284,7 +329,7 @@ def test_dual_random_batch_keeps_partial_success(api_client):
             json={
                 "name_mode": "random",
                 "career_mode": "random",
-                "personality": _PERSONALITY,
+                "personality_mode": "random",
             },
         )
     finally:
@@ -304,3 +349,51 @@ def test_manual_name_blank_is_rejected(api_client):
         app.dependency_overrides.pop(require_admin_jwt, None)
     assert response.status_code == 400
     assert "名称" in response.json()["detail"]
+
+
+def test_manual_personality_required(api_client):
+    app = _admin_override()
+    try:
+        response = api_client.post(
+            "/admin-api/agent-templates",
+            json={
+                "name": "柳如烟",
+                "gender": "female",
+                "personality_mode": "manual",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(require_admin_jwt, None)
+    assert response.status_code == 400
+    assert "性格" in response.json()["detail"]
+
+
+def test_assign_retries_when_name_career_personality_collide():
+    career = {"id": "c1", "title": "咖啡师"}
+    rolls = iter([10] * 7 + [10] * 7 + [20] * 7)
+    with patch(
+        "app.api.admin.agent_templates.random.randint",
+        side_effect=lambda _lo, _hi: next(rolls),
+    ):
+        assigned = assign_template_personalities(
+            ["同名", "同名"],
+            [career, career],
+            personality_mode="random",
+            manual=None,
+        )
+    assert assigned[0]["lively"] == 10
+    assert assigned[1]["lively"] == 20
+    assert combo_identity("同名", career, assigned[0]) != combo_identity(
+        "同名", career, assigned[1],
+    )
+
+
+def test_assign_manual_reuses_submitted_vector():
+    career = {"id": "c1"}
+    assigned = assign_template_personalities(
+        ["A", "B"],
+        [career, career],
+        personality_mode="manual",
+        manual=_PERSONALITY,
+    )
+    assert assigned == [_PERSONALITY, _PERSONALITY]

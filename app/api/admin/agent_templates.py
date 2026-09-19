@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 
 from typing import Literal
 
@@ -73,13 +74,88 @@ class TemplateCreateRequest(BaseModel):
     # Optional when name_mode=random — old clients still send a name and keep
     # the previous single-create path (manual name, random career).
     name: str | None = None
-    personality: PersonalityInput
+    # Required when personality_mode=manual. Random mode ignores this and
+    # samples a 7-dim vector per template.
+    personality: PersonalityInput | None = None
     gender: str | None = None
     background: str | None = None
     name_mode: Literal["manual", "random"] = "manual"
     career_mode: Literal["manual", "random"] = "random"
+    personality_mode: Literal["manual", "random"] = "manual"
     career_id: str | None = None
     batch_count: int = Field(default=1, ge=1, le=MAX_TEMPLATE_BATCH)
+
+
+_PERSONALITY_KEYS = (
+    "lively",
+    "rational",
+    "emotional",
+    "planned",
+    "spontaneous",
+    "creative",
+    "humor",
+)
+
+
+def random_personality() -> dict[str, int]:
+    """Sample one 7-dim vector in the same 0-100 range as the admin sliders."""
+    return {key: random.randint(0, 100) for key in _PERSONALITY_KEYS}
+
+
+def _career_identity(career: dict | None) -> str:
+    if not career:
+        return ""
+    return str(career.get("id") or career.get("title") or "")
+
+
+def _personality_identity(personality: dict) -> tuple[int, ...]:
+    return tuple(int(personality[key]) for key in _PERSONALITY_KEYS)
+
+
+def combo_identity(name: str, career: dict | None, personality: dict) -> tuple:
+    """Identity used to keep batch templates from sharing all three fields."""
+    return (name, _career_identity(career), _personality_identity(personality))
+
+
+def assign_template_personalities(
+    names: list[str],
+    careers: list[dict | None],
+    *,
+    personality_mode: str,
+    manual: dict | None,
+) -> list[dict[str, int]]:
+    """Return one personality per (name, career) pair.
+
+    Manual mode reuses the submitted vector. Random mode samples independently
+    and retries so no two items share the same (name, career, personality)
+    triple — the batch guarantee asked for by the admin UI.
+    """
+    if len(names) != len(careers):
+        raise ValueError("names and careers must be the same length")
+    if personality_mode == "manual":
+        if not manual:
+            raise ValueError("请填写性格维度")
+        return [dict(manual) for _ in names]
+
+    used: set[tuple] = set()
+    assigned: list[dict[str, int]] = []
+    for name, career in zip(names, careers, strict=True):
+        personality = random_personality()
+        for _ in range(48):
+            if combo_identity(name, career, personality) not in used:
+                break
+            personality = random_personality()
+        else:
+            personality = dict(personality)
+            start = int(personality["humor"])
+            personality["humor"] = (start + 1) % 101
+            while combo_identity(name, career, personality) in used:
+                personality["humor"] = (int(personality["humor"]) + 1) % 101
+                if personality["humor"] == start:
+                    break
+        used.add(combo_identity(name, career, personality))
+        assigned.append(personality)
+    return assigned
 
 
 class DefaultTemplateRequest(BaseModel):
@@ -204,9 +280,12 @@ async def list_templates() -> dict:
 async def create_template(data: TemplateCreateRequest) -> dict:
     """Create one or more template agents via the full provisioning pipeline.
 
-    Name and career can each be picked manually or randomly. Batch creation is
-    only allowed when *both* are random, so the operator is generating a pool
-    rather than repeating the same specified identity.
+    Name, career, and the 7-dim personality can each be picked manually or
+    randomly. Batch creation is only allowed when all three are random, so the
+    operator is generating a pool rather than repeating a specified identity.
+    Each batch item is then handed to ``create_agent_with_provisioning`` — the
+    same path as a Flutter user creating an agent — with its own name, career
+    override, and personality vector.
     """
     # Import here to avoid a public<-admin import cycle at module load.
     from app.api.public.agents import create_agent_with_provisioning
@@ -214,13 +293,18 @@ async def create_template(data: TemplateCreateRequest) -> dict:
     from app.services.name_templates import pick_random_names
 
     batch_count = data.batch_count
-    if batch_count > 1 and not (
-        data.name_mode == "random" and data.career_mode == "random"
-    ):
+    all_random = (
+        data.name_mode == "random"
+        and data.career_mode == "random"
+        and data.personality_mode == "random"
+    )
+    if batch_count > 1 and not all_random:
         raise HTTPException(
             status_code=400,
-            detail="只有姓名和职业都选择随机时才能批量生成",
+            detail="只有姓名、职业和性格维度都选择随机时才能批量生成",
         )
+    if data.personality_mode == "manual" and data.personality is None:
+        raise HTTPException(status_code=400, detail="请填写性格维度")
 
     gender = _normalize_gender(data.gender)
 
@@ -247,15 +331,25 @@ async def create_template(data: TemplateCreateRequest) -> dict:
     else:
         careers = await pick_random_active_careers(len(names))
 
+    try:
+        personalities = assign_template_personalities(
+            names,
+            careers,
+            personality_mode=data.personality_mode,
+            manual=data.personality.model_dump() if data.personality else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     owner = await get_or_create_template_user()
     created: list[dict] = []
     errors: list[dict] = []
-    for name, career in zip(names, careers, strict=True):
+    for name, career, personality in zip(names, careers, personalities, strict=True):
         try:
             agent, workspace = await create_agent_with_provisioning(
                 user_id=owner.id,
                 name=name,
-                personality=data.personality.model_dump(),
+                personality=personality,
                 background=data.background,
                 gender=gender,
                 career_template_override=career,
