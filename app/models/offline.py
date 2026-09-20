@@ -120,10 +120,14 @@ class OfflineActivityCompleteRequest(BaseModel):
 
 
 class OfflineActivityArriveRequest(BaseModel):
-    """确认到达时上报的当前 GPS（服务端算直线距离做 ≤200m 校验）。"""
+    """确认到达时上报的当前 GPS（可选）。
 
-    lat: float = Field(ge=-90, le=90)
-    lng: float = Field(ge=-180, le=180)
+    有坐标且该地点已地理编码时才做 ≤200m 直线校验；否则荣誉制放行（允许用户直接
+    点击到达）。地理编码 Key 未配置时地点无坐标，等同放行。
+    """
+
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
 
 
 class OfflineActivityImageUpload(BaseModel):

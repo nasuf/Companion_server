@@ -70,6 +70,20 @@ async def test_arrive_rejected_too_far(monkeypatch):
     mark.assert_not_awaited()  # 失败不改状态（spec §4.5）
 
 
+async def test_arrive_honor_system_without_coords(monkeypatch):
+    # 无客户端坐标：即便地点有经纬度也放行（允许用户直接点击到达）。
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(activity_service.repo, "get_activity", AsyncMock(return_value=_row()))
+    mark = AsyncMock(return_value=_row(reached=True))
+    monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
+
+    result = await activity_service.arrive_activity("u1", "a1")  # 不传坐标
+
+    assert result.reached is True
+    mark.assert_awaited_once()
+    assert mark.await_args.kwargs["lat"] is None
+
+
 async def test_arrive_idempotent_when_reached(monkeypatch):
     _patch_common(monkeypatch)
     monkeypatch.setattr(

@@ -367,8 +367,8 @@ async def arrive_activity(
     user_id: str,
     activity_id: str,
     *,
-    lat: float,
-    lng: float,
+    lat: float | None = None,
+    lng: float | None = None,
 ) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
@@ -380,7 +380,9 @@ async def arrive_activity(
         raise HTTPException(status_code=409, detail="先接受活动再确认到达")
     if activity.get("reached"):
         return OfflineActivityItem(**activity)  # 重复确认：幂等
-    _verify_arrival_distance(activity, lat, lng)
+    # 有客户端坐标才校验（地点已地理编码时才真正拦截 >200m）；无坐标荣誉制放行。
+    if lat is not None and lng is not None:
+        _verify_arrival_distance(activity, lat, lng)
     updated = await repo.mark_arrived(activity_id, user_id, lat=lat, lng=lng)
     if not updated:
         # 并发：别处已置为到达

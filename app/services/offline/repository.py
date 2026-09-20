@@ -548,8 +548,8 @@ async def mark_arrived(
     activity_id: str,
     user_id: str,
     *,
-    lat: float,
-    lng: float,
+    lat: float | None,
+    lng: float | None,
 ) -> dict[str, Any] | None:
     """确认到达：置 reached + 到达时间 + 24h 自动归档截止。仅 accepted 且未到达时生效。"""
     rows = await db.query_raw(
