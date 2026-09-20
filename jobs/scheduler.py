@@ -42,6 +42,7 @@ from app.services.notifications.capsules import scan_ready_capsule_notifications
 from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import dispatch_pending_last_will_deliveries, scan_due_last_wills
+from app.services.offline.activity_service import auto_archive_due_activities
 from app.services.offline.scheduler import scan_offline_triggers
 from app.services.offline.providers.ali1688_token import refresh_access_token
 from app.services.runtime.distributed_lock import (
@@ -606,6 +607,16 @@ def setup_scheduler():
         max_instances=1,
     )
 
+    # 线下活动 24h 自动归档（spec §3.6）：每 30 分钟扫一次到期活动。
+    scheduler.add_job(
+        _run_offline_auto_archive,
+        "cron",
+        minute="*/30",
+        id="offline_auto_archive",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Patience recovery every hour
     scheduler.add_job(
         _run_patience_recovery,
@@ -953,6 +964,18 @@ async def _run_offline_trigger_scan():
             _job_failed("Offline trigger scan", e)
 
     await _run_distributed_job("offline_trigger_scan", 3600, _body)
+
+
+async def _run_offline_auto_archive():
+    async def _body():
+        try:
+            stats = await auto_archive_due_activities()
+            if stats.get("archived"):
+                logger.info(f"[CRON] offline auto-archive: {stats}")
+        except Exception as e:
+            _job_failed("Offline auto archive", e)
+
+    await _run_distributed_job("offline_auto_archive", 1800, _body)
 
 
 async def _run_l2_adjustment():

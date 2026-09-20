@@ -164,6 +164,46 @@ async def emit_activity_card(
     )
 
 
+async def emit_thought_fragment(
+    *,
+    conversation_id: str | None,
+    user_id: str,
+    agent_id: str,
+    workspace_id: str | None,
+    activity_id: str,
+    fragment: dict[str, Any],
+    source_message_id: str | None,
+    trace_id: str | None = None,
+) -> str | None:
+    """识图命中产出碎片后推「思绪气泡」。metadata.offline_fragment 让前端定位触发照片
+    并按等级渲染；skip_post_process + voice 关闭，避免被当普通回复二次加工/朗读。"""
+    if not conversation_id:
+        return None
+    fragment_meta = {
+        "fragment_id": fragment.get("id"),
+        "tier": fragment.get("tier"),
+        "lead_in": fragment.get("lead_in") or "",
+        "source_message_id": source_message_id,
+    }
+    return await emit_proactive_message(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        workspace_id=workspace_id,
+        message=fragment.get("text") or "",
+        trigger_type="offline_thought_fragment",
+        extra_metadata={
+            "real_world_type": "activity",
+            "source_id": activity_id,
+            "offline_fragment": fragment_meta,
+        },
+        ws_payload_extra={"offline_fragment": fragment_meta},
+        skip_post_process=True,
+        voice_eligible=False,
+        trace_id=trace_id,
+    )
+
+
 async def emit_gift_card(
     *,
     conversation_id: str | None,

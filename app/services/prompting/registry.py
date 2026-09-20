@@ -87,6 +87,10 @@ from app.services.prompting.defaults import (
     MEDIUM_PATIENCE_REPLY_PROMPT,
     OFFLINE_ACTIVITY_CARD_PROMPT,
     OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
+    OFFLINE_MEMORY_NOTE_PROMPT,
+    OFFLINE_PHOTO_RECOGNITION_PROMPT,
+    OFFLINE_SHOOTING_CONDITIONS_PROMPT,
+    OFFLINE_THOUGHT_FRAGMENT_PROMPT,
     OFFLINE_GIFT_DELIVERED_MESSAGE_PROMPT,
     OFFLINE_GIFT_CANDIDATE_PICK_PROMPT,
     OFFLINE_GIFT_FIRST_ADDRESS_REQUEST_PROMPT,
@@ -239,6 +243,26 @@ PROMPT_DEFINITIONS = [
         "offline.activity_invite_message", "线下活动朋友式推荐语", "线下互动", "线下活动",
         "【工程扩展】V3 现实世界互动. 给生成的活动卡配一条不像通知模板的主动聊天消息.",
         OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.shooting_conditions", "线下打卡拍摄条件生成", "线下互动", "线下活动",
+        "【工程扩展】打卡闭环. 用户到达后为地点生成 3-5 条隐藏拍摄条件, 供后续识图匹配, 不展示给用户.",
+        OFFLINE_SHOOTING_CONDITIONS_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.photo_recognition", "线下现场照片识图匹配", "线下互动", "线下活动",
+        "【工程扩展】打卡闭环. 依据照片内容描述判断是否命中某条未触发拍摄条件, 输出命中项与去重关键词.",
+        OFFLINE_PHOTO_RECOGNITION_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.thought_fragment", "线下思绪碎片正文生成", "线下互动", "线下活动",
+        "【工程扩展】打卡闭环. 识图命中并定级后, 结合地点/记忆/语气生成对应等级的思绪碎片正文.",
+        OFFLINE_THOUGHT_FRAGMENT_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.memory_note", "线下记忆手札旅途小记", "线下互动", "线下活动",
+        "【工程扩展】打卡闭环. 回顾页生成记忆手札时, 汇总地点/时间/思绪碎片写一段旅途小记正文.",
+        OFFLINE_MEMORY_NOTE_PROMPT,
     ),
     PromptDefinition(
         "offline.gift_selection", "线下礼物选择", "线下互动", "礼物",

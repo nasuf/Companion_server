@@ -106,6 +106,17 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
             else None
         ),
         "search_sources": list(_json(_field(row, "search_sources", "searchSources"), [])),
+        # place_* 为内部字段（到达校验/同地点复用用），OfflineActivityItem 未声明，
+        # 序列化到前端时 pydantic 自动忽略，不外泄经纬度。
+        "place_lat": _field(row, "place_lat", "placeLat"),
+        "place_lng": _field(row, "place_lng", "placeLng"),
+        "place_key": _field(row, "place_key", "placeKey"),
+        "reached": bool(_field(row, "reached", default=False)),
+        "arrival_confirmed_at": _iso(_field(row, "arrival_confirmed_at", "arrivalConfirmedAt")),
+        "prophecy_text": _field(row, "prophecy_text", "prophecyText"),
+        "auto_archive_at": _iso(_field(row, "auto_archive_at", "autoArchiveAt")),
+        "travel_note": _field(row, "travel_note", "travelNote"),
+        "fragment_count": int(_field(row, "fragment_count", "fragmentCount", 0) or 0),
         "accepted_at": _iso(_field(row, "accepted_at", "acceptedAt")),
         "ignored_at": _iso(_field(row, "ignored_at", "ignoredAt")),
         "completed_at": _iso(_field(row, "completed_at", "completedAt")),
@@ -379,13 +390,15 @@ async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
             id, user_id, agent_id, workspace_id, conversation_id, status, source,
             title, summary, description, category, city, location_name, address,
             starts_at, ends_at, official_url, image_urls, search_sources,
-            easter_egg_task, task_hint, expires_at
+            easter_egg_task, task_hint, expires_at,
+            place_lat, place_lng, place_key
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12, $13, $14,
             $15::timestamptz, $16::timestamptz, $17, $18::jsonb, $19::jsonb,
-            $20::jsonb, $21, $22::timestamptz
+            $20::jsonb, $21, $22::timestamptz,
+            $23, $24, $25
         )
         RETURNING *
         """,
@@ -411,6 +424,9 @@ async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
         json.dumps(data.get("easter_egg_task") or {}, ensure_ascii=False),
         data.get("task_hint"),
         expires_at,
+        data.get("place_lat"),
+        data.get("place_lng"),
+        data.get("place_key"),
     )
     return activity_from_row(rows[0])
 
@@ -526,6 +542,360 @@ async def update_activity_status(
         status,
     )
     return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def mark_arrived(
+    activity_id: str,
+    user_id: str,
+    *,
+    lat: float,
+    lng: float,
+) -> dict[str, Any] | None:
+    """确认到达：置 reached + 到达时间 + 24h 自动归档截止。仅 accepted 且未到达时生效。"""
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET reached = TRUE,
+            arrival_confirmed_at = CURRENT_TIMESTAMP,
+            arrival_lat = $3,
+            arrival_lng = $4,
+            auto_archive_at = CURRENT_TIMESTAMP + INTERVAL '24 hours',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2 AND status = 'accepted' AND reached = FALSE
+        RETURNING *
+        """,
+        activity_id,
+        user_id,
+        lat,
+        lng,
+    )
+    return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def set_prophecy(
+    activity_id: str,
+    user_id: str,
+    text: str,
+) -> dict[str, Any] | None:
+    """写入此行小预言。原子守卫：仅「未抽过且未到达」时成功，防重复抽取。"""
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET prophecy_text = $3,
+            prophecy_drawn_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2
+          AND prophecy_text IS NULL AND reached = FALSE AND status = 'accepted'
+        RETURNING *
+        """,
+        activity_id,
+        user_id,
+        text,
+    )
+    return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def mark_archived(
+    activity_id: str,
+    user_id: str,
+    *,
+    auto: bool = False,
+) -> dict[str, Any] | None:
+    """归档「收好」：accepted -> completed，记归档时间。仅 accepted 生效（幂等由调用方处理）。"""
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET status = 'completed',
+            completed_at = CURRENT_TIMESTAMP,
+            archived_at = CURRENT_TIMESTAMP,
+            auto_archived = $3,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2 AND status = 'accepted'
+        RETURNING *
+        """,
+        activity_id,
+        user_id,
+        auto,
+    )
+    return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def list_due_for_auto_archive(*, limit: int = 200) -> list[dict[str, Any]]:
+    """spec §3.6：进行中 + 已到达 + 距确认到达 ≥24h（auto_archive_at 到期）的活动。"""
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM offline_activity_recommendations
+        WHERE status = 'accepted' AND reached = TRUE
+          AND auto_archive_at IS NOT NULL
+          AND auto_archive_at <= CURRENT_TIMESTAMP
+        ORDER BY auto_archive_at ASC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [activity_from_row(r, reveal_task=True) for r in rows]
+
+
+async def find_accepted_by_place_key(
+    user_id: str,
+    place_key: str,
+    *,
+    exclude_id: str,
+) -> dict[str, Any] | None:
+    """同地点复用：找该用户同 place_key 的其它进行中(accepted)活动。"""
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM offline_activity_recommendations
+        WHERE user_id = $1 AND place_key = $2 AND status = 'accepted' AND id != $3
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        user_id,
+        place_key,
+        exclude_id,
+    )
+    return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+# ---------------------------------------------------------------------------
+# 拍摄条件集合（spec §3.4）：到达后由大模型生成，永不下发前端明文。
+# ---------------------------------------------------------------------------
+async def create_shooting_conditions(
+    recommendation_id: str,
+    conditions: list[dict[str, Any]],
+) -> None:
+    for idx, cond in enumerate(conditions):
+        short_name = str(cond.get("short_name") or "").strip()[:60]
+        criteria = str(cond.get("criteria") or "").strip()[:500]
+        if not short_name or not criteria:
+            continue
+        await db.execute_raw(
+            """
+            INSERT INTO offline_shooting_conditions
+                (id, recommendation_id, short_name, criteria, sort_order)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            new_id(),
+            recommendation_id,
+            short_name,
+            criteria,
+            idx,
+        )
+
+
+async def mark_conditions_ready(recommendation_id: str, user_id: str) -> None:
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET conditions_ready_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2
+        """,
+        recommendation_id,
+        user_id,
+    )
+
+
+async def count_shooting_conditions(recommendation_id: str) -> int:
+    rows = await db.query_raw(
+        "SELECT COUNT(*)::int AS n FROM offline_shooting_conditions "
+        "WHERE recommendation_id = $1",
+        recommendation_id,
+    )
+    return int(_field(rows[0], "n") or 0) if rows else 0
+
+
+async def list_untriggered_conditions(recommendation_id: str) -> list[dict[str, Any]]:
+    rows = await db.query_raw(
+        """
+        SELECT id, short_name, criteria
+        FROM offline_shooting_conditions
+        WHERE recommendation_id = $1 AND triggered = FALSE
+        ORDER BY sort_order ASC
+        """,
+        recommendation_id,
+    )
+    return [
+        {
+            "id": str(_field(r, "id")),
+            "short_name": _field(r, "short_name", "shortName"),
+            "criteria": _field(r, "criteria"),
+        }
+        for r in rows
+    ]
+
+
+async def mark_condition_triggered(condition_id: str) -> None:
+    await db.execute_raw(
+        """
+        UPDATE offline_shooting_conditions
+        SET triggered = TRUE, triggered_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND triggered = FALSE
+        """,
+        condition_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 思绪碎片（spec §4）
+# ---------------------------------------------------------------------------
+async def count_fragments(recommendation_id: str) -> int:
+    rows = await db.query_raw(
+        "SELECT COUNT(*)::int AS n FROM offline_thought_fragments "
+        "WHERE recommendation_id = $1",
+        recommendation_id,
+    )
+    return int(_field(rows[0], "n") or 0) if rows else 0
+
+
+async def fragment_fingerprint_exists(
+    recommendation_id: str, fingerprint: str
+) -> bool:
+    if not fingerprint:
+        return False
+    rows = await db.query_raw(
+        """
+        SELECT 1 FROM offline_thought_fragments
+        WHERE recommendation_id = $1 AND content_fingerprint = $2 LIMIT 1
+        """,
+        recommendation_id,
+        fingerprint,
+    )
+    return bool(rows)
+
+
+async def create_fragment(
+    *,
+    recommendation_id: str,
+    tier: str,
+    text: str,
+    lead_in: str | None = None,
+    condition_id: str | None = None,
+    snapshot_media_id: str | None = None,
+    source_message_id: str | None = None,
+    content_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    rows = await db.query_raw(
+        """
+        INSERT INTO offline_thought_fragments
+            (id, recommendation_id, tier, text, lead_in, condition_id,
+             snapshot_media_id, source_message_id, content_fingerprint)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, tier, text, lead_in, snapshot_media_id, created_at
+        """,
+        new_id(),
+        recommendation_id,
+        tier,
+        text,
+        lead_in,
+        condition_id,
+        snapshot_media_id,
+        source_message_id,
+        content_fingerprint,
+    )
+    return _fragment_from_row(rows[0]) if rows else {}
+
+
+async def list_fragments(recommendation_id: str) -> list[dict[str, Any]]:
+    rows = await db.query_raw(
+        """
+        SELECT id, tier, text, lead_in, snapshot_media_id, created_at
+        FROM offline_thought_fragments
+        WHERE recommendation_id = $1
+        ORDER BY created_at ASC
+        """,
+        recommendation_id,
+    )
+    return [_fragment_from_row(r) for r in rows]
+
+
+def _fragment_from_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(_field(row, "id")),
+        "tier": str(_field(row, "tier") or "rare"),
+        "text": str(_field(row, "text") or ""),
+        "lead_in": _field(row, "lead_in", "leadIn"),
+        "snapshot_media_id": _field(row, "snapshot_media_id", "snapshotMediaId"),
+        "created_at": _iso(_field(row, "created_at", "createdAt")),
+    }
+
+
+async def create_captured_media(
+    *,
+    recommendation_id: str,
+    user_id: str,
+    storage_key: str,
+    url: str,
+    mime: str,
+    size: int,
+    width: int | None,
+    height: int | None,
+    source_message_id: str | None,
+) -> str:
+    """把聊天发来的现场图片登记为活动素材（role=material，url 指向聊天媒体服务）。"""
+    media_id = new_id()
+    await db.execute_raw(
+        """
+        INSERT INTO offline_activity_media
+            (id, recommendation_id, user_id, kind, mime, size, width, height,
+             storage_key, url, role, source_message_id)
+        VALUES ($1, $2, $3, 'image', $4, $5, $6, $7, $8, $9, 'material', $10)
+        """,
+        media_id,
+        recommendation_id,
+        user_id,
+        mime,
+        int(size or 0),
+        width,
+        height,
+        storage_key,
+        url,
+        source_message_id,
+    )
+    return media_id
+
+
+async def mark_media_fragment_cover(media_id: str, fingerprint: str) -> None:
+    """碎片封面图：从画廊素材里剔除（spec §3.5），并记内容指纹与已识别。"""
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_media
+        SET role = 'fragment_cover', recognized = TRUE,
+            content_fingerprint = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        """,
+        media_id,
+        fingerprint,
+    )
+
+
+async def list_gallery_media(recommendation_id: str) -> list[str]:
+    """回顾画廊：仅 role=material 的图片；已作碎片封面的（fragment_cover）自动排除。"""
+    rows = await db.query_raw(
+        """
+        SELECT url FROM offline_activity_media
+        WHERE recommendation_id = $1 AND kind = 'image' AND role = 'material'
+        ORDER BY created_at ASC
+        """,
+        recommendation_id,
+    )
+    return [str(_field(r, "url")) for r in rows if _field(r, "url")]
+
+
+async def set_travel_note(
+    recommendation_id: str, user_id: str, text: str
+) -> None:
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET travel_note = $3, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2
+        """,
+        recommendation_id,
+        user_id,
+        text,
+    )
 
 
 async def create_activity_feedback(

@@ -1389,6 +1389,20 @@ async def _handle_message(
         user_id=user_id,
         conversation_id=conversation_id,
     )
+    # 线下活动打卡：到达中发来的现场图片/语音路由进活动（素材+识图/转写归档），
+    # fire-and-forget，不阻塞回复。无进行中已到达活动时钩子内部自行 no-op。
+    if attachments:
+        try:
+            from app.services.offline.chat_capture import on_user_chat_media
+
+            fire_background(on_user_chat_media(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                message_id=user_message_id,
+                attachments=attachments,
+            ))
+        except Exception as offline_capture_err:
+            logger.debug(f"[offline-capture] hook skipped: {offline_capture_err}")
     if link_card_metadata and link_card_metadata.get("id"):
         await bind_link_card_to_message(
             link_id=str(link_card_metadata["id"]),

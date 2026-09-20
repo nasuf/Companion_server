@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.models.chat_media import ChatAttachmentResponse
 
 
-ActivityStatus = Literal["pending", "accepted", "ignored", "expired", "completed"]
+ActivityStatus = Literal["pending", "accepted", "ignored", "cancelled", "expired", "completed"]
 GiftStatus = Literal[
     "pending_address",
     "selecting",
@@ -37,6 +37,12 @@ class OfflineActivityItem(BaseModel):
     task_hint: str | None = None
     easter_egg_task: dict[str, Any] | None = None
     search_sources: list[dict[str, Any]] = Field(default_factory=list)
+    # 打卡闭环状态（拍摄条件明文永不下发前端）
+    reached: bool = False
+    arrival_confirmed_at: str | None = None
+    prophecy_text: str | None = None
+    auto_archive_at: str | None = None
+    fragment_count: int = 0
     accepted_at: str | None = None
     ignored_at: str | None = None
     completed_at: str | None = None
@@ -51,6 +57,36 @@ class OfflineActivityCompletionFeedback(BaseModel):
     photo_attachments: list[ChatAttachmentResponse] = Field(default_factory=list)
     audio_attachment: ChatAttachmentResponse | None = None
     created_at: str | None = None
+
+
+class OfflineActivityFragmentItem(BaseModel):
+    id: str
+    tier: str
+    text: str
+    lead_in: str | None = None
+
+
+class OfflineActivityReviewResponse(BaseModel):
+    id: str
+    title: str
+    address: str | None = None
+    cover_url: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    story: str = ""
+    gallery: list[str] = Field(default_factory=list)
+    fragments: list[OfflineActivityFragmentItem] = Field(default_factory=list)
+    event_tags: list[str] = Field(default_factory=list)
+    has_memory_note: bool = False
+    travel_note: str | None = None
+
+
+class OfflineMemoryNoteResponse(BaseModel):
+    title: str
+    date_text: str
+    cover_url: str | None = None
+    travel_note: str
+    fragment_tags: list[str] = Field(default_factory=list)
 
 
 class OfflineHomeResponse(BaseModel):
@@ -81,6 +117,13 @@ class OfflineActivityCompleteRequest(BaseModel):
     text: str = Field(default="", max_length=1000)
     photo_attachment_ids: list[str] = Field(default_factory=list, max_length=3)
     audio_attachment_id: str | None = Field(default=None, max_length=80)
+
+
+class OfflineActivityArriveRequest(BaseModel):
+    """确认到达时上报的当前 GPS（服务端算直线距离做 ≤200m 校验）。"""
+
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
 
 
 class OfflineActivityImageUpload(BaseModel):

@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
 
-from app.models.offline import OfflineActivitiesResponse, OfflineActivityItem
+from app.config import settings
+from app.models.offline import (
+    OfflineActivitiesResponse,
+    OfflineActivityFragmentItem,
+    OfflineActivityItem,
+    OfflineActivityReviewResponse,
+    OfflineMemoryNoteResponse,
+)
 from app.services.offline import activity_media_repo, activity_media_storage, gift_repository
+from app.services.offline import memory_note as memory_note_gen
+from app.services.offline import prophecy as prophecy_pool
 from app.services.offline import repository as repo
+from app.services.offline import shooting_conditions
+from app.services.offline.recognition import TIER_LABELS
+from app.services.offline.geocode import geocode_address, haversine_m, make_place_key
+from app.services.runtime.tasks import fire_background
 from app.services.offline.activity_generation import (
     generate_activity_card,
     generate_activity_invite_message,
@@ -19,6 +33,8 @@ from app.services.offline.chat_emit import (
     insert_user_component_message,
 )
 from app.services.offline.memory_hooks import remember_user_event
+
+logger = logging.getLogger(__name__)
 
 
 def _location_for_activity(ctx: dict) -> tuple[str, str | None]:
@@ -138,6 +154,13 @@ async def create_recommendation_for_user(
     )
     if not card:
         return None
+    # 地理编码：地址 -> 经纬度（供到达 ≤200m 校验）+ 同地点去重键。key 未配置或失败
+    # 时 coords=None，不阻断推荐（到达校验按 offline_arrival_require_geocode 处理）。
+    coords = await geocode_address(card.get("address"), card.get("city") or city)
+    place_lat, place_lng = coords if coords else (None, None)
+    place_key = make_place_key(
+        card.get("location_name"), card.get("address"), card.get("city") or city
+    )
     activity = await repo.create_activity(
         {
             **card,
@@ -146,6 +169,9 @@ async def create_recommendation_for_user(
             "workspace_id": ctx["workspace_id"],
             "conversation_id": ctx["conversation_id"],
             "status": "pending",
+            "place_lat": place_lat,
+            "place_lng": place_lng,
+            "place_key": place_key,
         }
     )
     async with offline_trace(
@@ -193,21 +219,31 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
         raise HTTPException(status_code=404, detail="Activity not found")
     if activity["status"] not in {"pending", "accepted", "ignored"}:
         raise HTTPException(status_code=409, detail="Activity cannot be accepted")
+    # spec §4.4 同地点复用：接受新推荐时若同地点已有进行中活动，直接返回既有（前端
+    # 打开其打卡页），并把当前这条收进「暂不考虑」，避免同地点重复占列表。
+    place_key = activity.get("place_key")
+    if activity["status"] == "pending" and place_key:
+        existing = await repo.find_accepted_by_place_key(
+            user_id, place_key, exclude_id=activity_id
+        )
+        if existing:
+            await repo.update_activity_status(activity_id, user_id, "ignored")
+            return OfflineActivityItem(**existing)
     was_ignored = activity["status"] == "ignored"
     if was_ignored:
         feedback_text = f"用户重新接受了活动推荐：{activity['title']}"
         chat_message = (
             f"好呀，我把「{activity['title']}」重新放回待出行里。"
-            "彩蛋任务也还在，等你想去的时候慢慢看。"
+            "等你想去的时候招呼我一声，到了现场点一下『我已经抵达这里』就行。"
         )
         memory_text = f"用户重新接受了线下活动推荐：{activity['title']}"
     else:
-        feedback_text = f"用户接受了活动推荐：{activity['title']}"
+        feedback_text = f"用户想去看看：{activity['title']}"
         chat_message = (
-            f"好，我把「{activity['title']}」先替你放进待确定里。"
-            "彩蛋任务也解锁啦，等你想去的时候再慢慢看。"
+            f"好，「{activity['title']}」我陪你一起去看看，先放进待出行里。"
+            "到了现场记得点『我已经抵达这里』，我在这儿等你。"
         )
-        memory_text = f"用户接受了线下活动推荐：{activity['title']}"
+        memory_text = f"用户接受了线下活动推荐（想去看看）：{activity['title']}"
     trigger_type = (
         "offline_activity_reaccepted" if was_ignored else "offline_activity_accepted"
     )
@@ -227,7 +263,7 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             workspace_id=ctx["workspace_id"],
             activity=updated,
             trigger_type=f"{trigger_type}_card",
-            status_label="已接受",
+            status_label="待出行",
         )
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
@@ -282,7 +318,7 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             user_id=user_id,
             agent_id=ctx["agent_id"],
             workspace_id=ctx["workspace_id"],
-            message="没关系，这个先不算。下次我会换一个更轻一点、更贴近你当下状态的选择。",
+            message="好，那这个先放一放。下次我换一个更轻一点、更贴近你当下状态的选择。",
             real_world_type="activity",
             source_id=activity_id,
             trigger_type="offline_activity_ignored",
@@ -299,6 +335,287 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
         text=f"用户暂时忽略了线下活动推荐：{activity['title']}",
     )
     return OfflineActivityItem(**updated)
+
+
+def _verify_arrival_distance(activity: dict, lat: float, lng: float) -> None:
+    """spec §3.3/§4.5：仅点击确认时校验直线距离 ≤ 半径。无坐标时按配置拦截或放行。"""
+    place_lat = activity.get("place_lat")
+    place_lng = activity.get("place_lng")
+    if place_lat is None or place_lng is None:
+        if settings.offline_arrival_require_geocode:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason": "no_geocode",
+                    "message": "这个地点还没定位到坐标，暂时没法确认到达",
+                },
+            )
+        return  # 放行：无坐标跳过距离校验（体验优先，开关控制）
+    distance = haversine_m(lat, lng, float(place_lat), float(place_lng))
+    if distance > settings.offline_arrival_radius_m:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason": "too_far",
+                "distance_m": round(distance),
+                "message": "好像还没到附近，再走近一点再试试",
+            },
+        )
+
+
+async def arrive_activity(
+    user_id: str,
+    activity_id: str,
+    *,
+    lat: float,
+    lng: float,
+) -> OfflineActivityItem:
+    activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    status = activity["status"]
+    if status == "completed":
+        raise HTTPException(status_code=409, detail="旅途已结束，可以去回顾看看")
+    if status != "accepted":
+        raise HTTPException(status_code=409, detail="先接受活动再确认到达")
+    if activity.get("reached"):
+        return OfflineActivityItem(**activity)  # 重复确认：幂等
+    _verify_arrival_distance(activity, lat, lng)
+    updated = await repo.mark_arrived(activity_id, user_id, lat=lat, lng=lng)
+    if not updated:
+        # 并发：别处已置为到达
+        current = await repo.get_activity(activity_id, user_id, reveal_task=True)
+        if current and current.get("reached"):
+            return OfflineActivityItem(**current)
+        raise HTTPException(status_code=409, detail="确认到达失败，请重试")
+    # 到达后后台生成 3-5 拍摄条件集合（spec §3.4，不阻塞到达响应，不披露给用户）。
+    fire_background(shooting_conditions.generate_conditions_for_activity(updated))
+    ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
+    if ctx:
+        await insert_user_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type="offline_activity_arrived_card",
+            status_label="我已到达",
+        )
+        # 拍照引导（spec §3.1：禁止泄露拍摄条件）。P3 接入 LLM 版，本期为固定文案。
+        await emit_assistant(
+            conversation_id=ctx.get("conversation_id"),
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            message="到啦～在现场随手拍点你觉得有意思的画面发给我，我慢慢看。",
+            real_world_type="activity",
+            source_id=activity_id,
+            trigger_type="offline_activity_arrival_guide",
+        )
+    remember_user_event(
+        user_id=user_id,
+        workspace_id=activity.get("workspace_id"),
+        text=f"用户确认到达线下活动地点：{activity['title']}",
+    )
+    return OfflineActivityItem(**updated)
+
+
+async def draw_prophecy(user_id: str, activity_id: str) -> OfflineActivityItem:
+    """spec §4.7：未到达前每活动最多抽一次；抽后返回带 prophecy_text 的活动。"""
+    activity = await repo.get_activity(activity_id, user_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    if activity["status"] != "accepted":
+        raise HTTPException(status_code=409, detail="这个活动现在不能抽预言")
+    if activity.get("reached"):
+        raise HTTPException(status_code=409, detail="已经到达，预言只在出发前有效")
+    if activity.get("prophecy_text"):
+        return OfflineActivityItem(**activity)  # 幂等：已抽过返回原文
+    updated = await repo.set_prophecy(
+        activity_id, user_id, prophecy_pool.pick_prophecy()
+    )
+    if not updated:
+        current = await repo.get_activity(activity_id, user_id)
+        if current and current.get("prophecy_text"):
+            return OfflineActivityItem(**current)
+        raise HTTPException(status_code=409, detail="抽签失败，请重试")
+    return OfflineActivityItem(**updated)
+
+
+async def archive_activity(user_id: str, activity_id: str) -> OfflineActivityItem:
+    """手动「收好这次旅途回忆」：accepted -> completed，推档案卡。幂等。"""
+    activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    if activity["status"] == "completed":
+        return OfflineActivityItem(**await _with_completion_feedback(activity))
+    if activity["status"] != "accepted":
+        raise HTTPException(status_code=409, detail="这个活动现在不能归档")
+    updated = await repo.mark_archived(activity_id, user_id, auto=False)
+    if not updated:
+        current = await repo.get_activity(activity_id, user_id, reveal_task=True)
+        if current and current["status"] == "completed":
+            return OfflineActivityItem(**await _with_completion_feedback(current))
+        raise HTTPException(status_code=409, detail="归档失败，请重试")
+    ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
+    if ctx:
+        await emit_activity_card(
+            conversation_id=ctx.get("conversation_id"),
+            user_id=user_id,
+            agent_id=ctx["agent_id"],
+            workspace_id=ctx["workspace_id"],
+            activity=updated,
+            trigger_type="offline_activity_archived_card",
+            status_label="已收好",
+        )
+    remember_user_event(
+        user_id=user_id,
+        workspace_id=activity.get("workspace_id"),
+        text=f"用户收好了线下活动的回忆：{activity['title']}",
+    )
+    return OfflineActivityItem(**await _with_completion_feedback(updated))
+
+
+async def cancel_activity(user_id: str, activity_id: str) -> OfflineActivityItem:
+    """取消进行中活动（spec §4.2）：accepted -> cancelled，之后不再出现在待出行。"""
+    activity = await repo.get_activity(activity_id, user_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    if activity["status"] != "accepted":
+        raise HTTPException(status_code=409, detail="没有可取消的进行中活动")
+    updated = await repo.update_activity_status(activity_id, user_id, "cancelled")
+    if not updated:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    remember_user_event(
+        user_id=user_id,
+        workspace_id=activity.get("workspace_id"),
+        text=f"用户取消了线下活动：{activity['title']}",
+    )
+    return OfflineActivityItem(**updated)
+
+
+async def auto_archive_due_activities() -> dict[str, int]:
+    """spec §3.6：扫描确认到达满 24h 的进行中活动，自动归档并推档案卡 + 提示。
+
+    单条失败记日志跳过、下周期重试（spec §6），不影响其它活动。
+    """
+    due = await repo.list_due_for_auto_archive()
+    archived = 0
+    for activity in due:
+        try:
+            updated = await repo.mark_archived(
+                activity["id"], activity["user_id"], auto=True
+            )
+            if not updated:
+                continue  # 并发下已被手动归档
+            ctx = await repo.resolve_user_context(
+                activity["user_id"], activity.get("workspace_id")
+            )
+            if ctx:
+                await emit_activity_card(
+                    conversation_id=ctx.get("conversation_id"),
+                    user_id=activity["user_id"],
+                    agent_id=ctx["agent_id"],
+                    workspace_id=ctx["workspace_id"],
+                    activity=updated,
+                    trigger_type="offline_activity_auto_archived_card",
+                    status_label="已收好",
+                )
+                await emit_assistant(
+                    conversation_id=ctx.get("conversation_id"),
+                    user_id=activity["user_id"],
+                    agent_id=ctx["agent_id"],
+                    workspace_id=ctx["workspace_id"],
+                    message="已过 24 小时，这次旅途我先帮你收好啦，想回味随时来回顾看看。",
+                    real_world_type="activity",
+                    source_id=activity["id"],
+                    trigger_type="offline_activity_auto_archived",
+                )
+            archived += 1
+        except Exception as exc:
+            logger.warning(
+                "[offline-auto-archive] 单条归档失败 activity=%s err=%s",
+                activity.get("id"), exc,
+            )
+    return {"scanned": len(due), "archived": archived}
+
+
+def _review_event_tags(
+    activity: dict, fragments: list[dict], gallery: list[str]
+) -> list[str]:
+    """spec §4.17 事件记录标签。"""
+    tags: list[str] = []
+    if activity.get("reached"):
+        tags.append("打卡完成")
+    if activity.get("status") == "completed":
+        tags.append("行程已归档")
+    if fragments:
+        tags.append("思绪碎片已收藏")
+    if gallery:
+        tags.append("素材已归档")
+    return tags
+
+
+def _activity_cover(activity: dict, gallery: list[str]) -> str | None:
+    images = activity.get("image_urls") or []
+    if isinstance(images, list) and images:
+        return str(images[0])
+    return gallery[0] if gallery else None
+
+
+async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewResponse:
+    activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    fragments = await repo.list_fragments(activity_id)
+    gallery = await repo.list_gallery_media(activity_id)
+    return OfflineActivityReviewResponse(
+        id=activity["id"],
+        title=activity["title"],
+        address=activity.get("address") or activity.get("location_name"),
+        cover_url=_activity_cover(activity, gallery),
+        started_at=activity.get("arrival_confirmed_at") or activity.get("created_at"),
+        ended_at=activity.get("completed_at") or activity.get("archived_at"),
+        story=activity.get("description") or activity.get("summary") or "你把这一天慢慢走完了。",
+        gallery=gallery,
+        fragments=[
+            OfflineActivityFragmentItem(
+                id=f["id"], tier=f["tier"], text=f["text"], lead_in=f.get("lead_in")
+            )
+            for f in fragments
+        ],
+        event_tags=_review_event_tags(activity, fragments, gallery),
+        has_memory_note=bool(activity.get("travel_note")),
+        travel_note=activity.get("travel_note"),
+    )
+
+
+_TIER_EMOJI = {"rare": "💭", "epic": "📜", "legendary": "🔮"}
+
+
+async def generate_memory_note(
+    user_id: str, activity_id: str
+) -> OfflineMemoryNoteResponse:
+    activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    fragments = await repo.list_fragments(activity_id)
+    note = activity.get("travel_note")
+    if not note:  # 幂等：已生成直接复用，未生成才调 LLM 并缓存
+        note = await memory_note_gen.generate_travel_note(activity, fragments)
+        if not note:
+            note = memory_note_gen.fallback_note()
+        await repo.set_travel_note(activity_id, user_id, note)
+    gallery = await repo.list_gallery_media(activity_id)
+    fragment_tags = [
+        f"{_TIER_EMOJI.get(f['tier'], '💭')} {TIER_LABELS.get(f['tier'], '片刻感想')}"
+        for f in fragments
+    ]
+    return OfflineMemoryNoteResponse(
+        title=activity["title"],
+        date_text=activity.get("arrival_confirmed_at") or activity.get("created_at") or "",
+        cover_url=_activity_cover(activity, gallery),
+        travel_note=note,
+        fragment_tags=fragment_tags,
+    )
 
 
 async def complete_activity(

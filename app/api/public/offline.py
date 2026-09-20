@@ -12,11 +12,14 @@ from app.models.offline import (
     GiftTrackingResponse,
     GiftsHomeResponse,
     OfflineActivitiesResponse,
+    OfflineActivityArriveRequest,
     OfflineActivityClearResponse,
     OfflineActivityCompleteRequest,
     OfflineActivityImageUpload,
     OfflineActivityItem,
+    OfflineActivityReviewResponse,
     OfflineHomeResponse,
+    OfflineMemoryNoteResponse,
     RealWorldGiftItem,
 )
 from app.services.offline import (
@@ -107,6 +110,66 @@ async def ignore_offline_activity(
     user: dict = Depends(require_user),
 ):
     return await activity_service.ignore_activity(str(user["sub"]), activity_id)
+
+
+@router.post("/activities/{activity_id}/arrive", response_model=OfflineActivityItem)
+async def arrive_offline_activity(
+    activity_id: str,
+    data: OfflineActivityArriveRequest,
+    user: dict = Depends(require_user),
+):
+    return await activity_service.arrive_activity(
+        str(user["sub"]),
+        activity_id,
+        lat=data.lat,
+        lng=data.lng,
+    )
+
+
+@router.post("/activities/{activity_id}/prophecy", response_model=OfflineActivityItem)
+async def draw_offline_activity_prophecy(
+    activity_id: str,
+    user: dict = Depends(require_user),
+):
+    return await activity_service.draw_prophecy(str(user["sub"]), activity_id)
+
+
+@router.post("/activities/{activity_id}/archive", response_model=OfflineActivityItem)
+async def archive_offline_activity(
+    activity_id: str,
+    user: dict = Depends(require_user),
+):
+    return await activity_service.archive_activity(str(user["sub"]), activity_id)
+
+
+@router.post("/activities/{activity_id}/cancel", response_model=OfflineActivityItem)
+async def cancel_offline_activity(
+    activity_id: str,
+    user: dict = Depends(require_user),
+):
+    return await activity_service.cancel_activity(str(user["sub"]), activity_id)
+
+
+@router.get(
+    "/activities/{activity_id}/review",
+    response_model=OfflineActivityReviewResponse,
+)
+async def get_offline_activity_review(
+    activity_id: str,
+    user: dict = Depends(require_user),
+):
+    return await activity_service.get_review(str(user["sub"]), activity_id)
+
+
+@router.post(
+    "/activities/{activity_id}/memory-note",
+    response_model=OfflineMemoryNoteResponse,
+)
+async def generate_offline_memory_note(
+    activity_id: str,
+    user: dict = Depends(require_user),
+):
+    return await activity_service.generate_memory_note(str(user["sub"]), activity_id)
 
 
 @router.post("/activities/{activity_id}/complete", response_model=OfflineActivityItem)

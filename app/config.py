@@ -332,6 +332,17 @@ class Settings(BaseSettings):
     brave_search_api_key: str = ""
     brave_search_endpoint: str = "https://api.search.brave.com/res/v1/web/search"
 
+    # 线下活动地理编码：地址 -> 经纬度，供「我已经抵达这里」≤200m 到达校验。
+    # 未配置 key 时 geocode.py 优雅降级（返回 None），推荐照常生成但到达校验按
+    # offline_arrival_require_geocode 决定拦截或放行（见 geocode.py / arrive）。
+    amap_geocode_key: str = ""
+    amap_geocode_endpoint: str = "https://restapi.amap.com/v3/geocode/geo"
+    offline_geocode_timeout_s: float = 8.0
+    # 到达半径（米），spec = 200
+    offline_arrival_radius_m: float = 200.0
+    # 无经纬度时是否拒绝到达确认：True=拦截并提示，False=放行（体验优先，跳过距离校验）
+    offline_arrival_require_geocode: bool = False
+
     # Real-world gift commerce/logistics. Keep the default mock provider for
     # local/dev. In production, point custom_http at a buyer-side purchasing
     # service that can legally search, order, pay, and track gifts.

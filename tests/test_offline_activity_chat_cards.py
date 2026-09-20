@@ -197,7 +197,7 @@ async def test_accept_activity_allows_reaccepting_ignored_activity(monkeypatch):
     assert insert_card.await_args.kwargs["trigger_type"] == (
         "offline_activity_reaccepted_card"
     )
-    assert insert_card.await_args.kwargs["status_label"] == "已接受"
+    assert insert_card.await_args.kwargs["status_label"] == "待出行"
     assert emit.await_args.kwargs["trigger_type"] == "offline_activity_reaccepted"
 
 

@@ -1730,8 +1730,29 @@ model OfflineActivityRecommendation {
   searchSources  Json                      @default("[]") @map("search_sources")
   easterEggTask  Json?                     @map("easter_egg_task")
   taskHint       String?                   @map("task_hint")
+  // 地理编码（推荐/接受时写入，供到达校验）
+  placeLat       Float?                    @map("place_lat")
+  placeLng       Float?                    @map("place_lng")
+  placeKey       String?                   @map("place_key")
+  // 到达（打卡）
+  reached            Boolean               @default(false)
+  arrivalConfirmedAt DateTime?             @map("arrival_confirmed_at")
+  arrivalLat         Float?                @map("arrival_lat")
+  arrivalLng         Float?                @map("arrival_lng")
+  conditionsReadyAt  DateTime?             @map("conditions_ready_at")
+  // 此行小预言
+  prophecyText   String?                   @map("prophecy_text")
+  prophecyDrawnAt DateTime?                @map("prophecy_drawn_at")
+  // 归档
+  autoArchived   Boolean                   @default(false) @map("auto_archived")
+  archivedAt     DateTime?                 @map("archived_at")
+  autoArchiveAt  DateTime?                 @map("auto_archive_at")
+  // 记忆手札旅途小记（生成后缓存）
+  travelNote     String?                   @map("travel_note")
   feedback       OfflineActivityFeedback[]
   media          OfflineActivityMedia[]
+  conditions     OfflineShootingCondition[]
+  fragments      OfflineThoughtFragment[]
   acceptedAt     DateTime?                 @map("accepted_at")
   ignoredAt      DateTime?                 @map("ignored_at")
   completedAt    DateTime?                 @map("completed_at")
@@ -1741,6 +1762,7 @@ model OfflineActivityRecommendation {
 
   @@index([userId, status, createdAt(sort: Desc)], map: "offline_activity_user_status_idx")
   @@index([workspaceId, createdAt(sort: Desc)], map: "offline_activity_workspace_idx")
+  @@index([status, autoArchiveAt], map: "offline_activity_autoarchive_idx")
   @@map("offline_activity_recommendations")
 }
 
@@ -1759,6 +1781,12 @@ model OfflineActivityMedia {
   durationSeconds  Int?                          @map("duration_seconds")
   storageKey       String                        @unique @map("storage_key")
   url              String
+  // 到达后媒体分流：material（画廊素材）| fragment_cover（碎片封面，排除画廊）| voice（语音，转写归档）
+  role               String                      @default("material")
+  recognized         Boolean                     @default(false)
+  contentFingerprint String?                     @map("content_fingerprint")
+  transcript         String?
+  sourceMessageId    String?                     @map("source_message_id")
   createdAt        DateTime                      @default(now()) @map("created_at")
   updatedAt        DateTime                      @updatedAt @map("updated_at")
 
@@ -1782,6 +1810,38 @@ model OfflineActivityFeedback {
 
   @@index([recommendationId])
   @@map("offline_activity_feedback")
+}
+
+model OfflineShootingCondition {
+  id               String                        @id @default(uuid())
+  recommendationId String                        @map("recommendation_id")
+  recommendation   OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  shortName        String                        @map("short_name")
+  criteria         String
+  sortOrder        Int                           @default(0) @map("sort_order")
+  triggered        Boolean                       @default(false)
+  triggeredAt      DateTime?                     @map("triggered_at")
+  createdAt        DateTime                      @default(now()) @map("created_at")
+
+  @@index([recommendationId], map: "offline_shooting_conditions_recommendation_idx")
+  @@map("offline_shooting_conditions")
+}
+
+model OfflineThoughtFragment {
+  id                 String                        @id @default(uuid())
+  recommendationId   String                        @map("recommendation_id")
+  recommendation     OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  tier               String
+  text               String
+  leadIn             String?                       @map("lead_in")
+  conditionId        String?                       @map("condition_id")
+  snapshotMediaId    String?                       @map("snapshot_media_id")
+  sourceMessageId    String?                       @map("source_message_id")
+  contentFingerprint String?                       @map("content_fingerprint")
+  createdAt          DateTime                      @default(now()) @map("created_at")
+
+  @@index([recommendationId, createdAt(sort: Desc)], map: "offline_thought_fragment_recommendation_idx")
+  @@map("offline_thought_fragments")
 }
 
 model GiftAddress {
