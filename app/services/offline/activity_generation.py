@@ -477,6 +477,8 @@ def _fallback_card(
             "不需要社交表现，也不用赶时间，就当给今天换一点空气。"
         ),
         "category": tags[0] if tags else "城市漫游",
+        "vibe": "轻松、随意",
+        "suitable": "散步、拍照",
         "location_name": location,
         "address": location,
         "starts_at": None,

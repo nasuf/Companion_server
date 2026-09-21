@@ -95,6 +95,8 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "city": _field(row, "city"),
         "location_name": _field(row, "location_name", "locationName"),
         "address": _field(row, "address"),
+        "vibe": _field(row, "vibe"),
+        "suitable": _field(row, "suitable"),
         "starts_at": _iso(_field(row, "starts_at", "startsAt")),
         "ends_at": _iso(_field(row, "ends_at", "endsAt")),
         "official_url": _field(row, "official_url", "officialUrl"),
@@ -393,14 +395,14 @@ async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
             title, summary, description, category, city, location_name, address,
             starts_at, ends_at, official_url, image_urls, search_sources,
             easter_egg_task, task_hint, expires_at,
-            place_lat, place_lng, place_key
+            place_lat, place_lng, place_key, vibe, suitable
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12, $13, $14,
             $15::timestamptz, $16::timestamptz, $17, $18::jsonb, $19::jsonb,
             $20::jsonb, $21, $22::timestamptz,
-            $23, $24, $25
+            $23, $24, $25, $26, $27
         )
         RETURNING *
         """,
@@ -429,6 +431,8 @@ async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
         data.get("place_lat"),
         data.get("place_lng"),
         data.get("place_key"),
+        (str(data.get("vibe") or "").strip() or None),
+        (str(data.get("suitable") or "").strip() or None),
     )
     return activity_from_row(rows[0])
 

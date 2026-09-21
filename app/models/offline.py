@@ -28,6 +28,8 @@ class OfflineActivityItem(BaseModel):
     description: str
     category: str | None = None
     city: str | None = None
+    vibe: str | None = None
+    suitable: str | None = None
     location_name: str | None = None
     address: str | None = None
     starts_at: str | None = None

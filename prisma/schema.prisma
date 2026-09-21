@@ -1726,6 +1726,8 @@ model OfflineActivityRecommendation {
   startsAt       DateTime?                 @map("starts_at")
   endsAt         DateTime?                 @map("ends_at")
   officialUrl    String?                   @map("official_url")
+  vibe           String?
+  suitable       String?
   imageUrls      Json                      @default("[]") @map("image_urls")
   searchSources  Json                      @default("[]") @map("search_sources")
   easterEggTask  Json?                     @map("easter_egg_task")

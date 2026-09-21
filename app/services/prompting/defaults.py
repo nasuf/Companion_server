@@ -315,12 +315,15 @@ OFFLINE_ACTIVITY_CARD_PROMPT = (
     "- summary 35-60 字，写“为什么我觉得它适合你”，不要写场馆历史、馆藏规模、官方介绍。\n"
     "- description 90-150 字，用第二人称，像朋友认真解释推荐理由；可以有一点生活画面，但不要抒情过度。\n"
     "- 禁止使用“作为…之一 / 常年免费开放 / 收藏了大量 / 打卡 / 必去 / 天然回声壁”等景点介绍腔。\n"
+    "- vibe（氛围）：2-3 个逗号分隔的短词，概括这个地方的气质，如“人文、安静”“绿意、慢节奏”。\n"
+    "- suitable（适合）：2-3 个逗号分隔的短动作，概括适合在这做什么，如“看展、拍细节”“散步、发呆”。\n"
     "- 若是地点推荐，时间可为“长期”；若是活动推荐，给出可读时间。\n"
     "- 彩蛋任务在用户接受前不展示，所以可以写在 easter_egg_task。\n"
     "- 输出严格 JSON，不要 markdown，不要解释。\n\n"
     "JSON 字段：\n"
-    "title, summary, description, category, location_name, address, starts_at, ends_at,\n"
-    "official_url, image_urls, task_hint, easter_egg_task={{title, body, principle}}"
+    "title, summary, description, category, vibe, suitable, location_name, address,\n"
+    "starts_at, ends_at, official_url, image_urls, task_hint,\n"
+    "easter_egg_task={{title, body, principle}}"
 )
 
 OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT = (
