@@ -203,6 +203,12 @@ async def _recognize_locked(
 
     await repo.mark_condition_triggered(matched_item["id"])
     await repo.mark_media_fragment_cover(media_id, fingerprint)
+    # 持久化"已识图"标记到源消息 metadata：让金框/左上角标记/「偶遇一缕思绪」在前端
+    # 重载聊天记录后仍保留（实时 WS 只改内存态，不落库）。失败不影响碎片交付。
+    try:
+        await repo.mark_message_recognized(source_message_id, tier)
+    except Exception as exc:  # pragma: no cover - best-effort 持久化
+        logger.warning("[offline-recognition] 标记源消息失败 err=%s", exc)
     fragment = await repo.create_fragment(
         recommendation_id=recommendation_id,
         tier=tier,

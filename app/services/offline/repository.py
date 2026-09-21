@@ -1031,6 +1031,26 @@ async def create_captured_media(
     return media_id
 
 
+async def mark_message_recognized(message_id: str | None, tier: str) -> None:
+    """把识图命中标记持久化到源消息 metadata，使前端重载聊天记录后金框/标记/说明仍在
+    （否则该标记只存在于实时 WS 的内存态，重载即丢）。metadata 用 jsonb 合并，不覆盖其他键。"""
+    if not message_id:
+        return
+    await db.execute_raw(
+        """
+        UPDATE messages
+        SET metadata = COALESCE(metadata, '{}'::jsonb)
+                       || jsonb_build_object(
+                              'offline_recognized', true,
+                              'offline_fragment_tier', $2::text
+                          )
+        WHERE id = $1
+        """,
+        message_id,
+        tier,
+    )
+
+
 async def mark_media_fragment_cover(media_id: str, fingerprint: str) -> None:
     """碎片封面图：从画廊素材里剔除（spec §3.5），并记内容指纹与已识别。"""
     await db.execute_raw(
