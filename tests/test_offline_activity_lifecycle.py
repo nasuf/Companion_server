@@ -160,27 +160,6 @@ async def test_archive_success(monkeypatch):
     activity_service.emit_activity_card.assert_awaited_once()  # 档案卡
 
 
-async def test_cancel_accepted(monkeypatch):
-    _patch_common(monkeypatch)
-    monkeypatch.setattr(activity_service.repo, "get_activity", AsyncMock(return_value=_row()))
-    upd = AsyncMock(return_value=_row(status="cancelled"))
-    monkeypatch.setattr(activity_service.repo, "update_activity_status", upd)
-    result = await activity_service.cancel_activity("u1", "a1")
-    assert result.status == "cancelled"
-    assert upd.await_args.args[2] == "cancelled"
-
-
-async def test_cancel_rejects_non_accepted(monkeypatch):
-    _patch_common(monkeypatch)
-    monkeypatch.setattr(
-        activity_service.repo, "get_activity",
-        AsyncMock(return_value=_row(status="completed")),
-    )
-    with pytest.raises(HTTPException) as exc:
-        await activity_service.cancel_activity("u1", "a1")
-    assert exc.value.status_code == 409
-
-
 async def test_archive_idempotent_when_completed(monkeypatch):
     _patch_common(monkeypatch)
     monkeypatch.setattr(

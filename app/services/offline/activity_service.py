@@ -550,24 +550,6 @@ async def archive_activity(user_id: str, activity_id: str) -> OfflineActivityIte
     return OfflineActivityItem(**await _with_completion_feedback(updated))
 
 
-async def cancel_activity(user_id: str, activity_id: str) -> OfflineActivityItem:
-    """取消进行中活动（spec §4.2）：accepted -> cancelled，之后不再出现在待出行。"""
-    activity = await repo.get_activity(activity_id, user_id)
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    if activity["status"] != "accepted":
-        raise HTTPException(status_code=409, detail="没有可取消的进行中活动")
-    updated = await repo.update_activity_status(activity_id, user_id, "cancelled")
-    if not updated:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=activity.get("workspace_id"),
-        text=f"用户取消了线下活动：{activity['title']}",
-    )
-    return OfflineActivityItem(**updated)
-
-
 async def auto_archive_due_activities() -> dict[str, int]:
     """spec §3.6：扫描确认到达满 24h 的进行中活动，自动归档并推档案卡 + 提示。
 

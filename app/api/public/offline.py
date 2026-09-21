@@ -160,14 +160,6 @@ async def archive_offline_activity(
     return await activity_service.archive_activity(str(user["sub"]), activity_id)
 
 
-@router.post("/activities/{activity_id}/cancel", response_model=OfflineActivityItem)
-async def cancel_offline_activity(
-    activity_id: str,
-    user: dict = Depends(require_user),
-):
-    return await activity_service.cancel_activity(str(user["sub"]), activity_id)
-
-
 @router.get(
     "/activities/{activity_id}/review",
     response_model=OfflineActivityReviewResponse,
