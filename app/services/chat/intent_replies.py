@@ -166,8 +166,13 @@ async def schedule_adjust_reply(
     user_portrait: str = "",
     current_activity: str = "",
     ai_schedule: str = "",
+    availability_hint: str = "",
 ) -> dict[str, str] | None:
-    """§3.4.2 作息调整回复（返回 JSON: reply + adjustment）。"""
+    """§3.4.2 作息调整回复（返回 JSON: reply + adjustment）。
+
+    `availability_hint` 把 AI 此刻的忙碌/配合意愿作为一句上下文喂给大模型，让它
+    用自己的性格自然答应或委婉拒绝——刻意不做硬编码模板判决（CLAUDE.md §6 偏离表）。
+    """
     params = {
         "message": message,
         "context": context or "(无)",
@@ -175,6 +180,7 @@ async def schedule_adjust_reply(
         "user_portrait": user_portrait or "(未知)",
         "current_activity": current_activity or "(未知)",
         "ai_schedule": ai_schedule or "(未知)",
+        "availability_hint": availability_hint or "你现在比较有空，乐意配合。",
     }
     result = await render_prompt(
         "intent.schedule_adjust_reply",

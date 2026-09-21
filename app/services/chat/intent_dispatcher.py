@@ -14,6 +14,7 @@ from app.observability.events import EVT_INTENT_DETECTED, EVT_LLM_FAIL
 from app.services.memory.interaction.deletion import DELETION_KEYWORDS
 from app.services.interaction.boundary import APOLOGY_KEYWORDS
 from app.services.rules.chat_keywords import (
+    AI_SCHEDULE_OFFER_CUES,
     CONVERSATION_END_KEYWORDS,
     CURRENT_STATE_EXPLICIT_PHRASES,
     CURRENT_STATE_FAST_PHRASES,
@@ -157,6 +158,21 @@ def is_explicit_schedule_adjust_request(message: str) -> bool:
     if not normalized:
         return False
     return any(keyword in normalized for keyword in SCHEDULE_ADJUST_KEYWORDS)
+
+
+def previous_turn_offered_schedule_change(previous_assistant_text: str | None) -> bool:
+    """§3.4.2 grounding: AI 上一句是否主动提出为用户调整自己的作息。
+
+    只有存在这种 grounding 证据时，用户随后无调整关键词的裸附和词（"好"/"嗯"）才应
+    判为作息调整；否则按"证据缺失即弃权"降级为日常交流（防裸附和词误触，
+    详见 CLAUDE.md §6 偏离表 + 会话记录 2026-09-21）。
+    """
+    if not previous_assistant_text:
+        return False
+    normalized = compact_chat_text(previous_assistant_text)
+    if not normalized:
+        return False
+    return any(cue in normalized for cue in AI_SCHEDULE_OFFER_CUES)
 
 
 def infer_schedule_query_type(message: str, *, require_query_cue: bool = True) -> str | None:

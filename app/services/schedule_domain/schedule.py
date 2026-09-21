@@ -775,80 +775,37 @@ async def compute_adjustment_feasibility(
     return {"score": score, "today_adjustments": adj_count}
 
 
-async def handle_schedule_adjustment(
+async def log_schedule_adjustment(
     agent_id: str,
-    request: str,
     current_status: dict,
-    intimacy_score: float = 0.0,
-    mbti: dict | None = None,
-    adjustment_minutes: int = 0,
-) -> dict:
-    """处理作息调整请求 (spec §1.2 起 MBTI)。
+    request: str,
+    adjustment: str,
+    *,
+    feasibility_score: int | None = None,
+) -> None:
+    """记录一次真实的作息调整 (spec §3.4.2 第 4 步): Redis 当日计数 + DB 日志。
 
-    4F.1: 基于可行性评分决定接受/拒绝。
-    返回 {"accepted": bool, "response": str, "score": int}
+    仅在 LLM 确实产出了 adjustment (真的改了作息) 时调用; 婉拒/口头安抚不落表、
+    不计数。Redis 当日计数供 compute_adjustment_feasibility 作"今日已调整次数"信号,
+    让反复索求时 AI 的配合意愿自然下降 (但由大模型决定语气, 不再有硬编码判决)。
     """
-    feasibility = await compute_adjustment_feasibility(
-        agent_id=agent_id,
-        current_status=current_status,
-        intimacy_score=intimacy_score,
-        mbti=mbti,
-        adjustment_minutes=adjustment_minutes,
-    )
-    score = feasibility["score"]
-    activity = current_status.get("activity", "")
-
-    async def _record_adjustment(accepted: bool) -> None:
-        """Redis计数 + DB持久化。"""
-        redis = await get_redis()
-        key = _adj_key(agent_id)
-        await redis.incr(key)
-        await redis.expire(key, 86400)
-        try:
-            await db.scheduleadjustlog.create(data={
-                "agentId": agent_id,
-                "adjustType": "user_request",
-                "oldValue": json.dumps(current_status, ensure_ascii=False),
-                "newValue": request,
-                "reason": f"feasibility={score}, accepted={accepted}",
-            })
-        except Exception as e:
-            logger.warning(f"Failed to log schedule adjustment: {e}")
-
-    if score >= 70:
-        # 接受
-        await _record_adjustment(True)
-
-        if current_status.get("status") == "sleep":
-            response = f"好吧...本来在{activity}，那就再聊一会儿～"
-        elif current_status.get("status") in ("busy", "very_busy"):
-            response = f"刚好{activity}差不多了，可以聊一会儿～"
-        else:
-            response = ""
-        return {"accepted": True, "response": response, "score": score}
-
-    elif score >= 30:
-        # 部分接受（50%概率）
-        if random.random() < 0.5:
-            await _record_adjustment(True)
-            return {
-                "accepted": True,
-                "response": f"嗯...那稍微调整一下吧，不过不能太久哦",
-                "score": score,
-            }
-        return {
-            "accepted": False,
-            "response": f"这个时间不太方便呢，要不换个时间？",
-            "score": score,
-        }
-
-    else:
-        # 拒绝
-        if current_status.get("status") == "sleep":
-            response = "不行啦，太晚了我真的好困...明天再聊好不好？"
-        else:
-            response = "今天已经调整过好几次了，这次真的不行啦"
-        return {"accepted": False, "response": response, "score": score}
+    redis = await get_redis()
+    key = _adj_key(agent_id)
+    await redis.incr(key)
+    await redis.expire(key, 86400)
+    try:
+        await db.scheduleadjustlog.create(data={
+            "agentId": agent_id,
+            "adjustType": "user_request",
+            "oldValue": json.dumps(current_status, ensure_ascii=False),
+            "newValue": f"{request} => {adjustment}",
+            "reason": (
+                f"feasibility={feasibility_score}"
+                if feasibility_score is not None else "llm_generated"
+            ),
+        })
+    except Exception as e:
+        logger.warning(f"Failed to log schedule adjustment: {e}")
 
 
 async def update_schedule_slot(

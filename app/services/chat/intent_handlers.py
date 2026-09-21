@@ -30,6 +30,7 @@ from app.services.chat.intent_replies import (
     end_reply,
     record_ask_time,
     record_confirm_reply,
+    schedule_adjust_reply,
     schedule_query_reply,
 )
 from app.services.chat.intent_dispatcher import (
@@ -51,10 +52,11 @@ from app.services.interaction.boundary import (
     handle_apology,
 )
 from app.services.schedule_domain.schedule import (
+    compute_adjustment_feasibility,
     format_full_schedule_for_query,
     format_schedule_context,
     get_cached_schedule,
-    handle_schedule_adjustment,
+    log_schedule_adjustment,
     resolve_schedule_query_scope,
     update_schedule_slot,
 )
@@ -346,31 +348,110 @@ async def handle_deletion(
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _format_schedule_table(schedule: Any) -> str:
+    """把作息表压成 "HH:MM-HH:MM 活动" 多行文本, 供 §3.4.2 prompt 注入 {ai_schedule}。"""
+    if not schedule:
+        return ""
+    lines: list[str] = []
+    for s in schedule:
+        if not isinstance(s, dict):
+            continue
+        label = s.get("event") or s.get("activity") or ""
+        if not label:
+            continue
+        lines.append(f"{s.get('start', '')}-{s.get('end', '')} {label}")
+    return "\n".join(lines)
+
+
+async def _schedule_adjust_availability_hint(
+    *,
+    agent_id: str,
+    ai_status: dict,
+    topic_intimacy: float,
+    mbti: dict | None,
+) -> tuple[str, int]:
+    """把可行性评分翻成一句自然语言"配合意愿"提示喂给大模型 (不做硬编码判决)。
+
+    刻意偏离 spec §3.4.2 的"无条件接受"(CLAUDE.md §6 偏离表): 评分只影响 AI 的
+    语气倾向, 由大模型自己决定答应还是委婉拒绝, 而非映射到罐头回复。返回 (hint, score)。
+    """
+    score = 50
+    try:
+        feasibility = await compute_adjustment_feasibility(
+            agent_id=agent_id,
+            current_status=ai_status,
+            intimacy_score=float(topic_intimacy),
+            mbti=mbti,
+        )
+        score = int(feasibility.get("score", 50))
+    except Exception as e:
+        logger.warning(f"Schedule feasibility hint failed: {e}")
+    status = (ai_status or {}).get("status", "idle")
+    if score >= 70:
+        hint = "你现在比较有空、状态也不错，很乐意配合对方。"
+    elif score >= 30:
+        if status in ("busy", "very_busy"):
+            hint = "你现在手头有点忙，可以配合，但可以顺带提一句自己的状态，别勉强太久。"
+        elif status == "sleep":
+            hint = "你其实已经有点困了，可以再陪一会儿，也可以温柔地说说自己的困意。"
+        else:
+            hint = "你状态一般，可以配合，不必勉强自己太久。"
+    else:
+        hint = (
+            "你现在确实很忙/很困，或今天已经反复为对方调整过了；"
+            "可以真诚而为难地回应，看情况只答应一小会儿或温柔地婉拒，但别冷漠。"
+        )
+    return hint, score
+
+
 async def handle_schedule_adjust(
     user_message: str,
     ctx: ShortCircuitCtx,
     *,
     schedule: Any,
     ai_status: dict | None,
+    portrait: Any,
+    user_emotion: dict | None,
     topic_intimacy: float,
     mbti: dict | None,
 ) -> tuple[bool, AsyncGenerator[dict, None] | None]:
+    """§3.4.2 作息调整: 调大模型「作息调整」指令生成回复 + 输出调整内容。
+
+    去掉了旧的硬编码模板判决 (schedule.handle_schedule_adjustment 已删除); 忙碌/
+    配合意愿只作为一句上下文喂给大模型 (CLAUDE.md §6 偏离表)。
+    """
     if not (ctx.agent_id and schedule and ai_status):
         return False, None
     try:
-        adj_result = await handle_schedule_adjustment(
+        hint, score = await _schedule_adjust_availability_hint(
             agent_id=ctx.agent_id,
-            request=user_message,
-            current_status=ai_status,
-            intimacy_score=float(topic_intimacy),
+            ai_status=ai_status,
+            topic_intimacy=topic_intimacy,
             mbti=mbti,
         )
-        response = adj_result.get("response", "")
-        if not response:
+        result = await schedule_adjust_reply(
+            message=user_message,
+            context=ctx.recent_context,
+            user_emotion=user_emotion,
+            personality_brief=_agent_name(ctx.agent),
+            user_portrait=str(portrait) if portrait else "",
+            current_activity=format_schedule_context(ai_status),
+            ai_schedule=_format_schedule_table(schedule),
+            availability_hint=hint,
+        )
+        reply = ((result or {}).get("reply") or "").strip()
+        if not reply:
+            # LLM 失败/空回复 → 不短路, 落回主回复路径 (绝不再出硬编码模板)。
             return False, None
-        if adj_result.get("accepted"):
+        adjustment = ((result or {}).get("adjustment") or "").strip()
+        if adjustment:
+            # 真的改了作息才落表 + 计数; 婉拒 / 口头安抚不动作息表。
             await update_schedule_slot(ctx.agent_id, schedule, ai_status)
-        return True, ctx.finalize(response, kind="schedule_adjust")
+            await log_schedule_adjustment(
+                ctx.agent_id, ai_status, user_message, adjustment,
+                feasibility_score=score,
+            )
+        return True, ctx.finalize(reply, kind="schedule_adjust")
     except Exception as e:
         logger.warning(f"Schedule adjustment failed, falling through: {e}")
         return False, None

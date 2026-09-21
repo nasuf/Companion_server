@@ -531,6 +531,9 @@ async def stream_chat_response(
         # W2 中期记忆: 摘要任务延后到主路径分支创建 (与 fetch_task 同处),
         # 避免 boundary/crisis/filler 短路回合白跑 LLM. 这里只声明.
         session_recap_task: asyncio.Task | None = None
+        # 默认声明: sub_intent_mode 下不进下面的 if 块, 但 §3.4.2 grounding 门控
+        # (_downgrade_non_explicit_schedule_adjust) 仍会读它, 不能留未定义。
+        previous_assistant = None
         if not sub_intent_mode:
             previous_assistant = _previous_assistant_message(
                 recent_messages, user_message_id,
@@ -812,6 +815,7 @@ async def stream_chat_response(
                 detected_intent,
                 user_message,
                 response_diagnostics,
+                previous_assistant_text=getattr(previous_assistant, "content", None),
             )
 
         async def _cancel_fetch_task() -> None:
@@ -1171,6 +1175,7 @@ async def stream_chat_response(
             handled, events = await handle_schedule_adjust(
                 user_message, sc_ctx,
                 schedule=schedule, ai_status=ai_status,
+                portrait=portrait, user_emotion=prompt_user_emotion,
                 topic_intimacy=topic_intimacy, mbti=mbti,
             )
             if handled and events is not None:

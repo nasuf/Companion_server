@@ -760,23 +760,185 @@ def test_orchestrator_keeps_explicit_schedule_adjust_request():
     assert diagnostics == {}
 
 
-def test_orchestrator_keeps_contextual_schedule_adjust_without_keywords():
+def test_orchestrator_downgrades_bare_affirmative_without_schedule_offer():
+    """裸附和词 + AI 上一句非作息邀约 → 降级为日常交流 (2026-09-21 会话 6d5a34db bug)。"""
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
     from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
 
     diagnostics = {}
-    original = IntentResult(
-        intent=IntentType.SCHEDULE_ADJUST,
-        confidence=0.88,
+    result = _downgrade_non_explicit_schedule_adjust(
+        IntentResult(intent=IntentType.SCHEDULE_ADJUST, confidence=0.88),
+        "好",
+        diagnostics,
+        previous_assistant_text="以后一直陪着你玩呀？",
     )
+
+    assert result.intent == IntentType.NONE
+    assert result.metadata["downgraded_from"] == IntentType.SCHEDULE_ADJUST.value
+    assert diagnostics["intent_downgrade_reason"] == "no_schedule_offer_grounding"
+
+
+def test_orchestrator_keeps_bare_affirmative_after_schedule_offer():
+    """裸附和词 + AI 上一句主动提出调整自己作息 → 保留作息调整 (grounding 命中)。"""
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    from app.services.chat.orchestrator import _downgrade_non_explicit_schedule_adjust
+
+    diagnostics = {}
+    original = IntentResult(intent=IntentType.SCHEDULE_ADJUST, confidence=0.88)
     result = _downgrade_non_explicit_schedule_adjust(
         original,
         "好",
         diagnostics,
+        previous_assistant_text="要不要我再晚点睡陪你一会儿？",
     )
 
     assert result is original
     assert diagnostics == {}
+
+
+def _schedule_adjust_ctx():
+    from app.services.chat.intent_handlers import ShortCircuitCtx
+
+    return ShortCircuitCtx(
+        conversation_id="c1", agent_id="a1", user_id="u1",
+        agent=SimpleNamespace(name="苏伊"),
+        reply_context=None,
+        tracer=MagicMock(safe_trace_id=None, trace_id=None, is_active=False),
+        save_replies_fn=AsyncMock(),
+        pending_sub_fragments={},
+        sub_intent_mode=False,
+        reply_index_offset=0,
+        cached_patience=100,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_adjust_uses_llm_reply_and_logs():
+    """§3.4.2 去硬编码: handler 走大模型 schedule_adjust_reply; 有 adjustment 才落表+计数。"""
+    from app.services.chat.intent_handlers import handle_schedule_adjust
+
+    ctx = _schedule_adjust_ctx()
+    with (
+        patch(
+            "app.services.chat.intent_handlers.compute_adjustment_feasibility",
+            new=AsyncMock(return_value={"score": 50}),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.schedule_adjust_reply",
+            new=AsyncMock(return_value={
+                "reply": "好呀，那我陪你晚点睡～",
+                "adjustment": "从23:00睡觉调整为次日00:30",
+            }),
+        ) as reply_mock,
+        patch(
+            "app.services.chat.intent_handlers.update_schedule_slot", new=AsyncMock(),
+        ) as slot_mock,
+        patch(
+            "app.services.chat.intent_handlers.log_schedule_adjustment", new=AsyncMock(),
+        ) as log_mock,
+    ):
+        handled, events = await handle_schedule_adjust(
+            "好", ctx,
+            schedule=[{"start": "22:00", "end": "23:00", "activity": "准备睡觉"}],
+            ai_status={"status": "idle", "activity": "在听歌"},
+            portrait=None, user_emotion=None, topic_intimacy=50.0, mbti=None,
+        )
+
+    assert handled is True
+    assert events is not None
+    # 走了 LLM 路径且喂了 availability_hint / ai_schedule 上下文
+    assert reply_mock.await_args.kwargs.get("availability_hint")
+    assert "准备睡觉" in reply_mock.await_args.kwargs.get("ai_schedule", "")
+    # 真的调整了 → 落表 + 计数
+    slot_mock.assert_awaited_once()
+    log_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_adjust_decline_does_not_touch_schedule():
+    """LLM 婉拒 (adjustment 为空) → 仍出回复, 但不动作息表、不计数。"""
+    from app.services.chat.intent_handlers import handle_schedule_adjust
+
+    ctx = _schedule_adjust_ctx()
+    with (
+        patch(
+            "app.services.chat.intent_handlers.compute_adjustment_feasibility",
+            new=AsyncMock(return_value={"score": 20}),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.schedule_adjust_reply",
+            new=AsyncMock(return_value={"reply": "今天真的有点困啦，明天再陪你熬夜好不好～", "adjustment": ""}),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.update_schedule_slot", new=AsyncMock(),
+        ) as slot_mock,
+        patch(
+            "app.services.chat.intent_handlers.log_schedule_adjustment", new=AsyncMock(),
+        ) as log_mock,
+    ):
+        handled, events = await handle_schedule_adjust(
+            "好", ctx,
+            schedule=[{"start": "22:00", "end": "23:00", "activity": "准备睡觉"}],
+            ai_status={"status": "sleep", "activity": "已经在床上了"},
+            portrait=None, user_emotion=None, topic_intimacy=0.0, mbti=None,
+        )
+
+    assert handled is True
+    assert events is not None
+    slot_mock.assert_not_awaited()
+    log_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_schedule_adjust_falls_through_on_empty_llm():
+    """LLM 失败/空回复 → 不短路, 落回主回复路径 (绝不再出硬编码模板)。"""
+    from app.services.chat.intent_handlers import handle_schedule_adjust
+
+    ctx = _schedule_adjust_ctx()
+    with (
+        patch(
+            "app.services.chat.intent_handlers.compute_adjustment_feasibility",
+            new=AsyncMock(return_value={"score": 50}),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.schedule_adjust_reply",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.chat.intent_handlers.update_schedule_slot", new=AsyncMock(),
+        ) as slot_mock,
+    ):
+        handled, events = await handle_schedule_adjust(
+            "好", ctx,
+            schedule=[{"start": "22:00", "end": "23:00", "activity": "准备睡觉"}],
+            ai_status={"status": "idle", "activity": "在听歌"},
+            portrait=None, user_emotion=None, topic_intimacy=50.0, mbti=None,
+        )
+
+    assert handled is False
+    assert events is None
+    slot_mock.assert_not_awaited()
+
+
+def test_no_hardcoded_schedule_adjust_templates_in_source():
+    """守卫: 旧硬编码作息调整模板串不得再出现在 app/ 源码 (防回归)。"""
+    import pathlib
+
+    banned = (
+        "那稍微调整一下吧，不过不能太久",
+        "这个时间不太方便呢，要不换个时间",
+        "今天已经调整过好几次了",
+        "不行啦，太晚了我真的好困",
+        "差不多了，可以聊一会儿",
+    )
+    app_root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    offenders = [
+        f"{p}: {b}"
+        for p in app_root.rglob("*.py")
+        for b in banned
+        if b in p.read_text(encoding="utf-8")
+    ]
+    assert not offenders, offenders
 
 
 def test_orchestrator_filters_non_explicit_schedule_adjust_sub_fragments():

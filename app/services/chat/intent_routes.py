@@ -19,6 +19,7 @@ from app.services.chat.intent_dispatcher import (
     infer_schedule_query_type,
     is_explicit_current_state_query,
     is_explicit_schedule_adjust_request,
+    previous_turn_offered_schedule_change,
 )
 
 
@@ -83,12 +84,21 @@ def _downgrade_non_explicit_schedule_adjust(
     detected_intent: IntentResult,
     user_message: str,
     response_diagnostics: dict[str, Any],
+    *,
+    previous_assistant_text: str | None = None,
 ) -> IntentResult:
-    """Keep schedule-adjust only for explicit adjustment requests.
+    """Keep schedule-adjust only when it is genuinely grounded.
 
-    The unified classifier can mislabel sleep/state questions ("你准备睡了吗")
-    as schedule adjustment, which triggers feasibility rejection replies and
-    unlocks schedule-adjust achievements incorrectly.
+    The unified classifier over-labels bare affirmatives ("好"/"嗯") and sleep/
+    state questions as schedule adjustment. That used to trigger canned feasibility
+    replies and unlock schedule-adjust achievements incorrectly (生产 bug 复现
+    2026-09-21 会话 6d5a34db: 裸 "好" 被判作息调整, 回了硬编码换时间模板).
+
+    Grounding gate (研究支撑: 证据缺失即弃权, CLAUDE.md §6):
+    - 用户消息本身含调整关键词 → 保留 (explicit request).
+    - 用户在问 AI 当前状态 ("你准备睡了吗") → reroute 到 CURRENT_STATE.
+    - 裸附和词 / 无调整关键词: 仅当 AI 上一句主动提出为用户调整自己作息时才保留;
+      否则降级为日常交流 (NONE), 交给主回复路径自然接话。
     """
     if detected_intent.intent != IntentType.SCHEDULE_ADJUST:
         return detected_intent
@@ -105,9 +115,21 @@ def _downgrade_non_explicit_schedule_adjust(
             metadata=metadata,
         )
 
-    # Keep LLM classification for contextual affirmatives ("好"/"行") that follow
-    # an AI invitation to stay up — those have no adjust keywords but are valid.
-    return detected_intent
+    # 裸附和词: 只有 AI 上一句确实提出了要调整自己作息 (grounding 证据) 才保留;
+    # 无证据 → 弃权降级为日常交流, 防 "好"/"嗯" 误触作息调整。
+    if previous_turn_offered_schedule_change(previous_assistant_text):
+        return detected_intent
+
+    metadata = dict(detected_intent.metadata or {})
+    metadata["downgraded_from"] = IntentType.SCHEDULE_ADJUST.value
+    metadata["downgrade_reason"] = "no_schedule_offer_grounding"
+    metadata.pop("fragments", None)
+    response_diagnostics["intent_downgrade_reason"] = "no_schedule_offer_grounding"
+    return IntentResult(
+        intent=IntentType.NONE,
+        confidence=detected_intent.confidence,
+        metadata=metadata,
+    )
 
 
 def _downgrade_non_explicit_current_schedule_query(
