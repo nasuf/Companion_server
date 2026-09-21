@@ -59,56 +59,97 @@ def test_lead_in_from_pool():
         assert rec.pick_lead_in(tier) in rec._LEAD_INS[tier]
 
 
-def test_parse_match_plain_json():
+def test_parse_subjects_sorted_by_confidence():
     raw = (
-        '{"hit": true, "condition_short_name": "杯子", '
-        '"confidence": 0.9, "keywords": ["咖啡", "杯子"]}'
+        '{"subjects": [{"type": "杯子", "confidence": 0.6}, '
+        '{"type": "天空", "confidence": 0.9}]}'
     )
-    m = rec._parse_match(raw)
-    assert m is not None
-    assert m["hit"] is True
-    assert m["condition_short_name"] == "杯子"
-    assert "咖啡" in m["keywords"]
+    subs = rec._parse_subjects(raw)
+    assert [s["type"] for s in subs] == ["天空", "杯子"]  # 高置信度在前
+    assert subs[0]["confidence"] == 0.9
 
 
-def test_parse_match_with_code_fence_and_prose():
-    raw = "好的，判断如下：\n```json\n{\"hit\": false, \"keywords\": []}\n```"
-    m = rec._parse_match(raw)
-    assert m is not None and m["hit"] is False
-    assert m["condition_short_name"] is None
+def test_parse_subjects_code_fence_and_prose():
+    raw = "识别如下：\n```json\n{\"subjects\": [{\"type\": \"花\", \"confidence\": 0.8}]}\n```"
+    subs = rec._parse_subjects(raw)
+    assert subs == [{"type": "花", "confidence": 0.8}]
 
 
-def test_parse_match_garbage_returns_none():
-    assert rec._parse_match("这里没有 JSON") is None
-    assert rec._parse_match("") is None
+def test_parse_subjects_garbage_returns_empty():
+    assert rec._parse_subjects("这里没有 JSON") == []
+    assert rec._parse_subjects("") == []
+    assert rec._parse_subjects('{"subjects": []}') == []
 
 
-def test_parse_conditions_json_array():
+def test_match_subject_to_item_by_short_name_and_category():
+    items = [
+        {"id": "i1", "short_name": "咖啡杯", "category": "餐具"},
+        {"id": "i2", "short_name": "天空", "category": "天空"},
+    ]
+    subjects = [{"type": "杯", "confidence": 0.9}]  # 子串命中 short_name
+    item, subject = rec._match_subject_to_item(subjects, items)
+    assert item is not None and item["id"] == "i1"
+    assert subject is not None and subject["type"] == "杯"
+
+
+def test_match_subject_to_item_no_match_returns_none():
+    items = [{"id": "i1", "short_name": "咖啡杯", "category": "餐具"}]
+    item, subject = rec._match_subject_to_item(
+        [{"type": "汽车", "confidence": 0.9}], items
+    )
+    assert item is None and subject is None
+
+
+def test_parse_items_json_object():
     from app.services.offline import shooting_conditions as sc
 
     raw = (
-        '[{"short_name": "杯子", "criteria": "拍到杯子"}, '
-        '{"short_name": "天空", "criteria": "拍到天空"}]'
+        '{"items": [{"short_name": "杯子", "category": "餐具"}, '
+        '{"short_name": "天空", "category": "天空"}]}'
     )
-    conds = sc._parse_conditions(raw)
-    assert [c["short_name"] for c in conds] == ["杯子", "天空"]
+    items = sc._parse_items(raw)
+    assert [i["short_name"] for i in items] == ["杯子", "天空"]
+    assert items[0]["category"] == "餐具"
 
 
-def test_parse_conditions_code_fence_and_cap_at_5():
+def test_parse_items_code_fence_and_cap_at_5():
     from app.services.offline import shooting_conditions as sc
 
-    items = ", ".join(
-        f'{{"short_name": "c{i}", "criteria": "k{i}"}}' for i in range(8)
+    entries = ", ".join(
+        f'{{"short_name": "c{i}", "category": "cat"}}' for i in range(8)
     )
-    conds = sc._parse_conditions(f"```json\n[{items}]\n```")
-    assert len(conds) == 5  # capped
-    assert conds[0]["short_name"] == "c0"
+    items = sc._parse_items(f'```json\n{{"items": [{entries}]}}\n```')
+    assert len(items) == 5  # capped
+    assert items[0]["short_name"] == "c0"
 
 
-def test_parse_conditions_drops_incomplete_and_handles_garbage():
+def test_parse_items_drops_nameless_and_handles_garbage():
     from app.services.offline import shooting_conditions as sc
 
-    raw = '[{"short_name": "只有名字"}, {"criteria": "只有要点"}, {"short_name":"好","criteria":"齐"}]'
-    conds = sc._parse_conditions(raw)
-    assert conds == [{"short_name": "好", "criteria": "齐"}]
-    assert sc._parse_conditions("no json") == []
+    raw = '{"items": [{"category": "只有类目"}, {"short_name": "好", "category": "齐"}]}'
+    items = sc._parse_items(raw)
+    assert items == [{"short_name": "好", "category": "齐"}]
+    assert sc._parse_items("no json") == []
+
+
+def test_ensure_min_items_tops_up_to_three():
+    from app.services.offline import shooting_conditions as sc
+
+    # 空 → 补到至少 3（spec §3.4 拍摄物品 3–5）。
+    assert len(sc._ensure_min_items([])) >= 3
+    # 1 个 → 补到 3，且保留原有、不与兜底 short_name 重复。
+    out = sc._ensure_min_items([{"short_name": "喷泉", "category": "水"}])
+    assert len(out) >= 3
+    assert out[0] == {"short_name": "喷泉", "category": "水"}
+    assert len({i["short_name"] for i in out}) == len(out)
+
+
+def test_ensure_min_items_keeps_when_already_enough():
+    from app.services.offline import shooting_conditions as sc
+
+    src = [
+        {"short_name": "花", "category": "植物"},
+        {"short_name": "湖", "category": "水"},
+        {"short_name": "长椅", "category": "设施"},
+    ]
+    assert sc._ensure_min_items(src) == src  # ≥3 不追加

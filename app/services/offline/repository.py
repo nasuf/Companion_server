@@ -116,6 +116,8 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "prophecy_text": _field(row, "prophecy_text", "prophecyText"),
         "auto_archive_at": _iso(_field(row, "auto_archive_at", "autoArchiveAt")),
         "travel_note": _field(row, "travel_note", "travelNote"),
+        "miss_count": int(_field(row, "miss_count", "missCount", 0) or 0),
+        "hint_count": int(_field(row, "hint_count", "hintCount", 0) or 0),
         "fragment_count": int(_field(row, "fragment_count", "fragmentCount", 0) or 0),
         "accepted_at": _iso(_field(row, "accepted_at", "acceptedAt")),
         "ignored_at": _iso(_field(row, "ignored_at", "ignoredAt")),
@@ -662,27 +664,124 @@ async def find_accepted_by_place_key(
 # ---------------------------------------------------------------------------
 # 拍摄条件集合（spec §3.4）：到达后由大模型生成，永不下发前端明文。
 # ---------------------------------------------------------------------------
-async def create_shooting_conditions(
+async def create_shooting_items(
     recommendation_id: str,
-    conditions: list[dict[str, Any]],
-) -> None:
-    for idx, cond in enumerate(conditions):
-        short_name = str(cond.get("short_name") or "").strip()[:60]
-        criteria = str(cond.get("criteria") or "").strip()[:500]
-        if not short_name or not criteria:
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """存拍摄物品（大类），返回带 id 的行供预生成回忆时逐物品挂靠。"""
+    created: list[dict[str, Any]] = []
+    for idx, item in enumerate(items):
+        short_name = str(item.get("short_name") or "").strip()[:60]
+        category = str(item.get("category") or "").strip()[:60] or None
+        if not short_name:
             continue
+        item_id = new_id()
         await db.execute_raw(
             """
             INSERT INTO offline_shooting_conditions
-                (id, recommendation_id, short_name, criteria, sort_order)
+                (id, recommendation_id, short_name, criteria, category, sort_order)
+            VALUES ($1, $2, $3, '', $4, $5)
+            """,
+            item_id,
+            recommendation_id,
+            short_name,
+            category,
+            idx,
+        )
+        created.append(
+            {"id": item_id, "short_name": short_name, "category": category}
+        )
+    return created
+
+
+async def create_prewritten_fragments(
+    recommendation_id: str,
+    condition_id: str,
+    tier_texts: dict[str, str],
+) -> None:
+    """为某个拍摄物品写入分档预生成回忆（tier -> text）。"""
+    for tier, text in tier_texts.items():
+        text = (text or "").strip()
+        if not text:
+            continue
+        await db.execute_raw(
+            """
+            INSERT INTO offline_prewritten_fragments
+                (id, recommendation_id, condition_id, tier, text)
             VALUES ($1, $2, $3, $4, $5)
             """,
             new_id(),
             recommendation_id,
-            short_name,
-            criteria,
-            idx,
+            condition_id,
+            tier,
+            text,
         )
+
+
+async def get_prewritten_fragment(condition_id: str, tier: str) -> str | None:
+    rows = await db.query_raw(
+        """
+        SELECT text FROM offline_prewritten_fragments
+        WHERE condition_id = $1 AND tier = $2
+        ORDER BY created_at ASC LIMIT 1
+        """,
+        condition_id,
+        tier,
+    )
+    return str(_field(rows[0], "text")) if rows else None
+
+
+async def count_prewritten_fragments(recommendation_id: str) -> int:
+    rows = await db.query_raw(
+        "SELECT COUNT(*)::int AS n FROM offline_prewritten_fragments "
+        "WHERE recommendation_id = $1",
+        recommendation_id,
+    )
+    return int(_field(rows[0], "n") or 0) if rows else 0
+
+
+async def increment_activity_counter(
+    recommendation_id: str, column: str
+) -> int:
+    """miss_count / hint_count 自增 1，返回新值。column 白名单固定，无注入面。"""
+    if column not in {"miss_count", "hint_count"}:
+        raise ValueError(f"illegal counter column: {column}")
+    rows = await db.query_raw(
+        f"""
+        UPDATE offline_activity_recommendations
+        SET {column} = {column} + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        RETURNING {column} AS n
+        """,
+        recommendation_id,
+    )
+    return int(_field(rows[0], "n") or 0) if rows else 0
+
+
+async def ai_memory_brief(
+    user_id: str, workspace_id: str | None, *, limit: int = 40
+) -> str:
+    """AI 自我记忆摘要（memories_ai），用作思绪预生成的「AI 经历库」素材。"""
+    rows = await db.query_raw(
+        """
+        SELECT content, main_category, sub_category
+        FROM memories_ai
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR workspace_id = $2)
+          AND is_archived = FALSE
+        ORDER BY importance DESC, updated_at DESC
+        LIMIT $3
+        """,
+        user_id,
+        workspace_id,
+        limit,
+    )
+    parts: list[str] = []
+    for row in rows or []:
+        text = str(_field(row, "content") or "").strip()
+        if text:
+            parts.append(f"- {text}")
+    return "\n".join(parts)[:3000]
 
 
 async def mark_conditions_ready(recommendation_id: str, user_id: str) -> None:
@@ -709,7 +808,7 @@ async def count_shooting_conditions(recommendation_id: str) -> int:
 async def list_untriggered_conditions(recommendation_id: str) -> list[dict[str, Any]]:
     rows = await db.query_raw(
         """
-        SELECT id, short_name, criteria
+        SELECT id, short_name, category
         FROM offline_shooting_conditions
         WHERE recommendation_id = $1 AND triggered = FALSE
         ORDER BY sort_order ASC
@@ -720,7 +819,28 @@ async def list_untriggered_conditions(recommendation_id: str) -> list[dict[str, 
         {
             "id": str(_field(r, "id")),
             "short_name": _field(r, "short_name", "shortName"),
-            "criteria": _field(r, "criteria"),
+            "category": _field(r, "category"),
+        }
+        for r in rows
+    ]
+
+
+async def list_all_conditions(recommendation_id: str) -> list[dict[str, Any]]:
+    """全部拍摄物品（含已触发），供预生成回忆逐物品遍历。"""
+    rows = await db.query_raw(
+        """
+        SELECT id, short_name, category
+        FROM offline_shooting_conditions
+        WHERE recommendation_id = $1
+        ORDER BY sort_order ASC
+        """,
+        recommendation_id,
+    )
+    return [
+        {
+            "id": str(_field(r, "id")),
+            "short_name": _field(r, "short_name", "shortName"),
+            "category": _field(r, "category"),
         }
         for r in rows
     ]
@@ -881,6 +1001,19 @@ async def list_gallery_media(recommendation_id: str) -> list[str]:
         recommendation_id,
     )
     return [str(_field(r, "url")) for r in rows if _field(r, "url")]
+
+
+async def list_voice_transcripts(recommendation_id: str) -> list[str]:
+    """活动期间用户语音转写文本（chat_capture 归档为 kind=voice_transcript）。"""
+    rows = await db.query_raw(
+        """
+        SELECT text FROM offline_activity_feedback
+        WHERE recommendation_id = $1 AND kind = 'voice_transcript'
+        ORDER BY created_at ASC
+        """,
+        recommendation_id,
+    )
+    return [str(_field(r, "text")).strip() for r in rows if str(_field(r, "text")).strip()]
 
 
 async def set_travel_note(

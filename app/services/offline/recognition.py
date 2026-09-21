@@ -15,9 +15,11 @@ import random
 import re
 from typing import Any
 
+from app.db import db
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline import chat_emit
 from app.services.offline import repository as repo
+from app.services.offline.memory_hooks import remember_offline_fragment
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
@@ -127,7 +129,9 @@ async def recognize_on_photo(
 ) -> dict[str, Any] | None:
     """识图匹配 + 概率阶梯 + 碎片产出（spec §4.8/§4.9）。服务端权威、单场串行。
 
-    三重去重：同图（调用方一图一次 + media.recognized）/ 同内容指纹 / 已触发条件不复用。
+    去重：① 同图——调用方对每张入站图只调一次（chat_capture 一图一 media_id 一次
+    识别，无 media 层重入）；② 同内容指纹不重复产出；③ 已触发条件本活动内不复用。
+    （产出时 media.recognized 标 TRUE，供画廊排除与 admin 追溯，非识别期闸门。）
     命中但概率未过 → 不产出且条件保持未触发（后续可再命中）。
     """
     recommendation_id = activity["id"]
@@ -144,6 +148,14 @@ async def recognize_on_photo(
         )
 
 
+# 口语化交付时的档位口吻（PM #11/#12/#13）。
+_TIER_TONE: dict[str, str] = {
+    "rare": "语气自然轻松，像随口一提。",
+    "epic": "语气比普通回忆更认真、更向内一些。",
+    "legendary": "语气带一点秘密感，像是终于说出口。",
+}
+
+
 async def _recognize_locked(
     *,
     activity: dict[str, Any],
@@ -156,39 +168,47 @@ async def _recognize_locked(
     recommendation_id = activity["id"]
     if not (photo_description or "").strip():
         return None
-    conditions = await repo.list_untriggered_conditions(recommendation_id)
-    if not conditions:
+    items = await repo.list_untriggered_conditions(recommendation_id)
+    if not items:
         return None
+
+    # 主体识图（复用真实视觉描述）→ 匹配未触发物品。
+    subjects = await _detect_subjects(photo_description)
+    matched_item, matched_subject = _match_subject_to_item(subjects, items)
+    if not matched_item or not matched_subject:
+        await _handle_miss(activity, ctx)  # 未命中：计数 + 视情况给方向暗示
+        return None
+
     produced = await repo.count_fragments(recommendation_id)
     if produced >= MAX_FRAGMENTS_PER_SESSION:
         return None
-
-    match = await _match_conditions(photo_description, conditions)
-    if not match or not match.get("hit"):
-        return None
-    fingerprint = content_fingerprint(match.get("keywords") or [])
+    fingerprint = content_fingerprint(
+        [str(matched_subject.get("type") or ""), str(matched_item.get("short_name") or "")]
+    )
     if fingerprint and await repo.fragment_fingerprint_exists(
         recommendation_id, fingerprint
     ):
         return None
     if not should_produce(produced):
-        return None  # 概率未过：不产出，命中的条件保持未触发
+        return None  # 概率未过：不产出，物品保持未触发
 
-    condition = _find_condition(conditions, match.get("condition_short_name"))
     tier = roll_tier()
     lead_in = pick_lead_in(tier)
-    text = (await _fragment_text(activity, tier, match.get("keywords") or [])) or \
-        _FALLBACK_FRAGMENT.get(tier, _FALLBACK_FRAGMENT["rare"])
+    prewritten = await repo.get_prewritten_fragment(matched_item["id"], tier)
+    text = (
+        (await _verbalize(activity, ctx, tier, prewritten, matched_item, matched_subject))
+        or prewritten
+        or _FALLBACK_FRAGMENT.get(tier, _FALLBACK_FRAGMENT["rare"])
+    )
 
-    if condition:
-        await repo.mark_condition_triggered(condition["id"])
+    await repo.mark_condition_triggered(matched_item["id"])
     await repo.mark_media_fragment_cover(media_id, fingerprint)
     fragment = await repo.create_fragment(
         recommendation_id=recommendation_id,
         tier=tier,
         text=text,
         lead_in=lead_in,
-        condition_id=condition["id"] if condition else None,
+        condition_id=matched_item["id"],
         snapshot_media_id=media_id,
         source_message_id=source_message_id,
         content_fingerprint=fingerprint,
@@ -208,6 +228,14 @@ async def _recognize_locked(
             source_message_id=source_message_id,
             trace_id=trace_id,
         )
+    # 写回 AI 记忆（#2）：让这次旅途"想起"的思绪进入 AI 长期记忆，不游离于聊天系统之外。
+    # 走保证写入（绕过"记/不记"预筛），否则碎片可能被会话式门控丢弃。
+    remember_offline_fragment(
+        user_id=activity["user_id"],
+        workspace_id=activity.get("workspace_id"),
+        text=text,
+        location=activity.get("location_name") or activity.get("title"),
+    )
     logger.info(
         "[offline-recognition] activity=%s 产出碎片 tier=%s produced=%d->%d",
         recommendation_id, tier, produced, produced + 1,
@@ -215,39 +243,41 @@ async def _recognize_locked(
     return fragment
 
 
-def _find_condition(
-    conditions: list[dict[str, Any]], short_name: str | None
-) -> dict[str, Any] | None:
-    if not short_name:
-        return None
-    for cond in conditions:
-        if cond.get("short_name") == short_name:
-            return cond
-    return None
+def _match_subject_to_item(
+    subjects: list[dict[str, Any]], items: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """按置信度从高到低，找第一个能对上某个未触发物品的主体。"""
+    for subject in subjects:
+        t = str(subject.get("type") or "").strip()
+        if not t:
+            continue
+        for item in items:
+            sn = str(item.get("short_name") or "").strip()
+            cat = str(item.get("category") or "").strip()
+            if (
+                (sn and (sn == t or sn in t or t in sn))
+                or (cat and (cat == t or cat in t or t in cat))
+            ):
+                return item, subject
+    return None, None
 
 
-async def _match_conditions(
-    photo_description: str, conditions: list[dict[str, Any]]
-) -> dict[str, Any] | None:
-    cond_lines = "\n".join(
-        f"- {c['short_name']} — {c['criteria']}" for c in conditions
-    )
+async def _detect_subjects(photo_description: str) -> list[dict[str, Any]]:
     try:
-        prompt = (await get_prompt_text("offline.photo_recognition")).format(
+        prompt = (await get_prompt_text("offline.photo_subjects")).format(
             photo_description=photo_description,
-            conditions=cond_lines,
         )
         raw = await invoke_text(get_chat_model(), prompt)
-        return _parse_match(raw)
+        return _parse_subjects(raw)
     except Exception as exc:
-        logger.warning("[offline-recognition] 识图匹配失败 err=%s", exc)
-        return None
+        logger.warning("[offline-recognition] 主体识图失败 err=%s", exc)
+        return []
 
 
-def _parse_match(raw: str) -> dict[str, Any] | None:
+def _parse_subjects(raw: str) -> list[dict[str, Any]]:
     text = (raw or "").strip()
     if not text:
-        return None
+        return []
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rstrip("`").strip()
     data: Any
@@ -256,39 +286,159 @@ def _parse_match(raw: str) -> dict[str, Any] | None:
     except Exception:
         match = re.search(r"\{.*\}", text, re.S)
         if not match:
-            return None
+            return []
         try:
             data = json.loads(match.group(0))
         except Exception:
-            return None
-    if not isinstance(data, dict):
-        return None
-    return {
-        "hit": bool(data.get("hit")),
-        "condition_short_name": (
-            str(data.get("condition_short_name") or "").strip() or None
-        ),
-        "keywords": [
-            str(k).strip() for k in (data.get("keywords") or []) if str(k).strip()
-        ],
-    }
+            return []
+    subs = data.get("subjects") if isinstance(data, dict) else None
+    if not isinstance(subs, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for s in subs:
+        if not isinstance(s, dict):
+            continue
+        t = str(s.get("type") or "").strip()
+        if not t:
+            continue
+        try:
+            conf = float(s.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        out.append({"type": t, "confidence": conf})
+    out.sort(key=lambda x: x["confidence"], reverse=True)
+    return out
 
 
-async def _fragment_text(
-    activity: dict[str, Any], tier: str, keywords: list[str]
+async def _verbalize(
+    activity: dict[str, Any],
+    ctx: dict[str, Any] | None,
+    tier: str,
+    prewritten: str | None,
+    item: dict[str, Any],
+    subject: dict[str, Any],
 ) -> str:
+    if not prewritten:
+        return ""
     try:
-        memory = await repo.memory_brief(
-            activity["user_id"], activity.get("workspace_id"), limit=30
+        conversation_id = (ctx or {}).get("conversation_id") or activity.get(
+            "conversation_id"
         )
-        prompt = (await get_prompt_text("offline.thought_fragment")).format(
-            place=activity.get("title") or activity.get("location_name") or "",
-            keywords="、".join(keywords) if keywords else "（无）",
-            memory=memory or "（暂无）",
-            tier_label=TIER_LABELS.get(tier, "片刻感想"),
+        recent = await _recent_dialogue(conversation_id)
+        prompt = (await get_prompt_text("offline.fragment_verbalize")).format(
+            tier_tone=_TIER_TONE.get(tier, ""),
+            prewritten_text=prewritten,
+            matched_item=item.get("short_name") or "",
+            photo_subject=subject.get("type") or "",
+            recent_dialogue=recent or "（无）",
         )
         raw = await invoke_text(get_chat_model(), prompt)
-        return (raw or "").strip()
+        return _parse_text_field(raw)
     except Exception as exc:
-        logger.warning("[offline-recognition] 碎片正文生成失败 err=%s", exc)
+        logger.warning("[offline-recognition] 口语化交付失败 err=%s", exc)
         return ""
+
+
+async def _handle_miss(
+    activity: dict[str, Any], ctx: dict[str, Any] | None
+) -> None:
+    """未命中：miss_count+1；每累计 2 次给一次方向暗示，最多 3 次（PM #9）。"""
+    recommendation_id = activity["id"]
+    try:
+        miss = await repo.increment_activity_counter(recommendation_id, "miss_count")
+    except Exception:
+        return
+    if miss % 2 != 0 or int(activity.get("hint_count") or 0) >= 3:
+        return
+    conversation_id = (ctx or {}).get("conversation_id") or activity.get(
+        "conversation_id"
+    )
+    agent_id = (ctx or {}).get("agent_id") or activity.get("agent_id")
+    if not (conversation_id and agent_id):
+        return
+    untriggered = await repo.list_untriggered_conditions(recommendation_id)
+    all_items = await repo.list_all_conditions(recommendation_id)
+    untriggered_ids = {i["id"] for i in untriggered}
+    triggered = [
+        str(i.get("short_name") or "")
+        for i in all_items
+        if i["id"] not in untriggered_ids
+    ]
+    hint = await _generate_miss_hint(
+        activity, miss, int(activity.get("hint_count") or 0), untriggered, triggered
+    )
+    if not hint:
+        return
+    await repo.increment_activity_counter(recommendation_id, "hint_count")
+    await chat_emit.emit_assistant(
+        conversation_id=str(conversation_id),
+        user_id=activity["user_id"],
+        agent_id=str(agent_id),
+        workspace_id=activity.get("workspace_id"),
+        message=hint,
+        real_world_type="activity",
+        source_id=recommendation_id,
+        trigger_type="offline_activity_miss_hint",
+    )
+
+
+async def _generate_miss_hint(
+    activity: dict[str, Any],
+    miss_count: int,
+    hint_count: int,
+    hintable_items: list[dict[str, Any]],
+    triggered_items: list[str],
+) -> str:
+    try:
+        prompt = (await get_prompt_text("offline.miss_hint")).format(
+            miss_count=miss_count,
+            hint_count=hint_count,
+            hintable_items="、".join(
+                str(i.get("short_name") or "") for i in hintable_items
+            ) or "（无）",
+            triggered_items="、".join(triggered_items) or "（无）",
+            location_info=activity.get("title") or activity.get("location_name") or "",
+        )
+        raw = await invoke_text(get_chat_model(), prompt)
+        return _parse_text_field(raw)
+    except Exception as exc:
+        logger.warning("[offline-recognition] 未命中暗示生成失败 err=%s", exc)
+        return ""
+
+
+async def _recent_dialogue(conversation_id: str | None, limit: int = 6) -> str:
+    if not conversation_id:
+        return ""
+    try:
+        rows = await db.message.find_many(
+            where={"conversationId": conversation_id},
+            order={"createdAt": "desc"},
+            take=limit,
+        )
+        lines: list[str] = []
+        for m in reversed(rows or []):
+            content = str(getattr(m, "content", "") or "").strip()
+            if not content:
+                continue
+            who = "我" if getattr(m, "role", "") == "assistant" else "用户"
+            lines.append(f"{who}：{content}")
+        return "\n".join(lines)[:1500]
+    except Exception:
+        return ""
+
+
+def _parse_text_field(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rstrip("`").strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("text"):
+            return str(data["text"]).strip()
+    except Exception:
+        match = re.search(r'"text"\s*:\s*"([^"]+)"', text)
+        if match:
+            return match.group(1).strip()
+    return ""

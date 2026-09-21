@@ -54,6 +54,47 @@ def remember_ai_event(
     )
 
 
+def remember_offline_fragment(
+    *,
+    user_id: str,
+    workspace_id: str | None,
+    text: str,
+    location: str | None = None,
+) -> None:
+    """线下活动思绪碎片 → 保证写入 AI 记忆（memories_ai），不走"记/不记"预筛。
+
+    产品决策（2026-09）：因活动而生成的思绪碎片必须落入 agent 记忆，不能游离于聊天
+    系统之外。碎片是已产出的、结构化的既成事件，与共同游戏记忆同理——会话式记忆门控
+    可能把"这一幕挺好的"判为不值得记，从而丢掉产品承诺要留住的东西。故走 store_memory
+    直存（仍享 taxonomy 校验/embedding/去重/changelog/缓存失效），不经预筛。
+    落 L3 + 低 importance，像真人回忆一样自然淡出；被反复提起再由 L2 动态升。
+    """
+    if not text.strip():
+        return
+    entities = [e for e in [location] if e and str(e).strip()]
+
+    async def _store() -> None:
+        try:
+            await store_memory(
+                user_id=user_id,
+                content=text.strip(),
+                level=3,
+                importance=0.45,
+                memory_type="life",
+                main_category="生活",
+                sub_category="交互",
+                source="ai",
+                statement_time=datetime.now(UTC),
+                workspace_id=workspace_id,
+                entities=entities,
+                topics=["线下活动", "思绪碎片"],
+            )
+        except Exception as exc:  # 后台写入：失败只记日志，不影响碎片已交付的主流程
+            logger.warning("[offline-fragment-memory] 写入失败 user=%s err=%s", user_id[:8], exc)
+
+    fire_background(_store())
+
+
 async def remember_shared_game_experience(
     *,
     user_id: str,

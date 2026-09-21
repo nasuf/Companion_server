@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
@@ -20,6 +22,8 @@ from app.services.offline import repository as repo
 from app.services.offline import shooting_conditions
 from app.services.offline.recognition import TIER_LABELS
 from app.services.offline.geocode import geocode_address, haversine_m, make_place_key
+from app.services.llm.models import get_chat_model, invoke_text
+from app.services.prompting.store import get_prompt_text
 from app.services.runtime.tasks import fire_background
 from app.services.offline.activity_generation import (
     generate_activity_card,
@@ -363,6 +367,41 @@ def _verify_arrival_distance(activity: dict, lat: float, lng: float) -> None:
         )
 
 
+_ARRIVAL_GUIDE_FALLBACK = "到啦～慢慢逛。看到喜欢的瞬间，随手留一张就好。"
+
+
+def _parse_text_json(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rstrip("`").strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("text"):
+            return str(data["text"]).strip()
+    except Exception:
+        match = re.search(r'"text"\s*:\s*"([^"]+)"', text)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+async def _arrival_guide_text(activity: dict, ctx: dict) -> str:
+    """PM #8：到达后拍照引导（严禁泄露拍摄目标）。失败回退固定陪伴语。"""
+    try:
+        prompt = (await get_prompt_text("offline.arrival_guide")).format(
+            location_name=activity.get("location_name") or activity.get("title") or "",
+            activity_type=activity.get("category") or "线下活动",
+            user_name=ctx.get("username") or ctx.get("user_name") or "你",
+        )
+        raw = await invoke_text(get_chat_model(), prompt)
+        return _parse_text_json(raw) or _ARRIVAL_GUIDE_FALLBACK
+    except Exception as exc:
+        logger.warning("[offline] 到达引导生成失败 err=%s", exc)
+        return _ARRIVAL_GUIDE_FALLBACK
+
+
 async def arrive_activity(
     user_id: str,
     activity_id: str,
@@ -390,8 +429,8 @@ async def arrive_activity(
         if current and current.get("reached"):
             return OfflineActivityItem(**current)
         raise HTTPException(status_code=409, detail="确认到达失败，请重试")
-    # 到达后后台生成 3-5 拍摄条件集合（spec §3.4，不阻塞到达响应，不披露给用户）。
-    fire_background(shooting_conditions.generate_conditions_for_activity(updated))
+    # 到达后后台生成 3-5 拍摄物品 + 分档回忆预生成（PM #3/#4/#5-7，不阻塞、不披露）。
+    fire_background(shooting_conditions.generate_items_for_activity(updated))
     ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
     if ctx:
         await insert_user_activity_card(
@@ -399,15 +438,16 @@ async def arrive_activity(
             workspace_id=ctx["workspace_id"],
             activity=updated,
             trigger_type="offline_activity_arrived_card",
-            status_label="我已到达",
+            status_label="我到了",  # spec §5.4-14 到达卡「我到了」
         )
-        # 拍照引导（spec §3.1：禁止泄露拍摄条件）。P3 接入 LLM 版，本期为固定文案。
+        # 拍照引导（PM #8：走提示词，严禁泄露拍摄目标；失败回退固定陪伴语）。
+        guide = await _arrival_guide_text(activity, ctx)
         await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
             user_id=user_id,
             agent_id=ctx["agent_id"],
             workspace_id=ctx["workspace_id"],
-            message="到啦～在现场随手拍点你觉得有意思的画面发给我，我慢慢看。",
+            message=guide,
             real_world_type="activity",
             source_id=activity_id,
             trigger_type="offline_activity_arrival_guide",
@@ -601,10 +641,18 @@ async def generate_memory_note(
         raise HTTPException(status_code=404, detail="Activity not found")
     fragments = await repo.list_fragments(activity_id)
     note = activity.get("travel_note")
+    mood_tags: list[str] = []
     if not note:  # 幂等：已生成直接复用，未生成才调 LLM 并缓存
-        note = await memory_note_gen.generate_travel_note(activity, fragments)
-        if not note:
-            note = memory_note_gen.fallback_note()
+        voice_transcripts = await repo.list_voice_transcripts(activity_id)
+        generated = await memory_note_gen.generate_note(
+            activity_info=_activity_info_text(activity),
+            dialogue="",
+            voice_transcripts="\n".join(voice_transcripts),
+            photo_keywords="",
+            fragments="\n".join(f["text"] for f in fragments if f.get("text")),
+        )
+        note = (generated.get("body") or "").strip() or memory_note_gen.fallback_body()
+        mood_tags = generated.get("mood_tags") or []
         await repo.set_travel_note(activity_id, user_id, note)
     gallery = await repo.list_gallery_media(activity_id)
     fragment_tags = [
@@ -617,7 +665,18 @@ async def generate_memory_note(
         cover_url=_activity_cover(activity, gallery),
         travel_note=note,
         fragment_tags=fragment_tags,
+        mood_tags=mood_tags,
     )
+
+
+def _activity_info_text(activity: dict) -> str:
+    parts = [
+        f"标题：{activity.get('title') or ''}",
+        f"类型：{activity.get('category') or ''}",
+        f"地点：{activity.get('location_name') or activity.get('address') or ''}",
+        f"简介：{activity.get('summary') or activity.get('description') or ''}",
+    ]
+    return "｜".join(p for p in parts if p.split("：", 1)[-1].strip())
 
 
 async def complete_activity(

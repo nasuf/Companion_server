@@ -1749,10 +1749,14 @@ model OfflineActivityRecommendation {
   autoArchiveAt  DateTime?                 @map("auto_archive_at")
   // 记忆手札旅途小记（生成后缓存）
   travelNote     String?                   @map("travel_note")
+  // 识图未命中计数 / 已发方向暗示计数（spec 未命中方向暗示递增用）
+  missCount      Int                       @default(0) @map("miss_count")
+  hintCount      Int                       @default(0) @map("hint_count")
   feedback       OfflineActivityFeedback[]
   media          OfflineActivityMedia[]
   conditions     OfflineShootingCondition[]
   fragments      OfflineThoughtFragment[]
+  prewritten     OfflinePrewrittenFragment[]
   acceptedAt     DateTime?                 @map("accepted_at")
   ignoredAt      DateTime?                 @map("ignored_at")
   completedAt    DateTime?                 @map("completed_at")
@@ -1817,14 +1821,32 @@ model OfflineShootingCondition {
   recommendationId String                        @map("recommendation_id")
   recommendation   OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
   shortName        String                        @map("short_name")
-  criteria         String
+  criteria         String                        @default("")
+  category         String?
   sortOrder        Int                           @default(0) @map("sort_order")
   triggered        Boolean                       @default(false)
   triggeredAt      DateTime?                     @map("triggered_at")
   createdAt        DateTime                      @default(now()) @map("created_at")
 
+  prewritten       OfflinePrewrittenFragment[]
+
   @@index([recommendationId], map: "offline_shooting_conditions_recommendation_idx")
   @@map("offline_shooting_conditions")
+}
+
+model OfflinePrewrittenFragment {
+  id               String                        @id @default(uuid())
+  recommendationId String                        @map("recommendation_id")
+  recommendation   OfflineActivityRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  conditionId      String                        @map("condition_id")
+  condition        OfflineShootingCondition      @relation(fields: [conditionId], references: [id], onDelete: Cascade)
+  tier             String
+  text             String
+  createdAt        DateTime                      @default(now()) @map("created_at")
+
+  @@index([recommendationId], map: "offline_prewritten_fragment_recommendation_idx")
+  @@index([conditionId, tier], map: "offline_prewritten_fragment_condition_tier_idx")
+  @@map("offline_prewritten_fragments")
 }
 
 model OfflineThoughtFragment {

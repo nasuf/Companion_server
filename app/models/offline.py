@@ -87,6 +87,7 @@ class OfflineMemoryNoteResponse(BaseModel):
     cover_url: str | None = None
     travel_note: str
     fragment_tags: list[str] = Field(default_factory=list)
+    mood_tags: list[str] = Field(default_factory=list)
 
 
 class OfflineHomeResponse(BaseModel):
