@@ -449,6 +449,39 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> list
     return [activity_from_row(row) for row in rows or []]
 
 
+async def get_active_activity_brief(
+    user_id: str, workspace_id: str | None = None
+) -> dict[str, Any] | None:
+    """当前进行中(accepted)活动的轻量概要，供聊天主回复注入外出情境。
+
+    只取最近一条 accepted 活动（走 offline_activity_user_status_idx 索引，热路径友好）。
+    刻意不含拍摄物品/任务字段 —— 聊天 prompt 严禁泄露通关目标（spec §3.1/§6）。
+    """
+    rows = await db.query_raw(
+        """
+        SELECT title, location_name, category, summary, reached
+        FROM offline_activity_recommendations
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR workspace_id = $2)
+          AND status = 'accepted'
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        user_id,
+        workspace_id,
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {
+        "title": str(_field(r, "title") or "").strip(),
+        "location_name": str(_field(r, "location_name", "locationName") or "").strip(),
+        "category": str(_field(r, "category") or "").strip(),
+        "summary": str(_field(r, "summary") or "").strip(),
+        "reached": bool(_field(r, "reached")),
+    }
+
+
 async def list_recent_activity_fingerprints(
     user_id: str,
     workspace_id: str | None = None,
@@ -841,6 +874,28 @@ async def list_all_conditions(recommendation_id: str) -> list[dict[str, Any]]:
             "id": str(_field(r, "id")),
             "short_name": _field(r, "short_name", "shortName"),
             "category": _field(r, "category"),
+        }
+        for r in rows
+    ]
+
+
+async def admin_list_conditions(recommendation_id: str) -> list[dict[str, Any]]:
+    """管理员检视用：拍摄物品全量（含判定要点 + 触发状态）。仅供 admin 测试页。"""
+    rows = await db.query_raw(
+        """
+        SELECT short_name, category, criteria, triggered, sort_order
+        FROM offline_shooting_conditions
+        WHERE recommendation_id = $1
+        ORDER BY sort_order
+        """,
+        recommendation_id,
+    )
+    return [
+        {
+            "short_name": _field(r, "short_name", "shortName"),
+            "category": _field(r, "category"),
+            "criteria": _field(r, "criteria"),
+            "triggered": bool(_field(r, "triggered")),
         }
         for r in rows
     ]

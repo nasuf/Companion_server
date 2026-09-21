@@ -1337,6 +1337,20 @@ async def stream_chat_response(
                 relation_meta_line = ""
             # W4 AI 情绪连续性: 上一轮回复情绪衰减后作为本轮"当下心情"
             ai_mood_text = format_ai_mood_text(await load_ai_mood(conversation_id))
+            # 线下活动外出情境: 进行中(accepted)活动时给主回复注入「当前线下活动」段,
+            # 让现场照片/消息贴合这次外出而非割裂的普通聊天; 拍摄任务绝不进 prompt.
+            # best-effort + 模块未启用/无活动时不查, 不影响聊天主流程。
+            offline_activity = None
+            try:
+                from app.services.offline.module_settings import is_activity_enabled
+                if await is_activity_enabled():
+                    from app.services.offline import repository as _offline_repo
+                    offline_activity = await _offline_repo.get_active_activity_brief(
+                        user_id, workspace_id,
+                    )
+            except Exception as _off_err:
+                logger.debug(f"[offline-ctx] skipped: {_off_err}")
+                offline_activity = None
             # 图灵测试条数变化: last_reply_count 已在外层一次性加载, 注入"≠上一轮"约束段
             system_prompt = await build_system_prompt(
                 agent=agent,
@@ -1368,6 +1382,7 @@ async def stream_chat_response(
                 expression_habits=expression_habits or None,
                 red_packet_context=red_packet_context,
                 gift_context=gift_context,
+                offline_activity=offline_activity,
                 last_reply_count=last_reply_count,
                 needs_web_search=needs_web_search,
                 discussed_titles=(

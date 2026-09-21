@@ -21,6 +21,7 @@ from app.services.prompting.defaults import (
     CHARACTER_GENERATION_PROMPT,
     CHARACTER_REPAIR_MISSING_FIELDS_PROMPT,
     CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT,
     CHAT_REPLY_EMOTION_MARKER_PROMPT,
     REPLY_COUNT_VARIATION_PROMPT,
     CHAT_DELAY_CONTEXT_SECTION_PROMPT,
@@ -319,6 +320,13 @@ PROMPT_DEFINITIONS = [
         "告诉 LLM 状态但禁止主动展开, 避免跟 §3.4.3 询问当前状态分支撞主题. "
         "占位符: {activity} {status}.",
         CHAT_AI_STATE_CONSTRAINT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.offline_activity_section", "线下活动外出情境", "聊天热路径", "聊天",
+        "【工程扩展】线下活动进行中时注入主回复的「当前线下活动」段, 让回复贴合"
+        "这次外出(地点/已到达状态), 解决现场照片被当普通聊天的割裂感。硬约束: 严禁"
+        "泄露拍摄物品/任务目标/通关(spec §3.1/§6 不披露)。占位符: {activity} {location} {status_line}.",
+        CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.relationship_stage_section", "关系阶段段落", "聊天热路径", "聊天",

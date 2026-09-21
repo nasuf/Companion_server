@@ -72,6 +72,24 @@ async def clear_current_user_offline_activities(
     return OfflineActivityClearResponse(**result)
 
 
+@router.get("/admin/activities/{activity_id}/inspect")
+async def admin_inspect_activity(
+    activity_id: str,
+    user: dict = Depends(require_admin_jwt),
+):
+    """管理员测试页：查看活动详情 + 拍摄物品(任务) + 已产出碎片。"""
+    return await activity_service.admin_inspect_activity(str(user["sub"]), activity_id)
+
+
+@router.post("/admin/activities/{activity_id}/generate-items")
+async def admin_generate_activity_items(
+    activity_id: str,
+    user: dict = Depends(require_admin_jwt),
+):
+    """管理员测试专用：绕过到达校验，直接生成拍摄物品(任务)，返回检视结果。"""
+    return await activity_service.admin_generate_items(str(user["sub"]), activity_id)
+
+
 @router.post("/admin/gifts/mock", response_model=RealWorldGiftItem)
 async def create_mock_gift(
     workspace_id: str | None = Query(default=None),

@@ -538,6 +538,39 @@ async def _build_music_context_section(music_context: str | None) -> _PromptBody
     return _PromptBody(_render_section(tpl, {"music_context": music_context}), "chat.music_context_section")
 
 
+async def _build_offline_activity_section(
+    offline_activity: dict[str, Any] | None,
+) -> _PromptBody | None:
+    """线下活动进行中的「外出情境」段：让主回复贴合这次外出，不泄露拍摄任务。
+
+    只用 title/location/reached 三个非敏感字段渲染；拍摄物品绝不进 prompt（spec §6）。
+    """
+    if not offline_activity:
+        return None
+    activity = str(offline_activity.get("title") or "").strip()
+    if not activity:
+        return None
+    tpl = await _get_optional_prompt("chat.offline_activity_section")
+    if tpl is None:
+        return None
+    location = str(
+        offline_activity.get("location_name") or offline_activity.get("category") or ""
+    ).strip() or "现场"
+    status_line = (
+        "TA 现在已经到了现场。"
+        if offline_activity.get("reached")
+        else "TA 还在前往/准备出发的路上。"
+    )
+    return _PromptBody(
+        _render_section(tpl, {
+            "activity": activity,
+            "location": location,
+            "status_line": status_line,
+        }),
+        "chat.offline_activity_section",
+    )
+
+
 # Phase 6: 删除 _build_relational_context_section + _build_graph_context_section.
 # 实证依据:
 # - relational_context: 注入"先接情绪/不要长解释" 等泛指令, 跟 SYSTEM_BASE
@@ -579,6 +612,8 @@ async def build_system_prompt(
     expression_habits: list[str] | None = None,
     red_packet_context: dict[str, Any] | None = None,
     gift_context: dict[str, Any] | None = None,
+    # 线下活动进行中的外出情境 (title/location/reached)，注入「当前线下活动」段。
+    offline_activity: dict[str, Any] | None = None,
     last_reply_count: int | None = None,
     # True → 本轮主回复走联网搜索, 追加「联网结果使用」段纠正播报腔与重复.
     needs_web_search: bool = False,
@@ -726,6 +761,16 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "一起听音乐")
+
+    # 线下活动外出情境 (会话级): 进行中活动时让主回复贴合这次外出, 不泄露拍摄任务.
+    offline_sec = await _build_offline_activity_section(offline_activity)
+    if offline_sec:
+        _append_section(
+            sections, components, "当前线下活动", offline_sec.body,
+            prompt_key=offline_sec.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "当前线下活动")
 
     # AI 自洽性约束 (§4 主回复路径). 告诉 LLM 当前状态 + 接下来的安排 + 禁止主动
     # 展开。详见 CHAT_AI_STATE_CONSTRAINT_PROMPT 注释 (defaults.py).

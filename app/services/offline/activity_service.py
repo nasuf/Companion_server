@@ -129,6 +129,40 @@ async def clear_all_activities(user_id: str) -> dict[str, int]:
     return await repo.clear_user_activities(user_id)
 
 
+async def admin_inspect_activity(user_id: str, activity_id: str) -> dict:
+    """管理员测试页检视：活动详情 + 拍摄物品(任务)全量 + 已产出碎片。仅 admin。"""
+    activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    items = await repo.admin_list_conditions(activity_id)
+    fragments = await repo.list_fragments(activity_id)
+    return {
+        "id": activity["id"],
+        "title": activity.get("title") or "",
+        "location_name": activity.get("location_name") or activity.get("address") or "",
+        "category": activity.get("category") or "",
+        "summary": activity.get("summary") or activity.get("description") or "",
+        "status": activity.get("status") or "",
+        "reached": bool(activity.get("reached")),
+        "items": items,
+        "fragments": [
+            {"tier": f.get("tier"), "text": f.get("text")} for f in fragments
+        ],
+    }
+
+
+async def admin_generate_items(user_id: str, activity_id: str) -> dict:
+    """管理员测试专用：绕过到达校验，直接为活动生成 3–5 拍摄物品(任务) + 分档预生成。
+
+    幂等（已有物品则跳过）。生成后返回检视结果，供测试页展示任务细节。
+    """
+    activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    await shooting_conditions.generate_items_for_activity(activity)
+    return await admin_inspect_activity(user_id, activity_id)
+
+
 async def get_activity(user_id: str, activity_id: str) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
