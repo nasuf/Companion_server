@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.services.chat_media import repo as chat_media_repo
 from app.services.chat_media.repo import ChatAttachment
 from app.services.offline import recognition
 from app.services.offline import repository as repo
@@ -37,8 +38,19 @@ async def on_user_chat_media(
         if not activity:
             return  # 未到达 / 无进行中活动 → 媒体只留聊天（spec §3.5）
         ctx = await repo.resolve_user_context(user_id, workspace_id)
+        # ⚠️ 传入的 attachments 是 ws 从 get_message_attachments 取的原始对象，
+        # 其 vision_summary 尚未回填（ensure_vision_summaries 只写库 + 造新对象，
+        # 不改传入对象；见 chat_media/vision.py）。识图依赖 vision_summary，故此处
+        # 按 message_id 重新拉一次已落库的附件（vision 落库 + 绑定都在本钩子之前完成）。
+        try:
+            fresh = await chat_media_repo.find_attachments_for_message(message_id)
+            fresh_by_id = {a.id: a for a in fresh}
+        except Exception:
+            fresh_by_id = {}
         for att in images:
-            await _capture_image(activity, ctx, att, message_id)
+            await _capture_image(
+                activity, ctx, fresh_by_id.get(att.id, att), message_id
+            )
         for att in audios:
             await _capture_audio(activity, att, message_id)
     except Exception as exc:  # 后台钩子：任何异常都不得冒泡到聊天主流程
