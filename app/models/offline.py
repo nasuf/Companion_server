@@ -81,6 +81,8 @@ class OfflineActivityReviewResponse(BaseModel):
     event_tags: list[str] = Field(default_factory=list)
     has_memory_note: bool = False
     travel_note: str | None = None
+    # 「查看原始聊天」定位用：该活动「我到了」到达卡消息 id（可空）。
+    arrival_message_id: str | None = None
 
 
 class OfflineMemoryNoteResponse(BaseModel):

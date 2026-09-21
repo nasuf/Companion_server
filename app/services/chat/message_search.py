@@ -263,6 +263,13 @@ async def _search_images(
     return list(rows[:limit]), has_more
 
 
+async def message_rank(conversation_id: str, message_id: str) -> int | None:
+    """某条消息在会话中的 rank（= 比它新的消息条数，= loadMessages 的 offset）。
+    供「跳转到某条消息」实时定位（避免用预存的过期 rank）。找不到返回 None。"""
+    ranks = await _ranks_for(conversation_id, [message_id])
+    return ranks.get(message_id)
+
+
 async def _ranks_for(conversation_id: str, message_ids: list[str]) -> dict[str, int]:
     if not message_ids:
         return {}

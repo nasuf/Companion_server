@@ -283,6 +283,18 @@ async def search_conversation_messages(
     )
 
 
+@router.get("/{conversation_id}/messages/{message_id}/rank")
+async def get_conversation_message_rank(
+    conversation_id: str,
+    message_id: str,
+    conv=Depends(require_conversation_owner),
+    user: dict = Depends(require_user),
+):
+    """消息在会话中的实时 rank（供「跳转到某条消息」定位，如回顾页「查看原始聊天」）。"""
+    rank = await message_search.message_rank(conversation_id, message_id)
+    return {"rank": rank}
+
+
 async def _attach_llm_usage(items: list[MessageResponse]) -> None:
     """给带 trace_id 的消息 metadata 注入 llm_usage (本轮 tokens/缓存/费用).
 

@@ -1055,6 +1055,27 @@ async def mark_message_recognized(message_id: str | None, tier: str) -> None:
     )
 
 
+async def find_arrival_card_message_id(
+    activity_id: str, conversation_id: str | None
+) -> str | None:
+    """定位该活动「我到了」到达卡消息（供回顾页「查看原始聊天」跳转定位）。"""
+    if not conversation_id:
+        return None
+    rows = await db.query_raw(
+        """
+        SELECT id FROM messages
+        WHERE conversation_id = $1
+          AND metadata->>'source_id' = $2
+          AND metadata->>'trigger_type' = 'offline_activity_arrived_card'
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        conversation_id,
+        activity_id,
+    )
+    return str(_field(rows[0], "id")) if rows else None
+
+
 async def mark_media_fragment_cover(media_id: str, fingerprint: str) -> None:
     """碎片封面图：从画廊素材里剔除（spec §3.5），并记内容指纹与已识别。"""
     await db.execute_raw(

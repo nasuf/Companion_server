@@ -625,9 +625,13 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
         raise HTTPException(status_code=404, detail="Activity not found")
     fragments = await repo.list_fragments(activity_id)
     gallery = await repo.list_gallery_media(activity_id)
+    arrival_message_id = await repo.find_arrival_card_message_id(
+        activity_id, activity.get("conversation_id")
+    )
     return OfflineActivityReviewResponse(
         id=activity["id"],
         title=activity["title"],
+        arrival_message_id=arrival_message_id,
         address=activity.get("address") or activity.get("location_name"),
         cover_url=_activity_cover(activity, gallery),
         started_at=activity.get("arrival_confirmed_at") or activity.get("created_at"),
