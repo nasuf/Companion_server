@@ -10,8 +10,10 @@ from app.services.offline.activity_generation import (
     _fallback_card,
     _filter_repeated_results,
     _search_query,
-    _search_queries,
+    _search_query_specs,
+    _source_is_usable,
     _usable_results,
+    resolve_activity_search_context,
 )
 from app.services.offline.activity_images import _is_bad_image_url
 from app.services.offline import activity_media_repo, repository as offline_repo
@@ -24,11 +26,9 @@ def test_search_query_localizes_zhenjiang_for_chinese_sources():
     assert "江苏 镇江" in query
     assert "Zhenjiang" in query
     assert "音乐爱好者" in query
-    assert "咖啡馆" in query
-    assert "手作" in query
-    assert "河边" in query
-    assert "菜市场" in query
-    assert "创意园" in query
+    assert "小吃" in query
+    assert "活动" in query
+    assert "商铺" in query
 
 
 def test_activity_place_categories_cover_small_city_options():
@@ -44,6 +44,10 @@ def test_activity_place_categories_cover_small_city_options():
         "街区与市集",
         "小吃与轻食",
         "城市观察",
+        "街头小吃",
+        "餐饮小店",
+        "商铺与零售",
+        "活动现场",
     }.issubset(category_names)
 
 
@@ -51,12 +55,14 @@ def test_offline_activity_image_upload_limit_is_10mb():
     assert offline.activity_media_storage._MAX_IMAGE_BYTES == 10 * 1024 * 1024
 
 
-def test_search_queries_push_recently_used_place_category_back():
+def test_search_query_specs_push_recently_used_place_category_back():
     recent = [{"title": "镇江市图书馆常设展", "location_name": "镇江市图书馆"}]
-    queries = _search_queries("Zhenjiang", ["音乐爱好者"], recent)
+    specs = _search_query_specs("江苏 镇江", ["音乐爱好者"], recent)
+    queries = [spec.query for spec in specs]
 
     assert "图书馆" not in queries[1]
     assert any("图书馆" in query for query in queries[2:])
+    assert any(spec.include_domains is not None for spec in specs)
 
 
 def test_tripadvisor_generic_review_source_is_not_usable_activity_source():
@@ -102,6 +108,56 @@ def test_fallback_card_does_not_promote_unverified_source_title_to_place():
     card = _fallback_card("Zhenjiang", ["音乐爱好者"], [result])
 
     assert card is None
+
+
+def test_resolve_activity_search_context_builds_city_and_region_terms():
+    city, anchor, terms = resolve_activity_search_context(
+        city="镇江市",
+        region="京口区",
+    )
+
+    assert city == "镇江市"
+    assert "镇江" in anchor
+    assert "镇江市" in terms
+    assert "京口区" in terms
+
+
+def test_source_is_usable_accepts_district_only_snippet():
+    result = SearchResult(
+        title="京口区周末市集活动整理",
+        url="https://www.xiaohongshu.com/explore/example",
+        content="京口区近期有几场免费展览和小吃市集。",
+    )
+
+    assert _source_is_usable(
+        result,
+        "镇江市",
+        ["镇江市", "京口区", "江苏省"],
+    )
+
+
+def test_source_is_usable_rejects_trusted_domain_without_city_match():
+    result = SearchResult(
+        title="上海周末必去苍蝇馆",
+        url="https://www.dianping.com/shop/example",
+        content="藏在弄堂里的本帮小吃，排队也要吃。",
+    )
+
+    assert not _source_is_usable(result, "镇江市", ["镇江市", "京口区"])
+
+
+def test_activity_card_accepts_snack_shop_style_place():
+    assert (
+        _card_has_concrete_place(
+            {
+                "title": "去巷口那家苍蝇馆试试",
+                "location_name": "老周苍蝇馆",
+                "address": "老周苍蝇馆",
+            },
+            "镇江市",
+        )
+        is True
+    )
 
 
 def test_activity_card_requires_a_concrete_place():
@@ -311,7 +367,7 @@ async def test_upload_offline_activity_audio_saves_file_and_returns_media(
     assert response.url == "/offline/media/user-1_voice.m4a"
 
 
-async def test_create_recommendation_requires_resolved_user_city(monkeypatch):
+async def test_create_recommendation_requires_location_anchor(monkeypatch):
     generate = AsyncMock()
     monkeypatch.setattr(
         activity_service.repo,
@@ -321,8 +377,8 @@ async def test_create_recommendation_requires_resolved_user_city(monkeypatch):
                 "conversation_id": "conversation-1",
                 "agent_id": "agent-1",
                 "workspace_id": "workspace-1",
-                "user_location_latitude": 32.19,
-                "user_location_longitude": 119.45,
+                "user_location_latitude": None,
+                "user_location_longitude": None,
                 "user_location_city": None,
                 "user_location_region": None,
             }

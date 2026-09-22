@@ -36,11 +36,27 @@ _GENERIC_LOCATION_RE = re.compile(
 _CONCRETE_PLACE_HINT_RE = re.compile(
     r"(博物馆|图书馆|美术馆|展览馆|纪念馆|科技馆|文化馆|艺术馆|非遗馆|"
     r"书店|书房|书屋|书吧|咖啡|咖啡馆|茶馆|茶室|奶茶|甜品|烘焙|蛋糕|"
-    r"手作|陶艺|花艺|画室|文创|工坊|小店|杂货|唱片|胶片|"
+    r"手作|陶艺|花艺|画室|文创|工坊|小店|杂货|唱片|胶片|商铺|门店|百货|"
     r"商场|购物中心|创意园|园区|社区|市民中心|游客中心|"
     r"公园|花园|植物园|湿地|绿道|步道|滨江|江边|河边|湖边|海边|码头|渡口|"
     r"景区|古镇|古街|老街|街区|步行街|市集|夜市|广场|剧场|影院|音乐厅|"
-    r"体育馆|运动公园|球场|菜场|菜市场|集市|桥|寺|山|湖|江|河|海|馆|园|店)"
+    r"体育馆|运动公园|球场|菜场|菜市场|集市|"
+    r"小吃|小吃街|大排档|路边摊|档口|苍蝇馆|小馆|饭馆|餐厅|面馆|"
+    r"火锅|烧烤|轻食|早餐|面包|老字号|"
+    r"活动|展会|展览|音乐|市集|开幕|"
+    r"酒吧|小酒馆|livehouse|KTV|台球|桌游|"
+    r"桥|寺|山|湖|江|河|海|馆|园|店|铺|坊|巷|里|弄|站|场|街|楼|中心)"
+)
+
+_TAVILY_LOCAL_DOMAINS = (
+    "dianping.com",
+    "xiaohongshu.com",
+    "gov.cn",
+    "12301.cn",
+    "ctrip.com",
+    "mafengwo.cn",
+    "meituan.com",
+    "douban.com",
 )
 
 _UNRELIABLE_ACTIVITY_DOMAINS = {
@@ -67,6 +83,12 @@ class ActivityPlaceCategory:
     name: str
     keywords: tuple[str, ...]
     query_hint: str
+
+
+@dataclass(frozen=True)
+class SearchQuerySpec:
+    query: str
+    include_domains: tuple[str, ...] | None = None
 
 
 ACTIVITY_PLACE_CATEGORIES: tuple[ActivityPlaceCategory, ...] = (
@@ -114,6 +136,36 @@ ACTIVITY_PLACE_CATEGORIES: tuple[ActivityPlaceCategory, ...] = (
         "小吃与轻食",
         ("小吃街", "面包店", "甜品店", "茶饮店", "轻食店", "老字号"),
         "小吃街 面包店 甜品店 茶饮店 轻食店 老字号 低消费",
+    ),
+    ActivityPlaceCategory(
+        "街头小吃",
+        ("路边摊", "大排档", "档口", "夜宵", "苍蝇馆"),
+        "路边摊 大排档 档口 夜宵 苍蝇馆 小吃 本地味道",
+    ),
+    ActivityPlaceCategory(
+        "餐饮小店",
+        ("小馆", "饭馆", "面馆", "火锅", "烧烤", "私房菜"),
+        "小馆 饭馆 面馆 火锅 烧烤 私房菜 小炒 本地餐厅",
+    ),
+    ActivityPlaceCategory(
+        "商铺与零售",
+        ("商铺", "门店", "百货", "超市", "便利店", "杂货铺"),
+        "商铺 门店 百货 超市 便利店 杂货铺 逛街 小店",
+    ),
+    ActivityPlaceCategory(
+        "活动现场",
+        ("活动", "展览", "展会", "音乐节", "市集", "开幕"),
+        "活动 展览 展会 音乐节 市集 开幕 巡展 免费 开放",
+    ),
+    ActivityPlaceCategory(
+        "休闲社交",
+        ("酒吧", "小酒馆", "KTV", "台球", "桌游", "livehouse"),
+        "酒吧 小酒馆 KTV 台球 桌游 livehouse 休闲 小聚",
+    ),
+    ActivityPlaceCategory(
+        "亲子与乐园",
+        ("乐园", "游乐场", "动物园", "科普馆", "亲子"),
+        "乐园 游乐场 动物园 水族馆 科普 亲子 周末",
     ),
     ActivityPlaceCategory(
         "演出与电影",
@@ -175,13 +227,64 @@ def _display_city(city: str) -> str:
     return terms[0] if terms else city.strip()
 
 
-def _search_query(city: str, tags: list[str]) -> str:
+def _expand_search_anchor(search_anchor: str) -> str:
+    anchor = search_anchor.strip()
+    if not anchor:
+        return anchor
+    direct = _localized_city_terms(anchor)
+    if len(direct) > 1:
+        return " ".join(term for term in direct if term)
+    parts: list[str] = []
+    for token in _TOKEN_SPLIT_RE.split(anchor):
+        token = token.strip()
+        if not token:
+            continue
+        for term in _localized_city_terms(token):
+            if term and term not in parts:
+                parts.append(term)
+        if token not in parts:
+            parts.append(token)
+    return " ".join(parts) if parts else anchor
+
+
+def _search_query(search_anchor: str, tags: list[str]) -> str:
     tag_text = " ".join(tags[:5])
-    anchor = " ".join(term for term in _localized_city_terms(city) if term)
+    anchor = _expand_search_anchor(search_anchor)
     return (
-        f"{anchor or city} 真实地点 免费 低成本 独自 安静 小众 "
-        f"{_ACTIVITY_CATEGORY_HINT} {tag_text}"
+        f"{anchor} 真实地点 推荐 周末 一个人 可以去 "
+        f"小吃 餐厅 商铺 活动 展览 公园 市集 {tag_text}"
     ).strip()
+
+
+def resolve_activity_search_context(
+    *,
+    city: str | None,
+    region: str | None,
+) -> tuple[str, str, tuple[str, ...]]:
+    """Resolve display city, Tavily anchor, and location match terms for filtering."""
+    display_city = (city or region or "").strip()
+    match_terms: list[str] = []
+
+    if display_city:
+        for term in _localized_city_terms(display_city):
+            if term and term not in match_terms:
+                match_terms.append(term)
+        if display_city not in match_terms:
+            match_terms.append(display_city)
+    if region and region not in match_terms:
+        match_terms.append(region)
+
+    search_anchor = _expand_search_anchor(display_city)
+    return display_city, search_anchor.strip(), tuple(match_terms)
+
+
+def _location_match_terms(city: str, location_terms: list[str] | None) -> list[str]:
+    terms: list[str] = []
+    for term in (location_terms or []) + list(_localized_city_terms(city)):
+        text = str(term or "").strip()
+        if text and text not in terms:
+            terms.append(text)
+    return terms
 
 
 def _category_matches_recent(
@@ -215,30 +318,58 @@ def _ordered_place_categories(
     )
 
 
-def _search_queries(
-    city: str,
+def _search_query_specs(
+    search_anchor: str,
     tags: list[str],
     recent_activities: list[dict[str, str]] | None = None,
-) -> list[str]:
+) -> list[SearchQuerySpec]:
     tag_text = " ".join(tags[:4])
-    anchor = " ".join(term for term in _localized_city_terms(city) if term)
-    base = anchor or city
-    queries = [_search_query(city, tags)]
-    for category in _ordered_place_categories(recent_activities or []):
-        queries.append(
-            f"{base} {category.query_hint} 真实地点 开放时间 推荐 {tag_text}".strip()
+    base = _expand_search_anchor(search_anchor)
+    ordered = _ordered_place_categories(recent_activities or [])
+    preferred = [
+        category
+        for category in ordered
+        if not _category_matches_recent(category, recent_activities or [])
+    ]
+    deprioritized = [
+        category
+        for category in ordered
+        if _category_matches_recent(category, recent_activities or [])
+    ]
+    category_batch = (preferred[:8] + deprioritized[:2])[:10]
+    specs: list[SearchQuerySpec] = [SearchQuerySpec(_search_query(base, tags))]
+    for category in category_batch:
+        specs.append(
+            SearchQuerySpec(
+                f"{base} {category.query_hint} 真实地点 推荐 {tag_text}".strip()
+            )
         )
-    queries.extend(
+    specs.extend(
         [
-            f"{base} 周末 一个人 可以去的地方 安静 低成本 {tag_text}".strip(),
-            f"{base} 附近 小众 去处 公园 书店 咖啡 手作 河边 {tag_text}".strip(),
+            SearchQuerySpec(
+                f"{base} 周末 一个人 可以去 小吃 餐厅 活动 展览 {tag_text}".strip()
+            ),
+            SearchQuerySpec(
+                f"{base} 附近 去处 小吃街 苍蝇馆 路边摊 商铺 市集 活动 {tag_text}".strip()
+            ),
+            SearchQuerySpec(
+                f"{base} 本地 美食 小店 活动 展览 推荐 {tag_text}".strip(),
+                include_domains=_TAVILY_LOCAL_DOMAINS,
+            ),
+            SearchQuerySpec(
+                f"{base} 周末 活动 展览 市集 免费 {tag_text}".strip(),
+                include_domains=("gov.cn", "12301.cn", "ctrip.com", "mafengwo.cn"),
+            ),
         ]
     )
-    deduped: list[str] = []
-    for query in queries:
-        compact = " ".join(query.split())
-        if compact and compact not in deduped:
-            deduped.append(compact)
+    deduped: list[SearchQuerySpec] = []
+    seen: set[str] = set()
+    for spec in specs:
+        compact = " ".join(spec.query.split())
+        key = f"{compact}|{spec.include_domains or ''}"
+        if compact and key not in seen:
+            seen.add(key)
+            deduped.append(SearchQuerySpec(compact, spec.include_domains))
     return deduped
 
 
@@ -339,20 +470,28 @@ def _sources(results: list[SearchResult]) -> list[dict[str, Any]]:
 
 
 async def _search_activity_candidates(
-    city: str,
+    search_anchor: str,
     tags: list[str],
     recent_activities: list[dict[str, str]],
     *,
-    max_queries: int = 10,
+    city: str = "",
+    location_terms: list[str] | None = None,
+    max_queries: int = 12,
 ) -> tuple[list[SearchResult], list[SearchResult], str]:
     all_usable: list[SearchResult] = []
     filtered: list[SearchResult] = []
     seen_urls: set[str] = set()
     first_query = ""
-    for query in _search_queries(city, tags, recent_activities)[:max_queries]:
-        first_query = first_query or query
-        raw_results = await tavily_search(query, max_results=8)
-        usable = _usable_results(raw_results, city)
+    for spec in _search_query_specs(search_anchor, tags, recent_activities)[:max_queries]:
+        first_query = first_query or spec.query
+        raw_results = await tavily_search(
+            spec.query,
+            max_results=8,
+            include_domains=list(spec.include_domains)
+            if spec.include_domains
+            else None,
+        )
+        usable = _usable_results(raw_results, city, location_terms)
         for result in usable:
             if result.url in seen_urls:
                 continue
@@ -371,7 +510,34 @@ def _domain(url: str | None) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-def _source_is_usable(result: SearchResult, city: str) -> bool:
+def _source_matches_location(
+    combined: str,
+    *,
+    city: str,
+    location_terms: list[str] | None,
+) -> bool:
+    if not city.strip():
+        return True
+    combined_lower = combined.lower()
+    city_terms = [term for term in _localized_city_terms(city) if term]
+    if city.strip() not in city_terms:
+        city_terms.append(city.strip())
+    if any(len(term) >= 2 and term.lower() in combined_lower for term in city_terms):
+        return True
+    # region 补充：仅当 snippet 不含城市名但含用户 region（如区县级）时放行。
+    extra = [
+        term
+        for term in (location_terms or [])
+        if term.strip() and term not in city_terms
+    ]
+    return any(len(term) >= 2 and term.lower() in combined_lower for term in extra)
+
+
+def _source_is_usable(
+    result: SearchResult,
+    city: str,
+    location_terms: list[str] | None = None,
+) -> bool:
     domain = _domain(result.url)
     if any(
         domain == bad or domain.endswith(f".{bad}")
@@ -385,8 +551,9 @@ def _source_is_usable(result: SearchResult, city: str) -> bool:
         return False
     if "No information is available for this page" in content:
         return False
-    city_terms = [term for term in _localized_city_terms(city) if term]
-    if city_terms and not any(term.lower() in combined.lower() for term in city_terms):
+    if not _source_matches_location(
+        combined, city=city, location_terms=location_terms
+    ):
         return False
     return True
 
@@ -411,6 +578,15 @@ def _is_generic_location(value: Any, city: str | None = None) -> bool:
     return False
 
 
+def _looks_like_named_place(text: str) -> bool:
+    visible = re.sub(r"\s+", "", str(text or ""))
+    if len(visible) < 4:
+        return False
+    if not re.search(r"[\u4e00-\u9fff]", visible):
+        return False
+    return not re.fullmatch(r"[0-9A-Za-z\-_.]+", visible)
+
+
 def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
     title = str(card.get("title") or "").strip()
     location = str(card.get("location_name") or card.get("address") or "").strip()
@@ -419,7 +595,9 @@ def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
     if len(_normalize_fingerprint(location)) < 2:
         return False
     combined = f"{title}\n{location}\n{card.get('address') or ''}"
-    return bool(_CONCRETE_PLACE_HINT_RE.search(combined))
+    if _CONCRETE_PLACE_HINT_RE.search(combined):
+        return True
+    return _looks_like_named_place(location) or _looks_like_named_place(title)
 
 
 def _place_from_source(result: SearchResult, city: str) -> str | None:
@@ -432,13 +610,23 @@ def _place_from_source(result: SearchResult, city: str) -> str | None:
             continue
         if _CONCRETE_PLACE_HINT_RE.search(part):
             return part
-    if not _is_generic_location(title, city) and _CONCRETE_PLACE_HINT_RE.search(title):
+    if not _is_generic_location(title, city) and (
+        _CONCRETE_PLACE_HINT_RE.search(title) or _looks_like_named_place(title)
+    ):
         return title[:32]
     return None
 
 
-def _usable_results(results: list[SearchResult], city: str) -> list[SearchResult]:
-    return [result for result in results if _source_is_usable(result, city)]
+def _usable_results(
+    results: list[SearchResult],
+    city: str,
+    location_terms: list[str] | None = None,
+) -> list[SearchResult]:
+    return [
+        result
+        for result in results
+        if _source_is_usable(result, city, location_terms)
+    ]
 
 
 def _card_is_source_backed(card: dict[str, Any], sources: list[dict[str, Any]]) -> bool:
@@ -502,6 +690,7 @@ async def generate_activity_card(
     city: str,
     source: str,
     search_location: str | None = None,
+    location_terms: list[str] | None = None,
 ) -> dict[str, Any] | None:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=9)
     memory = await repo.memory_brief(user_id, workspace_id, limit=60)
@@ -510,10 +699,13 @@ async def generate_activity_card(
         workspace_id,
         limit=20,
     )
+    search_anchor = search_location or city
     filtered_results, all_usable_results, query = await _search_activity_candidates(
-        search_location or city,
+        search_anchor,
         tags,
         recent_activities,
+        city=city,
+        location_terms=location_terms,
     )
     results = (filtered_results or all_usable_results)[:6]
     sources = _sources(results)

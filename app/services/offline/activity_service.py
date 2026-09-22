@@ -28,6 +28,7 @@ from app.services.runtime.tasks import fire_background
 from app.services.offline.activity_generation import (
     generate_activity_card,
     generate_activity_invite_message,
+    resolve_activity_search_context,
 )
 from app.services.offline.chat_emit import (
     offline_trace,
@@ -41,20 +42,17 @@ from app.services.offline.memory_hooks import remember_user_event
 logger = logging.getLogger(__name__)
 
 
-def _location_for_activity(ctx: dict) -> tuple[str, str | None]:
+def _location_for_activity(ctx: dict) -> tuple[str, str, tuple[str, ...]]:
     city = (
         ctx.get("user_location_city") or ctx.get("user_location_region") or ""
     ).strip()
-    if city:
-        return city, None
-    latitude = ctx.get("user_location_latitude")
-    longitude = ctx.get("user_location_longitude")
-    if latitude is None or longitude is None:
-        return "", None
-    try:
-        return "", f"{float(latitude):.5f},{float(longitude):.5f} 附近"
-    except (TypeError, ValueError):
-        return "", None
+    if not city:
+        return "", "", ()
+    _, search_anchor, match_terms = resolve_activity_search_context(
+        city=ctx.get("user_location_city"),
+        region=ctx.get("user_location_region"),
+    )
+    return city, search_anchor, match_terms
 
 
 async def get_home(user_id: str, workspace_id: str | None = None) -> dict:
@@ -180,7 +178,7 @@ async def create_recommendation_for_user(
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     if not ctx or not ctx.get("conversation_id"):
         return None
-    city, search_location = _location_for_activity(ctx)
+    city, search_anchor, match_terms = _location_for_activity(ctx)
     if not city:
         return None
     card = await generate_activity_card(
@@ -188,7 +186,8 @@ async def create_recommendation_for_user(
         workspace_id=ctx["workspace_id"],
         city=city,
         source=source,
-        search_location=search_location,
+        search_location=search_anchor,
+        location_terms=list(match_terms),
     )
     if not card:
         return None
