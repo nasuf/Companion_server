@@ -36,8 +36,14 @@ router = APIRouter(
 
 
 _PROVIDERS = provider_ids(admin_only=True)
-_MODEL_KINDS = {"llm", "tts"}
+_MODEL_KIND_ORDER = ("llm", "vision", "asr", "tts")
+_MODEL_KINDS = set(_MODEL_KIND_ORDER)
 _BILLING_UNITS = {"per_million_tokens", "per_10k_characters"}
+_MODEL_KIND_PROVIDERS = {
+    "vision": {"ark"},
+    "asr": {"dashscope"},
+    "tts": {"dashscope"},
+}
 
 
 class ModelCreatePayload(BaseModel):
@@ -99,7 +105,12 @@ def _validate_provider(provider: str) -> None:
         )
 
 
-def _validate_model_metadata(model_kind: str, billing_unit: str) -> None:
+def _validate_model_metadata(
+    model_kind: str,
+    billing_unit: str,
+    *,
+    provider: str | None = None,
+) -> None:
     if model_kind not in _MODEL_KINDS:
         raise HTTPException(
             status_code=400,
@@ -115,6 +126,20 @@ def _validate_model_metadata(model_kind: str, billing_unit: str) -> None:
             status_code=400,
             detail="TTS 模型 billing_unit 必须是 per_10k_characters",
         )
+    if model_kind != "tts" and billing_unit != "per_million_tokens":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{model_kind} 模型 billing_unit 必须是 per_million_tokens",
+        )
+    allowed_providers = _MODEL_KIND_PROVIDERS.get(model_kind)
+    if provider is not None and allowed_providers and provider not in allowed_providers:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"model_kind={model_kind!r} 仅支持 provider "
+                f"{sorted(allowed_providers)}, 收到 {provider!r}"
+            ),
+        )
 
 
 @router.get("")
@@ -126,13 +151,25 @@ async def list_models() -> dict[str, Any]:
     return {
         "models": [_row_to_dict(r) for r in rows],
         "providers": public_provider_options(),
+        "model_kinds": list(_MODEL_KIND_ORDER),
+        "model_kind_providers": {
+            "llm": sorted(_PROVIDERS),
+            **{
+                model_kind: sorted(providers)
+                for model_kind, providers in _MODEL_KIND_PROVIDERS.items()
+            },
+        },
     }
 
 
 @router.post("")
 async def create_model(payload: ModelCreatePayload) -> dict[str, Any]:
     _validate_provider(payload.provider)
-    _validate_model_metadata(payload.model_kind, payload.billing_unit)
+    _validate_model_metadata(
+        payload.model_kind,
+        payload.billing_unit,
+        provider=payload.provider,
+    )
     try:
         row = await db.modelregistry.create(data={
             "identifier": payload.identifier,
@@ -202,12 +239,16 @@ async def update_model(model_id: str, payload: ModelUpdatePayload) -> dict[str, 
         "billingUnit",
         getattr(row, "billingUnit", "per_million_tokens"),
     )
-    _validate_model_metadata(next_kind, next_unit)
+    next_provider = data.get("provider", row.provider)
+    _validate_model_metadata(
+        next_kind,
+        next_unit,
+        provider=next_provider,
+    )
 
     try:
         updated = await db.modelregistry.update(where={"id": model_id}, data=data)
     except UniqueViolationError:
-        next_provider = data.get("provider", row.provider)
         raise HTTPException(
             status_code=409,
             detail=f"provider={next_provider!r} identifier={row.identifier!r} 已存在",

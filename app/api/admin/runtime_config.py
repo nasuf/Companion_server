@@ -48,6 +48,17 @@ _LOCAL_PROVIDERS = provider_ids(admin_only=True) - provider_ids(
     admin_only=True, remote_only=True,
 )
 _REMOTE_PROVIDERS = provider_ids(admin_only=True, remote_only=True)
+_MEDIA_MODEL_PROVIDERS = {
+    "vision": {
+        "ark": ("ark_api_key", "ARK_API_KEY"),
+    },
+    "asr": {
+        "dashscope": ("dashscope_api_key", "DASHSCOPE_API_KEY"),
+    },
+    "tts": {
+        "dashscope": ("dashscope_tts_api_key", "DASHSCOPE_TTS_API_KEY"),
+    },
+}
 
 
 async def _sync_tts_probability(probability: int) -> None:
@@ -71,9 +82,7 @@ class ConfigPayload(BaseModel):
     local_small_model: str | None = None
     remote_chat_model: str | None = None
     remote_small_model: str | None = None
-    # Global-only fields — ignored on the per-agent endpoints
-    # (AgentConfigOverride has no such columns). vision/asr are free-text
-    # identifiers (not part of model_registry, so no registry check).
+    # Global-only fields ignored on per-agent endpoints.
     vision_model: str | None = None
     asr_model: str | None = None
     tts_model: str | None = None
@@ -264,21 +273,50 @@ def _payload_to_data(
 
 async def _model_exists_for_provider(identifier: str, provider: str) -> bool:
     row = await db.modelregistry.find_first(
-        where={"identifier": identifier, "provider": provider},
-    )
-    return row is not None
-
-
-async def _tts_model_exists(identifier: str) -> bool:
-    row = await db.modelregistry.find_first(
         where={
             "identifier": identifier,
-            "provider": "dashscope",
-            "modelKind": "tts",
+            "provider": provider,
+            "modelKind": "llm",
             "enabled": True,
         },
     )
     return row is not None
+
+
+async def _media_model_exists(identifier: str, model_kind: str) -> bool:
+    providers = set(_MEDIA_MODEL_PROVIDERS.get(model_kind, {}))
+    if not providers:
+        return False
+    row = await db.modelregistry.find_first(
+        where={
+            "identifier": identifier,
+            "provider": {"in": sorted(providers)},
+            "modelKind": model_kind,
+            "enabled": True,
+        },
+    )
+    return row is not None
+
+
+def _media_provider_options(model_kind: str) -> list[dict[str, Any]]:
+    providers = {
+        option["id"]: option
+        for option in public_provider_options(include_local=False)
+    }
+    result: list[dict[str, Any]] = []
+    for provider_id, (credential_setting, credential_env) in (
+        _MEDIA_MODEL_PROVIDERS.get(model_kind, {}).items()
+    ):
+        option = providers.get(provider_id)
+        if option is None:
+            continue
+        media_option = dict(option)
+        media_option["configured"] = bool(
+            str(getattr(settings, credential_setting, "")).strip()
+        )
+        media_option["credential_env"] = credential_env
+        result.append(media_option)
+    return result
 
 
 def _normalize_remote_provider(value: str | None, fallback: str) -> str:
@@ -320,20 +358,39 @@ async def _validate_payload_models(
         fallback_remote_small_provider,
     )
 
-    checks = [
-        (payload.local_chat_model, "ollama", "local_chat_model"),
-        (payload.local_small_model, "ollama", "local_small_model"),
-        (
+    checks: list[tuple[str | None, str, str]] = []
+    if "local_chat_model" in explicit:
+        checks.append((
+            payload.local_chat_model,
+            "ollama",
+            "local_chat_model",
+        ))
+    if "local_small_model" in explicit:
+        checks.append((
+            payload.local_small_model,
+            "ollama",
+            "local_small_model",
+        ))
+    if explicit & {
+        "remote_provider",
+        "remote_chat_provider",
+        "remote_chat_model",
+    }:
+        checks.append((
             payload.remote_chat_model or fallback_remote_chat_model,
             chat_provider,
             "remote_chat_model",
-        ),
-        (
+        ))
+    if explicit & {
+        "remote_provider",
+        "remote_small_provider",
+        "remote_small_model",
+    }:
+        checks.append((
             payload.remote_small_model or fallback_remote_small_model,
             small_provider,
             "remote_small_model",
-        ),
-    ]
+        ))
     for identifier, expected_provider, field in checks:
         if not identifier:
             continue
@@ -342,11 +399,20 @@ async def _validate_payload_models(
                 status_code=400,
                 detail=f"{field}={identifier!r} 在 provider {expected_provider!r} 下不存在",
             )
-    if "tts_model" in explicit and payload.tts_model:
-        if not await _tts_model_exists(payload.tts_model):
+    for field, model_kind in (
+        ("vision_model", "vision"),
+        ("asr_model", "asr"),
+        ("tts_model", "tts"),
+    ):
+        if field not in explicit:
+            continue
+        value = (getattr(payload, field) or "").strip()
+        if not value:
+            continue
+        if not await _media_model_exists(value, model_kind):
             raise HTTPException(
                 status_code=400,
-                detail=f"tts_model={payload.tts_model!r} 不是已启用的 DashScope TTS 模型",
+                detail=f"{field}={value!r} 不是已启用的 {model_kind} 模型",
             )
 
 
@@ -356,28 +422,49 @@ async def list_options() -> dict[str, Any]:
 
     按 provider 元数据动态分桶为 local_* / remote_*.
     chat/small 不分角色, 同 provider 模型在两个 dropdown 都出现 (admin 自由选).
+    vision/asr/tts are grouped independently by model kind and provider.
     禁用模型 (enabled=false) 不出现.
     """
     rows = await db.modelregistry.find_many(
         where={"enabled": True}, order=[{"identifier": "asc"}],
     )
     by_provider: dict[str, list[str]] = {p: [] for p in sorted(_LOCAL_PROVIDERS | _REMOTE_PROVIDERS)}
-    tts: list[str] = []
+    media_by_kind: dict[str, dict[str, list[str]]] = {
+        model_kind: {provider: [] for provider in providers}
+        for model_kind, providers in _MEDIA_MODEL_PROVIDERS.items()
+    }
     for r in rows:
-        if getattr(r, "modelKind", "llm") == "tts":
-            tts.append(r.identifier)
+        model_kind = getattr(r, "modelKind", "llm")
+        if model_kind in media_by_kind:
+            provider_models = media_by_kind[model_kind]
+            if r.provider in provider_models:
+                provider_models[r.provider].append(r.identifier)
+            continue
+        if model_kind != "llm":
             continue
         by_provider.setdefault(r.provider, []).append(r.identifier)
     local = [identifier for p in _LOCAL_PROVIDERS for identifier in by_provider.get(p, [])]
     remote = [identifier for p in _REMOTE_PROVIDERS for identifier in by_provider.get(p, [])]
+    media = {
+        model_kind: {
+            "by_provider": by_media_provider,
+            "providers": _media_provider_options(model_kind),
+        }
+        for model_kind, by_media_provider in media_by_kind.items()
+    }
     return {
         "local_chat": local,
         "local_small": local,
         "remote_chat": remote,
         "remote_small": remote,
-        "tts": tts,
+        "tts": [
+            identifier
+            for identifiers in media_by_kind["tts"].values()
+            for identifier in identifiers
+        ],
         "by_provider": by_provider,
         "providers": public_provider_options(),
+        "media": media,
     }
 
 

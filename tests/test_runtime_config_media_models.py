@@ -134,6 +134,97 @@ def test_row_to_payload_none_row_contains_media_keys():
     assert out["asr_model"] is None
 
 
+@pytest.mark.asyncio
+async def test_options_group_multimodal_models_by_kind_and_provider(monkeypatch):
+    from app.api.admin import runtime_config as api_rc
+
+    rows = [
+        SimpleNamespace(
+            identifier="doubao-chat", provider="ark", modelKind="llm",
+        ),
+        SimpleNamespace(
+            identifier="doubao-vision", provider="ark", modelKind="vision",
+        ),
+        SimpleNamespace(
+            identifier="fun-asr", provider="dashscope", modelKind="asr",
+        ),
+        SimpleNamespace(
+            identifier="qwen-tts", provider="dashscope", modelKind="tts",
+        ),
+    ]
+    monkeypatch.setattr(
+        api_rc.db,
+        "modelregistry",
+        SimpleNamespace(find_many=AsyncMock(return_value=rows)),
+        raising=False,
+    )
+    monkeypatch.setattr(api_rc.settings, "ark_api_key", "ark-key")
+    monkeypatch.setattr(api_rc.settings, "dashscope_api_key", "dash-key")
+    monkeypatch.setattr(api_rc.settings, "dashscope_tts_api_key", "")
+
+    options = await api_rc.list_options()
+
+    assert options["by_provider"]["ark"] == ["doubao-chat"]
+    assert options["media"]["vision"]["by_provider"]["ark"] == [
+        "doubao-vision",
+    ]
+    assert options["media"]["asr"]["by_provider"]["dashscope"] == ["fun-asr"]
+    assert options["media"]["tts"]["by_provider"]["dashscope"] == ["qwen-tts"]
+    assert options["tts"] == ["qwen-tts"]
+    assert options["media"]["vision"]["providers"][0]["configured"] is True
+    assert options["media"]["tts"]["providers"][0]["configured"] is False
+    assert (
+        options["media"]["tts"]["providers"][0]["credential_env"]
+        == "DASHSCOPE_TTS_API_KEY"
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_validation_normalizes_values_and_allows_clear(monkeypatch):
+    from app.api.admin import runtime_config as api_rc
+
+    chat_model_exists = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        api_rc,
+        "_model_exists_for_provider",
+        chat_model_exists,
+    )
+    media_exists = AsyncMock(return_value=True)
+    monkeypatch.setattr(api_rc, "_media_model_exists", media_exists)
+
+    await api_rc._validate_payload_models(
+        ConfigPayload(vision_model="  doubao-vision  ", asr_model="   "),
+        fallback_remote_chat_provider="dashscope",
+        fallback_remote_small_provider="dashscope",
+        fallback_remote_chat_model="chat",
+        fallback_remote_small_model="small",
+    )
+
+    media_exists.assert_awaited_once_with("doubao-vision", "vision")
+    chat_model_exists.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_model_lookup_requires_enabled_llm_kind(monkeypatch):
+    from app.api.admin import runtime_config as api_rc
+
+    find_first = AsyncMock(return_value=SimpleNamespace(id="model"))
+    monkeypatch.setattr(
+        api_rc.db,
+        "modelregistry",
+        SimpleNamespace(find_first=find_first),
+        raising=False,
+    )
+
+    assert await api_rc._model_exists_for_provider("chat", "ark") is True
+    assert find_first.await_args.kwargs["where"] == {
+        "identifier": "chat",
+        "provider": "ark",
+        "modelKind": "llm",
+        "enabled": True,
+    }
+
+
 # ─── consumers pick up override ───────────────────────────────────────────
 
 

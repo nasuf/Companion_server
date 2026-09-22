@@ -101,6 +101,43 @@ def test_tts_registry_requires_character_billing():
     model_registry._validate_model_metadata("tts", "per_10k_characters")
 
 
+def test_multimodal_registry_rejects_unsupported_providers():
+    model_registry._validate_model_metadata(
+        "vision",
+        "per_million_tokens",
+        provider="ark",
+    )
+    model_registry._validate_model_metadata(
+        "asr",
+        "per_million_tokens",
+        provider="dashscope",
+    )
+    with pytest.raises(Exception) as exc:
+        model_registry._validate_model_metadata(
+            "vision",
+            "per_million_tokens",
+            provider="dashscope",
+        )
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+@pytest.mark.asyncio
+async def test_model_registry_exposes_multimodal_capabilities(monkeypatch):
+    monkeypatch.setattr(
+        model_registry.db,
+        "modelregistry",
+        SimpleNamespace(find_many=AsyncMock(return_value=[])),
+        raising=False,
+    )
+
+    result = await model_registry.list_models()
+
+    assert set(result["model_kinds"]) == {"llm", "vision", "asr", "tts"}
+    assert result["model_kind_providers"]["vision"] == ["ark"]
+    assert result["model_kind_providers"]["asr"] == ["dashscope"]
+    assert result["model_kind_providers"]["tts"] == ["dashscope"]
+
+
 def test_agent_tts_payload_rejects_provider_parameter_overflow():
     with pytest.raises(ValidationError):
         tts.AgentTtsPayload(
