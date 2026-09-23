@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     # Volcengine Ark / Doubao vision (OpenAI-compatible chat completions)
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    doubao_vision_model: str = "doubao-1-5-vision-pro-250328"
+    doubao_vision_model: str = "doubao-seed-2-0-mini-260428"
     # Web search for main replies via Ark Responses API web_search tool.
     # Env default only; admins toggle it at runtime (SystemConfig.webSearchEnabled).
     # Requires the 联网内容插件 activated on the Ark account (per-call billing).
