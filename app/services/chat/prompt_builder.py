@@ -152,6 +152,40 @@ def _render_section(template: str, params: dict[str, Any]) -> str:
     return render_template(template, params)
 
 
+_MALE_GENDER_TOKENS = frozenset({"male", "男", "男生"})
+_FEMALE_GENDER_TOKENS = frozenset({"female", "女", "女生"})
+
+
+def _gender_token(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    token = value.strip().lower()
+    if token in _MALE_GENDER_TOKENS or token in _FEMALE_GENDER_TOKENS:
+        return token
+    return None
+
+
+def _gender_text_for_prompt(agent: Any) -> str:
+    """女生/男生 for the identity section.
+
+    The canonical field is ``ai_agents.gender``. ``values.gender`` is only a
+    legacy fallback: template creation never writes gender into ``values``, and
+    treating a missing key as female made every male persona say 女生.
+    """
+    for candidate in (
+        getattr(agent, "gender", None),
+        (getattr(agent, "values", None) or {}).get("gender")
+        if isinstance(getattr(agent, "values", None), dict)
+        else None,
+    ):
+        token = _gender_token(candidate)
+        if token in _MALE_GENDER_TOKENS:
+            return "男生"
+        if token in _FEMALE_GENDER_TOKENS:
+            return "女生"
+    return "女生"
+
+
 async def _build_personality_section(agent: Any) -> _PromptBody | None:
     """Build the personality section using MBTI (spec §1.2).
 
@@ -170,12 +204,7 @@ async def _build_personality_section(agent: Any) -> _PromptBody | None:
 
     name = getattr(agent, "name", None) or "伙伴"
     age = getattr(agent, "age", None)
-
-    values = getattr(agent, "values", None)
-    gender = "female"
-    if isinstance(values, dict):
-        gender = values.get("gender", "female")
-    gender_text = "女生" if gender == "female" else "男生"
+    gender_text = _gender_text_for_prompt(agent)
 
     mbti = get_mbti(agent)
     mbti_line = format_mbti_for_prompt(mbti)

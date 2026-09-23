@@ -95,6 +95,37 @@ async def test_identity_anchor_is_cache_stable_per_agent():
     assert first.body == second.body
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("column", "values_gender", "expected"),
+    [
+        ("male", None, "男生"),
+        ("male", "female", "男生"),
+        ("男", None, "男生"),
+        (None, "male", "男生"),
+        ("female", None, "女生"),
+        (None, None, "女生"),
+    ],
+)
+async def test_personality_section_uses_agent_gender_column(column, values_gender, expected):
+    """Male templates store gender on the column, not in values. The identity
+    line must follow the column, otherwise every male agent introduces as 女生.
+    """
+    from app.services.chat.prompt_builder import _build_personality_section
+
+    agent = _Agent()
+    agent.gender = column
+    agent.values = {} if values_gender is None else {"gender": values_gender}
+    with patch(
+        "app.services.chat.prompt_builder._get_optional_prompt",
+        side_effect=_fake_get_factory(),
+    ):
+        section = await _build_personality_section(agent)
+
+    assert section is not None
+    assert f"是一个{expected}" in section.body
+
+
 def test_first_greeting_prompt_requires_stating_profession():
     """The first greeting must actively surface the profession, not treat it as
     reference-only (previously '（只参考不用刻意提及）' suppressed it)."""
