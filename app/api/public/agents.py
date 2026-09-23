@@ -18,6 +18,7 @@ from app.models.agent import AgentCreate, AgentUpdate, AgentResponse, Regenerate
 from app.services.interaction.boundary import init_patience
 from app.services.mbti import build_mbti, get_mbti, seven_dim_to_mbti
 from app.services.career import pick_random_active_career
+from app.services.name_templates import normalize_name_gender, pick_random_names
 from app.services.character import _apply_postprocess_overrides
 from app.services.character_generation import generate_full_profile
 from app.services.agent_avatars import (
@@ -418,6 +419,30 @@ async def create_agent_with_provisioning(
     return agent, workspace
 
 
+async def _resolve_create_name(name: str | None, gender: str | None) -> str:
+    """Name stored on the new agent, and therefore the name generation uses.
+
+    The init job reads ``ai_agents.name`` into ``generate_full_profile``, which
+    hard-overrides ``identity.name``. Life-story then writes the L1 memory
+    ``我叫{name}``. Sampling here is what makes a gender-matched library name
+    show up in that memory. An explicit client name (the web form) is kept.
+    """
+    cleaned = (name or "").strip()
+    if cleaned:
+        return cleaned
+    normalized = normalize_name_gender(gender)
+    if normalized not in {"male", "female"}:
+        raise HTTPException(status_code=400, detail="请先选择性别，才能分配姓名")
+    try:
+        picked = await pick_random_names(normalized, 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    chosen = str(picked[0].get("name") or "").strip()
+    if not chosen:
+        raise HTTPException(status_code=500, detail="姓名库返回了空名字")
+    return chosen
+
+
 @router.post("", response_model=AgentResponse)
 async def create_agent(
     data: AgentCreate,
@@ -425,13 +450,17 @@ async def create_agent(
 ):
     if data.user_id != user.get("sub"):
         raise HTTPException(status_code=403, detail="Not your user_id")
+    # Store male/female even if a client sends 男/女. Generation maps only
+    # the English tokens onto 男/女; a raw 「男」 would be generated as female.
+    gender = normalize_name_gender(data.gender) or data.gender
+    name = await _resolve_create_name(data.name, gender)
     agent, workspace = await create_agent_with_provisioning(
         user_id=data.user_id,
-        name=data.name,
+        name=name,
         personality=data.personality.model_dump(),
         background=data.background,
         values=data.values,
-        gender=data.gender,
+        gender=gender,
     )
     return _agent_response(agent, workspace_id=workspace.id)
 

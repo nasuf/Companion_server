@@ -28,7 +28,9 @@ class MbtiInput(BaseModel):
 
 
 class AgentCreate(BaseModel):
-    name: str
+    # Omitted on the Flutter from-scratch flow: the server samples a name from
+    # the gender-matched name library. Web still sends an explicit name.
+    name: str | None = None
     user_id: str
     # spec §1.1: 用户填 7 维性格, 后端转 MBTI
     personality: PersonalityInput
