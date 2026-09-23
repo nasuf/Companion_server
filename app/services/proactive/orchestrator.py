@@ -130,6 +130,35 @@ async def _process_due_state(state, now: datetime | None = None) -> None:
         await stop_proactive_state(state, reason="workspace_inactive", now=now)
         return
 
+    # An arrived offline activity owns the proactive channel. Normal chat still
+    # replies as usual; the dedicated activity companion handles quiet periods.
+    try:
+        from app.services.offline.activity_companion import (
+            can_take_over_proactive_channel,
+        )
+
+        if await can_take_over_proactive_channel(
+            state.user_id,
+            state.workspace_id,
+        ):
+            logger.info(
+                "[PROACTIVE] deferred: offline_activity_active",
+                extra={
+                    "event": EVT_PROACTIVE_DEFERRED,
+                    "reason": "offline_activity_active",
+                    "stage": state.stage,
+                },
+            )
+            await advance_to_next_window(
+                state,
+                now=now,
+                event_type="window_deferred",
+                payload={"reason": "offline_activity_active"},
+            )
+            return
+    except Exception as exc:  # noqa: BLE001 - optional mutex must fail open
+        logger.warning("[PROACTIVE] offline activity mutex failed: %s", exc)
+
     # --- Mutex: 30分钟内有用户活动 (临时性条件，推迟到下一窗口) ---
     if await has_recent_user_activity(state.workspace_id, now=now, window_minutes=30):
         logger.info(

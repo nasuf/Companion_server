@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from app.db import db
 from app.services import profile_tags
+from app.services.offline.guidance import safe_guidance
 from app.services.offline.user_tags import derive_user_tags
 
 logger = logging.getLogger(__name__)
@@ -115,11 +116,33 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "place_key": _field(row, "place_key", "placeKey"),
         "reached": bool(_field(row, "reached", default=False)),
         "arrival_confirmed_at": _iso(_field(row, "arrival_confirmed_at", "arrivalConfirmedAt")),
+        "conditions_ready_at": _iso(
+            _field(row, "conditions_ready_at", "conditionsReadyAt")
+        ),
         "prophecy_text": _field(row, "prophecy_text", "prophecyText"),
         "auto_archive_at": _iso(_field(row, "auto_archive_at", "autoArchiveAt")),
         "travel_note": _field(row, "travel_note", "travelNote"),
         "miss_count": int(_field(row, "miss_count", "missCount", 0) or 0),
         "hint_count": int(_field(row, "hint_count", "hintCount", 0) or 0),
+        # Internal-only companion fields. OfflineActivityItem ignores them.
+        "focus_condition_id": _field(
+            row, "focus_condition_id", "focusConditionId"
+        ),
+        "next_companion_at": _iso(
+            _field(row, "next_companion_at", "nextCompanionAt")
+        ),
+        "last_companion_at": _iso(
+            _field(row, "last_companion_at", "lastCompanionAt")
+        ),
+        "companion_claim_token": _field(
+            row, "companion_claim_token", "companionClaimToken"
+        ),
+        "companion_claimed_at": _iso(
+            _field(row, "companion_claimed_at", "companionClaimedAt")
+        ),
+        "companion_state": _json(
+            _field(row, "companion_state", "companionState"), {}
+        ),
         "fragment_count": int(_field(row, "fragment_count", "fragmentCount", 0) or 0),
         "accepted_at": _iso(_field(row, "accepted_at", "acceptedAt")),
         "ignored_at": _iso(_field(row, "ignored_at", "ignoredAt")),
@@ -136,7 +159,10 @@ async def resolve_user_context(user_id: str, workspace_id: str | None = None) ->
         rows = await db.query_raw(
             """
             SELECT w.id AS workspace_id, w.user_id, w.agent_id, a.name AS agent_name,
-                   a.city AS agent_city, c.id AS conversation_id, u.created_at AS user_created_at,
+                   a.city AS agent_city, a.occupation AS agent_occupation,
+                   COALESCE(a.current_mbti, a.mbti) AS agent_mbti,
+                   u.display_name AS user_name,
+                   c.id AS conversation_id, u.created_at AS user_created_at,
                    u.location_latitude AS user_location_latitude,
                    u.location_longitude AS user_location_longitude,
                    u.location_city AS user_location_city,
@@ -162,7 +188,10 @@ async def resolve_user_context(user_id: str, workspace_id: str | None = None) ->
         rows = await db.query_raw(
             """
             SELECT w.id AS workspace_id, w.user_id, w.agent_id, a.name AS agent_name,
-                   a.city AS agent_city, c.id AS conversation_id, u.created_at AS user_created_at,
+                   a.city AS agent_city, a.occupation AS agent_occupation,
+                   COALESCE(a.current_mbti, a.mbti) AS agent_mbti,
+                   u.display_name AS user_name,
+                   c.id AS conversation_id, u.created_at AS user_created_at,
                    u.location_latitude AS user_location_latitude,
                    u.location_longitude AS user_location_longitude,
                    u.location_city AS user_location_city,
@@ -200,6 +229,9 @@ async def resolve_user_context(user_id: str, workspace_id: str | None = None) ->
         "agent_id": _field(row, "agent_id", "agentId"),
         "agent_name": _field(row, "agent_name", "agentName") or "伴生",
         "agent_city": _field(row, "agent_city", "agentCity"),
+        "agent_occupation": _field(row, "agent_occupation", "agentOccupation"),
+        "agent_mbti": _json(_field(row, "agent_mbti", "agentMbti"), {}),
+        "user_name": _field(row, "user_name", "userName"),
         "conversation_id": _field(row, "conversation_id", "conversationId"),
         "user_created_at": _field(row, "user_created_at", "userCreatedAt"),
         "user_location_latitude": latitude,
@@ -459,16 +491,26 @@ async def get_active_activity_brief(
     """当前进行中(accepted)活动的轻量概要，供聊天主回复注入外出情境。
 
     只取最近一条 accepted 活动（走 offline_activity_user_status_idx 索引，热路径友好）。
-    刻意不含拍摄物品/任务字段 —— 聊天 prompt 严禁泄露通关目标（spec §3.1/§6）。
+    只把预先校验过的安全线索放进聊天 prompt；物品名/类别/别名永不返回。
     """
     rows = await db.query_raw(
         """
-        SELECT title, location_name, category, summary, reached
-        FROM offline_activity_recommendations
-        WHERE user_id = $1
-          AND ($2::text IS NULL OR workspace_id = $2)
-          AND status = 'accepted'
-        ORDER BY updated_at DESC
+        SELECT a.title, a.location_name, a.category, a.summary, a.reached,
+               f.short_name AS focus_short_name,
+               f.category AS focus_category,
+               f.criteria AS focus_criteria,
+               f.guidance_profile
+        FROM offline_activity_recommendations a
+        LEFT JOIN offline_shooting_conditions f
+          ON f.id = a.focus_condition_id
+         AND f.recommendation_id = a.id
+         AND f.triggered = FALSE
+        WHERE a.user_id = $1
+          AND ($2::text IS NULL OR a.workspace_id = $2)
+          AND a.status = 'accepted'
+        ORDER BY a.reached DESC,
+                 a.arrival_confirmed_at DESC NULLS LAST,
+                 a.created_at DESC
         LIMIT 1
         """,
         user_id,
@@ -477,12 +519,28 @@ async def get_active_activity_brief(
     if not rows:
         return None
     r = rows[0]
+    profile = _json(_field(r, "guidance_profile", "guidanceProfile"), {})
+    focus_short_name = _field(r, "focus_short_name", "focusShortName")
+    safe_hint = (
+        safe_guidance(
+            {
+                "short_name": focus_short_name,
+                "category": _field(r, "focus_category", "focusCategory"),
+                "criteria": _field(r, "focus_criteria", "focusCriteria"),
+                "guidance_profile": profile,
+            },
+            "weak",
+        )
+        if focus_short_name
+        else ""
+    )
     return {
         "title": str(_field(r, "title") or "").strip(),
         "location_name": str(_field(r, "location_name", "locationName") or "").strip(),
         "category": str(_field(r, "category") or "").strip(),
         "summary": str(_field(r, "summary") or "").strip(),
         "reached": bool(_field(r, "reached")),
+        "safe_hint": safe_hint,
     }
 
 
@@ -569,9 +627,23 @@ async def update_activity_status(
     }.get(status, "updated_at")
     rows = await db.query_raw(
         f"""
-        UPDATE offline_activity_recommendations
+        UPDATE offline_activity_recommendations AS activity
         SET status = $3,
             {column} = CURRENT_TIMESTAMP,
+            next_companion_at = CASE
+                WHEN $3 <> 'accepted' THEN NULL ELSE next_companion_at
+            END,
+            focus_condition_id = CASE
+                WHEN $3 <> 'accepted' THEN NULL ELSE focus_condition_id
+            END,
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            companion_state = CASE
+                WHEN $3 <> 'accepted'
+                THEN COALESCE(companion_state, '{{}}'::jsonb)
+                     || '{{"mode":"stopped"}}'::jsonb
+                ELSE companion_state
+            END,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND user_id = $2
         RETURNING *
@@ -591,23 +663,73 @@ async def mark_arrived(
     lng: float | None,
 ) -> dict[str, Any] | None:
     """确认到达：置 reached + 到达时间 + 24h 自动归档截止。仅 accepted 且未到达时生效。"""
-    rows = await db.query_raw(
-        """
-        UPDATE offline_activity_recommendations
-        SET reached = TRUE,
-            arrival_confirmed_at = CURRENT_TIMESTAMP,
-            arrival_lat = $3,
-            arrival_lng = $4,
-            auto_archive_at = CURRENT_TIMESTAMP + INTERVAL '24 hours',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND user_id = $2 AND status = 'accepted' AND reached = FALSE
-        RETURNING *
-        """,
-        activity_id,
-        user_id,
-        lat,
-        lng,
-    )
+    async with db.tx() as tx:
+        current = await tx.query_raw(
+            """
+            SELECT workspace_id, status, reached
+            FROM offline_activity_recommendations
+            WHERE id = $1 AND user_id = $2
+            FOR UPDATE
+            """,
+            activity_id,
+            user_id,
+        )
+        if not current:
+            return None
+        row = current[0]
+        if str(_field(row, "status") or "") != "accepted":
+            return None
+        if bool(_field(row, "reached")):
+            existing = await tx.query_raw(
+                "SELECT * FROM offline_activity_recommendations WHERE id = $1",
+                activity_id,
+            )
+            return (
+                activity_from_row(existing[0], reveal_task=True)
+                if existing
+                else None
+            )
+        workspace_id = _field(row, "workspace_id", "workspaceId")
+        lock_scope = f"offline-arrive:{user_id}:{workspace_id or 'legacy'}"
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            lock_scope,
+        )
+        other = await tx.query_raw(
+            """
+            SELECT 1
+            FROM offline_activity_recommendations
+            WHERE user_id = $1
+              AND id <> $2
+              AND status = 'accepted'
+              AND reached = TRUE
+              AND workspace_id IS NOT DISTINCT FROM $3
+            LIMIT 1
+            """,
+            user_id,
+            activity_id,
+            workspace_id,
+        )
+        if other:
+            return None
+        rows = await tx.query_raw(
+            """
+            UPDATE offline_activity_recommendations
+            SET reached = TRUE,
+                arrival_confirmed_at = CURRENT_TIMESTAMP,
+                arrival_lat = $3,
+                arrival_lng = $4,
+                auto_archive_at = CURRENT_TIMESTAMP + INTERVAL '24 hours',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND user_id = $2
+              AND status = 'accepted' AND reached = FALSE
+            RETURNING *
+            """,
+            activity_id,
+            user_id,
+            lat,
+            lng,
+        )
     return activity_from_row(rows[0], reveal_task=True) if rows else None
 
 
@@ -648,6 +770,12 @@ async def mark_archived(
             completed_at = CURRENT_TIMESTAMP,
             archived_at = CURRENT_TIMESTAMP,
             auto_archived = $3,
+            next_companion_at = NULL,
+            focus_condition_id = NULL,
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || '{"mode":"stopped"}'::jsonb,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND user_id = $2 AND status = 'accepted'
         RETURNING *
@@ -701,34 +829,118 @@ async def find_accepted_by_place_key(
 # ---------------------------------------------------------------------------
 # 拍摄条件集合（spec §3.4）：到达后由大模型生成，永不下发前端明文。
 # ---------------------------------------------------------------------------
-async def create_shooting_items(
+async def replace_shooting_items_and_initialize(
+    *,
     recommendation_id: str,
+    user_id: str,
     items: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """存拍摄物品（大类），返回带 id 的行供预生成回忆时逐物品挂靠。"""
-    created: list[dict[str, Any]] = []
+    focus_index: int,
+    next_companion_at: datetime,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Atomically replace a partial set and mark the active activity ready."""
+    prepared: list[dict[str, Any]] = []
     for idx, item in enumerate(items):
         short_name = str(item.get("short_name") or "").strip()[:60]
-        category = str(item.get("category") or "").strip()[:60] or None
         if not short_name:
             continue
-        item_id = new_id()
-        await db.execute_raw(
-            """
-            INSERT INTO offline_shooting_conditions
-                (id, recommendation_id, short_name, criteria, category, sort_order)
-            VALUES ($1, $2, $3, '', $4, $5)
-            """,
-            item_id,
+        profile = item.get("guidance_profile")
+        prepared.append(
+            {
+                "id": new_id(),
+                "short_name": short_name,
+                "category": str(item.get("category") or "").strip()[:60] or None,
+                "criteria": str(item.get("criteria") or "").strip()[:500],
+                "guidance_profile": profile if isinstance(profile, dict) else {},
+                "sort_order": idx,
+            }
+        )
+    if not prepared:
+        return [], False
+    focus = prepared[max(0, min(focus_index, len(prepared) - 1))]
+    async with db.tx() as tx:
+        await tx.query_raw(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
             recommendation_id,
-            short_name,
-            category,
-            idx,
         )
-        created.append(
-            {"id": item_id, "short_name": short_name, "category": category}
+        current = await tx.query_raw(
+            """
+            SELECT conditions_ready_at
+            FROM offline_activity_recommendations
+            WHERE id = $1 AND user_id = $2
+              AND status = 'accepted' AND reached = TRUE
+            FOR UPDATE
+            """,
+            recommendation_id,
+            user_id,
         )
-    return created
+        if not current:
+            raise RuntimeError("activity no longer eligible for condition initialization")
+        if _field(current[0], "conditions_ready_at", "conditionsReadyAt") is not None:
+            existing = await tx.query_raw(
+                """
+                SELECT id, short_name, category, criteria, guidance_profile
+                FROM offline_shooting_conditions
+                WHERE recommendation_id = $1
+                ORDER BY sort_order
+                """,
+                recommendation_id,
+            )
+            return [
+                {
+                    "id": str(_field(row, "id")),
+                    "short_name": _field(row, "short_name", "shortName"),
+                    "category": _field(row, "category"),
+                    "criteria": _field(row, "criteria"),
+                    "guidance_profile": _json(
+                        _field(row, "guidance_profile", "guidanceProfile"),
+                        {},
+                    ),
+                }
+                for row in existing
+            ], False
+        await tx.execute_raw(
+            "DELETE FROM offline_shooting_conditions WHERE recommendation_id = $1",
+            recommendation_id,
+        )
+        for item in prepared:
+            await tx.execute_raw(
+                """
+                INSERT INTO offline_shooting_conditions
+                    (id, recommendation_id, short_name, criteria, category,
+                     guidance_profile, sort_order)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                """,
+                item["id"],
+                recommendation_id,
+                item["short_name"],
+                item["criteria"],
+                item["category"],
+                json.dumps(item["guidance_profile"], ensure_ascii=False),
+                item["sort_order"],
+            )
+        rows = await tx.query_raw(
+            """
+            UPDATE offline_activity_recommendations
+            SET conditions_ready_at = CURRENT_TIMESTAMP,
+                focus_condition_id = $3,
+                next_companion_at = $4::timestamptz,
+                companion_claim_token = NULL,
+                companion_claimed_at = NULL,
+                companion_state = COALESCE(companion_state, '{}'::jsonb)
+                    || '{"mode":"guided","unanswered_count":0,"recent_modes":[]}'::jsonb,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND user_id = $2
+              AND status = 'accepted' AND reached = TRUE
+            RETURNING id
+            """,
+            recommendation_id,
+            user_id,
+            focus["id"],
+            next_companion_at,
+        )
+        if not rows:
+            raise RuntimeError("activity no longer eligible for condition initialization")
+    return prepared, True
 
 
 async def create_prewritten_fragments(
@@ -746,6 +958,7 @@ async def create_prewritten_fragments(
             INSERT INTO offline_prewritten_fragments
                 (id, recommendation_id, condition_id, tier, text)
             VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (condition_id, tier) DO NOTHING
             """,
             new_id(),
             recommendation_id,
@@ -768,13 +981,24 @@ async def get_prewritten_fragment(condition_id: str, tier: str) -> str | None:
     return str(_field(rows[0], "text")) if rows else None
 
 
-async def count_prewritten_fragments(recommendation_id: str) -> int:
+async def list_prewritten_condition_tiers(
+    recommendation_id: str,
+) -> set[tuple[str, str]]:
     rows = await db.query_raw(
-        "SELECT COUNT(*)::int AS n FROM offline_prewritten_fragments "
-        "WHERE recommendation_id = $1",
+        """
+        SELECT condition_id, tier
+        FROM offline_prewritten_fragments
+        WHERE recommendation_id = $1
+        """,
         recommendation_id,
     )
-    return int(_field(rows[0], "n") or 0) if rows else 0
+    return {
+        (
+            str(_field(row, "condition_id", "conditionId") or ""),
+            str(_field(row, "tier") or ""),
+        )
+        for row in rows or []
+    }
 
 
 async def increment_activity_counter(
@@ -821,31 +1045,99 @@ async def ai_memory_brief(
     return "\n".join(parts)[:3000]
 
 
-async def mark_conditions_ready(recommendation_id: str, user_id: str) -> None:
+async def mark_conditions_ready(
+    recommendation_id: str,
+    user_id: str,
+    *,
+    focus_condition_id: str | None = None,
+    next_companion_at: datetime | None = None,
+) -> None:
     await db.execute_raw(
         """
         UPDATE offline_activity_recommendations
-        SET conditions_ready_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        SET conditions_ready_at = CURRENT_TIMESTAMP,
+            focus_condition_id = COALESCE($3, focus_condition_id),
+            next_companion_at = COALESCE($4::timestamptz, next_companion_at),
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || jsonb_build_object(
+                    'mode', 'guided',
+                    'unanswered_count', 0,
+                    'recent_modes', '[]'::jsonb
+                ),
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND user_id = $2
+          AND status = 'accepted' AND reached = TRUE
         """,
         recommendation_id,
         user_id,
+        focus_condition_id,
+        next_companion_at,
     )
 
 
-async def count_shooting_conditions(recommendation_id: str) -> int:
+async def list_unready_reached_activities(
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
     rows = await db.query_raw(
-        "SELECT COUNT(*)::int AS n FROM offline_shooting_conditions "
-        "WHERE recommendation_id = $1",
-        recommendation_id,
+        """
+        WITH ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY COALESCE(workspace_id, user_id)
+                       ORDER BY arrival_confirmed_at DESC NULLS LAST,
+                                created_at DESC
+                   ) AS current_rank
+            FROM offline_activity_recommendations
+            WHERE status = 'accepted' AND reached = TRUE
+        )
+        SELECT *
+        FROM ranked
+        WHERE current_rank = 1
+          AND conditions_ready_at IS NULL
+        ORDER BY arrival_confirmed_at ASC
+        LIMIT $1
+        """,
+        limit,
     )
-    return int(_field(rows[0], "n") or 0) if rows else 0
+    return [activity_from_row(row, reveal_task=True) for row in rows or []]
+
+
+async def list_ready_activities_with_missing_prewritten(
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows = await db.query_raw(
+        """
+        SELECT activity.*
+        FROM offline_activity_recommendations activity
+        WHERE activity.status = 'accepted'
+          AND activity.reached = TRUE
+          AND activity.conditions_ready_at IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM offline_shooting_conditions condition
+              CROSS JOIN (VALUES ('rare'), ('epic'), ('legendary')) tier(name)
+              WHERE condition.recommendation_id = activity.id
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM offline_prewritten_fragments fragment
+                    WHERE fragment.condition_id = condition.id
+                      AND fragment.tier = tier.name
+                )
+          )
+        ORDER BY activity.arrival_confirmed_at ASC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [activity_from_row(row, reveal_task=True) for row in rows or []]
 
 
 async def list_untriggered_conditions(recommendation_id: str) -> list[dict[str, Any]]:
     rows = await db.query_raw(
         """
-        SELECT id, short_name, category
+        SELECT id, short_name, category, criteria, guidance_profile
         FROM offline_shooting_conditions
         WHERE recommendation_id = $1 AND triggered = FALSE
         ORDER BY sort_order ASC
@@ -857,6 +1149,10 @@ async def list_untriggered_conditions(recommendation_id: str) -> list[dict[str, 
             "id": str(_field(r, "id")),
             "short_name": _field(r, "short_name", "shortName"),
             "category": _field(r, "category"),
+            "criteria": _field(r, "criteria"),
+            "guidance_profile": _json(
+                _field(r, "guidance_profile", "guidanceProfile"), {}
+            ),
         }
         for r in rows
     ]
@@ -866,7 +1162,7 @@ async def list_all_conditions(recommendation_id: str) -> list[dict[str, Any]]:
     """全部拍摄物品（含已触发），供预生成回忆逐物品遍历。"""
     rows = await db.query_raw(
         """
-        SELECT id, short_name, category
+        SELECT id, short_name, category, criteria, guidance_profile, triggered
         FROM offline_shooting_conditions
         WHERE recommendation_id = $1
         ORDER BY sort_order ASC
@@ -878,6 +1174,11 @@ async def list_all_conditions(recommendation_id: str) -> list[dict[str, Any]]:
             "id": str(_field(r, "id")),
             "short_name": _field(r, "short_name", "shortName"),
             "category": _field(r, "category"),
+            "criteria": _field(r, "criteria"),
+            "guidance_profile": _json(
+                _field(r, "guidance_profile", "guidanceProfile"), {}
+            ),
+            "triggered": bool(_field(r, "triggered")),
         }
         for r in rows
     ]
@@ -887,7 +1188,7 @@ async def admin_list_conditions(recommendation_id: str) -> list[dict[str, Any]]:
     """管理员检视用：拍摄物品全量（含判定要点 + 触发状态）。仅供 admin 测试页。"""
     rows = await db.query_raw(
         """
-        SELECT short_name, category, criteria, triggered, sort_order
+        SELECT short_name, category, criteria, guidance_profile, triggered, sort_order
         FROM offline_shooting_conditions
         WHERE recommendation_id = $1
         ORDER BY sort_order
@@ -899,21 +1200,349 @@ async def admin_list_conditions(recommendation_id: str) -> list[dict[str, Any]]:
             "short_name": _field(r, "short_name", "shortName"),
             "category": _field(r, "category"),
             "criteria": _field(r, "criteria"),
+            "guidance_profile": _json(
+                _field(r, "guidance_profile", "guidanceProfile"), {}
+            ),
             "triggered": bool(_field(r, "triggered")),
         }
         for r in rows
     ]
 
 
-async def mark_condition_triggered(condition_id: str) -> None:
-    await db.execute_raw(
+async def mark_condition_triggered(condition_id: str) -> bool:
+    rows = await db.query_raw(
         """
-        UPDATE offline_shooting_conditions
+        UPDATE offline_shooting_conditions AS condition
         SET triggered = TRUE, triggered_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND triggered = FALSE
+        FROM offline_activity_recommendations AS activity
+        WHERE condition.id = $1
+          AND condition.triggered = FALSE
+          AND activity.id = condition.recommendation_id
+          AND activity.status = 'accepted'
+          AND activity.reached = TRUE
+        RETURNING condition.id
         """,
         condition_id,
     )
+    return bool(rows)
+
+
+async def set_activity_focus(
+    recommendation_id: str,
+    condition_id: str | None,
+    *,
+    reason: str,
+) -> None:
+    """Persist the hidden guidance focus; no target text is exposed."""
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET focus_condition_id = $2,
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || jsonb_build_object(
+                    'last_focus_reason', $3::text,
+                    'focus_changed_at', CURRENT_TIMESTAMP
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'accepted' AND reached = TRUE
+          AND (
+              $2::text IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM offline_shooting_conditions condition
+                  WHERE condition.id = $2
+                    AND condition.recommendation_id = $1
+                    AND condition.triggered = FALSE
+              )
+          )
+        """,
+        recommendation_id,
+        condition_id,
+        reason,
+    )
+
+
+async def reset_activity_misses(recommendation_id: str) -> None:
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET miss_count = 0, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND miss_count <> 0
+        """,
+        recommendation_id,
+    )
+
+
+async def touch_activity_interaction(
+    recommendation_id: str,
+    *,
+    next_companion_at: datetime | None = None,
+) -> None:
+    """A user interaction resumes companionship and clears ignored-push backoff."""
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET next_companion_at = COALESCE($2::timestamptz, next_companion_at),
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || jsonb_build_object(
+                    'unanswered_count', 0,
+                    'last_user_interaction_at', CURRENT_TIMESTAMP
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'accepted' AND reached = TRUE
+        """,
+        recommendation_id,
+        next_companion_at,
+    )
+
+
+async def claim_due_companion_activities(
+    *,
+    limit: int = 20,
+    lease_minutes: int = 15,
+) -> list[dict[str, Any]]:
+    """Atomically claim due active activities for the distributed scanner."""
+    claim_token = uuid4().hex
+    rows = await db.query_raw(
+        """
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY COALESCE(workspace_id, user_id)
+                       ORDER BY arrival_confirmed_at DESC NULLS LAST,
+                                created_at DESC
+                   ) AS rn
+            FROM offline_activity_recommendations
+            WHERE status = 'accepted' AND reached = TRUE
+        ),
+        due AS (
+            SELECT id
+            FROM offline_activity_recommendations
+            WHERE status = 'accepted'
+              AND reached = TRUE
+              AND conditions_ready_at IS NOT NULL
+              AND next_companion_at IS NOT NULL
+              AND next_companion_at <= CURRENT_TIMESTAMP
+              AND id IN (SELECT id FROM ranked WHERE rn = 1)
+            ORDER BY next_companion_at ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE offline_activity_recommendations a
+        SET next_companion_at =
+                CURRENT_TIMESTAMP + ($2::int * INTERVAL '1 minute'),
+            companion_claim_token = $3,
+            companion_claimed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        FROM due
+        WHERE a.id = due.id
+        RETURNING a.*
+        """,
+        limit,
+        lease_minutes,
+        claim_token,
+    )
+    return [activity_from_row(row, reveal_task=True) for row in rows or []]
+
+
+async def save_companion_decision(
+    recommendation_id: str,
+    *,
+    claim_token: str,
+    state: dict[str, Any],
+    next_companion_at: datetime | None,
+    sent: bool,
+) -> bool:
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET companion_state = $2::jsonb,
+            next_companion_at = $3::timestamptz,
+            last_companion_at = CASE
+                WHEN $4::boolean THEN CURRENT_TIMESTAMP
+                ELSE last_companion_at
+            END,
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'accepted' AND reached = TRUE
+          AND companion_claim_token = $5
+        RETURNING id
+        """,
+        recommendation_id,
+        json.dumps(state, ensure_ascii=False),
+        next_companion_at,
+        sent,
+        claim_token,
+    )
+    return bool(rows)
+
+
+async def reserve_companion_send(
+    recommendation_id: str,
+    *,
+    claim_token: str,
+    delivery_key: str,
+    state: dict[str, Any],
+    next_companion_at: datetime,
+) -> bool:
+    """Fence the claim before delivery; a crash may skip one turn, never duplicate it."""
+    state = {**state, "delivery_key": delivery_key}
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET companion_state = $3::jsonb
+                || jsonb_build_object(
+                    'delivery_reserved_at', CURRENT_TIMESTAMP
+                ),
+            next_companion_at = $4::timestamptz,
+            last_companion_at = CURRENT_TIMESTAMP,
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'accepted' AND reached = TRUE
+          AND companion_claim_token = $2
+        RETURNING id
+        """,
+        recommendation_id,
+        claim_token,
+        json.dumps(state, ensure_ascii=False),
+        next_companion_at,
+    )
+    return bool(rows)
+
+
+async def companion_message_exists(delivery_key: str) -> bool:
+    rows = await db.query_raw(
+        """
+        SELECT 1
+        FROM messages
+        WHERE metadata->>'offline_companion_delivery_key' = $1
+        LIMIT 1
+        """,
+        delivery_key,
+    )
+    return bool(rows)
+
+
+async def cancel_guarded_companion_delivery(
+    recommendation_id: str,
+    *,
+    delivery_key: str,
+    previous_last_companion_at: datetime | str | None,
+) -> None:
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET last_companion_at = $3::timestamptz,
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || jsonb_build_object(
+                    'delivery_canceled', true,
+                    'unanswered_count',
+                    GREATEST(
+                        COALESCE(
+                            NULLIF(companion_state->>'unanswered_count', '')::int,
+                            0
+                        ) - 1,
+                        0
+                    )
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'accepted' AND reached = TRUE
+          AND companion_state->>'delivery_key' = $2
+        """,
+        recommendation_id,
+        delivery_key,
+        previous_last_companion_at,
+    )
+
+
+async def reschedule_failed_companion_delivery(
+    recommendation_id: str,
+    *,
+    delivery_key: str,
+    next_companion_at: datetime,
+    previous_last_companion_at: datetime | str | None,
+) -> None:
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET next_companion_at = $3::timestamptz,
+            last_companion_at = $4::timestamptz,
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || jsonb_build_object(
+                    'delivery_failed', true,
+                    'unanswered_count',
+                    GREATEST(
+                        COALESCE(
+                            NULLIF(companion_state->>'unanswered_count', '')::int,
+                            0
+                        ) - 1,
+                        0
+                    )
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'accepted' AND reached = TRUE
+          AND companion_state->>'delivery_key' = $2
+        """,
+        recommendation_id,
+        delivery_key,
+        next_companion_at,
+        previous_last_companion_at,
+    )
+
+
+async def get_current_reached_activity(
+    user_id: str,
+    workspace_id: str | None,
+) -> dict[str, Any] | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM offline_activity_recommendations
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR workspace_id = $2)
+          AND status = 'accepted'
+          AND reached = TRUE
+        ORDER BY arrival_confirmed_at DESC NULLS LAST, created_at DESC
+        LIMIT 1
+        """,
+        user_id,
+        workspace_id,
+    )
+    return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def find_other_reached_activity(
+    user_id: str,
+    workspace_id: str | None,
+    *,
+    exclude_id: str,
+) -> dict[str, Any] | None:
+    rows = await db.query_raw(
+        """
+        SELECT *
+        FROM offline_activity_recommendations
+        WHERE user_id = $1
+          AND ($2::text IS NULL OR workspace_id = $2)
+          AND id <> $3
+          AND status = 'accepted'
+          AND reached = TRUE
+        ORDER BY arrival_confirmed_at DESC NULLS LAST, created_at DESC
+        LIMIT 1
+        """,
+        user_id,
+        workspace_id,
+        exclude_id,
+    )
+    return activity_from_row(rows[0], reveal_task=True) if rows else None
 
 
 # ---------------------------------------------------------------------------
@@ -1053,6 +1682,25 @@ async def mark_message_recognized(message_id: str | None, tier: str) -> None:
         message_id,
         tier,
     )
+
+
+async def claim_activity_followup(message_id: str | None) -> bool:
+    """Allow at most one offline fragment/follow-up per user message."""
+    if not message_id:
+        return True
+    rows = await db.query_raw(
+        """
+        UPDATE messages
+        SET metadata = COALESCE(metadata, '{}'::jsonb)
+            || '{"offline_activity_followup_claimed":true}'::jsonb
+        WHERE id = $1
+          AND COALESCE(metadata->>'offline_activity_followup_claimed', 'false')
+              <> 'true'
+        RETURNING id
+        """,
+        message_id,
+    )
+    return bool(rows)
 
 
 async def find_arrival_card_message_id(

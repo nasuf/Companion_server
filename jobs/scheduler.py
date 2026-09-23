@@ -42,6 +42,7 @@ from app.services.notifications.capsules import scan_ready_capsule_notifications
 from app.services.notifications.dispatcher import dispatch_due_notifications
 from app.services.music_status import scan_music_schedule_transitions
 from app.services.last_will import dispatch_pending_last_will_deliveries, scan_due_last_wills
+from app.services.offline.activity_companion import scan_activity_companions
 from app.services.offline.activity_service import auto_archive_due_activities
 from app.services.offline.scheduler import scan_offline_triggers
 from app.services.offline.providers.ali1688_token import refresh_access_token
@@ -543,6 +544,15 @@ def setup_scheduler():
     )
 
     scheduler.add_job(
+        _run_offline_companion_scan,
+        "interval",
+        minutes=1,
+        id="offline_companion_scan",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
         _run_music_schedule_transition_scan,
         "interval",
         minutes=1,
@@ -964,6 +974,25 @@ async def _run_offline_trigger_scan():
             _job_failed("Offline trigger scan", e)
 
     await _run_distributed_job("offline_trigger_scan", 3600, _body)
+
+
+async def _run_offline_companion_scan():
+    async def _body():
+        try:
+            stats = await scan_activity_companions()
+            if stats.get("sent") or stats.get("failed"):
+                logger.info(f"[CRON] offline companion scan: {stats}")
+            if stats.get("failed"):
+                _job_failed(
+                    "Offline companion scan",
+                    RuntimeError(
+                        f"{stats['failed']} activity companion item(s) failed"
+                    ),
+                )
+        except Exception as e:  # noqa: BLE001 - scheduler boundary
+            _job_failed("Offline companion scan", e)
+
+    await _run_distributed_job("offline_companion_scan", 55, _body)
 
 
 async def _run_offline_auto_archive():

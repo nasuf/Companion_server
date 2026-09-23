@@ -54,13 +54,12 @@ def _time_period_now() -> str:
 
 async def pregenerate_for_activity(
     activity: dict[str, Any], items: list[dict[str, Any]]
-) -> None:
+) -> dict[str, int]:
     """为传入的每个物品预生成 3 档回忆并入池。幂等：已有池则跳过。"""
     recommendation_id = activity["id"]
     if not items:
-        return
-    if await repo.count_prewritten_fragments(recommendation_id) > 0:
-        return
+        return {"generated": 0, "missing": 0}
+    existing = await repo.list_prewritten_condition_tiers(recommendation_id)
     ai_experience = await repo.ai_memory_brief(
         activity["user_id"], activity.get("workspace_id")
     )
@@ -70,6 +69,8 @@ async def pregenerate_for_activity(
     for item in items:
         tier_texts: dict[str, str] = {}
         for tier, guidance in TIER_GUIDANCE.items():
+            if (str(item["id"]), tier) in existing:
+                continue
             text = await _prewrite(item, theme, time_period, ai_experience, guidance)
             if text:
                 tier_texts[tier] = text
@@ -81,6 +82,16 @@ async def pregenerate_for_activity(
     logger.info(
         "[offline-pregen] activity=%s 预生成 %d 段分档回忆", recommendation_id, total
     )
+    final_pairs = await repo.list_prewritten_condition_tiers(recommendation_id)
+    expected = {
+        (str(item["id"]), tier)
+        for item in items
+        for tier in TIER_GUIDANCE
+    }
+    return {
+        "generated": total,
+        "missing": len(expected - final_pairs),
+    }
 
 
 async def _prewrite(

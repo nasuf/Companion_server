@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
+from uuid import uuid4
 
 from prisma import Json
 
@@ -35,6 +37,8 @@ async def emit_proactive_message(
     ws_payload_extra: dict[str, Any] | None = None,
     trace_id: str | None = None,
     voice_eligible: bool = True,
+    guard_activity_id: str | None = None,
+    guard_delivery_key: str | None = None,
 ) -> str:
     """持久化主动消息 + 推 WS, 返回 assistant message id.
 
@@ -80,6 +84,8 @@ async def emit_proactive_message(
         metadata.update(extra_metadata)
 
     prepared_voice = None
+    if guard_activity_id and guard_delivery_key:
+        voice_eligible = False
     if voice_eligible and not (ws_payload_extra or {}).get("component_card"):
         from app.services.speech_output.policy import (
             VoiceContext,
@@ -113,14 +119,63 @@ async def emit_proactive_message(
                 )
 
     try:
-        created = await db.message.create(
-            data={
-                "conversation": {"connect": {"id": conversation_id}},
-                "role": "assistant",
-                "content": message,
-                "metadata": Json(metadata),
-            }
-        )
+        if guard_activity_id and guard_delivery_key:
+            rows = await db.query_raw(
+                """
+                INSERT INTO messages (
+                    id, conversation_id, role, content, metadata, created_at
+                )
+                SELECT $1, $2, 'assistant', $3, $4::jsonb, CURRENT_TIMESTAMP
+                FROM offline_activity_recommendations activity
+                WHERE activity.id = $5
+                  AND activity.status = 'accepted'
+                  AND activity.reached = TRUE
+                  AND activity.companion_state->>'delivery_key' = $6
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM messages user_message
+                      WHERE user_message.conversation_id = $2
+                        AND user_message.role = 'user'
+                        AND user_message.created_at > (
+                            activity.companion_state->>'delivery_reserved_at'
+                        )::timestamptz
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM messages prior
+                      WHERE prior.metadata->>'offline_companion_delivery_key' = $6
+                  )
+                RETURNING id, created_at
+                """,
+                uuid4().hex,
+                conversation_id,
+                message,
+                json.dumps(metadata, ensure_ascii=False, default=str),
+                guard_activity_id,
+                guard_delivery_key,
+            )
+            if not rows:
+                return ""
+            row = rows[0]
+            created_id = str(
+                row["id"] if isinstance(row, dict) else row.id
+            )
+            created_at = (
+                row.get("created_at")
+                if isinstance(row, dict)
+                else row.created_at
+            )
+        else:
+            created = await db.message.create(
+                data={
+                    "conversation": {"connect": {"id": conversation_id}},
+                    "role": "assistant",
+                    "content": message,
+                    "metadata": Json(metadata),
+                }
+            )
+            created_id = created.id
+            created_at = created.createdAt
     except Exception:
         if prepared_voice is not None:
             from app.services.speech_output.delivery import (
@@ -137,7 +192,7 @@ async def emit_proactive_message(
 
             await bind_prepared_voice_output(
                 prepared_voice,
-                message_id=created.id,
+                message_id=created_id,
             )
         except Exception as bind_error:
             logger.warning(
@@ -153,7 +208,7 @@ async def emit_proactive_message(
             metadata.pop("display_mode", None)
             metadata.pop("attachments", None)
             await db.message.update(
-                where={"id": created.id},
+                where={"id": created_id},
                 data={"metadata": Json(metadata)},
             )
     try:
@@ -163,14 +218,14 @@ async def emit_proactive_message(
 
         fire_background(handle_assistant_message_event(
             conversation_id=conversation_id,
-            message_id=created.id,
+            message_id=created_id,
             text=message,
             metadata=metadata,
-            occurred_at=getattr(created, "createdAt", None),
+            occurred_at=created_at,
         ))
         fire_background(notify_agent_message_created(
             conversation_id=conversation_id,
-            message_id=created.id,
+            message_id=created_id,
             text=message,
             metadata=metadata,
             user_id=user_id,
@@ -204,7 +259,7 @@ async def emit_proactive_message(
         "text": message,
         "agent_id": agent_id,
         "user_id": user_id,  # send_to_workspace fallback 需要 (workspace_id=None 时退回 user 维度)
-        "assistant_message_id": created.id,
+        "assistant_message_id": created_id,
         "trigger_type": trigger_type,
     }
     if prepared_voice is not None:
@@ -216,4 +271,4 @@ async def emit_proactive_message(
     # workspace_id 为 None (历史 conv) 时 send_to_workspace 内部 fallback 到 send_to_user.
     await manager.send_to_workspace(workspace_id, "proactive", ws_payload)
 
-    return created.id
+    return created_id

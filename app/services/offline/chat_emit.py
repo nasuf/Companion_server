@@ -45,6 +45,7 @@ async def emit_assistant(
     trigger_type: str,
     extra_metadata: dict[str, Any] | None = None,
     trace_id: str | None = None,
+    guard_delivery_key: str | None = None,
 ) -> str | None:
     if not conversation_id or not message.strip():
         return None
@@ -62,6 +63,9 @@ async def emit_assistant(
         trigger_type=trigger_type,
         extra_metadata=metadata,
         trace_id=trace_id,
+        voice_eligible=guard_delivery_key is None,
+        guard_activity_id=source_id if guard_delivery_key else None,
+        guard_delivery_key=guard_delivery_key,
     )
 
 

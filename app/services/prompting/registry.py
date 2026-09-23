@@ -87,13 +87,20 @@ from app.services.prompting.defaults import (
     MEDIUM_MEMORY_REPLY_PROMPT,
     MEDIUM_PATIENCE_REPLY_PROMPT,
     OFFLINE_ACTIVITY_CARD_PROMPT,
+    OFFLINE_ACTIVITY_COMPANION_DECISION_PROMPT,
+    OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT,
     OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
     OFFLINE_ARRIVAL_GUIDE_PROMPT,
     OFFLINE_FRAGMENT_PREWRITE_PROMPT,
     OFFLINE_FRAGMENT_VERBALIZE_PROMPT,
     OFFLINE_MEMORY_NOTE_PROMPT,
     OFFLINE_MISS_HINT_PROMPT,
+    OFFLINE_PHOTO_FOLLOWUP_FREE_ROAM_PROMPT,
+    OFFLINE_PHOTO_FOLLOWUP_NEAR_PROMPT,
+    OFFLINE_PHOTO_FOLLOWUP_TRANSITION_PROMPT,
+    OFFLINE_PHOTO_MATCH_PROMPT,
     OFFLINE_PHOTO_SUBJECTS_PROMPT,
+    OFFLINE_SAFE_REWRITE_PROMPT,
     OFFLINE_SHOOTING_ITEMS_PROMPT,
     OFFLINE_GIFT_DELIVERED_MESSAGE_PROMPT,
     OFFLINE_GIFT_CANDIDATE_PICK_PROMPT,
@@ -264,6 +271,26 @@ PROMPT_DEFINITIONS = [
         OFFLINE_PHOTO_SUBJECTS_PROMPT,
     ),
     PromptDefinition(
+        "offline.photo_match", "线下照片与隐藏方向匹配", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 将现场照片与并行隐藏方向判为 exact/near/none, 支持动态切换当前关注点.",
+        OFFLINE_PHOTO_MATCH_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.photo_followup_transition", "线下照片自然转场", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 当前照片触发隐藏方向后, 自然承接到下一条安全方向.",
+        OFFLINE_PHOTO_FOLLOWUP_TRANSITION_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.photo_followup_near", "线下照片顺势引导", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 照片接近另一隐藏方向时顺着当前画面引导, 不宣布切换.",
+        OFFLINE_PHOTO_FOLLOWUP_NEAR_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.photo_followup_free_roam", "线下照片自由闲逛承接", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 隐藏方向均结束后只聊照片本身, 不再继续引导.",
+        OFFLINE_PHOTO_FOLLOWUP_FREE_ROAM_PROMPT,
+    ),
+    PromptDefinition(
         "offline.fragment_verbalize", "线下思绪碎片口语化交付", "线下互动", "线下活动",
         "【工程扩展】打卡闭环. 命中并定档后, 把预生成回忆结合照片/最近对话口语化说给用户.",
         OFFLINE_FRAGMENT_VERBALIZE_PROMPT,
@@ -277,6 +304,21 @@ PROMPT_DEFINITIONS = [
         "offline.miss_hint", "线下未命中方向暗示", "线下互动", "线下活动",
         "【工程扩展】打卡闭环. 多次拍照未命中后按次数递增地给方向暗示, 不说出具体物品.",
         OFFLINE_MISS_HINT_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_companion_decision", "线下活动持续陪伴决策", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 只决定安静、闲聊、关心或低频提示, 不生成用户文案.",
+        OFFLINE_ACTIVITY_COMPANION_DECISION_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_companion_message", "线下活动持续陪伴文案", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 根据已选表达方式和最近对话生成朋友式短消息, 不接收内部计数.",
+        OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.safe_rewrite", "线下陪伴目标泄露重写", "线下互动", "线下活动",
+        "【工程扩展】自然活动陪伴. 用户可见文案命中隐藏目标词时重写一次, 仍失败则代码兜底.",
+        OFFLINE_SAFE_REWRITE_PROMPT,
     ),
     PromptDefinition(
         "offline.memory_note", "线下记忆手札旅途小记", "线下互动", "线下活动",
@@ -325,7 +367,8 @@ PROMPT_DEFINITIONS = [
         "chat.offline_activity_section", "线下活动外出情境", "聊天热路径", "聊天",
         "【工程扩展】线下活动进行中时注入主回复的「当前线下活动」段, 让回复贴合"
         "这次外出(地点/已到达状态), 解决现场照片被当普通聊天的割裂感。硬约束: 严禁"
-        "泄露拍摄物品/任务目标/通关(spec §3.1/§6 不披露)。占位符: {activity} {location} {status_line}.",
+        "泄露拍摄物品/任务目标/通关(spec §3.1/§6 不披露)。占位符: "
+        "{activity} {location} {status_line} {progress_line} {safe_hint}.",
         CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT,
     ),
     PromptDefinition(

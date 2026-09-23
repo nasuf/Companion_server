@@ -570,10 +570,7 @@ async def _build_music_context_section(music_context: str | None) -> _PromptBody
 async def _build_offline_activity_section(
     offline_activity: dict[str, Any] | None,
 ) -> _PromptBody | None:
-    """线下活动进行中的「外出情境」段：让主回复贴合这次外出，不泄露拍摄任务。
-
-    只用 title/location/reached 三个非敏感字段渲染；拍摄物品绝不进 prompt（spec §6）。
-    """
+    """Build conversation-first activity context without hidden target names."""
     if not offline_activity:
         return None
     activity = str(offline_activity.get("title") or "").strip()
@@ -590,11 +587,14 @@ async def _build_offline_activity_section(
         if offline_activity.get("reached")
         else "TA 还在前往/准备出发的路上。"
     )
+    safe_hint = str(offline_activity.get("safe_hint") or "").strip() or "（无）"
     return _PromptBody(
         _render_section(tpl, {
             "activity": activity,
             "location": location,
             "status_line": status_line,
+            "progress_line": "不要向用户总结、暗示或猜测任何隐藏进度。",
+            "safe_hint": safe_hint,
         }),
         "chat.offline_activity_section",
     )

@@ -76,6 +76,9 @@ EVT_PROACTIVE_SKIPPED = "proactive.skipped"
 EVT_PROACTIVE_DECAY = "proactive.decay_advanced"
 EVT_PROACTIVE_FIRST_GREETING = "proactive.first_greeting"
 EVT_SPECIAL_DATE_TRIGGERED = "proactive.special_date_triggered"
+EVT_OFFLINE_COMPANION_DECISION = "offline.companion_decision"
+EVT_OFFLINE_PHOTO_MATCH = "offline.photo_match"
+EVT_OFFLINE_FOCUS_SWITCHED = "offline.focus_switched"
 
 # Reminder (Part 5)
 EVT_REMINDER_HANDLED = "reminder.handled"

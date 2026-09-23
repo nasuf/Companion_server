@@ -35,6 +35,11 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(activity_service, "emit_assistant", AsyncMock())
     monkeypatch.setattr(activity_service, "emit_activity_card", AsyncMock())
     monkeypatch.setattr(activity_service, "remember_user_event", lambda **_: None)
+    monkeypatch.setattr(
+        activity_service.repo,
+        "find_other_reached_activity",
+        AsyncMock(return_value=None),
+    )
     # 拍摄条件生成在后台 fire——测试里吞掉，避免真实执行/未 await 警告。
     monkeypatch.setattr(
         activity_service, "fire_background",
@@ -54,6 +59,28 @@ async def test_arrive_success_within_radius(monkeypatch):
     mark.assert_awaited_once()
     activity_service.insert_user_activity_card.assert_awaited_once()
     activity_service.emit_assistant.assert_awaited_once()  # 拍照引导
+
+
+async def test_arrive_rejects_when_another_activity_is_already_reached(monkeypatch):
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        activity_service.repo,
+        "get_activity",
+        AsyncMock(return_value=_row()),
+    )
+    monkeypatch.setattr(
+        activity_service.repo,
+        "find_other_reached_activity",
+        AsyncMock(return_value=_row(id="other", reached=True)),
+    )
+    mark = AsyncMock()
+    monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
+
+    with pytest.raises(HTTPException) as exc:
+        await activity_service.arrive_activity("u1", "a1")
+
+    assert exc.value.status_code == 409
+    mark.assert_not_awaited()
 
 
 async def test_arrive_rejected_too_far(monkeypatch):

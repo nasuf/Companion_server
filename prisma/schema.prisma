@@ -1754,6 +1754,13 @@ model OfflineActivityRecommendation {
   // 识图未命中计数 / 已发方向暗示计数（spec 未命中方向暗示递增用）
   missCount      Int                       @default(0) @map("miss_count")
   hintCount      Int                       @default(0) @map("hint_count")
+  // Activity companion: hidden targets remain parallel; focus only guides the current direction.
+  focusConditionId String?                 @map("focus_condition_id")
+  nextCompanionAt DateTime?                @map("next_companion_at")
+  lastCompanionAt DateTime?                @map("last_companion_at")
+  companionClaimToken String?              @map("companion_claim_token")
+  companionClaimedAt DateTime?             @map("companion_claimed_at")
+  companionState  Json                     @default("{}") @map("companion_state")
   feedback       OfflineActivityFeedback[]
   media          OfflineActivityMedia[]
   conditions     OfflineShootingCondition[]
@@ -1769,6 +1776,7 @@ model OfflineActivityRecommendation {
   @@index([userId, status, createdAt(sort: Desc)], map: "offline_activity_user_status_idx")
   @@index([workspaceId, createdAt(sort: Desc)], map: "offline_activity_workspace_idx")
   @@index([status, autoArchiveAt], map: "offline_activity_autoarchive_idx")
+  @@index([status, reached, nextCompanionAt], map: "offline_activity_companion_due_idx")
   @@map("offline_activity_recommendations")
 }
 
@@ -1825,6 +1833,8 @@ model OfflineShootingCondition {
   shortName        String                        @map("short_name")
   criteria         String                        @default("")
   category         String?
+  // Server-only aliases, match criteria, and target-free guidance levels.
+  guidanceProfile  Json                          @default("{}") @map("guidance_profile")
   sortOrder        Int                           @default(0) @map("sort_order")
   triggered        Boolean                       @default(false)
   triggeredAt      DateTime?                     @map("triggered_at")
@@ -1847,7 +1857,7 @@ model OfflinePrewrittenFragment {
   createdAt        DateTime                      @default(now()) @map("created_at")
 
   @@index([recommendationId], map: "offline_prewritten_fragment_recommendation_idx")
-  @@index([conditionId, tier], map: "offline_prewritten_fragment_condition_tier_idx")
+  @@unique([conditionId, tier], map: "offline_prewritten_fragment_condition_tier_key")
   @@map("offline_prewritten_fragments")
 }
 

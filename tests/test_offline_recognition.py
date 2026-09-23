@@ -2,6 +2,7 @@
 
 import random
 from collections import Counter
+from unittest.mock import AsyncMock
 
 from app.services.offline import recognition as rec
 
@@ -128,7 +129,11 @@ def test_parse_items_drops_nameless_and_handles_garbage():
 
     raw = '{"items": [{"category": "只有类目"}, {"short_name": "好", "category": "齐"}]}'
     items = sc._parse_items(raw)
-    assert items == [{"short_name": "好", "category": "齐"}]
+    assert len(items) == 1
+    assert items[0]["short_name"] == "好"
+    assert items[0]["category"] == "齐"
+    assert items[0]["criteria"] == ""
+    assert items[0]["guidance_profile"] == {"aliases": [], "guidance": {}}
     assert sc._parse_items("no json") == []
 
 
@@ -153,3 +158,110 @@ def test_ensure_min_items_keeps_when_already_enough():
         {"short_name": "长椅", "category": "设施"},
     ]
     assert sc._ensure_min_items(src) == src  # ≥3 不追加
+
+
+async def test_photo_match_threshold_downgrades_weak_exact_to_near(monkeypatch):
+    monkeypatch.setattr(
+        rec,
+        "get_prompt_text",
+        AsyncMock(
+            return_value=(
+                "{photo_description}|{focus_condition_id}|{conditions_json}"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        rec,
+        "invoke_text",
+        AsyncMock(
+            return_value=(
+                '{"relation":"exact","condition_id":"c1","confidence":0.65,'
+                '"observed_subject":"彩色细节"}'
+            )
+        ),
+    )
+    result = await rec._classify_photo_match(
+        "一处彩色细节",
+        [
+            {
+                "id": "c1",
+                "short_name": "花",
+                "category": "植物",
+                "criteria": "主体清楚",
+                "guidance_profile": {"aliases": ["花朵"]},
+            }
+        ],
+        focus_condition_id="c1",
+    )
+
+    assert result["relation"] == "near"
+    assert result["condition_id"] == "c1"
+
+
+async def test_visible_message_leak_is_rewritten(monkeypatch):
+    conditions = [
+        {
+            "id": "c1",
+            "short_name": "花",
+            "category": "植物",
+            "guidance_profile": {"aliases": ["花朵"]},
+        }
+    ]
+    monkeypatch.setattr(
+        rec,
+        "get_prompt_text",
+        AsyncMock(return_value="{draft}|{forbidden_terms}|{safe_hint}"),
+    )
+    monkeypatch.setattr(
+        rec,
+        "invoke_text",
+        AsyncMock(return_value='{"text":"换个角度看看附近的颜色和明暗。"}'),
+    )
+
+    result = await rec._guard_visible_message(
+        "去拍一朵花吧",
+        conditions,
+        safe_hint="留意颜色和细小纹理",
+        fallback="慢慢逛就好。",
+    )
+
+    assert result == "换个角度看看附近的颜色和明暗。"
+    assert "花" not in result
+
+
+async def test_legacy_fallback_rejects_low_confidence_match(monkeypatch):
+    monkeypatch.setattr(
+        rec,
+        "get_prompt_text",
+        AsyncMock(side_effect=RuntimeError("registry unavailable")),
+    )
+    monkeypatch.setattr(
+        rec,
+        "_detect_subjects",
+        AsyncMock(return_value=[{"type": "花", "confidence": 0.1}]),
+    )
+
+    result = await rec._classify_photo_match(
+        "远处似乎有一点颜色",
+        [{"id": "c1", "short_name": "花", "category": "植物"}],
+        focus_condition_id="c1",
+    )
+
+    assert result["relation"] == "none"
+    assert result["condition_id"] == ""
+
+
+def test_directional_category_leak_is_blocked_but_place_name_is_allowed():
+    condition = {
+        "short_name": "花",
+        "category": "植物",
+        "guidance_profile": {"aliases": ["花朵"]},
+    }
+
+    assert rec.contains_hidden_target("留意一下附近的植物", [condition])
+    assert not rec.contains_hidden_target("植物园里逛着舒服吗", [condition])
+
+
+def test_hidden_progress_language_is_treated_as_mechanical():
+    for text in ("有点进展了", "还剩一个", "切换到下一个", "解锁新的阶段"):
+        assert rec._MECHANICAL_TERMS_RE.search(text)

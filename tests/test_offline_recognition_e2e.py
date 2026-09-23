@@ -13,13 +13,15 @@ class _FakeRepo:
     def __init__(self):
         # 物品带 category（PM #3/#4：拍摄「物品」大类），识图主体按名/类目匹配。
         self.conditions = [
-            {"id": "c1", "short_name": "杯子", "category": "餐具"},
-            {"id": "c2", "short_name": "天空", "category": "天空"},
-            {"id": "c3", "short_name": "小路", "category": "道路"},
+            {"id": "c1", "short_name": "杯子", "category": "餐具", "guidance_profile": {}},
+            {"id": "c2", "short_name": "天空", "category": "天空", "guidance_profile": {}},
+            {"id": "c3", "short_name": "小路", "category": "道路", "guidance_profile": {}},
         ]
         self.triggered: set[str] = set()
         self.fragments: list[dict] = []
         self.fingerprints: set[str] = set()
+        self.focus_updates: list[tuple[str | None, str]] = []
+        self.claimed_messages: set[str] = set()
 
     async def list_untriggered_conditions(self, rid):
         return [c for c in self.conditions if c["id"] not in self.triggered]
@@ -38,6 +40,21 @@ class _FakeRepo:
 
     async def mark_condition_triggered(self, cid):
         self.triggered.add(cid)
+        return True
+
+    async def set_activity_focus(self, rid, cid, *, reason):
+        self.focus_updates.append((cid, reason))
+
+    async def reset_activity_misses(self, rid):
+        pass
+
+    async def claim_activity_followup(self, message_id):
+        if not message_id:
+            return True
+        if message_id in self.claimed_messages:
+            return False
+        self.claimed_messages.add(message_id)
+        return True
 
     async def mark_media_fragment_cover(self, mid, fp):
         pass
@@ -62,16 +79,31 @@ def _install(monkeypatch, *, produce_random=0.0, subjects_queue):
     monkeypatch.setattr(recognition, "remember_offline_fragment", lambda **kw: None)
     monkeypatch.setattr(recognition, "_handle_miss", AsyncMock(return_value=None))
     monkeypatch.setattr(
+        recognition, "_emit_photo_followup", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        recognition, "_wait_for_main_reply", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
         recognition.chat_emit, "emit_thought_fragment", AsyncMock(return_value="m1")
     )
     # 概率门槛确定化：random() 恒为 produce_random。
     monkeypatch.setattr(recognition.random, "random", lambda: produce_random)
     queue = list(subjects_queue)
 
-    async def _detect(_desc):
-        return queue.pop(0) if queue else []
+    async def _classify(_desc, items, *, focus_condition_id):
+        subjects = queue.pop(0) if queue else []
+        item, subject = recognition._match_subject_to_item(subjects, items)
+        if not item or not subject:
+            return {"relation": "none", "condition_id": "", "confidence": 0.0}
+        return {
+            "relation": "exact",
+            "condition_id": item["id"],
+            "confidence": subject["confidence"],
+            "observed_subject": subject["type"],
+        }
 
-    monkeypatch.setattr(recognition, "_detect_subjects", _detect)
+    monkeypatch.setattr(recognition, "_classify_photo_match", _classify)
     return fake
 
 
@@ -84,13 +116,17 @@ def _activity():
         "id": "a1", "user_id": "u1", "workspace_id": "w1",
         "agent_id": "ag1", "conversation_id": "c1",
         "status": "accepted", "reached": True, "title": "植物园",
+        "focus_condition_id": "c1",
+        "conditions_ready_at": "2026-09-22T08:00:00Z",
     }
 
 
-async def _fire(desc="描述", mid="m"):
+async def _fire(desc="描述", mid="m", source_message_id=None):
     return await recognition.recognize_on_photo(
         activity=_activity(), ctx={"conversation_id": "c1", "agent_id": "ag1"},
-        photo_description=desc, media_id=mid, source_message_id="msg",
+        photo_description=desc,
+        media_id=mid,
+        source_message_id=source_message_id or mid,
     )
 
 
@@ -110,7 +146,7 @@ async def test_full_session_ladder_and_cap(monkeypatch):
     assert fake.triggered == {"c1", "c2", "c3"}
 
 
-async def test_probability_not_passed_keeps_condition_untriggered(monkeypatch):
+async def test_probability_not_passed_still_completes_condition(monkeypatch):
     fake = _install(
         monkeypatch,
         produce_random=0.9,  # 恒不过（>0.4/0.25）
@@ -122,8 +158,8 @@ async def test_probability_not_passed_keeps_condition_untriggered(monkeypatch):
     assert await _fire(mid="m1") is not None
     assert await _fire(mid="m2") is None
     assert len(fake.fragments) == 1
-    # 概率未过：天空物品保持未触发，后续仍可命中
-    assert "c2" not in fake.triggered
+    # Reward probability no longer controls hidden-task completion.
+    assert "c2" in fake.triggered
 
 
 async def test_duplicate_fingerprint_not_reproduced(monkeypatch):
@@ -137,7 +173,7 @@ async def test_duplicate_fingerprint_not_reproduced(monkeypatch):
     fake.fingerprints.add(fp)
     assert await _fire(mid="m1") is None
     assert len(fake.fragments) == 0
-    assert "c1" not in fake.triggered  # 未产出 → 条件保持未触发
+    assert "c1" in fake.triggered  # Duplicate reward still completes the condition.
 
 
 async def test_miss_invokes_hint_branch(monkeypatch):
@@ -156,3 +192,63 @@ async def test_no_conditions_no_fragment(monkeypatch):
     fake.conditions = []
     assert await _fire() is None
     assert fake.fragments == []
+
+
+async def test_near_other_condition_switches_focus_without_completion(monkeypatch):
+    fake = _install(monkeypatch, subjects_queue=[])
+    monkeypatch.setattr(
+        recognition,
+        "_classify_photo_match",
+        AsyncMock(
+            return_value={
+                "relation": "near",
+                "condition_id": "c2",
+                "confidence": 0.7,
+                "observed_subject": "远处开阔区域",
+            }
+        ),
+    )
+
+    assert await _fire(mid="m-near") is None
+    assert fake.triggered == set()
+    assert fake.focus_updates == [("c2", "photo_near_other")]
+    recognition._emit_photo_followup.assert_awaited_once()
+
+
+async def test_exact_other_condition_completes_then_advances(monkeypatch):
+    fake = _install(monkeypatch, produce_random=0.9, subjects_queue=[])
+    monkeypatch.setattr(
+        recognition,
+        "_classify_photo_match",
+        AsyncMock(
+            return_value={
+                "relation": "exact",
+                "condition_id": "c2",
+                "confidence": 0.95,
+                "observed_subject": "开阔画面",
+            }
+        ),
+    )
+
+    await _fire(mid="m-other")
+
+    assert "c2" in fake.triggered
+    assert fake.focus_updates
+    next_id, reason = fake.focus_updates[-1]
+    assert next_id in {"c1", "c3"}
+    assert reason == "photo_exact_next"
+
+
+async def test_same_source_message_emits_only_one_offline_followup(monkeypatch):
+    fake = _install(
+        monkeypatch,
+        produce_random=0.0,
+        subjects_queue=[_subj("杯子"), _subj("天空")],
+    )
+
+    await _fire(mid="m1", source_message_id="same-message")
+    await _fire(mid="m2", source_message_id="same-message")
+
+    assert fake.triggered == {"c1", "c2"}
+    assert len(fake.fragments) == 1
+    assert recognition._emit_photo_followup.await_count == 1

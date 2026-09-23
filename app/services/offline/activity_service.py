@@ -332,6 +332,8 @@ async def ignore_activity(user_id: str, activity_id: str) -> OfflineActivityItem
         raise HTTPException(status_code=404, detail="Activity not found")
     if activity["status"] not in {"pending", "accepted"}:
         raise HTTPException(status_code=409, detail="Activity cannot be ignored")
+    if activity.get("reached"):
+        raise HTTPException(status_code=409, detail="已经到达的旅途请先收好，不能再放回待考虑")
     updated = await repo.update_activity_status(activity_id, user_id, "ignored")
     if not updated:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -452,6 +454,16 @@ async def arrive_activity(
         raise HTTPException(status_code=409, detail="先接受活动再确认到达")
     if activity.get("reached"):
         return OfflineActivityItem(**activity)  # 重复确认：幂等
+    other_reached = await repo.find_other_reached_activity(
+        user_id,
+        activity.get("workspace_id"),
+        exclude_id=activity_id,
+    )
+    if other_reached:
+        raise HTTPException(
+            status_code=409,
+            detail="你还有一段正在进行的旅途，先把那一段收好再开始这里吧",
+        )
     # 有客户端坐标才校验（地点已地理编码时才真正拦截 >200m）；无坐标荣誉制放行。
     if lat is not None and lng is not None:
         _verify_arrival_distance(activity, lat, lng)
@@ -461,6 +473,16 @@ async def arrive_activity(
         current = await repo.get_activity(activity_id, user_id, reveal_task=True)
         if current and current.get("reached"):
             return OfflineActivityItem(**current)
+        other_reached = await repo.find_other_reached_activity(
+            user_id,
+            activity.get("workspace_id"),
+            exclude_id=activity_id,
+        )
+        if other_reached:
+            raise HTTPException(
+                status_code=409,
+                detail="你还有一段正在进行的旅途，先把那一段收好再开始这里吧",
+            )
         raise HTTPException(status_code=409, detail="确认到达失败，请重试")
     # 到达后后台生成 3-5 拍摄物品 + 分档回忆预生成（PM #3/#4/#5-7，不阻塞、不披露）。
     fire_background(shooting_conditions.generate_items_for_activity(updated))

@@ -97,3 +97,27 @@ class TestOnUserChatMedia:
             attachments=[_img("m3", "desc")],
         )
         recog.assert_not_awaited()
+
+    async def test_only_last_image_may_emit_a_miss_hint(self, monkeypatch):
+        images = [_img("m1", "第一张"), _img("m2", "第二张"), _img("m3", "第三张")]
+        recog = AsyncMock(return_value=None)
+        self._patch_common(monkeypatch, recog, fresh=images)
+
+        await chat_capture.on_user_chat_media(
+            user_id="u1",
+            workspace_id="w1",
+            message_id="msg-multi",
+            attachments=images,
+        )
+
+        assert recog.await_count == 3
+        flags = [
+            call.kwargs["allow_miss_hint"]
+            for call in recog.await_args_list
+        ]
+        assert flags == [False, False, True]
+        near_flags = [
+            call.kwargs["allow_near_followup"]
+            for call in recog.await_args_list
+        ]
+        assert near_flags == [False, False, True]

@@ -342,6 +342,14 @@ class Settings(BaseSettings):
     offline_arrival_radius_m: float = 200.0
     # 无经纬度时是否拒绝到达确认：True=拦截并提示，False=放行（体验优先，跳过距离校验）
     offline_arrival_require_geocode: bool = False
+    # Friend-like companionship during an active offline activity.
+    offline_activity_companion_enabled: bool = True
+    offline_activity_companion_min_interval_minutes: int = 10
+    offline_activity_companion_max_interval_minutes: int = 20
+    offline_activity_companion_active_chat_minutes: int = 5
+    offline_activity_companion_pause_after_ignored: int = 2
+    offline_activity_photo_exact_threshold: float = 0.78
+    offline_activity_photo_near_threshold: float = 0.55
 
     # Real-world gift commerce/logistics. Keep the default mock provider for
     # local/dev. In production, point custom_http at a buyer-side purchasing

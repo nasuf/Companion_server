@@ -47,9 +47,13 @@ async def on_user_chat_media(
             fresh_by_id = {a.id: a for a in fresh}
         except Exception:
             fresh_by_id = {}
-        for att in images:
+        for index, att in enumerate(images):
             await _capture_image(
-                activity, ctx, fresh_by_id.get(att.id, att), message_id
+                activity,
+                ctx,
+                fresh_by_id.get(att.id, att),
+                message_id,
+                allow_miss_hint=index == len(images) - 1,
             )
         for att in audios:
             await _capture_audio(activity, att, message_id)
@@ -60,11 +64,7 @@ async def on_user_chat_media(
 async def _active_reached_activity(
     user_id: str, workspace_id: str | None
 ) -> dict[str, Any] | None:
-    rows = await repo.list_activities(user_id, workspace_id)
-    for activity in rows:  # list_activities 按 created_at DESC，取最近的进行中已到达
-        if activity.get("status") == "accepted" and activity.get("reached"):
-            return activity
-    return None
+    return await repo.get_current_reached_activity(user_id, workspace_id)
 
 
 async def _capture_image(
@@ -72,6 +72,8 @@ async def _capture_image(
     ctx: dict[str, Any] | None,
     att: ChatAttachment,
     message_id: str,
+    *,
+    allow_miss_hint: bool,
 ) -> None:
     media_id = await repo.create_captured_media(
         recommendation_id=activity["id"],
@@ -101,6 +103,8 @@ async def _capture_image(
             media_id=media_id,
             source_message_id=message_id,
             trace_id=tracer.safe_trace_id,
+            allow_miss_hint=allow_miss_hint,
+            allow_near_followup=allow_miss_hint,
         )
 
 

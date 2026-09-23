@@ -118,10 +118,14 @@ CHAT_AI_STATE_CONSTRAINT_PROMPT = (
 # 占位符: {activity} 活动主题, {location} 地点, {status_line} 已到达/在路上的一句话。
 CHAT_OFFLINE_ACTIVITY_SECTION_PROMPT = (
     "你正在陪 TA 进行一次线下外出：{activity}（地点：{location}）。{status_line}\n"
-    "- 用自然、贴合「你们正一起经历这次外出」的语气回应，把当下的地点与情境放进对话里。\n"
-    "- 若 TA 发来现场照片或语音，就当作你们一起在现场看到/听到的画面来聊，给出真实、具体的反应。\n"
-    "- 严禁提及任何「任务/要拍什么/拍摄目标/通关/收集/关卡」之类的字眼，也不要暗示 TA 去拍特定的东西——"
-    "这是一次轻松的陪伴，不是打卡任务。"
+    "{progress_line}\n"
+    "- 当前用户在聊什么，就先聊什么。若用户在谈情绪、生活或其他话题，不要为了活动硬转话题。\n"
+    "- 用自然、贴合「你们正一起经历这次外出」的语气回应；只有真的相关时才带到地点与情境。\n"
+    "- 若 TA 发来现场照片或语音，就当作你们一起在现场看到/听到的画面来聊，给出真实、具体的反应；"
+    "这一轮只回应内容本身，不主动追加安全方向，避免和照片后的承接消息重复。\n"
+    "- 只有 TA 明确问“接下来做什么/给点提示”，或正在主动聊现场探索时，才可以自然借用这条安全方向："
+    "{safe_hint}。不要在每轮都提，更不能原样复读。\n"
+    "- 严禁提及任何「任务/要拍什么/拍摄目标/通关/收集/关卡/拍对/拍错」之类的字眼。"
 )
 
 # 「重逢感知」段 (借鉴 MaiBot context-restore wakeup 叙事): 用户离开一段时间后
@@ -360,8 +364,15 @@ OFFLINE_SHOOTING_ITEMS_PROMPT = (
     "- 必须是「大类」，例如：花、天空、云彩、湖泊、树、光影、小路、建筑、水、动物。\n"
     "- 不要具体到品种、品牌、店名、人名。互不重复，尽量覆盖不同类别。\n"
     "- 必须贴合该地点真实可拍物，不要生成现场不可能出现的东西。\n"
+    "- criteria 写清楚怎样才算主体明确命中；aliases 给出视觉描述可能出现的同义词。\n"
+    "- guidance 分 weak/medium/strong 三档，只写颜色、明暗、空间、动静、视线方向等抽象线索；"
+    "绝不能出现 short_name、category 或 aliases 中的词，也不能说“拍/寻找/任务”。\n"
     "- 输出严格合法 JSON，不要 markdown：\n"
-    '{{"items": [{{"id": "item_1", "category": "植物", "short_name": "花"}}]}}'
+    '{{"items": [{{"category": "植物", "short_name": "花", '
+    '"criteria": "画面主体清楚呈现花朵", "aliases": ["花朵", "鲜花"], '
+    '"guidance": {{"weak": "附近的颜色和细小纹理值得多看两眼", '
+    '"medium": "留意有生命感、颜色鲜明的角落", '
+    '"strong": "往自然生长的细节靠近一点，看看形状和颜色"}}}}]}}'
 )
 
 # PM #5/#6/#7 合并：为某个拍摄物品预生成一段「AI 自己的回忆」，档位语气由 tier_guidance 注入。
@@ -395,13 +406,31 @@ OFFLINE_PHOTO_SUBJECTS_PROMPT = (
     '{{"subjects": [{{"type": "花", "confidence": 0.92}}, {{"type": "天空", "confidence": 0.45}}]}}'
 )
 
+OFFLINE_PHOTO_MATCH_PROMPT = (
+    "你是线下照片匹配审核员。根据照片视觉描述，判断它与候选目标的关系。"
+    "候选目标只用于内部判定，绝不能在输出中改写或补充目标。\n\n"
+    "照片视觉描述：\n{photo_description}\n\n"
+    "当前关注目标 ID：{focus_condition_id}\n"
+    "候选目标 JSON：\n{conditions_json}\n\n"
+    "关系定义：\n"
+    "- exact：照片主要且清楚地呈现该目标，满足 criteria。\n"
+    "- near：没有满足 exact，但照片主体/场景明显接近该目标，可自然顺势引导。\n"
+    "- none：与所有目标都没有明显关系。\n\n"
+    "要求：\n"
+    "- 必须从候选 condition_id 中选；none 时 condition_id 为 null。\n"
+    "- 不要因为背景里偶然出现就判 exact；优先考虑画面主体和置信度。\n"
+    "- 若接近非当前目标，也照实选择该目标，让系统自然切换方向。\n"
+    "- 输出严格合法 JSON，不要 markdown：\n"
+    '{{"relation": "exact|near|none", "condition_id": null, '
+    '"confidence": 0.0, "observed_subject": "照片实际主体", "reason": "简短内部理由"}}'
+)
+
 # PM #11/#12/#13 合并：把预生成回忆用口语化方式说给用户，档位口吻由 tier_tone 注入。
 OFFLINE_FRAGMENT_VERBALIZE_PROMPT = (
     "你是用户的好友。你想起了一段过去的经历，现在需要用口语化、自然的方式说给用户听，"
     "就像聊天时随口提起。{tier_tone}\n\n"
     "预生成的回忆：{prewritten_text}\n"
-    "命中的拍摄物品：{matched_item}\n"
-    "照片主体信息：{photo_subject}\n"
+    "照片视觉描述：{photo_description}\n"
     "最近对话：\n{recent_dialogue}\n\n"
     "要求：\n"
     "- 保留预生成回忆的核心意思，不要改变它讲的事情。\n"
@@ -428,18 +457,109 @@ OFFLINE_ARRIVAL_GUIDE_PROMPT = (
 
 # PM #9：多次未命中后的方向暗示（随次数增强，不得说出具体物品）。
 OFFLINE_MISS_HINT_PROMPT = (
-    "你是用户的好友。用户多次拍照未命中拍摄物品，请生成一句方向暗示，帮助用户继续留意现场。\n\n"
-    "未命中次数：{miss_count}\n"
-    "已发暗示次数：{hint_count}\n"
-    "可暗示物品范围：{hintable_items}\n"
-    "已触发物品：{triggered_items}\n"
+    "你是用户的好友。用户连续发来的现场照片还没有触发新的旅途思绪，"
+    "请先接住照片本身，再生成一句若有若无的方向暗示。\n\n"
+    "安全方向（已确保不含目标名）：{safe_hint}\n"
     "地点信息：{location_info}\n\n"
     "要求：\n"
-    "- 不要直接说出具体物品名，用氛围、类别或场景方向暗示。\n"
+    "- 只能使用给定安全方向，不得猜测或补充任何具体物品。\n"
     "- 随未命中次数增加，暗示可以逐步增强。每次只给一句，不要像任务指令。\n"
-    "- 不得暴露拍摄条件、概率、系统规则。\n"
+    "- 不要说“没拍对/没命中/再拍一个/任务/目标/通关”，不得暴露系统规则。\n"
     "- 输出严格合法 JSON，不要 markdown：\n"
     '{{"text": "暗示文案", "hint_level": "weak"}}'
+)
+
+_OFFLINE_PHOTO_FOLLOWUP_BASE = (
+    "你是正在陪用户逛线下地点的朋友。普通聊天已经会回应照片；你只需要补一句自然的承接，"
+    "不要重复描述整张照片，也不要暴露任何隐藏规则。\n\n"
+    "你的名字：{agent_name}\n"
+    "照片视觉描述：{photo_description}\n"
+    "最近对话：\n{recent_dialogue}\n\n"
+    "要求：\n"
+    "- 先像朋友一样接住这张照片带来的感觉，再决定是否顺带一句安全方向。\n"
+    "- 不得出现“任务、目标、拍对、拍错、命中、完成、进度、进展、还剩、切换、隐藏、"
+    "下一关、收集、通关”等词；最多两句。\n"
+)
+
+OFFLINE_PHOTO_FOLLOWUP_TRANSITION_PROMPT = (
+    _OFFLINE_PHOTO_FOLLOWUP_BASE
+    + "可使用的安全方向（不含目标名）：{next_safe_hint}\n"
+    "- 可以从当前照片自然联想到给定安全方向，但不要宣布任何系统状态。\n"
+    "- 输出严格合法 JSON，不要 markdown：\n"
+    '{{"text": "自然承接"}}'
+)
+
+OFFLINE_PHOTO_FOLLOWUP_NEAR_PROMPT = (
+    _OFFLINE_PHOTO_FOLLOWUP_BASE
+    + "可使用的安全方向（不含目标名）：{next_safe_hint}\n"
+    "- 顺着照片已有元素把注意力带向安全方向；不要说接近、差一点。\n"
+    "- 输出严格合法 JSON，不要 markdown：\n"
+    '{{"text": "自然承接"}}'
+)
+
+OFFLINE_PHOTO_FOLLOWUP_FREE_ROAM_PROMPT = (
+    _OFFLINE_PHOTO_FOLLOWUP_BASE
+    + "- 只聊照片本身，让用户随意闲逛，不再给任何方向引导。\n"
+    "- 输出严格合法 JSON，不要 markdown：\n"
+    '{{"text": "自然承接"}}'
+)
+
+OFFLINE_ACTIVITY_COMPANION_DECISION_PROMPT = (
+    "你是线下活动陪伴策略器。请判断此刻要不要让 AI 主动说话。"
+    "你只做内部决策，不生成用户可见文案。\n\n"
+    "活动：{activity_title}\n"
+    "地点：{location_name}\n"
+    "到达后经过：{elapsed_minutes} 分钟\n"
+    "当前陪伴阶段：{activity_phase}\n"
+    "最近活动陪伴类型：{recent_modes}\n"
+    "连续未回应主动消息：{unanswered_count}\n"
+    "当前允许的安全方向（不含目标名）：{safe_hint}\n"
+    "最近对话：\n{recent_dialogue}\n\n"
+    "选择 action：\n"
+    "- silent：最近仍在聊天、用户在谈情绪/生活/其他主题、或此刻没必要打扰。\n"
+    "- social：接续用户刚才的话题或问一句当下感受，不碰隐藏方向。\n"
+    "- ambient：基于已知地点/时间作一句不编造现场事实的陪伴式闲聊。\n"
+    "- gentle_hint：仅当最近没有其他话题、且最近三次活动陪伴不超过一次提示时，"
+    "自然借用安全方向；不得扩写成具体物品。\n"
+    "- care：活动较久时关心累不累、要不要休息，不碰隐藏方向。\n\n"
+    "要求：\n"
+    "- 用户在活跃对话或情绪支持场景时必须 silent。\n"
+    "- next_delay_minutes 取 {min_delay_minutes}–{max_delay_minutes}；"
+    "输出严格合法 JSON，不要 markdown：\n"
+    '{{"action": "silent|social|ambient|gentle_hint|care", '
+    '"next_delay_minutes": 15, '
+    '"reason_code": "active_topic|quiet_gap|care_due|hint_due|free_roam|no_need"}}'
+)
+
+OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT = (
+    "你是正在远程陪朋友逛线下地点的人。根据内部选定的表达方式写一两句微信式短消息。\n\n"
+    "你的身份与说话风格：{agent_style}\n"
+    "用户称呼：{user_name}\n"
+    "活动：{activity_title}\n"
+    "地点：{location_name}\n"
+    "表达方式：{action}\n"
+    "可使用的安全方向（不含目标名）：{safe_hint}\n"
+    "最近对话：\n{recent_dialogue}\n\n"
+    "要求：\n"
+    "- social：接续最近话题或问当下感受；ambient：只基于已知地点/时间闲聊；"
+    "gentle_hint：只借用安全方向；care：关心累不累、要不要休息。\n"
+    "- 不要提及或解释表达方式本身；不得假装看到、听到或知道现场未提供的事物。\n"
+    "- 不得出现“任务、目标、拍摄要求、拍对、拍错、完成、进度、进展、还剩、切换、"
+    "隐藏、通关、收集”等词。\n"
+    "- 输出严格合法 JSON，不要 markdown：\n"
+    '{{"text": "一两句自然短消息"}}'
+)
+
+OFFLINE_SAFE_REWRITE_PROMPT = (
+    "请把下面这句线下陪伴消息改写得自然，并删除所有会直接说出隐藏方向的词。"
+    "只能保留朋友式反应与抽象的颜色、光线、空间、动静或视线方向。\n\n"
+    "原句：{draft}\n"
+    "绝对不能出现的词：{forbidden_terms}\n"
+    "可使用的安全方向：{safe_hint}\n\n"
+    "不得出现“任务、目标、拍对、拍错、命中、完成、进度、进展、还剩、切换、隐藏、"
+    "下一关、收集、通关”等词。"
+    "只输出严格合法 JSON：\n"
+    '{{"text": "改写后的一两句短消息"}}'
 )
 
 # PM #14：活动总结 / 旅途小记（= 记忆手札正文）。
