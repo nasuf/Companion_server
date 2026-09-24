@@ -930,8 +930,8 @@ async def _delete_agent_game_rows(user_id: str, agent_id: str) -> dict[str, int]
     """Remove play history that belongs to this agent, not the account.
 
     Sessions, their events, and per-agent skill state follow ``agent_id``.
-    ``user_game_wallets`` and ``game_point_ledger`` follow ``user_id`` only,
-    so deleting a friend must not zero the account balance.
+    ``user_wallets`` and ``wallet_ledger`` follow ``user_id`` only, so
+    deleting a friend must not zero the account balance.
     """
     stats: dict[str, int] = {}
     await _execute_counted(

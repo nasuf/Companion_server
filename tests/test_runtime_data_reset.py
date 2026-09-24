@@ -106,7 +106,9 @@ async def test_hard_delete_agent_data_removes_agent_scoped_game_rows(monkeypatch
     assert stats["game_events"] == 9
     assert stats["game_sessions"] == 4
     assert stats["native_game_skill_states"] == 2
-    assert not any("user_game_wallets" in sql or "game_point_ledger" in sql for sql, _args in executed)
+    assert not any(
+        "user_wallets" in sql or "wallet_ledger" in sql for sql, _args in executed
+    )
 
 
 @pytest.mark.asyncio
