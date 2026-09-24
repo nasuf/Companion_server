@@ -691,8 +691,10 @@ async def mark_arrived(
             )
         workspace_id = _field(row, "workspace_id", "workspaceId")
         lock_scope = f"offline-arrive:{user_id}:{workspace_id or 'legacy'}"
+        # pg_advisory_xact_lock returns void. Selecting it directly makes
+        # query_raw fail to deserialize the column. FROM yields an int column.
         await tx.query_raw(
-            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext($1)::bigint)",
             lock_scope,
         )
         other = await tx.query_raw(
@@ -857,8 +859,9 @@ async def replace_shooting_items_and_initialize(
         return [], False
     focus = prepared[max(0, min(focus_index, len(prepared) - 1))]
     async with db.tx() as tx:
+        # Same void-column avoidance as mark_arrived.
         await tx.query_raw(
-            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext($1)::bigint)",
             recommendation_id,
         )
         current = await tx.query_raw(

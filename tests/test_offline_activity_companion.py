@@ -951,12 +951,22 @@ async def test_missing_prewritten_recovery_is_persistent(monkeypatch):
 
 def test_single_reached_activity_is_database_backed():
     mark_arrived_source = inspect.getsource(offline_repo.mark_arrived)
+    init_source = inspect.getsource(offline_repo.replace_shooting_items_and_initialize)
     migration = (
         Path(__file__).parents[1]
         / "prisma/migrations/20260922170000_offline_activity_companion/migration.sql"
     ).read_text()
 
-    assert "pg_advisory_xact_lock" in mark_arrived_source
+    assert (
+        "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext($1)::bigint)"
+        in mark_arrived_source
+    )
+    assert "SELECT pg_advisory_xact_lock" not in mark_arrived_source
+    assert (
+        "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext($1)::bigint)"
+        in init_source
+    )
+    assert "SELECT pg_advisory_xact_lock" not in init_source
     assert "offline_activity_one_reached_workspace_key" in migration
     assert "offline_activity_one_reached_legacy_user_key" in migration
 
