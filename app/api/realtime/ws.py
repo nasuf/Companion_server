@@ -1370,12 +1370,12 @@ async def _handle_message(
         workspace_id=workspace_id,
         user_id=user_id,
     )
-    # Any user turn resumes a paused activity companion and postpones the next
-    # proactive check; active chat itself already provides companionship.
+    # Cancel a pending activity companion before reply generation. The
+    # follow-up clock starts only after this turn's reply is persisted.
     try:
         from app.services.offline.activity_companion import note_user_interaction
 
-        fire_background(note_user_interaction(user_id, workspace_id))
+        await note_user_interaction(user_id, workspace_id)
     except Exception as offline_companion_err:  # noqa: BLE001 - optional hook
         logger.debug(
             "[offline-companion] interaction hook skipped: %s",

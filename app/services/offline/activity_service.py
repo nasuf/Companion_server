@@ -497,7 +497,7 @@ async def arrive_activity(
         )
         # 拍照引导（PM #8：走提示词，严禁泄露拍摄目标；失败回退固定陪伴语）。
         guide = await _arrival_guide_text(activity, ctx)
-        await emit_assistant(
+        guide_id = await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
             user_id=user_id,
             agent_id=ctx["agent_id"],
@@ -507,6 +507,19 @@ async def arrive_activity(
             source_id=activity_id,
             trigger_type="offline_activity_arrival_guide",
         )
+        if guide_id and settings.offline_activity_companion_enabled:
+            try:
+                from app.services.offline.activity_companion import (
+                    start_opening_segment,
+                )
+
+                await start_opening_segment(activity_id, user_id)
+            except Exception as companion_err:  # noqa: BLE001 - arrival still succeeds
+                logger.warning(
+                    "[offline-companion] opening clock skipped activity=%s err=%s",
+                    activity_id,
+                    companion_err,
+                )
     remember_user_event(
         user_id=user_id,
         workspace_id=activity.get("workspace_id"),

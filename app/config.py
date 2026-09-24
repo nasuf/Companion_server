@@ -343,6 +343,9 @@ class Settings(BaseSettings):
     # 无经纬度时是否拒绝到达确认：True=拦截并提示，False=放行（体验优先，跳过距离校验）
     offline_arrival_require_geocode: bool = False
     # Friend-like companionship during an active offline activity.
+    # Send timing is the probability table in activity_companion.py.
+    # The interval, active-chat, and pause fields stay so existing env
+    # files keep loading; they no longer drive this path.
     offline_activity_companion_enabled: bool = True
     offline_activity_companion_min_interval_minutes: int = 10
     offline_activity_companion_max_interval_minutes: int = 20

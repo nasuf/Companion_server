@@ -50,7 +50,7 @@ def _condition(condition_id="condition-1"):
     }
 
 
-def _install_common(monkeypatch, *, messages):
+def _install_common(monkeypatch, *, messages, idle=True, last_ai_at=None):
     monkeypatch.setattr(
         companion.repo,
         "resolve_user_context",
@@ -72,6 +72,16 @@ def _install_common(monkeypatch, *, messages):
         AsyncMock(return_value=False),
     )
     monkeypatch.setattr(
+        companion,
+        "_ai_is_idle",
+        AsyncMock(return_value=idle),
+    )
+    monkeypatch.setattr(
+        companion,
+        "_latest_assistant_at",
+        AsyncMock(return_value=last_ai_at),
+    )
+    monkeypatch.setattr(
         companion.repo,
         "save_companion_decision",
         AsyncMock(return_value=True),
@@ -83,98 +93,303 @@ def _install_common(monkeypatch, *, messages):
     )
 
 
-async def test_active_conversation_suppresses_extra_message(monkeypatch):
+def _open_window(**overrides):
     now = datetime.now(UTC)
+    state = {
+        "phase": "opening",
+        "segment_sent": 0,
+        "activity_sent": 0,
+        "window_index": 2,
+        "anchor_at": (now - timedelta(minutes=3)).isoformat(),
+        "window_start": (now - timedelta(seconds=40)).isoformat(),
+        "window_end": (now + timedelta(minutes=1)).isoformat(),
+        "due_at": (now - timedelta(seconds=5)).isoformat(),
+        "probability": 1.0,
+        "recent_modes": [],
+        "awaiting_passive_reply": False,
+    }
+    state.update(overrides)
+    return state
+
+
+class _Rng:
+    def __init__(self, unit=0.0, wait=1):
+        self.unit = unit
+        self.wait = wait
+
+    def random(self):
+        return self.unit
+
+    def randint(self, low, high):
+        return self.wait
+
+
+def test_opening_tables_match_the_timing_document():
+    assert companion.OPENING_WINDOWS[0][0] == (0, 1, 0.80)
+    assert companion.OPENING_WINDOWS[0][2] == (2, 3, 0.50)
+    assert companion.OPENING_WINDOWS[2] == (
+        (0, 1, 0.40),
+        (1, 2, 0.28),
+        (2, 3, 0.18),
+        (3, 7, 0.12),
+        (7, 12, 0.06),
+    )
+    assert companion.FOLLOWUP_WINDOWS[0][0] == (0, 2, 0.55)
+    assert companion.FOLLOWUP_WINDOWS[1][-1] == (8, 15, 0.12)
+    assert companion.ACTIVITY_CAP == 5
+    assert companion.OPENING_CAP == 3
+    assert companion.FOLLOWUP_CAP == 2
+
+
+def test_expired_window_advances_without_counting():
+    now = datetime.now(UTC)
+    anchor = now - timedelta(minutes=2)
+    state = _open_window(
+        window_index=0,
+        anchor_at=anchor.isoformat(),
+        window_start=anchor.isoformat(),
+        window_end=(anchor + timedelta(minutes=1)).isoformat(),
+        due_at=(anchor + timedelta(seconds=20)).isoformat(),
+        probability=0.80,
+    )
+
+    decision = companion.evaluate_tick(
+        state,
+        now,
+        ai_idle=True,
+        last_ai_at=None,
+        rng=_Rng(),
+    )
+
+    assert decision.reason == "window_expired"
+    assert decision.state["activity_sent"] == 0
+    assert decision.state["window_index"] == 1
+    assert decision.state["probability"] == 0.65
+
+
+def test_probability_miss_does_not_count():
+    now = datetime.now(UTC)
+    decision = companion.evaluate_tick(
+        _open_window(probability=0.0, window_index=2),
+        now,
+        ai_idle=True,
+        last_ai_at=None,
+        rng=_Rng(unit=0.99),
+    )
+
+    assert decision.reason == "probability_miss"
+    assert decision.state["activity_sent"] == 0
+    assert decision.state["window_index"] == 3
+    assert decision.state["probability"] == 0.35
+
+
+def test_two_minute_gap_skips_the_window_without_counting():
+    now = datetime.now(UTC)
+    anchor = now - timedelta(seconds=30)
+    state = _open_window(
+        window_index=0,
+        anchor_at=anchor.isoformat(),
+        window_start=anchor.isoformat(),
+        window_end=(anchor + timedelta(minutes=1)).isoformat(),
+        due_at=(anchor + timedelta(seconds=10)).isoformat(),
+        probability=0.80,
+    )
+
+    decision = companion.evaluate_tick(
+        state,
+        now,
+        ai_idle=True,
+        last_ai_at=anchor,
+        rng=_Rng(),
+    )
+
+    assert decision.reason == "ai_gap"
+    assert decision.state["activity_sent"] == 0
+    assert decision.state["window_index"] == 1
+    assert decision.outcome != "send"
+
+
+def test_gap_leaves_the_two_to_three_minute_window_rollable():
+    now = datetime.now(UTC)
+    anchor = now - timedelta(minutes=2, seconds=30)
+    state = _open_window(
+        window_index=2,
+        anchor_at=anchor.isoformat(),
+        window_start=(anchor + timedelta(minutes=2)).isoformat(),
+        window_end=(anchor + timedelta(minutes=3)).isoformat(),
+        due_at=(anchor + timedelta(minutes=2, seconds=10)).isoformat(),
+        probability=0.50,
+    )
+
+    decision = companion.evaluate_tick(
+        state,
+        now,
+        ai_idle=True,
+        last_ai_at=anchor,
+        rng=_Rng(unit=0.1),
+    )
+
+    assert decision.outcome == "send"
+    assert decision.state["activity_sent"] == 0
+
+
+def test_busy_waits_inside_the_window_and_skips_after_it():
+    now = datetime.now(UTC)
+    open_end = now + timedelta(minutes=2)
+    waiting = companion.evaluate_tick(
+        _open_window(window_end=open_end.isoformat()),
+        now,
+        ai_idle=False,
+        last_ai_at=None,
+        rng=_Rng(),
+    )
+    assert waiting.reason == "ai_busy"
+    assert waiting.state["activity_sent"] == 0
+    assert waiting.state["window_index"] == 2
+    assert waiting.next_at is not None
+    assert now < waiting.next_at < open_end
+
+    expired = companion.evaluate_tick(
+        _open_window(window_end=(now + timedelta(milliseconds=200)).isoformat()),
+        now,
+        ai_idle=False,
+        last_ai_at=None,
+        rng=_Rng(),
+    )
+    assert expired.reason == "ai_busy"
+    assert expired.state["activity_sent"] == 0
+    assert expired.state["window_index"] == 3
+
+
+def test_five_missed_opening_windows_end_the_segment():
+    now = datetime.now(UTC)
+    anchor = now - timedelta(minutes=20)
+    state = _open_window(
+        window_index=4,
+        anchor_at=anchor.isoformat(),
+        window_start=(anchor + timedelta(minutes=7)).isoformat(),
+        window_end=(anchor + timedelta(minutes=12)).isoformat(),
+        due_at=(anchor + timedelta(minutes=8)).isoformat(),
+        probability=0.18,
+    )
+
+    decision = companion.evaluate_tick(
+        state,
+        now,
+        ai_idle=True,
+        last_ai_at=None,
+        rng=_Rng(),
+    )
+
+    assert decision.outcome == "stop"
+    assert decision.reason == "segment_done"
+    assert decision.next_at is None
+    assert decision.state["activity_sent"] == 0
+    assert decision.state["phase"] == "stopped"
+
+
+def test_activity_cap_stops_without_another_send():
+    decision = companion.evaluate_tick(
+        _open_window(activity_sent=5),
+        datetime.now(UTC),
+        ai_idle=True,
+        last_ai_at=None,
+    )
+
+    assert decision.outcome == "stop"
+    assert decision.next_at is None
+    assert decision.state["phase"] == "stopped"
+
+
+def test_followup_wait_is_one_to_three_minutes_and_keeps_the_activity_count():
+    reply_at = datetime(2026, 9, 24, 6, 0, tzinfo=UTC)
+    state, due = companion.begin_followup(
+        reply_at,
+        activity_sent=2,
+        recent_modes=["social"],
+        rng=_Rng(unit=0.0, wait=3),
+    )
+
+    assert state["phase"] == "followup"
+    assert state["segment_sent"] == 0
+    assert state["activity_sent"] == 2
+    assert state["probability"] == 0.55
+    assert due == reply_at + timedelta(minutes=3)
+    assert state["awaiting_passive_reply"] is False
+
+
+def test_hint_is_skipped_when_it_was_used_in_the_last_three_sends():
+    assert (
+        companion.choose_companion_action(
+            ["social", "gentle_hint"],
+            has_focus=True,
+        )
+        == "ambient"
+    )
+    assert (
+        companion.choose_companion_action(
+            ["social", "ambient", "care"],
+            has_focus=True,
+        )
+        == "gentle_hint"
+    )
+    assert (
+        companion.choose_companion_action(
+            ["social", "ambient", "care"],
+            has_focus=False,
+        )
+        == "social"
+    )
+
+
+async def test_two_minute_gap_does_not_generate_a_message(monkeypatch):
+    now = datetime.now(UTC)
+    anchor = now - timedelta(seconds=20)
     _install_common(
         monkeypatch,
-        messages=[{"role": "user", "content": "我刚走到河边", "created_at": now}],
+        messages=[],
+        last_ai_at=anchor,
     )
-    generate = AsyncMock()
-    monkeypatch.setattr(companion, "_generate_decision", generate)
-
-    assert await companion._process_activity(_activity()) is False
-    generate.assert_not_awaited()
-    companion.repo.save_companion_decision.assert_awaited_once()
-
-
-async def test_two_unanswered_messages_pause_until_user_returns(monkeypatch):
-    old = datetime.now(UTC) - timedelta(minutes=30)
-    _install_common(
-        monkeypatch,
-        messages=[{"role": "assistant", "content": "逛得怎么样", "created_at": old}],
-    )
-
-    activity = _activity(state={"unanswered_count": 2})
-    activity["last_companion_at"] = (
-        datetime.now(UTC) - timedelta(minutes=10)
-    ).isoformat()
-    assert await companion._process_activity(activity) is False
-    kwargs = companion.repo.save_companion_decision.await_args.kwargs
-    assert kwargs["next_companion_at"] is None
-    assert kwargs["state"]["mode"] == "paused_unanswered"
-
-
-async def test_hint_ratio_guard_prevents_tasky_consecutive_push(monkeypatch):
-    old = datetime.now(UTC) - timedelta(minutes=30)
-    _install_common(
-        monkeypatch,
-        messages=[{"role": "user", "content": "继续走走", "created_at": old}],
-    )
-    monkeypatch.setattr(
-        companion.repo,
-        "list_untriggered_conditions",
-        AsyncMock(return_value=[_condition()]),
-    )
-    monkeypatch.setattr(
-        companion,
-        "_generate_decision",
-        AsyncMock(
-            return_value={
-                "action": "gentle_hint",
-                "text": "换个方向看看",
-                "next_delay_minutes": 12,
-                "reason": "model_hint",
-            }
-        ),
-    )
-    emit = AsyncMock()
-    monkeypatch.setattr(companion.chat_emit, "emit_assistant", emit)
+    generate = companion._generate_companion_message
 
     sent = await companion._process_activity(
         _activity(
-            state={
-                "recent_modes": ["social", "gentle_hint"],
-                "unanswered_count": 0,
-            }
+            state=_open_window(
+                window_index=0,
+                anchor_at=anchor.isoformat(),
+                window_start=anchor.isoformat(),
+                window_end=(anchor + timedelta(minutes=1)).isoformat(),
+                due_at=(anchor + timedelta(seconds=5)).isoformat(),
+                probability=0.80,
+            )
         )
     )
 
     assert sent is False
-    emit.assert_not_awaited()
+    generate.assert_not_awaited()
+    saved = companion.repo.save_companion_decision.await_args.kwargs
+    assert saved["state"]["activity_sent"] == 0
+    assert saved["state"]["window_index"] == 1
+    assert saved["next_companion_at"] is not None
+
+
+async def test_non_idle_defers_without_counting(monkeypatch):
+    _install_common(monkeypatch, messages=[], idle=False)
+    generate = companion._generate_companion_message
+
+    assert await companion._process_activity(_activity(state=_open_window())) is False
+    generate.assert_not_awaited()
+    saved = companion.repo.save_companion_decision.await_args.kwargs
+    assert saved["state"]["activity_sent"] == 0
+    assert saved["state"]["window_index"] == 2
 
 
 async def test_social_companion_message_is_sent_and_counted(monkeypatch):
-    old = datetime.now(UTC) - timedelta(minutes=30)
-    _install_common(
-        monkeypatch,
-        messages=[{"role": "user", "content": "这里还挺舒服", "created_at": old}],
-    )
+    _install_common(monkeypatch, messages=[])
     monkeypatch.setattr(
         companion.repo,
         "list_untriggered_conditions",
         AsyncMock(return_value=[_condition()]),
-    )
-    monkeypatch.setattr(
-        companion,
-        "_generate_decision",
-        AsyncMock(
-            return_value={
-                "action": "social",
-                "text": "慢慢逛，舒服就多待一会儿。",
-                "next_delay_minutes": 15,
-                "reason": "quiet_gap",
-            }
-        ),
     )
     monkeypatch.setattr(
         recognition,
@@ -183,41 +398,47 @@ async def test_social_companion_message_is_sent_and_counted(monkeypatch):
     )
     reserve = AsyncMock(return_value=True)
     monkeypatch.setattr(companion.repo, "reserve_companion_send", reserve)
+    monkeypatch.setattr(companion.repo, "mark_companion_sent", AsyncMock())
     emit = AsyncMock(return_value="message-1")
     monkeypatch.setattr(companion.chat_emit, "emit_assistant", emit)
 
-    assert await companion._process_activity(_activity()) is True
+    assert await companion._process_activity(_activity(state=_open_window())) is True
     emit.assert_awaited_once()
     kwargs = reserve.await_args.kwargs
-    assert kwargs["state"]["unanswered_count"] == 1
-    assert kwargs["state"]["recent_modes"] == ["social"]
+    assert kwargs["state"]["activity_sent"] == 0
+    assert kwargs["state"]["segment_sent"] == 0
+    assert kwargs["next_companion_at"] > datetime.now(UTC) + timedelta(minutes=10)
     assert (
         emit.await_args.kwargs["extra_metadata"]["offline_companion_delivery_key"]
         == kwargs["delivery_key"]
     )
+    marked = companion.repo.mark_companion_sent.await_args.args
+    assert marked[2]["activity_sent"] == 1
+    assert marked[2]["segment_sent"] == 1
+    assert marked[2]["recent_modes"] == ["social"]
+
+
+async def test_activity_cap_does_not_send(monkeypatch):
+    _install_common(monkeypatch, messages=[])
+    generate = companion._generate_companion_message
+
+    sent = await companion._process_activity(
+        _activity(state=_open_window(activity_sent=5))
+    )
+
+    assert sent is False
+    generate.assert_not_awaited()
+    saved = companion.repo.save_companion_decision.await_args.kwargs
+    assert saved["next_companion_at"] is None
+    assert saved["state"]["phase"] == "stopped"
 
 
 async def test_claim_fence_blocks_send_after_user_interaction(monkeypatch):
-    old = datetime.now(UTC) - timedelta(minutes=30)
-    _install_common(
-        monkeypatch,
-        messages=[{"role": "user", "content": "先随便走走", "created_at": old}],
-    )
+    _install_common(monkeypatch, messages=[])
     monkeypatch.setattr(
         companion.repo,
         "list_untriggered_conditions",
         AsyncMock(return_value=[_condition()]),
-    )
-    monkeypatch.setattr(
-        companion,
-        "_generate_decision",
-        AsyncMock(
-            return_value={
-                "action": "social",
-                "text": "走累了就歇一会儿。",
-                "next_delay_minutes": 15,
-            }
-        ),
     )
     monkeypatch.setattr(
         recognition,
@@ -232,33 +453,18 @@ async def test_claim_fence_blocks_send_after_user_interaction(monkeypatch):
     emit = AsyncMock()
     monkeypatch.setattr(companion.chat_emit, "emit_assistant", emit)
 
-    assert await companion._process_activity(_activity()) is False
+    assert await companion._process_activity(_activity(state=_open_window())) is False
     emit.assert_not_awaited()
 
 
 async def test_emit_exception_does_not_reschedule_when_message_was_persisted(
     monkeypatch,
 ):
-    old = datetime.now(UTC) - timedelta(minutes=30)
-    _install_common(
-        monkeypatch,
-        messages=[{"role": "user", "content": "我在慢慢逛", "created_at": old}],
-    )
+    _install_common(monkeypatch, messages=[])
     monkeypatch.setattr(
         companion.repo,
         "list_untriggered_conditions",
         AsyncMock(return_value=[_condition()]),
-    )
-    monkeypatch.setattr(
-        companion,
-        "_generate_decision",
-        AsyncMock(
-            return_value={
-                "action": "social",
-                "text": "慢慢逛，我陪着你。",
-                "next_delay_minutes": 15,
-            }
-        ),
     )
     monkeypatch.setattr(
         recognition,
@@ -280,17 +486,44 @@ async def test_emit_exception_does_not_reschedule_when_message_was_persisted(
         "companion_message_exists",
         AsyncMock(return_value=True),
     )
-    reschedule = AsyncMock()
-    monkeypatch.setattr(
-        companion.repo,
-        "reschedule_failed_companion_delivery",
-        reschedule,
-    )
+    restore = AsyncMock()
+    monkeypatch.setattr(companion.repo, "restore_companion_schedule", restore)
 
     with pytest.raises(RuntimeError):
-        await companion._process_activity(_activity())
+        await companion._process_activity(_activity(state=_open_window()))
 
-    reschedule.assert_not_awaited()
+    restore.assert_not_awaited()
+
+
+async def test_failed_emit_restores_the_uncounted_window(monkeypatch):
+    _install_common(monkeypatch, messages=[])
+    monkeypatch.setattr(
+        companion.repo,
+        "list_untriggered_conditions",
+        AsyncMock(return_value=[_condition()]),
+    )
+    monkeypatch.setattr(
+        recognition,
+        "_guard_visible_message",
+        AsyncMock(return_value="慢慢逛，我陪着你。"),
+    )
+    monkeypatch.setattr(
+        companion.repo,
+        "reserve_companion_send",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        companion.chat_emit,
+        "emit_assistant",
+        AsyncMock(return_value=""),
+    )
+    restore = AsyncMock()
+    monkeypatch.setattr(companion.repo, "restore_companion_schedule", restore)
+
+    assert await companion._process_activity(_activity(state=_open_window())) is False
+    restored = restore.await_args.kwargs["state"]
+    assert restored["activity_sent"] == 0
+    assert restored["segment_sent"] == 0
 
 
 async def test_guarded_emit_drops_message_when_user_replied_after_reservation(
@@ -328,9 +561,7 @@ async def test_companion_provider_failure_is_not_counted_as_normal_silence(
     monkeypatch.setattr(
         companion,
         "get_prompt_text",
-        AsyncMock(
-            return_value=defaults.OFFLINE_ACTIVITY_COMPANION_DECISION_PROMPT
-        ),
+        AsyncMock(return_value=defaults.OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT),
     )
     monkeypatch.setattr(
         companion,
@@ -339,35 +570,191 @@ async def test_companion_provider_failure_is_not_counted_as_normal_silence(
     )
 
     with pytest.raises(companion.CompanionDecisionGenerationError):
-        await companion._generate_decision(
+        await companion._generate_companion_message(
+            action="social",
             activity=_activity(),
+            ctx={},
             messages=[],
-            safe_hint="留意颜色与明暗",
-            activity_phase="guided",
-            recent_modes=[],
-            unanswered=0,
+            safe_hint="",
         )
 
 
-async def test_user_interaction_resumes_paused_companion(monkeypatch):
+async def test_generation_failure_retries_inside_the_window(monkeypatch):
+    _install_common(monkeypatch, messages=[])
+    monkeypatch.setattr(
+        companion.repo,
+        "list_untriggered_conditions",
+        AsyncMock(return_value=[_condition()]),
+    )
+    monkeypatch.setattr(
+        companion,
+        "_generate_companion_message",
+        AsyncMock(side_effect=RuntimeError("provider down")),
+    )
+
+    assert await companion._process_activity(_activity(state=_open_window())) is False
+    saved = companion.repo.save_companion_decision.await_args.kwargs
+    assert saved["state"]["activity_sent"] == 0
+    assert saved["state"]["window_index"] == 2
+    assert saved["next_companion_at"] is not None
+
+
+async def test_arrival_guide_starts_opening_once(monkeypatch):
+    monkeypatch.setattr(
+        companion.repo,
+        "get_activity",
+        AsyncMock(return_value={"reached": True, "companion_state": {}}),
+    )
+    schedule = AsyncMock()
+    monkeypatch.setattr(companion.repo, "schedule_opening_unless_replied", schedule)
+
+    await companion.start_opening_segment("activity-1", "user-1")
+
+    state = schedule.await_args.args[1]
+    due = schedule.await_args.args[2]
+    assert state["phase"] == "opening"
+    assert state["segment_sent"] == 0
+    assert state["activity_sent"] == 0
+    assert due > datetime.now(UTC) - timedelta(seconds=1)
+    assert due < datetime.now(UTC) + timedelta(minutes=1)
+
+    schedule.reset_mock()
+    monkeypatch.setattr(
+        companion.repo,
+        "get_activity",
+        AsyncMock(
+            return_value={
+                "reached": True,
+                "companion_state": {"phase": "opening", "awaiting_passive_reply": True},
+            }
+        ),
+    )
+    await companion.start_opening_segment("activity-1", "user-1")
+    schedule.assert_not_awaited()
+
+
+async def test_user_reply_cancels_pending_companion_without_starting_followup(
+    monkeypatch,
+):
     monkeypatch.setattr(
         companion.repo,
         "get_current_reached_activity",
         AsyncMock(
             return_value={
                 "id": "activity-1",
-                "status": "accepted",
-                "reached": True,
+                "companion_state": _open_window(activity_sent=1, segment_sent=1),
             }
         ),
     )
-    touch = AsyncMock()
-    monkeypatch.setattr(companion.repo, "touch_activity_interaction", touch)
+    cancel = AsyncMock()
+    monkeypatch.setattr(companion.repo, "cancel_pending_companion", cancel)
 
     await companion.note_user_interaction("user-1", "workspace-1")
 
-    touch.assert_awaited_once()
-    assert touch.await_args.kwargs["next_companion_at"] > datetime.now(UTC)
+    cancel.assert_awaited_once()
+    assert cancel.await_args.args[0] == "activity-1"
+    assert cancel.await_args.args[1]
+
+
+async def test_passive_reply_starts_followup_after_the_reply_is_stored(monkeypatch):
+    monkeypatch.setattr(
+        companion.db,
+        "conversation",
+        SimpleNamespace(
+            find_unique=AsyncMock(
+                return_value=SimpleNamespace(
+                    userId="user-1",
+                    workspaceId="workspace-1",
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        companion.repo,
+        "get_current_reached_activity",
+        AsyncMock(
+            return_value={
+                "id": "activity-1",
+                "companion_state": {
+                    "phase": "opening",
+                    "activity_sent": 1,
+                    "segment_sent": 1,
+                    "recent_modes": ["social"],
+                    "awaiting_passive_reply": True,
+                    "reply_token": "token-user-1",
+                },
+            }
+        ),
+    )
+    schedule = AsyncMock()
+    monkeypatch.setattr(companion.repo, "schedule_followup_if_token", schedule)
+    monkeypatch.setattr(companion, "_wait_minutes", lambda rng=None: 2)
+    monkeypatch.setattr(companion, "_unit", lambda rng=None: 0.0)
+
+    before = datetime.now(UTC)
+    await companion.note_passive_reply("conversation-1")
+
+    state = schedule.await_args.args[1]
+    due = schedule.await_args.args[2]
+    assert state["phase"] == "followup"
+    assert state["segment_sent"] == 0
+    assert state["activity_sent"] == 1
+    assert state["awaiting_passive_reply"] is False
+    assert schedule.await_args.args[3] == "token-user-1"
+    assert due >= before + timedelta(minutes=2)
+
+
+async def test_passive_reply_ignores_a_turn_that_did_not_cancel_companion(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        companion.db,
+        "conversation",
+        SimpleNamespace(
+            find_unique=AsyncMock(
+                return_value=SimpleNamespace(
+                    userId="user-1",
+                    workspaceId="workspace-1",
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        companion.repo,
+        "get_current_reached_activity",
+        AsyncMock(
+            return_value={
+                "id": "activity-1",
+                "companion_state": _open_window(),
+            }
+        ),
+    )
+    schedule = AsyncMock()
+    monkeypatch.setattr(companion.repo, "schedule_followup_if_token", schedule)
+
+    await companion.note_passive_reply("conversation-1")
+
+    schedule.assert_not_awaited()
+
+
+def test_companion_clock_updates_are_fenced_in_sql():
+    cancel_sql = inspect.getsource(offline_repo.cancel_pending_companion)
+    opening_sql = inspect.getsource(offline_repo.schedule_opening_unless_replied)
+    followup_sql = inspect.getsource(offline_repo.schedule_followup_if_token)
+    restore_sql = inspect.getsource(offline_repo.restore_companion_schedule)
+    mark_sql = inspect.getsource(offline_repo.mark_companion_sent)
+
+    assert "jsonb_build_object" in cancel_sql
+    assert "reply_token" in cancel_sql
+    assert "companion_state = $2::jsonb" not in cancel_sql
+    assert "awaiting_passive_reply" in opening_sql
+    assert "reply_token" in followup_sql
+    assert "companion_state->>'activity_sent'" in followup_sql
+    assert "awaiting_passive_reply" in restore_sql
+    assert "reply_token" in restore_sql
+    assert "delivery_key" in mark_sql
+    assert "awaiting_passive_reply" in mark_sql
+    assert "reply_token" in mark_sql
 
 
 async def test_disabled_companion_does_not_take_over_proactive_channel(monkeypatch):

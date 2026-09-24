@@ -213,6 +213,16 @@ async def save_replies(
                 ))
             except Exception as achievement_err:
                 logger.debug(f"[ACH] assistant turn hook skipped: {achievement_err}")
+        if first_message_id:
+            try:
+                from app.services.offline.activity_companion import note_passive_reply
+
+                fire_background(note_passive_reply(conversation_id))
+            except Exception as companion_err:
+                logger.debug(
+                    "[offline-companion] passive reply hook skipped: %s",
+                    companion_err,
+                )
         return first_message_id
     except Exception as e:
         logger.error(f"Failed to save replies: {e}")

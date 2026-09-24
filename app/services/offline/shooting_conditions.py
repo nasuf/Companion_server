@@ -10,10 +10,8 @@ import json
 import logging
 import random
 import re
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.config import settings
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline import fragment_pregen
 from app.services.offline import repository as repo
@@ -48,7 +46,6 @@ async def generate_items_for_activity(activity: dict[str, Any]) -> None:
         user_id=activity["user_id"],
         items=selected,
         focus_index=focus_index,
-        next_companion_at=_initial_companion_due(),
     )
     logger.info(
         "[offline-items] activity=%s targets=%d created=%s",
@@ -71,14 +68,7 @@ async def _initialize_companion(
         activity["id"],
         activity["user_id"],
         focus_condition_id=str(focus["id"]),
-        next_companion_at=_initial_companion_due(),
     )
-
-
-def _initial_companion_due() -> datetime:
-    low = max(1, int(settings.offline_activity_companion_min_interval_minutes))
-    high = max(low, int(settings.offline_activity_companion_max_interval_minutes))
-    return datetime.now(UTC) + timedelta(minutes=random.randint(low, high))
 
 
 async def recover_unready_reached_activities() -> dict[str, int]:

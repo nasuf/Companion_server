@@ -835,7 +835,6 @@ async def replace_shooting_items_and_initialize(
     user_id: str,
     items: list[dict[str, Any]],
     focus_index: int,
-    next_companion_at: datetime,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Atomically replace a partial set and mark the active activity ready."""
     prepared: list[dict[str, Any]] = []
@@ -923,11 +922,6 @@ async def replace_shooting_items_and_initialize(
             UPDATE offline_activity_recommendations
             SET conditions_ready_at = CURRENT_TIMESTAMP,
                 focus_condition_id = $3,
-                next_companion_at = $4::timestamptz,
-                companion_claim_token = NULL,
-                companion_claimed_at = NULL,
-                companion_state = COALESCE(companion_state, '{}'::jsonb)
-                    || '{"mode":"guided","unanswered_count":0,"recent_modes":[]}'::jsonb,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1 AND user_id = $2
               AND status = 'accepted' AND reached = TRUE
@@ -936,7 +930,6 @@ async def replace_shooting_items_and_initialize(
             recommendation_id,
             user_id,
             focus["id"],
-            next_companion_at,
         )
         if not rows:
             raise RuntimeError("activity no longer eligible for condition initialization")
@@ -1050,20 +1043,13 @@ async def mark_conditions_ready(
     user_id: str,
     *,
     focus_condition_id: str | None = None,
-    next_companion_at: datetime | None = None,
 ) -> None:
+    """Mark targets ready without touching the companion clock."""
     await db.execute_raw(
         """
         UPDATE offline_activity_recommendations
         SET conditions_ready_at = CURRENT_TIMESTAMP,
             focus_condition_id = COALESCE($3, focus_condition_id),
-            next_companion_at = COALESCE($4::timestamptz, next_companion_at),
-            companion_state = COALESCE(companion_state, '{}'::jsonb)
-                || jsonb_build_object(
-                    'mode', 'guided',
-                    'unanswered_count', 0,
-                    'recent_modes', '[]'::jsonb
-                ),
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND user_id = $2
           AND status = 'accepted' AND reached = TRUE
@@ -1071,7 +1057,6 @@ async def mark_conditions_ready(
         recommendation_id,
         user_id,
         focus_condition_id,
-        next_companion_at,
     )
 
 
@@ -1274,29 +1259,128 @@ async def reset_activity_misses(recommendation_id: str) -> None:
     )
 
 
-async def touch_activity_interaction(
+async def cancel_pending_companion(
     recommendation_id: str,
-    *,
-    next_companion_at: datetime | None = None,
+    reply_token: str,
 ) -> None:
-    """A user interaction resumes companionship and clears ignored-push backoff."""
+    """Cancel a not-yet-sent line without copying counts from a stale read.
+
+    Merges only the cancel flag and a reply token. An in-flight delivery key
+    stays in place so a failed emit can still roll the reserved send back.
+    """
     await db.execute_raw(
         """
         UPDATE offline_activity_recommendations
-        SET next_companion_at = COALESCE($2::timestamptz, next_companion_at),
+        SET next_companion_at = NULL,
             companion_claim_token = NULL,
             companion_claimed_at = NULL,
-            companion_state = COALESCE(companion_state, '{}'::jsonb)
-                || jsonb_build_object(
-                    'unanswered_count', 0,
-                    'last_user_interaction_at', CURRENT_TIMESTAMP
-                ),
+            companion_state = CASE
+                WHEN COALESCE(
+                    NULLIF(companion_state->>'activity_sent', '')::int,
+                    0
+                ) >= 5 THEN
+                    COALESCE(companion_state, '{}'::jsonb) || jsonb_build_object(
+                        'phase', 'stopped',
+                        'awaiting_passive_reply', false
+                    )
+                ELSE
+                    COALESCE(companion_state, '{}'::jsonb) || jsonb_build_object(
+                        'awaiting_passive_reply', true,
+                        'reply_token', $2::text
+                    )
+            END,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND status = 'accepted' AND reached = TRUE
         """,
         recommendation_id,
+        reply_token,
+    )
+
+
+async def schedule_opening_unless_replied(
+    recommendation_id: str,
+    state: dict[str, Any],
+    next_companion_at: datetime,
+) -> bool:
+    """Start the opening clock unless a user reply already cancelled it."""
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET companion_state = $2::jsonb,
+            next_companion_at = $3::timestamptz,
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'accepted' AND reached = TRUE
+          AND COALESCE(companion_state->>'awaiting_passive_reply', '') <> 'true'
+          AND COALESCE(companion_state->>'phase', '') NOT IN (
+              'opening', 'followup', 'stopped'
+          )
+        RETURNING id
+        """,
+        recommendation_id,
+        json.dumps(state, ensure_ascii=False),
         next_companion_at,
     )
+    return bool(rows)
+
+
+async def schedule_followup_if_token(
+    recommendation_id: str,
+    state: dict[str, Any],
+    next_companion_at: datetime,
+    reply_token: str,
+) -> bool:
+    """Start follow-up only for the user turn that is still waiting.
+
+    Counts and recent modes are taken from the row at update time, so a
+    reserved send that later rolls back cannot be copied in from a stale read.
+    """
+    rows = await db.query_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET companion_state = $2::jsonb || jsonb_build_object(
+                'activity_sent',
+                COALESCE(NULLIF(companion_state->>'activity_sent', '')::int, 0),
+                'recent_modes',
+                COALESCE(companion_state->'recent_modes', '[]'::jsonb)
+            ),
+            next_companion_at = $3::timestamptz,
+            companion_claim_token = NULL,
+            companion_claimed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'accepted' AND reached = TRUE
+          AND companion_state->>'reply_token' = $4
+          AND companion_state->>'awaiting_passive_reply' = 'true'
+          AND COALESCE(NULLIF(companion_state->>'activity_sent', '')::int, 0) < 5
+        RETURNING id
+        """,
+        recommendation_id,
+        json.dumps(state, ensure_ascii=False),
+        next_companion_at,
+        reply_token,
+    )
+    if rows:
+        return True
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET next_companion_at = NULL,
+            companion_state = COALESCE(companion_state, '{}'::jsonb)
+                || jsonb_build_object(
+                    'phase', 'stopped',
+                    'awaiting_passive_reply', false
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'accepted' AND reached = TRUE
+          AND companion_state->>'reply_token' = $2
+          AND companion_state->>'awaiting_passive_reply' = 'true'
+          AND COALESCE(NULLIF(companion_state->>'activity_sent', '')::int, 0) >= 5
+        """,
+        recommendation_id,
+        reply_token,
+    )
+    return False
 
 
 async def claim_due_companion_activities(
@@ -1323,7 +1407,6 @@ async def claim_due_companion_activities(
             FROM offline_activity_recommendations
             WHERE status = 'accepted'
               AND reached = TRUE
-              AND conditions_ready_at IS NOT NULL
               AND next_companion_at IS NOT NULL
               AND next_companion_at <= CURRENT_TIMESTAMP
               AND id IN (SELECT id FROM ranked WHERE rn = 1)
@@ -1388,9 +1471,9 @@ async def reserve_companion_send(
     claim_token: str,
     delivery_key: str,
     state: dict[str, Any],
-    next_companion_at: datetime,
+    next_companion_at: datetime | None,
 ) -> bool:
-    """Fence the claim before delivery; a crash may skip one turn, never duplicate it."""
+    """Fence the claim before delivery. last_companion_at stays unchanged until emit succeeds."""
     state = {**state, "delivery_key": delivery_key}
     rows = await db.query_raw(
         """
@@ -1400,7 +1483,6 @@ async def reserve_companion_send(
                     'delivery_reserved_at', CURRENT_TIMESTAMP
                 ),
             next_companion_at = $4::timestamptz,
-            last_companion_at = CURRENT_TIMESTAMP,
             companion_claim_token = NULL,
             companion_claimed_at = NULL,
             updated_at = CURRENT_TIMESTAMP
@@ -1417,6 +1499,50 @@ async def reserve_companion_send(
     return bool(rows)
 
 
+async def mark_companion_sent(
+    recommendation_id: str,
+    delivery_key: str,
+    state: dict[str, Any],
+    next_companion_at: datetime | None,
+) -> None:
+    """Commit the counted state only after the guarded insert has landed.
+
+    A user reply that landed after the insert keeps its token. The follow-up
+    clock owns the next schedule, so this update must not replace it.
+    """
+    cleaned = {
+        key: value
+        for key, value in state.items()
+        if key not in {"delivery_key", "delivery_reserved_at", "reply_token"}
+    }
+    await db.execute_raw(
+        """
+        UPDATE offline_activity_recommendations
+        SET companion_state = $3::jsonb || CASE
+                WHEN companion_state->>'awaiting_passive_reply' = 'true' THEN
+                    jsonb_build_object(
+                        'awaiting_passive_reply', true,
+                        'reply_token', companion_state->>'reply_token'
+                    )
+                ELSE '{}'::jsonb
+            END,
+            next_companion_at = CASE
+                WHEN companion_state->>'awaiting_passive_reply' = 'true' THEN NULL
+                ELSE $4::timestamptz
+            END,
+            last_companion_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND status = 'accepted' AND reached = TRUE
+          AND companion_state->>'delivery_key' = $2
+        """,
+        recommendation_id,
+        delivery_key,
+        json.dumps(cleaned, ensure_ascii=False),
+        next_companion_at,
+    )
+
+
 async def companion_message_exists(delivery_key: str) -> bool:
     rows = await db.query_raw(
         """
@@ -1430,28 +1556,41 @@ async def companion_message_exists(delivery_key: str) -> bool:
     return bool(rows)
 
 
-async def cancel_guarded_companion_delivery(
+async def restore_companion_schedule(
     recommendation_id: str,
     *,
     delivery_key: str,
+    state: dict[str, Any],
+    next_companion_at: datetime | None,
     previous_last_companion_at: datetime | str | None,
 ) -> None:
+    """Roll a reserved send back only while this delivery key is still current.
+
+    A cancel already on the row keeps its own reply token. Otherwise a token
+    in the restored state remains, so follow-up can start if the user hook
+    never wrote one.
+    """
+    cleaned = {
+        key: value
+        for key, value in state.items()
+        if key not in {"delivery_key", "delivery_reserved_at"}
+    }
     await db.execute_raw(
         """
         UPDATE offline_activity_recommendations
-        SET last_companion_at = $3::timestamptz,
-            companion_state = COALESCE(companion_state, '{}'::jsonb)
-                || jsonb_build_object(
-                    'delivery_canceled', true,
-                    'unanswered_count',
-                    GREATEST(
-                        COALESCE(
-                            NULLIF(companion_state->>'unanswered_count', '')::int,
-                            0
-                        ) - 1,
-                        0
+        SET companion_state = $3::jsonb || CASE
+                WHEN companion_state->>'awaiting_passive_reply' = 'true' THEN
+                    jsonb_build_object(
+                        'awaiting_passive_reply', true,
+                        'reply_token', companion_state->>'reply_token'
                     )
-                ),
+                ELSE '{}'::jsonb
+            END,
+            next_companion_at = CASE
+                WHEN companion_state->>'awaiting_passive_reply' = 'true' THEN NULL
+                ELSE $4::timestamptz
+            END,
+            last_companion_at = $5::timestamptz,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1
           AND status = 'accepted' AND reached = TRUE
@@ -1459,41 +1598,7 @@ async def cancel_guarded_companion_delivery(
         """,
         recommendation_id,
         delivery_key,
-        previous_last_companion_at,
-    )
-
-
-async def reschedule_failed_companion_delivery(
-    recommendation_id: str,
-    *,
-    delivery_key: str,
-    next_companion_at: datetime,
-    previous_last_companion_at: datetime | str | None,
-) -> None:
-    await db.execute_raw(
-        """
-        UPDATE offline_activity_recommendations
-        SET next_companion_at = $3::timestamptz,
-            last_companion_at = $4::timestamptz,
-            companion_state = COALESCE(companion_state, '{}'::jsonb)
-                || jsonb_build_object(
-                    'delivery_failed', true,
-                    'unanswered_count',
-                    GREATEST(
-                        COALESCE(
-                            NULLIF(companion_state->>'unanswered_count', '')::int,
-                            0
-                        ) - 1,
-                        0
-                    )
-                ),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-          AND status = 'accepted' AND reached = TRUE
-          AND companion_state->>'delivery_key' = $2
-        """,
-        recommendation_id,
-        delivery_key,
+        json.dumps(cleaned, ensure_ascii=False),
         next_companion_at,
         previous_last_companion_at,
     )
