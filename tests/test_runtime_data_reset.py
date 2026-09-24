@@ -52,6 +52,64 @@ async def test_hard_delete_agent_data_does_not_require_removed_emotion_delegate(
 
 
 @pytest.mark.asyncio
+async def test_hard_delete_agent_data_removes_agent_scoped_game_rows(monkeypatch):
+    """Play history follows the agent. The account point wallet is not touched."""
+    executed: list[tuple[str, tuple]] = []
+
+    async def execute_raw(sql, *args):
+        compact = " ".join(sql.split())
+        executed.append((compact, args))
+        if compact.startswith("DELETE FROM game_events"):
+            return 9
+        if compact.startswith("DELETE FROM game_sessions"):
+            return 4
+        if compact.startswith("DELETE FROM native_game_skill_states"):
+            return 2
+        return 0
+
+    fake_db = SimpleNamespace(
+        chatworkspace=_Delegate(),
+        conversation=_Delegate(),
+        usermemory=_Delegate(),
+        aimemory=_Delegate(),
+        userprofile=_Delegate(),
+        memorychangelog=_Delegate(),
+        message=_Delegate(),
+        intimacy=_Delegate(),
+        aidailyschedule=_Delegate(),
+        traitfeedbacklog=_Delegate(),
+        proactivechatlog=_Delegate(),
+        proactivecounter=_Delegate(),
+        timetrigger=_Delegate(),
+        userportrait=_Delegate(),
+        aiagent=_Delegate(),
+        execute_raw=execute_raw,
+        query_raw=AsyncMock(return_value=[]),
+    )
+    fake_redis = SimpleNamespace(
+        delete=AsyncMock(return_value=0),
+        zrem=AsyncMock(return_value=0),
+        scan=AsyncMock(return_value=(0, [])),
+    )
+    monkeypatch.setattr(data_reset, "db", fake_db)
+    monkeypatch.setattr(data_reset, "get_redis", AsyncMock(return_value=fake_redis))
+
+    stats = await data_reset.hard_delete_agent_data("agent-1", "user-1")
+
+    game_sql = [sql for sql, _args in executed if "game_" in sql or "native_game_skill" in sql]
+    assert any(sql.startswith("DELETE FROM game_events") for sql in game_sql)
+    assert any(sql.startswith("DELETE FROM game_sessions") for sql in game_sql)
+    events_at = next(i for i, sql in enumerate(game_sql) if sql.startswith("DELETE FROM game_events"))
+    sessions_at = next(i for i, sql in enumerate(game_sql) if sql.startswith("DELETE FROM game_sessions"))
+    assert events_at < sessions_at
+    assert ("agent-1", "user-1") in {args for _sql, args in executed if "game_sessions" in _sql}
+    assert stats["game_events"] == 9
+    assert stats["game_sessions"] == 4
+    assert stats["native_game_skill_states"] == 2
+    assert not any("user_game_wallets" in sql or "game_point_ledger" in sql for sql, _args in executed)
+
+
+@pytest.mark.asyncio
 async def test_hard_delete_agent_data_removes_chat_media_files(monkeypatch, tmp_path):
     scoped_prefix = data_reset.chat_media_storage.conversation_storage_prefix(
         "user-1",

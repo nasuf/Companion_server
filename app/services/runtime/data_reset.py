@@ -926,6 +926,50 @@ async def _clear_redis(agent_id: str, user_id: str, conv_ids: list[str]) -> int:
     return deleted
 
 
+async def _delete_agent_game_rows(user_id: str, agent_id: str) -> dict[str, int]:
+    """Remove play history that belongs to this agent, not the account.
+
+    Sessions, their events, and per-agent skill state follow ``agent_id``.
+    ``user_game_wallets`` and ``game_point_ledger`` follow ``user_id`` only,
+    so deleting a friend must not zero the account balance.
+    """
+    stats: dict[str, int] = {}
+    await _execute_counted(
+        stats,
+        "game_events",
+        """
+        DELETE FROM game_events
+        WHERE session_id IN (
+            SELECT id FROM game_sessions
+            WHERE agent_id = $1 AND user_id = $2
+        )
+        """,
+        agent_id,
+        user_id,
+    )
+    await _execute_counted(
+        stats,
+        "game_sessions",
+        """
+        DELETE FROM game_sessions
+        WHERE agent_id = $1 AND user_id = $2
+        """,
+        agent_id,
+        user_id,
+    )
+    await _execute_counted(
+        stats,
+        "native_game_skill_states",
+        """
+        DELETE FROM native_game_skill_states
+        WHERE agent_id = $1 AND user_id = $2
+        """,
+        agent_id,
+        user_id,
+    )
+    return stats
+
+
 async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
     """彻底物理删除用户与某个 Agent 的全部数据，不影响其他 Agent。"""
     stats: dict[str, int] = {}
@@ -1132,6 +1176,12 @@ async def hard_delete_agent_data(agent_id: str, user_id: str) -> dict:
 
     # Plan B 后已无 character_profiles 表 (DROP 见 migration 20260427180000),
     # 旧 UPDATE 解绑逻辑随之失效, 此处不再需要任何 hook.
+
+    # Game rows are agent-scoped. Delete them explicitly so the count is
+    # visible to the client; the agent FK cascade would otherwise drop them
+    # silently when the agent row goes. The point wallet stays: it is keyed
+    # only by user_id.
+    _merge_stats(stats, await _delete_agent_game_rows(user_id, agent_id))
 
     # 10. 删除 Agent 本身
     await db.aiagent.delete(where={"id": agent_id})
