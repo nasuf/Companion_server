@@ -28,7 +28,7 @@ _TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 _audio_cache: dict[tuple[str, str, str, int], tuple[float, MusicTrack]] = {}
 _LIBRARY_CATALOG = {
     "focus": ("专注", "Jamendo 纯音乐"),
-    "ambient": ("Ambient", "氛围陪伴"),
+    "ambient": ("氛围", "氛围陪伴"),
     "sleep": ("助眠", "轻柔放松"),
     "relax": ("放松", "Relaxing tag"),
     "acoustic": ("原声", "温暖轻听"),
