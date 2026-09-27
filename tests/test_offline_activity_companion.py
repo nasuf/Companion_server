@@ -88,6 +88,16 @@ def _install_common(monkeypatch, *, messages, idle=True, last_ai_at=None):
     )
     monkeypatch.setattr(
         companion,
+        "_select_companion_topic",
+        AsyncMock(return_value="观察"),
+    )
+    monkeypatch.setattr(
+        companion,
+        "_user_memory_and_preference",
+        AsyncMock(return_value=("（无）", "（无）")),
+    )
+    monkeypatch.setattr(
+        companion,
         "_generate_companion_message",
         AsyncMock(return_value="慢慢逛，我陪着你。"),
     )
@@ -342,6 +352,26 @@ def test_hint_is_skipped_when_it_was_used_in_the_last_three_sends():
     )
 
 
+def test_topic_rotation_skips_recent_topics_and_the_latest_repeat():
+    assert companion._rotate_topic([]) == "观察"
+    assert companion._rotate_topic(["观察", "social"]) == "感受"
+    assert companion._rotate_topic(["观察", "感受", "杂谈"]) == "观察"
+    assert companion._rotate_topic(["杂谈"]) != "杂谈"
+
+
+def test_visible_copy_clips_on_a_sentence_break():
+    from app.services.offline.prompt_fields import clip_text, district_from_address, location_fields
+
+    text = "这一段已经写完。\n第二段也完整。第三段被截断不要出现"
+    assert clip_text(text, 20) == "这一段已经写完。\n第二段也完整。"
+    assert clip_text("短文", 20) == "短文"
+    assert district_from_address("镇江市京口区梦溪园") == "京口区"
+    assert district_from_address("杭州西湖景区") == ""
+    fields = location_fields({"title": "逛园", "location_name": "镇江市京口区梦溪园"})
+    assert fields["district"] == "京口区"
+    assert fields["address"] == "镇江市京口区梦溪园"
+
+
 async def test_two_minute_gap_does_not_generate_a_message(monkeypatch):
     now = datetime.now(UTC)
     anchor = now - timedelta(seconds=20)
@@ -415,7 +445,7 @@ async def test_social_companion_message_is_sent_and_counted(monkeypatch):
     marked = companion.repo.mark_companion_sent.await_args.args
     assert marked[2]["activity_sent"] == 1
     assert marked[2]["segment_sent"] == 1
-    assert marked[2]["recent_modes"] == ["social"]
+    assert marked[2]["recent_modes"] == ["观察"]
 
 
 async def test_activity_cap_does_not_send(monkeypatch):
@@ -561,7 +591,7 @@ async def test_companion_provider_failure_is_not_counted_as_normal_silence(
     monkeypatch.setattr(
         companion,
         "get_prompt_text",
-        AsyncMock(return_value=defaults.OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT),
+        AsyncMock(return_value=defaults.OFFLINE_ACTIVITY_COMPANION_OBSERVE_PROMPT),
     )
     monkeypatch.setattr(
         companion,
@@ -571,11 +601,12 @@ async def test_companion_provider_failure_is_not_counted_as_normal_silence(
 
     with pytest.raises(companion.CompanionDecisionGenerationError):
         await companion._generate_companion_message(
-            action="social",
+            topic="观察",
             activity=_activity(),
             ctx={},
             messages=[],
-            safe_hint="",
+            user_memory="（无）",
+            user_preference="（无）",
         )
 
 
@@ -1015,6 +1046,23 @@ def test_all_new_companion_prompts_are_managed_by_defaults_registry():
         "offline.activity_companion_message": (
             defaults.OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT
         ),
+        "offline.activity_companion_topic": (
+            defaults.OFFLINE_ACTIVITY_COMPANION_TOPIC_PROMPT
+        ),
+        "offline.activity_companion_observe": (
+            defaults.OFFLINE_ACTIVITY_COMPANION_OBSERVE_PROMPT
+        ),
+        "offline.activity_companion_feeling": (
+            defaults.OFFLINE_ACTIVITY_COMPANION_FEELING_PROMPT
+        ),
+        "offline.activity_companion_casual": (
+            defaults.OFFLINE_ACTIVITY_COMPANION_CASUAL_PROMPT
+        ),
+        "offline.activity_recommendation_copy": (
+            defaults.OFFLINE_ACTIVITY_RECOMMENDATION_COPY_PROMPT
+        ),
+        "offline.arrival_guide": defaults.OFFLINE_ARRIVAL_GUIDE_PROMPT,
+        "offline.memory_note": defaults.OFFLINE_MEMORY_NOTE_PROMPT,
         "offline.safe_rewrite": defaults.OFFLINE_SAFE_REWRITE_PROMPT,
     }
 
@@ -1029,6 +1077,11 @@ def test_user_visible_prompts_do_not_accept_hidden_target_placeholders():
         + defaults.OFFLINE_PHOTO_FOLLOWUP_NEAR_PROMPT
         + defaults.OFFLINE_PHOTO_FOLLOWUP_FREE_ROAM_PROMPT
         + defaults.OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT
+        + defaults.OFFLINE_ACTIVITY_COMPANION_TOPIC_PROMPT
+        + defaults.OFFLINE_ACTIVITY_COMPANION_OBSERVE_PROMPT
+        + defaults.OFFLINE_ACTIVITY_COMPANION_FEELING_PROMPT
+        + defaults.OFFLINE_ACTIVITY_COMPANION_CASUAL_PROMPT
+        + defaults.OFFLINE_ARRIVAL_GUIDE_PROMPT
     )
 
     assert "{hintable_items}" not in visible

@@ -17,7 +17,11 @@ _FALLBACK_BODY = "这一趟走得很轻，把当下的光和风都收进了心�
 
 async def generate_note(
     *,
-    activity_info: str,
+    activity_name: str,
+    location: str,
+    activity_type: str,
+    arrival_time: str,
+    weather: str,
     dialogue: str,
     voice_transcripts: str,
     photo_keywords: str,
@@ -25,7 +29,11 @@ async def generate_note(
 ) -> dict[str, Any]:
     try:
         prompt = (await get_prompt_text("offline.memory_note")).format(
-            activity_info=activity_info,
+            activity_name=activity_name or "这次外出",
+            location=location or "（未提供）",
+            type=activity_type or "线下活动",
+            arrival_time=arrival_time or "（未提供）",
+            weather=weather or "（未提供）",
             dialogue=dialogue or "（无）",
             voice_transcripts=voice_transcripts or "（无）",
             photo_keywords=photo_keywords or "（无）",

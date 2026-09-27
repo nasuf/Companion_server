@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline.activity_images import persist_activity_images
+from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
 from app.services.offline.providers.search import SearchResult, tavily_search
 from app.services.offline import repository as repo
 from app.services.prompting.store import get_prompt_text
@@ -784,7 +785,47 @@ async def generate_activity_card(
     card["city"] = city
     card["source"] = source
     card["expires_at"] = now + timedelta(days=14)
+    copy = await _recommendation_copy(card)
+    if copy:
+        card["description"] = copy
     return card
+
+
+def _date_time_text(card: dict[str, Any]) -> str:
+    start = str(card.get("starts_at") or "").strip()
+    end = str(card.get("ends_at") or "").strip()
+    if start and end:
+        return f"{start} 至 {end}"
+    return start or "长期"
+
+
+async def _recommendation_copy(card: dict[str, Any]) -> str:
+    """Detail-page seed copy. A failure keeps the short structured description."""
+    try:
+        prompt = (await get_prompt_text("offline.activity_recommendation_copy")).format(
+            activity_name=filled(card.get("title"), empty="这次外出"),
+            date_time=_date_time_text(card),
+            location=filled(
+                " ".join(
+                    part
+                    for part in (
+                        str(card.get("location_name") or "").strip(),
+                        str(card.get("address") or "").strip(),
+                    )
+                    if part
+                ),
+                empty="（未提供）",
+            ),
+            category=filled(card.get("category"), empty="线下活动"),
+            description=filled(card.get("description") or card.get("summary"), empty="（无）"),
+            official_link=filled(card.get("official_url"), empty="（无）"),
+            activity_summary=filled(card.get("summary"), empty="（无）"),
+            recommendation_blurb=filled(card.get("summary"), empty="（无）"),
+        )
+        return clip_text(parse_text_field(await invoke_text(get_chat_model(), prompt)), 500)
+    except Exception as exc:
+        logger.warning("[offline] recommendation copy failed: %s", exc)
+        return ""
 
 
 async def generate_activity_invite_message(

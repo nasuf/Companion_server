@@ -87,8 +87,13 @@ from app.services.prompting.defaults import (
     MEDIUM_MEMORY_REPLY_PROMPT,
     MEDIUM_PATIENCE_REPLY_PROMPT,
     OFFLINE_ACTIVITY_CARD_PROMPT,
+    OFFLINE_ACTIVITY_COMPANION_CASUAL_PROMPT,
     OFFLINE_ACTIVITY_COMPANION_DECISION_PROMPT,
+    OFFLINE_ACTIVITY_COMPANION_FEELING_PROMPT,
     OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT,
+    OFFLINE_ACTIVITY_COMPANION_OBSERVE_PROMPT,
+    OFFLINE_ACTIVITY_COMPANION_TOPIC_PROMPT,
+    OFFLINE_ACTIVITY_RECOMMENDATION_COPY_PROMPT,
     OFFLINE_ACTIVITY_INVITE_MESSAGE_PROMPT,
     OFFLINE_ARRIVAL_GUIDE_PROMPT,
     OFFLINE_FRAGMENT_PREWRITE_PROMPT,
@@ -296,8 +301,8 @@ PROMPT_DEFINITIONS = [
         OFFLINE_FRAGMENT_VERBALIZE_PROMPT,
     ),
     PromptDefinition(
-        "offline.arrival_guide", "线下到达拍照引导", "线下互动", "线下活动",
-        "【工程扩展】打卡闭环. 到达后自动发一句鼓励拍照的陪伴语, 严禁透露拍摄目标.",
+        "offline.arrival_guide", "到达后首条主动消息", "线下互动", "线下活动",
+        "【活动提示词】用户到达后、尚未开口时，围绕当前地点发一条朋友式主动消息。",
         OFFLINE_ARRIVAL_GUIDE_PROMPT,
     ),
     PromptDefinition(
@@ -312,8 +317,33 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "offline.activity_companion_message", "线下活动持续陪伴文案", "线下互动", "线下活动",
-        "【工程扩展】自然活动陪伴. 根据已选表达方式和最近对话生成朋友式短消息, 不接收内部计数.",
+        "【工程扩展】旧版陪伴文案。发送路径已改走观察/感受/杂谈，本条保留注册以免覆盖历史版本。",
         OFFLINE_ACTIVITY_COMPANION_MESSAGE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_companion_topic", "活动主动话题判断", "线下互动", "线下活动",
+        "【活动提示词】时间窗命中后，判断下一句用观察、感受、杂谈，或均可。",
+        OFFLINE_ACTIVITY_COMPANION_TOPIC_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_companion_observe", "观察类主动消息", "线下互动", "线下活动",
+        "【活动提示词】引导用户看当前地点的环境、景物、细节或氛围。",
+        OFFLINE_ACTIVITY_COMPANION_OBSERVE_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_companion_feeling", "感受类主动消息", "线下互动", "线下活动",
+        "【活动提示词】关心用户在此刻此地的情绪、感受、想法或体验。",
+        OFFLINE_ACTIVITY_COMPANION_FEELING_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_companion_casual", "杂谈类主动消息", "线下互动", "线下活动",
+        "【活动提示词】围绕当前地点做没有明确目的的轻松闲聊。",
+        OFFLINE_ACTIVITY_COMPANION_CASUAL_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.activity_recommendation_copy", "活动详情推荐文案", "线下互动", "线下活动",
+        "【活动提示词】活动卡片详情页的种草文案，500 字以内、分块展示。",
+        OFFLINE_ACTIVITY_RECOMMENDATION_COPY_PROMPT,
     ),
     PromptDefinition(
         "offline.safe_rewrite", "线下陪伴目标泄露重写", "线下互动", "线下活动",
@@ -321,8 +351,8 @@ PROMPT_DEFINITIONS = [
         OFFLINE_SAFE_REWRITE_PROMPT,
     ),
     PromptDefinition(
-        "offline.memory_note", "线下记忆手札旅途小记", "线下互动", "线下活动",
-        "【工程扩展】打卡闭环. 回顾页汇总对话/语音/照片/碎片, 生成活动总结/旅途小记(标题+正文+标签).",
+        "offline.memory_note", "活动总结旅途小记", "线下互动", "线下活动",
+        "【活动提示词】把这次外出写成用户和好友的共同回忆，正文 300 字以内。",
         OFFLINE_MEMORY_NOTE_PROMPT,
     ),
     PromptDefinition(

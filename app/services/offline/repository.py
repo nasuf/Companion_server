@@ -1859,6 +1859,65 @@ async def list_gallery_media(recommendation_id: str) -> list[str]:
     return [str(_field(r, "url")) for r in rows if _field(r, "url")]
 
 
+async def list_activity_dialogue(
+    conversation_id: str | None,
+    since: str | None,
+) -> list[dict[str, Any]]:
+    """Messages from arrival onward, used as the memory-note dialogue."""
+    if not conversation_id:
+        return []
+    rows = await db.query_raw(
+        """
+        SELECT role, content, created_at
+        FROM messages
+        WHERE conversation_id = $1
+          AND role IN ('user', 'assistant')
+          AND ($2::timestamptz IS NULL OR created_at >= $2::timestamptz)
+        ORDER BY created_at ASC
+        LIMIT 80
+        """,
+        conversation_id,
+        since,
+    )
+    return [
+        {
+            "role": str(_field(row, "role") or ""),
+            "content": str(_field(row, "content") or ""),
+            "created_at": _field(row, "created_at", "createdAt"),
+        }
+        for row in rows or []
+    ]
+
+
+async def list_activity_photo_keywords(
+    conversation_id: str | None,
+    since: str | None,
+) -> list[str]:
+    """Vision summaries of photos sent during the activity."""
+    if not conversation_id:
+        return []
+    rows = await db.query_raw(
+        """
+        SELECT a.vision_summary
+        FROM chat_message_attachments a
+        JOIN messages m ON m.id = a.message_id
+        WHERE m.conversation_id = $1
+          AND a.kind = 'image'
+          AND COALESCE(a.vision_summary, '') <> ''
+          AND ($2::timestamptz IS NULL OR m.created_at >= $2::timestamptz)
+        ORDER BY m.created_at ASC
+        LIMIT 20
+        """,
+        conversation_id,
+        since,
+    )
+    return [
+        str(_field(row, "vision_summary", "visionSummary")).strip()
+        for row in rows or []
+        if str(_field(row, "vision_summary", "visionSummary") or "").strip()
+    ]
+
+
 async def list_voice_transcripts(recommendation_id: str) -> list[str]:
     """活动期间用户语音转写文本（chat_capture 归档为 kind=voice_transcript）。"""
     rows = await db.query_raw(

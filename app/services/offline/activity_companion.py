@@ -1,8 +1,8 @@
 """Conversation-first companionship for an active offline activity.
 
-Send timing follows the activity-period probability windows. A hit still
-uses the friend-like message prompt and the hidden-target rewrite. The
-model does not decide whether to speak.
+Send timing follows the activity-period probability windows. A hit asks the
+topic prompt for 观察 / 感受 / 杂谈, then writes that message. The model does
+not decide whether to speak. Hidden-target wording is still rewritten.
 """
 
 from __future__ import annotations
@@ -20,10 +20,11 @@ from uuid import uuid4
 from app.config import settings
 from app.db import db
 from app.observability.events import EVT_OFFLINE_COMPANION_DECISION
-from app.services.llm.models import get_chat_model, invoke_text
+from app.services.llm.models import get_chat_model, get_utility_model, invoke_text
 from app.services.offline import chat_emit
 from app.services.offline import repository as repo
 from app.services.offline.guidance import safe_guidance
+from app.services.offline.prompt_fields import filled, format_moment, location_fields
 from app.services.offline.module_settings import is_activity_enabled
 from app.services.prompting.store import get_prompt_text
 from app.services.schedule_domain.schedule import (
@@ -68,7 +69,16 @@ FOLLOWUP_CAP = 2
 AI_MESSAGE_GAP = timedelta(minutes=2)
 _PHASES = {"opening", "followup", "stopped"}
 _SPEAK_ACTIONS = ("social", "ambient", "care")
+_TOPICS = ("观察", "感受", "杂谈")
+_TOPIC_PROMPTS = {
+    "观察": "offline.activity_companion_observe",
+    "感受": "offline.activity_companion_feeling",
+    "杂谈": "offline.activity_companion_casual",
+}
 _TRIGGER_BY_ACTION = {
+    "观察": "offline_activity_companion_observe",
+    "感受": "offline_activity_companion_feeling",
+    "杂谈": "offline_activity_companion_casual",
     "social": "offline_activity_companion_social",
     "ambient": "offline_activity_companion_ambient",
     "gentle_hint": "offline_activity_companion_hint",
@@ -93,6 +103,9 @@ _REASON_CODES = {
     "sent_ambient",
     "sent_gentle_hint",
     "sent_care",
+    "sent_观察",
+    "sent_感受",
+    "sent_杂谈",
 }
 _DELIVERY_KEYS = (
     "delivery_key",
@@ -628,19 +641,22 @@ async def _process_activity(activity: dict[str, Any]) -> bool:
     conditions = await repo.list_untriggered_conditions(activity["id"])
     focus = await _resolve_focus(activity, conditions)
     safe_hint = safe_guidance(focus, "weak") if focus else ""
-    recent_modes = [
-        str(mode)
-        for mode in (state.get("recent_modes") or [])
-        if str(mode) in _TRIGGER_BY_ACTION
-    ][-3:]
-    action = choose_companion_action(recent_modes, has_focus=focus is not None)
+    recent_modes = [str(mode) for mode in (state.get("recent_modes") or [])][-3:]
     try:
-        text = await _generate_companion_message(
-            action=action,
+        action = await _select_companion_topic(
             activity=activity,
             ctx=ctx,
             messages=messages,
-            safe_hint=safe_hint,
+            recent_modes=recent_modes,
+        )
+        user_memory, user_preference = await _user_memory_and_preference(activity, ctx)
+        text = await _generate_companion_message(
+            topic=action,
+            activity=activity,
+            ctx=ctx,
+            messages=messages,
+            user_memory=user_memory,
+            user_preference=user_preference,
         )
         from app.services.offline.recognition import _guard_visible_message
 
@@ -822,35 +838,86 @@ async def _latest_assistant_at(conversation_id: str) -> datetime | None:
     return _aware(getattr(row, "createdAt", None))
 
 
-async def _generate_companion_message(
+def _rotate_topic(recent_modes: list[str]) -> str:
+    recent = [mode for mode in recent_modes[-3:] if mode in _TOPICS]
+    for topic in _TOPICS:
+        if topic not in recent:
+            return topic
+    latest = recent[-1] if recent else ""
+    for topic in _TOPICS:
+        if topic != latest:
+            return topic
+    return _TOPICS[0]
+
+
+async def _select_companion_topic(
     *,
-    action: str,
     activity: dict[str, Any],
     ctx: dict[str, Any],
     messages: list[dict[str, Any]],
-    safe_hint: str,
+    recent_modes: list[str],
 ) -> str:
-    mbti = ctx.get("agent_mbti")
-    mbti_type = str(mbti.get("type") or "").strip() if isinstance(mbti, dict) else ""
-    agent_style = "，".join(
-        part
-        for part in (
-            str(ctx.get("agent_name") or "").strip(),
-            str(ctx.get("agent_occupation") or "").strip(),
-            mbti_type,
+    prompt = (await get_prompt_text("offline.activity_companion_topic")).format(
+        **location_fields(
+            activity,
+            now=_now(),
+            city_fallback=str(ctx.get("user_location_city") or ""),
+        ),
+        dialogue_context=_format_dialogue(messages) or "（无）",
+    )
+    try:
+        parsed = _parse_json_object(await invoke_text(get_utility_model(), prompt))
+    except Exception as exc:
+        logger.warning("[offline-companion] topic selection failed: %s", exc)
+        raise CompanionDecisionGenerationError("companion topic selection failed") from exc
+    topic = str(parsed.get("topic") or "").strip()
+    if topic in _TOPICS:
+        return topic
+    return _rotate_topic(recent_modes)
+
+
+async def _user_memory_and_preference(
+    activity: dict[str, Any],
+    ctx: dict[str, Any],
+) -> tuple[str, str]:
+    user_id = str(activity.get("user_id") or ctx.get("user_id") or "")
+    workspace_id = activity.get("workspace_id") or ctx.get("workspace_id")
+    if not user_id:
+        return "（无）", "（无）"
+    try:
+        memory = await repo.memory_brief(user_id, workspace_id, limit=12)
+        tags = await repo.list_user_tags(
+            user_id,
+            workspace_id,
+            agent_id=str(ctx.get("agent_id") or activity.get("agent_id") or "") or None,
+            limit=8,
         )
-        if part
-    ) or "像熟悉用户的朋友一样自然说话"
-    prompt = (await get_prompt_text("offline.activity_companion_message")).format(
-        agent_style=agent_style,
-        user_name=ctx.get("user_name") or "你",
-        activity_title=activity.get("title") or "这次外出",
-        location_name=activity.get("location_name")
-        or activity.get("address")
-        or "现场",
-        action=action,
-        safe_hint=safe_hint if action == "gentle_hint" else "（本轮不使用）",
-        recent_dialogue=_format_dialogue(messages) or "（无）",
+    except Exception as exc:
+        logger.warning("[offline-companion] memory context skipped: %s", exc)
+        return "（无）", "（无）"
+    preference = "、".join(str(tag).strip() for tag in tags if str(tag).strip())
+    return filled(memory, empty="（无）"), filled(preference, empty="（无）")
+
+
+async def _generate_companion_message(
+    *,
+    topic: str,
+    activity: dict[str, Any],
+    ctx: dict[str, Any],
+    messages: list[dict[str, Any]],
+    user_memory: str,
+    user_preference: str,
+) -> str:
+    prompt_key = _TOPIC_PROMPTS.get(topic, _TOPIC_PROMPTS["杂谈"])
+    prompt = (await get_prompt_text(prompt_key)).format(
+        **location_fields(
+            activity,
+            now=_now(),
+            city_fallback=str(ctx.get("user_location_city") or ""),
+        ),
+        user_memory=filled(user_memory, empty="（无）"),
+        user_preference=filled(user_preference, empty="（无）"),
+        dialogue_context=_format_dialogue(messages) or "（无）",
     )
     try:
         parsed = _parse_json_object(await invoke_text(get_chat_model(), prompt))
@@ -908,7 +975,9 @@ def _format_dialogue(messages: list[dict[str, Any]]) -> str:
         if not text:
             continue
         role = "用户" if message.get("role") == "user" else "AI"
-        lines.append(f"{role}：{text[:160]}")
+        stamp = format_moment(message.get("created_at"))
+        prefix = f"[{stamp}] " if stamp else ""
+        lines.append(f"{prefix}{role}：{text[:160]}")
     return "\n".join(lines)[-1800:]
 
 
