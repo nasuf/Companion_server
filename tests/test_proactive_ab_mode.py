@@ -496,7 +496,7 @@ async def test_sender_reports_user_came_back(monkeypatch):
     close.assert_not_awaited()
 
 
-# ── A 模式新来源: 带时间戳的用户记忆 ─────────────────────────────────────
+# ── A 模式新来源: 近两天带时间戳的对话 ─────────────────────────────────────
 
 @pytest.mark.parametrize(
     ("delta_days", "text"),
@@ -515,81 +515,112 @@ def _mem(mid, content, *, occur=None, said=None, main="生活", sub="日常"):
     )
 
 
-async def test_timed_memories_prefer_recent_events_and_skip_reminders(monkeypatch):
+async def test_recent_dialogue_is_stamped_and_denoised(monkeypatch):
     from app.services.proactive import context
 
-    local_midnight_today = datetime(2026, 9, 28, 16, 0, tzinfo=UTC)  # 上海 9/29 00:00
-    rows = [
-        _mem("said", "最近在学吉他", said=NOW - timedelta(days=3)),
-        # 4 天前事先说的「周五面试」, 周五已过 → 最该问的一条
-        _mem("event", "周五去面试", occur=NOW - timedelta(days=2), said=NOW - timedelta(days=4)),
-        _mem("rem", "提醒我喝水", occur=NOW - timedelta(days=1), sub="提醒"),
-        _mem("id", "我叫小李", said=NOW - timedelta(days=5), main="身份"),
-        _mem("used", "上周搬家", occur=NOW - timedelta(days=6)),
-        # 静态事实没有"后来怎么样" —— 只有生活类才能按"聊到"问
-        _mem("pref", "喜欢吃辣", said=NOW - timedelta(days=2), main="偏好"),
-        # 只有日期、就是今天: 还不知道几点, 今天不问
-        _mem("today", "今天去体检", occur=local_midnight_today),
-        # 有具体时刻但刚过去 1 小时: 太早
-        _mem("soon", "上午十点开会", occur=NOW - timedelta(hours=1)),
-        # 前两天才说的陈年旧事
-        _mem("old", "去年去过日本", occur=NOW - timedelta(days=300), said=NOW - timedelta(days=2)),
-        # 事后讲述: 结果对方已经说了, 再问"怎么样啦"是没在听
-        _mem("after", "昨天面试完了感觉挺好", occur=NOW - timedelta(days=1, hours=2),
-             said=NOW - timedelta(hours=20)),
-        # 事件型但刚聊过 (<12h)
-        _mem("fresh", "早上跑了步", occur=NOW - timedelta(hours=5), said=NOW - timedelta(hours=3)),
+    rows = [  # newest first, 同 SQL
+        {"role": "assistant", "content": "那你周五加油！", "metadata": {},
+         "created_at": datetime(2026, 9, 28, 13, 1)},
+        {"role": "assistant", "content": "黑棋落子", "metadata": {"kind": "game_status"},
+         "created_at": datetime(2026, 9, 28, 13, 0, 30)},
+        {"role": "user", "content": "我周五要去面试", "metadata": None,
+         "created_at": "2026-09-28T13:00:00"},
     ]
-    find = AsyncMock(return_value=rows)
-    monkeypatch.setattr(context.memory_repo, "find_many", find)
-
-    texts, ids = await context._load_timed_user_memories(
-        user_id="u-1", workspace_id="ws-1", exclude_memory_ids={"used"}, now=NOW,
-    )
-    assert ids == ["event", "said"]
-    assert texts[0].startswith("[前天的事, 9月27日]")
-    assert texts[1].startswith("[3天前聊到]")
-    # 最近半天内说的不算"想起来"
-    or_clause = find.await_args.kwargs["where"]["OR"]
-    assert or_clause[1]["statementTime"]["lte"] == NOW - timedelta(hours=12)
+    query = AsyncMock(return_value=rows)
+    monkeypatch.setattr(context, "db", SimpleNamespace(query_raw=query))
+    text = await context._load_recent_dialogue("ws-1", now=NOW)
+    assert text.splitlines() == [
+        "[09-28 21:00] 用户: 我周五要去面试",
+        "[09-28 21:01] AI: 那你周五加油！",
+    ]
+    # 窗口 = 近 48 小时
+    assert query.await_args.args[2] == (NOW - timedelta(hours=48)).replace(tzinfo=None).isoformat()
 
 
-async def test_timed_source_falls_back_to_ai_memories(monkeypatch):
+async def test_recent_dialogue_needs_the_user_to_have_said_something(monkeypatch):
+    """只有 AI 自己的主动消息 → 没有可追问的"对方的事"."""
     from app.services.proactive import context
 
+    rows = [{"role": "assistant", "content": "早呀", "metadata": {"proactive": True},
+             "created_at": datetime(2026, 9, 28, 1, 0)}]
+    monkeypatch.setattr(context, "db", SimpleNamespace(query_raw=AsyncMock(return_value=rows)))
+    assert await context._load_recent_dialogue("ws-1", now=NOW) == ""
+
+    monkeypatch.setattr(
+        context, "db", SimpleNamespace(query_raw=AsyncMock(side_effect=RuntimeError("db down"))),
+    )
+    assert await context._load_recent_dialogue("ws-1", now=NOW) == ""
+
+
+def _patch_context_deps(monkeypatch, context, memories):
     async def _load(**kwargs):
-        if kwargs["source"] == "timed_user":
-            return [], []
-        return ["[生活/爱好] 我最近在学做饭"], ["ai-mem"]
+        return memories.get(kwargs["source"], ([], []))
 
     monkeypatch.setattr(context, "_load_proactive_memories", _load)
-    for name in ("load_core_memory_strings",):
-        monkeypatch.setattr(context, name, AsyncMock(return_value=[]))
+    monkeypatch.setattr(context, "_load_recent_dialogue", AsyncMock(return_value=""))
+    monkeypatch.setattr(context, "load_core_memory_strings", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         context, "db",
         SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=SimpleNamespace()))),
     )
-    monkeypatch.setattr(context, "get_cached_schedule", AsyncMock(return_value=None))
+    for name in ("get_cached_schedule", "get_latest_portrait", "_load_recent_context", "load_ai_mood"):
+        monkeypatch.setattr(context, name, AsyncMock(return_value=None))
     monkeypatch.setattr(context, "get_topic_intimacy", AsyncMock(return_value=60.0))
-    monkeypatch.setattr(context, "get_latest_portrait", AsyncMock(return_value=""))
-    monkeypatch.setattr(context, "_load_recent_context", AsyncMock(return_value=""))
-    monkeypatch.setattr(context, "load_ai_mood", AsyncMock(return_value=None))
 
+
+async def test_empty_recent_dialogue_falls_back_by_trigger_type(monkeypatch):
+    from app.services.proactive import context
+
+    _patch_context_deps(
+        monkeypatch, context, {"ai_l1": (["[生活/爱好] 我最近在学做饭"], ["ai-mem"])},
+    )
+    common = dict(workspace_id="ws-1", user_id="u-1", agent_id="a-1", stage="warming",
+                  source="recent_dialogue")
+    # 记忆主动 → 回落 AI 自己的 L1 记忆
+    ctx = await context.build_proactive_context(trigger_type="memory_proactive", **common)
+    assert ctx["source"] == "ai_l1" and ctx["used_memory_ids"] == ["ai-mem"]
+    # 沉默唤醒 → 回落打招呼
+    ctx = await context.build_proactive_context(trigger_type="silence_wakeup", **common)
+    assert ctx["source"] == "greeting" and ctx["proactive_memories"] == []
+
+
+async def test_recent_dialogue_is_kept_when_present(monkeypatch):
+    from app.services.proactive import context
+
+    _patch_context_deps(monkeypatch, context, {})
+    monkeypatch.setattr(
+        context, "_load_recent_dialogue", AsyncMock(return_value="[09-28 21:00] 用户: 我周五面试"),
+    )
     ctx = await context.build_proactive_context(
         workspace_id="ws-1", user_id="u-1", agent_id="a-1",
-        trigger_type="memory_proactive", stage="warming", source="timed_user",
-        topic_theme="回忆之前聊过的事",
+        trigger_type="memory_proactive", stage="warming", source="recent_dialogue",
     )
-    assert ctx["source"] == "ai_l1"
-    assert ctx["used_memory_ids"] == ["ai-mem"]
+    assert ctx["source"] == "recent_dialogue"
+    assert ctx["recent_dialogue"] == "[09-28 21:00] 用户: 我周五面试"
 
 
-def test_timed_source_routes_to_its_prompt():
+def test_recent_dialogue_routes_to_its_prompt():
     from app.services.proactive import sender
 
-    assert sender._PROMPT_KEY_BY_SOURCE[("memory_proactive", "timed_user")] == "proactive.memory_timed"
-    assert sender._PROMPT_KEY_BY_SOURCE[("silence_wakeup", "timed_user")] == "proactive.memory_timed"
-    assert "timed_user" in sender._MEMORY_SOURCES
+    for trigger in ("memory_proactive", "silence_wakeup"):
+        assert sender._PROMPT_KEY_BY_SOURCE[(trigger, "recent_dialogue")] == "proactive.recent_dialogue"
+    # 不是记忆来源: 对话为空时 context 已经换了来源, sender 不该再按"缺记忆"取消
+    assert "recent_dialogue" not in sender._MEMORY_SOURCES
+
+
+def test_recent_dialogue_prompt_renders_every_placeholder():
+    from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+    from app.services.proactive import sender
+
+    prompt = sender._format_prompt(
+        "proactive.recent_dialogue",
+        {"__tpl": PROMPT_DEFINITION_MAP["proactive.recent_dialogue"].default_text,
+         "recent_dialogue": "[09-28 21:00] 用户: 我周五面试"},
+        "外向、温暖",
+    )
+    assert prompt is not None and "{" not in prompt
+    assert "[09-28 21:00] 用户: 我周五面试" in prompt and "外向、温暖" in prompt
+    assert any(approach in prompt for approach in sender._DIALOGUE_APPROACHES)
 
 
 def test_time_hints_only_on_things_that_happen():
@@ -601,29 +632,6 @@ def test_time_hints_only_on_things_that_happen():
     assert _user_memory_time_hint(_mem("m", "最近压力大", said=said, main="情绪"), NOW) == "[3天前聊到]"
     assert _user_memory_time_hint(_mem("m", "28岁", said=said, main="身份"), NOW) == ""
     assert _user_memory_time_hint(_mem("m", "喜欢猫", said=said, main="偏好"), NOW) == ""
-
-
-async def test_silence_wakeup_keeps_greeting_fallback(monkeypatch):
-    """沉默唤醒抽到 timed_user 但为空 → 交给 sender 回落打招呼, context 不改来源."""
-    from app.services.proactive import context
-
-    async def _load(**kwargs):
-        return [], []
-
-    monkeypatch.setattr(context, "_load_proactive_memories", _load)
-    monkeypatch.setattr(context, "load_core_memory_strings", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        context, "db",
-        SimpleNamespace(aiagent=SimpleNamespace(find_unique=AsyncMock(return_value=SimpleNamespace()))),
-    )
-    for name in ("get_cached_schedule", "get_latest_portrait", "_load_recent_context", "load_ai_mood"):
-        monkeypatch.setattr(context, name, AsyncMock(return_value=None))
-    monkeypatch.setattr(context, "get_topic_intimacy", AsyncMock(return_value=60.0))
-    ctx = await context.build_proactive_context(
-        workspace_id="ws-1", user_id="u-1", agent_id="a-1",
-        trigger_type="silence_wakeup", stage="warming", source="timed_user",
-    )
-    assert ctx["source"] == "timed_user" and ctx["proactive_memories"] == []
 
 
 async def test_reminder_lookahead_query(monkeypatch):
@@ -647,4 +655,4 @@ def test_memory_source_distributions_sum_to_one():
     for stage, dist in MEMORY_SOURCE_DIST.items():
         assert abs(sum(dist.values()) - 1.0) < 1e-9, stage
     # 冷启动还不熟, 不追问对方的事
-    assert "timed_user" not in MEMORY_SOURCE_DIST["p1_cold"]
+    assert "recent_dialogue" not in MEMORY_SOURCE_DIST["p1_cold"]

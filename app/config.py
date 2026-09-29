@@ -321,7 +321,8 @@ class Settings(BaseSettings):
     #      trending_context._hot_api_snippets docstring.
     proactive_hot_api_url: str = ""
     proactive_hot_api_key: str = ""  # 可选 bearer token, 有些自建 API 要
-    proactive_hot_max_age_days: int = 7  # 超过这个天数的候选被过滤 (0=关闭)
+    # 《主动交流提示词》4-1/4-2: 素材限 48 小时内的热点; 超过这个天数的候选被过滤 (0=关闭)
+    proactive_hot_max_age_days: int = 2
     proactive_link_candidate_urls: str = ""
     chat_link_search_provider: str = "custom"
     chat_link_search_endpoint: str = ""

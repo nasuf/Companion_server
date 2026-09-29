@@ -3,7 +3,7 @@
 generate_and_send_proactive 按步骤编排:
   _check_send_eligibility  日限 / 疲劳分 / workspace / conversation
   _resolve_topic           spec §3.2 话题方向 + §4.1/§4.2 来源抽签 → 上下文
-  _attach_trending         A 模式新来源「全网热点」(V3 三档分发, 默认关)
+  _attach_trending         A 模式新来源「全网热点」(4-1/4-2 筛选 → 4-3 生成, 默认关)
   _generate_message        按 (trigger_type, source, decay_final) 分发 prompt
   _prepare_attachments     音乐卡 / 链接卡
   emit_proactive_message   落库 + WS (生成期间用户回来则不插入)
@@ -37,8 +37,10 @@ from app.services.proactive.history import (
     increment_proactive_count,
 )
 from app.services.proactive.context import build_proactive_context
+from app.services.schedule_domain.time_expression import format_clock
 from app.services.schedule_domain.time_service import _now_corrected
 from app.services.proactive.policy import select_topic_source, select_topic_theme
+from app.services.mbti import build_personality_brief
 from app.services.relationship.emotion import emotion_to_tone
 from app.services.workspace.workspaces import (
     get_active_workspace,
@@ -76,7 +78,8 @@ _ADMIN_UNLOCKABLE_STATUSES = frozenset({
     STATUS_PROCESSING_TIMEOUT,
 })
 
-_MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship", "timed_user"})
+_MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship"})
+_DIALOGUE_APPROACHES = ("关心追问后续", "话题轻度延伸")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -296,41 +299,6 @@ def _apply_memory_cooldown(
 # Personality brief & prompt dispatch
 # ────────────────────────────────────────────────────────────────────
 
-# (正向字母, 描述, 反向字母, 描述) —— 明显偏向一侧 (≥65%) 才写进人设简述
-_BRIEF_AXES = (
-    ("E", "活泼外向", "I", "安静内敛"),
-    ("N", "脑洞大", "S", "务实"),
-    ("F", "感性细腻", "T", "理性"),
-    ("P", "随性", "J", "计划性强"),
-)
-_BRIEF_LEAN = 0.65
-
-
-def build_personality_brief(agent) -> str:
-    """人设简述, 给主动消息类 prompt 的 {personality_brief}.
-
-    MBTI 是人格的唯一持久化表达 (7 维输入建号后即丢弃, spec §1.2)。之前这里读
-    `agent.personality` —— 模型上早就没有这个字段, 所有主动消息的人设都退化成
-    同一句"温和友善", 不同性格的 AI 主动说话一个腔调。
-    """
-    from app.services.mbti import get_mbti, signal
-
-    try:
-        mbti = get_mbti(agent)
-    except Exception:
-        mbti = None
-    if not mbti:
-        return "温和友善"
-    parts: list[str] = []
-    for letter, text, opposite, opposite_text in _BRIEF_AXES:
-        strength = signal(mbti, letter)
-        if strength >= _BRIEF_LEAN:
-            parts.append(text)
-        elif 1 - strength >= _BRIEF_LEAN:
-            parts.append(opposite_text)
-    return "、".join(parts) if parts else "温和友善"
-
-
 # (trigger_type, source) → prompt key
 _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     ("silence_wakeup", "ai_l1"): "proactive.silence_ai_memory",
@@ -340,7 +308,7 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     ("silence_wakeup", "ai_schedule"): "proactive.silence_schedule",
     ("silence_wakeup", "greeting"): "proactive.silence_plain",
     ("silence_wakeup", "music"): "music.proactive_recommend",
-    ("silence_wakeup", "timed_user"): "proactive.memory_timed",
+    ("silence_wakeup", "recent_dialogue"): "proactive.recent_dialogue",
     ("memory_proactive", "ai_l1"): "proactive.memory_ai",
     ("memory_proactive", "ai_l2"): "proactive.memory_ai",
     ("memory_proactive", "user_l1"): "proactive.memory_user",
@@ -348,8 +316,8 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     # Phase 2 关系记忆: 共同经历 (memories_ai 生活/交互) 走 AI 记忆模板 —
     # 素材本来就是 AI 第一人称叙述的"我和用户…", memory_ai 模板语气吻合.
     ("memory_proactive", "relationship"): "proactive.memory_ai",
-    # 《主动聊天机制（新增）》A 模式「带时间戳的历史对话记忆」
-    ("memory_proactive", "timed_user"): "proactive.memory_timed",
+    # 《主动交流提示词》提示词3: A 模式「带时间感知历史对话搭话」
+    ("memory_proactive", "recent_dialogue"): "proactive.recent_dialogue",
     ("scheduled_scene", "ai_schedule"): "proactive.scheduled_scene",
 }
 
@@ -413,12 +381,12 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "user_memory": memory_text,
             "topic": topic,
         },
-        "proactive.memory_timed": {
+        "proactive.recent_dialogue": {
             "personality_brief": personality_brief,
-            "current_mood": current_mood,
-            "user_memory": memory_text,
-            # 对方最近刚说过后续的事别再问 (prompt 内有 SKIP 出口)
-            "recent_context": recent_context,
+            "recent_dialogue": ctx.get("recent_dialogue") or "（无）",
+            "current_time": format_clock(_now_corrected()),
+            # 提示词规定"随机二选一": 由代码掷骰, 让模型自己选并不随机
+            "approach": random.choice(_DIALOGUE_APPROACHES),
         },
         "proactive.scheduled_scene": {
             "personality_brief": personality_brief,
@@ -454,21 +422,6 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
         return None
 
 
-def _format_v3_trending_item(item: dict) -> str:
-    """V3 三档 prompt 里 {trending_item} 占位的渲染 —— 单条内容, 而非 V0 的多条汇总.
-    保留 title/snippet/platform 供 LLM 理解, 但压紧一行避免 prompt 过长.
-    """
-    if not isinstance(item, dict):
-        return str(item or "")
-    title = str(item.get("title") or "").strip()
-    snippet = str(item.get("snippet") or "").strip()[:160]
-    plat = str(item.get("platform") or "").strip()
-    plat_prefix = f"[{plat}] " if plat else ""
-    if title and snippet:
-        return f"{plat_prefix}{title} —— {snippet}"
-    return f"{plat_prefix}{title or snippet}"
-
-
 async def _generate_message(ctx: dict) -> str | None:
     """spec §4 按 (trigger_type, source) 分发到 7 个专属 prompt;
     spec §8.5 衰减最后一次优先 decay_final.
@@ -477,39 +430,19 @@ async def _generate_message(ctx: dict) -> str | None:
     trigger_type = ctx["trigger_type"]
     source = ctx.get("source") or "greeting"
     personality_brief = build_personality_brief(agent)
-
-    # V3 dispatch (2026-09-14): 若上游分类器 (topic_source.classify_topic_source)
-    # 已经把话题源判出来并塞进 ctx["topic_source_kind"] + 选好条 ctx["topic_source_item"],
-    # 走对应的三档独立 prompt (proactive.trending_user_interest / _ai_persona /
-    # _socially_hot) 而非 V0 的 append_trending_section 尾追. 详见
-    # app/services/proactive/topic_source.py 与 evals/proactive_naturalness.
-    #
-    # topic_source_kind='none' 或未设 → 落回 V0 逻辑, 保持向后兼容.
-    v3_source_kind = ctx.get("topic_source_kind")
-    v3_source_item = ctx.get("topic_source_item")
-    v3_prompt_keys = {
-        "user_interest_match": "proactive.trending_user_interest",
-        "ai_persona_match":    "proactive.trending_ai_persona",
-        "socially_hot":        "proactive.trending_socially_hot",
-    }
+    # 《主动交流提示词》4-3: 热点已由 4-1/4-2 筛好并摘要 (_attach_trending)
+    trending_pick = ctx.get("trending_pick")
 
     try:
         if ctx.get("is_decay_final"):
             tpl = await get_prompt_text("proactive.decay_final")
             prompt = tpl.format(personality_brief=personality_brief)
-        elif v3_source_kind in v3_prompt_keys and v3_source_item:
-            # V3 路径
-            key = v3_prompt_keys[v3_source_kind]
-            tpl = await get_prompt_text(key)
-            # 三档 prompt 都有的公共占位符
-            fields = {
-                "personality_brief": personality_brief,
-                "current_mood": emotion_to_tone(ctx.get("emotion")),
-                "trending_item": _format_v3_trending_item(v3_source_item),
-            }
-            if v3_source_kind == "user_interest_match":
-                fields["user_portrait"] = str(ctx.get("user_portrait") or "(未知)")
-            prompt = tpl.format(**fields)
+        elif trending_pick is not None:
+            tpl = await get_prompt_text("proactive.trending_chat")
+            prompt = tpl.format(
+                personality_brief=personality_brief,
+                hot_summary=trending_pick.summary,
+            )
         else:
             key = _PROMPT_KEY_BY_SOURCE.get(
                 (trigger_type, source), "proactive.silence_plain"
@@ -523,14 +456,6 @@ async def _generate_message(ctx: dict) -> str | None:
         logger.info(f"[proactive-gen] prompt disabled key={e}")
         ctx["_skip_reason_detail"] = f"prompt_disabled:{e}"
         return None
-
-    # V0 尾追: 只在 V3 未走时 append (v3 已经把 item 塞进 prompt 里, 别重复注入)
-    if not (v3_source_kind in v3_prompt_keys and v3_source_item):
-        trending_context = (ctx.get("trending_context") or "").strip()
-        if trending_context:
-            from app.services.proactive.trending_context import append_trending_section
-
-            prompt = await append_trending_section(prompt, trending_context)
 
     try:
         response = (await invoke_text(get_chat_model(), prompt)).strip()
@@ -699,7 +624,7 @@ async def _resolve_topic(
     # admin QA 反复触发时, anti-repetition 会兜死同 topic 的连测 → empty_or_skip 假象.
     # 标记后 _generate_message 会绕过 recent 相似度守卫, 保证每次测试都出可见结果.
     ctx["_admin_test"] = admin_test
-    # context 可能改写来源 (timed_user 抽不到 → ai_l1), 以它为准
+    # context 可能改写来源 (近两天没聊过 → ai_l1 / greeting), 以它为准
     source = ctx.get("source") or source
     if source == "music":
         source = await _prepare_music_recommendation_source(
@@ -737,39 +662,36 @@ async def _attach_trending(
     trigger_type: str,
     admin_test_options: "AdminProactiveTestOptions | None",
 ) -> bool:
-    """A 模式新来源「全网热点」(随机热点 socially_hot / 爱好匹配 user_interest_match)。
+    """A 模式新来源「全网热点内容搭话」(《主动交流提示词》4-1 / 4-2 → 4-3).
 
-    trending 命中 → V3 分类器决定档位 + 挑候选内容, 消息 prompt 与卡片同源
-    (evals/proactive_naturalness: V0 source_fit 17% → V3 50%)。分类器返 "none"
-    时 ctx 不设档位, _generate_message 落回 V0 append_trending_section。
-    整体开关: SystemConfig.proactive_trending_enabled (默认关)。
+    命中 trending 概率门时抓 48 小时热榜 → trending_pick 筛一条能聊的 (爱好匹配 /
+    随机) 并摘要 → ctx["trending_pick"], _generate_message 走 4-3 生成; 一条都
+    不合适就按原来源正常发。整体开关: SystemConfig.proactive_trending_enabled (默认关)。
+    返回是否抓了热榜 (admin QA 的 web_search_used)。
     """
     from app.services.proactive.trending_context import resolve_trending_context
 
-    trending_text, trending_attached, trending_meta = await resolve_trending_context(
+    _text, trending_attached, trending_meta = await resolve_trending_context(
         trigger_type,
         topic=ctx.get("topic_theme"),
         admin_test_options=admin_test_options,
     )
-    ctx["trending_context"] = trending_text
     if not (trending_attached and trending_meta is not None and trending_meta.candidates):
         return trending_attached
 
     from app.services.proactive.featured_topics import get_recent_featured
-    from app.services.proactive.topic_source import classify_topic_source
+    from app.services.proactive.trending_pick import pick_trending
 
-    # 最近 featured 过的话题 (6h, 按 workspace 隔离) 排除, 连续触发会轮到下一条
-    exclude = await get_recent_featured(str(state.workspace_id) if state.workspace_id else None)
-    cls = classify_topic_source(
-        trending_candidates=list(trending_meta.candidates),
-        user_portrait=str(ctx.get("user_portrait") or ""),
-        agent=ctx.get("agent"),
-        exclude_titles=exclude,
+    # 最近 featured 过的话题 (6h, 按 workspace 隔离) 排除, 连续触发会轮到别的
+    pick = await pick_trending(
+        list(trending_meta.candidates),
+        user_id=state.user_id,
+        workspace_id=state.workspace_id,
+        exclude_titles=await get_recent_featured(str(state.workspace_id) if state.workspace_id else None),
     )
-    if cls.kind != "none":
-        ctx["topic_source_kind"] = cls.kind
-        ctx["topic_source_item"] = cls.selected_candidate
-        logger.info(f"[V3-DISPATCH] source={cls.kind} reason={cls.reason}")
+    if pick is not None:
+        ctx["trending_pick"] = pick
+        logger.info(f"[TRENDING] picked mode={pick.mode} title={str(pick.item.get('title'))[:30]!r}")
     return trending_attached
 
 
@@ -816,9 +738,10 @@ async def _prepare_attachments(
         skip_link = not admin_test_options.use_link_card
     elif trending_attached:
         force_link = should_attach_trending_link_card(trending_attached=True)
-    # 消息-卡片硬耦合: V3 已挑好的那条内容, 卡片必须挂同一条, 不许独立再搜
+    # 消息-卡片硬耦合: 热点筛好的那条, 卡片必须挂同一条, 不许独立再搜
     # (修"文本说银锁骨链 + 卡说机场"这种语义脱钩)
-    preselected = ctx.get("topic_source_item") if ctx.get("topic_source_kind") else None
+    trending_pick = ctx.get("trending_pick")
+    preselected = trending_pick.item if trending_pick is not None else None
     link, attachments.link_skip_reason = await maybe_prepare_proactive_link_recommendation(
         user_id=state.user_id,
         conversation_id=prep.conversation_id,
@@ -857,9 +780,9 @@ async def _after_emit(
 
     # 只在真发出去后记, 免得各种 skip 路径污染防重复池
     await remember_recent(state.workspace_id, message)
-    v3_item = ctx.get("topic_source_item")
-    if isinstance(v3_item, dict):
-        featured_title = str(v3_item.get("title") or "").strip()
+    trending_pick = ctx.get("trending_pick")
+    if trending_pick is not None:
+        featured_title = str(trending_pick.item.get("title") or "").strip()
         if featured_title:
             from app.services.proactive.featured_topics import remember_featured
 

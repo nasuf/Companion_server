@@ -9,10 +9,11 @@ import pytest
 
 from app.services.interaction import topic_continuity as tc
 from app.services.interaction.topic_continuity import (
-    CUE_JUMP_KEY,
-    CUE_RETURN_KEY,
     ContinuityState,
     TopicVerdict,
+    clean_single_line,
+    is_dialogue_noise,
+    render_dialogue,
     resolve_cue,
 )
 
@@ -80,7 +81,7 @@ def redis(monkeypatch):
 
 
 _BASE_STATE = ContinuityState(
-    verdict=TopicVerdict("unfinished", "ai_question", "周末去哪玩"),
+    verdict=TopicVerdict("unfinished", "llm"),
     anchor_message_id="ai-1",
     followup_sent_at=None,
     last_user_at=None,
@@ -95,28 +96,27 @@ def _state(**kw) -> ContinuityState:
 # ── resolve_cue 决策表 ────────────────────────────────────────────────
 
 @pytest.mark.parametrize(
-    ("gap_min", "followup_used", "expected"),
+    ("gap_min", "followup_used", "return_line"),
     [
-        (6, False, CUE_JUMP_KEY),      # <10min: 只有跳话题过渡
-        (10, False, CUE_JUMP_KEY),     # spec 是"大于 10 分钟", 恰好 10 分钟不算
-        (11, False, CUE_RETURN_KEY),   # >10min 且没追问过: 回归承接
-        (11, True, CUE_JUMP_KEY),      # 追问过: 不带承接话术, 只保留跳话题过渡
-        (179, False, CUE_RETURN_KEY),
+        (6, False, False),     # <10min: 只考虑跳话题过渡
+        (10, False, False),    # spec 是"大于 10 分钟", 恰好 10 分钟不算
+        (11, False, True),     # >10min 且没追问过: 先说一句承接短句
+        (11, True, False),     # 追问过: 不带承接话术, 只保留跳话题过渡
+        (179, False, True),
     ],
 )
-def test_unfinished_cue_matrix(gap_min, followup_used, expected):
+def test_unfinished_cue_matrix(gap_min, followup_used, return_line):
     state = _state(followup_sent_at=NOW if followup_used else None)
     cue = resolve_cue(state, previous_assistant_id="ai-1", gap_seconds=gap_min * 60)
-    assert cue is not None
-    assert cue.template_key == expected
-    assert cue.pending_topic == "周末去哪玩"
+    assert cue is not None and cue.unfinished is True
+    assert cue.return_line is return_line
 
 
-def test_finished_topic_suppresses_without_section():
-    """spec: 已完结话题无论隔多久都不带承接 → 无段落, 但要压掉重逢短档."""
-    state = _state(verdict=TopicVerdict("finished", "natural_end"))
+def test_finished_topic_only_suppresses():
+    """spec: 已完结话题无论隔多久都不带承接 → 什么都不补, 但要压掉重逢短档."""
+    state = _state(verdict=TopicVerdict("finished", "llm"))
     cue = resolve_cue(state, previous_assistant_id="ai-1", gap_seconds=45 * 60)
-    assert cue is not None and cue.template_key is None
+    assert cue is not None and cue.unfinished is False and cue.return_line is False
 
 
 def test_three_hours_or_more_hands_over_to_reengagement():
@@ -137,18 +137,51 @@ def test_no_verdict_or_unknown_state_keeps_old_behaviour():
 
 
 def test_replying_to_followup_suppresses_return_phrase():
-    """对方在回 B 追问: 追问已经接住了旧话题, 不再叠「忙完啦」."""
+    """对方在回 B 追问: 追问已经接住了旧话题, 不再叠承接短句."""
     cue = resolve_cue(
         None, previous_assistant_id="b-1", gap_seconds=40 * 60,
         previous_assistant_is_followup=True,
     )
-    assert cue is not None and cue.template_key is None
+    assert cue is not None and cue.unfinished is False
 
 
-def test_pending_topic_has_readable_fallback():
-    state = _state(verdict=TopicVerdict("unfinished", "interrupted", ""))
-    cue = resolve_cue(state, previous_assistant_id="ai-1", gap_seconds=900)
-    assert cue.pending_topic == "刚才那件事"
+# ── 对话渲染 / 单句清洗 ───────────────────────────────────────────────
+
+def test_render_dialogue_uses_utc8_stamps():
+    text = render_dialogue([
+        ("user", "我明天面试", datetime(2026, 9, 29, 6, 0, tzinfo=UTC)),
+        ("assistant", "什么岗位呀？", datetime(2026, 9, 29, 6, 1, tzinfo=UTC)),
+        ("user", "没时间戳的", None),
+    ])
+    assert text.splitlines() == [
+        "[09-29 14:00] 用户: 我明天面试",
+        "[09-29 14:01] AI: 什么岗位呀？",
+        "用户: 没时间戳的",
+    ]
+
+
+def test_dialogue_noise():
+    assert is_dialogue_noise({"kind": "game_status"})
+    assert is_dialogue_noise({"offering_received": True})
+    assert not is_dialogue_noise({"proactive": True})
+    assert not is_dialogue_noise(None)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        ("SKIP。", None),
+        ("忙完啦||刚说到哪了", "忙完啦，刚说到哪了"),
+        ("“回来啦～”", "回来啦～"),
+        ("怎么才回呀", None),        # 提示词禁止: 怎么才回
+        ("还以为你消失很久了", None),  # 提示词禁止: 消失很久
+        ("等你好久啦", None),          # 提示词禁止: 等你好久
+        ("嗯", None),                 # 太短
+    ],
+)
+def test_clean_single_line(raw, expected):
+    assert clean_single_line(raw) == expected
 
 
 # ── 会话边界 / B 名额 ────────────────────────────────────────────────
@@ -212,7 +245,7 @@ async def test_reserve_and_release_followup(redis):
 
 
 async def test_verdict_roundtrip(redis):
-    verdict = TopicVerdict("unfinished", "user_story", "面试结果")
+    verdict = TopicVerdict("unfinished", "llm")
     await tc.record_verdict("c1", verdict, anchor_message_id="ai-3", now=NOW)
     state = await tc.load_continuity("c1")
     assert state.verdict == verdict

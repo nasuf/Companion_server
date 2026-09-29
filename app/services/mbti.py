@@ -223,3 +223,38 @@ def format_mbti_for_prompt(mbti: dict | None) -> str:
     summary = mbti.get("summary") or ""
     head = f"MBTI {mbti.get('type', '')}（{' · '.join(parts)}）"
     return f"{head} {summary}".strip()
+
+
+# ── 人设简述 (主动消息 / 被动承接等短 prompt 的 {personality_brief}) ──
+
+# (正向字母, 描述, 反向字母, 描述) —— 明显偏向一侧 (≥65%) 才写进人设简述
+_BRIEF_AXES = (
+    ("E", "活泼外向", "I", "安静内敛"),
+    ("N", "脑洞大", "S", "务实"),
+    ("F", "感性细腻", "T", "理性"),
+    ("P", "随性", "J", "计划性强"),
+)
+_BRIEF_LEAN = 0.65
+
+
+def build_personality_brief(agent) -> str:
+    """人设简述, 给主动消息类 prompt 的 {personality_brief}.
+
+    MBTI 是人格的唯一持久化表达 (7 维输入建号后即丢弃, spec §1.2)。之前这里读
+    `agent.personality` —— 模型上早就没有这个字段, 所有主动消息的人设都退化成
+    同一句"温和友善", 不同性格的 AI 主动说话一个腔调。
+    """
+    try:
+        mbti = get_mbti(agent)
+    except Exception:
+        mbti = None
+    if not mbti:
+        return "温和友善"
+    parts: list[str] = []
+    for letter, text, opposite, opposite_text in _BRIEF_AXES:
+        strength = signal(mbti, letter)
+        if strength >= _BRIEF_LEAN:
+            parts.append(text)
+        elif 1 - strength >= _BRIEF_LEAN:
+            parts.append(opposite_text)
+    return "、".join(parts) if parts else "温和友善"

@@ -10,7 +10,8 @@
    - AI 发出了 A 模式新开场 (旧话题已翻篇)
    - 本轮是告别 (晚安 / 去忙了)
 
-聊天侧用 `resolve_cue` 决定被动回复要不要带「回归承接」或「跳话题过渡」。
+聊天侧用 `resolve_cue` 决定被动回复要不要先说「回归承接短句」/「跳话题过渡句」
+(chat/topic_continuation.py 生成)。
 判定结论只对它 anchor 的那条 AI 消息之后的第一条用户回复有效 —— AI 之后又
 说了话 (比如 B 追问), anchor 就对不上, 结论自然作废, 不需要显式消费。
 
@@ -21,11 +22,14 @@ Redis 挂时: 读返回 None (聊天侧不注入、B 不发), 写静默失败 �
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
 from app.redis_client import get_redis
+from app.services.prompting.utils import is_skip_output
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +42,6 @@ SESSION_GAP_SECONDS = 3 * 3600
 RETURN_CUE_MIN_GAP_SECONDS = 10 * 60
 _TTL_SECONDS = 7 * 86400
 
-CUE_RETURN_KEY = "chat.topic_continuation_return"
-CUE_JUMP_KEY = "chat.topic_continuation_jump"
 # B 模式追问消息的 trigger_type (metadata.trigger_type), 聊天侧据此认出"上一句是追问"
 FOLLOWUP_TRIGGER_TYPE = "followup_unfinished"
 
@@ -49,10 +51,8 @@ VerdictStatus = Literal["finished", "unfinished"]
 @dataclass(frozen=True)
 class TopicVerdict:
     status: VerdictStatus
-    # ai_question / user_story / interrupted / natural_end / farewell / crisis ...
+    # llm (小模型判定) / farewell (告别按规则判完结)
     reason: str
-    # 未完结时, 还没聊完的点 (≤15 字); 已完结为空
-    pending_topic: str = ""
 
     @property
     def unfinished(self) -> bool:
@@ -74,15 +74,75 @@ class ContinuityState:
 
 @dataclass(frozen=True)
 class ContinuationCue:
-    """被动回复的话题接续指引。
+    """被动回复的话题接续决策。
 
-    template_key=None 表示「上一轮已聊完」: 不注入任何接续段, 但要压掉重逢感知
-    短档 (spec: 已完结话题无论间隔多久都不带承接话术)。
+    unfinished=False: 上一轮已聊完 / 对方在回 B 追问 —— 什么都不补, 但要压掉重逢
+    感知短档 (spec: 已完结话题无论间隔多久都不带承接话术)。
+    unfinished=True: 用户换了无关新话题时补一句过渡; return_line 再决定要不要先说
+    一句承接时间差的短句 (隔 >10min 且本会话没追问过)。
     """
 
-    template_key: str | None
-    pending_topic: str
+    unfinished: bool
+    return_line: bool
     gap_seconds: float
+
+
+# 兜底过滤: prompt 已要求别提"对方没回", LLM 仍写出催促/查岗口吻时宁可不发。
+# 自然追问不能误杀: "后来那个人呢""现在吗""然后呢？后来你去哪儿了" 都得放行 ——
+# 所以"在吗"要求前面是句首/标点/你/宝, "人呢"要求句首或标点, "去哪了/睡着了"
+# 只在整句就是它时才算查岗。
+_NEEDY_PATTERN = re.compile(
+    r"(?:^|[，。！？!?,.~～…\s]|你|宝)(?:还)?(?:在吗|在不在|在嘛)"
+    r"|(?:^|[，。！？!?,.~～…\s])人呢"
+    r"|还在忙|是不是(?:还)?(?:在|去)?忙|忙完了?[吗没]"
+    r"|怎么(?:不|没)(?:回|理|说话|动静)|不理我|没回我|理理我|回我一下"
+    r"|^\W*你?(?:去哪(?:了|啦|儿了)|睡着了)[吗呀啊？?！!~～。]*$"
+    r"|消失了|消失很久|怎么才回|打扰(?:到)?你|不好意思打扰|等你(?:回|好久)"
+)
+
+
+def clean_single_line(text: str | None, *, min_len: int = 2) -> str | None:
+    """主动 / 承接类"只输出一句"的生成结果清洗; 不该发时返回 None.
+
+    通用回复规则允许 "||" 分条, 这里要的是一句: 拼起来而不是只留前半句。
+    催促 / 查岗口吻 (提示词已明令禁止) 仍写出来时宁可不发。
+    """
+    if not text or is_skip_output(text):
+        return None
+    segments = [seg.strip() for seg in text.split("||") if seg.strip()]
+    line = "，".join(segments).strip().strip("\"'“”「」")
+    if len(line) < min_len:
+        return None
+    if _NEEDY_PATTERN.search(line):
+        logger.info(f"[CONTINUITY] dropped needy phrasing: {line[:30]!r}")
+        return None
+    return line
+
+
+def is_dialogue_noise(metadata: dict | None) -> bool:
+    """游戏播报 / 收礼小灰条不是"聊天内容", 不进任何对话上下文."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    kind = str(metadata.get("kind") or "")
+    return kind.startswith("game") or bool(metadata.get("offering_received"))
+
+
+def render_dialogue(
+    entries: Iterable[tuple[str, str, datetime | None]],
+    *,
+    max_chars: int = 120,
+) -> str:
+    """(role, text, created_at) → "[MM-DD HH:MM] 用户/AI: 内容" 行 (UTC+8, 与主聊天历史同格式).
+
+    主动交流 / 被动承接的各个提示词都以这种带时间戳的对话上下文为输入。
+    """
+    from app.services.schedule_domain.time_service import _TZ
+
+    lines = []
+    for role, text, created_at in entries:
+        stamp = f"[{created_at.astimezone(_TZ).strftime('%m-%d %H:%M')}] " if created_at else ""
+        speaker = "AI" if role == "assistant" else "用户"
+        lines.append(f"{stamp}{speaker}: {text[:max_chars]}")
+    return "\n".join(lines)
 
 
 def _key(conversation_id: str) -> str:
@@ -107,11 +167,7 @@ def _now(now: datetime | None) -> datetime:
 def _state_from_hash(raw: dict[str, str]) -> ContinuityState:
     status = raw.get("verdict_status")
     verdict = (
-        TopicVerdict(
-            status=status,  # type: ignore[arg-type]
-            reason=raw.get("verdict_reason") or "",
-            pending_topic=raw.get("pending_topic") or "",
-        )
+        TopicVerdict(status=status, reason=raw.get("verdict_reason") or "")  # type: ignore[arg-type]
         if status in ("finished", "unfinished")
         else None
     )
@@ -161,7 +217,6 @@ async def record_verdict(
     await _hset(conversation_id, {
         "verdict_status": verdict.status,
         "verdict_reason": verdict.reason,
-        "pending_topic": verdict.pending_topic,
         "anchor_id": anchor_message_id,
         "judged_at": _now(now).isoformat(),
     })
@@ -231,37 +286,31 @@ def resolve_cue(
 ) -> ContinuationCue | None:
     """spec「被动回复高级承接机制」的决策表 (纯函数).
 
-    | 上一轮判定 | 间隔        | 本会话已用 B | 结果                      |
-    |-----------|-------------|-------------|---------------------------|
-    | 无 / 过期  | -           | -           | None (维持原重逢感知逻辑)    |
-    | 任意       | ≥3h         | -           | None (交给重逢感知/上次聊到) |
-    | 已完结     | <3h         | -           | 不注入, 压掉重逢短档         |
-    | 未完结     | 10min-3h    | 否          | 回归承接 + 跳话题时轻过渡    |
-    | 未完结     | 10min-3h    | 是          | 仅跳话题时轻过渡             |
-    | 未完结     | <10min      | -           | 仅跳话题时轻过渡             |
-    | AI 上一句就是 B 追问 | <3h  | 是          | 不注入, 压掉重逢短档         |
+    | 上一轮判定 | 间隔        | 本会话已用 B | 结果                              |
+    |-----------|-------------|-------------|-----------------------------------|
+    | 无 / 过期  | -           | -           | None (维持原重逢感知逻辑)            |
+    | 任意       | ≥3h         | -           | None (交给重逢感知/上次聊到)         |
+    | 已完结     | <3h         | -           | 什么都不补, 压掉重逢短档              |
+    | 未完结     | 10min-3h    | 否          | 回归承接短句 (+ 跳话题时过渡句)       |
+    | 未完结     | 10min-3h    | 是          | 仅跳话题时过渡句                     |
+    | 未完结     | <10min      | -           | 仅跳话题时过渡句                     |
+    | AI 上一句就是 B 追问 | <3h  | 是          | 什么都不补, 压掉重逢短档              |
 
-    "是否跳了话题"交给主回复 LLM 按段内条件自己判断 —— 它本来就看得到完整
-    历史, 不值得为此多一次分类调用。
+    "是否跳了话题"要看用户这条消息, 由 chat/topic_continuation.py 另行判定。
     """
     if gap_seconds is None or gap_seconds >= SESSION_GAP_SECONDS:
         return None
     if previous_assistant_is_followup:
         # 对方在回 B 追问: 追问本身已经把旧话题接住了, spec 要求不再带承接话术
-        return ContinuationCue(template_key=None, pending_topic="", gap_seconds=gap_seconds)
+        return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds)
     if state is None or state.verdict is None:
         return None
     if not previous_assistant_id or state.anchor_message_id != previous_assistant_id:
         return None
-    verdict = state.verdict
-    if not verdict.unfinished:
-        return ContinuationCue(template_key=None, pending_topic="", gap_seconds=gap_seconds)
-    if gap_seconds > RETURN_CUE_MIN_GAP_SECONDS and state.followup_available:
-        key = CUE_RETURN_KEY
-    else:
-        key = CUE_JUMP_KEY
+    if not state.verdict.unfinished:
+        return ContinuationCue(unfinished=False, return_line=False, gap_seconds=gap_seconds)
     return ContinuationCue(
-        template_key=key,
-        pending_topic=verdict.pending_topic or "刚才那件事",
+        unfinished=True,
+        return_line=gap_seconds > RETURN_CUE_MIN_GAP_SECONDS and state.followup_available,
         gap_seconds=gap_seconds,
     )

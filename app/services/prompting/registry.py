@@ -52,6 +52,8 @@ from app.services.prompting.defaults import (
     CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
     CHAT_TOPIC_CONTINUATION_JUMP_PROMPT,
     CHAT_TOPIC_CONTINUATION_RETURN_PROMPT,
+    CHAT_TOPIC_CONTINUATION_SECTION_PROMPT,
+    CHAT_TOPIC_JUMP_DETECT_PROMPT,
     CHAT_STYLE_BASE_RULE_PROMPT,
     CHAT_STYLE_CLOSING_RULE_PROMPT,
     CHAT_TIME_CONTEXT_SECTION_PROMPT,
@@ -155,12 +157,12 @@ from app.services.prompting.defaults import (
     PROACTIVE_SCHEDULED_SCENE_PROMPT,
     PROACTIVE_DECAY_FINAL_PROMPT,
     PROACTIVE_FOLLOWUP_UNFINISHED_PROMPT,
-    PROACTIVE_MEMORY_TIMED_PROMPT,
+    PROACTIVE_RECENT_DIALOGUE_PROMPT,
     PROACTIVE_TOPIC_COMPLETION_JUDGE_PROMPT,
+    PROACTIVE_TRENDING_CHAT_PROMPT,
+    PROACTIVE_TRENDING_PICK_INTEREST_PROMPT,
+    PROACTIVE_TRENDING_PICK_RANDOM_PROMPT,
     PROACTIVE_TRENDING_SECTION_PROMPT,
-    PROACTIVE_TRENDING_USER_INTEREST_PROMPT,
-    PROACTIVE_TRENDING_AI_PERSONA_PROMPT,
-    PROACTIVE_TRENDING_SOCIALLY_HOT_PROMPT,
     PROACTIVE_FIRST_GREETING_PROMPT,
     PROACTIVE_SPECIAL_HOLIDAY_PROMPT,
     PROACTIVE_SPECIAL_BIRTHDAY_PROMPT,
@@ -456,18 +458,32 @@ PROMPT_DEFINITIONS = [
         CHAT_SESSION_RECAP_SECTION_PROMPT,
     ),
     PromptDefinition(
-        "chat.topic_continuation_return", "话题接续·回归承接", "聊天热路径", "聊天",
-        "《主动聊天机制（新增）》被动回复高级承接: 上一轮判定话题未完结、用户隔 10min-3h "
-        "才回、且本会话未触发过 B 模式追问时注入主回复 —— 先接住对方回来, 再按对方是否"
-        "换了话题决定顺着聊还是轻带过渡。占位符: {gap_text} {pending_topic}。",
+        "chat.topic_continuation_return", "用户久未回归·时间承接话术", "聊天热路径", "聊天",
+        "《主动交流提示词（新增）》用户久未回归时间承接话术: 上一轮判定话题未完结、用户隔 "
+        "10min-3h 才回、且本会话未触发过 B 模式追问时生成一句承接短句, 作为独立气泡排在正常"
+        "回复之前。占位符: {conversation} {ai_last_send_time} {current_time} {time_gap} "
+        "{user_msg} {personality_brief}。",
         CHAT_TOPIC_CONTINUATION_RETURN_PROMPT,
     ),
     PromptDefinition(
-        "chat.topic_continuation_jump", "话题接续·跳话题过渡", "聊天热路径", "聊天",
-        "《主动聊天机制（新增）》未完结话题·用户跳转新话题过渡机制: 上一轮判定话题未完结、"
-        "间隔 ≤10min 或本会话已触发过 B 模式时注入主回复 —— 对方换了无关新话题才轻带"
-        "一句旧话题。占位符: {pending_topic}。",
+        "chat.topic_continuation_jump", "未完结话题·跳转新话题过渡", "聊天热路径", "聊天",
+        "《主动交流提示词（新增）》未完结话题跳转新话题过渡: 上一轮判定话题未完结、用户这条"
+        "换了全新无关话题 (chat.topic_jump_detect 判定) 时生成一句过渡句, 排在正常回复之前。"
+        "占位符: {conversation} {user_new_msg} {personality_brief}。",
         CHAT_TOPIC_CONTINUATION_JUMP_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.topic_jump_detect", "跳话题判定", "聊天热路径", "聊天",
+        "【工程补丁】小模型判定用户这条消息是接着上一轮未完结话题还是换了全新无关话题"
+        " (输出 接续 / 新话题, 拿不准判接续), 决定要不要生成跳话题过渡句。"
+        "占位符: {conversation} {user_msg}。",
+        CHAT_TOPIC_JUMP_DETECT_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.topic_continuation_section", "话题接续段落", "聊天热路径", "聊天",
+        "【工程补丁】承接短句 / 过渡句已作为独立气泡先发出时, 注入主回复 system prompt 的"
+        "「话题接续」段, 让主回复只回对方这条消息、不重复。占位符: {lines}。",
+        CHAT_TOPIC_CONTINUATION_SECTION_PROMPT,
     ),
     PromptDefinition(
         "chat.expression_habits_section", "表达习惯参考段落", "聊天热路径", "表达学习",
@@ -877,25 +893,24 @@ PROMPT_DEFINITIONS = [
         PROACTIVE_SCHEDULED_SCENE_PROMPT,
     ),
     PromptDefinition(
-        "proactive.memory_timed", "记忆主动(带时间的用户记忆)", "主动交流", "主动消息",
-        "《主动聊天机制（新增）》A 模式新来源「带时间戳历史对话记忆搭话」: 对方最近发生 / "
-        "最近几天聊到的事, 带相对时间问问后来怎么样了。warming/intimate 阶段参与记忆主动抽签, "
-        "抽不到时兜底回 AI 记忆。对方最近已说过后续则输出 SKIP。"
-        "占位符: {personality_brief} {current_mood} {user_memory} {recent_context}。",
-        PROACTIVE_MEMORY_TIMED_PROMPT,
+        "proactive.recent_dialogue", "A模式·带时间感知历史对话搭话", "主动交流", "主动消息",
+        "《主动交流提示词（新增）》提示词3: 根据近两天带时间戳的聊天记录生成贴合时间差的"
+        "全新搭话, 关心追问后续 / 话题轻度延伸由代码随机二选一。warming/intimate 阶段参与"
+        "记忆主动与沉默唤醒抽签, 近两天没聊过时兜底回其他来源。"
+        "占位符: {recent_dialogue} {current_time} {approach} {personality_brief}。",
+        PROACTIVE_RECENT_DIALOGUE_PROMPT,
     ),
     PromptDefinition(
-        "proactive.topic_completion_judge", "话题完结判定", "主动交流", "主动消息",
-        "《主动聊天机制（新增）》AI 说完最后一句满 5 分钟用户未回时, 小模型判定话题是否"
-        "完结 (输出 JSON status/reason/pending_topic)。未完结 → B 模式追问; 完结 → A 模式。"
-        "结论同时供被动回复承接使用。占位符: {conversation}。",
+        "proactive.topic_completion_judge", "话题完结度判定", "主动交流", "主动消息",
+        "《主动交流提示词（新增）》提示词1: AI 说完最后一句满 5 分钟用户未回时, 小模型判定"
+        "已完结 / 未完结。未完结 → B 模式追问; 已完结 → A 模式。结论同时供被动回复承接使用。"
+        "占位符: {conversation} {user_last_time} {current_time}。",
         PROACTIVE_TOPIC_COMPLETION_JUDGE_PROMPT,
     ),
     PromptDefinition(
-        "proactive.followup_unfinished", "B 模式·未完结话题追问", "主动交流", "主动消息",
-        "《主动聊天机制（新增）》B 模式: 话题未完结·对话中断温柔追问, 单会话仅一次。"
-        "输出 SKIP 表示此刻追问会显得刻意, 不发。占位符: {personality_brief} {current_mood} "
-        "{pending_topic} {situation} {recent_context}。",
+        "proactive.followup_unfinished", "B模式·话题未完结温柔追问", "主动交流", "主动消息",
+        "《主动交流提示词（新增）》提示词2: 话题未完结·对话中断温柔追问, 单会话仅一次。"
+        "占位符: {conversation} {ai_last_time} {current_time} {time_scene} {personality_brief}。",
         PROACTIVE_FOLLOWUP_UNFINISHED_PROMPT,
     ),
     PromptDefinition(
@@ -908,27 +923,26 @@ PROMPT_DEFINITIONS = [
         "proactive.trending_section", "热点参考段", "主动交流", "主动消息",
         "【工程扩展·V0】主动消息命中 trending 概率或管理员强制联网时, "
         "追加在 silence_wakeup / scheduled_scene / special_date prompt 末尾. "
-        "占位符 {trending}. V3 dispatch 启用后由下面三个独立 prompt 取代.",
+        "占位符 {trending}. 现仅特殊日期祝福使用; A 模式热点改走 4-1/4-2/4-3 三段.",
         PROACTIVE_TRENDING_SECTION_PROMPT,
     ),
     PromptDefinition(
-        "proactive.trending_user_interest", "主动·用户兴趣分享", "主动交流", "主动消息",
-        "【工程扩展·V3】trending 分类命中用户兴趣时用. 表达模式勾用户 "
-        "(你不是说过X吗). 占位符 {personality_brief} {current_mood} "
-        "{user_portrait} {trending_item}.",
-        PROACTIVE_TRENDING_USER_INTEREST_PROMPT,
+        "proactive.trending_pick_random", "A模式·随机热点筛选", "主动交流", "主动消息",
+        "《主动交流提示词（新增）》提示词4-1: 从 48 小时热点候选中随机筛一条轻松无争议的,"
+        " 输出 100 字内摘要 (JSON 带候选序号, 供链接卡片挂同一条)。占位符: {candidates}。",
+        PROACTIVE_TRENDING_PICK_RANDOM_PROMPT,
     ),
     PromptDefinition(
-        "proactive.trending_ai_persona", "主动·AI自身兴趣分享", "主动交流", "主动消息",
-        "【工程扩展·V3】trending 分类命中 AI 人设兴趣时用. 表达模式第一人称 "
-        "(我最近在...). 占位符 {personality_brief} {current_mood} {trending_item}.",
-        PROACTIVE_TRENDING_AI_PERSONA_PROMPT,
+        "proactive.trending_pick_interest", "A模式·用户爱好匹配热点筛选", "主动交流", "主动消息",
+        "《主动交流提示词（新增）》提示词4-2: 按用户爱好记忆筛匹配的热点, 输出 100 字内摘要;"
+        " 无匹配 (index=-1) 自动切换随机热点。占位符: {user_hobbies} {candidates}。",
+        PROACTIVE_TRENDING_PICK_INTEREST_PROMPT,
     ),
     PromptDefinition(
-        "proactive.trending_socially_hot", "主动·社交谈资分享", "主动交流", "主动消息",
-        "【工程扩展·V3】trending 分类为通用社交谈资时用. 表达模式转发闲聊 "
-        "(刷到个X). 占位符 {personality_brief} {current_mood} {trending_item}.",
-        PROACTIVE_TRENDING_SOCIALLY_HOT_PROMPT,
+        "proactive.trending_chat", "A模式·热点生成闲聊消息", "主动交流", "主动消息",
+        "《主动交流提示词（新增）》提示词4-3: 按筛选好的热点摘要生成一句真人随手分享的"
+        "闲聊短句。占位符: {hot_summary} {personality_brief}。",
+        PROACTIVE_TRENDING_CHAT_PROMPT,
     ),
     PromptDefinition(
         "proactive.first_greeting", "AI首次打招呼", "主动交流", "主动消息",

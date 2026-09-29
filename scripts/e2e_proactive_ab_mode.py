@@ -3,7 +3,8 @@
 单测把 db / redis 都 mock 掉了, 验证不到 SQL 本身 (CAS、jsonb 合并、INSERT…WHERE
 NOT EXISTS 守卫、判定窗的 claim/推进)。这个脚本在一套**隔离的本地库**上把完整
 链路跑一遍: 用户发消息 → AI 回复收尾 arm → 时间推进 → 真实 scan → 判定 → B 追问
-/ A 模式 → 用户回来 → 聊天侧读承接 cue → 真实 build_system_prompt。
+/ A 模式 → 用户回来 → 聊天侧生成承接 / 过渡句 → 真实 build_system_prompt。
+各提示词 (《主动交流提示词（新增）》) 都从真实 registry 渲染, 断言输入字段确实填上。
 
 只桩三类东西: LLM 调用 (脚本化输出)、TTS / 推送通知、链接卡联网搜索。
 
@@ -28,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from collections import deque
@@ -76,23 +78,39 @@ def check(cond: bool, label: str) -> None:
 
 # ── LLM 脚本 ───────────────────────────────────────────────────────────
 
+RETURN_LINE = "忙完啦～刚才说到哪了"
+JUMP_LINE = "诶面试那事还没说完呢，先聊这个也行哈哈"
+
+
 class Script:
     """按调用顺序返回预设输出, 并记录 prompt (用于断言模板确实从 registry 取到)."""
 
     def __init__(self):
-        self.judge: deque = deque()
+        self.judge: deque = deque()        # "已完结" / "未完结"
         self.followup: deque = deque()
         self.a_mode: deque = deque()
+        self.jump_detect: deque = deque()  # "接续" / "新话题"
         self.prompts: list[tuple[str, str]] = []
         self.on_a_mode_call = None  # 模拟"生成期间用户回来"
 
-    async def judge_json(self, _model, prompt):
-        self.prompts.append(("judge", prompt))
-        return self.judge.popleft() if self.judge else {"status": "finished"}
-
     async def followup_text(self, _model, prompt):
+        """followup.invoke_text: 话题完结判定 (提示词1) 与 B 追问 (提示词2) 共用."""
+        if "精准判断当前对话状态" in prompt:
+            self.prompts.append(("judge", prompt))
+            return self.judge.popleft() if self.judge else "已完结"
         self.prompts.append(("followup", prompt))
         return self.followup.popleft() if self.followup else "SKIP"
+
+    async def continuation_text(self, _model, prompt):
+        """chat/topic_continuation.invoke_text: 回归承接 / 跳话题判定 / 过渡句."""
+        if "判断用户这条新消息" in prompt:
+            self.prompts.append(("jump_detect", prompt))
+            return self.jump_detect.popleft() if self.jump_detect else "接续"
+        if "承接时间差的开场白" in prompt:
+            self.prompts.append(("return", prompt))
+            return RETURN_LINE
+        self.prompts.append(("jump", prompt))
+        return JUMP_LINE
 
     async def a_mode_text(self, _model, prompt):
         self.prompts.append(("a_mode", prompt))
@@ -234,34 +252,34 @@ class World:
     async def continuity(self):
         return await tc.load_continuity(self.conv_id)
 
-    async def cue(self):
-        """聊天侧: 以真实上一条 AI 消息 + 真实 Redis 状态解析承接 cue."""
-        from app.services.chat.orchestrator import _resolve_topic_cue
+    async def continuation(self):
+        """聊天侧: 以真实历史 + 真实 Redis 状态生成承接 / 过渡句 (同 orchestrator 的入参)."""
+        from app.services.chat.topic_continuation import build_topic_continuation
 
-        previous = await db.message.find_first(
-            where={"conversationId": self.conv_id, "role": "assistant"},
-            order={"createdAt": "desc"},
+        history = await db.message.find_many(
+            where={"conversationId": self.conv_id}, order={"createdAt": "asc"},
         )
-        last_user = await db.message.find_first(
-            where={"conversationId": self.conv_id, "role": "user"},
-            order={"createdAt": "desc"},
-        )
-        return await _resolve_topic_cue(
-            asyncio.ensure_future(tc.load_continuity(self.conv_id)),
+        last_user = next(m for m in reversed(history) if m.role == "user")
+        previous = next((m for m in reversed(history) if m.role == "assistant"), None)
+        return await build_topic_continuation(
+            conversation_id=self.conv_id,
             previous_assistant=previous,
-            replied_at=last_user.createdAt if last_user else None,
+            replied_at=last_user.createdAt,
+            user_message=last_user.content,
+            history=history,
+            current_turn_ids={last_user.id},
+            agent=await db.aiagent.find_unique(where={"id": self.agent_id}),
             offering_turn=False,
             patience_low=False,
-            response_diagnostics={},
         )
 
-    async def system_prompt(self, gap_seconds: float) -> str:
+    async def system_prompt(self, gap_seconds: float, continuation=None) -> str:
         from app.services.chat.prompt_builder import build_system_prompt
 
         agent = await db.aiagent.find_unique(where={"id": self.agent_id})
         return await build_system_prompt(
             agent=agent, memory_relevance="weak", reengagement_gap_seconds=gap_seconds,
-            topic_continuation=await self.cue(),
+            topic_continuation=continuation if continuation is not None else await self.continuation(),
         )
 
 
@@ -302,7 +320,7 @@ async def scenario_unfinished_then_b_once():
     await scan()
     check((await w.state()).current_window_index == 0, "不满 5 分钟不判定")
 
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "周末去哪玩"})
+    SCRIPT.judge.append("未完结")
     SCRIPT.followup.append("要不我先说，我想去海边吹吹风~")
     await w.advance(5)
     await scan()
@@ -313,10 +331,24 @@ async def scenario_unfinished_then_b_once():
     check(len(assistant_msgs) == 2 and meta.get("trigger_type") == "followup_unfinished", "B 追问已发出")
     check(meta.get("proactive") is True, "B 带 proactive 标记 (计入全局冷却)")
     judge_prompt = next(p for k, p in SCRIPT.prompts if k == "judge")
-    check("AI: 好呀，你想去哪儿？" in judge_prompt and "unfinished" in judge_prompt,
-          "判定 prompt 来自 registry 且带最近对话")
+    check(
+        re.search(r"\[\d\d-\d\d \d\d:\d\d\] AI: 好呀，你想去哪儿？", judge_prompt) is not None
+        and "已完结 / 未完结" in judge_prompt,
+        "判定 prompt (提示词1) 来自 registry, 上下文带时间戳",
+    )
+    check(
+        re.search(r"用户最后一条消息发送时间：\d\d-\d\d 周. \d\d:\d\d", judge_prompt) is not None
+        and re.search(r"当前时间：\d\d-\d\d 周. \d\d:\d\d", judge_prompt) is not None,
+        "判定 prompt 填了用户最后发送时间 + 当前时间",
+    )
     fu_prompt = next(p for k, p in SCRIPT.prompts if k == "followup")
-    check("【通用回复规则】" in fu_prompt and "周末去哪玩" in fu_prompt, "B prompt 带回复前置 + 未完结点")
+    check("【通用回复规则】" in fu_prompt and "AI: 好呀，你想去哪儿？" in fu_prompt,
+          "B prompt (提示词2) 带回复前置 + 对话上下文")
+    check(
+        re.search(r"AI最后发送时间：\d\d-\d\d 周. \d\d:\d\d", fu_prompt) is not None
+        and re.search(r"当前时间场景：周.(?:凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)", fu_prompt) is not None,
+        "B prompt 填了 AI 最后发送时间 + 当前时间场景",
+    )
     check("活泼外向、脑洞大、感性细腻" in fu_prompt, "B prompt 带 MBTI 推出的人设 (不再恒为温和友善)")
 
     st = await w.state()
@@ -332,11 +364,14 @@ async def scenario_unfinished_then_b_once():
     await w.advance(20)
     await w.user_says("海边！我超想看海")
     check((await w.state()).status == "idle", "用户回来 → 状态 idle")
-    cue = await w.cue()
-    check(cue is not None and cue.template_key is None, "回 B 追问: 压掉重逢短档, 不注入承接段")
+    returned_before = SCRIPT.count("return") + SCRIPT.count("jump_detect")
+    cont = await w.continuation()
+    check(cont is not None and not cont.cue.unfinished and cont.lines == []
+          and SCRIPT.count("return") + SCRIPT.count("jump_detect") == returned_before,
+          "回 B 追问: 不生成承接句, 但压掉重逢短档")
 
     # 同会话再次停顿 → 判定仍跑 (供被动承接), 但只能走 A
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "去哪片海"})
+    SCRIPT.judge.append("未完结")
     await w.ai_replies("那你想去近一点的还是远一点的？")
     await w.advance(5)
     before = SCRIPT.count("followup")
@@ -352,7 +387,7 @@ async def scenario_finished_goes_a_and_passive_suppression():
     w = await World("s2").create()
     await w.user_says("今天好累呀")
     await w.ai_replies("辛苦啦，早点休息，泡个热水澡会舒服很多")
-    SCRIPT.judge.append({"status": "finished", "reason": "natural_end", "pending_topic": ""})
+    SCRIPT.judge.append("已完结")
     await w.advance(5)
     await scan()
     st = await w.state()
@@ -369,26 +404,51 @@ async def scenario_finished_goes_a_and_passive_suppression():
 
 
 async def scenario_passive_return_and_jump():
-    print("\n[S3] 未完结但 B 被门槛拦下 → 用户 15 分钟后回来: 回归承接; 8 分钟: 仅跳话题过渡")
-    for gap, expect_key, label in (
-        (15, tc.CUE_RETURN_KEY, "隔 15 分钟: 回归承接段"),
-        (8, tc.CUE_JUMP_KEY, "隔 8 分钟: 仅跳话题过渡段"),
+    print("\n[S3] 未完结但 B 被门槛拦下 → 用户 15 分钟后换话题回来: 承接 + 过渡; 8 分钟: 仅过渡")
+    for gap, expect_lines, label in (
+        (15, [RETURN_LINE, JUMP_LINE], "隔 15 分钟 + 换话题: 回归承接句 + 过渡句"),
+        (8, [JUMP_LINE], "隔 8 分钟 + 换话题: 仅过渡句"),
     ):
         w = await World(f"s3-{gap}").create()
         await w.user_says("我明天有个面试，有点紧张")
         await w.ai_replies("是什么岗位的面试呀？")
-        SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "面试岗位"})
+        SCRIPT.judge.append("未完结")
         with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: False):
             await w.advance(5)
             await scan()
         check(len(await w.messages("assistant")) == 1, f"{label}: 夜间门槛拦下 B")
         await w.advance(gap - 5)
         await w.user_says("对了你吃饭了吗")
-        cue = await w.cue()
-        check(cue is not None and cue.template_key == expect_key, label)
-        prompt = await w.system_prompt(gap_seconds=gap * 60)
-        check("## 话题接续" in prompt and "面试岗位" in prompt, f"{label}: 主 prompt 注入且带未完结点")
+        SCRIPT.jump_detect.append("新话题")
+        cont = await w.continuation()
+        check(cont is not None and cont.lines == expect_lines, f"{label} (lines={cont and cont.lines})")
+        detect = [p for k, p in SCRIPT.prompts if k == "jump_detect"][-1]
+        check("用户这条新消息：对了你吃饭了吗" in detect and "AI: 是什么岗位的面试呀？" in detect
+              and "对了你吃饭了吗" not in detect.split("用户这条新消息")[0],
+              f"{label}: 跳话题判定输入 = 历史 (不含本条) + 本条")
+        if gap > 10:
+            ret = [p for k, p in SCRIPT.prompts if k == "return"][-1]
+            check("间隔时长：15 分钟" in ret and "用户本次消息：对了你吃饭了吗" in ret
+                  and "【通用回复规则】" in ret,
+                  f"{label}: 承接 prompt 填了间隔 / 本次消息 + 回复前置")
+        prompt = await w.system_prompt(gap_seconds=gap * 60, continuation=cont)
+        check("## 话题接续" in prompt and all(f"「{line}」" in prompt for line in expect_lines),
+              f"{label}: 主 prompt 列出已发的句子, 让主回复别重复")
         check("## 重逢感知" not in prompt, f"{label}: 不叠重逢感知")
+
+    # 同一话题接着聊 (不是跳话题) + 8 分钟: 什么都不补
+    w = await World("s3-same").create()
+    await w.user_says("我明天有个面试，有点紧张")
+    await w.ai_replies("是什么岗位的面试呀？")
+    SCRIPT.judge.append("未完结")
+    with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: False):
+        await w.advance(5)
+        await scan()
+    await w.advance(3)
+    await w.user_says("产品经理")
+    SCRIPT.jump_detect.append("接续")
+    cont = await w.continuation()
+    check(cont is not None and cont.cue.unfinished and cont.lines == [], "接着回答旧话题: 不说过渡句")
 
 
 async def scenario_short_circuit_and_boundary_arming():
@@ -445,9 +505,11 @@ async def scenario_user_returns_during_generation():
     w = await World("s6").create()
     await w.user_says("你喜欢什么电影")
     await w.ai_replies("我最近在看老电影，你呢？喜欢什么类型")
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "喜欢的电影类型"})
+    SCRIPT.judge.append("未完结")
 
-    async def _user_interrupts(_model, prompt):
+    async def _user_interrupts(model, prompt):
+        if "精准判断当前对话状态" in prompt:
+            return await SCRIPT.followup_text(model, prompt)
         SCRIPT.prompts.append(("followup", prompt))
         await w.user_says("喜欢悬疑的！")  # 用户恰好在追问生成时回来
         return "我猜你喜欢悬疑片？"
@@ -518,7 +580,7 @@ async def scenario_farewell_and_sessions():
     w2 = await World("s7b").create()
     await w2.user_says("你猜我今天遇到谁了")
     await w2.ai_replies("谁呀谁呀？")
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "遇到了谁"})
+    SCRIPT.judge.append("未完结")
     SCRIPT.followup.append("快说快说，我好奇死了")
     with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: True):
         await w2.advance(5)
@@ -544,7 +606,7 @@ async def scenario_gates():
         "UPDATE messages SET created_at = created_at + interval '1 second' "
         "WHERE conversation_id = $1 AND content = '你想宅家还是出门？'", w.conv_id,
     )
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "周末安排"})
+    SCRIPT.judge.append("未完结")
     with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: True):
         await w.advance(5)
         await scan()
@@ -565,7 +627,7 @@ async def scenario_gates():
         str(uuid.uuid4()), w3.agent_id, w3.user_id,
         _naive(datetime.now(UTC) + timedelta(minutes=10)),
     )
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "周末安排"})
+    SCRIPT.judge.append("未完结")
     await w3.advance(5)
     await scan()
     check(len(await w3.messages("assistant")) == 1, "15 分钟内有提醒要响 → 不追问")
@@ -589,58 +651,62 @@ async def scenario_gates():
     await redis.set(f"patience:{w2.agent_id}:{w2.user_id}", "40")
     await w2.user_says("随便吧")
     await w2.ai_replies("那你到底想怎么样嘛？")
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "想怎么样"})
+    SCRIPT.judge.append("未完结")
     with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: True):
         await w2.advance(5)
         await scan()
     check(len(await w2.messages("assistant")) == 1, "耐心 <70 不追问")
 
 
-async def scenario_timed_memory_a_mode():
-    print("\n[S9] A 模式新来源: 带时间戳的历史记忆 → 发送 → 会话关闭")
-    from app.services.proactive.context import _load_timed_user_memories
+async def scenario_recent_dialogue_a_mode():
+    print("\n[S9] A 模式新来源: 近两天带时间戳的对话 (提示词3) → 发送 → 会话关闭")
+    from app.services.proactive.context import _load_recent_dialogue
     from app.services.proactive.sender import generate_and_send_proactive
 
     w = await World("s9").create()
-    now = datetime.now(UTC)
-    rows = [
-        ("周五要去面试产品经理", now - timedelta(days=2), now - timedelta(days=4), "生活", "计划"),  # 事先说的
-        ("昨天面试完了感觉挺好", now - timedelta(days=1, hours=2), now - timedelta(hours=20), "生活", "日常"),  # 事后讲述
-        ("提醒我喝水", now - timedelta(days=1), None, "生活", "提醒"),
-        ("最近在学吉他", None, now - timedelta(days=3), "偏好", "兴趣"),  # 偏好事实, 不问"后来怎样"
-        ("这周在搬家", None, now - timedelta(days=3), "生活", "日常"),
-        ("刚说的事", None, now - timedelta(hours=1), "生活", "日常"),  # 半天内说的不算"想起来"
-    ]
-    for content, occur, said, main, sub in rows:
-        await db.execute_raw(
-            "INSERT INTO memories_user (id, user_id, workspace_id, content, main_category, sub_category, "
-            "occur_time, statement_time, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9::timestamp)",
-            str(uuid.uuid4()), w.user_id, w.ws_id, content, main, sub,
-            _naive(occur) if occur else None, _naive(said) if said else None, _naive(now),
-        )
-    texts, _ids = await _load_timed_user_memories(user_id=w.user_id, workspace_id=w.ws_id, exclude_memory_ids=set())
-    check(
-        len(texts) == 2 and texts[0].startswith("[前天的事") and "面试" in texts[0]
-        and texts[1] == "[3天前聊到] 这周在搬家",
-        f"真库筛选正确 (事件优先; 排除提醒/偏好/刚说的/事后讲述): {texts}",
-    )
-
+    await w.user_says("上个月去了趟成都")          # 超出 48 小时: 不进上下文
+    await w.advance(50 * 60)
+    await w.user_says("这周五要去面试产品经理")
+    await w.ai_replies("加油！你肯定行")
+    await w._insert("assistant", "黑棋落子 D4", {"kind": "game_status"})  # 游戏播报不是聊天内容
+    await w.advance(20 * 60)
     await w.user_says("在忙")
     await w.ai_replies("好的去吧")
+
+    dialogue = await _load_recent_dialogue(w.ws_id)
+    lines = dialogue.splitlines()
+    check(
+        [line.split("] ", 1)[1] for line in lines]
+        == ["用户: 这周五要去面试产品经理", "AI: 加油！你肯定行", "用户: 在忙", "AI: 好的去吧"],
+        f"真库取近 48 小时对话 (滤掉游戏播报与更早的消息): {lines}",
+    )
+    check(all(re.match(r"\[\d\d-\d\d \d\d:\d\d\] ", line) for line in lines), "每行带 UTC+8 时间戳")
+
     st = await w.state()
     await db.execute_raw("UPDATE proactive_states SET status='processing' WHERE id=$1", st.id)
     st = await w.state()
-    SCRIPT.a_mode.append("前天你说要去面试，怎么样啦？")
+    SCRIPT.a_mode.append("周五面试准备得咋样啦")
     with (
         patch("app.services.proactive.sender.determine_proactive_stage", AsyncMock(return_value="warming")),
-        patch("app.services.proactive.sender.select_topic_source", lambda *_a: "timed_user"),
+        patch("app.services.proactive.sender.select_topic_source", lambda *_a: "recent_dialogue"),
     ):
         sent = await generate_and_send_proactive(st, trigger_type="memory_proactive")
     check(sent is True, "A 模式发送成功")
     a_prompt = [p for k, p in SCRIPT.prompts if k == "a_mode"][-1]
-    check("前天的事" in a_prompt and "问问后来怎么样了" in a_prompt, "走 proactive.memory_timed 模板并带时间")
+    check("带时间戳近两天完整对话上下文" in a_prompt and "用户: 这周五要去面试产品经理" in a_prompt,
+          "走 proactive.recent_dialogue 模板, 带对话上下文")
+    check(
+        re.search(r"当前发送时间：\d\d-\d\d 周. \d\d:\d\d", a_prompt) is not None
+        and re.search(r"本次随机到：(?:关心追问后续|话题轻度延伸)", a_prompt) is not None,
+        "填了当前发送时间 + 代码随机的二选一方式",
+    )
     check((await w.state()).status == "waiting_user", "A 发出 → waiting_user")
     check((await w.continuity()).session_closed is True, "A 是新开场 → 会话关闭")
+
+    # 近两天用户一句没说 (只有 AI 自己的主动消息) → 记忆主动回落 AI 自己的记忆
+    w2 = await World("s9b").create()
+    await w2._insert("assistant", "早呀～", {"proactive": True})
+    check(await _load_recent_dialogue(w2.ws_id) == "", "只有 AI 主动消息: 视为没有可聊的对话")
 
 
 class _RoutedFakeLLM:
@@ -690,12 +756,13 @@ async def scenario_real_chat_turn():
     w = await World("s10").create()
     await w.user_says("我明天有个面试，有点紧张")
     await w.ai_replies("别紧张！是什么岗位的面试呀？")
-    SCRIPT.judge.append({"status": "unfinished", "reason": "ai_question", "pending_topic": "面试岗位"})
+    SCRIPT.judge.append("未完结")
     with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: False):
         await w.advance(5)
         await scan()
     await w.advance(10)
     user_msg = await w.user_says("对了你吃饭了吗")
+    SCRIPT.jump_detect.append("新话题")
     agent = await db.aiagent.find_unique(where={"id": w.agent_id})
 
     events = []
@@ -725,31 +792,52 @@ async def scenario_real_chat_turn():
     check("reply" in kinds and kinds[-1] == "done", f"主路径正常出回复 (events={kinds})")
     check(bool(_RoutedFakeLLM.main_prompts), "走了主 prompt (话题接续强制跳过 tier)")
     main = _RoutedFakeLLM.main_prompts[-1] if _RoutedFakeLLM.main_prompts else ""
-    check("## 话题接续" in main and "面试岗位" in main and "过了约15 分钟" in main,
-          "主 prompt 注入回归承接段 (未完结 + 15 分钟 + 未用 B)")
+    check("## 话题接续" in main and f"「{RETURN_LINE}」" in main and f"「{JUMP_LINE}」" in main,
+          "主 prompt 注入话题接续段, 列出已先发的承接 + 过渡句")
     check("## 重逢感知" not in main, "主 prompt 不叠重逢感知")
+    replies = [
+        (json.loads(e["data"]) if isinstance(e.get("data"), str) else e.get("data") or {}).get("text")
+        for e in events if e.get("event") == "reply"
+    ]
+    check(replies[:2] == [RETURN_LINE, JUMP_LINE] and len(replies) >= 3,
+          f"气泡顺序 = 承接句 + 过渡句 + 正常回复 (replies={replies})")
     if "## 话题接续" in main:
         section = main.split("## 话题接续", 1)[1].split("\n## ", 1)[0].strip()
         print("    └ 注入的话题接续段:\n      " + section.replace("\n", "\n      "))
     st = await w.state()
     check(st.status == "running" and st.current_window_index == 0, "回复收尾后重新 arm 判定窗")
     check((st.metadata or {}).get("reason") == ARM_REASON_REPLY, "arm 原因 = 普通回复")
-    replies = [m for m in await w.messages("assistant")]
-    check(any("吃了" in m["content"] for m in replies), "AI 回复已落库")
+    saved = [m["content"] for m in await w.messages("assistant")]
+    check(any("吃了" in c for c in saved) and RETURN_LINE in saved, "承接句与回复都已落库")
 
 
 async def scenario_prompt_sync():
     print("\n[S0] 启动同步: 新增 prompt key 已入库")
     from app.services.prompting.store import ensure_prompt_templates, get_prompt_text
 
+    # 模拟上一版部署留下的行 (本次已从 registry 删除)
+    if await db.prompttemplate.find_unique(where={"key": "proactive.memory_timed"}) is None:
+        await db.prompttemplate.create(data={
+            "key": "proactive.memory_timed", "stage": "proactive", "category": "proactive",
+            "title": "旧模板", "content": "旧文案", "defaultContent": "旧文案",
+        })
     await ensure_prompt_templates()
     for key in (
         "proactive.topic_completion_judge", "proactive.followup_unfinished",
-        "proactive.memory_timed", "chat.topic_continuation_return", "chat.topic_continuation_jump",
+        "proactive.recent_dialogue", "proactive.trending_pick_random",
+        "proactive.trending_pick_interest", "proactive.trending_chat",
+        "chat.topic_continuation_return", "chat.topic_continuation_jump",
+        "chat.topic_jump_detect", "chat.topic_continuation_section",
     ):
         row = await db.prompttemplate.find_unique(where={"key": key})
         text = await get_prompt_text(key)
         check(row is not None and len(text) > 20, f"{key} 已同步且可取")
+    # 旧版本的 key 从 registry 删掉后, 部署同步把行连同版本历史一起清掉
+    for key in (
+        "proactive.memory_timed", "proactive.trending_user_interest",
+        "proactive.trending_ai_persona", "proactive.trending_socially_hot",
+    ):
+        check(await db.prompttemplate.find_unique(where={"key": key}) is None, f"{key} 已作为孤儿删除")
 
 
 async def main() -> int:
@@ -766,8 +854,8 @@ async def main() -> int:
     )
 
     patches = [
-        patch("app.services.proactive.followup.invoke_json", SCRIPT.judge_json),
         patch("app.services.proactive.followup.invoke_text", SCRIPT.followup_text),
+        patch("app.services.chat.topic_continuation.invoke_text", SCRIPT.continuation_text),
         patch("app.services.proactive.followup.get_utility_model", lambda: None),
         patch("app.services.proactive.followup.get_chat_model", lambda: None),
         patch("app.services.proactive.sender.invoke_text", SCRIPT.a_mode_text),
@@ -795,7 +883,7 @@ async def main() -> int:
             await scenario_user_returns_during_generation()
             await scenario_farewell_and_sessions()
             await scenario_gates()
-            await scenario_timed_memory_a_mode()
+            await scenario_recent_dialogue_a_mode()
         await scenario_passive_return_and_jump()
         await scenario_real_chat_turn()
     finally:

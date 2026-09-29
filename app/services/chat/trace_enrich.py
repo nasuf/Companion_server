@@ -110,8 +110,7 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.expression_habits_section",
     "chat.session_recap_section",
     # 《主动聊天机制》被动承接 — 仅作为主回复 system prompt 的「话题接续」段出现
-    "chat.topic_continuation_return",
-    "chat.topic_continuation_jump",
+    "chat.topic_continuation_section",
     "chat.reengagement_day",
     "chat.reengagement_long",
     "chat.reengagement_short",
@@ -358,16 +357,29 @@ def _label_reminder_precheck(output: str) -> str | None:
     return f"{state}: {reason[:20]}" if reason else state
 
 
+def _label_one_of(output: str, *labels: str) -> str | None:
+    """二选一类判定 (已完结/未完结、接续/新话题): 取模型输出里出现的那个标签."""
+    text = output or ""
+    return next((label for label in labels if label in text), None)
+
+
 def _label_topic_verdict(output: str) -> str | None:
+    return _label_one_of(output, "未完结", "已完结")
+
+
+def _label_topic_jump(output: str) -> str | None:
+    return _label_one_of(output, "新话题", "接续")
+
+
+def _label_trending_pick(output: str) -> str | None:
     try:
         data = json.loads(_label_strip_codeblock(output))
     except Exception:
         return None
-    status = str(data.get("status") or "").strip()
-    if status == "unfinished":
-        pending = str(data.get("pending_topic") or "").strip()
-        return f"未完结: {pending[:15]}" if pending else "未完结"
-    return "已完结" if status == "finished" else None
+    if not isinstance(data, dict):
+        return None
+    summary = str(data.get("summary") or "").strip()
+    return f"选中: {summary[:20]}" if summary else "无合适热点"
 
 
 def _label_ids(output: str) -> str | None:
@@ -515,7 +527,10 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("memory.consolidation", "L3 记忆整合压缩", "decision", _label_passthrough),
     ("intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message),
     ("proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids),
-    ("proactive.topic_completion_judge", "话题完结判定", "decision", _label_topic_verdict),
+    ("proactive.topic_completion_judge", "话题完结度判定", "decision", _label_topic_verdict),
+    ("proactive.trending_pick_random", "随机热点筛选", "decision", _label_trending_pick),
+    ("proactive.trending_pick_interest", "爱好匹配热点筛选", "decision", _label_trending_pick),
+    ("chat.topic_jump_detect", "跳话题判定", "decision", _label_topic_jump),
     ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),
     ("music.user_pause_followup_decision", "共听暂停后跟进判定", "decision", _label_passthrough),
 
@@ -591,13 +606,12 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.silence_schedule", "沉默唤醒(作息)", "reply", _label_reply_text),
     ("proactive.memory_ai", "记忆主动(AI记忆)", "reply", _label_reply_text),
     ("proactive.memory_user", "记忆主动(用户记忆)", "reply", _label_reply_text),
-    ("proactive.memory_timed", "记忆主动(带时间的用户记忆)", "reply", _label_reply_text),
-    ("proactive.followup_unfinished", "未完结话题追问", "reply", _label_reply_text),
+    ("proactive.recent_dialogue", "带时间感知历史对话搭话", "reply", _label_reply_text),
+    ("proactive.followup_unfinished", "未完结话题温柔追问", "reply", _label_reply_text),
+    ("chat.topic_continuation_return", "久未回归时间承接", "reply", _label_reply_text),
+    ("chat.topic_continuation_jump", "跳话题过渡", "reply", _label_reply_text),
     ("proactive.scheduled_scene", "定时情景(AI作息)", "reply", _label_reply_text),
-    # V3 三档主动分享 (2026-09-14): trending 分类命中后走三档独立 prompt.
-    ("proactive.trending_user_interest", "主动分享(用户兴趣)", "reply", _label_reply_text),
-    ("proactive.trending_ai_persona", "主动分享(AI人设兴趣)", "reply", _label_reply_text),
-    ("proactive.trending_socially_hot", "主动分享(社交谈资)", "reply", _label_reply_text),
+    ("proactive.trending_chat", "热点闲聊分享", "reply", _label_reply_text),
     ("proactive.decay_final", "衰减最后一次回复", "reply", _label_reply_text),
     ("proactive.first_greeting", "AI首次打招呼", "reply", _label_reply_text),
     ("proactive.special_holiday", "特殊日期(节日)", "reply", _label_reply_text),

@@ -1,4 +1,4 @@
-"""featured_topics.py + topic_source.exclude_titles 参数 单测 (2026-09-14).
+"""featured_topics.py 单测 (2026-09-14): 最近 featured 过的热点标题按 workspace 排除.
 
 修 bug: admin 反复触发主动消息, DailyHot 热榜前几名短时间内不变 + V3 分类器
 100% 确定性, 结果永远推"同一件事". 加"最近 featured 排除", 按 workspace_id
@@ -11,75 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.proactive.topic_source import classify_topic_source
-
-
-class TestClassifierExcludeTitles:
-    """topic_source.classify_topic_source 传 exclude_titles 时行为."""
-
-    def _cand(self, title: str, snippet: str = "", platform: str = "微博") -> dict:
-        return {"title": title, "snippet": snippet, "url": f"https://x.com/{title}",
-                "platform": platform}
-
-    def test_empty_exclude_backward_compatible(self):
-        """未传 exclude_titles 或空集合 → 行为跟原来一模一样 (regression 保护)."""
-        cands = [self._cand("热榜第一"), self._cand("热榜第二")]
-        r1 = classify_topic_source(trending_candidates=cands)
-        r2 = classify_topic_source(trending_candidates=cands, exclude_titles=frozenset())
-        r3 = classify_topic_source(trending_candidates=cands, exclude_titles=set())
-        # 三种调用方式结果一致
-        assert r1.kind == r2.kind == r3.kind == "socially_hot"
-        assert r1.selected_candidate == r2.selected_candidate == r3.selected_candidate
-
-    def test_excluded_top_picks_next(self):
-        """排除掉 socially_hot 会选的 top → 分类器自动选下一条."""
-        cands = [
-            self._cand("赵雷当爸爸"),   # 会被排除
-            self._cand("iPhone 首销秒空"),
-            self._cand("某明星综艺翻车"),
-        ]
-        r = classify_topic_source(
-            trending_candidates=cands,
-            exclude_titles={"赵雷当爸爸"},
-        )
-        assert r.kind == "socially_hot"
-        assert r.selected_candidate is not None
-        assert r.selected_candidate["title"] == "iPhone 首销秒空"
-
-    def test_excluded_all_returns_none(self):
-        """全部候选都在 exclude → kind='none' (兜底走 silence_plain)."""
-        cands = [self._cand("A"), self._cand("B"), self._cand("C")]
-        r = classify_topic_source(
-            trending_candidates=cands,
-            exclude_titles={"A", "B", "C"},
-        )
-        assert r.kind == "none"
-        assert r.selected_candidate is None
-        assert "全部" in r.reason and "featured" in r.reason.lower() or "featured" in r.reason
-
-    def test_exclude_respects_user_interest_priority(self):
-        """排除只对候选池, 不影响优先级. user_interest 命中的仍在 socially_hot 之上."""
-        cands = [
-            self._cand("A股大盘上涨"),     # 无匹配 → socially_hot
-            self._cand("摄影展开幕", "国家美术馆摄影展周末开幕"),  # 命中用户"摄影"
-        ]
-        r = classify_topic_source(
-            trending_candidates=cands,
-            user_portrait="用户喜欢摄影和爬山",
-            exclude_titles={"A股大盘上涨"},  # 排除 hot 候选
-        )
-        # user_interest 那条还在, 应仍走 user_interest_match
-        assert r.kind == "user_interest_match"
-        assert r.selected_candidate["title"] == "摄影展开幕"
-
-    def test_exclude_diagnostic_in_reason(self):
-        """排除动作在 reason 里留痕, 方便 log 排查."""
-        cands = [self._cand("旧闻"), self._cand("新闻")]
-        r = classify_topic_source(
-            trending_candidates=cands,
-            exclude_titles={"旧闻"},
-        )
-        assert "排除 1 条" in r.reason and "featured" in r.reason
 
 
 class TestFeaturedTopicsRedis:

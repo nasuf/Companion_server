@@ -1,18 +1,18 @@
 """主动交流·自然度评测 runner.
 
-跑真实主动消息生成路径 (build_proactive_context + append_trending_section +
-_generate_message + 线上豆包), 但**mock 掉 tavily/brave 搜索**, 让每 case 用它
-自己声明的 trending_candidates. 生产上 tavily 抓什么无法控制, mock 让 eval 可复现,
-也让我们能干净地测 "假设内容源改好了, LLM 表现会不会好".
+跑真实主动消息生成路径 (build_proactive_context → trending_pick.pick_trending →
+_generate_message, 线上模型), 但**mock 掉 tavily/brave 搜索和用户爱好记忆**: 每个
+case 用它自己声明的 trending_candidates, 爱好取自 case.user_portrait。生产上热榜抓
+什么无法控制, mock 让 eval 可复现, 也能干净地测 "假设内容源改好了, LLM 表现会不会好"。
 
 用法 (容器内 /app, redis 起来):
     python -m evals.proactive_naturalness.run_eval
     python -m evals.proactive_naturalness.run_eval --samples 3 --judge dashscope:qwen-plus
     python -m evals.proactive_naturalness.run_eval --source-kind socially_hot
 
-模式:
-    默认 (v0): 走当前生产 code path (append_trending_section 塞进 prompt 尾).
-    --mode v3: (task#4 建好后接入) 走 V3 三档独立 prompt.
+生成路径 = 《主动交流提示词（新增）》4-1 随机热点 / 4-2 用户爱好匹配 (筛选 + 100 字
+摘要) → 4-3 热点闲聊生成; 卡片就是筛中的那条。历史 V0 / V3 基线见 standard.py。
+注意: 新路径没有「AI 人设匹配」档, ai_persona_match 类 case 走的是随机热点。
 """
 
 from __future__ import annotations
@@ -31,11 +31,12 @@ from evals.proactive_naturalness import judge as J
 from evals.proactive_naturalness.cases import CASES, SOURCE_KINDS, ProactiveCase
 
 
-async def _generate_for_case(
-    case: ProactiveCase, mode: str,
-) -> tuple[str, dict | None]:
-    """Return (message, card_dict_or_None). 走 V0 or V3 code path."""
+async def _generate_for_case(case: ProactiveCase) -> tuple[str, dict | None]:
+    """Return (message, card_dict_or_None)."""
     # Late import: 模块顶导入会 pull 一堆运行时依赖, eval smoke test 想 offline 跑
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.proactive import trending_pick
     from app.services.proactive.context import build_proactive_context
     from app.services.proactive.sender import _generate_message
 
@@ -50,73 +51,38 @@ async def _generate_for_case(
         raise RuntimeError("no active workspace for eval; need one agent+ws in DB")
     ws = wss[0]
 
-    # 组 trending text (跟生产 append_trending_section 一致的形状)
-    trending_text = ""
-    if case.trending_candidates:
-        lines = [f"- {c.title}: {c.snippet[:140]}" for c in case.trending_candidates]
-        trending_text = "\n".join(lines)
-
-    # 组 topic_theme —— V0 用抽象词 (跟生产一致, 反映现状问题);
-    # V3 用 source_kind 语义 (跟新档位对齐).
-    if mode == "v0":
-        topic_theme = "分享有趣见闻"  # 生产最常见, 也就是眼下 tavily 拿垃圾的场景
-    else:  # v3
-        topic_theme = {
-            "user_interest_match": "用户兴趣分享",
-            "ai_persona_match":    "AI 自己想分享",
-            "socially_hot":        "社交谈资",
-            "none":                "问候",
-        }.get(case.source_kind, "分享有趣见闻")
-
     ctx = await build_proactive_context(
         workspace_id=ws.id, user_id=ws.userId, agent_id=agent.id,
         trigger_type=case.trigger_type, stage=case.stage,
-        source="greeting", topic_theme=topic_theme,
+        source="greeting", topic_theme="分享有趣见闻",
         conversation_id=None,
     )
     ctx["source"] = "greeting"
     ctx["is_decay_final"] = False
-    ctx["trending_context"] = trending_text
     # 覆盖 user_portrait, 让 judge 输入跟 case 声明的一致 (agent 是共享的, portrait
     # 来自 DB 里那个 workspace 的 user, 可能跟 case 声称的兴趣不匹配 → 让 eval
     # 结果不受 DB 状态影响)
     ctx["user_portrait"] = case.user_portrait
 
-    # V3 dispatch: 用 topic_source 分类器决定档位 + 挑候选内容, 塞进 ctx.
-    # sender._generate_message 看到 ctx["topic_source_kind"] 就走三档独立 prompt.
-    if mode == "v3":
-        from app.services.proactive.topic_source import classify_topic_source
-        from dataclasses import asdict
-
-        cands = [asdict(c) for c in case.trending_candidates]
-        cls = classify_topic_source(
-            trending_candidates=cands,
-            user_portrait=case.user_portrait,
-            agent=ctx["agent"],
-        )
-        ctx["topic_source_kind"] = cls.kind
-        ctx["topic_source_item"] = cls.selected_candidate
+    pick = None
+    if case.trending_candidates:
+        hobbies = [case.user_portrait] if "喜欢" in case.user_portrait or "爱好" in case.user_portrait else []
+        with patch.object(trending_pick, "_load_user_hobbies", AsyncMock(return_value=hobbies)):
+            pick = await trending_pick.pick_trending(
+                [asdict(c) for c in case.trending_candidates],
+                user_id=ws.userId, workspace_id=ws.id,
+            )
+    ctx["trending_pick"] = pick
 
     msg = await _generate_message(ctx)
     if not msg:
         return "", None
-
-    # 卡片 mock:
-    #   V0: chat_links 按 topic 独立搜, 跟 message 无关 → 用 trending_candidates[0]
-    #       模拟"随便挂一条"的形状 (代表当前生产的问题)
-    #   V3: 分类器已经选中了那一条 (selected_candidate), 卡片就是那条 → 天然跟消息
-    #       的话题源对齐 (P0.1 selB 的部分预演)
+    # 卡片就是筛中的那条 → 天然跟消息的话题源对齐
     card = None
-    if mode == "v3":
-        item = ctx.get("topic_source_item")
-        if item and case.should_emit_card:
-            card = {"title": item.get("title", ""),
-                    "platform": item.get("platform", ""),
-                    "url": item.get("url", "")}
-    else:  # v0
-        if case.should_emit_card and case.trending_candidates:
-            c = case.trending_candidates[0]
-            card = {"title": c.title, "platform": c.platform, "url": c.url}
+    if pick and case.should_emit_card:
+        card = {"title": pick.item.get("title", ""),
+                "platform": pick.item.get("platform", ""),
+                "url": pick.item.get("url", "")}
     return msg, card
 
 
@@ -164,8 +130,6 @@ def _build_judge(spec):
 
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=("v0", "v3"), default="v0",
-                    help="v0=当前生产 code path; v3=三档分化 (task#4 后可用)")
     ap.add_argument("--source-kind", choices=SOURCE_KINDS,
                     help="只跑一档 (调试用)")
     ap.add_argument("--samples", type=int, default=1,
@@ -189,15 +153,13 @@ async def main() -> None:
                       if not args.source_kind or c.source_kind == args.source_kind)
         sem = asyncio.Semaphore(args.concurrency)
         print(f"跑 {len(cases)} case × {args.samples} 样本 "
-              f"(mode={args.mode}, judge={args.judge or 'prod-small'})\n")
+              f"(judge={args.judge or 'prod-small'})\n")
 
-        # V0 mock: eval 里 tavily/brave 都不真调, 直接用 case.trending_candidates
-        # 塞进 ctx["trending_context"] (_generate_for_case 已经这么做了).
         results: list[dict] = []
         for case in cases:
             for i in range(args.samples):
                 try:
-                    msg, card = await _generate_for_case(case, args.mode)
+                    msg, card = await _generate_for_case(case)
                 except Exception as e:
                     print(f"  ✗ [{case.id}] 生成失败: {type(e).__name__} {str(e)[:80]}")
                     continue
@@ -258,7 +220,7 @@ async def main() -> None:
 
         if args.json:
             Path(args.json).write_text(json.dumps({
-                "mode": args.mode, "n": n, "graded": ng,
+                "n": n, "graded": ng,
                 "results": results,
             }, ensure_ascii=False, indent=2))
             print(f"\n写入 {args.json}")

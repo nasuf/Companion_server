@@ -107,3 +107,18 @@ def _format_time_part(hour: int, minute: int, lively: bool, precise: bool) -> st
     if minute:
         return f"{period}{display_hour}点{minute}分"
     return f"{period}{display_hour}点"
+
+
+def format_clock(moment: datetime) -> str:
+    """prompt 里的"某个时刻": 09-29 周二 14:30 (UTC+8)。"""
+    local = moment.astimezone(_TZ)
+    return f"{local.strftime('%m-%d')} {_WEEKDAY_CN[local.weekday()]} {local.strftime('%H:%M')}"
+
+
+def describe_time_scene(moment: datetime) -> str:
+    """当前时间场景: 周二下午（工作日）/ 周六晚上（周末）/ 周四上午（节假日·国庆节）."""
+    from app.services.schedule_domain.time_service import classify_day_kind
+
+    local = moment.astimezone(_TZ)
+    weekday = _WEEKDAY_CN[local.weekday()]
+    return f"{weekday}{_get_period(local.hour)}（{classify_day_kind(local.date())}）"

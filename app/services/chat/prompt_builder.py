@@ -16,7 +16,6 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 
 from app.services.chat.message_utils import _parse_message_created_at
-from app.services.interaction.topic_continuity import ContinuationCue
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import (
     PromptDisabledError,
@@ -636,8 +635,9 @@ async def build_system_prompt(
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
     reengagement_gap_seconds: float | None = None,
-    # 《主动聊天机制》被动承接: 上一轮判定话题未完结时的接续指引 (topic_continuity.resolve_cue)
-    topic_continuation: ContinuationCue | None = None,
+    # 《主动聊天机制》被动承接 (chat/topic_continuation.TopicContinuation): 存在即压掉
+    # 重逢感知短档; 带 lines 时注入「话题接续」段 (承接/过渡句已作为独立气泡先发)
+    topic_continuation: Any = None,
     session_recap: str | None = None,
     relation_meta_line: str = "",
     ai_mood_text: str = "",
@@ -891,7 +891,7 @@ async def build_system_prompt(
     )
     continuation = None if offering_turn else topic_continuation
     # 有上一轮的话题判定时 (只在 <3h 出现) 由它接管「回来了怎么接」: spec 要求
-    # 已完结话题无论隔多久都不带承接话术, 未完结则由话题接续段给出更具体的接法,
+    # 已完结话题无论隔多久都不带承接话术, 未完结时承接/过渡句已单独发出,
     # 两种情况都不能再叠一层重逢短档。≥3h 仍由重逢感知负责。
     reengage_gap = None if (offering_turn or continuation is not None) else reengagement_gap_seconds
     recap_text = None if offering_turn else session_recap
@@ -1169,21 +1169,17 @@ async def _build_reengagement_section(
     )
 
 
-async def _build_topic_continuation_section(
-    cue: ContinuationCue | None,
-) -> _PromptBody | None:
-    """「话题接续」段: 回归承接 (>10min 且本会话没追问过) 或跳话题过渡."""
-    if cue is None or cue.template_key is None:
+async def _build_topic_continuation_section(continuation: Any) -> _PromptBody | None:
+    """「话题接续」段: 承接短句 / 过渡句已作为独立气泡先发了, 让主回复别重复."""
+    lines = getattr(continuation, "lines", None)
+    if not lines:
         return None
-    tpl = await _get_optional_prompt(cue.template_key)
+    tpl = await _get_optional_prompt("chat.topic_continuation_section")
     if tpl is None:
         return None
     return _PromptBody(
-        _render_section(tpl, {
-            "gap_text": format_gap_text(cue.gap_seconds),
-            "pending_topic": cue.pending_topic,
-        }),
-        cue.template_key,
+        _render_section(tpl, {"lines": "\n".join(f"「{line}」" for line in lines)}),
+        "chat.topic_continuation_section",
     )
 
 

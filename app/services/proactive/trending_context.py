@@ -61,9 +61,8 @@ class TrendingLoadResult:
     text: str
     cache_hit: bool = False
     provider: str | None = None
-    # V3 (2026-09-14): 保留结构化 candidates 给 topic_source 分类器 + prompt.
-    # V0 只需要 text (append_trending_section 尾追), V3 需要按候选粒度打分/挑选.
-    # 缓存路径拿到的 text 无法反解回结构化, 这时候 candidates=() (V3 分类器会走 none).
+    # 结构化候选给热点筛选 (trending_pick, 4-1/4-2) 按条挑选 + 挂卡片;
+    # text 给特殊日期祝福的「热点」参考段. 缓存两者一起存.
     candidates: tuple[dict, ...] = ()
 
 
@@ -147,7 +146,7 @@ def _filter_to_supported_platforms(
       B) _url_looks_stale(url, max_age_days) → URL path 里带明显的往年年份, 丢
          (tavily 常返 "50个热门话题 2021" 这类 SEO 老列表)
     """
-    max_age = int(getattr(settings, "proactive_hot_max_age_days", 7))
+    max_age = int(getattr(settings, "proactive_hot_max_age_days", 2))
     out: list[SearchResult] = []
     stale_dropped = 0
     for r in results:
@@ -283,7 +282,7 @@ async def _hot_api_snippets(query: str) -> tuple[str, tuple[dict, ...]]:
                     base_url[:60])
         return "", ()
 
-    max_age = int(getattr(settings, "proactive_hot_max_age_days", 7))
+    max_age = int(getattr(settings, "proactive_hot_max_age_days", 2))
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age) if max_age > 0 else None
 
     candidates: list[dict] = []
@@ -456,11 +455,14 @@ async def load_trending_context(
     if not bypass_cache:
         cached = await get_cached_trending(key)
         if cached:
-            return TrendingLoadResult(text=cached, cache_hit=True, provider="cache")
+            text, candidates = cached
+            return TrendingLoadResult(
+                text=text, cache_hit=True, provider="cache", candidates=candidates,
+            )
 
     loaded = await _fetch_live_trending_snippets(topic=topic)
     if loaded.text and not bypass_cache:
-        await set_cached_trending(key, loaded.text)
+        await set_cached_trending(key, loaded.text, loaded.candidates)
     return loaded
 
 

@@ -11,7 +11,7 @@ import asyncio
 import functools
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from time import perf_counter
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -20,7 +20,6 @@ from prisma import Json
 
 from app.db import db
 from app.observability.events import (
-    EVT_CHAT_TOPIC_CONTINUATION,
     EVT_FILLER_EMOJI,
     EVT_INTENT_SPLIT,
     EVT_MEMORY_CONTRADICTION,
@@ -177,11 +176,9 @@ from app.services.chat.tracing import create_tracer
 from app.services.mbti import get_mbti
 from app.services.chat.turn_lifecycle import finish_assistant_turn
 from app.services.interaction.reply_context import actual_delay_seconds
-from app.services.interaction.topic_continuity import (
-    FOLLOWUP_TRIGGER_TYPE,
-    ContinuationCue,
-    load_continuity,
-    resolve_cue,
+from app.services.chat.topic_continuation import (
+    await_topic_continuation,
+    build_topic_continuation,
 )
 from app.services.proactive.state import ARM_REASON_CRISIS, ARM_REASON_REPLY, ARM_REASON_SYSTEM
 from app.services.runtime.tasks import fire_background as _fire_background
@@ -226,61 +223,6 @@ async def _boundary_short_circuit_reply(*args, **kwargs) -> list[dict]:
 async def _system_short_circuit_reply(*args, **kwargs) -> list[dict]:
     """pending 流程 (矛盾追问的回答 / 删除确认 / 撤回) 的回复: 照常 arm, 但不做 B 追问."""
     return await _short_circuit_reply(*args, proactive_reason=ARM_REASON_SYSTEM, **kwargs)
-
-
-async def _resolve_topic_cue(
-    continuity_task: asyncio.Task | None,
-    *,
-    previous_assistant: Any,
-    replied_at: datetime | None,
-    offering_turn: bool,
-    patience_low: bool,
-    response_diagnostics: dict[str, Any],
-) -> ContinuationCue | None:
-    """《主动聊天机制》被动承接: 上一轮的话题完结判定 + 用户隔多久回的 → 接续指引.
-
-    间隔 = 用户这条消息的落库时刻 − AI 上一句的时刻 (spec「用户回复间隔」), 不用
-    生成时刻: 走聚合窗口 / 延迟队列时, 8 分钟就回的消息不能被算成 10 分钟以上。
-    """
-    # 已被短路路径取消的任务不能 await (CancelledError 不是 Exception)
-    if continuity_task is None or continuity_task.cancelled():
-        return None
-    try:
-        continuity = await continuity_task
-    except Exception as e:  # noqa: BLE001 — 锦上添花, 失败就按没有判定处理
-        logger.debug(f"[CONTINUITY] load skipped: {e}")
-        return None
-    if offering_turn:
-        return None  # 红包/礼物本身就是新话题
-    if patience_low:
-        return None  # AI 还在生气, 语气交给「情绪状态提醒」段, 不叠"回来啦"
-    said_at = getattr(previous_assistant, "createdAt", None)
-    gap = None
-    if isinstance(said_at, datetime):
-        said_at = said_at if said_at.tzinfo else said_at.replace(tzinfo=timezone.utc)
-        reply_at = replied_at or datetime.now(timezone.utc)
-        gap = max(0.0, (reply_at - said_at).total_seconds())
-    metadata = getattr(previous_assistant, "metadata", None)
-    cue = resolve_cue(
-        continuity,
-        previous_assistant_id=getattr(previous_assistant, "id", None),
-        gap_seconds=gap,
-        previous_assistant_is_followup=(
-            isinstance(metadata, dict)
-            and metadata.get("trigger_type") == FOLLOWUP_TRIGGER_TYPE
-        ),
-    )
-    if cue is not None:
-        response_diagnostics["topic_continuation"] = cue.template_key or "finished"
-        logger.info(
-            f"[CONTINUITY] cue={cue.template_key or 'finished'} gap={int(cue.gap_seconds)}s",
-            extra={
-                "event": EVT_CHAT_TOPIC_CONTINUATION,
-                "cue": cue.template_key or "finished",
-                "gap_seconds": int(cue.gap_seconds),
-            },
-        )
-    return cue
 
 
 def _turn_started_at(messages: list[dict], turn_ids: set[str]) -> datetime | None:
@@ -627,8 +569,8 @@ async def stream_chat_response(
         # W2 中期记忆: 摘要任务延后到主路径分支创建 (与 fetch_task 同处),
         # 避免 boundary/crisis/filler 短路回合白跑 LLM. 这里只声明.
         session_recap_task: asyncio.Task | None = None
-        # 《主动聊天机制》被动承接: 上一轮的话题完结判定 (Redis, 与 fetch 并行读)
-        continuity_task: asyncio.Task | None = None
+        # 《主动聊天机制》被动承接: 回归承接 / 跳话题过渡句 (与 fetch 并行生成)
+        continuation_task: asyncio.Task | None = None
         # 默认声明: sub_intent_mode 下不进下面的 if 块, 但 §3.4.2 grounding 门控
         # (_downgrade_non_explicit_schedule_adjust) 仍会读它, 不能留未定义。
         previous_assistant = None
@@ -871,8 +813,19 @@ async def stream_chat_response(
                 gap_seconds=reengagement_gap_seconds,
                 exclude_ids=current_turn_ids,
             ))
-            if previous_assistant is not None:
-                continuity_task = asyncio.create_task(load_continuity(conversation_id))
+            # 危机照护 (含脱离后的照护轮) 不补"忙完啦 / 换话题"之类的承接句
+            if previous_assistant is not None and not crisis_care_turn:
+                continuation_task = asyncio.create_task(build_topic_continuation(
+                    conversation_id=conversation_id,
+                    previous_assistant=previous_assistant,
+                    replied_at=_turn_started_at(messages_dicts, current_turn_ids),
+                    user_message=user_message,
+                    history=recent_messages,
+                    current_turn_ids=current_turn_ids,
+                    agent=agent,
+                    offering_turn=bool(offering_context),
+                    patience_low=cached_patience < PATIENCE_NORMAL_MIN,
+                ))
 
         # --- 统一意图识别：spec §3.3 step 1 严格实现 ---
         # 每条用户消息都调小模型做意图分类, 并把最近对话历史作为上下文注入.
@@ -930,7 +883,7 @@ async def stream_chat_response(
             session_recap_task 一并取消 (review 发现): 意图短路路径不消费摘要,
             让它跑完是浪费一次 LLM 调用. 模块内部全链路吞异常, cancel 安全.
             """
-            for task in (fetch_task, session_recap_task, continuity_task):
+            for task in (fetch_task, session_recap_task, continuation_task):
                 if task is None or task.done():
                     continue
                 task.cancel()
@@ -1480,7 +1433,7 @@ async def stream_chat_response(
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
                 reengagement_gap_seconds=reengagement_gap_seconds,
-                topic_continuation=topic_cue,
+                topic_continuation=topic_continuation,
                 session_recap=session_recap,
                 relation_meta_line=relation_meta_line,
                 ai_mood_text=ai_mood_text,
@@ -1572,14 +1525,12 @@ async def stream_chat_response(
             if actual_sleep > 0:
                 await asyncio.sleep(actual_sleep)
 
-        topic_cue = await _resolve_topic_cue(
-            continuity_task,
-            previous_assistant=previous_assistant,
-            replied_at=_turn_started_at(messages_dicts, current_turn_ids),
-            offering_turn=bool(offering_context),
-            patience_low=cached_patience < PATIENCE_NORMAL_MIN,
-            response_diagnostics=response_diagnostics,
-        )
+        topic_continuation = await await_topic_continuation(continuation_task, response_diagnostics)
+        continuation_lines = topic_continuation.lines if topic_continuation else []
+        if continuation_lines:
+            # 总气泡数仍守 MAX_REPLY_COUNT: 承接 / 过渡句占的名额从正常回复里扣
+            max_reply_count = max(1, MAX_REPLY_COUNT - len(continuation_lines))
+            reply_count = min(reply_count, max_reply_count)
 
         replies, raw_response, reply_is_fallback, reply_emotion_pre = await _generate_reply(
             contradiction_inquiry=contradiction_inquiry,
@@ -1622,8 +1573,8 @@ async def stream_chat_response(
             reply_emotion_fn=_ai_reply_emotion,
             # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
             reengagement_gap_seconds=reengagement_gap_seconds,
-            # 话题接续段只在主 prompt 里有, tier 轻量 prompt 会把它丢掉
-            force_main_prompt=bool(offering_context) or bool(topic_cue and topic_cue.template_key),
+            # 「话题接续」段 (告诉模型承接句已发, 别重复) 只在主 prompt 里有
+            force_main_prompt=bool(offering_context) or bool(continuation_lines),
             diagnostics=response_diagnostics,
         )
 
@@ -1631,6 +1582,8 @@ async def stream_chat_response(
         # 主 LLM 路径已在 generate_reply 内并行算好, 直接复用; tier/contradiction 路径
         # reply_emotion_pre=None 时兜底再调一次 (这两条路径都是单 LLM, 增量小).
         # full_response 必须无条件计算 — 下方 background post_process 总是引用它.
+        # 回归承接 / 跳话题过渡句作为独立气泡排在正常回复之前 (提示词文档的输出格式)
+        replies = [*continuation_lines, *replies]
         full_response = " ".join(replies)
         if reply_emotion_pre is not None:
             reply_emotion = reply_emotion_pre

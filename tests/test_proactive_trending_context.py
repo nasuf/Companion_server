@@ -69,7 +69,7 @@ async def test_load_trending_context_cache_hit():
     with patch(
         "app.services.proactive.trending_context.get_cached_trending",
         new_callable=AsyncMock,
-        return_value="- cached line",
+        return_value=("- cached line", ({"title": "t", "platform": "微博"},)),
     ) as mock_get:
         with patch(
             "app.services.proactive.trending_context._fetch_live_trending_snippets",
@@ -80,13 +80,17 @@ async def test_load_trending_context_cache_hit():
     assert result.cache_hit is True
     assert result.provider == "cache"
     assert "cached line" in result.text
+    # 缓存命中也要有结构化候选, 否则热点筛选无从挑起
+    assert result.candidates == ({"title": "t", "platform": "微博"},)
     mock_get.assert_awaited_once()
     mock_fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_load_trending_context_live_fetch_and_write():
-    loaded = TrendingLoadResult(text="- live line", provider="brave")
+    loaded = TrendingLoadResult(
+        text="- live line", provider="brave", candidates=({"title": "t"},),
+    )
     with patch(
         "app.services.proactive.trending_context.get_cached_trending",
         new_callable=AsyncMock,
@@ -105,12 +109,42 @@ async def test_load_trending_context_live_fetch_and_write():
 
     assert result.provider == "brave"
     mock_set.assert_awaited_once()
+    assert mock_set.await_args.args[2] == ({"title": "t"},)
 
 
 def test_cache_key_for_topic():
-    assert cache_key_for_topic(None) == "proactive:trending:global:v1"
-    assert cache_key_for_topic("公共话题") == "proactive:trending:global:v1"
+    assert cache_key_for_topic(None) == "proactive:trending:global:v2"
+    assert cache_key_for_topic("公共话题") == "proactive:trending:global:v2"
     assert cache_key_for_topic("某具体话题").startswith("proactive:trending:topic:")
+
+
+@pytest.mark.asyncio
+async def test_trending_cache_roundtrips_candidates(monkeypatch):
+    from app.services.proactive import trending_cache
+
+    store: dict = {}
+
+    class _Redis:
+        async def get(self, key):
+            return store.get(key)
+
+        async def set(self, key, value, ex=None):
+            store[key] = value
+
+    async def _get_redis():
+        return _Redis()
+
+    monkeypatch.setattr(trending_cache, "get_redis", _get_redis)
+    monkeypatch.setattr(
+        trending_cache, "resolve_config_sync",
+        lambda **_k: type("C", (), {"proactive_trending_cache_ttl_s": 60})(),
+    )
+    cands = ({"title": "秋天第一杯奶茶", "platform": "微博"},)
+    await trending_cache.set_cached_trending("k", "- 秋天第一杯奶茶", cands)
+    assert await trending_cache.get_cached_trending("k") == ("- 秋天第一杯奶茶", cands)
+
+    store["k"] = b"- legacy plain text"  # v1 格式 / 损坏: 当未命中, 走实时抓取
+    assert await trending_cache.get_cached_trending("k") is None
 
 
 # ─── 平台白名单过滤 (2026-09-14): tophub 类聚合站不应进候选 ────────────────

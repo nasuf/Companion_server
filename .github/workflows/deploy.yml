@@ -248,7 +248,7 @@ jobs:
             # 返 2021 老 SEO 列表. 0 = 关闭 freshness filter.
             PROACTIVE_HOT_API_URL=${{ vars.PROACTIVE_HOT_API_URL || 'https://api-hot.imsyy.top' }}
             PROACTIVE_HOT_API_KEY=${{ secrets.PROACTIVE_HOT_API_KEY }}
-            PROACTIVE_HOT_MAX_AGE_DAYS=${{ vars.PROACTIVE_HOT_MAX_AGE_DAYS || '7' }}
+            PROACTIVE_HOT_MAX_AGE_DAYS=${{ vars.PROACTIVE_HOT_MAX_AGE_DAYS || '2' }}
             APNS_ENABLED=$APNS_ENABLED
             APNS_TEAM_ID=${{ vars.APNS_TEAM_ID }}
             APNS_KEY_ID=${{ secrets.APNS_KEY_ID }}

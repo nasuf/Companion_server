@@ -78,8 +78,12 @@ REPLY_PROMPT_KEYS: frozenset[str] = frozenset({
     "proactive.silence_schedule",
     "proactive.memory_ai",
     "proactive.memory_user",
-    "proactive.memory_timed",
+    "proactive.recent_dialogue",
     "proactive.followup_unfinished",
+    "proactive.trending_chat",
+    # 被动回复承接 / 过渡短句 (独立气泡)
+    "chat.topic_continuation_return",
+    "chat.topic_continuation_jump",
     "proactive.scheduled_scene",
     "proactive.decay_final",
     "proactive.first_greeting",

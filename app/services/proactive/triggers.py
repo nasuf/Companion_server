@@ -679,7 +679,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
 
         from app.services.llm.usage_tracker import traced_usage_session
         from app.services.proactive.emit import emit_proactive_message
-        from app.services.proactive.sender import build_personality_brief
+        from app.services.mbti import build_personality_brief
         from app.services.proactive.state import get_active_workspace_context
 
         workspace_context = await get_active_workspace_context(workspace_id)

@@ -35,7 +35,7 @@ from app.services.proactive.history import (
     can_send_proactive,
     increment_proactive_count,
 )
-from app.services.proactive.sender import build_personality_brief
+from app.services.mbti import build_personality_brief
 from app.services.proactive.state import (
     get_active_workspace_context,
     ensure_proactive_state_for_workspace,

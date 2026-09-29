@@ -23,20 +23,20 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-# 「带时间戳的历史记忆」来源 (timed_user): 最近发生过的事, 或最近几天聊到过的事
-TIMED_EVENT_LOOKBACK = timedelta(days=10)
-TIMED_STATEMENT_LOOKBACK = timedelta(days=14)
-# 刚聊过的不算"想起来" —— 半天内说的事再拿出来问, 像没在听
-TIMED_STATEMENT_MIN_AGE = timedelta(hours=12)
-# 有具体时刻的事, 过去这么久才问"怎么样了" (3 点的面试, 1 点就问是没过脑子)
-TIMED_EVENT_SETTLE = timedelta(hours=2)
+# 《主动交流提示词》提示词3「带时间感知历史对话搭话」的素材: 近两天带时间戳的聊天记录
+RECENT_DIALOGUE_WINDOW = timedelta(hours=48)
+RECENT_DIALOGUE_LIMIT = 60
 # 只有"发生过的事"才能问后来怎样; 偏好/身份/思维类事实带时间反而像翻档案
 # (「三周前你说你 28 岁」)
 _TIME_HINT_CATEGORIES = frozenset({"生活", "情绪"})
 # 超过这个时长的用户记忆不标时间 (太久远的时间感只会显得在翻档案)
 USER_MEMORY_TIME_HINT_MAX_AGE = timedelta(days=60)
-# 缺记忆时的兜底来源: AI 自身人设记忆建号即有, 不会空
-_SOURCE_FALLBACK = {"timed_user": "ai_l1"}
+# 近两天没聊过时的兜底来源: 记忆主动抽不到会整次取消 (spec §4.2) → AI 人设记忆
+# (建号即有); 沉默唤醒 → 打招呼
+_SOURCE_FALLBACK = {
+    ("memory_proactive", "recent_dialogue"): "ai_l1",
+    ("silence_wakeup", "recent_dialogue"): "greeting",
+}
 
 
 async def build_proactive_context(
@@ -79,10 +79,11 @@ async def build_proactive_context(
         raise ValueError(f"Agent not found: {agent_id}")
 
     proactive_memories, used_memory_ids = proactive_memories_pair
-    # 记忆主动抽不到记忆会整次取消 (spec §4.2), timed_user 常为空 → 兜底 AI 记忆;
-    # 沉默唤醒空了本来就回落到打招呼 (sender), 不在这里改来源
-    fallback_source = _SOURCE_FALLBACK.get(source or "")
-    if not proactive_memories and fallback_source and trigger_type == "memory_proactive":
+    recent_dialogue = (
+        await _load_recent_dialogue(workspace_id) if source == "recent_dialogue" else ""
+    )
+    fallback_source = _SOURCE_FALLBACK.get((trigger_type, source or ""))
+    if source == "recent_dialogue" and not recent_dialogue and fallback_source:
         source = fallback_source
         proactive_memories, used_memory_ids = await _load_proactive_memories(
             user_id=user_id,
@@ -103,6 +104,7 @@ async def build_proactive_context(
         "core_memories": [t[1] if isinstance(t, tuple) else t for t in core_memories[:8]],
         "proactive_memories": proactive_memories[:6],
         "used_memory_ids": used_memory_ids,
+        "recent_dialogue": recent_dialogue,
         "relationship_stage": relationship_stage,
         "topic_intimacy": topic_intimacy,
         # emotion_to_tone 读的就是这个形状 ({"emotion": 标签, ...}); None → 中性语气
@@ -203,7 +205,6 @@ async def _load_proactive_memories(
     - ai_l1 / ai_l2  → memories_ai, level=1 or 2
     - user_l1 / user_l2 → memories_user, level=1 or 2
     - relationship → memories_ai (生活, 交互) 共同经历 (Phase 2 关系记忆)
-    - timed_user → memories_user 最近发生/最近聊到的事, 带相对时间 (「前天你说…」)
     - ai_schedule / greeting → 无记忆 (返回空)
 
     spec §3.2 + §4.2: 抽中 source 后, **先按 topic_theme 做 LLM rerank**, 再
@@ -214,12 +215,6 @@ async def _load_proactive_memories(
     # spec §4.1/§4.2: 非记忆来源直接返回空 (打招呼 / 作息走 prompt 模板自身)
     if source in ("ai_schedule", "greeting", None):
         return [], []
-    if source == "timed_user":
-        return await _load_timed_user_memories(
-            user_id=user_id,
-            workspace_id=workspace_id,
-            exclude_memory_ids=exclude_memory_ids,
-        )
 
     # Resolve (owner, level) from source
     level: int | None
@@ -318,93 +313,54 @@ def _user_memory_time_hint(row: Any, now: datetime) -> str:
     return f"[{relative_day_text(said_at, now)}聊到]"
 
 
-async def _load_timed_user_memories(
-    *,
-    user_id: str,
-    workspace_id: str,
-    exclude_memory_ids: set[str] | None,
-    now: datetime | None = None,
-) -> tuple[list[str], list[str]]:
-    """最近发生过的事 (occur_time 在过去 10 天内), 或最近几天聊到的生活近况.
+async def _load_recent_dialogue(workspace_id: str, *, now: datetime | None = None) -> str:
+    """近两天带时间戳的聊天记录 (提示词3 的输入). 用户一句都没说过就当没有."""
+    from app.services.chat_media.prompt import render_message_content_for_prompt
+    from app.services.interaction.topic_continuity import is_dialogue_noise, render_dialogue
 
-    只取"能问后来怎么样"的事: 排除提醒 (有独立准点链路)、身份类; 没有事件时间的
-    只要生活类 —— 「前几天你说喜欢吃辣, 后来怎么样了」是尬聊。
-    事件型优先: 用户说过"周五面试", 周五之后问"面试怎么样啦"是最像朋友的主动。
-    """
-    now_ts = now or datetime.now(UTC)
-    rows = await memory_repo.find_many(
-        source="user",
-        where={
-            "userId": user_id,
-            "workspaceId": workspace_id,
-            "isArchived": False,
-            "OR": [
-                {"occurTime": {"gte": now_ts - TIMED_EVENT_LOOKBACK, "lte": now_ts}},
-                {"statementTime": {
-                    "gte": now_ts - TIMED_STATEMENT_LOOKBACK,
-                    "lte": now_ts - TIMED_STATEMENT_MIN_AGE,
-                }},
-            ],
-        },
-        order={"importance": "desc"},
-        take=30,
-    )
-    exclude = exclude_memory_ids or set()
-
-    def _recency(row: Any) -> datetime:
-        return _aware(row.occurTime) or _aware(row.statementTime) or _aware(row.createdAt) or now_ts
-
-    # 类目与时间过滤放在 Python 侧: Prisma 的 NOT 对 NULL 类目会把整行一起滤掉
-    eligible = [
-        r for r in rows
-        if r.id not in exclude
-        and r.content
-        and r.subCategory != "提醒"
-        and r.mainCategory != "身份"
-        and _worth_asking_about(r, now_ts)
-    ]
-    # 事件型 (有 occur_time) 排前, 同类里越近越前
-    eligible.sort(key=lambda r: (r.occurTime is None, -_recency(r).timestamp()))
-    texts: list[str] = []
-    ids: list[str] = []
-    for row in eligible[:3]:
-        occur = _aware(row.occurTime)
-        said = _aware(row.statementTime) or _aware(row.createdAt)
-        if occur is not None:
-            local = occur.astimezone(_TZ)
-            when = f"[{relative_day_text(occur, now_ts)}的事, {local.month}月{local.day}日]"
-        elif said is not None:
-            when = f"[{relative_day_text(said, now_ts)}聊到]"
-        else:
-            when = ""
-        texts.append(f"{when} {row.content}".strip())
-        ids.append(row.id)
-    return texts, ids
-
-
-def _worth_asking_about(row: Any, now: datetime) -> bool:
-    said = _aware(row.statementTime) or _aware(row.createdAt)
-    if said is not None and now - said < TIMED_STATEMENT_MIN_AGE:
-        return False  # 刚聊过的事再拿出来问, 像没在听
-    occur = _aware(row.occurTime)
-    if occur is None:
-        return row.mainCategory == "生活"
-    if not (now - TIMED_EVENT_LOOKBACK <= occur <= now):
-        return False  # 「去年去过日本」前两天才说 —— 不是能问"后来呢"的近事
-    local = occur.astimezone(_TZ)
-    all_day = (local.hour, local.minute) == (0, 0)
-    # 只追问对方**事先**告诉你的事 (「周五面试」); 事后讲述 (「昨天面试完了挺好」)
-    # 结果对方已经说了, 再问"怎么样啦"是没在听
-    if said is not None:
-        told_in_advance = (
-            said.astimezone(_TZ).date() <= local.date() if all_day else said < occur
+    since = (now or datetime.now(UTC)) - RECENT_DIALOGUE_WINDOW
+    try:
+        rows = await db.query_raw(
+            """
+            SELECT m.role, m.content, m.metadata, m.created_at
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE c.workspace_id = $1
+              AND c.is_deleted = FALSE
+              AND m.role IN ('user', 'assistant')
+              AND m.created_at >= $2::timestamp
+            ORDER BY m.created_at DESC
+            LIMIT $3
+            """,
+            workspace_id,
+            since.astimezone(UTC).replace(tzinfo=None).isoformat(),
+            RECENT_DIALOGUE_LIMIT,
         )
-        if not told_in_advance:
-            return False
-    if all_day:
-        # 只有日期的事: 当天还不知道几点, 过了那天再问
-        return local.date() < now.astimezone(_TZ).date()
-    return occur <= now - TIMED_EVENT_SETTLE
+    except Exception as e:
+        logger.warning(f"[PROACTIVE] recent dialogue load failed ws={workspace_id[:8]}: {e}")
+        return ""
+    entries = []
+    for row in reversed(rows or []):
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if is_dialogue_noise(metadata):
+            continue
+        text = render_message_content_for_prompt(str(row.get("content") or ""), metadata).strip()
+        if text:
+            entries.append((str(row.get("role")), text, _aware(_parse_ts(row.get("created_at")))))
+    if not any(role == "user" for role, _, _ in entries):
+        return ""
+    return render_dialogue(entries, max_chars=80)
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 def _build_scene_hint(trigger_type: str, schedule_status: dict[str, Any]) -> str:

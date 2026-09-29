@@ -73,7 +73,7 @@ def harness(monkeypatch):
         mark_sent=AsyncMock(return_value=True),
         release=AsyncMock(),
         emit=AsyncMock(return_value="msg-b"),
-        judge=AsyncMock(return_value=TopicVerdict("unfinished", "ai_question", "周末去哪")),
+        judge=AsyncMock(return_value=TopicVerdict("unfinished", "llm")),
         generate=AsyncMock(return_value="要不先说说你想要热闹点还是安静点的？"),
         gates=AsyncMock(return_value=None),
         continuity=AsyncMock(return_value=SimpleNamespace(followup_available=True)),
@@ -146,7 +146,7 @@ async def test_unknown_continuity_never_risks_a_second_followup(harness):
 
 
 async def test_finished_topic_goes_straight_to_a_mode(harness):
-    harness.judge.return_value = TopicVerdict("finished", "natural_end")
+    harness.judge.return_value = TopicVerdict("finished", "llm")
     await followup.process_followup_window(_state(), now=NOW)
 
     harness.record.assert_awaited_once()  # 被动承接要用
@@ -247,23 +247,38 @@ async def test_farewell_and_crisis_are_decided_by_rule(monkeypatch):
     render = AsyncMock()
     monkeypatch.setattr(followup, "render_prompt", render)
     assert await followup.judge_topic_completion(
-        _turns(), arm_reason=ARM_REASON_FAREWELL,
+        _turns(), arm_reason=ARM_REASON_FAREWELL, now=NOW,
     ) == TopicVerdict("finished", "farewell")
-    assert await followup.judge_topic_completion(_turns(), arm_reason=ARM_REASON_CRISIS) is None
+    assert await followup.judge_topic_completion(
+        _turns(), arm_reason=ARM_REASON_CRISIS, now=NOW,
+    ) is None
     # 删除确认 / 提醒要时间 / 矛盾追问: AI 的问句挂着 pending, 不追问
-    assert await followup.judge_topic_completion(_turns(), arm_reason=ARM_REASON_SYSTEM) is None
+    assert await followup.judge_topic_completion(
+        _turns(), arm_reason=ARM_REASON_SYSTEM, now=NOW,
+    ) is None
     render.assert_not_awaited()
 
 
+def _stamped_turns() -> list:
+    return [
+        Turn("u-0", "user", "我周末想出去玩", False, datetime(2026, 9, 29, 3, 50, tzinfo=UTC)),
+        Turn("ai-1", "assistant", "好呀，你想去哪儿？", False, datetime(2026, 9, 29, 3, 55, tzinfo=UTC)),
+    ]
+
+
 async def test_judge_uses_registry_prompt_and_parses(monkeypatch):
-    render = AsyncMock(return_value={
-        "status": "unfinished", "reason": "user_story", "pending_topic": "面试后来怎么样",
-    })
+    render = AsyncMock(return_value="未完结")
     monkeypatch.setattr(followup, "render_prompt", render)
-    verdict = await followup.judge_topic_completion(_turns(), arm_reason=ARM_REASON_REPLY)
-    assert verdict == TopicVerdict("unfinished", "user_story", "面试后来怎么样")
-    assert render.await_args.args[0] == "proactive.topic_completion_judge"
-    assert "AI: 好呀，你想去哪儿？" in render.await_args.args[1]["conversation"]
+    verdict = await followup.judge_topic_completion(
+        _stamped_turns(), arm_reason=ARM_REASON_REPLY, now=NOW,
+    )
+    assert verdict == TopicVerdict("unfinished", "llm")
+    key, params = render.await_args.args[:2]
+    assert key == "proactive.topic_completion_judge"
+    # 提示词文档的三个输入: 带时间戳的上下文 / 用户最后发言时间 / 当前时间 (UTC+8)
+    assert "[09-29 11:55] AI: 好呀，你想去哪儿？" in params["conversation"]
+    assert params["user_last_time"].startswith("09-29") and params["user_last_time"].endswith("11:50")
+    assert params["current_time"].endswith("20:00")
 
 
 async def test_judge_timeout_is_no_verdict(monkeypatch):
@@ -272,29 +287,19 @@ async def test_judge_timeout_is_no_verdict(monkeypatch):
 
     monkeypatch.setattr(followup, "render_prompt", _slow)
     monkeypatch.setattr(followup, "_JUDGE_TIMEOUT_S", 0.01)
-    assert await followup.judge_topic_completion(_turns(), arm_reason="") is None
+    assert await followup.judge_topic_completion(_turns(), arm_reason="", now=NOW) is None
 
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
         (None, None),
-        ("not json", None),
-        ({"status": "maybe"}, None),
-        ({"status": "finished", "reason": "x"}, TopicVerdict("finished", "natural_end")),
-        # 说不出还没聊完什么 → 按完结处理 (多半是模型在猜)
-        ({"status": "unfinished", "reason": "ai_question", "pending_topic": ""},
-         TopicVerdict("finished", "natural_end")),
-        ({"status": "unfinished", "reason": "??", "pending_topic": "旅行计划"},
-         TopicVerdict("unfinished", "interrupted", "旅行计划")),
-        ({"status": "FINISHED", "pending_topic": "leak"}, TopicVerdict("finished", "natural_end")),
-        ({"status": "unfinished", "reason": "ai_question", "pending_topic": "一" * 30},
-         TopicVerdict("unfinished", "ai_question", "一" * 15)),
-        # 注入回复 prompt 时视角是"你们聊到「…」"; 话题本身里的 AI 不动
-        ({"status": "unfinished", "reason": "ai_question", "pending_topic": "AI问用户周末去哪"},
-         TopicVerdict("unfinished", "ai_question", "你问对方周末去哪")),
-        ({"status": "unfinished", "reason": "interrupted", "pending_topic": "要不要学AI绘画"},
-         TopicVerdict("unfinished", "interrupted", "要不要学AI绘画")),
+        ("", None),
+        ("不确定", None),
+        ("未完结", TopicVerdict("unfinished", "llm")),
+        ("未完结。", TopicVerdict("unfinished", "llm")),
+        ("已完结", TopicVerdict("finished", "llm")),
+        ("结论：已完结", TopicVerdict("finished", "llm")),
     ],
 )
 def test_parse_verdict(raw, expected):
@@ -341,21 +346,16 @@ def test_clean_followup_blocks_needy_tone(raw, expected):
     assert followup._clean_followup(raw) == expected
 
 
-def test_judge_only_sees_the_current_conversation_segment():
-    """隔了 ≥3h 的旧内容是另一个会话, 不该影响这次判定."""
-    t0 = datetime(2026, 9, 29, 1, 0, tzinfo=UTC)
-    turns = [
-        Turn("old-u", "user", "昨天那部电影好看吗", False, t0),
-        Turn("old-a", "assistant", "挺好看的！", False, t0 + timedelta(minutes=1)),
-        Turn("u", "user", "我明天面试", False, t0 + timedelta(hours=5)),
-        Turn("a", "assistant", "什么岗位呀？", False, t0 + timedelta(hours=5, minutes=1)),
+def test_format_turns_stamps_each_line_in_utc8():
+    text = followup.format_turns(_stamped_turns())
+    assert text.splitlines() == [
+        "[09-29 11:50] 用户: 我周末想出去玩",
+        "[09-29 11:55] AI: 好呀，你想去哪儿？",
     ]
-    assert [t.id for t in followup._current_segment(turns)] == ["u", "a"]
-    text = followup.format_turns(followup._current_segment(turns))
-    assert text.splitlines()[0] == "[14:00] 用户: 我明天面试"  # UTC+8
+    assert followup._last_time([], "user") == "（无）"
 
 
-async def test_generation_keeps_all_segments(monkeypatch):
+async def test_generation_feeds_spec_inputs_and_keeps_all_segments(monkeypatch):
     """render_prompt 默认只留 || 前第一段; B 追问要整句."""
     render = AsyncMock(return_value="诶我先说||我肯定选火锅")
     monkeypatch.setattr(followup, "render_prompt", render)
@@ -364,12 +364,16 @@ async def test_generation_keeps_all_segments(monkeypatch):
             return_value=SimpleNamespace(mbti=None, currentMbti=None),
         ))),
     )
-    monkeypatch.setattr("app.services.relationship.ai_mood.load_ai_mood", AsyncMock(return_value=None))
-    text = await followup.generate_followup_message(
-        _state(), _turns(), TopicVerdict("unfinished", "ai_question", "吃什么"),
-    )
+    text = await followup.generate_followup_message(_state(), _stamped_turns(), NOW)
     assert text == "诶我先说，我肯定选火锅"
     assert render.await_args.kwargs["strip_split"] is False
+    key, params = render.await_args.args[:2]
+    assert key == "proactive.followup_unfinished"
+    assert set(params) == {
+        "conversation", "ai_last_time", "current_time", "time_scene", "personality_brief",
+    }
+    assert params["ai_last_time"].endswith("11:55")
+    assert "晚上" in params["time_scene"]  # 20:00 UTC+8
 
 
 async def test_load_recent_turns_drops_noise_and_keeps_order(monkeypatch):
