@@ -109,6 +109,9 @@ _COMPONENT_ONLY_PROMPT_KEYS = {
     "chat.ai_mood_section",
     "chat.expression_habits_section",
     "chat.session_recap_section",
+    # 《主动聊天机制》被动承接 — 仅作为主回复 system prompt 的「话题接续」段出现
+    "chat.topic_continuation_return",
+    "chat.topic_continuation_jump",
     "chat.reengagement_day",
     "chat.reengagement_long",
     "chat.reengagement_short",
@@ -355,6 +358,18 @@ def _label_reminder_precheck(output: str) -> str | None:
     return f"{state}: {reason[:20]}" if reason else state
 
 
+def _label_topic_verdict(output: str) -> str | None:
+    try:
+        data = json.loads(_label_strip_codeblock(output))
+    except Exception:
+        return None
+    status = str(data.get("status") or "").strip()
+    if status == "unfinished":
+        pending = str(data.get("pending_topic") or "").strip()
+        return f"未完结: {pending[:15]}" if pending else "未完结"
+    return "已完结" if status == "finished" else None
+
+
 def _label_ids(output: str) -> str | None:
     try:
         data = json.loads(_label_strip_codeblock(output))
@@ -500,6 +515,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("memory.consolidation", "L3 记忆整合压缩", "decision", _label_passthrough),
     ("intent.crisis_message_classify", "危机消息语义判定", "decision", _label_crisis_message),
     ("proactive.memory_topic_rerank", "主动话题记忆重排", "decision", _label_ids),
+    ("proactive.topic_completion_judge", "话题完结判定", "decision", _label_topic_verdict),
     ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),
     ("music.user_pause_followup_decision", "共听暂停后跟进判定", "decision", _label_passthrough),
 
@@ -575,6 +591,8 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("proactive.silence_schedule", "沉默唤醒(作息)", "reply", _label_reply_text),
     ("proactive.memory_ai", "记忆主动(AI记忆)", "reply", _label_reply_text),
     ("proactive.memory_user", "记忆主动(用户记忆)", "reply", _label_reply_text),
+    ("proactive.memory_timed", "记忆主动(带时间的用户记忆)", "reply", _label_reply_text),
+    ("proactive.followup_unfinished", "未完结话题追问", "reply", _label_reply_text),
     ("proactive.scheduled_scene", "定时情景(AI作息)", "reply", _label_reply_text),
     # V3 三档主动分享 (2026-09-14): trending 分类命中后走三档独立 prompt.
     ("proactive.trending_user_interest", "主动分享(用户兴趣)", "reply", _label_reply_text),

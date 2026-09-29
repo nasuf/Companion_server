@@ -1127,6 +1127,7 @@ async def test_generic_proactive_is_deferred_during_arrived_activity(monkeypatch
         workspace_id="workspace-1",
         user_id="user-1",
         stage="P3",
+        current_window_index=1,
     )
 
     await proactive_orchestrator._process_due_state(state)

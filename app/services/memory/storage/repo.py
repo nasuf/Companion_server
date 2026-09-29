@@ -39,6 +39,8 @@ class MemoryRecord:
     subCategory: str | None = None
     workspaceId: str | None = None
     provenance: str | None = None
+    # Part 5 §3.1: 用户说出这句话的时间 (主动消息「带时间戳的历史记忆」用)
+    statementTime: datetime | None = None
 
 
 def _to_record(row, source: Source) -> MemoryRecord:
@@ -60,6 +62,7 @@ def _to_record(row, source: Source) -> MemoryRecord:
         updatedAt=row.updatedAt,
         workspaceId=getattr(row, "workspaceId", None),
         provenance=getattr(row, "provenance", None),
+        statementTime=getattr(row, "statementTime", None),
     )
 
 

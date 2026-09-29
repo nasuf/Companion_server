@@ -679,7 +679,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
 
         from app.services.llm.usage_tracker import traced_usage_session
         from app.services.proactive.emit import emit_proactive_message
-        from app.services.proactive.sender import _build_personality_brief
+        from app.services.proactive.sender import build_personality_brief
         from app.services.proactive.state import get_active_workspace_context
 
         workspace_context = await get_active_workspace_context(workspace_id)
@@ -705,7 +705,7 @@ async def _handle_reminder_trigger(trigger, now: datetime) -> None:
         ) as tracer:
             message = await reminder_message(
                 summary=summary,
-                personality_brief=_build_personality_brief(agent),
+                personality_brief=build_personality_brief(agent),
             )
             if not message or len(message) < 4:
                 raise RuntimeError("message generation empty/short")

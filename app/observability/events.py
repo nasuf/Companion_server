@@ -157,6 +157,12 @@ EVT_SESSION_RECAP = "chat.session_recap_built"  # W2 重逢摘要生成 (LLM)
 # Proactive (扩展)
 EVT_PROACTIVE_DEFERRED = "proactive.deferred"  # mutex defer (recent_user / topic_fatigue / etc)
 EVT_PROACTIVE_FALLBACK = "proactive.trigger_fallback"  # scene→greeting / source→greeting
+# A/B 双模式: AI 说完 5min 后的话题完结判定 + B 模式追问
+EVT_PROACTIVE_TOPIC_JUDGED = "proactive.topic_judged"
+EVT_PROACTIVE_FOLLOWUP_SENT = "proactive.followup_sent"
+EVT_PROACTIVE_FOLLOWUP_SKIPPED = "proactive.followup_skipped"
+# 被动回复的话题接续段 (回归承接 / 跳话题过渡)
+EVT_CHAT_TOPIC_CONTINUATION = "chat.topic_continuation"
 
 # State machine transitions
 EVT_PROACTIVE_STATE_TRANSITION = "proactive.state_transition"  # session start, escalate n→n+1, cycle restart, user_replied reset

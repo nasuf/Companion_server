@@ -1,10 +1,20 @@
-"""主动聊天状态服务。
+"""主动聊天状态机 (每个 workspace 一行 proactive_states).
 
-第一阶段目标：
-- 为每个 active workspace 持久化一条主动状态记录
-- 在对话结束后记录新的 t0
-- 在用户再次回复时重置等待态
-- 为后续区间概率命中和衰减状态机提供稳定底座
+状态流转 (所有「离开 processing*」的写都带 status CAS, 见 _EXPECT_STATUS_SQL):
+
+    AI 回合结束 ──arm_after_assistant_turn──▶ running · window 0 (t0+5min 判定窗)
+    running ──scan claim──▶ processing
+    processing ─┬─ window 0: 话题完结判定 ─┬─ 未完结 & 本会话未用 B → 发 B → running · window 1 (t0=现在)
+                │                          └─ 其余 → running · window 1 (A 模式, t0 不变)
+                ├─ window 1-4 互斥/概率未命中 → running · 下一窗口 (走完一轮重启)
+                ├─ A 模式发送成功 → waiting_user (24h 回复期限)
+                └─ workspace 失效 → idle (stop_reason)
+    waiting_user ──24h 未回──▶ processing_timeout ──▶ running (n+1 衰减) / idle (永久停止)
+    任意状态 ──用户发消息 (mark_user_replied_for_conversation)──▶ idle, n=0
+
+用户在 processing 期间发消息会把行改成 idle; 此后生成链路的任何状态写都因
+CAS 落空而成为 no-op —— 这就是 spec「用户回归立即取消待发任务」的状态层保证
+(消息层保证见 emit.abort_if_user_replied_since)。
 """
 
 from __future__ import annotations
@@ -23,6 +33,46 @@ from app.observability.events import EVT_PROACTIVE_STATE_TRANSITION
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
+
+STATUS_IDLE = "idle"
+STATUS_RUNNING = "running"
+STATUS_PROCESSING = "processing"
+STATUS_WAITING_USER = "waiting_user"
+STATUS_PROCESSING_TIMEOUT = "processing_timeout"
+
+# window 0 不参与概率抽签: 它是 AI 说完最后一句后固定 5 分钟的「话题完结判定窗」
+# (proactive/followup.py), 判完进入 window 1 起的 A 模式窗口。
+JUDGE_WINDOW_INDEX = 0
+FOLLOWUP_JUDGE_DELAY_S = 5 * 60
+
+# arm 原因 (写进 metadata.reason, 判定窗据此决定要不要做 B 追问)
+ARM_REASON_REPLY = "assistant_reply"
+ARM_REASON_FAREWELL = "farewell"
+# 危机照护主回复: 照常进 A 模式, 但绝不做 B 追问
+ARM_REASON_CRISIS = "crisis_care"
+# 系统流程里的确认/追问 (删除确认、提醒要时间、矛盾追问 …): AI 的问句挂着 pending
+# 状态等用户答, 5 分钟后再换个说法追一遍只会烦人 —— 不做 B, 照常进 A 模式
+ARM_REASON_SYSTEM = "system_confirmation"
+NO_FOLLOWUP_REASONS = frozenset({ARM_REASON_CRISIS, ARM_REASON_SYSTEM})
+
+_SYSTEM_KIND_PREFIXES = ("deletion", "record_request")
+
+
+def short_circuit_arm_reason(kind: str | None) -> str | None:
+    """短路回复 kind → arm 原因; None = 本轮之后不主动.
+
+    危机短路回复之后不 arm (与改造前一致): 那时候 AI 主动开一句"我在画画呢"
+    是事故, 危机照护的后续由 crisis 流程自己负责。
+    """
+    kind = kind or ""
+    if kind == "conversation_end":
+        return ARM_REASON_FAREWELL
+    if kind.startswith("crisis"):
+        return None
+    if kind.startswith(_SYSTEM_KIND_PREFIXES):
+        return ARM_REASON_SYSTEM
+    return f"short_circuit:{kind}" if kind else "short_circuit"
+
 
 PROACTIVE_WINDOWS: tuple[dict[str, float | int | str], ...] = (
     {"index": 0, "name": "0-30m", "start_sec": 0, "end_sec": 1800, "hit_rate": 0.00},
@@ -138,6 +188,22 @@ def _log_if_unavailable(action: str, error: Exception) -> None:
     """proactive_state DB 异常: WARNING 不 INFO — 否则 fire_background 失败的
     state 创建会静默, 主动消息永远不发难排查."""
     logger.warning(f"Proactive state {action} skipped: {error}")
+
+
+def _cas_missed(affected: Any, state: ProactiveStateRecord, action: str) -> bool:
+    """execute_raw 返回受影响行数; 0 = 行已不在期望状态 (通常是用户在生成期间回来了)."""
+    if isinstance(affected, int) and affected == 0:
+        logger.info(
+            f"[PROACTIVE] {action} skipped: status moved away from {state.status!r}",
+            extra={
+                "event": EVT_PROACTIVE_STATE_TRANSITION,
+                "transition": "cas_missed",
+                "action": action,
+                "expected_status": state.status,
+            },
+        )
+        return True
+    return False
 
 
 def _pick_random_due_at(t0_at: datetime, window_index: int, now: datetime) -> datetime:
@@ -441,12 +507,29 @@ async def start_or_restart_proactive_session(
     user_id: str,
     agent_id: str,
     now: datetime | None = None,
-    reason: str = "conversation_end",
+    reason: str = ARM_REASON_REPLY,
+    first_window_index: int = 1,
+    turn_message_ids: list[str] | None = None,
 ) -> str | None:
+    """(重新) 开始一轮等待。t0 = 现在。返回 state id; 被守卫跳过时返回 None。
+
+    AI 回合结束走 `arm_after_assistant_turn` (first_window_index=判定窗);
+    workspace 激活 / 状态补建等没有新鲜 AI 回合的场景从 window 1 开始。
+
+    metadata 是合并不是覆盖: 记忆冷却 (spec §9 -1/+50) 必须跨越多轮聊天存活,
+    之前每次 AI 回复都把它冲掉, 冷却只在一段连续沉默里生效。
+
+    turn_message_ids: 本轮回复所回应的用户消息。生成期间用户又发了更新的消息时,
+    这次 arm 已经过期 —— 不能把新消息刚置的 idle 覆盖回 running, 否则新消息那一轮
+    若是危机/边界回复 (刻意不 arm), 5 分钟后会冒出一句 B 追问。判断与写入在同一条
+    SQL 里完成, 且只比较库里的 created_at (不掺应用服务器时钟, 免受时钟偏差影响)。
+    """
     now_ts = _now(now)
     stage = await determine_proactive_stage(agent_id, user_id)
-    first_window_index = 1
-    due_at = _pick_random_due_at(now_ts, first_window_index, now_ts)
+    if first_window_index == JUDGE_WINDOW_INDEX:
+        due_at = now_ts + timedelta(seconds=FOLLOWUP_JUDGE_DELAY_S)
+    else:
+        due_at = _pick_random_due_at(now_ts, first_window_index, now_ts)
 
     try:
         rows = await db.query_raw(
@@ -457,12 +540,23 @@ async def start_or_restart_proactive_session(
                 current_window_index, window_due_at, response_deadline_at,
                 t0_at, last_assistant_reply_at, stop_reason, metadata
             )
-            VALUES (
+            SELECT
                 $1, $2, $3, $4, $5,
                 'running', $6, 0, 'normal', NULL,
                 $7, $8::timestamp, NULL,
                 $9::timestamp, $9::timestamp, NULL, $10::jsonb
-            )
+            WHERE $11::jsonb IS NULL
+               OR NOT EXISTS (
+                   SELECT 1
+                   FROM messages m
+                   WHERE m.conversation_id = $5
+                     AND m.role = 'user'
+                     AND m.created_at > (
+                         SELECT MAX(t.created_at)
+                         FROM messages t
+                         WHERE t.id IN (SELECT jsonb_array_elements_text($11::jsonb))
+                     )
+               )
             ON CONFLICT (workspace_id)
             DO UPDATE SET
                 conversation_id = EXCLUDED.conversation_id,
@@ -479,7 +573,7 @@ async def start_or_restart_proactive_session(
                 last_assistant_reply_at = EXCLUDED.last_assistant_reply_at,
                 updated_at = CURRENT_TIMESTAMP,
                 stop_reason = NULL,
-                metadata = EXCLUDED.metadata
+                metadata = COALESCE(proactive_states.metadata, '{}'::jsonb) || EXCLUDED.metadata
             RETURNING id
             """,
             str(uuid.uuid4()),
@@ -492,11 +586,17 @@ async def start_or_restart_proactive_session(
             _ts(due_at),
             _ts(now_ts),
             json.dumps({"reason": reason}, ensure_ascii=False),
+            json.dumps(turn_message_ids) if turn_message_ids else None,
         )
     except Exception as e:
         _log_if_unavailable("session start", e)
         return None
     state_id = str(rows[0]["id"]) if rows else None
+    if not state_id and turn_message_ids:
+        logger.info(
+            "[PROACTIVE] arm skipped: user sent a newer message during the reply",
+            extra={"event": EVT_PROACTIVE_STATE_TRANSITION, "transition": "arm_superseded"},
+        )
     if state_id:
         await log_proactive_event(
             state_id=state_id,
@@ -520,12 +620,47 @@ async def start_or_restart_proactive_session(
     return state_id
 
 
+async def arm_after_assistant_turn(
+    *,
+    conversation_id: str,
+    user_id: str,
+    agent_id: str,
+    workspace_id: str | None = None,
+    reason: str = ARM_REASON_REPLY,
+    turn_message_ids: list[str] | None = None,
+) -> None:
+    """AI 一轮回复全部发出后调用 (主路径 + 所有短路路径, 见 chat/turn_lifecycle).
+
+    t0 = AI 最后一条消息的时刻; 5 分钟后进判定窗。之前只有主路径回复会 arm,
+    语气词表情 / 问当前状态这类短路回复之后状态停在 idle, 主动交流永久沉默。
+    用户在 turn_message_ids 之后又发过消息 → 本次 arm 过期, 跳过。
+    """
+    if not workspace_id:
+        from app.services.workspace.workspaces import resolve_workspace_id
+
+        workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
+    if not workspace_id:
+        return
+    await start_or_restart_proactive_session(
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        reason=reason,
+        first_window_index=JUDGE_WINDOW_INDEX,
+        turn_message_ids=turn_message_ids,
+    )
+
+
 async def mark_user_replied_for_conversation(
     conversation_id: str,
     *,
     replied_at: datetime | None = None,
 ) -> None:
     replied_ts = _now(replied_at)
+    # 先置 idle (越早越能挡住生成中的主动消息), 再记会话边界
+    from app.services.interaction.topic_continuity import note_user_message
+
     try:
         rows = await db.query_raw(
             """
@@ -550,7 +685,9 @@ async def mark_user_replied_for_conversation(
         )
     except Exception as e:
         _log_if_unavailable("mark user replied", e)
-        return
+        rows = []
+    # 会话边界 (B 模式单会话一次) 跟着每条用户消息走, 与 proactive 行是否存在无关
+    await note_user_message(conversation_id, now=replied_ts)
     if not rows:
         return
     row = rows[0]
@@ -654,15 +791,32 @@ async def has_recent_user_activity(workspace_id: str, *, now: datetime | None = 
             workspace_id,
             _ts(since),
         )
-        if rows:
-            return True
-        # 刻意**不按 status 过滤**。实测 status 只有 created / settled / aborted,
-        # 而 created 就是"正在下" (12 局全部 ended_at IS NULL) —— 把它排掉等于漏掉
-        # 最该保护的场景: 棋下到一半被 AI 插一句"好久没聊了"。
-        #
-        # 取最后活动时刻 = ended_at ?? updated_at ?? started_at。落子会推进
-        # updated_at, 所以长对局不会中途被判成沉默; 而弃局很久的 created 局
-        # 时间早就落在窗口外, 不会永久压住主动交流。
+    except Exception as e:
+        _log_if_unavailable("recent activity check", e)
+        return False
+    if rows:
+        return True
+    return await has_recent_game_activity(workspace_id, now=now_ts, window_minutes=window_minutes)
+
+
+async def has_recent_game_activity(
+    workspace_id: str,
+    *,
+    now: datetime | None = None,
+    window_minutes: int = 30,
+) -> bool:
+    """一起下棋/玩游戏时用户不发 user 消息, 但人在场。
+
+    刻意**不按 status 过滤**。实测 status 只有 created / settled / aborted,
+    而 created 就是"正在下" (12 局全部 ended_at IS NULL) —— 把它排掉等于漏掉
+    最该保护的场景: 棋下到一半被 AI 插一句"好久没聊了"。
+
+    取最后活动时刻 = ended_at ?? updated_at ?? started_at。落子会推进
+    updated_at, 所以长对局不会中途被判成沉默; 而弃局很久的 created 局
+    时间早就落在窗口外, 不会永久压住主动交流。
+    """
+    since = _now(now) - timedelta(minutes=window_minutes)
+    try:
         rows = await db.query_raw(
             """
             SELECT 1
@@ -675,7 +829,7 @@ async def has_recent_user_activity(workspace_id: str, *, now: datetime | None = 
             _ts(since),
         )
     except Exception as e:
-        _log_if_unavailable("recent activity check", e)
+        _log_if_unavailable("recent game activity check", e)
         return False
     return bool(rows)
 
@@ -727,10 +881,11 @@ async def stop_proactive_state(
     *,
     reason: str,
     now: datetime | None = None,
-) -> None:
+) -> bool:
+    """转入 idle 并记 stop_reason; 返回是否真的写入 (CAS 落空返回 False)."""
     now_ts = _now(now)
     try:
-        await db.execute_raw(
+        affected = await db.execute_raw(
             """
             UPDATE proactive_states
             SET
@@ -744,14 +899,18 @@ async def stop_proactive_state(
                 stop_reason = $3,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
+              AND status = $4
             """,
             state.id,
             now_ts,
             reason,
+            state.status,
         )
     except Exception as e:
         _log_if_unavailable("stop", e)
-        return
+        return False
+    if _cas_missed(affected, state, "stop"):
+        return False
     await log_proactive_event(
         state_id=state.id,
         workspace_id=state.workspace_id,
@@ -762,6 +921,7 @@ async def stop_proactive_state(
         window_index=state.current_window_index,
         payload={"reason": reason},
     )
+    return True
 
 
 def is_same_local_day(left: datetime | None, right: datetime | None) -> bool:
@@ -793,7 +953,7 @@ async def mark_proactive_sent(
     merged_metadata = {**(state.metadata or {}), **(extra_metadata or {})}
     try:
         # initial_silence_level_n 仅在当前 n=0 时升级 (first_greeting 重入安全).
-        await db.execute_raw(
+        affected = await db.execute_raw(
             """
             UPDATE proactive_states
             SET
@@ -813,6 +973,7 @@ async def mark_proactive_sent(
                 END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
+              AND status = $8
             """,
             state.id,
             now_ts,
@@ -821,10 +982,14 @@ async def mark_proactive_sent(
             mark_daily_scene,
             json.dumps(merged_metadata, ensure_ascii=False),
             initial_silence_level_n,
+            state.status,
         )
     except Exception as e:
         _log_if_unavailable("mark proactive sent", e)
         return
+    # CAS 落空 = 消息发出后用户立刻回了 (行已被置 idle): 状态保持 idle 是对的,
+    # 但消息确实发出去了, message_sent 事件照记 (疲劳度/节律统计依赖它)。
+    _cas_missed(affected, state, "mark sent")
 
     await log_proactive_event(
         state_id=state.id,
@@ -874,7 +1039,7 @@ async def _escalate_silence_level(
     if next_n <= 4:
         due_at = _pick_random_due_at(now_ts, 1, now_ts)
         try:
-            await db.execute_raw(
+            affected = await db.execute_raw(
                 """
                 UPDATE proactive_states
                 SET
@@ -889,14 +1054,18 @@ async def _escalate_silence_level(
                     last_attempt_at = $4::timestamp,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1
+                  AND status = $5
                 """,
                 state.id,
                 next_n,
                 due_at,
                 now_ts,
+                state.status,
             )
         except Exception as e:
             _log_if_unavailable("resume normal followup", e)
+            return
+        if _cas_missed(affected, state, "escalate"):
             return
         await log_proactive_event(
             state_id=state.id,
@@ -942,7 +1111,8 @@ async def _escalate_silence_level(
         )
         return
 
-    await stop_proactive_state(state, reason="silence_exhausted", now=now_ts)
+    if not await stop_proactive_state(state, reason="silence_exhausted", now=now_ts):
+        return
     await log_proactive_event(
         state_id=state.id,
         workspace_id=state.workspace_id,
@@ -1022,7 +1192,7 @@ async def _resume_forced_plan(
     silence_level_n: int | None = None,
 ) -> None:
     try:
-        await db.execute_raw(
+        affected = await db.execute_raw(
             """
             UPDATE proactive_states
             SET
@@ -1037,6 +1207,7 @@ async def _resume_forced_plan(
                 updated_at = CURRENT_TIMESTAMP,
                 metadata = $7::jsonb
             WHERE id = $1
+              AND status = $8
             """,
             state.id,
             silence_level_n,
@@ -1045,9 +1216,12 @@ async def _resume_forced_plan(
             due_at,
             now_ts,
             metadata_json,
+            state.status,
         )
     except Exception as e:
         _log_if_unavailable("resume forced plan", e)
+        return
+    if _cas_missed(affected, state, "resume forced plan"):
         return
     await log_proactive_event(
         state_id=state.id,
@@ -1066,11 +1240,16 @@ async def advance_to_next_window(
     now: datetime | None = None,
     event_type: str = "window_advanced",
     payload: dict[str, Any] | None = None,
+    restart_cycle: bool = False,
 ) -> None:
+    """推进到下一窗口; 走完 4-6h 或 `restart_cycle=True` 时以现在为 t0 从 window 1 重来.
+
+    `restart_cycle` 给 B 模式追问发出后用: AI 刚说完一句, A 模式窗口从这句开始算。
+    """
     now_ts = _now(now)
     current_index = state.current_window_index if state.current_window_index is not None else 0
     next_index = current_index + 1
-    cycle_restarted = next_index >= len(PROACTIVE_WINDOWS)
+    cycle_restarted = restart_cycle or next_index >= len(PROACTIVE_WINDOWS)
     if cycle_restarted:
         # spec §1.2 step 4: 走完 4-6h 区间未命中 → 重启 0-6h 循环, 不 escalate.
         # n+1 仅属于 spec §8 "用户回复 24h 超时", 不属于"概率没命中".
@@ -1085,7 +1264,7 @@ async def advance_to_next_window(
     # cycle 重启时刷新 t0_at; 普通推进 t0 不变, 跳过 no-op 写避免 WAL/replication 噪音.
     try:
         if cycle_restarted:
-            await db.execute_raw(
+            affected = await db.execute_raw(
                 """
                 UPDATE proactive_states
                 SET
@@ -1096,11 +1275,12 @@ async def advance_to_next_window(
                     last_attempt_at = $5::timestamp,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1
+                  AND status = $6
                 """,
-                state.id, next_index, due_at, new_t0, now_ts,
+                state.id, next_index, due_at, new_t0, now_ts, state.status,
             )
         else:
-            await db.execute_raw(
+            affected = await db.execute_raw(
                 """
                 UPDATE proactive_states
                 SET
@@ -1110,11 +1290,14 @@ async def advance_to_next_window(
                     last_attempt_at = $4::timestamp,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1
+                  AND status = $5
                 """,
-                state.id, next_index, due_at, now_ts,
+                state.id, next_index, due_at, now_ts, state.status,
             )
     except Exception as e:
         _log_if_unavailable("advance window", e)
+        return
+    if _cas_missed(affected, state, "advance window"):
         return
     await log_proactive_event(
         state_id=state.id,

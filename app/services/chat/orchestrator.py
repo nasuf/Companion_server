@@ -8,8 +8,10 @@ Background (fire-and-forget, after response):
 """
 
 import asyncio
+import functools
 import json
 import logging
+from datetime import datetime, timezone
 from time import perf_counter
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -18,6 +20,7 @@ from prisma import Json
 
 from app.db import db
 from app.observability.events import (
+    EVT_CHAT_TOPIC_CONTINUATION,
     EVT_FILLER_EMOJI,
     EVT_INTENT_SPLIT,
     EVT_MEMORY_CONTRADICTION,
@@ -70,6 +73,7 @@ from app.services.schedule_domain.schedule import (
 )
 from app.services.interaction.boundary import (
     PATIENCE_MAX,
+    PATIENCE_NORMAL_MIN,
     get_patience_prompt_instruction,
 )
 from app.services.relationship.intimacy import get_relationship_stage
@@ -171,8 +175,15 @@ from app.services.chat.post_process import (
 )
 from app.services.chat.tracing import create_tracer
 from app.services.mbti import get_mbti
-from app.services.interaction.reply_context import actual_delay_seconds, save_last_reply_timestamp
-from app.services.proactive.state import start_or_restart_proactive_session
+from app.services.chat.turn_lifecycle import finish_assistant_turn
+from app.services.interaction.reply_context import actual_delay_seconds
+from app.services.interaction.topic_continuity import (
+    FOLLOWUP_TRIGGER_TYPE,
+    ContinuationCue,
+    load_continuity,
+    resolve_cue,
+)
+from app.services.proactive.state import ARM_REASON_CRISIS, ARM_REASON_REPLY, ARM_REASON_SYSTEM
 from app.services.runtime.tasks import fire_background as _fire_background
 logger = logging.getLogger(__name__)
 
@@ -188,6 +199,9 @@ async def _short_circuit_reply(
     include_done: bool = True,
     extra_metadata: dict | None = None,
     trace_id: str | None = None,
+    proactive_reason: str | None = "short_circuit",
+    turn_user_message_ids: list[str] | None = None,
+    workspace_id: str | None = None,
 ) -> list[dict]:
     """Orchestrator-side adapter that injects `_save_replies`."""
     return await _short_circuit_reply_impl(
@@ -197,7 +211,89 @@ async def _short_circuit_reply(
         include_done=include_done,
         extra_metadata=extra_metadata,
         trace_id=trace_id,
+        proactive_reason=proactive_reason,
+        turn_user_message_ids=turn_user_message_ids,
+        workspace_id=workspace_id,
     )
+
+
+async def _boundary_short_circuit_reply(*args, **kwargs) -> list[dict]:
+    """边界系统的回复 (攻击 / 低耐心 / 拉黑 / 道歉) 之后不 arm 主动交流:
+    AI 正在生气时不追人, 与改造前行为一致。"""
+    return await _short_circuit_reply(*args, proactive_reason=None, **kwargs)
+
+
+async def _system_short_circuit_reply(*args, **kwargs) -> list[dict]:
+    """pending 流程 (矛盾追问的回答 / 删除确认 / 撤回) 的回复: 照常 arm, 但不做 B 追问."""
+    return await _short_circuit_reply(*args, proactive_reason=ARM_REASON_SYSTEM, **kwargs)
+
+
+async def _resolve_topic_cue(
+    continuity_task: asyncio.Task | None,
+    *,
+    previous_assistant: Any,
+    replied_at: datetime | None,
+    offering_turn: bool,
+    patience_low: bool,
+    response_diagnostics: dict[str, Any],
+) -> ContinuationCue | None:
+    """《主动聊天机制》被动承接: 上一轮的话题完结判定 + 用户隔多久回的 → 接续指引.
+
+    间隔 = 用户这条消息的落库时刻 − AI 上一句的时刻 (spec「用户回复间隔」), 不用
+    生成时刻: 走聚合窗口 / 延迟队列时, 8 分钟就回的消息不能被算成 10 分钟以上。
+    """
+    # 已被短路路径取消的任务不能 await (CancelledError 不是 Exception)
+    if continuity_task is None or continuity_task.cancelled():
+        return None
+    try:
+        continuity = await continuity_task
+    except Exception as e:  # noqa: BLE001 — 锦上添花, 失败就按没有判定处理
+        logger.debug(f"[CONTINUITY] load skipped: {e}")
+        return None
+    if offering_turn:
+        return None  # 红包/礼物本身就是新话题
+    if patience_low:
+        return None  # AI 还在生气, 语气交给「情绪状态提醒」段, 不叠"回来啦"
+    said_at = getattr(previous_assistant, "createdAt", None)
+    gap = None
+    if isinstance(said_at, datetime):
+        said_at = said_at if said_at.tzinfo else said_at.replace(tzinfo=timezone.utc)
+        reply_at = replied_at or datetime.now(timezone.utc)
+        gap = max(0.0, (reply_at - said_at).total_seconds())
+    metadata = getattr(previous_assistant, "metadata", None)
+    cue = resolve_cue(
+        continuity,
+        previous_assistant_id=getattr(previous_assistant, "id", None),
+        gap_seconds=gap,
+        previous_assistant_is_followup=(
+            isinstance(metadata, dict)
+            and metadata.get("trigger_type") == FOLLOWUP_TRIGGER_TYPE
+        ),
+    )
+    if cue is not None:
+        response_diagnostics["topic_continuation"] = cue.template_key or "finished"
+        logger.info(
+            f"[CONTINUITY] cue={cue.template_key or 'finished'} gap={int(cue.gap_seconds)}s",
+            extra={
+                "event": EVT_CHAT_TOPIC_CONTINUATION,
+                "cue": cue.template_key or "finished",
+                "gap_seconds": int(cue.gap_seconds),
+            },
+        )
+    return cue
+
+
+def _turn_started_at(messages: list[dict], turn_ids: set[str]) -> datetime | None:
+    """本轮第一条用户消息的落库时刻 (聚合的多条碎片取最早一条)."""
+    times = [
+        ts for ts in (
+            _parse_message_created_at(m.get("createdAt"))
+            for m in messages
+            if m.get("role") == "user" and m.get("id") in turn_ids
+        )
+        if ts is not None
+    ]
+    return min(times, default=None)
 
 
 async def _intent_llm_reply(
@@ -390,7 +486,7 @@ async def stream_chat_response(
     """spec §3.3 step 3：多意图拆分后递归调用本函数处理每个子片段。
 
     sub_intent_mode=True 的子调用：跳过用户消息 DB 写入、边界/pending 检查、
-    延迟解释、done 事件、save_last_reply_timestamp 与后台任务；由父调用统一完成。
+    延迟解释、done 事件、回合收尾 (finish_assistant_turn) 与后台任务；由父调用统一完成。
     forced_intent 指定片段意图不再识别；reply_index_offset 让回复 index 顺延；
     parent_patience 复用父调用的耐心值，避免每个子片段再读一次 Redis。
     子调用共享 reply_context 沿用首条消息的 due_at（spec §6 延迟批处理）。
@@ -531,6 +627,8 @@ async def stream_chat_response(
         # W2 中期记忆: 摘要任务延后到主路径分支创建 (与 fetch_task 同处),
         # 避免 boundary/crisis/filler 短路回合白跑 LLM. 这里只声明.
         session_recap_task: asyncio.Task | None = None
+        # 《主动聊天机制》被动承接: 上一轮的话题完结判定 (Redis, 与 fetch 并行读)
+        continuity_task: asyncio.Task | None = None
         # 默认声明: sub_intent_mode 下不进下面的 if 块, 但 §3.4.2 grounding 门控
         # (_downgrade_non_explicit_schedule_adjust) 仍会读它, 不能留未定义。
         previous_assistant = None
@@ -590,7 +688,7 @@ async def stream_chat_response(
                 sub_intent_mode=sub_intent_mode,
                 parent_patience=parent_patience,
                 tracer=tracer,
-                short_circuit_fn=_short_circuit_reply,
+                short_circuit_fn=_boundary_short_circuit_reply,
                 fire_background_fn=_fire_background,
                 bg_memory_pipeline_fn=_bg_memory_pipeline,
                 recent_context=recent_context_text,
@@ -617,7 +715,11 @@ async def stream_chat_response(
                 user_id=user_id,
                 agent=agent,
                 tracer=tracer,
-                short_circuit_fn=_short_circuit_reply,
+                short_circuit_fn=functools.partial(
+                    _system_short_circuit_reply,
+                    turn_user_message_ids=sorted(current_turn_ids),
+                    workspace_id=workspace_id,
+                ),
             )
 
             # Phase 0.2: 用户说"撤回/恢复" 时优先 short-circuit, 跳过任何 pending
@@ -668,6 +770,8 @@ async def stream_chat_response(
                 for evt in await _short_circuit_reply(
                     filler_emoji, conversation_id, agent_id, user_id,
                     trace_id=tracer.safe_trace_id,
+                    turn_user_message_ids=sorted(current_turn_ids),
+                    workspace_id=workspace_id,
                 ):
                     yield evt
                 tracer.close()
@@ -767,6 +871,8 @@ async def stream_chat_response(
                 gap_seconds=reengagement_gap_seconds,
                 exclude_ids=current_turn_ids,
             ))
+            if previous_assistant is not None:
+                continuity_task = asyncio.create_task(load_continuity(conversation_id))
 
         # --- 统一意图识别：spec §3.3 step 1 严格实现 ---
         # 每条用户消息都调小模型做意图分类, 并把最近对话历史作为上下文注入.
@@ -824,7 +930,7 @@ async def stream_chat_response(
             session_recap_task 一并取消 (review 发现): 意图短路路径不消费摘要,
             让它跑完是浪费一次 LLM 调用. 模块内部全链路吞异常, cancel 安全.
             """
-            for task in (fetch_task, session_recap_task):
+            for task in (fetch_task, session_recap_task, continuity_task):
                 if task is None or task.done():
                     continue
                 task.cancel()
@@ -925,16 +1031,9 @@ async def stream_chat_response(
         # §3.4.6 终结意图
         if detected_intent.intent == IntentType.CONVERSATION_END:
             await _cancel_fetch_task()
+            # 回合收尾 (arm 原因 = farewell, 关闭话题会话) 在 ctx.finalize 内完成
             async for evt in handle_conversation_end(user_message, sc_ctx, _intent_llm_reply):
                 yield evt
-            if workspace_id and agent_id and not sub_intent_mode:
-                _fire_background(start_or_restart_proactive_session(
-                    workspace_id=workspace_id,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    reason="farewell",
-                ))
             return
 
         # §3.4.4 道歉承诺热路径
@@ -1381,6 +1480,7 @@ async def stream_chat_response(
                 l3_memories=l3_memories or None,
                 memory_relevance=memory_relevance,
                 reengagement_gap_seconds=reengagement_gap_seconds,
+                topic_continuation=topic_cue,
                 session_recap=session_recap,
                 relation_meta_line=relation_meta_line,
                 ai_mood_text=ai_mood_text,
@@ -1472,6 +1572,15 @@ async def stream_chat_response(
             if actual_sleep > 0:
                 await asyncio.sleep(actual_sleep)
 
+        topic_cue = await _resolve_topic_cue(
+            continuity_task,
+            previous_assistant=previous_assistant,
+            replied_at=_turn_started_at(messages_dicts, current_turn_ids),
+            offering_turn=bool(offering_context),
+            patience_low=cached_patience < PATIENCE_NORMAL_MIN,
+            response_diagnostics=response_diagnostics,
+        )
+
         replies, raw_response, reply_is_fallback, reply_emotion_pre = await _generate_reply(
             contradiction_inquiry=contradiction_inquiry,
             detected_intent=detected_intent,
@@ -1513,7 +1622,8 @@ async def stream_chat_response(
             reply_emotion_fn=_ai_reply_emotion,
             # 时间感知收口: gap ≥3h 重逢轮禁走 tier (轻量 prompt 无重逢/摘要段)
             reengagement_gap_seconds=reengagement_gap_seconds,
-            force_main_prompt=bool(offering_context),
+            # 话题接续段只在主 prompt 里有, tier 轻量 prompt 会把它丢掉
+            force_main_prompt=bool(offering_context) or bool(topic_cue and topic_cue.template_key),
             diagnostics=response_diagnostics,
         )
 
@@ -1776,7 +1886,7 @@ async def stream_chat_response(
             ))
 
         if sub_intent_mode:
-            # 父调用负责后台任务、save_last_reply_timestamp、done、trace 关闭
+            # 父调用负责后台任务、回合收尾 (finish_assistant_turn)、done、trace 关闭
             return
 
         # Update conversation title if first exchange (non-blocking)
@@ -1820,15 +1930,19 @@ async def stream_chat_response(
             ):
                 yield evt
 
-        await save_last_reply_timestamp(agent_id, user_id)
-        if workspace_id and agent_id:
-            _fire_background(start_or_restart_proactive_session(
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                reason="conversation_end",
-            ))
+        await finish_assistant_turn(
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            turn_message_ids=sorted(current_turn_ids),
+            proactive_reason=(
+                ARM_REASON_CRISIS if crisis_care_turn
+                # 矛盾追问挂着 pending 等用户答, 不做 B 追问
+                else ARM_REASON_SYSTEM if contradiction_inquiry
+                else ARM_REASON_REPLY
+            ),
+        )
         done_data: dict = {"message_id": "complete"}
         if first_assistant_message_id and tracer.trace_id and tracer.is_active:
             done_data["assistant_message_id"] = first_assistant_message_id

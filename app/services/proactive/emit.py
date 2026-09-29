@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -39,6 +40,7 @@ async def emit_proactive_message(
     voice_eligible: bool = True,
     guard_activity_id: str | None = None,
     guard_delivery_key: str | None = None,
+    abort_if_user_replied_since: datetime | None = None,
 ) -> str:
     """持久化主动消息 + 推 WS, 返回 assistant message id.
 
@@ -46,6 +48,11 @@ async def emit_proactive_message(
     避免下游再做 emoji/拆句加工.
 
     trace_id 挂到 metadata, 让前端 Trace 按钮可点 (跟主聊天回复路径对齐).
+
+    abort_if_user_replied_since: 该时刻之后本会话出现过用户消息就不插入, 返回 "".
+    生成一条主动消息要好几秒 (LLM + 可能的联网/TTS), 用户恰好在这期间回来时,
+    spec 要求取消待发任务、优先响应用户。判断与插入在同一条 SQL 里完成 (READ
+    COMMITTED 下仍有毫秒级窗口看不到并发中未提交的用户消息, 可接受)。
     """
     # 防御: reply_prefix 给主动消息 prompt 注入的通用回复规则允许 "||" 分条,
     # 但主动消息是单条投递 (无 split 管线) — LLM 若照做, 取第一段, 与
@@ -165,6 +172,25 @@ async def emit_proactive_message(
                 if isinstance(row, dict)
                 else row.created_at
             )
+        elif abort_if_user_replied_since is not None:
+            created_id, created_at = await _insert_unless_user_replied(
+                conversation_id=conversation_id,
+                message=message,
+                metadata=metadata,
+                since=abort_if_user_replied_since,
+            )
+            if not created_id:
+                logger.info(
+                    "[PROACTIVE-EMIT] aborted: user replied during generation "
+                    f"trigger={trigger_type}"
+                )
+                if prepared_voice is not None:
+                    from app.services.speech_output.delivery import (
+                        discard_prepared_voice_output,
+                    )
+
+                    await discard_prepared_voice_output(prepared_voice)
+                return ""
         else:
             created = await db.message.create(
                 data={
@@ -272,3 +298,45 @@ async def emit_proactive_message(
     await manager.send_to_workspace(workspace_id, "proactive", ws_payload)
 
     return created_id
+
+
+def _naive_utc(ts: datetime) -> str:
+    """messages.created_at 是 UTC 的 timestamp without time zone (Prisma 默认)."""
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    return ts.isoformat()
+
+
+async def _insert_unless_user_replied(
+    *,
+    conversation_id: str,
+    message: str,
+    metadata: dict[str, Any],
+    since: datetime,
+) -> tuple[str | None, datetime | None]:
+    """「没有更新的用户消息才插入」(单条 SQL); 返回 (id, created_at) 或 (None, None)."""
+    created_at = datetime.now(timezone.utc)
+    rows = await db.query_raw(
+        """
+        INSERT INTO messages (id, conversation_id, role, content, metadata, created_at)
+        SELECT $1, $2, 'assistant', $3, $4::jsonb, $5::timestamp
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM messages user_message
+            WHERE user_message.conversation_id = $2
+              AND user_message.role = 'user'
+              AND user_message.created_at > $6::timestamp
+        )
+        RETURNING id
+        """,
+        str(uuid4()),
+        conversation_id,
+        message,
+        json.dumps(metadata, ensure_ascii=False, default=str),
+        _naive_utc(created_at),
+        _naive_utc(since),
+    )
+    if not rows:
+        return None, None
+    # 返回自己写入的时刻 (raw query 回来的是字符串, 下游成就/推送要 datetime)
+    return str(rows[0]["id"]), created_at

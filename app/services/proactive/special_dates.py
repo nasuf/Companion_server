@@ -35,7 +35,7 @@ from app.services.proactive.history import (
     can_send_proactive,
     increment_proactive_count,
 )
-from app.services.proactive.sender import _build_personality_brief  # type: ignore[import-private]
+from app.services.proactive.sender import build_personality_brief
 from app.services.proactive.state import (
     get_active_workspace_context,
     ensure_proactive_state_for_workspace,
@@ -344,7 +344,7 @@ async def send_special_date_proactive(
     if not agent:
         return False
 
-    personality_brief = _build_personality_brief(agent)
+    personality_brief = build_personality_brief(agent)
     prompt_key, fields = await _pick_prompt_key_and_fields(occasions, personality_brief)
     try:
         tpl = await get_prompt_text(prompt_key)
@@ -412,7 +412,9 @@ async def send_special_date_proactive(
             maybe_prepare_proactive_link_recommendation,
         )
 
-        proactive_link = await maybe_prepare_proactive_link_recommendation(
+        # 返回 (卡片, 未出卡原因) —— 09-14 改了返回值这里没跟上, 之前每次特殊日期
+        # 祝福都在 .component_card 上崩溃 (LLM 已调用, 消息永远发不出去)
+        proactive_link, _link_skip_reason = await maybe_prepare_proactive_link_recommendation(
             user_id=user_id,
             conversation_id=conversation_id,
             trigger_type="special_date",
@@ -443,7 +445,11 @@ async def send_special_date_proactive(
             extra_metadata=extra_metadata,
             ws_payload_extra=ws_payload_extra,
             trace_id=tracer.safe_trace_id,
+            # 生成期间用户回来了 → 不插入; trigger 仍 active, 下一轮扫描按"交流中"顺延
+            abort_if_user_replied_since=now_ts,
         )
+        if not assistant_message_id:
+            return False
         if proactive_link is not None:
             await bind_link_card_to_message(
                 link_id=proactive_link.link.id,
@@ -455,6 +461,10 @@ async def send_special_date_proactive(
             send_outcome.web_search_used = trending_attached
             send_outcome.link_card_used = proactive_link is not None
         await increment_proactive_count(agent_id, user_id)
+        # 节日/生日祝福和 A 模式开场一样是新话题: 用户回来后开新会话 (B 名额恢复)
+        from app.services.interaction.topic_continuity import close_session
+
+        await close_session(conversation_id)
         return True
 
 

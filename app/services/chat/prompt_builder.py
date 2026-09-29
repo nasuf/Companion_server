@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 
 from app.services.chat.message_utils import _parse_message_created_at
+from app.services.interaction.topic_continuity import ContinuationCue
 from app.services.memory.retrieval.context_selector import ClassifiedMemory
 from app.services.prompting.store import (
     PromptDisabledError,
@@ -635,6 +636,8 @@ async def build_system_prompt(
     ai_status: dict | None = None,
     memory_relevance: str = "medium",
     reengagement_gap_seconds: float | None = None,
+    # 《主动聊天机制》被动承接: 上一轮判定话题未完结时的接续指引 (topic_continuity.resolve_cue)
+    topic_continuation: ContinuationCue | None = None,
     session_recap: str | None = None,
     relation_meta_line: str = "",
     ai_mood_text: str = "",
@@ -886,7 +889,11 @@ async def build_system_prompt(
         (red_packet_context and red_packet_context.get("offering_id"))
         or (gift_context and gift_context.get("offering_id"))
     )
-    reengage_gap = None if offering_turn else reengagement_gap_seconds
+    continuation = None if offering_turn else topic_continuation
+    # 有上一轮的话题判定时 (只在 <3h 出现) 由它接管「回来了怎么接」: spec 要求
+    # 已完结话题无论隔多久都不带承接话术, 未完结则由话题接续段给出更具体的接法,
+    # 两种情况都不能再叠一层重逢短档。≥3h 仍由重逢感知负责。
+    reengage_gap = None if (offering_turn or continuation is not None) else reengagement_gap_seconds
     recap_text = None if offering_turn else session_recap
     reengage = await _build_reengagement_section(reengage_gap)
     if reengage:
@@ -896,6 +903,15 @@ async def build_system_prompt(
         )
     else:
         _record_skipped_section(diagnostics, "重逢感知")
+
+    continuation_section = await _build_topic_continuation_section(continuation)
+    if continuation_section:
+        _append_section(
+            sections, components, "话题接续", continuation_section.body,
+            prompt_key=continuation_section.prompt_key,
+        )
+    else:
+        _record_skipped_section(diagnostics, "话题接续")
 
     # W2 中期记忆: 重逢时的「上次聊到」摘要, 与重逢感知段配对注入
     recap_section = await _build_session_recap_section(recap_text)
@@ -1150,6 +1166,24 @@ async def _build_reengagement_section(
         return None
     return _PromptBody(
         _render_section(tpl, {"gap_text": format_gap_text(gap_seconds)}), key,
+    )
+
+
+async def _build_topic_continuation_section(
+    cue: ContinuationCue | None,
+) -> _PromptBody | None:
+    """「话题接续」段: 回归承接 (>10min 且本会话没追问过) 或跳话题过渡."""
+    if cue is None or cue.template_key is None:
+        return None
+    tpl = await _get_optional_prompt(cue.template_key)
+    if tpl is None:
+        return None
+    return _PromptBody(
+        _render_section(tpl, {
+            "gap_text": format_gap_text(cue.gap_seconds),
+            "pending_topic": cue.pending_topic,
+        }),
+        cue.template_key,
     )
 
 

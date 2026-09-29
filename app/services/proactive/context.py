@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.db import db
@@ -16,8 +17,26 @@ from app.services.relationship.intimacy import get_relationship_stage, get_topic
 from app.services.memory.storage import repo as memory_repo
 from app.services.memory.core_memory import load_core_memory_strings
 from app.services.schedule_domain.schedule import get_cached_schedule, get_current_status
+from app.services.schedule_domain.time_service import _TZ
 
 logger = logging.getLogger(__name__)
+
+UTC = timezone.utc
+
+# 「带时间戳的历史记忆」来源 (timed_user): 最近发生过的事, 或最近几天聊到过的事
+TIMED_EVENT_LOOKBACK = timedelta(days=10)
+TIMED_STATEMENT_LOOKBACK = timedelta(days=14)
+# 刚聊过的不算"想起来" —— 半天内说的事再拿出来问, 像没在听
+TIMED_STATEMENT_MIN_AGE = timedelta(hours=12)
+# 有具体时刻的事, 过去这么久才问"怎么样了" (3 点的面试, 1 点就问是没过脑子)
+TIMED_EVENT_SETTLE = timedelta(hours=2)
+# 只有"发生过的事"才能问后来怎样; 偏好/身份/思维类事实带时间反而像翻档案
+# (「三周前你说你 28 岁」)
+_TIME_HINT_CATEGORIES = frozenset({"生活", "情绪"})
+# 超过这个时长的用户记忆不标时间 (太久远的时间感只会显得在翻档案)
+USER_MEMORY_TIME_HINT_MAX_AGE = timedelta(days=60)
+# 缺记忆时的兜底来源: AI 自身人设记忆建号即有, 不会空
+_SOURCE_FALLBACK = {"timed_user": "ai_l1"}
 
 
 async def build_proactive_context(
@@ -60,6 +79,18 @@ async def build_proactive_context(
         raise ValueError(f"Agent not found: {agent_id}")
 
     proactive_memories, used_memory_ids = proactive_memories_pair
+    # 记忆主动抽不到记忆会整次取消 (spec §4.2), timed_user 常为空 → 兜底 AI 记忆;
+    # 沉默唤醒空了本来就回落到打招呼 (sender), 不在这里改来源
+    fallback_source = _SOURCE_FALLBACK.get(source or "")
+    if not proactive_memories and fallback_source and trigger_type == "memory_proactive":
+        source = fallback_source
+        proactive_memories, used_memory_ids = await _load_proactive_memories(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            source=source,
+            exclude_memory_ids=exclude_memory_ids,
+            topic_theme=topic_theme,
+        )
     schedule_status = get_current_status(schedule) if schedule else {"activity": "自由时间", "status": "idle", "type": "leisure"}
     relationship_stage = get_relationship_stage(topic_intimacy)
     scene_hint = _build_scene_hint(trigger_type, schedule_status)
@@ -172,6 +203,7 @@ async def _load_proactive_memories(
     - ai_l1 / ai_l2  → memories_ai, level=1 or 2
     - user_l1 / user_l2 → memories_user, level=1 or 2
     - relationship → memories_ai (生活, 交互) 共同经历 (Phase 2 关系记忆)
+    - timed_user → memories_user 最近发生/最近聊到的事, 带相对时间 (「前天你说…」)
     - ai_schedule / greeting → 无记忆 (返回空)
 
     spec §3.2 + §4.2: 抽中 source 后, **先按 topic_theme 做 LLM rerank**, 再
@@ -182,6 +214,12 @@ async def _load_proactive_memories(
     # spec §4.1/§4.2: 非记忆来源直接返回空 (打招呼 / 作息走 prompt 模板自身)
     if source in ("ai_schedule", "greeting", None):
         return [], []
+    if source == "timed_user":
+        return await _load_timed_user_memories(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            exclude_memory_ids=exclude_memory_ids,
+        )
 
     # Resolve (owner, level) from source
     level: int | None
@@ -231,6 +269,7 @@ async def _load_proactive_memories(
     else:
         ordered = eligible
 
+    now = datetime.now(UTC)
     texts: list[str] = []
     ids: list[str] = []
     seen: set[str] = set()
@@ -239,9 +278,133 @@ async def _load_proactive_memories(
         if not text or text in seen:
             continue
         seen.add(text)
-        texts.append(f"[{row.mainCategory or '生活'}/{row.subCategory or '其他'}] {text}")
+        label = f"[{row.mainCategory or '生活'}/{row.subCategory or '其他'}]"
+        # 用户记忆带上"几天前聊到" —— 真人想起朋友说过的事会带时间感;
+        # AI 人设记忆是建号时生成的, 没有"聊到"的时间, 不标。
+        hint = _user_memory_time_hint(row, now) if owner == "user" else ""
+        texts.append(f"{label}{hint} {text}")
         ids.append(row.id)
     return texts[:6], ids[:6]
+
+
+def _aware(ts: datetime | None) -> datetime | None:
+    if ts is None:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+
+def relative_day_text(ts: datetime, now: datetime) -> str:
+    """按 UTC+8 自然日算的粗粒度相对时间: 今天/昨天/前天/N天前/上周/N周前."""
+    days = (now.astimezone(_TZ).date() - ts.astimezone(_TZ).date()).days
+    if days <= 0:
+        return "今天"
+    if days == 1:
+        return "昨天"
+    if days == 2:
+        return "前天"
+    if days < 7:
+        return f"{days}天前"
+    if days < 14:
+        return "上周"
+    return f"{days // 7}周前"
+
+
+def _user_memory_time_hint(row: Any, now: datetime) -> str:
+    if getattr(row, "mainCategory", None) not in _TIME_HINT_CATEGORIES:
+        return ""
+    said_at = _aware(getattr(row, "statementTime", None) or getattr(row, "createdAt", None))
+    if said_at is None or now - said_at > USER_MEMORY_TIME_HINT_MAX_AGE:
+        return ""
+    return f"[{relative_day_text(said_at, now)}聊到]"
+
+
+async def _load_timed_user_memories(
+    *,
+    user_id: str,
+    workspace_id: str,
+    exclude_memory_ids: set[str] | None,
+    now: datetime | None = None,
+) -> tuple[list[str], list[str]]:
+    """最近发生过的事 (occur_time 在过去 10 天内), 或最近几天聊到的生活近况.
+
+    只取"能问后来怎么样"的事: 排除提醒 (有独立准点链路)、身份类; 没有事件时间的
+    只要生活类 —— 「前几天你说喜欢吃辣, 后来怎么样了」是尬聊。
+    事件型优先: 用户说过"周五面试", 周五之后问"面试怎么样啦"是最像朋友的主动。
+    """
+    now_ts = now or datetime.now(UTC)
+    rows = await memory_repo.find_many(
+        source="user",
+        where={
+            "userId": user_id,
+            "workspaceId": workspace_id,
+            "isArchived": False,
+            "OR": [
+                {"occurTime": {"gte": now_ts - TIMED_EVENT_LOOKBACK, "lte": now_ts}},
+                {"statementTime": {
+                    "gte": now_ts - TIMED_STATEMENT_LOOKBACK,
+                    "lte": now_ts - TIMED_STATEMENT_MIN_AGE,
+                }},
+            ],
+        },
+        order={"importance": "desc"},
+        take=30,
+    )
+    exclude = exclude_memory_ids or set()
+
+    def _recency(row: Any) -> datetime:
+        return _aware(row.occurTime) or _aware(row.statementTime) or _aware(row.createdAt) or now_ts
+
+    # 类目与时间过滤放在 Python 侧: Prisma 的 NOT 对 NULL 类目会把整行一起滤掉
+    eligible = [
+        r for r in rows
+        if r.id not in exclude
+        and r.content
+        and r.subCategory != "提醒"
+        and r.mainCategory != "身份"
+        and _worth_asking_about(r, now_ts)
+    ]
+    # 事件型 (有 occur_time) 排前, 同类里越近越前
+    eligible.sort(key=lambda r: (r.occurTime is None, -_recency(r).timestamp()))
+    texts: list[str] = []
+    ids: list[str] = []
+    for row in eligible[:3]:
+        occur = _aware(row.occurTime)
+        said = _aware(row.statementTime) or _aware(row.createdAt)
+        if occur is not None:
+            local = occur.astimezone(_TZ)
+            when = f"[{relative_day_text(occur, now_ts)}的事, {local.month}月{local.day}日]"
+        elif said is not None:
+            when = f"[{relative_day_text(said, now_ts)}聊到]"
+        else:
+            when = ""
+        texts.append(f"{when} {row.content}".strip())
+        ids.append(row.id)
+    return texts, ids
+
+
+def _worth_asking_about(row: Any, now: datetime) -> bool:
+    said = _aware(row.statementTime) or _aware(row.createdAt)
+    if said is not None and now - said < TIMED_STATEMENT_MIN_AGE:
+        return False  # 刚聊过的事再拿出来问, 像没在听
+    occur = _aware(row.occurTime)
+    if occur is None:
+        return row.mainCategory == "生活"
+    if not (now - TIMED_EVENT_LOOKBACK <= occur <= now):
+        return False  # 「去年去过日本」前两天才说 —— 不是能问"后来呢"的近事
+    local = occur.astimezone(_TZ)
+    all_day = (local.hour, local.minute) == (0, 0)
+    # 只追问对方**事先**告诉你的事 (「周五面试」); 事后讲述 (「昨天面试完了挺好」)
+    # 结果对方已经说了, 再问"怎么样啦"是没在听
+    if said is not None:
+        told_in_advance = (
+            said.astimezone(_TZ).date() <= local.date() if all_day else said < occur
+        )
+        if not told_in_advance:
+            return False
+    if all_day:
+        # 只有日期的事: 当天还不知道几点, 过了那天再问
+        return local.date() < now.astimezone(_TZ).date()
+    return occur <= now - TIMED_EVENT_SETTLE
 
 
 def _build_scene_hint(trigger_type: str, schedule_status: dict[str, Any]) -> str:

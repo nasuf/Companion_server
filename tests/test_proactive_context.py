@@ -170,6 +170,8 @@ async def test_proactive_music_waits_for_user_before_marking_playback_active():
         stage="warming",
         followup_plan_type="normal",
         current_window_index=1,
+        status="processing",
+        last_attempt_at=None,
     )
     track = MusicTrack(id="track-1", title="Quiet Realm")
     context = {
@@ -251,8 +253,8 @@ async def test_proactive_music_waits_for_user_before_marking_playback_active():
             new_callable=AsyncMock,
         ),
         patch.object(
-            sender.asyncio,
-            "create_task",
+            sender,
+            "fire_background",
             side_effect=_discard_background_task,
         ),
     ):

@@ -50,6 +50,8 @@ from app.services.prompting.defaults import (
     CHAT_SESSION_RECAP_PROMPT,
     CHAT_SESSION_RECAP_SECTION_PROMPT,
     CHAT_SPECIAL_INSTRUCTION_APPENDIX_PROMPT,
+    CHAT_TOPIC_CONTINUATION_JUMP_PROMPT,
+    CHAT_TOPIC_CONTINUATION_RETURN_PROMPT,
     CHAT_STYLE_BASE_RULE_PROMPT,
     CHAT_STYLE_CLOSING_RULE_PROMPT,
     CHAT_TIME_CONTEXT_SECTION_PROMPT,
@@ -152,6 +154,9 @@ from app.services.prompting.defaults import (
     PROACTIVE_MEMORY_TOPIC_RERANK_PROMPT,
     PROACTIVE_SCHEDULED_SCENE_PROMPT,
     PROACTIVE_DECAY_FINAL_PROMPT,
+    PROACTIVE_FOLLOWUP_UNFINISHED_PROMPT,
+    PROACTIVE_MEMORY_TIMED_PROMPT,
+    PROACTIVE_TOPIC_COMPLETION_JUDGE_PROMPT,
     PROACTIVE_TRENDING_SECTION_PROMPT,
     PROACTIVE_TRENDING_USER_INTEREST_PROMPT,
     PROACTIVE_TRENDING_AI_PERSONA_PROMPT,
@@ -449,6 +454,20 @@ PROMPT_DEFINITIONS = [
         "【工程扩展·拟人度】主回复 system prompt 的「上次聊到」段包装模板, "
         "紧跟重逢感知段注入。运行时注入 {recap}。",
         CHAT_SESSION_RECAP_SECTION_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.topic_continuation_return", "话题接续·回归承接", "聊天热路径", "聊天",
+        "《主动聊天机制（新增）》被动回复高级承接: 上一轮判定话题未完结、用户隔 10min-3h "
+        "才回、且本会话未触发过 B 模式追问时注入主回复 —— 先接住对方回来, 再按对方是否"
+        "换了话题决定顺着聊还是轻带过渡。占位符: {gap_text} {pending_topic}。",
+        CHAT_TOPIC_CONTINUATION_RETURN_PROMPT,
+    ),
+    PromptDefinition(
+        "chat.topic_continuation_jump", "话题接续·跳话题过渡", "聊天热路径", "聊天",
+        "《主动聊天机制（新增）》未完结话题·用户跳转新话题过渡机制: 上一轮判定话题未完结、"
+        "间隔 ≤10min 或本会话已触发过 B 模式时注入主回复 —— 对方换了无关新话题才轻带"
+        "一句旧话题。占位符: {pending_topic}。",
+        CHAT_TOPIC_CONTINUATION_JUMP_PROMPT,
     ),
     PromptDefinition(
         "chat.expression_habits_section", "表达习惯参考段落", "聊天热路径", "表达学习",
@@ -856,6 +875,28 @@ PROMPT_DEFINITIONS = [
         "proactive.scheduled_scene", "定时情景(AI作息)", "主动交流", "主动消息",
         "《终稿·第四部分 主动交流》§1.3: 40% 概率定时情景, 基于 AI 当前作息状态分享一句.",
         PROACTIVE_SCHEDULED_SCENE_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.memory_timed", "记忆主动(带时间的用户记忆)", "主动交流", "主动消息",
+        "《主动聊天机制（新增）》A 模式新来源「带时间戳历史对话记忆搭话」: 对方最近发生 / "
+        "最近几天聊到的事, 带相对时间问问后来怎么样了。warming/intimate 阶段参与记忆主动抽签, "
+        "抽不到时兜底回 AI 记忆。对方最近已说过后续则输出 SKIP。"
+        "占位符: {personality_brief} {current_mood} {user_memory} {recent_context}。",
+        PROACTIVE_MEMORY_TIMED_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.topic_completion_judge", "话题完结判定", "主动交流", "主动消息",
+        "《主动聊天机制（新增）》AI 说完最后一句满 5 分钟用户未回时, 小模型判定话题是否"
+        "完结 (输出 JSON status/reason/pending_topic)。未完结 → B 模式追问; 完结 → A 模式。"
+        "结论同时供被动回复承接使用。占位符: {conversation}。",
+        PROACTIVE_TOPIC_COMPLETION_JUDGE_PROMPT,
+    ),
+    PromptDefinition(
+        "proactive.followup_unfinished", "B 模式·未完结话题追问", "主动交流", "主动消息",
+        "《主动聊天机制（新增）》B 模式: 话题未完结·对话中断温柔追问, 单会话仅一次。"
+        "输出 SKIP 表示此刻追问会显得刻意, 不发。占位符: {personality_brief} {current_mood} "
+        "{pending_topic} {situation} {recent_context}。",
+        PROACTIVE_FOLLOWUP_UNFINISHED_PROMPT,
     ),
     PromptDefinition(
         "proactive.decay_final", "衰减最后一次回复", "主动交流", "主动消息",

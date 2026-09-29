@@ -349,7 +349,7 @@ class TestPresenceIncludesGames:
 
         from app.services.proactive import state as mod
 
-        src = inspect.getsource(mod.has_recent_user_activity)
+        src = inspect.getsource(mod.has_recent_game_activity)
         game_query = src[src.index("FROM game_sessions"):]
         assert "status" not in game_query, "按 status 过滤会漏掉进行中的对局"
 

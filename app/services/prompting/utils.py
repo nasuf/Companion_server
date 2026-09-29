@@ -169,6 +169,20 @@ def render_template(
     return rendered
 
 
+def is_skip_output(text: str | None) -> bool:
+    """模板约定的「此刻不说」出口。
+
+    模型常写成 "SKIP。" / "SKIP（补一句会很刻意）", 精确匹配会把它们原样发给用户;
+    但也不能做子串匹配 —— "给你推荐一首 Skip To My Lou" 是正常内容。规则: 以大写
+    SKIP 单词开头, 或整句就是 skip (不分大小写)。
+    """
+    t = (text or "").strip()
+    return bool(
+        re.match(r"^\W*SKIP(?![A-Za-z])", t)
+        or re.fullmatch(r"\W*skip\W*", t, re.IGNORECASE)
+    )
+
+
 class SafeDict(dict):
     """format_map 兜底：未填充占位符返回 "(无)"。"""
 

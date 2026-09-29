@@ -198,7 +198,7 @@ async def test_emit_replies_append_path_still_works_without_llm_emoji():
 async def test_short_circuit_reply_limits_emojis(monkeypatch):
     from app.services.chat import multi_intent
 
-    monkeypatch.setattr(multi_intent, "save_last_reply_timestamp", AsyncMock())
+    monkeypatch.setattr(multi_intent, "finish_assistant_turn", AsyncMock())
     monkeypatch.setattr(multi_intent, "_fire_background", lambda coro: coro.close())
 
     saved: list = []

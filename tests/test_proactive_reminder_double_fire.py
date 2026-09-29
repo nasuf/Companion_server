@@ -165,6 +165,7 @@ async def test_orchestrator_defers_when_recent_proactive_exists():
     (event_type='window_deferred', reason='recent_proactive_activity'), 不发新消息.
     生产 bug 直接复现: reminder 14:00:23 fire 后, orchestrator 14:01 scan
     应 defer 不要再发 scheduled_scene."""
+    from app.services.proactive import gates as gates_mod
     from app.services.proactive import orchestrator as orch_mod
 
     advance_calls = []
@@ -180,12 +181,14 @@ async def test_orchestrator_defers_when_recent_proactive_exists():
 
     with (
         # workspace 检查通过 (mock 整个 db 模块属性, query_raw 是 read-only 不能直接 patch)
-        patch.object(orch_mod, "db") as mock_db,
+        patch.object(gates_mod, "db") as mock_db,
+        patch.object(gates_mod, "offline_activity_owns_channel",
+                     new_callable=AsyncMock, return_value=False),
         patch.object(orch_mod, "stop_proactive_state", new_callable=AsyncMock),
         # 关键: 用户活动检查 → False (放过这关), proactive 检查 → True (该被它拦)
-        patch.object(orch_mod, "has_recent_user_activity",
+        patch.object(gates_mod, "has_recent_user_activity",
                      new_callable=AsyncMock, return_value=False),
-        patch.object(orch_mod, "has_recent_proactive_or_reminder",
+        patch.object(gates_mod, "has_recent_proactive_or_reminder",
                      new_callable=AsyncMock, return_value=True),
         patch.object(orch_mod, "advance_to_next_window",
                      side_effect=_capture_advance),

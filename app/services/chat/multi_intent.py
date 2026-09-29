@@ -25,7 +25,7 @@ from app.services.chat.intent_dispatcher import (
     IntentType,
     LABEL_TO_INTENT,
 )
-from app.services.interaction.reply_context import save_last_reply_timestamp
+from app.services.chat.turn_lifecycle import finish_assistant_turn
 from app.services.runtime.tasks import fire_background as _fire_background
 
 logger = logging.getLogger(__name__)
@@ -59,12 +59,16 @@ async def short_circuit_reply(
     agent: Any = None,
     reply_context: dict | None = None,
     voice_context: Any = None,
+    proactive_reason: str | None = "short_circuit",
+    workspace_id: str | None = None,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
     - save_replies_fn: 由调用方注入的 `_save_replies(conversation_id, [reply])`
       协程工厂，避免 multi_intent 依赖 orchestrator 的持久化实现.
-    - sub_intent_mode=True：父调用负责 save_last_reply_timestamp/done.
+    - sub_intent_mode=True：父调用负责回合收尾 (finish_assistant_turn) / done.
+    - proactive_reason: 回合收尾时 arm 主动交流的原因; None = 本轮之后不主动 (边界系统).
+    - workspace_id: 透传给回合收尾 (免一次反查); turn_user_message_ids 同时用作过期 arm 守卫.
     - include_done=False：延后 done（用于主调用随后处理 sub fragments）.
     - extra_metadata：透传给 save_replies_fn 的持久化 metadata（如 boundary/zone/attack_level）.
     - trace_id: 挂到首条 reply.metadata, 让前端 Trace 按钮可点. sub_intent_mode
@@ -185,8 +189,15 @@ async def short_circuit_reply(
     # 不区分回复来自哪条管线). 累计 offset+1, 最后一次写入即本轮总数.
     from app.services.chat.reply_count_state import save_last_reply_count
     _fire_background(save_last_reply_count(conversation_id, reply_index_offset + 1))
-    if not sub_intent_mode and agent_id:
-        await save_last_reply_timestamp(agent_id, user_id)
+    if not sub_intent_mode:
+        await finish_assistant_turn(
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            user_id=user_id,
+            proactive_reason=proactive_reason,
+            workspace_id=workspace_id,
+            turn_message_ids=turn_user_message_ids,
+        )
     event_data: dict[str, Any] = {
         "text": reply,
         "index": reply_index_offset,
@@ -289,6 +300,8 @@ async def finalize_short_circuit(
     extra_metadata: dict | None = None,
     achievement_turn_final: bool = True,
     voice_context: Any = None,
+    proactive_reason: str | None = "short_circuit",
+    workspace_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -311,6 +324,8 @@ async def finalize_short_circuit(
         agent=agent,
         reply_context=reply_context,
         voice_context=voice_context,
+        proactive_reason=proactive_reason,
+        workspace_id=workspace_id,
     )
     for evt in events:
         yield evt

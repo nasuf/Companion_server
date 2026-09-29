@@ -284,7 +284,7 @@ async def test_short_circuit_voice_is_saved_bound_and_emitted(monkeypatch):
     )
     monkeypatch.setattr(
         multi_intent,
-        "save_last_reply_timestamp",
+        "finish_assistant_turn",
         AsyncMock(),
     )
 

@@ -1,0 +1,219 @@
+"""话题连续性状态 (《主动聊天机制（新增）》): 会话边界 / B 名额 / 被动承接决策表."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.services.interaction import topic_continuity as tc
+from app.services.interaction.topic_continuity import (
+    CUE_JUMP_KEY,
+    CUE_RETURN_KEY,
+    ContinuityState,
+    TopicVerdict,
+    resolve_cue,
+)
+
+UTC = timezone.utc
+NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+
+
+class FakeRedis:
+    """只实现本模块用到的 hash 命令."""
+
+    def __init__(self):
+        self.store: dict[str, dict[str, str]] = {}
+        self.fail = False
+
+    async def hgetall(self, key):
+        if self.fail:
+            raise ConnectionError("redis down")
+        return dict(self.store.get(key, {}))
+
+    def pipeline(self):
+        return _Pipe(self)
+
+    async def hdel(self, key, *fields):
+        if self.fail:
+            raise ConnectionError("redis down")
+        for f in fields:
+            self.store.get(key, {}).pop(f, None)
+
+
+class _Pipe:
+    def __init__(self, redis: FakeRedis):
+        self.redis = redis
+        self.ops: list = []
+
+    def hset(self, key, mapping):
+        self.ops.append(("hset", key, mapping))
+
+    def hdel(self, key, *fields):
+        self.ops.append(("hdel", key, fields))
+
+    def expire(self, key, ttl):
+        self.ops.append(("expire", key, ttl))
+
+    async def execute(self):
+        if self.redis.fail:
+            raise ConnectionError("redis down")
+        for op, key, arg in self.ops:
+            bucket = self.redis.store.setdefault(key, {})
+            if op == "hset":
+                bucket.update(arg)
+            elif op == "hdel":
+                for f in arg:
+                    bucket.pop(f, None)
+
+
+@pytest.fixture
+def redis(monkeypatch):
+    fake = FakeRedis()
+
+    async def _get():
+        return fake
+
+    monkeypatch.setattr(tc, "get_redis", _get)
+    return fake
+
+
+_BASE_STATE = ContinuityState(
+    verdict=TopicVerdict("unfinished", "ai_question", "周末去哪玩"),
+    anchor_message_id="ai-1",
+    followup_sent_at=None,
+    last_user_at=None,
+    session_closed=False,
+)
+
+
+def _state(**kw) -> ContinuityState:
+    return replace(_BASE_STATE, **kw)
+
+
+# ── resolve_cue 决策表 ────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("gap_min", "followup_used", "expected"),
+    [
+        (6, False, CUE_JUMP_KEY),      # <10min: 只有跳话题过渡
+        (10, False, CUE_JUMP_KEY),     # spec 是"大于 10 分钟", 恰好 10 分钟不算
+        (11, False, CUE_RETURN_KEY),   # >10min 且没追问过: 回归承接
+        (11, True, CUE_JUMP_KEY),      # 追问过: 不带承接话术, 只保留跳话题过渡
+        (179, False, CUE_RETURN_KEY),
+    ],
+)
+def test_unfinished_cue_matrix(gap_min, followup_used, expected):
+    state = _state(followup_sent_at=NOW if followup_used else None)
+    cue = resolve_cue(state, previous_assistant_id="ai-1", gap_seconds=gap_min * 60)
+    assert cue is not None
+    assert cue.template_key == expected
+    assert cue.pending_topic == "周末去哪玩"
+
+
+def test_finished_topic_suppresses_without_section():
+    """spec: 已完结话题无论隔多久都不带承接 → 无段落, 但要压掉重逢短档."""
+    state = _state(verdict=TopicVerdict("finished", "natural_end"))
+    cue = resolve_cue(state, previous_assistant_id="ai-1", gap_seconds=45 * 60)
+    assert cue is not None and cue.template_key is None
+
+
+def test_three_hours_or_more_hands_over_to_reengagement():
+    cue = resolve_cue(_state(), previous_assistant_id="ai-1", gap_seconds=3 * 3600)
+    assert cue is None
+
+
+def test_stale_anchor_is_ignored():
+    """AI 在判定之后又说过话 (anchor 对不上) → 结论作废."""
+    assert resolve_cue(_state(), previous_assistant_id="ai-2", gap_seconds=900) is None
+    assert resolve_cue(_state(), previous_assistant_id=None, gap_seconds=900) is None
+
+
+def test_no_verdict_or_unknown_state_keeps_old_behaviour():
+    assert resolve_cue(None, previous_assistant_id="ai-1", gap_seconds=900) is None
+    assert resolve_cue(_state(verdict=None), previous_assistant_id="ai-1", gap_seconds=900) is None
+    assert resolve_cue(_state(), previous_assistant_id="ai-1", gap_seconds=None) is None
+
+
+def test_replying_to_followup_suppresses_return_phrase():
+    """对方在回 B 追问: 追问已经接住了旧话题, 不再叠「忙完啦」."""
+    cue = resolve_cue(
+        None, previous_assistant_id="b-1", gap_seconds=40 * 60,
+        previous_assistant_is_followup=True,
+    )
+    assert cue is not None and cue.template_key is None
+
+
+def test_pending_topic_has_readable_fallback():
+    state = _state(verdict=TopicVerdict("unfinished", "interrupted", ""))
+    cue = resolve_cue(state, previous_assistant_id="ai-1", gap_seconds=900)
+    assert cue.pending_topic == "刚才那件事"
+
+
+# ── 会话边界 / B 名额 ────────────────────────────────────────────────
+
+async def test_followup_budget_survives_user_replies_within_session(redis):
+    await tc.note_user_message("c1", now=NOW)
+    await tc.reserve_followup("c1", now=NOW + timedelta(minutes=5))
+    # 用户 20 分钟后回来, 同一会话: B 名额仍是已用
+    await tc.note_user_message("c1", now=NOW + timedelta(minutes=25))
+    state = await tc.load_continuity("c1")
+    assert state.followup_available is False
+
+
+async def test_long_gap_starts_new_session_and_restores_followup(redis):
+    await tc.note_user_message("c1", now=NOW)
+    await tc.reserve_followup("c1", now=NOW + timedelta(minutes=5))
+    await tc.note_user_message("c1", now=NOW + timedelta(hours=3, minutes=1))
+    state = await tc.load_continuity("c1")
+    assert state.followup_available is True
+
+
+async def test_closed_session_rolls_over_on_next_user_message(redis):
+    """A 模式新开场 / 告别之后, 用户的下一条消息开新会话."""
+    await tc.note_user_message("c1", now=NOW)
+    await tc.reserve_followup("c1", now=NOW)
+    await tc.close_session("c1")
+    await tc.note_user_message("c1", now=NOW + timedelta(minutes=2))
+    state = await tc.load_continuity("c1")
+    assert state.followup_available is True
+    assert state.session_closed is False
+
+
+async def test_session_rollover_keeps_verdict(redis):
+    """「晚安」隔两小时回来: 新会话, 但"上一轮已完结"仍要能压掉重逢寒暄."""
+    await tc.note_user_message("c1", now=NOW)
+    await tc.record_verdict(
+        "c1", TopicVerdict("finished", "farewell"), anchor_message_id="ai-9", now=NOW,
+    )
+    await tc.close_session("c1")
+    await tc.note_user_message("c1", now=NOW + timedelta(hours=2))
+    state = await tc.load_continuity("c1")
+    assert state.verdict == TopicVerdict("finished", "farewell")
+    assert state.anchor_message_id == "ai-9"
+
+
+async def test_redis_failure_reads_as_unknown_not_empty(redis):
+    """Redis 挂了 = 不知道 B 用没用过, 调用方必须能区分 (不能当成"没用过")."""
+    redis.fail = True
+    assert await tc.load_continuity("c1") is None
+    await tc.note_user_message("c1", now=NOW)  # 不抛
+
+
+async def test_reserve_and_release_followup(redis):
+    assert await tc.reserve_followup("c1", now=NOW) is True
+    assert (await tc.load_continuity("c1")).followup_available is False
+    await tc.release_followup("c1")  # 没发出去, 名额还回去
+    assert (await tc.load_continuity("c1")).followup_available is True
+
+    redis.fail = True
+    assert await tc.reserve_followup("c1", now=NOW) is False  # 记不上账就别发
+
+
+async def test_verdict_roundtrip(redis):
+    verdict = TopicVerdict("unfinished", "user_story", "面试结果")
+    await tc.record_verdict("c1", verdict, anchor_message_id="ai-3", now=NOW)
+    state = await tc.load_continuity("c1")
+    assert state.verdict == verdict
+    assert state.anchor_message_id == "ai-3"

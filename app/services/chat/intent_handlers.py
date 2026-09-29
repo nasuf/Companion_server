@@ -38,6 +38,7 @@ from app.services.chat.intent_dispatcher import (
     is_explicit_current_state_query,
 )
 from app.services.chat.multi_intent import finalize_short_circuit
+from app.services.proactive.state import short_circuit_arm_reason
 from app.services.memory.interaction.deletion import (
     detect_deletion_intent,
     find_matching_memories,
@@ -204,6 +205,9 @@ class ShortCircuitCtx:
             extra_metadata=extra_metadata,
             achievement_turn_final=self.achievement_turn_final,
             voice_context=voice_context,
+            # 告别 / 系统确认有专属 arm 原因 (判定窗据此不做 B 追问); 危机短路不 arm
+            proactive_reason=short_circuit_arm_reason(kind),
+            workspace_id=self.workspace_id,
         ):
             yield evt
 

@@ -122,19 +122,27 @@ SILENCE_SOURCE_DIST: dict[str, dict[str, float]] = {
     "p1_cold": _SILENCE_COLD,
     "p2_cold": _SILENCE_COLD,
     "cold_start": _SILENCE_COLD,
+    # timed_user (带时间戳的用户记忆, 见下方 MEMORY_SOURCE_DIST 注释) 从 greeting
+    # 匀出: 沉默后问一句"前天说的面试怎么样啦"比泛泛的"在干嘛呢"像真朋友得多
     "warming": {
         "ai_l1": 0.10, "ai_l2": 0.00, "ai_schedule": 0.10,
-        "user_l1": 0.05, "user_l2": 0.05, "greeting": 0.70,
+        "user_l1": 0.05, "user_l2": 0.05, "greeting": 0.60,
+        "timed_user": 0.10,
     },
     "intimate": {
         "ai_l1": 0.05, "ai_l2": 0.05, "ai_schedule": 0.10,
-        "user_l1": 0.10, "user_l2": 0.10, "greeting": 0.60,
+        "user_l1": 0.10, "user_l2": 0.10, "greeting": 0.50,
+        "timed_user": 0.10,
     },
 }
 
 # 记忆主动独立 100% 不参与抽签
 # Phase 2 关系记忆: warming/intimate 阶段给 "relationship" 来源 (memories_ai
 # 生活/交互 — 我们之间的共同经历) 分一份权重. 冷启动阶段没有共同历史, 不分.
+# 《主动聊天机制（新增）》A 模式新来源「带时间戳的历史对话记忆」= timed_user
+# (最近发生 / 最近聊到的用户的事, 「前天你说要面试, 怎么样啦」)。权重从 ai_l1
+# 匀出; 抽不到时 context 兜底回 ai_l1, 不会让本次主动落空。冷启动不分 ——
+# 还不熟就追问对方的事, 像查户口。
 _MEMORY_COLD = {
     "ai_l1": 1.00, "ai_l2": 0.00,
     "user_l1": 0.00, "user_l2": 0.00,
@@ -144,14 +152,16 @@ MEMORY_SOURCE_DIST: dict[str, dict[str, float]] = {
     "p2_cold": _MEMORY_COLD,
     "cold_start": _MEMORY_COLD,
     "warming": {
-        "ai_l1": 0.65, "ai_l2": 0.05,
+        "ai_l1": 0.50, "ai_l2": 0.05,
         "user_l1": 0.10, "user_l2": 0.10,
         "relationship": 0.10,
+        "timed_user": 0.15,
     },
     "intimate": {
-        "ai_l1": 0.45, "ai_l2": 0.10,
+        "ai_l1": 0.30, "ai_l2": 0.10,
         "user_l1": 0.15, "user_l2": 0.15,
         "relationship": 0.15,
+        "timed_user": 0.15,
     },
 }
 
@@ -175,8 +185,9 @@ def select_topic_source(stage: str, trigger_type: str) -> str:
     """spec §4.1/§4.2: 根据 stage + trigger_type 抽一个话题来源.
 
     Returns one of:
-      - silence_wakeup:  ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting
+      - silence_wakeup:  ai_l1 / ai_l2 / ai_schedule / user_l1 / user_l2 / greeting / timed_user
       - memory_proactive: ai_l1 / ai_l2 / user_l1 / user_l2 / relationship (Phase 2 共同经历)
+                          / timed_user (带时间戳的用户记忆)
       - scheduled_scene:  ai_schedule (固定)
     """
     if trigger_type == "scheduled_scene":

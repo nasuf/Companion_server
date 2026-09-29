@@ -1,14 +1,16 @@
-"""主动消息生成与发送入口.
+"""A 模式主动消息 (原主动回复) 的生成与发送.
 
-按职责拆分:
-  _check_send_eligibility   日限/二日限/workspace/conversation 检查
-  _resolve_conversation_id  从 state 推出最终 conversation_id
-  _apply_memory_cooldown    spec §9 -1/+50 冷却语义
-  _generate_message         按 (trigger_type, source, decay_final) 分发 7 个 prompt
-  _persist_proactive_state  调 mark_proactive_sent + save_last_reply_timestamp
-  generate_and_send_proactive  主流程编排 (上述 5 段 + emit + bg AI 自我记忆 pipeline)
+generate_and_send_proactive 按步骤编排:
+  _check_send_eligibility  日限 / 疲劳分 / workspace / conversation
+  _resolve_topic           spec §3.2 话题方向 + §4.1/§4.2 来源抽签 → 上下文
+  _attach_trending         A 模式新来源「全网热点」(V3 三档分发, 默认关)
+  _generate_message        按 (trigger_type, source, decay_final) 分发 prompt
+  _prepare_attachments     音乐卡 / 链接卡
+  emit_proactive_message   落库 + WS (生成期间用户回来则不插入)
+  _after_emit / _persist_proactive_state   记账 + 状态机 → waiting_user
 
-公共持久化与 WS 广播在 emit.py.
+B 模式 (话题未完结追问) 在 followup.py; 公共持久化与 WS 广播在 emit.py;
+发送门槛在 gates.py。
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from typing import Any
 
 from app.db import db
 from app.services.runtime.distributed_lock import distributed_lock
+from app.services.runtime.tasks import fire_background
 from app.observability import bind_context
 from app.observability.events import EVT_PROACTIVE_SENT, EVT_PROACTIVE_SKIPPED
 from app.redis_client import get_redis
@@ -43,6 +46,11 @@ from app.services.workspace.workspaces import (
     resolve_workspace_id,
 )
 from app.services.proactive.state import (
+    STATUS_IDLE,
+    STATUS_PROCESSING,
+    STATUS_PROCESSING_TIMEOUT,
+    STATUS_RUNNING,
+    STATUS_WAITING_USER,
     ProactiveStateRecord,
     determine_proactive_stage,
     ensure_proactive_state_for_workspace,
@@ -51,23 +59,24 @@ from app.services.proactive.state import (
     mark_proactive_sent,
 )
 from app.services.prompting.store import PromptDisabledError, get_prompt_text
-from app.services.prompting.utils import render_template
+from app.services.prompting.utils import is_skip_output, render_template
+from app.services.interaction import topic_continuity
 from app.services.interaction.reply_context import save_last_reply_timestamp
 
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
-SENDABLE_PROACTIVE_STATUSES = {"idle"}
+SENDABLE_PROACTIVE_STATUSES = {STATUS_IDLE}
 # Admin QA (skip_limits): force-send by resetting transient blockers to idle
 # without touching decay counters (silence_level_n / followup_plan_type).
 _ADMIN_UNLOCKABLE_STATUSES = frozenset({
-    "waiting_user",
-    "running",
-    "processing",
-    "processing_timeout",
+    STATUS_WAITING_USER,
+    STATUS_RUNNING,
+    STATUS_PROCESSING,
+    STATUS_PROCESSING_TIMEOUT,
 })
 
-_MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship"})
+_MEMORY_SOURCES = frozenset({"ai_l1", "ai_l2", "user_l1", "user_l2", "relationship", "timed_user"})
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -287,32 +296,39 @@ def _apply_memory_cooldown(
 # Personality brief & prompt dispatch
 # ────────────────────────────────────────────────────────────────────
 
-def _build_personality_brief(agent) -> str:
-    """从 agent 7 维性格导出简短描述, 给 prompt 用."""
+# (正向字母, 描述, 反向字母, 描述) —— 明显偏向一侧 (≥65%) 才写进人设简述
+_BRIEF_AXES = (
+    ("E", "活泼外向", "I", "安静内敛"),
+    ("N", "脑洞大", "S", "务实"),
+    ("F", "感性细腻", "T", "理性"),
+    ("P", "随性", "J", "计划性强"),
+)
+_BRIEF_LEAN = 0.65
+
+
+def build_personality_brief(agent) -> str:
+    """人设简述, 给主动消息类 prompt 的 {personality_brief}.
+
+    MBTI 是人格的唯一持久化表达 (7 维输入建号后即丢弃, spec §1.2)。之前这里读
+    `agent.personality` —— 模型上早就没有这个字段, 所有主动消息的人设都退化成
+    同一句"温和友善", 不同性格的 AI 主动说话一个腔调。
+    """
+    from app.services.mbti import get_mbti, signal
+
     try:
-        p = getattr(agent, "personality", None) or {}
-        if not isinstance(p, dict) or not p:
-            return "温和友善"
-        parts: list[str] = []
-        if p.get("liveliness", 50) >= 70:
-            parts.append("活泼")
-        elif p.get("liveliness", 50) <= 30:
-            parts.append("安静")
-        if p.get("humor", 50) >= 70:
-            parts.append("幽默")
-        if p.get("rationality", 50) >= 70:
-            parts.append("理性")
-        if p.get("sensitivity", 50) >= 70:
-            parts.append("感性")
-        if p.get("planning", 50) >= 70:
-            parts.append("计划性强")
-        if p.get("spontaneity", 50) >= 70:
-            parts.append("随性")
-        if p.get("imagination", 50) >= 70:
-            parts.append("脑洞大")
-        return "、".join(parts) if parts else "温和友善"
+        mbti = get_mbti(agent)
     except Exception:
+        mbti = None
+    if not mbti:
         return "温和友善"
+    parts: list[str] = []
+    for letter, text, opposite, opposite_text in _BRIEF_AXES:
+        strength = signal(mbti, letter)
+        if strength >= _BRIEF_LEAN:
+            parts.append(text)
+        elif 1 - strength >= _BRIEF_LEAN:
+            parts.append(opposite_text)
+    return "、".join(parts) if parts else "温和友善"
 
 
 # (trigger_type, source) → prompt key
@@ -324,6 +340,7 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     ("silence_wakeup", "ai_schedule"): "proactive.silence_schedule",
     ("silence_wakeup", "greeting"): "proactive.silence_plain",
     ("silence_wakeup", "music"): "music.proactive_recommend",
+    ("silence_wakeup", "timed_user"): "proactive.memory_timed",
     ("memory_proactive", "ai_l1"): "proactive.memory_ai",
     ("memory_proactive", "ai_l2"): "proactive.memory_ai",
     ("memory_proactive", "user_l1"): "proactive.memory_user",
@@ -331,6 +348,8 @@ _PROMPT_KEY_BY_SOURCE: dict[tuple[str, str], str] = {
     # Phase 2 关系记忆: 共同经历 (memories_ai 生活/交互) 走 AI 记忆模板 —
     # 素材本来就是 AI 第一人称叙述的"我和用户…", memory_ai 模板语气吻合.
     ("memory_proactive", "relationship"): "proactive.memory_ai",
+    # 《主动聊天机制（新增）》A 模式「带时间戳的历史对话记忆」
+    ("memory_proactive", "timed_user"): "proactive.memory_timed",
     ("scheduled_scene", "ai_schedule"): "proactive.scheduled_scene",
 }
 
@@ -394,6 +413,13 @@ def _format_prompt(key: str, ctx: dict, personality_brief: str) -> str | None:
             "user_memory": memory_text,
             "topic": topic,
         },
+        "proactive.memory_timed": {
+            "personality_brief": personality_brief,
+            "current_mood": current_mood,
+            "user_memory": memory_text,
+            # 对方最近刚说过后续的事别再问 (prompt 内有 SKIP 出口)
+            "recent_context": recent_context,
+        },
         "proactive.scheduled_scene": {
             "personality_brief": personality_brief,
             # 必须用项目时区 _TZ (Asia/Shanghai), 不能 datetime.now().astimezone() —
@@ -450,7 +476,7 @@ async def _generate_message(ctx: dict) -> str | None:
     agent = ctx["agent"]
     trigger_type = ctx["trigger_type"]
     source = ctx.get("source") or "greeting"
-    personality_brief = _build_personality_brief(agent)
+    personality_brief = build_personality_brief(agent)
 
     # V3 dispatch (2026-09-14): 若上游分类器 (topic_source.classify_topic_source)
     # 已经把话题源判出来并塞进 ctx["topic_source_kind"] + 选好条 ctx["topic_source_item"],
@@ -512,7 +538,7 @@ async def _generate_message(ctx: dict) -> str | None:
         logger.warning(f"[proactive-gen] LLM invoke failed: {exc!r}")
         ctx["_skip_reason_detail"] = f"llm_error:{type(exc).__name__}"
         return None
-    if response == "SKIP":
+    if is_skip_output(response):
         logger.info("[proactive-gen] LLM returned literal SKIP")
         ctx["_skip_reason_detail"] = "llm_skip_literal"
         return None
@@ -543,7 +569,7 @@ async def _generate_message(ctx: dict) -> str | None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[proactive-repeat] retry LLM failed: {exc!r}; shipping first attempt")
                 return response
-            if retry and retry != "SKIP" and len(retry) >= 4:
+            if retry and not is_skip_output(retry) and len(retry) >= 4:
                 response = retry
                 if await is_repeat_of_recent(str(workspace_id), response):
                     # 重复即重复, 发出去 —— 不再 return None. 详见函数上方注释.
@@ -612,39 +638,48 @@ async def _prepare_music_recommendation_source(
 # Main entry: generate_and_send_proactive
 # ────────────────────────────────────────────────────────────────────
 
-async def generate_and_send_proactive(
-    state: ProactiveStateRecord,
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _generation_started_at(state: ProactiveStateRecord, fallback: datetime) -> datetime:
+    """取消基准: 扫描路径用认领时刻 (门槛查"用户近期活跃"就在那之后), 而不是
+    跑完门槛和 DB 往返之后才取的 now —— 中间落库的用户消息否则两头都漏掉。"""
+    if state.status == STATUS_PROCESSING and state.last_attempt_at:
+        claimed = state.last_attempt_at
+        return claimed if claimed.tzinfo else claimed.replace(tzinfo=timezone.utc)
+    return fallback
+
+
+def schedule_proactive_ai_memory(
     *,
+    user_id: str,
+    agent_id: str,
+    conversation_id: str,
+    message: str,
+) -> None:
+    """Spec §2.2: 每条 AI 主动消息也进 AI 自我记忆录入管线 (后台, 不阻塞发送).
+
+    fire_background 持有任务引用 —— 裸 asyncio.create_task 的任务可能被中途 GC。
+    """
+    fire_background(_bg_proactive_ai_memory(
+        user_id, message,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+    ))
+
+
+async def _resolve_topic(
+    state: ProactiveStateRecord,
     trigger_type: str,
-    now: datetime | None = None,
-    skip_limits: bool = False,
-    admin_test_options: "AdminProactiveTestOptions | None" = None,
-    send_outcome: "AdminProactiveSendOutcome | None" = None,
-) -> bool:
-    from app.services.proactive.trending_context import resolve_trending_context
-    from app.services.proactive.trending_gate import should_attach_trending_link_card
-    # 绑 ContextVar 让本调用栈的 LLM 工厂应用该 agent 的模型 override.
-    # 不绑的话主动消息生成 / AI 自我记忆抽取都会用 system 全局, 跟 chat 路径
-    # 的 per-agent 行为不一致, 同时 token stats 会把这些 LLM 调用归到全局模型名.
-    from app.services.runtime_config import bind_agent_context
-    await bind_agent_context(state.agent_id)
-
-    now_ts = now or datetime.now(UTC)
-
-    prep = await _check_send_eligibility(
-        state,
-        trigger_type,
-        skip_limits=skip_limits,
-        send_outcome=send_outcome,
-    )
-    if prep is None:
-        return False
-
+    prep: _SendPrep,
+    *,
+    admin_test: bool,
+    send_outcome: "AdminProactiveSendOutcome | None",
+) -> dict[str, Any] | None:
+    """spec §3.2 话题方向 + §4.1/§4.2 来源抽签 → 组装上下文; 该取消本次发送时返回 None."""
     # spec §2.2: 话题亲密度可变, 触发前实时算; state.stage 仅在 session
     # start/restart 时持久化, 不追踪中途 intimacy 升级.
     stage = await determine_proactive_stage(state.agent_id, state.user_id)
-
-    # spec §3.2 话题方向 + §4.1/§4.2 来源概率表
     topic_theme = select_topic_theme(stage)
     source = select_topic_source(stage, trigger_type)
     if _should_use_music_source(trigger_type):
@@ -663,7 +698,9 @@ async def generate_and_send_proactive(
     )
     # admin QA 反复触发时, anti-repetition 会兜死同 topic 的连测 → empty_or_skip 假象.
     # 标记后 _generate_message 会绕过 recent 相似度守卫, 保证每次测试都出可见结果.
-    ctx["_admin_test"] = admin_test_options is not None
+    ctx["_admin_test"] = admin_test
+    # context 可能改写来源 (timed_user 抽不到 → ai_l1), 以它为准
+    source = ctx.get("source") or source
     if source == "music":
         source = await _prepare_music_recommendation_source(
             ctx,
@@ -671,78 +708,255 @@ async def generate_and_send_proactive(
         )
         if source == "music_skip_not_idle":
             await _log_skip(
-                state,
-                trigger_type,
-                "music_source_not_idle",
-                conversation_id=prep.conversation_id,
-                send_outcome=send_outcome,
+                state, trigger_type, "music_source_not_idle",
+                conversation_id=prep.conversation_id, send_outcome=send_outcome,
             )
-            return False
-        ctx["source"] = source
+            return None
 
     # spec §4.1 沉默唤醒兜底; §4.2 记忆主动失败时取消
     if source in _MEMORY_SOURCES and not ctx.get("proactive_memories"):
-        if trigger_type == "silence_wakeup":
-            source = "greeting"
-            ctx["source"] = "greeting"
-            ctx["scene_hint"] = "优先用轻量、低打扰的方式重新建立联系。"
-        else:
+        if trigger_type != "silence_wakeup":
             await _log_skip(
-                state,
-                trigger_type,
-                "memory_source_empty",
+                state, trigger_type, "memory_source_empty",
                 conversation_id=prep.conversation_id,
-                extra={"source": source},
-                send_outcome=send_outcome,
+                extra={"source": source}, send_outcome=send_outcome,
             )
-            return False
-
+            return None
+        source = "greeting"
+        ctx["scene_hint"] = "优先用轻量、低打扰的方式重新建立联系。"
+    ctx["source"] = source
+    ctx["stage"] = stage
     # spec §8.5 衰减最后一次
     ctx["is_decay_final"] = state.followup_plan_type == "thirty_day_final"
+    return ctx
 
-    trending_text, trending_attached, _trending_meta = await resolve_trending_context(
+
+async def _attach_trending(
+    ctx: dict[str, Any],
+    state: ProactiveStateRecord,
+    trigger_type: str,
+    admin_test_options: "AdminProactiveTestOptions | None",
+) -> bool:
+    """A 模式新来源「全网热点」(随机热点 socially_hot / 爱好匹配 user_interest_match)。
+
+    trending 命中 → V3 分类器决定档位 + 挑候选内容, 消息 prompt 与卡片同源
+    (evals/proactive_naturalness: V0 source_fit 17% → V3 50%)。分类器返 "none"
+    时 ctx 不设档位, _generate_message 落回 V0 append_trending_section。
+    整体开关: SystemConfig.proactive_trending_enabled (默认关)。
+    """
+    from app.services.proactive.trending_context import resolve_trending_context
+
+    trending_text, trending_attached, trending_meta = await resolve_trending_context(
         trigger_type,
-        topic=topic_theme,
+        topic=ctx.get("topic_theme"),
         admin_test_options=admin_test_options,
     )
     ctx["trending_context"] = trending_text
+    if not (trending_attached and trending_meta is not None and trending_meta.candidates):
+        return trending_attached
 
-    # V3 三档分发 (2026-09-14): trending 命中 → 分类器决定档位 + 挑候选内容.
-    # 已从 env flag 灰度转为**默认路径** —— 卡片同源硬耦合 (下面 preselected_item)
-    # 与消息 prompt 分档一起构成完整闭环, 不再需要 flag.
-    # 决策证据: evals/proactive_naturalness (V0 source_fit 17%/mentions_card 67%
-    # → V3 50%/100%). 关闭整个 trending 用 admin UI SystemConfig.proactive_trending_enabled=False.
-    # 分类器返 "none" (所有候选都被黑名单/无匹配拒了) 时 ctx 不 set,
-    # _generate_message 落回 V0 append_trending_section 兜底路径.
-    if (
-        trending_attached
-        and _trending_meta is not None
-        and _trending_meta.candidates
-    ):
-        from app.services.proactive.topic_source import classify_topic_source
-        from app.services.proactive.featured_topics import get_recent_featured
+    from app.services.proactive.featured_topics import get_recent_featured
+    from app.services.proactive.topic_source import classify_topic_source
 
-        # 加载该 user × agent 最近 featured 的话题 (6h TTL). 传给分类器排除,
-        # 让第 2/3/4... 次连续测试自动挑下一条最热的, 而不是永远是同一件事.
-        # workspace_id 由 (user_id, agent_id) 唯一确定 -> 天然按 user 隔离,
-        # 不影响其他用户对同一热点的首次曝光. 详见 featured_topics.py.
-        exclude = await get_recent_featured(str(state.workspace_id) if state.workspace_id else None)
+    # 最近 featured 过的话题 (6h, 按 workspace 隔离) 排除, 连续触发会轮到下一条
+    exclude = await get_recent_featured(str(state.workspace_id) if state.workspace_id else None)
+    cls = classify_topic_source(
+        trending_candidates=list(trending_meta.candidates),
+        user_portrait=str(ctx.get("user_portrait") or ""),
+        agent=ctx.get("agent"),
+        exclude_titles=exclude,
+    )
+    if cls.kind != "none":
+        ctx["topic_source_kind"] = cls.kind
+        ctx["topic_source_item"] = cls.selected_candidate
+        logger.info(f"[V3-DISPATCH] source={cls.kind} reason={cls.reason}")
+    return trending_attached
 
-        cls = classify_topic_source(
-            trending_candidates=list(_trending_meta.candidates),
-            user_portrait=str(ctx.get("user_portrait") or ""),
-            agent=ctx.get("agent"),
-            exclude_titles=exclude,
-        )
-        if cls.kind != "none":
-            ctx["topic_source_kind"] = cls.kind
-            ctx["topic_source_item"] = cls.selected_candidate
-            logger.info(
-                f"[V3-DISPATCH] source={cls.kind} reason={cls.reason}"
+
+@dataclass
+class _Attachments:
+    extra_metadata: dict[str, Any]
+    ws_payload_extra: dict[str, Any] | None = None
+    link: Any = None
+    link_skip_reason: str | None = None
+
+
+async def _prepare_attachments(
+    ctx: dict[str, Any],
+    state: ProactiveStateRecord,
+    prep: _SendPrep,
+    *,
+    trigger_type: str,
+    message: str,
+    trending_attached: bool,
+    admin_test_options: "AdminProactiveTestOptions | None",
+) -> _Attachments:
+    """音乐卡 / 链接卡 (二选一)。"""
+    source = ctx["source"]
+    attachments = _Attachments(extra_metadata={"stage": ctx["stage"]})
+    if source == "music" and ctx.get("music_track") is not None:
+        from app.services.music_chat import card_from_track
+
+        card = card_from_track(ctx["music_track"], intent="recommend", source="proactive")
+        attachments.extra_metadata.update({
+            "component_card": card,
+            "music_proactive": True,
+            "topic_source": "music",
+        })
+        attachments.ws_payload_extra = {"component_card": card}
+        return attachments
+
+    from app.services.chat_links import maybe_prepare_proactive_link_recommendation
+    from app.services.proactive.trending_gate import should_attach_trending_link_card
+
+    force_link = False
+    skip_link = False
+    if admin_test_options is not None:
+        force_link = admin_test_options.use_link_card
+        skip_link = not admin_test_options.use_link_card
+    elif trending_attached:
+        force_link = should_attach_trending_link_card(trending_attached=True)
+    # 消息-卡片硬耦合: V3 已挑好的那条内容, 卡片必须挂同一条, 不许独立再搜
+    # (修"文本说银锁骨链 + 卡说机场"这种语义脱钩)
+    preselected = ctx.get("topic_source_item") if ctx.get("topic_source_kind") else None
+    link, attachments.link_skip_reason = await maybe_prepare_proactive_link_recommendation(
+        user_id=state.user_id,
+        conversation_id=prep.conversation_id,
+        trigger_type=trigger_type,
+        source=source,
+        topic=ctx.get("topic_theme"),
+        stage=ctx["stage"],
+        message=message,
+        force=force_link,
+        skip=skip_link,
+        preselected_item=preselected,
+    )
+    if link is not None:
+        attachments.link = link
+        attachments.extra_metadata.update({
+            "component_card": link.component_card,
+            "link_card": link.link_card_metadata,
+            "link_proactive": True,
+            "topic_source": "link",
+        })
+        attachments.ws_payload_extra = {"component_card": link.component_card}
+    return attachments
+
+
+async def _after_emit(
+    ctx: dict[str, Any],
+    state: ProactiveStateRecord,
+    prep: _SendPrep,
+    *,
+    message: str,
+    assistant_message_id: str,
+    attachments: _Attachments,
+) -> None:
+    """发出后的记账: 防重复池 / 已推热点 / 链接卡绑定 / 音乐一起听."""
+    from app.services.proactive.recent_messages import remember_recent
+
+    # 只在真发出去后记, 免得各种 skip 路径污染防重复池
+    await remember_recent(state.workspace_id, message)
+    v3_item = ctx.get("topic_source_item")
+    if isinstance(v3_item, dict):
+        featured_title = str(v3_item.get("title") or "").strip()
+        if featured_title:
+            from app.services.proactive.featured_topics import remember_featured
+
+            await remember_featured(
+                str(state.workspace_id) if state.workspace_id else None, featured_title,
             )
+    if attachments.link is not None:
+        from app.services.chat_links import bind_link_card_to_message
 
-    # 主动消息也开 LangSmith trace + usage_session, 名字 [proactive:trigger_type]
-    # 方便 LangSmith 看板与统计 dashboard 区分被动回复.
+        await bind_link_card_to_message(
+            link_id=attachments.link.link.id,
+            message_id=assistant_message_id,
+            user_id=state.user_id,
+            conversation_id=prep.conversation_id,
+        )
+    if ctx["source"] == "music" and ctx.get("music_track") is not None:
+        await _start_proactive_co_listening(ctx, state, prep)
+
+
+async def _start_proactive_co_listening(
+    ctx: dict[str, Any],
+    state: ProactiveStateRecord,
+    prep: _SendPrep,
+) -> None:
+    from app.models.music import MusicTrackPayload
+    from app.services import music
+    from app.services.music_status import persist_and_emit_music_status
+
+    track = ctx["music_track"]
+    await music.start_co_listening(
+        user_id=state.user_id,
+        agent_id=state.agent_id,
+        conversation_id=prep.conversation_id,
+        workspace_id=state.workspace_id,
+        payload=MusicTrackPayload(
+            id=track.id,
+            title=track.title,
+            artist=track.artist,
+            album=track.album,
+            library=track.library,
+            url=track.url,
+            duration_sec=track.duration_sec,
+            cover_key=track.cover_key,
+            accent_a=track.accent_a,
+            accent_b=track.accent_b,
+            source=track.source,
+            metadata=track.metadata,
+        ),
+        initiated_by="agent",
+        status="active",
+        position_seconds=0,
+        is_playing=False,
+    )
+    await persist_and_emit_music_status(
+        conversation_id=prep.conversation_id,
+        status="started",
+        track=track,
+        actor="agent",
+        actor_name=getattr(ctx.get("agent"), "name", None) or "我",
+    )
+
+
+async def generate_and_send_proactive(
+    state: ProactiveStateRecord,
+    *,
+    trigger_type: str,
+    now: datetime | None = None,
+    skip_limits: bool = False,
+    admin_test_options: "AdminProactiveTestOptions | None" = None,
+    send_outcome: "AdminProactiveSendOutcome | None" = None,
+) -> bool:
+    """A 模式 (原主动回复) 发送主流程: 资格 → 话题 → 热点 → 生成 → 附件 → 发送 → 记账."""
+    # 绑 ContextVar 让本调用栈的 LLM 工厂应用该 agent 的模型 override.
+    # 不绑的话主动消息生成 / AI 自我记忆抽取都会用 system 全局, 跟 chat 路径
+    # 的 per-agent 行为不一致, 同时 token stats 会把这些 LLM 调用归到全局模型名.
+    from app.services.runtime_config import bind_agent_context
+    await bind_agent_context(state.agent_id)
+
+    now_ts = now or datetime.now(UTC)
+    prep = await _check_send_eligibility(
+        state, trigger_type, skip_limits=skip_limits, send_outcome=send_outcome,
+    )
+    if prep is None:
+        return False
+    ctx = await _resolve_topic(
+        state, trigger_type, prep,
+        admin_test=admin_test_options is not None,
+        send_outcome=send_outcome,
+    )
+    if ctx is None:
+        return False
+    source = ctx["source"]
+    stage = ctx["stage"]
+    trending_attached = await _attach_trending(ctx, state, trigger_type, admin_test_options)
+
+    # 主动消息也开 trace + usage_session, 名字 [proactive:trigger_type],
+    # 方便看板与统计 dashboard 区分被动回复.
     from app.services.llm.usage_tracker import traced_usage_session
     async with traced_usage_session(
         name=f"[proactive:{trigger_type}]",
@@ -752,88 +966,28 @@ async def generate_and_send_proactive(
         message = await _generate_message(ctx)
         if not message:
             # 细分 reason: prompt_disabled:X / llm_error:X / llm_skip_literal /
-            # llm_response_too_short:len=N. admin QA 直接看到 "为什么没消息",
-            # 不用翻后端日志. 若 _generate_message 忘了 set → 兜底 empty_or_skip
-            # 保持向后兼容 (旧 Flutter 版本仍能识别).
+            # llm_response_too_short:len=N. admin QA 直接看到 "为什么没消息".
             detail = str(ctx.get("_skip_reason_detail") or "empty_or_skip")
             await _log_skip(
-                state,
-                trigger_type,
-                detail,
-                conversation_id=prep.conversation_id,
-                send_outcome=send_outcome,
+                state, trigger_type, detail,
+                conversation_id=prep.conversation_id, send_outcome=send_outcome,
             )
             return False
 
-        extra_metadata: dict[str, Any] = {"stage": stage}
-        ws_payload_extra: dict[str, Any] | None = None
-        if source == "music" and ctx.get("music_track") is not None:
-            from app.services.music_chat import card_from_track
-
-            card = card_from_track(
-                ctx["music_track"],
-                intent="recommend",
-                source="proactive",
-            )
-            extra_metadata.update({
-                "component_card": card,
-                "music_proactive": True,
-                "topic_source": "music",
-            })
-            ws_payload_extra = {"component_card": card}
-        proactive_link = None
-        link_skip_reason: str | None = None
-        if ws_payload_extra is None:
-            from app.services.chat_links import maybe_prepare_proactive_link_recommendation
-
-            force_link = False
-            skip_link = False
-            if admin_test_options is not None:
-                force_link = admin_test_options.use_link_card
-                skip_link = not admin_test_options.use_link_card
-            elif trending_attached:
-                force_link = should_attach_trending_link_card(
-                    trending_attached=True,
-                )
-
-            # V3 消息-卡片硬耦合 (2026-09-14): 若 V3 分类器已挑好那条内容
-            # (ctx["topic_source_item"]), 卡片必须挂那一条, 不许再独立搜 tavily
-            # 拿随机 URL. 修根本问题: 截图里"文本说银锁骨链 + 卡说机场"这种同一
-            # 主动消息里语义脱钩的现象.
-            preselected = ctx.get("topic_source_item") if ctx.get("topic_source_kind") else None
-            proactive_link, link_skip_reason = await maybe_prepare_proactive_link_recommendation(
-                user_id=state.user_id,
-                conversation_id=prep.conversation_id,
-                trigger_type=trigger_type,
-                source=source,
-                topic=ctx.get("topic_theme"),
-                stage=stage,
-                message=message,
-                force=force_link,
-                skip=skip_link,
-                preselected_item=preselected,
-            )
-            if proactive_link is not None:
-                extra_metadata.update({
-                    "component_card": proactive_link.component_card,
-                    "link_card": proactive_link.link_card_metadata,
-                    "link_proactive": True,
-                    "topic_source": "link",
-                })
-                ws_payload_extra = {"component_card": proactive_link.component_card}
-
+        attachments = await _prepare_attachments(
+            ctx, state, prep,
+            trigger_type=trigger_type,
+            message=message,
+            trending_attached=trending_attached,
+            admin_test_options=admin_test_options,
+        )
         if send_outcome is not None:
             send_outcome.web_search_used = trending_attached
-            send_outcome.link_card_used = proactive_link is not None
-            # 2026-09-14 task#12: 卡片没出时把具体原因塞给 admin QA (可能是 music
-            # 走另一支从头没触发 link 路径, link_skip_reason 就还是初始 None → 那
-            # 也合理: 音乐卡走的是自己的路径, 不需要 link_skip_reason)
-            if proactive_link is None:
-                send_outcome.link_card_skip_reason = link_skip_reason
-            send_outcome.extra.update({
-                "trigger_type": trigger_type,
-                "source": source,
-            })
+            send_outcome.link_card_used = attachments.link is not None
+            # 音乐卡走自己的路径, 那时 link_skip_reason 为 None 是合理的
+            if attachments.link is None:
+                send_outcome.link_card_skip_reason = attachments.link_skip_reason
+            send_outcome.extra.update({"trigger_type": trigger_type, "source": source})
 
         assistant_message_id = await emit_proactive_message(
             conversation_id=prep.conversation_id,
@@ -842,71 +996,24 @@ async def generate_and_send_proactive(
             workspace_id=state.workspace_id,
             message=message,
             trigger_type=trigger_type,
-            extra_metadata=extra_metadata,
-            ws_payload_extra=ws_payload_extra,
+            extra_metadata=attachments.extra_metadata,
+            ws_payload_extra=attachments.ws_payload_extra,
             trace_id=tracer.safe_trace_id,
+            # 生成期间用户回来了 → 不插入, 优先响应用户 (spec 任务互斥)
+            abort_if_user_replied_since=_generation_started_at(state, now_ts),
         )
-        # 2026-09-14 task#12: 记账到 workspace 最近主动消息池 (下次生成时 anti-repeat 用).
-        # 只在真发出去后记, 免得 empty_or_skip / 各种 skip 路径污染.
-        from app.services.proactive.recent_messages import remember_recent
-        await remember_recent(state.workspace_id, message)
-
-        # 2026-09-14: 记账已 featured 的话题 title (下次分类器排除, 避免"同一件事情
-        # 反复推给同一 user × agent". 6h TTL, 按 workspace 隔离, 不影响其他用户).
-        v3_item = ctx.get("topic_source_item")
-        if isinstance(v3_item, dict):
-            featured_title = str(v3_item.get("title") or "").strip()
-            if featured_title:
-                from app.services.proactive.featured_topics import remember_featured
-                await remember_featured(str(state.workspace_id) if state.workspace_id else None,
-                                         featured_title)
-        if proactive_link is not None:
-            from app.services.chat_links import bind_link_card_to_message
-
-            await bind_link_card_to_message(
-                link_id=proactive_link.link.id,
-                message_id=assistant_message_id,
-                user_id=state.user_id,
-                conversation_id=prep.conversation_id,
+        if not assistant_message_id:
+            await _log_skip(
+                state, trigger_type, "user_replied_during_generation",
+                conversation_id=prep.conversation_id, send_outcome=send_outcome,
             )
-        if source == "music" and ctx.get("music_track") is not None:
-            from app.services import music
-            from app.models.music import MusicTrackPayload
-            from app.services.music_status import persist_and_emit_music_status
-
-            proactive_track = ctx["music_track"]
-
-            await music.start_co_listening(
-                user_id=state.user_id,
-                agent_id=state.agent_id,
-                conversation_id=prep.conversation_id,
-                workspace_id=state.workspace_id,
-                payload=MusicTrackPayload(
-                    id=proactive_track.id,
-                    title=proactive_track.title,
-                    artist=proactive_track.artist,
-                    album=proactive_track.album,
-                    library=proactive_track.library,
-                    url=proactive_track.url,
-                    duration_sec=proactive_track.duration_sec,
-                    cover_key=proactive_track.cover_key,
-                    accent_a=proactive_track.accent_a,
-                    accent_b=proactive_track.accent_b,
-                    source=proactive_track.source,
-                    metadata=proactive_track.metadata,
-                ),
-                initiated_by="agent",
-                status="active",
-                position_seconds=0,
-                is_playing=False,
-            )
-            await persist_and_emit_music_status(
-                conversation_id=prep.conversation_id,
-                status="started",
-                track=proactive_track,
-                actor="agent",
-                actor_name=getattr(ctx.get("agent"), "name", None) or "我",
-            )
+            return False
+        await _after_emit(
+            ctx, state, prep,
+            message=message,
+            assistant_message_id=assistant_message_id,
+            attachments=attachments,
+        )
     logger.info(
         f"proactive sent: trigger={trigger_type} source={source} stage={stage}",
         extra={
@@ -920,7 +1027,6 @@ async def generate_and_send_proactive(
     )
 
     await increment_proactive_count(state.agent_id, state.user_id)
-
     await _persist_proactive_state(
         state,
         trigger_type=trigger_type,
@@ -930,12 +1036,14 @@ async def generate_and_send_proactive(
         new_used_ids=set(ctx.get("used_memory_ids", [])),
         now_ts=now_ts,
     )
-
-    asyncio.create_task(_bg_proactive_ai_memory(
-        state.user_id, message,
-        conversation_id=prep.conversation_id,
+    # A 模式是一次全新开场: 旧话题翻篇, 用户回来后开启新会话 (B 名额恢复)
+    await topic_continuity.close_session(prep.conversation_id)
+    schedule_proactive_ai_memory(
+        user_id=state.user_id,
         agent_id=state.agent_id,
-    ))
+        conversation_id=prep.conversation_id,
+        message=message,
+    )
     return True
 
 
@@ -1083,7 +1191,7 @@ async def send_first_greeting(
         return False
 
     # provisioning 期间不发: 此时 character profile / life_events / MBTI 衍生
-    # 偏好都还没入库, _build_personality_brief 只能拿到 7 维基础值, LLM 写出来
+    # 偏好都还没入库, build_personality_brief 只能拿到 7 维基础值, LLM 写出来
     # 的开场白不能反映完整人设. agents.py 在 activate_agent 完成后会显式
     # dispatch_first_greeting_for_agent 兜底触发, 不依赖前端 WS 重连
     # (chatSocket 是 module-level singleton, App remount 不会重连 WS).
@@ -1119,7 +1227,7 @@ async def send_first_greeting(
                 return False
             prompt = tpl.format(
                 ai_name=agent.name,
-                personality_brief=_build_personality_brief(agent),
+                personality_brief=build_personality_brief(agent),
                 occupation=getattr(agent, "occupation", None) or "普通人",
             )
             message = (await invoke_text(get_chat_model(), prompt)).strip()
@@ -1137,7 +1245,12 @@ async def send_first_greeting(
                 skip_post_process=True,
                 trace_id=tracer.safe_trace_id,
                 voice_eligible=voice_eligible,
+                # 开场白 = 会话里还一条用户消息都没有; 用户抢先开口了就不插到后面
+                abort_if_user_replied_since=_EPOCH,
             )
+            if not assistant_message_id:
+                logger.info(f"first_greeting aborted: user spoke first conv={conversation_id[:8]}")
+                return False
 
             # 接入 spec §8 衰减链路：首句仍需计入 n=1，用户不回复才会
             # 推进到第二/三阶段。
