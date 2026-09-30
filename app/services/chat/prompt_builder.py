@@ -891,9 +891,13 @@ async def build_system_prompt(
     )
     continuation = None if offering_turn else topic_continuation
     # 有上一轮的话题判定时 (只在 <3h 出现) 由它接管「回来了怎么接」: spec 要求
-    # 已完结话题无论隔多久都不带承接话术, 未完结时承接/过渡句已单独发出,
-    # 两种情况都不能再叠一层重逢短档。≥3h 仍由重逢感知负责。
-    reengage_gap = None if (offering_turn or continuation is not None) else reengagement_gap_seconds
+    # 已完结话题无论隔多久都不带承接话术, 未完结且承接/过渡句已单独发出时也不能再
+    # 叠一层重逢短档。未完结但一句都没生成 (失败 / 被口吻过滤) 时保留重逢感知,
+    # 否则主回复完全感知不到时间差。≥3h 仍由重逢感知负责。
+    continuation_takes_over = continuation is not None and (
+        not continuation.cue.unfinished or bool(continuation.lines)
+    )
+    reengage_gap = None if (offering_turn or continuation_takes_over) else reengagement_gap_seconds
     recap_text = None if offering_turn else session_recap
     reengage = await _build_reengagement_section(reengage_gap)
     if reengage:

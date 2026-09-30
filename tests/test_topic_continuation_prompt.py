@@ -85,6 +85,17 @@ async def test_finished_topic_suppresses_reengagement_without_section():
 
 
 @pytest.mark.asyncio
+async def test_unfinished_without_lines_keeps_reengagement():
+    """承接句没生成出来 (失败 / 被口吻过滤): 至少让主回复知道隔了多久."""
+    prompt = await _build(
+        reengagement_gap_seconds=40 * 60,
+        topic_continuation=_continuation(unfinished=True),
+    )
+    assert "## 重逢感知" in prompt
+    assert "## 话题接续" not in prompt
+
+
+@pytest.mark.asyncio
 async def test_no_continuation_keeps_existing_reengagement():
     prompt = await _build(reengagement_gap_seconds=90 * 60)
     assert "## 重逢感知" in prompt
@@ -286,6 +297,25 @@ async def test_failed_or_needy_lines_are_dropped(monkeypatch, llm):
     result = await _run(monkeypatch)
     assert result.lines == []
     assert result.cue.unfinished is True
+
+
+@pytest.mark.asyncio
+async def test_welcome_back_line_may_ask_if_user_is_done_being_busy(monkeypatch, llm):
+    """对方已经回来了: "忙完了吗" 是承接时间差, 不是查岗 (B 追问才拦这类口吻)."""
+    llm.outputs["chat.topic_continuation_return"] = "忙完了吗？刚说到面试那儿"
+    llm.outputs["chat.topic_jump_detect"] = "接续"
+    result = await _run(monkeypatch)
+    assert result.lines == ["忙完了吗？刚说到面试那儿"]
+
+
+@pytest.mark.asyncio
+async def test_lines_respect_single_bubble_length(monkeypatch, llm):
+    from app.services.prompts.system_prompts import MAX_PER_REPLY
+
+    llm.outputs["chat.topic_continuation_return"] = "忙完啦。" + "刚才说到的那件事我还一直惦记着呢" * 6
+    llm.outputs["chat.topic_jump_detect"] = "接续"
+    result = await _run(monkeypatch)
+    assert result.lines and len(result.lines[0]) <= MAX_PER_REPLY
 
 
 @pytest.mark.asyncio

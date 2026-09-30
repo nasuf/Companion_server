@@ -81,6 +81,15 @@ def _history_text(history: list[Any], current_turn_ids: set[str]) -> str:
     return render_dialogue(entries[-_CONTEXT_MESSAGES:])
 
 
+def _clean_line(raw: str | None) -> str | None:
+    """单条气泡: 对方此刻在场 (查岗口吻不算冒犯), 且守住单条字数上限."""
+    from app.services.prompts.system_prompts import MAX_PER_REPLY
+    from app.services.chat.reply_formatting import truncate_at_sentence
+
+    line = clean_single_line(raw, user_present=True)
+    return truncate_at_sentence(line, MAX_PER_REPLY) if line else None
+
+
 async def _generate(key: str, params: dict[str, Any], *, utility: bool = False) -> str | None:
     model = get_utility_model if utility else get_chat_model
     try:
@@ -103,7 +112,7 @@ async def _return_line(conversation: str, *, ai_last_at: datetime, replied_at: d
         "user_msg": user_message,
         "personality_brief": personality,
     })
-    return clean_single_line(raw)
+    return _clean_line(raw)
 
 
 async def _transition_line(conversation: str, *, user_message: str, personality: str) -> str | None:
@@ -118,7 +127,7 @@ async def _transition_line(conversation: str, *, user_message: str, personality:
         "user_new_msg": user_message,
         "personality_brief": personality,
     })
-    return clean_single_line(raw)
+    return _clean_line(raw)
 
 
 async def build_topic_continuation(

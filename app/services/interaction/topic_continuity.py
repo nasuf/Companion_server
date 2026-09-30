@@ -87,25 +87,36 @@ class ContinuationCue:
     gap_seconds: float
 
 
-# 兜底过滤: prompt 已要求别提"对方没回", LLM 仍写出催促/查岗口吻时宁可不发。
+# 兜底过滤: 提示词已明令禁止, LLM 仍写出来时宁可不发。两类分开:
+#   催促 / 抱怨 / 质问 (等你好久、怎么才回、消失很久…): 任何时候都不能说
+#   查岗 (在吗、人呢、忙完了吗、是不是去忙了…): 只在对方还没回来时 (B 追问) 算冒犯;
+#   对方已经回来了 (回归承接), 一句"忙完啦？"恰恰是自然的时间差承接
 # 自然追问不能误杀: "后来那个人呢""现在吗""然后呢？后来你去哪儿了" 都得放行 ——
 # 所以"在吗"要求前面是句首/标点/你/宝, "人呢"要求句首或标点, "去哪了/睡着了"
-# 只在整句就是它时才算查岗。
-_NEEDY_PATTERN = re.compile(
+# 只在整句就是它时才算。
+_REPROACH_PATTERN = re.compile(
+    r"怎么(?:不|没)(?:回|理|说话|动静)|不理我|没回我|理理我|回我一下"
+    r"|^\W*你?(?:去哪(?:了|啦|儿了)|睡着了)[吗呀啊？?！!~～。]*$"
+    r"|消失了|消失很久|怎么才回|等你(?:回|好久)"
+)
+_CHECK_IN_PATTERN = re.compile(
     r"(?:^|[，。！？!?,.~～…\s]|你|宝)(?:还)?(?:在吗|在不在|在嘛)"
     r"|(?:^|[，。！？!?,.~～…\s])人呢"
     r"|还在忙|是不是(?:还)?(?:在|去)?忙|忙完了?[吗没]"
-    r"|怎么(?:不|没)(?:回|理|说话|动静)|不理我|没回我|理理我|回我一下"
-    r"|^\W*你?(?:去哪(?:了|啦|儿了)|睡着了)[吗呀啊？?！!~～。]*$"
-    r"|消失了|消失很久|怎么才回|打扰(?:到)?你|不好意思打扰|等你(?:回|好久)"
+    r"|打扰(?:到)?你|不好意思打扰"
 )
 
 
-def clean_single_line(text: str | None, *, min_len: int = 2) -> str | None:
+def clean_single_line(
+    text: str | None,
+    *,
+    min_len: int = 2,
+    user_present: bool = False,
+) -> str | None:
     """主动 / 承接类"只输出一句"的生成结果清洗; 不该发时返回 None.
 
     通用回复规则允许 "||" 分条, 这里要的是一句: 拼起来而不是只留前半句。
-    催促 / 查岗口吻 (提示词已明令禁止) 仍写出来时宁可不发。
+    user_present: 对方此刻就在 (刚发来消息) —— 查岗口吻不再算冒犯。
     """
     if not text or is_skip_output(text):
         return None
@@ -113,7 +124,7 @@ def clean_single_line(text: str | None, *, min_len: int = 2) -> str | None:
     line = "，".join(segments).strip().strip("\"'“”「」")
     if len(line) < min_len:
         return None
-    if _NEEDY_PATTERN.search(line):
+    if _REPROACH_PATTERN.search(line) or (not user_present and _CHECK_IN_PATTERN.search(line)):
         logger.info(f"[CONTINUITY] dropped needy phrasing: {line[:30]!r}")
         return None
     return line

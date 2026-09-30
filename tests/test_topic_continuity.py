@@ -184,6 +184,23 @@ def test_clean_single_line(raw, expected):
     assert clean_single_line(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "absent", "present"),
+    [
+        # 查岗口吻: 对方还没回来 (B 追问) 时冒犯, 对方已经回来 (回归承接) 时正是自然承接
+        ("忙完了吗？刚说到面试那儿", None, "忙完了吗？刚说到面试那儿"),
+        ("是不是去忙啦～", None, "是不是去忙啦～"),
+        # 催促 / 抱怨 / 质问: 任何时候都不说
+        ("怎么才回呀", None, None),
+        ("等你好久啦", None, None),
+        ("你怎么不回我", None, None),
+    ],
+)
+def test_check_in_phrasing_is_fine_once_user_is_back(raw, absent, present):
+    assert clean_single_line(raw) == absent
+    assert clean_single_line(raw, user_present=True) == present
+
+
 # ── 会话边界 / B 名额 ────────────────────────────────────────────────
 
 async def test_followup_budget_survives_user_replies_within_session(redis):

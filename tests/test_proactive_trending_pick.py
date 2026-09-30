@@ -185,3 +185,49 @@ async def test_attach_trending_stores_pick(monkeypatch):
     ctx = {"topic_theme": "日常"}
     await sender._attach_trending(ctx, state, "silence_wakeup", None)
     assert "trending_pick" not in ctx
+
+
+async def test_decay_final_never_pulls_trending(monkeypatch):
+    """衰减最后一次有专属 prompt: 抓热榜只会让卡片与消息不同源."""
+    resolve = AsyncMock(return_value=("text", True, SimpleNamespace(candidates=tuple(CANDIDATES))))
+    monkeypatch.setattr("app.services.proactive.trending_context.resolve_trending_context", resolve)
+    ctx: dict = {"topic_theme": "日常", "is_decay_final": True}
+    state = SimpleNamespace(user_id="u", workspace_id="w")
+    assert await sender._attach_trending(ctx, state, "silence_wakeup", None) is False
+    resolve.assert_not_awaited()
+    assert "trending_pick" not in ctx
+
+
+async def test_music_source_never_pulls_trending(monkeypatch):
+    """音乐推荐挂的是音乐卡, 消息再讲热点就不同源了."""
+    resolve = AsyncMock(return_value=("text", True, SimpleNamespace(candidates=tuple(CANDIDATES))))
+    monkeypatch.setattr("app.services.proactive.trending_context.resolve_trending_context", resolve)
+    ctx: dict = {"topic_theme": "日常", "source": "music"}
+    assert await sender._attach_trending(ctx, SimpleNamespace(user_id="u", workspace_id="w"),
+                                         "silence_wakeup", None) is False
+    resolve.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("pick", "forced"),
+    [
+        (TrendingPick("猫会开冰箱", CANDIDATES[2], "random"), True),
+        # 抓了热榜但一条没选中: 消息与热点无关, 不能强挂一张独立搜来的卡
+        (None, False),
+    ],
+)
+async def test_link_card_is_forced_only_for_the_picked_item(monkeypatch, pick, forced):
+    link = AsyncMock(return_value=(None, "e2e"))
+    monkeypatch.setattr("app.services.chat_links.maybe_prepare_proactive_link_recommendation", link)
+    monkeypatch.setattr(
+        "app.services.proactive.trending_gate.should_attach_trending_link_card", lambda **_k: True,
+    )
+    ctx = {"source": "greeting", "stage": "warming", "topic_theme": "日常", "trending_pick": pick}
+    await sender._prepare_attachments(
+        ctx, SimpleNamespace(user_id="u"), SimpleNamespace(conversation_id="c"),
+        trigger_type="silence_wakeup", message="刷到一只猫会开冰箱", trending_attached=True,
+        admin_test_options=None,
+    )
+    kwargs = link.await_args.kwargs
+    assert kwargs["force"] is forced
+    assert kwargs["preselected_item"] == (pick.item if pick else None)

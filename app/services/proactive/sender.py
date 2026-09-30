@@ -669,6 +669,11 @@ async def _attach_trending(
     不合适就按原来源正常发。整体开关: SystemConfig.proactive_trending_enabled (默认关)。
     返回是否抓了热榜 (admin QA 的 web_search_used)。
     """
+    if ctx.get("is_decay_final") or ctx.get("source") == "music":
+        # 衰减最后一次走专属 prompt / 音乐推荐挂的是音乐卡: 都不说热点, 否则消息与
+        # 卡片不同源
+        return False
+
     from app.services.proactive.trending_context import resolve_trending_context
 
     _text, trending_attached, trending_meta = await resolve_trending_context(
@@ -736,12 +741,13 @@ async def _prepare_attachments(
     if admin_test_options is not None:
         force_link = admin_test_options.use_link_card
         skip_link = not admin_test_options.use_link_card
-    elif trending_attached:
-        force_link = should_attach_trending_link_card(trending_attached=True)
     # 消息-卡片硬耦合: 热点筛好的那条, 卡片必须挂同一条, 不许独立再搜
-    # (修"文本说银锁骨链 + 卡说机场"这种语义脱钩)
+    # (修"文本说银锁骨链 + 卡说机场"这种语义脱钩)。抓了热榜但一条没选中时消息
+    # 与热点无关, 不强挂卡片。
     trending_pick = ctx.get("trending_pick")
     preselected = trending_pick.item if trending_pick is not None else None
+    if admin_test_options is None and trending_attached and preselected is not None:
+        force_link = should_attach_trending_link_card(trending_attached=True)
     link, attachments.link_skip_reason = await maybe_prepare_proactive_link_recommendation(
         user_id=state.user_id,
         conversation_id=prep.conversation_id,

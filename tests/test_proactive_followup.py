@@ -300,6 +300,8 @@ async def test_judge_timeout_is_no_verdict(monkeypatch):
         ("未完结。", TopicVerdict("unfinished", "llm")),
         ("已完结", TopicVerdict("finished", "llm")),
         ("结论：已完结", TopicVerdict("finished", "llm")),
+        # 把两个选项照抄一遍 = 没做判断
+        ("已完结 / 未完结", None),
     ],
 )
 def test_parse_verdict(raw, expected):

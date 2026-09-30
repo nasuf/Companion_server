@@ -552,6 +552,31 @@ async def test_recent_dialogue_needs_the_user_to_have_said_something(monkeypatch
     assert await context._load_recent_dialogue("ws-1", now=NOW) == ""
 
 
+@pytest.mark.parametrize(
+    "diagnostics",
+    [
+        {"crisis_guard_status": "crisis_followup"},
+        {"crisis_guard_status": "released"},
+        {"short_circuit_kind": "crisis"},
+    ],
+)
+async def test_recent_dialogue_skips_windows_with_crisis_care(monkeypatch, diagnostics):
+    """近两天有过危机照护: 不拿那段对话"轻度延伸", 换别的来源."""
+    from app.services.proactive import context
+
+    rows = [
+        {"role": "assistant", "content": "我在的，你现在安全吗？",
+         "metadata": {"response_diagnostics": diagnostics}, "created_at": datetime(2026, 9, 28, 13, 1)},
+        {"role": "user", "content": "……", "metadata": None, "created_at": datetime(2026, 9, 28, 13, 0)},
+    ]
+    monkeypatch.setattr(context, "db", SimpleNamespace(query_raw=AsyncMock(return_value=rows)))
+    assert await context._load_recent_dialogue("ws-1", now=NOW) == ""
+
+    # 普通回复的诊断 (crisis_guard_status = none) 不受影响
+    rows[0]["metadata"] = {"response_diagnostics": {"crisis_guard_status": "none"}}
+    assert await context._load_recent_dialogue("ws-1", now=NOW) != ""
+
+
 def _patch_context_deps(monkeypatch, context, memories):
     async def _load(**kwargs):
         return memories.get(kwargs["source"], ([], []))

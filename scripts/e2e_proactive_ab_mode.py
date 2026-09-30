@@ -799,7 +799,8 @@ async def scenario_real_chat_turn():
         (json.loads(e["data"]) if isinstance(e.get("data"), str) else e.get("data") or {}).get("text")
         for e in events if e.get("event") == "reply"
     ]
-    check(replies[:2] == [RETURN_LINE, JUMP_LINE] and len(replies) >= 3,
+    # 回复加工会随机给某一条气泡加 emoji, 只比前缀
+    check(len(replies) >= 3 and replies[0].startswith(RETURN_LINE) and replies[1].startswith(JUMP_LINE),
           f"气泡顺序 = 承接句 + 过渡句 + 正常回复 (replies={replies})")
     if "## 话题接续" in main:
         section = main.split("## 话题接续", 1)[1].split("\n## ", 1)[0].strip()
@@ -808,7 +809,61 @@ async def scenario_real_chat_turn():
     check(st.status == "running" and st.current_window_index == 0, "回复收尾后重新 arm 判定窗")
     check((st.metadata or {}).get("reason") == ARM_REASON_REPLY, "arm 原因 = 普通回复")
     saved = [m["content"] for m in await w.messages("assistant")]
-    check(any("吃了" in c for c in saved) and RETURN_LINE in saved, "承接句与回复都已落库")
+    check(any("吃了" in c for c in saved) and any(c.startswith(RETURN_LINE) for c in saved),
+          "承接句与回复都已落库")
+
+
+async def scenario_upset_user_gets_no_playful_lines():
+    print("\n[S11] 未完结 + 用户带着情绪回来 → 先接情绪, 不发轻快的承接 / 过渡句")
+    from langchain_core.embeddings import Embeddings
+
+    from app.services.chat.orchestrator import stream_chat_response
+    from app.services.llm import models
+
+    class _Emb(Embeddings):
+        def embed_documents(self, texts):
+            return [[0.01] * 1024 for _ in texts]
+
+        def embed_query(self, text):
+            return [0.01] * 1024
+
+    fake = _RoutedFakeLLM.build()
+    w = await World("s11").create()
+    await w.user_says("我明天有个面试，有点紧张")
+    await w.ai_replies("别紧张！是什么岗位的面试呀？")
+    SCRIPT.judge.append("未完结")
+    with patch("app.services.proactive.gates.is_in_active_hours", lambda _now: False):
+        await w.advance(5)
+        await scan()
+    await w.advance(20)
+    text = "今天被老板骂了，好难受"
+    user_msg = await w.user_says(text)
+    SCRIPT.jump_detect.append("新话题")
+    before = len(_RoutedFakeLLM.main_prompts)
+    events = []
+    with (
+        patch.object(models, "_build_chat_model", lambda _k: fake),
+        patch.object(models, "_build_utility_model", lambda _k: fake),
+        patch.object(models, "_build_fallback_chat_model", lambda _k: fake),
+        patch("app.services.memory.storage.embedding.get_embedding_model", lambda: _Emb()),
+    ):
+        async for evt in stream_chat_response(
+            conversation_id=w.conv_id, user_message=text, agent=await db.aiagent.find_unique(
+                where={"id": w.agent_id}),
+            user_id=w.user_id,
+            reply_context={"received_at": datetime.now(UTC).isoformat(), "turn_message_ids": [user_msg]},
+            save_user_message=False, user_message_id=user_msg, delivered_from_queue=True,
+        ):
+            events.append(evt)
+        await drain()
+    replies = [
+        (json.loads(e["data"]) if isinstance(e.get("data"), str) else e.get("data") or {}).get("text") or ""
+        for e in events if e.get("event") == "reply"
+    ]
+    check(bool(replies) and not any(r.startswith((RETURN_LINE, JUMP_LINE)) for r in replies),
+          f"不插承接 / 过渡气泡 (replies={replies})")
+    main = _RoutedFakeLLM.main_prompts[-1] if len(_RoutedFakeLLM.main_prompts) > before else ""
+    check(bool(main) and "## 话题接续" not in main, "主 prompt 不带话题接续段")
 
 
 async def scenario_prompt_sync():
@@ -886,6 +941,7 @@ async def main() -> int:
             await scenario_recent_dialogue_a_mode()
         await scenario_passive_return_and_jump()
         await scenario_real_chat_turn()
+        await scenario_upset_user_gets_no_playful_lines()
     finally:
         for p in patches:
             p.stop()

@@ -148,13 +148,12 @@ def _last_time(turns: list[_Turn], role: str) -> str:
 # ────────────────────────────────────────────────────────────────────
 
 def _parse_verdict(raw: Any) -> TopicVerdict | None:
-    """提示词输出 已完结 / 未完结 二选一; 说不清的当作判不出 (不写结论)."""
+    """提示词输出 已完结 / 未完结 二选一; 说不清 (含把两个选项照抄一遍) 当作判不出."""
     text = str(raw or "")
-    if "未完结" in text:
-        return TopicVerdict("unfinished", "llm")
-    if "已完结" in text:
-        return TopicVerdict("finished", "llm")
-    return None
+    unfinished, finished = "未完结" in text, "已完结" in text
+    if unfinished == finished:
+        return None
+    return TopicVerdict("unfinished" if unfinished else "finished", "llm")
 
 
 async def judge_topic_completion(

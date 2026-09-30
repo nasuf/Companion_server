@@ -515,6 +515,9 @@ async def stream_chat_response(
     # CLAUDE.md §3.3 design — apology 自己 fire memory pipeline, blocked 故意跳;
     # finally 通过 `boundary_ctx.stopped` 直接判别, 无需独立 flag.
     post_process_fired = False
+    # 《主动聊天机制》被动承接: 回归承接 / 跳话题过渡句 (与 fetch 并行生成);
+    # 短路 / 异常退出时由 finally 兜底取消, 不留孤儿 LLM 调用
+    continuation_task: asyncio.Task | None = None
     boundary_ctx: BoundaryPhaseCtx | None = None
     preflight_ctx: PreflightCtx | None = None
     sc_ctx: ShortCircuitCtx | None = None
@@ -569,8 +572,6 @@ async def stream_chat_response(
         # W2 中期记忆: 摘要任务延后到主路径分支创建 (与 fetch_task 同处),
         # 避免 boundary/crisis/filler 短路回合白跑 LLM. 这里只声明.
         session_recap_task: asyncio.Task | None = None
-        # 《主动聊天机制》被动承接: 回归承接 / 跳话题过渡句 (与 fetch 并行生成)
-        continuation_task: asyncio.Task | None = None
         # 默认声明: sub_intent_mode 下不进下面的 if 块, 但 §3.4.2 grounding 门控
         # (_downgrade_non_explicit_schedule_adjust) 仍会读它, 不能留未定义。
         previous_assistant = None
@@ -1525,7 +1526,11 @@ async def stream_chat_response(
             if actual_sleep > 0:
                 await asyncio.sleep(actual_sleep)
 
-        topic_continuation = await await_topic_continuation(continuation_task, response_diagnostics)
+        if relational_context:
+            # 对方正低落 / 抱怨: 先接情绪, 不插一句轻快的"忙完啦 / 换话题啦" (任务由 finally 取消)
+            topic_continuation = None
+        else:
+            topic_continuation = await await_topic_continuation(continuation_task, response_diagnostics)
         continuation_lines = topic_continuation.lines if topic_continuation else []
         if continuation_lines:
             # 总气泡数仍守 MAX_REPLY_COUNT: 承接 / 过渡句占的名额从正常回复里扣
@@ -1582,8 +1587,10 @@ async def stream_chat_response(
         # 主 LLM 路径已在 generate_reply 内并行算好, 直接复用; tier/contradiction 路径
         # reply_emotion_pre=None 时兜底再调一次 (这两条路径都是单 LLM, 增量小).
         # full_response 必须无条件计算 — 下方 background post_process 总是引用它.
-        # 回归承接 / 跳话题过渡句作为独立气泡排在正常回复之前 (提示词文档的输出格式)
-        replies = [*continuation_lines, *replies]
+        # 回归承接 / 跳话题过渡句作为独立气泡排在正常回复之前 (提示词文档的输出格式);
+        # 主回复生成失败时不发 —— 暖场之后接一句兜底回复更奇怪
+        if continuation_lines and not reply_is_fallback:
+            replies = [*continuation_lines, *replies]
         full_response = " ".join(replies)
         if reply_emotion_pre is not None:
             reply_emotion = reply_emotion_pre
@@ -1904,6 +1911,8 @@ async def stream_chat_response(
         # End trace and share publicly in background (updates DB with public URL)
         tracer.close()
     finally:
+        if continuation_task is not None and not continuation_task.done():
+            continuation_task.cancel()
         # Flush LLM usage 累计到 llm_usage 表. sub_intent_mode 没起 session,
         # token 是 None, 走里面的 short-circuit.
         if usage_token is not None:

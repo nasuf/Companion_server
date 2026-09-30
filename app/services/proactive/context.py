@@ -342,6 +342,10 @@ async def _load_recent_dialogue(workspace_id: str, *, now: datetime | None = Non
     entries = []
     for row in reversed(rows or []):
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if _is_crisis_reply(metadata):
+            # 近两天有过危机照护: 提示词3 会"关心追问后续 / 话题轻度延伸", 拿这段对话
+            # 随口接话可能是事故 —— 换别的来源 (记忆主动 → AI 记忆, 沉默唤醒 → 打招呼)
+            return ""
         if is_dialogue_noise(metadata):
             continue
         text = render_message_content_for_prompt(str(row.get("content") or ""), metadata).strip()
@@ -350,6 +354,15 @@ async def _load_recent_dialogue(workspace_id: str, *, now: datetime | None = Non
     if not any(role == "user" for role, _, _ in entries):
         return ""
     return render_dialogue(entries, max_chars=80)
+
+
+def _is_crisis_reply(metadata: dict) -> bool:
+    diagnostics = metadata.get("response_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return False
+    status = str(diagnostics.get("crisis_guard_status") or "none")
+    kind = str(diagnostics.get("short_circuit_kind") or "")
+    return status != "none" or kind.startswith("crisis")
 
 
 def _parse_ts(value: Any) -> datetime | None:
