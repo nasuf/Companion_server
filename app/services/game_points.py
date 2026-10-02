@@ -306,8 +306,30 @@ def _milestone_delta(rules: dict[str, Any], outcome: str, max_tile: int) -> int:
     return points
 
 
-async def settle_session(session: Any, *, database: Any, is_vip: bool = False) -> None:
-    """Adjust the game-point balance for one terminal native game session.
+def number_merge_max_tile(result: dict[str, Any]) -> int:
+    """Recover progress from the terminal payload or the last persisted board."""
+    payload = _load_json(result.get("final_payload"))
+    process = _load_json(result.get("process"))
+    game = _load_json(process.get("number_merge") or result.get("number_merge"))
+    states = [
+        payload,
+        _load_json(payload.get("final_state")),
+        _load_json(game.get("final_state")),
+    ]
+    values = [int(state.get("max_tile") or 0) for state in states]
+    for state in states:
+        board = state.get("board")
+        if isinstance(board, list):
+            for row in board:
+                cells = row if isinstance(row, list) else [row]
+                values.extend(int(value or 0) for value in cells)
+    return max(values, default=0)
+
+
+async def settle_session(
+    session: Any, *, database: Any, is_vip: bool = False
+) -> dict[str, Any] | None:
+    """Adjust the balance and return the actual change for the result screen.
 
     Must run inside the transaction that records the terminal game event so the
     ``inserted`` idempotency guard in ``native.handle_event`` protects it; the
@@ -341,14 +363,13 @@ async def settle_session(session: Any, *, database: Any, is_vip: bool = False) -
 
     max_tile = 0
     if rule_type == "milestone":
-        final_payload = _load_json(result.get("final_payload"))
-        max_tile = int(final_payload.get("max_tile") or 0)
+        max_tile = number_merge_max_tile(result)
         delta = _milestone_delta(rules, outcome, max_tile)
     else:
         delta = _outcome_delta(rules, outcome)
 
     if delta == 0:
-        return
+        return {"delta": 0, "base_delta": 0}
 
     from app.services.vip.config import GAME_VIP_MULTIPLIER
 
@@ -376,8 +397,13 @@ async def settle_session(session: Any, *, database: Any, is_vip: bool = False) -
     # Only points actually earned by winning / reaching a milestone (a positive
     # settlement) count toward the level; losses and quits never reduce it.
     earned = max(0, delta)
+    settlement = {
+        "delta": applied,
+        "base_delta": raw_delta,
+        "balance_after": new_balance,
+    }
     if applied == 0 and earned == 0:
-        return
+        return settlement
     await database.execute_raw(
         """
         UPDATE user_game_wallets
@@ -409,6 +435,7 @@ async def settle_session(session: Any, *, database: Any, is_vip: bool = False) -
         metadata=metadata,
         client=database,
     )
+    return settlement
 
 
 # ─────────────────────────── conversion ───────────────────────────

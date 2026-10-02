@@ -544,12 +544,14 @@ def test_number_merge_action_preserves_every_transition_and_merge_value():
 
 
 @pytest.mark.parametrize(
-    ("status", "outcome"),
-    [("completed", "win"), ("failed", "lose")],
+    ("status", "outcome", "max_tile"),
+    [("completed", "win", 2048), ("failed", "lose", 64),
+     ("failed", "win", 128), ("failed", "win", 1024)],
 )
 def test_number_merge_terminal_status_matches_shared_outcome(
     status: str,
     outcome: str,
+    max_tile: int,
 ):
     definition = native._definition("number_merge")
 
@@ -558,6 +560,7 @@ def test_number_merge_terminal_status_matches_shared_outcome(
             {
                 "user_outcome": outcome,
                 "terminal_state": {"status": status},
+                "max_tile": max_tile,
             },
             definition,
         )
@@ -641,6 +644,8 @@ def test_generic_terminal_recovery_uses_persisted_final_state(
     result = native._empty_result("normal", definition)
     game = native._generic_process(result, definition)
     game["final_state"] = {"status": status, "state_hash": "terminal-hash"}
+    if game_key == "number_merge":
+        game["final_state"]["max_tile"] = 2048
     result["process"][game_key] = game
 
     recovered = native._recover_generic_terminal(result, definition)
@@ -648,7 +653,7 @@ def test_generic_terminal_recovery_uses_persisted_final_state(
     assert recovered == (
         outcome,
         status,
-        {"status": status, "state_hash": "terminal-hash"},
+        game["final_state"],
     )
 
 
@@ -1001,3 +1006,66 @@ def test_generic_finish_reply_sounds_like_a_companion_not_a_score_report():
     assert "最后一下" in reply
     assert "分" not in reply
     assert "总结" not in reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("game_key", list(native._GAME_DEFINITIONS))
+async def test_terminal_receipt_is_persisted_and_retries_do_not_settle_again(monkeypatch, game_key):
+    from contextlib import asynccontextmanager
+    from app.services import game_points
+
+    session = native._as_native_session(_session(game_key))
+    updates = []
+    database = SimpleNamespace()
+
+    @asynccontextmanager
+    async def transaction():
+        yield database
+
+    database.tx = transaction
+
+    async def get_session(*args, **kwargs):
+        return session
+
+    async def update_session(**data):
+        nonlocal session
+        assert data['database'] is database
+        updates.append(data)
+        session = session.model_copy(update={
+            'status': data['status'], 'result': data['result'],
+            'duration_seconds': data['duration_seconds'],
+        })
+        return session
+
+    receipt = {'delta': -1, 'base_delta': -2, 'balance_after': 0}
+    settle = AsyncMock(return_value=receipt)
+    monkeypatch.setattr(native, 'db', database)
+    monkeypatch.setattr(native, 'get_session', get_session)
+    monkeypatch.setattr(native, '_update_session', update_session)
+    monkeypatch.setattr(native.session_support, '_append_event_idempotent',
+                        AsyncMock(return_value=('event-1', True, None)))
+    monkeypatch.setattr(native.wallet, 'is_vip', AsyncMock(return_value=True))
+    monkeypatch.setattr(game_points, 'settle_session', settle)
+    monkeypatch.setattr(native, 'fire_background', lambda coroutine: coroutine.close())
+
+    request = dict(session_id=session.id, user_id=session.user_id,
+                   event_type='game_aborted', state='aborted',
+                   payload={'reason': 'closed'}, source='client', client_event_id=None)
+    response, _, _, duplicate = await native.handle_event(**request)
+    assert not duplicate
+    assert response.result['point_settlement'] == receipt
+    assert updates[-1]['result']['point_settlement'] == receipt
+    settle.assert_awaited_once()
+    assert settle.await_args.kwargs == {'database': database, 'is_vip': True}
+
+    retried, _, _, duplicate = await native.handle_event(**request)
+    assert duplicate
+    assert retried.result['point_settlement'] == receipt
+    settle.assert_awaited_once()
+
+
+def test_number_merge_old_client_loss_is_normalized_to_milestone_win():
+    assert native._validated_generic_outcome({
+        'user_outcome': 'lose', 'max_tile': 128,
+        'terminal_state': {'status': 'failed'},
+    }, native._definition('number_merge')) == 'win'

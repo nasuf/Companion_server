@@ -691,6 +691,13 @@ async def handle_event(
                         definition,
                         event_payload,
                     )
+                    if definition.key == "number_merge":
+                        event_payload = {
+                            **event_payload,
+                            "max_tile": game_points.number_merge_max_tile(
+                                {**result, "final_payload": event_payload}
+                            ),
+                        }
                     outcome = (
                         _validated_tetris_outcome(result, event_payload)
                         if definition.key == "tetris_duel"
@@ -779,7 +786,21 @@ async def handle_event(
                 # which is the intended trade-off for correctness over a lost
                 # or duplicated balance change.)
                 is_vip = await wallet.is_vip(str(updated.user_id), client=tx)
-                await game_points.settle_session(updated, database=tx, is_vip=is_vip)
+                settlement = await game_points.settle_session(
+                    updated, database=tx, is_vip=is_vip
+                )
+                if settlement is not None:
+                    result = {**result, "point_settlement": settlement}
+                    updated = await _update_session(
+                        session_id=session.id,
+                        status=status,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        duration_seconds=duration_seconds,
+                        result=result,
+                        companion_reply=reply,
+                        database=tx,
+                    )
         if not inserted:
             return updated, stored_reply, event_id, True
         if event_type in {"game_started", "game_finished", "game_aborted"}:
@@ -2155,6 +2176,12 @@ def _validated_generic_outcome(
         raise ValueError("missing_terminal_state")
     terminal_status = str(terminal_state.get("status") or "")
     expected = _TERMINAL_OUTCOMES.get(definition.key, {}).get(terminal_status)
+    if definition.key == "number_merge" and terminal_status in {"completed", "failed"}:
+        max_tile = game_points.number_merge_max_tile({"final_payload": payload})
+        expected = "win" if max_tile >= 128 else "lose"
+        # Older clients still report a blocked board as a loss. Canonicalize
+        # it here so rollout order cannot reject an otherwise valid finish.
+        return expected
     if terminal_status and expected != outcome:
         raise ValueError("invalid_outcome")
     return outcome
@@ -2171,6 +2198,8 @@ def _recover_generic_terminal(
     outcome = _TERMINAL_OUTCOMES.get(definition.key, {}).get(terminal_status)
     if outcome is None:
         return None
+    if definition.key == "number_merge":
+        outcome = "win" if game_points.number_merge_max_tile(result) >= 128 else "lose"
     return outcome, terminal_status, final_state
 
 

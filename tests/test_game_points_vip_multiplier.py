@@ -108,3 +108,59 @@ async def test_settle_session_milestone_multiplier_rounds_to_nearest_int():
 
     # 3 * 1.5 = 4.5 -> round() to 4 (banker's rounding on .5 ties to even)
     assert db.balance == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("balance", "expected"), [(1, -1), (0, 0), (10, -2)])
+async def test_settlement_reports_actual_deduction(balance, expected):
+    database = _FakeSettleDb(rules={"type": "outcome", "lose": -2}, balance=balance)
+    settled = await game_points.settle_session(_session(outcome="lose"), database=database)
+    assert settled["delta"] == expected
+    assert settled["base_delta"] == -2
+    assert database.balance == max(0, balance - 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tile", "expected"), [(128, 3), (256, 8), (512, 9), (1024, 22), (2048, 38)])
+async def test_number_merge_vip_reports_actual_award(tile, expected):
+    rules = {"type": "milestone", "milestones": [
+        {"tile": t, "points": p} for t, p in [(128, 2), (256, 5), (512, 6), (1024, 15), (2048, 25)]
+    ], "quit_below_threshold": {"threshold": 128, "below": -2, "at_or_above": 0}}
+    database = _FakeSettleDb(rules=rules)
+    settled = await game_points.settle_session(
+        _session(outcome="win", final_payload={"max_tile": tile}), database=database, is_vip=True)
+    assert settled["delta"] == expected
+    assert database.balance == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "tile", "outcome", "expected"), [
+    ("playing", 64, "aborted", -2), ("playing", 128, "aborted", 0),
+    ("playing", 256, "aborted", 0), ("failed", 1024, "win", 15),
+    ("completed", 2048, "win", 25),
+])
+async def test_disconnected_number_merge_recovers_persisted_board(status, tile, outcome, expected):
+    from app.services.games import native
+    definition = native._definition("number_merge")
+    result = native._empty_result("normal", definition)
+    result["process"]["number_merge"]["final_state"] = {
+        "status": status, "board": [tile, 0, 0, 0] * 4,
+    }
+    if outcome == "aborted":
+        result = native._abort_generic_result(result, definition,
+            {"reason": "client_disconnected_timeout"}, 60)
+    else:
+        recovered_outcome, terminal_status, state = native._recover_generic_terminal(result, definition)
+        assert recovered_outcome == outcome
+        result = native._finish_generic_result(result, definition,
+            {"final_state": state, "terminal_state": {"status": terminal_status}},
+            outcome=outcome, duration_seconds=60)
+    session = _session(outcome=outcome)
+    session.game_key = "number_merge"
+    session.result = result
+    database = _FakeSettleDb(rules={"type": "milestone", "milestones": [
+        {"tile": t, "points": p} for t, p in [(128, 2), (256, 5), (512, 6), (1024, 15), (2048, 25)]
+    ], "quit_below_threshold": {"threshold": 128, "below": -2, "at_or_above": 0}}, balance=10)
+    settled = await game_points.settle_session(session, database=database)
+    assert settled["delta"] == expected
+    assert database.balance == 10 + expected
