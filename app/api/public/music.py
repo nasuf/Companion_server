@@ -351,7 +351,7 @@ async def update_music_now_playing(
     ):
         schedule_state = await music_status.get_agent_current_schedule_state(data.agent_id)
         if schedule_state["status"] == "idle":
-            await music.start_co_listening(
+            joined = await music.start_co_listening(
                 user_id=user["sub"],
                 agent_id=data.agent_id,
                 workspace_id=data.workspace_id,
@@ -367,6 +367,7 @@ async def update_music_now_playing(
                 status="started",
                 track=track,
                 actor="user",
+                shared_session=joined,
             )
         else:
             await music_status.reconcile_co_listening_for_status(
@@ -397,6 +398,7 @@ async def update_music_now_playing(
                     status="started",
                     track=track,
                     actor="user",
+                    shared_session=joined,
                 )
         await music_status.maybe_emit_track_change_reply(
             conversation_id=data.conversation_id,
@@ -464,6 +466,7 @@ async def end_music_co_listening(
                         track=ended.track,
                         reason=end_reason,
                         actor="user",
+                        shared_session=ended,
                     )
         else:
             current = await music.get_open_co_listening(
@@ -487,6 +490,7 @@ async def end_music_co_listening(
                     track=ended.track,
                     reason=end_reason,
                     actor="user",
+                    shared_session=ended,
                 )
     except ValueError as exc:
         _handle_value_error(exc)

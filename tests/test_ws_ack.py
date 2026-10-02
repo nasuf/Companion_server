@@ -994,7 +994,10 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
         patch(
             "app.services.music.start_co_listening",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=MusicCoListeningResponse(
+                status="active", initiated_by="user_joined",
+                track=MusicTrack(id="track-1", title="Quiet Realm"),
+            ),
         ) as start_co,
         patch(
             "app.services.music_chat.render_music_reply",
@@ -1006,6 +1009,7 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
             new=AsyncMock(side_effect=_fake_music_status),
         ) as music_status,
         patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.notifications.service.notify_agent_message_created", new=lambda *_args, **_kwargs: None),
         patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
     ):
         await ws_mod._handle_message(
@@ -1031,7 +1035,9 @@ async def test_handle_message_music_card_idle_starts_co_listening(fake_ws):
     assert second_status["status"] == "started"
     assert second_status["actor"] == "agent"
     assert second_status["actor_name"] == "A"
-    assert event_order[:3] == ["agent_reply", "status:user", "status:agent"]
+    assert first_status["shared_session"] is None
+    assert second_status["shared_session"] == start_co.return_value
+    assert event_order[:3] == ["status:user", "status:agent", "agent_reply"]
     envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
     assert any(item.get("type") == "reply" and item["data"]["music_co_listening"] for item in envelopes)
 
@@ -1089,7 +1095,13 @@ async def test_handle_message_music_card_while_agent_waiting_only_rejoins_user(f
             new_callable=AsyncMock,
             return_value=waiting,
         ),
-        patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
+        patch(
+            "app.services.music.start_co_listening", new_callable=AsyncMock,
+            return_value=MusicCoListeningResponse(
+                status="active", initiated_by="user_joined",
+                track=MusicTrack(id="track-1", title="Quiet Realm"),
+            ),
+        ) as start_co,
         patch(
             "app.services.music_chat.render_music_reply",
             new_callable=AsyncMock,
@@ -1101,6 +1113,7 @@ async def test_handle_message_music_card_while_agent_waiting_only_rejoins_user(f
             return_value="music-status-1",
         ) as music_status,
         patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.notifications.service.notify_agent_message_created", new=lambda *_args, **_kwargs: None),
         patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
     ):
         await ws_mod._handle_message(
@@ -1119,6 +1132,7 @@ async def test_handle_message_music_card_while_agent_waiting_only_rejoins_user(f
     music_status.assert_awaited_once()
     assert music_status.await_args.kwargs["status"] == "started"
     assert music_status.await_args.kwargs["actor"] == "user"
+    assert music_status.await_args.kwargs["shared_session"] == start_co.return_value
 
 
 @pytest.mark.asyncio
@@ -1149,7 +1163,10 @@ async def test_user_invite_joins_agent_only_music_session(
             "track": {"id": "track-1", "title": "Quiet Realm"},
         },
     }
-    start_co = AsyncMock(return_value=None)
+    start_co = AsyncMock(return_value=MusicCoListeningResponse(
+        status="active", initiated_by="user_joined",
+        track=MusicTrack(id="track-1", title="Quiet Realm"),
+    ))
     music_status = AsyncMock(return_value="music-status-1")
 
     with (
@@ -1206,10 +1223,14 @@ async def test_user_invite_joins_agent_only_music_session(
     start_co.assert_awaited_once()
     assert start_co.await_args.kwargs["initiated_by"] == "user_joined"
     assert [call.kwargs["actor"] for call in music_status.await_args_list] == expected_actors
+    projected = [call.kwargs["shared_session"] for call in music_status.await_args_list
+                 if call.kwargs["shared_session"] is not None]
+    assert projected == [start_co.return_value]
 
 
 @pytest.mark.asyncio
-async def test_handle_message_music_card_while_active_switches_track_without_status(fake_ws):
+@pytest.mark.parametrize("current_track_id", ["old-track", "track-1"])
+async def test_handle_message_music_card_updates_shared_status_only_for_new_track(fake_ws, current_track_id):
     agent = SimpleNamespace(id="a1", name="A")
 
     async def _fake_persist(*args, **kwargs):
@@ -1231,7 +1252,7 @@ async def test_handle_message_music_card_while_active_switches_track_without_sta
     plan = _aggregation_plan("immediate", text="换这首")
     active = MusicCoListeningResponse(
         status="active",
-        track=MusicTrack(id="old-track", title="Old Track"),
+        track=MusicTrack(id=current_track_id, title="Old Track"),
         is_playing=True,
         initiated_by="user",
     )
@@ -1261,7 +1282,13 @@ async def test_handle_message_music_card_while_active_switches_track_without_sta
             new_callable=AsyncMock,
             return_value=active,
         ),
-        patch("app.services.music.start_co_listening", new_callable=AsyncMock) as start_co,
+        patch(
+            "app.services.music.start_co_listening", new_callable=AsyncMock,
+            return_value=MusicCoListeningResponse(
+                status="active", initiated_by="user_joined",
+                track=MusicTrack(id="track-1", title="Quiet Realm"),
+            ),
+        ) as start_co,
         patch(
             "app.services.music_chat.render_music_reply",
             new_callable=AsyncMock,
@@ -1273,6 +1300,7 @@ async def test_handle_message_music_card_while_active_switches_track_without_sta
             return_value="music-status-1",
         ) as music_status,
         patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.notifications.service.notify_agent_message_created", new=lambda *_args, **_kwargs: None),
         patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
     ):
         await ws_mod._handle_message(
@@ -1290,7 +1318,11 @@ async def test_handle_message_music_card_while_active_switches_track_without_sta
     assert start_co.await_args.kwargs["status"] == "active"
     render_reply.assert_awaited_once()
     assert render_reply.await_args.args[0] == "music.switch_track"
-    music_status.assert_not_awaited()
+    if current_track_id == "old-track":
+        music_status.assert_awaited_once()
+        assert music_status.await_args.kwargs["shared_session"] == start_co.return_value
+    else:
+        music_status.assert_not_awaited()
     envelopes = [call.args[0] for call in fake_ws.send_json.call_args_list]
     assert any(item.get("type") == "reply" and item["data"]["music_co_listening"] for item in envelopes)
 
@@ -1353,6 +1385,7 @@ async def test_handle_message_music_card_busy_rejects_without_starting(fake_ws):
             new_callable=AsyncMock,
         ) as persist_status,
         patch("app.services.chat.post_process._bg_memory_pipeline", new=lambda *_args, **_kwargs: None),
+        patch("app.services.notifications.service.notify_agent_message_created", new=lambda *_args, **_kwargs: None),
         patch("app.services.runtime.tasks.fire_background", new=lambda *_args, **_kwargs: None),
     ):
         await ws_mod._handle_message(

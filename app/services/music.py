@@ -982,10 +982,7 @@ async def end_co_listening(
         agent_id=agent_id,
         conversation_id=conversation_id,
     )
-    current = await get_open_co_listening(conversation_id=conversation_id)
-    if current is None:
-        return None
-    await db.execute_raw(
+    rows = await db.query_raw(
         """
         UPDATE music_co_listening_sessions
         SET status = 'ended',
@@ -997,15 +994,16 @@ async def end_co_listening(
           AND user_id = $2
           AND agent_id = $3
           AND status IN ('active', 'pending_agent', 'agent_waiting_user')
+        RETURNING *
         """,
         conversation_id,
         user_id,
         agent_id,
         reason,
     )
-    return current.model_copy(
-        update={"status": "ended", "is_playing": False, "ended_reason": reason}
-    )
+    if not rows:
+        return None
+    return _co_listening_row_to_response(_row(rows[0]))
 
 
 async def move_active_co_listening_to_agent_waiting(

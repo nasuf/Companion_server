@@ -5,12 +5,11 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from weakref import WeakValueDictionary
 
 from prisma import Json
 
 from app.db import db
-from app.models.music import MusicTrack, MusicTrackPayload
+from app.models.music import MusicCoListeningResponse, MusicTrack, MusicTrackPayload
 from app.services import music
 from app.services.llm.models import get_utility_model, invoke_text
 from app.services.music_chat import render_music_reply
@@ -34,8 +33,6 @@ _TRACK_CHANGE_PROMPT_KEYS = {
     "music.track_changed_auto",
 }
 _MUSIC_ACTIVITY_BURST_KIND = "music_activity_burst"
-_MUSIC_ACTIVITY_BURST_WINDOW = timedelta(minutes=5)
-_MUSIC_BURST_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 _AGENT_JOIN_STATUS_SQL = """
     (
         metadata ->> 'music_status' = 'started'
@@ -99,94 +96,6 @@ def _loads(value: Any, fallback: Any = None) -> Any:
     return fallback
 
 
-def _parse_segment_time(value: Any) -> datetime | None:
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _burst_track_titles(segments: list[dict[str, Any]], fallback: str) -> list[str]:
-    titles: list[str] = []
-    seen: set[str] = set()
-    for segment in segments:
-        if str(segment.get("action") or "") not in {"joined", "listened"}:
-            continue
-        title = str(segment.get("track_title") or fallback or "").strip() or "共听"
-        if title in seen:
-            continue
-        seen.add(title)
-        titles.append(title)
-    return titles or ([fallback or "共听"] if fallback else [])
-
-
-def _format_music_burst_content(
-    track_title: str,
-    segments: list[dict[str, Any]],
-) -> str:
-    listened = [seg for seg in segments if str(seg.get("action") or "") == "listened"]
-    titles = _burst_track_titles(listened or segments, track_title)
-    if not titles:
-        return "刚才打开了共听"
-    if len(titles) == 1:
-        return f"一起听了《{titles[0]}》"
-    return f"一起听了 {len(titles)} 首歌"
-
-
-async def _find_open_music_burst_message(
-    conversation_id: str,
-) -> dict[str, Any] | None:
-    rows = await db.query_raw(
-        """
-        SELECT id, metadata, content, created_at
-        FROM messages
-        WHERE conversation_id = $1
-          AND metadata->>'kind' = $2
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        conversation_id,
-        _MUSIC_ACTIVITY_BURST_KIND,
-    )
-    if not rows:
-        return None
-    row = rows[0]
-    metadata = _loads(row.get("metadata"), {})
-    segments = list(metadata.get("segments") or [])
-    if not segments:
-        return None
-    last_at = _parse_segment_time(segments[-1].get("at"))
-    if last_at is None:
-        return row
-    if _now() - last_at > _MUSIC_ACTIVITY_BURST_WINDOW:
-        return None
-    return row
-
-
-async def _update_music_burst_message(
-    message_id: str,
-    content: str,
-    metadata: dict[str, Any],
-) -> None:
-    await db.execute_raw(
-        """
-        UPDATE messages
-        SET content = $2,
-            metadata = $3::jsonb
-        WHERE id = $1
-        """,
-        message_id,
-        content,
-        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
-    )
-
-
 async def _emit_music_activity_burst_event(
     conversation_id: str,
     *,
@@ -216,109 +125,65 @@ async def _emit_music_activity_burst_event(
         logger.debug("failed to emit music activity burst websocket event: %r", exc)
 
 
-async def _append_music_activity_burst_segment(
+def _should_project_music_status_to_chat(
+    *,
+    status: str,
+    session: MusicCoListeningResponse | None,
+) -> bool:
+    """Project a joint transition, using the result of the session mutation.
+
+    A user leaving moves the session to agent_waiting_user; it is not a joint
+    exit. Pending and agent-only sessions have never been shared.
+    """
+    if session is None or session.initiated_by != "user_joined":
+        return False
+    expected = "ended" if status == "ended" else "active"
+    return session.status == expected
+
+
+async def _persist_shared_music_status(
     *,
     conversation_id: str,
+    status: str,
     track_id: str,
     track_title: str,
     actor: str,
     actor_name: str,
-    action: str,
-    session_id: str,
-) -> tuple[str, bool, bool]:
-    """Append one co-listening segment to the open burst or start a new one."""
-
-    segment: dict[str, Any] = {
+) -> str:
+    # Keep the existing event envelope/kind. Each message is now
+    # one confirmed shared transition, never a five-minute activity digest.
+    action = "exited" if status == "ended" else "joined"
+    segment = {
         "at": _iso(_now()),
         "action": action,
         "actor": actor,
-        "session_id": session_id,
+        "shared": True,
+        "session_id": conversation_id,
         "track_id": track_id,
         "track_title": track_title,
     }
-    if actor_name:
-        segment["actor_name"] = actor_name
-
-    lock = _MUSIC_BURST_LOCKS.setdefault(conversation_id, asyncio.Lock())
-    async with lock:
-        open_burst = await _find_open_music_burst_message(conversation_id)
-        if open_burst:
-            metadata = _loads(open_burst.get("metadata"), {})
-            segments = list(metadata.get("segments") or [])
-            if (
-                segments
-                and segments[-1].get("session_id") == session_id
-                and segments[-1].get("action") == action
-                and segments[-1].get("actor") == actor
-            ):
-                return str(open_burst["id"]), False, False
-            segments.append(segment)
-            metadata["kind"] = _MUSIC_ACTIVITY_BURST_KIND
-            metadata["segments"] = segments
-            metadata["music_track_id"] = track_id or metadata.get("music_track_id") or ""
-            metadata["music_track_title"] = track_title or metadata.get("music_track_title") or ""
-            metadata["music_status_actor_name"] = actor_name or metadata.get(
-                "music_status_actor_name", ""
-            )
-            if action == "joined" and actor == "agent":
-                metadata["music_status"] = "started"
-                metadata["music_status_actor"] = "agent"
-            listened = [seg for seg in segments if str(seg.get("action") or "") == "listened"]
-            titles = _burst_track_titles(listened, track_title)
-            if len(titles) == 1:
-                metadata["music_track_title"] = titles[0]
-            elif len(titles) > 1:
-                metadata["music_track_title"] = "、".join(titles)
-            content = _format_music_burst_content(track_title, segments)
-            message_id = str(open_burst["id"])
-            await _update_music_burst_message(message_id, content, metadata)
-            return message_id, False, True
-
-        metadata = {
-            "kind": _MUSIC_ACTIVITY_BURST_KIND,
-            "music_track_id": track_id,
-            "music_track_title": track_title,
-            "music_status_actor_name": actor_name,
-            "segments": [segment],
-        }
-        if action == "joined" and actor == "agent":
-            metadata["music_status"] = "started"
-            metadata["music_status_actor"] = "agent"
-        content = _format_music_burst_content(track_title, [segment])
-        message_id = await _persist_assistant_message(
-            conversation_id,
-            content,
-            metadata=metadata,
-        )
-        return message_id, True, False
-
-
-def _should_project_music_status_to_chat(
-    *,
-    status: str,
-    actor: str | None,
-    reason: str | None,
-    had_agent_join: bool,
-) -> tuple[bool, str | None]:
-    normalized = "ended" if status == "ended" else "started"
-    actor_key = (actor or "").strip()
-    if normalized == "started":
-        if actor_key == "user":
-            return False, None
-        if actor_key == "agent":
-            return True, "joined"
-        return False, None
-    if normalized == "ended":
-        if not had_agent_join:
-            return False, None
-        if reason in {
-            "user_stopped_before_agent_join",
-            "connection_lost_before_agent_join",
-            "user_pause_timeout_before_agent_join",
-        }:
-            return False, None
-        return True, "listened"
-    return False, None
+    verb = "已退出共听" if status == "ended" else "一起在听"
+    text = f"你们{verb}《{track_title}》"
+    metadata = {
+        "kind": _MUSIC_ACTIVITY_BURST_KIND,
+        "music_track_id": track_id,
+        "music_track_title": track_title,
+        "segments": [segment],
+    }
+    message_id = await _persist_assistant_message(
+        conversation_id, text, metadata=metadata,
+    )
+    await _emit_music_activity_burst_event(
+        conversation_id,
+        message_id=message_id,
+        text=text,
+        track_title=track_title,
+        track_id=track_id,
+        actor_name=actor_name,
+        segments=[segment],
+        updated=False,
+    )
+    return message_id
 
 
 async def persist_and_emit_music_status(
@@ -329,53 +194,28 @@ async def persist_and_emit_music_status(
     reason: str | None = None,
     actor: str | None = None,
     actor_name: str | None = None,
+    shared_session: MusicCoListeningResponse | None = None,
 ) -> str:
-    """Push co-listening UI state and project meaningful sessions to chat digest."""
+    """Push participant UI state and, when confirmed, a shared chat status."""
     normalized = "ended" if status == "ended" else "started"
     actor_label = _actor_label(actor=actor, actor_name=actor_name)
     legacy_text = f"{actor_label}{'已退出共听' if normalized == 'ended' else '已加入共听'}"
     track_title = (track.title if track else "") or ""
     track_id = (track.id if track else "") or ""
-    had_agent_join = normalized == "started" and actor == "agent"
-    if normalized == "ended":
-        had_agent_join = await _agent_join_status_exists(conversation_id=conversation_id)
-    should_project, burst_action = _should_project_music_status_to_chat(
-        status=normalized,
-        actor=actor,
-        reason=reason,
-        had_agent_join=had_agent_join,
-    )
-
     message_id = ""
-    if should_project and burst_action:
-        message_id, inserted, updated_burst = await _append_music_activity_burst_segment(
+    if _should_project_music_status_to_chat(
+        status=normalized,
+        session=shared_session,
+    ):
+        shared_track = shared_session.track if shared_session is not None else None
+        message_id = await _persist_shared_music_status(
             conversation_id=conversation_id,
-            track_id=track_id,
-            track_title=track_title,
+            status=normalized,
+            track_id=(shared_track.id if shared_track else track_id),
+            track_title=(shared_track.title if shared_track else track_title) or "音乐",
             actor=actor or "",
             actor_name=actor_name or "",
-            action=burst_action,
-            session_id=conversation_id,
         )
-        if message_id and (inserted or updated_burst):
-            rows = await db.query_raw(
-                "SELECT content, metadata FROM messages WHERE id = $1 LIMIT 1",
-                message_id,
-            )
-            if rows:
-                metadata = _loads(rows[0].get("metadata"), {})
-                segments = list(metadata.get("segments") or [])
-                text = str(rows[0].get("content") or "")
-                await _emit_music_activity_burst_event(
-                    conversation_id,
-                    message_id=message_id,
-                    text=text,
-                    track_title=str(metadata.get("music_track_title") or track_title),
-                    track_id=str(metadata.get("music_track_id") or track_id),
-                    actor_name=actor_name or "",
-                    segments=segments,
-                    updated=updated_burst,
-                )
 
     await manager.send_event(
         conversation_id,
@@ -417,6 +257,15 @@ async def end_co_listening_with_notice(
         return False
     if _is_agent_auto_listening(ended):
         return False
+    await persist_and_emit_music_status(
+        conversation_id=conversation_id,
+        status="ended",
+        track=ended.track,
+        reason=reason,
+        actor=status_actor,
+        actor_name=status_actor_name,
+        shared_session=ended,
+    )
     if prompt_key and ended.track is not None:
         reply = await _render_exit_reply(
             prompt_key,
@@ -443,14 +292,6 @@ async def end_co_listening_with_notice(
                 "music_co_listening": False,
             },
         )
-    await persist_and_emit_music_status(
-        conversation_id=conversation_id,
-        status="ended",
-        track=ended.track,
-        reason=reason,
-        actor=status_actor,
-        actor_name=status_actor_name,
-    )
     return True
 
 
@@ -489,6 +330,14 @@ async def reconcile_co_listening_for_status(
                     position_seconds=current.position_seconds,
                     is_playing=True,
                 )
+                await persist_and_emit_music_status(
+                    conversation_id=conversation_id,
+                    status="started",
+                    track=current.track,
+                    actor="agent",
+                    actor_name=ai_name,
+                    shared_session=joined,
+                )
                 await _emit_rendered_reply(
                     conversation_id=conversation_id,
                     prompt_key="music.agent_join_after_busy",
@@ -497,13 +346,6 @@ async def reconcile_co_listening_for_status(
                     activity=activity,
                     track=current.track,
                     music_co_listening=True,
-                )
-                await persist_and_emit_music_status(
-                    conversation_id=conversation_id,
-                    status="started",
-                    track=current.track,
-                    actor="agent",
-                    actor_name=ai_name,
                 )
                 return joined
             ended = await music.end_co_listening(
@@ -519,6 +361,7 @@ async def reconcile_co_listening_for_status(
                     track=ended.track,
                     reason="user_stopped_before_agent_join",
                     actor="user",
+                    shared_session=ended,
                 )
                 await _emit_rendered_reply(
                     conversation_id=conversation_id,
@@ -721,6 +564,7 @@ async def end_if_paused_after_timeout(
             track=ended.track,
             reason=reason,
             actor="user",
+            shared_session=ended,
         )
         return
 
@@ -764,6 +608,7 @@ async def begin_user_exit_waiting_with_notice(
         track=waiting.track,
         reason=reason,
         actor="user",
+        shared_session=waiting,
     )
     if waiting.track is not None and should_follow_up:
         reply = await _render_exit_reply(
@@ -859,6 +704,15 @@ async def end_agent_waiting_after_timeout(
     )
     if ended is None or _is_agent_auto_listening(ended):
         return
+    await persist_and_emit_music_status(
+        conversation_id=conversation_id,
+        status="ended",
+        track=ended.track,
+        reason="user_absent_timeout",
+        actor="agent",
+        actor_name=await _resolve_agent_name(agent_id),
+        shared_session=ended,
+    )
     if ended.track is not None:
         reply = await _render_exit_reply(
             "music.user_absent_exit",
@@ -885,14 +739,6 @@ async def end_agent_waiting_after_timeout(
                 "music_co_listening": False,
             },
         )
-    await persist_and_emit_music_status(
-        conversation_id=conversation_id,
-        status="ended",
-        track=ended.track,
-        reason="user_absent_timeout",
-        actor="agent",
-        actor_name=await _resolve_agent_name(agent_id),
-    )
 
 
 async def end_if_disconnected_after_timeout(
@@ -931,6 +777,7 @@ async def end_if_disconnected_after_timeout(
                     track=ended.track,
                     reason="connection_lost_before_agent_join",
                     actor="user",
+                    shared_session=ended,
                 )
         return
     await end_co_listening_with_notice(

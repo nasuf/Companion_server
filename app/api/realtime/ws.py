@@ -589,7 +589,7 @@ async def _handle_music_component_card(
         await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
         return True
     try:
-        await music.start_co_listening(
+        started_session = await music.start_co_listening(
             user_id=user_id,
             agent_id=agent.id,
             conversation_id=conversation_id,
@@ -602,6 +602,31 @@ async def _handle_music_component_card(
     except ValueError:
         logger.warning("music co-listening start skipped: invalid ownership")
         return False
+
+    if not user_was_joined:
+        await persist_and_emit_music_status(
+            conversation_id=conversation_id,
+            status="started",
+            track=track,
+            actor="user",
+            shared_session=(
+                started_session if accepted and agent_join_was_announced else None
+            ),
+        )
+    shared_track_changed = (
+        already_co_listening
+        and current_session.track is not None
+        and current_session.track.id != track.id
+    )
+    if accepted and (not agent_join_was_announced or shared_track_changed):
+        await persist_and_emit_music_status(
+            conversation_id=conversation_id,
+            status="started",
+            track=track,
+            actor="agent",
+            actor_name=getattr(agent, "name", "") or "我",
+            shared_session=started_session,
+        )
 
     if status == "sleep":
         prompt_key = "music.sleep_reject"
@@ -682,21 +707,6 @@ async def _handle_music_component_card(
             "music_co_listening": accepted,
         },
     })
-    if not user_was_joined:
-        await persist_and_emit_music_status(
-            conversation_id=conversation_id,
-            status="started",
-            track=track,
-            actor="user",
-        )
-    if accepted and not agent_join_was_announced:
-        await persist_and_emit_music_status(
-            conversation_id=conversation_id,
-            status="started",
-            track=track,
-            actor="agent",
-            actor_name=getattr(agent, "name", "") or "我",
-        )
     await ws.send_json({"type": "done", "data": {"message_id": user_message_id}})
     return True
 
