@@ -9,6 +9,10 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+# Imports of the real chat route are substantial on a cold two-core CI runner.
+# Keep a startup breadcrumb even before Uvicorn can log its lifespan startup.
+print("chat safety harness imports started", flush=True)
+
 from fastapi import FastAPI
 from redis.asyncio import Redis
 

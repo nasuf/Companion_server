@@ -10,24 +10,28 @@ from websockets.asyncio.client import connect
 from app.services.auth import create_jwt
 
 
-async def wait_state(client, worker, predicate):
-    deadline = time.monotonic() + 10
+async def wait_state(client, worker, predicate, *, timeout=10):
+    deadline = time.monotonic() + timeout
+    last_observation = "No response"
     while time.monotonic() < deadline:
         try:
             result = await client.get(f"http://{worker}:8000/test/state")
             if result.status_code == 200 and predicate(result.json()):
                 return result.json()
-        except httpx.HTTPError:
-            pass
+            last_observation = f"HTTP {result.status_code}: {result.text[:300]}"
+        except httpx.HTTPError as exc:
+            last_observation = f"{type(exc).__name__}: {exc}"
         await asyncio.sleep(0.05)
-    raise AssertionError(f"State deadline exceeded for {worker}")
+    raise AssertionError(f"State deadline exceeded for {worker} ({timeout}s); {last_observation}")
 
 
 async def main():
     completed = []
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         for worker in ("worker-a", "worker-b"):
-            await wait_state(client, worker, lambda _: True)
+            # Cold production-module imports on shared CI CPUs take longer
+            # than reconnect cleanup. Only startup gets this larger budget.
+            await wait_state(client, worker, lambda _: True, timeout=60)
         # Give both real psubscribe loops a chance to register; verify via delivery below.
         await asyncio.sleep(0.2)
         base = "http://worker-a:8000"

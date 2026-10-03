@@ -68,6 +68,8 @@ def main():
         print(json.dumps(summary, ensure_ascii=False))
     finally:
         for name in names:
+            state = run(["inspect", "--format", "{{json .State}}", name], check=False)
+            (output / f"{name}.state.json").write_text(state.stdout or state.stderr)
             log = run(["logs", name], check=False)
             (output / f"{name}.log").write_text(log.stdout + log.stderr)
             run(["rm", "-fv", name], check=False)
