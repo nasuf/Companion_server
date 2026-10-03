@@ -204,6 +204,7 @@ jobs:
             AXIOM_LOG_LEVEL=${{ vars.AXIOM_LOG_LEVEL }}
             EMBEDDING_PROVIDER=${{ vars.EMBEDDING_PROVIDER }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
+            WS_ALLOWED_ORIGINS=${{ vars.WS_ALLOWED_ORIGINS || 'https://servicewechat.com' }}
             PROACTIVE_PROCESSING_TIMEOUT_S=${{ vars.PROACTIVE_PROCESSING_TIMEOUT_S || '300' }}
             EMOTION_KEYWORD_FAST_PATH=${{ vars.EMOTION_KEYWORD_FAST_PATH || 'true' }}
             BACKGROUND_TASK_MAX_CONCURRENCY=${{ vars.BACKGROUND_TASK_MAX_CONCURRENCY || '256' }}

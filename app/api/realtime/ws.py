@@ -6,12 +6,16 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from prisma import Json
 
 from app.db import db
+from app.services.runtime.ws_auth import (
+    CHAT_PROTOCOL, TicketInvalid, TicketUnavailable, consume_ticket, offered_ticket, origin_allowed,
+)
 from app.observability import bind_context
 from app.observability.events import EVT_WS_CONNECT, EVT_WS_DISCONNECT, EVT_WS_MESSAGE_RECV
 from app.redis_client import is_redis_healthy
@@ -823,12 +827,32 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         await websocket.close(code=1011, reason="redis_unavailable")
         return
 
+    try:
+        ticket = offered_ticket(websocket.scope.get("subprotocols", []))
+        if not origin_allowed(websocket.headers.get("origin")):
+            raise TicketInvalid()
+        principal = await consume_ticket(ticket, conversation_id)
+    except TicketInvalid:
+        await websocket.close(code=4401, reason="authentication_required")
+        return
+    except TicketUnavailable:
+        await websocket.close(code=1011, reason="authentication_unavailable")
+        return
+
     conv = await db.conversation.find_unique(
         where={"id": conversation_id},
         include={"agent": True},
     )
     if not conv or conv.isDeleted or not conv.agent:
         await websocket.close(code=4004, reason="Conversation not found")
+        return
+
+    if ((principal.role != "admin" and principal.user_id != conv.userId)
+            or conv.agent.userId != conv.userId):
+        await websocket.close(code=4403, reason="conversation_access_denied")
+        return
+    if conv.agent.status == "provisioning":
+        await websocket.close(code=1013, reason="agent_initializing")
         return
 
     user_id = conv.userId
@@ -840,6 +864,9 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
     # username 一次性查询缓存 — 整个 WS 生命周期复用, 避免每条 message 查 DB
     user_record = await db.user.find_unique(where={"id": user_id})
     cached_username = user_record.username if user_record else None
+    if principal.expires_at <= time.time():
+        await websocket.close(code=4401, reason="session_expired")
+        return
 
     # 绑定整个 WS 连接生命周期的 context — 内层 message handler / 派生的所有
     # asyncio.create_task / fire_background 自动继承
@@ -851,7 +878,9 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         user_id=user_id,
         username=cached_username,
     ):
-        await websocket.accept()
+        await websocket.accept(subprotocol=CHAT_PROTOCOL)
+        logger.info("ws authentication mode=ticket",
+                    extra={"event": "ws.auth_mode", "ws_auth_mode": "ticket"})
         await manager.connect(
             conversation_id, user_id, websocket, workspace_id=workspace_id,
         )
@@ -884,12 +913,20 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
         try:
             while True:
                 try:
-                    raw = await asyncio.wait_for(
-                        websocket.receive_json(),
-                        timeout=_IDLE_TIMEOUT,
-                    )
+                    timeout = _IDLE_TIMEOUT
+                    remaining = principal.expires_at - time.time()
+                    if remaining <= 0:
+                        await websocket.close(code=4401, reason="session_expired")
+                        break
+                    timeout = min(timeout, remaining)
+                    raw = await asyncio.wait_for(websocket.receive_json(), timeout=timeout)
+                    if principal.expires_at <= time.time():
+                        await websocket.close(code=4401, reason="session_expired")
+                        break
                 except asyncio.TimeoutError:
-                    await websocket.close(code=4008, reason="Idle timeout")
+                    expired = principal.expires_at <= time.time()
+                    await websocket.close(code=4401 if expired else 4008,
+                                          reason="session_expired" if expired else "Idle timeout")
                     break
 
                 msg_type = raw.get("type", "")

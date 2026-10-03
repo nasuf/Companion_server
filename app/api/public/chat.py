@@ -1,7 +1,7 @@
 import json
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from prisma import Json
 from sse_starlette.sse import EventSourceResponse
 
@@ -67,6 +67,37 @@ async def _persist_user_message(
         )
     )
     return saved.id
+
+
+@router.post("/{conversation_id}/ws-ticket", dependencies=[Depends(require_redis)])
+async def websocket_ticket(conversation_id: str, response: Response, user: dict = Depends(require_user)):
+    from app.services.runtime.ws_auth import (
+        TicketInvalid, TicketRateLimited, TicketUnavailable, issue_ticket,
+    )
+
+    conv = await db.conversation.find_unique(where={"id": conversation_id}, include={"agent": True})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if user.get("role") != "admin" and conv.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your conversation")
+    if conv.isDeleted:
+        raise HTTPException(status_code=410, detail="Conversation deleted")
+    if not conv.agent:
+        raise HTTPException(status_code=404, detail="Conversation agent not found")
+    if conv.agent.userId != conv.userId:
+        raise HTTPException(status_code=403, detail="Conversation agent owner mismatch")
+    if conv.agent.status == "provisioning":
+        raise HTTPException(status_code=503, detail="AI 正在初始化中，请稍等...")
+    try:
+        result = await issue_ticket(conversation_id, user)
+    except TicketInvalid:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from None
+    except TicketRateLimited:
+        raise HTTPException(status_code=429, detail="Too many connection attempts", headers={"Retry-After": "60"}) from None
+    except TicketUnavailable:
+        raise HTTPException(status_code=503, detail="Connection authentication unavailable") from None
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @router.post("/{conversation_id}", dependencies=[Depends(require_redis)])

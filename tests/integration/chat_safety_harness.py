@@ -20,7 +20,7 @@ from app.api import deps, ownership
 from app.api.public import chat
 from app.api.realtime import ws
 from app.config import settings
-from app.services.runtime import ws_manager
+from app.services.runtime import ws_manager, ws_auth
 
 
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -78,7 +78,7 @@ async def get_redis():
     return redis
 
 
-ws_manager.get_redis = get_redis
+ws_manager.get_redis = ws_auth.get_redis = get_redis
 disconnect = manager.disconnect
 
 

@@ -30,17 +30,19 @@ def main():
     # Do not pull implicitly: use the image that has actually been built/reviewed.
     image = run(["image", "inspect", args.image, "--format", "{{.Id}}"]).stdout.strip()
     run(["image", "inspect", "redis:7-alpine"])
+    run(["image", "inspect", "nginx:1.24-alpine"])
     root = Path(__file__).resolve().parents[1]
     harness = root / "tests" / "integration"
     suffix = uuid.uuid4().hex[:10]
     network = f"companion-chat-test-{suffix}"
-    names = [f"{network}-{kind}" for kind in ("redis", "a", "b", "probe")]
+    names = [f"{network}-{kind}" for kind in ("redis", "a", "b", "probe", "nginx")]
     env = {
         "APP_ENV": "test", "PYTHON_DOTENV_DISABLED": "1", "PYTHONPATH": "/verification:/app",
         "DATABASE_URL": "postgresql://synthetic:synthetic@unavailable/synthetic",
         "DIRECT_DATABASE_URL": "postgresql://synthetic:synthetic@unavailable/synthetic",
         "REDIS_URL": "redis://test-redis:6379/0", "TRACE_BACKEND": "off",
         "ONLINE_MODEL": "false", "LANGSMITH_TRACING": "false",
+        "CORS_ALLOWED_ORIGINS": "https://banshengcomp.com,https://www.banshengcomp.com",
         "JWT_SECRET": "isolated-chat-e2e-secret-at-least-32-characters",
     }
     common = ["--network", network, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
@@ -57,6 +59,11 @@ def main():
         for name, alias in zip(names[1:3], ("worker-a", "worker-b")):
             run(["run", "-d", "--name", name, "--network-alias", alias, *common, image,
                  "python", "-m", "uvicorn", "chat_safety_harness:app", "--host", "0.0.0.0", "--port", "8000"])
+        run(["run", "-d", "--name", names[4], "--network", network,
+             "--network-alias", "test-entry", "--read-only", "--tmpfs", "/tmp",
+             "--user", "101:101", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+             "-v", f"{harness}:/verification:ro", "--entrypoint", "nginx", "nginx:1.24-alpine",
+             "-c", "/verification/chat_safety_nginx.conf", "-g", "daemon off;"])
         result = run(["run", "--name", names[3], *common, image,
                       "python", "/verification/chat_safety_probe.py"], check=False)
         (output / "probe.log").write_text(result.stdout + result.stderr)

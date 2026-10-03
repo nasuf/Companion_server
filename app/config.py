@@ -215,6 +215,8 @@ class Settings(BaseSettings):
     # JWT authentication
     jwt_secret: str = ""
     jwt_expiry_hours: int = 168  # 7 days
+    # WebSocket-only platform origins; HTTP CORS remains independently scoped.
+    ws_allowed_origins: str = "https://servicewechat.com"
     # Optional separate key for last-will content/contact encryption. If unset,
     # production falls back to the strong JWT secret enforced below.
     last_will_encryption_key: str = ""

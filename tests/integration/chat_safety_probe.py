@@ -6,6 +6,9 @@ import time
 
 import httpx
 from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidStatus
+
+from app.services.runtime.ws_auth import CHAT_PROTOCOL, TICKET_PROTOCOL_PREFIX
 
 from app.services.auth import create_jwt
 
@@ -54,11 +57,17 @@ async def main():
         assert (await client.get(base + "/test/state")).json()["effects"] == {
             "messages": 1, "history": 1, "trigger": 1}
         completed.append("Authenticated HTTP routes preserve success contracts")
+        async def mint():
+            response = await client.post(base + "/chat/conv-1/ws-ticket", headers=headers)
+            assert response.status_code == 200, response.text
+            assert response.headers["cache-control"] == "no-store"
+            return [CHAT_PROTOCOL, TICKET_PROTOCOL_PREFIX + response.json()["ticket"]]
+
         await client.post(base + "/test/hold-cleanup")
-        async with connect("ws://worker-a:8000/ws/conv-1") as old:
+        async with connect("ws://worker-a:8000/ws/conv-1", subprotocols=await mint()) as old:
             await old.send(json.dumps({"type": "ping"}))
             assert json.loads(await asyncio.wait_for(old.recv(), 3)) == {"type": "pong"}
-            async with connect("ws://worker-a:8000/ws/conv-1") as new:
+            async with connect("ws://worker-a:8000/ws/conv-1", subprotocols=await mint()) as new:
                 await new.send(json.dumps({"type": "ping"}))
                 assert json.loads(await asyncio.wait_for(new.recv(), 3)) == {"type": "pong"}
                 await old.wait_closed()
@@ -82,6 +91,72 @@ async def main():
                 completed.append("Late old endpoint finally preserves reconnected socket, local/cross-worker/workspace delivery")
         await wait_state(client, "worker-a", lambda s: not s["connections"] and not s["workspace_convs"])
         completed.append("Current socket disconnect clears routing indexes")
+        async def rejected(worker, protocols=None, path="conv-1", origin=None):
+            try:
+                async with connect(f"ws://{worker}:8000/ws/{path}", subprotocols=protocols, origin=origin):
+                    raise AssertionError("Unauthenticated socket accepted")
+            except InvalidStatus as exc:
+                assert exc.response.status_code == 403
+
+        # Ticket issued by worker A is consumed once by B using shared Redis.
+        offered = await mint()
+        async with connect("ws://worker-b:8000/ws/conv-1", subprotocols=offered) as authenticated:
+            assert authenticated.subprotocol == CHAT_PROTOCOL
+            await authenticated.send(json.dumps({"type": "ping"}))
+            assert json.loads(await asyncio.wait_for(authenticated.recv(), 3)) == {"type": "pong"}
+            await rejected("worker-a", offered)
+            payload = {"type": "stream", "data": {"chunk": "authenticated-cross-worker"}}
+            await client.post(base + "/test/send/conv", json=payload)
+            assert json.loads(await asyncio.wait_for(authenticated.recv(), 3)) == payload
+        completed.append("Tickets cross workers and cannot be replayed; authenticated Pub/Sub delivery preserved")
+        await wait_state(client, "worker-b", lambda s: not s["connections"])
+
+        # Two simultaneous handshakes compete for one Redis GETDEL.
+        offered = await mint()
+        async def race(worker):
+            try:
+                socket = await connect(f"ws://{worker}:8000/ws/conv-1", subprotocols=offered)
+                return socket
+            except InvalidStatus as exc:
+                assert exc.response.status_code == 403
+                return None
+        racers = await asyncio.gather(race("worker-a"), race("worker-b"))
+        assert sum(s is not None for s in racers) == 1
+        for socket in racers:
+            if socket is not None:
+                await socket.send(json.dumps({"type": "ping"}))
+                assert json.loads(await asyncio.wait_for(socket.recv(), 3)) == {"type": "pong"}
+                await socket.close()
+        completed.append("Simultaneous cross-worker handshakes admit exactly one connection")
+        for worker in ("worker-a", "worker-b"):
+            await wait_state(client, worker, lambda s: not s["connections"])
+        await rejected("worker-a", await mint(), path="other")
+        await rejected("worker-a", await mint(), origin="https://evil.example")
+        completed.append("Wrong conversation and browser Origin rejected before connection effects")
+        for worker in ("worker-a", "worker-b"):
+            await rejected(worker)
+            async with connect(f"ws://{worker}:8000/ws/conv-1", subprotocols=await mint()) as socket:
+                await socket.send(json.dumps({"type": "ping"}))
+                assert json.loads(await asyncio.wait_for(socket.recv(), 3)) == {"type": "pong"}
+        completed.append("Mandatory authentication rejects old clients while accepting ticket clients")
+        await wait_state(client, "test-entry", lambda _: True, timeout=60)
+        proxy_ticket = await client.post("http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers)
+        assert proxy_ticket.status_code == 200, proxy_ticket.text
+        async with connect("ws://test-entry:8000/api/ws/conv-1?client=flutter", subprotocols=[
+                CHAT_PROTOCOL, TICKET_PROTOCOL_PREFIX + proxy_ticket.json()["ticket"]]) as socket:
+            assert socket.subprotocol == CHAT_PROTOCOL
+            await socket.send(json.dumps({"type": "ping"}))
+            assert json.loads(await asyncio.wait_for(socket.recv(), 3)) == {"type": "pong"}
+        completed.append("Nginx API prefix rewrite preserves ticket subprotocol and Flutter client query")
+        # Check all supported origins at the actual proxy boundary.
+        for origin in ("https://banshengcomp.com", "https://www.banshengcomp.com", "https://servicewechat.com"):
+            response = await client.post("http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers)
+            async with connect("ws://test-entry:8000/api/ws/conv-1", origin=origin, subprotocols=[
+                    CHAT_PROTOCOL, TICKET_PROTOCOL_PREFIX + response.json()["ticket"]]) as socket:
+                await socket.send(json.dumps({"type": "ping"}))
+                assert json.loads(await asyncio.wait_for(socket.recv(), 3)) == {"type": "pong"}
+        completed.append("Web/H5/WeChat exact origins accepted through Nginx with authenticated tickets")
+
     print(json.dumps({"passed": len(completed), "checks": completed,
                       "scope": "Real HTTP/WS endpoints and Redis; synthetic DB/AI; two processes"}))
 

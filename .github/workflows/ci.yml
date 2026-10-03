@@ -60,6 +60,7 @@ jobs:
             tests/test_scheduler_distributed_jobs.py \
             tests/test_public_endpoints_ownership.py \
             tests/test_chat_endpoint_security.py \
+            tests/test_ws_auth.py \
             tests/test_ws_pubsub.py \
             tests/test_ws_ack.py \
             tests/test_ws_route_registered.py \
@@ -92,7 +93,9 @@ jobs:
         run: docker build -t companion-server:ci-chat-safety .
 
       - name: Prepare disposable Redis image
-        run: docker pull redis:7-alpine
+        run: |
+          docker pull redis:7-alpine
+          docker pull nginx:1.24-alpine
 
       - name: Verify chat security and reconnect over real HTTP, WebSocket and Redis
         run: |
