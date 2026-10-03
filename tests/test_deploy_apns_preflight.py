@@ -66,11 +66,15 @@ def test_workflow_preflight_precedes_production_stop_and_fits_expression_limit()
     assert script.index("source scripts/deploy_apns_preflight.sh") < script.index(
         'echo "==> Stopping server before migrations"')
     assert "CANDIDATE_IMAGE" in script
-    # GitHub expands interpolated strings to format(...) expressions. Count
-    # escaping and argument overhead conservatively, with 500 chars of margin
-    # below the platform's 21000-char limit (the previous inline block failed).
+    assert script.index("source scripts/deploy_host_maintenance.sh") > script.index(
+        'echo "==> Waiting for server health"')
+    # GitHub expands interpolated strings to format(...) expressions. Keep a
+    # large budget for platform-specific serialization, including UTF-8 bytes;
+    # a tight character-only estimate did not catch the remote rejection.
     expressions = re.findall(r"\$\{\{(.*?)\}\}", script, re.S)
     literal = re.sub(r"\$\{\{.*?\}\}", "{0}", script, flags=re.S)
     escaped = literal.replace("'", "''").replace("{", "{{").replace("}", "}}")
-    estimated_length = len(escaped) + sum(map(len, expressions)) + len(expressions) * 6 + 64
-    assert estimated_length < 20500
+    estimated_bytes = (len(escaped.encode("utf-8"))
+                       + sum(len(e.encode("utf-8")) for e in expressions)
+                       + len(expressions) * 6 + 64)
+    assert estimated_bytes < 18000
