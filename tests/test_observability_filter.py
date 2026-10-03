@@ -9,6 +9,11 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
+import queue
+
+import httpx
+import pytest
 
 from app.observability.context import bind_context
 from app.observability.log_filter import ContextInjectionFilter
@@ -64,3 +69,50 @@ def test_filter_no_context_no_attrs():
     for attr in ("conversation_id", "agent_id", "agent_name", "user_id",
                  "workspace_id", "username", "request_id", "trace_id"):
         assert not hasattr(record, attr), f"unexpected {attr} on record"
+
+
+@pytest.mark.parametrize("origin", ["https://api.push.apple.com", "https://api.sandbox.push.apple.com:443"])
+def test_apns_token_is_removed_from_formatted_and_cached_structured_record(origin):
+    token = "abcd" * 17
+    record = logging.LogRecord("httpx", logging.INFO, __file__, 1,
+        'HTTP Request: %s %s "%s %d %s"',
+        ("POST", httpx.URL(f"{origin}/3/device/{token}"), "HTTP/2", 200, "OK"), None)
+    record.message = record.getMessage()  # Simulate an earlier formatter.
+    with bind_context(conversation_id="synthetic-conversation"):
+        assert ContextInjectionFilter().filter(record)
+    assert "/3/device/[redacted]" in record.getMessage()
+    assert token not in repr(record.__dict__)
+    assert record.conversation_id == "synthetic-conversation"
+    # Axiom applies the filter before enqueue and again in its listener.
+    assert ContextInjectionFilter().filter(record)
+    assert token not in repr(record.__dict__)
+
+
+def test_apns_token_never_enters_the_actual_axiom_queue_handler_record():
+    token = "abcd" * 17
+    record = logging.LogRecord("httpx", logging.INFO, __file__, 1,
+        f"HTTP Request: POST https://api.push.apple.com/3/device/{token}?legacy=private", (), None)
+    items = queue.Queue()
+    handler = logging.handlers.QueueHandler(items)
+    handler.addFilter(ContextInjectionFilter())
+    handler.handle(record)
+    queued = items.get_nowait()
+    assert "/3/device/[redacted]" in queued.getMessage()
+    assert token not in repr(queued.__dict__) and "legacy=private" not in repr(queued.__dict__)
+
+
+def test_non_apns_http_logging_retains_its_original_args_and_message():
+    args = ("GET", httpx.URL("https://synthetic.invalid/ordinary-request"), "HTTP/1.1", 200, "OK")
+    record = logging.LogRecord("httpx", logging.INFO, __file__, 1,
+        'HTTP Request: %s %s "%s %d %s"', args, None)
+    message = record.getMessage()
+    assert ContextInjectionFilter().filter(record)
+    assert record.getMessage() == message and record.args is args
+
+
+def test_bad_httpx_formatting_cannot_emit_private_fallback_args():
+    record = logging.LogRecord("httpx", logging.INFO, __file__, 1, "%d",
+        ("https://api.push.apple.com/3/device/private",), None)
+    assert ContextInjectionFilter().filter(record)
+    assert record.getMessage() == "HTTPX log formatting unavailable"
+    assert "device/private" not in repr(record.__dict__)

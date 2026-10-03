@@ -62,6 +62,9 @@ jobs:
             tests/test_ownership_dependencies.py \
             tests/test_api_integration.py \
             tests/test_llm_resilience.py \
+            tests/test_observability_filter.py \
+            tests/test_legacy_apns_logging.py \
+            tests/test_deploy_apns_preflight.py \
             tests/test_prompt_store.py \
             tests/test_admin_prompt_replay.py \
             tests/test_admin_stats_operations.py \
