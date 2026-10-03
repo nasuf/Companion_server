@@ -135,6 +135,8 @@ class ShortCircuitCtx:
     # 当前会话所属 workspace, 供删除等需按会话隔离的 handler 使用 (防多伴侣
     # 跨 workspace 误删/误查)。
     workspace_id: str | None = None
+    # The graph parent owns fragment scheduling and the single turn completion.
+    defer_turn_finalization: bool = False
 
     async def finalize(
         self,
@@ -208,6 +210,7 @@ class ShortCircuitCtx:
             # 告别 / 系统确认有专属 arm 原因 (判定窗据此不做 B 追问); 危机短路不 arm
             proactive_reason=short_circuit_arm_reason(kind),
             workspace_id=self.workspace_id,
+            **({"defer_turn_finalization": True} if self.defer_turn_finalization else {}),
         ):
             yield evt
 

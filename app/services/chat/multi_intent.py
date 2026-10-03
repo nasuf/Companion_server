@@ -61,6 +61,7 @@ async def short_circuit_reply(
     voice_context: Any = None,
     proactive_reason: str | None = "short_circuit",
     workspace_id: str | None = None,
+    defer_turn_finalization: bool = False,
 ) -> list[dict]:
     """构造短路分支的 SSE 事件列表。
 
@@ -145,7 +146,16 @@ async def short_circuit_reply(
     }
     assistant_message_id = None
     if prepared_voice is not None:
-        assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
+        try:
+            assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
+        except BaseException:
+            if defer_turn_finalization:
+                from app.services.speech_output.delivery import discard_prepared_voice_output
+                try:
+                    await discard_prepared_voice_output(prepared_voice)
+                except Exception:
+                    logger.warning("[TTS] graph short-circuit cleanup failed", exc_info=True)
+            raise
         if assistant_message_id:
             try:
                 from app.services.speech_output.delivery import (
@@ -183,13 +193,15 @@ async def short_circuit_reply(
 
             await discard_prepared_voice_output(prepared_voice)
             prepared_voice = None
+    elif defer_turn_finalization:
+        assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
     else:
         _fire_background(save_replies_fn(*save_args, **save_kwargs))
     # 图灵测试条数变化: 短路回复也计入"上一轮条数" (用户感知的是气泡数,
     # 不区分回复来自哪条管线). 累计 offset+1, 最后一次写入即本轮总数.
     from app.services.chat.reply_count_state import save_last_reply_count
     _fire_background(save_last_reply_count(conversation_id, reply_index_offset + 1))
-    if not sub_intent_mode:
+    if not sub_intent_mode and not defer_turn_finalization:
         await finish_assistant_turn(
             conversation_id=conversation_id,
             agent_id=agent_id,
@@ -212,7 +224,7 @@ async def short_circuit_reply(
         "event": "reply",
         "data": json.dumps(event_data),
     }]
-    if include_done and not sub_intent_mode:
+    if include_done and not sub_intent_mode and not defer_turn_finalization:
         events.append(_DONE_EVENT)
     return events
 
@@ -302,6 +314,7 @@ async def finalize_short_circuit(
     voice_context: Any = None,
     proactive_reason: str | None = "short_circuit",
     workspace_id: str | None = None,
+    defer_turn_finalization: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """短路分支尾部：primary reply → sub-intent 循环 → done → trace 关闭。
 
@@ -326,11 +339,12 @@ async def finalize_short_circuit(
         voice_context=voice_context,
         proactive_reason=proactive_reason,
         workspace_id=workspace_id,
+        defer_turn_finalization=defer_turn_finalization,
     )
     for evt in events:
         yield evt
 
-    if not sub_intent_mode and pending_sub_fragments:
+    if not sub_intent_mode and not defer_turn_finalization and pending_sub_fragments:
         async for evt in process_sub_intents(
             pending_sub_fragments, conversation_id, agent, user_id,
             reply_context, start_index=reply_index_offset + 1,
@@ -338,6 +352,6 @@ async def finalize_short_circuit(
         ):
             yield evt
 
-    if not sub_intent_mode:
+    if not sub_intent_mode and not defer_turn_finalization:
         yield _DONE_EVENT
         tracer.close()

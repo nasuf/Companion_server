@@ -1886,7 +1886,7 @@ def test_orchestrator_crisis_skips_full_fetch_parallel_context():
     import inspect
     from app.services.chat import orchestrator
 
-    src = inspect.getsource(orchestrator.stream_chat_response)
+    src = inspect.getsource(orchestrator._stream_legacy_response)
 
     # crisis_force_intent 分支必须出现这两个轻量 fetch
     assert "crisis_memory_task" in src, "crisis 轻量 memory fetch 缺失"
@@ -1917,7 +1917,7 @@ def test_orchestrator_crisis_followup_skips_current_state_fast_path_and_full_fet
     from app.services.chat import orchestrator as orch_mod
     from app.services.chat import crisis_guard_phase
 
-    src = inspect.getsource(orch_mod.stream_chat_response)
+    src = inspect.getsource(orch_mod._stream_legacy_response)
     guard_src = inspect.getsource(crisis_guard_phase.run_crisis_guard)
     guard_pos = src.find("run_crisis_guard(")
     fast_path_pos = src.find("current_state_fast_path =")

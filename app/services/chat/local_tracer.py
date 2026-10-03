@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -53,6 +54,21 @@ _local_trace_handler: ContextVar[Any | None] = ContextVar(
     "local_trace_handler",
     default=None,
 )
+
+_graph_node_parent: ContextVar[tuple[str, str] | None] = ContextVar("graph_node_parent", default=None)
+
+
+@contextmanager
+def graph_node(parent_id: str | None):
+    """Attach raw-provider calls to their graph node within the current root."""
+    handler = _local_trace_handler.get()
+    value = (handler.local_trace_id, str(parent_id)) if handler and parent_id else None
+    token = _graph_node_parent.set(value)
+    try:
+        yield
+    finally:
+        _graph_node_parent.reset(token)
+
 
 _configure_hook_registered = False
 
@@ -437,9 +453,11 @@ def record_manual_llm_run(
     total = None
     if input_tokens is not None or output_tokens is not None:
         total = (input_tokens or 0) + (output_tokens or 0)
+    graph_parent = _graph_node_parent.get()
+    parent_id = graph_parent[1] if graph_parent and graph_parent[0] == handler.local_trace_id else handler.local_root_run_id
     _fire(_write_manual_run(
         trace_id=handler.local_trace_id,
-        parent_id=handler.local_root_run_id,
+        parent_id=parent_id,
         name=name,
         model_name=model_name,
         messages=messages,
@@ -536,13 +554,13 @@ async def _write_root_start(
         logger.debug(f"[local-trace] root start write failed {trace_id}: {type(e).__name__}: {e}")
 
 
-async def _write_root_end(trace_id: str, ended_at: datetime) -> None:
+async def _write_root_end(trace_id: str, ended_at: datetime, *, error: str | None = None) -> None:
     try:
         from app.db import db
 
         await db.tracerun.update(
             where={"id": trace_id},
-            data={"status": "success", "endedAt": ended_at},
+            data={"status": "error" if error else "success", "endedAt": ended_at, **({"error": error} if error else {})},
         )
     except Exception as e:
         logger.debug(f"[local-trace] root end write failed {trace_id}: {type(e).__name__}: {e}")
@@ -555,6 +573,7 @@ class LocalTracer:
         self._user_message = user_message
         self._conversation_id = conversation_id
         self._closed = False
+        self._error: str | None = None
         self._attached = False
         self._cv_token = None
         self.trace_id: str | None = None
@@ -592,6 +611,11 @@ class LocalTracer:
         self._attached = True
         return self
 
+    def mark_failed(self, error: BaseException) -> None:
+        # Keep exception messages/secrets out of the synthetic root. Nodes
+        # record their own error details through the existing callback handler.
+        self._error = type(error).__name__
+
     def close(self) -> None:
         """Close the root run and uninstall the handler. Idempotent."""
         if self._closed:
@@ -607,7 +631,10 @@ class LocalTracer:
                 # tasks hold their own context copies either way.
                 _local_trace_handler.set(None)
             self._cv_token = None
-        _fire(_write_root_end(self.trace_id, _utcnow()))
+        if self._error:
+            _fire(_write_root_end(self.trace_id, _utcnow(), error=self._error))
+        else:
+            _fire(_write_root_end(self.trace_id, _utcnow()))
 
 
 # ─────────────────────────────────────────────────────────────────

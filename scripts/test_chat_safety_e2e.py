@@ -25,6 +25,7 @@ def run(args, *, check=True, timeout=120):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--graph", action="store_true", help="Qualify the G01 graph stream adapter")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     # Do not pull implicitly: use the image that has actually been built/reviewed.
@@ -37,7 +38,7 @@ def main():
     network = f"companion-chat-test-{suffix}"
     names = [f"{network}-{kind}" for kind in ("redis", "a", "b", "probe", "nginx")]
     env = {
-        "APP_ENV": "test", "PYTHON_DOTENV_DISABLED": "1", "PYTHONPATH": "/verification:/app",
+        "APP_ENV": "test", "PYTHON_DOTENV_DISABLED": "1", "PYTHONPATH": "/verification:/tests:/app",
         "DATABASE_URL": "postgresql://synthetic:synthetic@unavailable/synthetic",
         "DIRECT_DATABASE_URL": "postgresql://synthetic:synthetic@unavailable/synthetic",
         "REDIS_URL": "redis://test-redis:6379/0", "TRACE_BACKEND": "off",
@@ -45,9 +46,11 @@ def main():
         "CORS_ALLOWED_ORIGINS": "https://banshengcomp.com,https://www.banshengcomp.com",
         "JWT_SECRET": "isolated-chat-e2e-secret-at-least-32-characters",
     }
+    if args.graph:
+        env["CHAT_GRAPH_E2E"] = "1"
     common = ["--network", network, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
               "--security-opt", "no-new-privileges", "-w", "/tmp",
-              "-v", f"{harness}:/verification:ro"]
+              "-v", f"{harness}:/verification:ro", "-v", f"{root / 'tests'}:/tests:ro"]
     for key, value in env.items():
         common.extend(["-e", f"{key}={value}"])
     output = args.output or Path(tempfile.mkdtemp(prefix="companion-chat-e2e-"))
@@ -65,7 +68,7 @@ def main():
              "-v", f"{harness}:/verification:ro", "--entrypoint", "nginx", "nginx:1.24-alpine",
              "-c", "/verification/chat_safety_nginx.conf", "-g", "daemon off;"])
         result = run(["run", "--name", names[3], *common, image,
-                      "python", "/verification/chat_safety_probe.py"], check=False)
+                      "python", "/verification/graph_chat_probe.py" if args.graph else "/verification/chat_safety_probe.py"], check=False)
         (output / "probe.log").write_text(result.stdout + result.stderr)
         if result.returncode:
             raise RuntimeError(f"E2E failed; diagnostics in {output}")

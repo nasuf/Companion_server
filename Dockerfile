@@ -47,7 +47,7 @@ RUN set -eu; \
     fi; \
     rm -rf /var/lib/apt/lists/* /tmp/debian.sources.orig
 
-COPY pyproject.toml ./
+COPY pyproject.toml runtime-constraints.txt ./
 COPY app ./app
 COPY jobs ./jobs
 COPY prisma ./prisma
@@ -55,10 +55,10 @@ COPY scripts ./scripts
 
 RUN if [ -n "$PIP_INDEX_URL" ]; then \
         pip install --upgrade pip -i "$PIP_INDEX_URL" \
-        && pip install . -i "$PIP_INDEX_URL"; \
+        && pip install -c runtime-constraints.txt . -i "$PIP_INDEX_URL"; \
     else \
         pip install --upgrade pip \
-        && pip install .; \
+        && pip install -c runtime-constraints.txt .; \
     fi \
     && prisma generate --schema prisma/schema.prisma
 

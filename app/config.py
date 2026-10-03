@@ -1,9 +1,14 @@
+from typing import Literal
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # Runtime environment
     app_env: str = "development"
+
+    # G01: legacy by default; stable conversation allowlist is required.
+    chat_executor: Literal["legacy", "langgraph"] = "legacy"
+    chat_graph_conversation_allowlist: str = ""
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/companion"

@@ -408,7 +408,7 @@ async def _fetch_intent_context(
     return "\n".join(lines)
 
 
-async def stream_chat_response(
+async def _stream_legacy_response(
     conversation_id: str,
     user_message: str,
     agent,
@@ -1975,3 +1975,40 @@ async def stream_chat_response(
         # LocalTracer 依赖 close 还原 ContextVar handler; 不还原会让同一
         # task 处理的下一条消息的 LLM 调用错挂到本次 trace 树.
         tracer.close()
+
+
+async def stream_chat_response(
+    conversation_id: str,
+    user_message: str,
+    agent,
+    user_id: str,
+    reply_context: dict | None = None,
+    *,
+    save_user_message: bool = True,
+    user_message_id: str | None = None,
+    delivered_from_queue: bool = False,
+    sub_intent_mode: bool = False,
+    forced_intent: IntentType | None = None,
+    reply_index_offset: int = 0,
+    parent_patience: int | None = None,
+    parent_trace_id: str | None = None,
+    achievement_turn_final: bool = True,
+) -> AsyncGenerator[dict, None]:
+    """Choose once. Legacy children retain their parent's executor."""
+    from app.services.chat.graph_executor import select_executor, stream_graph_response
+
+    executor = "legacy" if sub_intent_mode else select_executor(conversation_id)
+    implementation = stream_graph_response if executor == "langgraph" else _stream_legacy_response
+    stream = implementation(
+        conversation_id, user_message, agent, user_id, reply_context,
+        save_user_message=save_user_message, user_message_id=user_message_id,
+        delivered_from_queue=delivered_from_queue, sub_intent_mode=sub_intent_mode,
+        forced_intent=forced_intent, reply_index_offset=reply_index_offset,
+        parent_patience=parent_patience, parent_trace_id=parent_trace_id,
+        achievement_turn_final=achievement_turn_final,
+    )
+    try:
+        async for event in stream:
+            yield event
+    finally:
+        await stream.aclose()

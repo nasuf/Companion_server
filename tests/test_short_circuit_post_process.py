@@ -1199,7 +1199,7 @@ def test_orchestrator_finally_logic_present():
     import inspect
     from app.services.chat import orchestrator as orch_mod
 
-    src = inspect.getsource(orch_mod.stream_chat_response)
+    src = inspect.getsource(orch_mod._stream_legacy_response)
     assert "post_process_fired" in src, "缺少 post_process_fired flag"
     assert "last_short_circuit_reply" in src, "未读取 ctx.last_short_circuit_reply"
     # 正向 gate: sc_reply is not None (防 mid-try exception phantom fire)
@@ -1214,7 +1214,7 @@ def test_orchestrator_current_state_fast_path_precedes_full_fetch_and_intent_llm
     import inspect
     from app.services.chat import orchestrator as orch_mod
 
-    src = inspect.getsource(orch_mod.stream_chat_response)
+    src = inspect.getsource(orch_mod._stream_legacy_response)
     fast_detect_pos = src.find("detect_current_state_fast_path(user_message)")
     fetch_guard_pos = src.find("elif forced_intent is None and not current_state_fast_path")
     intent_fast_pos = src.find("elif current_state_fast_path:")
@@ -1238,108 +1238,36 @@ def test_orchestrator_skips_ai_memory_for_state_and_schedule_short_circuits():
     import inspect
     from app.services.chat import orchestrator as orch_mod
 
-    src = inspect.getsource(orch_mod.stream_chat_response)
+    src = inspect.getsource(orch_mod._stream_legacy_response)
     assert "skip_ai_memory=(" in src
     assert '{"schedule_query", "current_state"}' in src
 
 
-@pytest.mark.skip(reason="full orchestrator integration test — too many lazy imports to mock cleanly; covered by manual e2e DB verification")
 @pytest.mark.asyncio
-async def test_orchestrator_intent_short_circuit_fires_post_process():
-    """SCHEDULE_QUERY 意图短路 → orchestrator finally 兜底应 fire _background_post_process."""
-    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+@pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+async def test_orchestrator_intent_short_circuit_fires_post_process(monkeypatch, executor):
+    """Both executors submit a query turn once and exclude AI self-memory."""
+    from app.config import settings
+    from tests.graph_harness_support import configure_chat
     from app.services.chat import orchestrator as orch_mod
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
 
-    # 收集 fire_background 调用
-    fire_calls: list = []
-    real_fire_background = orch_mod._fire_background
-
-    def _capturing_fire(coro):
-        fire_calls.append(coro)
-        # 尝试关闭协程避免警告
-        try:
-            coro.close()
-        except Exception:
-            pass
-
-    # 构造一个最小化的 SCHEDULE_QUERY mock 路径
-    agent = SimpleNamespace(id="agent1", name="Test", userId="user1", status="active")
-    saved_msg = SimpleNamespace(id="msg1")
-    conv = SimpleNamespace(workspaceId=None)
-
-    async def _empty_handler(user_message, ctx, **kwargs):
-        # 模拟短路 handler 调 ctx.finalize
-        async def _gen():
-            ctx.last_short_circuit_reply = "我现在在烤面包"
-            yield {"event": "reply", "data": "{}"}
-            yield {"event": "done", "data": "{}"}
-        return True, _gen(), None
-
-    with (
-        patch.object(orch_mod, "_fire_background", side_effect=_capturing_fire),
-        patch.object(orch_mod, "db", new=MagicMock(
-            message=MagicMock(
-                create=AsyncMock(return_value=saved_msg),
-                find_many=AsyncMock(return_value=[]),
-            ),
-            conversation=MagicMock(
-                find_unique=AsyncMock(return_value=conv),
-                update=MagicMock(),
-            ),
-        )),
-        # bind_agent_context / reset_current_agent are lazy-imported inside the function
-        patch("app.services.runtime_config.bind_agent_context",
-              new_callable=AsyncMock, return_value=None),
-        patch("app.services.runtime_config.reset_current_agent"),
-        patch.object(orch_mod, "create_tracer") as mock_tracer_cls,
-        patch.object(orch_mod, "run_boundary") as mock_boundary,
-        patch.object(orch_mod, "resolve_pending_contradiction") as mock_pc,
-        patch.object(orch_mod, "resolve_pending_deletion") as mock_pd,
-        patch.object(orch_mod, "detect_intent_unified", new_callable=AsyncMock,
-                     return_value=IntentResult(intent=IntentType.SCHEDULE_QUERY, confidence=1.0,
-                                                metadata={"query_type": "current"})),
-        patch.object(orch_mod, "_fetch_intent_context", new_callable=AsyncMock, return_value=""),
-        patch.object(orch_mod, "fetch_parallel_context", new_callable=AsyncMock,
-                     return_value=SimpleNamespace(
-                         memory_relevance="weak",
-                         retrieval_result=([], [], None),
-                         portrait=None,
-                         user_emotion={"emotion": "中性", "intensity": 0, "confidence": 0.0},
-                         time_memories=[],
-                         schedule=None,
-                         topic_intimacy=0.5,
-                         ai_status=None,
-                         schedule_context=None,
-                     )),
-        patch.object(orch_mod, "maybe_awaken_l3", new_callable=AsyncMock, return_value=([], "无")),
-        patch.object(orch_mod, "handle_schedule_query", side_effect=_empty_handler),
-        patch.object(orch_mod, "push_topic", new_callable=AsyncMock, return_value=None),
-    ):
-        # 配置 boundary / preflight 不命中 (空 generator + ctx.stopped=False)
-        async def _empty_gen(*args, **kwargs):
-            if False:
-                yield {}
-        mock_boundary.return_value = _empty_gen()
-        mock_pc.return_value = _empty_gen()
-        mock_pd.return_value = _empty_gen()
-        mock_tracer = MagicMock(
-            trace_id=None, is_active=False, safe_trace_id=None,
-            close=MagicMock(),
-        )
-        mock_tracer_cls.return_value.enter.return_value = mock_tracer
-        mock_tracer_cls.return_value.attach_to_parent.return_value = mock_tracer
-
-        events = await _drain(orch_mod.stream_chat_response(
-            conversation_id="conv1",
-            user_message="你现在在干嘛",
-            agent=agent,
-            user_id="user1",
-        ))
-
-    # 期望 fire_background 至少有一次调用是 _background_post_process
-    # (短路 SCHEDULE_QUERY 命中 → finally 兜底 fire)
-    coro_names = [getattr(c, "__qualname__", str(c)) for c in fire_calls]
-    post_proc_calls = [n for n in coro_names if "post_process" in n.lower() or "run_post_process" in n]
-    assert post_proc_calls, (
-        f"短路意图 finally 兜底必须 fire post_process; 实际 fire_background 调用: {coro_names}"
+    io = configure_chat(monkeypatch)
+    monkeypatch.setattr(settings, "chat_executor", executor)
+    orch_mod.detect_intent_unified.return_value = IntentResult(
+        intent=IntentType.SCHEDULE_QUERY, confidence=1.0,
+        metadata={"query_type": "date"},
     )
+
+    async def handle(user_message, ctx, **kwargs):
+        return True, ctx.finalize("明天有安排", kind="schedule_query"), "synthetic schedule"
+
+    monkeypatch.setattr(orch_mod, "handle_schedule_query", handle)
+    events = await _drain(orch_mod.stream_chat_response(
+        conversation_id="c-1", user_message="你明天有什么安排", agent=io.agent,
+        user_id="u-1",
+    ))
+    assert [event["event"] for event in events] == ["reply", "done"]
+    orch_mod._background_post_process.assert_called_once()
+    assert orch_mod._background_post_process.call_args.kwargs["skip_ai_memory"] is True
+    orch_mod.finish_assistant_turn.assert_awaited_once()

@@ -136,3 +136,34 @@ async def send(scope: str, data: dict):
     if scope == "workspace":
         return {"count": await manager.send_to_workspace("workspace-1", data["type"], data["data"])}
     return {"ok": await manager.send_event("conv-1", data["type"], data["data"])}
+
+
+# G01 extension: exercise the real production queue/stream adapter and graph.
+# This control endpoint exists exclusively on the isolated test ASGI app.
+import os
+if os.environ.get("CHAT_GRAPH_E2E") == "1":
+    from graph_harness_support import configure_chat
+    class TestPatches:
+        def setattr(self, target, name, value):
+            setattr(target, name, value)
+    graph_io = configure_chat(TestPatches())
+    settings.chat_graph_conversation_allowlist = "conv-1"
+    from app.services.chat import orchestrator as graph_chat
+    ws_manager.manager = manager
+
+    @app.post("/test/generate")
+    async def generate_graph(data: dict):
+        graph_chat._save_replies.reset_mock()
+        graph_chat.finish_assistant_turn.reset_mock()
+        graph_chat._background_post_process.reset_mock()
+        graph_io.achievement.reset_mock()
+        graph_chat._save_replies.return_value = None if data.get("fail_save") else "assistant-1"
+        await ws._queue_reply(
+            None, conversation_id="conv-1", agent=graph_io.agent, user_id="owner",
+            user_message=data.get("message", "synthetic ordinary message"),
+            user_message_id="user-1", reply_context={"delay_seconds":0, "turn_message_ids":["user-1"]},
+        )
+        return {"saves":graph_chat._save_replies.await_count,
+                "finish":graph_chat.finish_assistant_turn.await_count,
+                "background":graph_chat._background_post_process.call_count,
+                "turn_achievement":graph_io.achievement.call_count}

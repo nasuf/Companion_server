@@ -39,7 +39,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install -c runtime-constraints.txt -e ".[dev]"
 
       - name: Validate Prisma schema
         run: prisma validate --schema prisma/schema.prisma
@@ -60,6 +60,11 @@ jobs:
           pytest \
             tests/test_release_archive.py \
             tests/test_release_archive_workflow.py \
+            tests/test_chat_main_graph.py \
+            tests/test_local_tracer.py \
+            tests/test_orchestrator_phases.py \
+            tests/test_short_circuit_post_process.py \
+            tests/test_crisis_safety.py \
             tests/test_agent_evals.py \
             tests/test_security_config.py \
             tests/test_auth_security.py \
@@ -115,6 +120,12 @@ jobs:
           python3 scripts/test_chat_safety_e2e.py \
             --image companion-server:ci-chat-safety \
             --output "$RUNNER_TEMP/chat-safety-e2e"
+
+      - name: Verify graph execution through authenticated WebSocket and Redis
+        run: |
+          python3 scripts/test_chat_safety_e2e.py --graph \
+            --image companion-server:ci-chat-safety \
+            --output "$RUNNER_TEMP/chat-safety-e2e/graph"
 
       - name: Upload integration diagnostics
         if: always()

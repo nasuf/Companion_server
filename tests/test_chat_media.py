@@ -214,11 +214,9 @@ def test_audio_storage_key_has_deterministic_conversation_scope():
 def test_chat_media_route_precedes_chat_conversation_fallback():
     from app.main import app
 
-    paths = [
-        getattr(route, "path", "")
-        for route in app.routes
-        if "POST" in getattr(route, "methods", set())
-    ]
+    # FastAPI 0.142 uses lazy included routers in app.routes. OpenAPI resolves
+    # that tree in registration order, including the concrete POST paths.
+    paths = [path for path, methods in app.openapi()["paths"].items() if "post" in methods]
 
     assert paths.index("/chat/media") < paths.index("/chat/{conversation_id}")
 
