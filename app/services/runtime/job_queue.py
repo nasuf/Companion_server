@@ -38,6 +38,91 @@ _DEFAULT_JOB_TTL_S = 7 * 24 * 3600
 _HANDLERS: dict[str, JobHandler] = {}
 
 
+# These scripts protect job state transitions. Enqueue/pop crash recovery and
+# fencing of external business effects remain separate queue work.
+_START_JOB_LUA = """
+if redis.call('HGET', KEYS[1], 'status') ~= 'queued' then return {} end
+redis.call('HINCRBY', KEYS[1], 'attempts', 1)
+redis.call('HSET', KEYS[1], 'status', 'running', 'updated_at', ARGV[2])
+redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+return redis.call('HGETALL', KEYS[1])
+"""
+
+_FINISH_JOB_LUA = """
+if redis.call('HGET', KEYS[1], 'status') ~= 'running'
+   or redis.call('HGET', KEYS[1], 'attempts') ~= ARGV[2] then return 0 end
+redis.call('HSET', KEYS[1], 'status', ARGV[3],
+           'updated_at', ARGV[4], 'last_error', ARGV[5])
+redis.call('ZREM', KEYS[2], ARGV[1])
+if ARGV[3] == 'queued' then
+    redis.call('ZADD', KEYS[3], ARGV[6], ARGV[1])
+elseif ARGV[3] == 'dead_letter' then
+    redis.call('LPUSH', KEYS[4], ARGV[1])
+elseif ARGV[3] == 'succeeded' then
+    redis.call('LPUSH', KEYS[5], ARGV[1])
+    redis.call('LTRIM', KEYS[5], 0, 499)
+end
+return 1
+"""
+
+_MANUAL_JOB_LUA = """
+local state = redis.call('HGET', KEYS[1], 'status')
+if not state then return {'missing'} end
+local retry = ARGV[2] == 'retry'
+if retry and state ~= 'dead_letter' and state ~= 'failed' then
+    return {'conflict', state}
+end
+if not retry and state ~= 'queued' and state ~= 'dead_letter'
+   and state ~= 'failed' and state ~= 'resolved' then
+    return {'conflict', state}
+end
+if retry then
+    redis.call('HSET', KEYS[1], 'status', 'queued',
+               'updated_at', ARGV[3], 'last_error', '')
+elseif state ~= 'resolved' then
+    redis.call('HSET', KEYS[1], 'status', 'resolved', 'updated_at', ARGV[3])
+end
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('LREM', KEYS[4], 0, ARGV[1])
+redis.call('LREM', KEYS[5], 0, ARGV[1])
+redis.call('LREM', KEYS[6], 0, ARGV[1])
+if retry then redis.call('LPUSH', KEYS[6], ARGV[1]) end
+return {'ok', redis.call('HGETALL', KEYS[1])}
+"""
+
+_RECOVER_JOB_LUA = """
+local score = redis.call('ZSCORE', KEYS[2], ARGV[1])
+if not score or tonumber(score) > tonumber(ARGV[2]) then return 0 end
+if redis.call('HGET', KEYS[1], 'status') ~= 'running' then
+    redis.call('ZREM', KEYS[2], ARGV[1])
+    return 0
+end
+redis.call('HSET', KEYS[1], 'status', 'queued', 'updated_at', ARGV[3])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('LPUSH', KEYS[3], ARGV[1])
+return 1
+"""
+
+_DEFER_JOB_LUA = """
+if redis.call('HGET', KEYS[1], 'status') ~= 'queued' then return 0 end
+redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+return 1
+"""
+
+
+class RuntimeJobConflict(RuntimeError):
+    def __init__(self, job_id: str, status: str, action: str):
+        self.job_id = job_id
+        self.status = status
+        label = "重试" if action == "retry" else "标记解决"
+        super().__init__(f"任务当前状态为 {status}，不能{label}。")
+
+
+def _flat_hash(values: list[Any]) -> dict[str, str]:
+    return _decode_hash(dict(zip(values[::2], values[1::2], strict=True)))
+
+
 def register_job_handler(job_type: str, handler: JobHandler) -> None:
     _HANDLERS[job_type] = handler
 
@@ -140,11 +225,12 @@ async def _recover_stale_running_jobs(stale_after_s: int) -> None:
     stale = [v for v in stale if v]
     if not stale:
         return
-    await redis.zrem(_RUNNING_KEY, *stale)
     now = str(int(time.time()))
     for job_id in stale:
-        await redis.hset(_job_key(job_id), mapping={"status": "queued", "updated_at": now})
-        await redis.lpush(_READY_KEY, job_id)
+        await redis.eval(
+            _RECOVER_JOB_LUA, 3, _job_key(job_id), _RUNNING_KEY, _READY_KEY,
+            job_id, cutoff, now,
+        )
 
 
 async def _run_job(job_id: str) -> None:
@@ -157,72 +243,61 @@ async def _run_job(job_id: str) -> None:
             await _run_job_with_lock(job_id)
     except DistributedLockNotAcquired:
         redis = await get_redis()
-        await redis.zadd(_DELAYED_KEY, {job_id: int(time.time()) + 5})
+        await redis.eval(
+            _DEFER_JOB_LUA, 2, _job_key(job_id), _DELAYED_KEY,
+            job_id, int(time.time()) + 5,
+        )
 
 
 async def _run_job_with_lock(job_id: str) -> None:
     redis = await get_redis()
-    raw = await redis.hgetall(_job_key(job_id))
+    raw = await redis.eval(
+        _START_JOB_LUA, 2, _job_key(job_id), _RUNNING_KEY,
+        job_id, int(time.time()),
+    )
     if not raw:
         return
-    job = _decode_hash(raw)
+    job = _flat_hash(raw)
     job_type = job.get("type", "")
     handler = _HANDLERS.get(job_type)
-    attempts = int(job.get("attempts") or "0") + 1
+    attempts = int(job["attempts"])
     max_attempts = int(job.get("max_attempts") or _DEFAULT_MAX_ATTEMPTS)
-    now = int(time.time())
-
-    await redis.hset(
-        _job_key(job_id),
-        mapping={"status": "running", "attempts": str(attempts), "updated_at": str(now)},
-    )
-    await redis.zadd(_RUNNING_KEY, {job_id: now})
 
     try:
         if handler is None:
             raise RuntimeError(f"No handler registered for runtime job type: {job_type}")
         payload = json.loads(job.get("payload") or "{}")
         await handler(payload)
-    except Exception as e:
-        await redis.zrem(_RUNNING_KEY, job_id)
-        if attempts >= max_attempts:
-            await redis.hset(
-                _job_key(job_id),
-                mapping={
-                    "status": "dead_letter",
-                    "last_error": str(e)[:500],
-                    "updated_at": str(int(time.time())),
-                },
-            )
-            await redis.lpush(_DLQ_KEY, job_id)
+    except Exception as error:
+        status = "dead_letter" if attempts >= max_attempts else "queued"
+        committed = await _finish_job(
+            redis, job_id, attempts, status, str(error)[:500],
+            retry_at=int(time.time()) + _DEFAULT_RETRY_DELAY_S * attempts,
+        )
+        if committed:
             logger.warning(
-                f"Runtime job dead-lettered: {job_id} type={job_type} error={e}",
-                extra={"event": "runtime_job", "job_type": job_type, "job_id": job_id, "phase": "dead_letter"},
+                f"Runtime job failed: {job_id} type={job_type} error={error}",
+                extra={"event": "runtime_job", "job_type": job_type,
+                       "job_id": job_id, "phase": "dead_letter" if status == "dead_letter" else "retry"},
             )
-            return
-        delay = _DEFAULT_RETRY_DELAY_S * attempts
-        await redis.hset(
-            _job_key(job_id),
-            mapping={
-                "status": "queued",
-                "last_error": str(e)[:500],
-                "updated_at": str(int(time.time())),
-            },
-        )
-        await redis.zadd(_DELAYED_KEY, {job_id: int(time.time()) + delay})
-        logger.warning(
-            f"Runtime job failed; retry scheduled: {job_id} type={job_type} error={e}",
-            extra={"event": "runtime_job", "job_type": job_type, "job_id": job_id, "phase": "retry"},
-        )
         return
+    await _finish_job(redis, job_id, attempts, "succeeded", "")
 
-    await redis.zrem(_RUNNING_KEY, job_id)
-    await redis.hset(
-        _job_key(job_id),
-        mapping={"status": "succeeded", "updated_at": str(int(time.time())), "last_error": ""},
-    )
-    await redis.lpush(_SUCCEEDED_KEY, job_id)
-    await _safe_ltrim(redis, _SUCCEEDED_KEY, 0, 499)
+
+async def _finish_job(
+    redis, job_id: str, attempts: int, status: str, error: str, *, retry_at: int = 0,
+) -> bool:
+    committed = bool(await redis.eval(
+        _FINISH_JOB_LUA, 5, _job_key(job_id), _RUNNING_KEY,
+        _DELAYED_KEY, _DLQ_KEY, _SUCCEEDED_KEY,
+        job_id, attempts, status, int(time.time()), error, retry_at,
+    ))
+    if not committed:
+        logger.warning(
+            "Ignored obsolete runtime job result",
+            extra={"event": "runtime_job", "job_id": job_id, "phase": "stale_result_ignored"},
+        )
+    return committed
 
 
 async def inspect_runtime_job(job_id: str) -> dict[str, Any] | None:
@@ -270,29 +345,34 @@ async def list_runtime_jobs(
     return {"items": items, "count": len(items), "limit": limit, "counts": counts}
 
 
-async def retry_runtime_job(job_id: str) -> dict[str, Any] | None:
+async def _manual_job_transition(job_id: str, action: str) -> dict[str, Any] | None:
     redis = await get_redis()
-    job = await inspect_runtime_job(job_id)
-    if job is None:
-        return None
-    now = str(int(time.time()))
-    await redis.hset(
-        _job_key(job_id),
-        mapping={"status": "queued", "updated_at": now, "last_error": ""},
+    result = await redis.eval(
+        _MANUAL_JOB_LUA, 6, _job_key(job_id), _RUNNING_KEY, _DELAYED_KEY,
+        _DLQ_KEY, _SUCCEEDED_KEY, _READY_KEY, job_id, action, int(time.time()),
     )
-    await redis.zrem(_RUNNING_KEY, job_id)
-    await redis.zrem(_DELAYED_KEY, job_id)
-    await _safe_lrem(redis, _DLQ_KEY, job_id)
-    await _safe_lrem(redis, _SUCCEEDED_KEY, job_id)
-    await redis.lpush(_READY_KEY, job_id)
-    return await inspect_runtime_job(job_id)
+    outcome = _decode(result[0])
+    if outcome == "missing":
+        return None
+    if outcome == "conflict":
+        raise RuntimeJobConflict(job_id, _decode(result[1]) or "unknown", action)
+    return _serialize_job(_flat_hash(result[1]))
+
+
+async def retry_runtime_job(job_id: str) -> dict[str, Any] | None:
+    return await _manual_job_transition(job_id, "retry")
 
 
 async def retry_runtime_jobs(job_ids: list[str]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     missing: list[str] = []
+    conflicts: list[dict[str, str]] = []
     for job_id in list(dict.fromkeys(job_ids))[:200]:
-        job = await retry_runtime_job(job_id)
+        try:
+            job = await retry_runtime_job(job_id)
+        except RuntimeJobConflict as error:
+            conflicts.append({"id": job_id, "status": error.status, "detail": str(error)})
+            continue
         if job is None:
             missing.append(job_id)
         else:
@@ -301,23 +381,13 @@ async def retry_runtime_jobs(job_ids: list[str]) -> dict[str, Any]:
         "items": results,
         "retried_count": len(results),
         "missing_ids": missing,
+        "conflicts": conflicts,
+        "conflict_count": len(conflicts),
     }
 
 
 async def resolve_runtime_job(job_id: str) -> dict[str, Any] | None:
-    redis = await get_redis()
-    job = await inspect_runtime_job(job_id)
-    if job is None:
-        return None
-    await redis.hset(
-        _job_key(job_id),
-        mapping={"status": "resolved", "updated_at": str(int(time.time()))},
-    )
-    await redis.zrem(_RUNNING_KEY, job_id)
-    await redis.zrem(_DELAYED_KEY, job_id)
-    await _safe_lrem(redis, _DLQ_KEY, job_id)
-    await _safe_lrem(redis, _SUCCEEDED_KEY, job_id)
-    return await inspect_runtime_job(job_id)
+    return await _manual_job_transition(job_id, "resolve")
 
 
 async def runtime_job_counts() -> dict[str, int]:
@@ -348,26 +418,6 @@ async def _zset_ids(redis, key: str, limit: int) -> list[str]:
         str(member)
         for member, _score in sorted(zset.items(), key=lambda item: item[1])[:limit]
     ]
-
-
-async def _safe_lrem(redis, key: str, value: str) -> None:
-    if hasattr(redis, "lrem"):
-        await redis.lrem(key, 0, value)
-        return
-    values = getattr(redis, "lists", {}).get(key)
-    if isinstance(values, list):
-        while value in values:
-            values.remove(value)
-
-
-async def _safe_ltrim(redis, key: str, start: int, end: int) -> None:
-    if hasattr(redis, "ltrim"):
-        await redis.ltrim(key, start, end)
-        return
-    values = getattr(redis, "lists", {}).get(key)
-    if isinstance(values, list):
-        stop = None if end == -1 else end + 1
-        values[:] = values[start:stop]
 
 
 def _serialize_job(job: dict[str, str]) -> dict[str, Any]:

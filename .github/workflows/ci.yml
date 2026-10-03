@@ -10,7 +10,18 @@ on:
 jobs:
   backend-quality:
     runs-on: ubuntu-24.04
+    services:
+      runtime-test-redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
+      RUNTIME_JOB_TEST_REDIS_URL: redis://127.0.0.1:6379/15
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       JWT_SECRET: ci-test-jwt-secret-for-backend-quality-tests

@@ -6,9 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 
 from app.api.jwt_auth import require_admin_jwt
 from app.services.runtime.job_queue import (
+    RuntimeJobConflict,
     inspect_runtime_job,
     list_runtime_jobs,
     retry_runtime_jobs,
@@ -38,7 +40,10 @@ async def retry_jobs(
     payload: RuntimeJobBatchRequest,
     _: dict = Depends(require_admin_jwt),
 ) -> dict[str, Any]:
-    return await retry_runtime_jobs(payload.job_ids)
+    try:
+        return await retry_runtime_jobs(payload.job_ids)
+    except RedisError as error:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
 
 
 @router.get("/{job_id}")
@@ -57,7 +62,12 @@ async def retry_job(
     job_id: str,
     _: dict = Depends(require_admin_jwt),
 ) -> dict[str, Any]:
-    job = await retry_runtime_job(job_id)
+    try:
+        job = await retry_runtime_job(job_id)
+    except RuntimeJobConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
     if job is None:
         raise HTTPException(status_code=404, detail="runtime_job_not_found")
     return job
@@ -68,7 +78,12 @@ async def resolve_job(
     job_id: str,
     _: dict = Depends(require_admin_jwt),
 ) -> dict[str, Any]:
-    job = await resolve_runtime_job(job_id)
+    try:
+        job = await resolve_runtime_job(job_id)
+    except RuntimeJobConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
     if job is None:
         raise HTTPException(status_code=404, detail="runtime_job_not_found")
     return job
