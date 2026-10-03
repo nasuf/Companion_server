@@ -39,6 +39,7 @@ jobs:
             set -euo pipefail
             sudo mkdir -p /app/companion-server
             sudo chown -R "$USER:$USER" /app/companion-server
+            sudo install -d -m 700 -o "$USER" -g "$USER" /app/companion-release-archives
 
       # 用 rsync 而不是 scp, 两个理由:
       #
@@ -62,6 +63,7 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ vars.VPS_USERNAME }}
           VPS_PORT: ${{ vars.VPS_PORT }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
 
@@ -71,6 +73,13 @@ jobs:
           # 主机不可达时 ssh-keyscan 退出 1, set -e 会在这里就停 —— 比让 rsync
           # 抛一句 host key 相关的错好读。stderr 不吞: 失败原因要留在日志里。
           ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          # Run the candidate's standalone script before rsync replaces the old
+          # compose/source and before the next step rewrites .env or stops server.
+          ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" -o BatchMode=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "set -eu; ARCHIVE_DOCKER=docker; if command -v docker >/dev/null && ! docker ps >/dev/null 2>&1; then ARCHIVE_DOCKER='sudo docker'; fi; python3 - server --root /app/companion-release-archives/server --source /app/companion-server --docker \"\$ARCHIVE_DOCKER\" --incoming-commit '$RELEASE_SHA' --allow-first-deploy" \
+            < scripts/release_archive.py
 
           # --checksum 是增量能不能成立的关键, 不是可选优化: git 不存 mtime, 每次
           # checkout 出来的文件时间戳都是全新的, rsync 默认的 size+mtime 快速判定

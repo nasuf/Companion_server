@@ -2,6 +2,11 @@
 # Sourced after server health succeeds; keep existing cleanup and cron commands.
 : "${DOCKER:?DOCKER must be set by the deployment caller}"
 
+# Archive retention is separate from Docker prune: keep 14 days and at least
+# three verified rollback artifacts, including the latest pointer. Failure does
+# not remove any artifacts or undo an already healthy deployment.
+python3 scripts/release_archive.py prune --root /app/companion-release-archives/server || true
+
 echo "==> Cleaning up old docker images (>72h old, dangling, untagged)"
 # 防止历史 deploy 镜像层堆积撑爆磁盘 (Redis bgsave 一旦失败就锁所有
 # 写命令, 整个后端起不来). until=72h 安全保留近 3 天回滚目标; -a
