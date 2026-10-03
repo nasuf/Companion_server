@@ -1,10 +1,12 @@
 """Execute the deployment preflight shell with a fake Docker boundary."""
 from pathlib import Path
 import os
+import re
 import subprocess
 import textwrap
 
 import pytest
+import yaml
 
 
 @pytest.mark.parametrize("exists,owner,check_exit,expected_success", [
@@ -15,10 +17,8 @@ import pytest
 ])
 def test_image_failure_blocks_production_stop_and_retention_is_owned(
         tmp_path, exists, owner, check_exit, expected_success):
-    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/deploy.yml").read_text()
-    block = workflow.split("            # Keep the previous image", 1)[1]
-    block = "            # Keep the previous image" + block.split(
-        '            echo "==> Starting data services"', 1)[0]
+    root = Path(__file__).resolve().parents[1]
+    block = (root / "scripts/deploy_apns_preflight.sh").read_text()
     log = tmp_path / "commands"
     # No real Docker, filesystem cleanup, production settings or SSH commands.
     fake = r'''
@@ -55,3 +55,22 @@ DOCKER=docker
         assert "--entrypoint /bin/true sha256:previous" in commands
         assert "--network none --read-only" in commands
         assert "--entrypoint python sha256:candidate -m scripts.check_apns_log_redaction" in commands
+
+
+def test_workflow_preflight_precedes_production_stop_and_fits_expression_limit():
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/deploy.yml").read_text())
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"]
+                if s["name"] == "Deploy server stack on VPS")
+    script = step["with"]["script"]
+    assert script.index("source scripts/deploy_apns_preflight.sh") < script.index(
+        'echo "==> Stopping server before migrations"')
+    assert "CANDIDATE_IMAGE" in script
+    # GitHub expands interpolated strings to format(...) expressions. Count
+    # escaping and argument overhead conservatively, with 500 chars of margin
+    # below the platform's 21000-char limit (the previous inline block failed).
+    expressions = re.findall(r"\$\{\{(.*?)\}\}", script, re.S)
+    literal = re.sub(r"\$\{\{.*?\}\}", "{0}", script, flags=re.S)
+    escaped = literal.replace("'", "''").replace("{", "{{").replace("}", "}}")
+    estimated_length = len(escaped) + sum(map(len, expressions)) + len(expressions) * 6 + 64
+    assert estimated_length < 20500
