@@ -956,7 +956,7 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 pass
         finally:
             logger.info("ws disconnected", extra={"event": EVT_WS_DISCONNECT})
-            await manager.disconnect(conversation_id)
+            await manager.disconnect(conversation_id, expected=websocket)
             # 立即摘除该连接 → 实时在线瞬时反映离开.
             await remove_ws_online(user_id, ws_conn_id)
             try:

@@ -59,6 +59,14 @@ jobs:
             tests/test_agent_initialization_queue.py \
             tests/test_scheduler_distributed_jobs.py \
             tests/test_public_endpoints_ownership.py \
+            tests/test_chat_endpoint_security.py \
+            tests/test_ws_pubsub.py \
+            tests/test_ws_ack.py \
+            tests/test_ws_route_registered.py \
+            tests/test_user_turn_aggregation.py \
+            tests/test_scheduler_aggregation_enqueue.py \
+            tests/test_aggregation_workspace_isolation.py \
+            tests/test_redis_resilience.py \
             tests/test_ownership_dependencies.py \
             tests/test_api_integration.py \
             tests/test_llm_resilience.py \
@@ -72,3 +80,30 @@ jobs:
             tests/test_proactive_policy.py \
             tests/test_proactive_reminder_double_fire.py \
             -q
+
+  chat-safety-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build candidate runtime image
+        run: docker build -t companion-server:ci-chat-safety .
+
+      - name: Prepare disposable Redis image
+        run: docker pull redis:7-alpine
+
+      - name: Verify chat security and reconnect over real HTTP, WebSocket and Redis
+        run: |
+          python3 scripts/test_chat_safety_e2e.py \
+            --image companion-server:ci-chat-safety \
+            --output "$RUNNER_TEMP/chat-safety-e2e"
+
+      - name: Upload integration diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-safety-e2e
+          path: ${{ runner.temp }}/chat-safety-e2e
+          retention-days: 7

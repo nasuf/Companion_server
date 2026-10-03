@@ -6,6 +6,8 @@ from prisma import Json
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import require_redis
+from app.api.jwt_auth import require_user
+from app.api.ownership import require_agent_owner_any_status, require_user_self
 from app.db import db
 from app.models.message import ChatRequest
 from app.services.interaction.delayed_queue import enqueue_or_append_delayed
@@ -68,15 +70,21 @@ async def _persist_user_message(
 
 
 @router.post("/{conversation_id}", dependencies=[Depends(require_redis)])
-async def chat(conversation_id: str, data: ChatRequest):
+async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(require_user)):
     conv = await db.conversation.find_unique(
         where={"id": conversation_id},
         include={"agent": True},
     )
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    if user.get("role") != "admin" and conv.userId != user.get("sub"):
+        raise HTTPException(status_code=403, detail="Not your conversation")
     if conv.isDeleted:
         raise HTTPException(status_code=410, detail="Conversation deleted")
+    if not conv.agent:
+        raise HTTPException(status_code=404, detail="Conversation agent not found")
+    if conv.agent.userId != conv.userId:
+        raise HTTPException(status_code=403, detail="Conversation agent owner mismatch")
 
     # 阻断: agent 还在初始化中（人生经历生成未完成）
     if conv.agent and conv.agent.status == "provisioning":
@@ -153,8 +161,20 @@ async def chat(conversation_id: str, data: ChatRequest):
     return EventSourceResponse(_queued_stream(delay_seconds))
 
 
+async def _require_proactive_target(
+    user_id: str,
+    _user: dict = Depends(require_user_self),
+    agent=Depends(require_agent_owner_any_status),
+):
+    # Admin may act for another user, but the selected user/agent pair must
+    # still describe the same owner. Never trust the query user_id alone.
+    if agent.userId != user_id:
+        raise HTTPException(status_code=403, detail="Agent and user do not match")
+    return agent
+
+
 @router.post("/proactive/{agent_id}", dependencies=[Depends(require_redis)])
-async def trigger_proactive(agent_id: str, user_id: str):
+async def trigger_proactive(agent_id: str, user_id: str, _agent=Depends(_require_proactive_target)):
     """触发AI主动消息。"""
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     if not workspace_id:
@@ -169,7 +189,7 @@ async def trigger_proactive(agent_id: str, user_id: str):
 
 
 @router.get("/proactive/{agent_id}/history")
-async def proactive_history(agent_id: str, user_id: str, limit: int = 10):
+async def proactive_history(agent_id: str, user_id: str, limit: int = 10, _agent=Depends(_require_proactive_target)):
     """获取主动消息历史。"""
     workspace_id = await resolve_workspace_id(user_id=user_id, agent_id=agent_id)
     history = await get_proactive_history(agent_id, user_id, limit, workspace_id=workspace_id)

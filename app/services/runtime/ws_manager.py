@@ -101,8 +101,12 @@ class ConnectionManager:
             f"workspace={(workspace_id or 'none')[:8]}"
         )
 
-    async def disconnect(self, conv_id: str) -> None:
+    async def disconnect(self, conv_id: str, *, expected: WebSocket | None = None) -> None:
         async with self._lock:
+            # A replaced socket may finish cleanup after its replacement was
+            # registered. Only that socket's own registration may be removed.
+            if expected is not None and self._connections.get(conv_id) is not expected:
+                return
             self._connections.pop(conv_id, None)
             user_id = self._conv_users.pop(conv_id, None)
             workspace_id = self._conv_workspace.pop(conv_id, None)
@@ -180,7 +184,7 @@ class ConnectionManager:
             return True
         except Exception as e:
             logger.warning(f"WS send failed conv={conv_id[:8]} type={event_type}: {e}")
-            await self.disconnect(conv_id)
+            await self.disconnect(conv_id, expected=ws)
             return False
 
     async def _publish(self, channel: str, event_type: str, data: Any) -> bool:

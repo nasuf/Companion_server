@@ -212,6 +212,89 @@ async def test_disconnect_cleans_workspace_and_user_indexes():
     assert "user-1" not in mgr._user_convs
 
 
+@pytest.mark.asyncio
+async def test_replaced_socket_cleanup_preserves_new_connection_and_routing():
+    mgr = ConnectionManager()
+    old_ws, new_ws = _make_ws(), _make_ws()
+    await mgr.connect("conv-1", "user-1", old_ws, workspace_id="ws-1")
+    await mgr.connect("conv-1", "user-1", new_ws, workspace_id="ws-1")
+    await mgr.disconnect("conv-1", expected=old_ws)
+    assert mgr.get("conv-1") is new_ws
+    assert mgr._user_convs["user-1"] == {"conv-1"}
+    assert mgr._workspace_convs["ws-1"] == {"conv-1"}
+    assert await mgr._send_local_conv("conv-1", "stream", {"chunk": "after reconnect"})
+    new_ws.send_json.assert_awaited_once_with({"type": "stream", "data": {"chunk": "after reconnect"}})
+    await mgr.disconnect("conv-1", expected=new_ws)
+    assert mgr.get("conv-1") is None
+    assert not mgr._user_convs and not mgr._workspace_convs
+    assert not mgr._conv_users and not mgr._conv_workspace
+
+
+@pytest.mark.asyncio
+async def test_failed_send_on_replaced_socket_does_not_unregister_replacement():
+    mgr = ConnectionManager()
+    old_ws, new_ws = _make_ws(), _make_ws()
+    sending, fail = asyncio.Event(), asyncio.Event()
+
+    async def blocked_send(_):
+        sending.set()
+        await fail.wait()
+        raise RuntimeError("old socket closed during send")
+
+    old_ws.send_json.side_effect = blocked_send
+    await mgr.connect("conv-1", "user-1", old_ws, workspace_id="ws-1")
+    task = asyncio.create_task(mgr._send_local_conv("conv-1", "stream", {"chunk": "old"}))
+    try:
+        await asyncio.wait_for(sending.wait(), timeout=1)
+        await mgr.connect("conv-1", "user-1", new_ws, workspace_id="ws-1")
+        fail.set()
+        assert await asyncio.wait_for(task, timeout=1) is False
+        assert mgr.get("conv-1") is new_ws
+        await mgr._handle_message({"type": "pmessage", "channel": b"ws:conv:{conv-1}",
+                                   "data": json.dumps({"type": "done", "data": {"message_id": "new"}})})
+        new_ws.send_json.assert_awaited_once_with({"type": "done", "data": {"message_id": "new"}})
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_current_socket_send_failure_cleans_all_indexes():
+    mgr = ConnectionManager()
+    ws = _make_ws()
+    ws.send_json.side_effect = RuntimeError("disconnected")
+    await mgr.connect("conv-1", "user-1", ws, workspace_id="ws-1")
+    assert await mgr._send_local_conv("conv-1", "stream", {}) is False
+    assert not mgr._connections and not mgr._user_convs and not mgr._workspace_convs
+    assert not mgr._conv_users and not mgr._conv_workspace
+
+
+@pytest.mark.asyncio
+async def test_stale_cleanup_after_current_socket_disconnected_is_idempotent():
+    mgr = ConnectionManager()
+    ws = _make_ws()
+    await mgr.disconnect("missing", expected=ws)
+    await mgr.connect("conv-1", "user-1", ws)
+    await mgr.disconnect("conv-1", expected=ws)
+    await mgr.disconnect("conv-1", expected=ws)
+    assert not mgr._connections and not mgr._user_convs and not mgr._conv_users
+
+
+@pytest.mark.asyncio
+async def test_stale_cleanup_does_not_affect_other_conversation_in_workspace():
+    mgr = ConnectionManager()
+    old_ws, new_ws, other_ws = _make_ws(), _make_ws(), _make_ws()
+    await mgr.connect("conv-1", "user-1", old_ws, workspace_id="ws-1")
+    await mgr.connect("conv-2", "user-1", other_ws, workspace_id="ws-1")
+    await mgr.connect("conv-1", "user-1", new_ws, workspace_id="ws-1")
+    await mgr.disconnect("conv-1", expected=old_ws)
+    assert mgr._workspace_convs["ws-1"] == {"conv-1", "conv-2"}
+    await mgr.disconnect("conv-1", expected=new_ws)
+    assert mgr._workspace_convs["ws-1"] == {"conv-2"}
+    assert mgr.get("conv-2") is other_ws
+
+
 # ────────────────────────── subscriber lifecycle ──────────────────────────
 
 @pytest.mark.asyncio
