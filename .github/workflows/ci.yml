@@ -11,6 +11,18 @@ jobs:
   backend-quality:
     runs-on: ubuntu-24.04
     services:
+      tts-test-postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
       runtime-test-redis:
         image: redis:7-alpine
         ports:
@@ -21,6 +33,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     env:
+      TTS_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       RUNTIME_JOB_TEST_REDIS_URL: redis://127.0.0.1:6379/15
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -58,6 +71,8 @@ jobs:
       - name: Run backend quality tests
         run: |
           pytest \
+            tests/test_voice_enrollment_flow.py \
+            tests/test_voice_enrollment_postgres.py \
             tests/test_release_archive.py \
             tests/test_release_archive_workflow.py \
             tests/test_chat_main_graph.py \

@@ -69,7 +69,7 @@ def test_multipart_enrollment_persists_voice_and_schedules_sample_cleanup(enroll
     assert args[2:7] == (
         "聊天音色", "qwen-audio-3.0-tts-plus", "cloned-new", "female", "request-1",
     )
-    assert args[8] == "admin-1"
+    assert args[7] == "admin-1"
     flow.delete.assert_not_awaited()
     assert flow.cleanups == ["delete_enrollment_audio_later"]
 
@@ -107,6 +107,23 @@ def test_enrollment_database_failure_deletes_provider_voice(enrollment_flow):
     flow = enrollment_flow
     flow.database.query_raw.side_effect = RuntimeError("database unavailable")
 
-    assert upload(flow).status_code == 500
+    response = upload(flow)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "音色保存失败，本次创建未完成，请稍后重试"
     flow.delete.assert_awaited_once_with("cloned-new")
+    assert flow.cleanups == ["delete_enrollment_audio_later"]
+
+
+def test_enrollment_cleanup_failure_is_logged_without_hiding_save_error(
+    enrollment_flow, caplog,
+):
+    flow = enrollment_flow
+    flow.database.query_raw.side_effect = RuntimeError("database unavailable")
+    flow.delete.side_effect = RuntimeError("provider unavailable")
+
+    response = upload(flow)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "音色保存失败，本次创建未完成，请稍后重试"
+    assert "provider cleanup failed voice_id=cloned-new" in caplog.text
     assert flow.cleanups == ["delete_enrollment_audio_later"]

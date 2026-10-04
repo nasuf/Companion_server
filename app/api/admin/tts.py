@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import logging
 import mimetypes
 import uuid
@@ -316,7 +315,7 @@ async def clone_voice_profile(
                 )
                 VALUES (
                     $1, $2, 'dashscope', $3, $4, $5, 'cloned',
-                    true, $6, $7, $8, NOW(), NOW()
+                    true, $6, timezone('UTC', statement_timestamp()), $7, NOW(), NOW()
                 )
                 RETURNING *
                 """,
@@ -326,7 +325,6 @@ async def clone_voice_profile(
                 result.voice_id,
                 gender,
                 result.request_id,
-                datetime.now(UTC),
                 str(admin.get("sub") or ""),
             )
             logger.info(
@@ -334,13 +332,23 @@ async def clone_voice_profile(
                 result.voice_id,
             )
             return dict(rows[0])
-        except Exception:
-            logger.exception("[TTS-VOICE] enrollment persistence failed")
+        except Exception as exc:
+            logger.exception(
+                "[TTS-VOICE] enrollment persistence failed voice_id=%s request_id=%s",
+                result.voice_id,
+                result.request_id,
+            )
             try:
                 await delete_cloned_voice(result.voice_id)
             except Exception:
-                pass
-            raise
+                logger.exception(
+                    "[TTS-VOICE] provider cleanup failed voice_id=%s",
+                    result.voice_id,
+                )
+            raise HTTPException(
+                status_code=503,
+                detail="音色保存失败，本次创建未完成，请稍后重试",
+            ) from exc
     finally:
         fire_background(delete_enrollment_audio_later(storage_key))
 
