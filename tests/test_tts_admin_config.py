@@ -238,11 +238,13 @@ async def test_enrollment_audio_deletion_is_delayed_for_provider_refetch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", [5, 6])
 async def test_enrollment_audio_is_normalized_to_canonical_wav(
     monkeypatch,
     tmp_path,
+    seconds,
 ):
-    pcm = struct.pack("<h", 5000) * (24_000 * 4)
+    pcm = struct.pack("<h", 5000) * (24_000 * seconds)
     monkeypatch.setattr(
         voice_enrollment,
         "_decode_enrollment_pcm",
@@ -266,7 +268,39 @@ async def test_enrollment_audio_is_normalized_to_canonical_wav(
         assert audio.getframerate() == 24_000
         assert audio.getnchannels() == 1
         assert audio.getsampwidth() == 2
-        assert audio.getnframes() == 24_000 * 4
+        assert audio.getnframes() == 24_000 * seconds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("total_ms", "active_ms", "error"),
+    [(4_000, 4_000, "5–30 秒"), (10_000, 4_999, "至少 5 秒有效人声")],
+)
+async def test_enrollment_rejects_short_or_mostly_silent_samples(
+    monkeypatch, tmp_path, total_ms, active_ms, error,
+):
+    monkeypatch.setattr(
+        voice_enrollment,
+        "_decode_enrollment_pcm",
+        AsyncMock(return_value=b"decoded-pcm"),
+    )
+    monkeypatch.setattr(
+        voice_enrollment,
+        "analyze_pcm16_activity",
+        lambda *args, **kwargs: SimpleNamespace(
+            total_milliseconds=total_ms, active_milliseconds=active_ms,
+        ),
+    )
+    monkeypatch.setattr(
+        voice_enrollment.media_storage, "storage_path", lambda key: tmp_path / key,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        await voice_enrollment.save_enrollment_audio(
+            blob=b"source-m4a", mime="audio/mp4", filename="voice.m4a",
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio

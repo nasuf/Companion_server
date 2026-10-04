@@ -89,10 +89,10 @@ async def save_enrollment_audio(
     if activity.total_milliseconds <= 0:
         raise ValueError("Enrollment audio could not be decoded")
     duration_seconds = activity.total_milliseconds / 1000
-    if duration_seconds < 3 or duration_seconds > 30.5:
-        raise ValueError("Enrollment audio must be between 3 and 30 seconds")
-    if activity.active_milliseconds < 1_500:
-        raise ValueError("Enrollment audio does not contain enough speech")
+    if duration_seconds < 5 or duration_seconds > 30.5:
+        raise ValueError("请录制 5–30 秒清晰人声，建议录制 10–20 秒")
+    if activity.active_milliseconds < 5_000:
+        raise ValueError("录音需要至少 5 秒有效人声，请减少静音后重新录制")
 
     wav = io.BytesIO()
     with wave.open(wav, "wb") as output:
