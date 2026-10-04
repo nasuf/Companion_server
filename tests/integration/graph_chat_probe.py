@@ -15,16 +15,19 @@ async def main():
     completed = []
     headers = {"Authorization": "Bearer " + create_jwt("owner", "user")}
     async with httpx.AsyncClient(timeout=60) as client:
-        for _ in range(60):
-            try:
-                response = await client.get("http://test-entry:8000/test/state")
-                if response.status_code == 200:
-                    break
-            except httpx.TransportError:
-                pass
-            await asyncio.sleep(1)
-        else:
-            raise AssertionError("Test service did not start")
+        # Nginx readiness proves only worker-a is up. Cross-worker checks must
+        # also wait for worker-b's lifespan (including its Redis subscriber).
+        for host in ("test-entry", "worker-a", "worker-b"):
+            for _ in range(60):
+                try:
+                    response = await client.get(f"http://{host}:8000/test/state")
+                    if response.status_code == 200:
+                        break
+                except httpx.TransportError:
+                    pass
+                await asyncio.sleep(1)
+            else:
+                raise AssertionError(f"Test service {host} did not start")
         response = await client.post(
             "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers
         )
@@ -43,11 +46,16 @@ async def main():
                 request = asyncio.create_task(
                     client.post(f"http://{host}:8000/test/generate", json={})
                 )
-                frames = [
-                    json.loads(await asyncio.wait_for(socket.recv(), 10))
-                    for _ in range(2)
-                ]
-                result = await request
+                try:
+                    frames = [
+                        json.loads(await asyncio.wait_for(socket.recv(), 10))
+                        for _ in range(2)
+                    ]
+                    result = await request
+                finally:
+                    if not request.done():
+                        request.cancel()
+                    await asyncio.gather(request, return_exceptions=True)
                 result.raise_for_status()
                 assert [frame["type"] for frame in frames] == ["reply", "done"], frames
                 assert frames[0]["data"]["text"] == "ordinary reply"

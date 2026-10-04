@@ -157,24 +157,31 @@ def record_runtime_event(
         summary["failure_count"] += 1
 
 
+def session_has_usage_signal() -> bool:
+    """Inspect the current foreground session without flushing or mutating it."""
+    summary = _current.get()
+    return bool(summary and (
+        summary["call_count"] > 0 or any(
+            summary[key] > 0 for key in (
+                "latency_count", "failure_count", "fallback_count",
+                "circuit_open_count", "web_search_calls",
+            )
+        )
+    ))
+
+
 def flush_session(token: Token) -> UsageSummary | None:
     """关闭 session, 返回累加结果.
 
     有 token usage 或 runtime health signal 时才写 DB; 这样全失败但被熔断/
     fallback 的请求也能进入运营统计。
     """
+    has_signal = session_has_usage_signal()
     summary = _current.get()
     _current.reset(token)
     if summary is None:
         return None
-    has_runtime_signal = any(
-        summary[key] > 0
-        for key in (
-            "latency_count", "failure_count", "fallback_count",
-            "circuit_open_count", "web_search_calls",
-        )
-    )
-    if summary["call_count"] == 0 and not has_runtime_signal:
+    if not has_signal:
         return None
     return summary
 

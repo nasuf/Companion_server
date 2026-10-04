@@ -44,15 +44,25 @@ from app.services.chat.trace_enrich import apply_prompt_render_traces
 logger = logging.getLogger(__name__)
 
 
-def create_tracer(user_message: str, conversation_id: str) -> "LocalTracer | LangSmithTracer":
+def create_tracer(
+    user_message: str, conversation_id: str, *,
+    executor: str | None = None, graph_version: str | None = None,
+) -> "LocalTracer | LangSmithTracer":
     """Trace backend switch (settings.trace_backend).
 
     "langsmith" → legacy cloud tracer; anything else → LocalTracer, whose
     is_active only fires for "local" ("off" turns tracing into a no-op).
     """
+    metadata = {}
+    if executor is not None:
+        metadata = {"executor": executor, "checkpoint_enabled": False}
+        if graph_version is not None:
+            metadata["graph_version"] = graph_version
     if settings.trace_backend == "langsmith":
-        return LangSmithTracer(user_message, conversation_id)
-    return LocalTracer(user_message, conversation_id)
+        return LangSmithTracer(
+            user_message, conversation_id, execution_metadata=metadata,
+        )
+    return LocalTracer(user_message, conversation_id, execution_metadata=metadata)
 
 
 def get_langsmith_client():
@@ -73,9 +83,13 @@ class LangSmithTracer:
     是 async generator，无法直接套 `with` 语句。
     """
 
-    def __init__(self, user_message: str, conversation_id: str) -> None:
+    def __init__(
+        self, user_message: str, conversation_id: str, *,
+        execution_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self._user_message = user_message
         self._conversation_id = conversation_id
+        self._execution_metadata = dict(execution_metadata or {})
         self._ctx: Any = None
         self._closed = False
         # _attached=True: sub_intent 模式, trace_id 来自 parent, close() 不 share.
@@ -106,6 +120,7 @@ class LangSmithTracer:
                     "conversation_id": self._conversation_id,
                 },
                 project_name="ai-companion",
+                metadata=self._execution_metadata,
             )
         else:
             self._ctx = contextlib.nullcontext()

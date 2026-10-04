@@ -42,7 +42,7 @@ async def stream_graph_response(
         ChatGraphContext,
         ParentTraceView,
     )
-    from app.services.chat.main_graph import stream_main
+    from app.services.chat.main_graph import GRAPH_VERSION, stream_main
     from app.services.llm import usage_tracker
     from app.services.memory.retrieval.trace import (
         reset_retrieval_trace,
@@ -89,7 +89,10 @@ async def stream_graph_response(
             )
         agent_token = await bind_agent_context(agent_id)
         usage_token = usage_tracker.start_session()
-        tracer = services.create_tracer(user_message, conversation_id).enter()
+        tracer = services.create_tracer(
+            user_message, conversation_id, executor="langgraph",
+            graph_version=GRAPH_VERSION,
+        ).enter()
         retrieval_token = start_retrieval_trace()
         prompt_token = start_prompt_render_trace()
         frame = ChatFrame(
@@ -137,7 +140,10 @@ async def stream_graph_response(
         finally:
             if usage_token is not None:
                 from app.services.llm.usage_repo import write_usage_row
+                from app.services.chat.local_tracer import LocalTracer
 
+                if isinstance(tracer, LocalTracer):
+                    tracer.note_usage_expected(usage_tracker.session_has_usage_signal())
                 summary = usage_tracker.flush_session(usage_token)
                 if summary:
                     try:

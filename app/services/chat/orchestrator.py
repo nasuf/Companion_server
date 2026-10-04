@@ -500,7 +500,7 @@ async def _stream_legacy_response(
     if sub_intent_mode and parent_trace_id:
         tracer = create_tracer(user_message, conversation_id).attach_to_parent(parent_trace_id)
     else:
-        tracer = create_tracer(user_message, conversation_id).enter()
+        tracer = create_tracer(user_message, conversation_id, executor="legacy").enter()
     retrieval_trace_token = None
     prompt_trace_token = None
     if not sub_intent_mode:
@@ -1926,6 +1926,10 @@ async def _stream_legacy_response(
         # token 是 None, 走里面的 short-circuit.
         if usage_token is not None:
             from app.services.llm.usage_repo import write_usage_row
+            from app.services.chat.local_tracer import LocalTracer
+
+            if isinstance(tracer, LocalTracer):
+                tracer.note_usage_expected(usage_tracker.session_has_usage_signal())
             summary = usage_tracker.flush_session(usage_token)
             if summary:
                 try:

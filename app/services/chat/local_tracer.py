@@ -129,7 +129,7 @@ def _json_safe(value: Any) -> Any:
         return None
 
 
-def _fire(coro) -> None:
+def _fire(coro) -> asyncio.Task | None:
     """Schedule a fire-and-forget DB write; drop silently without a loop.
 
     Trace persistence must never break or slow the chat hot path. The wrapped
@@ -140,7 +140,7 @@ def _fire(coro) -> None:
     except RuntimeError:
         coro.close()
         return
-    loop.create_task(coro)
+    return loop.create_task(coro)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -534,11 +534,12 @@ async def _write_manual_run(
 
 async def _write_root_start(
     trace_id: str, user_message: str, conversation_id: str, started_at: datetime,
+    execution_metadata: dict[str, Any] | None = None,
 ) -> None:
     try:
         from app.db import db
 
-        await db.tracerun.create(data={
+        data = {
             "id": trace_id,
             "traceId": trace_id,
             "name": ROOT_RUN_NAME,
@@ -549,18 +550,32 @@ async def _write_root_start(
                 "message": user_message,
                 "conversation_id": conversation_id,
             }),
-        })
+        }
+        if execution_metadata:
+            data["extraJson"] = Json({"metadata": execution_metadata})
+        await db.tracerun.create(data=data)
     except Exception as e:
         logger.debug(f"[local-trace] root start write failed {trace_id}: {type(e).__name__}: {e}")
 
 
-async def _write_root_end(trace_id: str, ended_at: datetime, *, error: str | None = None) -> None:
+async def _write_root_end(
+    trace_id: str, ended_at: datetime, *, error: str | None = None,
+    execution_metadata: dict[str, Any] | None = None,
+    start_task: asyncio.Task | None = None,
+) -> None:
     try:
+        if start_task is not None:
+            # Root start/end remain asynchronous but must not race in the DB.
+            await asyncio.shield(start_task)
         from app.db import db
 
+        data = {"status": "error" if error else "success", "endedAt": ended_at,
+                **({"error": error} if error else {})}
+        if execution_metadata:
+            data["extraJson"] = Json({"metadata": execution_metadata})
         await db.tracerun.update(
             where={"id": trace_id},
-            data={"status": "error" if error else "success", "endedAt": ended_at, **({"error": error} if error else {})},
+            data=data,
         )
     except Exception as e:
         logger.debug(f"[local-trace] root end write failed {trace_id}: {type(e).__name__}: {e}")
@@ -569,13 +584,18 @@ async def _write_root_end(trace_id: str, ended_at: datetime, *, error: str | Non
 class LocalTracer:
     """Per-request local trace lifecycle; drop-in interface for LangSmithTracer."""
 
-    def __init__(self, user_message: str, conversation_id: str) -> None:
+    def __init__(
+        self, user_message: str, conversation_id: str, *,
+        execution_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self._user_message = user_message
         self._conversation_id = conversation_id
+        self._execution_metadata = dict(execution_metadata or {})
         self._closed = False
         self._error: str | None = None
         self._attached = False
         self._cv_token = None
+        self._root_start_task: asyncio.Task | None = None
         self.trace_id: str | None = None
 
     @property
@@ -595,8 +615,9 @@ class LocalTracer:
         self.trace_id = str(uuid.uuid4())
         handler = LocalTraceHandler(self.trace_id, self.trace_id)
         self._cv_token = _local_trace_handler.set(handler)
-        _fire(_write_root_start(
+        self._root_start_task = _fire(_write_root_start(
             self.trace_id, self._user_message, self._conversation_id, _utcnow(),
+            dict(self._execution_metadata),
         ))
         return self
 
@@ -616,6 +637,11 @@ class LocalTracer:
         # record their own error details through the existing callback handler.
         self._error = type(error).__name__
 
+    def note_usage_expected(self, expected: bool) -> None:
+        """Owners closing after session flush must supply this beforehand."""
+        if not self._closed and self._execution_metadata:
+            self._execution_metadata["usage_expected"] = expected
+
     def close(self) -> None:
         """Close the root run and uninstall the handler. Idempotent."""
         if self._closed:
@@ -631,10 +657,16 @@ class LocalTracer:
                 # tasks hold their own context copies either way.
                 _local_trace_handler.set(None)
             self._cv_token = None
-        if self._error:
-            _fire(_write_root_end(self.trace_id, _utcnow(), error=self._error))
-        else:
-            _fire(_write_root_end(self.trace_id, _utcnow()))
+        metadata = dict(self._execution_metadata)
+        if metadata and "usage_expected" not in metadata:
+            # Legacy owners close the root before flushing the foreground session.
+            from app.services.llm.usage_tracker import session_has_usage_signal
+
+            metadata["usage_expected"] = session_has_usage_signal()
+        _fire(_write_root_end(
+            self.trace_id, _utcnow(), error=self._error, execution_metadata=metadata,
+            start_task=self._root_start_task,
+        ))
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -70,3 +70,68 @@ currently available. Passing these tests is not a claim of zero production risk.
 
 Canonical task ledger and historical release records live in the user-facing
 `companion-refactor-roadmap.json/html/csv` deliverables in this Codex thread.
+
+Prompt changes follow the user's two-track rule. Audit the current production
+text and complete version history before changing a registry key. Only keys
+with no prior Web version update may change `defaults.py` and use `code_sync`.
+Any prior Web save, restore or reset to default requires a new version through
+the Web save path (`update_prompt_text` with `expected_updated_at`), even when
+current text equals the default. Incomplete history uses the Web path. Validate
+placeholders/rendering before publishing, preserve enabled state, and verify
+DB, Redis, version provenance and the runtime getter afterward. Do not relabel
+an existing `code_sync` revision as a Web save.
+
+## G03: controlled activation and observation
+
+The trace and read-only observation changes can be released independently while
+keeping `CHAT_EXECUTOR=legacy` and the conversation allowlist empty. An internal
+cohort and its observation/rollback gates are required to enable or expand graph
+execution; they do not block deployment of these supporting changes. The current
+GitHub deployment workflow regenerates `.env` without the graph switch/allowlist,
+so a future graph activation must first wire and verify persistent deployment
+configuration rather than rely on a manual `.env` edit surviving a release.
+
+New chat roots explicitly record the selected executor, graph version when
+applicable, and checkpoint-disabled flag in the existing JSON metadata. The
+foreground session also records whether a usage row is expected. Historical
+roots lacking these fields remain unmarked; absence of graph nodes alone does
+not prove that a legacy turn was observed.
+
+The read-only check requires exact, explicitly authorized conversation IDs:
+
+    PYTHONPATH=/app python scripts/check_chat_graph_rollout.py \
+      --conversation-id INTERNAL_CONVERSATION_ID \
+      --expected-executor langgraph --expected-graph-version chat-g01-v1 \
+      --since 2026-10-04T01:00:00+08:00 --until 2026-10-05T01:10:00+08:00
+
+Use actual activation timestamps; repeat the conversation option for every
+authorized internal conversation. End the window after late foreground writes
+have settled. The report requires at least 24 hours, 20 traced turns, and a
+sample from every specified conversation. These are telemetry minima, not
+statistical proof of quality or performance. Zero traffic and missing evidence
+never pass. Runtime cohort/version drift, failed or stale roots, missing
+persisted replies, graph/finish-node inconsistencies and usage gaps hold the
+gate. No model inputs, outputs, message text or exception messages are exported.
+
+The collector opens a READ ONLY / REPEATABLE READ transaction, limits each
+statement to five seconds, and reads at most 1000 roots over seven days for at
+most 100 internal conversations. Truncation holds the gate. It has no Redis
+writes, model invocations, scheduled work, notifications, activation or replay.
+Exit 0 means telemetry is complete; exit 2 means hold; exit 3 means collection
+failed. The report always keeps release_ready=false: controlled client smoke,
+matched quality/cost/latency evidence, rollback and review remain separate gates.
+
+Activation uses the existing startup environment configuration: set
+CHAT_EXECUTOR=langgraph and the exact internal allowlist, deploy the qualified
+artifact in the chosen production window, then verify actual marked traces.
+Configuration edits do not hot-update existing workers. Reverting to legacy
+requires applying startup configuration through the deployment mechanism and
+may restart the container. Keep the previous artifact/configuration available.
+Never rerun an in-flight or failed graph through legacy; its domain effects
+may already exist. Do not describe this deployment path as zero downtime.
+
+After controlled smoke and rollback qualification, observe the internal cohort
+for at least 24 hours with actual traffic and the relevant scheduled jobs.
+Record each later fixed cohort/coverage snapshot and its gates before expanding.
+Any unresolved P0/P1, repeated failures, unexpected billing, unexplained trace,
+or missing evidence stops expansion. R01/R02 still gate checkpoint replay.

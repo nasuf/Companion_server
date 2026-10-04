@@ -86,6 +86,88 @@ def _row(
 
 
 class TestLocalTracerLifecycle:
+    async def test_fast_close_waits_for_root_start_without_blocking_chat(self, monkeypatch):
+        from app.services.chat import tracing
+        from app.services.llm import usage_tracker
+
+        monkeypatch.setattr(settings, "trace_backend", "local")
+        fake = _fake_db()
+        import app.db
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_create(**_):
+            started.set()
+            await release.wait()
+
+        fake.tracerun.create.side_effect = slow_create
+        token = usage_tracker.start_session()
+        try:
+            with patch.object(app.db, "db", fake):
+                tracer = tracing.create_tracer("hi", "internal", executor="legacy").enter()
+                tracer.close()
+                tracer.close()  # Root completion stays idempotent.
+                await asyncio.wait_for(started.wait(), timeout=1)
+                await asyncio.sleep(.01)
+                fake.tracerun.update.assert_not_awaited()
+                release.set()
+                await asyncio.wait_for(tracer._root_start_task, timeout=1)
+                await asyncio.sleep(.01)
+        finally:
+            release.set()
+            usage_tracker.flush_session(token)
+        fake.tracerun.update.assert_awaited_once()
+        assert fake.tracerun.update.await_args.kwargs["data"]["status"] == "success"
+        start = _unjson(fake.tracerun.create.await_args.kwargs["data"]["extraJson"])
+        end = _unjson(fake.tracerun.update.await_args.kwargs["data"]["extraJson"])
+        assert "usage_expected" not in start["metadata"]
+        assert end["metadata"]["usage_expected"] is False
+
+    @pytest.mark.parametrize("used", [False, True])
+    async def test_executor_and_usage_metadata_survive_root_close(self, monkeypatch, used):
+        from app.services.chat import tracing
+        from app.services.llm import usage_tracker
+
+        monkeypatch.setattr(settings, "trace_backend", "local")
+        fake = _fake_db()
+        import app.db
+        token = usage_tracker.start_session()
+        with patch.object(app.db, "db", fake):
+            tracer = tracing.create_tracer("hi", "internal", executor="legacy").enter()
+            if used:
+                usage_tracker.record("synthetic", 10, 2)
+            tracer.close()  # Legacy closes before usage flush.
+            summary = usage_tracker.flush_session(token)
+            await asyncio.sleep(.05)
+        assert bool(summary) is used
+        metadata = _unjson(fake.tracerun.update.await_args.kwargs["data"]["extraJson"])
+        assert metadata == {"metadata": {
+            "executor": "legacy", "checkpoint_enabled": False, "usage_expected": used,
+        }}
+
+    @pytest.mark.parametrize("executor", ["legacy", "langgraph"])
+    async def test_usage_is_fixed_before_session_flush(self, monkeypatch, executor):
+        from app.services.chat import tracing
+        from app.services.llm import usage_tracker
+
+        monkeypatch.setattr(settings, "trace_backend", "local")
+        fake = _fake_db()
+        import app.db
+        token = usage_tracker.start_session()
+        with patch.object(app.db, "db", fake):
+            tracer = tracing.create_tracer(
+                "hi", "internal", executor=executor,
+                graph_version="chat-g01-v1" if executor == "langgraph" else None,
+            ).enter()
+            usage_tracker.record_runtime_event(result="fallback", latency_ms=1)
+            tracer.note_usage_expected(usage_tracker.session_has_usage_signal())
+            assert usage_tracker.flush_session(token)
+            assert not usage_tracker.session_has_usage_signal()
+            tracer.close()
+            await asyncio.sleep(.05)
+        metadata = _unjson(fake.tracerun.update.await_args.kwargs["data"]["extraJson"])
+        assert metadata["metadata"]["usage_expected"] is True
+        assert metadata["metadata"]["executor"] == executor
+
     def test_off_backend_is_noop(self, monkeypatch):
         from app.services.chat.local_tracer import LocalTracer
 

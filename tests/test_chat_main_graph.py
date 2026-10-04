@@ -300,7 +300,8 @@ async def test_real_graph_traces_link_nodes_and_manual_provider(chat_io, monkeyp
     fake.tracerun.update = AsyncMock()
     monkeypatch.setattr(app.db, "db", fake)
     monkeypatch.setattr(settings, "trace_backend", "local")
-    monkeypatch.setattr(chat, "create_tracer", local_tracer.LocalTracer)
+    from app.services.chat.tracing import create_tracer
+    monkeypatch.setattr(chat, "create_tracer", create_tracer)
 
     async def generate(**_):
         await FakeListChatModel(responses=["fake reply"]).ainvoke(
@@ -324,6 +325,10 @@ async def test_real_graph_traces_link_nodes_and_manual_provider(chat_io, monkeyp
     rows = [c.kwargs["data"] for c in fake.tracerun.create.await_args_list]
     roots = [row for row in rows if row["name"] == "chat_request"]
     assert len(roots) == 1
+    assert roots[0]["extraJson"].data["metadata"] == {
+        "executor": "langgraph", "graph_version": "chat-g01-v1",
+        "checkpoint_enabled": False,
+    }
     root = roots[0]["id"]
     nodes = [row for row in rows if row["name"] == "generate_reply"]
     assert len(nodes) == 1
@@ -349,7 +354,8 @@ async def test_failed_graph_root_reports_error(chat_io, monkeypatch):
     fake.tracerun.update = AsyncMock()
     monkeypatch.setattr(app.db, "db", fake)
     monkeypatch.setattr(settings, "trace_backend", "local")
-    monkeypatch.setattr(chat, "create_tracer", local_tracer.LocalTracer)
+    from app.services.chat.tracing import create_tracer
+    monkeypatch.setattr(chat, "create_tracer", create_tracer)
     chat._save_replies.return_value = None
     with pytest.raises(RuntimeError):
         await run(chat_io)
