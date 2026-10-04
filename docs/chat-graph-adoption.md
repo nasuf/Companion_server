@@ -86,10 +86,25 @@ an existing `code_sync` revision as a Web save.
 The trace and read-only observation changes can be released independently while
 keeping `CHAT_EXECUTOR=legacy` and the conversation allowlist empty. An internal
 cohort and its observation/rollback gates are required to enable or expand graph
-execution; they do not block deployment of these supporting changes. The current
-GitHub deployment workflow regenerates `.env` without the graph switch/allowlist,
-so a future graph activation must first wire and verify persistent deployment
-configuration rather than rely on a manual `.env` edit surviving a release.
+execution; they do not block deployment of these supporting changes. Graph
+activation uses persistent deployment configuration rather than a manual `.env`
+edit that would be lost on the next release.
+The deployment now applies a private host configuration at
+`/app/companion-secrets/chat-graph-rollout.json` after generating `.env`, before
+building or stopping the server. Keep that file mode 0600 and outside Git.
+Its exact shape is `{"executor":"langgraph","conversation_ids":["<UUID>"]}`.
+The operator must verify every ID's account/workspace ownership before adding it.
+Missing configuration selects legacy with an empty cohort. Invalid, wildcard,
+empty graph or oversized cohorts abort deployment before server stop; only exact
+conversation IDs can select graph. A new conversation requires a new authorized
+cohort entry. The JSON file is not included in source synchronization or images.
+To roll back, atomically replace it with
+`{"executor":"legacy","conversation_ids":[]}`, apply
+`scripts/chat_graph_deploy_config.py --env-file .env --config-file <host-file>`
+and recreate only the server from the qualified retained image, without build,
+pull or database migrations. Verify health and executor selection afterward.
+Existing in-flight/failed turns must never be replayed. The private file remains
+the source of rollout configuration for later deployments.
 
 New chat roots explicitly record the selected executor, graph version when
 applicable, and checkpoint-disabled flag in the existing JSON metadata. The

@@ -76,6 +76,7 @@ jobs:
             tests/test_voice_enrollment_postgres.py \
             tests/test_release_archive.py \
             tests/test_release_archive_workflow.py \
+            tests/test_chat_graph_deploy_config.py \
             tests/test_chat_main_graph.py \
             tests/test_chat_graph_rollout.py \
             tests/test_chat_graph_rollout_postgres.py \
