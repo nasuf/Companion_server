@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import io
 import json
 import struct
 import wave
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
+from weakref import WeakKeyDictionary
 
 import httpx
 
@@ -21,16 +24,37 @@ class SpeechSynthesisError(RuntimeError):
     pass
 
 
-_TTS_SEMAPHORE: asyncio.Semaphore | None = None
+@dataclass
+class _Transport:
+    semaphore: asyncio.Semaphore
+    client: httpx.AsyncClient | None = None
 
 
-def _tts_semaphore() -> asyncio.Semaphore:
-    global _TTS_SEMAPHORE
-    if _TTS_SEMAPHORE is None:
-        _TTS_SEMAPHORE = asyncio.Semaphore(
-            max(1, int(settings.dashscope_tts_max_concurrency)),
+_TRANSPORTS: WeakKeyDictionary[asyncio.AbstractEventLoop, _Transport] = WeakKeyDictionary()
+
+
+def _tts_transport() -> _Transport:
+    loop = asyncio.get_running_loop()
+    if loop not in _TRANSPORTS:
+        _TRANSPORTS[loop] = _Transport(
+            asyncio.Semaphore(max(1, int(settings.dashscope_tts_max_concurrency)))
         )
-    return _TTS_SEMAPHORE
+    return _TRANSPORTS[loop]
+
+
+async def close_tts_client() -> None:
+    transport = _TRANSPORTS.pop(asyncio.get_running_loop(), None)
+    if transport is not None and transport.client is not None:
+        await transport.client.aclose()
+
+
+async def _read_bounded(response: httpx.Response, limit: int) -> bytes:
+    data = bytearray()
+    async for chunk in response.aiter_bytes(chunk_size=16_384):
+        if len(data) + len(chunk) > limit:
+            raise SpeechSynthesisError("DashScope TTS response exceeded the allowed size")
+        data.extend(chunk)
+    return bytes(data)
 
 
 @dataclass(frozen=True)
@@ -73,6 +97,8 @@ def wav_duration_milliseconds(audio: bytes) -> int:
         raise SpeechSynthesisError("DashScope TTS returned invalid WAV audio") from exc
     data_bytes = _wav_data_bytes(audio)
     frame_width = channels * sample_width
+    if frame_width <= 0 or data_bytes % frame_width:
+        raise SpeechSynthesisError("DashScope TTS returned incomplete WAV frames")
     actual_frames = data_bytes // frame_width if frame_width > 0 else 0
     # Streaming WAV writers commonly leave the RIFF/data length at 0xFFFFFFFF.
     # Python's wave module interprets that sentinel as billions of frames, so
@@ -86,24 +112,54 @@ def wav_duration_milliseconds(audio: bytes) -> int:
     return max(1, round(frames * 1000 / rate))
 
 
-def _wav_data_bytes(audio: bytes) -> int:
+def _wav_data_chunk(audio: bytes) -> tuple[int, int] | None:
     if len(audio) < 20 or audio[8:12] != b"WAVE":
-        return 0
+        return None
     offset = 12
     while offset + 8 <= len(audio):
         chunk_id = audio[offset : offset + 4]
         chunk_size = struct.unpack_from("<I", audio, offset + 4)[0]
         payload_start = offset + 8
         if chunk_id == b"data":
-            available = max(0, len(audio) - payload_start)
-            return available if chunk_size == 0xFFFFFFFF else min(
-                chunk_size,
-                available,
-            )
+            return offset, chunk_size
         if chunk_size == 0xFFFFFFFF:
-            return 0
+            return None
         offset = payload_start + chunk_size + (chunk_size % 2)
-    return 0
+    return None
+
+
+def _streaming_wav_length(audio: bytes, offset: int, size: int) -> bool:
+    # Observed DashScope SSE headers use INT_MAX-64 for RIFF and subtract the
+    # preceding chunks for data (including a variable-length AIGC chunk).
+    riff_size = struct.unpack_from("<I", audio, 4)[0]
+    return size == 0xFFFFFFFF or (
+        riff_size == 0x7FFFFFBF and size == riff_size - offset
+    )
+
+
+def _wav_data_bytes(audio: bytes) -> int:
+    chunk = _wav_data_chunk(audio)
+    if chunk is None:
+        return 0
+    offset, size = chunk
+    available = max(0, len(audio) - offset - 8)
+    if _streaming_wav_length(audio, offset, size):
+        return available
+    if size > available:
+        raise SpeechSynthesisError("DashScope TTS returned truncated WAV audio")
+    return size
+
+
+def _finalize_wav(audio: bytes) -> bytes:
+    """Fix only recognized streaming placeholders after provider completion."""
+    chunk = _wav_data_chunk(audio)
+    if chunk is None or not _streaming_wav_length(audio, *chunk):
+        return audio
+    offset, _ = chunk
+    finalized = bytearray(audio)
+    struct.pack_into("<I", finalized, 4, len(audio) - 8)
+    struct.pack_into("<I", finalized, offset + 4, len(audio) - offset - 8)
+    return bytes(finalized)
 
 
 def _response_error(response: httpx.Response) -> SpeechSynthesisError:
@@ -120,39 +176,104 @@ def _response_error(response: httpx.Response) -> SpeechSynthesisError:
     return SpeechSynthesisError(f"DashScope TTS {code}: {safe_message}")
 
 
-def _parse_synthesis_response(response: httpx.Response) -> dict:
+def _provider_error(body: dict) -> SpeechSynthesisError:
+    message = str(body.get("message") or "request failed")[:160]
+    return SpeechSynthesisError(f"DashScope TTS {body['code']}: {message}")
+
+
+async def _read_synthesis_response(response: httpx.Response) -> tuple[dict, bytes]:
     content_type = response.headers.get("content-type", "").lower()
+    max_audio = settings.dashscope_tts_max_bytes
     if "text/event-stream" not in content_type:
         try:
-            body = response.json()
-        except (ValueError, json.JSONDecodeError) as exc:
+            body = json.loads(await _read_bounded(response, 1_048_576))
+        except (ValueError, UnicodeError) as exc:
             raise SpeechSynthesisError(
                 "DashScope TTS returned invalid JSON"
             ) from exc
         if not isinstance(body, dict):
             raise SpeechSynthesisError("DashScope TTS returned invalid payload")
-        return body
+        if body.get("code"):
+            raise _provider_error(body)
+        return body, b""
 
-    final_payload: dict | None = None
-    for line in response.text.splitlines():
-        if not line.startswith("data:"):
-            continue
-        raw = line[5:].strip()
-        if not raw or raw == "[DONE]":
-            continue
+    audio = bytearray()
+    usage: dict = {}
+    request_id = None
+    # Bound both decoded audio and encoded events, including a missing newline.
+    # aiter_lines alone would accumulate an unbounded line before our checks.
+    buffer = bytearray()
+    event_lines: list[bytes] = []
+    received = 0
+
+    def parse_event(lines: list[bytes]) -> dict | None:
+        nonlocal usage, request_id
+        raw = b"\n".join(lines).strip()
+        if not raw or raw == b"[DONE]":
+            return None
         try:
             event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+        except (ValueError, UnicodeError) as exc:
+            raise SpeechSynthesisError("DashScope TTS stream returned invalid JSON") from exc
         if not isinstance(event, dict):
-            continue
-        final_payload = event
+            raise SpeechSynthesisError("DashScope TTS stream returned invalid payload")
+        if event.get("code"):
+            raise _provider_error(event)
+        request_id = event.get("request_id") or request_id
+        if isinstance(event.get("usage"), dict):
+            usage = event["usage"]
         output = event.get("output")
+        meta = output.get("audio") if isinstance(output, dict) else None
+        encoded = meta.get("data") if isinstance(meta, dict) else None
+        if encoded:
+            try:
+                chunk = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError, binascii.Error) as exc:
+                raise SpeechSynthesisError("DashScope TTS stream returned invalid audio data") from exc
+            if len(audio) + len(chunk) > max_audio:
+                raise SpeechSynthesisError("DashScope TTS audio exceeded the allowed size")
+            audio.extend(chunk)
         if isinstance(output, dict) and output.get("finish_reason") == "stop":
-            return event
-    if final_payload is None:
-        raise SpeechSynthesisError("DashScope TTS stream returned no events")
-    return final_payload
+            return {**event, "usage": usage, "request_id": request_id}
+        return None
+
+    async for chunk in response.aiter_bytes(chunk_size=16_384):
+        received += len(chunk)
+        if received > max_audio * 2 + 1_048_576:
+            raise SpeechSynthesisError("DashScope TTS stream exceeded the allowed size")
+        buffer.extend(chunk)
+        while b"\n" in buffer:
+            line, _, rest = buffer.partition(b"\n")
+            buffer = bytearray(rest)
+            line = line.rstrip(b"\r")
+            if not line:
+                final = parse_event(event_lines)
+                event_lines.clear()
+                if final is not None:
+                    return final, bytes(audio)
+            elif line.startswith(b"data:"):
+                event_lines.append(line[5:].lstrip())
+    if buffer.startswith(b"data:"):
+        event_lines.append(buffer[5:].strip())
+    final = parse_event(event_lines)
+    if final is not None:
+        return final, bytes(audio)
+    raise SpeechSynthesisError("DashScope TTS stream ended before completion")
+
+
+async def _download_audio(http: httpx.AsyncClient, audio_url: str) -> bytes:
+    parsed = urlparse(audio_url)
+    if parsed.scheme == "http" and (parsed.hostname or "").endswith(".aliyuncs.com"):
+        parsed = parsed._replace(scheme="https")
+        audio_url = urlunparse(parsed)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise SpeechSynthesisError("DashScope TTS returned an unsafe audio URL")
+    async with http.stream(
+        "GET", audio_url, timeout=settings.dashscope_tts_timeout_s,
+    ) as response:
+        if response.status_code != 200:
+            raise SpeechSynthesisError(f"DashScope TTS audio download failed: http_{response.status_code}")
+        return await _read_bounded(response, settings.dashscope_tts_max_bytes)
 
 
 async def synthesize_speech(
@@ -198,43 +319,47 @@ async def synthesize_speech(
         "Content-Type": "application/json",
         "X-DashScope-SSE": "enable",
     }
-    owns_client = client is None
-    http = client or httpx.AsyncClient(timeout=settings.dashscope_tts_timeout_s)
-    semaphore = _tts_semaphore()
-    await semaphore.acquire()
+    transport = _tts_transport()
+    await transport.semaphore.acquire()
     try:
-        response = await http.post(endpoint, headers=headers, json=payload)
-        if response.status_code != 200:
-            raise _response_error(response)
-        body = _parse_synthesis_response(response)
+        # Create resources after acquisition: cancellation while queued leaks
+        # neither sockets nor permits. Share connections only within this loop.
+        if client is None and transport.client is None:
+            concurrency = max(1, int(settings.dashscope_tts_max_concurrency))
+            transport.client = httpx.AsyncClient(
+                timeout=settings.dashscope_tts_timeout_s,
+                limits=httpx.Limits(
+                    max_connections=concurrency,
+                    max_keepalive_connections=concurrency,
+                ),
+            )
+        http = client if client is not None else transport.client
+        assert http is not None
+        async with http.stream(
+            "POST", endpoint, headers=headers, json=payload,
+            timeout=settings.dashscope_tts_timeout_s,
+        ) as response:
+            if response.status_code != 200:
+                error_bytes = await _read_bounded(response, 16_384)
+                raise _response_error(httpx.Response(response.status_code, content=error_bytes))
+            body, audio = await _read_synthesis_response(response)
+            response_request_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("x-dashscope-request-id")
+            )
         output = body.get("output") if isinstance(body, dict) else None
         audio_meta = output.get("audio") if isinstance(output, dict) else None
         audio_url = audio_meta.get("url") if isinstance(audio_meta, dict) else None
-        if not isinstance(audio_url, str) or not audio_url:
-            raise SpeechSynthesisError("DashScope TTS response did not include audio")
-        parsed = urlparse(audio_url)
-        if (
-            parsed.scheme == "http"
-            and parsed.netloc.endswith(".aliyuncs.com")
-        ):
-            # DashScope currently returns an OSS HTTP URL. Upgrade the trusted
-            # Alibaba host before downloading so audio never crosses plaintext.
-            parsed = parsed._replace(scheme="https")
-            audio_url = urlunparse(parsed)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise SpeechSynthesisError("DashScope TTS returned an unsafe audio URL")
-        audio_response = await http.get(audio_url)
-        if audio_response.status_code != 200:
-            raise SpeechSynthesisError(
-                f"DashScope TTS audio download failed: http_{audio_response.status_code}"
-            )
-        audio = audio_response.content
+        if not audio:
+            if not isinstance(audio_url, str) or not audio_url:
+                raise SpeechSynthesisError("DashScope TTS response did not include audio")
+            audio = await _download_audio(http, audio_url)
         if not audio or len(audio) > settings.dashscope_tts_max_bytes:
             raise SpeechSynthesisError("DashScope TTS audio exceeded the allowed size")
+        audio = _finalize_wav(audio)
         duration_ms = wav_duration_milliseconds(audio)
         request_id = (
-            response.headers.get("x-request-id")
-            or response.headers.get("x-dashscope-request-id")
+            response_request_id
             or (body.get("request_id") if isinstance(body, dict) else None)
         )
         raw_characters = len(clean_text)
@@ -242,15 +367,20 @@ async def synthesize_speech(
         provider_billable = (
             usage.get("characters") if isinstance(usage, dict) else None
         )
-        billable = (
-            int(provider_billable)
-            if provider_billable is not None
-            else count_billable_characters(clean_text)
-        )
+        try:
+            billable = (
+                int(provider_billable) if provider_billable is not None
+                else count_billable_characters(clean_text)
+            )
+            if billable < 0:
+                raise ValueError("negative usage")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise SpeechSynthesisError("DashScope TTS returned invalid usage") from exc
         pricing = get_tts_pricing(effective_model) or {}
+        configured_price = pricing.get("unit_price_cny")
         unit_price = float(
-            pricing.get("unit_price_cny")
-            or settings.tts_price_cny_per_10k_chars
+            configured_price if configured_price is not None
+            else settings.tts_price_cny_per_10k_chars
         )
         cost = billable * unit_price / 10_000
         return SynthesizedSpeech(
@@ -270,6 +400,4 @@ async def synthesize_speech(
     except httpx.HTTPError as exc:
         raise SpeechSynthesisError("DashScope TTS network request failed") from exc
     finally:
-        semaphore.release()
-        if owns_client:
-            await http.aclose()
+        transport.semaphore.release()

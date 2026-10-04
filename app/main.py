@@ -159,6 +159,12 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Scheduler shutdown failed: {e!r}")
         try:
+            from app.services.speech_output.client import close_tts_client
+
+            await close_tts_client()
+        except Exception as e:
+            logger.warning(f"TTS client shutdown failed: {e!r}")
+        try:
             await disconnect_db()
         except Exception as e:
             logger.warning(f"DB disconnect failed: {e!r}")

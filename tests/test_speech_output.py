@@ -7,6 +7,7 @@ import wave
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.services.speech_output import client as tts_client
@@ -102,7 +103,7 @@ async def test_stylized_legacy_voice_is_migrated(monkeypatch):
 
     assert await voices.ensure_agent_voice(agent) == "longanlingxin"
     assert agent.ttsVoiceId == "longanlingxin"
-    assert fake_db.execute_raw.await_args.args[-2:] == (
+    assert fake_db.execute_raw.await_args.args[1:3] == (
         "longanlingxin",
         "agent-1",
     )
@@ -165,41 +166,25 @@ async def test_synthesize_uses_dedicated_key_and_returns_metering(monkeypatch):
     audio = _wav_bytes(seconds=0.5)
     captured = {}
 
-    class FakeResponse:
-        status_code = 200
-        headers = {
-            "x-request-id": "tts-request-1",
-            "content-type": "text/event-stream",
-        }
-        content = b""
-        text = "data: " + json.dumps(
-            {
-                "request_id": "tts-request-1",
-                "output": {
-                    "finish_reason": "stop",
-                    "audio": {
+    async def handle(request):
+        if request.method == "POST":
+            captured["endpoint"] = str(request.url)
+            captured["authorization"] = request.headers["Authorization"]
+            captured["payload"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                headers={"x-request-id": "tts-request-1", "content-type": "text/event-stream"},
+                text="data: " + json.dumps({
+                    "request_id": "tts-request-1",
+                    "output": {"finish_reason": "stop", "audio": {
                         "url": "http://dashscope-test.oss-cn-beijing.aliyuncs.com/out.wav",
-                    },
-                },
-                "usage": {"characters": 7},
-            },
-        )
-
-    class FakeAudioResponse:
-        status_code = 200
-        headers = {"content-type": "audio/wav"}
-        content = audio
-
-    class FakeClient:
-        async def post(self, endpoint, headers=None, json=None):
-            captured["endpoint"] = endpoint
-            captured["authorization"] = headers["Authorization"]
-            captured["payload"] = json
-            return FakeResponse()
-
-        async def get(self, url):
-            captured["audio_url"] = url
-            return FakeAudioResponse()
+                    }},
+                    "usage": {"characters": 7},
+                }) + "\n\n",
+            )
+        captured["audio_url"] = str(request.url)
+        assert "authorization" not in request.headers
+        return httpx.Response(200, content=audio)
 
     monkeypatch.setattr(tts_client.settings, "dashscope_tts_api_key", "tts-key")
     monkeypatch.setattr(tts_client.settings, "dashscope_tts_endpoint", "https://tts.example/api")
@@ -217,16 +202,17 @@ async def test_synthesize_uses_dedicated_key_and_returns_metering(monkeypatch):
             "billing_unit": "per_10k_characters",
         },
     )
-    result = await tts_client.synthesize_speech(
-        text="你好",
-        voice_id="longanlingxin",
-        instruction="自然表达",
-        rate=1.2,
-        pitch=0.9,
-        volume=60,
-        seed=42,
-        client=FakeClient(),
-    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        result = await tts_client.synthesize_speech(
+            text="你好",
+            voice_id="longanlingxin",
+            instruction="自然表达",
+            rate=1.2,
+            pitch=0.9,
+            volume=60,
+            seed=42,
+            client=http,
+        )
 
     assert captured["authorization"] == "Bearer tts-key"
     assert captured["payload"]["model"] == "qwen-tts-test"

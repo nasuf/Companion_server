@@ -10,14 +10,14 @@ from app.services.chat_media import storage as media_storage
 from app.services.chat_media.prompt import attachment_to_metadata
 from app.services.speech_output.client import SynthesizedSpeech, synthesize_speech
 from app.services.speech_output.style import (
-    decorate_text_with_emotion,
-    resolve_style_instruction,
+    build_speech_plan,
+    resolve_voice_emotion,
 )
 from app.services.speech_output.usage import (
     link_tts_usage_to_message,
     record_tts_usage,
 )
-from app.services.speech_output.voices import get_agent_tts_settings
+from app.services.speech_output.voices import get_agent_tts_settings, resolve_agent_tts_model
 
 logger = logging.getLogger(__name__)
 
@@ -43,30 +43,34 @@ async def prepare_voice_output(
     source: str,
     emotion: str | None = None,
     intensity: int | float | None = None,
+    detect_missing_emotion: bool = False,
 ) -> PreparedVoiceOutput:
     transcript = " ".join((text or "").split())
-    from app.services.emoji import limit_emojis
-
-    spoken_text = " ".join(limit_emojis(transcript, max_keep=0).split())
-    if not spoken_text:
-        spoken_text = transcript
     agent_id = str(getattr(agent, "id"))
+    model = await resolve_agent_tts_model()
     tts_settings = await get_agent_tts_settings(agent_id)
-    spoken_text = decorate_text_with_emotion(
-        spoken_text,
+    emotion, intensity = await resolve_voice_emotion(
+        transcript, emotion, intensity,
+        enabled=tts_settings.auto_emotion and tts_settings.emotion_scale > 0,
+        detect_missing=source != "chat" or detect_missing_emotion,
+    )
+    plan = build_speech_plan(
+        transcript,
         emotion,
         intensity,
+        instruction=tts_settings.instruction,
         enabled=tts_settings.auto_emotion,
         scale=tts_settings.emotion_scale,
     )
     speech = await synthesize_speech(
-        text=spoken_text,
+        text=plan.text,
         voice_id=tts_settings.voice_id,
-        instruction=resolve_style_instruction(tts_settings.instruction),
+        instruction=plan.instruction,
         rate=tts_settings.rate,
         pitch=tts_settings.pitch,
         volume=tts_settings.volume,
         seed=tts_settings.seed,
+        model=model,
     )
     # Meter the successful provider call before local persistence. DashScope has
     # already billed it even if disk/message delivery later fails.
@@ -100,7 +104,7 @@ async def prepare_voice_output(
             request_id=speech.request_id,
             name="agent_voice.wav",
         )
-    except Exception:
+    except BaseException:
         media_storage.delete_media_file(storage_key)
         raise
     metadata = attachment_to_metadata(attachment)
@@ -127,6 +131,7 @@ async def bind_prepared_voice_output(
         message_id=message_id,
         user_id=prepared.user_id,
         conversation_id=prepared.conversation_id,
+        require_all=True,
     )
     await link_tts_usage_to_message(
         request_id=prepared.speech.request_id,
@@ -142,7 +147,7 @@ async def discard_prepared_voice_output(
         user_id=prepared.user_id,
         conversation_id=prepared.conversation_id,
     )
-    media_storage.delete_media_file(
-        getattr(deleted, "storage_key", None)
-        or getattr(prepared.attachment, "storage_key", None)
-    )
+    # A bind may have committed before the caller saw an error/cancellation.
+    # Delete bytes only when the atomic unbound DELETE actually removed a row.
+    if deleted is not None:
+        media_storage.delete_media_file(deleted.storage_key)

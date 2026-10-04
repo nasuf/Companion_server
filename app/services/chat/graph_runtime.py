@@ -119,6 +119,7 @@ class ChatFrame:
     topic_context: dict | None = None
     topic_intimacy: float = None
     voice_data: Any = None
+    voice_attachment_bound: bool = False
 
     def __post_init__(self):
         context = self.reply_context or {}
@@ -154,13 +155,17 @@ class ChatFrame:
                 task.cancel()
         if self.owned_tasks:
             await asyncio.gather(*self.owned_tasks, return_exceptions=True)
-        if self.prepared_voice is not None and not self.first_assistant_message_id:
+        if self.prepared_voice is not None and not self.voice_attachment_bound:
             from app.services.speech_output.delivery import (
                 discard_prepared_voice_output,
             )
 
-            await discard_prepared_voice_output(self.prepared_voice)
+            prepared_voice = self.prepared_voice
             self.prepared_voice = None
+            try:
+                await discard_prepared_voice_output(prepared_voice)
+            except Exception:
+                self.services.logger.warning("[TTS] graph cleanup failed", exc_info=True)
 
     def intent_snapshot(self):
         if self.detected_intent is None:

@@ -1213,6 +1213,7 @@ async def persist_reply(ctx):
                 await bind_prepared_voice_output(
                     ctx.prepared_voice, message_id=ctx.first_assistant_message_id
                 )
+                ctx.voice_attachment_bound = True
                 ctx.voice_data = ctx.emitted_replies[0]
                 ctx.voice_data["assistant_message_id"] = ctx.first_assistant_message_id
                 public_voice_data = {

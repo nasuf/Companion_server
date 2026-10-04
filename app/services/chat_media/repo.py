@@ -245,10 +245,11 @@ async def bind_attachments_to_message(
     message_id: str,
     user_id: str,
     conversation_id: str,
+    require_all: bool = False,
 ) -> None:
     if not attachment_ids:
         return
-    await db.execute_raw(
+    bound_count = await db.execute_raw(
         """
         UPDATE chat_message_attachments
         SET message_id = $1, updated_at = NOW()
@@ -262,6 +263,8 @@ async def bind_attachments_to_message(
         user_id,
         conversation_id,
     )
+    if require_all and bound_count != len(set(attachment_ids)):
+        raise LookupError("Attachment binding did not update all requested attachments")
 
 
 async def delete_unbound_attachment(

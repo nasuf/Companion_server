@@ -215,8 +215,6 @@ async def create_cloned_voice(
     endpoint = settings.dashscope_tts_voice_enrollment_endpoint.strip()
     if not api_key or not endpoint:
         raise SpeechSynthesisError("DashScope voice enrollment is not configured")
-    if not api_key or not endpoint:
-        raise SpeechSynthesisError("DashScope voice enrollment is not configured")
     payload = {
         "model": "voice-enrollment",
         "input": {

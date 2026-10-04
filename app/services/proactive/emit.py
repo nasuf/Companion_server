@@ -202,13 +202,16 @@ async def emit_proactive_message(
             )
             created_id = created.id
             created_at = created.createdAt
-    except Exception:
+    except BaseException:
         if prepared_voice is not None:
             from app.services.speech_output.delivery import (
                 discard_prepared_voice_output,
             )
 
-            await discard_prepared_voice_output(prepared_voice)
+            try:
+                await discard_prepared_voice_output(prepared_voice)
+            except Exception:
+                logger.warning("[TTS] proactive cleanup failed", exc_info=True)
         raise
     if prepared_voice is not None:
         try:

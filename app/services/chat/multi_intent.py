@@ -119,6 +119,7 @@ async def short_circuit_reply(
                     agent=agent,
                     conversation_id=conversation_id,
                     source="chat",
+                    detect_missing_emotion=True,
                 )
             except Exception as voice_error:
                 logger.warning(
@@ -149,12 +150,11 @@ async def short_circuit_reply(
         try:
             assistant_message_id = await save_replies_fn(*save_args, **save_kwargs)
         except BaseException:
-            if defer_turn_finalization:
-                from app.services.speech_output.delivery import discard_prepared_voice_output
-                try:
-                    await discard_prepared_voice_output(prepared_voice)
-                except Exception:
-                    logger.warning("[TTS] graph short-circuit cleanup failed", exc_info=True)
+            from app.services.speech_output.delivery import discard_prepared_voice_output
+            try:
+                await discard_prepared_voice_output(prepared_voice)
+            except Exception:
+                logger.warning("[TTS] short-circuit cleanup failed", exc_info=True)
             raise
         if assistant_message_id:
             try:

@@ -23,9 +23,9 @@ from app.db import db
 from app.services.speech_output.client import SpeechSynthesisError, synthesize_speech
 from app.services.speech_output.style import (
     MAX_INSTRUCTION_BILLABLE_CHARACTERS,
-    decorate_text_with_emotion,
+    build_speech_plan,
     instruction_billable_characters,
-    resolve_style_instruction,
+    resolve_voice_emotion,
 )
 from app.services.speech_output.usage import record_tts_usage
 from app.services.speech_output.voice_enrollment import (
@@ -37,7 +37,7 @@ from app.services.speech_output.voice_enrollment import (
     signed_enrollment_url,
     verify_signed_enrollment_url,
 )
-from app.services.speech_output.voices import QWEN_AUDIO_TTS_MODEL
+from app.services.speech_output.voices import QWEN_AUDIO_TTS_MODEL, resolve_agent_tts_model
 from app.services.runtime.tasks import fire_background
 
 
@@ -398,14 +398,6 @@ async def preview_agent_tts(
         payload.voice_profile_id,
         require_enabled=True,
     )
-    instruction = resolve_style_instruction(_validate_instruction(payload.instruction))
-    text = decorate_text_with_emotion(
-        payload.text,
-        payload.emotion,
-        payload.intensity,
-        enabled=payload.auto_emotion,
-        scale=payload.emotion_scale,
-    )
     agent_rows = await db.query_raw(
         "SELECT user_id FROM ai_agents WHERE id = $1 LIMIT 1",
         agent_id,
@@ -413,15 +405,32 @@ async def preview_agent_tts(
     if not agent_rows:
         raise HTTPException(status_code=404, detail="Agent not found")
     try:
+        model = await resolve_agent_tts_model()
+    except SpeechSynthesisError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    emotion, intensity = await resolve_voice_emotion(
+        payload.text, payload.emotion, payload.intensity,
+        enabled=payload.auto_emotion and payload.emotion_scale > 0,
+        detect_missing=True,
+    )
+    try:
+        plan = build_speech_plan(
+            payload.text, emotion, intensity,
+            instruction=_validate_instruction(payload.instruction),
+            enabled=payload.auto_emotion, scale=payload.emotion_scale,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         speech = await synthesize_speech(
-            text=text,
+            text=plan.text,
             voice_id=str(profile.get("voice_id") or ""),
-            instruction=instruction,
+            instruction=plan.instruction,
             rate=payload.rate,
             pitch=payload.pitch,
             volume=payload.volume,
             seed=payload.seed,
-            model=QWEN_AUDIO_TTS_MODEL,
+            model=model,
         )
     except SpeechSynthesisError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

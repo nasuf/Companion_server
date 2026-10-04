@@ -523,6 +523,8 @@ async def _stream_legacy_response(
     sc_ctx: ShortCircuitCtx | None = None
     prompt_user_emotion: dict | None = None
     messages_dicts: list[dict] = []
+    prepared_voice = None
+    voice_attachment_bound = False
 
     try:
         # 必须早于 boundary phase: spec §2.6 步骤 4 攻击目标识别需要最近几轮做上下文,
@@ -1761,6 +1763,7 @@ async def _stream_legacy_response(
                         prepared_voice,
                         message_id=first_assistant_message_id,
                     )
+                    voice_attachment_bound = True
                     voice_data = emitted_replies[0]
                     voice_data["assistant_message_id"] = first_assistant_message_id
                     public_voice_data = {
@@ -1913,6 +1916,12 @@ async def _stream_legacy_response(
     finally:
         if continuation_task is not None and not continuation_task.done():
             continuation_task.cancel()
+        if prepared_voice is not None and not voice_attachment_bound:
+            from app.services.speech_output.delivery import discard_prepared_voice_output
+            try:
+                await discard_prepared_voice_output(prepared_voice)
+            except Exception:
+                logger.warning("[TTS] chat cleanup failed", exc_info=True)
         # Flush LLM usage 累计到 llm_usage 表. sub_intent_mode 没起 session,
         # token 是 None, 走里面的 short-circuit.
         if usage_token is not None:

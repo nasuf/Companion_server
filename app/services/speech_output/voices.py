@@ -13,6 +13,17 @@ SYSTEM_VOICE_BY_GENDER = {
 }
 
 
+async def resolve_agent_tts_model() -> str:
+    """The current voice library/enrollment targets Plus, including clones."""
+    from app.services.runtime_config import get_effective_tts_model
+    from app.services.speech_output.client import SpeechSynthesisError
+
+    model = (await get_effective_tts_model()).strip()
+    if model != QWEN_AUDIO_TTS_MODEL:
+        raise SpeechSynthesisError("当前模型与 Plus 音色库不兼容，请配置 qwen-audio-3.0-tts-plus")
+    return model
+
+
 @dataclass(frozen=True)
 class AgentTtsSettings:
     voice_id: str
@@ -77,15 +88,30 @@ async def assign_random_voice(
         if rows
         else SYSTEM_VOICE_BY_GENDER[gender_key]
     )
-    await db.execute_raw(
+    changed = await db.execute_raw(
         """
         UPDATE ai_agents
         SET tts_voice_id = $1, updated_at = NOW()
         WHERE id = $2
+          AND NOT EXISTS (
+              SELECT 1 FROM tts_voice_profiles profile
+              WHERE profile.provider = 'dashscope'
+                AND profile.model = $3
+                AND profile.voice_id = ai_agents.tts_voice_id
+          )
         """,
         voice_id,
         agent_id,
+        QWEN_AUDIO_TTS_MODEL,
     )
+    if not changed:
+        current = await db.query_raw(
+            "SELECT tts_voice_id FROM ai_agents WHERE id = $1 LIMIT 1",
+            agent_id,
+        )
+        if not current or not current[0].get("tts_voice_id"):
+            raise LookupError("Agent voice assignment failed")
+        voice_id = str(current[0]["tts_voice_id"])
     if agent is not None:
         _cache_voice_on_agent(agent, voice_id)
     return voice_id
