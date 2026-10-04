@@ -6,9 +6,10 @@ class Settings(BaseSettings):
     # Runtime environment
     app_env: str = "development"
 
-    # G01: legacy by default; stable conversation allowlist is required.
+    # Legacy by default; graph requires an exact cohort or explicit full rollout.
     chat_executor: Literal["legacy", "langgraph"] = "legacy"
     chat_graph_conversation_allowlist: str = ""
+    chat_graph_all_conversations: bool = False
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/companion"

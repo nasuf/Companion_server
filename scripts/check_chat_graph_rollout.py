@@ -29,6 +29,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--conversation-id", required=True, action="append")
     result.add_argument("--expected-executor", choices=("legacy", "langgraph"), required=True)
     result.add_argument("--expected-graph-version", required=True)
+    result.add_argument("--expect-all-conversations", action="store_true",
+                        help="Expect full rollout; query only the exact listed observation sample")
     result.add_argument("--since", required=True, type=timestamp)
     result.add_argument("--until", required=True, type=timestamp)
     return result
@@ -38,6 +40,7 @@ async def main(args) -> int:
     observation = Observation(
         tuple(args.conversation_id), args.expected_executor, args.expected_graph_version,
         args.since, args.until,
+        args.expect_all_conversations,
     )
     now = datetime.now(timezone.utc)
     observation.validate(now)
@@ -48,6 +51,7 @@ async def main(args) -> int:
     runtime = {
         "executor": settings.chat_executor,
         "allowlist": settings.chat_graph_conversation_allowlist,
+        "all_conversations": settings.chat_graph_all_conversations,
         "graph_version": GRAPH_VERSION,
         "durable_execution_ready": DURABLE_EXECUTION_READY,
         "trace_backend": settings.trace_backend,

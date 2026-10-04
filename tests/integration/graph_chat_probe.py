@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 
 import httpx
@@ -28,6 +29,19 @@ async def main():
                 await asyncio.sleep(1)
             else:
                 raise AssertionError(f"Test service {host} did not start")
+        if os.environ.get("CHAT_GRAPH_ALL_CONVERSATIONS") == "true":
+            before = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
+            for unauthorized, expected_status in (
+                ({}, 401),
+                ({"Authorization": "Bearer " + create_jwt("other-user", "user")}, 403),
+            ):
+                denied = await client.post(
+                    "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=unauthorized,
+                )
+                assert denied.status_code == expected_status
+            after = (await client.get("http://worker-a:8000/test/state")).json()["effects"]
+            assert after == before
+            completed.append("Full rollout still rejects anonymous/cross-account access without business effects")
         response = await client.post(
             "http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers
         )
@@ -87,7 +101,12 @@ async def main():
                 "Persistence failure emits no done and does not replay the legacy executor"
             )
         base = "http://worker-a:8000"
-        await client.post(base + "/test/graph-control", json={"reset": True})
+        controls = (await client.post(base + "/test/graph-control", json={"reset": True})).json()
+        expect_all = os.environ.get("CHAT_GRAPH_ALL_CONVERSATIONS") == "true"
+        assert controls["all_conversations"] is expect_all
+        assert controls["allowlist"] == ("" if expect_all else "conv-1")
+        if expect_all:
+            completed.append("Explicit full rollout reaches real graph with an empty allowlist")
         async def mint():
             result = await client.post("http://test-entry:8000/api/chat/conv-1/ws-ticket", headers=headers)
             result.raise_for_status()

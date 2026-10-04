@@ -148,6 +148,7 @@ def configure_chat(monkeypatch):
     tracer.enter.return_value = tracer
     monkeypatch.setattr(chat, "create_tracer", lambda *_, **__: tracer)
     monkeypatch.setattr(settings, "chat_executor", "langgraph")
+    monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
     monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "c-1")
     return SimpleNamespace(
         db=database,

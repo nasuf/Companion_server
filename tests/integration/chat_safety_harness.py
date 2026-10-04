@@ -147,7 +147,8 @@ if os.environ.get("CHAT_GRAPH_E2E") == "1":
         def setattr(self, target, name, value):
             setattr(target, name, value)
     graph_io = configure_chat(TestPatches())
-    settings.chat_graph_conversation_allowlist = "conv-1"
+    settings.chat_graph_all_conversations = os.environ.get("CHAT_GRAPH_ALL_CONVERSATIONS") == "true"
+    settings.chat_graph_conversation_allowlist = "" if settings.chat_graph_all_conversations else "conv-1"
     from app.services.chat import orchestrator as graph_chat
     ws_manager.manager = manager
     graph_release = asyncio.Event()
@@ -199,6 +200,8 @@ if os.environ.get("CHAT_GRAPH_E2E") == "1":
             graph_io.achievement.reset_mock()
             graph_chat._save_replies.return_value = "assistant-1"
         return {"generating": graph_generating, "saves": graph_chat._save_replies.await_count,
+                "all_conversations": settings.chat_graph_all_conversations,
+                "allowlist": settings.chat_graph_conversation_allowlist,
                 "finish": graph_chat.finish_assistant_turn.await_count,
                 "background": graph_chat._background_post_process.call_count,
                 "turn_achievement": graph_io.achievement.call_count,

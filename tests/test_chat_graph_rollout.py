@@ -61,6 +61,33 @@ def test_complete_telemetry_is_not_full_release_qualification(evidence):
     assert len(result["limitations"]) == 5
 
 
+def test_full_rollout_observation_keeps_a_bounded_sample_without_cohort_false_alarm(evidence):
+    o = evidence.observation
+    evidence.observation = Observation(o.conversation_ids, o.executor, o.graph_version, o.since, o.until, True)
+    evidence.runtime.update(all_conversations=True, allowlist="")
+    result = report(evidence)
+    assert result["telemetry_ready"]
+    assert result["coverage"] == "all_conversations"
+    assert result["release_ready"] is False
+    evidence.runtime["all_conversations"] = False
+    assert "coverage_drift" in codes(evidence)
+
+
+def test_unexpected_full_rollout_or_mixed_modes_are_detected(evidence):
+    evidence.runtime["all_conversations"] = True
+    assert "coverage_drift" in codes(evidence)
+    o = evidence.observation
+    evidence.observation = Observation(o.conversation_ids, o.executor, o.graph_version, o.since, o.until, True)
+    assert "cohort_drift" in codes(evidence)
+
+
+def test_full_rollout_observation_cannot_claim_legacy(evidence):
+    o = evidence.observation
+    request = Observation(o.conversation_ids, "legacy", o.graph_version, o.since, o.until, True)
+    with pytest.raises(ValueError):
+        request.validate(NOW)
+
+
 @pytest.mark.parametrize("field,value,code", [
     ("executor", "legacy", "executor_drift"),
     ("allowlist", "c-1,c-other", "cohort_drift"),

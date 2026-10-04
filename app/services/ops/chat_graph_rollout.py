@@ -25,6 +25,7 @@ class Observation:
     graph_version: str
     since: datetime
     until: datetime
+    all_conversations: bool = False
 
     def validate(self, now: datetime) -> None:
         if (
@@ -36,6 +37,8 @@ class Observation:
             raise ValueError("Specify 1–100 distinct, exact authorized conversation IDs")
         if self.executor not in {"legacy", "langgraph"} or not self.graph_version:
             raise ValueError("An executor and expected graph version are required")
+        if type(self.all_conversations) is not bool or (self.all_conversations and self.executor != "langgraph"):
+            raise ValueError("Full rollout observation requires the graph executor")
         for value in (self.since, self.until, now):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError("Observation timestamps must include a timezone")
@@ -57,7 +60,12 @@ def assess(
 
     cohort = set(observation.conversation_ids)
     allowed = {v.strip() for v in runtime["allowlist"].split(",") if v.strip()}
-    if allowed - cohort or (observation.executor == "langgraph" and allowed != cohort):
+    if runtime.get("all_conversations", False) != observation.all_conversations:
+        issue("coverage_drift", "stop", "Runtime full-rollout mode differs from the expected mode")
+    if (observation.all_conversations and allowed) or (
+        not observation.all_conversations
+        and (allowed - cohort or (observation.executor == "langgraph" and allowed != cohort))
+    ):
         issue("cohort_drift", "stop", "Runtime allowlist differs from the authorized cohort")
     if runtime["executor"] != observation.executor:
         issue("executor_drift", "stop", "Runtime executor differs from the expected executor")
@@ -180,6 +188,7 @@ def assess(
         "expected_graph_version": observation.graph_version,
         "since": observation.since.isoformat(), "until": observation.until.isoformat(),
         "runtime": {k: runtime[k] for k in ("executor", "graph_version", "trace_backend")},
+        "coverage": "all_conversations" if observation.all_conversations else "cohort",
         "telemetry_ready": not unique_issues,
         "release_ready": False,
         "issues": unique_issues,

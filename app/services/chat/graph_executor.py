@@ -11,6 +11,8 @@ def select_executor(conversation_id: str) -> str:
 
     if settings.chat_executor != "langgraph":
         return "legacy"
+    if settings.chat_graph_all_conversations and conversation_id:
+        return "langgraph"
     allowed = {
         item.strip()
         for item in settings.chat_graph_conversation_allowlist.split(",")

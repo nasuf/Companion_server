@@ -26,8 +26,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--graph", action="store_true", help="Qualify the G01 graph stream adapter")
+    parser.add_argument("--graph-all", action="store_true", help="Test explicit full rollout with an empty allowlist")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.graph_all and not args.graph:
+        parser.error("--graph-all requires --graph")
     # Do not pull implicitly: use the image that has actually been built/reviewed.
     image = run(["image", "inspect", args.image, "--format", "{{.Id}}"]).stdout.strip()
     run(["image", "inspect", "redis:7-alpine"])
@@ -48,6 +51,8 @@ def main():
     }
     if args.graph:
         env["CHAT_GRAPH_E2E"] = "1"
+    if args.graph_all:
+        env["CHAT_GRAPH_ALL_CONVERSATIONS"] = "true"
     common = ["--network", network, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
               "--security-opt", "no-new-privileges", "-w", "/tmp",
               "-v", f"{harness}:/verification:ro", "-v", f"{root / 'tests'}:/tests:ro"]

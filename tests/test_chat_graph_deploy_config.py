@@ -21,7 +21,7 @@ OTHER_CONVERSATION = str(UUID(int=2))
 
 @pytest.fixture(autouse=True)
 def isolate_startup_environment(monkeypatch):
-    for key in ("CHAT_EXECUTOR", "CHAT_GRAPH_CONVERSATION_ALLOWLIST", "JWT_SECRET", "WEB_CONCURRENCY"):
+    for key in ("CHAT_EXECUTOR", "CHAT_GRAPH_CONVERSATION_ALLOWLIST", "CHAT_GRAPH_ALL_CONVERSATIONS", "JWT_SECRET", "WEB_CONCURRENCY"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -38,7 +38,7 @@ def test_missing_configuration_defaults_to_legacy(tmp_path):
     path.unlink()
     result = apply_rollout(env, path)
     settings = Settings(_env_file=env)
-    assert result == {"executor": "legacy", "cohort_size": 0, "checkpoint_enabled": False}
+    assert result == {"executor": "legacy", "cohort_size": 0, "all_conversations": False, "checkpoint_enabled": False}
     assert settings.chat_executor == "legacy"
     assert settings.chat_graph_conversation_allowlist == ""
     assert env.stat().st_mode & 0o777 == 0o600
@@ -66,6 +66,33 @@ def test_only_exact_cohort_uses_graph_and_rollback_is_persistent(tmp_path, monke
     assert Settings(_env_file=env).chat_executor == "legacy"
 
 
+def test_explicit_full_rollout_survives_deploy_and_can_return_to_cohort_or_legacy(tmp_path, monkeypatch):
+    env, path = setup_files(tmp_path, {
+        "executor": "langgraph", "conversation_ids": [], "all_conversations": True,
+    })
+    for _ in range(2):
+        # Deployment regenerates .env before applying the persistent private file.
+        env.write_text("JWT_SECRET=synthetic-secret\nWEB_CONCURRENCY=2\n")
+        result = apply_rollout(env, path)
+        assert result["all_conversations"] is True
+        settings = Settings(_env_file=env)
+        monkeypatch.setattr("app.config.settings", settings)
+        assert select_executor(CONVERSATION) == select_executor(OTHER_CONVERSATION) == "langgraph"
+        assert settings.chat_graph_conversation_allowlist == ""
+        assert settings.jwt_secret == "synthetic-secret" and settings.web_concurrency == 2
+    assert env.read_text().count("CHAT_GRAPH_ALL_CONVERSATIONS=") == 1
+    path.write_text(json.dumps({"executor": "langgraph", "conversation_ids": [CONVERSATION]}))
+    apply_rollout(env, path)
+    monkeypatch.setattr("app.config.settings", Settings(_env_file=env))
+    assert select_executor(CONVERSATION) == "langgraph"
+    assert select_executor(OTHER_CONVERSATION) == "legacy"
+    path.write_text(json.dumps({"executor": "legacy", "conversation_ids": []}))
+    apply_rollout(env, path)
+    monkeypatch.setattr("app.config.settings", Settings(_env_file=env))
+    assert select_executor(CONVERSATION) == select_executor(OTHER_CONVERSATION) == "legacy"
+    assert not Settings(_env_file=env).chat_graph_all_conversations
+
+
 @pytest.mark.parametrize("config", [
     {}, [], {"executor": "unknown", "conversation_ids": []},
     {"executor": "langgraph", "conversation_ids": []},
@@ -77,6 +104,12 @@ def test_only_exact_cohort_uses_graph_and_rollback_is_persistent(tmp_path, monke
     {"executor": "langgraph", "conversation_ids": [CONVERSATION, CONVERSATION]},
     {"executor": "langgraph", "conversation_ids": [str(UUID(int=i)) for i in range(101)]},
     {"executor": "legacy", "conversation_ids": [], "checkpoint_enabled": True},
+    {"executor": "legacy", "conversation_ids": [], "all_conversations": True},
+    {"executor": "langgraph", "conversation_ids": [CONVERSATION], "all_conversations": True},
+    {"executor": "langgraph", "conversation_ids": [], "all_conversations": "true"},
+    {"executor": "langgraph", "conversation_ids": [], "all_conversations": 1},
+    {"executor": "langgraph", "conversation_ids": [], "all_conversations": None},
+    {"executor": "langgraph", "conversation_ids": [], "all_conversations": False},
 ])
 def test_invalid_cohort_leaves_environment_unchanged(tmp_path, config):
     env, path = setup_files(tmp_path, config)

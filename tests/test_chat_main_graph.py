@@ -169,6 +169,7 @@ def test_allowlist_and_default_fail_closed(monkeypatch):
     from app.services.chat.graph_executor import select_executor
 
     monkeypatch.setattr(settings, "chat_executor", "legacy")
+    monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
     assert select_executor("c-1") == "legacy"
     monkeypatch.setattr(settings, "chat_executor", "langgraph")
     monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "")
@@ -176,6 +177,43 @@ def test_allowlist_and_default_fail_closed(monkeypatch):
     monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "c-1,c-2")
     assert select_executor("c-1") == "langgraph"
     assert select_executor("c-3") == "legacy"
+
+
+def test_full_rollout_covers_existing_and_future_conversations_and_master_rollback(monkeypatch):
+    from app.services.chat.graph_executor import select_executor
+
+    monkeypatch.setattr(settings, "chat_executor", "langgraph")
+    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "")
+    monkeypatch.setattr(settings, "chat_graph_all_conversations", True)
+    for conversation in ("c-1", "c-existing", "c-created-after-deploy"):
+        assert select_executor(conversation) == "langgraph"
+    assert select_executor("") == "legacy"
+    monkeypatch.setattr(settings, "chat_executor", "legacy")
+    assert select_executor("c-created-after-deploy") == "legacy"
+    monkeypatch.setattr(settings, "chat_executor", "langgraph")
+    monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
+    assert select_executor("c-created-after-deploy") == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_full_rollout_rollback_does_not_switch_an_inflight_graph(chat_io, monkeypatch):
+    from app.services.chat.graph_executor import select_executor
+
+    monkeypatch.setattr(settings, "chat_graph_conversation_allowlist", "")
+    monkeypatch.setattr(settings, "chat_graph_all_conversations", True)
+
+    async def classify(*_, **__):
+        monkeypatch.setattr(settings, "chat_executor", "legacy")
+        monkeypatch.setattr(settings, "chat_graph_all_conversations", False)
+        return IntentResult(intent=IntentType.NONE, confidence=0.9)
+
+    chat.detect_intent_unified.side_effect = classify
+    monkeypatch.setattr(chat, "_stream_legacy_response", MagicMock(side_effect=AssertionError("legacy replay")))
+    events = await run(chat_io)
+    assert events[-1]["event"] == "done"
+    chat._stream_legacy_response.assert_not_called()
+    chat.finish_assistant_turn.assert_awaited_once()
+    assert select_executor("c-1") == "legacy"
 
 
 @pytest.mark.asyncio
