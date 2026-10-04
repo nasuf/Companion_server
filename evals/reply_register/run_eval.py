@@ -181,13 +181,20 @@ async def _judge(judge_model, group: str, case: RegisterCase, reply: str) -> str
     return J.parse_verdict(group, raw)
 
 
-async def run_calibration(judge_model, concurrency: int) -> bool:
+async def run_calibration(judge_model, concurrency: int, *, grounded_false_premises: bool = False) -> bool:
     """Judge must separate the undebatable cases before its verdicts count."""
     sem = asyncio.Semaphore(concurrency)
 
     async def one(group: str, message: str, reply: str, expected: str):
         async with sem:
-            prompt = J.build_judge_prompt(group, "", message, reply)
+            facts = None
+            if grounded_false_premises and group == "falsepremise":
+                # Both existing control calibration samples use the same
+                # Antarctic claim; declare its toy-world truth explicitly.
+                if message != "你昨天说你去过南极对吧":
+                    raise ValueError("New calibration case needs declared ground truth")
+                facts = "角色没有去过南极。"
+            prompt = J.build_judge_prompt(group, "", message, reply, known_facts=facts)
             try:
                 raw = await _ask_judge(judge_model, prompt)
             except Exception as e:  # noqa: BLE001

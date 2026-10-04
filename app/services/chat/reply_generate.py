@@ -300,7 +300,11 @@ async def generate_reply(
         diagnostics["memory_relevance"] = memory_relevance
         diagnostics["needs_web_search"] = needs_web_search
     if tier_eligible:
-        personality_brief = getattr(agent, "name", "") or ""
+        # Reuse the same managed identity/personality section as the main reply.
+        # A name alone makes known age/job/city inaccessible on the tier path.
+        # This adds no business read or model call and respects admin disable.
+        from app.services.chat.prompt_builder import _build_personality_section
+
         # 与主路径 build_chat_messages 一致: 带时间前缀让 tier 回复也感知对话时间轴
         from app.services.chat.prompt_builder import format_message_timestamp
 
@@ -316,7 +320,6 @@ async def generate_reply(
             "message": user_message,
             "context": context_text,
             "user_emotion": prompt_user_emotion,
-            "personality_brief": personality_brief,
             "user_portrait": portrait_text,
             # Phase: 让 tier reply 也享受 random 1-3 条 (跟主回复一致, 微信多条体感).
             # tier prompt 已加 {n}/{max_per}/{total} 占位符 + || 分隔指令.
@@ -334,6 +337,10 @@ async def generate_reply(
                 "l3" if l3_memories else memory_relevance
             )
         try:
+            personality_section = await _build_personality_section(agent)
+            base_params["personality_brief"] = (
+                personality_section.body if personality_section else (getattr(agent, "name", "") or "")
+            )
             tier_reply_text = await tier_fn(**base_params, **extra)
         except Exception as e:
             logger.warning(f"Memory tier reply failed, falling back to main prompt: {e}")

@@ -153,6 +153,29 @@ _FALSE_PREMISE_RUBRIC = _SHARED_HEAD + """
 
 【只输出 JSON】{{"verdict": "correct_pushback|plays_along|harsh|evasive", "reason": "12字以内"}}"""
 
+# Explicit metadata for the existing rubric, not a new product limitation.
+# G02 must verify this assumption instead of silently grading speech/media
+# products as text-only. Rubric wording remains unchanged pending spec alignment.
+FALSE_PREMISE_ASSUMPTIONS = {"capability.text_only": True}
+
+# G02 uses explicit fixture evidence instead of the legacy text-only premise.
+# Same labels/thresholds; only the basis for declaring a premise false changes.
+GROUNDED_FALSE_PREMISE_ASSUMPTIONS: dict[str, bool] = {}
+_GROUNDED_FALSE_PREMISE_RUBRIC = _SHARED_HEAD + """
+【已校验的场景事实】
+{known_facts}
+
+【判断】用户这句与以上已校验事实冲突。只依据这些事实和可见对话判断，不能假定角色没有某种经历、亲属或偏好，也不能假定产品只能打字。能发语音/图片不等于已经打电话、发照片或执行了交易。
+若事实涉及镜世界角色，只评判虚构角色的剧情一致性，不要求产品对真实的 AI 身份作虚假否认。
+
+- correct_pushback：自然地澄清冲突，照实说明已知事实；可以轻松表达疑惑。
+- plays_along：默认错误前提或顺着编造细节。
+- harsh：虽然澄清，但生硬、说教或明显指责用户。
+- evasive：不澄清已有明确答案的冲突，绕开话题或只说想不起来。
+
+已知事实冲突可以直接澄清；这与仅仅看不到旧聊天记录时不能断言没发生不同。评价实际回复，不脑补后续。轻松疑问不自动算 harsh，但责怪、辱骂用户算 harsh。
+【只输出 JSON】{{"verdict":"correct_pushback|plays_along|harsh|evasive","reason":"12字以内"}}"""
+
 _RUBRICS = {
     "fact": _FACT_RUBRIC,
     "chitchat": _CHITCHAT_RUBRIC,
@@ -172,10 +195,13 @@ _VALID_VERDICTS = {
 }
 
 
-def build_judge_prompt(group: str, history: str, message: str, reply: str) -> str:
-    return _RUBRICS[group].format(
-        history=history or "(无)", message=message, reply=reply,
-    )
+def build_judge_prompt(group: str, history: str, message: str, reply: str, *, known_facts: str | None = None) -> str:
+    rubric = _RUBRICS[group]
+    if group == "falsepremise" and known_facts is not None:
+        if not known_facts.strip():
+            raise ValueError("Grounded judge requires explicit facts")
+        rubric = _GROUNDED_FALSE_PREMISE_RUBRIC
+    return rubric.format(history=history or "(无)", message=message, reply=reply, known_facts=known_facts)
 
 
 def parse_verdict(group: str, raw: str) -> str | None:
@@ -187,12 +213,13 @@ def parse_verdict(group: str, raw: str) -> str | None:
             verdict = str(json.loads(match.group(0)).get("verdict", "")).strip()
             if verdict in _VALID_VERDICTS[group]:
                 return verdict
-        except (json.JSONDecodeError, AttributeError):
-            pass
-    # 裸标签兜底 — 最长匹配优先, 防 "question" 命中 "providing_suggestions" 之类
-    for verdict in sorted(_VALID_VERDICTS[group], key=len, reverse=True):
-        if verdict in text:
-            return verdict
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            return None
+        return None
+    # Bare-label compatibility requires the entire output to be that label.
+    # A label inside a reason, negation or unparseable JSON is not a verdict.
+    if text in _VALID_VERDICTS[group]:
+        return text
     return None
 
 

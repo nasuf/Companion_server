@@ -487,6 +487,17 @@ async def test_boundary_residual_medium_patience_short_circuits():
 # ═══════════════════════════════════════════════════════════════════
 
 
+@pytest.fixture(autouse=True)
+def isolated_managed_personality(monkeypatch, request):
+    # Phase unit tests isolate the managed prompt store. G02 paired tests use
+    # its actual renderer and separately verify identity/admin-disable behavior.
+    if request.node.name.startswith("test_reply_generate_"):
+        from app.services.chat import prompt_builder
+        monkeypatch.setattr(prompt_builder, "_build_personality_section", AsyncMock(
+            return_value=SimpleNamespace(body="合成角色身份与性格"),
+        ))
+
+
 def _make_reply_generate_kwargs(**overrides):
     from app.services.chat.intent_dispatcher import IntentResult, IntentType
 
@@ -636,6 +647,27 @@ async def test_reply_generate_tier_failure_falls_back_to_chat_messages_factory()
     assert diagnostics["tier_empty_or_failed"] is True
     assert replies == ["主 LLM 回复"]
     assert raw == "主 LLM 回复"
+
+
+@pytest.mark.asyncio
+async def test_reply_generate_personality_read_failure_falls_back_once():
+    from app.services.chat import prompt_builder
+    from app.services.chat.reply_generate import generate_reply
+    messages = [{"role": "system", "content": "synthetic main prompt"}]
+    factory = AsyncMock(return_value=messages)
+    diagnostics = {}
+    kwargs = _make_reply_generate_kwargs(chat_messages=None, chat_messages_factory=factory,
+                                        diagnostics=diagnostics)
+    main = AsyncMock(return_value=("主回复", False))
+    with patch.object(prompt_builder, "_build_personality_section", AsyncMock(side_effect=RuntimeError("Synthetic prompt read failure"))), \
+         patch("app.services.chat.reply_generate._run_main_llm", main):
+        replies, raw, _, _ = await generate_reply(**kwargs)
+    assert replies == ["主回复"] and raw == "主回复"
+    factory.assert_awaited_once()
+    main.assert_awaited_once_with(messages, needs_web_search=False)
+    kwargs["tier_fns"]["weak"].assert_not_awaited()
+    assert diagnostics["tier_error"] == "RuntimeError"
+    assert diagnostics["reply_path"] == "main_llm"
 
 
 @pytest.mark.asyncio

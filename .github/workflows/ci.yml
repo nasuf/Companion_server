@@ -76,6 +76,10 @@ jobs:
             tests/test_release_archive.py \
             tests/test_release_archive_workflow.py \
             tests/test_chat_main_graph.py \
+            tests/test_chat_graph_equivalence.py \
+            tests/test_graph_eval_safety.py \
+            tests/test_graph_eval_preconditions.py \
+            tests/test_reply_register_eval.py \
             tests/test_local_tracer.py \
             tests/test_orchestrator_phases.py \
             tests/test_short_circuit_post_process.py \
@@ -108,6 +112,10 @@ jobs:
             tests/test_legacy_apns_logging.py \
             tests/test_deploy_apns_preflight.py \
             tests/test_prompt_store.py \
+            tests/test_prompt_phase7_hardening.py \
+            tests/test_reply_prompt_format.py \
+            tests/test_prompt_optional_reference_rows.py \
+            tests/test_phase6_prompt_audit.py \
             tests/test_admin_prompt_replay.py \
             tests/test_admin_stats_operations.py \
             tests/test_proactive_history.py \

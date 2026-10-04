@@ -150,6 +150,59 @@ if os.environ.get("CHAT_GRAPH_E2E") == "1":
     settings.chat_graph_conversation_allowlist = "conv-1"
     from app.services.chat import orchestrator as graph_chat
     ws_manager.manager = manager
+    graph_release = asyncio.Event()
+    graph_release.set()
+    graph_generating = False
+    # Exercise actual WS ingress too; only domain/quota/media IO is synthetic.
+    graph_io.db.conversation.find_unique.return_value = conv
+    ws.wallet.is_vip = AsyncMock(return_value=True)
+    ws.chat_quota.consume_one = AsyncMock(return_value={"allowed": True})
+    ws.chat_media_repo.get_message_attachments = AsyncMock(return_value=[])
+    ws.chat_media_repo.bind_attachments_to_message = AsyncMock()
+    ws.ensure_vision_summaries = AsyncMock(return_value=[])
+    ws.get_cached_schedule = AsyncMock(return_value=[{"activity": "free"}])
+    ws.get_current_status = lambda _: {"activity": "free", "status": "idle"}
+    ws.build_reply_timing_context = AsyncMock(return_value={"delay_seconds": 0})
+    ws.mark_user_replied_for_conversation = AsyncMock()
+    from app.services.offline import activity_companion
+    activity_companion.note_user_interaction = AsyncMock()
+
+    async def immediate_plan(**kwargs):
+        return ws.UserMessageAggregationPlan(
+            route="immediate", agent_id=kwargs["agent_id"], user_id=kwargs["user_id"],
+            conversation_id=kwargs["conversation_id"], text=kwargs["text"], metadata={},
+            final_message=kwargs["text"], final_context=kwargs["reply_context"],
+            fallback_message=kwargs["text"], fallback_context=kwargs["reply_context"],
+        )
+    ws.plan_user_message_aggregation = immediate_plan
+
+    async def controlled_reply(**_):
+        global graph_generating
+        graph_generating = True
+        try:
+            await graph_release.wait()
+            return ["ordinary reply"], "ordinary reply", False, {"emotion": "中性"}
+        finally:
+            graph_generating = False
+    graph_chat._generate_reply.side_effect = controlled_reply
+
+    @app.post("/test/graph-control")
+    async def control_graph(data: dict):
+        if data.get("hold"):
+            graph_release.clear()
+        if data.get("release"):
+            graph_release.set()
+        if data.get("reset"):
+            graph_chat._save_replies.reset_mock()
+            graph_chat.finish_assistant_turn.reset_mock()
+            graph_chat._background_post_process.reset_mock()
+            graph_io.achievement.reset_mock()
+            graph_chat._save_replies.return_value = "assistant-1"
+        return {"generating": graph_generating, "saves": graph_chat._save_replies.await_count,
+                "finish": graph_chat.finish_assistant_turn.await_count,
+                "background": graph_chat._background_post_process.call_count,
+                "turn_achievement": graph_io.achievement.call_count,
+                "user_messages": effects["messages"]}
 
     @app.post("/test/generate")
     async def generate_graph(data: dict):
