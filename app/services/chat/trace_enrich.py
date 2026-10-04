@@ -702,6 +702,26 @@ def _extract_output_text(outputs: Any) -> str:
     return ""
 
 
+def _decision_label(meta: _PromptMeta, outputs: Any) -> str | None:
+    output_text = _extract_output_text(outputs)
+    label: str | None = None
+    if meta.label_extractor:
+        try:
+            label = meta.label_extractor(output_text)
+        except Exception as e:
+            logger.debug(
+                f"[trace_enrich] label_extractor failed prompt_key={meta.prompt_key}: {e}"
+            )
+            label = None
+    if label is None and output_text:
+        # Fallback: 截 output 前 30 字
+        label = output_text.strip()[:30]
+        if len(output_text.strip()) > 30:
+            label += "…"
+
+    return label
+
+
 def enrich_step(step: dict[str, Any]) -> dict[str, Any]:
     """给 normalized step 加 4 个语义字段. 只增不改.
 
@@ -741,21 +761,7 @@ def enrich_step(step: dict[str, Any]) -> dict[str, Any]:
         step["decision_label"] = None
         return step
 
-    output_text = _extract_output_text(step.get("outputs"))
-    label: str | None = None
-    if meta.label_extractor:
-        try:
-            label = meta.label_extractor(output_text)
-        except Exception as e:
-            logger.debug(
-                f"[trace_enrich] label_extractor failed prompt_key={meta.prompt_key}: {e}"
-            )
-            label = None
-    if label is None and output_text:
-        # Fallback: 截 output 前 30 字
-        label = output_text.strip()[:30]
-        if len(output_text.strip()) > 30:
-            label += "…"
+    label = _decision_label(meta, step.get("outputs"))
 
     step["display_name"] = meta.display_name
     step["category"] = meta.category
@@ -824,6 +830,13 @@ def apply_prompt_render_traces(
             step["prompt_stage"] = admin_meta.get("stage")
             step["prompt_category"] = admin_meta.get("category")
             step["prompt_description"] = admin_meta.get("description")
+            # Exact rendered-prompt provenance outranks default-text fingerprints.
+            # In particular, a Web-managed system prompt may not match defaults.
+            semantic = next((meta for _, meta in _REGISTRY if meta.prompt_key == prompt_key), None)
+            if semantic is not None:
+                step["display_name"] = semantic.display_name
+                step["category"] = semantic.category
+                step["decision_label"] = _decision_label(semantic, step.get("outputs"))
 
         components = matched.get("components")
         if isinstance(components, list):
@@ -859,21 +872,18 @@ def _end_ms(step: dict[str, Any]) -> int:
 
 
 def _mark_critical_path(steps: list[dict[str, Any]]) -> None:
-    """关键路径定义: 从 root 出发, 每层选 ended_at 最晚的 child, 递归到底.
+    """Mark a completion-chain heuristic, not a rigorous causal critical path.
 
-    背后的直觉: parent 完成时间 = max(children 完成时间), 决定 parent
-    完成时间的那个 child 是"卡 parent 的瓶颈". 整条链就是导致总耗时的路径,
-    优化它能直接缩短整次请求.
-
-    跟"longest path by sum of durations"的严格定义有差别 (并行场景 sum 会
-    大于真实 wall-clock latency), 但跟用户对"关键路径"的直觉更对齐 — 我们
-    在意的是 wall-clock 慢在哪.
-
-    所有在路径上的 step 加 on_critical_path=True. 路径外的不写字段
-    (前端用 step.on_critical_path === true 判断, undefined 视为 false).
+    A child finishing after its parent is asynchronous/outside that parent's
+    measured lifetime and must not be treated as blocking parent completion.
+    Retain the historical field for API compatibility; the timeline should
+    show actual durations rather than imply this chain is the whole bottleneck.
     """
     if not steps:
         return
+    # Re-enrichment must not retain a previously selected completion chain.
+    for step in steps:
+        step.pop("on_critical_path", None)
     # 按 parent_id 分组
     by_parent: dict[str | None, list[dict[str, Any]]] = {}
     for s in steps:
@@ -885,9 +895,13 @@ def _mark_critical_path(steps: list[dict[str, Any]]) -> None:
         return
     cur: dict[str, Any] | None = max(roots, key=_end_ms)
 
-    while cur is not None:
+    seen: set[str | None] = set()
+    while cur is not None and cur.get("id") not in seen:
+        seen.add(cur.get("id"))
         cur["on_critical_path"] = True
-        children = by_parent.get(cur.get("id")) or []
+        parent_end = _end_ms(cur)
+        children = [child for child in by_parent.get(cur.get("id"), [])
+                    if 0 < _end_ms(child) <= parent_end]
         if not children:
             break
         cur = max(children, key=_end_ms)

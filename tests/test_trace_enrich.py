@@ -461,7 +461,7 @@ def test_critical_path_simple_serial_chain():
     """root → A → B (串行): 三者都在关键路径上."""
     steps = [
         _step("root", None, "2026-04-28T00:00:00Z", "2026-04-28T00:00:10Z"),
-        _step("A", "root", "2026-04-28T00:00:00Z", "2026-04-28T00:00:05Z"),
+        _step("A", "root", "2026-04-28T00:00:00Z", "2026-04-28T00:00:10Z"),
         _step("B", "A", "2026-04-28T00:00:05Z", "2026-04-28T00:00:10Z"),
     ]
     trace_enrich.enrich_steps(steps)
@@ -499,3 +499,68 @@ def test_critical_path_no_root_safe():
     trace_enrich.enrich_steps(steps)
     # 没 root 就不标 critical_path, 不报错
     assert steps[0].get("on_critical_path") is not True
+
+
+def test_completion_chain_excludes_background_runs_finishing_after_parent():
+    steps = [
+        _step("root", None, "2026-04-28T00:00:00Z", "2026-04-28T00:00:08Z"),
+        _step("finish", "root", "2026-04-28T00:00:07Z", "2026-04-28T00:00:08Z"),
+        _step("background", "finish", "2026-04-28T00:00:07Z", "2026-04-28T00:00:13Z"),
+    ]
+    # Simulate old persisted enrichment: a refresh must clear stale markers.
+    steps[-1]["on_critical_path"] = True
+    trace_enrich.enrich_steps(steps)
+    assert steps[0]["on_critical_path"] is True
+    assert steps[1]["on_critical_path"] is True
+    assert steps[2].get("on_critical_path") is not True
+    assert steps[0]["ended_at"] == "2026-04-28T00:00:08Z"
+
+
+def test_completion_chain_terminates_on_malformed_cyclic_ids():
+    steps = [
+        _step("root", None, "2026-04-28T00:00:00Z", "2026-04-28T00:00:01Z"),
+        _step("loop", "root", "2026-04-28T00:00:00Z", "2026-04-28T00:00:01Z"),
+        _step("root", "loop", "2026-04-28T00:00:00Z", "2026-04-28T00:00:01Z"),
+    ]
+    trace_enrich.enrich_steps(steps)
+    assert steps[0]["on_critical_path"] is True
+
+
+def test_completion_chain_clears_stale_markers_when_there_is_no_root():
+    steps = [_step("A", "missing", None, None)]
+    steps[0]["on_critical_path"] = True
+    trace_enrich.enrich_steps(steps)
+    assert "on_critical_path" not in steps[0]
+
+
+@pytest.mark.parametrize("key,name,category", [
+    ("chat.system_base", "主回复", "reply"),
+    ("memory.relevance", "记忆相关度判定", "decision"),
+])
+def test_exact_render_metadata_labels_custom_prompts_without_default_fingerprints(key, name, category):
+    prompt = "Synthetic managed prompt with unrelated wording"
+    step = _fake_llm_step(prompt, "synthetic output")
+    trace_enrich.enrich_steps([step])
+    assert step["category"] == "other"
+    trace_enrich.apply_prompt_render_traces([step], [{
+        "prompt_hash": trace_enrich.prompt_hash(prompt), "prompt_key": key,
+        "source": "managed", "components": [],
+    }])
+    assert step["display_name"] == name
+    assert step["category"] == category
+    assert step["prompt_key"] == key
+    assert step["inputs"]["messages"][0][0]["kwargs"]["content"] == prompt
+
+
+def test_exact_render_metadata_overrides_misleading_fingerprint_label():
+    prompt = defaults.USER_EMOTION_LABEL_PROMPT + "\nSynthetic composite prompt"
+    step = _fake_llm_step(prompt, "synthetic reply")
+    trace_enrich.enrich_steps([step])
+    assert step["prompt_key"] == "emotion.user_label"
+    trace_enrich.apply_prompt_render_traces([step], [{
+        "prompt_hash": trace_enrich.prompt_hash(prompt), "prompt_key": "chat.system_base",
+        "source": "chat.system_prompt", "components": [],
+    }])
+    assert step["display_name"] == "主回复"
+    assert step["category"] == "reply"
+    assert step["decision_label"] == "synthetic reply"

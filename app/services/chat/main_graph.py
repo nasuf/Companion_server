@@ -123,6 +123,11 @@ async def _finish(state: ChatState, runtime: Runtime):
     return {"phase": "finish_turn", "next_node": "stop", "completed": True}
 
 
+def route_next(state: ChatState) -> str:
+    """Named conditional edge so traces can identify routing callbacks."""
+    return state["next_node"]
+
+
 def _build_graph():
     from app.services.chat.graph_runtime import ChatGraphContext
 
@@ -136,12 +141,12 @@ def _build_graph():
         following = PHASES[index + 1] if index + 1 < len(PHASES) else "fragments"
         graph.add_conditional_edges(
             name,
-            lambda state: state["next_node"],
+            route_next,
             {following: following, "fragments": "fragments"},
         )
     graph.add_conditional_edges(
         "fragments",
-        lambda state: state["next_node"],
+        route_next,
         {"load_turn": "load_turn", "finish_turn": "finish_turn"},
     )
     graph.add_edge("finish_turn", END)

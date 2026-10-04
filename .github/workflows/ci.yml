@@ -81,6 +81,9 @@ jobs:
             tests/test_chat_graph_rollout.py \
             tests/test_chat_graph_rollout_postgres.py \
             tests/test_chat_graph_equivalence.py \
+            tests/test_chat_graph_trace_structure.py \
+            tests/test_trace_enrich.py \
+            tests/test_trace_mirror.py \
             tests/test_graph_eval_safety.py \
             tests/test_graph_eval_preconditions.py \
             tests/test_reply_register_eval.py \
