@@ -88,6 +88,8 @@ jobs:
             tests/test_graph_eval_preconditions.py \
             tests/test_reply_register_eval.py \
             tests/test_local_tracer.py \
+            tests/test_tracing.py \
+            tests/test_traced_usage_session.py \
             tests/test_orchestrator_phases.py \
             tests/test_short_circuit_post_process.py \
             tests/test_crisis_safety.py \

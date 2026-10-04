@@ -235,7 +235,7 @@ async def traced_usage_session(
         reset_prompt_render_trace,
         start_prompt_render_trace,
     )
-    tracer = create_tracer(name, conversation_id or "").enter()
+    tracer = create_tracer(name, conversation_id or "", usage_scope=scope).enter()
     prompt_trace_token = start_prompt_render_trace()
     try:
         async with usage_session(
@@ -243,7 +243,19 @@ async def traced_usage_session(
             agent_id=agent_id, user_id=user_id,
             trace_id_provider=lambda: tracer.safe_trace_id,
         ):
-            yield tracer
+            try:
+                yield tracer
+            finally:
+                # The usage context flushes before the tracer closes. Capture
+                # the signal while this session still owns the accumulator.
+                note_usage = getattr(tracer, "note_usage_expected", None)
+                if callable(note_usage):
+                    note_usage(session_has_usage_signal())
+    except BaseException as exc:
+        mark_failed = getattr(tracer, "mark_failed", None)
+        if callable(mark_failed):
+            mark_failed(exc)
+        raise
     finally:
         reset_prompt_render_trace(prompt_trace_token)
         tracer.close()

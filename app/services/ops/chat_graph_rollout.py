@@ -9,13 +9,17 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, get_args
+
+from app.services.llm.usage_tracker import UsageScope
 
 MAX_COHORT = 100
 MAX_ROOTS = 1000
 MIN_TURNS = 20
 MIN_OBSERVATION = timedelta(hours=24)
 MAX_WINDOW = timedelta(days=7)
+USAGE_SCOPES = frozenset(get_args(UsageScope))
+AUXILIARY_SCOPES = USAGE_SCOPES - {"chat"}
 
 
 @dataclass(frozen=True)
@@ -80,11 +84,6 @@ def assess(
         roots = roots[:MAX_ROOTS]
     if observation.until - observation.since < MIN_OBSERVATION:
         issue("window_short", "wait", "At least 24 observed hours are required")
-    if len(roots) < MIN_TURNS:
-        issue("samples_short", "wait", f"At least {MIN_TURNS} traced turns are required")
-    if cohort - {r["conversation_id"] for r in roots}:
-        issue("cohort_unobserved", "wait", "Some authorized conversations have no traced turns")
-
     def indexed(rows: list[dict]) -> dict[str, dict]:
         index = {}
         for row in rows:
@@ -98,12 +97,48 @@ def assess(
     counts: Counter = Counter()
     durations, costs = [], []
     total_calls = total_failures = total_fallbacks = zero_model_turns = 0
+    auxiliary_statuses: Counter = Counter()
+    auxiliary_scopes: Counter = Counter()
+    auxiliary_usage_missing = 0
+    chat_roots = []
     seen = set()
     for root in roots:
         trace_id = root["trace_id"]
         if trace_id in seen or root["conversation_id"] not in cohort:
             issue("scope_or_duplicate_root", "stop", "Root scope or uniqueness is invalid")
         seen.add(trace_id)
+        node = node_by_id.get(trace_id, {})
+        record = usage_by_id.get(trace_id, {})
+        scope = root.get("usage_scope")
+        billed_scopes = set(record.get("auxiliary_scopes") or [])
+        # Old roots have no scope metadata. Only persisted usage evidence may
+        # identify them as auxiliary; names, input text and prompt fingerprints
+        # are not execution identity (a user can send any of those strings).
+        chat_evidence = (
+            scope == "chat" or root.get("executor") is not None
+            or root.get("graph_version") is not None
+            or node.get("graph_count", 0) > 0 or node.get("finish_count", 0) > 0
+            or record.get("rows", 0) > 0
+            or (scope is None and message_by_id.get(trace_id, {}).get("chat_reply_count", 0) > 0)
+        )
+        auxiliary = scope in AUXILIARY_SCOPES or (
+            scope is None and not chat_evidence
+            and billed_scopes and billed_scopes <= AUXILIARY_SCOPES
+        )
+        if scope is not None and scope not in USAGE_SCOPES:
+            issue("unknown_usage_scope", "wait", "Root usage scope is not a known operation")
+        if billed_scopes - AUXILIARY_SCOPES:
+            issue("unknown_billing_scope", "wait", "Billing scope is not a known auxiliary operation")
+        if auxiliary and chat_evidence:
+            issue("trace_scope_conflict", "stop", "Auxiliary identity conflicts with chat execution evidence")
+        elif auxiliary:
+            auxiliary_statuses[str(root["status"])] += 1
+            for value in ({scope} if scope is not None else billed_scopes):
+                auxiliary_scopes[value] += 1
+            if root.get("usage_expected") in ("true", True) and not record.get("auxiliary_rows"):
+                auxiliary_usage_missing += 1
+            continue
+        chat_roots.append(root)
         counts[str(root["status"])] += 1
         if root["executor"] not in {"legacy", "langgraph"}:
             issue("unmarked_root", "wait", "Historical/unmarked roots cannot prove executor selection")
@@ -130,7 +165,6 @@ def assess(
             continue
         elif root["status"] != "success" or root["ended_at"] is None:
             issue("root_failed", "stop", "A root failed or lacks a completion timestamp")
-        node = node_by_id.get(trace_id, {})
         if root["executor"] == "langgraph":
             if node.get("graph_count") != 1 or node.get("finish_count") != 1:
                 issue("graph_completion", "stop", "Graph or parent finish-node evidence is incomplete")
@@ -141,6 +175,8 @@ def assess(
         if root["status"] == "success" and message_by_id.get(trace_id, {}).get("reply_count", 0) < 1:
             issue("reply_missing", "stop", "Successful root has no persisted assistant reply")
         record = usage_by_id.get(trace_id)
+        if record is not None and record.get("rows") == 0:
+            record = None  # Auxiliary-only billing is not foreground usage.
         if (
             record is None and root.get("usage_expected") in ("false", False)
             and node.get("llm_count", 0) == 0
@@ -177,6 +213,11 @@ def assess(
         elif root["status"] == "success":
             issue("duration_missing", "wait", "Completed root lacks valid duration telemetry")
 
+    if len(chat_roots) < MIN_TURNS:
+        issue("samples_short", "wait", f"At least {MIN_TURNS} traced chat turns are required")
+    if cohort - {r["conversation_id"] for r in chat_roots}:
+        issue("cohort_unobserved", "wait", "Some authorized conversations have no traced chat turns")
+
     # Summaries only: never return message text, model inputs/outputs or error text.
     unique_issues = list({(v["code"], v["severity"]): v for v in issues}.values())
     return {
@@ -193,7 +234,7 @@ def assess(
         "release_ready": False,
         "issues": unique_issues,
         "metrics": {
-            "traced_turns": len(roots), "root_statuses": dict(counts),
+            "traced_turns": len(chat_roots), "root_statuses": dict(counts),
             "p95_root_duration_ms": sorted(durations)[math.ceil(.95 * len(durations)) - 1]
             if durations else None,
             "mean_chat_cost_cny": sum(costs) / len(costs) if costs else None,
@@ -201,8 +242,14 @@ def assess(
             "model_fallbacks": total_fallbacks,
             "zero_model_turns": zero_model_turns,
         },
+        "auxiliary_metrics": {
+            "traced_operations": sum(auxiliary_statuses.values()),
+            "root_statuses": dict(auxiliary_statuses),
+            "usage_scopes": dict(auxiliary_scopes),
+            "expected_usage_missing": auxiliary_usage_missing,
+        },
         "limitations": [
-            "Only persisted, explicitly marked trace roots are assessed.",
+            "Chat qualification excludes only auxiliary roots with positive scope evidence; unknown roots remain unqualified.",
             "Client ack/done, delivery, side effects and quality require controlled smoke/E2E.",
             "Chat token cost is an estimate; background, speech and other charges are excluded.",
             "This report performs no matched-model latency/cost comparison.",
@@ -218,7 +265,8 @@ SELECT trace_id, inputs_json->>'conversation_id' AS conversation_id, status,
        extra_json->'metadata'->>'executor' AS executor,
        extra_json->'metadata'->>'graph_version' AS graph_version,
        extra_json->'metadata'->>'checkpoint_enabled' AS checkpoint_enabled,
-       extra_json->'metadata'->>'usage_expected' AS usage_expected
+       extra_json->'metadata'->>'usage_expected' AS usage_expected,
+       extra_json->'metadata'->>'usage_scope' AS usage_scope
 FROM trace_runs
 WHERE name='chat_request' AND parent_id IS NULL AND run_id=trace_id
   AND inputs_json->>'conversation_id'=ANY($1::text[])
@@ -240,15 +288,19 @@ FROM trace_runs WHERE trace_id=ANY($1::text[]) AND parent_id IS NOT NULL
 GROUP BY trace_id
 """
 USAGE_SQL = """
-SELECT trace_id, COUNT(*)::int AS rows, SUM(cost_cny)::float8 AS cost_cny,
-       SUM(call_count)::int AS call_count, SUM(failure_count)::int AS failure_count,
-       SUM(fallback_count)::int AS fallback_count
+SELECT trace_id, COUNT(*) FILTER (WHERE scope='chat')::int AS rows,
+       SUM(cost_cny) FILTER (WHERE scope='chat')::float8 AS cost_cny,
+       SUM(call_count) FILTER (WHERE scope='chat')::int AS call_count,
+       SUM(failure_count) FILTER (WHERE scope='chat')::int AS failure_count,
+       SUM(fallback_count) FILTER (WHERE scope='chat')::int AS fallback_count,
+       COUNT(*) FILTER (WHERE scope<>'chat')::int AS auxiliary_rows,
+       ARRAY_AGG(DISTINCT scope) FILTER (WHERE scope<>'chat') AS auxiliary_scopes
 FROM llm_usage WHERE trace_id=ANY($1::text[]) AND conversation_id=ANY($2::text[])
-  AND scope='chat'
 GROUP BY trace_id
 """
 MESSAGES_SQL = """
-SELECT metadata->>'trace_id' AS trace_id, COUNT(*)::int AS reply_count
+SELECT metadata->>'trace_id' AS trace_id, COUNT(*)::int AS reply_count,
+       COUNT(*) FILTER (WHERE metadata->>'proactive' IS DISTINCT FROM 'true')::int AS chat_reply_count
 FROM messages WHERE conversation_id=ANY($1::text[]) AND role='assistant'
   AND metadata->>'trace_id'=ANY($2::text[])
   AND created_at >= ($3::timestamptz AT TIME ZONE 'UTC')

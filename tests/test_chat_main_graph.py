@@ -365,7 +365,7 @@ async def test_real_graph_traces_link_nodes_and_manual_provider(chat_io, monkeyp
     assert len(roots) == 1
     assert roots[0]["extraJson"].data["metadata"] == {
         "executor": "langgraph", "graph_version": "chat-g01-v1",
-        "checkpoint_enabled": False,
+        "checkpoint_enabled": False, "usage_scope": "chat",
     }
     root = roots[0]["id"]
     nodes = [row for row in rows if row["name"] == "generate_reply"]

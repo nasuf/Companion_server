@@ -114,6 +114,81 @@ async def test_real_sql_node_version_drift_is_visible(postgres):
     assert "node_version" in {v["code"] for v in result["issues"]}
 
 
+async def insert_auxiliary(postgres, *, scope=None, billing_scope="proactive", billing_conversation="c-1"):
+    stamp = (REQUEST.since + timedelta(minutes=30)).isoformat()
+    metadata = {"usage_scope": scope, "usage_expected": True} if scope else {}
+    await postgres.execute_raw(
+        """INSERT INTO trace_runs VALUES ('aux','aux',NULL,'chat_request','chain','success',
+           ($1::timestamptz AT TIME ZONE 'UTC'),
+           ($1::timestamptz AT TIME ZONE 'UTC')+interval '1 second',
+           $2::jsonb,$3::jsonb,($1::timestamptz AT TIME ZONE 'UTC'))""",
+        stamp, json.dumps({"conversation_id": "c-1", "message": "PRIVATE_AUX"}),
+        json.dumps({"metadata": metadata}),
+    )
+    if billing_scope:
+        await postgres.execute_raw(
+            "INSERT INTO llm_usage VALUES ('aux',$1,$2,999,1,0,0)",
+            billing_conversation, billing_scope,
+        )
+
+
+@pytest.mark.parametrize("scope", [None, "proactive"])
+async def test_real_sql_auxiliary_judge_does_not_report_a_missing_chat_reply(postgres, scope):
+    await insert_auxiliary(postgres, scope=scope)
+    result = await collect(postgres, REQUEST, RUNTIME, now=NOW)
+    assert result["telemetry_ready"]
+    assert result["metrics"]["traced_turns"] == 20
+    assert result["metrics"]["mean_chat_cost_cny"] == pytest.approx(.01)
+    assert result["auxiliary_metrics"]["traced_operations"] == 1
+    assert "PRIVATE_AUX" not in json.dumps(result)
+
+
+async def test_real_sql_unknown_and_foreign_billing_cannot_hide_missing_reply(postgres):
+    await insert_auxiliary(postgres, billing_conversation="unauthorized")
+    result = await collect(postgres, REQUEST, RUNTIME, now=NOW)
+    assert result["auxiliary_metrics"]["traced_operations"] == 0
+    assert {"unmarked_root", "reply_missing"} <= {v["code"] for v in result["issues"]}
+
+
+async def test_real_sql_declared_auxiliary_cannot_hide_foreground_chat_billing(postgres):
+    await insert_auxiliary(postgres, scope="proactive", billing_scope="chat")
+    result = await collect(postgres, REQUEST, RUNTIME, now=NOW)
+    assert {"trace_scope_conflict", "reply_missing"} <= {v["code"] for v in result["issues"]}
+
+
+async def test_real_sql_chat_trace_keeps_shared_background_cost_out_of_foreground_metrics(postgres):
+    await postgres.execute_raw(
+        "INSERT INTO llm_usage VALUES ('trace-0','c-1','post_process',999,20,10,10)",
+    )
+    result = await collect(postgres, REQUEST, RUNTIME, now=NOW)
+    assert result["telemetry_ready"]
+    assert result["auxiliary_metrics"]["traced_operations"] == 0
+    assert result["metrics"]["chat_model_calls"] == 80
+    assert result["metrics"]["model_failures"] == 0
+    assert result["metrics"]["mean_chat_cost_cny"] == pytest.approx(.01)
+
+
+async def test_real_sql_declared_auxiliary_retains_missing_billing_diagnostic(postgres):
+    await insert_auxiliary(postgres, scope="proactive", billing_scope=None)
+    result = await collect(postgres, REQUEST, RUNTIME, now=NOW)
+    assert result["telemetry_ready"]
+    assert result["auxiliary_metrics"]["expected_usage_missing"] == 1
+
+
+@pytest.mark.parametrize("proactive", [False, True])
+async def test_real_sql_historical_chat_reply_and_proactive_reply_are_distinct(postgres, proactive):
+    await insert_auxiliary(postgres)
+    await postgres.execute_raw(
+        """INSERT INTO messages VALUES ('c-1','assistant','PRIVATE_REPLY',$1::jsonb,
+           ($2::timestamptz AT TIME ZONE 'UTC'))""",
+        json.dumps({"trace_id": "aux", "proactive": proactive}),
+        REQUEST.since.isoformat(),
+    )
+    result = await collect(postgres, REQUEST, RUNTIME, now=NOW)
+    assert result["telemetry_ready"] is proactive
+    assert result["auxiliary_metrics"]["traced_operations"] == int(proactive)
+
+
 async def test_queries_use_read_only_repeatable_read(postgres):
     class CheckedContext:
         def __init__(self, **kwargs):

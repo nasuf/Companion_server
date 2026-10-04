@@ -1,14 +1,17 @@
-# Chat graph adoption — G01
+# Chat graph adoption
 
-Baseline: server `51a1501006b795d4daf1ec584fea4a588a571d47`.
+G01 implementation baseline: server `51a1501006b795d4daf1ec584fea4a588a571d47`.
 
 The public `stream_chat_response` selects one executor for the entire logical
-turn. The default is `legacy`. `CHAT_EXECUTOR=langgraph` additionally requires
-an exact conversation ID in `CHAT_GRAPH_CONVERSATION_ALLOWLIST`; an empty list
-selects legacy for every turn. Legacy recursive children remain in legacy.
+turn. The code default is `legacy`. `CHAT_EXECUTOR=langgraph` selects graph for
+an exact ID in `CHAT_GRAPH_CONVERSATION_ALLOWLIST`, or for every nonempty ID
+when `CHAT_GRAPH_ALL_CONVERSATIONS=true`. Full mode uses an empty allowlist;
+without that explicit boolean, an empty list selects legacy. The legacy master
+switch overrides both modes. Legacy recursive children remain in legacy.
 Once graph execution starts, failure is surfaced without replaying legacy.
-Production enablement remains gated on G02 paired model evaluations and G03
-stable internal cohorts/rollback qualification.
+Production was explicitly authorized for full coverage on 2026-10-04 after the
+internal trial. Remaining G03 business/observation/actual-worker rollback checks
+are still pending; full activation does not imply checkpoint readiness.
 
 G01 uses a real StateGraph with production phase adapters:
 
@@ -85,19 +88,22 @@ an existing `code_sync` revision as a Web save.
 
 The trace and read-only observation changes can be released independently while
 keeping `CHAT_EXECUTOR=legacy` and the conversation allowlist empty. An internal
-cohort and its observation/rollback gates are required to enable or expand graph
-execution; they do not block deployment of these supporting changes. Graph
+cohort and its observation/rollback gates form the default qualification path;
+they do not block deployment of these supporting changes. The explicit full
+activation authorization above does not mark the pending gates as passed. Graph
 activation uses persistent deployment configuration rather than a manual `.env`
 edit that would be lost on the next release.
 The deployment now applies a private host configuration at
 `/app/companion-secrets/chat-graph-rollout.json` after generating `.env`, before
 building or stopping the server. Keep that file mode 0600 and outside Git.
-Its exact shape is `{"executor":"langgraph","conversation_ids":["<UUID>"]}`.
+For a cohort use `{"executor":"langgraph","conversation_ids":["<UUID>"]}`.
 The operator must verify every ID's account/workspace ownership before adding it.
 Missing configuration selects legacy with an empty cohort. Invalid, wildcard,
-empty graph or oversized cohorts abort deployment before server stop; only exact
-conversation IDs can select graph. A new conversation requires a new authorized
-cohort entry. The JSON file is not included in source synchronization or images.
+empty cohort-mode graph or oversized cohorts abort deployment before server stop.
+Full mode requires `{"executor":"langgraph","conversation_ids":[],"all_conversations":true}`;
+the boolean must be a JSON boolean and cannot be combined with a cohort. New
+conversations are covered automatically in full mode; cohort mode requires an
+authorized entry. The JSON file is not included in source synchronization or images.
 To roll back, atomically replace it with
 `{"executor":"legacy","conversation_ids":[]}`, apply
 `scripts/chat_graph_deploy_config.py --env-file .env --config-file <host-file>`
@@ -111,6 +117,23 @@ applicable, and checkpoint-disabled flag in the existing JSON metadata. The
 foreground session also records whether a usage row is expected. Historical
 roots lacking these fields remain unmarked; absence of graph nodes alone does
 not prove that a legacy turn was observed.
+
+Chat roots carry `usage_scope=chat`. Other traced usage sessions carry their
+actual scope (for example `proactive` for topic-completion judgement). The root
+name/run ID API stays compatible. Usage expectation is captured before its
+accumulator flushes, and uncaught failures/cancellation mark local roots as
+errors without storing exception text. Trace and usage contexts restore their
+parents on exit.
+
+The collector separates positive auxiliary identities from chat-turn evidence.
+Old auxiliary roots may be identified by scoped billing, only when they contain
+no executor/graph/chat-billing evidence. Names, user text and prompt fingerprints
+never exclude a root. Contradictory identities stop qualification; unknown or
+unmarked roots remain unqualified. A chat root sharing background billing stays
+a chat turn, and only its `chat` usage contributes to foreground cost/counters.
+Auxiliary status and missing expected billing remain visible in separate
+`auxiliary_metrics`; those operations do not count toward the 20 chat-turn
+minimum or the per-conversation sample requirement.
 
 The read-only check requires exact, explicitly authorized conversation IDs:
 
@@ -127,6 +150,9 @@ statistical proof of quality or performance. Zero traffic and missing evidence
 never pass. Runtime cohort/version drift, failed or stale roots, missing
 persisted replies, graph/finish-node inconsistencies and usage gaps hold the
 gate. No model inputs, outputs, message text or exception messages are exported.
+In full mode add `--expect-all-conversations`; the SQL sample still consists of
+only the exact IDs supplied, and cannot claim that every production conversation
+has been observed.
 
 The collector opens a READ ONLY / REPEATABLE READ transaction, limits each
 statement to five seconds, and reads at most 1000 roots over seven days for at

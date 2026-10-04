@@ -226,6 +226,114 @@ def test_summary_never_contains_private_text_or_errors(evidence):
     assert "conversation_id" not in encoded
 
 
+def add_auxiliary(evidence, *, scope=None, status="success", billed=True):
+    root = {**evidence.roots[0], "trace_id": "auxiliary", "executor": None,
+            "graph_version": None, "checkpoint_enabled": None,
+            "usage_scope": scope, "usage_expected": billed, "status": status}
+    evidence.roots.append(root)
+    evidence.nodes.append({"trace_id": "auxiliary", "llm_count": int(billed),
+                           "graph_count": 0, "finish_count": 0})
+    if billed:
+        evidence.usage.append({"trace_id": "auxiliary", "rows": 0,
+                               "auxiliary_rows": 1, "auxiliary_scopes": ["proactive"]})
+    return root
+
+
+@pytest.mark.parametrize("scope", [None, "proactive"])
+@pytest.mark.parametrize("status", ["success", "error", "running"])
+def test_auxiliary_without_chat_reply_is_reported_separately(evidence, scope, status):
+    add_auxiliary(evidence, scope=scope, status=status)
+    result = report(evidence)
+    assert result["telemetry_ready"]
+    assert result["metrics"]["traced_turns"] == 20
+    assert result["metrics"]["chat_model_calls"] == 80
+    assert result["metrics"]["mean_chat_cost_cny"] == pytest.approx(.01)
+    assert result["auxiliary_metrics"] == {
+        "traced_operations": 1, "root_statuses": {status: 1},
+        "usage_scopes": {"proactive": 1}, "expected_usage_missing": 0,
+    }
+
+
+def test_explicit_zero_model_auxiliary_needs_no_chat_reply_or_billing(evidence):
+    add_auxiliary(evidence, scope="proactive", billed=False)
+    assert report(evidence)["telemetry_ready"]
+    assert report(evidence)["auxiliary_metrics"]["expected_usage_missing"] == 0
+    evidence.roots[-1]["usage_expected"] = True
+    assert report(evidence)["auxiliary_metrics"]["expected_usage_missing"] == 1
+
+
+def test_auxiliary_only_window_does_not_qualify_chat_samples(evidence):
+    add_auxiliary(evidence, scope="proactive")
+    evidence.roots = [evidence.roots[-1]] * 20
+    for i, root in enumerate(evidence.roots):
+        evidence.roots[i] = {**root, "trace_id": f"aux-{i}"}
+    result = report(evidence)
+    assert result["metrics"]["traced_turns"] == 0
+    assert {"samples_short", "cohort_unobserved"} <= codes(evidence)
+    assert result["auxiliary_metrics"]["traced_operations"] == 20
+
+
+def test_user_text_and_fingerprints_cannot_hide_an_unmarked_root(evidence):
+    root = add_auxiliary(evidence, billed=False)
+    root.update(inputs_json={"message": "[proactive:followup_unfinished]"},
+                name="proactive.topic_completion_judge")
+    assert {"unmarked_root", "reply_missing"} <= codes(evidence)
+    assert report(evidence)["auxiliary_metrics"]["traced_operations"] == 0
+
+
+@pytest.mark.parametrize("kind", ["executor", "graph", "finish", "billing"])
+def test_declared_auxiliary_cannot_hide_chat_execution_or_lost_reply(evidence, kind):
+    root = add_auxiliary(evidence, scope="proactive")
+    if kind == "executor":
+        root.update(executor="langgraph", graph_version="chat-g01-v1", checkpoint_enabled=False)
+    elif kind == "graph":
+        evidence.nodes[-1]["graph_count"] = 1
+    elif kind == "finish":
+        evidence.nodes[-1]["finish_count"] = 1
+    else:
+        evidence.usage[-1].update(rows=1, cost_cny=.01, call_count=1,
+                                 failure_count=0, fallback_count=0)
+    assert {"trace_scope_conflict", "reply_missing"} <= codes(evidence)
+    assert not report(evidence)["telemetry_ready"]
+
+
+def test_chat_root_with_background_usage_remains_a_chat_turn(evidence):
+    evidence.usage[0].update(auxiliary_rows=1, auxiliary_scopes=["post_process"])
+    result = report(evidence)
+    assert result["telemetry_ready"]
+    assert result["auxiliary_metrics"]["traced_operations"] == 0
+    assert result["metrics"]["mean_chat_cost_cny"] == pytest.approx(.01)
+
+
+def test_unmarked_chat_reply_with_background_billing_is_not_an_auxiliary_turn(evidence):
+    add_auxiliary(evidence)
+    evidence.messages.append({"trace_id": "auxiliary", "reply_count": 1, "chat_reply_count": 1})
+    result = report(evidence)
+    assert "unmarked_root" in codes(evidence)
+    assert result["metrics"]["traced_turns"] == 21
+    assert result["auxiliary_metrics"]["traced_operations"] == 0
+
+
+@pytest.mark.parametrize("source", ["root", "billing"])
+def test_unknown_scope_is_not_silently_excluded(evidence, source):
+    root = add_auxiliary(evidence)
+    if source == "root":
+        root["usage_scope"] = "future-unknown"
+        code = "unknown_usage_scope"
+    else:
+        evidence.usage[-1]["auxiliary_scopes"] = ["future-unknown"]
+        code = "unknown_billing_scope"
+    assert code in codes(evidence)
+    assert "reply_missing" in codes(evidence)
+
+
+def test_foreign_or_duplicate_auxiliary_cannot_bypass_scope_guard(evidence):
+    root = add_auxiliary(evidence, scope="proactive")
+    root["conversation_id"] = "unauthorized"
+    evidence.roots.append(dict(root))
+    assert "scope_or_duplicate_root" in codes(evidence)
+
+
 @pytest.mark.parametrize("ids", [(), ("*",), ("c-1,c-2",), ("c-1", "c-1"),
                                 tuple(f"c-{i}" for i in range(101))])
 async def test_invalid_scope_rejected_before_database_access(evidence, ids):

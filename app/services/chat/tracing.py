@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 def create_tracer(
     user_message: str, conversation_id: str, *,
     executor: str | None = None, graph_version: str | None = None,
+    usage_scope: str | None = None,
 ) -> "LocalTracer | LangSmithTracer":
     """Trace backend switch (settings.trace_backend).
 
@@ -54,8 +55,11 @@ def create_tracer(
     is_active only fires for "local" ("off" turns tracing into a no-op).
     """
     metadata = {}
+    if usage_scope is not None:
+        metadata["usage_scope"] = usage_scope
     if executor is not None:
-        metadata = {"executor": executor, "checkpoint_enabled": False}
+        metadata.update(executor=executor, checkpoint_enabled=False)
+        metadata.setdefault("usage_scope", "chat")
         if graph_version is not None:
             metadata["graph_version"] = graph_version
     if settings.trace_backend == "langsmith":

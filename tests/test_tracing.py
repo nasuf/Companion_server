@@ -338,6 +338,8 @@ class TestResolveTraceForMessage:
     async def test_first_share_loads_writes_mirror_and_pushes_ws(self, monkeypatch):
         """首次 share: share_run + load + write mirror + WS 推送, 返回 detail."""
         from app.services.chat import tracing
+        monkeypatch.setattr(tracing.settings, "langsmith_tracing", True)
+        monkeypatch.setattr(tracing, "count_local_trace_runs", AsyncMock(return_value=0))
         msg = self._make_msg(metadata={"trace_id": "t1"})
         loaded_detail = {"trace": {"trace_id": "t1"}, "steps": [{"id": "s1"}]}
 
