@@ -96,3 +96,20 @@ def test_page_images_reject_ads_and_keep_place_captions_and_cover():
     parser=PageImages('https://example.com/park','莲湖公园')
     parser.feed('<meta property="og:image" content="/hero.jpg"><img alt="莲湖公园荷花" src="/flower.jpg"><img alt="相关酒店广告" src="/ad.jpg">')
     assert parser.images=={'https://example.com/hero.jpg':'place_page_cover','https://example.com/flower.jpg':'place_image_caption'}
+
+
+async def test_unverified_candidates_do_not_starve_later_verified_sources(monkeypatch,tmp_path):
+    monkeypatch.setattr(images.place_catalog,'load_place',AsyncMock(return_value=None))
+    monkeypatch.setattr(images.place_catalog,'save_place',AsyncMock())
+    monkeypatch.setattr(storage,'_MEDIA_DIR',tmp_path)
+    bad=source([f'https://blocked.example/{i}.jpg' for i in range(50)])
+    good=SearchResult(title='东莞莲湖公园实景',url='https://official.example/park',content='东莞莲湖公园',images=[{'url':'https://photo.example/park.jpg'}])
+    async def evidence(client,url,*args):
+        return {'https://photo.example/park.jpg':'place_image_caption'} if 'official' in url else {}
+    monkeypatch.setattr(images,'page_image_evidence',evidence)
+    download=AsyncMock(return_value=(b'image','c'*64,123))
+    monkeypatch.setattr(images,'_download_image',download)
+    monkeypatch.setattr(images,'tavily_place_images',AsyncMock(return_value=[]))
+    gallery=await images.persist_activity_images(user_id='u',card=dict(CARD),city='东莞',search_results=[bad,good])
+    assert len(gallery)==1
+    download.assert_awaited_once()

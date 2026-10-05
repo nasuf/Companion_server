@@ -23,8 +23,8 @@ async def run(args):
     await db.connect()
     try:
         rows = await db.query_raw("""SELECT * FROM offline_activity_recommendations
-            WHERE status NOT IN ('cancelled','expired') AND image_urls <> '[]'::jsonb
-            AND NOT search_sources @> '[{"kind":"image"}]'::jsonb ORDER BY created_at""")
+            WHERE status NOT IN ('cancelled','expired') AND ($1::boolean OR image_urls <> '[]'::jsonb)
+            AND NOT search_sources @> '[{"kind":"image"}]'::jsonb ORDER BY created_at""", getattr(args, "include_empty", False))
         print(json.dumps({'legacy_galleries': len(rows), 'apply': args.apply}), flush=True)
         if not args.apply:
             return
@@ -66,4 +66,5 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--backup')
+    parser.add_argument('--include-empty', action='store_true', help='Retry previously unverified empty galleries')
     asyncio.run(run(parser.parse_args()))

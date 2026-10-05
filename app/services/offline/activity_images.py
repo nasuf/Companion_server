@@ -61,46 +61,55 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
     seen = {item['url'] for item in accepted}
     hashes = {item.get('sha256') for item in accepted}
     perceptual = [int(item['dhash']) for item in accepted if item.get('dhash') is not None]
-    async with httpx.AsyncClient(timeout=8, trust_env=False, follow_redirects=False) as client:
-        page_cache: dict[str, dict[str, str]] = {}
-        async def collect(sources: list[SearchResult]) -> None:
-            # Bound downloads per query as well as total query count.
-            for candidate in _source_images(card, sources)[:12]:
-                if len(accepted) >= limit:
-                    break
-                if candidate['url'] in seen:
-                    continue
-                seen.add(candidate['url'])
-                page = candidate['source_url']
-                if page not in page_cache:
-                    page_cache[page] = await page_image_evidence(client, page, card['location_name'], _public_url)
-                evidence = page_cache[page].get(canonical_url(candidate['url']))
-                if not evidence:
-                    continue
-                candidate['evidence'] = evidence
-                image = await _download_image(client, candidate['url'])
-                if image is None:
-                    continue
-                blob, digest, dhash = image
-                if digest in hashes or any((dhash ^ old).bit_count() <= 4 for old in perceptual):
-                    continue
-                key = f'place_{digest}.jpg'
-                storage._MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-                # Same content => same bytes across workers; atomic replace prevents partial reads.
-                import os, tempfile
-                with tempfile.NamedTemporaryFile(dir=storage._MEDIA_DIR, delete=False) as tmp:
-                    tmp.write(blob)
-                    tmp_name = tmp.name
-                os.replace(tmp_name, storage.storage_path(key))
-                accepted.append({**candidate, 'storage_key': key, 'sha256': digest,
-                                 'dhash': str(dhash), 'local_url': storage.media_url(key)})
-                hashes.add(digest)
-                perceptual.append(dhash)
-        await collect(search_results)
-        for query in _image_queries(card, city):
-            if len(accepted) >= limit:
-                break
-            await collect(await tavily_place_images(query))
+    try:
+        async with asyncio.timeout(35):
+            async with httpx.AsyncClient(timeout=8, trust_env=False, follow_redirects=False) as client:
+                page_cache: dict[str, dict[str, str]] = {}
+                async def collect(sources: list[SearchResult]) -> None:
+                    # Spend the download budget only on verified candidates. A large
+                    # blocked page must not starve later, valid source pages.
+                    attempts = 0
+                    for candidate in _source_images(card, sources):
+                        if len(accepted) >= limit:
+                            break
+                        if candidate['url'] in seen:
+                            continue
+                        seen.add(candidate['url'])
+                        page = candidate['source_url']
+                        if page not in page_cache:
+                            page_cache[page] = await page_image_evidence(client, page, card['location_name'], _public_url)
+                        evidence = page_cache[page].get(canonical_url(candidate['url']))
+                        if not evidence:
+                            continue
+                        candidate['evidence'] = evidence
+                        if attempts >= 12:
+                            break
+                        attempts += 1
+                        image = await _download_image(client, candidate['url'])
+                        if image is None:
+                            continue
+                        blob, digest, dhash = image
+                        if digest in hashes or any((dhash ^ old).bit_count() <= 4 for old in perceptual):
+                            continue
+                        key = f'place_{digest}.jpg'
+                        storage._MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+                        # Same content => same bytes across workers; atomic replace prevents partial reads.
+                        import os, tempfile
+                        with tempfile.NamedTemporaryFile(dir=storage._MEDIA_DIR, delete=False) as tmp:
+                            tmp.write(blob)
+                            tmp_name = tmp.name
+                        os.replace(tmp_name, storage.storage_path(key))
+                        accepted.append({**candidate, 'storage_key': key, 'sha256': digest,
+                                         'dhash': str(dhash), 'local_url': storage.media_url(key)})
+                        hashes.add(digest)
+                        perceptual.append(dhash)
+                await collect(search_results)
+                for query in _image_queries(card, city):
+                    if len(accepted) >= limit:
+                        break
+                    await collect(await tavily_place_images(query))
+    except TimeoutError:
+        logger.info("[offline-images] gallery budget reached; preserving verified images")
     if accepted:
         await place_catalog.save_place(card, accepted)
     card['image_provenance'] = accepted
