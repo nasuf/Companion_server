@@ -52,7 +52,9 @@ from app.services.workspace.workspaces import (
     restore_staged_workspaces,
     stage_active_workspaces_for_user,
 )
-from app.services.runtime.job_queue import enqueue_runtime_job, register_job_handler
+from app.services.runtime.job_queue import (
+    RuntimeJobEnqueueUncertain, RuntimeJobOrphaned, enqueue_runtime_job, register_job_handler,
+)
 from app.services.runtime.tasks import fire_background
 
 logger = logging.getLogger(__name__)
@@ -262,7 +264,8 @@ async def _run_agent_initialization_inner(
         await set_progress(agent.id, "complete", message="生成完成")
 
 
-register_job_handler("agent_initialization", _run_agent_initialization_job)
+# The audited legacy caller always enqueued initialization without delay_s.
+register_job_handler("agent_initialization", _run_agent_initialization_job, legacy_no_delay=True)
 
 
 async def _enqueue_agent_initialization(
@@ -295,6 +298,20 @@ async def _enqueue_agent_initialization(
             f"Queued agent initialization job {job_id} for {agent_id}",
             extra={"event": "runtime_job", "job_type": "agent_initialization", "job_id": job_id},
         )
+    except RuntimeJobEnqueueUncertain as e:
+        logger.error(
+            "Agent initialization enqueue result requires reconciliation",
+            extra={"event": "runtime_job", "job_type": "agent_initialization",
+                   "job_id": e.job_id, "phase": "enqueue_uncertain"},
+        )
+        await set_progress(agent_id, "failed", message="初始化任务入队结果待确认，请联系管理员核对队列", expected_stage="queued")
+    except RuntimeJobOrphaned as e:
+        logger.error(
+            "Agent initialization has an orphaned runtime idempotency record",
+            extra={"event": "runtime_job", "job_type": "agent_initialization",
+                   "job_id": e.job_id, "phase": "orphaned_record"},
+        )
+        await set_progress(agent_id, "failed", message="初始化任务记录缺失，请联系管理员核对后恢复", expected_stage="queued")
     except Exception as e:
         logger.warning(
             f"Queue unavailable for agent initialization; falling back to local task: {e}",

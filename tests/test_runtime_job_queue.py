@@ -5,6 +5,7 @@ import asyncio
 import os
 import time
 import uuid
+from collections import deque
 from urllib.parse import urlsplit
 
 import httpx
@@ -19,16 +20,22 @@ from app.services.runtime import distributed_lock, job_queue as q
 
 @pytest.fixture
 async def redis(monkeypatch):
+    if os.environ.get("APP_ENV") == "production":
+        pytest.fail("Runtime queue tests refuse production mode")
     url = os.environ.get("RUNTIME_JOB_TEST_REDIS_URL", "redis://127.0.0.1:6379/15")
     if urlsplit(url).hostname not in {"127.0.0.1", "localhost", "test-redis"}:
         pytest.fail("Runtime queue tests require explicitly isolated local Redis")
-    client = Redis.from_url(url, decode_responses=True)
+    client = Redis.from_url(url, decode_responses=True, max_connections=256)
     await client.ping()
     prefix = f"test:runtime-terminal:{uuid.uuid4().hex}:"
     for field in ("_READY_KEY", "_DELAYED_KEY", "_RUNNING_KEY", "_DLQ_KEY",
                   "_SUCCEEDED_KEY", "_JOB_KEY_PREFIX", "_IDEMP_KEY_PREFIX"):
         monkeypatch.setattr(q, field, prefix + getattr(q, field))
     monkeypatch.setattr(q, "_HANDLERS", {})
+    monkeypatch.setattr(q, "_LEGACY_NO_DELAY_HANDLERS", set())
+    monkeypatch.setattr(q, "_RECONCILE_CURSOR", 0)
+    monkeypatch.setattr(q, "_RECONCILE_PENDING", deque())
+    monkeypatch.setattr(q, "_RECOVERY_OFFSET", 0)
     monkeypatch.setattr(distributed_lock, "_KEY_PREFIX", prefix + "lock")
     async def get_redis():
         return client
@@ -87,6 +94,7 @@ async def test_runtime_job_queue_retries_then_dead_letters(redis):
     await q.process_runtime_jobs(max_jobs=1)
     assert (await q.inspect_runtime_job(jid))["status"] == "queued"
     assert await redis.zscore(q._DELAYED_KEY, jid) is not None
+    await redis.hset(q._job_key(jid), 'not_before', '1')
     await redis.zadd(q._DELAYED_KEY, {jid: 1})
     await q.process_runtime_jobs(max_jobs=1)
     item = await q.inspect_runtime_job(jid)
@@ -215,12 +223,13 @@ async def test_recovered_attempt_rejects_late_old_success_and_failure(redis):
     await q._recover_stale_running_jobs(1)
     assert (await q.inspect_runtime_job(jid))["status"] == "queued"
     # Claim a later attempt without executing any business effect.
-    await redis.eval(q._START_JOB_LUA, 2, q._job_key(jid), q._RUNNING_KEY, jid, int(time.time()))
+    claim = await q._claim_job(jid)
+    assert claim is not None
     before = await snapshot(redis, jid)
     for state in ["succeeded", "dead_letter", "queued"]:
         assert not await q._finish_job(redis, jid, 1, state, "obsolete", retry_at=1)
         assert await snapshot(redis, jid) == before
-    assert await q._finish_job(redis, jid, 2, "succeeded", "")
+    assert await q._finish_job(redis, jid, 2, "succeeded", "", lease_token=claim["lease_token"])
     after = await snapshot(redis, jid)
     assert not await q._finish_job(redis, jid, 2, "dead_letter", "duplicate")
     assert await snapshot(redis, jid) == after

@@ -104,7 +104,20 @@ _STAGE_PERCENT: dict[str, int] = {
 }
 
 
-async def set_progress(agent_id: str, stage: str, current: int = 0, total: int = 0, message: str = "") -> None:
+_SET_PROGRESS_IF_STAGE_LUA = """
+local value = redis.call('GET', KEYS[1])
+if not value then return 0 end
+local ok, current = pcall(cjson.decode, value)
+if not ok or type(current) ~= 'table' or current.stage ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+return 1
+"""
+
+
+async def set_progress(
+    agent_id: str, stage: str, current: int = 0, total: int = 0, message: str = "",
+    *, expected_stage: str | None = None,
+) -> None:
     """Update provisioning progress in Redis. See _STAGE_PERCENT for stage table."""
     if stage in _STAGE_PERCENT:
         percent = _STAGE_PERCENT[stage]
@@ -126,7 +139,13 @@ async def set_progress(agent_id: str, stage: str, current: int = 0, total: int =
         "percent": percent,
         "message": message,
     }, ensure_ascii=False)
-    await redis.set(f"{PROGRESS_KEY_PREFIX}{agent_id}", data, ex=PROGRESS_TTL)
+    key = f"{PROGRESS_KEY_PREFIX}{agent_id}"
+    if expected_stage is not None:
+        # A lost enqueue response can arrive after the worker has progressed.
+        # Never replace an already started/completed operation with this error.
+        await redis.eval(_SET_PROGRESS_IF_STAGE_LUA, 1, key, expected_stage, data, PROGRESS_TTL)
+    else:
+        await redis.set(key, data, ex=PROGRESS_TTL)
 
 
 async def get_progress(agent_id: str) -> dict | None:

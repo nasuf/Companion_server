@@ -11,6 +11,7 @@ from redis.exceptions import RedisError
 from app.api.jwt_auth import require_admin_jwt
 from app.services.runtime.job_queue import (
     RuntimeJobConflict,
+    diagnose_runtime_job_queue,
     inspect_runtime_job,
     list_runtime_jobs,
     retry_runtime_jobs,
@@ -32,7 +33,23 @@ async def list_jobs(
     limit: int = Query(50, ge=1, le=200),
     _: dict = Depends(require_admin_jwt),
 ) -> dict[str, Any]:
-    return await list_runtime_jobs(status=status, job_type=job_type, limit=limit)
+    try:
+        return await list_runtime_jobs(status=status, job_type=job_type, limit=limit)
+    except RedisError as error:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
+
+
+@router.get("/diagnostics")
+async def get_diagnostics(
+    cursor: int = Query(0, ge=0),
+    idempotency_cursor: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    _: dict = Depends(require_admin_jwt),
+) -> dict[str, Any]:
+    try:
+        return await diagnose_runtime_job_queue(cursor=cursor, idempotency_cursor=idempotency_cursor, limit=limit)
+    except RedisError as error:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
 
 
 @router.post("/retry")
@@ -51,7 +68,10 @@ async def get_job(
     job_id: str,
     _: dict = Depends(require_admin_jwt),
 ) -> dict[str, Any]:
-    job = await inspect_runtime_job(job_id)
+    try:
+        job = await inspect_runtime_job(job_id)
+    except RedisError as error:
+        raise HTTPException(status_code=503, detail="任务队列暂时不可用，请刷新状态后重试。") from error
     if job is None:
         raise HTTPException(status_code=404, detail="runtime_job_not_found")
     return job
