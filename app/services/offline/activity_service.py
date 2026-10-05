@@ -407,13 +407,16 @@ def _verify_arrival_distance(activity: dict, lat: float, lng: float) -> None:
         )
 
 
-_ARRIVAL_GUIDE_FALLBACK = "到啦，这边慢慢逛，我在这儿陪你。"
+_ARRIVAL_GUIDE_FALLBACK = "到啦，慢慢逛就好，想聊时给我发消息。"
 
 
 async def _arrival_guide_text(activity: dict, ctx: dict) -> str:
     """First proactive line after arrival. Falls back to a fixed companion line."""
     try:
+        from app.services.offline.activity_message_context import message_context
+
         prompt = (await get_prompt_text("offline.arrival_guide")).format(
+            **await message_context(ctx),
             **location_fields(
                 activity,
                 city_fallback=str(ctx.get("user_location_city") or ""),
@@ -485,7 +488,7 @@ async def arrive_activity(
             status_label="我到了",  # spec §5.4-14 到达卡「我到了」
         )
         # 到达后首条主动消息。失败回退固定陪伴语。
-        guide = await _arrival_guide_text(activity, ctx)
+        guide = await _arrival_guide_text(updated, ctx)
         guide_id = await emit_assistant(
             conversation_id=ctx.get("conversation_id"),
             user_id=user_id,

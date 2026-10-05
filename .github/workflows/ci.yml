@@ -23,6 +23,18 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      proactive-test-postgres:
+        image: pgvector/pgvector:0.8.0-pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: companion_proactive_e2e
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
       runtime-test-redis:
         image: redis:7-alpine
         ports:
@@ -38,6 +50,8 @@ jobs:
       RUNTIME_JOB_TEST_REDIS_URL: redis://127.0.0.1:6379/15
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
       DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      PROACTIVE_E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/companion_proactive_e2e
+      PROACTIVE_E2E_REDIS_URL: redis://127.0.0.1:6379/14
       JWT_SECRET: ci-test-jwt-secret-for-backend-quality-tests
 
     steps:
@@ -69,9 +83,24 @@ jobs:
           python evals/run_local.py --validate-only
           python evals/long_companion_sim.py --validate-only
 
+      - name: Prepare isolated proactive E2E database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5433/companion_proactive_e2e
+          DIRECT_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/companion_proactive_e2e
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -p 5433 -U postgres -d companion_proactive_e2e -c 'CREATE SCHEMA IF NOT EXISTS extensions; CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;'
+          prisma migrate deploy
+
       - name: Run backend quality tests
         run: |
           pytest \
+            tests/test_proactive_common_rules.py \
+            tests/test_proactive_activity_e2e.py \
+            tests/test_reply_prefix.py \
+            tests/test_offline_activity_companion.py \
+            tests/test_offline_activity_lifecycle.py \
+            tests/test_prompt_optional_reference_rows.py \
             tests/test_voice_enrollment_flow.py \
             tests/test_voice_enrollment_postgres.py \
             tests/test_release_archive.py \

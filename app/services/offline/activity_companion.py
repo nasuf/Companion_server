@@ -24,7 +24,9 @@ from app.services.llm.models import get_chat_model, get_utility_model, invoke_te
 from app.services.offline import chat_emit
 from app.services.offline import repository as repo
 from app.services.offline.guidance import safe_guidance
-from app.services.offline.prompt_fields import filled, format_moment, location_fields
+from app.services.offline.prompt_fields import filled, location_fields
+from app.services.offline.activity_message_context import persona_fields
+from app.services.proactive.dialogue import RECENT_MESSAGE_LIMIT, format_recent_turns
 from app.services.offline.module_settings import is_activity_enabled
 from app.services.prompting.store import get_prompt_text
 from app.services.schedule_domain.schedule import (
@@ -885,7 +887,7 @@ async def _user_memory_and_preference(
     if not user_id:
         return "（无）", "（无）"
     try:
-        memory = await repo.memory_brief(user_id, workspace_id, limit=12)
+        memory = await repo.memory_brief(user_id, workspace_id, limit=12, include_ai=False)
         tags = await repo.list_user_tags(
             user_id,
             workspace_id,
@@ -915,6 +917,7 @@ async def _generate_companion_message(
             now=_now(),
             city_fallback=str(ctx.get("user_location_city") or ""),
         ),
+        **persona_fields(ctx),
         user_memory=filled(user_memory, empty="（无）"),
         user_preference=filled(user_preference, empty="（无）"),
         dialogue_context=_format_dialogue(messages) or "（无）",
@@ -937,7 +940,7 @@ async def _generate_companion_message(
 async def _recent_messages(
     conversation_id: str,
     *,
-    limit: int = 12,
+    limit: int = RECENT_MESSAGE_LIMIT,
 ) -> list[dict[str, Any]]:
     rows = await db.message.find_many(
         where={"conversationId": conversation_id},
@@ -969,16 +972,7 @@ async def _new_user_message_arrived(
 
 
 def _format_dialogue(messages: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for message in messages:
-        text = str(message.get("content") or "").replace("\n", " ").strip()
-        if not text:
-            continue
-        role = "用户" if message.get("role") == "user" else "AI"
-        stamp = format_moment(message.get("created_at"))
-        prefix = f"[{stamp}] " if stamp else ""
-        lines.append(f"{prefix}{role}：{text[:160]}")
-    return "\n".join(lines)[-1800:]
+    return format_recent_turns(messages)
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:

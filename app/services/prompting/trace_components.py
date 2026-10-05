@@ -95,6 +95,26 @@ class ManagedPromptText(str):
         obj.prompt_variant = prompt_variant
         return obj
 
+    @classmethod
+    def compose(cls, parts: list[tuple[str, str]], prompt_key: str):
+        obj = cls("\n\n".join(text for _, text in parts), prompt_key)
+        obj.parts = tuple(parts)
+        return obj
+
+    def render_components(self, render_fn) -> str:
+        rendered_parts, components = [], []
+        offset = 0
+        for key, template in self.parts:
+            text = render_fn(ManagedPromptText(template, key, self.prompt_variant))
+            rendered_parts.append(text)
+            components.append({"prompt_key": key, "start": offset,
+                               "end": offset + len(text), "editable": True})
+            offset += len(text) + 2
+        rendered = "\n\n".join(rendered_parts)
+        record_prompt_render(rendered, prompt_key=self.prompt_key,
+                             prompt_variant=self.prompt_variant, components=components)
+        return rendered
+
     def _render_safely(self, render_fn, fallback_params: dict) -> str:
         try:
             return render_fn()
@@ -117,6 +137,9 @@ class ManagedPromptText(str):
             return str(self)
 
     def format(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
+        if getattr(self, "parts", None):
+            return self.render_components(lambda part: part._render_safely(
+                lambda: str(part).format(*args, **kwargs), kwargs))
         rendered = self._render_safely(
             lambda: str(self).format(*args, **kwargs), kwargs,
         )
@@ -128,6 +151,10 @@ class ManagedPromptText(str):
         return rendered
 
     def format_map(self, mapping: Any) -> str:  # type: ignore[override]
+        if getattr(self, "parts", None):
+            return self.render_components(lambda part: part._render_safely(
+                lambda: str(part).format_map(mapping),
+                dict(mapping) if isinstance(mapping, dict) else {}))
         rendered = self._render_safely(
             lambda: str(self).format_map(mapping),
             dict(mapping) if isinstance(mapping, dict) else {},

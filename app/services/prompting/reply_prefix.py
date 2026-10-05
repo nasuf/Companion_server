@@ -1,9 +1,9 @@
-"""所有回复类指令的固定前置 (通用回复规则 + 反幻觉硬约束).
+"""回复前置路由：主动消息使用 proactive.common_rules，其余使用聊天通用规则。
 
 产品诉求: AI 发出的**每一条**用户可见消息 (含主动消息/短路回复/边界回复/
 音乐/礼物文案) 都应遵守同一套核心回复规则与反幻觉底线, 而不是只有主回复
 大 prompt 有. 实现上在 store.get_prompt_text 的单一出口对
-REPLY_PROMPT_KEYS 内的模板注入前置:
+REPLY_PROMPT_KEYS 内的非主动模板注入以下前置；主动消息保留各任务输出契约：
 
     【通用回复规则】chat.response_instruction (渲染 {max_per}/{total} 常量)
     chat.anti_hallucination_hard_rule
@@ -112,6 +112,19 @@ REPLY_PROMPT_KEYS: frozenset[str] = frozenset({
     "offline.gift_delivered_message",
     "offline.gift_thanks_reply",
     "offline.activity_invite_message",
+})
+
+
+# Explicit allowlist: structured classifiers/cards must never inherit prose rules.
+PROACTIVE_COMMON_KEY = "proactive.common_rules"
+PROACTIVE_REPLY_PROMPT_KEYS = frozenset(
+    key for key in REPLY_PROMPT_KEYS if key.startswith("proactive.")
+) | frozenset({
+    "offline.activity_invite_message",
+    "offline.arrival_guide",
+    "offline.activity_companion_observe",
+    "offline.activity_companion_feeling",
+    "offline.activity_companion_casual",
 })
 
 

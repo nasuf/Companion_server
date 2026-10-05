@@ -54,17 +54,9 @@ async def emit_proactive_message(
     spec 要求取消待发任务、优先响应用户。判断与插入在同一条 SQL 里完成 (READ
     COMMITTED 下仍有毫秒级窗口看不到并发中未提交的用户消息, 可接受)。
     """
-    # 防御: reply_prefix 给主动消息 prompt 注入的通用回复规则允许 "||" 分条,
-    # 但主动消息是单条投递 (无 split 管线) — LLM 若照做, 取第一段, 与
-    # render_prompt.strip_split 语义一致, 不把字面 "||" 漏给用户.
+    # One delivery/bubble, but preserve every clause from older split-style prompts.
     if "||" in message:
-        segments = [seg.strip() for seg in message.split("||") if seg.strip()]
-        if segments:
-            logger.debug(
-                "[PROACTIVE-EMIT] multi-segment output collapsed to first segment "
-                f"({len(segments)} segments)",
-            )
-            message = segments[0]
+        message = " ".join(part.strip() for part in message.split("||") if part.strip())
 
     # 硬保证: 一条消息最多 1 个 emoji (spec §5.3 + 2026-07-08 产品要求).
     # 主动消息不走 emit_replies, 在此单独收口.

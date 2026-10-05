@@ -335,8 +335,8 @@ async def get_prompt_text(key: str) -> str:
     callers must treat that as "本段/本功能提示词彻底不存在".
 
     回复类模板 (reply_prefix.REPLY_PROMPT_KEYS) 在此统一注入固定前置
-    (通用回复规则 + 反幻觉) — 所有 AI 用户可见消息共享同一套核心规则,
-    包括主动消息. 前置来源模板自身不在集合内 (防递归).
+    (通用回复规则 + 反幻觉)；日常/活动主动消息改用 proactive.common_rules，
+    保留任务自己的输出格式。前置来源模板自身不在集合内 (防递归).
     """
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
@@ -354,9 +354,22 @@ async def get_prompt_text(key: str) -> str:
         content = record.content if record and record.content else definition.default_text
         await redis.set(_redis_key(key), content)
 
-    from app.services.prompting.reply_prefix import REPLY_PROMPT_KEYS, build_reply_prefix
+    from app.services.prompting.reply_prefix import (
+        REPLY_PROMPT_KEYS, PROACTIVE_REPLY_PROMPT_KEYS, PROACTIVE_COMMON_KEY,
+        build_reply_prefix,
+    )
 
-    if key in REPLY_PROMPT_KEYS:
+    if key in PROACTIVE_REPLY_PROMPT_KEYS:
+        # Keep source components separate so Web trace editing targets the right key.
+        try:
+            prefix = await get_prompt_text(PROACTIVE_COMMON_KEY)
+        except PromptDisabledError:
+            prefix = ""
+        if prefix:
+            return ManagedPromptText.compose([
+                (PROACTIVE_COMMON_KEY, str(prefix)), (key, content),
+            ], key)
+    elif key in REPLY_PROMPT_KEYS:
         try:
             prefix = await build_reply_prefix()
         except Exception as e:  # noqa: BLE001 — 前置故障不能放大成全回复链路故障

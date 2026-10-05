@@ -391,7 +391,8 @@ def test_preflight_uses_system_reply_variant():
 
     from app.services.chat import orchestrator
 
-    src = inspect.getsource(orchestrator.stream_chat_response)
+    # Public entry now selects an executor; the legacy phase wiring lives here.
+    src = inspect.getsource(orchestrator._stream_legacy_response)
     preflight = src[src.index("preflight_ctx = PreflightCtx("):]
     assert "_system_short_circuit_reply" in preflight[:500]
     boundary = src[src.index("boundary_ctx = BoundaryPhaseCtx("):]

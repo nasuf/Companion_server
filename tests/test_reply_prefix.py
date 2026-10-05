@@ -221,5 +221,5 @@ async def test_emit_proactive_collapses_multi_segment(monkeypatch):
     )
 
     stored = fake_db.message.create.call_args.kwargs["data"]["content"]
-    assert stored == "今晚月色真好"
+    assert stored == "今晚月色真好 想到你了 早点休息"
     assert "||" not in stored

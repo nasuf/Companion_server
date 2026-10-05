@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.db import db
+from app.services.proactive.dialogue import RECENT_MESSAGE_LIMIT, format_recent_turns
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.portrait import get_latest_portrait
 from app.services.prompting.utils import render_prompt
@@ -122,10 +123,10 @@ async def build_proactive_context(
     }
 
 
-async def _load_recent_context(workspace_id: str, limit: int = 6) -> str:
+async def _load_recent_context(workspace_id: str, limit: int = RECENT_MESSAGE_LIMIT) -> str:
     """Spec §4.1 step 4 汇总参考信息里的"近期对话上下文"。
 
-    取工作空间最近 N 条消息（用户+AI 混排），按时间正序拼成文本。
+    取工作空间有界消息窗口，保留最多十轮对话并标注时间戳。
     """
     try:
         rows = await db.query_raw(
@@ -145,16 +146,7 @@ async def _load_recent_context(workspace_id: str, limit: int = 6) -> str:
         return ""
     if not rows:
         return ""
-    # rows are newest-first; flip to chronological
-    lines = []
-    for r in reversed(rows):
-        role = r.get("role") or "user"
-        text = (r.get("content") or "").strip()
-        if not text:
-            continue
-        prefix = "AI" if role == "assistant" else "用户"
-        lines.append(f"{prefix}: {text[:80]}")
-    return "\n".join(lines)
+    return format_recent_turns(list(reversed(rows)))
 
 
 async def _rerank_memories_by_topic(

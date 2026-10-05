@@ -377,7 +377,10 @@ async def list_user_tags(
     return derive_user_tags(list(rows or []), limit=limit)
 
 
-async def memory_brief(user_id: str, workspace_id: str | None, *, limit: int = 60) -> str:
+async def memory_brief(
+    user_id: str, workspace_id: str | None, *, limit: int = 60, include_ai: bool = True,
+) -> str:
+    """Legacy mixed brief; user-specific prompt fields must pass include_ai=False."""
     rows = await db.query_raw(
         """
         SELECT content, main_category, sub_category
@@ -391,6 +394,7 @@ async def memory_brief(user_id: str, workspace_id: str | None, *, limit: int = 6
             SELECT content, main_category, sub_category, importance, updated_at
             FROM memories_ai
             WHERE user_id = $1
+              AND $4::boolean
               AND ($2::text IS NULL OR workspace_id = $2)
               AND is_archived = FALSE
         ) m
@@ -400,6 +404,7 @@ async def memory_brief(user_id: str, workspace_id: str | None, *, limit: int = 6
         user_id,
         workspace_id,
         limit,
+        include_ai,
     )
     parts: list[str] = []
     for row in rows or []:

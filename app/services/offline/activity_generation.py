@@ -834,15 +834,18 @@ async def generate_activity_invite_message(
     user_id: str,
     workspace_id: str | None,
 ) -> str:
-    tags = await repo.list_user_tags(user_id, workspace_id, limit=6)
-    memory = await repo.memory_brief(user_id, workspace_id, limit=20)
-    fallback = (
-        f"我看到「{activity.get('title') or '这个地方'}」还挺适合你，"
-        "不是很吵，也不用赶流程。要不要看看这张小卡？"
-    )
+    place = clip_text(str(activity.get("location_name") or activity.get("title") or "这个地方"), 30)
+    fallback = f"「{place}」要不要了解一下？"
     try:
+        from app.services.offline.activity_message_context import message_context
+
+        tags = await repo.list_user_tags(user_id, workspace_id, limit=6)
+        memory = await repo.memory_brief(user_id, workspace_id, limit=20, include_ai=False)
+        ctx = await repo.resolve_user_context(user_id, workspace_id)
+        context_fields = await message_context(ctx or {})
         prompt_template = await get_prompt_text("offline.activity_invite_message")
         prompt_text = prompt_template.format(
+            **context_fields,
             title=activity.get("title") or "线下活动",
             location=activity.get("location_name")
             or activity.get("address")
@@ -854,7 +857,7 @@ async def generate_activity_invite_message(
         )
         text = (await invoke_text(get_chat_model(), prompt_text)).strip()
         text = re.sub(r"^['\"“”]+|['\"“”]+$", "", text).strip()
-        return text[:80] or fallback
+        return clip_text(text, 80) or fallback
     except Exception as exc:
         logger.warning("[offline] activity invite message generation failed: %s", exc)
         return fallback

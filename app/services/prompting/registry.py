@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from app.services.prompting.defaults import (
     AI_REPLY_EMOTION_PROMPT,
+    PROACTIVE_COMMON_RULES_PROMPT,
     ANTI_HALLUCINATION_HARD_RULE_PROMPT,
     APOLOGY_PROMPT,
     APOLOGY_REPLY_PROMPT,
@@ -849,6 +850,11 @@ PROMPT_DEFINITIONS = [
     ),
 
     # ── 主动交流 (Part 4) ──
+    PromptDefinition(
+        "proactive.common_rules", "主动交流通用前提", "主动交流", "共享前置",
+        "日常及活动主动消息共用；只约束语气、事实和边界，具体任务保留输出格式。",
+        PROACTIVE_COMMON_RULES_PROMPT,
+    ),
     PromptDefinition(
         "proactive.silence_plain", "沉默唤醒(无记忆)", "主动交流", "主动消息",
         "《终稿·第四部分 主动交流》§4.1 沉默唤醒: 不涉及记忆的轻打招呼. "

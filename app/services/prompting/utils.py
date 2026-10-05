@@ -156,6 +156,11 @@ def render_template(
     safe: bool = True,
 ) -> str:
     """Format a prompt template after dropping optional empty reference rows."""
+    if getattr(template, "parts", None):
+        def render_part(part):
+            compacted = compact_optional_reference_rows(str(part), params, optional_keys)
+            return safe_format(compacted, params) if safe else compacted.format(**params)
+        return template.render_components(render_part)
     compacted = compact_optional_reference_rows(template, params, optional_keys)
     prompt_key = getattr(template, "prompt_key", None)
     if safe:
@@ -202,7 +207,7 @@ async def render_prompt(
     """取 prompt → format_map → 调 invoke_fn。
 
     - invoke_fn: `invoke_text` 返回 str，`invoke_json` 返回 dict/list。
-    - max_chars / strip_split 仅对字符串结果生效：按 "||" 只取首段并裁剪。
+    - max_chars / strip_split 仅对字符串结果生效：主动文案合并分句，其余取首段并裁剪。
     失败或空结果返回 None（或 {} 视 invoke_fn 而定，由调用方判断）。
     """
     try:
@@ -211,7 +216,11 @@ async def render_prompt(
         raw = await invoke_fn(prompt)
         if isinstance(raw, str):
             if strip_split:
-                raw = raw.strip().split("||")[0]
+                from app.services.prompting.reply_prefix import PROACTIVE_REPLY_PROMPT_KEYS
+                if prompt_key in PROACTIVE_REPLY_PROMPT_KEYS:
+                    raw = " ".join(part.strip() for part in raw.split("||") if part.strip())
+                else:
+                    raw = raw.strip().split("||")[0]
             if max_chars and len(raw) > max_chars:
                 return _truncate_at_sentence_boundary(raw, max_chars)
             return raw
