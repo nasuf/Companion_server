@@ -35,6 +35,8 @@ def validate_entry(entry: dict) -> None:
 async def run(apply: bool) -> None:
     entries = json.loads(MANIFEST.read_text())['prompts']
     for entry in entries:
+        # Web saves trim surrounding whitespace before persisting.
+        entry['content'] = entry['content'].strip()
         validate_entry(entry)
     await db.connect()
     try:

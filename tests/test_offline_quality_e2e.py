@@ -279,3 +279,10 @@ async def test_legacy_gallery_repair_updates_chat_cover_with_backup(journey, mon
     assert (await repo.get_activity(a['id'],j.user))['image_urls']==[]
     row=(await j.db.query_raw('SELECT metadata FROM messages WHERE id=$1',mid))[0]
     assert row['metadata']['component_card']['payload']['image_url'] is None
+
+
+def test_release_matches_web_save_normalization():
+    from scripts.publish_offline_quality_prompts import validate_entry
+    for entry in RELEASE['prompts']:
+        assert entry['content'] == entry['content'].strip()
+        validate_entry(entry)
