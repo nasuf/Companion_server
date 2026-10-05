@@ -84,6 +84,8 @@ async def geocode_address(
     geocodes = data.get("geocodes") or []
     if not geocodes:
         return None
+    if geocodes[0].get("level") in {"国家", "省", "市", "区县", "开发区", "乡镇", "村庄", "未知"}:
+        return None  # A district centroid cannot verify arrival at a particular place.
     location = str(geocodes[0].get("location") or "")  # 高德格式："lng,lat"
     try:
         lng_str, lat_str = location.split(",", 1)
@@ -94,3 +96,27 @@ async def geocode_address(
     if not (-90 <= lat <= 90 and -180 <= lng <= 180):
         return None
     return lat, lng
+
+
+def wgs84_to_gcj02(lat: float, lng: float) -> tuple[float, float]:
+    """Align system GPS with the coordinate system returned by Amap.
+
+    Outside mainland China's transform bounds the coordinates are unchanged.
+    This is a local calculation; it performs no paid API request.
+    """
+    if not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271):
+        return lat, lng
+    x, y = lng - 105, lat - 35
+    dlat = -100 + 2*x + 3*y + .2*y*y + .1*x*y + .2*math.sqrt(abs(x))
+    dlat += (20*math.sin(6*x*math.pi)+20*math.sin(2*x*math.pi))*2/3
+    dlat += (20*math.sin(y*math.pi)+40*math.sin(y/3*math.pi))*2/3
+    dlat += (160*math.sin(y/12*math.pi)+320*math.sin(y*math.pi/30))*2/3
+    dlng = 300+x+2*y+.1*x*x+.1*x*y+.1*math.sqrt(abs(x))
+    dlng += (20*math.sin(6*x*math.pi)+20*math.sin(2*x*math.pi))*2/3
+    dlng += (20*math.sin(x*math.pi)+40*math.sin(x/3*math.pi))*2/3
+    dlng += (150*math.sin(x/12*math.pi)+300*math.sin(x/30*math.pi))*2/3
+    rad = lat / 180 * math.pi
+    magic = 1 - .00669342162296594323 * math.sin(rad)**2
+    dlat = dlat*180 / ((6378245*(1-.00669342162296594323))/(magic*math.sqrt(magic))*math.pi)
+    dlng = dlng*180 / (6378245/math.sqrt(magic)*math.cos(rad)*math.pi)
+    return lat+dlat, lng+dlng

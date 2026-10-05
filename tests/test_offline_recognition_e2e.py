@@ -29,6 +29,9 @@ class _FakeRepo:
     async def list_all_conditions(self, rid):
         return list(self.conditions)
 
+    async def list_fragments(self, rid):
+        return self.fragments
+
     async def count_fragments(self, rid):
         return len(self.fragments)
 
@@ -75,7 +78,7 @@ def _install(monkeypatch, *, produce_random=0.0, subjects_queue):
     fake = _FakeRepo()
     monkeypatch.setattr(recognition, "repo", fake)
     # 口语化交付确定化；写回 AI 记忆与 WS 推送置空避免触碰 DB/网络。
-    monkeypatch.setattr(recognition, "_verbalize", AsyncMock(return_value="思绪正文"))
+    monkeypatch.setattr(recognition, "_verbalize", AsyncMock(side_effect=["这个角度让我想起以前写日记的午后", "突然有点想念家里那盏小灯", "你发来的这一刻让我笑了一下"]))
     monkeypatch.setattr(recognition, "remember_offline_fragment", lambda **kw: None)
     monkeypatch.setattr(recognition, "_handle_miss", AsyncMock(return_value=None))
     monkeypatch.setattr(

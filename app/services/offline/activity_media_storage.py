@@ -139,7 +139,7 @@ def serve_media(storage_key: str, *, user_id: str, is_admin: bool = False) -> Re
     path = storage_path(storage_key)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Media not found")
-    if not is_admin and not storage_key.startswith(f"{user_id}_"):
+    if not is_admin and not storage_key.startswith((f"{user_id}_", "place_")):
         raise HTTPException(status_code=403, detail="Not your media")
     media_type, _ = mimetypes.guess_type(path.name)
     return Response(

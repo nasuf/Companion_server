@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.offline.content import plain_text, canonical_url, place_source_matches
+
 import json
 import logging
 import re
@@ -17,12 +19,6 @@ from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
 
-
-_FALLBACK_IMAGES = [
-    "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=80",
-    "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1200&q=80",
-    "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1200&q=80",
-]
 
 _LOCALIZED_CITY_ALIASES = {
     "zhenjiang": ("江苏 镇江", "镇江", "Zhenjiang"),
@@ -603,6 +599,8 @@ def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
 
 def _place_from_source(result: SearchResult, city: str) -> str | None:
     title = result.title.strip()
+    if re.search(r"攻略|合集|排行榜|十大|周末去哪|[0-9一二三四五六七八九十]+[个大处家]", title):
+        return None
     for part in _TOKEN_SPLIT_RE.split(title):
         part = part.strip()
         if not part:
@@ -631,17 +629,12 @@ def _usable_results(
 
 
 def _card_is_source_backed(card: dict[str, Any], sources: list[dict[str, Any]]) -> bool:
-    if not sources:
-        return True
-    source_domains = {_domain(source.get("url")) for source in sources}
-    source_domains.discard("")
-    official_domain = _domain(card.get("official_url"))
-    if not official_domain:
-        return False
-    return any(
-        official_domain == domain or official_domain.endswith(f".{domain}")
-        for domain in source_domains
-    )
+    official = canonical_url(card.get("official_url"))
+    return bool(official and any(
+        canonical_url(source.get("url")) == official
+        and place_source_matches(card, str(source.get("title") or ""), str(source.get("content") or ""))
+        for source in sources
+    ))
 
 
 def _fallback_card(
@@ -660,7 +653,7 @@ def _fallback_card(
     task = f"到{location}后，拍下一处你觉得有一点可爱的细节，发给我看看。"
     return {
         "title": title,
-        "summary": source.content.strip()[:80] or "一个低压力、可以独立完成的小出门计划。",
+        "summary": f"如果想换个地方走走，可以看看{location}，按自己的节奏安排就好。",
         "description": (
             f"我帮你在{city_label}找到一个可以独自慢慢看的地方：{location}。"
             "不需要社交表现，也不用赶时间，就当给今天换一点空气。"
@@ -732,6 +725,8 @@ async def generate_activity_card(
             card = _json_object(raw)
         except Exception as exc:
             logger.warning("[offline] activity LLM generation failed: %s", exc)
+    if card:
+        card["city"] = _display_city(city)
     if card and not _card_is_source_backed(card, sources):
         logger.warning(
             "[offline] discarded unbacked activity card title=%r official_url=%r query=%r",
@@ -763,31 +758,30 @@ async def generate_activity_card(
         return None
 
     now = datetime.now(UTC)
-    image_urls = card.get("image_urls")
-    if not isinstance(image_urls, list):
-        image_urls = []
-    search_images = [r.image_url for r in results if r.image_url]
-    card["image_urls"] = (
-        [str(x) for x in image_urls if str(x).strip()]
-        or search_images[:3]
-        or _FALLBACK_IMAGES[:2]
+    card["city"] = _display_city(city)
+    # Date-bearing events require an explicit, current end time; evergreen POIs do not.
+    if card.get("starts_at") or card.get("ends_at"):
+        try:
+            end = datetime.fromisoformat(str(card.get("ends_at") or "").replace("Z", "+00:00"))
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=UTC)
+            if end <= now:
+                return None
+            card["expires_at"] = min(end, now + timedelta(days=14))
+        except ValueError:
+            return None
+    card["image_urls"] = await persist_activity_images(
+        user_id=user_id, card=card, city=city, search_results=results, limit=3,
     )
-    persisted_images = await persist_activity_images(
-        user_id=user_id,
-        card=card,
-        city=city,
-        search_results=results,
-        limit=3,
-    )
-    if persisted_images:
-        card["image_urls"] = persisted_images
-    card["search_sources"] = sources
-    card["city"] = city
+    for field in ("title", "summary", "description", "vibe", "suitable"):
+        card[field] = plain_text(card.get(field))
+    card["search_sources"] = sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]
+    card["city"] = _display_city(city)
     card["source"] = source
-    card["expires_at"] = now + timedelta(days=14)
+    card.setdefault("expires_at", now + timedelta(days=14))
     copy = await _recommendation_copy(card)
     if copy:
-        card["description"] = copy
+        card["description"] = plain_text(copy)
     return card
 
 

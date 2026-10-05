@@ -141,6 +141,8 @@ async def arrive_offline_activity(
         activity_id,
         lat=data.lat,
         lng=data.lng,
+        accuracy_m=data.accuracy_m,
+        manual_confirmation=data.manual_confirmation,
     )
 
 
@@ -329,3 +331,8 @@ def _media_response(
         vision_summary=None,
         created_at=str(media.created_at) if media.created_at else None,
     )
+
+
+@router.delete("/activities/{activity_id}")
+async def delete_offline_activity(activity_id: str, user: dict = Depends(require_user)):
+    return await activity_service.delete_activity(str(user['sub']), activity_id)

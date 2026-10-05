@@ -73,7 +73,7 @@ async def flow(monkeypatch):
     token = start_prompt_render_trace()
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
-            yield SimpleNamespace(db=database,redis=redis,client=client,ws=ws,user=user,agent=agent,workspace=workspace,conversation=conversation)
+            yield SimpleNamespace(app=app,db=database,redis=redis,client=client,ws=ws,user=user,agent=agent,workspace=workspace,conversation=conversation)
     finally:
         reset_prompt_render_trace(token)
         keys = [key async for key in redis.scan_iter(match=f'e2e:{tag}:*')]

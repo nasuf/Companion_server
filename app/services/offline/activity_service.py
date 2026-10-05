@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
@@ -19,9 +21,9 @@ from app.services.offline import prophecy as prophecy_pool
 from app.services.offline import repository as repo
 from app.services.offline import shooting_conditions
 from app.services.offline.recognition import TIER_LABELS
-from app.services.offline.geocode import geocode_address, haversine_m, make_place_key
+from app.services.offline.content import plain_text
+from app.services.offline.geocode import geocode_address, haversine_m, make_place_key, wgs84_to_gcj02
 from app.services.offline.prompt_fields import (
-    clip_text,
     filled,
     format_moment,
     location_fields,
@@ -269,8 +271,7 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             user_id, place_key, exclude_id=activity_id
         )
         if existing:
-            await repo.update_activity_status(activity_id, user_id, "ignored")
-            return OfflineActivityItem(**existing)
+            raise HTTPException(status_code=409, detail="这个地点已有待出行活动，请从待出行列表打开，当前推荐会保留")
     was_ignored = activity["status"] == "ignored"
     if was_ignored:
         feedback_text = f"用户重新接受了活动推荐：{activity['title']}"
@@ -435,6 +436,8 @@ async def arrive_activity(
     *,
     lat: float | None = None,
     lng: float | None = None,
+    accuracy_m: float | None = None,
+    manual_confirmation: bool = False,
 ) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
@@ -456,10 +459,18 @@ async def arrive_activity(
             status_code=409,
             detail="你还有一段正在进行的旅途，先把那一段收好再开始这里吧",
         )
-    # 有客户端坐标才校验（地点已地理编码时才真正拦截 >200m）；无坐标荣誉制放行。
-    if lat is not None and lng is not None:
-        _verify_arrival_distance(activity, lat, lng)
-    updated = await repo.mark_arrived(activity_id, user_id, lat=lat, lng=lng)
+    has_place = activity.get('place_lat') is not None and activity.get('place_lng') is not None
+    if not has_place:
+        if not manual_confirmation or settings.offline_arrival_require_geocode:
+            raise HTTPException(status_code=422, detail={"reason": "no_geocode", "message": "这个地点暂无可靠坐标，可选择手动记录到达；手动记录不代表定位核验通过"})
+    else:
+        if lat is None or lng is None or not all(math.isfinite(v) for v in (lat, lng)):
+            raise HTTPException(status_code=422, detail={"reason": "location_required", "message": "需要当前位置才能确认到达，请开启定位后重试"})
+        if accuracy_m is None or not math.isfinite(accuracy_m) or not 0 <= accuracy_m <= 100:
+            raise HTTPException(status_code=422, detail={"reason": "low_accuracy", "message": "定位还不够准确，请开启精确定位后再试一次"})
+        check_lat, check_lng = wgs84_to_gcj02(lat, lng)
+        _verify_arrival_distance(activity, check_lat, check_lng)
+    updated = await repo.mark_arrived(activity_id, user_id, lat=lat, lng=lng, verified=has_place)
     if not updated:
         # 并发：别处已置为到达
         current = await repo.get_activity(activity_id, user_id, reveal_task=True)
@@ -557,6 +568,7 @@ async def archive_activity(user_id: str, activity_id: str) -> OfflineActivityIte
         if current and current["status"] == "completed":
             return OfflineActivityItem(**await _with_completion_feedback(current))
         raise HTTPException(status_code=409, detail="归档失败，请重试")
+    await _ensure_journey_note(updated)
     ctx = await repo.resolve_user_context(user_id, activity.get("workspace_id"))
     if ctx:
         await emit_activity_card(
@@ -590,6 +602,7 @@ async def auto_archive_due_activities() -> dict[str, int]:
             )
             if not updated:
                 continue  # 并发下已被手动归档
+            await _ensure_journey_note(updated)
             ctx = await repo.resolve_user_context(
                 activity["user_id"], activity.get("workspace_id")
             )
@@ -649,11 +662,15 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
+    if activity["status"] != "completed":
+        raise HTTPException(status_code=409, detail="旅途还在进行中，收好后再来回顾")
     fragments = await repo.list_fragments(activity_id)
     gallery = await repo.list_gallery_media(activity_id)
     arrival_message_id = await repo.find_arrival_card_message_id(
         activity_id, activity.get("conversation_id")
     )
+    evidence = await repo.journey_evidence(activity)
+    note = await _ensure_journey_note(activity, evidence)
     return OfflineActivityReviewResponse(
         id=activity["id"],
         title=activity["title"],
@@ -662,7 +679,8 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
         cover_url=_activity_cover(activity, gallery),
         started_at=activity.get("arrival_confirmed_at") or activity.get("created_at"),
         ended_at=activity.get("completed_at") or activity.get("archived_at"),
-        story=activity.get("description") or activity.get("summary") or "你把这一天慢慢走完了。",
+        story=note or _arrival_only_story(activity),
+        can_generate_memory_note=activity["status"] == "completed" and _has_journey_evidence(evidence),
         gallery=gallery,
         fragments=[
             OfflineActivityFragmentItem(
@@ -671,59 +689,73 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
             for f in fragments
         ],
         event_tags=_review_event_tags(activity, fragments, gallery),
-        has_memory_note=bool(activity.get("travel_note")),
-        travel_note=activity.get("travel_note"),
+        has_memory_note=bool(note),
+        travel_note=note,
     )
 
 
 _TIER_EMOJI = {"rare": "💭", "epic": "📜", "legendary": "🔮"}
 
 
-async def generate_memory_note(
-    user_id: str, activity_id: str
-) -> OfflineMemoryNoteResponse:
+def _has_journey_evidence(evidence: dict) -> bool:
+    return bool(evidence.get('dialogue') or evidence.get('voice') or evidence.get('feedback') or evidence.get('photo_count'))
+
+
+def _arrival_only_story(activity: dict) -> str:
+    place = plain_text(activity.get('location_name') or activity.get('title'))
+    if activity.get('reached'):
+        return f"你确认到了{place}，随后收好了这次旅途。还没有留下照片或感想，就先记下这次到达。"
+    return f"这次去{place}的计划已经收好，还没有确认到达或留下旅途记录。"
+
+
+async def _ensure_journey_note(activity: dict, evidence: dict | None = None) -> str | None:
+    if activity.get('status') != 'completed':
+        return None
+    evidence = evidence if evidence is not None else await repo.journey_evidence(activity)
+    if not _has_journey_evidence(evidence):
+        return None
+    if activity.get('travel_note') and activity.get('travel_note_version') == 2:
+        return activity['travel_note']
+    generated = await memory_note_gen.generate_note(
+        activity_name=filled(activity.get('title'), empty='这次外出'),
+        location=filled(activity.get('location_name'), empty='（未提供）'),
+        activity_type=filled(activity.get('category'), empty='线下活动'),
+        arrival_time=format_moment(activity.get('arrival_confirmed_at')),
+        weather='（未提供）', dialogue=_format_note_dialogue(evidence['dialogue']),
+        voice_transcripts='\n'.join(evidence['voice'] + evidence['feedback']),
+        photo_keywords='\n'.join(evidence['photos']) or (f"用户分享了{evidence['photo_count']}张照片，内容未识别。" if evidence['photo_count'] else ''),
+        fragments='',  # AI-written memories cannot establish the user's experience.
+    )
+    note = plain_text(generated.get('body'))[:300]
+    # Reject invented photo actions even if the model ignores the evidence-only prompt.
+    if not evidence['photo_count'] and re.search(r'照片|拍照|拍下|拍了|分享.{0,6}图片', note):
+        note = ''
+    if not note:
+        # Fail closed to an extractive record; never invent weather, feelings or actions.
+        quotes = [str(r['content']) for r in evidence['dialogue']] + evidence['voice'] + evidence['feedback']
+        note = (f"这次在{plain_text(activity.get('location_name') or activity['title'])}，你留下了这些话："
+                + '；'.join('「'+plain_text(q)[:80]+'」' for q in quotes[:2])) if quotes else f"这次旅途你分享了{evidence['photo_count']}张照片，已经为你收好。"
+    await repo.set_travel_note(activity['id'], activity['user_id'], note)
+    saved = await repo.get_activity(activity['id'], activity['user_id'])
+    return (saved or {}).get('travel_note') or note
+
+
+async def generate_memory_note(user_id: str, activity_id: str) -> OfflineMemoryNoteResponse:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
+    if activity['status'] != 'completed':
+        raise HTTPException(status_code=409, detail="先收好这次旅途，再整理手札")
+    note = await _ensure_journey_note(activity)
+    if not note:
+        raise HTTPException(status_code=409, detail="这次只记录了到达，还没有照片或感想可以整理成手札")
     fragments = await repo.list_fragments(activity_id)
-    note = activity.get("travel_note")
-    mood_tags: list[str] = []
-    if not note:  # 幂等：已生成直接复用，未生成才调 LLM 并缓存
-        voice_transcripts = await repo.list_voice_transcripts(activity_id)
-        since = activity.get("arrival_confirmed_at") or activity.get("accepted_at")
-        conversation_id = activity.get("conversation_id")
-        dialogue_rows = await repo.list_activity_dialogue(conversation_id, since)
-        photo_keywords = await repo.list_activity_photo_keywords(conversation_id, since)
-        place = location_fields(activity)
-        generated = await memory_note_gen.generate_note(
-            activity_name=place["activity_name"],
-            location=filled(
-                activity.get("location_name") or activity.get("address"),
-                empty="（未提供）",
-            ),
-            activity_type=place["type"],
-            arrival_time=place["arrival_time"],
-            weather="（未提供）",
-            dialogue=_format_note_dialogue(dialogue_rows),
-            voice_transcripts="\n".join(voice_transcripts),
-            photo_keywords="\n".join(photo_keywords),
-            fragments="\n".join(f["text"] for f in fragments if f.get("text")),
-        )
-        note = clip_text(str(generated.get("body") or ""), 300) or memory_note_gen.fallback_body()
-        mood_tags = generated.get("mood_tags") or []
-        await repo.set_travel_note(activity_id, user_id, note)
     gallery = await repo.list_gallery_media(activity_id)
-    fragment_tags = [
-        f"{_TIER_EMOJI.get(f['tier'], '💭')} {TIER_LABELS.get(f['tier'], '片刻感想')}"
-        for f in fragments
-    ]
     return OfflineMemoryNoteResponse(
-        title=activity["title"],
-        date_text=activity.get("arrival_confirmed_at") or activity.get("created_at") or "",
-        cover_url=_activity_cover(activity, gallery),
-        travel_note=note,
-        fragment_tags=fragment_tags,
-        mood_tags=mood_tags,
+        title=activity['title'], date_text=activity.get('arrival_confirmed_at') or '',
+        cover_url=_activity_cover(activity, gallery), travel_note=note,
+        fragment_tags=[f"{_TIER_EMOJI.get(f['tier'], '💭')} {TIER_LABELS.get(f['tier'], '片刻感想')}" for f in fragments],
+        mood_tags=[],
     )
 
 
@@ -859,3 +891,14 @@ def _media_to_metadata(media: activity_media_repo.OfflineActivityMedia) -> dict:
         "url": media.url,
         "vision_status": "ready",
     }
+
+
+async def delete_activity(user_id: str, activity_id: str) -> dict:
+    activity = await repo.get_activity(activity_id, user_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    if activity['status'] == 'cancelled':
+        return {'ok': True}
+    if not await repo.cancel_unstarted_activity(activity_id, user_id):
+        raise HTTPException(status_code=409, detail="已经到达的旅途请收好回忆，不能删除待出行记录")
+    return {'ok': True}

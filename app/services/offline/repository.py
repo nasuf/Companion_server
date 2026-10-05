@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.offline.content import plain_text, novel_fragment
+
 import json
 import logging
 import re
@@ -89,9 +91,9 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "workspace_id": _field(row, "workspace_id", "workspaceId"),
         "conversation_id": _field(row, "conversation_id", "conversationId"),
         "status": status,
-        "title": str(_field(row, "title") or ""),
-        "summary": str(_field(row, "summary") or ""),
-        "description": str(_field(row, "description") or ""),
+        "title": plain_text(_field(row, "title")),
+        "summary": plain_text(_field(row, "summary")),
+        "description": plain_text(_field(row, "description")),
         "category": _field(row, "category"),
         "city": _field(row, "city"),
         "location_name": _field(row, "location_name", "locationName"),
@@ -115,6 +117,7 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "place_lng": _field(row, "place_lng", "placeLng"),
         "place_key": _field(row, "place_key", "placeKey"),
         "reached": bool(_field(row, "reached", default=False)),
+        "arrival_verification_available": _field(row, "place_lat", "placeLat") is not None and _field(row, "place_lng", "placeLng") is not None,
         "arrival_confirmed_at": _iso(_field(row, "arrival_confirmed_at", "arrivalConfirmedAt")),
         "conditions_ready_at": _iso(
             _field(row, "conditions_ready_at", "conditionsReadyAt")
@@ -122,6 +125,8 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "prophecy_text": _field(row, "prophecy_text", "prophecyText"),
         "auto_archive_at": _iso(_field(row, "auto_archive_at", "autoArchiveAt")),
         "travel_note": _field(row, "travel_note", "travelNote"),
+        "travel_note_version": int(_field(row, "travel_note_version", "travelNoteVersion", 0) or 0),
+        "arrival_verified": bool(_field(row, "arrival_verified", "arrivalVerified", False)),
         "miss_count": int(_field(row, "miss_count", "missCount", 0) or 0),
         "hint_count": int(_field(row, "hint_count", "hintCount", 0) or 0),
         # Internal-only companion fields. OfflineActivityItem ignores them.
@@ -651,6 +656,9 @@ async def update_activity_status(
             END,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND user_id = $2
+          AND status NOT IN ('cancelled','expired')
+          AND ($3 <> 'accepted' OR status IN ('pending','accepted','ignored'))
+          AND ($3 <> 'ignored' OR (status IN ('pending','accepted') AND reached=FALSE))
         RETURNING *
         """,
         activity_id,
@@ -666,6 +674,7 @@ async def mark_arrived(
     *,
     lat: float | None,
     lng: float | None,
+    verified: bool = False,
 ) -> dict[str, Any] | None:
     """确认到达：置 reached + 到达时间 + 24h 自动归档截止。仅 accepted 且未到达时生效。"""
     async with db.tx() as tx:
@@ -726,6 +735,7 @@ async def mark_arrived(
                 arrival_confirmed_at = CURRENT_TIMESTAMP,
                 arrival_lat = $3,
                 arrival_lng = $4,
+                arrival_verified = $5,
                 auto_archive_at = CURRENT_TIMESTAMP + INTERVAL '24 hours',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1 AND user_id = $2
@@ -736,6 +746,7 @@ async def mark_arrived(
             user_id,
             lat,
             lng,
+            verified,
         )
     return activity_from_row(rows[0], reveal_task=True) if rows else None
 
@@ -1697,24 +1708,25 @@ async def create_fragment(
     source_message_id: str | None = None,
     content_fingerprint: str | None = None,
 ) -> dict[str, Any]:
-    rows = await db.query_raw(
-        """
-        INSERT INTO offline_thought_fragments
-            (id, recommendation_id, tier, text, lead_in, condition_id,
-             snapshot_media_id, source_message_id, content_fingerprint)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, tier, text, lead_in, snapshot_media_id, created_at
-        """,
-        new_id(),
-        recommendation_id,
-        tier,
-        text,
-        lead_in,
-        condition_id,
-        snapshot_media_id,
-        source_message_id,
-        content_fingerprint,
-    )
+    async with db.tx() as tx:
+        active = await tx.query_raw("""
+            SELECT id FROM offline_activity_recommendations
+            WHERE id=$1 AND status='accepted' AND reached=TRUE FOR UPDATE
+        """, recommendation_id)
+        if not active:
+            return {}
+        previous = await tx.query_raw("SELECT text,content_fingerprint FROM offline_thought_fragments WHERE recommendation_id=$1", recommendation_id)
+        if len(previous) >= 3 or not novel_fragment(text, [r['text'] for r in previous]):
+            return {}
+        if content_fingerprint and any(r.get('content_fingerprint') == content_fingerprint for r in previous):
+            return {}
+        rows = await tx.query_raw("""
+            INSERT INTO offline_thought_fragments
+                (id,recommendation_id,tier,text,lead_in,condition_id,snapshot_media_id,source_message_id,content_fingerprint)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            RETURNING id,tier,text,lead_in,snapshot_media_id,created_at
+        """, new_id(), recommendation_id, tier, text, lead_in, condition_id,
+            snapshot_media_id, source_message_id, content_fingerprint)
     return _fragment_from_row(rows[0]) if rows else {}
 
 
@@ -1942,8 +1954,9 @@ async def set_travel_note(
     await db.execute_raw(
         """
         UPDATE offline_activity_recommendations
-        SET travel_note = $3, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND user_id = $2
+        SET travel_note = $3, travel_note_version = 2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND user_id = $2 AND status = 'completed'
+          AND (travel_note IS NULL OR travel_note_version < 2)
         """,
         recommendation_id,
         user_id,
@@ -1978,6 +1991,11 @@ async def create_activity_feedback(
         audio_attachment_id,
         json.dumps(metadata or {}, ensure_ascii=False),
     )
+
+    if kind == 'completion':
+        # Explicitly submitted activity feedback can arrive just after archival.
+        await db.execute_raw("UPDATE offline_activity_recommendations SET travel_note=NULL, travel_note_version=0 WHERE id=$1 AND user_id=$2", recommendation_id, user_id)
+
 
 async def get_activity_completion_feedback(
     *,
@@ -2094,3 +2112,58 @@ async def update_next_activity_due(
         workspace_id,
         due_at,
     )
+
+
+async def cancel_unstarted_activity(activity_id: str, user_id: str) -> dict | None:
+    rows = await db.query_raw("""
+        UPDATE offline_activity_recommendations SET status='cancelled',
+            next_companion_at=NULL, companion_claim_token=NULL,
+            companion_claimed_at=NULL, updated_at=CURRENT_TIMESTAMP
+        WHERE id=$1 AND user_id=$2 AND status IN ('pending','accepted','ignored') AND reached=FALSE
+        RETURNING *
+    """, activity_id, user_id)
+    return activity_from_row(rows[0]) if rows else None
+
+
+async def journey_evidence(activity: dict) -> dict:
+    """Bound to the owner's conversation AND arrival/end; exclude synthetic cards.
+
+    AI fragments are context, never evidence of what the user actually did.
+    """
+    if not activity.get('arrival_confirmed_at'):
+        return {'dialogue': [], 'photos': [], 'voice': [], 'feedback': [], 'photo_count': 0}
+    rows = await db.query_raw("""
+        SELECT m.role,m.content,m.created_at FROM messages m
+        JOIN offline_activity_recommendations a ON a.conversation_id=m.conversation_id
+        WHERE a.id=$1 AND a.user_id=$2 AND m.role='user'
+          AND m.created_at >= a.arrival_confirmed_at
+          AND m.created_at <= COALESCE(a.completed_at,CURRENT_TIMESTAMP)
+          AND COALESCE(m.metadata->>'trigger_type','') NOT LIKE 'offline_%'
+          AND NOT (COALESCE(m.metadata,'{}'::jsonb) ? 'component_card')
+          AND COALESCE(m.content,'') <> ''
+        ORDER BY m.created_at LIMIT 80
+    """, activity['id'], activity['user_id'])
+    media = await db.query_raw("""
+        SELECT om.id,ca.vision_summary FROM offline_activity_media om
+        JOIN offline_activity_recommendations a ON a.id=om.recommendation_id
+        LEFT JOIN chat_message_attachments ca ON ca.message_id=om.source_message_id AND ca.url=om.url
+        WHERE a.id=$1 AND a.user_id=$2 AND om.kind='image'
+          AND om.created_at >= a.arrival_confirmed_at
+          AND (om.created_at <= COALESCE(a.completed_at,CURRENT_TIMESTAMP) OR EXISTS (
+            SELECT 1 FROM offline_activity_feedback f WHERE f.recommendation_id=a.id
+            AND f.user_id=a.user_id AND f.kind='completion' AND f.photo_attachment_ids ? om.id))
+        ORDER BY om.created_at LIMIT 30
+    """, activity['id'], activity['user_id'])
+    feedback = await db.query_raw("""
+        SELECT f.kind,f.text FROM offline_activity_feedback f
+        JOIN offline_activity_recommendations a ON a.id=f.recommendation_id
+        WHERE a.id=$1 AND a.user_id=$2 AND f.kind IN ('voice_transcript','completion')
+          AND f.created_at >= a.arrival_confirmed_at
+          AND (f.kind='completion' OR f.created_at <= COALESCE(a.completed_at,CURRENT_TIMESTAMP))
+        ORDER BY f.created_at LIMIT 30
+    """, activity['id'], activity['user_id'])
+    return {'dialogue': rows,
+            'photos': [r['vision_summary'] for r in media if r.get('vision_summary')],
+            'photo_count': len({r['id'] for r in media}),
+            'voice': [r['text'] for r in feedback if r['kind']=='voice_transcript' and r.get('text')],
+            'feedback': [r['text'] for r in feedback if r['kind']=='completion' and r.get('text')]}

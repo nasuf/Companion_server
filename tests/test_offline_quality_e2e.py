@@ -1,0 +1,281 @@
+"""Authenticated HTTP → actual Postgres/Redis → lifecycle/evidence/gallery.
+
+External search/model/notification transports use deterministic fixtures. No
+production users or messages are used. See offline-quality-verification.md.
+"""
+import asyncio
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
+from app.api.public import offline
+from app.services.auth import create_jwt
+from app.services.offline import activity_service as service, repository as repo
+from app.services.offline import place_catalog, memory_note, recognition
+from app.services.offline.chat_emit import build_activity_component_card
+from app.services.offline.geocode import wgs84_to_gcj02
+from app.services.prompting.registry import PROMPT_DEFINITION_MAP
+from tests.test_proactive_activity_e2e import flow  # noqa: F401
+
+RELEASE = json.loads((Path(__file__).parents[1]/'scripts/prompt_releases/20261005_offline_quality.json').read_text())
+
+
+@pytest.fixture
+async def journey(flow, monkeypatch):
+    flow.app.include_router(offline.router)
+    flow.client.headers['Authorization'] = 'Bearer '+create_jwt(flow.user, role="user")
+    for module in (place_catalog,):
+        monkeypatch.setattr(module, 'db', flow.db)
+    for name in ('emit_assistant', 'emit_activity_card', 'insert_user_activity_card'):
+        monkeypatch.setattr(service, name, AsyncMock(return_value='sent'))
+    monkeypatch.setattr(service, 'fire_background', lambda c: c.close())
+    monkeypatch.setattr(service, 'remember_user_event', lambda **k: None)
+    monkeypatch.setattr(service, '_arrival_guide_text', AsyncMock(return_value='到了呀，慢慢逛'))
+    monkeypatch.setattr(service, 'settings', type('Settings', (), {
+        'offline_arrival_require_geocode': False, 'offline_arrival_radius_m': 200,
+        'offline_activity_companion_enabled': False})())
+    for entry in RELEASE['prompts']:
+        d= PROMPT_DEFINITION_MAP[entry['key']]
+        await flow.db.prompttemplate.upsert(where={'key':d.key},data={
+            'create':dict(key=d.key,stage=d.stage,category=d.category,title=d.title,description=d.description,content=d.default_text,defaultContent=d.default_text),
+            'update':dict(content=d.default_text,defaultContent=d.default_text,isEnabled=True)})
+        row=await flow.db.prompttemplate.find_unique(where={'key':d.key})
+        result=await flow.client.put('/admin-api/prompts/'+d.key,json={'content':entry['content'],'expected_updated_at':row.updatedAt.isoformat()})
+        assert result.status_code==200, result.text
+    async def create(**over):
+        lat,lng=wgs84_to_gcj02(23.01,113.75)
+        return await repo.create_activity(dict(user_id=flow.user,agent_id=flow.agent,
+            workspace_id=flow.workspace,conversation_id=flow.conversation,status='accepted',
+            title='莲湖公园走走',location_name='莲湖公园',city='东莞',address='桥头镇莲湖路',
+            summary='慢慢走走',description='推荐介绍：建议看看湖面',place_lat=lat,place_lng=lng,
+            **over))
+    flow.create=create
+    return flow
+
+
+async def post(j, a, action, body=None):
+    return await j.client.post('/offline/activities/'+a['id']+'/'+action,json=body or {})
+
+
+async def test_gps_validation_arrival_only_no_invented_memory(journey, monkeypatch):
+    j=journey; a=await j.create()
+    for payload, reason in [({},'location_required'),({'lat':23.01,'lng':113.75},'low_accuracy'),
+            ({'lat':24,'lng':113.75,'accuracy_m':10},'too_far'),
+            ({'lat':23.01,'lng':113.75,'accuracy_m':500},'low_accuracy'),
+            ({'manual_confirmation':True},'location_required')]:
+        r=await post(j,a,'arrive',payload)
+        assert r.status_code==422 and r.json()['detail']['reason']==reason
+        assert not (await repo.get_activity(a['id'],j.user))['reached']
+    r=await post(j,a,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':10})
+    assert r.status_code==200 and r.json()['arrival_verified']
+    assert (await post(j,a,'arrive')).status_code==200  # idempotent
+    llm=AsyncMock(side_effect=AssertionError('arrival alone must never ask model to invent a story'))
+    monkeypatch.setattr(memory_note,'invoke_text',llm)
+    assert (await post(j,a,'archive')).status_code==200
+    review=await j.client.get('/offline/activities/'+a['id']+'/review')
+    assert review.status_code==200,review.text
+    data=review.json()
+    assert '还没有留下' in data['story'] and '推荐介绍' not in data['story']
+    assert not data['can_generate_memory_note'] and not data['has_memory_note']
+    assert (await post(j,a,'memory-note')).status_code==409
+    llm.assert_not_called()
+
+
+async def test_actual_journey_snapshot_excludes_before_after_and_agent_claims(journey, monkeypatch):
+    j=journey;a=await j.create()
+    async def message(text, offset, role='user', metadata=None):
+        await j.db.execute_raw('''INSERT INTO messages(id,conversation_id,role,content,metadata,created_at)
+            VALUES ($1,$2,$3,$4,$5::jsonb,CURRENT_TIMESTAMP+($6||' seconds')::interval)''',
+            uuid4().hex,j.conversation,role,text,json.dumps(metadata or {}),str(offset))
+    await message('出发前的旧话',-100)
+    await post(j,a,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':5})
+    await message('我在湖边坐了一会儿，风吹着很舒服',0)
+    await message('你已经参观了整座博物馆',0,'assistant')
+    await message('用户确认到达',0,metadata={'component_card':{'type':'offline_activity'}})
+    await message('明天无关的事',100)
+    async def generate(model,prompt):
+        assert '湖边坐了一会儿' in prompt
+        for excluded in ('出发前的旧话','你已经参观了整座博物馆','用户确认到达','明天无关的事','推荐介绍：'):
+            assert excluded not in prompt
+        return json.dumps({'body':'你说在湖边坐了一会儿，风吹着很舒服。这句感想也一起收好了。'},ensure_ascii=False)
+    llm=AsyncMock(side_effect=generate);monkeypatch.setattr(memory_note,'invoke_text',llm)
+    r=await post(j,a,'archive');assert r.status_code==200,r.text
+    review=(await j.client.get('/offline/activities/'+a['id']+'/review')).json()
+    assert review['can_generate_memory_note'] and review['has_memory_note']
+    note=(await post(j,a,'memory-note')).json()
+    assert note['travel_note']==review['story']
+    llm.assert_awaited_once()
+
+
+async def test_delete_owned_unstarted_only_and_no_resurrection(journey):
+    j=journey;a=await j.create()
+    path='/offline/activities/'+a['id']
+    denied=await j.client.delete(path,headers={'Authorization':'Bearer '+create_jwt('other-user', role='user')})
+    assert denied.status_code==404
+    r=await j.client.delete(path);assert r.status_code==200,r.text
+    assert (await j.client.delete(path)).status_code==200
+    assert (await post(j,a,'accept')).status_code==409
+    assert (await post(j,a,'arrive')).status_code==409
+    listing=(await j.client.get('/offline/activities')).json()
+    assert a['id'] not in {x['id'] for x in listing['pending']}
+    b=await j.create();await post(j,b,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':10})
+    assert (await j.client.delete('/offline/activities/'+b['id'])).status_code==409
+
+
+async def test_arrive_delete_race_has_one_valid_terminal_state(journey):
+    j=journey;a=await j.create()
+    results=await asyncio.gather(post(j,a,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':10}),j.client.delete('/offline/activities/'+a['id']))
+    row=await repo.get_activity(a['id'],j.user)
+    assert (row['status']=='cancelled' and not row['reached']) or (row['status']=='accepted' and row['reached'])
+    assert sorted(r.status_code for r in results)==[200,409]
+
+
+async def test_concurrent_fragments_cannot_repeat_or_exceed_cap(journey):
+    j=journey;a=await j.create();await post(j,a,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':10})
+    async def fragment(text):
+        return await repo.create_fragment(recommendation_id=a['id'],tier='rare',text=text)
+    results=await asyncio.gather(*(fragment('这张照片的光让我想起小时候放学的路') for _ in range(4)))
+    assert sum(bool(r) for r in results)==1
+    assert not await fragment('这张照片的光，让我想起小时候放学的路。')
+    await asyncio.gather(*(fragment(text) for text in ['我忽然想给家里那盆花浇点水','小店的字写得歪歪扭扭的很可爱','听你说起这个我也馋那碗热面了']))
+    assert await repo.count_fragments(a['id'])==3
+    await post(j,a,'archive')
+    assert not await fragment('结束之后不能再产生新的感想')
+
+
+async def test_explicit_manual_arrival_is_not_gps_verified(journey):
+    j=journey;a=await j.create()
+    await j.db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',a['id'])
+    assert (await post(j,a,'arrive')).status_code==422
+    r=await post(j,a,'arrive',{'manual_confirmation':True})
+    assert r.status_code==200 and r.json()['reached'] and not r.json()['arrival_verified']
+
+
+async def test_public_place_cache_contains_no_personal_copy(journey):
+    card={'city':'东莞','location_name':'莲湖公园','address':'桥头镇莲湖路','official_url':'https://example.com/place','summary':'个人偏好和秘密'}
+    await place_catalog.save_place(card,[{'url':'https://example.com/a.jpg','source_url':card['official_url']}])
+    cached=await place_catalog.load_place(card)
+    assert cached and 'summary' not in cached
+    assert await place_catalog.load_place({**card,'city':'西安'}) is None
+
+
+async def test_recommendation_http_card_detail_share_same_record(journey, monkeypatch, tmp_path):
+    from app.services.offline import activity_generation as gen, activity_images as media
+    from app.services.offline.providers.search import SearchResult
+    j=journey
+    ctx=dict(user_id=j.user,agent_id=j.agent,workspace_id=j.workspace,conversation_id=j.conversation,
+             user_location_city='东莞',user_location_region='广东',has_location=True,agent_name='小伴')
+    monkeypatch.setattr(repo,'resolve_user_context',AsyncMock(return_value=ctx))
+    monkeypatch.setattr(repo,'list_user_tags',AsyncMock(return_value=[]))
+    monkeypatch.setattr(repo,'memory_brief',AsyncMock(return_value=''))
+    monkeypatch.setattr(offline,'is_activity_enabled',AsyncMock(return_value=True))
+    monkeypatch.setattr(service,'geocode_address',AsyncMock(return_value=wgs84_to_gcj02(23.01,113.75)))
+    url='https://example.com/park-'+uuid4().hex
+    result=SearchResult(title='东莞莲湖公园',url=url,content='东莞桥头镇莲湖路的莲湖公园，可沿湖散步',
+                        images=[{'url':'https://image.example/park.jpg'}])
+    monkeypatch.setattr(gen,'tavily_search',AsyncMock(return_value=[result]))
+    monkeypatch.setattr(media,'tavily_place_images',AsyncMock(return_value=[]))
+    monkeypatch.setattr(media.storage,'_MEDIA_DIR',tmp_path)
+    monkeypatch.setattr(media,'page_image_evidence',AsyncMock(return_value={'https://image.example/park.jpg':'place_page_cover'}))
+    monkeypatch.setattr(media,'_download_image',AsyncMock(return_value=(b'fixture','b'*64,123)))
+    card=dict(title='莲湖公园走走',location_name='莲湖公园',address='桥头镇莲湖路',summary='沿湖慢慢走走',
+              description='沿湖散步 https://example.com/unusable',category='公园',official_url=url,image_urls=['https://untrusted.example/invented.jpg'])
+    async def model(_,prompt):
+        return json.dumps(card,ensure_ascii=False) if 'image_urls' in prompt else json.dumps({'text':'沿湖慢慢走走'},ensure_ascii=False)
+    monkeypatch.setattr(gen,'invoke_text',model)
+    r=await j.client.post('/offline/activities/recommend')
+    assert r.status_code==200 and r.json(),r.text
+    activity=r.json()
+    detail=(await j.client.get('/offline/activities/'+activity['id'])).json()
+    chat=build_activity_component_card(activity,status_label='待确定')
+    assert chat['title']==detail['title']==activity['title']
+    assert chat['body']==detail['summary']==activity['summary']
+    assert chat['payload']['image_url']==detail['image_urls'][0]
+    assert chat['payload']['activity_id']==detail['id']
+    assert 'http' not in detail['description'] and detail['official_url']==url
+    assert detail['image_urls'][0].startswith('/offline/media/place_')
+
+
+async def test_flutter_real_http_client(journey):
+    import os, shutil, socket
+    import uvicorn
+    if not os.getenv('OFFLINE_FLUTTER_E2E'):
+        pytest.skip('Set OFFLINE_FLUTTER_E2E=1 to run the sibling Flutter checkout')
+    assert shutil.which('flutter'), 'Flutter SDK required for cross-client E2E'
+    j=journey;a=await j.create();b=await j.create()
+    await j.db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',a['id'])
+    sock=socket.socket();sock.bind(('127.0.0.1',0))
+    port=sock.getsockname()[1]
+    server=uvicorn.Server(uvicorn.Config(j.app,log_level='error',lifespan='off'))
+    running=asyncio.create_task(server.serve(sockets=[sock]))
+    process = None
+    try:
+        for _ in range(100):
+            if server.started:break
+            await asyncio.sleep(.02)
+        assert server.started
+        env={**os.environ,'OFFLINE_E2E_API':f'http://127.0.0.1:{port}',
+             'OFFLINE_E2E_TOKEN':create_jwt(j.user,role='user'),
+             'OFFLINE_E2E_ACTIVITY':a['id'],'OFFLINE_E2E_DELETE':b['id']}
+        process=await asyncio.create_subprocess_exec('flutter','test','--no-pub','test/offline_api_e2e_test.dart','-r','expanded',
+            cwd=Path(__file__).parents[2]/'Companion_flutter',env=env,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
+        output,_=await asyncio.wait_for(process.communicate(),timeout=120)
+        assert process.returncode==0,output.decode()
+        assert 'All tests passed' in output.decode()
+    finally:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+        server.should_exit=True
+        await running
+
+
+@pytest.mark.parametrize('model_result', ['unavailable', '你拍下了沿路的照片，玩得很开心'])
+async def test_note_failure_or_invented_photo_uses_actual_user_quote(journey, monkeypatch, model_result):
+    j=journey; a=await j.create()
+    await post(j,a,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':10})
+    await j.db.execute_raw("INSERT INTO messages(id,conversation_id,role,content) VALUES ($1,$2,'user',$3)",uuid4().hex,j.conversation,'湖边的风有点凉')
+    result=AsyncMock(side_effect=RuntimeError('unavailable')) if model_result=='unavailable' else AsyncMock(return_value=json.dumps({'body':model_result},ensure_ascii=False))
+    monkeypatch.setattr(memory_note,'invoke_text',result)
+    assert (await post(j,a,'archive')).status_code==200
+    data=(await j.client.get('/offline/activities/'+a['id']+'/review')).json()
+    assert '湖边的风有点凉' in data['story']
+    assert '照片' not in data['story'] and '开心' not in data['story']
+
+
+async def test_explicit_completion_feedback_after_archive_is_included(journey, monkeypatch):
+    j=journey; a=await j.create()
+    await post(j,a,'arrive',{'lat':23.01,'lng':113.75,'accuracy_m':10})
+    await post(j,a,'archive')
+    await repo.create_activity_feedback(recommendation_id=a['id'],user_id=j.user,kind='completion',text='临走前喝了一杯热茶')
+    async def generate(model,prompt):
+        assert '临走前喝了一杯热茶' in prompt
+        return json.dumps({'body':'你说临走前喝了一杯热茶，这句话也收进了这次的记录。'},ensure_ascii=False)
+    monkeypatch.setattr(memory_note,'invoke_text',generate)
+    data=(await j.client.get('/offline/activities/'+a['id']+'/review')).json()
+    assert data['can_generate_memory_note'] and '热茶' in data['story']
+
+
+async def test_legacy_gallery_repair_updates_chat_cover_with_backup(journey, monkeypatch, tmp_path):
+    from scripts import repair_offline_galleries as repair
+    from types import SimpleNamespace
+    j=journey; a=await j.create()
+    await j.db.execute_raw('UPDATE offline_activity_recommendations SET image_urls=$1::jsonb WHERE id=$2',json.dumps(['https://unverified.example/wrong.jpg']),a['id'])
+    card=build_activity_component_card({**a,'image_urls':['https://unverified.example/wrong.jpg']},status_label='待出行')
+    mid=uuid4().hex
+    await j.db.execute_raw("INSERT INTO messages(id,conversation_id,role,content,metadata) VALUES ($1,$2,'assistant','',$3::jsonb)",mid,j.conversation,json.dumps({'component_card':card}))
+    # Reuse fixture connection; the production script owns its own lifecycle.
+    class Database:
+        async def connect(self): pass
+        async def disconnect(self): pass
+        def __getattr__(self,name): return getattr(j.db,name)
+    monkeypatch.setattr(repair,'db',Database())
+    monkeypatch.setattr(repair,'persist_activity_images',AsyncMock(return_value=[]))
+    backup=tmp_path/'before.json'
+    await repair.run(SimpleNamespace(apply=True,backup=str(backup)))
+    assert any(r['id']==a['id'] for r in json.loads(backup.read_text()))
+    assert (await repo.get_activity(a['id'],j.user))['image_urls']==[]
+    row=(await j.db.query_raw('SELECT metadata FROM messages WHERE id=$1',mid))[0]
+    assert row['metadata']['component_card']['payload']['image_url'] is None

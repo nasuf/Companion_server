@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import json
+import hashlib
+from dataclasses import asdict
+from app.redis_client import get_redis
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -18,6 +22,7 @@ class SearchResult:
     content: str
     score: float | None = None
     image_url: str | None = None
+    images: list[dict[str, str]] = field(default_factory=list)
 
 
 def _result_from_item(item: Any) -> SearchResult | None:
@@ -40,6 +45,9 @@ def _result_from_item(item: Any) -> SearchResult | None:
         content=content[:800],
         score=score,
         image_url=str(image_url).strip() if image_url else None,
+        images=[{"url": url, "source_url": str(item.get("url") or ""),
+                 "source_title": title, "description": str(img.get("description") or "") if isinstance(img, dict) else ""}
+                for img in (item.get("images") or []) if (url := _image_url_from_item(img))],
     )
 
 
@@ -64,6 +72,13 @@ async def tavily_search(
     }
     if include_domains:
         payload["include_domains"] = include_domains
+    cache_key = 'offline:search:v2:' + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    try:
+        cached = await (await get_redis()).get(cache_key)
+        if cached:
+            return [SearchResult(**item) for item in json.loads(cached)]
+    except Exception:
+        pass
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -90,6 +105,11 @@ async def tavily_search(
         result = _result_from_item(item)
         if result and result.url not in {r.url for r in results}:
             results.append(result)
+    if results:
+        try:
+            await (await get_redis()).set(cache_key, json.dumps([asdict(r) for r in results]), ex=3600)
+        except Exception:
+            pass
     return results
 
 
@@ -153,3 +173,8 @@ async def tavily_image_search(
         if image_url not in deduped:
             deduped.append(image_url)
     return deduped[:max_results]
+
+
+async def tavily_place_images(query: str) -> list[SearchResult]:
+    """Return page-bound candidates; query-global images have no place evidence."""
+    return await tavily_search(query, max_results=8)

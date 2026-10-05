@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from app.services.offline.content import novel_fragment as _novel_fragment
 import json
 import logging
 import math
@@ -306,41 +307,25 @@ async def _recognize_locked(
         tier = roll_tier()
         lead_in = pick_lead_in(tier)
         prewritten = await repo.get_prewritten_fragment(matched_item["id"], tier)
-        text = (
-            (
-                await _verbalize(
-                    activity,
-                    ctx,
-                    tier,
-                    prewritten,
-                    photo_description,
-                )
+        previous = [str(f.get('text') or '') for f in await repo.list_fragments(recommendation_id)]
+        text = await _verbalize(activity, ctx, tier, prewritten, photo_description, previous)
+        text = await _guard_visible_message(text, items, safe_hint="", fallback="")
+        if not _novel_fragment(text, previous):
+            text = await _verbalize(activity, ctx, tier, prewritten, photo_description, previous + [text])
+            text = await _guard_visible_message(text, items, safe_hint="", fallback="")
+        if _novel_fragment(text, previous):
+            fragment = await repo.create_fragment(
+                recommendation_id=recommendation_id, tier=tier, text=text,
+                lead_in=lead_in, condition_id=matched_item["id"],
+                snapshot_media_id=media_id, source_message_id=source_message_id,
+                content_fingerprint=fingerprint,
             )
-            or prewritten
-            or _FALLBACK_FRAGMENT.get(tier, _FALLBACK_FRAGMENT["rare"])
-        )
-        text = await _guard_visible_message(
-            text,
-            items,
-            safe_hint="",
-            fallback=_FALLBACK_FRAGMENT.get(tier, _FALLBACK_FRAGMENT["rare"]),
-        )
-
-        await repo.mark_media_fragment_cover(media_id, fingerprint)
-        try:
-            await repo.mark_message_recognized(source_message_id, tier)
-        except Exception as exc:  # noqa: BLE001 - best-effort persistence
-            logger.warning("[offline-recognition] failed to mark source message: %s", exc)
-        fragment = await repo.create_fragment(
-            recommendation_id=recommendation_id,
-            tier=tier,
-            text=text,
-            lead_in=lead_in,
-            condition_id=matched_item["id"],
-            snapshot_media_id=media_id,
-            source_message_id=source_message_id,
-            content_fingerprint=fingerprint,
-        )
+            if fragment:
+                await repo.mark_media_fragment_cover(media_id, fingerprint)
+                try:
+                    await repo.mark_message_recognized(source_message_id, tier)
+                except Exception:
+                    logger.warning('[offline-recognition] source message mark failed')
 
     conversation_id = (ctx or {}).get("conversation_id") or activity.get(
         "conversation_id"
@@ -568,6 +553,7 @@ async def _verbalize(
     tier: str,
     prewritten: str | None,
     photo_description: str,
+    previous: list[str] | None = None,
 ) -> str:
     if not prewritten:
         return ""
@@ -580,7 +566,7 @@ async def _verbalize(
             tier_tone=_TIER_TONE.get(tier, ""),
             prewritten_text=prewritten,
             photo_description=photo_description,
-            recent_dialogue=recent or "（无）",
+            recent_dialogue=(recent or "（无）") + "\n此前已经说过的感想（不可复述；没有新内容就输出空 text）：\n" + "\n".join(previous or []),
         )
         raw = await invoke_text(get_chat_model(), prompt)
         return _parse_text_field(raw)
@@ -759,6 +745,8 @@ async def _guard_visible_message(
     fallback: str,
 ) -> str:
     candidate = str(draft or "").strip()
+    if not candidate and not fallback:
+        return ""
     violates = (
         not candidate
         or contains_hidden_target(candidate, conditions)
@@ -788,7 +776,7 @@ async def _guard_visible_message(
             return rewritten
     except Exception as exc:  # noqa: BLE001 - safe fallback is mandatory
         logger.warning("[offline-recognition] safe rewrite failed: %s", exc)
-    return sanitize_visible_text(fallback, conditions, fallback="我看到啦，这张挺有感觉的。")
+    return sanitize_visible_text(fallback, conditions, fallback="我看到啦，这张挺有感觉的。" if fallback else "")
 
 
 async def _wait_for_main_reply(

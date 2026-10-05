@@ -1750,6 +1750,8 @@ model OfflineActivityRecommendation {
   archivedAt     DateTime?                 @map("archived_at")
   autoArchiveAt  DateTime?                 @map("auto_archive_at")
   // 记忆手札旅途小记（生成后缓存）
+  travelNoteVersion Int @default(0) @map("travel_note_version")
+  arrivalVerified Boolean @default(false) @map("arrival_verified")
   travelNote     String?                   @map("travel_note")
   // 识图未命中计数 / 已发方向暗示计数（spec 未命中方向暗示递增用）
   missCount      Int                       @default(0) @map("miss_count")
@@ -2109,4 +2111,15 @@ model ModelRegistry {
   @@index([provider, enabled])
   @@index([modelKind, enabled])
   @@map("model_registry")
+}
+
+// Public place facts and source-bound images only; no user experience or copy.
+model OfflinePlaceCatalog {
+  id        String   @id
+  data      Json
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@index([expiresAt], map: "offline_place_catalog_expiry_idx")
+  @@map("offline_place_catalog")
 }

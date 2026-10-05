@@ -1,158 +1,152 @@
+"""Source-bound place galleries with bounded refill and shared public caching."""
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import io
+import ipaddress
 import logging
-from urllib.parse import urlparse
+import socket
+from urllib.parse import urlsplit
 
 import httpx
+from PIL import Image, ImageOps
 
-from app.services.offline import activity_media_storage
-from app.services.offline.providers.search import SearchResult, tavily_image_search
+from app.services.offline import activity_media_storage as storage, place_catalog
+from app.services.offline.content import canonical_url, place_source_matches
+from app.services.offline.image_evidence import page_image_evidence
+from app.services.offline.providers.search import SearchResult, tavily_place_images
 
 logger = logging.getLogger(__name__)
-
-_DOWNLOAD_TIMEOUT_S = 8.0
-_BAD_IMAGE_URL_RE = (
-    "map",
-    "maps",
-    "staticmap",
-    "location",
-    "gps",
-    "route",
-    "marker",
-    "icon",
-    "logo",
-    "vector",
-    "sprite",
-)
-_BAD_IMAGE_HOST_RE = (
-    "map.qq.com",
-    "maps.googleapis.com",
-    "amap.com",
-    "openstreetmap",
-    "help.apple.com",
-    "telegramy.com",
-)
-
-
-def _is_generic_location(value: str) -> bool:
-    text = value.strip().lower()
-    return text in {
-        "当前位置附近",
-        "当前位置",
-        "附近",
-        "本地",
-        "当前城市",
-        "nearby",
-        "current location",
-    }
+_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _image_queries(card: dict, city: str) -> list[str]:
-    location = str(card.get("location_name") or card.get("address") or "").strip()
-    title = str(card.get("title") or "").strip()
-    category = str(card.get("category") or "").strip()
-    queries: list[str] = []
-    if location and not _is_generic_location(location):
-        queries.append(f"{city} {location} 现场 图片 官方")
-        queries.append(f"{city} {location} 实景图")
-    if title:
-        queries.append(f"{city} {title} 图片")
-    fallback = " ".join(part for part in [city, category or "活动", "现场 图片"] if part)
-    if fallback:
-        queries.append(fallback)
-    deduped: list[str] = []
-    for query in queries:
-        if query and query not in deduped:
-            deduped.append(query)
-    return deduped[:4]
+    name = str(card.get('location_name') or '').strip()
+    address = str(card.get('address') or '').strip()
+    return [f'{city} {name} {address} 实景照片', f'{city} {name} 官方 图片'] if name else []
 
 
 def _is_bad_image_url(url: str) -> bool:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    path = f"{parsed.path}?{parsed.query}".lower()
-    if any(bad in host for bad in _BAD_IMAGE_HOST_RE):
-        return True
-    return any(bad in path for bad in _BAD_IMAGE_URL_RE)
+    p = urlsplit(url)
+    return not canonical_url(url) or any(word in p.path.lower() for word in
+        ('staticmap', '/logo', '/icon', '/sprite', 'placeholder', 'avatar'))
 
 
-def _remote_image_candidates(
-    card: dict,
-    search_results: list[SearchResult],
-) -> list[str]:
-    candidates: list[str] = []
-    for value in card.get("image_urls") or []:
-        text = str(value).strip()
-        if text.startswith(("http://", "https://")):
-            candidates.append(text)
-    for result in search_results:
-        if result.image_url:
-            candidates.append(result.image_url)
-    deduped: list[str] = []
-    for image_url in candidates:
-        if image_url not in deduped:
-            deduped.append(image_url)
-    return deduped
-
-
-async def persist_activity_images(
-    *,
-    user_id: str,
-    card: dict,
-    city: str,
-    search_results: list[SearchResult],
-    limit: int = 3,
-) -> list[str]:
-    candidates: list[str] = []
-    for query in _image_queries(card, city):
-        candidates.extend(await tavily_image_search(query, max_results=6))
-        if len(candidates) >= limit * 2:
-            break
-    candidates.extend(_remote_image_candidates(card, search_results))
-
-    persisted: list[str] = []
-    seen: set[str] = set()
-    for image_url in candidates:
-        if image_url in seen:
+def _source_images(card: dict, sources: list[SearchResult]) -> list[dict]:
+    candidates = []
+    for source in sources:
+        if not place_source_matches(card, source.title, source.content):
             continue
-        if _is_bad_image_url(image_url):
-            logger.debug("[offline] skipped unsuitable activity image url=%s", image_url)
-            continue
-        seen.add(image_url)
-        local_url = await _download_and_store_image(user_id=user_id, url=image_url)
-        if local_url:
-            persisted.append(local_url)
-        if len(persisted) >= limit:
-            break
-    return persisted
+        images = source.images or ([{'url': source.image_url}] if source.image_url else [])
+        for image in images:
+            url = image.get('url')
+            if isinstance(url, str) and not _is_bad_image_url(url):
+                candidates.append({**image, 'url': url, 'source_url': source.url,
+                                   'source_title': source.title, 'evidence': 'place_page'})
+    return candidates
 
 
-async def _download_and_store_image(*, user_id: str, url: str) -> str | None:
+async def persist_activity_images(*, user_id: str, card: dict, city: str,
+                                  search_results: list[SearchResult], limit: int = 3) -> list[str]:
+    # Personal media and LLM-proposed URLs never enter this public cache.
+    card = card if card.get('city') else {**card, 'city': city}
+    cached = await place_catalog.load_place(card)
+    accepted = []
+    for item in (cached or {}).get('images', []):
+        key = str(item.get('storage_key') or '')
+        if key.startswith('place_') and storage.storage_path(key).is_file():
+            accepted.append(item)
+    accepted = accepted[:limit]
+    seen = {item['url'] for item in accepted}
+    hashes = {item.get('sha256') for item in accepted}
+    perceptual = [int(item['dhash']) for item in accepted if item.get('dhash') is not None]
+    async with httpx.AsyncClient(timeout=8, trust_env=False, follow_redirects=False) as client:
+        page_cache: dict[str, dict[str, str]] = {}
+        async def collect(sources: list[SearchResult]) -> None:
+            # Bound downloads per query as well as total query count.
+            for candidate in _source_images(card, sources)[:12]:
+                if len(accepted) >= limit:
+                    break
+                if candidate['url'] in seen:
+                    continue
+                seen.add(candidate['url'])
+                page = candidate['source_url']
+                if page not in page_cache:
+                    page_cache[page] = await page_image_evidence(client, page, card['location_name'], _public_url)
+                evidence = page_cache[page].get(canonical_url(candidate['url']))
+                if not evidence:
+                    continue
+                candidate['evidence'] = evidence
+                image = await _download_image(client, candidate['url'])
+                if image is None:
+                    continue
+                blob, digest, dhash = image
+                if digest in hashes or any((dhash ^ old).bit_count() <= 4 for old in perceptual):
+                    continue
+                key = f'place_{digest}.jpg'
+                storage._MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+                # Same content => same bytes across workers; atomic replace prevents partial reads.
+                import os, tempfile
+                with tempfile.NamedTemporaryFile(dir=storage._MEDIA_DIR, delete=False) as tmp:
+                    tmp.write(blob)
+                    tmp_name = tmp.name
+                os.replace(tmp_name, storage.storage_path(key))
+                accepted.append({**candidate, 'storage_key': key, 'sha256': digest,
+                                 'dhash': str(dhash), 'local_url': storage.media_url(key)})
+                hashes.add(digest)
+                perceptual.append(dhash)
+        await collect(search_results)
+        for query in _image_queries(card, city):
+            if len(accepted) >= limit:
+                break
+            await collect(await tavily_place_images(query))
+    if accepted:
+        await place_catalog.save_place(card, accepted)
+    card['image_provenance'] = accepted
+    return [item['local_url'] for item in accepted]
+
+
+async def _public_url(url: str) -> bool:
     try:
-        async with httpx.AsyncClient(
-            timeout=_DOWNLOAD_TIMEOUT_S,
-            follow_redirects=True,
-            trust_env=False,
-        ) as client:
-            response = await client.get(url, headers={"accept": "image/*"})
-            response.raise_for_status()
-    except Exception as exc:
-        logger.debug("[offline] activity image download failed url=%s err=%s", url, exc)
-        return None
+        p = urlsplit(url)
+        if p.scheme not in {'https', 'http'} or not p.hostname or p.username or p.port not in {None, 80, 443}:
+            return False
+        infos = await asyncio.get_running_loop().getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)
+        return bool(infos) and all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+    except (ValueError, OSError):
+        return False
 
-    mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
+
+async def _download_image(client: httpx.AsyncClient, url: str) -> tuple[bytes, str, int] | None:
     try:
-        mime = activity_media_storage.normalize_image_mime(mime)
+        for _ in range(4):
+            if not await _public_url(url):
+                return None
+            async with client.stream('GET', url, headers={'accept': 'image/*'}) as response:
+                if response.is_redirect:
+                    url = str(response.url.join(response.headers.get('location', '')))
+                    continue
+                response.raise_for_status()
+                if not response.headers.get('content-type', '').startswith('image/'):
+                    return None
+                blob = bytearray()
+                async for chunk in response.aiter_bytes():
+                    blob.extend(chunk)
+                    if len(blob) > _MAX_BYTES:
+                        return None
+            with Image.open(io.BytesIO(blob)) as original:
+                if min(original.size) < 240 or original.width * original.height > 20_000_000:
+                    return None
+                picture = ImageOps.exif_transpose(original).convert('RGB')
+                small = picture.resize((9, 8)).convert('L')
+                thumb = [small.getpixel((x,y)) for y in range(8) for x in range(9)]
+                dhash = sum((thumb[y*9+x] > thumb[y*9+x+1]) << (y*8+x) for y in range(8) for x in range(8))
+                picture.thumbnail((1600, 1600))
+                target = io.BytesIO()
+                picture.save(target, format='JPEG', quality=85)
+                output = target.getvalue()
+                return output, hashlib.sha256(output).hexdigest(), dhash
     except Exception:
-        return None
-    blob = response.content
-    try:
-        storage_key = activity_media_storage.save_image_blob(
-            user_id=user_id,
-            blob=blob,
-            mime=mime,
-        )
-    except Exception as exc:
-        logger.debug("[offline] activity image store failed url=%s err=%s", url, exc)
-        return None
-    return activity_media_storage.media_url(storage_key)
+        logger.debug('[offline-images] rejected or unavailable candidate')
+    return None

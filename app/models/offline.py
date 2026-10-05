@@ -41,6 +41,8 @@ class OfflineActivityItem(BaseModel):
     search_sources: list[dict[str, Any]] = Field(default_factory=list)
     # 打卡闭环状态（拍摄条件明文永不下发前端）
     reached: bool = False
+    arrival_verified: bool = False
+    arrival_verification_available: bool = False
     arrival_confirmed_at: str | None = None
     prophecy_text: str | None = None
     auto_archive_at: str | None = None
@@ -79,6 +81,7 @@ class OfflineActivityReviewResponse(BaseModel):
     gallery: list[str] = Field(default_factory=list)
     fragments: list[OfflineActivityFragmentItem] = Field(default_factory=list)
     event_tags: list[str] = Field(default_factory=list)
+    can_generate_memory_note: bool = False
     has_memory_note: bool = False
     travel_note: str | None = None
     # 「查看原始聊天」定位用：该活动「我到了」到达卡消息 id（可空）。
@@ -125,14 +128,11 @@ class OfflineActivityCompleteRequest(BaseModel):
 
 
 class OfflineActivityArriveRequest(BaseModel):
-    """确认到达时上报的当前 GPS（可选）。
-
-    有坐标且该地点已地理编码时才做 ≤200m 直线校验；否则荣誉制放行（允许用户直接
-    点击到达）。地理编码 Key 未配置时地点无坐标，等同放行。
-    """
-
-    lat: float | None = Field(default=None, ge=-90, le=90)
-    lng: float | None = Field(default=None, ge=-180, le=180)
+    """System WGS84 GPS. Manual confirmation is allowed only without destination coordinates."""
+    lat: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    lng: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    accuracy_m: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    manual_confirmation: bool = False
 
 
 class OfflineActivityImageUpload(BaseModel):

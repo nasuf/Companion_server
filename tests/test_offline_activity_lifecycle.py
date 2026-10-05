@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.services.offline import activity_service
+from app.services.offline.geocode import wgs84_to_gcj02
 
 # 上海人广附近；~200m 内的到达点与 ~8km 外的远点。
 _PLACE_LAT, _PLACE_LNG = 31.2304, 121.4737
@@ -18,7 +19,7 @@ def _row(**over):
         "id": "a1", "user_id": "u1", "workspace_id": "w1", "agent_id": "ag1",
         "conversation_id": "c1", "status": "accepted", "title": "植物园",
         "summary": "", "description": "", "reached": False,
-        "place_lat": _PLACE_LAT, "place_lng": _PLACE_LNG,
+        "place_lat": wgs84_to_gcj02(_PLACE_LAT, _PLACE_LNG)[0], "place_lng": wgs84_to_gcj02(_PLACE_LAT, _PLACE_LNG)[1],
         "created_at": "2026-09-19T00:00:00+00:00",
         "updated_at": "2026-09-19T00:00:00+00:00",
     }
@@ -53,7 +54,7 @@ async def test_arrive_success_within_radius(monkeypatch):
     mark = AsyncMock(return_value=_row(reached=True))
     monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
 
-    result = await activity_service.arrive_activity("u1", "a1", lat=_NEAR_LAT, lng=_NEAR_LNG)
+    result = await activity_service.arrive_activity("u1", "a1", lat=_NEAR_LAT, lng=_NEAR_LNG, accuracy_m=10)
 
     assert result.reached is True
     mark.assert_awaited_once()
@@ -90,25 +91,22 @@ async def test_arrive_rejected_too_far(monkeypatch):
     monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
 
     with pytest.raises(HTTPException) as exc:
-        await activity_service.arrive_activity("u1", "a1", lat=_FAR_LAT, lng=_FAR_LNG)
+        await activity_service.arrive_activity("u1", "a1", lat=_FAR_LAT, lng=_FAR_LNG, accuracy_m=10)
 
     assert exc.value.status_code == 422
     assert exc.value.detail["reason"] == "too_far"
     mark.assert_not_awaited()  # 失败不改状态（spec §4.5）
 
 
-async def test_arrive_honor_system_without_coords(monkeypatch):
-    # 无客户端坐标：即便地点有经纬度也放行（允许用户直接点击到达）。
+async def test_arrive_requires_device_coords_when_place_is_known(monkeypatch):
     _patch_common(monkeypatch)
     monkeypatch.setattr(activity_service.repo, "get_activity", AsyncMock(return_value=_row()))
-    mark = AsyncMock(return_value=_row(reached=True))
+    mark = AsyncMock()
     monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
-
-    result = await activity_service.arrive_activity("u1", "a1")  # 不传坐标
-
-    assert result.reached is True
-    mark.assert_awaited_once()
-    assert mark.await_args.kwargs["lat"] is None
+    with pytest.raises(HTTPException) as exc:
+        await activity_service.arrive_activity("u1", "a1")
+    assert exc.value.detail['reason'] == 'location_required'
+    mark.assert_not_awaited()
 
 
 async def test_arrive_idempotent_when_reached(monkeypatch):
@@ -119,7 +117,7 @@ async def test_arrive_idempotent_when_reached(monkeypatch):
     mark = AsyncMock()
     monkeypatch.setattr(activity_service.repo, "mark_arrived", mark)
 
-    result = await activity_service.arrive_activity("u1", "a1", lat=_NEAR_LAT, lng=_NEAR_LNG)
+    result = await activity_service.arrive_activity("u1", "a1", lat=_NEAR_LAT, lng=_NEAR_LNG, accuracy_m=10)
 
     assert result.reached is True
     mark.assert_not_awaited()
@@ -131,7 +129,7 @@ async def test_arrive_rejects_non_accepted(monkeypatch):
         activity_service.repo, "get_activity", AsyncMock(return_value=_row(status="completed"))
     )
     with pytest.raises(HTTPException) as exc:
-        await activity_service.arrive_activity("u1", "a1", lat=_NEAR_LAT, lng=_NEAR_LNG)
+        await activity_service.arrive_activity("u1", "a1", lat=_NEAR_LAT, lng=_NEAR_LNG, accuracy_m=10)
     assert exc.value.status_code == 409
 
 
