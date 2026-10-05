@@ -15,6 +15,7 @@ from app.api.admin.runtime_jobs import router
 from app.services.auth import create_jwt
 from app.services.runtime import job_queue as q
 from app.services import life_story
+from app.services.memory import generation_lock
 from tests.test_runtime_job_queue import redis, seed, snapshot  # One shared isolation policy.
 
 
@@ -34,6 +35,89 @@ async def revoke(redis, claim):
     await redis.delete(q._job_lock_key(jid))
     await redis.hset(q._job_key(jid), "lease_expires_at", "0")
     await redis.zadd(q._RUNNING_KEY, {jid: 0})
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+async def test_initializer_recovery_waits_for_existing_memory_lock(redis, monkeypatch, legacy):
+    ttl = generation_lock.MEMORY_GENERATION_LOCK_TTL_S
+    memory_key = q._READY_KEY.removesuffix('runtime:jobs:ready') + 'synthetic-memory-lock'
+    monkeypatch.setattr(generation_lock, 'get_redis', AsyncMock(return_value=redis))
+    monkeypatch.setattr(generation_lock, 'lock_key', lambda _: memory_key)
+    calls = []
+    async def handler(payload):
+        async with generation_lock.memory_generation_lock(payload['agent_id']):
+            calls.append(payload)
+    q.register_job_handler('agent_initialization', handler, recovery_delay_s=ttl)
+    jid = await q.enqueue_runtime_job('agent_initialization', {'agent_id': 'synthetic-agent'})
+    assert (await q.inspect_runtime_job(jid))['recovery_delay_s'] == ttl
+    claim = await q._claim_job(jid)
+    if legacy:
+        await redis.hdel(q._job_key(jid), 'recovery_delay_s', 'queue_version', 'lease_token', 'lease_expires_at')
+        await redis.hset(q._job_key(jid), 'updated_at', '1')
+    else:
+        # Stored policy remains protective even if a recovering process has no registration.
+        q._RECOVERY_DELAYS.clear()
+    async with generation_lock.memory_generation_lock('synthetic-agent'):
+        await revoke(redis, claim)
+        if legacy:
+            await redis.hdel(q._job_key(jid), 'lease_expires_at')
+        await q._recover_stale_running_jobs(1)
+        row = await redis.hgetall(q._job_key(jid))
+        due = float(row['not_before'])
+        assert ttl <= due - float(row['last_recovered_at']) < ttl + 1
+        assert row['status'] == 'queued' and 'lease_token' not in row
+        assert await redis.zscore(q._DELAYED_KEY, jid) == due
+        assert await redis.llen(q._READY_KEY) == 0
+        assert 0 < await redis.ttl(memory_key) <= ttl
+        # Even a stale ready entry cannot bypass the recorded lock grace.
+        await redis.lpush(q._READY_KEY, jid)
+        await q.process_runtime_jobs(1)
+        assert calls == []
+        assert (await q.inspect_runtime_job(jid))['attempts'] == 1
+    # Advance only this synthetic record, rather than waiting 30 minutes.
+    await redis.hset(q._job_key(jid), 'not_before', '1')
+    await redis.zadd(q._DELAYED_KEY, {jid: 1})
+    await q.process_runtime_jobs(1)
+    assert calls == [{'agent_id': 'synthetic-agent'}]
+    assert (await q.inspect_runtime_job(jid))['status'] == 'succeeded'
+
+
+async def test_manual_retry_cannot_bypass_exhausted_initializer_recovery_grace(redis):
+    handler = AsyncMock()
+    q.register_job_handler('agent_initialization', handler, recovery_delay_s=1800)
+    jid = await q.enqueue_runtime_job('agent_initialization', {}, max_attempts=1)
+    claim = await q._claim_job(jid)
+    await revoke(redis, claim)
+    await q._recover_stale_running_jobs(1)
+    assert (await q.inspect_runtime_job(jid))['status'] == 'dead_letter'
+    due = await redis.hget(q._job_key(jid), 'not_before')
+    await q.retry_runtime_job(jid)
+    assert await redis.hget(q._job_key(jid), 'not_before') == due
+    assert await redis.zscore(q._DELAYED_KEY, jid) == float(due)
+    await q.process_runtime_jobs(1)
+    handler.assert_not_awaited()
+    assert (await q.inspect_runtime_job(jid))['attempts'] == 1
+
+
+async def test_regular_crashed_job_recovers_without_initialization_grace(redis):
+    handler = AsyncMock()
+    q.register_job_handler('test.job', handler)
+    jid = await q.enqueue_runtime_job('test.job', {})
+    claim = await q._claim_job(jid)
+    await revoke(redis, claim)
+    await q._recover_stale_running_jobs(1)
+    assert await redis.lrange(q._READY_KEY, 0, -1) == [jid]
+    assert await redis.zscore(q._DELAYED_KEY, jid) is None
+    await q.process_runtime_jobs(1)
+    handler.assert_awaited_once_with({})
+
+
+@pytest.mark.parametrize('delay', [-1, 604800, 'invalid'])
+async def test_invalid_recovery_policy_does_not_register_handler(redis, delay):
+    with pytest.raises(ValueError):
+        q.register_job_handler('test.job', AsyncMock(), recovery_delay_s=delay)
+    assert 'test.job' not in q._HANDLERS
+    assert 'test.job' not in q._RECOVERY_DELAYS
 
 
 @pytest.mark.parametrize("delay", [0, 60])

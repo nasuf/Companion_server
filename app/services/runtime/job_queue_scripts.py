@@ -38,7 +38,8 @@ local due = string.format('%.6f', now + tonumber(ARGV[7]))
 redis.call('HSET', KEYS[1], 'id', ARGV[3], 'type', ARGV[4],
     'payload', ARGV[5], 'status', 'queued', 'attempts', '0',
     'max_attempts', ARGV[6], 'created_at', stamp, 'updated_at', stamp,
-    'last_error', '', 'queue_version', '2', 'not_before', due)
+    'last_error', '', 'queue_version', '2', 'not_before', due,
+    'recovery_delay_s', ARGV[9])
 redis.call('EXPIRE', KEYS[1], ARGV[8])
 if tonumber(ARGV[7]) > 0 then
     redis.call('ZADD', KEYS[4], due, ARGV[3])
@@ -185,6 +186,12 @@ local attempts = tonumber(redis.call('HGET', KEYS[1], 'attempts') or '0')
 local maximum = tonumber(redis.call('HGET', KEYS[1], 'max_attempts') or '3')
 local recovered = tonumber(redis.call('HGET', KEYS[1], 'recoveries') or '0') or 0
 local exhausted = not attempts or not maximum or maximum < 1 or attempts >= maximum
+local policies = cjson.decode(ARGV[3] or '{}')
+local kind = redis.call('HGET', KEYS[1], 'type') or ''
+local delay = math.max(tonumber(redis.call('HGET', KEYS[1], 'recovery_delay_s') or '0') or 0,
+    tonumber(policies[kind] or 0) or 0)
+if delay < 0 or delay >= 604800 then return 0 end
+local due = string.format('%.6f', now + delay)
 redis.call('HDEL', KEYS[1], 'lease_token', 'lease_expires_at')
 redis.call('ZREM', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[4], ARGV[1])
@@ -192,11 +199,12 @@ redis.call('LREM', KEYS[3], 0, ARGV[1])
 redis.call('HSET', KEYS[1], 'status', exhausted and 'dead_letter' or 'queued',
     'updated_at', stamp, 'last_error', 'Execution interrupted: expired runtime lease',
     'recoveries', math.max(0, recovered) + 1, 'last_recovered_at', stamp,
-    'not_before', stamp)
+    'not_before', due)
 if exhausted then
     redis.call('LPUSH', KEYS[6], ARGV[1])
 else
-    redis.call('LPUSH', KEYS[3], ARGV[1])
+    if delay > 0 then redis.call('ZADD', KEYS[4], due, ARGV[1])
+    else redis.call('LPUSH', KEYS[3], ARGV[1]) end
 end
 return 1
 """

@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 # 完整 L1 生成: profile 直转 + 5 并发 LLM 调用 + retry + 批量 embedding
 # + 写库, 单次可能 5-15 min。TTL 30 min 保留足够安全边际。
-_DEFAULT_TTL = 1800
+MEMORY_GENERATION_LOCK_TTL_S = 1800
+_DEFAULT_TTL = MEMORY_GENERATION_LOCK_TTL_S
 
 # Atomic compare-and-delete: only delete if the stored value still matches our
 # token. Prevents deleting another worker's lock when ours has expired.

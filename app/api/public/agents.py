@@ -32,6 +32,7 @@ from app.services.life_story import (
     get_progress,
     set_progress,
 )
+from app.services.memory.generation_lock import MEMORY_GENERATION_LOCK_TTL_S
 from app.services.runtime.data_reset import hard_delete_agent_data
 from app.services.proactive.sender import dispatch_first_greeting_for_agent
 from app.services.schedule_domain.schedule import (
@@ -265,7 +266,10 @@ async def _run_agent_initialization_inner(
 
 
 # The audited legacy caller always enqueued initialization without delay_s.
-register_job_handler("agent_initialization", _run_agent_initialization_job, legacy_no_delay=True)
+register_job_handler(
+    "agent_initialization", _run_agent_initialization_job, legacy_no_delay=True,
+    recovery_delay_s=MEMORY_GENERATION_LOCK_TTL_S,
+)
 
 
 async def _enqueue_agent_initialization(

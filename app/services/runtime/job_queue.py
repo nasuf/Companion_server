@@ -55,6 +55,7 @@ _RECONCILE_PENDING: deque[str] = deque()
 _RECOVERY_OFFSET = 0
 _HANDLERS: dict[str, JobHandler] = {}
 _LEGACY_NO_DELAY_HANDLERS: set[str] = set()
+_RECOVERY_DELAYS: dict[str, int] = {}
 
 
 _MANUAL_JOB_LUA = """
@@ -80,9 +81,15 @@ if not retry and state ~= 'queued' and state ~= 'dead_letter'
    and state ~= 'failed' and state ~= 'resolved' then
     return {'conflict', state}
 end
+local clock = redis.call('TIME')
+local now = tonumber(clock[1]) + tonumber(clock[2]) / 1000000
+local next_at = now
 if retry then
+    next_at = math.max(now,
+        tonumber(redis.call('HGET', KEYS[1], 'not_before') or '0') or 0)
+    local due = string.format('%.6f', next_at)
     redis.call('HSET', KEYS[1], 'status', 'queued',
-               'updated_at', ARGV[3], 'last_error', '', 'not_before', ARGV[3])
+               'updated_at', ARGV[3], 'last_error', '', 'not_before', due)
 elseif state ~= 'resolved' then
     redis.call('HSET', KEYS[1], 'status', 'resolved', 'updated_at', ARGV[3])
 end
@@ -92,7 +99,12 @@ redis.call('ZREM', KEYS[3], ARGV[1])
 redis.call('LREM', KEYS[4], 0, ARGV[1])
 redis.call('LREM', KEYS[5], 0, ARGV[1])
 redis.call('LREM', KEYS[6], 0, ARGV[1])
-if retry then redis.call('LPUSH', KEYS[6], ARGV[1]) end
+if retry then
+    local due = redis.call('HGET', KEYS[1], 'not_before')
+    if next_at > now then
+        redis.call('ZADD', KEYS[3], due, ARGV[1])
+    else redis.call('LPUSH', KEYS[6], ARGV[1]) end
+end
 return {'ok', redis.call('HGETALL', KEYS[1])}
 """
 
@@ -128,8 +140,15 @@ def _flat_hash(values: list[Any]) -> dict[str, str]:
     return _decode_hash(dict(zip(values[::2], values[1::2], strict=True)))
 
 
-def register_job_handler(job_type: str, handler: JobHandler, *, legacy_no_delay: bool = False) -> None:
+def register_job_handler(
+    job_type: str, handler: JobHandler, *, legacy_no_delay: bool = False,
+    recovery_delay_s: int = 0,
+) -> None:
+    delay = int(recovery_delay_s)
+    if not 0 <= delay < _DEFAULT_JOB_TTL_S:
+        raise ValueError('Recovery delay must fit within task retention')
     _HANDLERS[job_type] = handler
+    _RECOVERY_DELAYS[job_type] = delay
     if legacy_no_delay:
         _LEGACY_NO_DELAY_HANDLERS.add(job_type)
     else:
@@ -188,7 +207,7 @@ async def enqueue_runtime_job(
             result = await redis.eval(
                 _ENQUEUE_JOB_LUA, 4, _job_key(job_id), idem_key, _READY_KEY, _DELAYED_KEY,
                 "1" if idempotency_key else "0", existing or "", job_id, job_type,
-                content, maximum, delay, _DEFAULT_JOB_TTL_S,
+                content, maximum, delay, _DEFAULT_JOB_TTL_S, _RECOVERY_DELAYS.get(job_type, 0),
             )
         except RedisError as error:
             # Even a connection error may follow a successful server commit.
@@ -250,6 +269,7 @@ async def _recover_stale_running_jobs(stale_after_s: int) -> None:
         recovered = await redis.eval(
             _RECOVER_JOB_LUA, 6, _job_key(job_id), _RUNNING_KEY, _READY_KEY,
             _DELAYED_KEY, _job_lock_key(job_id), _DLQ_KEY, job_id, cutoff,
+            json.dumps(_RECOVERY_DELAYS),
         )
         if recovered:
             logger.warning("Recovered interrupted runtime job", extra={
@@ -616,6 +636,7 @@ def _serialize_job(job: dict[str, str]) -> dict[str, Any]:
         "recoveries": _safe_int(job.get("recoveries")),
         "last_recovered_at": _ts_iso(job.get("last_recovered_at")),
         "not_before": _ts_iso(job.get("not_before")),
+        "recovery_delay_s": _safe_int(job.get("recovery_delay_s")),
     }
 
 

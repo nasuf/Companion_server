@@ -33,6 +33,7 @@ async def redis(monkeypatch):
         monkeypatch.setattr(q, field, prefix + getattr(q, field))
     monkeypatch.setattr(q, "_HANDLERS", {})
     monkeypatch.setattr(q, "_LEGACY_NO_DELAY_HANDLERS", set())
+    monkeypatch.setattr(q, "_RECOVERY_DELAYS", {})
     monkeypatch.setattr(q, "_RECONCILE_CURSOR", 0)
     monkeypatch.setattr(q, "_RECONCILE_PENDING", deque())
     monkeypatch.setattr(q, "_RECOVERY_OFFSET", 0)

@@ -30,6 +30,16 @@ indexes hold lease deadlines; legacy records without a token retain the original
 Manual retry/resolve retains N04's state conflicts and cumulative attempt count;
 manual retry permits a new attempt even when the previous automatic budget ended.
 
+Initialization also holds a separate memory-generation lock for 30 minutes.
+Its registration therefore adds a 30-minute recovery grace after the runtime
+lease expires, allowing that domain lock to expire before another attempt.
+The policy is persisted in new records; registration supplies it for legacy
+records. The greater of the stored and registered policy wins. Recovery uses
+the delayed index and records `not_before`; manual retry cannot bypass it.
+Other handlers default to immediate recovery after their runtime lease expires.
+This grace handles abandoned locks, not partial business effects: initialization
+still needs the R03 work on step idempotency and internal error propagation.
+
 ## Old and interrupted data
 
 Each scheduler tick scans one bounded page, retains oversized SCAN pages for later
@@ -67,7 +77,7 @@ best-effort inventory during concurrent changes, not a transaction over the queu
 Diagnostics report missing indexes, unverified legacy delays and missing bound
 records without exposing payloads, idempotency key names or ownership tokens.
 Job detail also returns optional queue version, lease state/deadline, heartbeat,
-recovery count and recorded due time. Redis outages return 503. The Web workspace
+recovery count, recovery grace and recorded due time. Redis outages return 503. The Web workspace
 keeps its existing UI; these added fields do not create a new UI panel.
 Counts are raw index sizes: expired records can leave history entries, so counts
 are not guaranteed to equal the number of retained detail records.
