@@ -13,12 +13,19 @@ from urllib.parse import urlparse
 
 from app.services.llm.models import get_chat_model, invoke_text
 from app.services.offline.activity_images import persist_activity_images
+from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
 from app.services.offline.providers.search import SearchResult, tavily_search
 from app.services.offline import repository as repo
+from app.services.offline.activity_discovery import (
+    ACTIVITY_PLACE_CATEGORIES, VENUE_RE,
+    article_place_names, category_for, event_facts, ordered_categories,
+    source_address, source_text,
+)
 from app.services.prompting.store import get_prompt_text
 
 logger = logging.getLogger(__name__)
+_DISCOVERY_BUDGET_S = 40
 
 
 _LOCALIZED_CITY_ALIASES = {
@@ -77,124 +84,9 @@ _TOKEN_SPLIT_RE = re.compile(
 
 
 @dataclass(frozen=True)
-class ActivityPlaceCategory:
-    name: str
-    keywords: tuple[str, ...]
-    query_hint: str
-
-
-@dataclass(frozen=True)
 class SearchQuerySpec:
     query: str
     include_domains: tuple[str, ...] | None = None
-
-
-ACTIVITY_PLACE_CATEGORIES: tuple[ActivityPlaceCategory, ...] = (
-    ActivityPlaceCategory(
-        "阅读与文化",
-        ("图书馆", "书店", "城市书房", "书吧", "旧书店", "独立书店"),
-        "图书馆 城市书房 书店 旧书店 独立书店 阅读 空间",
-    ),
-    ActivityPlaceCategory(
-        "展览与博物馆",
-        ("博物馆", "美术馆", "纪念馆", "展览馆", "科技馆", "非遗馆"),
-        "博物馆 美术馆 纪念馆 展览馆 非遗馆 常设展 免费 开放",
-    ),
-    ActivityPlaceCategory(
-        "咖啡与茶饮",
-        ("咖啡馆", "茶馆", "茶室", "奶茶店", "甜品店", "烘焙店"),
-        "咖啡馆 茶馆 茶室 奶茶店 甜品店 烘焙店 安静 小店",
-    ),
-    ActivityPlaceCategory(
-        "手作与小店",
-        ("手作店", "陶艺", "花艺", "画室", "文创店", "杂货店", "工坊"),
-        "手作 陶艺 花艺 画室 文创店 杂货店 工坊 体验",
-    ),
-    ActivityPlaceCategory(
-        "公园与绿地",
-        ("公园", "花园", "植物园", "湿地公园", "城市绿道", "运动公园"),
-        "公园 花园 植物园 湿地公园 城市绿道 免费 散步",
-    ),
-    ActivityPlaceCategory(
-        "水边散步",
-        ("江边", "河边", "湖边", "海边", "滨江步道", "码头", "湿地"),
-        "江边 河边 湖边 滨江步道 码头 湿地 散步 夜景",
-    ),
-    ActivityPlaceCategory(
-        "山与轻户外",
-        ("山", "步道", "森林公园", "郊野公园", "观景台", "古道"),
-        "山 步道 森林公园 郊野公园 观景台 轻徒步 免费",
-    ),
-    ActivityPlaceCategory(
-        "街区与市集",
-        ("步行街", "老街", "古街", "文旅街区", "市集", "夜市", "广场", "菜市场"),
-        "步行街 老街 古街 文旅街区 市集 夜市 菜市场 广场",
-    ),
-    ActivityPlaceCategory(
-        "小吃与轻食",
-        ("小吃街", "面包店", "甜品店", "茶饮店", "轻食店", "老字号"),
-        "小吃街 面包店 甜品店 茶饮店 轻食店 老字号 低消费",
-    ),
-    ActivityPlaceCategory(
-        "街头小吃",
-        ("路边摊", "大排档", "档口", "夜宵", "苍蝇馆"),
-        "路边摊 大排档 档口 夜宵 苍蝇馆 小吃 本地味道",
-    ),
-    ActivityPlaceCategory(
-        "餐饮小店",
-        ("小馆", "饭馆", "面馆", "火锅", "烧烤", "私房菜"),
-        "小馆 饭馆 面馆 火锅 烧烤 私房菜 小炒 本地餐厅",
-    ),
-    ActivityPlaceCategory(
-        "商铺与零售",
-        ("商铺", "门店", "百货", "超市", "便利店", "杂货铺"),
-        "商铺 门店 百货 超市 便利店 杂货铺 逛街 小店",
-    ),
-    ActivityPlaceCategory(
-        "活动现场",
-        ("活动", "展览", "展会", "音乐节", "市集", "开幕"),
-        "活动 展览 展会 音乐节 市集 开幕 巡展 免费 开放",
-    ),
-    ActivityPlaceCategory(
-        "休闲社交",
-        ("酒吧", "小酒馆", "KTV", "台球", "桌游", "livehouse"),
-        "酒吧 小酒馆 KTV 台球 桌游 livehouse 休闲 小聚",
-    ),
-    ActivityPlaceCategory(
-        "亲子与乐园",
-        ("乐园", "游乐场", "动物园", "科普馆", "亲子"),
-        "乐园 游乐场 动物园 水族馆 科普 亲子 周末",
-    ),
-    ActivityPlaceCategory(
-        "演出与电影",
-        ("剧场", "影院", "音乐厅", "livehouse", "露天电影", "音乐会"),
-        "剧场 影院 音乐厅 livehouse 露天电影 音乐会 低成本",
-    ),
-    ActivityPlaceCategory(
-        "轻运动",
-        ("体育公园", "球场", "骑行绿道", "健身步道", "滑板公园"),
-        "体育公园 球场 骑行绿道 健身步道 滑板公园",
-    ),
-    ActivityPlaceCategory(
-        "安静角落",
-        ("校园", "书院", "寺庙", "教堂", "社区中心", "市民中心"),
-        "校园 书院 寺庙 教堂 社区中心 市民中心 安静 参观",
-    ),
-    ActivityPlaceCategory(
-        "城市观察",
-        ("桥", "渡口", "码头", "老建筑", "火车站", "创意园", "老厂房"),
-        "桥 渡口 码头 老建筑 火车站 创意园 老厂房 城市观察",
-    ),
-    ActivityPlaceCategory(
-        "室内避雨",
-        ("商场", "购物中心", "文化中心", "市民中心", "游客中心", "社区空间"),
-        "商场 购物中心 文化中心 市民中心 游客中心 社区空间 室内 免费",
-    ),
-)
-
-_ACTIVITY_CATEGORY_HINT = " ".join(
-    category.query_hint for category in ACTIVITY_PLACE_CATEGORIES
-)
 
 
 def _json_object(text: str) -> dict[str, Any] | None:
@@ -273,6 +165,8 @@ def resolve_activity_search_context(
         match_terms.append(region)
 
     search_anchor = _expand_search_anchor(display_city)
+    if region and region.strip() not in search_anchor:
+        search_anchor += " " + region.strip()
     return display_city, search_anchor.strip(), tuple(match_terms)
 
 
@@ -285,92 +179,33 @@ def _location_match_terms(city: str, location_terms: list[str] | None) -> list[s
     return terms
 
 
-def _category_matches_recent(
-    category: ActivityPlaceCategory,
-    recent_activities: list[dict[str, str]],
-) -> bool:
-    if not recent_activities:
-        return False
-    recent_text = _normalize_fingerprint(
-        " ".join(
-            " ".join(
-                str(item.get(key) or "")
-                for key in ("title", "location_name", "address")
-            )
-            for item in recent_activities[:12]
-        )
-    )
-    return any(
-        _normalize_fingerprint(keyword) in recent_text
-        for keyword in category.keywords
-    )
-
-
-def _ordered_place_categories(
-    recent_activities: list[dict[str, str]],
-) -> list[ActivityPlaceCategory]:
-    categories = list(ACTIVITY_PLACE_CATEGORIES)
-    return sorted(
-        categories,
-        key=lambda category: _category_matches_recent(category, recent_activities),
-    )
-
-
 def _search_query_specs(
     search_anchor: str,
     tags: list[str],
     recent_activities: list[dict[str, str]] | None = None,
+    diversity_seed: str = "",
+    city: str = "",
 ) -> list[SearchQuerySpec]:
-    tag_text = " ".join(tags[:4])
+    recent = recent_activities or []
     base = _expand_search_anchor(search_anchor)
-    ordered = _ordered_place_categories(recent_activities or [])
-    preferred = [
-        category
-        for category in ordered
-        if not _category_matches_recent(category, recent_activities or [])
-    ]
-    deprioritized = [
-        category
-        for category in ordered
-        if _category_matches_recent(category, recent_activities or [])
-    ]
-    category_batch = (preferred[:8] + deprioritized[:2])[:10]
-    specs: list[SearchQuerySpec] = [SearchQuerySpec(_search_query(base, tags))]
-    for category in category_batch:
-        specs.append(
-            SearchQuerySpec(
-                # Broad preference terms can pull every category back to the
-                # same coffee listicle. Dedicated searches need a narrow intent.
-                f"{base} {category.keywords[0]} 地址 开放时间".strip()
-            )
-        )
-    specs.extend(
-        [
-            SearchQuerySpec(
-                f"{base} 周末 一个人 可以去 小吃 餐厅 活动 展览 {tag_text}".strip()
-            ),
-            SearchQuerySpec(
-                f"{base} 附近 去处 小吃街 苍蝇馆 路边摊 商铺 市集 活动 {tag_text}".strip()
-            ),
-            SearchQuerySpec(
-                f"{base} 本地 美食 小店 活动 展览 推荐 {tag_text}".strip(),
-                include_domains=_TAVILY_LOCAL_DOMAINS,
-            ),
-            SearchQuerySpec(
-                f"{base} 周末 活动 展览 市集 免费 {tag_text}".strip(),
-                include_domains=("gov.cn", "12301.cn", "ctrip.com", "mafengwo.cn"),
-            ),
-        ]
-    )
-    deduped: list[SearchQuerySpec] = []
-    seen: set[str] = set()
-    for spec in specs:
-        compact = " ".join(spec.query.split())
-        key = f"{compact}|{spec.include_domains or ''}"
-        if compact and key not in seen:
-            seen.add(key)
-            deduped.append(SearchQuerySpec(compact, spec.include_domains))
-    return deduped
+    ordered = ordered_categories(recent, tags, diversity_seed)
+    # Every run explores multiple families, with an explicit current-event lane.
+    batch = ordered[:8]
+    event = next(c for c in ACTIVITY_PLACE_CATEGORIES if c.family == '限时')
+    batch = [c for c in batch if c != event]
+    batch.insert(3, event)
+    specs = [SearchQuerySpec(_search_query(base, tags))]
+    for category in batch:
+        variant = category.keywords[len(recent) % len(category.keywords)]
+        suffix = (datetime.now().strftime('%Y年%m月') + ' 活动时间 地点'
+                  if category.family == '限时' else ' 地址 开放时间')
+        specs.append(SearchQuerySpec(f"{base} {variant} {suffix}"))
+    # County/district remains in primary queries; wider city searches are a
+    # bounded recovery lane, with the actual address retained in the result.
+    city_anchor = _expand_search_anchor(city) if city else re.sub(r'\s+[^\s]+[区县]$', '', base)
+    recovery = [SearchQuerySpec(_search_query(city_anchor, tags)), SearchQuerySpec(
+        f"{city_anchor} {ordered[0].keywords[0]} 地址", include_domains=_TAVILY_LOCAL_DOMAINS)]
+    return specs[:6] + recovery + specs[6:]
 
 
 def _normalize_fingerprint(value: Any) -> str:
@@ -461,11 +296,11 @@ def _sources(results: list[SearchResult]) -> list[dict[str, Any]]:
         {
             "title": result.title,
             "url": result.url,
-            "content": result.content,
+            "content": source_text(result)[:2200],
             "score": result.score,
             "image_url": result.image_url,
         }
-        for result in results[:6]
+        for result in results[:12]
     ]
 
 
@@ -477,42 +312,50 @@ async def _search_activity_candidates(
     city: str = "",
     location_terms: list[str] | None = None,
     max_queries: int = 12,
+    diversity_seed: str = "",
 ) -> tuple[list[SearchResult], list[SearchResult], str]:
     all_usable: list[SearchResult] = []
     filtered: list[SearchResult] = []
     seen_urls: set[str] = set()
     first_query = ""
-    specs = _search_query_specs(search_anchor, tags, recent_activities)[:max_queries]
+    specs = _search_query_specs(search_anchor, tags, recent_activities, diversity_seed, city)[:max_queries]
 
     async def search(spec: SearchQuerySpec) -> list[SearchResult]:
-        return await tavily_search(
-            spec.query,
-            max_results=8,
-            image_evidence=True,
-            include_domains=list(spec.include_domains)
-            if spec.include_domains
-            else None,
-        )
+        try:
+            return await tavily_search(
+                spec.query,
+                max_results=8,
+                image_evidence=True,
+                include_domains=list(spec.include_domains) if spec.include_domains else None,
+            )
+        except Exception:
+            logger.warning("[offline] discovery query failed; continuing other intents")
+            return []
+    async def collect(spec: SearchQuerySpec) -> None:
+        nonlocal filtered
+        raw_results = await search(spec)
+        for result in _usable_results(raw_results, city, location_terms):
+            if result.url not in seen_urls:
+                seen_urls.add(result.url)
+                all_usable.append(result)
+        filtered = _filter_repeated_results(all_usable, recent_activities)
     # Count distinct, usable destinations, not articles or multiple pages for
     # one place. Bound upstream latency while retaining completed discoveries.
     try:
-        async with asyncio.timeout(40):
+        async with asyncio.timeout(_DISCOVERY_BUDGET_S):
             for offset in range(0, len(specs), 2):
                 batch = specs[offset:offset + 2]
                 first_query = first_query or batch[0].query
-                for raw_results in await asyncio.gather(*(search(spec) for spec in batch)):
-                    for result in _usable_results(raw_results, city, location_terms):
-                        if result.url not in seen_urls:
-                            seen_urls.add(result.url)
-                            all_usable.append(result)
-                filtered = _filter_repeated_results(all_usable, recent_activities)
+                await asyncio.gather(*(collect(spec) for spec in batch))
                 places = {
                     _normalize_fingerprint(card['location_name'])
                     for result in filtered
                     if (card := _fallback_card(city, tags, [result]))
                     and not _card_repeats_history(card, recent_activities)
                 }
-                if len(places) >= 4:
+                families = {category.family for name in places
+                            if (category := category_for(name))}
+                if offset >= 4 and len(places) >= 4 and len(families) >= 2:
                     break
     except TimeoutError:
         logger.info('[offline] discovery budget reached; retaining %s sources', len(filtered))
@@ -546,7 +389,7 @@ def _source_matches_location(
     extra = [
         term
         for term in (location_terms or [])
-        if term.strip() and term not in city_terms
+        if term.strip() and term not in city_terms and not term.endswith(("省", "Province"))
     ]
     return any(len(term) >= 2 and term.lower() in combined_lower for term in extra)
 
@@ -564,7 +407,7 @@ def _source_is_usable(
         return False
     title = result.title.strip()
     content = result.content.strip()
-    combined = f"{title}\n{content}"
+    combined = f"{title}\n{source_text(result)}"
     if not title or _GENERIC_ACTIVITY_TITLE_RE.search(title):
         return False
     if "No information is available for this page" in content:
@@ -615,22 +458,32 @@ def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
     combined = f"{title}\n{location}\n{card.get('address') or ''}"
     if _CONCRETE_PLACE_HINT_RE.search(combined):
         return True
-    return _looks_like_named_place(location) or _looks_like_named_place(title)
+    return (_looks_like_named_place(location) or _looks_like_named_place(title)
+            or bool(re.search(r"(?:路|街|巷|号|弄|楼|street|road)", str(card.get("address") or ""), re.I)))
 
 
 def _place_from_source(result: SearchResult, city: str) -> str | None:
     title = result.title.strip()
     if is_collection_title(title) or _GENERIC_ACTIVITY_TITLE_RE.search(title):
         return None
-    # Keep branch names in parentheses: different branches are different places.
-    name = re.split(r"\s+[-–—|]\s+|[，。；;:：|_]", title, maxsplit=1)[0].strip()
+    event = event_facts(result)
+    if event is not None:
+        return event.get('location_name')
+    # Keep branch names. A verified address also supports brands such as
+    # "Blue Bottle" or "阿婆生煎", which do not end in 店/馆/园.
+    name = re.split(r"\s+[-–—|]\s*|[-–—|]\s+|[，。；;:：|_]", title, maxsplit=1)[0].strip()
     name = re.sub(r"(?:开放时间|开放信息|常设展|交通指南|门票信息).*$", "", name).strip()
-    # Arbitrary Chinese headlines containing 山/江/店 are not POI names.
-    if not re.search(r"(?:馆|园|店|铺|坊|巷|弄|站|场|街|楼|中心|咖啡|茶室|书房|书屋|书吧|码头|渡口|古镇|景区|绿道|步道|寺|山|湖|桥|KTV|livehouse|酒吧|市集|夜市)(?:[（(][^()（）]{1,20}[)）])?$", name, re.I):
-        return None
+    name = re.sub(r'(?:官方网站|官方主页|官网|首页)$', '', name).strip()
+    labelled = VENUE_RE.search(source_text(result))
+    if labelled and labelled.group(1).strip() in title:
+        name = labelled.group(1).strip()
+    suffix = re.search(r"(?:馆|园|店|铺|坊|巷|弄|站|场|街|楼|中心|咖啡|茶室|书房|书屋|书吧|码头|渡口|古镇|景区|绿道|步道|寺|山|湖|桥|KTV|livehouse|酒吧|市集|夜市)(?:[（(][^()（）]{1,20}[)）])?$", name, re.I)
     if (not _is_generic_location(name, city)
             and concrete_place_name(name, _display_city(city))
-            and _CONCRETE_PLACE_HINT_RE.search(name)):
+            and (suffix or (source_address(result) and (
+                (labelled and labelled.group(1).strip().rstrip('* ') == name)
+                or category_for(name)
+                or re.fullmatch(r'[A-Za-z][A-Za-z0-9 &\u2019\u0027.-]{1,40}', name))))):
         return name
     return None
 
@@ -647,58 +500,128 @@ def _usable_results(
     ]
 
 
+def _source_supports_place(card: dict[str, Any], result: SearchResult) -> bool:
+    if place_source_matches(card, result.title, source_text(result)):
+        return event_facts(result) != {}
+    event = event_facts(result)
+    return bool(event and event['location_name'] == card.get('location_name')
+                and _source_matches_location(result.title + source_text(result), city=card.get('city') or '', location_terms=None))
+
+
 def _card_is_source_backed(card: dict[str, Any], sources: list[dict[str, Any]]) -> bool:
     official = canonical_url(card.get("official_url"))
     return bool(official and any(
         canonical_url(source.get("url")) == official
-        and place_source_matches(card, str(source.get("title") or ""), str(source.get("content") or ""))
+        and _source_supports_place(card, SearchResult(
+            title=str(source.get('title') or ''), url=official, content=str(source.get('content') or '')))
         for source in sources
     ))
 
 
-def _fallback_card(
-    city: str,
-    tags: list[str],
-    results: list[SearchResult],
-) -> dict[str, Any] | None:
-    source = next((item for item in results if (
-        (name := _place_from_source(item, city))
-        and place_source_matches({"location_name": name, "city": _display_city(city)}, item.title, item.content)
-    )), None)
-    if source is None:
+def _fallback_card(city: str, tags: list[str], results: list[SearchResult]) -> dict[str, Any] | None:
+    for item in results:
+        location = _place_from_source(item, city)
+        if location and _source_supports_place({'location_name': location, 'city': _display_city(city)}, item):
+            source = item
+            break
+    else:
         return None
-    location = _place_from_source(source, city)
-    if not location:
-        return None
-    city_label = _display_city(city)
-    title = location
-    address_match = re.search(r"(?:地址为|地址[：:])\s*([^。；;\n]{4,100})", source.content)
-    address = address_match.group(1).strip() if address_match else location
-    task = f"到{location}后，拍下一处你觉得有一点可爱的细节，发给我看看。"
+    event = event_facts(source)
+    category = category_for(location) or category_for(source.title + ' ' + source.content)
+    suitable = category.suitable if category else '随意逛逛、坐一会儿'
+    category_name = '活动现场' if event else category.name if category else '城市漫游'
     return {
-        "title": title,
-        "summary": f"如果想换个地方走走，可以看看{location}，按自己的节奏安排就好。",
-        "description": (
-            f"我帮你在{city_label}找到一个可以独自慢慢看的地方：{location}。"
-            "不需要社交表现，也不用赶时间，就当给今天换一点空气。"
-        ),
-        "category": tags[0] if tags else "城市漫游",
-        "vibe": "轻松、随意",
-        "suitable": "散步、拍照",
-        "location_name": location,
-        "address": address,
-        "starts_at": None,
-        "ends_at": None,
-        "official_url": source.url,
-        "image_urls": [source.image_url] if source.image_url else [],
-        "task_hint": "接受后解锁一个小彩蛋任务",
-        "easter_egg_task": {
-            "title": "小彩蛋任务",
-            "body": task,
-            "principle": "低社交压力、可独立完成、无安全风险",
-        },
-        "metadata": {"fallback": True},
+        'title': source.title[:60] if event else location,
+        'summary': f'想换个节奏的话，可以去{location}，{suitable}，按自己的兴致来就好。',
+        'description': f'{location}可以放进你这次出门的备选里。{suitable}都可以，不用安排得太满。具体开放安排以现场为准。',
+        'category': category_name, 'vibe': '轻松、随意', 'suitable': suitable,
+        'location_name': location, 'address': source_address(source) or location,
+        'starts_at': event['starts_at'] if event else None,
+        'ends_at': event['ends_at'] if event else None,
+        'official_url': source.url, 'image_urls': [],
+        'task_hint': '接受后解锁一个小彩蛋任务',
+        'easter_egg_task': {'title': '小彩蛋任务',
+                           'body': f'在{location}挑一个让你停下来看一眼的小细节，想分享的话就发给我。',
+                           'principle': '自愿参与、可独立完成、无安全风险'},
+        'metadata': {'fallback': True},
     }
+
+
+def _candidate_rank(card: dict, recent: list[dict], tags: list[str], region: str) -> tuple:
+    category = category_for(str(card.get('category') or '') + ' ' + str(card.get('location_name') or ''))
+    family = category.family if category else ''
+    recent_categories = [category_for(str(item.get('location_name') or '') + ' ' + str(item.get('title') or '')) for item in recent[:6]]
+    repeated = sum(bool(c and c.name == (category.name if category else '')) for c in recent_categories)
+    interest = ' '.join(tags)
+    affinity = bool(category and any(k in interest for k in category.keywords))
+    near = bool(region and region in str(card.get('address') or '') + str(card.get('location_name') or ''))
+    return (not near, repeated, not affinity,
+            -min(int(card.get('_image_evidence_count') or 0), 3),
+            family == (recent_categories[0].family if recent_categories and recent_categories[0] else ''))
+
+
+async def _verify_discovery_leads(proposals: list[dict], results: list[SearchResult], city: str,
+                                  tags: list[str], location_terms: list[str] | None, recent: list[dict]) -> list[dict]:
+    verified: list[dict] = []
+    leads: list[str] = []
+    for card in proposals[:8]:
+        card['city'] = _display_city(city)
+        name = str(card.get('location_name') or '')
+        if not concrete_place_name(name, _display_city(city)) or _card_repeats_history(card, recent):
+            continue
+        linked = next((r for r in results if canonical_url(r.url) == canonical_url(card.get('official_url'))), None)
+        if linked and event_facts(linked) == {}:
+            continue
+        matching = next((r for r in results if canonical_url(r.url) == canonical_url(card.get('official_url'))
+                         and _source_supports_place(card, r)), None)
+        if matching:
+            facts = _fallback_card(city, tags, [matching])
+            if facts and facts['location_name'] == name:
+                # Facts always come from the verified page, including dates and
+                # addresses. The published prompt owns the recommendation prose.
+                for field in ('title', 'summary', 'description', 'vibe', 'suitable'):
+                    value = card.get(field)
+                    if isinstance(value, str) and value.strip():
+                        if field == 'title' and _normalize_fingerprint(name).replace('市', '') not in _normalize_fingerprint(value).replace('市', ''):
+                            continue
+                        facts[field] = plain_text(value)[:500]
+                task = card.get('easter_egg_task')
+                if isinstance(task, dict) and all(isinstance(task.get(k), str) for k in ('title', 'body', 'principle')):
+                    facts['easter_egg_task'] = {k: plain_text(task[k])[:500] for k in ('title', 'body', 'principle')}
+                verified.append(facts)
+                continue
+        # A model cannot send arbitrary unmentioned names to a verification API.
+        if any(event_facts(r) != {} and name in source_text(r) + r.title for r in results):
+            leads.append(name)
+    for result in results:
+        if event_facts(result) != {} and not _place_from_source(result, city):
+            leads.extend(article_place_names(result))
+    leads = list(dict.fromkeys(name for name in leads if not _card_repeats_history({'location_name': name}, recent)))[:3]
+
+    async def verify(name: str) -> tuple[list[SearchResult], dict | None]:
+        try:
+            found = await tavily_search(f'{_display_city(city)} {name} 地址', max_results=5, image_evidence=True, timeout_s=8)
+            for result in _usable_results(found, city, location_terms):
+                card = {'location_name': name, 'city': _display_city(city)}
+                if _source_supports_place(card, result):
+                    facts = _fallback_card(city, tags, [result])
+                    if facts and facts['location_name'] == name:
+                        return [result], facts
+        except Exception:
+            logger.warning('[offline] independent place verification failed')
+        return [], None
+    # Search verification shares a hard budget and retains completed successes.
+    async def collect(name: str) -> None:
+        found, card = await verify(name)
+        if card:
+            results.extend(r for r in found if r.url not in {item.url for item in results})
+            verified.append(card)
+    try:
+        async with asyncio.timeout(10):
+            await asyncio.gather(*(collect(name) for name in leads))
+    except TimeoutError:
+        logger.info('[offline] verification budget reached')
+    return verified
 
 
 async def generate_activity_card(
@@ -724,6 +647,7 @@ async def generate_activity_card(
         recent_activities,
         city=city,
         location_terms=location_terms,
+        diversity_seed=f"{user_id}:{workspace_id or ''}",
     )
     # Search ranking often puts listicles above actual POI pages. Keep usable
     # individual places in the model's bounded source window first.
@@ -736,9 +660,9 @@ async def generate_activity_card(
             source_places.add(place)
         else:
             other.append(item)
-    results = (distinct + other)[:6]
+    results = (distinct + other)[:24]
     sources = _sources(results)
-    card: dict[str, Any] | None = None
+    proposals: list[dict] = []
     if sources:
         try:
             prompt_template = await get_prompt_text("offline.activity_card")
@@ -756,56 +680,27 @@ async def generate_activity_card(
                     f"{_avoid_text(recent_activities)}\n"
                     "不要重复推荐同一地点、同一场馆或高度相似主题。"
                 )
-            raw = await invoke_text(get_chat_model(), prompt_text)
-            card = _json_object(raw)
+            async with asyncio.timeout(18):
+                raw = await invoke_text(get_chat_model(), prompt_text)
+            parsed = _json_object(raw) or {}
+            pool = parsed.get("candidates")
+            proposals = [c for c in pool[:8] if isinstance(c, dict)] if isinstance(pool, list) else [parsed]
         except Exception as exc:
             logger.warning("[offline] activity LLM generation failed: %s", exc)
-    if card:
-        card["city"] = _display_city(city)
-    if card and card.get('location_name') and _card_has_concrete_place(card, city) and not _card_is_source_backed(card, sources):
-        # A discovery article may name a real shop without being its own page.
-        # Verify that one place against an independent, city-bound source.
-        verified_results = await tavily_search(
-            f"{_display_city(city)} {card['location_name']} 地址",
-            max_results=5, image_evidence=True, timeout_s=8,
-        )
-        verified = next((item for item in _usable_results(verified_results, city, location_terms)
-                         if place_source_matches(card, item.title, item.content)
-                         and _fallback_card(city, tags, [item])), None)
-        if verified:
-            # Rebuild facts from the verified page rather than attaching its
-            # URL to prose/addresses inferred from a different article.
-            card = _fallback_card(city, tags, [verified])
-            card['city'] = _display_city(city)
-            results = [verified] + [item for item in results if item.url != verified.url]
-            sources = _sources(results)
-    if card and not _card_is_source_backed(card, sources):
-        logger.warning(
-            "[offline] discarded unbacked activity card title=%r official_url=%r query=%r",
-            card.get("title"),
-            card.get("official_url"),
-            query,
-        )
-        card = None
-    if card and not _card_has_concrete_place(card, city):
-        logger.warning(
-            "[offline] discarded generic activity card title=%r location=%r query=%r",
-            card.get("title"),
-            card.get("location_name") or card.get("address"),
-            query,
-        )
-        card = None
-    if card and _card_repeats_history(card, recent_activities):
-        logger.warning(
-            "[offline] discarded repeated activity card title=%r location=%r query=%r",
-            card.get("title"),
-            card.get("location_name"),
-            query,
-        )
-        card = None
+    verified = await _verify_discovery_leads(proposals, results, city, tags, location_terms, recent_activities)
     fallback_cards = [candidate for result in results
                       if (candidate := _fallback_card(city, tags, [result]))]
-    candidates = ([card] if card else []) + fallback_cards
+    # All verified candidates must remain in the fact window; model input alone
+    # is bounded. Galleries read only pages bound to the chosen place.
+    fact_sources = [dict(title=r.title, url=r.url, content=source_text(r)) for r in results]
+    region = next((t for t in location_terms or [] if t != city and t.endswith(('区', '县', '镇', '街道', '市'))), '')
+    for candidate in verified + fallback_cards:
+        identity = {'location_name': candidate['location_name'], 'city': _display_city(city)}
+        candidate['_image_evidence_count'] = sum(
+            len(indexed_image_evidence(r.raw_content, candidate['location_name'], r.images, r.url))
+            for r in results if place_source_matches(identity, r.title, source_text(r)))
+    candidates = sorted(verified + fallback_cards,
+                        key=lambda c: _candidate_rank(c, recent_activities, tags, region))
     card = None
     unillustrated = None
     now = datetime.now(UTC)
@@ -820,7 +715,7 @@ async def generate_activity_card(
                 if identity in seen_places:
                     continue
                 if (not _card_has_concrete_place(candidate, city)
-                        or not _card_is_source_backed(candidate, sources)
+                        or not _card_is_source_backed(candidate, fact_sources)
                         or _card_repeats_history(candidate, recent_activities)):
                     continue
                 # Expired/undated events cannot become the image-free fallback.
@@ -831,7 +726,7 @@ async def generate_activity_card(
                             end = end.replace(tzinfo=UTC)
                         if end <= now:
                             continue
-                        candidate['expires_at'] = min(end, now + timedelta(days=14))
+                        candidate['expires_at'] = min(end, now + timedelta(days=30))
                     except ValueError:
                         continue
                 if len(seen_places) >= 3:
@@ -846,8 +741,10 @@ async def generate_activity_card(
                     user_id=user_id, card=candidate, city=city, search_results=results, limit=3,
                 )
                 if candidate["image_urls"]:
-                    card = candidate
-                    break
+                    if card is None or len(candidate['image_urls']) > len(card['image_urls']):
+                        card = candidate
+                    if len(card['image_urls']) >= 3:
+                        break
                 logger.info("[offline] retained image-free fallback place=%r", candidate.get("location_name"))
     except TimeoutError:
         logger.info("[offline] candidate/gallery budget exhausted")
@@ -858,7 +755,10 @@ async def generate_activity_card(
 
     for field in ("title", "summary", "description", "vibe", "suitable"):
         card[field] = plain_text(card.get(field))
-    card["search_sources"] = sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]
+    card.pop('_image_evidence_count', None)
+    chosen_sources = [dict(title=r.title, url=r.url, content=source_text(r)[:2200]) for r in results
+                      if _source_supports_place(card, r)]
+    card["search_sources"] = chosen_sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]
     card["city"] = _display_city(city)
     card["source"] = source
     card.setdefault("expires_at", now + timedelta(days=14))
@@ -899,7 +799,8 @@ async def _recommendation_copy(card: dict[str, Any]) -> str:
             activity_summary=filled(card.get("summary"), empty="（无）"),
             recommendation_blurb=filled(card.get("summary"), empty="（无）"),
         )
-        return clip_text(parse_text_field(await invoke_text(get_chat_model(), prompt)), 500)
+        async with asyncio.timeout(15):
+            return clip_text(parse_text_field(await invoke_text(get_chat_model(), prompt)), 500)
     except Exception as exc:
         logger.warning("[offline] recommendation copy failed: %s", exc)
         return ""

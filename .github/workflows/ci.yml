@@ -102,6 +102,7 @@ jobs:
             tests/test_proactive_common_rules.py \
             tests/test_proactive_activity_e2e.py \
             tests/test_offline_quality_e2e.py \
+            tests/test_offline_regional_discovery_e2e.py \
             tests/test_offline_gallery_quality.py \
             tests/test_reply_prefix.py \
             tests/test_offline_activity_companion.py \

@@ -29,8 +29,9 @@ def normalized(value: object) -> str:
 # Discovery articles are useful search input, but never an individual destination.
 _COLLECTION_TITLE = re.compile(
     r"攻略|合集|排行榜|状元榜|扫街榜|十大|周末去哪|这些|那些|这几|那几|盘点|汇总|大全|"
+    r"黄页|企业名录|商家名录|企业单位|店铺列表|商户列表|"
     r"[0-9一二三四五六七八九十]+[个大处家]|(?:咖啡店|咖啡馆|景点|公园|小店).{0,6}(?:推荐|整理|指南)|"
-    r"\b(?:the best|things to do|travel guide)\b", re.I
+    r"\b(?:the best|things to do|travel guide|business directory|company directory)\b", re.I
 )
 
 

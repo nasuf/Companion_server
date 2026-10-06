@@ -6,7 +6,19 @@ from app.services.offline.content import canonical_url, normalized
 
 _IMAGE = re.compile(r'!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)')
 _NON_PHOTO = re.compile(r'logo|icon|二维码|广告|标识|标志|示意图|效果图|设计方案|规划图|头像|海报|订阅|吉祥物', re.I)
-_SCENE = re.compile(r'外观|外景|实景|全景|内景|馆舍|建筑|大门|正门|入口|馆内|阅览|风景|湖面|绿道|步道|远景|近景|侧视|匾额|展厅|展陈|陈列|器展|精品展|庭院|花园')
+_SCENE = re.compile(r'外观|外景|实景|全景|内景|馆舍|建筑|大门|正门|入口|馆内|阅览|风景|湖面|绿道|步道|远景|近景|侧视|匾额|展厅|展陈|陈列|器展|精品展|庭院|花园|门头|店内|吧台|座位区|用餐区|书架|摊位|摊档')
+_NAMED_VENUE = re.compile(r'[\u4e00-\u9fffA-Za-z]{2,24}(?:图书馆|博物馆|展览馆|公园|咖啡店|咖啡馆|书店)')
+
+
+def _other_place_caption(caption: str, name: str) -> bool:
+    # Generic scene captions are useful on a bound POI page, but an explicitly
+    # named different venue (e.g. a nearby attraction) must not borrow its identity.
+    own = normalized(name).replace('市', '')
+    for match in _NAMED_VENUE.finditer(caption):
+        other = normalized(match.group()).replace('市', '')
+        if own not in other and other not in own:
+            return True
+    return False
 
 
 def _visible_text(text: str) -> str:
@@ -50,7 +62,7 @@ def indexed_image_evidence(raw: str, name: str, images: list[dict], source_url: 
             before = _visible_text(block[start:match.start()])[-350:]
             nearby = previous + ' ' + before
             # The previous photo's caption must not reject the current photograph.
-            if (_NON_PHOTO.search(caption) or _NON_PHOTO.search(heading)
+            if (_NON_PHOTO.search(caption) or _other_place_caption(caption, name) or _NON_PHOTO.search(heading)
                     or (not caption and _NON_PHOTO.search(nearby))):
                 continue
             explicit_name = len(normalized(name)) >= 2 and normalized(name) in normalized(caption + nearby)
@@ -58,7 +70,7 @@ def indexed_image_evidence(raw: str, name: str, images: list[dict], source_url: 
                 result[url] = 'indexed_place_caption'
         previous = ''
     for url, caption in descriptions.items():
-        if url and url not in seen_markdown and not _NON_PHOTO.search(caption) and len(normalized(name)) >= 2 and normalized(name) in normalized(caption):
+        if url and url not in seen_markdown and not _NON_PHOTO.search(caption) and not _other_place_caption(caption, name) and len(normalized(name)) >= 2 and normalized(name) in normalized(caption):
             result.setdefault(url, 'indexed_place_alt')
     return result
 
@@ -78,7 +90,8 @@ class PageImages(HTMLParser):
                 self.images[url] = 'place_page_cover'
         if tag == 'img':
             alt = normalized((attrs.get('alt') or '') + (attrs.get('title') or ''))
-            if len(self.name) >= 2 and self.name in alt and not _NON_PHOTO.search(alt):
+            if (len(self.name) >= 2 and self.name in alt and not _NON_PHOTO.search(alt)
+                    and not _other_place_caption(alt, self.name)):
                 for key in ('src','data-src','data-original'):
                     if attrs.get(key):
                         url = canonical_url(urljoin(self.page_url, attrs[key]))

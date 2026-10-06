@@ -62,15 +62,17 @@ def test_search_query_specs_push_recently_used_place_category_back():
     queries = [spec.query for spec in specs]
 
     assert "图书馆" not in queries[1]
-    assert any("图书馆" in query for query in queries[2:])
+    # A recently recommended intent need not consume this run's query budget.
+    assert any("活动时间" in query for query in queries)
     assert any(spec.include_domains is not None for spec in specs)
 
 
 def test_category_search_does_not_repeat_conflicting_preference_terms():
     specs = _search_query_specs('镇江市', ['咖啡成瘾', '甜品控'])
     assert '咖啡成瘾' in specs[0].query
-    assert '图书馆' in specs[1].query
-    assert '咖啡成瘾' not in specs[1].query
+    assert '咖啡馆' in specs[1].query
+    assert all('咖啡成瘾' not in spec.query for spec in specs if '地址' in spec.query)
+    assert any('图书馆' in spec.query for spec in specs[2:])
 
 
 def test_city_suffix_does_not_reject_a_local_place():

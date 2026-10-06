@@ -32,8 +32,8 @@ def validate_entry(entry: dict) -> None:
     content.format(**{field: '验证素材' for field in allowed})
 
 
-async def run(apply: bool) -> None:
-    entries = json.loads(MANIFEST.read_text())['prompts']
+async def run(apply: bool, manifest: Path = MANIFEST) -> None:
+    entries = json.loads(manifest.read_text())['prompts']
     for entry in entries:
         # Web saves trim surrounding whitespace before persisting.
         entry['content'] = entry['content'].strip()
@@ -80,7 +80,7 @@ async def run(apply: bool) -> None:
                               'change_type':'manual_save' if added else 'already_published',
                               'enabled':after.isEnabled},ensure_ascii=False),flush=True)
         common = await db.prompttemplate.find_unique(where={'key':'proactive.common_rules'})
-        if common.isEnabled:
+        if common and common.isEnabled:
             for key in ('proactive.silence_plain', 'offline.activity_invite_message', 'offline.arrival_guide',
                         'offline.activity_companion_observe', 'offline.activity_companion_feeling', 'offline.activity_companion_casual'):
                 row = await db.prompttemplate.find_unique(where={'key':key})
@@ -94,4 +94,6 @@ async def run(apply: bool) -> None:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
-    asyncio.run(run(parser.parse_args().apply))
+    parser.add_argument('--manifest', type=Path, default=MANIFEST)
+    args = parser.parse_args()
+    asyncio.run(run(args.apply, args.manifest))

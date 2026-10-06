@@ -91,7 +91,11 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                             for url, kind in evidence.items() if not _is_bad_image_url(url)]
 
                 async def collect(sources: list[SearchResult]) -> None:
-                    groups = await asyncio.gather(*(candidates(source) for source in sources[:8]))
+                    # Apply the window after binding the chosen destination.
+                    # A diverse discovery pool can put this place after page 8.
+                    bound = [source for source in sources if place_source_matches(
+                        card, source.title, source.content + source.raw_content)]
+                    groups = await asyncio.gather(*(candidates(source) for source in bound[:8]))
                     attempts = 0
                     # Alternate sources so a blocked image CDN cannot monopolize the budget.
                     for candidate in (item for row in zip_longest(*groups) for item in row if item):

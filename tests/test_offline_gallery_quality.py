@@ -23,6 +23,23 @@ def test_nested_tavily_images_keep_provenance_and_both_shapes():
     assert parsed.images[1]['description']=='公园湖边'
 
 
+def test_bound_cafe_scene_captions_do_not_admit_other_named_venues():
+    from app.services.offline.image_evidence import indexed_image_evidence
+    raw = '''# 小岛咖啡馆
+
+![门头](https://photo.example/front.jpg)
+
+![店内](https://photo.example/inside.jpg)
+
+![吧台](https://photo.example/bar.jpg)
+
+![南京别处咖啡馆店内](https://photo.example/wrong.jpg)
+'''
+    found = indexed_image_evidence(raw, '小岛咖啡馆', [])
+    assert set(found) == {f'https://photo.example/{name}.jpg' for name in ('front', 'inside', 'bar')}
+    assert indexed_image_evidence('![南京图书馆阅览区](https://photo.example/wrong.jpg)', '镇江市图书馆', []) == {}
+
+
 @pytest.mark.parametrize('title,content',[('西安莲湖公园','西安市莲湖区'),('东莞周末去哪玩十大公园','莲湖公园以及其他公园'),('东莞人民公园','莲湖公园在另一边')])
 def test_rejects_other_city_listicle_or_other_place(title,content):
     assert not place_source_matches(CARD,title,content)
