@@ -241,13 +241,19 @@ async def test_recommendation_http_card_detail_share_same_record(journey, monkey
     assert detail['image_urls'][0].startswith('/offline/media/place_')
 
 
-async def test_flutter_real_http_client(journey):
+async def test_flutter_real_http_client(journey, monkeypatch):
     import os, shutil, socket
     import uvicorn
     if not os.getenv('OFFLINE_FLUTTER_E2E'):
         pytest.skip('Set OFFLINE_FLUTTER_E2E=1 to run the sibling Flutter checkout')
     assert shutil.which('flutter'), 'Flutter SDK required for cross-client E2E'
     j=journey
+    monkeypatch.setattr(offline, 'is_activity_enabled', AsyncMock(return_value=True))
+    monkeypatch.setattr(repo, 'resolve_user_context', AsyncMock(return_value={
+        'conversation_id':j.conversation, 'workspace_id':j.workspace, 'user_location_city':'镇江市',
+        'agent_id':j.agent, 'user_id':j.user,
+    }))
+    monkeypatch.setattr(service, 'generate_activity_card', AsyncMock(return_value=None))
     a=await j.create(image_urls=[f'/offline/media/place_fixture_{i}.jpg' for i in range(3)])
     b=await j.create()
     await j.db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',a['id'])
@@ -401,7 +407,7 @@ async def test_fill_only_gallery_repair_preserves_existing_photos(journey, monke
 
 
 @pytest.mark.parametrize('have_images', [False, True])
-async def test_recommendation_rejects_collection_fallback_and_empty_gallery(journey, monkeypatch, tmp_path, have_images):
+async def test_recommendation_rejects_collections_but_prefers_photos_without_requiring_them(journey, monkeypatch, tmp_path, have_images):
     from app.services.offline import activity_generation as gen, activity_images as media
     from app.services.offline.providers.search import SearchResult
     j = journey
@@ -444,10 +450,11 @@ async def test_recommendation_rejects_collection_fallback_and_empty_gallery(jour
     response = await j.client.post('/offline/activities/recommend')
     assert response.status_code == 200, response.text
     if not have_images:
-        assert response.json() is None
-        rows = await j.db.query_raw('SELECT id FROM offline_activity_recommendations WHERE user_id=$1', j.user)
-        assert rows == []
-        service.emit_assistant.assert_not_awaited()
+        card = response.json()
+        assert card['location_name'] == '库迪咖啡(临湖苑店)'
+        assert card['image_urls'] == []
+        detail = (await j.client.get('/offline/activities/' + card['id'])).json()
+        assert detail['image_urls'] == []
         return
     card = response.json()
     assert card['location_name'] == '镇江博物馆'
@@ -455,6 +462,40 @@ async def test_recommendation_rejects_collection_fallback_and_empty_gallery(jour
     detail = (await j.client.get('/offline/activities/' + card['id'])).json()
     assert detail['image_urls'] == card['image_urls']
     assert detail['title'] == card['title'] == '镇江博物馆'
+
+
+@pytest.mark.parametrize('case,status,reason', [
+    ('disabled', 403, 'activity_disabled'),
+    ('conversation', 422, 'conversation_required'),
+    ('location', 422, 'location_required'),
+    ('candidates', 503, 'no_suitable_activity'),
+])
+async def test_recommendation_failure_explains_actual_reason_without_side_effects(journey, monkeypatch, case, status, reason):
+    j = journey
+    ctx = dict(conversation_id=j.conversation, workspace_id=j.workspace, user_location_city='镇江市')
+    if case == 'conversation':
+        ctx = None
+    elif case == 'location':
+        ctx.pop('user_location_city')
+    monkeypatch.setattr(offline, 'is_activity_enabled', AsyncMock(return_value=case != 'disabled'))
+    monkeypatch.setattr(repo, 'resolve_user_context', AsyncMock(return_value=ctx))
+    generate = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, 'generate_activity_card', generate)
+    response = await j.client.post('/offline/activities/recommend')
+    assert response.status_code == status
+    assert response.json()['detail']['reason'] == reason
+    if case == 'candidates':
+        assert '定位' not in response.json()['detail']['message']
+        generate.assert_awaited_once()
+    else:
+        generate.assert_not_awaited()
+    service.emit_assistant.assert_not_awaited()
+    assert await j.db.query_raw('SELECT id FROM offline_activity_recommendations WHERE user_id=$1', j.user) == []
+
+
+async def test_scheduled_recommendation_still_skips_without_conversation(monkeypatch):
+    monkeypatch.setattr(repo, 'resolve_user_context', AsyncMock(return_value=None))
+    assert await service.create_recommendation_for_user(user_id='none', source='scheduled') is None
 
 
 async def test_scoped_gallery_refill_preserves_existing_photos_and_skips_failed_discovery(journey, monkeypatch, tmp_path):

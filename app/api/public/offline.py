@@ -55,7 +55,9 @@ async def create_offline_activity_recommendation(
     user: dict = Depends(require_user),
 ):
     if not await is_activity_enabled():
-        return None
+        raise HTTPException(status_code=403, detail={
+            "reason": "activity_disabled", "message": "活动推荐暂未开放。",
+        })
     activity = await activity_service.create_recommendation_for_user(
         user_id=str(user["sub"]),
         workspace_id=workspace_id,

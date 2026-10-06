@@ -184,9 +184,17 @@ async def create_recommendation_for_user(
 ) -> dict | None:
     ctx = await repo.resolve_user_context(user_id, workspace_id)
     if not ctx or not ctx.get("conversation_id"):
+        if source == "manual":
+            raise HTTPException(status_code=422, detail={
+                "reason": "conversation_required", "message": "请先创建或打开一个聊天会话，再生成活动。",
+            })
         return None
     city, search_anchor, match_terms = _location_for_activity(ctx)
     if not city:
+        if source == "manual":
+            raise HTTPException(status_code=422, detail={
+                "reason": "location_required", "message": "还没有获取到所在城市，请更新定位后再生成活动。",
+            })
         return None
     card = await generate_activity_card(
         user_id=user_id,
@@ -197,6 +205,10 @@ async def create_recommendation_for_user(
         location_terms=list(match_terms),
     )
     if not card:
+        if source == "manual":
+            raise HTTPException(status_code=503, detail={
+                "reason": "no_suitable_activity", "message": "暂时没找到合适的新去处，请稍后再试。",
+            })
         return None
     # 地理编码：地址 -> 经纬度（供到达 ≤200m 校验）+ 同地点去重键。key 未配置或失败
     # 时 coords=None，不阻断推荐（到达校验按 offline_arrival_require_geocode 处理）。

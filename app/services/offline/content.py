@@ -44,6 +44,8 @@ def concrete_place_name(value: object, city: object = "") -> bool:
         return False
     if re.search(r"[？！?!]|门户网站|人民政府|高德地图|怎么玩|去哪玩|玩得开心|藏着|收藏这|打卡指南", text):
         return False
+    if re.search(r"^(?:从.{1,30}(?:聊聊|看看)|带你|一起看|走进|探访|揭秘|探秘|寻访)", text):
+        return False
     name = normalized(text)
     city_name = normalized(city).removesuffix("市")
     local_name = name.removeprefix(city_name).removeprefix("市") if city_name else name

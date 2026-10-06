@@ -339,7 +339,9 @@ def _search_query_specs(
     for category in category_batch:
         specs.append(
             SearchQuerySpec(
-                f"{base} {category.query_hint} 真实地点 推荐 {tag_text}".strip()
+                # Broad preference terms can pull every category back to the
+                # same coffee listicle. Dedicated searches need a narrow intent.
+                f"{base} {category.keywords[0]} 地址 开放时间".strip()
             )
         )
     specs.extend(
@@ -480,9 +482,10 @@ async def _search_activity_candidates(
     filtered: list[SearchResult] = []
     seen_urls: set[str] = set()
     first_query = ""
-    for spec in _search_query_specs(search_anchor, tags, recent_activities)[:max_queries]:
-        first_query = first_query or spec.query
-        raw_results = await tavily_search(
+    specs = _search_query_specs(search_anchor, tags, recent_activities)[:max_queries]
+
+    async def search(spec: SearchQuerySpec) -> list[SearchResult]:
+        return await tavily_search(
             spec.query,
             max_results=8,
             image_evidence=True,
@@ -490,15 +493,29 @@ async def _search_activity_candidates(
             if spec.include_domains
             else None,
         )
-        usable = _usable_results(raw_results, city, location_terms)
-        for result in usable:
-            if result.url in seen_urls:
-                continue
-            seen_urls.add(result.url)
-            all_usable.append(result)
-        filtered = _filter_repeated_results(all_usable, recent_activities)
-        if len(filtered) >= 4:
-            return filtered, all_usable, first_query
+    # Count distinct, usable destinations, not articles or multiple pages for
+    # one place. Bound upstream latency while retaining completed discoveries.
+    try:
+        async with asyncio.timeout(40):
+            for offset in range(0, len(specs), 2):
+                batch = specs[offset:offset + 2]
+                first_query = first_query or batch[0].query
+                for raw_results in await asyncio.gather(*(search(spec) for spec in batch)):
+                    for result in _usable_results(raw_results, city, location_terms):
+                        if result.url not in seen_urls:
+                            seen_urls.add(result.url)
+                            all_usable.append(result)
+                filtered = _filter_repeated_results(all_usable, recent_activities)
+                places = {
+                    _normalize_fingerprint(card['location_name'])
+                    for result in filtered
+                    if (card := _fallback_card(city, tags, [result]))
+                    and not _card_repeats_history(card, recent_activities)
+                }
+                if len(places) >= 4:
+                    break
+    except TimeoutError:
+        logger.info('[offline] discovery budget reached; retaining %s sources', len(filtered))
     return filtered, all_usable, first_query
 
 
@@ -519,6 +536,8 @@ def _source_matches_location(
         return True
     combined_lower = combined.lower()
     city_terms = [term for term in _localized_city_terms(city) if term]
+    if city.endswith('市') and len(city) > 2:
+        city_terms.append(city.removesuffix('市'))
     if city.strip() not in city_terms:
         city_terms.append(city.strip())
     if any(len(term) >= 2 and term.lower() in combined_lower for term in city_terms):
@@ -708,8 +727,16 @@ async def generate_activity_card(
     )
     # Search ranking often puts listicles above actual POI pages. Keep usable
     # individual places in the model's bounded source window first.
-    results = sorted(filtered_results or all_usable_results,
-                     key=lambda item: _place_from_source(item, city) is None)[:6]
+    distinct, other = [], []
+    source_places: set[str] = set()
+    for item in filtered_results or all_usable_results:
+        place = _normalize_fingerprint(_place_from_source(item, city) or '')
+        if place and place not in source_places:
+            distinct.append(item)
+            source_places.add(place)
+        else:
+            other.append(item)
+    results = (distinct + other)[:6]
     sources = _sources(results)
     card: dict[str, Any] | None = None
     if sources:
@@ -735,6 +762,23 @@ async def generate_activity_card(
             logger.warning("[offline] activity LLM generation failed: %s", exc)
     if card:
         card["city"] = _display_city(city)
+    if card and card.get('location_name') and _card_has_concrete_place(card, city) and not _card_is_source_backed(card, sources):
+        # A discovery article may name a real shop without being its own page.
+        # Verify that one place against an independent, city-bound source.
+        verified_results = await tavily_search(
+            f"{_display_city(city)} {card['location_name']} 地址",
+            max_results=5, image_evidence=True, timeout_s=8,
+        )
+        verified = next((item for item in _usable_results(verified_results, city, location_terms)
+                         if place_source_matches(card, item.title, item.content)
+                         and _fallback_card(city, tags, [item])), None)
+        if verified:
+            # Rebuild facts from the verified page rather than attaching its
+            # URL to prose/addresses inferred from a different article.
+            card = _fallback_card(city, tags, [verified])
+            card['city'] = _display_city(city)
+            results = [verified] + [item for item in results if item.url != verified.url]
+            sources = _sources(results)
     if card and not _card_is_source_backed(card, sources):
         logger.warning(
             "[offline] discarded unbacked activity card title=%r official_url=%r query=%r",
@@ -763,6 +807,8 @@ async def generate_activity_card(
                       if (candidate := _fallback_card(city, tags, [result]))]
     candidates = ([card] if card else []) + fallback_cards
     card = None
+    unillustrated = None
+    now = datetime.now(UTC)
     seen_places: set[str] = set()
     # A bounded retry selects another real place if a gallery cannot be verified.
     # This shares the same validation gate for model and deterministic candidates.
@@ -777,35 +823,39 @@ async def generate_activity_card(
                         or not _card_is_source_backed(candidate, sources)
                         or _card_repeats_history(candidate, recent_activities)):
                     continue
+                # Expired/undated events cannot become the image-free fallback.
+                if candidate.get('starts_at') or candidate.get('ends_at'):
+                    try:
+                        end = datetime.fromisoformat(str(candidate.get('ends_at') or '').replace('Z', '+00:00'))
+                        if end.tzinfo is None:
+                            end = end.replace(tzinfo=UTC)
+                        if end <= now:
+                            continue
+                        candidate['expires_at'] = min(end, now + timedelta(days=14))
+                    except ValueError:
+                        continue
                 if len(seen_places) >= 3:
                     break
                 seen_places.add(identity)
+                # Image availability ranks valid destinations; it must not
+                # erase them. Never retain model-proposed or raw source URLs.
+                candidate['image_urls'] = []
+                if unillustrated is None:
+                    unillustrated = candidate
                 candidate["image_urls"] = await persist_activity_images(
                     user_id=user_id, card=candidate, city=city, search_results=results, limit=3,
                 )
                 if candidate["image_urls"]:
                     card = candidate
                     break
-                logger.info("[offline] skipped place without verified photos place=%r", candidate.get("location_name"))
+                logger.info("[offline] retained image-free fallback place=%r", candidate.get("location_name"))
     except TimeoutError:
         logger.info("[offline] candidate/gallery budget exhausted")
+    card = card or unillustrated
     if not card:
         logger.warning("[offline] no concrete activity card generated query=%r", query)
         return None
 
-    now = datetime.now(UTC)
-    card["city"] = _display_city(city)
-    # Date-bearing events require an explicit, current end time; evergreen POIs do not.
-    if card.get("starts_at") or card.get("ends_at"):
-        try:
-            end = datetime.fromisoformat(str(card.get("ends_at") or "").replace("Z", "+00:00"))
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=UTC)
-            if end <= now:
-                return None
-            card["expires_at"] = min(end, now + timedelta(days=14))
-        except ValueError:
-            return None
     for field in ("title", "summary", "description", "vibe", "suitable"):
         card[field] = plain_text(card.get(field))
     card["search_sources"] = sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]

@@ -150,7 +150,7 @@ async def test_indexed_photos_do_not_require_origin_html(monkeypatch, tmp_path):
     fetch.assert_not_called()
 
 
-@pytest.mark.parametrize('name', ['镇江这些咖啡店', '镇江十大咖啡馆', '镇江市2025高德状元榜·美食', '在道滘玩得开心吗？_东莞市人民政府门户网站'])
+@pytest.mark.parametrize('name', ['镇江这些咖啡店', '镇江十大咖啡馆', '镇江市2025高德状元榜·美食', '在道滘玩得开心吗？_东莞市人民政府门户网站', '从老照片聊聊镇江的古董店'])
 def test_collection_and_article_titles_are_not_place_identities(name):
     card = dict(location_name=name, city='镇江市', title=name, address=name)
     assert not generation._card_has_concrete_place(card, '镇江市')

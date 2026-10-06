@@ -1,5 +1,6 @@
 import base64
 from unittest.mock import AsyncMock
+import pytest
 
 from app.api.public import offline
 from app.services.offline import activity_service
@@ -63,6 +64,35 @@ def test_search_query_specs_push_recently_used_place_category_back():
     assert "图书馆" not in queries[1]
     assert any("图书馆" in query for query in queries[2:])
     assert any(spec.include_domains is not None for spec in specs)
+
+
+def test_category_search_does_not_repeat_conflicting_preference_terms():
+    specs = _search_query_specs('镇江市', ['咖啡成瘾', '甜品控'])
+    assert '咖啡成瘾' in specs[0].query
+    assert '图书馆' in specs[1].query
+    assert '咖啡成瘾' not in specs[1].query
+
+
+def test_city_suffix_does_not_reject_a_local_place():
+    assert _source_is_usable(SearchResult(title='镇江博物馆', url='https://example.com/museum', content='镇江伯先路85号'), '镇江市')
+
+
+async def test_discovery_continues_past_articles_and_duplicate_place_pages(monkeypatch):
+    from app.services.offline import activity_generation as gen
+    specs = [gen.SearchQuerySpec(str(i)) for i in range(6)]
+    monkeypatch.setattr(gen, '_search_query_specs', lambda *args: specs)
+    async def search(query, **kwargs):
+        if int(query) < 2:
+            return [SearchResult(title='镇江这些咖啡店', url=f'https://example.com/list-{query}-{i}', content='镇江市') for i in range(4)]
+        if int(query) < 4:
+            return [SearchResult(title='镇江博物馆', url=f'https://example.com/museum-{query}-{i}', content='镇江市') for i in range(4)]
+        return [SearchResult(title=name, url=f'https://example.com/{query}-{i}', content='镇江市') for i,name in enumerate(['南山公园','西津渡古街','库迪咖啡(临湖苑店)'])]
+    mocked = AsyncMock(side_effect=search)
+    monkeypatch.setattr(gen, 'tavily_search', mocked)
+    filtered, _, _ = await gen._search_activity_candidates('镇江市', [], [], city='镇江市')
+    names = {gen._place_from_source(item, '镇江市') for item in filtered}
+    assert {'南山公园','镇江博物馆','西津渡古街','库迪咖啡(临湖苑店)'} <= names
+    assert mocked.await_count == 6
 
 
 def test_tripadvisor_generic_review_source_is_not_usable_activity_source():
@@ -386,11 +416,42 @@ async def test_create_recommendation_requires_location_anchor(monkeypatch):
     )
     monkeypatch.setattr(activity_service, "generate_activity_card", generate)
 
-    result = await activity_service.create_recommendation_for_user(
-        user_id="user-1",
-        workspace_id="workspace-1",
-        source="manual",
-    )
-
-    assert result is None
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as failure:
+        await activity_service.create_recommendation_for_user(
+            user_id="user-1", workspace_id="workspace-1", source="manual",
+        )
+    assert failure.value.detail['reason'] == 'location_required'
     generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize('city,timeout,expected', [('镇江市', False, True), ('镇江市', True, True), ('上海市', False, False)])
+async def test_article_place_requires_independent_source_and_survives_image_timeout(monkeypatch, city, timeout, expected):
+    import json
+    from app.services.offline import activity_generation as gen
+    article = SearchResult(title='镇江这些咖啡店', url='https://example.com/list', content='镇江折光咖啡')
+    verified = SearchResult(title='折光咖啡', url='https://example.com/place', content=city + '某路1号')
+    monkeypatch.setattr(gen.repo, 'list_user_tags', AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen.repo, 'memory_brief', AsyncMock(return_value=''))
+    monkeypatch.setattr(gen.repo, 'list_recent_activity_fingerprints', AsyncMock(return_value=[]))
+    monkeypatch.setattr(gen, '_search_activity_candidates', AsyncMock(return_value=([article], [article], 'query')))
+    monkeypatch.setattr(gen, 'get_prompt_text', AsyncMock(return_value='{sources_json} {avoid_text}'))
+    monkeypatch.setattr(gen, 'invoke_text', AsyncMock(return_value=json.dumps(dict(
+        title='喝杯咖啡', location_name='折光咖啡', official_url=article.url,
+        summary='模型推测有免费甜品', address='未核实的地址',
+        image_urls=['https://invented.example/fake.jpg'],
+    ))))
+    monkeypatch.setattr(gen, 'tavily_search', AsyncMock(return_value=[verified]))
+    images = AsyncMock(side_effect=TimeoutError) if timeout else AsyncMock(return_value=[])
+    monkeypatch.setattr(gen, 'persist_activity_images', images)
+    monkeypatch.setattr(gen, '_recommendation_copy', AsyncMock(return_value=''))
+    result = await gen.generate_activity_card(user_id='u', workspace_id=None, city='镇江市', source='manual')
+    assert bool(result) == expected
+    if expected:
+        assert result['location_name'] == '折光咖啡'
+        assert result['official_url'] == verified.url
+        assert result['image_urls'] == []
+        assert '免费甜品' not in result['summary']
+        assert result['address'] != '未核实的地址'
+    else:
+        images.assert_not_awaited()
