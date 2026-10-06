@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from app.api.jwt_auth import require_admin_jwt
 from app.models.prompt_template import (
     PromptTemplateEnabledRequest,
+    PromptTemplateWriteGuard,
     PromptTemplateReplayRequest,
     PromptTemplateReplayResponse,
     PromptTemplateRestoreVersionRequest,
@@ -72,13 +73,14 @@ async def update_prompt(
             key,
             payload.content,
             expected_updated_at=payload.expected_updated_at,
+            **({"expected_revision": payload.expected_revision} if payload.expected_revision is not None else {}),
         )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Prompt not found") from None
     except PromptUpdateConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Prompt not found") from None
     return PromptTemplateResponse(**prompt)
 
 
@@ -91,7 +93,11 @@ async def update_prompt_enabled(
     """启用/停用提示词. 停用后该模板从运行时最终输入中彻底移除:
     组合 section → 该段不注入; 独立步骤 prompt → 该 LLM 调用跳过走 fallback."""
     try:
-        prompt = await set_prompt_enabled(key, payload.is_enabled)
+        prompt = await set_prompt_enabled(key, payload.is_enabled, **payload.model_dump(exclude={"is_enabled"}, exclude_none=True))
+    except PromptUpdateConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
     return PromptTemplateResponse(**prompt)
@@ -114,6 +120,8 @@ async def replay_prompt_step(
     rendered_prompt = payload.rendered_prompt
     if not rendered_prompt.strip():
         raise HTTPException(status_code=400, detail="rendered_prompt is required")
+    from app.services.runtime_config import ensure_loaded
+    await ensure_loaded()
     model = get_chat_model() if payload.model_kind == "chat" else get_utility_model()
     # Validate outside the try: a malformed payload must surface as 400, not be
     # re-wrapped by the generic 502 "replay failed" handler below.
@@ -148,9 +156,13 @@ async def get_prompt_versions(
 
 
 @router.post("/{key}/reset", response_model=PromptTemplateResponse)
-async def reset_prompt(key: str, _: str = Depends(require_admin_jwt)):
+async def reset_prompt(key: str, payload: PromptTemplateWriteGuard | None = Body(default=None), _: str = Depends(require_admin_jwt)):
     try:
-        prompt = await reset_prompt_text(key)
+        prompt = await reset_prompt_text(key, **(payload.model_dump(exclude_none=True) if payload else {}))
+    except PromptUpdateConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt not found") from None
     return PromptTemplateResponse(**prompt)
@@ -163,7 +175,11 @@ async def restore_prompt_from_version(
     _: str = Depends(require_admin_jwt),
 ):
     try:
-        prompt = await restore_prompt_version(key, payload.version_id)
+        prompt = await restore_prompt_version(key, payload.version_id, **payload.model_dump(exclude={"version_id"}, exclude_none=True))
+    except PromptUpdateConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError:
         raise HTTPException(status_code=404, detail="Prompt version not found") from None
     return PromptTemplateResponse(**prompt)

@@ -44,7 +44,6 @@ async def flow(monkeypatch):
     redis = Redis.from_url(redis_url, decode_responses=True)
     await database.connect()
     tag = uuid4().hex
-    monkeypatch.setattr(store, '_enabled_local_cache', {})
     monkeypatch.setattr(store, '_redis_key', lambda key: f'e2e:{tag}:text:{key}')
     monkeypatch.setattr(store, '_enabled_redis_key', lambda key: f'e2e:{tag}:enabled:{key}')
     monkeypatch.setattr(store, 'get_redis', AsyncMock(return_value=redis))

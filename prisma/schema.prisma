@@ -1058,6 +1058,8 @@ model PromptTemplate {
   content        String
   defaultContent String   @map("default_content")
   isEnabled      Boolean  @default(true) @map("is_enabled")
+  revision       Int      @default(1)
+  webManaged     Boolean  @default(false) @map("web_managed")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
@@ -1072,6 +1074,7 @@ model PromptTemplateVersion {
   source     String
   changeType String   @map("change_type")
   evalResult Json?    @map("eval_result")
+  revision   Int?
   createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([promptId, createdAt(sort: Desc)])
@@ -2122,4 +2125,12 @@ model OfflinePlaceCatalog {
 
   @@index([expiresAt], map: "offline_place_catalog_expiry_idx")
   @@map("offline_place_catalog")
+}
+
+// Database triggers advance this counter for all configuration writers.
+model ConfigurationRevision {
+  scope    String @id
+  revision BigInt @default(1)
+
+  @@map("configuration_revisions")
 }

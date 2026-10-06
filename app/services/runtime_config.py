@@ -1,19 +1,7 @@
-"""Runtime config — 模型选择的动态配置 (admin "系统设置" + per-agent override).
+"""Database-backed dynamic configuration, refreshed at request boundaries.
 
-设计:
-  解析顺序: AgentConfigOverride.field → SystemConfig.field → settings.field (env)
-  字段范围: ONLINE_MODEL / REMOTE_CHAT_PROVIDER / REMOTE_SMALL_PROVIDER /
-          LOCAL_CHAT / LOCAL_SMALL / REMOTE_CHAT / REMOTE_SMALL
-  REMOTE_PROVIDER 保留为兼容 fallback, 新配置允许主回复与辅助任务走不同平台.
-  embedding 不在此 — 跨 agent 共享 vector store, 改了已有向量失真.
-
-热路径 (get_chat_model 等) 必须 sync 拿配置, 不能 await DB. 启动时把 system 行
-+ 所有 agent overrides 一次性 load 到模块级 in-memory cache; 任何 PUT 后调
-invalidate_caches() 重新 load + 清 lru_cache. ContextVar 携带当前 agent_id,
-模型工厂据此挑 override.
-
-ContextVar 在 orchestrator / proactive sender / memory pipeline 等请求入口设置
-(set_current_agent), 没设时 fallback 到 None → 仅取 system / env, 不应用 override.
+Workers use the database revision rather than relying on delivery of Pub/Sub.
+A bound turn keeps its model, prices and prompt content; disabling a prompt is live.
 """
 
 from __future__ import annotations
@@ -59,9 +47,15 @@ class ResolvedConfig:
     user_message_aggregation_enabled: bool
 
 
-# Module-level caches, 启动时填充, 配置变更时 invalidate 重 load.
-# 单进程内 dict 即可; 多 worker 时各 worker 自己 load (PUT API 也只更新本进程,
-# 跨 worker 同步靠 Redis pub/sub, 暂不实现 — 单 worker 部署足够).
+@dataclass(frozen=True)
+class ConfigurationSnapshot:
+    global_config: dict | None
+    agent_configs: dict[str, dict]
+    pricing: dict[str, dict[str, float]]
+    tts_pricing: dict[str, dict[str, float | str]]
+
+
+# Module caches are replaced atomically after a consistent database snapshot.
 _GLOBAL_CACHE: dict | None = None
 _AGENT_CACHE: dict[str, dict] = {}
 # {"provider/identifier": {"input": float, "output": float}}.
@@ -70,6 +64,9 @@ _AGENT_CACHE: dict[str, dict] = {}
 _PRICING_CACHE: dict[str, dict[str, float]] = {}
 _TTS_PRICING_CACHE: dict[str, dict[str, float | str]] = {}
 _CACHE_LOADED = False
+_CACHE_REVISION = -1
+_PROMPTS_CACHE: dict = {}
+_current_snapshot: ContextVar[ConfigurationSnapshot | None] = ContextVar("configuration_snapshot", default=None)
 # 防并发 ensure_loaded 触发 N 次 load_caches (每次都打 DB)
 _LOAD_LOCK = asyncio.Lock()
 
@@ -95,7 +92,13 @@ def reset_current_agent(token) -> None:
     if token is None:
         return
     try:
-        _current_agent.reset(token)
+        if isinstance(token, AgentBinding):
+            from app.services.prompting.store import reset_prompt_snapshot
+            reset_prompt_snapshot(token.prompts)
+            _current_snapshot.reset(token.configuration)
+            _current_agent.reset(token.agent)
+        else:
+            _current_agent.reset(token)
     except (LookupError, ValueError):
         # 跨 task reset 抛 ValueError, 跨 ctx 抛 LookupError, 静默兜底.
         pass
@@ -105,41 +108,54 @@ def get_current_agent() -> str | None:
     return _current_agent.get()
 
 
-async def bind_agent_context(agent_id: str | None):
-    """请求入口的便捷封装: ensure_loaded + set_current_agent.
+@dataclass(frozen=True)
+class AgentBinding:
+    agent: object
+    configuration: object
+    prompts: object
 
-    返回 Token. 大多数 fire-and-forget 入口 (proactive/cron) 可忽略;
-    长流式入口 (orchestrator) try/finally + reset_current_agent(token).
-    """
-    await ensure_loaded()
-    return _current_agent.set(agent_id)
+
+async def bind_agent_context(agent_id: str | None, *, reuse_snapshot: bool = False):
+    from app.services.prompting.store import bind_prompt_snapshot
+    reuse = reuse_snapshot and _current_snapshot.get() is not None and get_current_agent() == agent_id
+    if not reuse:
+        # Models, prices and prompt contents share one repeatable-read database view.
+        await load_caches()
+    snapshot = _current_snapshot.get() if reuse else ConfigurationSnapshot(
+        _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _TTS_PRICING_CACHE,
+    )
+    # Reusing a nested fragment preserves the prompt ContextVar without rebinding content.
+    from app.services.prompting.store import get_prompt_snapshot
+    prompts = get_prompt_snapshot() if reuse else _PROMPTS_CACHE
+    return AgentBinding(_current_agent.set(agent_id), _current_snapshot.set(snapshot),
+                        bind_prompt_snapshot(prompts))
 
 
 async def load_caches() -> None:
-    """启动时调用. PUT API 改完后也调用 (invalidate + reload).
+    async with _LOAD_LOCK:
+        await _load_caches_unlocked()
 
-    先把 DB 行装进新 dict 再原子赋值给 module-level — 期间 sync 读者继续读
-    旧值 (一致), 不会读到半填充状态. 同步路径不 await ensure_loaded, 这是
-    避免 stale-read 的关键 (旧实现先 _CACHE_LOADED=False 再 reload, 中间窗口
-    sync 读者拿到未清空的旧 dict, 与新 _CACHE_LOADED 状态语义割裂).
 
-    DB 是模型配置真源, env 仅在 DB 整体不可用时兜底. 首次启动 / 现有 deploy
-    没跑 seed migration 时 system_config 行可能缺 → 用当前 env 默认 auto-seed.
-    """
-    global _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _TTS_PRICING_CACHE, _CACHE_LOADED
+async def _load_caches_unlocked() -> None:
+    """Read a consistent DB view and retain the last complete view on failure."""
+    global _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _TTS_PRICING_CACHE, _CACHE_LOADED, _CACHE_REVISION, _PROMPTS_CACHE
     new_pricing: dict[str, dict[str, float]] = {}
     new_tts_pricing: dict[str, dict[str, float | str]] = {}
     try:
-        sys_row = await db.systemconfig.find_unique(where={"id": 1})
-        if sys_row is None:
-            sys_row = await _seed_system_config_with_env_defaults()
+        if await db.systemconfig.find_unique(where={"id": 1}) is None:
+            await _seed_system_config_with_env_defaults()
+        async with db.tx() as tx:
+            await tx.execute_raw("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            sys_row = await tx.systemconfig.find_unique(where={"id": 1})
+            overrides = await tx.agentconfigoverride.find_many()
+            registry = await tx.modelregistry.find_many()
+            prompts = await tx.prompttemplate.find_many()
+            revision_rows = await tx.query_raw("SELECT revision FROM configuration_revisions WHERE scope='models'")
+        revision = int(revision_rows[0]["revision"])
         _verify_prisma_client_fields(sys_row)
         new_global = _row_to_dict(sys_row)
-        overrides = await db.agentconfigoverride.find_many()
         new_agent = {row.agentId: _row_to_dict(row) for row in overrides}
-        # 装载 model_registry 的价格 (只 enabled, 因为 disabled 模型不会被新调用,
-        # 但已有 llm_usage 行的归桶若指向它仍能匹配 → 保险起见 disabled 也装).
-        registry = await db.modelregistry.find_many()
+        new_prompts = {row.key: (row.content, row.isEnabled) for row in prompts}
         identifier_counts: dict[str, int] = {}
         for r in registry:
             identifier_counts[r.identifier] = identifier_counts.get(r.identifier, 0) + 1
@@ -166,17 +182,19 @@ async def load_caches() -> None:
             new_pricing[f"{r.provider}/{r.identifier}"] = pricing
             if identifier_counts.get(r.identifier, 0) == 1:
                 new_pricing[r.identifier] = pricing
-    except Exception as e:
-        # DB 不可用 (e.g. 测试无连接) → 缓存空, 全部 fallback 到 env / 价格当 0.
-        logger.warning(f"[RUNTIME-CONFIG] load failed, falling back to env only: {e}")
-        new_global = {}
-        new_agent = {}
+    except Exception:
+        # Retain the last complete configuration; a transient error never resets it to env.
+        # Initial failure stays retryable, and callers may use environment defaults.
+        logger.warning("[RUNTIME-CONFIG] refresh failed; retaining last complete snapshot", exc_info=True)
+        return
     _GLOBAL_CACHE = new_global
     _AGENT_CACHE = new_agent
     _PRICING_CACHE = new_pricing
     _TTS_PRICING_CACHE = new_tts_pricing
+    _PROMPTS_CACHE = new_prompts
+    _CACHE_REVISION = revision
     _CACHE_LOADED = True
-    logger.info(
+    logger.debug(
         f"[RUNTIME-CONFIG] loaded: global={bool(_GLOBAL_CACHE)} "
         f"overrides={len(_AGENT_CACHE)} pricing={len(_PRICING_CACHE)}"
     )
@@ -185,7 +203,7 @@ async def load_caches() -> None:
 async def _seed_system_config_with_env_defaults():
     """system_config 行不存在时用 env 默认 seed 一行. 仅首次. 后续改靠 admin PUT."""
     logger.info("[RUNTIME-CONFIG] system_config row missing, seeding with env defaults")
-    return await db.systemconfig.create(data={
+    return await db.systemconfig.upsert(where={"id": 1}, data={"update": {}, "create": {
         "id": 1,
         "onlineModel": settings.online_model,
         "remoteProvider": settings.remote_provider,
@@ -197,7 +215,7 @@ async def _seed_system_config_with_env_defaults():
         "remoteSmallModel": settings.remote_small_model,
         "ttsModel": settings.dashscope_tts_model,
         "ttsOutputProbability": settings.tts_output_probability,
-    })
+    }})
 
 
 # SystemConfig 里生产依赖的字段 (schema.prisma 里的驼峰名). 加新列到 SystemConfig
@@ -274,41 +292,50 @@ def invalidate_caches() -> None:
     # 循环 import 防御: 延迟导入
     try:
         from app.services.llm.models import (
-            get_chat_model, get_utility_model, get_embedding_model,
+            get_chat_model, get_utility_model,
             get_fallback_chat_model,
         )
         get_chat_model.cache_clear()
         get_utility_model.cache_clear()
-        get_embedding_model.cache_clear()
         get_fallback_chat_model.cache_clear()
     except Exception as e:
         logger.warning(f"[RUNTIME-CONFIG] cache_clear failed: {e}")
 
 
 async def ensure_loaded() -> None:
-    """resolve_config_sync 调用前确保 caches 已 load. 启动 lifespan 也可主动调.
-
-    Lock 防并发: 多个请求同时穿透 _CACHE_LOADED=False 时只 load 一次.
-    """
-    if _CACHE_LOADED:
+    if _current_snapshot.get() is not None:
         return
-    async with _LOAD_LOCK:
-        if not _CACHE_LOADED:  # double-check
-            await load_caches()
+    if _CACHE_LOADED:
+        try:
+            rows = await db.query_raw("SELECT revision FROM configuration_revisions WHERE scope='models'")
+            if int(rows[0]["revision"]) == _CACHE_REVISION:
+                return
+        except Exception:
+            logger.warning("[RUNTIME-CONFIG] revision check failed; retaining cached configuration")
+            return
+    await load_caches()
+
+
+async def refresh_worker_config() -> None:
+    """Refresh synchronous-only consumers too; request boundaries still check the DB."""
+    while True:
+        await asyncio.sleep(2)
+        await ensure_loaded()
 
 
 def resolve_config_sync(agent_id: str | None = None) -> ResolvedConfig:
     """同步取配置, 解析链 agent override → system (DB 真源) → env (兜底).
 
     正常情况 system_config 行总是存在 (migration seed + load_caches auto-seed),
-    env fallback 仅在 DB 整体 load 失败时触发 (load_caches except 把 _GLOBAL_CACHE
-    置 {}). 即: 跑得动 DB 就用 DB, 跑不动才用 env.
+    首次加载失败时使用 env；之后刷新失败保留最近一份完整配置。
 
     agent_id 为 None 时跳过 override (用于无会话上下文场景: admin 建 agent /
     cron / global memory pipeline). 显式传 agent_id 时按该 agent 的 override 取.
     """
-    ag_override = _AGENT_CACHE.get(agent_id) if agent_id else None
-    glob = _GLOBAL_CACHE or {}
+    snapshot = _current_snapshot.get()
+    agents = snapshot.agent_configs if snapshot else _AGENT_CACHE
+    ag_override = agents.get(agent_id) if agent_id else None
+    glob = (snapshot.global_config if snapshot else _GLOBAL_CACHE) or {}
 
     def _pick(field: str, env_default):
         if ag_override and field in ag_override:
@@ -445,9 +472,11 @@ def get_pricing(model: str) -> dict[str, float] | None:
     pricing.estimate_cost_cny 调本函数. _PRICING_CACHE 由 load_caches 装载;
     admin PUT model_registry 后 invalidate_caches → 下次 ensure_loaded 重 load.
     """
-    return _PRICING_CACHE.get(model)
+    snapshot = _current_snapshot.get()
+    return (snapshot.pricing if snapshot else _PRICING_CACHE).get(model)
 
 
 def get_tts_pricing(model: str) -> dict[str, float | str] | None:
     """Return TTS unit pricing metadata for a registered speech model."""
-    return _TTS_PRICING_CACHE.get(model)
+    snapshot = _current_snapshot.get()
+    return (snapshot.tts_pricing if snapshot else _TTS_PRICING_CACHE).get(model)

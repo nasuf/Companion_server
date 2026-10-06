@@ -95,6 +95,9 @@ jobs:
       - name: Run backend quality tests
         run: |
           pytest \
+            tests/test_configuration_consistency_e2e.py \
+            tests/test_prompt_store.py \
+            tests/test_prompt_sync_overwrite_warning.py \
             tests/test_proactive_common_rules.py \
             tests/test_proactive_activity_e2e.py \
             tests/test_offline_quality_e2e.py \

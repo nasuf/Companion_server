@@ -81,42 +81,32 @@ def _provider_for(role: str) -> Provider:
     return spec.id
 
 
-def _current_agent_key() -> str | None:
-    """lru_cache key — 让不同 agent 共享或独占模型实例."""
-    from app.services.runtime_config import get_current_agent
-    return get_current_agent()
+@lru_cache(maxsize=256)
+def _build_chat_model(provider: str, model: str) -> BaseChatModel:
+    return build_chat_model(provider, model)
 
 
 @lru_cache(maxsize=256)
-def _build_chat_model(_agent_key: str | None) -> BaseChatModel:
-    return build_chat_model(_provider_for("chat"), _chat_model_name())
+def _build_utility_model(provider: str, model: str) -> BaseChatModel:
+    return build_chat_model(provider, model)
 
 
 @lru_cache(maxsize=256)
-def _build_utility_model(_agent_key: str | None) -> BaseChatModel:
-    return build_chat_model(_provider_for("utility"), _utility_model_name())
-
-
-@lru_cache(maxsize=256)
-def _build_fallback_chat_model(_agent_key: str | None) -> ChatOllama:
-    cfg = _resolved()
-    return cast(ChatOllama, build_chat_model("ollama", cfg.local_chat_model))
+def _build_fallback_chat_model(model: str) -> ChatOllama:
+    return cast(ChatOllama, build_chat_model("ollama", model))
 
 
 def get_chat_model() -> BaseChatModel:
-    """主回复大模型. 缓存按 (current ContextVar agent_id) 分桶, 按 agent override
-    取不同实例; 改 admin/per-agent 配置后 invalidate_caches() 清桶. cache_clear
-    暴露给 runtime_config.invalidate_caches() 调用."""
-    return _build_chat_model(_current_agent_key())
+    # Content-addressed cache: an old in-flight turn cannot poison a new turn's bucket.
+    return _build_chat_model(_provider_for("chat"), _chat_model_name())
 
 
 def get_utility_model() -> BaseChatModel:
-    return _build_utility_model(_current_agent_key())
+    return _build_utility_model(_provider_for("utility"), _utility_model_name())
 
 
 def get_fallback_chat_model() -> ChatOllama:
-    """resilience.py 用作 primary 失败兜底, 始终是本地 Ollama LOCAL_CHAT_MODEL."""
-    return _build_fallback_chat_model(_current_agent_key())
+    return _build_fallback_chat_model(_resolved().local_chat_model)
 
 
 # 公开 cache_clear hook 给 runtime_config 调用 (PUT 配置后清缓存)

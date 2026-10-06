@@ -25,7 +25,8 @@ async def test_shared_prefix_allowlist_and_disabled_semantics(monkeypatch):
     })
     cache = AsyncMock()
     cache.get.side_effect = lambda key: '共同规则' if key.endswith(PROACTIVE_COMMON_KEY) else '场景 {name}'
-    monkeypatch.setattr(store, 'get_redis', AsyncMock(return_value=cache))
+    from contextvars import ContextVar
+    monkeypatch.setattr(store, '_prompt_snapshot', ContextVar('test_proactive_prompts', default={key: ('共同规则' if key == PROACTIVE_COMMON_KEY else '场景 {name}', True) for key in PROACTIVE_REPLY_PROMPT_KEYS | {PROACTIVE_COMMON_KEY}}))
     enabled = AsyncMock(return_value=True)
     monkeypatch.setattr(store, 'is_prompt_enabled', enabled)
     for key in PROACTIVE_REPLY_PROMPT_KEYS:

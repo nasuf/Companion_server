@@ -81,7 +81,6 @@ def configure_pair(patches):
     patches.setattr(store, "db", SimpleNamespace(prompttemplate=SimpleNamespace(
         find_unique=AsyncMock(return_value=None),
     )))
-    patches.setattr(store, "_enabled_local_cache", {})
     patches.setattr(chat, "_generate_reply", reply_generate.generate_reply)
     io.main_calls = []
     io.tier_calls = []

@@ -63,6 +63,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up...")
     scheduler_started = False
     ws_manager = None
+    config_refresh_task = None
 
     try:
         settings.validate_security_config()
@@ -130,6 +131,9 @@ async def lifespan(app: FastAPI):
                 f"Runtime config load failed ({e!r}); env defaults active."
             )
 
+        from app.services.runtime_config import refresh_worker_config
+        config_refresh_task = asyncio.create_task(refresh_worker_config(), name="configuration-refresh")
+
         from app.services.agent_avatars import validate_avatar_assets
 
         validate_avatar_assets()
@@ -148,6 +152,12 @@ async def lifespan(app: FastAPI):
         logger.info(f"Startup complete ({total:.0f}ms)")
         yield
     finally:
+        if config_refresh_task is not None:
+            config_refresh_task.cancel()
+            try:
+                await config_refresh_task
+            except asyncio.CancelledError:
+                pass
         if ws_manager is not None:
             try:
                 await ws_manager.stop_subscriber()

@@ -1,50 +1,37 @@
-"""Prompt storage service backed by Redis + Prisma."""
-
+"""Database-authoritative prompt storage with transactional audit and fenced cache."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
+from contextvars import ContextVar
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from prisma import Json
-
 from app.db import db
 from app.redis_client import get_redis
-from app.services.prompting.registry import PROMPT_DEFINITION_MAP, PROMPT_DEFINITIONS, PromptDefinition
+from app.services.prompting.registry import PROMPT_DEFINITION_MAP, PROMPT_DEFINITIONS
 from app.services.prompting.trace_components import ManagedPromptText
 
 logger = logging.getLogger(__name__)
-
 PROMPT_KEY_PREFIX = "prompt_template:"
 PROMPT_ENABLED_KEY_PREFIX = "prompt_enabled:"
-
-# enabled 状态的进程内缓存 TTL. 热路径每次 get_prompt_text 都要判断 enabled,
-# 不能每次打 Redis; 10s 内以本进程缓存为准，多 worker 最迟 10s 后全量生效.
-_ENABLED_LOCAL_TTL_SECONDS = 10.0
-_enabled_local_cache: dict[str, tuple[bool, float]] = {}
-
+_ROOT = Path(__file__).resolve().parents[3]
+_EVAL_CASES = _ROOT / "evals" / "cases.jsonl"
+_prompt_snapshot: ContextVar[dict | None] = ContextVar("prompt_snapshot", default=None)
 
 class PromptDisabledError(Exception):
-    """Raised when a prompt template is disabled by admin.
-
-    - render_prompt 捕获后返回 None (调用方已有 fallback 语义).
-    - prompt_builder 捕获后跳过对应 section (从最终模型输入中彻底移除).
-    """
-
     def __init__(self, key: str):
         super().__init__(f"Prompt disabled: {key}")
         self.key = key
 
-
 class PromptUpdateConflictError(Exception):
-    """Raised when an optimistic-lock save detects a concurrent modification."""
-_ROOT = Path(__file__).resolve().parents[3]
-_EVAL_CASES = _ROOT / "evals" / "cases.jsonl"
+    """The version seen by an administrator is no longer current."""
+
+
 def _redis_key(key: str) -> str:
     return f"{PROMPT_KEY_PREFIX}{key}"
 
@@ -53,80 +40,211 @@ def _enabled_redis_key(key: str) -> str:
     return f"{PROMPT_ENABLED_KEY_PREFIX}{key}"
 
 
-def _cache_enabled_local(key: str, enabled: bool) -> None:
-    _enabled_local_cache[key] = (enabled, time.monotonic() + _ENABLED_LOCAL_TTL_SECONDS)
+_CACHE_LUA = """
+local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or '-1')
+if redis.call('HGET', KEYS[1], 'prompt_id') == ARGV[4] and revision > tonumber(ARGV[1]) then return 0 end
+redis.call('HSET', KEYS[1], 'revision', ARGV[1], 'content', ARGV[2], 'enabled', ARGV[3], 'prompt_id', ARGV[4])
+redis.call('SET', KEYS[2], ARGV[2])
+redis.call('SET', KEYS[3], ARGV[3])
+return 1
+"""
+
+
+async def _sync_cache(row) -> bool:
+    """A failed cache write never rolls back a committed save. Older writes lose."""
+    try:
+        # Redis can evict its revision fence. Validate under a database row lock as
+        # well, so a delayed publisher cannot resurrect an older snapshot after eviction.
+        async with db.tx() as tx:
+            await _lock(tx, row.key)
+            current = await tx.prompttemplate.find_unique(where={"key": row.key})
+            if current is None or current.id != row.id or current.revision != row.revision:
+                return False
+            redis = await get_redis()
+            result = await redis.eval(_CACHE_LUA, 3, f"prompt_snapshot:{row.key}",
+                                      _redis_key(row.key), _enabled_redis_key(row.key),
+                                      row.revision, row.content, "1" if row.isEnabled else "0", row.id)
+            return bool(result)
+    except Exception:
+        logger.warning("[PROMPT-CACHE] sync pending key=%s revision=%s", getattr(row, "key", "unknown"), getattr(row, "revision", "unknown"))
+        return False
+
+
+def _response(definition, row, *, cache_synced=True, version_id=None) -> dict:
+    return {**asdict(definition), "content": row.content if row else definition.default_text,
+            "is_enabled": row.isEnabled if row else True, "source": "db" if row else "default",
+            "updated_at": row.updatedAt.isoformat() if row else None,
+            "revision": row.revision if row else 0, "web_managed": row.webManaged if row else False,
+            "cache_synced": cache_synced, "version_id": version_id}
+
+
+def _check_expected(row, expected_updated_at=None, expected_revision=None):
+    if expected_revision is not None and (row.revision if row else 0) != expected_revision:
+        raise PromptUpdateConflictError("提示词已被修改，请刷新后比对草稿再保存。")
+    if expected_updated_at:
+        try:
+            expected = datetime.fromisoformat(expected_updated_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Invalid expected_updated_at") from exc
+        if not row or expected != row.updatedAt:
+            raise PromptUpdateConflictError("提示词已被修改，请刷新后比对草稿再保存。")
+
+
+async def _lock(tx, key):
+    # Serializes bootstrap/save/reset/restore/enable, including a missing row.
+    await tx.query_raw("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))::text AS locked", "prompt:" + key)
+    # Also serialize writers using the old store (which knows no advisory lock).
+    await tx.query_raw("SELECT id FROM prompt_templates WHERE key=$1 FOR UPDATE", key)
+
+
+def _new_data(definition):
+    return {"key": definition.key, "stage": definition.stage, "category": definition.category,
+            "title": definition.title, "description": definition.description,
+            "content": definition.default_text, "defaultContent": definition.default_text}
+
+
+async def _version(tx, row, change_type, source):
+    return await tx.prompttemplateversion.create(data={"promptId": row.id, "promptKey": row.key,
+        "content": row.content, "source": source, "changeType": change_type, "revision": row.revision})
+
+
+def _schedule_eval(version):
+    from app.services.runtime.tasks import fire_background
+    fire_background(_attach_eval_to_version(version.id, version.promptKey, version.changeType))
+
+
+def get_prompt_snapshot() -> dict | None:
+    return _prompt_snapshot.get()
+
+
+def bind_prompt_snapshot(snapshot: dict | None):
+    return _prompt_snapshot.set(snapshot)
+
+
+def reset_prompt_snapshot(token) -> None:
+    _prompt_snapshot.reset(token)
 
 
 async def is_prompt_enabled(key: str) -> bool:
-    """Return the admin enable/disable state (local cache → Redis → DB)."""
     if key not in PROMPT_DEFINITION_MAP:
         raise KeyError(f"Unknown prompt key: {key}")
-    cached = _enabled_local_cache.get(key)
-    if cached is not None and cached[1] > time.monotonic():
-        return cached[0]
-
-    redis = await get_redis()
-    raw = await redis.get(_enabled_redis_key(key))
-    if raw is None:
-        record = await db.prompttemplate.find_unique(where={"key": key})
-        enabled = bool(record.isEnabled) if record else True
-        await redis.set(_enabled_redis_key(key), "1" if enabled else "0")
-    else:
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", "ignore")
-        enabled = str(raw) != "0"
-    _cache_enabled_local(key, enabled)
-    return enabled
+    row = await db.prompttemplate.find_unique(where={"key": key})
+    snapshot = _prompt_snapshot.get()
+    # A live disable is a safety switch; enabling a prompt mid-turn waits for the next turn.
+    return (bool(row.isEnabled) if row else True) and (not snapshot or snapshot.get(key, (None, True))[1])
 
 
-async def set_prompt_enabled(key: str, enabled: bool) -> dict:
-    """Persist enable/disable to DB + Redis and record an audit version entry."""
+async def _mutate(key, change_type, *, content=None, enabled=None, version_id=None,
+                  expected_updated_at=None, expected_revision=None):
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
         raise KeyError(f"Unknown prompt key: {key}")
+    version = None
+    async with db.tx() as tx:
+        await _lock(tx, key)
+        row = await tx.prompttemplate.find_unique(where={"key": key})
+        _check_expected(row, expected_updated_at, expected_revision)
+        if version_id is not None:
+            previous = await tx.prompttemplateversion.find_unique(where={"id": version_id})
+            if not previous or previous.promptKey != key:
+                raise KeyError(f"Unknown prompt version for key: {key}")
+            content = previous.content
+        no_change = row and ((change_type == "manual_save" and content == row.content)
+                            or (enabled is not None and enabled == row.isEnabled))
+        if not no_change:
+            data = {}
+            if content is not None:
+                data.update(content=content, webManaged=True)
+            if enabled is not None:
+                data["isEnabled"] = enabled
+            if row:
+                row = await tx.prompttemplate.update(where={"key": key}, data=data)
+            else:
+                row = await tx.prompttemplate.create(data={**_new_data(definition), **data})
+            version = await _version(tx, row, change_type, "default" if change_type == "reset_default" else "db")
+    cache_synced = await _sync_cache(row)
+    if version:
+        _schedule_eval(version)
+    return _response(definition, row, cache_synced=cache_synced, version_id=version.id if version else None)
 
-    row = await db.prompttemplate.find_unique(where={"key": key})
-    if row:
-        row = await db.prompttemplate.update(
-            where={"key": key},
-            data={"isEnabled": enabled},
-        )
-    else:
-        row = await db.prompttemplate.create(
-            data={
-                "key": key,
-                "stage": definition.stage,
-                "category": definition.category,
-                "title": definition.title,
-                "description": definition.description,
-                "content": definition.default_text,
-                "defaultContent": definition.default_text,
-                "isEnabled": enabled,
-            }
-        )
 
-    redis = await get_redis()
-    await redis.set(_enabled_redis_key(key), "1" if enabled else "0")
-    _cache_enabled_local(key, enabled)
+async def update_prompt_text(key: str, content: str, *, expected_updated_at=None, expected_revision=None):
+    normalized = content.strip()
+    if not normalized:
+        raise ValueError("Prompt content cannot be empty")
+    return await _mutate(key, "manual_save", content=normalized,
+                         expected_updated_at=expected_updated_at, expected_revision=expected_revision)
 
-    # enable/disable 也进版本表留审计痕迹 (content 记录当时生效内容, 便于追溯).
-    await _create_prompt_version(
-        prompt_id=row.id,
-        prompt_key=key,
-        content=row.content,
-        source="redis",
-        change_type="enable" if enabled else "disable",
-    )
-    logger.info("[PROMPT-ENABLED] key=%s enabled=%s", key, enabled)
 
-    cached = await redis.get(_redis_key(key))
-    return {
-        **asdict(definition),
-        "content": cached or row.content,
-        "is_enabled": enabled,
-        "updated_at": row.updatedAt.isoformat() if getattr(row, "updatedAt", None) else None,
-        "source": "redis" if cached else "db",
-    }
+async def set_prompt_enabled(key: str, enabled: bool, *, expected_updated_at=None, expected_revision=None):
+    return await _mutate(key, "enable" if enabled else "disable", enabled=enabled,
+                         expected_updated_at=expected_updated_at, expected_revision=expected_revision)
+
+
+async def reset_prompt_text(key: str, *, expected_updated_at=None, expected_revision=None):
+    definition = PROMPT_DEFINITION_MAP.get(key)
+    if not definition:
+        raise KeyError(key)
+    return await _mutate(key, "reset_default", content=definition.default_text,
+                         expected_updated_at=expected_updated_at, expected_revision=expected_revision)
+
+
+async def restore_prompt_version(key: str, version_id: str, *, expected_updated_at=None, expected_revision=None):
+    return await _mutate(key, f"restore:{version_id}", version_id=version_id,
+                         expected_updated_at=expected_updated_at, expected_revision=expected_revision)
+
+
+def history_requires_web(row, versions) -> bool:
+    """Check complete history, never just whether the content differs today.
+
+    A bootstrap recorded long after creation cannot prove earlier edits did not exist.
+    The one-minute window tolerates separate transactions used by the old seeder.
+    """
+    created = getattr(row, "createdAt", None)
+    initial = [v for v in versions if v.changeType == "bootstrap" and
+               created is not None and getattr(v, "createdAt", None) is not None and
+               abs(v.createdAt - created) <= timedelta(minutes=1)]
+    return bool(row.webManaged or row.content != row.defaultContent or not initial or any(
+        v.changeType not in {"bootstrap", "code_sync", "enable", "disable"} for v in versions))
+
+
+async def ensure_prompt_templates() -> None:
+    # Orphan keys retain their audit history; the registry limits runtime/UI access.
+    for definition in PROMPT_DEFINITIONS:
+        version = None
+        async with db.tx() as tx:
+            await _lock(tx, definition.key)
+            row = await tx.prompttemplate.find_unique(where={"key": definition.key})
+            if not row:
+                row = await tx.prompttemplate.create(data=_new_data(definition))
+                await _version(tx, row, "bootstrap", "default")
+            else:
+                # Ownership belongs to the registry key, even after a row is recreated.
+                history = await tx.prompttemplateversion.find_many(where={"promptKey": row.key})
+                protected = history_requires_web(row, history)
+                data = {}
+                for name, value in {"stage": definition.stage, "category": definition.category,
+                                    "title": definition.title, "description": definition.description}.items():
+                    if (getattr(row, name) or "") != (value or ""):
+                        data[name] = value
+                if protected and not row.webManaged:
+                    data["webManaged"] = True
+                changed = row.defaultContent != definition.default_text
+                if changed:
+                    data["defaultContent"] = definition.default_text
+                    if not protected:
+                        data["content"] = definition.default_text
+                    else:
+                        logger.info("[PROMPT-SYNC] preserved Web-managed key=%s", row.key)
+                if data:
+                    row = await tx.prompttemplate.update(where={"key": row.key}, data=data)
+                if changed and not protected:
+                    version = await _version(tx, row, "code_sync", "default")
+                elif not history:
+                    await _version(tx, row, "bootstrap", "db")
+        await _sync_cache(row)
+        if version:
+            _schedule_eval(version)
 
 
 def _json_or_none(value: Any) -> dict[str, Any] | None:
@@ -183,176 +301,24 @@ def _prompt_eval_result(*, prompt_key: str, change_type: str) -> dict[str, Any]:
         }
 
 
-async def ensure_prompt_templates() -> None:
-    """Ensure prompt templates exist in DB and warm Redis from DB state.
-
-    Also reconciles orphan rows — any key in DB/Redis that is no longer in
-    `PROMPT_DEFINITIONS` gets deleted so the data source stays in sync with code.
-
-    Optimized: batch-load all existing prompts + versions in 2 queries,
-    then only write to DB for missing/changed entries.
-    """
-    # Batch load: 1 query for all prompts, 1 for version counts
-    all_existing = await db.prompttemplate.find_many()
-    existing_map = {t.key: t for t in all_existing}
-
-    # Get prompt IDs that have at least one version (single query)
-    version_prompt_ids: set[str] = set()
-    if all_existing:
-        versions = await db.query_raw(
-            "SELECT DISTINCT prompt_id FROM prompt_template_versions",
-        )
-        version_prompt_ids = {str(v["prompt_id"]) for v in versions}
-
-    redis = await get_redis()
-    pipe = redis.pipeline()
-
-    # Reconcile orphans: DB keys not in registry → delete (rows + versions + Redis)
-    registry_keys = {d.key for d in PROMPT_DEFINITIONS}
-    orphan_keys = [k for k in existing_map if k not in registry_keys]
-    if orphan_keys:
-        logger.warning(
-            "Deleting %d orphan prompt template(s) not in registry: %s",
-            len(orphan_keys), ", ".join(sorted(orphan_keys)),
-        )
-        await db.prompttemplateversion.delete_many(where={"promptKey": {"in": orphan_keys}})
-        await db.prompttemplate.delete_many(where={"key": {"in": orphan_keys}})
-        for k in orphan_keys:
-            pipe.delete(_redis_key(k))
-            pipe.delete(_enabled_redis_key(k))
-
-    # 代码 default 视为 prompt 终极真理: defaultContent 与代码不一致时同步覆盖
-    # content, UI 定制作废; default 未变期间保留 UI 定制 (update_prompt_text
-    # 写 Redis 立即生效).
-    code_sync_keys: list[str] = []
-    for definition in PROMPT_DEFINITIONS:
-        existing = existing_map.get(definition.key)
-        pipe.set(
-            _enabled_redis_key(definition.key),
-            "0" if (existing and not existing.isEnabled) else "1",
-        )
-        if existing:
-            default_changed = existing.defaultContent != definition.default_text
-            metadata_changed = (
-                existing.stage != definition.stage
-                or existing.category != definition.category
-                or existing.title != definition.title
-                or (existing.description or "") != definition.description
-            )
-            metadata_data = {
-                "stage": definition.stage,
-                "category": definition.category,
-                "title": definition.title,
-                "description": definition.description,
-            }
-
-            if default_changed:
-                # 覆盖的是后台编辑过的内容时要吼一声。这个分支无条件用代码默认值
-                # 盖掉 content —— 历史上 chat.response_instruction 就这样被抹过一次,
-                # 事后只能从版本表把内容捞回来重新提交。判据是 content 与
-                # defaultContent 不同: 说明有人在后台改过而代码默认值没跟着变。
-                # 原文进了版本表 (下面那条 code_sync 记录的前一条), 可以捞回。
-                if existing.content != existing.defaultContent:
-                    logger.error(
-                        "[PROMPT-SYNC] key=%s 的后台编辑被代码默认值覆盖 "
-                        "(原 %d 字 → 新 %d 字)。若这不是本意, 从 "
-                        "prompt_template_versions 取回原文并走 update_prompt_text 重新提交。",
-                        definition.key,
-                        len(existing.content or ""),
-                        len(definition.default_text),
-                    )
-                content = definition.default_text
-                await db.prompttemplate.update(
-                    where={"key": definition.key},
-                    data={
-                        **metadata_data,
-                        "content": definition.default_text,
-                        "defaultContent": definition.default_text,
-                    },
-                )
-                await _create_prompt_version(
-                    prompt_id=existing.id,
-                    prompt_key=definition.key,
-                    content=definition.default_text,
-                    source="default",
-                    change_type="code_sync",
-                    attach_eval=True,
-                )
-                code_sync_keys.append(definition.key)
-                logger.info(f"[PROMPT-SYNC] key={definition.key} overridden by code default")
-            else:
-                content = existing.content
-                if metadata_changed:
-                    await db.prompttemplate.update(
-                        where={"key": definition.key},
-                        data=metadata_data,
-                    )
-
-            if existing.id not in version_prompt_ids:
-                # 已有行无 version 记录 (早期 seed 时版本表还没引入), 补一条作起点
-                await _create_prompt_version(
-                    prompt_id=existing.id,
-                    prompt_key=definition.key,
-                    content=content,
-                    source="db",
-                    change_type="bootstrap",
-                )
-        else:
-            content = definition.default_text
-            created = await db.prompttemplate.create(
-                data={
-                    "key": definition.key,
-                    "stage": definition.stage,
-                    "category": definition.category,
-                    "title": definition.title,
-                    "description": definition.description,
-                    "content": definition.default_text,
-                    "defaultContent": definition.default_text,
-                    "isEnabled": True,
-                }
-            )
-            await _create_prompt_version(
-                prompt_id=created.id,
-                prompt_key=definition.key,
-                content=definition.default_text,
-                source="default",
-                change_type="bootstrap",
-            )
-        pipe.set(_redis_key(definition.key), content)
-
-    await pipe.execute()
-    if code_sync_keys:
-        logger.info(
-            f"[PROMPT-SYNC] code_sync_count={len(code_sync_keys)} "
-            f"keys={sorted(code_sync_keys)}"
-        )
-
 
 async def get_prompt_text(key: str) -> str:
-    """Fetch latest prompt text from Redis, falling back to DB/default.
-
-    Raises PromptDisabledError when the template is disabled by admin —
-    callers must treat that as "本段/本功能提示词彻底不存在".
-
-    回复类模板 (reply_prefix.REPLY_PROMPT_KEYS) 在此统一注入固定前置
-    (通用回复规则 + 反幻觉)；日常/活动主动消息改用 proactive.common_rules，
-    保留任务自己的输出格式。前置来源模板自身不在集合内 (防递归).
-    """
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
         raise KeyError(f"Unknown prompt key: {key}")
-
     if not await is_prompt_enabled(key):
         raise PromptDisabledError(key)
-
-    redis = await get_redis()
-    cached = await redis.get(_redis_key(key))
-    if cached:
-        content = cached
+    snapshot = _prompt_snapshot.get()
+    if snapshot is not None:
+        content = snapshot.get(key, (definition.default_text, True))[0]
     else:
-        record = await db.prompttemplate.find_unique(where={"key": key})
-        content = record.content if record and record.content else definition.default_text
-        await redis.set(_redis_key(key), content)
+        row = await db.prompttemplate.find_unique(where={"key": key})
+        # Re-check the row used for content (a disable may race the first read).
+        if row and not row.isEnabled:
+            raise PromptDisabledError(key)
+        content = row.content if row else definition.default_text
+        if row:
+            await _sync_cache(row)
 
     from app.services.prompting.reply_prefix import (
         REPLY_PROMPT_KEYS, PROACTIVE_REPLY_PROMPT_KEYS, PROACTIVE_COMMON_KEY,
@@ -396,27 +362,11 @@ async def get_prompt_text_or_default(key: str) -> str:
         return ManagedPromptText(definition.default_text, key, prompt_variant="default")
 
 
-async def list_prompts() -> list[dict]:
-    """Return prompt definitions merged with DB and Redis state."""
-    redis = await get_redis()
-    rows = await db.prompttemplate.find_many(order=[{"stage": "asc"}, {"title": "asc"}])
-    row_map = {row.key: row for row in rows}
 
-    prompts: list[dict] = []
-    for definition in PROMPT_DEFINITIONS:
-        row = row_map.get(definition.key)
-        cached = await redis.get(_redis_key(definition.key))
-        content = cached or (row.content if row else definition.default_text)
-        prompts.append(
-            {
-                **asdict(definition),
-                "content": content,
-                "is_enabled": bool(row.isEnabled) if row else True,
-                "updated_at": row.updatedAt.isoformat() if row else None,
-                "source": "redis" if cached else ("db" if row else "default"),
-            }
-        )
-    return prompts
+async def list_prompts() -> list[dict]:
+    rows = await db.prompttemplate.find_many()
+    by_key = {row.key: row for row in rows}
+    return [_response(d, by_key.get(d.key)) for d in PROMPT_DEFINITIONS]
 
 
 async def _attach_eval_to_version(version_id: str, prompt_key: str, change_type: str) -> None:
@@ -434,32 +384,6 @@ async def _attach_eval_to_version(version_id: str, prompt_key: str, change_type:
     except Exception as exc:
         logger.warning("[PROMPT-EVAL] attach failed version=%s key=%s: %s", version_id, prompt_key, exc)
 
-
-async def _create_prompt_version(
-    *,
-    prompt_id: str,
-    prompt_key: str,
-    content: str,
-    source: str,
-    change_type: str,
-    attach_eval: bool = False,
-) -> None:
-    version = await db.prompttemplateversion.create(
-        data={
-            "promptId": prompt_id,
-            "promptKey": prompt_key,
-            "content": content,
-            "source": source,
-            "changeType": change_type,
-        }
-    )
-    if attach_eval:
-        # eval 快照可能要跑本地模拟 (秒级), 移出保存关键路径; 失败只丢 eval 徽章,
-        # 不影响版本记录本身的持久性. fire_background 统一处理错误日志/取消/
-        # request-scoped ContextVar 隔离.
-        from app.services.runtime.tasks import fire_background
-
-        fire_background(_attach_eval_to_version(version.id, prompt_key, change_type))
 
 
 async def list_prompt_versions(key: str, limit: int = 20) -> list[dict]:
@@ -481,218 +405,8 @@ async def list_prompt_versions(key: str, limit: int = 20) -> list[dict]:
             "change_type": version.changeType,
             "eval_result": _json_or_none(getattr(version, "evalResult", None)),
             "persistence": "synced",
+            "revision": version.revision,
             "created_at": version.createdAt.isoformat(),
         }
         for version in versions
     ]
-
-
-async def _persist_prompt_update(
-    key: str,
-    content: str,
-    *,
-    source: str,
-    change_type: str,
-    require_updated_at: Any = None,
-) -> Any:
-    """Persist content + version row.
-
-    require_updated_at: 乐观锁的原子形态 — 提供时用条件 update_many
-    (where key AND updatedAt) 代替无条件 update, 命中 0 行说明校验与写入的
-    间隙有并发修改, 抛 PromptUpdateConflictError. 仅 check-then-act 的
-    find_unique 比对挡不住毫秒级并发双写.
-    """
-    definition = PROMPT_DEFINITION_MAP[key]
-    try:
-        existing = await db.prompttemplate.find_unique(where={"key": key})
-        if existing:
-            # defaultContent 是 ensure_prompt_templates 的同步哨兵 (上次 startup 时
-            # 代码 default 的快照), 只归 bootstrap + startup sync 写. UI 保存 / reset
-            # / restore 路径不能触它, 否则下次代码改 default 时 sync 认为"哨兵对得
-            # 上" → 放弃覆盖 → UI 永远停在旧版本.
-            data = {
-                "content": content,
-                "stage": definition.stage,
-                "category": definition.category,
-                "title": definition.title,
-                "description": definition.description,
-            }
-            if require_updated_at is not None:
-                count = await db.prompttemplate.update_many(
-                    where={"key": key, "updatedAt": require_updated_at},
-                    data=data,
-                )
-                if not count:
-                    raise PromptUpdateConflictError(
-                        f"Prompt {key} was modified concurrently during save"
-                    )
-                row = await db.prompttemplate.find_unique(where={"key": key})
-            else:
-                row = await db.prompttemplate.update(
-                    where={"key": key},
-                    data=data,
-                )
-        else:
-            row = await db.prompttemplate.create(
-                data={
-                    "key": key,
-                    "stage": definition.stage,
-                    "category": definition.category,
-                    "title": definition.title,
-                    "description": definition.description,
-                    "content": content,
-                    "defaultContent": definition.default_text,
-                    "isEnabled": True,
-                }
-            )
-        await _create_prompt_version(
-            prompt_id=row.id,
-            prompt_key=key,
-            content=content,
-            source=source,
-            change_type=change_type,
-            attach_eval=change_type != "bootstrap",
-        )
-        return row
-    except Exception as exc:
-        logger.error("Failed to persist prompt %s: %s", key, exc)
-        raise
-
-
-async def update_prompt_text(
-    key: str,
-    content: str,
-    *,
-    expected_updated_at: str | None = None,
-) -> dict:
-    """Persist prompt update: Redis 先写立即生效, DB + 版本记录同步落库.
-
-    历史实现 DB 持久化是 fire-and-forget task, 存在两类丢失窗口:
-    1. 进程在 task 完成前崩溃 → 版本历史缺条, 且下次启动 Redis 被 DB 旧值覆盖;
-    2. 并发保存 task 完成顺序不定 → DB 内容与 Redis 分叉.
-    现改为: 校验 → 内容去重 → (可选) 乐观锁 → Redis 写入 → DB 同步落库,
-    DB 失败时回滚 Redis 并抛错, 保证 Redis/DB/版本表三者一致.
-
-    expected_updated_at: 前端携带其所见的 updated_at 快照; 与 DB 当前值不一致说明
-    有人并发改过 → 抛 PromptUpdateConflictError (API 层转 409), 防止静默互相覆盖.
-    """
-    definition = PROMPT_DEFINITION_MAP.get(key)
-    if not definition:
-        raise KeyError(f"Unknown prompt key: {key}")
-
-    normalized = content.strip()
-    if not normalized:
-        raise ValueError("Prompt content cannot be empty")
-
-    existing = await db.prompttemplate.find_unique(where={"key": key})
-    if (
-        expected_updated_at
-        and existing
-        and existing.updatedAt
-        and existing.updatedAt.isoformat() != expected_updated_at
-    ):
-        raise PromptUpdateConflictError(
-            f"Prompt {key} was modified by someone else at {existing.updatedAt.isoformat()}"
-        )
-
-    redis = await get_redis()
-    previous_cached = await redis.get(_redis_key(key))
-    current_effective = previous_cached or (
-        existing.content if existing and existing.content else definition.default_text
-    )
-    if (
-        normalized == current_effective
-        and existing is not None
-        and existing.content == normalized
-    ):
-        # 内容没变: 不产生重复版本记录, 直接返回当前状态.
-        # 必须同时要求 DB 一致 — 若 Redis 与 DB 分叉 (历史异步落库失败的存量),
-        # 管理员原样保存当前可见内容应当落 DB 修复分叉, 而不是静默 no-op
-        # (否则下次重启 ensure_prompt_templates 会用 DB 旧值覆盖 Redis 回退文案).
-        return {
-            **asdict(definition),
-            "content": normalized,
-            "is_enabled": bool(existing.isEnabled),
-            "updated_at": existing.updatedAt.isoformat() if existing.updatedAt else None,
-            "source": "redis" if previous_cached else "db",
-        }
-
-    await redis.set(_redis_key(key), normalized)
-    try:
-        row = await _persist_prompt_update(
-            key,
-            normalized,
-            source="redis",
-            change_type="manual_save",
-            # 带乐观锁请求时把校验下推为原子条件更新, 覆盖 find_unique 比对
-            # 与 update 之间的并发窗口.
-            require_updated_at=(
-                existing.updatedAt if expected_updated_at and existing else None
-            ),
-        )
-    except Exception:
-        # DB 落库失败 / 并发冲突 → 回滚 Redis, 保持一致性 (宁可保存失败也不要静默分叉).
-        if previous_cached is not None:
-            await redis.set(_redis_key(key), previous_cached)
-        else:
-            await redis.delete(_redis_key(key))
-        raise
-
-    return {
-        **asdict(definition),
-        "content": normalized,
-        "is_enabled": bool(getattr(row, "isEnabled", True)),
-        "updated_at": row.updatedAt.isoformat() if getattr(row, "updatedAt", None) else None,
-        "source": "redis",
-    }
-
-
-async def reset_prompt_text(key: str) -> dict:
-    """Reset prompt to default in Redis and DB."""
-    definition = PROMPT_DEFINITION_MAP.get(key)
-    if not definition:
-        raise KeyError(f"Unknown prompt key: {key}")
-
-    redis = await get_redis()
-    await redis.set(_redis_key(key), definition.default_text)
-    row = await _persist_prompt_update(
-        key,
-        definition.default_text,
-        source="default",
-        change_type="reset_default",
-    )
-    return {
-        **asdict(definition),
-        "content": definition.default_text,
-        # is_enabled 必须回传真实 DB 值: PromptTemplateResponse 默认 True,
-        # 漏传会让前端把已停用模板显示成已启用 (UI 与运行时状态分叉).
-        "is_enabled": bool(getattr(row, "isEnabled", True)),
-        "source": "default",
-        "updated_at": row.updatedAt.isoformat() if row else None,
-    }
-
-
-async def restore_prompt_version(key: str, version_id: str) -> dict:
-    definition = PROMPT_DEFINITION_MAP.get(key)
-    if not definition:
-        raise KeyError(f"Unknown prompt key: {key}")
-
-    version = await db.prompttemplateversion.find_unique(where={"id": version_id})
-    if not version or version.promptKey != key:
-        raise KeyError(f"Unknown prompt version for key: {key}")
-
-    redis = await get_redis()
-    await redis.set(_redis_key(key), version.content)
-    row = await _persist_prompt_update(
-        key,
-        version.content,
-        source="version_restore",
-        change_type=f"restore:{version_id}",
-    )
-    return {
-        **asdict(definition),
-        "content": version.content,
-        "is_enabled": bool(getattr(row, "isEnabled", True)),
-        "source": "redis",
-        "updated_at": row.updatedAt.isoformat() if row else None,
-    }

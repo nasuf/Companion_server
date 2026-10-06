@@ -145,7 +145,8 @@ async def test_get_prompt_text_injects_prefix_for_reply_keys(monkeypatch):
         "prompt_template:chat.response_instruction": "像朋友发微信那样回复，每条不超过{max_per}个字。",
         "prompt_template:chat.anti_hallucination_hard_rule": "【回答前的硬约束】不许编造。",
     }
-    monkeypatch.setattr(store, "get_redis", AsyncMock(return_value=_FakeRedis(redis_store)))
+    from contextvars import ContextVar
+    monkeypatch.setattr(store, "_prompt_snapshot", ContextVar("test_prompt_snapshot", default={k.removeprefix("prompt_template:"): (v, True) for k, v in redis_store.items()}))
     monkeypatch.setattr(store, "is_prompt_enabled", AsyncMock(return_value=True))
 
     reply_text = await store.get_prompt_text("intent.end_reply")
@@ -166,7 +167,8 @@ async def test_prefix_failure_falls_back_to_bare_template(monkeypatch):
     from app.services.prompting import store
 
     redis_store = {"prompt_template:intent.end_reply": "【任务】道别"}
-    monkeypatch.setattr(store, "get_redis", AsyncMock(return_value=_FakeRedis(redis_store)))
+    from contextvars import ContextVar
+    monkeypatch.setattr(store, "_prompt_snapshot", ContextVar("test_prompt_snapshot", default={k.removeprefix("prompt_template:"): (v, True) for k, v in redis_store.items()}))
     monkeypatch.setattr(store, "is_prompt_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(
         "app.services.prompting.reply_prefix.build_reply_prefix",

@@ -483,7 +483,7 @@ async def _stream_legacy_response(
     # 预置 None token 让 finally reset 在 bind 抛异常时也能 no-op.
     from app.services.runtime_config import bind_agent_context, reset_current_agent
     _agent_ctx_token = None
-    _agent_ctx_token = await bind_agent_context(agent_id)
+    _agent_ctx_token = await bind_agent_context(agent_id, reuse_snapshot=sub_intent_mode)
 
     # --- LLM usage 累加 session ---
     # 父调用启 session, 所有 phase 内 LLM wrapper 自动 record 进来; 出口 finally 写一行
