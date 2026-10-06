@@ -48,3 +48,6 @@ network access disabled. These checks validate the evaluation harness and refere
 transcript; they do not measure the saved prompt's live model quality. Existing
 failed snapshots remain unchanged. The Web history labels execution errors as
 `评测不可用`, and completed validate-only results as `基础校验通过/失败`.
+The deployment transfer explicitly synchronizes these five files with relative
+paths; optional datasets/results stay outside the production transfer. A local
+rsync rehearsal verifies an empty target receives exactly the runtime files.

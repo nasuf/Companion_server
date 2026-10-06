@@ -103,6 +103,14 @@ jobs:
             pyproject.toml runtime-constraints.txt Dockerfile docker-compose.deploy.yml .dockerignore .env.example \
             "$VPS_USER@$VPS_HOST:/app/companion-server/"
 
+          # Only deterministic runtime validators are required by Docker COPY.
+          # --relative preserves evals/ without transferring optional datasets/results.
+          rsync -azvcOR --stats \
+            -e "ssh -i ~/.ssh/deploy_key -p $VPS_PORT -o BatchMode=yes" \
+            evals/__init__.py evals/graders.py evals/run_local.py \
+            evals/long_companion_sim.py evals/cases.jsonl \
+            "$VPS_USER@$VPS_HOST:/app/companion-server/"
+
       - name: Deploy server stack on VPS
         uses: appleboy/ssh-action@v1.2.0
         with:
