@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.db import db
+from app.services.offline.repository import get_cancelled_activity_plans
 from app.services.proactive.dialogue import RECENT_MESSAGE_LIMIT, format_recent_turns
 from app.services.llm.models import get_utility_model, invoke_json
 from app.services.portrait import get_latest_portrait
@@ -57,7 +58,7 @@ async def build_proactive_context(
     (
         agent, schedule, core_memories,
         proactive_memories_pair, topic_intimacy,
-        user_portrait, recent_context, ai_mood,
+        user_portrait, recent_context, ai_mood, cancelled_plans,
     ) = await asyncio.gather(
         db.aiagent.find_unique(where={"id": agent_id}),
         get_cached_schedule(agent_id),
@@ -75,10 +76,13 @@ async def build_proactive_context(
         # AI 上一轮的残留情绪 (30min 半衰期衰减后). 主动消息的 current_mood 靠它 —
         # 没有它 ctx 里永远没 "emotion" 键, emotion_to_tone(None) 恒为中性语气.
         load_ai_mood(conversation_id),
+        get_cancelled_activity_plans(user_id, workspace_id),
     )
     if not agent:
         raise ValueError(f"Agent not found: {agent_id}")
 
+    if cancelled_plans:
+        recent_context += "\n出行计划取消记录（当前业务状态）：" + json.dumps(cancelled_plans, ensure_ascii=False)
     proactive_memories, used_memory_ids = proactive_memories_pair
     recent_dialogue = (
         await _load_recent_dialogue(workspace_id) if source == "recent_dialogue" else ""

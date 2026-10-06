@@ -484,6 +484,7 @@ async def _search_activity_candidates(
         raw_results = await tavily_search(
             spec.query,
             max_results=8,
+            image_evidence=True,
             include_domains=list(spec.include_domains)
             if spec.include_domains
             else None,

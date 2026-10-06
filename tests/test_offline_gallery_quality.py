@@ -13,7 +13,7 @@ CARD={'location_name':'莲湖公园','city':'东莞','address':'桥头镇莲湖�
 
 
 def source(urls, title='东莞桥头莲湖公园', content='东莞桥头镇莲湖公园的现场照片'):
-    return _result_from_item({'title':title,'url':CARD['official_url'],'content':content,'images':urls})
+    return _result_from_item({'title':title,'url':CARD['official_url'],'content':content,'images':urls,'raw_content':'\n\n'.join('![莲湖公园实景]('+ (u if isinstance(u,str) else u['url']) +')' for u in urls)})
 
 
 def test_nested_tavily_images_keep_provenance_and_both_shapes():
@@ -102,7 +102,7 @@ async def test_unverified_candidates_do_not_starve_later_verified_sources(monkey
     monkeypatch.setattr(images.place_catalog,'load_place',AsyncMock(return_value=None))
     monkeypatch.setattr(images.place_catalog,'save_place',AsyncMock())
     monkeypatch.setattr(storage,'_MEDIA_DIR',tmp_path)
-    bad=source([f'https://blocked.example/{i}.jpg' for i in range(50)])
+    bad=SearchResult(title='东莞莲湖公园', url=CARD['official_url'], content='东莞莲湖公园', images=[{'url':f'https://blocked.example/{i}.jpg'} for i in range(50)])
     good=SearchResult(title='东莞莲湖公园实景',url='https://official.example/park',content='东莞莲湖公园',images=[{'url':'https://photo.example/park.jpg'}])
     async def evidence(client,url,*args):
         return {'https://photo.example/park.jpg':'place_image_caption'} if 'official' in url else {}
@@ -113,3 +113,38 @@ async def test_unverified_candidates_do_not_starve_later_verified_sources(monkey
     gallery=await images.persist_activity_images(user_id='u',card=dict(CARD),city='东莞',search_results=[bad,good])
     assert len(gallery)==1
     download.assert_awaited_once()
+
+
+def test_indexed_captions_survive_origin_block_and_reject_logo_renderings():
+    from app.services.offline.image_evidence import indexed_image_evidence
+    raw = """# 镇江市图书馆
+
+镇江市图书馆
+
+[![Image 3](https://cdn.example/front.jpg)](https://baike.example/library)[![Image 4](https://cdn.example/inside.jpg)](https://baike.example/library)
+
+### 形象标识
+
+![Image 6](https://cdn.example/brand.jpg)
+
+### 新馆规划
+
+镇江市图书馆效果图
+
+![Image 7](https://cdn.example/render.jpg)
+"""
+    result = indexed_image_evidence(raw, '镇江市图书馆', [dict(url='https://cdn.example/brand.jpg', description='镇江市图书馆', description_source='alt')])
+    assert set(result) == {'https://cdn.example/front.jpg', 'https://cdn.example/inside.jpg'}
+    assert indexed_image_evidence('# 莲湖公园\n\n![Image 1](https://cdn.example/ad.jpg)', '莲湖公园', []) == {}
+
+
+async def test_indexed_photos_do_not_require_origin_html(monkeypatch, tmp_path):
+    monkeypatch.setattr(images.place_catalog, 'load_place', AsyncMock(return_value=None))
+    monkeypatch.setattr(images.place_catalog, 'save_place', AsyncMock())
+    monkeypatch.setattr(storage, '_MEDIA_DIR', tmp_path)
+    fetch = AsyncMock(side_effect=AssertionError('indexed captions suffice even if origin returns 403'))
+    monkeypatch.setattr(images, 'page_image_evidence', fetch)
+    monkeypatch.setattr(images, '_download_image', AsyncMock(return_value=(b'image', 'd'*64, 42)))
+    monkeypatch.setattr(images, 'tavily_place_images', AsyncMock(return_value=[]))
+    assert len(await images.persist_activity_images(user_id='u', card=dict(CARD), city='东莞', search_results=[source(['https://photo.example/real.jpg'])])) == 1
+    fetch.assert_not_called()

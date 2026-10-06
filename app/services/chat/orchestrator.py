@@ -1540,6 +1540,8 @@ async def _stream_legacy_response(
             reply_count = min(reply_count, max_reply_count)
 
         replies, raw_response, reply_is_fallback, reply_emotion_pre = await _generate_reply(
+            user_id=user_id,
+            workspace_id=workspace_id,
             contradiction_inquiry=contradiction_inquiry,
             detected_intent=detected_intent,
             memory_relevance=memory_relevance,

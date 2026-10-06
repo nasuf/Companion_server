@@ -1011,6 +1011,8 @@ async def generate_reply(ctx):
         ctx.reply_is_fallback,
         ctx.reply_emotion_pre,
     ) = await services._generate_reply(
+        user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
         contradiction_inquiry=ctx.contradiction_inquiry,
         detected_intent=ctx.detected_intent,
         memory_relevance=ctx.memory_relevance,

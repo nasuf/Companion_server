@@ -24,6 +24,15 @@ def synthetic_agent():
 
 def configure_pair(patches):
     io = configure_chat(patches)
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return io.now.astimezone(tz) if tz else io.now.replace(tzinfo=None)
+
+    # Paired executors must not render different current-message timestamps if
+    # their sequential runs happen to straddle a wall-clock minute boundary.
+    patches.setattr(chat, "datetime", FixedClock)
     from app.services.chat import intent_handlers, multi_intent
     # Handlers have their own imported DB/time aliases. Keep real handler and
     # model logic, but resolve current activity and repeat history synthetically.
@@ -53,6 +62,8 @@ def configure_pair(patches):
 
     patches.setattr(music, "get_active_co_listening", AsyncMock(return_value=None))
     patches.setattr(module_settings, "is_activity_enabled", AsyncMock(return_value=False))
+    from app.services.offline import repository as offline_repo
+    patches.setattr(offline_repo, "get_cancelled_activity_plans", AsyncMock(return_value=[]))
     for name, value in (
         ("sample_expression_habits", []), ("get_relation_meta", {}),
         ("load_ai_mood", None), ("detect_l1_contradiction", None),

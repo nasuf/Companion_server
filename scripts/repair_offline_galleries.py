@@ -24,7 +24,8 @@ async def run(args):
     try:
         rows = await db.query_raw("""SELECT * FROM offline_activity_recommendations
             WHERE status NOT IN ('cancelled','expired') AND ($1::boolean OR image_urls <> '[]'::jsonb)
-            AND NOT search_sources @> '[{"kind":"image"}]'::jsonb ORDER BY created_at""", getattr(args, "include_empty", False))
+            AND ($2::boolean = FALSE OR image_urls = '[]'::jsonb)
+            AND NOT search_sources @> '[{"kind":"image"}]'::jsonb ORDER BY created_at""", getattr(args, "include_empty", False) or getattr(args, "fill_only", False), getattr(args, "fill_only", False))
         print(json.dumps({'legacy_galleries': len(rows), 'apply': args.apply}), flush=True)
         if not args.apply:
             return
@@ -44,6 +45,9 @@ async def run(args):
                         search_results=[]), timeout=45)
                 except Exception:
                     urls = []  # Never retain an unverified legacy cover after a failed refill.
+                if getattr(args, 'fill_only', False) and not urls:
+                    print(json.dumps({'activity_id':card['id'],'images':0,'updated':False}), flush=True)
+                    return
                 sources = card['search_sources'] + [dict(item, kind='image') for item in card.get('image_provenance', [])]
                 async with db.tx() as tx:
                     updated = await tx.query_raw('''UPDATE offline_activity_recommendations
@@ -67,4 +71,5 @@ if __name__ == '__main__':
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--backup')
     parser.add_argument('--include-empty', action='store_true', help='Retry previously unverified empty galleries')
+    parser.add_argument('--fill-only', action='store_true', help='Fill empty galleries only; preserve all existing photos and skip failed discovery')
     asyncio.run(run(parser.parse_args()))

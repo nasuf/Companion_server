@@ -7,6 +7,8 @@ import io
 import ipaddress
 import logging
 import socket
+import re
+from itertools import zip_longest
 from urllib.parse import urlsplit
 
 import httpx
@@ -14,7 +16,7 @@ from PIL import Image, ImageOps
 
 from app.services.offline import activity_media_storage as storage, place_catalog
 from app.services.offline.content import canonical_url, place_source_matches
-from app.services.offline.image_evidence import page_image_evidence
+from app.services.offline.image_evidence import page_image_evidence, indexed_image_evidence
 from app.services.offline.providers.search import SearchResult, tavily_place_images
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,9 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
         if key.startswith('place_') and storage.storage_path(key).is_file():
             accepted.append(item)
     accepted = accepted[:limit]
+    if len(accepted) >= limit:
+        card['image_provenance'] = accepted
+        return [item['local_url'] for item in accepted]
     seen = {item['url'] for item in accepted}
     hashes = {item.get('sha256') for item in accepted}
     perceptual = [int(item['dhash']) for item in accepted if item.get('dhash') is not None]
@@ -65,23 +70,36 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
         async with asyncio.timeout(35):
             async with httpx.AsyncClient(timeout=8, trust_env=False, follow_redirects=False) as client:
                 page_cache: dict[str, dict[str, str]] = {}
+                page_slots = asyncio.Semaphore(3)
+
+                async def candidates(source: SearchResult) -> list[dict]:
+                    if not place_source_matches(card, source.title, source.content + source.raw_content):
+                        return []
+                    if re.search(r'效果图|设计方案|规划图|拟建', source.title):
+                        return []
+                    evidence = indexed_image_evidence(source.raw_content, card['location_name'], source.images)
+                    if not evidence:
+                        async with page_slots:
+                            if source.url not in page_cache:
+                                try:
+                                    async with asyncio.timeout(4):
+                                        page_cache[source.url] = await page_image_evidence(client, source.url, card['location_name'], _public_url)
+                                except TimeoutError:
+                                    page_cache[source.url] = {}
+                        evidence = page_cache[source.url]
+                    return [dict(url=url, source_url=source.url, source_title=source.title, evidence=kind)
+                            for url, kind in evidence.items() if not _is_bad_image_url(url)]
+
                 async def collect(sources: list[SearchResult]) -> None:
-                    # Spend the download budget only on verified candidates. A large
-                    # blocked page must not starve later, valid source pages.
+                    groups = await asyncio.gather(*(candidates(source) for source in sources[:8]))
                     attempts = 0
-                    for candidate in _source_images(card, sources):
+                    # Alternate sources so a blocked image CDN cannot monopolize the budget.
+                    for candidate in (item for row in zip_longest(*groups) for item in row if item):
                         if len(accepted) >= limit:
                             break
                         if candidate['url'] in seen:
                             continue
                         seen.add(candidate['url'])
-                        page = candidate['source_url']
-                        if page not in page_cache:
-                            page_cache[page] = await page_image_evidence(client, page, card['location_name'], _public_url)
-                        evidence = page_cache[page].get(canonical_url(candidate['url']))
-                        if not evidence:
-                            continue
-                        candidate['evidence'] = evidence
                         if attempts >= 12:
                             break
                         attempts += 1

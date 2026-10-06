@@ -286,3 +286,70 @@ def test_release_matches_web_save_normalization():
     for entry in RELEASE['prompts']:
         assert entry['content'] == entry['content'].strip()
         validate_entry(entry)
+
+
+async def test_cancellation_revokes_plan_context_without_erasing_real_memories(journey, monkeypatch):
+    from app.services.proactive import context as proactive
+    j=journey; a=await j.create()
+    memory_id=uuid4().hex
+    await j.db.execute_raw("""INSERT INTO memories_user (id,user_id,workspace_id,content,importance,level,main_category,sub_category,updated_at)
+        VALUES ($1,$2,$3,'我喜欢莲湖公园的荷花',0.7,2,'偏好边界','喜好',CURRENT_TIMESTAMP)""", memory_id,j.user,j.workspace)
+    await j.db.execute_raw("UPDATE offline_activity_recommendations SET next_companion_at=CURRENT_TIMESTAMP, companion_claim_token='inflight', companion_claimed_at=CURRENT_TIMESTAMP WHERE id=$1",a['id'])
+    assert (await j.client.delete('/offline/activities/'+a['id'])).status_code == 200
+    row=await repo.get_activity(a['id'], j.user)
+    assert row['status']=='cancelled' and row.get('next_companion_at') is None and row.get('companion_claim_token') is None
+    brief=await repo.get_active_activity_brief(j.user, j.workspace)
+    assert not brief.get('title')
+    facts=brief['cancelled_plans']
+    assert len(facts)==1 and facts[0]['activity_id']==a['id'] and not facts[0]['arrival_record']
+    assert facts[0]['preference_change'] is None and facts[0]['cancellation_reason'] is None
+    assert await repo.get_cancelled_activity_plans('other-user', j.workspace)==[]
+    assert await repo.get_cancelled_activity_plans(j.user, 'other-workspace')==[]
+    assert (await j.db.query_raw('SELECT content FROM memories_user WHERE id=$1',memory_id))[0]['content']=='我喜欢莲湖公园的荷花'
+    # The same live state is visible to everyday proactive replies, without an
+    # asynchronous LLM extraction or deleting unrelated memories.
+    monkeypatch.setattr(proactive,'db',j.db)
+    for name,value in [('get_cached_schedule',None),('load_core_memory_strings',[]),
+        ('_load_proactive_memories',([],[])),('get_topic_intimacy',50),
+        ('get_latest_portrait',''),('_load_recent_context','以前说过想去莲湖公园'),('load_ai_mood',None)]:
+        monkeypatch.setattr(proactive,name,AsyncMock(return_value=value))
+    ctx=await proactive.build_proactive_context(workspace_id=j.workspace,user_id=j.user,agent_id=j.agent,trigger_type='silence_wakeup',stage='warming')
+    assert 'cancelled' in ctx['recent_context'] and a['id'] in ctx['recent_context']
+    # Lightweight memory tiers also bypass the main chat prompt; cancellation
+    # must reach their existing context field rather than disappear on this path.
+    from types import SimpleNamespace
+    from app.services.chat.reply_generate import generate_reply
+    from app.services.chat.intent_dispatcher import IntentResult, IntentType
+    monkeypatch.setattr('app.services.chat.prompt_builder._build_personality_section',AsyncMock(return_value=None))
+    async def tier(**params):
+        assert 'cancelled' in params['context'] and a['id'] in params['context']
+        return '好呀，按你的安排来'
+    result=await generate_reply(user_id=j.user,workspace_id=j.workspace,contradiction_inquiry=None,
+        detected_intent=IntentResult(intent=IntentType.NONE,confidence=1), memory_relevance='weak',
+        relational_context=None,schedule_context=None,delay_context=None,l3_memories=[],classified_memories=[],
+        messages_dicts=[],portrait=None,prompt_user_emotion=None,user_message='今天先不去了',
+        agent=SimpleNamespace(name='小伴'),reply_count=1,max_reply_count=4,max_total=80,
+        tier_fns={'weak':tier},truncate_fn=lambda text,_:text,pipe_fallback_fn=lambda text,*_: [text])
+    assert result[1]=='好呀，按你的安排来'
+    # A new plan at the same place remains active; cancellation is per activity.
+    new=await j.create()
+    brief=await repo.get_active_activity_brief(j.user, j.workspace)
+    assert brief['title']==new['title'] and len(brief['cancelled_plans'])==1
+
+
+async def test_fill_only_gallery_repair_preserves_existing_photos(journey, monkeypatch, tmp_path):
+    from scripts import repair_offline_galleries as repair
+    from types import SimpleNamespace
+    j=journey; a=await j.create(); empty=await j.create()
+    await j.db.execute_raw('UPDATE offline_activity_recommendations SET image_urls=$1::jsonb WHERE id=$2',json.dumps(['/offline/media/place_existing.jpg']),a['id'])
+    class Database:
+        async def connect(self): pass
+        async def disconnect(self): pass
+        def __getattr__(self,name): return getattr(j.db,name)
+    monkeypatch.setattr(repair,'db',Database())
+    async def images(**kwargs):
+        return ['/offline/media/place_recovered.jpg'] if kwargs['card']['id']==empty['id'] else []
+    monkeypatch.setattr(repair,'persist_activity_images',images)
+    await repair.run(SimpleNamespace(apply=True,backup=str(tmp_path/'before.json'),fill_only=True))
+    assert (await repo.get_activity(a['id'],j.user))['image_urls']==['/offline/media/place_existing.jpg']
+    assert (await repo.get_activity(empty['id'],j.user))['image_urls']==['/offline/media/place_recovered.jpg']

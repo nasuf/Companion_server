@@ -495,6 +495,25 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> list
     return [activity_from_row(row) for row in rows or []]
 
 
+async def get_cancelled_activity_plans(user_id: str, workspace_id: str | None) -> list[dict]:
+    """Current cancellation facts; historical intent is not an active plan.
+
+    Keep this structured and scoped, rather than semantically deleting unrelated
+    memories about the same place. Pending recommendations are not user intent.
+    """
+    rows = await db.query_raw("""
+        SELECT a.id, a.title, a.location_name, a.updated_at AS cancelled_at
+        FROM offline_activity_recommendations a
+        WHERE a.user_id=$1 AND ($2::text IS NULL OR a.workspace_id=$2)
+          AND a.status='cancelled' AND a.reached=FALSE
+        ORDER BY a.updated_at DESC LIMIT 10
+    """, user_id, workspace_id)
+    return [dict(activity_id=r['id'], title=r['title'], location=r['location_name'],
+                 status='cancelled', cancelled_at=str(r['cancelled_at']),
+                 arrival_record=False, cancellation_reason=None, preference_change=None)
+            for r in rows]
+
+
 async def get_active_activity_brief(
     user_id: str, workspace_id: str | None = None
 ) -> dict[str, Any] | None:
@@ -526,8 +545,9 @@ async def get_active_activity_brief(
         user_id,
         workspace_id,
     )
+    cancelled = await get_cancelled_activity_plans(user_id, workspace_id)
     if not rows:
-        return None
+        return {"cancelled_plans": cancelled} if cancelled else None
     r = rows[0]
     profile = _json(_field(r, "guidance_profile", "guidanceProfile"), {})
     focus_short_name = _field(r, "focus_short_name", "focusShortName")
@@ -551,6 +571,7 @@ async def get_active_activity_brief(
         "summary": str(_field(r, "summary") or "").strip(),
         "reached": bool(_field(r, "reached")),
         "safe_hint": safe_hint,
+        "cancelled_plans": cancelled,
     }
 
 

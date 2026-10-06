@@ -23,6 +23,7 @@ class SearchResult:
     score: float | None = None
     image_url: str | None = None
     images: list[dict[str, str]] = field(default_factory=list)
+    raw_content: str = ''
 
 
 def _result_from_item(item: Any) -> SearchResult | None:
@@ -45,8 +46,10 @@ def _result_from_item(item: Any) -> SearchResult | None:
         content=content[:800],
         score=score,
         image_url=str(image_url).strip() if image_url else None,
+        raw_content=str(item.get('raw_content') or '')[:50000],
         images=[{"url": url, "source_url": str(item.get("url") or ""),
-                 "source_title": title, "description": str(img.get("description") or "") if isinstance(img, dict) else ""}
+                 "source_title": title, "description": str(img.get("description") or "") if isinstance(img, dict) else "",
+                 "description_source": str(img.get("description_source") or "") if isinstance(img, dict) else ""}
                 for img in (item.get("images") or []) if (url := _image_url_from_item(img))],
     )
 
@@ -57,6 +60,7 @@ async def tavily_search(
     max_results: int = 6,
     include_domains: list[str] | None = None,
     timeout_s: float = 10.0,
+    image_evidence: bool = False,
 ) -> list[SearchResult]:
     api_key = settings.tavily_api_key.strip()
     endpoint = settings.tavily_search_endpoint.strip()
@@ -67,12 +71,13 @@ async def tavily_search(
         "max_results": max(1, min(max_results, 10)),
         "search_depth": "basic",
         "include_answer": False,
-        "include_raw_content": False,
+        "include_raw_content": "markdown" if image_evidence else False,
+        "include_image_descriptions": image_evidence,
         "include_images": True,
     }
     if include_domains:
         payload["include_domains"] = include_domains
-    cache_key = 'offline:search:v2:' + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    cache_key = 'offline:search:v3:' + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     try:
         cached = await (await get_redis()).get(cache_key)
         if cached:
@@ -177,4 +182,4 @@ async def tavily_image_search(
 
 async def tavily_place_images(query: str) -> list[SearchResult]:
     """Return page-bound candidates; query-global images have no place evidence."""
-    return await tavily_search(query, max_results=8)
+    return await tavily_search(query, max_results=8, image_evidence=True, timeout_s=15)

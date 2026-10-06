@@ -8,6 +8,7 @@ Uses seven-dim personality (0-100) to build role-play personality descriptions.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -574,11 +575,13 @@ async def _build_offline_activity_section(
     if not offline_activity:
         return None
     activity = str(offline_activity.get("title") or "").strip()
-    if not activity:
-        return None
     tpl = await _get_optional_prompt("chat.offline_activity_section")
     if tpl is None:
         return None
+    cancelled = offline_activity.get("cancelled_plans") or []
+    facts = ("\n出行计划取消记录（当前业务状态）：" + json.dumps(cancelled, ensure_ascii=False)) if cancelled else ""
+    if not activity:
+        return _PromptBody(facts.strip(), "chat.offline_activity_section") if facts else None
     location = str(
         offline_activity.get("location_name") or offline_activity.get("category") or ""
     ).strip() or "现场"
@@ -595,7 +598,7 @@ async def _build_offline_activity_section(
             "status_line": status_line,
             "progress_line": "不要向用户总结、暗示或猜测任何隐藏进度。",
             "safe_hint": safe_hint,
-        }),
+        }) + facts,
         "chat.offline_activity_section",
     )
 

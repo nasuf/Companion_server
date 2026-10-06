@@ -279,14 +279,12 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             f"好呀，我把「{activity['title']}」重新放回待出行里。"
             "等你想去的时候招呼我一声，到了现场点一下『我已经抵达这里』就行。"
         )
-        memory_text = f"用户重新接受了线下活动推荐：{activity['title']}"
     else:
         feedback_text = f"用户想去看看：{activity['title']}"
         chat_message = (
             f"好，「{activity['title']}」我陪你一起去看看，先放进待出行里。"
             "到了现场记得点『我已经抵达这里』，我在这儿等你。"
         )
-        memory_text = f"用户接受了线下活动推荐（想去看看）：{activity['title']}"
     trigger_type = (
         "offline_activity_reaccepted" if was_ignored else "offline_activity_accepted"
     )
@@ -324,11 +322,8 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
             ctx["workspace_id"],
             repo.next_activity_due(datetime.now(UTC), accepted_delta_days=-3),
         )
-    remember_user_event(
-        user_id=user_id,
-        workspace_id=activity.get("workspace_id"),
-        text=memory_text,
-    )
+    # A cancellable intention lives in the activity state, not permanent memory.
+    # Actual user dialogue and completed journey evidence retain their own pipeline.
     return OfflineActivityItem(**updated)
 
 

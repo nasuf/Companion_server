@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from typing import Any, Awaitable, Callable
@@ -244,6 +245,8 @@ async def generate_reply(
     reply_emotion_fn: Callable[[str], Awaitable[dict]] | None = None,
     reengagement_gap_seconds: float | None = None,
     force_main_prompt: bool = False,
+    user_id: str | None = None,
+    workspace_id: str | None = None,
     needs_web_search: bool = False,
     diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, bool, dict | None]:
@@ -337,6 +340,14 @@ async def generate_reply(
                 "l3" if l3_memories else memory_relevance
             )
         try:
+            # Tier prompts skip the main activity section. Inject the same live
+            # cancellation facts through their existing context placeholder.
+            if user_id and workspace_id:
+                from app.services.offline.repository import get_cancelled_activity_plans
+
+                cancelled = await get_cancelled_activity_plans(user_id, workspace_id)
+                if cancelled:
+                    base_params["context"] += "\n出行计划取消记录（当前业务状态）：" + json.dumps(cancelled, ensure_ascii=False)
             personality_section = await _build_personality_section(agent)
             base_params["personality_brief"] = (
                 personality_section.body if personality_section else (getattr(agent, "name", "") or "")

@@ -66,3 +66,12 @@ class TestOfflineActivitySection:
             assert await _build_offline_activity_section(
                 {"title": "X", "location_name": "Y", "reached": True}
             ) is None
+
+
+async def test_cancelled_plan_is_state_only_not_an_ongoing_outing():
+    section = await _build({'cancelled_plans': [dict(activity_id='a', title='旧活动', status='cancelled', arrival_record=False)]})
+    assert 'cancelled' in section.body and '旧活动' in section.body
+    assert '正在陪' not in section.body and '准备出发' not in section.body
+    active = await _build({'title': '新活动', 'location_name': '同一地点', 'reached': True,
+                           'cancelled_plans': [dict(activity_id='a', title='旧活动', status='cancelled')]})
+    assert '新活动' in active.body and '已经到了现场' in active.body and 'cancelled' in active.body

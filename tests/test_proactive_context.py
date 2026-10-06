@@ -332,6 +332,7 @@ async def test_build_context_populates_emotion_from_ai_mood():
     mock_db.aiagent.find_unique = AsyncMock(return_value=SimpleNamespace(id="a1", name="小芜"))
     with (
         patch.object(C, "db", mock_db),
+        patch.object(C, "get_cancelled_activity_plans", new_callable=AsyncMock, return_value=[]),
         patch.object(C, "get_cached_schedule", new_callable=AsyncMock, return_value=None),
         patch.object(C, "load_core_memory_strings", new_callable=AsyncMock, return_value=[]),
         patch.object(C, "_load_proactive_memories", new_callable=AsyncMock,
@@ -366,6 +367,7 @@ async def test_build_context_emotion_none_when_no_mood():
     mock_db.aiagent.find_unique = AsyncMock(return_value=SimpleNamespace(id="a1", name="小芜"))
     with (
         patch.object(C, "db", mock_db),
+        patch.object(C, "get_cancelled_activity_plans", new_callable=AsyncMock, return_value=[]),
         patch.object(C, "get_cached_schedule", new_callable=AsyncMock, return_value=None),
         patch.object(C, "load_core_memory_strings", new_callable=AsyncMock, return_value=[]),
         patch.object(C, "_load_proactive_memories", new_callable=AsyncMock,
