@@ -12,6 +12,8 @@ generator client {
 }
 
 model User {
+  // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
+  executionGeneration      String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                       String                          @id @default(uuid())
   username                 String                          @unique
   hashedPassword           String?                         @map("hashed_password")
@@ -114,6 +116,8 @@ model AuthIdentity {
 }
 
 model AiAgent {
+  // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
+  executionGeneration      String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                       String                          @id @default(uuid())
   name                     String
   userId                   String                          @map("user_id")
@@ -187,6 +191,8 @@ model AiAgent {
 }
 
 model ChatWorkspace {
+  // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
+  executionGeneration      String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                       String                          @id @default(uuid())
   userId                   String                          @map("user_id")
   user                     User                            @relation(fields: [userId], references: [id])
@@ -245,6 +251,8 @@ model WorkspaceInteractionDay {
 }
 
 model Conversation {
+  // Server-only execution identity. Lifecycle/rebinding changes rotate it in DB.
+  executionGeneration     String @default(dbgenerated("gen_random_uuid()::text")) @map("execution_generation")
   id                      String                          @id @default(uuid())
   userId                  String                          @map("user_id")
   user                    User                            @relation(fields: [userId], references: [id])

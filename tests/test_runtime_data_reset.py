@@ -329,7 +329,10 @@ async def test_hard_delete_user_data_reuses_agent_delete_and_removes_user(monkey
 
 
 @pytest.mark.asyncio
-async def test_delete_remaining_user_side_tables_clears_user_owned_capsules_and_wills(monkeypatch):
+async def test_delete_remaining_user_side_tables_clears_user_owned_capsules_and_wills(monkeypatch, tmp_path):
+    # Production deletion deliberately fails closed if the media disk is absent.
+    # Give this SQL-cleanup test its own available, empty synthetic media root.
+    monkeypatch.setenv("CAPSULE_MEDIA_DIR", str(tmp_path))
     executed_sql: list[str] = []
 
     async def execute_raw(sql, *args):
