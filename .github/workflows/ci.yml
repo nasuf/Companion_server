@@ -179,6 +179,19 @@ jobs:
       - name: Build candidate runtime image
         run: docker build -t companion-server:ci-chat-safety .
 
+      - name: Verify prompt validation inside the packaged runtime
+        run: |
+          docker run --rm --network none \
+            -e APP_ENV=test -e JWT_SECRET=ci-isolated-prompt-runtime-validation-secret \
+            --entrypoint python companion-server:ci-chat-safety -c '
+          import json
+          from app.services.prompting.store import _prompt_eval_result
+          result = _prompt_eval_result(prompt_key="runtime.check", change_type="manual_save")
+          assert result["ok"] is True, result
+          assert result["mode"] == "validate_only", result
+          print(json.dumps({"ok": result["ok"], "mode": result["mode"], "validated_cases": result["agent_eval"]["validated_cases"]}))
+          '
+
       - name: Prepare disposable Redis image
         run: |
           docker pull redis:7-alpine

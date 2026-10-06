@@ -52,6 +52,9 @@ COPY app ./app
 COPY jobs ./jobs
 COPY prisma ./prisma
 COPY scripts ./scripts
+# Prompt version snapshots use these deterministic validators at runtime.
+# Keep generated results and optional evaluation datasets out of the image.
+COPY evals/__init__.py evals/graders.py evals/run_local.py evals/long_companion_sim.py evals/cases.jsonl ./evals/
 
 RUN if [ -n "$PIP_INDEX_URL" ]; then \
         pip install --upgrade pip -i "$PIP_INDEX_URL" \

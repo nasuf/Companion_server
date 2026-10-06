@@ -14,6 +14,26 @@ def test_eval_cases_are_valid():
     assert validate_cases(cases) == []
 
 
+def test_prompt_version_snapshot_runs_without_services_or_model_calls():
+    from app.services.prompting.store import _prompt_eval_result
+
+    result = _prompt_eval_result(prompt_key="runtime.check", change_type="manual_save")
+    assert result["ok"] is True
+    assert result["mode"] == "validate_only"
+    assert result["agent_eval"]["validated_cases"] > 0
+    assert result["long_companion"]["passed"] is True
+
+
+def test_missing_eval_data_is_an_execution_error_not_a_completed_check(monkeypatch, tmp_path):
+    from app.services.prompting import store
+
+    monkeypatch.setattr(store, "_EVAL_CASES", tmp_path / "absent.jsonl")
+    result = store._prompt_eval_result(prompt_key="runtime.check", change_type="manual_save")
+    assert result["ok"] is False
+    assert result["error"] == "FileNotFoundError"
+    assert "agent_eval" not in result
+
+
 def test_memory_hallucination_case_fails_on_specific_invention():
     cases = load_cases(ROOT / "evals" / "cases.jsonl")
     case = next(c for c in cases if c["id"] == "memory_no_unsupported_preference")

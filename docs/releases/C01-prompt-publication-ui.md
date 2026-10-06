@@ -40,3 +40,11 @@ regression checks, and two reviews per repo. Deploy server/migration first,
 reconcile unverified current content, then deploy Web. Application rollback
 retains additive tables/triggers; no destructive reverse migration is needed.
 Existing single-container deployment interruption remains a separate workstream.
+
+Production acceptance found the pre-existing Docker image omitted the deterministic
+eval files used by prompt-version snapshots. The runtime now packages only the five
+required source/data files, and CI runs the snapshot inside the actual image with
+network access disabled. These checks validate the evaluation harness and reference
+transcript; they do not measure the saved prompt's live model quality. Existing
+failed snapshots remain unchanged. The Web history labels execution errors as
+`评测不可用`, and completed validate-only results as `基础校验通过/失败`.
