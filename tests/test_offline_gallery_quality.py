@@ -148,3 +148,65 @@ async def test_indexed_photos_do_not_require_origin_html(monkeypatch, tmp_path):
     monkeypatch.setattr(images, 'tavily_place_images', AsyncMock(return_value=[]))
     assert len(await images.persist_activity_images(user_id='u', card=dict(CARD), city='东莞', search_results=[source(['https://photo.example/real.jpg'])])) == 1
     fetch.assert_not_called()
+
+
+@pytest.mark.parametrize('name', ['镇江这些咖啡店', '镇江十大咖啡馆', '镇江市2025高德状元榜·美食', '在道滘玩得开心吗？_东莞市人民政府门户网站'])
+def test_collection_and_article_titles_are_not_place_identities(name):
+    card = dict(location_name=name, city='镇江市', title=name, address=name)
+    assert not generation._card_has_concrete_place(card, '镇江市')
+    assert not generation._fallback_card('镇江市', [], [SearchResult(title=name, url='https://example.com/article', content='镇江市的地点汇总')])
+    assert not place_source_matches(card, name, '镇江市')
+
+
+def test_fallback_preserves_cafe_branch_name_and_rejects_listicle_first():
+    article = SearchResult(title='镇江这些咖啡店，藏着整个春天！', url='https://example.com/list', content='镇江市咖啡店合集')
+    cafe = SearchResult(title='库迪咖啡(临湖苑店) - 镇江市句容市经济开发区- 餐饮服务', url='https://example.com/place', content='库迪咖啡(临湖苑店)，镇江市句容市临湖苑商业B2幢110号')
+    card = generation._fallback_card('镇江市', [], [article, cafe])
+    assert card['location_name'] == '库迪咖啡(临湖苑店)'
+    assert card['title'] == '库迪咖啡(临湖苑店)'
+    assert generation._card_has_concrete_place(card, '镇江市')
+    card['city'] = '镇江市'
+    assert generation._card_is_source_backed(card, generation._sources([cafe]))
+
+
+def test_indexed_museum_link_captions_do_not_share_plan_image_rejection():
+    from app.services.offline.image_evidence import indexed_image_evidence
+    raw = '''# 镇江博物馆
+
+## 建筑格局
+
+[![Image 3](https://cdn.example/plan.jpg)](https://example.com/album "镇江市博物馆平面示意图")镇江市博物馆平面示意图
+
+## 展览陈列
+
+青铜文化的展览。[![Image 4](https://cdn.example/bronze.jpg)](https://example.com/album "青铜器展")青铜器展
+陶瓷文化的展览。[![Image 5](/photos/ceramic.jpg)](https://example.com/album "陶瓷器精品展")陶瓷器精品展
+金银器的展览。[![Image 6](//cdn.example/silver.jpg)](https://example.com/album "金银器精品展")金银器精品展
+
+### 相关广告
+
+![镇江博物馆附近酒店](https://cdn.example/ad.jpg)
+'''
+    evidence = indexed_image_evidence(raw, '镇江博物馆', [], 'https://example.com/museum')
+    assert set(evidence) == {'https://cdn.example/bronze.jpg', 'https://example.com/photos/ceramic.jpg', 'https://cdn.example/silver.jpg'}
+
+
+def test_photo_context_does_not_borrow_the_next_places_caption():
+    from app.services.offline.image_evidence import indexed_image_evidence
+    raw = '# 莲湖公园\n\n![广告](https://example.com/ad.jpg)\n莲湖公园实景\n![莲湖公园大门](https://example.com/gate.jpg)'
+    assert set(indexed_image_evidence(raw, '莲湖公园', [])) == {'https://example.com/gate.jpg'}
+
+
+@pytest.mark.parametrize('options', [
+    dict(activity_id=['one']),
+    dict(refill_incomplete=True),
+    dict(refill_incomplete=True, activity_id=['one'], fill_only=True),
+])
+async def test_gallery_repair_rejects_ambiguous_scope(options, monkeypatch):
+    from scripts import repair_offline_galleries as repair
+    from types import SimpleNamespace
+    connect = AsyncMock()
+    monkeypatch.setattr(repair, 'db', SimpleNamespace(connect=connect))
+    with pytest.raises(ValueError):
+        await repair.run(SimpleNamespace(**options))
+    connect.assert_not_awaited()

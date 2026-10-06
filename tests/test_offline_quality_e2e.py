@@ -398,3 +398,83 @@ async def test_fill_only_gallery_repair_preserves_existing_photos(journey, monke
     await repair.run(SimpleNamespace(apply=True,backup=str(tmp_path/'before.json'),fill_only=True))
     assert (await repo.get_activity(a['id'],j.user))['image_urls']==['/offline/media/place_existing.jpg']
     assert (await repo.get_activity(empty['id'],j.user))['image_urls']==['/offline/media/place_recovered.jpg']
+
+
+@pytest.mark.parametrize('have_images', [False, True])
+async def test_recommendation_rejects_collection_fallback_and_empty_gallery(journey, monkeypatch, tmp_path, have_images):
+    from app.services.offline import activity_generation as gen, activity_images as media
+    from app.services.offline.providers.search import SearchResult
+    j = journey
+    ctx = dict(user_id=j.user, agent_id=j.agent, workspace_id=j.workspace, conversation_id=j.conversation,
+               user_location_city='镇江市', has_location=True, agent_name='小伴')
+    monkeypatch.setattr(repo, 'resolve_user_context', AsyncMock(return_value=ctx))
+    monkeypatch.setattr(repo, 'list_user_tags', AsyncMock(return_value=[]))
+    monkeypatch.setattr(repo, 'memory_brief', AsyncMock(return_value=''))
+    monkeypatch.setattr(offline, 'is_activity_enabled', AsyncMock(return_value=True))
+    monkeypatch.setattr(service, 'geocode_address', AsyncMock(return_value=None))
+    article = SearchResult(title='镇江这些咖啡店，藏着整个春天！', url='https://example.com/collection', content='镇江市咖啡店合集')
+    cafe = SearchResult(title='库迪咖啡(临湖苑店) - 镇江市', url='https://example.com/cafe', content='镇江市句容市临湖苑商业B2幢110号')
+    museum = SearchResult(title='镇江博物馆', url='https://example.com/museum', content='镇江市润州区伯先路85号', raw_content='''# 镇江博物馆
+
+## 展览陈列
+
+[![Image 1](https://photo.example/one.jpg)](https://example.com/album "青铜器展")青铜器展
+[![Image 2](https://photo.example/two.jpg)](https://example.com/album "陶瓷器精品展")陶瓷器精品展
+[![Image 3](https://photo.example/three.jpg)](https://example.com/album "金银器精品展")金银器精品展
+''')
+    sources = [article, cafe, museum] if have_images else [article, cafe]
+    monkeypatch.setattr(service, '_location_for_activity', lambda ctx: ('镇江市', '镇江', ['镇江']))
+    monkeypatch.setattr(gen, '_search_activity_candidates', AsyncMock(return_value=(sources, sources, '镇江')))
+    monkeypatch.setattr(gen.repo, 'list_recent_activity_fingerprints', AsyncMock(return_value=[]))
+    # Even an invalid model result must pass the same validation as the fallback.
+    monkeypatch.setattr(gen, 'invoke_text', AsyncMock(return_value=json.dumps({
+        'title': article.title, 'location_name': '镇江这些咖啡店',
+        'address': '镇江这些咖啡店', 'official_url': article.url,
+    }, ensure_ascii=False)))
+    monkeypatch.setattr(gen, '_recommendation_copy', AsyncMock(return_value=''))
+    monkeypatch.setattr(media.place_catalog, 'load_place', AsyncMock(return_value=None))
+    monkeypatch.setattr(media.place_catalog, 'save_place', AsyncMock())
+    monkeypatch.setattr(media.storage, '_MEDIA_DIR', tmp_path)
+    monkeypatch.setattr(media, 'page_image_evidence', AsyncMock(return_value={}))
+    monkeypatch.setattr(media, 'tavily_place_images', AsyncMock(return_value=[]))
+    async def photo(client, url):
+        index = ['one', 'two', 'three'].index(url.rsplit('/', 1)[-1].split('.')[0])
+        return b'image', str(index) * 64, [0, 65535, 281474976645120][index]
+    monkeypatch.setattr(media, '_download_image', photo)
+    response = await j.client.post('/offline/activities/recommend')
+    assert response.status_code == 200, response.text
+    if not have_images:
+        assert response.json() is None
+        rows = await j.db.query_raw('SELECT id FROM offline_activity_recommendations WHERE user_id=$1', j.user)
+        assert rows == []
+        service.emit_assistant.assert_not_awaited()
+        return
+    card = response.json()
+    assert card['location_name'] == '镇江博物馆'
+    assert len(card['image_urls']) == 3
+    detail = (await j.client.get('/offline/activities/' + card['id'])).json()
+    assert detail['image_urls'] == card['image_urls']
+    assert detail['title'] == card['title'] == '镇江博物馆'
+
+
+async def test_scoped_gallery_refill_preserves_existing_photos_and_skips_failed_discovery(journey, monkeypatch, tmp_path):
+    from scripts import repair_offline_galleries as repair
+    from types import SimpleNamespace
+    j = journey
+    old = '/offline/media/place_original.jpg'
+    a = await j.create(image_urls=[old], search_sources=[{'kind': 'image', 'local_url': old}])
+    untouched = await j.create(image_urls=[old])
+    class Database:
+        async def connect(self): pass
+        async def disconnect(self): pass
+        def __getattr__(self, name): return getattr(j.db, name)
+    monkeypatch.setattr(repair, 'db', Database())
+    args = SimpleNamespace(apply=True, backup=str(tmp_path / 'before.json'), refill_incomplete=True, activity_id=[a['id']])
+    monkeypatch.setattr(repair, 'persist_activity_images', AsyncMock(return_value=[]))
+    await repair.run(args)
+    assert (await repo.get_activity(a['id'], j.user))['image_urls'] == [old]
+    monkeypatch.setattr(repair, 'persist_activity_images', AsyncMock(return_value=['/offline/media/place_second.jpg', old, '/offline/media/place_third.jpg']))
+    args.backup = str(tmp_path / 'before-refill.json')
+    await repair.run(args)
+    assert (await repo.get_activity(a['id'], j.user))['image_urls'] == [old, '/offline/media/place_second.jpg', '/offline/media/place_third.jpg']
+    assert (await repo.get_activity(untouched['id'], j.user))['image_urls'] == [old]

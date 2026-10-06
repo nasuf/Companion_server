@@ -20,12 +20,23 @@ from app.services.offline.repository import activity_from_row
 
 
 async def run(args):
+    refill = getattr(args, "refill_incomplete", False)
+    ids = getattr(args, "activity_id", None)
+    if ids and not refill:
+        raise ValueError('--activity-id requires --refill-incomplete')
+    if refill and (not ids or getattr(args, "fill_only", False) or getattr(args, "include_empty", False)):
+        raise ValueError('--refill-incomplete requires explicit IDs and cannot combine with legacy modes')
     await db.connect()
     try:
-        rows = await db.query_raw("""SELECT * FROM offline_activity_recommendations
-            WHERE status NOT IN ('cancelled','expired') AND ($1::boolean OR image_urls <> '[]'::jsonb)
-            AND ($2::boolean = FALSE OR image_urls = '[]'::jsonb)
-            AND NOT search_sources @> '[{"kind":"image"}]'::jsonb ORDER BY created_at""", getattr(args, "include_empty", False) or getattr(args, "fill_only", False), getattr(args, "fill_only", False))
+        if refill:
+            rows = await db.query_raw("""SELECT * FROM offline_activity_recommendations
+                WHERE id = ANY($1::text[]) AND status NOT IN ('cancelled','expired')
+                AND jsonb_array_length(image_urls) < 3 ORDER BY created_at""", ids)
+        else:
+            rows = await db.query_raw("""SELECT * FROM offline_activity_recommendations
+                WHERE status NOT IN ('cancelled','expired') AND ($1::boolean OR image_urls <> '[]'::jsonb)
+                AND ($2::boolean = FALSE OR image_urls = '[]'::jsonb)
+                AND NOT search_sources @> '[{"kind":"image"}]'::jsonb ORDER BY created_at""", getattr(args, "include_empty", False) or getattr(args, "fill_only", False), getattr(args, "fill_only", False))
         print(json.dumps({'legacy_galleries': len(rows), 'apply': args.apply}), flush=True)
         if not args.apply:
             return
@@ -45,6 +56,12 @@ async def run(args):
                         search_results=[]), timeout=45)
                 except Exception:
                     urls = []  # Never retain an unverified legacy cover after a failed refill.
+                if refill:
+                    # Append only: failed discovery must never remove an existing photo.
+                    urls = list(dict.fromkeys(card['image_urls'] + urls))[:3]
+                    if len(urls) <= len(card['image_urls']):
+                        print(json.dumps({'activity_id':card['id'],'images':len(urls),'updated':False}), flush=True)
+                        return
                 if getattr(args, 'fill_only', False) and not urls:
                     print(json.dumps({'activity_id':card['id'],'images':0,'updated':False}), flush=True)
                     return
@@ -52,7 +69,8 @@ async def run(args):
                 async with db.tx() as tx:
                     updated = await tx.query_raw('''UPDATE offline_activity_recommendations
                         SET image_urls=$1::jsonb, search_sources=$2::jsonb, updated_at=CURRENT_TIMESTAMP
-                        WHERE id=$3 AND image_urls=$4::jsonb RETURNING id''',
+                        WHERE id=$3 AND image_urls=$4::jsonb
+                        AND status NOT IN ('cancelled','expired') RETURNING id''',
                         json.dumps(urls), json.dumps(sources), card['id'], json.dumps(card['image_urls']))
                     if updated:
                         await tx.execute_raw('''UPDATE messages SET metadata=jsonb_set(metadata,
@@ -72,4 +90,6 @@ if __name__ == '__main__':
     parser.add_argument('--backup')
     parser.add_argument('--include-empty', action='store_true', help='Retry previously unverified empty galleries')
     parser.add_argument('--fill-only', action='store_true', help='Fill empty galleries only; preserve all existing photos and skip failed discovery')
+    parser.add_argument('--refill-incomplete', action='store_true', help='Append verified photos to selected incomplete albums, preserving existing photos')
+    parser.add_argument('--activity-id', action='append', help='Explicit activity ID to refill (repeatable)')
     asyncio.run(run(parser.parse_args()))

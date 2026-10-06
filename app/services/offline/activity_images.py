@@ -77,7 +77,7 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                         return []
                     if re.search(r'效果图|设计方案|规划图|拟建', source.title):
                         return []
-                    evidence = indexed_image_evidence(source.raw_content, card['location_name'], source.images)
+                    evidence = indexed_image_evidence(source.raw_content, card['location_name'], source.images, source.url)
                     if not evidence:
                         async with page_slots:
                             if source.url not in page_cache:

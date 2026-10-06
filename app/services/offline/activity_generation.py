@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from app.services.offline.content import plain_text, canonical_url, place_source_matches
+from app.services.offline.content import plain_text, canonical_url, place_source_matches, concrete_place_name, is_collection_title
 
+import asyncio
 import json
 import logging
 import re
@@ -588,7 +589,7 @@ def _looks_like_named_place(text: str) -> bool:
 def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
     title = str(card.get("title") or "").strip()
     location = str(card.get("location_name") or card.get("address") or "").strip()
-    if not title or _is_generic_location(location, city):
+    if not title or _is_generic_location(location, city) or not concrete_place_name(location, _display_city(city)):
         return False
     if len(_normalize_fingerprint(location)) < 2:
         return False
@@ -600,20 +601,18 @@ def _card_has_concrete_place(card: dict[str, Any], city: str) -> bool:
 
 def _place_from_source(result: SearchResult, city: str) -> str | None:
     title = result.title.strip()
-    if re.search(r"攻略|合集|排行榜|十大|周末去哪|[0-9一二三四五六七八九十]+[个大处家]", title):
+    if is_collection_title(title) or _GENERIC_ACTIVITY_TITLE_RE.search(title):
         return None
-    for part in _TOKEN_SPLIT_RE.split(title):
-        part = part.strip()
-        if not part:
-            continue
-        if _is_generic_location(part, city):
-            continue
-        if _CONCRETE_PLACE_HINT_RE.search(part):
-            return part
-    if not _is_generic_location(title, city) and (
-        _CONCRETE_PLACE_HINT_RE.search(title) or _looks_like_named_place(title)
-    ):
-        return title[:32]
+    # Keep branch names in parentheses: different branches are different places.
+    name = re.split(r"\s+[-–—|]\s+|[，。；;:：|_]", title, maxsplit=1)[0].strip()
+    name = re.sub(r"(?:开放时间|开放信息|常设展|交通指南|门票信息).*$", "", name).strip()
+    # Arbitrary Chinese headlines containing 山/江/店 are not POI names.
+    if not re.search(r"(?:馆|园|店|铺|坊|巷|弄|站|场|街|楼|中心|咖啡|茶室|书房|书屋|书吧|码头|渡口|古镇|景区|绿道|步道|寺|山|湖|桥|KTV|livehouse|酒吧|市集|夜市)(?:[（(][^()（）]{1,20}[)）])?$", name, re.I):
+        return None
+    if (not _is_generic_location(name, city)
+            and concrete_place_name(name, _display_city(city))
+            and _CONCRETE_PLACE_HINT_RE.search(name)):
+        return name
     return None
 
 
@@ -643,14 +642,19 @@ def _fallback_card(
     tags: list[str],
     results: list[SearchResult],
 ) -> dict[str, Any] | None:
-    source = next((item for item in results if _place_from_source(item, city)), None)
+    source = next((item for item in results if (
+        (name := _place_from_source(item, city))
+        and place_source_matches({"location_name": name, "city": _display_city(city)}, item.title, item.content)
+    )), None)
     if source is None:
         return None
     location = _place_from_source(source, city)
     if not location:
         return None
     city_label = _display_city(city)
-    title = source.title.strip()[:36] or f"{location}轻量出门计划"
+    title = location
+    address_match = re.search(r"(?:地址为|地址[：:])\s*([^。；;\n]{4,100})", source.content)
+    address = address_match.group(1).strip() if address_match else location
     task = f"到{location}后，拍下一处你觉得有一点可爱的细节，发给我看看。"
     return {
         "title": title,
@@ -663,7 +667,7 @@ def _fallback_card(
         "vibe": "轻松、随意",
         "suitable": "散步、拍照",
         "location_name": location,
-        "address": location,
+        "address": address,
         "starts_at": None,
         "ends_at": None,
         "official_url": source.url,
@@ -702,7 +706,10 @@ async def generate_activity_card(
         city=city,
         location_terms=location_terms,
     )
-    results = (filtered_results or all_usable_results)[:6]
+    # Search ranking often puts listicles above actual POI pages. Keep usable
+    # individual places in the model's bounded source window first.
+    results = sorted(filtered_results or all_usable_results,
+                     key=lambda item: _place_from_source(item, city) is None)[:6]
     sources = _sources(results)
     card: dict[str, Any] | None = None
     if sources:
@@ -752,8 +759,36 @@ async def generate_activity_card(
             query,
         )
         card = None
-    if not card:
-        card = _fallback_card(city, tags, results)
+    fallback_cards = [candidate for result in results
+                      if (candidate := _fallback_card(city, tags, [result]))]
+    candidates = ([card] if card else []) + fallback_cards
+    card = None
+    seen_places: set[str] = set()
+    # A bounded retry selects another real place if a gallery cannot be verified.
+    # This shares the same validation gate for model and deterministic candidates.
+    try:
+        async with asyncio.timeout(55):
+            for candidate in candidates:
+                candidate["city"] = _display_city(city)
+                identity = _normalize_fingerprint(candidate.get("location_name") or "")
+                if identity in seen_places:
+                    continue
+                if (not _card_has_concrete_place(candidate, city)
+                        or not _card_is_source_backed(candidate, sources)
+                        or _card_repeats_history(candidate, recent_activities)):
+                    continue
+                if len(seen_places) >= 3:
+                    break
+                seen_places.add(identity)
+                candidate["image_urls"] = await persist_activity_images(
+                    user_id=user_id, card=candidate, city=city, search_results=results, limit=3,
+                )
+                if candidate["image_urls"]:
+                    card = candidate
+                    break
+                logger.info("[offline] skipped place without verified photos place=%r", candidate.get("location_name"))
+    except TimeoutError:
+        logger.info("[offline] candidate/gallery budget exhausted")
     if not card:
         logger.warning("[offline] no concrete activity card generated query=%r", query)
         return None
@@ -771,9 +806,6 @@ async def generate_activity_card(
             card["expires_at"] = min(end, now + timedelta(days=14))
         except ValueError:
             return None
-    card["image_urls"] = await persist_activity_images(
-        user_id=user_id, card=card, city=city, search_results=results, limit=3,
-    )
     for field in ("title", "summary", "description", "vibe", "suitable"):
         card[field] = plain_text(card.get(field))
     card["search_sources"] = sources + [{"kind": "image", **image} for image in card.pop("image_provenance", [])]
