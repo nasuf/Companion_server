@@ -89,7 +89,7 @@ async def discovery(journey, monkeypatch, tmp_path):
             j.queries.append(payload['query'])
             assert payload['search_depth'] == 'basic' and payload['include_raw_content'] == 'markdown'
             rows = j.search_rows(payload['query']) if hasattr(j, 'search_rows') else j.rows
-            return httpx.Response(200, json={'results': rows, 'images': ['https://photo.fixture.test/unbound.jpg']})
+            return httpx.Response(200, json={'results': rows, 'images': getattr(j, 'query_images', ['https://photo.fixture.test/unbound.jpg'])})
         if request.url.host == 'photo.fixture.test':
             j.downloads.append(str(request.url))
             try:
@@ -154,6 +154,37 @@ async def test_real_generation_supports_diverse_named_places_and_three_photos(di
         result = await j.client.get(url)
         assert result.status_code == 200 and result.headers['content-type'] == 'image/jpeg'
         assert Image.open(io.BytesIO(result.content)).size == (320, 240)
+
+
+@pytest.mark.parametrize('channel', ['query', 'native'])
+async def test_photo_channels_reach_http_detail_and_archived_album(discovery, channel, monkeypatch):
+    j = discovery
+    name = '小岛咖啡馆'
+    j.rows = [j.row(name, '地址：镇江市京口区江滨路18号', images=False)]
+    if channel == 'query':
+        j.query_images = [dict(url=f'https://photo.fixture.test/{i}.jpg',
+                               title='鎮江市小島咖啡館實景照片', description='Interior of the cafe') for i in range(3)]
+        # Matching query words are not enough; each image has its own identity.
+        j.query_images += [dict(url='https://photo.fixture.test/wrong.jpg', title='南京别处咖啡馆', description=name)]
+    else:
+        j.rows[0]['images'] = [dict(url=f'https://photo.fixture.test/{i}.jpg', description=caption,
+                                   description_source='alt') for i, caption in enumerate(['门头', '内饰', '美食'])]
+    monkeypatch.setattr(media, 'page_image_evidence', AsyncMock(return_value={}))
+    result = await j.client.post('/offline/activities/recommend')
+    assert result.status_code == 200, result.text
+    card = result.json()
+    assert len(card['image_urls']) == 3
+    assert set(j.downloads) == {f'https://photo.fixture.test/{i}.jpg' for i in range(3)}
+    path = '/offline/activities/' + card['id']
+    assert (await j.client.get(path)).json()['image_urls'] == card['image_urls']
+    assert (await j.client.post(path + '/accept')).status_code == 200
+    assert (await j.client.post(path + '/arrive', json={'manual_confirmation': True})).status_code == 200
+    assert (await j.client.post(path + '/archive')).status_code == 200
+    review = (await j.client.get(path + '/review')).json()
+    assert review['image_urls'] == card['image_urls'] and not review['gallery']
+    assert not review['can_generate_memory_note']  # Place photos aren't user actions.
+    for url in review['image_urls']:
+        assert (await j.client.get(url)).status_code == 200
 
 
 async def test_collection_multiple_leads_require_independent_local_branch_verification(discovery):

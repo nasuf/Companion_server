@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 from urllib.parse import urlsplit, urlunsplit
+from opencc import OpenCC
+
+_SEARCH_CHINESE = OpenCC('t2s')
 
 
 def plain_text(value: object) -> str:
@@ -22,8 +25,20 @@ def canonical_url(value: object) -> str:
         return ""
 
 
+def simplified(value: object) -> str:
+    return _SEARCH_CHINESE.convert(str(value or ''))
+
+
 def normalized(value: object) -> str:
-    return re.sub(r"[\W_]+", "", str(value or "")).casefold()
+    return re.sub(r"[\W_]+", "", simplified(value)).casefold()
+
+
+def place_name_in_text(name: object, text: object, city: object = '') -> bool:
+    """Allow the city's optional 市, without fuzzy matching unrelated venues."""
+    name, text, city = normalized(name), normalized(text), normalized(city).removesuffix('市')
+    if city:
+        name, text = name.replace(city + '市', city), text.replace(city + '市', city)
+    return len(name) >= 2 and name in text
 
 
 # Discovery articles are useful search input, but never an individual destination.
@@ -36,7 +51,7 @@ _COLLECTION_TITLE = re.compile(
 
 
 def is_collection_title(value: object) -> bool:
-    return bool(_COLLECTION_TITLE.search(str(value or "")))
+    return bool(_COLLECTION_TITLE.search(simplified(value)))
 
 
 def concrete_place_name(value: object, city: object = "") -> bool:
@@ -65,7 +80,18 @@ def place_source_matches(card: dict, title: str, content: str) -> bool:
     # A listicle is a discovery source, never a place or a place's photo album.
     if is_collection_title(title) or not concrete_place_name(card.get("location_name"), card.get("city")):
         return False
-    return bool(len(name) >= 2 and name in heading and city and city in heading + body)
+    return bool(place_name_in_text(name, heading, city) and city and city in heading + body)
+
+
+def photo_source_matches(card: dict, title: str, content: str, url: str = '') -> bool:
+    if not place_source_matches(card, title, content):
+        return False
+    branches = re.findall(r'[（(]([^()（）]{1,20}店)[)）]', simplified(title))
+    identity = normalized(str(card.get('location_name') or '') + str(card.get('address') or ''))
+    # A brand-only name does not authorize borrowing photographs from its other
+    # branches. Its selected exact source is valid evidence for this address.
+    selected = bool(canonical_url(url) and canonical_url(url) == canonical_url(card.get('official_url')))
+    return selected or all(normalized(branch).removesuffix('店') in identity for branch in branches)
 
 
 def novel_fragment(text: str, previous: list[str]) -> bool:

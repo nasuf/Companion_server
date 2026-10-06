@@ -227,3 +227,94 @@ async def test_gallery_repair_rejects_ambiguous_scope(options, monkeypatch):
     with pytest.raises(ValueError):
         await repair.run(SimpleNamespace(**options))
     connect.assert_not_awaited()
+
+
+def test_native_scene_alt_and_responsive_lazy_photos_keep_identity():
+    from app.services.offline.image_evidence import indexed_image_evidence, PageImages
+    items = [dict(url='https://photo.example/' + kind + '.jpg', description=caption, description_source='alt')
+             for kind, caption in [('inside', '内饰'), ('food', '美食'), ('wrong', '别处咖啡馆内饰'), ('ad', '餐点广告')]]
+    assert set(indexed_image_evidence('', '小岛咖啡馆', items)) == {
+        'https://photo.example/inside.jpg', 'https://photo.example/food.jpg'}
+    parser = PageImages('https://photo.example/place', '小岛咖啡馆')
+    parser.feed('<img alt="内饰" src="/placeholder.gif" data-lazy-src="/inside.jpg" '
+                'srcset="/small.jpg 300w, /large.jpg 1200w"><img alt="别处咖啡馆店内" src="/wrong.jpg">')
+    assert next(iter(parser.images)) == 'https://photo.example/large.jpg'
+    assert 'https://photo.example/inside.jpg' in parser.images
+    assert 'https://photo.example/wrong.jpg' not in parser.images
+
+
+@pytest.mark.parametrize('title,description,ok', [
+    ('东莞莲湖公园实景', '湖面', True),
+    ('東莞蓮湖公園', '外观', True),
+    ('西安莲湖公园', '东莞莲湖公园', False),
+    ('东莞十大公园', '莲湖公园', False),
+    ('东莞莲湖公园logo', '', False),
+    ('东莞莲湖公园', '人民公园风景', False),
+    ('', '东莞莲湖公园实景', False),
+])
+def test_independent_image_documents_require_their_own_identity(title, description, ok):
+    from app.services.offline.image_evidence import query_image_evidence
+    assert query_image_evidence(CARD, dict(source_title=title, description=description)) is ok
+
+
+def test_branch_and_optional_city_suffix_are_checked_before_photo_acceptance():
+    from app.services.offline.content import photo_source_matches
+    assert place_source_matches(dict(location_name='镇江市图书馆', city='镇江市'), '镇江图书馆', '镇江市')
+    cafe = dict(location_name='悠澜咖啡', city='镇江市', address='如意江南', official_url='https://example.com/ruyi')
+    assert photo_source_matches(cafe, '悠澜咖啡(如意江南店)', '镇江市')
+    assert not photo_source_matches(cafe, '悠澜咖啡(丁卯店)', '镇江市')
+    branch = {**cafe, 'location_name': '悠澜咖啡(如意江南店)'}
+    assert not photo_source_matches(branch, '悠澜咖啡(丁卯店)', '镇江市')
+
+
+async def test_images_only_response_is_retained_and_cache_preserves_independent_evidence(monkeypatch):
+    from app.services.offline.providers import search
+    cache = {}
+    class Cache:
+        async def get(self, key): return cache.get(key)
+        async def set(self, key, data, **kwargs): cache[key] = data
+    monkeypatch.setattr(search, 'get_redis', AsyncMock(return_value=Cache()))
+    monkeypatch.setattr(search.settings, 'tavily_api_key', 'fixture')
+    monkeypatch.setattr(search.settings, 'tavily_search_endpoint', 'https://search.fixture.test')
+    response = dict(results=[], images=[dict(url='https://photo.example/park.jpg', title='东莞莲湖公园', description='湖面')])
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=response)
+    original = httpx.AsyncClient
+    class Client(original):
+        def __init__(self, **kwargs): super().__init__(transport=httpx.MockTransport(handler), **kwargs)
+    monkeypatch.setattr(httpx, 'AsyncClient', Client)
+    first = await search.tavily_place_images('东莞莲湖公园')
+    second = await search.tavily_place_images('东莞莲湖公园')
+    assert first == second and len(calls) == 1
+    assert first[0].url == '' and first[0].images == []
+    assert first[0].query_images[0]['source_title'] == '东莞莲湖公园'
+    assert first[0].query_images[0]['source_url'] == ''
+
+
+async def test_gallery_deadline_keeps_completed_photo_and_cancels_slow_peers(monkeypatch, tmp_path):
+    import asyncio
+    monkeypatch.setattr(images.place_catalog, 'load_place', AsyncMock(return_value=None))
+    monkeypatch.setattr(images.place_catalog, 'save_place', AsyncMock())
+    monkeypatch.setattr(storage, '_MEDIA_DIR', tmp_path)
+    monkeypatch.setattr(images, '_GALLERY_BUDGET_S', .05)
+    cancelled, active = [], set()
+    async def download(client, url):
+        active.add(url)
+        try:
+            if url.endswith('fast.jpg'): return b'photo', 'f' * 64, 123
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(url)
+            raise
+        finally:
+            active.remove(url)
+    monkeypatch.setattr(images, '_download_image', download)
+    monkeypatch.setattr(images, 'tavily_place_images', AsyncMock(return_value=[]))
+    urls = ['https://photo.example/' + n + '.jpg' for n in ('fast', 'slow1', 'slow2')]
+    card = dict(CARD)
+    gallery = await images.persist_activity_images(user_id='u', card=card, city='东莞', search_results=[source(urls)])
+    assert len(gallery) == 1 and len(cancelled) == 2 and not active
+    assert card['image_provenance'][0]['url'] == urls[0]
+    assert storage.storage_path(card['image_provenance'][0]['storage_key']).is_file()

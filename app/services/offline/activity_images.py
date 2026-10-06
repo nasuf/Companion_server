@@ -8,6 +8,9 @@ import ipaddress
 import logging
 import socket
 import re
+import os
+import tempfile
+from collections import Counter
 from itertools import zip_longest
 from urllib.parse import urlsplit
 
@@ -15,18 +18,19 @@ import httpx
 from PIL import Image, ImageOps
 
 from app.services.offline import activity_media_storage as storage, place_catalog
-from app.services.offline.content import canonical_url, place_source_matches
-from app.services.offline.image_evidence import page_image_evidence, indexed_image_evidence
+from app.services.offline.content import canonical_url, photo_source_matches
+from app.services.offline.image_evidence import page_image_evidence, indexed_image_evidence, query_image_evidence
 from app.services.offline.providers.search import SearchResult, tavily_place_images
 
 logger = logging.getLogger(__name__)
 _MAX_BYTES = 8 * 1024 * 1024
+_GALLERY_BUDGET_S = 35.0
 
 
 def _image_queries(card: dict, city: str) -> list[str]:
     name = str(card.get('location_name') or '').strip()
     address = str(card.get('address') or '').strip()
-    return [f'{city} {name} {address} 实景照片', f'{city} {name} 官方 图片'] if name else []
+    return [f'{city} {name} 实景照片', f'{city} {name} {address} 图片'] if name else []
 
 
 def _is_bad_image_url(url: str) -> bool:
@@ -38,7 +42,7 @@ def _is_bad_image_url(url: str) -> bool:
 def _source_images(card: dict, sources: list[SearchResult]) -> list[dict]:
     candidates = []
     for source in sources:
-        if not place_source_matches(card, source.title, source.content):
+        if not photo_source_matches(card, source.title, source.content, source.url):
             continue
         images = source.images or ([{'url': source.image_url}] if source.image_url else [])
         for image in images:
@@ -66,14 +70,15 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
     seen = {item['url'] for item in accepted}
     hashes = {item.get('sha256') for item in accepted}
     perceptual = [int(item['dhash']) for item in accepted if item.get('dhash') is not None]
+    stats = Counter()
     try:
-        async with asyncio.timeout(35):
+        async with asyncio.timeout(_GALLERY_BUDGET_S):
             async with httpx.AsyncClient(timeout=8, trust_env=False, follow_redirects=False) as client:
                 page_cache: dict[str, dict[str, str]] = {}
                 page_slots = asyncio.Semaphore(3)
 
                 async def candidates(source: SearchResult) -> list[dict]:
-                    if not place_source_matches(card, source.title, source.content + source.raw_content):
+                    if not photo_source_matches(card, source.title, source.content + source.raw_content, source.url):
                         return []
                     if re.search(r'效果图|设计方案|规划图|拟建', source.title):
                         return []
@@ -93,38 +98,82 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                 async def collect(sources: list[SearchResult]) -> None:
                     # Apply the window after binding the chosen destination.
                     # A diverse discovery pool can put this place after page 8.
-                    bound = [source for source in sources if place_source_matches(
-                        card, source.title, source.content + source.raw_content)]
+                    bound = [source for source in sources if photo_source_matches(
+                        card, source.title, source.content + source.raw_content, source.url)]
                     groups = await asyncio.gather(*(candidates(source) for source in bound[:8]))
+                    query_candidates = {}
+                    counted_query_urls = set()
+                    for source in sources:
+                        for item in source.query_images:
+                            if item['url'] in query_candidates:
+                                continue
+                            if item['url'] not in counted_query_urls:
+                                stats['query_candidates'] += 1
+                                counted_query_urls.add(item['url'])
+                            if query_image_evidence(card, item) and not _is_bad_image_url(item['url']):
+                                # A title identifies the image document; it does
+                                # not give us permission to invent its page URL.
+                                query_candidates[item['url']] = {**item, 'evidence': 'image_search_document'}
+                    groups.append(list(query_candidates.values()))
+                    stats['bound_pages'] += len(bound)
+                    stats['eligible_candidates'] += sum(len(group) for group in groups)
                     attempts = 0
                     # Alternate sources so a blocked image CDN cannot monopolize the budget.
-                    for candidate in (item for row in zip_longest(*groups) for item in row if item):
-                        if len(accepted) >= limit:
+                    ordered = (item for row in zip_longest(*groups) for item in row if item)
+                    while len(accepted) < limit and attempts < 18:
+                        batch = []
+                        capacity = min(3, 18 - attempts)
+                        for candidate in ordered:
+                            if candidate['url'] in seen:
+                                continue
+                            seen.add(candidate['url'])
+                            batch.append(candidate)
+                            attempts += 1
+                            if len(batch) >= capacity:
+                                break
+                        if not batch:
                             break
-                        if candidate['url'] in seen:
-                            continue
-                        seen.add(candidate['url'])
-                        if attempts >= 12:
-                            break
-                        attempts += 1
-                        image = await _download_image(client, candidate['url'])
-                        if image is None:
-                            continue
-                        blob, digest, dhash = image
-                        if digest in hashes or any((dhash ^ old).bit_count() <= 4 for old in perceptual):
-                            continue
-                        key = f'place_{digest}.jpg'
-                        storage._MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-                        # Same content => same bytes across workers; atomic replace prevents partial reads.
-                        import os, tempfile
-                        with tempfile.NamedTemporaryFile(dir=storage._MEDIA_DIR, delete=False) as tmp:
-                            tmp.write(blob)
-                            tmp_name = tmp.name
-                        os.replace(tmp_name, storage.storage_path(key))
-                        accepted.append({**candidate, 'storage_key': key, 'sha256': digest,
-                                         'dhash': str(dhash), 'local_url': storage.media_url(key)})
-                        hashes.add(digest)
-                        perceptual.append(dhash)
+                        # Bounded parallel downloads let slow CDNs share one
+                        # timeout window without monopolizing gallery refill.
+                        async def download(candidate):
+                            return candidate, await _download_image(client, candidate['url'])
+                        tasks = [asyncio.create_task(download(c)) for c in batch]
+                        try:
+                            # Persist each completed photo immediately: a deadline
+                            # must not discard fast downloads waiting on a peer.
+                            for completed in asyncio.as_completed(tasks):
+                                candidate, image = await completed
+                                stats['downloads'] += 1
+                                if image is None:
+                                    stats['unavailable'] += 1
+                                    continue
+                                blob, digest, dhash = image
+                                if digest in hashes or any((dhash ^ old).bit_count() <= 4 for old in perceptual):
+                                    stats['duplicates'] += 1
+                                    continue
+                                if len(accepted) >= limit:
+                                    break
+                                key = f'place_{digest}.jpg'
+                                storage._MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+                                with tempfile.NamedTemporaryFile(dir=storage._MEDIA_DIR, delete=False) as tmp:
+                                    tmp.write(blob)
+                                    tmp_name = tmp.name
+                                try:
+                                    os.replace(tmp_name, storage.storage_path(key))
+                                finally:
+                                    if os.path.exists(tmp_name):
+                                        os.unlink(tmp_name)
+                                accepted.append({**candidate, 'storage_key': key, 'sha256': digest,
+                                                 'dhash': str(dhash), 'local_url': storage.media_url(key)})
+                                hashes.add(digest)
+                                perceptual.append(dhash)
+                                if len(accepted) >= limit:
+                                    break
+                        finally:
+                            for task in tasks:
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
                 await collect(search_results)
                 for query in _image_queries(card, city):
                     if len(accepted) >= limit:
@@ -135,6 +184,7 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
     if accepted:
         await place_catalog.save_place(card, accepted)
     card['image_provenance'] = accepted
+    logger.info('[offline-images] gallery accepted=%s stages=%s', len(accepted), dict(stats))
     return [item['local_url'] for item in accepted]
 
 

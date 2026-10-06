@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import hashlib
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from app.redis_client import get_redis
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,6 +24,9 @@ class SearchResult:
     image_url: str | None = None
     images: list[dict[str, str]] = field(default_factory=list)
     raw_content: str = ''
+    # Query-level image search results are independent documents, not photos
+    # belonging to this page. Keep them separate through filtering/cache reads.
+    query_images: list[dict[str, str]] = field(default_factory=list)
 
 
 def _result_from_item(item: Any) -> SearchResult | None:
@@ -77,7 +80,7 @@ async def tavily_search(
     }
     if include_domains:
         payload["include_domains"] = include_domains
-    cache_key = 'offline:search:v3:' + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    cache_key = 'offline:search:v4:' + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     try:
         cached = await (await get_redis()).get(cache_key)
         if cached:
@@ -102,7 +105,9 @@ async def tavily_search(
         logger.warning("[offline] tavily search failed: %s", exc)
         return []
 
-    raw_results = data.get("results") if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        return []
+    raw_results = data.get("results") or []
     if not isinstance(raw_results, list):
         return []
     results: list[SearchResult] = []
@@ -110,6 +115,22 @@ async def tavily_search(
         result = _result_from_item(item)
         if result and result.url not in {r.url for r in results}:
             results.append(result)
+    query_images = []
+    raw_images = data.get('images') or []
+    for item in (raw_images[:20] if isinstance(raw_images, list) else []):
+        url = _image_url_from_item(item)
+        if not url:
+            continue
+        meta = item if isinstance(item, dict) else {}
+        query_images.append(dict(url=url, source_title=str(meta.get('title') or '')[:200],
+                                 source_url=str(meta.get('source_url') or '')[:2048],
+                                 description=str(meta.get('description') or '')[:1200], query=payload['query']))
+    if query_images:
+        results = [replace(r, query_images=query_images) for r in results]
+        if not results and image_evidence:
+            # Images-only responses remain usable for gallery refill. An empty
+            # page URL cannot become a source-backed activity destination.
+            results = [SearchResult(title='', url='', content='', query_images=query_images)]
     if results:
         try:
             await (await get_redis()).set(cache_key, json.dumps([asdict(r) for r in results]), ex=3600)
@@ -181,5 +202,5 @@ async def tavily_image_search(
 
 
 async def tavily_place_images(query: str) -> list[SearchResult]:
-    """Return page-bound candidates; query-global images have no place evidence."""
+    """Return page photos and separate image-search documents with their evidence."""
     return await tavily_search(query, max_results=8, image_evidence=True, timeout_s=15)
