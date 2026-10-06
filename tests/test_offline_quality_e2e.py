@@ -185,9 +185,15 @@ async def test_concurrent_fragments_cannot_repeat_or_exceed_cap(journey):
 async def test_explicit_manual_arrival_is_not_gps_verified(journey):
     j=journey;a=await j.create()
     await j.db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',a['id'])
-    assert (await post(j,a,'arrive')).status_code==422
+    rejected = await post(j,a,'arrive')
+    assert rejected.status_code == 422
+    assert rejected.json()['detail'] == {
+        'reason': 'no_geocode', 'message': '暂时没能确认到达，请稍后再试'
+    }
     r=await post(j,a,'arrive',{'manual_confirmation':True})
     assert r.status_code==200 and r.json()['reached'] and not r.json()['arrival_verified']
+    assert service.insert_user_activity_card.await_args.kwargs['status_label'] == '我到了'
+    assert service.emit_assistant.await_args.kwargs['message'] == '到了呀，慢慢逛'
 
 
 async def test_public_place_cache_contains_no_personal_copy(journey):

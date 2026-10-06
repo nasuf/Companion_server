@@ -387,7 +387,7 @@ def _verify_arrival_distance(activity: dict, lat: float, lng: float) -> None:
                 status_code=422,
                 detail={
                     "reason": "no_geocode",
-                    "message": "这个地点还没定位到坐标，暂时没法确认到达",
+                    "message": "暂时没能确认到达，请稍后再试",
                 },
             )
         return  # 放行：无坐标跳过距离校验（体验优先，开关控制）
@@ -457,7 +457,7 @@ async def arrive_activity(
     has_place = activity.get('place_lat') is not None and activity.get('place_lng') is not None
     if not has_place:
         if not manual_confirmation or settings.offline_arrival_require_geocode:
-            raise HTTPException(status_code=422, detail={"reason": "no_geocode", "message": "这个地点暂无可靠坐标，可选择手动记录到达；手动记录不代表定位核验通过"})
+            raise HTTPException(status_code=422, detail={"reason": "no_geocode", "message": "暂时没能确认到达，请稍后再试"})
     else:
         if lat is None or lng is None or not all(math.isfinite(v) for v in (lat, lng)):
             raise HTTPException(status_code=422, detail={"reason": "location_required", "message": "需要当前位置才能确认到达，请开启定位后重试"})
