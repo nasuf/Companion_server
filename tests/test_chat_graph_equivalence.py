@@ -17,6 +17,9 @@ from evals.reply_register.cases import ALL_CASES
 
 
 async def collect(io, text="今天有点累了", **kwargs):
+    # Paired executions share the ingress clock, including a synthetic user row
+    # absent from the mocked history. Never compare two wall-clock timestamps.
+    kwargs.setdefault("reply_context", {"received_at": io.now.isoformat()})
     return [event async for event in chat.stream_chat_response(
         "c-1", text, io.agent, "u-1", **kwargs
     )]
@@ -127,6 +130,7 @@ async def test_paired_reply_paths_and_prompt_inputs(monkeypatch, case):
             else:
                 assert len(io.tier_calls) == 1
                 assert io.tier_calls[0][0] == ("l3" if case == "l3" else relevance)
+                assert "[10-04 12:00] user: 今天有点累了" in io.tier_calls[0][1]["context"]
             snapshots.append(snapshot)
     assert snapshots[0] == snapshots[1]
 
