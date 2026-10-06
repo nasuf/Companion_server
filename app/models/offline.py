@@ -71,6 +71,8 @@ class OfflineActivityFragmentItem(BaseModel):
 
 
 class OfflineActivityReviewResponse(BaseModel):
+    # Original recommendation photos, separate from user-created journey media.
+    image_urls: list[str] = Field(default_factory=list)
     id: str
     title: str
     address: str | None = None

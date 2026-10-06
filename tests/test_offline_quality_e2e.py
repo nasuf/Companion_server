@@ -83,6 +83,43 @@ async def test_gps_validation_arrival_only_no_invented_memory(journey, monkeypat
     llm.assert_not_called()
 
 
+@pytest.mark.parametrize('image_count', [0, 1, 3])
+@pytest.mark.parametrize('has_material', [False, True])
+async def test_archived_review_preserves_place_album_separate_from_materials(
+    journey, monkeypatch, image_count, has_material
+):
+    j = journey
+    images = [f'/offline/media/place_fixture_{i}.jpg' for i in range(image_count)]
+    a = await j.create(image_urls=images)
+    path = '/offline/activities/' + a['id']
+    assert (await j.client.get(path)).json()['image_urls'] == images
+    assert (await post(j, a, 'arrive', {'lat': 23.01, 'lng': 113.75, 'accuracy_m': 10})).status_code == 200
+    storage_key = f'user_journey_{a["id"]}.jpg'
+    material = '/offline/media/' + storage_key
+    if has_material:
+        await repo.create_captured_media(
+            recommendation_id=a['id'], user_id=j.user, storage_key=storage_key,
+            url=material, mime='image/jpeg', size=123, width=10, height=10,
+            source_message_id=None,
+        )
+    monkeypatch.setattr(memory_note, 'invoke_text', AsyncMock(return_value=json.dumps({
+        'body': '你留下了一张现场照片。'
+    }, ensure_ascii=False)))
+    archived = await post(j, a, 'archive')
+    assert archived.status_code == 200, archived.text
+    assert archived.json()['image_urls'] == images
+    for _ in range(2):  # Reopening an already archived trip retains the same album.
+        response = await j.client.get(path + '/review')
+        assert response.status_code == 200, response.text
+        review = response.json()
+        assert review['image_urls'] == images
+        assert review['gallery'] == ([material] if has_material else [])
+        assert review['cover_url'] == (images[0] if images else material if has_material else None)
+        if not has_material:
+            assert not review['can_generate_memory_note']  # Place photos aren't trip evidence.
+    assert (await j.client.get(path)).json()['image_urls'] == images
+
+
 async def test_actual_journey_snapshot_excludes_before_after_and_agent_claims(journey, monkeypatch):
     j=journey;a=await j.create()
     async def message(text, offset, role='user', metadata=None):
@@ -204,7 +241,9 @@ async def test_flutter_real_http_client(journey):
     if not os.getenv('OFFLINE_FLUTTER_E2E'):
         pytest.skip('Set OFFLINE_FLUTTER_E2E=1 to run the sibling Flutter checkout')
     assert shutil.which('flutter'), 'Flutter SDK required for cross-client E2E'
-    j=journey;a=await j.create();b=await j.create()
+    j=journey
+    a=await j.create(image_urls=[f'/offline/media/place_fixture_{i}.jpg' for i in range(3)])
+    b=await j.create()
     await j.db.execute_raw('UPDATE offline_activity_recommendations SET place_lat=NULL,place_lng=NULL WHERE id=$1',a['id'])
     sock=socket.socket();sock.bind(('127.0.0.1',0))
     port=sock.getsockname()[1]

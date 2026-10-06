@@ -672,6 +672,7 @@ async def get_review(user_id: str, activity_id: str) -> OfflineActivityReviewRes
         arrival_message_id=arrival_message_id,
         address=activity.get("address") or activity.get("location_name"),
         cover_url=_activity_cover(activity, gallery),
+        image_urls=activity.get("image_urls") or [],
         started_at=activity.get("arrival_confirmed_at") or activity.get("created_at"),
         ended_at=activity.get("completed_at") or activity.get("archived_at"),
         story=note or _arrival_only_story(activity),
