@@ -70,12 +70,38 @@ async def _sync_cache(row) -> bool:
         return False
 
 
-def _response(definition, row, *, cache_synced=True, version_id=None) -> dict:
+def _response(definition, row, *, cache_synced=True, version_id=None, publication=None) -> dict:
     return {**asdict(definition), "content": row.content if row else definition.default_text,
             "is_enabled": row.isEnabled if row else True, "source": "db" if row else "default",
             "updated_at": row.updatedAt.isoformat() if row else None,
             "revision": row.revision if row else 0, "web_managed": row.webManaged if row else False,
-            "cache_synced": cache_synced, "version_id": version_id}
+            "cache_synced": cache_synced, "version_id": version_id,
+            **(publication or {"content_version_type": "unverified", "web_version": None,
+                               "content_version_id": None})}
+
+
+def _publication_metadata(row, versions, numbers):
+    """Only verified content publishes receive a public Web version label."""
+    published = [v for v in versions if v.id in numbers]
+    if published:
+        latest = max(published, key=lambda v: numbers[v.id])
+        if row and latest.content == row.content:
+            return {"content_version_type": "web", "web_version": numbers[latest.id],
+                    "content_version_id": latest.id}
+    elif (row is None and not versions) or (row and not history_requires_web(row, versions)):
+        matches = [v for v in versions if v.changeType in {"bootstrap", "code_sync"}
+                   and row and v.content == row.content]
+        latest = max(matches, key=lambda v: (v.createdAt, v.id)) if matches else None
+        return {"content_version_type": "default", "web_version": None,
+                "content_version_id": latest.id if latest else None}
+    return {"content_version_type": "unverified", "web_version": None,
+            "content_version_id": None}
+
+
+async def _publication_data(tx, key=None):
+    versions = await tx.prompttemplateversion.find_many(where={"promptKey": key} if key else {})
+    mappings = await tx.promptpublicationversion.find_many(where={"promptKey": key} if key else {})
+    return versions, {p.versionId: p.number for p in mappings}
 
 
 def _check_expected(row, expected_updated_at=None, expected_revision=None):
@@ -105,7 +131,8 @@ def _new_data(definition):
 
 async def _version(tx, row, change_type, source):
     return await tx.prompttemplateversion.create(data={"promptId": row.id, "promptKey": row.key,
-        "content": row.content, "source": source, "changeType": change_type, "revision": row.revision})
+        "content": row.content, "source": source, "changeType": change_type, "revision": row.revision,
+        "createdAt": datetime.now(timezone.utc)})
 
 
 def _schedule_eval(version):
@@ -135,7 +162,7 @@ async def is_prompt_enabled(key: str) -> bool:
 
 
 async def _mutate(key, change_type, *, content=None, enabled=None, version_id=None,
-                  expected_updated_at=None, expected_revision=None):
+                  expected_updated_at=None, expected_revision=None, publish_version=False):
     definition = PROMPT_DEFINITION_MAP.get(key)
     if not definition:
         raise KeyError(f"Unknown prompt key: {key}")
@@ -149,7 +176,11 @@ async def _mutate(key, change_type, *, content=None, enabled=None, version_id=No
             if not previous or previous.promptKey != key:
                 raise KeyError(f"Unknown prompt version for key: {key}")
             content = previous.content
-        no_change = row and ((change_type == "manual_save" and content == row.content)
+        # A same-content publication must preserve legacy surrounding whitespace;
+        # edited drafts retain the normal Web trimming policy.
+        if publish_version and change_type == "manual_save" and row and content == row.content.strip():
+            content = row.content
+        no_change = row and ((change_type == "manual_save" and content == row.content and not publish_version)
                             or (enabled is not None and enabled == row.isEnabled))
         if not no_change:
             data = {}
@@ -162,18 +193,23 @@ async def _mutate(key, change_type, *, content=None, enabled=None, version_id=No
             else:
                 row = await tx.prompttemplate.create(data={**_new_data(definition), **data})
             version = await _version(tx, row, change_type, "default" if change_type == "reset_default" else "db")
+        history, numbers = await _publication_data(tx, key)
+        publication = _publication_metadata(row, history, numbers)
     cache_synced = await _sync_cache(row)
     if version:
         _schedule_eval(version)
-    return _response(definition, row, cache_synced=cache_synced, version_id=version.id if version else None)
+    return _response(definition, row, cache_synced=cache_synced,
+                     version_id=version.id if version else None, publication=publication)
 
 
-async def update_prompt_text(key: str, content: str, *, expected_updated_at=None, expected_revision=None):
+async def update_prompt_text(key: str, content: str, *, expected_updated_at=None, expected_revision=None,
+                             publish_version=False):
     normalized = content.strip()
     if not normalized:
         raise ValueError("Prompt content cannot be empty")
     return await _mutate(key, "manual_save", content=normalized,
-                         expected_updated_at=expected_updated_at, expected_revision=expected_revision)
+                         expected_updated_at=expected_updated_at, expected_revision=expected_revision,
+                         publish_version=publish_version)
 
 
 async def set_prompt_enabled(key: str, enabled: bool, *, expected_updated_at=None, expected_revision=None):
@@ -364,9 +400,16 @@ async def get_prompt_text_or_default(key: str) -> str:
 
 
 async def list_prompts() -> list[dict]:
-    rows = await db.prompttemplate.find_many()
+    async with db.tx() as tx:
+        await tx.execute_raw("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        rows = await tx.prompttemplate.find_many()
+        history, numbers = await _publication_data(tx)
     by_key = {row.key: row for row in rows}
-    return [_response(d, by_key.get(d.key)) for d in PROMPT_DEFINITIONS]
+    by_history = {}
+    for version in history:
+        by_history.setdefault(version.promptKey, []).append(version)
+    return [_response(d, by_key.get(d.key), publication=_publication_metadata(
+        by_key.get(d.key), by_history.get(d.key, []), numbers)) for d in PROMPT_DEFINITIONS]
 
 
 async def _attach_eval_to_version(version_id: str, prompt_key: str, change_type: str) -> None:
@@ -391,11 +434,10 @@ async def list_prompt_versions(key: str, limit: int = 20) -> list[dict]:
     if not definition:
         raise KeyError(f"Unknown prompt key: {key}")
 
-    versions = await db.prompttemplateversion.find_many(
-        where={"promptKey": key},
-        order={"createdAt": "desc"},
-        take=limit,
-    )
+    async with db.tx() as tx:
+        await tx.execute_raw("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        versions, numbers = await _publication_data(tx, key)
+    versions = sorted(versions, key=lambda v: (v.createdAt, v.id), reverse=True)[:limit]
     return [
         {
             "id": version.id,
@@ -407,6 +449,7 @@ async def list_prompt_versions(key: str, limit: int = 20) -> list[dict]:
             "persistence": "synced",
             "revision": version.revision,
             "created_at": version.createdAt.isoformat(),
+            "web_version": numbers.get(version.id),
         }
         for version in versions
     ]

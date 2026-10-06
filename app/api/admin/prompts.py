@@ -73,6 +73,7 @@ async def update_prompt(
             key,
             payload.content,
             expected_updated_at=payload.expected_updated_at,
+            **({"publish_version": True} if payload.publish_version else {}),
             **({"expected_revision": payload.expected_revision} if payload.expected_revision is not None else {}),
         )
     except PromptUpdateConflictError as exc:

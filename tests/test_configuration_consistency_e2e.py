@@ -47,6 +47,7 @@ async def flow(monkeypatch):
             store._prompt_snapshot.reset(token); runtime._current_snapshot.reset(config_token)
             await database.prompttemplateversion.delete_many(where={'promptKey':d.key})
             await database.prompttemplate.delete_many(where={'key':d.key})
+            await database.promptpublicationcounter.delete_many(where={'promptKey':d.key})
             await redis.delete('prompt_snapshot:'+d.key,store._redis_key(d.key),store._enabled_redis_key(d.key))
             await redis.aclose(); await database.disconnect()
 
@@ -338,3 +339,149 @@ async def test_unauthenticated_prompt_write_has_no_side_effects(flow):
     response=await flow.client.put('/admin-api/prompts/'+flow.key,json={'content':'unauthorized'})
     assert response.status_code==401
     assert len(await store.list_prompt_versions(flow.key))==1
+
+# Public Web publications deliberately do not reuse optimistic-lock revisions.
+async def test_publication_default_and_disabled_have_one_content_identity(flow):
+    initial=(await store.list_prompts())[0]
+    assert initial['content_version_type']=='default' and initial['web_version'] is None
+    assert initial['content_version_id']==(await store.list_prompt_versions(flow.key))[0]['id']
+    disabled=await store.set_prompt_enabled(flow.key,False)
+    assert disabled['content_version_type']=='default' and disabled['web_version'] is None
+    assert disabled['content_version_id']==initial['content_version_id']
+    assert disabled['is_enabled'] is False and disabled['revision']>initial['revision']
+
+async def test_web_publications_count_content_actions_only(flow):
+    first=await store.update_prompt_text(flow.key,'Web one')
+    assert first['web_version']==1 and first['revision']==2
+    disabled=await store.set_prompt_enabled(flow.key,False)
+    noop=await store.update_prompt_text(flow.key,'Web one')
+    assert disabled['web_version']==noop['web_version']==1
+    assert disabled['content_version_id']==noop['content_version_id']==first['version_id']
+    assert noop['version_id'] is None
+    reset=await store.reset_prompt_text(flow.key)
+    assert reset['web_version']==2 and reset['content_version_type']=='web'
+    restored=await store.restore_prompt_version(flow.key,first['version_id'])
+    assert restored['web_version']==3 and restored['content']=='Web one'
+    assert restored['is_enabled'] is False
+    history=await store.list_prompt_versions(flow.key)
+    assert [v['web_version'] for v in history if v['web_version'] is not None]==[3,2,1]
+    assert next(v for v in history if v['change_type']=='disable')['web_version'] is None
+
+async def test_concurrent_publications_are_contiguous_and_match_current_content(flow):
+    results=await asyncio.gather(*(store.update_prompt_text(flow.key,str(i)) for i in range(3)))
+    assert sorted(x['web_version'] for x in results)==[1,2,3]
+    latest=max(results,key=lambda x:x['web_version'])
+    row=(await store.list_prompts())[0]
+    assert row['content']==latest['content'] and row['web_version']==3
+    assert row['content_version_id']==latest['version_id']
+
+async def test_stale_guard_does_not_consume_publication_number(flow):
+    await store.update_prompt_text(flow.key,'one',expected_revision=1)
+    with pytest.raises(store.PromptUpdateConflictError):
+        await store.update_prompt_text(flow.key,'stale',expected_revision=1,publish_version=True)
+    second=await store.update_prompt_text(flow.key,'two',expected_revision=2)
+    assert second['web_version']==2
+
+async def test_mapping_failure_rolls_back_counter_content_audit_and_cache(flow):
+    await flow.db.execute_raw("CREATE FUNCTION c01_fail_publication() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.prompt_key LIKE 'test.c01.%' THEN RAISE EXCEPTION 'synthetic mapping failure'; END IF; RETURN NEW; END $$")
+    await flow.db.execute_raw('CREATE TRIGGER c01_fail_publication BEFORE INSERT ON prompt_publication_versions FOR EACH ROW EXECUTE FUNCTION c01_fail_publication()')
+    try:
+        with pytest.raises(Exception): await store.update_prompt_text(flow.key,'must roll back')
+        row=await flow.db.prompttemplate.find_unique(where={'key':flow.key})
+        assert row.content==flow.d.default_text and row.revision==1
+        assert await flow.db.promptpublicationcounter.find_unique(where={'promptKey':flow.key}) is None
+        assert len(await store.list_prompt_versions(flow.key))==1
+        assert await flow.redis.get(store._redis_key(flow.key))==row.content
+    finally:
+        await flow.db.execute_raw('DROP TRIGGER c01_fail_publication ON prompt_publication_versions')
+        await flow.db.execute_raw('DROP FUNCTION c01_fail_publication()')
+    assert (await store.update_prompt_text(flow.key,'first success'))['web_version']==1
+
+async def test_publication_numbers_survive_history_and_template_deletion(flow):
+    await store.update_prompt_text(flow.key,'one')
+    await flow.db.prompttemplateversion.delete_many(where={'promptKey':flow.key})
+    assert await flow.db.promptpublicationversion.count(where={'promptKey':flow.key})==0
+    await flow.db.prompttemplate.delete(where={'key':flow.key})
+    recreated=await store.update_prompt_text(flow.key,'two')
+    assert recreated['web_version']==2
+
+async def test_publication_pagination_and_enable_revision_keep_current_content_id(flow):
+    for i in range(22): await store.update_prompt_text(flow.key,'version '+str(i))
+    published=(await store.list_prompts())[0]
+    disabled=await store.set_prompt_enabled(flow.key,False)
+    history=await store.list_prompt_versions(flow.key,limit=5)
+    assert len(history)==5 and history[0]['change_type']=='disable'
+    assert [v['web_version'] for v in history[1:]]==[22,21,20,19]
+    assert disabled['content_version_id']==published['content_version_id']
+    assert disabled['web_version']==22 and disabled['revision']==24
+
+@pytest.mark.parametrize('legacy',['unknown','code_sync_after_web','missing_history'])
+async def test_uncertain_history_can_publish_same_content_without_changing_enable(flow,legacy):
+    if legacy=='code_sync_after_web':
+        await store.update_prompt_text(flow.key,'historical Web')
+        row=await flow.db.prompttemplate.update(where={'key':flow.key},data={'content':flow.d.default_text})
+        await store._version(flow.db,row,'code_sync','default')
+    elif legacy=='unknown':
+        row=await flow.db.prompttemplate.find_unique(where={'key':flow.key})
+        await store._version(flow.db,row,'unknown','db')
+    else:
+        await flow.db.prompttemplateversion.delete_many(where={'promptKey':flow.key})
+    await store.set_prompt_enabled(flow.key,False)
+    before=(await store.list_prompts())[0]
+    assert before['content_version_type']=='unverified' and before['web_version'] is None
+    response=await flow.client.put('/admin-api/prompts/'+flow.key,json={
+        'content':before['content'],'publish_version':True,'expected_revision':before['revision'],
+        'expected_updated_at':before['updated_at']})
+    assert response.status_code==200,response.text
+    saved=response.json()
+    assert saved['content']==before['content'] and saved['is_enabled'] is False
+    assert saved['content_version_type']=='web' and saved['web_version']==(2 if legacy=='code_sync_after_web' else 1)
+    assert saved['content_version_id']==saved['version_id']
+    latest=(await store.list_prompt_versions(flow.key))[0]
+    assert latest['change_type']=='manual_save' and latest['web_version']==saved['web_version']
+    assert await flow.redis.get(store._redis_key(flow.key))==before['content']
+    assert (await store.list_prompts())[0]['content_version_id']==saved['version_id']
+
+async def test_content_restore_at_same_content_is_still_a_new_web_publication(flow):
+    first=await store.update_prompt_text(flow.key,'same')
+    second=await store.restore_prompt_version(flow.key,first['version_id'])
+    assert second['content']==first['content'] and second['web_version']==2
+
+async def test_old_client_audit_insert_gets_publication_number(flow):
+    row=await flow.db.prompttemplate.find_unique(where={'key':flow.key})
+    await flow.db.execute_raw("INSERT INTO prompt_template_versions(id,prompt_id,prompt_key,content,source,change_type,created_at) VALUES($1,$2,$3,$4,'db','manual_save',NOW())",uuid4().hex,row.id,row.key,row.content)
+    listed=(await store.list_prompts())[0]
+    assert listed['content_version_type']=='web' and listed['web_version']==1
+    assert listed['revision']==1
+
+async def test_publication_api_requires_admin(flow):
+    flow.app.dependency_overrides.clear()
+    response=await flow.client.put('/admin-api/prompts/'+flow.key,json={'content':flow.d.default_text,'publish_version':True})
+    assert response.status_code==401
+    assert await flow.db.promptpublicationcounter.find_unique(where={'promptKey':flow.key}) is None
+
+async def test_same_content_publication_preserves_legacy_surrounding_whitespace(flow):
+    raw='\n  historical text {message}\n'
+    await flow.db.prompttemplate.update(where={'key':flow.key},data={'content':raw,'webManaged':True})
+    result=await store.update_prompt_text(flow.key,raw,publish_version=True)
+    assert result['content']==raw and result['web_version']==1
+    assert await flow.redis.get(store._redis_key(flow.key))==raw
+    edited=await store.update_prompt_text(flow.key,'  changed text  ',publish_version=True)
+    assert edited['content']=='changed text' and edited['web_version']==2
+
+async def test_alignment_preflight_apply_and_rerun_are_guarded_and_idempotent(flow,monkeypatch):
+    import hashlib
+    from scripts import align_prompt_publication_versions as script
+    monkeypatch.setattr(script,'db',flow.db)
+    monkeypatch.setattr(script,'get_redis',AsyncMock(return_value=flow.redis))
+    await flow.db.prompttemplate.update(where={'key':flow.key},data={'webManaged':True})
+    entry={'key':flow.key,'expected_sha256':hashlib.sha256(flow.d.default_text.encode()).hexdigest(),'allowed_fields':['message']}
+    assert (await script.align([entry]))[0]['action']=='preflight'
+    assert len(await store.list_prompt_versions(flow.key))==1
+    receipt=(await script.align([entry],apply=True))[0]
+    assert receipt['action']=='published' and receipt['web_version']==1
+    assert (await script.align([entry],apply=True))[0]['action']=='already_published'
+    assert len(await store.list_prompt_versions(flow.key))==2
+    entry['expected_sha256']='stale'
+    with pytest.raises(ValueError,match='reviewed'):await script.align([entry],apply=True)
+    assert len(await store.list_prompt_versions(flow.key))==2

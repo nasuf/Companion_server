@@ -1076,10 +1076,28 @@ model PromptTemplateVersion {
   evalResult Json?    @map("eval_result")
   revision   Int?
   createdAt  DateTime @default(now()) @map("created_at")
+  publication PromptPublicationVersion?
 
   @@index([promptId, createdAt(sort: Desc)])
   @@index([promptKey, createdAt(sort: Desc)])
   @@map("prompt_template_versions")
+}
+
+model PromptPublicationVersion {
+  versionId String @id @map("version_id")
+  promptKey String @map("prompt_key")
+  number Int
+  auditVersion PromptTemplateVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([promptKey, number])
+  @@map("prompt_publication_versions")
+}
+
+model PromptPublicationCounter {
+  promptKey String @id @map("prompt_key")
+  lastVersion Int @map("last_version")
+
+  @@map("prompt_publication_counters")
 }
 
 model UserMemory {

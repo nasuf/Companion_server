@@ -18,6 +18,9 @@ class PromptTemplateResponse(BaseModel):
     web_managed: bool = False
     cache_synced: bool = True
     version_id: str | None = None
+    content_version_type: Literal["default", "web", "unverified"] = "unverified"
+    web_version: int | None = None
+    content_version_id: str | None = None
 
 
 class PromptTemplateWriteGuard(BaseModel):
@@ -27,6 +30,7 @@ class PromptTemplateWriteGuard(BaseModel):
 
 class PromptTemplateUpdateRequest(PromptTemplateWriteGuard):
     content: str
+    publish_version: bool = False
     # 乐观锁: 前端携带其所见的 updated_at 快照; 与 DB 当前值不一致 → 409,
     # 防止两个管理员并发编辑时后保存者静默覆盖前者.
     expected_updated_at: str | None = None
@@ -46,6 +50,7 @@ class PromptTemplateVersionResponse(BaseModel):
     revision: int | None = None
     persistence: str
     created_at: str
+    web_version: int | None = None
 
 
 class PromptTemplateRestoreVersionRequest(PromptTemplateWriteGuard):
