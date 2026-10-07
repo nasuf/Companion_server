@@ -202,6 +202,12 @@ jobs:
           docker pull redis:7-alpine
           docker pull nginx:1.24-alpine
 
+      - name: Verify two workers survive slow imports and worker replacement
+        run: |
+          python3 scripts/test_server_workers_e2e.py \
+            --image companion-server:ci-chat-safety \
+            --output "$RUNNER_TEMP/chat-safety-e2e/workers"
+
       - name: Verify chat security and reconnect over real HTTP, WebSocket and Redis
         run: |
           python3 scripts/test_chat_safety_e2e.py \

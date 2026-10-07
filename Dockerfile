@@ -74,4 +74,6 @@ EXPOSE 8000
 # 多 worker 的前提在部署前逐项扫过 (2026-07-29): 29 个 cron 全部带分布式锁、
 # WS 走 Redis pub/sub 跨进程投递、记忆管线 fail-closed 锁、启动 seeding 加锁串行
 # 化。详见 CLAUDE.md §11。
-CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"]
+# Cold Prisma/Pydantic imports may hold the GIL beyond Uvicorn's 5s default.
+# Keep two workers; allow bounded startup/heartbeat time under deployment load.
+CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2} --timeout-worker-healthcheck ${UVICORN_WORKER_HEALTHCHECK_TIMEOUT:-60}"]

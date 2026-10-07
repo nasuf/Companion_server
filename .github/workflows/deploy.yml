@@ -439,4 +439,10 @@ jobs:
               sleep 3
             done
 
+            echo "==> Verifying all configured workers before declaring deployment ready"
+            python3 scripts/verify_server_workers.py \
+              --docker "$DOCKER" --container companion-server \
+              --workers "$(grep -E '^WEB_CONCURRENCY=' .env | cut -d= -f2-)" \
+              --timeout 120 --stable-seconds 15
+
             source scripts/deploy_host_maintenance.sh
