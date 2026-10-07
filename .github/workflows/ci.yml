@@ -96,7 +96,7 @@ jobs:
         run: |
           pytest \
             tests/test_sql_job_contracts.py \
-            tests/test_sql_job_postgres.py \
+            tests/test_sql_job_postgres.py tests/test_outbox_postgres.py tests/test_outbox_realtime.py \
             tests/test_chat_ingress_contracts.py \
             tests/test_chat_ingress_postgres.py \
             tests/test_runtime_execution_foundation.py \

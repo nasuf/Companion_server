@@ -35,6 +35,7 @@ from app.services.runtime.execution_scope import (
 )
 from app.services.runtime.sql_job_contracts import (
     ClaimedJob,
+    BoundSqlCommit,
     HandlerSpec,
     LeaseLost,
     LeasePolicy,
@@ -488,11 +489,13 @@ class SqlJobQueue:
     async def finish(self, claim: ClaimedJob, result: dict, *, commit=None) -> bool:
         """Commit prepared SQL business writes + Job/Run result together.
 
-        commit(tx) is SQL-only and bounded by scoped_transaction. R01.05 will
-        supply reply+Outbox writes here; this release has no such adapter.
+        commit(tx) is SQL-only and bounded by scoped_transaction. Prepared
+        reply/Outbox callbacks are bound to the exact originating claim.
         Returns False without invoking commit if an unresolved action requires
         reconciliation. Record known provider outcomes before final reply commit.
         """
+        if isinstance(commit, BoundSqlCommit) and commit.claim != claim:
+            raise LeaseLost()
         encoded = canonical_object(result)
         claim.require_active()
         async with scoped_transaction(claim.scope, database=self.database) as tx:

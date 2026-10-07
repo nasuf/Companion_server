@@ -288,3 +288,17 @@ def test_idle_socket_closes_at_jwt_deadline(secured_ws, monkeypatch):
         assert error.value.code == 4401
     ws._handle_message.assert_not_called()
     secured_ws.manager.disconnect.assert_awaited_once()
+
+
+def test_delivery_frames_use_ticket_actor_not_client_scope(secured_ws,monkeypatch):
+    from app.services.runtime import outbox_realtime
+    callback=AsyncMock()
+    monkeypatch.setattr(outbox_realtime,'handle_delivery_frame',callback)
+    ticket=mint(secured_ws)
+    with secured_ws.client.websocket_connect('/ws/conv',subprotocols=protocols(ticket)) as socket:
+        socket.send_json({'type':'delivery_resume','data':{'actor_user_id':'forged','conversation_id':'foreign'}})
+        socket.send_json({'type':'delivery_ack','data':{'event_id':'event','delivery_token':'1'}})
+        socket.send_json({'type':'ping'})
+        assert socket.receive_json()=={'type':'pong'}
+    assert [c.args[1:3] for c in callback.await_args_list]==[('owner','conv'),('owner','conv')]
+    ws._handle_message.assert_not_called()

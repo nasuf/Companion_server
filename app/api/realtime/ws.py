@@ -937,6 +937,11 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
 
+                elif msg_type in {"delivery_resume", "delivery_ack"}:
+                    from app.services.runtime.outbox_realtime import handle_delivery_frame
+
+                    await handle_delivery_frame(websocket, principal.user_id, conversation_id, raw)
+
                 elif msg_type == "message":
                     payload = raw.get("data") or {}
                     text = (payload.get("message") or "").strip()

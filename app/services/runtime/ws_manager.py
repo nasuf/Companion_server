@@ -134,6 +134,25 @@ class ConnectionManager:
             return True
         return await self._publish(_conv_channel(conv_id), event_type, data)
 
+    async def send_envelope(self, conv_id: str, envelope: dict) -> bool:
+        """Preserve durable event identity across local sockets and worker pubsub.
+
+        True is transport acceptance only; SqlOutbox still requires client ACK.
+        This conversation-only method cannot broadcast a durable event to other
+        workspaces/conversations. Keep the legacy send_event API unchanged.
+        """
+        if await self._send_local_envelope(conv_id, envelope):
+            return True
+        try:
+            redis = await get_redis()
+            await redis.publish(_conv_channel(conv_id), json.dumps(
+                {**envelope, "sender": self._instance_id}, ensure_ascii=False,
+            ))
+            return True
+        except Exception:
+            logger.warning("Durable WS publish unavailable")
+            return False
+
     async def send_to_workspace(
         self, workspace_id: str | None, event_type: str, data: Any = None,
     ) -> int:
@@ -184,6 +203,18 @@ class ConnectionManager:
             return True
         except Exception as e:
             logger.warning(f"WS send failed conv={conv_id[:8]} type={event_type}: {e}")
+            await self.disconnect(conv_id, expected=ws)
+            return False
+
+    async def _send_local_envelope(self, conv_id: str, envelope: dict) -> bool:
+        ws = self.get(conv_id)
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(envelope)
+            return True
+        except Exception:
+            logger.warning("Durable WS send unavailable")
             await self.disconnect(conv_id, expected=ws)
             return False
 
@@ -309,6 +340,13 @@ class ConnectionManager:
         event_type = payload.get("type", "")
         data = payload.get("data")
 
+        if "event_id" in payload:
+            # Durable events are conversation-specific, never workspace broadcasts.
+            if kind == "conv":
+                await self._send_local_envelope(scope_id, {
+                    key: value for key, value in payload.items() if key != "sender"
+                })
+            return
         if kind == "conv":
             await self._send_local_conv(scope_id, event_type, data)
         elif kind == "workspace":

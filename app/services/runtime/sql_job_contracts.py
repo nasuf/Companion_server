@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any
 from dataclasses import dataclass, field
 from datetime import datetime
 import math
@@ -114,3 +116,15 @@ class ClaimedJob:
     def require_active(self) -> None:
         if self._revoked.is_set():
             raise LeaseLost()
+
+
+@dataclass(frozen=True, slots=True)
+class BoundSqlCommit:
+    """Bind a prepared business callback to the exact claim that produced it."""
+
+    claim: ClaimedJob
+    apply: Callable[[Any], Awaitable[None]]
+
+    async def __call__(self, tx: Any) -> None:
+        self.claim.require_active()
+        await self.apply(tx)

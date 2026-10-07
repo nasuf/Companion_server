@@ -444,3 +444,35 @@ async def test_close_pubsub_safely_closes_client_too():
     await ConnectionManager._close_pubsub_safely(ps, cl)
     assert pubsub_aclose == 1
     assert client_aclose == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_envelope_survives_two_worker_pubsub_and_never_workspace_broadcast():
+    sender,receiver=ConnectionManager(),ConnectionManager()
+    socket=_make_ws();await receiver.connect('conv','owner',socket,workspace_id='workspace')
+    envelope={'type':'reply','data':{'text':'stored','message_id':'message'},'event_id':'event','run_id':'run','sequence':0,'delivery_token':'1'}
+    redis=AsyncMock()
+    with patch('app.services.runtime.ws_manager.get_redis',AsyncMock(return_value=redis)):
+        assert await sender.send_envelope('conv',envelope)
+    channel,payload=redis.publish.call_args.args
+    await receiver._handle_message({'channel':channel,'data':payload})
+    socket.send_json.assert_awaited_once_with(envelope)
+    await sender._handle_message({'channel':channel,'data':payload})
+    await receiver._handle_message({'channel':_workspace_channel('workspace'),'data':payload})
+    assert socket.send_json.await_count==1
+
+
+@pytest.mark.asyncio
+async def test_durable_local_send_and_failure_preserve_event_identity():
+    manager=ConnectionManager();socket=_make_ws()
+    await manager.connect('conv','owner',socket)
+    envelope={'type':'done','data':{},'event_id':'event','run_id':'run','sequence':1,'delivery_token':'1'}
+    redis=AsyncMock()
+    with patch('app.services.runtime.ws_manager.get_redis',AsyncMock(return_value=redis)):
+        assert await manager.send_envelope('conv',envelope)
+        socket.send_json.assert_awaited_once_with(envelope)
+        redis.publish.assert_not_called()
+        socket.send_json.side_effect=RuntimeError('closed')
+        assert await manager.send_envelope('conv',envelope)
+        assert manager.get('conv') is None
+        assert json.loads(redis.publish.call_args.args[1])['event_id']=='event'
