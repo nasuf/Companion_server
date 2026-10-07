@@ -95,6 +95,7 @@ jobs:
       - name: Run backend quality tests
         run: |
           pytest \
+            tests/test_runtime_execution_foundation.py \
             tests/test_execution_scope.py \
             tests/test_execution_scope_postgres.py \
             tests/test_runtime_data_reset.py \

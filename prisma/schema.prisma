@@ -89,6 +89,9 @@ model User {
   userFeedback             UserFeedback[]
   workspaceInteractionDays WorkspaceInteractionDay[]
 
+  agentRunsOwned           AgentRun[] @relation("RunOwner") @ignore
+  agentRunsActed           AgentRun[] @relation("RunActor") @ignore
+
   // admin 监控"新增注册走势"按 created_at 分桶.
   @@index([createdAt])
   @@map("users")
@@ -186,6 +189,8 @@ model AiAgent {
   offerings                UserOffering[]
   wallet                   AgentWallet?
 
+  agentRuns                AgentRun[] @ignore
+
   @@index([sourceTemplateId], map: "ai_agents_source_template_idx")
   @@map("ai_agents")
 }
@@ -229,6 +234,8 @@ model ChatWorkspace {
   realWorldGifts           RealWorldGift[]
   realWorldTriggerState    RealWorldTriggerState?
   interactionDays          WorkspaceInteractionDay[]
+
+  agentRuns                AgentRun[] @ignore
 
   @@index([userId, status])
   @@index([agentId, status])
@@ -279,6 +286,8 @@ model Conversation {
   realWorldGifts          RealWorldGift[]
   offerings               UserOffering[]
 
+  agentRuns                AgentRun[] @ignore
+
   @@map("conversations")
 }
 
@@ -293,6 +302,8 @@ model Message {
   bugReports     BugReport[]
   attachments    ChatMessageAttachment[]
   linkCards      ChatLinkCard[]
+
+  runtimeEvents  RuntimeOutbox[] @ignore
 
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
@@ -2159,4 +2170,148 @@ model ConfigurationRevision {
   revision BigInt @default(1)
 
   @@map("configuration_revisions")
+}
+
+// R01.02 additive foundation. No production queue/checkpointer consumes these
+// tables yet. Scope is internal server state; foreign keys are not authorization.
+// SQL workers use parameterized queries for transactional claims/fencing. Ignore
+// client generation only: Prisma migrations still manage these tables and FKs.
+// This preserves legacy client startup memory and avoids deep recursive types.
+model AgentRun {
+  id                     String          @id @default(uuid())
+  actorUserId            String          @map("actor_user_id")
+  actor                  User            @relation("RunActor", fields: [actorUserId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  ownerUserId            String          @map("owner_user_id")
+  owner                  User            @relation("RunOwner", fields: [ownerUserId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  agentId                String          @map("agent_id")
+  agent                  AiAgent         @relation(fields: [agentId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  workspaceId            String          @map("workspace_id")
+  workspace              ChatWorkspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  conversationId         String          @map("conversation_id")
+  conversation           Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  actorGeneration        String          @map("actor_generation") @db.Uuid
+  ownerGeneration        String          @map("owner_generation") @db.Uuid
+  agentGeneration        String          @map("agent_generation") @db.Uuid
+  workspaceGeneration    String          @map("workspace_generation") @db.Uuid
+  conversationGeneration String          @map("conversation_generation") @db.Uuid
+  scopeVersion           Int             @default(1) @map("scope_version")
+  parentRunId            String?         @map("parent_run_id")
+  parent                 AgentRun?       @relation("RunChildren", fields: [parentRunId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  children               AgentRun[]      @relation("RunChildren")
+  kind                   String
+  requestKey             String          @map("request_key")
+  inputFingerprint       String          @map("input_fingerprint")
+  input                  Json
+  graphVersion           String          @map("graph_version")
+  stateVersion           Int             @map("state_version")
+  configSnapshot         Json            @map("config_snapshot")
+  promptSnapshot         Json            @map("prompt_snapshot")
+  budgetSnapshot         Json            @map("budget_snapshot")
+  status                 String          @default("queued")
+  state                  Json            @default("{}")
+  result                 Json            @default("{}")
+  error                  Json            @default("{}")
+  deadlineAt             DateTime?       @map("deadline_at") @db.Timestamptz(6)
+  finishedAt             DateTime?       @map("finished_at") @db.Timestamptz(6)
+  createdAt              DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  jobs                   RuntimeJob[]
+  actions                AgentAction[]
+  outbox                 RuntimeOutbox[]
+
+  @@unique([conversationId, requestKey], map: "agent_runs_conversation_request_key")
+  @@index([conversationId, createdAt], map: "agent_runs_conversation_created_idx")
+  @@index([status, updatedAt], map: "agent_runs_status_updated_idx")
+  @@index([parentRunId], map: "agent_runs_parent_idx")
+  @@index([ownerUserId], map: "agent_runs_owner_idx")
+  @@index([actorUserId], map: "agent_runs_actor_idx")
+  @@index([agentId], map: "agent_runs_agent_idx")
+  @@index([workspaceId], map: "agent_runs_workspace_idx")
+  @@ignore
+  @@map("agent_runs")
+}
+
+model RuntimeJob {
+  id             String    @id @default(uuid())
+  runId          String    @map("run_id")
+  run            AgentRun  @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  jobKey         String    @map("job_key")
+  handler        String
+  payloadVersion Int       @default(1) @map("payload_version")
+  payload        Json
+  queue          String // foreground | background
+  priority       Int       @default(100)
+  status         String    @default("pending")
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(3) @map("max_attempts")
+  fencingToken   BigInt    @default(0) @map("fencing_token")
+  leaseOwner     String?   @map("lease_owner")
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  availableAt    DateTime  @default(now()) @map("available_at") @db.Timestamptz(6)
+  result         Json      @default("{}")
+  error          Json      @default("{}")
+  finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([runId, jobKey], map: "runtime_jobs_run_key")
+  @@index([queue, status, priority, availableAt, id], map: "runtime_jobs_claim_idx")
+  @@index([status, leaseExpiresAt], map: "runtime_jobs_lease_idx")
+  @@ignore
+  @@map("runtime_jobs")
+}
+
+model AgentAction {
+  id               String    @id @default(uuid())
+  runId            String    @map("run_id")
+  run              AgentRun  @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  actionKey        String    @map("action_key")
+  idempotencyKey   String    @unique(map: "agent_actions_idempotency_key") @map("idempotency_key")
+  kind             String
+  inputFingerprint String    @map("input_fingerprint")
+  input            Json
+  status           String    @default("planned")
+  provider         String?
+  providerRef      String?   @map("provider_ref")
+  result           Json      @default("{}")
+  error            Json      @default("{}")
+  startedAt        DateTime? @map("started_at") @db.Timestamptz(6)
+  finishedAt       DateTime? @map("finished_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([runId, actionKey], map: "agent_actions_run_key")
+  @@index([status, updatedAt], map: "agent_actions_reconcile_idx")
+  @@ignore
+  @@map("agent_actions")
+}
+
+model RuntimeOutbox {
+  id             String    @id @default(uuid()) // stable client event ID
+  runId          String    @map("run_id")
+  run            AgentRun  @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  eventKey       String    @map("event_key")
+  sequence       Int
+  eventType      String    @map("event_type")
+  payload        Json
+  messageId      String?   @map("message_id")
+  message        Message?  @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  status         String    @default("pending")
+  attempts       Int       @default(0)
+  fencingToken   BigInt    @default(0) @map("fencing_token")
+  leaseOwner     String?   @map("lease_owner")
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  availableAt    DateTime  @default(now()) @map("available_at") @db.Timestamptz(6)
+  deliveredAt    DateTime? @map("delivered_at") @db.Timestamptz(6)
+  error          Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([runId, eventKey], map: "runtime_outbox_run_event_key")
+  @@unique([runId, sequence], map: "runtime_outbox_run_sequence_key")
+  @@index([status, availableAt, id], map: "runtime_outbox_delivery_idx")
+  @@index([status, leaseExpiresAt], map: "runtime_outbox_lease_idx")
+  @@index([messageId], map: "runtime_outbox_message_idx")
+  @@ignore
+  @@map("runtime_outbox")
 }
