@@ -288,6 +288,8 @@ model Conversation {
 
   agentRuns                AgentRun[] @ignore
 
+  chatIngressReceipts ChatIngressReceipt[] @ignore
+
   @@map("conversations")
 }
 
@@ -304,6 +306,8 @@ model Message {
   linkCards      ChatLinkCard[]
 
   runtimeEvents  RuntimeOutbox[] @ignore
+
+  chatIngressReceipts ChatIngressReceipt[] @ignore
 
   @@index([conversationId, createdAt(sort: Desc)])
   // admin 监控聚合 (分时段/每日活跃/句子区间/DAU-WAU-MAU) 都按 role='user' +
@@ -2219,6 +2223,8 @@ model AgentRun {
   actions                AgentAction[]
   outbox                 RuntimeOutbox[]
 
+  chatIngressReceipts ChatIngressReceipt[] @ignore
+
   @@unique([conversationId, requestKey], map: "agent_runs_conversation_request_key")
   @@index([conversationId, createdAt], map: "agent_runs_conversation_created_idx")
   @@index([status, updatedAt], map: "agent_runs_status_updated_idx")
@@ -2253,6 +2259,8 @@ model RuntimeJob {
   finishedAt     DateTime? @map("finished_at") @db.Timestamptz(6)
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  chatIngressReceipts ChatIngressReceipt[] @ignore
 
   @@unique([runId, jobKey], map: "runtime_jobs_run_key")
   @@index([queue, status, priority, availableAt, id], map: "runtime_jobs_claim_idx")
@@ -2314,4 +2322,34 @@ model RuntimeOutbox {
   @@index([messageId], map: "runtime_outbox_message_idx")
   @@ignore
   @@map("runtime_outbox")
+}
+
+
+// SQL ingress receipts remain client-ignored to preserve the legacy ORM graph.
+model ChatIngressReceipt {
+  id               String       @id @default(uuid())
+  conversationId   String       @map("conversation_id")
+  conversation     Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  requestKey       String       @map("request_key")
+  source           String
+  clientId         String?      @map("client_id")
+  inputFingerprint String       @map("input_fingerprint")
+  requestInput     Json         @map("request_input")
+  preparedInput    Json         @map("prepared_input")
+  messageId        String       @unique(map: "chat_ingress_receipts_message_key") @map("message_id")
+  message          Message      @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  runId            String       @map("run_id")
+  run              AgentRun     @relation(fields: [runId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  jobId            String       @map("job_id")
+  job              RuntimeJob   @relation(fields: [jobId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  ordinal          BigInt       @default(autoincrement())
+  receivedAt       DateTime     @map("received_at") @db.Timestamptz(6)
+  acceptedAt       DateTime     @map("accepted_at") @db.Timestamptz(6)
+
+  @@unique([conversationId, requestKey], map: "chat_ingress_receipts_request_key")
+  @@unique([conversationId, ordinal], map: "chat_ingress_receipts_conversation_order")
+  @@index([runId, ordinal], map: "chat_ingress_receipts_run_order")
+  @@index([jobId], map: "chat_ingress_receipts_job_idx")
+  @@ignore
+  @@map("chat_ingress_receipts")
 }

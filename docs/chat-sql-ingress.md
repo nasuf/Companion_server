@@ -1,0 +1,117 @@
+# Transactional chat ingress (R01.03, staged)
+
+`chat_ingress.accept_chat_message` commits a user message, immutable input receipt
+and its Run/Job in one short, server-scoped PostgreSQL transaction. Multiple
+receipts may share a Run/Job when they belong to one aggregation window.
+Migration `20261007060000_chat_ingress_receipts` adds only the receipt table,
+sequence, association guards and indexes; historical migrations are unchanged.
+The model and inverse relations remain client-ignored to preserve the old ORM.
+
+## Deployment boundary
+
+This release does **not** call the new writer from current WebSocket, HTTP or
+WeChat entrypoints, claim SQL jobs, deliver an Outbox or enable checkpoints.
+Current Redis scheduling and graph rollout remain unchanged. SQL ingress must
+not be enabled before R01.04-.07 provide consumers, delivery, role isolation and
+the explicit Redis handover/rollback boundary. No shadow jobs are submitted:
+recording pending SQL jobs while also executing Redis jobs would risk duplicate
+replies when SQL consumers start later.
+
+Endpoint/domain integration remains a separate activation requirement within
+R01.03: preserve quota/payment rules, validate and bind media/link/offering rows,
+and publish ack/pending only after commit. Existing Redis aggregation planning
+mutates Redis while flushing; it must not run before a SQL transaction as if it
+were a pure planner. Reminder, achievement, location and proactive hooks also
+need durable source identity; this repository does not execute those hooks.
+
+## Trusted contracts and retries
+
+- Bind `ExecutionScope` from authenticated actor + conversation on the server.
+  A serialized scope, provider payload or model output is not authorization.
+- `ChatRequestInput` captures original text, ordered attachment IDs and card
+  input as strict canonical JSON. JSON object key order is irrelevant; text and
+  attachment order are preserved. Requests are unique by conversation + key.
+- WebSocket/HTTP share `client:<client_id>`. WeChat uses `wechat:<verified MsgId>`.
+  Missing IDs are rejected by this staged API; legacy endpoints are unaffected.
+  Do not manufacture a new ID for each retry or trust an unsigned provider ID.
+- `PreparedChatMessage` contains separately rendered text, domain-validated
+  metadata/context and a timezone-aware server receipt time. Construction does
+  not authorize attachments, offerings or a quota charge.
+- The first Run fixes executor/graph/state/config/prompt/budget/deadline values.
+  Capture real values before transaction; never store secrets, clients or raw
+  media. No model or provider I/O is permitted inside `scoped_transaction`.
+- Same identity + identical original body returns original IDs, current status
+  and stored result/error, without rewriting input, rendering or snapshots.
+  Different body raises `ChatRequestConflict`; changed generations fail closed.
+  Terminal retries return stored state without restarting a job or replaying replies.
+- `lookup_chat_request` permits an early duplicate check; a missing result is
+  **not** a reservation. Moving quota or offering mutations after this lookup
+  alone would still allow concurrent duplicate charges. The final adapter must
+  include their idempotent reservation/transaction semantics before activation.
+
+Only return/publish an accepted receipt after the transaction context exits.
+A commit acknowledgement may be lost after a successful commit; retry with the
+same ID to discover the result. DB errors never fall back to an unguarded write
+or a parallel Redis execution.
+
+## Aggregation and ordering
+
+Each source receipt is immutable and retains original/prepared input. Run input
+is the **first original request**, not a rewritten aggregate. Run state tracks
+the open window, policy and source counters; `load_chat_turn` reconstructs the
+ordered execution input from receipts. Physical source deletion fails closed.
+
+The DB-generated receipt ordinal defines **server acceptance order**, independent
+of client timestamps. Gaps from rolled-back inserts are normal. It establishes
+durable input order, but SQL job execution ordering still belongs to R01.04.
+
+The caller supplies the existing domain decision: fragment/normal/immediate,
+quiet window, maximum wait, delay and whether joining is allowed. Fragment joins
+use direct concatenation; normal turns use the existing read-only query coalescer
+and newline joins. A fragment arriving during a normal window retains that
+normal policy; a complete input following fragments closes their window.
+Bypass inputs do not join a normal window. Card/urgent decisions can explicitly
+disallow joining. This module does not change intent classification prompts.
+
+Joining preserves the first policy, snapshot and receipt context, refreshing
+only latest receipt/emotion fields. Retries do not refresh windows. Expired
+windows close before a new input can join. Different executor/graph/state versions
+start a new turn; current configuration changes cannot rewrite an open turn.
+Maximum input count is 32; a conservative 32,768-character aggregate budget
+reserves newline separators. Reaching either boundary closes the old turn and
+starts another without deleting source inputs. Unschedulable deadlines reject
+the whole transaction; a rejected append leaves the previous window unchanged.
+
+`seal_due_chat_turn` is idempotent; it does not claim or execute the job. Delay is
+added to the window due time. Jobs contain an immutable Run reference, not a
+mutable copy of the merged payload. `load_chat_turn` is a scoped read, **not** a
+lease or authority to execute side effects.
+
+## Locking, lifecycle and rollback
+
+The lock order is scoped parent SHARE locks -> conversation advisory lock -> Run
+-> Job -> source message/receipt. Acceptance/sealing are serialized per
+conversation. Locks last only for the bounded transaction: 1s lock timeout,
+2.5s statement budget, 5s transaction budget. Consumers must acquire the same
+conversation lock, close collecting windows before claiming, enforce due/order,
+and reject stale worker commits using the R01.04 lease/fencing protocol.
+
+Association triggers require a user message and a pending/unattempted chat Job
+in the same conversation/Run. Closed Runs reject additional receipts. These
+checks prove association, not resource authority. Resource deletion cascades;
+archive/reset invalidate generations. Full task cancellation and preserving
+message ownership against unconverted writers remain R03/R01.05 requirements.
+
+Before SQL activation, the prior application can run with the expanded schema;
+keep added tables when rolling back. After activation, a Redis-only rollback
+requires handover and cannot be inferred from this additive migration.
+
+## Verification
+
+CI runs strict input/snapshot contracts and migrated loopback PostgreSQL tests:
+cross-client retry/conflict, ordered aggregation and expiry, deadline/bounds,
+every-write rollback, lost commit acknowledgement, stale scopes, raw-writer
+immutability/association, lock timeout and source deletion. Migration rehearsal
+uses synthetic historic data, old generated-client reads/writes and backup restore.
+Existing authenticated HTTP/WS/Redis graph E2E and two-worker startup gates remain
+mandatory. Test cases must never use application DATABASE_URL or production data.
