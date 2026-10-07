@@ -9,6 +9,70 @@ import pytest
 import yaml
 
 
+def test_worker_gate_uses_container_setting_when_dotenv_has_no_worker_field(tmp_path):
+    root=Path(__file__).resolve().parents[1]
+    workflow=yaml.safe_load((root/'.github/workflows/deploy.yml').read_text())
+    deploy=next(s for s in workflow['jobs']['deploy']['steps'] if s['name']=='Deploy server stack on VPS')
+    section=deploy['with']['script'].split('echo "==> Verifying all configured workers before declaring deployment ready"',1)[1].split('source scripts/deploy_host_maintenance.sh',1)[0]
+    # Exercise the actual shell expansion with no .env and no host worker var.
+    # The running container has a non-default value, proving the source used.
+    stub='''set -euo pipefail
+DOCKER=docker
+docker() { printf '4'; }
+python3() { printf '%s\\n' "$@"; }
+'''
+    result=subprocess.run(['bash'],input=stub+section,cwd=tmp_path,
+                          env={'PATH':os.environ['PATH']},text=True,capture_output=True,timeout=10)
+    assert result.returncode==0,result.stderr
+    args=result.stdout.splitlines()
+    assert args[args.index('--workers')+1]=='4'
+    assert args[args.index('--docker')+1]=='docker'
+
+
+@pytest.mark.parametrize('same_image,ready,stops',[(True,True,False),(True,False,True),(False,True,True)])
+def test_deploy_reuses_only_same_image_with_initialized_workers(tmp_path,same_image,ready,stops):
+    root=Path(__file__).resolve().parents[1]
+    workflow=yaml.safe_load((root/'.github/workflows/deploy.yml').read_text())
+    deploy=next(s for s in workflow['jobs']['deploy']['steps'] if s['name']=='Deploy server stack on VPS')
+    section=deploy['with']['script'].split('RUNNING_IMAGE=',1)[1].split('echo "==> Running database migrations"',1)[0]
+    image='candidate' if same_image else 'older'
+    stub=f'''set -euo pipefail
+DOCKER=docker
+CANDIDATE_IMAGE=candidate
+docker() {{
+ case "$1" in
+ inspect) printf '{image}';;
+ exec) printf '2';;
+ compose) printf 'STOP_REQUESTED\\n';;
+ esac
+}}
+python3() {{ return {0 if ready else 1}; }}
+'''
+    result=subprocess.run(['bash'],input=stub+'RUNNING_IMAGE='+section,cwd=tmp_path,
+                          env={'PATH':os.environ['PATH']},text=True,capture_output=True,timeout=10)
+    assert result.returncode==0,result.stderr
+    assert ('STOP_REQUESTED' in result.stdout)==stops
+
+
+@pytest.mark.parametrize('migration_exit',[0,19])
+def test_deploy_does_not_resolve_history_and_blocks_start_after_migration_failure(tmp_path,migration_exit):
+    root=Path(__file__).resolve().parents[1]
+    workflow=yaml.safe_load((root/'.github/workflows/deploy.yml').read_text())
+    deploy=next(s for s in workflow['jobs']['deploy']['steps'] if s['name']=='Deploy server stack on VPS')
+    section=deploy['with']['script'].split('echo "==> Running database migrations"',1)[1].split('echo "==> Starting server stack"',1)[0]
+    (tmp_path/'.env').write_text('MIGRATION_DATABASE_URL=postgresql://synthetic@isolated/unused\n')
+    stub=f'''set -euo pipefail
+DOCKER=docker
+docker() {{ printf '%s\\n' "$*"; return {migration_exit}; }}
+'''
+    result=subprocess.run(['bash'],input=stub+section+'echo SERVER_START_ALLOWED\n',cwd=tmp_path,
+                          env={'PATH':os.environ['PATH']},text=True,capture_output=True,timeout=10)
+    assert result.returncode==migration_exit
+    assert 'prisma migrate resolve' not in result.stdout
+    assert 'server prisma migrate deploy' in result.stdout
+    assert ('SERVER_START_ALLOWED' in result.stdout)==(migration_exit==0)
+
+
 def test_deploy_sync_includes_only_required_runtime_eval_files(tmp_path):
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/deploy.yml").read_text())

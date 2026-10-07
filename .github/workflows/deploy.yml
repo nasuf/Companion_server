@@ -396,8 +396,18 @@ jobs:
               $DOCKER compose -f docker-compose.deploy.yml exec -T ollama ollama pull "$EMBEDDING_MODEL_VALUE"
             fi
 
-            echo "==> Stopping server before migrations"
-            $DOCKER compose -f docker-compose.deploy.yml stop server || true
+            # Reuse healthy identical images; compose still applies config changes.
+            RUNNING_IMAGE="$($DOCKER inspect --format '{{.Image}}' companion-server 2>/dev/null || true)"
+            if [ "$RUNNING_IMAGE" = "$CANDIDATE_IMAGE" ] && \
+               python3 scripts/verify_server_workers.py \
+                 --docker "$DOCKER" --container companion-server \
+                 --workers "$($DOCKER exec companion-server sh -c 'printf "%s" "${WEB_CONCURRENCY:-2}"')" \
+                 --timeout 15 --stable-seconds 0; then
+              echo "==> Reusing healthy server with identical runtime image"
+            else
+              echo "==> Stopping server before migrations"
+              $DOCKER compose -f docker-compose.deploy.yml stop server || true
+            fi
 
             echo "==> Running database migrations"
             MIGRATION_DATABASE_URL_VALUE="$(grep -E '^MIGRATION_DATABASE_URL=' .env | cut -d= -f2-)"
@@ -405,13 +415,7 @@ jobs:
               echo "MIGRATION_DATABASE_URL secret is required for Prisma migrations"
               exit 1
             fi
-            # If a migration failed (P3018) and was fixed in git, mark it rolled back
-            # so migrate deploy can re-apply the corrected SQL. No-op when not needed.
-            $DOCKER compose -f docker-compose.deploy.yml run --rm --no-deps \
-              -e DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
-              -e DIRECT_DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
-              server prisma migrate resolve --rolled-back 20260917120000_vip_activation_codes \
-              || true
+            # Failed migrations require inspected recovery.
             $DOCKER compose -f docker-compose.deploy.yml run --rm --no-deps \
               -e DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
               -e DIRECT_DATABASE_URL="$MIGRATION_DATABASE_URL_VALUE" \
@@ -442,7 +446,7 @@ jobs:
             echo "==> Verifying all configured workers before declaring deployment ready"
             python3 scripts/verify_server_workers.py \
               --docker "$DOCKER" --container companion-server \
-              --workers "$(grep -E '^WEB_CONCURRENCY=' .env | cut -d= -f2-)" \
+              --workers "$($DOCKER exec companion-server sh -c 'printf "%s" "${WEB_CONCURRENCY:-2}"')" \
               --timeout 120 --stable-seconds 15
 
             source scripts/deploy_host_maintenance.sh
