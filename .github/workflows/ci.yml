@@ -154,7 +154,7 @@ jobs:
             tests/test_memory_watermark.py \
             tests/test_memory_system_integration.py \
             tests/test_l2_dynamics_workspace_scope.py \
-            tests/test_api_server.py tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
+            tests/test_api_server.py tests/test_worker_probe_contracts.py tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
             tests/test_runtime_job_queue.py \
             tests/test_runtime_job_atomic.py \
             tests/test_runtime_job_crash_recovery.py \
@@ -162,6 +162,7 @@ jobs:
             tests/test_scheduler_distributed_jobs.py \
             tests/test_public_endpoints_ownership.py \
             tests/test_chat_endpoint_security.py \
+            tests/test_chat_link_fetch.py tests/test_chat_links.py \
             tests/test_ws_auth.py \
             tests/test_ws_pubsub.py \
             tests/test_ws_ack.py \

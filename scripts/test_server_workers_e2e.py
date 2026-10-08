@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+
+from verify_server_workers import snapshot
 import subprocess
 import sys
 import tempfile
@@ -42,6 +44,21 @@ def docker(*args, timeout=20):
 def serving_workers(name):
     result=docker('exec',name,'python','-c',PROBE,timeout=12)
     return set(json.loads(result.stdout)) if result.returncode==0 else set()
+
+
+def wait_expected_pair(name, expected, timeout=20):
+    """Require both original responders; a single accept burst need not be fair."""
+    deadline = time.monotonic() + timeout
+    observed = set()
+    while time.monotonic() < deadline:
+        sample = serving_workers(name)
+        assert sample, 'Recovered worker HTTP probe failed'
+        assert sample <= expected, f'Recovered worker identity changed: {sorted(sample)}'
+        observed.update(sample)
+        if observed == expected:
+            return observed
+        time.sleep(0.2)
+    raise AssertionError(f'Recovered worker pair did not both respond: {sorted(observed)}')
 
 
 def wait_pair(name, previous=None, timeout=100):
@@ -97,8 +114,19 @@ def main():
             assert unready.returncode!=0,'Deployment gate accepted a crashed startup worker'
             recovered=wait_pair(name,original,timeout=100)
             assert victim not in recovered and original-{victim}<=recovered
+            result.update(initial_pids=sorted(original), recovered_pids=sorted(recovered))
             time.sleep(12)
-            assert serving_workers(name)==recovered,'Recovered workers were not stable'
+            observed = wait_expected_pair(name, recovered)
+            state = snapshot(['docker'], name, 2)
+            memory = docker('exec', name, 'python', '-c',
+                            "from pathlib import Path;print(Path('/sys/fs/cgroup/memory.events').read_text())")
+            assert memory.returncode == 0
+            events = dict(line.split() for line in memory.stdout.splitlines() if line.strip())
+            result['stability_probe'] = {**state, 'observed_pids': sorted(observed), 'memory_events': events,
+                                       'ready_false_expected_after_injected_death': not state['ready']}
+            assert set(state['active_pids']) == recovered, 'Recovered native worker identity changed'
+            assert state['child_deaths'] == 1 and state['startup_failures'] == 0
+            assert all(int(events[key]) == 0 for key in ('oom', 'oom_kill', 'oom_group_kill'))
             logs=docker('logs',name)
             lines=(logs.stdout+logs.stderr).splitlines()
             deaths=sum('Child process' in line and 'died' in line for line in lines)
@@ -119,6 +147,15 @@ def main():
                                   'replacement remains stable without repeated restarts',
                                   'worker exit before replacement includes the observed SIGKILL exit code'])
     finally:
+        # Preserve native/OOM evidence even when an HTTP identity assertion fails.
+        try:
+            result['final_worker_snapshot'] = snapshot(['docker'], name, 2)
+            memory = docker('exec', name, 'python', '-c',
+                            "from pathlib import Path;print(Path('/sys/fs/cgroup/memory.events').read_text())")
+            if memory.returncode == 0:
+                result['final_memory_events'] = dict(line.split() for line in memory.stdout.splitlines() if line.strip())
+        except Exception as exc:
+            result['final_probe_error_type'] = type(exc).__name__
         logs=docker('logs',name)
         (args.output/'container.log').write_text(logs.stdout+logs.stderr)
         state=docker('inspect',name)
