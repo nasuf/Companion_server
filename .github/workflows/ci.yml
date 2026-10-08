@@ -154,7 +154,7 @@ jobs:
             tests/test_memory_watermark.py \
             tests/test_memory_system_integration.py \
             tests/test_l2_dynamics_workspace_scope.py \
-            tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
+            tests/test_api_server.py tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
             tests/test_runtime_job_queue.py \
             tests/test_runtime_job_atomic.py \
             tests/test_runtime_job_crash_recovery.py \
@@ -228,6 +228,12 @@ jobs:
           python3 scripts/test_runtime_roles_e2e.py \
             --image companion-server:ci-chat-safety \
             --output "$RUNNER_TEMP/chat-safety-e2e/roles"
+
+      - name: Verify heartbeat and startup-failure worker diagnostics
+        run: |
+          python3 scripts/test_api_server_diagnostics_e2e.py \
+            --image companion-server:ci-chat-safety \
+            --output "$RUNNER_TEMP/chat-safety-e2e/worker-diagnostics"
 
       - name: Verify chat security and reconnect over real HTTP, WebSocket and Redis
         run: |

@@ -66,7 +66,7 @@ def main():
              "redis:7-alpine", "redis-server", "--save", "", "--appendonly", "no"])
         for name, alias in zip(names[1:3], ("worker-a", "worker-b")):
             run(["run", "-d", "--name", name, "--network-alias", alias, *common, image,
-                 "python", "-m", "uvicorn", "chat_safety_harness:app", "--host", "0.0.0.0", "--port", "8000"])
+                 "python", "-m", "app.api_server", "chat_safety_harness:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"])
         run(["run", "-d", "--name", names[4], "--network", network,
              "--network-alias", "test-entry", "--read-only", "--tmpfs", "/tmp",
              "--user", "101:101", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",

@@ -65,8 +65,8 @@ def main():
     cmd_result=docker('image','inspect',args.image,'--format','{{json .Config.Cmd}}')
     assert cmd_result.returncode==0,cmd_result.stderr
     cmd=json.loads(cmd_result.stdout)
-    assert cmd[:2]==['sh','-c'] and len(cmd)==3 and 'uvicorn app.main:app' in cmd[2]
-    cmd[2]=cmd[2].replace('uvicorn app.main:app','uvicorn worker_fixture:app --app-dir /worker-test')
+    assert cmd[:2]==['sh','-c'] and len(cmd)==3 and 'app.api_server app.main:app' in cmd[2]
+    cmd[2]=cmd[2].replace('app.api_server app.main:app','app.api_server worker_fixture:app --app-dir /worker-test')
     started=time.monotonic()
     result={'passed':False,'image':args.image,'container':name}
     try:
@@ -103,13 +103,21 @@ def main():
             lines=(logs.stdout+logs.stderr).splitlines()
             deaths=sum('Child process' in line and 'died' in line for line in lines)
             assert deaths==1,f'Unexpected supervisor deaths: {deaths}'
+            diagnostics=[json.loads(line.split('worker_diagnostic ',1)[1]) for line in lines if 'worker_diagnostic ' in line]
+            unhealthy=[d for d in diagnostics if d['event']=='api_worker_unhealthy']
+            assert len(unhealthy)==1 and unhealthy[0]['worker_pid']==victim
+            assert unhealthy[0]['reason']=='exited_before_replacement'
+            assert unhealthy[0]['exitcode_before_replacement']==-9
+            joined=[d for d in diagnostics if d['event']=='api_worker_failure_joined']
+            assert len(joined)==1 and joined[0]['exitcode_after_join']==-9
             result.update(passed=True,initial_pids=sorted(original),recovered_pids=sorted(recovered),
                           child_deaths=deaths,seconds=round(time.monotonic()-started,2),
                           checks=['two workers serve after GIL-blocking cold app import',
                                   'deployment gate verifies initialized stable workers',
                                   'deployment gate rejects a crashed startup worker',
                                   'one crashed worker is replaced while the survivor remains',
-                                  'replacement remains stable without repeated restarts'])
+                                  'replacement remains stable without repeated restarts',
+                                  'worker exit before replacement includes the observed SIGKILL exit code'])
     finally:
         logs=docker('logs',name)
         (args.output/'container.log').write_text(logs.stdout+logs.stderr)

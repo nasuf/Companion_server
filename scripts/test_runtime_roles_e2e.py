@@ -103,7 +103,7 @@ def main():
         for role,name in [('background',background),('scheduler',scheduler),('api',api)]:
             command=['run','-d','--name',name,'--network',network,'--memory','4g',
                      '--init','--restart','on-failure:1',*environment,'-e',f'APP_RUNTIME_ROLE={role}',
-                     '--entrypoint','python',args.image,'-m','uvicorn',
+                     '--entrypoint','python',args.image,'-m','app.api_server' if role=='api' else 'uvicorn',
                      'app.main:app' if role=='api' else 'jobs.runtime:app',
                      '--host','0.0.0.0','--port','8000','--workers','2' if role=='api' else '1',
                      '--timeout-worker-healthcheck','60']

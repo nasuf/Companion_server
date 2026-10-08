@@ -70,13 +70,13 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
 
 EXPOSE 8000
 
-# --workers 取自 WEB_CONCURRENCY (uvicorn 原生识别该环境变量, 默认由 compose 传
-# 入并与 settings.web_concurrency 保持同值)。用 shell 形式而非 exec 形式,
-# 是为了让环境变量在启动时展开; init:true 已在 compose 里配好, 信号转发不受影响。
+# --workers 取自 WEB_CONCURRENCY，与 settings.web_concurrency 保持同值。
+# app.api_server 只补充父进程的 worker 失败诊断，生命周期仍委托给固定版本
+# Uvicorn；init:true 已在 compose 里配好，信号转发不受影响。
 #
 # 多 worker 的前提在部署前逐项扫过 (2026-07-29): 29 个 cron 全部带分布式锁、
 # WS 走 Redis pub/sub 跨进程投递、记忆管线 fail-closed 锁、启动 seeding 加锁串行
 # 化。详见 CLAUDE.md §11。
 # Cold Prisma/Pydantic imports may hold the GIL beyond Uvicorn's 5s default.
 # Keep two workers; allow bounded startup/heartbeat time under deployment load.
-CMD ["sh", "-c", "exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2} --timeout-worker-healthcheck ${UVICORN_WORKER_HEALTHCHECK_TIMEOUT:-60}"]
+CMD ["sh", "-c", "exec python -m app.api_server app.main:app --host 0.0.0.0 --port 8000"]
