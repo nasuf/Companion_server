@@ -112,6 +112,9 @@ jobs:
             tests/test_offline_quality_e2e.py \
             tests/test_cleversee_facts.py \
             tests/test_cleversee_provider.py \
+            tests/test_offline_public_cache.py \
+            tests/test_offline_public_cache_e2e.py \
+            tests/test_offline_recommendation_quality.py \
             tests/test_offline_llm_route.py \
             tests/test_cleversee_activity_e2e.py \
             tests/test_offline_regional_discovery_e2e.py \
