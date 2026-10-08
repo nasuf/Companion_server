@@ -46,6 +46,17 @@ RELEASE = json.loads(
         / "scripts/prompt_releases/20261008_cleversee_activity.json"
     ).read_text()
 )
+DETAIL_RELEASE = json.loads(
+    (
+        Path(__file__).parents[1]
+        / "scripts/prompt_releases/20261008_activity_detail_quality.json"
+    ).read_text()
+)
+RELEASE["prompts"] = list(
+    {
+        entry["key"]: entry for entry in RELEASE["prompts"] + DETAIL_RELEASE["prompts"]
+    }.values()
+)
 
 
 @pytest.fixture
@@ -550,11 +561,78 @@ async def test_unverified_generated_business_claims_fall_back_to_place_facts(
     monkeypatch.setattr(
         generation, "invoke_json", AsyncMock(return_value={"supported": False})
     )
+    original = generation.invoke_text
+
+    async def unsafe_copy(model, prompt):
+        if "候选原始ID" in prompt:
+            return await original(model, prompt)
+        return json.dumps(
+            {
+                "text": "🌿 免费全天开放\n这里有窗边座位和免费体验，" * 5
+                + "\n\n💡 无需预约\n现在就可以参加。\n\n🧭 实用信息\n每人免费。"
+            }
+        )
+
+    monkeypatch.setattr(generation, "invoke_text", unsafe_copy)
     r = await j.client.post(
         "/offline/activities/recommend", params={"workspace_id": j.workspace}
     )
     assert r.status_code == 200
-    assert r.json()["description"] == j.raw["name"] + "，" + j.raw["address"] + "。"
+    a = r.json()
+    assert len(a["description"]) >= 120 and len(a["description"].split("\n\n")) >= 3
+    assert j.raw["name"] in a["description"] and j.raw["address"] in a["description"]
+    assert "免费" not in a["description"] and "https://" not in a["description"]
+    stored = await repo.get_activity(a["id"], j.user)
+    assert stored["discovery_metadata"]["copy_status"] == "fallback_rejected"
+    detail = await j.client.get("/offline/activities/" + a["id"])
+    assert detail.json()["description"] == a["description"]
+
+
+async def test_empty_album_reselects_same_category_and_serves_real_authenticated_images(
+    native, monkeypatch
+):
+    j = native
+    first = native_place({**j.raw, "images": []}, "镇江市")
+    second = native_place(
+        {
+            **j.raw,
+            "id": "second-" + j.raw["id"],
+            "name": "青石咖啡馆",
+            "address": "伯先路18号",
+        },
+        "镇江市",
+    )
+    j.selection = first["candidate_id"]
+    monkeypatch.setattr(discovery, "discover", AsyncMock(return_value=[first, second]))
+    result = await j.client.post(
+        "/offline/activities/recommend", params={"workspace_id": j.workspace}
+    )
+    assert result.status_code == 200, result.text
+    a = result.json()
+    assert a["location_name"] == second["location_name"] and len(a["image_urls"]) == 3
+    assert first["location_name"] not in a["summary"] + a["description"]
+    assert a["summary"] != "可以去" + a["location_name"] + "看看"
+    assert len(a["description"]) >= 120
+    for uri in a["image_urls"]:
+        image = await j.client.get(uri)
+        assert image.status_code == 200 and image.headers["content-type"].startswith(
+            "image/"
+        )
+        picture = Image.open(io.BytesIO(image.content))
+        picture.verify()
+    detail = await j.client.get("/offline/activities/" + a["id"])
+    assert (
+        detail.json()["summary"] == a["summary"]
+        and detail.json()["description"] == a["description"]
+    )
+    stored = await repo.get_activity(a["id"], j.user)
+    component = build_activity_component_card(stored, status_label="待确定")
+    assert (
+        component["title"] == a["title"]
+        and component["payload"]["image_urls"] == a["image_urls"]
+    )
+    generation.tavily_search.assert_not_awaited()
+    images.tavily_place_images.assert_not_awaited()
 
 
 async def test_expired_events_agree_in_deep_links_and_lists_but_started_journeys_survive(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.offline.content import plain_text, canonical_url, place_source_matches, concrete_place_name, is_collection_title
+from app.services.offline.content import plain_text, canonical_url, place_source_matches, concrete_place_name, is_collection_title, normalized
 
 import asyncio
 import json
@@ -17,6 +17,7 @@ from app.services.offline.llm import get_offline_chat_model as get_chat_model, g
 from app.services.offline.activity_images import persist_activity_images
 from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
+from app.services.offline.recommendation_content import fallback_detail, fallback_summary, useful_detail
 from app.services.offline.providers.search import SearchResult, tavily_search
 from app.services.offline import repository as repo
 from app.services.offline.activity_discovery import (
@@ -778,6 +779,8 @@ async def generate_activity_card(
     copy = await _recommendation_copy(card)
     if copy:
         card["description"] = plain_text(copy)
+    if not useful_detail(card["description"]):
+        card["description"] = fallback_detail(card)
     return card
 
 
@@ -814,55 +817,76 @@ async def _native_card(
                 break
     except Exception as exc:
         logger.info("[offline] candidate selection fallback (%s)", type(exc).__name__)
-    card = dict(selected)
-    bound_sources = []
-    if card["discovery_metadata"].get("kind") == "place":
-        from app.services.offline.providers.cleversee import web_search
-
-        try:
-            async with asyncio.timeout(10):
-                pages = await web_search(
-                    f"{city} {card['location_name']} {card['address']} 简介 开放时间",
-                    max_results=4,
+    card, bound_sources, source = None, [], None
+    # A valid but unillustrated POI must not beat an equally relevant POI with
+    # a verified album. Keep the selected event/session and user category intact.
+    alternatives = [
+        c
+        for c in candidates
+        if c is not selected
+        and c.get("native_images")
+        and c.get("category") == selected.get("category")
+        and (c.get("discovery_metadata") or {}).get("kind") == "place"
+    ]
+    attempts = [selected] + (
+        alternatives[:2]
+        if selected["discovery_metadata"].get("kind") == "place"
+        else []
+    )
+    try:
+        async with asyncio.timeout(55):
+            for candidate in attempts:
+                current = {
+                    **candidate,
+                    "discovery_metadata": dict(candidate["discovery_metadata"]),
+                }
+                pages = await _native_context_sources(current, city)
+                album = _native_album_source(current, city)
+                current["image_urls"] = await persist_activity_images(
+                    user_id=user_id,
+                    card=current,
+                    city=city,
+                    search_results=[album] + pages,
+                    limit=3,
                 )
-            bound_sources = [
-                p
-                for p in pages
-                if _source_is_usable(p, city)
-                and place_source_matches(card, p.title, p.content + p.raw_content)
-            ][:2]
-        except Exception as exc:
-            logger.info("[offline] place context unavailable (%s)", type(exc).__name__)
-    facts_for_copy = dict(selected)
-    copy_context = dict(card)
-    if bound_sources:
-        notes = [
-            dict(title=p.title, url=p.url, text=source_text(p)[:2200])
-            for p in bound_sources
-        ]
-        facts_for_copy["verified_source_text"] = notes
-        # Retrieved pages are evidence for generation, not a user-facing
-        # fallback. An unavailable/rejected copy keeps the canonical facts.
-        copy_context["description"] += "\n" + "\n".join(p["text"] for p in notes)
-    if copy.get("vibe"):
-        card["vibe"] = plain_text(copy["vibe"])[:30]
-    source = SearchResult(
-        title=city + " " + card["location_name"],
-        url="https://www.amap.com/detail/" + card["native_poi_id"],
-        content=card["address"],
-        images=[
-            {**i, "poi_id": card["native_poi_id"], "evidence": "native_poi"}
-            for i in card.get("native_images", [])
-            if isinstance(i, dict)
-        ],
-    )
-    card["image_urls"] = await persist_activity_images(
-        user_id=user_id,
-        card=card,
-        city=city,
-        search_results=[source] + bound_sources,
-        limit=3,
-    )
+                if card is None or len(current["image_urls"]) > len(card["image_urls"]):
+                    card, bound_sources, source = current, pages, album
+                # A partial but real album stays with the intended destination;
+                # fallback is for wholly empty galleries, not a three-photo quota.
+                if current["image_urls"]:
+                    break
+    except TimeoutError:
+        logger.info("[offline] native gallery selection deadline reached")
+    if card is None:
+        card = {
+            **selected,
+            "discovery_metadata": dict(selected["discovery_metadata"]),
+            "image_urls": [],
+        }
+        source = _native_album_source(card, city)
+    if card["candidate_id"] != selected["candidate_id"]:
+        copy = {}  # Never attach the original place's reason to its replacement.
+    card["summary"] = fallback_summary(card)
+    notes = [
+        dict(title=p.title, url=p.url, text=source_text(p)[:2200])
+        for p in bound_sources
+    ]
+    facts_for_copy = {**card, "verified_source_text": notes}
+    copy_context = {
+        **card,
+        "description": json.dumps(
+            {
+                "place_introduction": card["description"],
+                "native_category": card["category"],
+                "opening_hours": card["discovery_metadata"].get("opening_hours", ""),
+                "average_spend_reference": card["discovery_metadata"].get(
+                    "price_info", ""
+                ),
+                "verified_source_text": notes,
+            },
+            ensure_ascii=False,
+        ),
+    }
     card["search_sources"] = [
         dict(
             title=source.title,
@@ -890,8 +914,14 @@ async def _native_card(
         or (datetime.now(UTC) + timedelta(days=14)).isoformat()
     )
     copy_text = await _recommendation_copy(copy_context)
-    if copy_text:
+    card["description"] = fallback_detail(card)
+    copy_status = "fallback_unavailable"
+    if useful_detail(copy_text):
         try:
+            summary = plain_text(copy.get("summary"))[:120] or card["summary"]
+            if normalized(summary) == normalized(f"可以去{card['location_name']}看看"):
+                summary = card["summary"]
+            vibe = plain_text(copy.get("vibe"))[:30]
             check_prompt = (
                 await get_prompt_text("offline.recommendation_fact_check")
             ).format(
@@ -899,19 +929,77 @@ async def _native_card(
                     {
                         k: v
                         for k, v in facts_for_copy.items()
-                        if k not in {"native_images", "vibe"}
+                        if k not in {"native_images", "vibe", "image_provenance"}
                     },
                     ensure_ascii=False,
                 ),
-                copy_text=copy_text,
+                copy_text="推荐摘要："
+                + summary
+                + "\n氛围："
+                + vibe
+                + "\n\n推荐详情："
+                + copy_text,
             )
             async with asyncio.timeout(8):
                 checked = await invoke_json(get_utility_model(), check_prompt)
             if isinstance(checked, dict) and checked.get("supported") is True:
-                card["description"] = copy_text
+                card["description"] = plain_text(copy_text)
+                card["summary"] = summary
+                if vibe:
+                    card["vibe"] = vibe
+                copy_status = "verified"
+            else:
+                copy_status = "fallback_rejected"
         except Exception as exc:
             logger.info("[offline] factual copy fallback (%s)", type(exc).__name__)
+    elif copy_text:
+        copy_status = "fallback_too_short"
+    card["discovery_metadata"]["copy_status"] = copy_status
+    logger.info(
+        "[offline] native detail copy=%s photos=%s",
+        copy_status,
+        len(card["image_urls"]),
+    )
     return card
+
+
+async def _native_context_sources(card: dict, city: str) -> list[SearchResult]:
+    if card["discovery_metadata"].get("kind") != "place":
+        return []
+    from app.services.offline.providers.cleversee import web_search
+
+    try:
+        async with asyncio.timeout(10):
+            pages = await web_search(
+                f"{city} {card['location_name']} 简介 开放时间",
+                max_results=4,
+            )
+        return [
+            p
+            for p in pages
+            if _source_is_usable(p, city)
+            and place_source_matches(card, p.title, p.content + p.raw_content)
+        ][:2]
+    except Exception as exc:
+        logger.info("[offline] place context unavailable (%s)", type(exc).__name__)
+        return []
+
+
+def _native_album_source(card: dict, city: str) -> SearchResult:
+    items = [
+        ({"url": item} if isinstance(item, str) else item)
+        for item in card.get("native_images", [])
+    ]
+    return SearchResult(
+        title=city + " " + card["location_name"],
+        url="https://www.amap.com/detail/" + card["native_poi_id"],
+        content=card["address"],
+        images=[
+            {**item, "poi_id": card["native_poi_id"], "evidence": "native_poi"}
+            for item in items
+            if isinstance(item, dict) and item.get("url")
+        ],
+    )
 
 
 def _date_time_text(card: dict[str, Any]) -> str:
@@ -935,7 +1023,7 @@ def _date_time_text(card: dict[str, Any]) -> str:
 
 
 async def _recommendation_copy(card: dict[str, Any]) -> str:
-    """Detail-page seed copy. A failure keeps the short structured description."""
+    """Detail-page seed copy. The caller supplies a readable factual fallback."""
     try:
         prompt = (await get_prompt_text("offline.activity_recommendation_copy")).format(
             activity_name=filled(card.get("title"), empty="这次外出"),
