@@ -104,6 +104,40 @@ def test_probe_exceptions_propagate_without_false_exit_report(caplog):
     assert diagnostics(caplog) == []
 
 
+def test_healthy_worker_never_requests_a_snapshot():
+    session = Mock()
+    observed = api_server.ObservedProcess(FakeProcess(), session)
+    assert observed.is_alive(timeout=60)
+    session.capture.assert_not_called()
+    observed.join()
+    session.discard.assert_called_once_with(7)
+
+
+@pytest.mark.parametrize("exitcode", [None, -9, 3])
+def test_failure_snapshot_signal_permission_follows_actual_exit_state(exitcode, caplog):
+    session = Mock()
+    session.capture.return_value = {"stack_status": "captured", "frames": []}
+    observed = api_server.ObservedProcess(FakeProcess(alive=False, exitcode=exitcode), session)
+    assert not observed.is_alive(timeout=60)
+    session.capture.assert_called_once_with(7, allow_signal=exitcode is None)
+    assert diagnostics(caplog)[0]["failure_snapshot"] == session.capture.return_value
+
+
+def test_snapshot_error_never_changes_worker_replacement_or_leaks_exception(monkeypatch, caplog):
+    session = Mock()
+    session.capture.side_effect = RuntimeError("private-diagnostic-secret")
+    failed = FakeProcess(alive=False)
+    replacement = FakeProcess(pid=9)
+    monkeypatch.setattr(upstream, "Process", lambda config, sockets: replacement)
+    parent = supervisor([failed])
+    parent.trace_session = session
+    parent.keep_subprocess_alive()
+    assert failed.actions == ["kill", "join"]
+    assert replacement.actions == ["start"]
+    assert diagnostics(caplog)[0]["failure_snapshot"] == {"stack_status": "collection_failed"}
+    assert "private-diagnostic-secret" not in caplog.text
+
+
 def test_upstream_replaces_one_failure_and_observes_its_replacement(monkeypatch, caplog):
     failed = FakeProcess(alive=False)
     survivor = FakeProcess(pid=8)

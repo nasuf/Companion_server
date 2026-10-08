@@ -14,6 +14,13 @@ import os
 import sys
 from typing import Any
 
+from app.worker_diagnostics import bootstrap_worker_trace, create_trace_session, TraceSession
+
+# CPython spawn reimports this -m entry point as __mp_main__ before invoking
+# Uvicorn's unchanged child target. Register before potentially slow app imports.
+if __name__ == "__mp_main__":
+    bootstrap_worker_trace()
+
 import uvicorn
 from uvicorn import Config, Server
 from uvicorn.config import STARTUP_FAILURE
@@ -26,9 +33,10 @@ logger = logging.getLogger("uvicorn.error")
 class ObservedProcess:
     """Parent-only proxy; the spawned child still uses Uvicorn's own target."""
 
-    def __init__(self, process: Process) -> None:
+    def __init__(self, process: Process, trace_session: TraceSession | None = None) -> None:
         self._process = process
         self._failure: dict[str, Any] | None = None
+        self._trace_session = trace_session
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._process, name)
@@ -44,6 +52,15 @@ class ObservedProcess:
                 "exitcode_before_replacement": exitcode,
                 "healthcheck_timeout_seconds": timeout,
             }
+            if self._trace_session is not None:
+                try:
+                    self._failure["failure_snapshot"] = self._trace_session.capture(
+                        self._process.pid, allow_signal=exitcode is None,
+                    )
+                except Exception:
+                    # Optional observation must never prevent upstream worker
+                    # replacement. Do not log raw diagnostic exceptions.
+                    self._failure["failure_snapshot"] = {"stack_status": "collection_failed"}
             logger.warning("worker_diagnostic %s", json.dumps(self._failure, sort_keys=True))
         return alive
 
@@ -56,15 +73,29 @@ class ObservedProcess:
                 "exitcode_after_join": self._process.exitcode,
             }, sort_keys=True))
             self._failure = None
+        if self._trace_session is not None:
+            self._trace_session.discard(self._process.pid)
 
 
 class DiagnosedMultiprocess(Multiprocess):
-    def keep_subprocess_alive(self) -> None:
+    def _observe(self) -> None:
         # Uvicorn creates ordinary Process objects on startup and replacement.
         # Wrap them only in the parent; leave the upstream decision tree intact.
         for index, process in enumerate(self.processes):
             if not isinstance(process, ObservedProcess):
-                self.processes[index] = ObservedProcess(process)  # type: ignore[assignment]
+                self.processes[index] = ObservedProcess(process, getattr(self, "trace_session", None))  # type: ignore[assignment]
+
+    def init_processes(self) -> None:
+        super().init_processes()
+        self._observe()
+
+    def restart_all(self) -> None:
+        self._observe()
+        super().restart_all()
+        self._observe()
+
+    def keep_subprocess_alive(self) -> None:
+        self._observe()
         super().keep_subprocess_alive()
 
 
@@ -75,10 +106,14 @@ def run_server(config: Config) -> None:
         config.load_app()
     server = Server(config=config)
     sock = None
+    trace_session = None
     try:
         if config.workers > 1:
+            trace_session = create_trace_session()
             sock = config.bind_socket()
-            DiagnosedMultiprocess(config, sockets=[sock]).run()
+            parent = DiagnosedMultiprocess(config, sockets=[sock])
+            parent.trace_session = trace_session
+            parent.run()
         else:
             server.run()
     except KeyboardInterrupt:
@@ -86,6 +121,8 @@ def run_server(config: Config) -> None:
     finally:
         if sock is not None:
             sock.close()
+        if trace_session is not None:
+            trace_session.close()
     if not server.started and config.workers == 1:
         raise SystemExit(STARTUP_FAILURE)
 

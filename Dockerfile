@@ -71,7 +71,7 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
 EXPOSE 8000
 
 # --workers 取自 WEB_CONCURRENCY，与 settings.web_concurrency 保持同值。
-# app.api_server 只补充父进程的 worker 失败诊断，生命周期仍委托给固定版本
+# app.api_server 补充有界的失败前 worker 诊断，生命周期仍委托给固定版本
 # Uvicorn；init:true 已在 compose 里配好，信号转发不受影响。
 #
 # 多 worker 的前提在部署前逐项扫过 (2026-07-29): 29 个 cron 全部带分布式锁、
