@@ -27,6 +27,7 @@ from app.services.life_story import (
 )
 from app.services.runtime.data_reset import hard_delete_agent_data
 from app.services.schedule_domain.schedule import (
+    generate_daily_schedule,
     get_cached_schedule,
     get_current_status,
     get_life_overview,
