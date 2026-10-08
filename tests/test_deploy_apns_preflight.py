@@ -78,3 +78,36 @@ def test_workflow_preflight_precedes_production_stop_and_fits_expression_limit()
                        + sum(len(e.encode("utf-8")) for e in expressions)
                        + len(expressions) * 6 + 64)
     assert estimated_bytes < 18000
+
+
+@pytest.mark.parametrize("registry,exit_code", [
+    ("", 0),
+    ("https://mirror.fixture.invalid/npm/", 0),
+    ("https://mirror.fixture.invalid/npm/", 19),
+])
+def test_prisma_build_receives_registry_and_bounded_fetch_policy(tmp_path, registry, exit_code):
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "Dockerfile").read_text()
+    section = "npm_config_registry=" + dockerfile.split("&& npm_config_registry=", 1)[1].split("\n\n", 1)[0]
+    fake = tmp_path / "prisma"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$npm_config_registry" "$npm_config_fetch_timeout" "$npm_config_fetch_retries" "$*"\nexit ' + str(exit_code) + '\n')
+    fake.chmod(0o700)
+    result = subprocess.run(["sh", "-c", section], env={
+        "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "NPM_REGISTRY": registry,
+    }, text=True, capture_output=True, timeout=10)
+    assert result.returncode == exit_code
+    assert result.stdout.splitlines() == [
+        registry or "https://registry.npmjs.org", "120000", "2",
+        "generate --schema prisma/schema.prisma",
+    ]
+
+
+def test_production_npm_source_survives_env_regeneration():
+    root = Path(__file__).resolve().parents[1]
+    compose = yaml.safe_load((root / "docker-compose.deploy.yml").read_text())
+    assert compose["services"]["server"]["build"]["args"]["NPM_REGISTRY"] == (
+        "${NPM_REGISTRY:-https://mirrors.cloud.tencent.com/npm/}"
+    )
+    deploy = (root / ".github/workflows/deploy.yml").read_text()
+    assert "NPM_REGISTRY=${{ vars.NPM_REGISTRY || 'https://mirrors.cloud.tencent.com/npm/' }}" in deploy

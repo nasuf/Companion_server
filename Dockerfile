@@ -5,6 +5,7 @@ ARG DEBIAN_SECURITY_MIRROR=""
 ARG DEBIAN_FALLBACK_MIRROR=""
 ARG DEBIAN_SECURITY_FALLBACK_MIRROR=""
 ARG PIP_INDEX_URL=""
+ARG NPM_REGISTRY=""
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -63,7 +64,9 @@ RUN if [ -n "$PIP_INDEX_URL" ]; then \
         pip install --upgrade pip \
         && pip install -c runtime-constraints.txt .; \
     fi \
-    && prisma generate --schema prisma/schema.prisma
+    && npm_config_registry="${NPM_REGISTRY:-https://registry.npmjs.org}" \
+       npm_config_fetch_timeout=120000 npm_config_fetch_retries=2 \
+       prisma generate --schema prisma/schema.prisma
 
 EXPOSE 8000
 

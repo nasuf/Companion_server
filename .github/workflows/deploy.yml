@@ -169,6 +169,7 @@ jobs:
             APP_ENV=production
             CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}
             REDIS_URL=redis://redis:6379/0
+            NPM_REGISTRY=${{ vars.NPM_REGISTRY || 'https://mirrors.cloud.tencent.com/npm/' }}
             OLLAMA_BASE_URL=${{ vars.OLLAMA_BASE_URL }}
             DASHSCOPE_API_KEY=${{ secrets.DASHSCOPE_API_KEY }}
             DASHSCOPE_BASE_URL=${{ vars.DASHSCOPE_BASE_URL }}
