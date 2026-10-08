@@ -9,8 +9,11 @@ The model and inverse relations remain client-ignored to preserve the old ORM.
 
 ## Deployment boundary
 
-This release does **not** call the new writer from current WebSocket, HTTP or
-WeChat entrypoints, claim SQL jobs, deliver an Outbox or enable checkpoints.
+The HTTP and ticket-authenticated WebSocket entrypoints now contain staged SQL
+adapters. `CHAT_INGRESS_BACKEND` defaults to `redis`; requesting `sql` fails at API
+startup and the shared request gate while `SQL_CHAT_ACTIVATION_READY` is false.
+Production does **not** call the SQL writer, claim SQL jobs, deliver an Outbox
+automatically or enable checkpoints.
 Current Redis scheduling and graph rollout remain unchanged. SQL ingress must
 not be enabled before R01.04-.07 provide consumers, delivery, role isolation and
 the explicit Redis handover/rollback boundary. No shadow jobs are submitted:
@@ -51,19 +54,73 @@ still come from trusted preparation services; they are not request schemas.
 Committed message metadata records the effect version and quota outcome, and a
 paid ledger records that message's ID as its audit source.
 
-Existing endpoints do **not** use this adapter yet. Their legacy quota wrapper
+The production Redis endpoints do **not** use this adapter yet. Their legacy quota wrapper
 reuses the same transaction helper, with existing prices and periods; unexpected
 wallet/ledger failures now propagate to roll back instead of being reported as
 insufficient funds. The legacy separation between charging and saving a chat
-message remains until R01.03.8.2 activates atomic acceptance.
+message remains until the qualified topology activates atomic acceptance.
 
 Link, music, location and other cards fail closed in this staged adapter until
 their dedicated domain effects and durable follow-ups are implemented. The
 legacy endpoints continue supporting them. This release must not enable SQL
 ingress/consumers: R01.03.8.2-.6 and R01.06.7/.8, R01.07/.08 remain required.
-An omitted adapter retains the storage-only API for foundation tests; production
+An omitted adapter retains the storage-only API for foundation tests; SQL
 endpoint adapters must explicitly supply it and must not retry through that
 storage-only path on error. No schema or prompt content changes in this batch.
+
+### R01.03.8.2: authenticated endpoint adapters (staged)
+
+The shared receiver parses original text/card, ordered attachment IDs (maximum
+three, without truncation or deduplication) and mandatory stable `client_id`.
+HTTP accepts an optional `client_id` for existing Redis clients; it becomes
+mandatory on the SQL path. HTTP and WS share `client:<client_id>` so a retry
+can change transport without creating a second source. Original whitespace is
+part of retry identity; separately prepared text uses the chat normalization.
+Payment confirmation must be a JSON boolean. It is outside request identity so
+an unaccepted draft can be confirmed and retried with the original ID. Legacy
+WS also rejects strings/numbers instead of treating `"false"` as paid consent.
+
+Each SQL request binds current actor/owner/agent/workspace/conversation from SQL,
+using the authenticated JWT or consumed socket-ticket principal. Payload fields
+cannot impersonate an owner, select a backend or supply a scope. Existing
+terminal receipts return current status without starting another job. Duplicate
+lookup precedes provider preparation; if an identical concurrent commit binds a
+resource during preparation, the receiver looks up its receipt again. The final
+transaction still owns deduplication, quota authorization and resource binding.
+
+Trusted preparation reads owned attachments and server-issued offerings, renders
+their model input, captures reply timing and chooses aggregation policy without
+calling Redis execution-queue reads/flush/enqueue operations. Pending deletion
+and contradiction checks retain the existing read-only bypass rules. SQL decides
+window membership/order. Complete inputs close a collecting fragment window;
+ordinary turn-window timings use the same 1.2s/4s constants, fragments use 5s,
+and offerings bypass aggregation/delay.
+
+Preparation binds a complete configuration/prompt view, serializes resolved
+models/options, prices, effective prompt content/enabled flags/content hashes,
+executor/graph/state versions and timeout budgets. Environment credentials and
+raw SystemConfig rows are excluded. The first accepted turn keeps its captured
+snapshot; capture remains bounded by existing JSON limits. Applying these values
+to a real SQL foreground worker and replay is still R01.06.7/R02 work. Media
+analysis/cache and daily schedule preparation occur outside the SQL transaction;
+their provider-call deduplication is not promised by the business receipt.
+
+Only a successful transaction exit produces an `ack`, followed by `pending`
+when execution is nonterminal. ACK means accepted persistence, not successful
+reply generation; it never exposes stored result/error details. UI defer/timer
+fields preserve the existing collecting/delayed behavior. HTTP closes its SSE
+request with an `acceptance_only` done event; durable reply delivery is separate.
+Request conflicts, invalid resources, quota blocks and unavailable storage
+produce distinct errors, with no ACK, Redis execution or legacy fallback. A
+lost commit/socket ACK must be retried with the **same** source ID.
+
+The official-account H5 entry uses the same authenticated HTTP/WS transport;
+there is no independent provider chat-message callback to migrate in this repo.
+The internal `from_wechat` contract does not expose an unsigned MsgId route.
+Links, music, location and other cards remain refused on this staged SQL path
+until R01.03.8.3 supplies their domain effects/follow-ups. Existing Redis clients
+retain their current behavior. R01.03.8.3-.6, R01.06.7/.8 and R01.07/.08 still
+block SQL activation; this batch changes neither prompts nor database schema.
 
 ## Trusted contracts and retries
 

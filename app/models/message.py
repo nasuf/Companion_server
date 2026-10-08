@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 
 class MessageCreate(BaseModel):
@@ -20,6 +20,10 @@ class MessageResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    client_id: StrictStr | None = None
+    paid_confirmed: StrictBool = False
+    attachments: list[StrictStr | dict] = Field(default_factory=list, max_length=3)
+    component_card: dict | None = None
 
 
 class MessageSearchHit(BaseModel):

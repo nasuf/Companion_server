@@ -22,6 +22,7 @@ from app.services.schedule_domain.holiday_cache import reload as reload_holiday_
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
 from app.services.runtime.roles import require_role, validate_process_budget
 from app.services.runtime.handler_registry import register_runtime_handlers
+from app.services.runtime.chat_ingress_activation import validate_chat_ingress_backend
 
 # Configure logging and tracing before anything else
 configure_logging()
@@ -63,6 +64,7 @@ def _warn_if_embedding_model_uncalibrated() -> None:
 async def lifespan(app: FastAPI):
     role = require_role(settings.app_runtime_role, api=True)
     validate_process_budget(settings)
+    validate_chat_ingress_backend(settings.chat_ingress_backend)
     t_start = time.monotonic()
     logger.info("Starting up...")
     scheduler_started = False

@@ -60,6 +60,7 @@ from app.services.chat_links import (
 from app.services.chat_links.prompt import render_user_message_with_link
 from app.services import wallet
 from app.services.vip import chat_quota
+from app.services.runtime.chat_ingress_activation import sql_chat_ingress_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -944,6 +945,12 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
 
                 elif msg_type == "message":
                     payload = raw.get("data") or {}
+                    if sql_chat_ingress_enabled():
+                        from app.services.runtime.chat_entrypoint import handle_sql_chat_frame
+
+                        await handle_sql_chat_frame(websocket, principal.user_id,
+                            conversation_id, payload, client_supports_voice=client_supports_voice)
+                        continue
                     text = (payload.get("message") or "").strip()
                     # client_id (optional, 但前端推荐传) — 让 ack 事件带回供前端 reconcile.
                     # 不传时 ack 仅含 message_id (DB id), 前端按时间顺序匹配.
@@ -951,7 +958,12 @@ async def websocket_endpoint(websocket: WebSocket, conversation_id: str):
                     raw_component_card = payload.get("component_card")
                     component_card = _sanitize_component_card(raw_component_card)
                     attachment_ids = _sanitize_attachment_ids(payload.get("attachments"))
-                    paid_confirmed = bool(payload.get("paid_confirmed", False))
+                    paid_confirmed = payload.get("paid_confirmed", False)
+                    if type(paid_confirmed) is not bool:
+                        await websocket.send_json({"type": "error", "data": {
+                            "code": "invalid_request", "message": "付款确认必须是布尔值",
+                        }})
+                        continue
                     if not text and component_card is None and not attachment_ids:
                         continue
                     client_id_present = isinstance(client_id, str) and bool(client_id)

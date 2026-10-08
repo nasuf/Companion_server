@@ -115,12 +115,15 @@ class AgentBinding:
     prompts: object
 
 
-async def bind_agent_context(agent_id: str | None, *, reuse_snapshot: bool = False):
+async def bind_agent_context(agent_id: str | None, *, reuse_snapshot: bool = False,
+                             require_loaded: bool = False):
     from app.services.prompting.store import bind_prompt_snapshot
     reuse = reuse_snapshot and _current_snapshot.get() is not None and get_current_agent() == agent_id
     if not reuse:
         # Models, prices and prompt contents share one repeatable-read database view.
         await load_caches()
+    if require_loaded and not _CACHE_LOADED:
+        raise RuntimeError("No complete database configuration/prompt view is available")
     snapshot = _current_snapshot.get() if reuse else ConfigurationSnapshot(
         _GLOBAL_CACHE, _AGENT_CACHE, _PRICING_CACHE, _TTS_PRICING_CACHE,
     )
@@ -464,6 +467,22 @@ def get_effective_tts_probability() -> int:
 def resolve_for_current() -> ResolvedConfig:
     """convenience: 用 ContextVar 当前 agent 解析."""
     return resolve_config_sync(get_current_agent())
+
+
+def export_bound_chat_configuration() -> dict:
+    """Export only resolved models/options and prices from this bound DB view.
+
+    Raw SystemConfig/agent rows and environment credentials are never exported.
+    The caller serializes this before opening a business transaction.
+    """
+    from dataclasses import asdict
+
+    snapshot = _current_snapshot.get()
+    if snapshot is None:
+        raise RuntimeError("A bound configuration snapshot is required")
+    return {"schema_version": 1, "resolved": asdict(resolve_for_current()),
+            "pricing": {key: dict(value) for key, value in snapshot.pricing.items()},
+            "tts_pricing": {key: dict(value) for key, value in snapshot.tts_pricing.items()}}
 
 
 def get_pricing(model: str) -> dict[str, float] | None:

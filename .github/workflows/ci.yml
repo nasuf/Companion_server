@@ -98,6 +98,7 @@ jobs:
             tests/test_sql_job_contracts.py \
             tests/test_sql_job_postgres.py tests/test_outbox_postgres.py tests/test_outbox_realtime.py \
             tests/test_chat_ingress_contracts.py \
+            tests/test_chat_entrypoint.py tests/test_chat_entrypoint_postgres.py \
             tests/test_chat_ingress_postgres.py \
             tests/test_chat_ingress_effects_postgres.py tests/test_vip_chat_quota.py tests/test_wallet_gift_tickets.py \
             tests/test_runtime_execution_foundation.py \

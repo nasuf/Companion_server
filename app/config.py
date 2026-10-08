@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     chat_graph_conversation_allowlist: str = ""
     chat_graph_all_conversations: bool = False
 
+    # SQL entrypoint adapters are staged until consumers/delivery/handover qualify.
+    chat_ingress_backend: Literal["redis", "sql"] = "redis"
+
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/companion"
     direct_database_url: str = ""

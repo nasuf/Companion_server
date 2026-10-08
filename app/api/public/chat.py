@@ -24,6 +24,7 @@ from app.services.proactive.sender import send_manual_or_triggered_proactive
 from app.services.proactive.state import mark_user_replied_for_conversation
 from app.services.runtime.tasks import fire_background
 from app.services.workspace.workspaces import resolve_workspace_id
+from app.services.runtime.chat_ingress_activation import sql_chat_ingress_enabled
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -40,6 +41,16 @@ async def _queued_stream(delay_seconds: float) -> AsyncGenerator[dict, None]:
         yield {"event": "delay", "data": json.dumps({"duration": delay_seconds})}
     yield {"event": "pending", "data": json.dumps({"status": "queued", "delay": delay_seconds})}
     yield {"event": "done", "data": json.dumps({"message_id": "queued"})}
+
+
+async def _accepted_sql_stream(receipt) -> AsyncGenerator[dict, None]:
+    from app.services.runtime.chat_entrypoint import accepted_chat_events
+
+    for event in accepted_chat_events(receipt):
+        yield {"event": event["type"], "data": json.dumps(event["data"])}
+    # Close this SSE request. SQL execution/durable replies have their own owner.
+    yield {"event": "done", "data": json.dumps({"message_id": receipt.message_id,
+        "run_id": receipt.run_id, "acceptance_only": True})}
 
 
 async def _persist_user_message(
@@ -125,6 +136,35 @@ async def chat(conversation_id: str, data: ChatRequest, user: dict = Depends(req
         )
 
     user_id = conv.userId
+
+    if sql_chat_ingress_enabled():
+        from app.services.runtime.chat_entrypoint import ChatIngressInputInvalid, receive_client_chat
+        from app.services.runtime.chat_ingress import ChatRequestConflict
+        from app.services.runtime.chat_ingress_effects import ChatIngressQuotaBlocked, ChatIngressResourceInvalid
+        from app.services.runtime.execution_scope import ExecutionScopeUnavailable
+
+        try:
+            receipt = await receive_client_chat(
+                actor_user_id=user["sub"], conversation_id=conversation_id,
+                payload={"message": data.message, "client_id": data.client_id,
+                         "paid_confirmed": data.paid_confirmed,
+                         "attachments": data.attachments, "component_card": data.component_card},
+            )
+        except ChatRequestConflict:
+            raise HTTPException(409, detail={"code": "request_conflict"}) from None
+        except ChatIngressQuotaBlocked as error:
+            raise HTTPException(429, detail={"code": "quota_blocked",
+                "reason": error.result["reason"], "per_msg_cost": error.result["per_msg_cost"],
+                "spendable_tickets": error.result["spendable_tickets"]}) from None
+        except ChatIngressResourceInvalid:
+            raise HTTPException(422, detail={"code": "invalid_resource"}) from None
+        except ExecutionScopeUnavailable:
+            raise HTTPException(403, detail={"code": "conversation_access_denied"}) from None
+        except ChatIngressInputInvalid:
+            raise HTTPException(422, detail={"code": "invalid_request"}) from None
+        except Exception:
+            raise HTTPException(503, detail={"code": "storage_unavailable"}) from None
+        return EventSourceResponse(_accepted_sql_stream(receipt), headers={"Cache-Control": "no-store"})
 
     # --- 用户回合聚合：fragment/turn 策略由 user_turn_aggregation 统一决定 ---
     schedule = await get_cached_schedule(conv.agent.id)

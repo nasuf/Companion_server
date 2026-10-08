@@ -132,6 +132,37 @@ def test_ticket_connect_and_message_preserve_protocol(secured_ws, role, origin):
     assert s.manager.disconnect.await_args.kwargs['expected'] is not None
 
 
+@pytest.mark.parametrize('value', ['false', 'true', 0, 1, None])
+def test_invalid_payment_confirmation_does_not_disconnect_or_charge(secured_ws, value):
+    s=secured_ws
+    with s.client.websocket_connect('/ws/conv',subprotocols=protocols(mint(s))) as socket:
+        socket.send_json({'type':'message','data':{'message':'synthetic','paid_confirmed':value}})
+        assert socket.receive_json()['data']['code']=='invalid_request'
+        socket.send_json({'type':'ping'})
+        assert socket.receive_json()=={'type':'pong'}
+    ws._handle_message.assert_not_called()
+
+
+@pytest.mark.parametrize('role', ['user','admin'])
+def test_sql_message_frame_uses_authenticated_actor_and_original_input(secured_ws, monkeypatch, role):
+    from app.services.runtime import chat_entrypoint
+    s=secured_ws
+    monkeypatch.setattr(ws,'sql_chat_ingress_enabled',lambda:True)
+    handler=AsyncMock()
+    monkeypatch.setattr(chat_entrypoint,'handle_sql_chat_frame',handler)
+    actor='admin' if role=='admin' else 'owner'
+    body={'message':'  synthetic  ','client_id':'stable','paid_confirmed':False,
+          'user_id':'forged','backend':'redis'}
+    with s.client.websocket_connect('/ws/conv?client=flutter',subprotocols=protocols(mint(s,actor,role))) as socket:
+        socket.send_json({'type':'message','data':body})
+        socket.send_json({'type':'ping'})
+        assert socket.receive_json()=={'type':'pong'}
+    handler.assert_awaited_once()
+    assert handler.await_args.args[1:]==(actor,'conv',body)
+    assert handler.await_args.kwargs['client_supports_voice'] is True
+    ws._handle_message.assert_not_called()
+
+
 @pytest.mark.parametrize("offered", [[], ["unrelated.protocol"]])
 def test_anonymous_connections_rejected_before_business_effects(secured_ws, offered):
     denied(secured_ws, offered)

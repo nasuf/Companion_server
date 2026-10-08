@@ -235,6 +235,33 @@ async def plan_user_message_aggregation(
     )
 
 
+async def plan_sql_user_message_aggregation(
+    *, conversation_id: str, text: str, reply_context: dict,
+    offering: bool = False,
+):
+    """Choose policy without flushing or reading Redis execution queues.
+
+    Pending contradiction/deletion reads preserve the existing bypass rules;
+    collecting-window membership and ordering belong to the SQL transaction.
+    """
+    from app.services.interaction.chat_management import user_message_aggregation_enabled
+    from app.services.interaction.aggregation import (
+        _AGGREGATION_WINDOW, _TURN_QUIET_WINDOW, _TURN_MAX_WAIT,
+    )
+    from app.services.runtime.chat_ingress_contracts import ChatAggregationPolicy
+
+    delay = float(reply_context.get("delay_seconds", 0.0) or 0.0)
+    if offering:
+        return ChatAggregationPolicy("immediate", allow_join=False)
+    if not user_message_aggregation_enabled():
+        return ChatAggregationPolicy("immediate", delay_seconds=delay, allow_join=False)
+    if is_short_message(text):
+        return ChatAggregationPolicy("fragment_window", _AGGREGATION_WINDOW, delay_seconds=delay)
+    if await should_bypass_user_turn_aggregation(conversation_id, text):
+        return ChatAggregationPolicy("immediate", delay_seconds=delay)
+    return ChatAggregationPolicy("turn_window", _TURN_QUIET_WINDOW, _TURN_MAX_WAIT, delay)
+
+
 async def enqueue_planned_user_message(
     plan: UserMessageAggregationPlan,
     *,
