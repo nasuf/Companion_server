@@ -20,6 +20,8 @@ from app.services.runtime.distributed_lock import (
 )
 from app.services.schedule_domain.holiday_cache import reload as reload_holiday_cache
 from jobs.scheduler import setup_scheduler, shutdown_scheduler
+from app.services.runtime.roles import require_role, validate_process_budget
+from app.services.runtime.handler_registry import register_runtime_handlers
 
 # Configure logging and tracing before anything else
 configure_logging()
@@ -59,11 +61,14 @@ def _warn_if_embedding_model_uncalibrated() -> None:
 
 
 async def lifespan(app: FastAPI):
+    role = require_role(settings.app_runtime_role, api=True)
+    validate_process_budget(settings)
     t_start = time.monotonic()
     logger.info("Starting up...")
     scheduler_started = False
     ws_manager = None
     config_refresh_task = None
+    redis_recheck_task = None
 
     try:
         settings.validate_security_config()
@@ -140,9 +145,21 @@ async def lifespan(app: FastAPI):
         logger.info("  ✓ Agent avatar assets")
 
         # Phase 3: Scheduler + WS subscriber (跨进程 Pub/Sub)
-        setup_scheduler()
-        scheduler_started = True
-        logger.info("  ✓ Scheduler")
+        register_runtime_handlers()
+        if role.starts_scheduler:
+            setup_scheduler()
+            scheduler_started = True
+            logger.info("  ✓ Scheduler (explicit integrated role)")
+        else:
+            # Redis recovery is process-local, even when timers run elsewhere.
+            from app.redis_client import recheck_redis_health
+
+            async def recheck_loop():
+                while True:
+                    await recheck_redis_health()
+                    await asyncio.sleep(30)
+
+            redis_recheck_task = asyncio.create_task(recheck_loop(), name="redis-health-recheck")
         from app.services.runtime.ws_manager import manager as runtime_ws_manager
         ws_manager = runtime_ws_manager
         await ws_manager.start_subscriber()
@@ -152,6 +169,12 @@ async def lifespan(app: FastAPI):
         logger.info(f"Startup complete ({total:.0f}ms)")
         yield
     finally:
+        if redis_recheck_task is not None:
+            redis_recheck_task.cancel()
+            try:
+                await redis_recheck_task
+            except asyncio.CancelledError:
+                pass
         if config_refresh_task is not None:
             config_refresh_task.cancel()
             try:

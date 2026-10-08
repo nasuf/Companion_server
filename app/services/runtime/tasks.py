@@ -33,6 +33,11 @@ def background_inflight_count() -> int:
     return len(_inflight)
 
 
+def pending_background_tasks() -> tuple[asyncio.Task, ...]:
+    """Owned background tasks for bounded independent-role shutdown."""
+    return tuple(_inflight)
+
+
 def fire_background(coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
     """Schedule a coroutine as a fire-and-forget task with error logging.
 

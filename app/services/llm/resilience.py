@@ -374,7 +374,7 @@ def _per_worker_share(total: int | None) -> int:
     configured = int(total or 0)
     if configured <= 0:
         return 0
-    workers = max(1, int(getattr(settings, "web_concurrency", 1) or 1))
+    workers = max(1, int(settings.llm_process_count or getattr(settings, "web_concurrency", 1) or 1))
     return max(1, -(-configured // workers))     # ceil division
 
 
@@ -401,7 +401,10 @@ async def _llm_slot(provider: str):
 
     from app.services.llm.usage_tracker import current_scope
 
-    is_background = current_scope() in _BACKGROUND_SCOPES
+    is_background = (
+        settings.app_runtime_role in {"scheduler", "background"}
+        or current_scope() in _BACKGROUND_SCOPES
+    )
     if not is_background:
         async with _get_semaphore(_slots, provider, total):
             yield

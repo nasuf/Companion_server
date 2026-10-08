@@ -89,6 +89,8 @@ services:
     environment:
       # uvicorn worker 数。必须与 settings.web_concurrency 同值 —— 后者是若干
       # 进程内上限 (LLM 并发槽位) 的分母, 对不上会让全局上限漂掉。
+      # Explicit legacy topology; role separation is a separately accepted cutover.
+      APP_RUNTIME_ROLE: integrated
       WEB_CONCURRENCY: "${WEB_CONCURRENCY:-2}"
       DB_CONNECTION_LIMIT: "${DB_CONNECTION_LIMIT:-12}"
       DB_CONNECTION_LIMIT_MAX: "${DB_CONNECTION_LIMIT_MAX:-15}"

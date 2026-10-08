@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-import inspect
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -42,14 +41,10 @@ async def test_run_distributed_job_skips_when_lock_busy():
 
 
 def test_weekly_reflection_is_registered_through_distributed_wrapper():
-    source = inspect.getsource(scheduler_mod.setup_scheduler)
-
-    assert "scheduler.add_job(\n        run_weekly_reflection," not in source
-    assert "_run_weekly_reflection," in source
+    jobs = {job.id: job for job in scheduler_mod.scheduler_job_definitions()}
+    assert jobs["weekly_reflection"].func is scheduler_mod._run_weekly_reflection
 
 
 def test_runtime_job_queue_is_registered():
-    source = inspect.getsource(scheduler_mod.setup_scheduler)
-
-    assert "_run_runtime_job_queue," in source
-    assert 'id="runtime_job_queue"' in source
+    jobs = {job.id: job for job in scheduler_mod.scheduler_job_definitions()}
+    assert jobs["runtime_job_queue"].func is scheduler_mod._run_runtime_job_queue

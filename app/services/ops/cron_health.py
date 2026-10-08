@@ -302,7 +302,7 @@ _VERDICT_ORDER = {"failing": 0, "stale": 1, "drifted": 2, "unknown": 3, "healthy
 async def collect_cron_health(now: datetime | None = None) -> CronHealthReport:
     """从 Redis + 运行中的 scheduler 取数并判读."""
     from app.redis_client import get_redis
-    from jobs.scheduler import _JOB_HEALTH_KEY, scheduler
+    from jobs.scheduler import _JOB_HEALTH_KEY, scheduler, scheduler_job_definitions
 
     raw: dict[str, str] = {}
     try:
@@ -312,7 +312,7 @@ async def collect_cron_health(now: datetime | None = None) -> CronHealthReport:
         logger.warning(f"cron health: failed to read {_JOB_HEALTH_KEY}: {exc}")
 
     try:
-        jobs = scheduler.get_jobs()
+        jobs = scheduler.get_jobs() if scheduler.running else scheduler_job_definitions()
     except Exception as exc:
         logger.warning(f"cron health: failed to list scheduler jobs: {exc}")
         jobs = []

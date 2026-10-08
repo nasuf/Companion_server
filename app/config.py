@@ -5,6 +5,10 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Runtime environment
     app_env: str = "development"
+    # integrated preserves the existing deployment until role handover is accepted.
+    app_runtime_role: Literal["integrated", "api", "scheduler", "background"] = "integrated"
+    # Total LLM-capable processes in a split topology; independent of API workers.
+    llm_process_count: int | None = None
 
     # Legacy by default; graph requires an exact cohort or explicit full rollout.
     chat_executor: Literal["legacy", "langgraph"] = "legacy"

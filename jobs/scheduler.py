@@ -94,6 +94,14 @@ class _JobRun:
 _current_job: ContextVar[_JobRun | None] = ContextVar("_current_job", default=None)
 
 
+_active_jobs: dict[asyncio.Task, int] = {}
+
+
+def active_scheduler_tasks() -> tuple[asyncio.Task, ...]:
+    """Owned job tasks to drain before an independent role closes its DB."""
+    return tuple(_active_jobs)
+
+
 async def _run_distributed_job(
     job_name: str,
     ttl_s: int,
@@ -114,6 +122,9 @@ async def _run_distributed_job(
     """
     run = _JobRun(name=health_name or job_name)
     token = _current_job.set(run)
+    owner = asyncio.current_task()
+    if owner is not None:
+        _active_jobs[owner] = _active_jobs.get(owner, 0) + 1
     try:
         async with distributed_lock(
             f"scheduler:{job_name}",
@@ -150,6 +161,10 @@ async def _run_distributed_job(
         raise
     finally:
         _current_job.reset(token)
+        if owner in _active_jobs:
+            _active_jobs[owner] -= 1
+            if not _active_jobs[owner]:
+                del _active_jobs[owner]
 
 
 async def _run_local_job(job_name: str, fn: Callable[[], object]) -> None:
@@ -165,6 +180,9 @@ async def _run_local_job(job_name: str, fn: Callable[[], object]) -> None:
     """
     run = _JobRun(name=job_name)
     token = _current_job.set(run)
+    owner = asyncio.current_task()
+    if owner is not None:
+        _active_jobs[owner] = _active_jobs.get(owner, 0) + 1
     try:
         result = fn()
         if asyncio.iscoroutine(result):
@@ -176,6 +194,10 @@ async def _run_local_job(job_name: str, fn: Callable[[], object]) -> None:
         raise
     finally:
         _current_job.reset(token)
+        if owner in _active_jobs:
+            _active_jobs[owner] -= 1
+            if not _active_jobs[owner]:
+                del _active_jobs[owner]
 
 
 _JOB_HEALTH_KEY = "scheduler:health"
@@ -356,8 +378,8 @@ async def _run_for_all_agents(
     )
 
 
-def setup_scheduler():
-    """Configure and start the job scheduler."""
+def register_scheduler_jobs(scheduler):
+    """Register definitions without starting timers or executing business tasks."""
     # Daily growth intimacy at 2 AM
     scheduler.add_job(
         _run_daily_intimacy,
@@ -669,7 +691,6 @@ def setup_scheduler():
         # ±3s 不影响 reminder 最坏延迟量级 (15s → 18s), 换取锁竞争均摊.
         jitter=3,
     )
-    logger.info("Scheduler: trigger_scan registered (interval=15s, jitter=3s)")
 
     scheduler.add_job(
         _run_last_will_scan,
@@ -752,8 +773,26 @@ def setup_scheduler():
         max_instances=1,
     )
 
+
+def setup_scheduler(*, role="integrated"):
+    """Start explicitly selected timers. Independent scheduler excludes consumers."""
+    if role not in {"integrated", "scheduler"}:
+        raise ValueError("This process may not start the business scheduler")
+    register_scheduler_jobs(scheduler)
+    if role == "scheduler":
+        scheduler.remove_job("runtime_job_queue")
+        scheduler.remove_job("redis_health_recheck")
     scheduler.start()
-    logger.info("Job scheduler started")
+    logger.info("Job scheduler started (role=%s)", role)
+
+
+def scheduler_job_definitions():
+    """Full deployment inventory for API/CLI health reports without a live timer."""
+    from apscheduler.triggers.date import DateTrigger
+
+    definitions = AsyncIOScheduler(timezone=settings.schedule_timezone)
+    register_scheduler_jobs(definitions)
+    return [job for job in definitions.get_jobs() if not isinstance(job.trigger, DateTrigger)]
 
 
 async def _run_weekly_portraits():

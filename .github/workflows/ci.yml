@@ -149,6 +149,7 @@ jobs:
             tests/test_memory_watermark.py \
             tests/test_memory_system_integration.py \
             tests/test_l2_dynamics_workspace_scope.py \
+            tests/test_runtime_roles.py tests/test_multi_worker_safety.py tests/test_scheduler_timezone.py tests/test_cron_health.py tests/test_cron_health_reporting.py \
             tests/test_runtime_job_queue.py \
             tests/test_runtime_job_atomic.py \
             tests/test_runtime_job_crash_recovery.py \
@@ -209,12 +210,19 @@ jobs:
         run: |
           docker pull redis:7-alpine
           docker pull nginx:1.24-alpine
+          docker pull pgvector/pgvector:0.8.0-pg16
 
       - name: Verify two workers survive slow imports and worker replacement
         run: |
           python3 scripts/test_server_workers_e2e.py \
             --image companion-server:ci-chat-safety \
             --output "$RUNNER_TEMP/chat-safety-e2e/workers"
+
+      - name: Verify independent roles with owned SQL and Redis
+        run: |
+          python3 scripts/test_runtime_roles_e2e.py \
+            --image companion-server:ci-chat-safety \
+            --output "$RUNNER_TEMP/chat-safety-e2e/roles"
 
       - name: Verify chat security and reconnect over real HTTP, WebSocket and Redis
         run: |
