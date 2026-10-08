@@ -1780,6 +1780,7 @@ model OfflineActivityRecommendation {
   placeLat       Float?                    @map("place_lat")
   placeLng       Float?                    @map("place_lng")
   placeKey       String?                   @map("place_key")
+  discoveryMetadata Json                    @default("{}") @map("discovery_metadata")
   // 到达（打卡）
   reached            Boolean               @default(false)
   arrivalConfirmedAt DateTime?             @map("arrival_confirmed_at")

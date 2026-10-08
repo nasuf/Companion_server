@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -34,6 +35,13 @@ class OfflineActivityItem(BaseModel):
     address: str | None = None
     starts_at: str | None = None
     ends_at: str | None = None
+    kind: Literal["place", "event"] = "place"
+    time_precision: Literal["date", "datetime"] | None = None
+    event_status: str | None = None
+    schedule_label: str | None = None
+    place_lat: float | None = None
+    place_lng: float | None = None
+    coordinate_system: Literal['gcj02', 'wgs84'] = 'gcj02'
     official_url: str | None = None
     image_urls: list[str] = Field(default_factory=list)
     task_hint: str | None = None
@@ -135,6 +143,7 @@ class OfflineActivityArriveRequest(BaseModel):
     lng: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
     accuracy_m: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     manual_confirmation: bool = False
+    observed_at: datetime | None = None
 
 
 class OfflineActivityImageUpload(BaseModel):

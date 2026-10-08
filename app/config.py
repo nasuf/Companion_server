@@ -336,6 +336,18 @@ class Settings(BaseSettings):
     chat_link_search_endpoint: str = ""
     chat_link_search_api_key: str = ""
     chat_link_search_timeout_s: float = 8.0
+    # Activity discovery is separate from chat's web search provider.
+    offline_search_provider: Literal["cleversee", "tavily"] = "cleversee"
+    offline_tavily_fallback: bool = False
+    ali_cloud_access_key_id: str = ""
+    ali_cloud_access_key_secret: str = ""
+    ali_cleversee_api_key: str = ""
+    cleversee_poi_coordinate_system: Literal["gcj02", "wgs84"] = "gcj02"
+    offline_discovery_radius_m: float = 15000
+    offline_event_horizon_days: int = 30
+    offline_model_provider: str = "dashscope"
+    offline_chat_model: str = "qwen3.5-plus"
+    offline_small_model: str = "qwen3.5-flash"
     tavily_api_key: str = ""
     tavily_search_endpoint: str = "https://api.tavily.com/search"
     brave_search_api_key: str = ""

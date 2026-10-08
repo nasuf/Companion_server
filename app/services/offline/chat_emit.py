@@ -92,6 +92,9 @@ def build_activity_component_card(activity: dict[str, Any], *, status_label: str
             "status_label": status_label,
             "location_name": location,
             "image_url": image_url,
+            "image_urls": image_urls,
+            "kind": activity.get('kind', 'place'),
+            "schedule_label": activity.get('schedule_label'),
             "real_world_type": "activity",
         },
     }

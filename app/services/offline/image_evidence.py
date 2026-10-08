@@ -39,6 +39,13 @@ def query_image_evidence(card: dict, image: dict) -> bool:
                 and photo_source_matches(card, title, caption, image.get('source_url', '')))
 
 
+def native_image_evidence(card: dict, image: dict) -> bool:
+    """Native POI association is stronger than an absent/short photo title."""
+    return bool(card.get('native_poi_id') and image.get('poi_id') == card['native_poi_id']
+                and image.get('evidence') == 'native_poi'
+                and not _NON_PHOTO.search(str(image.get('title') or '') + str(image.get('description') or '')))
+
+
 def indexed_image_evidence(raw: str, name: str, images: list[dict], source_url: str = '') -> dict[str, str]:
     """Extract per-photo evidence without leaking captions between neighbouring images.
 

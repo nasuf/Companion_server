@@ -145,6 +145,7 @@ async def arrive_offline_activity(
         lng=data.lng,
         accuracy_m=data.accuracy_m,
         manual_confirmation=data.manual_confirmation,
+        observed_at=data.observed_at,
     )
 
 

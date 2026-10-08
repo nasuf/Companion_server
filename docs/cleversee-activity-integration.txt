@@ -1,0 +1,123 @@
+CleverSee activity integration — 2026-10-08
+
+Decision
+Activity discovery defaults to CleverSee. Tavily fallback is explicitly off;
+Tavily remains available to unrelated chat/web-search flows. No national place
+seed database is maintained. The existing place catalogue is a public-photo
+cache populated from live searches, not a prerequisite for regional coverage.
+
+Flow
+User city/district + device WGS-84 point + category/history policy
+  -> CommonQueryByScene(normal): native POI identities, address, coordinates,
+     categories, business metadata and the selected POI's album
+  -> independently verify city/county, concrete name, finite coordinates and
+     the 15km radius (do not trust distanceMeter)
+  -> web-search/read-page for current event announcements and place context
+  -> cited event extraction -> explicit year/date/session -> exact native venue
+  -> select existing candidate ID -> source-bound gallery + duplicate checks
+  -> copy generation -> independent factual check -> immutable stored facts
+  -> API/chat card/detail all read the same record and schedule label.
+
+Coverage is driven by 27 category intents with history/family rotation, including
+cafes, tea, museums, exhibitions, libraries, bookshops, parks, restaurants,
+street snacks, markets, handicrafts, record/secondhand shops and performances.
+They are query categories, not a list of places. Six families/intents are queried
+per recommendation; cultural misses also try native QA cards. QA prose never
+supplies coordinates or a venue identity. Named venue categories can override an
+incorrect provider search category (e.g. a noodle shop tagged as a cafe).
+
+Temporary events
+The event has its own identity: venue ID + title + UTC-normalized session dates.
+A venue can host different sessions without merging them. Original announcement
+text must support this edition's year, date/time and exact venue. Date-only
+announcements display dates, never invented midnight times. Start-only concerts
+show the known start time; the day's end is an internal expiry bound, not an
+advertised finish time. Daily closing hours constrain arrival and final expiry.
+Accept/arrive re-read the announcement. Failed refresh blocks the action with a
+retryable response. Old refreshes cannot restore a cancelled/postponed session.
+Expiration is consistent for listings and deep links and preserves started
+journeys. Concurrency is serialized in PostgreSQL, with duplicate acceptance
+and arrival guarded at the write boundary.
+
+Images and positioning
+Prefer albums explicitly bound to the native POI ID. Supplement with image
+search only when title + actual source/branch/address evidence match. Download,
+SSRF, MIME, dimensions, content/perceptual dedupe and optional visual filtering
+run before storing local media. The visual model classifies photos vs maps,
+logos/posters/renderings; it does not guess which venue a photo belongs to.
+An unavailable visual classifier cannot erase otherwise source-bound galleries.
+Aim for three distinct photos; do not fabricate/fill unrelated images when the
+provider/source has fewer valid photos. Reviews retain the full original album
+separately from user-created journey materials.
+
+Phone GPS and POI coordinates are compared in one coordinate system. Default
+GCJ-02 is an explicit integration assumption supported by the earlier five
+reference checks (2–68m differences), not a CRS declaration in Aliyun's docs.
+Native coordinates are not overwritten by geocoding or guessed by a model.
+GPS accuracy <=100m, distance <=200m, fresh fix <=120s (30s future clock tolerance).
+Older clients can omit fix time. New Flutter clients send the device timestamp.
+Navigation receives the native point/CRS; address fallback includes the city.
+No separate paid Amap/Tencent API is needed for the current distance check or
+opening an installed map app. GPS confirms proximity, not event attendance.
+Arrival alone does not invent photos, feelings, attendance or a memory note.
+Deleting an unstarted plan revokes plan context, preserves real past memories.
+
+Configuration and release
+ALI_CLOUD_ACCESS_KEY_ID / ALI_CLOUD_ACCESS_KEY_SECRET: SDK authentication.
+ALI_CLEVERSEE_API_KEY: web/image search, QA and read-page authentication.
+Credentials are environment/GitHub secrets only; never checked into Git.
+OFFLINE_SEARCH_PROVIDER=cleversee; OFFLINE_TAVILY_FALLBACK=false.
+CLEVERSEE_POI_COORDINATE_SYSTEM=gcj02 (change only after contract validation).
+OFFLINE_DISCOVERY_RADIUS_M=15000; OFFLINE_EVENT_HORIZON_DAYS=30.
+OFFLINE_MODEL_PROVIDER=dashscope, OFFLINE_CHAT_MODEL=qwen3.5-plus,
+OFFLINE_SMALL_MODEL=qwen3.5-flash reuse DASHSCOPE_API_KEY. This is an explicit
+activity route verified by live calls; provider=runtime follows chat settings.
+Native SDK is pinned to alibabacloud_iqs20240712==6.0.1.
+Transport budgets, two concurrent calls and a shared Redis 5QPS gate bound load;
+public-response caching avoids repeat calls. CleverSee is metered, not inherently
+free; this integration uses the services already enabled by the user.
+
+Migration 20261008010000_cleversee_activity_facts is additive JSONB with a default
+empty object. Existing cards remain readable. Existing customized defaults are
+unchanged. Production current content + full version histories were audited
+before editing. The manifest scripts/prompt_releases/20261008_cleversee_activity.json
+updates activity selection/copy and adds extraction/visual/factual-check prompts.
+After code rollout publish with:
+python scripts/publish_offline_quality_prompts.py \
+  --manifest scripts/prompt_releases/20261008_cleversee_activity.json --apply
+This invokes the same update_prompt_text/CAS/manual_save service as the Web UI.
+The publisher verifies old history/default/enabled state, DB/Redis, version rows,
+actual get_prompt_text reads and the common proactive prefix.
+
+Verification
+Use disposable pgvector PostgreSQL + Redis; apply all Prisma migrations. Export
+DATABASE_URL and DIRECT_DATABASE_URL to that database, plus PROACTIVE_E2E_DATABASE_URL,
+REDIS_URL and PROACTIVE_E2E_REDIS_URL. Never point E2E fixtures at production.
+pytest tests/test_cleversee_facts.py tests/test_cleversee_provider.py \
+  tests/test_cleversee_activity_e2e.py tests/test_offline_llm_route.py \
+  tests/test_deploy_env_defaults.py -q
+The E2E suite publishes prompts via authenticated Web API, asserts full history,
+uses official-shaped SDK/HTTP wire fixtures and real image decoding/storage,
+then exercises real HTTP/PG/Redis ownership, GPS, cancellation/concurrency,
+expiry, delete, arrival-only archive and original gallery retention.
+Set OFFLINE_FLUTTER_E2E=1, OFFLINE_FLUTTER_PROJECT to the matching checkout and
+put flutter on PATH to include the two real Flutter -> HTTP -> backend journeys.
+External wire fixtures keep CI deterministic; real CleverSee/model/image probes
+are separate evidence and do not create production users or notifications.
+Flutter: models, journey widgets, device location and arrival API tests; analyzer.
+Production: healthy workers/schema/config, versioned prompt release, real
+provider calls, native point/gallery/media response and event revalidation.
+
+Limits
+Search coverage and live announcements are not exhaustive. If current evidence
+or a unique venue is missing, recommend another verified place rather than
+invent an event. Shanghai's sampled announcement searches produced no accepted
+session in this run; a dated Zhenjiang concert did pass native venue binding.
+Native photos are source evidence, not a guarantee that every venue has three
+current images. Source coordinates are proximity data, not surveyed entrances.
+The referenced 4.19 prompt/proactive PDFs were absent from the workspace and
+Downloads/Documents; this change follows audited production prompt versions
+and existing shared proactive rules rather than claiming a fresh PDF audit.
+
+Primary API contract:
+https://help.aliyun.com/zh/document_detail/3057308.html

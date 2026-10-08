@@ -203,6 +203,8 @@ async def create_recommendation_for_user(
         source=source,
         search_location=search_anchor,
         location_terms=list(match_terms),
+        center=(float(ctx['user_location_latitude']), float(ctx['user_location_longitude']))
+        if ctx.get('user_location_latitude') is not None and ctx.get('user_location_longitude') is not None else None,
     )
     if not card:
         if source == "manual":
@@ -212,11 +214,14 @@ async def create_recommendation_for_user(
         return None
     # 地理编码：地址 -> 经纬度（供到达 ≤200m 校验）+ 同地点去重键。key 未配置或失败
     # 时 coords=None，不阻断推荐（到达校验按 offline_arrival_require_geocode 处理）。
-    coords = await geocode_address(card.get("address"), card.get("city") or city)
-    place_lat, place_lng = coords if coords else (None, None)
-    place_key = make_place_key(
-        card.get("location_name"), card.get("address"), card.get("city") or city
-    )
+    metadata = card.get('discovery_metadata') or {}
+    if metadata.get('coordinate_source') == 'native_poi':
+        place_lat, place_lng = card['place_lat'], card['place_lng']
+        place_key = metadata.get('session_key') or ('poi:' + metadata['poi_id'])
+    else:
+        coords = await geocode_address(card.get("address"), card.get("city") or city)
+        place_lat, place_lng = coords if coords else (None, None)
+        place_key = make_place_key(card.get("location_name"), card.get("address"), card.get("city") or city)
     activity = await repo.create_activity(
         {
             **card,
@@ -275,6 +280,9 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
         raise HTTPException(status_code=404, detail="Activity not found")
     if activity["status"] not in {"pending", "accepted", "ignored"}:
         raise HTTPException(status_code=409, detail="Activity cannot be accepted")
+    await _guard_event(activity)
+    if activity['status'] == 'accepted':
+        return OfflineActivityItem(**activity)
     # spec §4.4 同地点复用：接受新推荐时若同地点已有进行中活动，直接返回既有（前端
     # 打开其打卡页），并把当前这条收进「暂不考虑」，避免同地点重复占列表。
     place_key = activity.get("place_key")
@@ -300,7 +308,14 @@ async def accept_activity(user_id: str, activity_id: str) -> OfflineActivityItem
     trigger_type = (
         "offline_activity_reaccepted" if was_ignored else "offline_activity_accepted"
     )
-    updated = await repo.update_activity_status(activity_id, user_id, "accepted")
+    if (activity.get('discovery_metadata') or {}).get('provider') == 'cleversee':
+        updated, changed = await repo.accept_native_activity(activity_id, user_id)
+        if not updated:
+            raise HTTPException(status_code=409, detail='这项活动已有出行安排，请从待出行列表打开')
+        if not changed:
+            return OfflineActivityItem(**updated)
+    else:
+        updated = await repo.update_activity_status(activity_id, user_id, "accepted")
     if not updated:
         raise HTTPException(status_code=404, detail="Activity not found")
     await repo.create_activity_feedback(
@@ -415,6 +430,26 @@ def _verify_arrival_distance(activity: dict, lat: float, lng: float) -> None:
         )
 
 
+async def _guard_event(activity: dict, *, arrival: bool = False) -> None:
+    from app.services.offline.discovery_facts import event_is_available
+    from app.services.offline.cleversee_discovery import refresh_event
+    metadata = activity.get('discovery_metadata') or {}
+    if metadata.get('kind') != 'event':
+        return
+    if not event_is_available(activity, arrival=arrival):
+        raise HTTPException(status_code=409, detail='这场活动现在还不能前往，看看其他安排吧')
+    refreshed = await refresh_event(activity)
+    if refreshed:
+        persisted = await repo.save_discovery_metadata(activity['id'], activity['user_id'], refreshed)
+        if persisted is None:
+            raise HTTPException(status_code=404, detail='Activity not found')
+        activity['discovery_metadata'] = persisted
+        if not event_is_available(activity, arrival=arrival):
+            raise HTTPException(status_code=409, detail='这场活动的安排有变化，先看看其他活动吧')
+    else:
+        raise HTTPException(status_code=503, detail='这场活动的安排还需确认，稍后再试试吧')
+
+
 _ARRIVAL_GUIDE_FALLBACK = "到啦，慢慢逛就好，想聊时给我发消息。"
 
 
@@ -445,6 +480,7 @@ async def arrive_activity(
     lng: float | None = None,
     accuracy_m: float | None = None,
     manual_confirmation: bool = False,
+    observed_at: datetime | None = None,
 ) -> OfflineActivityItem:
     activity = await repo.get_activity(activity_id, user_id, reveal_task=True)
     if not activity:
@@ -456,6 +492,7 @@ async def arrive_activity(
         raise HTTPException(status_code=409, detail="先接受活动再确认到达")
     if activity.get("reached"):
         return OfflineActivityItem(**activity)  # 重复确认：幂等
+    await _guard_event(activity, arrival=True)
     other_reached = await repo.find_other_reached_activity(
         user_id,
         activity.get("workspace_id"),
@@ -475,7 +512,13 @@ async def arrive_activity(
             raise HTTPException(status_code=422, detail={"reason": "location_required", "message": "需要当前位置才能确认到达，请开启定位后重试"})
         if accuracy_m is None or not math.isfinite(accuracy_m) or not 0 <= accuracy_m <= 100:
             raise HTTPException(status_code=422, detail={"reason": "low_accuracy", "message": "定位还不够准确，请开启精确定位后再试一次"})
-        check_lat, check_lng = wgs84_to_gcj02(lat, lng)
+        if observed_at is not None and (observed_at.tzinfo is None or
+                not -30 <= (datetime.now(UTC) - observed_at).total_seconds() <= 120):
+            raise HTTPException(status_code=422, detail={'reason': 'stale_location', 'message': '再获取一下当前位置试试'})
+        crs = (activity.get('discovery_metadata') or {}).get('coordinate_system', 'gcj02')
+        if crs not in {'gcj02', 'wgs84'}:
+            raise HTTPException(status_code=422, detail={'reason': 'no_geocode', 'message': '暂时没能确认到达，请稍后再试'})
+        check_lat, check_lng = wgs84_to_gcj02(lat, lng) if crs == 'gcj02' else (lat, lng)
         _verify_arrival_distance(activity, check_lat, check_lng)
     updated = await repo.mark_arrived(activity_id, user_id, lat=lat, lng=lng, verified=has_place)
     if not updated:

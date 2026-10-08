@@ -30,6 +30,8 @@ RELEASE = json.loads((Path(__file__).parents[1] / 'scripts/prompt_releases/20261
 
 @pytest.fixture
 async def discovery(journey, monkeypatch, tmp_path):
+    from app.config import settings
+    monkeypatch.setattr(settings, 'offline_search_provider', 'tavily')
     j = journey
     entry = RELEASE['prompts'][0]
     before = await j.db.prompttemplate.find_unique(where={'key': entry['key']})

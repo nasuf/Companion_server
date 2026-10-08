@@ -17,9 +17,10 @@ from urllib.parse import urlsplit
 import httpx
 from PIL import Image, ImageOps
 
+from app.config import settings
 from app.services.offline import activity_media_storage as storage, place_catalog
-from app.services.offline.content import canonical_url, photo_source_matches
-from app.services.offline.image_evidence import page_image_evidence, indexed_image_evidence, query_image_evidence
+from app.services.offline.content import canonical_url, photo_source_matches, normalized, place_name_in_text
+from app.services.offline.image_evidence import page_image_evidence, indexed_image_evidence, query_image_evidence, native_image_evidence
 from app.services.offline.providers.search import SearchResult, tavily_place_images
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,8 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
     cached = await place_catalog.load_place(card)
     accepted = []
     for item in (cached or {}).get('images', []):
+        if card.get('native_poi_id') and item.get('poi_id') != card['native_poi_id']:
+            continue  # Old inferred albums need native identity revalidation.
         key = str(item.get('storage_key') or '')
         if key.startswith('place_') and storage.storage_path(key).is_file():
             accepted.append(item)
@@ -78,6 +81,8 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                 page_slots = asyncio.Semaphore(3)
 
                 async def candidates(source: SearchResult) -> list[dict]:
+                    if any(native_image_evidence(card, item) for item in source.images):
+                        return []
                     if not photo_source_matches(card, source.title, source.content + source.raw_content, source.url):
                         return []
                     if re.search(r'效果图|设计方案|规划图|拟建', source.title):
@@ -101,19 +106,38 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                     bound = [source for source in sources if photo_source_matches(
                         card, source.title, source.content + source.raw_content, source.url)]
                     groups = await asyncio.gather(*(candidates(source) for source in bound[:8]))
+                    native = [{**item, 'source_url': source.url, 'source_title': source.title}
+                              for source in sources for item in source.images
+                              if native_image_evidence(card, item) and not _is_bad_image_url(str(item.get('url') or ''))]
+                    # Don't spend page-read time validating a native POI album.
+                    groups.insert(0, native)
                     query_candidates = {}
                     counted_query_urls = set()
+                    async def query_bound(item: dict) -> bool:
+                        if query_image_evidence(card, item):
+                            return True
+                        # Short image titles commonly omit the city. Verify the
+                        # actual host page and selected branch/address instead.
+                        url = canonical_url(item.get('source_url'))
+                        if not card.get('native_poi_id') or not url or not place_name_in_text(card['location_name'], item.get('source_title')):
+                            return False
+                        from app.services.offline.providers.cleversee import read_page
+                        text = await read_page(url)
+                        address = normalized(card.get('address'))
+                        return bool(len(address) >= 4 and address in normalized(text)
+                                    and photo_source_matches(card, item.get('source_title', ''), text, url))
                     for source in sources:
-                        for item in source.query_images:
+                        for item in source.query_images[:8]:
                             if item['url'] in query_candidates:
                                 continue
                             if item['url'] not in counted_query_urls:
                                 stats['query_candidates'] += 1
                                 counted_query_urls.add(item['url'])
-                            if query_image_evidence(card, item) and not _is_bad_image_url(item['url']):
+                            if not _is_bad_image_url(item['url']) and await query_bound(item):
                                 # A title identifies the image document; it does
                                 # not give us permission to invent its page URL.
-                                query_candidates[item['url']] = {**item, 'evidence': 'image_search_document'}
+                                query_candidates[item['url']] = {**item, 'evidence': 'image_search_document',
+                                    **({'poi_id': card['native_poi_id']} if card.get('native_poi_id') else {})}
                     groups.append(list(query_candidates.values()))
                     stats['bound_pages'] += len(bound)
                     stats['eligible_candidates'] += sum(len(group) for group in groups)
@@ -148,6 +172,11 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                                     stats['unavailable'] += 1
                                     continue
                                 blob, digest, dhash = image
+                                if card.get('native_poi_id'):
+                                    from app.services.offline.image_quality import scene_photo
+                                    if not await scene_photo(blob, digest):
+                                        stats['non_photo'] += 1
+                                        continue
                                 if digest in hashes or any((dhash ^ old).bit_count() <= 4 for old in perceptual):
                                     stats['duplicates'] += 1
                                     continue
@@ -178,7 +207,14 @@ async def persist_activity_images(*, user_id: str, card: dict, city: str,
                 for query in _image_queries(card, city):
                     if len(accepted) >= limit:
                         break
-                    await collect(await tavily_place_images(query))
+                    if card.get('native_poi_id'):
+                        from app.services.offline.providers.cleversee import image_search
+                        found = await image_search(query)
+                        if not found and settings.offline_tavily_fallback:
+                            found = await tavily_place_images(query)
+                        await collect(found)
+                    else:
+                        await collect(await tavily_place_images(query))
     except TimeoutError:
         logger.info("[offline-images] gallery budget reached; preserving verified images")
     if accepted:

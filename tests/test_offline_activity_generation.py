@@ -21,6 +21,13 @@ from app.services.offline import activity_media_repo, repository as offline_repo
 from app.services.offline.providers.search import SearchResult
 
 
+@pytest.fixture(autouse=True)
+def legacy_search_provider(monkeypatch):
+    # These tests exercise the retained Tavily fallback, not live providers.
+    from app.config import settings
+    monkeypatch.setattr(settings, 'offline_search_provider', 'tavily')
+
+
 def test_search_query_localizes_zhenjiang_for_chinese_sources():
     query = _search_query("Zhenjiang", ["音乐爱好者"])
 

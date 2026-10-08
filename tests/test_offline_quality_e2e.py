@@ -24,6 +24,8 @@ RELEASE = json.loads((Path(__file__).parents[1]/'scripts/prompt_releases/2026100
 
 @pytest.fixture
 async def journey(flow, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, 'offline_search_provider', 'tavily')
     flow.app.include_router(offline.router)
     flow.client.headers['Authorization'] = 'Bearer '+create_jwt(flow.user, role="user")
     for module in (place_catalog,):
@@ -271,7 +273,7 @@ async def test_flutter_real_http_client(journey, monkeypatch):
              'OFFLINE_E2E_TOKEN':create_jwt(j.user,role='user'),
              'OFFLINE_E2E_ACTIVITY':a['id'],'OFFLINE_E2E_DELETE':b['id']}
         process=await asyncio.create_subprocess_exec('flutter','test','--no-pub','test/offline_api_e2e_test.dart','-r','expanded',
-            cwd=Path(__file__).parents[2]/'Companion_flutter',env=env,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
+            cwd=Path(os.getenv('OFFLINE_FLUTTER_PROJECT', str(Path(__file__).parents[2]/'Companion_flutter'))),env=env,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
         output,_=await asyncio.wait_for(process.communicate(),timeout=120)
         assert process.returncode==0,output.decode()
         assert 'All tests passed' in output.decode()

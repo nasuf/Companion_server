@@ -11,7 +11,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from app.services.llm.models import get_chat_model, invoke_text
+from app.config import settings
+from app.services.llm.models import invoke_text, invoke_json
+from app.services.offline.llm import get_offline_chat_model as get_chat_model, get_offline_small_model as get_utility_model
 from app.services.offline.activity_images import persist_activity_images
 from app.services.offline.image_evidence import indexed_image_evidence
 from app.services.offline.prompt_fields import clip_text, filled, parse_text_field
@@ -632,6 +634,7 @@ async def generate_activity_card(
     source: str,
     search_location: str | None = None,
     location_terms: list[str] | None = None,
+    center: tuple[float, float] | None = None,
 ) -> dict[str, Any] | None:
     tags = await repo.list_user_tags(user_id, workspace_id, limit=9)
     memory = await repo.memory_brief(user_id, workspace_id, limit=60)
@@ -641,6 +644,16 @@ async def generate_activity_card(
         limit=20,
     )
     search_anchor = search_location or city
+    if settings.offline_search_provider == 'cleversee':
+        from app.services.offline.cleversee_discovery import discover
+        native_city = _display_city(city)
+        candidates = await discover(city=native_city, search_anchor=search_anchor, tags=tags,
+                                    recent=recent_activities, center=center)
+        if candidates:
+            return await _native_card(candidates, user_id=user_id, city=native_city,
+                search_anchor=search_anchor, tags=tags, memory=memory, recent=recent_activities)
+        if not settings.offline_tavily_fallback:
+            return None
     filtered_results, all_usable_results, query = await _search_activity_candidates(
         search_anchor,
         tags,
@@ -768,12 +781,157 @@ async def generate_activity_card(
     return card
 
 
+async def _native_card(
+    candidates: list[dict],
+    *,
+    user_id: str,
+    city: str,
+    search_anchor: str,
+    tags: list[str],
+    memory: str,
+    recent: list[dict],
+) -> dict:
+    # Model output selects an ID and supplies copy, never place/session facts.
+    facts = [{k: v for k, v in c.items() if k != "native_images"} for c in candidates]
+    prompt = (await get_prompt_text("offline.activity_card")).format(
+        city=city,
+        search_anchor=search_anchor,
+        tags="、".join(tags) or "暂无",
+        memory=memory or "暂无",
+        avoid_text=_avoid_text(recent),
+        sources_json=json.dumps(facts, ensure_ascii=False),
+    )
+    selected, copy = candidates[0], {}
+    try:
+        async with asyncio.timeout(18):
+            raw = await invoke_text(get_chat_model(), prompt)
+        payload = _json_object(raw) or {}
+        proposed = payload.get("candidates", [])
+        by_id = {c["candidate_id"]: c for c in candidates}
+        for item in proposed if isinstance(proposed, list) else []:
+            if isinstance(item, dict) and item.get("candidate_id") in by_id:
+                selected, copy = by_id[item["candidate_id"]], item
+                break
+    except Exception as exc:
+        logger.info("[offline] candidate selection fallback (%s)", type(exc).__name__)
+    card = dict(selected)
+    bound_sources = []
+    if card["discovery_metadata"].get("kind") == "place":
+        from app.services.offline.providers.cleversee import web_search
+
+        try:
+            async with asyncio.timeout(10):
+                pages = await web_search(
+                    f"{city} {card['location_name']} {card['address']} 简介 开放时间",
+                    max_results=4,
+                )
+            bound_sources = [
+                p
+                for p in pages
+                if _source_is_usable(p, city)
+                and place_source_matches(card, p.title, p.content + p.raw_content)
+            ][:2]
+        except Exception as exc:
+            logger.info("[offline] place context unavailable (%s)", type(exc).__name__)
+    facts_for_copy = dict(selected)
+    copy_context = dict(card)
+    if bound_sources:
+        notes = [
+            dict(title=p.title, url=p.url, text=source_text(p)[:2200])
+            for p in bound_sources
+        ]
+        facts_for_copy["verified_source_text"] = notes
+        # Retrieved pages are evidence for generation, not a user-facing
+        # fallback. An unavailable/rejected copy keeps the canonical facts.
+        copy_context["description"] += "\n" + "\n".join(p["text"] for p in notes)
+    if copy.get("vibe"):
+        card["vibe"] = plain_text(copy["vibe"])[:30]
+    source = SearchResult(
+        title=city + " " + card["location_name"],
+        url="https://www.amap.com/detail/" + card["native_poi_id"],
+        content=card["address"],
+        images=[
+            {**i, "poi_id": card["native_poi_id"], "evidence": "native_poi"}
+            for i in card.get("native_images", [])
+            if isinstance(i, dict)
+        ],
+    )
+    card["image_urls"] = await persist_activity_images(
+        user_id=user_id,
+        card=card,
+        city=city,
+        search_results=[source] + bound_sources,
+        limit=3,
+    )
+    card["search_sources"] = [
+        dict(
+            title=source.title,
+            url=source.url,
+            provider="cleversee",
+            poi_id=card["native_poi_id"],
+        )
+    ] + card.get("image_provenance", [])
+    card["search_sources"] += [
+        dict(title=p.title, url=p.url, subject="place_context") for p in bound_sources
+    ]
+    if card["discovery_metadata"].get("kind") == "event":
+        card["search_sources"].insert(
+            0,
+            dict(
+                title=card["title"],
+                url=card["official_url"],
+                subject="event_announcement",
+            ),
+        )
+    card["source"] = "cleversee"
+    card["expires_at"] = (
+        card.get("expires_at")
+        or card.get("ends_at")
+        or (datetime.now(UTC) + timedelta(days=14)).isoformat()
+    )
+    copy_text = await _recommendation_copy(copy_context)
+    if copy_text:
+        try:
+            check_prompt = (
+                await get_prompt_text("offline.recommendation_fact_check")
+            ).format(
+                facts_json=json.dumps(
+                    {
+                        k: v
+                        for k, v in facts_for_copy.items()
+                        if k not in {"native_images", "vibe"}
+                    },
+                    ensure_ascii=False,
+                ),
+                copy_text=copy_text,
+            )
+            async with asyncio.timeout(8):
+                checked = await invoke_json(get_utility_model(), check_prompt)
+            if isinstance(checked, dict) and checked.get("supported") is True:
+                card["description"] = copy_text
+        except Exception as exc:
+            logger.info("[offline] factual copy fallback (%s)", type(exc).__name__)
+    return card
+
+
 def _date_time_text(card: dict[str, Any]) -> str:
+    from app.services.offline.event_schedule import schedule_label
+
+    label = schedule_label((card.get("discovery_metadata") or {}).get("event") or {})
+    if label:
+        return label
     start = str(card.get("starts_at") or "").strip()
     end = str(card.get("ends_at") or "").strip()
     if start and end:
         return f"{start} 至 {end}"
-    return start or "长期"
+    if start:
+        return start
+    hours = (card.get("discovery_metadata") or {}).get("opening_hours")
+    return (
+        "固定地点；开放时间：" + str(hours)
+        if hours
+        else "固定地点；开放时段未提供，不能推断全天或随时营业"
+    )
 
 
 async def _recommendation_copy(card: dict[str, Any]) -> str:

@@ -263,6 +263,15 @@ jobs:
             TAVILY_SEARCH_ENDPOINT=${{ vars.TAVILY_SEARCH_ENDPOINT || 'https://api.tavily.com/search' }}
             CHAT_LINK_SEARCH_TIMEOUT_S=${{ vars.CHAT_LINK_SEARCH_TIMEOUT_S || '8' }}
             TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}
+            ALI_CLOUD_ACCESS_KEY_ID=${{ secrets.ALI_CLOUD_ACCESS_KEY_ID }}
+            ALI_CLOUD_ACCESS_KEY_SECRET=${{ secrets.ALI_CLOUD_ACCESS_KEY_SECRET }}
+            ALI_CLEVERSEE_API_KEY=${{ secrets.ALI_CLEVERSEE_API_KEY }}
+            OFFLINE_SEARCH_PROVIDER=${{ vars.OFFLINE_SEARCH_PROVIDER || 'cleversee' }}
+            OFFLINE_TAVILY_FALLBACK=${{ vars.OFFLINE_TAVILY_FALLBACK || 'false' }}
+            CLEVERSEE_POI_COORDINATE_SYSTEM=${{ vars.CLEVERSEE_POI_COORDINATE_SYSTEM || 'gcj02' }}
+            OFFLINE_MODEL_PROVIDER=${{ vars.OFFLINE_MODEL_PROVIDER || 'dashscope' }}
+            OFFLINE_CHAT_MODEL=${{ vars.OFFLINE_CHAT_MODEL || 'qwen3.5-plus' }}
+            OFFLINE_SMALL_MODEL=${{ vars.OFFLINE_SMALL_MODEL || 'qwen3.5-flash' }}
             # 主动交流 · 结构化热榜源 (2026-09-14 task#13). 默认走 DailyHot 免费公共实例
             # (MIT 开源, github.com/imsyy/DailyHot). 想自建换成自己 endpoint 即可.
             # 设为空串 → 关闭 hot_api, fallback tavily 通用搜.
@@ -293,6 +302,15 @@ jobs:
             NOTIFICATION_MAX_ATTEMPTS=${{ vars.NOTIFICATION_MAX_ATTEMPTS || '3' }}
             NOTIFICATION_DISPATCH_BATCH_SIZE=${{ vars.NOTIFICATION_DISPATCH_BATCH_SIZE || '50' }}
             EOF
+
+            if grep -q '^OFFLINE_SEARCH_PROVIDER=cleversee$' .env; then
+              for key in ALI_CLOUD_ACCESS_KEY_ID ALI_CLOUD_ACCESS_KEY_SECRET ALI_CLEVERSEE_API_KEY; do
+                if ! grep -Eq "^${key}=.+" .env; then
+                  echo "$key is required when OFFLINE_SEARCH_PROVIDER=cleversee"
+                  exit 1
+                fi
+              done
+            fi
 
             # Private cohort survives rsync and .env regeneration. Fail before
             # stopping the running server if the operator configuration is invalid.

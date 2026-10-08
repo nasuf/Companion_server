@@ -260,8 +260,24 @@ PROMPT_DEFINITIONS = [
     ),
     PromptDefinition(
         "offline.activity_card", "线下活动推荐卡生成", "线下互动", "线下活动",
-        "【工程扩展】V3 现实世界互动. 基于城市、记忆标签和 Tavily 搜索结果生成结构化活动推荐卡.",
+        "【工程扩展】基于区域、记忆标签和核验后的地点/活动事实生成推荐卡。",
         OFFLINE_ACTIVITY_CARD_PROMPT,
+    ),
+    PromptDefinition(
+        "offline.event_extract", "临时活动公告与场次提取", "线下互动", "线下活动",
+        "提取有公告原文证据的活动场次；代码再次验证日期、城市及具体举办地点。",
+        '来源：{source_url}\n城市：{city}\n当前时间：{now}\n待核验素材：{source_text}\n'
+        '活动公告核验模板等待 Web 版本发布。仅输出空 JSON：{{"events":[]}}',
+    ),
+    PromptDefinition(
+        "offline.image_quality", "地点配图视觉质量核验", "线下互动", "线下活动",
+        "只判断实景照片与图标/海报/地图/拼图，不从图片推断地点身份。",
+        '图片质量模板等待 Web 版本发布。仅输出 JSON：{{"kind":"unknown"}}',
+    ),
+    PromptDefinition(
+        "offline.recommendation_fact_check", "推荐文案事实核验", "线下互动", "线下活动",
+        "核验文案中的营业、预约、设施、价格、场景等断言是否来自候选事实；失败使用事实简介。",
+        '事实：{facts_json}\n待审文案：{copy_text}\n文案核验模板等待 Web 发布。输出{{"supported":false}}',
     ),
     PromptDefinition(
         "offline.activity_invite_message", "线下活动朋友式推荐语", "线下互动", "线下活动",

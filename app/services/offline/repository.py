@@ -84,6 +84,8 @@ def _timestamp_or_none(value: Any) -> datetime | str | None:
 
 def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
     status = str(_field(row, "status") or "pending")
+    metadata = _json(_field(row, 'discovery_metadata', 'discoveryMetadata'), {})
+    from app.services.offline.event_schedule import schedule_label
     return {
         "id": str(_field(row, "id")),
         "user_id": _field(row, "user_id", "userId"),
@@ -102,6 +104,12 @@ def activity_from_row(row: Any, *, reveal_task: bool = False) -> dict[str, Any]:
         "suitable": _field(row, "suitable"),
         "starts_at": _iso(_field(row, "starts_at", "startsAt")),
         "ends_at": _iso(_field(row, "ends_at", "endsAt")),
+        "discovery_metadata": metadata,
+        "kind": metadata.get('kind', 'place'),
+        "time_precision": metadata.get('time_precision'),
+        "event_status": (metadata.get('event') or {}).get('status'),
+        "schedule_label": schedule_label(metadata.get('event') or {}),
+        "coordinate_system": metadata.get('coordinate_system', 'gcj02'),
         "official_url": _field(row, "official_url", "officialUrl"),
         "image_urls": list(_json(_field(row, "image_urls", "imageUrls"), [])),
         "task_hint": _field(row, "task_hint", "taskHint"),
@@ -437,14 +445,14 @@ async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
             title, summary, description, category, city, location_name, address,
             starts_at, ends_at, official_url, image_urls, search_sources,
             easter_egg_task, task_hint, expires_at,
-            place_lat, place_lng, place_key, vibe, suitable
+            place_lat, place_lng, place_key, vibe, suitable, discovery_metadata
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12, $13, $14,
             $15::timestamptz, $16::timestamptz, $17, $18::jsonb, $19::jsonb,
             $20::jsonb, $21, $22::timestamptz,
-            $23, $24, $25, $26, $27
+            $23, $24, $25, $26, $27, $28::jsonb
         )
         RETURNING *
         """,
@@ -475,11 +483,13 @@ async def create_activity(data: dict[str, Any]) -> dict[str, Any]:
         data.get("place_key"),
         (str(data.get("vibe") or "").strip() or None),
         (str(data.get("suitable") or "").strip() or None),
+        json.dumps(data.get('discovery_metadata') or {}, ensure_ascii=False),
     )
     return activity_from_row(rows[0])
 
 
 async def list_activities(user_id: str, workspace_id: str | None = None) -> list[dict[str, Any]]:
+    await expire_inactive_events(user_id)
     rows = await db.query_raw(
         """
         SELECT *
@@ -493,6 +503,19 @@ async def list_activities(user_id: str, workspace_id: str | None = None) -> list
         workspace_id,
     )
     return [activity_from_row(row) for row in rows or []]
+
+
+async def expire_inactive_events(user_id: str) -> None:
+    # Arrival/evidence remain intact; a started journey can still be archived.
+    await db.execute_raw("""
+        UPDATE offline_activity_recommendations
+        SET status='expired', updated_at=CURRENT_TIMESTAMP,
+            next_companion_at=NULL, companion_claim_token=NULL, companion_claimed_at=NULL
+        WHERE user_id=$1 AND discovery_metadata->>'kind'='event'
+          AND status IN ('pending','accepted','ignored') AND reached=FALSE
+          AND (COALESCE(expires_at,ends_at) <= CURRENT_TIMESTAMP
+               OR discovery_metadata->'event'->>'status' IN ('cancelled','postponed','unavailable'))
+    """, user_id)
 
 
 async def get_cancelled_activity_plans(user_id: str, workspace_id: str | None) -> list[dict]:
@@ -583,7 +606,7 @@ async def list_recent_activity_fingerprints(
 ) -> list[dict[str, str]]:
     rows = await db.query_raw(
         """
-        SELECT title, location_name, address, category
+        SELECT title, location_name, address, category, place_key, discovery_metadata
         FROM offline_activity_recommendations
         WHERE user_id = $1
           AND ($2::text IS NULL OR workspace_id = $2)
@@ -604,6 +627,8 @@ async def list_recent_activity_fingerprints(
                 ).strip(),
                 "address": str(_field(row, "address") or "").strip(),
                 "category": str(_field(row, "category") or "").strip(),
+                "place_key": str(_field(row, 'place_key') or ''),
+                "kind": _json(_field(row, 'discovery_metadata'), {}).get('kind', 'place'),
             }
         )
     return items
@@ -640,7 +665,18 @@ async def get_activity(activity_id: str, user_id: str, *, reveal_task: bool = Fa
         activity_id,
         user_id,
     )
-    return activity_from_row(rows[0], reveal_task=reveal_task) if rows else None
+    activity = activity_from_row(rows[0], reveal_task=reveal_task) if rows else None
+    if (activity and activity['discovery_metadata'].get('kind') == 'event'
+            and not activity['reached'] and activity['status'] in {'pending', 'accepted', 'ignored'}):
+        # Deep links must agree with the listing even when the list was never
+        # refreshed. The SQL guard preserves concurrently started journeys.
+        await expire_inactive_events(user_id)
+        rows = await db.query_raw(
+            "SELECT * FROM offline_activity_recommendations WHERE id=$1 AND user_id=$2 LIMIT 1",
+            activity_id, user_id,
+        )
+        activity = activity_from_row(rows[0], reveal_task=reveal_task) if rows else None
+    return activity
 
 
 async def update_activity_status(
@@ -687,6 +723,47 @@ async def update_activity_status(
         status,
     )
     return activity_from_row(rows[0], reveal_task=True) if rows else None
+
+
+async def save_discovery_metadata(activity_id: str, user_id: str, metadata: dict) -> dict | None:
+    # A slow older refresh must not resurrect an already cancelled session.
+    rows = await db.query_raw("""
+        UPDATE offline_activity_recommendations
+        SET discovery_metadata=$3::jsonb, updated_at=CURRENT_TIMESTAMP
+        WHERE id=$1 AND user_id=$2
+          AND (COALESCE(discovery_metadata->'event'->>'status','scheduled') NOT IN ('cancelled','postponed')
+               OR $3::jsonb->'event'->>'status' IN ('cancelled','postponed'))
+        RETURNING discovery_metadata
+    """, activity_id, user_id, json.dumps(metadata, ensure_ascii=False))
+    if not rows:
+        rows = await db.query_raw('SELECT discovery_metadata FROM offline_activity_recommendations WHERE id=$1 AND user_id=$2', activity_id, user_id)
+    return _json(_field(rows[0], 'discovery_metadata'), {}) if rows else None
+
+
+async def accept_native_activity(activity_id: str, user_id: str) -> tuple[dict | None, bool]:
+    """Serialize acceptance of a POI or event session, including duplicate taps.
+
+    The lock is acquired BEFORE reading the competing rows so a waiting request
+    observes committed state. A same-venue different session has a different key.
+    """
+    from app.services.offline.discovery_facts import event_is_available
+    async with db.tx() as tx:
+        await tx.query_raw('SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext($1)::bigint)',
+                           'offline-accept:' + user_id)
+        rows = await tx.query_raw('SELECT * FROM offline_activity_recommendations WHERE id=$1 AND user_id=$2 FOR UPDATE', activity_id, user_id)
+        if not rows:
+            return None, False
+        activity = activity_from_row(rows[0], reveal_task=True)
+        if activity['status'] == 'accepted':
+            return activity, False
+        if activity['status'] not in {'pending', 'ignored'} or not event_is_available(activity):
+            return None, False
+        duplicates = await tx.query_raw("SELECT 1 FROM offline_activity_recommendations WHERE user_id=$1 AND place_key=$2 AND status='accepted' AND id<>$3 LIMIT 1",
+                                        user_id, activity['place_key'], activity_id)
+        if duplicates:
+            return None, False
+        rows = await tx.query_raw("UPDATE offline_activity_recommendations SET status='accepted', accepted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1 RETURNING *", activity_id)
+        return activity_from_row(rows[0], reveal_task=True), True
 
 
 async def mark_arrived(
@@ -761,6 +838,9 @@ async def mark_arrived(
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1 AND user_id = $2
               AND status = 'accepted' AND reached = FALSE
+              AND (discovery_metadata->>'kind' IS DISTINCT FROM 'event'
+                   OR (discovery_metadata->'event'->>'status'='scheduled'
+                       AND COALESCE(expires_at,ends_at) > CURRENT_TIMESTAMP))
             RETURNING *
             """,
             activity_id,

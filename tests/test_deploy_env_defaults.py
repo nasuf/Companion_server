@@ -19,7 +19,9 @@ import pytest
 
 from app.config import Settings
 
-_DEPLOY_YML = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
+_DEPLOY_YML = (
+    Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
+)
 
 # (env 变量名, Settings 字段名)
 _COUPLED_FLAGS = [
@@ -29,6 +31,12 @@ _COUPLED_FLAGS = [
     # fallback 是「运维看到的默认」。两者漂开的话, 调优时按看到的数推理会算错。
     ("LLM_MAX_CONCURRENCY", "llm_max_concurrency"),
     ("LLM_BACKGROUND_MAX_CONCURRENCY", "llm_background_max_concurrency"),
+    ("OFFLINE_SEARCH_PROVIDER", "offline_search_provider"),
+    ("OFFLINE_TAVILY_FALLBACK", "offline_tavily_fallback"),
+    ("CLEVERSEE_POI_COORDINATE_SYSTEM", "cleversee_poi_coordinate_system"),
+    ("OFFLINE_MODEL_PROVIDER", "offline_model_provider"),
+    ("OFFLINE_CHAT_MODEL", "offline_chat_model"),
+    ("OFFLINE_SMALL_MODEL", "offline_small_model"),
 ]
 
 
@@ -53,7 +61,9 @@ def test_deploy_default_matches_code_default(env_name, field):
 
     code_default = Settings.model_fields[field].default
     expected = (
-        str(code_default).lower() if isinstance(code_default, bool) else str(code_default)
+        str(code_default).lower()
+        if isinstance(code_default, bool)
+        else str(code_default)
     )
     assert deployed == expected, (
         f"{env_name} 在 deploy.yml 里默认 {deployed!r}, 代码里是 {expected!r}。"
@@ -66,3 +76,17 @@ def test_canary_allowlist_is_actually_settable(env_name):
     """白名单存在的意义是"出事时先缩小范围"。要是只能靠改代码 + 重新部署才能设,
     那它就不是应急手段。"""
     assert f"vars.{env_name}" in _DEPLOY_YML.read_text()
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    ["ALI_CLOUD_ACCESS_KEY_ID", "ALI_CLOUD_ACCESS_KEY_SECRET", "ALI_CLEVERSEE_API_KEY"],
+)
+def test_cleversee_credentials_survive_env_regeneration(env_name):
+    text = _DEPLOY_YML.read_text()
+    assert f"{env_name}=${{{{ secrets.{env_name} }}}}" in text
+    assert (
+        "for key in ALI_CLOUD_ACCESS_KEY_ID ALI_CLOUD_ACCESS_KEY_SECRET ALI_CLEVERSEE_API_KEY"
+        in text
+    )
+    assert "is required when OFFLINE_SEARCH_PROVIDER=cleversee" in text
