@@ -249,12 +249,7 @@ jobs:
             JAMENDO_CLIENT_ID=${{ secrets.JAMENDO_CLIENT_ID }}
             JAMENDO_BASE_URL=${{ vars.JAMENDO_BASE_URL || 'https://api.jamendo.com/v3.0' }}
             JAMENDO_DEFAULT_LIBRARIES=${{ vars.JAMENDO_DEFAULT_LIBRARIES || 'focus,ambient,sleep' }}
-            # 记忆整合 (周日 05:10 的 L3 簇压缩)。它是唯一会归档原始数据的维护
-            # 任务, 所以两个开关都要能不改代码就调整:
-            #   ENABLED     出事时的总闸
-            #   WORKSPACES  逗号分隔的白名单, 非空时只对这些 workspace 生效。
-            #               比直接关掉更有用 —— 先缩到一个 workspace 观察。
-            # 默认值必须与 app/config.py 里的代码默认一致, 有守卫测试盯着。
+            # Memory archival must retain runtime kill switch and cohort controls.
             MEMORY_CONSOLIDATION_ENABLED=${{ vars.MEMORY_CONSOLIDATION_ENABLED || 'true' }}
             MEMORY_CONSOLIDATION_WORKSPACES=${{ vars.MEMORY_CONSOLIDATION_WORKSPACES }}
             PROACTIVE_LINK_RECOMMENDATION_ENABLED=${{ vars.PROACTIVE_LINK_RECOMMENDATION_ENABLED || 'true' }}
@@ -272,11 +267,7 @@ jobs:
             OFFLINE_MODEL_PROVIDER=${{ vars.OFFLINE_MODEL_PROVIDER || 'dashscope' }}
             OFFLINE_CHAT_MODEL=${{ vars.OFFLINE_CHAT_MODEL || 'qwen3.5-plus' }}
             OFFLINE_SMALL_MODEL=${{ vars.OFFLINE_SMALL_MODEL || 'qwen3.5-flash' }}
-            # 主动交流 · 结构化热榜源 (2026-09-14 task#13). 默认走 DailyHot 免费公共实例
-            # (MIT 开源, github.com/imsyy/DailyHot). 想自建换成自己 endpoint 即可.
-            # 设为空串 → 关闭 hot_api, fallback tavily 通用搜.
-            # max_age_days: URL 里带早年份 / published_at 超此天数 → 丢, 修 tavily
-            # 返 2021 老 SEO 列表. 0 = 关闭 freshness filter.
+            # DailyHot source and freshness controls; independent of offline search.
             PROACTIVE_HOT_API_URL=${{ vars.PROACTIVE_HOT_API_URL || 'https://api-hot.imsyy.top' }}
             PROACTIVE_HOT_API_KEY=${{ secrets.PROACTIVE_HOT_API_KEY }}
             PROACTIVE_HOT_MAX_AGE_DAYS=${{ vars.PROACTIVE_HOT_MAX_AGE_DAYS || '2' }}
@@ -287,10 +278,7 @@ jobs:
             APNS_AUTH_KEY=
             APNS_TOPIC=${{ vars.APNS_TOPIC || 'com.bansheng.dev' }}
             APNS_USE_SANDBOX=${{ vars.APNS_USE_SANDBOX || 'false' }}
-            # ── Apple 内购 (App Store Server API + Notifications V2)。.p8 走 APNS
-            #    同款「私钥文件放 VPS, 配置里只存路径」约定: 手动把 In-App Purchase
-            #    密钥 scp 到 /app/companion-secrets/iap/ (已 ro 挂载进容器), GH 里配路径。
-            #    ENABLED 默认 false —— GH 变量/密钥齐了并翻成 true 才生效。
+            # IAP private keys stay on VPS; env stores the read-only mount path.
             APPLE_IAP_ENABLED=${{ vars.APPLE_IAP_ENABLED || 'false' }}
             APPLE_IAP_BUNDLE_ID=${{ vars.APPLE_IAP_BUNDLE_ID || 'com.bansheng.prod' }}
             APPLE_IAP_ISSUER_ID=${{ secrets.APPLE_IAP_ISSUER_ID }}

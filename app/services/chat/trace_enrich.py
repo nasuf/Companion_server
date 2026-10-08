@@ -534,6 +534,8 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("chat.topic_jump_detect", "跳话题判定", "decision", _label_topic_jump),
     ("intent.crisis_followup_classify", "危机后续状态判定", "decision", _label_crisis_followup_classify),
     ("music.user_pause_followup_decision", "共听暂停后跟进判定", "decision", _label_passthrough),
+    ("offline.recommendation_fact_check", "活动文案事实核验", "decision", lambda out: _label_json_bool(out, "supported", "有事实依据", "缺少事实依据")),
+    ("offline.image_quality", "活动配图类型核验", "decision", _label_passthrough),
 
     # Data 类
     ("emotion.user_label", "用户情绪标签", "data", _label_emotion),
@@ -549,6 +551,7 @@ _PROMPT_FALLBACK_REGISTRATIONS: list[
     ("portrait.update", "用户画像更新", "data", _label_reply_text),
     ("portrait.tags", "用户画像标签生成", "data", _label_passthrough),
     ("offline.activity_card", "线下活动推荐卡生成", "data", _label_reply_text),
+    ("offline.event_extract", "临时活动公告事实提取", "data", _label_passthrough),
     ("offline.shooting_items", "线下打卡拍摄物品生成", "data", _label_passthrough),
     ("offline.fragment_prewrite", "思绪碎片预生成", "data", _label_passthrough),
     ("offline.photo_subjects", "现场照片主体判定", "data", _label_passthrough),

@@ -122,6 +122,9 @@ async def test_web_publication_activity_generation_and_guarded_delivery(flow, mo
         return '{"text":"莲湖慢慢逛就好||不用赶时间"}' if '只输出合法JSON' in prompt else '莲湖公园可以看看||随便走走'
     for module in (generation,service,companion):
         monkeypatch.setattr(module,'invoke_text',model)
+        # The model transport is stubbed; constructing a paid provider is also
+        # outside this deterministic DB/Redis/HTTP/WS integration test.
+        monkeypatch.setattr(module,'get_chat_model',lambda: None)
     invite = await generation.generate_activity_invite_message(activity=activity,user_id=flow.user,workspace_id=flow.workspace)
     arrival = await service._arrival_guide_text(activity,ctx)
     messages = await companion._recent_messages(flow.conversation)

@@ -253,6 +253,35 @@ def test_trace_prompt_key_coverage_matches_runtime_surfaces():
     assert set(PROMPT_DEFINITION_MAP) - covered == set()
 
 
+@pytest.mark.parametrize("key,category", [
+    ("offline.event_extract", "data"),
+    ("offline.image_quality", "decision"),
+    ("offline.recommendation_fact_check", "decision"),
+])
+def test_cleversee_steps_expose_editable_prompt_and_semantic_category(key, category):
+    import json
+    from pathlib import Path
+    from app.services.prompting.trace_components import (
+        ManagedPromptText, start_prompt_render_trace, reset_prompt_render_trace,
+        snapshot_prompt_render_traces,
+    )
+
+    release = json.loads((Path(__file__).resolve().parents[1]
+                          / "scripts/prompt_releases/20261008_cleversee_activity.json").read_text())
+    content = next(item["content"] for item in release["prompts"] if item["key"] == key)
+    token = start_prompt_render_trace()
+    try:
+        prompt = ManagedPromptText(content, key).format_map(SafeDict())
+        step = trace_enrich.enrich_step(_fake_llm_step(prompt, '{"supported":true}'))
+        trace_enrich.apply_prompt_render_traces([step], snapshot_prompt_render_traces())
+    finally:
+        reset_prompt_render_trace(token)
+    assert step["prompt_key"] == key
+    assert step["category"] == category
+    assert step["prompt_title"] == PROMPT_DEFINITION_MAP[key].title
+    assert step["prompt_components"][0]["editable"] is True
+
+
 def test_all_defaults_prompt_constants_are_registered():
     """defaults.py 是唯一 prompt 文案源; 其中每个 *_PROMPT 都必须出现在后台 registry。"""
     import ast
