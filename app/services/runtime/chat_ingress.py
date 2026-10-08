@@ -21,6 +21,7 @@ from app.services.runtime.execution_scope import (
     ExecutionScope, ExecutionScopeExpired, ExecutionScopeUnavailable,
     scoped_transaction,
 )
+from app.services.runtime.chat_ingress_effects import ChatIngressEffects
 
 
 CHAT_JOB_HANDLER = "chat.execute.v1"
@@ -277,16 +278,20 @@ async def _target_run(tx: Any, scope: ExecutionScope, request: ChatRequestInput,
 
 async def accept_chat_message(scope: ExecutionScope, request: ChatRequestInput,
                                message: PreparedChatMessage, snapshot: ChatExecutionSnapshot,
-                               policy: ChatAggregationPolicy, *, database: Any = None) -> AcceptedChatMessage:
+                               policy: ChatAggregationPolicy, *, database: Any = None,
+                               effects: ChatIngressEffects | None = None) -> AcceptedChatMessage:
     """Commit message + immutable receipt + Run/Job, or return the original retry.
 
     Prepared metadata and snapshots must come from trusted domain services. No
-    quota, attachment, offering, achievement or provider side effects are performed
-    here. Their endpoint integration is gated with SQL consumers and delivery.
+    provider/achievement side effects are performed here. The explicit effects
+    adapter commits quota and resource bindings under the receipt's retry guard.
+    Endpoint integration remains gated with SQL consumers and delivery.
     """
     if not (isinstance(request, ChatRequestInput) and isinstance(message, PreparedChatMessage)
             and isinstance(snapshot, ChatExecutionSnapshot) and isinstance(policy, ChatAggregationPolicy)):
         raise TypeError("Prepared ingress contracts are required")
+    if effects is not None and type(effects) is not ChatIngressEffects:
+        raise TypeError("Trusted chat effects adapter is required")
     async with scoped_transaction(scope, database=database) as tx:
         await _lock_conversation(tx, scope)
         row = await _request_row(tx, scope, request)
@@ -307,6 +312,10 @@ async def accept_chat_message(scope: ExecutionScope, request: ChatRequestInput,
                 message_id, scope.conversation_id, message.persisted_text,
                 canonical_object(metadata), message.received_at.isoformat(),
             )
+            if effects is not None:
+                metadata["ingress_effects"] = await effects.commit(tx, scope, request, message_id, metadata)
+                await tx.execute_raw("UPDATE messages SET metadata=$2::jsonb WHERE id=$1",
+                                     message_id, canonical_object(metadata))
             reply_context = _object(message.reply_context_json)
             reply_context.setdefault("received_at", message.received_at.isoformat())
             prepared = canonical_object({"prompt_text": message.prompt_text,

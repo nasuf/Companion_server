@@ -157,6 +157,18 @@ async def test_consume_one_confirmed_insufficient_balance_blocks_without_writes(
 
 
 @pytest.mark.asyncio
+async def test_unexpected_debit_failure_propagates_to_rollback(monkeypatch):
+    fake_db = _FakeQuotaDb(used=20)
+    monkeypatch.setattr(chat_quota, "db", fake_db)
+    monkeypatch.setattr(chat_quota.wallet, "full_wallet", AsyncMock(return_value={"spendable_tickets": 1.0}))
+    monkeypatch.setattr(chat_quota.wallet, "ensure_wallet", AsyncMock())
+    monkeypatch.setattr(chat_quota.wallet, "debit_tickets_prioritized", AsyncMock(side_effect=ValueError("ledger_write_failed")))
+    with pytest.raises(ValueError, match="ledger_write_failed"):
+        await chat_quota.consume_one("u1", is_vip=False, paid_confirmed=True)
+    assert fake_db.used == 20
+
+
+@pytest.mark.asyncio
 async def test_consume_one_blocks_when_balance_below_per_message_cost(monkeypatch):
     fake_db = _FakeQuotaDb(used=20)
     monkeypatch.setattr(chat_quota, "db", fake_db)

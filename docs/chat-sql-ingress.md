@@ -24,6 +24,47 @@ mutates Redis while flushing; it must not run before a SQL transaction as if it
 were a pure planner. Reminder, achievement, location and proactive hooks also
 need durable source identity; this repository does not execute those hooks.
 
+### R01.03.8.1: atomic domain effects (staged)
+
+The optional server-only `ChatIngressEffects` adapter now commits actual quota
+and wallet writes, attachment bindings and red-packet/gift bindings with the
+message/receipt/Run/Job. Receipt deduplication under the conversation lock occurs
+before these effects. Same-ID retries return the original message without
+charging or binding again; conflicting content fails before any effects.
+Every later write failure rolls back the entire acceptance, including payment
+ledgers. A lost commit acknowledgement is recovered with the same request ID.
+
+VIP status is read from SQL for the scoped owner. Payment confirmation is a
+strict boolean; it is intentionally outside immutable request identity so a
+rejected, uncharged draft can be resubmitted after confirmation. Usage is counted
+per original message, before aggregation. Gift/red-packet cards are exempt only
+after checking the authoritative offering owner, agent, conversation, kind,
+`sent` state and unbound message under its row lock. Preparation metadata must
+match the server-issued card. Their previous purchase is not charged again;
+this adapter does not implement purchase, receipt or refund operations.
+
+All attachment IDs must be unbound resources of the scoped owner/conversation,
+and the prepared metadata preserves their original order. All requested bindings
+must succeed. No model, vision, provider call, nested transaction or legacy
+offering background hook runs during acceptance. Prepared text/metadata/context
+still come from trusted preparation services; they are not request schemas.
+Committed message metadata records the effect version and quota outcome, and a
+paid ledger records that message's ID as its audit source.
+
+Existing endpoints do **not** use this adapter yet. Their legacy quota wrapper
+reuses the same transaction helper, with existing prices and periods; unexpected
+wallet/ledger failures now propagate to roll back instead of being reported as
+insufficient funds. The legacy separation between charging and saving a chat
+message remains until R01.03.8.2 activates atomic acceptance.
+
+Link, music, location and other cards fail closed in this staged adapter until
+their dedicated domain effects and durable follow-ups are implemented. The
+legacy endpoints continue supporting them. This release must not enable SQL
+ingress/consumers: R01.03.8.2-.6 and R01.06.7/.8, R01.07/.08 remain required.
+An omitted adapter retains the storage-only API for foundation tests; production
+endpoint adapters must explicitly supply it and must not retry through that
+storage-only path on error. No schema or prompt content changes in this batch.
+
 ## Trusted contracts and retries
 
 - Bind `ExecutionScope` from authenticated actor + conversation on the server.

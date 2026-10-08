@@ -111,84 +111,51 @@ async def consume_one(
     (ws intake) must reject the message outright — nothing was counted or
     charged, matching "取消发送 = 什么都没发生".
     """
+    async with db.tx() as tx:
+        return await consume_one_in_transaction(
+            user_id, is_vip=is_vip, paid_confirmed=paid_confirmed, client=tx,
+        )
+
+
+async def consume_one_in_transaction(
+    user_id: str, *, is_vip: bool, paid_confirmed: bool = False,
+    client: Any, source_id: str | None = None,
+) -> dict[str, Any]:
+    """Count/charge using the caller's SQL transaction, without opening another.
+
+    The caller supplies server-resolved VIP status and must roll back if later
+    acceptance fails. This helper alone does not deduplicate a request. The SQL
+    ingress receipt provides that guard; its message ID is the charge source.
+    Only a pre-debit insufficient balance is a normal rejection. Other errors
+    propagate so a partially written balance/ledger cannot accidentally commit.
+    """
     scope, key, limit = config.message_period(is_vip)
     per_msg_cost = config.overage_per_msg(is_vip)
+    tx = client
 
-    async with db.tx() as tx:
-        await tx.execute_raw(
-            """
-            INSERT INTO user_message_quota (user_id, period_scope, period_key, used)
-            VALUES ($1, $2, $3, 0)
-            ON CONFLICT (user_id, period_scope, period_key) DO NOTHING
-            """,
-            user_id,
-            scope,
-            key,
-        )
-        locked = await tx.query_raw(
-            """
-            SELECT used FROM user_message_quota
-            WHERE user_id = $1 AND period_scope = $2 AND period_key = $3
-            FOR UPDATE
-            """,
-            user_id,
-            scope,
-            key,
-        )
-        used = int(_field(locked[0], "used", 0) or 0)
+    await tx.execute_raw(
+        """
+        INSERT INTO user_message_quota (user_id, period_scope, period_key, used)
+        VALUES ($1, $2, $3, 0)
+        ON CONFLICT (user_id, period_scope, period_key) DO NOTHING
+        """,
+        user_id,
+        scope,
+        key,
+    )
+    locked = await tx.query_raw(
+        """
+        SELECT used FROM user_message_quota
+        WHERE user_id = $1 AND period_scope = $2 AND period_key = $3
+        FOR UPDATE
+        """,
+        user_id,
+        scope,
+        key,
+    )
+    used = int(_field(locked[0], "used", 0) or 0)
 
-        if used < limit:
-            await tx.execute_raw(
-                """
-                UPDATE user_message_quota
-                SET used = used + 1, updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $1 AND period_scope = $2 AND period_key = $3
-                """,
-                user_id,
-                scope,
-                key,
-            )
-            return {"allowed": True, "mode": "free", "used": used + 1, "limit": limit, "charged": 0}
-
-        snapshot = await wallet.full_wallet(user_id, client=tx)
-        spendable = float(snapshot["spendable_tickets"])
-
-        if not paid_confirmed:
-            if _can_afford(spendable, per_msg_cost):
-                reason: BlockReason = "paid_confirm"
-                mode: Mode = "paid"
-            else:
-                reason = "no_ticket"
-                mode = "blocked"
-            return {
-                "allowed": False,
-                "mode": mode,
-                "reason": reason,
-                "per_msg_cost": per_msg_cost,
-                "spendable_tickets": spendable,
-            }
-
-        await wallet.ensure_wallet(user_id, client=tx)
-        try:
-            await wallet.debit_tickets_prioritized(
-                user_id,
-                per_msg_cost,
-                source=SOURCE_CHAT_OVERAGE,
-                metadata={
-                    "per_msg_cost": per_msg_cost,
-                    "is_vip": is_vip,
-                },
-                client=tx,
-            )
-        except ValueError:
-            return {
-                "allowed": False,
-                "mode": "blocked",
-                "reason": "no_ticket",
-                "per_msg_cost": per_msg_cost,
-                "spendable_tickets": 0,
-            }
-
+    if used < limit:
         await tx.execute_raw(
             """
             UPDATE user_message_quota
@@ -199,10 +166,64 @@ async def consume_one(
             scope,
             key,
         )
+        return {"allowed": True, "mode": "free", "used": used + 1, "limit": limit, "charged": 0}
+
+    snapshot = await wallet.full_wallet(user_id, client=tx)
+    spendable = float(snapshot["spendable_tickets"])
+
+    if not paid_confirmed:
+        if _can_afford(spendable, per_msg_cost):
+            reason: BlockReason = "paid_confirm"
+            mode: Mode = "paid"
+        else:
+            reason = "no_ticket"
+            mode = "blocked"
         return {
-            "allowed": True,
-            "mode": "paid",
-            "used": used + 1,
-            "limit": limit,
-            "charged": per_msg_cost,
+            "allowed": False,
+            "mode": mode,
+            "reason": reason,
+            "per_msg_cost": per_msg_cost,
+            "spendable_tickets": spendable,
         }
+
+    await wallet.ensure_wallet(user_id, client=tx)
+    try:
+        await wallet.debit_tickets_prioritized(
+            user_id,
+            per_msg_cost,
+            source=SOURCE_CHAT_OVERAGE,
+            source_id=source_id,
+            metadata={
+                "per_msg_cost": per_msg_cost,
+                "is_vip": is_vip,
+            },
+            client=tx,
+        )
+    except ValueError as exc:
+        if str(exc) != "insufficient_ticket_balance":
+            raise
+        return {
+            "allowed": False,
+            "mode": "blocked",
+            "reason": "no_ticket",
+            "per_msg_cost": per_msg_cost,
+            "spendable_tickets": 0,
+        }
+
+    await tx.execute_raw(
+        """
+        UPDATE user_message_quota
+        SET used = used + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = $1 AND period_scope = $2 AND period_key = $3
+        """,
+        user_id,
+        scope,
+        key,
+    )
+    return {
+        "allowed": True,
+        "mode": "paid",
+        "used": used + 1,
+        "limit": limit,
+        "charged": per_msg_cost,
+    }
